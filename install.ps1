@@ -63,9 +63,9 @@ if ($hasExisting -and $Update) {
         New-Item -ItemType Directory "$BackupDir\commands" -Force | Out-Null
         Get-ChildItem "$AgentsDirorge*.md"   -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\agents\"
         Get-ChildItem "$CommandsDirorge*.md" -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\commands\"
-        if (Test-Path "$ClaudeDir\forge-agent-prefs.md") {
-            Copy-Item "$ClaudeDir\forge-agent-prefs.md" $BackupDir
-        }
+        if (Test-Path "$ClaudeDir\forge-agent-prefs.md") { Copy-Item "$ClaudeDir\forge-agent-prefs.md" $BackupDir }
+        if (Test-Path "$ClaudeDir\forge-statusline.js")  { Copy-Item "$ClaudeDir\forge-statusline.js"  $BackupDir }
+        if (Test-Path "$ClaudeDir\forge-hook.js")        { Copy-Item "$ClaudeDir\forge-hook.js"        $BackupDir }
     }
     Success "Backup salvo em $BackupDir"
 }
@@ -134,6 +134,21 @@ if (-not $DryRun -and (Test-Path $prefsFile)) {
         Add-Content $prefsFile "`n## Update Settings`n`n``````repo_path: $RepoDir`n``````"
     }
     Info "  repo_path gravado: $RepoDir"
+}
+
+# ── Install statusline + hooks ────────────────────────────────────────────────
+Write-Host ""
+Info "Instalando statusline & hooks..."
+CopyFile "$RepoDir\scripts\forge-statusline.js" "$ClaudeDir\forge-statusline.js"
+Info "  forge-statusline.js"
+CopyFile "$RepoDir\scripts\forge-hook.js" "$ClaudeDir\forge-hook.js"
+Info "  forge-hook.js"
+
+$settingsFile = "$ClaudeDir\settings.json"
+if ($DryRun) {
+    Dry "merge statusLine + hooks → $settingsFile"
+} else {
+    node "$RepoDir\scripts\merge-settings.js" $settingsFile
 }
 
 # ── Done ──────────────────────────────────────────────────────────────────────

@@ -71,6 +71,8 @@ if $has_existing && $UPDATE; then
     for f in "${AGENTS_DIR}"/forge*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/agents/"; done
     for f in "${COMMANDS_DIR}"/forge*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/commands/"; done
     [ -f "${CLAUDE_DIR}/forge-agent-prefs.md" ] && cp "${CLAUDE_DIR}/forge-agent-prefs.md" "$BACKUP_DIR/"
+    [ -f "${CLAUDE_DIR}/forge-statusline.js"  ] && cp "${CLAUDE_DIR}/forge-statusline.js"  "$BACKUP_DIR/"
+    [ -f "${CLAUDE_DIR}/forge-hook.js"        ] && cp "${CLAUDE_DIR}/forge-hook.js"         "$BACKUP_DIR/"
   fi
   success "Backup saved to $BACKUP_DIR"
 fi
@@ -136,6 +138,21 @@ if ! $DRY_RUN && [ -f "$PREFS_DST" ]; then
     fi
   fi
   info "  repo_path gravado: ${REPO_DIR}"
+fi
+
+# ── Install statusline + hooks ────────────────────────────────────────────────
+echo ""
+info "Installing statusline & hooks..."
+copy "${REPO_DIR}/scripts/forge-statusline.js" "${CLAUDE_DIR}/forge-statusline.js"
+info "  forge-statusline.js"
+copy "${REPO_DIR}/scripts/forge-hook.js" "${CLAUDE_DIR}/forge-hook.js"
+info "  forge-hook.js"
+
+SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
+if $DRY_RUN; then
+  dry "merge statusLine + hooks → ${SETTINGS_FILE}"
+else
+  node "${REPO_DIR}/scripts/merge-settings.js" "${SETTINGS_FILE}"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
