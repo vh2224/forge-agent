@@ -4,3 +4,4 @@ Thumbs.db
 
 # Backups gerados pelo instalador (não commitar)
 *-backup-*/
+.claude/
