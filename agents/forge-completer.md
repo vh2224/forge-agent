@@ -48,10 +48,39 @@ Given all `T##-SUMMARY.md` files from the slice:
 
 5. Mark slice `[x]` in `M###-ROADMAP.md`
 
+6. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
+   - Read `M###-ROADMAP.md` to find the next pending slice `[ ]`
+   - If a next slice exists:
+     ```markdown
+     ## Estado atual
+
+     - **Milestone ativo:** M### — <milestone title>
+     - **Slice ativo:** S## — <next slice title>
+     - **Fase:** execute
+     - **Próxima ação:** Executar `/forge-next` para iniciar S##.
+     ```
+   - If no next slice remains (this was the last slice):
+     ```markdown
+     ## Estado atual
+
+     - **Milestone ativo:** M### — <milestone title>
+     - **Slice ativo:** —
+     - **Fase:** validate — todos os slices concluídos. Aguarda validação/encerramento.
+     - **Próxima ação:** Executar `/forge-next` para fechar M### ou `/forge-new-milestone` para o próximo milestone.
+     ```
+
 ## For complete-milestone
 
 1. Write final `M###-SUMMARY.md` with all slices summarized
-2. Mark milestone complete in ROADMAP
-3. Emit milestone completion report: slices completed, total tasks, key decisions made
+2. Mark milestone `[x]` in ROADMAP (if exists at milestone level)
+3. Update `CLAUDE.md` — rewrite the `## Estado atual` section only:
+   ```markdown
+   ## Estado atual
+
+   - **Milestone ativo:** — (M### concluído)
+   - **Fase:** idle — M### encerrado com sucesso.
+   - **Próxima ação:** Executar `/forge-new-milestone <descrição>` para iniciar o próximo milestone.
+   ```
+4. Emit milestone completion report: slices completed, total tasks, key decisions made
 
 Then return the `---GSD-WORKER-RESULT---` block.
