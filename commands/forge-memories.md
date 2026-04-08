@@ -1,9 +1,9 @@
 ---
-description: "Mostra, limpa ou exporta as memórias auto-aprendidas do projeto GSD. Use: /gsd-memories | /gsd-memories clean | /gsd-memories export"
+description: "Mostra, limpa ou exporta as memórias auto-aprendidas do projeto GSD. Use: /forge-memories | /forge-memories clean | /forge-memories export"
 allowed-tools: Read, Write, Edit
 ---
 
-Use the **gsd** agent to manage auto-learned project memories.
+Use the **forge** agent to manage auto-learned project memories.
 
 ## Input
 $ARGUMENTS

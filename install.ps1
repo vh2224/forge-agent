@@ -13,7 +13,7 @@ $RepoDir    = $PSScriptRoot
 $ClaudeDir  = "$env:USERPROFILE\.claude"
 $AgentsDir  = "$ClaudeDir\agents"
 $CommandsDir = "$ClaudeDir\commands"
-$BackupDir  = "$ClaudeDir\gsd-agent-backup-$(Get-Date -Format 'yyyyMMddHHmmss')"
+$BackupDir  = "$ClaudeDir\forge-agent-backup-$(Get-Date -Format 'yyyyMMddHHmmss')"
 
 function Info($msg)    { Write-Host "  $msg" }
 function Success($msg) { Write-Host "✓ $msg" -ForegroundColor Green }
@@ -45,9 +45,9 @@ if (!(Test-Path $ClaudeDir)) {
 Success "Claude Code encontrado em $ClaudeDir"
 
 # ── Check existing installation ───────────────────────────────────────────────
-$hasExisting = (Get-ChildItem "$AgentsDir\gsd*.md" -ErrorAction SilentlyContinue) -or
-               (Get-ChildItem "$CommandsDir\gsd*.md" -ErrorAction SilentlyContinue) -or
-               (Test-Path "$ClaudeDir\gsd-agent-prefs.md")
+$hasExisting = (Get-ChildItem "$AgentsDirorge*.md" -ErrorAction SilentlyContinue) -or
+               (Get-ChildItem "$CommandsDirorge*.md" -ErrorAction SilentlyContinue) -or
+               (Test-Path "$ClaudeDir\forge-agent-prefs.md")
 
 if ($hasExisting -and -not $Update) {
     Write-Host ""
@@ -61,10 +61,10 @@ if ($hasExisting -and $Update) {
     if (-not $DryRun) {
         New-Item -ItemType Directory "$BackupDir\agents" -Force | Out-Null
         New-Item -ItemType Directory "$BackupDir\commands" -Force | Out-Null
-        Get-ChildItem "$AgentsDir\gsd*.md"   -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\agents\"
-        Get-ChildItem "$CommandsDir\gsd*.md" -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\commands\"
-        if (Test-Path "$ClaudeDir\gsd-agent-prefs.md") {
-            Copy-Item "$ClaudeDir\gsd-agent-prefs.md" $BackupDir
+        Get-ChildItem "$AgentsDirorge*.md"   -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\agents\"
+        Get-ChildItem "$CommandsDirorge*.md" -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\commands\"
+        if (Test-Path "$ClaudeDir\forge-agent-prefs.md") {
+            Copy-Item "$ClaudeDir\forge-agent-prefs.md" $BackupDir
         }
     }
     Success "Backup salvo em $BackupDir"
@@ -73,7 +73,7 @@ if ($hasExisting -and $Update) {
 # ── Install agents ────────────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando agentes..."
-foreach ($f in Get-ChildItem "$RepoDir\agents\gsd*.md") {
+foreach ($f in Get-ChildItem "$RepoDir\agentsorge*.md") {
     CopyFile $f.FullName "$AgentsDir\$($f.Name)"
     Info "  agents\$($f.Name)"
 }
@@ -81,7 +81,7 @@ foreach ($f in Get-ChildItem "$RepoDir\agents\gsd*.md") {
 # ── Install commands ──────────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando comandos..."
-foreach ($f in Get-ChildItem "$RepoDir\commands\gsd*.md") {
+foreach ($f in Get-ChildItem "$RepoDir\commandsorge*.md") {
     CopyFile $f.FullName "$CommandsDir\$($f.Name)"
     Info "  commands\$($f.Name)"
 }
@@ -108,16 +108,16 @@ foreach ($skillDir in Get-ChildItem "$RepoDir\skills" -Directory) {
 # ── Install preferences ───────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando preferências..."
-$prefsFile = "$ClaudeDir\gsd-agent-prefs.md"
+$prefsFile = "$ClaudeDir\forge-agent-prefs.md"
 if (!(Test-Path $prefsFile)) {
-    CopyFile "$RepoDir\gsd-agent-prefs.md" $prefsFile
-    Info "  gsd-agent-prefs.md (novo)"
+    CopyFile "$RepoDir\forge-agent-prefs.md" $prefsFile
+    Info "  forge-agent-prefs.md (novo)"
 } else {
-    Info "  gsd-agent-prefs.md já existe — mantido"
+    Info "  forge-agent-prefs.md já existe — mantido"
     Info "  (suas preferências não foram alteradas)"
 }
 
-# ── Store repo path for /gsd-update ──────────────────────────────────────────
+# ── Store repo path for /forge-update ──────────────────────────────────────────
 if (-not $DryRun -and (Test-Path $prefsFile)) {
     $prefsContent = Get-Content $prefsFile -Raw
     $repoPathLine = "repo_path: $RepoDir"
@@ -147,10 +147,10 @@ if ($DryRun) {
     Write-Host "  Próximos passos:"
     Write-Host "  1. Navegue até um projeto:  cd C:\seu\projeto"
     Write-Host "  2. Abra o Claude Code:      claude"
-    Write-Host "  3. Inicialize o projeto:    /gsd-init"
-    Write-Host "  4. Crie um milestone:       /gsd-new-milestone <descrição>"
-    Write-Host "  5. Execute:                 /gsd-auto"
+    Write-Host "  3. Inicialize o projeto:    /forge-init"
+    Write-Host "  4. Crie um milestone:       /forge-new-milestone <descrição>"
+    Write-Host "  5. Execute:                 /forge-auto"
     Write-Host ""
-    Write-Host "  Ajuda a qualquer momento:   /gsd-help"
+    Write-Host "  Ajuda a qualquer momento:   /forge-help"
 }
 Write-Host ""

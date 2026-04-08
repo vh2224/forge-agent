@@ -1,5 +1,5 @@
 ---
-name: gsd-completer
+name: forge-completer
 description: GSD completion phase agent. Writes slice summaries, UAT scripts, milestone summaries, and handles squash merges. Used for complete-slice and complete-milestone units.
 model: claude-sonnet-4-6
 tools: Read, Write, Edit, Bash

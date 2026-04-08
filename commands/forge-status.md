@@ -12,10 +12,10 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ```
 
 **Se CLAUDE.md não existe:** Stop and tell the user:
-> Projeto não inicializado. Execute `/gsd-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
+> Projeto não inicializado. Execute `/forge-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
 
 **Se .gsd/STATE.md não existe:** Stop and tell the user:
-> Nenhum projeto GSD encontrado neste diretório. Execute `/gsd-init` para começar.
+> Nenhum projeto GSD encontrado neste diretório. Execute `/forge-init` para começar.
 
 **Se `.gsd/AUTO-MEMORY.md` não existe:** Create it silently before proceeding:
 ```
@@ -26,7 +26,7 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ---
 
 
-Use the **gsd** agent. Read these files in order and produce a status dashboard:
+Use the **forge** agent. Read these files in order and produce a status dashboard:
 
 1. `.gsd/STATE.md` — current position
 2. Active `M###-ROADMAP.md` — slice completion status  

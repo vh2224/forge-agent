@@ -1,5 +1,5 @@
 ---
-description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Argumentos: 'next' (mesmo que sem argumento), 'auto' (delega para /gsd-auto)."
+description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Argumentos: 'next' (mesmo que sem argumento), 'auto' (delega para /forge-auto)."
 allowed-tools: Read, Bash, Agent
 ---
 
@@ -7,7 +7,7 @@ allowed-tools: Read, Bash, Agent
 
 From `$ARGUMENTS`:
 - Empty, `next`, or `step` → **STEP MODE** (execute one unit, stop)
-- `auto` → tell the user: "Use `/gsd-auto` para modo autônomo." and stop.
+- `auto` → tell the user: "Use `/forge-auto` para modo autônomo." and stop.
 - Anything else → treat as STEP MODE (ignore unknown args)
 
 ## Bootstrap guard
@@ -19,10 +19,10 @@ pwd
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:
-> Projeto não inicializado. Execute `/gsd-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
+> Projeto não inicializado. Execute `/forge-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
 
 **Se .gsd/STATE.md não existe:** Stop. Tell the user:
-> Nenhum projeto GSD encontrado neste diretório. Execute `/gsd-init` para começar.
+> Nenhum projeto GSD encontrado neste diretório. Execute `/forge-init` para começar.
 
 ---
 
@@ -30,11 +30,11 @@ pwd
 
 Read these files (and ONLY these):
 1. `.gsd/STATE.md`
-2. `~/.claude/gsd-agent-prefs.md` (skip silently if missing)
+2. `~/.claude/forge-agent-prefs.md` (skip silently if missing)
 3. `.gsd/claude-agent-prefs.md` (skip silently if missing)
 4. First 80 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
 
-Then call the `gsd` agent with this prompt (fill in the actual file contents):
+Then call the `forge` agent with this prompt (fill in the actual file contents):
 
 ```
 STEP MODE.
@@ -45,7 +45,7 @@ STATE:
 {full content of .gsd/STATE.md}
 
 PREFS:
-{content of ~/.claude/gsd-agent-prefs.md}
+{content of ~/.claude/forge-agent-prefs.md}
 {content of .gsd/claude-agent-prefs.md if exists, otherwise "(none)"}
 
 TOP_MEMORIES:
@@ -62,4 +62,4 @@ Return a concise report of what was done and what STATE is now.
 
 ## Surface the result
 
-Display the agent's report to the user. Do not add any summary or follow-up — the user will decide whether to run `/gsd` again or proceed differently.
+Display the agent's report to the user. Do not add any summary or follow-up — the user will decide whether to run `/forge-next` again or proceed differently.

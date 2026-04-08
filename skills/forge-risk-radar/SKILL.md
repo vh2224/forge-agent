@@ -1,5 +1,5 @@
 ---
-name: gsd-risk-radar
+name: forge-risk-radar
 description: Risk assessment for GSD slices before execution. Identifies technical risks, dependency risks, and scope creep signals in a slice plan before the executor starts work. Use during plan-slice or when a slice has high risk tag.
 ---
 

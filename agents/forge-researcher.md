@@ -1,5 +1,5 @@
 ---
-name: gsd-researcher
+name: forge-researcher
 description: GSD research phase agent. Scouts codebases, reads docs, identifies patterns and pitfalls before planning. Used for research-milestone and research-slice units. Runs on a more capable model for deep analysis.
 model: claude-opus-4-6
 tools: Read, Bash, Glob, Grep, Write

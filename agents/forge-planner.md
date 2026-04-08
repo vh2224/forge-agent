@@ -1,5 +1,5 @@
 ---
-name: gsd-planner
+name: forge-planner
 description: GSD planning phase agent. Decomposes milestones into slices and slices into tasks. Writes ROADMAP, boundary maps, S##-PLAN.md, and T##-PLAN.md files. Used for plan-milestone and plan-slice units. Runs on a more capable model for architectural thinking.
 model: claude-opus-4-6
 tools: Read, Write, Glob, Grep

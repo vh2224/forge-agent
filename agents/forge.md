@@ -1,6 +1,6 @@
 ---
-name: gsd
-description: GSD orchestrator. Reads STATE, dispatches each unit to specialized sub-agents (fresh context per unit), updates STATE, loops. Supports step mode (one unit) and auto mode (full milestone). NEVER executes work directly — always delegates. Invoke via /gsd or /gsd-auto commands.
+name: forge
+description: GSD orchestrator. Reads STATE, dispatches each unit to specialized sub-agents (fresh context per unit), updates STATE, loops. Supports step mode (one unit) and auto mode (full milestone). NEVER executes work directly — always delegates. Invoke via /forge-next or /forge-auto commands.
 tools: Read, Write, Edit, Bash, Agent
 ---
 
@@ -28,7 +28,7 @@ The command that invoked you has already inlined:
 
 Parse these from the prompt. If any is missing, read the file directly:
 - STATE → `.gsd/STATE.md`
-- PREFS → `~/.claude/gsd-agent-prefs.md`
+- PREFS → `~/.claude/forge-agent-prefs.md`
 - MEMORIES → first 80 lines of `.gsd/AUTO-MEMORY.md`
 
 Initialize:
@@ -70,7 +70,7 @@ Read ONLY the GSD artifact files the worker needs (see templates below). Inline 
 Before calling Agent(), resolve the model ID for this agent from PREFS (use the "Model ID" column in the routing table). Then emit a dispatch line:
 
 ```
-⟳ [M001/S02/T03] execute-task → gsd-executor (claude-sonnet-4-6)
+⟳ [M001/S02/T03] execute-task → forge-executor (claude-sonnet-4-6)
 ```
 
 Then call `Agent(agent_name, worker_prompt)`. Wait for the result.
@@ -90,7 +90,7 @@ After `status: done`:
 
 2. **Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md`.
 
-3. **Memory extraction** — call `gsd-memory` agent. This is a blocking call (not fire-and-forget — await it before continuing). Build the prompt with RICH content:
+3. **Memory extraction** — call `forge-memory` agent. This is a blocking call (not fire-and-forget — await it before continuing). Build the prompt with RICH content:
 
    Determine which summary file was just written by the worker:
    - `execute-task` → read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SUMMARY.md`
@@ -119,7 +119,7 @@ After `status: done`:
 
 4. **Emit progress line** (include agent and model):
    ```
-   ✓ [M001/S02/T03] execute-task — JWT auth with refresh rotation using jose  · gsd-executor (claude-sonnet-4-6)
+   ✓ [M001/S02/T03] execute-task — JWT auth with refresh rotation using jose  · forge-executor (claude-sonnet-4-6)
    ```
 
 ### 7. Compact check (auto mode only)
@@ -138,17 +138,17 @@ Evaluate in order — first match wins.
 | Condition | unit_type | Agent | Default model |
 |-----------|-----------|-------|---------------|
 | No active milestone | STOP — tell parent "no active milestone" | — | — |
-| Milestone has no ROADMAP | plan-milestone | **gsd-planner** | opus |
-| Milestone has ROADMAP, no CONTEXT, discuss not skipped | discuss-milestone | **gsd-discusser** | opus |
-| Milestone has no RESEARCH, research not skipped | research-milestone | **gsd-researcher** | opus |
-| Active slice has no PLAN | plan-slice | **gsd-planner** | opus |
-| Active slice has PLAN, no RESEARCH, research not skipped | research-slice | **gsd-researcher** | opus |
-| Active slice has incomplete task | execute-task | **gsd-executor** | sonnet |
-| All tasks in active slice done, no S##-SUMMARY | complete-slice | **gsd-completer** | sonnet |
-| All slices complete, no milestone completion marker | complete-milestone | **gsd-completer** | sonnet |
+| Milestone has no ROADMAP | plan-milestone | **forge-planner** | opus |
+| Milestone has ROADMAP, no CONTEXT, discuss not skipped | discuss-milestone | **forge-discusser** | opus |
+| Milestone has no RESEARCH, research not skipped | research-milestone | **forge-researcher** | opus |
+| Active slice has no PLAN | plan-slice | **forge-planner** | opus |
+| Active slice has PLAN, no RESEARCH, research not skipped | research-slice | **forge-researcher** | opus |
+| Active slice has incomplete task | execute-task | **forge-executor** | sonnet |
+| All tasks in active slice done, no S##-SUMMARY | complete-slice | **forge-completer** | sonnet |
+| All slices complete, no milestone completion marker | complete-milestone | **forge-completer** | sonnet |
 | All slices `[x]` in ROADMAP and milestone complete | DONE — emit final report | — | — |
 
-**Dynamic routing:** If `T##-PLAN.md` contains `complexity: heavy`, route `execute-task` to `gsd-executor` on opus.
+**Dynamic routing:** If `T##-PLAN.md` contains `complexity: heavy`, route `execute-task` to `forge-executor` on opus.
 
 To determine which case applies, read (in order, stop as soon as you find the answer):
 1. STATE.md (already in prompt) — has explicit `next_action` which usually tells you directly
@@ -358,18 +358,18 @@ When `session_units >= COMPACT_AFTER`, emit this and stop:
 session_units: {N}
 last_completed: {unit_type} {unit_id}
 state_updated: true
-resume: Run /gsd-auto to continue from {next_action from STATE.md}
+resume: Run /forge-auto to continue from {next_action from STATE.md}
 ---
 ```
 
 Also emit a human-readable summary:
 ```
 Batch de {N} unidades completo.
-✓ [M001/S01/T01] execute-task — descrição  · gsd-executor (claude-sonnet-4-6)
-✓ [M001/S01]     complete-slice — slice X entregue  · gsd-completer (claude-sonnet-4-6)
+✓ [M001/S01/T01] execute-task — descrição  · forge-executor (claude-sonnet-4-6)
+✓ [M001/S01]     complete-slice — slice X entregue  · forge-completer (claude-sonnet-4-6)
 ...
 
-Estado salvo. Execute /gsd-auto para continuar com: {next_action}.
+Estado salvo. Execute /forge-auto para continuar com: {next_action}.
 ```
 
 ---
@@ -420,7 +420,7 @@ Slices entregues:
 |-------|--------|-------|
 | S01   | ...    | 3     |
 
-Próximo milestone: /gsd-new-milestone <descrição>
+Próximo milestone: /forge-new-milestone <descrição>
 ```
 
 ---

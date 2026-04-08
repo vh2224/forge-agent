@@ -1,5 +1,5 @@
 ---
-description: "Abre uma discussão de arquitetura para capturar decisões antes de planejar. Use: /gsd-discuss M003 | /gsd-discuss S02 | /gsd-discuss -fast S02 (pula brainstorm)"
+description: "Abre uma discussão de arquitetura para capturar decisões antes de planejar. Use: /forge-discuss M003 | /forge-discuss S02 | /forge-discuss -fast S02 (pula brainstorm)"
 allowed-tools: Read, Write, Bash, Agent
 ---
 
@@ -12,10 +12,10 @@ pwd
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:
-> Projeto não inicializado. Execute `/gsd-init` primeiro.
+> Projeto não inicializado. Execute `/forge-init` primeiro.
 
 **Se .gsd/STATE.md não existe:** Stop. Tell the user:
-> Nenhum projeto GSD encontrado. Execute `/gsd-init` para começar.
+> Nenhum projeto GSD encontrado. Execute `/forge-init` para começar.
 
 ---
 
@@ -49,7 +49,7 @@ If `TARGET_TYPE=milestone` and `FAST_MODE=false`:
 ls .gsd/milestones/{TARGET_ID}/{TARGET_ID}-BRAINSTORM.md 2>/dev/null && echo "exists" || echo "missing"
 ```
 
-If brainstorm missing: delegate to `gsd-planner` agent:
+If brainstorm missing: delegate to `forge-planner` agent:
 
 ```
 Run brainstorm for milestone {TARGET_ID}.
@@ -59,7 +59,7 @@ MILESTONE_ID: {TARGET_ID}
 PROJECT:
 {content of .gsd/PROJECT.md}
 
-SKILL: Check ~/.agents/skills/gsd-brainstorm/SKILL.md or ~/.claude/skills/gsd-brainstorm/SKILL.md.
+SKILL: Check ~/.agents/skills/forge-brainstorm/SKILL.md or ~/.claude/skills/forge-brainstorm/SKILL.md.
 If found: execute the skill.
 If not found: 3 alternative approaches + top 5 risks + scope boundaries (inline).
 
@@ -113,7 +113,7 @@ Update `.gsd/STATE.md` — set phase to `plan` (ready to plan this milestone/sli
 
 ## Fire memory extraction (fire-and-forget)
 
-After writing the context file, delegate to `gsd-memory` agent:
+After writing the context file, delegate to `forge-memory` agent:
 
 ```
 Extract memories from this discuss session.
@@ -138,5 +138,5 @@ Tell the user:
 ✓ Discuss de {TARGET_ID} concluído
 
 Decisões registradas em: .gsd/milestones/{path}/CONTEXT.md
-Próximo: /gsd para planejar, ou /gsd-auto para executar automaticamente.
+Próximo: /gsd para planejar, ou /forge-auto para executar automaticamente.
 ```

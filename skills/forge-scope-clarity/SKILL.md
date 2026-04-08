@@ -1,5 +1,5 @@
 ---
-name: gsd-scope-clarity
+name: forge-scope-clarity
 description: Scope definition skill for GSD milestones. Produces a crisp in/out scope list and validates that milestone success criteria are observable and testable. Use when milestone description is ambiguous or when discuss phase produces conflicting requirements.
 ---
 

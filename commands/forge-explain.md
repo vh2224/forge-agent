@@ -1,9 +1,9 @@
 ---
-description: "Explica qualquer artefato GSD: milestone, slice, task, decisões, estado atual. Use: /gsd-explain M002 | /gsd-explain S03 | /gsd-explain T02 | /gsd-explain decisions"
+description: "Explica qualquer artefato GSD: milestone, slice, task, decisões, estado atual. Use: /forge-explain M002 | /forge-explain S03 | /forge-explain T02 | /forge-explain decisions"
 allowed-tools: Read, Glob
 ---
 
-Use the **gsd** agent to explain a GSD artifact. Do NOT execute or modify anything — only read and explain.
+Use the **forge** agent to explain a GSD artifact. Do NOT execute or modify anything — only read and explain.
 
 ## What to explain
 $ARGUMENTS

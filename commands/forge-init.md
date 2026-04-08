@@ -1,5 +1,5 @@
 ---
-description: "Inicializa o agente GSD no projeto atual. Detecta projeto gsd-pi existente ou cria estrutura nova. Use: /gsd-init | /gsd-init <descrição do projeto>"
+description: "Inicializa o agente GSD no projeto atual. Detecta projeto gsd-pi existente ou cria estrutura nova. Use: /forge-init | /forge-init <descrição do projeto>"
 allowed-tools: Read, Write, Edit, Bash, Glob
 ---
 
@@ -56,7 +56,7 @@ The project is already managed by gsd-pi. Your job is to:
    - .gsd/AUTO-MEMORY.md ✓
    - .gsd/claude-agent-prefs.md ✓
 
-   Ready. Use /gsd to advance next unit or /gsd-auto for autonomous mode.
+   Ready. Use /gsd to advance next unit or /forge-auto for autonomous mode.
    ```
 
 ---
@@ -114,7 +114,7 @@ The project is already managed by gsd-pi. Your job is to:
    **Phase:** idle
 
    ## Next Action
-   Create first milestone with /gsd-new-milestone <description>
+   Create first milestone with /forge-new-milestone <description>
    ```
 
    **`.gsd/KNOWLEDGE.md`:**
@@ -122,7 +122,7 @@ The project is already managed by gsd-pi. Your job is to:
    # Project Knowledge
 
    <!-- Lessons learned, patterns, important non-obvious facts -->
-   <!-- Written manually or via /gsd-memories -->
+   <!-- Written manually or via /forge-memories -->
    ```
 
    **`.gsd/AUTO-MEMORY.md`:**
@@ -152,7 +152,7 @@ The project is already managed by gsd-pi. Your job is to:
    - .gsd/AUTO-MEMORY.md
    - .gsd/claude-agent-prefs.md
 
-   Next: /gsd-new-milestone <descrição do que entregar primeiro>
+   Next: /forge-new-milestone <descrição do que entregar primeiro>
    ```
 
 ---
@@ -180,25 +180,25 @@ Se houver `continue.md` no slice ativo → leia, delete, retome de "Next Action"
 
 | Comando | Descrição |
 |---------|-----------|
-| `/gsd` | Avança próxima unidade (step mode) |
-| `/gsd-auto` | Execução autônoma até milestone completo |
-| `/gsd-status` | Dashboard do projeto |
-| `/gsd-new-milestone <desc>` | Cria novo milestone |
-| `/gsd-add-slice <M###> <desc>` | Adiciona slice ao milestone |
-| `/gsd-add-task <S##> <desc>` | Adiciona task ao slice |
-| `/gsd-discuss <M###\|S##>` | Discuss phase |
-| `/gsd-explain <M###\|S##\|T##>` | Explica qualquer artefato |
-| `/gsd-memories` | Gerencia memórias auto-aprendidas |
-| `/gsd-prefs` | Configura modelos por fase |
+| `/forge-next` | Avança próxima unidade (step mode) |
+| `/forge-auto` | Execução autônoma até milestone completo |
+| `/forge-status` | Dashboard do projeto |
+| `/forge-new-milestone <desc>` | Cria novo milestone |
+| `/forge-add-slice <M###> <desc>` | Adiciona slice ao milestone |
+| `/forge-add-task <S##> <desc>` | Adiciona task ao slice |
+| `/forge-discuss <M###\|S##>` | Discuss phase |
+| `/forge-explain <M###\|S##\|T##>` | Explica qualquer artefato |
+| `/forge-memories` | Gerencia memórias auto-aprendidas |
+| `/forge-prefs` | Configura modelos por fase |
 
 ## Agentes especializados
 
-- `gsd-discusser` (opus) — decisões de arquitetura
-- `gsd-researcher` (opus) — pesquisa de codebase
-- `gsd-planner` (opus) — decomposição em tasks
-- `gsd-executor` (sonnet) — implementação
-- `gsd-completer` (sonnet) — summaries e git
-- `gsd-memory` (haiku) — extração de memórias
+- `forge-discusser` (opus) — decisões de arquitetura
+- `forge-researcher` (opus) — pesquisa de codebase
+- `forge-planner` (opus) — decomposição em tasks
+- `forge-executor` (sonnet) — implementação
+- `forge-completer` (sonnet) — summaries e git
+- `forge-memory` (haiku) — extração de memórias
 
 ## Metodologia
 
@@ -214,7 +214,7 @@ Referência completa: `~/.gsd/agent/GSD-WORKFLOW.md`
 ```markdown
 ---
 # GSD Claude Agent Preferences — Project Level
-# Overrides ~/.claude/gsd-agent-prefs.md for this project
+# Overrides ~/.claude/forge-agent-prefs.md for this project
 # Leave empty to use global defaults
 version: 1
 project: <project name>

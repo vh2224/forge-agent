@@ -1,5 +1,5 @@
 ---
-description: "Visualiza ou edita as preferências do agente GSD. Use: /gsd-prefs | /gsd-prefs models | /gsd-prefs set research opus | /gsd-prefs set execute claude-opus-4-6"
+description: "Visualiza ou edita as preferências do agente GSD. Use: /forge-prefs | /forge-prefs models | /forge-prefs set research opus | /forge-prefs set execute claude-opus-4-6"
 allowed-tools: Read, Write, Edit
 ---
 
@@ -26,7 +26,7 @@ O usuário pode passar tanto o alias quanto o model ID completo — ambos são a
 
 ### Sem argumento ou "show"
 
-Read `~/.claude/gsd-agent-prefs.md`. Display:
+Read `~/.claude/forge-agent-prefs.md`. Display:
 
 ```
 GSD Agent — Configuração atual
@@ -37,11 +37,11 @@ MODELOS DISPONÍVEIS
   haiku  → claude-haiku-4-5-20251001 (tarefas leves, memórias)
 
 ROTEAMENTO POR FASE
-  discuss    → gsd-discusser   [claude-opus-4-6]
-  research   → gsd-researcher  [claude-opus-4-6]
-  plan       → gsd-planner     [claude-opus-4-6]
-  execute    → gsd-executor    [claude-sonnet-4-6]
-  complete   → gsd-completer   [claude-sonnet-4-6]
+  discuss    → forge-discusser   [claude-opus-4-6]
+  research   → forge-researcher  [claude-opus-4-6]
+  plan       → forge-planner     [claude-opus-4-6]
+  execute    → forge-executor    [claude-sonnet-4-6]
+  complete   → forge-completer   [claude-sonnet-4-6]
   memory     → gsd-memory      [claude-haiku-4-5-20251001]
 
 SKIP RULES
@@ -78,13 +78,13 @@ MODELOS DISPONÍVEIS NO CLAUDE CODE
           Use para tarefas leves que não precisam de raciocínio pesado.
 
 Para mudar o modelo de uma fase:
-  /gsd-prefs set <fase> <alias ou model ID>
+  /forge-prefs set <fase> <alias ou model ID>
 
 Exemplos:
-  /gsd-prefs set execute opus
-  /gsd-prefs set execute claude-opus-4-6
-  /gsd-prefs set research haiku
-  /gsd-prefs set research claude-haiku-4-5-20251001
+  /forge-prefs set execute opus
+  /forge-prefs set execute claude-opus-4-6
+  /forge-prefs set research haiku
+  /forge-prefs set research claude-haiku-4-5-20251001
 ```
 
 ---
@@ -92,24 +92,24 @@ Exemplos:
 ### "set \<phase\> \<model\>"
 
 Exemplos válidos:
-- `/gsd-prefs set research haiku`
-- `/gsd-prefs set execute opus`
-- `/gsd-prefs set execute claude-opus-4-6`
-- `/gsd-prefs set plan claude-sonnet-4-6`
+- `/forge-prefs set research haiku`
+- `/forge-prefs set execute opus`
+- `/forge-prefs set execute claude-opus-4-6`
+- `/forge-prefs set plan claude-sonnet-4-6`
 
 Fases válidas: `discuss`, `research`, `plan`, `execute`, `complete`, `memory`
 
 Mapa fase → arquivo de agente:
-- `discuss` → `~/.claude/agents/gsd-discusser.md`
-- `research` → `~/.claude/agents/gsd-researcher.md`
-- `plan` → `~/.claude/agents/gsd-planner.md`
-- `execute` → `~/.claude/agents/gsd-executor.md`
-- `complete` → `~/.claude/agents/gsd-completer.md`
+- `discuss` → `~/.claude/agents/forge-discusser.md`
+- `research` → `~/.claude/agents/forge-researcher.md`
+- `plan` → `~/.claude/agents/forge-planner.md`
+- `execute` → `~/.claude/agents/forge-executor.md`
+- `complete` → `~/.claude/agents/forge-completer.md`
 - `memory` → `~/.claude/agents/gsd-memory.md`
 
 Steps:
 1. Resolve o model ID completo (converta alias se necessário)
-2. Atualize a coluna "Model ID" na tabela de Phase → Agent Routing no `~/.claude/gsd-agent-prefs.md`
+2. Atualize a coluna "Model ID" na tabela de Phase → Agent Routing no `~/.claude/forge-agent-prefs.md`
 3. Atualize o campo `model:` no frontmatter do arquivo de agente correspondente
 4. Confirme:
 
@@ -119,7 +119,7 @@ Steps:
   Antes: claude-sonnet-4-6
   Agora: claude-opus-4-6
 
-  Arquivo do agente atualizado: ~/.claude/agents/gsd-executor.md
+  Arquivo do agente atualizado: ~/.claude/agents/forge-executor.md
 ```
 
 Se o modelo passado não for reconhecido (nem alias nem model ID válido):
@@ -136,7 +136,7 @@ Modelos disponíveis:
 
 ### "skip-research \<true|false\>"
 
-Toggle research phase skip. Update `skip_research` in `~/.claude/gsd-agent-prefs.md`.
+Toggle research phase skip. Update `skip_research` in `~/.claude/forge-agent-prefs.md`.
 Confirm the new value.
 
 ---
@@ -152,7 +152,7 @@ Confirm the new value.
 
 Exemplos: `git auto_push true`, `git merge_strategy merge`, `git main_branch main`
 
-Update the git setting in `~/.claude/gsd-agent-prefs.md`. Confirm.
+Update the git setting in `~/.claude/forge-agent-prefs.md`. Confirm.
 
 ---
 
@@ -165,7 +165,7 @@ Restore all defaults:
 - skip rules → all false
 - git → squash, auto_push false, main_branch master
 
-Update both `~/.claude/gsd-agent-prefs.md` AND all agent frontmatter files.
+Update both `~/.claude/forge-agent-prefs.md` AND all agent frontmatter files.
 Confirm with the restored routing table.
 
 ---

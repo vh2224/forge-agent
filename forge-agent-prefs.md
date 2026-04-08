@@ -1,7 +1,7 @@
 ---
 # GSD Claude Agent Preferences
 # Equivalente ao ~/.gsd/preferences.md mas para os agentes do Claude Code
-# Editado via /gsd-prefs ou manualmente
+# Editado via /forge-prefs ou manualmente
 version: 1
 ---
 
@@ -19,15 +19,15 @@ Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-6`) em q
 
 | Phase | Agent | Model ID | Alias |
 |-------|-------|----------|-------|
-| discuss-milestone | gsd-discusser | claude-opus-4-6 | opus |
-| discuss-slice | gsd-discusser | claude-opus-4-6 | opus |
-| research-milestone | gsd-researcher | claude-opus-4-6 | opus |
-| research-slice | gsd-researcher | claude-opus-4-6 | opus |
-| plan-milestone | gsd-planner | claude-opus-4-6 | opus |
-| plan-slice | gsd-planner | claude-opus-4-6 | opus |
-| execute-task | gsd-executor | claude-sonnet-4-6 | sonnet |
-| complete-slice | gsd-completer | claude-sonnet-4-6 | sonnet |
-| complete-milestone | gsd-completer | claude-sonnet-4-6 | sonnet |
+| discuss-milestone | forge-discusser | claude-opus-4-6 | opus |
+| discuss-slice | forge-discusser | claude-opus-4-6 | opus |
+| research-milestone | forge-researcher | claude-opus-4-6 | opus |
+| research-slice | forge-researcher | claude-opus-4-6 | opus |
+| plan-milestone | forge-planner | claude-opus-4-6 | opus |
+| plan-slice | forge-planner | claude-opus-4-6 | opus |
+| execute-task | forge-executor | claude-sonnet-4-6 | sonnet |
+| complete-slice | forge-completer | claude-sonnet-4-6 | sonnet |
+| complete-milestone | forge-completer | claude-sonnet-4-6 | sonnet |
 | memory-extract | gsd-memory | claude-haiku-4-5-20251001 | haiku |
 
 ## Phase Skip Rules
@@ -46,9 +46,9 @@ usar um agente mais leve. Configurado pelo planner no T##-PLAN.md via
 `complexity: light | standard | heavy`.
 
 ```
-light    → gsd-executor  (sonnet)   # tasks de rotina, mudanças simples
-standard → gsd-executor  (sonnet)   # tasks normais
-heavy    → gsd-executor  (opus)     # tasks com decisões arquiteturais complexas
+light    → forge-executor  (sonnet)   # tasks de rotina, mudanças simples
+standard → forge-executor  (sonnet)   # tasks normais
+heavy    → forge-executor  (opus)     # tasks com decisões arquiteturais complexas
 ```
 
 ## Git Settings

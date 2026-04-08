@@ -1,4 +1,4 @@
-# GSD Agent for Claude Code
+# Forge Agent for Claude Code
 
 > Workflow de desenvolvimento autônomo para o Claude Code, baseado na metodologia e arquitetura do **[GSD-2](https://github.com/gsd-build/gsd-2)** (MIT).
 
@@ -41,16 +41,16 @@ claude --version   # deve retornar uma versão
 ### macOS / Linux / Windows (Git Bash)
 
 ```bash
-git clone https://github.com/<seu-usuario>/gsd-agent
-cd gsd-agent
+git clone https://github.com/<seu-usuario>/forge-agent
+cd forge-agent
 bash install.sh
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
-git clone https://github.com/<seu-usuario>/gsd-agent
-cd gsd-agent
+git clone https://github.com/<seu-usuario>/forge-agent
+cd forge-agent
 .\install.ps1
 ```
 
@@ -62,7 +62,7 @@ Suas preferências existentes **não são sobrescritas**.
 Abra qualquer projeto com o Claude Code e digite:
 
 ```
-/gsd-help
+/forge-help
 ```
 
 Se listar os comandos, está instalado corretamente.
@@ -79,19 +79,19 @@ claude
 ```
 
 ```
-/gsd-init minha plataforma de e-commerce com Next.js e Stripe
+/forge-init minha plataforma de e-commerce com Next.js e Stripe
 ```
 
 O agente detecta a stack, cria a estrutura `.gsd/` e o `CLAUDE.md`. A partir daí, toda sessão neste diretório carrega o contexto GSD automaticamente.
 
 ```
-/gsd-new-milestone autenticação de usuários com NextAuth
+/forge-new-milestone autenticação de usuários com NextAuth
 ```
 
 O agente faz perguntas sobre decisões de arquitetura, planeja os slices, decompõe em tasks e está pronto para executar.
 
 ```
-/gsd-auto
+/forge-auto
 ```
 
 Executa o milestone inteiro de forma autônoma.
@@ -105,7 +105,7 @@ Se o projeto já tem `.gsd/` gerenciado pelo gsd-pi:
 ```bash
 cd /projeto-existente
 claude
-/gsd-init
+/forge-init
 ```
 
 Detecta o estado atual, cria o `CLAUDE.md` e os arquivos de suporte sem tocar no `.gsd/` existente.
@@ -118,43 +118,43 @@ Detecta o estado atual, cria o `CLAUDE.md` e os arquivos de suporte sem tocar no
 
 | Comando | O que faz |
 |---------|-----------|
-| `/gsd-init` | Inicializa o projeto. Detecta `.gsd/` existente (gsd-pi) ou cria estrutura nova. Gera `CLAUDE.md`, `AUTO-MEMORY.md` e `claude-agent-prefs.md`. |
-| `/gsd-init <descrição>` | Mesmo que acima, passando a descrição do projeto direto para pular a pergunta inicial. |
+| `/forge-init` | Inicializa o projeto. Detecta `.gsd/` existente (gsd-pi) ou cria estrutura nova. Gera `CLAUDE.md`, `AUTO-MEMORY.md` e `claude-agent-prefs.md`. |
+| `/forge-init <descrição>` | Mesmo que acima, passando a descrição do projeto direto para pular a pergunta inicial. |
 
 ### Execução
 
 | Comando | O que faz |
 |---------|-----------|
-| `/gsd` | **Step mode** — executa uma unidade (task, slice ou fase) e para. Ideal para revisar antes de continuar. |
-| `/gsd-auto` | **Auto mode** — executa o milestone inteiro de forma autônoma, sem parar entre unidades. Para em blocker ou milestone completo. |
+| `/forge-next` | **Step mode** — executa uma unidade (task, slice ou fase) e para. Ideal para revisar antes de continuar. |
+| `/forge-auto` | **Auto mode** — executa o milestone inteiro de forma autônoma, sem parar entre unidades. Para em blocker ou milestone completo. |
 
 ### Planejamento
 
 | Comando | Exemplo | O que faz |
 |---------|---------|-----------|
-| `/gsd-new-milestone` | `/gsd-new-milestone sistema de pagamentos com Stripe` | Cria milestone completo: discuss → plan → ROADMAP com slices e boundary map. |
-| `/gsd-discuss` | `/gsd-discuss M002` ou `/gsd-discuss S03` | Fase de discuss para milestone ou slice específico. Pergunta sobre gray areas e registra decisões. |
-| `/gsd-add-slice` | `/gsd-add-slice M002 webhook de pagamentos` | Adiciona slice ao milestone com tasks planejadas e T##-PLAN.md. |
-| `/gsd-add-task` | `/gsd-add-task S03 validar assinatura do webhook` | Planeja task específica com steps e must-haves. |
+| `/forge-new-milestone` | `/forge-new-milestone sistema de pagamentos com Stripe` | Cria milestone completo: discuss → plan → ROADMAP com slices e boundary map. |
+| `/forge-discuss` | `/forge-discuss M002` ou `/forge-discuss S03` | Fase de discuss para milestone ou slice específico. Pergunta sobre gray areas e registra decisões. |
+| `/forge-add-slice` | `/forge-add-slice M002 webhook de pagamentos` | Adiciona slice ao milestone com tasks planejadas e T##-PLAN.md. |
+| `/forge-add-task` | `/forge-add-task S03 validar assinatura do webhook` | Planeja task específica com steps e must-haves. |
 
 ### Visibilidade
 
 | Comando | Exemplo | O que faz |
 |---------|---------|-----------|
-| `/gsd-status` | `/gsd-status` | Dashboard: milestone ativo, progresso de slices/tasks, próxima ação. |
-| `/gsd-explain` | `/gsd-explain M002` · `/gsd-explain S03` · `/gsd-explain decisions` | Explica qualquer artefato sem modificar nada. Aceita: `M###`, `S##`, `T##`, `decisions`, `state`, `all`. |
-| `/gsd-memories` | `/gsd-memories` · `/gsd-memories stats` | Gerencia memórias auto-aprendidas. Sub-comandos: `show`, `stats`, `clean`, `export`, `inject`. |
-| `/gsd-help` | `/gsd-help` | Ajuda completa com todos os comandos, agentes e arquivos. |
+| `/forge-status` | `/forge-status` | Dashboard: milestone ativo, progresso de slices/tasks, próxima ação. |
+| `/forge-explain` | `/forge-explain M002` · `/forge-explain S03` · `/forge-explain decisions` | Explica qualquer artefato sem modificar nada. Aceita: `M###`, `S##`, `T##`, `decisions`, `state`, `all`. |
+| `/forge-memories` | `/forge-memories` · `/forge-memories stats` | Gerencia memórias auto-aprendidas. Sub-comandos: `show`, `stats`, `clean`, `export`, `inject`. |
+| `/forge-help` | `/forge-help` | Ajuda completa com todos os comandos, agentes e arquivos. |
 
 ### Configuração
 
 | Comando | Exemplo | O que faz |
 |---------|---------|-----------|
-| `/gsd-prefs` | `/gsd-prefs` | Mostra configuração atual de modelos, skip rules e git. |
-| `/gsd-prefs set` | `/gsd-prefs set research haiku` | Muda o modelo de uma fase. |
-| `/gsd-prefs skip-research` | `/gsd-prefs skip-research true` | Ativa/desativa o skip da fase de research. |
-| `/gsd-prefs git` | `/gsd-prefs git auto_push true` | Altera configuração de git. |
-| `/gsd-prefs reset` | `/gsd-prefs reset` | Restaura todos os padrões. |
+| `/forge-prefs` | `/forge-prefs` | Mostra configuração atual de modelos, skip rules e git. |
+| `/forge-prefs set` | `/forge-prefs set research haiku` | Muda o modelo de uma fase. |
+| `/forge-prefs skip-research` | `/forge-prefs skip-research true` | Ativa/desativa o skip da fase de research. |
+| `/forge-prefs git` | `/forge-prefs git auto_push true` | Altera configuração de git. |
+| `/forge-prefs reset` | `/forge-prefs reset` | Restaura todos os padrões. |
 
 ---
 
@@ -164,48 +164,48 @@ Cada fase tem um agente dedicado com modelo configurável:
 
 | Agente | Modelo padrão | Fase | Por que este modelo |
 |--------|--------------|------|---------------------|
-| `gsd-discusser` | **Opus** | discuss | Precisa entender nuance de requisitos e trade-offs |
-| `gsd-researcher` | **Opus** | research | Análise profunda de codebase e identificação de riscos |
-| `gsd-planner` | **Opus** | plan | Decomposição arquitetural, boundary maps, task sizing |
-| `gsd-executor` | **Sonnet** | execute | Implementação eficiente, boa relação custo/qualidade |
-| `gsd-completer` | **Sonnet** | complete | Síntese de summaries, UAT scripts, squash merge |
-| `gsd-worker` | **Sonnet** | step mode | Worker genérico para execução manual |
-| `gsd-memory` | **Haiku** | pós-unidade | Extração barata de memórias do transcript (fire-and-forget) |
+| `forge-discusser` | **Opus** | discuss | Precisa entender nuance de requisitos e trade-offs |
+| `forge-researcher` | **Opus** | research | Análise profunda de codebase e identificação de riscos |
+| `forge-planner` | **Opus** | plan | Decomposição arquitetural, boundary maps, task sizing |
+| `forge-executor` | **Sonnet** | execute | Implementação eficiente, boa relação custo/qualidade |
+| `forge-completer` | **Sonnet** | complete | Síntese de summaries, UAT scripts, squash merge |
+| `forge-worker` | **Sonnet** | step mode | Worker genérico para execução manual |
+| `forge-memory` | **Haiku** | pós-unidade | Extração barata de memórias do transcript (fire-and-forget) |
 
-Cada agente roda com **contexto isolado** — equivalente ao `ctx.newSession()` do gsd-pi. O orquestrador (`gsd`) nunca acumula tokens de execução.
+Cada agente roda com **contexto isolado** — equivalente ao `ctx.newSession()` do gsd-pi. O orquestrador (`forge`) nunca acumula tokens de execução.
 
 ### Mudar modelos
 
 ```
-/gsd-prefs set research haiku    ← pesquisa mais barata
-/gsd-prefs set execute opus      ← execução com modelo pesado
+/forge-prefs set research haiku    ← pesquisa mais barata
+/forge-prefs set execute opus      ← execução com modelo pesado
 ```
 
-Ou edite diretamente `~/.claude/gsd-agent-prefs.md` e o frontmatter do agente correspondente em `~/.claude/agents/`.
+Ou edite diretamente `~/.claude/forge-agent-prefs.md` e o frontmatter do agente correspondente em `~/.claude/agents/`.
 
 ---
 
 ## Como funciona
 
 ```
-você digita /gsd-auto
+você digita /forge-auto
         │
         ▼
-gsd (orquestrador)
-  1. lê ~/.claude/gsd-agent-prefs.md  ← modelo por fase
+forge (orquestrador)
+  1. lê ~/.claude/forge-agent-prefs.md  ← modelo por fase
   2. lê .gsd/claude-agent-prefs.md    ← overrides do projeto
   3. lê .gsd/STATE.md                 ← próxima unidade
   4. lê .gsd/AUTO-MEMORY.md           ← top memórias rankeadas
   5. monta prompt com arquivos inlined
         │
-        ├── research? → gsd-researcher (opus,   contexto fresco)
-        ├── plan?     → gsd-planner    (opus,   contexto fresco)
-        ├── execute?  → gsd-executor   (sonnet, contexto fresco)
-        └── complete? → gsd-completer  (sonnet, contexto fresco)
+        ├── research? → forge-researcher (opus,   contexto fresco)
+        ├── plan?     → forge-planner    (opus,   contexto fresco)
+        ├── execute?  → forge-executor   (sonnet, contexto fresco)
+        └── complete? → forge-completer  (sonnet, contexto fresco)
         │
         ▼
   após cada unidade:
-    gsd-memory (haiku) extrai memórias do transcript
+    forge-memory (haiku) extrai memórias do transcript
     memórias rankeadas → injetadas na próxima unidade
     loop → próxima unidade
         │
@@ -215,7 +215,7 @@ gsd (orquestrador)
 
 ### Memória emergente
 
-Após cada unidade, o `gsd-memory` (Haiku) lê o transcript e extrai conhecimento durável:
+Após cada unidade, o `forge-memory` (Haiku) lê o transcript e extrai conhecimento durável:
 
 ```
 [MEM001] (gotcha)       conf:0.95  hits:3  — watchEffect com flush:post necessário para watchers de rota no Vue 3
@@ -237,26 +237,26 @@ O instalador copia automaticamente para ambos os diretórios:
 
 | Skill | O que faz | Quando é usada |
 |-------|-----------|----------------|
-| `gsd-brainstorm` | Explora alternativas, riscos e limites de escopo antes de planejar | `/gsd-new-milestone` (automático) |
-| `gsd-scope-clarity` | Gera contrato de escopo com critérios observáveis e testáveis | `/gsd-new-milestone` (automático) |
-| `gsd-risk-radar` | Analisa riscos por slice antes da execução, para slices `risk:high` | `/gsd-new-milestone`, `/gsd-auto` |
+| `forge-brainstorm` | Explora alternativas, riscos e limites de escopo antes de planejar | `/forge-new-milestone` (automático) |
+| `forge-scope-clarity` | Gera contrato de escopo com critérios observáveis e testáveis | `/forge-new-milestone` (automático) |
+| `forge-risk-radar` | Analisa riscos por slice antes da execução, para slices `risk:high` | `/forge-new-milestone`, `/forge-auto` |
 
 ### Descobrir skills disponíveis
 
 ```
-/gsd-skills              ← lista todas as skills instaladas + integrações GSD
-/gsd-skills brainstorm   ← detalhes e exemplos de uma skill específica
-/gsd-skills --all        ← mapa completo: skill × fase × comando × flag
-/gsd-skills install      ← como instalar novas skills
+/forge-skills              ← lista todas as skills instaladas + integrações GSD
+/forge-skills brainstorm   ← detalhes e exemplos de uma skill específica
+/forge-skills --all        ← mapa completo: skill × fase × comando × flag
+/forge-skills install      ← como instalar novas skills
 ```
 
 ### Flag `-fast` — pular skills
 
 ```bash
-/gsd-new-milestone autenticação OAuth         # brainstorm + scope + discuss + plan
-/gsd-new-milestone -fast autenticação OAuth   # só discuss + plan
-/gsd-discuss M003                              # com brainstorm (se disponível)
-/gsd-discuss -fast M003                        # discuss direto
+/forge-new-milestone autenticação OAuth         # brainstorm + scope + discuss + plan
+/forge-new-milestone -fast autenticação OAuth   # só discuss + plan
+/forge-discuss M003                              # com brainstorm (se disponível)
+/forge-discuss -fast M003                        # discuss direto
 ```
 
 ### Instalar skills de outros repositórios
@@ -264,7 +264,7 @@ O instalador copia automaticamente para ambos os diretórios:
 ```bash
 npx skills add odra/superpowers --skill brainstorm -y
 npx skills add <repositório> --skill <nome> -y
-# Detectado automaticamente pelo /gsd-skills
+# Detectado automaticamente pelo /forge-skills
 ```
 
 ### Contribuir uma skill
@@ -275,17 +275,17 @@ Coloque em `skills/<nome>/SKILL.md` seguindo o formato das skills existentes e a
 
 ## Configuração
 
-### Global — `~/.claude/gsd-agent-prefs.md`
+### Global — `~/.claude/forge-agent-prefs.md`
 
 Padrões aplicados a todos os projetos. Criado pelo instalador.
 
 ```yaml
 # Modelos por fase
-research:   opus    → gsd-researcher
-planning:   opus    → gsd-planner
-execution:  sonnet  → gsd-executor
-completion: sonnet  → gsd-completer
-memory:     haiku   → gsd-memory
+research:   opus    → forge-researcher
+planning:   opus    → forge-planner
+execution:  sonnet  → forge-executor
+completion: sonnet  → forge-completer
+memory:     haiku   → forge-memory
 
 # Skip rules
 skip_discuss:        false
@@ -300,7 +300,7 @@ main_branch:    master
 
 ### Por projeto — `.gsd/claude-agent-prefs.md`
 
-Overrides específicos do projeto. Criado pelo `/gsd-init`.
+Overrides específicos do projeto. Criado pelo `/forge-init`.
 
 ```yaml
 # Overrides só para este projeto
@@ -346,13 +346,13 @@ CLAUDE.md                       ← carregado automaticamente pelo Claude Code e
 ## Atualizar
 
 ```bash
-cd gsd-agent
+cd forge-agent
 git pull
 bash install.sh --update      # macOS/Linux — faz backup antes de atualizar
 .\install.ps1 -Update         # Windows
 ```
 
-O `gsd-agent-prefs.md` e os arquivos de projeto (`.gsd/`) **nunca são sobrescritos** na atualização.
+O `forge-agent-prefs.md` e os arquivos de projeto (`.gsd/`) **nunca são sobrescritos** na atualização.
 
 ---
 

@@ -1,5 +1,5 @@
 ---
-description: "Modo conversa com o agente GSD — discute ideias, resolve dúvidas, planeja, captura decisões. Salva sessão automaticamente em .gsd/sessions/. Se o chat cair, /gsd-ask resume retoma de onde parou."
+description: "Modo conversa com o agente GSD — discute ideias, resolve dúvidas, planeja, captura decisões. Salva sessão automaticamente em .gsd/sessions/. Se o chat cair, /forge-ask resume retoma de onde parou."
 allowed-tools: Read, Write, Bash, Glob
 ---
 
@@ -12,10 +12,10 @@ pwd
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:
-> Projeto não inicializado. Execute `/gsd-init` primeiro.
+> Projeto não inicializado. Execute `/forge-init` primeiro.
 
 **Se .gsd/STATE.md não existe:** Stop. Tell the user:
-> Nenhum projeto GSD encontrado. Execute `/gsd-init` para começar.
+> Nenhum projeto GSD encontrado. Execute `/forge-init` para começar.
 
 ---
 
@@ -156,7 +156,7 @@ Comandos especiais durante a conversa:
   "criar milestone: X"  → planeja novo milestone
   "criar task: X"       → adiciona task ao slice ativo
   "encerrar sessão"     → fecha e arquiva esta sessão
-  /gsd-ask resume       → retoma esta sessão se o chat cair
+  /forge-ask resume       → retoma esta sessão se o chat cair
 ```
 
 ---
@@ -197,11 +197,11 @@ If user said **"salvar decisão: [text]"**:
 - Confirm: "✓ Decisão salva no DECISIONS.md"
 
 If user said **"criar milestone: [description]"**:
-- Tell the user: "Execute `/gsd-new-milestone {description}` para criar o milestone completo com brainstorm e planejamento."
+- Tell the user: "Execute `/forge-new-milestone {description}` para criar o milestone completo com brainstorm e planejamento."
 - Append to `## Queued Actions` in session file
 
 If user said **"criar task: [description]"**:
-- Tell the user: "Execute `/gsd-add-task {active slice} {description}` para adicionar a task."
+- Tell the user: "Execute `/forge-add-task {active slice} {description}` para adicionar a task."
 - Append to `## Queued Actions`
 
 If user said **"encerrar sessão"** or **"close session"**:

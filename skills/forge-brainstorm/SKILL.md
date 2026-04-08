@@ -1,5 +1,5 @@
 ---
-name: gsd-brainstorm
+name: forge-brainstorm
 description: Structured brainstorming for GSD milestones and slices. Generates alternative approaches, surfaces hidden risks, clarifies scope boundaries, and produces a decision brief ready for the discuss phase. Use before planning any significant milestone.
 ---
 

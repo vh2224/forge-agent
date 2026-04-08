@@ -1,5 +1,5 @@
 ---
-description: "Adiciona uma task a um slice existente. Use: /gsd-add-task S02 implementar refresh token rotation | /gsd-add-task T04 (task específica no slice ativo)"
+description: "Adiciona uma task a um slice existente. Use: /forge-add-task S02 implementar refresh token rotation | /forge-add-task T04 (task específica no slice ativo)"
 allowed-tools: Read, Write, Edit, Glob
 ---
 
@@ -12,10 +12,10 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ```
 
 **Se CLAUDE.md não existe:** Stop and tell the user:
-> Projeto não inicializado. Execute `/gsd-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
+> Projeto não inicializado. Execute `/forge-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
 
 **Se .gsd/STATE.md não existe:** Stop and tell the user:
-> Nenhum projeto GSD encontrado neste diretório. Execute `/gsd-init` para começar.
+> Nenhum projeto GSD encontrado neste diretório. Execute `/forge-init` para começar.
 
 **Se `.gsd/AUTO-MEMORY.md` não existe:** Create it silently before proceeding:
 ```
@@ -26,7 +26,7 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ---
 
 
-Use the **gsd** agent to add or plan a specific task within a slice.
+Use the **forge** agent to add or plan a specific task within a slice.
 
 ## Input
 $ARGUMENTS

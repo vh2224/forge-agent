@@ -1,5 +1,5 @@
 ---
-description: "Atualiza o GSD Agent para a versão mais recente do repositório. Faz git pull e reinstala agents/commands/skills. Preserva suas preferências. Use: /gsd-update | /gsd-update /caminho/para/gsd-agent"
+description: "Atualiza o GSD Agent para a versão mais recente do repositório. Faz git pull e reinstala agents/commands/skills. Preserva suas preferências. Use: /forge-update | /forge-update /caminho/para/gsd-agent"
 allowed-tools: Read, Bash
 ---
 
@@ -9,7 +9,7 @@ allowed-tools: Read, Bash
 
 **Se não foi passado:**
 
-Read `~/.claude/gsd-agent-prefs.md` and look for:
+Read `~/.claude/forge-agent-prefs.md` and look for:
 ```
 repo_path: /path/to/gsd-agent
 ```
@@ -21,7 +21,7 @@ If `repo_path` is NOT set or the file doesn't exist:
 Não foi possível encontrar o repositório do GSD Agent.
 
 Passe o caminho como argumento:
-  /gsd-update /caminho/para/gsd-agent
+  /forge-update /caminho/para/gsd-agent
 
 Ou rode o instalador novamente para registrar o caminho:
   bash /caminho/para/gsd-agent/install.sh --update
@@ -91,13 +91,13 @@ Capture and display the installer output.
 ## Verificar que preferences foram preservadas
 
 ```bash
-grep "repo_path" ~/.claude/gsd-agent-prefs.md 2>/dev/null | head -1
+grep "repo_path" ~/.claude/forge-agent-prefs.md 2>/dev/null | head -1
 ```
 
 If repo_path is gone from prefs (shouldn't happen, but just in case): re-add it:
 ```bash
-echo "" >> ~/.claude/gsd-agent-prefs.md
-echo "repo_path: {REPO_PATH}" >> ~/.claude/gsd-agent-prefs.md
+echo "" >> ~/.claude/forge-agent-prefs.md
+echo "repo_path: {REPO_PATH}" >> ~/.claude/forge-agent-prefs.md
 ```
 
 ---
@@ -111,11 +111,11 @@ De:  {commit hash antes do pull}
 Para: {commit hash depois do pull, ou "mesmo" se já estava atualizado}
 
 Arquivos atualizados:
-  ~/.claude/agents/gsd*.md
-  ~/.claude/commands/gsd*.md
+  ~/.claude/agents/forge*.md
+  ~/.claude/commands/forge*.md
   ~/.claude/skills/gsd-*/SKILL.md
 
-Preferências preservadas: ~/.claude/gsd-agent-prefs.md ✓
+Preferências preservadas: ~/.claude/forge-agent-prefs.md ✓
 
 Para ver o que mudou: git log --oneline {REPO_PATH}
 ```

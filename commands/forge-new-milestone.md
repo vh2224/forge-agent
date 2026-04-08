@@ -1,5 +1,5 @@
 ---
-description: "Cria uma nova milestone GSD. Fluxo completo: brainstorm → discuss → plan. Use -fast para pular brainstorm. Ex: /gsd-new-milestone autenticação OAuth | /gsd-new-milestone -fast pagamentos com Stripe"
+description: "Cria uma nova milestone GSD. Fluxo completo: brainstorm → discuss → plan. Use -fast para pular brainstorm. Ex: /forge-new-milestone autenticação OAuth | /forge-new-milestone -fast pagamentos com Stripe"
 allowed-tools: Read, Write, Bash, Agent
 ---
 
@@ -12,10 +12,10 @@ pwd
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:
-> Projeto não inicializado. Execute `/gsd-init` primeiro.
+> Projeto não inicializado. Execute `/forge-init` primeiro.
 
 **Se .gsd/STATE.md não existe:** Stop. Tell the user:
-> Nenhum projeto GSD encontrado. Execute `/gsd-init` para começar.
+> Nenhum projeto GSD encontrado. Execute `/forge-init` para começar.
 
 ---
 
@@ -49,10 +49,10 @@ mkdir -p .gsd/milestones/{MILESTONE_ID}/slices
 
 **If FAST_MODE=true:** Skip to Step 3.
 
-Delegate to `gsd-planner` agent:
+Delegate to `forge-planner` agent:
 
 ```
-Run the gsd-brainstorm skill for a new milestone.
+Run the forge-brainstorm skill for a new milestone.
 WORKING_DIR: {pwd}
 MILESTONE_ID: {MILESTONE_ID}
 MILESTONE_DESC: {MILESTONE_DESC}
@@ -66,7 +66,7 @@ REQUIREMENTS:
 DECISIONS (last 10 rows):
 {last 10 rows of .gsd/DECISIONS.md}
 
-SKILL: Check ~/.agents/skills/gsd-brainstorm/SKILL.md or ~/.claude/skills/gsd-brainstorm/SKILL.md.
+SKILL: Check ~/.agents/skills/forge-brainstorm/SKILL.md or ~/.claude/skills/forge-brainstorm/SKILL.md.
 If found: execute the skill.
 If not found: run inline brainstorm — 3 alternative approaches + top 5 risks + scope boundaries.
 
@@ -82,7 +82,7 @@ Show the brainstorm summary to the user before continuing.
 
 **If FAST_MODE=true:** Skip to Step 4.
 
-Delegate to `gsd-planner` agent:
+Delegate to `forge-planner` agent:
 
 ```
 Run scope clarity for milestone {MILESTONE_ID}.
@@ -96,7 +96,7 @@ BRAINSTORM (if available):
 PROJECT:
 {content of .gsd/PROJECT.md}
 
-SKILL: Check ~/.agents/skills/gsd-scope-clarity/SKILL.md or ~/.claude/skills/gsd-scope-clarity/SKILL.md.
+SKILL: Check ~/.agents/skills/forge-scope-clarity/SKILL.md or ~/.claude/skills/forge-scope-clarity/SKILL.md.
 If found: execute the skill.
 If not found: produce a brief in/out/deferred classification and observable criteria.
 
@@ -145,7 +145,7 @@ Append significant decisions to `.gsd/DECISIONS.md`.
 Read:
 - `.gsd/AUTO-MEMORY.md` first 80 lines (or skip if missing)
 
-Then delegate to `gsd-planner` agent:
+Then delegate to `forge-planner` agent:
 
 ```
 Plan milestone {MILESTONE_ID}: {MILESTONE_DESC}
@@ -187,7 +187,7 @@ Return ---GSD-WORKER-RESULT--- with list of slices created.
 
 Read the ROADMAP to find slices tagged `risk:high`.
 
-For each high-risk slice, delegate to `gsd-planner` agent:
+For each high-risk slice, delegate to `forge-planner` agent:
 
 ```
 Run risk radar for slice {S##} of milestone {MILESTONE_ID}.
@@ -199,7 +199,7 @@ SLICE ENTRY:
 MILESTONE CONTEXT:
 {content of {MILESTONE_ID}-CONTEXT.md}
 
-SKILL: Check ~/.agents/skills/gsd-risk-radar/SKILL.md or ~/.claude/skills/gsd-risk-radar/SKILL.md.
+SKILL: Check ~/.agents/skills/forge-risk-radar/SKILL.md or ~/.claude/skills/forge-risk-radar/SKILL.md.
 If found: execute the skill.
 If not found: produce a brief risk analysis covering technical, dependency, and scope-creep risks.
 
@@ -221,7 +221,7 @@ Update `.gsd/STATE.md`:
 **Phase:** plan-slice (ready to plan first slice)
 
 ## Next Action
-Plan first slice: run /gsd or /gsd-auto
+Plan first slice: run /forge-next or /forge-auto
 ```
 
 Report to user:
@@ -238,5 +238,5 @@ Arquivos criados:
   [{MILESTONE_ID}-BRAINSTORM.md]  (se não for fast mode)
   [{MILESTONE_ID}-SCOPE.md]       (se skill disponível)
 
-Próximo: /gsd para planejar primeiro slice, ou /gsd-auto para executar tudo.
+Próximo: /gsd para planejar primeiro slice, ou /forge-auto para executar tudo.
 ```

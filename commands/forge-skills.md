@@ -1,5 +1,5 @@
 ---
-description: "Lista skills disponíveis e explica como usar com os comandos GSD. Use: /gsd-skills | /gsd-skills brainstorm | /gsd-skills --all"
+description: "Lista skills disponíveis e explica como usar com os comandos GSD. Use: /forge-skills | /forge-skills brainstorm | /forge-skills --all"
 allowed-tools: Read, Bash, Glob
 ---
 
@@ -28,21 +28,21 @@ Then display in this format:
 Para cada skill com nome começando em `gsd-`:
 
 ```
-📦 gsd-brainstorm
+📦 forge-brainstorm
    Brainstorming estruturado antes do planejamento de milestone.
-   → Usado em: /gsd-new-milestone (automático)
-   → Manual:   /gsd-new-milestone -brainstorm <desc>
-   → Pular:    /gsd-new-milestone -fast <desc>
+   → Usado em: /forge-new-milestone (automático)
+   → Manual:   /forge-new-milestone -brainstorm <desc>
+   → Pular:    /forge-new-milestone -fast <desc>
 
-📦 gsd-risk-radar
+📦 forge-risk-radar
    Análise de risco por slice antes da execução.
-   → Usado em: /gsd-new-milestone (automático em slices risk:high)
+   → Usado em: /forge-new-milestone (automático em slices risk:high)
    → Manual:   /gsd S##  (o orquestrador roda antes de executar slices high-risk)
 
-📦 gsd-scope-clarity
+📦 forge-scope-clarity
    Contrato de escopo com critérios observáveis.
-   → Usado em: /gsd-new-milestone (automático)
-   → Manual:   /gsd-discuss -scope M###
+   → Usado em: /forge-new-milestone (automático)
+   → Manual:   /forge-discuss -scope M###
 ```
 
 ---
@@ -61,16 +61,16 @@ Ao final, mostrar:
 Total: N skills GSD + M outras skills instaladas
 
 Como usar skills com GSD:
-  /gsd-skills <nome>    ver detalhes e exemplos de uma skill específica
-  /gsd-skills --all     listar todas as skills com integrações GSD
-  /gsd-skills install   ver como instalar novas skills
+  /forge-skills <nome>    ver detalhes e exemplos de uma skill específica
+  /forge-skills --all     listar todas as skills com integrações GSD
+  /forge-skills install   ver como instalar novas skills
 ```
 
 ---
 
 ## Com nome de skill — detalhes e exemplos
 
-Se o argumento for um nome de skill (ex: `brainstorm`, `gsd-brainstorm`, `review`):
+Se o argumento for um nome de skill (ex: `brainstorm`, `forge-brainstorm`, `review`):
 
 1. Find the skill in `~/.agents/skills/<name>/SKILL.md` or `~/.claude/skills/<name>/SKILL.md`
 2. Read the full `SKILL.md`
@@ -88,11 +88,11 @@ INTEGRAÇÃO COM GSD:
 
 USAR AGORA:
   Para brainstorming de um milestone:
-    /gsd-new-milestone <desc>           ← skill roda automaticamente
-    /gsd-new-milestone -fast <desc>     ← pular esta skill
+    /forge-new-milestone <desc>           ← skill roda automaticamente
+    /forge-new-milestone -fast <desc>     ← pular esta skill
 
   Para rodar manualmente:
-    Me peça: "rode a skill gsd-brainstorm para o milestone X"
+    Me peça: "rode a skill forge-brainstorm para o milestone X"
 
 FLAGS DISPONÍVEIS NESTA SKILL:
   -fast       Pular esta skill completamente
@@ -108,10 +108,10 @@ Mostrar tabela:
 ```
 SKILL               FASE GSD              COMANDO          FLAG SKIP
 ──────────────────────────────────────────────────────────────────────
-gsd-brainstorm      nova milestone        /gsd-new-milestone   -fast
-gsd-scope-clarity   nova milestone        /gsd-new-milestone   -fast
-gsd-risk-radar      plan → execute        /gsd, /gsd-auto      —
-gsd-brainstorm      discuss               /gsd-discuss         -fast
+forge-brainstorm      nova milestone        /forge-new-milestone   -fast
+forge-scope-clarity   nova milestone        /forge-new-milestone   -fast
+forge-risk-radar      plan → execute        /gsd, /forge-auto      —
+forge-brainstorm      discuss               /forge-discuss         -fast
 
 Outras skills (invocar manualmente pedindo ao agente):
 review              qualquer fase         —                    —
@@ -143,7 +143,7 @@ CRIAR SUA PRÓPRIA SKILL:
   Ou crie manualmente:
     mkdir ~/.agents/skills/minha-skill
     # Crie SKILL.md com frontmatter name + description + XML structure
-    # Veja ~/.agents/skills/gsd-brainstorm/SKILL.md como exemplo
+    # Veja ~/.agents/skills/forge-brainstorm/SKILL.md como exemplo
 
 ADICIONAR AO GSD-AGENT (para que todos recebam ao instalar):
   Coloque a skill em gsd-agent/skills/<nome>/

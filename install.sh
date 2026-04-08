@@ -7,7 +7,7 @@ set -euo pipefail
 # ── Config ──────────────────────────────────────────────────────────────────
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="${HOME}/.claude"
-BACKUP_DIR="${CLAUDE_DIR}/gsd-agent-backup-$(date +%Y%m%d%H%M%S)"
+BACKUP_DIR="${CLAUDE_DIR}/forge-agent-backup-$(date +%Y%m%d%H%M%S)"
 DRY_RUN=false
 UPDATE=false
 
@@ -53,7 +53,7 @@ AGENTS_DIR="${CLAUDE_DIR}/agents"
 COMMANDS_DIR="${CLAUDE_DIR}/commands"
 
 has_existing=false
-for f in "${AGENTS_DIR}"/gsd*.md "${COMMANDS_DIR}"/gsd*.md "${CLAUDE_DIR}/gsd-agent-prefs.md"; do
+for f in "${AGENTS_DIR}"/forge*.md "${COMMANDS_DIR}"/forge*.md "${CLAUDE_DIR}/forge-agent-prefs.md"; do
   [ -f "$f" ] && has_existing=true && break
 done
 
@@ -68,9 +68,9 @@ fi
 if $has_existing && $UPDATE; then
   if ! $DRY_RUN; then
     mkdir -p "$BACKUP_DIR/agents" "$BACKUP_DIR/commands"
-    for f in "${AGENTS_DIR}"/gsd*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/agents/"; done
-    for f in "${COMMANDS_DIR}"/gsd*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/commands/"; done
-    [ -f "${CLAUDE_DIR}/gsd-agent-prefs.md" ] && cp "${CLAUDE_DIR}/gsd-agent-prefs.md" "$BACKUP_DIR/"
+    for f in "${AGENTS_DIR}"/forge*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/agents/"; done
+    for f in "${COMMANDS_DIR}"/forge*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/commands/"; done
+    [ -f "${CLAUDE_DIR}/forge-agent-prefs.md" ] && cp "${CLAUDE_DIR}/forge-agent-prefs.md" "$BACKUP_DIR/"
   fi
   success "Backup saved to $BACKUP_DIR"
 fi
@@ -78,7 +78,7 @@ fi
 # ── Install ───────────────────────────────────────────────────────────────────
 echo ""
 info "Installing agents..."
-for f in "${REPO_DIR}/agents"/gsd*.md; do
+for f in "${REPO_DIR}/agents"/forge*.md; do
   name="$(basename "$f")"
   copy "$f" "${AGENTS_DIR}/${name}"
   info "  agents/${name}"
@@ -86,7 +86,7 @@ done
 
 echo ""
 info "Installing commands..."
-for f in "${REPO_DIR}/commands"/gsd*.md; do
+for f in "${REPO_DIR}/commands"/forge*.md; do
   name="$(basename "$f")"
   copy "$f" "${COMMANDS_DIR}/${name}"
   info "  commands/${name}"
@@ -96,7 +96,7 @@ echo ""
 info "Installing skills..."
 SKILLS_DIR_AGENTS="${HOME}/.agents/skills"
 SKILLS_DIR_CLAUDE="${CLAUDE_DIR}/skills"
-# Install to ~/.agents/skills (skills.sh ecosystem, used by gsd-pi)
+# Install to ~/.agents/skills (skills.sh ecosystem, compatible with gsd-pi)
 # AND ~/.claude/skills (Claude Code native)
 for skill_dir in "${REPO_DIR}/skills"/*/; do
   skill_name="$(basename "$skill_dir")"
@@ -114,16 +114,16 @@ done
 
 echo ""
 info "Installing preferences..."
-PREFS_DST="${CLAUDE_DIR}/gsd-agent-prefs.md"
+PREFS_DST="${CLAUDE_DIR}/forge-agent-prefs.md"
 if [ ! -f "$PREFS_DST" ]; then
-  copy "${REPO_DIR}/gsd-agent-prefs.md" "$PREFS_DST"
-  info "  gsd-agent-prefs.md (novo)"
+  copy "${REPO_DIR}/forge-agent-prefs.md" "$PREFS_DST"
+  info "  forge-agent-prefs.md (novo)"
 else
-  info "  gsd-agent-prefs.md já existe — não sobrescrito"
+  info "  forge-agent-prefs.md já existe — não sobrescrito"
   info "  (suas preferências foram mantidas)"
 fi
 
-# ── Store repo path for /gsd-update ──────────────────────────────────────────
+# ── Store repo path for /forge-update ──────────────────────────────────────────
 if ! $DRY_RUN && [ -f "$PREFS_DST" ]; then
   if grep -q "^repo_path:" "$PREFS_DST" 2>/dev/null; then
     sed -i "s|^repo_path:.*|repo_path: ${REPO_DIR}|" "$PREFS_DST"
@@ -149,10 +149,10 @@ else
   echo "  Próximos passos:"
   echo "  1. Navegue até um projeto:  cd /seu/projeto"
   echo "  2. Abra o Claude Code:      claude"
-  echo "  3. Inicialize o projeto:    /gsd-init"
-  echo "  4. Crie um milestone:       /gsd-new-milestone <descrição>"
-  echo "  5. Execute:                 /gsd-auto"
+  echo "  3. Inicialize o projeto:    /forge-init"
+  echo "  4. Crie um milestone:       /forge-new-milestone <descrição>"
+  echo "  5. Execute:                 /forge-auto"
   echo ""
-  echo "  Ajuda a qualquer momento:   /gsd-help"
+  echo "  Ajuda a qualquer momento:   /forge-help"
 fi
 echo ""
