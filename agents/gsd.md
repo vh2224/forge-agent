@@ -79,18 +79,39 @@ Parse the `---GSD-WORKER-RESULT---` block:
 ### 6. Post-unit housekeeping
 
 After `status: done`:
-1. Update `.gsd/STATE.md` — advance to next unit position
-2. If `key_decisions` in result → append to `.gsd/DECISIONS.md`
-3. Fire `gsd-memory` agent (fire-and-forget — do NOT await before continuing):
+
+1. **Update STATE.md** — advance to next unit position.
+
+2. **Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md`.
+
+3. **Memory extraction** — call `gsd-memory` agent. This is a blocking call (not fire-and-forget — await it before continuing). Build the prompt with RICH content:
+
+   Determine which summary file was just written by the worker:
+   - `execute-task` → read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SUMMARY.md`
+   - `plan-slice` → read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md`
+   - `complete-slice` → read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SUMMARY.md`
+   - `plan-milestone` → read `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-ROADMAP.md`
+   - `complete-milestone` → read `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md`
+   - other → use the result block only
+
+   Then call:
    ```
-   Extract memories from this unit.
+   WORKING_DIR: {WORKING_DIR}
    UNIT_TYPE: {unit_type}
    UNIT_ID: {unit_id}
-   TRANSCRIPT_SUMMARY: {key_decisions + files_written + one_liner from result}
-   AUTO_MEMORY_PATH: .gsd/AUTO-MEMORY.md
-   WORKING_DIR: {WORKING_DIR}
+   MILESTONE_ID: {M###}
+
+   SUMMARY_CONTENT:
+   {full content of the summary/plan file read above, or "(none)" if file not found}
+
+   RESULT_BLOCK:
+   {full ---GSD-WORKER-RESULT--- block verbatim from the worker}
+
+   KEY_DECISIONS:
+   {key_decisions field from result block, or "(none)"}
    ```
-4. Emit one progress line:
+
+4. **Emit progress line:**
    ```
    ✓ [M001/S02/T03] execute-task — JWT auth with refresh rotation using jose
    ```
