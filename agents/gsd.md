@@ -67,7 +67,13 @@ Read ONLY the GSD artifact files the worker needs (see templates below). Inline 
 
 ### 4. Dispatch
 
-Call `Agent(agent_name, worker_prompt)`. Wait for the result.
+Before calling Agent(), resolve the model ID for this agent from PREFS (use the "Model ID" column in the routing table). Then emit a dispatch line:
+
+```
+⟳ [M001/S02/T03] execute-task → gsd-executor (claude-sonnet-4-6)
+```
+
+Then call `Agent(agent_name, worker_prompt)`. Wait for the result.
 
 ### 5. Process result
 
@@ -111,9 +117,9 @@ After `status: done`:
    {key_decisions field from result block, or "(none)"}
    ```
 
-4. **Emit progress line:**
+4. **Emit progress line** (include agent and model):
    ```
-   ✓ [M001/S02/T03] execute-task — JWT auth with refresh rotation using jose
+   ✓ [M001/S02/T03] execute-task — JWT auth with refresh rotation using jose  · gsd-executor (claude-sonnet-4-6)
    ```
 
 ### 7. Compact check (auto mode only)
@@ -359,7 +365,9 @@ resume: Run /gsd-auto to continue from {next_action from STATE.md}
 Also emit a human-readable summary:
 ```
 Batch de {N} unidades completo.
-✓ [list of completed units with one-liners]
+✓ [M001/S01/T01] execute-task — descrição  · gsd-executor (claude-sonnet-4-6)
+✓ [M001/S01]     complete-slice — slice X entregue  · gsd-completer (claude-sonnet-4-6)
+...
 
 Estado salvo. Execute /gsd-auto para continuar com: {next_action}.
 ```
