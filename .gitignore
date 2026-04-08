@@ -1,0 +1,6 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Backups gerados pelo instalador (não commitar)
+*-backup-*/

@@ -1,0 +1,118 @@
+# GSD Agent — Installer for Claude Code (Windows PowerShell)
+# Usage: .\install.ps1 [-Update] [-DryRun]
+
+param(
+    [switch]$Update,
+    [switch]$DryRun
+)
+
+$ErrorActionPreference = "Stop"
+
+# ── Config ───────────────────────────────────────────────────────────────────
+$RepoDir    = $PSScriptRoot
+$ClaudeDir  = "$env:USERPROFILE\.claude"
+$AgentsDir  = "$ClaudeDir\agents"
+$CommandsDir = "$ClaudeDir\commands"
+$BackupDir  = "$ClaudeDir\gsd-agent-backup-$(Get-Date -Format 'yyyyMMddHHmmss')"
+
+function Info($msg)    { Write-Host "  $msg" }
+function Success($msg) { Write-Host "✓ $msg" -ForegroundColor Green }
+function Warn($msg)    { Write-Host "⚠ $msg" -ForegroundColor Yellow }
+function Dry($msg)     { Write-Host "  [dry-run] $msg" -ForegroundColor Cyan }
+
+function CopyFile($src, $dst) {
+    if ($DryRun) {
+        Dry "cp $src → $dst"
+    } else {
+        $dir = Split-Path $dst -Parent
+        if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Copy-Item $src $dst -Force
+    }
+}
+
+# ── Header ───────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "GSD Agent Installer" -ForegroundColor Cyan
+Write-Host "═══════════════════════"
+Write-Host ""
+
+# ── Detect Claude Code ────────────────────────────────────────────────────────
+if (!(Test-Path $ClaudeDir)) {
+    Write-Host "✗ Claude Code não encontrado em: $ClaudeDir" -ForegroundColor Red
+    Write-Host "  Instale o Claude Code primeiro: https://claude.ai/code"
+    exit 1
+}
+Success "Claude Code encontrado em $ClaudeDir"
+
+# ── Check existing installation ───────────────────────────────────────────────
+$hasExisting = (Get-ChildItem "$AgentsDir\gsd*.md" -ErrorAction SilentlyContinue) -or
+               (Get-ChildItem "$CommandsDir\gsd*.md" -ErrorAction SilentlyContinue) -or
+               (Test-Path "$ClaudeDir\gsd-agent-prefs.md")
+
+if ($hasExisting -and -not $Update) {
+    Write-Host ""
+    Warn "GSD Agent já está instalado."
+    Write-Host "  Execute com -Update para atualizar (backup automático):"
+    Write-Host "  .\install.ps1 -Update"
+    exit 0
+}
+
+if ($hasExisting -and $Update) {
+    if (-not $DryRun) {
+        New-Item -ItemType Directory "$BackupDir\agents" -Force | Out-Null
+        New-Item -ItemType Directory "$BackupDir\commands" -Force | Out-Null
+        Get-ChildItem "$AgentsDir\gsd*.md"   -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\agents\"
+        Get-ChildItem "$CommandsDir\gsd*.md" -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\commands\"
+        if (Test-Path "$ClaudeDir\gsd-agent-prefs.md") {
+            Copy-Item "$ClaudeDir\gsd-agent-prefs.md" $BackupDir
+        }
+    }
+    Success "Backup salvo em $BackupDir"
+}
+
+# ── Install agents ────────────────────────────────────────────────────────────
+Write-Host ""
+Info "Instalando agentes..."
+foreach ($f in Get-ChildItem "$RepoDir\agents\gsd*.md") {
+    CopyFile $f.FullName "$AgentsDir\$($f.Name)"
+    Info "  agents\$($f.Name)"
+}
+
+# ── Install commands ──────────────────────────────────────────────────────────
+Write-Host ""
+Info "Instalando comandos..."
+foreach ($f in Get-ChildItem "$RepoDir\commands\gsd*.md") {
+    CopyFile $f.FullName "$CommandsDir\$($f.Name)"
+    Info "  commands\$($f.Name)"
+}
+
+# ── Install preferences ───────────────────────────────────────────────────────
+Write-Host ""
+Info "Instalando preferências..."
+$prefsFile = "$ClaudeDir\gsd-agent-prefs.md"
+if (!(Test-Path $prefsFile)) {
+    CopyFile "$RepoDir\gsd-agent-prefs.md" $prefsFile
+    Info "  gsd-agent-prefs.md (novo)"
+} else {
+    Info "  gsd-agent-prefs.md já existe — mantido"
+    Info "  (suas preferências não foram alteradas)"
+}
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "═══════════════════════"
+if ($DryRun) {
+    Write-Host "Dry run completo. Nenhum arquivo alterado." -ForegroundColor Cyan
+} else {
+    Success "GSD Agent instalado com sucesso!"
+    Write-Host ""
+    Write-Host "  Próximos passos:"
+    Write-Host "  1. Navegue até um projeto:  cd C:\seu\projeto"
+    Write-Host "  2. Abra o Claude Code:      claude"
+    Write-Host "  3. Inicialize o projeto:    /gsd-init"
+    Write-Host "  4. Crie um milestone:       /gsd-new-milestone <descrição>"
+    Write-Host "  5. Execute:                 /gsd-auto"
+    Write-Host ""
+    Write-Host "  Ajuda a qualquer momento:   /gsd-help"
+}
+Write-Host ""
