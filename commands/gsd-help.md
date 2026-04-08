@@ -54,6 +54,10 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 | `/gsd-status` | Dashboard do projeto — milestone ativo, progresso de slices e tasks, próxima ação. |
 | `/gsd-explain <alvo>` | Explica qualquer artefato sem modificar nada. Alvos válidos: `M001`, `S03`, `T02`, `decisions`, `state`, `all`. |
 | `/gsd-memories` | Gerencia as memórias auto-aprendidas do projeto. Sub-comandos: `show` (padrão), `stats`, `clean`, `export`, `inject`. |
+| `/gsd-skills` | Lista todas as skills disponíveis e como integrá-las com os comandos GSD. |
+| `/gsd-skills <nome>` | Detalhes, exemplos e flags de uma skill específica. |
+| `/gsd-skills --all` | Mapa completo: skill × fase GSD × comando × flag de skip. |
+| `/gsd-skills install` | Como instalar novas skills do ecossistema skills.sh. |
 | `/gsd-help` | Esta tela. |
 
 ---

@@ -227,6 +227,52 @@ Memórias são rankeadas por `confidence × (1 + hits × 0.1)`, decaem se não c
 
 ---
 
+## Skills
+
+Skills são módulos de conhecimento especializado que o agente carrega sob demanda. São arquivos `SKILL.md` instalados em `~/.agents/skills/` (ecossistema [skills.sh](https://skills.sh), compatível com gsd-pi) e `~/.claude/skills/`.
+
+### Skills incluídas
+
+O instalador copia automaticamente para ambos os diretórios:
+
+| Skill | O que faz | Quando é usada |
+|-------|-----------|----------------|
+| `gsd-brainstorm` | Explora alternativas, riscos e limites de escopo antes de planejar | `/gsd-new-milestone` (automático) |
+| `gsd-scope-clarity` | Gera contrato de escopo com critérios observáveis e testáveis | `/gsd-new-milestone` (automático) |
+| `gsd-risk-radar` | Analisa riscos por slice antes da execução, para slices `risk:high` | `/gsd-new-milestone`, `/gsd-auto` |
+
+### Descobrir skills disponíveis
+
+```
+/gsd-skills              ← lista todas as skills instaladas + integrações GSD
+/gsd-skills brainstorm   ← detalhes e exemplos de uma skill específica
+/gsd-skills --all        ← mapa completo: skill × fase × comando × flag
+/gsd-skills install      ← como instalar novas skills
+```
+
+### Flag `-fast` — pular skills
+
+```bash
+/gsd-new-milestone autenticação OAuth         # brainstorm + scope + discuss + plan
+/gsd-new-milestone -fast autenticação OAuth   # só discuss + plan
+/gsd-discuss M003                              # com brainstorm (se disponível)
+/gsd-discuss -fast M003                        # discuss direto
+```
+
+### Instalar skills de outros repositórios
+
+```bash
+npx skills add odra/superpowers --skill brainstorm -y
+npx skills add <repositório> --skill <nome> -y
+# Detectado automaticamente pelo /gsd-skills
+```
+
+### Contribuir uma skill
+
+Coloque em `skills/<nome>/SKILL.md` seguindo o formato das skills existentes e abra um PR.
+
+---
+
 ## Configuração
 
 ### Global — `~/.claude/gsd-agent-prefs.md`
