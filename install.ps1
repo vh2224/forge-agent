@@ -66,6 +66,7 @@ if ($hasExisting -and $Update) {
         if (Test-Path "$ClaudeDir\forge-agent-prefs.md") { Copy-Item "$ClaudeDir\forge-agent-prefs.md" $BackupDir }
         if (Test-Path "$ClaudeDir\forge-statusline.js")  { Copy-Item "$ClaudeDir\forge-statusline.js"  $BackupDir }
         if (Test-Path "$ClaudeDir\forge-hook.js")        { Copy-Item "$ClaudeDir\forge-hook.js"        $BackupDir }
+        if (Test-Path "$ClaudeDir\forge-settings.js")   { Copy-Item "$ClaudeDir\forge-settings.js"   $BackupDir }
     }
     Success "Backup salvo em $BackupDir"
 }
@@ -143,13 +144,11 @@ CopyFile "$RepoDir\scripts\forge-statusline.js" "$ClaudeDir\forge-statusline.js"
 Info "  forge-statusline.js"
 CopyFile "$RepoDir\scripts\forge-hook.js" "$ClaudeDir\forge-hook.js"
 Info "  forge-hook.js"
-
-$settingsFile = "$ClaudeDir\settings.json"
-if ($DryRun) {
-    Dry "merge statusLine + hooks → $settingsFile"
-} else {
-    node "$RepoDir\scripts\merge-settings.js" $settingsFile
-}
+CopyFile "$RepoDir\scripts\merge-settings.js" "$ClaudeDir\forge-settings.js"
+Info "  forge-settings.js"
+Info ""
+Info "  Status line não ativada por padrão."
+Info "  Para ativar: /forge-config statusline on"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""

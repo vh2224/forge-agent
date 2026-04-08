@@ -73,6 +73,7 @@ if $has_existing && $UPDATE; then
     [ -f "${CLAUDE_DIR}/forge-agent-prefs.md" ] && cp "${CLAUDE_DIR}/forge-agent-prefs.md" "$BACKUP_DIR/"
     [ -f "${CLAUDE_DIR}/forge-statusline.js"  ] && cp "${CLAUDE_DIR}/forge-statusline.js"  "$BACKUP_DIR/"
     [ -f "${CLAUDE_DIR}/forge-hook.js"        ] && cp "${CLAUDE_DIR}/forge-hook.js"         "$BACKUP_DIR/"
+    [ -f "${CLAUDE_DIR}/forge-settings.js"   ] && cp "${CLAUDE_DIR}/forge-settings.js"    "$BACKUP_DIR/"
   fi
   success "Backup saved to $BACKUP_DIR"
 fi
@@ -147,13 +148,11 @@ copy "${REPO_DIR}/scripts/forge-statusline.js" "${CLAUDE_DIR}/forge-statusline.j
 info "  forge-statusline.js"
 copy "${REPO_DIR}/scripts/forge-hook.js" "${CLAUDE_DIR}/forge-hook.js"
 info "  forge-hook.js"
-
-SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
-if $DRY_RUN; then
-  dry "merge statusLine + hooks → ${SETTINGS_FILE}"
-else
-  node "${REPO_DIR}/scripts/merge-settings.js" "${SETTINGS_FILE}"
-fi
+copy "${REPO_DIR}/scripts/merge-settings.js" "${CLAUDE_DIR}/forge-settings.js"
+info "  forge-settings.js"
+info ""
+info "  Status line não ativada por padrão."
+info "  Para ativar: /forge-config statusline on"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
