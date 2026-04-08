@@ -1,8 +1,12 @@
 # GSD Agent for Claude Code
 
-> Workflow de desenvolvimento autônomo para o Claude Code, baseado na metodologia [GSD-2](https://github.com/gsd-build/gsd-2).
+> Workflow de desenvolvimento autônomo para o Claude Code, baseado na metodologia e arquitetura do **[GSD-2](https://github.com/gsd-build/gsd-2)** (MIT).
 
 Planejamento → Execução → Verificação → Git — gerenciado por agentes especializados, com modelo de linguagem diferente por fase e memória emergente que cresce a cada sessão.
+
+> **Este projeto é uma reimplementação não-oficial da metodologia GSD-2 para o sistema nativo de agentes do Claude Code.**
+> Todo o crédito pela metodologia, hierarquia Milestone → Slice → Task, estratégia de contexto fresco por unidade, sistema de memória emergente e workflow de fases (discuss → research → plan → execute → verify → summarize → advance) pertence ao projeto original [gsd-build/gsd-2](https://github.com/gsd-build/gsd-2).
+> Este repositório não distribui nem modifica código do gsd-2 — apenas reimplementa os conceitos usando arquivos `.md` para o runtime de agentes do Claude Code.
 
 ---
 
@@ -306,13 +310,32 @@ O `gsd-agent-prefs.md` e os arquivos de projeto (`.gsd/`) **nunca são sobrescri
 
 ---
 
-## Baseado em
+## Créditos e atribuição
 
-- [GSD-2 / gsd-pi](https://github.com/gsd-build/gsd-2) — metodologia, workflow e arquitetura de agentes
-- [Claude Code](https://claude.ai/code) — runtime de execução
+Este projeto reimplementa os conceitos do **[GSD-2 (gsd-pi)](https://github.com/gsd-build/gsd-2)** para o sistema nativo de agentes do Claude Code.
+
+Os seguintes conceitos, termos e designs são originários do gsd-2 e de seus autores:
+
+- Hierarquia **Milestone → Slice → Task** e a "iron rule" de context window
+- Workflow de fases: **discuss → research → plan → execute → verify → summarize → advance**
+- Estratégia de contexto fresco por unidade (`ctx.newSession()` → `Agent tool`)
+- Sistema de **memória emergente** com extração pós-unidade, scoring por `confidence × (1 + hits × 0.1)`, decay e cap
+- Formato dos arquivos de estado: `STATE.md`, `T##-PLAN.md`, `T##-SUMMARY.md`, `S##-PLAN.md`, `ROADMAP.md`, `DECISIONS.md`, `continue.md`
+- Estratégia de git branch-per-slice com squash merge
+- Tabela de dispatch por estado (discuss → research → plan → execute → complete)
+- Routing dinâmico de modelos por fase (research/planning/execution/completion)
+- Conceito de **boundary map** no ROADMAP
+- Protocolo **continue-here** para recuperação de sessão
+
+Este repositório **não distribui nem modifica nenhum código-fonte do gsd-2**. Apenas reimplementa os conceitos usando arquivos `.md` compatíveis com o runtime de agentes do Claude Code.
+
+Se você usa ou gosta desta metodologia, considere também o projeto original:
+**https://github.com/gsd-build/gsd-2**
 
 ---
 
 ## Licença
 
-MIT
+MIT — veja [LICENSE](LICENSE)
+
+Este projeto é independente e não é afiliado, endossado ou patrocinado pelos autores do gsd-2.
