@@ -50,6 +50,12 @@ main_branch: master       # branch principal
 isolation: none           # none | worktree (worktree = branch isolado por milestone)
 ```
 
+## Update Settings
+
+```
+repo_path:    # preenchido pelo install.sh — caminho do repositório gsd-agent
+```
+
 ## Notes
 
 - Para mudar o modelo de uma fase, edite a coluna "Model" na tabela acima

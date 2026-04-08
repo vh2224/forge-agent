@@ -117,6 +117,25 @@ if (!(Test-Path $prefsFile)) {
     Info "  (suas preferências não foram alteradas)"
 }
 
+# ── Store repo path for /gsd-update ──────────────────────────────────────────
+if (-not $DryRun -and (Test-Path $prefsFile)) {
+    $prefsContent = Get-Content $prefsFile -Raw
+    $repoPathLine = "repo_path: $RepoDir"
+    if ($prefsContent -match "^repo_path:") {
+        # Update existing line
+        $prefsContent = $prefsContent -replace "(?m)^repo_path:.*", $repoPathLine
+        Set-Content $prefsFile $prefsContent -NoNewline
+    } elseif ($prefsContent -match "repo_path:") {
+        # Update placeholder line
+        $prefsContent = $prefsContent -replace "repo_path:[^\n]*", $repoPathLine
+        Set-Content $prefsFile $prefsContent -NoNewline
+    } else {
+        # Append at end
+        Add-Content $prefsFile "`n## Update Settings`n`n``````repo_path: $RepoDir`n``````"
+    }
+    Info "  repo_path gravado: $RepoDir"
+}
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "═══════════════════════"

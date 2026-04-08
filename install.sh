@@ -123,6 +123,21 @@ else
   info "  (suas preferências foram mantidas)"
 fi
 
+# ── Store repo path for /gsd-update ──────────────────────────────────────────
+if ! $DRY_RUN && [ -f "$PREFS_DST" ]; then
+  if grep -q "^repo_path:" "$PREFS_DST" 2>/dev/null; then
+    sed -i "s|^repo_path:.*|repo_path: ${REPO_DIR}|" "$PREFS_DST"
+  else
+    # Append repo_path under Update Settings section if present, else append at end
+    if grep -q "repo_path:" "$PREFS_DST" 2>/dev/null; then
+      sed -i "s|repo_path:.*|repo_path: ${REPO_DIR}|" "$PREFS_DST"
+    else
+      printf '\n## Update Settings\n\n```\nrepo_path: %s\n```\n' "${REPO_DIR}" >> "$PREFS_DST"
+    fi
+  fi
+  info "  repo_path gravado: ${REPO_DIR}"
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════"

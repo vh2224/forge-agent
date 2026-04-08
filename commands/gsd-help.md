@@ -66,6 +66,15 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 
 ---
 
+### Manutenção
+
+| Comando | O que faz |
+|---------|-----------|
+| `/gsd-update` | Atualiza o GSD Agent para a versão mais recente (git pull + reinstala agents/commands/skills). Preserva suas preferências. |
+| `/gsd-update <caminho>` | Mesmo que acima, mas especificando o caminho do repositório manualmente. |
+
+---
+
 ### Configuração
 
 | Comando | O que faz |
