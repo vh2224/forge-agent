@@ -6,6 +6,10 @@ set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# On Windows Git Bash, convert /c/DEV/... to C:/DEV/... so the path works in Node.js and Claude Code
+if command -v cygpath &>/dev/null; then
+  REPO_DIR="$(cygpath -m "$REPO_DIR")"
+fi
 CLAUDE_DIR="${HOME}/.claude"
 BACKUP_DIR="${CLAUDE_DIR}/forge-agent-backup-$(date +%Y%m%d%H%M%S)"
 DRY_RUN=false

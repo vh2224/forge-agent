@@ -16,7 +16,20 @@ repo_path: /path/to/gsd-agent
 
 If `repo_path` is set and non-empty → use it.
 
-If `repo_path` is NOT set or the file doesn't exist:
+If `repo_path` is NOT set or the file doesn't exist, try to auto-detect by checking if the current working directory is a valid gsd-agent repo:
+
+```bash
+test -f "$(pwd)/install.sh" && grep -q "GSD Agent" "$(pwd)/install.sh" 2>/dev/null && echo "found" || echo "not-found"
+```
+
+If "found": use `$(pwd)` as REPO_PATH and persist it:
+```bash
+sed -i "s|repo_path:.*|repo_path: $(pwd)|" ~/.claude/forge-agent-prefs.md 2>/dev/null || \
+  echo "repo_path: $(pwd)" >> ~/.claude/forge-agent-prefs.md
+```
+Tell user: `repo_path detectado automaticamente: {REPO_PATH}` and continue.
+
+If "not-found":
 ```
 Não foi possível encontrar o repositório do GSD Agent.
 
