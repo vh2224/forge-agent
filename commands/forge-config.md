@@ -63,6 +63,34 @@ Replace `[ESTADO]` with `✓ ativo` (green) or `○ inativo`.
 
 ---
 
+## Garantir que forge-settings.js está instalado
+
+Before running any enable/disable command, check if the script exists:
+
+```bash
+test -f ~/.claude/forge-settings.js && echo "exists" || echo "missing"
+```
+
+If "missing": look for `repo_path` in `~/.claude/forge-agent-prefs.md` and copy the script:
+
+```bash
+REPO=$(grep 'repo_path:' ~/.claude/forge-agent-prefs.md 2>/dev/null | head -1 | sed 's/repo_path: *//')
+if [ -n "$REPO" ] && [ -f "$REPO/scripts/merge-settings.js" ]; then
+  cp "$REPO/scripts/merge-settings.js" ~/.claude/forge-settings.js && echo "installed"
+else
+  echo "not-found"
+fi
+```
+
+If "not-found": print the error below and stop:
+```
+✗ forge-settings.js não encontrado.
+
+Execute /forge-update para reinstalar os scripts do Forge Agent.
+```
+
+---
+
 ## Enable — "statusline on"
 
 ```bash
