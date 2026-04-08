@@ -31,8 +31,9 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 
 | Comando | O que faz |
 |---------|-----------|
-| `/gsd` | **Step mode** — lê `STATE.md`, executa exatamente uma unidade (task, slice, fase) e para. Ideal para revisar o que foi feito antes de continuar. |
-| `/gsd-auto` | **Auto mode** — executa o milestone inteiro de forma autônoma, unidade por unidade, sem pausas. Para apenas em blocker ou milestone completo. Equivalente ao `/gsd auto` do gsd-pi. |
+| `/gsd` | **Step mode** — executa exatamente uma unidade e para. Ideal para revisar antes de continuar. |
+| `/gsd next` | Explícito step mode — mesmo que `/gsd`. Mais legível em scripts ou quando você quer deixar a intenção clara. |
+| `/gsd-auto` | **Auto mode** — executa o milestone inteiro de forma autônoma, sem pausas. Para em blocker ou milestone completo. |
 
 ---
 

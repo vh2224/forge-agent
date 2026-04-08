@@ -1,7 +1,14 @@
 ---
-description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Use /gsd-auto para modo autônomo."
+description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Argumentos: 'next' (mesmo que sem argumento), 'auto' (delega para /gsd-auto)."
 allowed-tools: Read, Bash, Agent
 ---
+
+## Parse arguments
+
+From `$ARGUMENTS`:
+- Empty, `next`, or `step` → **STEP MODE** (execute one unit, stop)
+- `auto` → tell the user: "Use `/gsd-auto` para modo autônomo." and stop.
+- Anything else → treat as STEP MODE (ignore unknown args)
 
 ## Bootstrap guard
 
