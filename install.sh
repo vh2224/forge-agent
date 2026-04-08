@@ -93,6 +93,26 @@ for f in "${REPO_DIR}/commands"/gsd*.md; do
 done
 
 echo ""
+info "Installing skills..."
+SKILLS_DIR_AGENTS="${HOME}/.agents/skills"
+SKILLS_DIR_CLAUDE="${CLAUDE_DIR}/skills"
+# Install to ~/.agents/skills (skills.sh ecosystem, used by gsd-pi)
+# AND ~/.claude/skills (Claude Code native)
+for skill_dir in "${REPO_DIR}/skills"/*/; do
+  skill_name="$(basename "$skill_dir")"
+  for target in "$SKILLS_DIR_AGENTS" "$SKILLS_DIR_CLAUDE"; do
+    dst="${target}/${skill_name}"
+    if $DRY_RUN; then
+      dry "install skill ${skill_name} → ${target}/"
+    else
+      mkdir -p "$dst"
+      cp -r "${skill_dir}"* "$dst/"
+    fi
+  done
+  info "  ${skill_name}"
+done
+
+echo ""
 info "Installing preferences..."
 PREFS_DST="${CLAUDE_DIR}/gsd-agent-prefs.md"
 if [ ! -f "$PREFS_DST" ]; then

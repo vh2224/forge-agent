@@ -86,6 +86,25 @@ foreach ($f in Get-ChildItem "$RepoDir\commands\gsd*.md") {
     Info "  commands\$($f.Name)"
 }
 
+# ── Install skills ────────────────────────────────────────────────────────────
+Write-Host ""
+Info "Instalando skills..."
+$SkillsDirAgents = "$env:USERPROFILE\.agents\skills"
+$SkillsDirClaude = "$ClaudeDir\skills"
+foreach ($skillDir in Get-ChildItem "$RepoDir\skills" -Directory) {
+    $skillName = $skillDir.Name
+    foreach ($target in @($SkillsDirAgents, $SkillsDirClaude)) {
+        $dst = "$target\$skillName"
+        if ($DryRun) {
+            Dry "install skill $skillName → $target\"
+        } else {
+            New-Item -ItemType Directory -Path $dst -Force | Out-Null
+            Copy-Item "$($skillDir.FullName)\*" $dst -Recurse -Force
+        }
+    }
+    Info "  $skillName"
+}
+
 # ── Install preferences ───────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando preferências..."

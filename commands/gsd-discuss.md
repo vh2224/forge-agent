@@ -1,5 +1,5 @@
 ---
-description: "Abre uma discussão de arquitetura para capturar decisões antes de planejar. Use: /gsd-discuss M003 | /gsd-discuss S02 | /gsd-discuss como fazer autenticação"
+description: "Abre uma discussão de arquitetura para capturar decisões antes de planejar. Use: /gsd-discuss M003 | /gsd-discuss S02 | /gsd-discuss -fast S02 (pula brainstorm)"
 allowed-tools: Read, Write, Glob, Agent, Bash
 ---
 
@@ -28,13 +28,19 @@ Stop. Tell the user:
 
 ---
 
+## Parse flags and target
+
+From `$ARGUMENTS`:
+- If contains `-fast` → set `FAST_MODE=true`, remove from args
+- Remaining → topic/scope (milestone ID, slice ID, or freeform)
+
 ## Topic
 $ARGUMENTS
 
 ## How to resolve scope
 
-- If argument is a milestone ID → discuss milestone-level architecture, write `M###-CONTEXT.md`
-- If argument is a slice ID → discuss slice-level decisions, write `S##-CONTEXT.md`
+- If argument is a milestone ID (M###) → discuss milestone-level architecture, write `M###-CONTEXT.md`
+- If argument is a slice ID (S##) → discuss slice-level decisions, write `S##-CONTEXT.md`
 - If freeform text → find the relevant active milestone/slice from STATE.md, discuss that topic
 
 ## Your job
@@ -44,25 +50,31 @@ $ARGUMENTS
    - Relevant ROADMAP / PLAN files
    - `.gsd/DECISIONS.md` — decisions already locked (don't re-debate these)
    - `PROJECT.md` and `REQUIREMENTS.md` if they exist
+   - `M###-BRAINSTORM.md` if exists — many questions may already be answered there
 
-2. **Identify 3-5 gray areas** — implementation decisions the user should weigh in on. Focus on:
+2. **If FAST_MODE=false and discussing a milestone:**
+   Check for `gsd-brainstorm` skill:
+   ```bash
+   ls ~/.agents/skills/gsd-brainstorm/SKILL.md 2>/dev/null && echo "found" || echo "not found"
+   ```
+   If found and no `M###-BRAINSTORM.md` exists yet: run brainstorm first, save output, use it to focus discuss questions.
+
+3. **Identify 3-5 gray areas** not already resolved by brainstorm/scope files. Focus on:
    - Architecture choices with real trade-offs
-   - Scope boundaries (in vs. out)
+   - Scope boundaries (what's in vs. out)
    - Technology/library choices not yet decided
    - Constraints that affect multiple slices/tasks
 
-3. **Ask the questions** — ask all at once, not one by one
+4. **Ask the questions** — ask all at once, not one by one
 
-4. **Record decisions** in `M###-CONTEXT.md` or `S##-CONTEXT.md`:
+5. **Record decisions** in `M###-CONTEXT.md` or `S##-CONTEXT.md`:
    ```markdown
    # M###: Title — Context
-
    **Gathered:** YYYY-MM-DD
    **Status:** Ready for planning
 
    ## Implementation Decisions
    - Decision 1
-   - Decision 2
 
    ## Agent's Discretion
    - Areas where user said "you decide"
@@ -71,8 +83,8 @@ $ARGUMENTS
    - Ideas that belong in other slices
    ```
 
-5. **Append significant decisions to `.gsd/DECISIONS.md`**
+6. **Append significant decisions to `.gsd/DECISIONS.md`**
 
-6. **Update STATE.md** — set phase to plan (ready to plan this milestone/slice)
+7. **Update STATE.md** — set phase to plan (ready to plan this milestone/slice)
 
-7. **After completing** — invoke the `gsd-memory` agent with the transcript of this session so learnings are persisted to `.gsd/AUTO-MEMORY.md`.
+8. **After completing** — invoke the `gsd-memory` agent with the transcript of this session so learnings are persisted to `.gsd/AUTO-MEMORY.md`.

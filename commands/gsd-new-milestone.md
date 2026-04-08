@@ -1,5 +1,5 @@
 ---
-description: "Cria uma nova milestone GSD: faz discuss para capturar decisões, depois planeja (ROADMAP + slices). Use: /gsd-new-milestone <descrição do que entregar>"
+description: "Cria uma nova milestone GSD. Fluxo completo: brainstorm → discuss → plan. Use -fast para pular brainstorm. Ex: /gsd-new-milestone autenticação OAuth | /gsd-new-milestone -fast pagamentos com Stripe"
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent
 ---
 
@@ -25,30 +25,113 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 
 ---
 
+## Parse flags and description
 
-Use the **gsd** agent to create a new milestone.
+From `$ARGUMENTS`:
+- If starts with `-fast` → set `FAST_MODE=true`, remove `-fast` from description
+- Remaining text → milestone description
+
+---
 
 ## What the user wants to build
+
 $ARGUMENTS
 
-## Your job
+---
 
-1. **Read project context first:**
-   - `.gsd/PROJECT.md` (if exists) — what is this project?
-   - `.gsd/REQUIREMENTS.md` (if exists) — what are the constraints?
-   - `.gsd/DECISIONS.md` (if exists) — what decisions are locked?
-   - `.gsd/STATE.md` — what milestones already exist? What's the next milestone ID?
+## Phase 0 — Read project context
 
-2. **Determine next milestone ID** (M001 if none, otherwise M00N+1)
+Always read first:
+- `.gsd/PROJECT.md` — what is this project?
+- `.gsd/REQUIREMENTS.md` — what are the constraints?
+- `.gsd/DECISIONS.md` — what decisions are locked?
+- `.gsd/AUTO-MEMORY.md` — gotchas and patterns already learned
+- `.gsd/STATE.md` — what milestones already exist? Determine next milestone ID (M001 if none, otherwise M00N+1)
 
-3. **Discuss phase** — Ask the user 3-5 targeted questions about gray areas in the scope (architecture choices, scope boundaries, technology decisions). Write answers to `.gsd/milestones/M###/M###-CONTEXT.md`.
+---
 
-4. **Plan phase** — Based on discussion + project context:
-   - Decompose into 4-10 slices ordered by risk (highest risk first)
-   - Write `M###-ROADMAP.md` with checkboxes, `risk:` tags, `depends:[]` tags, demo sentences
-   - Include a **Boundary Map** section
-   - Create `.gsd/milestones/M###/` directory structure
+## Phase 1 — Brainstorm (skip if FAST_MODE)
 
-5. **Update STATE.md** — set this as the active milestone, phase: plan-slice (ready to plan first slice)
+**If FAST_MODE=true:**
+> ⚡ Fast mode — brainstorm skipped. Proceeding to discuss.
 
-6. Report: milestone ID, vision, slice list with risk levels
+**If FAST_MODE=false:**
+
+Check if `gsd-brainstorm` skill is available:
+```bash
+ls ~/.agents/skills/gsd-brainstorm/SKILL.md 2>/dev/null || ls ~/.claude/skills/gsd-brainstorm/SKILL.md 2>/dev/null && echo "found" || echo "not found"
+```
+
+**If skill found:** Read `~/.agents/skills/gsd-brainstorm/SKILL.md` (or `~/.claude/skills/`) and execute the brainstorm process for this milestone. Save output to `.gsd/milestones/M###/M###-BRAINSTORM.md`.
+
+**If skill not found:** Run an inline brainstorm (3 alternative approaches + top 5 risks + scope boundaries). Save to `.gsd/milestones/M###/M###-BRAINSTORM.md`.
+
+Show the user a brief summary of the brainstorm output before continuing.
+
+---
+
+## Phase 2 — Scope clarity (skip if FAST_MODE)
+
+**If FAST_MODE=false and `gsd-scope-clarity` skill is available:**
+```bash
+ls ~/.agents/skills/gsd-scope-clarity/SKILL.md 2>/dev/null && echo "found" || echo "not found"
+```
+If found: read and execute the scope clarity process. Save to `.gsd/milestones/M###/M###-SCOPE.md`.
+If not found: skip silently.
+
+---
+
+## Phase 3 — Discuss
+
+Ask the user 3-5 targeted questions about gray areas. If FAST_MODE=false, use the brainstorm and scope outputs to focus questions on genuine unknowns — avoid re-asking what was already resolved.
+
+If FAST_MODE=true, ask questions based only on the project context.
+
+Write decisions to `.gsd/milestones/M###/M###-CONTEXT.md`.
+
+---
+
+## Phase 4 — Plan
+
+Dispatch to **gsd-planner** agent with:
+- The milestone description
+- Brainstorm output (if generated)
+- Scope contract (if generated)
+- Context file decisions
+- AUTO-MEMORY.md content (top entries)
+- DECISIONS.md (last 20 rows)
+
+The planner writes:
+- `M###-ROADMAP.md` with 4-10 slices, risk tags, depends, demo sentences, boundary map
+
+---
+
+## Phase 5 — Risk radar on high-risk slices (skip if FAST_MODE)
+
+**If FAST_MODE=false and `gsd-risk-radar` skill available:**
+For each slice marked `risk:high` in the roadmap:
+- Read skill and run risk assessment
+- Save as `S##-RISK.md` in the slice directory
+
+---
+
+## Phase 6 — Finalize
+
+- Update `.gsd/STATE.md`: set this as active milestone, phase = plan-slice (ready to plan first slice)
+- Report to user:
+
+```
+✓ Milestone M### created
+
+Title: [title]
+Slices: [N] slices planned
+High-risk slices: [list]
+
+Files created:
+  .gsd/milestones/M###/M###-ROADMAP.md
+  .gsd/milestones/M###/M###-CONTEXT.md
+  [.gsd/milestones/M###/M###-BRAINSTORM.md]  (if not fast)
+  [.gsd/milestones/M###/M###-SCOPE.md]       (if scope skill available)
+
+Next: /gsd to plan first slice, or /gsd-auto to execute autonomously.
+```
