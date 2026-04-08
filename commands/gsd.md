@@ -1,39 +1,58 @@
 ---
-description: "GSD step mode — avança uma unidade de trabalho e para. Use /gsd auto para modo autônomo."
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent
+description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Use /gsd-auto para modo autônomo."
+allowed-tools: Read, Bash, Agent
 ---
 
-## Bootstrap guard (sempre executar primeiro)
+## Bootstrap guard
 
-Before doing anything else, run:
 ```bash
 ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
 ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
+pwd
 ```
 
-**Se CLAUDE.md não existe:** Stop and tell the user:
+**Se CLAUDE.md não existe:** Stop. Tell the user:
 > Projeto não inicializado. Execute `/gsd-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
 
-**Se .gsd/STATE.md não existe:** Stop and tell the user:
+**Se .gsd/STATE.md não existe:** Stop. Tell the user:
 > Nenhum projeto GSD encontrado neste diretório. Execute `/gsd-init` para começar.
 
-**Se `.gsd/AUTO-MEMORY.md` não existe:** Create it silently before proceeding:
+---
+
+## Delegate — não execute nada aqui
+
+Read these files (and ONLY these):
+1. `.gsd/STATE.md`
+2. `~/.claude/gsd-agent-prefs.md` (skip silently if missing)
+3. `.gsd/claude-agent-prefs.md` (skip silently if missing)
+4. First 80 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+
+Then call the `gsd` agent with this prompt (fill in the actual file contents):
+
 ```
-<!-- gsd-auto-memory | project: <from PROJECT.md or directory name> | extraction_count: 0 -->
-<!-- ranked by: confidence × (1 + hits × 0.1) | cap: 50 active -->
+STEP MODE.
+
+WORKING_DIR: {absolute path from pwd}
+
+STATE:
+{full content of .gsd/STATE.md}
+
+PREFS:
+{content of ~/.claude/gsd-agent-prefs.md}
+{content of .gsd/claude-agent-prefs.md if exists, otherwise "(none)"}
+
+TOP_MEMORIES:
+{first 80 lines of AUTO-MEMORY.md, or "(none yet)"}
+
+ARGUMENTS: $ARGUMENTS
+
+Execute exactly ONE unit (the next unit indicated in STATE).
+Dispatch it to the appropriate specialized sub-agent — do not execute it yourself.
+Return a concise report of what was done and what STATE is now.
 ```
 
 ---
 
+## Surface the result
 
-Use the **gsd** agent in **step mode**.
-
-Read `.gsd/STATE.md` to find the next pending unit. Execute exactly one unit (one task, or one phase like plan/research/discuss/complete-slice). After the unit is done:
-1. Write the appropriate artifact (summary, plan, research, etc.)
-2. Update `.gsd/STATE.md` with the new position and next action
-3. Report what was done in one concise paragraph
-4. **Stop** — do not proceed to the next unit
-
-If there is a `continue.md` in the active slice directory, resume from it instead (read it, delete it, execute from "Next Action").
-
-$ARGUMENTS
+Display the agent's report to the user. Do not add any summary or follow-up — the user will decide whether to run `/gsd` again or proceed differently.
