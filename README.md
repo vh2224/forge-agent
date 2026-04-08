@@ -150,6 +150,9 @@ Detecta o estado atual, cria o `CLAUDE.md` e os arquivos de suporte sem tocar no
 
 | Comando | Exemplo | O que faz |
 |---------|---------|-----------|
+| `/forge-config` | `/forge-config` | Mostra todas as opções de configuração do Forge e seu estado atual. |
+| `/forge-config statusline on` | `/forge-config statusline on` | Ativa a status line do Forge no Claude Code (substitui a nativa). |
+| `/forge-config statusline off` | `/forge-config statusline off` | Desativa a status line e restaura a nativa do Claude Code. |
 | `/forge-prefs` | `/forge-prefs` | Mostra configuração atual de modelos, skip rules e git. |
 | `/forge-prefs set` | `/forge-prefs set research haiku` | Muda o modelo de uma fase. |
 | `/forge-prefs skip-research` | `/forge-prefs skip-research true` | Ativa/desativa o skip da fase de research. |
@@ -270,6 +273,45 @@ npx skills add <repositório> --skill <nome> -y
 ### Contribuir uma skill
 
 Coloque em `skills/<nome>/SKILL.md` seguindo o formato das skills existentes e abra um PR.
+
+---
+
+## Status Line
+
+O Forge instala uma status line customizada para o Claude Code que substitui a nativa. Ela não é ativada automaticamente — você escolhe quando habilitar.
+
+```
+Forge │ Claude Sonnet 4.6 │ meu-projeto │ M001/S02 │ █████░░░░░ 47% │ $0.0042 │ ↑12k ↓3k 💾8k
+✓ forge-executor: implement auth middleware  2m ago (3 units)
+```
+
+| Campo | O que mostra |
+|-------|-------------|
+| `Claude Sonnet 4.6` | Modelo ativo na sessão |
+| `meu-projeto` | Pasta atual |
+| `M001/S02` | Milestone e slice ativos (lido de `.gsd/STATE.md`) |
+| `█████░░░░░ 47%` | Uso da context window |
+| `$0.0042` | Custo acumulado da sessão |
+| `↑12k ↓3k 💾8k` | Tokens enviados / recebidos / cache |
+| Segunda linha | Último sub-agente despachado pelo forge: tipo, descrição, tempo e total de units |
+
+A segunda linha aparece após o primeiro dispatch do forge e atualiza a cada step.
+
+### Ativar
+
+```
+/forge-config statusline on
+```
+
+Reinicie o Claude Code para aplicar. O comando modifica apenas as chaves `statusLine` e `hooks` do `~/.claude/settings.json` — todas as suas outras configurações são preservadas.
+
+### Desativar
+
+```
+/forge-config statusline off
+```
+
+Remove as chaves do forge do `settings.json` e restaura a status line nativa do Claude Code.
 
 ---
 
