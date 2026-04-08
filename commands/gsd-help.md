@@ -80,7 +80,8 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 | Comando | O que faz |
 |---------|-----------|
 | `/gsd-prefs` | Mostra configuração atual (modelos por fase, skip rules, git settings). |
-| `/gsd-prefs set <fase> <modelo>` | Muda o modelo de uma fase. Ex: `/gsd-prefs set research haiku`, `/gsd-prefs set execute opus`. |
+| `/gsd-prefs models` | Lista os modelos disponíveis com model IDs completos e recomendações de uso. |
+| `/gsd-prefs set <fase> <modelo>` | Muda o modelo de uma fase. Aceita alias (`opus`, `sonnet`, `haiku`) ou model ID completo (`claude-opus-4-6`). Ex: `/gsd-prefs set execute claude-opus-4-6`. |
 | `/gsd-prefs skip-research <true\|false>` | Ativa/desativa o skip da fase de research. |
 | `/gsd-prefs skip-discuss <true\|false>` | Ativa/desativa o skip da fase de discuss. |
 | `/gsd-prefs git <chave> <valor>` | Altera configuração git. Ex: `/gsd-prefs git auto_push true`. |
@@ -90,17 +91,19 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 
 ### Agentes especializados (invocados automaticamente)
 
-| Agente | Modelo atual | Usado em |
-|--------|-------------|----------|
-| `gsd-discusser` | **[ler de gsd-agent-prefs.md]** | discuss-milestone, discuss-slice |
-| `gsd-researcher` | **[ler de gsd-agent-prefs.md]** | research-milestone, research-slice |
-| `gsd-planner` | **[ler de gsd-agent-prefs.md]** | plan-milestone, plan-slice |
-| `gsd-executor` | **[ler de gsd-agent-prefs.md]** | execute-task |
-| `gsd-completer` | **[ler de gsd-agent-prefs.md]** | complete-slice, complete-milestone |
-| `gsd-worker` | **[ler de gsd-agent-prefs.md]** | step mode (genérico) |
-| `gsd-memory` | **[ler de gsd-agent-prefs.md]** | extração de memórias (fire-and-forget) |
+Read `~/.claude/gsd-agent-prefs.md` to get the current model for each agent, then display:
 
-> Modelos disponíveis: `opus` (claude-opus-4-6) · `sonnet` (claude-sonnet-4-6) · `haiku` (claude-haiku-4-5-20251001)
+| Agente | Model ID atual | Usado em |
+|--------|---------------|----------|
+| `gsd-discusser` | **[Phase → Agent Routing: discuss]** | discuss-milestone, discuss-slice |
+| `gsd-researcher` | **[Phase → Agent Routing: research]** | research-milestone, research-slice |
+| `gsd-planner` | **[Phase → Agent Routing: plan]** | plan-milestone, plan-slice |
+| `gsd-executor` | **[Phase → Agent Routing: execute]** | execute-task |
+| `gsd-completer` | **[Phase → Agent Routing: complete]** | complete-slice, complete-milestone |
+| `gsd-memory` | **[Phase → Agent Routing: memory]** | extração de memórias |
+
+> Modelos disponíveis: `opus` → `claude-opus-4-6` · `sonnet` → `claude-sonnet-4-6` · `haiku` → `claude-haiku-4-5-20251001`
+> Para listar detalhes: `/gsd-prefs models` · Para mudar: `/gsd-prefs set <fase> <modelo>`
 
 ---
 

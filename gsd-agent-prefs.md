@@ -5,20 +5,30 @@
 version: 1
 ---
 
+## Modelos disponíveis
+
+| Alias | Model ID | Uso recomendado |
+|-------|----------|-----------------|
+| `opus` | `claude-opus-4-6` | Análise profunda, decisões arquiteturais, planejamento |
+| `sonnet` | `claude-sonnet-4-6` | Implementação, execução, tarefas padrão |
+| `haiku` | `claude-haiku-4-5-20251001` | Tarefas leves, extração de memórias, operações rápidas |
+
+Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-6`) em qualquer configuração.
+
 ## Phase → Agent Routing
 
-| Phase | Agent | Model | When |
-|-------|-------|-------|------|
-| discuss-milestone | gsd-discusser | opus | Captura decisões antes de planejar |
-| discuss-slice | gsd-discusser | opus | Decisões de slice específico |
-| research-milestone | gsd-researcher | opus | Pesquisa pesada de codebase |
-| research-slice | gsd-researcher | opus | Pesquisa de slice |
-| plan-milestone | gsd-planner | opus | Decomposição em slices + boundary map |
-| plan-slice | gsd-planner | opus | Decomposição em tasks + T##-PLANs |
-| execute-task | gsd-executor | sonnet | Implementação de tarefa |
-| complete-slice | gsd-completer | sonnet | Summary + UAT + squash merge |
-| complete-milestone | gsd-completer | sonnet | Summary final do milestone |
-| memory-extract | gsd-memory | haiku | Extração de memórias (fire-and-forget) |
+| Phase | Agent | Model ID | Alias |
+|-------|-------|----------|-------|
+| discuss-milestone | gsd-discusser | claude-opus-4-6 | opus |
+| discuss-slice | gsd-discusser | claude-opus-4-6 | opus |
+| research-milestone | gsd-researcher | claude-opus-4-6 | opus |
+| research-slice | gsd-researcher | claude-opus-4-6 | opus |
+| plan-milestone | gsd-planner | claude-opus-4-6 | opus |
+| plan-slice | gsd-planner | claude-opus-4-6 | opus |
+| execute-task | gsd-executor | claude-sonnet-4-6 | sonnet |
+| complete-slice | gsd-completer | claude-sonnet-4-6 | sonnet |
+| complete-milestone | gsd-completer | claude-sonnet-4-6 | sonnet |
+| memory-extract | gsd-memory | claude-haiku-4-5-20251001 | haiku |
 
 ## Phase Skip Rules
 
