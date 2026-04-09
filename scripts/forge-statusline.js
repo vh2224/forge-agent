@@ -44,6 +44,7 @@ process.stdin.on('end', () => {
 
     // --- Forge STATE (reads .gsd/STATE.md) ---
     let forgeTag = '';
+    let autoMode = false;
     try {
       const stateFile = path.join(cwd, '.gsd', 'STATE.md');
       const state     = fs.readFileSync(stateFile, 'utf8');
@@ -59,9 +60,27 @@ process.stdin.on('end', () => {
         const sId = s && s.toLowerCase() !== 'none'
           ? s.match(/^(S\d+)/i)?.[1] || s.split(' ')[0]
           : null;
-        forgeTag = sId ? ` │ ${mId}/${sId}` : ` │ ${mId}`;
+        forgeTag = sId ? `${mId}/${sId}` : `${mId}`;
       }
     } catch { /* not a forge project */ }
+
+    // --- Auto mode indicator (reads .gsd/forge/auto-mode.json) ---
+    try {
+      const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
+      const auto     = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
+      if (auto.active) {
+        autoMode = true;
+        const elapsed = auto.started_at
+          ? Math.round((Date.now() - auto.started_at) / 1000)
+          : 0;
+        const elStr = elapsed >= 60
+          ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
+          : `${elapsed}s`;
+        forgeTag = forgeTag
+          ? `▶ AUTO ${elStr} │ ${forgeTag}`
+          : `▶ AUTO ${elStr}`;
+      }
+    } catch { /* no auto mode active */ }
 
     // --- Live dispatch info (written by forge-hook.js) ---
     let dispatchLine = '';
@@ -92,7 +111,7 @@ process.stdin.on('end', () => {
     const line1 = [
       'Forge',
       model,
-      project + forgeTag,
+      forgeTag ? `${project} │ ${forgeTag}` : project,
       `${bar} ${pct}%`,
       costStr,
       `↑${fmt(totalIn)} ↓${fmt(totalOut)} 💾${fmt(cacheTotal)}`,

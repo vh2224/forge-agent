@@ -50,6 +50,11 @@ completed_units = []
 
 ## Orchestrate — AUTO MODE
 
+**Activate auto-mode indicator** — write marker so the status line shows `▶ AUTO`:
+```bash
+mkdir -p .gsd/forge && echo '{"active":true,"started_at":'$(date +%s000)'}' > .gsd/forge/auto-mode.json
+```
+
 You are the orchestrator. Execute the dispatch loop, repeating until: milestone complete, blocked, or `session_units >= COMPACT_AFTER`.
 
 **AUTONOMY RULE — CRITICAL:** This is FULLY AUTONOMOUS mode. After each unit completes with `status: done`, proceed IMMEDIATELY to the next unit. Do NOT pause to ask the user if they want to continue. Do NOT ask for confirmation between units. Do NOT summarize progress and wait for input. The ONLY reasons to stop the loop are: milestone complete, worker returned `blocked`/`partial`, or `session_units >= COMPACT_AFTER`. Between units, emit the progress line and move on — nothing else.
@@ -198,6 +203,13 @@ After incrementing `session_units`:
 - If `session_units >= COMPACT_AFTER`: ensure STATE.md is updated, emit compact signal, **stop loop**
 
 ---
+
+## Deactivate auto-mode indicator
+
+Before ANY exit (compact signal, final report, blocked, or partial), deactivate the marker:
+```bash
+echo '{"active":false}' > .gsd/forge/auto-mode.json
+```
 
 ## Compact Signal
 
