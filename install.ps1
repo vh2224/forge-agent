@@ -1,4 +1,4 @@
-# Forge Agent — Installer for Claude Code (Windows PowerShell)
+﻿# Forge Agent — Installer for Claude Code (Windows PowerShell)
 # Usage: .\install.ps1 [-Update] [-DryRun]
 
 param(
