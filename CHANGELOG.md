@@ -1,3 +1,11 @@
+## v0.6.0 (2026-04-09)
+
+### Features
+
+- feat: auto-mode indicator with blink, timer and stale detection (3c584e9)
+- feat: show auto-mode indicator with elapsed time in status line (c28ce56)
+
+
 ## v0.5.0 (2026-04-09)
 
 ### Features
