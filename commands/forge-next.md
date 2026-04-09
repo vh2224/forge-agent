@@ -1,6 +1,6 @@
 ---
 description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Argumentos: 'next' (mesmo que sem argumento), 'auto' (delega para /forge-auto)."
-allowed-tools: Read, Write, Edit, Bash, Agent, TaskCreate, TaskUpdate, TaskList, TaskStop
+allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop
 ---
 
 ## Parse arguments
@@ -97,6 +97,13 @@ Then proceed with dispatch normally (the executor will overwrite the partial wor
 unit_effort = EFFORT_MAP[unit_type] or ("medium" if opus model else "low")
 ```
 Inject `effort: {unit_effort}` and (for opus phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
+
+**Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
+```
+mkdir -p .gsd/milestones/{M###}/slices/{S##}
+Skill({ skill: "forge-risk-radar", args: "{M###} {S##}" })
+```
+This runs the risk assessment in the current context before the plan-slice agent is dispatched. The produced `S##-RISK.md` will be injected into the worker prompt.
 
 ### 2. Check skip rules
 
@@ -247,6 +254,9 @@ Plan GSD slice {S##} of milestone {M###}.
 WORKING_DIR: {WORKING_DIR}
 effort: {unit_effort}
 thinking: {THINKING_OPUS}
+
+## Risk Assessment
+{content of S##-RISK.md if exists, else "(none — slice is not high-risk)"}
 
 ## Roadmap Entry + Boundary Map
 {relevant section of M###-ROADMAP.md for this slice}

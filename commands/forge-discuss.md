@@ -1,6 +1,6 @@
 ---
 description: "Abre uma discussão de arquitetura para capturar decisões antes de planejar. Use: /forge-discuss M003 | /forge-discuss S02 | /forge-discuss -fast S02 (pula brainstorm)"
-allowed-tools: Read, Write, Bash, Agent
+allowed-tools: Read, Write, Bash, Agent, Skill
 ---
 
 ## Bootstrap guard
@@ -49,25 +49,13 @@ If `TARGET_TYPE=milestone` and `FAST_MODE=false`:
 ls .gsd/milestones/{TARGET_ID}/{TARGET_ID}-BRAINSTORM.md 2>/dev/null && echo "exists" || echo "missing"
 ```
 
-If brainstorm missing: delegate to `forge-planner` agent:
+If brainstorm missing, invoke the skill directly in this context:
 
 ```
-Run brainstorm for milestone {TARGET_ID}.
-WORKING_DIR: {pwd}
-MILESTONE_ID: {TARGET_ID}
-
-PROJECT:
-{content of .gsd/PROJECT.md}
-
-SKILL: Check ~/.agents/skills/forge-brainstorm/SKILL.md or ~/.claude/skills/forge-brainstorm/SKILL.md.
-If found: execute the skill.
-If not found: 3 alternative approaches + top 5 risks + scope boundaries (inline).
-
-Write output to .gsd/milestones/{TARGET_ID}/{TARGET_ID}-BRAINSTORM.md
-Return a brief summary (5-8 lines) of key findings.
+Skill({ skill: "forge-brainstorm", args: "{TARGET_ID}" })
 ```
 
-Use the returned summary (do NOT read the full BRAINSTORM.md) to inform the discuss questions.
+After the skill completes, read the **Open questions** and **Top risks** sections of the produced BRAINSTORM.md to inform the discuss questions. Do not read the full file.
 
 ---
 

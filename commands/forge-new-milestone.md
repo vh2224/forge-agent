@@ -1,6 +1,6 @@
 ---
 description: "Cria uma nova milestone GSD. Fluxo completo: brainstorm → discuss → plan. Use -fast para pular brainstorm. Ex: /forge-new-milestone autenticação OAuth | /forge-new-milestone -fast pagamentos com Stripe"
-allowed-tools: Read, Write, Bash, Agent
+allowed-tools: Read, Write, Bash, Agent, Skill
 ---
 
 ## Bootstrap guard
@@ -49,32 +49,15 @@ mkdir -p .gsd/milestones/{MILESTONE_ID}/slices
 
 **If FAST_MODE=true:** Skip to Step 3.
 
-Delegate to `forge-planner` agent:
+Invoke the brainstorm skill directly in this context:
 
 ```
-Run the forge-brainstorm skill for a new milestone.
-WORKING_DIR: {pwd}
-MILESTONE_ID: {MILESTONE_ID}
-MILESTONE_DESC: {MILESTONE_DESC}
-
-PROJECT:
-{content of .gsd/PROJECT.md}
-
-REQUIREMENTS:
-{content of .gsd/REQUIREMENTS.md}
-
-DECISIONS (last 10 rows):
-{last 10 rows of .gsd/DECISIONS.md}
-
-SKILL: Check ~/.agents/skills/forge-brainstorm/SKILL.md or ~/.claude/skills/forge-brainstorm/SKILL.md.
-If found: execute the skill.
-If not found: run inline brainstorm — 3 alternative approaches + top 5 risks + scope boundaries.
-
-Write output to .gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-BRAINSTORM.md
-Return a brief summary (5-10 lines) of the brainstorm key findings.
+Skill({ skill: "forge-brainstorm", args: "{MILESTONE_ID}: {MILESTONE_DESC}" })
 ```
 
-Show the brainstorm summary to the user before continuing.
+The skill reads project context and writes `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-BRAINSTORM.md` itself.
+
+After the skill completes, read the produced BRAINSTORM.md and show the user a compact summary (Recommended approach + Top 3 risks + Open questions). Do not show the full file.
 
 ---
 
@@ -82,29 +65,15 @@ Show the brainstorm summary to the user before continuing.
 
 **If FAST_MODE=true:** Skip to Step 4.
 
-Delegate to `forge-planner` agent:
+Invoke the scope clarity skill directly in this context:
 
 ```
-Run scope clarity for milestone {MILESTONE_ID}.
-WORKING_DIR: {pwd}
-MILESTONE_ID: {MILESTONE_ID}
-MILESTONE_DESC: {MILESTONE_DESC}
-
-BRAINSTORM (if available):
-{summary from Step 2, or content of BRAINSTORM.md}
-
-PROJECT:
-{content of .gsd/PROJECT.md}
-
-SKILL: Check ~/.agents/skills/forge-scope-clarity/SKILL.md or ~/.claude/skills/forge-scope-clarity/SKILL.md.
-If found: execute the skill.
-If not found: produce a brief in/out/deferred classification and observable criteria.
-
-Write output to .gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-SCOPE.md
-Return the scope contract summary (what's IN vs OUT).
+Skill({ skill: "forge-scope-clarity", args: "{MILESTONE_ID}: {MILESTONE_DESC}" })
 ```
 
-Show the scope contract to the user briefly.
+The skill reads project context and writes `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-SCOPE.md` itself.
+
+After the skill completes, show the user the **In Scope** and **Out of Scope** tables from the produced SCOPE.md. Do not show the full file.
 
 ---
 
@@ -185,27 +154,17 @@ Return ---GSD-WORKER-RESULT--- with list of slices created.
 
 **If FAST_MODE=true:** Skip to Step 7.
 
-Read the ROADMAP to find slices tagged `risk:high`.
+Read the ROADMAP to find slices tagged `risk:high`. For each one, create the slice directory and invoke the risk radar skill:
 
-For each high-risk slice, delegate to `forge-planner` agent:
+```bash
+mkdir -p .gsd/milestones/{MILESTONE_ID}/slices/{S##}
+```
 
 ```
-Run risk radar for slice {S##} of milestone {MILESTONE_ID}.
-WORKING_DIR: {pwd}
-
-SLICE ENTRY:
-{relevant roadmap entry}
-
-MILESTONE CONTEXT:
-{content of {MILESTONE_ID}-CONTEXT.md}
-
-SKILL: Check ~/.agents/skills/forge-risk-radar/SKILL.md or ~/.claude/skills/forge-risk-radar/SKILL.md.
-If found: execute the skill.
-If not found: produce a brief risk analysis covering technical, dependency, and scope-creep risks.
-
-Write output to .gsd/milestones/{MILESTONE_ID}/slices/{S##}/{S##}-RISK.md
-Return a one-line risk summary.
+Skill({ skill: "forge-risk-radar", args: "{MILESTONE_ID} {S##}" })
 ```
+
+The skill reads the slice context from disk and writes `S##-RISK.md` itself. Repeat for each `risk:high` slice — call `Skill` once per slice, sequentially.
 
 ---
 
