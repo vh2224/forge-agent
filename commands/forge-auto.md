@@ -27,10 +27,17 @@ Read ONLY these files:
 3. `.gsd/claude-agent-prefs.md` (repo-level shared prefs — overrides user-global)
 4. `.gsd/prefs.local.md` (local personal overrides — gitignored, overrides repo prefs)
 5. First 80 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+6. `.gsd/CODING-STANDARDS.md` (skip silently if missing)
 
 **Merge order:** later files override earlier ones for any key present. Missing files are skipped silently. Store merged result as `PREFS`.
 
-Store as: `STATE`, `PREFS`, `TOP_MEMORIES`.
+Store as: `STATE`, `PREFS`, `TOP_MEMORIES`, `CODING_STANDARDS`.
+
+**CODING_STANDARDS section extraction** — to minimize token usage, extract these named sections from the file for selective injection:
+- `CS_LINT` — content of `## Lint & Format Commands` section only
+- `CS_STRUCTURE` — content of `## Directory Conventions` + `## Asset Map` + `## Pattern Catalog` sections
+- `CS_RULES` — content of `## Code Rules` section only
+If CODING-STANDARDS.md is missing, all section variables are `"(none)"`.
 
 Initialize:
 ```
@@ -229,6 +236,9 @@ WORKING_DIR: {WORKING_DIR}
 ## Slice Plan (tasks section)
 {content of S##-PLAN.md}
 
+## Lint & Format Commands
+{CS_LINT}
+
 ## Prior Context
 {content of M###-SUMMARY.md if exists, else last S##-SUMMARY.md if exists, else "(none yet)"}
 
@@ -239,7 +249,8 @@ WORKING_DIR: {WORKING_DIR}
 {TOP_MEMORIES}
 
 ## Instructions
-Execute all steps. Verify every must-have using the verification ladder.
+Execute all steps. The task plan's ## Standards section has the relevant coding rules — follow them.
+Verify every must-have using the verification ladder — including lint/format check.
 Write T##-SUMMARY.md. Commit: feat(S##/T##): <one-liner>.
 Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
 ```
@@ -256,6 +267,12 @@ WORKING_DIR: {WORKING_DIR}
 ## Milestone Context
 {content of M###-CONTEXT.md if exists, else "(none)"}
 
+## Directory Conventions & Asset Map
+{CS_STRUCTURE}
+
+## Code Rules
+{CS_RULES}
+
 ## Dependency Slice Summaries
 {content of S##-SUMMARY.md for each slice listed in depends:[]}
 
@@ -267,6 +284,7 @@ WORKING_DIR: {WORKING_DIR}
 
 ## Instructions
 Write S##-PLAN.md and individual T##-PLAN.md files (1-7 tasks).
+Each T##-PLAN.md must include a ## Standards section with relevant rules from CODING-STANDARDS.md.
 Iron rule: each task must fit in one context window.
 Return ---GSD-WORKER-RESULT---.
 ```
@@ -282,6 +300,9 @@ WORKING_DIR: {WORKING_DIR}
 
 ## Requirements
 {content of .gsd/REQUIREMENTS.md}
+
+## Directory Conventions & Asset Map
+{CS_STRUCTURE}
 
 ## Context (discuss decisions)
 {content of M###-CONTEXT.md if exists, else "(none)"}
@@ -300,6 +321,7 @@ WORKING_DIR: {WORKING_DIR}
 
 ## Instructions
 Write M###-ROADMAP.md with 4-10 slices, risk tags, depends, demo sentences, and a Boundary Map section.
+Respect directory conventions and reusable assets from Coding Standards when placing new code.
 Return ---GSD-WORKER-RESULT---.
 ```
 
@@ -315,15 +337,19 @@ WORKING_DIR: {WORKING_DIR}
 ## Slice Plan
 {content of S##-PLAN.md}
 
+## Lint & Format Commands
+{CS_LINT}
+
 ## Current Milestone Summary
 {content of M###-SUMMARY.md if exists, else "(none)"}
 
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
 2. Write S##-UAT.md (non-blocking human test script)
-3. Squash-merge branch gsd/M###/S## to main
-4. Update M###-SUMMARY.md with this slice's contribution
-5. Mark slice [x] in M###-ROADMAP.md
+3. Run lint gate — if lint commands exist, run on changed files. Fix violations before merge.
+4. Squash-merge branch gsd/M###/S## to main
+5. Update M###-SUMMARY.md with this slice's contribution
+6. Mark slice [x] in M###-ROADMAP.md
 Return ---GSD-WORKER-RESULT---.
 ```
 
@@ -391,6 +417,9 @@ WORKING_DIR: {WORKING_DIR}
 ## Project
 {content of .gsd/PROJECT.md}
 
+## Current Coding Standards
+{CODING_STANDARDS or "(none — no .gsd/CODING-STANDARDS.md found)"}
+
 ## Project Memory (known gotchas)
 {TOP_MEMORIES}
 
@@ -400,6 +429,9 @@ Explore the codebase. Produce M###-RESEARCH.md (or S##-RESEARCH.md) with:
 - Don't Hand-Roll table (what libraries/patterns exist already)
 - Common Pitfalls found
 - Relevant Code sections
+- Asset Map — Reusable Code (functions, hooks, services to reuse)
+- Coding Conventions Detected (naming, structure, imports, error patterns)
+After writing RESEARCH.md, update .gsd/CODING-STANDARDS.md with new findings (Asset Map, conventions).
 Return ---GSD-WORKER-RESULT---.
 ```
 

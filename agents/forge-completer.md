@@ -26,29 +26,31 @@ Given all `T##-SUMMARY.md` files from the slice:
    ```markdown
    # S##: Title — UAT Script
    **Slice:** S##  **Milestone:** M###  **Written:** YYYY-MM-DD
-   
+
    ## Prerequisites
    ## Test Cases
    | # | Action | Expected | Pass? |
    ## Notes
    ```
 
-3. Git: squash-merge branch `gsd/M###/S##` to main
+3. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding to merge. If no lint commands are configured, skip this step.
+
+4. Git: squash-merge branch `gsd/M###/S##` to main
    ```
    feat(M###/S##): <slice title>
-   
+
    <slice one-liner>
-   
+
    Tasks completed:
    - T01: <one-liner>
    - T02: <one-liner>
    ```
 
-4. Update `M###-SUMMARY.md` — add this slice's contributions
+5. Update `M###-SUMMARY.md` — add this slice's contributions
 
-5. Mark slice `[x]` in `M###-ROADMAP.md`
+6. Mark slice `[x]` in `M###-ROADMAP.md`
 
-6. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
+7. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
    - Read `M###-ROADMAP.md` to find the next pending slice `[ ]`
    - If a next slice exists:
      ```markdown

@@ -47,7 +47,9 @@ The project is already managed by gsd-pi. Your job is to:
    grep -q "prefs.local.md" .gitignore 2>/dev/null || echo ".gsd/prefs.local.md" >> .gitignore
    ```
 
-5. **Report:**
+6. **Create or update `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
+
+7. **Report:**
    ```
    ✓ GSD agent initialized on existing project
 
@@ -60,6 +62,7 @@ The project is already managed by gsd-pi. Your job is to:
    - CLAUDE.md ✓
    - .gsd/AUTO-MEMORY.md ✓
    - .gsd/claude-agent-prefs.md ✓
+   - .gsd/CODING-STANDARDS.md ✓ (auto-detected)
 
    Ready. Use /gsd to advance next unit or /forge-auto for autonomous mode.
    ```
@@ -146,7 +149,9 @@ The project is already managed by gsd-pi. Your job is to:
    grep -q "prefs.local.md" .gitignore 2>/dev/null || echo ".gsd/prefs.local.md" >> .gitignore
    ```
 
-6. **Report:**
+6. **Create `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
+
+7. **Report:**
    ```
    ✓ GSD agent initialized (new project)
 
@@ -161,6 +166,7 @@ The project is already managed by gsd-pi. Your job is to:
    - .gsd/STATE.md
    - .gsd/KNOWLEDGE.md
    - .gsd/AUTO-MEMORY.md
+   - .gsd/CODING-STANDARDS.md    ← auto-detected coding standards
    - .gsd/claude-agent-prefs.md  ← repo shared prefs (commit this)
    .gitignore updated:
    - .gsd/prefs.local.md         ← gitignored personal overrides
@@ -225,6 +231,110 @@ Hierarquia: Milestone → Slice → Task (iron rule: task deve caber em um conte
 
 Referência completa: `~/.gsd/agent/GSD-WORKFLOW.md`
 ```
+
+---
+
+## Coding Standards Auto-Detection
+
+This step runs for BOTH Case A and Case B. If `.gsd/CODING-STANDARDS.md` already exists, **update only the `## Detected Config` section** — preserve any user customizations in other sections.
+
+### Detection logic
+
+Run these checks in parallel to detect the project ecosystem:
+
+```bash
+# Package managers & configs
+ls package.json pyproject.toml pom.xml build.gradle Cargo.toml go.mod Gemfile composer.json 2>/dev/null
+
+# Lint configs
+ls .eslintrc .eslintrc.* eslint.config.* .pylintrc .flake8 .golangci.yml .rubocop.yml 2>/dev/null
+
+# Format configs
+ls .prettierrc .prettierrc.* prettier.config.* .editorconfig rustfmt.toml .clang-format 2>/dev/null
+
+# Type checking
+ls tsconfig.json tsconfig.*.json mypy.ini .mypy.ini pyright*.json 2>/dev/null
+
+# Test configs
+ls jest.config.* vitest.config.* pytest.ini conftest.py .rspec 2>/dev/null
+```
+
+If `package.json` exists, read it to extract:
+- `scripts.lint` → lint command
+- `scripts.format` → format command
+- `scripts.test` → test command
+- `scripts.typecheck` or `scripts.tsc` → type check command
+
+If `pyproject.toml` exists, look for `[tool.ruff]`, `[tool.black]`, `[tool.mypy]`, `[tool.pytest]`.
+
+### Detect directory conventions
+
+```bash
+# Map top-level source directories
+ls -d src/ lib/ app/ components/ utils/ helpers/ services/ hooks/ types/ models/ controllers/ routes/ middleware/ tests/ __tests__/ spec/ 2>/dev/null
+```
+
+Scan 2-3 source files to detect naming conventions (camelCase, snake_case, PascalCase for files/dirs).
+
+### Write `.gsd/CODING-STANDARDS.md`
+
+Use the template below. Fill sections with actual detected findings. For sections where nothing was detected, write `(pending — will be enriched by researcher)` as a **single line** — do NOT write multi-line HTML comments or examples.
+
+**Important:** The generated file must be lean. Every token counts because it's injected into agent prompts. No HTML comments, no examples, no blank placeholder tables.
+
+```markdown
+# Coding Standards
+
+## Detected Config
+
+| Tool | Config File | Command |
+|------|-------------|---------|
+| {detected tool} | {config path} | {run command} |
+
+## Directory Conventions
+
+| Directory | Purpose | Naming |
+|-----------|---------|--------|
+| {detected dir} | {purpose} | {naming pattern} |
+
+## Code Rules
+
+### Single Responsibility
+- Each file exports ONE primary responsibility (one component, one service, one utility set)
+- If a file exceeds ~200 lines, consider splitting by responsibility
+
+### Reuse Before Create
+- Before creating a new utility, check the Asset Map and existing utils/helpers directories
+- Shared logic used by 2+ files belongs in a common location (utils/, helpers/, lib/)
+- Do NOT duplicate logic — extract and import
+
+### Naming Conventions
+(pending — will be enriched by researcher)
+
+### Import Organization
+(pending — will be enriched by researcher)
+
+### Error Handling
+- Validate at system boundaries (user input, external APIs, file I/O)
+- Trust internal code and framework guarantees — don't over-validate
+- Use the project's established error patterns
+
+## Lint & Format Commands
+
+- **Lint:** `{detected lint command or "(none detected)"}`
+- **Format:** `{detected format command or "(none detected)"}`
+- **Type check:** `{detected typecheck command or "(none detected)"}`
+
+## Asset Map
+
+(pending — will be populated by forge-researcher)
+
+## Pattern Catalog
+
+(pending — will be populated by forge-researcher)
+```
+
+If a section has actual detected values, write them. If not, write the single-line `(pending...)` placeholder. Never leave empty tables — either fill them or replace with the pending placeholder.
 
 ---
 
