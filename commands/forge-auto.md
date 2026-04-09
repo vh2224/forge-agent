@@ -23,9 +23,12 @@ pwd
 
 Read ONLY these files:
 1. `.gsd/STATE.md`
-2. `~/.claude/forge-agent-prefs.md` (skip silently if missing)
-3. `.gsd/claude-agent-prefs.md` (skip silently if missing)
-4. First 80 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+2. `~/.claude/forge-agent-prefs.md` (user-global defaults — skip silently if missing)
+3. `.gsd/claude-agent-prefs.md` (repo-level shared prefs — overrides user-global)
+4. `.gsd/prefs.local.md` (local personal overrides — gitignored, overrides repo prefs)
+5. First 80 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+
+**Merge order:** later files override earlier ones for any key present. Missing files are skipped silently. Store merged result as `PREFS`.
 
 Store as: `STATE`, `PREFS`, `TOP_MEMORIES`.
 

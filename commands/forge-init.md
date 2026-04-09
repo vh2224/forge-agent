@@ -40,7 +40,12 @@ The project is already managed by gsd-pi. Your job is to:
 
 3. **Create `.gsd/AUTO-MEMORY.md`** if it doesn't exist (empty, with header only)
 
-4. **Create `.gsd/claude-agent-prefs.md`** if it doesn't exist (project-level overrides)
+4. **Create `.gsd/claude-agent-prefs.md`** if it doesn't exist (project-level overrides, committed)
+
+5. **Add `.gsd/prefs.local.md` to `.gitignore`** if not already present:
+   ```bash
+   grep -q "prefs.local.md" .gitignore 2>/dev/null || echo ".gsd/prefs.local.md" >> .gitignore
+   ```
 
 5. **Report:**
    ```
@@ -133,9 +138,15 @@ The project is already managed by gsd-pi. Your job is to:
 
 3. **Create `CLAUDE.md`** (see template below)
 
-4. **Create `.gsd/claude-agent-prefs.md`** (project-level overrides)
+4. **Create `.gsd/claude-agent-prefs.md`** (project-level overrides, committed)
 
-5. **Report:**
+5. **Add `.gsd/prefs.local.md` to `.gitignore`** — personal local overrides should never be committed:
+   ```bash
+   # Append to .gitignore if not already present
+   grep -q "prefs.local.md" .gitignore 2>/dev/null || echo ".gsd/prefs.local.md" >> .gitignore
+   ```
+
+6. **Report:**
    ```
    ✓ GSD agent initialized (new project)
 
@@ -150,7 +161,14 @@ The project is already managed by gsd-pi. Your job is to:
    - .gsd/STATE.md
    - .gsd/KNOWLEDGE.md
    - .gsd/AUTO-MEMORY.md
-   - .gsd/claude-agent-prefs.md
+   - .gsd/claude-agent-prefs.md  ← repo shared prefs (commit this)
+   .gitignore updated:
+   - .gsd/prefs.local.md         ← gitignored personal overrides
+
+   Prefs resolution order (later overrides earlier):
+     1. ~/.claude/forge-agent-prefs.md  (user-global)
+     2. .gsd/claude-agent-prefs.md      (repo shared)
+     3. .gsd/prefs.local.md             (local personal, gitignored)
 
    Next: /forge-new-milestone <descrição do que entregar primeiro>
    ```
