@@ -30,10 +30,13 @@ Parse the `extraction_count` from the header.
 
 ## Step 2 — Extract candidates
 
-Analyze SUMMARY_CONTENT + RESULT_BLOCK + KEY_DECISIONS. Extract knowledge that is:
-- **Durable** — true beyond this one task (not "fixed bug X in commit abc")
-- **Non-obvious** — not derivable from reading the code structure
-- **Actionable** — changes how future work should be done in this project
+Analyze SUMMARY_CONTENT + RESULT_BLOCK + KEY_DECISIONS. For each potential memory, apply the **quality gate** — all three questions must be YES to proceed:
+
+1. **Project-specific?** — Is this specific to THIS codebase/project, not generic best practice?
+2. **Non-obvious?** — Would a competent dev reading the code NOT know this without real debugging effort?
+3. **Durable?** — Will this still be true in future tasks, not just a one-off fix?
+
+If any answer is NO → discard the candidate. Do not save it.
 
 Good extraction candidates from a summary:
 - `patterns_established` entries → often become `pattern` or `convention` memories
