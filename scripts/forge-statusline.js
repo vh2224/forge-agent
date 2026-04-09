@@ -45,6 +45,7 @@ process.stdin.on('end', () => {
     // --- Forge STATE (reads .gsd/STATE.md) ---
     let forgeTag = '';
     let autoMode = false;
+    let autoElapsed = '0s';
     try {
       const stateFile = path.join(cwd, '.gsd', 'STATE.md');
       const state     = fs.readFileSync(stateFile, 'utf8');
@@ -69,16 +70,22 @@ process.stdin.on('end', () => {
       const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
       const auto     = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
       if (auto.active) {
-        autoMode = true;
         const elapsed = auto.started_at
           ? Math.round((Date.now() - auto.started_at) / 1000)
           : 0;
-        const elStr = elapsed >= 60
-          ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
-          : `${elapsed}s`;
-        forgeTag = forgeTag
-          ? `▶ AUTO ${elStr} │ ${forgeTag}`
-          : `▶ AUTO ${elStr}`;
+
+        // Stale check: if auto-mode has been "active" for over 15 minutes
+        // with no recent dispatch, assume the session was killed (Ctrl+C, terminal closed).
+        // Auto-clean: deactivate the marker so it doesn't persist forever.
+        const STALE_THRESHOLD = 15 * 60; // 15 minutes
+        if (elapsed > STALE_THRESHOLD) {
+          try { fs.writeFileSync(autoFile, '{"active":false}', 'utf8'); } catch {}
+        } else {
+          autoMode = true;
+          autoElapsed = elapsed >= 60
+            ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
+            : `${elapsed}s`;
+        }
       }
     } catch { /* no auto mode active */ }
 
@@ -108,7 +115,14 @@ process.stdin.on('end', () => {
     } catch { /* no dispatch info yet */ }
 
     // --- Build status line ---
-    const line1 = [
+    // --- Build auto-mode prefix ---
+    let autoPrefix = '';
+    if (autoMode) {
+      const dot = Math.floor(Date.now() / 1000) % 2 === 0 ? '●' : '○';
+      autoPrefix = `${dot} AUTO ${autoElapsed} │ `;
+    }
+
+    const line1 = autoPrefix + [
       'Forge',
       model,
       forgeTag ? `${project} │ ${forgeTag}` : project,
