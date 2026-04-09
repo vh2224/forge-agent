@@ -1,6 +1,6 @@
 ---
 description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Argumentos: 'next' (mesmo que sem argumento), 'auto' (delega para /forge-auto)."
-allowed-tools: Read, Write, Edit, Bash, Agent, TaskCreate, TaskUpdate
+allowed-tools: Read, Write, Edit, Bash, Agent, TaskCreate, TaskUpdate, TaskList, TaskStop
 ---
 
 ## Parse arguments
@@ -39,6 +39,12 @@ Read ONLY these files:
 **Merge order:** later files override earlier ones for any key present. Missing files are skipped silently. Store merged result as `PREFS`.
 
 Store as: `STATE`, `PREFS`, `TOP_MEMORIES`, `CODING_STANDARDS`.
+
+**Cleanup orphaned tasks** — call `TaskList`. If any tasks have `status: in_progress` (leftover from a previous session), mark them completed before creating new tasks:
+```
+TaskUpdate({ taskId: <id>, status: "completed" })
+```
+Skip if TaskList returns empty.
 
 **CODING_STANDARDS section extraction** — to minimize token usage, extract these named sections from the file for selective injection:
 - `CS_LINT` — content of `## Lint & Format Commands` section only

@@ -1,6 +1,6 @@
 ---
 description: "GSD auto mode — executa o milestone inteiro de forma autônoma. Equivalente ao /forge-auto do gsd-pi."
-allowed-tools: Read, Write, Edit, Bash, Agent, TaskCreate, TaskUpdate
+allowed-tools: Read, Write, Edit, Bash, Agent, TaskCreate, TaskUpdate, TaskList, TaskStop
 ---
 
 ## Bootstrap guard
@@ -45,6 +45,12 @@ session_units = 0
 COMPACT_AFTER = 5
 completed_units = []
 ```
+
+**Cleanup orphaned tasks** — call `TaskList`. If any tasks have `status: in_progress` (leftover from a previous crashed session), mark them completed to keep the UI clean:
+```
+TaskUpdate({ taskId: <id>, status: "completed" })
+```
+Do this for ALL in_progress tasks before starting the loop. Skip if TaskList returns empty.
 
 ---
 
@@ -151,6 +157,8 @@ Parse the `---GSD-WORKER-RESULT---` block:
 | `unknown` | anything else | Stop loop. Surface raw blocker to user. |
 
 Auto-recovery attempts (context_overflow, model_refusal) count as units toward `COMPACT_AFTER`.
+
+**Before any auto-recovery retry:** If the failed unit spawned a background task (visible via `TaskList` with `status: in_progress` and no owner), call `TaskStop({ task_id: <id> })` to terminate it cleanly before dispatching the retry.
 
 #### 6. Post-unit housekeeping
 
