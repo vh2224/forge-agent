@@ -1,3 +1,11 @@
+## v0.5.0 (2026-04-09)
+
+### Features
+
+- feat: add auto_commit preference — let users opt out of git management (c773c4c)
+- feat: add visual timeline to forge-auto and forge-next via TaskCreate (0b907c2)
+
+
 ## v0.4.0 (2026-04-09)
 
 ### Features
