@@ -52,6 +52,8 @@ completed_units = []
 
 You are the orchestrator. Execute the dispatch loop, repeating until: milestone complete, blocked, or `session_units >= COMPACT_AFTER`.
 
+**AUTONOMY RULE — CRITICAL:** This is FULLY AUTONOMOUS mode. After each unit completes with `status: done`, proceed IMMEDIATELY to the next unit. Do NOT pause to ask the user if they want to continue. Do NOT ask for confirmation between units. Do NOT summarize progress and wait for input. The ONLY reasons to stop the loop are: milestone complete, worker returned `blocked`/`partial`, or `session_units >= COMPACT_AFTER`. Between units, emit the progress line and move on — nothing else.
+
 ### Dispatch Loop
 
 Repeat until stop condition:
@@ -115,7 +117,7 @@ Wait for the result.
 #### 5. Process result
 
 Parse the `---GSD-WORKER-RESULT---` block:
-- `status: done` → proceed to post-unit housekeeping, then continue loop
+- `status: done` → proceed to post-unit housekeeping, then **immediately continue loop** (do NOT pause or ask user)
 - `status: partial` → write `continue.md`, update STATE, emit compact signal, **stop loop**
 - `status: blocked` → apply failure taxonomy before stopping:
 
