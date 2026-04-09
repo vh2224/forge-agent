@@ -208,6 +208,7 @@ Se houver `continue.md` no slice ativo → leia, delete, retome de "Next Action"
 | `/forge-auto` | Execução autônoma até milestone completo |
 | `/forge-status` | Dashboard do projeto |
 | `/forge-doctor` | Diagnóstico — valida STATE, arquivos e prefs |
+| `/forge-fix` | Corrige problemas — repara STATE, arquivos e estrutura |
 | `/forge-new-milestone <desc>` | Cria novo milestone |
 | `/forge-add-slice <M###> <desc>` | Adiciona slice ao milestone |
 | `/forge-add-task <S##> <desc>` | Adiciona task ao slice |

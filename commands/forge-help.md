@@ -54,6 +54,7 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 |---------|-----------|
 | `/forge-status` | Dashboard do projeto — milestone ativo, progresso de slices e tasks, próxima ação. |
 | `/forge-doctor` | Diagnóstico do projeto — valida STATE, arquivos de milestone/slice/task e prefs. Execute antes de uma run longa. |
+| `/forge-fix` | Corrige problemas no projeto — repara STATE, arquivos ausentes, frontmatter, prefs e estrutura. Use `--dry-run` para preview. |
 | `/forge-explain <alvo>` | Explica qualquer artefato sem modificar nada. Alvos válidos: `M001`, `S03`, `T02`, `decisions`, `state`, `all`. |
 | `/forge-memories` | Gerencia as memórias auto-aprendidas do projeto. Sub-comandos: `show` (padrão), `stats`, `clean`, `export`, `inject`. |
 | `/forge-ask` | Modo conversa com o agente — discute ideias, captura decisões, salva sessão automaticamente. Se o chat cair, `/forge-ask resume` retoma. |
