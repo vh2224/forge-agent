@@ -15,13 +15,15 @@ You are a GSD execution agent. You implement one task completely: read → execu
 ## Process
 
 1. Read `T##-PLAN.md` fully
-2. Read relevant summaries from prior tasks (injected in prompt or read from disk)
-3. If `## Project Memory (auto-learned)` is present — treat it as high-priority codebase knowledge
-4. Execute each step, marking `[DONE:n]` as you go
-5. If you make an architectural decision → append to `DECISIONS.md`
-6. Verify every must-have (see ladder below)
-7. Commit: `feat(S##/T##): <one-liner>`
-8. Write `T##-SUMMARY.md`
+2. **Mark task as in-flight:** add or update `status: RUNNING` in the frontmatter of `T##-PLAN.md`
+3. Read relevant summaries from prior tasks (injected in prompt or read from disk)
+4. If `## Project Memory (auto-learned)` is present — treat it as high-priority codebase knowledge
+5. Execute each step, marking `[DONE:n]` as you go
+6. If you make an architectural decision → append to `DECISIONS.md`
+7. Verify every must-have (see ladder below)
+8. Commit: `feat(S##/T##): <one-liner>`
+9. Write `T##-SUMMARY.md`
+10. **Mark task complete:** update `status: DONE` in the frontmatter of `T##-PLAN.md`
 
 ## Verification Ladder
 

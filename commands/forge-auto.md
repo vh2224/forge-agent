@@ -70,6 +70,10 @@ To determine which case applies, read (in order, stop as soon as you find the an
 2. `M###-ROADMAP.md` — only if STATE is ambiguous about slices/milestone completion
 3. `S##-PLAN.md` — only if STATE is ambiguous about tasks within a slice
 
+**Crash detection:** Before dispatching `execute-task`, read `T##-PLAN.md`. If it contains `status: RUNNING`, the previous session crashed mid-task. Warn the user:
+> ⚠ Task {T##} was interrupted (status: RUNNING). Re-executing from scratch.
+Then proceed with dispatch normally (the executor will overwrite the partial work).
+
 **Dynamic routing:** If `T##-PLAN.md` contains `complexity: heavy`, route `execute-task` to `forge-executor` on opus.
 
 #### 2. Check skip rules
