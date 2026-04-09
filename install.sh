@@ -82,6 +82,34 @@ if $has_existing && $UPDATE; then
   success "Backup saved to $BACKUP_DIR"
 fi
 
+# ── Clean up legacy gsd-* files ──────────────────────────────────────────────
+echo ""
+info "Cleaning up legacy gsd-* files..."
+cleaned=0
+for f in "${AGENTS_DIR}"/gsd-*.md; do
+  [ -f "$f" ] || continue
+  if $DRY_RUN; then
+    dry "rm $f"
+  else
+    rm "$f"
+  fi
+  info "  removed agents/$(basename "$f")"
+  cleaned=$((cleaned + 1))
+done
+for f in "${COMMANDS_DIR}"/gsd-*.md; do
+  [ -f "$f" ] || continue
+  if $DRY_RUN; then
+    dry "rm $f"
+  else
+    rm "$f"
+  fi
+  info "  removed commands/$(basename "$f")"
+  cleaned=$((cleaned + 1))
+done
+if [ "$cleaned" -eq 0 ]; then
+  info "  (nenhum arquivo legado encontrado)"
+fi
+
 # ── Install ───────────────────────────────────────────────────────────────────
 echo ""
 info "Installing agents..."

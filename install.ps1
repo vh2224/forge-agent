@@ -45,8 +45,8 @@ if (!(Test-Path $ClaudeDir)) {
 Success "Claude Code encontrado em $ClaudeDir"
 
 # ── Check existing installation ───────────────────────────────────────────────
-$hasExisting = (Get-ChildItem "$AgentsDirorge*.md" -ErrorAction SilentlyContinue) -or
-               (Get-ChildItem "$CommandsDirorge*.md" -ErrorAction SilentlyContinue) -or
+$hasExisting = (Get-ChildItem "$AgentsDir\forge*.md" -ErrorAction SilentlyContinue) -or
+               (Get-ChildItem "$CommandsDir\forge*.md" -ErrorAction SilentlyContinue) -or
                (Test-Path "$ClaudeDir\forge-agent-prefs.md")
 
 if ($hasExisting -and -not $Update) {
@@ -61,8 +61,8 @@ if ($hasExisting -and $Update) {
     if (-not $DryRun) {
         New-Item -ItemType Directory "$BackupDir\agents" -Force | Out-Null
         New-Item -ItemType Directory "$BackupDir\commands" -Force | Out-Null
-        Get-ChildItem "$AgentsDirorge*.md"   -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\agents\"
-        Get-ChildItem "$CommandsDirorge*.md" -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\commands\"
+        Get-ChildItem "$AgentsDir\forge*.md"   -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\agents\"
+        Get-ChildItem "$CommandsDir\forge*.md" -ErrorAction SilentlyContinue | Copy-Item -Destination "$BackupDir\commands\"
         if (Test-Path "$ClaudeDir\forge-agent-prefs.md") { Copy-Item "$ClaudeDir\forge-agent-prefs.md" $BackupDir }
         if (Test-Path "$ClaudeDir\forge-statusline.js")  { Copy-Item "$ClaudeDir\forge-statusline.js"  $BackupDir }
         if (Test-Path "$ClaudeDir\forge-hook.js")        { Copy-Item "$ClaudeDir\forge-hook.js"        $BackupDir }
@@ -71,10 +71,36 @@ if ($hasExisting -and $Update) {
     Success "Backup salvo em $BackupDir"
 }
 
+# ── Clean up legacy gsd-* files ──────────────────────────────────────────────
+Write-Host ""
+Info "Limpando arquivos legados gsd-*..."
+$cleaned = 0
+foreach ($f in Get-ChildItem "$AgentsDir\gsd-*.md" -ErrorAction SilentlyContinue) {
+    if ($DryRun) {
+        Dry "rm $($f.FullName)"
+    } else {
+        Remove-Item $f.FullName -Force
+    }
+    Info "  removed agents\$($f.Name)"
+    $cleaned++
+}
+foreach ($f in Get-ChildItem "$CommandsDir\gsd-*.md" -ErrorAction SilentlyContinue) {
+    if ($DryRun) {
+        Dry "rm $($f.FullName)"
+    } else {
+        Remove-Item $f.FullName -Force
+    }
+    Info "  removed commands\$($f.Name)"
+    $cleaned++
+}
+if ($cleaned -eq 0) {
+    Info "  (nenhum arquivo legado encontrado)"
+}
+
 # ── Install agents ────────────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando agentes..."
-foreach ($f in Get-ChildItem "$RepoDir\agentsorge*.md") {
+foreach ($f in Get-ChildItem "$RepoDir\agents\forge*.md") {
     CopyFile $f.FullName "$AgentsDir\$($f.Name)"
     Info "  agents\$($f.Name)"
 }
@@ -82,7 +108,7 @@ foreach ($f in Get-ChildItem "$RepoDir\agentsorge*.md") {
 # ── Install commands ──────────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando comandos..."
-foreach ($f in Get-ChildItem "$RepoDir\commandsorge*.md") {
+foreach ($f in Get-ChildItem "$RepoDir\commands\forge*.md") {
     CopyFile $f.FullName "$CommandsDir\$($f.Name)"
     Info "  commands\$($f.Name)"
 }
