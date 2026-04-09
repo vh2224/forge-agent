@@ -38,6 +38,10 @@ Read ONLY these files:
 
 **Merge order:** later files override earlier ones for any key present. Missing files are skipped silently. Store merged result as `PREFS`.
 
+**Extract effort & thinking from PREFS:**
+- `EFFORT_MAP` ← `PREFS.effort` (per-phase effort table; default: opus phases = `medium`, sonnet phases = `low`)
+- `THINKING_OPUS` ← `PREFS.thinking.opus_phases` (default: `adaptive`)
+
 Store as: `STATE`, `PREFS`, `TOP_MEMORIES`, `CODING_STANDARDS`.
 
 **Cleanup orphaned tasks** — call `TaskList`. If any tasks have `status: in_progress` (leftover from a previous session), mark them completed before creating new tasks:
@@ -87,6 +91,12 @@ To determine which case applies, read (in order, stop as soon as you find the an
 Then proceed with dispatch normally (the executor will overwrite the partial work).
 
 **Dynamic routing:** If `T##-PLAN.md` contains `complexity: heavy`, route `execute-task` to `forge-executor` on opus.
+
+**Resolve effort for this unit:**
+```
+unit_effort = EFFORT_MAP[unit_type] or ("medium" if opus model else "low")
+```
+Inject `effort: {unit_effort}` and (for opus phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
 
 ### 2. Check skip rules
 
@@ -200,6 +210,8 @@ Display the progress line AND the next action (read from the STATE.md you just u
 Execute GSD task {T##} in slice {S##} of milestone {M###}.
 WORKING_DIR: {WORKING_DIR}
 auto_commit: {PREFS.auto_commit — true or false}
+effort: {unit_effort}
+thinking: disabled
 
 ## Task Plan
 {content of T##-PLAN.md}
@@ -233,6 +245,8 @@ Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
 ```
 Plan GSD slice {S##} of milestone {M###}.
 WORKING_DIR: {WORKING_DIR}
+effort: {unit_effort}
+thinking: {THINKING_OPUS}
 
 ## Roadmap Entry + Boundary Map
 {relevant section of M###-ROADMAP.md for this slice}
@@ -267,6 +281,8 @@ Return ---GSD-WORKER-RESULT---.
 ```
 Plan GSD milestone {M###}: {description}.
 WORKING_DIR: {WORKING_DIR}
+effort: {unit_effort}
+thinking: {THINKING_OPUS}
 
 ## Project
 {content of .gsd/PROJECT.md}
@@ -361,6 +377,8 @@ Return ---GSD-WORKER-RESULT---.
 ```
 Discuss {milestone M### | slice S##} architecture decisions.
 WORKING_DIR: {WORKING_DIR}
+effort: {unit_effort}
+thinking: {THINKING_OPUS}
 
 ## Project
 {content of .gsd/PROJECT.md}
@@ -391,6 +409,8 @@ NOTE: You can ask the user questions during this phase.
 ```
 Research codebase for GSD {milestone M### | slice S##}: {description}.
 WORKING_DIR: {WORKING_DIR}
+effort: {unit_effort}
+thinking: {THINKING_OPUS}
 
 ## What we're building
 {context from M###-CONTEXT.md or S##-CONTEXT.md}

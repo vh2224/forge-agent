@@ -51,6 +51,34 @@ standard → forge-executor  (sonnet)   # tasks normais
 heavy    → forge-executor  (opus)     # tasks com decisões arquiteturais complexas
 ```
 
+## Effort Settings
+
+Controla a intensidade de processamento por fase. Opus suporta `low | medium | high | max`. Sonnet suporta `low | medium`.
+
+```
+effort:
+  plan-milestone:    medium   # opus — decomposição arquitetural
+  plan-slice:        medium   # opus — planejamento de tasks
+  discuss-milestone: medium   # opus — decisões de arquitetura
+  discuss-slice:     medium   # opus — decisões de slice
+  research-milestone: medium  # opus — pesquisa de codebase
+  research-slice:    medium   # opus — pesquisa de slice
+  execute-task:      low      # sonnet — implementação (custo-efetivo)
+  complete-slice:    low      # sonnet — summaries e git
+  complete-milestone: low     # sonnet — fechamento de milestone
+  memory-extract:    low      # haiku — extração leve
+```
+
+## Thinking Settings
+
+Controla raciocínio estendido para agentes Opus. `adaptive` = modelo decide quanto pensar.
+
+```
+thinking:
+  opus_phases: adaptive    # adaptive | disabled
+  sonnet_phases: disabled  # sonnet não suporta extended thinking
+```
+
 ## Git Settings
 
 ```

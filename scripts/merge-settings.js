@@ -25,6 +25,19 @@ try {
 
 const FORGE_HOOK_MARKER = 'forge-hook.js';
 
+// Lifecycle events: no matcher (fire for all agents)
+const LIFECYCLE_HOOKS = [
+  { event: 'SubagentStart', phase: 'subagent-start' },
+  { event: 'SubagentStop',  phase: 'subagent-stop'  },
+  { event: 'PreCompact',    phase: 'pre-compact'     },
+];
+
+// Tool-use events: scoped to Agent tool via matcher
+const TOOL_HOOKS = [
+  { event: 'PreToolUse',  phase: 'pre'  },
+  { event: 'PostToolUse', phase: 'post' },
+];
+
 // ── REMOVE mode ─────────────────────────────────────────────────────────────
 if (remove) {
   // Remove statusLine if it's ours
@@ -32,8 +45,8 @@ if (remove) {
     delete settings.statusLine;
   }
 
-  // Remove forge hooks from PreToolUse / PostToolUse
-  for (const event of ['PreToolUse', 'PostToolUse']) {
+  // Remove forge hooks from tool-use events (matcher: Agent)
+  for (const { event } of TOOL_HOOKS) {
     const eventHooks = settings.hooks?.[event];
     if (!Array.isArray(eventHooks)) continue;
 
@@ -46,6 +59,17 @@ if (remove) {
     // Clean up empty matcher entries
     settings.hooks[event] = eventHooks.filter(
       e => !(e.matcher === 'Agent' && e.hooks?.length === 0)
+    );
+    if (settings.hooks[event].length === 0) delete settings.hooks[event];
+  }
+
+  // Remove forge hooks from lifecycle events (no matcher)
+  for (const { event } of LIFECYCLE_HOOKS) {
+    const eventHooks = settings.hooks?.[event];
+    if (!Array.isArray(eventHooks)) continue;
+
+    settings.hooks[event] = eventHooks.filter(
+      e => !e.hooks?.some(h => h.command?.includes(FORGE_HOOK_MARKER))
     );
     if (settings.hooks[event].length === 0) delete settings.hooks[event];
   }
@@ -68,7 +92,8 @@ settings.statusLine = {
 
 if (!settings.hooks) settings.hooks = {};
 
-function mergeForgeHook(eventHooks, phase) {
+// Tool-use hooks: scoped to Agent matcher
+function mergeToolHook(eventHooks, phase) {
   let matcherEntry = eventHooks.find(e => e.matcher === 'Agent');
   if (!matcherEntry) {
     matcherEntry = { matcher: 'Agent', hooks: [] };
@@ -84,11 +109,26 @@ function mergeForgeHook(eventHooks, phase) {
   else                  matcherEntry.hooks.push(hookEntry);
 }
 
-if (!Array.isArray(settings.hooks.PreToolUse))  settings.hooks.PreToolUse  = [];
-if (!Array.isArray(settings.hooks.PostToolUse)) settings.hooks.PostToolUse = [];
+// Lifecycle hooks: no matcher (fire for all agents)
+function mergeLifecycleHook(eventHooks, phase) {
+  const existingIdx = eventHooks.findIndex(
+    e => e.hooks?.some(h => h.command?.includes(FORGE_HOOK_MARKER))
+  );
+  const hookEntry = { hooks: [{ type: 'command', command: `node ~/.claude/forge-hook.js ${phase}` }] };
 
-mergeForgeHook(settings.hooks.PreToolUse,  'pre');
-mergeForgeHook(settings.hooks.PostToolUse, 'post');
+  if (existingIdx >= 0) eventHooks[existingIdx] = hookEntry;
+  else                  eventHooks.push(hookEntry);
+}
+
+for (const { event, phase } of TOOL_HOOKS) {
+  if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+  mergeToolHook(settings.hooks[event], phase);
+}
+
+for (const { event, phase } of LIFECYCLE_HOOKS) {
+  if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+  mergeLifecycleHook(settings.hooks[event], phase);
+}
 
 fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
 fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n', 'utf8');

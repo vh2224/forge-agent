@@ -2,6 +2,7 @@
 name: forge-executor
 description: GSD execution phase agent. Implements tasks — reads the plan, executes steps, verifies must-haves, commits, writes summary. Used for execute-task units. Balanced model for cost-effective implementation.
 model: claude-sonnet-4-6
+effort: low
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 
