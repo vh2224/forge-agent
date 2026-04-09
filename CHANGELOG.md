@@ -1,3 +1,16 @@
+## v0.7.0 (2026-04-09)
+
+### Features
+
+- feat: integrate skills via Skill tool — brainstorm/scope/risk-radar composable in workflow (837d746)
+- feat: effort/thinking per phase, WebSearch in researcher, SubagentStart/Stop + PreCompact hooks (2b9d3b0)
+- feat: AskUserQuestion + PlanMode in discusser, TaskList/TaskStop in orchestrators (9d0a79f)
+
+### Other Changes
+
+- Merge branch 'master' of https://github.com/vh2224/forge-agent (9c1fb90)
+
+
 ## v0.6.1 (2026-04-09)
 
 ### Bug Fixes
