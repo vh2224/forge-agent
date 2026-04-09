@@ -26,8 +26,6 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ---
 
 
-Use the **forge** agent to add a new slice to an existing milestone.
-
 ## Input
 $ARGUMENTS
 

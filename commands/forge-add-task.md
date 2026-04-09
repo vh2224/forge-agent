@@ -26,8 +26,6 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ---
 
 
-Use the **forge** agent to add or plan a specific task within a slice.
-
 ## Input
 $ARGUMENTS
 
