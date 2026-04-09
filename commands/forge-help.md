@@ -53,8 +53,7 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 | Comando | O que faz |
 |---------|-----------|
 | `/forge-status` | Dashboard do projeto — milestone ativo, progresso de slices e tasks, próxima ação. |
-| `/forge-doctor` | Diagnóstico do projeto — valida STATE, arquivos de milestone/slice/task e prefs. Execute antes de uma run longa. |
-| `/forge-fix` | Corrige problemas no projeto — repara STATE, arquivos ausentes, frontmatter, prefs e estrutura. Use `--dry-run` para preview. |
+| `/forge-doctor` | Diagnóstico do projeto — valida STATE, checkboxes, arquivos e prefs. Use `--fix` para corrigir automaticamente. |
 | `/forge-explain <alvo>` | Explica qualquer artefato sem modificar nada. Alvos válidos: `M001`, `S03`, `T02`, `decisions`, `state`, `all`. |
 | `/forge-memories` | Gerencia as memórias auto-aprendidas do projeto. Sub-comandos: `show` (padrão), `stats`, `clean`, `export`, `inject`. |
 | `/forge-ask` | Modo conversa com o agente — discute ideias, captura decisões, salva sessão automaticamente. Se o chat cair, `/forge-ask resume` retoma. |
@@ -73,6 +72,9 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 
 | Comando | O que faz |
 |---------|-----------|
+| `/forge-doctor` | Diagnóstico do projeto — relatório de problemas encontrados. |
+| `/forge-doctor --fix` | Diagnostica E corrige automaticamente (STATE, checkboxes, arquivos, prefs). |
+| `/forge-doctor --fix --dry-run` | Mostra o que `--fix` faria sem alterar nada. |
 | `/forge-update` | Atualiza o GSD Agent para a versão mais recente (git pull + reinstala agents/commands/skills). Preserva suas preferências. |
 | `/forge-update <caminho>` | Mesmo que acima, mas especificando o caminho do repositório manualmente. |
 
