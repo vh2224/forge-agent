@@ -56,7 +56,7 @@ completed_at: ISO8601
 
 Follow with: **one substantive liner** + `## What Happened` + `## Deviations` + `## Files Created/Modified`
 
-Before returning the result block, append one line to `{WORKING_DIR}/.gsd/events.jsonl`:
+Before returning the result block, append one line to `{WORKING_DIR}/.gsd/forge/events.jsonl` (create directory if missing):
 
 ```json
 {"ts":"{ISO8601}","unit":"execute-task/{T##}","agent":"forge-executor","milestone":"{M###}","slice":"{S##}","task":"{T##}","status":"{done|blocked|partial}","summary":"{one-liner of what was done or why blocked}","key_decisions":["{decision1}"],"files_changed":["{path1}"]}

@@ -119,7 +119,7 @@ Parse the `---GSD-WORKER-RESULT---` block:
 
 ### 6. Post-unit housekeeping
 
-**a) Append to event log** — append one line to `.gsd/events.jsonl` (create if missing):
+**a) Append to event log** — append one line to `.gsd/forge/events.jsonl` (create `.gsd/forge/` directory if missing):
 ```json
 {"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"{M###}","status":"{done|blocked|partial}","summary":"{one-liner}"}
 ```
