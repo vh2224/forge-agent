@@ -131,13 +131,16 @@ else
 fi
 
 # ── Store repo path for /forge-update ──────────────────────────────────────────
+# Use sed -i '' for macOS (BSD sed) compatibility; GNU sed ignores the empty string arg
+_sed_inplace() { sed -i '' "$@" 2>/dev/null || sed -i "$@"; }
+
 if ! $DRY_RUN && [ -f "$PREFS_DST" ]; then
   if grep -q "^repo_path:" "$PREFS_DST" 2>/dev/null; then
-    sed -i "s|^repo_path:.*|repo_path: ${REPO_DIR}|" "$PREFS_DST"
+    _sed_inplace "s|^repo_path:.*|repo_path: ${REPO_DIR}|" "$PREFS_DST"
   else
     # Append repo_path under Update Settings section if present, else append at end
     if grep -q "repo_path:" "$PREFS_DST" 2>/dev/null; then
-      sed -i "s|repo_path:.*|repo_path: ${REPO_DIR}|" "$PREFS_DST"
+      _sed_inplace "s|repo_path:.*|repo_path: ${REPO_DIR}|" "$PREFS_DST"
     else
       printf '\n## Update Settings\n\n```\nrepo_path: %s\n```\n' "${REPO_DIR}" >> "$PREFS_DST"
     fi
