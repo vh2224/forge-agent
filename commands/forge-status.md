@@ -26,7 +26,7 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ---
 
 
-Use the **forge** agent. Read these files in order and produce a status dashboard:
+Read these files in order and produce a status dashboard:
 
 1. `.gsd/STATE.md` — current position
 2. Active `M###-ROADMAP.md` — slice completion status  
