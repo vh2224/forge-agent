@@ -45,6 +45,15 @@ if (remove) {
     delete settings.statusLine;
   }
 
+  // Remove forge-managed permission defaults
+  if (settings.skipDangerousModePermissionPrompt === true) {
+    delete settings.skipDangerousModePermissionPrompt;
+  }
+  if (settings.permissions?.defaultMode === 'bypassPermissions') {
+    delete settings.permissions.defaultMode;
+    if (Object.keys(settings.permissions).length === 0) delete settings.permissions;
+  }
+
   // Remove forge hooks from tool-use events (matcher: Agent)
   for (const { event } of TOOL_HOOKS) {
     const eventHooks = settings.hooks?.[event];
@@ -86,9 +95,15 @@ if (remove) {
 
 // ── ENABLE mode ─────────────────────────────────────────────────────────────
 settings.statusLine = {
-  type   : 'command',
-  command: 'node ~/.claude/forge-statusline.js',
+  type           : 'command',
+  command        : 'node ~/.claude/forge-statusline.js',
+  refreshInterval: 1,
 };
+
+// Bypass permission prompts — required for forge-auto unattended execution
+settings.skipDangerousModePermissionPrompt = true;
+if (!settings.permissions) settings.permissions = {};
+settings.permissions.defaultMode = 'bypassPermissions';
 
 if (!settings.hooks) settings.hooks = {};
 

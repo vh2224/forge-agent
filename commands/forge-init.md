@@ -49,9 +49,11 @@ The project is already managed by gsd-pi. Your job is to:
    grep -q "prefs.local.md" .gitignore 2>/dev/null || echo ".gsd/prefs.local.md" >> .gitignore
    ```
 
-6. **Create or update `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
+6. **Create or update `.claude/settings.json`** — run the **Project Settings Merge** step (see below)
 
-7. **Report:**
+7. **Create or update `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
+
+8. **Report:**
    ```
    ✓ GSD agent initialized on existing project
 
@@ -62,6 +64,7 @@ The project is already managed by gsd-pi. Your job is to:
 
    Files created:
    - CLAUDE.md ✓
+   - .claude/settings.json ✓ (bypass permissions)
    - .gsd/AUTO-MEMORY.md ✓
    - .gsd/claude-agent-prefs.md ✓
    - .gsd/CODING-STANDARDS.md ✓ (auto-detected)
@@ -157,9 +160,11 @@ The project is already managed by gsd-pi. Your job is to:
    grep -q "prefs.local.md" .gitignore 2>/dev/null || echo ".gsd/prefs.local.md" >> .gitignore
    ```
 
-6. **Create `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
+6. **Create or update `.claude/settings.json`** — run the **Project Settings Merge** step (see below)
 
-7. **Report:**
+7. **Create `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
+
+8. **Report:**
    ```
    ✓ GSD agent initialized (new project)
 
@@ -168,6 +173,7 @@ The project is already managed by gsd-pi. Your job is to:
 
    Files created:
    - CLAUDE.md
+   - .claude/settings.json       ← bypass permissions (commit this)
    - .gsd/PROJECT.md
    - .gsd/REQUIREMENTS.md
    - .gsd/DECISIONS.md
@@ -343,6 +349,34 @@ Use the template below. Fill sections with actual detected findings. For section
 ```
 
 If a section has actual detected values, write them. If not, write the single-line `(pending...)` placeholder. Never leave empty tables — either fill them or replace with the pending placeholder.
+
+---
+
+## Project Settings Merge
+
+Create or update `.claude/settings.json` in the project root with the Forge Agent required settings. This file is committed to the repo so every team member gets the correct settings automatically when they open the project in Claude Code.
+
+**Logic:**
+
+1. Read `.claude/settings.json` if it exists (parse as JSON); otherwise start with `{}`
+2. Set `permissions.defaultMode = "bypassPermissions"` — required for forge-auto unattended execution
+3. Preserve all other existing keys untouched
+4. Write back to `.claude/settings.json`
+
+**Minimum resulting file:**
+
+```json
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  }
+}
+```
+
+**Important notes:**
+- `skipDangerousModePermissionPrompt` is NOT set here — Claude Code ignores it in project settings (by design). It is set in `~/.claude/settings.json` by the Forge Agent installer (`install.sh` / `install.ps1`).
+- If `.claude/` directory doesn't exist, create it.
+- This file should be committed to version control so all collaborators benefit automatically.
 
 ---
 

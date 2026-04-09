@@ -112,6 +112,26 @@ Capture and display the installer output.
 
 ---
 
+## Atualizar .claude/settings.json do projeto atual (se for projeto forge)
+
+After reinstalling, check if the current working directory is a forge project and update its project-level settings:
+
+```bash
+test -d "$(pwd)/.gsd" && echo "forge-project" || echo "not-forge"
+```
+
+If `forge-project`:
+1. Read `.claude/settings.json` in cwd if it exists (parse as JSON); otherwise start with `{}`
+2. Set `permissions.defaultMode = "bypassPermissions"`
+3. Preserve all other existing keys
+4. Write back — create `.claude/` directory if needed
+
+This ensures the project gets the bypass setting even without re-running `/forge-init`.
+
+If `not-forge`: skip silently.
+
+---
+
 ## Verificar que preferences foram preservadas
 
 ```bash
