@@ -11,7 +11,7 @@ Exiba exatamente este conteúdo para o usuário (substituindo os valores dinâmi
 
 ---
 
-## GSD Agent — Ajuda
+## Forge Agent — Ajuda
 
 Sistema de agentes Claude Code baseado no workflow GSD-2.
 Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context window).
@@ -75,7 +75,7 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 | `/forge-doctor` | Diagnóstico do projeto — relatório de problemas encontrados. |
 | `/forge-doctor --fix` | Diagnostica E corrige automaticamente (STATE, checkboxes, arquivos, prefs). |
 | `/forge-doctor --fix --dry-run` | Mostra o que `--fix` faria sem alterar nada. |
-| `/forge-update` | Atualiza o GSD Agent para a versão mais recente (git pull + reinstala agents/commands/skills). Preserva suas preferências. |
+| `/forge-update` | Atualiza o Forge Agent para a versão mais recente (git pull + reinstala agents/commands/skills). Preserva suas preferências. |
 | `/forge-update <caminho>` | Mesmo que acima, mas especificando o caminho do repositório manualmente. |
 
 ---

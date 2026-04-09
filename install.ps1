@@ -1,4 +1,4 @@
-# GSD Agent — Installer for Claude Code (Windows PowerShell)
+# Forge Agent — Installer for Claude Code (Windows PowerShell)
 # Usage: .\install.ps1 [-Update] [-DryRun]
 
 param(
@@ -32,7 +32,7 @@ function CopyFile($src, $dst) {
 
 # ── Header ───────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "GSD Agent Installer" -ForegroundColor Cyan
+Write-Host "Forge Agent Installer" -ForegroundColor Cyan
 Write-Host "═══════════════════════"
 Write-Host ""
 
@@ -51,7 +51,7 @@ $hasExisting = (Get-ChildItem "$AgentsDir\forge*.md" -ErrorAction SilentlyContin
 
 if ($hasExisting -and -not $Update) {
     Write-Host ""
-    Warn "GSD Agent já está instalado."
+    Warn "Forge Agent já está instalado."
     Write-Host "  Execute com -Update para atualizar (backup automático):"
     Write-Host "  .\install.ps1 -Update"
     exit 0
@@ -182,7 +182,7 @@ Write-Host "══════════════════════�
 if ($DryRun) {
     Write-Host "Dry run completo. Nenhum arquivo alterado." -ForegroundColor Cyan
 } else {
-    Success "GSD Agent instalado com sucesso!"
+    Success "Forge Agent instalado com sucesso!"
     Write-Host ""
     Write-Host "  Próximos passos:"
     Write-Host "  1. Navegue até um projeto:  cd C:\seu\projeto"

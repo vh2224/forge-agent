@@ -1,5 +1,5 @@
 ---
-description: "Atualiza o GSD Agent para a versão mais recente do repositório. Faz git pull e reinstala agents/commands/skills. Preserva suas preferências. Use: /forge-update | /forge-update /caminho/para/gsd-agent"
+description: "Atualiza o Forge Agent para a versão mais recente do repositório. Faz git pull e reinstala agents/commands/skills. Preserva suas preferências. Use: /forge-update | /forge-update /caminho/para/forge-agent"
 allowed-tools: Read, Bash
 ---
 
@@ -11,33 +11,34 @@ allowed-tools: Read, Bash
 
 Read `~/.claude/forge-agent-prefs.md` and look for:
 ```
-repo_path: /path/to/gsd-agent
+repo_path: /path/to/forge-agent
 ```
 
 If `repo_path` is set and non-empty → use it.
 
-If `repo_path` is NOT set or the file doesn't exist, try to auto-detect by checking if the current working directory is a valid gsd-agent repo:
+If `repo_path` is NOT set or the file doesn't exist, try to auto-detect by checking if the current working directory is a valid forge-agent repo:
 
 ```bash
-test -f "$(pwd)/install.sh" && grep -q "GSD Agent" "$(pwd)/install.sh" 2>/dev/null && echo "found" || echo "not-found"
+test -f "$(pwd)/install.sh" && grep -q "Forge Agent\|GSD Agent" "$(pwd)/install.sh" 2>/dev/null && echo "found" || echo "not-found"
 ```
 
 If "found": use `$(pwd)` as REPO_PATH and persist it:
 ```bash
-sed -i "s|repo_path:.*|repo_path: $(pwd)|" ~/.claude/forge-agent-prefs.md 2>/dev/null || \
+sed -i '' "s|repo_path:.*|repo_path: $(pwd)|" ~/.claude/forge-agent-prefs.md 2>/dev/null || \
+  sed -i "s|repo_path:.*|repo_path: $(pwd)|" ~/.claude/forge-agent-prefs.md 2>/dev/null || \
   echo "repo_path: $(pwd)" >> ~/.claude/forge-agent-prefs.md
 ```
 Tell user: `repo_path detectado automaticamente: {REPO_PATH}` and continue.
 
 If "not-found":
 ```
-Não foi possível encontrar o repositório do GSD Agent.
+Não foi possível encontrar o repositório do Forge Agent.
 
 Passe o caminho como argumento:
-  /forge-update /caminho/para/gsd-agent
+  /forge-update /caminho/para/forge-agent
 
 Ou rode o instalador novamente para registrar o caminho:
-  bash /caminho/para/gsd-agent/install.sh --update
+  bash /caminho/para/forge-agent/install.sh --update
 ```
 Stop.
 
@@ -50,17 +51,17 @@ test -f "{REPO_PATH}/install.sh" && echo "valid" || echo "invalid"
 test -d "{REPO_PATH}/.git" && echo "git" || echo "no-git"
 ```
 
-If `invalid`: tell user the path doesn't look like a gsd-agent repo and stop.
+If `invalid`: tell user the path doesn't look like a forge-agent repo and stop.
 
 ---
 
-## Mostrar versão atual
+## Capturar versão atual (antes do pull)
 
 ```bash
 cd "{REPO_PATH}" && git log --oneline -1 2>/dev/null || echo "(sem git)"
 ```
 
-Tell user: `Versão atual: {commit hash and message}`
+Store as `OLD_COMMIT` (hash + message). Also store just the hash as `OLD_HASH`.
 
 ---
 
@@ -72,11 +73,21 @@ If `.git` exists:
 cd "{REPO_PATH}" && git pull 2>&1
 ```
 
-- If output contains `Already up to date.` → tell user "Já está na versão mais recente." and stop.
+- If output contains `Already up to date.` → tell user "Forge Agent já está na versão mais recente." and stop.
 - If output contains `error:` or `fatal:` → show the error and stop.
-- Otherwise: show what changed (lines starting with `|` or filenames in the pull output).
+- Otherwise: proceed to reinstall.
 
 If `.git` does NOT exist: skip this step and proceed with reinstall using existing files.
+
+---
+
+## Capturar versão nova (depois do pull)
+
+```bash
+cd "{REPO_PATH}" && git log --oneline -1 2>/dev/null
+```
+
+Store as `NEW_COMMIT`.
 
 ---
 
@@ -115,22 +126,61 @@ echo "repo_path: {REPO_PATH}" >> ~/.claude/forge-agent-prefs.md
 
 ---
 
+## Gerar notas de atualização
+
+Collect commits between old and new versions:
+
+```bash
+cd "{REPO_PATH}" && git log --oneline {OLD_HASH}..HEAD 2>/dev/null
+```
+
+Parse each commit and classify by conventional commit prefix:
+
+- `feat:` or `feat(...):`  → **Novidades**
+- `fix:` or `fix(...):`    → **Correções**
+- `refactor:` or `refactor(...):` → **Melhorias**
+- `perf:` or `perf(...):`  → **Melhorias**
+- `docs:`, `chore:`, `ci:` → skip (não exibir)
+
+If a commit message contains `[skip ci]` → skip it.
+
+---
+
 ## Relatório final
 
+Emit the update report in this exact format:
+
 ```
-✓ GSD Agent atualizado
+══════════════════════════════════════
+  Forge Agent atualizado com sucesso
+══════════════════════════════════════
 
-De:  {commit hash antes do pull}
-Para: {commit hash depois do pull, ou "mesmo" se já estava atualizado}
+  De:   {OLD_COMMIT}
+  Para: {NEW_COMMIT}
 
-Arquivos atualizados:
-  ~/.claude/agents/forge*.md
-  ~/.claude/commands/forge*.md
-  ~/.claude/skills/gsd-*/SKILL.md
+─── Notas de atualização ───
 
-Preferências preservadas: ~/.claude/forge-agent-prefs.md ✓
+{If there are commits classified as "Novidades":}
+Novidades:
+  - {commit message without prefix, one per line}
 
-Para ver o que mudou: git log --oneline {REPO_PATH}
+{If there are commits classified as "Correções":}
+Correções:
+  - {commit message without prefix, one per line}
+
+{If there are commits classified as "Melhorias":}
+Melhorias:
+  - {commit message without prefix, one per line}
+
+─────────────────────────────
+
+  Preferências preservadas ✓
+  Para ver detalhes: git log --oneline {OLD_HASH}..HEAD
 ```
 
-Se o pull não encontrou mudanças, diga ao usuário que o GSD Agent já estava na versão mais recente e nenhum arquivo foi alterado.
+**Rules for the report:**
+- Strip the conventional commit prefix from messages (e.g. `feat: add X` → `add X`, `fix(install): Y` → `Y`)
+- Strip scope parentheses from prefix (keep only the message)
+- If all commits are docs/chore/ci (nothing to show), say: `Atualização interna — sem mudanças visíveis para o usuário.`
+- Keep each line under 100 chars — truncate with `...` if needed
+- Do NOT add extra commentary, tips, or suggestions after the report

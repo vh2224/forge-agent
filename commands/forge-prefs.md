@@ -29,7 +29,7 @@ O usuário pode passar tanto o alias quanto o model ID completo — ambos são a
 Read `~/.claude/forge-agent-prefs.md`. Display:
 
 ```
-GSD Agent — Configuração atual
+Forge Agent — Configuração atual
 
 MODELOS DISPONÍVEIS
   opus   → claude-opus-4-6           (análise profunda, planejamento)

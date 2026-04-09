@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GSD Agent — Installer for Claude Code (macOS / Linux / Windows Git Bash)
+# Forge Agent — Installer for Claude Code (macOS / Linux / Windows Git Bash)
 # Usage: bash install.sh [--update] [--dry-run]
 
 set -euo pipefail
@@ -41,7 +41,7 @@ copy() {
 
 # ── Detect Claude Code ────────────────────────────────────────────────────────
 echo ""
-echo "GSD Agent Installer"
+echo "Forge Agent Installer"
 echo "════════════════════"
 echo ""
 
@@ -63,7 +63,7 @@ done
 
 if $has_existing && ! $UPDATE; then
   echo ""
-  warn "GSD Agent files already exist."
+  warn "Forge Agent files already exist."
   echo "  Run with --update to overwrite (existing files will be backed up)."
   echo "  Or run: bash install.sh --update"
   exit 0
@@ -195,7 +195,7 @@ echo "════════════════════"
 if $DRY_RUN; then
   echo "Dry run completo. Nenhum arquivo foi alterado."
 else
-  success "GSD Agent instalado com sucesso!"
+  success "Forge Agent instalado com sucesso!"
   echo ""
   echo "  Próximos passos:"
   echo "  1. Navegue até um projeto:  cd /seu/projeto"
