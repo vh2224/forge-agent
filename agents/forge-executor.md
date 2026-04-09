@@ -56,6 +56,14 @@ completed_at: ISO8601
 
 Follow with: **one substantive liner** + `## What Happened` + `## Deviations` + `## Files Created/Modified`
 
+Before returning the result block, append one line to `{WORKING_DIR}/.gsd/events.jsonl`:
+
+```json
+{"ts":"{ISO8601}","unit":"execute-task/{T##}","agent":"forge-executor","milestone":"{M###}","slice":"{S##}","task":"{T##}","status":"{done|blocked|partial}","summary":"{one-liner of what was done or why blocked}","key_decisions":["{decision1}"],"files_changed":["{path1}"]}
+```
+
+Omit `key_decisions` and `files_changed` if empty. Each event must be a single line (no newlines inside the JSON).
+
 Then return the `---GSD-WORKER-RESULT---` block.
 
 If returning `status: blocked`, include a `blocker_class` field:

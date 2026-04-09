@@ -119,11 +119,17 @@ Parse the `---GSD-WORKER-RESULT---` block:
 
 ### 6. Post-unit housekeeping
 
-**a) Update STATE.md** — advance to next unit position.
+**a) Append to event log** — append one line to `.gsd/events.jsonl` (create if missing):
+```json
+{"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"{M###}","status":"{done|blocked|partial}","summary":"{one-liner}"}
+```
+Each entry must be a single line. This is the orchestrator-side record; workers may also write their own entries.
 
-**b) Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md`.
+**b) Update STATE.md** — advance to next unit position.
 
-**c) Memory extraction** — call `forge-memory` agent (blocking — await before continuing):
+**c) Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md`.
+
+**d) Memory extraction** — call `forge-memory` agent (blocking — await before continuing):
 
 Determine which summary file was just written:
 - `execute-task` → `.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SUMMARY.md`
