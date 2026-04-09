@@ -5,3 +5,7 @@ Thumbs.db
 # Backups gerados pelo instalador (não commitar)
 *-backup-*/
 .claude/
+
+# Projeto local
+CLAUDE.md
+do-not-commit/

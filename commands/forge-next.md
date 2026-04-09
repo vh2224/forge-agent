@@ -1,6 +1,6 @@
 ---
 description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Argumentos: 'next' (mesmo que sem argumento), 'auto' (delega para /forge-auto)."
-allowed-tools: Read, Write, Edit, Bash, Agent
+allowed-tools: Read, Write, Edit, Bash, Agent, TaskCreate, TaskUpdate
 ---
 
 ## Parse arguments
@@ -92,10 +92,19 @@ Read ONLY the `.gsd/` artifact files the worker needs (templates below). Inline 
 
 ### 4. Dispatch
 
-Resolve the model ID for this unit from PREFS. Emit a dispatch line:
+Resolve the model ID for this unit from PREFS.
 
+**Create timeline task** — use `TaskCreate` to show progress in the UI:
 ```
-⟳ [M001/S02/T03] execute-task → forge-executor (claude-sonnet-4-6)
+TaskCreate({
+  subject: "[{M###}/{S##}/{T##}] {unit_type} — {one-liner}",
+  description: "{agent_name} ({model_id})",
+  activeForm: "{unit_type} {unit_id} — {one-liner} · {agent_name}"
+})
+```
+Store the returned `taskId` as `current_task_id`. Then immediately mark it as in progress:
+```
+TaskUpdate({ taskId: current_task_id, status: "in_progress" })
 ```
 
 Then call `Agent(agent_name, worker_prompt)` with a `description` that captures what is happening:
@@ -109,6 +118,10 @@ Then call `Agent(agent_name, worker_prompt)` with a `description` that captures 
 Wait for the result.
 
 ### 5. Process result
+
+**Update timeline task** — mark the current task based on outcome:
+- `status: done` → `TaskUpdate({ taskId: current_task_id, status: "completed" })`
+- `status: partial` or `status: blocked` → leave task as `in_progress` (shows it was interrupted)
 
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping
