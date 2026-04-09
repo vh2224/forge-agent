@@ -1,6 +1,6 @@
 ---
-name: gsd-memory
-description: Extrai memórias emergentes de uma unidade GSD concluída e persiste em AUTO-MEMORY.md. Recebe o conteúdo rico do trabalho executado (summary file + result block + key decisions). Chamado pelo orquestrador gsd após cada unidade.
+name: forge-memory
+description: Extrai memórias emergentes de uma unidade GSD concluída e persiste em AUTO-MEMORY.md. Recebe o conteúdo rico do trabalho executado (summary file + result block + key decisions). Chamado pelo orquestrador após cada unidade.
 model: claude-haiku-4-5-20251001
 tools: Read, Write, Edit, Bash
 ---

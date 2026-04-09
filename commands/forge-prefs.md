@@ -42,7 +42,7 @@ ROTEAMENTO POR FASE
   plan       → forge-planner     [claude-opus-4-6]
   execute    → forge-executor    [claude-sonnet-4-6]
   complete   → forge-completer   [claude-sonnet-4-6]
-  memory     → gsd-memory      [claude-haiku-4-5-20251001]
+  memory     → forge-memory     [claude-haiku-4-5-20251001]
 
 SKIP RULES
   skip_discuss:  false
@@ -105,7 +105,7 @@ Mapa fase → arquivo de agente:
 - `plan` → `~/.claude/agents/forge-planner.md`
 - `execute` → `~/.claude/agents/forge-executor.md`
 - `complete` → `~/.claude/agents/forge-completer.md`
-- `memory` → `~/.claude/agents/gsd-memory.md`
+- `memory` → `~/.claude/agents/forge-memory.md`
 
 Steps:
 1. Resolve o model ID completo (converta alias se necessário)

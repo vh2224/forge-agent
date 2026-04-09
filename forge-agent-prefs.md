@@ -28,7 +28,7 @@ Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-6`) em q
 | execute-task | forge-executor | claude-sonnet-4-6 | sonnet |
 | complete-slice | forge-completer | claude-sonnet-4-6 | sonnet |
 | complete-milestone | forge-completer | claude-sonnet-4-6 | sonnet |
-| memory-extract | gsd-memory | claude-haiku-4-5-20251001 | haiku |
+| memory-extract | forge-memory | claude-haiku-4-5-20251001 | haiku |
 
 ## Phase Skip Rules
 
