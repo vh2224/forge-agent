@@ -54,8 +54,9 @@ heavy    → forge-executor  (opus)     # tasks com decisões arquiteturais comp
 ## Git Settings
 
 ```
-merge_strategy: squash    # squash | merge | rebase
-auto_push: false          # push automático após squash merge
+auto_commit: true         # false = agente NÃO faz commits/merges (usuário gerencia git)
+merge_strategy: squash    # squash | merge | rebase (ignorado se auto_commit: false)
+auto_push: false          # push automático após squash merge (ignorado se auto_commit: false)
 main_branch: master       # branch principal
 isolation: none           # none | worktree (worktree = branch isolado por milestone)
 ```

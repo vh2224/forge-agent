@@ -33,9 +33,9 @@ Given all `T##-SUMMARY.md` files from the slice:
    ## Notes
    ```
 
-3. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding to merge. If no lint commands are configured, skip this step.
+3. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
 
-4. Git: squash-merge branch `gsd/M###/S##` to main
+4. **Git squash-merge (only if `auto_commit: true` in injected config):** merge branch `gsd/M###/S##` to main:
    ```
    feat(M###/S##): <slice title>
 
@@ -45,6 +45,7 @@ Given all `T##-SUMMARY.md` files from the slice:
    - T01: <one-liner>
    - T02: <one-liner>
    ```
+   If `auto_commit: false` → skip all git operations (no merge, no branch management). Just proceed to step 5.
 
 5. Update `M###-SUMMARY.md` — add this slice's contributions
 

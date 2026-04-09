@@ -23,7 +23,7 @@ You are a GSD execution agent. You implement one task completely: read → execu
 7. Execute each step, following the **Helper-First Protocol** and **DRY Guard** (see below). Mark `[DONE:n]` as you go.
 8. If you make an architectural decision → append to `DECISIONS.md`
 9. Verify every must-have (see ladder below)
-10. Commit: `feat(S##/T##): <one-liner>`
+10. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.
 11. Write `T##-SUMMARY.md` — include `new_helpers` field if you created reusable functions (see Summary Format)
 12. **Mark task complete:** update `status: DONE` in the frontmatter of `T##-PLAN.md`
 

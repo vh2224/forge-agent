@@ -244,6 +244,7 @@ Próximo milestone: /forge-new-milestone <descrição>
 ```
 Execute GSD task {T##} in slice {S##} of milestone {M###}.
 WORKING_DIR: {WORKING_DIR}
+auto_commit: {PREFS.auto_commit — true or false}
 
 ## Task Plan
 {content of T##-PLAN.md}
@@ -266,7 +267,9 @@ WORKING_DIR: {WORKING_DIR}
 ## Instructions
 Execute all steps. The task plan's ## Standards section has the relevant coding rules — follow them.
 Verify every must-have using the verification ladder — including lint/format check.
-Write T##-SUMMARY.md. Commit: feat(S##/T##): <one-liner>.
+Write T##-SUMMARY.md.
+If auto_commit is true: Commit with message feat(S##/T##): <one-liner>.
+If auto_commit is false: Do NOT run any git commands.
 Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
 ```
 
@@ -345,6 +348,7 @@ Return ---GSD-WORKER-RESULT---.
 ```
 Complete GSD slice {S##} of milestone {M###}.
 WORKING_DIR: {WORKING_DIR}
+auto_commit: {PREFS.auto_commit — true or false}
 
 ## Task Summaries
 {content of each T##-SUMMARY.md in this slice}
@@ -361,8 +365,11 @@ WORKING_DIR: {WORKING_DIR}
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
 2. Write S##-UAT.md (non-blocking human test script)
-3. Run lint gate — if lint commands exist, run on changed files. Fix violations before merge.
+3. Run lint gate — if lint commands exist, run on changed files. Fix violations.
+If auto_commit is true:
 4. Squash-merge branch gsd/M###/S## to main
+If auto_commit is false:
+4. Skip — do NOT run any git commands (no merge, no branch operations).
 5. Update M###-SUMMARY.md with this slice's contribution
 6. Mark slice [x] in M###-ROADMAP.md
 Return ---GSD-WORKER-RESULT---.
@@ -373,6 +380,7 @@ Return ---GSD-WORKER-RESULT---.
 ```
 Complete GSD milestone {M###}.
 WORKING_DIR: {WORKING_DIR}
+auto_commit: {PREFS.auto_commit — true or false}
 
 ## Slice Summaries
 {content of each S##-SUMMARY.md in this milestone}
@@ -386,7 +394,10 @@ WORKING_DIR: {WORKING_DIR}
 ## Instructions
 1. Write final M###-SUMMARY.md
 2. Mark milestone as complete in STATE.md (do modify STATE.md for this)
+If auto_commit is true:
 3. Write final git tag or note
+If auto_commit is false:
+3. Skip — do NOT run any git commands.
 Return ---GSD-WORKER-RESULT---.
 ```
 

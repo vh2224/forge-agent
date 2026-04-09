@@ -5,6 +5,8 @@ allowed-tools: Read, Write, Edit, Bash, Glob
 
 You are initializing GSD agent support for the current project directory. Follow the detection flow below exactly.
 
+**GIT RULE — CRITICAL:** NEVER run `git init`. If the project has no `.git/` directory, that is the user's choice. The Forge Agent works with or without git. Do not create, initialize, or suggest creating a git repository.
+
 ## Input
 $ARGUMENTS
 
@@ -75,7 +77,13 @@ The project is already managed by gsd-pi. Your job is to:
    - If `$ARGUMENTS` has a description → use it as project description
    - Otherwise → ask: "Descreva o projeto em 2-3 frases. O que ele faz e qual o stack principal?"
 
-2. **Create `.gsd/` structure:**
+2. **Ask about git management:**
+   - Ask: "Deseja que o Forge Agent gerencie os commits automaticamente? (sim/não)"
+   - `sim` → set `auto_commit: true` in `.gsd/claude-agent-prefs.md`
+   - `não` → set `auto_commit: false` in `.gsd/claude-agent-prefs.md`
+   - **IMPORTANT:** Never run `git init`. If the project has no `.git/`, that's the user's choice. The agent works with or without git.
+
+3. **Create `.gsd/` structure:**
 
    **`.gsd/PROJECT.md`:**
    ```markdown
@@ -357,6 +365,7 @@ project: <project name>
 
 ## Git Settings
 
+auto_commit: <true or false — based on user answer in step 2>
 merge_strategy: squash
 main_branch: master
 auto_push: false
