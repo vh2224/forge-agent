@@ -106,8 +106,21 @@ Wait for the result.
 
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping, then continue loop
-- `status: blocked` → surface blocker to user, **stop loop**
 - `status: partial` → write `continue.md`, update STATE, emit compact signal, **stop loop**
+- `status: blocked` → apply failure taxonomy before stopping:
+
+**Failure Taxonomy** (check `blocker` field in result, first match wins):
+
+| Class | Signals | Auto-recovery |
+|-------|---------|---------------|
+| `context_overflow` | "context limit", "too long", "token" | Retry with `complexity: heavy` routing (opus) — larger context window |
+| `scope_exceeded` | "out of scope", "too broad", "multiple tasks" | Stop loop. Tell user: "Task scope too broad — ask forge-planner to split T## into smaller tasks." |
+| `model_refusal` | "cannot", "I'm not able", "policy" | Retry once with a different model (sonnet ↔ opus). If fails again → stop loop, surface to user. |
+| `tooling_failure` | "command not found", "permission denied", "ENOENT" | Stop loop. Tell user: "Tooling error — check that required tools are installed and accessible." |
+| `external_dependency` | "API", "network", "not running", "connection refused" | Stop loop. Tell user: "External dependency unavailable — resolve and re-run /forge-auto." |
+| `unknown` | anything else | Stop loop. Surface raw blocker to user. |
+
+Auto-recovery attempts (context_overflow, model_refusal) count as units toward `COMPACT_AFTER`.
 
 #### 6. Post-unit housekeeping
 

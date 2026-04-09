@@ -57,3 +57,9 @@ completed_at: ISO8601
 Follow with: **one substantive liner** + `## What Happened` + `## Deviations` + `## Files Created/Modified`
 
 Then return the `---GSD-WORKER-RESULT---` block.
+
+If returning `status: blocked`, include a `blocker_class` field:
+```
+blocker_class: context_overflow | scope_exceeded | model_refusal | tooling_failure | external_dependency | unknown
+blocker: <one-line description of what blocked>
+```

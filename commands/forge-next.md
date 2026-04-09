@@ -102,8 +102,17 @@ Wait for the result.
 
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping
-- `status: blocked` → surface blocker to user, stop
 - `status: partial` → write `continue.md`, update STATE, emit compact signal, stop
+- `status: blocked` → classify failure before surfacing to user:
+
+| Class | Signals | Message to user |
+|-------|---------|-----------------|
+| `context_overflow` | "context limit", "too long", "token" | "Task too large for one context window. Run `/forge-next` again — it will retry with a more capable model." |
+| `scope_exceeded` | "out of scope", "too broad" | "Task scope too broad. Ask the planner to split T## before continuing." |
+| `model_refusal` | "cannot", "I'm not able", "policy" | "Model refused the task. Try `/forge-next` again or adjust the task plan." |
+| `tooling_failure` | "command not found", "permission denied", "ENOENT" | "Tooling error — check that required tools are installed." |
+| `external_dependency` | "API", "network", "not running" | "External dependency unavailable — resolve it and re-run `/forge-next`." |
+| `unknown` | anything else | Surface raw blocker message. |
 
 ### 6. Post-unit housekeeping
 
