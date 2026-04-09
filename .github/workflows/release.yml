@@ -142,7 +142,6 @@ jobs:
           done <<< "$COMMITS"
 
           {
-            echo "body<<CHANGELOG_EOF"
             if [ -n "$BREAKING" ]; then
               echo "### Breaking Changes"
               echo ""
@@ -163,8 +162,7 @@ jobs:
               echo ""
               echo -e "$OTHER"
             fi
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
+          } > /tmp/changelog.md
 
       - name: Create release
         if: steps.bump.outputs.skip != 'true'
@@ -173,5 +171,5 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.new_tag }}" \
             --title "${{ steps.version.outputs.new_tag }}" \
-            --notes "${{ steps.changelog.outputs.body }}" \
+            --notes-file /tmp/changelog.md \
             --target "${{ github.sha }}"
