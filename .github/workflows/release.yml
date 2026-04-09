@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: latest_tag
+        run: |
+          tag=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$tag" ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "No previous tag found, will start at v0.1.0"
+          else
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "Latest tag: $tag"
+          fi
+
+      - name: Determine version bump
+        id: bump
+        run: |
+          LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
+
+          if [ -z "$LATEST_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${LATEST_TAG}..HEAD"
+          fi
+
+          COMMITS=$(git log "$RANGE" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+
+          if [ -z "$COMMITS" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BUMP="none"
+
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qiE '^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE'; then
+              BUMP="major"
+              break
+            fi
+          done <<< "$COMMITS"
+
+          if [ "$BUMP" = "none" ]; then
+            while IFS= read -r msg; do
+              if echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
+                BUMP="minor"
+                break
+              fi
+            done <<< "$COMMITS"
+          fi
+
+          if [ "$BUMP" = "none" ]; then
+            while IFS= read -r msg; do
+              if echo "$msg" | grep -qE '^fix(\(.+\))?:'; then
+                BUMP="patch"
+              fi
+            done <<< "$COMMITS"
+          fi
+
+          if [ "$BUMP" = "none" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No releasable commits (feat/fix/breaking), skipping."
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "Bump type: $BUMP"
+
+      - name: Calculate next version
+        if: steps.bump.outputs.skip != 'true'
+        id: version
+        run: |
+          LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
+          BUMP="${{ steps.bump.outputs.bump }}"
+
+          if [ -z "$LATEST_TAG" ]; then
+            MAJOR=0; MINOR=0; PATCH=0
+          else
+            VERSION="${LATEST_TAG#v}"
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            PATCH=$(echo "$VERSION" | cut -d. -f3)
+          fi
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "Next version: $NEW_TAG"
+
+      - name: Generate changelog
+        if: steps.bump.outputs.skip != 'true'
+        id: changelog
+        run: |
+          LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
+
+          if [ -z "$LATEST_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${LATEST_TAG}..HEAD"
+          fi
+
+          COMMITS=$(git log "$RANGE" --pretty=format:"%H %s" 2>/dev/null || git log --pretty=format:"%H %s")
+
+          BREAKING=""
+          FEATURES=""
+          FIXES=""
+          OTHER=""
+
+          while IFS= read -r line; do
+            HASH=$(echo "$line" | cut -c1-7)
+            MSG=$(echo "$line" | cut -d' ' -f2-)
+
+            if echo "$MSG" | grep -qiE '^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE'; then
+              BREAKING="${BREAKING}- ${MSG} (${HASH})\n"
+            elif echo "$MSG" | grep -qE '^feat(\(.+\))?:'; then
+              FEATURES="${FEATURES}- ${MSG} (${HASH})\n"
+            elif echo "$MSG" | grep -qE '^fix(\(.+\))?:'; then
+              FIXES="${FIXES}- ${MSG} (${HASH})\n"
+            else
+              OTHER="${OTHER}- ${MSG} (${HASH})\n"
+            fi
+          done <<< "$COMMITS"
+
+          {
+            echo "body<<CHANGELOG_EOF"
+            if [ -n "$BREAKING" ]; then
+              echo "### Breaking Changes"
+              echo ""
+              echo -e "$BREAKING"
+            fi
+            if [ -n "$FEATURES" ]; then
+              echo "### Features"
+              echo ""
+              echo -e "$FEATURES"
+            fi
+            if [ -n "$FIXES" ]; then
+              echo "### Bug Fixes"
+              echo ""
+              echo -e "$FIXES"
+            fi
+            if [ -n "$OTHER" ]; then
+              echo "### Other Changes"
+              echo ""
+              echo -e "$OTHER"
+            fi
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.new_tag }}" \
+            --title "${{ steps.version.outputs.new_tag }}" \
+            --notes "${{ steps.changelog.outputs.body }}" \
+            --target "${{ github.sha }}"
