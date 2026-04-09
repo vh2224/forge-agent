@@ -163,12 +163,13 @@ KEY_DECISIONS:
 {key_decisions field from result, or "(none)"}
 ```
 
-**d) Emit progress line:**
+**d) Emit progress + next action:**
 ```
 ✓ [M001/S02/T03] execute-task — JWT auth with refresh rotation  · forge-executor (claude-sonnet-4-6)
+→ Next: /forge-next para {next unit_type} {unit_id}
 ```
 
-Then stop. Display the progress line to the user. Do not add summaries or follow-up text — the user will decide whether to run `/forge-next` again.
+Display the progress line AND the next action (read from the STATE.md you just updated). The user needs to know what comes next to decide whether to continue. Do not add summaries, explanations, or other follow-up text beyond these two lines.
 
 ---
 
