@@ -128,21 +128,31 @@ echo "repo_path: {REPO_PATH}" >> ~/.claude/forge-agent-prefs.md
 
 ## Gerar notas de atualização
 
-Collect commits between old and new versions:
+Collect full commit messages (title + body) between old and new versions:
 
 ```bash
-cd "{REPO_PATH}" && git log --oneline {OLD_HASH}..HEAD 2>/dev/null
+cd "{REPO_PATH}" && git log {OLD_HASH}..HEAD --format="===COMMIT===%n%h %s%n%b" 2>/dev/null
 ```
 
-Parse each commit and classify by conventional commit prefix:
+Split output by `===COMMIT===` separator. For each commit:
 
-- `feat:` or `feat(...):`  → **Novidades**
-- `fix:` or `fix(...):`    → **Correções**
-- `refactor:` or `refactor(...):` → **Melhorias**
-- `perf:` or `perf(...):`  → **Melhorias**
-- `docs:`, `chore:`, `ci:` → skip (não exibir)
+1. **Skip non-user-facing commits** — drop anything that does NOT affect the user's experience with `/forge-*` commands, agents, or installer:
+   - `docs:`, `chore:`, `ci:` prefix → skip always
+   - Title contains `[skip ci]` → skip
+   - **Relevance filter:** If the commit is about CI pipelines, release workflows, changelog generation, internal tooling, GitHub Actions, or any infrastructure that the user never interacts with → skip, even if prefixed with `feat:` or `fix:`. The user doesn't need to know about internal plumbing.
 
-If a commit message contains `[skip ci]` → skip it.
+2. **Classify** remaining commits by conventional commit prefix:
+   - `feat:` or `feat(...):`  → **Novidades**
+   - `fix:` or `fix(...):`    → **Correções**
+   - `refactor:` or `refactor(...):` → **Melhorias**
+   - `perf:` or `perf(...):`  → **Melhorias**
+
+3. **Synthesize a user-facing description** from the commit body:
+   - Read the full body (the paragraph after the title). It explains the WHY and WHAT in detail.
+   - Write a 1-2 sentence description in Portuguese (pt-BR) that explains **what changed and why it matters to the user**. Focus on the impact, not implementation details.
+   - Do NOT just repeat the commit title translated — use the body to add real context.
+   - If the commit has no body (title only), use the title translated to Portuguese as fallback.
+   - Strip any `Co-Authored-By` lines from the body before analyzing.
 
 ---
 
@@ -160,17 +170,20 @@ Emit the update report in this exact format:
 
 ─── Notas de atualização ───
 
-{If there are commits classified as "Novidades":}
+{If there are entries classified as "Novidades":}
 Novidades:
-  - {commit message without prefix, one per line}
+  - {synthesized description}
+  - ...
 
-{If there are commits classified as "Correções":}
+{If there are entries classified as "Correções":}
 Correções:
-  - {commit message without prefix, one per line}
+  - {synthesized description}
+  - ...
 
-{If there are commits classified as "Melhorias":}
+{If there are entries classified as "Melhorias":}
 Melhorias:
-  - {commit message without prefix, one per line}
+  - {synthesized description}
+  - ...
 
 ─────────────────────────────
 
@@ -179,8 +192,7 @@ Melhorias:
 ```
 
 **Rules for the report:**
-- Strip the conventional commit prefix from messages (e.g. `feat: add X` → `add X`, `fix(install): Y` → `Y`)
-- Strip scope parentheses from prefix (keep only the message)
+- Each description: 1-2 sentences in Portuguese, max 120 chars per line (break into 2 lines if needed)
+- Focus on user impact: "Agora o X faz Y" / "Corrigido problema onde X causava Y"
 - If all commits are docs/chore/ci (nothing to show), say: `Atualização interna — sem mudanças visíveis para o usuário.`
-- Keep each line under 100 chars — truncate with `...` if needed
 - Do NOT add extra commentary, tips, or suggestions after the report
