@@ -78,6 +78,11 @@ Identify structures that repeat across the codebase (e.g., every API route follo
 | {name} | {trigger condition} | {file1}, {file2}, ... | 1. ... 2. ... 3. ... |
 Max 10 patterns. Only document patterns that appear 3+ times in the codebase.
 
+## Security Considerations
+*(Include only if scope involves: auth, crypto, data handling, external APIs, user input, file ops, or secrets. Omit section entirely if none apply.)*
+| Concern | Risk Level | Recommended Mitigation |
+|---------|------------|------------------------|
+
 ## Sources
 - File reads: `path/to/file.ts` — what was found
 - Web search: `query used` → finding (confidence: HIGH|MEDIUM|LOW)

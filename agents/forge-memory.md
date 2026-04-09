@@ -118,4 +118,28 @@ Use this structure:
 
 Only include sections that have entries. Sort entries within each section by score descending: `confidence × (1 + hits × 0.1)`.
 
-**Do not output anything else. Just write the file.**
+## Step 5 — Promote to CLAUDE.md
+
+After writing AUTO-MEMORY.md, identify promotion candidates:
+- `confidence >= 0.85` AND `hits >= 3`
+- Category is NOT `preference` or `environment`
+
+For each candidate:
+
+1. Read `{WORKING_DIR}/CLAUDE.md`
+2. Locate or create a `## Forge Auto-Rules` section (append at end of file if missing)
+3. If the rule is NOT already present (check by approximate content match — not exact string):
+   - Append inside that section:
+     ```
+     - [{MEM###}] {rule in one sentence} *(auto-promoted {date}, confidence:{score}, hits:{n})*
+     ```
+
+**Do NOT promote:**
+- `preference` or `environment` memories
+- Memories describing a one-time bug fix (content contains "fixed", "patched", "workaround")
+- Rules that duplicate existing content in CLAUDE.md
+- Memories with `hits:0` even if high initial confidence
+
+If no candidates meet the threshold → skip this step silently. Do not modify CLAUDE.md.
+
+**Do not output anything else. Just write the files.**

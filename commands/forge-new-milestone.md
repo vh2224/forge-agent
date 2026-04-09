@@ -1,6 +1,6 @@
 ---
 description: "Cria uma nova milestone GSD. Fluxo completo: brainstorm → discuss → plan. Use -fast para pular brainstorm. Ex: /forge-new-milestone autenticação OAuth | /forge-new-milestone -fast pagamentos com Stripe"
-allowed-tools: Read, Write, Bash, Agent, Skill
+allowed-tools: Read, Write, Bash, Agent, Skill, AskUserQuestion
 ---
 
 ## Bootstrap guard
@@ -79,15 +79,20 @@ After the skill completes, show the user the **In Scope** and **Out of Scope** t
 
 ## Step 4 — Discuss (interactive, stays in main context)
 
-Ask the user 3-5 targeted questions about gray areas. Base them on:
+Identify 3-5 genuine architecture/scope gray areas based on:
 - The brainstorm output summary (if available from Step 2)
 - The scope contract (if available from Step 3)
 - The DECISIONS.md locked decisions (avoid re-debating)
 
-Focus only on genuine architecture/scope decisions not yet resolved.
-Ask ALL questions at once — not one by one.
+Focus only on decisions not yet resolved that materially affect implementation.
 
-Wait for user answers.
+**Ask questions one at a time using `AskUserQuestion`** — do NOT dump all questions in a text block.
+
+For each question:
+1. Generate 2-4 concrete options derived from the project context (not generic)
+2. `AskUserQuestion` adds "Other" automatically — do not add it manually
+3. Wait for the answer before moving to the next question
+4. If user answers "you decide" → record as "Agent's Discretion" and move on
 
 Write decisions to `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-CONTEXT.md`:
 ```markdown

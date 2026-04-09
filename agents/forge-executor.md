@@ -16,7 +16,8 @@ You are a GSD execution agent. You implement one task completely: read → execu
 ## Process
 
 1. Read `T##-PLAN.md` fully
-2. **Read `## Standards` section** in the task plan — contains pre-filtered coding rules (directory placement, naming, reusable assets, lint command, pattern to follow). If missing, read `.gsd/CODING-STANDARDS.md` as fallback.
+2. **Read `## Standards` section** in the task plan
+2.5. **If `## Security Checklist` is present in the injected prompt** — treat every item as a must-have equal to those in T##-PLAN.md. Verify all checklist items before writing T##-SUMMARY.md. Record any violations found (and fixed) in `## Security Flags` section of T##-SUMMARY.md. — contains pre-filtered coding rules (directory placement, naming, reusable assets, lint command, pattern to follow). If missing, read `.gsd/CODING-STANDARDS.md` as fallback.
 3. **Mark task as in-flight:** add or update `status: RUNNING` in the frontmatter of `T##-PLAN.md`
 4. Read relevant summaries from prior tasks (injected in prompt or read from disk)
 5. If `## Project Memory (auto-learned)` is present — treat it as high-priority codebase knowledge

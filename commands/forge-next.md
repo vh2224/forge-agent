@@ -105,6 +105,15 @@ Skill({ skill: "forge-risk-radar", args: "{M###} {S##}" })
 ```
 This runs the risk assessment in the current context before the plan-slice agent is dispatched. The produced `S##-RISK.md` will be injected into the worker prompt.
 
+**Security gate (execute-task only):** If `unit_type == execute-task`, scan `T##-PLAN.md` content for security-sensitive keywords:
+`auth|token|crypto|password|secret|api.?key|jwt|oauth|permission|role|hash|salt|encrypt|decrypt|session|cookie|credential|sanitize|xss|sql|inject`
+
+If any keyword matches AND `T##-SECURITY.md` does not already exist in the task directory:
+```
+Skill({ skill: "forge-security", args: "{M###} {S##} {T##}" })
+```
+The produced `T##-SECURITY.md` will be injected into the execute-task worker prompt as `## Security Checklist`.
+
 ### 2. Check skip rules
 
 Read PREFS for `skip_discuss` and `skip_research`. If the current unit type is skipped, advance STATE past it and re-derive (do not count as a unit).
@@ -232,6 +241,9 @@ thinking: disabled
 ## Prior Context
 {content of M###-SUMMARY.md if exists, else last S##-SUMMARY.md if exists, else "(none yet)"}
 
+## Security Checklist
+{content of T##-SECURITY.md if exists, else "(none — task has no security-sensitive scope)"}
+
 ## Decisions Register (last 20 rows)
 {last 20 rows of .gsd/DECISIONS.md}
 
@@ -240,6 +252,7 @@ thinking: disabled
 
 ## Instructions
 Execute all steps. The task plan's ## Standards section has the relevant coding rules — follow them.
+If ## Security Checklist is present — treat each item as a must-have. Verify all checklist items before writing T##-SUMMARY.md.
 Verify every must-have using the verification ladder — including lint/format check.
 Write T##-SUMMARY.md.
 If auto_commit is true: Commit with message feat(S##/T##): <one-liner>.
@@ -346,13 +359,14 @@ auto_commit: {PREFS.auto_commit — true or false}
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
 2. Write S##-UAT.md (non-blocking human test script)
-3. Run lint gate — if lint commands exist, run on changed files. Fix violations.
+3. Security scan — search changed files for risky patterns (eval, innerHTML, dangerouslySetInnerHTML, raw SQL concatenation, console.log near secrets, hardcoded credentials). If found, add ## ⚠ Security Flags to S##-SUMMARY.md. Not a blocker — document and continue.
+4. Run lint gate — if lint commands exist, run on changed files. Fix violations.
 If auto_commit is true:
-4. Squash-merge branch gsd/M###/S## to main
+5. Squash-merge branch gsd/M###/S## to main
 If auto_commit is false:
-4. Skip — do NOT run any git commands (no merge, no branch operations).
-5. Update M###-SUMMARY.md with this slice's contribution
-6. Mark slice [x] in M###-ROADMAP.md
+5. Skip — do NOT run any git commands (no merge, no branch operations).
+6. Update M###-SUMMARY.md with this slice's contribution
+7. Mark slice [x] in M###-ROADMAP.md
 Return ---GSD-WORKER-RESULT---.
 ```
 
@@ -406,12 +420,12 @@ thinking: {THINKING_OPUS}
 {TOP_MEMORIES}
 
 ## Instructions
-Identify 3-5 gray areas not yet resolved. Ask them ALL AT ONCE in a single message.
-Record answers in M###-CONTEXT.md (or S##-CONTEXT.md for slice discuss).
+Identify 3-5 gray areas not yet resolved. Ask them ONE AT A TIME using AskUserQuestion — do NOT dump all questions in a single text block.
+For each question, provide 2-4 concrete options derived from the project context. AskUserQuestion adds "Other" automatically — do not add it manually.
+Wait for each answer before asking the next question.
+Record all answers in M###-CONTEXT.md (or S##-CONTEXT.md for slice discuss).
 Append significant decisions to .gsd/DECISIONS.md.
 Return ---GSD-WORKER-RESULT---.
-
-NOTE: You can ask the user questions during this phase.
 ```
 
 ### research-milestone / research-slice

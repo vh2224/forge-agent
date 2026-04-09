@@ -33,9 +33,14 @@ Given all `T##-SUMMARY.md` files from the slice:
    ## Notes
    ```
 
-3. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
+3. **Security scan** — scan files changed in this slice for risky patterns:
+   `eval(`, `exec(`, `innerHTML`, `dangerouslySetInnerHTML`, string-concatenated SQL queries (`.query("` + variable), `console.log` adjacent to token/password/secret, hardcoded credential strings, `shell=True`, `os.system(`.
+   If any found → add `## ⚠ Security Flags` section to `S##-SUMMARY.md` with: file path, pattern, and one-line context.
+   This is documentation only — not a blocker. Record and continue.
 
-4. **Git squash-merge (only if `auto_commit: true` in injected config):** merge branch `gsd/M###/S##` to main:
+4. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
+
+5. **Git squash-merge (only if `auto_commit: true` in injected config):** merge branch `gsd/M###/S##` to main:
    ```
    feat(M###/S##): <slice title>
 
@@ -45,13 +50,13 @@ Given all `T##-SUMMARY.md` files from the slice:
    - T01: <one-liner>
    - T02: <one-liner>
    ```
-   If `auto_commit: false` → skip all git operations (no merge, no branch management). Just proceed to step 5.
+   If `auto_commit: false` → skip all git operations (no merge, no branch management). Just proceed to step 6.
 
-5. Update `M###-SUMMARY.md` — add this slice's contributions
+6. Update `M###-SUMMARY.md` — add this slice's contributions
 
-6. Mark slice `[x]` in `M###-ROADMAP.md`
+7. Mark slice `[x]` in `M###-ROADMAP.md`
 
-7. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
+8. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
    - Read `M###-ROADMAP.md` to find the next pending slice `[ ]`
    - If a next slice exists:
      ```markdown
