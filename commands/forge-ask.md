@@ -1,7 +1,19 @@
 ---
 description: "Modo conversa com o agente GSD — discute ideias, resolve dúvidas, planeja, captura decisões. Salva sessão automaticamente em .gsd/sessions/. Se o chat cair, /forge-ask resume retoma de onde parou."
-allowed-tools: Read, Write, Bash, Glob
+allowed-tools: Read, Write, Bash, Glob, Skill
 ---
+
+## CONVERSATION-ONLY MODE — CRITICAL
+
+This is a **read-only brainstorming and discussion mode**. The following rules are absolute and apply for the ENTIRE session:
+
+1. **Do NOT modify, create, or fix source files** — not even obvious typos, not even one line
+2. **Do NOT run Bash commands that change state** — no git, no installs, no file edits outside `.gsd/sessions/`
+3. **Do NOT implement anything** — if you see a bug, a risk, or an improvement, MENTION it in conversation only
+4. **The ONLY Write operations permitted** are to `.gsd/sessions/*.md` (session log) and `.gsd/DECISIONS.md` when user explicitly says "salvar decisão"
+5. **If the user asks you to fix or build something** — respond with: "No modo /forge-ask eu só discuto. Para implementar, use `/forge-next` ou `/forge-auto`."
+
+The purpose of this mode is thinking, not doing. Stay in conversation.
 
 ## Bootstrap guard
 
@@ -141,20 +153,24 @@ topic: (pending first message)
 Tell the user:
 
 ```
-Sessão GSD iniciada: {session-id}
+💬 Modo conversa ativo — {session-id}
 
 Contexto carregado:
   Milestone ativo: {from STATE.md}
   Próxima ação: {next action from STATE.md}
   Memórias ativas: {count}
 
-Pode falar à vontade — vou anotar tudo no rascunho da sessão.
+Este é um modo de discussão e brainstorming.
+Não vou modificar arquivos nem implementar nada sem você pedir explicitamente.
+Se quiser executar algo, use /forge-next ou /forge-auto.
+
 Arquivo da sessão: .gsd/sessions/{session-id}.md
 
-Comandos especiais durante a conversa:
-  "salvar decisão: X"   → adiciona X ao DECISIONS.md
-  "criar milestone: X"  → planeja novo milestone
-  "criar task: X"       → adiciona task ao slice ativo
+Comandos durante a conversa:
+  "brainstorm: X"       → explora abordagens, riscos e escopo de X
+  "salvar decisão: X"   → registra X no DECISIONS.md
+  "criar milestone: X"  → instrução para /forge-new-milestone
+  "criar task: X"       → instrução para /forge-add-task
   "encerrar sessão"     → fecha e arquiva esta sessão
   /forge-ask resume       → retoma esta sessão se o chat cair
 ```
@@ -162,6 +178,8 @@ Comandos especiais durante a conversa:
 ---
 
 ## Active session behavior (follow these rules for the ENTIRE conversation after this command)
+
+**REMINDER — CONVERSATION-ONLY:** Do NOT fix code, do NOT create files, do NOT run git or build commands. If you notice something worth fixing, say it — don't do it.
 
 **CRITICAL: After EVERY response you give in this conversation, perform these two actions:**
 
@@ -196,6 +214,15 @@ If user said **"salvar decisão: [text]"**:
 - Append to `.gsd/DECISIONS.md` with a new row
 - Confirm: "✓ Decisão salva no DECISIONS.md"
 
+If user said **"brainstorm: [topic]"** or **"brainstorming: [topic]"**:
+- Invoke: `Skill({ skill: "forge-brainstorm", args: "[topic]" })`
+- The skill explores approaches, risks, and scope boundaries and writes a BRAINSTORM.md
+- After the skill completes, summarize the key findings in the conversation (Recommended approach + Top 3 risks + Open questions)
+- This is the ONLY skill invocation allowed in forge-ask — it produces a planning artifact, not source code
+- Append to `## Queued Actions`: `- [ ] [{timestamp}] Brainstorm produzido para: [topic]`
+
+**Auto-suggest brainstorm:** If the user describes a new feature, milestone idea, or architectural change and NO brainstorm exists for it yet, suggest: "Quer que eu rode o brainstorm para explorar abordagens e riscos antes de continuarmos?"
+
 If user said **"criar milestone: [description]"**:
 - Tell the user: "Execute `/forge-new-milestone {description}` para criar o milestone completo com brainstorm e planejamento."
 - Append to `## Queued Actions` in session file
@@ -218,8 +245,10 @@ If user said **"encerrar sessão"** or **"close session"**:
 During this conversation, use the loaded project context to give relevant, grounded answers:
 
 - Refer to STATE.md for current position ("you're on M002/S03/T01")
-- Refer to DECISIONS.md to avoid re-debating locked decisions  
+- Refer to DECISIONS.md to avoid re-debating locked decisions
 - Refer to AUTO-MEMORY memories to warn about known gotchas
 - When asked about architecture, refer to what's in CONTEXT files (not speculation)
 
-You do NOT need to read more files unless the user asks about something specific. If you need to look something up, do so and add what you found to the session log.
+You do NOT need to read more files unless the user asks about something specific. If you need to look something up, read it and summarize — do not edit it.
+
+**If you spot a bug, an inconsistency, or an improvement while reading:** mention it conversationally ("Notei que X pode ser um problema — quer que eu investigue mais?"). Do NOT fix it silently. Do NOT fix it even if asked mid-conversation — that's for `/forge-next`.
