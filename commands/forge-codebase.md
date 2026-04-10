@@ -141,6 +141,19 @@ rg --files -g '*.md' commands .gsd 2>/dev/null | xargs wc -c 2>/dev/null | sort 
 echo "::LARGE_FILES::"
 find $ROOTS -type f -size +1M 2>/dev/null | grep -Ev "$IGNORE"
 
+echo "::FRONTEND::"
+FE_COMPONENTS=$(grep -cE '\.(tsx|jsx|vue|svelte)$' /tmp/_fc.txt 2>/dev/null || echo "0")
+FE_STYLES=$(grep -cE '\.(css|scss)$' /tmp/_fc.txt 2>/dev/null || echo "0")
+echo "components=$FE_COMPONENTS styles=$FE_STYLES"
+if [ "$FE_COMPONENTS" -gt 0 ]; then
+  echo "---IMG_TAGS---"
+  grep -E '\.(tsx|jsx|vue|svelte)$' /tmp/_fc.txt | xargs rg -n '<img' 2>/dev/null | head -30
+  echo "---DIV_HANDLERS---"
+  grep -E '\.(tsx|jsx|vue|svelte)$' /tmp/_fc.txt | xargs rg -n '<div[^>]*on[A-Z]' 2>/dev/null | head -20
+  echo "---USE_CLIENT---"
+  grep -E '\.(tsx|jsx|ts|js)$' /tmp/_fc.txt | xargs rg -l "^.use client" 2>/dev/null
+fi
+
 rm -f /tmp/_fc.txt
 ```
 
@@ -309,6 +322,32 @@ Fonte: Bash do Round 1 (lockfiles), `::LARGE_FILES::`
 - Mais de 1 lockfile → `⚠ Múltiplos lockfiles; escolher um.`
 - Cada arquivo em `::LARGE_FILES::` → `⚠ Arquivo grande no repo: <file>. Considerar .gitignore ou LFS.`
 - Correção: nunca deletar. FIX_MODE → ao QUALITY-PLAN.
+
+---
+
+### A10: Frontend quality (auto-detectado)
+
+Fonte: `::FRONTEND::` — ativado SOMENTE se `components > 0`.
+
+> Se `::FRONTEND::` reporta `components=0`, pular esta seção inteiramente.
+
+**Surface checks (dados já coletados, zero I/O):**
+
+| Check | Fonte | Critério | Severity |
+|-------|-------|----------|----------|
+| `<img>` sem `alt` | `---IMG_TAGS---` — linhas sem `alt=` | WCAG SC 1.1.1 | `✗` |
+| `<div>` com handler sem `role`/`tabIndex` | `---DIV_HANDLERS---` — linhas com `<div onClick` etc. | WCAG SC 2.1.1 | `✗` |
+| `'use client'` desnecessário | `---USE_CLIENT---` cruzado com `::FUNCS::` — se o arquivo não usa hooks/events | Next.js App Router | `⚠` |
+| Componentes god (>300 linhas) | `::LINES::` filtrado por `.tsx/.jsx/.vue` | Arquitetura | `⚠` |
+| Componentes com >8 exports | `::EXPORTS::` filtrado por `.tsx/.jsx` | Arquitetura | `⚠` |
+
+**Report inline:**
+- `✓ Frontend: N componentes, N arquivos CSS`
+- Listar findings críticos e warnings encontrados
+- `info Para audit completo de responsividade: /forge-responsive`
+- `info Para audit completo de acessibilidade e performance: /forge-ui-review`
+
+Correção: FIX_MODE → issues de a11y e arquitetura ao QUALITY-PLAN.
 
 ---
 

@@ -66,6 +66,23 @@ Use the strongest tier you can reach — **every task must pass at least tiers 1
 
 **If lint fails:** fix the violations in your code, do NOT disable rules or add ignore comments unless the task plan explicitly allows it.
 
+### Frontend gate (conditional)
+
+**Activates only if** files created/modified during this task include `.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, or `.scss`. If no frontend files were touched, skip entirely.
+
+Before marking task DONE, verify these critical items in the modified frontend files:
+
+| # | Check | Standard | How to verify |
+|---|-------|----------|---------------|
+| 1 | Every `<img>` has `alt` attribute | WCAG SC 1.1.1 | Grep modified files for `<img` without `alt=` |
+| 2 | No `<div onClick>` without `role`, `tabIndex`, `onKeyDown` | WCAG SC 2.1.1 | Grep for `<div` with event handlers |
+| 3 | List renderings have `key` prop (React) / `:key` (Vue) | React/Vue critical | Grep for `.map(` in JSX context |
+| 4 | Form inputs have associated `<label>` or `aria-label` | WCAG SC 1.3.1 | Grep for `<input` without label |
+| 5 | Images have `width`/`height` or `aspect-ratio` | Core Web Vitals CLS | Grep for `<img` without dimensions |
+| 6 | No `'use client'` on components without hooks/events (Next.js only) | App Router | Check if file uses useState/useEffect/onClick |
+
+These are **same priority as lint errors**. If any fail, fix before proceeding to commit.
+
 ## Summary Format
 
 ```yaml
