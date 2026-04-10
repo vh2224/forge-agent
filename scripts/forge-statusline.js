@@ -114,6 +114,43 @@ process.stdin.on('end', () => {
       dispatchLine = `\n${icon} ${agent}: ${desc}${timeStr}${units}`;
     } catch { /* no dispatch info yet */ }
 
+    // --- Forge version + update check ---
+    let forgeVersion = '';
+    let forgeUpdate = '';
+    try {
+      const prefsFile = path.join(os.homedir(), '.claude', 'forge-agent-prefs.md');
+      const prefs = fs.readFileSync(prefsFile, 'utf8');
+      const repoMatch = prefs.match(/repo_path:\s*(.+)/);
+      if (repoMatch) {
+        const repo = repoMatch[1].trim();
+        const { execSync } = require('child_process');
+        forgeVersion = execSync('git describe --tags --always 2>/dev/null', { cwd: repo, encoding: 'utf8', timeout: 2000 }).trim();
+
+        // Check for update (cached, max once per 10 min)
+        const cacheFile = path.join(os.tmpdir(), 'forge-update-check.json');
+        let shouldCheck = true;
+        try {
+          const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+          if (Date.now() - cache.ts < 600_000) {
+            shouldCheck = false;
+            if (cache.latest && cache.latest !== forgeVersion.split('-')[0]) forgeUpdate = cache.latest;
+          }
+        } catch {}
+        if (shouldCheck) {
+          try {
+            const tags = execSync('git ls-remote --tags origin 2>/dev/null', { cwd: repo, encoding: 'utf8', timeout: 5000 });
+            const latest = tags.match(/v\d+\.\d+\.\d+/g)?.sort((a, b) => {
+              const pa = a.slice(1).split('.').map(Number), pb = b.slice(1).split('.').map(Number);
+              return pa[0] - pb[0] || pa[1] - pb[1] || pa[2] - pb[2];
+            }).pop() || '';
+            const localTag = forgeVersion.split('-')[0];
+            if (latest && latest !== localTag) forgeUpdate = latest;
+            fs.writeFileSync(cacheFile, JSON.stringify({ ts: Date.now(), latest }), 'utf8');
+          } catch {}
+        }
+      }
+    } catch {}
+
     // --- Build status line ---
     // --- Build auto-mode prefix ---
     let autoPrefix = '';
@@ -122,8 +159,12 @@ process.stdin.on('end', () => {
       autoPrefix = `${dot} AUTO ${autoElapsed} │ `;
     }
 
+    const forgeLabel = forgeVersion
+      ? (forgeUpdate ? `Forge ${forgeVersion} ⬆${forgeUpdate}` : `Forge ${forgeVersion}`)
+      : 'Forge';
+
     const line1 = autoPrefix + [
-      'Forge',
+      forgeLabel,
       model,
       forgeTag ? `${project} │ ${forgeTag}` : project,
       `${bar} ${pct}%`,
