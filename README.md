@@ -254,6 +254,8 @@ O instalador copia automaticamente para ambos os diretórios:
 | `forge-brainstorm` | Explora alternativas, riscos e limites de escopo antes de planejar | `/forge-new-milestone` (automático) |
 | `forge-scope-clarity` | Gera contrato de escopo com critérios observáveis e testáveis | `/forge-new-milestone` (automático) |
 | `forge-risk-radar` | Analisa riscos por slice antes da execução, para slices `risk:high` | `/forge-new-milestone`, `/forge-auto` |
+| `forge-responsive` | Audit de design responsivo — breakpoints, fluid layout, mobile-first, anti-patterns | Manual ou via `/forge-codebase` |
+| `forge-ui-review` | Review de componentes UI — acessibilidade (WCAG 2.1 AA), performance, arquitetura | Manual ou via `/forge-codebase` |
 
 ### Descobrir skills disponíveis
 
