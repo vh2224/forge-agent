@@ -101,70 +101,19 @@ Se FORCE ou FIX_MODE:
 
 ## Round 2 — Mega-collection (1 único Bash)
 
-**UMA ÚNICA tool call Bash** que coleta TODOS os dados necessários de uma vez. Substituir `$ROOTS` pelos valores resolvidos no Round 1.
+**UMA ÚNICA tool call Bash** que coleta TODOS os dados. Substituir `ROOTS` pelos valores resolvidos no Round 1.
+
+> **IMPORTANTE**: NÃO reconstruir o script manualmente. Chamar o script pronto:
 
 ```bash
-ROOTS="src lib commands"  # ← substituir pelos valores reais
-IGNORE="node_modules|dist|build|coverage|\.venv|target|\.git|\.gsd|\.claude|\.github|storybook-static|\.next|\.turbo"
-
-# Coletar file list uma vez — usar find com -name (portável, sem problemas de brace expansion)
-# IMPORTANTE: NÃO usar rg --files -g "$VAR" — brace expansion não funciona dentro de variável bash
-find $ROOTS -type f \( \
-  -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \
-  -o -name '*.py' -o -name '*.go' -o -name '*.rb' -o -name '*.rs' \
-  -o -name '*.java' -o -name '*.kt' -o -name '*.cs' \
-  -o -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \
-  -o -name '*.css' -o -name '*.scss' \
-  -o -name '*.vue' -o -name '*.svelte' \
-\) 2>/dev/null | grep -Ev "$IGNORE" | head -500 > /tmp/_fc.txt
-
-echo "::FINGERPRINT::"
-xargs stat -f '%N %m %z' < /tmp/_fc.txt 2>/dev/null | sort | shasum -a 256 | cut -d' ' -f1
-
-echo "::FILES::"
-cat /tmp/_fc.txt
-
-echo "::LINES::"
-xargs wc -l < /tmp/_fc.txt 2>/dev/null
-
-echo "::EXPORTS::"
-grep -E '\.tsx?$|\.jsx?$' /tmp/_fc.txt | xargs rg -c "^export " 2>/dev/null
-
-echo "::DEFS::"
-grep -E '\.py$' /tmp/_fc.txt | xargs rg -c "^def " 2>/dev/null
-
-echo "::FUNCS::"
-xargs rg -n --no-heading \
-  -e "function\s+[A-Za-z0-9_]+" \
-  -e "const\s+[A-Za-z0-9_]+\s*=\s*(async\s+)?\(" \
-  -e "^def\s+[A-Za-z0-9_]+" < /tmp/_fc.txt 2>/dev/null | head -300
-
-echo "::PROMPT_SIZES::"
-wc -c CLAUDE.md .gsd/AUTO-MEMORY.md .gsd/CODING-STANDARDS.md 2>/dev/null
-
-echo "::MD_SIZES::"
-rg --files -g '*.md' commands .gsd 2>/dev/null | xargs wc -c 2>/dev/null | sort -rn | head -10
-
-echo "::LARGE_FILES::"
-find $ROOTS -type f -size +1M 2>/dev/null | grep -Ev "$IGNORE"
-
-echo "::FRONTEND::"
-FE_COMPONENTS=$(grep -cE '\.(tsx|jsx|vue|svelte)$' /tmp/_fc.txt 2>/dev/null || echo "0")
-FE_STYLES=$(grep -cE '\.(css|scss)$' /tmp/_fc.txt 2>/dev/null || echo "0")
-echo "components=$FE_COMPONENTS styles=$FE_STYLES"
-if [ "$FE_COMPONENTS" -gt 0 ]; then
-  echo "---IMG_TAGS---"
-  grep -E '\.(tsx|jsx|vue|svelte)$' /tmp/_fc.txt | xargs rg -n '<img' 2>/dev/null | head -30
-  echo "---DIV_HANDLERS---"
-  grep -E '\.(tsx|jsx|vue|svelte)$' /tmp/_fc.txt | xargs rg -n '<div[^>]*on[A-Z]' 2>/dev/null | head -20
-  echo "---USE_CLIENT---"
-  grep -E '\.(tsx|jsx|ts|js)$' /tmp/_fc.txt | xargs rg -l "^.use client" 2>/dev/null
-fi
-
-rm -f /tmp/_fc.txt
+bash ~/.claude/scripts/codebase-collect.sh apps packages
 ```
 
-> 1 tool call = **1 roundtrip** (~2-3s). Produz TUDO: fingerprint, file list, line counts, exports, defs, funções, tamanhos.
+Substituir `apps packages` pelos ROOTS reais. O script produz todas as seções separadas por `::LABEL::`.
+
+Se o script não existir (`command not found`), copiar de: `$(grep -m1 'repo_path:' ~/.claude/forge-agent-prefs.md | cut -d: -f2 | tr -d ' ')/scripts/codebase-collect.sh`
+
+> 1 tool call = **1 roundtrip**. Produz TUDO: fingerprint, file list, line counts, exports, defs, funções, tamanhos, frontend checks.
 
 ---
 

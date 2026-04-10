@@ -128,6 +128,18 @@ for f in "${REPO_DIR}/commands"/forge*.md; do
 done
 
 echo ""
+info "Installing scripts..."
+SCRIPTS_DIR="${CLAUDE_DIR}/scripts"
+mkdir -p "$SCRIPTS_DIR"
+for f in "${REPO_DIR}/scripts"/*.sh; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f")"
+  copy "$f" "${SCRIPTS_DIR}/${name}"
+  chmod +x "${SCRIPTS_DIR}/${name}" 2>/dev/null || true
+  info "  scripts/${name}"
+done
+
+echo ""
 info "Installing skills..."
 SKILLS_DIR_AGENTS="${HOME}/.agents/skills"
 SKILLS_DIR_CLAUDE="${CLAUDE_DIR}/skills"
