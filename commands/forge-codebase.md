@@ -311,17 +311,76 @@ Correção: FIX_MODE → issues de a11y e arquitetura ao QUALITY-PLAN.
 
 Disparar em uma única mensagem todas as escritas necessárias:
 
+### Diagnóstico (sem flags)
+
+| # | Tool | Ação |
+|---|------|------|
+| 1 | — | Emitir report como texto |
+| 2 | Write | `.gsd/.codebase-cache-hash` ← FINGERPRINT |
+| 3 | Write | `.gsd/.codebase-cache.md` ← report completo |
+
+### FIX_MODE — correções mecânicas + plano de refatoração
+
+**Correções mecânicas (aplicar diretamente):**
+
 | # | Condição | Tool | Ação |
 |---|----------|------|------|
-| 1 | Sempre (diagnóstico) | — | Emitir report como texto (sem tool call) |
-| 2 | Não FIX_MODE, não FORCE | Write | `.gsd/.codebase-cache-hash` ← FINGERPRINT |
-| 3 | Não FIX_MODE, não FORCE | Write | `.gsd/.codebase-cache.md` ← report completo |
-| 4 | FIX_MODE + issues estruturais | Write/Edit | `.gsd/QUALITY-PLAN.md` ← checklist de issues |
-| 5 | FIX_MODE + lint:fix existe | Bash | `RUN run lint:fix` |
-| 6 | FIX_MODE + format:fix existe | Bash | `RUN run format:fix` |
-| 7 | FIX_MODE + CODING-STANDARDS ausente | Write | `.gsd/CODING-STANDARDS.md` via auto-detect |
+| 1 | CODING-STANDARDS ausente | Write | `.gsd/CODING-STANDARDS.md` via auto-detect |
+| 2 | lint:fix existe | Bash | `RUN run lint:fix` |
+| 3 | format:fix existe | Bash | `RUN run format:fix` |
+| 4 | Build output no repo (storybook-static, dist, .next) | Edit | Adicionar ao `.gitignore` se não presente |
+| 5 | tsconfig existe mas sem script typecheck | Edit | Adicionar `"typecheck": "tsc --noEmit"` ao package.json |
+| 6 | prettier/biome detectado mas sem script format | Edit | Adicionar `"format": "prettier --write ."` ou `"format": "biome format --write ."` ao package.json |
 
-> Máximo ~4 tool calls paralelas = **1 roundtrip** (~2s).
+**Plano de refatoração (QUALITY-PLAN.md):**
+
+Para issues estruturais que requerem decisão arquitetural, criar `.gsd/QUALITY-PLAN.md` com detalhes suficientes para o planner do GSD transformar diretamente em slices.
+
+Cada item do QUALITY-PLAN deve ter:
+
+```markdown
+### [Categoria] Título do item
+
+**Arquivo(s):** `path/to/file.ts`
+**Problema:** Descrição concreta do que está errado (N linhas, N exports, responsabilidades misturadas)
+**Impacto:** Por que isso importa (manutenibilidade, performance, DX)
+**Sugestão de fix:** Passos concretos — quais componentes extrair, para onde mover, quais imports atualizar
+**Esforço estimado:** pequeno (1 task) | médio (1 slice) | grande (múltiplos slices)
+```
+
+Exemplo concreto:
+```markdown
+### [Hotspot] lojista/catalogo/components.tsx — 2080 linhas
+
+**Arquivo(s):** `apps/web/app/lojista/catalogo/components.tsx`
+**Problema:** God component com 2080 linhas misturando tabela de produtos, drawer de importação, wizard de sync, e filtros.
+**Impacto:** Qualquer mudança no catálogo arrisca quebrar funcionalidades não relacionadas. Tempo de leitura alto para novos devs.
+**Sugestão de fix:**
+1. Extrair `CatalogTable` (listagem + filtros) → `components/CatalogTable.tsx`
+2. Extrair `ImportDrawer` (upload + mapeamento) → `components/ImportDrawer.tsx`
+3. Extrair `SyncWizard` (fluxo de sincronização) → `components/SyncWizard.tsx`
+4. Manter `page.tsx` como orquestrador que compõe os 3 componentes
+5. Mover types compartilhados para `types.ts` (já existe, verificar duplicação)
+**Esforço estimado:** médio (1 slice com 3-4 tasks)
+```
+
+**Rodapé do QUALITY-PLAN:**
+
+```markdown
+---
+
+## Próximo passo
+
+Para executar este plano de refatoração:
+
+\`\`\`
+/forge-new-milestone refatoração do codebase baseada no QUALITY-PLAN
+\`\`\`
+
+O planner lerá este arquivo e criará slices com tasks executáveis.
+```
+
+> Máximo ~5 tool calls paralelas = **1 roundtrip** (~2-3s).
 
 ---
 
@@ -329,12 +388,12 @@ Disparar em uma única mensagem todas as escritas necessárias:
 
 Linha de cabeçalho:
 - diagnose: `forge-codebase — diagnóstico`
-- fix: `forge-codebase --fix — correções seguras`
+- fix: `forge-codebase --fix — correções aplicadas + plano de refatoração`
 - dry-run: `forge-codebase --fix --dry-run — prévia`
 
 Rodapé:
 - diagnose: `FAILs: N  WARNs: N  OK: N` + if any issues: `Para corrigir: /forge-codebase --fix`
-- fix: `Corrigidos: N  OK: N  Skipped: N` + if all clear: `Repositório auditado`
+- fix: `Corrigidos: N  Planejados: N  OK: N` + `Próximo: /forge-new-milestone refatoração baseada no QUALITY-PLAN`
 - dry-run: same as fix counts + `Nenhum arquivo alterado. Execute /forge-codebase --fix para aplicar.`
 
 Se `.gsd/QUALITY-PLAN.md` foi criado ou atualizado, mencione explicitamente.
