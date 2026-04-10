@@ -26,7 +26,7 @@ Read ONLY these files:
 2. `~/.claude/forge-agent-prefs.md` (user-global defaults — skip silently if missing)
 3. `.gsd/claude-agent-prefs.md` (repo-level shared prefs — overrides user-global)
 4. `.gsd/prefs.local.md` (local personal overrides — gitignored, overrides repo prefs)
-5. First 80 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+5. First 40 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
 6. `.gsd/CODING-STANDARDS.md` (skip silently if missing)
 
 **Merge order:** later files override earlier ones for any key present. Missing files are skipped silently. Store merged result as `PREFS`.
@@ -351,8 +351,8 @@ thinking: {THINKING_OPUS}
 ## Dependency Slice Summaries
 {content of S##-SUMMARY.md for each slice listed in depends:[]}
 
-## Decisions Register
-{full .gsd/DECISIONS.md}
+## Decisions Register (last 20 rows)
+{last 20 rows of .gsd/DECISIONS.md}
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -390,8 +390,8 @@ thinking: {THINKING_OPUS}
 ## Scope Contract
 {content of M###-SCOPE.md if exists, else "(none)"}
 
-## Decisions Register
-{full .gsd/DECISIONS.md}
+## Decisions Register (last 20 rows)
+{last 20 rows of .gsd/DECISIONS.md}
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -410,7 +410,7 @@ WORKING_DIR: {WORKING_DIR}
 auto_commit: {PREFS.auto_commit — true or false}
 
 ## Task Summaries
-{content of each T##-SUMMARY.md in this slice}
+{first 35 lines of each T##-SUMMARY.md in this slice}
 
 ## Slice Plan
 {content of S##-PLAN.md}
@@ -443,7 +443,7 @@ WORKING_DIR: {WORKING_DIR}
 auto_commit: {PREFS.auto_commit — true or false}
 
 ## Slice Summaries
-{content of each S##-SUMMARY.md in this milestone}
+{first 35 lines of each S##-SUMMARY.md in this milestone}
 
 ## Milestone Roadmap
 {content of M###-ROADMAP.md}
@@ -478,8 +478,8 @@ thinking: {THINKING_OPUS}
 ## Brainstorm Output (if available)
 {content of M###-BRAINSTORM.md if exists, else "(none)"}
 
-## Locked Decisions (do not re-debate)
-{full .gsd/DECISIONS.md}
+## Locked Decisions — last 20 rows (do not re-debate)
+{last 20 rows of .gsd/DECISIONS.md}
 
 ## Project Memory
 {TOP_MEMORIES}

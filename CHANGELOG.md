@@ -1,3 +1,9 @@
+## v0.7.1 (2026-04-10)
+
+### Performance
+
+- perf: reduce context injection in worker prompts — DECISIONS.md capped at last 20 rows in plan-slice/plan-milestone/discuss (was full file), AUTO-MEMORY capped at 40 lines (was 80), T##/S##-SUMMARY injection capped at 35 lines each
+
 ## v0.7.0 (2026-04-09)
 
 ### Features
