@@ -77,16 +77,13 @@ If `.git` exists:
 cd "{REPO_PATH}" && git pull 2>&1
 ```
 
-- If output contains `Already up to date.` → emit:
-```
-══════════════════════════════════════
-  Forge Agent {OLD_VERSION}
-══════════════════════════════════════
-  Já está na versão mais recente.
-```
-And stop.
 - If output contains `error:` or `fatal:` → show the error and stop.
-- Otherwise: proceed to reinstall.
+- If output contains `Already up to date.` → set `GIT_UPDATED=false`. Proceed to reinstall.
+- Otherwise → set `GIT_UPDATED=true`. Proceed to reinstall.
+
+> **IMPORTANTE**: SEMPRE prosseguir com a reinstalação, mesmo quando "Already up to date."
+> O repo pode estar atualizado mas os arquivos em `~/.claude/` podem estar defasados.
+> A reinstalação é idempotente e leva <2s.
 
 If `.git` does NOT exist: skip this step and proceed with reinstall using existing files.
 
@@ -191,6 +188,8 @@ Split output by `===COMMIT===` separator. For each commit:
 
 Emit the update report in this exact format:
 
+### If GIT_UPDATED=true (new commits pulled):
+
 ```
 ══════════════════════════════════════
   Forge Agent atualizado
@@ -219,6 +218,18 @@ Melhorias:
   ✓ Preferências preservadas
   ✓ Comandos atualizados — já ativos nesta sessão
   ⚠ Se um comando NOVO foi adicionado, reinicie o Claude Code para que apareça no autocomplete
+```
+
+### If GIT_UPDATED=false (already up to date, but reinstalled):
+
+```
+══════════════════════════════════════
+  Forge Agent {NEW_VERSION}
+══════════════════════════════════════
+  Código já atualizado — arquivos reinstalados.
+
+  ✓ Comandos, agents e skills sincronizados
+  ✓ Preferências preservadas
 ```
 
 **Rules for the report:**
