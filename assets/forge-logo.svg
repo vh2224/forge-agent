@@ -1,0 +1,18 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+
+  <!-- F base -->
+  <path
+    d="M180 120 L120 200 L120 400 L180 320 L180 120
+       L180 240 L300 240 L260 300 L180 300
+       L180 120
+       L360 120 L310 190 L180 190 Z"
+    fill="#FFFFFF"
+  />
+
+  <!-- highlight -->
+  <path
+    d="M180 120 L360 120 L310 190 L180 190 Z"
+    fill="#FF6B00"
+  />
+
+</svg>
