@@ -58,10 +58,14 @@ If `invalid`: tell user the path doesn't look like a forge-agent repo and stop.
 ## Capturar versão atual (antes do pull)
 
 ```bash
-cd "{REPO_PATH}" && git log --oneline -1 2>/dev/null || echo "(sem git)"
+cd "{REPO_PATH}" && git describe --tags --always 2>/dev/null || git log --oneline -1 2>/dev/null || echo "(sem git)"
 ```
 
-Store as `OLD_COMMIT` (hash + message). Also store just the hash as `OLD_HASH`.
+Store as `OLD_VERSION`. Also capture hash:
+```bash
+cd "{REPO_PATH}" && git rev-parse --short HEAD 2>/dev/null
+```
+Store as `OLD_HASH`.
 
 ---
 
@@ -73,7 +77,14 @@ If `.git` exists:
 cd "{REPO_PATH}" && git pull 2>&1
 ```
 
-- If output contains `Already up to date.` → tell user "Forge Agent já está na versão mais recente." and stop.
+- If output contains `Already up to date.` → emit:
+```
+══════════════════════════════════════
+  Forge Agent {OLD_VERSION}
+══════════════════════════════════════
+  Já está na versão mais recente.
+```
+And stop.
 - If output contains `error:` or `fatal:` → show the error and stop.
 - Otherwise: proceed to reinstall.
 
@@ -84,10 +95,10 @@ If `.git` does NOT exist: skip this step and proceed with reinstall using existi
 ## Capturar versão nova (depois do pull)
 
 ```bash
-cd "{REPO_PATH}" && git log --oneline -1 2>/dev/null
+cd "{REPO_PATH}" && git describe --tags --always 2>/dev/null || git log --oneline -1 2>/dev/null
 ```
 
-Store as `NEW_COMMIT`.
+Store as `NEW_VERSION`.
 
 ---
 
@@ -182,11 +193,9 @@ Emit the update report in this exact format:
 
 ```
 ══════════════════════════════════════
-  Forge Agent atualizado com sucesso
+  Forge Agent atualizado
+  {OLD_VERSION} → {NEW_VERSION}
 ══════════════════════════════════════
-
-  De:   {OLD_COMMIT}
-  Para: {NEW_COMMIT}
 
 ─── Notas de atualização ───
 
@@ -207,8 +216,9 @@ Melhorias:
 
 ─────────────────────────────
 
-  Preferências preservadas ✓
-  Para ver detalhes: git log --oneline {OLD_HASH}..HEAD
+  ✓ Preferências preservadas
+  ✓ Comandos atualizados — já ativos nesta sessão
+  ⚠ Se um comando NOVO foi adicionado, reinicie o Claude Code para que apareça no autocomplete
 ```
 
 **Rules for the report:**
