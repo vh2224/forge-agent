@@ -309,8 +309,8 @@ thinking: disabled
 ## Security Checklist
 {content of T##-SECURITY.md if exists, else "(none — task has no security-sensitive scope)"}
 
-## Decisions Register (last 20 rows)
-{last 20 rows of .gsd/DECISIONS.md}
+## Slice Decisions
+{## Decisions section of S##-CONTEXT.md if exists, else "(none — discuss-slice was skipped)"}
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -342,6 +342,9 @@ thinking: {THINKING_OPUS}
 ## Milestone Context
 {content of M###-CONTEXT.md if exists, else "(none)"}
 
+## Slice Context
+{content of S##-CONTEXT.md if exists, else "(none — discuss-slice was skipped)"}
+
 ## Directory Conventions & Asset Map
 {CS_STRUCTURE}
 
@@ -349,10 +352,7 @@ thinking: {THINKING_OPUS}
 {CS_RULES}
 
 ## Dependency Slice Summaries
-{content of S##-SUMMARY.md for each slice listed in depends:[]}
-
-## Decisions Register (last 20 rows)
-{last 20 rows of .gsd/DECISIONS.md}
+{first 35 lines of S##-SUMMARY.md for each slice listed in depends:[]}
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -389,9 +389,6 @@ thinking: {THINKING_OPUS}
 
 ## Scope Contract
 {content of M###-SCOPE.md if exists, else "(none)"}
-
-## Decisions Register (last 20 rows)
-{last 20 rows of .gsd/DECISIONS.md}
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -478,8 +475,10 @@ thinking: {THINKING_OPUS}
 ## Brainstorm Output (if available)
 {content of M###-BRAINSTORM.md if exists, else "(none)"}
 
-## Locked Decisions — last 20 rows (do not re-debate)
-{last 20 rows of .gsd/DECISIONS.md}
+## Prior Decisions (do not re-debate)
+{For discuss-slice: extract ## Decisions section from M###-CONTEXT.md (milestone-level locked decisions).
+ For discuss-milestone: use last 30 rows of .gsd/DECISIONS.md (decisions from prior milestones).
+ Either way: these are closed — do not re-open or re-debate.}
 
 ## Project Memory
 {TOP_MEMORIES}

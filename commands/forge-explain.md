@@ -13,7 +13,7 @@ $ARGUMENTS
 - If argument is a milestone ID (M###) → read `M###-ROADMAP.md`, `M###-CONTEXT.md`, `M###-SUMMARY.md` (whichever exist)
 - If argument is a slice ID (S##) → find its `S##-PLAN.md`, `S##-CONTEXT.md`, `S##-SUMMARY.md` in the active milestone
 - If argument is a task ID (T##) → find its `T##-PLAN.md` and `T##-SUMMARY.md` in the active slice
-- If argument is "decisions" → read `.gsd/DECISIONS.md`
+- If argument is "decisions" → read `.gsd/DECISIONS.md` (global overview — all decisions ever appended across milestones) AND glob `.gsd/milestones/**/M*-CONTEXT.md` and `.gsd/milestones/**/*S*-CONTEXT.md` to list which phases have phase-scoped decisions. Show: (1) full DECISIONS.md content grouped by milestone if possible, (2) table of "Phase → CONTEXT file → decision count" for quick navigation
 - If argument is "state" or empty → read `.gsd/STATE.md` and active ROADMAP
 - If argument is "all" → read STATE.md + all ROADMAPs + summarize the entire project arc
 

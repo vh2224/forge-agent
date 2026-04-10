@@ -1,3 +1,9 @@
+## v0.7.2 (2026-04-10)
+
+### Features
+
+- feat: distribute decisions by phase — workers inject CONTEXT.md decisions instead of global DECISIONS.md; DECISIONS.md becomes audit overview for /forge-explain decisions
+
 ## v0.7.1 (2026-04-10)
 
 ### Performance

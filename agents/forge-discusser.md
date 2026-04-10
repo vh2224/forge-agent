@@ -81,7 +81,7 @@ Write `M###-CONTEXT.md` or `S##-CONTEXT.md`:
 **Gathered:** YYYY-MM-DD
 **Clarity scores:** scope:85 acceptance:90 tech:70 dependencies:80 risk:65
 
-## Implementation Decisions
+## Decisions
 - Decision 1
 - Decision 2
 
@@ -94,6 +94,8 @@ Write `M###-CONTEXT.md` or `S##-CONTEXT.md`:
 ## Deferred Ideas
 - Ideas that belong in other slices
 ```
+
+> **Note:** The `## Decisions` section is machine-parsed by the orchestrator and injected into downstream workers (plan-slice, execute-task). Keep each entry as a standalone, self-contained statement — no forward references to other sections.
 
 ### Step 4.5 — Exit plan mode
 
