@@ -1,3 +1,9 @@
+## v0.7.3 (2026-04-10)
+
+### Features
+
+- feat: add /forge-task command — autonomous task without milestone/slice hierarchy. Flow: brainstorm → discuss → research → plan → execute. Supports --skip-brainstorm, --skip-research, --resume TASK-###. Tasks live in .gsd/tasks/TASK-###/. forge-status and forge-explain updated.
+
 ## v0.7.2 (2026-04-10)
 
 ### Features

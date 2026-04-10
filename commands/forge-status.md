@@ -42,8 +42,9 @@ fi
 Read these files in order and produce a status dashboard:
 
 1. `.gsd/STATE.md` — current position
-2. Active `M###-ROADMAP.md` — slice completion status  
+2. Active `M###-ROADMAP.md` — slice completion status
 3. Active `S##-PLAN.md` — task completion status (if a slice is active)
+4. Glob `.gsd/tasks/*/TASK-*-BRIEF.md` — list all forge-tasks
 
 Report in this format:
 ```
@@ -65,6 +66,13 @@ Report in this format:
 
 ### Blockers
 <list or "Nenhum">
+
+### Tasks autônomas
+{If .gsd/tasks/ exists and has entries, list each TASK-### with its status:}
+- ✓ TASK-001: <description> (done — SUMMARY.md exists)
+- ▶ TASK-002: <description> (em andamento — last phase with existing file)
+- · TASK-003: <description> (pendente — só BRIEF.md)
+{If no tasks: omit this section entirely}
 ```
 
 $ARGUMENTS

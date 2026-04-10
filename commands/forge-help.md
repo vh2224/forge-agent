@@ -32,8 +32,10 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 | Comando | O que faz |
 |---------|-----------|
 | `/forge-next` | **Step mode** — executa exatamente uma unidade e para. Ideal para revisar antes de continuar. |
-| `/forge-next` | Explícito step mode — mesmo que `/gsd`. Mais legível em scripts ou quando você quer deixar a intenção clara. |
 | `/forge-auto` | **Auto mode** — executa o milestone inteiro de forma autônoma, sem pausas. Para em blocker ou milestone completo. |
+| `/forge-task <descrição>` | **Task autônoma** — executa uma task standalone sem milestone. Fluxo completo: brainstorm → discuss → research → plan → execute. Ideal para tarefas pontuais, correções ou experimentos. |
+| `/forge-task --skip-brainstorm <descrição>` | Pula brainstorm — vai direto para discuss → research → plan → execute. |
+| `/forge-task --resume TASK-001` | Retoma uma task de onde parou (fluxo idempotente por presença de arquivos). |
 
 ---
 
@@ -148,7 +150,7 @@ Read `~/.claude/forge-agent-prefs.md` to get the current model for each agent, t
 ```
 .gsd/
   STATE.md                    ← estado atual (lido em toda sessão)
-  DECISIONS.md                ← registro de decisões (append-only)
+  DECISIONS.md                ← registro global de decisões (append-only)
   PROJECT.md                  ← descrição do projeto
   REQUIREMENTS.md             ← contrato de capacidades
   KNOWLEDGE.md                ← conhecimento manual do projeto
@@ -168,4 +170,12 @@ Read `~/.claude/forge-agent-prefs.md` to get the current model for each agent, t
           tasks/
             T01-PLAN.md       ← steps + must-haves
             T01-SUMMARY.md    ← o que foi feito + evidência
+  tasks/                      ← tasks autônomas (/forge-task)
+    TASK-001/
+      TASK-001-BRIEF.md       ← descrição + flags
+      TASK-001-BRAINSTORM.md  ← abordagens alternativas
+      TASK-001-CONTEXT.md     ← decisões do discuss
+      TASK-001-RESEARCH.md    ← pesquisa de codebase
+      TASK-001-PLAN.md        ← steps + must-haves
+      TASK-001-SUMMARY.md     ← resultado + evidência
 ```
