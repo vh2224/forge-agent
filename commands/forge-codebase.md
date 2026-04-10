@@ -105,11 +105,18 @@ Se FORCE ou FIX_MODE:
 
 ```bash
 ROOTS="src lib commands"  # ← substituir pelos valores reais
-IGNORE="node_modules|dist|build|coverage|\.venv|target|\.git|\.gsd|\.claude|\.github"
-GLOBS="*.{ts,tsx,js,jsx,py,go,rb,rs,java,kt,cs,cpp,c,h,hpp}"
+IGNORE="node_modules|dist|build|coverage|\.venv|target|\.git|\.gsd|\.claude|\.github|storybook-static|\.next|\.turbo"
 
-# Coletar file list uma vez
-rg --files -g "$GLOBS" $ROOTS 2>/dev/null | grep -Ev "$IGNORE" | head -500 > /tmp/_fc.txt
+# Coletar file list uma vez — usar find com -name (portável, sem problemas de brace expansion)
+# IMPORTANTE: NÃO usar rg --files -g "$VAR" — brace expansion não funciona dentro de variável bash
+find $ROOTS -type f \( \
+  -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \
+  -o -name '*.py' -o -name '*.go' -o -name '*.rb' -o -name '*.rs' \
+  -o -name '*.java' -o -name '*.kt' -o -name '*.cs' \
+  -o -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \
+  -o -name '*.css' -o -name '*.scss' \
+  -o -name '*.vue' -o -name '*.svelte' \
+\) 2>/dev/null | grep -Ev "$IGNORE" | head -500 > /tmp/_fc.txt
 
 echo "::FINGERPRINT::"
 xargs stat -f '%N %m %z' < /tmp/_fc.txt 2>/dev/null | sort | shasum -a 256 | cut -d' ' -f1
