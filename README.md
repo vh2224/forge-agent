@@ -142,6 +142,7 @@ Detecta o estado atual, cria o `CLAUDE.md` e os arquivos de suporte sem tocar no
 | Comando | Exemplo | O que faz |
 |---------|---------|-----------|
 | `/forge-status` | `/forge-status` | Dashboard: milestone ativo, progresso de slices/tasks, próxima ação. |
+| `/forge-codebase` | `/forge-codebase` | Qualidade do codebase — estrutura, nomenclatura e responsabilidade. Use `--paths a,b` para escopo e `--fix` para correções seguras. |
 | `/forge-explain` | `/forge-explain M002` · `/forge-explain S03` · `/forge-explain decisions` | Explica qualquer artefato sem modificar nada. Aceita: `M###`, `S##`, `T##`, `decisions`, `state`, `all`. |
 | `/forge-memories` | `/forge-memories` · `/forge-memories stats` | Gerencia memórias auto-aprendidas. Sub-comandos: `show`, `stats`, `clean`, `export`, `inject`. |
 | `/forge-help` | `/forge-help` | Ajuda completa com todos os comandos, agentes e arquivos. |
@@ -227,6 +228,16 @@ Após cada unidade, o `forge-memory` (Haiku) lê o transcript e extrai conhecime
 ```
 
 Memórias são rankeadas por `confidence × (1 + hits × 0.1)`, decaem se não confirmadas, e são injetadas no prompt de cada nova unidade. O agente nunca redescobre o que já aprendeu.
+
+---
+
+## Perfil de engenharia (o que este agente otimiza)
+
+- **Bytes e tokens**: contexto enxuto, arquivos de prompt pequenos, evitar inflação de tokens.
+- **Performance e previsibilidade**: builds e lint consistentes (um lockfile, scripts padrão).
+- **Código limpo**: responsabilidade única por arquivo, convenções de nome claras.
+- **Segurança de mudanças**: correções automáticas apenas quando mecanicamente seguras.
+- **Evidência**: diagnósticos que geram plano ao invés de refactors silenciosos.
 
 ---
 

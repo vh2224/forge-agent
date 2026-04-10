@@ -54,6 +54,7 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 |---------|-----------|
 | `/forge-status` | Dashboard do projeto — milestone ativo, progresso de slices e tasks, próxima ação. |
 | `/forge-doctor` | Diagnóstico do projeto — valida STATE, checkboxes, arquivos e prefs. Use `--fix` para corrigir automaticamente. |
+| `/forge-codebase` | Qualidade do codebase — estrutura, nomenclatura e responsabilidade. Use `--paths a,b` para escopo e `--fix` para correções seguras. |
 | `/forge-explain <alvo>` | Explica qualquer artefato sem modificar nada. Alvos válidos: `M001`, `S03`, `T02`, `decisions`, `state`, `all`. |
 | `/forge-memories` | Gerencia as memórias auto-aprendidas do projeto. Sub-comandos: `show` (padrão), `stats`, `clean`, `export`, `inject`. |
 | `/forge-ask` | Modo conversa com o agente — discute ideias, captura decisões, salva sessão automaticamente. Se o chat cair, `/forge-ask resume` retoma. |
@@ -75,6 +76,9 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 | `/forge-doctor` | Diagnóstico do projeto — relatório de problemas encontrados. |
 | `/forge-doctor --fix` | Diagnostica E corrige automaticamente (STATE, checkboxes, arquivos, prefs). |
 | `/forge-doctor --fix --dry-run` | Mostra o que `--fix` faria sem alterar nada. |
+| `/forge-codebase` | Qualidade do codebase — relatório de problemas encontrados. Use `--paths a,b` para escopo. |
+| `/forge-codebase --fix` | Diagnostica e corrige automaticamente o que for seguro (format, lint fix). |
+| `/forge-codebase --fix --dry-run` | Mostra o que `--fix` faria sem alterar nada. |
 | `/forge-update` | Atualiza o Forge Agent para a versão mais recente (git pull + reinstala agents/commands/skills). Preserva suas preferências. |
 | `/forge-update <caminho>` | Mesmo que acima, mas especificando o caminho do repositório manualmente. |
 
