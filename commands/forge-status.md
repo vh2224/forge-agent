@@ -5,10 +5,23 @@ allowed-tools: Read, Glob, Bash
 
 ## Bootstrap guard (sempre executar primeiro)
 
-Before doing anything else, run:
+Before doing anything else, run these in parallel:
 ```bash
 ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
 ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
+```
+
+```bash
+REPO=$(grep 'repo_path:' ~/.claude/forge-agent-prefs.md 2>/dev/null | cut -d: -f2 | tr -d ' ')
+if [ -n "$REPO" ] && [ -d "$REPO/.git" ]; then
+  LOCAL=$(cd "$REPO" && git describe --tags --always 2>/dev/null)
+  REMOTE=$(cd "$REPO" && git ls-remote --tags origin 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+  echo "FORGE_VERSION=$LOCAL"
+  [ -n "$REMOTE" ] && [ "$REMOTE" != "$(cd "$REPO" && git describe --tags --abbrev=0 2>/dev/null)" ] && echo "FORGE_UPDATE=$REMOTE" || echo "FORGE_UPDATE=none"
+else
+  echo "FORGE_VERSION=unknown"
+  echo "FORGE_UPDATE=none"
+fi
 ```
 
 **Se CLAUDE.md não existe:** Stop and tell the user:
@@ -36,6 +49,7 @@ Report in this format:
 ```
 ## Status GSD
 
+**Forge Agent:** {FORGE_VERSION}  {if FORGE_UPDATE != none: "⚠ Nova versão disponível: {FORGE_UPDATE} — /forge-update"}
 **Milestone ativo:** M### — Title
 **Progresso:** X/Y slices concluídos
 
