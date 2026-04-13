@@ -52,7 +52,8 @@ If missing, all section variables are `"(none)"`.
 - `EFFORT_OPUS = PREFS.effort.plan or "medium"`
 - `EFFORT_EXEC = PREFS.effort.execute or "low"`
 
-Initialize: `session_units = 0`, `COMPACT_AFTER = 3`
+Initialize: `session_units = 0`, `COMPACT_AFTER = PREFS.compact_after || 10`
+(0 or "unlimited" in PREFS disables the compact signal entirely)
 
 ---
 
@@ -252,6 +253,10 @@ Explore the codebase relevant to this task. Write {TASK_ID}-RESEARCH.md to
 - ## Common Pitfalls: found in existing code or well-known for this stack
 - ## Relevant Code: file:line references for key sections
 - ## Reusable Assets: functions/hooks/services to leverage directly
+- ## External Research: (include if web searches were done — source URL + 1-line takeaway)
+
+**Web research:** If the Task Brief references specific URLs — fetch them. Do up to 3 targeted
+web searches for pitfalls, breaking changes, or best practices relevant to named libraries/APIs.
 After writing RESEARCH.md, update .gsd/CODING-STANDARDS.md with any new findings.
 Return ---GSD-WORKER-RESULT---.
 ```

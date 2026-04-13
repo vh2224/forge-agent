@@ -4,7 +4,7 @@ description: GSD planning phase agent. Decomposes milestones into slices and sli
 model: claude-opus-4-6
 thinking: adaptive
 effort: medium
-tools: Read, Write, Glob, Grep
+tools: Read, Write, Glob, Grep, WebSearch, WebFetch
 ---
 
 You are a GSD planning agent. Your job is to decompose work into well-scoped, context-window-sized tasks with clear must-haves.
