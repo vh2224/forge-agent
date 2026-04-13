@@ -159,17 +159,23 @@ Return ---GSD-WORKER-RESULT--- with list of slices created.
 
 **If FAST_MODE=true:** Skip to Step 7.
 
-Read the ROADMAP to find slices tagged `risk:high`. For each one, create the slice directory and invoke the risk radar skill:
+Read the ROADMAP and collect ALL slices tagged `risk:high` into a list. Then process each one **to completion before moving to the next**. Do NOT stop, summarize, or report to the user between slices — the loop must complete entirely before proceeding to Step 7.
 
+For EACH `risk:high` slice, in order:
+
+1. Create the slice directory:
 ```bash
 mkdir -p .gsd/milestones/{MILESTONE_ID}/slices/{S##}
 ```
 
+2. Invoke risk radar for this slice:
 ```
 Skill({ skill: "forge-risk-radar", args: "{MILESTONE_ID} {S##}" })
 ```
 
-The skill reads the slice context from disk and writes `S##-RISK.md` itself. Repeat for each `risk:high` slice — call `Skill` once per slice, sequentially.
+3. Confirm `S##-RISK.md` was written. Then **immediately** continue to the next `risk:high` slice without pausing.
+
+After ALL slices have been processed (or if no `risk:high` slices exist), proceed to Step 7.
 
 ---
 
