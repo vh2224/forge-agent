@@ -151,24 +151,50 @@ process.stdin.on('end', () => {
       }
     } catch {}
 
+    // --- ANSI colors (used sparingly, only for critical info) ---
+    const c = {
+      reset:   '\x1b[0m',
+      bold:    '\x1b[1m',
+      dim:     '\x1b[2m',
+      red:     '\x1b[31m',
+      green:   '\x1b[32m',
+      yellow:  '\x1b[33m',
+    };
+
     // --- Build status line ---
     // --- Build auto-mode prefix ---
     let autoPrefix = '';
     if (autoMode) {
       const dot = Math.floor(Date.now() / 1000) % 2 === 0 ? '●' : '○';
-      autoPrefix = `${dot} AUTO ${autoElapsed} │ `;
+      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset} │ `;
     }
 
-    const forgeLabel = forgeVersion
-      ? (forgeUpdate ? `Forge ${forgeVersion} ⬆${forgeUpdate}` : `Forge ${forgeVersion}`)
-      : 'Forge';
+    // Forge label: version normally plain, update highlighted
+    let forgeLabel = 'Forge';
+    if (forgeVersion) {
+      forgeLabel = forgeUpdate
+        ? `Forge ${forgeVersion} ${c.bold}${c.yellow}⬆${forgeUpdate}${c.reset}`
+        : `Forge ${forgeVersion}`;
+    }
+
+    // Context bar: color based on usage threshold
+    let barColor = '';
+    if (pct >= 85)      barColor = c.red;
+    else if (pct >= 70) barColor = c.yellow;
+    else if (pct >= 1)  barColor = c.green;
+    const ctxStr = barColor ? `${barColor}${bar} ${pct}%${c.reset}` : `${bar} ${pct}%`;
+
+    // Cost: highlight when expensive
+    let costDisplay = costStr;
+    if (cost >= 5)      costDisplay = `${c.red}${costStr}${c.reset}`;
+    else if (cost >= 1) costDisplay = `${c.yellow}${costStr}${c.reset}`;
 
     const line1 = autoPrefix + [
       forgeLabel,
       model,
       forgeTag ? `${project} │ ${forgeTag}` : project,
-      `${bar} ${pct}%`,
-      costStr,
+      ctxStr,
+      costDisplay,
       `↑${fmt(totalIn)} ↓${fmt(totalOut)} 💾${fmt(cacheTotal)}`,
     ].join(' │ ');
 

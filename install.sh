@@ -75,6 +75,7 @@ if $has_existing && $UPDATE; then
     for f in "${AGENTS_DIR}"/forge*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/agents/"; done
     for f in "${COMMANDS_DIR}"/forge*.md; do [ -f "$f" ] && cp "$f" "$BACKUP_DIR/commands/"; done
     [ -f "${CLAUDE_DIR}/forge-agent-prefs.md" ] && cp "${CLAUDE_DIR}/forge-agent-prefs.md" "$BACKUP_DIR/"
+    [ -f "${CLAUDE_DIR}/forge-dispatch.md"     ] && cp "${CLAUDE_DIR}/forge-dispatch.md"     "$BACKUP_DIR/"
     [ -f "${CLAUDE_DIR}/forge-statusline.js"  ] && cp "${CLAUDE_DIR}/forge-statusline.js"  "$BACKUP_DIR/"
     [ -f "${CLAUDE_DIR}/forge-hook.js"        ] && cp "${CLAUDE_DIR}/forge-hook.js"         "$BACKUP_DIR/"
     [ -f "${CLAUDE_DIR}/forge-settings.js"   ] && cp "${CLAUDE_DIR}/forge-settings.js"    "$BACKUP_DIR/"
@@ -189,6 +190,11 @@ if ! $DRY_RUN && [ -f "$PREFS_DST" ]; then
 fi
 
 # ── Install statusline + hooks ────────────────────────────────────────────────
+echo ""
+info "Installing shared references..."
+copy "${REPO_DIR}/shared/forge-dispatch.md" "${CLAUDE_DIR}/forge-dispatch.md"
+info "  forge-dispatch.md"
+
 echo ""
 info "Installing statusline & hooks..."
 copy "${REPO_DIR}/scripts/forge-statusline.js" "${CLAUDE_DIR}/forge-statusline.js"
