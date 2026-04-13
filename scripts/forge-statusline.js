@@ -66,6 +66,7 @@ process.stdin.on('end', () => {
     } catch { /* not a forge project */ }
 
     // --- Auto mode indicator (reads .gsd/forge/auto-mode.json) ---
+    let autoElapsedSecs = 0; // kept for dot sync below
     try {
       const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
       const auto     = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
@@ -81,8 +82,9 @@ process.stdin.on('end', () => {
         if (elapsed > STALE_THRESHOLD) {
           try { fs.writeFileSync(autoFile, '{"active":false}', 'utf8'); } catch {}
         } else {
-          autoMode = true;
-          autoElapsed = elapsed >= 60
+          autoMode        = true;
+          autoElapsedSecs = elapsed;
+          autoElapsed     = elapsed >= 60
             ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
             : `${elapsed}s`;
         }
@@ -190,7 +192,9 @@ process.stdin.on('end', () => {
     // --- Build auto-mode prefix ---
     let autoPrefix = '';
     if (autoMode) {
-      const dot = Math.floor(Date.now() / 1000) % 2 === 0 ? '●' : '○';
+      // Use elapsed seconds (same base as the counter) so dot and counter
+      // advance together — avoids desync with absolute epoch parity.
+      const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';
       autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset} │ `;
     }
 
