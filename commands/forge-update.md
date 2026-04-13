@@ -140,6 +140,23 @@ If `not-forge`: skip silently.
 
 ---
 
+## Invalidar cache da status line
+
+After reinstalling, bust the version cache so the status line reflects the new
+version immediately instead of waiting up to 10 minutes for cache expiry:
+
+```bash
+node -e "
+const fs = require('fs'), os = require('os');
+const f = os.tmpdir() + '/forge-update-check.json';
+try { const c = JSON.parse(fs.readFileSync(f,'utf8')); c.ts = 0; fs.writeFileSync(f, JSON.stringify(c), 'utf8'); } catch {}
+" 2>/dev/null || true
+```
+
+(This sets `ts=0` in the cache, forcing a refresh on the next prompt render.)
+
+---
+
 ## Verificar que preferences foram preservadas
 
 ```bash

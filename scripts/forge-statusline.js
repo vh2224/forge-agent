@@ -115,6 +115,8 @@ process.stdin.on('end', () => {
     } catch { /* no dispatch info yet */ }
 
     // --- Forge version + update check ---
+    // All git operations are cached (max once per 10 min) so no git process
+    // runs on every render — eliminates the flickering caused by variable latency.
     let forgeVersion = '';
     let forgeUpdate = '';
     try {
@@ -123,29 +125,52 @@ process.stdin.on('end', () => {
       const repoMatch = prefs.match(/repo_path:\s*(.+)/);
       if (repoMatch) {
         const repo = repoMatch[1].trim();
-        const { execSync } = require('child_process');
-        forgeVersion = execSync('git describe --tags --always 2>/dev/null', { cwd: repo, encoding: 'utf8', timeout: 2000 }).trim();
-
-        // Check for update (cached, max once per 10 min)
         const cacheFile = path.join(os.tmpdir(), 'forge-update-check.json');
-        let shouldCheck = true;
-        try {
-          const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-          if (Date.now() - cache.ts < 600_000) {
-            shouldCheck = false;
-            if (cache.latest && cache.latest !== forgeVersion.split('-')[0]) forgeUpdate = cache.latest;
-          }
-        } catch {}
-        if (shouldCheck) {
+
+        let cache = null;
+        try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
+
+        const CACHE_TTL = 600_000; // 10 minutes
+        const cacheValid = cache && (Date.now() - (cache.ts || 0) < CACHE_TTL);
+
+        if (cacheValid) {
+          // Fast path: serve from cache — zero git processes, no flicker
+          forgeVersion = cache.version || '';
+          if (cache.has_update) forgeUpdate = '↑ novos commits';
+        } else {
+          // Slow path: refresh cache (runs at most once per 10 min)
           try {
-            const tags = execSync('git ls-remote --tags origin 2>/dev/null', { cwd: repo, encoding: 'utf8', timeout: 5000 });
-            const latest = tags.match(/v\d+\.\d+\.\d+/g)?.sort((a, b) => {
-              const pa = a.slice(1).split('.').map(Number), pb = b.slice(1).split('.').map(Number);
-              return pa[0] - pb[0] || pa[1] - pb[1] || pa[2] - pb[2];
-            }).pop() || '';
-            const localTag = forgeVersion.split('-')[0];
-            if (latest && latest !== localTag) forgeUpdate = latest;
-            fs.writeFileSync(cacheFile, JSON.stringify({ ts: Date.now(), latest }), 'utf8');
+            const { execSync } = require('child_process');
+            const version = execSync(
+              'git describe --tags --always 2>/dev/null || git log --oneline -1 2>/dev/null',
+              { cwd: repo, encoding: 'utf8', timeout: 2000, shell: true }
+            ).trim();
+            const localCommit = execSync(
+              'git rev-parse HEAD 2>/dev/null',
+              { cwd: repo, encoding: 'utf8', timeout: 2000, shell: true }
+            ).trim();
+
+            forgeVersion = version;
+
+            // Commit-based update check: compare local HEAD vs remote HEAD
+            let hasUpdate = false;
+            try {
+              const remoteOut = execSync(
+                'git ls-remote origin HEAD 2>/dev/null',
+                { cwd: repo, encoding: 'utf8', timeout: 5000, shell: true }
+              );
+              const remoteCommit = remoteOut.split(/\s/)[0].trim();
+              hasUpdate = !!remoteCommit && remoteCommit !== localCommit;
+            } catch {}
+
+            if (hasUpdate) forgeUpdate = '↑ novos commits';
+
+            fs.writeFileSync(cacheFile, JSON.stringify({
+              ts: Date.now(),
+              version,
+              localCommit,
+              has_update: hasUpdate,
+            }), 'utf8');
           } catch {}
         }
       }
@@ -173,7 +198,7 @@ process.stdin.on('end', () => {
     let forgeLabel = 'Forge';
     if (forgeVersion) {
       forgeLabel = forgeUpdate
-        ? `Forge ${forgeVersion} ${c.bold}${c.yellow}⬆${forgeUpdate}${c.reset}`
+        ? `Forge ${forgeVersion} ${c.bold}${c.yellow}⬆ novos commits${c.reset}`
         : `Forge ${forgeVersion}`;
     }
 
