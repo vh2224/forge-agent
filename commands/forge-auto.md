@@ -26,7 +26,7 @@ Read ONLY these files:
 2. `~/.claude/forge-agent-prefs.md` (user-global defaults — skip silently if missing)
 3. `.gsd/claude-agent-prefs.md` (repo-level shared prefs — overrides user-global)
 4. `.gsd/prefs.local.md` (local personal overrides — gitignored, overrides repo prefs)
-5. First 40 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+5. `.gsd/AUTO-MEMORY.md` full file (skip silently if missing) — stored as `ALL_MEMORIES` for selective injection per unit
 6. `.gsd/CODING-STANDARDS.md` (skip silently if missing)
 
 **Merge order:** later files override earlier ones for any key present. Missing files are skipped silently. Store merged result as `PREFS`.
@@ -35,7 +35,7 @@ Read ONLY these files:
 - `EFFORT_MAP` ← `PREFS.effort` (per-phase effort table; default: opus phases = `medium`, sonnet phases = `low`)
 - `THINKING_OPUS` ← `PREFS.thinking.opus_phases` (default: `adaptive`)
 
-Store as: `STATE`, `PREFS`, `TOP_MEMORIES`, `CODING_STANDARDS`.
+Store as: `STATE`, `PREFS`, `ALL_MEMORIES`, `CODING_STANDARDS`.
 
 **CODING_STANDARDS section extraction** — to minimize token usage, extract these named sections from the file for selective injection:
 - `CS_LINT` — content of `## Lint & Format Commands` section only
@@ -62,8 +62,11 @@ Do this for ALL in_progress tasks before starting the loop. Skip if TaskList ret
 
 **Activate auto-mode indicator** — write marker so the status line shows `▶ AUTO`:
 ```bash
-mkdir -p .gsd/forge && echo '{"active":true,"started_at":'$(date +%s000)'}' > .gsd/forge/auto-mode.json
+mkdir -p .gsd/forge
+FORGE_STARTED_AT=$(date +%s000)
+echo '{"active":true,"started_at":'$FORGE_STARTED_AT',"worker":null}' > .gsd/forge/auto-mode.json
 ```
+Store `$FORGE_STARTED_AT` for use in the heartbeat writes throughout this session.
 
 You are the orchestrator. Execute the dispatch loop, repeating until: milestone complete, blocked, or `session_units >= COMPACT_AFTER`.
 
@@ -150,6 +153,19 @@ Store the returned `taskId` as `current_task_id`. Then immediately mark it as in
 TaskUpdate({ taskId: current_task_id, status: "in_progress" })
 ```
 
+**Selective memory injection** — before building the worker prompt, filter `ALL_MEMORIES` to the entries most relevant to this unit:
+- For `execute-task`: read keywords from `T##-PLAN.md` title + step names. Include memories whose description shares ≥2 keywords with the plan. Prefer categories `gotcha` and `convention`. Cap at 8 entries.
+- For `plan-slice` / `research-slice`: include `architecture` and `pattern` memories related to the milestone scope. Cap at 8 entries.
+- For other unit types: include top-5 entries by confidence score.
+- If ALL_MEMORIES is empty or no entries match: inject `(none)`.
+Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` section instead of the raw full file.
+
+**Heartbeat — record active worker** before dispatching:
+```bash
+echo '{"active":true,"started_at":'$FORGE_STARTED_AT',"worker":"'"$unit_type/$unit_id"'","worker_started":'$(date +%s000)'}' > .gsd/forge/auto-mode.json
+```
+(where `$FORGE_STARTED_AT` is the timestamp written when auto-mode was activated)
+
 Then call `Agent(agent_name, worker_prompt)` with a `description` that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
 - Examples:
@@ -159,6 +175,11 @@ Then call `Agent(agent_name, worker_prompt)` with a `description` that captures 
 - For memory extraction: `extract memories from {unit_id}`
 
 Wait for the result.
+
+**Heartbeat — clear worker field** after Agent() returns:
+```bash
+echo '{"active":true,"started_at":'$FORGE_STARTED_AT',"worker":null}' > .gsd/forge/auto-mode.json
+```
 
 #### 5. Process result
 

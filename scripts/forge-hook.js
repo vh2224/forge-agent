@@ -78,13 +78,75 @@ process.stdin.on('end', () => {
     }
 
     // ── PreToolUse / PostToolUse: track Agent dispatches ────────────────────
-    const toolName = data.tool_name || '';
+    const toolName  = data.tool_name  || '';
+    const toolInput = data.tool_input || {};
 
-    // Only track Agent tool dispatches
+    // ── Safety guards (PreToolUse only) ─────────────────────────────────────
+    if (phase === 'pre') {
+      let blockMessage = null;
+
+      // ── Bash guards ────────────────────────────────────────────────────────
+      if (toolName === 'Bash') {
+        const cmd = toolInput.command || '';
+
+        // Block: git commit --no-verify (bypass pre-commit hooks)
+        if (/git\s+commit\b/.test(cmd) && /--no-verify\b/.test(cmd)) {
+          blockMessage = '[forge-hook] Bloqueado: git commit --no-verify contorna hooks de pre-commit. Corrija a falha do hook.';
+        }
+
+        // Block: git push --force / -f  (but allow --force-with-lease)
+        if (!blockMessage && /git\s+push\b/.test(cmd)) {
+          // Remove --force-with-lease from consideration, then check for --force or -f flag
+          const cmdWithoutSafe = cmd.replace(/--force-with-lease\S*/g, '');
+          if (/--force\b/.test(cmdWithoutSafe) || /(?:^|\s)-[a-zA-Z]*f[a-zA-Z]*(?:\s|$)/.test(cmdWithoutSafe)) {
+            blockMessage = '[forge-hook] Bloqueado: git push --force pode sobrescrever commits remotos. Use --force-with-lease se necessário.';
+          }
+        }
+
+        // Block: rm -rf .gsd/ (destructive removal of forge state)
+        if (!blockMessage && /\brm\b/.test(cmd) && /\.gsd/.test(cmd)) {
+          // Flags must contain both r and f (in any combined form or separately)
+          const flagsMatch = cmd.match(/\B-([a-zA-Z]+)/g) || [];
+          const allFlags   = flagsMatch.join('');
+          if (allFlags.includes('r') && allFlags.includes('f')) {
+            blockMessage = '[forge-hook] Bloqueado: remoção destrutiva de .gsd/ protege o estado do Forge.';
+          }
+        }
+      }
+
+      // ── Write / Edit guards — block hardcoded secrets ────────────────────
+      if (!blockMessage && (toolName === 'Write' || toolName === 'Edit')) {
+        const filePath  = toolInput.file_path || '';
+        const content   = toolName === 'Write' ? (toolInput.content || '') : (toolInput.new_string || '');
+
+        // Skip .env.example and .env.sample files
+        const isSafeEnvFile = /\.env\.(example|sample)$/i.test(filePath);
+
+        if (!isSafeEnvFile) {
+          const secretPattern = /(API_KEY|SECRET_KEY|PRIVATE_KEY|PASSWORD)\s*=\s*["'][^${\s]{8,}/;
+          // Check line by line — skip comment lines (# or //)
+          const lines = content.split('\n');
+          const hasBareSecret = lines.some(line => {
+            const trimmed = line.trimStart();
+            if (trimmed.startsWith('#') || trimmed.startsWith('//')) return false;
+            return secretPattern.test(line);
+          });
+          if (hasBareSecret) {
+            blockMessage = '[forge-hook] Bloqueado: possível secret hardcoded detectado. Use variável de ambiente.';
+          }
+        }
+      }
+
+      if (blockMessage) {
+        process.stdout.write(blockMessage + '\n');
+        process.exit(2);
+      }
+    }
+
+    // Only track Agent tool dispatches (from here on)
     if (toolName !== 'Agent') return;
 
     const sessionId    = data.session_id || 'unknown';
-    const toolInput    = data.tool_input || {};
     const description  = toolInput.description  || '(sem descrição)';
     const subagentType = toolInput.subagent_type || 'general-purpose';
     const now          = Date.now();

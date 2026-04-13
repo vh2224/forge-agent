@@ -72,7 +72,10 @@ For each candidate memory:
 
 **If it contradicts an existing memory:** mark existing as `[SUPERSEDED by MEM###]`, create new entry.
 
-**If it's new:**
+**Before creating a new entry — near-duplicate check:**
+Extract the 5 most distinctive words from the candidate's body (skip stop-words: the, is, in, to, for, a, an, this, that, it, of, with, and, or, not, we, you, by). Check each existing entry for overlap: if 3 or more of these words appear in an existing entry's description, treat the candidate as a **confirmation** of that entry — increment its `hits`, update `confidence` (+0.05, max 0.95), and merge any new nuance into the description. Do NOT create a new entry.
+
+**If it's new (no near-duplicate found):**
 - Assign next sequential ID
 - Confidence: `0.95` for clear gotcha, `0.85` for confirmed pattern/architecture, `0.70` for tentative observation
 - hits: 0

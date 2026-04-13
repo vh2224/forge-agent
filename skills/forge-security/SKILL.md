@@ -41,7 +41,17 @@ Map plan content to domains. Only activate domains where the plan explicitly men
 
 Domains with zero keyword matches → exclude from output entirely.
 
-## Step 3 — Write the checklist
+## Step 3 — Classify items by confidence
+
+For each active domain, generate items in two tiers:
+
+**Blocker tier** — item directly triggered by a keyword or action explicitly named in the plan. Example: plan says "implement JWT refresh token rotation" → "Verify refresh token is invalidated on use (single-use)" is a Blocker.
+
+**Check tier** — item implied by the domain but not directly named in the plan. These are high-value patterns for the domain that the executor should verify if applicable, but may not block completion if not relevant. Example: same plan → "Ensure token blacklist does not grow unbounded" might be a Check if the plan doesn't mention blacklisting.
+
+Rule: if you're not sure which tier, default to Check. Fewer Blockers = checklist gets read. More Blockers = checklist gets ignored.
+
+## Step 4 — Write the checklist
 
 Save as:
 - Task-level: `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SECURITY.md`
@@ -56,41 +66,46 @@ Save as:
 
 *(HIGH = auth/authz/crypto in scope; MEDIUM = input validation or secrets; LOW = transport/headers only)*
 
-## Must-Verify Before Marking Task Complete
+## Blockers — resolve before marking complete
+*(Directly triggered by explicit plan content — cannot skip)*
 
-{For each active domain, list 2-5 specific, actionable items tailored to THIS plan.}
+### Authentication *(if active and has Blocker items)*
+- [ ] {Item directly tied to something the plan builds}
 
-### Authentication *(if active)*
-- [ ] {Specific item for what this task builds — not a generic rule}
+### Authorization *(if active and has Blocker items)*
+- [ ] {Item}
 
-### Authorization *(if active)*
-- [ ] {Specific item}
+### Data Handling *(if active and has Blocker items)*
+- [ ] {Item}
 
-### Data Handling *(if active)*
-- [ ] {Specific item}
+### Input Validation *(if active and has Blocker items)*
+- [ ] {Item}
 
-### Input Validation *(if active)*
-- [ ] {Specific item}
-
-### Secrets Management *(if active)*
+### Secrets Management *(if active and has Blocker items)*
 - [ ] No secrets or API keys appear in source files or committed `.env`
 - [ ] All secrets loaded from environment variables — verified before commit
 
-### Injection *(if active)*
-- [ ] {Specific item based on the ORM/DB layer detected in PROJECT.md}
+### Injection *(if active and has Blocker items)*
+- [ ] {Item based on the ORM/DB layer in PROJECT.md}
 
-### Frontend XSS *(if active)*
-- [ ] {Specific item}
+### Frontend XSS *(if active and has Blocker items)*
+- [ ] {Item}
 
-### Transport / Headers *(if active)*
-- [ ] {Specific item}
+### Transport / Headers *(if active and has Blocker items)*
+- [ ] {Item}
+
+## Also verify *(if applicable)*
+*(Good-practice checks for the active domains — document rationale if skipping)*
+
+- [ ] {Check-tier item — domain: Authentication}
+- [ ] {Check-tier item — domain: ...}
 
 ## Anti-Patterns to Avoid
 {2-3 specific anti-patterns for the stack in PROJECT.md — e.g., "Express: never use `res.json(err)` — leaks stack traces"}
 
 ## If You Find a Violation
 Record it in T##-SUMMARY.md under `## Security Flags` with: file, line, pattern, and fix applied.
-Do NOT mark the task complete until all HIGH/MEDIUM items are resolved.
+Do NOT mark the task complete until all Blocker items are resolved.
 ```
 
 **If no domains are active:** write:

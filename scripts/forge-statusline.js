@@ -67,6 +67,8 @@ process.stdin.on('end', () => {
 
     // --- Auto mode indicator (reads .gsd/forge/auto-mode.json) ---
     let autoElapsedSecs = 0; // kept for dot sync below
+    let autoWorker      = '';  // active worker unit (from heartbeat)
+    let autoWorkerSecs  = 0;   // how long the current worker has been running
     try {
       const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
       const auto     = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
@@ -87,6 +89,12 @@ process.stdin.on('end', () => {
           autoElapsed     = elapsed >= 60
             ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
             : `${elapsed}s`;
+
+          // Heartbeat: show which worker is running and for how long
+          if (auto.worker && auto.worker_started) {
+            autoWorker     = auto.worker;
+            autoWorkerSecs = Math.round((Date.now() - auto.worker_started) / 1000);
+          }
         }
       }
     } catch { /* no auto mode active */ }
@@ -195,7 +203,14 @@ process.stdin.on('end', () => {
       // Use elapsed seconds (same base as the counter) so dot and counter
       // advance together — avoids desync with absolute epoch parity.
       const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';
-      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset} │ `;
+      let workerStr = '';
+      if (autoWorker) {
+        const wt = autoWorkerSecs >= 60
+          ? `${Math.floor(autoWorkerSecs / 60)}m${autoWorkerSecs % 60}s`
+          : `${autoWorkerSecs}s`;
+        workerStr = ` ${c.dim}▸ ${autoWorker} +${wt}${c.reset}`;
+      }
+      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset}${workerStr} │ `;
     }
 
     // Forge label: version normally plain, update highlighted

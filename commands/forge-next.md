@@ -33,7 +33,7 @@ Read ONLY these files:
 2. `~/.claude/forge-agent-prefs.md` (user-global defaults — skip silently if missing)
 3. `.gsd/claude-agent-prefs.md` (repo-level shared prefs — overrides user-global)
 4. `.gsd/prefs.local.md` (local personal overrides — gitignored, overrides repo prefs)
-5. First 40 lines of `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+5. `.gsd/AUTO-MEMORY.md` full file (skip silently if missing) — stored as `ALL_MEMORIES` for selective injection
 6. `.gsd/CODING-STANDARDS.md` (skip silently if missing)
 
 **Merge order:** later files override earlier ones for any key present. Missing files are skipped silently. Store merged result as `PREFS`.
@@ -42,7 +42,7 @@ Read ONLY these files:
 - `EFFORT_MAP` ← `PREFS.effort` (per-phase effort table; default: opus phases = `medium`, sonnet phases = `low`)
 - `THINKING_OPUS` ← `PREFS.thinking.opus_phases` (default: `adaptive`)
 
-Store as: `STATE`, `PREFS`, `TOP_MEMORIES`, `CODING_STANDARDS`.
+Store as: `STATE`, `PREFS`, `ALL_MEMORIES`, `CODING_STANDARDS`.
 
 **Cleanup orphaned tasks** — call `TaskList`. If any tasks have `status: in_progress` (leftover from a previous session), mark them completed before creating new tasks:
 ```
@@ -119,6 +119,13 @@ The produced `T##-SECURITY.md` will be injected into the execute-task worker pro
 Read PREFS for `skip_discuss` and `skip_research`. If the current unit type is skipped, advance STATE past it and re-derive (do not count as a unit).
 
 ### 3. Build worker prompt
+
+**Selective memory injection** — filter `ALL_MEMORIES` to entries relevant to this unit:
+- For `execute-task`: read keywords from `T##-PLAN.md` title + step names. Include memories whose description shares ≥2 keywords with the plan. Prefer categories `gotcha` and `convention`. Cap at 8 entries.
+- For `plan-slice` / `research-slice`: include `architecture` and `pattern` memories related to the milestone scope. Cap at 8 entries.
+- For other unit types: include top-5 entries by confidence score.
+- If no entries match: inject `(none)`.
+Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` section.
 
 Read ONLY the `.gsd/` artifact files the worker needs (templates below). Inline their content — do not summarize or paraphrase.
 
