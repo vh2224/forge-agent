@@ -214,7 +214,7 @@ process.stdin.on('end', () => {
         const wt = autoWorkerSecs >= 60
           ? `${Math.floor(autoWorkerSecs / 60)}m${autoWorkerSecs % 60}s`
           : `${autoWorkerSecs}s`;
-        workerStr = ` ${c.dim}▸ ${autoWorker} +${wt}${c.reset}`;
+        workerStr = ` ${c.green}▸ ${autoWorker} +${wt}${c.reset}`;
       }
       autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset}${workerStr} │ `;
     }
