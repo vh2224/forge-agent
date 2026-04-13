@@ -45,9 +45,10 @@ If CODING-STANDARDS.md is missing, all section variables are `"(none)"`.
 
 Initialize:
 ```
-session_units = 0
-COMPACT_AFTER = 5
-completed_units = []
+session_units    = 0
+COMPACT_AFTER    = PREFS.compact_after if set and not "unlimited", else 50
+                   (0 or "unlimited" disables context checkpoints entirely)
+completed_units  = []
 ```
 
 **Cleanup orphaned tasks** — call `TaskList`. If any tasks have `status: in_progress` (leftover from a previous crashed session), mark them completed to keep the UI clean:
@@ -55,6 +56,14 @@ completed_units = []
 TaskUpdate({ taskId: <id>, status: "completed" })
 ```
 Do this for ALL in_progress tasks before starting the loop. Skip if TaskList returns empty.
+
+**Auto-resume detection** — check for a previous interrupted session:
+```bash
+cat .gsd/forge/auto-mode.json 2>/dev/null
+```
+- If `active: true` AND `started_at` is within the last 60 minutes AND milestone is not done:
+  → Emit one line: `↺ Retomando forge-auto após interrupção...` and skip the activation step below — go directly to the dispatch loop. The marker is already set.
+- Otherwise: proceed normally to activation.
 
 ---
 
@@ -68,9 +77,9 @@ echo '{"active":true,"started_at":'$FORGE_STARTED_AT',"worker":null}' > .gsd/for
 ```
 Store `$FORGE_STARTED_AT` for use in the heartbeat writes throughout this session.
 
-You are the orchestrator. Execute the dispatch loop, repeating until: milestone complete, blocked, or `session_units >= COMPACT_AFTER`.
+You are the orchestrator. Execute the dispatch loop until the milestone is complete or a stop condition is hit.
 
-**AUTONOMY RULE — CRITICAL:** This is FULLY AUTONOMOUS mode. After each unit completes with `status: done`, proceed IMMEDIATELY to the next unit. Do NOT pause to ask the user if they want to continue. Do NOT ask for confirmation between units. Do NOT summarize progress and wait for input. The ONLY reasons to stop the loop are: milestone complete, worker returned `blocked`/`partial`, or `session_units >= COMPACT_AFTER`. Between units, emit the progress line and move on — nothing else.
+**AUTONOMY RULE — CRITICAL:** This is FULLY AUTONOMOUS mode. After each unit completes with `status: done`, proceed IMMEDIATELY to the next unit. Do NOT pause to ask the user if they want to continue. Do NOT ask for confirmation between units. Do NOT summarize progress and wait for input. The ONLY reasons to STOP the loop are: milestone complete, worker returned `blocked`/`partial`, or pause requested. Context checkpoints (every COMPACT_AFTER units) do NOT stop the loop — they reset counters and continue. Between units, emit the progress line and move on — nothing else.
 
 ### Dispatch Loop
 
@@ -252,39 +261,38 @@ session_units += 1
 completed_units.append("✓ [M###/S##/T##] {unit_type} — {one-liner}  · {agent} ({model})")
 ```
 
-#### 7. Compact check
+#### 7. Pause + checkpoint check
 
 After incrementing `session_units`:
-- If `session_units >= COMPACT_AFTER`: ensure STATE.md is updated, emit compact signal, **stop loop**
+
+**Pause check** — if `.gsd/forge/pause` exists:
+```bash
+rm -f .gsd/forge/pause
+echo '{"active":false}' > .gsd/forge/auto-mode.json
+```
+Emit and **stop loop**:
+```
+⏸  Auto-mode pausado após {session_units} unidades.
+{completed_units list, one per line}
+
+Execute /forge-auto para retomar a partir de: {next_action from STATE.md}
+```
+
+**Context checkpoint** (only if COMPACT_AFTER is not disabled AND `session_units >= COMPACT_AFTER`):
+- Emit ONE line: `▸ Checkpoint: {session_units} unidades concluídas. Continuando...`
+- Append checkpoint to events.jsonl (already current via housekeeping)
+- Reset counters: `session_units = 0`, `completed_units = []`
+- **Do NOT stop the loop** — continue immediately to the next iteration
+
+This keeps the orchestrator's active tracking bounded without stopping execution.
 
 ---
 
 ## Deactivate auto-mode indicator
 
-Before ANY exit (compact signal, final report, blocked, or partial), deactivate the marker:
+Before ANY exit (final report, blocked, partial, or pause), deactivate the marker:
 ```bash
 echo '{"active":false}' > .gsd/forge/auto-mode.json
-```
-
-## Compact Signal
-
-When `session_units >= COMPACT_AFTER`, emit and stop:
-
-```
----GSD-COMPACT---
-session_units: {N}
-last_completed: {unit_type} {unit_id}
-state_updated: true
-resume: Run /forge-auto to continue from {next_action from STATE.md}
----
-```
-
-Followed by human-readable summary:
-```
-Batch de {N} unidades completo.
-{completed_units list, one per line}
-
-Estado salvo. Execute /forge-auto para continuar com: {next_action}.
 ```
 
 ---

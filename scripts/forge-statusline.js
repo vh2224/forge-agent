@@ -199,7 +199,13 @@ process.stdin.on('end', () => {
     // --- Build status line ---
     // --- Build auto-mode prefix ---
     let autoPrefix = '';
-    if (autoMode) {
+    // Check for pause request (file written by /forge-pause command)
+    const pauseFile = path.join(cwd, '.gsd', 'forge', 'pause');
+    const pausePending = (() => { try { return fs.existsSync(pauseFile); } catch { return false; } })();
+
+    if (pausePending) {
+      autoPrefix = `${c.yellow}⏸ PAUSE SOLICITADO${c.reset} │ `;
+    } else if (autoMode) {
       // Use elapsed seconds (same base as the counter) so dot and counter
       // advance together — avoids desync with absolute epoch parity.
       const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';

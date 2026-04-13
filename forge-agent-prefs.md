@@ -89,6 +89,14 @@ main_branch: master       # branch principal
 isolation: none           # none | worktree (worktree = branch isolado por milestone)
 ```
 
+## Auto-mode Settings
+
+```
+compact_after: 50      # unidades por sessão antes do checkpoint (0 ou "unlimited" = sem limite)
+                       # checkpoint não para o loop — apenas reseta contadores e continua
+                       # aumente para milestones grandes, diminua se o contexto encher rápido
+```
+
 ## Update Settings
 
 ```
