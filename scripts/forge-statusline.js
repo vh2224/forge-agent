@@ -151,10 +151,12 @@ process.stdin.on('end', () => {
           // Slow path: refresh cache (runs at most once per 10 min)
           try {
             const { execSync } = require('child_process');
-            const version = execSync(
+            const rawVersion = execSync(
               'git describe --tags --always 2>/dev/null || git log --oneline -1 2>/dev/null',
               { cwd: repo, encoding: 'utf8', timeout: 2000, shell: true }
             ).trim();
+            // Reformat git describe output: v0.19.0-3-gabcdef → v0.19.0.3
+            const version = rawVersion.replace(/^(v[\d.]+)-(\d+)-g[0-9a-f]+$/, '$1.$2');
             const localCommit = execSync(
               'git rev-parse HEAD 2>/dev/null',
               { cwd: repo, encoding: 'utf8', timeout: 2000, shell: true }
