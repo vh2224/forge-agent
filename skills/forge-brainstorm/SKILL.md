@@ -26,7 +26,23 @@ Before generating anything, read:
 - `.gsd/AUTO-MEMORY.md` — patterns and gotchas discovered so far
 - If an active milestone exists: its `M###-CONTEXT.md` and `M###-SUMMARY.md`
 
-## Step 2 — Five-lens exploration
+## Step 2 — Web research (optional, targeted)
+
+If Step 1 reveals specific libraries, frameworks, or external services involved in this milestone, run 2–4 targeted searches **before** generating alternatives. Focus on what changes the decision:
+
+- `"{library} {version} known issues"` or `"{library} pitfalls production"`
+- `"{approach A} vs {approach B} {year}"` for competing approaches
+- `"{library} breaking changes {current_version}"` if a pinned version was found in the project
+
+Guidelines:
+- Only search if the milestone involves specific named tech — skip for purely architectural decisions
+- Max 4 searches total — stop when you have enough signal to inform tradeoffs
+- If a search result is thin, use WebFetch on the official changelog/docs URL
+- Record a 1-line takeaway per search; discard results that don't change any alternative
+
+If no specific tech is identified from context, skip this step entirely.
+
+## Step 3 — Five-lens exploration
 
 For the milestone/topic, generate ideas through each lens:
 
@@ -58,7 +74,7 @@ If this milestone were broken into 3-5 demoable slices, what would they be?
 - Each slice: one sentence describing what the user can demo when done
 - Flag which slice has the highest risk (validate it first)
 
-## Step 3 — Decision brief
+## Step 4 — Decision brief
 
 Produce a structured brief:
 
@@ -91,7 +107,7 @@ Produce a structured brief:
 - S02: ...
 ```
 
-## Step 4 — Hand off to discuss
+## Step 5 — Hand off to discuss
 
 After producing the brief:
 - Save it as `.gsd/milestones/M###/M###-BRAINSTORM.md` (create milestone dir if needed)

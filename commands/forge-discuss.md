@@ -1,6 +1,6 @@
 ---
 description: "Abre uma discussão de arquitetura para capturar decisões antes de planejar. Use: /forge-discuss M003 | /forge-discuss S02 | /forge-discuss -fast S02 (pula brainstorm)"
-allowed-tools: Read, Write, Bash, Agent, Skill
+allowed-tools: Read, Write, Bash, Agent, Skill, WebSearch, WebFetch
 ---
 
 ## Bootstrap guard

@@ -1,6 +1,6 @@
 ---
 description: "GSD auto mode — executa o milestone inteiro de forma autônoma. Equivalente ao /forge-auto do gsd-pi."
-allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop
+allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, WebSearch, WebFetch
 ---
 
 ## Bootstrap guard

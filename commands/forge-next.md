@@ -1,6 +1,6 @@
 ---
 description: "GSD step mode — avança exatamente uma unidade de trabalho e para. Argumentos: 'next' (mesmo que sem argumento), 'auto' (delega para /forge-auto)."
-allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop
+allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, WebSearch, WebFetch
 ---
 
 ## Parse arguments
