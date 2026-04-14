@@ -49,15 +49,16 @@ mkdir -p .gsd/milestones/{MILESTONE_ID}/slices
 
 **If FAST_MODE=true:** Skip to Step 3.
 
-Invoke the brainstorm skill directly in this context:
+Delegate to an isolated subagent to keep brainstorm output out of main context:
 
 ```
-Skill({ skill: "forge-brainstorm", args: "{MILESTONE_ID}: {MILESTONE_DESC}" })
+Agent({
+  description: "Brainstorm {MILESTONE_ID}",
+  prompt: "You are running the forge-brainstorm skill for milestone {MILESTONE_ID}: {MILESTONE_DESC}.\nWorking directory: {pwd}\n\nInvoke: Skill({ skill: \"forge-brainstorm\", args: \"{MILESTONE_ID}: {MILESTONE_DESC}\" })\n\nAfter the skill writes the BRAINSTORM.md file, return ONLY:\n- Path of file written\n- Recommended approach (1 paragraph)\n- Top 3 risks (bullet list)\n- Open questions (bullet list)\n\nDo NOT return the full file content."
+})
 ```
 
-The skill reads project context and writes `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-BRAINSTORM.md` itself.
-
-After the skill completes, read the produced BRAINSTORM.md and show the user a compact summary (Recommended approach + Top 3 risks + Open questions). Do not show the full file.
+After the agent returns, confirm `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-BRAINSTORM.md` exists and show the user the compact summary returned by the agent (Recommended approach + Top 3 risks + Open questions).
 
 ---
 
@@ -65,15 +66,16 @@ After the skill completes, read the produced BRAINSTORM.md and show the user a c
 
 **If FAST_MODE=true:** Skip to Step 4.
 
-Invoke the scope clarity skill directly in this context:
+Delegate to an isolated subagent to keep scope clarity output out of main context:
 
 ```
-Skill({ skill: "forge-scope-clarity", args: "{MILESTONE_ID}: {MILESTONE_DESC}" })
+Agent({
+  description: "Scope clarity {MILESTONE_ID}",
+  prompt: "You are running the forge-scope-clarity skill for milestone {MILESTONE_ID}: {MILESTONE_DESC}.\nWorking directory: {pwd}\n\nInvoke: Skill({ skill: \"forge-scope-clarity\", args: \"{MILESTONE_ID}: {MILESTONE_DESC}\" })\n\nAfter the skill writes the SCOPE.md file, return ONLY:\n- Path of file written\n- The In Scope table (markdown)\n- The Out of Scope table (markdown)\n\nDo NOT return the full file content."
+})
 ```
 
-The skill reads project context and writes `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-SCOPE.md` itself.
-
-After the skill completes, show the user the **In Scope** and **Out of Scope** tables from the produced SCOPE.md. Do not show the full file.
+After the agent returns, confirm `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-SCOPE.md` exists and show the user the In Scope and Out of Scope tables returned by the agent.
 
 ---
 
