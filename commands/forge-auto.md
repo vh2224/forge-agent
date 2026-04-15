@@ -72,10 +72,11 @@ cat .gsd/forge/auto-mode.json 2>/dev/null
 **Activate auto-mode indicator** — write marker so the status line shows `▶ AUTO`:
 ```bash
 mkdir -p .gsd/forge
-FORGE_STARTED_AT=$(date +%s000)
-echo '{"active":true,"started_at":'$FORGE_STARTED_AT',"worker":null}' > .gsd/forge/auto-mode.json
+_forge_now=$(node -e "process.stdout.write(String(Date.now()))")
+echo $_forge_now > .gsd/forge/auto-mode-started.txt
+echo '{"active":true,"started_at":'$_forge_now',"worker":null}' > .gsd/forge/auto-mode.json
 ```
-Store `$FORGE_STARTED_AT` for use in the heartbeat writes throughout this session.
+`started_at` is persisted to `.gsd/forge/auto-mode-started.txt` so heartbeat writes can read it across bash tool calls (shell state does not persist between tool calls).
 
 You are the orchestrator. Execute the dispatch loop until the milestone is complete or a stop condition is hit.
 
@@ -171,9 +172,11 @@ Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` se
 
 **Heartbeat — record active worker** before dispatching:
 ```bash
-echo '{"active":true,"started_at":'$FORGE_STARTED_AT',"worker":"'"$unit_type/$unit_id"'","worker_started":'$(date +%s000)'}' > .gsd/forge/auto-mode.json
+_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+_now=$(node -e "process.stdout.write(String(Date.now()))")
+echo '{"active":true,"started_at":'$_sa',"worker":"UNIT_TYPE/UNIT_ID","worker_started":'$_now'}' > .gsd/forge/auto-mode.json
 ```
-(where `$FORGE_STARTED_AT` is the timestamp written when auto-mode was activated)
+Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Reading `started_at` from the file ensures it survives across tool calls.
 
 Then call `Agent(agent_name, worker_prompt)` with a `description` that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
@@ -187,7 +190,8 @@ Wait for the result.
 
 **Heartbeat — clear worker field** after Agent() returns:
 ```bash
-echo '{"active":true,"started_at":'$FORGE_STARTED_AT',"worker":null}' > .gsd/forge/auto-mode.json
+_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+echo '{"active":true,"started_at":'$_sa',"worker":null}' > .gsd/forge/auto-mode.json
 ```
 
 #### 5. Process result
