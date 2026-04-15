@@ -154,12 +154,27 @@ Read ONLY the `.gsd/` artifact files the worker needs (templates below). Inline 
 
 Resolve the model ID for this unit from PREFS.
 
-**Create timeline task** — use `TaskCreate` to show progress in the UI:
+**Create timeline task** — use `TaskCreate` to show progress in the UI.
+
+Use the icon for the current `unit_type`:
+| unit_type | icon |
+|-----------|------|
+| plan-milestone | ⚙ |
+| plan-slice | ⚙ |
+| discuss-milestone | 💬 |
+| discuss-slice | 💬 |
+| research-milestone | 🔬 |
+| research-slice | 🔬 |
+| execute-task | ⚡ |
+| complete-slice | ✔ |
+| complete-milestone | 🏁 |
+| memory extraction | 🧠 |
+
 ```
 TaskCreate({
-  subject: "[{M###}/{S##}/{T##}] {unit_type} — {one-liner}",
+  subject: "{icon} [{M###}/{S##}/{T##}] {unit_type} — {one-liner}",
   description: "{agent_name} ({model_id})",
-  activeForm: "{unit_type} {unit_id} — {one-liner} · {agent_name}"
+  activeForm: "{icon} {unit_type} {unit_id} — {one-liner} · {agent_name}"
 })
 ```
 Store the returned `taskId` as `current_task_id`. Then immediately mark it as in progress:
@@ -182,13 +197,15 @@ echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":"UNIT
 ```
 Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Reading `started_at` from the file ensures it survives across tool calls. `last_heartbeat` is used by the statusline stale check — it resets on every dispatch so long sessions are never incorrectly marked stale.
 
-Then call `Agent(agent_name, worker_prompt)` with a `description` that captures what is happening:
-- Format: `{unit_type} {unit_id}: {one-liner describing the work}`
+Then call `Agent(agent_name, worker_prompt)` with a `description` using the same icon:
+- Format: `{icon} {unit_id} · {one-liner} — {agent_name}`
 - Examples:
-  - `plan-slice S01: authentication foundation`
-  - `execute-task T03: JWT middleware setup`
-  - `research-milestone M001: e-commerce platform`
-- For memory extraction: `extract memories from {unit_id}`
+  - `⚙ S01 · authentication foundation — forge-planner`
+  - `⚡ T03 · JWT middleware setup — forge-executor`
+  - `🔬 M001 · e-commerce platform — forge-researcher`
+  - `💬 S02 · payment flow decisions — forge-discusser`
+  - `✔ S01 · auth slice complete — forge-completer`
+  - `🧠 S01 · extract memories — forge-memory`
 
 Wait for the result.
 
