@@ -50,6 +50,10 @@ Given all `T##-SUMMARY.md` files from the slice:
    - T01: <one-liner>
    - T02: <one-liner>
    ```
+   After merging, if `auto_push: true` in config, push to remote. Then bust the statusline version cache so the new commit shows immediately:
+   ```bash
+   node -e "const fs=require('fs'),os=require('os'),p=os.tmpdir()+'/forge-update-check.json';try{fs.unlinkSync(p)}catch{}" 2>/dev/null || true
+   ```
    If `auto_commit: false` → skip all git operations (no merge, no branch management). Just proceed to step 6.
 
 6. Update `M###-SUMMARY.md` — add this slice's contributions
