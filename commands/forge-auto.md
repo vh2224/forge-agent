@@ -178,9 +178,9 @@ Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` se
 ```bash
 _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
 _now=$(node -e "process.stdout.write(String(Date.now()))")
-echo '{"active":true,"started_at":'$_sa',"worker":"UNIT_TYPE/UNIT_ID","worker_started":'$_now'}' > .gsd/forge/auto-mode.json
+echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":"UNIT_TYPE/UNIT_ID","worker_started":'$_now'}' > .gsd/forge/auto-mode.json
 ```
-Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Reading `started_at` from the file ensures it survives across tool calls.
+Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Reading `started_at` from the file ensures it survives across tool calls. `last_heartbeat` is used by the statusline stale check — it resets on every dispatch so long sessions are never incorrectly marked stale.
 
 Then call `Agent(agent_name, worker_prompt)` with a `description` that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
@@ -204,7 +204,8 @@ Executing work inline bypasses context isolation and is NEVER acceptable as a fa
 **Heartbeat — clear worker field** after Agent() returns:
 ```bash
 _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
-echo '{"active":true,"started_at":'$_sa',"worker":null}' > .gsd/forge/auto-mode.json
+_now=$(node -e "process.stdout.write(String(Date.now()))")
+echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":null}' > .gsd/forge/auto-mode.json
 ```
 
 #### 5. Process result

@@ -77,11 +77,16 @@ process.stdin.on('end', () => {
           ? Math.round((Date.now() - auto.started_at) / 1000)
           : 0;
 
-        // Stale check: if auto-mode has been "active" for over 15 minutes
-        // with no recent dispatch, assume the session was killed (Ctrl+C, terminal closed).
-        // Auto-clean: deactivate the marker so it doesn't persist forever.
-        const STALE_THRESHOLD = 15 * 60; // 15 minutes
-        if (elapsed > STALE_THRESHOLD) {
+        // Stale check: use last_heartbeat (updated before/after every Agent dispatch)
+        // to detect killed sessions — NOT started_at, which grows forever in long sessions.
+        // A session is stale only if no heartbeat was written in the last 5 minutes.
+        // Falls back to started_at for sessions that predate this field.
+        const STALE_THRESHOLD_HEARTBEAT = 5 * 60; // 5 minutes since last heartbeat
+        const lastActivity = auto.last_heartbeat || auto.started_at || 0;
+        const sinceLastActivity = Math.round((Date.now() - lastActivity) / 1000);
+        const isStale = sinceLastActivity > STALE_THRESHOLD_HEARTBEAT;
+
+        if (isStale) {
           try { fs.writeFileSync(autoFile, '{"active":false}', 'utf8'); } catch {}
         } else {
           autoMode        = true;
