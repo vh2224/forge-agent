@@ -166,22 +166,27 @@ process.stdin.on('end', () => {
 
             forgeVersion = version;
 
-            // Single ls-remote call: fetch HEAD + all version tags
+            // Update check: compare local HEAD vs remote HEAD, then find latest tag
+            // Two separate calls avoids shell quoting issues on Windows (cmd.exe)
             let hasUpdate = false;
             let remoteVersion = '';
             try {
-              const remoteOut = execSync(
-                "git ls-remote origin HEAD 'refs/tags/v*' 2>/dev/null",
+              const headOut = execSync(
+                'git ls-remote origin HEAD 2>/dev/null',
                 { cwd: repo, encoding: 'utf8', timeout: 5000, shell: true }
               );
-              const lines = remoteOut.trim().split('\n').filter(Boolean);
-              const headLine = lines.find(l => l.endsWith('\tHEAD'));
-              const remoteCommit = headLine ? headLine.split(/\s/)[0].trim() : '';
+              const remoteCommit = headOut.trim().split(/\s/)[0];
               hasUpdate = !!remoteCommit && remoteCommit !== localCommit;
+            } catch {}
 
-              if (hasUpdate) {
-                // Find latest semver tag from remote
-                const tags = lines
+            if (hasUpdate) {
+              try {
+                // git ls-remote --tags needs no shell quoting — safe on Windows + Linux
+                const tagsOut = execSync(
+                  'git ls-remote --tags origin 2>/dev/null',
+                  { cwd: repo, encoding: 'utf8', timeout: 5000, shell: true }
+                );
+                const tags = tagsOut.split('\n')
                   .filter(l => /refs\/tags\/v[\d.]+$/.test(l))
                   .map(l => l.split(/\s+/)[1].replace('refs/tags/', ''))
                   .sort((a, b) => {
@@ -193,8 +198,8 @@ process.stdin.on('end', () => {
                     return 0;
                   });
                 remoteVersion = tags[0] || '';
-              }
-            } catch {}
+              } catch {}
+            }
 
             if (hasUpdate) forgeUpdate = remoteVersion ? `↑ ${remoteVersion}` : '↑ novos commits';
 
