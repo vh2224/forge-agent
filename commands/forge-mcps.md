@@ -1,5 +1,5 @@
 ---
-description: "Visualiza e altera configurações do Forge Agent (status line, hooks, MCPs). Use: /forge-config | /forge-config statusline on | /forge-config mcps | /forge-config mcps add <nome>"
+description: "Gerencia MCPs do Forge Agent — lista, adiciona e remove servidores MCP. Use: /forge-mcps | /forge-mcps add <nome> | /forge-mcps remove <nome>"
 allowed-tools: Bash, Read, AskUserQuestion
 ---
 
@@ -9,127 +9,9 @@ $ARGUMENTS
 
 ---
 
-## Ler estado atual
-
-```bash
-cat ~/.claude/settings.json 2>/dev/null || echo "{}"
-```
-
-Parse the JSON. Detect:
-- `statusline_active`: true if `settings.statusLine.command` contains `forge-statusline.js`
-- `hooks_active`: true if `settings.hooks.PreToolUse` or `PostToolUse` contains an entry with `forge-hook.js`
-
----
-
-## Routing
-
-**If $ARGUMENTS is empty or "help"** → show config dashboard (see below).
-
-**If $ARGUMENTS is "statusline on"** → enable (see below).
-
-**If $ARGUMENTS is "statusline off"** → disable (see below).
-
-**If $ARGUMENTS starts with "mcps"** → strip the "mcps" prefix and follow the exact same logic as `/forge-mcps` would with the remaining arguments. For example: `mcps add github` → behave as `/forge-mcps add github`. `mcps` alone → behave as `/forge-mcps` (list). See the MCP Management section below.
-
-**Otherwise** → show error: `Opção desconhecida: "$ARGUMENTS". Use /forge-config para ver as opções.`
-
----
-
-## Dashboard (sem argumentos)
-
-Before printing the dashboard, run the MCP list logic to gather real data:
-
-**Step 1 — Read installed MCPs:**
-
-```bash
-echo "==GLOBAL=="
-node ~/.claude/forge-settings.js ~/.claude/settings.json --mcp-list 2>/dev/null
-echo "==PROJECT=="
-node ~/.claude/forge-settings.js .claude/settings.json --mcp-list 2>/dev/null
-```
-
-**Step 2 — Read catalog:**
-
-Read `~/.claude/forge-mcps.md`. Extract all MCP names from `### <name>` headings.
-
-**Step 3 — Compute:**
-- Count how many catalog MCPs are installed (N_INSTALLED)
-- Count total catalog MCPs (N_TOTAL)
-- Count custom MCPs not in catalog (N_CUSTOM)
-- Build a quick list of installed names with ✓ and not-installed with ○
-
-**Step 4 — Print dashboard:**
-
-```
-Forge Config
-════════════════════════════════════════
-
-  Comandos disponíveis
-  ────────────────────────────────────
-  /forge-config statusline on|off    Ativa/desativa status line
-  /forge-config mcps                 Lista MCPs (alias de /forge-mcps)
-  /forge-mcps                        Gerencia MCPs — lista, add, remove
-  /forge-mcps add <nome>             Adiciona um MCP (catálogo ou custom)
-  /forge-mcps remove <nome>          Remove um MCP
-
-════════════════════════════════════════
-
-  Status Line                      [ESTADO]
-  ────────────────────────────────────
-  Substitui a status line nativa do Claude Code.
-  Mostra: modelo • projeto • M/S ativo • contexto %
-          custo da sessão • tokens enviados/recebidos/cache
-
-  [se ativo:]
-  → /forge-config statusline off     Desativar
-
-  [se inativo:]
-  → /forge-config statusline on      Ativar
-
-  MCPs (Model Context Protocol)    N_INSTALLED/N_TOTAL
-  ────────────────────────────────────
-  [For each catalog MCP, print one line:]
-    ✓ fetch          Instalado (global)
-    ✓ context7       Instalado (global)
-    ○ github         Disponível — GitHub oficial (~70 tools)
-    ○ postgres       Disponível — Schema, queries (precisa DATABASE_URL)
-    ○ redis          Disponível — Filas, cache (precisa REDIS_URL)
-    ○ puppeteer      Disponível — Browser automation, screenshots
-    ○ sqlite         Disponível — Banco SQLite local
-
-  [If there are custom MCPs (not in catalog), add:]
-  Customizados:
-    ✓ my-mcp         global
-
-  → /forge-mcps add <nome>            Instalar um MCP
-  → /forge-mcps                      Ver detalhes
-
-════════════════════════════════════════
-  Reinicie o Claude Code após qualquer alteração.
-```
-
-Replace `[ESTADO]` with `✓ ativo` (green) or `○ inativo`.
-Replace `N_INSTALLED/N_TOTAL` with actual counts (e.g., `3/7 do catálogo`).
-
-**Short descriptions for catalog MCPs** (use these when showing ○ Disponível):
-
-| MCP | Description |
-|-----|------------|
-| fetch | Full HTTP client (GET, POST, PUT, DELETE) |
-| context7 | Docs atualizadas de libs e frameworks |
-| github | GitHub oficial (~70 tools: issues, PRs, Actions) |
-| postgres | Schema, queries, migrations (precisa DATABASE_URL) |
-| redis | Filas, cache, pub/sub (precisa REDIS_URL) |
-| puppeteer | Automação de browser, screenshots, E2E |
-| sqlite | Acesso a banco SQLite local |
-
-For installed MCPs, show scope (global/projeto) instead of description since the user already chose to install them.
-
----
-
 ## Garantir que forge-settings.js está instalado
 
-Before running any enable/disable command, check if the script exists:
+Before running any operation, check if the script exists:
 
 ```bash
 test -f ~/.claude/forge-settings.js && echo "exists" || echo "missing"
@@ -155,51 +37,19 @@ Execute /forge-update para reinstalar os scripts do Forge Agent.
 
 ---
 
-## Enable — "statusline on"
+## Routing
 
-```bash
-node ~/.claude/forge-settings.js ~/.claude/settings.json
-```
+**If $ARGUMENTS is empty or "list"** → show MCP list (see below).
 
-If exit code is 0, print:
-```
-✓ Status line ativada
+**If $ARGUMENTS starts with "add"** → add MCP (see below).
 
-Reinicie o Claude Code para aplicar.
-Visualização:
-  Forge │ Claude Sonnet 4.6 │ <projeto> │ M001/S01 │ ██░░░░░░░░ 18% │ $0.0000 │ ↑0 ↓0 💾0
-```
+**If $ARGUMENTS starts with "remove"** → remove MCP (see below).
 
-If exit code != 0, show the error output.
+**Otherwise** → show error: `Opção desconhecida: "$ARGUMENTS". Use /forge-mcps para ver as opções.`
 
 ---
 
-## Disable — "statusline off"
-
-```bash
-node ~/.claude/forge-settings.js ~/.claude/settings.json --remove
-```
-
-If exit code is 0, print:
-```
-✓ Status line desativada — status line nativa do Claude Code restaurada
-
-Reinicie o Claude Code para aplicar.
-```
-
-If exit code != 0, show the error output.
-
----
-
-## MCP Management
-
-### Garantir que forge-settings.js está instalado
-
-Same check as above — verify `~/.claude/forge-settings.js` exists before any MCP operation.
-
-### Route: "mcps" (list)
-
-If $ARGUMENTS is exactly "mcps" or "mcps list":
+## List (sem argumentos ou "list")
 
 **Step 1 — Read what's installed:**
 
@@ -227,7 +77,7 @@ Print:
 
 ```
 MCPs — Forge Agent
-────────────────────────────────────────
+════════════════════════════════════════
 
   Configurados:
     ✓ fetch          global    Full HTTP client (GET, POST, PUT, DELETE)
@@ -253,7 +103,7 @@ MCPs — Forge Agent
     (list any installed MCPs whose name does NOT match a catalog entry)
     (if none, omit this section entirely)
 
-────────────────────────────────────────
+════════════════════════════════════════
   Adicionar:  /forge-mcps add <nome>
   Remover:    /forge-mcps remove <nome>
 ```
@@ -270,11 +120,13 @@ MCPs — Forge Agent
 | puppeteer | Automação de browser, screenshots, E2E |
 | sqlite | Acesso a banco SQLite local |
 
-### Route: "mcps add <name>"
+---
 
-If $ARGUMENTS starts with "mcps add":
+## Add — "add <name>"
 
-Extract the MCP name. Read `~/.claude/forge-mcps.md` (the MCP catalog) to check if it's a known MCP.
+Extract the MCP name from $ARGUMENTS (strip "add " prefix).
+
+Read `~/.claude/forge-mcps.md` (the MCP catalog) to check if it's a known MCP.
 
 **If known MCP (found in catalog):**
 
@@ -341,7 +193,9 @@ Print result:
 Reinicie o Claude Code para ativar.
 ```
 
-### Route: "mcps remove <name>"
+---
+
+## Remove — "remove <name>"
 
 Extract the MCP name. Check which scopes have it:
 

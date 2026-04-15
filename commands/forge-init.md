@@ -435,7 +435,7 @@ Quais MCPs deseja configurar? Pode:
   2. Adicionar/remover da lista (ex: "sem postgres, adicionar redis")
   3. Pular — nenhum MCP por agora
 
-Também pode adicionar MCPs depois com /forge-config mcps add <nome>
+Também pode adicionar MCPs depois com /forge-mcps add <nome>
 ```
 
 Adapt the list based on actual detection results. Only show MCPs relevant to the detected stack.
@@ -472,7 +472,7 @@ Gather: name, command, args, env vars, has-credentials. Apply credential safety 
 
 If the user chooses to skip, do not configure any MCPs. Print:
 ```
-  MCPs: nenhum configurado (adicione depois com /forge-config mcps add)
+  MCPs: nenhum configurado (adicione depois com /forge-mcps add)
 ```
 
 ---

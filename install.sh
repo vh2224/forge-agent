@@ -301,7 +301,7 @@ else
   echo "  5. Execute:                 /forge-auto"
   echo ""
   echo "  MCPs de projeto (postgres, redis) serão sugeridos no /forge-init."
-  echo "  Gerenciar MCPs a qualquer momento: /forge-config mcps"
+  echo "  Gerenciar MCPs a qualquer momento: /forge-mcps"
   echo ""
   echo "  Ajuda a qualquer momento:   /forge-help"
 fi
