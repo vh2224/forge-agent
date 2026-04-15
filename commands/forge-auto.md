@@ -174,7 +174,7 @@ Use the icon for the current `unit_type`:
 TaskCreate({
   subject: "{icon} [{M###}/{S##}/{T##}] {unit_type} — {one-liner}",
   description: "{agent_name} ({model_id})",
-  activeForm: "{icon} {unit_type} {unit_id} — {one-liner} · {agent_name}"
+  activeForm: "{icon} {unit_type} · {agent_name} ({model_id}) · {M###}/{S##}/{T##}"
 })
 ```
 Store the returned `taskId` as `current_task_id`. Then immediately mark it as in progress:
@@ -198,14 +198,14 @@ echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":"UNIT
 Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Reading `started_at` from the file ensures it survives across tool calls. `last_heartbeat` is used by the statusline stale check — it resets on every dispatch so long sessions are never incorrectly marked stale.
 
 Then call `Agent(agent_name, worker_prompt)` with a `description` using the same icon:
-- Format: `{icon} {unit_id} · {one-liner} — {agent_name}`
+- Format: `{icon} {unit_id} · {one-liner}`
 - Examples:
-  - `⚙ S01 · authentication foundation — forge-planner`
-  - `⚡ T03 · JWT middleware setup — forge-executor`
-  - `🔬 M001 · e-commerce platform — forge-researcher`
-  - `💬 S02 · payment flow decisions — forge-discusser`
-  - `✔ S01 · auth slice complete — forge-completer`
-  - `🧠 S01 · extract memories — forge-memory`
+  - `⚙ S01 · authentication foundation`
+  - `⚡ T03 · JWT middleware setup`
+  - `🔬 M001 · e-commerce platform`
+  - `💬 S02 · payment flow decisions`
+  - `✔ S01 · auth slice complete`
+  - `🧠 S01 · extract memories`
 
 Wait for the result.
 
