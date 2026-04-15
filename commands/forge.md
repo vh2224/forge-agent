@@ -21,9 +21,10 @@ pwd
 
 ## Load context
 
-Read ONLY these files:
+Read ONLY this file:
 1. `.gsd/STATE.md` — store as `STATE`
-2. `.gsd/AUTO-MEMORY.md` (skip silently if missing)
+
+> AUTO-MEMORY is NOT loaded here. It will be passed to workers at dispatch time by forge-auto/forge-task/forge-next.
 
 From STATE extract:
 - `PROJECT_NAME` ← `project` field (or filename fallback)
@@ -68,9 +69,8 @@ cat .gsd/forge/compact-signal.json 2>/dev/null
 
 If the file exists:
 1. Re-read `.gsd/STATE.md` → update `STATE`, `PROJECT_NAME`, `ACTIVE_MILESTONE`, `NEXT_ACTION`
-2. Re-read `.gsd/AUTO-MEMORY.md` if it exists
-3. Delete the signal: `rm -f .gsd/forge/compact-signal.json`
-4. Emit: `↺ Recovery pós-compactação — retomando de: {NEXT_ACTION}`
+2. Delete the signal: `rm -f .gsd/forge/compact-signal.json`
+3. Emit: `↺ Recovery pós-compactação — retomando de: {NEXT_ACTION}`
 
 If the file does not exist, skip this block entirely.
 

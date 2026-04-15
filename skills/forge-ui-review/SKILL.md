@@ -1,6 +1,6 @@
 ---
 name: forge-ui-review
-description: Frontend component quality review — WCAG 2.2 accessibility, Core Web Vitals performance, WAI-ARIA patterns, React 19/Next.js App Router, component architecture. Use when building, reviewing, or refactoring UI components.
+description: "Review de UI — WCAG 2.2, CWV, WAI-ARIA, React 19/Next.js."
 ---
 
 <objective>

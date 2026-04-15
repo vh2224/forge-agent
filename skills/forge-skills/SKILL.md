@@ -1,6 +1,6 @@
 ---
 name: forge-skills
-description: "Lista skills disponíveis e explica como usar com os comandos GSD. Use: /forge-skills | /forge-skills brainstorm | /forge-skills --all"
+description: "Lista skills disponiveis e detalhes de uso."
 disable-model-invocation: true
 allowed-tools: Read, Bash, Glob
 ---

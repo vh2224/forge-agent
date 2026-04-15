@@ -1,6 +1,6 @@
 ---
 name: forge-status
-description: "Mostra o estado atual do projeto GSD — milestone ativo, slice, tarefas pendentes e próxima ação."
+description: "Dashboard do projeto — milestone ativo, slices, proxima acao."
 allowed-tools: Read, Glob, Bash
 ---
 

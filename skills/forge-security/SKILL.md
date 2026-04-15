@@ -1,6 +1,6 @@
 ---
 name: forge-security
-description: Security analysis for GSD tasks and slices. Detects security-sensitive scope in a plan and produces a focused, implementation-specific checklist the executor must verify. Auto-invoked by the orchestrator when security keywords are detected in T##-PLAN.md.
+description: "Checklist de seguranca por task/slice. Auto-invocada por keywords."
 ---
 
 <objective>

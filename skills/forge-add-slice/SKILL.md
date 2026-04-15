@@ -1,6 +1,6 @@
 ---
 name: forge-add-slice
-description: "Adiciona um novo slice a uma milestone existente e planeja suas tasks. Use: /forge-add-slice M002 autenticação OAuth com refresh token"
+description: "Adiciona um slice a um milestone existente e planeja suas tasks."
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Glob
 ---

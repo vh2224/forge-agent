@@ -1,6 +1,6 @@
 ---
 name: forge-doctor
-description: "Diagnóstico e correção do projeto GSD. Use: /forge-doctor | /forge-doctor --fix | /forge-doctor --fix --dry-run"
+description: "Diagnostico e correcao do projeto GSD. Flags: --fix, --dry-run."
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Glob
 ---

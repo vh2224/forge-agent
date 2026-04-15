@@ -1,6 +1,6 @@
 ---
 name: forge-pause
-description: "Pausa ou retoma o forge-auto no próximo intervalo entre unidades. Use: /forge-pause | /forge-pause status"
+description: "Pausa ou retoma o forge-auto no proximo intervalo."
 disable-model-invocation: true
 allowed-tools: Bash, Read
 ---

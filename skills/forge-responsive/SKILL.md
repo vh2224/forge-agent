@@ -1,6 +1,6 @@
 ---
 name: forge-responsive
-description: Responsive design audit and implementation. Core Web Vitals, fluid/intrinsic layout, container queries, mobile-first, WCAG 2.2 touch targets. Use when building or reviewing UI components, pages, or layouts.
+description: "Audit e implementacao de design responsivo — CWV, WCAG 2.2."
 ---
 
 <objective>

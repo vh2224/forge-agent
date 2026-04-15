@@ -1,6 +1,6 @@
 ---
 name: forge-mcps
-description: "Gerencia MCPs do Forge Agent — lista, adiciona e remove servidores MCP. Use: /forge-mcps | /forge-mcps add <nome> | /forge-mcps remove <nome>"
+description: "Gerencia MCPs — lista, adiciona e remove servidores MCP."
 disable-model-invocation: true
 allowed-tools: Bash, Read, AskUserQuestion
 ---

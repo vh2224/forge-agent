@@ -1,6 +1,6 @@
 ---
 name: forge-prefs
-description: "Visualiza ou edita as preferências do agente GSD. Use: /forge-prefs | /forge-prefs models | /forge-prefs set research opus | /forge-prefs set execute claude-opus-4-6"
+description: "Preferencias do agente GSD — modelos, git, skip rules."
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit
 ---

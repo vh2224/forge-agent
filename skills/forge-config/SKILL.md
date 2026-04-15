@@ -1,6 +1,6 @@
 ---
 name: forge-config
-description: "Visualiza e altera configurações do Forge Agent (status line, hooks, MCPs). Use: /forge-config | /forge-config statusline on | /forge-config mcps | /forge-config mcps add <nome>"
+description: "Configuracoes do Forge — status line, hooks, MCPs."
 disable-model-invocation: true
 allowed-tools: Bash, Read, AskUserQuestion
 ---

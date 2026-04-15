@@ -1,6 +1,6 @@
 ---
 name: forge-codebase
-description: "Qualidade do codebase. Use: /forge-codebase [--paths a,b] [--force] | /forge-codebase --fix | /forge-codebase --fix --dry-run"
+description: "Qualidade do codebase — lint, nomenclatura. Flags: --fix, --paths."
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Glob
 ---

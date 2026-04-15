@@ -1,6 +1,6 @@
 ---
 name: forge-task
-description: "Executa uma task autônoma — sem milestone ou slice. Fluxo: brainstorm → discuss → research → plan → execute."
+description: "Task autonoma sem milestone — brainstorm, discuss, plan, execute."
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, AskUserQuestion, TaskCreate, TaskUpdate, TaskList, TaskStop, WebSearch, WebFetch
 ---
 

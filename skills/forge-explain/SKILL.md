@@ -1,6 +1,6 @@
 ---
 name: forge-explain
-description: "Explica qualquer artefato GSD: milestone, slice, task, decisões, estado atual. Use: /forge-explain M002 | /forge-explain S03 | /forge-explain T02 | /forge-explain decisions"
+description: "Explica artefatos GSD: M###, S##, T##, decisions, state."
 disable-model-invocation: true
 allowed-tools: Read, Glob
 ---

@@ -1,6 +1,6 @@
 ---
 name: forge-help
-description: "Exibe ajuda completa do Forge Agent — comandos, skills, agentes, fluxo de trabalho e configurações."
+description: "Ajuda completa do Forge Agent — comandos, skills, agentes."
 allowed-tools: Read
 ---
 
