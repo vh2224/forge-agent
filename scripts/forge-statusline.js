@@ -146,7 +146,9 @@ process.stdin.on('end', () => {
         if (cacheValid) {
           // Fast path: serve from cache — zero git processes, no flicker
           forgeVersion = cache.version || '';
-          if (cache.has_update) forgeUpdate = '↑ novos commits';
+          if (cache.has_update) {
+            forgeUpdate = cache.remote_version ? `↑ ${cache.remote_version}` : '↑ novos commits';
+          }
         } else {
           // Slow path: refresh cache (runs at most once per 10 min)
           try {
@@ -164,24 +166,44 @@ process.stdin.on('end', () => {
 
             forgeVersion = version;
 
-            // Commit-based update check: compare local HEAD vs remote HEAD
+            // Single ls-remote call: fetch HEAD + all version tags
             let hasUpdate = false;
+            let remoteVersion = '';
             try {
               const remoteOut = execSync(
-                'git ls-remote origin HEAD 2>/dev/null',
+                "git ls-remote origin HEAD 'refs/tags/v*' 2>/dev/null",
                 { cwd: repo, encoding: 'utf8', timeout: 5000, shell: true }
               );
-              const remoteCommit = remoteOut.split(/\s/)[0].trim();
+              const lines = remoteOut.trim().split('\n').filter(Boolean);
+              const headLine = lines.find(l => l.endsWith('\tHEAD'));
+              const remoteCommit = headLine ? headLine.split(/\s/)[0].trim() : '';
               hasUpdate = !!remoteCommit && remoteCommit !== localCommit;
+
+              if (hasUpdate) {
+                // Find latest semver tag from remote
+                const tags = lines
+                  .filter(l => /refs\/tags\/v[\d.]+$/.test(l))
+                  .map(l => l.split(/\s+/)[1].replace('refs/tags/', ''))
+                  .sort((a, b) => {
+                    const av = a.replace('v', '').split('.').map(Number);
+                    const bv = b.replace('v', '').split('.').map(Number);
+                    for (let i = 0; i < Math.max(av.length, bv.length); i++) {
+                      if ((av[i] || 0) !== (bv[i] || 0)) return (bv[i] || 0) - (av[i] || 0);
+                    }
+                    return 0;
+                  });
+                remoteVersion = tags[0] || '';
+              }
             } catch {}
 
-            if (hasUpdate) forgeUpdate = '↑ novos commits';
+            if (hasUpdate) forgeUpdate = remoteVersion ? `↑ ${remoteVersion}` : '↑ novos commits';
 
             fs.writeFileSync(cacheFile, JSON.stringify({
               ts: Date.now(),
               version,
               localCommit,
               has_update: hasUpdate,
+              remote_version: remoteVersion,
             }), 'utf8');
           } catch {}
         }
@@ -225,7 +247,7 @@ process.stdin.on('end', () => {
     let forgeLabel = 'Forge';
     if (forgeVersion) {
       forgeLabel = forgeUpdate
-        ? `Forge ${forgeVersion} ${c.bold}${c.yellow}⬆ novos commits${c.reset}`
+        ? `Forge ${forgeVersion} ${c.bold}${c.yellow}${forgeUpdate}${c.reset}`
         : `Forge ${forgeVersion}`;
     }
 
