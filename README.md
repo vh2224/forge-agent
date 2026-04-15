@@ -51,38 +51,58 @@ Verificar instalação: `/forge-help`
 
 ---
 
-## Comandos principais
+## Arquitetura v1.0 — 3 comandos + skills
+
+A partir da v1.0, o Forge Agent usa **3 comandos slash** e **skills** para tudo o mais:
+
+| Tipo | Exemplos | Como invocar |
+|------|---------|--------------|
+| Comando slash | `/forge`, `/forge-init`, `/forge-update` | Digitar `/` no Claude Code |
+| Skill | `forge-auto`, `forge-status`, `forge-new-milestone`... | Via `/forge` REPL ou digitando o nome |
+
+### Comandos slash
 
 | Comando | O que faz |
 |---------|-----------|
-| `/forge` | Shell interativo — entry point principal |
-| `/forge-init` | Inicializa o projeto GSD |
-| `/forge-new-milestone` | Cria milestone com discuss + plan (alias — delega ao `/forge`) |
-| `/forge-auto` | Executa o milestone inteiro (alias — delega ao `/forge`) |
-| `/forge-next` | Executa uma unidade e para |
-| `/forge-status` | Dashboard de progresso |
-| `/forge-codebase` | Qualidade do codebase (`--fix` para correções) |
-| `/forge-explain` | Explica qualquer artefato GSD |
-| `/forge-discuss` | Abre discussão de arquitetura |
-| `/forge-prefs` | Configuração de modelos e git |
-| `/forge-help` | Ajuda completa |
+| `/forge` | **Entry point principal** — REPL interativo com menu: auto, task, new-milestone, status, help |
+| `/forge-init [descrição]` | Inicializa o projeto GSD — cria `CLAUDE.md` + `.gsd/` + prefs |
+| `/forge-update [caminho]` | Atualiza Forge Agent (git pull + reinstala). Preserva preferências. |
 
-[Referência completa de comandos](docs/commands.md)
+### Skills de execução e planejamento
 
----
+| Skill | O que faz |
+|-------|-----------|
+| `forge-auto` | Executa o milestone inteiro de forma autônoma até concluir |
+| `forge-next` | Executa exatamente uma unidade e para (step mode) |
+| `forge-task <descrição>` | Task autônoma sem milestone — brainstorm → discuss → plan → execute |
+| `forge-new-milestone <descrição>` | Cria milestone completo — brainstorm → scope → discuss → ROADMAP |
+| `forge-discuss <M###\|S##>` | Abre fase de discuss para milestone ou slice |
+| `forge-add-slice`, `forge-add-task` | Adiciona slice ou task a um milestone existente |
 
-## Skills
+### Skills de visibilidade e manutenção
+
+| Skill | O que faz |
+|-------|-----------|
+| `forge-status` | Dashboard de progresso — milestone, slices, próxima ação |
+| `forge-doctor [--fix]` | Diagnóstico do projeto — valida e corrige STATE, arquivos, prefs |
+| `forge-codebase [--fix]` | Qualidade do codebase — lint, nomenclatura, estrutura |
+| `forge-explain <alvo>` | Explica qualquer artefato GSD sem modificar nada |
+| `forge-memories` | Gerencia memórias auto-aprendidas do projeto |
+| `forge-ask` | Modo conversa — discute ideias, captura decisões |
+| `forge-prefs` | Configuração de modelos por fase e git settings |
+| `forge-config`, `forge-mcps` | Status line, hooks e MCPs |
+| `forge-help` | Ajuda completa |
+
+### Skills de qualidade (invocadas automaticamente ou manualmente)
 
 | Skill | O que faz |
 |-------|-----------|
 | `forge-brainstorm` | Explora alternativas e riscos antes de planejar |
 | `forge-scope-clarity` | Contrato de escopo com critérios testáveis |
-| `forge-risk-radar` | Análise de riscos por slice |
-| `forge-security` | Análise de segurança por task/slice |
+| `forge-risk-radar` | Análise de riscos por slice (auto-invocada em slices `risk:high`) |
+| `forge-security` | Checklist de segurança por task (auto-invocada por keywords) |
 | `forge-responsive` | Audit responsivo — Core Web Vitals, WCAG 2.2 |
 | `forge-ui-review` | Review UI — acessibilidade, performance, React 19 |
-
-[Documentação de skills](docs/skills.md)
 
 ---
 
