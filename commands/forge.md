@@ -87,9 +87,7 @@ AskUserQuestion({
     "auto — modo autônomo (executa o milestone até concluir)",
     "task — criar e executar uma task avulsa",
     "new-milestone — planejar um novo milestone",
-    "status — ver status detalhado do projeto",
-    "help — ajuda e lista de comandos",
-    "sair — fechar o forge"
+    "sair — fechar o forge  |  status · help também disponíveis"
   ]
 })
 ```

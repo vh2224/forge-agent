@@ -1,7 +1,6 @@
 ---
 name: forge-new-milestone
 description: Creates a new GSD milestone. Full flow: brainstorm → scope clarity → discuss → plan → risk radar → state update. Use -fast to skip brainstorm and scope clarity. Ex: forge-new-milestone autenticação OAuth | forge-new-milestone -fast pagamentos com Stripe
-disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Agent, Skill, AskUserQuestion, WebSearch, WebFetch
 ---
 

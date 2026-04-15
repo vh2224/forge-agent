@@ -1,7 +1,6 @@
 ---
 name: forge-help
 description: "Exibe ajuda completa do agente GSD — comandos, agentes, fluxo de trabalho e configurações."
-disable-model-invocation: true
 allowed-tools: Read
 ---
 

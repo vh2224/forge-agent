@@ -1,7 +1,6 @@
 ---
 name: forge-auto
 description: GSD auto mode — executa o milestone inteiro de forma autônoma até concluir
-disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, WebSearch, WebFetch
 ---
 
