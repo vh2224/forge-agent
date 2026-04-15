@@ -89,15 +89,20 @@ main_branch: master       # branch principal
 isolation: none           # none | worktree (worktree = branch isolado por milestone)
 ```
 
-## Milestone Cleanup
+## Artifact Cleanup
 
-Após um milestone fechar com sucesso, os arquivos de milestone/slice/task são arqueologia:
+Após um milestone ou task fechar com sucesso, os arquivos de planejamento/execução são arqueologia:
 o valor real já foi extraído para AUTO-MEMORY.md, DECISIONS.md e CODING-STANDARDS.md.
+Um resumo compacto é sempre gravado em LEDGER.md antes de qualquer cleanup.
 
 ```
 milestone_cleanup: keep   # keep    = mantém tudo (padrão seguro)
                           # archive = move .gsd/milestones/M###/ → .gsd/archive/M###/
                           # delete  = remove .gsd/milestones/M###/ inteiramente
+
+task_cleanup: keep        # keep    = mantém tudo (padrão seguro)
+                          # archive = move .gsd/tasks/TASK-###/ → .gsd/archive/tasks/TASK-###/
+                          # delete  = remove .gsd/tasks/TASK-###/ inteiramente
 ```
 
 ## Auto-mode Settings

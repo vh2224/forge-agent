@@ -417,6 +417,32 @@ mkdir -p .gsd/forge
 Agent("forge-memory", "WORKING_DIR: {WORKING_DIR}\nUNIT_TYPE: execute-task\nUNIT_ID: {TASK_ID}\n\nSUMMARY_CONTENT:\n{content of {TASK_ID}-SUMMARY.md}\n\nRESULT_BLOCK:\n{full ---GSD-WORKER-RESULT--- block verbatim}\n\nKEY_DECISIONS:\n{key_decisions from SUMMARY.md frontmatter, or '(none)'}")
 ```
 
+**Write ledger entry** — append a compact entry to `.gsd/LEDGER.md` (create if missing, same file used by milestones):
+```markdown
+## {TASK_ID} — {TASK_DESCRIPTION} · {YYYY-MM-DD}
+
+{2-sentence description of what was done and why it matters}
+
+**Key files:** path/to/file, path/to/file (up to 5)
+**Key decisions:** one-liner (if any, else omit line)
+
+---
+```
+Keep each entry under 10 lines. This is the only task artifact that persists regardless of `task_cleanup` setting.
+
+**Cleanup task artifacts** — based on `task_cleanup` from PREFS (default: `keep`):
+- `keep`: do nothing — all files remain in `.gsd/tasks/{TASK_ID}/`
+- `archive`: move the task directory to archive:
+  ```bash
+  mkdir -p .gsd/archive/tasks
+  mv .gsd/tasks/{TASK_ID} .gsd/archive/tasks/{TASK_ID}
+  ```
+- `delete`: remove the task directory entirely:
+  ```bash
+  rm -rf .gsd/tasks/{TASK_ID}
+  ```
+In all cases `.gsd/LEDGER.md`, `AUTO-MEMORY.md`, `DECISIONS.md`, and `CODING-STANDARDS.md` are never touched.
+
 **Final report:**
 ```
 ✓ {TASK_ID} concluída: {TASK_DESCRIPTION}
