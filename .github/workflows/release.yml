@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     branches: [master]
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -15,23 +17,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get latest tag
-        id: latest_tag
+      - name: Resolve version
+        id: version
         run: |
-          tag=$(git tag -l 'v*' --sort=-v:refname | head -1)
-          if [ -z "$tag" ]; then
-            echo "tag=" >> "$GITHUB_OUTPUT"
-            echo "No previous tag found, will start at v0.1.0"
-          else
-            echo "tag=$tag" >> "$GITHUB_OUTPUT"
-            echo "Latest tag: $tag"
+          # If HEAD is already tagged (manual tag push or tag+commit together),
+          # use that tag directly — skip semver bump entirely.
+          HEAD_TAG=$(git tag --points-at HEAD -l 'v*' | sort -V | tail -1)
+          if [ -n "$HEAD_TAG" ]; then
+            echo "new_tag=$HEAD_TAG" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "range=${HEAD_TAG}^..HEAD" >> "$GITHUB_OUTPUT"
+            echo "HEAD is already tagged: $HEAD_TAG — using as-is"
+            exit 0
           fi
 
-      - name: Determine version bump
-        id: bump
-        run: |
-          LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
-
+          # Triggered by branch push without a tag — calculate next semver.
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -z "$LATEST_TAG" ]; then
             RANGE="HEAD"
           else
@@ -39,26 +40,23 @@ jobs:
           fi
 
           COMMITS=$(git log "$RANGE" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
-
           if [ -z "$COMMITS" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No commits since $LATEST_TAG, skipping."
             exit 0
           fi
 
           BUMP="none"
-
           while IFS= read -r msg; do
             if echo "$msg" | grep -qiE '^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE'; then
-              BUMP="major"
-              break
+              BUMP="major"; break
             fi
           done <<< "$COMMITS"
 
           if [ "$BUMP" = "none" ]; then
             while IFS= read -r msg; do
               if echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
-                BUMP="minor"
-                break
+                BUMP="minor"; break
               fi
             done <<< "$COMMITS"
           fi
@@ -77,17 +75,6 @@ jobs:
             exit 0
           fi
 
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
-          echo "Bump type: $BUMP"
-
-      - name: Calculate next version
-        if: steps.bump.outputs.skip != 'true'
-        id: version
-        run: |
-          LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
-          BUMP="${{ steps.bump.outputs.bump }}"
-
           if [ -z "$LATEST_TAG" ]; then
             MAJOR=0; MINOR=0; PATCH=0
           else
@@ -105,31 +92,22 @@ jobs:
 
           NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
-          echo "Next version: $NEW_TAG"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+          echo "Bump type: $BUMP → $NEW_TAG"
 
       - name: Generate changelog
-        if: steps.bump.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true'
         id: changelog
         run: |
-          LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
-
-          if [ -z "$LATEST_TAG" ]; then
-            RANGE="HEAD"
-          else
-            RANGE="${LATEST_TAG}..HEAD"
-          fi
-
+          RANGE="${{ steps.version.outputs.range }}"
           COMMITS=$(git log "$RANGE" --pretty=format:"%H %s" 2>/dev/null || git log --pretty=format:"%H %s")
 
-          BREAKING=""
-          FEATURES=""
-          FIXES=""
-          OTHER=""
+          BREAKING=""; FEATURES=""; FIXES=""; OTHER=""
 
           while IFS= read -r line; do
             HASH=$(echo "$line" | cut -c1-7)
             MSG=$(echo "$line" | cut -d' ' -f2-)
-
             if echo "$MSG" | grep -qiE '^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE'; then
               BREAKING="${BREAKING}- ${MSG} (${HASH})\n"
             elif echo "$MSG" | grep -qE '^feat(\(.+\))?:'; then
@@ -142,34 +120,28 @@ jobs:
           done <<< "$COMMITS"
 
           {
-            if [ -n "$BREAKING" ]; then
-              echo "### Breaking Changes"
-              echo ""
-              echo -e "$BREAKING"
-            fi
-            if [ -n "$FEATURES" ]; then
-              echo "### Features"
-              echo ""
-              echo -e "$FEATURES"
-            fi
-            if [ -n "$FIXES" ]; then
-              echo "### Bug Fixes"
-              echo ""
-              echo -e "$FIXES"
-            fi
-            if [ -n "$OTHER" ]; then
-              echo "### Other Changes"
-              echo ""
-              echo -e "$OTHER"
-            fi
+            [ -n "$BREAKING" ] && { echo "### Breaking Changes"; echo ""; echo -e "$BREAKING"; }
+            [ -n "$FEATURES" ] && { echo "### Features"; echo ""; echo -e "$FEATURES"; }
+            [ -n "$FIXES"    ] && { echo "### Bug Fixes"; echo ""; echo -e "$FIXES"; }
+            [ -n "$OTHER"    ] && { echo "### Other Changes"; echo ""; echo -e "$OTHER"; }
           } > /tmp/changelog.md
 
       - name: Create release
-        if: steps.bump.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ steps.version.outputs.new_tag }}" \
-            --title "${{ steps.version.outputs.new_tag }}" \
-            --notes-file /tmp/changelog.md \
-            --target master
+          NEW_TAG="${{ steps.version.outputs.new_tag }}"
+          # If tag doesn't exist yet (auto-bump case), gh release create will create it.
+          # If tag already exists (manual tag case), --verify-tag ensures we use it as-is.
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            gh release create "$NEW_TAG" \
+              --title "$NEW_TAG" \
+              --notes-file /tmp/changelog.md \
+              --verify-tag
+          else
+            gh release create "$NEW_TAG" \
+              --title "$NEW_TAG" \
+              --notes-file /tmp/changelog.md \
+              --target master
+          fi
