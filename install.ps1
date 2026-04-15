@@ -93,6 +93,17 @@ foreach ($f in Get-ChildItem "$CommandsDir\gsd-*.md" -ErrorAction SilentlyContin
     Info "  removed commands\$($f.Name)"
     $cleaned++
 }
+foreach ($d in @("$ClaudeDir\skills", "$env:USERPROFILE\.agents\skills")) {
+    foreach ($skillDir in Get-ChildItem "$d\gsd-*" -Directory -ErrorAction SilentlyContinue) {
+        if ($DryRun) {
+            Dry "rm -rf $($skillDir.FullName)"
+        } else {
+            Remove-Item $skillDir.FullName -Recurse -Force
+        }
+        Info "  removed skills\$($skillDir.Name)"
+        $cleaned++
+    }
+}
 if ($cleaned -eq 0) {
     Info "  (nenhum arquivo legado encontrado)"
 }

@@ -107,6 +107,16 @@ for f in "${COMMANDS_DIR}"/gsd-*.md; do
   info "  removed commands/$(basename "$f")"
   cleaned=$((cleaned + 1))
 done
+for d in "${CLAUDE_DIR}/skills"/gsd-* "${HOME}/.agents/skills"/gsd-*; do
+  [ -d "$d" ] || continue
+  if $DRY_RUN; then
+    dry "rm -rf $d"
+  else
+    rm -rf "$d"
+  fi
+  info "  removed skills/$(basename "$d")"
+  cleaned=$((cleaned + 1))
+done
 if [ "$cleaned" -eq 0 ]; then
   info "  (nenhum arquivo legado encontrado)"
 fi
