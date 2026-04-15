@@ -21,17 +21,17 @@ jobs:
         id: version
         run: |
           # If HEAD is already tagged (manual tag push or tag+commit together),
-          # use that tag directly — skip semver bump entirely.
+          # use that tag directly -- skip semver bump entirely.
           HEAD_TAG=$(git tag --points-at HEAD -l 'v*' | sort -V | tail -1)
           if [ -n "$HEAD_TAG" ]; then
             echo "new_tag=$HEAD_TAG" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "range=${HEAD_TAG}^..HEAD" >> "$GITHUB_OUTPUT"
-            echo "HEAD is already tagged: $HEAD_TAG — using as-is"
+            echo "HEAD is already tagged: $HEAD_TAG -- using as-is"
             exit 0
           fi
 
-          # Triggered by branch push without a tag — calculate next semver.
+          # Triggered by branch push without a tag -- calculate next semver.
           LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -z "$LATEST_TAG" ]; then
             RANGE="HEAD"
@@ -94,7 +94,7 @@ jobs:
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "range=$RANGE" >> "$GITHUB_OUTPUT"
-          echo "Bump type: $BUMP → $NEW_TAG"
+          echo "Bump type: $BUMP -> $NEW_TAG"
 
       - name: Generate changelog
         if: steps.version.outputs.skip != 'true'
