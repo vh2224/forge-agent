@@ -123,10 +123,10 @@ jobs:
           done <<< "$COMMITS"
 
           {
-            [ -n "$BREAKING" ] && { echo "### Breaking Changes"; echo ""; echo -e "$BREAKING"; }
-            [ -n "$FEATURES" ] && { echo "### Features"; echo ""; echo -e "$FEATURES"; }
-            [ -n "$FIXES"    ] && { echo "### Bug Fixes"; echo ""; echo -e "$FIXES"; }
-            [ -n "$OTHER"    ] && { echo "### Other Changes"; echo ""; echo -e "$OTHER"; }
+            if [ -n "$BREAKING" ]; then echo "### Breaking Changes"; echo ""; echo -e "$BREAKING"; fi
+            if [ -n "$FEATURES" ]; then echo "### Features"; echo ""; echo -e "$FEATURES"; fi
+            if [ -n "$FIXES"    ]; then echo "### Bug Fixes"; echo ""; echo -e "$FIXES"; fi
+            if [ -n "$OTHER"    ]; then echo "### Other Changes"; echo ""; echo -e "$OTHER"; fi
           } > /tmp/changelog.md
 
       - name: Create release
