@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Forge Hook — fires on PreToolUse / PostToolUse for the Agent tool
-//              and on SubagentStart / SubagentStop / PreCompact lifecycle events
+//              and on SubagentStart / SubagentStop / PreCompact / PostCompact lifecycle events
 // Writes dispatch progress to a temp file that forge-statusline.js reads
 //
 // Called by Claude Code hooks (configured in ~/.claude/settings.json):
@@ -9,12 +9,13 @@
 //   SubagentStart   → node ~/.claude/forge-hook.js subagent-start
 //   SubagentStop    → node ~/.claude/forge-hook.js subagent-stop
 //   PreCompact      → node ~/.claude/forge-hook.js pre-compact
+//   PostCompact     → node ~/.claude/forge-hook.js post-compact
 
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 
-const phase = process.argv[2] || 'post'; // 'pre', 'post', 'subagent-start', 'subagent-stop', 'pre-compact'
+const phase = process.argv[2] || 'post'; // 'pre', 'post', 'subagent-start', 'subagent-stop', 'pre-compact', 'post-compact'
 
 process.stdin.setEncoding('utf8');
 let raw = '';
@@ -74,6 +75,24 @@ process.stdin.on('end', () => {
           fs.copyFileSync(stateFile, backupFile);
         }
       } catch { /* not a forge project — skip */ }
+      return;
+    }
+
+    // ── PostCompact: write recovery signal if forge-auto was active ────────────
+    if (phase === 'post-compact') {
+      const cwd      = data.cwd || process.cwd();
+      const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
+      let autoMode   = {};
+      try { autoMode = JSON.parse(fs.readFileSync(autoFile, 'utf8')); } catch {}
+
+      if (autoMode.active === true) {
+        const signalFile = path.join(cwd, '.gsd', 'forge', 'compact-signal.json');
+        fs.writeFileSync(signalFile, JSON.stringify({
+          recovered_at : Date.now(),
+          milestone    : autoMode.milestone || null,
+          worker       : autoMode.worker    || null,
+        }), 'utf8');
+      }
       return;
     }
 

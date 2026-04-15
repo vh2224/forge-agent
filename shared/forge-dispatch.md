@@ -15,22 +15,27 @@ effort: {unit_effort}
 thinking: disabled
 
 ## Task Plan
-{content of T##-PLAN.md}
 
-## Slice Plan (tasks section)
-{content of S##-PLAN.md}
+Read and follow: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md
+
+## Slice Plan
+
+Read: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md
 
 ## Lint & Format Commands
 {CS_LINT}
 
 ## Prior Context
-{content of M###-SUMMARY.md if exists, else last S##-SUMMARY.md if exists, else "(none yet)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
 
 ## Security Checklist
-{content of T##-SECURITY.md if exists, else "(none — task has no security-sensitive scope)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-SECURITY.md
 
 ## Slice Decisions
-{## Decisions section of S##-CONTEXT.md if exists, else "(none — discuss-slice was skipped)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md — extract ## Decisions section only
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -54,16 +59,24 @@ effort: {unit_effort}
 thinking: {THINKING_OPUS}
 
 ## Risk Assessment
-{content of S##-RISK.md if exists, else "(none — slice is not high-risk)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-RISK.md
 
 ## Roadmap Entry + Boundary Map
-{relevant section of M###-ROADMAP.md for this slice}
+
+Read: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-ROADMAP.md — focus on {S##} entry and Boundary Map
 
 ## Milestone Context
-{content of M###-CONTEXT.md if exists, else "(none)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CONTEXT.md
 
 ## Slice Context
-{content of S##-CONTEXT.md if exists, else "(none — discuss-slice was skipped)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md
+
+## Milestone Research
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-RESEARCH.md
 
 ## Directory Conventions & Asset Map
 {CS_STRUCTURE}
@@ -72,7 +85,8 @@ thinking: {THINKING_OPUS}
 {CS_RULES}
 
 ## Dependency Slice Summaries
-{first 35 lines of S##-SUMMARY.md for each slice listed in depends:[]}
+
+Read if exists (first 35 lines each): {WORKING_DIR}/.gsd/milestones/{M###}/slices/{dep}/{dep}-SUMMARY.md — for each slice listed in depends:[] in the Roadmap entry
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -93,22 +107,27 @@ effort: {unit_effort}
 thinking: {THINKING_OPUS}
 
 ## Project
-{content of .gsd/PROJECT.md}
+
+Read: {WORKING_DIR}/.gsd/PROJECT.md
 
 ## Requirements
-{content of .gsd/REQUIREMENTS.md}
+
+Read: {WORKING_DIR}/.gsd/REQUIREMENTS.md
 
 ## Directory Conventions & Asset Map
 {CS_STRUCTURE}
 
 ## Context (discuss decisions)
-{content of M###-CONTEXT.md if exists, else "(none)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CONTEXT.md
 
 ## Brainstorm Output
-{content of M###-BRAINSTORM.md if exists, else "(none)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-BRAINSTORM.md
 
 ## Scope Contract
-{content of M###-SCOPE.md if exists, else "(none)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SCOPE.md
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -127,16 +146,19 @@ WORKING_DIR: {WORKING_DIR}
 auto_commit: {PREFS.auto_commit — true or false}
 
 ## Task Summaries
-{first 35 lines of each T##-SUMMARY.md in this slice}
+
+Read (first 35 lines each): {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/T*/T*-SUMMARY.md
 
 ## Slice Plan
-{content of S##-PLAN.md}
+
+Read: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md
 
 ## Lint & Format Commands
 {CS_LINT}
 
 ## Current Milestone Summary
-{content of M###-SUMMARY.md if exists, else "(none)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
 
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
@@ -161,13 +183,16 @@ auto_commit: {PREFS.auto_commit — true or false}
 milestone_cleanup: {PREFS.milestone_cleanup — keep, archive, or delete}
 
 ## Slice Summaries
-{first 35 lines of each S##-SUMMARY.md in this milestone}
+
+Read (first 35 lines each): {WORKING_DIR}/.gsd/milestones/{M###}/slices/S*/S*-SUMMARY.md
 
 ## Milestone Roadmap
-{content of M###-ROADMAP.md}
+
+Read: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-ROADMAP.md
 
 ## Milestone Summary
-{content of M###-SUMMARY.md}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
 
 ## Instructions
 1. Write final M###-SUMMARY.md
@@ -188,18 +213,22 @@ effort: {unit_effort}
 thinking: {THINKING_OPUS}
 
 ## Project
-{content of .gsd/PROJECT.md}
+
+Read: {WORKING_DIR}/.gsd/PROJECT.md
 
 ## Requirements
-{content of .gsd/REQUIREMENTS.md if exists}
+
+Read if exists: {WORKING_DIR}/.gsd/REQUIREMENTS.md
 
 ## Brainstorm Output (if available)
-{content of M###-BRAINSTORM.md if exists, else "(none)"}
+
+Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-BRAINSTORM.md
 
 ## Prior Decisions (do not re-debate)
-{For discuss-slice: extract ## Decisions section from M###-CONTEXT.md (milestone-level locked decisions).
- For discuss-milestone: use last 30 rows of .gsd/DECISIONS.md (decisions from prior milestones).
- Either way: these are closed — do not re-open or re-debate.}
+
+For discuss-slice: Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CONTEXT.md — extract ## Decisions section (locked milestone decisions, do not re-open)
+For discuss-milestone: Read last 30 lines: {WORKING_DIR}/.gsd/DECISIONS.md — decisions from prior milestones only
+Either way: these are closed — do not re-open or re-debate.
 
 ## Project Memory
 {TOP_MEMORIES}
@@ -222,13 +251,17 @@ effort: {unit_effort}
 thinking: {THINKING_OPUS}
 
 ## What we're building
-{context from M###-CONTEXT.md or S##-CONTEXT.md}
+
+For research-milestone: Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CONTEXT.md
+For research-slice: Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md
 
 ## Project
-{content of .gsd/PROJECT.md}
+
+Read: {WORKING_DIR}/.gsd/PROJECT.md
 
 ## Current Coding Standards
-{CODING_STANDARDS or "(none — no .gsd/CODING-STANDARDS.md found)"}
+
+Read if exists: {WORKING_DIR}/.gsd/CODING-STANDARDS.md
 
 ## Project Memory (known gotchas)
 {TOP_MEMORIES}

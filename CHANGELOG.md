@@ -1,3 +1,23 @@
+## v1.0.0 (2026-04-15)
+
+### Breaking Changes
+
+- `/forge` replaces `/forge-auto` as the primary entry point; existing `/forge-auto` invocations continue to work via a thin shim
+- `forge-auto`, `forge-task`, and `forge-new-milestone` commands migrated to skills (`skills/forge-auto/`, `skills/forge-task/`, `skills/forge-new-milestone/`); the original command files are now 6–7-line shims that delegate to `Skill()`
+
+### Features
+
+- feat: PostCompact hook recovery — `forge-hook.js` writes `.gsd/forge/compact-signal.json` when Claude Code fires the PostCompact lifecycle event while forge-auto is active; orchestrator detects the signal on the next loop iteration, re-initializes all in-memory state from disk, deletes the signal, and continues transparently
+- feat: lean orchestrator — all 24 `{content of …}` artifact-inlining placeholders in `shared/forge-dispatch.md` replaced with `Read:` / `Read if exists:` path directives; workers resolve their own context in their isolated context window, cutting per-unit token growth from ~10–50K down to ~500 tokens
+- feat: `/forge` REPL shell — new `commands/forge.md` (126 lines, < 5K tokens) is a compact-safe router with bootstrap guard, auto-resume detection, and an `AskUserQuestion` dispatch loop covering forge-auto, forge-task, forge-new-milestone, forge-status, and forge-help
+- feat: skill migration with `disable-model-invocation: true` — three heavyweight commands converted to skills, shrinking command footprint from ~950 lines to ~20 lines of shims while preserving all logic in isolated skill contexts
+
+### Architecture
+
+- compact-signal.json recovery flow: PostCompact hook (forge-hook.js) → disk signal (`.gsd/forge/compact-signal.json`) → orchestrator reads/deletes on next iteration → transparent resume; existing COMPACTION RESILIENCE behavioral rule kept as fallback for Claude Code versions without PostCompact support
+- workers read own artifacts: orchestrator passes paths, not content; workers call `Read` tool inside their isolated context — eliminates token accumulation across dispatch loop iterations
+- `/forge` compact-safe token budget: REPL shell stays well within < 5K token re-attachment budget; compact recovery check runs at the top of every loop iteration
+
 ## v0.7.3 (2026-04-10)
 
 ### Features

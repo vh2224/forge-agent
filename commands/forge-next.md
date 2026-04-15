@@ -127,7 +127,20 @@ Read PREFS for `skip_discuss` and `skip_research`. If the current unit type is s
 - If no entries match: inject `(none)`.
 Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` section.
 
-Read ONLY the `.gsd/` artifact files the worker needs (templates below). Inline their content — do not summarize or paraphrase.
+Use the template from `~/.claude/forge-dispatch.md` for the current `unit_type`.
+Substitute placeholders:
+- `{WORKING_DIR}` <- current working directory
+- `{M###}`, `{S##}`, `{T##}` <- from STATE
+- `{unit_effort}`, `{THINKING_OPUS}` <- resolved effort/thinking for this unit
+- `{TOP_MEMORIES}` <- RELEVANT_MEMORIES (filtered above)
+- `{CS_LINT}` <- CS_LINT section (already extracted)
+- `{CS_STRUCTURE}` <- CS_STRUCTURE section (already extracted)
+- `{CS_RULES}` <- CS_RULES section (already extracted)
+- `{auto_commit}` <- PREFS.auto_commit
+- `{milestone_cleanup}` <- PREFS.milestone_cleanup
+- `{CODING_STANDARDS}` <- full CODING_STANDARDS content (for research templates)
+
+Do NOT read artifact files here — templates now pass paths; workers read their own context.
 
 ### 4. Dispatch
 

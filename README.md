@@ -42,8 +42,10 @@ claude
 ```
 /forge-init minha plataforma de e-commerce com Next.js
 /forge-new-milestone autenticação de usuários com NextAuth
-/forge-auto
+/forge
 ```
+
+O `/forge` é o shell interativo principal — navega entre milestones, executa unidades e responde perguntas sem sair do REPL.
 
 Verificar instalação: `/forge-help`
 
@@ -53,9 +55,10 @@ Verificar instalação: `/forge-help`
 
 | Comando | O que faz |
 |---------|-----------|
+| `/forge` | Shell interativo — entry point principal |
 | `/forge-init` | Inicializa o projeto GSD |
-| `/forge-new-milestone` | Cria milestone com discuss + plan |
-| `/forge-auto` | Executa o milestone inteiro |
+| `/forge-new-milestone` | Cria milestone com discuss + plan (alias — delega ao `/forge`) |
+| `/forge-auto` | Executa o milestone inteiro (alias — delega ao `/forge`) |
 | `/forge-next` | Executa uma unidade e para |
 | `/forge-status` | Dashboard de progresso |
 | `/forge-codebase` | Qualidade do codebase (`--fix` para correções) |
@@ -75,6 +78,7 @@ Verificar instalação: `/forge-help`
 | `forge-brainstorm` | Explora alternativas e riscos antes de planejar |
 | `forge-scope-clarity` | Contrato de escopo com critérios testáveis |
 | `forge-risk-radar` | Análise de riscos por slice |
+| `forge-security` | Análise de segurança por task/slice |
 | `forge-responsive` | Audit responsivo — Core Web Vitals, WCAG 2.2 |
 | `forge-ui-review` | Review UI — acessibilidade, performance, React 19 |
 

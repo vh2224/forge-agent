@@ -36,6 +36,7 @@ const LIFECYCLE_HOOKS = [
   { event: 'SubagentStart', phase: 'subagent-start' },
   { event: 'SubagentStop',  phase: 'subagent-stop'  },
   { event: 'PreCompact',    phase: 'pre-compact'     },
+  { event: 'PostCompact',   phase: 'post-compact'    },
 ];
 
 // Tool-use events: scoped to Agent tool via matcher
