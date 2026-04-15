@@ -57,6 +57,8 @@ TaskUpdate({ taskId: <id>, status: "completed" })
 ```
 Do this for ALL in_progress tasks before starting the loop. Skip if TaskList returns empty.
 
+**Argumentos ignorados** — `/forge-auto` não aceita argumentos. Se o usuário digitou `/forge-auto resume` ou qualquer outro argumento, ignore-o silenciosamente. O auto-resume é automático via detecção abaixo.
+
 **Auto-resume detection** — check for a previous interrupted session:
 ```bash
 cat .gsd/forge/auto-mode.json 2>/dev/null
@@ -187,6 +189,15 @@ Then call `Agent(agent_name, worker_prompt)` with a `description` that captures 
 - For memory extraction: `extract memories from {unit_id}`
 
 Wait for the result.
+
+**CRITICAL — Agent() dispatch failure:** If the `Agent()` call itself fails (API error, 500, timeout, tool unavailable, or any exception before the worker even starts), do NOT attempt to execute the work inline in the main context. Instead:
+1. Deactivate auto-mode: `echo '{"active":false}' > .gsd/forge/auto-mode.json`
+2. Mark the task as in_progress (leave it — signals interruption): skip TaskUpdate
+3. Stop the loop immediately and tell the user:
+   > ⚠ Falha ao despachar subagente para `{unit_type} {unit_id}`: `{error message}`
+   > Execute `/forge-auto` para tentar novamente quando a API estiver disponível.
+
+Executing work inline bypasses context isolation and is NEVER acceptable as a fallback.
 
 **Heartbeat — clear worker field** after Agent() returns:
 ```bash
