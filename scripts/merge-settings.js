@@ -11,9 +11,15 @@ const path = require('path');
 
 const settingsFile = process.argv[2];
 const remove       = process.argv.includes('--remove');
+const mcpAdd       = process.argv.includes('--mcp-add');
+const mcpRemove    = process.argv.includes('--mcp-remove');
+const mcpList      = process.argv.includes('--mcp-list');
 
 if (!settingsFile) {
   console.error('Usage: node merge-settings.js <settings.json path> [--remove]');
+  console.error('       node merge-settings.js <settings.json path> --mcp-add <name> <json-config>');
+  console.error('       node merge-settings.js <settings.json path> --mcp-remove <name>');
+  console.error('       node merge-settings.js <settings.json path> --mcp-list');
   process.exit(1);
 }
 
@@ -37,6 +43,64 @@ const TOOL_HOOKS = [
   { event: 'PreToolUse',  phase: 'pre'  },
   { event: 'PostToolUse', phase: 'post' },
 ];
+
+// ── MCP operations ──────────────────────────────────────────────────────────
+if (mcpAdd || mcpRemove || mcpList) {
+  if (!settings.mcpServers) settings.mcpServers = {};
+
+  if (mcpList) {
+    const servers = Object.entries(settings.mcpServers);
+    if (servers.length === 0) {
+      console.log('  (nenhum MCP configurado)');
+    } else {
+      for (const [name, config] of servers) {
+        const cmd = [config.command, ...(config.args || [])].join(' ');
+        const envKeys = config.env ? Object.keys(config.env) : [];
+        const envStr = envKeys.length ? ` (env: ${envKeys.join(', ')})` : '';
+        console.log(`  ${name}: ${cmd}${envStr}`);
+      }
+    }
+    process.exit(0);
+  }
+
+  if (mcpAdd) {
+    const idx = process.argv.indexOf('--mcp-add');
+    const name = process.argv[idx + 1];
+    const jsonStr = process.argv[idx + 2];
+    if (!name || !jsonStr) {
+      console.error('Usage: --mcp-add <name> \'<json-config>\'');
+      process.exit(1);
+    }
+    try {
+      settings.mcpServers[name] = JSON.parse(jsonStr);
+    } catch (e) {
+      console.error(`Invalid JSON config: ${e.message}`);
+      process.exit(1);
+    }
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+    console.log(`  MCP "${name}" adicionado`);
+    process.exit(0);
+  }
+
+  if (mcpRemove) {
+    const idx = process.argv.indexOf('--mcp-remove');
+    const name = process.argv[idx + 1];
+    if (!name) {
+      console.error('Usage: --mcp-remove <name>');
+      process.exit(1);
+    }
+    if (!settings.mcpServers[name]) {
+      console.error(`  MCP "${name}" não encontrado`);
+      process.exit(1);
+    }
+    delete settings.mcpServers[name];
+    if (Object.keys(settings.mcpServers).length === 0) delete settings.mcpServers;
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+    console.log(`  MCP "${name}" removido`);
+    process.exit(0);
+  }
+}
 
 // ── REMOVE mode ─────────────────────────────────────────────────────────────
 if (remove) {

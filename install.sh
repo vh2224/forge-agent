@@ -194,6 +194,10 @@ echo ""
 info "Installing shared references..."
 copy "${REPO_DIR}/shared/forge-dispatch.md" "${CLAUDE_DIR}/forge-dispatch.md"
 info "  forge-dispatch.md"
+if [ -f "${REPO_DIR}/shared/forge-mcps.md" ]; then
+  copy "${REPO_DIR}/shared/forge-mcps.md" "${CLAUDE_DIR}/forge-mcps.md"
+  info "  forge-mcps.md"
+fi
 
 echo ""
 info "Installing statusline & hooks..."
@@ -206,6 +210,80 @@ info "  forge-settings.js"
 info ""
 info "  Status line não ativada por padrão."
 info "  Para ativar: /forge-config statusline on"
+
+# ── Global MCP setup (first install only, interactive terminal) ───────────────
+SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
+SETTINGS_SCRIPT="${CLAUDE_DIR}/forge-settings.js"
+
+if ! $DRY_RUN && ! $UPDATE && [ -t 0 ] && [ -f "$SETTINGS_SCRIPT" ]; then
+  echo ""
+  echo "────────────────────"
+  echo "  MCP Setup (opcional)"
+  echo "────────────────────"
+  echo ""
+  info "MCPs (Model Context Protocol) adicionam capacidades extras ao agente."
+  info "Aqui você configura MCPs globais (disponíveis em todos os projetos)."
+  info "MCPs de projeto (postgres, redis, etc.) são configurados no /forge-init."
+  echo ""
+  info "  fetch    — HTTP client completo (GET, POST, PUT, DELETE, headers, auth)"
+  info "  context7 — docs atualizadas de libs e frameworks (evita APIs obsoletas)"
+  echo ""
+
+  read -rp "  Adicionar MCPs globais recomendados (fetch + context7)? (s/n) [s]: " mcp_globals
+  mcp_globals="${mcp_globals:-s}"
+
+  if [[ "$mcp_globals" =~ ^[sS]$ ]]; then
+    node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-add fetch '{"command":"npx","args":["-y","@anthropic-ai/mcp-server-fetch"]}'
+    node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-add context7 '{"command":"npx","args":["-y","@upstash/context7-mcp@latest"]}'
+  fi
+
+  # Ask for custom global MCPs
+  while true; do
+    echo ""
+    read -rp "  Adicionar outro MCP global? (nome ou 'não' para continuar) [não]: " custom_name
+    custom_name="${custom_name:-não}"
+
+    if [[ "$custom_name" =~ ^[nN] ]] || [ "$custom_name" = "não" ]; then
+      break
+    fi
+
+    read -rp "  Comando (ex: npx, uvx, node): " custom_cmd
+    read -rp "  Argumentos (ex: -y @meu/mcp-server): " custom_args
+    read -rp "  Variáveis de ambiente (KEY=val KEY2=val2, ou vazio): " custom_env
+
+    # Build args array
+    args_json="["
+    first=true
+    for arg in $custom_args; do
+      if $first; then first=false; else args_json+=","; fi
+      args_json+="\"$arg\""
+    done
+    args_json+="]"
+
+    # Build env object
+    if [ -n "$custom_env" ]; then
+      env_json="{"
+      env_first=true
+      for pair in $custom_env; do
+        key="${pair%%=*}"
+        val="${pair#*=}"
+        if $env_first; then env_first=false; else env_json+=","; fi
+        env_json+="\"$key\":\"$val\""
+      done
+      env_json+="}"
+      config_json="{\"command\":\"$custom_cmd\",\"args\":$args_json,\"env\":$env_json}"
+    else
+      config_json="{\"command\":\"$custom_cmd\",\"args\":$args_json}"
+    fi
+
+    node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-add "$custom_name" "$config_json"
+  done
+
+  echo ""
+  # Show configured MCPs
+  info "MCPs globais configurados:"
+  node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-list
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -221,6 +299,9 @@ else
   echo "  3. Inicialize o projeto:    /forge-init"
   echo "  4. Crie um milestone:       /forge-new-milestone <descrição>"
   echo "  5. Execute:                 /forge-auto"
+  echo ""
+  echo "  MCPs de projeto (postgres, redis) serão sugeridos no /forge-init."
+  echo "  Gerenciar MCPs a qualquer momento: /forge-config mcps"
   echo ""
   echo "  Ajuda a qualquer momento:   /forge-help"
 fi

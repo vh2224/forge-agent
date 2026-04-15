@@ -1,6 +1,6 @@
 ---
 description: "Inicializa o agente GSD no projeto atual. Detecta projeto gsd-pi existente ou cria estrutura nova. Use: /forge-init | /forge-init <descrição do projeto>"
-allowed-tools: Read, Write, Edit, Bash, Glob
+allowed-tools: Read, Write, Edit, Bash, Glob, AskUserQuestion
 ---
 
 You are initializing GSD agent support for the current project directory. Follow the detection flow below exactly.
@@ -53,7 +53,9 @@ The project is already managed by gsd-pi. Your job is to:
 
 7. **Create or update `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
 
-8. **Report:**
+8. **MCP Setup** — run the **MCP Setup** step (see below). Detect stack, suggest MCPs, ask user.
+
+9. **Report:**
    ```
    ✓ GSD agent initialized on existing project
 
@@ -64,10 +66,13 @@ The project is already managed by gsd-pi. Your job is to:
 
    Files created:
    - CLAUDE.md ✓
-   - .claude/settings.json ✓ (bypass permissions)
+   - .claude/settings.json ✓ (bypass permissions + MCPs)
    - .gsd/AUTO-MEMORY.md ✓
    - .gsd/claude-agent-prefs.md ✓
    - .gsd/CODING-STANDARDS.md ✓ (auto-detected)
+
+   MCPs configured:
+   - <name>: <status> (or "nenhum MCP configurado")
 
    Ready. Use /gsd to advance next unit or /forge-auto for autonomous mode.
    ```
@@ -164,7 +169,9 @@ The project is already managed by gsd-pi. Your job is to:
 
 7. **Create `.gsd/CODING-STANDARDS.md`** — run the **Coding Standards Auto-Detection** step (see below)
 
-8. **Report:**
+8. **MCP Setup** — run the **MCP Setup** step (see below). Detect stack, suggest MCPs, ask user.
+
+9. **Report:**
    ```
    ✓ GSD agent initialized (new project)
 
@@ -173,7 +180,7 @@ The project is already managed by gsd-pi. Your job is to:
 
    Files created:
    - CLAUDE.md
-   - .claude/settings.json       ← bypass permissions (commit this)
+   - .claude/settings.json       ← bypass permissions + MCPs (commit this)
    - .gsd/PROJECT.md
    - .gsd/REQUIREMENTS.md
    - .gsd/DECISIONS.md
@@ -184,6 +191,9 @@ The project is already managed by gsd-pi. Your job is to:
    - .gsd/claude-agent-prefs.md  ← repo shared prefs (commit this)
    .gitignore updated:
    - .gsd/prefs.local.md         ← gitignored personal overrides
+
+   MCPs configured:
+   - <name>: <status> (or "nenhum MCP configurado")
 
    Prefs resolution order (later overrides earlier):
      1. ~/.claude/forge-agent-prefs.md  (user-global)
@@ -378,6 +388,92 @@ Create or update `.claude/settings.json` in the project root with the Forge Agen
 - `skipDangerousModePermissionPrompt` is NOT set here — Claude Code ignores it in project settings (by design). It is set in `~/.claude/settings.json` by the Forge Agent installer (`install.sh` / `install.ps1`).
 - If `.claude/` directory doesn't exist, create it.
 - This file should be committed to version control so all collaborators benefit automatically.
+
+---
+
+## MCP Setup
+
+Configure MCP servers for enhanced agent capabilities. Read `~/.claude/forge-mcps.md` (the MCP catalog) for available MCPs, detection patterns, config templates, and credential safety rules.
+
+### Step 1: Detect stack and check existing MCPs
+
+First, check what's already configured globally:
+```bash
+node ~/.claude/forge-settings.js ~/.claude/settings.json --mcp-list 2>/dev/null
+```
+
+Then run the detection commands from the catalog's **Detection Logic** section to identify which project-scoped MCPs are relevant.
+
+Also check for existing env vars:
+```bash
+grep -h 'DATABASE_URL\|REDIS_URL\|REDIS_HOST\|GITHUB_TOKEN' .env .env.local .env.development 2>/dev/null
+```
+
+### Step 2: Ask the user
+
+Build a recommendation list from detection results. For each MCP in the catalog:
+- **always recommended** MCPs (fetch, context7) → mark `[✓]` if not already global
+- **detected** MCPs → mark `[✓]`
+- **not detected** MCPs → mark `[ ]`
+- **already configured globally** → mark `[✓ global]` (won't be added again)
+
+Use AskUserQuestion to present findings:
+
+```
+MCPs para este projeto:
+
+  [✓ global] fetch — HTTP client (já configurado globalmente)
+  [✓ global] context7 — docs de libs (já configurado globalmente)
+  [✓] postgres — acesso ao banco (detectado: prisma/)
+      DATABASE_URL: <found in .env | "não encontrada — adicione ao .env">
+  [ ] redis — filas e cache (não detectado)
+  [ ] puppeteer — browser automation (não detectado)
+  [ ] sqlite — banco local (não detectado)
+
+Quais MCPs deseja configurar? Pode:
+  1. Aceitar as recomendações acima
+  2. Adicionar/remover da lista (ex: "sem postgres, adicionar redis")
+  3. Pular — nenhum MCP por agora
+
+Também pode adicionar MCPs depois com /forge-config mcps add <nome>
+```
+
+Adapt the list based on actual detection results. Only show MCPs relevant to the detected stack.
+
+### Step 3: Configure based on response
+
+For each MCP the user confirmed, read its **Config** JSON from the catalog:
+
+**Global-scoped MCPs** (fetch, context7, github):
+- Check if already exists in `~/.claude/settings.json` → skip if yes
+- Otherwise add to global settings:
+  ```bash
+  node ~/.claude/forge-settings.js ~/.claude/settings.json --mcp-add <name> '<config-from-catalog>'
+  ```
+
+**Project-scoped MCPs with credentials** (postgres, redis):
+- Use the **safe config** (shell wrapper) from the catalog — NEVER put credentials in settings.json
+- Verify the required env var exists in `.env`:
+  - If found: print `  <ENV_VAR> encontrada em .env ✓`
+  - If NOT found: warn `  ⚠ Adicione <ENV_VAR> ao .env antes de usar o MCP`
+- Add to project settings:
+  ```bash
+  node ~/.claude/forge-settings.js .claude/settings.json --mcp-add <name> '<safe-config-from-catalog>'
+  ```
+
+**Project-scoped MCPs without credentials** (puppeteer, sqlite):
+- For sqlite: ask for the database file path via AskUserQuestion
+- Add to project settings using config from catalog
+
+**Custom MCPs:**
+Gather: name, command, args, env vars, has-credentials. Apply credential safety rules from catalog. Add to appropriate scope.
+
+### Step 4: Skip option
+
+If the user chooses to skip, do not configure any MCPs. Print:
+```
+  MCPs: nenhum configurado (adicione depois com /forge-config mcps add)
+```
 
 ---
 

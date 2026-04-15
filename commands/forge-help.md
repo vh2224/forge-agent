@@ -90,6 +90,11 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 
 | Comando | O que faz |
 |---------|-----------|
+| `/forge-config` | Dashboard de configurações — status line, hooks, MCPs. |
+| `/forge-config statusline on\|off` | Ativa/desativa a status line customizada do Forge. |
+| `/forge-config mcps` | Lista MCPs configurados (global e projeto). |
+| `/forge-config mcps add <nome>` | Adiciona um MCP. Conhecidos: `fetch`, `postgres`, `redis`. Aceita nomes customizados. |
+| `/forge-config mcps remove <nome>` | Remove um MCP de qualquer escopo. |
 | `/forge-prefs` | Mostra configuração atual (modelos por fase, skip rules, git settings). |
 | `/forge-prefs models` | Lista os modelos disponíveis com model IDs completos e recomendações de uso. |
 | `/forge-prefs set <fase> <modelo>` | Muda o modelo de uma fase. Aceita alias (`opus`, `sonnet`, `haiku`) ou model ID completo (`claude-opus-4-6`). Ex: `/forge-prefs set execute claude-opus-4-6`. |
@@ -138,6 +143,8 @@ Read `~/.claude/forge-agent-prefs.md` to get the current model for each agent, t
 | Arquivo | Escopo | O que controla |
 |---------|--------|----------------|
 | `~/.claude/forge-agent-prefs.md` | Global | Modelos padrão por fase, skip rules, git |
+| `~/.claude/settings.json` | Global | Status line, hooks, MCPs globais (ex: fetch) |
+| `.claude/settings.json` | Projeto | Bypass permissions, MCPs de projeto (ex: postgres, redis) |
 | `.gsd/claude-agent-prefs.md` | Projeto | Overrides do projeto (sobrescreve o global) |
 | `CLAUDE.md` | Projeto | Carregado automaticamente pelo Claude Code em toda sessão |
 | `.gsd/AUTO-MEMORY.md` | Projeto | Conhecimento auto-aprendido acumulado |
