@@ -206,12 +206,125 @@ Agents: read this file at `~/.claude/forge-mcps.md` when handling MCP operations
   ```
 - **Value:** SQLite database access — schema, queries, data inspection. No external server needed.
 
+### semgrep
+
+- **Package:** `semgrep` CLI (built-in MCP subcommand)
+- **Command:** `semgrep`
+- **Args:** `["mcp"]`
+- **Env:** none
+- **Scope:** global
+- **Credentials:** none (free OSS rules)
+- **Detect:** always recommended for security-focused projects
+- **Prerequisite:** `semgrep` CLI must be installed:
+  ```bash
+  # macOS
+  brew install semgrep
+  # or via pip
+  pip install semgrep
+  ```
+- **Install detection:**
+  ```bash
+  command -v semgrep >/dev/null 2>&1 && echo "semgrep-found" || echo "semgrep-missing"
+  ```
+- **Config:**
+  ```json
+  {
+    "command": "semgrep",
+    "args": ["mcp"]
+  }
+  ```
+- **Value:** SAST — análise estática de segurança com 3000+ regras. Detecta injection, XSS, auth bypass, hardcoded secrets, OWASP Top 10. Free e open-source.
+- **Bundle:** `security`
+
+### snyk
+
+- **Package:** `snyk` CLI (built-in MCP)
+- **Command:** special — uses its own configure command
+- **Env:** `SNYK_TOKEN` (managed by `snyk auth`, stored in `~/.config/configstore/snyk.json`)
+- **Scope:** global
+- **Credentials:** yes — Snyk auth token (managed by `snyk auth`, not stored in settings.json)
+- **Detect:** always recommended for security-focused projects
+- **Prerequisite:** Snyk account (free tier available) + authentication:
+  ```bash
+  # Install and authenticate
+  npx snyk auth
+  ```
+- **Install detection:**
+  ```bash
+  npx -y snyk@latest whoami >/dev/null 2>&1 && echo "snyk-auth-ok" || echo "snyk-auth-missing"
+  ```
+- **Install method:** `snyk-mcp-configure` — run the auto-configure command instead of standard `--mcp-add`:
+  ```bash
+  npx -y snyk@latest mcp configure --tool=claude-cli
+  ```
+  This writes the correct MCP config to `~/.claude/settings.json` automatically.
+- **Config:** (written by the configure command — do NOT use `--mcp-add` for Snyk)
+- **Value:** All-in-one: SAST + SCA (dependências vulneráveis) + secret scanning + IaC + containers. 11 tools. Free tier generoso.
+- **Bundle:** `security`
+
+### trivy
+
+- **Package:** `trivy` CLI + MCP plugin
+- **Command:** `trivy`
+- **Args:** `["mcp"]`
+- **Env:** none
+- **Scope:** global
+- **Credentials:** none (open-source)
+- **Detect:**
+  ```
+  file_exists: Dockerfile, docker-compose.yml, docker-compose.yaml
+  file_exists: *.tf, *.tfvars (Terraform)
+  dir_exists: .github/workflows/
+  ```
+- **Prerequisite:** `trivy` CLI + MCP plugin:
+  ```bash
+  # macOS
+  brew install trivy
+  # Install MCP plugin
+  trivy plugin install mcp
+  ```
+- **Install detection:**
+  ```bash
+  command -v trivy >/dev/null 2>&1 && echo "trivy-found" || echo "trivy-missing"
+  trivy plugin list 2>/dev/null | grep -q mcp && echo "mcp-plugin-ok" || echo "mcp-plugin-missing"
+  ```
+- **Config:**
+  ```json
+  {
+    "command": "trivy",
+    "args": ["mcp"]
+  }
+  ```
+- **Value:** Scanner de vulnerabilidades para containers, filesystem e IaC. Open-source (Aqua Security). Detecta CVEs em imagens Docker, misconfigurations em Terraform/K8s.
+- **Bundle:** `security`
+
+---
+
+## Bundles
+
+Bundles agrupam MCPs relacionados para instalação em um único comando.
+
+### security
+
+- **Components:** `semgrep`, `snyk`, `trivy`
+- **Scope:** global (todos os componentes)
+- **Description:** Stack completo de segurança — SAST, SCA, containers
+- **Short description:** SAST + SCA + containers (Semgrep, Snyk, Trivy)
+- **Install behavior:** When `/forge-mcps add security` is called:
+  1. Check which components are already installed
+  2. For each missing component:
+     - `semgrep`: check `command -v semgrep`, add config via `--mcp-add`
+     - `snyk`: run `npx -y snyk@latest mcp configure --tool=claude-cli`
+     - `trivy`: check `command -v trivy` + plugin, add config via `--mcp-add`
+  3. Report which were added, which were already installed, which need prerequisites
+- **Remove behavior:** When `/forge-mcps remove security` is called, remove all 3 components
+
 ---
 
 ## Scope Rules
 
 - **global** (`~/.claude/settings.json`) — MCPs useful across all projects. Not committed to git.
-  - Default global: `fetch`, `context7`, `github`
+  - Default global: `fetch`, `context7`, `github`, `semgrep`, `snyk`, `trivy`
 - **project** (`.claude/settings.json`) — MCPs that need project-specific config. Committed to git.
   - Default project: `postgres`, `redis`, `puppeteer`, `sqlite`
 
@@ -228,6 +341,9 @@ Used by forge-config and forge-init to skip scope question for known MCPs:
 | redis | project | Project-specific service |
 | puppeteer | project | E2E testing is project-specific |
 | sqlite | project | Database file is project-specific |
+| semgrep | global | SAST tool, useful across all projects |
+| snyk | global | Security scanner, useful across all projects |
+| trivy | global | Container/filesystem scanner, useful across all projects |
 
 ## Credential Safety
 
@@ -281,6 +397,11 @@ gh auth token >/dev/null 2>&1 && echo "gh-auth-ok" || echo "gh-auth-missing"
 
 # Check for existing env vars
 grep -h 'DATABASE_URL\|REDIS_URL\|REDIS_HOST' .env .env.local .env.development 2>/dev/null
+
+# Security tools (for security bundle)
+command -v semgrep >/dev/null 2>&1 && echo "semgrep-available" || echo "semgrep-missing"
+npx -y snyk@latest whoami >/dev/null 2>&1 && echo "snyk-auth-ok" || echo "snyk-auth-missing"
+command -v trivy >/dev/null 2>&1 && echo "trivy-available" || echo "trivy-missing"
 ```
 
 ## Custom MCPs

@@ -65,7 +65,8 @@ Parse the output to build a set of installed MCP names (both scopes).
 **Step 2 — Read the catalog:**
 
 Read `~/.claude/forge-mcps.md`. Extract all MCP names from `### <name>` headings.
-Known catalog MCPs: `fetch`, `context7`, `github`, `postgres`, `redis`, `puppeteer`, `sqlite`.
+Known catalog MCPs: `fetch`, `context7`, `github`, `postgres`, `redis`, `puppeteer`, `sqlite`, `semgrep`, `snyk`, `trivy`.
+Known bundles: `security` (components: `semgrep`, `snyk`, `trivy`).
 
 **Step 3 — Build the unified view:**
 
@@ -119,6 +120,26 @@ MCPs — Forge Agent
 | redis | Filas, cache, pub/sub (precisa REDIS_URL) |
 | puppeteer | Automação de browser, screenshots, E2E |
 | sqlite | Acesso a banco SQLite local |
+| semgrep | SAST — análise estática de segurança (3000+ regras) |
+| snyk | All-in-one: SAST + SCA + secrets + IaC + containers |
+| trivy | Scanner de vulnerabilidades: containers, filesystem, IaC |
+
+**Short descriptions for bundles:**
+
+| Bundle | Description |
+|--------|------------|
+| security | SAST + SCA + containers (Semgrep, Snyk, Trivy) |
+
+When listing, show bundles in a separate section after individual MCPs:
+
+```
+  Bundles:
+    ◈ security       global    SAST + SCA + containers (Semgrep, Snyk, Trivy)
+      └─ semgrep ✓, snyk ○, trivy ○
+    (show ✓ for installed components, ○ for missing)
+
+  (if no bundles exist in catalog, omit this section)
+```
 
 ---
 
@@ -126,7 +147,52 @@ MCPs — Forge Agent
 
 Extract the MCP name from $ARGUMENTS (strip "add " prefix).
 
-Read `~/.claude/forge-mcps.md` (the MCP catalog) to check if it's a known MCP.
+Read `~/.claude/forge-mcps.md` (the MCP catalog) to check if it's a known MCP or bundle.
+
+**If bundle (e.g., "security"):**
+
+Read the bundle definition from the catalog. For each component in the bundle:
+
+1. Check if already installed (via `--mcp-list`)
+2. If already installed → skip, note as "já instalado"
+3. If not installed → follow the individual MCP add flow below
+
+Special handling per component:
+- **semgrep:** Check `command -v semgrep`. If missing, warn:
+  ```
+  ⚠ Semgrep CLI não encontrado. Instale antes de usar:
+    brew install semgrep   # ou: pip install semgrep
+  ```
+  Add the config regardless (will fail at runtime until installed).
+- **snyk:** Run `npx -y snyk@latest mcp configure --tool=claude-cli` (special install).
+  Check auth: `npx -y snyk@latest whoami 2>/dev/null`. If fails, warn:
+  ```
+  ⚠ Snyk não autenticado. Execute antes de usar:
+    npx snyk auth          # free tier disponível
+  ```
+- **trivy:** Check `command -v trivy`. If missing, warn:
+  ```
+  ⚠ Trivy CLI não encontrado. Instale antes de usar:
+    brew install trivy
+  ```
+  If found but MCP plugin missing (`trivy plugin list 2>/dev/null | grep -q mcp`), auto-install:
+  ```bash
+  trivy plugin install mcp
+  ```
+  Add the config.
+
+After processing all components, print summary:
+```
+Bundle "security" — resultado:
+  ✓ semgrep    adicionado (global)
+  ✓ snyk       adicionado (global)
+  ✓ trivy      adicionado (global)
+  ─ <name>     já instalado
+
+  ⚠ Pré-requisitos pendentes (listados acima)
+
+Reinicie o Claude Code para ativar.
+```
 
 **If known MCP (found in catalog):**
 
@@ -196,6 +262,31 @@ Reinicie o Claude Code para ativar.
 ---
 
 ## Remove — "remove <name>"
+
+Extract the MCP name. Check if it's a bundle first.
+
+**If bundle (e.g., "security"):**
+
+For each component in the bundle, check if installed and remove:
+```bash
+for name in semgrep snyk trivy; do
+  node ~/.claude/forge-settings.js ~/.claude/settings.json --mcp-list 2>/dev/null | grep -q "$name" && echo "$name:global"
+  node ~/.claude/forge-settings.js .claude/settings.json --mcp-list 2>/dev/null | grep -q "$name" && echo "$name:project"
+done
+```
+
+Remove each found component from its scope. Print summary:
+```
+Bundle "security" removido:
+  ✓ semgrep    removido (global)
+  ✓ snyk       removido (global)
+  ✓ trivy      removido (global)
+  ─ <name>     não encontrado
+
+Reinicie o Claude Code para aplicar.
+```
+
+**If individual MCP:**
 
 Extract the MCP name. Check which scopes have it:
 
