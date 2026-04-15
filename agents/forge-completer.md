@@ -95,4 +95,34 @@ Given all `T##-SUMMARY.md` files from the slice:
    ```
 4. Emit milestone completion report: slices completed, total tasks, key decisions made
 
+5. **Write ledger entry** — append a compact summary to `.gsd/LEDGER.md` (create if missing).
+   This file survives cleanup and gives future subagents quick context on what was built:
+   ```markdown
+   ## {M###} — {milestone title} · {YYYY-MM-DD}
+
+   {2-3 sentence description of what was built and delivered}
+
+   **Slices:** S01 — title · S02 — title · ...
+   **Key files:** path/to/file, path/to/file (up to 8, most important)
+   **Key decisions:** one-liner · one-liner (up to 3)
+
+   ---
+   ```
+   Keep each entry under 15 lines. Focus on WHAT was built, not HOW. This is the only
+   milestone artifact that must persist regardless of `milestone_cleanup` setting.
+
+6. **Cleanup milestone artifacts** — based on `milestone_cleanup` from injected config:
+   - `keep` (default): do nothing — all files remain
+   - `archive`: move the milestone directory to archive:
+     ```bash
+     mkdir -p {WORKING_DIR}/.gsd/archive
+     mv {WORKING_DIR}/.gsd/milestones/{M###} {WORKING_DIR}/.gsd/archive/{M###}
+     ```
+   - `delete`: remove the milestone directory entirely:
+     ```bash
+     rm -rf {WORKING_DIR}/.gsd/milestones/{M###}
+     ```
+   In all cases `.gsd/LEDGER.md`, `AUTO-MEMORY.md`, `DECISIONS.md`, `CODING-STANDARDS.md`
+   and `STATE.md` are never touched — they are the durable record.
+
 Then return the `---GSD-WORKER-RESULT---` block.

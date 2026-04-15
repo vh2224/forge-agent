@@ -158,6 +158,7 @@ Return ---GSD-WORKER-RESULT---.
 Complete GSD milestone {M###}.
 WORKING_DIR: {WORKING_DIR}
 auto_commit: {PREFS.auto_commit — true or false}
+milestone_cleanup: {PREFS.milestone_cleanup — keep, archive, or delete}
 
 ## Slice Summaries
 {first 35 lines of each S##-SUMMARY.md in this milestone}

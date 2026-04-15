@@ -89,6 +89,17 @@ main_branch: master       # branch principal
 isolation: none           # none | worktree (worktree = branch isolado por milestone)
 ```
 
+## Milestone Cleanup
+
+Após um milestone fechar com sucesso, os arquivos de milestone/slice/task são arqueologia:
+o valor real já foi extraído para AUTO-MEMORY.md, DECISIONS.md e CODING-STANDARDS.md.
+
+```
+milestone_cleanup: keep   # keep    = mantém tudo (padrão seguro)
+                          # archive = move .gsd/milestones/M###/ → .gsd/archive/M###/
+                          # delete  = remove .gsd/milestones/M###/ inteiramente
+```
+
 ## Auto-mode Settings
 
 ```
