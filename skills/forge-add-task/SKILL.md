@@ -1,5 +1,7 @@
 ---
+name: forge-add-task
 description: "Adiciona uma task a um slice existente. Use: /forge-add-task S02 implementar refresh token rotation | /forge-add-task T04 (task específica no slice ativo)"
+disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Glob
 ---
 

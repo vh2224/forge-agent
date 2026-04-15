@@ -119,6 +119,17 @@ foreach ($f in Get-ChildItem "$RepoDir\agents\forge*.md") {
 # ── Install commands ──────────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando comandos..."
+# Remove commands that no longer exist in the repo (migrated to skills)
+foreach ($f in Get-ChildItem "$CommandsDir\forge*.md" -ErrorAction SilentlyContinue) {
+    if (!(Test-Path "$RepoDir\commands\$($f.Name)")) {
+        if ($DryRun) {
+            Dry "rm $($f.FullName) (migrated to skill)"
+        } else {
+            Remove-Item $f.FullName -Force
+        }
+        Info "  removed commands\$($f.Name) (migrated to skill)"
+    }
+}
 foreach ($f in Get-ChildItem "$RepoDir\commands\forge*.md") {
     CopyFile $f.FullName "$CommandsDir\$($f.Name)"
     Info "  commands\$($f.Name)"

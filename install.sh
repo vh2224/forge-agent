@@ -132,6 +132,19 @@ done
 
 echo ""
 info "Installing commands..."
+# Remove commands that no longer exist in the repo (migrated to skills)
+for f in "${COMMANDS_DIR}"/forge*.md; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f")"
+  if [ ! -f "${REPO_DIR}/commands/${name}" ]; then
+    if $DRY_RUN; then
+      dry "rm ${f} (migrated to skill)"
+    else
+      rm "$f"
+    fi
+    info "  removed commands/${name} (migrated to skill)"
+  fi
+done
 for f in "${REPO_DIR}/commands"/forge*.md; do
   name="$(basename "$f")"
   copy "$f" "${COMMANDS_DIR}/${name}"

@@ -1,5 +1,7 @@
 ---
+name: forge-codebase
 description: "Qualidade do codebase. Use: /forge-codebase [--paths a,b] [--force] | /forge-codebase --fix | /forge-codebase --fix --dry-run"
+disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Glob
 ---
 
@@ -346,22 +348,6 @@ Cada item do QUALITY-PLAN deve ter:
 **Impacto:** Por que isso importa (manutenibilidade, performance, DX)
 **Sugestão de fix:** Passos concretos — quais componentes extrair, para onde mover, quais imports atualizar
 **Esforço estimado:** pequeno (1 task) | médio (1 slice) | grande (múltiplos slices)
-```
-
-Exemplo concreto:
-```markdown
-### [Hotspot] lojista/catalogo/components.tsx — 2080 linhas
-
-**Arquivo(s):** `apps/web/app/lojista/catalogo/components.tsx`
-**Problema:** God component com 2080 linhas misturando tabela de produtos, drawer de importação, wizard de sync, e filtros.
-**Impacto:** Qualquer mudança no catálogo arrisca quebrar funcionalidades não relacionadas. Tempo de leitura alto para novos devs.
-**Sugestão de fix:**
-1. Extrair `CatalogTable` (listagem + filtros) → `components/CatalogTable.tsx`
-2. Extrair `ImportDrawer` (upload + mapeamento) → `components/ImportDrawer.tsx`
-3. Extrair `SyncWizard` (fluxo de sincronização) → `components/SyncWizard.tsx`
-4. Manter `page.tsx` como orquestrador que compõe os 3 componentes
-5. Mover types compartilhados para `types.ts` (já existe, verificar duplicação)
-**Esforço estimado:** médio (1 slice com 3-4 tasks)
 ```
 
 **Rodapé do QUALITY-PLAN:**

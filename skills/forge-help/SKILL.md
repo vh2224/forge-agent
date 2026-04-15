@@ -1,5 +1,7 @@
 ---
+name: forge-help
 description: "Exibe ajuda completa do agente GSD — comandos, agentes, fluxo de trabalho e configurações."
+disable-model-invocation: true
 allowed-tools: Read
 ---
 
@@ -31,6 +33,7 @@ Hierarquia: **Milestone → Slice → Task** (iron rule: task cabe em um context
 
 | Comando | O que faz |
 |---------|-----------|
+| `/forge` | **Entry point unificado** — REPL com menu: auto, task, new-milestone, status, help. |
 | `/forge-next` | **Step mode** — executa exatamente uma unidade e para. Ideal para revisar antes de continuar. |
 | `/forge-auto` | **Auto mode** — executa o milestone inteiro de forma autônoma, sem pausas. Para em blocker ou milestone completo. |
 | `/forge-task <descrição>` | **Task autônoma** — executa uma task standalone sem milestone. Fluxo completo: brainstorm → discuss → research → plan → execute. Ideal para tarefas pontuais, correções ou experimentos. |
@@ -130,7 +133,7 @@ Read `~/.claude/forge-agent-prefs.md` to get the current model for each agent, t
 2. /forge-init                        ← uma vez por projeto
 3. /forge-new-milestone <descrição>   ← criar primeiro milestone
 4. /forge-status                      ← ver o que foi criado
-5. /gsd                             ← avançar step a step
+5. /forge-next                        ← avançar step a step
    ou
    /forge-auto                        ← rodar tudo de uma vez
 6. /forge-memories                    ← ver o que o agente aprendeu
@@ -148,7 +151,6 @@ Read `~/.claude/forge-agent-prefs.md` to get the current model for each agent, t
 | `.gsd/claude-agent-prefs.md` | Projeto | Overrides do projeto (sobrescreve o global) |
 | `CLAUDE.md` | Projeto | Carregado automaticamente pelo Claude Code em toda sessão |
 | `.gsd/AUTO-MEMORY.md` | Projeto | Conhecimento auto-aprendido acumulado |
-| `~/.gsd/agent/GSD-WORKFLOW.md` | Global | Referência completa da metodologia |
 
 ---
 

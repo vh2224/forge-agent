@@ -1,5 +1,7 @@
 ---
+name: forge-status
 description: "Mostra o estado atual do projeto GSD — milestone ativo, slice, tarefas pendentes e próxima ação."
+disable-model-invocation: true
 allowed-tools: Read, Glob, Bash
 ---
 

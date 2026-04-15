@@ -1,5 +1,7 @@
 ---
+name: forge-memories
 description: "Mostra, limpa ou exporta as memórias auto-aprendidas do projeto GSD. Use: /forge-memories | /forge-memories clean | /forge-memories export"
+disable-model-invocation: true
 allowed-tools: Read, Write, Edit
 ---
 

@@ -1,5 +1,7 @@
 ---
+name: forge-ask
 description: "Modo conversa com o agente GSD — discute ideias, resolve dúvidas, planeja, captura decisões. Salva sessão automaticamente em .gsd/sessions/. Se o chat cair, /forge-ask resume retoma de onde parou."
+disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Glob, Skill
 ---
 

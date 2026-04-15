@@ -1,5 +1,7 @@
 ---
+name: forge-skills
 description: "Lista skills disponíveis e explica como usar com os comandos GSD. Use: /forge-skills | /forge-skills brainstorm | /forge-skills --all"
+disable-model-invocation: true
 allowed-tools: Read, Bash, Glob
 ---
 
@@ -23,9 +25,9 @@ Then display in this format:
 
 ---
 
-**Skills GSD instaladas** (prefixo `gsd-`):
+**Skills GSD instaladas** (prefixo `forge-`):
 
-Para cada skill com nome começando em `gsd-`:
+Para cada skill com nome começando em `forge-`:
 
 ```
 📦 forge-brainstorm
@@ -36,8 +38,8 @@ Para cada skill com nome começando em `gsd-`:
 
 📦 forge-risk-radar
    Análise de risco por slice antes da execução.
-   → Usado em: /forge-new-milestone (automático em slices risk:high)
-   → Manual:   /gsd S##  (o orquestrador roda antes de executar slices high-risk)
+   → Usado em: /forge-auto (automático em slices risk:high)
+   → Manual:   orquestrador roda antes de executar slices high-risk
 
 📦 forge-scope-clarity
    Contrato de escopo com critérios observáveis.
@@ -47,9 +49,9 @@ Para cada skill com nome começando em `gsd-`:
 
 ---
 
-**Outras skills instaladas** (não-GSD, disponíveis para uso manual):
+**Outras skills instaladas** (não-Forge, disponíveis para uso manual):
 
-Para cada skill sem prefixo `gsd-`, listar nome + description em uma linha:
+Para cada skill sem prefixo `forge-`, listar nome + description em uma linha:
 ```
 • review          — Review code changes for security, performance, bugs
 • lint            — ...
@@ -58,7 +60,7 @@ Para cada skill sem prefixo `gsd-`, listar nome + description em uma linha:
 
 Ao final, mostrar:
 ```
-Total: N skills GSD + M outras skills instaladas
+Total: N skills Forge + M outras skills instaladas
 
 Como usar skills com GSD:
   /forge-skills <nome>    ver detalhes e exemplos de uma skill específica
@@ -106,17 +108,17 @@ FLAGS DISPONÍVEIS NESTA SKILL:
 Mostrar tabela:
 
 ```
-SKILL               FASE GSD              COMANDO          FLAG SKIP
-──────────────────────────────────────────────────────────────────────
-forge-brainstorm      nova milestone        /forge-new-milestone   -fast
-forge-scope-clarity   nova milestone        /forge-new-milestone   -fast
-forge-risk-radar      plan → execute        /gsd, /forge-auto      —
-forge-brainstorm      discuss               /forge-discuss         -fast
+SKILL               FASE GSD              COMANDO               FLAG SKIP
+──────────────────────────────────────────────────────────────────────────
+forge-brainstorm    nova milestone        /forge-new-milestone  -fast
+forge-scope-clarity nova milestone        /forge-new-milestone  -fast
+forge-risk-radar    plan → execute        /forge-auto           —
+forge-brainstorm    discuss               /forge-discuss        -fast
 
 Outras skills (invocar manualmente pedindo ao agente):
-review              qualquer fase         —                    —
-lint                execute / complete    —                    —
-debug-like-expert   execute (blocker)     —                    —
+review              qualquer fase         —                     —
+lint                execute / complete    —                     —
+debug-like-expert   execute (blocker)     —                     —
 ```
 
 ---
@@ -145,7 +147,7 @@ CRIAR SUA PRÓPRIA SKILL:
     # Crie SKILL.md com frontmatter name + description + XML structure
     # Veja ~/.agents/skills/forge-brainstorm/SKILL.md como exemplo
 
-ADICIONAR AO GSD-AGENT (para que todos recebam ao instalar):
-  Coloque a skill em gsd-agent/skills/<nome>/
+ADICIONAR AO FORGE-AGENT (para que todos recebam ao instalar):
+  Coloque a skill em forge-agent/skills/<nome>/
   Abra um PR no repositório
 ```

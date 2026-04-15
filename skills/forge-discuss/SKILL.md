@@ -1,5 +1,7 @@
 ---
+name: forge-discuss
 description: "Abre uma discussão de arquitetura para capturar decisões antes de planejar. Use: /forge-discuss M003 | /forge-discuss S02 | /forge-discuss -fast S02 (pula brainstorm)"
+disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Agent, Skill, WebSearch, WebFetch
 ---
 
