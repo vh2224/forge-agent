@@ -11,100 +11,83 @@ $ARGUMENTS
 
 ---
 
-## Garantir que forge-settings.js está instalado
+## Pré-requisito: Claude CLI
 
-Before running any operation, check if the script exists:
+Todas as operações usam o CLI oficial `claude mcp`. Claude Code lê MCPs do registry user-scope (`~/.claude.json`), NÃO de `~/.claude/settings.json` — por isso escrever settings.json direto não funciona.
 
-```bash
-test -f ~/.claude/forge-settings.js && echo "exists" || echo "missing"
-```
-
-If "missing": look for `repo_path` in `~/.claude/forge-agent-prefs.md` and copy the script:
+Verifique que o CLI está disponível:
 
 ```bash
-REPO=$(grep 'repo_path:' ~/.claude/forge-agent-prefs.md 2>/dev/null | head -1 | sed 's/repo_path: *//')
-if [ -n "$REPO" ] && [ -f "$REPO/scripts/merge-settings.js" ]; then
-  cp "$REPO/scripts/merge-settings.js" ~/.claude/forge-settings.js && echo "installed"
-else
-  echo "not-found"
-fi
+command -v claude >/dev/null && echo "ok" || echo "missing"
 ```
 
-If "not-found": print the error below and stop:
-```
-✗ forge-settings.js não encontrado.
+Se "missing": `✗ Claude CLI não encontrado no PATH. Instale o Claude Code antes de gerenciar MCPs.` e pare.
 
-Execute /forge-update para reinstalar os scripts do Forge Agent.
-```
+---
+
+## Escopos
+
+- **user** (global, todos os projetos) → `claude mcp add <name> -s user ...`
+- **project** (commitável, `.mcp.json` na raiz) → `claude mcp add <name> -s project ...`
+- **local** (só este projeto, gitignored) → `claude mcp add <name> -s local ...` (default do CLI)
 
 ---
 
 ## Routing
 
-**If $ARGUMENTS is empty or "list"** → show MCP list (see below).
+**Se $ARGUMENTS vazio ou "list"** → listar MCPs.
 
-**If $ARGUMENTS starts with "add"** → add MCP (see below).
+**Se $ARGUMENTS começa com "add"** → adicionar.
 
-**If $ARGUMENTS starts with "remove"** → remove MCP (see below).
+**Se $ARGUMENTS começa com "remove"** → remover.
 
-**Otherwise** → show error: `Opção desconhecida: "$ARGUMENTS". Use /forge-mcps para ver as opções.`
+**Caso contrário** → `Opção desconhecida: "$ARGUMENTS". Use /forge-mcps para ver as opções.`
 
 ---
 
 ## List (sem argumentos ou "list")
 
-**Step 1 — Read what's installed:**
+**Step 1 — Listar registrados:**
 
 ```bash
-echo "==GLOBAL=="
-node ~/.claude/forge-settings.js ~/.claude/settings.json --mcp-list 2>/dev/null
-echo "==PROJECT=="
-node ~/.claude/forge-settings.js .claude/settings.json --mcp-list 2>/dev/null
+claude mcp list 2>/dev/null
 ```
 
-Parse the output to build a set of installed MCP names (both scopes).
+O output inclui nome e escopo de cada MCP. Parse e construa o conjunto de nomes instalados.
 
-**Step 2 — Read the catalog:**
+**Step 2 — Ler catálogo:**
 
-Read `~/.claude/forge-mcps.md`. Extract all MCP names from `### <name>` headings.
-Known catalog MCPs: `fetch`, `context7`, `github`, `postgres`, `redis`, `puppeteer`, `sqlite`, `semgrep`, `snyk`, `trivy`.
-Known bundles: `security` (components: `semgrep`, `snyk`, `trivy`).
+Leia `~/.claude/forge-mcps.md`. Extraia nomes de MCP dos headings `### <name>`.
+Catálogo conhecido: `fetch`, `context7`, `brave-search`, `github`, `postgres`, `redis`, `puppeteer`, `sqlite`, `semgrep`, `snyk`, `trivy`.
+Bundles: `security` (componentes: `semgrep`, `snyk`, `trivy`).
 
-**Step 3 — Build the unified view:**
-
-For each catalog MCP, check if it appears in the installed set. Mark:
-- `✓` — installed (show which scope: global or projeto)
-- `○` — available but not installed
-
-Print:
+**Step 3 — View unificado:**
 
 ```
 MCPs — Forge Agent
 ════════════════════════════════════════
 
   Configurados:
-    ✓ fetch          global    Full HTTP client (GET, POST, PUT, DELETE)
-    (list only MCPs that ARE installed, with scope and short description)
+    ✓ fetch          user      Full HTTP client (GET, POST, PUT, DELETE)
 
   Disponíveis (não instalados):
-    ○ postgres       projeto   Schema, queries, migrations (precisa DATABASE_URL)
-    (list only MCPs that are NOT installed)
+    ○ postgres       project   Schema, queries, migrations (precisa DATABASE_URL)
 
   MCPs customizados (não do catálogo):
-    ✓ my-custom-mcp  global    npx -y my-custom-mcp
-    (if none, omit this section entirely)
+    ✓ my-custom-mcp  user      npx -y my-custom-mcp
 
 ════════════════════════════════════════
   Adicionar:  /forge-mcps add <nome>
   Remover:    /forge-mcps remove <nome>
 ```
 
-**Short descriptions for catalog MCPs:**
+**Descrições curtas:**
 
 | MCP | Description |
 |-----|------------|
 | fetch | Full HTTP client (GET, POST, PUT, DELETE) |
 | context7 | Docs atualizadas de libs e frameworks |
+| brave-search | Busca web estruturada (precisa BRAVE_API_KEY) |
 | github | GitHub oficial (~70 tools: issues, PRs, Actions) |
 | postgres | Schema, queries, migrations (precisa DATABASE_URL) |
 | redis | Filas, cache, pub/sub (precisa REDIS_URL) |
@@ -114,11 +97,11 @@ MCPs — Forge Agent
 | snyk | All-in-one: SAST + SCA + secrets + IaC + containers |
 | trivy | Scanner de vulnerabilidades: containers, filesystem, IaC |
 
-**Bundles section:**
+**Bundles:**
 
 ```
   Bundles:
-    ◈ security       global    SAST + SCA + containers (Semgrep, Snyk, Trivy)
+    ◈ security       user      SAST + SCA + containers (Semgrep, Snyk, Trivy)
       └─ semgrep ✓, snyk ○, trivy ○
 ```
 
@@ -126,45 +109,47 @@ MCPs — Forge Agent
 
 ## Add — "add <name>"
 
-Extract the MCP name from $ARGUMENTS (strip "add " prefix).
+Extraia o nome de $ARGUMENTS (strip "add ").
 
-Read `~/.claude/forge-mcps.md` (the MCP catalog) to check if it's a known MCP or bundle.
+Leia `~/.claude/forge-mcps.md` para saber se é MCP conhecido ou bundle.
 
-**If bundle (e.g., "security"):**
+**Se bundle (ex: "security"):**
 
-Read the bundle definition from the catalog. For each component in the bundle:
+Para cada componente:
 
-1. Check if already installed (via `--mcp-list`)
-2. If already installed → skip, note as "já instalado"
-3. If not installed → follow the individual MCP add flow below
+1. Checar se já instalado (`claude mcp list | grep -q "^<name>[: ]"`)
+2. Se sim → skip ("já instalado")
+3. Se não → seguir fluxo individual abaixo
 
-Special handling per component:
-- **semgrep:** Check `command -v semgrep`. If missing, warn: `⚠ Semgrep CLI não encontrado. Instale antes de usar: brew install semgrep`
-- **snyk:** Run `npx -y snyk@latest mcp configure --tool=claude-cli`. Check auth: `npx -y snyk@latest whoami 2>/dev/null`. If fails, warn: `⚠ Snyk não autenticado. Execute: npx snyk auth`
-- **trivy:** Check `command -v trivy`. If missing, warn: `⚠ Trivy CLI não encontrado. Instale antes de usar: brew install trivy`. If found but plugin missing, auto-install: `trivy plugin install mcp`
+Handling especial:
+- **semgrep:** `command -v semgrep` → se faltar, avisar: `⚠ Semgrep CLI não encontrado. Instale: brew install semgrep`
+- **snyk:** `npx -y snyk@latest mcp configure --tool=claude-cli`; checar auth com `npx -y snyk@latest whoami`. Se falhar: `⚠ Snyk não autenticado. Execute: npx snyk auth`
+- **trivy:** `command -v trivy` → se faltar: `⚠ Trivy CLI não encontrado. Instale: brew install trivy`. Se presente mas sem plugin: `trivy plugin install mcp`
 
-After processing all components, print summary:
+Summary:
 ```
 Bundle "security" — resultado:
-  ✓ semgrep    adicionado (global)
-  ✓ snyk       adicionado (global)
-  ✓ trivy      adicionado (global)
+  ✓ semgrep    adicionado (user)
+  ✓ snyk       adicionado (user)
+  ✓ trivy      adicionado (user)
 
 Reinicie o Claude Code para ativar.
 ```
 
-**If known MCP (found in catalog):**
+**Se MCP conhecido (no catálogo):**
 
-1. Read the MCP's **Config** JSON and **Scope** from the catalog entry
-2. Use the catalog's **default scope** automatically:
-   - global-scoped MCPs → TARGET = `~/.claude/settings.json`
-   - project-scoped MCPs → TARGET = `.claude/settings.json`
-3. If the MCP has `credentials: yes` in the catalog, verify the required env var exists in `.env`, `.env.local`, or `.env.development`. Warn if missing but proceed.
-4. For MCPs that need a path argument (sqlite): ask for the path via AskUserQuestion
-5. For github MCP: check `gh auth token`; detect docker/binary runtime; offer to install if neither available.
-6. Run:
+1. Leia o bloco **Config** JSON e o **Scope** default do catálogo.
+2. Mapeie scope do catálogo para flag do CLI: `global` → `-s user`; `project` → `-s project`.
+3. Se `credentials: yes` no catálogo, verifique se a env var requerida existe em `.env`, `.env.local` ou `.env.development`. Avise se faltar, mas continue.
+4. MCPs que precisam de path (sqlite): perguntar via AskUserQuestion.
+5. github: checar `gh auth token`; detectar runtime docker/binário; oferecer instalação se nenhum disponível.
+6. Registre com `claude mcp add-json` (aceita o JSON completo do catálogo):
    ```bash
-   node ~/.claude/forge-settings.js <TARGET> --mcp-add <name> '<config-json-from-catalog>'
+   claude mcp add-json <name> '<config-json-from-catalog>' -s user
+   ```
+   Se o CLI não suportar `add-json` nessa versão, caia para forma posicional:
+   ```bash
+   claude mcp add <name> -s user [-e KEY=val ...] -- <command> <arg1> <arg2> ...
    ```
 7. Print:
    ```
@@ -173,45 +158,40 @@ Reinicie o Claude Code para ativar.
    Reinicie o Claude Code para ativar.
    ```
 
-**If unknown MCP (not in catalog):**
+**Se MCP desconhecido (fora do catálogo):**
 
-Use AskUserQuestion to gather all at once:
-```
-MCP "<name>" não está no catálogo. Preciso de:
+AskUserQuestion coletando:
 1. Comando (ex: npx, uvx, node, python)
 2. Argumentos (ex: -y @meu/mcp-server)
-3. Variáveis de ambiente (ex: API_KEY=xxx) — ou "nenhuma"
-4. Tem credenciais/senhas? (sim/não)
-5. Escopo: global (todos os projetos) ou projeto (só este)?
-```
+3. Env vars (KEY=val KEY2=val2) — ou "nenhuma"
+4. Escopo: user (global) / project (commitável) / local (só aqui)
 
-Build the config JSON and run:
+Rode:
 ```bash
-node ~/.claude/forge-settings.js <TARGET> --mcp-add <name> '<json-config>'
+claude mcp add <name> -s <scope> [-e KEY=val ...] -- <command> <args...>
 ```
 
 ---
 
 ## Remove — "remove <name>"
 
-Extract the MCP name. Check if it's a bundle first.
+Extraia o nome. Checar se é bundle primeiro.
 
-**If bundle:** Remove each component from its scope. Print summary.
+**Se bundle:** remover cada componente. Summary no fim.
 
-**If individual MCP:**
+**Se MCP individual:**
 
-Check which scopes have it:
+O CLI mostra escopo no `list`. Parse para descobrir onde está:
 ```bash
-node ~/.claude/forge-settings.js .claude/settings.json --mcp-list 2>/dev/null | grep -q "<name>" && echo "project-has" || echo "project-no"
-node ~/.claude/forge-settings.js ~/.claude/settings.json --mcp-list 2>/dev/null | grep -q "<name>" && echo "global-has" || echo "global-no"
+claude mcp list 2>/dev/null
 ```
 
-If found in both scopes, use AskUserQuestion: "MCP '<name>' encontrado em ambos os escopos. Remover de: global, projeto, ou ambos?"
-
-If found in one scope:
+Se encontrado em um único escopo:
 ```bash
-node ~/.claude/forge-settings.js <TARGET> --mcp-remove <name>
+claude mcp remove <name> -s <scope>
 ```
+
+Se em múltiplos: AskUserQuestion — "MCP '<name>' em user e project. Remover de: user, project, ou ambos?"
 
 Print:
 ```
@@ -220,9 +200,9 @@ Print:
 Reinicie o Claude Code para aplicar.
 ```
 
-If not found in either:
+Se não encontrado:
 ```
-✗ MCP "<name>" não encontrado em nenhum escopo.
+✗ MCP "<name>" não encontrado.
 
 Use /forge-mcps para ver os MCPs configurados.
 ```

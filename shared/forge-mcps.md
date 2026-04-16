@@ -10,9 +10,9 @@ Agents: read this file at `~/.claude/forge-mcps.md` when handling MCP operations
 
 ### fetch
 
-- **Package:** `@anthropic-ai/mcp-server-fetch`
+- **Package:** `mcp-fetch-server`
 - **Command:** `npx`
-- **Args:** `["-y", "@anthropic-ai/mcp-server-fetch"]`
+- **Args:** `["-y", "mcp-fetch-server"]`
 - **Env:** none
 - **Scope:** global
 - **Credentials:** none
@@ -21,7 +21,7 @@ Agents: read this file at `~/.claude/forge-mcps.md` when handling MCP operations
   ```json
   {
     "command": "npx",
-    "args": ["-y", "@anthropic-ai/mcp-server-fetch"]
+    "args": ["-y", "mcp-fetch-server"]
   }
   ```
 - **Value:** Full HTTP client — GET, POST, PUT, DELETE with headers, auth, body. More capable than native WebFetch for API testing and integration verification.
@@ -43,6 +43,31 @@ Agents: read this file at `~/.claude/forge-mcps.md` when handling MCP operations
   }
   ```
 - **Value:** Fetches current documentation for libraries and frameworks. Prevents hallucinated APIs and outdated patterns. Essential for coding agents.
+
+### brave-search
+
+- **Package:** `@modelcontextprotocol/server-brave-search`
+- **Command:** `/bin/sh` (shell wrapper — reads BRAVE_API_KEY from env)
+- **Args:** `["-c", "[ -f .env ] && set -a && . .env; exec npx -y @modelcontextprotocol/server-brave-search"]`
+- **Env:** `BRAVE_API_KEY` (read from `.env` or shell environment)
+- **Scope:** global
+- **Credentials:** yes — Brave Search API key (free tier: 2000 queries/month)
+- **Detect:** always recommended — gives agents a reliable web search backend beyond the built-in WebSearch tool
+- **Prerequisite:** obtain free API key at https://brave.com/search/api/ and export `BRAVE_API_KEY`:
+  ```bash
+  export BRAVE_API_KEY=your_key_here
+  # or add to ~/.bashrc / ~/.zshrc / .env
+  ```
+- **Config (safe — credential read at runtime):**
+  ```json
+  {
+    "command": "/bin/sh",
+    "args": ["-c", "[ -f .env ] && set -a && . .env; exec npx -y @modelcontextprotocol/server-brave-search"]
+  }
+  ```
+- **Value:** Structured web search + local/news search with ranked results and snippets. More deterministic than the built-in WebSearch for targeted research (version-specific bugs, library changelogs, error messages). Pairs well with `fetch` MCP for reading full article content. Equivalent to the `search-the-web` extension in gsd-2.
+- **Tools provided:** `brave_web_search`, `brave_local_search`
+- **Requirement:** `BRAVE_API_KEY` must be set in environment or `.env`.
 
 ### postgres
 
@@ -324,7 +349,7 @@ Bundles agrupam MCPs relacionados para instalação em um único comando.
 ## Scope Rules
 
 - **global** (`~/.claude/settings.json`) — MCPs useful across all projects. Not committed to git.
-  - Default global: `fetch`, `context7`, `github`, `semgrep`, `snyk`, `trivy`
+  - Default global: `fetch`, `context7`, `brave-search`, `github`, `semgrep`, `snyk`, `trivy`
 - **project** (`.claude/settings.json`) — MCPs that need project-specific config. Committed to git.
   - Default project: `postgres`, `redis`, `puppeteer`, `sqlite`
 
@@ -336,6 +361,7 @@ Used by forge-config and forge-init to skip scope question for known MCPs:
 |-----|--------------|--------|
 | fetch | global | Universal utility, no config needed |
 | context7 | global | Universal utility, no config needed |
+| brave-search | global | Web search API, one key works everywhere |
 | github | global | One token works everywhere |
 | postgres | project | Project-specific database |
 | redis | project | Project-specific service |

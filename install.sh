@@ -234,78 +234,89 @@ info ""
 info "  Status line não ativada por padrão."
 info "  Para ativar: /forge-config statusline on"
 
-# ── Global MCP setup (first install only, interactive terminal) ───────────────
-SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
-SETTINGS_SCRIPT="${CLAUDE_DIR}/forge-settings.js"
+# ── Global MCP setup (via `claude mcp add -s user`) ───────────────────────────
+# Claude Code CLI reads MCPs from ~/.claude.json (user-scope registry), NOT from
+# ~/.claude/settings.json. We must use the official CLI to register them — writing
+# settings.json directly has zero effect on MCP discovery.
 
-if ! $DRY_RUN && ! $UPDATE && [ -t 0 ] && [ -f "$SETTINGS_SCRIPT" ]; then
+if ! $DRY_RUN && command -v claude >/dev/null 2>&1; then
   echo ""
   echo "────────────────────"
-  echo "  MCP Setup (opcional)"
+  echo "  MCPs globais (Tier 1 — zero-config)"
   echo "────────────────────"
   echo ""
-  info "MCPs (Model Context Protocol) adicionam capacidades extras ao agente."
-  info "Aqui você configura MCPs globais (disponíveis em todos os projetos)."
-  info "MCPs de projeto (postgres, redis, etc.) são configurados no /forge-init."
-  echo ""
-  info "  fetch    — HTTP client completo (GET, POST, PUT, DELETE, headers, auth)"
-  info "  context7 — docs atualizadas de libs e frameworks (evita APIs obsoletas)"
-  echo ""
 
-  read -rp "  Adicionar MCPs globais recomendados (fetch + context7)? (s/n) [s]: " mcp_globals
-  mcp_globals="${mcp_globals:-s}"
+  SKIP_FILE="${CLAUDE_DIR}/forge-mcps-skipped.txt"
+  installed_list=$(claude mcp list 2>/dev/null || echo "")
 
-  if [[ "$mcp_globals" =~ ^[sS]$ ]]; then
-    node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-add fetch '{"command":"npx","args":["-y","@anthropic-ai/mcp-server-fetch"]}'
-    node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-add context7 '{"command":"npx","args":["-y","@upstash/context7-mcp@latest"]}'
+  tier1_add() {
+    local name="$1"; shift
+    if [ -f "$SKIP_FILE" ] && grep -q "^${name}$" "$SKIP_FILE" 2>/dev/null; then
+      info "  ${name} — pulado (marcado como skip pelo usuário)"
+      return
+    fi
+    if echo "$installed_list" | grep -qE "^${name}[: ]"; then
+      info "  ${name} — já configurado"
+      return
+    fi
+    claude mcp add "$name" -s user -- "$@" >/dev/null 2>&1 \
+      && success "  ${name} — adicionado" \
+      || info "  ${name} — falha ao adicionar (rode manualmente: claude mcp add ${name} -s user -- $*)"
+  }
+
+  tier1_add fetch    npx -y mcp-fetch-server
+  tier1_add context7 npx -y @upstash/context7-mcp@latest
+  echo ""
+  info "Pesquisa web (Anthropic WebSearch nativo) já funciona sem MCP ou chave."
+  info "Para search determinístico (Brave, 2000q/mês grátis): /forge-mcps add brave-search"
+
+  if ! $UPDATE && [ -t 0 ]; then
+    echo ""
+    read -rp "  Remover algum MCP Tier 1 desta instalação? (fetch/context7/nenhum) [nenhum]: " remove_choice
+    remove_choice="${remove_choice:-nenhum}"
+    case "$remove_choice" in
+      fetch|context7)
+        claude mcp remove "$remove_choice" -s user >/dev/null 2>&1 || true
+        echo "$remove_choice" >> "$SKIP_FILE"
+        info "  ${remove_choice} removido e marcado como skip"
+        ;;
+    esac
   fi
 
-  # Ask for custom global MCPs
-  while true; do
-    echo ""
-    read -rp "  Adicionar outro MCP global? (nome ou 'não' para continuar) [não]: " custom_name
-    custom_name="${custom_name:-não}"
+  if ! $UPDATE && [ -t 0 ]; then
+    while true; do
+      echo ""
+      read -rp "  Adicionar outro MCP global? (nome ou 'não' para continuar) [não]: " custom_name
+      custom_name="${custom_name:-não}"
 
-    if [[ "$custom_name" =~ ^[nN] ]] || [ "$custom_name" = "não" ]; then
-      break
-    fi
+      if [[ "$custom_name" =~ ^[nN] ]] || [ "$custom_name" = "não" ]; then
+        break
+      fi
 
-    read -rp "  Comando (ex: npx, uvx, node): " custom_cmd
-    read -rp "  Argumentos (ex: -y @meu/mcp-server): " custom_args
-    read -rp "  Variáveis de ambiente (KEY=val KEY2=val2, ou vazio): " custom_env
+      read -rp "  Comando (ex: npx, uvx, node): " custom_cmd
+      read -rp "  Argumentos (ex: -y @meu/mcp-server): " custom_args
+      read -rp "  Variáveis de ambiente (KEY=val KEY2=val2, ou vazio): " custom_env
 
-    # Build args array
-    args_json="["
-    first=true
-    for arg in $custom_args; do
-      if $first; then first=false; else args_json+=","; fi
-      args_json+="\"$arg\""
+      env_flags=()
+      if [ -n "$custom_env" ]; then
+        for pair in $custom_env; do
+          env_flags+=(-e "$pair")
+        done
+      fi
+
+      claude mcp add "$custom_name" -s user "${env_flags[@]}" -- "$custom_cmd" $custom_args \
+        && success "  ${custom_name} — adicionado" \
+        || info "  ${custom_name} — falha ao adicionar"
     done
-    args_json+="]"
 
-    # Build env object
-    if [ -n "$custom_env" ]; then
-      env_json="{"
-      env_first=true
-      for pair in $custom_env; do
-        key="${pair%%=*}"
-        val="${pair#*=}"
-        if $env_first; then env_first=false; else env_json+=","; fi
-        env_json+="\"$key\":\"$val\""
-      done
-      env_json+="}"
-      config_json="{\"command\":\"$custom_cmd\",\"args\":$args_json,\"env\":$env_json}"
-    else
-      config_json="{\"command\":\"$custom_cmd\",\"args\":$args_json}"
-    fi
-
-    node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-add "$custom_name" "$config_json"
-  done
-
-  echo ""
-  # Show configured MCPs
-  info "MCPs globais configurados:"
-  node "$SETTINGS_SCRIPT" "$SETTINGS_FILE" --mcp-list
+    echo ""
+    info "MCPs globais configurados:"
+    claude mcp list 2>/dev/null || true
+  fi
+elif ! $DRY_RUN; then
+  info ""
+  info "Claude CLI não encontrado no PATH — MCPs Tier 1 não foram instalados."
+  info "Após instalar o Claude Code, rode: /forge-mcps"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────

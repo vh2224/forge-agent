@@ -198,6 +198,54 @@ Info ""
 Info "  Status line não ativada por padrão."
 Info "  Para ativar: /forge-config statusline on"
 
+# ── Tier 1 MCPs: fetch + context7 (via `claude mcp add -s user`) ─────────────
+# Claude Code CLI lê MCPs de ~/.claude.json (user-scope registry), NÃO de
+# ~/.claude/settings.json. Usar o CLI oficial é a única forma de registrar.
+$SkipFile    = Join-Path $ClaudeDir "forge-mcps-skipped.txt"
+$ClaudeCmd   = Get-Command claude -ErrorAction SilentlyContinue
+
+if (-not $DryRun -and $ClaudeCmd) {
+    Write-Host ""
+    Write-Host "────────────────────"
+    Write-Host "  MCPs globais (Tier 1 — zero-config)"
+    Write-Host "────────────────────"
+    Write-Host ""
+
+    $installedList = ""
+    try { $installedList = & claude mcp list 2>$null | Out-String } catch {}
+
+    function Add-Tier1Mcp($name, $configJson) {
+        if ((Test-Path $SkipFile) -and ((Get-Content $SkipFile -ErrorAction SilentlyContinue) -contains $name)) {
+            Info "  $name — pulado (marcado como skip pelo usuário)"
+            return
+        }
+        if ($installedList -match "(?m)^$name[:\s]") {
+            Info "  $name — já configurado"
+            return
+        }
+        # add-json aceita a config inteira em JSON. PowerShell 5.1 strippa aspas
+        # duplas ao passar args para exe externo — escapar `"` como `\"` preserva
+        # o JSON literal que o CLI do Claude precisa receber.
+        $escaped = $configJson -replace '"', '\"'
+        & claude mcp add-json $name $escaped -s user 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Success "  $name — adicionado"
+        } else {
+            Info "  $name — falha ao adicionar (rode manualmente: claude mcp add-json $name '$configJson' -s user)"
+        }
+    }
+
+    Add-Tier1Mcp "fetch"    '{"command":"npx","args":["-y","mcp-fetch-server"]}'
+    Add-Tier1Mcp "context7" '{"command":"npx","args":["-y","@upstash/context7-mcp@latest"]}'
+    Write-Host ""
+    Info "Pesquisa web (Anthropic WebSearch nativo) já funciona sem MCP ou chave."
+    Info "Para search determinístico (Brave, 2000q/mês grátis): /forge-mcps add brave-search"
+} elseif (-not $DryRun) {
+    Info ""
+    Info "Claude CLI não encontrado no PATH — MCPs Tier 1 não foram instalados."
+    Info "Após instalar o Claude Code, rode: /forge-mcps"
+}
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "═══════════════════════"
