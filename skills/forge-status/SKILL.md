@@ -65,6 +65,9 @@ Report in this format:
 ### Próxima ação
 <exact next action from STATE.md>
 
+### Token usage (M###)
+<token usage block — see instructions below>
+
 ### Blockers
 <list or "Nenhum">
 
@@ -75,5 +78,77 @@ Report in this format:
 - · TASK-003: <description> (pendente — só BRIEF.md)
 {If no tasks: omit this section entirely}
 ```
+
+---
+
+## Token usage — geração do bloco
+
+**Só executar se STATE.md tem um milestone ativo.** Se não há milestone, omitir o bloco inteiro.
+
+Run the following to aggregate token telemetry for the active milestone and render the `### Token usage` block:
+
+```bash
+ACTIVE_M=$(grep -oE 'M[0-9]{3}' .gsd/STATE.md | head -1)
+if [ -z "$ACTIVE_M" ]; then
+  # No active milestone — omit Token usage block entirely
+  :
+elif [ ! -f .gsd/forge/events.jsonl ]; then
+  echo "Sem dados de telemetria ainda."
+else
+  node -e "
+// Aggregate dispatch events for the active milestone.
+// Matching strategy: all events recorded AFTER the milestone's first dispatch timestamp.
+// This is a best-effort heuristic because unit_id for slice/task phases is S## or T##, not M###.
+const fs = require('fs');
+const activeM = process.env.ACTIVE_M;
+const raw = fs.readFileSync('.gsd/forge/events.jsonl', 'utf8').trim();
+if (!raw) { console.log('Sem dados de telemetria ainda.'); process.exit(0); }
+
+const lines = raw.split('\n');
+const events = lines.flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
+
+// Find the first dispatch event that directly names the active milestone
+const milestoneFirst = events.find(e =>
+  e.event === 'dispatch' && e.unit && e.unit.includes(activeM)
+);
+if (!milestoneFirst) { console.log('Sem dados de telemetria ainda.'); process.exit(0); }
+
+const startTs = milestoneFirst.ts;
+const dispatches = events.filter(e =>
+  e.event === 'dispatch' &&
+  e.ts >= startTs &&
+  typeof e.input_tokens === 'number' &&
+  typeof e.output_tokens === 'number'
+);
+if (dispatches.length === 0) { console.log('Sem dados de telemetria ainda.'); process.exit(0); }
+
+const totalIn = dispatches.reduce((s, e) => s + e.input_tokens, 0);
+const totalOut = dispatches.reduce((s, e) => s + e.output_tokens, 0);
+
+// Phase order per dispatch table
+const phaseOrder = [
+  'plan-milestone','discuss-milestone','research-milestone',
+  'plan-slice','discuss-slice','research-slice',
+  'execute-task','complete-slice','complete-milestone','memory-extract'
+];
+const byPhase = {};
+dispatches.forEach(e => {
+  const phase = e.unit ? e.unit.split('/')[0] : 'unknown';
+  byPhase[phase] = (byPhase[phase] || 0) + 1;
+});
+const fmt = n => n.toString().replace(/\B(?=(\d{3})+\$)/g, ' ');
+const phaseStr = phaseOrder
+  .filter(p => byPhase[p] > 0)
+  .map(p => p + ' ' + byPhase[p])
+  .join(' · ');
+console.log('### Token usage (' + activeM + ')');
+console.log('- Total input:  ' + fmt(totalIn) + ' tokens');
+console.log('- Total output: ' + fmt(totalOut) + ' tokens');
+console.log('- Dispatches:   ' + dispatches.length + ' (por fase: ' + phaseStr + ')');
+" ACTIVE_M="$ACTIVE_M"
+fi
+```
+
+Replace the `### Token usage (M###)` placeholder line in the dashboard template with the output of this block. If the output is `Sem dados de telemetria ainda.`, render it as a single line under the heading.
 
 $ARGUMENTS
