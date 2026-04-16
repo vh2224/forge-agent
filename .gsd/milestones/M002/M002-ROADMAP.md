@@ -18,7 +18,7 @@ Port four high-impact Context Engineering features from the GSD-2 TypeScript ext
 - [x] **S01: Error classifier + retry integration** `risk:medium` `depends:[]`
   Demo: force a mock 503/429/ECONNRESET in a forge-auto unit dispatch; orchestrator auto-recovers with correct exponential backoff (2s/4s/8s) for up to 3 attempts, logs each retry to `events.jsonl`, and surfaces a clean error after exhaustion. Smoke test on kickoff confirms the exception text reaching the orchestrator catch block is classifier-legible (validates assumption A1).
 
-- [ ] **S02: Verification gate executable** `risk:high` `depends:[S01]`
+- [x] **S02: Verification gate executable** `risk:high` `depends:[S01]`
   Demo: task with `verify: npm run typecheck && npm test` in T##-PLAN.md frontmatter executes the commands via `scripts/forge-verify.js`, blocks worker result when any exits non-zero, and injects truncated stderr into the next retry prompt. Gate is also exercised against (a) a Node repo with auto-detected `package.json` scripts and (b) a docs-only repo where it skips gracefully with `skipped:no-stack` in `events.jsonl`.
 
 - [ ] **S03: Token counter + context budget** `risk:low` `depends:[S01]`

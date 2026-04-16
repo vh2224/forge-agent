@@ -1,8 +1,31 @@
 ---
 id: S02
 milestone: M002
-status: ready-for-completer
-draft: true
+status: complete
+draft: false
+provides:
+  - scripts/forge-verify.js — zero-dep CJS verification gate CLI + module
+  - shared/forge-dispatch.md ## Verification Gate — 8-subsection integration spec
+  - agents/forge-executor.md step 10 — task-level gate before T##-SUMMARY
+  - agents/forge-completer.md step 3 — slice-level gate before security scan
+  - forge-agent-prefs.md ## Verification Settings — discovery chain + allow-list docs
+  - S02-CONTEXT.md — task-vs-slice gate split rationale (W4 mitigation)
+  - S02-UAT.md — 10-case human test script
+key_files:
+  - scripts/forge-verify.js
+  - shared/forge-dispatch.md
+  - agents/forge-executor.md
+  - agents/forge-completer.md
+  - forge-agent-prefs.md
+key_decisions:
+  - Discovery order is task-plan FIRST (T##-PLAN verify: → prefs preference_commands → package.json allow-list → no-stack)
+  - Slice-level gate uses --cwd only (no --plan); task-level uses both --plan and --cwd
+  - Slice-level gate failure → blocked + tooling_failure, NOT routed through Retry Handler
+  - events.jsonl I/O errors throw (not swallowed) — telemetry is a hard contract per S02-RISK W3
+  - C:/temp/ used for Windows smoke dirs (/tmp unavailable on win32)
+patterns_established:
+  - Node CLI + module dual-mode pattern for deterministic runners (scripts/forge-verify.js)
+  - Verification gate placement in agent process steps (executor step 10, completer step 3)
 ---
 
 ## Goal
@@ -263,3 +286,19 @@ forge-agent has no `package.json`, no `pyproject.toml`, no `go.mod`.
 ## Verdict
 
 All 6 scenarios passed; gate is production-ready.
+
+---
+
+## Verification Gate
+
+**Invocation:** `node scripts/forge-verify.js --cwd . --unit complete-slice/S02`
+
+**Discovery source:** `none`
+
+**Commands run:** (none — docs-only repo)
+
+**Result:** `passed:true`, `skipped:"no-stack"`
+
+**Duration:** ~1 ms
+
+The forge-agent repo itself has no `package.json`, `pyproject.toml`, or `go.mod`, so the gate exits cleanly with `no-stack` — the expected and correct outcome for a docs-only repo.
