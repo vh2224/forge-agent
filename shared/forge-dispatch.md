@@ -277,3 +277,164 @@ Explore the codebase. Produce M###-RESEARCH.md (or S##-RESEARCH.md) with:
 After writing RESEARCH.md, update .gsd/CODING-STANDARDS.md with new findings (Asset Map, conventions).
 Return ---GSD-WORKER-RESULT---.
 ```
+
+---
+
+### Retry Handler
+
+**Purpose:** Control-flow utility invoked after any `Agent()` call throws. Classifies the exception, decides whether to retry (transient) or bail (permanent/unknown), applies backoff, and appends a structured event to `events.jsonl`. This section is intentionally separate from the data-flow templates above (MEM011 — retries are control flow, not data flow).
+
+> **Cross-reference:** Classifier CLI — `node scripts/forge-classify-error.js --msg "$errorMsg"`.
+> Output shape: `{ kind, retry, backoffMs? }`. Transient kinds: `rate-limit`, `network`, `server`, `stream`, `connection`.
+> Non-transient kinds (`permanent`, `unknown`, `model_refusal`, `context_overflow`, `tooling_failure`) fall through to the existing **Failure Taxonomy** in `skills/forge-auto/SKILL.md` Step 5 — do NOT handle them here.
+
+#### When to apply
+
+Wrap every `Agent()` dispatch call in a try/catch. On throw, run this handler. On clean return, skip it entirely.
+
+#### Algorithm
+
+1. Catch the thrown exception; capture its `.message` (or string representation) into a local variable `errorMsg`. Do NOT log or store `errorMsg` beyond this scope.
+2. Shell out via `Bash`:
+   ```
+   node scripts/forge-classify-error.js --msg "$errorMsg"
+   ```
+   > **Security note:** Always double-quote `"$errorMsg"` in the shell invocation to prevent word-splitting and shell injection. If the error string may contain backticks or `$` characters, prefer piping via stdin:
+   > `echo "$errorMsg" | node scripts/forge-classify-error.js`
+   > Implementors who copy this example verbatim MUST preserve the double-quotes — bare `--msg $errorMsg` is a shell-injection risk.
+3. Parse the JSON output into a `result` object: `{ kind, retry, backoffMs? }`.
+4. If `result.retry === false` — bail immediately. Route to the CRITICAL failure block in `skills/forge-auto/SKILL.md` Step 5 (deactivate auto-mode, surface the `kind` to the user, stop the loop). Do NOT surface `errorMsg`.
+5. If `result.retry === true` — increment the in-memory `attempt` counter (starts at 0 before the first retry; so first retry is `attempt = 1`).
+6. If `attempt > PREFS.retry.max_transient_retries` (default `3`) — bail with message `"retries exhausted after {attempt} attempts (kind: {result.kind})"` via the same CRITICAL path. Do NOT surface `errorMsg`.
+7. Compute backoff delay:
+   - Preferred: use `result.backoffMs` directly when present.
+   - Override (exponential): `delay_ms = 2000 * Math.pow(2, attempt - 1)` → 2000 ms / 4000 ms / 8000 ms for attempts 1/2/3.
+   - When both are present, use `Math.min(result.backoffMs, delay_ms)` to avoid runaway waits.
+8. Sleep for `delay_ms` milliseconds. Use the cross-platform Node one-liner (no `setTimeout` in the Claude-in-the-loop context):
+   ```
+   Bash("node -e \"const t=Date.now();while(Date.now()-t<{delay_ms}){}\"")
+   ```
+   Or on Unix with integer seconds:
+   ```
+   Bash("sleep $((Math.ceil(delay_ms / 1000)))")
+   ```
+9. Append a retry event to `.gsd/forge/events.jsonl` (single line, valid JSON). See **Event log format** below.
+   > **NEVER include `errorMsg` or any exception body in the event log entry.**
+10. Re-dispatch the same `Agent()` call with the identical prompt. Go to step 1 of the outer dispatch loop (not this handler).
+
+#### Event log format
+
+Each retry event is a single newline-terminated JSON object appended to `.gsd/forge/events.jsonl`:
+
+```json
+{"ts":"{ISO8601}","event":"retry","unit":"{unit_type}/{unit_id}","class":"{kind}","attempt":N,"backoff_ms":N,"model":"{model_id}"}
+```
+
+Fields:
+- `ts` — ISO 8601 timestamp of the retry decision
+- `event` — always `"retry"`
+- `unit` — e.g. `"execute-task/T03"`, `"plan-slice/S01"`
+- `class` — the `kind` from classifier output (`"rate-limit"`, `"server"`, `"network"`, `"stream"`, `"connection"`)
+- `attempt` — retry attempt number (1-based)
+- `backoff_ms` — actual sleep duration in milliseconds
+- `model` — model ID used for the dispatch (e.g. `"claude-sonnet-4-6"`)
+
+**Do NOT include:** raw exception text, SDK error body, request IDs, or any PII. The `errorMsg` variable must not appear in this entry.
+
+#### Prefs contract
+
+The handler reads `PREFS.retry.max_transient_retries` (integer). Default `3` when `PREFS.retry` is absent or the key is missing. The prefs block ships in T05 — until then the handler falls back to `3` silently.
+
+Per-class behaviour summary:
+
+| kind | retry | default backoffMs | notes |
+|------|-------|-------------------|-------|
+| `rate-limit` | true | 60 000 (or from `reset in Xs` header) | Respect provider backoff when present |
+| `network` | true | 3 000 | ECONNRESET, ETIMEDOUT, socket hang up |
+| `server` | true | 30 000 | 500 / 502 / 503, overloaded |
+| `stream` | true | 15 000 | Malformed JSON mid-stream |
+| `connection` | true | 15 000 | ECONNRESET-style; treated as transient |
+| `permanent` | false | — | Auth / billing / quota — bail immediately |
+| `unknown` | false | — | Opaque / tooling string — bail immediately |
+
+#### Worked examples
+
+**Example 1 — 429 rate-limit (attempt 1 of 3)**
+
+Exception text (not logged): `"Rate limit exceeded — reset in 30s"`
+Classifier output: `{"kind":"rate-limit","retry":true,"backoffMs":30000}`
+Action: sleep 30 000 ms, then retry.
+Event log entry:
+```json
+{"ts":"2026-04-16T10:00:05Z","event":"retry","unit":"execute-task/T03","class":"rate-limit","attempt":1,"backoff_ms":30000,"model":"claude-sonnet-4-6"}
+```
+
+**Example 2 — 503 server error (attempt 2 of 3)**
+
+Exception text (not logged): `"503 Service Unavailable"`
+Classifier output: `{"kind":"server","retry":true,"backoffMs":30000}`
+Exponential override for attempt 2: `2000 * 2^1 = 4000 ms`. Use `Math.min(30000, 4000) = 4000 ms`.
+Event log entry:
+```json
+{"ts":"2026-04-16T10:01:12Z","event":"retry","unit":"plan-slice/S02","class":"server","attempt":2,"backoff_ms":4000,"model":"claude-opus-4-7"}
+```
+
+**Example 3 — ECONNRESET network error (attempt 3 of 3, exhausted)**
+
+Exception text (not logged): `"ECONNRESET — socket hang up"`
+Classifier output: `{"kind":"network","retry":true,"backoffMs":3000}`
+Attempt counter is now `3 > max_transient_retries (3)`? No, `3 === 3` — this IS the last allowed retry. Sleep 3 000 ms, retry.
+If the re-dispatch also throws: `attempt` becomes `4 > 3` → bail with CRITICAL message `"retries exhausted after 4 attempts (kind: network)"`.
+Event log entry for attempt 3:
+```json
+{"ts":"2026-04-16T10:02:44Z","event":"retry","unit":"research-slice/S01","class":"network","attempt":3,"backoff_ms":3000,"model":"claude-opus-4-7"}
+```
+
+#### Wiring into a dispatch template
+
+Place the try/catch immediately around the `Agent()` call. Example snippet (drop into any dispatch template that has a `## Dispatch` step):
+
+```
+// ── Retry state (reset per unit) ──────────────────────────────────────────────
+let attempt = 0;
+const MAX_RETRIES = PREFS?.retry?.max_transient_retries ?? 3;
+
+// ── Dispatch with retry ───────────────────────────────────────────────────────
+while (true) {
+  try {
+    result = Agent(workerType, prompt);
+    break; // success — exit retry loop
+  } catch (e) {
+    const errorMsg = String(e?.message ?? e);
+    const classification = JSON.parse(
+      Bash(`node scripts/forge-classify-error.js --msg "$errorMsg"`)
+    );
+
+    if (!classification.retry) {
+      // Permanent / unknown → existing CRITICAL failure block
+      deactivateAutoMode();
+      throw new Error(`Dispatch failed (kind: ${classification.kind}) — see forge-auto Step 5`);
+    }
+
+    attempt++;
+    if (attempt > MAX_RETRIES) {
+      deactivateAutoMode();
+      throw new Error(`Retries exhausted after ${attempt} attempts (kind: ${classification.kind})`);
+    }
+
+    const expBackoff = 2000 * Math.pow(2, attempt - 1);
+    const delay = classification.backoffMs
+      ? Math.min(classification.backoffMs, expBackoff)
+      : expBackoff;
+
+    Bash(`node -e "const t=Date.now();while(Date.now()-t<${delay}){}"`);
+
+    appendToEventsLog({ ts: new Date().toISOString(), event: "retry",
+      unit: `${unitType}/${unitId}`, class: classification.kind,
+      attempt, backoff_ms: delay, model: modelId });
+    // Loop continues → re-dispatch
+  }
+}
+```
+
+This snippet is self-contained and drop-in compatible with both `skills/forge-auto/SKILL.md` (T04) and `commands/forge-next.md` (T04 — note: forge-next has a unique selective memory injection block at its Step 3 that does not appear here; the retry wrapper surrounds only the `Agent()` call, not the memory injection logic).
