@@ -43,25 +43,43 @@ process.stdin.on('end', () => {
     };
 
     // --- Forge STATE (reads .gsd/STATE.md) ---
-    let forgeTag = '';
+    let forgeMilestone = '';   // e.g. "M002"
+    let forgeProgress  = '';   // e.g. "2/4" (done slices / total) — empty if can't parse ROADMAP
     let autoMode = false;
     let autoElapsed = '0s';
     try {
       const stateFile = path.join(cwd, '.gsd', 'STATE.md');
       const state     = fs.readFileSync(stateFile, 'utf8');
 
-      const mMatch = state.match(/\*\*Active Milestone:\*\*\s*([^\n]+)/i);
-      const sMatch = state.match(/\*\*Active Slice:\*\*\s*([^\n]+)/i);
+      // New STATE format uses "## Active Milestone" heading. Fall back to legacy bold form.
+      let milestoneText = '';
+      const headMatch = state.match(/^## Active Milestone\s*\n([^\n]+)/mi);
+      if (headMatch) milestoneText = headMatch[1].trim();
+      else {
+        const legacy = state.match(/\*\*Active Milestone:\*\*\s*([^\n]+)/i);
+        if (legacy) milestoneText = legacy[1].trim();
+      }
 
-      const m = mMatch?.[1]?.trim();
-      const s = sMatch?.[1]?.trim();
+      const mId = milestoneText && !/^—|^\(none\)/i.test(milestoneText)
+        ? (milestoneText.match(/^(M\d+)/i)?.[1] || '')
+        : '';
 
-      if (m && m.toLowerCase() !== 'none') {
-        const mId = m.match(/^(M\d+)/i)?.[1] || m.split(' ')[0];
-        const sId = s && s.toLowerCase() !== 'none'
-          ? s.match(/^(S\d+)/i)?.[1] || s.split(' ')[0]
-          : null;
-        forgeTag = sId ? `${mId}/${sId}` : `${mId}`;
+      if (mId) {
+        forgeMilestone = mId;
+        // Parse ROADMAP to count done slices
+        try {
+          const roadmap = fs.readFileSync(
+            path.join(cwd, '.gsd', 'milestones', mId, `${mId}-ROADMAP.md`),
+            'utf8'
+          );
+          const sliceRe = /^- \[( |x)\]\s+\*\*S\d+/gm;
+          let done = 0, total = 0, m2;
+          while ((m2 = sliceRe.exec(roadmap)) !== null) {
+            total++;
+            if (m2[1] === 'x') done++;
+          }
+          if (total > 0) forgeProgress = `${done}/${total}`;
+        } catch { /* ROADMAP missing — just show milestone id */ }
       }
     } catch { /* not a forge project */ }
 
@@ -231,58 +249,139 @@ process.stdin.on('end', () => {
     };
 
     // --- Build status line ---
-    // --- Build auto-mode prefix ---
-    let autoPrefix = '';
-    // Check for pause request (file written by /forge-pause command)
+    // --- Tier icon map (mirrors shared/forge-tiers.md unit_type defaults) ---
+    const TIER_ICON = {
+      'memory-extract':    '🪶',
+      'complete-slice':    '🪶',
+      'complete-milestone':'🪶',
+      'execute-task':      '⚡',
+      'plan-milestone':    '🔥',
+      'plan-slice':        '🔥',
+      'discuss-milestone': '🔥',
+      'discuss-slice':     '🔥',
+      'research-milestone':'🔥',
+      'research-slice':    '🔥',
+    };
+    const tierIconFor = (unit_type) => TIER_ICON[unit_type] || '•';
+
+    // --- Read tail of events.jsonl (cheap — stays under ~50KB typically) ---
+    const readTailEvents = () => {
+      try {
+        const f = path.join(cwd, '.gsd', 'forge', 'events.jsonl');
+        const content = fs.readFileSync(f, 'utf8').trimEnd();
+        if (!content) return [];
+        const lines = content.split('\n').slice(-20);
+        return lines
+          .map(l => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(Boolean);
+      } catch { return []; }
+    };
+
+    // Find an active retry (most recent "event:retry" in last 90s, newer than any done)
+    const findActiveRetry = (events) => {
+      for (let i = events.length - 1; i >= 0; i--) {
+        const e = events[i];
+        const ts = e.ts ? new Date(e.ts).getTime() : 0;
+        if (e.event === 'retry' && Date.now() - ts < 90_000) return e;
+        if (e.status === 'done' || e.status === 'blocked') return null;
+      }
+      return null;
+    };
+
+    // Find last terminal outcome (done/blocked/partial) for idle display
+    const findLastOutcome = (events) => {
+      for (let i = events.length - 1; i >= 0; i--) {
+        const e = events[i];
+        if (e.status === 'done' || e.status === 'blocked' || e.status === 'partial') return e;
+      }
+      return null;
+    };
+
+    const fmtSecsShort = (s) => s >= 60 ? `${Math.floor(s/60)}m${s%60 ? s%60+'s' : ''}` : `${s}s`;
+
+    // --- Check for pause request ---
     const pauseFile = path.join(cwd, '.gsd', 'forge', 'pause');
     const pausePending = (() => { try { return fs.existsSync(pauseFile); } catch { return false; } })();
 
+    // --- Build auto-mode prefix (dot + AUTO + elapsed) — worker moves to middle segment now ---
+    let autoPrefix = '';
     if (pausePending) {
       autoPrefix = `${c.yellow}⏸ PAUSE SOLICITADO${c.reset} │ `;
     } else if (autoMode) {
-      // Use elapsed seconds (same base as the counter) so dot and counter
-      // advance together — avoids desync with absolute epoch parity.
       const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';
-      let workerStr = '';
-      if (autoWorker) {
-        const wt = autoWorkerSecs >= 60
-          ? `${Math.floor(autoWorkerSecs / 60)}m${autoWorkerSecs % 60}s`
-          : `${autoWorkerSecs}s`;
-        workerStr = ` ${c.green}▸ ${autoWorker} +${wt}${c.reset}`;
+      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset} │ `;
+    }
+
+    // --- Middle segment: milestone progress + worker/retry/outcome ---
+    let middleSegment = project;
+    if (forgeMilestone) {
+      const mLabel = forgeProgress
+        ? `${c.bold}${forgeMilestone}${c.reset} ${forgeProgress}`
+        : forgeMilestone;
+
+      let rightPart = '';
+      if (autoMode && autoWorker) {
+        const [ut, uid] = autoWorker.split('/');
+        const icon = tierIconFor(ut);
+        const wt = fmtSecsShort(autoWorkerSecs);
+        const events = readTailEvents();
+        const retry = findActiveRetry(events);
+        if (retry) {
+          const cls = retry.class || 'transient';
+          const attempt = retry.attempt || '?';
+          rightPart = ` · ${c.yellow}↻${c.reset} ${icon}${uid || ut} retry ${attempt}/3 (${cls})`;
+        } else {
+          rightPart = ` · ${c.green}${icon}${uid || ut} +${wt}${c.reset}`;
+        }
+      } else {
+        // No active worker — show last outcome if recent (< 10 min)
+        const events = readTailEvents();
+        const last = findLastOutcome(events);
+        if (last && last.ts) {
+          const ago = Math.round((Date.now() - new Date(last.ts).getTime()) / 1000);
+          if (ago < 600) {
+            const uid = last.unit?.split('/')?.[1] || last.unit || '';
+            const statusIcon =
+              last.status === 'done'    ? `${c.green}✓${c.reset}` :
+              last.status === 'partial' ? `${c.yellow}○${c.reset}` :
+                                          `${c.red}✗${c.reset}`;
+            rightPart = ` · ${statusIcon} ${uid} há ${fmtSecsShort(ago)}`;
+          }
+        }
       }
-      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset}${workerStr} │ `;
+
+      middleSegment = `${project} │ ${mLabel}${rightPart}`;
     }
 
-    // Forge label: version normally plain, update highlighted
-    let forgeLabel = 'Forge';
-    if (forgeVersion) {
-      forgeLabel = forgeUpdate
-        ? `Forge ${forgeVersion} ${c.bold}${c.yellow}${forgeUpdate}${c.reset}`
-        : `Forge ${forgeVersion}`;
-    }
-
-    // Context bar: color based on usage threshold
+    // --- Context bar: color based on usage threshold ---
     let barColor = '';
     if (pct >= 85)      barColor = c.red;
     else if (pct >= 70) barColor = c.yellow;
     else if (pct >= 1)  barColor = c.green;
     const ctxStr = barColor ? `${barColor}${bar} ${pct}%${c.reset}` : `${bar} ${pct}%`;
 
-    // Cost: highlight when expensive
+    // --- Cost: highlight when expensive ---
     let costDisplay = costStr;
     if (cost >= 5)      costDisplay = `${c.red}${costStr}${c.reset}`;
     else if (cost >= 1) costDisplay = `${c.yellow}${costStr}${c.reset}`;
 
-    const line1 = autoPrefix + [
-      forgeLabel,
-      model,
-      forgeTag ? `${project} │ ${forgeTag}` : project,
-      ctxStr,
-      costDisplay,
-      `↑${fmt(totalIn)} ↓${fmt(totalOut)} 💾${fmt(cacheTotal)}`,
-    ].join(' │ ');
+    // --- Forge version tail: only shown when update available (otherwise noise) ---
+    let forgeVersionTail = '';
+    if (forgeUpdate) {
+      forgeVersionTail = ` │ ${c.bold}${c.yellow}Forge ${forgeUpdate}${c.reset}`;
+    }
 
-    process.stdout.write(line1 + dispatchLine + '\n');
+    // --- Model segment: only when NOT auto (tier icon covers "what's running" in auto mode) ---
+    const segments = [];
+    if (!autoMode) segments.push(model);
+    segments.push(middleSegment, ctxStr, costDisplay);
+
+    const line1 = autoPrefix + segments.join(' │ ') + forgeVersionTail;
+
+    // --- Line 2 (dispatchLine): only useful when NOT in auto mode (auto shows worker in line 1) ---
+    const line2 = autoMode ? '' : dispatchLine;
+
+    process.stdout.write(line1 + line2 + '\n');
   } catch {
     process.stdout.write('Forge │ ?\n');
   }
