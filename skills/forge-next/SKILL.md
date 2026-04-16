@@ -100,6 +100,47 @@ unit_effort = EFFORT_MAP[unit_type] or ("medium" if opus model else "low")
 ```
 Inject `effort: {unit_effort}` and (for opus phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
 
+**Tier resolution (step 1.5)** — resolve `{tier, model, reason}` for this dispatch.
+> Cross-reference: `shared/forge-dispatch.md § Tier Resolution` (algorithm) and `shared/forge-tiers.md` (canonical tables).
+
+```bash
+# ── Tier Resolution ────────────────────────────────────────────────────────────
+# Step 1: unit-type default
+declare -A TIER_DEFAULTS=(
+  [memory-extract]="light" [complete-slice]="light" [complete-milestone]="light"
+  [research-milestone]="standard" [research-slice]="standard"
+  [discuss-milestone]="standard" [discuss-slice]="standard" [execute-task]="standard"
+  [plan-milestone]="heavy" [plan-slice]="heavy"
+)
+TIER="${TIER_DEFAULTS[$unit_type]:-standard}"
+REASON="unit-type:$unit_type"
+
+# Step 2: parse frontmatter (execute-task only)
+if [ "$unit_type" = "execute-task" ]; then
+  PLAN_PATH=".gsd/milestones/${M###}/slices/${S##}/tasks/${T##}/${T##}-PLAN.md"
+  PLAN_TIER=$(node -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tier:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
+  PLAN_TAG=$(node  -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tag:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
+
+  # Step 3: apply precedence (first match wins)
+  if [ -n "$PLAN_TIER" ]; then
+    TIER="$PLAN_TIER"; REASON="frontmatter-override:$PLAN_TIER"
+  elif [ "$PLAN_TAG" = "docs" ]; then
+    TIER="light"; REASON="frontmatter-tag:docs"
+  fi
+fi
+
+# Step 4: resolve model — PREFS.tier_models[tier] with fallback to forge-tiers.md defaults
+MODEL_ID=$(node -e "
+  let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
+  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-7'};
+  const tier='$TIER';
+  const validTiers=['light','standard','heavy'];
+  const t=validTiers.includes(tier)?tier:'standard';
+  process.stdout.write((p.tier_models||{})[t]||d[t]);
+")
+```
+`TIER`, `MODEL_ID`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
+
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
 mkdir -p .gsd/milestones/{M###}/slices/{S##}
@@ -146,7 +187,7 @@ Do NOT read artifact files here — templates now pass paths; workers read their
 
 ### 4. Dispatch
 
-Resolve the model ID for this unit from PREFS.
+Use `$MODEL_ID` resolved by Tier Resolution (step 1.5) above. Do NOT look up model from PREFS directly — `model = PREFS.tier_models[tier]` is already computed.
 
 **Create timeline task** — use `TaskCreate` to show progress in the UI:
 ```
@@ -188,7 +229,7 @@ Wait for the result. Then:
 ```bash
 OUTPUT_TOKENS=$(node scripts/forge-tokens.js --inline "$result")
 mkdir -p .gsd/forge/
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${modelId}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS}}" >> .gsd/forge/events.jsonl
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS}}" >> .gsd/forge/events.jsonl
 ```
 
 ### 5. Process result
