@@ -184,7 +184,7 @@ After ALL slices have been processed (or if no `risk:high` slices exist), procee
 
 ## Step 7 — Update state and report
 
-Update `.gsd/STATE.md`:
+Read `.gsd/STATE.md` (required before writing), then overwrite with:
 ```markdown
 # GSD State
 

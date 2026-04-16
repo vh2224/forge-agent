@@ -57,6 +57,6 @@ $ARGUMENTS
    - Add the new slice entry to `M###-ROADMAP.md` with `- [ ]`, risk tag, depends tag, demo sentence
    - Update the Boundary Map section with what this slice produces/consumes
 
-5. **Update STATE.md** if this is the next slice to execute
+5. **Update STATE.md** if this is the next slice to execute — Read it first before writing
 
 6. Report: slice ID, task breakdown, estimated scope

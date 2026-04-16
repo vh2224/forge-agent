@@ -77,7 +77,7 @@ $ARGUMENTS
 
 3. **Update `S##-PLAN.md`** — add `- [ ] **T##: Title**` entry
 
-4. **Update STATE.md** if this task is now the active one
+4. **Update STATE.md** if this task is now the active one — Read it first before writing
 
 5. Report: task ID, goal, must-haves count, estimated complexity
 

@@ -97,7 +97,7 @@ Write (or update) `.gsd/milestones/{M###}/{M###}-CONTEXT.md` or `slices/{S##}/{S
 
 Append significant decisions to `.gsd/DECISIONS.md`.
 
-Update `.gsd/STATE.md` — set phase to `plan` (ready to plan this milestone/slice).
+Read `.gsd/STATE.md`, then update it — set phase to `plan` (ready to plan this milestone/slice).
 
 ---
 
