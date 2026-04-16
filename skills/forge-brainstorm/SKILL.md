@@ -7,6 +7,17 @@ description: "Brainstorm estruturado — alternativas, riscos, contorno de escop
 Transform a rough milestone description into a structured decision brief by exploring the problem space before committing to a plan. The output feeds directly into the GSD discuss phase — giving the discuss agent concrete alternatives to reason about instead of starting from scratch.
 </objective>
 
+<web_research>
+Brainstorm de qualidade exige conhecer o estado da arte. Antes de listar alternativas, pesquise livremente com `WebSearch` / `WebFetch` (ou `brave-search` / `context7` / `fetch` MCPs quando configurados — `WebSearch` nativo da Anthropic já funciona zero-config). Casos que justificam lookup:
+
+- "Existe biblioteca pronta pra X?" — antes de propor "build from scratch", confirme o que há no ecossistema.
+- Padrões consagrados para o problema (rate limiting, retry, caching, auth flows).
+- Tradeoffs reais entre tecnologias concorrentes — não palpites.
+- Changelogs relevantes da stack detectada.
+
+Budget: até 5 buscas. Cite findings em `## Alternativas` como "(fonte: {url}, confiança: HIGH|MEDIUM)".
+</web_research>
+
 <essential_principles>
 - Generate options, not prescriptions. The user decides; you explore.
 - Diverge first, converge last. Do not filter ideas during generation.

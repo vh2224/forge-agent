@@ -27,6 +27,7 @@ After exploring the codebase, run targeted web searches for the key dependencies
 
 Guidelines:
 - Max 3–5 web searches — be selective, target only the most critical dependencies
+- Prefer MCP tools when configured: `brave-search` (structured web search with snippets), `context7` (library docs), `fetch` (full HTTP client). Fall back to `WebSearch` / `WebFetch` when MCPs are unavailable.
 - Use `WebFetch` to read official docs or changelogs when search results are insufficient
 - Record findings in `## Sources` with confidence level
 - If nothing relevant found online, skip silently — do not pad with generic advice

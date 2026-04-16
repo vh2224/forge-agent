@@ -2,7 +2,7 @@
 name: forge-ask
 description: "Modo conversa — discute ideias, captura decisoes, salva sessao."
 disable-model-invocation: true
-allowed-tools: Read, Write, Bash, Glob, Skill
+allowed-tools: Read, Write, Bash, Glob, Skill, WebSearch, WebFetch
 ---
 
 ## CONVERSATION-ONLY MODE — CRITICAL
@@ -16,6 +16,17 @@ This is a **read-only brainstorming and discussion mode**. The following rules a
 5. **If the user asks you to fix or build something** — respond with: "No modo /forge-ask eu só discuto. Para implementar, use `/forge-next` ou `/forge-auto`."
 
 The purpose of this mode is thinking, not doing. Stay in conversation.
+
+## Research freely (web + docs)
+
+Conversa de qualidade precisa de fatos. Pesquise livremente com `WebSearch` / `WebFetch` (ou MCPs `brave-search` / `context7` / `fetch` quando configurados — `WebSearch` nativo da Anthropic já funciona zero-config) sempre que:
+
+- O usuário perguntar sobre uma lib/framework/API e você não tem certeza 100% atual
+- A discussão envolver tradeoffs entre tecnologias — traga numbers/benchmarks reais
+- Aparecer um erro, CVE, changelog, ou breaking change
+- O usuário pedir comparação ou "qual o estado da arte em X"
+
+Cite as fontes na resposta (url + 1 linha do que foi encontrado). Lembre: pesquisar NÃO viola o modo read-only — só escrita em source files é proibida.
 
 ## Bootstrap guard
 

@@ -7,6 +7,10 @@ description: "Avaliacao de riscos por slice antes da execucao."
 Analyze a slice plan and surface risks that would cause the executor to get stuck, produce wrong output, or need to replan mid-execution. Output a risk card that the executor reads before starting.
 </objective>
 
+<web_research>
+Riscos externos (versão bugada de dependência, breaking change recente, CVE, limite de API) só são detectáveis pesquisando. Use `WebSearch` / `WebFetch` (ou MCPs `brave-search` / `context7` / `fetch`) livremente — zero-config via WebSearch nativo. Budget: até 3 buscas focadas nas dependências de alto impacto do slice. Registre achados como risco concreto com link na mitigação.
+</web_research>
+
 <essential_principles>
 - Focus on risks that affect THIS slice, not the whole project.
 - A risk without a mitigation is noise. Always pair risk + response.
