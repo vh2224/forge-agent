@@ -248,11 +248,20 @@ Then call `Agent(agent_name, worker_prompt)` with a `description` using the same
 
 Wait for the result.
 
-**CRITICAL — Agent() dispatch failure:** If the `Agent()` call itself fails (API error, 500, timeout, tool unavailable, or any exception before the worker even starts), do NOT attempt to execute the work inline in the main context. Instead:
+**Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
+
+1. Capture the exception message into `errorMsg`.
+2. Shell out: `node scripts/forge-classify-error.js --msg "$errorMsg"` → parse `{ kind, retry, backoffMs? }`.
+3. If `retry === true` AND `attempt <= PREFS.retry.max_transient_retries` (default 3): increment `attempt`, apply backoff, append a retry event to `.gsd/forge/events.jsonl`, and re-dispatch. Task stays `in_progress` between retries. Heartbeat write is NOT disturbed.
+4. Otherwise fall through to the CRITICAL path below.
+
+> Transient errors (`rate-limit`, `network`, `server`, `stream`, `connection`) are handled by the Retry Handler before this block is reached. The CRITICAL path below is only reached when the classifier returns `retry: false` OR retries are exhausted.
+
+**CRITICAL — Agent() dispatch failure (permanent / retries exhausted):** Do NOT attempt to execute the work inline. Instead:
 1. Deactivate auto-mode: `echo '{"active":false}' > .gsd/forge/auto-mode.json`
 2. Mark the task as in_progress (leave it — signals interruption): skip TaskUpdate
 3. Stop the loop immediately and tell the user:
-   > ⚠ Falha ao despachar subagente para `{unit_type} {unit_id}`: `{error message}`
+   > ⚠ Falha ao despachar subagente para `{unit_type} {unit_id}`: `{kind}` (não surfaçar `errorMsg`)
    > Execute `/forge-auto` para tentar novamente quando a API estiver disponível.
 
 Executing work inline bypasses context isolation and is NEVER acceptable as a fallback.

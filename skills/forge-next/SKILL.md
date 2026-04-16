@@ -161,6 +161,15 @@ Store the returned `taskId` as `current_task_id`. Then immediately mark it as in
 TaskUpdate({ taskId: current_task_id, status: "in_progress" })
 ```
 
+**Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
+
+1. Capture the exception message into `errorMsg`.
+2. Shell out: `node scripts/forge-classify-error.js --msg "$errorMsg"` → parse `{ kind, retry, backoffMs? }`.
+3. If `retry === true` AND `attempt <= PREFS.retry.max_transient_retries` (default 3): increment `attempt`, apply backoff, append a retry event to `.gsd/forge/events.jsonl`, and re-dispatch. Task stays `in_progress` between retries.
+4. Otherwise fall through to the failure taxonomy in Step 5.
+
+> Transient errors (`rate-limit`, `network`, `server`, `stream`, `connection`) are handled by the Retry Handler before this block is reached. The failure taxonomy below is only reached when the classifier returns `retry: false` OR retries are exhausted.
+
 Then call `Agent(agent_name, worker_prompt)` with a `description` that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
 - Examples:
