@@ -20,6 +20,7 @@ Given all `T##-SUMMARY.md` files from the slice:
    - YAML frontmatter: id, milestone, provides (up to 8), key_files (up to 10), key_decisions (up to 5), patterns_established
    - One substantive liner for the slice
    - `## What Was Built` narrative
+   - `## Verification Gate` section (commands, exit codes, discovery source, total duration) — populated in step 3
    - `drill_down_paths` to each task summary
 
 2. Write `S##-UAT.md` — human test script derived from must-haves:
@@ -33,14 +34,23 @@ Given all `T##-SUMMARY.md` files from the slice:
    ## Notes
    ```
 
-3. **Security scan** — scan files changed in this slice for risky patterns:
+3. **Verification gate** — invoke:
+   ```bash
+   node scripts/forge-verify.js --cwd {WORKING_DIR} --unit complete-slice/{S##}
+   ```
+   Parse result:
+   - `passed: true` → record the gate result in `S##-SUMMARY.md` under `## Verification Gate` (commands, exit codes, discovery source, total duration, timestamp). Continue to step 4.
+   - `skipped: "no-stack"` → record `## Verification Gate: skipped (no-stack)` + one-line explanation in `S##-SUMMARY.md`. Continue to step 4.
+   - `passed: false` → record full failure context in `S##-SUMMARY.md` under `## Verification Gate`. STOP — do NOT run security scan, lint, or merge. Return `---GSD-WORKER-RESULT---` with `status: blocked`, `blocker_class: tooling_failure`, and the `formatFailureContext` output as `blocker`.
+
+4. **Security scan** — scan files changed in this slice for risky patterns:
    `eval(`, `exec(`, `innerHTML`, `dangerouslySetInnerHTML`, string-concatenated SQL queries (`.query("` + variable), `console.log` adjacent to token/password/secret, hardcoded credential strings, `shell=True`, `os.system(`.
    If any found → add `## ⚠ Security Flags` section to `S##-SUMMARY.md` with: file path, pattern, and one-line context.
    This is documentation only — not a blocker. Record and continue.
 
-4. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
+5. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
 
-5. **Git squash-merge (only if `auto_commit: true` in injected config):** merge branch `gsd/M###/S##` to main:
+6. **Git squash-merge (only if `auto_commit: true` in injected config):** merge branch `gsd/M###/S##` to main:
    ```
    feat(M###/S##): <slice title>
 
@@ -54,13 +64,13 @@ Given all `T##-SUMMARY.md` files from the slice:
    ```bash
    node -e "const fs=require('fs'),os=require('os'),p=os.tmpdir()+'/forge-update-check.json';try{fs.unlinkSync(p)}catch{}" 2>/dev/null || true
    ```
-   If `auto_commit: false` → skip all git operations (no merge, no branch management). Just proceed to step 6.
+   If `auto_commit: false` → skip all git operations (no merge, no branch management). Just proceed to step 7.
 
-6. Update `M###-SUMMARY.md` — add this slice's contributions
+7. Update `M###-SUMMARY.md` — add this slice's contributions
 
-7. Mark slice `[x]` in `M###-ROADMAP.md`
+8. Mark slice `[x]` in `M###-ROADMAP.md`
 
-8. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
+9. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
    - Read `M###-ROADMAP.md` to find the next pending slice `[ ]`
    - If a next slice exists:
      ```markdown
