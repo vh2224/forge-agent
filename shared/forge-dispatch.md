@@ -565,6 +565,189 @@ Placeholder classification:
 
 ---
 
+### Tier Resolution
+
+**Purpose:** Control-flow section that runs before every `Agent()` call. It translates `unit_type + frontmatter hints + prefs` into a concrete `{tier, model, reason}` triple that the dispatch loop passes to `Agent()`. Like the Retry Handler and Token Telemetry, this is control flow — not data flow — and lives outside the fenced template blocks (MEM011). No new Node script is introduced: tier classification is pure Markdown rules + a `node -e` one-liner for frontmatter extraction (M002-CONTEXT D7, Hybrid C approach). This section fulfils the S04 extension note in Token Telemetry above: the `dispatch` event schema is extended additively with `tier` and `reason` fields.
+
+> **Cross-reference:** Canonical tier tables — see [`shared/forge-tiers.md`](forge-tiers.md). Override precedence and `tag: docs` semantics are locked in that file. The retry path (see `### Retry Handler` above) preserves the same `tier` and `model` on re-dispatch — do NOT re-resolve tier inside the retry loop.
+
+#### When to apply
+
+Before every `Agent()` dispatch, after Retry Handler setup but before Token Telemetry's `input_tokens` computation (so the final dispatch event has `tier`, `reason`, and token counts in one line). Tier resolution is read-only — it never mutates STATE.md or any file.
+
+#### Algorithm
+
+1. **Look up unit-type default.** Given `unit_type` (e.g. `execute-task`), find its row in the [Unit Type → Default Tier](forge-tiers.md#unit-type--default-tier) table. Assign `tier = defaultTier`.
+2. **Parse T##-PLAN frontmatter when `unit_type == execute-task`.** If the unit is `execute-task`, read the first YAML frontmatter block from the task plan file and extract `tier:` and `tag:` values:
+   ```bash
+   # Extract frontmatter tier override (returns empty string if absent)
+   PLAN_TIER=$(node -e "
+     const fs=require('fs');
+     const text=fs.readFileSync('$PLAN_PATH','utf8');
+     const m=text.match(/^---[\s\S]*?---/);
+     if(!m)process.exit(0);
+     const t=(m[0].match(/^tier:\s*(.+)$/m)||[])[1]||'';
+     process.stdout.write(t.trim());
+   ")
+   PLAN_TAG=$(node -e "
+     const fs=require('fs');
+     const text=fs.readFileSync('$PLAN_PATH','utf8');
+     const m=text.match(/^---[\s\S]*?---/);
+     if(!m)process.exit(0);
+     const t=(m[0].match(/^tag:\s*(.+)$/m)||[])[1]||'';
+     process.stdout.write(t.trim());
+   ")
+   ```
+3. **Apply precedence rules (first match wins):**
+   - If `PLAN_TIER` is non-empty → `tier = PLAN_TIER`, `reason = "frontmatter-override:${PLAN_TIER}"`.
+   - Else if `PLAN_TAG == "docs"` → `tier = "light"`, `reason = "frontmatter-tag:docs"`.
+   - Else → `tier` stays as unit-type default, `reason = "unit-type:${unit_type}"`.
+4. **Resolve model.** Look up `PREFS.tier_models[tier]`; fall back to the [Tier → Default Model](forge-tiers.md#tier--default-model) table when the key is absent:
+   ```bash
+   model=$(node -e "
+     const prefs=require('./.gsd/prefs-resolved.json')||{};
+     const defaults={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-7'};
+     const m=(prefs.tier_models||{})['$tier']||defaults['$tier'];
+     process.stdout.write(m);
+   ")
+   ```
+   If `tier` is not one of `light | standard | heavy`, treat as `standard` (defensive fallback).
+5. **Build `reason` string.** By this step `reason` is already set by step 3. Confirm it is exactly one of:
+   - `"unit-type:<unit_type>"` — no frontmatter override; default used.
+   - `"frontmatter-override:<tier>"` — `tier:` field present in T##-PLAN frontmatter.
+   - `"frontmatter-tag:docs"` — `tag: docs` in frontmatter, no explicit `tier:`.
+   - `"prefs-override:tier_models.<tier>"` — `PREFS.tier_models[tier]` was present (the model was overridden, but tier itself came from default or tag). Note: this reason is only appended as a suffix when the model diverges from the tier default, e.g. `"unit-type:execute-task|prefs-override:tier_models.standard"`. Implementations MAY omit the suffix for simplicity; the first three forms are canonical.
+
+#### Prefs contract
+
+| Key | Type | Default (when absent) | Description |
+|-----|------|-----------------------|-------------|
+| `tier_models.light` | string (model ID) | `claude-haiku-4-5-20251001` | Model used when tier resolves to `light` |
+| `tier_models.standard` | string (model ID) | `claude-sonnet-4-6` | Model used when tier resolves to `standard` |
+| `tier_models.heavy` | string (model ID) | `claude-opus-4-7` | Model used when tier resolves to `heavy` |
+
+The `tier_models` block ships in T05. Until then, the resolver falls back to the defaults above silently.
+
+#### Frontmatter override fields
+
+| Field | Type | Accepted Values | Effect |
+|-------|------|-----------------|--------|
+| `tier:` | enum | `light \| standard \| heavy` | Explicit tier assignment; takes precedence over `tag:` and unit-type default. The orchestrator reads this immediately after resolving the unit type and short-circuits all other rules. |
+| `tag:` | string | `docs` (only value active in M002) | When `tag: docs` and no explicit `tier:` is set, downgrades tier to `light`. Intended for documentation-only tasks that do not require code generation. Additional tag values may be introduced in future milestones. |
+
+#### Event log extension
+
+The `dispatch` event schema (defined in Token Telemetry above) is extended additively with two new fields. No existing fields are renamed or removed.
+
+```json
+{
+  "ts": "2026-04-16T10:00:05Z",
+  "event": "dispatch",
+  "unit": "execute-task/T03",
+  "model": "claude-sonnet-4-6",
+  "input_tokens": 2000,
+  "output_tokens": 300,
+  "tier": "standard",
+  "reason": "unit-type:execute-task"
+}
+```
+
+**Compatibility:** Existing S03 readers that parse `dispatch` events by known field names and ignore unknown fields continue to work without modification. The `tier` and `reason` fields are present on every new dispatch event; S03-era events in the log (which lack these fields) are valid — readers must treat missing `tier`/`reason` as `undefined`, not as an error.
+
+#### Worked examples
+
+**Example A — `memory-extract` unit (default, no frontmatter)**
+
+```
+unit_type  : memory-extract
+PLAN_TIER  : (absent — not an execute-task unit)
+PLAN_TAG   : (absent)
+
+→ tier   = light
+→ model  = claude-haiku-4-5-20251001
+→ reason = "unit-type:memory-extract"
+```
+
+Dispatch event:
+```json
+{"ts":"2026-04-16T10:05:00Z","event":"dispatch","unit":"memory-extract/T01","model":"claude-haiku-4-5-20251001","input_tokens":800,"output_tokens":120,"tier":"light","reason":"unit-type:memory-extract"}
+```
+
+**Example B — `execute-task` with `tier: heavy` AND `tag: docs` in frontmatter (manual wins)**
+
+```
+unit_type  : execute-task
+PLAN_TIER  : heavy   ← explicit; wins over tag
+PLAN_TAG   : docs
+
+→ tier   = heavy   (manual tier: overrides tag: docs downgrade)
+→ model  = claude-opus-4-7
+→ reason = "frontmatter-override:heavy"
+```
+
+Dispatch event:
+```json
+{"ts":"2026-04-16T10:06:00Z","event":"dispatch","unit":"execute-task/T07","model":"claude-opus-4-7","input_tokens":3200,"output_tokens":540,"tier":"heavy","reason":"frontmatter-override:heavy"}
+```
+
+**Example C — `execute-task` with ONLY `tag: docs` in frontmatter (downgrade applied)**
+
+```
+unit_type  : execute-task   → default tier = standard
+PLAN_TIER  : (absent)
+PLAN_TAG   : docs           ← triggers downgrade
+
+→ tier   = light   (tag: docs with no tier: override)
+→ model  = claude-haiku-4-5-20251001
+→ reason = "frontmatter-tag:docs"
+```
+
+Dispatch event:
+```json
+{"ts":"2026-04-16T10:07:00Z","event":"dispatch","unit":"execute-task/T09","model":"claude-haiku-4-5-20251001","input_tokens":1100,"output_tokens":200,"tier":"light","reason":"frontmatter-tag:docs"}
+```
+
+#### Wiring snippet
+
+Drop this block into the dispatch loop (e.g. `skills/forge-auto/SKILL.md` Step 3, before the `Agent()` call). It is self-contained and copy-paste-adaptable for both `forge-auto` (T04) and `forge-next` (T04).
+
+```bash
+# ── Tier Resolution (before Agent() call) ─────────────────────────────────────
+# Step 1: unit-type default
+declare -A TIER_DEFAULTS=(
+  [memory-extract]="light" [complete-slice]="light" [complete-milestone]="light"
+  [research-milestone]="standard" [research-slice]="standard"
+  [discuss-milestone]="standard" [discuss-slice]="standard" [execute-task]="standard"
+  [plan-milestone]="heavy" [plan-slice]="heavy"
+)
+TIER="${TIER_DEFAULTS[$UNIT_TYPE]:-standard}"
+REASON="unit-type:$UNIT_TYPE"
+
+# Step 2: parse frontmatter (execute-task only)
+if [ "$UNIT_TYPE" = "execute-task" ]; then
+  PLAN_TIER=$(node -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tier:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
+  PLAN_TAG=$(node -e  "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tag:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
+
+  # Step 3: apply precedence
+  if [ -n "$PLAN_TIER" ]; then
+    TIER="$PLAN_TIER"; REASON="frontmatter-override:$PLAN_TIER"
+  elif [ "$PLAN_TAG" = "docs" ]; then
+    TIER="light"; REASON="frontmatter-tag:docs"
+  fi
+fi
+
+# Step 4: resolve model
+declare -A TIER_MODELS=([light]="claude-haiku-4-5-20251001" [standard]="claude-sonnet-4-6" [heavy]="claude-opus-4-7")
+MODEL_ID=$(node -e "const p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8')||'{}');const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-7'};process.stdout.write((p.tier_models||{})['$TIER']||d['$TIER'])")
+
+# Step 5: extend dispatch event (append after Token Telemetry builds dispatchEvent)
+# Add:  ,"tier":"$TIER","reason":"$REASON"
+# Example (forge-auto line 259 extended):
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\"}" >> .gsd/forge/events.jsonl
+```
+
+---
+
 ## Verification Gate
 
 **Purpose:** Quality gate invoked by workers after all implementation steps are complete but before the worker is allowed to write its summary and return `done`. The gate shells out to `scripts/forge-verify.js`, which discovers and runs verification commands appropriate for the current unit. A worker may not return `done` unless `forge-verify.js` exits `0` (or the result is a recognised skip). This section is intentionally separate from the Retry Handler above (MEM011 — the gate is a quality control step, not an error-recovery step).
