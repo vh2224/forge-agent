@@ -171,7 +171,7 @@ Arquivo da sessão: .gsd/sessions/{session-id}.md
 Comandos durante a conversa:
   "brainstorm: X"       → explora abordagens, riscos e escopo de X
   "salvar decisão: X"   → registra X no DECISIONS.md
-  "criar milestone: X"  → instrução para /forge-new-milestone
+  "criar milestone: X"  → gera /forge-new-milestone com contexto desta sessão
   "criar task: X"       → instrução para /forge-add-task
   "encerrar sessão"     → fecha e arquiva esta sessão
   /forge-ask resume       → retoma esta sessão se o chat cair
@@ -226,8 +226,10 @@ If user said **"brainstorm: [topic]"** or **"brainstorming: [topic]"**:
 **Auto-suggest brainstorm:** If the user describes a new feature, milestone idea, or architectural change and NO brainstorm exists for it yet, suggest: "Quer que eu rode o brainstorm para explorar abordagens e riscos antes de continuarmos?"
 
 If user said **"criar milestone: [description]"**:
-- Tell the user: "Execute `/forge-new-milestone {description}` para criar o milestone completo com brainstorm e planejamento."
-- Append to `## Queued Actions` in session file
+- Check if the current session has meaningful content (non-empty `## Conversation` or `## Captured Decisions` sections, or a brainstorm was run)
+- If YES (session has context): Tell the user: "Execute `/forge-new-milestone {description} -session {session-id}` para criar o milestone aproveitando o contexto desta sessão."
+- If NO (session is empty): Tell the user: "Execute `/forge-new-milestone {description}` para criar o milestone completo com brainstorm e planejamento."
+- Append to `## Queued Actions` in session file: `- [ ] [{timestamp}] Criar milestone: {description} (session: {session-id})`
 
 If user said **"criar task: [description]"**:
 - Tell the user: "Execute `/forge-add-task {active slice} {description}` para adicionar a task."

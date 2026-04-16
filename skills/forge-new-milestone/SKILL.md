@@ -24,6 +24,7 @@ pwd
 
 From `$ARGUMENTS`:
 - If starts with `-fast` → `FAST_MODE=true`, strip `-fast` from description
+- If contains `-session {id}` → `SESSION_ID={id}`, strip `-session {id}` from description
 - Remaining text → `MILESTONE_DESC`
 
 ---
@@ -35,6 +36,8 @@ Read ONLY these small files:
 - `.gsd/PROJECT.md` → project description and stack
 - `.gsd/REQUIREMENTS.md` → constraints (or skip if missing)
 - Last 10 rows of `.gsd/DECISIONS.md` → locked decisions
+
+If `SESSION_ID` is set: Read `.gsd/sessions/{SESSION_ID}.md` → store as `SESSION_FILE`.
 
 Do NOT read anything else. Do NOT read source code.
 
@@ -49,6 +52,49 @@ mkdir -p .gsd/milestones/{MILESTONE_ID}/slices
 ## Step 2 — Brainstorm (skip if FAST_MODE)
 
 **If FAST_MODE=true:** Skip to Step 3.
+
+**If SESSION_ID is set (session-backed milestone):**
+
+Synthesize `SESSION_FILE` into a BRAINSTORM.md directly (no subagent needed — the session IS the brainstorm). Write `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-BRAINSTORM.md` with this structure:
+
+```markdown
+# {MILESTONE_ID}: {MILESTONE_DESC} — Brainstorm
+**Source:** forge-ask session {SESSION_ID}
+**Date:** {today}
+
+## Context
+{Summarize the session topic and motivation in 2-3 sentences, drawn from ## Conversation}
+
+## Recommended Approach
+{Derive from the session conversation — what approach emerged as preferred?}
+
+## Alternatives Considered
+{List alternatives discussed in the session, or "(none discussed)" if absent}
+
+## Risks
+{Extract risks mentioned in the session. If none: derive top 3 from the context.}
+
+## Open Questions
+{Copy from session ## Queued Actions or derive from unresolved threads in ## Conversation}
+
+## Key Decisions from Session
+{Copy all entries from ## Captured Decisions verbatim}
+
+## Session Conversation Summary
+{Paraphrase ## Conversation in 5-8 bullet points capturing the key ideas discussed}
+```
+
+Show the user:
+```
+✓ Brainstorm sintetizado da sessão {SESSION_ID}
+  Abordagem recomendada: {1-line summary}
+  Riscos identificados: {count}
+  Decisões capturadas: {count from ## Captured Decisions}
+```
+
+Then proceed to Step 3.
+
+**If SESSION_ID is NOT set (standard flow):**
 
 Delegate to an isolated subagent to keep brainstorm output out of main context:
 
@@ -82,12 +128,14 @@ After the agent returns, confirm `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-
 
 ## Step 4 — Discuss (interactive, stays in main context)
 
-Identify 3-5 genuine architecture/scope gray areas based on:
-- The brainstorm output summary (if available from Step 2)
-- The scope contract (if available from Step 3)
-- The DECISIONS.md locked decisions (avoid re-debating)
+**If SESSION_ID is set:** Pre-populate CONTEXT.md with decisions already captured in the session (from `## Captured Decisions` in `SESSION_FILE`). These are locked — do NOT re-ask them.
 
-Focus only on decisions not yet resolved that materially affect implementation.
+Identify only the **remaining** gray areas not already resolved by the session. Focus on decisions that:
+- Are NOT covered by `## Captured Decisions` in the session
+- Materially affect implementation
+- Are not already in DECISIONS.md
+
+If the session thoroughly covered the scope, it may be that 0-2 questions remain. That is fine — do not manufacture questions.
 
 **Ask questions one at a time using `AskUserQuestion`** — do NOT dump all questions in a text block.
 
@@ -102,9 +150,13 @@ Write decisions to `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-CONTEXT.md`:
 # {MILESTONE_ID}: {MILESTONE_DESC} — Context
 **Gathered:** {date}
 **Status:** Ready for planning
+{If SESSION_ID: **Session source:** {SESSION_ID}}
+
+## Decisions from Session
+{If SESSION_ID: copy all entries from ## Captured Decisions in SESSION_FILE verbatim. Else: omit this section.}
 
 ## Implementation Decisions
-- {decision from user answers}
+- {decision from user answers in Step 4 AskUserQuestion}
 
 ## Agent's Discretion
 - {areas where user said "you decide"}
@@ -142,6 +194,11 @@ BRAINSTORM:
 
 SCOPE:
 {content of {MILESTONE_ID}-SCOPE.md, or "(none — fast mode)"}
+
+{If SESSION_ID:
+SESSION_CONVERSATION:
+{content of ## Conversation section from SESSION_FILE — provides rich context about what was discussed, considered, and rejected}
+}
 
 DECISIONS:
 {full .gsd/DECISIONS.md}
