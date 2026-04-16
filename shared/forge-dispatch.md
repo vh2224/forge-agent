@@ -445,6 +445,124 @@ while (true) {
 
 This snippet is self-contained and drop-in compatible with both `skills/forge-auto/SKILL.md` (T04) and `commands/forge-next.md` (T04 — note: forge-next has a unique selective memory injection block at its Step 3 that does not appear here; the retry wrapper surrounds only the `Agent()` call, not the memory injection logic).
 
+> After appending the retry entry, follow the Token Telemetry section below: the retry entry MUST include an `input_tokens` field (the re-dispatch is new input).
+
+---
+
+### Token Telemetry
+
+**Purpose:** Control-flow section that defines two complementary responsibilities every Forge dispatch loop must fulfil: (a) emit a structured `dispatch` event to `.gsd/forge/events.jsonl` after every worker returns, capturing token counts for observability and future cost tracking; and (b) budget optional-section injections before dispatch so oversize context injections never silently blow up a worker context. Like the Retry Handler, this section is control flow — not data flow — and therefore lives outside the fenced template blocks (MEM011). Token counting uses the zero-dependency `Math.ceil(chars / 4)` heuristic (M002-CONTEXT D1). No SDK imports, no external packages.
+
+> **Cross-reference:** Token counter + truncator — `node scripts/forge-tokens.js --file <path>` (CLI) or `require('./scripts/forge-tokens')` (module). Exported functions: `countTokens(text)` and `truncateAtSectionBoundary(content, budgetChars, opts)`. Workers NEVER call this script directly — only the orchestrator invokes it during prompt assembly and after worker return.
+
+#### When to apply
+
+Compute `input_tokens` after all placeholder substitution in the final worker prompt, but BEFORE `Agent()` is invoked. Compute `output_tokens` from the worker result metadata if the SDK surfaces usage, otherwise use `countTokens(result.text)`. Emit the dispatch event on EVERY dispatch — success path AND retry re-dispatches. Retry re-dispatches additionally require an `input_tokens` field on the existing `retry` event (see Retry Handler above).
+
+#### Algorithm
+
+1. After full placeholder substitution and before `Agent()` dispatch: `input_tokens = countTokens(finalPrompt)`.
+2. If `input_tokens > 0.8 * 200000` (160 000 — conservative context-window fraction, hardcoded for all Claude models as of 2026-04): emit a warning entry to the orchestrator log. Do NOT block dispatch — this is informational only.
+3. `Agent()` dispatch proceeds as documented in the Retry Handler (success path or exception path).
+4. On clean return: if the SDK result includes a usage or metadata field with token counts, use those. Otherwise: `output_tokens = countTokens(result.text ?? String(result))`.
+5. Build the dispatch event object:
+   ```js
+   const dispatchEvent = {
+     ts: new Date().toISOString(),
+     event: "dispatch",
+     unit: `${unitType}/${unitId}`,
+     model: modelId,
+     input_tokens,
+     output_tokens,
+   };
+   ```
+6. Ensure `.gsd/forge/` directory exists (`mkdir -p .gsd/forge/` or equivalent).
+7. Append `JSON.stringify(dispatchEvent) + "\n"` to `.gsd/forge/events.jsonl`.
+8. **I/O errors from the append MUST throw** — same contract as the Verification Gate (S02 precedent). Telemetry is not silent-fail. Do NOT wrap in a try/catch that swallows the error. The MEM036 "errors are data" principle applies to classification outcomes only — budget violations and I/O errors are exceptions.
+9. On the retry path: include `input_tokens: countTokens(retryPrompt)` on the retry event (not a separate dispatch event — the retry entry already represents that re-dispatch).
+
+#### Event log format
+
+Each dispatch event is a single newline-terminated JSON object appended to `.gsd/forge/events.jsonl`:
+
+| Field | Type | Source | Example |
+|-------|------|--------|---------|
+| `ts` | ISO 8601 string | `new Date().toISOString()` | `"2026-04-16T10:00:00Z"` |
+| `event` | literal `"dispatch"` | — | `"dispatch"` |
+| `unit` | string | `${unitType}/${unitId}` | `"execute-task/T03"` |
+| `model` | string | PREFS routing | `"claude-sonnet-4-6"` |
+| `input_tokens` | integer | `countTokens(finalPrompt)` | `12345` |
+| `output_tokens` | integer | SDK usage or `countTokens(text)` | `3421` |
+
+**S04 extension note:** S04 will extend this schema with `tier` and `reason` fields — additive only, no field renames. Implementors should treat the schema as open for extension.
+
+Do NOT include: raw prompt text, worker output, file paths, exception messages, or any PII.
+
+#### Prefs contract
+
+The Budgeted Section Injection subsection (below) reads `PREFS.token_budget.<key>` (integer tokens) to determine per-placeholder budgets. The `token_budget` block ships in T05. Until then, the handler falls back silently to these defaults:
+
+| key | Default (tokens) | Placeholder(s) governed |
+|-----|-----------------|------------------------|
+| `auto_memory` | 2000 | `{TOP_MEMORIES}` |
+| `coding_standards` | 3000 | `{CS_STRUCTURE}`, `{CS_RULES}` (shared — count once per dispatch) |
+| `ledger_snapshot` | 1500 | `{LEDGER}` (future placeholder) |
+
+Missing `PREFS.token_budget` block → silent fallback to all defaults above. Individual missing keys → their default only.
+
+#### Worked example
+
+Input: a final worker prompt of approximately 8 000 characters. Token estimate: `countTokens(8000-char string) = Math.ceil(8000 / 4) = 2000`.
+
+Worker returns approximately 1 200 characters of output. Token estimate: `countTokens(1200-char string) = Math.ceil(1200 / 4) = 300`.
+
+Event appended to `.gsd/forge/events.jsonl`:
+
+```json
+{"ts":"2026-04-16T10:00:05Z","event":"dispatch","unit":"execute-task/T03","model":"claude-sonnet-4-6","input_tokens":2000,"output_tokens":300}
+```
+
+#### Budgeted Section Injection
+
+Wrap OPTIONAL placeholders with the boundary-aware truncator so oversize injections never blow up a worker context. Mandatory placeholders throw instead.
+
+```js
+// Helper pseudocode — orchestrator-side only
+const budgetTokens = PREFS?.token_budget?.auto_memory ?? 2000;
+const budgetChars  = budgetTokens * 4;
+const MEMORIES_SAFE = truncateAtSectionBoundary(
+  ALL_MEMORIES,
+  budgetChars,
+  { mandatory: false, label: "AUTO-MEMORY" }
+);
+// MEMORIES_SAFE is substituted for {TOP_MEMORIES} in the template.
+// Truncated output ends with: [...truncated N sections]
+
+// For mandatory sections (T##-PLAN, S##-CONTEXT, M###-SCOPE):
+const planContent = readFileSync(planPath, 'utf8');
+truncateAtSectionBoundary(
+  planContent,
+  (PREFS?.token_budget?.plan_max ?? 8000) * 4,
+  { mandatory: true, label: `T${taskId}-PLAN` }
+); // Throws on overflow → surfaces as blocker(scope_exceeded).
+```
+
+When a mandatory-section throw reaches the orchestrator's catch path, surface it as a `scope_exceeded` blocker (existing failure taxonomy). The blocker message must include the label and the actual vs. budget numbers for debugging (e.g. `"T03-PLAN: 42000 chars > 32000 budget"`).
+
+Placeholder classification:
+
+| Placeholder | Category | Budget key | Default (tokens) |
+|-------------|----------|-----------|------------------|
+| `{TOP_MEMORIES}` | optional | `auto_memory` | 2000 |
+| `{CS_STRUCTURE}` | optional | `coding_standards` | 3000 |
+| `{CS_RULES}` | optional | `coding_standards` | (shares key with CS_STRUCTURE — count once per dispatch) |
+| `{LEDGER}` (future) | optional | `ledger_snapshot` | 1500 |
+| T##-PLAN content | mandatory | — | no cap (overflow throws) |
+| S##-CONTEXT content | mandatory | — | no cap (overflow throws) |
+| M###-SCOPE content | mandatory | — | no cap (overflow throws) |
+| `{CS_LINT}` | inlined (small) | — | not wrapped |
+| `{auto_commit}`, `{unit_effort}`, `{THINKING_OPUS}` | scalar | — | not wrapped |
+
 ---
 
 ## Verification Gate
