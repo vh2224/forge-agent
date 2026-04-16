@@ -16,11 +16,13 @@ Quando o usuário usar um alias, converta para o model ID completo:
 
 | Alias | Model ID completo |
 |-------|------------------|
-| `opus` | `claude-opus-4-6` |
+| `opus` | `claude-opus-4-7[1m]` (fallback `claude-opus-4-6`) |
 | `sonnet` | `claude-sonnet-4-6` |
 | `haiku` | `claude-haiku-4-5-20251001` |
 
 O usuário pode passar tanto o alias quanto o model ID completo — ambos são aceitos.
+
+**Fallback:** Se `claude-opus-4-7[1m]` não estiver disponível na conta, o instalador detecta e faz downgrade para `claude-opus-4-6`. Ao editar agentes Opus manualmente, aceite ambos `claude-opus-4-7[1m]` e `claude-opus-4-6` como válidos.
 
 ---
 
@@ -34,14 +36,14 @@ Read `~/.claude/forge-agent-prefs.md`. Display:
 Forge Agent — Configuração atual
 
 MODELOS DISPONÍVEIS
-  opus   → claude-opus-4-6           (análise profunda, planejamento)
+  opus   → claude-opus-4-7[1m]           (análise profunda, planejamento — fallback: 4-6)
   sonnet → claude-sonnet-4-6         (execução, tarefas padrão)
   haiku  → claude-haiku-4-5-20251001 (tarefas leves, memórias)
 
 ROTEAMENTO POR FASE
-  discuss    → forge-discusser   [claude-opus-4-6]
-  research   → forge-researcher  [claude-opus-4-6]
-  plan       → forge-planner     [claude-opus-4-6]
+  discuss    → forge-discusser   [claude-opus-4-7[1m]]
+  research   → forge-researcher  [claude-opus-4-7[1m]]
+  plan       → forge-planner     [claude-opus-4-7[1m]]
   execute    → forge-executor    [claude-sonnet-4-6]
   complete   → forge-completer   [claude-sonnet-4-6]
   memory     → forge-memory     [claude-haiku-4-5-20251001]
@@ -67,9 +69,10 @@ Display the full model list with descriptions:
 ```
 MODELOS DISPONÍVEIS NO CLAUDE CODE
 
-  opus    claude-opus-4-6
+  opus    claude-opus-4-7[1m] (fallback: claude-opus-4-6)
           Modelo mais capaz. Ideal para: discuss, research, plan.
           Use quando precisar de raciocínio profundo e decisões arquiteturais.
+          Fallback automático para 4-6 se 4-7 não estiver disponível na conta.
 
   sonnet  claude-sonnet-4-6
           Modelo balanceado (padrão para execução). Ideal para: execute, complete.
@@ -84,7 +87,7 @@ Para mudar o modelo de uma fase:
 
 Exemplos:
   /forge-prefs set execute opus
-  /forge-prefs set execute claude-opus-4-6
+  /forge-prefs set execute claude-opus-4-7[1m]
   /forge-prefs set research haiku
   /forge-prefs set research claude-haiku-4-5-20251001
 ```
@@ -96,7 +99,7 @@ Exemplos:
 Exemplos válidos:
 - `/forge-prefs set research haiku`
 - `/forge-prefs set execute opus`
-- `/forge-prefs set execute claude-opus-4-6`
+- `/forge-prefs set execute claude-opus-4-7[1m]`
 - `/forge-prefs set plan claude-sonnet-4-6`
 
 Fases válidas: `discuss`, `research`, `plan`, `execute`, `complete`, `memory`
@@ -119,7 +122,7 @@ Steps:
 ✓ Fase 'execute' atualizada
 
   Antes: claude-sonnet-4-6
-  Agora: claude-opus-4-6
+  Agora: claude-opus-4-7[1m]
 
   Arquivo do agente atualizado: ~/.claude/agents/forge-executor.md
 ```
@@ -129,7 +132,7 @@ Se o modelo passado não for reconhecido (nem alias nem model ID válido):
 Modelo desconhecido: '{input}'
 
 Modelos disponíveis:
-  opus    → claude-opus-4-6
+  opus    → claude-opus-4-7[1m] (fallback claude-opus-4-6)
   sonnet  → claude-sonnet-4-6
   haiku   → claude-haiku-4-5-20251001
 ```
@@ -161,7 +164,7 @@ Update the git setting in `~/.claude/forge-agent-prefs.md`. Confirm.
 ### "reset"
 
 Restore all defaults:
-- discuss/research/plan → `claude-opus-4-6`
+- discuss/research/plan → `claude-opus-4-7[1m]` (fallback `claude-opus-4-6` se 4-7 indisponível na conta)
 - execute/complete → `claude-sonnet-4-6`
 - memory → `claude-haiku-4-5-20251001`
 - skip rules → all false

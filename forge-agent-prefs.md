@@ -9,22 +9,24 @@ version: 1
 
 | Alias | Model ID | Uso recomendado |
 |-------|----------|-----------------|
-| `opus` | `claude-opus-4-6` | Análise profunda, decisões arquiteturais, planejamento |
+| `opus` | `claude-opus-4-7[1m]` | Análise profunda, decisões arquiteturais, planejamento |
 | `sonnet` | `claude-sonnet-4-6` | Implementação, execução, tarefas padrão |
 | `haiku` | `claude-haiku-4-5-20251001` | Tarefas leves, extração de memórias, operações rápidas |
 
-Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-6`) em qualquer configuração.
+Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-7[1m]`) em qualquer configuração.
+
+**Fallback automático:** Se `claude-opus-4-7[1m]` não estiver disponível na sua conta (tier/região), o instalador detecta na instalação e faz downgrade para `claude-opus-4-6` nos frontmatters dos agentes. Sem intervenção manual necessária.
 
 ## Phase → Agent Routing
 
 | Phase | Agent | Model ID | Alias |
 |-------|-------|----------|-------|
-| discuss-milestone | forge-discusser | claude-opus-4-6 | opus |
-| discuss-slice | forge-discusser | claude-opus-4-6 | opus |
-| research-milestone | forge-researcher | claude-opus-4-6 | opus |
-| research-slice | forge-researcher | claude-opus-4-6 | opus |
-| plan-milestone | forge-planner | claude-opus-4-6 | opus |
-| plan-slice | forge-planner | claude-opus-4-6 | opus |
+| discuss-milestone | forge-discusser | claude-opus-4-7[1m] | opus |
+| discuss-slice | forge-discusser | claude-opus-4-7[1m] | opus |
+| research-milestone | forge-researcher | claude-opus-4-7[1m] | opus |
+| research-slice | forge-researcher | claude-opus-4-7[1m] | opus |
+| plan-milestone | forge-planner | claude-opus-4-7[1m] | opus |
+| plan-slice | forge-planner | claude-opus-4-7[1m] | opus |
 | execute-task | forge-executor | claude-sonnet-4-6 | sonnet |
 | complete-slice | forge-completer | claude-sonnet-4-6 | sonnet |
 | complete-milestone | forge-completer | claude-sonnet-4-6 | sonnet |
@@ -123,5 +125,5 @@ repo_path:    # preenchido pelo install.sh — caminho do repositório gsd-agent
 
 - Para mudar o modelo de uma fase, edite a coluna "Model" na tabela acima
   E atualize o frontmatter do agente correspondente em ~/.claude/agents/
-- Modelos disponíveis: opus (claude-opus-4-6), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
+- Modelos disponíveis: opus (claude-opus-4-7[1m], fallback claude-opus-4-6), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
 - Este arquivo é lido pelo orquestrador gsd.md a cada iteração do loop

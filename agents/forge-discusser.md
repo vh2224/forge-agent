@@ -1,7 +1,7 @@
 ---
 name: forge-discusser
 description: GSD discuss phase agent. Identifies gray areas in scope, asks targeted questions, and records architectural decisions. Used for discuss-milestone and discuss-slice units. Runs on a more capable model for nuanced understanding of requirements.
-model: claude-opus-4-6
+model: "claude-opus-4-7[1m]"
 thinking: adaptive
 effort: medium
 tools: Read, Write, Glob, Agent, AskUserQuestion, EnterPlanMode, ExitPlanMode, WebSearch, WebFetch

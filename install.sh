@@ -14,12 +14,14 @@ CLAUDE_DIR="${HOME}/.claude"
 BACKUP_DIR="${CLAUDE_DIR}/forge-agent-backup-$(date +%Y%m%d%H%M%S)"
 DRY_RUN=false
 UPDATE=false
+NO_MODEL_PROBE=false
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 for arg in "$@"; do
   case $arg in
-    --dry-run) DRY_RUN=true ;;
-    --update)  UPDATE=true  ;;
+    --dry-run)         DRY_RUN=true         ;;
+    --update)          UPDATE=true          ;;
+    --no-model-probe)  NO_MODEL_PROBE=true  ;;
   esac
 done
 
@@ -129,6 +131,51 @@ for f in "${REPO_DIR}/agents"/forge*.md; do
   copy "$f" "${AGENTS_DIR}/${name}"
   info "  agents/${name}"
 done
+
+# ── Opus model availability probe ─────────────────────────────────────────────
+# Agents default to claude-opus-4-7[1m]. If the user's account doesn't have access
+# (tier/region), downgrade the installed agent frontmatters to claude-opus-4-6.
+# Runs a minimal API probe (~1 token). Skip with --no-model-probe.
+_sed_inplace_probe() { sed -i '' "$@" 2>/dev/null || sed -i "$@"; }
+
+downgrade_opus_to_46() {
+  for agent in forge-planner.md forge-discusser.md forge-researcher.md; do
+    local f="${AGENTS_DIR}/${agent}"
+    [ -f "$f" ] || continue
+    if $DRY_RUN; then
+      dry "downgrade model in agents/${agent}: claude-opus-4-7[1m] → claude-opus-4-6"
+    else
+      _sed_inplace_probe 's|^model: "claude-opus-4-7\[1m\]"$|model: claude-opus-4-6|' "$f"
+    fi
+  done
+}
+
+if $DRY_RUN; then
+  :  # skip probe in dry-run
+elif $NO_MODEL_PROBE; then
+  info ""
+  info "  (--no-model-probe: mantendo claude-opus-4-7[1m] como padrão)"
+elif ! command -v claude >/dev/null 2>&1; then
+  info ""
+  info "  Claude CLI não encontrado — probe de modelo pulado (mantendo claude-opus-4-7[1m])"
+else
+  echo ""
+  info "Verificando disponibilidade de claude-opus-4-7[1m]..."
+  set +e
+  probe_out=$(claude -p "ok" --model 'claude-opus-4-7[1m]' --max-turns 1 2>&1)
+  probe_exit=$?
+  set -e
+  if [ $probe_exit -eq 0 ]; then
+    success "  claude-opus-4-7[1m] disponível — usando como modelo Opus padrão"
+  elif echo "$probe_out" | grep -qiE "model.*not.*(found|available|supported|allowed)|invalid.*model|404|not_found|does not have access|issue with.*model|may not exist|may not have access"; then
+    warn "  claude-opus-4-7[1m] indisponível nesta conta — fallback para claude-opus-4-6"
+    downgrade_opus_to_46
+    info "  Agents atualizados: forge-planner, forge-discusser, forge-researcher"
+  else
+    info "  Probe inconclusivo (erro não relacionado a modelo) — mantendo claude-opus-4-7[1m]"
+    info "  Se houver problemas em runtime, rode: bash install.sh --update (com conectividade)"
+  fi
+fi
 
 echo ""
 info "Installing commands..."

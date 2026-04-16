@@ -3,7 +3,8 @@
 
 param(
     [switch]$Update,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$NoModelProbe
 )
 
 $ErrorActionPreference = "Stop"
@@ -114,6 +115,58 @@ Info "Instalando agentes..."
 foreach ($f in Get-ChildItem "$RepoDir\agents\forge*.md") {
     CopyFile $f.FullName "$AgentsDir\$($f.Name)"
     Info "  agents\$($f.Name)"
+}
+
+# ── Opus model availability probe ─────────────────────────────────────────────
+# Agents default to claude-opus-4-7[1m]. If the user's account doesn't have access
+# (tier/region), downgrade the installed agent frontmatters to claude-opus-4-6.
+# Runs a minimal API probe (~1 token). Skip with -NoModelProbe.
+function Downgrade-OpusTo46 {
+    foreach ($agent in @("forge-planner.md", "forge-discusser.md", "forge-researcher.md")) {
+        $file = "$AgentsDir\$agent"
+        if (!(Test-Path $file)) { continue }
+        if ($DryRun) {
+            Dry "downgrade model in agents\${agent}: claude-opus-4-7[1m] → claude-opus-4-6"
+        } else {
+            $content = Get-Content $file -Raw
+            $content = $content -replace '(?m)^model: "claude-opus-4-7\[1m\]"$', 'model: claude-opus-4-6'
+            Set-Content $file $content -NoNewline
+        }
+    }
+}
+
+$ClaudeForProbe = Get-Command claude -ErrorAction SilentlyContinue
+
+if ($DryRun) {
+    # skip probe in dry-run
+} elseif ($NoModelProbe) {
+    Info ""
+    Info "  (-NoModelProbe: mantendo claude-opus-4-7[1m] como padrão)"
+} elseif (-not $ClaudeForProbe) {
+    Info ""
+    Info "  Claude CLI não encontrado — probe de modelo pulado (mantendo claude-opus-4-7[1m])"
+} else {
+    Write-Host ""
+    Info "Verificando disponibilidade de claude-opus-4-7[1m]..."
+    $probeOut = ""
+    $probeExit = 1
+    try {
+        $probeOut = & claude -p "ok" --model 'claude-opus-4-7[1m]' --max-turns 1 2>&1 | Out-String
+        $probeExit = $LASTEXITCODE
+    } catch {
+        $probeOut = $_.Exception.Message
+        $probeExit = 1
+    }
+    if ($probeExit -eq 0) {
+        Success "  claude-opus-4-7[1m] disponível — usando como modelo Opus padrão"
+    } elseif ($probeOut -imatch "model.*not.*(found|available|supported|allowed)|invalid.*model|404|not_found|does not have access|issue with.*model|may not exist|may not have access") {
+        Warn "  claude-opus-4-7[1m] indisponível nesta conta — fallback para claude-opus-4-6"
+        Downgrade-OpusTo46
+        Info "  Agents atualizados: forge-planner, forge-discusser, forge-researcher"
+    } else {
+        Info "  Probe inconclusivo (erro não relacionado a modelo) — mantendo claude-opus-4-7[1m]"
+        Info "  Se houver problemas em runtime, rode: .\install.ps1 -Update (com conectividade)"
+    }
 }
 
 # ── Install commands ──────────────────────────────────────────────────────────
