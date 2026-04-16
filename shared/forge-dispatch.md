@@ -44,6 +44,9 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.
 Execute all steps. The task plan's ## Standards section has the relevant coding rules — follow them.
 If ## Security Checklist is present — treat each item as a must-have. Verify all checklist items before writing T##-SUMMARY.md.
 Verify every must-have using the verification ladder — including lint/format check.
+Run verification gate: node scripts/forge-verify.js --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
+If exit code != 0 and not skipped → include formatFailureContext output as ## Verification Failures in retry prompt, return partial. Do NOT write T##-SUMMARY.md.
+If exit code == 0 or skipped → continue to summary.
 Write T##-SUMMARY.md.
 If auto_commit is true: Commit with message feat(S##/T##): <one-liner>.
 If auto_commit is false: Do NOT run any git commands.
@@ -163,14 +166,17 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
 2. Write S##-UAT.md (non-blocking human test script)
-3. Security scan — search changed files for risky patterns (eval, innerHTML, dangerouslySetInnerHTML, raw SQL concatenation, console.log near secrets, hardcoded credentials). If found, add ## ⚠ Security Flags to S##-SUMMARY.md. Not a blocker — document and continue.
-4. Run lint gate — if lint commands exist, run on changed files. Fix violations.
+3. Run verification gate: node scripts/forge-verify.js --cwd "{WORKING_DIR}" --unit complete-slice/{S##}
+   Record result in S##-SUMMARY.md ## Verification Gate section (commands, exit codes, discovery source, total duration).
+   If exit code != 0 and not skipped:"no-stack" → stop, return blocked with blocker_class: tooling_failure.
+4. Security scan — search changed files for risky patterns (eval, innerHTML, dangerouslySetInnerHTML, raw SQL concatenation, console.log near secrets, hardcoded credentials). If found, add ## ⚠ Security Flags to S##-SUMMARY.md. Not a blocker — document and continue.
+5. Run lint gate — if lint commands exist, run on changed files. Fix violations.
 If auto_commit is true:
-5. Squash-merge branch gsd/M###/S## to main
+6. Squash-merge branch gsd/M###/S## to main
 If auto_commit is false:
-5. Skip — do NOT run any git commands (no merge, no branch operations).
-6. Update M###-SUMMARY.md with this slice's contribution
-7. Mark slice [x] in M###-ROADMAP.md
+6. Skip — do NOT run any git commands (no merge, no branch operations).
+7. Update M###-SUMMARY.md with this slice's contribution
+8. Mark slice [x] in M###-ROADMAP.md
 Return ---GSD-WORKER-RESULT---.
 ```
 
@@ -438,3 +444,110 @@ while (true) {
 ```
 
 This snippet is self-contained and drop-in compatible with both `skills/forge-auto/SKILL.md` (T04) and `commands/forge-next.md` (T04 — note: forge-next has a unique selective memory injection block at its Step 3 that does not appear here; the retry wrapper surrounds only the `Agent()` call, not the memory injection logic).
+
+---
+
+## Verification Gate
+
+**Purpose:** Quality gate invoked by workers after all implementation steps are complete but before the worker is allowed to write its summary and return `done`. The gate shells out to `scripts/forge-verify.js`, which discovers and runs verification commands appropriate for the current unit. A worker may not return `done` unless `forge-verify.js` exits `0` (or the result is a recognised skip). This section is intentionally separate from the Retry Handler above (MEM011 — the gate is a quality control step, not an error-recovery step).
+
+> **Cross-reference:** Verifier CLI — `node scripts/forge-verify.js --plan "$PLAN_PATH" --cwd "$CWD" --unit $UNIT`.
+> Output shape (JSON): `{ passed, skipped?, discovery_source, commands[], checks[], duration_ms }`.
+> Discovery chain: `task-plan.verify` → `prefs.preference_commands` → `package.json` allow-list → `skipped:"no-stack"`.
+
+### Invocation points
+
+| Worker | Phase | CLI flag set | When it runs |
+|--------|-------|-------------|--------------|
+| `execute-task` (`forge-executor`) | Task level | `--plan <path> --cwd <cwd> --unit execute-task/{T##}` | After "Verify every must-have", before writing T##-SUMMARY.md |
+| `complete-slice` (`forge-completer`) | Slice level | `--cwd <cwd> --unit complete-slice/{S##}` (no `--plan`) | Step 3 — before the security scan |
+
+### CLI shape
+
+Task-level invocation (inside `execute-task` worker):
+
+```sh
+node scripts/forge-verify.js \
+  --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" \
+  --cwd "{WORKING_DIR}" \
+  --unit execute-task/{T##}
+```
+
+Slice-level invocation (inside `complete-slice` worker):
+
+```sh
+node scripts/forge-verify.js \
+  --cwd "{WORKING_DIR}" \
+  --unit complete-slice/{S##}
+```
+
+Note: `--plan` is omitted at slice level. The verifier reads verification commands from `prefs.preference_commands` or falls back through the discovery chain without a task-plan source.
+
+### Discovery chain
+
+When invoked, `forge-verify.js` resolves which commands to run in this order:
+
+1. **`task-plan.verify`** — `verify:` key in the T##-PLAN.md YAML frontmatter (task-level only, requires `--plan`).
+2. **`prefs.preference_commands`** — `preference_commands` list from the project's `.gsd/prefs.local.md` or `claude-agent-prefs.md`.
+3. **`package.json` allow-list** — scripts matching a frozen set of safe keys (`test`, `typecheck`, `lint`, `check`) probed from `package.json`.
+4. **`skipped:"no-stack"`** — no commands found and no recognised stack (pure-docs repo). Gate passes automatically.
+
+This ordering ensures task-specific overrides take precedence, falls back to project-wide preferences, then auto-detects from the package manifest, and avoids false failures on documentation-only repos. Commands from step 1 are treated as untrusted (shell-injection pattern applied); commands from step 2 are user-authored and trusted.
+
+### Failure handling
+
+**Executor (`execute-task`):** If `forge-verify.js` exits non-zero and the result is not a `skipped` state, the worker must:
+
+1. Call `formatFailureContext()` (exported from `forge-verify.js`) to obtain a human-readable summary of failing checks with truncated stderr.
+2. Do NOT write T##-SUMMARY.md. The task stays in `RUNNING` state.
+3. Return `partial`. Include the `formatFailureContext()` output verbatim in the next retry prompt under the heading `## Verification Failures`.
+4. The orchestrator will re-dispatch the executor with the failure context injected — the worker uses it to diagnose and fix the failing checks before re-running the gate.
+
+**Completer (`complete-slice`):** If `forge-verify.js` exits non-zero and the result is not `skipped:"no-stack"`:
+
+1. STOP immediately — do not proceed to the security scan, lint gate, or squash-merge.
+2. Write the failure context into `S##-SUMMARY.md` under a `## Verification Gate` section. Include: commands run, exit codes, discovery source, per-command durations, and truncated stderr for each failing check.
+3. Return `blocked` with `blocker_class: tooling_failure`.
+4. The orchestrator surfaces this to the user with the full verification context so the failure can be diagnosed without re-running the slice.
+
+### Skip handling
+
+Two skip conditions exist and are treated differently:
+
+**`skipped:"no-stack"` (whole-gate skip):** The verifier found no commands via any discovery step — the repo has no recognisable test/lint stack. The gate records a verify event with `skipped:"no-stack"` and exits `0`. Workers treat this as a pass: log the event, continue to summary/merge. Do not surface as a warning to the user.
+
+**Per-check `timeout`:** An individual command exceeded its timeout budget. That check is marked `passed: false` and assigned exit code `124` (POSIX timeout convention). The overall gate fails (exit non-zero) unless all other checks pass. The `timeout` flag is surfaced in the failure context so the user can investigate flaky or slow test suites. This is not a skip — it is a failure.
+
+### Events.jsonl schema
+
+Each gate run appends one event to `.gsd/forge/events.jsonl` (single line, valid JSON, newline-terminated):
+
+```json
+{"ts":"<ISO8601>","event":"verify","unit":"execute-task/T##","milestone":"M###","slice":"S##","task":"T##","discovery_source":"task-plan","commands":["npm run typecheck","npm test"],"passed":true,"duration_ms":4123}
+```
+
+Fields:
+- `ts` — ISO 8601 timestamp of gate completion.
+- `event` — always `"verify"`.
+- `unit` — e.g. `"execute-task/T03"` or `"complete-slice/S02"`.
+- `milestone` — e.g. `"M002"`.
+- `slice` — e.g. `"S02"`.
+- `task` — e.g. `"T03"`. **Omit this field at slice level.**
+- `discovery_source` — one of `"task-plan"`, `"preference"`, `"package-json"`, `"none"`.
+- `commands` — array of command strings that were run (or attempted).
+- `passed` — `true` if exit code `0`, `false` otherwise.
+- `skipped` — `"no-stack"` or `"timeout"` when applicable. **Omit when not applicable.**
+- `duration_ms` — total wall-clock time for all checks combined.
+
+Do NOT include: raw stderr, command output, file paths outside the project root, or any PII.
+
+### Anti-recursion rule
+
+The `--from-verify` flag is reserved for orchestrator-side guards against infinite verify↔retry loops. It is **not used** in the current dispatch flow. Workers must follow this rule instead:
+
+Verification failures (non-zero exit from `forge-verify.js`) go **directly** to `partial` (executor) or `blocked` (completer). They must NOT be re-classified by the Retry Handler. The Retry Handler handles `Agent()` exceptions only — it never sees a verification result. These two control-flow paths are mutually exclusive:
+
+- `Agent()` throws → **Retry Handler** (exception classification, backoff, re-dispatch).
+- `forge-verify.js` exits non-zero → **Verification Gate failure handling** (partial/blocked, no backoff, no re-dispatch by the handler).
+
+A worker that routes verification failures through the Retry Handler risks infinite loops: the handler may retry the same broken unit indefinitely. Do not do this.
