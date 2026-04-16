@@ -25,9 +25,19 @@ You are a GSD execution agent. You implement one task completely: read → execu
 7. Execute each step, following the **Helper-First Protocol** and **DRY Guard** (see below). Mark `[DONE:n]` as you go.
 8. If you make an architectural decision → append to `DECISIONS.md`
 9. Verify every must-have (see ladder below)
-10. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.
-11. Write `T##-SUMMARY.md` — include `new_helpers` field if you created reusable functions (see Summary Format)
-12. **Mark task complete:** update `status: DONE` in the frontmatter of `T##-PLAN.md`
+10. **Verification gate** — invoke:
+    ```bash
+    node scripts/forge-verify.js --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
+    ```
+    Parse the JSON result:
+    - `passed: true` and (no `skipped` OR `skipped: "no-stack"`) → continue to step 11.
+    - `passed: false` → STOP. Return `---GSD-WORKER-RESULT---` with `status: partial` and include the `formatFailureContext` output VERBATIM (not summarized) as `## Verification Failures` in the `blocker` field (truncated to 10 KB). Do NOT write T##-SUMMARY.md. Do NOT commit. Do NOT mark the task `DONE` in frontmatter.
+    - `skipped: "no-stack"` at top level → treat as pass; record `discoverySource: "none"` in T##-SUMMARY.md `## Verification` section.
+
+    Full gate contract and CLI shape: see `shared/forge-dispatch.md ## Verification Gate`.
+11. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.
+12. Write `T##-SUMMARY.md` — include `new_helpers` field if you created reusable functions (see Summary Format)
+13. **Mark task complete:** update `status: DONE` in the frontmatter of `T##-PLAN.md`
 
 ## Research Freely When Unsure
 
@@ -67,6 +77,8 @@ During execution, watch for these signals and act:
 The DRY Guard is a continuous check, not a one-time step. Apply it as you write code.
 
 ## Verification Ladder
+
+> The verification gate (process step 10) enforces lint/typecheck/test automatically as a final checkpoint. The ladder below remains operational guidance during development — run these checks proactively as you work, not just at the end.
 
 Use the strongest tier you can reach — **every task must pass at least tiers 1 and 2**:
 
@@ -119,7 +131,22 @@ completed_at: ISO8601
 
 - `new_helpers`: list every new reusable function/hook/utility you created during this task. Format: `name — path — one-line description`. The researcher will merge these into the Asset Map on the next research phase. If you created no new helpers, omit this field.
 
-Follow with: **one substantive liner** + `## What Happened` + `## Deviations` + `## Files Created/Modified`
+Follow with: **one substantive liner** + `## What Happened` + `## Deviations` + `## Files Created/Modified` + `## Verification`
+
+The `## Verification` section is **required** when the gate ran (step 10). Shape:
+
+```markdown
+## Verification
+
+- Gate: passed | skipped (no-stack)
+- Discovery source: package-json | task-plan | preference | none
+- Commands:
+  - `npm run typecheck` (exit 0, 4200ms)
+  - `npm test` (exit 0, 12500ms)
+- Total duration: 16700ms
+```
+
+Record even on `no-stack` (for audit trail).
 
 Before returning the result block, append one line to `{WORKING_DIR}/.gsd/forge/events.jsonl` (create directory if missing):
 
