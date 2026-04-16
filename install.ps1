@@ -135,6 +135,30 @@ function Downgrade-OpusTo46 {
     }
 }
 
+# Sync opus model references in prefs file with the current agent frontmatter model.
+# Replaces both `claude-opus-4-6` and `claude-opus-4-7[1m]` with $Target.
+# Touches only opus model strings — sonnet/haiku and user customizations for other
+# models are preserved. If user explicitly pinned a phase to claude-opus-4-6, they
+# must reapply manually (edge case; documented in installer output).
+function Sync-PrefsOpusModel {
+    param([string]$Target, [string]$PrefsFile)
+    if (!(Test-Path $PrefsFile)) { return }
+    if ($DryRun) {
+        Dry "sync prefs opus references → $Target"
+        return
+    }
+    $content = Get-Content $PrefsFile -Raw
+    # Placeholder approach: collapse both IDs to a temp token, then expand to Target.
+    # Escape regex-special brackets in the source patterns only.
+    $content = $content -replace 'claude-opus-4-7\[1m\]', '@@FORGE_OPUS_TMP@@'
+    $content = $content -replace 'claude-opus-4-6', '@@FORGE_OPUS_TMP@@'
+    $content = $content -replace '@@FORGE_OPUS_TMP@@', $Target
+    Set-Content $PrefsFile $content -NoNewline
+}
+
+$script:OpusTarget = "claude-opus-4-7[1m]"  # default; flipped to claude-opus-4-6 on downgrade
+$script:SyncPrefs  = $true                   # false when probe inconclusive
+
 $ClaudeForProbe = Get-Command claude -ErrorAction SilentlyContinue
 
 if ($DryRun) {
@@ -145,6 +169,7 @@ if ($DryRun) {
 } elseif (-not $ClaudeForProbe) {
     Info ""
     Info "  Claude CLI não encontrado — probe de modelo pulado (mantendo claude-opus-4-7[1m])"
+    $script:SyncPrefs = $false  # can't verify — leave prefs untouched
 } else {
     Write-Host ""
     Info "Verificando disponibilidade de claude-opus-4-7[1m]..."
@@ -163,9 +188,11 @@ if ($DryRun) {
         Warn "  claude-opus-4-7[1m] indisponível nesta conta — fallback para claude-opus-4-6"
         Downgrade-OpusTo46
         Info "  Agents atualizados: forge-planner, forge-discusser, forge-researcher"
+        $script:OpusTarget = "claude-opus-4-6"
     } else {
         Info "  Probe inconclusivo (erro não relacionado a modelo) — mantendo claude-opus-4-7[1m]"
         Info "  Se houver problemas em runtime, rode: .\install.ps1 -Update (com conectividade)"
+        $script:SyncPrefs = $false  # can't verify — leave prefs untouched
     }
 }
 
@@ -236,6 +263,21 @@ if (-not $DryRun -and (Test-Path $prefsFile)) {
         Add-Content $prefsFile "`n## Update Settings`n`n``````repo_path: $RepoDir`n``````"
     }
     Info "  repo_path gravado: $RepoDir"
+}
+
+# ── Sync prefs opus model with agent frontmatter ──────────────────────────────
+# The orchestrator reads the model ID from forge-agent-prefs.md to display the model
+# in TaskCreate descriptions. When agents are upgraded (or downgraded) by the probe,
+# the prefs file must be rewritten to match — otherwise the UI shows one model while
+# Agent() dispatches another (the frontmatter wins at dispatch time).
+if ($script:SyncPrefs -and (Test-Path $prefsFile)) {
+    if ($DryRun) {
+        Dry "sync prefs opus model → $($script:OpusTarget)"
+    } else {
+        Sync-PrefsOpusModel -Target $script:OpusTarget -PrefsFile $prefsFile
+        Info "  prefs opus model sincronizado: $($script:OpusTarget)"
+        Info "  (se você fixou uma fase em claude-opus-4-6 manualmente, reaplique via /forge-prefs)"
+    }
 }
 
 # ── Install statusline + hooks ────────────────────────────────────────────────

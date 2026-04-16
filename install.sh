@@ -138,6 +138,9 @@ done
 # Runs a minimal API probe (~1 token). Skip with --no-model-probe.
 _sed_inplace_probe() { sed -i '' "$@" 2>/dev/null || sed -i "$@"; }
 
+OPUS_TARGET="claude-opus-4-7[1m]"  # default; flipped to claude-opus-4-6 on probe downgrade
+SYNC_PREFS=true                     # default; false when probe is inconclusive (keep prefs unchanged)
+
 downgrade_opus_to_46() {
   for agent in forge-planner.md forge-discusser.md forge-researcher.md; do
     local f="${AGENTS_DIR}/${agent}"
@@ -150,6 +153,24 @@ downgrade_opus_to_46() {
   done
 }
 
+# Sync opus model references in prefs file with the current agent frontmatter model.
+# Replaces both `claude-opus-4-6` and `claude-opus-4-7[1m]` with $1 (target).
+# Touches only opus model strings — sonnet/haiku refs and user-customized rows for other
+# models are preserved. If user explicitly pinned a phase to claude-opus-4-6, they must
+# reapply manually after install (edge case; documented in installer output).
+sync_prefs_opus_model() {
+  local target="$1"
+  local prefs="${CLAUDE_DIR}/forge-agent-prefs.md"
+  [ -f "$prefs" ] || return 0
+  if $DRY_RUN; then
+    dry "sync prefs opus references → ${target}"
+    return 0
+  fi
+  # Placeholder approach: collapse both IDs to a temp token, then expand to target.
+  # [1m] contains regex-special brackets — escape in the pattern only.
+  _sed_inplace_probe "s|claude-opus-4-7\[1m\]|@@FORGE_OPUS_TMP@@|g; s|claude-opus-4-6|@@FORGE_OPUS_TMP@@|g; s|@@FORGE_OPUS_TMP@@|${target}|g" "$prefs"
+}
+
 if $DRY_RUN; then
   :  # skip probe in dry-run
 elif $NO_MODEL_PROBE; then
@@ -158,6 +179,7 @@ elif $NO_MODEL_PROBE; then
 elif ! command -v claude >/dev/null 2>&1; then
   info ""
   info "  Claude CLI não encontrado — probe de modelo pulado (mantendo claude-opus-4-7[1m])"
+  SYNC_PREFS=false  # can't verify — leave prefs untouched
 else
   echo ""
   info "Verificando disponibilidade de claude-opus-4-7[1m]..."
@@ -171,9 +193,11 @@ else
     warn "  claude-opus-4-7[1m] indisponível nesta conta — fallback para claude-opus-4-6"
     downgrade_opus_to_46
     info "  Agents atualizados: forge-planner, forge-discusser, forge-researcher"
+    OPUS_TARGET="claude-opus-4-6"
   else
     info "  Probe inconclusivo (erro não relacionado a modelo) — mantendo claude-opus-4-7[1m]"
     info "  Se houver problemas em runtime, rode: bash install.sh --update (com conectividade)"
+    SYNC_PREFS=false  # can't verify — leave prefs untouched
   fi
 fi
 
@@ -257,6 +281,21 @@ if ! $DRY_RUN && [ -f "$PREFS_DST" ]; then
     fi
   fi
   info "  repo_path gravado: ${REPO_DIR}"
+fi
+
+# ── Sync prefs opus model with agent frontmatter ──────────────────────────────
+# The orchestrator reads the model ID from forge-agent-prefs.md to display the model
+# in TaskCreate descriptions. When agents are upgraded (or downgraded) by the probe,
+# the prefs file must be rewritten to match — otherwise the UI shows one model while
+# Agent() dispatches another (the frontmatter wins at dispatch time).
+if $SYNC_PREFS && [ -f "$PREFS_DST" ]; then
+  if $DRY_RUN; then
+    dry "sync prefs opus model → ${OPUS_TARGET}"
+  else
+    sync_prefs_opus_model "$OPUS_TARGET"
+    info "  prefs opus model sincronizado: ${OPUS_TARGET}"
+    info "  (se você fixou uma fase em claude-opus-4-6 manualmente, reaplique via /forge-prefs)"
+  fi
 fi
 
 # ── Install statusline + hooks ────────────────────────────────────────────────
