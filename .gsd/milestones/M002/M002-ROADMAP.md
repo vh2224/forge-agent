@@ -21,10 +21,10 @@ Port four high-impact Context Engineering features from the GSD-2 TypeScript ext
 - [x] **S02: Verification gate executable** `risk:high` `depends:[S01]`
   Demo: task with `verify: npm run typecheck && npm test` in T##-PLAN.md frontmatter executes the commands via `scripts/forge-verify.js`, blocks worker result when any exits non-zero, and injects truncated stderr into the next retry prompt. Gate is also exercised against (a) a Node repo with auto-detected `package.json` scripts and (b) a docs-only repo where it skips gracefully with `skipped:no-stack` in `events.jsonl`.
 
-- [ ] **S03: Token counter + context budget** `risk:low` `depends:[S01]`
+- [x] **S03: Token counter + context budget** `risk:low` `depends:[S01]`
   Demo: every dispatched unit writes `{event:"dispatch", unit, model, input_tokens, output_tokens}` to `events.jsonl` using the `Math.ceil(chars/4)` heuristic from `scripts/forge-tokens.js`; `/forge-status` renders a "Token usage" block summing tokens for the active milestone; injecting a 10k-token AUTO-MEMORY dump with budget 2k produces truncated output ending at an H2 boundary with a `[...truncated N sections]` marker; mandatory sections (T##-PLAN, S##-CONTEXT) error explicitly if they exceed budget instead of silently truncating.
 
-- [ ] **S04: Complexity classifier + tier-only model router** `risk:medium` `depends:[S01, S03]`
+- [x] **S04: Complexity classifier + tier-only model router** `risk:medium` `depends:[S01, S03]`
   Demo: `memory-extract` unit dispatches at `light` tier (Haiku), `plan-slice` dispatches at `heavy` tier (Opus), `execute-task` with `tag: docs` frontmatter dispatches at `light`, and `execute-task` with `tier: heavy` override in frontmatter forces heavy regardless of tags; each dispatch logs `{tier, model, reason}` to `events.jsonl`; changing `tier_models.light` in `claude-agent-prefs.md` from Haiku to Sonnet re-routes light units to Sonnet on next dispatch without code changes.
 
 ---
