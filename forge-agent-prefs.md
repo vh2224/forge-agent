@@ -139,6 +139,49 @@ in `forge-auto` / `forge-next` (dispatch-level, not classifier-level).
 See `scripts/forge-classify-error.js` for classifier implementation and
 `shared/forge-dispatch.md ### Retry Handler` for the full control-flow algorithm.
 
+## Verification Settings
+
+O verification gate executa comandos de lint/typecheck/test antes de uma task ser marcada como concluída e antes de um slice ser squash-mergeado. Configurável pelo bloco abaixo — ou desabilitado globalmente com `enabled: false`. Quando `preference_commands` estiver vazio, o gate usa a ordem de descoberta descrita na subseção abaixo.
+
+```
+verification:
+  preference_commands: []        # lista ordenada de comandos shell a executar como gate
+                                 # vazio = fallback para T##-PLAN verify: ou auto-detect do package.json
+  command_timeout_ms: 120000     # timeout por comando (ms); exit 124 sintético ao estourar
+```
+
+### Discovery chain
+
+O gate resolve o conjunto de comandos em até 4 passos (para no primeiro que produzir pelo menos um comando):
+
+1. `T##-PLAN.md` frontmatter `verify:` — task-level only; aceita string `"npm run typecheck && npm test"` ou array `["npm run typecheck", "npm test"]`. Slice-level (completer) pula este passo.
+2. `verification.preference_commands` neste arquivo (ou override em `claude-agent-prefs.md` / `prefs.local.md`).
+3. `package.json` scripts filtrados pelo allow-list `["typecheck", "lint", "test"]` (nessa ordem; scripts ausentes são ignorados).
+4. Nenhum dos anteriores E sem `package.json` / `pyproject.toml` / `go.mod` detectado → `{skipped: "no-stack"}`, exit 0 (repos de documentação não bloqueiam).
+
+### Allow-list
+
+Hardcoded em `scripts/forge-verify.js` como `["typecheck", "lint", "test"]`. O gate **nunca** executa `start`, `dev`, `build`, `prepare`, `postinstall` ou scripts customizados via auto-detect. Para rodar um script fora do allow-list, use `preference_commands` ou declare explicitamente em `T##-PLAN.md` `verify:`.
+
+### Timeout
+
+Default 120 000 ms (2 min) por comando. Timeout produz exit code 124 e é registrado em `events.jsonl` como `{event:"verify", ..., passed: false}`. O check individual recebe `skipped: "timeout"` — mas isso **não é pass**: aciona o caminho normal de falha.
+
+### Skip semantics
+
+`skipped: "no-stack"` no resultado **top-level** significa que o gate inteiro foi ignorado (repo docs-only). Tratado como pass — não bloqueia merge. `skipped: "timeout"` num check **individual** é falha, não skip.
+
+### Security note
+
+> **Atenção:** `preference_commands` e `verify:` em `T##-PLAN.md` são executados no shell do repo com o CWD do projeto. Eles provêm de arquivos confiáveis (controlados por quem tem write access ao repo). NÃO adicione comandos não revisados — qualquer pessoa com acesso de escrita a `.gsd/claude-agent-prefs.md` ou a um `T##-PLAN.md` pode executar comandos shell arbitrários na sua máquina.
+
+### Cross-references
+
+- `scripts/forge-verify.js` — implementação completa (allow-list, sanitização, timeout, result schema).
+- `shared/forge-dispatch.md ## Verification Gate` — contrato do gate e integração com o orquestrador.
+- `agents/forge-executor.md` (step 10) — invocação no nível de task.
+- `agents/forge-completer.md` (step 3 de complete-slice) — invocação no nível de slice.
+
 ## Update Settings
 
 ```
@@ -151,3 +194,4 @@ repo_path:    # preenchido pelo install.sh — caminho do repositório gsd-agent
   E atualize o frontmatter do agente correspondente em ~/.claude/agents/
 - Modelos disponíveis: opus (claude-opus-4-7[1m], fallback claude-opus-4-6), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
 - Este arquivo é lido pelo orquestrador gsd.md a cada iteração do loop
+- Para mudar comandos de verify, edite o bloco "verification:" acima. Veja scripts/forge-verify.js para a implementação.
