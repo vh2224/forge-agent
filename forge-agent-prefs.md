@@ -139,6 +139,76 @@ in `forge-auto` / `forge-next` (dispatch-level, not classifier-level).
 See `scripts/forge-classify-error.js` for classifier implementation and
 `shared/forge-dispatch.md ### Retry Handler` for the full control-flow algorithm.
 
+## Tier Settings
+
+Controls which concrete model ID each tier alias resolves to at dispatch time. Edit this block
+to re-route any tier without touching orchestrator code or agent frontmatters.
+
+```
+tier_models:
+  light:    claude-haiku-4-5-20251001      # fast, cheap (memory-extract, complete-slice, docs tag)
+  standard: claude-sonnet-4-6              # balanced (execute-task default, research, discuss)
+  heavy:    "claude-opus-4-7[1m]"          # deepest reasoning (plan-milestone, plan-slice)
+```
+
+### How this block works
+
+The orchestrator reads `tier_models` on every dispatch loop iteration. When the tier for a unit
+is resolved (see precedence below), the corresponding model ID from this block is injected into
+the `Agent()` call. If a key is missing, the system falls back to the canonical defaults defined
+in [`shared/forge-tiers.md § Tier → Default Model`](shared/forge-tiers.md).
+
+### Override precedence (highest wins)
+
+1. **`T##-PLAN.md` frontmatter `tier:`** — explicit assignment; always wins. Example: `tier: heavy`
+   on an `execute-task` unit promotes it to opus regardless of all other rules.
+2. **`T##-PLAN.md` frontmatter `tag: docs`** — downgrades the unit to `light` unless a `tier:`
+   is also set. Intended for documentation-only tasks (no code generation needed).
+3. **Unit type default** — the `unit_type → tier` table locked in `shared/forge-tiers.md`.
+   Used when no frontmatter override is present.
+
+### How to override globally
+
+Edit the `tier_models` block in this file (or in `.gsd/claude-agent-prefs.md` for repo-level
+scope, or `.gsd/prefs.local.md` for personal local scope — latter gitignored). Example: changing
+`tier_models.light` from `claude-haiku-4-5-20251001` to `claude-sonnet-4-6` means the next
+`memory-extract` dispatch will invoke sonnet instead of haiku — **no code change required**.
+
+### How to override per-task
+
+Add a `tier:` or `tag:` field to the frontmatter of the relevant `T##-PLAN.md`:
+
+```yaml
+---
+id: T12
+tier: heavy      # promotes this execute-task to opus
+---
+```
+
+or
+
+```yaml
+---
+id: T13
+tag: docs        # downgrades to light (haiku) — docs-only task
+---
+```
+
+### Deprecation note on Phase → Agent Routing table
+
+The **Phase → Agent Routing** table (lines 20–34 of this file) is now **deprecated for
+model-selection purposes**. The "Model ID" column of that table is informational only —
+the `tier_models:` block above is the single source of truth for which model runs each unit.
+The routing table is retained for informational continuity and `skip_discuss`/`skip_research`
+skip-rule logic. Do not update model IDs there; update `tier_models:` instead.
+
+### Cross-references
+
+- [`shared/forge-tiers.md`](shared/forge-tiers.md) — canonical `unit_type → tier` and
+  `tier → default model` tables. Edit to add new unit types or tiers.
+- [`shared/forge-dispatch.md § Tier Resolution`](shared/forge-dispatch.md) — runtime resolution
+  algorithm; reads `forge-tiers.md` tables then applies `tier_models:` overrides from prefs.
+
 ## Verification Settings
 
 O verification gate executa comandos de lint/typecheck/test antes de uma task ser marcada como concluída e antes de um slice ser squash-mergeado. Configurável pelo bloco abaixo — ou desabilitado globalmente com `enabled: false`. Quando `preference_commands` estiver vazio, o gate usa a ordem de descoberta descrita na subseção abaixo.
@@ -217,8 +287,8 @@ repo_path:    # preenchido pelo install.sh — caminho do repositório gsd-agent
 
 ## Notes
 
-- Para mudar o modelo de uma fase, edite a coluna "Model" na tabela acima
-  E atualize o frontmatter do agente correspondente em ~/.claude/agents/
+- Para mudar o modelo de uma fase, edite o bloco `tier_models:` na seção `## Tier Settings` acima.
+  A tabela Phase → Agent Routing é informacional; o bloco `tier_models:` é a fonte de verdade.
 - Modelos disponíveis: opus (claude-opus-4-7[1m], fallback claude-opus-4-6), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
 - Este arquivo é lido pelo orquestrador gsd.md a cada iteração do loop
 - Para mudar comandos de verify, edite o bloco "verification:" acima. Veja scripts/forge-verify.js para a implementação.
