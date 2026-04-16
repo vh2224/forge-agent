@@ -182,6 +182,33 @@ Default 120 000 ms (2 min) por comando. Timeout produz exit code 124 e é regist
 - `agents/forge-executor.md` (step 10) — invocação no nível de task.
 - `agents/forge-completer.md` (step 3 de complete-slice) — invocação no nível de slice.
 
+## Token Budget Settings
+
+O bloco `token_budget` limita o tamanho das seções **opcionais** injetadas nos prompts dos workers, mantendo o consumo de contexto previsível. O orquestrador multiplica cada valor por 4 para obter o limite em caracteres antes de chamar `truncateAtSectionBoundary` (de `scripts/forge-tokens.js`), que usa a heurística `Math.ceil(chars / 4)` para estimar tokens — sem dependências externas, com precisão de ±5–15% para inglês/markdown.
+
+```
+token_budget:
+  auto_memory:       2000   # cap em tokens do snippet AUTO-MEMORY injetado em cada worker
+  ledger_snapshot:   1500   # cap em tokens do snippet do LEDGER.md (quando injetado)
+  coding_standards:  3000   # cap compartilhado entre CS_STRUCTURE e CS_RULES
+```
+
+### Semântica
+
+- **Valores em tokens, não chars.** O orquestrador multiplica por 4 para chamar `truncateAtSectionBoundary` (cuja API é em chars). Exemplo: `auto_memory: 2000` → `truncateAtSectionBoundary(content, 8000)`.
+- **Só aplica a seções OPCIONAIS.** `T##-PLAN`, `S##-CONTEXT`, `M###-SCOPE` são mandatórias — se excederem o budget esperado, o orquestrador levanta blocker `scope_exceeded`, não trunca silenciosamente.
+- **Fallback silencioso.** Se o bloco estiver ausente ou uma chave faltar, o helper usa os defaults hardcoded (2000/1500/3000 tokens respectivamente). Nenhum erro é levantado.
+
+### Observação sobre H2 boundary
+
+A truncagem sempre termina numa linha de cabeçalho H2 (`## `), H3 (`### `), ou regra horizontal (`---` / `***`), preservando seções atômicas — nunca corta no meio de um bloco de código ou lista. O marcador `[...truncated N sections]` é inserido ao final do conteúdo truncado para indicar quantas seções foram descartadas.
+
+### Cross-references
+
+- `scripts/forge-tokens.js` — implementação de `countTokens` e `truncateAtSectionBoundary`.
+- `shared/forge-dispatch.md ### Token Telemetry` — contrato completo e tabela de placeholders opcionais.
+- `skills/forge-status/SKILL.md` — relatório de consumo de tokens por worker.
+
 ## Update Settings
 
 ```

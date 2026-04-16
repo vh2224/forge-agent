@@ -542,7 +542,7 @@ const MEMORIES_SAFE = truncateAtSectionBoundary(
 const planContent = readFileSync(planPath, 'utf8');
 truncateAtSectionBoundary(
   planContent,
-  (PREFS?.token_budget?.plan_max ?? 8000) * 4,
+  8000 * 4, // Mandatory sections have no prefs key — the throw is unconditional per ## Token Budget Settings
   { mandatory: true, label: `T${taskId}-PLAN` }
 ); // Throws on overflow → surfaces as blocker(scope_exceeded).
 ```
