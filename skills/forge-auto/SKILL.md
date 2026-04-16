@@ -236,6 +236,12 @@ echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":"UNIT
 ```
 Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Reading `started_at` from the file ensures it survives across tool calls. `last_heartbeat` is used by the statusline stale check — it resets on every dispatch so long sessions are never incorrectly marked stale.
 
+<!-- token-telemetry-integration -->
+Per `shared/forge-dispatch.md § Token Telemetry` — compute input tokens, dispatch, capture output tokens, append dispatch event (I/O errors MUST propagate):
+```bash
+INPUT_TOKENS=$(node scripts/forge-tokens.js --inline "$worker_prompt")
+```
+
 Then call `Agent(agent_name, worker_prompt)` with a `description` using the same icon:
 - Format: `{icon} {unit_id} · {one-liner}`
 - Examples:
@@ -246,13 +252,18 @@ Then call `Agent(agent_name, worker_prompt)` with a `description` using the same
   - `✔ S01 · auth slice complete`
   - `🧠 S01 · extract memories`
 
-Wait for the result.
+Wait for the result. Then:
+```bash
+OUTPUT_TOKENS=$(node scripts/forge-tokens.js --inline "$result")
+mkdir -p .gsd/forge/
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${modelId}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS}}" >> .gsd/forge/events.jsonl
+```
 
 **Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
 
 1. Capture the exception message into `errorMsg`.
 2. Shell out: `node scripts/forge-classify-error.js --msg "$errorMsg"` → parse `{ kind, retry, backoffMs? }`.
-3. If `retry === true` AND `attempt <= PREFS.retry.max_transient_retries` (default 3): increment `attempt`, apply backoff, append a retry event to `.gsd/forge/events.jsonl`, and re-dispatch. Task stays `in_progress` between retries. Heartbeat write is NOT disturbed.
+3. If `retry === true` AND `attempt <= PREFS.retry.max_transient_retries` (default 3): increment `attempt`, apply backoff, append a retry event (include `input_tokens: INPUT_TOKENS` from the retry prompt) to `.gsd/forge/events.jsonl`, and re-dispatch. Task stays `in_progress` between retries. Heartbeat write is NOT disturbed.
 4. Otherwise fall through to the CRITICAL path below.
 
 > Transient errors (`rate-limit`, `network`, `server`, `stream`, `connection`) are handled by the Retry Handler before this block is reached. The CRITICAL path below is only reached when the classifier returns `retry: false` OR retries are exhausted.
