@@ -115,6 +115,30 @@ compact_after: 50      # unidades por sessão antes do checkpoint (0 ou "unlimit
                        # aumente para milestones grandes, diminua se o contexto encher rápido
 ```
 
+## Retry Settings
+
+```
+retry:
+  max_transient_retries: 3      # per-unit cap before surfacing blocker
+  base_backoff_ms: 2000         # first retry delay; doubled each attempt
+  max_backoff_ms: 60000         # ceiling for computed backoff
+```
+
+**Retryable classes** (classifier returns `retry: true`):
+`rate-limit`, `network`, `server`, `stream`, `connection` — these are transient; the
+Retry Handler will sleep (exponential backoff, capped at `max_backoff_ms`) and reissue
+the `Agent()` call up to `max_transient_retries` times.
+
+**Non-retryable classes** (classifier returns `retry: false`):
+`permanent` — auth / not-found / bad-request — fail immediately, surface to user.
+`unknown` — unrecognised exception text — fail immediately (safe default; no blind retry).
+Orchestrator-owned error classes that bypass the handler entirely:
+`model_refusal`, `context_overflow`, `tooling_failure` — handled by the failure taxonomy
+in `forge-auto` / `forge-next` (dispatch-level, not classifier-level).
+
+See `scripts/forge-classify-error.js` for classifier implementation and
+`shared/forge-dispatch.md ### Retry Handler` for the full control-flow algorithm.
+
 ## Update Settings
 
 ```
