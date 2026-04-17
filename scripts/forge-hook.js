@@ -17,6 +17,20 @@ const os   = require('os');
 
 const phase = process.argv[2] || 'post'; // 'pre', 'post', 'subagent-start', 'subagent-stop', 'pre-compact', 'post-compact'
 
+// Bump last_heartbeat in auto-mode.json without clobbering other fields.
+// Called from SubagentStart/Stop so workers longer than the statusline stale
+// threshold don't get marked dead. No-op if auto-mode isn't active.
+const bumpAutoHeartbeat = (cwd) => {
+  try {
+    const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
+    const auto = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
+    if (auto && auto.active === true) {
+      auto.last_heartbeat = Date.now();
+      fs.writeFileSync(autoFile, JSON.stringify(auto), 'utf8');
+    }
+  } catch { /* no auto mode or unreadable — ignore */ }
+};
+
 process.stdin.setEncoding('utf8');
 let raw = '';
 process.stdin.on('data', chunk => (raw += chunk));
@@ -29,6 +43,7 @@ process.stdin.on('end', () => {
       const sessionId  = data.session_id || 'unknown';
       const agentType  = data.agent_type  || 'unknown';
       const agentId    = data.agent_id    || '';
+      const cwd        = data.cwd || process.cwd();
       const liveFile   = path.join(os.tmpdir(), `forge-live-${sessionId}.json`);
 
       let existing = {};
@@ -42,12 +57,15 @@ process.stdin.on('end', () => {
         agent_id        : agentId,
         subagent_started: Date.now(),
       }), 'utf8');
+
+      bumpAutoHeartbeat(cwd);
       return;
     }
 
     // ── SubagentStop: compute real worker duration ───────────────────────────
     if (phase === 'subagent-stop') {
       const sessionId = data.session_id || 'unknown';
+      const cwd       = data.cwd || process.cwd();
       const liveFile  = path.join(os.tmpdir(), `forge-live-${sessionId}.json`);
 
       let existing = {};
@@ -62,6 +80,8 @@ process.stdin.on('end', () => {
         subagent_duration: durationMs,
         completed_at     : Date.now(),
       }), 'utf8');
+
+      bumpAutoHeartbeat(cwd);
       return;
     }
 

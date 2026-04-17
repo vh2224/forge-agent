@@ -95,18 +95,22 @@ process.stdin.on('end', () => {
           ? Math.round((Date.now() - auto.started_at) / 1000)
           : 0;
 
-        // Stale check: use last_heartbeat (updated before/after every Agent dispatch)
-        // to detect killed sessions — NOT started_at, which grows forever in long sessions.
-        // A session is stale only if no heartbeat was written in the last 5 minutes.
-        // Falls back to started_at for sessions that predate this field.
-        const STALE_THRESHOLD_HEARTBEAT = 5 * 60; // 5 minutes since last heartbeat
-        const lastActivity = auto.last_heartbeat || auto.started_at || 0;
+        // Stale check — only HIDE the indicator; never mutate the file.
+        // The orchestrator and forge-hook (SubagentStart/Stop) own the marker;
+        // if the statusline wrote {"active":false} on a transient gap it would
+        // destroy recovery state and the indicator would never come back.
+        // A session is considered alive if EITHER a heartbeat or an active
+        // worker was touched within the threshold. Threshold is generous
+        // because Opus workers with extended thinking + web search can take
+        // 10+ minutes between SubagentStart/Stop hook fires.
+        const STALE_THRESHOLD_SECS = 15 * 60;
+        const lastHeartbeat = auto.last_heartbeat || auto.started_at || 0;
+        const workerStart   = auto.worker_started || 0;
+        const lastActivity  = Math.max(lastHeartbeat, workerStart);
         const sinceLastActivity = Math.round((Date.now() - lastActivity) / 1000);
-        const isStale = sinceLastActivity > STALE_THRESHOLD_HEARTBEAT;
+        const isStale = sinceLastActivity > STALE_THRESHOLD_SECS;
 
-        if (isStale) {
-          try { fs.writeFileSync(autoFile, '{"active":false}', 'utf8'); } catch {}
-        } else {
+        if (!isStale) {
           autoMode        = true;
           autoElapsedSecs = elapsed;
           autoElapsed     = elapsed >= 60
