@@ -87,8 +87,11 @@ process.stdin.on('end', () => {
     let autoElapsedSecs = 0; // kept for dot sync below
     let autoWorker      = '';  // active worker unit (from heartbeat)
     let autoWorkerSecs  = 0;   // how long the current worker has been running
+    let autoUnitsDone   = 0;   // # units completed since auto-mode started
+    let autoBurnRate    = 0;   // $/h (session cost divided by auto-mode elapsed)
     try {
       const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
+      const autoStats = fs.statSync(autoFile);
       const auto     = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
       if (auto.active) {
         const elapsed = auto.started_at
@@ -99,14 +102,27 @@ process.stdin.on('end', () => {
         // The orchestrator and forge-hook (SubagentStart/Stop) own the marker;
         // if the statusline wrote {"active":false} on a transient gap it would
         // destroy recovery state and the indicator would never come back.
-        // A session is considered alive if EITHER a heartbeat or an active
-        // worker was touched within the threshold. Threshold is generous
-        // because Opus workers with extended thinking + web search can take
-        // 10+ minutes between SubagentStart/Stop hook fires.
+        //
+        // A session is considered alive if ANY of these signals are fresh:
+        //   - auto.last_heartbeat (explicit orchestrator/hook bump)
+        //   - auto.worker_started (current dispatch timestamp)
+        //   - auto-mode.json mtime (catches any write — covers hook mismatches)
+        //   - events.jsonl mtime (orchestrator/worker appended an event)
+        // Using mtime as fallback resolves the case where hooks aren't registered
+        // (old session predating hook fix) AND the orchestrator is in long
+        // extended-thinking phases between Bash heartbeat writes.
         const STALE_THRESHOLD_SECS = 15 * 60;
-        const lastHeartbeat = auto.last_heartbeat || auto.started_at || 0;
-        const workerStart   = auto.worker_started || 0;
-        const lastActivity  = Math.max(lastHeartbeat, workerStart);
+        let eventsMtimeMs = 0;
+        try {
+          eventsMtimeMs = fs.statSync(path.join(cwd, '.gsd', 'forge', 'events.jsonl')).mtimeMs;
+        } catch { /* no events.jsonl yet — ignore */ }
+        const lastActivity = Math.max(
+          auto.last_heartbeat || 0,
+          auto.worker_started || 0,
+          autoStats.mtimeMs    || 0,
+          eventsMtimeMs,
+          auto.started_at      || 0
+        );
         const sinceLastActivity = Math.round((Date.now() - lastActivity) / 1000);
         const isStale = sinceLastActivity > STALE_THRESHOLD_SECS;
 
@@ -121,6 +137,32 @@ process.stdin.on('end', () => {
           if (auto.worker && auto.worker_started) {
             autoWorker     = auto.worker;
             autoWorkerSecs = Math.round((Date.now() - auto.worker_started) / 1000);
+          }
+
+          // Count "done" events since auto-mode started. Early-break is unsafe
+          // here: some workers self-report wrong timestamps (e.g. ts with
+          // zeroed time portion), so events.jsonl is not guaranteed to be
+          // monotonic. We iterate the tail and filter by timestamp instead —
+          // reading 500 lines per render is cheap.
+          if (auto.started_at && eventsMtimeMs >= auto.started_at) {
+            try {
+              const eventsRaw = fs.readFileSync(
+                path.join(cwd, '.gsd', 'forge', 'events.jsonl'), 'utf8'
+              );
+              const lines = eventsRaw.trimEnd().split('\n').slice(-500);
+              for (const raw of lines) {
+                try {
+                  const e = JSON.parse(raw);
+                  const ts = e.ts ? new Date(e.ts).getTime() : 0;
+                  if (ts >= auto.started_at && e.status === 'done') autoUnitsDone++;
+                } catch { /* malformed line — skip */ }
+              }
+            } catch { /* events.jsonl unreadable — skip */ }
+          }
+
+          // Burn rate: only meaningful after 10min and $0.50 accumulated
+          if (elapsed >= 600 && cost >= 0.5) {
+            autoBurnRate = cost / (elapsed / 3600);
           }
         }
       }
@@ -307,13 +349,14 @@ process.stdin.on('end', () => {
     const pauseFile = path.join(cwd, '.gsd', 'forge', 'pause');
     const pausePending = (() => { try { return fs.existsSync(pauseFile); } catch { return false; } })();
 
-    // --- Build auto-mode prefix (dot + AUTO + elapsed) — worker moves to middle segment now ---
+    // --- Build auto-mode prefix (dot + AUTO + elapsed + units) — worker moves to middle segment now ---
     let autoPrefix = '';
     if (pausePending) {
       autoPrefix = `${c.yellow}⏸ PAUSE SOLICITADO${c.reset} │ `;
     } else if (autoMode) {
       const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';
-      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${c.reset} │ `;
+      const unitsSuffix = autoUnitsDone > 0 ? ` · ${autoUnitsDone}u` : '';
+      autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${unitsSuffix}${c.reset} │ `;
     }
 
     // --- Middle segment: milestone progress + worker/retry/outcome ---
@@ -364,10 +407,14 @@ process.stdin.on('end', () => {
     else if (pct >= 1)  barColor = c.green;
     const ctxStr = barColor ? `${barColor}${bar} ${pct}%${c.reset}` : `${bar} ${pct}%`;
 
-    // --- Cost: highlight when expensive ---
-    let costDisplay = costStr;
-    if (cost >= 5)      costDisplay = `${c.red}${costStr}${c.reset}`;
-    else if (cost >= 1) costDisplay = `${c.yellow}${costStr}${c.reset}`;
+    // --- Cost: highlight when expensive, append burn rate when auto-mode mature ---
+    let costCore = costStr;
+    if (cost >= 5)      costCore = `${c.red}${costStr}${c.reset}`;
+    else if (cost >= 1) costCore = `${c.yellow}${costStr}${c.reset}`;
+    let costDisplay = costCore;
+    if (autoBurnRate > 0) {
+      costDisplay = `${costCore} ${c.dim}($${autoBurnRate.toFixed(2)}/h)${c.reset}`;
+    }
 
     // --- Forge version tail: only shown when update available (otherwise noise) ---
     let forgeVersionTail = '';
