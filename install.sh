@@ -324,6 +324,30 @@ info ""
 info "  Status line não ativada por padrão."
 info "  Para ativar: /forge-config statusline on"
 
+# Re-register hooks when statusline is already active — picks up new hook events
+# added in later versions (SubagentStart/Stop, PreCompact/PostCompact, …) without
+# requiring the user to toggle the statusline off and on again.
+SETTINGS_FILE="${CLAUDE_DIR}/settings.json"
+if ! $DRY_RUN && [ -f "$SETTINGS_FILE" ] && command -v node >/dev/null 2>&1; then
+  statusline_active=$(SETTINGS_FILE="$SETTINGS_FILE" node -e '
+try {
+  const s = JSON.parse(require("fs").readFileSync(process.env.SETTINGS_FILE, "utf8"));
+  const cmd = s && s.statusLine && s.statusLine.command;
+  process.stdout.write(cmd && cmd.indexOf("forge-statusline.js") !== -1 ? "yes" : "no");
+} catch { process.stdout.write("no"); }
+' 2>/dev/null || echo "no")
+
+  if [ "$statusline_active" = "yes" ]; then
+    echo ""
+    info "Statusline ativa detectada — re-registrando hooks em settings.json..."
+    if node "${CLAUDE_DIR}/forge-settings.js" "$SETTINGS_FILE" >/dev/null 2>&1; then
+      success "  hooks sincronizados (inclui SubagentStart/Stop, PreCompact/PostCompact)"
+    else
+      warn "  falha ao re-registrar — rode manualmente: node ~/.claude/forge-settings.js ~/.claude/settings.json"
+    fi
+  fi
+fi
+
 # ── Global MCP setup (via `claude mcp add -s user`) ───────────────────────────
 # Claude Code CLI reads MCPs from ~/.claude.json (user-scope registry), NOT from
 # ~/.claude/settings.json. We must use the official CLI to register them — writing

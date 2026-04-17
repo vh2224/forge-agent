@@ -307,6 +307,32 @@ Info ""
 Info "  Status line não ativada por padrão."
 Info "  Para ativar: /forge-config statusline on"
 
+# Re-register hooks when statusline is already active — picks up new hook events
+# added in later versions (SubagentStart/Stop, PreCompact/PostCompact, ...) without
+# requiring the user to toggle the statusline off and on again.
+$SettingsFile  = Join-Path $ClaudeDir "settings.json"
+$SettingsScript = Join-Path $ClaudeDir "forge-settings.js"
+if (-not $DryRun -and (Test-Path $SettingsFile)) {
+    $StatusActive = $false
+    try {
+        $Existing = Get-Content $SettingsFile -Raw | ConvertFrom-Json
+        if ($Existing.statusLine -and $Existing.statusLine.command -and ($Existing.statusLine.command -like "*forge-statusline.js*")) {
+            $StatusActive = $true
+        }
+    } catch {}
+
+    if ($StatusActive) {
+        Write-Host ""
+        Info "Statusline ativa detectada — re-registrando hooks em settings.json..."
+        $null = & node $SettingsScript $SettingsFile 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Success "  hooks sincronizados (inclui SubagentStart/Stop, PreCompact/PostCompact)"
+        } else {
+            Info "  falha ao re-registrar — rode manualmente: node ~/.claude/forge-settings.js ~/.claude/settings.json"
+        }
+    }
+}
+
 # ── Tier 1 MCPs: fetch + context7 (via `claude mcp add -s user`) ─────────────
 # Claude Code CLI lê MCPs de ~/.claude.json (user-scope registry), NÃO de
 # ~/.claude/settings.json. Usar o CLI oficial é a única forma de registrar.
