@@ -43,6 +43,8 @@ Before asking anything, read PROJECT.md, REQUIREMENTS.md, DECISIONS.md, and any 
 
 For each dimension below threshold, formulate one targeted question. Cap at 4 questions (AskUserQuestion supports max 4 per call).
 
+**Draw from domain probes before writing generic questions.** Before formulating a question, check `shared/forge-domain-probes.md` for the domains that match this milestone/slice scope (auth, realtime, database, API, search, payments, caching, etc.). Each domain provides 4–6 pre-curated questions that produce sharper plans than "what's the scope?" style generics. Use probes as seed material — rephrase for the project's concrete context rather than asking verbatim.
+
 For each question, generate 2–4 specific options based on common patterns for this project's tech stack and context. Mark the most appropriate option with "(Recommended)". Users can always type a custom answer via the automatic "Other" option.
 
 Call `AskUserQuestion` once with all questions:

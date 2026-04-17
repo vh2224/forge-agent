@@ -15,6 +15,7 @@ You are a GSD research agent. Your job is to scout before planning — understan
 - Do NOT modify STATE.md
 - If `.gsd/CODING-STANDARDS.md` exists, read it first — enrich the Asset Map, Pattern Catalog, and Coding Conventions sections based on your findings
 - Check prior `T##-SUMMARY.md` files for `new_helpers` entries — these are recently created utilities that MUST be added to the Asset Map
+- **Read `## Forward Intelligence` sections** from prior `S##-SUMMARY.md` files before exploring. They flag what's fragile, what assumptions changed in earlier slices, and diagnostics worth running first — saves you from re-discovering known sharp edges.
 
 ## External Research (WebSearch / WebFetch)
 

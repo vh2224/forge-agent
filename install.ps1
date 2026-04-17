@@ -280,6 +280,20 @@ if ($script:SyncPrefs -and (Test-Path $prefsFile)) {
     }
 }
 
+# ── Install shared references ─────────────────────────────────────────────────
+Write-Host ""
+Info "Instalando referências compartilhadas..."
+CopyFile "$RepoDir\shared\forge-dispatch.md" "$ClaudeDir\forge-dispatch.md"
+Info "  forge-dispatch.md"
+if (Test-Path "$RepoDir\shared\forge-mcps.md") {
+    CopyFile "$RepoDir\shared\forge-mcps.md" "$ClaudeDir\forge-mcps.md"
+    Info "  forge-mcps.md"
+}
+if (Test-Path "$RepoDir\shared\forge-domain-probes.md") {
+    CopyFile "$RepoDir\shared\forge-domain-probes.md" "$ClaudeDir\forge-domain-probes.md"
+    Info "  forge-domain-probes.md"
+}
+
 # ── Install statusline + hooks ────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando statusline & hooks..."

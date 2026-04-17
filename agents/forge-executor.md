@@ -92,6 +92,27 @@ Use the strongest tier you can reach — **every task must pass at least tiers 1
 
 **If lint fails:** fix the violations in your code, do NOT disable rules or add ignore comments unless the task plan explicitly allows it.
 
+## Debugging Discipline
+
+When a verification check fails, resist the urge to patch symptoms. Work the problem:
+
+1. **Form a hypothesis first.** Before editing, state (to yourself) what you believe is wrong and why. "Tests fail" is not a hypothesis; "the mock returns a Promise but the code awaits it twice" is.
+2. **Change one variable at a time.** If you edit three files before re-running, you don't know which edit helped. Revert speculative changes before the next attempt.
+3. **Read completely.** Read the full error output, the full failing test, the full function — not just the line the traceback points at. Most "mystery bugs" are explained 20 lines up.
+4. **Distinguish "I know" from "I assume."** Mark assumptions explicitly. Verify them with `Read`/`Grep`/a quick command before acting on them.
+5. **Know when to stop.** If you've tried 3+ fixes without convergence, your mental model is probably wrong. Step back, re-read the error, reconsider the hypothesis. Don't escalate brute-force attempts.
+
+Write a one-line diagnosis in `## What Happened` of the T##-SUMMARY when the bug turned out to be non-obvious — that's memory-worthy signal.
+
+## Background Processes
+
+Never start long-running processes with `&` or fire-and-forget inside a `Bash` call (`npm start &`, `python server.py &`, `docker-compose up`). On Windows + Git Bash these can hang the tool call indefinitely, and even on Unix they leave orphaned processes after the task ends.
+
+If you genuinely need a server running to verify behavior:
+- Prefer `npm test`/`npm run build` or a single-shot verification command
+- If a dev server is unavoidable, use `run_in_background: true` on the Bash tool call and kill the process before finishing the task
+- If neither is viable, mark the verification as tier 5 (Human) in the summary and move on
+
 ### Frontend gate (conditional)
 
 **Activates only if** files created/modified during this task include `.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, or `.scss`. If no frontend files were touched, skip entirely.

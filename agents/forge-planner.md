@@ -40,7 +40,7 @@ Write `M###-ROADMAP.md`:
 
 1. Read the slice entry in ROADMAP + boundary map
 2. Read CONTEXT files and DECISIONS.md
-3. Read summaries from dependency slices
+3. Read summaries from dependency slices — **pay particular attention to `## Forward Intelligence` sections**. They contain hard-won knowledge about what's fragile, what assumptions changed, and diagnostics the author wants the next agent to know. Treat every bullet as high-priority input to your plan.
 4. Verify upstream outputs match what this slice consumes
 
 Write `S##-PLAN.md` + individual `T##-PLAN.md` files (1-7 tasks):

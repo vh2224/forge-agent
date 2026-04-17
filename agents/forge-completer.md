@@ -21,7 +21,24 @@ Given all `T##-SUMMARY.md` files from the slice:
    - One substantive liner for the slice
    - `## What Was Built` narrative
    - `## Verification Gate` section (commands, exit codes, discovery source, total duration) — populated in step 3
+   - `## Forward Intelligence` — forward-looking briefing for the next slice (see template below)
    - `drill_down_paths` to each task summary
+
+   ### Forward Intelligence template
+
+   ```markdown
+   ## Forward Intelligence
+
+   **What the next slice should know:** <1-3 facts — concrete things downstream work will interact with. Paths, contracts, invariants. Not a recap of what was built.>
+
+   **What's fragile:** <1-3 items — edge cases that barely work, known sharp edges, assumptions that will break under specific conditions. Omit if nothing qualifies.>
+
+   **Authoritative diagnostics:** <commands, files, or endpoints the next agent should hit first when debugging in this area — e.g. "check /api/health before assuming the service is down", "run `npm run db:status` to verify migration state".>
+
+   **What assumptions changed:** <1-2 items — things we believed at plan-time that turned out different. Omit if nothing changed. If research said X and execution proved Y, record it here.>
+   ```
+
+   Keep each bullet tight (one sentence). This section is read by `forge-planner` and `forge-researcher` before they plan or research the next slice — they treat it as high-priority context.
 
 2. Write `S##-UAT.md` — human test script derived from must-haves:
    ```markdown
