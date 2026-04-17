@@ -129,9 +129,16 @@ process.stdin.on('end', () => {
         if (!isStale) {
           autoMode        = true;
           autoElapsedSecs = elapsed;
-          autoElapsed     = elapsed >= 60
-            ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s`
-            : `${elapsed}s`;
+          if (elapsed >= 3600) {
+            const h = Math.floor(elapsed / 3600);
+            const m = Math.floor((elapsed % 3600) / 60);
+            const s = elapsed % 60;
+            autoElapsed = `${h}h${m}m${s}s`;
+          } else if (elapsed >= 60) {
+            autoElapsed = `${Math.floor(elapsed / 60)}m${elapsed % 60}s`;
+          } else {
+            autoElapsed = `${elapsed}s`;
+          }
 
           // Heartbeat: show which worker is running and for how long
           if (auto.worker && auto.worker_started) {
@@ -343,7 +350,16 @@ process.stdin.on('end', () => {
       return null;
     };
 
-    const fmtSecsShort = (s) => s >= 60 ? `${Math.floor(s/60)}m${s%60 ? s%60+'s' : ''}` : `${s}s`;
+    const fmtSecsShort = (s) => {
+      if (s >= 3600) {
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        return `${h}h${m ? m + 'm' : ''}${sec ? sec + 's' : ''}`;
+      }
+      if (s >= 60) return `${Math.floor(s/60)}m${s%60 ? s%60+'s' : ''}`;
+      return `${s}s`;
+    };
 
     // --- Check for pause request ---
     const pauseFile = path.join(cwd, '.gsd', 'forge', 'pause');
