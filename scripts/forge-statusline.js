@@ -217,13 +217,17 @@ process.stdin.on('end', () => {
         try { cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
 
         const CACHE_TTL = 600_000; // 10 minutes
-        const cacheValid = cache && (Date.now() - (cache.ts || 0) < CACHE_TTL);
+        // Don't trust a cache entry whose has_update:true is missing the release
+        // version — treat incomplete results as "retry on next render" instead
+        // of pinning "novos commits" for the full TTL.
+        const cacheComplete = !(cache && cache.has_update && !cache.remote_version);
+        const cacheValid = cache && (Date.now() - (cache.ts || 0) < CACHE_TTL) && cacheComplete;
 
         if (cacheValid) {
           // Fast path: serve from cache — zero git processes, no flicker
           forgeVersion = cache.version || '';
-          if (cache.has_update) {
-            forgeUpdate = cache.remote_version ? `↑ ${cache.remote_version}` : '↑ novos commits';
+          if (cache.has_update && cache.remote_version) {
+            forgeUpdate = `↑ ${cache.remote_version}`;
           }
         } else {
           // Slow path: refresh cache (runs at most once per 10 min)
@@ -242,42 +246,77 @@ process.stdin.on('end', () => {
 
             forgeVersion = version;
 
-            // Update check: compare local HEAD vs remote HEAD, then find latest tag
-            // Two separate calls avoids shell quoting issues on Windows (cmd.exe)
+            // Update check: local vs remote HEAD with ancestry-aware semantics.
+            //   - remote HEAD unknown locally → local is BEHIND → show update
+            //   - remote HEAD known locally (and different) → local is AHEAD → no indicator
+            //   - equal → no indicator
+            // Release version is the tag pointing exactly at remote HEAD (that's
+            // what GitHub Actions tagged on deploy); falls back to the highest
+            // semver tag overall if no tag at HEAD.
             let hasUpdate = false;
             let remoteVersion = '';
+            let remoteCommit = '';
             try {
               const headOut = execSync(
                 'git ls-remote origin HEAD 2>/dev/null',
                 { cwd: repo, encoding: 'utf8', timeout: 5000, shell: true }
               );
-              const remoteCommit = headOut.trim().split(/\s/)[0];
-              hasUpdate = !!remoteCommit && remoteCommit !== localCommit;
+              remoteCommit = headOut.trim().split(/\s/)[0];
+
+              if (remoteCommit && remoteCommit !== localCommit) {
+                // Ancestry probe — cat-file exits non-zero if the object is
+                // unknown locally. Unknown means we don't have remote's work
+                // yet, i.e. we are behind (a real update). We pass just the
+                // SHA (no ^{commit} suffix) because cmd.exe on Windows eats
+                // the caret before git sees it; ls-remote HEAD is already a
+                // commit ref, so asserting the type is redundant.
+                let remoteKnownLocally = true;
+                try {
+                  execSync(
+                    `git cat-file -e ${remoteCommit}`,
+                    { cwd: repo, timeout: 2000, shell: true, stdio: 'ignore' }
+                  );
+                } catch { remoteKnownLocally = false; }
+
+                hasUpdate = !remoteKnownLocally;
+              }
             } catch {}
 
             if (hasUpdate) {
               try {
-                // git ls-remote --tags needs no shell quoting — safe on Windows + Linux
                 const tagsOut = execSync(
                   'git ls-remote --tags origin 2>/dev/null',
                   { cwd: repo, encoding: 'utf8', timeout: 5000, shell: true }
                 );
-                const tags = tagsOut.split('\n')
-                  .filter(l => /refs\/tags\/v[\d.]+$/.test(l))
-                  .map(l => l.split(/\s+/)[1].replace('refs/tags/', ''))
-                  .sort((a, b) => {
-                    const av = a.replace('v', '').split('.').map(Number);
-                    const bv = b.replace('v', '').split('.').map(Number);
-                    for (let i = 0; i < Math.max(av.length, bv.length); i++) {
-                      if ((av[i] || 0) !== (bv[i] || 0)) return (bv[i] || 0) - (av[i] || 0);
-                    }
-                    return 0;
-                  });
-                remoteVersion = tags[0] || '';
+                const tagLines = tagsOut.split('\n')
+                  .filter(l => /refs\/tags\/v[\d.]+$/.test(l));
+
+                // Primary: tag whose SHA matches remote HEAD (the released version)
+                const atHead = tagLines.find(l => l.startsWith(remoteCommit));
+                if (atHead) {
+                  remoteVersion = atHead.split(/\s+/)[1].replace('refs/tags/', '');
+                } else {
+                  // Fallback: highest semver tag in the repo
+                  const tags = tagLines
+                    .map(l => l.split(/\s+/)[1].replace('refs/tags/', ''))
+                    .sort((a, b) => {
+                      const av = a.replace('v', '').split('.').map(Number);
+                      const bv = b.replace('v', '').split('.').map(Number);
+                      for (let i = 0; i < Math.max(av.length, bv.length); i++) {
+                        if ((av[i] || 0) !== (bv[i] || 0)) return (bv[i] || 0) - (av[i] || 0);
+                      }
+                      return 0;
+                    });
+                  remoteVersion = tags[0] || '';
+                }
               } catch {}
             }
 
-            if (hasUpdate) forgeUpdate = remoteVersion ? `↑ ${remoteVersion}` : '↑ novos commits';
+            // Only show the indicator when we have a concrete version to point
+            // at. If remoteVersion is empty the cache TTL is already shortened
+            // (cacheComplete gate), so we retry next tick instead of showing a
+            // useless "novos commits" label.
+            if (hasUpdate && remoteVersion) forgeUpdate = `↑ ${remoteVersion}`;
 
             fs.writeFileSync(cacheFile, JSON.stringify({
               ts: Date.now(),
