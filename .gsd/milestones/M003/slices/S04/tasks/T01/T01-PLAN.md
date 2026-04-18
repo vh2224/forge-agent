@@ -3,7 +3,7 @@ id: T01
 slice: S04
 milestone: M003
 title: "Create agents/forge-plan-checker.md — Sonnet advisory plan-checker with 10 locked dimensions"
-status: RUNNING
+status: DONE
 planned: 2026-04-18
 must_haves:
   truths:
