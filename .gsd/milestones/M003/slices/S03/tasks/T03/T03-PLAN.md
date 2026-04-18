@@ -3,7 +3,7 @@ id: T03
 slice: S03
 milestone: M003
 title: "Import-chain walker — Wired level (depth-2 JS/TS static scan)"
-status: RUNNING
+status: DONE
 planned: 2026-04-16
 must_haves:
   truths:
