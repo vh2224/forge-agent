@@ -16,7 +16,7 @@ Make the forge-agent loop honest by replacing self-reported "done" with evidence
 - [x] **S02: Evidence log (PostToolUse) + file-audit in completer** `risk:medium` `depends:[S01]`
   Demo: run a task with 3+ Bash calls → `.gsd/forge/evidence-{T##}.jsonl` exists with one JSON line per tool call (each ≤ 512 bytes); seed a SUMMARY with `npm test → exit 0` not backed by the log → `## Evidence Flags` section appears in `S##-SUMMARY.md`; add a stray file not in any `expected_output` → `## File Audit` lists it under `unexpected`; deliberately break the hook → tool call still succeeds (silent-fail per MEM008).
 
-- [ ] **S03: Goal-backward verifier (3-level)** `risk:high` `depends:[S01, S02]`
+- [x] **S03: Goal-backward verifier (3-level)** `risk:high` `depends:[S01, S02]`
   Demo: run a slice mixing one legit file and one 3-line stub (`() => null`) → `S##-VERIFICATION.md` shows legit file passing Exists/Substantive/Wired, stub file failing Substantive with the matching regex named; verifier wall-clock on 10-artifact slice stays within the 2s budget; a legacy M001/M002 plan is handled with `skipped: legacy_schema` — no crash.
 
 - [ ] **S04: Plan-checker agent (advisory) + CLAUDE.md doc** `risk:medium` `depends:[S01]`

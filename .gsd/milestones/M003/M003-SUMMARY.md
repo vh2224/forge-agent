@@ -2,9 +2,9 @@
 id: M003
 title: Anti-Hallucination Layer
 status: in-progress
-slices_completed: [S01, S02]
-slices_pending: [S03, S04]
-last_updated: 2026-04-16
+slices_completed: [S01, S02, S03]
+slices_pending: [S04]
+last_updated: 2026-04-18
 ---
 
 # M003: Anti-Hallucination Layer — Milestone Summary
@@ -42,8 +42,18 @@ Evidence capture + file-audit infrastructure landed across 5 tasks:
 
 **Produces for S03:** `.gsd/forge/evidence-{unitId}.jsonl` as optional Wired-level corroborating input. Shape LOCKED (additive contract). `disabled` mode produces no files — verifier must tolerate absence gracefully.
 
-### S03 — Goal-backward verifier (PENDING)
+### S03 — Goal-backward verifier (COMPLETE)
 
-### S03 — Goal-backward verifier (PENDING)
+Shipped `scripts/forge-verifier.js` (975 lines) — CommonJS dual-mode module implementing the 3-level `verifyArtifact` API, CLI writer, and `forge-completer` sub-step 1.8 integration. Six tasks delivered:
+
+- `scripts/forge-verifier.js` — `verifyArtifact(mustHaves, sliceFiles)` with `checkExists`, `checkSubstantive` (4-pattern stub regex library in locked precedence order), `checkWired` (depth-2 BFS import-chain walker supporting ESM/CJS/re-exports/barrels).
+- CLI `--slice/--milestone/--cwd/--help`; writes `S##-VERIFICATION.md` per-artifact table with `exists | substantive | wired | flags` columns.
+- `agents/forge-completer.md` sub-step 1.8 — invokes verifier after File Audit, reads VERIFICATION.md, writes `## Verification Summary` paragraph (always, even 0-artifact result).
+- Smoke fixtures (legit/stub/legacy/non-JS) + RESULTS.md regression record.
+- Perf harness `perf/run-perf.js` — hot-cache mean ~3.5ms / 10 artifacts (budget: 2000ms, 99.8% under).
+
+**Key decisions:** stub detection is heuristic (per-artifact `stub_patterns:[]` override); Wired v1 uses static import-chain scan only (evidence log deferred); depth-2 emits `approximate` on barrel depth-limit, not failure.
+
+**Known limits documented:** regex-based stub detection (not semantic), depth-2 walker misses 3+ hop chains, perf budget assumes hot cache, dynamic imports unsupported.
 
 ### S04 — Plan-checker agent + CLAUDE.md doc (PENDING)
