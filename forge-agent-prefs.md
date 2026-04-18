@@ -306,6 +306,29 @@ file_audit:
 - `scripts/forge-must-haves.js --check` — fornece a classificação legacy/valid usada pelo completer para decidir se o `expected_output` de um plano entra na união.
 - `.gsd/milestones/M003/slices/S02/tasks/T04/T04-PLAN.md` — tarefa que implementa o consumer.
 
+## Plan-Check Settings
+
+Controla o gate advisório `forge-plan-checker` que roda entre `plan-slice` e o primeiro `execute-task`. Avalia 10 dimensões estruturais do plano (`completeness`, `must_haves_wellformed`, `ordering`, `dependencies`, `risk_coverage`, `acceptance_observable`, `scope_alignment`, `decisions_honored`, `expected_output_realistic`, `legacy_schema_detect`) e grava `S##-PLAN-CHECK.md`.
+
+```
+plan_check:
+  mode: advisory     # advisory | blocking | disabled
+```
+
+### Semântica
+
+- `advisory` (padrão): o orquestrador invoca o plan-checker, grava `S##-PLAN-CHECK.md`, e prossegue com o primeiro `execute-task` independente do veredicto. Flags servem como documentação para revisão humana no UAT.
+- `blocking` (inerte em M003, scaffolded para M004+): o orquestrador enforça um revision-loop — máximo 3 rodadas; a cada rodada o número de `fail` precisa decrescer estritamente (monotônico). Caso contrário, o loop termina e o usuário é notificado com as dimensões ainda falhando. Sem código reordenando o planejamento — o modo apenas pausa a dispatch até o usuário intervir.
+- `disabled`: pula o gate completamente. Nenhum `S##-PLAN-CHECK.md` é gerado. Útil para milestones de documentação ou debugging rápido.
+
+### Cross-references
+
+- Consumer: `agents/forge-plan-checker.md` (agente Sonnet advisory; 10 dimensões locked).
+- Dispatch guard: `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` (invocação entre `plan-slice` e primeiro `execute-task`; idempotente — se `S##-PLAN-CHECK.md` já existe, pula).
+- Revision loop: `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` — branch inerte até `plan_check.mode == blocking`.
+- Artefato gerado: `.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md`.
+- Documentado em `CLAUDE.md § Anti-Hallucination Layer`.
+
 ## Token Budget Settings
 
 O bloco `token_budget` limita o tamanho das seções **opcionais** injetadas nos prompts dos workers, mantendo o consumo de contexto previsível. O orquestrador multiplica cada valor por 4 para obter o limite em caracteres antes de chamar `truncateAtSectionBoundary` (de `scripts/forge-tokens.js`), que usa a heurística `Math.ceil(chars / 4)` para estimar tokens — sem dependências externas, com precisão de ±5–15% para inglês/markdown.
