@@ -3,7 +3,7 @@ id: T01
 slice: S03
 milestone: M003
 title: "forge-verifier.js core module — 3-level verifyArtifact API + stub regex library"
-status: RUNNING
+status: DONE
 planned: 2026-04-16
 must_haves:
   truths:

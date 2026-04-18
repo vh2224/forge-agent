@@ -80,4 +80,36 @@ One sentence.
 - Key files to read first
 ```
 
+> **Note:** YAML frontmatter `must_haves:` is authoritative — the human-readable `## Must-Haves` section above mirrors it for readability but both must agree.
+
+## Must-Haves Schema (required on every T##-PLAN)
+
+Every net-new `T##-PLAN.md` **must** include the following structured block in its YAML frontmatter — **unconditionally, with no branches, no `if applicable`**. The executor blocks on absence.
+
+```yaml
+must_haves:
+  truths:
+    - "Observable outcome (used for verification)"
+  artifacts:
+    - path: "path/to/file.ts"
+      provides: "one-line description of what this file exports/does"
+      min_lines: 20
+      stub_patterns: ["return null"]   # optional — per-artifact overrides
+  key_links:
+    - from: "path/a.ts"
+      to: "path/b.ts"
+      via: "import of functionX"
+expected_output:
+  - path/to/file.ts
+  - path/to/other.ts
+```
+
+**Schema contract:**
+
+- `must_haves` is a **map** with exactly three keys: `truths`, `artifacts`, `key_links`.
+- `artifacts[].path` + `min_lines` + `provides` are REQUIRED per entry; `stub_patterns` is OPTIONAL.
+- `key_links[]` REQUIRES `from`, `to`, `via`.
+- `expected_output` is a **top-level sibling** of `must_haves` (not nested inside it) — a flat array of path strings.
+- **Unconditional** — emit the block on every net-new T##-PLAN, even when artifacts are minor. The executor's verification gate (`scripts/forge-must-haves.js`) parses and validates this shape; a missing or malformed block causes the gate to fail.
+
 Then return the `---GSD-WORKER-RESULT---` block.

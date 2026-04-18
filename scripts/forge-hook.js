@@ -31,6 +31,51 @@ const bumpAutoHeartbeat = (cwd) => {
   } catch { /* no auto mode or unreadable — ignore */ }
 };
 
+// Resolve the current unit ID from .gsd/forge/auto-mode.json `worker` field.
+// worker shape: "unit_type/UNIT_ID" — returns the right half (e.g. "T03").
+// Falls back to "adhoc" when the file is absent, unreadable, or worker is null.
+const resolveUnitId = (cwd) => {
+  try {
+    const autoFile = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
+    const auto = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
+    if (auto && typeof auto.worker === 'string' && auto.worker.length > 0) {
+      const parts = auto.worker.split('/');
+      return parts.length === 2 ? parts[1] : 'adhoc';
+    }
+  } catch { /* no auto-mode / unreadable → adhoc */ }
+  return 'adhoc';
+};
+
+// Read evidence.mode from merged prefs (user → repo → local, last wins).
+// Valid values: lenient | strict | disabled. Defaults to lenient.
+// Regex-only — no YAML parser required (MEM017 / zero-new-deps rule).
+const readEvidenceMode = (cwd) => {
+  const files = [
+    path.join(os.homedir(), '.claude', 'forge-agent-prefs.md'),
+    path.join(cwd, '.gsd', 'claude-agent-prefs.md'),
+    path.join(cwd, '.gsd', 'prefs.local.md'),
+  ];
+  let mode = 'lenient'; // default
+  for (const f of files) {
+    try {
+      const raw = fs.readFileSync(f, 'utf8');
+      // Look for `evidence:` followed on next non-blank line by `mode: <word>`
+      const m = raw.match(/^evidence:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);
+      if (m) mode = m[1].toLowerCase();
+    } catch { /* missing file — skip */ }
+  }
+  if (mode !== 'lenient' && mode !== 'strict' && mode !== 'disabled') {
+    mode = 'lenient';
+  }
+  return mode;
+};
+
+// Truncate a string to at most `max` characters, appending ellipsis if cut.
+const truncate = (s, max) => {
+  if (typeof s !== 'string') return '';
+  return s.length <= max ? s : s.slice(0, max) + '\u2026';
+};
+
 process.stdin.setEncoding('utf8');
 let raw = '';
 process.stdin.on('data', chunk => (raw += chunk));
@@ -180,6 +225,46 @@ process.stdin.on('end', () => {
         process.stdout.write(blockMessage + '\n');
         process.exit(2);
       }
+    }
+
+    // ── PostToolUse: evidence capture (Bash/Write/Edit only) ─────────────────
+    if (phase === 'post' && (toolName === 'Bash' || toolName === 'Write' || toolName === 'Edit')) {
+      try {
+        const cwd = data.cwd || process.cwd();
+        const mode = readEvidenceMode(cwd);
+        if (mode !== 'disabled') {
+          const unitId = resolveUnitId(cwd);
+          const evidenceDir  = path.join(cwd, '.gsd', 'forge');
+          const evidenceFile = path.join(evidenceDir, `evidence-${unitId}.jsonl`);
+
+          // Build evidence line — keep ≤ 512 bytes total
+          const toolResponse = data.tool_response || {};
+          const line = {
+            ts          : Date.now(),
+            tool        : toolName,
+            cmd         : truncate(toolInput.command || '', 200),
+            file        : toolInput.file_path || null,
+            ok          : toolResponse.success !== false && toolResponse.interrupted !== true,
+            interrupted : toolResponse.interrupted === true,
+          };
+
+          let serialized = JSON.stringify(line);
+          // Safety: if still oversize (huge file path), truncate cmd then file
+          if (Buffer.byteLength(serialized, 'utf8') > 512) {
+            line.cmd = truncate(line.cmd, 80);
+            line.file = truncate(line.file || '', 200) || null;
+            serialized = JSON.stringify(line);
+            // Last resort — drop cmd entirely
+            if (Buffer.byteLength(serialized, 'utf8') > 512) {
+              line.cmd = '[truncated]';
+              serialized = JSON.stringify(line);
+            }
+          }
+
+          fs.mkdirSync(evidenceDir, { recursive: true });
+          fs.appendFileSync(evidenceFile, serialized + '\n', 'utf8');
+        }
+      } catch { /* silent-fail — hook must never crash Claude Code (MEM008) */ }
     }
 
     // Only track Agent tool dispatches (from here on)

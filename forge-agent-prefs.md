@@ -252,6 +252,60 @@ Default 120 000 ms (2 min) por comando. Timeout produz exit code 124 e é regist
 - `agents/forge-executor.md` (step 10) — invocação no nível de task.
 - `agents/forge-completer.md` (step 3 de complete-slice) — invocação no nível de slice.
 
+## Evidence Settings
+
+Controla o comportamento do evidence log (PostToolUse) para verificação de claims nos summaries. Bloco **inerte até M003/S02** — nenhum código consome essas chaves ainda; documentadas aqui para que operadores possam pré-configurar antes de S02 entrar no ar.
+
+```
+evidence:
+  mode: lenient        # lenient | strict | disabled
+                       # lenient  = escreve evidence-{unitId}.jsonl; mismatches viram "## Evidence Flags"
+                       #            advisory em S##-SUMMARY.md (não bloqueia merge)
+                       # strict   = mismatches viram blocker em complete-slice (ativa via M004+)
+                       # disabled = hook pula escrita — nenhum evidence log gerado
+```
+
+### Semântica (referência — implementação em S02)
+
+- `lenient` (padrão seguro): gera o log, surfacia divergências como seção advisory no SUMMARY do slice. Forge-completer adiciona `## Evidence Flags` quando detecta claims sem contrapartida no log.
+- `strict`: mesma coleta; mismatches **bloqueiam** o fechamento do slice. Ativação prevista para M004+ após telemetria de falsos-positivos.
+- `disabled`: `scripts/forge-hook.js` PostToolUse branch pula a escrita do arquivo — zero overhead, zero log. Use em sessões de debug curtas ou em ambientes onde o disco está pressionado.
+
+### Cross-references
+
+- `scripts/forge-hook.js` (S02) — consumer; PostToolUse branch lê essa pref antes de gravar `.gsd/forge/evidence-{unitId}.jsonl`.
+- `agents/forge-completer.md` (S02) — consumer em `complete-slice`; lê a pref para decidir entre flag advisory e blocker.
+- `.gsd/milestones/M003/slices/S02/S02-PLAN.md` — tarefa de consumo efetivo.
+
+## File Audit Settings
+
+Controla o filtro do file-audit (seção `## File Audit` em `S##-SUMMARY.md`) executado pelo `forge-completer` no fechamento de cada slice. O file-audit compara `git diff --name-only --diff-filter=AM` com a união dos `expected_output:` de todos os `T##-PLAN.md` da slice — paths que batem com qualquer padrão em `ignore_list` são excluídos antes do diff (evita ruído de lockfiles e diretórios de build).
+
+```
+file_audit:
+  ignore_list:
+    - "package-lock.json"
+    - "yarn.lock"
+    - "pnpm-lock.yaml"
+    - "dist/**"
+    - "build/**"
+    - ".next/**"
+    - ".gsd/**"
+```
+
+### Semântica
+
+- **Padrões suportados:** prefix exato (`package-lock.json`), prefix com wildcard (`dist/**` cobre qualquer path abaixo de `dist/`), e simples `*` como `[^/]*` dentro de um segmento. NÃO usa `minimatch` — parser hand-rolled, zero dependências externas.
+- **Aplicação:** tanto o conjunto AM quanto o conjunto `expected_output` são filtrados pelo mesmo matcher antes do diff. Isso garante que um `expected_output: [".gsd/milestones/..."]` também seja desconsiderado se o ignore list cobrir `.gsd/**`.
+- **Fallback silencioso:** se o bloco estiver ausente ou a chave `ignore_list` estiver vazia, o consumer usa o default hardcoded idêntico ao mostrado acima. Nenhum erro é levantado.
+- **Deleções não auditadas:** `--diff-filter=AM` cobre apenas additions e modifications (decisão M003 D4). Arquivos deletados não aparecem no audit independente do `ignore_list`.
+
+### Cross-references
+
+- `agents/forge-completer.md` sub-step 1.6 — consumer do `file_audit.ignore_list`; escreve a seção `## File Audit` em `S##-SUMMARY.md`.
+- `scripts/forge-must-haves.js --check` — fornece a classificação legacy/valid usada pelo completer para decidir se o `expected_output` de um plano entra na união.
+- `.gsd/milestones/M003/slices/S02/tasks/T04/T04-PLAN.md` — tarefa que implementa o consumer.
+
 ## Token Budget Settings
 
 O bloco `token_budget` limita o tamanho das seções **opcionais** injetadas nos prompts dos workers, mantendo o consumo de contexto previsível. O orquestrador multiplica cada valor por 4 para obter o limite em caracteres antes de chamar `truncateAtSectionBoundary` (de `scripts/forge-tokens.js`), que usa a heurística `Math.ceil(chars / 4)` para estimar tokens — sem dependências externas, com precisão de ±5–15% para inglês/markdown.

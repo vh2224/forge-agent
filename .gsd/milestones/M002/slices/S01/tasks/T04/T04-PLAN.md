@@ -1,6 +1,6 @@
 # T04: Wire Retry Handler into forge-auto skill and forge-next command
 
-status: RUNNING
+status: DONE
 
 **Slice:** S01  **Milestone:** M002
 

@@ -16,6 +16,24 @@ You are a GSD execution agent. You implement one task completely: read → execu
 ## Process
 
 1. Read `T##-PLAN.md` fully
+1a. **Validate must_haves schema (BEFORE setting `status: RUNNING`):**
+    Run:
+    ```bash
+    node scripts/forge-must-haves.js --check "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md"
+    ```
+    Parse the JSON on stdout:
+    - `{"legacy": true}` → **continue normally**; record `legacy_schema: true` in T##-SUMMARY.md `## What Happened` as a one-line warn note. Do NOT block.
+    - `{"legacy": false, "valid": true}` → continue normally.
+    - `{"legacy": false, "valid": false}` (exit code 2) → **STOP**. Do NOT set `status: RUNNING`. Return `---GSD-WORKER-RESULT---` with:
+      ```
+      status: blocked
+      blocker_class: scope_exceeded
+      blocker: missing_must_haves_schema — <errors joined with "; ">
+      ```
+      Append the CLI stderr VERBATIM (truncated to 4 KB) inside `blocker`.
+    - Any other exit code or malformed JSON → surface as `status: blocked`, `blocker_class: tooling_failure`, `blocker: "forge-must-haves.js CLI error: <stderr>"`.
+
+    Schema shape is authoritative in `agents/forge-planner.md § Must-Haves Schema`.
 2. **Read `## Standards` section** in the task plan
 2.5. **If `## Security Checklist` is present in the injected prompt** — treat every item as a must-have equal to those in T##-PLAN.md. Verify all checklist items before writing T##-SUMMARY.md. Record any violations found (and fixed) in `## Security Flags` section of T##-SUMMARY.md. — contains pre-filtered coding rules (directory placement, naming, reusable assets, lint command, pattern to follow). If missing, read `.gsd/CODING-STANDARDS.md` as fallback.
 3. **Mark task as in-flight:** add or update `status: RUNNING` in the frontmatter of `T##-PLAN.md`
@@ -37,6 +55,33 @@ You are a GSD execution agent. You implement one task completely: read → execu
     Full gate contract and CLI shape: see `shared/forge-dispatch.md ## Verification Gate`.
 11. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.
 12. Write `T##-SUMMARY.md` — include `new_helpers` field if you created reusable functions (see Summary Format)
+12a. **Emit `verification_evidence:` frontmatter block** (inside the YAML frontmatter of `T##-SUMMARY.md`). For each command you ran in step 10 (verification gate), produce one entry:
+    ```yaml
+    verification_evidence:
+      - command: "npm run typecheck"
+        exit_code: 0
+        matched_line: 42
+      - command: "npm test"
+        exit_code: 0
+        matched_line: 43
+    ```
+    Derivation:
+    - `command`: the exact shell string you ran (or a stable substring — see below).
+    - `exit_code`: the numeric exit code you observed in your conversation (Claude Code surfaces it in the Bash tool result).
+    - `matched_line`: the 1-indexed line number in `.gsd/forge/evidence-{T##}.jsonl` whose `cmd` field contains your command (or a recognisable substring). Derive with:
+      ```bash
+      grep -n -m 1 -F "<command-substring>" .gsd/forge/evidence-{T##}.jsonl | cut -d: -f1
+      ```
+      - If grep finds a line → use that number.
+      - If grep returns nothing (evidence log missing, disabled mode, or the command string doesn't match) → record `matched_line: 0`. This is a valid sentinel — the slice completer (forge-completer) will surface it as an advisory flag, not a blocker.
+    - If the evidence log file does not exist at all (evidence.mode is `disabled`, or the hook failed silently), emit `verification_evidence: []` (empty array). Do NOT omit the key — the completer expects it.
+
+    `command` string rules:
+    - Must be ≤ 180 chars. Truncate at word boundary if the real command is longer.
+    - Must not contain raw newlines. Collapse to a single line.
+    - Quote the string in YAML with double quotes to avoid edge-case parser issues.
+
+    This block is advisory — it is not a verification gate. Emission is mandatory (completer reads it); content accuracy is best-effort.
 13. **Mark task complete:** update `status: DONE` in the frontmatter of `T##-PLAN.md`
 
 ## Research Freely When Unsure
@@ -151,6 +196,32 @@ completed_at: ISO8601
 ```
 
 - `new_helpers`: list every new reusable function/hook/utility you created during this task. Format: `name — path — one-line description`. The researcher will merge these into the Asset Map on the next research phase. If you created no new helpers, omit this field.
+- `legacy_schema: true` — set when the T##-PLAN carried a pre-M003 free-text must-haves section; warn only, never a blocker.
+
+### Summary Format: verification_evidence
+
+Every `T##-SUMMARY.md` MUST carry a `verification_evidence:` field in its YAML frontmatter. Shape:
+
+```yaml
+---
+id: T##
+slice: S##
+milestone: M###
+status: DONE
+verification_evidence:
+  - command: "npm run typecheck"
+    exit_code: 0
+    matched_line: 42
+  - command: "npm test"
+    exit_code: 0
+    matched_line: 43
+# ... other fields (provides, key_files, etc.) ...
+---
+```
+
+- Empty array (`verification_evidence: []`) is valid — means no verification commands were run OR the evidence log was unavailable (`evidence.mode: disabled`).
+- `matched_line: 0` is the "claim not found in evidence log" sentinel — valid, advisory only.
+- The slice completer (`forge-completer`) reads this block to produce `## Evidence Flags` in `S##-SUMMARY.md`. Mismatches are flagged but never block merge (M003 is advisory; strict-mode blocker is reserved for M004+).
 
 Follow with: **one substantive liner** + `## What Happened` + `## Deviations` + `## Files Created/Modified` + `## Verification`
 

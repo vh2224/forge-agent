@@ -4,15 +4,17 @@
 forge-agent — Context Engineering Orchestrator for Claude Code
 
 ## Active Milestone
-— (none)
+M003 — Anti-Hallucination Layer
 
 ## Current Position
-- milestone: —
-- slice: —
-- task: —
-- phase: idle
-- next_action: Run /forge-new-milestone <description> to start the next milestone
+- milestone: M003
+- slice: S03 — Goal-backward verifier (3-level)
+- task: T05
+- phase: execute-task
+- next_action: Execute T05
 
-## Milestone Status
-- [x] M001 — Forge v1.0: Autonomous, Shell-first, Context-aware (complete · v1.0.0)
-- [x] M002 — Context engineering upgrades portados do GSD-2 (complete · 2026-04-16)
+## Skipped for S03
+- research-slice — already captured via S03-RISK.md; planner designed defensively with contraexamples from RISK card; T05 smoke fixtures serve as calibration baseline
+
+## Slice Progress
+- [x] S01 · [x] S02 · [ ] S03 (T01→T06) · [ ] S04

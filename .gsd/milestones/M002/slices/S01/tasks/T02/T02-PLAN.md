@@ -1,6 +1,6 @@
 # T02: Port error classifier to `scripts/forge-classify-error.js`
 
-status: RUNNING
+status: DONE
 
 **Slice:** S01  **Milestone:** M002
 
