@@ -9,3 +9,8 @@ Thumbs.db
 # Projeto local
 CLAUDE.md
 do-not-commit/
+
+# Dogfood do próprio agente — este repo É o forge-agent, então .gsd/ aqui é
+# estado interno do agente rodando sobre si mesmo, nunca entrega. Em projetos
+# que CONSOMEM o agente, .gsd/ pode ser commitado normalmente.
+.gsd/

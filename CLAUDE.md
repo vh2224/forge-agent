@@ -353,6 +353,7 @@ Instaladores (`install.sh`, `install.ps1`) copiavam `merge-settings.js` atualiza
 
 ## Ao editar este projeto
 
+- **`.gsd/` NUNCA é commitado neste repo** — este projeto É o próprio agente Forge, então `.gsd/` aqui é dogfood interno (STATE, milestones, AUTO-MEMORY, events, etc. do agente rodando sobre si mesmo), não entrega. Executores, completer e qualquer outro worker que rodar `git add` / `git commit` aqui devem **explicitamente excluir `.gsd/`** do stage (ex.: `git add <arquivo-específico>` em vez de `git add -A`). A regra vale para o repo `forge-agent/` apenas — em projetos-usuário que **consomem** o agente, `.gsd/` pode ser commitado normalmente conforme as prefs do projeto.
 - **Nunca edite install.ps1 com strings contendo `\f`** — usar hex escape ou verificar bytes após edição
 - **Agentes não acessam tool Agent** — apenas o orquestrador (commands) despacha agentes
 - **Workers retornam `---GSD-WORKER-RESULT---`** — formato estruturado que o orquestrador parseia
