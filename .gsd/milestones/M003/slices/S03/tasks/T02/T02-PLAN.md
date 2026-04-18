@@ -3,7 +3,7 @@ id: T02
 slice: S03
 milestone: M003
 title: "CLI dual-mode + S##-VERIFICATION.md writer"
-status: RUNNING
+status: DONE
 planned: 2026-04-16
 must_haves:
   truths:
