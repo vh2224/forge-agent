@@ -18,6 +18,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
 1. Write `S##-SUMMARY.md` — compress all task summaries:
    - YAML frontmatter: id, milestone, provides (up to 8), key_files (up to 10), key_decisions (up to 5), patterns_established
+   > Note: `## Evidence Flags` (sub-step 1.5), `## File Audit` (sub-step 1.6), and `## Verification Summary` (sub-step 1.8) sections may appear in the body — written by the sub-steps below.
    - One substantive liner for the slice
    - `## What Was Built` narrative
    - `## Verification Gate` section (commands, exit codes, discovery source, total duration) — populated in step 3
@@ -39,6 +40,218 @@ Given all `T##-SUMMARY.md` files from the slice:
    ```
 
    Keep each bullet tight (one sentence). This section is read by `forge-planner` and `forge-researcher` before they plan or research the next slice — they treat it as high-priority context.
+
+1.5. **Evidence cross-ref — write `## Evidence Flags` section to `S##-SUMMARY.md`** (advisory; skipped when `evidence.mode: disabled`).
+
+    Read the merged `evidence.mode` pref (inline Bash):
+    ```bash
+    node -e "
+    const fs=require('fs'),path=require('path'),os=require('os');
+    const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                 path.join('{WORKING_DIR}','.gsd','claude-agent-prefs.md'),
+                 path.join('{WORKING_DIR}','.gsd','prefs.local.md')];
+    let mode='lenient';
+    for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^evidence:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch{}}
+    process.stdout.write(mode);
+    "
+    ```
+    If the result is `disabled` → SKIP this entire sub-step. Do NOT write `## Evidence Flags`, not even an empty one.
+    For each `T##-SUMMARY.md` in the slice (under `.gsd/milestones/M###/slices/S##/tasks/T##/`):
+
+    a. **Parse `verification_evidence:` from the SUMMARY frontmatter.** Use a tiny node one-liner (no new script):
+       ```bash
+       node -e "
+       const fs=require('fs');
+       const raw=fs.readFileSync('<T##-SUMMARY.md>','utf8');
+       const fm=(raw.match(/^---\\n([\\s\\S]*?)\\n---/)||[])[1]||'';
+       const block=fm.match(/^verification_evidence:[ \\t]*\\n([\\s\\S]*?)(?=\\n[a-zA-Z_][^\\n]*:|$)/m);
+       if(!block){process.stdout.write('[]');process.exit(0)}
+       const lines=block[1].split('\\n');
+       const entries=[];let cur=null;
+       for(const l of lines){
+         const m=l.match(/^\\s+-\\s+command:\\s*\"?([^\"]*)\"?/);
+         if(m){if(cur)entries.push(cur);cur={command:m[1],exit_code:null,matched_line:null};continue}
+         const e=l.match(/^\\s+exit_code:\\s*(-?\\d+)/);if(e&&cur){cur.exit_code=+e[1];continue}
+         const ml=l.match(/^\\s+matched_line:\\s*(-?\\d+)/);if(ml&&cur){cur.matched_line=+ml[1];continue}
+       }
+       if(cur)entries.push(cur);
+       process.stdout.write(JSON.stringify(entries));
+       "
+       ```
+       Output: `[{command, exit_code, matched_line}, ...]` or `[]`.
+    b. **Read `.gsd/forge/evidence-{T##}.jsonl`.** If the file does not exist AND `verification_evidence:` is non-empty → that is **condition (c)** — record a flag with reason `evidence_log_missing` for each claimed entry.
+    c. **For each entry, classify:**
+       - `matched_line === 0` → **condition (a)** — flag reason `command_not_in_log`.
+       - `matched_line > 0` → read line N of the JSONL (`sed -n "<N>p" <evidence-file>`), parse JSON, check whether the log line's `cmd` field contains the claimed `command` as a substring (case-sensitive, first 80 chars). If NO substring match → **condition (b)** — flag reason `command_mismatch_at_line`.
+       - `matched_line > 0` and substring match → no flag.
+    d. **Collect all flags from all tasks.** If flags is non-empty, append a `## Evidence Flags` section to `S##-SUMMARY.md`:
+       ```markdown
+       ## Evidence Flags
+
+       _Advisory only — these claims in T##-SUMMARY.md `verification_evidence:` could not be corroborated by the PostToolUse evidence log. No action taken; recorded for auditing._
+
+       | Task | Claim (command) | Reason |
+       |------|-----------------|--------|
+       | T01  | `npm run typecheck` | `command_not_in_log` (matched_line=0) |
+       | T02  | `npm test` | `command_mismatch_at_line` (line 3 of evidence-T02.jsonl has cmd="echo hello") |
+       | T03  | `npm run lint` | `evidence_log_missing` (file not found: .gsd/forge/evidence-T03.jsonl) |
+       ```
+
+       If flags is empty → do NOT write the section at all (absence is good news, no noise).
+
+    This sub-step is **advisory**. Do NOT return `status: blocked` based on flags. Do NOT abort merge. The section is purely documentation.
+
+1.6. **File audit — write `## File Audit` section to `S##-SUMMARY.md`** (advisory; always runs regardless of `evidence.mode`).
+
+    a. **Determine the slice diff set.** Use `git diff --name-only --diff-filter=AM` from the merge-base of the slice branch to HEAD. For a slice branch `gsd/M###/S##`:
+       ```bash
+       git diff --name-only --diff-filter=AM "$(git merge-base HEAD master)...HEAD"
+       ```
+       If `master` does not resolve, try `main`, then `origin/HEAD`, then fall back to working-tree diff:
+       ```bash
+       # Fallback (auto_commit: false or no slice branch):
+       git diff --name-only --diff-filter=AM HEAD
+       # Plus untracked files (git diff doesn't show these):
+       git ls-files --others --exclude-standard
+       ```
+       Collect all paths into a Set → `ACTUAL_AM`. Wrap in try/catch — git failure silently yields an empty set.
+
+    b. **Build expected_output union.** For each `T##-PLAN.md` under `.gsd/milestones/M###/slices/S##/tasks/T##/`:
+       ```bash
+       node scripts/forge-must-haves.js --check .gsd/milestones/M###/slices/S##/tasks/T##/T##-PLAN.md
+       ```
+       Parse the JSON stdout:
+       - `{legacy: true}` → contributes nothing (empty set).
+       - `{legacy: false, valid: false}` → skip with a warn note (malformed plan; non-blocking).
+       - `{legacy: false, valid: true}` → parse `expected_output:` inline via this one-liner:
+         ```bash
+         node -e "
+         const fs=require('fs');
+         const raw=fs.readFileSync('<T##-PLAN.md>','utf8');
+         const fm=(raw.match(/^---\n([\s\S]*?)\n---/)||[])[1]||'';
+         const inline=fm.match(/^expected_output:[ \t]*\[([^\]]*)\]/m);
+         if(inline){
+           const items=inline[1].split(',').map(s=>s.trim().replace(/^[\"']|[\"']$/g,'')).filter(Boolean);
+           process.stdout.write(JSON.stringify(items));process.exit(0);
+         }
+         const block=fm.match(/^expected_output:[ \t]*\n((?:[ \t]+-[^\n]*\n?)+)/m);
+         if(block){
+           const items=block[1].split('\n').filter(l=>/^\s+-\s+/.test(l))
+             .map(l=>l.replace(/^\s+-\s+/,'').trim().replace(/^[\"']|[\"']$/g,''));
+           process.stdout.write(JSON.stringify(items));process.exit(0);
+         }
+         process.stdout.write('[]');
+         "
+         ```
+       Union all results → `EXPECTED`.
+
+    c. **Read `file_audit.ignore_list` from merged prefs** (same cascade order as evidence.mode — user-global → repo → local):
+       ```bash
+       node -e "
+       const fs=require('fs'),path=require('path'),os=require('os');
+       const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                    path.join('{WORKING_DIR}','.gsd','claude-agent-prefs.md'),
+                    path.join('{WORKING_DIR}','.gsd','prefs.local.md')];
+       const DEFAULT=['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**'];
+       let list=DEFAULT;
+       for(const f of files){
+         try{
+           const r=fs.readFileSync(f,'utf8');
+           const block=r.match(/^file_audit:[ \t]*\n[ \t]+ignore_list:[ \t]*\[([^\]]*)\]/m);
+           if(block){
+             const items=block[1].split(',').map(s=>s.trim().replace(/^[\"']|[\"']$/g,'')).filter(Boolean);
+             if(items.length)list=items;
+           }
+         }catch{}
+       }
+       process.stdout.write(JSON.stringify(list));
+       "
+       ```
+
+    d. **Filter both sides with ignore_list.** A path matches a glob when:
+       - Pattern has no `*` / `?` → exact prefix match (`.gsd/` matches `.gsd/anything/here`).
+       - Pattern ends with `/**` → prefix match of everything before `/**`.
+       - Pattern has a single `**` in the middle → split on `**`, match start + end substrings.
+       - Otherwise → escape regex metachars, convert `*` to `[^/]*`, anchor at both ends.
+
+       Filter both `ACTUAL_AM` and `EXPECTED` through the ignore matcher. Any path matching any ignore pattern is dropped from that side.
+
+    e. **Diff the sets.**
+       - `unexpected` = ACTUAL_AM \ EXPECTED (files changed but not promised by any plan).
+       - `missing` = EXPECTED \ ACTUAL_AM (files promised but no AM diff entry).
+
+    f. **Write `## File Audit` section** to `S##-SUMMARY.md`. Write the section only if at least one of `unexpected` or `missing` is non-empty; if both are empty, omit the section entirely.
+       ```markdown
+       ## File Audit
+
+       _Advisory — git diff `--diff-filter=AM` vs union of `expected_output:` across all T##-PLAN.md. Deletions not audited per M003 decision D4. Ignore list applied from `file_audit.ignore_list` prefs._
+
+       **Unexpected (changed but not promised):**
+       - `scripts/forge-stray.js` (added — not in any expected_output)
+
+       **Missing (promised but no diff entry):**
+       - `scripts/forge-other.js` (declared in T01 `expected_output` — no AM diff)
+
+       Advisory only — no action taken; recorded for auditing.
+       ```
+       If only one list has entries, include only that sub-heading.
+
+    This sub-step is advisory. Do NOT return `status: blocked`. Do NOT abort merge. Git failures and malformed plans surface as warn notes, not errors.
+
+1.8. **Verification Summary — invoke verifier + write `## Verification Summary` section to `S##-SUMMARY.md`** (advisory; always runs).
+
+    a. **Invoke the verifier CLI:**
+       ```bash
+       node scripts/forge-verifier.js \
+         --slice {S##} \
+         --milestone {M###} \
+         --cwd {WORKING_DIR}
+       ```
+       Capture stdout into a variable; capture exit code separately. If exit code is non-zero OR stdout is not valid JSON, skip to step (d) below — write the "unavailable" fallback line.
+
+    b. **Parse the JSON output:**
+       ```javascript
+       // Expected shape:
+       // { slice, milestone, generated_at, duration_ms, rows: [...],
+       //   legacy_count, malformed_count, error_count }
+       ```
+       Count rows by verdict:
+       - `exists_pass`, `exists_fail`
+       - `substantive_pass`, `substantive_fail`
+       - `wired_pass`, `wired_fail`, `wired_skipped`, `wired_approximate`
+
+    c. **Read the generated VERIFICATION.md:**
+       Confirm the file exists at
+       `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-VERIFICATION.md`.
+       This is diagnostic — no content is inlined into the summary; the VERIFICATION.md stands on its own as the detailed audit artifact.
+
+    d. **Write `## Verification Summary` section to `S##-SUMMARY.md`:**
+       Always append this section (never omit — unlike Evidence Flags/File Audit which are omit-when-clean). Template:
+       ```markdown
+       ## Verification Summary
+
+       _Advisory — goal-backward audit of `must_haves.artifacts[]` across all tasks. Heuristic (regex stub detection + depth-2 import walker), JS/TS only. See `{S##}-VERIFICATION.md` for per-artifact detail._
+
+       - **Artifacts audited:** N
+       - **Exists:** P pass, F fail
+       - **Substantive:** P pass, F fail (K stub matches)
+       - **Wired:** P pass, F fail, S skipped (non-JS/TS or placeholder), A approximate (depth-limit)
+       - **Legacy plans:** L (schema-skip)
+       - **Malformed plans:** M
+       - **Duration:** D ms (budget ≤ 2000 ms for 10 artifacts hot-cache)
+
+       No action taken; flags are documentation-only.
+       ```
+
+    e. **Fallback (verifier unavailable):**
+       If the CLI failed (exit != 0, missing script, missing S01 dependency, etc.), append this one-liner instead:
+       ```markdown
+       ## Verification Summary (unavailable)
+
+       _Verifier failed to run: {reason from stderr or "unknown"}. VERIFICATION.md not generated this slice. Advisory — does not block closure._
+       ```
+
+    This sub-step is **advisory**. Do NOT return `status: blocked` based on verifier output. Do NOT abort merge. The section is purely documentation. If `scripts/forge-verifier.js` does not exist (e.g., running against a pre-M003/S03 checkout), write the fallback line and proceed.
 
 2. Write `S##-UAT.md` — human test script derived from must-haves:
    ```markdown
