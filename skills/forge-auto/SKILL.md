@@ -255,12 +255,152 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 
 9. **Branch on `PLAN_CHECK_MODE`:**
    - `advisory` → proceed to first `execute-task` regardless of counts.
-   - `blocking` → # TODO(T04): blocking revision loop goes here — fall through to advisory behavior.
+   - `blocking` → enter the **Blocking-mode revision loop** below.
    - (`disabled` already handled in step 2.)
 
 10. **Forward-compatibility note:** future M004+ may add per-dimension enforcement. The current wire passes through all dimension counts to events.jsonl so future code can filter.
 
 > This gate fires ONLY when transitioning from a just-completed `plan-slice` to the first `execute-task` of the same slice. When deriving the next unit (Step 1) results in `execute-task` AND the previous completed unit was `plan-slice` for the same slice, run this gate. For subsequent `execute-task` dispatches within the same slice, the idempotency check (step 3 above) ensures the gate is a no-op.
+
+**Blocking-mode revision loop (activated ONLY when `PLAN_CHECK_MODE == "blocking"`):**
+
+Constants (LOCKED — changing requires a new milestone decision):
+```
+MAX_PLAN_CHECK_ROUNDS = 3
+```
+
+State for the loop:
+- `round = 1` (the initial plan-check above was round 1; its result is already in `plan_check_counts`)
+- `prev_fail_count = plan_check_counts.fail` (from the step 7 parse result)
+
+**Append first-round events.jsonl entry** (round 1 = the initial gate run):
+```bash
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":1,\"counts\":{\"pass\":${PASS_COUNT},\"warn\":${WARN_COUNT},\"fail\":${FAIL_COUNT}},\"prev_fail\":null,\"outcome\":\"revised\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+```
+(Use the actual parsed counts from step 7. `prev_fail: null` for round 1 — there is no prior round.)
+
+**While `prev_fail_count > 0` AND `round < MAX_PLAN_CHECK_ROUNDS`:**
+
+  **a. Back up the prior PLAN-CHECK.md:**
+  ```bash
+  mv {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md \
+     {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK-round{round}.md
+  ```
+  This preserves the prior round's results for audit. Round 1 backup → `{S##}-PLAN-CHECK-round1.md`. Round 2 backup → `{S##}-PLAN-CHECK-round2.md`.
+
+  **b. Collect failing dimensions** from the backed-up `{S##}-PLAN-CHECK-round{round}.md`. Parse the verdict table — rows where `Verdict == "fail"`. Extract dimension names and justifications into a list.
+
+  **c. Increment round:** `round += 1`.
+
+  **d. Re-dispatch plan-slice** with an injected `## Revision Request` section:
+  ```
+  Agent({
+    subagent_type: 'forge-planner',
+    prompt: <plan-slice template from shared/forge-dispatch.md>
+      + "\n\n## Revision Request (round " + round + ")\n"
+      + "The prior plan scored `fail` on these dimensions:\n"
+      + "- {dimension 1}: {justification}\n"
+      + "- {dimension 2}: {justification}\n"
+      + "...\n"
+      + "Revise the slice plan to resolve these failures. Preserve all already-passing dimensions. "
+      + "Do NOT reduce scope to hide failures — fix the root cause.\n"
+  })
+  ```
+  Wait for the planner result. If the planner returns `status: blocked`, terminate immediately (do not enter the non-decreasing check — surfacing the planner failure takes precedence).
+
+  **e. Re-run the plan-check gate** — dispatch `forge-plan-checker` again using the same template from `shared/forge-dispatch.md § plan-check`, with `{PLAN_CHECK_MODE}: blocking` and `round: {round}` passed in the prompt. This produces a new `{S##}-PLAN-CHECK.md` (overwriting any prior file — the backup in step (a) already preserved the previous round).
+
+  **f. Parse new counts** → `new_fail_count` (from the worker result `plan_check_counts.fail`).
+
+  **g. Append events.jsonl line** (I/O errors MUST propagate — no silent-fail):
+  ```bash
+  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"counts\":{\"pass\":${NEW_PASS},\"warn\":${NEW_WARN},\"fail\":${new_fail_count}},\"prev_fail\":${prev_fail_count},\"outcome\":\"revised\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+  ```
+
+  **h. Monotonic-decrease check:** if `new_fail_count >= prev_fail_count`, TERMINATE (non-decreasing):
+  - Overwrite the `outcome` field in the events.jsonl line just written — or append a corrective entry:
+    ```bash
+    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"terminated-non-decreasing\",\"prev_fail\":${prev_fail_count},\"new_fail\":${new_fail_count}}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+    ```
+  - Surface to user (see **Termination Surface Block** below — reason: `non-decreasing`).
+  - Deactivate auto-mode: `echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json`
+  - **Stop loop.** Do NOT dispatch the first `execute-task` for this slice. Return.
+
+  **i. Update state:** `prev_fail_count = new_fail_count`.
+
+**After the while loop exits:**
+
+- If `prev_fail_count == 0`:
+  - Append events.jsonl:
+    ```bash
+    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"passed\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+    ```
+  - Proceed to the first `execute-task` dispatch normally.
+
+- Else (`round == MAX_PLAN_CHECK_ROUNDS` and `prev_fail_count > 0`):
+  - Append events.jsonl:
+    ```bash
+    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"terminated-exhausted\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+    ```
+  - Surface to user (see **Termination Surface Block** below — reason: `exhausted`).
+  - Deactivate auto-mode: `echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json`
+  - **Stop loop.** Do NOT dispatch the first `execute-task` for this slice. Return.
+
+---
+
+**Termination Surface Block (pt-BR):**
+
+Emit to the user when terminating (either `non-decreasing` or `exhausted`):
+
+```
+⚠  Plan-check blocking mode: terminando loop de revisão.
+   Motivo: {non-decreasing — fail não diminuiu entre rodadas | exhausted — rodadas esgotadas sem convergência}
+   Rodada atual: {round}/3
+   Dimensões ainda falhando:
+     - {dim1}: {justification}
+     - {dim2}: {justification}
+     ...
+
+Ação necessária: edite os T##-PLAN.md para resolver as dimensões listadas acima, depois:
+  - delete {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md
+  - rode `/forge-next` para reexecutar o gate (ou `/forge-auto` para continuar autônomo).
+
+Os arquivos de backup das rodadas anteriores estão em:
+  {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK-round1.md
+  {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK-round2.md  (se round >= 2)
+```
+
+---
+
+## Plan-Check Revision Loop
+
+**Purpose:** when `plan_check.mode: blocking` is set in prefs, the orchestrator does not proceed to `execute-task` if the plan-check gate finds structural failures. Instead, it enters this revision loop, which repeatedly re-plans and re-checks until the plan is clean or the loop terminates.
+
+**Activation:** only when `PLAN_CHECK_MODE == "blocking"`. Default (`advisory`) never enters this loop — the plan-checker result is informational only and the orchestrator proceeds immediately to `execute-task`.
+
+**Round semantics:**
+- Round 1 = the initial gate run (step 6 dispatch above). Already captured in `plan_check_counts`.
+- Rounds 2 and 3 = revision iterations triggered by this loop.
+- At most `MAX_PLAN_CHECK_ROUNDS = 3` rounds total (LOCKED constant — not a pref key).
+
+**Backup filenames:**
+- Before round 2 replanning: `{S##}-PLAN-CHECK-round1.md` (backup of round 1 results)
+- Before round 3 replanning: `{S##}-PLAN-CHECK-round2.md` (backup of round 2 results)
+- Final `{S##}-PLAN-CHECK.md` = the last round's results (whatever round terminates the loop)
+
+**Termination conditions (both stop the loop and surface to user):**
+1. `terminated-non-decreasing` — new fail count ≥ prev fail count (replanning made things worse or stagnated)
+2. `terminated-exhausted` — reached `MAX_PLAN_CHECK_ROUNDS` (3) and still has failures
+
+**Pass condition:** `fail_count == 0` at any point → `outcome: passed` → proceed to `execute-task`.
+
+**User-surface contract:** on termination, emit the structured pt-BR block above. User must edit plans manually and delete `{S##}-PLAN-CHECK.md` to reset. The T03 idempotency check will treat the deleted file as a fresh gate trigger on the next `/forge-next` or `/forge-auto` run.
+
+**events.jsonl outcomes (LOCKED):**
+- `"revised"` — a revision round completed (plan was re-dispatched and re-checked)
+- `"terminated-exhausted"` — rounds exhausted without reaching fail == 0
+- `"terminated-non-decreasing"` — fail count did not decrease between rounds
+- `"passed"` — fail count reached 0; proceeding to execute-task
 
 #### 2. Check skip rules
 
