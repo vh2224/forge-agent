@@ -429,7 +429,6 @@ Antes de ativar qualquer um destes em um projeto de produção: rode ≥ 1 miles
 
 ## Estado atual
 
-- **Milestone ativo:** M003 — Anti-Hallucination Layer
-- **Slice ativo:** —
-- **Fase:** validate — todos os slices concluídos. Aguarda validação/encerramento.
-- **Próxima ação:** Executar `/forge-next` para fechar M003 ou `/forge-new-milestone` para o próximo milestone.
+- **Milestone ativo:** — (M003 concluído)
+- **Fase:** idle — M003 encerrado com sucesso.
+- **Próxima ação:** Executar `/forge-new-milestone <descrição>` para iniciar o próximo milestone.

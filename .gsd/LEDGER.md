@@ -17,3 +17,13 @@ Four context engineering layers ported from GSD-2 into Forge's shell-first archi
 **Key decisions:** `unknown` errors are never retried (GSD-2 #3588 guard) · Slice-level verify failure → blocked, not retried (anti-recursion) · `Math.ceil(chars/4)` only — no tiktoken · Tier Resolution is pure Markdown (Hybrid C — no new script)
 
 ---
+
+## M003 — Anti-Hallucination Layer · 2026-04-18
+
+Four components compose multiplicatively to replace self-reported "done" with evidence-backed verification: a machine-parseable `must_haves:` schema enforced at executor startup (S01), a PostToolUse evidence JSONL log with completer cross-ref and file-audit (S02), a 3-level goal-backward verifier (Exists/Substantive/Wired with depth-2 BFS import-chain walker) that writes `S##-VERIFICATION.md` (S03), and an advisory plan-checker agent scoring 10 structural dimensions pre-execution with an inert blocking-mode revision loop (S04). Everything ships advisory by default except the schema — which is enforced from day one.
+
+**Slices:** S01 — Structured must-haves schema · S02 — Evidence log + file-audit · S03 — Goal-backward verifier (3-level) · S04 — Plan-checker agent + CLAUDE.md doc  
+**Key files:** scripts/forge-must-haves.js, scripts/forge-verifier.js, scripts/forge-hook.js, agents/forge-plan-checker.md, agents/forge-executor.md, agents/forge-completer.md, shared/forge-dispatch.md, forge-agent-prefs.md  
+**Key decisions:** Advisory-by-default posture (only S01 schema is a hard blocker) · D4 LOCKED — deletions not tracked in file-audit · Wired v1 = static import-chain only · MAX_PLAN_CHECK_ROUNDS=3 and plan_check.mode key name are LOCKED constants
+
+---

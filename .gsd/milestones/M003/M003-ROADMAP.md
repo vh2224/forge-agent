@@ -19,7 +19,7 @@ Make the forge-agent loop honest by replacing self-reported "done" with evidence
 - [x] **S03: Goal-backward verifier (3-level)** `risk:high` `depends:[S01, S02]`
   Demo: run a slice mixing one legit file and one 3-line stub (`() => null`) → `S##-VERIFICATION.md` shows legit file passing Exists/Substantive/Wired, stub file failing Substantive with the matching regex named; verifier wall-clock on 10-artifact slice stays within the 2s budget; a legacy M001/M002 plan is handled with `skipped: legacy_schema` — no crash.
 
-- [x] **S04: Plan-checker agent (advisory) + CLAUDE.md doc** `risk:medium` `depends:[S01]`
+- [x] **S04: Plan-checker agent (advisory) + CLAUDE.md doc** `risk:medium` `depends:[S01]` **MILESTONE COMPLETE**
   Demo: plan a slice → `S##-PLAN-CHECK.md` exists before the first `execute-task` dispatch with ≥8 scored dimensions (pass/warn/fail); set `plan_check.mode: blocking` in prefs → loop terminates at round 3 or on non-decreasing fail count; default stays `advisory` and loop proceeds regardless of verdict; `grep -n "Anti-Hallucination Layer" CLAUDE.md` returns the new section naming all 3 artifacts and 3 prefs keys.
 
 ## Capability Coverage (C1–C14 → slice)
