@@ -60,10 +60,50 @@ Given all `T##-SUMMARY.md` files from the slice:
    - `skipped: "no-stack"` → record `## Verification Gate: skipped (no-stack)` + one-line explanation in `S##-SUMMARY.md`. Continue to step 4.
    - `passed: false` → record full failure context in `S##-SUMMARY.md` under `## Verification Gate`. STOP — do NOT run security scan, lint, or merge. Return `---GSD-WORKER-RESULT---` with `status: blocked`, `blocker_class: tooling_failure`, and the `formatFailureContext` output as `blocker`.
 
-4. **Security scan** — scan files changed in this slice for risky patterns:
-   `eval(`, `exec(`, `innerHTML`, `dangerouslySetInnerHTML`, string-concatenated SQL queries (`.query("` + variable), `console.log` adjacent to token/password/secret, hardcoded credential strings, `shell=True`, `os.system(`.
-   If any found → add `## ⚠ Security Flags` section to `S##-SUMMARY.md` with: file path, pattern, and one-line context.
-   This is documentation only — not a blocker. Record and continue.
+4. **Review scan** (advisory; skipped when `review.mode: disabled`).
+
+   Read the merged `review.mode` pref (same cascade as evidence.mode):
+   ```bash
+   node -e "
+   const fs=require('fs'),path=require('path'),os=require('os');
+   const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                path.join('{WORKING_DIR}','.gsd','claude-agent-prefs.md'),
+                path.join('{WORKING_DIR}','.gsd','prefs.local.md')];
+   let mode='enabled';
+   for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^review:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch{}}
+   process.stdout.write(mode);
+   "
+   ```
+   If the result is `disabled` → SKIP this entire step. Continue to step 5.
+
+   4a. **Pattern scan.** Grep files changed in this slice for risky patterns:
+      `eval(`, `exec(`, `innerHTML`, `dangerouslySetInnerHTML`, string-concatenated SQL queries (`.query("` + variable), `console.log` adjacent to token/password/secret, hardcoded credentials, `shell=True`, `os.system(`.
+      Collect hits as `{file, line, pattern, snippet}` → `PATTERN_HITS`. Empty list is fine.
+
+   4b. **Adversarial review.** Dispatch `forge-reviewer` on the slice diff:
+      ```
+      Agent("forge-reviewer", "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: git diff $(git merge-base HEAD master 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo HEAD~10)...HEAD")
+      ```
+      Parse the result. If the worker returned `NO_FLAGS` → `LLM_FINDINGS = ""`. Otherwise capture the markdown block (everything before `---GSD-WORKER-RESULT---`).
+      If the `Agent()` call throws → record `LLM_FINDINGS = ""` and a one-line note; continue. Review failures never abort complete-slice.
+
+   4c. **Merge & write.** Build the `## ⚠ Review Flags` section:
+      ```markdown
+      ## ⚠ Review Flags
+
+      _Advisory — pattern scan + adversarial reviewer on slice diff. No action taken; recorded for auditing._
+
+      {LLM_FINDINGS if non-empty}
+
+      ### Pattern Hits
+      - `{file}:{line}` — pattern `{pattern}` — {one-line context from snippet}
+      ```
+      Write rules:
+      - Both empty → omit the section entirely.
+      - `PATTERN_HITS` empty → omit `### Pattern Hits` sub-heading.
+      - `LLM_FINDINGS` empty → include only `### Pattern Hits`.
+
+      Append to `S##-SUMMARY.md`. This is documentation only — never a blocker.
 
 5. **Lint gate** — before merging, read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
 

@@ -340,6 +340,11 @@ After result: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
 
 **Skip if:** `.gsd/tasks/{TASK_ID}/{TASK_ID}-SUMMARY.md` already exists (task done).
 
+**Record pre-execute HEAD SHA** (persisted to file so Step 5.5 can diff after executor commits):
+```bash
+git rev-parse HEAD 2>/dev/null > .gsd/tasks/{TASK_ID}/.start-sha || echo "" > .gsd/tasks/{TASK_ID}/.start-sha
+```
+
 **Create timeline task:**
 ```
 TaskCreate({ subject: "[{TASK_ID}] execute", activeForm: "execute · forge-executor (sonnet)" })
@@ -400,6 +405,69 @@ Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
 - `status: blocked` → surface blocker to user, stop
 
 `session_units += 1`
+
+---
+
+### Step 5.5 — Review (advisory)
+
+**Skip if:**
+- `review.mode: disabled` in merged prefs, OR
+- `{TASK_ID}-SUMMARY.md` already contains `## ⚠ Review Flags` section (idempotent resume)
+
+**Read `review.mode` pref** (same cascade as forge-completer):
+```bash
+node -e "
+const fs=require('fs'),path=require('path'),os=require('os');
+const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+             path.join('{WORKING_DIR}','.gsd','claude-agent-prefs.md'),
+             path.join('{WORKING_DIR}','.gsd','prefs.local.md')];
+let mode='enabled';
+for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^review:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch{}}
+process.stdout.write(mode);
+"
+```
+If `disabled` → skip Step 5.5 entirely.
+
+**Compute DIFF_CMD:**
+```bash
+START_SHA=$(cat .gsd/tasks/{TASK_ID}/.start-sha 2>/dev/null || echo "")
+if [ -n "$START_SHA" ] && git rev-parse "$START_SHA" >/dev/null 2>&1 && [ "$START_SHA" != "$(git rev-parse HEAD 2>/dev/null)" ]; then
+  DIFF_CMD="git diff ${START_SHA}..HEAD"
+else
+  DIFF_CMD="git diff HEAD"
+fi
+```
+`git diff HEAD` is the fallback for `auto_commit: false` (working-tree changes) or when no commit happened.
+
+**Pattern scan.** Grep changed files (from `$DIFF_CMD --name-only`) for the same patterns as forge-completer step 4a. Collect `PATTERN_HITS`.
+
+**Create timeline task:**
+```
+TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewer (sonnet)" })
+TaskUpdate({ taskId: <id>, status: "in_progress" })
+```
+
+**Dispatch forge-reviewer:**
+```
+Agent("forge-reviewer", "WORKING_DIR: {WORKING_DIR}\nUNIT: task/{TASK_ID}\nDIFF_CMD: {DIFF_CMD}")
+```
+If the `Agent()` call throws → `LLM_FINDINGS = ""` + one-line note in event log; continue. Review failures never abort the task.
+
+**Merge & append.** Build `## ⚠ Review Flags` section (same rules as forge-completer 4c) and append to `{TASK_ID}-SUMMARY.md`. If both `PATTERN_HITS` and `LLM_FINDINGS` are empty → skip append entirely.
+
+**Follow-up commit** (only if `auto_commit: true` AND the section was written):
+```bash
+git add .gsd/tasks/{TASK_ID}/{TASK_ID}-SUMMARY.md
+git commit -m "chore({TASK_ID}): append review flags"
+```
+Do NOT amend the `feat({TASK_ID})` commit — create a distinct follow-up. If no section was written, skip the commit.
+
+After: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
+
+Clean up `.start-sha` marker:
+```bash
+rm -f .gsd/tasks/{TASK_ID}/.start-sha
+```
 
 ---
 
