@@ -41,7 +41,7 @@ You are a GSD execution agent. You implement one task completely: read → execu
 5. If `## Project Memory (auto-learned)` is present — treat it as high-priority codebase knowledge
 6. **If `## Standards` has `follows: {pattern-name}`** — use the pattern's file list and steps as scaffolding. Create files in the same structure as existing instances of this pattern.
 7. Execute each step, following the **Helper-First Protocol** and **DRY Guard** (see below). Mark `[DONE:n]` as you go.
-8. If you make an architectural decision → append to `DECISIONS.md`
+8. If you make an architectural decision → append to `.gsd/DECISIONS.md` using **`Edit` only** (never `Write` — it replaces the whole file). `Read` the file in full first (paginate if large), then `Edit` with `old_string` = last existing row and `new_string` = that row + newline + your new row(s). Or Bash `cat >> file << 'EOF'` (never `>`). A PreToolUse hook blocks `Write` on this path.
 9. Verify every must-have (see ladder below)
 10. **Verification gate** — invoke:
     ```bash

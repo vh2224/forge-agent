@@ -45,6 +45,13 @@ const TOOL_HOOKS = [
   { event: 'PostToolUse', phase: 'post' },
 ];
 
+// Matchers installed for each tool-use event. `Agent` tracks dispatches;
+// `Write` fires the append-only guard for DECISIONS.md / LEDGER.md (pre only).
+const FORGE_MATCHERS = {
+  PreToolUse : ['Agent', 'Write'],
+  PostToolUse: ['Agent'],
+};
+
 // ── MCP operations ──────────────────────────────────────────────────────────
 if (mcpAdd || mcpRemove || mcpList) {
   if (!settings.mcpServers) settings.mcpServers = {};
@@ -119,20 +126,21 @@ if (remove) {
     if (Object.keys(settings.permissions).length === 0) delete settings.permissions;
   }
 
-  // Remove forge hooks from tool-use events (matcher: Agent)
+  // Remove forge hooks from tool-use events (matchers: Agent, Write)
   for (const { event } of TOOL_HOOKS) {
     const eventHooks = settings.hooks?.[event];
     if (!Array.isArray(eventHooks)) continue;
 
+    const matchers = FORGE_MATCHERS[event] || ['Agent'];
     for (const entry of eventHooks) {
-      if (entry.matcher === 'Agent' && Array.isArray(entry.hooks)) {
+      if (matchers.includes(entry.matcher) && Array.isArray(entry.hooks)) {
         entry.hooks = entry.hooks.filter(h => !h.command?.includes(FORGE_HOOK_MARKER));
       }
     }
 
     // Clean up empty matcher entries
     settings.hooks[event] = eventHooks.filter(
-      e => !(e.matcher === 'Agent' && e.hooks?.length === 0)
+      e => !(matchers.includes(e.matcher) && e.hooks?.length === 0)
     );
     if (settings.hooks[event].length === 0) delete settings.hooks[event];
   }
@@ -172,11 +180,11 @@ settings.permissions.defaultMode = 'bypassPermissions';
 
 if (!settings.hooks) settings.hooks = {};
 
-// Tool-use hooks: scoped to Agent matcher
-function mergeToolHook(eventHooks, phase) {
-  let matcherEntry = eventHooks.find(e => e.matcher === 'Agent');
+// Tool-use hooks: one matcher entry per tool name
+function mergeToolHook(eventHooks, phase, matcher) {
+  let matcherEntry = eventHooks.find(e => e.matcher === matcher);
   if (!matcherEntry) {
-    matcherEntry = { matcher: 'Agent', hooks: [] };
+    matcherEntry = { matcher, hooks: [] };
     eventHooks.push(matcherEntry);
   }
 
@@ -202,7 +210,10 @@ function mergeLifecycleHook(eventHooks, phase) {
 
 for (const { event, phase } of TOOL_HOOKS) {
   if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
-  mergeToolHook(settings.hooks[event], phase);
+  const matchers = FORGE_MATCHERS[event] || ['Agent'];
+  for (const matcher of matchers) {
+    mergeToolHook(settings.hooks[event], phase, matcher);
+  }
 }
 
 for (const { event, phase } of LIFECYCLE_HOOKS) {

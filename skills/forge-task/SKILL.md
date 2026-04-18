@@ -207,7 +207,7 @@ thinking: adaptive
 Score clarity (scope/acceptance/tech/dependencies/risk). Ask about dimensions below 70.
 Write {TASK_ID}-CONTEXT.md to .gsd/tasks/{TASK_ID}/ with sections:
   ## Decisions, ## Agent's Discretion, ## Open Questions, ## Out of Scope
-Append significant decisions to .gsd/DECISIONS.md.
+Append significant decisions to .gsd/DECISIONS.md using **Edit only** — never Write (replaces whole file; PreToolUse hook blocks Write here). Read the file in full first (paginate if large), then Edit with old_string = current last row and new_string = that row + newline + new row(s). Bash: cat >> file << 'EOF' (never >).
 Return ---GSD-WORKER-RESULT---.
 ```
 
@@ -486,7 +486,7 @@ mkdir -p .gsd/forge
 Agent("forge-memory", "WORKING_DIR: {WORKING_DIR}\nUNIT_TYPE: execute-task\nUNIT_ID: {TASK_ID}\n\nSUMMARY_CONTENT:\n{content of {TASK_ID}-SUMMARY.md}\n\nRESULT_BLOCK:\n{full ---GSD-WORKER-RESULT--- block verbatim}\n\nKEY_DECISIONS:\n{key_decisions from SUMMARY.md frontmatter, or '(none)'}")
 ```
 
-**Write ledger entry** — append a compact entry to `.gsd/LEDGER.md` (create if missing, same file used by milestones):
+**Write ledger entry** — append a compact entry to `.gsd/LEDGER.md` (create if missing, same file used by milestones). **Append using `Edit` only** (never `Write` on an existing file — it replaces the whole thing; a PreToolUse hook blocks `Write` here). Initial creation (file absent) may use `Write`. To append: `Read` the file in full first, then `Edit` with `old_string` = current last line and `new_string` = that line + newline + your new entry. Bash alternative: `cat >> .gsd/LEDGER.md << 'EOF'` (never `>`).
 ```markdown
 ## {TASK_ID} — {TASK_DESCRIPTION} · {YYYY-MM-DD}
 

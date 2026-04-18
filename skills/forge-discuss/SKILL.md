@@ -95,7 +95,7 @@ Write (or update) `.gsd/milestones/{M###}/{M###}-CONTEXT.md` or `slices/{S##}/{S
 {ideas for later milestones/slices}
 ```
 
-Append significant decisions to `.gsd/DECISIONS.md`.
+Append significant decisions to `.gsd/DECISIONS.md` using **`Edit` only** — never `Write` (it replaces the whole file; a PreToolUse hook blocks `Write` on this path). `Read` the file in full first (paginate if large), then `Edit` with `old_string` = current last row and `new_string` = that row + newline + your new row(s). Bash alternative: `cat >> .gsd/DECISIONS.md << 'EOF'` (never `>`).
 
 Read `.gsd/STATE.md`, then update it — set phase to `plan` (ready to plan this milestone/slice).
 

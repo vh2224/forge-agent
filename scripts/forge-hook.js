@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Forge Hook — fires on PreToolUse / PostToolUse for the Agent tool
+// Forge Hook — fires on PreToolUse / PostToolUse (Agent + Write matchers)
 //              and on SubagentStart / SubagentStop / PreCompact / PostCompact lifecycle events
 // Writes dispatch progress to a temp file that forge-statusline.js reads
 //
@@ -195,6 +195,23 @@ process.stdin.on('end', () => {
           if (allFlags.includes('r') && allFlags.includes('f')) {
             blockMessage = '[forge-hook] Bloqueado: remoção destrutiva de .gsd/ protege o estado do Forge.';
           }
+        }
+      }
+
+      // ── Write guard — protect append-only files (DECISIONS.md, LEDGER.md) ─
+      // Root cause: agents reflexively pick `Write` to "append" after reading
+      // a partial file, clobbering all prior rows. Append-only files must go
+      // through `Edit` or `cat >>`. Initial creation (file absent) is allowed.
+      if (!blockMessage && toolName === 'Write') {
+        const filePath = toolInput.file_path || '';
+        const isAppendOnly = /[/\\]\.gsd[/\\](DECISIONS|LEDGER)\.md$/.test(filePath);
+        if (isAppendOnly) {
+          try {
+            if (fs.existsSync(filePath) && fs.statSync(filePath).size > 0) {
+              const name = path.basename(filePath);
+              blockMessage = `[forge-hook] Bloqueado: Write em ${name} (append-only). Use Edit: Read o arquivo completo primeiro (sem limit, paginando se grande), depois Edit com old_string = última linha existente (exata) e new_string = essa linha + newline + nova(s) linha(s). Ou Bash: cat >> ${filePath.replace(/.*\.gsd/, '.gsd')} << 'EOF' (nunca >).`;
+            }
+          } catch { /* can't stat — allow */ }
         }
       }
 

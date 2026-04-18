@@ -109,4 +109,10 @@ Call `ExitPlanMode`. The CONTEXT file above is your plan — the user will revie
 
 ### Step 5 — Append significant decisions to `DECISIONS.md`
 
+**Use `Edit` — never `Write`** on `.gsd/DECISIONS.md`. `Write` replaces the whole file and will destroy existing rows (we lost decisions this way before, and a PreToolUse hook now blocks `Write` on this path). Procedure:
+
+1. `Read` `.gsd/DECISIONS.md` in full — no `limit`; if the file is long, call `Read` again with `offset` until you've seen the last row.
+2. `Edit` with `old_string` = the current last table row (exact whitespace, copied verbatim) and `new_string` = that same row followed by a newline and your new row(s).
+3. If you must use Bash instead, use `cat >> .gsd/DECISIONS.md << 'EOF' … EOF` — never `>` (which truncates).
+
 Then return the `---GSD-WORKER-RESULT---` block.

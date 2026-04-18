@@ -376,6 +376,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 4. Emit milestone completion report: slices completed, total tasks, key decisions made
 
 5. **Write ledger entry** — append a compact summary to `.gsd/LEDGER.md` (create if missing).
+   **Append using `Edit` only** (never `Write` on an existing file — it replaces the whole thing; a PreToolUse hook blocks `Write` here). If the file does not exist yet, `Write` is fine for initial creation. To append: `Read` the file in full first, then `Edit` with `old_string` = current last line and `new_string` = that line + newline + your new entry. Bash alternative: `cat >> .gsd/LEDGER.md << 'EOF'` (never `>`).
    This file survives cleanup and gives future subagents quick context on what was built:
    ```markdown
    ## {M###} — {milestone title} · {YYYY-MM-DD}

@@ -224,7 +224,7 @@ Write the updated file.
 ### B. Check for special commands
 
 If user said **"salvar decisão: [text]"**:
-- Append to `.gsd/DECISIONS.md` with a new row
+- Append to `.gsd/DECISIONS.md` using **`Edit` only** — never `Write` (replaces whole file; PreToolUse hook blocks `Write` here). `Read` the file in full first (paginate if large), then `Edit` with `old_string` = current last row and `new_string` = that row + newline + your new row. Bash alternative: `cat >> .gsd/DECISIONS.md << 'EOF'` (never `>`).
 - Confirm: "✓ Decisão salva no DECISIONS.md"
 
 If user said **"brainstorm: [topic]"** or **"brainstorming: [topic]"**:

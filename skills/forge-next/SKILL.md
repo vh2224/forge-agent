@@ -414,7 +414,7 @@ Each entry must be a single line. This is the orchestrator-side record; workers 
 
 **b) Update STATE.md** — advance to next unit position.
 
-**c) Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md`.
+**c) Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md` using **`Edit` only** (never `Write` — it replaces the entire file and destroys existing rows; a PreToolUse hook blocks `Write` here). `Read` the file in full first (paginate if needed), then `Edit` with `old_string` = the current last row and `new_string` = that row + newline + your new row(s). Bash alternative: `cat >> .gsd/DECISIONS.md << 'EOF'` (never `>`).
 
 **d) Memory extraction** — call `forge-memory` agent (blocking — await before continuing):
 
