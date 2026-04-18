@@ -430,6 +430,6 @@ Antes de ativar qualquer um destes em um projeto de produção: rode ≥ 1 miles
 ## Estado atual
 
 - **Milestone ativo:** M003 — Anti-Hallucination Layer
-- **Slice ativo:** S04 — Plan-checker agent (advisory) + CLAUDE.md doc
-- **Fase:** execute
-- **Próxima ação:** Executar `/forge-next` para iniciar S04.
+- **Slice ativo:** —
+- **Fase:** validate — todos os slices concluídos. Aguarda validação/encerramento.
+- **Próxima ação:** Executar `/forge-next` para fechar M003 ou `/forge-new-milestone` para o próximo milestone.

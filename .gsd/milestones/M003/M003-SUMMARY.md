@@ -2,8 +2,8 @@
 id: M003
 title: Anti-Hallucination Layer
 status: in-progress
-slices_completed: [S01, S02, S03]
-slices_pending: [S04]
+slices_completed: [S01, S02, S03, S04]
+slices_pending: []
 last_updated: 2026-04-18
 ---
 
@@ -56,4 +56,16 @@ Shipped `scripts/forge-verifier.js` (975 lines) — CommonJS dual-mode module im
 
 **Known limits documented:** regex-based stub detection (not semantic), depth-2 walker misses 3+ hop chains, perf budget assumes hot cache, dynamic imports unsupported.
 
-### S04 — Plan-checker agent + CLAUDE.md doc (PENDING)
+### S04 — Plan-checker agent + CLAUDE.md doc (COMPLETE)
+
+Shipped the final layer of M003: advisory plan-checker agent scoring 10 locked structural dimensions pre-execution, dispatch wiring in forge-auto + forge-next, inert blocking-mode revision loop (max 3 rounds, monotonic decrease), and `## Anti-Hallucination Layer (M003)` documentation in CLAUDE.md.
+
+- `agents/forge-plan-checker.md` (260 lines) — Sonnet agent, 10 dimensions, no Bash tool, orchestrator inlines `--check` JSON
+- `shared/forge-dispatch.md` — new `### plan-check` template (Read-paths pattern, MEM011)
+- `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` — plan-check guard + blocking revision loop (+140/+99 lines each)
+- `forge-agent-prefs.md` — `plan_check.mode: advisory` default (`## Plan-Check Settings`)
+- `CLAUDE.md` — `## Anti-Hallucination Layer (M003)` section (+55 lines, 5 components, 3 artifacts, 3 prefs keys)
+
+**Key decisions:** `plan_check.mode` key name LOCKED; `MAX_PLAN_CHECK_ROUNDS = 3` is a LOCKED literal constant; legacy plans always `warn` (never `fail`) per C13; template positioned between `plan-slice` and `plan-milestone` in file (file order ≠ execution order — execution order unchanged).
+
+**Activation note (MEM068):** `install.sh` / `install.ps1` re-run required to activate new agent + updated skill files. First live plan-check occurs on next net-new slice after re-install.
