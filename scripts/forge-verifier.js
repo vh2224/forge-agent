@@ -25,7 +25,7 @@
 // 3-level verification:
 //   Level 1 — Exists:       file present + non-empty
 //   Level 2 — Substantive:  meets min_lines + no stub patterns
-//   Level 3 — Wired:        key_links satisfied (stubbed in T01; T03 implements)
+//   Level 3 — Wired:        depth-2 import-chain scan (T03 implementation)
 //
 // Short-circuit rules:
 //   Exists fails  → Substantive and Wired not evaluated (Wired stays null)
@@ -33,6 +33,23 @@
 //
 // Zero dependencies — only Node built-ins fs and path.
 // Companion module: scripts/forge-must-haves.js (hasStructuredMustHaves, parseMustHaves)
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// Import-chain walker — supported patterns:
+//   - import ... from '<spec>'         (ESM)
+//   - require('<spec>')                (CJS)
+//   - export ... from '<spec>'         (ESM re-export)
+//   - export * from '<spec>'           (ESM barrel)
+//
+// Known limitations (heuristic, not semantic analysis):
+//   - Dynamic imports `import('<spec>')` — not detected.
+//   - Computed specs `require(VAR + '/thing')` — not detected.
+//   - `module.exports = require('./x')` CJS chains — detected as single-hop only; deeper chains emit `approximate`.
+//   - TypeScript path aliases from tsconfig `paths` — not resolved; alias'd imports treated as bare specs.
+//   - Re-exports through 3+ barrels — depth-2 cap emits `approximate`.
+//
+// This is a heuristic Wired check — human triages `approximate` / `false` rows.
+// ──────────────────────────────────────────────────────────────────────────────
 
 'use strict';
 
@@ -47,6 +64,46 @@ const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves')
 
 /** File extensions treated as JS/TS for stub detection. */
 const JS_TS_EXTENSIONS = new Set(['.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs']);
+
+/**
+ * Ordered list of supported extensions for import resolution.
+ * Used by resolveSpec() to try bare names and directories.
+ * Order: .js first (CJS-compat), then TS variants, then ESM-only.
+ */
+const SUPPORTED_EXTENSIONS = ['.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs'];
+
+/**
+ * Import pattern registry — all patterns whose capture group 1 is the import specifier.
+ * Order is documented for consistency (does NOT affect union result — all patterns run).
+ *   1. import_from    — ESM import ... from '...'
+ *   2. require_call   — CJS require('...')
+ *   3. export_from    — ESM re-export: export ... from '...'
+ *   4. export_star    — ESM barrel: export * from '...'
+ *
+ * IMPORTANT: Each regex uses the /g flag. Callers MUST reset lastIndex = 0 before use.
+ */
+const IMPORT_PATTERNS = [
+  {
+    name: 'import_from',
+    regex: /import\s+(?:[\s\S]*?)\s+from\s+['"]([^'"]+)['"]/g,
+    description: "ESM import ... from '<spec>'",
+  },
+  {
+    name: 'require_call',
+    regex: /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+    description: "CJS require('<spec>')",
+  },
+  {
+    name: 'export_from',
+    regex: /export\s+(?:[\s\S]*?)\s+from\s+['"]([^'"]+)['"]/g,
+    description: "ESM re-export: export ... from '<spec>'",
+  },
+  {
+    name: 'export_star',
+    regex: /export\s*\*\s*from\s+['"]([^'"]+)['"]/g,
+    description: "ESM barrel: export * from '<spec>'",
+  },
+];
 
 // ── Stub regex library ────────────────────────────────────────────────────────
 
@@ -115,6 +172,161 @@ function readFileCached(absPath) {
   }
   _fileCache.set(absPath, content);
   return content;
+}
+
+// ── Import-chain walker helpers ───────────────────────────────────────────────
+
+/**
+ * Extract all import/require/export specifiers from file content.
+ * Runs all IMPORT_PATTERNS and returns a deduplicated list of matches.
+ * Line numbers are 1-indexed.
+ *
+ * @param {string} content  File content
+ * @returns {Array<{pattern_name: string, spec: string, line_number: number}>}
+ */
+function extractImports(content) {
+  const results = [];
+  for (const { name, regex } of IMPORT_PATTERNS) {
+    regex.lastIndex = 0; // reset stateful global regex
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      const spec = match[1];
+      const lineNumber = content.substr(0, match.index).split('\n').length;
+      results.push({ pattern_name: name, spec, line_number: lineNumber });
+    }
+  }
+  return results;
+}
+
+/**
+ * Resolve an import specifier relative to the importing file.
+ * Returns the absolute normalised path if found on disk, or null for:
+ *   - bare/package specs (no leading ./ or ../)
+ *   - specs that cannot be resolved to any existing file
+ *
+ * Resolution order for `base`:
+ *   1. base as-is (if it already has a recognised extension)
+ *   2. base + each SUPPORTED_EXTENSION
+ *   3. base/index + each SUPPORTED_EXTENSION
+ *
+ * @param {string} importerAbs  Absolute path of the file containing the import
+ * @param {string} spec         Raw import specifier string
+ * @param {string} _cwd         Working directory (unused; reserved for future alias resolution)
+ * @returns {string|null}
+ */
+function resolveSpec(importerAbs, spec, _cwd) {
+  if (!spec.startsWith('./') && !spec.startsWith('../')) {
+    return null; // bare/package spec — skip
+  }
+
+  const base = path.resolve(path.dirname(importerAbs), spec);
+
+  // Try base as-is first (may already have extension)
+  if (SUPPORTED_EXTENSIONS.includes(path.extname(base).toLowerCase()) && fs.existsSync(base)) {
+    return path.normalize(base);
+  }
+
+  // Try base + extension
+  for (const ext of SUPPORTED_EXTENSIONS) {
+    const candidate = base + ext;
+    if (fs.existsSync(candidate)) {
+      return path.normalize(candidate);
+    }
+  }
+
+  // Try base/index + extension (directory import)
+  for (const ext of SUPPORTED_EXTENSIONS) {
+    const candidate = path.join(base, 'index' + ext);
+    if (fs.existsSync(candidate)) {
+      return path.normalize(candidate);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * BFS import-chain walker. Searches candidateFiles (and files reachable from them
+ * up to `depth` hops) for any reference to targetAbs.
+ *
+ * @param {string}   targetAbs       Absolute path of the artifact we are checking
+ * @param {string[]} candidateFiles  Absolute paths of peer files to start BFS from
+ * @param {object}   opts
+ * @param {string}   opts.cwd        Working directory
+ * @param {number}   [opts.depth=2]  Maximum hop depth
+ * @param {Map}      [opts.cache]    Optional external file cache (readFileCached's _fileCache)
+ * @returns {object}  BFS result object
+ */
+function walkImports(targetAbs, candidateFiles, opts) {
+  const cwd = opts.cwd;
+  const maxDepth = (opts.depth !== undefined) ? opts.depth : 2;
+  // Use the shared cache if provided so we don't re-read files already read by verifyArtifact
+  // (MEM073: pass cache by reference through opts)
+
+  const visited = new Set();
+  let anyHopAtMaxDepth = false;
+
+  // Queue entries: { file: absPath, hop: 1..maxDepth }
+  const queue = candidateFiles.map(f => ({ file: f, hop: 1 }));
+
+  while (queue.length > 0) {
+    const { file, hop } = queue.shift();
+    if (visited.has(file)) continue;
+    visited.add(file);
+
+    if (hop === maxDepth) {
+      anyHopAtMaxDepth = true;
+    }
+
+    // Read content — swallow per-file errors (ENOENT etc.)
+    let content;
+    try {
+      content = readFileCached(file);
+    } catch (_err) {
+      continue; // file unreadable — skip, counts as visited
+    }
+    if (content === null) continue;
+
+    const imports = extractImports(content);
+    for (const imp of imports) {
+      const resolved = resolveSpec(file, imp.spec, cwd);
+      if (resolved === null) continue;
+
+      if (path.normalize(resolved) === path.normalize(targetAbs)) {
+        return {
+          found: true,
+          depth_reached: hop,
+          candidates_scanned: visited.size,
+          matching_file: file,
+          pattern_name: imp.pattern_name,
+          line_number: imp.line_number,
+        };
+      }
+
+      // Enqueue for next hop if within depth budget
+      if (hop < maxDepth && !visited.has(resolved)) {
+        queue.push({ file: resolved, hop: hop + 1 });
+      }
+    }
+  }
+
+  // Not found — distinguish depth_limit from no_references_found
+  if (anyHopAtMaxDepth) {
+    return {
+      found: false,
+      approximate: true,
+      reason: 'depth_limit',
+      depth_reached: maxDepth,
+      candidates_scanned: visited.size,
+    };
+  }
+
+  return {
+    found: false,
+    approximate: false,
+    reason: 'no_references_found',
+    candidates_scanned: visited.size,
+  };
 }
 
 // ── Level 1: Exists ───────────────────────────────────────────────────────────
@@ -234,26 +446,71 @@ function checkSubstantive(content, lineCount, artifact) {
   return { pass: true };
 }
 
-// ── Level 3: Wired (stub) ─────────────────────────────────────────────────────
+// ── Level 3: Wired ────────────────────────────────────────────────────────────
 
 /**
- * Level-3 wired check — not yet implemented (T03 fills this in).
- * Returns a sentinel flag indicating this level is pending.
+ * Level-3 wired check — depth-2 import-chain scan (T03 implementation).
  *
- * @param {object} artifact   Artifact descriptor
- * @param {boolean} nonJsTs   True when repo has no JS/TS files
- * @returns {{ wired: null|'skipped', flag: object }}
+ * Returns:
+ *   { wired: true }                           — found a reference within depth
+ *   { wired: false, flag: {...} }             — no references found
+ *   { wired: 'approximate', flag: {...} }     — depth limit reached, may exist deeper
+ *   { wired: 'skipped', flag: {...} }         — non-JS/TS artifact
+ *
+ * @param {object}   artifact      Artifact descriptor (must have .path)
+ * @param {boolean}  nonJsTs       True when this is not a JS/TS artifact
+ * @param {string[]} candidateFiles Absolute paths of candidate peer files
+ * @param {string}   cwd           Working directory
+ * @returns {{ wired: boolean|string, flag?: object, walker_info?: object }}
  */
-function checkWiredStub(artifact, nonJsTs) {
+function checkWired(artifact, nonJsTs, candidateFiles, cwd) {
   if (nonJsTs) {
     return {
       wired: 'skipped',
       flag: { level: 'wired', reason: 'non_js_ts_repo', path: artifact.path },
     };
   }
+
+  const artifactAbs = path.resolve(cwd, artifact.path);
+  const result = walkImports(artifactAbs, candidateFiles, { cwd, depth: 2 });
+
+  const walkerInfo = {
+    candidates_scanned: result.candidates_scanned,
+    depth_reached: result.depth_reached,
+    pattern_name: result.pattern_name,
+    line_number: result.line_number,
+  };
+
+  if (result.found) {
+    return {
+      wired: true,
+      walker_info: walkerInfo,
+    };
+  }
+
+  if (result.approximate) {
+    return {
+      wired: 'approximate',
+      flag: {
+        level: 'wired',
+        reason: result.reason,
+        depth_reached: result.depth_reached,
+        candidates_scanned: result.candidates_scanned,
+        path: artifact.path,
+      },
+      walker_info: walkerInfo,
+    };
+  }
+
   return {
-    wired: null,
-    flag: { level: 'wired', reason: 'not_implemented_yet', path: artifact.path },
+    wired: false,
+    flag: {
+      level: 'wired',
+      reason: 'no_references_found',
+      candidates_scanned: result.candidates_scanned,
+      path: artifact.path,
+    },
+    walker_info: walkerInfo,
   };
 }
 
@@ -290,17 +547,22 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
 
   const artifacts = mustHaves.artifacts;
 
-  // ── Detect non-JS/TS repo ─────────────────────────────────────────────────
-  const nonJsTs = artifacts.every(a => {
-    const ext = path.extname(a.path).toLowerCase();
-    return !JS_TS_EXTENSIONS.has(ext);
-  });
+  // ── Detect non-JS/TS artifact (per-artifact, not per-repo) ──────────────
+  // (nonJsTs is computed per artifact below)
+
+  // ── Build all artifact absolute paths for cross-reference ─────────────────
+  // Candidates = all artifacts in this must-haves + extra sliceFiles passed by CLI
+  const artifactAbsPaths = artifacts.map(a => path.resolve(cwd, a.path));
+  const extraAbsPaths = (Array.isArray(sliceFiles) ? sliceFiles : [])
+    .map(f => path.isAbsolute(f) ? f : path.resolve(cwd, f));
+  const allCandidateAbsPaths = Array.from(new Set([...artifactAbsPaths, ...extraAbsPaths]));
 
   // ── Evaluate each artifact ────────────────────────────────────────────────
   const rows = [];
 
   for (const artifact of artifacts) {
     const artifactPath = artifact.path;
+    const artifactAbs = path.resolve(cwd, artifactPath);
 
     // ── Level 1: Exists ───────────────────────────────────────────────────
     const existsResult = checkExists(artifactPath, cwd);
@@ -332,15 +594,24 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
       continue; // short-circuit
     }
 
-    // ── Level 3: Wired (stub) ─────────────────────────────────────────────
-    const wiredResult = checkWiredStub(artifact, nonJsTs);
+    // ── Level 3: Wired ────────────────────────────────────────────────────
+    const isNonJsTs = !JS_TS_EXTENSIONS.has(path.extname(artifactPath).toLowerCase());
+    // Candidate files: all artifacts and sliceFiles EXCEPT this artifact itself
+    const candidateFiles = allCandidateAbsPaths.filter(
+      p => path.normalize(p) !== path.normalize(artifactAbs)
+    );
+    const wiredResult = checkWired(artifact, isNonJsTs, candidateFiles, cwd);
+
+    const rowFlags = [];
+    if (wiredResult.flag) rowFlags.push(wiredResult.flag);
 
     rows.push({
       path: artifactPath,
       exists: true,
       substantive: true,
       wired: wiredResult.wired,
-      flags: [wiredResult.flag],
+      walker_info: wiredResult.walker_info,
+      flags: rowFlags,
     });
   }
 
@@ -352,10 +623,16 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
 module.exports = {
   verifyArtifact,
   DEFAULT_STUB_REGEXES,
+  IMPORT_PATTERNS,
+  SUPPORTED_EXTENSIONS,
   _private: {
     checkExists,
     checkSubstantive,
     readFileCached,
+    extractImports,
+    resolveSpec,
+    walkImports,
+    checkWired,
   },
 };
 
@@ -465,7 +742,9 @@ function runSliceVerification(opts) {
 
   if (combinedArtifacts.length > 0) {
     const combinedMustHaves = { artifacts: combinedArtifacts, key_links: [] };
-    const verifyResult = verifyArtifact(combinedMustHaves, [], { cwd: opts.cwd });
+    // Pass all artifact paths as sliceFiles so the walker has full candidate set
+    const sliceFilesCandidates = combinedArtifacts.map(a => path.resolve(opts.cwd, a.path));
+    const verifyResult = verifyArtifact(combinedMustHaves, sliceFilesCandidates, { cwd: opts.cwd });
     for (const row of verifyResult.rows) {
       // Find the sourceTask from the artifact we tagged
       const artifact = combinedArtifacts.find(a => a.path === row.path);
@@ -568,7 +847,12 @@ function formatVerificationMd(result) {
   const tableRows = rows.map(row => {
     const existsCell = row.exists === true ? '✓' : row.exists === false ? '✗' : '—';
     const subCell = row.substantive === true ? '✓' : row.substantive === false ? '✗' : '—';
-    const wiredCell = row.wired === true ? '✓' : row.wired === false ? '✗' : row.wired === 'skipped' ? 'skip' : '—';
+    // Wired: ✓ (found), ✗ (not found), ~ (approximate/depth_limit), — (skipped non-JS/TS or not evaluated)
+    const wiredCell = row.wired === true ? '✓'
+      : row.wired === false ? '✗'
+      : row.wired === 'approximate' ? '~'
+      : row.wired === 'skipped' ? '—'
+      : '—';
 
     // Build compact flags cell
     let flagsCell = '—';
@@ -578,10 +862,13 @@ function formatVerificationMd(result) {
         flagsCell = '`skipped: legacy_schema`';
       } else if (firstFlag.reason === 'malformed_schema') {
         flagsCell = '`skipped: malformed_schema`';
-      } else if (firstFlag.reason === 'not_implemented_yet') {
-        flagsCell = '`wired: pending T03`';
       } else if (firstFlag.reason === 'non_js_ts_repo') {
         flagsCell = '`wired: non_js_ts`';
+      } else if (firstFlag.reason === 'no_references_found') {
+        const scanned = firstFlag.candidates_scanned !== undefined ? ` (${firstFlag.candidates_scanned} scanned)` : '';
+        flagsCell = `\`wired: no_references_found${scanned}\``;
+      } else if (firstFlag.reason === 'depth_limit') {
+        flagsCell = `\`wired: ~depth_limit (depth ${firstFlag.depth_reached})\``;
       } else if (firstFlag.reason === 'file_not_found' && firstFlag.level === 'exists') {
         flagsCell = '`file_not_found`';
       } else if (firstFlag.reason === 'below_min_lines') {
@@ -603,8 +890,10 @@ function formatVerificationMd(result) {
   const failingRows = rows.filter(row =>
     row.exists === false ||
     row.substantive === false ||
+    row.wired === false ||
+    row.wired === 'approximate' ||
     (row.flags && row.flags.some(f =>
-      f.reason && !['not_implemented_yet', 'non_js_ts_repo', 'legacy_schema'].includes(f.reason)
+      f.reason && !['non_js_ts_repo', 'legacy_schema', 'no_references_found', 'depth_limit'].includes(f.reason)
     ))
   );
 
@@ -617,6 +906,10 @@ function formatVerificationMd(result) {
       for (const flag of (row.flags || [])) {
         if (flag.regex_name) {
           parts.push(`- **${flag.regex_name}** at line ${flag.line_number}: \`${flag.matched_text}\``);
+        } else if (flag.reason === 'depth_limit') {
+          parts.push(`- **wired: ~** depth_limit reached at depth ${flag.depth_reached} (${flag.candidates_scanned} candidates scanned). Chain may exist beyond depth-2 cap — human triage advised.`);
+        } else if (flag.reason === 'no_references_found') {
+          parts.push(`- **wired: ✗** no import/require/export reference found in ${flag.candidates_scanned} candidates scanned.`);
         } else if (flag.reason) {
           const detail = flag.error ? ` — ${flag.error}` : '';
           const lines = flag.actual !== undefined ? ` (actual: ${flag.actual}, expected: ${flag.expected})` : '';
