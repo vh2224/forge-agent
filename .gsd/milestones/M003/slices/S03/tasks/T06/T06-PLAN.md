@@ -4,7 +4,7 @@ slice: S03
 milestone: M003
 tag: docs
 title: "Perf smoke — cold/warm/hot measurements on Windows + SUMMARY appendix"
-status: planned
+status: DONE
 planned: 2026-04-16
 must_haves:
   truths:
