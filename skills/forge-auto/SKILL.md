@@ -209,6 +209,59 @@ Skill({ skill: "forge-security", args: "{M###} {S##} {T##}" })
 ```
 The produced `T##-SECURITY.md` will be injected into the execute-task worker prompt as `## Security Checklist`.
 
+**Plan-check gate (between plan-slice and first execute-task):**
+
+After a successful `plan-slice` unit, before dispatching the first `execute-task` for the same slice, run the plan-check gate:
+
+1. **Read `plan_check.mode` from the 3-file prefs cascade:**
+   ```bash
+   PLAN_CHECK_MODE=$(node -e "
+   const fs=require('fs'),path=require('path'),os=require('os');
+   const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                path.join('{WORKING_DIR}','.gsd','claude-agent-prefs.md'),
+                path.join('{WORKING_DIR}','.gsd','prefs.local.md')];
+   let mode='advisory';
+   for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^plan_check:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch(e){}}
+   if(mode!=='advisory'&&mode!=='blocking'&&mode!=='disabled')mode='advisory';
+   process.stdout.write(mode);
+   ")
+   ```
+   Store as `PLAN_CHECK_MODE`.
+
+2. **If `PLAN_CHECK_MODE == "disabled"`:** skip — do not invoke the plan-checker. Proceed to first `execute-task`.
+
+3. **Idempotency check:** if `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md` already exists, skip — do not re-invoke the plan-checker.
+
+4. **Aggregate MUST_HAVES_CHECK_RESULTS:**
+   For each `T##-PLAN.md` under `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/T*/`:
+   ```bash
+   node scripts/forge-must-haves.js --check <T##-PLAN.md>
+   ```
+   Capture stdout JSON. Build an array of `{task_id, legacy, valid, errors}`. Serialize to JSON as `MUST_HAVES_CHECK_RESULTS`.
+
+5. **Fill the plan-check template** from `shared/forge-dispatch.md § plan-check` with `{WORKING_DIR}`, `{M###}`, `{S##}`, `{PLAN_CHECK_MODE}`, `{MUST_HAVES_CHECK_RESULTS}`.
+
+6. **Dispatch:**
+   ```
+   Agent({ subagent_type: 'forge-plan-checker', prompt: <filled-template> })
+   ```
+
+7. **Parse the worker result** — extract `plan_check_counts: {pass, warn, fail}` from the `---GSD-WORKER-RESULT---` block.
+
+8. **Append to `{WORKING_DIR}/.gsd/forge/events.jsonl`** (I/O errors MUST propagate — no silent-fail):
+   ```json
+   {"ts":"<ISO-8601>","event":"plan_check","milestone":"{M###}","slice":"{S##}","mode":"{PLAN_CHECK_MODE}","counts":{"pass":N,"warn":N,"fail":N}}
+   ```
+
+9. **Branch on `PLAN_CHECK_MODE`:**
+   - `advisory` → proceed to first `execute-task` regardless of counts.
+   - `blocking` → # TODO(T04): blocking revision loop goes here — fall through to advisory behavior.
+   - (`disabled` already handled in step 2.)
+
+10. **Forward-compatibility note:** future M004+ may add per-dimension enforcement. The current wire passes through all dimension counts to events.jsonl so future code can filter.
+
+> This gate fires ONLY when transitioning from a just-completed `plan-slice` to the first `execute-task` of the same slice. When deriving the next unit (Step 1) results in `execute-task` AND the previous completed unit was `plan-slice` for the same slice, run this gate. For subsequent `execute-task` dispatches within the same slice, the idempotency check (step 3 above) ensures the gate is a no-op.
+
 #### 2. Check skip rules
 
 Read PREFS for `skip_discuss` and `skip_research`. If the current unit type is skipped, advance STATE past it and re-derive (do not count as a unit).
