@@ -9,7 +9,8 @@ allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, Ta
 ```bash
 ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
 ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
-pwd
+WORKING_DIR=$(pwd)
+echo "WORKING_DIR=$WORKING_DIR"
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:
@@ -217,14 +218,15 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
    ```bash
    PLAN_CHECK_MODE=$(node -e "
    const fs=require('fs'),path=require('path'),os=require('os');
+   const wd=process.env.WORKING_DIR||process.cwd();
    const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
-                path.join('{WORKING_DIR}','.gsd','claude-agent-prefs.md'),
-                path.join('{WORKING_DIR}','.gsd','prefs.local.md')];
+                path.join(wd,'.gsd','claude-agent-prefs.md'),
+                path.join(wd,'.gsd','prefs.local.md')];
    let mode='advisory';
    for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^plan_check:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch(e){}}
    if(mode!=='advisory'&&mode!=='blocking'&&mode!=='disabled')mode='advisory';
    process.stdout.write(mode);
-   ")
+   " WORKING_DIR="$WORKING_DIR")
    ```
    Store as `PLAN_CHECK_MODE`.
 
@@ -233,13 +235,15 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 3. **Idempotency check:** if `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md` already exists, skip — do not re-invoke the plan-checker.
 
 4. **Aggregate MUST_HAVES_CHECK_RESULTS:**
-   For each `T##-PLAN.md` under `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/T*/`:
+   Use `$WORKING_DIR` (captured in bootstrap via `pwd` — always forward-slash, Windows-safe). For each `T##-PLAN.md`:
    ```bash
-   node scripts/forge-must-haves.js --check <T##-PLAN.md>
+   for plan in "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/T"/T*-PLAN.md; do
+     node scripts/forge-must-haves.js --check "$plan"
+   done
    ```
    Capture stdout JSON. Build an array of `{task_id, legacy, valid, errors}`. Serialize to JSON as `MUST_HAVES_CHECK_RESULTS`.
 
-5. **Fill the plan-check template** from `shared/forge-dispatch.md § plan-check` with `{WORKING_DIR}`, `{M###}`, `{S##}`, `{PLAN_CHECK_MODE}`, `{MUST_HAVES_CHECK_RESULTS}`.
+5. **Fill the plan-check template** from `shared/forge-dispatch.md § plan-check` with `$WORKING_DIR` (not raw CWD — always use the bash-captured variable), `{M###}`, `{S##}`, `{PLAN_CHECK_MODE}`, `{MUST_HAVES_CHECK_RESULTS}`.
 
 6. **Dispatch:**
    ```

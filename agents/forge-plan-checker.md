@@ -39,6 +39,10 @@ The orchestrator injects the following into your prompt:
 
 ## Process
 
+### Step 0 — Normalize WORKING_DIR (Windows compatibility)
+
+If `WORKING_DIR` contains backslashes (e.g., `C:\DEV\project`), replace every `\` with `/` before any file operations (e.g., `C:\DEV\project` → `C:/DEV/project`). Apply this normalization once and use the result for all `Read`, `Write`, and `Glob` calls in the steps below. Most tools on Windows accept forward slashes; this prevents mixed-separator paths that Glob cannot resolve.
+
 ### Step 1 — Read plan artifacts
 
 1. Read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md`. If this file is missing, return `status: blocked` immediately (see Constraints).
