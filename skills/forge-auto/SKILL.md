@@ -65,8 +65,11 @@ Do this for ALL in_progress tasks before starting the loop. Skip if TaskList ret
 ```bash
 cat .gsd/forge/auto-mode.json 2>/dev/null
 ```
-- If `active: true` AND `started_at` is within the last 60 minutes AND milestone is not done:
-  → Emit one line: `↺ Retomando forge-auto após interrupção...` and skip the activation step below — go directly to the dispatch loop. The marker is already set.
+- If `active: true` AND milestone is not done:
+  - If `compact-signal.json` exists (`cat .gsd/forge/compact-signal.json 2>/dev/null`):
+    → Compact recovery path — skip ALL initialization (activation, load context, etc.). Go directly to the dispatch loop. The compact recovery check at the top of iteration 1 will re-read state from disk and delete the signal.
+  - Else if `started_at` is within the last 4 hours:
+    → Emit one line: `↺ Retomando forge-auto após interrupção...` and skip the activation step below — go directly to the dispatch loop. The marker is already set.
 - Otherwise: proceed normally to activation.
 
 ---

@@ -70,7 +70,18 @@ cat .gsd/forge/compact-signal.json 2>/dev/null
 If the file exists:
 1. Re-read `.gsd/STATE.md` → update `STATE`, `PROJECT_NAME`, `ACTIVE_MILESTONE`, `NEXT_ACTION`
 2. Delete the signal: `rm -f .gsd/forge/compact-signal.json`
-3. Emit: `↺ Recovery pós-compactação — retomando de: {NEXT_ACTION}`
+3. Check auto-mode:
+   ```bash
+   cat .gsd/forge/auto-mode.json 2>/dev/null
+   ```
+   If `active: true` (regardless of elapsed time):
+   → Emit: `↺ Recovery pós-compactação — retomando forge-auto de: {NEXT_ACTION}`
+   → Call `Skill("forge-auto")` immediately — **do NOT show the menu**
+   → After skill returns, continue the REPL loop normally
+   
+   If auto-mode is not active:
+   → Emit: `↺ Recovery pós-compactação — retomando de: {NEXT_ACTION}`
+   → Fall through to menu normally
 
 If the file does not exist, skip this block entirely.
 
