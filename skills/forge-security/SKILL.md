@@ -1,6 +1,7 @@
 ---
 name: forge-security
 description: "Checklist de seguranca por task/slice. Auto-invocada por keywords."
+allowed-tools: Read, Write, Bash, Glob, Grep, Skill, WebSearch, WebFetch
 ---
 
 <objective>
@@ -13,6 +14,40 @@ Read a task or slice plan, identify which security domains are actually touched 
 - A short focused checklist beats a comprehensive generic one. The executor reads this before coding, not after.
 - If no security-sensitive scope is detected → write that explicitly. An empty checklist is valid.
 </essential_principles>
+
+<probe_autonomy>
+Para controles de segurança onde o comportamento real sob ataque não é evidente por docs/código (ex: header de segurança realmente bloqueia o vetor X? rate limiter abre janela em edge case Y? token TTL é respeitado pelo cliente Z?), invoque `Skill({ skill: "forge-probe", args: "<vetor como Given/When/Then>" })` para validar o controle num sandbox isolado.
+
+Casos ideais (cobrir backend, API, dados, infra — não só frontend):
+
+**Backend / API**
+- Confirmar que refresh token rotation invalida o antigo de verdade (reuso do antigo retorna 401)
+- Medir se rate limiter dispara antes do volume de ataque esperado (burst, sliding window, distributed)
+- Validar que middleware de authz bloqueia escalação horizontal (user A não acessa recurso de user B via IDOR)
+- Verificar que endpoint de reset de senha não vaza existência de conta (response time + status uniformes)
+- Testar que webhook HMAC signature rejeita payload adulterado
+
+**Banco de dados / ORM**
+- Confirmar que query parametrizada do ORM realmente escapa input malicioso (ex: `$1` vs string interpolation em raw query)
+- Validar que Row-Level Security do Postgres bloqueia leitura cross-tenant quando JWT claim é spoofado
+- Medir se prepared statement do driver suporta o tipo do payload (alguns drivers caem em fallback string)
+- Testar que soft-delete não vaza dados em queries que esquecem o `WHERE deleted_at IS NULL`
+
+**Crypto / secrets**
+- Verificar que lib de hash (bcrypt/argon2) está usando cost factor esperado sob a versão pinada
+- Confirmar que KMS/Vault retorna erro (não valor default) quando chave está expirada/revogada
+- Testar que criptografia at-rest usa IV único por payload (reuso de IV = CVE)
+
+**Infra / transport**
+- Validar que `Content-Security-Policy` bloqueia o vetor XSS específico da app (quando aplicável)
+- Confirmar que CORS preflight rejeita origem não autorizada mesmo com `credentials: include`
+- Testar que TLS config recusa cipher suite fraca (ex: forçar `TLS_RSA_WITH_AES_128_CBC_SHA` e esperar handshake failure)
+- Verificar que proxy reverso (nginx/traefik) não vaza header interno (`X-Forwarded-*`, `X-Real-IP`) para upstream público
+
+**Budget: máximo 1 probe por análise de segurança.** Escopo obrigatório: probe deve rodar no sandbox (`.gsd/probes/NNN-name/`), nunca contra infra de produção, nunca com credenciais reais — use tokens dummy, banco local/docker ephemero, fixtures, endpoints locais.
+
+Finding do probe vira item de checklist concreto com evidência: "✓ ORM escapa payload via probe 003 — teste com `'; DROP TABLE users;--` retornou 0 rows, não erro SQL" ou "✗ Rate limiter permite 50 req no burst window — exige ajuste de token bucket (probe 003)" ou "✗ RLS policy falha quando JWT claim é renomeado — probe 003 leu 3 rows de outro tenant".
+</probe_autonomy>
 
 <process>
 

@@ -253,6 +253,77 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     This sub-step is **advisory**. Do NOT return `status: blocked` based on verifier output. Do NOT abort merge. The section is purely documentation. If `scripts/forge-verifier.js` does not exist (e.g., running against a pre-M003/S03 checkout), write the fallback line and proceed.
 
+1.9. **Checker Memory update — append quality patterns to `.gsd/CHECKER-MEMORY.md`** (advisory; skipped when `checker_memory.mode: disabled`).
+
+    Read the merged `checker_memory.mode` pref (same cascade as evidence.mode):
+    ```bash
+    node -e "
+    const fs=require('fs'),path=require('path'),os=require('os');
+    const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                 path.join('{WORKING_DIR}','.gsd','claude-agent-prefs.md'),
+                 path.join('{WORKING_DIR}','.gsd','prefs.local.md')];
+    let mode='enabled';
+    for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^checker_memory:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch{}}
+    process.stdout.write(mode);
+    "
+    ```
+    If the result is `disabled` → SKIP this entire sub-step.
+
+    a. **Extract plan-check results.** Read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md` if it exists.
+       Parse all dimension rows from the markdown table. Expected format per row: `| dimension | pass/warn/fail | justification |`.
+       Collect only `warn` and `fail` rows → `PLAN_ISSUES: [{dimension, severity, justification}]`.
+       If file doesn't exist or parse yields empty → `PLAN_ISSUES = []`.
+
+    b. **Extract verification failures.** Read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-VERIFICATION.md` if it exists.
+       Count rows by verdict: `exists_fail`, `substantive_fail`, `wired_fail`. Collect only non-zero fail counts → `VERIFY_ISSUES: [{pattern, count}]`.
+       If file doesn't exist → `VERIFY_ISSUES = []`.
+
+    c. **Extract file audit flags.** Scan the `## File Audit` section of `S##-SUMMARY.md` (just written above).
+       If entries appear under `**Unexpected**` → append `{pattern: "file_audit.unexpected", count: <N entries>}` to `VERIFY_ISSUES`.
+       If entries appear under `**Missing**` → append `{pattern: "file_audit.missing", count: <N entries>}` to `VERIFY_ISSUES`.
+
+    d. **If `PLAN_ISSUES` and `VERIFY_ISSUES` are both empty** → skip writing; do NOT touch `CHECKER-MEMORY.md`. Absence is signal — clean slices must not pollute the file.
+
+    e. **Read or initialize `CHECKER-MEMORY.md`:**
+       ```bash
+       cat "{WORKING_DIR}/.gsd/CHECKER-MEMORY.md" 2>/dev/null
+       ```
+       If the file does not exist, treat as an empty document with no table rows.
+
+    f. **Merge and update counts.** Parse the two existing tables (`## Plan Quality Patterns`, `## Verification Patterns`). For each incoming issue:
+       - If a row for the same `dimension` / `pattern` key exists → increment `Count`, update `Last Seen` to `{M###}/{S##}`, and update `Specific Pattern` if the new justification is more specific (longer).
+       - If no matching row exists → add a new row.
+       Apply decay: drop any row where `Count >= 5 AND Last Seen is more than 3 milestone numbers ago` (e.g. current M###=M020, last seen ≤ M016 → drop). This prevents stale resolved patterns from cluttering the file indefinitely.
+
+    g. **Write `.gsd/CHECKER-MEMORY.md`** using the `Write` tool (structural rewrites make `Edit` fragile here). Format:
+       ```markdown
+       # Checker Memory
+
+       _Auto-generated quality feedback. Updated after each complete-slice. Injected into forge-planner (plan-slice) and forge-executor (execute-task) as anti-recidivism guidance._
+       _Last updated: YYYY-MM-DD · Slices analyzed: N_
+
+       ---
+
+       ## Plan Quality Patterns
+
+       _Dimensions where the planner scored warn/fail in recent slices. Injected into forge-planner._
+
+       | Dimension | Severity | Count | Last Seen | Specific Pattern Observed |
+       |-----------|----------|-------|-----------|---------------------------|
+       | acceptance_observable | warn | 3 | M018/S02 | Criteria use vague language ("works correctly") instead of observable output (exit code, HTTP status, file path) |
+
+       ## Verification Patterns
+
+       _Recurring verification and file-audit failures. Injected into forge-executor._
+
+       | Pattern | Count | Last Seen | Advice |
+       |---------|-------|-----------|--------|
+       | substantive_fail | 2 | M018/S02 | Stub implementations flagged — ensure min_lines threshold is met before marking done |
+       ```
+       Omit a table entirely if it has no rows after merging.
+
+    This sub-step is **advisory**. Never return `status: blocked` based on this step. Write failures are silent (wrap in try/catch). `CHECKER-MEMORY.md` lives at `.gsd/` root and is never touched by `milestone_cleanup` — same durability contract as `AUTO-MEMORY.md` and `LEDGER.md`.
+
 2. Write `S##-UAT.md` — human test script derived from must-haves:
    ```markdown
    # S##: Title — UAT Script

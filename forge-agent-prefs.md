@@ -98,9 +98,9 @@ o valor real já foi extraído para AUTO-MEMORY.md, DECISIONS.md e CODING-STANDA
 Um resumo compacto é sempre gravado em LEDGER.md antes de qualquer cleanup.
 
 ```
-milestone_cleanup: keep   # keep    = mantém tudo (padrão seguro)
-                          # archive = move .gsd/milestones/M###/ → .gsd/archive/M###/
-                          # delete  = remove .gsd/milestones/M###/ inteiramente
+milestone_cleanup: archive # keep    = mantém tudo
+                           # archive = move .gsd/milestones/M###/ → .gsd/archive/M###/ (padrão)
+                           # delete  = remove .gsd/milestones/M###/ inteiramente
 
 task_cleanup: keep        # keep    = mantém tudo (padrão seguro)
                           # archive = move .gsd/tasks/TASK-###/ → .gsd/archive/tasks/TASK-###/
@@ -305,6 +305,35 @@ file_audit:
 - `agents/forge-completer.md` sub-step 1.6 — consumer do `file_audit.ignore_list`; escreve a seção `## File Audit` em `S##-SUMMARY.md`.
 - `scripts/forge-must-haves.js --check` — fornece a classificação legacy/valid usada pelo completer para decidir se o `expected_output` de um plano entra na união.
 - `.gsd/milestones/M003/slices/S02/tasks/T04/T04-PLAN.md` — tarefa que implementa o consumer.
+
+## Checker Memory Settings
+
+Controla a extração de padrões de qualidade do plan-checker e verificador para `.gsd/CHECKER-MEMORY.md`.
+Cria um loop de feedback anti-recidivismo: erros recorrentes em planos e verificações são surfaçados como
+contexto nas próximas execuções — `forge-planner` recebe padrões de plan-check, `forge-executor` recebe
+padrões de verificação.
+
+```
+checker_memory:
+  mode: enabled     # enabled | disabled
+                    # enabled  = forge-completer extrai warn/fail do S##-PLAN-CHECK.md + falhas
+                    #            do S##-VERIFICATION.md e file-audit após cada complete-slice
+                    # disabled = pula completamente — nenhum CHECKER-MEMORY.md é gerado/atualizado
+```
+
+### Semântica
+
+- **Padrões coletados:** dimensões `warn`/`fail` do plan-checker (ex: `acceptance_observable`), falhas do verificador (ex: `substantive_fail`), flags do file-audit (`unexpected`, `missing`).
+- **Separação de injeção:** `forge-planner` recebe apenas `## Plan Quality Patterns`; `forge-executor` recebe apenas `## Verification Patterns`. Evita ruído cruzado.
+- **Ausência é sinal:** slices sem issues não tocam o arquivo. Histórico limpo = confiança real.
+- **Decay automático:** linhas com `Count >= 5 AND Last Seen > 3 milestones atrás` são removidas (padrões resolvidos não contaminam milestones futuros).
+- **Durabilidade:** `.gsd/CHECKER-MEMORY.md` vive na raiz de `.gsd/` — nunca é tocado por `milestone_cleanup`, mesmo em modo `delete`.
+
+### Cross-references
+
+- `agents/forge-completer.md` sub-step 1.9 — consumer; escreve/atualiza `CHECKER-MEMORY.md` após cada slice.
+- `shared/forge-dispatch.md § plan-slice` — lê `## Plan Quality Patterns` via Read-path.
+- `shared/forge-dispatch.md § execute-task` — lê `## Verification Patterns` via Read-path.
 
 ## Plan-Check Settings
 

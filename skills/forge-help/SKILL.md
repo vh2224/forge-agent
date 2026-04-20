@@ -89,7 +89,8 @@ REPL interativo com menu. Acesso a todas as funcionalidades sem memorizar comand
 | `forge-status` | Dashboard — milestone ativo, progresso de slices e tasks, próxima ação. |
 | `forge-explain <alvo>` | Explica qualquer artefato sem modificar nada. Alvos: `M001`, `S03`, `T02`, `decisions`, `state`, `all`. |
 | `forge-memories [show\|stats\|clean\|export\|inject]` | Gerencia memórias auto-aprendidas do projeto. |
-| `forge-ask [resume\|close\|list]` | Modo conversa — discute ideias, captura decisões, salva sessão. |
+| `forge-ask [resume\|close\|list]` | Modo conversa — discute ideias, captura decisões, salva sessão. Pode invocar `probe:` / `brainstorm:` dentro da conversa. |
+| `forge-probe <ideia> [--quick]` | **Experimentos descartáveis** — valida viabilidade antes de commit. Decompõe em probes Given/When/Then, escreve código mínimo em `.gsd/probes/NNN-name/`, retorna verdict (VALIDATED/INVALIDATED/PARTIAL) com evidência observável. |
 | `forge-skills [<nome>\|--all]` | Lista skills disponíveis e detalhes de uso. |
 | `forge-help` | Esta tela. |
 
@@ -178,10 +179,14 @@ Read `~/.claude/forge-agent-prefs.md` to get the current model for each agent, t
   LEDGER.md                   ← resumo compacto de milestones concluídos
   PROJECT.md                  ← descrição do projeto e stack
   AUTO-MEMORY.md              ← memórias auto-aprendidas (max 50)
+  CHECKER-MEMORY.md           ← padrões recorrentes de plan-check/verification (anti-recidivismo)
   CODING-STANDARDS.md         ← padrões detectados + Asset Map
   forge/
     events.jsonl              ← event log do orquestrador
     auto-mode.json            ← estado do auto-mode
+  probes/                     ← experimentos descartáveis (forge-probe)
+    MANIFEST.md               ← índice de probes
+    NNN-descriptive-name/     ← probe isolado com README + código
   milestones/
     M001/
       M001-ROADMAP.md         ← slices com checkboxes + boundary map

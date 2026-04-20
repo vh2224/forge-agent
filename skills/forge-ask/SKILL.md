@@ -7,15 +7,19 @@ allowed-tools: Read, Write, Bash, Glob, Skill, WebSearch, WebFetch
 
 ## CONVERSATION-ONLY MODE — CRITICAL
 
-This is a **read-only brainstorming and discussion mode**. The following rules are absolute and apply for the ENTIRE session:
+This is a **read-only brainstorming and discussion mode** for production source code. The following rules are absolute and apply for the ENTIRE session:
 
-1. **Do NOT modify, create, or fix source files** — not even obvious typos, not even one line
-2. **Do NOT run Bash commands that change state** — no git, no installs, no file edits outside `.gsd/sessions/`
-3. **Do NOT implement anything** — if you see a bug, a risk, or an improvement, MENTION it in conversation only
-4. **The ONLY Write operations permitted** are to `.gsd/sessions/*.md` (session log) and `.gsd/DECISIONS.md` when user explicitly says "salvar decisão"
-5. **If the user asks you to fix or build something** — respond with: "No modo /forge-ask eu só discuto. Para implementar, use `/forge-next` ou `/forge-auto`."
+1. **Do NOT modify, create, or fix source files** — not even obvious typos, not even one line. Source files = `src/`, `lib/`, `components/`, `app/`, `pages/`, root `package.json`, or any code that ships.
+2. **Do NOT run Bash commands that change production state** — no `git commit` on source changes, no `npm install` at root, no file edits in production paths.
+3. **Do NOT implement production features** — if you see a bug, a risk, or an improvement, MENTION it in conversation only.
+4. **Write operations permitted:**
+   - `.gsd/sessions/*.md` (session log — auto-updated every turn)
+   - `.gsd/DECISIONS.md` via "salvar decisão" (Edit only, append-only)
+   - `.gsd/probes/**` via `Skill("forge-probe")` — throwaway feasibility experiments, isolated from production code
+   - `.gsd/milestones/M###/M###-BRAINSTORM.md` via `Skill("forge-brainstorm")`
+5. **If the user asks you to fix or build production code** — respond with: "No modo /forge-ask eu só discuto. Para implementar, use `/forge-next` ou `/forge-auto`."
 
-The purpose of this mode is thinking, not doing. Stay in conversation.
+The purpose of this mode is thinking (and sometimes validating feasibility via isolated probes), not building production code. Stay in conversation or scoped experimentation.
 
 ## Research freely (web + docs)
 
@@ -231,10 +235,23 @@ If user said **"brainstorm: [topic]"** or **"brainstorming: [topic]"**:
 - Invoke: `Skill({ skill: "forge-brainstorm", args: "[topic]" })`
 - The skill explores approaches, risks, and scope boundaries and writes a BRAINSTORM.md
 - After the skill completes, summarize the key findings in the conversation (Recommended approach + Top 3 risks + Open questions)
-- This is the ONLY skill invocation allowed in forge-ask — it produces a planning artifact, not source code
 - Append to `## Queued Actions`: `- [ ] [{timestamp}] Brainstorm produzido para: [topic]`
 
 **Auto-suggest brainstorm:** If the user describes a new feature, milestone idea, or architectural change and NO brainstorm exists for it yet, suggest: "Quer que eu rode o brainstorm para explorar abordagens e riscos antes de continuarmos?"
+
+If user said **"probe: [question/idea]"** or **"probar: [idea]"** or **"testar: [idea]"**:
+- Invoke: `Skill({ skill: "forge-probe", args: "[idea]" })`
+- The skill decomposes the idea into 2-5 focused experiments (or 1 if `--quick` is passed), builds throwaway code in `.gsd/probes/NNN-name/`, and produces verdicts (VALIDATED/INVALIDATED/PARTIAL) with observable evidence
+- The conversation context (tradeoffs discussed, constraints mentioned, stack preferences) flows directly into the probe — Skill tool runs in main context, not isolated
+- After the skill completes, summarize verdicts + recommendation (prosseguir com milestone, pivotar, ou abandonar abordagem) in the conversation
+- Append to `## Queued Actions`: `- [ ] [{timestamp}] Probes rodados para: [idea]`
+
+**Auto-suggest probe:** If the user's discussion surfaces technical uncertainty that benefits from observable evidence — phrases like "vale testar se", "será que X aguenta", "é viável usar Y", "qual é mais rápido: A ou B", "queria ver se X funciona", comparisons between competing libraries/approaches, or performance/compatibility concerns — suggest: "Quer rodar um probe rápido para validar isso com evidência antes de decidir? `probe: [reformulação da pergunta em Given/When/Then]`"
+
+**Brainstorm vs Probe — quando sugerir qual:**
+- **Brainstorm:** problema mal definido, escopo incerto, múltiplas abordagens possíveis mas nenhuma testada. Output = decision brief em markdown.
+- **Probe:** pergunta técnica específica com resposta verificável por código. Output = evidência executável (exit code, benchmark number, response body).
+- **Ambos em sequência:** brainstorm gera alternativas → usuário escolhe top 2 → probe valida as escolhidas.
 
 If user said **"criar milestone: [description]"**:
 - Check if the current session has meaningful content (non-empty `## Conversation` or `## Captured Decisions` sections, or a brainstorm was run)

@@ -1,6 +1,7 @@
 ---
 name: forge-risk-radar
 description: "Avaliacao de riscos por slice antes da execucao."
+allowed-tools: Read, Write, Bash, Glob, Grep, Skill, WebSearch, WebFetch
 ---
 
 <objective>
@@ -10,6 +11,18 @@ Analyze a slice plan and surface risks that would cause the executor to get stuc
 <web_research>
 Riscos externos (versão bugada de dependência, breaking change recente, CVE, limite de API) só são detectáveis pesquisando. Use `WebSearch` / `WebFetch` (ou MCPs `brave-search` / `context7` / `fetch`) livremente — zero-config via WebSearch nativo. Budget: até 3 buscas focadas nas dependências de alto impacto do slice. Registre achados como risco concreto com link na mitigação.
 </web_research>
+
+<probe_autonomy>
+Para riscos onde WebSearch não dá evidência definitiva (comportamento específico sob carga, compatibilidade entre versões exatas usadas no projeto, performance real vs docs otimistas), invoque `Skill({ skill: "forge-probe", args: "<risco como Given/When/Then>" })` para validar/invalidar o risco com experimento.
+
+Casos ideais:
+- Risco `high` do tipo "API X pode não suportar Y no volume esperado" — probe mede e downgrade pra `medium` se validar, ou confirma mitigação obrigatória
+- Risco de compatibilidade entre dois componentes internos — probe toca o ponto de contato
+
+**Budget: máximo 1 probe por avaliação de slice.** Use apenas para riscos `high` cuja decisão de mitigação depende de evidência real. Riscos óbvios (documentados em AUTO-MEMORY, CVEs conhecidos) não precisam de probe — só documentação.
+
+O probe pode transformar um risco `high` em `low` com mitigação inline, ou confirmar que precisa de estratégia de mitigação mais forte (ex: circuit breaker, cache, fallback).
+</probe_autonomy>
 
 <essential_principles>
 - Focus on risks that affect THIS slice, not the whole project.
