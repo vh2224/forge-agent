@@ -35,16 +35,32 @@ From STATE extract:
 
 ## Auto-resume detection
 
-Check if auto-mode is already active:
+Check if auto-mode is already active AND alive (heartbeat-stale detection):
 
 ```bash
-cat .gsd/forge/auto-mode.json 2>/dev/null
+AUTO_STATE=$(node -e "
+try {
+  const a = JSON.parse(require('fs').readFileSync('.gsd/forge/auto-mode.json','utf8'));
+  if (a.active !== true) { process.stdout.write('inactive'); return; }
+  const last = a.last_heartbeat || a.worker_started || a.started_at || 0;
+  const age = Date.now() - last;
+  process.stdout.write(age > 300000 ? 'stale' : 'fresh');
+} catch { process.stdout.write('inactive'); }
+")
 ```
 
-If `active: true` AND `started_at` is within the last 60 minutes AND milestone is not done:
-→ Emit one line: `↺ Auto-mode ativo — retomando forge-auto...`
-→ Call `Skill("forge-auto")` immediately (skip the menu loop entirely)
-→ After skill returns, exit
+Branch on `$AUTO_STATE`:
+
+- **`inactive`** — no prior auto session; proceed to REPL loop.
+- **`stale`** — previous auto session died (Ctrl+C, terminal kill). Clear the stale marker silently and proceed to REPL loop as a normal start:
+  ```bash
+  echo '{"active":false}' > .gsd/forge/auto-mode.json
+  ```
+  Do NOT emit a resume message.
+- **`fresh`** — heartbeat within the last 5 minutes → genuine recovery (just-reopened or concurrent instance).
+  → Emit one line: `↺ Auto-mode ativo — retomando forge-auto...`
+  → Call `Skill("forge-auto")` immediately (skip the menu loop entirely)
+  → After skill returns, exit
 
 ---
 

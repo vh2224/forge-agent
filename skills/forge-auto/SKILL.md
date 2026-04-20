@@ -61,16 +61,33 @@ Do this for ALL in_progress tasks before starting the loop. Skip if TaskList ret
 
 **Argumentos ignorados** — `/forge-auto` não aceita argumentos. Se o usuário digitou `/forge-auto resume` ou qualquer outro argumento, ignore-o silenciosamente. O auto-resume é automático via detecção abaixo.
 
-**Auto-resume detection** — check for a previous interrupted session:
+**Auto-resume detection** — check for a previous interrupted session.
+
+Read `auto-mode.json` and compute heartbeat freshness in one shot:
 ```bash
-cat .gsd/forge/auto-mode.json 2>/dev/null
+AUTO_STATE=$(node -e "
+try {
+  const a = JSON.parse(require('fs').readFileSync('.gsd/forge/auto-mode.json','utf8'));
+  if (a.active !== true) { process.stdout.write('inactive'); return; }
+  const last = a.last_heartbeat || a.worker_started || a.started_at || 0;
+  const age = Date.now() - last;
+  process.stdout.write(age > 300000 ? 'stale' : 'fresh');
+} catch { process.stdout.write('inactive'); }
+")
+COMPACT_SIGNAL=$(test -f .gsd/forge/compact-signal.json && echo "yes" || echo "no")
 ```
-- If `active: true` AND milestone is not done:
-  - If `compact-signal.json` exists (`cat .gsd/forge/compact-signal.json 2>/dev/null`):
-    → Compact recovery path — skip ALL initialization (activation, load context, etc.). Go directly to the dispatch loop. The compact recovery check at the top of iteration 1 will re-read state from disk and delete the signal.
-  - Else if `started_at` is within the last 4 hours:
-    → Emit one line: `↺ Retomando forge-auto após interrupção...` and skip the activation step below — go directly to the dispatch loop. The marker is already set.
-- Otherwise: proceed normally to activation.
+
+Branch on `$AUTO_STATE`:
+
+- **`inactive`** — no prior session; proceed normally to activation.
+- **`stale`** — previous session died (Ctrl+C, terminal kill, OOM). The marker is lying. Clear it silently and proceed normally to activation as a fresh start:
+  ```bash
+  echo '{"active":false}' > .gsd/forge/auto-mode.json
+  ```
+  Do NOT emit a resume message.
+- **`fresh`** — heartbeat within the last 5 minutes.
+  - If `$COMPACT_SIGNAL == "yes"` → Compact recovery path: skip ALL initialization (activation, load context, etc.). Go directly to the dispatch loop. The compact recovery check at the top of iteration 1 will re-read state from disk and delete the signal.
+  - Otherwise → a session is genuinely in flight (concurrent Claude instance, or just-reopened within 5 min). Emit one line: `↺ Retomando forge-auto após interrupção...` and skip the activation step below — go directly to the dispatch loop. The marker is already set.
 
 ---
 
