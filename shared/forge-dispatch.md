@@ -967,3 +967,101 @@ Verification failures (non-zero exit from `forge-verify.js`) go **directly** to 
 - `forge-verify.js` exits non-zero → **Verification Gate failure handling** (partial/blocked, no backoff, no re-dispatch by the handler).
 
 A worker that routes verification failures through the Retry Handler risks infinite loops: the handler may retry the same broken unit indefinitely. Do not do this.
+
+---
+
+## Parallel Task Execution
+
+Execute-task dispatches may run **in parallel** when the ready set has ≥2 tasks with satisfied `depends:[]` and non-overlapping `writes:[]`. This section is the canonical spec for parallelism — both `forge-auto` and `forge-next` reference it.
+
+### Scope
+
+- **Parallel:** `forge-auto` only. When `forge-parallelism.js` returns `mode: parallel`, the orchestrator dispatches N `Agent()` calls in a single response message.
+- **Sequential (depends-aware):** `forge-next` always. It invokes `forge-parallelism.js --max-concurrent 1` to pick the first pending task whose deps are satisfied — never more than one dispatch per `/forge-next` invocation. This is deliberate — `forge-next` is a debug/manual-control mode.
+- **Other unit types** (`plan-slice`, `research-slice`, `complete-slice`, etc.) are always sequential. Parallelism applies strictly within `execute-task`.
+
+### Contract — plan frontmatter
+
+Every net-new `T##-PLAN.md` carries two unconditional frontmatter fields:
+
+```yaml
+depends: [T01, T02]   # task IDs in the same slice that must complete before this one; [] if none
+writes:               # every file/glob this task will create, modify, or delete
+  - "src/auth/jwt.ts"
+  - "src/auth/__tests__/**"
+```
+
+- `depends` is a flat array of task IDs. Empty array means no predecessors.
+- `writes` uses literal paths OR globs (`*`, `**`). Paths use forward slashes (Windows-safe).
+- Both fields are emitted by `forge-planner` on every plan, even when empty (`writes: []` for docs-only tasks).
+- `T##-SUMMARY.md` existence = task done. `forge-parallelism.js` uses this as the done signal.
+
+### Algorithm
+
+`scripts/forge-parallelism.js` does:
+
+1. **Discover tasks** by scanning `tasks/T##/` directories under the slice.
+2. **Parse frontmatter** of each `T##-PLAN.md` for `depends` + `writes`. If ANY task in the slice is missing either field → **legacy mode** → return first pending task, force sequential.
+3. **Build pending set** (no `T##-SUMMARY.md`).
+4. **Build ready set** — pending tasks whose `depends` are all satisfied (each dep has a `T##-SUMMARY.md`).
+5. **Greedy conflict-free batch** — iterate `ready` in plan order; include a task iff its `writes` don't overlap any already-claimed task's `writes`. Stop at `max-concurrent`.
+6. **Return** `{mode, batch, reason, details?}`.
+
+### Output modes
+
+| `mode` | Meaning | Orchestrator action |
+|--------|---------|---------------------|
+| `parallel` | `batch.length ≥ 2` — multiple ready, no write conflicts | `forge-auto`: N Agent() in one message. `forge-next`: take `batch[0]`. |
+| `single` | `batch.length == 1` — modern plan, one task ready | Normal single dispatch. |
+| `legacy` | Any task missing `depends`/`writes` frontmatter | Single dispatch with `batch[0]` — sequential for the whole slice. |
+| `blocked` | Pending tasks exist but none have satisfied deps (or all filtered out by conflicts) | Surface `reason` to user, stop loop. |
+| `none` | All tasks complete | Advance STATE, re-derive (usually `complete-slice`). |
+| `error` | Script crash | Stop loop, surface reason. |
+
+### Backward compatibility — legacy semantics
+
+Tasks created before the parallelism schema existed lack `depends`/`writes` in their frontmatter. The script detects this at slice-scope: **if ANY task in the slice is missing either field, the entire slice runs sequentially** — preserving exact pre-parallelism behavior for in-flight milestones. No backfill is required. Only newly-planned slices benefit from parallelism. This is intentional: mixing old/new within a slice is too risky for the race conditions we'd unlock.
+
+### Parallel dispatch semantics (forge-auto only)
+
+When `mode == parallel` and `BATCH.length > 1`:
+
+1. **Per-task prep** — build a worker prompt, resolve tier (`{TIER, MODEL_ID, REASON}`), run the security gate, and create a `TaskCreate` entry for each batch member.
+2. **Single heartbeat write** — `auto-mode.json` gets one `BATCH:<csv-of-units>` label so the statusline surfaces the parallel group without special-casing.
+3. **Dispatch N in ONE assistant message** — emit N `Agent()` tool-use blocks inside the same response turn. Claude Code executes multiple tool-use blocks in a single turn concurrently. `run_in_background: true` is NOT used — background agents are fire-and-forget; here we need results.
+4. **Await all results** — Claude Code returns them together.
+5. **Process serially** — iterate results in batch order; for each, run the full Step 5 (Process result) + Step 6 (Post-unit housekeeping) pipeline. STATE is advanced per-task.
+6. **Handle mixed outcomes** — if some return `done` and others `partial`/`blocked`, process all `done` results first (so their work is captured in STATE and events.jsonl), then fall through to the partial/blocked handler. Don't lose completed work to a sibling's failure.
+
+### Events.jsonl extension
+
+`dispatch` events for parallel tasks get an additive `batch_size` field:
+
+```json
+{"ts":"...","event":"dispatch","unit":"execute-task/T01","model":"...","tier":"...","reason":"...","input_tokens":1234,"output_tokens":5678,"batch_size":3}
+```
+
+Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely.
+
+### Memory extraction as background
+
+After each `done` result (in both parallel and sequential paths), `forge-memory` is dispatched with `run_in_background: true`. The orchestrator proceeds to the next unit immediately without awaiting memory extraction. The extracted AUTO-MEMORY.md only affects the *next* unit's selective injection — running it concurrently with the next dispatch is the single highest-leverage parallelism win (one extraction per unit, every unit).
+
+### Prefs contract
+
+```yaml
+parallelism:
+  max_concurrent: 3   # integer 1–8; default 3. Caps batch size in forge-auto.
+```
+
+Setting `max_concurrent: 1` disables parallelism in `forge-auto` while still honoring depends-aware picking. Setting it higher than 3 works but has diminishing returns — most slices rarely have more than 3 independently-writable tasks ready simultaneously.
+
+### Authoring guidance for planners
+
+When decomposing a slice:
+
+1. **Map the real data/artifact dependency graph.** Any task that consumes another's output declares it in `depends`.
+2. **List every file each task writes** — literal paths or globs. Be **explicit and realistic**. Underreporting `writes` causes race conditions; overreporting only sequentializes unnecessarily.
+3. **If two tasks share a file in `writes`** (e.g., both registering exports in a barrel file), either (a) order them with `depends`, or (b) split the shared-file responsibility into a third task that both depend on.
+
+`writes` conflicts are checked bidirectionally — glob on either side matches literal path on the other, and vice versa. `src/auth/**` conflicts with `src/auth/jwt.ts`.

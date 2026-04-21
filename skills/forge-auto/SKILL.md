@@ -214,6 +214,43 @@ MODEL_ID=$(node -e "
 ```
 `TIER`, `MODEL_ID`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
 
+**Batch determination (step 1.6 — execute-task only):** When `unit_type == execute-task`, the dispatch is no longer strictly single-task. Invoke `scripts/forge-parallelism.js` to compute a **ready batch** — a set of tasks in the active slice whose `depends:[]` are satisfied AND whose `writes:[]` don't overlap with each other.
+
+```bash
+SLICE_PLAN=".gsd/milestones/${M###}/slices/${S##}/${S##}-PLAN.md"
+MAX_CONCURRENT=$(node -e "
+  let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
+  process.stdout.write(String((p.parallelism && p.parallelism.max_concurrent) || 3));
+")
+BATCH_JSON=$(node scripts/forge-parallelism.js --slice-plan "$SLICE_PLAN" --max-concurrent "$MAX_CONCURRENT")
+echo "$BATCH_JSON"
+```
+
+Parse the JSON. Field semantics:
+
+| `mode` | Meaning | Action |
+|--------|---------|--------|
+| `parallel` | `batch.length ≥ 2` — multiple ready tasks, no `writes` conflicts | Parallel dispatch path (Step 4 branch B) |
+| `single` | `batch.length == 1` — modern plan, only one task currently ready | Single dispatch path (Step 4 branch A) |
+| `legacy` | At least one task in slice is missing `depends` or `writes` frontmatter | Single dispatch with `batch[0]` — preserves behavior for pre-parallelism plans |
+| `blocked` | Pending tasks exist but none have satisfied deps (or all ready tasks were filtered out) | Error — emit `reason` to user, deactivate auto-mode, stop loop |
+| `none` | All tasks complete | Advance STATE, re-derive unit_type (should flip to `complete-slice`) |
+| `error` | Script crash | Stop loop, surface reason |
+
+Store the parsed batch as `BATCH = [{id, planPath}, ...]`. For non-execute-task unit_types, treat `BATCH = [{id: unit_id, planPath: (n/a)}]` implicitly — the rest of the flow below is unchanged for them.
+
+When `mode == "parallel"`, emit one line so the user sees the parallelism in action:
+```
+⇉ Batch paralelo: T01, T02, T03 (3 independent tasks ready)
+```
+
+When `mode == "legacy"`, emit one line (the first time per slice — not every iteration):
+```
+↻ Legacy plan — dispatching sequentially (no depends/writes frontmatter)
+```
+
+**Per-task resolution (parallel only):** If `BATCH.length > 1`, the Tier Resolution block above resolved for `$PLAN_PATH` of the **first** task. Before building prompts, re-run the frontmatter parse (steps 2–3 of Tier Resolution) once per task in the batch so each one carries its own `{TIER, MODEL_ID, REASON}`. The unit-type default and model lookup steps don't change. Security gate (below) also loops over each task in the batch.
+
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
 mkdir -p .gsd/milestones/{M###}/slices/{S##}
@@ -221,14 +258,16 @@ Skill({ skill: "forge-risk-radar", args: "{M###} {S##}" })
 ```
 This runs the risk assessment in the current context before the plan-slice agent is dispatched. The produced `S##-RISK.md` will be injected into the worker prompt.
 
-**Security gate (execute-task only):** If `unit_type == execute-task`, scan `T##-PLAN.md` content for security-sensitive keywords:
+**Security gate (execute-task only):** If `unit_type == execute-task`, run this check for **each task in `BATCH`** (when `BATCH.length > 1`, iterate through every batch member; when `BATCH.length == 1`, run once for the single task).
+
+For each task T## in BATCH: scan the corresponding `T##-PLAN.md` content for security-sensitive keywords:
 `auth|token|crypto|password|secret|api.?key|jwt|oauth|permission|role|hash|salt|encrypt|decrypt|session|cookie|credential|sanitize|xss|sql|inject`
 
-If any keyword matches AND `T##-SECURITY.md` does not already exist in the task directory:
+If any keyword matches AND `T##-SECURITY.md` does not already exist in that task's directory:
 ```
 Skill({ skill: "forge-security", args: "{M###} {S##} {T##}" })
 ```
-The produced `T##-SECURITY.md` will be injected into the execute-task worker prompt as `## Security Checklist`.
+The produced `T##-SECURITY.md` will be injected into that task's worker prompt as `## Security Checklist`. Skills run in the orchestrator context — loop them serially (fast enough; each is short) before dispatching the batch in parallel.
 
 **Plan-check gate (between plan-slice and first execute-task):**
 
@@ -449,6 +488,14 @@ Do NOT read artifact files here — templates now pass paths; workers read their
 
 #### 4. Dispatch
 
+**Branch on BATCH size:**
+- `BATCH.length == 1` (all non-execute-task unit types, plus execute-task when only one task is ready): follow the **single-task flow** below (unchanged from pre-parallelism behavior).
+- `BATCH.length > 1` (execute-task only, when `forge-parallelism.js` returned `mode: parallel`): follow the **parallel-batch flow** in Step 4-P after this section.
+
+---
+
+**Single-task flow (BATCH.length == 1):**
+
 Use `$MODEL_ID` resolved by Tier Resolution (step 1.5) above — do NOT re-read from PREFS Phase-routing table.
 
 **Create timeline task** — use `TaskCreate` to show progress in the UI.
@@ -542,6 +589,79 @@ _now=$(node -e "process.stdout.write(String(Date.now()))")
 echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":null}' > .gsd/forge/auto-mode.json
 ```
 
+---
+
+#### 4-P. Parallel-batch flow (execute-task only, BATCH.length > 1)
+
+This branch runs ONLY when `forge-parallelism.js` returned `mode: parallel` for an `execute-task` unit. All tasks in `BATCH` have satisfied `depends:[]` and non-overlapping `writes:[]`.
+
+**a) Per-task resolution** — for each task `T##` in BATCH, already resolved (Per-task resolution step above) so each task has its own `{TIER, MODEL_ID, REASON, SECURITY_PATH, PLAN_PATH}`. Build a **per-task worker prompt** using the same substitution rules as Step 3 (templates from `forge-dispatch.md`, memory filter per-task, coding standards sections, etc.).
+
+**b) Create N timeline tasks** — emit one `TaskCreate` per batch member (icon `⚡`, one-liner from T##-PLAN.md). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
+
+**c) Heartbeat — record multi-worker** before dispatching:
+```bash
+_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+_now=$(node -e "process.stdout.write(String(Date.now()))")
+# workers_csv = "execute-task/T01,execute-task/T02,..." built from BATCH
+echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":"BATCH:'$workers_csv'","worker_started":'$_now'}' > .gsd/forge/auto-mode.json
+```
+Use a single `BATCH:<csv>` worker label so the statusline shows the parallel group without special-casing.
+
+**d) Compute per-task INPUT_TOKENS** — loop and capture each:
+```bash
+INPUT_TOKENS_T01=$(node scripts/forge-tokens.js --inline "$prompt_T01")
+INPUT_TOKENS_T02=$(node scripts/forge-tokens.js --inline "$prompt_T02")
+# ... for each task in BATCH
+```
+
+**e) Dispatch ALL N Agent() calls IN ONE RESPONSE MESSAGE** — this is the critical Claude Code semantic: multiple tool-use blocks in a single assistant turn execute concurrently. Emit **all N `Agent()` calls inside the same assistant message** (not sequential messages). Example shape (N=3):
+
+```
+Agent({ subagent_type: "forge-executor", description: "⚡ T01 · <one-liner>", prompt: "<prompt_T01>" })
+Agent({ subagent_type: "forge-executor", description: "⚡ T02 · <one-liner>", prompt: "<prompt_T02>" })
+Agent({ subagent_type: "forge-executor", description: "⚡ T03 · <one-liner>", prompt: "<prompt_T03>" })
+```
+
+Do NOT use `run_in_background: true` — background agents are for fire-and-forget; here we need results. Multiple foreground Agent() calls in one message is the supported pattern.
+
+**f) Await all results** — Claude Code returns all N results together. Collect them as `results = [{taskId: "T01", result: "..."}, ...]` preserving BATCH order.
+
+**g) Guarded dispatch for the batch** — wrap the whole N-way dispatch in the same try/catch semantics as the single path. Classification rules:
+- If ANY single task throws transiently (`retry: true`): currently the simplest contract is to re-dispatch **only the failed task** with `attempt` incremented, while accepting the already-returned results for the others. The retry runs as its own single Agent() call immediately after — no need to re-batch.
+- If ANY task throws permanently (classifier `retry: false`, or retries exhausted): apply the CRITICAL path — deactivate auto-mode, surface to user, stop loop. Other batch results are discarded (STATE still reflects the pre-batch position).
+- Transient/retry events append to `events.jsonl` with `unit: "execute-task/T##"` (per-task, not per-batch).
+
+**h) Output tokens + dispatch events** — once all results are back, emit one `dispatch` event per task (not one per batch), preserving the per-task tier/model/reason fields:
+```bash
+for each task in BATCH:
+  OUTPUT_TOKENS_T##=$(node scripts/forge-tokens.js --inline "$result_T##")
+  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/T##\",\"model\":\"$MODEL_ID_T##\",\"tier\":\"$TIER_T##\",\"reason\":\"$REASON_T##\",\"input_tokens\":$INPUT_TOKENS_T##,\"output_tokens\":$OUTPUT_TOKENS_T##,\"batch_size\":${BATCH_LENGTH}}" >> .gsd/forge/events.jsonl
+```
+
+The extra `batch_size` field lets post-hoc analysis separate parallel from sequential dispatches without breaking S03 telemetry readers (which ignore unknown fields).
+
+**i) Heartbeat — clear worker field** after all Agent() calls return:
+```bash
+_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+_now=$(node -e "process.stdout.write(String(Date.now()))")
+echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":null}' > .gsd/forge/auto-mode.json
+```
+
+**j) Process each result serially** — iterate `results` in order and for each, run the full Step 5 (Process result) + Step 6 (Post-unit housekeeping) pipeline. Specifically:
+- For each `{taskId, result}`:
+  - Parse `---GSD-WORKER-RESULT---` and `TaskUpdate` based on status.
+  - Append events.jsonl (Step 6a).
+  - Update STATE.md (Step 6b) — each task advance is independent; do not skip.
+  - Append decisions (Step 6c).
+  - Memory extraction (Step 6d) — dispatch `forge-memory` **in the background** so memory extraction doesn't block the next unit's dispatch.
+  - Track progress (Step 6e) — `session_units += 1` per task completed.
+- If any task returned `status: partial` or `status: blocked`, follow the existing partial/blocked handling (write `continue.md`, stop loop, etc.) — but AFTER processing all other `done` results so their work isn't lost.
+
+**k) Re-enter the dispatch loop** — after all results are processed, loop back to step 1 (derive next unit). The next iteration will usually be another `execute-task` in the same slice (batch exhausted → possibly a new batch) or a `complete-slice` if this batch finished all tasks.
+
+---
+
 #### 5. Process result
 
 **Update timeline task** — mark the current task based on outcome:
@@ -580,7 +700,7 @@ Each entry must be a single line. This is the orchestrator-side record; workers 
 
 **c) Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md` using **`Edit` only** (never `Write` — it replaces the entire file and destroys existing rows; a PreToolUse hook blocks `Write` here). `Read` the file in full first (paginate if needed), then `Edit` with `old_string` = the current last row and `new_string` = that row + newline + your new row(s). Bash alternative: `cat >> .gsd/DECISIONS.md << 'EOF'` (never `>`).
 
-**d) Memory extraction** — call `forge-memory` agent (blocking — await before continuing):
+**d) Memory extraction** — dispatch `forge-memory` agent **in the background** (`run_in_background: true`) so the orchestrator can immediately dispatch the next unit without waiting for memory extraction to finish. Rationale: memory extraction averages 20–40s, runs on Haiku (cheap + fast), and the extracted memories only affect the *next* selective injection — not the current dispatch decision. Running it in parallel with the next unit is the single highest-leverage parallelism win (one extraction per unit, every unit).
 
 Determine which summary file was just written:
 - `execute-task` → `.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SUMMARY.md`
@@ -606,6 +726,8 @@ RESULT_BLOCK:
 KEY_DECISIONS:
 {key_decisions field from result, or "(none)"}
 ```
+
+Pass `run_in_background: true` to the `Agent()` call. The orchestrator does NOT await this — it proceeds immediately to Step 6e. When the background agent finishes, AUTO-MEMORY.md is updated on disk and will be picked up by the next unit's selective injection filter. If the background agent fails silently, the loss is bounded to that one extraction — the next unit's extraction will still run and AUTO-MEMORY accumulates.
 
 **e) Track progress:**
 ```

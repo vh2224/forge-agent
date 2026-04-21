@@ -89,6 +89,28 @@ To determine which case applies, read (in order, stop as soon as you find the an
 2. `M###-ROADMAP.md` — only if STATE is ambiguous about slices/milestone completion
 3. `S##-PLAN.md` — only if STATE is ambiguous about tasks within a slice
 
+**Depends-aware task pick (execute-task only):** `forge-next` is strictly **sequential** — never dispatches more than one task — but it must still respect `depends:[]` declared in `T##-PLAN.md` frontmatter. Without this, `forge-next` would try to run tasks in STATE-declared order even when a predecessor is incomplete, producing broken dispatches.
+
+After the dispatch table resolves `unit_type == execute-task`, ask `forge-parallelism.js` which task to pick. The script, invoked with `--max-concurrent 1`, returns the **first pending task in plan order whose `depends:[]` are satisfied** (by `T##-SUMMARY.md` existence). Legacy plans (any task missing `depends`/`writes` frontmatter) fall back to the first pending task in plan order — preserving pre-parallelism behavior exactly.
+
+```bash
+SLICE_PLAN=".gsd/milestones/${M###}/slices/${S##}/${S##}-PLAN.md"
+BATCH_JSON=$(node scripts/forge-parallelism.js --slice-plan "$SLICE_PLAN" --max-concurrent 1)
+PICK_MODE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).mode)" "$BATCH_JSON")
+PICK_ID=$(node -e "const r=JSON.parse(process.argv[1]);const b=r.batch||[];process.stdout.write(b[0]?b[0].id:'')" "$BATCH_JSON")
+```
+
+Handle `PICK_MODE`:
+- `single` or `legacy` or `parallel` — use `PICK_ID` as `unit_id` (override STATE's T## if different; the picker knows best). `parallel` mode can still happen here because the script computes the full ready set — just take `batch[0]`. The user only sees one dispatch.
+- `none` — all tasks complete; re-derive (should flip to `complete-slice`).
+- `blocked` — surface to user: `⚠ Dispatch bloqueado: todas as tasks pendentes dependem de unidades não concluídas. Motivo: {reason}`. Stop without dispatching.
+- `error` — stop and surface the error.
+
+If STATE's `next_action` referenced a different T## than `PICK_ID`, emit one line so the user sees the swap:
+```
+↷ Pulando para {PICK_ID} (STATE apontava para {STATE_T##}, mas {STATE_T##} depende de tasks ainda pendentes)
+```
+
 **Crash detection:** Before dispatching `execute-task`, read `T##-PLAN.md`. If it contains `status: RUNNING`, the previous session crashed mid-task. Warn the user:
 > ⚠ Task {T##} was interrupted (status: RUNNING). Re-executing from scratch.
 Then proceed with dispatch normally (the executor will overwrite the partial work).

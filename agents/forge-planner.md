@@ -100,6 +100,10 @@ One sentence.
 Every net-new `T##-PLAN.md` **must** include the following structured block in its YAML frontmatter — **unconditionally, with no branches, no `if applicable`**. The executor blocks on absence.
 
 ```yaml
+depends: [T01, T02]              # task IDs in this slice that must complete first; [] if none
+writes:                           # files/globs this task will create or modify
+  - "src/auth/jwt.ts"
+  - "src/auth/__tests__/**"
 must_haves:
   truths:
     - "Observable outcome (used for verification)"
@@ -119,10 +123,29 @@ expected_output:
 
 **Schema contract:**
 
+- `depends` is a flat array of task IDs from this slice (e.g. `[T01, T02]`). Empty array (`[]`) means the task has no predecessors and can run immediately. **Unconditional** — emit on every T##-PLAN.
+- `writes` lists every file/path this task will create, modify, or delete. Use literal paths (`src/a.ts`) or globs (`src/auth/**`, `tests/*.spec.ts`). **Unconditional** — emit on every T##-PLAN, even when empty (`writes: []` for a docs-only task). The dispatcher uses `writes` to detect conflicts between independent tasks in the same slice — two tasks with overlapping `writes` cannot run in parallel.
 - `must_haves` is a **map** with exactly three keys: `truths`, `artifacts`, `key_links`.
 - `artifacts[].path` + `min_lines` + `provides` are REQUIRED per entry; `stub_patterns` is OPTIONAL.
 - `key_links[]` REQUIRES `from`, `to`, `via`.
 - `expected_output` is a **top-level sibling** of `must_haves` (not nested inside it) — a flat array of path strings.
 - **Unconditional** — emit the block on every net-new T##-PLAN, even when artifacts are minor. The executor's verification gate (`scripts/forge-must-haves.js`) parses and validates this shape; a missing or malformed block causes the gate to fail.
+
+## Parallelism Guidance
+
+When decomposing a slice into tasks, explicitly think about which tasks **can** run concurrently. Two tasks are safely parallel when:
+
+1. Neither depends on the other (`depends` arrays don't reference each other — directly or transitively).
+2. Their `writes` sets are disjoint — no literal path or glob on one side overlaps with the other.
+
+**Order of decisions:**
+
+1. Identify the real data/artifact dependency graph — a task depending on another task's output must list it in `depends`.
+2. List every file each task writes to in `writes`. Be **explicit and realistic** — if a task edits `src/config.ts` to register a new module, include it. Underreporting `writes` causes race conditions when the dispatcher parallelizes. Overreporting is safe but sequentializes unnecessarily.
+3. If two tasks could logically run in parallel but share a file in `writes` (e.g. both registering exports in a barrel file), either:
+   - Order them with `depends` (one must complete first), or
+   - Split the shared file responsibility into a third task that depends on both.
+
+**Legacy / upgrade note:** tasks created before this schema existed lack `depends` and `writes`. The dispatcher auto-detects this at slice-scope (any task in the slice missing either field) and forces sequential execution for the whole slice — preserving the behavior of in-flight milestones. You do NOT need to backfill old T##-PLAN.md files; the next slice will be planned under the new schema.
 
 Then return the `---GSD-WORKER-RESULT---` block.
