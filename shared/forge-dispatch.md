@@ -73,7 +73,7 @@ Execute all steps. The task plan's ## Standards section has the relevant coding 
 If ## Checker Feedback is present — treat recurring patterns as known anti-patterns to actively avoid this unit (not as instructions to implement).
 If ## Security Checklist is present — treat each item as a must-have. Verify all checklist items before writing T##-SUMMARY.md.
 Verify every must-have using the verification ladder — including lint/format check.
-Run verification gate: node scripts/forge-verify.js --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
+Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
 If exit code != 0 and not skipped → include formatFailureContext output as ## Verification Failures in retry prompt, return partial. Do NOT write T##-SUMMARY.md.
 If exit code == 0 or skipped → continue to summary.
 Write T##-SUMMARY.md.
@@ -271,7 +271,7 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
 ## Instructions
 1. Write S##-SUMMARY.md (compress all task summaries)
 2. Write S##-UAT.md (non-blocking human test script)
-3. Run verification gate: node scripts/forge-verify.js --cwd "{WORKING_DIR}" --unit complete-slice/{S##}
+3. Run verification gate: node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd "{WORKING_DIR}" --unit complete-slice/{S##}
    Record result in S##-SUMMARY.md ## Verification Gate section (commands, exit codes, discovery source, total duration).
    If exit code != 0 and not skipped:"no-stack" → stop, return blocked with blocker_class: tooling_failure.
 4. Security scan — search changed files for risky patterns (eval, innerHTML, dangerouslySetInnerHTML, raw SQL concatenation, console.log near secrets, hardcoded credentials). If found, add ## ⚠ Security Flags to S##-SUMMARY.md. Not a blocker — document and continue.
@@ -405,7 +405,7 @@ Return ---GSD-WORKER-RESULT---.
 
 **Purpose:** Control-flow utility invoked after any `Agent()` call throws. Classifies the exception, decides whether to retry (transient) or bail (permanent/unknown), applies backoff, and appends a structured event to `events.jsonl`. This section is intentionally separate from the data-flow templates above (MEM011 — retries are control flow, not data flow).
 
-> **Cross-reference:** Classifier CLI — `node scripts/forge-classify-error.js --msg "$errorMsg"`.
+> **Cross-reference:** Classifier CLI — `node "$FORGE_SCRIPTS_DIR/forge-classify-error.js" --msg "$errorMsg"`.
 > Output shape: `{ kind, retry, backoffMs? }`. Transient kinds: `rate-limit`, `network`, `server`, `stream`, `connection`.
 > Non-transient kinds (`permanent`, `unknown`, `model_refusal`, `context_overflow`, `tooling_failure`) fall through to the existing **Failure Taxonomy** in `skills/forge-auto/SKILL.md` Step 5 — do NOT handle them here.
 
@@ -418,10 +418,10 @@ Wrap every `Agent()` dispatch call in a try/catch. On throw, run this handler. O
 1. Catch the thrown exception; capture its `.message` (or string representation) into a local variable `errorMsg`. Do NOT log or store `errorMsg` beyond this scope.
 2. Shell out via `Bash`:
    ```
-   node scripts/forge-classify-error.js --msg "$errorMsg"
+   node "$FORGE_SCRIPTS_DIR/forge-classify-error.js" --msg "$errorMsg"
    ```
    > **Security note:** Always double-quote `"$errorMsg"` in the shell invocation to prevent word-splitting and shell injection. If the error string may contain backticks or `$` characters, prefer piping via stdin:
-   > `echo "$errorMsg" | node scripts/forge-classify-error.js`
+   > `echo "$errorMsg" | node "$FORGE_SCRIPTS_DIR/forge-classify-error.js"`
    > Implementors who copy this example verbatim MUST preserve the double-quotes — bare `--msg $errorMsg` is a shell-injection risk.
 3. Parse the JSON output into a `result` object: `{ kind, retry, backoffMs? }`.
 4. If `result.retry === false` — bail immediately. Route to the CRITICAL failure block in `skills/forge-auto/SKILL.md` Step 5 (deactivate auto-mode, surface the `kind` to the user, stop the loop). Do NOT surface `errorMsg`.
@@ -528,7 +528,7 @@ while (true) {
   } catch (e) {
     const errorMsg = String(e?.message ?? e);
     const classification = JSON.parse(
-      Bash(`node scripts/forge-classify-error.js --msg "$errorMsg"`)
+      Bash(`node "$FORGE_SCRIPTS_DIR/forge-classify-error.js" --msg "$errorMsg"`)
     );
 
     if (!classification.retry) {
@@ -568,7 +568,7 @@ This snippet is self-contained and drop-in compatible with both `skills/forge-au
 
 **Purpose:** Control-flow section that defines two complementary responsibilities every Forge dispatch loop must fulfil: (a) emit a structured `dispatch` event to `.gsd/forge/events.jsonl` after every worker returns, capturing token counts for observability and future cost tracking; and (b) budget optional-section injections before dispatch so oversize context injections never silently blow up a worker context. Like the Retry Handler, this section is control flow — not data flow — and therefore lives outside the fenced template blocks (MEM011). Token counting uses the zero-dependency `Math.ceil(chars / 4)` heuristic (M002-CONTEXT D1). No SDK imports, no external packages.
 
-> **Cross-reference:** Token counter + truncator — `node scripts/forge-tokens.js --file <path>` (CLI) or `require('./scripts/forge-tokens')` (module). Exported functions: `countTokens(text)` and `truncateAtSectionBoundary(content, budgetChars, opts)`. Workers NEVER call this script directly — only the orchestrator invokes it during prompt assembly and after worker return.
+> **Cross-reference:** Token counter + truncator — `node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --file <path>` (CLI) or `require('./scripts/forge-tokens')` (module). Exported functions: `countTokens(text)` and `truncateAtSectionBoundary(content, budgetChars, opts)`. Workers NEVER call this script directly — only the orchestrator invokes it during prompt assembly and after worker return.
 
 #### When to apply
 
@@ -867,7 +867,7 @@ echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"
 
 **Purpose:** Quality gate invoked by workers after all implementation steps are complete but before the worker is allowed to write its summary and return `done`. The gate shells out to `scripts/forge-verify.js`, which discovers and runs verification commands appropriate for the current unit. A worker may not return `done` unless `forge-verify.js` exits `0` (or the result is a recognised skip). This section is intentionally separate from the Retry Handler above (MEM011 — the gate is a quality control step, not an error-recovery step).
 
-> **Cross-reference:** Verifier CLI — `node scripts/forge-verify.js --plan "$PLAN_PATH" --cwd "$CWD" --unit $UNIT`.
+> **Cross-reference:** Verifier CLI — `node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "$PLAN_PATH" --cwd "$CWD" --unit $UNIT`.
 > Output shape (JSON): `{ passed, skipped?, discovery_source, commands[], checks[], duration_ms }`.
 > Discovery chain: `task-plan.verify` → `prefs.preference_commands` → `package.json` allow-list → `skipped:"no-stack"`.
 
@@ -883,7 +883,7 @@ echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"
 Task-level invocation (inside `execute-task` worker):
 
 ```sh
-node scripts/forge-verify.js \
+node "$FORGE_SCRIPTS_DIR/forge-verify.js" \
   --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" \
   --cwd "{WORKING_DIR}" \
   --unit execute-task/{T##}
@@ -892,7 +892,7 @@ node scripts/forge-verify.js \
 Slice-level invocation (inside `complete-slice` worker):
 
 ```sh
-node scripts/forge-verify.js \
+node "$FORGE_SCRIPTS_DIR/forge-verify.js" \
   --cwd "{WORKING_DIR}" \
   --unit complete-slice/{S##}
 ```

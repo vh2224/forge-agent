@@ -294,6 +294,22 @@ if (Test-Path "$RepoDir\shared\forge-domain-probes.md") {
     Info "  forge-domain-probes.md"
 }
 
+# ── Install runtime scripts (scripts/forge-*.js invoked by skills/dispatch) ────
+Write-Host ""
+Info "Instalando scripts runtime..."
+$ScriptsDir = Join-Path $ClaudeDir "scripts"
+if (-not (Test-Path $ScriptsDir)) {
+    New-Item -ItemType Directory -Path $ScriptsDir -Force | Out-Null
+}
+Get-ChildItem -Path "$RepoDir\scripts" -Filter "forge-*.js" -File | ForEach-Object {
+    $name = $_.Name
+    # Exclude *.test.js and files copied separately under $ClaudeDir root (statusline, hook).
+    if ($name -like "*.test.js") { return }
+    if ($name -eq "forge-statusline.js" -or $name -eq "forge-hook.js") { return }
+    CopyFile $_.FullName (Join-Path $ScriptsDir $name)
+    Info "  scripts/$name"
+}
+
 # ── Install statusline + hooks ────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando statusline & hooks..."

@@ -19,6 +19,15 @@ ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
 ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 WORKING_DIR=$(pwd)
 echo "WORKING_DIR=$WORKING_DIR"
+
+# Resolve runtime scripts dir — prefer local ./scripts (dogfood: edits take effect
+# immediately); fall back to ~/.claude/scripts (user-land: installed version).
+if [ -f "scripts/forge-parallelism.js" ]; then
+  FORGE_SCRIPTS_DIR="scripts"
+else
+  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+fi
+echo "FORGE_SCRIPTS_DIR=$FORGE_SCRIPTS_DIR"
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:
@@ -95,7 +104,7 @@ After the dispatch table resolves `unit_type == execute-task`, ask `forge-parall
 
 ```bash
 SLICE_PLAN=".gsd/milestones/${M###}/slices/${S##}/${S##}-PLAN.md"
-BATCH_JSON=$(node scripts/forge-parallelism.js --slice-plan "$SLICE_PLAN" --max-concurrent 1)
+BATCH_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-parallelism.js" --slice-plan "$SLICE_PLAN" --max-concurrent 1)
 PICK_MODE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).mode)" "$BATCH_JSON")
 PICK_ID=$(node -e "const r=JSON.parse(process.argv[1]);const b=r.batch||[];process.stdout.write(b[0]?b[0].id:'')" "$BATCH_JSON")
 ```
@@ -208,7 +217,7 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
    Use `$WORKING_DIR` (captured in bootstrap via `pwd` — always forward-slash, Windows-safe). For each `T##-PLAN.md`:
    ```bash
    for plan in "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/T"/T*-PLAN.md; do
-     node scripts/forge-must-haves.js --check "$plan"
+     node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check "$plan"
    done
    ```
    Capture stdout JSON. Build an array of `{task_id, legacy, valid, errors}`. Serialize to JSON as `MUST_HAVES_CHECK_RESULTS`.
@@ -383,13 +392,13 @@ TaskUpdate({ taskId: current_task_id, status: "in_progress" })
 <!-- token-telemetry-integration -->
 Per `shared/forge-dispatch.md § Token Telemetry` — compute input tokens, dispatch, capture output tokens, append dispatch event (I/O errors MUST propagate):
 ```bash
-INPUT_TOKENS=$(node scripts/forge-tokens.js --inline "$worker_prompt")
+INPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$worker_prompt")
 ```
 
 **Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
 
 1. Capture the exception message into `errorMsg`.
-2. Shell out: `node scripts/forge-classify-error.js --msg "$errorMsg"` → parse `{ kind, retry, backoffMs? }`.
+2. Shell out: `node "$FORGE_SCRIPTS_DIR/forge-classify-error.js" --msg "$errorMsg"` → parse `{ kind, retry, backoffMs? }`.
 3. If `retry === true` AND `attempt <= PREFS.retry.max_transient_retries` (default 3): increment `attempt`, apply backoff, append a retry event (include `input_tokens: INPUT_TOKENS` from the retry prompt) to `.gsd/forge/events.jsonl`, and re-dispatch. Task stays `in_progress` between retries.
 4. Otherwise fall through to the failure taxonomy in Step 5.
 
@@ -405,7 +414,7 @@ Then call `Agent(agent_name, worker_prompt)` with a `description` that captures 
 
 Wait for the result. Then:
 ```bash
-OUTPUT_TOKENS=$(node scripts/forge-tokens.js --inline "$result")
+OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
 echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS}}" >> .gsd/forge/events.jsonl
 ```

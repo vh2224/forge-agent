@@ -11,6 +11,15 @@ ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
 ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 WORKING_DIR=$(pwd)
 echo "WORKING_DIR=$WORKING_DIR"
+
+# Resolve runtime scripts dir — prefer local ./scripts (dogfood: edits take effect
+# immediately); fall back to ~/.claude/scripts (user-land: installed version).
+if [ -f "scripts/forge-parallelism.js" ]; then
+  FORGE_SCRIPTS_DIR="scripts"
+else
+  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+fi
+echo "FORGE_SCRIPTS_DIR=$FORGE_SCRIPTS_DIR"
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:
@@ -222,7 +231,7 @@ MAX_CONCURRENT=$(node -e "
   let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
   process.stdout.write(String((p.parallelism && p.parallelism.max_concurrent) || 3));
 ")
-BATCH_JSON=$(node scripts/forge-parallelism.js --slice-plan "$SLICE_PLAN" --max-concurrent "$MAX_CONCURRENT")
+BATCH_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-parallelism.js" --slice-plan "$SLICE_PLAN" --max-concurrent "$MAX_CONCURRENT")
 echo "$BATCH_JSON"
 ```
 
@@ -297,7 +306,7 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
    Use `$WORKING_DIR` (captured in bootstrap via `pwd` — always forward-slash, Windows-safe). For each `T##-PLAN.md`:
    ```bash
    for plan in "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/T"/T*-PLAN.md; do
-     node scripts/forge-must-haves.js --check "$plan"
+     node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check "$plan"
    done
    ```
    Capture stdout JSON. Build an array of `{task_id, legacy, valid, errors}`. Serialize to JSON as `MUST_HAVES_CHECK_RESULTS`.
@@ -544,7 +553,7 @@ Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). R
 <!-- token-telemetry-integration -->
 Per `shared/forge-dispatch.md § Token Telemetry` — compute input tokens, dispatch, capture output tokens, append dispatch event (I/O errors MUST propagate):
 ```bash
-INPUT_TOKENS=$(node scripts/forge-tokens.js --inline "$worker_prompt")
+INPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$worker_prompt")
 ```
 
 Then call `Agent(agent_name, worker_prompt)` with a `description` using the same icon:
@@ -559,7 +568,7 @@ Then call `Agent(agent_name, worker_prompt)` with a `description` using the same
 
 Wait for the result. Then:
 ```bash
-OUTPUT_TOKENS=$(node scripts/forge-tokens.js --inline "$result")
+OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
 echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS}}" >> .gsd/forge/events.jsonl
 ```
@@ -567,7 +576,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\"
 **Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
 
 1. Capture the exception message into `errorMsg`.
-2. Shell out: `node scripts/forge-classify-error.js --msg "$errorMsg"` → parse `{ kind, retry, backoffMs? }`.
+2. Shell out: `node "$FORGE_SCRIPTS_DIR/forge-classify-error.js" --msg "$errorMsg"` → parse `{ kind, retry, backoffMs? }`.
 3. If `retry === true` AND `attempt <= PREFS.retry.max_transient_retries` (default 3): increment `attempt`, apply backoff, append a retry event (include `input_tokens: INPUT_TOKENS` from the retry prompt) to `.gsd/forge/events.jsonl`, and re-dispatch. Task stays `in_progress` between retries. Heartbeat write is NOT disturbed.
 4. Otherwise fall through to the CRITICAL path below.
 
@@ -610,8 +619,8 @@ Use a single `BATCH:<csv>` worker label so the statusline shows the parallel gro
 
 **d) Compute per-task INPUT_TOKENS** — loop and capture each:
 ```bash
-INPUT_TOKENS_T01=$(node scripts/forge-tokens.js --inline "$prompt_T01")
-INPUT_TOKENS_T02=$(node scripts/forge-tokens.js --inline "$prompt_T02")
+INPUT_TOKENS_T01=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$prompt_T01")
+INPUT_TOKENS_T02=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$prompt_T02")
 # ... for each task in BATCH
 ```
 
@@ -635,7 +644,7 @@ Do NOT use `run_in_background: true` — background agents are for fire-and-forg
 **h) Output tokens + dispatch events** — once all results are back, emit one `dispatch` event per task (not one per batch), preserving the per-task tier/model/reason fields:
 ```bash
 for each task in BATCH:
-  OUTPUT_TOKENS_T##=$(node scripts/forge-tokens.js --inline "$result_T##")
+  OUTPUT_TOKENS_T##=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result_T##")
   echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/T##\",\"model\":\"$MODEL_ID_T##\",\"tier\":\"$TIER_T##\",\"reason\":\"$REASON_T##\",\"input_tokens\":$INPUT_TOKENS_T##,\"output_tokens\":$OUTPUT_TOKENS_T##,\"batch_size\":${BATCH_LENGTH}}" >> .gsd/forge/events.jsonl
 ```
 

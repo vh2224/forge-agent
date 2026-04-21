@@ -118,7 +118,8 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     b. **Build expected_output union.** For each `T##-PLAN.md` under `.gsd/milestones/M###/slices/S##/tasks/T##/`:
        ```bash
-       node scripts/forge-must-haves.js --check .gsd/milestones/M###/slices/S##/tasks/T##/T##-PLAN.md
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-must-haves.js ] && echo scripts || echo "$HOME/.claude/scripts")
+       node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check .gsd/milestones/M###/slices/S##/tasks/T##/T##-PLAN.md
        ```
        Parse the JSON stdout:
        - `{legacy: true}` → contributes nothing (empty set).
@@ -202,7 +203,8 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     a. **Invoke the verifier CLI:**
        ```bash
-       node scripts/forge-verifier.js \
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verifier.js ] && echo scripts || echo "$HOME/.claude/scripts")
+       node "$FORGE_SCRIPTS_DIR/forge-verifier.js" \
          --slice {S##} \
          --milestone {M###} \
          --cwd {WORKING_DIR}
@@ -337,7 +339,8 @@ Given all `T##-SUMMARY.md` files from the slice:
 
 3. **Verification gate** — invoke:
    ```bash
-   node scripts/forge-verify.js --cwd {WORKING_DIR} --unit complete-slice/{S##}
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd {WORKING_DIR} --unit complete-slice/{S##}
    ```
    Parse result:
    - `passed: true` → record the gate result in `S##-SUMMARY.md` under `## Verification Gate` (commands, exit codes, discovery source, total duration, timestamp). Continue to step 4.

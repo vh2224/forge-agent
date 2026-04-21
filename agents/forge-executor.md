@@ -19,7 +19,8 @@ You are a GSD execution agent. You implement one task completely: read → execu
 1a. **Validate must_haves schema (BEFORE setting `status: RUNNING`):**
     Run:
     ```bash
-    node scripts/forge-must-haves.js --check "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md"
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-must-haves.js ] && echo scripts || echo "$HOME/.claude/scripts")
+    node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md"
     ```
     Parse the JSON on stdout:
     - `{"legacy": true}` → **continue normally**; record `legacy_schema: true` in T##-SUMMARY.md `## What Happened` as a one-line warn note. Do NOT block.
@@ -45,7 +46,8 @@ You are a GSD execution agent. You implement one task completely: read → execu
 9. Verify every must-have (see ladder below)
 10. **Verification gate** — invoke:
     ```bash
-    node scripts/forge-verify.js --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "$HOME/.claude/scripts")
+    node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
     ```
     Parse the JSON result:
     - `passed: true` and (no `skipped` OR `skipped: "no-stack"`) → continue to step 11.

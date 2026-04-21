@@ -233,6 +233,18 @@ for f in "${REPO_DIR}/scripts"/*.sh; do
   chmod +x "${SCRIPTS_DIR}/${name}" 2>/dev/null || true
   info "  scripts/${name}"
 done
+# Copy runtime forge-*.js scripts invoked by skills/dispatch (exclude *.test.js,
+# statusline/hook/merge-settings — those go directly under $CLAUDE_DIR, not scripts/).
+for f in "${REPO_DIR}/scripts"/forge-*.js; do
+  [ -f "$f" ] || continue
+  name="$(basename "$f")"
+  case "$name" in
+    *.test.js) continue ;;
+    forge-statusline.js|forge-hook.js) continue ;;
+  esac
+  copy "$f" "${SCRIPTS_DIR}/${name}"
+  info "  scripts/${name}"
+done
 
 echo ""
 info "Installing skills..."
