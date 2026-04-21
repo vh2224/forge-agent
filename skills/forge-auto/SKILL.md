@@ -624,7 +624,18 @@ INPUT_TOKENS_T02=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$prompt_T
 # ... for each task in BATCH
 ```
 
-**e) Dispatch ALL N Agent() calls IN ONE RESPONSE MESSAGE** — this is the critical Claude Code semantic: multiple tool-use blocks in a single assistant turn execute concurrently. Emit **all N `Agent()` calls inside the same assistant message** (not sequential messages). Example shape (N=3):
+**e) Dispatch ALL N Agent() calls IN ONE RESPONSE MESSAGE** — this is the critical Claude Code semantic: multiple tool-use blocks in a single assistant turn execute concurrently. Emit **all N `Agent()` calls inside the same assistant message** (not sequential messages).
+
+**⚠ CRITICAL — tool-call shape (read before dispatching):**
+
+The built-in description of the `Agent` tool suggests `run_in_background: true` for "genuinely independent work to do in parallel." **That guidance does NOT apply here.** In this flow we parallelize BUT we need the results back in the SAME turn to process them and drive the next loop iteration. Violating this has already caused a 3+ hour hang in production where 3 backgrounded executors completed but the orchestrator never picked up their results.
+
+- The parallel semantic in Claude Code is: **foreground multi-call = parallel-with-results.** Background is fire-and-forget (e.g., `forge-memory` step 6d) — you do not await it.
+- **Never pass these params** on the parallel executor dispatch: `run_in_background`, `isolation`, `model` override, or any field other than `subagent_type`, `description`, `prompt`.
+- The only Agent() call in this whole SKILL that legitimately takes `run_in_background: true` is the `forge-memory` dispatch in step 6d (single-task path) and its equivalent in step 4-P/j. Executors never.
+- UI tell: if after dispatching you see `⎿ Backgrounded agent` under any of the N calls, you've already broken the contract. See step (f) fail-fast below.
+
+Example shape (N=3), exact and minimal:
 
 ```
 Agent({ subagent_type: "forge-executor", description: "⚡ T01 · <one-liner>", prompt: "<prompt_T01>" })
@@ -632,9 +643,20 @@ Agent({ subagent_type: "forge-executor", description: "⚡ T02 · <one-liner>", 
 Agent({ subagent_type: "forge-executor", description: "⚡ T03 · <one-liner>", prompt: "<prompt_T03>" })
 ```
 
-Do NOT use `run_in_background: true` — background agents are for fire-and-forget; here we need results. Multiple foreground Agent() calls in one message is the supported pattern.
+**f) Await all results — and fail fast if the shape is wrong.** Claude Code returns all N results together in the same turn when step (e) was done correctly. Collect them as `results = [{taskId: "T01", result: "..."}, ...]` preserving BATCH order.
 
-**f) Await all results** — Claude Code returns all N results together. Collect them as `results = [{taskId: "T01", result: "..."}, ...]` preserving BATCH order.
+**Fail-fast check (execute BEFORE processing any result):** if the tool-result payload for any of the N `Agent()` calls is the background-dispatch acknowledgement shape (contains "Backgrounded agent" / agent ID without the `---GSD-WORKER-RESULT---` block), the contract was violated in step (e). Treat this as a permanent failure:
+
+1. Do NOT wait for background completion notifications — they may arrive later but the dispatch loop is not resumable from a half-state like this.
+2. Deactivate auto-mode:
+   ```bash
+   echo '{"active":false,"deactivated_at":'$(node -e "process.stdout.write(String(Date.now()))")',"reason":"parallel_dispatch_backgrounded"}' > .gsd/forge/auto-mode.json
+   ```
+3. Append one `blocked` event per affected task to `events.jsonl` with `reason: "parallel_dispatch_backgrounded"` and `batch_size: N`.
+4. Leave STATE.md at its pre-batch position — when the user resumes via `/forge`, heartbeat-stale detection will pick up from there.
+5. Surface a single user-facing message naming the skill file and step (e) as the violation point, and stop the loop.
+
+This branch is a safety net, not a retry path. The right fix is to not background in step (e) — the CRITICAL block above covers that.
 
 **g) Guarded dispatch for the batch** — wrap the whole N-way dispatch in the same try/catch semantics as the single path. Classification rules:
 - If ANY single task throws transiently (`retry: true`): currently the simplest contract is to re-dispatch **only the failed task** with `attempt` incremented, while accepting the already-returned results for the others. The retry runs as its own single Agent() call immediately after — no need to re-batch.
