@@ -1,3 +1,51 @@
+## v1.1.0 (2026-05-20) — M004 Multi-Run Workspace
+
+### Breaking Changes
+
+- `.gsd/STATE.md` raiz vira **dashboard read-only auto-gerado** (Multi-run mode). Single-run workspaces continuam funcionando via migração lazy ao primeiro boot multi-run — sem ação manual necessária.
+- Workers (forge-executor, forge-discusser, forge-completer, forge-memory) escrevem decisões/memórias/eventos em arquivos **per-milestone** (`M###-DECISIONS.md`, `M###-AUTO-MEMORY.md`, `M###-events.jsonl`, `M###-CHECKER-MEMORY.md`) durante a run. Globais são merged em `complete-milestone` via `forge-merger.js` sob lockfile.
+
+### Features
+
+- feat: **Per-milestone state + runs registry** (S01) — `M###-STATE.md` substitui STATE.md raiz como source-of-truth de cada run. `.gsd/forge/runs/{id}.json` registra todas as runs ativas (kind: milestone | task).
+- feat: **Hooks session-aware** (S02) — `forge-hook.js` resolve a run dona via `data.session_id` em todos os 6 phases. Evidence path scoped por run_id.
+- feat: **Pause + compact-signal per-run** (S03) — `.gsd/forge/pause-{run_id}` e `compact-signal-{sessionId}.json` substituem globais. `/forge-pause M065` toggla scoped.
+- feat: **Global merge sob lockfile** (S05) — `scripts/forge-merger.js` promove per-milestone files pros globais (DECISIONS, AUTO-MEMORY com cap-50 decay, LEDGER, CHECKER-MEMORY, events.jsonl) sob `mkdir`-mutex via `scripts/forge-lock.js`. Validado com 2 mergers concorrentes em NTFS sem corruption.
+- feat: **CLI multi-run** (S06) — `/forge-auto <ID>`, `/forge-next <ID>`, `/forge-task <descrição>` aceitam ID args. Sem arg + 0 ativas = legacy fallback; 1 ativa = assume retomar; 2+ ativas = refuse + lista IDs.
+- feat: **File-locks modo shared** (S07) — `scripts/forge-filelock.js` + `forge-hook.js` PreToolUse bloqueia Write/Edit cross-run quando outra run ativa segura o arquivo. Steal-on-inactive + steal-on-expired (TTL 60s). Orquestrador retenta 3× com backoff 5-30s jitter via `forge-classify-error.js` novo class `cross_run_file_lock`.
+- feat: **Isolation modes** (S08) — `forge_isolation.mode: shared | branch | worktree` configurável em prefs. `scripts/forge-repos.js` auto-detect multi-repo via walk de subdirs `.git/`. `scripts/forge-isolation.js` setup/cleanup pra branch (`forge/{M###}`) e worktree (`.forge-worktrees/{M###}/{repo}/`).
+- feat: **Statusline multi-run** (S09) — `forge-statusline.js` scaneia `runs/*.json`. 1 run = visual rico legado. 2-3 runs = compacto `● AUTO ×2 │ M065 ⚡T03 +12s │ M066 🔥S04 +1m`. 4+ trunca com `+N mais`.
+- feat: **Docs** (S10) — `docs/multi-run.md` cobre 3 modes, locks, registry, CLI, troubleshooting. `forge-agent-prefs.md` ganha bloco `forge_isolation:` + `multi_run:` + `parallelism.cross_run_overlap:` scaffolded.
+
+### Architecture (M004 decisions D-M004-1..12 — see .gsd/milestones/M004/M004-CONTEXT.md)
+
+- STATE.md raiz dashboard regenerável; per-milestone state em M###-STATE.md
+- Runs registry indexado por ID, kind=milestone | task
+- Per-milestone artifacts → globals via merger sob lockfile no complete-milestone
+- File-locks only em shared mode; defesa-em-profundidade em branch; auto-disabled em worktree
+- Conflict de lock → retry 3× com jitter 5-30s
+- forge_isolation.mode default = shared (zero quebra retroativa)
+- Multi-repo auto-detect via walk de .git
+- CLI exige ID quando 2+ ativas
+- Hooks resolvem run via session_id
+- Statusline linha compacta multi-run; trunca em 4+
+- forge-memory promove per-milestone → global no merger
+- auto-mode.json mantido como alias do oldest active (compat)
+
+### Scripts added
+
+- `scripts/forge-runs.js` — registry CRUD
+- `scripts/forge-state.js` — per-milestone STATE read/write + legacy compat
+- `scripts/forge-lock.js` — mkdir-mutex helper
+- `scripts/forge-dashboard.js` — regen STATE.md raiz
+- `scripts/forge-merger.js` — per-milestone → global promotion
+- `scripts/forge-cli-helpers.js` — resolveRunFromArgs, refuse logic, newTaskId
+- `scripts/forge-filelock.js` — cross-run file ownership tracking
+- `scripts/forge-repos.js` — auto-detect git repos via walk
+- `scripts/forge-isolation.js` — setup/cleanup branch + worktree modes
+
+All 9 scripts auto-installed via existing `install.sh` / `install.ps1` globs — no installer changes needed.
+
 ## v1.0.0 (2026-04-15)
 
 ### Breaking Changes
