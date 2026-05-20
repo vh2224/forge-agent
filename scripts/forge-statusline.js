@@ -83,6 +83,33 @@ process.stdin.on('end', () => {
       }
     } catch { /* not a forge project */ }
 
+    // --- Multi-run detection (M004+, reads .gsd/forge/runs/*.json) ---
+    // When 2+ active runs exist, the statusline switches to compact multi-run mode.
+    // 0-1 active runs fall back to the legacy auto-mode.json single-run rendering below.
+    let multiRunActive = [];
+    try {
+      const runsDir = path.join(cwd, '.gsd', 'forge', 'runs');
+      if (fs.existsSync(runsDir)) {
+        const STALE_MS = 5 * 60 * 1000;
+        const now = Date.now();
+        const files = fs.readdirSync(runsDir).filter(f => f.endsWith('.json'));
+        for (const f of files) {
+          try {
+            const r = JSON.parse(fs.readFileSync(path.join(runsDir, f), 'utf8'));
+            if (r.active !== true) continue;
+            const age = now - (r.last_heartbeat || 0);
+            if (age > STALE_MS) continue;
+            multiRunActive.push({
+              id: r.id, kind: r.kind, worker: r.worker, isolation: r.isolation_mode,
+              started_at: r.started_at, heartbeat_age_ms: age,
+            });
+          } catch {}
+        }
+        multiRunActive.sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+      }
+    } catch {}
+    const isMultiRunMode = multiRunActive.length >= 2;
+
     // --- Auto mode indicator (reads .gsd/forge/auto-mode.json) ---
     let autoElapsedSecs = 0; // kept for dot sync below
     let autoWorker      = '';  // active worker unit (from heartbeat)
@@ -400,15 +427,45 @@ process.stdin.on('end', () => {
       return `${s}s`;
     };
 
-    // --- Check for pause request ---
+    // --- Check for pause request (legacy global + any scoped) ---
     const pauseFile = path.join(cwd, '.gsd', 'forge', 'pause');
-    const pausePending = (() => { try { return fs.existsSync(pauseFile); } catch { return false; } })();
+    let pausePending = false;
+    try {
+      pausePending = fs.existsSync(pauseFile);
+      // Scoped pause-{ID} also signals pause for any run
+      if (!pausePending) {
+        const pauseGlob = fs.readdirSync(path.join(cwd, '.gsd', 'forge'));
+        pausePending = pauseGlob.some(n => n.startsWith('pause-'));
+      }
+    } catch {}
 
-    // --- Build auto-mode prefix (dot + AUTO + elapsed + units) — worker moves to middle segment now ---
+    // --- Build auto-mode prefix — multi-run compact OR single-run rich ---
     let autoPrefix = '';
     if (pausePending) {
       autoPrefix = `${c.yellow}⏸ PAUSE SOLICITADO${c.reset} │ `;
+    } else if (isMultiRunMode) {
+      // Multi-run compact line: ● AUTO ×N │ M065 ⚡T03 +12s │ M066 🔥S04 +1m
+      // 4+ runs: truncate to "+N-2 mais"
+      const now = Date.now();
+      const segments = multiRunActive.slice(0, 3).map(r => {
+        let icon = '·';
+        let unit = '';
+        if (r.worker) {
+          const [ut, uid] = r.worker.split('/');
+          icon = tierIconFor(ut);
+          unit = uid || ut || '';
+        }
+        const wAge = r.heartbeat_age_ms > 0 ? fmtSecsShort(Math.round(r.heartbeat_age_ms / 1000)) : '0s';
+        return `${r.id} ${icon}${unit} +${wAge}`;
+      });
+      const more = multiRunActive.length > 3 ? ` · +${multiRunActive.length - 3} mais` : '';
+      const dot = (Math.floor(Date.now() / 500) % 2 === 0) ? '●' : '○';
+      autoPrefix = `${c.red}${dot} AUTO ×${multiRunActive.length}${c.reset} │ ${segments.join(' │ ')}${more} │ `;
+      // Disable single-run autoMode flag so middle/right segments don't double-render
+      autoMode = false;
+      autoWorker = '';
     } else if (autoMode) {
+      // Legacy single-run rendering
       const dot = autoElapsedSecs % 2 === 0 ? '●' : '○';
       const unitsSuffix = autoUnitsDone > 0 ? ` · ${autoUnitsDone}u` : '';
       autoPrefix = `${c.red}${dot} AUTO ${autoElapsed}${unitsSuffix}${c.reset} │ `;

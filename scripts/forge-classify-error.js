@@ -25,6 +25,9 @@ const CONNECTION_RE   = /terminated|connection.?refused|other side closed|EPIPE|
 // Catch-all for V8 JSON.parse errors: all modern variants end with "in JSON at position \d+".
 const STREAM_RE       = /in JSON at position \d+|Unexpected end of JSON|SyntaxError.*JSON/i;
 const RESET_DELAY_RE  = /reset in (\d+)s/i;
+// M004+: file-lock conflict from forge-hook PreToolUse — another active run holds the file.
+// Format: "[forge-hook] Bloqueado: arquivo \"<path>\" em uso por run M### há Ns. Aguarde..."
+const CROSS_RUN_LOCK_RE = /\[forge-hook\]\s+Bloqueado:\s+arquivo[^]*em uso por run/i;
 
 // ── Classification ────────────────────────────────────────────────────────────
 /**
@@ -46,6 +49,12 @@ const RESET_DELAY_RE  = /reset in (\d+)s/i;
 function classifyError(errorMsg, retryAfterMs) {
   const isPermanent  = PERMANENT_RE.test(errorMsg);
   const isRateLimit  = RATE_LIMIT_RE.test(errorMsg);
+
+  // 0. Cross-run file lock — M004+, retry with jitter 5-30s, defer task
+  if (CROSS_RUN_LOCK_RE.test(errorMsg)) {
+    const delayMs = retryAfterMs ?? (5_000 + Math.floor(Math.random() * 25_000));
+    return { kind: 'cross_run_file_lock', retry: true, backoffMs: delayMs };
+  }
 
   // 1. Permanent — but rate limit takes precedence
   if (isPermanent && !isRateLimit) {
@@ -101,6 +110,7 @@ function isTransient(result) {
     case 'server':
     case 'stream':
     case 'connection':
+    case 'cross_run_file_lock':
       return true;
     default:
       return false;
