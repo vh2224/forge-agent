@@ -441,15 +441,15 @@ Parse the `---GSD-WORKER-RESULT---` block:
 
 ### 6. Post-unit housekeeping
 
-**a) Append to event log** — append one line to `.gsd/forge/events.jsonl` (create `.gsd/forge/` directory if missing):
+**a) Append to per-milestone event log** — append one line to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-events.jsonl` (M004+; create dir if missing):
 ```json
 {"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"{M###}","status":"{done|blocked|partial}","summary":"{one-liner}"}
 ```
-Each entry must be a single line. This is the orchestrator-side record; workers may also write their own entries.
+Each entry must be a single line. Append-only is atomic up to PIPE_BUF — event lines are <512B → safe without lockfile. Legacy fallback: `.gsd/forge/events.jsonl` if `{M###}` not resolved.
 
-**b) Update STATE.md** — advance to next unit position.
+**b) Update per-milestone STATE** — advance to next unit position via `scripts/forge-state.js --update {M###} --json '{...}'`. Dashboard regen happens separately via `scripts/forge-dashboard.js`.
 
-**c) Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md` using **`Edit` only** (never `Write` — it replaces the entire file and destroys existing rows; a PreToolUse hook blocks `Write` here). `Read` the file in full first (paginate if needed), then `Edit` with `old_string` = the current last row and `new_string` = that row + newline + your new row(s). Bash alternative: `cat >> .gsd/DECISIONS.md << 'EOF'` (never `>`).
+**c) Append decisions** — if `key_decisions` in result, append to per-milestone `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-DECISIONS.md` (M004+). Global `.gsd/DECISIONS.md` merged on `complete-milestone` via merger (S05). `Edit` for existing file; `Write` once if missing; or `cat >> path << 'EOF'`. Legacy fallback: global path direct if `{M###}` not resolved.
 
 **d) Memory extraction** — call `forge-memory` agent (blocking — await before continuing):
 

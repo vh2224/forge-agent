@@ -255,7 +255,9 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     This sub-step is **advisory**. Do NOT return `status: blocked` based on verifier output. Do NOT abort merge. The section is purely documentation. If `scripts/forge-verifier.js` does not exist (e.g., running against a pre-M003/S03 checkout), write the fallback line and proceed.
 
-1.9. **Checker Memory update — append quality patterns to `.gsd/CHECKER-MEMORY.md`** (advisory; skipped when `checker_memory.mode: disabled`).
+1.9. **Checker Memory update — append quality patterns to per-milestone `M###-CHECKER-MEMORY.md`** (advisory; skipped when `checker_memory.mode: disabled`).
+
+    **Multi-run (M004+):** writes go to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CHECKER-MEMORY.md` (per-milestone). The global `.gsd/CHECKER-MEMORY.md` is merged on `complete-milestone` via `scripts/forge-merger.js` (S05). All path references below — read and write — refer to the per-milestone file when `{M###}` is provided in the prompt. Legacy single-run fallback: `.gsd/CHECKER-MEMORY.md` direct.
 
     Read the merged `checker_memory.mode` pref (same cascade as evidence.mode):
     ```bash
@@ -286,18 +288,18 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     d. **If `PLAN_ISSUES` and `VERIFY_ISSUES` are both empty** → skip writing; do NOT touch `CHECKER-MEMORY.md`. Absence is signal — clean slices must not pollute the file.
 
-    e. **Read or initialize `CHECKER-MEMORY.md`:**
+    e. **Read or initialize `M###-CHECKER-MEMORY.md`** (per-milestone):
        ```bash
-       cat "{WORKING_DIR}/.gsd/CHECKER-MEMORY.md" 2>/dev/null
+       cat "{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CHECKER-MEMORY.md" 2>/dev/null
        ```
-       If the file does not exist, treat as an empty document with no table rows.
+       If the file does not exist, treat as an empty document with no table rows. The global `.gsd/CHECKER-MEMORY.md` is NOT read here — its state during the run may be stale.
 
     f. **Merge and update counts.** Parse the two existing tables (`## Plan Quality Patterns`, `## Verification Patterns`). For each incoming issue:
        - If a row for the same `dimension` / `pattern` key exists → increment `Count`, update `Last Seen` to `{M###}/{S##}`, and update `Specific Pattern` if the new justification is more specific (longer).
        - If no matching row exists → add a new row.
        Apply decay: drop any row where `Count >= 5 AND Last Seen is more than 3 milestone numbers ago` (e.g. current M###=M020, last seen ≤ M016 → drop). This prevents stale resolved patterns from cluttering the file indefinitely.
 
-    g. **Write `.gsd/CHECKER-MEMORY.md`** using the `Write` tool (structural rewrites make `Edit` fragile here). Format:
+    g. **Write `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-CHECKER-MEMORY.md`** using the `Write` tool (structural rewrites make `Edit` fragile here). Create parent dir with `mkdir -p` first. Format:
        ```markdown
        # Checker Memory
 
@@ -449,9 +451,9 @@ Given all `T##-SUMMARY.md` files from the slice:
    ```
 4. Emit milestone completion report: slices completed, total tasks, key decisions made
 
-5. **Write ledger entry** — append a compact summary to `.gsd/LEDGER.md` (create if missing).
-   **Append using `Edit` only** (never `Write` on an existing file — it replaces the whole thing; a PreToolUse hook blocks `Write` here). If the file does not exist yet, `Write` is fine for initial creation. To append: `Read` the file in full first, then `Edit` with `old_string` = current last line and `new_string` = that line + newline + your new entry. Bash alternative: `cat >> .gsd/LEDGER.md << 'EOF'` (never `>`).
-   This file survives cleanup and gives future subagents quick context on what was built:
+5. **Write ledger entry + run merger** (per-milestone → globals under lockfile, M004+):
+
+   **5a. Write per-milestone ledger entry** to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-LEDGER-ENTRY.md`. This is the block that the merger will append to the global `LEDGER.md`. Format (max 15 lines):
    ```markdown
    ## {M###} — {milestone title} · {YYYY-MM-DD}
 
@@ -463,8 +465,23 @@ Given all `T##-SUMMARY.md` files from the slice:
 
    ---
    ```
-   Keep each entry under 15 lines. Focus on WHAT was built, not HOW. This is the only
-   milestone artifact that must persist regardless of `milestone_cleanup` setting.
+   Keep under 15 lines. Focus on WHAT was built, not HOW.
+
+   **5b. Invoke the merger** to promote all per-milestone files to workspace globals under lockfile:
+   ```bash
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-merger.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   node "$FORGE_SCRIPTS_DIR/forge-merger.js" --milestone {M###} --cwd "{WORKING_DIR}" --holder "completer:{M###}"
+   ```
+   The merger reads:
+   - `M###-DECISIONS.md` → append rows (dedup by ID) to global `DECISIONS.md` under `.gsd/.locks/DECISIONS.md/`
+   - `M###-AUTO-MEMORY.md` → promote entries (dedup by ID or description match), apply cap-50 with decay ordering, write `AUTO-MEMORY.md` under `.gsd/.locks/AUTO-MEMORY.md/`
+   - `M###-LEDGER-ENTRY.md` → append block to global `LEDGER.md` (idempotent on header match) under `.gsd/.locks/LEDGER.md/`
+   - `M###-CHECKER-MEMORY.md` → merge tables (accumulate Count, update Last Seen) into global `CHECKER-MEMORY.md` under `.gsd/.locks/CHECKER-MEMORY.md/`
+   - `M###-events.jsonl` → append all lines to global `.gsd/forge/events.jsonl`
+
+   Parse the JSON output. On non-empty `errors` array: emit warning but proceed (cleanup in step 6 is still safe — per-milestone files remain on disk). On success: log merge counts in the completion report.
+
+   The global `LEDGER.md`, `AUTO-MEMORY.md`, `DECISIONS.md`, `CHECKER-MEMORY.md`, `CODING-STANDARDS.md` and `STATE.md` (dashboard) are durable across `milestone_cleanup` — never touched by archive/delete.
 
 6. **Cleanup milestone artifacts** — based on `milestone_cleanup` from injected config:
    - `keep` (default): do nothing — all files remain

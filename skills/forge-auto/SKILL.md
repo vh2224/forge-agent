@@ -102,12 +102,51 @@ Branch on `$AUTO_STATE`:
 
 ## Orchestrate — AUTO MODE
 
-**Activate auto-mode indicator** — write marker so the status line shows `▶ AUTO`:
+### Multi-run activation (M004+)
+
+Resolve which run this invocation operates on, based on `$ARGUMENTS` and the active-run registry. This block runs BEFORE the legacy single-run activation below.
+
+```bash
+RESOLVE=$(node "$FORGE_SCRIPTS_DIR/forge-cli-helpers.js" --resolve-args --args "$ARGUMENTS" --command forge-auto)
+STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$RESOLVE")
+RUN_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).run_id || '')" "$RESOLVE")
+RUN_KIND=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).kind || '')" "$RESOLVE")
+MSG=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).message || '')" "$RESOLVE")
+```
+
+Branch on `$STATUS`:
+
+- **`refuse`** — emit `$MSG` (lists active runs + example commands) and stop. Do NOT continue.
+- **`error`** — emit `$MSG` and stop.
+- **`legacy`** — zero active runs + no arg + .gsd/STATE.md is single-run legacy format. Run the legacy activation block below (preserves pre-M004 behavior). RUN_ID stays empty; `{M###}` placeholders below resolve from STATE.md as before.
+- **`activate-new`** — register the new run:
+  ```bash
+  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --cwd "$WORKING_DIR" > /dev/null
+  echo "$MSG"
+  ```
+  Then continue to legacy activation (which writes auto-mode-started.txt + alias).
+- **`resume`** — emit `$MSG`, set `RUN_ID` (already set), reuse existing registry entry. Don't re-register.
+
+For all non-legacy paths, the `MILESTONE_DIR` for downstream substitution is `.gsd/milestones/$RUN_ID/` (if kind=milestone) or null (if kind=task). Where bash blocks below reference `{M###}`, substitute `$RUN_ID`. Workers receive `{M###}` resolved in their prompt header via the dispatch templates.
+
+**Regenerate dashboard** after registry change:
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" --holder "auto:$RUN_ID" > /dev/null || true
+```
+
+### Activate auto-mode indicator (legacy single-run alias)
+
+Write marker so the status line shows `▶ AUTO`. With M004+, `forge-runs.js` already does this via its auto-refresh-legacy-alias side effect — but writing here explicitly is safe (forge-runs `oldestActive` will pick the same record):
+
 ```bash
 mkdir -p .gsd/forge
 _forge_now=$(node -e "process.stdout.write(String(Date.now()))")
 echo $_forge_now > .gsd/forge/auto-mode-started.txt
-echo '{"active":true,"started_at":'$_forge_now',"worker":null}' > .gsd/forge/auto-mode.json
+# Multi-run path: forge-runs.js manages the alias. If RUN_ID is empty (legacy mode), write the alias directly.
+if [ -z "$RUN_ID" ]; then
+  echo '{"active":true,"started_at":'$_forge_now',"worker":null}' > .gsd/forge/auto-mode.json
+fi
 ```
 `started_at` is persisted to `.gsd/forge/auto-mode-started.txt` so heartbeat writes can read it across bash tool calls (shell state does not persist between tool calls).
 
@@ -721,15 +760,19 @@ Auto-recovery attempts (context_overflow, model_refusal) count as units toward `
 
 #### 6. Post-unit housekeeping
 
-**a) Append to event log** — append one line to `.gsd/forge/events.jsonl` (create `.gsd/forge/` directory if missing):
+**a) Append to per-milestone event log** — append one line to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-events.jsonl` (M004+; create dir if missing):
 ```json
 {"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"{M###}","status":"{done|blocked|partial}","summary":"{one-liner}"}
 ```
-Each entry must be a single line. This is the orchestrator-side record; workers may also write their own entries.
+Each entry must be a single line. This is the orchestrator-side record; workers may also write their own entries to the SAME file. Append-only is atomic up to PIPE_BUF (~4KB POSIX / single-write NTFS) — event lines are <512B → safe without lockfile.
 
-**b) Update STATE.md** — advance to next unit position.
+**Legacy:** if running pre-M004 (no `{M###}` resolved), append to `.gsd/forge/events.jsonl` global as before.
 
-**c) Append decisions** — if `key_decisions` in result, append to `.gsd/DECISIONS.md` using **`Edit` only** (never `Write` — it replaces the entire file and destroys existing rows; a PreToolUse hook blocks `Write` here). `Read` the file in full first (paginate if needed), then `Edit` with `old_string` = the current last row and `new_string` = that row + newline + your new row(s). Bash alternative: `cat >> .gsd/DECISIONS.md << 'EOF'` (never `>`).
+**b) Update per-milestone STATE** — advance to next unit position via `scripts/forge-state.js --update {M###} --json '{...}'`. The global `.gsd/STATE.md` dashboard is regenerated separately via `scripts/forge-dashboard.js` (called on boot/exit/phase-change per `multi_run.dashboard_refresh_on` pref).
+
+**c) Append decisions** — if `key_decisions` in result, append to per-milestone `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-DECISIONS.md` (M004+). The global `.gsd/DECISIONS.md` is merged on `complete-milestone` via `scripts/forge-merger.js` (S05) under `.gsd/.locks/DECISIONS.md/`. Use **`Edit`** for an existing per-milestone file (anchor on last row); use `Write` once if the file does not yet exist (header + first row). Bash alternative: `cat >> path << 'EOF'`.
+
+**Legacy:** if `{M###}` not resolved, append to `.gsd/DECISIONS.md` global direct (pre-M004 behavior).
 
 **d) Memory extraction** — dispatch `forge-memory` agent **in the background** (`run_in_background: true`) so the orchestrator can immediately dispatch the next unit without waiting for memory extraction to finish. Rationale: memory extraction averages 20–40s, runs on Haiku (cheap + fast), and the extracted memories only affect the *next* selective injection — not the current dispatch decision. Running it in parallel with the next unit is the single highest-leverage parallelism win (one extraction per unit, every unit).
 
@@ -770,17 +813,29 @@ completed_units.append("✓ [M###/S##/T##] {unit_type} — {one-liner}  · {agen
 
 After incrementing `session_units`:
 
-**Pause check** — if `.gsd/forge/pause` exists:
+**Pause check** — multi-run-aware (M004). Checks the run-scoped pause file first, then the legacy global pause file (for compat):
+
 ```bash
-rm -f .gsd/forge/pause
-echo '{"active":false}' > .gsd/forge/auto-mode.json
+# M004 scoped: .gsd/forge/pause-{RUN_ID} where RUN_ID is this orchestrator's run id (e.g. M065)
+PAUSE_SCOPED=".gsd/forge/pause-${RUN_ID}"
+PAUSE_LEGACY=".gsd/forge/pause"
+
+if [ -f "$PAUSE_SCOPED" ] || [ -f "$PAUSE_LEGACY" ]; then
+  rm -f "$PAUSE_SCOPED" "$PAUSE_LEGACY"
+  # Deactivate THIS run only — never touches other runs' state
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' >/dev/null 2>&1 || \
+    echo '{"active":false}' > .gsd/forge/auto-mode.json   # legacy fallback
+fi
 ```
+
+`RUN_ID` was set during activation (see Step "Activate auto-mode indicator" above; multi-run version sets `RUN_ID=$ARGUMENTS` or derives from STATE.md when called with no args + single-run workspace).
+
 Emit and **stop loop**:
 ```
 ⏸  Auto-mode pausado após {session_units} unidades.
 {completed_units list, one per line}
 
-Execute /forge-auto para retomar a partir de: {next_action from STATE.md}
+Execute /forge-auto {RUN_ID} para retomar a partir de: {next_action from STATE.md}
 ```
 
 **Context checkpoint** (only fires if the user explicitly set `compact_after` in prefs AND `session_units >= COMPACT_AFTER`):

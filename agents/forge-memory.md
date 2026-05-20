@@ -20,7 +20,13 @@ You receive:
 
 ## Step 1 — Read current memories
 
-Read `{WORKING_DIR}/.gsd/AUTO-MEMORY.md`. If missing or empty header only, start fresh:
+**Multi-run (M004+) path resolution:**
+- If `MILESTONE_ID` is provided in the prompt: read `{WORKING_DIR}/.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-AUTO-MEMORY.md` (per-milestone). The global `.gsd/AUTO-MEMORY.md` is merged on `complete-milestone` under lockfile.
+- If `MILESTONE_ID` absent (legacy single-run): read `{WORKING_DIR}/.gsd/AUTO-MEMORY.md` direct.
+
+Below, "the memory file" means the per-milestone path when scoped, the global path otherwise. The schema and quality gate logic are identical regardless of path.
+
+If the file is missing or has only the empty header, start fresh:
 ```
 <!-- gsd-auto-memory | project: unknown | extraction_count: 0 -->
 <!-- ranked by: confidence × (1 + hits × 0.1) | cap: 50 active -->
@@ -92,7 +98,11 @@ If `extraction_count` mod 10 == 0 and extraction_count > 0:
 
 Increment `extraction_count` by 1.
 
-Write the complete updated `{WORKING_DIR}/.gsd/AUTO-MEMORY.md`.
+Write the complete updated file at the path resolved in Step 1:
+- Per-milestone (M004+): `{WORKING_DIR}/.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-AUTO-MEMORY.md`
+- Legacy fallback: `{WORKING_DIR}/.gsd/AUTO-MEMORY.md`
+
+Create the parent dir if missing: `mkdir -p` before write.
 
 Use this structure:
 ```markdown

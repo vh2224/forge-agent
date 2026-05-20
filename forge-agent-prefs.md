@@ -88,8 +88,124 @@ auto_commit: true         # false = agente NÃO faz commits/merges (usuário ger
 merge_strategy: squash    # squash | merge | rebase (ignorado se auto_commit: false)
 auto_push: false          # push automático após squash merge (ignorado se auto_commit: false)
 main_branch: master       # branch principal
-isolation: none           # none | worktree (worktree = branch isolado por milestone)
 ```
+
+> **Deprecated:** `isolation: none | worktree` (legacy single-run flag) substituído pelo bloco
+> `forge_isolation:` abaixo. Operadores em workspaces existentes não precisam migrar — o orquestrador
+> trata ausência de `forge_isolation:` como `mode: shared`.
+
+## Forge Isolation (multi-run)
+
+Controla como múltiplos `/forge-auto`/`/forge-task` simultâneos isolam suas mudanças.
+Aplicado a partir do M004 — Multi-Run Workspace. Default mantém comportamento single-run.
+
+```
+forge_isolation:
+  mode: shared              # shared | branch | worktree
+                            # shared   = single working tree; concorrência protegida por file-locks
+                            # branch   = cria forge/{M###} em cada repo afetado, commits ali
+                            # worktree = cria worktree física por milestone, isolamento total
+
+  branch_pattern: "forge/{M###}"    # nome da branch quando mode=branch
+                                    # placeholders: {M###} (milestone ID), {kind}, {id}
+  auto_pull_main: true              # git pull main antes de criar branch (idempotente se exists)
+  pr_on_complete: false             # opt-in: complete-milestone roda `npm run pr` / `gh pr create`
+
+  worktree_root: ".forge-worktrees"  # diretório raiz onde worktrees são criadas
+                                     # path relativo ao workspace; absoluto também aceito
+  worktree_cleanup_on_complete: false # remove worktree ao completar milestone
+
+  file_locks: true                   # ativa PreToolUse file-lock check (default true em shared/branch)
+                                     # ignorado em mode=worktree (FS já isolado)
+
+  repos:
+    auto_detect: true        # walk de subdirs com .git/ na raiz do workspace
+    include: []              # globs explícitos; quando definido, ignora auto_detect
+    exclude:                 # globs a excluir do auto-detect
+      - "node_modules/**"
+      - "vendor/**"
+      - ".forge-worktrees/**"
+```
+
+### Semântica de cada modo
+
+- **shared** (padrão): zero overhead, sem mudança de fluxo git. File-locks (próximo bloco) protegem
+  contra writes simultâneos no mesmo arquivo. Recomendado para projetos solo ou início de adoção.
+- **branch**: alinhado ao fluxo `pr/BRANCHING.md` (cria `forge/M###`, pull main first, commit ali,
+  PR no fim opcional). Conflitos cross-run viram merge-time, resolvidos pelo operador.
+- **worktree**: isolamento físico total. Cada milestone roda numa worktree separada — zero risco
+  de overlap. Custo: disco × N milestones simultâneas, IDE complexity.
+
+### Override por run
+
+`forge_isolation.mode` pode ser sobrescrito por run individual via CLI flag (futuro: `/forge-auto M065 --isolation=worktree`). Por enquanto, edite prefs antes de iniciar.
+
+### Cross-references
+
+- `shared/forge-state.md` §2 — campo `isolation_mode` no `runs/{id}.json`
+- `scripts/forge-repos.js` (S08) — implementação do auto-detect
+- `scripts/forge-isolation.js` (S08) — setup/cleanup de branch + worktree
+
+## Multi-Run
+
+```
+multi_run:
+  stale_cleanup_ms: 1800000     # 30min — registros stale são deletados no próximo boot
+  stale_warning_ms: 180000      # 3min — statusline vira amarela
+  stale_red_ms: 300000          # 5min — statusline vira vermelha; CLI trata como morto
+  refused_when_active_count: 2  # /forge-auto sem ID refuse quando >= N runs ativas
+                                # (1 = sempre exige ID; 999 = nunca refuse)
+  dashboard_refresh_on:         # eventos que disparam regen do .gsd/STATE.md dashboard
+    - boot
+    - exit
+    - phase_change
+  legacy_alias: true            # mantém .gsd/forge/auto-mode.json como mirror do oldest active
+                                # false = arquivo só é tocado por código pré-M004 (deprecation path)
+```
+
+### Semântica
+
+- **stale_cleanup_ms**: ao boot de qualquer `/forge-*` skill, `runs/*.json` com `last_heartbeat`
+  mais velho que esse limite são deletados silenciosamente. Cobre kills sem cleanup.
+- **stale_warning_ms** / **stale_red_ms**: visíveis na statusline e dashboard. Não bloqueiam —
+  apenas comunicam saúde da run.
+- **refused_when_active_count**: comportamento do `/forge-auto` (e similares) sem argumento.
+  Threshold de quantas runs ativas exigem ID explícito.
+- **dashboard_refresh_on**: pontos do ciclo que chamam `scripts/forge-dashboard.js`. Adicionar
+  `tick` cria regen periódico (custoso — não recomendado).
+
+### Cross-references
+
+- `scripts/forge-runs.js` — implementação do cleanup + alias refresh
+- `scripts/forge-dashboard.js` — regen do STATE.md
+- `skills/forge-auto/SKILL.md` (S06) — refuse logic
+
+## Parallelism
+
+```
+parallelism:
+  max_concurrent: 3       # máximo de execute-task em paralelo dentro do mesmo slice
+                          # range válido: 1-8
+  cross_run_overlap: defer  # defer | block
+                          # defer = pula task com overlap, escolhe outra ready do batch
+                          # block = pausa batch até outra run liberar o arquivo
+```
+
+### Semântica
+
+- **max_concurrent**: já existia em M002; controla intra-run parallelism via
+  `scripts/forge-parallelism.js`. M004 estende com cross-run check.
+- **cross_run_overlap**: comportamento quando o batch atual tem task com `expected_output`
+  que sobrepõe `expected_output` de outra run ativa.
+  - `defer` (padrão): match com filosofia intra-run; descarta task do batch, escolhe próxima
+    ready sem overlap. Re-tenta a deferida no próximo batch.
+  - `block`: pausa o dispatch até a outra run liberar (polling com backoff). Pior em latência,
+    melhor em fairness.
+
+### Cross-references
+
+- `scripts/forge-parallelism.js` (M002, extended em M004 S07)
+- `shared/forge-dispatch.md § Parallel Task Execution`
 
 ## Artifact Cleanup
 

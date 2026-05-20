@@ -48,7 +48,7 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
 5. If `## Project Memory (auto-learned)` is present — treat it as high-priority codebase knowledge
 6. **If `## Standards` has `follows: {pattern-name}`** — use the pattern's file list and steps as scaffolding. Create files in the same structure as existing instances of this pattern.
 7. Execute each step, following the **Helper-First Protocol** and **DRY Guard** (see below). Mark `[DONE:n]` as you go.
-8. If you make an architectural decision → append to `.gsd/DECISIONS.md` using **`Edit` only** (never `Write` — it replaces the whole file). `Read` the file in full first (paginate if large), then `Edit` with `old_string` = last existing row and `new_string` = that row + newline + your new row(s). Or Bash `cat >> file << 'EOF'` (never `>`). A PreToolUse hook blocks `Write` on this path.
+8. If you make an architectural decision → append to per-milestone `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-DECISIONS.md` (M004+). The global `.gsd/DECISIONS.md` is merged on `complete-milestone` under lockfile. Procedure: `mkdir -p` the dir first; if per-milestone file missing, `Write` it once with header + your row(s); if existing, use **`Edit`** with last-row anchor (never `Write` again — destroys rows). Bash alternative: `cat >> path << 'EOF'`. Legacy fallback if `{M###}` not provided: write to `.gsd/DECISIONS.md` direct.
 9. Verify every must-have (see ladder below)
 10. **Verification gate** — invoke:
     ```bash
@@ -250,13 +250,15 @@ The `## Verification` section is **required** when the gate ran (step 10). Shape
 
 Record even on `no-stack` (for audit trail).
 
-Before returning the result block, append one line to `{WORKING_DIR}/.gsd/forge/events.jsonl` (create directory if missing):
+Before returning the result block, append one line to per-milestone `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-events.jsonl` (M004+). The global `.gsd/forge/events.jsonl` is no longer written by workers. Create dir first: `mkdir -p {WORKING_DIR}/.gsd/milestones/{M###}/`.
 
 ```json
 {"ts":"{ISO8601}","unit":"execute-task/{T##}","agent":"forge-executor","milestone":"{M###}","slice":"{S##}","task":"{T##}","status":"{done|blocked|partial}","summary":"{one-liner of what was done or why blocked}","key_decisions":["{decision1}"],"files_changed":["{path1}"]}
 ```
 
-Omit `key_decisions` and `files_changed` if empty. Each event must be a single line (no newlines inside the JSON).
+Omit `key_decisions` and `files_changed` if empty. Each event must be a single line (no newlines inside the JSON). Append-only is atomic up to PIPE_BUF (~4KB) on POSIX + single-write on NTFS — event lines are <512B → safe without lockfile.
+
+**Legacy fallback:** if `{M###}` not provided in the prompt (pre-M004 single-run invocation), append to `{WORKING_DIR}/.gsd/forge/events.jsonl` direct.
 
 Then return the `---GSD-WORKER-RESULT---` block.
 

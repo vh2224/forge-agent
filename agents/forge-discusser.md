@@ -119,12 +119,18 @@ Write `M###-CONTEXT.md` or `S##-CONTEXT.md`:
 
 Call `ExitPlanMode`. The CONTEXT file above is your plan — the user will review and approve it before planning begins. After the user approves, continue to Step 5.
 
-### Step 5 — Append significant decisions to `DECISIONS.md`
+### Step 5 — Append significant decisions to per-milestone `M###-DECISIONS.md`
 
-**Use `Edit` — never `Write`** on `.gsd/DECISIONS.md`. `Write` replaces the whole file and will destroy existing rows (we lost decisions this way before, and a PreToolUse hook now blocks `Write` on this path). Procedure:
+**Multi-run (M004+):** decisions go to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-DECISIONS.md` (per-milestone). The global `.gsd/DECISIONS.md` is merged on `complete-milestone` (forge-completer step 5) under lockfile. This eliminates cross-run write contention.
 
-1. `Read` `.gsd/DECISIONS.md` in full — no `limit`; if the file is long, call `Read` again with `offset` until you've seen the last row.
-2. `Edit` with `old_string` = the current last table row (exact whitespace, copied verbatim) and `new_string` = that same row followed by a newline and your new row(s).
-3. If you must use Bash instead, use `cat >> .gsd/DECISIONS.md << 'EOF' … EOF` — never `>` (which truncates).
+**Use `Edit` (or `cat >>`) — never `Write` that file from scratch.** Procedure:
+
+1. `Read` the per-milestone file if it exists (`{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-DECISIONS.md`).
+   - If the file does NOT exist: use `Write` once to create it with the header row + your decision(s). Subsequent appends use `Edit`.
+2. `mkdir -p {WORKING_DIR}/.gsd/milestones/{M###}/` first (safe if exists).
+3. For an existing file: `Edit` with `old_string` = the current last table row (exact whitespace) and `new_string` = that row + newline + your new row(s).
+4. Bash alternative: `cat >> {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-DECISIONS.md << 'EOF' … EOF` — never `>` (which truncates).
+
+**Legacy fallback:** if `{M###}` is not provided in the prompt (legacy single-run invocation), write to `.gsd/DECISIONS.md` direct as before. The orchestrator from M004+ always sets `{M###}`.
 
 Then return the `---GSD-WORKER-RESULT---` block.

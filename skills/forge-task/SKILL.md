@@ -58,8 +58,30 @@ Initialize: `session_units = 0`, `COMPACT_AFTER = PREFS.compact_after || 10`
 
 ---
 
-## Determine TASK_ID
+## Multi-run resolution + TASK_ID
 
+**Resolve scripts dir** for forge-runs.js / forge-cli-helpers.js:
+```bash
+if [ -f "scripts/forge-runs.js" ]; then
+  FORGE_SCRIPTS_DIR="scripts"
+else
+  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+fi
+```
+
+**Multi-run check** — refuse if too many active and no explicit resume:
+```bash
+if [ -z "$TASK_ID" ]; then
+  RESOLVE=$(node "$FORGE_SCRIPTS_DIR/forge-cli-helpers.js" --resolve-args --args "" --command forge-task)
+  STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$RESOLVE")
+  if [ "$STATUS" = "refuse" ]; then
+    node -e "process.stdout.write(JSON.parse(process.argv[1]).message)" "$RESOLVE"
+    exit 0
+  fi
+fi
+```
+
+**Determine TASK_ID:**
 ```bash
 mkdir -p .gsd/tasks
 ls .gsd/tasks/ 2>/dev/null | grep -oE 'TASK-[0-9]+' | sort -t- -k2 -n | tail -1
@@ -68,6 +90,24 @@ ls .gsd/tasks/ 2>/dev/null | grep -oE 'TASK-[0-9]+' | sort -t- -k2 -n | tail -1
 - Resume mode: `TASK_ID` already set — skip to Dispatch loop
 - No tasks exist: `TASK_ID = TASK-001`
 - Otherwise: increment last number → `TASK_ID = TASK-NNN` (zero-padded to 3 digits)
+
+**Register in multi-run registry** (M004+) — only when initializing fresh (not on resume):
+```bash
+if [ -z "$RESUME_MODE" ]; then
+  SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$TASK_ID" --kind task --session "$SESSION_ID" --cwd "$(pwd)" --task-description "$TASK_DESCRIPTION" > /dev/null
+  # Regenerate dashboard
+  node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$(pwd)" --holder "task:$TASK_ID" > /dev/null || true
+fi
+```
+
+This makes the task visible in `runs/*.json`, statusline, and dashboard. The `.gsd/tasks/{TASK_ID}/` directory continues to hold artifacts (BRIEF, PLAN, SUMMARY) as before — only the run registry is new.
+
+**On task completion** (or any exit path — pause/error): mark inactive:
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$TASK_ID" --json '{"active":false}' > /dev/null
+node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$(pwd)" --holder "task:$TASK_ID" > /dev/null || true
+```
 
 ---
 
