@@ -104,7 +104,18 @@ process.stdin.on('end', () => {
           try {
             const r = JSON.parse(fs.readFileSync(path.join(runsDir, f), 'utf8'));
             if (r.active !== true) continue;
-            const age = now - (r.last_heartbeat || 0);
+            // M005+: smart stale heuristic. runs/{id}.json.last_heartbeat may be
+            // stale due to session_id mismatch (pre-v1.13.3 bug); cross-reference
+            // M###-events.jsonl and M###-STATE.md mtime — most-recent signal wins.
+            let age = now - (r.last_heartbeat || 0);
+            if (r.milestone_dir) {
+              for (const sub of [`${r.id}-events.jsonl`, `${r.id}-STATE.md`]) {
+                try {
+                  const sigAge = now - fs.statSync(path.join(cwd, r.milestone_dir, sub)).mtimeMs;
+                  if (sigAge < age) age = sigAge;
+                } catch {}
+              }
+            }
             if (age > STALE_MS) continue;
             multiRunActive.push({
               id: r.id, kind: r.kind, worker: r.worker, isolation: r.isolation_mode,

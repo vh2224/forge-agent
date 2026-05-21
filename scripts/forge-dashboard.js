@@ -23,9 +23,31 @@ const path = require('path');
 
 const runs = require('./forge-runs.js');
 const lock = require('./forge-lock.js');
+const forgeState = require('./forge-state.js');
 
 const STALE_WARNING_MS = 3  * 60 * 1000;  // yellow chip
 const STALE_MS         = 5  * 60 * 1000;  // red chip / "stale" label
+
+// Compute effective heartbeat age from multiple sources (M005+).
+// Some bugs leave runs/{id}.json.last_heartbeat stale (e.g. session_id mismatch
+// pre-v1.13.3), but the worker is still alive — events.jsonl and STATE.md mtime
+// reveal that. Use the MOST RECENT signal as ground truth.
+function effectiveHeartbeatAge(r, now, cwd) {
+  let minAge = now - (r.last_heartbeat || 0);
+  if (r.milestone_dir) {
+    const candidates = [
+      path.join(cwd, r.milestone_dir, `${r.id}-events.jsonl`),
+      path.join(cwd, r.milestone_dir, `${r.id}-STATE.md`),
+    ];
+    for (const f of candidates) {
+      try {
+        const age = now - fs.statSync(f).mtimeMs;
+        if (age < minAge) minAge = age;
+      } catch {}
+    }
+  }
+  return minAge;
+}
 
 function fmtAgo(ms) {
   if (ms < 1000)        return `${ms}ms ago`;
@@ -41,18 +63,36 @@ function fmtClock(ts) {
   return d.toTimeString().slice(0, 8);
 }
 
-function formatActiveRunLine(r, now) {
-  const age = now - (r.last_heartbeat || 0);
+function formatActiveRunLine(r, now, cwd) {
+  // Use effective heartbeat (cross-referenced with events.jsonl + STATE.md mtime)
+  const age = effectiveHeartbeatAge(r, now, cwd);
   let staleness = '';
   if (age > STALE_MS) staleness = ' · ⚠ STALE';
   else if (age > STALE_WARNING_MS) staleness = ' · ⚠ slow';
+
+  // M005+: cross-reference M###-STATE.md for real phase/slice/task
+  // (runs/{id}.json schema doesn't have phase field — STATE has the truth)
+  let phase = '—';
+  let sliceTask = '';
+  if (r.kind === 'milestone') {
+    try {
+      const state = forgeState.read(cwd, r.id);
+      if (state) {
+        phase = state.phase || '—';
+        const slice = state.active_slice && state.active_slice !== '—' ? state.active_slice : '';
+        const task  = state.active_task  && state.active_task  !== '—' ? state.active_task  : '';
+        if (slice) sliceTask += ` · slice: ${slice}`;
+        if (task)  sliceTask += ` · task: ${task}`;
+      }
+    } catch { /* best-effort; fall back to '—' */ }
+  }
 
   const worker = r.worker ? ` · worker: ${r.worker.split('/').pop()}` : '';
   const desc   = r.kind === 'task' && r.task_description
     ? ` · "${r.task_description.slice(0, 60)}${r.task_description.length > 60 ? '…' : ''}"`
     : '';
 
-  return `- **${r.id}** — ${r.kind} · phase: ${r.phase || '—'}${worker} · heartbeat: ${fmtAgo(age)} · isolation: ${r.isolation_mode || 'shared'} · session: ${r.session_id || '—'}${staleness}${desc}`;
+  return `- **${r.id}** — ${r.kind} · phase: ${phase}${sliceTask}${worker} · heartbeat: ${fmtAgo(age)} · isolation: ${r.isolation_mode || 'shared'} · session: ${r.session_id || '—'}${staleness}${desc}`;
 }
 
 function readLedgerTail(cwd, maxEntries) {
@@ -175,7 +215,7 @@ function render(cwd) {
     out.push(`## Active runs (${active.length})`);
     out.push('');
     for (const r of active) {
-      out.push(formatActiveRunLine(r, now));
+      out.push(formatActiveRunLine(r, now, cwd));
     }
     out.push('');
   }
