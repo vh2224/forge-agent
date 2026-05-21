@@ -497,4 +497,16 @@ Given all `T##-SUMMARY.md` files from the slice:
    In all cases `.gsd/LEDGER.md`, `AUTO-MEMORY.md`, `DECISIONS.md`, `CODING-STANDARDS.md`
    and `STATE.md` are never touched — they are the durable record.
 
+7. **Deactivate run in registry** (M005+ — multi-run aware). After cleanup, mark the run as `active:false` in `runs/{id}.json` and regenerate the dashboard. Idempotent: safe to skip if `runs/{id}.json` does not exist (legacy single-run workspace):
+
+   ```bash
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-runs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   if [ -f "{WORKING_DIR}/.gsd/forge/runs/{M###}.json" ]; then
+     node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "{M###}" --json '{"active":false,"deactivated_reason":"complete-milestone"}' --cwd "{WORKING_DIR}" > /dev/null
+     node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "{WORKING_DIR}" > /dev/null || true
+   fi
+   ```
+
+   Without this step, the run stays as `active:true` in the registry indefinitely — dashboard would keep listing M### as active even after merger ran. Operator confusion + stale runs count toward `multi_run.refused_when_active_count`.
+
 Then return the `---GSD-WORKER-RESULT---` block.

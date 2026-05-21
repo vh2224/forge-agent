@@ -89,8 +89,13 @@ COMPACT_SIGNAL=$(test -f .gsd/forge/compact-signal.json && echo "yes" || echo "n
 Branch on `$AUTO_STATE`:
 
 - **`inactive`** — no prior session; proceed normally to activation.
-- **`stale`** — previous session died (Ctrl+C, terminal kill, OOM). The marker is lying. Clear it silently and proceed normally to activation as a fresh start:
+- **`stale`** — previous session died (Ctrl+C, terminal kill, OOM). The marker is lying. Clear it silently (M005+ aware of runs/*.json registry) and proceed normally to activation as a fresh start:
   ```bash
+  # Clean any active runs in registry first
+  for f in .gsd/forge/runs/*.json 2>/dev/null; do
+    [ -f "$f" ] || continue
+    node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$(basename "$f" .json)" --json '{"active":false}' >/dev/null 2>&1 || true
+  done
   echo '{"active":false}' > .gsd/forge/auto-mode.json
   ```
   Do NOT emit a resume message.
@@ -180,18 +185,20 @@ For legacy mode (`STATUS=legacy`, `RUN_ID=""`), STATE was already loaded from `.
 
 ### Activate auto-mode indicator (legacy single-run alias)
 
-Write marker so the status line shows `▶ AUTO`. With M004+, `forge-runs.js` already does this via its auto-refresh-legacy-alias side effect — but writing here explicitly is safe (forge-runs `oldestActive` will pick the same record):
+Write marker so the status line shows `▶ AUTO`. With M005+, all `started_at` lives in `runs/{id}.json` (per-run, no sharing). Only legacy mode writes `auto-mode.json` + `auto-mode-started.txt` directly:
 
 ```bash
 mkdir -p .gsd/forge
-_forge_now=$(node -e "process.stdout.write(String(Date.now()))")
-echo $_forge_now > .gsd/forge/auto-mode-started.txt
-# Multi-run path: forge-runs.js manages the alias. If RUN_ID is empty (legacy mode), write the alias directly.
 if [ -z "$RUN_ID" ]; then
+  # Legacy single-run path: write shared files (no contention because legacy ⇒ 1 tab)
+  _forge_now=$(node -e "process.stdout.write(String(Date.now()))")
+  echo $_forge_now > .gsd/forge/auto-mode-started.txt
   echo '{"active":true,"started_at":'$_forge_now',"worker":null}' > .gsd/forge/auto-mode.json
 fi
+# Multi-run path: `runs/{id}.json.started_at` was set by forge-runs.add earlier (in Multi-run activation).
+# `auto-mode.json` is automatically mirrored from oldest-active by refreshLegacyAlias.
+# `auto-mode-started.txt` is NOT written in multi-run — each tab reads its own started_at from runs/.
 ```
-`started_at` is persisted to `.gsd/forge/auto-mode-started.txt` so heartbeat writes can read it across bash tool calls (shell state does not persist between tool calls).
 
 You are the orchestrator. Execute the dispatch loop until the milestone is complete or a stop condition is hit.
 
@@ -404,7 +411,7 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 
 8. **Append to `{WORKING_DIR}/.gsd/forge/events.jsonl`** (I/O errors MUST propagate — no silent-fail):
    ```json
-   {"ts":"<ISO-8601>","event":"plan_check","milestone":"{M###}","slice":"{S##}","mode":"{PLAN_CHECK_MODE}","counts":{"pass":N,"warn":N,"fail":N}}
+   {"ts":"<ISO-8601>","event":"plan_check","milestone":"${RUN_ID:-{M###}}","slice":"{S##}","mode":"{PLAN_CHECK_MODE}","counts":{"pass":N,"warn":N,"fail":N}}
    ```
 
 9. **Branch on `PLAN_CHECK_MODE`:**
@@ -429,7 +436,7 @@ State for the loop:
 
 **Append first-round events.jsonl entry** (round 1 = the initial gate run):
 ```bash
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":1,\"counts\":{\"pass\":${PASS_COUNT},\"warn\":${WARN_COUNT},\"fail\":${FAIL_COUNT}},\"prev_fail\":null,\"outcome\":\"revised\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"${RUN_ID:-{M###}}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":1,\"counts\":{\"pass\":${PASS_COUNT},\"warn\":${WARN_COUNT},\"fail\":${FAIL_COUNT}},\"prev_fail\":null,\"outcome\":\"revised\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
 ```
 (Use the actual parsed counts from step 7. `prev_fail: null` for round 1 — there is no prior round.)
 
@@ -468,16 +475,23 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
 
   **g. Append events.jsonl line** (I/O errors MUST propagate — no silent-fail):
   ```bash
-  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"counts\":{\"pass\":${NEW_PASS},\"warn\":${NEW_WARN},\"fail\":${new_fail_count}},\"prev_fail\":${prev_fail_count},\"outcome\":\"revised\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"${RUN_ID:-{M###}}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"counts\":{\"pass\":${NEW_PASS},\"warn\":${NEW_WARN},\"fail\":${new_fail_count}},\"prev_fail\":${prev_fail_count},\"outcome\":\"revised\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
   ```
 
   **h. Monotonic-decrease check:** if `new_fail_count >= prev_fail_count`, TERMINATE (non-decreasing):
   - Overwrite the `outcome` field in the events.jsonl line just written — or append a corrective entry:
     ```bash
-    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"terminated-non-decreasing\",\"prev_fail\":${prev_fail_count},\"new_fail\":${new_fail_count}}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"${RUN_ID:-{M###}}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"terminated-non-decreasing\",\"prev_fail\":${prev_fail_count},\"new_fail\":${new_fail_count}}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
     ```
   - Surface to user (see **Termination Surface Block** below — reason: `non-decreasing`).
-  - Deactivate auto-mode: `echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json`
+  - Deactivate run (M005+ pattern):
+    ```bash
+    if [ -n "$RUN_ID" ]; then
+      node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
+    else
+      echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json
+    fi
+    ```
   - **Stop loop.** Do NOT dispatch the first `execute-task` for this slice. Return.
 
   **i. Update state:** `prev_fail_count = new_fail_count`.
@@ -487,17 +501,24 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
 - If `prev_fail_count == 0`:
   - Append events.jsonl:
     ```bash
-    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"passed\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"${RUN_ID:-{M###}}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"passed\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
     ```
   - Proceed to the first `execute-task` dispatch normally.
 
 - Else (`round == MAX_PLAN_CHECK_ROUNDS` and `prev_fail_count > 0`):
   - Append events.jsonl:
     ```bash
-    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"terminated-exhausted\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
+    echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"milestone\":\"${RUN_ID:-{M###}}\",\"slice\":\"{S##}\",\"mode\":\"blocking\",\"round\":{round},\"outcome\":\"terminated-exhausted\"}" >> {WORKING_DIR}/.gsd/forge/events.jsonl
     ```
   - Surface to user (see **Termination Surface Block** below — reason: `exhausted`).
-  - Deactivate auto-mode: `echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json`
+  - Deactivate run (M005+ pattern):
+    ```bash
+    if [ -n "$RUN_ID" ]; then
+      node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
+    else
+      echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json
+    fi
+    ```
   - **Stop loop.** Do NOT dispatch the first `execute-task` for this slice. Return.
 
 ---
@@ -624,13 +645,19 @@ TaskUpdate({ taskId: current_task_id, status: "in_progress" })
 - If ALL_MEMORIES is empty or no entries match: inject `(none)`.
 Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` section instead of the raw full file.
 
-**Heartbeat — record active worker** before dispatching:
+**Heartbeat — record active worker** before dispatching (M005+: writes via forge-runs.js when multi-run, legacy auto-mode.json fallback):
 ```bash
-_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
 _now=$(node -e "process.stdout.write(String(Date.now()))")
-echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":"UNIT_TYPE/UNIT_ID","worker_started":'$_now'}' > .gsd/forge/auto-mode.json
+if [ -n "$RUN_ID" ]; then
+  # Multi-run: forge-runs.update bumps runs/{id}.json + auto-refreshes legacy alias
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":\"UNIT_TYPE/UNIT_ID\",\"worker_started\":$_now,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
+else
+  # Legacy single-run path
+  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":\"UNIT_TYPE/UNIT_ID\",\"worker_started\":$_now}" > .gsd/forge/auto-mode.json
+fi
 ```
-Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Reading `started_at` from the file ensures it survives across tool calls. `last_heartbeat` is used by the statusline stale check — it resets on every dispatch so long sessions are never incorrectly marked stale.
+Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`). Multi-run uses each run's own `runs/{id}.json` as source-of-truth; `auto-mode.json` is automatically synced to oldest-active by `forge-runs.refreshLegacyAlias` (eliminates cross-tab race). Legacy mode preserved for pre-M004 workspaces.
 
 <!-- token-telemetry-integration -->
 Per `shared/forge-dispatch.md § Token Telemetry` — compute input tokens, dispatch, capture output tokens, append dispatch event (I/O errors MUST propagate):
@@ -665,7 +692,14 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\"
 > Transient errors (`rate-limit`, `network`, `server`, `stream`, `connection`) are handled by the Retry Handler before this block is reached. The CRITICAL path below is only reached when the classifier returns `retry: false` OR retries are exhausted.
 
 **CRITICAL — Agent() dispatch failure (permanent / retries exhausted):** Do NOT attempt to execute the work inline. Instead:
-1. Deactivate auto-mode: `echo '{"active":false}' > .gsd/forge/auto-mode.json`
+1. Deactivate run (M005+ pattern):
+   ```bash
+   if [ -n "$RUN_ID" ]; then
+     node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
+   else
+     echo '{"active":false}' > .gsd/forge/auto-mode.json
+   fi
+   ```
 2. Mark the task as in_progress (leave it — signals interruption): skip TaskUpdate
 3. Stop the loop immediately and tell the user:
    > ⚠ Falha ao despachar subagente para `{unit_type} {unit_id}`: `{kind}` (não surfaçar `errorMsg`)
@@ -673,11 +707,15 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\"
 
 Executing work inline bypasses context isolation and is NEVER acceptable as a fallback.
 
-**Heartbeat — clear worker field** after Agent() returns:
+**Heartbeat — clear worker field** after Agent() returns (M005+ pattern):
 ```bash
-_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
 _now=$(node -e "process.stdout.write(String(Date.now()))")
-echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":null}' > .gsd/forge/auto-mode.json
+if [ -n "$RUN_ID" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":null,\"worker_started\":null,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
+else
+  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":null}" > .gsd/forge/auto-mode.json
+fi
 ```
 
 ---
@@ -690,12 +728,16 @@ This branch runs ONLY when `forge-parallelism.js` returned `mode: parallel` for 
 
 **b) Create N timeline tasks** — emit one `TaskCreate` per batch member (icon `⚡`, one-liner from T##-PLAN.md). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
 
-**c) Heartbeat — record multi-worker** before dispatching:
+**c) Heartbeat — record multi-worker** before parallel dispatching (M005+ pattern):
 ```bash
-_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
 _now=$(node -e "process.stdout.write(String(Date.now()))")
 # workers_csv = "execute-task/T01,execute-task/T02,..." built from BATCH
-echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":"BATCH:'$workers_csv'","worker_started":'$_now'}' > .gsd/forge/auto-mode.json
+if [ -n "$RUN_ID" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":\"BATCH:$workers_csv\",\"worker_started\":$_now,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
+else
+  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":\"BATCH:$workers_csv\",\"worker_started\":$_now}" > .gsd/forge/auto-mode.json
+fi
 ```
 Use a single `BATCH:<csv>` worker label so the statusline shows the parallel group without special-casing.
 
@@ -730,9 +772,14 @@ Agent({ subagent_type: "forge-executor", description: "⚡ T03 · <one-liner>", 
 **Fail-fast check (execute BEFORE processing any result):** if the tool-result payload for any of the N `Agent()` calls is the background-dispatch acknowledgement shape (contains "Backgrounded agent" / agent ID without the `---GSD-WORKER-RESULT---` block), the contract was violated in step (e). Treat this as a permanent failure:
 
 1. Do NOT wait for background completion notifications — they may arrive later but the dispatch loop is not resumable from a half-state like this.
-2. Deactivate auto-mode:
+2. Deactivate run (M005+ pattern — records reason in registry for post-hoc audit):
    ```bash
-   echo '{"active":false,"deactivated_at":'$(node -e "process.stdout.write(String(Date.now()))")',"reason":"parallel_dispatch_backgrounded"}' > .gsd/forge/auto-mode.json
+   _deact=$(node -e "process.stdout.write(String(Date.now()))")
+   if [ -n "$RUN_ID" ]; then
+     node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"active\":false,\"deactivated_at\":$_deact,\"deactivated_reason\":\"parallel_dispatch_backgrounded\"}" > /dev/null
+   else
+     echo "{\"active\":false,\"deactivated_at\":$_deact,\"reason\":\"parallel_dispatch_backgrounded\"}" > .gsd/forge/auto-mode.json
+   fi
    ```
 3. Append one `blocked` event per affected task to `events.jsonl` with `reason: "parallel_dispatch_backgrounded"` and `batch_size: N`.
 4. Leave STATE.md at its pre-batch position — when the user resumes via `/forge`, heartbeat-stale detection will pick up from there.
@@ -754,11 +801,15 @@ for each task in BATCH:
 
 The extra `batch_size` field lets post-hoc analysis separate parallel from sequential dispatches without breaking S03 telemetry readers (which ignore unknown fields).
 
-**i) Heartbeat — clear worker field** after all Agent() calls return:
+**i) Heartbeat — clear worker field** after all Agent() calls return (M005+ pattern):
 ```bash
-_sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
 _now=$(node -e "process.stdout.write(String(Date.now()))")
-echo '{"active":true,"started_at":'$_sa',"last_heartbeat":'$_now',"worker":null}' > .gsd/forge/auto-mode.json
+if [ -n "$RUN_ID" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":null,\"worker_started\":null,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
+else
+  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
+  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":null}" > .gsd/forge/auto-mode.json
+fi
 ```
 
 **j) Process each result serially** — iterate `results` in order and for each, run the full Step 5 (Process result) + Step 6 (Post-unit housekeeping) pipeline. Specifically:
@@ -805,7 +856,7 @@ Auto-recovery attempts (context_overflow, model_refusal) count as units toward `
 
 **a) Append to per-milestone event log** — append one line to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-events.jsonl` (M004+; create dir if missing):
 ```json
-{"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"{M###}","status":"{done|blocked|partial}","summary":"{one-liner}"}
+{"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"${RUN_ID:-{M###}}","status":"{done|blocked|partial}","summary":"{one-liner}"}
 ```
 Each entry must be a single line. This is the orchestrator-side record; workers may also write their own entries to the SAME file. Append-only is atomic up to PIPE_BUF (~4KB POSIX / single-write NTFS) — event lines are <512B → safe without lockfile.
 
@@ -882,7 +933,7 @@ Execute /forge-auto {RUN_ID} para retomar a partir de: {next_action from STATE.m
 ```
 
 **Context checkpoint** (only fires if the user explicitly set `compact_after` in prefs AND `session_units >= COMPACT_AFTER`):
-- Append to events.jsonl: `{"ts":"{ISO8601}","unit":"checkpoint","agent":"orchestrator","milestone":"{M###}","status":"checkpoint","summary":"{session_units} unidades concluídas"}`
+- Append to events.jsonl: `{"ts":"{ISO8601}","unit":"checkpoint","agent":"orchestrator","milestone":"${RUN_ID:-{M###}}","status":"checkpoint","summary":"{session_units} unidades concluídas"}`
 - Reset counters: `session_units = 0`, `completed_units = []`
 - **Continue the loop immediately** — do NOT stop.
 
@@ -890,9 +941,14 @@ Execute /forge-auto {RUN_ID} para retomar a partir de: {next_action from STATE.m
 
 ## Deactivate auto-mode indicator
 
-Before ANY exit (final report, blocked, partial, or pause), deactivate the marker:
+Before ANY exit (final report, blocked, partial, or pause), deactivate the marker (M005+ pattern):
 ```bash
-echo '{"active":false}' > .gsd/forge/auto-mode.json
+if [ -n "$RUN_ID" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
+  node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" > /dev/null || true
+else
+  echo '{"active":false}' > .gsd/forge/auto-mode.json
+fi
 ```
 
 ---
