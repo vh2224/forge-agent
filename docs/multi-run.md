@@ -152,6 +152,18 @@ Funciona out-of-the-box em workspaces tipo monorepo (Lookchina omnichannel = 10 
 - 2-3 runs: compacto — `● AUTO ×2 │ M065 ⚡T03 +12s │ M066 🔥S04 +1m`
 - 4+ runs: trunca — `● AUTO ×4 │ M065 │ M066 │ M067 · +1 mais`
 
+**Smart stale (M005+):** isMultiRunMode considera mais de uma fonte de heartbeat. Run com `runs/{id}.json.last_heartbeat` velho mas com `M###-events.jsonl` ou `M###-STATE.md` modificado recentemente é considerada viva. Cobre cenários onde a sessão atual está com session_id mismatch no registry mas workers estão escrevendo normalmente.
+
+## Dashboard (M005+ enriquecido)
+
+`.gsd/STATE.md` (auto-gerado) mostra phase real lendo `M###-STATE.md` de cada run:
+
+```
+- **M067** — milestone · phase: execute-task · slice: S07 · task: T01 · worker: T01 · heartbeat: 2s ago · ...
+```
+
+Antes do M005 mostrava `phase: —` porque o schema `runs/{id}.json` não tinha esse campo. Agora cross-references o per-milestone STATE pra trazer phase + active_slice + active_task.
+
 ## Pause + compact recovery
 
 - `/forge-pause` (sem arg, 1 run) → toggla aquela

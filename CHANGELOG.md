@@ -1,3 +1,48 @@
+## v1.14.0 (2026-05-21) — M005 Multi-Run Cleanup
+
+Polish + correctness fixes for issues discovered during the first real multi-run in production (M067 + M068 simultaneous in WHATSAPP OMNICHANNEL WORKSPACE). All changes are 100% additive — no breaking changes for single-run workspaces.
+
+### Fixes
+
+- **Heartbeat decoupling (S01):** orchestrator no longer writes `.gsd/forge/auto-mode.json` directly. All 9 heartbeat/deactivate sites in `skills/forge-auto/SKILL.md` now branch on `$RUN_ID`: multi-run uses `forge-runs.js --update` (which auto-refreshes the legacy alias via `refreshLegacyAlias`), legacy preserves direct `auto-mode.json` write. Eliminates race condition between concurrent tabs that caused worker/started_at fields to flip-flop.
+- **`auto-mode-started.txt` per-run (S01):** removed shared `.gsd/forge/auto-mode-started.txt` write from the multi-run path. Each run's `started_at` lives in `runs/{id}.json` (set by `forge-runs.add` at activation). Legacy single-run still writes the shared file for backward compat. Fixes "AUTO 9m51s" showing M068's age when tab A was running M067 for 5h.
+- **Stale auto-resume cleanup (S01):** `stale` branch of activation now loops `runs/*.json` and marks each `active:false` before fallback `auto-mode.json` cleanup. Prevents orphan runs in registry after Ctrl+C / OOM.
+- **`{M###}` → `${RUN_ID:-{M###}}` sweep (S02):** 7 event-write sites in plan-check / checkpoint / housekeeping bash blocks now use `${RUN_ID:-{M###}}` for the milestone field. Resolves to `$RUN_ID` in multi-run, falls through to Claude's template substitution in legacy. Eliminates milestone field drift in `events.jsonl`.
+- **Dashboard phase cross-reference (S03):** `scripts/forge-dashboard.js` reads `M###-STATE.md` via `forge-state.read` to show real phase + active_slice + active_task. Before always rendered `phase: —` (runs/{id}.json schema has no phase field). New output: `phase: execute-task · slice: S07 · task: T01 · worker: T01`.
+- **Smart stale heuristic (S03):** `scripts/forge-statusline.js` and dashboard now compute effective heartbeat as `min(runs.last_heartbeat, mtime(M###-events.jsonl), mtime(M###-STATE.md))`. Runs with stale `runs/{id}.json` but fresh per-milestone artifacts (e.g. session_id mismatch pre-v1.13.3) are NOT filtered out of `isMultiRunMode`. Cobre cosmetic falla onde 2 runs ativas mas só uma aparecia na statusline.
+- **complete-milestone deactivates run (S04):** `agents/forge-completer.md` step 7 (new) calls `forge-runs.js --update --json '{"active":false,"deactivated_reason":"complete-milestone"}'` after cleanup, then regenerates dashboard. Without this, completed milestones stayed `active:true` in registry indefinitely — dashboard kept listing them, counting toward `multi_run.refused_when_active_count` threshold.
+
+### Added
+
+- **`scripts/forge-smoke.js`:** end-to-end smoke test suite covering 8 sections (runs CRUD, lock, state migration, dashboard cross-ref, merger, file-lock cross-run, repos auto-detect, cli-helpers refuse). 47 assertions, runs in ~3.5s. `node scripts/forge-smoke.js` exits 0/1 — use as pre-release sanity check.
+
+### Architecture (M005 decisions D-M005-1..12 — see .gsd/milestones/M005/M005-CONTEXT.md)
+
+- D-M005-1 — Heartbeat orchestrator writes runs/{id}.json via forge-runs.bumpHeartbeat
+- D-M005-2 — auto-mode-started.txt removed from multi-run path; runs/{id}.json.started_at is truth
+- D-M005-3 — Dashboard cross-references M###-STATE.md for phase + slice + task
+- D-M005-4 — Statusline stale threshold considers multiple heartbeat sources
+- D-M005-5 — `{M###}` → `${RUN_ID:-{M###}}` sweep in remaining bash blocks
+- D-M005-6 — complete-milestone deactivates runs/{id}.json + regens dashboard
+- D-M005-7 — Smoke test automated in scripts/forge-smoke.js
+- D-M005-8 — Soft pre-claim cross-run [DEFERRED to M006]
+- D-M005-9 — auto-mode.json mantido como alias-only (no direct writes)
+- D-M005-10 — compact-signal cleanup [DEFERRED — low priority]
+- D-M005-11 — Smart stale heuristic in statusline (combinado com D-M005-4)
+- D-M005-12 — No M005-SHADOW-STATE; standard worktree workflow
+
+## v1.13.3 (2026-05-20) — M004 hotfix bootstrap M###-STATE.md
+
+- fix: bootstrap M###-STATE.md on activate-new + re-load STATE post-activation (a04ed8a)
+
+## v1.13.2 (2026-05-20) — M004 hotfix resume + statusline
+
+- fix: resume updates session_id + statusline parses dashboard format (69f7d47)
+
+## v1.13.1 (2026-05-20) — M004 hotfix migrate-legacy
+
+- fix: migrate legacy STATE.md BEFORE dashboard regen in activation (caf94f2)
+
 ## v1.1.0 (2026-05-20) — M004 Multi-Run Workspace
 
 ### Breaking Changes
