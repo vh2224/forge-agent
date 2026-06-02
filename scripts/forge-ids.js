@@ -104,6 +104,10 @@ function classify(id) {
   if (!id) return 'legacy';
   const s = String(id);
   if (/^[MT]-\d{14}(-|$)/.test(s)) return 'timestamp';
+  // Dashed timestamp form: M-YYYYMMDD-HHMMSS / T-… / TASK-… (date and time
+  // separated by a hyphen). Observed in the wild alongside the compact 14-digit
+  // form — both encode a creation timestamp, so both classify as 'timestamp'.
+  if (/^(?:M|T|TASK)-\d{8}-\d{6}(-|$)/i.test(s)) return 'timestamp';
   // Legacy patterns: M005, M123, TASK-001, task-fix-foo, etc.
   if (/^M\d+$/i.test(s)) return 'legacy';
   if (/^TASK-\d+$/i.test(s)) return 'legacy';
@@ -116,8 +120,11 @@ function classify(id) {
 function isValid(id) {
   if (!id) return false;
   const s = String(id);
-  // New timestamp format
+  // New timestamp format — compact 14-digit (canonical generated form)
   if (/^[MT]-\d{14}(-[a-z0-9-]*)?$/.test(s)) return true;
+  // Timestamp format — dashed date-time (M-YYYYMMDD-HHMMSS, T-…, TASK-…),
+  // optionally followed by a slug. Read-compatible alternate of the compact form.
+  if (/^(?:M|T|TASK)-\d{8}-\d{6}(-[a-z0-9-]*)?$/i.test(s)) return true;
   // Legacy formats
   if (/^M\d+$/i.test(s)) return true;
   if (/^TASK-\d+$/i.test(s)) return true;
@@ -133,6 +140,9 @@ function prefixGlob(id) {
   const s = String(id);
   const m = s.match(/^([MT]-\d{14})/);
   if (m) return `${m[1]}*`;
+  // Dashed timestamp form: glob on the M-YYYYMMDD-HHMMSS prefix.
+  const dm = s.match(/^((?:M|T|TASK)-\d{8}-\d{6})/i);
+  if (dm) return `${dm[1]}*`;
   return s; // legacy: exact match
 }
 

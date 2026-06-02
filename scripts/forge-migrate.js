@@ -50,7 +50,22 @@ const STORES = [
     name:       'memory',
     monolithRel: '.gsd/AUTO-MEMORY.md',
     bakRel:      '.gsd/AUTO-MEMORY.md.bak',
-    migrate:    (cwd, opts) => memoryMigrate.migrate(cwd, opts),
+    // memoryMigrate.migrate returns a nested shape { memory: {written,…}, checker, warnings }
+    // (it owns both the AUTO-MEMORY and CHECKER-MEMORY monoliths). Flatten the memory
+    // counts to the top level migrateStore expects — otherwise migrateResult.written is
+    // undefined and the orchestrator reports `memory: written:0` even on a successful
+    // migration. Skip the checker monolith here: forge-migrate only governs AUTO-MEMORY.
+    migrate:    (cwd, opts) => {
+      const r = memoryMigrate.migrate(cwd, Object.assign({ skipChecker: true }, opts));
+      const mem = r.memory || {};
+      return {
+        status:      r.status,
+        written:     mem.written     || 0,
+        skipped:     mem.skipped     || 0,
+        would_write: mem.would_write || 0,
+        warnings:    r.warnings      || [],
+      };
+    },
     render:     (cwd)       => projection.renderMemory(cwd),
   },
 ];
@@ -70,6 +85,31 @@ function stripDecisionNumbers(text) {
     .join('\n');
 }
 
+// ── canonicalizeMemory ──────────────────────────────────────────────────────
+// The memory store changes SHAPE across migration: the legacy monolith uses
+//   - [MEM###] (category) confidence:X hits:Y [score:Z] — text
+// while the projection (forge-projection.renderMemory) emits
+//   <!-- gsd-auto-memory mem_id:MEM### category:cat confidence:X hits:Y … -->
+// A line-by-line diff can never call these "layout only", yet the migration is
+// lossless when the same set of memories survives. So for the memory store we
+// compare a CANONICAL ENTRY SET instead: (mem_id, category, hits) extracted from
+// whichever dialect a side is in, sorted. confidence is excluded because the
+// projection applies on-read time decay; text is excluded because multi-line
+// entries are folded to a single line on migration. A mismatch here means a
+// memory was actually dropped (the failure this whole fix targets).
+function canonicalizeMemory(text) {
+  const set = [];
+  // Legacy bullet dialect.
+  const legacyRe = /^- \[([A-Z]+\d+)\] \(([^)]+)\) confidence:[\d.]+ hits:(\d+)/gm;
+  // Projection HTML-comment dialect.
+  const renderedRe = /<!--\s*gsd-auto-memory\s+mem_id:(\S+)\s+category:(\S+)\s+confidence:[\d.]+\s+hits:(\d+)/g;
+  let m;
+  while ((m = legacyRe.exec(text)) !== null)   set.push(`${m[1]}|${m[2].trim()}|${m[3]}`);
+  while ((m = renderedRe.exec(text)) !== null) set.push(`${m[1]}|${m[2].trim()}|${m[3]}`);
+  set.sort();
+  return set.join('\n');
+}
+
 // ── normalizeLayout ───────────────────────────────────────────────────────────
 // Returns a canonical form of text for layout-insensitive comparison.
 // Normalizations applied (conservative — never masks real content changes):
@@ -82,6 +122,11 @@ function stripDecisionNumbers(text) {
 //      the derived | # | column (rows reuse the existing helper).
 // Returns the normalized string.
 function normalizeLayout(text, storeName) {
+  // The memory store changes shape across migration — compare entry sets, not lines.
+  if (storeName === 'memory') {
+    return canonicalizeMemory(text);
+  }
+
   let lines = text.split('\n');
 
   // Strip derived header/preamble lines (projection title + blockquote boilerplate)

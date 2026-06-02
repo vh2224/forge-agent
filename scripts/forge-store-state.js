@@ -61,6 +61,38 @@ const STORES = [
   },
 ];
 
+// ── monolithHasContent ──────────────────────────────────────────────────────
+// Format-agnostic "does this monolith hold real entries?" heuristic. Used as a
+// safety net when a store's structured parser returns 0 — a parser bug (e.g. a
+// new monolith dialect the regex doesn't recognize) must NOT be read as "empty",
+// because that lets the projection write guard clobber real content.
+//
+// Counts as content: any non-empty line that is not part of the empty skeleton —
+// i.e. not a heading (#), blockquote (>), italic placeholder (_…_), table header
+// row, or table separator. Table DATA rows (those after a `|---|` separator) DO
+// count. HTML comment blocks (extraction/pruning annotations) are stripped first.
+function monolithHasContent(text) {
+  if (!text) return false;
+  const stripped = text.replace(/<!--[\s\S]*?-->/g, '');
+  let pastSeparator = false;
+  for (const raw of stripped.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    // Table separator row (|---|---|) marks the start of data rows.
+    if (/^\|[\s\-:|]+\|$/.test(line)) { pastSeparator = true; continue; }
+    if (line.startsWith('|')) {
+      // A pipe row after a separator is real data; a header row before it is skeleton.
+      if (pastSeparator) return true;
+      continue;
+    }
+    if (/^#/.test(line)) continue;     // headings (## M### entries handled via body lines)
+    if (/^>/.test(line)) continue;     // blockquote preamble
+    if (/^_.*_$/.test(line)) continue; // italic placeholder (_No … yet._)
+    return true;                       // bullets, prose, key/value lines → real content
+  }
+  return false;
+}
+
 // ── monolithEntryCount ────────────────────────────────────────────────────────
 // Reads the monolith (if present) and returns the number of real entries.
 // Returns 0 when the file is absent, empty, or only contains the skeleton.
@@ -72,13 +104,20 @@ function monolithEntryCount(cwd, store) {
   } catch (_) {
     return 0; // monolith absent
   }
+  let count;
   try {
-    return store.countMonolithEntries(text) || 0;
+    count = store.countMonolithEntries(text) || 0;
   } catch (_) {
     // A parse failure means we cannot prove the monolith is empty — treat as
     // having content so the write guard errs on the side of NOT overwriting.
     return text.trim() ? 1 : 0;
   }
+  // Safety net: the structured parser found nothing but the file clearly holds
+  // content. Report ≥1 so the store is classified 'unmigrated' (not 'empty') and
+  // the write guard refuses to overwrite it. Without this, a parser that silently
+  // under-counts (returns 0 instead of throwing) would let writeAll wipe the file.
+  if (count === 0 && monolithHasContent(text)) return 1;
+  return count;
 }
 
 // ── storeState ────────────────────────────────────────────────────────────────

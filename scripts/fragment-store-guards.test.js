@@ -18,9 +18,12 @@ const os   = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const projection = require('./forge-projection');
-const storeState = require('./forge-store-state');
-const ignore     = require('./forge-ignore');
+const projection     = require('./forge-projection');
+const storeState     = require('./forge-store-state');
+const ignore         = require('./forge-ignore');
+const memoryMigrate  = require('./forge-memory-migrate');
+const migrate        = require('./forge-migrate');
+const memoryStore    = require('./forge-memory');
 
 // ── Harness ───────────────────────────────────────────────────────────────────
 let passed = 0;
@@ -260,6 +263,138 @@ test('validateIgnore does NOT report wholesale-covered children as missing', () 
     assert(!res.missing.some(p => p.startsWith('.gsd/forge/')), `false-positive missing: ${res.missing.join(', ')}`);
     assert(res.covered && res.covered.some(p => p.startsWith('.gsd/forge/')), 'forge children should be covered');
   } finally { ignore.__setExecFileSync(restore); rmrf(tmp); }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Migrator regression suite (forge-migrate fragment-store@1.0.0 bugs):
+//   BUG 1 — dashed milestone IDs (M-YYYYMMDD-HHMMSS) dropped by the migrator.
+//   BUG 2 — AUTO-MEMORY.md not migrated when entries carry a `score:` token
+//           (regex mismatch) → memory written:0, .gsd/memory/ empty.
+//   BUG 3 — writeAll clobbered a populated monolith whose structured parser
+//           under-counted (the score-format file read as 'empty', not 'unmigrated').
+// ════════════════════════════════════════════════════════════════════════════
+
+// Real-world AUTO-MEMORY monolith dialect: bullet carries `score:` between hits
+// and the em-dash, and the source line may list multiple comma-separated sources.
+const MEMORY_SCORE_POPULATED = [
+  '# Forge Auto-Memory',
+  '',
+  '<!-- extraction: 2026-05-21 | pruned: 0 -->',
+  '',
+  '## Gotcha',
+  '',
+  '- [MEM077] (gotcha) confidence:1.0 hits:13 score:2.3 — Score-format entry that the old regex dropped.',
+  '  source: execute-task/T01, complete-slice/S02 | updated: 2026-05-21',
+  '',
+  '- [MEM078] (convention) confidence:0.8 hits:3 — Sourced from a dashed milestone id.',
+  '  source: M-20260519-153227 | updated: 2026-05-20',
+  '',
+  '- [MEM079] (pattern) confidence:0.9 hits:5 — No score token on this one.',
+  '  source: M004 | updated: 2026-05-11',
+  '',
+].join('\n');
+
+console.log('\nBUG 2 — AUTO-MEMORY score-format parsing');
+
+test('parseAutoMemory parses bullets WITH and WITHOUT a score: token', () => {
+  const { entries } = memoryMigrate.parseAutoMemory(MEMORY_SCORE_POPULATED);
+  assert(entries.length === 3, `expected 3 entries, got ${entries.length}`);
+  const m077 = entries.find(e => e.mem_id === 'MEM077');
+  assert(m077, 'MEM077 (score variant) must not be dropped');
+  assert(m077.score === 2.3, `expected score 2.3, got ${m077.score}`);
+  assert(m077.hits === 13, `expected hits 13, got ${m077.hits}`);
+  const m079 = entries.find(e => e.mem_id === 'MEM079');
+  assert(m079 && m079.score === null, 'no-score bullet should parse with score=null');
+});
+
+console.log('\nBUG 3 — score-format monolith is "unmigrated", not "empty"');
+
+test('storeState reports memory unmigrated for a score-format monolith', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.gsd', 'AUTO-MEMORY.md'), MEMORY_SCORE_POPULATED, 'utf8');
+    const st = storeState.storeState(tmp);
+    assert(st.memory.state === 'unmigrated', `memory: ${st.memory.state}`);
+  } finally { rmrf(tmp); }
+});
+
+test('writeAll refuses to overwrite a populated score-format AUTO-MEMORY', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.gsd', 'AUTO-MEMORY.md'), MEMORY_SCORE_POPULATED, 'utf8');
+    const before = fs.readFileSync(path.join(tmp, '.gsd', 'AUTO-MEMORY.md'), 'utf8');
+    const res = projection.writeAll(tmp);
+    assert(res.blocked.some(b => b.file.includes('AUTO-MEMORY')), 'AUTO-MEMORY must be blocked');
+    assert(!res.written.includes('.gsd/AUTO-MEMORY.md'), 'AUTO-MEMORY must not be written');
+    assert(fs.readFileSync(path.join(tmp, '.gsd', 'AUTO-MEMORY.md'), 'utf8') === before, 'AUTO-MEMORY.md changed');
+  } finally { rmrf(tmp); }
+});
+
+test('safety net: a monolith the parser can\'t read at all still reads as content', () => {
+  // Simulate a future dialect the structured parser returns 0 for. The empty
+  // table-header skeleton must NOT trip the net (false block); a real entry must.
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    // Genuinely empty decisions skeleton → 'empty' (safe to write).
+    fs.writeFileSync(path.join(tmp, '.gsd', 'DECISIONS.md'), DECISIONS_POPULATED.replace(
+      '| 1 | 2026-01-01 | milestone | Usar fragment store | sim | escala | no |\n', ''), 'utf8');
+    assert(storeState.storeState(tmp).decisions.state === 'empty', 'empty table skeleton must be empty');
+    // Unparseable-but-populated memory → 'unmigrated' (refuse to clobber).
+    fs.writeFileSync(path.join(tmp, '.gsd', 'AUTO-MEMORY.md'),
+      '# Forge Auto-Memory\n\n- Some freeform note the regex will never match.\n', 'utf8');
+    assert(storeState.storeState(tmp).memory.state === 'unmigrated', 'freeform content must be unmigrated');
+  } finally { rmrf(tmp); }
+});
+
+console.log('\nBUG 1+2 — full migrate round-trip (dashed IDs + score memory, no loss)');
+
+test('migrateAll migrates dashed/compact/legacy ledger IDs and all memories', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    const ledger = [
+      '# Forge Project Ledger',
+      '',
+      '## M-20260519-153227 — Pagamentos',   // dashed (was dropped)
+      'Completed: 2026-05-19',
+      '**Slices:** S01, S02',
+      '',
+      '## M004 — Legacy sequential',          // legacy seq
+      'Completed: 2026-05-10',
+      '**Slices:** S01',
+      '',
+      '## M-20260601213131 — Compact timestamp', // compact 14-digit
+      'Completed: 2026-06-01',
+      '**Slices:** S01',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmp, '.gsd', 'LEDGER.md'), ledger, 'utf8');
+    fs.writeFileSync(path.join(tmp, '.gsd', 'AUTO-MEMORY.md'), MEMORY_SCORE_POPULATED, 'utf8');
+
+    const r = migrate.migrateAll(tmp, {});
+
+    // BUG 1: all three ledger ID shapes migrated (none dropped as "Invalid").
+    assert(r.ledger.written === 3, `expected 3 ledger fragments, got ${r.ledger.written}`);
+    const ledgerIds = require('./forge-ledger').listFragments(tmp).map(f => f.id).sort();
+    assert(ledgerIds.includes('M-20260519-153227'), `dashed id missing: ${ledgerIds.join(', ')}`);
+
+    // BUG 2: memory.written reported > 0 (not the spurious 0) and all 3 MEMs survive.
+    assert(r.memory.written >= 1, `expected memory.written >= 1, got ${r.memory.written}`);
+    assert(memoryStore.listFragments(tmp).length >= 1, 'expected ≥1 memory fragment on disk');
+    const rendered = projection.renderMemory(tmp);
+    for (const id of ['MEM077', 'MEM078', 'MEM079']) {
+      assert(rendered.includes(id), `${id} lost after migrate→render`);
+    }
+    // Verification recognizes the lossless reshape (not a catastrophic "differs").
+    assert(r.memory.verification === 'differs (layout only)',
+      `memory verification: ${r.memory.verification}`);
+
+    // Post-migration the store is 'migrated' → writeAll is now allowed (idempotent).
+    assert(storeState.storeState(tmp).memory.state === 'migrated', 'memory should be migrated');
+  } finally { rmrf(tmp); }
 });
 
 // ── Summary ─────────────────────────────────────────────────────────────────────

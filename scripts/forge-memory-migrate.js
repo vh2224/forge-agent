@@ -28,6 +28,7 @@ const fs = require('fs');
 const path = require('path');
 const memory = require('./forge-memory');
 const checkerMemory = require('./forge-checker-memory');
+const { isValid: idIsValid, entityKind: idEntityKind } = require('./forge-ids');
 
 // ── SENTINEL ──────────────────────────────────────────────────────────────────
 // Entries whose source cannot be resolved to a valid unit-id go here.
@@ -57,9 +58,14 @@ function parseAutoMemory(text) {
   while (i < lines.length) {
     const line = lines[i];
 
-    // Match bullet: - [MEM###] (category) confidence:0.NN hits:N — text
+    // Match bullet: - [MEM###] (category) confidence:0.NN hits:N [score:X.X] — text
+    // The `score:` token is an OPTIONAL derived field present in some monolith
+    // dialects (score ≈ confidence × hits). It is recomputed on projection, so we
+    // capture it for fidelity but never need it to reconstruct the entry. Without
+    // the optional group the whole bullet failed to match and the entry was
+    // silently dropped (memory written:0). Accept the em-dash with or without it.
     const bulletMatch = line.match(
-      /^- \[([A-Z]+\d+)\] \(([^)]+)\) confidence:([\d.]+) hits:(\d+) — (.+)$/
+      /^- \[([A-Z]+\d+)\] \(([^)]+)\) confidence:([\d.]+) hits:(\d+)(?:\s+score:([\d.]+))? — (.+)$/
     );
 
     if (!bulletMatch) {
@@ -71,7 +77,8 @@ function parseAutoMemory(text) {
     const category = bulletMatch[2];
     const confidence = parseFloat(bulletMatch[3]);
     const hits = parseInt(bulletMatch[4], 10);
-    let textLines = [bulletMatch[5].trim()];
+    const score = bulletMatch[5] !== undefined ? parseFloat(bulletMatch[5]) : null;
+    let textLines = [bulletMatch[6].trim()];
 
     // Collect continuation lines until we hit "source:" line or a new bullet or section
     let j = i + 1;
@@ -100,7 +107,7 @@ function parseAutoMemory(text) {
 
     if (!sourceLine) {
       warnings.push(`[${mem_id}] No source line found — orphaning`);
-      entries.push({ mem_id, category, confidence, hits, text: textLines.join(' '), source: null, updated: null });
+      entries.push({ mem_id, category, confidence, hits, score, text: textLines.join(' '), source: null, updated: null });
       continue;
     }
 
@@ -108,14 +115,14 @@ function parseAutoMemory(text) {
     const sourceMatch = sourceLine.match(/source:\s*([^\|]+)\|?\s*(?:updated:\s*(.+))?$/);
     if (!sourceMatch) {
       warnings.push(`[${mem_id}] Could not parse source line: "${sourceLine}" — orphaning`);
-      entries.push({ mem_id, category, confidence, hits, text: textLines.join(' '), source: null, updated: null });
+      entries.push({ mem_id, category, confidence, hits, score, text: textLines.join(' '), source: null, updated: null });
       continue;
     }
 
     const source = sourceMatch[1].trim();
     const updated = sourceMatch[2] ? sourceMatch[2].trim() : null;
 
-    entries.push({ mem_id, category, confidence, hits, text: textLines.join(' '), source, updated });
+    entries.push({ mem_id, category, confidence, hits, score, text: textLines.join(' '), source, updated });
   }
 
   return { entries, warnings };
@@ -126,22 +133,26 @@ function parseAutoMemory(text) {
 // Source forms:
 //   execute-task/T01        → resolve T01 to its owning milestone via filesystem scan
 //   complete-slice/S##      → resolve to owning milestone similarly
-//   T-<ts>-<slug>           → use as-is (loose task)
-//   M-<ts>-<slug> or M###  → use as-is (milestone)
-// Unresolvable → ORPHAN_BUCKET
+//   T-<ts>[-<slug>]         → use as-is (loose task; compact OR dashed timestamp)
+//   M-<ts>[-<slug>] or M### → use as-is (milestone; compact, dashed, or legacy)
+//   "a, b, c"               → multi-source — only the FIRST source is honored
+// ID-shape decisions delegate to forge-ids (isValid + entityKind) so every
+// supported format — compact 14-digit, dashed M-YYYYMMDD-HHMMSS, and legacy —
+// resolves identically. Unresolvable → ORPHAN_BUCKET.
 function resolveMemoryUnitId(source, cwd) {
   if (!source) return ORPHAN_BUCKET;
 
-  const s = source.trim();
+  let s = source.trim();
 
-  // Timestamp-prefixed loose task — use as-is
-  if (/^T-\d{14}-[a-z0-9-]+$/i.test(s)) return s;
+  // Multi-source line ("execute-task/T01, complete-slice/S02"): honor the first.
+  if (s.includes(',')) s = s.split(',')[0].trim();
+  if (!s) return ORPHAN_BUCKET;
 
-  // Timestamp-prefixed milestone — use as-is
-  if (/^M-\d{14}-[a-z0-9-]+$/i.test(s)) return s;
-
-  // Legacy milestone M### — use as-is
-  if (/^M\d+$/i.test(s)) return s;
+  // Bare id (milestone or task) in any supported format — use as-is.
+  if (idIsValid(s)) {
+    const kind = idEntityKind(s);
+    if (kind === 'milestone' || kind === 'task') return s;
+  }
 
   // Structured source: <unit_type>/<id>
   const slashIdx = s.indexOf('/');
@@ -149,20 +160,18 @@ function resolveMemoryUnitId(source, cwd) {
     const unitType = s.slice(0, slashIdx).trim();
     const unitId = s.slice(slashIdx + 1).trim();
 
-    // Timestamp-prefixed task from structured source
-    if (/^T-\d{14}-[a-z0-9-]+$/i.test(unitId)) return unitId;
-    // Timestamp-prefixed milestone from structured source
-    if (/^M-\d{14}-[a-z0-9-]+$/i.test(unitId)) return unitId;
+    // Timestamp-prefixed / legacy-milestone id from structured source — use as-is.
+    if (idIsValid(unitId)) {
+      const kind = idEntityKind(unitId);
+      if (kind === 'milestone' || kind === 'task') return unitId;
+    }
 
-    // Legacy T## / S## — need to resolve via filesystem
+    // Legacy intra-milestone T## / S## — resolve to owning milestone via filesystem.
     if (/^T\d+$/i.test(unitId) || /^S\d+$/i.test(unitId)) {
       const resolved = resolveViaFilesystem(unitId, unitType, cwd);
       if (resolved) return resolved;
       return ORPHAN_BUCKET;
     }
-
-    // Legacy M### from structured source
-    if (/^M\d+$/i.test(unitId)) return unitId;
   }
 
   return ORPHAN_BUCKET;
@@ -354,6 +363,7 @@ function writeOrphanBucket(cwd, orphanEntries, dryRun) {
     content += `## [${e.mem_id}] ${e.category}\n\n`;
     content += `- confidence: ${e.confidence}\n`;
     content += `- hits: ${e.hits}\n`;
+    if (e.score !== null && e.score !== undefined) content += `- score: ${e.score}\n`;
     content += `- text: ${e.text}\n`;
     content += `- source: ${e.source || '(unparseable)'}\n`;
     if (e.updated) content += `- updated: ${e.updated}\n`;

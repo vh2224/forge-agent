@@ -232,6 +232,45 @@ test('garbage → unknown', () => assertEq(ids.entityKind('GARBAGE!!!'), 'unknow
 test('empty string → unknown', () => assertEq(ids.entityKind(''), 'unknown'));
 test('null → unknown', () => assertEq(ids.entityKind(null), 'unknown'));
 
+// ── 13. dashed timestamp IDs (regression: M-YYYYMMDD-HHMMSS dropped) ───────────
+// The dashed date-time form (a hyphen between date and time) appeared in real
+// projects alongside the compact 14-digit form. The validator only knew the
+// compact form, so dashed IDs were rejected as "Invalid" and silently dropped
+// from migrations. All three shapes must validate, classify, and route the same.
+console.log('\n13. dashed timestamp IDs (M-YYYYMMDD-HHMMSS)');
+
+// The three formats from BUG 1: sequential, compact-14-digit, dashed.
+test('isValid: legacy sequential M004', () => assert(ids.isValid('M004')));
+test('isValid: compact 14-digit M-20260601213131', () => assert(ids.isValid('M-20260601213131')));
+test('isValid: dashed milestone M-20260519-153227', () => assert(ids.isValid('M-20260519-153227')));
+test('isValid: dashed task TASK-20260521-205130', () => assert(ids.isValid('TASK-20260521-205130')));
+test('isValid: dashed task T-20260521-205130', () => assert(ids.isValid('T-20260521-205130')));
+test('isValid: dashed milestone with slug M-20260519-153227-pagamentos', () =>
+  assert(ids.isValid('M-20260519-153227-pagamentos')));
+
+test('entityKind: dashed milestone → milestone', () =>
+  assertEq(ids.entityKind('M-20260519-153227'), 'milestone'));
+test('entityKind: dashed TASK → task', () =>
+  assertEq(ids.entityKind('TASK-20260521-205130'), 'task'));
+test('entityKind: dashed T → task', () =>
+  assertEq(ids.entityKind('T-20260521-205130'), 'task'));
+
+test('classify: dashed milestone → timestamp', () =>
+  assertEq(ids.classify('M-20260519-153227'), 'timestamp'));
+test('classify: dashed TASK → timestamp', () =>
+  assertEq(ids.classify('TASK-20260521-205130'), 'timestamp'));
+
+test('prefixGlob: dashed milestone → M-YYYYMMDD-HHMMSS*', () =>
+  assertEq(ids.prefixGlob('M-20260519-153227'), 'M-20260519-153227*'));
+test('prefixGlob: dashed milestone with slug → prefix*', () =>
+  assertEq(ids.prefixGlob('M-20260519-153227-pagamentos'), 'M-20260519-153227*'));
+
+// Guard against over-acceptance: malformed near-misses must stay invalid.
+test('isValid: M-2026051-153227 (7-digit date) → invalid', () =>
+  assert(!ids.isValid('M-2026051-153227')));
+test('isValid: M-20260519-15322 (5-digit time) → invalid', () =>
+  assert(!ids.isValid('M-20260519-15322')));
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 
