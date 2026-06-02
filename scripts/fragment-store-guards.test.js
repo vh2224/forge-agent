@@ -397,6 +397,93 @@ test('migrateAll migrates dashed/compact/legacy ledger IDs and all memories', ()
   } finally { rmrf(tmp); }
 });
 
+// ════════════════════════════════════════════════════════════════════════════
+// BUG 4 — SessionStart schema-mismatch guard (forge-hook.js)
+//   When the local forge tooling schema differs from the committed
+//   .gsd/SCHEMA-VERSION, the SessionStart hook injects a loud, deterministic
+//   warning (additionalContext) so the user runs /forge-update before a
+//   milestone close silently drops a ledger entry. Never blocks the session.
+// ════════════════════════════════════════════════════════════════════════════
+console.log('\nBUG 4 — SessionStart schema-mismatch guard');
+
+const HOOK = path.resolve(__dirname, 'forge-hook.js');
+const CURRENT_SCHEMA = require('./forge-doctor').CURRENT_SCHEMA; // 'fragment-store@1.0.0'
+
+function runHook(cwd, source) {
+  // Returns { stdout, parsed } — parsed is hookSpecificOutput JSON or null.
+  const input = JSON.stringify({ session_id: 'test-sess', cwd, source: source || 'startup' });
+  let stdout = '';
+  try {
+    stdout = execFileSync(process.execPath, [HOOK, 'session-start'], { input, encoding: 'utf8' });
+  } catch (e) {
+    stdout = (e.stdout || '');
+  }
+  let parsed = null;
+  try { parsed = JSON.parse(stdout); } catch (_) {}
+  return { stdout, parsed };
+}
+
+test('warns (additionalContext) when repo schema is NEWER than tooling → /forge-update', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@2.0.0\n', 'utf8');
+    const { parsed } = runHook(tmp);
+    assert(parsed && parsed.hookSpecificOutput, 'expected hookSpecificOutput JSON');
+    assert(parsed.hookSpecificOutput.hookEventName === 'SessionStart', 'wrong hookEventName');
+    const ctx = parsed.hookSpecificOutput.additionalContext || '';
+    assert(/forge-update/.test(ctx), `expected /forge-update hint, got: ${ctx}`);
+    assert(/ANTIGA/.test(ctx), `expected "older" framing, got: ${ctx}`);
+  } finally { rmrf(tmp); }
+});
+
+test('warns to migrate when repo schema is OLDER than tooling → forge-doctor --fix --migrate', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@0.0.1\n', 'utf8');
+    const ctx = (runHook(tmp).parsed || {}).hookSpecificOutput?.additionalContext || '';
+    assert(/forge-doctor --fix --migrate/.test(ctx), `expected migrate hint, got: ${ctx}`);
+  } finally { rmrf(tmp); }
+});
+
+test('stays SILENT when schema matches', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), CURRENT_SCHEMA + '\n', 'utf8');
+    assert(runHook(tmp).stdout.trim() === '', 'expected no output on match');
+  } finally { rmrf(tmp); }
+});
+
+test('stays SILENT on a non-forge project (no .gsd)', () => {
+  const tmp = mkTmp();
+  try {
+    assert(runHook(tmp).stdout.trim() === '', 'expected no output without .gsd');
+  } finally { rmrf(tmp); }
+});
+
+test('stays SILENT when .gsd exists but has no SCHEMA-VERSION (fresh/pre-schema)', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    assert(runHook(tmp).stdout.trim() === '', 'expected no output without a stamp');
+  } finally { rmrf(tmp); }
+});
+
+test('exits 0 (never blocks the session) even on mismatch', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@2.0.0\n', 'utf8');
+    let status = 0;
+    try { execFileSync(process.execPath, [HOOK, 'session-start'],
+      { input: JSON.stringify({ session_id: 's', cwd: tmp, source: 'resume' }), encoding: 'utf8' }); }
+    catch (e) { status = e.status == null ? -1 : e.status; }
+    assert(status === 0, `expected exit 0, got ${status}`);
+  } finally { rmrf(tmp); }
+});
+
 // ── Summary ─────────────────────────────────────────────────────────────────────
 console.log(`\n  ${passed} passed, ${failed} failed\n`);
 if (failed > 0) {

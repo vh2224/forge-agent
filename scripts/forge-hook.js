@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Forge Hook — fires on PreToolUse / PostToolUse (Agent + Write matchers)
-//              and on SubagentStart / SubagentStop / PreCompact / PostCompact lifecycle events
+//              and on SessionStart / SubagentStart / SubagentStop / PreCompact / PostCompact events
 // Writes dispatch progress to a temp file that forge-statusline.js reads.
 // Session-aware after M004: resolves run via data.session_id → .gsd/forge/runs/*.json
 //
 // Called by Claude Code hooks (configured in ~/.claude/settings.json):
+//   SessionStart    → node ~/.claude/forge-hook.js session-start
 //   PreToolUse      → node ~/.claude/forge-hook.js pre
 //   PostToolUse     → node ~/.claude/forge-hook.js post
 //   SubagentStart   → node ~/.claude/forge-hook.js subagent-start
@@ -161,6 +162,65 @@ const truncate = (s, max) => {
   return s.length <= max ? s : s.slice(0, max) + '…';
 };
 
+// ── Schema-mismatch guard helpers (SessionStart) ──────────────────────────────
+// Lazy-load forge-doctor (owns checkSchema + CURRENT_SCHEMA). Same dev/installed
+// resolution as runs/filelock above: installed → ~/.claude/scripts/, dev → sibling.
+const loadDoctor = () => {
+  try { return require(path.join(__dirname, 'scripts', 'forge-doctor.js')); } catch {}
+  try { return require(path.join(__dirname, 'forge-doctor.js')); } catch {}
+  return null;
+};
+
+// Parse the semver embedded in a schema string ("fragment-store@1.0.0" → [1,0,0]).
+// Returns null when the version cannot be parsed.
+const parseSchemaSemver = (s) => {
+  const m = String(s || '').match(/@(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+};
+
+// Compare two [major,minor,patch] tuples → -1 | 0 | 1.
+const cmpSemver = (a, b) => {
+  for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1; }
+  return 0;
+};
+
+// Build the high-visibility warning injected into session context on mismatch.
+// res = { ok, expected (local tooling schema), actual (repo .gsd/SCHEMA-VERSION) }.
+// Direction matters: tooling OLDER than repo is the dangerous case (a closing
+// milestone may be written to a monolith the repo now ignores → silently dropped).
+const buildSchemaWarning = (res) => {
+  const tooling = res.expected; // CURRENT_SCHEMA baked into the local tooling
+  const repo    = res.actual;   // .gsd/SCHEMA-VERSION committed in the repo
+  const tv = parseSchemaSemver(tooling);
+  const rv = parseSchemaSemver(repo);
+  const dir = (tv && rv) ? cmpSemver(tv, rv) : null;
+  const header = '⚠️ ATENÇÃO — incompatibilidade de schema do Forge';
+
+  if (dir === -1) {
+    // tooling < repo — the headline failure mode
+    return [
+      header,
+      `Sua tooling Forge local (${tooling}) é MAIS ANTIGA que o schema deste repositório (${repo}).`,
+      'Rode /forge-update ANTES de fechar qualquer milestone — senão sua entrada de LEDGER/DECISIONS',
+      'pode ser gravada num arquivo que o repo ignora e NÃO será commitada (perda silenciosa).',
+    ].join('\n');
+  }
+  if (dir === 1) {
+    // tooling > repo — repo needs migrating up
+    return [
+      header,
+      `Sua tooling Forge local (${tooling}) é MAIS NOVA que o schema deste repositório (${repo}).`,
+      'Rode /forge-doctor --fix --migrate para migrar o repo ao schema atual antes de continuar.',
+    ].join('\n');
+  }
+  // Unparseable on one side — generic divergence notice
+  return [
+    header,
+    `A tooling Forge (${tooling}) e o schema do repo (${repo}) divergem.`,
+    'Rode /forge-update ou /forge-doctor --fix --migrate antes de fechar milestone.',
+  ].join('\n');
+};
+
 process.stdin.setEncoding('utf8');
 let raw = '';
 process.stdin.on('data', chunk => (raw += chunk));
@@ -169,6 +229,32 @@ process.stdin.on('end', () => {
     const data = JSON.parse(raw);
     const sessionId = data.session_id || '';
     const cwd       = data.cwd || process.cwd();
+
+    // ── SessionStart: warn on forge tooling ↔ repo schema mismatch ──────────
+    // Deterministic guard (does NOT depend on the model reading CLAUDE.md):
+    // fires on startup/resume/clear/compact. When the local tooling schema
+    // differs from the committed .gsd/SCHEMA-VERSION, inject a loud notice so
+    // the user runs /forge-update before a milestone close silently drops a
+    // ledger entry into a now-ignored monolith. Never blocks the session.
+    if (phase === 'session-start') {
+      try {
+        if (!fs.existsSync(path.join(cwd, '.gsd'))) return; // not a forge project — stay silent
+        const doctor = loadDoctor();
+        if (!doctor || typeof doctor.checkSchema !== 'function') return;
+        const res = doctor.checkSchema(cwd);
+        // Warn only on a real mismatch against an EXISTING stamp. actual == null
+        // means the repo has no SCHEMA-VERSION yet (fresh / pre-schema project) —
+        // that is not a mismatch, so we stay silent to avoid false alarms.
+        if (res.ok || res.actual == null) return;
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'SessionStart',
+            additionalContext: buildSchemaWarning(res),
+          },
+        }));
+      } catch { /* never block session start (MEM008) */ }
+      return;
+    }
 
     // ── SubagentStart: log start timestamp for timing ───────────────────────
     if (phase === 'subagent-start') {

@@ -31,8 +31,9 @@ try {
 
 const FORGE_HOOK_MARKER = 'forge-hook.js';
 
-// Lifecycle events: no matcher (fire for all agents)
+// Lifecycle / session events: no matcher (fire session-wide, not per-tool)
 const LIFECYCLE_HOOKS = [
+  { event: 'SessionStart',  phase: 'session-start'  },
   { event: 'SubagentStart', phase: 'subagent-start' },
   { event: 'SubagentStop',  phase: 'subagent-stop'  },
   { event: 'PreCompact',    phase: 'pre-compact'     },
