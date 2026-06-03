@@ -220,21 +220,16 @@ function smokeMerger() {
 
   fs.mkdirSync(path.join(dir, '.gsd/milestones/M060'), { recursive: true });
 
+  // Post-D9 (M001/S02–S05): mergeMilestone consumes ONLY events.jsonl. Decisions,
+  // memory and checker now live in per-unit fragment stores (.gsd/{decisions,memory,
+  // checker-memory}/) and the global monoliths are regenerated via projection in
+  // complete-milestone — the merger no longer reads M###-DECISIONS.md / M###-LEDGER-
+  // ENTRY.md nor writes .gsd/DECISIONS.md / .gsd/LEDGER.md. We still seed a stale
+  // M060-DECISIONS.md to prove the deprecated path stays dormant (merged.decisions=0).
   fs.writeFileSync(path.join(dir, '.gsd/milestones/M060/M060-DECISIONS.md'), `| ID | Decision | Rationale | Date |
 |----|----------|-----------|------|
 | D-M060-1 | choice X | reason | 2026-05-21 |
 | D-M060-2 | choice Y | reason | 2026-05-21 |
-`);
-
-  fs.writeFileSync(path.join(dir, '.gsd/milestones/M060/M060-LEDGER-ENTRY.md'), `## M060 — Test milestone · 2026-05-21
-
-One-line description.
-
-**Slices:** S01 — test
-**Key files:** a/b.ts
-**Key decisions:** choice X · choice Y
-
----
 `);
 
   fs.writeFileSync(path.join(dir, '.gsd/milestones/M060/M060-events.jsonl'), '{"ts":"2026-05-21T00:00:00Z","status":"done"}\n');
@@ -242,17 +237,25 @@ One-line description.
   let r = runScript('forge-merger.js', ['--milestone', 'M060', '--cwd', dir]);
   assert(r.status === 0, 'merger runs successfully', r.stderr);
   const result = JSON.parse(r.stdout);
-  assert(result.merged.decisions === 2, '2 decisions merged');
-  assert(result.merged.ledger === true, 'ledger merged');
   assert(result.merged.events === 1, '1 event merged');
+  assert(result.merged.decisions === 0, 'decisions NOT merged (fragment store owns them post-D9)');
+  assert(result.merged.memories === 0, 'memories NOT merged (fragment store owns them post-D9)');
   assert(result.errors.length === 0, 'no merger errors');
 
-  // Verify globals
-  const globalDecisions = fs.readFileSync(path.join(dir, '.gsd/DECISIONS.md'), 'utf8');
-  assert(/D-M060-1/.test(globalDecisions) && /D-M060-2/.test(globalDecisions), 'global DECISIONS contains rows');
+  // The merger appends per-milestone events to the global event log.
+  const globalEventsPath = path.join(dir, '.gsd/forge/events.jsonl');
+  assert(fs.existsSync(globalEventsPath), 'global events.jsonl created');
+  const globalEvents = fs.readFileSync(globalEventsPath, 'utf8');
+  assert(/"status":"done"/.test(globalEvents), 'global events contains merged line');
 
-  const globalLedger = fs.readFileSync(path.join(dir, '.gsd/LEDGER.md'), 'utf8');
-  assert(/## M060/.test(globalLedger), 'global LEDGER contains entry');
+  // Guard monolith reads behind existsSync so a regression here degrades to a failed
+  // assert, never an unhandled ENOENT that aborts the whole smoke run (issue #11).
+  // Post-D9 the merger must NOT fabricate these monoliths — they are projection output.
+  const globalDecisionsPath = path.join(dir, '.gsd/DECISIONS.md');
+  assert(!fs.existsSync(globalDecisionsPath), 'merger does not write global DECISIONS.md (projection owns it)');
+
+  const globalLedgerPath = path.join(dir, '.gsd/LEDGER.md');
+  assert(!fs.existsSync(globalLedgerPath), 'merger does not write global LEDGER.md (projection owns it)');
 
   cleanup(dir);
 }
