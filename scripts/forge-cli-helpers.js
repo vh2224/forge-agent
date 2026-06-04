@@ -7,7 +7,7 @@
 // Library exports:
 //   resolveRunFromArgs(cwd, args, opts) → { run_id, kind, status, message }
 //   listActiveSummary(cwd) → string (multi-line, formatted for user)
-//   newTaskId(description) → string (T-<ts>-<slug>, delegates to forge-ids.js)
+//   newTaskId(description, cwd) → string (T-<ts>-<slug> or TASK-00N per ids.format pref)
 //   refuseMessage(activeRuns, command) → string
 //   activateRun(cwd, opts) → registered RunRecord
 //
@@ -51,8 +51,9 @@ function readPref(cwd, dottedKey, fallback) {
 
 // ── ID generation ───────────────────────────────────────────────────────────
 // newTaskId delegates to forge-ids.js — no local slugify or crypto needed.
-function newTaskId(description) {
-  return ids.makeTaskId(description || 'task');
+// Honors the `ids.format` pref (timestamp | sequential) via resolveTaskId.
+function newTaskId(description, cwd) {
+  return ids.resolveTaskId(cwd || process.cwd(), description || 'task');
 }
 
 // ── Arg resolution ──────────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ Flags:
     } else if (args['list-active-summary']) {
       process.stdout.write(listActiveSummary(cwd) + '\n');
     } else if (args['new-task-id']) {
-      process.stdout.write(newTaskId(args.description || 'adhoc') + '\n');
+      process.stdout.write(newTaskId(args.description || 'adhoc', cwd) + '\n');
     } else if (args['refuse-msg']) {
       const active = runs.listActive(cwd);
       process.stdout.write(refuseMessage(active, args.command || 'forge-auto') + '\n');

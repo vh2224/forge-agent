@@ -94,6 +94,42 @@ main_branch: master       # branch principal
 > `forge_isolation:` abaixo. Operadores em workspaces existentes não precisam migrar — o orquestrador
 > trata ausência de `forge_isolation:` como `mode: shared`.
 
+## ID Settings
+
+Controla o formato dos IDs **gerados** para milestones e tasks soltas. A leitura
+aceita sempre os dois formatos, independente desta pref.
+
+```
+ids:
+  format: timestamp        # timestamp | sequential
+```
+
+### Semântica
+
+- `timestamp` (default) — `M-<YYYYMMDDHHMMSS>-<slug>` / `T-<YYYYMMDDHHMMSS>-<slug>`.
+  Chave primária é o timestamp UTC de 14 dígitos: única, ordenável por criação,
+  **sem colisão entre devs/branches paralelos**. Slug cosmético (≤24 chars).
+- `sequential` — formato legado `M001`, `M002`, … / `TASK-001`, `TASK-002`, …
+  O próximo número é `max + 1` varrendo `.gsd/milestones/` + `.gsd/archive/`
+  (milestones) e `.gsd/tasks/` (tasks). IDs timestamp existentes são ignorados
+  na numeração (namespaces distintos — sem colisão entre os dois formatos).
+
+> ⚠ `sequential` reintroduz o risco de colisão que motivou o formato timestamp:
+> dois devs criando milestone em branches paralelos geram o mesmo `M00N`.
+> Use apenas em repositórios de dev único ou com coordenação central de IDs.
+
+### Resolução
+
+Flag `--format` no CLI > pref `ids.format` (cascata user → repo → local, último
+ganha) > default `timestamp`. Valor inválido cai silenciosamente em `timestamp`.
+
+### Cross-references
+
+- Lógica central: `scripts/forge-ids.js` (`readIdFormat`, `resolveMilestoneId`,
+  `resolveTaskId`, `nextSequential*Id`)
+- Consumidores: `skills/forge-new-milestone/SKILL.md`, `skills/forge-task/SKILL.md`,
+  `scripts/forge-cli-helpers.js` (`newTaskId`)
+
 ## Forge Isolation (multi-run)
 
 Controla como múltiplos `/forge-auto`/`/forge-task` simultâneos isolam suas mudanças.

@@ -1,19 +1,29 @@
 #!/usr/bin/env node
-// forge-ids — Central timestamp-based ID module for Forge Agent
+// forge-ids — Central ID module for Forge Agent
 //
-// Library exports:
+// Generation format is controlled by the `ids.format` pref (timestamp | sequential,
+// default timestamp). Reading always accepts BOTH formats regardless of the pref.
+//
+// Library exports (pure — no I/O):
 //   nowTimestamp()        → string  // 'YYYYMMDDHHMMSS', 14 digits, UTC
 //   slugify(desc)         → string  // kebab-case ASCII-folded, stopwords removed; '' if empty
 //   makeMilestoneId(desc) → string  // 'M-<ts>-<slug>' or 'M-<ts>' if slug empty
 //   makeTaskId(desc)      → string  // 'T-<ts>-<slug>' or 'T-<ts>' if slug empty
+//   nextSequentialMilestoneId(existingIds) → string  // 'M00N' (max legacy M### + 1)
+//   nextSequentialTaskId(existingIds)      → string  // 'TASK-00N' (max legacy TASK-### + 1)
 //   classify(id)          → 'legacy' | 'timestamp'
 //   isValid(id)           → boolean
 //   prefixGlob(id)        → string  // 'M-20260522143012*' or exact id for legacy
 //   entityKind(id)        → 'milestone' | 'task' | 'unknown'
 //
+// Library exports (I/O — prefs cascade + .gsd scan; used by CLI and forge-cli-helpers):
+//   readIdFormat(cwd)               → 'timestamp' | 'sequential'
+//   resolveMilestoneId(cwd, desc, formatOverride?) → string
+//   resolveTaskId(cwd, desc, formatOverride?)      → string
+//
 // CLI:
-//   node forge-ids.js --new-milestone "<desc>"
-//   node forge-ids.js --new-task "<desc>"
+//   node forge-ids.js --new-milestone "<desc>" [--format timestamp|sequential] [--cwd <path>]
+//   node forge-ids.js --new-task "<desc>"      [--format timestamp|sequential] [--cwd <path>]
 //   node forge-ids.js --classify <id>
 //   node forge-ids.js --slugify "<desc>"
 //   node forge-ids.js --help
@@ -96,6 +106,30 @@ function makeTaskId(desc) {
   return slug ? `T-${ts}-${slug}` : `T-${ts}`;
 }
 
+// ── nextSequentialMilestoneId ────────────────────────────────────────────────
+// Pure: takes the list of existing IDs (directory names), returns the next
+// legacy-style sequential ID — 'M001' if none exist, else max(M###) + 1.
+// Timestamp-format IDs in the list are ignored (different namespace, no collision).
+function nextSequentialMilestoneId(existingIds) {
+  let max = 0;
+  for (const id of existingIds || []) {
+    const m = String(id).match(/^M(\d+)$/i);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return 'M' + String(max + 1).padStart(3, '0');
+}
+
+// ── nextSequentialTaskId ─────────────────────────────────────────────────────
+// Pure: same contract as nextSequentialMilestoneId, for legacy 'TASK-###' IDs.
+function nextSequentialTaskId(existingIds) {
+  let max = 0;
+  for (const id of existingIds || []) {
+    const m = String(id).match(/^TASK-(\d+)$/i);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return 'TASK-' + String(max + 1).padStart(3, '0');
+}
+
 // ── classify ─────────────────────────────────────────────────────────────────
 // Returns 'timestamp' for new-style IDs, 'legacy' otherwise.
 // Conservative default: unknown patterns classified as 'legacy' so S02 can
@@ -156,16 +190,87 @@ function entityKind(id) {
   return 'unknown';
 }
 
+// ── I/O helpers — prefs cascade + .gsd scan ─────────────────────────────────
+// These are the ONLY functions in this module that touch the filesystem.
+// Kept separate from the pure core above so library consumers can stay pure.
+
+// readIdFormat — resolves the `ids.format` pref through the standard cascade
+// (user-global → repo shared → local personal; last file wins).
+// Invalid/absent values silently fall back to 'timestamp'.
+// NOTE: block regex matches indented lines only — do NOT use \Z (JS treats it
+// as a literal 'Z'; see the readIsolationPrefs regression).
+function readIdFormat(cwd) {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const files = [
+    path.join(os.homedir(), '.claude', 'forge-agent-prefs.md'),
+    path.join(cwd, '.gsd', 'claude-agent-prefs.md'),
+    path.join(cwd, '.gsd', 'prefs.local.md'),
+  ];
+  let value = 'timestamp';
+  for (const f of files) {
+    try {
+      const raw = fs.readFileSync(f, 'utf8');
+      const block = raw.match(/^ids:[ \t]*\n((?:[ \t]+\S.*(?:\n|$))*)/m);
+      if (block) {
+        const kv = block[1].match(/^[ \t]+format:[ \t]*([a-z]+)/m);
+        if (kv) value = kv[1];
+      }
+    } catch { /* file missing — keep current value */ }
+  }
+  return value === 'sequential' ? 'sequential' : 'timestamp';
+}
+
+// listExistingIds — collects candidate ID directory names for sequential numbering.
+// Milestones: .gsd/milestones/ + .gsd/archive/ (archived ones still occupy their number).
+// Tasks: .gsd/tasks/.
+function listExistingIds(cwd, kind) {
+  const fs = require('fs');
+  const path = require('path');
+  const dirs = kind === 'milestone'
+    ? [path.join(cwd, '.gsd', 'milestones'), path.join(cwd, '.gsd', 'archive')]
+    : [path.join(cwd, '.gsd', 'tasks')];
+  const out = [];
+  for (const d of dirs) {
+    try { out.push(...fs.readdirSync(d)); } catch { /* dir absent — skip */ }
+  }
+  return out;
+}
+
+// resolveMilestoneId / resolveTaskId — single entry point honoring the pref.
+// formatOverride (from --format flag) wins over the pref when provided.
+function resolveMilestoneId(cwd, desc, formatOverride) {
+  const format = formatOverride || readIdFormat(cwd);
+  if (format === 'sequential') {
+    return nextSequentialMilestoneId(listExistingIds(cwd, 'milestone'));
+  }
+  return makeMilestoneId(desc);
+}
+
+function resolveTaskId(cwd, desc, formatOverride) {
+  const format = formatOverride || readIdFormat(cwd);
+  if (format === 'sequential') {
+    return nextSequentialTaskId(listExistingIds(cwd, 'task'));
+  }
+  return makeTaskId(desc);
+}
+
 // ── module.exports ───────────────────────────────────────────────────────────
 module.exports = {
   nowTimestamp,
   slugify,
   makeMilestoneId,
   makeTaskId,
+  nextSequentialMilestoneId,
+  nextSequentialTaskId,
   classify,
   isValid,
   prefixGlob,
   entityKind,
+  readIdFormat,
+  resolveMilestoneId,
+  resolveTaskId,
 };
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -187,16 +292,31 @@ function cliMain() {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.help) {
-    process.stdout.write(`forge-ids — timestamp ID generator for Forge Agent
+    process.stdout.write(`forge-ids — ID generator for Forge Agent
 
 Flags:
-  --new-milestone "<desc>"   generate a new milestone ID (M-<ts>-<slug>)
-  --new-task "<desc>"        generate a new task ID (T-<ts>-<slug>)
+  --new-milestone "<desc>"   generate a new milestone ID (M-<ts>-<slug> or M00N)
+  --new-task "<desc>"        generate a new task ID (T-<ts>-<slug> or TASK-00N)
+  --format <fmt>             timestamp | sequential — overrides the ids.format pref
+  --cwd <path>               project root for pref/scan resolution (default: cwd)
   --classify <id>            print 'legacy' or 'timestamp'
   --slugify "<desc>"         print the slug for a description
   --help                     show this help
+
+Generation format resolves: --format flag > ids.format pref (user → repo → local,
+last wins) > 'timestamp' default. Reading accepts both formats always.
 `);
     return;
+  }
+
+  const cwd = (typeof args.cwd === 'string' && args.cwd) ? args.cwd : process.cwd();
+  let formatOverride;
+  if ('format' in args) {
+    if (args.format !== 'timestamp' && args.format !== 'sequential') {
+      process.stderr.write(`forge-ids: invalid --format '${args.format}' (use timestamp | sequential)\n`);
+      process.exit(1);
+    }
+    formatOverride = args.format;
   }
 
   try {
@@ -206,14 +326,14 @@ Flags:
         process.stderr.write('forge-ids: --new-milestone requires a description argument\n');
         process.exit(1);
       }
-      process.stdout.write(makeMilestoneId(desc) + '\n');
+      process.stdout.write(resolveMilestoneId(cwd, desc, formatOverride) + '\n');
     } else if ('new-task' in args) {
       const desc = args['new-task'];
       if (!desc || desc === true) {
         process.stderr.write('forge-ids: --new-task requires a description argument\n');
         process.exit(1);
       }
-      process.stdout.write(makeTaskId(desc) + '\n');
+      process.stdout.write(resolveTaskId(cwd, desc, formatOverride) + '\n');
     } else if ('classify' in args) {
       const id = args['classify'];
       if (!id || id === true) {

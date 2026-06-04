@@ -271,6 +271,129 @@ test('isValid: M-2026051-153227 (7-digit date) → invalid', () =>
 test('isValid: M-20260519-15322 (5-digit time) → invalid', () =>
   assert(!ids.isValid('M-20260519-15322')));
 
+// ── nextSequentialMilestoneId / nextSequentialTaskId (pure) ──────────────────
+test('nextSequentialMilestoneId: empty list → M001', () =>
+  assertEq(ids.nextSequentialMilestoneId([]), 'M001'));
+test('nextSequentialMilestoneId: undefined → M001', () =>
+  assertEq(ids.nextSequentialMilestoneId(undefined), 'M001'));
+test('nextSequentialMilestoneId: M001,M002 → M003', () =>
+  assertEq(ids.nextSequentialMilestoneId(['M001', 'M002']), 'M003'));
+test('nextSequentialMilestoneId: gap M001,M005 → M006 (max+1, not fill)', () =>
+  assertEq(ids.nextSequentialMilestoneId(['M001', 'M005']), 'M006'));
+test('nextSequentialMilestoneId: ignores timestamp IDs', () =>
+  assertEq(ids.nextSequentialMilestoneId(['M-20260604002929-gsd-core-import', 'M002']), 'M003'));
+test('nextSequentialMilestoneId: ignores non-ID dirs', () =>
+  assertEq(ids.nextSequentialMilestoneId(['.DS_Store', 'M010', 'notes']), 'M011'));
+test('nextSequentialMilestoneId: case-insensitive m007 → M008', () =>
+  assertEq(ids.nextSequentialMilestoneId(['m007']), 'M008'));
+test('nextSequentialMilestoneId: M999 → M1000 (no broken padding)', () =>
+  assertEq(ids.nextSequentialMilestoneId(['M999']), 'M1000'));
+test('nextSequentialMilestoneId: output isValid + classify legacy', () => {
+  const id = ids.nextSequentialMilestoneId(['M004']);
+  assert(ids.isValid(id), 'must be valid');
+  assertEq(ids.classify(id), 'legacy');
+});
+
+test('nextSequentialTaskId: empty list → TASK-001', () =>
+  assertEq(ids.nextSequentialTaskId([]), 'TASK-001'));
+test('nextSequentialTaskId: TASK-001,TASK-002 → TASK-003', () =>
+  assertEq(ids.nextSequentialTaskId(['TASK-001', 'TASK-002']), 'TASK-003'));
+test('nextSequentialTaskId: ignores timestamp + task-slug forms', () =>
+  assertEq(ids.nextSequentialTaskId(['T-20260601121212-fix', 'task-fix-foo', 'TASK-009']), 'TASK-010'));
+test('nextSequentialTaskId: output isValid + classify legacy', () => {
+  const id = ids.nextSequentialTaskId(['TASK-001']);
+  assert(ids.isValid(id), 'must be valid');
+  assertEq(ids.classify(id), 'legacy');
+});
+
+// ── readIdFormat / resolveMilestoneId / resolveTaskId (I/O — temp sandbox) ──
+// Uses a throwaway cwd so the real user prefs cascade can still inject
+// ids.format from ~/.claude — guard by always passing explicit repo prefs.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+function withSandbox(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-ids-test-'));
+  try { fn(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+test('readIdFormat: no prefs → timestamp (unless user-global sets sequential)', () => {
+  withSandbox(dir => {
+    const v = ids.readIdFormat(dir);
+    assert(v === 'timestamp' || v === 'sequential', 'must return a valid enum');
+  });
+});
+test('readIdFormat: repo pref sequential wins over absent local', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd'));
+    fs.writeFileSync(path.join(dir, '.gsd', 'claude-agent-prefs.md'),
+      '## ID Settings\n\nids:\n  format: sequential\n');
+    assertEq(ids.readIdFormat(dir), 'sequential');
+  });
+});
+test('readIdFormat: ids block at EOF without trailing newline still parses', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd'));
+    fs.writeFileSync(path.join(dir, '.gsd', 'claude-agent-prefs.md'),
+      'auto_commit: false\n\nids:\n  format: sequential');
+    assertEq(ids.readIdFormat(dir), 'sequential');
+  });
+});
+test('readIdFormat: local pref overrides repo pref (last wins)', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd'));
+    fs.writeFileSync(path.join(dir, '.gsd', 'claude-agent-prefs.md'),
+      'ids:\n  format: sequential\n');
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'),
+      'ids:\n  format: timestamp\n');
+    assertEq(ids.readIdFormat(dir), 'timestamp');
+  });
+});
+test('readIdFormat: invalid value falls back to timestamp', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd'));
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'),
+      'ids:\n  format: banana\n');
+    assertEq(ids.readIdFormat(dir), 'timestamp');
+  });
+});
+
+test('resolveMilestoneId: sequential scans milestones/ + archive/', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd', 'milestones', 'M002'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '.gsd', 'archive', 'M007'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '.gsd', 'milestones', 'M-20260601121212-feature'), { recursive: true });
+    assertEq(ids.resolveMilestoneId(dir, 'qualquer desc', 'sequential'), 'M008');
+  });
+});
+test('resolveMilestoneId: explicit timestamp override ignores sequential pref', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd'));
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'), 'ids:\n  format: sequential\n');
+    const id = ids.resolveMilestoneId(dir, 'minha feature nova', 'timestamp');
+    assert(/^M-\d{14}-/.test(id), `expected timestamp format, got ${id}`);
+  });
+});
+test('resolveMilestoneId: pref sequential picked up from sandbox prefs', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd', 'milestones', 'M041'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'), 'ids:\n  format: sequential\n');
+    assertEq(ids.resolveMilestoneId(dir, 'qualquer'), 'M042');
+  });
+});
+test('resolveTaskId: sequential scans .gsd/tasks/', () => {
+  withSandbox(dir => {
+    fs.mkdirSync(path.join(dir, '.gsd', 'tasks', 'TASK-003'), { recursive: true });
+    assertEq(ids.resolveTaskId(dir, 'fix typo', 'sequential'), 'TASK-004');
+  });
+});
+test('resolveTaskId: sequential with no tasks dir → TASK-001', () => {
+  withSandbox(dir => {
+    assertEq(ids.resolveTaskId(dir, 'fix typo', 'sequential'), 'TASK-001');
+  });
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 

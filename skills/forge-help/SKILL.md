@@ -112,7 +112,7 @@ REPL interativo com menu. Acesso a todas as funcionalidades sem memorizar comand
 |-------|-----------|
 | `forge-config [statusline on\|off]` | Dashboard de configurações — status line, hooks, MCPs. |
 | `forge-mcps [add\|remove <nome>]` | Gerencia MCPs. Catálogo: `fetch`, `context7`, `github`, `postgres`, `redis`, `puppeteer`, `sqlite`. |
-| `forge-prefs [models\|set\|skip-research\|skip-discuss\|git\|reset]` | Gerencia preferências e modelos por fase. |
+| `forge-prefs [models\|set\|skip-research\|skip-discuss\|git\|ids\|reset]` | Gerencia preferências, modelos por fase e formato de IDs. |
 
 ---
 

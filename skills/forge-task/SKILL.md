@@ -91,7 +91,7 @@ TASK_ID=$(node "$FORGE_SCRIPTS_DIR/forge-ids.js" --new-task "$TASK_DESCRIPTION")
 ```
 
 - Resume mode: `TASK_ID` already set — skip to Dispatch loop
-- `TASK_ID` agora tem o formato `T-<YYYYMMDDHHMMSS>-<slug>` (slug omitido se a descrição for vaga)
+- Formato do `TASK_ID` segue a pref `ids.format` (resolvida pelo próprio forge-ids.js): `timestamp` (default) → `T-<YYYYMMDDHHMMSS>-<slug>` (slug omitido se a descrição for vaga); `sequential` → legado `TASK-00N` (max existente + 1 em `.gsd/tasks/`)
 
 **Isolation setup (branch/worktree)** — apply `forge_isolation` from prefs BEFORE registering the run. Idempotent — safe on resume (`already-on-branch` / `already-exists`):
 ```bash

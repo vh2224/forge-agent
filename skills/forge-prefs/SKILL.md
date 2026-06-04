@@ -56,9 +56,13 @@ GIT
   merge_strategy: squash
   auto_push:      false
   main_branch:    master
+
+IDS
+  format: timestamp        (timestamp | sequential)
 ```
 
-(Read actual values from the prefs file — do not hardcode the above.)
+(Read actual values from the prefs file — do not hardcode the above. For IDS, if no
+`ids:` block exists in the file, show `format: timestamp (default)`.)
 
 ---
 
@@ -161,6 +165,54 @@ Update the git setting in `~/.claude/forge-agent-prefs.md`. Confirm.
 
 ---
 
+### "ids \<timestamp|sequential\> [repo|local]"
+
+Controla o formato dos IDs **gerados** para milestones e tasks soltas (pref `ids.format`,
+consumida por `scripts/forge-ids.js`). A leitura aceita sempre os dois formatos.
+
+Exemplos:
+- `/forge-prefs ids sequential` — seta no user-global (`~/.claude/forge-agent-prefs.md`)
+- `/forge-prefs ids sequential repo` — seta no repo (`.gsd/claude-agent-prefs.md`, commitável)
+- `/forge-prefs ids timestamp local` — seta no local (`.gsd/prefs.local.md`, gitignored)
+
+Scope → arquivo (cascata: user → repo → local, último ganha):
+- (omitido) → `~/.claude/forge-agent-prefs.md`
+- `repo` → `.gsd/claude-agent-prefs.md`
+- `local` → `.gsd/prefs.local.md`
+
+Steps:
+1. Valide o valor: apenas `timestamp` ou `sequential`. Valor inválido → mostre os dois válidos e pare.
+2. Read o arquivo do scope. Se já existe um bloco `ids:` com `format:`, edite o valor in-place.
+   Se não existe, adicione ao final do arquivo:
+   ```
+   ids:
+     format: <valor>
+   ```
+3. Se o valor for `sequential`, inclua o aviso na confirmação:
+   ```
+   ⚠ sequential reintroduz risco de colisão entre devs/branches paralelos
+     (dois devs criando milestone ao mesmo tempo geram o mesmo M00N).
+     Recomendado apenas para repositório de dev único.
+   ```
+4. Confirme mostrando o valor efetivo resolvido pela cascata:
+   ```
+   ✓ ids.format atualizado
+
+     Scope:  {user-global | repo | local} → {arquivo}
+     Valor:  {timestamp | sequential}
+     Efetivo (após cascata): {resultado de node scripts/forge-ids.js --help → ou
+       grep dos 3 arquivos na ordem user → repo → local, último encontrado ganha}
+
+     Formatos gerados a partir de agora:
+       milestone: {M-<ts>-<slug> | M00N}
+       task:      {T-<ts>-<slug> | TASK-00N}
+   ```
+
+Nota: `repo`/`local` exigem `.gsd/` no projeto atual — se não existir, avise que o scope
+exige `/forge-init` primeiro e ofereça o user-global como alternativa.
+
+---
+
 ### "reset"
 
 Restore all defaults:
@@ -169,6 +221,7 @@ Restore all defaults:
 - memory → `claude-haiku-4-5-20251001`
 - skip rules → all false
 - git → squash, auto_push false, main_branch master
+- ids → format timestamp (remove o bloco `ids:` apenas do user-global; repo/local não são tocados pelo reset)
 
 Update both `~/.claude/forge-agent-prefs.md` AND all agent frontmatter files.
 Confirm with the restored routing table.

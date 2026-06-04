@@ -54,7 +54,7 @@ fi
 MILESTONE_ID=$(node "$FORGE_SCRIPTS_DIR/forge-ids.js" --new-milestone "{MILESTONE_DESC}")
 ```
 
-`MILESTONE_ID` will be in the format `M-<YYYYMMDDHHMMSS>-<slug>` (e.g. `M-20260522143201-sistema-notificacoes`). The slug is derived from `MILESTONE_DESC` and omitted if the description is too vague. Legacy milestones with sequential IDs (`M001`, `M002`, …) remain fully valid for reading and resolving — only generation has switched to timestamp format.
+`MILESTONE_ID` format depends on the `ids.format` pref (resolved by forge-ids.js itself — user → repo → local cascade, default `timestamp`): `timestamp` → `M-<YYYYMMDDHHMMSS>-<slug>` (e.g. `M-20260522143201-sistema-notificacoes`; slug derived from `MILESTONE_DESC`, omitted if too vague); `sequential` → legacy `M00N` (max existing + 1, scanning `.gsd/milestones/` + `.gsd/archive/`). Reading/resolving accepts BOTH formats always, regardless of the pref.
 
 Create the milestone directory:
 ```bash
