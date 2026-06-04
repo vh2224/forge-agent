@@ -216,6 +216,7 @@ The produced `T##-SECURITY.md` will be injected into the execute-task worker pro
 1. Idempotency: if `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` already exists → skip the gate, proceed to `complete-slice`.
 2. Read `review.{mode,style,rounds,ask_in_auto}` via the cascade in `shared/forge-review.md § Step 0`. If `mode == disabled` → skip.
 3. Execute the procedure in **`shared/forge-review.md`** with `MODE = interactive`:
+   > Antes de despachar cada agente (Challenge e Defense abaixo), exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) com duração estimada para `review-challenger` / `review-advocate`.
    - Challenge → `Agent({ subagent_type: 'forge-reviewer', … })`
    - Defense → `Agent({ subagent_type: 'forge-advocate', … })`
    - Rebuttal × `rounds` → `forge-reviewer` in rebuttal mode (DEFENSE injected)
@@ -252,7 +253,7 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 4. **Aggregate MUST_HAVES_CHECK_RESULTS:**
    Use `$WORKING_DIR` (captured in bootstrap via `pwd` — always forward-slash, Windows-safe). For each `T##-PLAN.md`:
    ```bash
-   for plan in "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/T"/T*-PLAN.md; do
+   for plan in "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks"/T*/T*-PLAN.md; do
      node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check "$plan"
    done
    ```
@@ -261,6 +262,7 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 5. **Fill the plan-check template** from `shared/forge-dispatch.md § plan-check` with `$WORKING_DIR` (not raw CWD — always use the bash-captured variable), `{M###}`, `{S##}`, `{PLAN_CHECK_MODE}`, `{MUST_HAVES_CHECK_RESULTS}`.
 
 6. **Dispatch:**
+   > Antes de despachar o plan-checker, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) — duração estimada `plan-check`: ~1–2 min.
    ```
    Agent({ subagent_type: 'forge-plan-checker', prompt: <filled-template> })
    ```
@@ -280,6 +282,60 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 10. **Forward-compatibility note:** future M004+ may add per-dimension enforcement. The current wire passes through all dimension counts to events.jsonl so future code can filter.
 
 > This gate fires ONLY when transitioning from a just-completed `plan-slice` to the first `execute-task` of the same slice. When deriving the next unit (Step 1) results in `execute-task` AND the previous completed unit was `plan-slice` for the same slice, run this gate. For subsequent `execute-task` dispatches within the same slice, the idempotency check (step 3 above) ensures the gate is a no-op.
+
+**Symbol-check gate (between plan-slice and first execute-task, after plan-check gate):**
+
+After the plan-check gate completes (or is skipped), run the symbol-check gate before dispatching the first `execute-task` for the same slice. This gate runs via Bash shell-out — NOT via `Agent()` — so there is no liveness banner and return is immediate. See `shared/forge-dispatch.md § symbol-check` for artifact format and event schema.
+
+1. **Read `symbol_check.mode` from the 3-file prefs cascade:**
+   ```bash
+   SYMBOL_CHECK_MODE=$(node -e "
+   const fs=require('fs'),path=require('path'),os=require('os');
+   const wd=process.env.WORKING_DIR||process.cwd();
+   const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                path.join(wd,'.gsd','claude-agent-prefs.md'),
+                path.join(wd,'.gsd','prefs.local.md')];
+   let mode='advisory';
+   for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^symbol_check:[ \t]*\n[ \t]+mode:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch(e){}}
+   if(mode!=='advisory'&&mode!=='disabled')mode='advisory';
+   process.stdout.write(mode);
+   " WORKING_DIR="$WORKING_DIR")
+   ```
+   Store as `SYMBOL_CHECK_MODE`.
+
+2. **If `SYMBOL_CHECK_MODE == "disabled"`:** skip — proceed to first `execute-task`.
+
+3. **Idempotency check:** if `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SYMBOL-CHECK.md` already exists, skip — proceed to first `execute-task`.
+
+4. **Run symbol-check for each T##-PLAN.md in the slice:**
+   ```bash
+   SYMBOL_CHECK_RESULTS="["
+   FIRST=1
+   TOTAL_VERIFIED=0; TOTAL_MISSING=0; TOTAL_AMBIGUOUS=0; TOTAL_UNCHECKED=0; TOTAL_GREENFIELD=0
+   for plan in "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks"/T*/T*-PLAN.md; do
+     # --cwd: raiz de busca de código = CODE_DIR (worktree isolation) — WORKING_DIR só vale p/ .gsd/** (review S02 R6)
+     result=$(node "$FORGE_SCRIPTS_DIR/forge-symbol-check.js" --check "$plan" --cwd "${WORKER_CWD:-$WORKING_DIR}")
+     if [ $FIRST -eq 0 ]; then SYMBOL_CHECK_RESULTS="$SYMBOL_CHECK_RESULTS,"; fi
+     SYMBOL_CHECK_RESULTS="$SYMBOL_CHECK_RESULTS$result"
+     FIRST=0
+     TOTAL_VERIFIED=$((TOTAL_VERIFIED + $(echo "$result" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(String(d.counts.verified||0))")))
+     TOTAL_MISSING=$((TOTAL_MISSING   + $(echo "$result" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(String(d.counts.missing||0))")))
+     TOTAL_AMBIGUOUS=$((TOTAL_AMBIGUOUS + $(echo "$result" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(String(d.counts.ambiguous||0))")))
+     TOTAL_UNCHECKED=$((TOTAL_UNCHECKED + $(echo "$result" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(String(d.counts.uncheckable||0))")))
+     TOTAL_GREENFIELD=$((TOTAL_GREENFIELD + $(echo "$result" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(String(d.counts.greenfield||0))")))
+   done
+   SYMBOL_CHECK_RESULTS="$SYMBOL_CHECK_RESULTS]"
+   ```
+   Aggregate `{verified, missing, ambiguous, unchecked, greenfield}` totals across all tasks.
+
+5. **Write `S##-SYMBOL-CHECK.md`** to `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SYMBOL-CHECK.md` (see `shared/forge-dispatch.md § symbol-check` for format). Then **append the `symbol_check` event** to `{WORKING_DIR}/.gsd/forge/events.jsonl` (I/O errors MUST propagate — no silent-fail):
+   ```json
+   {"ts":"<ISO-8601>","event":"symbol_check","milestone":"${RUN_ID:-{M###}}","slice":"{S##}","mode":"{SYMBOL_CHECK_MODE}","counts":{"verified":N,"missing":N,"ambiguous":N,"unchecked":N,"greenfield":N}}
+   ```
+
+6. **Proceed to first `execute-task` ALWAYS** (advisory). MISSING or AMBIGUOUS symbols are documented in `S##-SYMBOL-CHECK.md` for informational use — they NEVER block the execute-task dispatch.
+
+> This gate fires ONLY when transitioning from a just-completed `plan-slice` to the first `execute-task` of the same slice. Fires AFTER the plan-check gate. The idempotency check (step 3 above) makes it a no-op for subsequent `execute-task` dispatches within the same slice.
 
 **Blocking-mode revision loop (activated ONLY when `PLAN_CHECK_MODE == "blocking"`):**
 
@@ -469,6 +525,8 @@ INPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$worker_promp
 
 > Transient errors (`rate-limit`, `network`, `server`, `stream`, `connection`) are handled by the Retry Handler before this block is reached. The failure taxonomy below is only reached when the classifier returns `retry: false` OR retries are exhausted.
 
+> Antes de despachar o worker, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) com a duração estimada para o `unit_type` sendo executado (consulte a tabela de duração na seção canônica).
+
 Then call `Agent(agent_name, worker_prompt)` with a `description` that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
 - Examples:
@@ -503,6 +561,73 @@ Parse the `---GSD-WORKER-RESULT---` block:
 | `tooling_failure` | "command not found", "permission denied", "ENOENT" | "Tooling error — check that required tools are installed." |
 | `external_dependency` | "API", "network", "not running" | "External dependency unavailable — resolve it and re-run `/forge-next`." |
 | `unknown` | anything else | Surface raw blocker message. |
+
+**Node Repair gate (Layer 3 — disjoint from Layers 1 and 2):** Applies ONLY when `unit_type == execute-task`. Trigger: `status: done` AND `S##-VERIFICATION.md` rows show must_have drift (artifacts `substantive:false` / `wired:false`, test-quality flags) OR `status: partial` with must_haves unmet. `Agent()` throws → Layer 1. `status: blocked` → Layer 2. Do NOT overlap. See full spec: `shared/forge-dispatch.md § Node Repair`.
+
+1. **Read prefs:**
+   ```bash
+   REPAIR_BUDGET=$(node -e "
+   const fs=require('fs'),path=require('path'),os=require('os');
+   const wd=process.env.WORKING_DIR||process.cwd();
+   const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                path.join(wd,'.gsd','claude-agent-prefs.md'),
+                path.join(wd,'.gsd','prefs.local.md')];
+   let v=2;
+   for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^repair:[ \t]*\n[ \t]+budget:[ \t]*(\d+)/m);if(m)v=parseInt(m[1]);}catch(e){}}
+   process.stdout.write(String(v));
+   " WORKING_DIR="$WORKING_DIR")
+   ```
+
+2. **Context-monitor suppression (S03 bridge):** read `$(node -e "require('os').tmpdir()")/forge-ctx-${SESSION_ID}.json`; if absent/unreadable → treat as non-CRITICAL. If `severity == "CRITICAL"` → suppress DECOMPOSE and PRUNE (force RETRY or blocked).
+
+3. **Budget check (via helper — review S04 R9; NUNCA improvisar edit de YAML):**
+   ```bash
+   PLAN="$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md"
+   REPAIR_COUNT=$(node "$FORGE_SCRIPTS_DIR/forge-repair.js" --read-budget "$PLAN" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).repair_count))")
+   if [ "$REPAIR_COUNT" -ge "$REPAIR_BUDGET" ]; then
+     : # budget exhausted → fall through to blocked → human
+   else
+     # incrementa ANTES do dispatch (persiste em disco — sobrevive compaction); throw se frontmatter ausente
+     REPAIR_COUNT_NEW=$(node "$FORGE_SCRIPTS_DIR/forge-repair.js" --increment-budget "$PLAN" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).repair_count))")
+   fi
+   ```
+
+4. **Classify:**
+   ```bash
+   # is_large_task: derivado deterministicamente do plano (review S04 R6)
+   IS_LARGE=$(node "$FORGE_SCRIPTS_DIR/forge-repair.js" --is-large-task "$PLAN" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).is_large_task))")
+   REPAIR_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-repair.js" --classify '<json-input>')
+   # Input: {failure_shape, severity, worker_explained, signals} from result block + S##-VERIFICATION.md + S##-SYMBOL-CHECK.md
+   # signals.is_large_task = $IS_LARGE (frontmatter large_task vence; senão heurística >5 steps | >=3 artifacts | >250 linhas)
+   # --cwd $CODE_DIR when under isolation (avoids false MISSING in worktree)
+   ```
+   Capture `{strategy, reason}` from output.
+
+5. **Dispatch strategy** (per `shared/forge-dispatch.md § Node Repair`):
+   - `retry` → re-dispatch same `forge-executor` with `## Verification Failures` + `## Repair Hint` (reason) injected.
+   - `decompose` → idempotency guard: if `T##.1-PLAN.md` exists → skip dispatch. Otherwise:
+     > Antes de despachar o forge-planner em decompose mode, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) — duração estimada `plan-slice`: ~2–4 min.
+     ```
+     Agent({ subagent_type: 'forge-planner', prompt: <plan-slice template>
+       + "\n\nMODE: decompose\nTARGET_TASK: {T##}\n\n## Unmet Must-Haves\n{diff list}\n\n## Why it failed\n{result/SUMMARY excerpt}" })
+     ```
+     After return, re-derive next unit (sub-tasks `T##.1`, `T##.2` … now visible via `forge-parallelism.js`).
+   - `prune` → **`AskUserQuestion`** (interactive — forge-next is always interactive):
+     ```
+     AskUserQuestion({
+       question: "O worker declarou o requisito '{requirement}' impossível de implementar. O que fazer?",
+       options: ["Podar e continuar", "Tentar novamente (retry)", "Bloquear para revisão humana"]
+     })
+     ```
+     If "Podar e continuar": write entry to `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md § Decisions` naming pruned requirement + rationale + task ID.
+     If "Tentar novamente": override strategy to `retry`, re-classify accordingly.
+     If "Bloquear": fall through to `blocked → human`.
+   - `blocked` → fall through to existing `blocked → human` path.
+
+6. **Append repair event:**
+   ```bash
+   echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"repair\",\"unit\":\"execute-task/{T##}\",\"milestone\":\"{M###}\",\"slice\":\"{S##}\",\"task\":\"{T##}\",\"strategy\":\"$REPAIR_STRATEGY\",\"repair_count\":$REPAIR_COUNT_NEW,\"reason\":\"$REPAIR_REASON\"}" >> "$WORKING_DIR/.gsd/milestones/{M###}/{M###}-events.jsonl"
+   ```
 
 ### 6. Post-unit housekeeping
 
@@ -560,6 +685,32 @@ RESULT_BLOCK:
 KEY_DECISIONS:
 {key_decisions field from result, or "(none)"}
 ```
+
+**d-reinject) Must-haves re-injection diff (scope_reduction)** — runs after memory extraction, before isolation cleanup. Applies to `execute-task` units only.
+
+Read `scope_reduction.reinject` from prefs (3-file cascade; default `auto`). If `off` → skip this step (PRUNE still registers in CONTEXT — independently of this pref).
+
+```bash
+REINJECT_RESULT=$(node "$FORGE_SCRIPTS_DIR/forge-repair.js" --reinject-diff \
+  --plan "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" \
+  --verification "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-VERIFICATION.md" \
+  --pruned "$PRUNED_IDS" \
+  --must-haves-status "$MUST_HAVES_STATUS_JSON" 2>/dev/null || echo '{"dropped":[],"capped":false}')
+```
+
+Where `PRUNED_IDS` = comma-separated IDs from any PRUNE decisions made in this unit's repair routing (empty if none); `MUST_HAVES_STATUS_JSON` = `must_haves_status` field from the worker result (if present).
+
+If `dropped.length > 0`: when building the next unit's worker prompt (Step 3), append:
+
+```markdown
+## Requisitos pendentes re-injetados
+
+Os seguintes requisitos planejados não foram entregues pela unidade anterior e permanecem em aberto:
+{bullet list of dropped items}
+{if capped: "⚠ Lista truncada em 10 itens — ver S##-VERIFICATION.md para lista completa."}
+```
+
+Also append this same section to `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SUMMARY.md`.
 
 **e) Isolation cleanup (complete-milestone only)** — if the unit just processed was `complete-milestone` with `status: done`, release the isolation. No-op when `ISOLATION_MODE == shared`; `branch` mode checks the repo back out to the default branch (the `forge/{run}` branch is kept for PR/merge); `worktree` mode removes the worktree only if `worktree_cleanup_on_complete: true` in prefs. Never run this on partial/blocked — the branch/worktree must survive for resume:
 ```bash

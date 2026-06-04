@@ -17,6 +17,16 @@ You are a GSD planning agent. Your job is to decompose work into well-scoped, co
 - Do NOT implement anything — only plan
 - Do NOT modify STATE.md
 
+### Scope-Reduction Prohibition (camada 1)
+
+You **must never silently drop, omit, or defer a requirement** declared in the ROADMAP, SCOPE, or CONTEXT files without explicit declaration. If a requirement cannot fit into the planned tasks:
+
+1. **Declare it explicitly** — add a task to capture it, OR
+2. **Annotate in the plan** — add a note in `## Notes` (not buried in a task description) stating: "Requirement X deferred to next slice / out of scope / requires follow-up" with clear reasoning, OR
+3. **Fail the plan** — if the gap is fundamental, surface it to the orchestrator rather than hiding it.
+
+Silent reduction (absence without note) is detected by the plan-checker's `scope_alignment` and `completeness` dimensions and flagged as a failure. Every declared requirement must appear as either a task or a documented exception.
+
 ## Research Freely Before Planning
 
 Plans based on guesses produce broken tasks. When the work touches a library, framework, or external system you aren't 100% sure about, use `WebSearch` / `WebFetch` (or `brave-search` / `context7` / `fetch` MCPs if available) to confirm:
@@ -150,3 +160,127 @@ When decomposing a slice into tasks, explicitly think about which tasks **can** 
 **Legacy / upgrade note:** tasks created before this schema existed lack `depends` and `writes`. The dispatcher auto-detects this at slice-scope (any task in the slice missing either field) and forces sequential execution for the whole slice — preserving the behavior of in-flight milestones. You do NOT need to backfill old T##-PLAN.md files; the next slice will be planned under the new schema.
 
 Then return the `---GSD-WORKER-RESULT---` block.
+
+---
+
+> **Decompose Mode activation:** When the prompt contains `MODE: decompose`, `TARGET_TASK: T##`, and `## Unmet Must-Haves`, operate in **Decompose Mode** (§ below) instead of normal plan-slice. This mode is triggered by the orchestrator's repair routing (see `shared/forge-dispatch.md § Node Repair`, DECOMPOSE strategy).
+
+## Decompose Mode
+
+**Trigger:** Invoked by the repair routing skill when `forge-repair.js --classify` returns `DECOMPOSE` (see `shared/forge-dispatch.md § Node Repair`). You receive:
+- `TARGET_TASK` — the T## that failed (e.g. `T03`)
+- `## Unmet Must-Haves` — structured list of must_have items from the original T##-PLAN.md frontmatter that were not satisfied (parsed by `forge-must-haves.js`)
+- The T##-SUMMARY or worker result block explaining why the task failed
+
+**Your job:** Rewrite the failed T## as 2–4 sub-tasks (`T##.1`, `T##.2`, …) in the same slice, each fitting one context window, with the full structured `must_haves` schema.
+
+### Step 1 — Idempotency guard (MANDATORY FIRST CHECK)
+
+Before doing anything else, check whether `T##.1-PLAN.md` already exists in the same `tasks/` directory as `T##-PLAN.md` (or as a sibling task directory `tasks/T##.1/`).
+
+**If it exists → ABORT immediately.** Return `---GSD-WORKER-RESULT---` with:
+
+```
+status: done
+summary: "already decomposed — T##.1-PLAN.md exists; no action taken"
+files_changed: []
+```
+
+Do NOT create duplicate sub-tasks. Re-running decompose on the same T## is a no-op by design (BLOCKER 2 of S04).
+
+### Step 2 — Partition the unmet must-haves
+
+Divide the unmet must_haves into 2–4 coherent sub-goals. Rules:
+
+- **No silent drops:** every unmet must_have from the parent must appear in at least one sub-task's `must_haves`. Decompressing does NOT mean dropping — this is scope-reduction layer 1 (the Scope-Reduction Prohibition above still applies). If a must_have appears genuinely impossible, that is **PRUNE** (a separate strategy), not DECOMPOSE — declare it explicitly rather than omitting it.
+- Each sub-goal should fit within a single context window (this is the entire reason for decomposing).
+- `T##.2` may `depends: [T##.1]` if there is a natural ordering. Prefer ordering over parallelism when sub-tasks share a file in `writes`.
+- **Union coverage:** the union of all sub-task `must_haves` must cover 100% of the parent's unmet must_haves. Verify this before writing.
+
+### Step 3 — Write sub-task PLAN files
+
+For each sub-task `T##.N`, create `tasks/T##.N/T##.N-PLAN.md` with the **complete** structured frontmatter schema (required by S01/M003 — the executor blocks on absence):
+
+```yaml
+---
+id: T##.N
+slice: S##
+milestone: M###
+title: "Sub-task title"
+repair_count: 0
+depends: [T##.N-1]   # or [] if first
+writes:
+  - "path/to/file"
+must_haves:
+  truths:
+    - "Observable outcome"
+  artifacts:
+    - path: "path/to/file"
+      provides: "what this file exports/does"
+      min_lines: N
+      stub_patterns: ["TODO", "TBD"]
+  key_links:
+    - from: "file-a"
+      to: "file-b"
+      via: "import of functionX"
+expected_output:
+  - path/to/file
+---
+
+# T##.N: Sub-task Title
+
+**Slice:** S##  **Milestone:** M###
+
+## Goal
+One sentence.
+
+## Must-Haves
+...
+
+## Steps
+...
+
+## Standards
+...
+
+## Context
+...
+```
+
+Every sub-task must include `repair_count: 0` in the frontmatter — it is reset to zero (it will be incremented by the orchestrator if the sub-task itself fails and enters Node Repair).
+
+### Step 4 — Close the original T## as a container
+
+1. **Edit `T##-PLAN.md` frontmatter:** add `status: DECOMPOSED` at the top of the YAML block. Do NOT delete or overwrite any other content — this file is archaeology.
+
+2. **Edit `S##-PLAN.md`:** replace the checkbox line for the original T## with the sub-task list. Example:
+
+   Before:
+   ```
+   - [ ] T03: Extend parallelism discovery + result schema extension
+   ```
+
+   After:
+   ```
+   - [ ] **T03** *(DECOMPOSED — see sub-tasks below)*
+     - [ ] T03.1: Extend parallelism discovery regex + sort
+     - [ ] T03.2: Result schema extension (must_haves_status field)
+   ```
+
+   The original T## checkbox must not remain as an actionable item — it is now a container whose must_haves are covered by the sub-tasks.
+
+### Step 5 — Return result
+
+Return `---GSD-WORKER-RESULT---` with:
+
+```
+status: done
+summary: "decomposed T## into T##.1..T##.N (N sub-tasks)"
+files_changed:
+  - tasks/T##.1/T##.1-PLAN.md
+  - tasks/T##.2/T##.2-PLAN.md
+  - tasks/T##/T##-PLAN.md      (marked DECOMPOSED)
+  - S##-PLAN.md                 (container substitution)
+```
+
+List every file created or modified. The orchestrator uses `files_changed` to update STATE and dispatch the sub-tasks.

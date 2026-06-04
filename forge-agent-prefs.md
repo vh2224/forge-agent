@@ -585,6 +585,170 @@ A truncagem sempre termina numa linha de cabeçalho H2 (`## `), H3 (`### `), ou 
 - `shared/forge-dispatch.md ### Token Telemetry` — contrato completo e tabela de placeholders opcionais.
 - `skills/forge-status/SKILL.md` — relatório de consumo de tokens por worker.
 
+## Verifier Settings
+
+Controla o comportamento dos detectores de qualidade no `scripts/forge-verifier.js`.
+Postura M003: ambos os sub-detectores nascem **advisory** — emitem flags em `S##-VERIFICATION.md`
+mas nunca bloqueiam o fechamento de slice. `blocking` é opt-in, previsto para M004+ após
+medir falsos positivos em milestones reais.
+
+```
+verifier:
+  test_quality: advisory   # advisory | blocking | disabled
+                           # advisory  = detecta disabled-test/weak-assertion/no-assertion/
+                           #             circular-assertion e registra flags no VERIFICATION.md
+                           #             (nunca bloqueia — default seguro M003)
+                           # blocking  = mismatches bloqueiam complete-slice (ativa via M004+
+                           #             após telemetria de falsos positivos)
+                           # disabled  = pula completamente o nível 4 — nenhuma flag gerada
+```
+
+### Semântica
+
+- `advisory` (padrão): `verifyArtifact` detecta problemas em arquivos de teste declarados
+  (`*.test.*`, `*.spec.*`, `__tests__/`) e os surfaça como seção `## Flags → Test-quality`
+  em `S##-VERIFICATION.md`. Nunca altera o veredito 3-level (Exists/Substantive/Wired) —
+  aditivo, sem veto.
+- `blocking`: reservado para M004+. Quando ativo, a presença de flags `test-quality` em
+  artefatos declarados bloqueia o `complete-slice`. Não implementado como veto neste slice —
+  apenas o scaffold da pref está presente.
+- `disabled`: o gate `isTestFile()` dentro de `verifyArtifact` é pulado — nenhum nível 4
+  roda, `test_quality` field não é adicionado aos rows.
+
+### Cross-references
+
+- `scripts/forge-verifier.js` — implementação de `auditTestQuality`, `isTestFile`,
+  `TEST_QUALITY_REGEXES` (Level 4); gating `isTestFile(artifactPath)` dentro de `verifyArtifact`.
+- Artefato: `S##-VERIFICATION.md` → seção `## Flags` → sub-seção **Test-quality**.
+- Decisão locked #4 (S02): test-quality SÓ em artefatos declarados em `must_haves.artifacts`/
+  `expected_output`; nunca varredura global do repo.
+
+## Symbol Check Settings
+
+Controla o comportamento do drift guard `scripts/forge-symbol-check.js` que verifica se
+os símbolos citados nos planos (`S##-PLAN.md`/`T##-PLAN.md`) existem no código real.
+Postura M003: nasce **advisory** — emite `S##-SYMBOL-CHECK.md` mas nunca bloqueia o dispatch.
+
+```
+symbol_check:
+  mode: advisory           # advisory | disabled
+                           # advisory  = resolve cada símbolo via ripgrep/grep, emite
+                           #             VERIFIED|MISSING|AMBIGUOUS|UNCHECKABLE no artefato
+                           #             S##-SYMBOL-CHECK.md (nunca bloqueia — default seguro)
+                           # disabled  = pula o gate completamente — nenhum artefato gerado
+```
+
+### Semântica
+
+- `advisory` (padrão): `forge-symbol-check.js --check <plan>` resolve cada símbolo citado
+  no plano e registra o estado em `S##-SYMBOL-CHECK.md`. Greenfield exclusion: símbolos
+  declarados em `must_haves.artifacts[].path` ou `expected_output` não são flagged como
+  `MISSING` (ainda não existem — é esperado). `UNCHECKABLE` é sempre logado explicitamente
+  (silêncio nunca mascara gap).
+- `disabled`: o gate no orquestrador é pulado entre `plan-slice` e o primeiro `execute-task`.
+  Nenhum `S##-SYMBOL-CHECK.md` é gerado.
+
+### Cross-references
+
+- `scripts/forge-symbol-check.js` — implementação do resolver (rung-0: ripgrep/Read);
+  CLI `--check <plan>` para invocação standalone.
+- Dispatch guard: `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` (bloco
+  "Symbol-check gate" entre plan-check e primeiro execute-task; idempotente — se
+  `S##-SYMBOL-CHECK.md` já existe, pula).
+- `agents/forge-plan-checker.md` — plan-checker lê `S##-SYMBOL-CHECK.md` como insumo
+  se existir (sem nova dimensão — decisão locked #2).
+- Artefato gerado: `.gsd/milestones/{M###}/slices/{S##}/{S##}-SYMBOL-CHECK.md`.
+
+## Context Monitor Settings
+
+Controla o context-monitor proativo que avisa o agente worker ANTES de bater no muro
+de contexto. A statusline grava o % de contexto restante num bridge file por sessão;
+o hook PostToolUse lê e injeta `additionalContext` (WARNING/CRITICAL) conforme severidade.
+Complementa — não substitui — o PostCompact recovery reativo. Silent-fail total (MEM008):
+nunca aborta uma tool call.
+
+Default `enabled: true` (e não `false`/advisory como os demais gates novos): este componente
+é **puramente informativo** — só injeta texto no contexto do agente, nunca bloqueia tool call
+nem gate. Risco de falso positivo ≈ zero (no pior caso o agente recebe um aviso desnecessário
+e o ignora). Logo é seguro entregar valor desde o dia 1; opt-out trivial via `enabled: false`.
+
+```
+context_monitor:
+  enabled: true            # true | false — liga/desliga a injeção proativa
+  warning_threshold: 0.35  # fração de contexto RESTANTE; ≤ este valor → WARNING
+                           #   ("encerre a task atual, não inicie trabalho complexo novo")
+  critical_threshold: 0.25 # fração de contexto RESTANTE; ≤ este valor → CRITICAL
+                           #   ("pare, salve o estado em continue.md e retorne partial")
+```
+
+### Semântica
+
+> **Custo de leitura (decisão registrada — review S03 R1):** o hook lê a cascata de prefs
+> (3 arquivos pequenos, regex-only) a cada PostToolUse. Custo aceito: arquivos ficam em page
+> cache; mover a leitura para depois do guard do bridge mudaria a semântica de `enabled`
+> mid-session. Revisitar apenas se telemetria mostrar custo real.
+
+- `enabled: true` (padrão): a cada PostToolUse, o hook lê o bridge `forge-ctx-${sessionId}.json`
+  e — se a leitura não está stale (>60s) — calcula a severidade pelo % restante. Debounce de
+  5 tool-uses entre avisos; **escalada de severidade (WARNING→CRITICAL) fura o debounce**.
+- `enabled: false`: o branch context-monitor é no-op — nenhuma injeção, nenhum estado escrito.
+- `warning_threshold` / `critical_threshold`: frações de contexto RESTANTE (0–1). Aceitam
+  também valor percentual (`35`) — normalizado para fração quando > 1. `critical` é testado
+  antes de `warning` (mais grave ganha).
+
+### Cross-references
+
+- `scripts/forge-context-monitor.js` — `readContextMonitorPrefs(cwd)` lê estas chaves;
+  `severityFor`/`shouldInject`/`buildAdditionalContext` aplicam a lógica.
+- `scripts/forge-statusline.js` — escreve o bridge `forge-ctx-${sessionId}.json`
+  (`{context_pct_remaining, ts}`) a cada render.
+- `scripts/forge-hook.js` — branch PostToolUse lê o bridge e injeta `additionalContext`.
+- Complementa o PostCompact recovery em `scripts/forge-hook.js` (reativo no orquestrador) —
+  este é proativo no worker.
+
+## Repair Settings
+
+```
+repair:
+  budget: 2            # max Node Repair attempts per task before falling back to blocked→human
+```
+
+### Semântica
+
+- `repair.budget` — orçamento de reparos (RETRY/DECOMPOSE/PRUNE) por task na camada 3 (Node Repair).
+  Contador `repair_count` persistido no frontmatter do `T##-PLAN.md`, incrementado ANTES de cada
+  reparo (sobrevive compaction). Esgotado → fallback `blocked → humano` (comportamento atual).
+- `context_overflow` NUNCA consome budget de repair — pertence à Failure Taxonomy (camada 2).
+  Se o context-monitor bridge reportar severidade CRITICAL, Node Repair suprime DECOMPOSE/PRUNE
+  e força RETRY ou `blocked` (nunca inicia trabalho novo complexo sob contexto baixo).
+
+### Cross-references
+
+- `shared/forge-dispatch.md § Node Repair` — contrato completo das 3 estratégias + precedência.
+- `scripts/forge-repair.js` — classificador determinístico falha→estratégia.
+- `skills/forge-auto/SKILL.md` / `skills/forge-next/SKILL.md § Process result` — roteamento.
+
+## Scope Reduction Settings
+
+```
+scope_reduction:
+  reinject: auto       # auto | off — re-inject dropped must_haves into next slice unit
+```
+
+### Semântica
+
+- `auto` (default) — must_haves planejados mas não entregues viram seção
+  `## Requisitos pendentes re-injetados` no prompt da próxima unidade do slice + S##-SUMMARY.
+- `off` — opt-out da re-injeção automática. PRUNE AINDA registra em S##-CONTEXT § Decisions
+  independente deste pref ("nunca some em silêncio").
+- Cap de 10 itens re-injetados por unidade; overflow indicado no final da seção.
+
+### Cross-references
+
+- `scripts/forge-repair.js --reinject-diff` — diff planejado−entregue (fonte estruturada).
+- `skills/forge-auto/SKILL.md § Post-unit housekeeping` — emite a seção re-injetada.
+- `skills/forge-next/SKILL.md § Post-unit housekeeping` — idem (modo interativo).
+
 ## Update Settings
 
 ```

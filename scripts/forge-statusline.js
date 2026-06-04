@@ -26,6 +26,19 @@ process.stdin.on('end', () => {
     const filled = Math.floor(pct * 10 / 100);
     const bar    = '█'.repeat(filled) + '░'.repeat(10 - filled);
 
+    // --- Context-monitor bridge: statusline writes % remaining for forge-hook to read ---
+    try {
+      const sessionId = d.session_id || '';
+      if (sessionId) {
+        const usedPct   = Number(d.context_window?.used_percentage) || 0;
+        const ctxBridge = path.join(os.tmpdir(), `forge-ctx-${sessionId}.json`);
+        fs.writeFileSync(ctxBridge, JSON.stringify({
+          context_pct_remaining: Math.max(0, Math.min(1, (100 - usedPct) / 100)),
+          ts: Date.now(),
+        }), 'utf8');
+      }
+    } catch { /* silent — statusline is best-effort (MEM008) */ }
+
     // --- Cost (session total) ---
     const cost    = d.cost?.total_cost_usd || 0;
     const costStr = '$' + cost.toFixed(4);

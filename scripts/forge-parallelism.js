@@ -169,7 +169,7 @@ function discoverTasks(sliceDir) {
   const tasks = [];
   for (const e of entries) {
     if (!e.isDirectory()) continue;
-    if (!/^T\d+$/.test(e.name)) continue;
+    if (!/^T\d+(\.\d+)?$/.test(e.name)) continue;
     const id = e.name;
     const taskDir = path.join(tasksRoot, id);
     const planPath = path.join(taskDir, id + '-PLAN.md');
@@ -181,11 +181,18 @@ function discoverTasks(sliceDir) {
       planPath,
     });
   }
-  // Sort by numeric suffix so T01 < T02 < T10.
+  // Sort decimal-aware: T03 < T03.1 < T03.2 < T04.
+  // Parse T(\d+)(?:\.(\d+))? — sub-tasks without .N get minor = -1 (sort before sub-tasks).
+  function parseTaskId(id) {
+    const m = id.match(/^T(\d+)(?:\.(\d+))?$/);
+    if (!m) return { major: 0, minor: -1 };
+    return { major: parseInt(m[1], 10), minor: m[2] !== undefined ? parseInt(m[2], 10) : -1 };
+  }
   tasks.sort((a, b) => {
-    const na = parseInt(a.id.slice(1), 10);
-    const nb = parseInt(b.id.slice(1), 10);
-    return na - nb;
+    const pa = parseTaskId(a.id);
+    const pb = parseTaskId(b.id);
+    if (pa.major !== pb.major) return pa.major - pb.major;
+    return pa.minor - pb.minor;
   });
   return tasks;
 }

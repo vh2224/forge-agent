@@ -55,6 +55,56 @@ The templates below do NOT repeat this header — the orchestrator injects it at
 
 ---
 
+## Spawn Liveness Banner
+
+When dispatching a subagent to execute a work unit (task, slice planning, research, etc.), the orchestrator/skill **must** present a liveness message to the user immediately before the spawn, so they understand that the absence of output is expected and not a freeze or hang. This section defines the canonical pt-BR phrasing and a static reference table of estimated durations by unit type.
+
+**Canonical phrase (pt-BR):**
+
+```
+◆ Despachando {worker}… (roda em subagente — sem output até retornar, ~{X} min; esperado, não é travamento)
+```
+
+Where:
+- `{worker}` = human-readable name of the unit type being dispatched (e.g., "executor da task", "planner do slice", "pesquisador")
+- `{X}` = estimated duration in minutes, pulled from the table below for the corresponding `unit_type`
+
+**Purpose:** Users often assume an absence of output during a subagent spawn (1–5 minutes) means the system is frozen and hit Ctrl+C, corrupting the work flow. This message, shown inline before each spawn, reassures them that the silence is expected and the unit is actively running. The message must be shown **every time**, not just the first spawn, because context can compact between dispatches and the user may not recall seeing the message.
+
+**Duration reference table (static):**
+
+| Unit Type | Estimated Duration (min) | Notes |
+|-----------|--------------------------|-------|
+| `plan-milestone` | 2–5 | Depends on milestone scope; complex boundary maps increase duration. |
+| `plan-slice` | 1–3 | Typically fastest planning phase; few dependencies. |
+| `discuss-milestone` | 2–4 | Includes ambiguity scoring and user question rounds. |
+| `discuss-slice` | 1–3 | Focused on slice-level ambiguities; fewer questions than milestone. |
+| `research-milestone` | 2–5 | Codebase scanning, pattern detection, memory extraction. |
+| `research-slice` | 1–3 | Focused research on slice assets. |
+| `execute-task` | 1–5 | Highly variable: docs-only tasks ~1 min; complex code ~3–5 min. |
+| `complete-slice` | 2–4 | Merge, UAT script generation, summary writing. |
+| `complete-milestone` | 3–6 | Full milestone summary, ledger update, memory extraction, cleanup. |
+| `review-challenger` | 1–2 | Adversarial code review pass. |
+| `review-advocate` | 1–2 | Defense and counter-argument. |
+| `plan-check` | 1–2 | Dimension scoring (10 locked dimensions, lightweight). |
+| `memory-extract` | 1 | Auto-extraction of durable patterns; concurrent with next unit. |
+
+**Skill invocations** (sub-skills despachadas via subagente — não são unit_types do dispatch loop, mas levam banner igual):
+
+| Skill | `{X}` (min) | Notes |
+|-------|-------------|-------|
+| `forge-brainstorm` | 1–3 | Alternativas, riscos, contorno de escopo. |
+| `forge-scope-clarity` | 1–3 | Contrato de escopo com critérios observáveis. |
+| `forge-risk-radar` | 1–3 | Risk card por slice (roda no contexto principal — sem banner). |
+
+**Usage rule:** Every skill or command that contains an `Agent()` dispatch must reference this banner in the text/explanation immediately preceding the dispatch. The reference must include the `◆ Despachando…` line with `{worker}` and `{X}` substituted. Example:
+
+```
+◆ Despachando executor de task… (roda em subagente — sem output até retornar, ~3 min; esperado, não é travamento)
+```
+
+---
+
 ### execute-task
 
 ```
@@ -112,6 +162,16 @@ Write T##-SUMMARY.md.
 If auto_commit is true: Commit with message feat(S##/T##): <one-liner>.
 If auto_commit is false: Do NOT run any git commands.
 Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
+
+The `---GSD-WORKER-RESULT---` block MAY include the following optional additive field (introduced M-S04 — readers that do not recognise it ignore it; backward-compatible):
+
+```
+must_haves_status:           # OPTIONAL (additive, M-S04) — old readers ignore this field
+  satisfied: [<truth or artifact id verified>]
+  dropped: [<must_haves the worker could not deliver, with reason>]
+```
+
+Purpose: structured primary source for Node Repair re-injection (alongside `S##-VERIFICATION.md`). If absent, the orchestrator falls back to `S##-VERIFICATION.md` diff only.
 ```
 
 ### plan-slice
@@ -224,6 +284,68 @@ Write S##-PLAN-CHECK.md to {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S#
 Return ---GSD-WORKER-RESULT--- with plan_check_counts: {pass, warn, fail}.
 Advisory — do NOT return `status: blocked`. If S##-PLAN.md is missing, return blocked with blocker_class: scope_exceeded.
 ```
+
+### symbol-check
+
+The symbol-check gate is a **Bash shell-out** — NOT a dispatched `Agent()`. It runs directly in the orchestrator context via `node scripts/forge-symbol-check.js --check <plan>`. Return is immediate; no liveness banner is shown (banners apply only to Agent() sub-agents).
+
+**Artifact: `S##-SYMBOL-CHECK.md`**
+
+Written to `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SYMBOL-CHECK.md`.
+
+Format:
+```markdown
+---
+slice: {S##}
+milestone: {M###}
+mode: {SYMBOL_CHECK_MODE}
+generated_at: {ISO-8601}
+---
+
+# Symbol-Check — {S##}
+
+**Advisory — never blocks execute-task.**
+
+## Results by Symbol
+
+| Symbol | State | Details | Task |
+|--------|-------|---------|------|
+| checkSymbols | VERIFIED | found in scripts/forge-symbol-check.js | T01 |
+| missingHelper | MISSING | not found in codebase | T02 |
+| someUtil | AMBIGUOUS | 3 candidates: a.js, b.js, c.js | T01 |
+| rawPattern | UNCHECKABLE | not a code identifier | T01 |
+
+## Coverage Summary
+
+| verified | missing | ambiguous | uncheckable | greenfield |
+|----------|---------|-----------|-------------|------------|
+| N        | N       | N         | N           | N          |
+
+## Coverage (UNCHECKABLE)
+
+Symbols marked UNCHECKABLE could not be verified because they are not code identifiers (e.g., plain English words, regex patterns, or prose fragments). This is expected for plan text that mixes code with narrative.
+
+## Advisory
+
+This report is informational only. MISSING and AMBIGUOUS symbols may indicate drift between the plan and the codebase, but they do not block task execution. Review manually if drift is suspected before the slice completes.
+```
+
+**Event schema for `events.jsonl`:**
+
+```json
+{"ts":"<ISO-8601>","event":"symbol_check","milestone":"{M###}","slice":"{S##}","mode":"{SYMBOL_CHECK_MODE}","counts":{"verified":N,"missing":N,"ambiguous":N,"unchecked":N,"greenfield":N}}
+```
+
+Fields:
+- `event` — always `"symbol_check"`
+- `milestone` — milestone ID (e.g., `M003` or `M-20260604002929-gsd-core-import`)
+- `slice` — slice ID (e.g., `S02`)
+- `mode` — `"advisory"` (only valid non-disabled value in M003)
+- `counts` — aggregated totals across all T##-PLAN.md files in the slice: `verified` (symbol found unambiguously), `missing` (symbol not found), `ambiguous` (multiple candidates), `unchecked` (not a code identifier), `greenfield` (excluded — declared in greenfield set)
+
+**Idempotency:** `S##-SYMBOL-CHECK.md` already exists → gate is a no-op (skip).
+
+**Advisory posture:** gate NEVER blocks `execute-task`. MISSING/AMBIGUOUS are documentation only. Future slices (e.g., S04-PRUNE) may consume this data to suggest import cleanup.
 
 ### plan-milestone
 
@@ -1002,6 +1124,115 @@ Verification failures (non-zero exit from `forge-verify.js`) go **directly** to 
 - `forge-verify.js` exits non-zero → **Verification Gate failure handling** (partial/blocked, no backoff, no re-dispatch by the handler).
 
 A worker that routes verification failures through the Retry Handler risks infinite loops: the handler may retry the same broken unit indefinitely. Do not do this.
+
+**Node Repair (§ Node Repair below) is the disjoint 3rd recovery layer** — it acts exclusively on verification-signal failures after `forge-verify.js` runs, before the fallback `blocked → human` path. It never re-classifies `Agent()` throws and never sees `status: blocked` results. All three layers (Retry Handler / Failure Taxonomy / Node Repair) are mutually exclusive by trigger signal.
+
+---
+
+## Node Repair
+
+**Purpose:** Third recovery layer — acts after a worker returns `status: done` but post-verification signals indicate must_haves were not satisfied, or after a worker returns `status: partial` with unmet must_haves. Unlike the Retry Handler (Layer 1, `Agent()` exceptions) and the Failure Taxonomy (Layer 2, `status: blocked`), Node Repair targets **verification-signal failures**: cases where the worker claimed success but structured evidence (verifier rows, test-quality flags, symbol-check) contradicts it. The orchestrator classifies the failure shape into one of three strategies (RETRY / DECOMPOSE / PRUNE) and re-routes accordingly — or falls back to the existing `blocked → human` path when the budget is exhausted or the shape is unrecognised.
+
+> **Cross-reference:** Deterministic classifier and re-injection diff — `node "$FORGE_SCRIPTS_DIR/forge-repair.js" --classify` / `--reinject-diff` (implemented in T02). The classifier is a pure function: zero `Agent()` calls, zero network, deterministic output given the same input signals. Routing wired in skills: `skills/forge-auto/SKILL.md` Step 5 / `skills/forge-next/SKILL.md` Step 5 (T05).
+
+### Recovery layer precedence
+
+The three recovery layers are **mutually exclusive**. Every failure enters exactly one layer based on its trigger signal:
+
+| Layer | Name | Trigger signal | Mechanism | Reference |
+|-------|------|---------------|-----------|-----------|
+| **1** | Retry Handler | `Agent()` **throws** (network/rate-limit/server/stream) | `forge-classify-error.js` → backoff + re-dispatch (max `retry.max_transient_retries`) | `§ Retry Handler` above |
+| **2** | Failure Taxonomy | Worker returns `status: blocked` | `blocker_class` table → auto-recovery (`context_overflow`→opus model, `model_refusal`→alternate model, others→stop) | `skills/forge-auto § Failure Taxonomy` |
+| **3** | Node Repair | Worker returns `status: done` **and** verification signals must_have failures **OR** `status: partial` with unmet must_haves | `forge-repair.js --classify` → RETRY \| DECOMPOSE \| PRUNE \| `blocked` | This section + T02 |
+
+**Absolute precedence rules:**
+
+1. If `Agent()` throws → Layer 1 only. Never reaches Layer 2 or 3.
+2. If worker returns `status: blocked` → Layer 2 only. Never reaches Layer 1 or 3.
+3. If worker returns `status: done` or `status: partial` → verification gate runs. If signals show must_have drift → Layer 3 only. The Retry Handler never sees verification results (Anti-recursion rule above).
+4. **`context_overflow` belongs to Layer 2, never Layer 3.** It is not a verification-signal failure — it is a capacity failure. Routing it to PRUNE would silently discard requirements under resource pressure. If the S03 context-monitor bridge reports severity CRITICAL, Node Repair **suppresses DECOMPOSE and PRUNE** entirely (see § Context-monitor suppression below) and forces RETRY or `blocked`.
+
+### Strategy table
+
+The failure shape determines the strategy deterministically. `forge-repair.js --classify` implements this table:
+
+| Failure shape (verification signal) | Strategy | Rationale |
+|--------------------------------------|----------|-----------|
+| must_have artifact **absent** in a task that already occupies a full context window (`verifier substantive:false` on ≥2 artifacts **or** symbol-check MISSING on aggregated key symbols) | **DECOMPOSE** | Task is too large for one pass; split into sub-tasks that each fit a context window |
+| requirement is **impossible or contradictory** — worker explicitly stated why in result block or SUMMARY (not merely failed silently) | **PRUNE** | Remove the requirement from scope; register in `S##-CONTEXT § Decisions`; re-inject remaining must_haves |
+| implementation is **incorrect or flaky** — isolated `verifier wired:false`, single artifact `substantive:false`, or test-quality `weak-assertion` flag | **RETRY** | Same task, same scope; worker re-attempts with the unmet must_haves re-injected into the prompt |
+| shape not recognised by any row above | **`blocked`** (fallback) | Fall through to existing `blocked → human` path; no budget consumed |
+
+**Weighting notes (from S02/S03 Forward Intelligence):**
+
+- `disabled-test` flag outweighs `weak-assertion` in the RETRY vs. DECOMPOSE decision: a disabled test on a small artifact is a precision issue (RETRY), not a scope issue (DECOMPOSE).
+- MISSING from symbol-check is a **weighted signal, not a certainty**. A single MISSING does not trigger DECOMPOSE automatically — it is input for the classifier, which requires corroboration from other signals (e.g., `verifier substantive:false`) before choosing DECOMPOSE.
+- PRUNE must not be triggered by silent failure alone. The worker must have explicitly explained why the requirement is impossible in its result block or T##-SUMMARY.md.
+
+### Context-monitor suppression
+
+Before executing DECOMPOSE or PRUNE, the orchestrator reads the S03 context-monitor bridge file:
+
+```
+os.tmpdir()/forge-ctx-${sessionId}.json
+```
+
+If that file is absent or unreadable, proceed normally (treat as non-CRITICAL).
+
+If `severity === "CRITICAL"` in the bridge JSON:
+- **Suppress DECOMPOSE and PRUNE.** Do not initiate new complex work or discard requirements under low-context conditions.
+- Force the decision to **RETRY** if `repair_count < repair.budget`, or to **`blocked`** if budget is exhausted.
+- Record the suppression in the repair event (`"suppression":"context-critical"`).
+
+Rationale: starting a DECOMPOSE pass or permanently pruning requirements when the orchestrator context is critically low risks losing the decision entirely in the next compaction cycle. RETRY is low-cost; `blocked → human` preserves all information.
+
+### Budget
+
+**Default budget:** `repair.budget = 2` (configurable in `forge-agent-prefs.md § repair:`).
+
+**Counter:** `repair_count` is persisted in the frontmatter of the **`T##-PLAN.md` being repaired** — not in memory. This is intentional: the orchestrator may be compacted between dispatch and result; the frontmatter value survives on disk and is re-read on resume (Compaction Resilience Protocol).
+
+**Increment rule:** `repair_count` must be **incremented BEFORE dispatching the repair** — write the updated frontmatter to disk, then call `Agent()`. If the session is compacted between the write and the `Agent()` call, the counter is already at the correct value.
+
+**Exhaustion:** when `repair_count >= repair.budget` before a new repair would be initiated:
+- Do NOT attempt another repair strategy.
+- Return `status: blocked` with `blocker_class: scope_exceeded` and `blocker: "node-repair budget exhausted after {repair_count} attempts"`.
+- This falls through to the existing `blocked → human` path — the fallback is preserved.
+
+**Budget does not apply to `blocked` fallback rows** (unrecognised failure shape): those go directly to `blocked → human` without consuming budget.
+
+### PRUNE contract — never silent
+
+PRUNE permanently removes a requirement from the task scope. It must never happen silently:
+
+1. **Register in `S##-CONTEXT.md § Decisions`** (WORKING_DIR, not CODE_DIR): append an entry naming the pruned requirement, the worker's stated reason, and the task ID. This is write-to-disk in the orchestrator context — not delegated to a worker.
+2. **Re-inject remaining must_haves** into the next unit of the same slice via the re-injection diff (see `§ must_haves re-injection` in S##-SUMMARY and T05 wiring). The pruned item is excluded from the diff.
+3. **In `forge-auto`** with `review.ask_in_auto: defer` (default): do NOT pause the loop — register and continue (AUTONOMY RULE).
+4. **In `forge-next`**: may present an `AskUserQuestion` prompt before recording the prune, with options `[Prune and continue] [Retry instead] [Block for human review]`.
+
+### Events
+
+Each Node Repair decision appends one event to `.gsd/forge/events.jsonl` (single line, valid JSON, newline-terminated):
+
+```json
+{"ts":"{ISO8601}","event":"repair","unit":"execute-task/T##","milestone":"{M###}","slice":"{S##}","task":"{T##}","strategy":"retry|decompose|prune|blocked","repair_count":N,"reason":"{one-line shape description}"}
+```
+
+Fields:
+
+- `ts` — ISO 8601 timestamp of the repair decision.
+- `event` — always `"repair"`.
+- `unit` — e.g. `"execute-task/T03"`.
+- `milestone`, `slice`, `task` — IDs from the plan frontmatter.
+- `strategy` — one of `"retry"`, `"decompose"`, `"prune"`, `"blocked"`.
+- `repair_count` — value **after** increment (so first repair is `1`).
+- `reason` — one-line description of the failure shape that drove the decision (e.g. `"2 artifacts substantive:false, task >200 lines"`). Do NOT include raw worker output or error text.
+
+Optional field (add when applicable):
+
+- `"suppression":"context-critical"` — present when DECOMPOSE/PRUNE was suppressed by the S03 context-monitor.
+
+This event schema is **additive**: existing readers that process `"verify"` and `"retry"` events ignore unknown `event` values — no reader changes required.
 
 ---
 

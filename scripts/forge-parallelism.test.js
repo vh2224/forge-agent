@@ -391,6 +391,42 @@ console.log('\nScenario 24: nonexistent --slice-plan');
   }
 }
 
+// --- Scenario 25: sub-task IDs (T##.N) discovered and sorted decimal-aware ---
+console.log('\nScenario 25: sub-task discovery and decimal-aware sort');
+{
+  const { sliceDir, planPath } = mkSlice('s25');
+  mkTask(sliceDir, 'T03', 'depends: []\nwrites:\n  - "src/a.ts"', { done: true });
+  mkTask(sliceDir, 'T03.1', 'depends: [T03]\nwrites:\n  - "src/b.ts"');
+  mkTask(sliceDir, 'T03.2', 'depends: [T03]\nwrites:\n  - "src/c.ts"');
+  mkTask(sliceDir, 'T04', 'depends: [T03]\nwrites:\n  - "src/d.ts"');
+  const r = run(planPath, 10);
+
+  test('sub-task dirs are discovered (4 tasks total)', () => {
+    // T03 is done; T03.1, T03.2, T04 should all be in batch or skipped/pending
+    const allIds = [
+      ...(r.batch || []).map(b => b.id),
+      ...((r.details && r.details.skipped) || []).map(s => s.id),
+    ];
+    assert(allIds.includes('T03.1'), `T03.1 not found in output: ${JSON.stringify(r)}`);
+    assert(allIds.includes('T03.2'), `T03.2 not found in output: ${JSON.stringify(r)}`);
+    assert(allIds.includes('T04'), `T04 not found in output: ${JSON.stringify(r)}`);
+  });
+  test('sub-tasks sort after parent: T03.1 and T03.2 before T04', () => {
+    const ids = batchIds(r);
+    const i31 = ids.indexOf('T03.1');
+    const i32 = ids.indexOf('T03.2');
+    const i4 = ids.indexOf('T04');
+    // All three should be in batch (T03 done, all depend on T03)
+    assert(i31 >= 0 && i32 >= 0 && i4 >= 0, `expected T03.1, T03.2, T04 in batch; got ${JSON.stringify(ids)}`);
+    assert(i31 < i4, `T03.1 should come before T04; got ${JSON.stringify(ids)}`);
+    assert(i32 < i4, `T03.2 should come before T04; got ${JSON.stringify(ids)}`);
+    assert(i31 < i32, `T03.1 should come before T03.2; got ${JSON.stringify(ids)}`);
+  });
+  test('T03.1 depends on T03 — satisfied since T03 is done', () => {
+    assert(batchIds(r).includes('T03.1'), `T03.1 should be ready; got batch: ${JSON.stringify(batchIds(r))}`);
+  });
+}
+
 // --- Summary ---
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 

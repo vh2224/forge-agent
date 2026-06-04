@@ -514,6 +514,227 @@ function checkWired(artifact, nonJsTs, candidateFiles, cwd) {
   };
 }
 
+// ── Level 4: Test-quality ─────────────────────────────────────────────────────
+//
+// Applies ONLY to test files declared in must_haves.artifacts/expected_output.
+// Non-test artifacts are never audited (decision locked #4).
+//
+// isTestFile(artifactPath) — true if path matches *.test.* / *.spec.* or /__tests__/
+//
+// TEST_QUALITY_REGEXES — ordered registry { name, regex, description, pattern_set }
+//   pattern_set: 'jest' | 'node' | 'both'
+//   Precedence order: disabled-test → weak-assertion → circular-assertion
+//
+// auditTestQuality(content, artifact) — scans content for test-quality issues.
+//   Detects dominant pattern set from require('assert')/process.exit (node) or
+//   expect(/it/describe (jest); when ambiguous, runs both sets.
+//   Returns { pass: boolean, flags: [] }
+//   Flags: { level:'test-quality', reason, regex_name?, line_number?, matched_text?, path }
+//
+// verifyArtifact integration:
+//   After Level 3 (Wired), calls auditTestQuality for test-file artifacts.
+//   Appends test-quality flags to rowFlags; adds test_quality: boolean to the row.
+//   Non-test artifact rows are NOT modified (regression zero on 3-level).
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// MEM004: [ \t] not \s in line-scoped regexes; \Z does not exist in JS.
+// Regexes here are line-scoped (applied to individual lines via split('\n')).
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns true when the given artifact path is a test file.
+ * Matches *.test.<ext>, *.spec.<ext>, or anything inside __tests__/.
+ *
+ * @param {string} artifactPath  Relative or absolute path
+ * @returns {boolean}
+ */
+function isTestFile(artifactPath) {
+  const normalised = artifactPath.replace(/\\/g, '/');
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(normalised) || normalised.includes('/__tests__/');
+}
+
+/**
+ * Registry of test-quality patterns.
+ * Evaluated in precedence order: disabled-test → weak-assertion → circular-assertion.
+ * Each regex is applied line-by-line (line-scoped).
+ *
+ * @type {Array<{name: string, regex: RegExp, description: string, pattern_set: string}>}
+ */
+const TEST_QUALITY_REGEXES = [
+  // ── disabled-test (both) ──────────────────────────────────────────────────
+  {
+    name: 'disabled_test_skip_todo',
+    // Matches it.skip, test.skip, describe.skip, it.todo, test.todo, describe.todo
+    regex: /\b(?:it|test|describe)\.(?:skip|todo)\s*\(/,
+    description: 'Test skipped or marked todo via .skip/.todo',
+    pattern_set: 'both',
+  },
+  {
+    name: 'disabled_test_xit_xdescribe',
+    // Matches xit( and xdescribe( (legacy mocha/jest xunit-style skips)
+    regex: /\b(?:xit|xdescribe)\s*\(/,
+    description: 'Test skipped via xit() or xdescribe()',
+    pattern_set: 'both',
+  },
+  // ── weak-assertion (jest) ─────────────────────────────────────────────────
+  {
+    name: 'weak_assertion_jest_literal',
+    // Matches expect(true|false|1|0).toBe(true|false|1|0) — literal tautologies
+    // MEM004: line-scoped, no \s used, use [ \t]* where whitespace needed
+    regex: /expect\([ \t]*(?:true|false|1|0)[ \t]*\)\.(?:toBe|toEqual)\([ \t]*(?:true|false|1|0)[ \t]*\)/,
+    description: 'expect(literal).toBe(literal) — assertion always passes; no real coverage',
+    pattern_set: 'jest',
+  },
+  // ── weak-assertion (node) ─────────────────────────────────────────────────
+  {
+    name: 'weak_assertion_node_assert_true',
+    // Matches assert(true) or assert(1) — trivially true assertions
+    regex: /\bassert\([ \t]*(?:true|1)[ \t]*\)/,
+    description: 'assert(true) or assert(1) — assertion always passes; no real coverage',
+    pattern_set: 'node',
+  },
+  {
+    name: 'weak_assertion_node_assert_ok_true',
+    // Matches assert.ok(true)
+    regex: /\bassert\.ok\([ \t]*true[ \t]*\)/,
+    description: 'assert.ok(true) — assertion always passes; no real coverage',
+    pattern_set: 'node',
+  },
+  // ── circular-assertion (jest) ─────────────────────────────────────────────
+  {
+    name: 'circular_assertion_jest',
+    // Matches expect(varName).toBe(varName) or .toEqual(varName) — same variable both sides
+    // Uses back-reference \1 to ensure the same identifier appears in both positions
+    regex: /expect\([ \t]*([A-Za-z_$][\w$]*)[ \t]*\)\.(?:toBe|toEqual)\([ \t]*\1[ \t]*\)/,
+    description: 'expect(x).toBe(x) — circular assertion; variable compared against itself',
+    pattern_set: 'jest',
+  },
+  // ── circular-assertion (node) ─────────────────────────────────────────────
+  {
+    name: 'circular_assertion_node_strictequal',
+    // Matches assert.strictEqual(x, x) or assert(x === x) or assert(x, x)
+    // Using back-reference \1 to ensure same identifier
+    regex: /\bassert(?:\.strictEqual)?\([ \t]*([A-Za-z_$][\w$]*)[ \t]*,[ \t]*\1[ \t]*\)/,
+    description: 'assert(x, x) or assert.strictEqual(x, x) — circular assertion',
+    pattern_set: 'node',
+  },
+  {
+    name: 'circular_assertion_node_identity',
+    // Matches assert(x === x) — identity tautology in assert condition
+    regex: /\bassert\([ \t]*([A-Za-z_$][\w$]*)[ \t]*===[ \t]*\1[ \t]*\)/,
+    description: 'assert(x === x) — circular identity assertion',
+    pattern_set: 'node',
+  },
+];
+
+/**
+ * Detect the dominant pattern set from file content.
+ * Returns an array of pattern_set values to run: ['both'] always included.
+ * If both signals present, run both jest and node sets.
+ *
+ * @param {string} content
+ * @returns {string[]}  e.g. ['both', 'jest'] or ['both', 'node'] or ['both', 'jest', 'node']
+ */
+function detectPatternSets(content) {
+  const hasNode = /require\s*\(\s*['"]assert['"]\s*\)/.test(content) ||
+                  /process\.exit\s*\(/.test(content);
+  const hasJest = /\bexpect\s*\(/.test(content) ||
+                  /\b(?:it|test|describe)\s*\(/.test(content);
+
+  if (hasNode && hasJest) return ['both', 'jest', 'node'];
+  if (hasNode)  return ['both', 'node'];
+  if (hasJest)  return ['both', 'jest'];
+  // Ambiguous (no clear signal) — run all
+  return ['both', 'jest', 'node'];
+}
+
+/**
+ * Level-4 audit: test-quality analysis.
+ *
+ * Applies to test files only. Detects:
+ *   - disabled-test:      it.skip / xit / it.todo / describe.skip
+ *   - weak-assertion:     expect(true).toBe(true) / assert(true)
+ *   - no-assertion:       file has zero expect() or assert() calls
+ *   - circular-assertion: expect(x).toBe(x) / assert(x, x)
+ *
+ * Pattern sets: jest/vitest patterns AND standalone-node assert patterns (MEM003).
+ * Short-circuit: first matching regex per line wins (same as checkSubstantive).
+ *
+ * @param {string} content   File content of the test artifact
+ * @param {object} artifact  Artifact descriptor (used for .path in flag output)
+ * @returns {{ pass: boolean, flags: Array<object> }}
+ *   pass  — true when no test-quality flags were found
+ *   flags — array of { level:'test-quality', reason, regex_name?, line_number?, matched_text?, path }
+ */
+function auditTestQuality(content, artifact) {
+  try {
+    const artifactPath = artifact && artifact.path ? artifact.path : '<unknown>';
+    const flags = [];
+
+    // ── No-assertion check (whole-file, runs before line scan) ───────────────
+    const hasAnyAssertion = /\bexpect\s*\(/.test(content) ||
+                            /\bassert\s*[\.(]/.test(content);
+    if (!hasAnyAssertion) {
+      return {
+        pass: false,
+        flags: [{ level: 'test-quality', reason: 'no-assertion', path: artifactPath }],
+      };
+    }
+
+    // ── Detect active pattern sets ────────────────────────────────────────────
+    const activeSets = detectPatternSets(content);
+    const activeRegexes = TEST_QUALITY_REGEXES.filter(r =>
+      activeSets.includes(r.pattern_set)
+    );
+
+    // ── Line-by-line scan — first match per line wins ─────────────────────────
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      for (const { name, regex } of activeRegexes) {
+        // Reset stateful regexes (none here use /g, but defensive)
+        regex.lastIndex = 0;
+        if (regex.test(line)) {
+          // Map regex name to canonical reason
+          let reason;
+          if (name.startsWith('disabled_test')) {
+            reason = 'disabled-test';
+          } else if (name.startsWith('weak_assertion')) {
+            reason = 'weak-assertion';
+          } else if (name.startsWith('circular_assertion')) {
+            reason = 'circular-assertion';
+          } else {
+            reason = name;
+          }
+          flags.push({
+            level: 'test-quality',
+            reason,
+            regex_name: name,
+            line_number: i + 1,
+            matched_text: line.trim(),
+            path: artifactPath,
+          });
+          break; // first match wins for this line
+        }
+      }
+    }
+
+    return { pass: flags.length === 0, flags };
+  } catch (err) {
+    // Advisory — never throws; returns a safe audit-error flag
+    const artifactPath = artifact && artifact.path ? artifact.path : '<unknown>';
+    return {
+      pass: true,
+      flags: [{
+        level: 'test-quality',
+        reason: 'audit-error',
+        error: err.message,
+        path: artifactPath,
+      }],
+    };
+  }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -605,14 +826,30 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
     const rowFlags = [];
     if (wiredResult.flag) rowFlags.push(wiredResult.flag);
 
-    rows.push({
+    // ── Level 4: Test-quality ─────────────────────────────────────────────
+    // Only audits test files (isTestFile); non-test artifacts are never audited
+    // (decision locked #4). Advisory — never changes the 3-level verdict.
+    let testQualityResult = null;
+    if (isTestFile(artifactPath)) {
+      testQualityResult = auditTestQuality(content, artifact);
+      if (!testQualityResult.pass) {
+        rowFlags.push(...testQualityResult.flags);
+      }
+    }
+
+    const row = {
       path: artifactPath,
       exists: true,
       substantive: true,
       wired: wiredResult.wired,
       walker_info: wiredResult.walker_info,
       flags: rowFlags,
-    });
+    };
+    // Add test_quality field only for test files (non-test rows stay unchanged)
+    if (testQualityResult !== null) {
+      row.test_quality = testQualityResult.pass;
+    }
+    rows.push(row);
   }
 
   return { legacy: false, rows };
@@ -625,6 +862,10 @@ module.exports = {
   DEFAULT_STUB_REGEXES,
   IMPORT_PATTERNS,
   SUPPORTED_EXTENSIONS,
+  // Level 4 exports
+  auditTestQuality,
+  TEST_QUALITY_REGEXES,
+  isTestFile,
   _private: {
     checkExists,
     checkSubstantive,
@@ -633,6 +874,10 @@ module.exports = {
     resolveSpec,
     walkImports,
     checkWired,
+    // Level 4 privates
+    detectPatternSets,
+    auditTestQuality,
+    isTestFile,
   },
 };
 
@@ -819,7 +1064,7 @@ function formatVerificationMd(result) {
     `milestone: ${milestone}`,
     `generated_at: ${generated_at}`,
     `duration_ms: ${Math.round(duration_ms * 100) / 100}`,
-    `verifier_version: "v1.0 (T01/T02 baseline; T03 adds Wired)"`,
+    `verifier_version: "v1.1 (T01/T02 baseline; T03 adds Wired; T02/S02 adds Test-quality)"`,
     `legacy_count: ${legacy_count}`,
     `malformed_count: ${malformed_count}`,
     '---',
@@ -830,8 +1075,9 @@ function formatVerificationMd(result) {
   const header = [
     `# ${slice}: Goal-backward Verification`,
     '',
-    'Advisory only — heuristic 3-level audit (Exists / Substantive / Wired).',
+    'Advisory only — heuristic 4-level audit (Exists / Substantive / Wired / Test-quality).',
     'Stub detection is regex-based; Wired is depth-2 import-chain scan (JS/TS only).',
+    'Test-quality applies only to declared test files (*.test.* / *.spec.* / __tests__/).',
     'This file is generated by `scripts/forge-verifier.js` and never blocks slice closure.',
     '',
   ].join('\n');
@@ -892,6 +1138,7 @@ function formatVerificationMd(result) {
     row.substantive === false ||
     row.wired === false ||
     row.wired === 'approximate' ||
+    row.test_quality === false ||
     (row.flags && row.flags.some(f =>
       f.reason && !['non_js_ts_repo', 'legacy_schema', 'no_references_found', 'depth_limit'].includes(f.reason)
     ))
@@ -903,7 +1150,11 @@ function formatVerificationMd(result) {
     for (const row of failingRows) {
       parts.push(`### ${row.path}`);
       parts.push('');
-      for (const flag of (row.flags || [])) {
+      // Separate test-quality flags for dedicated sub-section
+      const tqFlags = (row.flags || []).filter(f => f.level === 'test-quality');
+      const otherFlags = (row.flags || []).filter(f => f.level !== 'test-quality');
+
+      for (const flag of otherFlags) {
         if (flag.regex_name) {
           parts.push(`- **${flag.regex_name}** at line ${flag.line_number}: \`${flag.matched_text}\``);
         } else if (flag.reason === 'depth_limit') {
@@ -914,6 +1165,26 @@ function formatVerificationMd(result) {
           const detail = flag.error ? ` — ${flag.error}` : '';
           const lines = flag.actual !== undefined ? ` (actual: ${flag.actual}, expected: ${flag.expected})` : '';
           parts.push(`- **${flag.reason}**${lines}${detail}`);
+        }
+      }
+
+      if (tqFlags.length > 0) {
+        parts.push('');
+        parts.push('**Test-quality**');
+        for (const flag of tqFlags) {
+          if (flag.reason === 'no-assertion') {
+            parts.push(`- **no-assertion** — file has no \`expect()\` or \`assert()\` calls`);
+          } else if (flag.reason === 'disabled-test') {
+            parts.push(`- **disabled-test** (${flag.regex_name}) at line ${flag.line_number}: \`${flag.matched_text}\``);
+          } else if (flag.reason === 'weak-assertion') {
+            parts.push(`- **weak-assertion** (${flag.regex_name}) at line ${flag.line_number}: \`${flag.matched_text}\``);
+          } else if (flag.reason === 'circular-assertion') {
+            parts.push(`- **circular-assertion** (${flag.regex_name}) at line ${flag.line_number}: \`${flag.matched_text}\``);
+          } else if (flag.reason === 'audit-error') {
+            parts.push(`- **audit-error** — ${flag.error || 'unknown error during test-quality scan'}`);
+          } else if (flag.reason) {
+            parts.push(`- **${flag.reason}** (${flag.regex_name || ''}) at line ${flag.line_number || '?'}`);
+          }
         }
       }
       parts.push('');

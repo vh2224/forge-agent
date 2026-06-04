@@ -51,6 +51,7 @@ If `WORKING_DIR` contains backslashes (e.g., `C:\DEV\project`), replace every `\
 4. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md`.
 5. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/S##-RISK.md`. (Used for `risk_coverage` dimension.)
 6. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/M###-SCOPE.md`. (Used for `scope_alignment` dimension.)
+7. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SYMBOL-CHECK.md`. If present, use it as **informational input** for the `scope_alignment` and `completeness` dimensions — symbols marked MISSING may indicate drift between the plan and the codebase. This is read-only advisory input; do NOT add an 11th dimension for symbol-check and do NOT let symbol results change a `pass` verdict to `fail` on their own. The 10 locked dimensions remain unchanged.
 
 ### Step 2 — Parse MUST_HAVES_CHECK_RESULTS
 
@@ -64,11 +65,11 @@ For each dimension, produce one verdict (`pass`, `warn`, or `fail`) and a one-se
 
 #### Dimension 1: `completeness`
 
-**Rubric:** Every T## declared in `S##-PLAN.md § Task Breakdown` has a corresponding `T##-PLAN.md` file AND a non-empty `## Goal` section.
+**Rubric:** Every T## declared in `S##-PLAN.md § Task Breakdown` has a corresponding `T##-PLAN.md` file AND a non-empty `## Goal` section. Additionally, every requirement declared in the ROADMAP, SCOPE, or CONTEXT (§ Produces) must appear as either a task in the plan OR a documented exception (deferral/out-of-scope note in `## Notes`). Silent omission — a requirement absent from both tasks and notes — counts as a completeness gap.
 
-- `pass` — 100% of declared T## have a plan file with a non-empty `## Goal` section.
-- `warn` — exactly 1 declared T## is missing a plan file OR has an empty/absent `## Goal`.
-- `fail` — 2 or more declared T## are missing plan files OR have empty/absent `## Goal` sections.
+- `pass` — 100% of declared T## have a plan file with a non-empty `## Goal` section, AND all declared requirements are either tasked or documented as explicit exceptions.
+- `warn` — exactly 1 declared T## is missing a plan file OR has an empty/absent `## Goal`, OR exactly 1 declared requirement is silently absent (not tasked, not noted).
+- `fail` — 2 or more declared T## are missing plan files OR have empty/absent `## Goal` sections, OR 2 or more declared requirements are silently absent.
 
 #### Dimension 2: `must_haves_wellformed`
 
@@ -118,11 +119,11 @@ To score: read `S##-RISK.md` and extract risk names/descriptions. For each, use 
 
 #### Dimension 7: `scope_alignment`
 
-**Rubric:** Every task's `## Goal` and `must_haves.truths[]` refer only to capabilities listed in `M###-SCOPE.md` (if it exists) OR in `S##-PLAN.md § Boundary Map § Produces` (if no SCOPE file). No task introduces a capability explicitly listed in an `## Out of Scope` section.
+**Rubric:** Every task's `## Goal` and `must_haves.truths[]` refer only to capabilities listed in `M###-SCOPE.md` (if it exists) OR in `S##-PLAN.md § Boundary Map § Produces` (if no SCOPE file). No task introduces a capability explicitly listed in an `## Out of Scope` section. Additionally, any capability declared in Produces/SCOPE must either appear in a task's `## Goal` OR be documented as a deferred requirement in `## Notes` (no silent scope-reduction).
 
-- `pass` — all tasks stay within declared scope; no out-of-scope capabilities introduced.
-- `warn` — exactly 1 task introduces an apparently-new capability not listed in produces/scope (but not explicitly out-of-scope).
-- `fail` — 2 or more tasks introduce new capabilities OR any task references an item from an explicit `## Out of Scope` section.
+- `pass` — all tasks stay within declared scope; no out-of-scope capabilities introduced; all produces are either tasked or documented as deferred.
+- `warn` — exactly 1 task introduces an apparently-new capability not listed in produces/scope (but not explicitly out-of-scope), OR exactly 1 capability from Produces is silently absent (not tasked, not deferred in Notes).
+- `fail` — 2 or more tasks introduce new capabilities OR any task references an item from an explicit `## Out of Scope` section, OR 2 or more capabilities from Produces are silently absent.
 
 #### Dimension 8: `decisions_honored`
 
@@ -151,6 +152,10 @@ Note: `expected_output:` is a **top-level** YAML key in each T##-PLAN.md (not ne
 - `pass` — count is 0 (all tasks use structured must_haves schema).
 - `warn` — count is 1 or more (at least one task uses the legacy free-text must_haves format). Justification **names the legacy task IDs** (e.g., "T03 uses legacy free-text must_haves").
 - `fail` — **never**. Legacy detection is always `warn` at worst. C13: legacy plans are downgraded to warn, not fail.
+
+### Step 3.5 — Camada 1 ↔ Camada 2 linkage
+
+**Note on scope-reduction detection (Dimensions 1 & 7):** The planner is bound by an explicit constraint (camada 1) to never silently drop or omit a declared requirement without annotation. Dimensions 1 (`completeness`) and 7 (`scope_alignment`) are the detection layer (camada 2) that flags when this constraint is violated. When scoring these dimensions, specifically check for silently-dropped requirements (declared in ROADMAP/SCOPE/CONTEXT § Produces but absent from all tasks and from the `## Notes` section of `S##-PLAN.md`). This linkage closes the loop: planner declares, plan-checker detects.
 
 ### Step 4 — Write S##-PLAN-CHECK.md
 

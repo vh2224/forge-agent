@@ -34,6 +34,16 @@ try {
   } catch { runs = null; filelock = null; }
 }
 
+// ── Resolve context-monitor module — same dev/installed pattern ──
+let ctxMonitor = null;
+try {
+  ctxMonitor = require(path.join(__dirname, 'scripts', 'forge-context-monitor.js'));
+} catch {
+  try {
+    ctxMonitor = require(path.join(__dirname, 'forge-context-monitor.js'));
+  } catch { ctxMonitor = null; }
+}
+
 // Sanitize run_id for safe filesystem use (evidence-{runId}-{unitId}.jsonl)
 function sanitizeRunId(id) {
   return String(id || 'adhoc').replace(/[^\w.\-]/g, '_');
@@ -484,6 +494,37 @@ process.stdin.on('end', () => {
           fs.appendFileSync(evidenceFile, serialized + '\n', 'utf8');
         }
       } catch { /* silent-fail — hook must never crash Claude Code (MEM008) */ }
+    }
+
+    // ── PostToolUse: proactive context monitor (writes additionalContext, never blocks) ──
+    // Complements (does not replace) the PostCompact reactive recovery.
+    if (phase === 'post') {
+      try {
+        if (ctxMonitor && sessionId) {
+          const prefs = ctxMonitor.readContextMonitorPrefs(cwd);
+          if (prefs.enabled) {
+            const bridgeFile = path.join(os.tmpdir(), `forge-ctx-${sessionId}.json`);
+            let bridge = null;
+            try { bridge = JSON.parse(fs.readFileSync(bridgeFile, 'utf8')); } catch {}
+            if (bridge && !ctxMonitor.isStale(bridge.ts)) {
+              const severity = ctxMonitor.severityFor(bridge.context_pct_remaining, prefs.thresholds);
+              const debounceFile = path.join(os.tmpdir(), `forge-ctx-debounce-${sanitizeRunId(sessionId)}.json`);
+              let dstate = {};
+              try { dstate = JSON.parse(fs.readFileSync(debounceFile, 'utf8')); } catch {}
+              const decision = ctxMonitor.shouldInject(severity, dstate);
+              try { fs.writeFileSync(debounceFile, JSON.stringify(decision.nextState), 'utf8'); } catch {}
+              if (decision.inject) {
+                process.stdout.write(JSON.stringify({
+                  hookSpecificOutput: {
+                    hookEventName: 'PostToolUse',
+                    additionalContext: ctxMonitor.buildAdditionalContext(severity, prefs.thresholds),
+                  },
+                }));
+              }
+            }
+          }
+        }
+      } catch { /* silent-fail — context monitor never aborts a tool call (MEM008) */ }
     }
 
     // Only track Agent tool dispatches (from here on)

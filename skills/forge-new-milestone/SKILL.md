@@ -112,6 +112,8 @@ Then proceed to Step 3.
 
 Delegate to an isolated subagent to keep brainstorm output out of main context:
 
+> Antes de despachar o brainstorm, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) com duração estimada apropriada para esta subagent (consulte a tabela de duração).
+
 ```
 Agent({
   description: "Brainstorm {MILESTONE_ID}",
@@ -128,6 +130,8 @@ After the agent returns, confirm `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-
 **If FAST_MODE=true:** Skip to Step 4.
 
 Delegate to an isolated subagent to keep scope clarity output out of main context:
+
+> Antes de despachar o scope-clarity, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) com duração estimada apropriada para esta subagent (consulte a tabela de duração).
 
 ```
 Agent({
@@ -211,6 +215,9 @@ echo '{
 
 Read:
 - `.gsd/AUTO-MEMORY.md` first 80 lines (or skip if missing)
+
+Emita o banner de liveness (ver `shared/forge-dispatch.md § Spawn Liveness Banner`):
+`◆ Despachando forge-planner… (roda em subagente — sem output até retornar, ~2–5 min; esperado, não é travamento)`
 
 Then delegate to `forge-planner` agent:
 
