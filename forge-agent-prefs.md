@@ -522,7 +522,7 @@ plan_check:
 
 ## Review Settings
 
-Controla o **review gate dialético** que roda no orquestrador antes de `complete-slice` (no diff do slice ainda não-mergeado). Dois agentes se confrontam sobre o código — `forge-reviewer` (challenger, acha bugs/brechas) × `forge-advocate` (defender, o autor) — e o humano só arbitra as objeções em que os dois discordam. Advisory: **nunca bloqueia** o `complete-slice`.
+Controla o **review gate dialético** que roda no orquestrador antes de `complete-slice` (no diff do slice ainda não-mergeado). Dois agentes se confrontam sobre o código — `forge-reviewer` (challenger, acha bugs/brechas) × `forge-advocate` (defender, o autor) — e o humano só arbitra as objeções em que os dois discordam. O que os dois **concordam** que está quebrado (`concedida`) é corrigido na hora (dispatch `review-fix`); o que fica `aberta` em modo auto sobe ao operador na **triagem final da milestone** (antes do `complete-milestone`). O gate **nunca bloqueia** o `complete-slice`.
 
 ```
 review:
@@ -530,6 +530,7 @@ review:
   style: dialectic    # dialectic | flags
   rounds: 1           # 0–3 rodadas de réplica do reviewer sobre a defesa
   ask_in_auto: defer  # defer | pause
+  fix_conceded: true  # true | false — corrige automaticamente as objeções concedidas
 ```
 
 ### Semântica
@@ -537,26 +538,27 @@ review:
 - `mode: enabled` (padrão): o gate roda. `disabled`: pula inteiramente — nenhum `S##-REVIEW.md` é gerado.
 - `style: dialectic` (padrão): loop completo challenge → defense → rebuttal → resolução. Objeções `aberta`s sobem ao humano (via `AskUserQuestion` em modo interativo). `style: flags`: single-pass legado — só o reviewer, grava `## ⚠ Review Flags` em `S##-REVIEW.md`, sem defesa nem perguntas. Opt-out do debate.
 - `rounds` (padrão `1`): quantas vezes o reviewer replica à defesa do advocate. `0` = sem réplica (toda objeção contestada vira `aberta`). Cap em `3`.
-- `ask_in_auto` (padrão `defer`): em `forge-auto`, `defer` **não pausa** — registra `aberta`s/`concedida`s no `S##-REVIEW.md` e segue (honra a AUTONOMY RULE). `pause` faz o `forge-auto` perguntar ao humano mesmo no modo autônomo (opt-in).
+- `ask_in_auto` (padrão `defer`): em `forge-auto`, `defer` **não pausa no meio do loop** — marca as `aberta`s como `deferido → triagem no fim da milestone` e segue (honra a AUTONOMY RULE). **Defer não engole:** todo item deferido é apresentado ao operador na triagem final, antes do `complete-milestone` rodar de fato. `pause` faz o `forge-auto` perguntar ao humano por slice, mesmo no modo autônomo (opt-in).
+- `fix_conceded` (padrão `true`): objeções **concedidas** (challenger e advocate concordam que o problema é real) disparam um `review-fix` — `forge-executor` corrige só os itens listados, commit `fix(review): ...`, ainda no branch do slice. Sem re-review do commit de fix (evita ping-pong). `false`: volta ao comportamento legado — concedidas são registradas e (em modo interativo) perguntadas uma vez.
 
 ### Resolução das objeções
 
 | advocate | réplica do reviewer | resolução |
 |----------|---------------------|-----------|
-| conceded | (qualquer) | **CONCEDIDA** — ambos veem um problema real → item de ação |
+| conceded | (qualquer) | **CONCEDIDA** — ambos veem um problema real → **corrigida na hora** (`review-fix`, se `fix_conceded: true`) |
 | refuted  | withdrawn | **RESOLVIDA** — o advocate convenceu o reviewer → sem ação |
-| refuted  | maintained | **ABERTA** — discordância genuína → humano decide |
+| refuted  | maintained | **ABERTA** — discordância genuína → humano decide (ao vivo no interativo; triagem final no auto) |
 | open     | withdrawn | **RESOLVIDA** — reviewer retirou → sem ação |
-| open     | maintained | **ABERTA** — tradeoff real → humano decide |
+| open     | maintained | **ABERTA** — tradeoff real → humano decide (ao vivo no interativo; triagem final no auto) |
 
 ### Cross-references
 
 - Spec autoritativa: `shared/forge-review.md` (procedimento completo do gate).
 - Challenger: `agents/forge-reviewer.md` (challenge mode + rebuttal mode).
 - Defender: `agents/forge-advocate.md`.
-- Dispatch guard: `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` (antes de `complete-slice`; idempotente — se `S##-REVIEW.md` já existe, pula).
-- Artefato gerado: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (per-slice) ou `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md` (task solta) — durável com a unidade; limpo por `milestone_cleanup`.
-- Dois boundaries: per-slice (gate antes de `complete-slice` em `forge-auto`/`forge-next`) e task solta (`/forge-task` step 5.5, sempre interativo). Ambos honram `mode`/`style`/`rounds`; `ask_in_auto` só se aplica ao `forge-auto`.
+- Dispatch guard: `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` (antes de `complete-slice`; idempotente — se `S##-REVIEW.md` já existe, pula). Triagem final: mesmos skills, antes de `complete-milestone` (`shared/forge-review.md § Step 9`).
+- Artefato gerado: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (per-slice) ou `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md` (task solta) — durável com a unidade; limpo por `milestone_cleanup`. Follow-ups da triagem final vão para `.gsd/KNOWLEDGE.md § Review follow-ups` (sobrevive cleanup).
+- Dois boundaries: per-slice (gate antes de `complete-slice` em `forge-auto`/`forge-next`) e task solta (`/forge-task` step 5.5, sempre interativo). Ambos honram `mode`/`style`/`rounds`/`fix_conceded`; `ask_in_auto` só se aplica ao `forge-auto`.
 
 ## Token Budget Settings
 

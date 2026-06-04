@@ -219,11 +219,15 @@ The produced `T##-SECURITY.md` will be injected into the execute-task worker pro
    - Challenge → `Agent({ subagent_type: 'forge-reviewer', … })`
    - Defense → `Agent({ subagent_type: 'forge-advocate', … })`
    - Rebuttal × `rounds` → `forge-reviewer` in rebuttal mode (DEFENSE injected)
-   - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6). In interactive mode each OPEN objection is put to the user via `AskUserQuestion` (Step 7) — `Manter abordagem` / `Refatorar agora` / `Criar follow-up` — and the decision is written back into `{S##}-REVIEW.md`.
+   - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6).
+   - **CONCEDED items → fix now (Step 7a):** dispatch `Agent({ subagent_type: 'forge-executor', … })` with `UNIT: review-fix/{S##}` to fix ONLY the conceded items on the still-unmerged slice branch (skip when `review.fix_conceded: false` — then list and ask once, legacy behavior). Mark each `**Correção:** aplicada — commit {sha}` or `falhou — deferida para triagem final`. No re-review of the fix commit.
+   - **OPEN items (Step 7b, interactive):** each OPEN objection is put to the user via `AskUserQuestion` — `Manter abordagem` / `Refatorar agora` (dispatches a `review-fix` unit for the accepted items) / `Criar follow-up` — and the decision is written back into `{S##}-REVIEW.md`.
    - Append the `review` event to `events.jsonl` (Step 8).
 4. The gate **never blocks** — any `Agent()` throw is recorded and the step proceeds to `complete-slice` regardless.
 
 > Fires ONLY when the derived unit is `complete-slice`. Boundary is per-slice; standalone `/forge-task` keeps its own step-5.5 review. After the gate, dispatch `forge-completer` normally.
+
+**Review triage gate (before complete-milestone):** If `unit_type == complete-milestone`, run the milestone-final triage (`shared/forge-review.md § Step 9`) BEFORE dispatching `forge-completer`. In pure forge-next sessions OPEN items were already decided live per-slice, so this usually finds nothing and skips silently — it exists for mixed sessions (slices run under `forge-auto` with `ask_in_auto: defer`, milestone closed via `forge-next`): scan all `{S##}-REVIEW.md` for pending `deferido`/`falhou — deferida` items, triage each via `AskUserQuestion`, dispatch ONE `review-fix/{M###}-triage` for the `Refatorar agora` items, write decisions back, append the `review-triage` event. Never blocks the close-out.
 
 **Plan-check gate (between plan-slice and first execute-task):**
 

@@ -223,7 +223,7 @@ fi
 
 You are the orchestrator. Execute the dispatch loop until the milestone is complete or a stop condition is hit.
 
-**AUTONOMY RULE — CRITICAL:** This is FULLY AUTONOMOUS mode. After each unit completes with `status: done`, proceed IMMEDIATELY to the next unit. Do NOT pause to ask the user if they want to continue. Do NOT ask for confirmation between units. Do NOT summarize progress and wait for input. The ONLY reasons to STOP the loop are: milestone complete, worker returned `blocked`/`partial`, or pause requested. Between units, emit the progress line and move on — nothing else.
+**AUTONOMY RULE — CRITICAL:** This is FULLY AUTONOMOUS mode. After each unit completes with `status: done`, proceed IMMEDIATELY to the next unit. Do NOT pause to ask the user if they want to continue. Do NOT ask for confirmation between units. Do NOT summarize progress and wait for input. The ONLY reasons to STOP the loop are: milestone complete, worker returned `blocked`/`partial`, or pause requested. Between units, emit the progress line and move on — nothing else. **Single sanctioned exception:** the review triage gate before `complete-milestone` (see Dispatch guards) MAY ask the user — every slice is done at that point, so arbitrating deferred review items there does not violate this rule.
 
 **COMPACTION RESILIENCE — CRITICAL:** Claude Code may auto-compact the conversation context during a long autonomous run. This is NOT a stopping condition. If you detect that your in-memory variables (`PREFS`, `EFFORT_MAP`, `THINKING_OPUS`, `session_units`, `ALL_MEMORIES`) appear undefined or missing, context was likely compacted. Recovery protocol — execute immediately without telling the user:
 1. Read `.gsd/forge/auto-mode.json` — if `active: true`, the loop MUST continue
@@ -396,11 +396,23 @@ The produced `T##-SECURITY.md` will be injected into that task's worker prompt a
    - Challenge → `Agent({ subagent_type: 'forge-reviewer', … })`
    - Defense → `Agent({ subagent_type: 'forge-advocate', … })`
    - Rebuttal × `rounds` → `forge-reviewer` in rebuttal mode (DEFENSE injected)
-   - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6), handle OPEN/CONCEDED per `ask_in_auto` (Step 7 — `defer` does NOT pause; `pause` asks).
+   - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6).
+   - **CONCEDED items → fix now (Step 7a):** dispatch `Agent({ subagent_type: 'forge-executor', … })` with `UNIT: review-fix/{S##}` to fix ONLY the conceded items on the still-unmerged slice branch (skip when `review.fix_conceded: false`). On success mark each `**Correção:** aplicada — commit {sha}`; on failure mark `falhou — deferida para triagem final`. No re-review of the fix commit.
+   - **OPEN items → posture (Step 7b):** `ask_in_auto: defer` (default) marks each `**Decisão:** deferido → triagem no fim da milestone` and continues WITHOUT pausing — they are guaranteed to surface at the milestone-final triage gate below. `pause` (opt-in) asks per-slice via `AskUserQuestion`.
    - Append the `review` event to `events.jsonl` (Step 8).
 4. The gate **never blocks** — any `Agent()` throw is recorded and the loop proceeds to `complete-slice` regardless.
 
 > Fires ONLY when the derived unit is `complete-slice`. Boundary is per-slice; standalone `/forge-task` keeps its own step-5.5 review. After the gate, dispatch `forge-completer` normally.
+
+**Review triage gate (before complete-milestone):** If `unit_type == complete-milestone`, run the **milestone-final triage** (`shared/forge-review.md § Step 9`) BEFORE dispatching `forge-completer` — i.e., before the milestone is finalized "de fato" (final close-out, LEDGER entry, cleanup):
+
+1. Scan all `{S##}-REVIEW.md` under `.gsd/milestones/{M###}/slices/*/` for pending items: `Decisão: deferido → triagem no fim da milestone`, `Correção: falhou — deferida para triagem final`, or legacy `Decisão: deferido (auto-mode)`.
+2. Zero pending → skip silently and dispatch `complete-milestone` normally.
+3. Otherwise print the digest table (slice · R# · path:line · objeção · status) and triage each item via `AskUserQuestion` (batched up to 4, header `Review M###`): `Manter abordagem atual` / `Refatorar agora` / `Criar follow-up`.
+4. `Refatorar agora` items → ONE `review-fix/{M###}-triage` dispatch to `forge-executor` (slices already merged — fixes are normal commits). Write every decision back into the R#'s `**Decisão:**` line; `Criar follow-up` items also append to `.gsd/KNOWLEDGE.md § Review follow-ups` (survives `milestone_cleanup`).
+5. Append the `review-triage` event to `events.jsonl`. The triage **never blocks** the milestone close-out.
+
+> **This gate is the explicit exception to the AUTONOMY RULE** — at this point every slice is done; asking the operator here is the designed arbitration moment that `defer` postponed to. It does not fire on pause/blocked/partial exits — only when the derived unit is `complete-milestone`.
 
 **Plan-check gate (between plan-slice and first execute-task):**
 
@@ -1052,8 +1064,16 @@ Slices entregues:
 |-------|--------|-------|
 | S01   | ...    | 3     |
 
+⚖ Review — digest da milestone:
+| Slice | Objeções | Corrigidas (concedidas) | Triadas | Follow-ups |
+|-------|----------|-------------------------|---------|------------|
+| S01   | 5        | 2                       | 1       | 0          |
+{follow-up lines, if any: "R# path:line — <objeção>" → .gsd/KNOWLEDGE.md § Review follow-ups}
+
 Próximo milestone: /forge-new-milestone <descrição>
 ```
+
+The review digest is built from the `review` / `review-triage` events in `events.jsonl` (fallback: scan the `**Outcome:**` lines of each `{S##}-REVIEW.md`). Omit the section entirely when the milestone had zero objections.
 
 ---
 
