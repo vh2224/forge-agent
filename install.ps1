@@ -136,7 +136,7 @@ function Downgrade-OpusTo47 {
 }
 
 # Sync opus model references in prefs file with the current agent frontmatter model.
-# Replaces both `claude-opus-4-7` and `claude-opus-4-8[1m]` with $Target.
+# Replaces `claude-opus-4-7`, `claude-opus-4-7[1m]` and `claude-opus-4-8[1m]` with $Target.
 # Touches only opus model strings — sonnet/haiku and user customizations for other
 # models are preserved. If user explicitly pinned a phase to claude-opus-4-7, they
 # must reapply manually (edge case; documented in installer output).
@@ -150,9 +150,14 @@ function Sync-PrefsOpusModel {
     $content = Get-Content $PrefsFile -Raw
     # Placeholder approach: collapse both IDs to a temp token, then expand to Target.
     # Escape regex-special brackets in the source patterns only.
+    # Order matters: [1m] variants BEFORE the bare ID, or the bare pattern matches as a
+    # substring of claude-opus-4-7[1m] and leaves an orphan [1m] behind (=> "4-8[1m][1m]").
+    # Final collapse repairs files already damaged by the pre-fix migration.
     $content = $content -replace 'claude-opus-4-8\[1m\]', '@@FORGE_OPUS_TMP@@'
+    $content = $content -replace 'claude-opus-4-7\[1m\]', '@@FORGE_OPUS_TMP@@'
     $content = $content -replace 'claude-opus-4-7', '@@FORGE_OPUS_TMP@@'
     $content = $content -replace '@@FORGE_OPUS_TMP@@', $Target
+    $content = $content -replace '\[1m\]\[1m\]', '[1m]'
     Set-Content $PrefsFile $content -NoNewline
 }
 

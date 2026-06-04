@@ -154,7 +154,7 @@ downgrade_opus_to_47() {
 }
 
 # Sync opus model references in prefs file with the current agent frontmatter model.
-# Replaces both `claude-opus-4-7` and `claude-opus-4-8[1m]` with $1 (target).
+# Replaces `claude-opus-4-7`, `claude-opus-4-7[1m]` and `claude-opus-4-8[1m]` with $1 (target).
 # Touches only opus model strings — sonnet/haiku refs and user-customized rows for other
 # models are preserved. If user explicitly pinned a phase to claude-opus-4-7, they must
 # reapply manually after install (edge case; documented in installer output).
@@ -168,7 +168,10 @@ sync_prefs_opus_model() {
   fi
   # Placeholder approach: collapse both IDs to a temp token, then expand to target.
   # [1m] contains regex-special brackets — escape in the pattern only.
-  _sed_inplace_probe "s|claude-opus-4-8\[1m\]|@@FORGE_OPUS_TMP@@|g; s|claude-opus-4-7|@@FORGE_OPUS_TMP@@|g; s|@@FORGE_OPUS_TMP@@|${target}|g" "$prefs"
+  # Order matters: [1m] variants BEFORE the bare ID, or the bare pattern matches as a
+  # substring of claude-opus-4-7[1m] and leaves an orphan [1m] behind (→ "4-8[1m][1m]").
+  # Final collapse repairs files already damaged by the pre-fix migration.
+  _sed_inplace_probe "s|claude-opus-4-8\[1m\]|@@FORGE_OPUS_TMP@@|g; s|claude-opus-4-7\[1m\]|@@FORGE_OPUS_TMP@@|g; s|claude-opus-4-7|@@FORGE_OPUS_TMP@@|g; s|@@FORGE_OPUS_TMP@@|${target}|g; s|\[1m\]\[1m\]|[1m]|g" "$prefs"
 }
 
 if $DRY_RUN; then
