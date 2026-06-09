@@ -204,6 +204,33 @@ else
   fi
 fi
 
+# ── Fable 5 model availability probe ──────────────────────────────────────────
+# The `max` tier defaults to claude-fable-5 (plan-milestone, risk:high plan-slice,
+# blocker escalation). If the account doesn't have access, tier_models.max in prefs
+# is redirected to the resolved Opus target. Skip with --no-model-probe.
+FABLE_DOWNGRADE=false
+
+if $DRY_RUN || $NO_MODEL_PROBE; then
+  :  # skip — keep claude-fable-5 as the max tier default
+elif ! command -v claude >/dev/null 2>&1; then
+  :  # CLI missing — already reported above; keep default
+else
+  info "Verificando disponibilidade de claude-fable-5 (tier max)..."
+  set +e
+  fable_out=$(claude -p "ok" --model 'claude-fable-5' --max-turns 1 2>&1)
+  fable_exit=$?
+  set -e
+  if [ $fable_exit -eq 0 ]; then
+    success "  claude-fable-5 disponível — tier max usará Fable 5"
+  elif echo "$fable_out" | grep -qiE "model.*not.*(found|available|supported|allowed)|invalid.*model|404|not_found|does not have access|issue with.*model|may not exist|may not have access"; then
+    warn "  claude-fable-5 indisponível nesta conta — tier max será redirecionado para Opus"
+    FABLE_DOWNGRADE=true
+  else
+    info "  Probe inconclusivo — mantendo claude-fable-5 no tier max"
+    info "  Se plan-milestone falhar em runtime, edite tier_models.max via /forge-prefs"
+  fi
+fi
+
 echo ""
 info "Installing commands..."
 # Remove commands that no longer exist in the repo (migrated to skills)
@@ -311,6 +338,31 @@ if $SYNC_PREFS && [ -f "$PREFS_DST" ]; then
     info "  prefs opus model sincronizado: ${OPUS_TARGET}"
     info "  (se você fixou uma fase em claude-opus-4-7 manualmente, reaplique via /forge-prefs)"
   fi
+fi
+
+# ── Downgrade fable max tier in prefs (probe-driven) ──────────────────────────
+# Runs AFTER the opus sync so the target is the final resolved Opus ID. Replaces
+# claude-fable-5 in tier_models.max; if the user's preserved prefs predate the max
+# tier, the line is inserted after heavy: so the runtime fallback (claude-fable-5)
+# never fires on an account without access.
+if $FABLE_DOWNGRADE && [ -f "$PREFS_DST" ]; then
+  if command -v node >/dev/null 2>&1; then
+    FORGE_FABLE_TARGET="$OPUS_TARGET" node -e '
+      const fs = require("fs");
+      const p = process.argv[1], target = process.env.FORGE_FABLE_TARGET;
+      let t = fs.readFileSync(p, "utf8");
+      if (t.includes("claude-fable-5")) {
+        t = t.split("claude-fable-5").join(target);
+      } else if (/^tier_models:/m.test(t) && !/^  max:/m.test(t)) {
+        t = t.replace(/^(  heavy:.*)$/m, "$1\n  max:      " + target + "  # claude-fable-5 indisponivel (probe)");
+      }
+      fs.writeFileSync(p, t);
+    ' "$PREFS_DST"
+  else
+    # node missing — handle the common case (line present in prefs template)
+    _sed_inplace_probe "s|claude-fable-5|${OPUS_TARGET}|g" "$PREFS_DST"
+  fi
+  info "  tier_models.max redirecionado: ${OPUS_TARGET}"
 fi
 
 # ── Install statusline + hooks ────────────────────────────────────────────────

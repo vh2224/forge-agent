@@ -201,6 +201,38 @@ if ($DryRun) {
     }
 }
 
+# ── Fable 5 model availability probe ──────────────────────────────────────────
+# The max tier defaults to claude-fable-5 (plan-milestone, risk:high plan-slice,
+# blocker escalation). If the account doesn't have access, tier_models.max in prefs
+# is redirected to the resolved Opus target. Skip with -NoModelProbe.
+$script:FableDowngrade = $false
+
+if ($DryRun -or $NoModelProbe) {
+    # skip — keep claude-fable-5 as the max tier default
+} elseif (-not $ClaudeForProbe) {
+    # CLI missing — already reported above; keep default
+} else {
+    Info "Verificando disponibilidade de claude-fable-5 (tier max)..."
+    $fableOut = ""
+    $fableExit = 1
+    try {
+        $fableOut = & claude -p "ok" --model 'claude-fable-5' --max-turns 1 2>&1 | Out-String
+        $fableExit = $LASTEXITCODE
+    } catch {
+        $fableOut = $_.Exception.Message
+        $fableExit = 1
+    }
+    if ($fableExit -eq 0) {
+        Success "  claude-fable-5 disponível — tier max usará Fable 5"
+    } elseif ($fableOut -imatch "model.*not.*(found|available|supported|allowed)|invalid.*model|404|not_found|does not have access|issue with.*model|may not exist|may not have access") {
+        Warn "  claude-fable-5 indisponível nesta conta — tier max será redirecionado para Opus"
+        $script:FableDowngrade = $true
+    } else {
+        Info "  Probe inconclusivo — mantendo claude-fable-5 no tier max"
+        Info "  Se plan-milestone falhar em runtime, edite tier_models.max via /forge-prefs"
+    }
+}
+
 # ── Install commands ──────────────────────────────────────────────────────────
 Write-Host ""
 Info "Instalando comandos..."
@@ -283,6 +315,23 @@ if ($script:SyncPrefs -and (Test-Path $prefsFile)) {
         Info "  prefs opus model sincronizado: $($script:OpusTarget)"
         Info "  (se você fixou uma fase em claude-opus-4-7 manualmente, reaplique via /forge-prefs)"
     }
+}
+
+# ── Downgrade fable max tier in prefs (probe-driven) ──────────────────────────
+# Runs AFTER the opus sync so the target is the final resolved Opus ID. Replaces
+# claude-fable-5 in tier_models.max; if the user's preserved prefs predate the max
+# tier, the line is inserted after heavy: so the runtime fallback (claude-fable-5)
+# never fires on an account without access.
+if ($script:FableDowngrade -and (Test-Path $prefsFile)) {
+    $content = Get-Content $prefsFile -Raw
+    if ($content -match 'claude-fable-5') {
+        $content = $content -replace 'claude-fable-5', $script:OpusTarget
+    } elseif ($content -match '(?m)^tier_models:' -and $content -notmatch '(?m)^  max:') {
+        $maxLine = "  max:      " + $script:OpusTarget + "  # claude-fable-5 indisponivel (probe)"
+        $content = $content -replace '(?m)^(  heavy:.*)$', ('$1' + "`n" + $maxLine)
+    }
+    Set-Content $prefsFile $content -NoNewline
+    Info "  tier_models.max redirecionado: $($script:OpusTarget)"
 }
 
 # ── Install shared references ─────────────────────────────────────────────────

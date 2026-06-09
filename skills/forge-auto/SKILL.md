@@ -302,7 +302,7 @@ declare -A TIER_DEFAULTS=(
   [memory-extract]="light" [complete-slice]="light" [complete-milestone]="light"
   [research-milestone]="standard" [research-slice]="standard"
   [discuss-milestone]="standard" [discuss-slice]="standard" [execute-task]="standard"
-  [plan-milestone]="heavy" [plan-slice]="heavy"
+  [plan-milestone]="max" [plan-slice]="heavy"
 )
 TIER="${TIER_DEFAULTS[$unit_type]:-standard}"
 REASON="unit-type:$unit_type"
@@ -321,17 +321,30 @@ if [ "$unit_type" = "execute-task" ]; then
   fi
 fi
 
+# Step 3b: risk escalation (plan-slice only) — risk:high slice escalates heavy → max.
+# Same ROADMAP check that triggers the risk radar gate below.
+if [ "$unit_type" = "plan-slice" ]; then
+  ROADMAP_PATH=".gsd/milestones/${M###}/${M###}-ROADMAP.md"
+  if grep -E "${S##}.*risk:[[:space:]]*high" "$ROADMAP_PATH" >/dev/null 2>&1; then
+    TIER="max"; REASON="risk-escalation:high"
+  fi
+fi
+
 # Step 4: resolve model — PREFS.tier_models[tier] with fallback to forge-tiers.md defaults
 MODEL_ID=$(node -e "
   let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
-  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8'};
+  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8','max':'claude-fable-5'};
   const tier='$TIER';
-  const validTiers=['light','standard','heavy'];
+  const validTiers=['light','standard','heavy','max'];
   const t=validTiers.includes(tier)?tier:'standard';
   process.stdout.write((p.tier_models||{})[t]||d[t]);
 ")
 ```
 `TIER`, `MODEL_ID`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
+
+> **Fable 5 thinking guard:** if `$MODEL_ID` is `claude-fable-5`, inject `thinking: adaptive` in the
+> worker prompt header (or omit the `thinking:` line) regardless of the phase's `thinking:` pref —
+> `claude-fable-5` returns HTTP 400 on an explicit `thinking: disabled` (Opus 4.7/4.8 accept it).
 
 **Batch determination (step 1.6 — execute-task only):** When `unit_type == execute-task`, the dispatch is no longer strictly single-task. Invoke `scripts/forge-parallelism.js` to compute a **ready batch** — a set of tasks in the active slice whose `depends:[]` are satisfied AND whose `writes:[]` don't overlap with each other.
 
@@ -978,7 +991,7 @@ Parse the `---GSD-WORKER-RESULT---` block:
 
 | Class | Signals | Auto-recovery |
 |-------|---------|---------------|
-| `context_overflow` | "context limit", "too long", "token" | Retry with `complexity: heavy` routing (opus) — larger context window |
+| `context_overflow` | "context limit", "too long", "token" | Retry one tier up: `standard → heavy` (opus), `heavy → max` (fable). If already `max` → stop loop, surface to user. Apply the Fable 5 thinking guard when escalating to `max`. |
 | `scope_exceeded` | "out of scope", "too broad", "multiple tasks" | Stop loop. Tell user: "Task scope too broad — ask forge-planner to split T## into smaller tasks." |
 | `model_refusal` | "cannot", "I'm not able", "policy" | Retry once with a different model (sonnet ↔ opus). If fails again → stop loop, surface to user. |
 | `tooling_failure` | "command not found", "permission denied", "ENOENT" | Stop loop. Tell user: "Tooling error — check that required tools are installed and accessible." |

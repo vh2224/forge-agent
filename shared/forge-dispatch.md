@@ -873,21 +873,27 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
 3. **Apply precedence rules (first match wins):**
    - If `PLAN_TIER` is non-empty → `tier = PLAN_TIER`, `reason = "frontmatter-override:${PLAN_TIER}"`.
    - Else if `PLAN_TAG == "docs"` → `tier = "light"`, `reason = "frontmatter-tag:docs"`.
+   - Else if `unit_type == plan-slice` AND the slice is tagged `risk:high` in the milestone ROADMAP → `tier = "max"`, `reason = "risk-escalation:high"`. (Same ROADMAP check that triggers the `forge-risk-radar` gate.)
    - Else → `tier` stays as unit-type default, `reason = "unit-type:${unit_type}"`.
 4. **Resolve model.** Look up `PREFS.tier_models[tier]`; fall back to the [Tier → Default Model](forge-tiers.md#tier--default-model) table when the key is absent:
    ```bash
    model=$(node -e "
      const prefs=require('./.gsd/prefs-resolved.json')||{};
-     const defaults={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8'};
+     const defaults={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8','max':'claude-fable-5'};
      const m=(prefs.tier_models||{})['$tier']||defaults['$tier'];
      process.stdout.write(m);
    ")
    ```
-   If `tier` is not one of `light | standard | heavy`, treat as `standard` (defensive fallback).
+   If `tier` is not one of `light | standard | heavy | max`, treat as `standard` (defensive fallback).
+
+   > **Fable 5 thinking guard:** when the resolved model is `claude-fable-5`, force the worker prompt
+   > header to `thinking: adaptive` (or omit the `thinking:` line) regardless of phase prefs —
+   > `claude-fable-5` returns HTTP 400 on an explicit `thinking: disabled` (Opus 4.7/4.8 accept it).
 5. **Build `reason` string.** By this step `reason` is already set by step 3. Confirm it is exactly one of:
    - `"unit-type:<unit_type>"` — no frontmatter override; default used.
    - `"frontmatter-override:<tier>"` — `tier:` field present in T##-PLAN frontmatter.
    - `"frontmatter-tag:docs"` — `tag: docs` in frontmatter, no explicit `tier:`.
+   - `"risk-escalation:high"` — `plan-slice` on a `risk:high` slice; tier escalated `heavy → max`.
    - `"prefs-override:tier_models.<tier>"` — `PREFS.tier_models[tier]` was present (the model was overridden, but tier itself came from default or tag). Note: this reason is only appended as a suffix when the model diverges from the tier default, e.g. `"unit-type:execute-task|prefs-override:tier_models.standard"`. Implementations MAY omit the suffix for simplicity; the first three forms are canonical.
 
 #### Prefs contract
@@ -897,6 +903,7 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
 | `tier_models.light` | string (model ID) | `claude-haiku-4-5-20251001` | Model used when tier resolves to `light` |
 | `tier_models.standard` | string (model ID) | `claude-sonnet-4-6` | Model used when tier resolves to `standard` |
 | `tier_models.heavy` | string (model ID) | `claude-opus-4-8` | Model used when tier resolves to `heavy` |
+| `tier_models.max` | string (model ID) | `claude-fable-5` | Model used when tier resolves to `max` (plan-milestone, `risk:high` plan-slice, blocker escalation). 2x the cost of opus — never a default for high-volume unit types |
 
 The `tier_models` block ships in T05. Until then, the resolver falls back to the defaults above silently.
 
@@ -904,7 +911,7 @@ The `tier_models` block ships in T05. Until then, the resolver falls back to the
 
 | Field | Type | Accepted Values | Effect |
 |-------|------|-----------------|--------|
-| `tier:` | enum | `light \| standard \| heavy` | Explicit tier assignment; takes precedence over `tag:` and unit-type default. The orchestrator reads this immediately after resolving the unit type and short-circuits all other rules. |
+| `tier:` | enum | `light \| standard \| heavy \| max` | Explicit tier assignment; takes precedence over `tag:` and unit-type default. The orchestrator reads this immediately after resolving the unit type and short-circuits all other rules. |
 | `tag:` | string | `docs` (only value active in M002) | When `tag: docs` and no explicit `tier:` is set, downgrades tier to `light`. Intended for documentation-only tasks that do not require code generation. Additional tag values may be introduced in future milestones. |
 
 #### Event log extension
@@ -990,7 +997,7 @@ declare -A TIER_DEFAULTS=(
   [memory-extract]="light" [complete-slice]="light" [complete-milestone]="light"
   [research-milestone]="standard" [research-slice]="standard"
   [discuss-milestone]="standard" [discuss-slice]="standard" [execute-task]="standard"
-  [plan-milestone]="heavy" [plan-slice]="heavy"
+  [plan-milestone]="max" [plan-slice]="heavy"
 )
 TIER="${TIER_DEFAULTS[$UNIT_TYPE]:-standard}"
 REASON="unit-type:$UNIT_TYPE"
@@ -1008,9 +1015,22 @@ if [ "$UNIT_TYPE" = "execute-task" ]; then
   fi
 fi
 
+# Step 3b: risk escalation (plan-slice only) — risk:high slice escalates heavy → max
+if [ "$UNIT_TYPE" = "plan-slice" ]; then
+  ROADMAP_PATH=".gsd/milestones/${MILESTONE_ID}/${MILESTONE_ID}-ROADMAP.md"
+  if grep -E "${UNIT_ID}.*risk:[[:space:]]*high" "$ROADMAP_PATH" >/dev/null 2>&1; then
+    TIER="max"; REASON="risk-escalation:high"
+  fi
+fi
+
 # Step 4: resolve model
-declare -A TIER_MODELS=([light]="claude-haiku-4-5-20251001" [standard]="claude-sonnet-4-6" [heavy]="claude-opus-4-8")
-MODEL_ID=$(node -e "const p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8')||'{}');const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8'};process.stdout.write((p.tier_models||{})['$TIER']||d['$TIER'])")
+declare -A TIER_MODELS=([light]="claude-haiku-4-5-20251001" [standard]="claude-sonnet-4-6" [heavy]="claude-opus-4-8" [max]="claude-fable-5")
+MODEL_ID=$(node -e "const p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8')||'{}');const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8','max':'claude-fable-5'};process.stdout.write((p.tier_models||{})['$TIER']||d['$TIER'])")
+
+# Step 4b: Fable 5 thinking guard — claude-fable-5 400s on explicit thinking:disabled.
+# When MODEL_ID is claude-fable-5, inject "thinking: adaptive" in the worker prompt
+# header (or omit the line), overriding any phase-level "thinking: disabled" pref.
+case "$MODEL_ID" in claude-fable-5*) THINKING_HEADER="adaptive";; esac
 
 # Step 5: extend dispatch event (append after Token Telemetry builds dispatchEvent)
 # Add:  ,"tier":"$TIER","reason":"$REASON"

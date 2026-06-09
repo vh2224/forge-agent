@@ -20,21 +20,27 @@ unless overridden (see [Override Precedence](#override-precedence)).
 | `discuss-milestone` | standard | Ambiguity scoring and AskUserQuestion loops; standard reasoning sufficient |
 | `discuss-slice` | standard | Scoped discussion within a slice |
 | `execute-task` | standard | Code implementation; default standard, can be overridden via frontmatter |
-| `plan-milestone` | heavy | Full decomposition into slices and tasks; requires deep reasoning |
-| `plan-slice` | heavy | Task-level decomposition with dependency analysis and acceptance criteria |
+| `plan-milestone` | max | Full decomposition into slices and tasks; 1 unit per milestone — frontier reasoning justifies the 2x premium |
+| `plan-slice` | heavy | Task-level decomposition with dependency analysis and acceptance criteria. Escalates to `max` when the slice is tagged `risk:high` in ROADMAP (see [Override Precedence](#override-precedence)) |
 
 ---
 
 ## Tier → Default Model
 
-The three tiers map to three model aliases. Operators can override the model for any tier via
+The four tiers map to four model aliases. Operators can override the model for any tier via
 `tier_models:` in `forge-agent-prefs.md` without changing unit-type assignments.
 
 | Tier | Default Model ID | Alias | Intended Workloads | Operator Override Key |
 |---|---|---|---|---|
 | `light` | `claude-haiku-4-5-20251001` | `haiku` | Memory extraction, aggregation, fast summaries | `tier_models.light` |
 | `standard` | `claude-sonnet-4-6` | `sonnet` | Code execution, research, discussion, scoped planning | `tier_models.standard` |
-| `heavy` | `claude-opus-4-8[1m]` | `opus` | Deep architectural planning, full milestone decomposition | `tier_models.heavy` |
+| `heavy` | `claude-opus-4-8[1m]` | `opus` | Deep architectural planning, slice decomposition | `tier_models.heavy` |
+| `max` | `claude-fable-5` | `fable` | Milestone planning, `risk:high` slice planning, last rung of blocker escalation. 2x the cost of opus ($10/$50 vs $5/$25 per MTok) — never a default for high-volume unit types | `tier_models.max` |
+
+> **Fable 5 thinking guard:** `claude-fable-5` returns HTTP 400 on an explicit `thinking: {type: "disabled"}`
+> (Opus 4.7/4.8 accept it). Whenever the resolved model is `claude-fable-5`, the orchestrator must inject
+> `thinking: adaptive` in the worker prompt header — or omit the `thinking:` line entirely — even if the
+> phase prefs say `disabled`. Never forward `disabled` to a `max`-tier dispatch.
 
 ---
 
@@ -45,7 +51,7 @@ before the unit_type default is consulted. The `tier:` field takes precedence ov
 
 | Field | Type | Accepted Values | Effect |
 |---|---|---|---|
-| `tier:` | enum | `light \| standard \| heavy` | Explicitly sets the tier for this unit, overriding both the unit_type default and any tag-based downgrade |
+| `tier:` | enum | `light \| standard \| heavy \| max` | Explicitly sets the tier for this unit, overriding both the unit_type default and any tag-based downgrade |
 | `tag:` | string | `docs` (only value that triggers a tier change in M002) | When `tag: docs`, the unit is downgraded to `light` regardless of unit_type default |
 
 **Note:** Additional `tag:` values may be introduced in future milestones. The `docs` downgrade
@@ -61,7 +67,12 @@ Highest precedence first. The first matching rule wins.
    this field immediately after resolving the unit type and short-circuits all other rules.
 2. **T##-PLAN frontmatter `tag: docs`** — tag-based downgrade to `light`. Applied when no explicit
    `tier:` is set. Intended for documentation-only tasks that do not require code generation.
-3. **Unit type default** — the table in [Unit Type → Default Tier](#unit-type--default-tier) above.
+3. **Risk escalation (`plan-slice` only)** — when `unit_type == plan-slice` and the slice is tagged
+   `risk:high` in the milestone ROADMAP, the tier escalates `heavy → max`. Uses the same ROADMAP
+   check that triggers the `forge-risk-radar` gate. Rationale: a better plan on a high-risk slice
+   is the highest leverage-per-dollar spot for frontier reasoning — it prevents expensive executor
+   rework downstream.
+4. **Unit type default** — the table in [Unit Type → Default Tier](#unit-type--default-tier) above.
    Used when no frontmatter override is present.
 
 ---

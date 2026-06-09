@@ -310,7 +310,8 @@ to re-route any tier without touching orchestrator code or agent frontmatters.
 tier_models:
   light:    claude-haiku-4-5-20251001      # fast, cheap (memory-extract, complete-slice, docs tag)
   standard: claude-sonnet-4-6              # balanced (execute-task default, research, discuss)
-  heavy:    "claude-opus-4-8[1m]"          # deepest reasoning (plan-milestone, plan-slice)
+  heavy:    "claude-opus-4-8[1m]"          # deep reasoning (plan-slice default)
+  max:      claude-fable-5                 # frontier (plan-milestone, risk:high plan-slice, blocker escalation) — 2x opus cost
 ```
 
 ### How this block works
@@ -326,8 +327,14 @@ in [`shared/forge-tiers.md § Tier → Default Model`](shared/forge-tiers.md).
    on an `execute-task` unit promotes it to opus regardless of all other rules.
 2. **`T##-PLAN.md` frontmatter `tag: docs`** — downgrades the unit to `light` unless a `tier:`
    is also set. Intended for documentation-only tasks (no code generation needed).
-3. **Unit type default** — the `unit_type → tier` table locked in `shared/forge-tiers.md`.
+3. **Risk escalation (`plan-slice` only)** — slice tagged `risk:high` no ROADMAP escala
+   `heavy → max` (Fable 5). Mesma checagem que dispara o `forge-risk-radar`.
+4. **Unit type default** — the `unit_type → tier` table locked in `shared/forge-tiers.md`.
    Used when no frontmatter override is present.
+
+> **Fable 5 + thinking:** `claude-fable-5` rejeita `thinking: disabled` explícito (HTTP 400).
+> Quando o tier `max` resolve para Fable 5, o orquestrador injeta `thinking: adaptive` no header
+> do worker independentemente do que a seção `thinking:` deste arquivo diga para a fase.
 
 ### How to override globally
 
@@ -761,6 +768,6 @@ repo_path:    # preenchido pelo install.sh — caminho do repositório gsd-agent
 
 - Para mudar o modelo de uma fase, edite o bloco `tier_models:` na seção `## Tier Settings` acima.
   A tabela Phase → Agent Routing é informacional; o bloco `tier_models:` é a fonte de verdade.
-- Modelos disponíveis: opus (claude-opus-4-8[1m], fallback claude-opus-4-7), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
+- Modelos disponíveis: fable (claude-fable-5 — tier max, 2x custo do opus), opus (claude-opus-4-8[1m], fallback claude-opus-4-7), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
 - Este arquivo é lido pelo orquestrador gsd.md a cada iteração do loop
 - Para mudar comandos de verify, edite o bloco "verification:" acima. Veja scripts/forge-verify.js para a implementação.

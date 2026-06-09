@@ -164,7 +164,7 @@ declare -A TIER_DEFAULTS=(
   [memory-extract]="light" [complete-slice]="light" [complete-milestone]="light"
   [research-milestone]="standard" [research-slice]="standard"
   [discuss-milestone]="standard" [discuss-slice]="standard" [execute-task]="standard"
-  [plan-milestone]="heavy" [plan-slice]="heavy"
+  [plan-milestone]="max" [plan-slice]="heavy"
 )
 TIER="${TIER_DEFAULTS[$unit_type]:-standard}"
 REASON="unit-type:$unit_type"
@@ -183,17 +183,30 @@ if [ "$unit_type" = "execute-task" ]; then
   fi
 fi
 
+# Step 3b: risk escalation (plan-slice only) — risk:high slice escalates heavy → max.
+# Same ROADMAP check that triggers the risk radar gate below.
+if [ "$unit_type" = "plan-slice" ]; then
+  ROADMAP_PATH=".gsd/milestones/${M###}/${M###}-ROADMAP.md"
+  if grep -E "${S##}.*risk:[[:space:]]*high" "$ROADMAP_PATH" >/dev/null 2>&1; then
+    TIER="max"; REASON="risk-escalation:high"
+  fi
+fi
+
 # Step 4: resolve model — PREFS.tier_models[tier] with fallback to forge-tiers.md defaults
 MODEL_ID=$(node -e "
   let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
-  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8'};
+  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8','max':'claude-fable-5'};
   const tier='$TIER';
-  const validTiers=['light','standard','heavy'];
+  const validTiers=['light','standard','heavy','max'];
   const t=validTiers.includes(tier)?tier:'standard';
   process.stdout.write((p.tier_models||{})[t]||d[t]);
 ")
 ```
 `TIER`, `MODEL_ID`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
+
+> **Fable 5 thinking guard:** if `$MODEL_ID` is `claude-fable-5`, inject `thinking: adaptive` in the
+> worker prompt header (or omit the `thinking:` line) regardless of the phase's `thinking:` pref —
+> `claude-fable-5` returns HTTP 400 on an explicit `thinking: disabled` (Opus 4.7/4.8 accept it).
 
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
