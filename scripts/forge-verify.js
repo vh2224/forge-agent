@@ -377,9 +377,71 @@ function runVerificationGate(options) {
   };
 }
 
+/**
+ * Extract the `verify:` field from a plan's YAML frontmatter.
+ *
+ * Supports three shapes:
+ *   - Plain string:    verify: npm test
+ *   - Inline array:    verify: [npm test, npm run lint]
+ *   - Multi-line list: verify:\n  - npm test\n  - npm run lint
+ *
+ * Returns the commands joined with " && ", or null if there is no frontmatter
+ * or no `verify:` field. Throws (message consumed by the CLI catch → exit 2) if
+ * the field resolves to a non-string shape.
+ *
+ * NOTE: the single-line regex anchors trailing whitespace to `[ \t]*` (NOT
+ * `\s*`). `\s` matches `\n`, so `\s*` let the single-line pattern span the
+ * newline into a multi-line YAML list and capture its first "- item" as a plain
+ * string (e.g. taskPlanVerify = "- npm test"), which never reached the
+ * multi-line branch below and produced spurious verification failures.
+ */
+function parsePlanVerify(planContent) {
+  const fmMatch = planContent.match(/^---\n([\s\S]*?)\n---/);
+  if (!fmMatch) return null;
+  const frontmatter = fmMatch[1];
+
+  let taskPlanVerify = null;
+  // Same-line whitespace only ([ \t]*) — must not cross into a YAML list.
+  // (\S.*) forces the captured value to start with a non-space char, so a
+  // `verify:` line that is blank except for trailing spaces (the multi-line
+  // list header) does NOT match here and falls through to the block branch.
+  const verifyLineMatch = frontmatter.match(/^verify:[ \t]*(\S.*)$/m);
+  if (verifyLineMatch) {
+    const raw = verifyLineMatch[1].trim();
+    // Inline array: verify: [cmd1, cmd2]
+    if (raw.startsWith("[")) {
+      // Simple bracket array parse — strip brackets, split on comma
+      const inner = raw.slice(1, raw.endsWith("]") ? raw.length - 1 : raw.length);
+      const items = inner.split(",").map(s => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      taskPlanVerify = items.join(" && ");
+    } else if (raw === "|" || raw === ">") {
+      // Block scalar — not supported; skip
+    } else {
+      // Plain string value
+      taskPlanVerify = raw.replace(/^["']|["']$/g, "");
+    }
+  } else {
+    // Multi-line YAML array: verify:\n  - cmd1\n  - cmd2
+    const verifyBlockMatch = frontmatter.match(/^verify:[ \t]*\n((?:\s+-\s+.+\n?)+)/m);
+    if (verifyBlockMatch) {
+      const items = verifyBlockMatch[1]
+        .split("\n")
+        .map(l => l.replace(/^\s+-\s+/, "").trim())
+        .filter(Boolean);
+      taskPlanVerify = items.join(" && ");
+    }
+  }
+
+  // Validate verify: shape — reject non-string/non-array shapes
+  if (taskPlanVerify !== null && typeof taskPlanVerify !== "string") {
+    throw new Error("verify: field must be a string or array of strings");
+  }
+  return taskPlanVerify;
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
-module.exports = { discoverCommands, runVerificationGate, formatFailureContext, isLikelyCommand };
+module.exports = { discoverCommands, runVerificationGate, formatFailureContext, isLikelyCommand, parsePlanVerify };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 
@@ -427,43 +489,7 @@ if (require.main === module) {
         process.exit(2);
       }
 
-      const fmMatch = planContent.match(/^---\n([\s\S]*?)\n---/);
-      if (fmMatch) {
-        const frontmatter = fmMatch[1];
-        // Extract verify: field — supports string or YAML array
-        const verifyLineMatch = frontmatter.match(/^verify:\s*(.+)$/m);
-        if (verifyLineMatch) {
-          const raw = verifyLineMatch[1].trim();
-          // Inline array: verify: [cmd1, cmd2]
-          if (raw.startsWith("[")) {
-            // Simple bracket array parse — strip brackets, split on comma
-            const inner = raw.slice(1, raw.endsWith("]") ? raw.length - 1 : raw.length);
-            const items = inner.split(",").map(s => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
-            taskPlanVerify = items.join(" && ");
-          } else if (raw === "|" || raw === ">") {
-            // Block scalar — not supported; skip
-          } else {
-            // Plain string value
-            taskPlanVerify = raw.replace(/^["']|["']$/g, "");
-          }
-        } else {
-          // Multi-line YAML array: verify:\n  - cmd1\n  - cmd2
-          const verifyBlockMatch = frontmatter.match(/^verify:\s*\n((?:\s+-\s+.+\n?)+)/m);
-          if (verifyBlockMatch) {
-            const items = verifyBlockMatch[1]
-              .split("\n")
-              .map(l => l.replace(/^\s+-\s+/, "").trim())
-              .filter(Boolean);
-            taskPlanVerify = items.join(" && ");
-          }
-        }
-
-        // Validate verify: shape — reject non-string/non-array shapes
-        if (taskPlanVerify !== null && typeof taskPlanVerify !== "string") {
-          process.stderr.write(JSON.stringify({ error: "verify: field must be a string or array of strings" }) + "\n");
-          process.exit(2);
-        }
-      }
+      taskPlanVerify = parsePlanVerify(planContent);
     }
 
     const startTime = Date.now();
