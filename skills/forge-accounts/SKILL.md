@@ -91,20 +91,24 @@ Notas para mencionar quando fizer sentido:
 
 ### `use <nome>`
 
+Num terminal de verdade, `forge-accounts use <nome>` **já abre o Claude Code** nessa
+conta (um comando, sem copiar nada). Como uma sessão rodando não troca a si mesma, isso
+só funciona num terminal — por isso, chamado in-session (sem TTY), o engine apenas
+**imprime** o comando. Aqui na skill (sem TTY), marque a conta como ativa e apresente
+o comando curto pro usuário rodar:
+
 ```bash
-node "$FA" --use <nome>
+node "$FA" --use <nome>   # in-session: marca ativa + imprime; não abre sessão
 ```
 
-Isso marca a conta como ativa e imprime o **comando de relançamento**. Apresente assim:
-
-> Para usar a conta **`<nome>`**, **saia desta sessão** e rode no seu terminal:
+> Para usar a conta **`<nome>`**, rode **no seu terminal**:
 >
 > ```bash
-> <comando impresso pelo engine>
+> forge-accounts use <nome>
 > ```
 >
-> Se você estava no meio de um milestone, é só rodar `/forge-auto` depois — ele
-> retoma do checkpoint automaticamente.
+> Isso abre o Claude Code já nessa conta. Se você estava no meio de um milestone,
+> rode `/forge-auto` depois — ele retoma do checkpoint automaticamente.
 
 Se o engine errar (conta inexistente / sem token), repasse a mensagem e sugira `add`.
 

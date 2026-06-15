@@ -1262,11 +1262,7 @@ Invoked from Step 7 when the active account's tightest usage window crossed `HAN
 node "$FORGE_SCRIPTS_DIR/forge-accounts.js" --list --json
 ```
 
-From the JSON, candidates = accounts where `has_token == true` AND `name != {account}` (when `{account}` is null, every token-bearing account qualifies). Prefer one with the most `days_left` if several. If a candidate `NEXT` exists, get its exact relaunch command:
-
-```bash
-node "$FORGE_SCRIPTS_DIR/forge-accounts.js" --launch-cmd {NEXT}
-```
+From the JSON, candidates = accounts where `has_token == true` AND `name != {account}` (when `{account}` is null, every token-bearing account qualifies). Prefer one with the most `days_left` if several. The switch command for the chosen `NEXT` is simply `forge-accounts use {NEXT}` (in a terminal it launches claude on that account directly).
 
 **3. Deactivate this run** — see `## Deactivate auto-mode indicator` (deactivate `$RUN_ID` only; never touches other runs). This is what stops the loop; the marker staying recoverable lets the relaunched session resume.
 
@@ -1278,8 +1274,8 @@ If a `NEXT` candidate exists:
    Milestone {RUN_ID} pausado em: {next_action from STATE.md}
 
    Para continuar na conta '{NEXT}', rode no seu terminal:
-     {comando de --launch-cmd}
-   Depois: /forge-auto {RUN_ID}   ← retoma do checkpoint automaticamente
+     forge-accounts use {NEXT}     ← abre o Claude Code nessa conta
+   Depois: /forge-auto {RUN_ID}    ← retoma do checkpoint automaticamente
 ```
 
 If NO alternative account is registered:
@@ -1288,8 +1284,8 @@ If NO alternative account is registered:
    Milestone {RUN_ID} pausado em: {next_action from STATE.md}
 
    Nenhuma conta alternativa registrada. Registre uma e retome:
-     /forge-accounts add <nome>     (precisa de `claude setup-token`)
-     /forge-accounts use <nome>     → mostra o comando de relançamento
+     forge-accounts add <nome>      (no terminal; precisa de `claude setup-token`)
+     forge-accounts use <nome>      → abre o Claude Code nessa conta
    Depois: /forge-auto {RUN_ID}
 ```
 

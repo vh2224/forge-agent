@@ -315,7 +315,9 @@ Flags:
   --add <name> --setup                          force the setup-token flow
   --list [--json]                               list registered accounts
   --current [--json]                            show active account (registry + env)
-  --use <name>                                  mark active + print relaunch command
+  --use <name> [--print]                        switch to the account: in a TTY it
+                                                launches claude on it; --print (or no
+                                                TTY) emits the relaunch command instead
   --launch-cmd <name>                           print relaunch command only
   --token <name>                                print the raw token (for $( ) substitution)
   --rename <old> --to <new>                     rename an account (keeps the token)
@@ -376,7 +378,24 @@ function cliMain() {
       process.stdout.write(`registry: ${data.registry_active || '(none)'}\nsession : ${data.env_active || '(default login)'}\n`);
 
     } else if ('use' in args) {
-      const cmd = useAccount(args.use);
+      const name = assertName(args.use);
+      const cmd = useAccount(name); // marks active + validates token exists
+      // In a real terminal: actually switch — launch claude on this account.
+      // Without a TTY (in-session/`!`/piped) or with --print: emit the command,
+      // since a session can't be started from a non-interactive context.
+      if (process.stdout.isTTY && !('print' in args)) {
+        const { spawnSync } = require('child_process');
+        process.stderr.write(`\nTrocando para a conta '${name}' — iniciando Claude Code…\n`);
+        const r = spawnSync('claude', [], {
+          stdio: 'inherit',
+          env: { ...process.env, FORGE_ACCOUNT: name, CLAUDE_CODE_OAUTH_TOKEN: readToken(name) },
+        });
+        if (r.error) {
+          if (r.error.code === 'ENOENT') throw new Error("comando 'claude' não encontrado no PATH");
+          throw new Error(`falha ao lançar claude: ${r.error.message}`);
+        }
+        process.exit(typeof r.status === 'number' ? r.status : 0);
+      }
       process.stdout.write(cmd + '\n');
 
     } else if ('launch-cmd' in args) {
