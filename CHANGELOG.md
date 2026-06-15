@@ -1,3 +1,17 @@
+## v1.34.0 (2026-06-15) — forge-sweep model-invocable at end of cycle
+
+### Changed
+
+- **`forge-sweep` is now model-invocable (`skills/forge-sweep/SKILL.md`):** removed `disable-model-invocation: true`. The orchestrator can now run the sweep directly via the `Skill` tool at the **end of a milestone/task, once the human has validated the delivered work** — no need for the user to type `/forge-sweep` and no magic confirmation phrase (the positive validation feedback in the conversation is the go-ahead). A new **`## Invocation policy`** section codifies exactly when auto-invocation is allowed and forbidden.
+- **Single confirmation gate — the "re-type with `--apply`" step is eliminated for the end-of-cycle flow:** the recommended path invokes the skill with `--apply` from the start. Step 3 still prints the full preview before any write, and the Step 5 `AskUserQuestion` popup fires as the single final reminder (one yes/no, so a distracted dev isn't surprised). Bare `/forge-sweep` (no args) remains a safe preview-on-demand for anyone.
+- **Risk-aware fallback:** the orchestrator must NOT auto-apply — it falls back to a dry-run + explicit user authorization — when the preview surfaces a specific risk: an AUTO-MEMORY entry flagged `review`, a milestone/task dir skipped for a missing `LEDGER.md` entry, an active milestone phase in `STATE.md`, or a dirty working tree that makes the trim hard to review.
+
+### Why
+
+The previous `disable-model-invocation: true` flag (added in v1.16.0 because the sweep is destructive) forced the user to type `/forge-sweep --apply` explicitly even after work was already validated and the orchestrator had announced the sweep as the next step. The destructiveness is now guarded by the conversational human-validation gate + the in-skill confirmation popup + risk-aware fallback, rather than by blocking model invocation entirely.
+
+---
+
 ## v1.16.0 (2026-05-22) — forge-sweep skill
 
 New maintenance skill, promoted from a project-local draft used in production (WDMA / custody-transfer).

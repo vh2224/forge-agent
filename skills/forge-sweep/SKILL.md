@@ -1,7 +1,6 @@
 ---
 name: forge-sweep
-description: "Prune know-how files (AUTO-MEMORY, CHECKER-MEMORY, DECISIONS, milestones, sessions) per team policy. Default = dry-run preview. Use --apply to execute."
-disable-model-invocation: true
+description: "Prune know-how files (AUTO-MEMORY, CHECKER-MEMORY, DECISIONS, milestones, sessions) per team policy. Default = dry-run preview; --apply executes after a single confirmation popup. Model-invocable at end of a milestone/task once the human has validated the work — see Invocation policy."
 allowed-tools: Read, Write, Bash, Glob, AskUserQuestion
 ---
 
@@ -14,6 +13,28 @@ $ARGUMENTS
 Prune ephemeral GSD artifacts and tighten durable know-how files (AUTO-MEMORY, CHECKER-MEMORY, DECISIONS) at the end of a task or milestone. Goal: keep shared `.gsd/` files lean and long-lived; avoid SVN/Git merge conflicts.
 
 Milestone and task directories are **trimmed in place** (preserving only the `*-SUMMARY.md` file) rather than removed entirely — the directory's continued presence in version control signals to the team that the milestone/task existed and was completed, avoiding the "where did M### go?" confusion when one teammate runs `/forge-sweep` and another pulls the result.
+
+## Invocation policy
+
+This skill is **model-invocable**: the orchestrator may run it directly via the `Skill` tool — the user does NOT have to type `/forge-sweep` for it to run. It is destructive, though, so it runs in exactly one situation:
+
+> **At the end of a milestone or task, after the human has validated the delivered work.** You will normally have just told the user that the next step is the sweep; their positive feedback on the validation IS the go-ahead. There is no magic phrase — read the conversation.
+
+**Recommended end-of-cycle flow — invoke with `--apply` directly:**
+
+1. Call the skill with `--apply` (not bare). Step 3 always prints the preview first, so the user still sees exactly what will be pruned/trimmed before anything is written.
+2. The `--apply` confirmation popup (Step 5, `AskUserQuestion`) fires as the single final reminder — one yes/no so a distracted dev isn't surprised. **This is the only gate.** Do NOT first run a bare dry-run and then ask the user to re-type `/forge-sweep --apply` — that re-type step is eliminated for the end-of-cycle flow.
+
+**When to fall back to dry-run + explicit user authorization** (do NOT auto-apply if the preview surfaces a specific risk):
+
+- any AUTO-MEMORY entry classified `review` (flagged), or
+- a milestone/task dir that would be **skipped** for a missing `LEDGER.md` entry, or
+- the project is **mid-milestone** (an active phase in `STATE.md` — sweeps run only after `complete-milestone` or between tickets), or
+- the working tree is dirty in a way that makes the trim hard to review.
+
+In those cases: present the dry-run, explain the risk in plain language, and ask the user to confirm before you pass `--apply`.
+
+**Never** invoke this skill mid-task, during planning, or speculatively. A bare `/forge-sweep` (no args) remains a safe preview-on-demand that anyone can run at any time.
 
 ## Args
 
@@ -199,7 +220,11 @@ Always print the preview, regardless of mode:
 
 ### 4. If dry-run → stop here
 
+This is the terminal state ONLY for (a) an explicit bare `/forge-sweep` preview-on-demand, or (b) an end-of-cycle run where the preview surfaced a risk (see **Invocation policy**) that needs explicit user authorization before `--apply`.
+
 Print: "Dry-run complete. To apply: /forge-sweep --apply"
+
+In an end-of-cycle wrap-up with the work already validated and no risk flagged, do NOT dead-end here — you should have invoked with `--apply` from the start, so the user gets the preview + the single confirmation popup without re-typing the command.
 
 ### 5. If --apply (and not --force) → confirm
 
