@@ -20,7 +20,9 @@
 // stdout on purpose — that is how the relaunch command injects it via $( ).
 //
 // CLI
-//   node forge-accounts.js --add <name> [--token <tok>] [--note "<n>"]   (token also read from stdin)
+//   node forge-accounts.js --add <name> [--note "<n>"]   (TTY → runs `claude setup-token`
+//                                                          and captures the token automatically;
+//                                                          or --token <tok>, or piped stdin)
 //   node forge-accounts.js --list [--json]
 //   node forge-accounts.js --current [--json]
 //   node forge-accounts.js --use <name>            # mark active + print relaunch cmd
@@ -250,11 +252,35 @@ function readStdinSync() {
   try { return fs.readFileSync(0, 'utf8'); } catch { return ''; }
 }
 
+// Run `claude setup-token` interactively and capture the token automatically.
+// stdin+stderr are inherited so the browser/login flow and its prompts work and
+// stay visible; stdout is captured (setup-token emits the token there). The token
+// is parsed out and never printed — only run this in YOUR terminal (needs a real
+// TTY for the login), never via the in-session skill (no TTY, and it would route
+// the secret through the transcript).
+function runSetupTokenSync() {
+  const { spawnSync } = require('child_process');
+  process.stderr.write('\nAbrindo `claude setup-token` — conclua o login no browser…\n');
+  const r = spawnSync('claude', ['setup-token'], {
+    stdio: ['inherit', 'pipe', 'inherit'],
+    encoding: 'utf8',
+  });
+  if (r.error) {
+    if (r.error.code === 'ENOENT') throw new Error("comando 'claude' não encontrado no PATH");
+    throw new Error(`falha ao rodar 'claude setup-token': ${r.error.message}`);
+  }
+  const m = String(r.stdout || '').match(/sk-ant-oat01-[A-Za-z0-9_-]+/);
+  return m ? m[0] : '';
+}
+
 const HELP = `forge-accounts — multi-account registry & switcher for Forge Agent
 
 Flags:
-  --add <name> [--token <tok>] [--note "<n>"]   register an account
-                                                (token also read from stdin)
+  --add <name> [--note "<n>"]                   register an account — runs
+                                                'claude setup-token' and captures
+                                                the token automatically (in a TTY)
+  --add <name> --token <tok>                    register with an explicit token
+  --add <name> --setup                          force the setup-token flow
   --list [--json]                               list registered accounts
   --current [--json]                            show active account (registry + env)
   --use <name>                                  mark active + print relaunch command
@@ -277,7 +303,22 @@ function cliMain() {
     if ('add' in args) {
       const name = assertName(args.add);
       let token = (typeof args.token === 'string') ? args.token : '';
-      if (!token) token = readStdinSync();
+      // Token source precedence:
+      //   1. --token <tok>            (explicit, scriptable)
+      //   2. --setup / --login, OR an interactive TTY with no piped input
+      //      → run `claude setup-token` and capture automatically (one command)
+      //   3. piped stdin              (paste fallback)
+      const wantSetup = 'setup' in args || 'login' in args;
+      if (!token && (wantSetup || process.stdin.isTTY)) {
+        token = runSetupTokenSync();
+        if (!token) {
+          throw new Error('token não capturado do `claude setup-token` ' +
+            '(login cancelado/incompleto). Tente de novo, ou registre manual: ' +
+            `--add ${name} --token <sk-ant-oat01-…>`);
+        }
+      } else if (!token) {
+        token = readStdinSync();
+      }
       const res = addAccount(name, token, args.note);
       if (res.warn) process.stderr.write(`forge-accounts: warning — ${res.warn}\n`);
       process.stdout.write(`added '${res.name}' (token in ${res.store})\n`);

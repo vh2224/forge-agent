@@ -59,28 +59,29 @@ Se não houver contas, explique como adicionar a primeira (veja `add`).
 
 ### `add <nome>`
 
-Registrar exige um token do `claude setup-token`. **O token é segredo — não deve
-entrar no chat.** Por isso o fluxo roda no terminal do próprio usuário (paste via
-stdin), nunca via o `!` da sessão (que imprimiria o token aqui).
+Registrar é **um comando só**: o engine roda o `claude setup-token`, captura o token
+automaticamente da saída e salva no Keychain — sem copiar/colar. **Mas precisa rodar
+no terminal do próprio usuário**, não aqui no chat: o login exige um TTY real, e isso
+mantém o token fora do transcript. Nunca rode esse comando você mesmo (via `!` ou
+Bash) — sem TTY ele falha/trava e rotearia o segredo pra conversa.
 
 Valide o nome primeiro (`letras/dígitos/._-`, máx 32). Então apresente exatamente:
 
-> Para registrar a conta **`<nome>`**, rode estes dois comandos **no seu terminal**
-> (não aqui no chat — o token é sensível):
+> Para registrar a conta **`<nome>`**, rode **no seu terminal** (não aqui no chat):
 >
 > ```bash
-> claude setup-token        # 1) faz login dessa conta no browser e mostra o token (sk-ant-oat01-…)
 > node ~/.claude/scripts/forge-accounts.js --add <nome>
->                           # 2) cole o token quando o cursor ficar esperando, Enter, depois Ctrl-D
 > ```
 >
+> Ele abre o `claude setup-token` (login no browser), captura o token sozinho e salva.
 > Quando terminar, me chame com `/forge-accounts list` que eu confirmo.
 
-Não tente capturar o token você mesmo. Se o usuário **insistir** em colar o token no
-chat, avise que ficará no histórico da conversa e, se ele confirmar, aí sim rode
-`node "$FA" --add <nome> --token "<token>"`.
-
-Dica útil para mencionar: a primeira conta adicionada vira a ativa por padrão.
+Notas para mencionar quando fizer sentido:
+- A primeira conta adicionada vira a ativa por padrão.
+- Para registrar uma **segunda** conta, deslogue/troque a conta no browser durante o
+  `setup-token` — cada execução pega o token da conta logada naquele momento.
+- Alternativas (raramente necessárias): `--add <nome> --token <sk-ant-oat01-…>` para
+  passar um token já gerado, ou paste via stdin (`… --add <nome> < arquivo`).
 
 ---
 
