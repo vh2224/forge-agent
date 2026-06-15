@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Forge Status Line — shown in Claude Code prompt during sessions
-// Shows: agent label, model, project, forge state, context %, cost, tokens, last dispatch
+// Shows: agent label, model, project, forge state, context %, cost, tokens, rate limits, last dispatch
 
 const fs   = require('fs');
 const path = require('path');
@@ -591,6 +591,37 @@ process.stdin.on('end', () => {
       costDisplay = `${costCore} ${c.dim}($${autoBurnRate.toFixed(2)}/h)${c.reset}`;
     }
 
+    // --- Rate limits: 5h rolling session window + 7d weekly limit ---
+    // Source: d.rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}.
+    // Server-synced — this is the ONLY source for these %s; they can't be
+    // computed from local files (depend on Anthropic-side state across devices).
+    // Present only for claude.ai (Pro/Max) subscribers, after the first API
+    // response; each window may be absent independently. Degrades silently for
+    // API-key users (field never arrives) — same best-effort posture (MEM008).
+    let rateLimitDisplay = '';
+    try {
+      const rl = d.rate_limits || {};
+      const rlColor = (pctUsed) =>
+        pctUsed >= 90 ? c.red : pctUsed >= 70 ? c.yellow : c.green;
+      const parts = [];
+      let tightest = null; // highest used % → owns the reset clock (limits you first)
+      for (const [key, label] of [['five_hour', '5h'], ['seven_day', '7d']]) {
+        const w = rl[key];
+        if (!w || typeof w.used_percentage !== 'number') continue;
+        const p = Math.round(w.used_percentage);
+        parts.push(`${rlColor(w.used_percentage)}${label} ${p}%${c.reset}`);
+        if (!tightest || w.used_percentage > tightest.used_percentage) tightest = w;
+      }
+      if (parts.length) {
+        let resetStr = '';
+        if (tightest && typeof tightest.resets_at === 'number') {
+          const secs = Math.round(tightest.resets_at - Date.now() / 1000);
+          if (secs > 0) resetStr = ` ${c.dim}↺${fmtSecsShort(secs)}${c.reset}`;
+        }
+        rateLimitDisplay = parts.join(' · ') + resetStr;
+      }
+    } catch { /* no rate_limits — Pro/Max only, after first API response */ }
+
     // --- Forge version tail: only shown when update available (otherwise noise) ---
     let forgeVersionTail = '';
     if (forgeUpdate) {
@@ -601,6 +632,7 @@ process.stdin.on('end', () => {
     const segments = [];
     if (!autoMode) segments.push(model);
     segments.push(middleSegment, ctxStr, costDisplay);
+    if (rateLimitDisplay) segments.push(rateLimitDisplay);
 
     const line1 = autoPrefix + segments.join(' │ ') + forgeVersionTail;
 
