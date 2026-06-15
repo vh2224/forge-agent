@@ -645,6 +645,42 @@ process.stdin.on('end', () => {
       }
     } catch { /* no rate_limits — Pro/Max only, after first API response */ }
 
+    // --- Active account (👤) — set when launched as FORGE_ACCOUNT=<name> claude ---
+    // The relaunch command from `forge-accounts use <name>` exports this so the
+    // statusline can show which account this session runs under. Empty = default
+    // Keychain login (no indicator).
+    const acctName = (process.env.FORGE_ACCOUNT || '').trim();
+    const acctLabel = acctName ? `👤 ${acctName}` : '';
+
+    // --- Rate-limit bridge: persist usage for forge-auto's exhaustion handoff ---
+    // forge-auto runs in the orchestrator and can't read the statusline JSON; it
+    // reads this temp file at unit boundaries to decide whether to checkpoint and
+    // hand off to another account. Best-effort (MEM008) — never throws.
+    try {
+      const sessionId = d.session_id || '';
+      const rl = d.rate_limits;
+      if (sessionId && rl && (rl.five_hour || rl.seven_day)) {
+        const slim = (w) => (w && typeof w.used_percentage === 'number')
+          ? { used_percentage: w.used_percentage, resets_at: w.resets_at ?? null }
+          : null;
+        fs.writeFileSync(
+          path.join(os.tmpdir(), `forge-ratelimit-${sessionId}.json`),
+          JSON.stringify({
+            five_hour: slim(rl.five_hour),
+            seven_day: slim(rl.seven_day),
+            account: acctName || null,
+            ts: Date.now(),
+          }),
+          'utf8'
+        );
+      }
+    } catch { /* best-effort */ }
+
+    // --- Usage segment: account + rate limits read together ---
+    let usageSegment = '';
+    if (acctLabel && rateLimitDisplay) usageSegment = `${acctLabel} · ${rateLimitDisplay}`;
+    else usageSegment = acctLabel || rateLimitDisplay;
+
     // --- Forge version tail: only shown when update available (otherwise noise) ---
     let forgeVersionTail = '';
     if (forgeUpdate) {
@@ -655,7 +691,7 @@ process.stdin.on('end', () => {
     const segments = [];
     if (!autoMode) segments.push(model);
     segments.push(middleSegment, ctxStr, costDisplay);
-    if (rateLimitDisplay) segments.push(rateLimitDisplay);
+    if (usageSegment) segments.push(usageSegment);
 
     const line1 = autoPrefix + segments.join(' │ ') + forgeVersionTail;
 
