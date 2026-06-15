@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# forge-run — supervisor de execução autônoma multi-conta para o Forge Agent.
+#
+# Roda /forge-auto em modo headless (`claude -p`) e, quando a conta esgota a
+# sessão (limite 5h ou semanal), troca AUTOMATICAMENTE para outra conta
+# registrada e retoma o milestone do checkpoint — sem você abrir terminal nem
+# digitar nada. Continua até o milestone terminar, dar bloqueio/erro, ou
+# acabarem as contas com folga.
+#
+# Por que um supervisor "fora" do claude: uma sessão que esgota não consegue se
+# reabrir; só um processo externo consegue lançar a próxima sessão na conta nova.
+#
+# Detecção de esgotamento (defesa dupla, porque em headless a statusline não
+# renderiza o bridge de rate_limits):
+#   1. handoff-request.json — o /forge-auto grava ao cruzar o limite e sair;
+#   2. fallback — o supervisor varre a saída do `claude` por sinais de limite.
+#
+# Uso:
+#   forge-run                  # no diretório do projeto (.gsd presente)
+#   forge-run --max <N>        # teto de sessões (default 200, anti-runaway)
+#   FORGE_RUN_CLAUDE_CMD=...    # override do comando (default: /forge-auto)
+set -uo pipefail
+
+WORKING_DIR="$(pwd)"
+FORGE_DIR="$WORKING_DIR/.gsd/forge"
+HANDOFF="$FORGE_DIR/handoff-request.json"
+COOLDOWNS="$FORGE_DIR/account-cooldowns.json"
+PROMPT="${FORGE_RUN_CLAUDE_CMD:-/forge-auto}"
+DEFAULT_COOLDOWN_SECS=18000   # 5h — usado quando o resets_at real é desconhecido
+MAX_SESSIONS=200
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --max) MAX_SESSIONS="${2:-200}"; shift 2 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "forge-run: argumento desconhecido '$1'" >&2; exit 2 ;;
+  esac
+done
+
+ENGINE="${FORGE_ENGINE:-$HOME/.claude/scripts/forge-accounts.js}"
+if [ ! -f "$ENGINE" ]; then
+  REPO="$(grep 'repo_path:' "$HOME/.claude/forge-agent-prefs.md" 2>/dev/null | cut -d: -f2 | tr -d ' ' || true)"
+  [ -n "${REPO:-}" ] && ENGINE="$REPO/scripts/forge-accounts.js"
+fi
+[ -f "$ENGINE" ] || { echo "forge-run: engine de contas não encontrado. Rode /forge-update." >&2; exit 1; }
+command -v claude >/dev/null 2>&1 || { echo "forge-run: comando 'claude' não encontrado no PATH." >&2; exit 1; }
+[ -d "$WORKING_DIR/.gsd" ] || { echo "forge-run: '$WORKING_DIR' não é um projeto forge (.gsd ausente). Rode dentro do projeto." >&2; exit 1; }
+
+mkdir -p "$FORGE_DIR"
+rm -f "$HANDOFF"
+
+# extrai um campo do JSON impresso por --next-account (account|wait_until)
+json_field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const v=j[process.argv[1]];console.log(v==null?"":v)}catch{console.log("")}})' "$1"; }
+
+# lê resets_at de um handoff-request.json (vazio se ausente)
+handoff_resets() { node -e 'try{const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(j.resets_at||"")}catch{console.log("")}' "$1" 2>/dev/null; }
+
+echo "forge-run: supervisor iniciado — projeto: $WORKING_DIR"
+echo "forge-run: contas serão rotacionadas por folga ao esgotar. Ctrl-C para parar."
+
+SESSIONS=0
+while :; do
+  SESSIONS=$((SESSIONS+1))
+  if [ "$SESSIONS" -gt "$MAX_SESSIONS" ]; then
+    echo "forge-run: teto de $MAX_SESSIONS sessões atingido — parando (anti-runaway)." >&2
+    exit 1
+  fi
+
+  PICK="$(node "$ENGINE" --next-account --cooldowns "$COOLDOWNS")"
+  ACCT="$(printf '%s' "$PICK" | json_field account)"
+
+  if [ -z "$ACCT" ]; then
+    WAIT_UNTIL="$(printf '%s' "$PICK" | json_field wait_until)"
+    if [ -n "$WAIT_UNTIL" ]; then
+      NOW="$(date +%s)"; SLEEP=$((WAIT_UNTIL - NOW)); [ "$SLEEP" -lt 60 ] && SLEEP=60
+      echo "forge-run: todas as contas em cooldown — aguardando ~$((SLEEP/60))min até a próxima resetar…"
+      sleep "$SLEEP"
+      continue
+    fi
+    echo "forge-run: nenhuma conta com token registrada. Rode 'forge-accounts add <nome>'." >&2
+    exit 1
+  fi
+
+  TOKEN="$(node "$ENGINE" --token "$ACCT" 2>/dev/null)"
+  if [ -z "$TOKEN" ]; then
+    echo "forge-run: sem token para '$ACCT' — colocando em cooldown e seguindo." >&2
+    node "$ENGINE" --mark-cooldown "$ACCT" --resets-at "$(( $(date +%s) + DEFAULT_COOLDOWN_SECS ))" --cooldowns "$COOLDOWNS" >/dev/null
+    continue
+  fi
+
+  echo ""
+  echo "forge-run: ▶ sessão #$SESSIONS na conta '$ACCT' — claude -p \"$PROMPT\" (headless)"
+  rm -f "$HANDOFF"
+  LOG="$(mktemp -t forge-run.XXXXXX)"
+
+  FORGE_ACCOUNT="$ACCT" CLAUDE_CODE_OAUTH_TOKEN="$TOKEN" \
+    claude -p "$PROMPT" --dangerously-skip-permissions 2>&1 | tee "$LOG"
+  CODE="${PIPESTATUS[0]}"
+
+  # 1) sentinela explícita do orquestrador
+  if [ -f "$HANDOFF" ]; then
+    R="$(handoff_resets "$HANDOFF")"
+    [ -z "$R" ] && R="$(( $(date +%s) + DEFAULT_COOLDOWN_SECS ))"
+    node "$ENGINE" --mark-cooldown "$ACCT" --resets-at "$R" --cooldowns "$COOLDOWNS" >/dev/null
+    rm -f "$HANDOFF" "$LOG"
+    echo "forge-run: ⟳ '$ACCT' esgotada (handoff) — trocando de conta…"
+    continue
+  fi
+
+  # 2) fallback: detecta esgotamento na saída do claude (headless pode morrer no 429
+  #    sem o orquestrador conseguir gravar a sentinela)
+  if grep -qiE 'usage limit|rate.?limit|quota|exceeded your|status (429|529)|too many requests' "$LOG"; then
+    node "$ENGINE" --mark-cooldown "$ACCT" --resets-at "$(( $(date +%s) + DEFAULT_COOLDOWN_SECS ))" --cooldowns "$COOLDOWNS" >/dev/null
+    rm -f "$LOG"
+    echo "forge-run: ⟳ '$ACCT' aparenta ter esgotado (limite detectado na saída) — trocando…"
+    continue
+  fi
+
+  rm -f "$LOG"
+  echo ""
+  echo "forge-run: sessão terminou sem pedido de troca (exit=$CODE)."
+  echo "forge-run: milestone completa, bloqueio ou erro — parando. Verifique com /forge-status."
+  break
+done

@@ -39,7 +39,9 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const CLAUDE_DIR     = path.join(os.homedir(), '.claude');
-const REGISTRY_FILE  = path.join(CLAUDE_DIR, 'forge-accounts.json');
+// FORGE_ACCOUNTS_REGISTRY overrides the non-secret registry path (used for tests
+// and for isolating a dev registry). Tokens still live in the Keychain by name.
+const REGISTRY_FILE  = process.env.FORGE_ACCOUNTS_REGISTRY || path.join(CLAUDE_DIR, 'forge-accounts.json');
 const TOKENS_FILE    = path.join(CLAUDE_DIR, 'forge-accounts-tokens.json'); // non-darwin fallback
 const IS_DARWIN      = process.platform === 'darwin';
 const KEYCHAIN_ACCT  = (() => { try { return os.userInfo().username; } catch { return 'forge'; } })();
@@ -266,6 +268,55 @@ function currentAccount() {
   };
 }
 
+// ── Supervisor support (forge-run): cooldown tracking + account selection ─────
+// A cooldown file maps account → { exhausted_at, resets_at } (epoch seconds).
+// "Headroom" can't be queried live outside a session (rate_limits only reaches
+// the statusline JSON), so we approximate: an account is eligible unless it's in
+// cooldown (exhausted and before its resets_at). Among eligible, the most-rested
+// (oldest/absent exhaustion) wins.
+function readCooldowns(file) {
+  if (!file) return {};
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
+}
+
+function markCooldown(file, account, resetsAt) {
+  if (!file) throw new Error('--mark-cooldown requer --cooldowns <file>');
+  assertName(account);
+  const cds = readCooldowns(file);
+  cds[account] = {
+    exhausted_at: Math.floor(Date.now() / 1000),
+    resets_at: resetsAt != null && resetsAt !== '' ? Number(resetsAt) : null,
+  };
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(cds, null, 2) + '\n', 'utf8');
+  fs.renameSync(tmp, file);
+  return cds[account];
+}
+
+function nextAccount(cooldownsFile) {
+  const reg = loadRegistry();
+  const cds = readCooldowns(cooldownsFile);
+  const nowS = Math.floor(Date.now() / 1000);
+  const tokenAccts = Object.keys(reg.accounts).filter((n) => !!readToken(n));
+  const inCooldown = (n) => {
+    const cd = cds[n];
+    return !!(cd && cd.resets_at && cd.resets_at > nowS);
+  };
+  const eligible = tokenAccts.filter((n) => !inCooldown(n));
+  if (eligible.length) {
+    // most-rested first: never-exhausted (no record) sorts before older exhaustions
+    eligible.sort((a, b) => ((cds[a]?.exhausted_at) || 0) - ((cds[b]?.exhausted_at) || 0));
+    return { account: eligible[0], wait_until: null };
+  }
+  // all token accounts are cooling down → earliest reset time (so the supervisor can wait)
+  let earliest = null;
+  for (const n of tokenAccts) {
+    const r = cds[n]?.resets_at;
+    if (r && (earliest === null || r < earliest)) earliest = r;
+  }
+  return { account: null, wait_until: earliest };
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
   const args = {};
@@ -322,6 +373,10 @@ Flags:
   --token <name>                                print the raw token (for $( ) substitution)
   --rename <old> --to <new>                     rename an account (keeps the token)
   --remove <name>                               delete account + its token
+  --next-account [--cooldowns <file>]           print {account,wait_until} for the
+                                                supervisor (most-rested eligible)
+  --mark-cooldown <name> [--resets-at <epoch>] --cooldowns <file>
+                                                record that <name> is exhausted
   --help                                        show this help
 
 Switch accounts (cannot happen mid-session — relaunch claude):
@@ -419,6 +474,17 @@ function cliMain() {
       removeAccount(args.remove);
       process.stdout.write(`removed '${args.remove}'\n`);
 
+    } else if ('next-account' in args) {
+      const f = typeof args.cooldowns === 'string' ? args.cooldowns : null;
+      process.stdout.write(JSON.stringify(nextAccount(f)) + '\n');
+
+    } else if ('mark-cooldown' in args) {
+      const acct = assertName(args['mark-cooldown']);
+      const f = typeof args.cooldowns === 'string' ? args.cooldowns : null;
+      const resetsAt = ('resets-at' in args && args['resets-at'] !== true) ? args['resets-at'] : null;
+      markCooldown(f, acct, resetsAt);
+      process.stdout.write(`cooldown set for '${acct}'\n`);
+
     } else {
       process.stderr.write('forge-accounts: no command specified. Use --help.\n');
       process.exit(2);
@@ -434,6 +500,7 @@ module.exports = {
   addAccount, removeAccount, renameAccount, useAccount, listAccounts, currentAccount,
   readToken, storeToken, deleteToken,
   launchCommand, daysLeft, assertName,
+  nextAccount, markCooldown, readCooldowns,
   REGISTRY_FILE, TOKENS_FILE,
 };
 

@@ -1256,6 +1256,8 @@ Invoked from Step 7 when the active account's tightest usage window crossed `HAN
 **1. Checkpoint.** Write `continue.md` for the active slice per `## Continue-Here Protocol` (so the next session resumes exactly here). Append an events.jsonl line:
 `{"ts":"{ISO8601}","unit":"account-handoff","agent":"orchestrator","milestone":"${RUN_ID:-{M###}}","status":"handoff","summary":"janela {window} em {used}% — checkpoint + troca de conta"}`
 
+**1b. Supervisor sentinel.** Write `.gsd/forge/handoff-request.json` so the `forge-run` supervisor (if one is driving this headless session) switches accounts and resumes automatically: `{"run_id":"{RUN_ID}","account":"{account}","window":"{window}","used":{used},"resets_at":{resets_at|null},"ts":"{ISO8601}"}`. Harmless without a supervisor — a plain `/forge-auto` just leaves the file (cleared on the next supervised run). The supervisor consumes and deletes it.
+
 **2. Resolve the next account.** List registered accounts and pick a candidate with a token that is NOT the current one:
 
 ```bash

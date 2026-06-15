@@ -276,14 +276,18 @@ for f in "${REPO_DIR}/scripts"/forge-*.js; do
   info "  scripts/${name}"
 done
 
-# CLI wrappers → a bin dir on PATH so users type `forge-accounts add x`
-# instead of `node ~/.claude/scripts/forge-accounts.js --add x`.
-if [ -f "${REPO_DIR}/bin/forge-accounts" ]; then
+# CLI wrappers → a bin dir on PATH so users type `forge-accounts add x` /
+# `forge-run` instead of `node ~/.claude/scripts/...`.
+if [ -d "${REPO_DIR}/bin" ]; then
   BIN_DIR="${HOME}/.local/bin"
   mkdir -p "$BIN_DIR"
-  copy "${REPO_DIR}/bin/forge-accounts" "${BIN_DIR}/forge-accounts"
-  chmod +x "${BIN_DIR}/forge-accounts" 2>/dev/null || true
-  info "  bin/forge-accounts → ${BIN_DIR}/forge-accounts"
+  for w in "${REPO_DIR}/bin"/*; do
+    [ -f "$w" ] || continue
+    wname="$(basename "$w")"
+    copy "$w" "${BIN_DIR}/${wname}"
+    chmod +x "${BIN_DIR}/${wname}" 2>/dev/null || true
+    info "  bin/${wname} → ${BIN_DIR}/${wname}"
+  done
   case ":${PATH}:" in
     *":${BIN_DIR}:"*) ;;
     *) warn "  ${BIN_DIR} não está no PATH — adicione: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
