@@ -603,20 +603,43 @@ process.stdin.on('end', () => {
       const rl = d.rate_limits || {};
       const rlColor = (pctUsed) =>
         pctUsed >= 90 ? c.red : pctUsed >= 70 ? c.yellow : c.green;
+      // Fine-grained 5-cell bar using partial-block glyphs, so even low usage
+      // shows a sliver — a full/empty bar would read as "broken" at 4%.
+      const EIGHTHS = ['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+      const usageBar = (pct, width = 5) => {
+        const eighths = Math.round((Math.max(0, Math.min(100, pct)) / 100) * width * 8);
+        let s = '';
+        for (let i = 0; i < width; i++) {
+          const e = Math.max(0, Math.min(8, eighths - i * 8));
+          s += e === 0 ? '░' : e === 8 ? '█' : EIGHTHS[e - 1];
+        }
+        return s;
+      };
+      // Reset clock: day-aware, down to minutes (no seconds): 2d7h / 3h12m / 45m.
+      const fmtReset = (secs) => {
+        if (secs <= 0) return '';
+        const dd = Math.floor(secs / 86400);
+        const hh = Math.floor((secs % 86400) / 3600);
+        const mm = Math.floor((secs % 3600) / 60);
+        if (dd > 0) return `${dd}d${hh}h`;
+        if (hh > 0) return `${hh}h${mm}m`;
+        return mm > 0 ? `${mm}m` : '<1m';
+      };
       const parts = [];
       let tightest = null; // highest used % → owns the reset clock (limits you first)
-      for (const [key, label] of [['five_hour', '5h'], ['seven_day', '7d']]) {
+      for (const [key, icon] of [['five_hour', '⏱'], ['seven_day', '📅']]) {
         const w = rl[key];
         if (!w || typeof w.used_percentage !== 'number') continue;
         const p = Math.round(w.used_percentage);
-        parts.push(`${rlColor(w.used_percentage)}${label} ${p}%${c.reset}`);
+        const col = rlColor(w.used_percentage);
+        parts.push(`${icon} ${col}${usageBar(w.used_percentage)} ${p}%${c.reset}`);
         if (!tightest || w.used_percentage > tightest.used_percentage) tightest = w;
       }
       if (parts.length) {
         let resetStr = '';
         if (tightest && typeof tightest.resets_at === 'number') {
-          const secs = Math.round(tightest.resets_at - Date.now() / 1000);
-          if (secs > 0) resetStr = ` ${c.dim}↺${fmtSecsShort(secs)}${c.reset}`;
+          const r = fmtReset(Math.round(tightest.resets_at - Date.now() / 1000));
+          if (r) resetStr = ` ${c.dim}⏳${r}${c.reset}`;
         }
         rateLimitDisplay = parts.join(' · ') + resetStr;
       }
