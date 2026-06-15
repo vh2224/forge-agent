@@ -33,6 +33,11 @@ case "$sub" in
     fi
     exec node "$ENGINE" --"$sub" "$@"
     ;;
+  rename)
+    # two positionals: <old> <new>
+    old="${1:-}"; new="${2:-}"
+    exec node "$ENGINE" --rename "$old" --to "$new"
+    ;;
   list|current)
     exec node "$ENGINE" --"$sub" "$@"
     ;;

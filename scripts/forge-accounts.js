@@ -206,6 +206,27 @@ function removeAccount(name) {
   saveRegistry(reg);
 }
 
+// Rename keeps the same token (no re-`setup-token`): copy the token to the new
+// slot, repoint the registry, persist, THEN delete the old token — so a failure
+// mid-way never loses the credential. Preserves added_at/last_used/note/active.
+function renameAccount(oldName, newName) {
+  assertName(oldName);
+  assertName(newName);
+  if (oldName === newName) throw new Error('o nome novo é igual ao atual');
+  const reg = loadRegistry();
+  if (!reg.accounts[oldName]) throw new Error(`conta '${oldName}' não registrada`);
+  if (reg.accounts[newName]) throw new Error(`já existe uma conta '${newName}' — escolha outro nome ou remova-a antes`);
+  const token = readToken(oldName);
+  if (!token) throw new Error(`sem token armazenado para '${oldName}' — não dá pra renomear com segurança`);
+  const store = storeToken(newName, token);
+  reg.accounts[newName] = { ...reg.accounts[oldName], store };
+  delete reg.accounts[oldName];
+  if (reg.active === oldName) reg.active = newName;
+  saveRegistry(reg);
+  deleteToken(oldName); // only after the registry points to the new slot
+  return { oldName, newName };
+}
+
 function useAccount(name) {
   assertName(name);
   const reg = loadRegistry();
@@ -297,6 +318,7 @@ Flags:
   --use <name>                                  mark active + print relaunch command
   --launch-cmd <name>                           print relaunch command only
   --token <name>                                print the raw token (for $( ) substitution)
+  --rename <old> --to <new>                     rename an account (keeps the token)
   --remove <name>                               delete account + its token
   --help                                        show this help
 
@@ -367,6 +389,13 @@ function cliMain() {
       if (!tok) { process.stderr.write(`forge-accounts: no token for '${name}'\n`); process.exit(1); }
       process.stdout.write(tok); // no trailing newline — clean for $( )
 
+    } else if ('rename' in args) {
+      const oldName = assertName(args.rename);
+      const newName = (typeof args.to === 'string') ? args.to : '';
+      if (!newName) throw new Error('--rename requer --to <novo-nome>');
+      const r = renameAccount(oldName, newName);
+      process.stdout.write(`renamed '${r.oldName}' → '${r.newName}'\n`);
+
     } else if ('remove' in args) {
       removeAccount(args.remove);
       process.stdout.write(`removed '${args.remove}'\n`);
@@ -383,7 +412,7 @@ function cliMain() {
 
 module.exports = {
   loadRegistry, saveRegistry,
-  addAccount, removeAccount, useAccount, listAccounts, currentAccount,
+  addAccount, removeAccount, renameAccount, useAccount, listAccounts, currentAccount,
   readToken, storeToken, deleteToken,
   launchCommand, daysLeft, assertName,
   REGISTRY_FILE, TOKENS_FILE,

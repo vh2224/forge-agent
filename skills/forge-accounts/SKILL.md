@@ -35,11 +35,12 @@ Se `ENGINE_MISSING`: diga ao usuário para rodar `/forge-update` e pare.
 
 Parse `$ARGUMENTS`. Primeira palavra = subcomando (default `list` se vazio):
 
-- `list` (ou vazio) → mostrar contas
-- `add <nome>`      → registrar conta nova (fluxo guiado)
-- `use <nome>`      → trocar para a conta (imprime comando de relançamento)
-- `current`         → conta ativa (registro + sessão atual)
-- `remove <nome>`   → remover conta + token
+- `list` (ou vazio)       → mostrar contas
+- `add <nome>`            → registrar conta nova (fluxo guiado)
+- `use <nome>`            → trocar para a conta (imprime comando de relançamento)
+- `rename <velho> <novo>` → renomear uma conta (mantém o token)
+- `current`               → conta ativa (registro + sessão atual)
+- `remove <nome>`         → remover conta + token
 
 ---
 
@@ -106,6 +107,20 @@ Isso marca a conta como ativa e imprime o **comando de relançamento**. Apresent
 > retoma do checkpoint automaticamente.
 
 Se o engine errar (conta inexistente / sem token), repasse a mensagem e sugira `add`.
+
+---
+
+### `rename <velho> <novo>`
+
+```bash
+node "$FA" --rename <velho> --to <novo>
+```
+
+Renomeia mantendo o token (não precisa refazer `setup-token`). Pode rodar in-session —
+não envolve TTY nem imprime o token. Se a conta ativa era a renomeada, o registro
+passa a apontar para o novo nome. Repasse erros do engine (conta inexistente, nome
+novo já em uso) ao usuário. Lembre que, se houver uma sessão aberta com
+`FORGE_ACCOUNT=<velho>`, ela continua válida (o token é o mesmo) — só o rótulo mudou.
 
 ---
 
