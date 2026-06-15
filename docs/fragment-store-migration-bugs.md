@@ -84,3 +84,18 @@ svnPropset(absDir, merged);                    // ← THROW E155010 não tratado
 ## Nota operacional (separado da PR de código)
 
 O WDMA (e possivelmente outros WCs da equipe) está **não-migrado**. Depois que a PR estiver pronta, rodar a migração de forma **coordenada** num único WC e commitar o resultado (fragmentos) — porque o `.gsd` é compartilhado via SVN. Até lá, **não rodar `forge-doctor --fix`/`--regen-projection` em WCs do WDMA**.
+
+---
+
+## ✅ Follow-up — `forge-migrate` aposentava caches regenerados de repo já migrado
+
+> **Status:** ✅ corrigido na branch `fix/migrate-already-migrated-guard`. Coberto por `scripts/forge-migrate.test.js` (4 casos).
+
+**Sintoma:** num repo **já migrado** (`SCHEMA-VERSION == fragment-store@1.0.0`, fragment store populado) com os monólitos presentes em disco como **caches regenerados**, rodar `/forge-update` (que chama `forge-migrate.js`) renomeava `LEDGER.md`/`DECISIONS.md`/`AUTO-MEMORY.md` para `.bak` e **não os regenerava** — sumiam do disco. Em seguida `forge-sweep` abortava no bootstrap (`ls .gsd/LEDGER.md` → "Project not initialized").
+
+**Causa-raiz:** `backupMonolith` decidia aposentar o monólito **só pela presença do arquivo** — não consultava `SCHEMA-VERSION` nem se os fragmentos já estavam populados. Um cache regenerado era tratado como monólito legado pré-migração.
+
+**Correção (ponta a ponta):**
+- `forge-migrate.js` ganhou um atalho "Step 0 already-migrated" em `migrateStore`: quando `SCHEMA-VERSION` está current **e** o store está `migrated` (via `forge-store-state.js`), pula backup/migrate, **não** renomeia, reporta `skipped_reason: 'already-migrated'`. Estado `schema-current + store-vazio` (stamped-but-empty) emite **warning** em vez de aposentar o monólito.
+- `forge-sweep` passou a gatear o bootstrap em `.gsd/ledger/`/`SCHEMA-VERSION` (monólito como fallback) e a obter o LEDGER via `forge-projection --render ledger`.
+- `/forge-update` roda `forge-projection --write-all` **depois** do migrate, reconciliando os caches (a guarda anti-clobber já protege WC não-migrado).

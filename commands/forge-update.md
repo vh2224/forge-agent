@@ -151,16 +151,38 @@ node "{REPO_PATH}/scripts/forge-migrate.js" --cwd "$(pwd)" 2>&1
 
 **Behavior and guarantees:**
 - Runs three migrators in order: `LEDGER.md → ledger/`, `DECISIONS.md → decisions/`, `AUTO-MEMORY.md → memory/`.
-- Each legacy monolith is renamed to `<name>.bak` **before** migration begins. If a `.bak` already exists it is preserved (never overwritten).
-- After migration, renders via `forge-projection` and diffs against the `.bak` — reports `identical` / `differs (numbering only)` / `differs` per store.
+- On a **legacy (not-yet-migrated)** repo, each monolith is renamed to `<name>.bak` **before** migration begins. If a `.bak` already exists it is preserved (never overwritten).
+- On an **already-migrated** repo (`SCHEMA-VERSION` current **and** the fragment store populated), the migrator detects this and **skips** the store — it does **not** rename the monolith to `.bak`. A present monolith there is a regenerated projection cache, not a legacy file; each store reports `skipped_reason: "already-migrated"`.
+- After a real migration, renders via `forge-projection` and diffs against the `.bak` — reports `identical` / `differs (numbering only)` / `differs` per store.
 - Writes `.gsd/SCHEMA-VERSION` on success.
-- **Idempotent:** running again reports `written:0` for each store — safe to run on every update.
+- **Idempotent:** running again reports `skipped_reason: "already-migrated"` for each store — safe to run on every update.
 - **Dry-run preview:** `node scripts/forge-migrate.js --dry-run --cwd <repo>`.
 
 If the migrator exits non-zero, surface the error output to the user:
 ```
 ⚠ Migração falhou — verifique a saída acima. Os arquivos .bak foram preservados.
 ```
+
+---
+
+## Reconciliar caches de projeção (após a migração)
+
+After the migration, regenerate the monolithic projection caches from the fragment
+stores so the post-update state has `.gsd/{LEDGER,DECISIONS,AUTO-MEMORY}.md` present
+on disk (skills that read them never hit a missing cache):
+
+```bash
+node "{REPO_PATH}/scripts/forge-projection.js" --write-all --cwd "$(pwd)" 2>&1
+```
+
+**Behavior and guarantees:**
+- Renders all three projections from the fragment store and writes them, byte-comparing first (no-op when already identical).
+- **Data-loss guard:** refuses to overwrite a *populated* monolith from an *empty* fragment store (an unmigrated working copy). Such targets are reported as `blocked` and left untouched — this is expected and safe, not an error to surface loudly. The migration step above already populated the fragments on a genuine migration; on an already-migrated repo the store is populated, so the caches regenerate cleanly.
+- Idempotent — running again writes nothing when the caches are already up to date.
+
+If the output reports `blocked` entries, mention them briefly (the repo is in a
+not-yet-migrated state and the caches are the source of truth) but do **not** fail
+the update — the monoliths were preserved by design.
 
 ---
 
