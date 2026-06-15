@@ -31,10 +31,16 @@ Run in parallel:
 ```bash
 ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
 ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
-ls .gsd/LEDGER.md 2>/dev/null && echo "ok" || echo "missing"
+{ ls -d .gsd/ledger 2>/dev/null || ls .gsd/SCHEMA-VERSION 2>/dev/null || ls .gsd/LEDGER.md 2>/dev/null; } && echo "ok" || echo "missing"
 ```
 
 If any missing → tell user "Project not initialized — run /forge-init first" and stop.
+
+> **Why not just `ls .gsd/LEDGER.md`?** On a migrated repo (`fragment-store@1.0.0`)
+> `.gsd/LEDGER.md` is a regenerated *cache* — it may be absent on disk while the
+> ledger store (`.gsd/ledger/`) is fully populated. Gate on the fragment store /
+> schema marker (with the monolith as a legacy fallback), not on the cache file,
+> so the sweep doesn't falsely abort with "Project not initialized".
 
 ---
 
@@ -128,7 +134,10 @@ In parallel:
 - `ls -d .gsd/milestones/M*/ 2>/dev/null`
 - `ls -d .gsd/tasks/TASK-*/ 2>/dev/null`
 - `ls .gsd/sessions/ 2>/dev/null`
-- Read `.gsd/LEDGER.md`
+- Obtain the LEDGER content via the projection (works whether or not the monolith
+  cache exists on disk): `node scripts/forge-projection.js --render ledger --cwd .`.
+  Fall back to reading `.gsd/LEDGER.md` only if the projection script is unavailable.
+  All LEDGER-guard heading lookups below operate on this rendered content.
 
 For each AUTO-MEMORY fragment returned by `forge-memory.js --list` (format: `[{unitId, path}]`):
 - Read the fragment file.
