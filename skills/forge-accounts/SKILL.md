@@ -70,7 +70,7 @@ Valide o nome primeiro (`letras/dígitos/._-`, máx 32). Então apresente exatam
 > Para registrar a conta **`<nome>`**, rode **no seu terminal** (não aqui no chat):
 >
 > ```bash
-> node ~/.claude/scripts/forge-accounts.js --add <nome>
+> forge-accounts add <nome>
 > ```
 >
 > Ele abre o `claude setup-token` (login no browser), captura o token sozinho e salva.
@@ -80,8 +80,11 @@ Notas para mencionar quando fizer sentido:
 - A primeira conta adicionada vira a ativa por padrão.
 - Para registrar uma **segunda** conta, deslogue/troque a conta no browser durante o
   `setup-token` — cada execução pega o token da conta logada naquele momento.
-- Alternativas (raramente necessárias): `--add <nome> --token <sk-ant-oat01-…>` para
-  passar um token já gerado, ou paste via stdin (`… --add <nome> < arquivo`).
+- Se o comando `forge-accounts` não for encontrado, o `~/.local/bin` não está no PATH:
+  rode `export PATH="$HOME/.local/bin:$PATH"` (ou use a forma longa
+  `node ~/.claude/scripts/forge-accounts.js --add <nome>`).
+- Alternativas (raramente necessárias): `forge-accounts add <nome> --token <sk-ant-oat01-…>`
+  para um token já gerado, ou paste via stdin.
 
 ---
 

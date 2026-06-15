@@ -158,9 +158,20 @@ function scriptPath() {
   return __filename;
 }
 
+// True when the `forge-accounts` wrapper is resolvable on PATH — lets us emit
+// short, readable relaunch commands instead of the long node-path form.
+function wrapperOnPath() {
+  try {
+    execFileSync('which', ['forge-accounts'], { stdio: 'ignore' });
+    return true;
+  } catch { return false; }
+}
+
 function launchCommand(name) {
-  const sp = scriptPath();
-  return `FORGE_ACCOUNT=${name} CLAUDE_CODE_OAUTH_TOKEN="$(node '${sp}' --token ${name})" claude`;
+  const tokenCmd = wrapperOnPath()
+    ? `forge-accounts token ${name}`
+    : `node '${scriptPath()}' --token ${name}`;
+  return `FORGE_ACCOUNT=${name} CLAUDE_CODE_OAUTH_TOKEN="$(${tokenCmd})" claude`;
 }
 
 // ── Operations ───────────────────────────────────────────────────────────────
