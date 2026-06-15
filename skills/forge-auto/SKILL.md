@@ -1175,6 +1175,34 @@ completed_units.append("✓ [M###/S##/T##] {unit_type} — {one-liner}  · {agen
 
 After incrementing `session_units`:
 
+**Rate-limit handoff check** — runs BEFORE the pause check. Detects when this account's usage window is exhausted and hands off to another account (account exhaustion is more urgent than a queued pause). Gated by prefs: resolve `HANDOFF_IN_AUTO` (`accounts.handoff_in_auto`, default `on`) and `HANDOFF_THRESHOLD` (`accounts.handoff_threshold`, default `90`). If `HANDOFF_IN_AUTO == off`, skip this entire check.
+
+Read the freshest rate-limit bridge the statusline wrote (most-recently-modified `forge-ratelimit-*.json` in the tmpdir, within 120s — that is this session's; the orchestrator's own statusline renders continuously while the loop runs):
+
+```bash
+node -e '
+const fs=require("fs"),os=require("os"),path=require("path");
+const dir=os.tmpdir(); let best=null;
+try { for (const f of fs.readdirSync(dir)) {
+  if(!/^forge-ratelimit-.*\.json$/.test(f))continue;
+  const p=path.join(dir,f),st=fs.statSync(p);
+  if(Date.now()-st.mtimeMs>120000)continue;
+  if(!best||st.mtimeMs>best.m)best={m:st.mtimeMs,p};
+}} catch{}
+if(!best){console.log(JSON.stringify({available:false}));process.exit(0);}
+let rl={};try{rl=JSON.parse(fs.readFileSync(best.p,"utf8"));}catch{}
+const wins=[["5h",rl.five_hour],["7d",rl.seven_day]].filter(([,w])=>w&&typeof w.used_percentage==="number");
+if(!wins.length){console.log(JSON.stringify({available:false}));process.exit(0);}
+wins.sort((a,b)=>b[1].used_percentage-a[1].used_percentage);
+const [label,w]=wins[0];
+console.log(JSON.stringify({available:true,window:label,used:Math.round(w.used_percentage),resets_at:w.resets_at||null,account:rl.account||null}));
+'
+```
+
+- If `available == false` → no usage data (API-key user, or statusline never rendered rate_limits). Skip — fall through to the Pause check.
+- If `available == true` AND `used >= HANDOFF_THRESHOLD` → **trigger the handoff**: go to `## Account Handoff Procedure`, passing `{window, used, resets_at, account}`. That procedure checkpoints, deactivates this run, emits the relaunch instructions, fires a push, and **stops the loop**. Do NOT continue to the next unit.
+- Otherwise → fall through to the Pause check.
+
 **Pause check** — multi-run-aware (M004). Checks the run-scoped pause file first, then the legacy global pause file (for compat):
 
 ```bash
@@ -1218,6 +1246,56 @@ else
   echo '{"active":false}' > .gsd/forge/auto-mode.json
 fi
 ```
+
+---
+
+## Account Handoff Procedure
+
+Invoked from Step 7 when the active account's tightest usage window crossed `HANDOFF_THRESHOLD`. Inputs: `{window, used, resets_at, account}` (account = this session's `FORGE_ACCOUNT`, or null for the default Keychain login). **This is a sanctioned stop** — account exhaustion is a hard external limit, not an AUTONOMY-RULE violation. The handoff is always a *relaunch* (a running session cannot switch its own account); on-disk state makes `/forge-auto` resume seamlessly.
+
+**1. Checkpoint.** Write `continue.md` for the active slice per `## Continue-Here Protocol` (so the next session resumes exactly here). Append an events.jsonl line:
+`{"ts":"{ISO8601}","unit":"account-handoff","agent":"orchestrator","milestone":"${RUN_ID:-{M###}}","status":"handoff","summary":"janela {window} em {used}% — checkpoint + troca de conta"}`
+
+**2. Resolve the next account.** List registered accounts and pick a candidate with a token that is NOT the current one:
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-accounts.js" --list --json
+```
+
+From the JSON, candidates = accounts where `has_token == true` AND `name != {account}` (when `{account}` is null, every token-bearing account qualifies). Prefer one with the most `days_left` if several. If a candidate `NEXT` exists, get its exact relaunch command:
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-accounts.js" --launch-cmd {NEXT}
+```
+
+**3. Deactivate this run** — see `## Deactivate auto-mode indicator` (deactivate `$RUN_ID` only; never touches other runs). This is what stops the loop; the marker staying recoverable lets the relaunched session resume.
+
+**4. Emit the handoff message and STOP the loop.**
+
+If a `NEXT` candidate exists:
+```
+⚠  Conta esgotada — janela {window} em {used}%. Checkpoint salvo.
+   Milestone {RUN_ID} pausado em: {next_action from STATE.md}
+
+   Para continuar na conta '{NEXT}', rode no seu terminal:
+     {comando de --launch-cmd}
+   Depois: /forge-auto {RUN_ID}   ← retoma do checkpoint automaticamente
+```
+
+If NO alternative account is registered:
+```
+⚠  Conta esgotada — janela {window} em {used}%. Checkpoint salvo.
+   Milestone {RUN_ID} pausado em: {next_action from STATE.md}
+
+   Nenhuma conta alternativa registrada. Registre uma e retome:
+     /forge-accounts add <nome>     (precisa de `claude setup-token`)
+     /forge-accounts use <nome>     → mostra o comando de relançamento
+   Depois: /forge-auto {RUN_ID}
+```
+
+**5. Fire push** (reuse the Push helper): message `"Forge {RUN_ID} — conta esgotada (janela {window} {used}%). Checkpoint salvo; troque de conta para retomar."`
+
+**Secondary trigger (429 on dispatch):** if `Agent()` fails with a usage-limit / quota-exhaustion error (not a transient network/stream error — those go through the Retry Handler), route here instead of the generic CRITICAL stop: run this same procedure with `{window: "5h", used: 100, resets_at: null, account}` (best-effort, since the bridge may lag the real 429). Everything else is identical.
 
 ---
 

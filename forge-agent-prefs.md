@@ -803,6 +803,36 @@ scope_reduction:
 - `skills/forge-auto/SKILL.md § Post-unit housekeeping` — emite a seção re-injetada.
 - `skills/forge-next/SKILL.md § Post-unit housekeeping` — idem (modo interativo).
 
+## Accounts Settings
+
+```
+accounts:
+  handoff_in_auto: on      # on | off — ao esgotar uma janela no /forge-auto, fazer checkpoint+pausa e indicar a troca de conta
+  handoff_threshold: 90    # % de uso (janela mais apertada: 5h ou semanal) que dispara o handoff
+```
+
+### Semântica
+
+- O `/forge-auto` checa o uso (via o bridge `forge-ratelimit-<session>.json` que a
+  statusline grava) **na fronteira de cada unidade** (Step 7). Se a janela mais
+  apertada (5h **ou** semanal) cruzar `handoff_threshold`, o loop faz **checkpoint**
+  (`continue.md`), pausa preservando o estado e imprime o comando exato pra relançar
+  o `claude` em outra conta registrada. `/forge-auto` retoma do checkpoint ao relançar.
+- `handoff_in_auto: off` → desliga a pausa automática; a statusline ainda mostra o
+  alerta visual de uso, mas o loop não pausa por esgotamento (você troca manualmente
+  via `/forge-accounts use <nome>`).
+- O handoff **nunca** é hot-swap (impossível mid-session) — é sempre relaunch.
+  Requer ≥1 conta alternativa registrada via `/forge-accounts add` para ter destino;
+  sem alternativa, o loop ainda faz checkpoint+pausa e instrui a registrar uma.
+- Só fica ativo no modo autônomo (`/forge-auto`). No `/forge-next` (interativo) você
+  vê o uso na statusline e decide.
+
+### Cross-references
+
+- `scripts/forge-accounts.js` — registro de contas + comando de relançamento.
+- `skills/forge-auto/SKILL.md § Account Handoff Procedure` — implementação do handoff.
+- `scripts/forge-statusline.js` — grava o bridge de rate-limit consumido aqui.
+
 ## Update Settings
 
 ```
