@@ -169,11 +169,54 @@ function wrapperOnPath() {
   } catch { return false; }
 }
 
+function tokenSubcommand(name) {
+  return wrapperOnPath() ? `forge-accounts token ${name}` : `node '${scriptPath()}' --token ${name}`;
+}
+
 function launchCommand(name) {
-  const tokenCmd = wrapperOnPath()
-    ? `forge-accounts token ${name}`
-    : `node '${scriptPath()}' --token ${name}`;
-  return `FORGE_ACCOUNT=${name} CLAUDE_CODE_OAUTH_TOKEN="$(${tokenCmd})" claude`;
+  return `FORGE_ACCOUNT=${name} CLAUDE_CODE_OAUTH_TOKEN="$(${tokenSubcommand(name)})" claude`;
+}
+
+// Single-quote for safe interpolation into a /bin/sh script.
+function shq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
+
+// Open a NEW terminal window already on <name>, resuming /forge-auto when the cwd
+// is a forge project (else a bare claude). macOS-only (uses osascript). The token
+// is fetched live inside the launcher (never written to disk or the AppleScript).
+// Lets you switch without exiting the current session — a fresh window appears.
+// Set FORGE_NEW_WINDOW_DRYRUN=1 to print what would run instead of opening it.
+function openNewTerminal(name) {
+  assertName(name);
+  if (!readToken(name)) throw new Error(`sem token para '${name}' — rode 'add ${name}'`);
+  if (process.platform !== 'darwin') {
+    throw new Error('--new-window por enquanto só no macOS (usa osascript). Em outros SOs, rode o comando do --print num terminal.');
+  }
+  const projectDir = process.cwd();
+  const isForge = fs.existsSync(path.join(projectDir, '.gsd'));
+  const claudeCmd = isForge ? 'claude "/forge-auto"' : 'claude';
+  const launcher = path.join(os.tmpdir(), `forge-switch-${name}-${process.pid}.sh`);
+  const body = [
+    '#!/usr/bin/env bash',
+    `cd ${shq(projectDir)} || exit 1`,
+    `export FORGE_ACCOUNT=${shq(name)}`,
+    `export CLAUDE_CODE_OAUTH_TOKEN="$(${tokenSubcommand(name)})"`,
+    `rm -f -- ${shq(launcher)}`,
+    `exec ${claudeCmd}`,
+    '',
+  ].join('\n');
+
+  const term = process.env.TERM_PROGRAM || '';
+  const osa = term === 'iTerm.app'
+    ? [['-e', `tell application "iTerm" to create window with default profile command "bash ${launcher}"`]]
+    : [['-e', `tell application "Terminal" to do script "bash ${launcher}"`],
+       ['-e', 'tell application "Terminal" to activate']];
+
+  if (process.env.FORGE_NEW_WINDOW_DRYRUN) {
+    return { dryrun: true, projectDir, isForge, launcherBody: body, osascript: osa.flat() };
+  }
+  fs.writeFileSync(launcher, body, { mode: 0o700 });
+  execFileSync('osascript', osa.flat());
+  return { dryrun: false, projectDir, isForge };
 }
 
 // ── Operations ───────────────────────────────────────────────────────────────
@@ -366,9 +409,11 @@ Flags:
   --add <name> --setup                          force the setup-token flow
   --list [--json]                               list registered accounts
   --current [--json]                            show active account (registry + env)
-  --use <name> [--print]                        switch to the account: in a TTY it
-                                                launches claude on it; --print (or no
-                                                TTY) emits the relaunch command instead
+  --use <name> [--new-window] [--print]         switch to the account. TTY → launch
+                                                claude here; --new-window (or no TTY on
+                                                macOS) → open a NEW Terminal window on it
+                                                (resumes /forge-auto in a forge project);
+                                                --print → just emit the relaunch command
   --launch-cmd <name>                           print relaunch command only
   --token <name>                                print the raw token (for $( ) substitution)
   --rename <old> --to <new>                     rename an account (keeps the token)
@@ -435,10 +480,23 @@ function cliMain() {
     } else if ('use' in args) {
       const name = assertName(args.use);
       const cmd = useAccount(name); // marks active + validates token exists
-      // In a real terminal: actually switch — launch claude on this account.
-      // Without a TTY (in-session/`!`/piped) or with --print: emit the command,
-      // since a session can't be started from a non-interactive context.
-      if (process.stdout.isTTY && !('print' in args)) {
+      const forceWindow = 'new-window' in args;
+      const forcePrint  = 'print' in args;
+      // Resolution:
+      //   --print                         → emit the command (scriptable)
+      //   --new-window, or non-TTY+macOS  → open a NEW terminal window on the account
+      //                                      (resumes /forge-auto in a forge project)
+      //   TTY (plain terminal)            → switch in place: launch claude here
+      //   non-TTY non-macOS               → emit the command (last resort)
+      if (forcePrint) {
+        process.stdout.write(cmd + '\n');
+      } else if (forceWindow || (!process.stdout.isTTY && process.platform === 'darwin')) {
+        const r = openNewTerminal(name);
+        if (r.dryrun) { process.stdout.write(JSON.stringify(r, null, 2) + '\n'); return; }
+        process.stdout.write(
+          `nova janela de Terminal aberta na conta '${name}'` +
+          (r.isForge ? ' — retomando /forge-auto.' : '.') + '\n');
+      } else if (process.stdout.isTTY) {
         const { spawnSync } = require('child_process');
         process.stderr.write(`\nTrocando para a conta '${name}' — iniciando Claude Code…\n`);
         const r = spawnSync('claude', [], {
@@ -450,8 +508,9 @@ function cliMain() {
           throw new Error(`falha ao lançar claude: ${r.error.message}`);
         }
         process.exit(typeof r.status === 'number' ? r.status : 0);
+      } else {
+        process.stdout.write(cmd + '\n');
       }
-      process.stdout.write(cmd + '\n');
 
     } else if ('launch-cmd' in args) {
       assertName(args['launch-cmd']);

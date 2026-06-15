@@ -91,24 +91,18 @@ Notas para mencionar quando fizer sentido:
 
 ### `use <nome>`
 
-Num terminal de verdade, `forge-accounts use <nome>` **já abre o Claude Code** nessa
-conta (um comando, sem copiar nada). Como uma sessão rodando não troca a si mesma, isso
-só funciona num terminal — por isso, chamado in-session (sem TTY), o engine apenas
-**imprime** o comando. Aqui na skill (sem TTY), marque a conta como ativa e apresente
-o comando curto pro usuário rodar:
+`use` resolve sozinho conforme o contexto (uma sessão rodando não troca a si mesma — então sempre é uma sessão NOVA):
+
+- **Terminal de verdade (TTY):** `forge-accounts use <nome>` troca **abrindo o claude ali** na conta.
+- **Chamado da skill / chat (sem TTY) no macOS:** abre uma **nova janela do Terminal** já na conta, e **num projeto forge retoma o `/forge-auto`** (via `osascript`). É o caso desta skill — então pode rodar direto:
 
 ```bash
-node "$FA" --use <nome>   # in-session: marca ativa + imprime; não abre sessão
+node "$FA" --use <nome>   # macOS sem TTY → abre nova janela do Terminal na conta
 ```
 
-> Para usar a conta **`<nome>`**, rode **no seu terminal**:
->
-> ```bash
-> forge-accounts use <nome>
-> ```
->
-> Isso abre o Claude Code já nessa conta. Se você estava no meio de um milestone,
-> rode `/forge-auto` depois — ele retoma do checkpoint automaticamente.
+Apresente ao usuário: uma nova janela do Terminal vai abrir na conta `<nome>` (retomando o milestone se for projeto forge). **Aviso uma vez só:** o macOS pode pedir permissão de Automação ("controlar Terminal") na primeira vez — é só permitir. Se ele preferir trocar na janela atual, deve sair desta sessão (`/exit`) e rodar `forge-accounts use <nome>` no terminal liberado.
+
+Flags úteis: `--new-window` força a janela nova mesmo num TTY; `--print` só imprime o comando (sem abrir nada). Fora do macOS, sem TTY, cai pro `--print`.
 
 Se o engine errar (conta inexistente / sem token), repasse a mensagem e sugira `add`.
 
