@@ -2,7 +2,11 @@
 // forge-migrate — Consolidated migration orchestrator for Forge Agent fragment stores.
 //
 // Runs the three migrators (ledger, decisions, memory) in order. For each:
-//   1. Renames the legacy monolith to <name>.bak (preserves existing .bak).
+//   0. Already-migrated shortcut: when .gsd/SCHEMA-VERSION is already CURRENT_SCHEMA
+//      AND the store's fragments are populated, the monolith on disk is a REGENERATED
+//      projection cache — NOT a legacy pre-migration monolith. Skip backup + migrate so
+//      the cache is never retired to .bak (reports skipped_reason: 'already-migrated').
+//   1. Otherwise: renames the legacy monolith to <name>.bak (preserves existing .bak).
 //   2. Invokes the migrator's migrate() export.
 //   3. Verifies: renders via forge-projection and diffs against .bak content.
 //   4. Writes .gsd/SCHEMA-VERSION on success.
@@ -27,6 +31,7 @@ const ledgerMigrate    = require('./forge-ledger-migrate');
 const decisionsMigrate = require('./forge-decisions-migrate');
 const memoryMigrate    = require('./forge-memory-migrate');
 const projection       = require('./forge-projection');
+const storeStateMod    = require('./forge-store-state');
 const { CURRENT_SCHEMA } = require('./forge-doctor');
 
 // ── Store descriptors ─────────────────────────────────────────────────────────
@@ -183,9 +188,25 @@ function compareContent(bakContent, rendered, storeName) {
   return 'differs';
 }
 
+// ── readSchemaVersion ───────────────────────────────────────────────────────
+// Returns the trimmed content of .gsd/SCHEMA-VERSION, or null if absent.
+function readSchemaVersion(cwd) {
+  try {
+    return fs.readFileSync(path.join(cwd, '.gsd', 'SCHEMA-VERSION'), 'utf8').trim();
+  } catch (_) {
+    return null;
+  }
+}
+
 // ── backupMonolith ────────────────────────────────────────────────────────────
 // Renames monolith to .bak if monolith exists and .bak does not exist yet.
 // Returns { action: 'renamed'|'bak-exists'|'no-source', bakContent: string|null }
+//
+// NOTE: this function only knows about file presence — it cannot tell a legacy
+// pre-migration monolith apart from a regenerated projection cache. The
+// already-migrated guard in migrateStore() short-circuits BEFORE this is called
+// when the repo is already at CURRENT_SCHEMA with a populated fragment store, so
+// a regenerated cache is never mistaken for a legacy monolith and retired.
 function backupMonolith(cwd, store, dryRun) {
   const monolithPath = path.join(cwd, store.monolithRel);
   const bakPath      = path.join(cwd, store.bakRel);
@@ -214,17 +235,51 @@ function backupMonolith(cwd, store, dryRun) {
 // Runs backup + migration + verification for a single store.
 // Returns store result object.
 function migrateStore(cwd, store, opts) {
-  const { dryRun = false } = opts;
+  const { dryRun = false, schemaCurrent = false, storeState = null } = opts;
   const result = {
-    name:         store.name,
-    bak:          null,    // 'renamed'|'bak-exists'|'no-source'|'would-rename'
-    written:      0,
-    skipped:      0,
-    would_write:  0,
-    warnings:     [],
-    verification: null,   // 'identical'|'differs (numbering only)'|'differs'|'no-bak'|'skipped'
-    error:        null,
+    name:           store.name,
+    bak:            null,    // 'renamed'|'bak-exists'|'no-source'|'would-rename'|'skipped (already-migrated)'
+    written:        0,
+    skipped:        0,
+    would_write:    0,
+    skipped_reason: null,   // 'already-migrated'|'inconsistent-schema-current-empty-store'|null
+    warnings:       [],
+    verification:   null,   // 'identical'|'differs (numbering only)'|'differs'|'no-bak'|'skipped'
+    error:          null,
   };
+
+  // Step 0: already-migrated shortcut.
+  // When the repo is already at CURRENT_SCHEMA, the monolith on disk is a
+  // REGENERATED projection cache — not a legacy pre-migration monolith. Retiring
+  // it to .bak would delete the cache and break skills that read it. Decide by
+  // schema version + populated fragment store, never by file presence alone.
+  if (schemaCurrent && storeState) {
+    if (storeState.state === 'migrated') {
+      // Fragments are the source of truth and the schema is current → done.
+      result.bak            = 'skipped (already-migrated)';
+      result.skipped_reason = 'already-migrated';
+      result.verification   = 'skipped (already-migrated)';
+      return result;
+    }
+    if (storeState.state === 'unmigrated') {
+      // SCHEMA-VERSION claims current, but fragments are empty while the monolith
+      // still holds real entries — an inconsistent ("stamped-but-empty") state.
+      // Do NOT silently retire the monolith; warn and skip so no history is lost.
+      const n = storeState.monolithEntries;
+      result.bak            = 'skipped (inconsistent-state)';
+      result.skipped_reason = 'inconsistent-schema-current-empty-store';
+      result.verification   = 'skipped (inconsistent-state)';
+      result.warnings.push(
+        `SCHEMA-VERSION is "${CURRENT_SCHEMA}" but the ${store.name} fragment store is empty ` +
+        `while ${store.monolithRel} still has ${n} entr${n === 1 ? 'y' : 'ies'}. ` +
+        `Not retiring the monolith. Remove .gsd/SCHEMA-VERSION and re-run migrate, ` +
+        `or investigate why the fragment store is missing.`
+      );
+      return result;
+    }
+    // storeState.state === 'empty' → nothing to migrate; fall through to backup
+    // (which reports 'no-source' when the monolith is absent).
+  }
 
   // Step 1: backup
   let bakContent = null;
@@ -293,11 +348,18 @@ function writeSchemaVersion(cwd) {
 function migrateAll(cwd, opts = {}) {
   const { dryRun = false } = opts;
 
+  // Resolve "already migrated" inputs once. The shortcut in migrateStore consults
+  // both: SCHEMA-VERSION must be current AND the store's fragments must be
+  // populated. storeState is read up-front — stores are independent, so a per-store
+  // snapshot taken here stays accurate across the loop.
+  const schemaCurrent = readSchemaVersion(cwd) === CURRENT_SCHEMA;
+  const state = storeStateMod.storeState(cwd);
+
   const results = {};
   let anyError = false;
 
   for (const store of STORES) {
-    const r = migrateStore(cwd, store, { dryRun });
+    const r = migrateStore(cwd, store, { dryRun, schemaCurrent, storeState: state[store.name] });
     results[store.name] = r;
     if (r.error) {
       anyError = true;
@@ -346,6 +408,9 @@ Description:
   After migration, renders via forge-projection and diffs against .bak.
   Writes .gsd/SCHEMA-VERSION on success.
   Idempotent: second run reports written:0 for each store.
+  Already-migrated shortcut: when SCHEMA-VERSION is current AND the fragment
+  store is populated, the monolith is a regenerated cache and is left untouched
+  (no .bak) — reported as skipped_reason: "already-migrated".
 
 Exit codes:
   0  Success
