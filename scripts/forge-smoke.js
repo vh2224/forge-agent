@@ -1301,6 +1301,39 @@ function smokeEffort() {
   assert(clamp('claude-sonnet-4-6', 'bogus') === 'medium', 'clamp: invalid effort → medium fallback', 'no fallback');
 }
 
+// Section 18: usage indicator (5h/weekly bars + handoff under token auth).
+// Guards the poller (fetchUsage + unified-* headers + adaptive cadence), the
+// statusline (bridge fallback-read + 70% gate + poll trigger), the hook spawn,
+// the multi-account dashboard, and the headroom-aware account selector with its
+// cooldown fallback intact.
+function smokeUsageIndicator() {
+  process.stdout.write('\n▸ Section 18: usage indicator (token-auth 5h/weekly)\n');
+  const poll = fs.readFileSync(path.join(SCRIPTS, 'forge-usage-poll.js'), 'utf8');
+  const sl   = fs.readFileSync(path.join(SCRIPTS, 'forge-statusline.js'), 'utf8');
+  const hook = fs.readFileSync(path.join(SCRIPTS, 'forge-hook.js'), 'utf8');
+  const acct = require(path.join(SCRIPTS, 'forge-accounts.js'));
+  const pollMod = require(path.join(SCRIPTS, 'forge-usage-poll.js'));
+
+  // Poller: exports fetchUsage, reads the unified-* headers, self-throttles adaptively.
+  assert(typeof pollMod.fetchUsage === 'function', 'forge-usage-poll exports fetchUsage');
+  assert(/anthropic-ratelimit-unified-/.test(poll), 'poller reads unified-* headers');
+  assert(/maxUtil >= 70 \? 120000/.test(poll), 'poller has adaptive cadence');
+
+  // Statusline: reads the bridge when rate_limits absent, gates at 70%, triggers the poll.
+  assert(/forge-ratelimit-/.test(sl), 'statusline reads ratelimit bridge (token-auth fallback)');
+  assert(/DISPLAY_THRESHOLD\s*=\s*70/.test(sl), 'statusline gates display at 70%');
+  assert(/forge-usage-poll\.js/.test(sl), 'statusline triggers the poll');
+
+  // Hook: spawns the poll on PostToolUse under token auth (covers headless forge-auto).
+  assert(/forge-usage-poll\.js/.test(hook) && /ANTHROPIC_AUTH_TOKEN/.test(hook),
+    'hook spawns poll under token auth');
+
+  // Multi-account dashboard + headroom-aware selector (cooldown fallback intact).
+  assert(fs.existsSync(path.join(SCRIPTS, 'forge-usage.js')), 'forge-usage.js dashboard present');
+  assert(typeof acct.nextAccountByUsage === 'function', 'forge-accounts exports nextAccountByUsage');
+  assert(typeof acct.nextAccount === 'function', 'cooldown-based nextAccount retained as fallback');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1325,6 +1358,7 @@ function main() {
     smokeReviewEngine();
     smokeAccounts();
     smokeEffort();
+    smokeUsageIndicator();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }

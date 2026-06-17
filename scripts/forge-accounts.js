@@ -660,6 +660,41 @@ function nextAccount(cooldownsFile) {
   return { account: null, wait_until: earliest };
 }
 
+// Headroom-aware variant (opt-in via --by-usage). Among cooldown-eligible
+// accounts, pick the one with the LOWEST 7-day utilization, read live from each
+// account's token via forge-usage-poll.fetchUsage (the unified-* headers). This
+// is the real "use all accounts" selector — it drains the freshest account
+// first instead of the cooldown approximation noted above. Falls back to the
+// cooldown-based nextAccount() on any failure (poll module absent, all polls
+// fail, ≤1 eligible), so it never regresses. Costs ~9 tokens per polled account,
+// only at a rotation boundary.
+async function nextAccountByUsage(cooldownsFile) {
+  let fetchUsage;
+  try { ({ fetchUsage } = require(path.join(__dirname, 'forge-usage-poll.js'))); }
+  catch { return nextAccount(cooldownsFile); }
+
+  const reg = loadRegistry();
+  const cds = readCooldowns(cooldownsFile);
+  const nowS = Math.floor(Date.now() / 1000);
+  const tokenAccts = Object.keys(reg.accounts).filter((n) => !!readToken(n));
+  const eligible = tokenAccts.filter((n) => {
+    const cd = cds[n];
+    return !(cd && cd.resets_at && cd.resets_at > nowS);
+  });
+  if (eligible.length <= 1) return nextAccount(cooldownsFile);
+
+  const scored = await Promise.all(eligible.map(async (n) => {
+    const usage = await fetchUsage(readToken(n));
+    const u7 = (usage && usage.seven_day && typeof usage.seven_day.used_percentage === 'number')
+      ? usage.seven_day.used_percentage : null;
+    return { name: n, u7 };
+  }));
+  const reachable = scored.filter((s) => s.u7 !== null);
+  if (!reachable.length) return nextAccount(cooldownsFile);
+  reachable.sort((a, b) => a.u7 - b.u7);
+  return { account: reachable[0].name, wait_until: null, by: 'usage', util_7d: Math.round(reachable[0].u7) };
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
   const args = {};
@@ -760,8 +795,10 @@ Flags:
   --token <name>                                print the raw token (for $( ) substitution)
   --rename <old> --to <new>                     rename an account (keeps the token)
   --remove <name>                               delete account + its token
-  --next-account [--cooldowns <file>]           print {account,wait_until} for the
-                                                supervisor (most-rested eligible)
+  --next-account [--cooldowns <file>] [--by-usage]  print {account,wait_until} for
+                                                the supervisor. Default: most-rested
+                                                eligible. --by-usage: lowest 7d
+                                                utilization (polls each, ~9 tok/acct)
   --mark-cooldown <name> [--resets-at <epoch>] --cooldowns <file>
                                                 record that <name> is exhausted
   --help                                        show this help
@@ -890,7 +927,15 @@ function cliMain() {
 
     } else if ('next-account' in args) {
       const f = typeof args.cooldowns === 'string' ? args.cooldowns : null;
-      process.stdout.write(JSON.stringify(nextAccount(f)) + '\n');
+      if ('by-usage' in args) {
+        // Async headroom-aware pick; the pending network I/O keeps the event
+        // loop alive until stdout is written. Any failure → cooldown-based pick.
+        nextAccountByUsage(f)
+          .then((r) => process.stdout.write(JSON.stringify(r) + '\n'))
+          .catch(() => process.stdout.write(JSON.stringify(nextAccount(f)) + '\n'));
+      } else {
+        process.stdout.write(JSON.stringify(nextAccount(f)) + '\n');
+      }
 
     } else if ('mark-cooldown' in args) {
       const acct = assertName(args['mark-cooldown']);
@@ -916,7 +961,7 @@ module.exports = {
   launchCommand, daysLeft, assertName, shellInit, shellInitPwsh,
   setDefault, resolveLaunch, launchOrEmit, spawnClaudeOnAccount, forgeAutoArgsFor,
   setEmail, recordIdentity, matchAccount, readClaudeIdentity, openNewTerminal,
-  nextAccount, markCooldown, readCooldowns,
+  nextAccount, nextAccountByUsage, markCooldown, readCooldowns,
   REGISTRY_FILE, TOKENS_FILE,
 };
 

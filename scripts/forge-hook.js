@@ -613,6 +613,31 @@ process.stdin.on('end', () => {
       } catch { /* silent-fail — context monitor never aborts a tool call (MEM008) */ }
     }
 
+    // ── PostToolUse: usage poll (token-auth sessions only) ───────────────────
+    // Under ANTHROPIC_AUTH_TOKEN, Claude Code omits rate_limits, so the
+    // statusline's 5h/weekly bars and forge-auto's exhaustion handoff go blind.
+    // forge-usage-poll.js reads the unified-* headers and writes the bridge the
+    // statusline (display fallback) and forge-auto (handoff) consume. Detached +
+    // self-throttling (adaptive cadence); a coarse 90s mtime floor here keeps
+    // rapid tool calls from spawning node needlessly. Best-effort (MEM008).
+    if (phase === 'post' && sessionId && process.env.ANTHROPIC_AUTH_TOKEN) {
+      try {
+        const bridge = path.join(os.tmpdir(), `forge-ratelimit-${sessionId}.json`);
+        let fresh = false;
+        try { fresh = (Date.now() - fs.statSync(bridge).mtimeMs) < 90000; } catch {}
+        if (!fresh) {
+          let poller = path.join(__dirname, 'scripts', 'forge-usage-poll.js');
+          if (!fs.existsSync(poller)) poller = path.join(__dirname, 'forge-usage-poll.js');
+          if (fs.existsSync(poller)) {
+            const child = require('child_process').spawn(
+              process.execPath, [poller, '--session', sessionId],
+              { detached: true, stdio: 'ignore' });
+            child.unref();
+          }
+        }
+      } catch { /* never block a tool call (MEM008) */ }
+    }
+
     // Only track Agent tool dispatches (from here on)
     if (toolName !== 'Agent') return;
 

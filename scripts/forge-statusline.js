@@ -638,7 +638,22 @@ process.stdin.on('end', () => {
     // API-key users (field never arrives) — same best-effort posture (MEM008).
     let rateLimitDisplay = '';
     try {
-      const rl = d.rate_limits || {};
+      let rl = d.rate_limits || {};
+      // Token-auth fallback: under ANTHROPIC_AUTH_TOKEN, Claude Code omits
+      // rate_limits, so the bars would vanish. forge-usage-poll.js polls the
+      // unified-* headers and writes the same bridge file; read it when the
+      // live field is absent. Bridge shape matches the writer below.
+      if (!rl.five_hour && !rl.seven_day) {
+        try {
+          const sid = d.session_id || '';
+          if (sid) {
+            const b = JSON.parse(fs.readFileSync(
+              path.join(os.tmpdir(), `forge-ratelimit-${sid}.json`), 'utf8'));
+            // ≤15min keeps a stale poll from showing indefinitely after exit.
+            if (b && typeof b.ts === 'number' && Date.now() - b.ts < 15 * 60 * 1000) rl = b;
+          }
+        } catch { /* no bridge yet — degrade silently */ }
+      }
       const rlColor = (pctUsed) =>
         pctUsed >= 90 ? c.red : pctUsed >= 70 ? c.yellow : c.green;
       // Fine-grained 5-cell bar using partial-block glyphs, so even low usage
@@ -673,9 +688,13 @@ process.stdin.on('end', () => {
         parts.push(`${icon} ${col}${usageBar(w.used_percentage)} ${p}%${c.reset}`);
         if (!tightest || w.used_percentage > tightest.used_percentage) tightest = w;
       }
-      if (parts.length) {
+      // Show the usage segment only once a window crosses 70% (5h OR weekly) —
+      // below that you're not near a limit, so the bars are noise. Above it,
+      // show every window so you see the full picture before the 90% handoff.
+      const DISPLAY_THRESHOLD = 70;
+      if (parts.length && tightest && tightest.used_percentage >= DISPLAY_THRESHOLD) {
         let resetStr = '';
-        if (tightest && typeof tightest.resets_at === 'number') {
+        if (typeof tightest.resets_at === 'number') {
           const r = fmtReset(Math.round(tightest.resets_at - Date.now() / 1000));
           if (r) resetStr = ` ${c.dim}⏳${r}${c.reset}`;
         }
@@ -714,6 +733,31 @@ process.stdin.on('end', () => {
         );
       }
     } catch { /* best-effort */ }
+
+    // --- Usage poll trigger (token-auth sessions): keep the bridge fresh ---
+    // Under ANTHROPIC_AUTH_TOKEN, Claude Code omits rate_limits, so the bars
+    // above read from the poll bridge instead. The statusline renders
+    // continuously, so it's the reliable place to keep that bridge fresh: spawn
+    // the detached, self-throttling poller when the bridge is missing or older
+    // than ~100s (the poller applies the finer adaptive cadence). Hook-driven
+    // polling (PostToolUse matcher Agent) covers headless forge-auto, where the
+    // statusline doesn't render. Best-effort (MEM008) — never blocks a render.
+    try {
+      const sid = d.session_id || '';
+      if (sid && process.env.ANTHROPIC_AUTH_TOKEN) {
+        const rlFile = path.join(os.tmpdir(), `forge-ratelimit-${sid}.json`);
+        let stale = true;
+        try { stale = (Date.now() - fs.statSync(rlFile).mtimeMs) > 100000; } catch {}
+        if (stale) {
+          let poller = path.join(__dirname, 'scripts', 'forge-usage-poll.js');
+          if (!fs.existsSync(poller)) poller = path.join(__dirname, 'forge-usage-poll.js');
+          if (fs.existsSync(poller)) {
+            require('child_process').spawn(process.execPath, [poller, '--session', sid],
+              { detached: true, stdio: 'ignore' }).unref();
+          }
+        }
+      }
+    } catch { /* best-effort — statusline never throws (MEM008) */ }
 
     // --- Usage segment: account + rate limits read together ---
     let usageSegment = '';
