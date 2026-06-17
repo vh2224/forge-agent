@@ -55,7 +55,9 @@ heavy    → forge-executor  (opus)     # tasks com decisões arquiteturais comp
 
 ## Effort Settings
 
-Controla a intensidade de processamento por fase. Opus suporta `low | medium | high | max`. Sonnet suporta `low | medium`.
+Controla a intensidade de raciocínio (tokens gastos por unidade). Eixo **ortogonal ao tier**: o tier escolhe *qual modelo* roda; o effort escolhe *o quão fundo* ele pensa. Escala ordenada (barato → caro): `low < medium < high < xhigh < max`.
+
+Este bloco define o **default por fase** (`unit_type`). É a camada base — sobreposta por `effort:` no frontmatter de cada `T##-PLAN.md` (ver abaixo).
 
 ```
 effort:
@@ -70,6 +72,17 @@ effort:
   complete-milestone: low     # sonnet — fechamento de milestone
   memory-extract:    low      # haiku — extração leve
 ```
+
+### Effort dinâmico por complexidade da task
+
+O `forge-planner` julga a complexidade de cada task e emite `effort:` (e `tier:`) no frontmatter do `T##-PLAN.md`. O orquestrador resolve o effort em **4 passos** (algoritmo canônico em `shared/forge-dispatch.md § Effort Resolution`):
+
+1. **Default por fase** — `effort:` deste bloco para o `unit_type`.
+2. **Override de frontmatter** (`execute-task`) — `effort:` no `T##-PLAN.md` vence o default. É o sinal de complexidade da task.
+3. **Risk escalation** — `plan-slice` em slice `risk:high` (tier escalado a `max`) também sobe o effort a `max`.
+4. **Clamp por modelo** — effort é rebaixado ao teto do modelo resolvido: `haiku`/`sonnet` (tiers `light`/`standard`) **limitam em `medium`**; `opus`/`fable` (tiers `heavy`/`max`) permitem a escala toda.
+
+> **Consequência do clamp:** para uma task *rodar* em `high`/`xhigh`/`max`, ela precisa estar num tier `heavy`/`max` (opus/fable). Setar `effort: xhigh` numa task `standard` (sonnet) não tem efeito — o planner deve subir `tier` junto. O evento `dispatch` em `events.jsonl` registra `effort` + `effort_reason` (incluindo `|clamped:model-cap` quando o clamp dispara) para auditoria.
 
 ## Thinking Settings
 

@@ -1006,6 +1006,7 @@ REASON="unit-type:$UNIT_TYPE"
 if [ "$UNIT_TYPE" = "execute-task" ]; then
   PLAN_TIER=$(node -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tier:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
   PLAN_TAG=$(node -e  "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tag:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
+  PLAN_EFFORT=$(node -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^effort:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
 
   # Step 3: apply precedence
   if [ -n "$PLAN_TIER" ]; then
@@ -1032,11 +1033,82 @@ MODEL_ID=$(node -e "const p=JSON.parse(require('fs').readFileSync('.gsd/prefs-re
 # header (or omit the line), overriding any phase-level "thinking: disabled" pref.
 case "$MODEL_ID" in claude-fable-5*) THINKING_HEADER="adaptive";; esac
 
+# Step 4c: Effort Resolution — see "### Effort Resolution" below for the full algorithm.
+# Runs here because the per-model capability clamp needs $MODEL_ID. Sets $EFFORT/$EFFORT_REASON.
+declare -A EFFORT_DEFAULTS=(
+  [plan-milestone]="medium" [plan-slice]="medium" [discuss-milestone]="medium" [discuss-slice]="medium"
+  [research-milestone]="medium" [research-slice]="medium" [execute-task]="low"
+  [complete-slice]="low" [complete-milestone]="low" [memory-extract]="low"
+)
+EFFORT="${EFFORT_MAP[$UNIT_TYPE]:-${EFFORT_DEFAULTS[$UNIT_TYPE]:-low}}"; EFFORT_REASON="unit-type:$UNIT_TYPE"
+if [ "$UNIT_TYPE" = "execute-task" ] && [ -n "$PLAN_EFFORT" ]; then EFFORT="$PLAN_EFFORT"; EFFORT_REASON="frontmatter-effort:$PLAN_EFFORT"; fi
+if [ "$UNIT_TYPE" = "plan-slice" ] && [ "$REASON" = "risk-escalation:high" ]; then EFFORT="max"; EFFORT_REASON="risk-escalation:high"; fi
+EFFORT_CLAMPED=$(node -e "const r={low:0,medium:1,high:2,xhigh:3,max:4};const m='$MODEL_ID';const cap=(/^claude-(haiku|sonnet)/.test(m))?'medium':'max';let e='$EFFORT';if(!(e in r))e='medium';process.stdout.write(r[e]>r[cap]?cap:e)")
+if [ "$EFFORT_CLAMPED" != "$EFFORT" ]; then EFFORT_REASON="${EFFORT_REASON}|clamped:model-cap"; EFFORT="$EFFORT_CLAMPED"; fi
+
 # Step 5: extend dispatch event (append after Token Telemetry builds dispatchEvent)
-# Add:  ,"tier":"$TIER","reason":"$REASON"
+# Add:  ,"tier":"$TIER","reason":"$REASON","effort":"$EFFORT","effort_reason":"$EFFORT_REASON"
 # Example (forge-auto line 259 extended):
-echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\"}" >> .gsd/forge/events.jsonl
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\"}" >> .gsd/forge/events.jsonl
 ```
+
+---
+
+### Effort Resolution
+
+**Purpose:** Control-flow section that runs right after [Tier Resolution](#tier-resolution), before the `Agent()` call. It translates `unit_type + frontmatter hint + prefs + resolved model` into a concrete `effort` level injected into the worker prompt header (`effort: {unit_effort}`). Effort controls *reasoning intensity* (token spend per unit), orthogonal to the tier (which controls *which model* runs). A complex task wants both a heavier model **and** higher effort; the two axes are resolved independently but can be set coherently by the planner. Like Tier Resolution, this is pure Markdown rules + a `node -e` clamp — no new script.
+
+> **Why a separate axis from tier:** tier picks the model; effort picks how hard that model thinks. Coupling them to one signal loses granularity (e.g. a `standard`-tier task that is logically intricate but cheap to run still benefits from `medium` over `low`). The planner emits `effort:` per task on its own judgement (see `agents/forge-planner.md § Effort & Tier Hints`).
+
+#### Effort scale
+
+Ordered cheap → expensive reasoning: **`low < medium < high < xhigh < max`**. Higher = more reasoning tokens = better quality on hard problems, worse token efficiency on easy ones. The whole point of dynamic effort is to spend `low` on routine tasks and reserve `high`/`xhigh`/`max` for genuinely complex ones.
+
+#### When to apply
+
+After Tier Resolution has set `$MODEL_ID` (the clamp in step 4 depends on it) and before Token Telemetry builds the dispatch event (so `effort`/`effort_reason` land on the same line as `tier`/`reason`). Read-only — never mutates STATE.md.
+
+#### Algorithm
+
+1. **Unit-type default.** `EFFORT = PREFS.effort[unit_type]` (the `EFFORT_MAP` extracted at Load Context from `forge-agent-prefs.md § Effort Settings`). Fall back to the built-in defaults (opus/planning phases = `medium`, sonnet/haiku phases = `low`) when the key is absent. `EFFORT_REASON = "unit-type:<unit_type>"`.
+2. **Dedicated frontmatter axis (`execute-task` only).** If `effort:` is present in the `T##-PLAN.md` frontmatter → `EFFORT = PLAN_EFFORT`, `EFFORT_REASON = "frontmatter-effort:<val>"`. This is the planner's per-task complexity judgement and wins over the unit-type default. Independent of `tier:` — a task may be `tier: standard` + `effort: medium` or `tier: heavy` + `effort: high` in any combination.
+3. **Risk escalation sync (`plan-slice` only).** When Tier Resolution escalated the slice to `max` (`REASON == "risk-escalation:high"`), the effort also jumps to `max`. A `risk:high` slice plan is the highest leverage-per-dollar spot for frontier reasoning.
+4. **Model capability clamp.** Clamp `EFFORT` down to the resolved model's ceiling. `claude-haiku*` and `claude-sonnet*` cap at `medium`; `claude-opus*` and `claude-fable*` allow the full scale up to `max`. When the clamp lowers the value, append `|clamped:model-cap` to `EFFORT_REASON`. This prevents HTTP 400s (a Sonnet dispatch never receives `high`+) and silently-wasted config. **Consequence:** to actually *run* a task at `high`/`xhigh`/`max`, the task must also be on a `heavy`/`max` tier (opus/fable) — set both `tier:` and `effort:` in the plan, or rely on the planner to set them coherently.
+
+#### Frontmatter field
+
+| Field | Type | Accepted Values | Effect |
+|-------|------|-----------------|--------|
+| `effort:` | enum | `low \| medium \| high \| xhigh \| max` | Per-task reasoning intensity (execute-task only). Wins over the unit-type default; clamped down to the resolved model's ceiling. Independent of `tier:`. |
+
+#### Event log extension
+
+The `dispatch` event schema is extended additively with `effort` and `effort_reason`. No existing fields renamed/removed; S03-era readers ignore unknown fields.
+
+```json
+{
+  "ts": "2026-06-17T10:00:05Z",
+  "event": "dispatch",
+  "unit": "execute-task/T03",
+  "model": "claude-opus-4-8",
+  "tier": "heavy",
+  "reason": "frontmatter-override:heavy",
+  "effort": "high",
+  "effort_reason": "frontmatter-effort:high",
+  "input_tokens": 2000,
+  "output_tokens": 300
+}
+```
+
+#### Worked examples
+
+**A — routine execute-task (defaults).** `unit_type=execute-task`, no `effort:`/`tier:` → `tier=standard`, `model=claude-sonnet-4-6`, `EFFORT=low` (unit default), no clamp → `effort=low`, `effort_reason="unit-type:execute-task"`.
+
+**B — complex execute-task (planner sets both axes).** Frontmatter `tier: heavy` + `effort: high` → `model=claude-opus-4-8`; effort `high` ≤ opus cap `max`, no clamp → `effort=high`, `effort_reason="frontmatter-effort:high"`.
+
+**C — effort set high but task left on Sonnet (clamp fires).** Frontmatter `effort: xhigh`, no `tier:` → `tier=standard`, `model=claude-sonnet-4-6`; `xhigh` > sonnet cap `medium` → clamp → `effort=medium`, `effort_reason="frontmatter-effort:xhigh|clamped:model-cap"`. The operator sees in telemetry that effort was capped because the model wasn't bumped.
+
+**D — risk:high plan-slice.** Tier escalated `heavy → max` (`reason="risk-escalation:high"`, `model=claude-fable-5`) → effort jumps to `max`, no clamp (fable allows max) → `effort=max`, `effort_reason="risk-escalation:high"`.
 
 ---
 

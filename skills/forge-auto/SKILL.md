@@ -301,11 +301,7 @@ Then proceed with dispatch normally (the executor will overwrite the partial wor
 
 **Dynamic routing:** If `T##-PLAN.md` contains `complexity: heavy`, route `execute-task` to `forge-executor` on opus.
 
-**Resolve effort for this unit:**
-```
-unit_effort = EFFORT_MAP[unit_type] or ("medium" if opus model else "low")
-```
-Inject `effort: {unit_effort}` and (for opus phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
+**Effort is resolved in step 1.55 below** (after tier resolution), because the per-model capability clamp needs the resolved `$MODEL_ID`. Do NOT resolve effort here.
 
 **Tier resolution (step 1.5)** — resolve `{tier, model, reason}` for this dispatch.
 > Cross-reference: `shared/forge-dispatch.md § Tier Resolution` (algorithm) and `shared/forge-tiers.md` (canonical tables).
@@ -327,6 +323,7 @@ if [ "$unit_type" = "execute-task" ]; then
   PLAN_PATH=".gsd/milestones/${M###}/slices/${S##}/tasks/${T##}/${T##}-PLAN.md"
   PLAN_TIER=$(node -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tier:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
   PLAN_TAG=$(node  -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^tag:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
+  PLAN_EFFORT=$(node -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^effort:\s*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
 
   # Step 3: apply precedence (first match wins)
   if [ -n "$PLAN_TIER" ]; then
@@ -360,6 +357,49 @@ MODEL_ID=$(node -e "
 > **Fable 5 thinking guard:** if `$MODEL_ID` is `claude-fable-5`, inject `thinking: adaptive` in the
 > worker prompt header (or omit the `thinking:` line) regardless of the phase's `thinking:` pref —
 > `claude-fable-5` returns HTTP 400 on an explicit `thinking: disabled` (Opus 4.7/4.8 accept it).
+
+**Effort resolution (step 1.55)** — resolve `$EFFORT` for this dispatch. Runs **after** tier resolution because the per-model capability clamp needs `$MODEL_ID`.
+> Cross-reference: `shared/forge-dispatch.md § Effort Resolution` (algorithm, scale, clamp table).
+
+```bash
+# ── Effort Resolution (after Tier Resolution; needs $MODEL_ID) ────────────────────
+# Ordered scale (cheap → expensive reasoning): low < medium < high < xhigh < max
+# Step 1: unit-type default — PREFS.effort (EFFORT_MAP) wins; fallback to built-in defaults.
+declare -A EFFORT_DEFAULTS=(
+  [plan-milestone]="medium" [plan-slice]="medium"
+  [discuss-milestone]="medium" [discuss-slice]="medium"
+  [research-milestone]="medium" [research-slice]="medium"
+  [execute-task]="low" [complete-slice]="low" [complete-milestone]="low"
+  [memory-extract]="low"
+)
+EFFORT="${EFFORT_MAP[$unit_type]:-${EFFORT_DEFAULTS[$unit_type]:-low}}"
+EFFORT_REASON="unit-type:$unit_type"
+
+# Step 2: dedicated frontmatter axis (execute-task only) — effort: in T##-PLAN wins, independent of tier:
+if [ "$unit_type" = "execute-task" ] && [ -n "$PLAN_EFFORT" ]; then
+  EFFORT="$PLAN_EFFORT"; EFFORT_REASON="frontmatter-effort:$PLAN_EFFORT"
+fi
+
+# Step 3: risk escalation sync — a risk:high plan-slice (TIER bumped to max) also gets max effort.
+if [ "$unit_type" = "plan-slice" ] && [ "$REASON" = "risk-escalation:high" ]; then
+  EFFORT="max"; EFFORT_REASON="risk-escalation:high"
+fi
+
+# Step 4: clamp to the resolved model's capability ceiling — prevents HTTP 400s + wasted config.
+# haiku/sonnet cap at medium; opus/fable allow the full scale.
+EFFORT_CLAMPED=$(node -e "
+  const rank={low:0,medium:1,high:2,xhigh:3,max:4};
+  const model='$MODEL_ID';
+  const cap=(/^claude-(haiku|sonnet)/.test(model))?'medium':'max';
+  let e='$EFFORT'; if(!(e in rank)) e='medium';
+  process.stdout.write(rank[e]>rank[cap]?cap:e);
+")
+if [ "$EFFORT_CLAMPED" != "$EFFORT" ]; then
+  EFFORT_REASON="${EFFORT_REASON}|clamped:model-cap"; EFFORT="$EFFORT_CLAMPED"
+fi
+unit_effort="$EFFORT"
+```
+`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are now set. Inject `effort: {unit_effort}` and (for opus/fable phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
 
 **Batch determination (step 1.6 — execute-task only):** When `unit_type == execute-task`, the dispatch is no longer strictly single-task. Invoke `scripts/forge-parallelism.js` to compute a **ready batch** — a set of tasks in the active slice whose `depends:[]` are satisfied AND whose `writes:[]` don't overlap with each other.
 
@@ -843,7 +883,7 @@ Wait for the result. Then:
 ```bash
 OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS}}" >> .gsd/forge/events.jsonl
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS}}" >> .gsd/forge/events.jsonl
 ```
 
 **Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
@@ -957,11 +997,11 @@ This branch is a safety net, not a retry path. The right fix is to not backgroun
 - If ANY task throws permanently (classifier `retry: false`, or retries exhausted): apply the CRITICAL path — deactivate auto-mode, surface to user, stop loop. Other batch results are discarded (STATE still reflects the pre-batch position).
 - Transient/retry events append to `events.jsonl` with `unit: "execute-task/T##"` (per-task, not per-batch).
 
-**h) Output tokens + dispatch events** — once all results are back, emit one `dispatch` event per task (not one per batch), preserving the per-task tier/model/reason fields:
+**h) Output tokens + dispatch events** — once all results are back, emit one `dispatch` event per task (not one per batch), preserving the per-task tier/model/reason/effort fields. Effort resolves **per task** in batch mode exactly as tier does — each task gets its own `$EFFORT_T##`/`$EFFORT_REASON_T##` from the Effort Resolution algorithm (step 1.55) run against that task's `$MODEL_ID_T##`:
 ```bash
 for each task in BATCH:
   OUTPUT_TOKENS_T##=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result_T##")
-  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/T##\",\"model\":\"$MODEL_ID_T##\",\"tier\":\"$TIER_T##\",\"reason\":\"$REASON_T##\",\"input_tokens\":$INPUT_TOKENS_T##,\"output_tokens\":$OUTPUT_TOKENS_T##,\"batch_size\":${BATCH_LENGTH}}" >> .gsd/forge/events.jsonl
+  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/T##\",\"model\":\"$MODEL_ID_T##\",\"tier\":\"$TIER_T##\",\"reason\":\"$REASON_T##\",\"effort\":\"$EFFORT_T##\",\"effort_reason\":\"$EFFORT_REASON_T##\",\"input_tokens\":$INPUT_TOKENS_T##,\"output_tokens\":$OUTPUT_TOKENS_T##,\"batch_size\":${BATCH_LENGTH}}" >> .gsd/forge/events.jsonl
 ```
 
 The extra `batch_size` field lets post-hoc analysis separate parallel from sequential dispatches without breaking S03 telemetry readers (which ignore unknown fields).

@@ -57,6 +57,12 @@ before the unit_type default is consulted. The `tier:` field takes precedence ov
 **Note:** Additional `tag:` values may be introduced in future milestones. The `docs` downgrade
 is the only tag-based rule active in M002.
 
+> **Sibling axis — `effort:`.** `tier:` (this file) picks *which model* runs the unit; `effort:`
+> picks *how hard it reasons* (token spend). The two are independent frontmatter fields resolved
+> in separate passes. Effort is clamped to the resolved model's ceiling (`light`/`standard` cap at
+> `medium`; `heavy`/`max` allow up to `max`), so a high effort only takes effect on a `heavy`/`max`
+> tier. Canonical spec: [`shared/forge-dispatch.md § Effort Resolution`](forge-dispatch.md#effort-resolution).
+
 ---
 
 ## Override Precedence

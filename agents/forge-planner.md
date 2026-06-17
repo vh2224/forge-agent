@@ -142,6 +142,29 @@ expected_output:
 - `expected_output` is a **top-level sibling** of `must_haves` (not nested inside it) — a flat array of path strings.
 - **Unconditional** — emit the block on every net-new T##-PLAN, even when artifacts are minor. The executor's verification gate (`scripts/forge-must-haves.js`) parses and validates this shape; a missing or malformed block causes the gate to fail.
 
+## Effort & Tier Hints (routing — judge per task)
+
+The orchestrator routes each `execute-task` to a model (**tier**) and a reasoning intensity (**effort**). Both come from optional frontmatter fields you set per task based on your judgement of its complexity. Spending the right amount per task is the whole point — don't blanket-set `heavy`/`high` on routine work, and don't starve a genuinely hard task with `low`. These two axes are **independent** but should be set **coherently**:
+
+```yaml
+tier:   light | standard | heavy | max     # which model runs the task (optional; default standard)
+effort: low | medium | high | xhigh | max  # how hard it reasons (optional; default = unit-type default, low)
+```
+
+**Calibration — pick the pair that matches the task:**
+
+| Task complexity | `tier` | `effort` | Examples |
+|---|---|---|---|
+| Trivial / docs-only | `light` (or `tag: docs`) | `low` | Copy edits, comment/README tweaks, constant changes |
+| Routine | `standard` | `low` | CRUD endpoint, straightforward component, glue code following an existing pattern |
+| Moderate | `standard` | `medium` | Non-trivial logic, a new module with some edge cases, refactor within one file |
+| Complex | `heavy` | `high` | Cross-cutting changes, tricky concurrency/state, an algorithm with subtle correctness |
+| Very complex / high-stakes | `heavy` or `max` | `xhigh` or `max` | Architectural decisions encoded in code, security-critical paths, intricate migrations |
+
+**Hard rule — the effort clamp:** the orchestrator clamps effort down to what the resolved model supports. `light`/`standard` tiers (haiku/sonnet) **cap at `medium`** — an `effort: high`+ on a `standard` task is silently lowered to `medium`. So to actually *run* a task at `high`/`xhigh`/`max`, you **must also raise `tier` to `heavy`/`max`**. Set both together: `tier: heavy` + `effort: high`. Setting `effort: xhigh` alone on a `standard` task does nothing useful.
+
+**Omit both fields** for the common case — a routine `standard` task at the unit-type default effort (`low`). Only add them when the task deviates from routine. Emit them on the same frontmatter block as `must_haves`/`depends`/`writes`.
+
 ## Parallelism Guidance
 
 When decomposing a slice into tasks, explicitly think about which tasks **can** run concurrently. Two tasks are safely parallel when:

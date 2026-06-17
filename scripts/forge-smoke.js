@@ -1263,6 +1263,44 @@ function smokeAccounts() {
   cleanup(dir); cleanup(proj);
 }
 
+// ── Section 17: dynamic effort resolution ──────────────────────────────────
+function smokeEffort() {
+  process.stdout.write('\n▸ Section 17: dynamic effort\n');
+  const REPO = path.dirname(SCRIPTS);
+  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+
+  const auto = rd('skills/forge-auto/SKILL.md');
+  const next = rd('skills/forge-next/SKILL.md');
+  const disp = rd('shared/forge-dispatch.md');
+  const planner = rd('agents/forge-planner.md');
+
+  for (const [label, txt] of [['forge-auto', auto], ['forge-next', next]]) {
+    assert(/Effort Resolution \(after Tier Resolution/.test(txt), `${label}: has Effort Resolution block`, 'block missing');
+    assert(/PLAN_EFFORT=\$\(node/.test(txt), `${label}: parses effort: from T##-PLAN frontmatter`, 'PLAN_EFFORT parse missing');
+    assert(/frontmatter-effort:/.test(txt), `${label}: frontmatter-effort reason present`, 'reason missing');
+    assert(/clamped:model-cap/.test(txt), `${label}: model-cap clamp present`, 'clamp missing');
+    // dispatch event carries effort + effort_reason
+    assert(/event.*dispatch[\s\S]*?effort\\?":\\?"\$\{?EFFORT/.test(txt), `${label}: dispatch event includes effort`, 'effort field missing from event');
+    assert(/effort_reason\\?":\\?"\$\{?EFFORT_REASON/.test(txt), `${label}: dispatch event includes effort_reason`, 'effort_reason field missing');
+    // old naive resolver must be gone
+    assert(!/EFFORT_MAP\[unit_type\] or \("medium" if opus/.test(txt), `${label}: legacy naive effort resolver removed`, 'naive resolver still present');
+  }
+
+  assert(/### Effort Resolution/.test(disp), 'forge-dispatch: canonical Effort Resolution section', 'section missing');
+  assert(/low < medium < high < xhigh < max/.test(disp), 'forge-dispatch: documents ordered effort scale', 'scale missing');
+  assert(/## Effort & Tier Hints/.test(planner), 'forge-planner: Effort & Tier Hints section', 'planner guidance missing');
+
+  // Behavioural: the clamp one-liner used in the SKILLs
+  const clamp = (model, e) => spawnSync('node', ['-e',
+    `const r={low:0,medium:1,high:2,xhigh:3,max:4};const m='${model}';const cap=(/^claude-(haiku|sonnet)/.test(m))?'medium':'max';let e='${e}';if(!(e in r))e='medium';process.stdout.write(r[e]>r[cap]?cap:e)`
+  ], { encoding: 'utf8' }).stdout;
+  assert(clamp('claude-sonnet-4-6', 'xhigh') === 'medium', 'clamp: sonnet xhigh → medium', 'no clamp');
+  assert(clamp('claude-haiku-4-5-20251001', 'high') === 'medium', 'clamp: haiku high → medium', 'no clamp');
+  assert(clamp('claude-opus-4-8', 'xhigh') === 'xhigh', 'clamp: opus xhigh → xhigh (no clamp)', 'wrongly clamped');
+  assert(clamp('claude-fable-5', 'max') === 'max', 'clamp: fable max → max', 'wrongly clamped');
+  assert(clamp('claude-sonnet-4-6', 'bogus') === 'medium', 'clamp: invalid effort → medium fallback', 'no fallback');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1286,6 +1324,7 @@ function main() {
     smokeNotifications();
     smokeReviewEngine();
     smokeAccounts();
+    smokeEffort();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
