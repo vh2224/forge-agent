@@ -446,6 +446,40 @@ function smokeIsolation() {
   res = JSON.parse(r.stdout);
   assert(res.repos[0].status === 'removed' && !fs.existsSync(wt2), 'clean worktree cleanup removes after commit', r.stdout);
 
+  // auto_pull_main: worktree must branch from FRESH origin/<def>, not the stale
+  // local main (2026-06-17 incident: forge/M099 forked from a local main that was
+  // 13 commits behind origin because nobody ran `git pull` on it). Setup:
+  //   bare origin ← clone ← advance origin by one commit (local main stays behind)
+  // then a worktree setup with auto_pull_main:true must contain the new commit.
+  const origin = path.join(dir, 'origin.git');
+  git(['init', '-q', '--bare', '-b', 'main', origin], dir);
+  const clone = path.join(dir, 'clone');
+  git(['clone', '-q', origin, clone], dir);
+  fs.mkdirSync(path.join(clone, '.gsd'), { recursive: true });
+  fs.writeFileSync(path.join(clone, 'base.txt'), 'v1\n');
+  git(['add', 'base.txt'], clone);
+  git(['-c', 'user.email=smoke@forge', '-c', 'user.name=smoke', 'commit', '-qm', 'v1'], clone);
+  git(['push', '-q', 'origin', 'main'], clone);
+  // Advance origin from a SEPARATE checkout so the clone's local main stays behind.
+  const pusher = path.join(dir, 'pusher');
+  git(['clone', '-q', origin, pusher], dir);
+  fs.writeFileSync(path.join(pusher, 'fresh.txt'), 'from-origin\n');
+  git(['add', 'fresh.txt'], pusher);
+  git(['-c', 'user.email=smoke@forge', '-c', 'user.name=smoke', 'commit', '-qm', 'fresh-on-origin'], pusher);
+  git(['push', '-q', 'origin', 'main'], pusher);
+  // Sanity: the clone's local main does NOT have fresh.txt yet (never pulled).
+  const localHasFresh = fs.existsSync(path.join(clone, 'fresh.txt'));
+  assert(!localHasFresh, 'clone local main is stale before setup (no fresh.txt)', String(localHasFresh));
+
+  fs.writeFileSync(path.join(clone, '.gsd', 'prefs.local.md'),
+    'forge_isolation:\n  mode: worktree\n  auto_pull_main: true\n');
+  r = runScript('forge-isolation.js', ['--setup', '--run', 'M-FRESH', '--cwd', clone], { env });
+  res = JSON.parse(r.stdout);
+  const wtF = res.repos[0] && res.repos[0].worktree;
+  assert(res.repos[0].base === 'origin/main', 'worktree base is origin/main, not local main', r.stdout);
+  assert(wtF && fs.existsSync(path.join(wtF, 'fresh.txt')),
+    'worktree branches from fresh origin/main (contains commit local main lacked)', r.stdout);
+
   cleanup(dir);
 }
 

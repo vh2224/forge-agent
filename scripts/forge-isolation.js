@@ -2,8 +2,15 @@
 // forge-isolation — Setup/cleanup for branch + worktree isolation modes
 //
 // For each git repo in the workspace:
-//   branch mode   : git checkout main && git pull && git checkout -b forge/{runId} (idempotent)
-//   worktree mode : git worktree add {root}/{runId}/{repo} -b forge/{runId}
+//   branch mode   : git fetch origin <def> && git checkout <def> && git merge --ff-only origin/<def> && git checkout -b forge/{runId} (idempotent)
+//   worktree mode : git fetch origin <def> && git worktree add {root}/{runId}/{repo} -b forge/{runId} origin/<def>
+//
+// Branching in git NEVER talks to the server — `git worktree add ... <def>` /
+// `git checkout -b` start from the LOCAL ref, which may be many commits behind
+// origin if nobody ran `git pull` on it. So we fetch origin/<def> first (updates
+// the remote-tracking cache without touching any working tree) and branch from
+// `origin/<def>`, deterministically, regardless of which branch the main checkout
+// currently sits on. Falls back to the local ref when there is no origin remote.
 //
 // Library exports:
 //   setupForRun(cwd, runId, opts) → { mode, repos: [{path, branch?, worktree?, status, error?}] }
@@ -76,6 +83,31 @@ function gitCurrentBranch(repoPath) {
   catch { return null; }
 }
 
+function gitHasOriginRemote(repoPath) {
+  try {
+    execSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'ignore' });
+    return true;
+  } catch { return false; }
+}
+
+// Fetch <def> from origin so worktrees/branches start from the freshest remote
+// state, not a stale local ref. `git fetch` updates the `origin/<def>` cache
+// without touching any working tree and does not depend on which branch the
+// checkout currently sits on. Returns the ref to branch from:
+//   { ref: 'origin/<def>', fetched: true }   when the fetch + verify succeeded
+//   { ref: '<def>',        fetched: false }   no origin remote, or fetch failed
+function fetchDefaultBranch(repoPath, def) {
+  if (!gitHasOriginRemote(repoPath)) return { ref: def, fetched: false };
+  try {
+    execSync(`git fetch origin ${def} --quiet`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+    // Confirm the remote-tracking ref resolves before we rely on it as a base.
+    execSync(`git rev-parse --verify origin/${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'ignore' });
+    return { ref: `origin/${def}`, fetched: true };
+  } catch (e) {
+    return { ref: def, fetched: false, warn: `fetch origin ${def} failed: ${e.message.split('\n')[0]}` };
+  }
+}
+
 function branchExists(repoPath, branch) {
   try {
     execSync(`git rev-parse --verify ${branch}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'ignore' });
@@ -95,11 +127,18 @@ function setupBranchOne(repoPath, branchName, autoPullMain) {
 
     if (autoPullMain) {
       const def = gitDefaultBranch(repoPath);
+      const base = fetchDefaultBranch(repoPath, def);
+      if (base.warn) result.warn = base.warn;
       try {
         execSync(`git checkout ${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
-        execSync(`git pull --ff-only`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+        if (base.fetched) {
+          // Fast-forward the local default to the freshly-fetched origin tip.
+          execSync(`git merge --ff-only origin/${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+        } else {
+          execSync(`git pull --ff-only`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+        }
       } catch (e) {
-        result.warn = `pull main failed: ${e.message.split('\n')[0]}`;
+        result.warn = `update ${def} failed: ${e.message.split('\n')[0]}`;
       }
     }
 
@@ -156,9 +195,13 @@ function setupWorktreeOne(repoPath, branchName, worktreeRoot, runId, autoPullMai
 
     if (autoPullMain) {
       const def = gitDefaultBranch(repoPath);
-      try { execSync(`git pull --ff-only`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' }); } catch {}
-      // Worktree from default branch
-      execSync(`git worktree add "${wtPath}" -b ${branchName} ${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+      // Fetch first, then branch the worktree from origin/<def> (fresh remote
+      // cache) — NOT the local <def>, which is never updated by branching and is
+      // commonly stale. Falls back to local <def> when there is no origin.
+      const base = fetchDefaultBranch(repoPath, def);
+      if (base.warn) result.warn = base.warn;
+      result.base = base.ref;
+      execSync(`git worktree add "${wtPath}" -b ${branchName} ${base.ref}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
     } else {
       execSync(`git worktree add "${wtPath}" -b ${branchName}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
     }
@@ -297,4 +340,5 @@ if (require.main === module) cliMain();
 module.exports = {
   setupForRun, cleanupForRun, readIsolationPrefs,
   resolveBranchName, gitDefaultBranch, gitCurrentBranch,
+  gitHasOriginRemote, fetchDefaultBranch,
 };
