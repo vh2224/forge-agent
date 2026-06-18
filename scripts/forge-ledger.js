@@ -4,10 +4,10 @@
 // Library exports:
 //   LEDGER_DIR                          → string  // relative path '.gsd/ledger'
 //   ledgerDir(cwd)                      → string  // absolute path to ledger dir
-//   fragmentPath(cwd, milestoneId)      → string  // absolute path to <id>.md
+//   fragmentPath(cwd, id)               → string  // absolute path to <id>.md (milestone or task)
 //   parseFragment(text)                 → object  // parse markdown with YAML frontmatter
 //   writeFragment(cwd, entry, opts)     → { path, created }
-//   readFragment(cwd, milestoneId)      → object | null
+//   readFragment(cwd, id)               → object | null
 //   listFragments(cwd)                  → Array<{ id, path }>
 //
 // CLI:
@@ -41,16 +41,20 @@ function ledgerDir(cwd) {
 }
 
 // ── fragmentPath ──────────────────────────────────────────────────────────────
-// Returns absolute path to the fragment file for a milestone ID.
-// Throws if the ID is invalid or not a milestone.
-function fragmentPath(cwd, milestoneId) {
-  if (!isValid(milestoneId)) {
-    throw new Error(`Invalid milestone ID: ${milestoneId}`);
+// Returns absolute path to the fragment file for a milestone OR task ID.
+// Both kinds live in the same store: .gsd/ledger/<id>.md (loose tasks from
+// /forge-task write a ledger entry the same way milestones do — the projection
+// already renders both, keyed off the directory listing, not the entity kind).
+// Throws if the ID is invalid or is neither a milestone nor a task.
+function fragmentPath(cwd, id) {
+  if (!isValid(id)) {
+    throw new Error(`Invalid ledger ID: ${id}`);
   }
-  if (entityKind(milestoneId) !== 'milestone') {
-    throw new Error(`ID is not a milestone: ${milestoneId} (kind: ${entityKind(milestoneId)})`);
+  const kind = entityKind(id);
+  if (kind !== 'milestone' && kind !== 'task') {
+    throw new Error(`ID is not a milestone or task: ${id} (kind: ${kind})`);
   }
-  return path.join(ledgerDir(cwd), `${milestoneId}.md`);
+  return path.join(ledgerDir(cwd), `${id}.md`);
 }
 
 // ── parseFragment ─────────────────────────────────────────────────────────────
@@ -229,11 +233,12 @@ function writeFragment(cwd, entry, opts) {
 }
 
 // ── readFragment ──────────────────────────────────────────────────────────────
-// Reads and parses a LEDGER fragment. Returns null if the file does not exist.
-function readFragment(cwd, milestoneId) {
+// Reads and parses a LEDGER fragment (milestone or task). Returns null if the
+// file does not exist.
+function readFragment(cwd, id) {
   let fpath;
   try {
-    fpath = fragmentPath(cwd, milestoneId);
+    fpath = fragmentPath(cwd, id);
   } catch (e) {
     throw e; // propagate invalid id error
   }
@@ -272,7 +277,7 @@ Commands:
   --read <id> [--cwd <dir>]     Read and print a fragment (JSON), null if missing
   --write [--cwd <dir>]         Write fragment from stdin (JSON entry)
   --validate <id> [--cwd <dir>] Validate ID and check if fragment exists
-  --smoke-regression            Run regression smoke tests (multi-line + renderLedger)
+  --smoke-regression            Run regression smoke tests (multi-line + renderLedger + task round-trip)
   --help, -h                    Show this help
 
 Options:
@@ -313,7 +318,7 @@ function cliMain(argv) {
   if (cmd === '--read') {
     const id = argv[1];
     if (!id) {
-      process.stderr.write('--read requires a milestone ID\n');
+      process.stderr.write('--read requires a milestone or task ID\n');
       process.exit(2);
     }
     const fragment = readFragment(cwd, id);
@@ -344,7 +349,7 @@ function cliMain(argv) {
   if (cmd === '--validate') {
     const id = argv[1];
     if (!id) {
-      process.stderr.write('--validate requires a milestone ID\n');
+      process.stderr.write('--validate requires a milestone or task ID\n');
       process.exit(2);
     }
     let exists = false;
@@ -451,6 +456,51 @@ function runSmokeRegression() {
       assert('renderLedger: contains title content', containsTitle, true);
     } catch (e) {
       console.log('FAIL: renderLedger threw: ' + e.message);
+      allPassed = false;
+    }
+
+    // ── Test 5: task ledger fragment round-trip (regression — see fix) ─────────
+    // Loose tasks from /forge-task write ledger entries the same way milestones
+    // do. fragmentPath() used to throw for task IDs, breaking post-task
+    // housekeeping and the /forge-sweep LEDGER guard. Cover both the timestamp
+    // (T-<ts>-<slug>) and legacy (TASK-###) task ID forms.
+    const taskIds = ['T-20260618020926-wdma-fechar-modal', 'TASK-007'];
+    for (const taskId of taskIds) {
+      let threw = false;
+      try {
+        fragmentPath(smokeCwd, taskId);
+      } catch (_) {
+        threw = true;
+      }
+      assert(`task fragmentPath does not throw (${taskId})`, threw, false);
+
+      const taskEntry = {
+        id: taskId,
+        title: 'Fechar modal ao apertar Esc',
+        completed_at: '2026-06-18T00:00:00Z',
+        slices: [],
+        key_files: ['src/components/Modal.tsx'],
+        key_decisions: ['Esc fecha o modal mais externo'],
+        body: 'Modal agora fecha com Esc.',
+      };
+      const wrote = writeFragment(smokeCwd, taskEntry);
+      assert(`task write: created=true (${taskId})`, wrote.created, true);
+
+      const readBackTask = readFragment(smokeCwd, taskId);
+      assert(`task round-trip: id (${taskId})`, readBackTask && readBackTask.id, taskId);
+      assert(`task round-trip: title (${taskId})`, readBackTask && readBackTask.title, 'Fechar modal ao apertar Esc');
+      assert(`task round-trip: key_files[0] (${taskId})`, readBackTask && readBackTask.key_files[0], 'src/components/Modal.tsx');
+    }
+
+    // Task entries must surface in the rendered LEDGER (the /forge-sweep guard
+    // matches the directory name against a `## <task-id>` heading).
+    try {
+      const projection = require('./forge-projection');
+      const renderedWithTasks = projection.renderLedger(smokeCwd);
+      assert('renderLedger: contains timestamp task heading', renderedWithTasks.includes('## T-20260618020926-wdma-fechar-modal'), true);
+      assert('renderLedger: contains legacy task heading', renderedWithTasks.includes('## TASK-007'), true);
+    } catch (e) {
+      console.log('FAIL: renderLedger (tasks) threw: ' + e.message);
       allPassed = false;
     }
 

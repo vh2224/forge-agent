@@ -84,7 +84,7 @@ Emitting a `prune` event is a **logical prune** — the projection layer will ex
 
 **Physical fragment deletion** (`rm .gsd/memory/<unit-id>.md`) is performed ONLY when:
 1. Every memory inside the fragment has a corresponding `prune` event, AND
-2. The owning unit appears in `.gsd/LEDGER.md` (matched by unit ID in a heading line, e.g. `^## M-<ts>-<slug>` or `^## TASK-###`).
+2. The owning unit appears in `.gsd/LEDGER.md` (matched by unit ID in a heading line, e.g. `^## M-<ts>-<slug>`, `^## T-<ts>-<slug>`, or `^## TASK-###`).
 
 Until both conditions are met, pruning is **event-only** — the fragment file stays on disk. This guarantees that an open or partially-evaluated unit never loses facts prematurely.
 
@@ -125,13 +125,20 @@ Trim = delete every file inside the directory EXCEPT `M###-SUMMARY.md`. Slice pl
 
 Skip + warn if either condition is missing — don't lose history without a LEDGER trail.
 
-### Task directories (`.gsd/tasks/TASK-###/`)
+### Task directories (`.gsd/tasks/<task-id>/`)
+
+Task IDs come in two forms: timestamp (`T-<ts>-<slug>`, the current default from
+`/forge-task`) and legacy (`TASK-###`). Both are swept the same way — match the
+directory name against the LEDGER heading the projection renders for it (which is
+literally `## <task-id>`, i.e. `## T-<ts>-<slug>` or `## TASK-###`).
 
 **Trim in place** (do NOT remove the directory) when:
-- `TASK-###-SUMMARY.md` exists inside it (task is done)
-- AND a corresponding entry exists in `.gsd/LEDGER.md` (matched by `## TASK-###` heading)
+- `<task-id>-SUMMARY.md` exists inside it (task is done)
+- AND a corresponding entry exists in the rendered LEDGER (matched by a
+  `## <task-id>` heading — `## T-<ts>-<slug>` for timestamp tasks, `## TASK-###`
+  for legacy tasks)
 
-Trim = delete every file inside the directory EXCEPT `TASK-###-SUMMARY.md`. The directory itself and the SUMMARY remain for the same team-visibility reason as milestones.
+Trim = delete every file inside the directory EXCEPT `<task-id>-SUMMARY.md`. The directory itself and the SUMMARY remain for the same team-visibility reason as milestones.
 
 Skip + warn if either condition is missing — don't lose history without a LEDGER trail.
 
@@ -153,7 +160,7 @@ In parallel:
 - `node scripts/forge-memory.js --list` (enumerate AUTO-MEMORY fragments)
 - `node scripts/forge-checker-memory.js --list` (enumerate CHECKER-MEMORY fragments)
 - `ls -d .gsd/milestones/M*/ 2>/dev/null`
-- `ls -d .gsd/tasks/TASK-*/ 2>/dev/null`
+- `ls -d .gsd/tasks/*/ 2>/dev/null` (both timestamp `T-<ts>-<slug>` and legacy `TASK-###` task dirs)
 - `ls .gsd/sessions/ 2>/dev/null`
 - Obtain the LEDGER content via the projection (works whether or not the monolith
   cache exists on disk): `node scripts/forge-projection.js --render ledger --cwd .`.
@@ -172,7 +179,7 @@ For each CHECKER-MEMORY fragment returned by `forge-checker-memory.js --list`:
 - Apply the staleness-based prune criteria.
 
 For each milestone dir, check `M###-SUMMARY.md` and `LEDGER.md` heading.
-For each task dir, check `TASK-###-SUMMARY.md` and `LEDGER.md` heading.
+For each task dir, check `<task-id>-SUMMARY.md` and the `## <task-id>` LEDGER heading (works for both `T-<ts>-<slug>` and `TASK-###`).
 For each session file, parse frontmatter `status`.
 
 ### 2. Classify
@@ -217,9 +224,9 @@ Always print the preview, regardless of mode:
   Skip:    M00Y (no SUMMARY) | M00Z (missing LEDGER entry)
 
 ### Task dirs
-  Trim:    TASK-001, TASK-002, ...   (keep only TASK-###-SUMMARY.md; drop intermediates)
-  Keep:    TASK-NNN (no SUMMARY yet — untouched)
-  Skip:    TASK-NNN (missing LEDGER entry)
+  Trim:    T-<ts>-<slug>, TASK-002, ...   (keep only <task-id>-SUMMARY.md; drop intermediates)
+  Keep:    <task-id> (no SUMMARY yet — untouched)
+  Skip:    <task-id> (missing LEDGER entry)
 
 ### Session files
   Drop:    ask-YYYY-MM-DD-HHMM.md (status: closed)
@@ -301,10 +308,10 @@ For each dir in the "Trim" list:
 
 **f) Task dirs**
 
-For each dir in the "Trim" list:
-- Double-check LEDGER has a matching heading (defensive).
-- Remove every file inside `.gsd/tasks/TASK-###/` EXCEPT `TASK-###-SUMMARY.md`. Use the same find/PowerShell pattern as above with the task-specific paths and filename.
-- Do NOT remove the directory itself, and do NOT remove `TASK-###-SUMMARY.md`.
+For each dir in the "Trim" list (timestamp `T-<ts>-<slug>` or legacy `TASK-###`):
+- Double-check LEDGER has a matching `## <task-id>` heading (defensive).
+- Remove every file inside `.gsd/tasks/<task-id>/` EXCEPT `<task-id>-SUMMARY.md`. Use the same find/PowerShell pattern as above with the task-specific paths and filename.
+- Do NOT remove the directory itself, and do NOT remove `<task-id>-SUMMARY.md`.
 
 **g) Session files**
 
