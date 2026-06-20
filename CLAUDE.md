@@ -412,6 +412,15 @@ Quando a sessão é lançada com `ANTHROPIC_AUTH_TOKEN` (caminho multi-conta), o
 ### Dashboard multi-conta + handoff por folga real (`forge-usage.js`, `--by-usage`)
 Pra "usar todas as contas" sem desperdício, faltava ver a folga de cada uma. (1) `scripts/forge-usage.js` — pega o token de cada conta registrada (via `forge-accounts --token`) e imprime a tabela 5h/7d ordenada por folga semanal, marcando a recomendada; `--json` pro consumo por máquina. ~9 tokens por conta polada, on-demand. (2) `forge-accounts.js` ganhou `nextAccountByUsage()` async + flag `--next-account --by-usage` — entre as contas elegíveis (fora de cooldown), escolhe a de **menor utilização 7d real** (polada via `fetchUsage`), com fallback total pro `nextAccount()` (cooldown/most-rested) em qualquer falha (módulo ausente, polls falham, ≤1 elegível) — nunca regride. O `bin/forge-run` passou a usar `--by-usage`, tornando o handoff mwtelles→conta-mais-folgada automático. O comentário do `nextAccount` já antecipava isso ("Headroom can't be queried live outside a session... so we approximate") — agora com `fetchUsage` a folga é consultável de verdade.
 
+### Plan gate interativo — conduct de lapidação no orquestrador (M002)
+O handshake interativo de aprovação de planos vive no **orquestrador/skill** (Approach A, LOCKED) — estendendo o plan-check gate existente que já roda no contexto principal na boundary `plan-slice → first execute-task`. O `forge-planner` continua **decompositor batch puro**: sem `EnterPlanMode`/`ExitPlanMode`, sem mode-branching interno. Preserva o invariante "worker stateless, orquestrador conduz o humano". **Mecânica:** preview do plano (arquivo em disco) → cada `warn`/`fail` do `forge-plan-checker` vira `AskUserQuestion` acionável (manter / corrigir-no-ato / deferir) → usuário pode editar o `*-PLAN.md` diretamente em disco (modelo "edição livre"); orquestrador relê + re-valida via `scripts/forge-must-haves.js` (erro de schema = mais um finding; **no-op em planos legacy do forge-task**) → handshake de aprovação único ao final. **Contrato compartilhado:** `shared/forge-plan-gate.md` (boundary-agnóstico, dois consumidores: `forge-task` Step 4 e `forge-next` plan-check gate), espelhando `shared/forge-review.md`. **Pref:**
+```yaml
+plan_gate:
+  interactive: always   # always | auto | off   (default: always)
+  ask_in_auto: defer    # defer | off
+```
+Separada de `plan_check:` (que controla o scoring advisory). `interactive: auto` = conduz só com `warn`/`fail`; `off` = batch atual mesmo em interativo. **Degradação:** `forge-auto` **nunca** conduz o handshake — degrada para batch advisory, independente de `plan_gate.interactive`. `ask_in_auto: defer` é o guard explícito (AUTONOMY RULE intocada). Regression guard no `forge-smoke.js` (S04).
+
 ## Convenções de código
 
 - **Linguagem dos artefatos:** Markdown com frontmatter YAML

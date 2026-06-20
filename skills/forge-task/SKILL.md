@@ -399,6 +399,245 @@ After result: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
 
 ---
 
+### Step 4.5 — Plan gate (interactive)
+
+Roda o handshake do plan gate (spec autoritativa: `shared/forge-plan-gate.md`) no boundary do `forge-task`: após o `forge-planner` retornar `{TASK_ID}-PLAN.md` (Step 4) e **antes** do `forge-executor` ser despachado (Step 5). `/forge-task` é uma skill (main context) com `AskUserQuestion`, sempre interativo → `MODE = interactive`.
+
+**Binding forge-task (conforme `shared/forge-plan-gate.md` tabela de consumidores):**
+
+| Campo | Valor |
+|-------|-------|
+| UNIT | `task/{TASK_ID}` |
+| PLAN_FILE | `.gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN.md` (arquivo único) |
+| MODE | `interactive` (forge-task é sempre interativo) |
+| Approval marker | `{TASK_ID}-PLAN-GATE.md` |
+| GATE_MARKER path | `{WORKING_DIR}/.gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN-GATE.md` |
+
+> Nota R4 (resolvida): planos do forge-task são free-text legado e produzem no máximo **1 finding** (`legacy_schema_detect` warn). Não há findings "related" para agrupar. Batching **não é aplicado** — o finding é surfaçado como pergunta direta.
+
+**Skip conditions (topo do Step 4.5 — verificar antes de qualquer bloco bash):**
+
+1. `{TASK_ID}-PLAN-GATE.md` já existe com `status: approved` → pular (resume idempotente pós-compactação, não re-pergunta o operador).
+2. `plan_gate.interactive == off` → pular o gate inteiro, ir direto ao outer Step 5 — execute (comportamento batch anterior; sem preview, sem `AskUserQuestion`, sem marker).
+
+---
+
+#### Gate Step 0 — Cascade-read da pref `plan_gate:`
+
+```bash
+PLAN_GATE_CFG=$(node -e "
+const fs=require('fs'),path=require('path'),os=require('os');
+const wd=process.env.WORKING_DIR||process.cwd();
+const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+             path.join(wd,'.gsd','claude-agent-prefs.md'),
+             path.join(wd,'.gsd','prefs.local.md')];
+let interactive='always',askAuto='defer';
+for(const f of files){try{
+  const r=fs.readFileSync(f,'utf8');
+  const blk=(r.match(/^plan_gate:[ \t]*\n((?:[ \t]+.*\n?)*)/m)||[])[1]||'';
+  let m;
+  if(m=blk.match(/^[ \t]+interactive:[ \t]*(\w+)/m))interactive=m[1].toLowerCase();
+  if(m=blk.match(/^[ \t]+ask_in_auto:[ \t]*(\w+)/m))askAuto=m[1].toLowerCase();
+}catch(e){}}
+if(!['always','auto','off'].includes(interactive))interactive='always';
+if(!['defer','off'].includes(askAuto))askAuto='defer';
+process.stdout.write(JSON.stringify({interactive,askAuto}));
+" WORKING_DIR=\"$WORKING_DIR\")
+
+INTERACTIVE=$(node -e "process.stdout.write(JSON.parse(process.env.PLAN_GATE_CFG).interactive)" PLAN_GATE_CFG="$PLAN_GATE_CFG")
+ASK_AUTO=$(node -e    "process.stdout.write(JSON.parse(process.env.PLAN_GATE_CFG).askAuto)"    PLAN_GATE_CFG="$PLAN_GATE_CFG")
+```
+
+> **Nota regex (crítica):** o cascade usa `/^plan_gate:[ \t]*\n((?:[ \t]+.*\n?)*)/m` com `[ \t]` e flag `m`. **Nunca use `\Z`** — não existe em JS regex (vira o char literal `Z`, ignorando blocos no fim do arquivo — mesmo bug que quebrou `forge_isolation`). Copiar verbatim da spec.
+
+**Semântica da pref `interactive`:**
+
+| Valor | Comportamento |
+|-------|---------------|
+| `always` (default) | Conduzir o gate em todo plano — preview + aprovação sempre. |
+| `auto` | Conduzir só quando `warn > 0` ou `fail > 0`. Auto-aprovar silenciosamente se tudo passar. (**Nota:** para forge-task legado, `plan_check_counts` não está em escopo — tratar como `always`.) |
+| `off` | Pular o gate inteiro — comportamento batch atual. Ir direto ao outer Step 5 (execute). |
+
+Se `INTERACTIVE == off` → **pular o gate.** Ir direto ao outer Step 5 (execute).
+
+---
+
+#### Gate Step 0a — Idempotency / GATE_MARKER
+
+```bash
+GATE_MARKER="$WORKING_DIR/.gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN-GATE.md"
+```
+
+> **NUNCA** usar `{TASK_ID}-PLAN-CHECK.md` como marker — esse arquivo pertence ao `forge-plan-checker` (agente advisory separado) e não deve ser reutilizado como sinal de aprovação do operador.
+
+```bash
+if [ -f "$GATE_MARKER" ] && grep -qF "status: approved" "$GATE_MARKER" 2>/dev/null; then
+  echo "Plan gate already approved — skipping (resume after compaction)"
+  # Prosseguir diretamente para o outer Step 5 (execute)
+fi
+```
+
+---
+
+#### Gate Step 1 — Preview do plano
+
+Ler `{TASK_ID}-PLAN.md` do disco — **preview = arquivo em disco, não conteúdo cacheado.** Isso garante que edições em andamento sejam refletidas.
+
+```bash
+PLAN_FILE="$WORKING_DIR/.gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN.md"
+```
+
+Exibir um resumo informacional (sem pergunta ainda):
+- Título da task (de `{TASK_ID}-BRIEF.md` ou cabeçalho do plano)
+- Número de seções presentes (`## Steps`, `## Must-Haves`, `## Standards`, `## Files to Change`)
+- Número de itens em `## Files to Change`
+
+O operador lê o plano e se prepara para a revisão de findings no Gate Step 2.
+
+---
+
+#### Gate Step 2 — Lapidação do finding (R4: sem batching para forge-task)
+
+Planos do `forge-task` são **legacy free-text** (não há `must_haves:` YAML estruturado em coluna 0). O plan-checker, se rodado, sempre retornaria `warn` em `legacy_schema_detect` (nunca `fail`) — **no máximo 1 finding**.
+
+> **Resolução de R4 (era OPEN em S01):** drop batching para o consumidor forge-task. Com ≤ 1 finding, não há findings "related" para agrupar. O único finding é surfaçado como pergunta direta — sem lógica de batching. (O consumidor `forge-next` em S03 reavaliará batching para planos estruturados com múltiplos findings possíveis.)
+
+> **Nota importante:** o `forge-task` não roda o `forge-plan-checker` no fluxo atual (Step 4 só despacha o planner, não o plan-checker). Portanto `plan_check_counts` não está em escopo. O Step 4.5 trata o plano como legado por definição e oferece preview + edição livre como a rede de segurança primária. O gate é essencialmente: **preview → edição livre → aprovação**, com o aviso de formato legado como único "finding".
+
+Invocar `AskUserQuestion`:
+```
+Header: "Plano {TASK_ID} — formato legado"
+Body:   "O plano está no formato free-text legado (## Steps / ## Must-Haves / ## Standards / ## Files to Change, sem YAML estruturado). Revise o texto do plano diretamente antes de aprovar."
+Options: ["Manter — plano está bom", "Corrigir no ato — editar o plano", "Deferir — prosseguir assim"]
+```
+
+- `Manter` / `Deferir` → ir para Gate Step 3 (edição livre opcional).
+- `Corrigir no ato` → ir para Gate Step 3 (edição livre, com intenção de editar).
+
+---
+
+#### Gate Step 3 — Edição livre (escape hatch)
+
+Oferecer ao operador uma janela de edição não-estruturada:
+
+```
+AskUserQuestion({
+  header: "Edição livre do plano",
+  body:   "Edite {TASK_ID}-PLAN.md no seu editor agora. Confirme quando terminar.",
+  options: ["Confirmar — relerei o plano", "Pular — plano está bom"]
+})
+```
+
+- `Confirmar` → reler o arquivo do disco (`PLAN_FILE`) e exibir a versão atualizada ao operador. O orquestrador NÃO usa cache — lê o arquivo atual. As edições humanas passam a ser a versão autoritativa do plano. Ir para Gate Step 4 (re-validação).
+- `Pular` → ir direto para Gate Step 5 (aprovação).
+
+---
+
+#### Gate Step 4 — Re-validação pós-edição (NO-OP para forge-task — documentado)
+
+Após edição (caminho `Confirmar` do Step 3), re-validar o schema do plano.
+
+```bash
+REVALIDATION_STDERR=$(mktemp)
+REVALIDATION=$(node scripts/forge-must-haves.js --check "$PLAN_FILE" 2>"$REVALIDATION_STDERR")
+REVALIDATION_EXIT=$?
+```
+
+**IO-error guard (aplicar antes do JSON.parse):**
+
+```bash
+if [ $REVALIDATION_EXIT -ne 0 ] && [ $REVALIDATION_EXIT -ne 2 ]; then
+  IO_ERR=$(cat "$REVALIDATION_STDERR")
+  LEGACY=false; VALID=false
+  ERRORS="[\"IO error from forge-must-haves.js: $IO_ERR\"]"
+else
+  if ! node -e "JSON.parse(process.env.R)" R="$REVALIDATION" 2>/dev/null; then
+    IO_ERR=$(cat "$REVALIDATION_STDERR")
+    LEGACY=false; VALID=false
+    ERRORS="[\"Non-JSON stdout from forge-must-haves.js (exit $REVALIDATION_EXIT): $IO_ERR\"]"
+  else
+    LEGACY=$(node -e "process.stdout.write(String(JSON.parse(process.env.R).legacy))" R="$REVALIDATION")
+    VALID=$(node -e  "process.stdout.write(String(JSON.parse(process.env.R).valid))"  R="$REVALIDATION")
+    ERRORS=$(node -e "process.stdout.write(JSON.stringify(JSON.parse(process.env.R).errors))" R="$REVALIDATION")
+  fi
+fi
+rm -f "$REVALIDATION_STDERR"
+```
+
+> **⚠ Pitfall 1 — re-validação é NO-OP para planos forge-task legados:** `node scripts/forge-must-haves.js --check` detecta ausência de `^must_haves:` em coluna 0 e retorna `{legacy:true, valid:true, errors:[]}` (exit 0) — **validando nada.** A rede de segurança para planos legados é a edição livre + reload do Step 3, **não** schema enforcement. Re-validação só é significativa para planos estruturados futuros (`forge-next` com `must_haves:` YAML). NÃO prometer enforcement que não dispara em planos legados.
+
+Se `legacy == false && valid == false` (plano estruturado futuro com erro de schema):
+
+```
+AskUserQuestion({
+  header: "Erro de schema no plano",
+  body:   "O plano tem erros de schema que impedem a aprovação:\n{ERRORS}\nCorrigir o plano (edit + releitura) ou abortar.",
+  options: ["Corrigir agora", "Abortar — replanejar"]
+})
+```
+
+- `Corrigir agora` → voltar ao Gate Step 3, depois re-rodar Gate Step 4.
+- `Abortar` → não escrever o marker; retornar o usuário à fase de planejamento.
+
+---
+
+#### Gate Step 5 — Approval handshake
+
+Após os findings serem endereçados e a re-validação passar, apresentar o gate de aprovação final. O `ExitPlanMode` pode ser usado aqui (Agent's Discretion, M002-CONTEXT `§ Agent's Discretion`) — é seguro pois o `forge-task` **não** é invocado dentro de uma fase de discuss, portanto não há plan mode herdado aberto neste ponto (ver `shared/forge-plan-gate.md § Plan-mode non-nesting`).
+
+> **Não-aninhamento de plan mode:** o `forge-discusser` (Step 2) é o único dono do `EnterPlanMode`/`ExitPlanMode` e já fechou seu plan mode antes do planejamento começar. **NÃO adicionar `EnterPlanMode`** em nenhum ponto do Step 4.5 — isso aninharia com o discuss e quebraria a invariante.
+
+```
+AskUserQuestion({
+  header: "Aprovar plano {TASK_ID}",
+  body:   "Plano revisado e validado. Aprovar para iniciar a execução?",
+  options: ["Aprovar — iniciar execução", "Editar mais", "Abortar — replanejar"]
+})
+```
+
+- `Aprovar` → escrever o GATE_MARKER:
+
+```bash
+mkdir -p "$(dirname "$GATE_MARKER")"
+cat > "$GATE_MARKER" << 'EOF'
+---
+status: approved
+approved_at: {ISO8601}
+consumer: forge-task
+unit: task/{TASK_ID}
+---
+Plan approved by operator. Execution may proceed.
+EOF
+```
+
+  Prosseguir para o outer Step 5 (execute).
+
+- `Editar mais` → voltar ao Gate Step 3.
+- `Abortar` → não escrever o marker. Re-despachar o `forge-planner` com notas do operador; reiniciar o ciclo de planejamento.
+
+---
+
+#### Event log
+
+Após o gate fechar (aprovado/abortado/pulado), append uma linha em `.gsd/forge/events.jsonl`:
+
+```bash
+mkdir -p "$WORKING_DIR/.gsd/forge"
+printf '%s\n' "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan-gate\",\"milestone\":\"\",\"unit\":\"task/{TASK_ID}\",\"mode\":\"interactive\",\"interactive\":\"$INTERACTIVE\",\"outcome\":\"{approved|aborted|skipped}\",\"warn\":0,\"fail\":0,\"edits\":{N}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+```
+
+Campos:
+- `outcome`: `approved` (operador aprovou), `aborted` (operador escolheu replanejar), `skipped` (idempotência atingida ou `interactive: off`).
+- `warn` / `fail`: sempre `0` para planos forge-task legados (plan-checker não rodou).
+- `edits`: número de vezes que o Step 3 foi visitado (0 = sem edição livre).
+- `milestone`: `""` (forge-task fora de milestone por padrão).
+
+---
+
+**Handoff para outer Step 5:** o outer Step 5 (execute) só roda após o gate aprovar (marker `{TASK_ID}-PLAN-GATE.md` escrito com `status: approved`) ou ser pulado (`interactive: off`). A ausência do marker indica que o gate foi abortado — o executor **não** deve ser despachado.
+
+---
+
 ### Step 5 — Execute
 
 **Skip if:** `.gsd/tasks/{TASK_ID}/{TASK_ID}-SUMMARY.md` already exists (task done).

@@ -541,6 +541,22 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 
 > This gate fires ONLY when transitioning from a just-completed `plan-slice` to the first `execute-task` of the same slice. When deriving the next unit (Step 1) results in `execute-task` AND the previous completed unit was `plan-slice` for the same slice, run this gate. For subsequent `execute-task` dispatches within the same slice, the idempotency check (step 3 above) ensures the gate is a no-op.
 
+### Plan gate — degradação no modo auto (NUNCA conduz)
+
+**Plan-gate degradation (auditable) — forge-auto NEVER conducts the interactive handshake:**
+
+`forge-auto` (`MODE = auto`) **never conducts** the plan gate handshake defined in `shared/forge-plan-gate.md`. This is **unconditional over `MODE = auto`** — it applies regardless of the `plan_gate.interactive` pref value. Setting `interactive: always` does NOT cause `forge-auto` to pause and ask.
+
+The path in `forge-auto` at the plan boundary:
+1. Run `forge-planner` (batch — unchanged).
+2. Run `forge-plan-checker` (advisory — unchanged, handled by the gate above).
+3. **Skip the interactive gate entirely.** No preview, no `AskUserQuestion`, no approval marker.
+4. Proceed directly to `execute-task`.
+
+`ask_in_auto: defer` (default) is the explicit guard — it mirrors `review.ask_in_auto: defer` from `shared/forge-review.md`. The AUTONOMY RULE protects the middle of the loop; plan-gate conduct is incompatible with autonomous operation.
+
+**Spec authority:** `shared/forge-plan-gate.md § Degradation by mode`.
+
 **Symbol-check gate (between plan-slice and first execute-task, after plan-check gate):**
 
 After the plan-check gate completes (or is skipped), run the symbol-check gate before dispatching the first `execute-task` for the same slice. This gate runs via Bash shell-out — NOT via `Agent()` — so there is no liveness banner and return is immediate. See `shared/forge-dispatch.md § symbol-check` for artifact format and event schema.

@@ -625,6 +625,50 @@ review:
 - Artefato gerado: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (per-slice) ou `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md` (task solta) — durável com a unidade; limpo por `milestone_cleanup`. Follow-ups da triagem final vão para `.gsd/KNOWLEDGE.md § Review follow-ups` (sobrevive cleanup).
 - Dois boundaries: per-slice (gate antes de `complete-slice` em `forge-auto`/`forge-next`) e task solta (`/forge-task` step 5.5, sempre interativo). Ambos honram `mode`/`style`/`rounds`/`fix_conceded`/`engine`; `ask_in_auto` só se aplica ao `forge-auto`.
 
+## Plan Gate Settings
+
+Controla o **conduct interativo de lapidação do plano** que roda no orquestrador entre `plan-slice` e o primeiro `execute-task` (nos modos interativos `forge-task`/`forge-next`). Separado do **scoring** (`plan_check.mode`, que avalia 10 dimensões estruturais): enquanto o plan-checker *pontua*, o plan gate *conduz o handshake* — preview do plano + findings acionáveis + edição opcional + aprovação. Espelha `## Review Settings` na estrutura: bloco fenced → Semântica → Cross-references.
+
+```
+plan_gate:
+  interactive: always   # always | auto | off   (default: always)
+  ask_in_auto: defer    # defer | off            (forge-auto nunca pausa)
+```
+
+### Semântica
+
+- `interactive: always` (padrão): o orquestrador conduz o handshake **sempre que existe um plano**, inclusive quando todos os findings do plan-checker são `pass`. O usuário recebe preview + aprovação em todo planejamento interativo. Tradeoff: maximiza controle, adiciona um toque extra de aprovação em planos limpos. Para reduzir o atrito mantendo a cobertura, basta trocar para `auto`.
+- `interactive: auto`: o handshake só é conduzido quando há pelo menos um finding `warn` ou `fail` do plan-checker. Em all-pass, o plano é auto-aprovado sem pausa. Reduz atrito a um toque de pref.
+- `interactive: off`: comportamento batch atual — plan-checker roda como advisory, resultado gravado em `S##-PLAN-CHECK.md`, e o orquestrador segue para `execute-task` sem handshake. Equivale ao comportamento pré-M002 mesmo em modo interativo.
+- `ask_in_auto: defer` (padrão): em `forge-auto`, o handshake interativo **nunca** é conduzido, independente do valor de `interactive`. A degradação é incondicional e honra a AUTONOMY RULE. O valor `off` é semânticamente idêntico para o `forge-auto` (que nunca conduz o gate de qualquer forma); está disponível como sinalizador explícito de intenção.
+
+**Cascade-read (3-file precedence, last-wins):**
+O bloco `plan_gate:` é lido em cascata de três arquivos, na ordem abaixo — cada arquivo subsequente sobrescreve chaves do anterior (merge por chave, não substituição do bloco inteiro):
+1. `~/.claude/forge-agent-prefs.md` — user-global (este template)
+2. `.gsd/claude-agent-prefs.md` — repo shared (commitável; sobrescreve user-global)
+3. `.gsd/prefs.local.md` — local personal (gitignored; sobrescreve ambos)
+
+**Snippet de regex de captura (documental — vive nos SKILLs, não aqui):**
+
+```js
+// Captura o bloco plan_gate: e todos os seus pares chave: valor indentados
+// NUNCA usar \Z (não existe em JS — bug histórico do forge_isolation).
+// Usar flag m para ^ âncora por linha.
+const m = text.match(/^plan_gate:[ \t]*\n((?:[ \t]+.*\n?)*)/m);
+// Sub-keys: /^[ \t]+([\w_]+):[ \t]*(.+)/m por cada linha capturada
+```
+
+Os consumidores (`skills/forge-task/SKILL.md`, `skills/forge-next/SKILL.md`) copiam esse snippet idêntico — a pref só documenta o padrão de referência.
+
+### Cross-references
+
+- Spec autoritativa: `shared/forge-plan-gate.md` (contrato completo do gate: preview → findings → editar → re-validar → aprovar/ExitPlanMode).
+- Consumidores: `skills/forge-task/SKILL.md` (sempre interativo) + `skills/forge-next/SKILL.md` (interativo em step-mode).
+- Scoring peer: `forge-agent-prefs.md § Plan-Check Settings` (avalia 10 dimensões; advisory).
+- Review peer: `forge-agent-prefs.md § Review Settings` (gate dialético antes de `complete-slice`; espelha a estrutura desta seção).
+- Decisões de arquitetura: `CLAUDE.md § Plan mode interativo` (D1–D7).
+- Artefato do scoring (input para o handshake): `.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md`.
+
 ## Token Budget Settings
 
 O bloco `token_budget` limita o tamanho das seções **opcionais** injetadas nos prompts dos workers, mantendo o consumo de contexto previsível. O orquestrador multiplica cada valor por 4 para obter o limite em caracteres antes de chamar `truncateAtSectionBoundary` (de `scripts/forge-tokens.js`), que usa a heurística `Math.ceil(chars / 4)` para estimar tokens — sem dependências externas, com precisão de ±5–15% para inglês/markdown.

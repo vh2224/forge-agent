@@ -333,13 +333,299 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
    ```
 
 9. **Branch on `PLAN_CHECK_MODE`:**
-   - `advisory` → proceed to first `execute-task` regardless of counts.
+   - `advisory` → proceed to the plan gate (interactive) → symbol-check gate → first `execute-task` regardless of counts.
    - `blocking` → enter the **Blocking-mode revision loop** below.
    - (`disabled` already handled in step 2.)
 
 10. **Forward-compatibility note:** future M004+ may add per-dimension enforcement. The current wire passes through all dimension counts to events.jsonl so future code can filter.
 
 > This gate fires ONLY when transitioning from a just-completed `plan-slice` to the first `execute-task` of the same slice. When deriving the next unit (Step 1) results in `execute-task` AND the previous completed unit was `plan-slice` for the same slice, run this gate. For subsequent `execute-task` dispatches within the same slice, the idempotency check (step 3 above) ensures the gate is a no-op.
+
+**Plan gate (interactive) (after plan-check gate, before symbol-check gate):**
+
+Roda o handshake interativo do plan gate (spec autoritativa: `shared/forge-plan-gate.md`) no boundary do `forge-next`: após o `forge-plan-checker` retornar `plan_check_counts` e escrever `{S##}-PLAN-CHECK.md` (plan-check gate acima) e **antes** do symbol-check gate / primeiro `execute-task`. `forge-next` é sempre interativo → `MODE = interactive`. `forge-auto` NÃO executa este gate (`MODE = auto` → degradação auditável; ver `shared/forge-plan-gate.md § Degradation by mode`).
+
+**Binding forge-next (conforme `shared/forge-plan-gate.md` tabela de consumidores):**
+
+| Campo | Valor |
+|-------|-------|
+| UNIT | `plan-slice/{S##}` |
+| PLAN_GLOB | `{S##}-PLAN.md` + `tasks/*/T##-PLAN.md` |
+| MODE | `interactive` (forge-next é sempre interativo) |
+| Approval marker | `{S##}-PLAN-GATE.md` |
+| GATE_MARKER path | `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-GATE.md` |
+
+> **R4 (batching de findings — resolvido para planos estruturados):** planos do `forge-next` têm `plan_check_counts` reais e podem ter múltiplos `warn`/`fail` por dimensão e task. Regra operacional: findings `fail` são SEMPRE perguntas individuais; findings `warn` podem ser agrupados em UMA `AskUserQuestion` (até 4 por call) somente quando compartilham a mesma dimensão OU a mesma task-id — caso contrário, perguntas separadas. Cada finding agrupado mantém sua própria resolução registrada individualmente no marker.
+
+> **Não-aninhamento de plan mode:** o `forge-next` roda no contexto do orquestrador, que não carrega plan mode herdado. O gate usa **somente `AskUserQuestion`** — NÃO usa `EnterPlanMode`/`ExitPlanMode`. Ver `shared/forge-plan-gate.md § Plan-mode non-nesting`.
+
+> **NUNCA** usar `{S##}-PLAN-CHECK.md` como marker de aprovação — esse arquivo pertence ao `forge-plan-checker` (agente advisory separado).
+
+**Skip conditions (verificar antes de qualquer bloco bash):**
+
+1. `{S##}-PLAN-GATE.md` já existe com `status: approved` → pular (resume idempotente pós-compactação, não re-pergunta o operador). Prosseguir diretamente ao symbol-check gate.
+2. `plan_gate.interactive == off` → pular o gate inteiro; comportamento batch-advisory atual intocado (sem preview, sem `AskUserQuestion`, sem marker).
+
+---
+
+#### Gate Step 0 — Cascade-read da pref `plan_gate:`
+
+```bash
+PLAN_GATE_CFG=$(node -e "
+const fs=require('fs'),path=require('path'),os=require('os');
+const wd=process.env.WORKING_DIR||process.cwd();
+const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+             path.join(wd,'.gsd','claude-agent-prefs.md'),
+             path.join(wd,'.gsd','prefs.local.md')];
+let interactive='always',askAuto='defer';
+for(const f of files){try{
+  const r=fs.readFileSync(f,'utf8');
+  const blk=(r.match(/^plan_gate:[ \t]*\n((?:[ \t]+.*\n?)*)/m)||[])[1]||'';
+  let m;
+  if(m=blk.match(/^[ \t]+interactive:[ \t]*(\w+)/m))interactive=m[1].toLowerCase();
+  if(m=blk.match(/^[ \t]+ask_in_auto:[ \t]*(\w+)/m))askAuto=m[1].toLowerCase();
+}catch(e){}}
+if(!['always','auto','off'].includes(interactive))interactive='always';
+if(!['defer','off'].includes(askAuto))askAuto='defer';
+process.stdout.write(JSON.stringify({interactive,askAuto}));
+" WORKING_DIR=\"$WORKING_DIR\")
+
+INTERACTIVE=$(node -e "process.stdout.write(JSON.parse(process.env.PLAN_GATE_CFG).interactive)" PLAN_GATE_CFG="$PLAN_GATE_CFG")
+ASK_AUTO=$(node -e    "process.stdout.write(JSON.parse(process.env.PLAN_GATE_CFG).askAuto)"    PLAN_GATE_CFG="$PLAN_GATE_CFG")
+```
+
+> **Nota regex (crítica):** o cascade usa `/^plan_gate:[ \t]*\n((?:[ \t]+.*\n?)*)/m` com `[ \t]` e flag `m`. **Nunca use `\Z`** — não existe em JS regex (vira o char literal `Z`, ignorando blocos no fim do arquivo — mesmo bug que quebrou `forge_isolation`). Copiar verbatim da spec.
+
+**Semântica da pref `interactive`:**
+
+| Valor | Comportamento |
+|-------|---------------|
+| `always` (default) | Conduzir o gate em todo plano — preview + aprovação sempre, mesmo all-pass. |
+| `auto` | Conduzir só quando `warn > 0` ou `fail > 0`. Auto-aprovar silenciosamente se `warn==0 && fail==0`. |
+| `off` | Pular o gate inteiro — comportamento batch-advisory atual. Ir direto ao symbol-check gate. |
+
+---
+
+#### Gate Step 0a — Idempotency / GATE_MARKER
+
+```bash
+GATE_MARKER="$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-GATE.md"
+```
+
+```bash
+if [ -f "$GATE_MARKER" ] && grep -qF "status: approved" "$GATE_MARKER" 2>/dev/null; then
+  echo "Plan gate already approved — skipping (resume after compaction)"
+  # Prosseguir diretamente ao symbol-check gate
+fi
+```
+
+**Regras de skip (após ler a pref e verificar idempotência):**
+
+```bash
+# skip: interactive off
+if [ "$INTERACTIVE" = "off" ]; then
+  # Pular gate — comportamento batch-advisory atual
+  # Prosseguir ao symbol-check gate
+fi
+
+# auto-approve: interactive=auto + all-pass
+if [ "$INTERACTIVE" = "auto" ] && [ "${plan_check_counts_warn:-0}" -eq 0 ] && [ "${plan_check_counts_fail:-0}" -eq 0 ]; then
+  mkdir -p "$(dirname "$GATE_MARKER")"
+  cat > "$GATE_MARKER" << 'EOF'
+---
+status: approved
+approved_at: {ISO8601}
+consumer: forge-next
+unit: plan-slice/{S##}
+---
+Plan auto-approved (all-pass, interactive: auto). Execution may proceed.
+EOF
+  GATE_EDITS=0
+  # Append plan-gate event (outcome: skipped — auto-approve silencioso)
+  printf '%s\n' "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan-gate\",\"milestone\":\"{M###}\",\"unit\":\"plan-slice/{S##}\",\"mode\":\"interactive\",\"interactive\":\"$INTERACTIVE\",\"outcome\":\"skipped\",\"warn\":${plan_check_counts_warn:-0},\"fail\":${plan_check_counts_fail:-0},\"edits\":0}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+  # Prosseguir ao symbol-check gate
+fi
+
+# interactive=always (ou auto com warn/fail > 0) → conduzir o gate
+```
+
+---
+
+#### Gate Step 1 — Preview do plano
+
+Ler `{S##}-PLAN.md` do disco — **preview = arquivo em disco, não conteúdo cacheado.**
+
+```bash
+SLICE_PLAN_FILE="$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md"
+```
+
+Exibir um resumo informacional (sem pergunta ainda):
+- Título do milestone + slice (de `{S##}-PLAN.md` frontmatter `title`)
+- Número de tasks na slice
+- Contagem de `must_haves` (truths + artifacts + key_links) por task
+- Dependências de ordenação entre tasks (campo `depends` de cada `T##-PLAN.md`)
+- Para cada `T##`: título, `tier`, `effort`, `depends` (lendo os task plans)
+
+O operador lê o plano e se prepara para a revisão de findings no Gate Step 2.
+
+---
+
+#### Gate Step 2 — Lapidação de findings (R4: batching estruturado para forge-next)
+
+Ler os findings de `{S##}-PLAN-CHECK.md` (dimensões com verdict `warn` ou `fail`).
+
+**Ordem de apresentação:** `fail` primeiro (severidade decrescente), depois `warn`.
+
+**R4 (resolvido para forge-next):**
+- Findings `fail` → SEMPRE pergunta individual (arbitragem item-a-item — severidade alta demais para agrupar).
+- Findings `warn` → podem ser agrupados em UMA `AskUserQuestion` (até 4 por call) somente quando compartilham a **mesma dimensão** OU a **mesma task-id**; caso contrário, perguntas separadas. Cada finding agrupado mantém sua própria resolução registrada individualmente no marker.
+
+Para cada finding individual (ou grupo de warns relacionados), invocar `AskUserQuestion`:
+
+```
+Header: "Plano {S##} — <nome da dimensão>  [fail|warn]"
+Body:   "<justificativa de uma linha do checker para aquela dimensão/task>"
+Options: ["Manter — aceitar assim", "Corrigir no ato", "Deferir — criar follow-up"]
+```
+
+Registrar a resolução de cada finding individualmente (para inclusão no marker):
+- `Manter` → aceitar o finding sem mudança; anotar no marker como `{dimensão}: mantido`.
+- `Corrigir no ato` → prosseguir para Gate Step 3 (edição livre) com intenção de corrigir.
+- `Deferir` → aceitar por ora; anotar no marker como `{dimensão}: deferido`.
+
+Se não houver findings `warn`/`fail` (all-pass) e `INTERACTIVE == always` → pular Gate Step 2 (nada a lapidar); ir direto para Gate Step 3 (edição livre opcional).
+
+---
+
+#### Gate Step 3 — Edição livre (escape hatch)
+
+Inicializar contador de edições: `GATE_EDITS=0` (se ainda não definido).
+
+Ao entrar no Gate Step 3: `GATE_EDITS=$((GATE_EDITS + 1))` (conta cada visita ao step, incluindo re-entradas via "Editar mais").
+
+Oferecer ao operador uma janela de edição não-estruturada:
+
+```
+AskUserQuestion({
+  header: "Edição livre do plano",
+  body:   "Edite {S##}-PLAN.md e/ou os T##-PLAN.md no seu editor agora. Confirme quando terminar.",
+  options: ["Confirmar — relerei o plano", "Pular — plano está bom"]
+})
+```
+
+- `Confirmar` → reler `{S##}-PLAN.md` e todos os `T##-PLAN.md` do disco e exibir a versão atualizada ao operador. O orquestrador NÃO usa cache — lê o arquivo atual. Ir para Gate Step 4 (re-validação).
+- `Pular` → ir direto para Gate Step 5 (aprovação).
+
+---
+
+#### Gate Step 4 — Re-validação pós-edição (LOOP sobre PLAN_GLOB)
+
+Após edição (caminho `Confirmar` do Gate Step 3), re-validar o schema de todos os planos da slice.
+
+```bash
+PLAN_GLOB_FILES=$(find "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}" -maxdepth 1 -name "{S##}-PLAN.md"; \
+                  find "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks" -name "T*-PLAN.md" 2>/dev/null)
+REVALIDATION_BLOCKING=false
+
+for plan in $PLAN_GLOB_FILES; do
+  REVALIDATION_STDERR=$(mktemp)
+  REVALIDATION=$(node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check "$plan" 2>"$REVALIDATION_STDERR")
+  REVALIDATION_EXIT=$?
+
+  if [ $REVALIDATION_EXIT -ne 0 ] && [ $REVALIDATION_EXIT -ne 2 ]; then
+    IO_ERR=$(cat "$REVALIDATION_STDERR")
+    LEGACY=false; VALID=false
+    ERRORS="[\"IO error from forge-must-haves.js: $IO_ERR\"]"
+  else
+    if ! node -e "JSON.parse(process.env.R)" R="$REVALIDATION" 2>/dev/null; then
+      IO_ERR=$(cat "$REVALIDATION_STDERR")
+      LEGACY=false; VALID=false
+      ERRORS="[\"Non-JSON stdout from forge-must-haves.js (exit $REVALIDATION_EXIT): $IO_ERR\"]"
+    else
+      LEGACY=$(node -e "process.stdout.write(String(JSON.parse(process.env.R).legacy))" R="$REVALIDATION")
+      VALID=$(node -e  "process.stdout.write(String(JSON.parse(process.env.R).valid))"  R="$REVALIDATION")
+      ERRORS=$(node -e "process.stdout.write(JSON.stringify(JSON.parse(process.env.R).errors))" R="$REVALIDATION")
+    fi
+  fi
+  rm -f "$REVALIDATION_STDERR"
+
+  if [ "$LEGACY" = "false" ] && [ "$VALID" = "false" ]; then
+    REVALIDATION_BLOCKING=true
+    # Surface schema error as a blocking finding for this file
+    AskUserQuestion({
+      header: "Erro de schema no plano",
+      body:   "O arquivo $plan tem erros de schema que impedem a aprovação:\n$ERRORS\nCorrigir o plano (edit + releitura) ou abortar.",
+      options: ["Corrigir agora", "Abortar — replanejar"]
+    })
+    # "Corrigir agora" → voltar ao Gate Step 3, depois re-rodar Gate Step 4
+    # "Abortar" → não escrever marker; re-despachar forge-planner; encerrar o gate
+  fi
+done
+```
+
+> **Re-validação é SIGNIFICATIVA para forge-next:** planos estruturados (`must_haves:` YAML) retornam `{legacy:false, valid:true/false}`. `legacy==false && valid==false` em qualquer arquivo da PLAN_GLOB → finding bloqueante. Aprovação só concedida após todos os arquivos atingirem `valid==true` (ou `legacy==true`).
+
+Aprovação só prossegue para Gate Step 5 se `REVALIDATION_BLOCKING=false` ao final do loop.
+
+---
+
+#### Gate Step 5 — Approval handshake
+
+Após os findings serem endereçados e a re-validação passar, apresentar o gate de aprovação final.
+
+> **Não-aninhamento de plan mode:** NÃO usar `EnterPlanMode`/`ExitPlanMode` aqui. O gate usa somente `AskUserQuestion`. Ver `shared/forge-plan-gate.md § Plan-mode non-nesting`.
+
+```
+AskUserQuestion({
+  header: "Aprovar plano {S##}",
+  body:   "Plano revisado e validado. Aprovar para iniciar a execução?",
+  options: ["Aprovar — iniciar execução", "Editar mais", "Abortar — replanejar"]
+})
+```
+
+- `Aprovar` → escrever o GATE_MARKER:
+
+```bash
+mkdir -p "$(dirname "$GATE_MARKER")"
+cat > "$GATE_MARKER" << 'EOF'
+---
+status: approved
+approved_at: {ISO8601}
+consumer: forge-next
+unit: plan-slice/{S##}
+---
+Plan approved by operator. Execution may proceed.
+EOF
+```
+
+  Prosseguir ao symbol-check gate / primeiro `execute-task`.
+
+- `Editar mais` → voltar ao Gate Step 3.
+- `Abortar` → não escrever o marker. Re-despachar `forge-planner` com notas do operador; reiniciar o ciclo de planejamento da slice.
+
+---
+
+#### Event log (plan-gate)
+
+Após o gate fechar (aprovado/abortado/pulado), append uma linha em `{WORKING_DIR}/.gsd/forge/events.jsonl`:
+
+```bash
+mkdir -p "$WORKING_DIR/.gsd/forge"
+printf '%s\n' "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan-gate\",\"milestone\":\"{M###}\",\"unit\":\"plan-slice/{S##}\",\"mode\":\"interactive\",\"interactive\":\"$INTERACTIVE\",\"outcome\":\"{approved|aborted|skipped}\",\"warn\":${plan_check_counts_warn:-0},\"fail\":${plan_check_counts_fail:-0},\"edits\":${GATE_EDITS:-0}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+```
+
+Campos:
+- `outcome`: `approved` (operador aprovou), `aborted` (operador escolheu replanejar), `skipped` (idempotência atingida, `interactive: off`, ou auto-approve de all-pass).
+- `warn` / `fail`: counts de `plan_check_counts` (parseados pelo plan-check gate — já em escopo).
+- `edits`: número de vezes que o Gate Step 3 foi visitado (0 = sem edição livre).
+
+> Campos aditivos — readers que ignoram campos desconhecidos permanecem compatíveis (mesma convenção de `tier`/`reason` de M001).
+
+---
+
+**Handoff para symbol-check gate / execute-task:** o symbol-check gate e o primeiro `execute-task` só rodam após o gate aprovar (marker `{S##}-PLAN-GATE.md` escrito com `status: approved`) ou ser pulado (`interactive: off` ou idempotência). A ausência do marker indica que o gate foi abortado — o executor **não** deve ser despachado.
+
+> Este gate dispara SOMENTE na transição de `plan-slice` concluído para o primeiro `execute-task` da mesma slice. A verificação de idempotência (`{S##}-PLAN-GATE.md` existente) garante que seja no-op para dispatches subsequentes de `execute-task` dentro da mesma slice.
 
 **Symbol-check gate (between plan-slice and first execute-task, after plan-check gate):**
 

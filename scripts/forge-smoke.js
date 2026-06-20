@@ -1368,6 +1368,79 @@ function smokeUsageIndicator() {
   assert(typeof acct.nextAccount === 'function', 'cooldown-based nextAccount retained as fallback');
 }
 
+// ── Section 19: plan gate degradation (forge-auto never conducts) ───────────
+function smokePlanGateDegradation() {
+  process.stdout.write('\n▸ Section 19: plan gate degradation (forge-auto never conducts)\n');
+  const REPO = path.dirname(SCRIPTS);
+  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+
+  const gate  = rd('shared/forge-plan-gate.md');
+  const task  = rd('skills/forge-task/SKILL.md');
+  const next  = rd('skills/forge-next/SKILL.md');
+  const auto  = rd('skills/forge-auto/SKILL.md');
+  const prefs = rd('forge-agent-prefs.md');
+
+  // (a) shared/forge-plan-gate.md exists + references both consumers + has Degradation by mode section
+  assert(fs.existsSync(path.join(REPO, 'shared/forge-plan-gate.md')),
+    '(a) shared/forge-plan-gate.md exists', 'file missing');
+  assert(/forge-task/.test(gate) && /forge-next/.test(gate),
+    '(a) forge-plan-gate.md references both consumers (forge-task, forge-next)', 'consumer reference missing');
+  assert(/## Degradation by mode/.test(gate),
+    '(a) forge-plan-gate.md has "## Degradation by mode" section', 'section missing');
+
+  // (b) forge-task and forge-next consume shared/forge-plan-gate.md and conduct interactively
+  for (const [label, txt] of [['forge-task', task], ['forge-next', next]]) {
+    assert(/shared\/forge-plan-gate\.md/.test(txt),
+      `(b) ${label}/SKILL.md references shared/forge-plan-gate.md`, 'reference missing');
+    assert(/MODE = interactive/.test(txt),
+      `(b) ${label}/SKILL.md has MODE = interactive (conducts interactively)`, 'interactive mode missing');
+  }
+
+  // (c) forge-auto does NOT conduct the interactive plan gate — negative + positive guards
+  assert((auto.match(/Plan gate \(interactive\)/g) || []).length === 0,
+    '(c) forge-auto SKILL does NOT conduct the interactive plan gate',
+    `found ${(auto.match(/Plan gate \(interactive\)/g) || []).length} occurrences`);
+  // R1: if forge-auto mentions shared/forge-plan-gate.md it MUST carry the "NEVER conducts" qualifier
+  assert(!/shared\/forge-plan-gate\.md/.test(auto) || /NEVER conducts|NUNCA conduz/i.test(auto),
+    '(c) forge-auto: if it references shared/forge-plan-gate.md it must carry NEVER conducts/NUNCA conduz qualifier',
+    'forge-auto references forge-plan-gate.md without the required NEVER-conducts qualifier');
+  assert(/Plan gate — degradação no modo auto/.test(auto),
+    '(c) forge-auto has the auditable degradation guard heading', 'guard heading missing');
+  assert(/Plan-gate degradation \(auditable\) — forge-auto NEVER conducts the interactive handshake/.test(auto),
+    '(c) forge-auto has the grep-anchor phrase (NEVER conducts)', 'anchor phrase missing');
+  // R3: extract the degradation guard block and test the three key terms WITHIN it (block-scoped)
+  {
+    const guardStart = auto.indexOf('### Plan gate — degradação no modo auto');
+    const guardEnd   = guardStart === -1 ? -1 : (() => {
+      const afterStart = auto.indexOf('\n###', guardStart + 1);
+      return afterStart === -1 ? auto.length : afterStart;
+    })();
+    const guardBlock = guardStart === -1 ? '' : auto.slice(guardStart, guardEnd);
+    const hasModeAuto      = /MODE = auto/.test(guardBlock);
+    const hasNeverConducts = /never conducts/.test(guardBlock);
+    const hasAskInAuto     = /ask_in_auto: defer/.test(guardBlock);
+    const missing = [
+      !hasModeAuto      && 'MODE=auto',
+      !hasNeverConducts && 'never conducts',
+      !hasAskInAuto     && 'ask_in_auto:defer',
+    ].filter(Boolean).join(', ');
+    assert(hasModeAuto && hasNeverConducts && hasAskInAuto,
+      '(c) forge-auto degradation guard block has all three key terms (MODE=auto, never conducts, ask_in_auto:defer)',
+      guardStart === -1 ? 'guard block not found' : `missing in block: ${missing}`);
+  }
+
+  // (d) plan_gate: pref scaffolded in forge-agent-prefs.md with correct defaults
+  // R2: guard missing file distinctly from missing key
+  assert(fs.existsSync(path.join(REPO, 'forge-agent-prefs.md')),
+    '(d) forge-agent-prefs.md exists', 'file missing');
+  assert(/^plan_gate:/m.test(prefs),
+    '(d) forge-agent-prefs.md has plan_gate: block', 'plan_gate block missing');
+  assert(/plan_gate:[\s\S]*?interactive:\s*always/.test(prefs),
+    '(d) plan_gate.interactive defaults to always', 'interactive: always missing');
+  assert(/plan_gate:[\s\S]*?ask_in_auto:\s*defer/.test(prefs),
+    '(d) plan_gate.ask_in_auto defaults to defer', 'ask_in_auto: defer missing');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1393,6 +1466,7 @@ function main() {
     smokeAccounts();
     smokeEffort();
     smokeUsageIndicator();
+    smokePlanGateDegradation();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
