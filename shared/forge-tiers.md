@@ -33,7 +33,7 @@ The four tiers map to four model aliases. Operators can override the model for a
 | Tier | Default Model ID | Alias | Intended Workloads | Operator Override Key |
 |---|---|---|---|---|
 | `light` | `claude-haiku-4-5-20251001` | `haiku` | Memory extraction, aggregation, fast summaries | `tier_models.light` |
-| `standard` | `claude-sonnet-4-6` | `sonnet` | Code execution, research, discussion, scoped planning | `tier_models.standard` |
+| `standard` | `claude-sonnet-5` | `sonnet` | Code execution, research, discussion, scoped planning | `tier_models.standard` |
 | `heavy` | `claude-opus-4-8[1m]` | `opus` | Deep architectural planning, slice decomposition | `tier_models.heavy` |
 | `max` | `claude-fable-5` | `fable` | Milestone planning, `risk:high` slice planning, last rung of blocker escalation. 2x the cost of opus ($10/$50 vs $5/$25 per MTok) — never a default for high-volume unit types | `tier_models.max` |
 

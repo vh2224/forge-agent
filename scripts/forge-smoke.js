@@ -1328,11 +1328,11 @@ function smokeEffort() {
   const clamp = (model, e) => spawnSync('node', ['-e',
     `const r={low:0,medium:1,high:2,xhigh:3,max:4};const m='${model}';const cap=(/^claude-(haiku|sonnet)/.test(m))?'medium':'max';let e='${e}';if(!(e in r))e='medium';process.stdout.write(r[e]>r[cap]?cap:e)`
   ], { encoding: 'utf8' }).stdout;
-  assert(clamp('claude-sonnet-4-6', 'xhigh') === 'medium', 'clamp: sonnet xhigh → medium', 'no clamp');
+  assert(clamp('claude-sonnet-5', 'xhigh') === 'medium', 'clamp: sonnet xhigh → medium', 'no clamp');
   assert(clamp('claude-haiku-4-5-20251001', 'high') === 'medium', 'clamp: haiku high → medium', 'no clamp');
   assert(clamp('claude-opus-4-8', 'xhigh') === 'xhigh', 'clamp: opus xhigh → xhigh (no clamp)', 'wrongly clamped');
   assert(clamp('claude-fable-5', 'max') === 'max', 'clamp: fable max → max', 'wrongly clamped');
-  assert(clamp('claude-sonnet-4-6', 'bogus') === 'medium', 'clamp: invalid effort → medium fallback', 'no fallback');
+  assert(clamp('claude-sonnet-5', 'bogus') === 'medium', 'clamp: invalid effort → medium fallback', 'no fallback');
 }
 
 // Section 18: usage indicator (5h/weekly bars + handoff under token auth).

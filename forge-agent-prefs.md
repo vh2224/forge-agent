@@ -10,7 +10,7 @@ version: 1
 | Alias | Model ID | Uso recomendado |
 |-------|----------|-----------------|
 | `opus` | `claude-opus-4-8[1m]` | Análise profunda, decisões arquiteturais, planejamento |
-| `sonnet` | `claude-sonnet-4-6` | Implementação, execução, tarefas padrão |
+| `sonnet` | `claude-sonnet-5` | Implementação, execução, tarefas padrão |
 | `haiku` | `claude-haiku-4-5-20251001` | Tarefas leves, extração de memórias, operações rápidas |
 
 Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-8[1m]`) em qualquer configuração.
@@ -27,9 +27,9 @@ Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-8[1m]`) 
 | research-slice | forge-researcher | claude-opus-4-8[1m] | opus |
 | plan-milestone | forge-planner | claude-opus-4-8[1m] | opus |
 | plan-slice | forge-planner | claude-opus-4-8[1m] | opus |
-| execute-task | forge-executor | claude-sonnet-4-6 | sonnet |
-| complete-slice | forge-completer | claude-sonnet-4-6 | sonnet |
-| complete-milestone | forge-completer | claude-sonnet-4-6 | sonnet |
+| execute-task | forge-executor | claude-sonnet-5 | sonnet |
+| complete-slice | forge-completer | claude-sonnet-5 | sonnet |
+| complete-milestone | forge-completer | claude-sonnet-5 | sonnet |
 | memory-extract | forge-memory | claude-haiku-4-5-20251001 | haiku |
 
 ## Phase Skip Rules
@@ -360,7 +360,7 @@ to re-route any tier without touching orchestrator code or agent frontmatters.
 ```
 tier_models:
   light:    claude-haiku-4-5-20251001      # fast, cheap (memory-extract, complete-slice, docs tag)
-  standard: claude-sonnet-4-6              # balanced (execute-task default, research, discuss)
+  standard: claude-sonnet-5              # balanced (execute-task default, research, discuss)
   heavy:    "claude-opus-4-8[1m]"          # deep reasoning (plan-slice default)
   max:      claude-fable-5                 # frontier (plan-milestone, risk:high plan-slice, blocker escalation) — 2x opus cost
 ```
@@ -391,7 +391,7 @@ in [`shared/forge-tiers.md § Tier → Default Model`](shared/forge-tiers.md).
 
 Edit the `tier_models` block in this file (or in `.gsd/claude-agent-prefs.md` for repo-level
 scope, or `.gsd/prefs.local.md` for personal local scope — latter gitignored). Example: changing
-`tier_models.light` from `claude-haiku-4-5-20251001` to `claude-sonnet-4-6` means the next
+`tier_models.light` from `claude-haiku-4-5-20251001` to `claude-sonnet-5` means the next
 `memory-extract` dispatch will invoke sonnet instead of haiku — **no code change required**.
 
 ### How to override per-task
@@ -902,6 +902,6 @@ repo_path:    # preenchido pelo install.sh — caminho do repositório gsd-agent
 - `review.engine` é ignorado quando `review.mode: disabled`.
 - Para mudar o modelo de uma fase, edite o bloco `tier_models:` na seção `## Tier Settings` acima.
   A tabela Phase → Agent Routing é informacional; o bloco `tier_models:` é a fonte de verdade.
-- Modelos disponíveis: fable (claude-fable-5 — tier max, 2x custo do opus), opus (claude-opus-4-8[1m], fallback claude-opus-4-7), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
+- Modelos disponíveis: fable (claude-fable-5 — tier max, 2x custo do opus), opus (claude-opus-4-8[1m], fallback claude-opus-4-7), sonnet (claude-sonnet-5), haiku (claude-haiku-4-5-20251001)
 - Este arquivo é lido pelo orquestrador gsd.md a cada iteração do loop
 - Para mudar comandos de verify, edite o bloco "verification:" acima. Veja scripts/forge-verify.js para a implementação.

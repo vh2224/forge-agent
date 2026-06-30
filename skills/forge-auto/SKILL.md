@@ -345,7 +345,7 @@ fi
 # Step 4: resolve model — PREFS.tier_models[tier] with fallback to forge-tiers.md defaults
 MODEL_ID=$(node -e "
   let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
-  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8','max':'claude-fable-5'};
+  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-5','heavy':'claude-opus-4-8','max':'claude-fable-5'};
   const tier='$TIER';
   const validTiers=['light','standard','heavy','max'];
   const t=validTiers.includes(tier)?tier:'standard';
