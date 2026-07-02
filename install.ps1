@@ -386,6 +386,12 @@ if (Test-Path $CmdSrc) {
     CopyFile $CmdSrc $CmdDst
     Info ("  bin -> " + $CmdDst)
 }
+$StatusCmdSrc = Join-Path (Join-Path $RepoDir "bin") "forge-status.cmd"
+$StatusCmdDst = Join-Path $BinDir "forge-status.cmd"
+if (Test-Path $StatusCmdSrc) {
+    CopyFile $StatusCmdSrc $StatusCmdDst
+    Info ("  bin -> " + $StatusCmdDst)
+}
 # Ensure $BinDir on the persisted User PATH so the wrapper resolves in new shells.
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (-not (($UserPath -split ';') | Where-Object { $_ -eq $BinDir })) {
