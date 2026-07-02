@@ -922,6 +922,83 @@ test('bare --watch (default interval) capped at 1 frame via env still exits 0 qu
   assertEq(frameCount, 1, 'exactly 1 rendered frame (first frame renders immediately)');
 });
 
+// ── R1 fix: --watch= (empty value) must enter watch mode, not fall through ──
+test('R1: --watch= (empty value) enters watch mode (bounded frames), not single-shot', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--watch=', '--cwd', dir], {
+    encoding: 'utf8',
+    input: '',
+    timeout: 10000,
+    env: { ...process.env, FORGE_STATUS_WATCH_MAX: '2' },
+  });
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.signal == null, `expected no kill signal, got ${res.signal}`);
+  assert(res.stdout.includes('refresh #'), 'watch-mode per-frame divider present (not single-shot)');
+  const frameCount = res.stdout.split('## Status GSD').length - 1;
+  assertEq(frameCount, 2, 'exactly 2 rendered frames (watch mode honored default interval)');
+});
+
+test('R1: --watch=abc (non-numeric) is rejected with exit 2', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--watch=abc', '--cwd', dir], {
+    encoding: 'utf8',
+    input: '',
+    timeout: 10000,
+  });
+  assert(res.status === 2, `expected exit 2, got ${res.status}\nstderr: ${res.stderr}`);
+});
+
+// ── R3 fix: FORGE_STATUS_WATCH_MAX=0 must render zero frames, exit 0, no hang ──
+test('R3: FORGE_STATUS_WATCH_MAX=0 exits 0 with ZERO frames rendered, no hang', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--watch=0.05', '--cwd', dir], {
+    encoding: 'utf8',
+    input: '',
+    timeout: 10000,
+    env: { ...process.env, FORGE_STATUS_WATCH_MAX: '0' },
+  });
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.signal == null, `expected no kill signal (would indicate hang/timeout), got ${res.signal}`);
+  const frameCount = res.stdout.split('## Status GSD').length - 1;
+  assertEq(frameCount, 0, 'zero milestone-header renders');
+});
+
+// ── R4 fix: --watch <bad-id> must fail fast (exit 2), not loop forever ──
+test('R4: --watch <valid-format-but-nonexistent-id> exits 2, not a hang, not exit 0', () => {
+  const res = spawnSync(process.execPath, [
+    CLI_PATH, 'M-20990101000000-ghost', '--watch=0.05', '--cwd', makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] }).dir,
+  ], {
+    encoding: 'utf8',
+    input: '',
+    timeout: 10000,
+    env: { ...process.env, FORGE_STATUS_WATCH_MAX: '3' },
+  });
+  assert(res.status === 2, `expected exit 2, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.signal == null, `expected no kill signal (would indicate hang/timeout), got ${res.signal}`);
+  assert(res.stderr.includes('não encontrado'), 'stderr carries the not-found pt-BR message');
+});
+
+// ── R2: SIGINT handler — real spawn + signal, guarded on win32 ──────────────
+// NOTE: `test()` in this harness is synchronous (fn() is called and awaited
+// inline, no Promise support) — so this test must block synchronously too,
+// via a shell script that backgrounds the child, sleeps, sends SIGINT, and
+// waits, all inside one spawnSync call. Guarded off entirely on win32 (no
+// POSIX `sh`/`kill`, and child.kill('SIGINT') is unreliable there anyway).
+test('R2: --watch child process exits cleanly on SIGINT', () => {
+  if (process.platform === 'win32') {
+    console.log('      (skipped — SIGINT test skipped on win32, unreliable via child.kill; verify manually via UAT)');
+    passed++;
+    return;
+  }
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const nodeBin = process.execPath;
+  const script = `"${nodeBin}" "${CLI_PATH}" --watch=0.5 --cwd "${dir}" >/dev/null 2>&1 & pid=$!; sleep 0.2; kill -INT $pid; wait $pid; echo "EXIT:$?"`;
+  const res = spawnSync('/bin/sh', ['-c', script], { encoding: 'utf8', timeout: 8000 });
+  const m = (res.stdout || '').match(/EXIT:(\d+)/);
+  assert(m, `expected EXIT:<code> marker in stdout, got: ${res.stdout}\nstderr: ${res.stderr}`);
+  assertEq(m[1], '0', 'child exited with code 0 after SIGINT');
+});
+
 test('--watch=0.05 in-process: collect()+renderTree() reflects an external STATE change across two calls', () => {
   const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
   const r1 = status.renderTree(status.collect(dir, {}));

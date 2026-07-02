@@ -656,10 +656,37 @@ function emitHumanRender(model, cwd, args) {
 // emitHumanRender) and appends the render to stdout, preserving scrollback.
 // Pure-read absolute: zero writes to .gsd/**, no lock acquired.
 function runWatch(cwd, args) {
-  const s = args.watch === true ? 3 : parseFloat(args.watch);
-  const intervalMs = (Number.isFinite(s) && s > 0 ? s : 3) * 1000;
+  // R1 fix: interval resolution. `--watch` (bare, args.watch === true) or
+  // `--watch=` (empty string, args.watch === '') both fall back to the
+  // default interval (3s). A clearly non-numeric or non-positive value
+  // (e.g. `--watch=abc`, `--watch=0`, `--watch=-1`) is rejected outright
+  // with a pt-BR error and exit 2 — we don't silently clamp a value the
+  // user typed wrong, only an *absent* value.
+  let intervalMs;
+  if (args.watch === true || args.watch === '') {
+    intervalMs = 3000;
+  } else {
+    const s = parseFloat(args.watch);
+    if (!Number.isFinite(s) || s <= 0) {
+      process.stderr.write(`Argumento inválido: --watch=${args.watch} — esperado um número de segundos maior que zero (ex.: --watch=5).\n`);
+      process.exit(2);
+      return;
+    }
+    intervalMs = s * 1000;
+  }
 
-  const max = parseInt(process.env.FORGE_STATUS_WATCH_MAX, 10);
+  // R3 fix: a non-negative integer cap N means EXACTLY N frames — including
+  // N=0 (render zero frames, exit immediately, checked BEFORE the first
+  // frame() call). Negative or non-integer/NaN values are treated as
+  // uncapped (documented here, not just in the check below).
+  const maxRaw = parseInt(process.env.FORGE_STATUS_WATCH_MAX, 10);
+  const capped = Number.isInteger(maxRaw) && maxRaw >= 0;
+  const max = capped ? maxRaw : Infinity; // negative/NaN => uncapped
+
+  if (capped && max === 0) {
+    process.exit(0);
+    return;
+  }
 
   let count = 0;
   let timer = null;
@@ -673,13 +700,24 @@ function runWatch(cwd, args) {
     if (stopped) return;
     try {
       const model = collect(cwd, { milestoneId: args._positional || null });
+      // R4 fix: a milestone that doesn't exist must fail fast, exactly like
+      // the single-shot path does, instead of looping forever re-rendering
+      // the same not_found state. A milestone that exists but is missing
+      // STATE.md (degraded, not not_found) still watches normally.
+      if (model.not_found && model.not_found.code === 'not_found') {
+        stopped = true;
+        if (timer) clearInterval(timer);
+        process.stderr.write(`Milestone não encontrado: ${model.not_found.id}\n`);
+        process.exit(2);
+        return;
+      }
       process.stdout.write(divider(count));
       emitHumanRender(model, cwd, args);
     } catch (e) {
       process.stdout.write('\n⚠ refresh falhou (torn read?): ' + (e && e.message ? e.message : e) + '\n');
     }
     count++;
-    if (Number.isInteger(max) && max > 0 && count >= max) {
+    if (count >= max) {
       stopped = true;
       if (timer) clearInterval(timer);
       process.exit(0);
@@ -688,6 +726,7 @@ function runWatch(cwd, args) {
   }
 
   frame();
+  if (stopped) return;
   timer = setInterval(frame, intervalMs);
 
   process.on('SIGINT', () => {
@@ -736,7 +775,11 @@ function cliMain() {
     }
   }
 
-  if (args.watch) {
+  // R1 fix: gate on presence (hasOwnProperty), not truthiness — `--watch=`
+  // (empty value) sets args.watch = '' which is falsy under `if (args.watch)`
+  // and silently fell through to the single-shot path. Mirrors the --cwd
+  // hasOwnProperty pattern above.
+  if (Object.prototype.hasOwnProperty.call(args, 'watch')) {
     // --watch ignores --json (human tree render only, per-frame append loop).
     runWatch(cwd, args);
     return;
