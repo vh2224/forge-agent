@@ -424,10 +424,189 @@ function collect(cwd, opts) {
   };
 }
 
+// ── renderTree ───────────────────────────────────────────────────────────────
+// Pure string builder over the model produced by collect(). No fs access here
+// — S03's --watch calls collect()+renderTree() per refresh; any fs read here
+// would double the torn-read surface. Mirrors skills/forge-status/SKILL.md
+// dashboard template (icons, markers) minus the tokens/version blocks.
+const STATUS_PT = {
+  done: 'concluída',
+  in_progress: 'em andamento',
+  pending: 'pendente',
+};
+
+function renderTree(model) {
+  const lines = [];
+
+  if (!model || model.milestone === null) {
+    lines.push('## Status GSD');
+    lines.push('');
+    lines.push('Nenhum run ativo. Execute /forge-auto <M-id> ou /forge-task <descrição> para começar.');
+    if (model && Array.isArray(model.warnings) && model.warnings.length > 0) {
+      lines.push('');
+      for (const w of model.warnings) lines.push(`⚠ ${w}`);
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  const m = model.milestone;
+
+  lines.push('## Status GSD');
+  lines.push('');
+  lines.push(`**Milestone ativo:** ${m.id} — ${m.title}`);
+  lines.push(`**Fase:** ${m.phase}`);
+
+  const activeRun = (model.runs && Array.isArray(model.runs.active))
+    ? model.runs.active.find((r) => r.id === m.id)
+    : null;
+  if (activeRun) {
+    const staleChip = activeRun.stale ? ' ⚠ STALE' : '';
+    lines.push(`**Run:** ${activeRun.kind} · heartbeat ${fmtAgo(activeRun.heartbeat_age_ms)}${staleChip}`);
+  }
+
+  lines.push(`**Progresso:** ${m.progress.done}/${m.progress.total} slices concluídos`);
+
+  if (model.runs && model.runs.note) {
+    lines.push(`**Nota:** ${model.runs.note}`);
+  }
+
+  lines.push('');
+  lines.push('### Slices');
+  if (Array.isArray(m.slices) && m.slices.length > 0) {
+    for (const s of m.slices) {
+      const box = s.checked ? 'x' : ' ';
+      const activeSuffix = s.status === 'active' ? '  ← ativo' : '';
+      lines.push(`- [${box}] ${s.id}: ${s.title}${activeSuffix}`);
+      if (s.status === 'active' && Array.isArray(s.tasks)) {
+        for (const t of s.tasks) {
+          const tBox = t.checked ? 'x' : ' ';
+          const tActiveSuffix = t.status === 'active' ? '  ← ativa' : '';
+          lines.push(`  - [${tBox}] ${t.id}: ${t.title}${tActiveSuffix}`);
+        }
+      }
+    }
+  } else {
+    lines.push('—');
+  }
+
+  lines.push('');
+  lines.push('### Próxima ação');
+  lines.push(m.next_action || '—');
+
+  if (Array.isArray(model.autonomous_tasks) && model.autonomous_tasks.length > 0) {
+    lines.push('');
+    lines.push('### Tasks autônomas');
+    for (const t of model.autonomous_tasks) {
+      let icon = '·';
+      if (t.status === 'done') icon = '✓';
+      else if (t.status === 'in_progress') icon = '▶';
+      const statusPt = STATUS_PT[t.status] || t.status;
+      lines.push(`${icon} ${t.id}: ${t.description} (${statusPt})`);
+    }
+  }
+
+  if (Array.isArray(model.warnings) && model.warnings.length > 0) {
+    lines.push('');
+    for (const w of model.warnings) lines.push(`⚠ ${w}`);
+  }
+
+  return lines.join('\n') + '\n';
+}
+
+// ── CLI ──────────────────────────────────────────────────────────────────────
+// parseArgs convention copied from scripts/forge-runs.js (~L238) for
+// consistency across project CLIs, extended here to also capture the first
+// non-flag token as the positional <M-id>.
+function parseArgs(argv) {
+  const args = {};
+  let positional = null;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (next && !next.startsWith('--')) { args[key] = next; i++; }
+      else { args[key] = true; }
+      continue;
+    }
+    if (positional === null) positional = a;
+  }
+  args._positional = positional;
+  return args;
+}
+
+const HELP_TEXT = `forge-status — dashboard de status GSD (somente leitura)
+
+Uso:
+  node scripts/forge-status.js [<M-id>] [--cwd <path>] [--help]
+
+Argumentos:
+  <M-id>            (opcional) foca um milestone específico pelo id
+  --cwd <path>       diretório do projeto (default: diretório atual). Use
+                      esta flag como escape hatch ao rodar de dentro de um
+                      worktree — aponte --cwd para o workspace original onde
+                      o .gsd/ realmente vive.
+  --help             mostra esta ajuda e sai
+
+Garantia: forge-status é estritamente somente-leitura — nunca escreve em
+.gsd/**. Flags desconhecidas são toleradas silenciosamente para compatibilidade
+futura (--json, --tokens e --watch chegam em próximos slices).
+`;
+
+function cliMain() {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.help) {
+    process.stdout.write(HELP_TEXT);
+    process.exit(0);
+    return;
+  }
+
+  const cwd = args.cwd || process.cwd();
+
+  let hasGsd = false;
+  try {
+    hasGsd = fs.existsSync(path.join(cwd, '.gsd'));
+  } catch {
+    hasGsd = false;
+  }
+  if (!hasGsd) {
+    process.stderr.write('Nenhum projeto GSD encontrado neste diretório. Execute /forge-init para começar.\n');
+    process.exit(1);
+    return;
+  }
+
+  const milestoneId = args._positional || null;
+  if (milestoneId) {
+    if (!ids.isValid(milestoneId) || ids.entityKind(milestoneId) !== 'milestone') {
+      process.stderr.write(`Id inválido: ${milestoneId} — esperado um id de milestone (ex.: M-20260101000000-slug).\n`);
+      process.exit(2);
+      return;
+    }
+  }
+
+  try {
+    const model = collect(cwd, { milestoneId });
+    if (milestoneId && model.warnings && model.warnings.some((w) => w.includes('não encontrado') && w.includes(milestoneId))) {
+      process.stderr.write(`Milestone não encontrado: ${milestoneId}\n`);
+      process.exit(2);
+      return;
+    }
+    process.stdout.write(renderTree(model));
+    process.exit(0);
+  } catch (err) {
+    process.stderr.write(`forge-status error: ${err && err.message ? err.message : err}\n`);
+    process.exit(1);
+  }
+}
+
+if (require.main === module) cliMain();
+
 module.exports = {
   parseRoadmap,
   parsePlanTasks,
   scanAutonomousTasks,
   resolveFocus,
   collect,
+  renderTree,
 };
