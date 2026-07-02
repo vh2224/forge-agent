@@ -838,6 +838,103 @@ test('--tokens run leaves .gsd/ byte-for-byte unchanged, creates no .gsd/.locks/
   assert(!fs.existsSync(path.join(dir, '.gsd', '.locks')), 'no .gsd/.locks/ created');
 });
 
+// ── 15. --watch (bounded via env cap) (S03) ──────────────────────────────────
+console.log('15. --watch (bounded via env cap)');
+
+function runWatch(dir, extraArgs, maxFrames) {
+  return spawnSync(process.execPath, [CLI_PATH, '--watch=0.05', '--cwd', dir, ...(extraArgs || [])], {
+    encoding: 'utf8',
+    input: '',
+    timeout: 10000,
+    env: { ...process.env, FORGE_STATUS_WATCH_MAX: String(maxFrames || 2) },
+  });
+}
+
+test('--watch bounded by FORGE_STATUS_WATCH_MAX exits 0 with exactly N frames, no kill signal', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = runWatch(dir, [], 2);
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.signal == null, `expected no kill signal, got ${res.signal}`);
+  const frameCount = res.stdout.split('## Status GSD').length - 1;
+  assertEq(frameCount, 2, 'exactly 2 rendered frames');
+});
+
+test('--watch appends per-frame divider and never emits clear-screen escapes', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = runWatch(dir, [], 2);
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.stdout.includes('refresh #'), 'per-frame divider present');
+  assert(!res.stdout.includes('\x1b[2J') && !res.stdout.includes('\x1b[H') && !res.stdout.includes('\x1bc'), 'no clear-screen escape codes');
+});
+
+test('--watch bounded run leaves .gsd/ byte-for-byte unchanged, creates no .gsd/.locks/', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const before = snapshot(dir);
+  const res = runWatch(dir, [], 3);
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+  const after = snapshot(dir);
+  assertEq(after, before, 'snapshot must be identical before/after --watch run');
+  assert(!fs.existsSync(path.join(dir, '.gsd', '.locks')), 'no .gsd/.locks/ created');
+});
+
+test('--watch tolerates a torn/truncated ROADMAP across frames, still exits 0', () => {
+  const { dir } = makeFixture({
+    runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }],
+    roadmapText: ROADMAP_TEXT.slice(0, 20),
+  });
+  const res = runWatch(dir, [], 2);
+  assert(res.status === 0, `expected exit 0 despite torn ROADMAP, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.stdout.length > 0, 'produced frame output');
+});
+
+test('--watch tolerates a missing STATE.md across frames, still exits 0', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  fs.unlinkSync(path.join(dir, '.gsd', 'milestones', milestoneId, `${milestoneId}-STATE.md`));
+  const res = runWatch(dir, [], 2);
+  assert(res.status === 0, `expected exit 0 despite missing STATE.md, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.stdout.length > 0, 'produced frame output');
+});
+
+test('--watch --tokens repeats the token block once per frame, exits 0', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
+    globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 }],
+  });
+  const res = runWatch(dir, ['--tokens'], 2);
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+  const blockCount = res.stdout.split('### Token usage').length - 1;
+  assertEq(blockCount, 2, 'token block appears once per frame');
+});
+
+test('bare --watch (default interval) capped at 1 frame via env still exits 0 quickly', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--watch', '--cwd', dir], {
+    encoding: 'utf8',
+    input: '',
+    timeout: 10000,
+    env: { ...process.env, FORGE_STATUS_WATCH_MAX: '1' },
+  });
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.signal == null, `expected no kill signal, got ${res.signal}`);
+  const frameCount = res.stdout.split('## Status GSD').length - 1;
+  assertEq(frameCount, 1, 'exactly 1 rendered frame (first frame renders immediately)');
+});
+
+test('--watch=0.05 in-process: collect()+renderTree() reflects an external STATE change across two calls', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const r1 = status.renderTree(status.collect(dir, {}));
+  fs.writeFileSync(
+    path.join(dir, '.gsd', 'milestones', milestoneId, `${milestoneId}-STATE.md`),
+    stateText(milestoneId, { active_task: 'T03', next_action: 'Changed' }),
+    'utf8'
+  );
+  const r2 = status.renderTree(status.collect(dir, {}));
+  assert(r1 !== r2, 'render reflects external STATE change');
+  assert(r2.includes('Changed'), 'new next_action rendered');
+});
+
 // ── Cleanup ────────────────────────────────────────────────────────────────────
 for (const dir of tmpDirs) {
   try {
