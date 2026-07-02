@@ -525,16 +525,24 @@ function renderTree(model) {
 // parseArgs convention copied from scripts/forge-runs.js (~L238) for
 // consistency across project CLIs, extended here to also capture the first
 // non-flag token as the positional <M-id>.
+// Flags that consume the next token as their value. Everything else is boolean.
+// Reserve --tokens and --watch here (S03) so they don't accidentally swallow
+// a positional M-id when added later.
+const VALUE_FLAGS = new Set(['--cwd']);
+
 function parseArgs(argv) {
   const args = {};
   let positional = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next && !next.startsWith('--')) { args[key] = next; i++; }
-      else { args[key] = true; }
+      if (VALUE_FLAGS.has(a)) {
+        const next = argv[i + 1];
+        if (next && !next.startsWith('--')) { args[a.slice(2)] = next; i++; }
+        else { args[a.slice(2)] = true; } // malformed but tolerated
+      } else {
+        args[a.slice(2)] = true;
+      }
       continue;
     }
     if (positional === null) positional = a;
@@ -555,10 +563,11 @@ Argumentos:
                       worktree — aponte --cwd para o workspace original onde
                       o .gsd/ realmente vive.
   --help             mostra esta ajuda e sai
+  --json             emite o modelo de status como JSON (best-effort v1) e sai
 
 Garantia: forge-status é estritamente somente-leitura — nunca escreve em
 .gsd/**. Flags desconhecidas são toleradas silenciosamente para compatibilidade
-futura (--json, --tokens e --watch chegam em próximos slices).
+futura (--tokens e --watch chegam em próximos slices).
 `;
 
 function cliMain() {
@@ -601,6 +610,15 @@ function cliMain() {
 
   try {
     const model = collect(cwd, { milestoneId });
+    if (args.json) {
+      // --json is programmatic consumption: emit the full collect() model
+      // as-is (including not_found, if any) and exit 0 — the consumer
+      // inspects model.not_found itself, unlike the human render path
+      // below which exits 2 on not_found. best-effort v1, no tokens.
+      process.stdout.write(JSON.stringify(model, null, 2) + '\n');
+      process.exit(0);
+      return;
+    }
     if (model.not_found && model.not_found.code === 'not_found') {
       process.stderr.write(`Milestone não encontrado: ${model.not_found.id}\n`);
       process.exit(2);
