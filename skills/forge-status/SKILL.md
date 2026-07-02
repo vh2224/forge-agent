@@ -48,7 +48,11 @@ if command -v forge-status >/dev/null 2>&1; then
 else
   ENGINE="$HOME/.claude/scripts/forge-status.js"
   [ -f "$ENGINE" ] || ENGINE="$(grep 'repo_path:' ~/.claude/forge-agent-prefs.md 2>/dev/null | cut -d: -f2 | tr -d ' ')/scripts/forge-status.js"
-  node "$ENGINE" $ARGUMENTS
+  if [ ! -f "$ENGINE" ]; then
+    echo "forge-status: engine não encontrado — rode /forge-update ou /forge-init." >&2
+  else
+    node "$ENGINE" $ARGUMENTS
+  fi
 fi
 ```
 

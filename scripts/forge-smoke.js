@@ -1467,6 +1467,7 @@ function smokeStatusPackaging() {
   cleanup(dir);
 
   // (c) bin wrappers presentes
+  // (c) presence-only by design: executing the bash wrapper from smoke would break Windows CI (no bash guarantee); the engine itself is exercised end-to-end in (b).
   assert(fs.existsSync(path.join(REPO, 'bin', 'forge-status')), '(c) bin/forge-status existe', 'arquivo ausente');
   assert(fs.existsSync(path.join(REPO, 'bin', 'forge-status.cmd')), '(c) bin/forge-status.cmd existe', 'arquivo ausente');
 
