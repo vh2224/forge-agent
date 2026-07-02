@@ -10,9 +10,8 @@
 //   2. Never modify forge-dashboard.js nor forge-statusline.js — patterns are
 //      mined (copied) here, never required from them (their call graph is the
 //      write path).
-//   3. Exports contract: collect/renderTree land in T02/T03. This file (T01)
-//      exports only the tree parsers: parseRoadmap, parsePlanTasks,
-//      scanAutonomousTasks.
+//   3. Exports contract: parseRoadmap/parsePlanTasks/scanAutonomousTasks (T01) +
+//      resolveFocus/collect (T02). renderTree + CLI land in T03.
 //   4. Torn-read tolerance from day 1: every file read + JSON.parse wrapped in
 //      try/catch. Malformed/truncated input degrades to empty/partial results,
 //      never throws.
@@ -25,6 +24,27 @@
 const fs = require('fs');
 const path = require('path');
 const ids = require('./forge-ids.js');
+
+// Read-only reuse of forge-runs / forge-state — WHITELIST:
+//   runs.listActive / runs.get / runs.oldestActive
+//   forgeState.read / forgeState.readLegacyStateFile
+// FORBIDDEN (write-side, never call): runs.add/update/remove/bumpHeartbeat/
+// cleanupStale/refreshLegacyAlias/migrateLegacyState, forgeState.write/
+// updateFields/pushRecentUnit.
+const runs = require('./forge-runs.js');
+const forgeState = require('./forge-state.js');
+
+// ── Staleness helpers (COPIED from forge-dashboard.js ~L28-69 — do NOT require
+// forge-dashboard, its call graph is the write path) ────────────────────────
+const STALE_WARNING_MS = 5 * 60 * 1000;  // 5min: warn
+const STALE_MS = 15 * 60 * 1000;         // 15min: stale
+
+function fmtAgo(ms) {
+  if (ms < 1000) return `${ms}ms ago`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s ago`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+  return `${Math.round(ms / 3_600_000)}h ago`;
+}
 
 // ── parseRoadmap ─────────────────────────────────────────────────────────────
 // Extracts { title, slices: [{id, title, checked, risk}] } from ROADMAP markdown.
@@ -164,10 +184,250 @@ function scanAutonomousTasks(cwd) {
   return results;
 }
 
-// collect() and renderTree() land in T02/T03 respectively — not implemented here.
+// ── resolveFocus ─────────────────────────────────────────────────────────────
+// Decides which milestone the model should render: 0/1/N active runs, or an
+// explicit positional milestoneId override. Never throws — degrades to
+// { focused: null, note, error } shapes. See S01-PLAN §Steps step 4.
+function resolveFocus(cwd, milestoneId) {
+  let active = [];
+  try {
+    active = runs.listActive(cwd) || [];
+  } catch {
+    active = [];
+  }
+
+  if (milestoneId) {
+    let dirExists = false;
+    try {
+      dirExists = fs.existsSync(path.join(cwd, '.gsd', 'milestones', milestoneId));
+    } catch {
+      dirExists = false;
+    }
+    let hasRun = false;
+    try {
+      hasRun = !!runs.get(cwd, milestoneId);
+    } catch {
+      hasRun = false;
+    }
+    if (!dirExists && !hasRun) {
+      return { focused: null, note: null, error: `milestone não encontrado: ${milestoneId}` };
+    }
+    return { focused: milestoneId, note: null, error: null };
+  }
+
+  if (active.length === 1) {
+    return { focused: active[0].id, note: null, error: null };
+  }
+
+  if (active.length > 1) {
+    let oldest = null;
+    try {
+      oldest = runs.oldestActive(cwd);
+    } catch {
+      oldest = null;
+    }
+    if (!oldest) return { focused: null, note: null, error: null };
+    return {
+      focused: oldest.id,
+      note: `${active.length} runs ativos; mostrando ${oldest.id} (mais antigo) — use forge-status <M-id> para focar outro`,
+      error: null,
+    };
+  }
+
+  // 0 active runs — fall back to legacy STATE.md, then a milestones scan.
+  try {
+    const legacy = forgeState.readLegacyStateFile(cwd);
+    if (legacy && legacy.active_milestone) {
+      const token = legacy.active_milestone.split(/\s/)[0];
+      if (token && ids.isValid(token) && ids.entityKind(token) === 'milestone') {
+        return {
+          focused: token,
+          note: 'nenhum run ativo — estado do STATE.md legado',
+          error: null,
+        };
+      }
+    }
+  } catch {
+    // ignore, fall through to milestones scan
+  }
+
+  try {
+    const milestonesDir = path.join(cwd, '.gsd', 'milestones');
+    let entries = [];
+    try {
+      entries = fs.readdirSync(milestonesDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch {
+      entries = [];
+    }
+
+    let best = null;
+    let bestTs = -1;
+    for (const id of entries) {
+      let state = null;
+      try {
+        state = forgeState.read(cwd, id);
+      } catch {
+        state = null;
+      }
+      if (!state || !state.last_updated) continue;
+      const ts = Date.parse(state.last_updated);
+      if (!Number.isNaN(ts) && ts > bestTs) {
+        bestTs = ts;
+        best = id;
+      }
+    }
+    if (best) {
+      return { focused: best, note: 'nenhum run ativo — último estado registrado', error: null };
+    }
+  } catch {
+    // ignore
+  }
+
+  return { focused: null, note: null, error: null };
+}
+
+// ── collect ──────────────────────────────────────────────────────────────────
+// Assembles the full status model per S01-PLAN.md § Shared contract. Pure-read,
+// torn-read tolerant end to end. opts = { milestoneId }.
+function collect(cwd, opts) {
+  opts = opts || {};
+  const warnings = [];
+  const now = Date.now();
+
+  let activeRuns = [];
+  try {
+    activeRuns = runs.listActive(cwd) || [];
+  } catch {
+    activeRuns = [];
+  }
+
+  const runsActiveModel = activeRuns.map((r) => {
+    let phase = '—';
+    if (r.kind === 'milestone') {
+      try {
+        const state = forgeState.read(cwd, r.id);
+        if (state) phase = state.phase || '—';
+      } catch {
+        // keep '—'
+      }
+    }
+    const age = now - (r.last_heartbeat || 0);
+    return {
+      id: r.id,
+      kind: r.kind,
+      phase,
+      heartbeat_age_ms: age,
+      stale: age > STALE_MS,
+      isolation_mode: r.isolation_mode || 'shared',
+      session_id: r.session_id || null,
+      task_description: r.task_description || null,
+    };
+  });
+
+  const focus = resolveFocus(cwd, opts.milestoneId);
+  if (focus.error) warnings.push(focus.error);
+
+  let milestoneModel = null;
+  const focusedId = focus.focused;
+
+  if (focusedId) {
+    let state = null;
+    try {
+      state = forgeState.read(cwd, focusedId);
+    } catch {
+      state = null;
+    }
+    if (!state) {
+      warnings.push(`estado não encontrado para ${focusedId} — campos exibidos como '—'`);
+    }
+
+    let roadmapParsed = { title: null, slices: [] };
+    try {
+      const roadmapPath = path.join(cwd, '.gsd', 'milestones', focusedId, `${focusedId}-ROADMAP.md`);
+      if (fs.existsSync(roadmapPath)) {
+        const text = fs.readFileSync(roadmapPath, 'utf8');
+        roadmapParsed = parseRoadmap(text);
+      } else {
+        warnings.push('ROADMAP não encontrado — árvore de slices omitida');
+      }
+    } catch {
+      warnings.push('ROADMAP não encontrado — árvore de slices omitida');
+    }
+
+    const activeSlice = state ? state.active_slice : null;
+    const activeTask = state ? state.active_task : null;
+
+    let doneCount = 0;
+    const slices = (roadmapParsed.slices || []).map((s) => {
+      if (s.checked) doneCount++;
+      let status = 'pending';
+      if (s.checked) status = 'done';
+      else if (activeSlice && activeSlice !== '—' && s.id === activeSlice) status = 'active';
+
+      let tasks = [];
+      if (activeSlice && activeSlice !== '—' && s.id === activeSlice) {
+        try {
+          const planPath = path.join(cwd, '.gsd', 'milestones', focusedId, 'slices', s.id, `${s.id}-PLAN.md`);
+          if (fs.existsSync(planPath)) {
+            const planText = fs.readFileSync(planPath, 'utf8');
+            const parsedTasks = parsePlanTasks(planText);
+            tasks = parsedTasks.map((t) => {
+              let tStatus = 'pending';
+              if (t.checked) tStatus = 'done';
+              else if (activeTask && activeTask !== '—' && t.id === activeTask) tStatus = 'active';
+              return { id: t.id, title: t.title, checked: t.checked, status: tStatus };
+            });
+          } else {
+            warnings.push(`${s.id}-PLAN.md não encontrado — tasks omitidas`);
+          }
+        } catch {
+          warnings.push(`${s.id}-PLAN.md não encontrado — tasks omitidas`);
+        }
+      }
+
+      return { id: s.id, title: s.title, checked: s.checked, risk: s.risk || null, status, tasks };
+    });
+
+    milestoneModel = {
+      id: focusedId,
+      title: roadmapParsed.title || focusedId,
+      phase: state ? state.phase : '—',
+      active_slice: state ? state.active_slice : '—',
+      active_task: state ? state.active_task : '—',
+      auto_mode: state ? state.auto_mode : '—',
+      next_action: state ? state.next_action : '—',
+      progress: { done: doneCount, total: slices.length },
+      slices,
+    };
+  }
+
+  let autonomousTasks = [];
+  try {
+    autonomousTasks = scanAutonomousTasks(cwd);
+  } catch {
+    autonomousTasks = [];
+  }
+
+  return {
+    cwd,
+    generated_at: new Date().toISOString(),
+    runs: {
+      active: runsActiveModel,
+      focused: focusedId || null,
+      note: focus.note || null,
+    },
+    milestone: milestoneModel,
+    autonomous_tasks: autonomousTasks,
+    warnings,
+  };
+}
 
 module.exports = {
   parseRoadmap,
   parsePlanTasks,
   scanAutonomousTasks,
+  resolveFocus,
+  collect,
 };
