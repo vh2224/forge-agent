@@ -10,6 +10,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const status = require('./forge-status.js');
 
@@ -239,6 +240,37 @@ test('parsePlanTasks handles plain, bold-decomposed and T##.N variants', () => {
   assertEq(t[1], { checked: false, id: 'T02', title: 'plain active' }, 't02');
   assert(t[2].id === 'T03' && t[2].checked === false, 't03');
   assert(t[3].id === 'T03.1' && t[3].checked === false, 't03.1');
+});
+
+test('parseRoadmap does not truncate title on inner bold emphasis', () => {
+  const text = [
+    '# M-x: Title',
+    '',
+    '- [ ] **S02: A **critical** fix** `risk:high`',
+    '',
+  ].join('\n');
+  const r = status.parseRoadmap(text);
+  assert(r.slices.length === 1, `expected 1 slice, got ${r.slices.length}`);
+  assertEq(r.slices[0].id, 'S02', 'id');
+  assertEq(r.slices[0].risk, 'high', 'risk');
+  assert(r.slices[0].title === 'A **critical** fix', `title truncated: ${JSON.stringify(r.slices[0].title)}`);
+});
+
+test('parseRoadmap tolerates trailing depends:[] tag after risk tag (real ROADMAP format)', () => {
+  const text = [
+    '# M-x: Title',
+    '',
+    '- [ ] **S01: Engine core + parser de árvore (read-only)** `risk:high` `depends:[]`',
+    '- [x] **S02: Plain done** `risk:low`',
+    '',
+  ].join('\n');
+  const r = status.parseRoadmap(text);
+  assert(r.slices.length === 2, `expected 2 slices, got ${r.slices.length}`);
+  assertEq(r.slices[0].id, 'S01', 'id');
+  assertEq(r.slices[0].risk, 'high', 'risk');
+  assert(r.slices[0].title.includes('Engine core'), `title should include "Engine core": ${JSON.stringify(r.slices[0].title)}`);
+  assertEq(r.slices[1].id, 'S02', 'id 2');
+  assertEq(r.slices[1].checked, true, 'checked');
 });
 
 test('parseRoadmap tolerates malformed / empty input', () => {
@@ -476,6 +508,53 @@ test('forge-status.js source contains zero write-API call sites', () => {
   const forbiddenRequireRe = /require\(\s*['"][^'"]*forge-(lock|dashboard)[^'"]*['"]\s*\)/g;
   const reqMatches = cleaned.match(forbiddenRequireRe) || [];
   assertEq(reqMatches, [], `expected zero forge-lock/forge-dashboard requires, found: ${JSON.stringify(reqMatches)}`);
+});
+
+// ── 9. CLI exit codes ─────────────────────────────────────────────────────────
+console.log('9. CLI exit codes');
+
+const CLI_PATH = path.join(__dirname, 'forge-status.js');
+
+function runCli(args) {
+  return spawnSync(process.execPath, [CLI_PATH, ...args], { encoding: 'utf8' });
+}
+
+test('CLI exits 0 for a valid fixture + idle project', () => {
+  const { dir } = makeFixture({ milestone: false, runs: [], legacyState: false, autonomousTasks: false });
+  const res = runCli(['--cwd', dir]);
+  assert(res.status === 0, `expected exit 0, got ${res.status}\nstderr: ${res.stderr}`);
+});
+
+test('CLI exits 1 for --cwd pointing at a dir without .gsd', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-nogsd-'));
+  tmpDirs.push(dir);
+  const res = runCli(['--cwd', dir]);
+  assert(res.status === 1, `expected exit 1, got ${res.status}\nstderr: ${res.stderr}`);
+});
+
+test('CLI exits 2 for an invalid positional id', () => {
+  const { dir } = makeFixture({ milestone: false, runs: [], legacyState: false, autonomousTasks: false });
+  const res = runCli(['not-a-valid-id', '--cwd', dir]);
+  assert(res.status === 2, `expected exit 2, got ${res.status}\nstderr: ${res.stderr}`);
+});
+
+test('CLI exits 0 for --help', () => {
+  const res = runCli(['--help']);
+  assert(res.status === 0, `expected exit 0, got ${res.status}`);
+  assert(res.stdout.includes('forge-status'), 'help text present');
+});
+
+test('CLI exits 2 for --cwd given without a following value', () => {
+  const res = runCli(['--cwd']);
+  assert(res.status === 2, `expected exit 2, got ${res.status}\nstderr: ${res.stderr}`);
+});
+
+test('CLI regression: milestone-with-missing-STATE via positional id does NOT exit 2', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  fs.unlinkSync(path.join(dir, '.gsd', 'milestones', milestoneId, `${milestoneId}-STATE.md`));
+  const res = runCli([milestoneId, '--cwd', dir]);
+  assert(res.status === 0, `expected exit 0 (degraded render, not not-found), got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.stdout.includes(milestoneId), 'stdout mentions milestone id');
 });
 
 // ── Cleanup ────────────────────────────────────────────────────────────────────

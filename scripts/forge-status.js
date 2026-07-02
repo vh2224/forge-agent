@@ -57,7 +57,7 @@ function parseRoadmap(text) {
 
   try {
     const slices = [];
-    const sliceRe = /^- \[( |x)\]\s+\*\*(S\d+):\s*(.+?)\*\*(?:.*?`risk:(\w+)`)?/gm;
+    const sliceRe = /^- \[( |x)\]\s+\*\*(S\d+):\s*(.+)\*\*(?:.*?`risk:(\w+)`)?[^\n]*$/gm;
     let m;
     while ((m = sliceRe.exec(text)) !== null) {
       slices.push({
@@ -188,12 +188,14 @@ function scanAutonomousTasks(cwd) {
 // Decides which milestone the model should render: 0/1/N active runs, or an
 // explicit positional milestoneId override. Never throws — degrades to
 // { focused: null, note, error } shapes. See S01-PLAN §Steps step 4.
-function resolveFocus(cwd, milestoneId) {
-  let active = [];
-  try {
-    active = runs.listActive(cwd) || [];
-  } catch {
-    active = [];
+function resolveFocus(cwd, milestoneId, activeRuns) {
+  let active = Array.isArray(activeRuns) ? activeRuns : [];
+  if (!Array.isArray(activeRuns)) {
+    try {
+      active = runs.listActive(cwd) || [];
+    } catch {
+      active = [];
+    }
   }
 
   if (milestoneId) {
@@ -210,7 +212,12 @@ function resolveFocus(cwd, milestoneId) {
       hasRun = false;
     }
     if (!dirExists && !hasRun) {
-      return { focused: null, note: null, error: `milestone não encontrado: ${milestoneId}` };
+      return {
+        focused: null,
+        note: null,
+        error: `milestone não encontrado: ${milestoneId}`,
+        not_found: { code: 'not_found', id: milestoneId },
+      };
     }
     return { focused: milestoneId, note: null, error: null };
   }
@@ -326,7 +333,7 @@ function collect(cwd, opts) {
     };
   });
 
-  const focus = resolveFocus(cwd, opts.milestoneId);
+  const focus = resolveFocus(cwd, opts.milestoneId, activeRuns);
   if (focus.error) warnings.push(focus.error);
 
   let milestoneModel = null;
@@ -421,6 +428,7 @@ function collect(cwd, opts) {
     milestone: milestoneModel,
     autonomous_tasks: autonomousTasks,
     warnings,
+    not_found: focus.not_found || null,
   };
 }
 
@@ -562,7 +570,13 @@ function cliMain() {
     return;
   }
 
-  const cwd = args.cwd || process.cwd();
+  if (Object.prototype.hasOwnProperty.call(args, 'cwd') && typeof args.cwd !== 'string') {
+    process.stderr.write('Argumento inválido: --cwd requer um valor de caminho (ex.: --cwd /path/to/project).\n');
+    process.exit(2);
+    return;
+  }
+
+  const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : process.cwd();
 
   let hasGsd = false;
   try {
@@ -587,8 +601,8 @@ function cliMain() {
 
   try {
     const model = collect(cwd, { milestoneId });
-    if (milestoneId && model.warnings && model.warnings.some((w) => w.includes('não encontrado') && w.includes(milestoneId))) {
-      process.stderr.write(`Milestone não encontrado: ${milestoneId}\n`);
+    if (model.not_found && model.not_found.code === 'not_found') {
+      process.stderr.write(`Milestone não encontrado: ${model.not_found.id}\n`);
       process.exit(2);
       return;
     }
