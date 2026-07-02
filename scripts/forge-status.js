@@ -571,8 +571,9 @@ function renderTokensBlock(agg) {
 // consistency across project CLIs, extended here to also capture the first
 // non-flag token as the positional <M-id>.
 // Flags that consume the next token as their value. Everything else is boolean.
-// Reserve --tokens and --watch here (S03) so they don't accidentally swallow
-// a positional M-id when added later.
+// Reserve --tokens here so it doesn't accidentally swallow a positional M-id.
+// --watch uses the inline '=' form (--watch=<seconds>) instead of VALUE_FLAGS —
+// see the '=' split below, checked BEFORE the VALUE_FLAGS/boolean branch.
 const VALUE_FLAGS = new Set(['--cwd']);
 
 function parseArgs(argv) {
@@ -581,6 +582,13 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith('--')) {
+      const eqIdx = a.indexOf('=');
+      if (eqIdx !== -1) {
+        const key = a.slice(2, eqIdx);
+        const val = a.slice(eqIdx + 1);
+        args[key] = val;
+        continue;
+      }
       if (VALUE_FLAGS.has(a)) {
         const next = argv[i + 1];
         if (next && !next.startsWith('--')) { args[a.slice(2)] = next; i++; }
@@ -610,11 +618,85 @@ Argumentos:
   --help             mostra esta ajuda e sai
   --json             emite o modelo de status como JSON (best-effort v1) e sai
   --tokens           anexa um bloco de uso de tokens agregado de events.jsonl
+  --watch[=<seg>]    re-renderiza a árvore em loop (append, sem limpar a
+                      tela; default 3s; Ctrl+C encerra). Pure-read — seguro
+                      num 2º terminal ao lado de /forge-auto. Ignora --json.
 
 Garantia: forge-status é estritamente somente-leitura — nunca escreve em
 .gsd/**. Flags desconhecidas são toleradas silenciosamente para compatibilidade
-futura (--watch chega em próximo slice).
+futura.
 `;
+
+// ── emitHumanRender ──────────────────────────────────────────────────────────
+// Shared render path for the single-shot and --watch CLI branches: writes the
+// human tree render, then (if args.tokens) the aggregated token block. Never
+// touches fs directly beyond what renderTree/aggregate already do.
+function emitHumanRender(model, cwd, args) {
+  process.stdout.write(renderTree(model));
+
+  if (args.tokens) {
+    const focusedId = (model.runs && model.runs.focused) || (model.milestone && model.milestone.id) || null;
+    try {
+      if (focusedId) {
+        const agg = tokens.aggregate(cwd, { milestoneId: focusedId });
+        const block = renderTokensBlock(agg);
+        process.stdout.write('\n' + (block || 'Sem dados de telemetria ainda.\n'));
+      } else {
+        process.stdout.write('\nSem dados de telemetria ainda.\n');
+      }
+    } catch {
+      process.stdout.write('\nSem dados de telemetria ainda.\n');
+    }
+  }
+}
+
+// ── runWatch ─────────────────────────────────────────────────────────────────
+// Append/diff-mode refresh loop (LOCKED — see S03-PLAN.md § Design decision):
+// NEVER clears the screen. Each frame re-runs collect()+renderTree() (via
+// emitHumanRender) and appends the render to stdout, preserving scrollback.
+// Pure-read absolute: zero writes to .gsd/**, no lock acquired.
+function runWatch(cwd, args) {
+  const s = args.watch === true ? 3 : parseFloat(args.watch);
+  const intervalMs = (Number.isFinite(s) && s > 0 ? s : 3) * 1000;
+
+  const max = parseInt(process.env.FORGE_STATUS_WATCH_MAX, 10);
+
+  let count = 0;
+  let timer = null;
+  let stopped = false;
+
+  function divider(n) {
+    return `\n─── refresh #${n + 1} @ ${new Date().toISOString()} ───\n`;
+  }
+
+  function frame() {
+    if (stopped) return;
+    try {
+      const model = collect(cwd, { milestoneId: args._positional || null });
+      process.stdout.write(divider(count));
+      emitHumanRender(model, cwd, args);
+    } catch (e) {
+      process.stdout.write('\n⚠ refresh falhou (torn read?): ' + (e && e.message ? e.message : e) + '\n');
+    }
+    count++;
+    if (Number.isInteger(max) && max > 0 && count >= max) {
+      stopped = true;
+      if (timer) clearInterval(timer);
+      process.exit(0);
+      return;
+    }
+  }
+
+  frame();
+  timer = setInterval(frame, intervalMs);
+
+  process.on('SIGINT', () => {
+    stopped = true;
+    if (timer) clearInterval(timer);
+    process.stdout.write('\n');
+    process.exit(0);
+  });
+}
 
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
@@ -654,6 +736,12 @@ function cliMain() {
     }
   }
 
+  if (args.watch) {
+    // --watch ignores --json (human tree render only, per-frame append loop).
+    runWatch(cwd, args);
+    return;
+  }
+
   try {
     const model = collect(cwd, { milestoneId });
     if (args.json) {
@@ -670,22 +758,7 @@ function cliMain() {
       process.exit(2);
       return;
     }
-    process.stdout.write(renderTree(model));
-
-    if (args.tokens) {
-      const focusedId = (model.runs && model.runs.focused) || (model.milestone && model.milestone.id) || null;
-      try {
-        if (focusedId) {
-          const agg = tokens.aggregate(cwd, { milestoneId: focusedId });
-          const block = renderTokensBlock(agg);
-          process.stdout.write('\n' + (block || 'Sem dados de telemetria ainda.\n'));
-        } else {
-          process.stdout.write('\nSem dados de telemetria ainda.\n');
-        }
-      } catch {
-        process.stdout.write('\nSem dados de telemetria ainda.\n');
-      }
-    }
+    emitHumanRender(model, cwd, args);
 
     process.exit(0);
   } catch (err) {
@@ -704,4 +777,5 @@ module.exports = {
   collect,
   renderTree,
   renderTokensBlock,
+  runWatch,
 };
