@@ -13,6 +13,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const status = require('./forge-status.js');
+const tokens = require('./forge-tokens.js');
 
 // ── Harness (copied from forge-ids.test.js) ─────────────────────────────────
 let passed = 0;
@@ -188,6 +189,35 @@ function makeFixture(opts) {
   }
 
   return { dir, milestoneId };
+}
+
+// ── Token telemetry fixture helper (S02) ────────────────────────────────────
+// Writes the global .gsd/forge/events.jsonl and/or the per-milestone
+// .gsd/milestones/<id>/<id>-events.jsonl into an EXISTING fixture dir (built
+// via makeFixture above). Kept as a standalone helper (not folded into
+// makeFixture's opts) per T04-PLAN step 2 — makeFixture's signature stays
+// compatible; this just layers telemetry files on top.
+function writeEventsFixture(dir, milestoneId, opts) {
+  opts = opts || {};
+  const forgeDir = path.join(dir, '.gsd', 'forge');
+  fs.mkdirSync(forgeDir, { recursive: true });
+  const msDir = path.join(dir, '.gsd', 'milestones', milestoneId);
+  fs.mkdirSync(msDir, { recursive: true });
+
+  if (opts.globalLines) {
+    fs.writeFileSync(
+      path.join(forgeDir, 'events.jsonl'),
+      opts.globalLines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n',
+      'utf8'
+    );
+  }
+  if (opts.perMsLines) {
+    fs.writeFileSync(
+      path.join(msDir, `${milestoneId}-events.jsonl`),
+      opts.perMsLines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n',
+      'utf8'
+    );
+  }
 }
 
 // ── Recursive snapshot for pure-read proof ──────────────────────────────────
@@ -555,6 +585,218 @@ test('CLI regression: milestone-with-missing-STATE via positional id does NOT ex
   const res = runCli([milestoneId, '--cwd', dir]);
   assert(res.status === 0, `expected exit 0 (degraded render, not not-found), got ${res.status}\nstderr: ${res.stderr}`);
   assert(res.stdout.includes(milestoneId), 'stdout mentions milestone id');
+});
+
+// ── 10. aggregate() unit tests (S02) ─────────────────────────────────────────
+console.log('10. aggregate() unit tests');
+
+test('aggregate() joins (ts,unit) and sums input/output tokens correctly', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-'));
+  tmpDirs.push(dir);
+  const milestoneId = 'M-20260101120000-alpha';
+  const ts1 = '2026-07-02T19:00:00Z';
+  const ts2 = '2026-07-02T19:01:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [
+      { ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' },
+      { ts: ts2, unit: 'plan-slice/S01', milestone: milestoneId, agent: 'forge-planner', status: 'done' },
+    ],
+    globalLines: [
+      { ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 },
+      { ts: ts2, event: 'dispatch', unit: 'plan-slice/S01', input_tokens: 200, output_tokens: 80 },
+    ],
+  });
+  const agg = tokens.aggregate(dir, { milestoneId });
+  assertEq(agg.dispatch_count, 2, 'dispatch_count');
+  assertEq(agg.total_input, 300, 'total_input');
+  assertEq(agg.total_output, 130, 'total_output');
+  assertEq(agg.source, 'per-milestone', 'source');
+  assert(agg.by_phase['execute-task'] && agg.by_phase['execute-task'].count === 1, 'by_phase execute-task count');
+  assert(agg.by_phase['plan-slice'] && agg.by_phase['plan-slice'].count === 1, 'by_phase plan-slice count');
+});
+
+test('aggregate() all-zero-tokens case: has_telemetry true, has_token_data false', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-zero-'));
+  tmpDirs.push(dir);
+  const milestoneId = 'M-20260101120000-alpha';
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
+    globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 0, output_tokens: 0 }],
+  });
+  const agg = tokens.aggregate(dir, { milestoneId });
+  assertEq(agg.has_telemetry, true, 'has_telemetry');
+  assertEq(agg.has_token_data, false, 'has_token_data');
+  assert(agg.dispatch_count > 0, 'dispatch_count > 0');
+});
+
+test('aggregate() falls back to global source when per-milestone file is missing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-fallback-'));
+  tmpDirs.push(dir);
+  const milestoneId = 'M-20260101120000-alpha';
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 10, output_tokens: 5 }],
+  });
+  const agg = tokens.aggregate(dir, { milestoneId });
+  assertEq(agg.source, 'global', 'source fallback');
+  assert(agg.dispatch_count > 0, 'dispatch_count > 0');
+});
+
+test('aggregate() with no files at all -> has_telemetry false, source none', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-none-'));
+  tmpDirs.push(dir);
+  const agg = tokens.aggregate(dir, { milestoneId: 'M-nonexistent-000000-x' });
+  assertEq(agg.has_telemetry, false, 'has_telemetry');
+  assertEq(agg.source, 'none', 'source none');
+  assertEq(agg.dispatch_count, 0, 'dispatch_count 0');
+});
+
+test('aggregate() tolerates torn/malformed JSONL lines without throwing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-torn-'));
+  tmpDirs.push(dir);
+  const milestoneId = 'M-20260101120000-alpha';
+  const forgeDir = path.join(dir, '.gsd', 'forge');
+  const msDir = path.join(dir, '.gsd', 'milestones', milestoneId);
+  fs.mkdirSync(forgeDir, { recursive: true });
+  fs.mkdirSync(msDir, { recursive: true });
+  const ts1 = '2026-07-02T19:00:00Z';
+  fs.writeFileSync(
+    path.join(forgeDir, 'events.jsonl'),
+    JSON.stringify({ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 40, output_tokens: 20 }) +
+      '\n{"ts":"broken-line-trunc\n',
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(msDir, `${milestoneId}-events.jsonl`),
+    JSON.stringify({ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, status: 'done' }) +
+      '\n{"unit":"garbage\n',
+    'utf8'
+  );
+  let agg;
+  let threw = false;
+  try {
+    agg = tokens.aggregate(dir, { milestoneId });
+  } catch {
+    threw = true;
+  }
+  assert(!threw, 'aggregate() must not throw on torn JSONL');
+  assert(agg.dispatch_count >= 1, 'valid line still counted');
+  assertEq(agg.total_input, 40, 'torn line ignored, valid line summed');
+});
+
+// ── 11. --json CLI (S02) ──────────────────────────────────────────────────────
+console.log('11. --json CLI');
+
+test('--json produces parseable JSON with collect() keys, exit 0', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
+  let parsed;
+  let threw = false;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch (e) {
+    threw = true;
+  }
+  assert(!threw, 'stdout must be parseable JSON');
+  assert(Object.prototype.hasOwnProperty.call(parsed, 'cwd'), 'has cwd');
+  assert(Object.prototype.hasOwnProperty.call(parsed, 'runs'), 'has runs');
+  assert(Object.prototype.hasOwnProperty.call(parsed, 'milestone'), 'has milestone');
+  assert(Object.prototype.hasOwnProperty.call(parsed, 'autonomous_tasks'), 'has autonomous_tasks');
+  assert(Object.prototype.hasOwnProperty.call(parsed, 'warnings'), 'has warnings');
+});
+
+test('--json <valid-milestone-id> focuses that id in output', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--json', milestoneId, '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
+  const parsed = JSON.parse(res.stdout);
+  assertEq(parsed.milestone.id, milestoneId, 'focused id');
+});
+
+test('--json <invalid-id> exits 2 (parseArgs boolean-flag regression guard)', () => {
+  const { dir } = makeFixture({ milestone: false, runs: [], legacyState: false, autonomousTasks: false });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--json', 'not-a-valid-id', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 2, `expected 2 (positional was NOT swallowed by --json), got ${res.status}\nstderr: ${res.stderr}`);
+});
+
+test('--json --cwd <no-.gsd> exits 1', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-nogsd2-'));
+  tmpDirs.push(dir);
+  const res = spawnSync(process.execPath, [CLI_PATH, '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 1, `expected 1, got ${res.status}\nstderr: ${res.stderr}`);
+});
+
+// ── 12. --tokens CLI (S02) ────────────────────────────────────────────────────
+console.log('12. --tokens CLI');
+
+test('--tokens output contains token-usage block with by-phase dispatch counts', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
+    globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 }],
+  });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.stdout.includes('### Token usage'), 'block header present');
+  assert(res.stdout.includes('execute-task'), 'phase name present');
+  assert(res.stdout.includes('100'), 'input total present');
+  assert(res.stdout.includes('50'), 'output total present');
+});
+
+test('--tokens all-zero-tokens fixture shows the "sem dados de token" note', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
+    globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 0, output_tokens: 0 }],
+  });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(res.stdout.includes('### Token usage'), 'block header present');
+  assert(res.stdout.includes('sem dados de token'), 'all-zero note present');
+});
+
+// ── 13. Combined flags (S02) ─────────────────────────────────────────────────
+console.log('13. Combined flags');
+
+test('--json --tokens together still emits pure JSON (no "### Token usage" text)', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
+    globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 }],
+  });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--json', '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
+  assert(!res.stdout.includes('### Token usage'), 'no token-usage text mixed into JSON stdout');
+  let threw = false;
+  try {
+    JSON.parse(res.stdout);
+  } catch {
+    threw = true;
+  }
+  assert(!threw, 'stdout must still be pure parseable JSON when --tokens is also passed');
+});
+
+// ── 14. Pure-read proof for --tokens (S02) ────────────────────────────────────
+console.log('14. Pure-read proof (--tokens)');
+
+test('--tokens run leaves .gsd/ byte-for-byte unchanged, creates no .gsd/.locks/', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
+    globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 }],
+  });
+  const before = snapshot(dir);
+  const res = spawnSync(process.execPath, [CLI_PATH, '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
+  const after = snapshot(dir);
+  assertEq(after, before, 'snapshot must be identical before/after --tokens run');
+  assert(!fs.existsSync(path.join(dir, '.gsd', '.locks')), 'no .gsd/.locks/ created');
 });
 
 // ── Cleanup ────────────────────────────────────────────────────────────────────
