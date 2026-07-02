@@ -1441,6 +1441,51 @@ function smokePlanGateDegradation() {
     '(d) plan_gate.ask_in_auto defaults to defer', 'ask_in_auto: defer missing');
 }
 
+// ── Section 20: forge-status CLI packaging ──────────────────────────────────
+function smokeStatusPackaging() {
+  process.stdout.write('\n▸ Section 20: forge-status CLI packaging\n');
+  const REPO = path.dirname(SCRIPTS);
+  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+
+  // (a) engine pure-read: no real write-API calls, no forge-lock require
+  const eng = rd('scripts/forge-status.js');
+  assert(eng.length > 0, '(a) scripts/forge-status.js lê conteúdo não-vazio', 'arquivo ausente ou vazio');
+  const code = eng.split('\n').filter((l) => !l.trimStart().startsWith('//')).join('\n');
+  assert(!/fs\.writeFileSync\(|fs\.appendFileSync\(|fs\.mkdirSync\(|fs\.unlinkSync\(|fs\.renameSync\(/.test(code),
+    '(a) engine é pure-read (sem write-API em código)', 'chamada de write-API encontrada fora de comentários');
+  assert(!/require\(['"]\.\/forge-lock\.js['"]\)/.test(code),
+    '(a) engine não requer forge-lock', 'require de forge-lock.js encontrado');
+
+  // (b) --json parseável
+  const dir = mkTmp('status-json');
+  fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true }); // fixture: valid (idle) GSD project
+  const r = spawnSync('node', [path.join(SCRIPTS, 'forge-status.js'), '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(r.status === 0, '(b) forge-status.js --json sai 0', `exit=${r.status} stderr=${(r.stderr || '').slice(0, 200)}`);
+  let parsed = null;
+  try { parsed = JSON.parse(r.stdout); } catch {}
+  assert(parsed !== null, '(b) --json stdout é JSON válido', `stdout não é JSON parseável: ${(r.stdout || '').slice(0, 200)}`);
+  cleanup(dir);
+
+  // (c) bin wrappers presentes
+  assert(fs.existsSync(path.join(REPO, 'bin', 'forge-status')), '(c) bin/forge-status existe', 'arquivo ausente');
+  assert(fs.existsSync(path.join(REPO, 'bin', 'forge-status.cmd')), '(c) bin/forge-status.cmd existe', 'arquivo ausente');
+
+  // (d) install.ps1 Join-Path + no-\f
+  const ps1 = rd('install.ps1');
+  assert(/Join-Path[^\n]*forge-status\.cmd/.test(ps1),
+    '(d) install.ps1 copia forge-status.cmd via Join-Path', 'bloco Join-Path ... forge-status.cmd não encontrado');
+  const ps1buf = fs.readFileSync(path.join(REPO, 'install.ps1'));
+  assert(!ps1buf.includes(0x0C), '(d) install.ps1 sem byte 0x0C (literal \\f)', 'byte 0x0C encontrado em install.ps1');
+
+  // (e) SKILL thin shim
+  const skill = rd('skills/forge-status/SKILL.md');
+  assert(!/phaseOrder|byPhase|### Slices/.test(skill),
+    '(e) SKILL sem template de agregação (thin shim)', 'template de agregação legado ainda presente');
+  assert(/forge-status\.js/.test(skill), '(e) SKILL referencia o engine', 'referência a forge-status.js ausente');
+  assert(/verbatim|cru|sem (interpretar|resumir|reformatar)|não .*(resumir|interpretar|reformatar)/i.test(skill),
+    '(e) SKILL instrui pass-through cru', 'instrução de pass-through cru não encontrada');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1467,6 +1512,7 @@ function main() {
     smokeEffort();
     smokeUsageIndicator();
     smokePlanGateDegradation();
+    smokeStatusPackaging();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
