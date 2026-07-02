@@ -33,6 +33,9 @@ const ids = require('./forge-ids.js');
 // updateFields/pushRecentUnit.
 const runs = require('./forge-runs.js');
 const forgeState = require('./forge-state.js');
+// Read-only reuse of forge-tokens.aggregate() (T01) — CLI layer only, never
+// called from renderTree/collect (pure-read + purity invariants).
+const tokens = require('./forge-tokens.js');
 
 // ── Staleness helpers (COPIED from forge-dashboard.js ~L28-69 — do NOT require
 // forge-dashboard, its call graph is the write path) ────────────────────────
@@ -521,6 +524,37 @@ function renderTree(model) {
   return lines.join('\n') + '\n';
 }
 
+// ── renderTokensBlock ────────────────────────────────────────────────────────
+// Pure string builder over the model produced by forge-tokens.aggregate() (T01).
+// No fs access here — the aggregate() read happens in cliMain only. Mirrors
+// skills/forge-status/SKILL.md § "Token usage" legacy block format.
+function fmtInt(n) {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+function renderTokensBlock(agg) {
+  if (!agg || agg.has_telemetry === false) {
+    return '';
+  }
+
+  const lines = [];
+  lines.push(`### Token usage (${agg.milestone || '—'})`);
+  lines.push(`- Total input:  ${fmtInt(agg.total_input)} tokens`);
+  lines.push(`- Total output: ${fmtInt(agg.total_output)} tokens`);
+
+  const phases = Object.keys(agg.by_phase || {});
+  const phaseSummary = phases
+    .map((p) => `${p} ${agg.by_phase[p].count}`)
+    .join(' · ');
+  lines.push(`- Dispatches:   ${agg.dispatch_count} (por fase: ${phaseSummary || '—'})`);
+
+  if (agg.has_token_data === false) {
+    lines.push('(sem dados de token registrados)');
+  }
+
+  return lines.join('\n') + '\n';
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────────────
 // parseArgs convention copied from scripts/forge-runs.js (~L238) for
 // consistency across project CLIs, extended here to also capture the first
@@ -564,10 +598,11 @@ Argumentos:
                       o .gsd/ realmente vive.
   --help             mostra esta ajuda e sai
   --json             emite o modelo de status como JSON (best-effort v1) e sai
+  --tokens           anexa um bloco de uso de tokens agregado de events.jsonl
 
 Garantia: forge-status é estritamente somente-leitura — nunca escreve em
 .gsd/**. Flags desconhecidas são toleradas silenciosamente para compatibilidade
-futura (--tokens e --watch chegam em próximos slices).
+futura (--watch chega em próximo slice).
 `;
 
 function cliMain() {
@@ -625,6 +660,22 @@ function cliMain() {
       return;
     }
     process.stdout.write(renderTree(model));
+
+    if (args.tokens) {
+      const focusedId = (model.runs && model.runs.focused) || (model.milestone && model.milestone.id) || null;
+      try {
+        if (focusedId) {
+          const agg = tokens.aggregate(cwd, { milestoneId: focusedId });
+          const block = renderTokensBlock(agg);
+          process.stdout.write('\n' + (block || 'Sem dados de telemetria ainda.\n'));
+        } else {
+          process.stdout.write('\nSem dados de telemetria ainda.\n');
+        }
+      } catch {
+        process.stdout.write('\nSem dados de telemetria ainda.\n');
+      }
+    }
+
     process.exit(0);
   } catch (err) {
     process.stderr.write(`forge-status error: ${err && err.message ? err.message : err}\n`);
@@ -641,4 +692,5 @@ module.exports = {
   resolveFocus,
   collect,
   renderTree,
+  renderTokensBlock,
 };
