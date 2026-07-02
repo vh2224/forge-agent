@@ -533,7 +533,18 @@ function fmtInt(n) {
 }
 
 function renderTokensBlock(agg) {
-  if (!agg || agg.has_telemetry === false) {
+  if (!agg) {
+    return '';
+  }
+
+  // R2 fix: when aggregate() reports a non-attributable/fallback source
+  // (per-milestone membership missing/empty), never print cross-milestone
+  // numbers under this milestone's label — render an honest note instead.
+  if (agg.source === 'unattributable') {
+    return `### Token usage (${agg.milestone || '—'})\n(sem telemetria atribuível a este milestone)\n`;
+  }
+
+  if (agg.has_telemetry === false) {
     return '';
   }
 

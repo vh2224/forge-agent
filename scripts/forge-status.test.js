@@ -630,7 +630,7 @@ test('aggregate() all-zero-tokens case: has_telemetry true, has_token_data false
   assert(agg.dispatch_count > 0, 'dispatch_count > 0');
 });
 
-test('aggregate() falls back to global source when per-milestone file is missing', () => {
+test('aggregate() does NOT sum global log when per-milestone file is missing (R2 regression)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-fallback-'));
   tmpDirs.push(dir);
   const milestoneId = 'M-20260101120000-alpha';
@@ -639,8 +639,47 @@ test('aggregate() falls back to global source when per-milestone file is missing
     globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 10, output_tokens: 5 }],
   });
   const agg = tokens.aggregate(dir, { milestoneId });
-  assertEq(agg.source, 'global', 'source fallback');
-  assert(agg.dispatch_count > 0, 'dispatch_count > 0');
+  assertEq(agg.source, 'unattributable', 'source unattributable, never global sum without membership');
+  assertEq(agg.has_telemetry, false, 'has_telemetry false when unattributable');
+  assertEq(agg.dispatch_count, 0, 'dispatch_count 0 when unattributable');
+});
+
+test('aggregate() ignores OTHER units in global log when per-milestone file is missing (R2 regression)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-otherunits-'));
+  tmpDirs.push(dir);
+  const milestoneId = 'M-20260101120000-alpha';
+  const ts1 = '2026-07-02T19:00:00Z';
+  const forgeDir = path.join(dir, '.gsd', 'forge');
+  fs.mkdirSync(forgeDir, { recursive: true });
+  // No per-milestone events file at all — global has lines for a DIFFERENT milestone's units.
+  fs.writeFileSync(
+    path.join(forgeDir, 'events.jsonl'),
+    JSON.stringify({ ts: ts1, event: 'dispatch', unit: 'execute-task/T99', input_tokens: 999, output_tokens: 999 }) + '\n',
+    'utf8'
+  );
+  const agg = tokens.aggregate(dir, { milestoneId });
+  assertEq(agg.source, 'unattributable', 'source unattributable');
+  assertEq(agg.total_input, 0, 'other milestone totals not attributed');
+  assertEq(agg.total_output, 0, 'other milestone totals not attributed');
+  assertEq(agg.dispatch_count, 0, 'other milestone dispatches not counted');
+});
+
+test('aggregate() dedups identical (ts,unit) dispatch lines in membership (R3 regression)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-tok-dedup-'));
+  tmpDirs.push(dir);
+  const milestoneId = 'M-20260101120000-alpha';
+  const ts1 = '2026-07-02T19:00:00Z';
+  writeEventsFixture(dir, milestoneId, {
+    perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
+    globalLines: [
+      { ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 10, output_tokens: 5 },
+      { ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 10, output_tokens: 5 },
+    ],
+  });
+  const agg = tokens.aggregate(dir, { milestoneId });
+  assertEq(agg.dispatch_count, 1, 'duplicate (ts,unit) counted once');
+  assertEq(agg.total_input, 10, 'duplicate input not double-counted');
+  assertEq(agg.total_output, 5, 'duplicate output not double-counted');
 });
 
 test('aggregate() with no files at all -> has_telemetry false, source none', () => {

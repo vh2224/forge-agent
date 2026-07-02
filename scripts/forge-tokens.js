@@ -181,7 +181,7 @@ function readJsonlLines(absPath) {
  *   by_phase: Object<string,{count:number,input:number,output:number}>,
  *   has_telemetry: boolean,
  *   has_token_data: boolean,
- *   source: 'per-milestone'|'global'|'none'
+ *   source: 'per-milestone'|'global'|'unattributable'|'none'
  * }}
  */
 function aggregate(cwd, opts) {
@@ -219,11 +219,27 @@ function aggregate(cwd, opts) {
 
       if (membership.size > 0) {
         source = 'per-milestone';
-        selected = dispatchLines.filter((l) => membership.has(`${l.ts}|${l.unit}`));
-      } else if (dispatchLines.length > 0) {
-        // Fallback: per-milestone file missing/empty — best-effort v1 aggregates the whole global file.
-        source = 'global';
-        selected = dispatchLines;
+        // R3 (defensive): dedup on (ts,unit) so a literal duplicate dispatch
+        // line (same ts AND same unit, e.g. from a duplicate-write bug) is
+        // counted at most once. Full fix (a unique dispatch id plumbed
+        // through the telemetry pipeline) is deferred to a follow-up milestone.
+        const seen = new Set();
+        selected = [];
+        for (const l of dispatchLines) {
+          const key = `${l.ts}|${l.unit}`;
+          if (!membership.has(key)) continue;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          selected.push(l);
+        }
+      } else {
+        // R2 fix: attribution REQUIRES per-milestone membership. When the
+        // per-milestone events file is missing/empty/corrupt, we must NOT
+        // sum the entire global log under this milestoneId — that would
+        // silently attribute other milestones' totals to this one.
+        // Distinguish: global has dispatches (unattributable) vs. truly empty (none).
+        source = dispatchLines.length > 0 ? 'unattributable' : 'none';
+        selected = [];
       }
     } else if (dispatchLines.length > 0) {
       source = 'global';
