@@ -8,7 +8,7 @@
 //   parseFragment(text)                 → object  // parse markdown with YAML frontmatter
 //   writeFragment(cwd, fragment, opts)  → { path, created }
 //   readFragment(cwd, unitId)           → object | null
-//   listFragments(cwd)                  → Array<{ unitId, path }>
+//   listFragments(cwd)                  → Array<{ unitId, path, content?, bucket? }>
 //
 // CLI:
 //   node forge-decisions.js --list [--cwd <dir>]
@@ -428,7 +428,7 @@ function listFragments(cwd) {
   //    module-eval time, but lazy-require here is consistent + load-order-proof
   //    regardless).
   const { listBucketUnits } = require('./forge-maintenance');
-  const { units, warnings } = listBucketUnits(dir);
+  const { units, warnings } = listBucketUnits(dir, 'decisions');
   for (const w of warnings) {
     process.stderr.write(`[forge-decisions] warn: ${w}\n`);
   }
@@ -675,8 +675,8 @@ function cliMain(argv) {
     let exists = false;
     let existsError = null;
     try {
-      const fpath = fragmentPath(cwd, id);
-      exists = fs.existsSync(fpath);
+      fragmentPath(cwd, id); // throws if invalid id — validity still checked
+      exists = readFragment(cwd, id) !== null; // bucket-aware existence check
     } catch (e) {
       existsError = e.message;
     }

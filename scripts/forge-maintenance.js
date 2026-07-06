@@ -88,9 +88,11 @@
 //   sortKey(id, writtenAt)           → string
 //   parseBucket(content)             → { type, units: [{ id, title, content }] }
 //   bucketHash(content)              → string (sha256 hex)
-//   listBucketUnits(dir)             → { units, warnings } — S02 addition, read-side
-//                                        helper; not part of the frozen v1 merge
-//                                        contract above.
+//   listBucketUnits(dir, expectedType?) → { units, warnings } — S02 addition,
+//                                        read-side helper; not part of the frozen
+//                                        v1 merge contract above. expectedType
+//                                        (optional) filters out (with a warning)
+//                                        buckets whose header type mismatches.
 //
 // CLI:
 //   node forge-maintenance.js --merge --out <path> [--type <t>] [--dry-run] [--cwd <dir>] <frag...>
@@ -304,7 +306,12 @@ function mergeBucket(fragmentPaths, opts) {
 // Lenient per-bucket: an unparseable bucket is skipped with a warning — safe
 // because a fully-consolidated store with a corrupt bucket degrades to
 // fragments:0, which the existing 'unmigrated' write guard already blocks.
-function listBucketUnits(dir) {
+// expectedType (optional, S02 review-fix): when provided, a bucket whose
+// header type does not match is WARNED about and its units are SKIPPED
+// entirely (not folded in) — guards against a ledger store accidentally
+// reading a decisions bucket (or vice versa) if paths ever cross. Omitted →
+// back-compat, no type check performed.
+function listBucketUnits(dir, expectedType) {
   const units = []; const warnings = [];
   if (!fs.existsSync(dir)) return { units, warnings };
   const buckets = fs.readdirSync(dir)
@@ -314,6 +321,10 @@ function listBucketUnits(dir) {
     const bucketPath = path.join(dir, b);
     try {
       const parsed = parseBucket(normalizeText(fs.readFileSync(bucketPath, 'utf8')));
+      if (expectedType && parsed.type !== expectedType) {
+        warnings.push(`skipping bucket ${b}: type mismatch (expected "${expectedType}", got "${parsed.type}")`);
+        continue;
+      }
       for (const u of parsed.units) units.push({ id: u.id, title: u.title, content: u.content, bucketPath });
     } catch (e) { warnings.push(`skipping bucket ${b}: ${e.message}`); }
   }

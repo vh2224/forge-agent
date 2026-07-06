@@ -8,7 +8,7 @@
 //   parseFragment(text)                 → object  // parse markdown with YAML frontmatter
 //   writeFragment(cwd, entry, opts)     → { path, created }
 //   readFragment(cwd, id)               → object | null
-//   listFragments(cwd)                  → Array<{ id, path }>
+//   listFragments(cwd)                  → Array<{ id, path, content?, bucket? }>
 //
 // CLI:
 //   node forge-ledger.js --list [--cwd <dir>]
@@ -282,7 +282,7 @@ function listFragments(cwd) {
   //    body is load-order-proof (both modules are fully initialized by the
   //    time any function actually runs).
   const { listBucketUnits } = require('./forge-maintenance');
-  const { units, warnings } = listBucketUnits(dir);
+  const { units, warnings } = listBucketUnits(dir, 'ledger');
   for (const w of warnings) {
     process.stderr.write(`[forge-ledger] warn: ${w}\n`);
   }
@@ -380,8 +380,8 @@ function cliMain(argv) {
     let exists = false;
     let existsError = null;
     try {
-      const fpath = fragmentPath(cwd, id);
-      exists = fs.existsSync(fpath);
+      fragmentPath(cwd, id); // throws if invalid id — validity still checked
+      exists = readFragment(cwd, id) !== null; // bucket-aware existence check
     } catch (e) {
       existsError = e.message;
     }
