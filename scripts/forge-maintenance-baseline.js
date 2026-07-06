@@ -61,6 +61,18 @@ const DECISIONS_THRESHOLD = 100;
 
 const NOT_ACTIVE_PHASES = new Set(['idle', 'complete', 'done', 'complete-milestone']);
 
+// ── axes selector (S05, additive) ────────────────────────────────────────────
+// AXES names the three consolidation axes. `_axisEnabled` is a pure gate:
+// omitting `opts.axes` enables every axis (byte-identical to pre-S05
+// behavior); passing an explicit array restricts gathering/consolidation to
+// only the named axes. This is a SELECTOR over what to gather — it changes
+// no mechanics (normalization, .bak protection, verify/abort-restore).
+const AXES = ['milestones', 'tasks', 'decisions'];
+
+function _axisEnabled(opts, axis) {
+  return !opts || !opts.axes || opts.axes.includes(axis);
+}
+
 // ── deriveQuarter ─────────────────────────────────────────────────────────────
 // PURE. Two supported input shapes:
 //   1. `idOrWrittenAt` is a timestamp-format id (M-YYYYMMDDHHMMSS[-slug] or the
@@ -297,21 +309,27 @@ function _gatherEligibility(cwd, opts) {
   const taskIds = [];
   const taskPaths = [];
 
+  const milestonesOn = _axisEnabled(opts, 'milestones');
+  const tasksOn = _axisEnabled(opts, 'tasks');
+  const decisionsOn = _axisEnabled(opts, 'decisions');
+
   const ledgerEntries = ledger.listFragments(cwd).filter(e => !e.bucket);
   for (const entry of ledgerEntries) {
     if (!isFinalized(cwd, entry.id, opts)) continue;
     const kind = ids.entityKind(entry.id);
     if (kind === 'milestone') {
+      if (!milestonesOn) continue;
       milestoneIds.push(entry.id);
       milestonePaths.push(entry.path);
     } else if (kind === 'task') {
+      if (!tasksOn) continue;
       taskIds.push(entry.id);
       taskPaths.push(entry.path);
     }
   }
 
   const byQuarter = new Map(); // quarter → { ids, paths }
-  const decisionEntries = decisions.listFragments(cwd).filter(e => !e.bucket);
+  const decisionEntries = decisionsOn ? decisions.listFragments(cwd).filter(e => !e.bucket) : [];
   for (const entry of decisionEntries) {
     if (!isFinalized(cwd, entry.unitId, opts)) continue;
     const q = deriveQuarter(entry.unitId, opts.writtenAtFor ? opts.writtenAtFor(entry.unitId) : undefined);
