@@ -154,6 +154,39 @@ Drop when frontmatter has `status: closed`. Keep `status: open` sessions untouch
 
 ## Steps
 
+### 0. Maintenance detection & announce (runs before Inventory — always, both dry-run and --apply)
+
+The sweep policy above (AUTO-MEMORY/CHECKER-MEMORY prune events, milestone/task trim) is independent of the **maintenance gate** (`shared/forge-maintenance.md`) — the deterministic-consolidation handshake that fuses loose finalized units (`.gsd/ledger/`, `.gsd/decisions/`) into LOCKED rollup buckets once an axis (`milestones`/`tasks`/`ledgerDecisions`) crosses its threshold. `/forge-sweep` is the primary interactive surface for that gate (per `shared/forge-maintenance.md`'s consumer table). The operator must know the mode **before any write happens** (R3 of the shared spec), so this step runs first, ahead of the Inventory/preview flow, regardless of args.
+
+1. Resolve `FORGE_SCRIPTS_DIR` the same way the rest of this skill's Bootstrap guard does (local `./scripts` if present, else `~/.claude/scripts`).
+2. Shell-out (read-only, safe in any mode, including dry-run):
+   ```bash
+   node "$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js" --detect --cwd "$WORKING_DIR"
+   ```
+3. Parse the JSON result: `{ mode, triggers, firedAxes, baseline }` (`detectMode` export of `scripts/forge-maintenance-gate.js`).
+4. **`mode == "normal"`** → print:
+   ```
+   ▸ SWEEP NORMAL — nenhum eixo cruzou o gatilho
+   ```
+   and continue straight to Step 1 (Inventory) below — no further maintenance action this run.
+5. **`mode == "maintenance"`** → print:
+   ```
+   ⚠ SWEEP PRECISA DE MAINTENANCE
+     - eixo "<axis>": <count> unidades finalizadas soltas (limiar <threshold>) → <target>
+     ... (one line per entry in firedAxes)
+   ```
+   and, when `baseline.available` is `true`, append an extra line:
+   ```
+     - BASELINE (1ª maintenance) — nenhum bucket rollup existe ainda para nenhum eixo
+   ```
+   Then continue to Step 1 (Inventory) as normal — announcing does not fire the apply handshake by itself. A bare `/forge-sweep` (no args) or a plain `--apply` sweep only **announces** the maintenance mode; it does not consolidate anything unless the operator explicitly opts into the Maintenance apply handshake (Step 3b below).
+6. Emit `maintenance-detected` to `.gsd/forge/events.jsonl` **regardless of which branch fired** — it is the audit record that detection ran, not that it fired:
+   ```bash
+   echo '{"ts":"<ISO8601>","event":"maintenance-detected","mode":"<mode>","fired":[<firedAxes names>],"baseline":<baseline.available>}' \
+     >> .gsd/forge/events.jsonl
+   ```
+   (`<ISO8601>` via `date -u +%Y-%m-%dT%H:%M:%SZ`, per the events.jsonl append convention shared across skills.)
+
 ### 1. Inventory
 
 In parallel:
@@ -241,6 +274,46 @@ This is the terminal state ONLY for (a) an explicit bare `/forge-sweep` preview-
 Print: "Dry-run complete. To apply: /forge-sweep --apply"
 
 In an end-of-cycle wrap-up with the work already validated and no risk flagged, do NOT dead-end here — you should have invoked with `--apply` from the start, so the user gets the preview + the single confirmation popup without re-typing the command.
+
+### 4b. Maintenance apply handshake (opt-in — only when Step 0 announced `mode == "maintenance"`)
+
+This step is **independent** of the prune/trim policy above: maintenance consolidation (fusing loose `.gsd/ledger/`/`.gsd/decisions/` units into LOCKED rollup buckets) and the existing prune/trim sweep are two separate concerns that happen to share the same skill surface. Step 0 always announces; this step only fires when the operator explicitly opts into running maintenance for a run where Step 0 detected `mode == "maintenance"`. A bare `/forge-sweep` or a plain `--apply`/`--force` sweep does **not** auto-enter this step — the operator must opt in (e.g. by asking to run maintenance, or the orchestrator invoking the skill specifically for that purpose). Do NOT duplicate the full spec here — this enumerates the local wiring; the authoritative procedure is `shared/forge-maintenance.md` Steps 2–5, 8.
+
+**Rule (LOCKED, per `shared/forge-maintenance.md` Rule 1): no non-interactive apply.** Even `--force` (which skips the Step 5 prune confirmation below) does **NOT** skip any of the maintenance handshakes in this step. There is no flag, env var, or config value that bypasses the RED warning or either confirmation. Detection (Step 0, `--detect`) is always safe to run non-interactively; apply is not.
+
+1. **RED warning.** Render `renderRedWarning(detectMode(cwd))` and print it verbatim, before any confirmation is requested — do not summarize or truncate it:
+   ```bash
+   node -e "const {detectMode,renderRedWarning}=require('$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js'); console.log(renderRedWarning(detectMode(process.argv[1])))" "$WORKING_DIR"
+   ```
+2. **First confirmation.** One `AskUserQuestion`:
+   - Question: "Prosseguir com a maintenance?"
+   - Options: ["Prosseguir", "Cancelar"]
+   - `Cancelar` → stop. No writes, no further events beyond the `maintenance-detected` already emitted in Step 0.
+3. **Per-axis double-confirm.** For **each** axis in `firedAxes` (independently — never all-or-nothing), a **separate** `AskUserQuestion`:
+   - Question: "Consolidar `<axis>` (`<count>` unidades → `<target>`)?"
+   - Options: ["Confirmar", "Pular"]
+   - Collect the confirmed axes into `confirmedAxes`. Declining one axis excludes only that axis — an operator can confirm `milestones` while skipping `ledgerDecisions` in the same run.
+   - Emit `maintenance-confirmed` per confirmed axis:
+     ```bash
+     echo '{"ts":"<ISO8601>","event":"maintenance-confirmed","axis":"<axis>","count":<count>,"target":"<target>"}' \
+       >> .gsd/forge/events.jsonl
+     ```
+   - If `confirmedAxes` ends up empty (every axis declined) → stop here. No apply cascade, no further events.
+4. **Apply cascade.** In order:
+   1. **VCS precheck (S03).** `precheckHistory(cwd)` from `scripts/forge-maintenance-vcs.js` (read-only). If `already: true` → abort the apply, announce that maintenance already happened upstream, instruct the operator to run `pullScoped(cwd)` to pick it up, then re-run detection from Step 0 — do not re-consolidate.
+   2. **Consolidate.** `runBaseline(cwd, { axes: confirmedAxes })` from `scripts/forge-maintenance-baseline.js` — the single call site for the apply. It owns the full `.bak`/verify/restore safety net; do not re-implement any part of it here.
+   3. **Commit guard (S03).** Immediately before the actual commit — no intervening I/O between this call and the commit — `runCommitGuard(cwd, localBuckets)` (`localBuckets` from `runBaseline`'s result):
+      - `action: 'proceed'` → commit/push normally.
+      - `action: 'discard'` → discard the local buckets, `pullScoped` the remote version, treat the run as already-applied.
+      - `action: 'abort'` → genuine divergence — abort loud, preserve both local and remote state, surface `maintenance-aborted-collision` to the operator (emitted by the VCS module itself).
+   4. **Success** → emit `maintenance-applied`:
+      ```bash
+      echo '{"ts":"<ISO8601>","event":"maintenance-applied","axes":{"milestones":N,"tasks":N,"decisions":N}}' \
+        >> .gsd/forge/events.jsonl
+      ```
+      (counts are per-axis unit counts actually consolidated; 0 for axes not confirmed). Then commit + push if the run's isolation mode does auto-push.
+
+The maintenance consolidation and the existing prune/trim policy (Steps 1–7 below) are independent: this step runs first (or is simply announced and skipped, per Step 0), then the normal prune preview/apply proceeds unaffected by whatever happened here. This does **not** change the DECISIONS no-op note above — that note is about row-level pruning of decisions text, which the sweep still never does; maintenance's `ledgerDecisions` axis is a rollup **consolidation** of already-closed-quarter decision fragments, a different operation owned by `shared/forge-maintenance.md`, not a claim that this sweep now prunes decision rows.
 
 ### 5. If --apply (and not --force) → confirm
 

@@ -669,6 +669,30 @@ Os consumidores (`skills/forge-task/SKILL.md`, `skills/forge-next/SKILL.md`) cop
 - Decisões de arquitetura: `CLAUDE.md § Plan mode interativo` (D1–D7).
 - Artefato do scoring (input para o handshake): `.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md`.
 
+## Maintenance Settings
+
+Controla a postura do **maintenance gate** (`shared/forge-maintenance.md`) na fronteira de unidade do `forge-auto` e do supervisor headless `bin/forge-run`. O gate detecta (via `scripts/forge-maintenance-gate.js --detect`) se unidades finalizadas soltas (`.gsd/ledger/`, `.gsd/decisions/`) cruzaram o limiar de consolidação em algum eixo (`milestones`/`tasks`/`ledgerDecisions`) e, se sim, precisa do handshake RED-warning + double-confirm por eixo — que só roda em contexto interativo (`/forge-sweep` ou `forge-next`). Esta pref decide o que o `forge-auto`/`forge-run` fazem quando detectam esse estado, já que eles nunca aplicam a consolidação inline.
+
+```
+maintenance:
+  in_auto: stop      # stop | defer | off   (default: stop)
+```
+
+### Semântica
+
+- `stop` (padrão, mais seguro): ao detectar `mode == maintenance` na fronteira de unidade, o `forge-auto` renderiza o announce + a RED warning (Steps 1–2 de `shared/forge-maintenance.md`), **para o loop** e delega o handshake de confirmação + apply ao operador — via `/forge-sweep` ou uma sessão interativa de `forge-next`. Esta é a **exceção sancionada à AUTONOMY RULE**: consolidar unidades finalizadas é uma ação destrutiva-ish (apaga fragmentos-fonte, ainda que com `.bak` e verificação) que exige um humano no loop.
+- `defer`: o `forge-auto` adota a mesma postura do `bin/forge-run` headless — marca a maintenance como **deferida** (registrada para uma sessão interativa futura pegar) e **continua** o loop sem bloquear. Nunca trava esperando input humano que não pode responder (mesma postura do handling de 429/quota).
+- `off`: a detecção do Step 1 nem roda na fronteira de auto/headless — o maintenance gate é inteiramente pulado para esse consumidor. A detecção continua normal para `/forge-sweep` e `forge-next` interativos, que não são afetados por esta pref.
+
+### Cross-references
+
+- Spec autoritativa: `shared/forge-maintenance.md` (contrato completo do gate: detect → RED warning → confirm → double-confirm por eixo → apply cascade → eventos).
+- Detecção/render: `scripts/forge-maintenance-gate.js` (`detectMode`, `renderRedWarning`; CLI `--detect`).
+- Apply: `scripts/forge-maintenance-baseline.js` (`runBaseline(cwd, {axes})`) + `scripts/forge-maintenance-vcs.js` (`precheckHistory`/`pullScoped`/`runCommitGuard` — guard de VCS contra colisão).
+- Consumidor interativo (announce + handshake completo): `skills/forge-sweep/SKILL.md`.
+- Consumidores de fronteira de unidade (postura `stop`/`defer`/`off` desta pref): `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`, `bin/forge-run` (headless, sempre `defer`-like independente desta pref — que só rege o `forge-auto`).
+- Schema não é tocado por este gate — versionamento é território do S06.
+
 ## Token Budget Settings
 
 O bloco `token_budget` limita o tamanho das seções **opcionais** injetadas nos prompts dos workers, mantendo o consumo de contexto previsível. O orquestrador multiplica cada valor por 4 para obter o limite em caracteres antes de chamar `truncateAtSectionBoundary` (de `scripts/forge-tokens.js`), que usa a heurística `Math.ceil(chars / 4)` para estimar tokens — sem dependências externas, com precisão de ±5–15% para inglês/markdown.
