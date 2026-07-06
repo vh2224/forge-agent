@@ -1480,6 +1480,36 @@ function smokeFragmentStoreCompat() {
     '(b) forge-decisions.js contains _rollup- (bucket-aware enumeration)', '_rollup- not found');
 }
 
+// ── Section 21: S03 VCS concurrency guard ───────
+function smokeMaintenanceVcs() {
+  process.stdout.write('\n▸ Section 21: S03 VCS concurrency guard\n');
+
+  // (a) spawn the guard suite — it must exit 0 on its own.
+  const suite = path.join(SCRIPTS, 'forge-maintenance-vcs.test.js');
+  const res = spawnSync(process.execPath, [suite], { encoding: 'utf8' });
+  assert(res.status === 0,
+    'forge-maintenance-vcs.test.js exits 0',
+    `status ${res.status}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  // (b) spec-greps — pin the guard invariants in source.
+  const src = fs.readFileSync(path.join(SCRIPTS, 'forge-maintenance-vcs.js'), 'utf8');
+
+  for (const name of ['precheckHistory', 'pullScoped', 'recheckAtCommit', 'resolveCollision', 'runCommitGuard', 'isRollupPath', '__setExecFileSync']) {
+    const re = new RegExp(`module\\.exports[\\s\\S]*${name}`);
+    assert(re.test(src),
+      `(b) forge-maintenance-vcs.js exports ${name}`, `${name} not exported`);
+  }
+
+  assert(/cat-file/.test(src),
+    '(b) forge-maintenance-vcs.js contains cat-file (filter-free blob read)', 'cat-file not found');
+  assert(/maintenance-aborted-collision/.test(src),
+    '(b) forge-maintenance-vcs.js contains maintenance-aborted-collision', 'event name not found');
+  assert(!/localeCompare/.test(src),
+    '(b) forge-maintenance-vcs.js does NOT contain localeCompare (MEM001)', 'forbidden localeCompare found');
+  assert(/dirty-abort/.test(src),
+    '(b) forge-maintenance-vcs.js contains dirty-abort (dirty-refuse path)', 'dirty-abort not found');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1507,6 +1537,7 @@ function main() {
     smokeUsageIndicator();
     smokePlanGateDegradation();
     smokeFragmentStoreCompat();
+    smokeMaintenanceVcs();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
