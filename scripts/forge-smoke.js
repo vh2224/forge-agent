@@ -1510,6 +1510,49 @@ function smokeMaintenanceVcs() {
     '(b) forge-maintenance-vcs.js contains dirty-abort (dirty-refuse path)', 'dirty-abort not found');
 }
 
+// ── Section 22: S04 baseline + finalized triggers ───────
+function smokeMaintenanceBaseline() {
+  process.stdout.write('\n▸ Section 22: S04 baseline + finalized triggers\n');
+
+  // (a) spawn both new suites — each must exit 0 on its own.
+  const writerSuite = path.join(SCRIPTS, 'fragment-store-writer.test.js');
+  const writerRes = spawnSync(process.execPath, [writerSuite], { encoding: 'utf8' });
+  assert(writerRes.status === 0,
+    'fragment-store-writer.test.js exits 0',
+    `status ${writerRes.status}\nstdout:\n${writerRes.stdout}\nstderr:\n${writerRes.stderr}`);
+
+  const baselineSuite = path.join(SCRIPTS, 'forge-maintenance-baseline.test.js');
+  const baselineRes = spawnSync(process.execPath, [baselineSuite], { encoding: 'utf8' });
+  assert(baselineRes.status === 0,
+    'forge-maintenance-baseline.test.js exits 0',
+    `status ${baselineRes.status}\nstdout:\n${baselineRes.stdout}\nstderr:\n${baselineRes.stderr}`);
+
+  // (b) spec-greps — pin the baseline invariants in source.
+  // Strip comment lines first — the module's own header comment documents the
+  // forbidden tokens by name (e.g. "NO Math.random, NO mtime, NO localeCompare"),
+  // which would otherwise false-positive the absence asserts below.
+  const rawSrc = fs.readFileSync(path.join(SCRIPTS, 'forge-maintenance-baseline.js'), 'utf8');
+  const src = rawSrc.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+
+  for (const name of ['isFinalized', 'deriveQuarter', 'currentQuarter', 'isClosedQuarter', 'detectTriggers', 'runBaseline']) {
+    const re = new RegExp(`module\\.exports[\\s\\S]*${name}`);
+    assert(re.test(src),
+      `(b) forge-maintenance-baseline.js exports ${name}`, `${name} not exported`);
+  }
+
+  for (const literal of ['milestones-rollup.md', 'tasks-rollup.md', '_rollup-']) {
+    assert(src.includes(literal),
+      `(b) forge-maintenance-baseline.js contains ${literal}`, `${literal} not found`);
+  }
+
+  assert(!src.includes('localeCompare'),
+    '(b) forge-maintenance-baseline.js does NOT contain localeCompare (MEM001)', 'forbidden localeCompare found');
+  assert(!src.includes('.mtime'),
+    '(b) forge-maintenance-baseline.js does NOT contain .mtime (MEM001/MEM002)', 'forbidden .mtime found');
+  assert(!src.includes('Math.random'),
+    '(b) forge-maintenance-baseline.js does NOT contain Math.random (determinism guard)', 'forbidden Math.random found');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1538,6 +1581,7 @@ function main() {
     smokePlanGateDegradation();
     smokeFragmentStoreCompat();
     smokeMaintenanceVcs();
+    smokeMaintenanceBaseline();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
