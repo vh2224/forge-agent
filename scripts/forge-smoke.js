@@ -1614,6 +1614,72 @@ function smokeMaintenanceGate() {
     '(e) forge-agent-prefs.md contains in_auto:', 'in_auto: not found');
 }
 
+// ── Section 24: S06 rollout anchor (schema bump + opt-in) ───────
+function smokeMaintenanceRollout() {
+  process.stdout.write('\n▸ Section 24: S06 rollout anchor (schema bump + opt-in)\n');
+  const ROOT = path.join(SCRIPTS, '..');
+
+  // (a) spawn both T01/T02 suites — each must exit 0 on its own.
+  const baselineSuite = path.join(SCRIPTS, 'forge-maintenance-baseline.test.js');
+  const baselineRes = spawnSync(process.execPath, [baselineSuite], { encoding: 'utf8' });
+  assert(baselineRes.status === 0,
+    'forge-maintenance-baseline.test.js exits 0',
+    `status ${baselineRes.status}\nstdout:\n${baselineRes.stdout}\nstderr:\n${baselineRes.stderr}`);
+
+  const gateSuite = path.join(SCRIPTS, 'forge-maintenance-gate.test.js');
+  const gateRes = spawnSync(process.execPath, [gateSuite], { encoding: 'utf8' });
+  assert(gateRes.status === 0,
+    'forge-maintenance-gate.test.js exits 0',
+    `status ${gateRes.status}\nstdout:\n${gateRes.stdout}\nstderr:\n${gateRes.stderr}`);
+
+  // (b) spec-greps — strip comment lines first, same anti-false-positive
+  // trick as Section 22/23 (headers document forbidden tokens by name).
+  const rawBaselineSrc = fs.readFileSync(path.join(SCRIPTS, 'forge-maintenance-baseline.js'), 'utf8');
+  const baselineSrc = rawBaselineSrc.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+
+  assert(/BUCKET_SCHEMA/.test(baselineSrc),
+    '(b) forge-maintenance-baseline.js contains BUCKET_SCHEMA', 'BUCKET_SCHEMA not found');
+  assert(/stampBucketSchema/.test(baselineSrc),
+    '(b) forge-maintenance-baseline.js contains stampBucketSchema', 'stampBucketSchema not found');
+
+  const rawGateSrc = fs.readFileSync(path.join(SCRIPTS, 'forge-maintenance-gate.js'), 'utf8');
+  const gateSrc = rawGateSrc.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+
+  assert(/readPref/.test(gateSrc),
+    '(b) forge-maintenance-gate.js contains readPref', 'readPref not found');
+  assert(/enabled/.test(gateSrc),
+    '(b) forge-maintenance-gate.js contains enabled', 'enabled not found');
+
+  // (c) prefs grep — maintenance.enabled opt-in switch.
+  const prefsSrc = fs.readFileSync(path.join(ROOT, 'forge-agent-prefs.md'), 'utf8');
+  assert(/maintenance\.enabled/.test(prefsSrc),
+    '(c) forge-agent-prefs.md contains maintenance.enabled', 'maintenance.enabled not found');
+  assert(/enabled:/.test(prefsSrc),
+    '(c) forge-agent-prefs.md contains enabled:', 'enabled: not found');
+
+  // (d) docs grep — schema bump + maintenance layer documented.
+  const docsSrc = fs.readFileSync(path.join(ROOT, 'docs', 'fragment-store.md'), 'utf8');
+  assert(docsSrc.includes('fragment-store@2.0.0'),
+    '(d) docs/fragment-store.md contains fragment-store@2.0.0', 'fragment-store@2.0.0 not found');
+  assert(docsSrc.includes('maintenance'),
+    '(d) docs/fragment-store.md contains maintenance', 'maintenance not found');
+
+  // (e) re-pin determinism guards on both S06-touched modules.
+  assert(!baselineSrc.includes('localeCompare'),
+    '(e) forge-maintenance-baseline.js does NOT contain localeCompare (MEM001)', 'forbidden localeCompare found');
+  assert(!baselineSrc.includes('.mtime'),
+    '(e) forge-maintenance-baseline.js does NOT contain .mtime (MEM001/MEM002)', 'forbidden .mtime found');
+  assert(!baselineSrc.includes('Math.random'),
+    '(e) forge-maintenance-baseline.js does NOT contain Math.random (determinism guard)', 'forbidden Math.random found');
+
+  assert(!gateSrc.includes('localeCompare'),
+    '(e) forge-maintenance-gate.js does NOT contain localeCompare (MEM001)', 'forbidden localeCompare found');
+  assert(!gateSrc.includes('.mtime'),
+    '(e) forge-maintenance-gate.js does NOT contain .mtime (MEM001/MEM002)', 'forbidden .mtime found');
+  assert(!gateSrc.includes('Math.random'),
+    '(e) forge-maintenance-gate.js does NOT contain Math.random (determinism guard)', 'forbidden Math.random found');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1644,6 +1710,7 @@ function main() {
     smokeMaintenanceVcs();
     smokeMaintenanceBaseline();
     smokeMaintenanceGate();
+    smokeMaintenanceRollout();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
