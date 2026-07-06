@@ -1231,6 +1231,34 @@ completed_units.append("✓ [M###/S##/T##] {unit_type} — {one-liner}  · {agen
 
 After incrementing `session_units`:
 
+**Maintenance gate check** — runs FIRST, before the rate-limit handoff and pause checks (a fired maintenance trigger halts before any more dispatch work happens, per `shared/forge-maintenance.md`). Resolve `MAINTENANCE_IN_AUTO` via the 3-file prefs cascade (same `node -e` pattern used for `plan_check.mode`/`symbol_check.mode`):
+
+```bash
+MAINTENANCE_IN_AUTO=$(node -e "
+const fs=require('fs'),path=require('path'),os=require('os');
+const wd=process.env.WORKING_DIR||process.cwd();
+const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+             path.join(wd,'.gsd','claude-agent-prefs.md'),
+             path.join(wd,'.gsd','prefs.local.md')];
+let mode='stop';
+for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^maintenance:[ \t]*\n[ \t]+in_auto:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch(e){}}
+if(mode!=='stop'&&mode!=='defer'&&mode!=='off')mode='stop';
+process.stdout.write(mode);
+" WORKING_DIR="$WORKING_DIR")
+```
+
+- `MAINTENANCE_IN_AUTO == off` → skip this entire check — do not even run detection. Fall through to the Rate-limit handoff check.
+- Otherwise, run detection (`shared/forge-maintenance.md § Step 1`):
+  ```bash
+  DETECT=$(node "$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js" --detect --cwd "$WORKING_DIR")
+  MAINT_MODE=$(echo "$DETECT" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).mode)")
+  ```
+  - `MAINT_MODE == normal` → no-op, fall through to the Rate-limit handoff check.
+  - `MAINT_MODE == maintenance` AND `MAINTENANCE_IN_AUTO == stop` → go to `## Maintenance Gate Procedure` (stop path). Do NOT continue to the next unit — the loop halts here.
+  - `MAINT_MODE == maintenance` AND `MAINTENANCE_IN_AUTO == defer` → go to `## Maintenance Gate Procedure` (defer path), then fall through to the Rate-limit handoff check. Never block on missing input or a 429 — this is the headless-friendly path (`bin/forge-run`).
+
+**NEVER apply maintenance inline here.** The ISOLATION RULE forbids the orchestrator from mutating project files directly — the apply cascade (Steps 3–5 of `shared/forge-maintenance.md`) runs only inside `/forge-sweep` or an interactive `forge-next` session. This gate only detects, announces, and (on `stop`) halts the loop; it never dispatches the confirm/apply steps itself. **This STOP is the sanctioned AUTONOMY-RULE exception** — same posture as the milestone review-triage gate and the account-handoff stop below: maintenance is destructive-ish (consolidates and prunes loose finalized units, `.bak`-protected and verified) and inherently needs a human in the loop, so halting here does not violate the AUTONOMY RULE that otherwise forbids `forge-auto` from pausing mid-loop for confirmation.
+
 **Rate-limit handoff check** — runs BEFORE the pause check. Detects when this account's usage window is exhausted and hands off to another account (account exhaustion is more urgent than a queued pause). Gated by prefs: resolve `HANDOFF_IN_AUTO` (`accounts.handoff_in_auto`, default `on`) and `HANDOFF_THRESHOLD` (`accounts.handoff_threshold`, default `90`). If `HANDOFF_IN_AUTO == off`, skip this entire check.
 
 Read the freshest rate-limit bridge the statusline wrote (most-recently-modified `forge-ratelimit-*.json` in the tmpdir, within 120s — that is this session's; the orchestrator's own statusline renders continuously while the loop runs):
@@ -1302,6 +1330,34 @@ else
   echo '{"active":false}' > .gsd/forge/auto-mode.json
 fi
 ```
+
+---
+
+## Maintenance Gate Procedure
+
+Invoked from Step 7 when `MAINT_MODE == maintenance`. Full spec: `shared/forge-maintenance.md` — this procedure only wires the STOP/defer postures documented there (Rules 2–4); it does not re-implement detection, the RED warning renderer, or the apply cascade.
+
+**Stop path** (`maintenance.in_auto: stop`, the default — `shared/forge-maintenance.md § Rules (LOCKED) #2`):
+1. Render the announce (Step 1) and the RED warning (Step 2) from `shared/forge-maintenance.md`, verbatim via `renderRedWarning(detection)` — do not summarize or truncate it.
+2. Print the cascade instructions: "Rode `/forge-sweep` ou `/forge-next` para conduzir a maintenance com o double-confirm por eixo."
+3. Deactivate this run — see `## Deactivate auto-mode indicator` above (same pattern as pause/handoff: `forge-runs.js --update "$RUN_ID" --json '{"active":false}'`, legacy fallback `echo '{"active":false}' > .gsd/forge/auto-mode.json`).
+4. Append the `maintenance-detected` event to `events.jsonl` per `shared/forge-maintenance.md § Step 8` (`{"ts":"<ISO>","event":"maintenance-detected","mode":"maintenance","fired":[...],"baseline":<bool>}`).
+5. Emit and **STOP the loop**:
+   ```
+   ⏸  Auto-mode parado — maintenance pendente (SWEEP PRECISA DE MAINTENANCE).
+   {firedAxes summary, one line per axis}
+
+   Rode /forge-sweep ou /forge-next para consolidar. Depois execute /forge-auto {RUN_ID} para retomar.
+   ```
+   Do not proceed to the next unit.
+
+**Defer path** (`maintenance.in_auto: defer` — `shared/forge-maintenance.md § Rules (LOCKED) #3`, mirrors `bin/forge-run`'s own posture and the account-handoff sentinel pattern):
+1. Render the announce (Step 1) only — no RED warning needed for a non-blocking defer.
+2. Write `.gsd/forge/maintenance-request.json`: `{"run_id":"{RUN_ID}","fired":<firedAxes>,"baseline":<bool>,"ts":"{ISO8601}"}` so a supervisor (`bin/forge-run`) or the next interactive session picks it up and surfaces it. Harmless without a supervisor — a plain `/forge-auto` just leaves the file, overwritten on the next detection.
+3. Append the `maintenance-detected` event to `events.jsonl` with an added `"deferred":true` field.
+4. **Continue the loop** — do not stop, do not block on the missing human input or a 429. This is the headless-friendly path used by `bin/forge-run`.
+
+**Idempotency:** if a STOP was already surfaced for this boundary and the same fired state persists across an interrupted/resumed run, re-detecting is fine — it just re-surfaces the same warning. The gate never loop-applies maintenance itself in either path.
 
 ---
 

@@ -255,6 +255,39 @@ Skill({ skill: "forge-risk-radar", args: "{M###} {S##}" })
 ```
 This runs the risk assessment in the current context before the plan-slice agent is dispatched. The produced `S##-RISK.md` will be injected into the worker prompt.
 
+**Maintenance gate (before dispatching any unit):** Runs at the unit boundary regardless of `unit_type` — unlike the plan-check/symbol-check gates (which fire only between `plan-slice` and the first `execute-task`), the maintenance gate checks every time `forge-next` is about to dispatch a unit. Full spec: `shared/forge-maintenance.md` — this gate only wires the trigger + interactive cascade dispatch points; it does not re-document the procedure.
+
+1. Resolve `MAINTENANCE_IN_AUTO` via the 3-file prefs cascade (same `node -e` pattern as `plan_check.mode`/`symbol_check.mode` below — despite the name, the key also governs whether `forge-next` even runs detection: `off` skips it here too):
+   ```bash
+   MAINTENANCE_IN_AUTO=$(node -e "
+   const fs=require('fs'),path=require('path'),os=require('os');
+   const wd=process.env.WORKING_DIR||process.cwd();
+   const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+                path.join(wd,'.gsd','claude-agent-prefs.md'),
+                path.join(wd,'.gsd','prefs.local.md')];
+   let mode='stop';
+   for(const f of files){try{const r=fs.readFileSync(f,'utf8');const m=r.match(/^maintenance:[ \t]*\n[ \t]+in_auto:[ \t]*(\w+)/m);if(m)mode=m[1].toLowerCase();}catch(e){}}
+   if(mode!=='stop'&&mode!=='defer'&&mode!=='off')mode='stop';
+   process.stdout.write(mode);
+   " WORKING_DIR="$WORKING_DIR")
+   ```
+2. `MAINTENANCE_IN_AUTO == off` → skip the gate entirely — do not run detection. Proceed to dispatch the derived unit normally.
+3. Otherwise, run detection (`shared/forge-maintenance.md § Step 1`):
+   ```bash
+   DETECT=$(node "$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js" --detect --cwd "$WORKING_DIR")
+   MAINT_MODE=$(echo "$DETECT" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).mode)")
+   ```
+   Append the `maintenance-detected` event to `events.jsonl` regardless of which branch fires (`shared/forge-maintenance.md § Step 8`).
+4. `MAINT_MODE == normal` → no-op. Proceed to dispatch the derived unit normally.
+5. `MAINT_MODE == maintenance` → **`forge-next` is interactive, so it runs the full cascade** per `shared/forge-maintenance.md` (this is the one consumer besides `/forge-sweep` allowed past Step 2):
+   - **RED warning (Step 2):** render `renderRedWarning(detection)` verbatim — do not summarize.
+   - **First confirmation (Step 3):** `AskUserQuestion({ question: "Prosseguir com a maintenance?", options: ["Prosseguir", "Cancelar"] })`. `Cancelar` → stop the cascade here (no writes beyond the `maintenance-detected` event already appended); proceed to dispatch the originally-derived unit normally.
+   - **Per-axis double-confirm (Step 4):** for each axis in `firedAxes`, a **separate** `AskUserQuestion({ question: "Consolidar {axis} ({count} unidades → {target})?", options: ["Confirmar", "Pular"] })`. Collect `confirmedAxes`. Emit one `maintenance-confirmed` event per confirmed axis. Empty `confirmedAxes` → stop, no apply, proceed to dispatch the originally-derived unit.
+   - **Apply cascade (Step 5):** `precheckHistory(cwd)` (abort+`pullScoped` instruction on `already:true`) → `runBaseline(cwd, { axes: confirmedAxes })` → `runCommitGuard(cwd, localBuckets)` (proceed / discard+`pullScoped` / abort-loud per the truth table) → on success, commit + push (if isolation auto-push) and emit `maintenance-applied`.
+   - After the cascade resolves (applied, cancelled, or partially confirmed), continue with the normal step-mode flow — dispatch whichever unit was originally derived for this `/forge-next` invocation.
+
+**`forge-next` never defers** — `maintenance.in_auto: defer` is a headless posture (`forge-auto`/`bin/forge-run`); an interactive session always gets the full RED-warning + double-confirm cascade when maintenance fires (as long as the pref isn't `off`). `forge-next` also never applies maintenance silently — every write in Step 5 is gated by the confirmations above.
+
 **Security gate (execute-task only):** If `unit_type == execute-task`, scan `T##-PLAN.md` content for security-sensitive keywords:
 `auth|token|crypto|password|secret|api.?key|jwt|oauth|permission|role|hash|salt|encrypt|decrypt|session|cookie|credential|sanitize|xss|sql|inject`
 
