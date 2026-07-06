@@ -18,6 +18,7 @@ const { spawnSync } = require('child_process');
 const {
   mergeBucket,
   normalizeText,
+  anchorHeader,
   sortKey,
   parseBucket,
   bucketHash,
@@ -431,6 +432,85 @@ test('two input paths with same basename id throws', () => {
     rmrf(tmpA);
     rmrf(tmpB);
   }
+});
+
+// ── Review-fix regressions: CRLF-existing, conflicted, empty-title ──────────
+console.log('\nreview-fix — CRLF-existing bucket, conflicted array, empty-title round-trip');
+
+test('CRLF-existing bucket does not throw and re-merge is byte-identical to LF-existing case', () => {
+  const tmp = mkTmp();
+  try {
+    const pAlpha = seedFrag(tmp, 'M-20260101120000-alpha', { title: 'Alpha', body: 'Alpha body.' });
+    const pBeta  = seedFrag(tmp, 'T-20260301090000-beta', { title: 'Beta', body: 'Beta body.' });
+    const paths = [pAlpha, pBeta];
+
+    const first = mergeBucket(paths, { type: 'test' });
+
+    // LF-existing case (baseline).
+    const lfResult = mergeBucket(paths, { type: 'test', existing: first.content });
+
+    // CRLF-existing case: simulate core.autocrlf=true rewriting line endings.
+    const crlfExisting = first.content.replace(/\n/g, '\r\n');
+    let threw = false;
+    let crlfResult;
+    try {
+      crlfResult = mergeBucket(paths, { type: 'test', existing: crlfExisting });
+    } catch (e) {
+      threw = true;
+    }
+    assert(!threw, 'mergeBucket threw on CRLF-tainted existing bucket');
+    assert(crlfResult.content === lfResult.content, 'CRLF-existing merge differs from LF-existing merge');
+    assert(crlfResult.hash === lfResult.hash, 'CRLF-existing merge hash differs from LF-existing merge hash');
+  } finally {
+    rmrf(tmp);
+  }
+});
+
+test('conflicted array populated when same-id divergent content is merged; empty when identical', () => {
+  const tmpA = mkTmp();
+  const tmpB = mkTmp();
+  try {
+    const pOriginal = seedFrag(tmpA, 'M-20260101120000-alpha', { title: 'Alpha', body: 'Original body.' });
+    const first = mergeBucket([pOriginal], { type: 'test' });
+
+    // Identical re-merge → skipped, conflicted empty.
+    const identicalRerun = mergeBucket([pOriginal], { type: 'test', existing: first.content });
+    assert(identicalRerun.skipped.length === 1, 'expected 1 skipped for identical re-merge');
+    assert(identicalRerun.conflicted.length === 0, 'expected empty conflicted for identical re-merge');
+
+    // Divergent content under the same id → conflicted, not skipped.
+    const pDivergent = seedFrag(tmpB, 'M-20260101120000-alpha', { title: 'Alpha', body: 'DIFFERENT body.' });
+    const divergentRerun = mergeBucket([pDivergent], { type: 'test', existing: first.content });
+    assert(divergentRerun.conflicted.length === 1, `expected 1 conflicted, got ${divergentRerun.conflicted.length}`);
+    assert(divergentRerun.conflicted[0] === 'M-20260101120000-alpha', `unexpected conflicted id: ${divergentRerun.conflicted[0]}`);
+    assert(divergentRerun.skipped.length === 0, `expected 0 skipped when content diverges, got ${divergentRerun.skipped.length}`);
+    // Existing bucket entry still wins verbatim.
+    assert(divergentRerun.content === first.content, 'existing entry did not win verbatim on conflict');
+  } finally {
+    rmrf(tmpA);
+    rmrf(tmpB);
+  }
+});
+
+test('empty-title round-trips as empty string, distinct from absent (null) title', () => {
+  const headerAbsent = anchorHeader('some-id', null);
+  const headerEmpty  = anchorHeader('some-id', '');
+  const headerFilled = anchorHeader('some-id', 'A Title');
+
+  assert(headerAbsent === '<!-- unit:some-id -->\n## some-id', `unexpected absent-title heading: ${JSON.stringify(headerAbsent)}`);
+  assert(headerEmpty === '<!-- unit:some-id -->\n## some-id — ', `unexpected empty-title heading: ${JSON.stringify(headerEmpty)}`);
+  assert(headerFilled === '<!-- unit:some-id -->\n## some-id — A Title', `unexpected filled-title heading: ${JSON.stringify(headerFilled)}`);
+
+  const bucket = '<!-- forge-bucket v1 type:test -->\n'
+    + '\n' + headerAbsent + '\n\nBody absent.\n'
+    + '\n' + headerEmpty.replace('some-id', 'other-id') + '\n\nBody empty.\n'
+    + '\n' + headerFilled.replace('some-id', 'third-id') + '\n\nBody filled.\n';
+
+  const parsed = parseBucket(bucket);
+  const byId = new Map(parsed.units.map(u => [u.id, u]));
+  assert(byId.get('some-id').title === null, `expected absent title to parse as null, got ${JSON.stringify(byId.get('some-id').title)}`);
+  assert(byId.get('other-id').title === '', `expected empty title to parse as '', got ${JSON.stringify(byId.get('other-id').title)}`);
+  assert(byId.get('third-id').title === 'A Title', `expected filled title to round-trip, got ${JSON.stringify(byId.get('third-id').title)}`);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

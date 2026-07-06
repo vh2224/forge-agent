@@ -14,10 +14,14 @@
 //
 //   <!-- unit:<id> -->                          ← idempotent anchor (id = fragment
 //                                                  basename without .md)
-//   ## <id> — <title>                           ← heading; "## <id>" when the
-//                                                  fragment has no title; title =
-//                                                  FIRST line of frontmatter
-//                                                  `title`, verbatim
+//   ## <id> — <title>                           ← heading; "## <id>" (no
+//                                                  separator) when title is
+//                                                  absent (null); "## <id> — "
+//                                                  when title is present but
+//                                                  empty string (separator
+//                                                  emitted, round-trips to '');
+//                                                  title = FIRST line of
+//                                                  frontmatter `title`, verbatim
 //   (blank line)
 //   <full fragment content, frontmatter          ← normalized via normalizeText;
 //    included, ending in exactly one \n>           zero content bytes lost, zero
@@ -54,14 +58,21 @@
 //      locale-dependent and breaks byte-identity across machines). mtime
 //      NEVER enters any ordering or content decision.
 //
-// Idempotency / anchor dedup: mergeBucket() with an existing bucket parses it
+// Idempotency / anchor dedup: mergeBucket() with an existing bucket first
+// NORMALIZES it (normalizeText — so a CRLF-tainted existing bucket, e.g. from
+// `core.autocrlf=true`, never throws in parseBucket) then parses it
 // (parseBucket), dedupes by id (the existing bucket entry wins verbatim; a
-// duplicate input fragment goes to `skipped`), re-sorts the union by sortKey
-// and re-emits. Since unit content preserves the original frontmatter,
-// `writtenAt` is re-derivable from the content itself on every re-merge — the
-// same extraction function for both new and existing units produces the same
-// key → byte-identical output. Duplicate ids WITHIN the input list throw
-// (noisy error, exit 1).
+// duplicate input fragment whose NORMALIZED content is byte-identical to the
+// retained entry goes to `skipped` — true idempotent no-op). If the
+// normalized incoming content DIFFERS from the retained entry, the id is
+// pushed to `conflicted` instead (surfacing silent divergence; the retained
+// entry still wins verbatim — this module does not resolve which content is
+// "correct", it only reports the disagreement). Re-sorts the union by
+// sortKey and re-emits. Since unit content preserves the original
+// frontmatter, `writtenAt` is re-derivable from the content itself on every
+// re-merge — the same extraction function for both new and existing units
+// produces the same key → byte-identical output. Duplicate ids WITHIN the
+// input list throw (noisy error, exit 1).
 //
 // Hash (`bucketHash`): sha256 hex (Node `crypto`) over the UTF-8 bytes of the
 // already-normalized content. This is the oracle for the D3 check in S03.
@@ -71,7 +82,7 @@
 // such a line; documented here as a known limitation, not defended against.
 //
 // Library exports:
-//   mergeBucket(fragmentPaths, opts) → { content, hash, units, skipped }
+//   mergeBucket(fragmentPaths, opts) → { content, hash, units, skipped, conflicted }
 //   normalizeText(raw)               → string
 //   anchorHeader(id, title)          → string
 //   sortKey(id, writtenAt)           → string
@@ -142,7 +153,11 @@ function sortKey(id, writtenAt) {
 // ── anchorHeader ──────────────────────────────────────────────────────────────
 // Returns the anchor + heading pair (no trailing '\n').
 function anchorHeader(id, title) {
-  const heading = '## ' + id + (title ? ' — ' + firstLine(title) : '');
+  // title == null → absent title, no separator emitted.
+  // title === ''  → present-but-empty title; separator IS emitted (with an
+  // empty string after it) so parseBucket can round-trip '' distinct from
+  // null. Byte-identical to prior behavior for any non-empty title.
+  const heading = '## ' + id + (title != null ? ' — ' + firstLine(title) : '');
   return '<!-- unit:' + id + ' -->\n' + heading;
 }
 
@@ -218,9 +233,14 @@ function mergeBucket(fragmentPaths, opts) {
   const type = opts.type || 'generic';
   const map = new Map(); // id → { id, content }
   const skipped = [];
+  const conflicted = [];
 
   if (opts.existing) {
-    const parsed = parseBucket(opts.existing);
+    // Normalize BEFORE parseBucket: a CRLF-tainted existing bucket (e.g. a
+    // file written under `core.autocrlf=true`) must never throw here — the
+    // header regex and anchor regex are LF-anchored (`$` in non-multiline
+    // split-by-'\n' lines), so un-normalized CR bytes would corrupt parsing.
+    const parsed = parseBucket(normalizeText(opts.existing));
     for (const u of parsed.units) {
       map.set(u.id, { id: u.id, content: u.content });
     }
@@ -238,8 +258,13 @@ function mergeBucket(fragmentPaths, opts) {
     const content = normalizeText(raw);
 
     if (map.has(id)) {
-      skipped.push(id);
-      continue; // existing bucket entry wins verbatim
+      const retained = map.get(id);
+      if (retained.content === content) {
+        skipped.push(id); // true idempotent no-op — existing bucket entry wins verbatim
+      } else {
+        conflicted.push(id); // divergent content under the same id — surfaced, not silently dropped
+      }
+      continue; // existing bucket entry always wins verbatim regardless of branch
     }
     map.set(id, { id, content });
   }
@@ -266,7 +291,7 @@ function mergeBucket(fragmentPaths, opts) {
   }
 
   const hash = bucketHash(content);
-  return { content, hash, units: unitsArr.map(u => u.id), skipped };
+  return { content, hash, units: unitsArr.map(u => u.id), skipped, conflicted };
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -349,6 +374,7 @@ function cliMain(argv) {
           unitCount: result.units.length,
           units: result.units,
           skipped: result.skipped,
+          conflicted: result.conflicted,
           hash: result.hash,
           bytes: Buffer.byteLength(result.content, 'utf8'),
         }));
@@ -362,6 +388,7 @@ function cliMain(argv) {
           hash: result.hash,
           unitCount: result.units.length,
           skipped: result.skipped,
+          conflicted: result.conflicted,
         }));
         return 0;
       }
@@ -373,6 +400,7 @@ function cliMain(argv) {
         hash: result.hash,
         unitCount: result.units.length,
         skipped: result.skipped,
+        conflicted: result.conflicted,
       }));
       return 0;
     } catch (e) {
