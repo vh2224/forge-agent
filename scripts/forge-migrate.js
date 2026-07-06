@@ -2,8 +2,9 @@
 // forge-migrate — Consolidated migration orchestrator for Forge Agent fragment stores.
 //
 // Runs the three migrators (ledger, decisions, memory) in order. For each:
-//   0. Already-migrated shortcut: when .gsd/SCHEMA-VERSION is already CURRENT_SCHEMA
-//      AND the store's fragments are populated, the monolith on disk is a REGENERATED
+//   0. Already-migrated shortcut: when .gsd/SCHEMA-VERSION is already a VALID schema
+//      (1.0.0 or 2.0.0) AND the store's fragments are populated, the monolith on disk
+//      is a REGENERATED
 //      projection cache — NOT a legacy pre-migration monolith. Skip backup + migrate so
 //      the cache is never retired to .bak (reports skipped_reason: 'already-migrated').
 //   1. Otherwise: renames the legacy monolith to <name>.bak (preserves existing .bak).
@@ -32,7 +33,7 @@ const decisionsMigrate = require('./forge-decisions-migrate');
 const memoryMigrate    = require('./forge-memory-migrate');
 const projection       = require('./forge-projection');
 const storeStateMod    = require('./forge-store-state');
-const { CURRENT_SCHEMA } = require('./forge-doctor');
+const { CURRENT_SCHEMA, isValidSchema } = require('./forge-doctor');
 
 // ── Store descriptors ─────────────────────────────────────────────────────────
 // Each store: { name, monolithRel, bakRel, migrate, render }
@@ -270,7 +271,7 @@ function migrateStore(cwd, store, opts) {
       result.skipped_reason = 'inconsistent-schema-current-empty-store';
       result.verification   = 'skipped (inconsistent-state)';
       result.warnings.push(
-        `SCHEMA-VERSION is "${CURRENT_SCHEMA}" but the ${store.name} fragment store is empty ` +
+        `SCHEMA-VERSION is current but the ${store.name} fragment store is empty ` +
         `while ${store.monolithRel} still has ${n} entr${n === 1 ? 'y' : 'ies'}. ` +
         `Not retiring the monolith. Remove .gsd/SCHEMA-VERSION and re-run migrate, ` +
         `or investigate why the fragment store is missing.`
@@ -337,6 +338,10 @@ function migrateStore(cwd, store, opts) {
 function writeSchemaVersion(cwd) {
   const dest = path.join(cwd, '.gsd', 'SCHEMA-VERSION');
   const dir  = path.dirname(dest);
+  // Anti-downgrade: never overwrite an already-valid stamp (e.g. a 2.0.0
+  // opt-in bump must never be rewritten back to the 1.0.0 write-default).
+  const existing = readSchemaVersion(cwd);
+  if (isValidSchema(existing)) return existing;
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(dest, CURRENT_SCHEMA + '\n', 'utf8');
   return CURRENT_SCHEMA;
@@ -352,7 +357,7 @@ function migrateAll(cwd, opts = {}) {
   // both: SCHEMA-VERSION must be current AND the store's fragments must be
   // populated. storeState is read up-front — stores are independent, so a per-store
   // snapshot taken here stays accurate across the loop.
-  const schemaCurrent = readSchemaVersion(cwd) === CURRENT_SCHEMA;
+  const schemaCurrent = isValidSchema(readSchemaVersion(cwd));
   const state = storeStateMod.storeState(cwd);
 
   const results = {};

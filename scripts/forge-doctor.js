@@ -2,7 +2,9 @@
 // forge-doctor — schema-version + projection-versioned checks for Forge Agent
 //
 // Library exports:
-//   CURRENT_SCHEMA              // string — 'fragment-store@1.0.0'
+//   CURRENT_SCHEMA              // string — 'fragment-store@1.0.0' (write-default)
+//   VALID_SCHEMAS               // string[] — accepted read stamps: 1.0.0 and 2.0.0
+//   isValidSchema(v)            // (v) → boolean — membership check, never ===
 //   checkSchema(cwd)            // (cwd?) → { ok, expected, actual, message }
 //   checkProjectionVersioned(cwd) // (cwd?) → { ok, tracked: string[], skipped?: string, message }
 //
@@ -26,7 +28,11 @@ const { execFileSync } = require('child_process');
 const { PROJECTION_IGNORE_PATHS, detectVcs } = require('./forge-ignore');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const CURRENT_SCHEMA = 'fragment-store@1.0.0';
+// Write-default stays 1.0.0: the 2.0.0 bump is opt-in per repo and happens
+// only when the first maintenance baseline runs (R6 — S06). Reading accepts both.
+const VALID_SCHEMAS = ['fragment-store@1.0.0', 'fragment-store@2.0.0'];
+const CURRENT_SCHEMA = VALID_SCHEMAS[0];
+const isValidSchema = (v) => VALID_SCHEMAS.includes(String(v || '').trim());
 const SCHEMA_FILE = '.gsd/SCHEMA-VERSION';
 
 // ── checkSchema ───────────────────────────────────────────────────────────────
@@ -50,12 +56,12 @@ function checkSchema(cwd) {
 
   const actual = fs.readFileSync(schemaPath, 'utf8').trim();
 
-  if (actual === CURRENT_SCHEMA) {
+  if (isValidSchema(actual)) {
     return {
       ok: true,
       expected: CURRENT_SCHEMA,
       actual,
-      message: `Schema version matches: ${actual}`,
+      message: `Schema version valid: ${actual}`,
     };
   }
 
@@ -63,7 +69,7 @@ function checkSchema(cwd) {
     ok: false,
     expected: CURRENT_SCHEMA,
     actual,
-    message: `Schema version mismatch — expected "${CURRENT_SCHEMA}", got "${actual}". Run --fix to update.`,
+    message: `Schema version mismatch — expected one of "${VALID_SCHEMAS.join('", "')}", got "${actual}". Run --fix to update.`,
   };
 }
 
@@ -142,6 +148,8 @@ function checkProjectionVersioned(cwd) {
 // ── module.exports ────────────────────────────────────────────────────────────
 module.exports = {
   CURRENT_SCHEMA,
+  VALID_SCHEMAS,
+  isValidSchema,
   checkSchema,
   checkProjectionVersioned,
 };
@@ -296,11 +304,13 @@ Exit codes:
       fixed.push(`Created ${SCHEMA_FILE} with "${CURRENT_SCHEMA}"`);
     } else {
       const current = fs.readFileSync(schemaPath, 'utf8').trim();
-      if (current !== CURRENT_SCHEMA) {
+      if (isValidSchema(current)) {
+        // Anti-downgrade: never overwrite an already-valid stamp (e.g. a 2.0.0
+        // opt-in bump must never be rewritten back to the 1.0.0 write-default).
+        fixed.push(`${SCHEMA_FILE} already valid ("${current}") — no change`);
+      } else {
         fs.writeFileSync(schemaPath, CURRENT_SCHEMA + '\n', 'utf8');
         fixed.push(`Updated ${SCHEMA_FILE}: "${current}" → "${CURRENT_SCHEMA}"`);
-      } else {
-        fixed.push(`${SCHEMA_FILE} already at "${CURRENT_SCHEMA}" — no change`);
       }
     }
 

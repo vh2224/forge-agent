@@ -427,7 +427,7 @@ test('warns (additionalContext) when repo schema is NEWER than tooling → /forg
   const tmp = mkTmp();
   try {
     fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
-    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@2.0.0\n', 'utf8');
+    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@3.0.0\n', 'utf8');
     const { parsed } = runHook(tmp);
     assert(parsed && parsed.hookSpecificOutput, 'expected hookSpecificOutput JSON');
     assert(parsed.hookSpecificOutput.hookEventName === 'SessionStart', 'wrong hookEventName');
@@ -456,6 +456,15 @@ test('stays SILENT when schema matches', () => {
   } finally { rmrf(tmp); }
 });
 
+test('stays SILENT on fragment-store@2.0.0 (valid since S02)', () => {
+  const tmp = mkTmp();
+  try {
+    fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@2.0.0\n', 'utf8');
+    assert(runHook(tmp).stdout.trim() === '', 'expected no output for a valid 2.0.0 stamp');
+  } finally { rmrf(tmp); }
+});
+
 test('stays SILENT on a non-forge project (no .gsd)', () => {
   const tmp = mkTmp();
   try {
@@ -475,7 +484,7 @@ test('exits 0 (never blocks the session) even on mismatch', () => {
   const tmp = mkTmp();
   try {
     fs.mkdirSync(path.join(tmp, '.gsd'), { recursive: true });
-    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@2.0.0\n', 'utf8');
+    fs.writeFileSync(path.join(tmp, '.gsd', 'SCHEMA-VERSION'), 'fragment-store@3.0.0\n', 'utf8');
     let status = 0;
     try { execFileSync(process.execPath, [HOOK, 'session-start'],
       { input: JSON.stringify({ session_id: 's', cwd: tmp, source: 'resume' }), encoding: 'utf8' }); }

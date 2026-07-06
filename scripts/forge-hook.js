@@ -246,6 +246,9 @@ process.stdin.on('end', () => {
     // differs from the committed .gsd/SCHEMA-VERSION, inject a loud notice so
     // the user runs /forge-update before a milestone close silently drops a
     // ledger entry into a now-ignored monolith. Never blocks the session.
+    // Since S02, checkSchema() accepts the set {1.0.0, 2.0.0} — this hook is a
+    // pure delegate and stays silent for either valid stamp; it only warns for
+    // stamps outside that set (e.g. 3.0.0+).
     if (phase === 'session-start') {
       try {
         if (!fs.existsSync(path.join(cwd, '.gsd'))) return; // not a forge project — stay silent
