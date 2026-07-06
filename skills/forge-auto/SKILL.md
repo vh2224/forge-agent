@@ -1253,7 +1253,7 @@ process.stdout.write(mode);
   DETECT=$(node "$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js" --detect --cwd "$WORKING_DIR")
   MAINT_MODE=$(echo "$DETECT" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).mode)")
   ```
-  - `MAINT_MODE == normal` → no-op, fall through to the Rate-limit handoff check.
+  - `MAINT_MODE == normal` → append the `maintenance-detected` event to `events.jsonl` (`{"ts":"<ISO>","event":"maintenance-detected","mode":"normal","fired":[],"baseline":false}`) — per `shared/forge-maintenance.md § Step 1`, detection ran and must be audited regardless of which branch fires. Then fall through to the Rate-limit handoff check.
   - `MAINT_MODE == maintenance` AND `MAINTENANCE_IN_AUTO == stop` → go to `## Maintenance Gate Procedure` (stop path). Do NOT continue to the next unit — the loop halts here.
   - `MAINT_MODE == maintenance` AND `MAINTENANCE_IN_AUTO == defer` → go to `## Maintenance Gate Procedure` (defer path), then fall through to the Rate-limit handoff check. Never block on missing input or a 429 — this is the headless-friendly path (`bin/forge-run`).
 

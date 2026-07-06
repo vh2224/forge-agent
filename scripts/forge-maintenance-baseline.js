@@ -67,10 +67,20 @@ const NOT_ACTIVE_PHASES = new Set(['idle', 'complete', 'done', 'complete-milesto
 // behavior); passing an explicit array restricts gathering/consolidation to
 // only the named axes. This is a SELECTOR over what to gather — it changes
 // no mechanics (normalization, .bak protection, verify/abort-restore).
-const AXES = ['milestones', 'tasks', 'decisions'];
+const AXES = ['milestones', 'tasks', 'ledgerDecisions'];
 
+// REVIEW-FIX (S05, M1/MAJOR): the public/detection/spec name for the third
+// axis is `ledgerDecisions` everywhere (detectTriggers, shared/forge-maintenance.md,
+// forge-sweep/forge-next skills). `_axisEnabled` accepts BOTH `'ledgerDecisions'`
+// and the legacy bare `'decisions'` as aliases for the same axis, so neither a
+// caller following the spec nor a caller using the old internal name silently
+// no-ops.
 function _axisEnabled(opts, axis) {
-  return !opts || !opts.axes || opts.axes.includes(axis);
+  if (!opts || !opts.axes) return true;
+  if (axis === 'ledgerDecisions' || axis === 'decisions') {
+    return opts.axes.includes('ledgerDecisions') || opts.axes.includes('decisions');
+  }
+  return opts.axes.includes(axis);
 }
 
 // ── deriveQuarter ─────────────────────────────────────────────────────────────

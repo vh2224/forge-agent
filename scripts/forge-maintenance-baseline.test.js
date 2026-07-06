@@ -372,6 +372,32 @@ test('detectTriggers: current-quarter decisions stay loose (not counted)', () =>
   }
 });
 
+// REVIEW-FIX (S05, M1/MAJOR): the axes selector name must be `ledgerDecisions`
+// end-to-end (detection/spec/skills already used it; the selector previously
+// only accepted the bare `'decisions'`, so a caller following the spec —
+// `runBaseline(cwd, { axes: ['ledgerDecisions'] })` — silently no-op'd the
+// decisions axis). This proves the confirmed axis is actually honored on a
+// fixture with ONLY closed-quarter decision fragments (no milestones/tasks).
+test('runBaseline: axes:["ledgerDecisions"] selector actually consolidates the decisions axis', () => {
+  const cwd = mkTmp();
+  try {
+    const now = new Date('2026-07-15T12:00:00Z'); // Q3 — Q1 closed
+    const closedId = 'M-20260201000000-onlydec';
+    writeMilestoneSummary(cwd, closedId);
+    writeDecisionsFragment(cwd, closedId);
+
+    const result = runBaseline(cwd, { now, axes: ['ledgerDecisions'] });
+    assert(result.applied === true, 'runBaseline must apply');
+    assert(result.ledgerDecisions.perQuarter.length === 1, 'the closed-quarter decisions axis must actually consolidate');
+    assert(result.ledgerDecisions.perQuarter[0].unitIds.includes(closedId), 'consolidated bucket must include the closed-quarter unit');
+    const target = path.join(cwd, '.gsd', 'decisions', '_rollup-2026-Q1.md');
+    assert(fs.existsSync(target), 'decisions rollup bucket must be written on disk');
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'decisions', `${closedId}.md`)), 'loose decision fragment must be consumed');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
 // ── runBaseline / consolidateAxis (T03) ──────────────────────────────────────
 // Builds a mixed .gsd fixture: 3 finalized milestones + 1 in-progress
 // milestone (active per legacy STATE) + 2 finalized tasks + finalized
