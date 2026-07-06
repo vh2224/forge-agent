@@ -37,7 +37,10 @@ function readPref(cwd, dottedKey, fallback) {
   for (const f of files) {
     try {
       const raw = fs.readFileSync(f, 'utf8');
-      const re = new RegExp(`^${section}:[ \\t]*\\n([\\s\\S]*?)(?=^\\w|\\Z)`, 'm');
+      // Capture only the indented body of the block (plus blank lines). The previous
+      // pattern used `\Z`, which JS treats as a literal "Z" — blocks at end-of-file
+      // (or the sole block in a file) were silently ignored. See forge-isolation.js.
+      const re = new RegExp(`^${section}:[ \\t]*\\n((?:[ \\t]+[^\\n]*(?:\\n|$)|[ \\t]*\\n)*)`, 'm');
       const m = raw.match(re);
       if (m) {
         const kre = new RegExp(`^[ \\t]+${key}:[ \\t]*([^\\n]+)`, 'm');

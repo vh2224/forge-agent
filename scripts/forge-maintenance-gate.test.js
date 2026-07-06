@@ -309,6 +309,41 @@ test('detectMode: reads maintenance.enabled from a real pref file (repo-level .g
   }
 });
 
+test('detectMode: reads maintenance.enabled: true when the section is the SOLE/LAST block in the pref file (no trailing section)', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD);
+    const prefsDir = path.join(cwd, '.gsd');
+    fs.mkdirSync(prefsDir, { recursive: true });
+    // Minimal snippet exactly as S06 docs tell operators to paste — nothing
+    // follows the maintenance: block. This is the shape that the old `\Z`
+    // regex (a literal "Z", not end-of-string, in JS) silently failed to
+    // match, defeating the opt-in.
+    fs.writeFileSync(
+      path.join(prefsDir, 'claude-agent-prefs.md'),
+      'maintenance:\n  enabled: true\n'
+    );
+    const { readPref } = require('./forge-cli-helpers.js');
+    assert(readPref(cwd, 'maintenance.enabled', 'false') === 'true', 'readPref must find enabled:true when the section is the sole/last block');
+    const detection = detectMode(cwd, { activeIds: new Set() });
+    assert(detection.enabled === true, 'must read maintenance.enabled: true when it is the sole block in the pref file');
+    assert(detection.mode === 'maintenance', 'must restore maintenance mode when the sole-block pref says enabled: true');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('detectMode: disabled branch returns triggers:null (genuinely I/O-free — no detectTriggers scan)', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, 1);
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: false });
+    assert(detection.triggers === null, 'triggers must be null in the disabled branch (no fragment scan performed)');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
 // ── Determinism-token absence ────────────────────────────────────────────────
 test('forge-maintenance-gate.js source contains no Math.random, .mtime, localeCompare, or Date', () => {
   const src = fs.readFileSync(path.join(__dirname, 'forge-maintenance-gate.js'), 'utf8');

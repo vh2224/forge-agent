@@ -80,10 +80,12 @@ function detectMode(cwd, opts) {
       : String(readPref(cwd, 'maintenance.enabled', 'false')).trim() === 'true';
 
   if (!enabled) {
+    // Deliberately cheap: no fragment-scan I/O when the feature is opted out.
+    // No consumer reads `triggers` off a normal-mode result.
     return {
       mode: 'normal',
       enabled: false,
-      triggers: detectTriggers(cwd, opts),
+      triggers: null,
       firedAxes: [],
       baseline: { available: false, plan: null },
     };
