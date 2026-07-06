@@ -573,18 +573,22 @@ if (!svnAvailable()) {
     execFileSync('svn', ['add', '--force', '-q', path.join(wcA, '.gsd')], { cwd: wcA });
     execFileSync('svn', ['commit', '-q', '-m', 'add rollup'], { cwd: wcA });
 
-    test('D1 real-svn precheckHistory runs the svn status --show-updates code path without throwing', () => {
+    test('D1 real-svn precheckHistory detects an out-of-date .gsd/ (honest assertion, review-fix S03 Obj 1)', () => {
+      // wcB was checked out BEFORE wcA committed the rollup, so wcB's HEAD
+      // revision is behind the repo tip — a genuine out-of-date working
+      // copy. --quiet was removed from the source's `svn status
+      // --show-updates` invocation specifically so the '*' marker survives;
+      // this test asserts detection actually works end-to-end against a
+      // real svn client, not just that the call doesn't throw.
       const pre = precheckHistory(wcB, 'svn');
       assert(pre.checked === true, 'expected checked:true, got ' + JSON.stringify(pre));
-      // NOTE (drift flagged in T02 SUMMARY): on this environment's svn client
-      // (TortoiseSVN's bundled svn.exe), `svn status --show-updates --quiet`
-      // (as invoked by precheckHistory) suppresses the '*' out-of-date marker
-      // entirely, so already stays false here even though the mock-exec unit
-      // (Section B1, using a canned --show-updates line without --quiet
-      // stripping it) proves the parsing logic itself is correct. This is a
-      // real-svn-client compat gap in the source's use of --quiet, not a test
-      // bug — documented rather than silently asserted around.
-      assert(typeof pre.already === 'boolean');
+      assert(pre.already === true, 'expected already:true (wcB is behind repo tip), got ' + JSON.stringify(pre));
+
+      // Up-to-date case: bring wcB current, then re-run — already must flip
+      // to false.
+      execFileSync('svn', ['update', '-q', wcB]);
+      const preUpToDate = precheckHistory(wcB, 'svn');
+      assert(preUpToDate.already === false, 'expected already:false once wcB is updated, got ' + JSON.stringify(preUpToDate));
     });
 
     test('D2 real-svn pullScoped materializes the remote rollup', () => {

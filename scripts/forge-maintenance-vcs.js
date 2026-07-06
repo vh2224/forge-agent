@@ -26,8 +26,9 @@
 // a different blob sha.
 //
 // DEC-S03-3 (filter-free read): remote content is read via
-// `git cat-file blob <sha>` (raw bytes, bypasses checkout/eol filters —
-// autocrlf-safe) / `svn cat -r HEAD <path>`. Never read remote content from
+// `git cat-file blob <sha>` (raw content, UTF-8 decoded, bypasses
+// checkout/eol (smudge/clean) filters — autocrlf-safe) / `svn cat -r HEAD
+// <path>`. Never read remote content from
 // the working tree post-checkout. Compared via
 // bucketHash(normalizeText(remoteRaw)) — S01's oracle.
 //
@@ -222,7 +223,13 @@ function precheckHistory(cwd, vcs) {
   if (v === 'svn') {
     let out;
     try {
-      out = vcsExec('svn', ['status', '--show-updates', '--quiet', '.gsd'], { cwd });
+      // NOTE: --quiet is intentionally omitted — on real svn clients it
+      // suppresses the '*' out-of-date marker entirely, defeating detection
+      // (review-fix S03 Obj 1). Without --quiet, svn also lists local-only
+      // noise (unversioned '?' entries, plain status lines with no marker);
+      // the filter below (mirrors dirtyGsd's svn branch) keeps only lines
+      // that actually carry the out-of-date '*' marker.
+      out = vcsExec('svn', ['status', '--show-updates', '.gsd'], { cwd });
     } catch (err) {
       return {
         vcs: 'svn',
@@ -235,6 +242,7 @@ function precheckHistory(cwd, vcs) {
     }
     const hits = [];
     for (const line of out.split('\n')) {
+      if (line.trim() === '' || line.startsWith('?')) continue;
       if (!line.includes('*')) continue;
       const parts = line.trim().split(/\s+/);
       const p = parts[parts.length - 1];
@@ -327,7 +335,8 @@ function recheckAtCommit(cwd, vcs) {
 function readRemoteBlob(cwd, entry, vcs, ref) {
   const v = vcs || detectVcs(cwd);
   if (v === 'git') {
-    // Raw blob bytes — bypasses checkout/eol filters; the autocrlf-safe path.
+    // Raw content (UTF-8 decoded) — bypasses checkout/eol (smudge/clean)
+    // filters; the autocrlf-safe path.
     return vcsExec('git', ['cat-file', 'blob', entry.sha], { cwd });
   }
   if (v === 'svn') {
@@ -361,6 +370,12 @@ function appendEvent(cwd, evt) {
 // ── runCommitGuard — S05 convenience glue ────────────────────────────────────
 // localBuckets = [{ path, hash }] (paths repo-relative, forward slashes;
 // hash = S01 mergeBucket().hash). No file writes/deletes anywhere in here.
+// NOTE (review-fix S03 Obj 3): this is a read-only recheck — there is a
+// residual check-then-act (TOCTOU) window between this call returning and
+// the actual commit/push (which S05 owns). S05 MUST call runCommitGuard
+// immediately before an atomic push with no intervening await/IO, otherwise
+// a concurrent maintenance push can still race in between the recheck and
+// the push.
 function runCommitGuard(cwd, localBuckets) {
   const vcs = detectVcs(cwd);
   if (vcs === 'none') {
