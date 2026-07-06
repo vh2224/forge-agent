@@ -115,12 +115,29 @@ The fourth related event, `maintenance-aborted-collision`, is owned and emitted 
    - `stop` — `forge-auto` halts and surfaces per Rule 2 (the default, safest posture).
    - `defer` — `forge-auto` behaves like headless `forge-run` (Rule 3): mark deferred, continue the loop.
    - `off` — do not even run Step 1 detection at the auto/headless boundary; the maintenance gate is entirely skipped for that consumer (detection still runs normally for `/forge-sweep` and `forge-next`).
-5. **Schema is not touched here.** Applying maintenance (Step 5) does **not** bump `.gsd/SCHEMA-VERSION` or perform any opt-in migration. Schema versioning is S06's territory entirely; this gate's `runBaseline` call only ever fuses loose fragments into rollup buckets under the current schema.
+5. **Schema bump is a byproduct of a real apply, never a separate step.** `.gsd/SCHEMA-VERSION` stays at `fragment-store@1.0.0` until the first successful `runBaseline` apply that actually consolidates something (`writtenTargets.length > 0`) — its success path calls `stampBucketSchema(cwd)`, an upgrade-only write (never clobbers an existing `2.0.0` stamp; a dry-run or a no-op apply never touches the file at all). Nothing in Steps 1–4 (detect/announce/confirm) ever writes the schema stamp — only a completed Step 5 apply can.
+
+## Opt-in + schema
+
+The entire gate described above is **inert by default, per repo.** `detectMode(cwd, opts)` resolves `enabled` from `opts.enabled` (test/programmatic injection) or `readPref(cwd, 'maintenance.enabled', 'false')` — the standard 3-file prefs cascade (`~/.claude/forge-agent-prefs.md` → `.gsd/claude-agent-prefs.md` → `.gsd/prefs.local.md`, last wins), defaulting to `'false'`. When disabled, `detectMode` short-circuits to `{ mode: 'normal', enabled: false, triggers: detectTriggers(cwd, opts), firedAxes: [], baseline: { available: false, plan: null } }` **without** running `runBaseline`'s dry-run trigger plan — the disabled path is deliberately cheap (no extra I/O) so that leaving the feature off costs nothing at every unit boundary. There is no separate "feature flag check" a consumer needs to perform: `mode` is already `normal` when disabled, so every consumer's existing `mode == "normal"` branch is the correct no-op path.
+
+A repo opts in by setting:
+
+```yaml
+maintenance:
+  enabled: true
+```
+
+in `forge-agent-prefs.md § Maintenance Settings` (repo-shared or local prefs layer). Turning it on only changes whether `detectMode` ever reports `mode: "maintenance"` — it does not retroactively touch anything already on disk, and turning it back off at any time returns the gate to its inert, `mode: "normal"`-always state (no partial/half-applied intermediate state is possible: the gate either announces+asks, or does nothing).
+
+The schema stamp (`fragment-store@2.0.0`) is entirely a consequence of this same opt-in: it is written **only** the first time a repo with `maintenance.enabled: true` runs a Step 5 apply that consolidates at least one axis (see Rule 5, above). A repo that never opts in — or opts in but never crosses a trigger threshold — never sees its `.gsd/SCHEMA-VERSION` change from `fragment-store@1.0.0`. Both stamps are members of `VALID_SCHEMAS` in `scripts/forge-doctor.js` and read identically through `listFragments()`'s unit-based enumeration (bucket-wins, loose-otherwise) — a `1.0.0` working copy and a `2.0.0` working copy with buckets project byte-identical `LEDGER.md`/`DECISIONS.md` output. See [`docs/fragment-store.md` § Layer 6](../docs/fragment-store.md) for the store-layer view of this same guarantee.
 
 ## Cross-references
 
-- `scripts/forge-maintenance-gate.js` — `detectMode(cwd, opts?)`, `renderRedWarning(detection)`; CLI `--detect [--cwd D]`.
-- `scripts/forge-maintenance-baseline.js` — `detectTriggers`, `runBaseline(cwd, { axes?, dryRun? })`, `MILESTONE_THRESHOLD`/`TASK_THRESHOLD`/`DECISIONS_THRESHOLD`.
+- `scripts/forge-maintenance-gate.js` — `detectMode(cwd, opts?)` (opt-in gated via `readPref`/`maintenance.enabled`), `renderRedWarning(detection)`; CLI `--detect [--cwd D]`.
+- `scripts/forge-maintenance-baseline.js` — `detectTriggers`, `runBaseline(cwd, { axes?, dryRun? })`, `stampBucketSchema(cwd)` (upgrade-only 2.0.0 stamp), `MILESTONE_THRESHOLD`/`TASK_THRESHOLD`/`DECISIONS_THRESHOLD`.
+- `scripts/forge-doctor.js` — `VALID_SCHEMAS` (`{fragment-store@1.0.0, fragment-store@2.0.0}`), `BUCKET_SCHEMA` (`= fragment-store@2.0.0`), `isValidSchema`.
+- `scripts/forge-cli-helpers.js` — `readPref(cwd, key, fallback)`, the 3-file prefs cascade reader used by the opt-in gate.
 - `scripts/forge-maintenance-vcs.js` — `precheckHistory`, `pullScoped`, `recheckAtCommit`, `resolveCollision`, `runCommitGuard`, `isRollupPath`, `appendEvent` (emits `maintenance-aborted-collision`).
 - `scripts/forge-maintenance.js` (S01) — `mergeBucket`, `normalizeText`, `bucketHash` — the deterministic-merge oracle referenced in the Determinism guarantee above.
 - `skills/forge-sweep/SKILL.md` — end-of-cycle/on-demand invocation (T03 wiring).

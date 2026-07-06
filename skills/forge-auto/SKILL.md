@@ -1248,6 +1248,7 @@ process.stdout.write(mode);
 ```
 
 - `MAINTENANCE_IN_AUTO == off` → skip this entire check — do not even run detection. Fall through to the Rate-limit handoff check.
+- The gate only ever fires in repos that opted in: `detectMode` (called below) resolves `maintenance.enabled` (default `false`) via the same prefs cascade — a repo that never sets `maintenance.enabled: true` always gets `mode: "normal"` back, so `forge-auto` never STOPs for it regardless of `MAINTENANCE_IN_AUTO`.
 - Otherwise, run detection (`shared/forge-maintenance.md § Step 1`):
   ```bash
   DETECT=$(node "$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js" --detect --cwd "$WORKING_DIR")

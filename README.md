@@ -131,6 +131,19 @@ developer, one branch).
 Migration from the pre-M001 monolith layout runs automatically during `/forge-update` and
 keeps a `.bak` copy of every monolith until you verify the projection matches.
 
+**Maintenance (opt-in, `fragment-store@2.0.0`).** Once an axis (milestones/tasks/decisions)
+accumulates enough loose finalized fragments, an operator-confirmed **maintenance** pass fuses
+them into deterministic rollup buckets (`.gsd/archive/{milestones,tasks}-rollup.md`,
+`.gsd/decisions/_rollup-<quarter>.md`) — a byte-deterministic merge, never an LLM
+summarization, so nothing is reworded or dropped. The whole feature is **inert by default**
+(`maintenance.enabled: false`); a repo opts in per-`forge-agent-prefs.md`, and only the first
+real consolidation stamps `.gsd/SCHEMA-VERSION` to `fragment-store@2.0.0` — `1.0.0` working
+copies keep reading and rendering byte-identically forever, opted-in or not. `/forge-sweep`
+and `forge-next` conduct the apply interactively (RED warning + per-axis double-confirm);
+`forge-auto` only ever announces and **STOPs** the loop when it fires — it never consolidates
+inline. See [docs/fragment-store.md § Layer 6](docs/fragment-store.md) and
+[shared/forge-maintenance.md](shared/forge-maintenance.md) for the full spec.
+
 For full details — layout, fragment schema, projection engine, migration, and doctor checks —
 see [docs/fragment-store.md](docs/fragment-store.md).
 

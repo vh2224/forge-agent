@@ -158,6 +158,8 @@ Drop when frontmatter has `status: closed`. Keep `status: open` sessions untouch
 
 The sweep policy above (AUTO-MEMORY/CHECKER-MEMORY prune events, milestone/task trim) is independent of the **maintenance gate** (`shared/forge-maintenance.md`) — the deterministic-consolidation handshake that fuses loose finalized units (`.gsd/ledger/`, `.gsd/decisions/`) into LOCKED rollup buckets once an axis (`milestones`/`tasks`/`ledgerDecisions`) crosses its threshold. `/forge-sweep` is the primary interactive surface for that gate (per `shared/forge-maintenance.md`'s consumer table). The operator must know the mode **before any write happens** (R3 of the shared spec), so this step runs first, ahead of the Inventory/preview flow, regardless of args.
 
+Detection itself respects `maintenance.enabled` (default `false`, resolved by `detectMode` via the standard prefs cascade) — the feature is entirely **inert until the repo opts in**; a repo that never sets `maintenance.enabled: true` always sees `mode: "normal"` here, regardless of how many loose finalized fragments exist.
+
 1. Resolve `FORGE_SCRIPTS_DIR` the same way the rest of this skill's Bootstrap guard does (local `./scripts` if present, else `~/.claude/scripts`).
 2. Shell-out (read-only, safe in any mode, including dry-run):
    ```bash

@@ -1,3 +1,21 @@
+## v1.37.0 (2026-07-06) — fragment-store maintenance: deterministic bucket rollup + schema 2.0.0 (opt-in)
+
+### Added
+
+- **Deterministic bucket-merge engine** (`scripts/forge-maintenance.js`) — pure, byte-deterministic merge of loose fragments into immutable rollup buckets (`mergeBucket`/`normalizeText`/`bucketHash`), never an LLM summarization.
+- **Count triggers + baseline** (`scripts/forge-maintenance-baseline.js`) — `detectTriggers` fires per axis (`milestones@30`, `tasks@30`, `ledgerDecisions@100` closed-quarter loose finalized units); `runBaseline` consolidates into the 3 LOCKED targets (`.gsd/archive/{milestones,tasks}-rollup.md`, `.gsd/decisions/_rollup-<quarter>.md`), `.bak`-protected with projection-lossless verify + abort/restore on any mismatch.
+- **VCS concurrency guard** (`scripts/forge-maintenance-vcs.js`) — read-only precheck before apply, byte-identity collision resolution at commit time (discard-if-identical, abort-loud-and-preserve-both if genuinely divergent), zero shell-string interpolation.
+- **Operator gate** (`scripts/forge-maintenance-gate.js`, [`shared/forge-maintenance.md`](shared/forge-maintenance.md)) — `/forge-sweep` and `forge-next` conduct the apply interactively (RED warning + per-axis double-confirm); `forge-auto` only announces and **STOPs** the loop on a fired trigger (sanctioned AUTONOMY-RULE exception) — it never consolidates inline. Headless `bin/forge-run` defers instead of blocking.
+- **Schema `fragment-store@2.0.0` (opt-in, upgrade-only)** — `.gsd/SCHEMA-VERSION` stays `1.0.0` until the first successful maintenance apply that actually consolidates something; `stampBucketSchema` never clobbers an existing `2.0.0` stamp. `forge-doctor.js`'s `VALID_SCHEMAS` accepts both `{1.0.0, 2.0.0}` for reading — a `1.0.0` working copy and a `2.0.0` working copy with buckets project byte-identical `LEDGER.md`/`DECISIONS.md` output.
+- **`maintenance.enabled` pref (default `false`)** — the entire feature is inert per repo until explicitly opted in via `forge-agent-prefs.md § Maintenance Settings`; `detectMode` short-circuits to `mode: "normal"` with no extra I/O when disabled.
+- `forge-smoke.js` Sections 20–23 — regression anchors for mixed-schema readers, the VCS guard, baseline+triggers, and the operator gate. Full smoke: 272 passed.
+
+### Notes
+
+- Two items flagged for milestone-end triage (documented as known limitations, not resolved): `isFinalized`'s active-unit exclusion has no TTL/staleness check against a crashed session's stale `forge-runs` record; `baselineAvailable`-only (no fired axis, but a project's very first finalized unit) currently forces the same `forge-auto` STOP as a real fired trigger — whether to downgrade that to a non-blocking informational note is an open product decision.
+
+---
+
 ## v1.35.0 (2026-06-15) — Multi-conta redesenhado: default vs launch, display por identidade, resume run-aware, cross-platform
 
 Revisão estrutural do multi-conta. Tudo backward-compatible (single-account e fluxos `use`/`forge-run` existentes seguem iguais).
