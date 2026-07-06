@@ -104,7 +104,7 @@ test('detectMode: below all thresholds, baseline already ran -> mode normal', ()
     const bucketDir = path.join(cwd, '.gsd', 'archive');
     fs.mkdirSync(bucketDir, { recursive: true });
     fs.writeFileSync(path.join(bucketDir, 'milestones-rollup.md'), '# milestones rollup\n');
-    const detection = detectMode(cwd, { activeIds: new Set() });
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
     assert(detection.mode === 'normal', `expected normal, got ${detection.mode}`);
     assert(detection.firedAxes.length === 0, 'no axis should be fired');
     assert(detection.baseline.available === false, 'baseline must not be "available" once a bucket already exists');
@@ -118,7 +118,7 @@ test('detectMode: milestones @30 fires -> mode maintenance, firedAxes includes m
   const cwd = mkTmp();
   try {
     seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD);
-    const detection = detectMode(cwd, { activeIds: new Set() });
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
     assert(detection.mode === 'maintenance', `expected maintenance, got ${detection.mode}`);
     const names = detection.firedAxes.map(f => f.axis);
     assert(names.includes('milestones'), 'firedAxes must include milestones');
@@ -134,7 +134,7 @@ test('detectMode: loose finalized units below threshold but no rollup buckets ->
   const cwd = mkTmp();
   try {
     seedFinalizedMilestones(cwd, 1); // well below threshold
-    const detection = detectMode(cwd, { activeIds: new Set() });
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
     assert(detection.baseline.available === true, 'baseline must be available (loose units exist, no buckets)');
     assert(detection.mode === 'maintenance', 'baseline-available alone must force mode maintenance');
     assert(detection.firedAxes.length === 0, 'no axis threshold fired in this fixture');
@@ -152,7 +152,7 @@ test('detectMode: after a real runBaseline (bucket exists), baseline is no longe
     // true -> baselineAvailable must be false (this is a subsequent axis
     // firing scenario, not a "first baseline" scenario).
     seedFinalizedMilestones(cwd, 1);
-    const detection = detectMode(cwd, { activeIds: new Set() });
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
     assert(detection.baseline.available === false, 'baseline must not be "available" once a rollup bucket exists');
   } finally {
     rmrf(cwd);
@@ -164,7 +164,7 @@ test('renderRedWarning: contains banner marker and one line per fired axis', () 
   const cwd = mkTmp();
   try {
     seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD);
-    const detection = detectMode(cwd, { activeIds: new Set() });
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
     const warning = renderRedWarning(detection);
     assert(/\x1b\[1;31m/.test(warning), 'must contain ANSI bold-red escape');
     assert(/⚠ MAINTENANCE/.test(warning), 'must contain boxed ⚠ MAINTENANCE header');
@@ -179,7 +179,7 @@ test('renderRedWarning: baseline-available fixture gets a BASELINE line', () => 
   const cwd = mkTmp();
   try {
     seedFinalizedMilestones(cwd, 1);
-    const detection = detectMode(cwd, { activeIds: new Set() });
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
     const warning = renderRedWarning(detection);
     assert(/BASELINE/.test(warning), 'must mention BASELINE when it is the first-ever consolidation');
   } finally {
@@ -230,6 +230,80 @@ test('runBaseline: default (no opts.axes) dry-run plan matches an explicit all-a
     const planDefault = runBaseline(cwd, { activeIds: new Set(), dryRun: true });
     const planAllAxes = runBaseline(cwd, { activeIds: new Set(), dryRun: true, axes: ['milestones', 'tasks', 'decisions'] });
     assert(JSON.stringify(planDefault) === JSON.stringify(planAllAxes), 'default axes must be byte-identical to an explicit all-axes call');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+// ── Opt-in gate (S06/T02) ─────────────────────────────────────────────────────
+// The feature must be default-inert: installing the tooling does not change
+// behavior until the repo explicitly sets maintenance.enabled: true.
+test('detectMode: default (no opts.enabled, no pref file) -> mode normal, enabled false, even when an axis would fire', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD);
+    const detection = detectMode(cwd, { activeIds: new Set() });
+    assert(detection.mode === 'normal', `expected normal, got ${detection.mode}`);
+    assert(detection.enabled === false, 'enabled must be false by default');
+    assert(detection.firedAxes.length === 0, 'firedAxes must be empty when disabled, even though the axis would fire');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('detectMode: opts.enabled explicitly false -> mode normal despite baseline-available fixture', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, 1); // would make baseline "available" if enabled
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: false });
+    assert(detection.mode === 'normal', `expected normal, got ${detection.mode}`);
+    assert(detection.enabled === false, 'enabled must reflect false');
+    assert(detection.baseline.available === false, 'baseline must be reported unavailable when disabled');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('detectMode: opts.enabled=true restores S05 behavior for a fired-axis fixture', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD);
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
+    assert(detection.mode === 'maintenance', `expected maintenance, got ${detection.mode}`);
+    assert(detection.enabled === true, 'enabled must be true');
+    assert(detection.firedAxes.map(f => f.axis).includes('milestones'), 'firedAxes must include milestones when enabled');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('detectMode: enabled field is a boolean in both the disabled and enabled branches', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, 1);
+    const off = detectMode(cwd, { activeIds: new Set(), enabled: false });
+    const on = detectMode(cwd, { activeIds: new Set(), enabled: true });
+    assert(typeof off.enabled === 'boolean', 'enabled must be boolean in disabled branch');
+    assert(typeof on.enabled === 'boolean', 'enabled must be boolean in enabled branch');
+    assert(off.enabled === false && on.enabled === true, 'enabled must reflect the resolved opt-in state');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('detectMode: reads maintenance.enabled from a real pref file (repo-level .gsd/claude-agent-prefs.md) when opts.enabled is not set', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD);
+    const prefsDir = path.join(cwd, '.gsd');
+    fs.mkdirSync(prefsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(prefsDir, 'claude-agent-prefs.md'),
+      'maintenance:\n  enabled: true\nother_section:\n  noop: true\n'
+    );
+    const detection = detectMode(cwd, { activeIds: new Set() });
+    assert(detection.enabled === true, 'must read maintenance.enabled: true from the repo prefs file');
+    assert(detection.mode === 'maintenance', 'must restore S05 behavior when the real pref says enabled: true');
   } finally {
     rmrf(cwd);
   }

@@ -34,6 +34,8 @@ const {
   DECISIONS_THRESHOLD,
 } = require('./forge-maintenance-baseline.js');
 
+const { readPref } = require('./forge-cli-helpers.js');
+
 // ── rollup bucket presence (no schema read) ──────────────────────────────────
 function _milestonesRollupPath(cwd) {
   return path.join(cwd, '.gsd', 'archive', 'milestones-rollup.md');
@@ -66,6 +68,26 @@ function _axisTargetLabel(axis, cwd) {
 // no writes). Baseline availability is an existsSync check only.
 function detectMode(cwd, opts) {
   opts = opts || {};
+
+  // ── opt-in gate (S06/T02) ───────────────────────────────────────────────
+  // The feature is inert by default: installing the tooling must never
+  // change behavior. Only when the repo explicitly sets
+  // `maintenance.enabled: true` does the trigger/baseline logic below run.
+  // Injectable via opts.enabled for tests (bypasses the prefs cascade).
+  const enabled =
+    typeof opts.enabled === 'boolean'
+      ? opts.enabled
+      : String(readPref(cwd, 'maintenance.enabled', 'false')).trim() === 'true';
+
+  if (!enabled) {
+    return {
+      mode: 'normal',
+      enabled: false,
+      triggers: detectTriggers(cwd, opts),
+      firedAxes: [],
+      baseline: { available: false, plan: null },
+    };
+  }
 
   const triggers = detectTriggers(cwd, opts);
   const plan = runBaseline(cwd, Object.assign({}, opts, { dryRun: true }));
@@ -111,6 +133,7 @@ function detectMode(cwd, opts) {
 
   return {
     mode,
+    enabled: true,
     triggers,
     firedAxes,
     baseline: { available: baselineAvailable, plan },

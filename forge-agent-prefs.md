@@ -675,8 +675,13 @@ Controla a postura do **maintenance gate** (`shared/forge-maintenance.md`) na fr
 
 ```
 maintenance:
+  enabled: false     # true | false   (default: false — opt-in per repo)
   in_auto: stop      # stop | defer | off   (default: stop)
 ```
+
+### Opt-in (`maintenance.enabled`)
+
+`maintenance.enabled` é o interruptor mestre, **default `false`**, resolvido em `detectMode` (`scripts/forge-maintenance-gate.js`, S06/T02) via a mesma cascata de prefs user→repo→local (`readPref`), com override injetável por teste via `opts.enabled`. Enquanto ausente ou `false`, `detectMode` retorna `mode:'normal'` e `firedAxes:[]` **mesmo que** algum eixo tenha cruzado o limiar ou `baseline.available` seja `true` — instalar a tooling de maintenance (S04–S06) **não muda nenhum comportamento observável** em nenhum repo até que ele opte explicitamente. Só depois de setar `maintenance.enabled: true` é que o comportamento S05 (detecção de eixos + RED warning + as posturas `in_auto` acima) volta a valer. Rodar a 1ª baseline (que exige o handshake manual do gate) é o que eleva o schema de fragmentos a `fragment-store@2.0.0` — a instalação por si só nunca força essa migração.
 
 ### Semântica
 

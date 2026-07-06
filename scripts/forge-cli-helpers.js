@@ -229,5 +229,5 @@ Flags:
 if (require.main === module) cliMain();
 
 module.exports = {
-  resolveRunFromArgs, listActiveSummary, newTaskId, refuseMessage, activateRun,
+  resolveRunFromArgs, listActiveSummary, newTaskId, refuseMessage, activateRun, readPref,
 };
