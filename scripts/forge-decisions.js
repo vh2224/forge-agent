@@ -331,6 +331,50 @@ function serializeFrontmatter(fragment) {
   return lines.join('\n');
 }
 
+// ── Bucket enumeration cache (memoization) ──────────────────────────────────
+// Mirrors forge-ledger.js's cache (S02 review follow-up #2). Key derived from
+// bucket FILE NAMES + BYTE LENGTHS only — never mtime, never Date (MEM002).
+// Decisions has no archive read path (buckets stay in-store as `_rollup-*.md`
+// — S02's listBucketUnits already covers it), so this only wraps that scan.
+const _bucketCache = new Map(); // cwd → { key, units, warnings }
+
+function _bucketCacheKey(dir) {
+  const parts = [];
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir)) {
+      if (f.startsWith('_rollup-') && f.endsWith('.md')) {
+        parts.push([f, fs.statSync(path.join(dir, f)).size]);
+      }
+    }
+  }
+  // Bytewise sort — localeCompare is FORBIDDEN in this family (MEM001).
+  parts.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return dir + '::' + JSON.stringify(parts);
+}
+
+function _getBucketUnits(cwd) {
+  const dir = decisionsDir(cwd);
+  const key = _bucketCacheKey(dir);
+  const cacheKey = cwd || process.cwd();
+
+  const cached = _bucketCache.get(cacheKey);
+  if (cached && cached.key === key) return cached;
+
+  const { listBucketUnits } = require('./forge-maintenance');
+  const { units, warnings } = listBucketUnits(dir, 'decisions');
+
+  const result = { key, units, warnings };
+  _bucketCache.set(cacheKey, result);
+  return result;
+}
+
+// ── _invalidateBucketCache ───────────────────────────────────────────────────
+// Explicit invalidation for the residual same-size-edit case (see
+// forge-ledger.js's twin for the full rationale).
+function _invalidateBucketCache(cwd) {
+  _bucketCache.delete(cwd || process.cwd());
+}
+
 // ── writeFragment ─────────────────────────────────────────────────────────────
 // Writes a DECISIONS fragment to disk.
 // fragment shape: { unit_id, decisions: [{when, scope, decision, choice, rationale, revisable}, ...], ...rest }
@@ -365,6 +409,28 @@ function writeFragment(cwd, fragment, opts) {
   const frontmatter = serializeFrontmatter(base);
   const body = base.body ? `\n${base.body}` : '';
   const content = `---\n${frontmatter}\n---\n${body}`;
+
+  // Shadow-guard (S02 review follow-up #1): once a unit is consolidated into
+  // a bucket (loose file deleted), writing it again must never create a
+  // silent shadow duplicate. The comparison is against the FINAL serialized
+  // content that WOULD be written (not merged with the bucket's decisions —
+  // buckets are frozen/consolidated, MEM005): identical → idempotent no-op;
+  // divergent → throw (surfaced lost-update, never silent).
+  if (!fs.existsSync(fpath)) {
+    const bucketEntry = listFragments(cwd).find(f => f.unitId === fragment.unit_id && f.bucket);
+    if (bucketEntry) {
+      // Compare through normalizeText (MEM005-frozen bucket normalization —
+      // trailing-newline collapse only) — mirrors forge-ledger.js's guard.
+      const { normalizeText } = require('./forge-maintenance');
+      if (normalizeText(content) === bucketEntry.content) {
+        return { path: bucketEntry.path, created: false };
+      }
+      throw new Error(
+        `writeFragment: unit "${fragment.unit_id}" is already consolidated into bucket ${bucketEntry.path} ` +
+        'with divergent content — refusing to write a silent shadow duplicate (lost-update).'
+      );
+    }
+  }
 
   // Idempotent check
   if (fs.existsSync(fpath)) {
@@ -423,12 +489,10 @@ function listFragments(cwd) {
     map.set(unitId, { unitId, path: path.join(dir, f) });
   }
 
-  // 2. Bucket units overwrite — bucket wins. Lazy require avoids a load-order
-  //    cycle (forge-maintenance requires forge-ledger, not forge-decisions, at
-  //    module-eval time, but lazy-require here is consistent + load-order-proof
-  //    regardless).
-  const { listBucketUnits } = require('./forge-maintenance');
-  const { units, warnings } = listBucketUnits(dir, 'decisions');
+  // 2. Bucket units overwrite — bucket wins. Folds in-store `_rollup-*.md`
+  //    units via the memoized `_getBucketUnits` helper (S02 review follow-up
+  //    #2 — kills the O(M×N) re-scan across repeated per-id lookups).
+  const { units, warnings } = _getBucketUnits(cwd);
   for (const w of warnings) {
     process.stderr.write(`[forge-decisions] warn: ${w}\n`);
   }
@@ -448,6 +512,7 @@ module.exports = {
   writeFragment,
   readFragment,
   listFragments,
+  _invalidateBucketCache,
 };
 
 // ── cliMain ───────────────────────────────────────────────────────────────────

@@ -192,6 +192,87 @@ function serializeFrontmatter(entry) {
   return lines.join('\n');
 }
 
+// ── Bucket enumeration cache (memoization) ──────────────────────────────────
+// Module-level, keyed by cwd. `listFragments`/`readFragment` used to re-scan
+// every bucket file (in-store `_rollup-*.md` + the two archive rollups) on
+// every call — O(M×N) across a migration loop (S02 review follow-up #2).
+// Cache key is derived from bucket FILE NAMES + BYTE LENGTHS only — NEVER
+// mtime, NEVER Date (MEM002) — so the key changes (self-invalidating) the
+// moment a relevant bucket file's size changes. `_invalidateBucketCache`
+// covers the residual case of a same-size edit.
+const _bucketCache = new Map(); // cwd → { key, units, warnings }
+
+function _archiveRollupPaths(cwd) {
+  const archiveDir = path.join(cwd || process.cwd(), '.gsd', 'archive');
+  return [
+    path.join(archiveDir, 'milestones-rollup.md'),
+    path.join(archiveDir, 'tasks-rollup.md'),
+  ];
+}
+
+function _bucketCacheKey(dir, archiveFiles) {
+  const parts = [];
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir)) {
+      if (f.startsWith('_rollup-') && f.endsWith('.md')) {
+        parts.push([f, fs.statSync(path.join(dir, f)).size]);
+      }
+    }
+  }
+  for (const ap of archiveFiles) {
+    if (fs.existsSync(ap)) {
+      parts.push([path.basename(ap), fs.statSync(ap).size]);
+    }
+  }
+  // Bytewise sort — localeCompare is FORBIDDEN in this family (MEM001).
+  parts.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return dir + '::' + JSON.stringify(parts);
+}
+
+// Returns { units, warnings } — the union of in-store bucket units (S02) and
+// units folded from the two known `.gsd/archive/*-rollup.md` files (this
+// task, additive). Only reads the archive files when they exist, so a store
+// with no archive rollups behaves exactly as before (S02 parity).
+function _getBucketUnits(cwd) {
+  const dir = ledgerDir(cwd);
+  const archiveFiles = _archiveRollupPaths(cwd);
+  const key = _bucketCacheKey(dir, archiveFiles);
+  const cacheKey = cwd || process.cwd();
+
+  const cached = _bucketCache.get(cacheKey);
+  if (cached && cached.key === key) return cached;
+
+  const { listBucketUnits, parseBucket, normalizeText } = require('./forge-maintenance');
+  const { units, warnings } = listBucketUnits(dir, 'ledger');
+
+  for (const ap of archiveFiles) {
+    if (!fs.existsSync(ap)) continue;
+    try {
+      const parsed = parseBucket(normalizeText(fs.readFileSync(ap, 'utf8')));
+      if (parsed.type !== 'ledger') {
+        warnings.push(`skipping archive bucket ${path.basename(ap)}: type mismatch (expected "ledger", got "${parsed.type}")`);
+        continue;
+      }
+      for (const u of parsed.units) units.push({ id: u.id, title: u.title, content: u.content, bucketPath: ap });
+    } catch (e) {
+      warnings.push(`skipping archive bucket ${path.basename(ap)}: ${e.message}`);
+    }
+  }
+
+  const result = { key, units, warnings };
+  _bucketCache.set(cacheKey, result);
+  return result;
+}
+
+// ── _invalidateBucketCache ───────────────────────────────────────────────────
+// Explicit invalidation, covering the residual case a byte-length-keyed cache
+// cannot catch on its own: a same-size edit to a bucket file. Callers that
+// mutate bucket files directly (e.g. T03's baseline, after each bucket write)
+// must call this for the cwd they touched.
+function _invalidateBucketCache(cwd) {
+  _bucketCache.delete(cwd || process.cwd());
+}
+
 // ── writeFragment ─────────────────────────────────────────────────────────────
 // Writes a LEDGER fragment to disk.
 // Validates entry.id before writing.
@@ -210,6 +291,29 @@ function writeFragment(cwd, entry, opts) {
   const frontmatter = serializeFrontmatter(entry);
   const body = entry.body ? `\n${entry.body}` : '';
   const content = `---\n${frontmatter}\n---\n${body}`;
+
+  // Shadow-guard (S02 review follow-up #1): once an id is consolidated into a
+  // bucket (loose file deleted), writing it again must never create a silent
+  // shadow duplicate that the unconditional bucket-wins dedup then hides
+  // forever. Identical content → idempotent no-op; divergent → throw
+  // (surfaced lost-update, never silent).
+  if (!fs.existsSync(fpath)) {
+    const bucketEntry = listFragments(cwd).find(f => f.id === entry.id && f.bucket);
+    if (bucketEntry) {
+      // Compare through normalizeText (MEM005-frozen bucket normalization —
+      // trailing-newline collapse only) so a semantically-identical write is
+      // never flagged divergent just because the bucket engine normalized
+      // trailing whitespace when it consolidated the unit.
+      const { normalizeText } = require('./forge-maintenance');
+      if (normalizeText(content) === bucketEntry.content) {
+        return { path: bucketEntry.path, created: false };
+      }
+      throw new Error(
+        `writeFragment: id "${entry.id}" is already consolidated into bucket ${bucketEntry.path} ` +
+        'with divergent content — refusing to write a silent shadow duplicate (lost-update).'
+      );
+    }
+  }
 
   // Idempotent check — read before acquiring lock to avoid unnecessary contention
   if (fs.existsSync(fpath)) {
@@ -275,14 +379,10 @@ function listFragments(cwd) {
     map.set(id, { id, path: path.join(dir, f) });
   }
 
-  // 2. Bucket units overwrite — bucket wins. Lazy require to avoid a load-order
-  //    cycle: forge-maintenance requires forge-ledger (for parseFragment) at
-  //    module-eval time, so requiring it back at the top of this file would
-  //    race depending on which module loads first. Lazy inside the function
-  //    body is load-order-proof (both modules are fully initialized by the
-  //    time any function actually runs).
-  const { listBucketUnits } = require('./forge-maintenance');
-  const { units, warnings } = listBucketUnits(dir, 'ledger');
+  // 2. Bucket units overwrite — bucket wins. Folds in-store `_rollup-*.md`
+  //    units (S02) AND units from `.gsd/archive/{milestones,tasks}-rollup.md`
+  //    (this task, additive) via the memoized `_getBucketUnits` helper.
+  const { units, warnings } = _getBucketUnits(cwd);
   for (const w of warnings) {
     process.stderr.write(`[forge-ledger] warn: ${w}\n`);
   }
@@ -554,6 +654,7 @@ module.exports = {
   readFragment,
   listFragments,
   parseFragment,
+  _invalidateBucketCache,
 };
 
 // ── Guarded CLI invocation ────────────────────────────────────────────────────
