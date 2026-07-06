@@ -40,6 +40,11 @@ const memoryMigrate    = require('./forge-memory-migrate');
 // ── Store descriptors ───────────────────────────────────────────────────────
 // Each descriptor knows how to count fragments and how to count entries in the
 // legacy monolith (reusing the migrators' own parsers — no ad-hoc regex).
+// fragments = logical units (loose fragments + entries inside closed
+// `_rollup-*.md` buckets) — counting delegated to each store's listFragments
+// (S02). No logic change here: this file already counted via
+// `listFragments(cwd).length`, so it became bucket-aware transitively the
+// moment forge-ledger/forge-decisions listFragments started flattening buckets.
 const STORES = [
   {
     name: 'ledger',

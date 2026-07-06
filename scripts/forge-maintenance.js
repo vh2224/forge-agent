@@ -88,6 +88,9 @@
 //   sortKey(id, writtenAt)           → string
 //   parseBucket(content)             → { type, units: [{ id, title, content }] }
 //   bucketHash(content)              → string (sha256 hex)
+//   listBucketUnits(dir)             → { units, warnings } — S02 addition, read-side
+//                                        helper; not part of the frozen v1 merge
+//                                        contract above.
 //
 // CLI:
 //   node forge-maintenance.js --merge --out <path> [--type <t>] [--dry-run] [--cwd <dir>] <frag...>
@@ -294,6 +297,29 @@ function mergeBucket(fragmentPaths, opts) {
   return { content, hash, units: unitsArr.map(u => u.id), skipped, conflicted };
 }
 
+// ── listBucketUnits ───────────────────────────────────────────────────────────
+// S02 addition — read-side helper; not part of the frozen v1 merge contract.
+// Scans dir for closed buckets (_rollup-*.md) and returns their units flat.
+// Deterministic: bucket filenames sorted bytewise; units in bucket order.
+// Lenient per-bucket: an unparseable bucket is skipped with a warning — safe
+// because a fully-consolidated store with a corrupt bucket degrades to
+// fragments:0, which the existing 'unmigrated' write guard already blocks.
+function listBucketUnits(dir) {
+  const units = []; const warnings = [];
+  if (!fs.existsSync(dir)) return { units, warnings };
+  const buckets = fs.readdirSync(dir)
+    .filter(f => f.startsWith('_rollup-') && f.endsWith('.md'))
+    .sort(); // bytewise — deterministic, never readdir order
+  for (const b of buckets) {
+    const bucketPath = path.join(dir, b);
+    try {
+      const parsed = parseBucket(normalizeText(fs.readFileSync(bucketPath, 'utf8')));
+      for (const u of parsed.units) units.push({ id: u.id, title: u.title, content: u.content, bucketPath });
+    } catch (e) { warnings.push(`skipping bucket ${b}: ${e.message}`); }
+  }
+  return { units, warnings };
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
@@ -413,7 +439,7 @@ function cliMain(argv) {
   return 2;
 }
 
-module.exports = { mergeBucket, normalizeText, anchorHeader, sortKey, parseBucket, bucketHash };
+module.exports = { mergeBucket, normalizeText, anchorHeader, sortKey, parseBucket, bucketHash, listBucketUnits };
 
 if (require.main === module) {
   process.exit(cliMain(process.argv.slice(2)));

@@ -385,38 +385,58 @@ function writeFragment(cwd, fragment, opts) {
 }
 
 // ── readFragment ──────────────────────────────────────────────────────────────
-// Reads and parses a DECISIONS fragment. Returns null if the file does not exist.
+// Reads and parses a DECISIONS fragment. Returns null if the unit does not
+// exist as a loose fragment OR as a unit inside a closed bucket (bucket-aware
+// — S02). Always resolves via listFragments() so the same bucket-wins
+// precedence applies to both listing and single-id lookup.
 function readFragment(cwd, unitId) {
-  let fpath;
-  try {
-    fpath = fragmentPath(cwd, unitId);
-  } catch (e) {
-    throw e; // propagate invalid id error
-  }
+  fragmentPath(cwd, unitId); // throws if invalid id
 
-  if (!fs.existsSync(fpath)) return null;
-  const text = fs.readFileSync(fpath, 'utf8');
+  const entry = listFragments(cwd).find(f => f.unitId === unitId);
+  if (!entry) return null;
+  if (entry.content != null) return parseFragment(entry.content); // unit from a bucket
+  const text = fs.readFileSync(entry.path, 'utf8');
   return parseFragment(text);
 }
 
 // ── listFragments ─────────────────────────────────────────────────────────────
-// Lists all fragment files in the decisions directory.
-// Returns Array<{ unitId, path }> sorted by unitId ascending.
+// Lists all logical DECISIONS units: loose fragment files (S01, unchanged
+// shape) PLUS units flattened from closed `_rollup-*.md` buckets (S02
+// addition).
+// Returns Array<{ unitId, path, content?, bucket? }> sorted by unitId ascending.
+//   - Loose fragment: { unitId, path }                        (S01 shape — unchanged)
+//   - Bucket unit:     { unitId, path: bucketPath, content, bucket: true }
+// Dedup precedence: BUCKET WINS (same rationale as forge-ledger.listFragments
+// — consistent with forge-maintenance.mergeBucket's write-path).
 // Returns [] if the directory does not exist.
 function listFragments(cwd) {
   const dir = decisionsDir(cwd);
   if (!fs.existsSync(dir)) return [];
 
   const files = fs.readdirSync(dir);
-  const fragments = files
-    .filter(f => f.endsWith('.md'))
-    .map(f => ({
-      unitId: f.slice(0, -3), // strip .md
-      path: path.join(dir, f),
-    }))
-    .sort((a, b) => a.unitId.localeCompare(b.unitId));
+  const map = new Map(); // unitId → entry
 
-  return fragments;
+  // 1. Loose fragments first (`_`-prefix reserved for buckets).
+  for (const f of files) {
+    if (!f.endsWith('.md') || f.startsWith('_')) continue;
+    const unitId = f.slice(0, -3); // strip .md
+    map.set(unitId, { unitId, path: path.join(dir, f) });
+  }
+
+  // 2. Bucket units overwrite — bucket wins. Lazy require avoids a load-order
+  //    cycle (forge-maintenance requires forge-ledger, not forge-decisions, at
+  //    module-eval time, but lazy-require here is consistent + load-order-proof
+  //    regardless).
+  const { listBucketUnits } = require('./forge-maintenance');
+  const { units, warnings } = listBucketUnits(dir);
+  for (const w of warnings) {
+    process.stderr.write(`[forge-decisions] warn: ${w}\n`);
+  }
+  for (const u of units) {
+    map.set(u.id, { unitId: u.id, path: u.bucketPath, content: u.content, bucket: true });
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.unitId.localeCompare(b.unitId));
 }
 
 // ── Module exports ────────────────────────────────────────────────────────────

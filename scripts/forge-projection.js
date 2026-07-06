@@ -56,6 +56,12 @@ const MEMORY_CAP = 50;
 // as "most recent" (forge-dashboard readLedgerTail) surface a stale milestone.
 // Fragments without completed_at sort first (treated as oldest).
 // Mirrors the legacy LEDGER.md block shape produced by forge-completer.
+// Caveat (not a bug): byte-identity of the projection pre/post-consolidation
+// holds for LF-normalized fragments (everything the forge writes via
+// writeAtomic). A CRLF-tainted loose fragment would have its `\r` bytes
+// normalized away the moment it enters a bucket (forge-maintenance D2) — the
+// post-consolidation projection then differs only in those whitespace bytes.
+// The S04 consolidation gate is where this is actually caught/enforced.
 function renderLedger(cwd) {
   const fragments = ledgerMod.listFragments(cwd);
   const lines = ['# Forge Project Ledger', ''];
@@ -67,14 +73,17 @@ function renderLedger(cwd) {
     return lines.join('\n') + '\n';
   }
 
-  // Parse everything up-front — ordering needs completed_at from the frontmatter
+  // Parse everything up-front — ordering needs completed_at from the frontmatter.
+  // f.content is present when the unit came from a closed bucket (S02) — use it
+  // directly instead of re-reading f.path (which points at the bucket file, not
+  // a standalone fragment). Falls back to reading f.path for loose fragments.
   const parsed = [];
-  for (const { id, path: fpath } of fragments) {
+  for (const f of fragments) {
     try {
-      const text = fs.readFileSync(fpath, 'utf8');
-      parsed.push({ id, frag: ledgerMod.parseFragment(text) });
+      const text = (f.content != null) ? f.content : fs.readFileSync(f.path, 'utf8');
+      parsed.push({ id: f.id, frag: ledgerMod.parseFragment(text) });
     } catch (e) {
-      process.stderr.write(`[forge-projection] warn: skipping ledger fragment ${id}: ${e.message}\n`);
+      process.stderr.write(`[forge-projection] warn: skipping ledger fragment ${f.id}: ${e.message}\n`);
     }
   }
 
@@ -140,10 +149,13 @@ function renderDecisions(cwd) {
   const allDecisions = [];
   const legacyOrphanBodies = [];
 
-  for (const { unitId, path: fpath } of fragments) {
+  for (const f of fragments) {
+    const unitId = f.unitId;
     let frag;
     try {
-      const text = fs.readFileSync(fpath, 'utf8');
+      // f.content is present for units flattened from a closed bucket (S02) —
+      // use it directly instead of re-reading f.path (the bucket file).
+      const text = (f.content != null) ? f.content : fs.readFileSync(f.path, 'utf8');
       frag = decisionsMod.parseFragment(text);
     } catch (e) {
       process.stderr.write(`[forge-projection] warn: skipping decisions fragment ${unitId}: ${e.message}\n`);
@@ -483,7 +495,9 @@ function renderChecker(cwd) {
 
 // ── maxMtime ──────────────────────────────────────────────────────────────────
 // Recursively finds the maximum mtime (ms) of all .md files in a directory.
-// Returns 0 if directory does not exist or is empty.
+// Returns 0 if directory does not exist or is empty. Already covers bucket
+// files transparently — `_rollup-*.md` buckets live in the same store dir and
+// end in `.md`, so no separate bucket-mtime scan is needed here (S02).
 function maxMtime(dir) {
   if (!fs.existsSync(dir)) return 0;
   let max = 0;

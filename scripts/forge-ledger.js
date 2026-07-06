@@ -234,38 +234,63 @@ function writeFragment(cwd, entry, opts) {
 
 // ── readFragment ──────────────────────────────────────────────────────────────
 // Reads and parses a LEDGER fragment (milestone or task). Returns null if the
-// file does not exist.
+// file does not exist as a loose fragment OR as a unit inside a closed bucket
+// (bucket-aware — S02). Always resolves via listFragments() so the same
+// bucket-wins precedence applies to both listing and single-id lookup.
 function readFragment(cwd, id) {
-  let fpath;
-  try {
-    fpath = fragmentPath(cwd, id);
-  } catch (e) {
-    throw e; // propagate invalid id error
-  }
+  // Validate the id up front — propagate the same error shape as before for
+  // invalid ids, regardless of loose/bucket location.
+  fragmentPath(cwd, id); // throws if invalid id
 
-  if (!fs.existsSync(fpath)) return null;
-  const text = fs.readFileSync(fpath, 'utf8');
+  const entry = listFragments(cwd).find(f => f.id === id);
+  if (!entry) return null;
+  if (entry.content != null) return parseFragment(entry.content); // unit from a bucket
+  const text = fs.readFileSync(entry.path, 'utf8');
   return parseFragment(text);
 }
 
 // ── listFragments ─────────────────────────────────────────────────────────────
-// Lists all fragment files in the ledger directory.
-// Returns Array<{ id, path }> sorted by id ascending.
+// Lists all logical LEDGER units: loose fragment files (S01, unchanged shape)
+// PLUS units flattened from closed `_rollup-*.md` buckets (S02 addition).
+// Returns Array<{ id, path, content?, bucket? }> sorted by id ascending.
+//   - Loose fragment: { id, path }                         (S01 shape — unchanged)
+//   - Bucket unit:     { id, path: bucketPath, content, bucket: true }
+// Dedup precedence: BUCKET WINS. Consistent with forge-maintenance.mergeBucket's
+// write-path, where an existing bucket entry always wins verbatim over an
+// incoming duplicate — read-path and write-path agreeing keeps the projection
+// stable across a consolidate/re-merge cycle.
 // Returns [] if the directory does not exist.
 function listFragments(cwd) {
   const dir = ledgerDir(cwd);
   if (!fs.existsSync(dir)) return [];
 
   const files = fs.readdirSync(dir);
-  const fragments = files
-    .filter(f => f.endsWith('.md'))
-    .map(f => ({
-      id: f.slice(0, -3), // strip .md
-      path: path.join(dir, f),
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+  const map = new Map(); // id → entry
 
-  return fragments;
+  // 1. Loose fragments first (`_`-prefix is reserved for buckets — never a
+  //    loose unit id, so it must be excluded here).
+  for (const f of files) {
+    if (!f.endsWith('.md') || f.startsWith('_')) continue;
+    const id = f.slice(0, -3); // strip .md
+    map.set(id, { id, path: path.join(dir, f) });
+  }
+
+  // 2. Bucket units overwrite — bucket wins. Lazy require to avoid a load-order
+  //    cycle: forge-maintenance requires forge-ledger (for parseFragment) at
+  //    module-eval time, so requiring it back at the top of this file would
+  //    race depending on which module loads first. Lazy inside the function
+  //    body is load-order-proof (both modules are fully initialized by the
+  //    time any function actually runs).
+  const { listBucketUnits } = require('./forge-maintenance');
+  const { units, warnings } = listBucketUnits(dir);
+  for (const w of warnings) {
+    process.stderr.write(`[forge-ledger] warn: ${w}\n`);
+  }
+  for (const u of units) {
+    map.set(u.id, { id: u.id, path: u.bucketPath, content: u.content, bucket: true });
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 // ── cliMain ───────────────────────────────────────────────────────────────────
