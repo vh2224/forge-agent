@@ -1553,6 +1553,67 @@ function smokeMaintenanceBaseline() {
     '(b) forge-maintenance-baseline.js does NOT contain Math.random (determinism guard)', 'forbidden Math.random found');
 }
 
+// ── Section 23: S05 gate regression anchor ───────
+function smokeMaintenanceGate() {
+  process.stdout.write('\n▸ Section 23: S05 gate regression anchor\n');
+
+  // (a) spawn the gate test suite — it must exit 0 on its own.
+  const suite = path.join(SCRIPTS, 'forge-maintenance-gate.test.js');
+  const res = spawnSync(process.execPath, [suite], { encoding: 'utf8' });
+  assert(res.status === 0,
+    'forge-maintenance-gate.test.js exits 0',
+    `status ${res.status}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  // (b) gate helper spec-greps — strip comment lines first, same
+  // anti-false-positive trick as Section 22 (the module's own header
+  // comment names the forbidden tokens by name).
+  const rawSrc = fs.readFileSync(path.join(SCRIPTS, 'forge-maintenance-gate.js'), 'utf8');
+  const src = rawSrc.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+
+  for (const name of ['detectMode', 'renderRedWarning']) {
+    const re = new RegExp(`module\\.exports[\\s\\S]*${name}`);
+    assert(re.test(src),
+      `(b) forge-maintenance-gate.js exports ${name}`, `${name} not exported`);
+  }
+
+  assert(!src.includes('localeCompare'),
+    '(b) forge-maintenance-gate.js does NOT contain localeCompare (MEM001)', 'forbidden localeCompare found');
+  assert(!src.includes('.mtime'),
+    '(b) forge-maintenance-gate.js does NOT contain .mtime (MEM001/MEM002)', 'forbidden .mtime found');
+  assert(!src.includes('Math.random'),
+    '(b) forge-maintenance-gate.js does NOT contain Math.random (determinism guard)', 'forbidden Math.random found');
+
+  // (c) shared spec greps — pin the three events + per-axis double-confirm.
+  const ROOT = path.join(SCRIPTS, '..');
+  const specSrc = fs.readFileSync(path.join(ROOT, 'shared', 'forge-maintenance.md'), 'utf8');
+  for (const literal of ['maintenance-detected', 'maintenance-confirmed', 'maintenance-applied', 'POR EIXO']) {
+    assert(specSrc.includes(literal),
+      `(c) shared/forge-maintenance.md contains ${literal}`, `${literal} not found`);
+  }
+
+  // (d) skill greps — pin the STOP/AUTONOMY-exception language and the announce language.
+  const autoSrc = fs.readFileSync(path.join(ROOT, 'skills', 'forge-auto', 'SKILL.md'), 'utf8');
+  assert(/maintenance/i.test(autoSrc),
+    '(d) skills/forge-auto/SKILL.md mentions maintenance', 'maintenance not found');
+  assert(autoSrc.includes('STOP'),
+    '(d) skills/forge-auto/SKILL.md contains STOP', 'STOP not found');
+  assert(autoSrc.includes('AUTONOMY-RULE'),
+    '(d) skills/forge-auto/SKILL.md contains AUTONOMY-RULE exception language', 'AUTONOMY-RULE not found');
+
+  const sweepSrc = fs.readFileSync(path.join(ROOT, 'skills', 'forge-sweep', 'SKILL.md'), 'utf8');
+  assert(sweepSrc.includes('SWEEP NORMAL'),
+    '(d) skills/forge-sweep/SKILL.md contains SWEEP NORMAL', 'SWEEP NORMAL not found');
+  assert(sweepSrc.includes('SWEEP PRECISA DE MAINTENANCE'),
+    '(d) skills/forge-sweep/SKILL.md contains SWEEP PRECISA DE MAINTENANCE', 'SWEEP PRECISA DE MAINTENANCE not found');
+
+  // (e) pref grep — maintenance.in_auto.
+  const prefsSrc = fs.readFileSync(path.join(ROOT, 'forge-agent-prefs.md'), 'utf8');
+  assert(/maintenance:/.test(prefsSrc),
+    '(e) forge-agent-prefs.md contains maintenance:', 'maintenance: not found');
+  assert(/in_auto:/.test(prefsSrc),
+    '(e) forge-agent-prefs.md contains in_auto:', 'in_auto: not found');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1582,6 +1643,7 @@ function main() {
     smokeFragmentStoreCompat();
     smokeMaintenanceVcs();
     smokeMaintenanceBaseline();
+    smokeMaintenanceGate();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
