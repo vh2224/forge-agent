@@ -12,7 +12,27 @@
 //   currentQuarter(now?)             → 'YYYY-QN'  (the ONLY place Date may appear)
 //   isClosedQuarter(q, now?)         → boolean
 //   detectTriggers(cwd, opts?)       → { milestones, tasks, ledgerDecisions }
+//   consolidateAxis(cwd, { units, target, type, invalidate }) → { target, unitIds, bytes, hash }
+//   runBaseline(cwd, opts?)          → { dryRun } | { applied, milestones, tasks, ledgerDecisions, verified }
 //   MILESTONE_THRESHOLD / TASK_THRESHOLD / DECISIONS_THRESHOLD
+//
+// runBaseline (T03) is the actual consolidation: fuses every LOOSE finalized
+// unit per axis into the LOCKED targets (R1):
+//   milestones → .gsd/archive/milestones-rollup.md   (type 'ledger')
+//   tasks      → .gsd/archive/tasks-rollup.md         (type 'ledger')
+//   decisions  → .gsd/decisions/_rollup-<YYYY-QN>.md  (type 'decisions', per CLOSED quarter)
+// Every source loose fragment is `.bak`-ed before deletion; the projection
+// (renderLedger/renderDecisions) is verified byte-identical BEFORE physical
+// deletion completes — on ANY mismatch the run ABORTS, restores every source
+// from its `.bak`, and removes the just-written buckets (no data loss ever).
+// Every written target is asserted against `isRollupPath()` (S03 handoff) —
+// a target that doesn't satisfy it would leave the VCS guard blind to it.
+// Does NOT bump `.gsd/SCHEMA-VERSION` — that opt-in write is S06's job.
+//
+// CLI:
+//   node forge-maintenance-baseline.js --dry-run [--cwd <dir>]
+//   node forge-maintenance-baseline.js --baseline [--cwd <dir>]
+//   node forge-maintenance-baseline.js --help
 //
 // Determinism invariants (hard, per S04 CONTEXT + plan):
 //   - NO Math.random, NO mtime, NO localeCompare anywhere in this module.
@@ -29,6 +49,10 @@ const ledger = require('./forge-ledger.js');
 const decisions = require('./forge-decisions.js');
 const runs = require('./forge-runs.js');
 const state = require('./forge-state.js');
+const { mergeBucket } = require('./forge-maintenance.js');
+const { writeAtomic } = require('./forge-yaml-safe.js');
+const { renderLedger, renderDecisions } = require('./forge-projection.js');
+const { isRollupPath } = require('./forge-maintenance-vcs.js');
 
 // ── Thresholds — named constants so S05/prefs can reference them ────────────
 const MILESTONE_THRESHOLD = 30;
@@ -200,13 +224,301 @@ function detectTriggers(cwd, opts) {
   };
 }
 
+// ── rollup target path helpers ───────────────────────────────────────────────
+function _milestonesTarget(cwd) {
+  return path.join(cwd, '.gsd', 'archive', 'milestones-rollup.md');
+}
+function _tasksTarget(cwd) {
+  return path.join(cwd, '.gsd', 'archive', 'tasks-rollup.md');
+}
+function _decisionsTarget(cwd, quarter) {
+  return path.join(cwd, '.gsd', 'decisions', `_rollup-${quarter}.md`);
+}
+
+// ── _assertRollupPath (runtime guard, not just a test) ───────────────────────
+// S03 handoff: every rollup file this module writes MUST satisfy
+// isRollupPath() or the VCS commit guard goes blind to it. This is a real
+// runtime assertion — a broken target name fails LOUD, not silently.
+function _assertRollupPath(cwd, absTarget) {
+  const rel = path.relative(cwd, absTarget).replace(/\\/g, '/');
+  if (!isRollupPath(rel)) {
+    throw new Error(
+      `Internal error: rollup target "${rel}" does not satisfy isRollupPath() — refusing to write (VCS guard would go blind to it)`
+    );
+  }
+}
+
+// ── consolidateAxis ───────────────────────────────────────────────────────────
+// Given an EXPLICIT list of loose fragment paths (`units`), a `target` path,
+// and a bucket `type`, fuses them into the target bucket via mergeBucket
+// (frozen, S01 — sorts internally; baseline performs NO ordering of its own),
+// writes it atomically, then invalidates the owning store's bucket cache so
+// the post-write projection reflects the new bucket immediately.
+// Returns { target, unitIds, bytes, hash }.
+function consolidateAxis(cwd, opts) {
+  opts = opts || {};
+  const units = opts.units || [];
+  const target = opts.target;
+  const type = opts.type || 'generic';
+  const invalidate = opts.invalidate;
+
+  _assertRollupPath(cwd, target);
+
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+
+  let existing = null;
+  if (fs.existsSync(target)) {
+    existing = fs.readFileSync(target, 'utf8');
+  }
+
+  const result = mergeBucket(units, { type, existing });
+  writeAtomic(target, result.content, { cwd });
+
+  if (typeof invalidate === 'function') invalidate(cwd);
+
+  return {
+    target,
+    unitIds: result.units,
+    bytes: Buffer.byteLength(result.content, 'utf8'),
+    hash: result.hash,
+  };
+}
+
+// ── _gatherEligibility (internal) ────────────────────────────────────────────
+// Enumerates loose finalized units per axis, mirroring detectTriggers' walk
+// but returning the actual paths/ids needed to consolidate (not just counts).
+// Decisions are grouped by deriveQuarter, closed-quarter only.
+function _gatherEligibility(cwd, opts) {
+  opts = opts || {};
+  const now = opts.now;
+
+  const milestoneIds = [];
+  const milestonePaths = [];
+  const taskIds = [];
+  const taskPaths = [];
+
+  const ledgerEntries = ledger.listFragments(cwd).filter(e => !e.bucket);
+  for (const entry of ledgerEntries) {
+    if (!isFinalized(cwd, entry.id, opts)) continue;
+    const kind = ids.entityKind(entry.id);
+    if (kind === 'milestone') {
+      milestoneIds.push(entry.id);
+      milestonePaths.push(entry.path);
+    } else if (kind === 'task') {
+      taskIds.push(entry.id);
+      taskPaths.push(entry.path);
+    }
+  }
+
+  const byQuarter = new Map(); // quarter → { ids, paths }
+  const decisionEntries = decisions.listFragments(cwd).filter(e => !e.bucket);
+  for (const entry of decisionEntries) {
+    if (!isFinalized(cwd, entry.unitId, opts)) continue;
+    const q = deriveQuarter(entry.unitId, opts.writtenAtFor ? opts.writtenAtFor(entry.unitId) : undefined);
+    if (!isClosedQuarter(q, now)) continue;
+    if (!byQuarter.has(q)) byQuarter.set(q, { ids: [], paths: [] });
+    const g = byQuarter.get(q);
+    g.ids.push(entry.unitId);
+    g.paths.push(entry.path);
+  }
+
+  return { milestoneIds, milestonePaths, taskIds, taskPaths, byQuarter };
+}
+
+// ── _restoreBackups / _removeTargets (internal, abort path) ──────────────────
+function _restoreBackups(backups) {
+  for (const src of backups) {
+    const bak = src + '.bak';
+    if (fs.existsSync(bak)) {
+      fs.copyFileSync(bak, src);
+    }
+  }
+}
+function _removeTargets(paths) {
+  for (const t of paths) {
+    try { fs.unlinkSync(t); } catch { /* noop — may never have been written */ }
+  }
+}
+
+// ── runBaseline ───────────────────────────────────────────────────────────────
+// opts may inject { now, dryRun, _forceMismatch, activeIds, writtenAtFor } —
+// the last two pass through to isFinalized/_gatherEligibility for tests.
+// _forceMismatch is test-only: forces the abort+restore path deterministically.
+function runBaseline(cwd, opts) {
+  opts = opts || {};
+  const now = opts.now;
+  const elig = _gatherEligibility(cwd, opts);
+  const quarters = Array.from(elig.byQuarter.keys()).sort(); // bytewise (default string sort)
+
+  const milestonesTarget = _milestonesTarget(cwd);
+  const tasksTarget = _tasksTarget(cwd);
+
+  if (opts.dryRun) {
+    return {
+      dryRun: true,
+      milestones: { count: elig.milestoneIds.length, target: milestonesTarget, unitIds: elig.milestoneIds },
+      tasks: { count: elig.taskIds.length, target: tasksTarget, unitIds: elig.taskIds },
+      ledgerDecisions: {
+        perQuarter: quarters.map(q => ({
+          quarter: q,
+          count: elig.byQuarter.get(q).ids.length,
+          target: _decisionsTarget(cwd, q),
+        })),
+        closedQuarterCount: quarters.reduce((sum, q) => sum + elig.byQuarter.get(q).ids.length, 0),
+      },
+    };
+  }
+
+  // (a) snapshot pre-consolidation projection.
+  const before = { ledger: renderLedger(cwd), decisions: renderDecisions(cwd) };
+
+  const allSourcePaths = [...elig.milestonePaths, ...elig.taskPaths];
+  for (const q of quarters) allSourcePaths.push(...elig.byQuarter.get(q).paths);
+
+  // (b) .bak every source loose fragment BEFORE anything is written/deleted.
+  const backups = [];
+  for (const src of allSourcePaths) {
+    fs.copyFileSync(src, src + '.bak');
+    backups.push(src);
+  }
+
+  const writtenTargets = [];
+  let milestonesResult = { target: milestonesTarget, unitIds: [] };
+  let tasksResult = { target: tasksTarget, unitIds: [] };
+  const ledgerDecisionsResult = { perQuarter: [] };
+
+  try {
+    // (c) consolidate each axis.
+    if (elig.milestonePaths.length > 0) {
+      milestonesResult = consolidateAxis(cwd, {
+        units: elig.milestonePaths, target: milestonesTarget, type: 'ledger', invalidate: ledger._invalidateBucketCache,
+      });
+      writtenTargets.push(milestonesTarget);
+    }
+    if (elig.taskPaths.length > 0) {
+      tasksResult = consolidateAxis(cwd, {
+        units: elig.taskPaths, target: tasksTarget, type: 'ledger', invalidate: ledger._invalidateBucketCache,
+      });
+      writtenTargets.push(tasksTarget);
+    }
+    for (const q of quarters) {
+      const g = elig.byQuarter.get(q);
+      const target = _decisionsTarget(cwd, q);
+      const r = consolidateAxis(cwd, {
+        units: g.paths, target, type: 'decisions', invalidate: decisions._invalidateBucketCache,
+      });
+      ledgerDecisionsResult.perQuarter.push({ quarter: q, target, unitIds: r.unitIds });
+      writtenTargets.push(target);
+    }
+
+    // (d) delete the consumed loose source fragments — only after every
+    // bucket write above succeeded.
+    for (const src of allSourcePaths) {
+      fs.unlinkSync(src);
+    }
+
+    // (e) invalidate both stores' bucket caches.
+    ledger._invalidateBucketCache(cwd);
+    decisions._invalidateBucketCache(cwd);
+
+    // (f) post-consolidation projection — must be byte-identical to `before`.
+    const after = { ledger: renderLedger(cwd), decisions: renderDecisions(cwd) };
+
+    if (opts._forceMismatch || after.ledger !== before.ledger || after.decisions !== before.decisions) {
+      throw new Error(
+        'runBaseline: projection mismatch detected after consolidation — aborting and restoring from .bak. '
+        + `ledgerMatch=${after.ledger === before.ledger} decisionsMatch=${after.decisions === before.decisions}`
+      );
+    }
+
+    return {
+      applied: true,
+      milestones: milestonesResult,
+      tasks: tasksResult,
+      ledgerDecisions: ledgerDecisionsResult,
+      verified: true,
+    };
+  } catch (e) {
+    // Abort path: restore every source from its .bak, remove any bucket
+    // written this run, and re-invalidate caches — no data loss regardless
+    // of which step failed (mismatch, or an earlier consolidateAxis/unlink
+    // error). Idempotent: restoring an untouched source is a no-op overwrite.
+    _restoreBackups(backups);
+    _removeTargets(writtenTargets);
+    ledger._invalidateBucketCache(cwd);
+    decisions._invalidateBucketCache(cwd);
+    throw e;
+  }
+}
+
+// ── CLI ───────────────────────────────────────────────────────────────────────
+function parseArgs(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--dry-run') out.dryRun = true;
+    else if (a === '--baseline') out.baseline = true;
+    else if (a === '--cwd') out.cwd = argv[++i];
+    else if (a === '--help' || a === '-h') out.help = true;
+    else out._.push(a);
+  }
+  return out;
+}
+
+function printHelp() {
+  console.log([
+    'forge-maintenance-baseline — finalized predicate, triggers, and consolidation',
+    '',
+    'Usage:',
+    '  node forge-maintenance-baseline.js --dry-run [--cwd <dir>]',
+    '  node forge-maintenance-baseline.js --baseline [--cwd <dir>]',
+    '  node forge-maintenance-baseline.js --help',
+  ].join('\n'));
+}
+
+function cliMain(argv) {
+  const args = parseArgs(argv);
+
+  if (args.help) {
+    printHelp();
+    return 0;
+  }
+
+  const cwd = args.cwd || process.cwd();
+
+  if (args.dryRun) {
+    console.log(JSON.stringify(runBaseline(cwd, { dryRun: true })));
+    return 0;
+  }
+
+  if (args.baseline) {
+    try {
+      const result = runBaseline(cwd, {});
+      console.log(JSON.stringify(result));
+      return 0;
+    } catch (e) {
+      process.stderr.write('Error: ' + e.message + '\n');
+      return 1;
+    }
+  }
+
+  process.stderr.write('Error: no command given. Use --dry-run, --baseline, or --help\n');
+  return 2;
+}
+
 module.exports = {
   isFinalized,
   deriveQuarter,
   currentQuarter,
   isClosedQuarter,
   detectTriggers,
+  consolidateAxis,
+  runBaseline,
   MILESTONE_THRESHOLD,
   TASK_THRESHOLD,
   DECISIONS_THRESHOLD,
 };
+
+if (require.main === module) {
+  process.exit(cliMain(process.argv.slice(2)));
+}

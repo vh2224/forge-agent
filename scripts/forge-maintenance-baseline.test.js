@@ -17,6 +17,8 @@ const {
   currentQuarter,
   isClosedQuarter,
   detectTriggers,
+  consolidateAxis,
+  runBaseline,
   MILESTONE_THRESHOLD,
   TASK_THRESHOLD,
   DECISIONS_THRESHOLD,
@@ -24,6 +26,8 @@ const {
 
 const ledger = require('./forge-ledger.js');
 const decisions = require('./forge-decisions.js');
+const { isRollupPath } = require('./forge-maintenance-vcs.js');
+const { renderLedger, renderDecisions } = require('./forge-projection.js');
 
 // ── Harness ───────────────────────────────────────────────────────────────────
 let passed = 0;
@@ -363,6 +367,255 @@ test('detectTriggers: current-quarter decisions stay loose (not counted)', () =>
     writeDecisionsFragment(cwd, currentQId);
     const result = detectTriggers(cwd, { activeIds: new Set(), now });
     assert(result.ledgerDecisions.closedQuarterCount === 0, 'current-quarter decisions must not be counted as closed');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+// ── runBaseline / consolidateAxis (T03) ──────────────────────────────────────
+// Builds a mixed .gsd fixture: 3 finalized milestones + 1 in-progress
+// milestone (active per legacy STATE) + 2 finalized tasks + finalized
+// decisions in a CLOSED quarter + 1 decision in the CURRENT quarter.
+const BASELINE_NOW = new Date('2026-07-15T12:00:00Z'); // Q3 — Q1/Q2 closed
+
+function buildMixedFixture(cwd) {
+  const finalizedMilestoneIds = [
+    'M-20260101000001-f1',
+    'M-20260101000002-f2',
+    'M-20260101000003-f3',
+  ];
+  for (const id of finalizedMilestoneIds) {
+    writeMilestoneSummary(cwd, id);
+    writeLedgerFragment(cwd, id);
+  }
+
+  const inProgressId = 'M-20260101000004-inprogress';
+  writeLedgerFragment(cwd, inProgressId); // done-evidence present...
+  writeLegacyState(cwd, { activeMilestone: inProgressId, phase: 'execute-task' }); // ...but active per STATE
+
+  const finalizedTaskIds = [
+    'T-20260101000005-t1',
+    'T-20260101000006-t2',
+  ];
+  for (const id of finalizedTaskIds) {
+    writeTaskSummary(cwd, id);
+    writeLedgerFragment(cwd, id);
+  }
+
+  const closedQuarterDecisionId = 'M-20260201000000-decclosed'; // Feb -> Q1, closed rel. to Q3
+  writeMilestoneSummary(cwd, closedQuarterDecisionId);
+  writeDecisionsFragment(cwd, closedQuarterDecisionId);
+
+  const currentQuarterDecisionId = 'M-20260706000000-deccurrent'; // July -> Q3, current
+  writeMilestoneSummary(cwd, currentQuarterDecisionId);
+  writeDecisionsFragment(cwd, currentQuarterDecisionId);
+
+  return {
+    finalizedMilestoneIds,
+    inProgressId,
+    finalizedTaskIds,
+    closedQuarterDecisionId,
+    currentQuarterDecisionId,
+  };
+}
+
+function readBucketIds(bucketPath) {
+  const { parseBucket, normalizeText } = require('./forge-maintenance.js');
+  const content = fs.readFileSync(bucketPath, 'utf8');
+  return parseBucket(normalizeText(content)).units.map(u => u.id);
+}
+
+test('consolidateAxis: fuses given units into a fresh bucket, asserts isRollupPath, invalidates cache', () => {
+  const cwd = mkTmp();
+  try {
+    const id = 'M-20260101000001-solo';
+    writeLedgerFragment(cwd, id);
+    const src = path.join(cwd, '.gsd', 'ledger', `${id}.md`);
+    const target = path.join(cwd, '.gsd', 'archive', 'milestones-rollup.md');
+
+    let invalidated = false;
+    const result = consolidateAxis(cwd, {
+      units: [src], target, type: 'ledger', invalidate: () => { invalidated = true; },
+    });
+
+    assert(fs.existsSync(target), 'target bucket must be written');
+    assert(result.unitIds.includes(id), 'result must report the consolidated unit id');
+    assert(invalidated === true, 'invalidate callback must be called');
+    const rel = path.relative(cwd, target).replace(/\\/g, '/');
+    assert(isRollupPath(rel), 'written target must satisfy isRollupPath()');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('consolidateAxis: refuses to write a target that does not satisfy isRollupPath()', () => {
+  const cwd = mkTmp();
+  try {
+    const id = 'M-20260101000001-solo';
+    writeLedgerFragment(cwd, id);
+    const src = path.join(cwd, '.gsd', 'ledger', `${id}.md`);
+    const badTarget = path.join(cwd, '.gsd', 'archive', 'plain-name.md');
+    let threw = false;
+    try {
+      consolidateAxis(cwd, { units: [src], target: badTarget, type: 'ledger' });
+    } catch (e) {
+      threw = true;
+      assert(/isRollupPath/.test(e.message), 'error must name the isRollupPath guard');
+    }
+    assert(threw, 'must throw for a non-rollup target name');
+    assert(!fs.existsSync(badTarget), 'must not have written the bad target');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('runBaseline: consolidates only finalized loose units per axis, excludes active + current-quarter', () => {
+  const cwd = mkTmp();
+  try {
+    const fx = buildMixedFixture(cwd);
+
+    const beforeLedger = renderLedger(cwd);
+    const beforeDecisions = renderDecisions(cwd);
+
+    const result = runBaseline(cwd, { now: BASELINE_NOW });
+
+    assert(result.applied === true, 'runBaseline must report applied:true');
+    assert(result.verified === true, 'runBaseline must report verified:true');
+
+    const milestonesTarget = path.join(cwd, '.gsd', 'archive', 'milestones-rollup.md');
+    const tasksTarget = path.join(cwd, '.gsd', 'archive', 'tasks-rollup.md');
+    const closedTarget = path.join(cwd, '.gsd', 'decisions', '_rollup-2026-Q1.md');
+
+    assert(fs.existsSync(milestonesTarget), 'milestones-rollup.md must exist');
+    assert(fs.existsSync(tasksTarget), 'tasks-rollup.md must exist');
+    assert(fs.existsSync(closedTarget), '_rollup-2026-Q1.md must exist');
+
+    const milestoneIdsInBucket = readBucketIds(milestonesTarget);
+    for (const id of fx.finalizedMilestoneIds) {
+      assert(milestoneIdsInBucket.includes(id), `bucket must contain finalized milestone ${id}`);
+    }
+    assert(!milestoneIdsInBucket.includes(fx.inProgressId), 'bucket must NOT contain the in-progress milestone');
+    assert(milestoneIdsInBucket.length === fx.finalizedMilestoneIds.length, 'bucket must contain exactly the 3 finalized milestones');
+
+    const taskIdsInBucket = readBucketIds(tasksTarget);
+    assert(taskIdsInBucket.length === fx.finalizedTaskIds.length, 'bucket must contain exactly the 2 finalized tasks');
+    for (const id of fx.finalizedTaskIds) {
+      assert(taskIdsInBucket.includes(id), `bucket must contain finalized task ${id}`);
+    }
+
+    const decisionIdsInBucket = readBucketIds(closedTarget);
+    assert(decisionIdsInBucket.includes(fx.closedQuarterDecisionId), 'closed-quarter bucket must contain the closed decision unit');
+    assert(!decisionIdsInBucket.includes(fx.currentQuarterDecisionId), 'closed-quarter bucket must NOT contain the current-quarter unit');
+
+    // Current-quarter decision + in-progress milestone remain loose.
+    assert(fs.existsSync(path.join(cwd, '.gsd', 'decisions', `${fx.currentQuarterDecisionId}.md`)), 'current-quarter decision must remain loose');
+    assert(fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${fx.inProgressId}.md`)), 'in-progress milestone must remain loose');
+
+    // isRollupPath satisfied for every written target.
+    for (const t of [milestonesTarget, tasksTarget, closedTarget]) {
+      const rel = path.relative(cwd, t).replace(/\\/g, '/');
+      assert(isRollupPath(rel), `${rel} must satisfy isRollupPath()`);
+    }
+
+    // .bak present for every consumed source.
+    for (const id of fx.finalizedMilestoneIds) {
+      assert(fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md.bak`)), `.bak must exist for ${id}`);
+    }
+    for (const id of fx.finalizedTaskIds) {
+      assert(fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md.bak`)), `.bak must exist for ${id}`);
+    }
+    assert(fs.existsSync(path.join(cwd, '.gsd', 'decisions', `${fx.closedQuarterDecisionId}.md.bak`)), '.bak must exist for the closed-quarter decision');
+
+    // Consumed sources themselves deleted.
+    for (const id of fx.finalizedMilestoneIds.concat(fx.finalizedTaskIds)) {
+      assert(!fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`)), `${id} loose fragment must be deleted after consolidation`);
+    }
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'decisions', `${fx.closedQuarterDecisionId}.md`)), 'closed-quarter decision loose fragment must be deleted');
+
+    // Projection byte-identical before vs after (S02 lossless guarantee).
+    const afterLedger = renderLedger(cwd);
+    const afterDecisions = renderDecisions(cwd);
+    assert(afterLedger === beforeLedger, 'renderLedger must be byte-identical before vs after baseline');
+    assert(afterDecisions === beforeDecisions, 'renderDecisions must be byte-identical before vs after baseline');
+
+    // Schema bump is NOT this task's job.
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'SCHEMA-VERSION')), 'runBaseline must NOT write .gsd/SCHEMA-VERSION');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('runBaseline --dry-run: writes nothing, returns correct per-axis plan', () => {
+  const cwd = mkTmp();
+  try {
+    const fx = buildMixedFixture(cwd);
+
+    const plan = runBaseline(cwd, { dryRun: true, now: BASELINE_NOW });
+
+    assert(plan.dryRun === true, 'dry-run result must set dryRun:true');
+    assert(plan.milestones.count === fx.finalizedMilestoneIds.length, `expected ${fx.finalizedMilestoneIds.length} finalized milestones in plan`);
+    assert(plan.tasks.count === fx.finalizedTaskIds.length, `expected ${fx.finalizedTaskIds.length} finalized tasks in plan`);
+    assert(plan.ledgerDecisions.closedQuarterCount === 1, 'expected exactly 1 closed-quarter decision');
+    assert(plan.ledgerDecisions.perQuarter.some(p => p.quarter === '2026-Q1' && p.count === 1), 'plan must list the 2026-Q1 quarter with count 1');
+
+    // Nothing written, nothing deleted.
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'archive')), 'dry-run must not create .gsd/archive');
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'decisions', '_rollup-2026-Q1.md')), 'dry-run must not create the decisions rollup');
+    for (const id of fx.finalizedMilestoneIds.concat(fx.finalizedTaskIds)) {
+      assert(fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`)), `${id} loose fragment must remain untouched by dry-run`);
+      assert(!fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md.bak`)), `dry-run must not create a .bak for ${id}`);
+    }
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('runBaseline: _forceMismatch aborts, restores every source from .bak, removes just-written buckets', () => {
+  const cwd = mkTmp();
+  try {
+    const fx = buildMixedFixture(cwd);
+
+    const originalMilestoneContents = fx.finalizedMilestoneIds.map(id =>
+      fs.readFileSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`), 'utf8')
+    );
+    const originalTaskContents = fx.finalizedTaskIds.map(id =>
+      fs.readFileSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`), 'utf8')
+    );
+    const originalDecisionContent = fs.readFileSync(
+      path.join(cwd, '.gsd', 'decisions', `${fx.closedQuarterDecisionId}.md`), 'utf8'
+    );
+
+    let threw = false;
+    try {
+      runBaseline(cwd, { now: BASELINE_NOW, _forceMismatch: true });
+    } catch (e) {
+      threw = true;
+      assert(/mismatch/i.test(e.message), 'abort error must mention the mismatch');
+    }
+    assert(threw, 'runBaseline must throw on forced mismatch');
+
+    // Every source restored, byte-identical to its pre-run content.
+    fx.finalizedMilestoneIds.forEach((id, i) => {
+      const restored = fs.readFileSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`), 'utf8');
+      assert(restored === originalMilestoneContents[i], `${id} must be restored byte-identical from .bak`);
+    });
+    fx.finalizedTaskIds.forEach((id, i) => {
+      const restored = fs.readFileSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`), 'utf8');
+      assert(restored === originalTaskContents[i], `${id} must be restored byte-identical from .bak`);
+    });
+    const restoredDecision = fs.readFileSync(path.join(cwd, '.gsd', 'decisions', `${fx.closedQuarterDecisionId}.md`), 'utf8');
+    assert(restoredDecision === originalDecisionContent, 'closed-quarter decision must be restored byte-identical from .bak');
+
+    // No bucket left behind.
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'archive', 'milestones-rollup.md')), 'milestones-rollup.md must be removed on abort');
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'archive', 'tasks-rollup.md')), 'tasks-rollup.md must be removed on abort');
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'decisions', '_rollup-2026-Q1.md')), '_rollup-2026-Q1.md must be removed on abort');
+
+    // No data loss: nothing consumed is actually gone.
+    for (const id of fx.finalizedMilestoneIds.concat(fx.finalizedTaskIds)) {
+      assert(fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`)), `${id} must still exist after abort — no data loss`);
+    }
+    assert(fs.existsSync(path.join(cwd, '.gsd', 'decisions', `${fx.closedQuarterDecisionId}.md`)), 'closed-quarter decision must still exist after abort — no data loss');
   } finally {
     rmrf(cwd);
   }
