@@ -1441,6 +1441,45 @@ function smokePlanGateDegradation() {
     '(d) plan_gate.ask_in_auto defaults to defer', 'ask_in_auto: defer missing');
 }
 
+// ── Section 20: S02 back-compat readers (mixed-state fragment stores) ───────
+function smokeFragmentStoreCompat() {
+  process.stdout.write('\n▸ Section 20: S02 back-compat readers (mixed-state fragment stores)\n');
+  const REPO = path.dirname(SCRIPTS);
+  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+
+  // (a) spawn the compat suite — it must exit 0 on its own.
+  const suite = path.join(SCRIPTS, 'fragment-store-compat.test.js');
+  const res = spawnSync(process.execPath, [suite], { encoding: 'utf8' });
+  assert(res.status === 0,
+    'fragment-store-compat.test.js exits 0',
+    `status ${res.status}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
+
+  // (b) spec-greps — T01/T02 shapes must remain present in source.
+  const doctorSrc      = fs.readFileSync(path.join(SCRIPTS, 'forge-doctor.js'), 'utf8');
+  const maintenanceSrc = fs.readFileSync(path.join(SCRIPTS, 'forge-maintenance.js'), 'utf8');
+  const migrateSrc     = fs.readFileSync(path.join(SCRIPTS, 'forge-migrate.js'), 'utf8');
+  const ledgerSrc       = fs.readFileSync(path.join(SCRIPTS, 'forge-ledger.js'), 'utf8');
+  const decisionsSrc    = fs.readFileSync(path.join(SCRIPTS, 'forge-decisions.js'), 'utf8');
+
+  assert(/VALID_SCHEMAS/.test(doctorSrc),
+    '(b) forge-doctor.js contains VALID_SCHEMAS', 'VALID_SCHEMAS not found');
+  assert(/module\.exports[\s\S]*isValidSchema/.test(doctorSrc) || /isValidSchema/.test(doctorSrc),
+    '(b) forge-doctor.js exports isValidSchema', 'isValidSchema not found/exported');
+
+  assert(/listBucketUnits/.test(maintenanceSrc) && /module\.exports[\s\S]*listBucketUnits/.test(maintenanceSrc),
+    '(b) forge-maintenance.js exports listBucketUnits', 'listBucketUnits not exported');
+
+  assert(/isValidSchema\(readSchemaVersion/.test(migrateSrc),
+    '(b) forge-migrate.js casa isValidSchema(readSchemaVersion(...))', 'pattern not found');
+  assert(!/readSchemaVersion\(cwd\)\s*===\s*CURRENT_SCHEMA/.test(migrateSrc),
+    '(b) forge-migrate.js NÃO casa readSchemaVersion(cwd) === CURRENT_SCHEMA', 'forbidden strict-equality pattern found');
+
+  assert(/_rollup-/.test(ledgerSrc),
+    '(b) forge-ledger.js contains _rollup- (bucket-aware enumeration)', '_rollup- not found');
+  assert(/_rollup-/.test(decisionsSrc),
+    '(b) forge-decisions.js contains _rollup- (bucket-aware enumeration)', '_rollup- not found');
+}
+
 function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -1467,6 +1506,7 @@ function main() {
     smokeEffort();
     smokeUsageIndicator();
     smokePlanGateDegradation();
+    smokeFragmentStoreCompat();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
