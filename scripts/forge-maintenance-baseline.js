@@ -152,6 +152,37 @@ function isClosedQuarter(q, now) {
   return q < currentQuarter(now);
 }
 
+// REVIEW-FIX (S04-Obj4): `runs.get(cwd, id).active === true` used to be
+// trusted with NO staleness check. A run record left `active: true` by a
+// crashed/abandoned session (Ctrl+C, killed terminal, machine sleep) would
+// then indefinitely and silently exclude a genuinely-finalized unit from
+// consolidation — the record never expires on its own, only
+// `forge-runs --cleanup-stale` removes it, and nothing guarantees that runs
+// promptly against every id. `_isActiveUnit` now additionally requires the
+// record to be FRESH (not stale) for `active: true` to count — a stale
+// "active" record is treated as not-active, so the finalized unit becomes
+// eligible again.
+//
+// TTL choice: reuse forge-runs' own STALE_THRESHOLD_MS (30min) rather than
+// inventing a second number. Rationale for going with the existing
+// "garbage-collect" threshold instead of something even more generous:
+// this predicate only flips a unit from "active" to "not active" — it does
+// NOT delete or mutate anything. Worst case if the TTL is too short: a
+// genuinely long-running/paused session (heartbeat lagging past 30min)
+// gets treated as if it weren't active, and the id becomes visible to
+// detectTriggers as a candidate for consolidation — consolidation is
+// EXPECTED to be gated by both isFinalized AND actual done-evidence
+// (`SUMMARY.md`/ledger fragment), so a still-in-progress unit with no
+// done-evidence yet stays excluded by the `doneEvidence` check below
+// regardless of this active flag. That asymmetry (activity used only to
+// EXCLUDE an otherwise-finalized unit, never to force-include an
+// unfinished one) is what makes reusing the shorter GC threshold safe here
+// — erring toward "stale wins" cannot cause a false consolidation, only an
+// earlier-than-ideal one, and 30min already matches the interval forge-runs
+// itself considers "dead enough to garbage collect". Overridable via
+// `opts.activeTtlMs` for tests/tuning.
+const ACTIVE_STALE_TTL_MS = runs.STALE_THRESHOLD_MS;
+
 // ── isActiveUnit (internal) ───────────────────────────────────────────────────
 // Resolves whether `id` is the workspace's active in-progress unit.
 // Precedence: opts.activeIds (test injection) short-circuits everything else;
@@ -164,7 +195,8 @@ function _isActiveUnit(cwd, id, opts) {
   let runActive = false;
   try {
     const rec = runs.get(cwd, id);
-    runActive = !!(rec && rec.active === true);
+    const ttl = (opts && opts.activeTtlMs) || ACTIVE_STALE_TTL_MS;
+    runActive = !!(rec && rec.active === true && !runs.isStale(rec, ttl, opts && opts.now));
   } catch { /* runs registry unavailable — treat as not-active from this source */ }
   if (runActive) return true;
 

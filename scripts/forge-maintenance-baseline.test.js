@@ -28,6 +28,7 @@ const {
 
 const ledger = require('./forge-ledger.js');
 const decisions = require('./forge-decisions.js');
+const runs = require('./forge-runs.js');
 const { isRollupPath } = require('./forge-maintenance-vcs.js');
 const { renderLedger, renderDecisions } = require('./forge-projection.js');
 
@@ -238,6 +239,75 @@ test('isFinalized: legacy STATE.md idle phase does not exclude', () => {
     writeLegacyState(cwd, { activeMilestone: id, phase: 'idle' });
     const result = isFinalized(cwd, id);
     assert(result === true, 'idle phase should not exclude a done unit');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+// ── isFinalized — stale forge-runs "active" record (S04-Obj4 review-fix) ────
+test('isFinalized: stale forge-runs active record no longer excludes a done unit', () => {
+  const cwd = mkTmp();
+  try {
+    const id = 'M-20260101000006-staleactive';
+    writeMilestoneSummary(cwd, id);
+    writeLedgerFragment(cwd, id);
+    const fixedNow = Date.parse('2026-01-02T00:00:00Z');
+    // Real run record, active:true, but its last_heartbeat is far older than
+    // the TTL (STALE_THRESHOLD_MS = 30min) relative to the injected `now`.
+    runs.add(cwd, {
+      id,
+      kind: 'milestone',
+      session_id: 'sess-stale',
+      active: true,
+      last_heartbeat: fixedNow - 60 * 60 * 1000, // 1h ago > 30min TTL
+    });
+    // No opts.activeIds injected — must consult the real runs registry, and
+    // no opts.now — must consult isFinalized's own injectable clock.
+    const result = isFinalized(cwd, id, { now: fixedNow });
+    assert(result === true, 'a stale active:true run record must not indefinitely exclude a finalized unit');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('isFinalized: fresh forge-runs active record still excludes (guard intact)', () => {
+  const cwd = mkTmp();
+  try {
+    const id = 'M-20260101000007-freshactive';
+    writeMilestoneSummary(cwd, id);
+    writeLedgerFragment(cwd, id);
+    const fixedNow = Date.parse('2026-01-02T00:00:00Z');
+    runs.add(cwd, {
+      id,
+      kind: 'milestone',
+      session_id: 'sess-fresh',
+      active: true,
+      last_heartbeat: fixedNow - 5 * 60 * 1000, // 5min ago, well within 30min TTL
+    });
+    const result = isFinalized(cwd, id, { now: fixedNow });
+    assert(result === false, 'a fresh active:true run record must still exclude the unit');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('isFinalized: opts.activeTtlMs override lets a caller tune the staleness window', () => {
+  const cwd = mkTmp();
+  try {
+    const id = 'M-20260101000008-ttloverride';
+    writeMilestoneSummary(cwd, id);
+    writeLedgerFragment(cwd, id);
+    const fixedNow = Date.parse('2026-01-02T00:00:00Z');
+    runs.add(cwd, {
+      id,
+      kind: 'milestone',
+      session_id: 'sess-ttl',
+      active: true,
+      last_heartbeat: fixedNow - 5 * 60 * 1000, // 5min ago
+    });
+    // With a 1-minute TTL, a 5-minute-old heartbeat is stale.
+    const result = isFinalized(cwd, id, { now: fixedNow, activeTtlMs: 60 * 1000 });
+    assert(result === true, 'a caller-supplied shorter TTL must be honored');
   } finally {
     rmrf(cwd);
   }

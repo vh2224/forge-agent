@@ -136,12 +136,29 @@ function bumpHeartbeat(cwd, id, ts) {
   return update(cwd, id, { last_heartbeat: ts || Date.now() });
 }
 
+// isStale — shared staleness predicate for a run record.
+// A record is stale when its most recent liveness signal
+// (last_heartbeat, falling back to worker_started, falling back to
+// started_at) is older than `thresholdMs`. Centralizes the staleness
+// concept so callers (cleanup-stale here, and consumers like
+// forge-maintenance-baseline's isFinalized) share ONE definition and
+// ONE number instead of each inlining their own "now - ts > threshold"
+// check with a risk of drifting thresholds.
+// `now` is injectable (defaults to Date.now()) so callers/tests can pin
+// a deterministic clock instead of depending on wall-clock time.
+function isStale(record, thresholdMs, now) {
+  const threshold = thresholdMs || STALE_THRESHOLD_MS;
+  const at = (now == null) ? Date.now() : now;
+  const lastSignal = (record && (record.last_heartbeat || record.worker_started || record.started_at)) || 0;
+  return (at - lastSignal) > threshold;
+}
+
 function cleanupStale(cwd, thresholdMs) {
   const threshold = thresholdMs || STALE_THRESHOLD_MS;
   const now = Date.now();
   const removed = [];
   for (const r of listAll(cwd)) {
-    if ((now - (r.last_heartbeat || 0)) > threshold) {
+    if (isStale(r, threshold, now)) {
       remove(cwd, r.id);
       removed.push(r.id);
     }
@@ -331,7 +348,7 @@ if (require.main === module) cliMain();
 module.exports = {
   listAll, listActive, get,
   add, update, remove,
-  bumpHeartbeat, cleanupStale,
+  bumpHeartbeat, cleanupStale, isStale,
   resolveBySessionId, oldestActive,
   refreshLegacyAlias, migrateLegacyState,
   runsDir, runFile,
