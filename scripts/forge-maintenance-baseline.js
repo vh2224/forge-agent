@@ -27,7 +27,10 @@
 // from its `.bak`, and removes the just-written buckets (no data loss ever).
 // Every written target is asserted against `isRollupPath()` (S03 handoff) —
 // a target that doesn't satisfy it would leave the VCS guard blind to it.
-// Does NOT bump `.gsd/SCHEMA-VERSION` — that opt-in write is S06's job.
+// On a successful apply that actually wrote at least one target, runBaseline
+// stamps `.gsd/SCHEMA-VERSION = fragment-store@2.0.0` via stampBucketSchema
+// (S06, upgrade-only — never clobbers an existing valid 2.0.0 stamp). A
+// dry-run or a run that consolidated nothing never touches SCHEMA-VERSION.
 //
 // CLI:
 //   node forge-maintenance-baseline.js --dry-run [--cwd <dir>]
@@ -53,6 +56,7 @@ const { mergeBucket } = require('./forge-maintenance.js');
 const { writeAtomic } = require('./forge-yaml-safe.js');
 const { renderLedger, renderDecisions } = require('./forge-projection.js');
 const { isRollupPath } = require('./forge-maintenance-vcs.js');
+const { BUCKET_SCHEMA } = require('./forge-doctor.js');
 
 // ── Thresholds — named constants so S05/prefs can reference them ────────────
 const MILESTONE_THRESHOLD = 30;
@@ -394,6 +398,24 @@ function _restoreOrRemoveTargets(paths, targetBackupsSet) {
   }
 }
 
+// ── stampBucketSchema ────────────────────────────────────────────────────────
+// Upgrade-only write of .gsd/SCHEMA-VERSION to BUCKET_SCHEMA ('fragment-store@
+// 2.0.0'). Never clobbers an already-valid 2.0.0 stamp (idempotent/anti-
+// downgrade — mirrors the pattern in forge-doctor.js --fix). Absent or a
+// 1.0.0 stamp is elevated to 2.0.0. Called only from runBaseline's success
+// step, after the byte-identical projection check — never in dry-run, never
+// when nothing was actually consolidated.
+function stampBucketSchema(cwd) {
+  const gsdDir = path.join(cwd, '.gsd');
+  if (!fs.existsSync(gsdDir)) fs.mkdirSync(gsdDir, { recursive: true });
+  const schemaPath = path.join(gsdDir, 'SCHEMA-VERSION');
+  if (fs.existsSync(schemaPath)) {
+    const current = fs.readFileSync(schemaPath, 'utf8').trim();
+    if (current === BUCKET_SCHEMA) return; // already at 2.0.0 — no clobber
+  }
+  writeAtomic(schemaPath, BUCKET_SCHEMA + '\n');
+}
+
 // ── runBaseline ───────────────────────────────────────────────────────────────
 // opts may inject { now, dryRun, _forceMismatch, activeIds, writtenAtFor } —
 // the last two pass through to isFinalized/_gatherEligibility for tests.
@@ -501,6 +523,11 @@ function runBaseline(cwd, opts) {
       try { fs.unlinkSync(t + '.bak'); } catch { /* noop */ }
     }
 
+    // (h) opt-in schema bump — only when this run actually wrote a target.
+    if (writtenTargets.length > 0) {
+      stampBucketSchema(cwd);
+    }
+
     return {
       applied: true,
       milestones: milestonesResult,
@@ -585,6 +612,8 @@ module.exports = {
   detectTriggers,
   consolidateAxis,
   runBaseline,
+  stampBucketSchema,
+  BUCKET_SCHEMA,
   MILESTONE_THRESHOLD,
   TASK_THRESHOLD,
   DECISIONS_THRESHOLD,

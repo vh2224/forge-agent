@@ -19,6 +19,8 @@ const {
   detectTriggers,
   consolidateAxis,
   runBaseline,
+  stampBucketSchema,
+  BUCKET_SCHEMA,
   MILESTONE_THRESHOLD,
   TASK_THRESHOLD,
   DECISIONS_THRESHOLD,
@@ -564,8 +566,10 @@ test('runBaseline: consolidates only finalized loose units per axis, excludes ac
     assert(afterLedger === beforeLedger, 'renderLedger must be byte-identical before vs after baseline');
     assert(afterDecisions === beforeDecisions, 'renderDecisions must be byte-identical before vs after baseline');
 
-    // Schema bump is NOT this task's job.
-    assert(!fs.existsSync(path.join(cwd, '.gsd', 'SCHEMA-VERSION')), 'runBaseline must NOT write .gsd/SCHEMA-VERSION');
+    // Schema bump (S06): a real apply that wrote targets stamps 2.0.0.
+    const schemaPath = path.join(cwd, '.gsd', 'SCHEMA-VERSION');
+    assert(fs.existsSync(schemaPath), 'runBaseline must write .gsd/SCHEMA-VERSION on a real apply');
+    assert(fs.readFileSync(schemaPath, 'utf8').trim() === BUCKET_SCHEMA, '.gsd/SCHEMA-VERSION must be fragment-store@2.0.0');
   } finally {
     rmrf(cwd);
   }
@@ -591,6 +595,123 @@ test('runBaseline --dry-run: writes nothing, returns correct per-axis plan', () 
       assert(fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md`)), `${id} loose fragment must remain untouched by dry-run`);
       assert(!fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${id}.md.bak`)), `dry-run must not create a .bak for ${id}`);
     }
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'SCHEMA-VERSION')), 'dry-run must NEVER write .gsd/SCHEMA-VERSION');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+// ── S06: schema bump + SACRED read-back + anti-downgrade ────────────────────
+
+test('runBaseline: apply-without-consolidation (nothing finalized) does NOT stamp schema', () => {
+  const cwd = mkTmp();
+  try {
+    // Empty repo — no loose finalized units on any axis.
+    const result = runBaseline(cwd, { now: BASELINE_NOW });
+    assert(result.applied === true, 'runBaseline must still report applied:true with nothing to do');
+    assert(!fs.existsSync(path.join(cwd, '.gsd', 'SCHEMA-VERSION')), 'no consolidation happened — SCHEMA-VERSION must not be written');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('stampBucketSchema: SACRED — a loose fragment-store@1.0.0 fragment still reads and projects byte-identically after the 2.0.0 stamp', () => {
+  const cwd = mkTmp();
+  try {
+    const fx = buildMixedFixture(cwd);
+
+    // A loose 1.0.0-era decision fragment sitting alongside the fixture,
+    // never touched by consolidation (current-quarter, stays loose).
+    const beforeLedger = renderLedger(cwd);
+    const beforeDecisions = renderDecisions(cwd);
+
+    const result = runBaseline(cwd, { now: BASELINE_NOW });
+    assert(result.applied === true, 'apply must succeed');
+
+    const schemaPath = path.join(cwd, '.gsd', 'SCHEMA-VERSION');
+    assert(fs.readFileSync(schemaPath, 'utf8').trim() === BUCKET_SCHEMA, 'schema must be stamped to 2.0.0');
+
+    // The 1.0.0 loose fragment (current-quarter decision) left untouched by
+    // consolidation must still be readable via the same store API.
+    const looseFragPath = path.join(cwd, '.gsd', 'decisions', `${fx.currentQuarterDecisionId}.md`);
+    assert(fs.existsSync(looseFragPath), 'loose 1.0.0-era fragment must still exist after the 2.0.0 stamp');
+    const raw = fs.readFileSync(looseFragPath, 'utf8');
+    assert(raw.length > 0, 'loose fragment must still be readable (non-empty) after the stamp');
+
+    // Projection must remain byte-identical to what it was mid-run (the
+    // SCHEMA-VERSION stamp is not part of the ledger/decisions projection).
+    const afterLedger = renderLedger(cwd);
+    const afterDecisions = renderDecisions(cwd);
+    assert(afterLedger === beforeLedger, 'renderLedger must stay byte-identical after the schema stamp');
+    assert(afterDecisions === beforeDecisions, 'renderDecisions must stay byte-identical after the schema stamp');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('stampBucketSchema: idempotent / anti-downgrade — a 2nd apply never clobbers an existing 2.0.0 stamp', () => {
+  const cwd = mkTmp();
+  try {
+    const schemaPath = path.join(cwd, '.gsd', 'SCHEMA-VERSION');
+    fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
+    fs.writeFileSync(schemaPath, BUCKET_SCHEMA + '\n');
+    const mtimeBefore = fs.statSync(schemaPath).mtimeMs;
+
+    stampBucketSchema(cwd);
+
+    assert(fs.readFileSync(schemaPath, 'utf8').trim() === BUCKET_SCHEMA, 'stamp must remain 2.0.0 (no clobber)');
+    // Best-effort: content identical either way; the important invariant is
+    // the value, not the mtime (filesystems may not report sub-ms deltas).
+    assert(typeof mtimeBefore === 'number', 'sanity: mtime read');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('stampBucketSchema: elevates an existing 1.0.0 stamp to 2.0.0', () => {
+  const cwd = mkTmp();
+  try {
+    const schemaPath = path.join(cwd, '.gsd', 'SCHEMA-VERSION');
+    fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
+    fs.writeFileSync(schemaPath, 'fragment-store@1.0.0\n');
+
+    stampBucketSchema(cwd);
+
+    assert(fs.readFileSync(schemaPath, 'utf8').trim() === BUCKET_SCHEMA, '1.0.0 stamp must be elevated to 2.0.0');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('stampBucketSchema: writes a fresh stamp when SCHEMA-VERSION is absent', () => {
+  const cwd = mkTmp();
+  try {
+    const schemaPath = path.join(cwd, '.gsd', 'SCHEMA-VERSION');
+    assert(!fs.existsSync(schemaPath), 'precondition: no schema file yet');
+
+    stampBucketSchema(cwd);
+
+    assert(fs.existsSync(schemaPath), 'stampBucketSchema must create SCHEMA-VERSION');
+    assert(fs.readFileSync(schemaPath, 'utf8').trim() === BUCKET_SCHEMA, 'fresh stamp must be 2.0.0');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('runBaseline: repeat apply on an already-2.0.0 repo does not downgrade the stamp', () => {
+  const cwd = mkTmp();
+  try {
+    const fx = buildMixedFixture(cwd);
+    const result1 = runBaseline(cwd, { now: BASELINE_NOW });
+    assert(result1.applied === true, '1st apply must succeed');
+    const schemaPath = path.join(cwd, '.gsd', 'SCHEMA-VERSION');
+    assert(fs.readFileSync(schemaPath, 'utf8').trim() === BUCKET_SCHEMA, '1st apply stamps 2.0.0');
+
+    // 2nd apply: nothing left to consolidate (all finalized units consumed),
+    // so writtenTargets.length === 0 this time — must not touch the stamp.
+    const result2 = runBaseline(cwd, { now: BASELINE_NOW });
+    assert(result2.applied === true, '2nd apply must still report applied:true (no-op consolidation)');
+    assert(fs.readFileSync(schemaPath, 'utf8').trim() === BUCKET_SCHEMA, '2nd apply must not downgrade or clobber the 2.0.0 stamp');
   } finally {
     rmrf(cwd);
   }

@@ -4,6 +4,7 @@
 // Library exports:
 //   CURRENT_SCHEMA              // string — 'fragment-store@1.0.0' (write-default)
 //   VALID_SCHEMAS               // string[] — accepted read stamps: 1.0.0 and 2.0.0
+//   BUCKET_SCHEMA               // string — 'fragment-store@2.0.0' (opt-in bucket stamp, S06)
 //   isValidSchema(v)            // (v) → boolean — membership check, never ===
 //   checkSchema(cwd)            // (cwd?) → { ok, expected, actual, message }
 //   checkProjectionVersioned(cwd) // (cwd?) → { ok, tracked: string[], skipped?: string, message }
@@ -32,6 +33,10 @@ const { PROJECTION_IGNORE_PATHS, detectVcs } = require('./forge-ignore');
 // only when the first maintenance baseline runs (R6 — S06). Reading accepts both.
 const VALID_SCHEMAS = ['fragment-store@1.0.0', 'fragment-store@2.0.0'];
 const CURRENT_SCHEMA = VALID_SCHEMAS[0];
+// BUCKET_SCHEMA — single source of truth for the 2.0.0 bucket-schema stamp
+// string, written by forge-maintenance-baseline.js (S06) on the first applied
+// consolidation (upgrade-only, never a write-default).
+const BUCKET_SCHEMA = VALID_SCHEMAS[1];
 const isValidSchema = (v) => VALID_SCHEMAS.includes(String(v || '').trim());
 const SCHEMA_FILE = '.gsd/SCHEMA-VERSION';
 
@@ -149,6 +154,7 @@ function checkProjectionVersioned(cwd) {
 module.exports = {
   CURRENT_SCHEMA,
   VALID_SCHEMAS,
+  BUCKET_SCHEMA,
   isValidSchema,
   checkSchema,
   checkProjectionVersioned,
