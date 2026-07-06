@@ -334,9 +334,35 @@ function _restoreBackups(backups) {
     }
   }
 }
-function _removeTargets(paths) {
+
+// _backupTargetIfExists — REVIEW-FIX (S04 review-fix, MAJOR/data-loss): a
+// rollup target may already hold prior consolidated data from an earlier
+// runBaseline. Before it gets overwritten this run, snapshot it to
+// `target + '.bak'` so an abort can RESTORE prior data instead of deleting
+// it. Fresh targets (no pre-existing content) get no backup — there is
+// nothing prior to lose for them, so abort just unlinks them (as before).
+function _backupTargetIfExists(target, targetBackups) {
+  if (fs.existsSync(target)) {
+    fs.copyFileSync(target, target + '.bak');
+    targetBackups.push(target);
+  }
+}
+
+// _restoreOrRemoveTargets — abort path for targets written this run.
+// A target that HAD a pre-existing backup (prior data) is RESTORED from its
+// `.bak`, never deleted — this is the fix for the data-loss objection.
+// A target CREATED fresh this run (no prior backup) is unlinked, same as
+// before: nothing pre-existing to lose.
+function _restoreOrRemoveTargets(paths, targetBackupsSet) {
   for (const t of paths) {
-    try { fs.unlinkSync(t); } catch { /* noop — may never have been written */ }
+    try {
+      if (targetBackupsSet.has(t)) {
+        fs.copyFileSync(t + '.bak', t);
+        try { fs.unlinkSync(t + '.bak'); } catch { /* noop */ }
+      } else {
+        fs.unlinkSync(t);
+      }
+    } catch { /* noop — may never have been written */ }
   }
 }
 
@@ -383,19 +409,26 @@ function runBaseline(cwd, opts) {
   }
 
   const writtenTargets = [];
+  // REVIEW-FIX (S04 review-fix, MAJOR/data-loss): targets that ALREADY held
+  // prior consolidated data get backed up before being overwritten, so an
+  // abort restores them instead of deleting them (see _restoreOrRemoveTargets).
+  const targetBackups = [];
   let milestonesResult = { target: milestonesTarget, unitIds: [] };
   let tasksResult = { target: tasksTarget, unitIds: [] };
   const ledgerDecisionsResult = { perQuarter: [] };
 
   try {
-    // (c) consolidate each axis.
+    // (c) consolidate each axis. Each target is snapshotted (if pre-existing)
+    // immediately before its overwrite.
     if (elig.milestonePaths.length > 0) {
+      _backupTargetIfExists(milestonesTarget, targetBackups);
       milestonesResult = consolidateAxis(cwd, {
         units: elig.milestonePaths, target: milestonesTarget, type: 'ledger', invalidate: ledger._invalidateBucketCache,
       });
       writtenTargets.push(milestonesTarget);
     }
     if (elig.taskPaths.length > 0) {
+      _backupTargetIfExists(tasksTarget, targetBackups);
       tasksResult = consolidateAxis(cwd, {
         units: elig.taskPaths, target: tasksTarget, type: 'ledger', invalidate: ledger._invalidateBucketCache,
       });
@@ -404,6 +437,7 @@ function runBaseline(cwd, opts) {
     for (const q of quarters) {
       const g = elig.byQuarter.get(q);
       const target = _decisionsTarget(cwd, q);
+      _backupTargetIfExists(target, targetBackups);
       const r = consolidateAxis(cwd, {
         units: g.paths, target, type: 'decisions', invalidate: decisions._invalidateBucketCache,
       });
@@ -431,6 +465,14 @@ function runBaseline(cwd, opts) {
       );
     }
 
+    // (g) success — remove the target .bak snapshots now that the new
+    // content is committed. A stale target .bak left on disk could be
+    // wrongly restored-from by a FUTURE run's abort path (it would no
+    // longer correspond to that future run's own pre-write state).
+    for (const t of targetBackups) {
+      try { fs.unlinkSync(t + '.bak'); } catch { /* noop */ }
+    }
+
     return {
       applied: true,
       milestones: milestonesResult,
@@ -439,12 +481,13 @@ function runBaseline(cwd, opts) {
       verified: true,
     };
   } catch (e) {
-    // Abort path: restore every source from its .bak, remove any bucket
-    // written this run, and re-invalidate caches — no data loss regardless
-    // of which step failed (mismatch, or an earlier consolidateAxis/unlink
+    // Abort path: restore every source from its .bak, restore-or-remove any
+    // bucket written this run (restore if it held prior data, remove if it
+    // was fresh), and re-invalidate caches — no data loss regardless of
+    // which step failed (mismatch, or an earlier consolidateAxis/unlink
     // error). Idempotent: restoring an untouched source is a no-op overwrite.
     _restoreBackups(backups);
-    _removeTargets(writtenTargets);
+    _restoreOrRemoveTargets(writtenTargets, new Set(targetBackups));
     ledger._invalidateBucketCache(cwd);
     decisions._invalidateBucketCache(cwd);
     throw e;

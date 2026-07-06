@@ -621,6 +621,57 @@ test('runBaseline: _forceMismatch aborts, restores every source from .bak, remov
   }
 });
 
+test('runBaseline: repeat-run abort restores prior consolidated data (no data loss on 2nd baseline)', () => {
+  const cwd = mkTmp();
+  try {
+    // Run 1: clean baseline — consolidates a first batch into the milestones
+    // rollup target, which now holds real prior data.
+    const run1Id = 'M-20260101000001-run1';
+    writeMilestoneSummary(cwd, run1Id);
+    writeLedgerFragment(cwd, run1Id);
+
+    const result1 = runBaseline(cwd, { now: BASELINE_NOW });
+    assert(result1.applied === true, 'run 1 must apply cleanly');
+    assert(result1.verified === true, 'run 1 must verify');
+
+    const milestonesTarget = path.join(cwd, '.gsd', 'archive', 'milestones-rollup.md');
+    assert(fs.existsSync(milestonesTarget), 'run 1 must create the milestones rollup');
+    const afterRun1 = readBucketIds(milestonesTarget);
+    assert(afterRun1.includes(run1Id), 'rollup must contain run 1 unit after run 1');
+    assert(!fs.existsSync(milestonesTarget + '.bak'), 'no target .bak should remain after a successful run');
+
+    // Run 2: add more finalized units, then force the post-write verify to
+    // fail — this must abort WITHOUT losing run 1's already-consolidated data.
+    const run2Id = 'M-20260101000002-run2';
+    writeMilestoneSummary(cwd, run2Id);
+    writeLedgerFragment(cwd, run2Id);
+
+    let threw = false;
+    try {
+      runBaseline(cwd, { now: BASELINE_NOW, _forceMismatch: true });
+    } catch (e) {
+      threw = true;
+      assert(/mismatch/i.test(e.message), 'run 2 abort error must mention the mismatch');
+    }
+    assert(threw, 'run 2 must throw on forced mismatch');
+
+    // The rollup target must still exist and still contain run 1's data —
+    // this is the regression this fix addresses: an unconditional unlink
+    // on abort would have deleted the entire rollup here.
+    assert(fs.existsSync(milestonesTarget), 'rollup target must still exist after aborted run 2 — must not be deleted');
+    const afterAbort = readBucketIds(milestonesTarget);
+    assert(afterAbort.includes(run1Id), 'run 1 unit must still be present in the rollup after aborted run 2 — no data loss');
+    assert(!afterAbort.includes(run2Id), 'run 2 unit must not have been committed to the rollup (its consolidation was aborted)');
+
+    // Run 2's source fragment must be restored (unconsumed), and no orphan
+    // target .bak should remain after the abort completes.
+    assert(fs.existsSync(path.join(cwd, '.gsd', 'ledger', `${run2Id}.md`)), 'run 2 source fragment must be restored after abort');
+    assert(!fs.existsSync(milestonesTarget + '.bak'), 'no orphan target .bak should remain after the abort restore completes');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {
