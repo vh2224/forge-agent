@@ -1570,11 +1570,20 @@ function smokeMaintenanceGate() {
   const rawSrc = fs.readFileSync(path.join(SCRIPTS, 'forge-maintenance-gate.js'), 'utf8');
   const src = rawSrc.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
 
-  for (const name of ['detectMode', 'renderRedWarning']) {
+  for (const name of ['detectMode', 'renderRedWarning', 'renderBaselineNote']) {
     const re = new RegExp(`module\\.exports[\\s\\S]*${name}`);
     assert(re.test(src),
       `(b) forge-maintenance-gate.js exports ${name}`, `${name} not exported`);
   }
+
+  // (b2) S05-M2 review fix invariant: mode is fired-axis-driven, not
+  // baseline-driven — pin the new coupling and the absence of the old one.
+  assert(/const mode = firedAxes\.length > 0 \? 'maintenance' : 'normal'/.test(src),
+    "(b2) mode derivation is fired-axis-only ('firedAxes.length > 0 ? maintenance : normal')",
+    'expected mode derivation line not found — baseline-available may be forcing maintenance again');
+  assert(!/firedAxes\.length > 0 \|\| baselineAvailable/.test(src),
+    '(b2) forge-maintenance-gate.js does NOT couple baselineAvailable into mode (S05-M2 regression)',
+    'found the old baselineAvailable-forces-maintenance coupling');
 
   assert(!src.includes('localeCompare'),
     '(b) forge-maintenance-gate.js does NOT contain localeCompare (MEM001)', 'forbidden localeCompare found');

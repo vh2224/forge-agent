@@ -278,7 +278,7 @@ This runs the risk assessment in the current context before the plan-slice agent
    MAINT_MODE=$(echo "$DETECT" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).mode)")
    ```
    Append the `maintenance-detected` event to `events.jsonl` regardless of which branch fires (`shared/forge-maintenance.md § Step 8`).
-4. `MAINT_MODE == normal` → no-op. Proceed to dispatch the derived unit normally.
+4. `MAINT_MODE == normal` → no-op (per S05-M2: `mode` is fired-axis-driven, so this includes the case where `baseline.available == true` but no axis fired). If `baseline.available == true`, print the calm informational note via `renderBaselineNote(detection)` — non-blocking, no `AskUserQuestion`. Proceed to dispatch the derived unit normally either way.
 5. `MAINT_MODE == maintenance` → **`forge-next` is interactive, so it runs the full cascade** per `shared/forge-maintenance.md` (this is the one consumer besides `/forge-sweep` allowed past Step 2):
    - **RED warning (Step 2):** render `renderRedWarning(detection)` verbatim — do not summarize.
    - **First confirmation (Step 3):** `AskUserQuestion({ question: "Prosseguir com a maintenance?", options: ["Prosseguir", "Cancelar"] })`. `Cancelar` → stop the cascade here (no writes beyond the `maintenance-detected` event already appended); proceed to dispatch the originally-derived unit normally.

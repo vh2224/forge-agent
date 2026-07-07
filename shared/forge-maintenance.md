@@ -31,16 +31,18 @@ Invoke the detection/announce layer (`scripts/forge-maintenance-gate.js`):
 node scripts/forge-maintenance-gate.js --detect --cwd "$WORKING_DIR"
 ```
 
-Parses to `{ mode, triggers, firedAxes, baseline }` (`detectMode` export). `mode` is one of:
+Parses to `{ mode, triggers, firedAxes, baseline }` (`detectMode` export). **`mode` is fired-axis-driven, not baseline-driven** — it is `'maintenance'` **if and only if `firedAxes.length > 0`**. `baseline.available` is always reported independently and never by itself changes `mode`:
 
-- **`normal`** → announce `SWEEP NORMAL`. No fired axes, no baseline available. Proceed with the caller's normal flow — the maintenance gate is a no-op for this run.
-- **`maintenance`** → announce `SWEEP PRECISA DE MAINTENANCE`. List each entry of `firedAxes` (`axis`, `count`, `threshold`, `target`); if `baseline.available` is `true`, additionally note this is a **BASELINE** run (first-ever maintenance — no rollup bucket exists yet for any axis, so any loose finalized units become the seed baseline once confirmed).
+- **`normal`** → announce `SWEEP NORMAL`. No fired axes. This branch fires even when `baseline.available` is `true` (loose finalized units exist but no rollup bucket exists yet for any axis, and no axis has crossed its threshold) — in that case additionally surface the calm informational baseline note (`renderBaselineNote(detection)`, non-RED, non-halting; see Step 2). Proceed with the caller's normal flow otherwise — the maintenance gate is a no-op for this run.
+- **`maintenance`** → announce `SWEEP PRECISA DE MAINTENANCE`. List each entry of `firedAxes` (`axis`, `count`, `threshold`, `target`) via `renderRedWarning(detection)`. This is the only mode that triggers the RED alarm and the `forge-auto` STOP.
 
 Emit the `maintenance-detected` event (see Step 8) regardless of which branch fires — it is the audit record that detection ran, not just that it fired.
 
-## Step 2 — RED warning
+## Step 2 — RED warning (fired axes) / informational note (baseline-only)
 
 On `mode == maintenance`, render the prominent warning via `renderRedWarning(detection)` (same module) and print it verbatim **before any confirmation is requested**. The renderer already wraps the banner in ANSI bold-red plus a boxed `⚠` header so it survives both color and no-color terminals — do not summarize or truncate it; the whole point is that it is unmistakable.
+
+On `mode == normal` with `baseline.available == true`, print `renderBaselineNote(detection)` instead — a single calm, non-RED, non-ANSI line noting that a baseline consolidation is available. This is informational only: it must never gate a confirmation, never STOP `forge-auto`, and never itself trigger Step 3/4 below (those steps are reserved for `mode == maintenance`). An operator who wants to act on it does so via the normal `/forge-sweep` per-axis apply handshake (Step 5), invoked manually — never auto-offered from this note.
 
 ## Step 3 — First confirmation
 
@@ -57,7 +59,7 @@ For **each** axis present in `firedAxes` (`milestones`, `tasks`, `ledgerDecision
 
 Collect the set of confirmed axes (`confirmedAxes`, e.g. `['milestones', 'ledgerDecisions']`). Declining an axis **excludes only that axis** — this is never all-or-nothing; an operator can consolidate `milestones` while skipping `ledgerDecisions` in the same run. Emit one `maintenance-confirmed` event **per confirmed axis** (Step 8). If the resulting `confirmedAxes` set is empty (every axis declined) → stop, no apply cascade, no further events.
 
-`baseline.available` axes with no fired trigger (loose units exist but below threshold) are **not** offered here — Step 4 only confirms axes that are in `firedAxes`. A baseline-only run (below every threshold but no bucket exists) is out of scope for automatic offering; it is surfaced informationally in the Step 2 warning only.
+`baseline.available` axes with no fired trigger (loose units exist but below threshold) are **not** offered here — Step 4 only confirms axes that are in `firedAxes`. A baseline-only run (below every threshold but no bucket exists) never reaches `mode == maintenance` at all, so it never reaches Step 3/4 automatically; it is surfaced informationally via the Step 2 baseline note only. An operator may still choose to run a baseline manually via `/forge-sweep`'s per-axis apply handshake — see Step 5.
 
 ## Step 5 — Apply cascade (interactive / sweep contexts only — NOT `forge-auto`)
 

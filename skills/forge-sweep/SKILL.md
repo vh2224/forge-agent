@@ -170,16 +170,16 @@ Detection itself respects `maintenance.enabled` (default `false`, resolved by `d
    ```
    ▸ SWEEP NORMAL — nenhum eixo cruzou o gatilho
    ```
-   and continue straight to Step 1 (Inventory) below — no further maintenance action this run.
-5. **`mode == "maintenance"`** → print:
+   and, when `baseline.available` is `true` (loose finalized units exist but no rollup bucket exists yet — first-ever maintenance — and no axis has crossed its threshold), additionally print the calm informational note via `renderBaselineNote(detection)`:
+   ```bash
+   node -e "const {detectMode,renderBaselineNote}=require('$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js'); const n=renderBaselineNote(detectMode(process.argv[1])); if (n) console.log(n)" "$WORKING_DIR"
+   ```
+   This is informational only — **not** a RED alarm, **not** a confirmation gate. The operator may still choose to run a baseline consolidation manually via the Maintenance apply handshake (Step 3b below), which accepts any axis present in `triggers` even when `firedAxes` is empty, precisely to serve this manually-opted-in baseline path. Then continue straight to Step 1 (Inventory) below — no further maintenance action this run unless the operator opts in.
+5. **`mode == "maintenance"`** (a fired count-trigger — the only condition that renders the RED alarm) → print:
    ```
    ⚠ SWEEP PRECISA DE MAINTENANCE
      - eixo "<axis>": <count> unidades finalizadas soltas (limiar <threshold>) → <target>
      ... (one line per entry in firedAxes)
-   ```
-   and, when `baseline.available` is `true`, append an extra line:
-   ```
-     - BASELINE (1ª maintenance) — nenhum bucket rollup existe ainda para nenhum eixo
    ```
    Then continue to Step 1 (Inventory) as normal — announcing does not fire the apply handshake by itself. A bare `/forge-sweep` (no args) or a plain `--apply` sweep only **announces** the maintenance mode; it does not consolidate anything unless the operator explicitly opts into the Maintenance apply handshake (Step 3b below).
 6. Emit `maintenance-detected` to `.gsd/forge/events.jsonl` **regardless of which branch fired** — it is the audit record that detection ran, not that it fired:
@@ -277,21 +277,22 @@ Print: "Dry-run complete. To apply: /forge-sweep --apply"
 
 In an end-of-cycle wrap-up with the work already validated and no risk flagged, do NOT dead-end here — you should have invoked with `--apply` from the start, so the user gets the preview + the single confirmation popup without re-typing the command.
 
-### 4b. Maintenance apply handshake (opt-in — only when Step 0 announced `mode == "maintenance"`)
+### 4b. Maintenance apply handshake (opt-in — when Step 0 announced `mode == "maintenance"`, or manually for a baseline-only `mode == "normal"` run)
 
-This step is **independent** of the prune/trim policy above: maintenance consolidation (fusing loose `.gsd/ledger/`/`.gsd/decisions/` units into LOCKED rollup buckets) and the existing prune/trim sweep are two separate concerns that happen to share the same skill surface. Step 0 always announces; this step only fires when the operator explicitly opts into running maintenance for a run where Step 0 detected `mode == "maintenance"`. A bare `/forge-sweep` or a plain `--apply`/`--force` sweep does **not** auto-enter this step — the operator must opt in (e.g. by asking to run maintenance, or the orchestrator invoking the skill specifically for that purpose). Do NOT duplicate the full spec here — this enumerates the local wiring; the authoritative procedure is `shared/forge-maintenance.md` Steps 2–5, 8.
+This step is **independent** of the prune/trim policy above: maintenance consolidation (fusing loose `.gsd/ledger/`/`.gsd/decisions/` units into LOCKED rollup buckets) and the existing prune/trim sweep are two separate concerns that happen to share the same skill surface. Step 0 always announces; this step only fires when the operator explicitly opts into running maintenance — either for a run where Step 0 detected `mode == "maintenance"` (a fired axis), or, manually, for a `mode == "normal"` run where `baseline.available == true` (the informational note from Step 0) and the operator chooses to seed the baseline anyway. A bare `/forge-sweep` or a plain `--apply`/`--force` sweep does **not** auto-enter this step in either case — the operator must opt in (e.g. by asking to run maintenance, or the orchestrator invoking the skill specifically for that purpose). Do NOT duplicate the full spec here — this enumerates the local wiring; the authoritative procedure is `shared/forge-maintenance.md` Steps 2–5, 8.
 
-**Rule (LOCKED, per `shared/forge-maintenance.md` Rule 1): no non-interactive apply.** Even `--force` (which skips the Step 5 prune confirmation below) does **NOT** skip any of the maintenance handshakes in this step. There is no flag, env var, or config value that bypasses the RED warning or either confirmation. Detection (Step 0, `--detect`) is always safe to run non-interactively; apply is not.
+**Rule (LOCKED, per `shared/forge-maintenance.md` Rule 1): no non-interactive apply.** Even `--force` (which skips the Step 5 prune confirmation below) does **NOT** skip any of the maintenance handshakes in this step. There is no flag, env var, or config value that bypasses the RED warning/informational note or either confirmation. Detection (Step 0, `--detect`) is always safe to run non-interactively; apply is not.
 
-1. **RED warning.** Render `renderRedWarning(detectMode(cwd))` and print it verbatim, before any confirmation is requested — do not summarize or truncate it:
+1. **Warning or note.** On `mode == "maintenance"`, render `renderRedWarning(detectMode(cwd))` and print it verbatim, before any confirmation is requested — do not summarize or truncate it:
    ```bash
    node -e "const {detectMode,renderRedWarning}=require('$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js'); console.log(renderRedWarning(detectMode(process.argv[1])))" "$WORKING_DIR"
    ```
+   On a manually-opted-in baseline-only run (`mode == "normal"`, `baseline.available == true`), print `renderBaselineNote(detection)` instead (already shown in Step 0 — repeat it here so it is visible right before the confirmation).
 2. **First confirmation.** One `AskUserQuestion`:
    - Question: "Prosseguir com a maintenance?"
    - Options: ["Prosseguir", "Cancelar"]
    - `Cancelar` → stop. No writes, no further events beyond the `maintenance-detected` already emitted in Step 0.
-3. **Per-axis double-confirm.** For **each** axis in `firedAxes` (independently — never all-or-nothing), a **separate** `AskUserQuestion`:
+3. **Per-axis double-confirm.** Determine the axis set to offer: `firedAxes` when `mode == "maintenance"`; otherwise (baseline-only manual opt-in) every axis reported in `baseline.plan` with a non-zero loose count. For **each** axis in that set (independently — never all-or-nothing), a **separate** `AskUserQuestion`:
    - Question: "Consolidar `<axis>` (`<count>` unidades → `<target>`)?"
    - Options: ["Confirmar", "Pular"]
    - Collect the confirmed axes into `confirmedAxes`. Declining one axis excludes only that axis — an operator can confirm `milestones` while skipping `ledgerDecisions` in the same run.

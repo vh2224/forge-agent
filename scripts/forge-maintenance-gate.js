@@ -8,8 +8,9 @@
 // S04's `runBaseline` (imported here, not re-implemented).
 //
 // Library exports:
-//   detectMode(cwd, opts?)      → { mode, triggers, firedAxes, baseline }
-//   renderRedWarning(detection) → string (prominent RED/⚠ banner)
+//   detectMode(cwd, opts?)       → { mode, triggers, firedAxes, baseline }
+//   renderRedWarning(detection)  → string (prominent RED/⚠ banner, fired axes only)
+//   renderBaselineNote(detection)→ string|null (calm, non-RED, informational)
 //
 // CLI:
 //   node forge-maintenance-gate.js --detect [--cwd <dir>]
@@ -131,7 +132,10 @@ function detectMode(cwd, opts) {
     });
   }
 
-  const mode = firedAxes.length > 0 || baselineAvailable ? 'maintenance' : 'normal';
+  // Only a FIRED count-trigger halts forge-auto / renders the RED alarm.
+  // `baselineAvailable` alone is informational (see renderBaselineNote) —
+  // it must never force `mode:'maintenance'` on its own (S05-M2 review fix).
+  const mode = firedAxes.length > 0 ? 'maintenance' : 'normal';
 
   return {
     mode,
@@ -150,7 +154,7 @@ const RED_ON = '\x1b[1;31m';
 const RED_OFF = '\x1b[0m';
 
 function renderRedWarning(detection) {
-  detection = detection || { firedAxes: [], baseline: { available: false } };
+  detection = detection || { firedAxes: [] };
   const lines = [];
 
   lines.push('┌' + '─'.repeat(58) + '┐');
@@ -163,15 +167,25 @@ function renderRedWarning(detection) {
     lines.push(`  ⚠ eixo "${f.axis}": ${f.count} unidades finalizadas soltas (limiar ${f.threshold}) — funde → ${f.target}`);
   }
 
-  if (detection.baseline && detection.baseline.available) {
-    lines.push('  ⚠ BASELINE (1ª maintenance) — nenhum bucket rollup existe ainda; unidades finalizadas soltas serão consolidadas.');
-  }
-
-  if (firedAxes.length === 0 && !(detection.baseline && detection.baseline.available)) {
+  if (firedAxes.length === 0) {
     lines.push('  (nenhum eixo disparado — chamado fora de contexto de maintenance)');
   }
 
   return RED_ON + lines.join('\n') + RED_OFF;
+}
+
+// ── renderBaselineNote ─────────────────────────────────────────────────────────
+// Calm, non-alarming, non-RED informational note for baseline-only detections
+// (no fired axis, but no rollup bucket exists yet). Plain string, no ANSI —
+// the sweep/auto surfaces MUST NOT treat this as a STOP condition.
+function renderBaselineNote(detection) {
+  detection = detection || { baseline: { available: false } };
+  if (!detection.baseline || !detection.baseline.available) return null;
+  return (
+    'ℹ baseline disponível (1ª maintenance) — nenhum bucket rollup existe ainda; ' +
+    'há unidades finalizadas soltas que PODEM ser consolidadas. Isto é apenas informativo ' +
+    '— não bloqueia o fluxo; rode /forge-sweep manualmente se quiser consolidar agora.'
+  );
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -219,6 +233,7 @@ function cliMain(argv) {
 module.exports = {
   detectMode,
   renderRedWarning,
+  renderBaselineNote,
 };
 
 if (require.main === module) {

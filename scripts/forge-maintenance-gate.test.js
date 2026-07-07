@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { detectMode, renderRedWarning } = require('./forge-maintenance-gate.js');
+const { detectMode, renderRedWarning, renderBaselineNote } = require('./forge-maintenance-gate.js');
 const {
   runBaseline,
   MILESTONE_THRESHOLD,
@@ -129,15 +129,31 @@ test('detectMode: milestones @30 fires -> mode maintenance, firedAxes includes m
   }
 });
 
-// ── Fixture C: loose finalized units, no buckets -> baseline available ──────
-test('detectMode: loose finalized units below threshold but no rollup buckets -> baseline available, mode maintenance', () => {
+// ── Fixture C: loose finalized units, no buckets -> baseline available,
+// but INFORMATIONAL only (S05-M2 review fix: baseline-available alone must
+// NOT force mode:'maintenance' / the STOP / the RED alarm — only a fired
+// count-trigger does that).
+test('detectMode: loose finalized units below threshold but no rollup buckets -> baseline available, mode normal (informational only)', () => {
   const cwd = mkTmp();
   try {
     seedFinalizedMilestones(cwd, 1); // well below threshold
     const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
     assert(detection.baseline.available === true, 'baseline must be available (loose units exist, no buckets)');
-    assert(detection.mode === 'maintenance', 'baseline-available alone must force mode maintenance');
+    assert(detection.mode === 'normal', 'baseline-available alone must NOT force mode maintenance (informational only)');
     assert(detection.firedAxes.length === 0, 'no axis threshold fired in this fixture');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('detectMode: fired axis AND baseline-available -> mode maintenance (fired dominates)', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD); // fires the axis, no bucket exists -> baseline also available
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
+    assert(detection.baseline.available === true, 'baseline must also be available in this fixture (no bucket yet)');
+    assert(detection.mode === 'maintenance', 'a fired axis must force mode maintenance regardless of baseline');
+    assert(detection.firedAxes.length > 0, 'firedAxes must be non-empty');
   } finally {
     rmrf(cwd);
   }
@@ -175,13 +191,45 @@ test('renderRedWarning: contains banner marker and one line per fired axis', () 
   }
 });
 
-test('renderRedWarning: baseline-available fixture gets a BASELINE line', () => {
+test('renderRedWarning: baseline-only fixture (no fired axis) does NOT emit the RED alarm', () => {
   const cwd = mkTmp();
   try {
     seedFinalizedMilestones(cwd, 1);
     const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
+    assert(detection.mode === 'normal', 'sanity: this fixture must be mode normal');
     const warning = renderRedWarning(detection);
-    assert(/BASELINE/.test(warning), 'must mention BASELINE when it is the first-ever consolidation');
+    assert(!/BASELINE/.test(warning), 'must NOT mention BASELINE in the RED warning (informational note lives elsewhere now)');
+    assert(/nenhum eixo disparado/.test(warning), 'must render the "no axis fired" fallback line');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+// ── renderBaselineNote ──────────────────────────────────────────────────────
+test('renderBaselineNote: baseline-only fixture returns a calm, non-RED informational string', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, 1);
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
+    const note = renderBaselineNote(detection);
+    assert(typeof note === 'string' && note.length > 0, 'must return a non-empty string when baseline is available');
+    assert(!/\x1b\[1;31m/.test(note), 'must NOT contain the RED ANSI escape');
+    assert(/baseline/i.test(note), 'must mention baseline');
+  } finally {
+    rmrf(cwd);
+  }
+});
+
+test('renderBaselineNote: returns null when baseline is not available', () => {
+  const cwd = mkTmp();
+  try {
+    seedFinalizedMilestones(cwd, MILESTONE_THRESHOLD - 1);
+    const bucketDir = path.join(cwd, '.gsd', 'archive');
+    fs.mkdirSync(bucketDir, { recursive: true });
+    fs.writeFileSync(path.join(bucketDir, 'milestones-rollup.md'), '# milestones rollup\n');
+    const detection = detectMode(cwd, { activeIds: new Set(), enabled: true });
+    assert(detection.baseline.available === false, 'sanity: baseline must not be available here');
+    assert(renderBaselineNote(detection) === null, 'must return null when baseline is not available');
   } finally {
     rmrf(cwd);
   }

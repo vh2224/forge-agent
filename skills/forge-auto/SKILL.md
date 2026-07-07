@@ -1249,12 +1249,14 @@ process.stdout.write(mode);
 
 - `MAINTENANCE_IN_AUTO == off` → skip this entire check — do not even run detection. Fall through to the Rate-limit handoff check.
 - The gate only ever fires in repos that opted in: `detectMode` (called below) resolves `maintenance.enabled` (default `false`) via the same prefs cascade — a repo that never sets `maintenance.enabled: true` always gets `mode: "normal"` back, so `forge-auto` never STOPs for it regardless of `MAINTENANCE_IN_AUTO`.
+- **`mode` is fired-axis-driven, not baseline-driven** (S05-M2 review fix): `detectMode` returns `mode: "maintenance"` **only** when a count-trigger actually fired (`firedAxes.length > 0`). A `baseline.available: true` result with no fired axis is `mode: "normal"` — it must NEVER halt `forge-auto` on its own; it is informational only (per the AUTONOMY RULE).
 - Otherwise, run detection (`shared/forge-maintenance.md § Step 1`):
   ```bash
   DETECT=$(node "$FORGE_SCRIPTS_DIR/forge-maintenance-gate.js" --detect --cwd "$WORKING_DIR")
   MAINT_MODE=$(echo "$DETECT" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).mode)")
+  BASELINE_AVAILABLE=$(echo "$DETECT" | node -e "process.stdout.write(String(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).baseline.available))")
   ```
-  - `MAINT_MODE == normal` → append the `maintenance-detected` event to `events.jsonl` (`{"ts":"<ISO>","event":"maintenance-detected","mode":"normal","fired":[],"baseline":false}`) — per `shared/forge-maintenance.md § Step 1`, detection ran and must be audited regardless of which branch fires. Then fall through to the Rate-limit handoff check.
+  - `MAINT_MODE == normal` → append the `maintenance-detected` event to `events.jsonl` (`{"ts":"<ISO>","event":"maintenance-detected","mode":"normal","fired":[],"baseline":<BASELINE_AVAILABLE>}`) — per `shared/forge-maintenance.md § Step 1`, detection ran and must be audited regardless of which branch fires. If `BASELINE_AVAILABLE == true`, print a single calm, non-blocking one-liner (e.g. `ℹ baseline disponível — rode /forge-sweep manualmente para consolidar`) — **do not** ask, do not halt, do not go to the Maintenance Gate Procedure. Then fall through to the Rate-limit handoff check.
   - `MAINT_MODE == maintenance` AND `MAINTENANCE_IN_AUTO == stop` → go to `## Maintenance Gate Procedure` (stop path). Do NOT continue to the next unit — the loop halts here.
   - `MAINT_MODE == maintenance` AND `MAINTENANCE_IN_AUTO == defer` → go to `## Maintenance Gate Procedure` (defer path), then fall through to the Rate-limit handoff check. Never block on missing input or a 429 — this is the headless-friendly path (`bin/forge-run`).
 
