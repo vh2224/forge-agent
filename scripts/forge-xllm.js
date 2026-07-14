@@ -284,6 +284,41 @@ function buildRebuttalPrompt(inputText) {
 // ── Codex invocation ──────────────────────────────────────────────────────────
 
 /**
+ * Resolve a directly-spawnable codex command, keeping shell:false on every platform.
+ *
+ * POSIX: npm installs `codex` as an executable shebang shim — spawn it by name.
+ * Windows: npm installs only `codex` (a bash script), `codex.cmd` and `codex.ps1`.
+ * spawnSync does not apply PATHEXT, and Node refuses to spawn .cmd/.bat without
+ * shell:true (CVE-2024-27980) — so spawning 'codex' by name fails with ENOENT.
+ * Resolve the real entry point instead: a `codex.exe` on PATH if one exists, else
+ * the npm shim's sibling `node_modules/@openai/codex/bin/codex.js`, launched with
+ * the current Node binary — which is what codex.cmd does internally anyway.
+ *
+ * @returns {{cmd: string, prefixArgs: string[]}}
+ */
+function resolveCodexCommand() {
+  if (process.platform !== 'win32') {
+    return { cmd: 'codex', prefixArgs: [] };
+  }
+
+  for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+    const exe = path.join(dir, 'codex.exe');
+    if (fs.existsSync(exe)) {
+      return { cmd: exe, prefixArgs: [] };
+    }
+    if (fs.existsSync(path.join(dir, 'codex.cmd'))) {
+      const js = path.join(dir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+      if (fs.existsSync(js)) {
+        return { cmd: process.execPath, prefixArgs: [js] };
+      }
+    }
+  }
+
+  // Nothing resolvable — spawn by name so the caller surfaces the usual ENOENT.
+  return { cmd: 'codex', prefixArgs: [] };
+}
+
+/**
  * Invoke `codex exec` headless with a strict, minimal flag set. No retry.
  * @param {object} opts
  * @param {string} opts.prompt
@@ -322,7 +357,8 @@ function invokeCodex(opts) {
     }
     args.push(prompt);
 
-    const res = spawnSync('codex', args, {
+    const { cmd, prefixArgs } = resolveCodexCommand();
+    const res = spawnSync(cmd, [...prefixArgs, ...args], {
       timeout: timeoutSecs * 1000,
       killSignal: 'SIGKILL',
       encoding: 'utf8',
