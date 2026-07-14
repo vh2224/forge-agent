@@ -387,13 +387,32 @@ test('collect builds slice statuses done/active/pending and progress', () => {
   assertEq(bySlice.S03.status, 'pending', 's03 status');
 });
 
-test('collect only attaches tasks under the active slice', () => {
-  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+test('collect attaches tasks for every slice with a PLAN.md (expanded default)', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  // Non-active slice S01 also has a plan — its tasks must be listed too.
+  const s01Dir = path.join(dir, '.gsd', 'milestones', milestoneId, 'slices', 'S01');
+  fs.mkdirSync(s01Dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(s01Dir, 'S01-PLAN.md'),
+    ['# S01 Plan', '', '## Tasks', '', '- [x] T01: done thing', '- [ ] T02: same id as the active task', ''].join('\n'),
+    'utf8'
+  );
   const model = status.collect(dir, {});
   const bySlice = Object.fromEntries(model.milestone.slices.map((s) => [s.id, s]));
   assert(bySlice.S02.tasks.length === 4, `expected 4 tasks on S02, got ${bySlice.S02.tasks.length}`);
-  assertEq(bySlice.S01.tasks, [], 's01 has no tasks');
-  assertEq(bySlice.S03.tasks, [], 's03 has no tasks');
+  assert(bySlice.S01.tasks.length === 2, `expected 2 tasks on S01, got ${bySlice.S01.tasks.length}`);
+  // S01 is checked in the ROADMAP: its unchecked-plan tasks derive done from the
+  // slice checkbox, and — task ids repeating across slices — T02 must NOT be
+  // marked active despite matching active_task.
+  const s01ByTask = Object.fromEntries(bySlice.S01.tasks.map((t) => [t.id, t]));
+  assertEq(s01ByTask.T02.status, 'done', 's01 T02 derives done from slice checkbox, never active');
+  assertEq(s01ByTask.T02.checked, true, 's01 T02 checked reflects derived completion');
+  // Slice without a plan file: empty tasks, and no warning (only the active slice warns).
+  assertEq(bySlice.S03.tasks, [], 's03 has no tasks (no plan file)');
+  assert(
+    !(model.warnings || []).some((w) => w.includes('S03-PLAN.md')),
+    `no warning for planless non-active slice, got: ${JSON.stringify(model.warnings)}`
+  );
 });
 
 test('collect derives task statuses done/active/pending', () => {
@@ -405,6 +424,19 @@ test('collect derives task statuses done/active/pending', () => {
   assertEq(byTask.T02.status, 'active', 't02 (matches active_task)');
   assertEq(byTask['T03'].status, 'pending', 't03');
   assertEq(byTask['T03.1'].status, 'pending', 't03.1');
+});
+
+test('collect derives task done from T##-SUMMARY.md when plan checkbox lags', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const t03Dir = path.join(dir, '.gsd', 'milestones', milestoneId, 'slices', 'S02', 'tasks', 'T03');
+  fs.mkdirSync(t03Dir, { recursive: true });
+  fs.writeFileSync(path.join(t03Dir, 'T03-SUMMARY.md'), '# Summary\n\nDone.\n', 'utf8');
+  const model = status.collect(dir, {});
+  const s02 = model.milestone.slices.find((s) => s.id === 'S02');
+  const byTask = Object.fromEntries(s02.tasks.map((t) => [t.id, t]));
+  assertEq(byTask.T03.status, 'done', 't03 derives done from its summary file');
+  assertEq(byTask.T02.status, 'active', 't02 still active (no summary, matches active_task)');
+  assertEq(byTask['T03.1'].status, 'pending', 't03.1 unaffected (no summary dir)');
 });
 
 // ── 4. Autonomous tasks ───────────────────────────────────────────────────────
@@ -502,6 +534,20 @@ test('renderTree output contains expected section markers', () => {
   assert(out.includes('### Próxima ação'), 'next action header');
   assert(out.includes('### Tasks autônomas'), 'autonomous tasks header');
   assert(out.includes('✓ TASK-001'), 'done autonomous task icon');
+});
+
+test('renderTree lists tasks of non-active slices (expanded default)', () => {
+  const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const s01Dir = path.join(dir, '.gsd', 'milestones', milestoneId, 'slices', 'S01');
+  fs.mkdirSync(s01Dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(s01Dir, 'S01-PLAN.md'),
+    ['# S01 Plan', '', '## Tasks', '', '- [x] T01: coisa do slice fechado', ''].join('\n'),
+    'utf8'
+  );
+  const out = status.renderTree(status.collect(dir, {}));
+  assert(out.includes('  - [x] T01: coisa do slice fechado'), 'done slice task line rendered');
+  assert(out.includes('← ativa'), 'active task marker still present on the active slice');
 });
 
 test('renderTree on idle model shows "Nenhum run ativo"', () => {

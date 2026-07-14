@@ -376,25 +376,39 @@ function collect(cwd, opts) {
       if (s.checked) status = 'done';
       else if (activeSlice && activeSlice !== '—' && s.id === activeSlice) status = 'active';
 
+      // Tasks are expanded for EVERY slice that has a PLAN.md (default view).
+      // A missing plan only warns on the active slice — pending slices
+      // legitimately have no plan yet, and cleaned-up slices may have lost it.
+      // Task ids repeat across slices (each slice has its own T01..), so the
+      // 'active' status only applies inside the active slice.
       let tasks = [];
-      if (activeSlice && activeSlice !== '—' && s.id === activeSlice) {
-        try {
-          const planPath = path.join(cwd, '.gsd', 'milestones', focusedId, 'slices', s.id, `${s.id}-PLAN.md`);
-          if (fs.existsSync(planPath)) {
-            const planText = fs.readFileSync(planPath, 'utf8');
-            const parsedTasks = parsePlanTasks(planText);
-            tasks = parsedTasks.map((t) => {
-              let tStatus = 'pending';
-              if (t.checked) tStatus = 'done';
-              else if (activeTask && activeTask !== '—' && t.id === activeTask) tStatus = 'active';
-              return { id: t.id, title: t.title, checked: t.checked, status: tStatus };
-            });
-          } else {
-            warnings.push(`${s.id}-PLAN.md não encontrado — tasks omitidas`);
-          }
-        } catch {
+      const isActiveSlice = Boolean(activeSlice && activeSlice !== '—' && s.id === activeSlice);
+      try {
+        const sliceDir = path.join(cwd, '.gsd', 'milestones', focusedId, 'slices', s.id);
+        const planPath = path.join(sliceDir, `${s.id}-PLAN.md`);
+        if (fs.existsSync(planPath)) {
+          const planText = fs.readFileSync(planPath, 'utf8');
+          const parsedTasks = parsePlanTasks(planText);
+          tasks = parsedTasks.map((t) => {
+            // The plan checkbox is not reliably ticked by executors — completion
+            // ground truth is the slice checkbox (complete-slice only runs after
+            // all tasks) or the task's own T##-SUMMARY.md (written on execution).
+            let done = t.checked || s.checked;
+            if (!done) {
+              try {
+                done = fs.existsSync(path.join(sliceDir, 'tasks', t.id, `${t.id}-SUMMARY.md`));
+              } catch { /* degrade to plan checkbox */ }
+            }
+            let tStatus = 'pending';
+            if (done) tStatus = 'done';
+            else if (isActiveSlice && activeTask && activeTask !== '—' && t.id === activeTask) tStatus = 'active';
+            return { id: t.id, title: t.title, checked: done, status: tStatus };
+          });
+        } else if (isActiveSlice) {
           warnings.push(`${s.id}-PLAN.md não encontrado — tasks omitidas`);
         }
+      } catch {
+        if (isActiveSlice) warnings.push(`${s.id}-PLAN.md não encontrado — tasks omitidas`);
       }
 
       return { id: s.id, title: s.title, checked: s.checked, risk: s.risk || null, status, tasks };
@@ -488,7 +502,7 @@ function renderTree(model) {
       const box = s.checked ? 'x' : ' ';
       const activeSuffix = s.status === 'active' ? '  ← ativo' : '';
       lines.push(`- [${box}] ${s.id}: ${s.title}${activeSuffix}`);
-      if (s.status === 'active' && Array.isArray(s.tasks)) {
+      if (Array.isArray(s.tasks)) {
         for (const t of s.tasks) {
           const tBox = t.checked ? 'x' : ' ';
           const tActiveSuffix = t.status === 'active' ? '  ← ativa' : '';
