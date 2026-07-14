@@ -526,8 +526,10 @@ test('forge-status.js source contains zero write-API call sites', () => {
   const raw = fs.readFileSync(srcPath, 'utf8');
   // Strip `//` line comments so the documented CONTRACT header (which names
   // these APIs on purpose) does not trigger a false positive.
+  // Split on \r?\n: on a CRLF checkout (core.autocrlf=true) a trailing \r
+  // blocks the `$` anchor and the comment would survive the strip.
   const cleaned = raw
-    .split('\n')
+    .split(/\r?\n/)
     .map((line) => line.replace(/\/\/.*$/, ''))
     .join('\n');
 
