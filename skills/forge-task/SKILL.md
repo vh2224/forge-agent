@@ -741,7 +741,9 @@ Runs the **challenger × advocate** confrontation on the task diff — the same 
 - `review.mode: disabled` in merged prefs, OR
 - `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md` already exists (idempotent resume).
 
-**Read review prefs** (`mode`, `style`, `rounds`, `fix_conceded` — 3-file cascade, exactly as `shared/forge-review.md § Step 0`). If `mode == disabled` → skip Step 5.5 entirely.
+**Read review prefs** (`mode`, `style`, `rounds`, `fix_conceded`, `challenger`, `challenger_model` — 3-file cascade, exactly as `shared/forge-review.md § Step 0`). If `mode == disabled` → skip Step 5.5 entirely.
+
+Challenger routing (`review.challenger: claude|codex`) follows `shared/forge-review.md § Step 0` + the Codex branch in Steps 2/4 — single fallback to `forge-reviewer` when codex is unavailable.
 
 **Compute DIFF_CMD** (task boundary — START_SHA marker). In `worktree` mode the commits live in `CODE_DIR`, so every git call targets it via `git -C`:
 ```bash

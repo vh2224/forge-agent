@@ -1,8 +1,8 @@
 ---
 name: forge-advocate
 description: Author-side defender in the dialectic review. Receives a reviewer's objections against a diff and, as the engineer who owns the code, defends what is defensible, concedes what is genuinely flawed, and marks true tradeoffs as open. Read-only; never blocks.
-model: claude-sonnet-5
-thinking: disabled
+model: claude-fable-5
+thinking: adaptive
 effort: medium
 tools: Read, Bash, Grep, Glob
 ---
@@ -65,3 +65,7 @@ If `OBJECTIONS` is empty or the diff is empty → return the single line `NO_OBJ
 - Never return `status: blocked`.
 - Never concede just to be agreeable, and never refute just to defend your work — anchor every verdict to the code or to project intent.
 - Never raise new issues, suggest refactors, or review hunks the reviewer did not flag.
+
+## Modelo & custo
+
+Default: Claude Fable 5 (`$10/$50 por MTok` — 2x o custo de Opus 4.8). Rodar o defender numa família de modelo diferente do challenger (tipicamente `forge-reviewer` em Opus/Sonnet) equilibra o debate — reduz o viés de um mesmo modelo concordando consigo mesmo em ambos os lados da confrontação. Override via `review.advocate_model` (`forge-agent-prefs.md § Review Settings`); resolvido para um alias de dispatch por `scripts/forge-model-alias.js` no orquestrador (`shared/forge-review.md § Step 0/3`). **Guard:** Fable 5 retorna HTTP 400 em `thinking: {type: "disabled"}` explícito — este frontmatter usa `thinking: adaptive`, nunca `disabled`, ao trocar o `model:` neste arquivo.

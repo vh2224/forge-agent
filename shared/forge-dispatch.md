@@ -1046,10 +1046,20 @@ if [ "$UNIT_TYPE" = "plan-slice" ] && [ "$REASON" = "risk-escalation:high" ]; th
 EFFORT_CLAMPED=$(node -e "const r={low:0,medium:1,high:2,xhigh:3,max:4};const m='$MODEL_ID';const cap=(/^claude-(haiku|sonnet)/.test(m))?'medium':'max';let e='$EFFORT';if(!(e in r))e='medium';process.stdout.write(r[e]>r[cap]?cap:e)")
 if [ "$EFFORT_CLAMPED" != "$EFFORT" ]; then EFFORT_REASON="${EFFORT_REASON}|clamped:model-cap"; EFFORT="$EFFORT_CLAMPED"; fi
 
+# Step 4d: resolve alias — Agent() model param only accepts sonnet|opus|haiku|fable,
+# never a full model ID. MODEL_ALIAS empty → ID has no known alias → OMIT model:
+# (degrades to the agent's own frontmatter) + a documented warning.
+MODEL_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$MODEL_ID")
+[ -z "$MODEL_ALIAS" ] && echo "⚠ model \"$MODEL_ID\" sem alias — usando frontmatter do agente" >&2
+# When $MODEL_ALIAS is non-empty, pass model: $MODEL_ALIAS to Agent(); when empty,
+# call Agent() without a model: param (the warning above was already echoed).
+
 # Step 5: extend dispatch event (append after Token Telemetry builds dispatchEvent)
-# Add:  ,"tier":"$TIER","reason":"$REASON","effort":"$EFFORT","effort_reason":"$EFFORT_REASON"
+# Add:  ,"tier":"$TIER","reason":"$REASON","effort":"$EFFORT","effort_reason":"$EFFORT_REASON","model_applied":$MODEL_APPLIED_JSON
+# (build MODEL_APPLIED_JSON safely — never interpolate MODEL_ALIAS directly into JSON)
 # Example (forge-auto line 259 extended):
-echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\"}" >> .gsd/forge/events.jsonl
+MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_APPLIED_JSON}" >> .gsd/forge/events.jsonl
 ```
 
 ---
