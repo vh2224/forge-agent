@@ -460,32 +460,60 @@ const STATUS_PT = {
   pending: 'pendente',
 };
 
-function renderTree(model) {
+// ── ANSI colors ──────────────────────────────────────────────────────────────
+// Opt-in per render call ({color: true}). The CLI only enables colors on a
+// real TTY (respecting NO_COLOR and --color/--no-color) — piped output (the
+// /forge-status chat shim, --json consumers, tests) stays byte-identical to
+// the plain render. Invariant: stripping /\x1b\[[0-9;]*m/g from a colored
+// render yields exactly the plain render.
+const ANSI = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  dim: '\x1b[2m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  cyan: '\x1b[36m',
+};
+
+function makePaint(enabled) {
+  const wrap = (code) => (enabled ? (s) => code + s + ANSI.reset : (s) => s);
+  return {
+    header: wrap(ANSI.bold),
+    id: wrap(ANSI.cyan),
+    done: wrap(ANSI.green),
+    active: wrap(ANSI.yellow),
+    warn: wrap(ANSI.yellow),
+    dim: wrap(ANSI.dim),
+  };
+}
+
+function renderTree(model, opts) {
+  const paint = makePaint(Boolean(opts && opts.color));
   const lines = [];
 
   if (!model || model.milestone === null) {
-    lines.push('## Status GSD');
+    lines.push(paint.header('## Status GSD'));
     lines.push('');
     lines.push('Nenhum run ativo. Execute /forge-auto <M-id> ou /forge-task <descrição> para começar.');
     if (model && Array.isArray(model.warnings) && model.warnings.length > 0) {
       lines.push('');
-      for (const w of model.warnings) lines.push(`⚠ ${w}`);
+      for (const w of model.warnings) lines.push(paint.warn(`⚠ ${w}`));
     }
     return lines.join('\n') + '\n';
   }
 
   const m = model.milestone;
 
-  lines.push('## Status GSD');
+  lines.push(paint.header('## Status GSD'));
   lines.push('');
-  lines.push(`**Milestone ativo:** ${m.id} — ${m.title}`);
+  lines.push(`**Milestone ativo:** ${paint.id(m.id)} — ${m.title}`);
   lines.push(`**Fase:** ${m.phase}`);
 
   const activeRun = (model.runs && Array.isArray(model.runs.active))
     ? model.runs.active.find((r) => r.id === m.id)
     : null;
   if (activeRun) {
-    const staleChip = activeRun.stale ? ' ⚠ STALE' : '';
+    const staleChip = activeRun.stale ? paint.warn(' ⚠ STALE') : '';
     lines.push(`**Run:** ${activeRun.kind} · heartbeat ${fmtAgo(activeRun.heartbeat_age_ms)}${staleChip}`);
   }
 
@@ -496,17 +524,17 @@ function renderTree(model) {
   }
 
   lines.push('');
-  lines.push('### Slices');
+  lines.push(paint.header('### Slices'));
   if (Array.isArray(m.slices) && m.slices.length > 0) {
     for (const s of m.slices) {
-      const box = s.checked ? 'x' : ' ';
-      const activeSuffix = s.status === 'active' ? '  ← ativo' : '';
-      lines.push(`- [${box}] ${s.id}: ${s.title}${activeSuffix}`);
+      const box = s.checked ? paint.done('[x]') : '[ ]';
+      const activeSuffix = s.status === 'active' ? paint.active('  ← ativo') : '';
+      lines.push(`- ${box} ${paint.id(s.id)}: ${s.title}${activeSuffix}`);
       if (Array.isArray(s.tasks)) {
         for (const t of s.tasks) {
-          const tBox = t.checked ? 'x' : ' ';
-          const tActiveSuffix = t.status === 'active' ? '  ← ativa' : '';
-          lines.push(`  - [${tBox}] ${t.id}: ${t.title}${tActiveSuffix}`);
+          const tBox = t.checked ? paint.done('[x]') : '[ ]';
+          const tActiveSuffix = t.status === 'active' ? paint.active('  ← ativa') : '';
+          lines.push(`  - ${tBox} ${paint.id(t.id)}: ${t.title}${tActiveSuffix}`);
         }
       }
     }
@@ -515,24 +543,24 @@ function renderTree(model) {
   }
 
   lines.push('');
-  lines.push('### Próxima ação');
+  lines.push(paint.header('### Próxima ação'));
   lines.push(m.next_action || '—');
 
   if (Array.isArray(model.autonomous_tasks) && model.autonomous_tasks.length > 0) {
     lines.push('');
-    lines.push('### Tasks autônomas');
+    lines.push(paint.header('### Tasks autônomas'));
     for (const t of model.autonomous_tasks) {
       let icon = '·';
-      if (t.status === 'done') icon = '✓';
-      else if (t.status === 'in_progress') icon = '▶';
+      if (t.status === 'done') icon = paint.done('✓');
+      else if (t.status === 'in_progress') icon = paint.active('▶');
       const statusPt = STATUS_PT[t.status] || t.status;
-      lines.push(`${icon} ${t.id}: ${t.description} (${statusPt})`);
+      lines.push(`${icon} ${paint.id(t.id)}: ${t.description} (${statusPt})`);
     }
   }
 
   if (Array.isArray(model.warnings) && model.warnings.length > 0) {
     lines.push('');
-    for (const w of model.warnings) lines.push(`⚠ ${w}`);
+    for (const w of model.warnings) lines.push(paint.warn(`⚠ ${w}`));
   }
 
   return lines.join('\n') + '\n';
@@ -546,7 +574,8 @@ function fmtInt(n) {
   return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
-function renderTokensBlock(agg) {
+function renderTokensBlock(agg, opts) {
+  const paint = makePaint(Boolean(opts && opts.color));
   if (!agg) {
     return '';
   }
@@ -555,7 +584,7 @@ function renderTokensBlock(agg) {
   // (per-milestone membership missing/empty), never print cross-milestone
   // numbers under this milestone's label — render an honest note instead.
   if (agg.source === 'unattributable') {
-    return `### Token usage (${agg.milestone || '—'})\n(sem telemetria atribuível a este milestone)\n`;
+    return `${paint.header(`### Token usage (${agg.milestone || '—'})`)}\n(sem telemetria atribuível a este milestone)\n`;
   }
 
   if (agg.has_telemetry === false) {
@@ -563,7 +592,7 @@ function renderTokensBlock(agg) {
   }
 
   const lines = [];
-  lines.push(`### Token usage (${agg.milestone || '—'})`);
+  lines.push(paint.header(`### Token usage (${agg.milestone || '—'})`));
   lines.push(`- Total input:  ${fmtInt(agg.total_input)} tokens`);
   lines.push(`- Total output: ${fmtInt(agg.total_output)} tokens`);
 
@@ -632,6 +661,10 @@ Argumentos:
   --help             mostra esta ajuda e sai
   --json             emite o modelo de status como JSON (best-effort v1) e sai
   --tokens           anexa um bloco de uso de tokens agregado de events.jsonl
+  --color            força cores ANSI mesmo sem TTY
+  --no-color         desliga cores. Default: auto — cores só em TTY real,
+                      respeitando NO_COLOR; saída piped (shim /forge-status,
+                      pipes, testes) permanece sem códigos ANSI
   --watch[=<seg>]    re-renderiza a árvore em loop (append, sem limpar a
                       tela; default 3s; Ctrl+C encerra). Pure-read — seguro
                       num 2º terminal ao lado de /forge-auto. Ignora --json.
@@ -646,14 +679,15 @@ futura.
 // human tree render, then (if args.tokens) the aggregated token block. Never
 // touches fs directly beyond what renderTree/aggregate already do.
 function emitHumanRender(model, cwd, args) {
-  process.stdout.write(renderTree(model));
+  const renderOpts = { color: Boolean(args._color) };
+  process.stdout.write(renderTree(model, renderOpts));
 
   if (args.tokens) {
     const focusedId = (model.runs && model.runs.focused) || (model.milestone && model.milestone.id) || null;
     try {
       if (focusedId) {
         const agg = tokens.aggregate(cwd, { milestoneId: focusedId });
-        const block = renderTokensBlock(agg);
+        const block = renderTokensBlock(agg, renderOpts);
         process.stdout.write('\n' + (block || 'Sem dados de telemetria ainda.\n'));
       } else {
         process.stdout.write('\nSem dados de telemetria ainda.\n');
@@ -707,7 +741,8 @@ function runWatch(cwd, args) {
   let stopped = false;
 
   function divider(n) {
-    return `\n─── refresh #${n + 1} @ ${new Date().toISOString()} ───\n`;
+    const line = `─── refresh #${n + 1} @ ${new Date().toISOString()} ───`;
+    return '\n' + makePaint(Boolean(args._color)).dim(line) + '\n';
   }
 
   function frame() {
@@ -751,8 +786,19 @@ function runWatch(cwd, args) {
   });
 }
 
+// Color mode: --no-color > --color > NO_COLOR env > TTY autodetect.
+// Presence-gated (hasOwnProperty) like --watch/--cwd — the S03-R5 '=value'
+// coercion quirk applies to every boolean flag equally.
+function resolveColorMode(args) {
+  if (Object.prototype.hasOwnProperty.call(args, 'no-color')) return false;
+  if (Object.prototype.hasOwnProperty.call(args, 'color')) return true;
+  if (process.env.NO_COLOR) return false;
+  return Boolean(process.stdout.isTTY);
+}
+
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
+  args._color = resolveColorMode(args);
 
   if (args.help) {
     process.stdout.write(HELP_TEXT);

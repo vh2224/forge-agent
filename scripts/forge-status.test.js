@@ -550,6 +550,26 @@ test('renderTree lists tasks of non-active slices (expanded default)', () => {
   assert(out.includes('← ativa'), 'active task marker still present on the active slice');
 });
 
+test('renderTree default output has zero ANSI codes (shim/pipe safety)', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const out = status.renderTree(status.collect(dir, {}));
+  assert(!out.includes('\x1b['), 'no escape sequences in default render');
+});
+
+test('renderTree {color:true} paints checkboxes/ids and strips back to the plain render', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const model = status.collect(dir, {});
+  const plain = status.renderTree(model);
+  const colored = status.renderTree(model, { color: true });
+  assert(colored.includes('\x1b[32m[x]\x1b[0m'), 'green done checkbox');
+  assert(colored.includes('\x1b[36mS01\x1b[0m'), 'cyan slice id');
+  assert(colored.includes('\x1b[36mT02\x1b[0m'), 'cyan task id');
+  assert(colored.includes('\x1b[1m### Slices\x1b[0m'), 'bold section header');
+  assert(colored.includes('\x1b[33m  ← ativo\x1b[0m'), 'yellow active marker');
+  const stripped = colored.replace(/\x1b\[[0-9;]*m/g, '');
+  assertEq(stripped, plain, 'stripping ANSI yields exactly the plain render');
+});
+
 test('renderTree on idle model shows "Nenhum run ativo"', () => {
   const { dir } = makeFixture({ milestone: false, runs: [], legacyState: false, autonomousTasks: false });
   const model = status.collect(dir, {});
@@ -633,6 +653,32 @@ test('CLI regression: milestone-with-missing-STATE via positional id does NOT ex
   const res = runCli([milestoneId, '--cwd', dir]);
   assert(res.status === 0, `expected exit 0 (degraded render, not not-found), got ${res.status}\nstderr: ${res.stderr}`);
   assert(res.stdout.includes(milestoneId), 'stdout mentions milestone id');
+});
+
+test('CLI piped (no TTY): output has no ANSI codes by default', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = runCli(['--cwd', dir]);
+  assert(res.status === 0, `expected exit 0, got ${res.status}`);
+  assert(!res.stdout.includes('\x1b['), 'no escape sequences when piped');
+});
+
+test('CLI --color forces ANSI even when piped; --no-color wins over --color', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const forced = runCli(['--cwd', dir, '--color']);
+  assert(forced.status === 0, `expected exit 0, got ${forced.status}`);
+  assert(forced.stdout.includes('\x1b[32m[x]\x1b[0m'), '--color paints the done checkbox');
+  const off = runCli(['--cwd', dir, '--color', '--no-color']);
+  assert(!off.stdout.includes('\x1b['), '--no-color disables even with --color present');
+});
+
+test('CLI --json ignores --color (machine output stays clean)', () => {
+  const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
+  const res = runCli(['--cwd', dir, '--json', '--color']);
+  assert(res.status === 0, `expected exit 0, got ${res.status}`);
+  assert(!res.stdout.includes('\x1b['), 'no escape sequences in JSON output');
+  let parsed = null;
+  try { parsed = JSON.parse(res.stdout); } catch {}
+  assert(parsed !== null, 'stdout still parses as JSON');
 });
 
 // ── 10. aggregate() unit tests (S02) ─────────────────────────────────────────
