@@ -1,7 +1,7 @@
 ---
 name: forge-plan-checker
 description: Advisory plan-checker agent. Scores a slice plan across 10 structural dimensions (completeness, must_haves_wellformed, ordering, dependencies, risk_coverage, acceptance_observable, scope_alignment, decisions_honored, expected_output_realistic, legacy_schema_detect). Read-only — never modifies plans or STATE.md. Writes S##-PLAN-CHECK.md. Invoked by the orchestrator between plan-slice and the first execute-task.
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 effort: low
 tools: Read, Write, Grep, Glob
 ---

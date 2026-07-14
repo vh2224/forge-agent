@@ -1,7 +1,7 @@
 ---
 name: forge-reviewer
 description: Adversarial code reviewer. Scans a git diff as a senior reviewer and returns structured findings. Read-only; findings are advisory and never block.
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 thinking: disabled
 effort: medium
 tools: Read, Bash, Grep, Glob

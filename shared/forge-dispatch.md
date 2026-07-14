@@ -615,7 +615,7 @@ Fields:
 - `class` — the `kind` from classifier output (`"rate-limit"`, `"server"`, `"network"`, `"stream"`, `"connection"`)
 - `attempt` — retry attempt number (1-based)
 - `backoff_ms` — actual sleep duration in milliseconds
-- `model` — model ID used for the dispatch (e.g. `"claude-sonnet-4-6"`)
+- `model` — model ID used for the dispatch (e.g. `"claude-sonnet-5"`)
 
 **Do NOT include:** raw exception text, SDK error body, request IDs, or any PII. The `errorMsg` variable must not appear in this entry.
 
@@ -644,7 +644,7 @@ Classifier output: `{"kind":"rate-limit","retry":true,"backoffMs":30000}`
 Action: sleep 30 000 ms, then retry.
 Event log entry:
 ```json
-{"ts":"2026-04-16T10:00:05Z","event":"retry","unit":"execute-task/T03","class":"rate-limit","attempt":1,"backoff_ms":30000,"model":"claude-sonnet-4-6"}
+{"ts":"2026-04-16T10:00:05Z","event":"retry","unit":"execute-task/T03","class":"rate-limit","attempt":1,"backoff_ms":30000,"model":"claude-sonnet-5"}
 ```
 
 **Example 2 — 503 server error (attempt 2 of 3)**
@@ -762,7 +762,7 @@ Each dispatch event is a single newline-terminated JSON object appended to `.gsd
 | `ts` | ISO 8601 string | `new Date().toISOString()` | `"2026-04-16T10:00:00Z"` |
 | `event` | literal `"dispatch"` | — | `"dispatch"` |
 | `unit` | string | `${unitType}/${unitId}` | `"execute-task/T03"` |
-| `model` | string | PREFS routing | `"claude-sonnet-4-6"` |
+| `model` | string | PREFS routing | `"claude-sonnet-5"` |
 | `input_tokens` | integer | `countTokens(finalPrompt)` | `12345` |
 | `output_tokens` | integer | SDK usage or `countTokens(text)` | `3421` |
 
@@ -791,7 +791,7 @@ Worker returns approximately 1 200 characters of output. Token estimate: `countT
 Event appended to `.gsd/forge/events.jsonl`:
 
 ```json
-{"ts":"2026-04-16T10:00:05Z","event":"dispatch","unit":"execute-task/T03","model":"claude-sonnet-4-6","input_tokens":2000,"output_tokens":300}
+{"ts":"2026-04-16T10:00:05Z","event":"dispatch","unit":"execute-task/T03","model":"claude-sonnet-5","input_tokens":2000,"output_tokens":300}
 ```
 
 #### Budgeted Section Injection
@@ -879,7 +879,7 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
    ```bash
    model=$(node -e "
      const prefs=require('./.gsd/prefs-resolved.json')||{};
-     const defaults={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8','max':'claude-fable-5'};
+     const defaults={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-5','heavy':'claude-opus-4-8','max':'claude-fable-5'};
      const m=(prefs.tier_models||{})['$tier']||defaults['$tier'];
      process.stdout.write(m);
    ")
@@ -901,7 +901,7 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
 | Key | Type | Default (when absent) | Description |
 |-----|------|-----------------------|-------------|
 | `tier_models.light` | string (model ID) | `claude-haiku-4-5-20251001` | Model used when tier resolves to `light` |
-| `tier_models.standard` | string (model ID) | `claude-sonnet-4-6` | Model used when tier resolves to `standard` |
+| `tier_models.standard` | string (model ID) | `claude-sonnet-5` | Model used when tier resolves to `standard` |
 | `tier_models.heavy` | string (model ID) | `claude-opus-4-8` | Model used when tier resolves to `heavy` |
 | `tier_models.max` | string (model ID) | `claude-fable-5` | Model used when tier resolves to `max` (plan-milestone, `risk:high` plan-slice, blocker escalation). 2x the cost of opus — never a default for high-volume unit types |
 
@@ -923,7 +923,7 @@ The `dispatch` event schema (defined in Token Telemetry above) is extended addit
   "ts": "2026-04-16T10:00:05Z",
   "event": "dispatch",
   "unit": "execute-task/T03",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "input_tokens": 2000,
   "output_tokens": 300,
   "tier": "standard",
@@ -1025,8 +1025,8 @@ if [ "$UNIT_TYPE" = "plan-slice" ]; then
 fi
 
 # Step 4: resolve model
-declare -A TIER_MODELS=([light]="claude-haiku-4-5-20251001" [standard]="claude-sonnet-4-6" [heavy]="claude-opus-4-8" [max]="claude-fable-5")
-MODEL_ID=$(node -e "const p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8')||'{}');const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-4-6','heavy':'claude-opus-4-8','max':'claude-fable-5'};process.stdout.write((p.tier_models||{})['$TIER']||d['$TIER'])")
+declare -A TIER_MODELS=([light]="claude-haiku-4-5-20251001" [standard]="claude-sonnet-5" [heavy]="claude-opus-4-8" [max]="claude-fable-5")
+MODEL_ID=$(node -e "const p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8')||'{}');const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-5','heavy':'claude-opus-4-8','max':'claude-fable-5'};process.stdout.write((p.tier_models||{})['$TIER']||d['$TIER'])")
 
 # Step 4b: Fable 5 thinking guard — claude-fable-5 400s on explicit thinking:disabled.
 # When MODEL_ID is claude-fable-5, inject "thinking: adaptive" in the worker prompt
@@ -1046,10 +1046,20 @@ if [ "$UNIT_TYPE" = "plan-slice" ] && [ "$REASON" = "risk-escalation:high" ]; th
 EFFORT_CLAMPED=$(node -e "const r={low:0,medium:1,high:2,xhigh:3,max:4};const m='$MODEL_ID';const cap=(/^claude-(haiku|sonnet)/.test(m))?'medium':'max';let e='$EFFORT';if(!(e in r))e='medium';process.stdout.write(r[e]>r[cap]?cap:e)")
 if [ "$EFFORT_CLAMPED" != "$EFFORT" ]; then EFFORT_REASON="${EFFORT_REASON}|clamped:model-cap"; EFFORT="$EFFORT_CLAMPED"; fi
 
+# Step 4d: resolve alias — Agent() model param only accepts sonnet|opus|haiku|fable,
+# never a full model ID. MODEL_ALIAS empty → ID has no known alias → OMIT model:
+# (degrades to the agent's own frontmatter) + a documented warning.
+MODEL_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$MODEL_ID")
+[ -z "$MODEL_ALIAS" ] && echo "⚠ model \"$MODEL_ID\" sem alias — usando frontmatter do agente" >&2
+# When $MODEL_ALIAS is non-empty, pass model: $MODEL_ALIAS to Agent(); when empty,
+# call Agent() without a model: param (the warning above was already echoed).
+
 # Step 5: extend dispatch event (append after Token Telemetry builds dispatchEvent)
-# Add:  ,"tier":"$TIER","reason":"$REASON","effort":"$EFFORT","effort_reason":"$EFFORT_REASON"
+# Add:  ,"tier":"$TIER","reason":"$REASON","effort":"$EFFORT","effort_reason":"$EFFORT_REASON","model_applied":$MODEL_APPLIED_JSON
+# (build MODEL_APPLIED_JSON safely — never interpolate MODEL_ALIAS directly into JSON)
 # Example (forge-auto line 259 extended):
-echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\"}" >> .gsd/forge/events.jsonl
+MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_APPLIED_JSON}" >> .gsd/forge/events.jsonl
 ```
 
 ---
@@ -1102,11 +1112,11 @@ The `dispatch` event schema is extended additively with `effort` and `effort_rea
 
 #### Worked examples
 
-**A — routine execute-task (defaults).** `unit_type=execute-task`, no `effort:`/`tier:` → `tier=standard`, `model=claude-sonnet-4-6`, `EFFORT=low` (unit default), no clamp → `effort=low`, `effort_reason="unit-type:execute-task"`.
+**A — routine execute-task (defaults).** `unit_type=execute-task`, no `effort:`/`tier:` → `tier=standard`, `model=claude-sonnet-5`, `EFFORT=low` (unit default), no clamp → `effort=low`, `effort_reason="unit-type:execute-task"`.
 
 **B — complex execute-task (planner sets both axes).** Frontmatter `tier: heavy` + `effort: high` → `model=claude-opus-4-8`; effort `high` ≤ opus cap `max`, no clamp → `effort=high`, `effort_reason="frontmatter-effort:high"`.
 
-**C — effort set high but task left on Sonnet (clamp fires).** Frontmatter `effort: xhigh`, no `tier:` → `tier=standard`, `model=claude-sonnet-4-6`; `xhigh` > sonnet cap `medium` → clamp → `effort=medium`, `effort_reason="frontmatter-effort:xhigh|clamped:model-cap"`. The operator sees in telemetry that effort was capped because the model wasn't bumped.
+**C — effort set high but task left on Sonnet (clamp fires).** Frontmatter `effort: xhigh`, no `tier:` → `tier=standard`, `model=claude-sonnet-5`; `xhigh` > sonnet cap `medium` → clamp → `effort=medium`, `effort_reason="frontmatter-effort:xhigh|clamped:model-cap"`. The operator sees in telemetry that effort was capped because the model wasn't bumped.
 
 **D — risk:high plan-slice.** Tier escalated `heavy → max` (`reason="risk-escalation:high"`, `model=claude-fable-5`) → effort jumps to `max`, no clamp (fable allows max) → `effort=max`, `effort_reason="risk-escalation:high"`.
 

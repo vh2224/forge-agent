@@ -33,7 +33,7 @@ The four tiers map to four model aliases. Operators can override the model for a
 | Tier | Default Model ID | Alias | Intended Workloads | Operator Override Key |
 |---|---|---|---|---|
 | `light` | `claude-haiku-4-5-20251001` | `haiku` | Memory extraction, aggregation, fast summaries | `tier_models.light` |
-| `standard` | `claude-sonnet-4-6` | `sonnet` | Code execution, research, discussion, scoped planning | `tier_models.standard` |
+| `standard` | `claude-sonnet-5` | `sonnet` | Code execution, research, discussion, scoped planning | `tier_models.standard` |
 | `heavy` | `claude-opus-4-8[1m]` | `opus` | Deep architectural planning, slice decomposition | `tier_models.heavy` |
 | `max` | `claude-fable-5` | `fable` | Milestone planning, `risk:high` slice planning, last rung of blocker escalation. 2x the cost of opus ($10/$50 vs $5/$25 per MTok) — never a default for high-volume unit types | `tier_models.max` |
 
@@ -41,6 +41,23 @@ The four tiers map to four model aliases. Operators can override the model for a
 > (Opus 4.7/4.8 accept it). Whenever the resolved model is `claude-fable-5`, the orchestrator must inject
 > `thinking: adaptive` in the worker prompt header — or omit the `thinking:` line entirely — even if the
 > phase prefs say `disabled`. Never forward `disabled` to a `max`-tier dispatch.
+
+> **ID→alias map — the `Agent()` `model:` param only accepts aliases.** The `model` parameter of the
+> `Agent` tool accepts only the four short aliases (`haiku|sonnet|opus|fable`) — it does **not** accept a
+> full model ID string (e.g. `claude-opus-4-8[1m]`). The "Default Model ID" column above is the concrete
+> ID an operator writes into `tier_models.<tier>` in `forge-agent-prefs.md`; before that ID reaches
+> `Agent()`, the orchestrator must translate it to its alias. This translation is a single canonical
+> map, implemented once in [`scripts/forge-model-alias.js`](../scripts/forge-model-alias.js)
+> (`modelToAlias(id)` — plain lowercase substring match, checked in order `fable → haiku → sonnet →
+> opus`; the `[1m]` context-window suffix needs no special-casing since substring search still finds
+> the base name). **This file and `shared/forge-dispatch.md` only describe and reference that helper —
+> neither reimplements the map as a second, driftable table.** Resolution rule: `Agent(model: <alias>)`
+> is dispatched with the alias, never the raw ID. When an operator sets `tier_models.<tier>` to an ID
+> the map does not recognize, `modelToAlias` returns `{ alias: null, mapped: false }`; the orchestrator
+> **omits** the `model:` param entirely in that case (degrading to the invoked agent's own frontmatter
+> `model:` default) and logs a warning — it never passes the unmapped ID straight through, since
+> `Agent()` would reject it. This same map is reused by S04 (advocate override) — see
+> [Cross-references](#cross-references).
 
 ---
 

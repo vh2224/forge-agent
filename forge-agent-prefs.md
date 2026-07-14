@@ -10,7 +10,7 @@ version: 1
 | Alias | Model ID | Uso recomendado |
 |-------|----------|-----------------|
 | `opus` | `claude-opus-4-8[1m]` | Análise profunda, decisões arquiteturais, planejamento |
-| `sonnet` | `claude-sonnet-4-6` | Implementação, execução, tarefas padrão |
+| `sonnet` | `claude-sonnet-5` | Implementação, execução, tarefas padrão |
 | `haiku` | `claude-haiku-4-5-20251001` | Tarefas leves, extração de memórias, operações rápidas |
 
 Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-8[1m]`) em qualquer configuração.
@@ -27,9 +27,9 @@ Você pode usar o alias (`opus`) ou o model ID completo (`claude-opus-4-8[1m]`) 
 | research-slice | forge-researcher | claude-opus-4-8[1m] | opus |
 | plan-milestone | forge-planner | claude-opus-4-8[1m] | opus |
 | plan-slice | forge-planner | claude-opus-4-8[1m] | opus |
-| execute-task | forge-executor | claude-sonnet-4-6 | sonnet |
-| complete-slice | forge-completer | claude-sonnet-4-6 | sonnet |
-| complete-milestone | forge-completer | claude-sonnet-4-6 | sonnet |
+| execute-task | forge-executor | claude-sonnet-5 | sonnet |
+| complete-slice | forge-completer | claude-sonnet-5 | sonnet |
+| complete-milestone | forge-completer | claude-sonnet-5 | sonnet |
 | memory-extract | forge-memory | claude-haiku-4-5-20251001 | haiku |
 
 ## Phase Skip Rules
@@ -360,7 +360,7 @@ to re-route any tier without touching orchestrator code or agent frontmatters.
 ```
 tier_models:
   light:    claude-haiku-4-5-20251001      # fast, cheap (memory-extract, complete-slice, docs tag)
-  standard: claude-sonnet-4-6              # balanced (execute-task default, research, discuss)
+  standard: claude-sonnet-5              # balanced (execute-task default, research, discuss)
   heavy:    "claude-opus-4-8[1m]"          # deep reasoning (plan-slice default)
   max:      claude-fable-5                 # frontier (plan-milestone, risk:high plan-slice, blocker escalation) — 2x opus cost
 ```
@@ -371,6 +371,14 @@ The orchestrator reads `tier_models` on every dispatch loop iteration. When the 
 is resolved (see precedence below), the corresponding model ID from this block is injected into
 the `Agent()` call. If a key is missing, the system falls back to the canonical defaults defined
 in [`shared/forge-tiers.md § Tier → Default Model`](shared/forge-tiers.md).
+
+> **Restrição do mapa ID→alias (M004):** o param `model` da tool `Agent` aceita apenas os aliases
+> `sonnet|opus|haiku|fable`. O ID configurado aqui é traduzido por `scripts/forge-model-alias.js`
+> (fonte única do mapa: `*haiku*→haiku`, `*sonnet*→sonnet`, `*opus*→opus`, `*fable*→fable`).
+> Um ID que não casa com o mapa (ex.: um modelo de outra família) NÃO roteia — o dispatch omite
+> `model:` (o frontmatter do agente governa) e registra warning + `model_applied: null` no evento.
+> Exemplos que funcionam: `claude-opus-4-8`, `"claude-opus-4-8[1m]"`, `claude-fable-5`,
+> `claude-sonnet-5`, `claude-haiku-4-5-20251001`.
 
 ### Override precedence (highest wins)
 
@@ -391,7 +399,7 @@ in [`shared/forge-tiers.md § Tier → Default Model`](shared/forge-tiers.md).
 
 Edit the `tier_models` block in this file (or in `.gsd/claude-agent-prefs.md` for repo-level
 scope, or `.gsd/prefs.local.md` for personal local scope — latter gitignored). Example: changing
-`tier_models.light` from `claude-haiku-4-5-20251001` to `claude-sonnet-4-6` means the next
+`tier_models.light` from `claude-haiku-4-5-20251001` to `claude-sonnet-5` means the next
 `memory-extract` dispatch will invoke sonnet instead of haiku — **no code change required**.
 
 ### How to override per-task
@@ -590,7 +598,32 @@ review:
   rounds: 1           # 0–3 rodadas de réplica do reviewer sobre a defesa
   ask_in_auto: defer  # defer | pause
   fix_conceded: true  # true | false — corrige automaticamente as objeções concedidas
+  challenger: claude       # claude | codex — quem desafia (codex via scripts/forge-xllm.js)
+  challenger_model:        # (unset) — passa -m <valor> ao codex; vazio = default do CLI
+                           #   ex.: challenger_model: gpt-5.2-codex
+  advocate_model: claude-fable-5   # modelo do defender (alias via forge-model-alias.js)
+                                   #   ex.: advocate_model: claude-opus-4-8  (defesa mais barata)
 ```
+
+### Exemplo — review cross-model (GPT ataca × Fable 5 defende)
+
+O ganho do multi-LLM: challenger e advocate da MESMA família compartilham pontos cegos; um GPT
+desafiando código escrito por Claude acha classes de bug que dois Claudes não acham. Para ativar,
+cole em `.gsd/prefs.local.md` (pessoal, gitignored) ou `.gsd/claude-agent-prefs.md` (repo):
+
+```yaml
+review:
+  challenger: codex            # GPT via Codex CLI assume challenge + réplica
+  # challenger_model:          # deixe unset → default do Codex CLI (a OpenAI mantém atual);
+  #                            # pin explícito só se precisar: challenger_model: gpt-5.2-codex
+  # advocate_model: claude-fable-5   # já é o default — melhor Claude defendendo
+```
+
+**Pré-requisitos (uma vez por máquina):** `npm install -g @openai/codex` + `codex login`
+(assinatura ChatGPT — recomendado) OU `OPENAI_API_KEY` no ambiente. O forge NÃO instala nem
+armazena credenciais — a auth é 100% do Codex CLI. Sem codex disponível (binário, auth, quota,
+rede), o gate cai automaticamente no `forge-reviewer` Claude com evento
+`review-challenger-fallback` — nunca trava, nunca bloqueia.
 
 ### Semântica
 
@@ -604,6 +637,9 @@ review:
 - `rounds` (padrão `1`): quantas vezes o reviewer replica à defesa do advocate. `0` = sem réplica (toda objeção contestada vira `aberta`). Cap em `3`.
 - `ask_in_auto` (padrão `defer`): em `forge-auto`, `defer` **não pausa no meio do loop** — marca as `aberta`s como `deferido → triagem no fim da milestone` e segue (honra a AUTONOMY RULE). **Defer não engole:** todo item deferido é apresentado ao operador na triagem final, antes do `complete-milestone` rodar de fato. `pause` faz o `forge-auto` perguntar ao humano por slice, mesmo no modo autônomo (opt-in).
 - `fix_conceded` (padrão `true`): objeções **concedidas** (challenger e advocate concordam que o problema é real) disparam um `review-fix` — `forge-executor` corrige só os itens listados, commit `fix(review): ...`, ainda no branch do slice. Sem re-review do commit de fix (evita ping-pong). `false`: volta ao comportamento legado — concedidas são registradas e (em modo interativo) perguntadas uma vez.
+- `challenger` (padrão `claude`): quem roda o papel de challenger (Steps 2/4). `claude` mantém o comportamento atual — os agentes `forge-reviewer`/`forge-advocate` em contexto. `codex` roteia challenge e rebuttal pelo adapter `scripts/forge-xllm.js` (GPT via `codex exec`); valor inválido cai no fallback da whitelist (`claude`). Precede `engine: workflow`: `challenger: codex` força `engine: agents` (o script workflow não roteia codex) — ver `shared/forge-review.md § Step 0 § Precedência`.
+- `challenger_model` (padrão unset): nome do modelo — não é credencial — repassado como `--model <valor>` ao adapter quando `challenger: codex`; vazio/unset usa o default do Codex CLI. Ignorado quando `challenger: claude`.
+- `advocate_model` (padrão `claude-fable-5`, literal — nunca null): modelo do defender (`forge-advocate`). Resolvido para um alias de dispatch via `scripts/forge-model-alias.js` (única fonte do mapa ID→alias — não duplicar) e passado como `model:` no `Agent()` do Step 3 só quando o alias não é vazio; um id sem alias conhecido omite `model:` (o frontmatter de `agents/forge-advocate.md` governa) e emite um warning de uma linha. **Guard Fable 400:** o frontmatter de `agents/forge-advocate.md` usa `thinking: adaptive` (nunca `disabled`) — Fable 5 retorna HTTP 400 em `thinking` explicitamente desabilitado. **Nota de reinstall:** mudar `advocate_model` (ou o frontmatter de `agents/forge-advocate.md`) só tem efeito em runtime após `/forge-update`/reinstall — as cópias em `~/.claude/` divergem do repo até a sincronização (installed-copies drift).
 
 ### Resolução das objeções
 
@@ -623,7 +659,8 @@ review:
 - Defender: `agents/forge-advocate.md`.
 - Dispatch guard: `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` (antes de `complete-slice`; idempotente — se `S##-REVIEW.md` já existe, pula). Triagem final: mesmos skills, antes de `complete-milestone` (`shared/forge-review.md § Step 9`).
 - Artefato gerado: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (per-slice) ou `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md` (task solta) — durável com a unidade; limpo por `milestone_cleanup`. Follow-ups da triagem final vão para `.gsd/KNOWLEDGE.md § Review follow-ups` (sobrevive cleanup).
-- Dois boundaries: per-slice (gate antes de `complete-slice` em `forge-auto`/`forge-next`) e task solta (`/forge-task` step 5.5, sempre interativo). Ambos honram `mode`/`style`/`rounds`/`fix_conceded`/`engine`; `ask_in_auto` só se aplica ao `forge-auto`.
+- Dois boundaries: per-slice (gate antes de `complete-slice` em `forge-auto`/`forge-next`) e task solta (`/forge-task` step 5.5, sempre interativo). Ambos honram `mode`/`style`/`rounds`/`fix_conceded`/`engine`/`challenger`/`challenger_model`/`advocate_model`; `ask_in_auto` só se aplica ao `forge-auto`.
+- Challenger Codex: `shared/forge-review.md § Step 0` (cascata + precedência vs `engine: workflow`) e `scripts/forge-xllm.js` (adapter — nunca recebe credencial por argv; auth é do próprio Codex CLI).
 
 ## Plan Gate Settings
 
@@ -902,6 +939,6 @@ repo_path:    # preenchido pelo install.sh — caminho do repositório gsd-agent
 - `review.engine` é ignorado quando `review.mode: disabled`.
 - Para mudar o modelo de uma fase, edite o bloco `tier_models:` na seção `## Tier Settings` acima.
   A tabela Phase → Agent Routing é informacional; o bloco `tier_models:` é a fonte de verdade.
-- Modelos disponíveis: fable (claude-fable-5 — tier max, 2x custo do opus), opus (claude-opus-4-8[1m], fallback claude-opus-4-7), sonnet (claude-sonnet-4-6), haiku (claude-haiku-4-5-20251001)
+- Modelos disponíveis: fable (claude-fable-5 — tier max, 2x custo do opus), opus (claude-opus-4-8[1m], fallback claude-opus-4-7), sonnet (claude-sonnet-5), haiku (claude-haiku-4-5-20251001)
 - Este arquivo é lido pelo orquestrador gsd.md a cada iteração do loop
 - Para mudar comandos de verify, edite o bloco "verification:" acima. Veja scripts/forge-verify.js para a implementação.

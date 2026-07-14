@@ -34,7 +34,7 @@ const wd=process.env.WORKING_DIR||process.cwd();
 const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
              path.join(wd,'.gsd','claude-agent-prefs.md'),
              path.join(wd,'.gsd','prefs.local.md')];
-let mode='enabled',style='dialectic',rounds=1,askAuto='defer',fixConceded=true,engine='agents';
+let mode='enabled',style='dialectic',rounds=1,askAuto='defer',fixConceded=true,engine='agents',challenger='claude',challengerModel=null,advocateModel='claude-fable-5';
 for(const f of files){try{
   const r=fs.readFileSync(f,'utf8');
   const blk=(r.match(/^review:[ \t]*\n((?:[ \t]+.*\n?)*)/m)||[])[1]||'';
@@ -45,18 +45,50 @@ for(const f of files){try{
   if(m=blk.match(/^[ \t]+ask_in_auto:[ \t]*(\w+)/m))askAuto=m[1].toLowerCase();
   if(m=blk.match(/^[ \t]+fix_conceded:[ \t]*(\w+)/m))fixConceded=m[1].toLowerCase()!=='false';
   if(m=blk.match(/^[ \t]+engine:[ \t]*(\w+)/m))engine=m[1].toLowerCase();
+  if(m=blk.match(/^[ \t]+challenger:[ \t]*(\w+)/m))challenger=m[1].toLowerCase();
+  if(m=blk.match(/^[ \t]+challenger_model:[ \t]*(\S+)/m))challengerModel=m[1];
+  if(m=blk.match(/^[ \t]+advocate_model:[ \t]*(\S+)/m))advocateModel=m[1];
 }catch(e){}}
 if(!['enabled','disabled'].includes(mode))mode='enabled';
 if(!['dialectic','flags'].includes(style))style='dialectic';
 if(!Number.isInteger(rounds)||rounds<0||rounds>3)rounds=1;
 if(!['defer','pause'].includes(askAuto))askAuto='defer';
 if(!['agents','workflow'].includes(engine))engine='agents';
-process.stdout.write(JSON.stringify({mode,style,rounds,askAuto,fixConceded,engine}));
+if(!['claude','codex'].includes(challenger))challenger='claude';
+process.stdout.write(JSON.stringify({mode,style,rounds,askAuto,fixConceded,engine,challenger,challengerModel,advocateModel}));
 " WORKING_DIR=\"$WORKING_DIR\")
+
+CHALLENGER_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.challengerModel||'')}catch(e){process.stdout.write('')}})")
+ADVOCATE_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.advocateModel||'')}catch(e){process.stdout.write('')}})")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-model-alias.js ] && echo scripts || echo "$HOME/.claude/scripts")
+ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")
 ```
 
+`$CHALLENGER_MODEL` and `$ADVOCATE_MODEL` are derived immediately after `$REVIEW_CFG` (same JSON-aware pattern as the `engine==workflow && challenger==codex` precedence check below) so Steps 2/3/4's `[ -n "$CHALLENGER_MODEL" ]` / `[ -n "$ADVOCATE_ALIAS" ]` guards have a value to test — never left unassigned.
+
+**Prefs read here:**
+- `challenger` — whitelist `claude|codex`, default `claude`. `claude` (or any invalid value → whitelist fallback) runs the in-context `forge-reviewer`/`forge-advocate` agents unchanged. `codex` routes the challenge (Step 2) and rebuttal (Step 4) through the `scripts/forge-xllm.js` adapter (GPT via `codex exec`).
+- `challengerModel` — default `null` (unset). When set (e.g. `gpt-5-x`), it is forwarded to the adapter as `--model {challenger_model}`; when `null`, `-m`/`--model` is omitted and the adapter uses the Codex CLI default model. Only meaningful when `challenger == codex`.
+- `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Resolved to a dispatch alias via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id with no known alias resolves to an empty string; Step 3 then omits `model:` entirely (frontmatter governs) and echoes a warning — degradation is documented, not silent.
+- The regexes use `[ \t]` (never `\s`, which would match `\n` and leak into the next line — MEM), following the `readEvidenceMode` reader model.
+
+### Precedence — `challenger: codex` × `engine: workflow`
+
+The `engine: workflow` script hardcodes `agentType: 'forge-reviewer'` and cannot route Codex. So `challenger == 'codex'` **forces `engine = 'agents'`** — never a silent state. Immediately after the cascade resolves, in the orchestrator:
+
+```bash
+if [ "$(printf '%s' "$REVIEW_CFG" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const c=JSON.parse(s);process.stdout.write(c.challenger==="codex"&&c.engine==="workflow"?"1":"")})')" = "1" ]; then
+  echo "⚠ challenger: codex força engine agents (workflow não roteia codex)"
+  printf '{"ts":"%s","event":"review-challenger-fallback","milestone":"%s","slice":"%s","reason":"engine-workflow-forced-agents"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{M###}" "{S##}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+  # treat engine as 'agents' for the rest of the gate
+fi
+```
+
+The Codex challenger still runs — only the `workflow` transport is overridden to `agents` (which is where the Codex branch of Steps 2/4 lives). `<ISO>` comes from bash, never from inside a script. See **Fallback challenger (review-challenger-fallback)** below.
+
 - `mode == disabled` → **skip the entire gate.** Proceed straight to `complete-slice`.
-- `style == flags` → run the **legacy single-pass** (challenge only; write a `## ⚠ Review Flags`-style section into `{S##}-REVIEW.md`; no defense, no rebuttal, no Ask). Back-compat for users who don't want the debate.
+- `style == flags` → run the **legacy single-pass** (challenge only; write a `## ⚠ Review Flags`-style section into `{S##}-REVIEW.md`; no defense, no rebuttal, no Ask). Back-compat for users who don't want the debate. **`flags` respects `challenger`:** the single-pass runs Step 2 (challenge) only, so when `challenger == 'codex'` the challenge is routed to the adapter (`--mode challenge`) exactly as in the dialectic path; `challenger == 'claude'` runs `forge-reviewer`. A `flags` run has no rebuttal, so the Codex rebuttal branch never applies.
 - `style == dialectic` (default) → run Steps 1–7 below. Engine routing applies within this path:
   - `engine == agents` (default) → Steps 1–9 as-is (zero change).
   - `engine == workflow` AND `style == dialectic` → **detect by introspection:** check whether the tool `Workflow` is present in **your own tool list** (when available, `Workflow` is a top-level tool — **do NOT use ToolSearch**, which only finds deferred tools and would return empty even when `Workflow` is available). Tool present → run Step 1 then execute **`## Engine workflow`** in place of Steps 2–5; Steps 6, 7a, 7b, 8, 9 are unchanged. Tool absent → **fallback agents** (see sub-section below).
@@ -80,6 +112,22 @@ Proceed via Steps 2–5 (agents). Defense/rebuttal `null` **never** reach this p
 
 > The `<ISO>` timestamp for both events comes from bash (`date -u +%Y-%m-%dT%H:%M:%SZ`) in the orchestrator — never from inside the script.
 
+### Fallback challenger (review-challenger-fallback)
+
+Modeled on **Fallback agents** above. One event type, two triggers discriminated by `reason`:
+
+**(a) `engine-workflow-forced-agents`** (precedence, resolved at Step 0 — see the precedence sub-section above): `challenger == 'codex'` AND `engine == 'workflow'` → force `engine = 'agents'`, echo `⚠ challenger: codex força engine agents (workflow não roteia codex)`, append to `{WORKING_DIR}/.gsd/forge/events.jsonl`:
+```json
+{"ts":"<ISO>","event":"review-challenger-fallback","milestone":"{M###}","slice":"{S##}","reason":"engine-workflow-forced-agents"}
+```
+
+**(b) `codex-exit-nonzero`** (adapter unavailable/failed at the challenge stage — Step 2): the `scripts/forge-xllm.js` challenge invocation exits `!= 0` (binary absent, auth, quota, timeout, parse — the adapter does not distinguish; cause on its stderr) → **single fallback** to `Agent("forge-reviewer")` (no retry), echo `⚠ challenger: codex indisponível (exit ≠ 0) — usando forge-reviewer`, append:
+```json
+{"ts":"<ISO>","event":"review-challenger-fallback","milestone":"{M###}","slice":"{S##}","reason":"codex-exit-nonzero"}
+```
+
+> `<ISO>` for both comes from bash (`date -u +%Y-%m-%dT%H:%M:%SZ`) — never from inside a script. **Rebuttal has no fallback of its own:** a Codex rebuttal failure degrades non-conceded objections to `maintained` (conservative), it does NOT emit this event nor dispatch an agent (see Step 4).
+
 ## Step 0a — Idempotency
 
 If `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` already exists → **skip the gate** (a prior run, or a resume after compaction, already produced it). Proceed to `complete-slice`.
@@ -99,7 +147,11 @@ fi
 
 If `$DIFF_CMD` still produces no changes → write a minimal `{S##}-REVIEW.md` stating "no diff to review" and proceed. Do not dispatch agents.
 
-## Step 2 — Challenge (forge-reviewer)
+## Step 2 — Challenge
+
+Routed by `challenger` (from Step 0). `challenger == 'claude'` (default) runs the in-context agent unchanged; `challenger == 'codex'` runs the S01 adapter.
+
+### `challenger == 'claude'` (default agent)
 
 ```
 Agent({ subagent_type: 'forge-reviewer',
@@ -112,18 +164,53 @@ Parse the result:
 
 If the `Agent()` call **throws** → record a one-line note, write a `{S##}-REVIEW.md` stub noting the review could not run, and proceed. **Review failures never abort `complete-slice`.**
 
+### `challenger == 'codex'` (S01 adapter)
+
+Invoke the adapter (parsing is **not** reimplemented — the adapter of S01 already validates and normalizes; see `scripts/forge-xllm.js`). Append `--model {challenger_model}` **only when `challengerModel != null`**; `--timeout` is optional:
+
+```bash
+node scripts/forge-xllm.js --mode challenge --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} \
+  $([ -n "$CHALLENGER_MODEL" ] && printf -- '--model %s' "$CHALLENGER_MODEL")
+XLLM_EXIT=$?
+```
+
+- **exit 0** → stdout is JSON `{objections:[{id,severity,file,line,issue,fix,challenge}]}` (already normalized by the adapter). Map each objection into the same `OBJECTIONS` contract the Claude branch produces — id (`R#`), `path:line` (`file:line`), severity, claim (`issue`), suggested fix (`fix`), and the `challenge` question — so Steps 3/5/6 consume it identically. Empty `objections` array → treat as `NO_FLAGS` (write a clean `{S##}-REVIEW.md`, proceed).
+- **exit != 0** → **single fallback** (no retry) to `Agent("forge-reviewer")` (the `challenger == 'claude'` invocation above), echo `⚠ challenger: codex indisponível (exit ≠ 0) — usando forge-reviewer`, and append a `review-challenger-fallback` event with `reason: "codex-exit-nonzero"` (cause is on the adapter's stderr). See **Fallback challenger (review-challenger-fallback)** (trigger b). The gate then continues with the agent's objections.
+
 ## Step 3 — Defense (forge-advocate)
 
+`ADVOCATE_ALIAS` was resolved in Step 0 from `advocate_model` (default `claude-fable-5`) via `scripts/forge-model-alias.js`. Pass `model:` to the dispatch **only when the alias is non-empty** (same override-at-dispatch pattern as the S02 challenger model, mirrored for the defender):
+
+```
+if [ -n "$ADVOCATE_ALIAS" ]; then
+```
+```
+Agent({ subagent_type: 'forge-advocate', model: '{ADVOCATE_ALIAS}',
+  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nOBJECTIONS:\n{OBJECTIONS}" })
+```
+```
+else
+  echo "⚠ advocate_model '$ADVOCATE_MODEL' sem alias — usando frontmatter"
+```
 ```
 Agent({ subagent_type: 'forge-advocate',
   prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nOBJECTIONS:\n{OBJECTIONS}" })
 ```
+```
+fi
+```
+
+**Guard Fable 400 (documented):** when the resolved model is `claude-fable-5*`, `thinking` MUST be `adaptive` (never `disabled`) — Fable 5 returns HTTP 400 on an explicit `thinking: {type: 'disabled'}`. The `Agent()` call above never injects `thinking` itself, so this is guaranteed by `agents/forge-advocate.md`'s own frontmatter (`model: claude-fable-5` + `thinking: adaptive`, changed together in the same commit).
+
+**Scope of the override:** this `model:` override only applies to the `engine: agents` dispatch path above (Step 3). Under `engine: workflow`, the advocate runs as `agentType: 'forge-advocate'` inside the workflow script (see `## Engine workflow` below) — the script does not accept a per-call `model:` override, so the agent's own frontmatter (now Fable 5 by default) governs there instead.
 
 Capture per-objection verdicts: `R# → {refuted | conceded | open} + rationale`. A throw here → treat every objection as `open` (the defense couldn't be heard) and continue.
 
-## Step 4 — Rebuttal (forge-reviewer, rebuttal mode) × `rounds`
+## Step 4 — Rebuttal (rebuttal mode) × `rounds`
 
-Skip if `rounds == 0`. Otherwise, for `i` in `1..rounds` (default 1), feed the defense back to the reviewer:
+Skip if `rounds == 0`. Otherwise, for `i` in `1..rounds` (default 1), feed the defense back to the **same challenger** that ran Step 2 (LOCKED — a rebuttal is only meaningful from the agent that wrote the original objections). Routed by `challenger`.
+
+### `challenger == 'claude'` (default agent)
 
 ```
 Agent({ subagent_type: 'forge-reviewer',
@@ -131,6 +218,21 @@ Agent({ subagent_type: 'forge-reviewer',
 ```
 
 When `DEFENSE` is present the reviewer runs in **rebuttal mode** (`agents/forge-reviewer.md § Rebuttal mode`): it only re-litigates objections the advocate `refuted` or marked `open`, returning `maintained` or `withdrawn` + a reason. Objections the advocate `conceded` are carried through as `conceded` (settled — nothing to rebut). A throw → treat all non-conceded objections as `maintained` (conservative). Only the last round's verdicts count.
+
+### `challenger == 'codex'` (S01 adapter)
+
+Write the OBJECTIONS + DEFENSE dialogue to a temp file (the adapter reads the rebuttal input from disk), then invoke the adapter (`--model` only when `challengerModel != null`):
+
+```bash
+node scripts/forge-xllm.js --mode rebuttal --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} \
+  $([ -n "$CHALLENGER_MODEL" ] && printf -- '--model %s' "$CHALLENGER_MODEL")
+XLLM_EXIT=$?
+```
+
+- **exit 0** → stdout is JSON `{verdicts:[{id,verdict,rationale}]}` (`verdict ∈ maintained|withdrawn`, already normalized). Apply exactly as the agent's rebuttal verdicts; only the last round's verdicts count.
+- **exit != 0** → **no fallback of any kind.** Degrade every non-conceded objection to `maintained` (conservative) — reusing the same throw-handling rule the Claude branch already documents ("A throw → treat all non-conceded objections as `maintained`"). **NO** `Agent("forge-reviewer")` dispatch and **NO** `review-challenger-fallback` event.
+
+> **The asymmetry with Step 2 challenge is deliberate (LOCKED, M004-CONTEXT).** A challenge failure falls back to a Claude agent because any competent reviewer can produce fresh objections from the diff. A rebuttal failure does **not**: a Claude agent would be re-judging objections it never wrote — so we degrade conservatively (`maintained` keeps them open for the human) rather than hand them to a different mind.
 
 ## Step 5 — Resolve each objection
 
@@ -177,11 +279,13 @@ phases: [{ title: 'Challenge' }, { title: 'Defense' }, { title: 'Rebuttal' }]
 
 const { wd, unit, diffCmd, rounds } = args
 
+// keep in sync with scripts/forge-xllm.js
 const challengeSchema = {
-  type: 'object', required: ['objections'],
+  type: 'object', required: ['objections'], additionalProperties: false,
   properties: { objections: { type: 'array', items: {
     type: 'object',
     required: ['id', 'path_line', 'claim', 'suggested_fix', 'challenge', 'severity'],
+    additionalProperties: false,
     properties: {
       id: { type: 'string', description: 'Stable id R1, R2, ... severity-then-order' },
       path_line: { type: 'string' },
@@ -209,11 +313,12 @@ const objText = challenge.objections.map(function (o) {
     ' — suggested fix: ' + o.suggested_fix + ' — challenge: ' + o.challenge
 }).join('\n')
 
+// keep in sync with scripts/forge-xllm.js
 const verdictSchema = function (allowed) {
   return {
-    type: 'object', required: ['verdicts'],
+    type: 'object', required: ['verdicts'], additionalProperties: false,
     properties: { verdicts: { type: 'array', items: {
-      type: 'object', required: ['id', 'verdict', 'rationale'],
+      type: 'object', required: ['id', 'verdict', 'rationale'], additionalProperties: false,
       properties: {
         id: { type: 'string' },
         verdict: { type: 'string', enum: allowed },
@@ -318,6 +423,8 @@ The artifact is the **dialogue**, not a flag dump. Auditable, durable with the m
 # S##: <slice title> — Review (Dialectic)
 **Slice:** S##  **Milestone:** M###  **Reviewed:** YYYY-MM-DD  **Rounds:** {rounds}
 **Outcome:** {X resolved · Y conceded · Z open}
+**Challenger:** {claude|codex} (<model|default>)
+**Defender:** {advocate_model|alias}
 
 ## Abertas — requerem decisão humana
 > O reviewer e o autor não chegaram a acordo. Você decide.
@@ -341,6 +448,10 @@ The artifact is the **dialogue**, not a flag dump. Auditable, durable with the m
 ```
 
 Omit any section with zero items.
+
+**`Challenger` line:** `claude` → `**Challenger:** claude`. `codex` with `challengerModel` set → `**Challenger:** codex (gpt-5-x)`; `codex` with model unset → `**Challenger:** codex (default do CLI)`. When a challenge fell back from codex to the agent (`review-challenger-fallback` / `codex-exit-nonzero`), stamp `**Challenger:** claude (fallback de codex)` to keep the artifact honest about what actually ran.
+
+**`Defender` line:** `ADVOCATE_ALIAS` non-empty → `**Defender:** {advocate_model} ({ADVOCATE_ALIAS})` (e.g. `**Defender:** claude-fable-5 (fable)`); `ADVOCATE_ALIAS` empty (id with no known alias) → `**Defender:** {advocate_model} (frontmatter — sem alias)`, matching the Step 3 warning.
 
 ## Step 7a — Conceded fix dispatch (both modes)
 
@@ -378,10 +489,10 @@ The gate **never** returns a blocker regardless of posture.
 Append one line per agent dispatch to `{WORKING_DIR}/.gsd/forge/events.jsonl` (I/O errors propagate — no silent-fail):
 
 ```json
-{"ts":"<ISO-8601>","event":"review","milestone":"${RUN_ID:-{M###}}","slice":"{S##}","style":"dialectic","rounds":N,"counts":{"resolved":N,"conceded":N,"open":N},"conceded_fixed":N,"engine":"agents"}
+{"ts":"<ISO-8601>","event":"review","milestone":"${RUN_ID:-{M###}}","slice":"{S##}","style":"dialectic","rounds":N,"counts":{"resolved":N,"conceded":N,"open":N},"conceded_fixed":N,"engine":"agents","challenger":"claude","advocate":$([ -n "$ADVOCATE_ALIAS" ] && printf '"%s"' "$ADVOCATE_ALIAS" || printf 'null')}
 ```
 
-`conceded_fixed` and `engine` are additive fields (readers that ignore unknown fields stay compatible — same convention as `tier`/`reason` from M002). `engine` is either `"agents"` or `"workflow"` and is emitted by **both** engine paths. `conceded_fixed`: number of conceded items whose Step 7a fix landed.
+`conceded_fixed`, `engine`, `challenger` and `advocate` are additive fields (readers that ignore unknown fields stay compatible — same convention as `tier`/`reason` from M002). `engine` is either `"agents"` or `"workflow"` and is emitted by **both** engine paths. `conceded_fixed`: number of conceded items whose Step 7a fix landed. `challenger` is `"claude"` or `"codex"` — the challenger that actually ran the challenge (so a codex→agent fallback records `"claude"`). `advocate` is the resolved `ADVOCATE_ALIAS` (e.g. `"fable"`) or JSON `null` when the id had no known alias (frontmatter governed instead) — same optional-field glue pattern as the rest of this event.
 
 ## Step 9 — Milestone-final triage (before `complete-milestone`)
 
@@ -403,11 +514,12 @@ Consumer: `forge-auto` / `forge-next`, when the derived unit is `complete-milest
 
 ## Legacy `style: flags` single-pass
 
-When `style == flags`: run Step 2 only. Write the reviewer's findings (+ optional pattern hits) into `{S##}-REVIEW.md` under a single `## ⚠ Review Flags` heading. No advocate, no rebuttal, no Ask. This reproduces the pre-dialectic advisory behavior for users who opt out of the debate.
+When `style == flags`: run Step 2 only — routed by `challenger` (so `codex` uses the adapter's `--mode challenge`, `claude` uses `forge-reviewer`). Write the findings (+ optional pattern hits) into `{S##}-REVIEW.md` under a single `## ⚠ Review Flags` heading. No advocate, no rebuttal, no Ask. This reproduces the pre-dialectic advisory behavior for users who opt out of the debate.
 
 ## Cross-references
 - `agents/forge-reviewer.md` — challenger + rebuttal mode
 - `agents/forge-advocate.md` — defender
 - `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md` — gate invocation (before `complete-slice`) + milestone-final triage (Step 9, before `complete-milestone`)
-- `forge-agent-prefs.md § Review Settings` — `review.{mode,style,rounds,ask_in_auto,fix_conceded,engine}`
+- `scripts/forge-xllm.js` — S01 adapter for the Codex challenger (`--mode challenge|rebuttal`); parsing/validation lives there, not here
+- `forge-agent-prefs.md § Review Settings` — `review.{mode,style,rounds,ask_in_auto,fix_conceded,engine,challenger,challenger_model,advocate_model}`
 - Artifact: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (durable with the milestone; cleaned by `milestone_cleanup`)

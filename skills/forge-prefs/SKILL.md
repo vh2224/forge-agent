@@ -17,7 +17,7 @@ Quando o usuário usar um alias, converta para o model ID completo:
 | Alias | Model ID completo |
 |-------|------------------|
 | `opus` | `claude-opus-4-8[1m]` (fallback `claude-opus-4-7`) |
-| `sonnet` | `claude-sonnet-4-6` |
+| `sonnet` | `claude-sonnet-5` |
 | `haiku` | `claude-haiku-4-5-20251001` |
 
 O usuário pode passar tanto o alias quanto o model ID completo — ambos são aceitos.
@@ -37,15 +37,15 @@ Forge Agent — Configuração atual
 
 MODELOS DISPONÍVEIS
   opus   → claude-opus-4-8[1m]           (análise profunda, planejamento — fallback: 4-6)
-  sonnet → claude-sonnet-4-6         (execução, tarefas padrão)
+  sonnet → claude-sonnet-5         (execução, tarefas padrão)
   haiku  → claude-haiku-4-5-20251001 (tarefas leves, memórias)
 
 ROTEAMENTO POR FASE
   discuss    → forge-discusser   [claude-opus-4-8[1m]]
   research   → forge-researcher  [claude-opus-4-8[1m]]
   plan       → forge-planner     [claude-opus-4-8[1m]]
-  execute    → forge-executor    [claude-sonnet-4-6]
-  complete   → forge-completer   [claude-sonnet-4-6]
+  execute    → forge-executor    [claude-sonnet-5]
+  complete   → forge-completer   [claude-sonnet-5]
   memory     → forge-memory     [claude-haiku-4-5-20251001]
 
 SKIP RULES
@@ -78,7 +78,7 @@ MODELOS DISPONÍVEIS NO CLAUDE CODE
           Use quando precisar de raciocínio profundo e decisões arquiteturais.
           Fallback automático para 4-6 se 4-7 não estiver disponível na conta.
 
-  sonnet  claude-sonnet-4-6
+  sonnet  claude-sonnet-5
           Modelo balanceado (padrão para execução). Ideal para: execute, complete.
           Boa relação entre qualidade e custo.
 
@@ -104,7 +104,7 @@ Exemplos válidos:
 - `/forge-prefs set research haiku`
 - `/forge-prefs set execute opus`
 - `/forge-prefs set execute claude-opus-4-8[1m]`
-- `/forge-prefs set plan claude-sonnet-4-6`
+- `/forge-prefs set plan claude-sonnet-5`
 
 Fases válidas: `discuss`, `research`, `plan`, `execute`, `complete`, `memory`
 
@@ -125,7 +125,7 @@ Steps:
 ```
 ✓ Fase 'execute' atualizada
 
-  Antes: claude-sonnet-4-6
+  Antes: claude-sonnet-5
   Agora: claude-opus-4-8[1m]
 
   Arquivo do agente atualizado: ~/.claude/agents/forge-executor.md
@@ -137,7 +137,7 @@ Modelo desconhecido: '{input}'
 
 Modelos disponíveis:
   opus    → claude-opus-4-8[1m] (fallback claude-opus-4-7)
-  sonnet  → claude-sonnet-4-6
+  sonnet  → claude-sonnet-5
   haiku   → claude-haiku-4-5-20251001
 ```
 
@@ -217,7 +217,7 @@ exige `/forge-init` primeiro e ofereça o user-global como alternativa.
 
 Restore all defaults:
 - discuss/research/plan → `claude-opus-4-8[1m]` (fallback `claude-opus-4-7` se 4-7 indisponível na conta)
-- execute/complete → `claude-sonnet-4-6`
+- execute/complete → `claude-sonnet-5`
 - memory → `claude-haiku-4-5-20251001`
 - skip rules → all false
 - git → squash, auto_push false, main_branch master

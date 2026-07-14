@@ -1328,11 +1328,11 @@ function smokeEffort() {
   const clamp = (model, e) => spawnSync('node', ['-e',
     `const r={low:0,medium:1,high:2,xhigh:3,max:4};const m='${model}';const cap=(/^claude-(haiku|sonnet)/.test(m))?'medium':'max';let e='${e}';if(!(e in r))e='medium';process.stdout.write(r[e]>r[cap]?cap:e)`
   ], { encoding: 'utf8' }).stdout;
-  assert(clamp('claude-sonnet-4-6', 'xhigh') === 'medium', 'clamp: sonnet xhigh → medium', 'no clamp');
+  assert(clamp('claude-sonnet-5', 'xhigh') === 'medium', 'clamp: sonnet xhigh → medium', 'no clamp');
   assert(clamp('claude-haiku-4-5-20251001', 'high') === 'medium', 'clamp: haiku high → medium', 'no clamp');
   assert(clamp('claude-opus-4-8', 'xhigh') === 'xhigh', 'clamp: opus xhigh → xhigh (no clamp)', 'wrongly clamped');
   assert(clamp('claude-fable-5', 'max') === 'max', 'clamp: fable max → max', 'wrongly clamped');
-  assert(clamp('claude-sonnet-4-6', 'bogus') === 'medium', 'clamp: invalid effort → medium fallback', 'no fallback');
+  assert(clamp('claude-sonnet-5', 'bogus') === 'medium', 'clamp: invalid effort → medium fallback', 'no fallback');
 }
 
 // Section 18: usage indicator (5h/weekly bars + handoff under token auth).
@@ -1441,9 +1441,479 @@ function smokePlanGateDegradation() {
     '(d) plan_gate.ask_in_auto defaults to defer', 'ask_in_auto: defer missing');
 }
 
-// ── Section 20: forge-status CLI packaging ──────────────────────────────────
+// ── Section 20: forge-xllm adapter (mock codex on PATH) ─────────────────────
+// Live-spawns the T01 adapter against a mock `codex` shell binary prepended to
+// PATH — structural (token-presence) asserts don't catch runtime failures.
+function writeMockCodex(dir, opts) {
+  opts = opts || {};
+  const script = [
+    '#!/bin/sh',
+    '# forge-smoke mock codex — writes payload to the -o file, honors exit code / sleep',
+    'OUT=""',
+    'prev=""',
+    'for arg in "$@"; do',
+    '  if [ "$prev" = "-o" ]; then OUT="$arg"; fi',
+    '  prev="$arg"',
+    'done',
+    opts.sleepSecs ? `sleep ${opts.sleepSecs}` : '',
+    opts.writeOutput === false
+      ? ''
+      : `if [ -n "$OUT" ]; then printf '%s' ${shQuote(opts.payload || '')} > "$OUT"; fi`,
+    `exit ${typeof opts.exitCode === 'number' ? opts.exitCode : 0}`,
+    '',
+  ].join('\n');
+  const codexPath = path.join(dir, 'codex');
+  fs.writeFileSync(codexPath, script, 'utf8');
+  fs.chmodSync(codexPath, 0o755);
+  return dir;
+}
+
+function shQuote(s) {
+  // single-quote for POSIX sh, escaping embedded single quotes
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+function runXllm(args, mockDir, cwd) {
+  const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
+  const env = mockDir
+    ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
+    : { ...process.env, PATH: '' };
+  const r = spawnSync(process.execPath, [xllmPath, ...args], {
+    encoding: 'utf8',
+    cwd: cwd || process.cwd(),
+    env,
+  });
+  return { stdout: r.stdout || '', stderr: r.stderr || '', status: r.status };
+}
+
+function smokeXllm() {
+  process.stdout.write('\n▸ Section 20: forge-xllm adapter (mock codex on PATH)\n');
+
+  // Scenario A — happy challenge: prose + valid JSON extraction, normalized shape.
+  {
+    const dir = mkTmp('xllm-a');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-a-mock-'));
+    const payload = 'Some prose from codex...\n' + JSON.stringify({
+      objections: [{ id: 'R1', path_line: 'src/a.js:12', claim: 'x', suggested_fix: 'y', challenge: 'z?', severity: 'high' }],
+    });
+    writeMockCodex(mockDir, { payload, exitCode: 0 });
+    const r = runXllm(['--mode', 'challenge', '--diff-cmd', 'echo diff', '--cwd', dir], mockDir, dir);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { /* leave null */ }
+    assert(r.status === 0, 'A: happy challenge exits 0', `status=${r.status} stderr=${r.stderr}`);
+    assert(!!parsed && Array.isArray(parsed.objections) && parsed.objections.length === 1,
+      'A: stdout parses to objections array', `stdout=${r.stdout}`);
+    const o = parsed && parsed.objections && parsed.objections[0];
+    assert(!!o && o.id === 'R1' && o.severity === 'high' && o.file === 'src/a.js' && o.line === 12
+      && typeof o.issue === 'string' && typeof o.fix === 'string',
+      'A: normalized objection has id/severity/file/line/issue/fix', `objection=${JSON.stringify(o)}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario B — missing binary: PATH-hermetic (no codex, no process.env.PATH) → exit non-zero.
+  // R1: mockDir must be falsy so runXllm takes the empty-PATH branch — a truthy
+  // (even empty) dir here would still fall back to process.env.PATH, which on a
+  // host with a real codex binary installed would spawn it for real.
+  {
+    const dir = mkTmp('xllm-b');
+    const r = runXllm(['--mode', 'challenge', '--diff-cmd', 'echo diff', '--cwd', dir], null, dir);
+    assert(r.status !== 0, 'B: missing binary exits non-zero', `status=${r.status}`);
+    assert(r.stderr.length > 0, 'B: missing binary writes stderr', `stderr=${r.stderr}`);
+    cleanup(dir);
+  }
+
+  // Scenario C — child exit ≠ 0: mock exits 1 without writing -o.
+  {
+    const dir = mkTmp('xllm-c');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-c-mock-'));
+    writeMockCodex(mockDir, { exitCode: 1, writeOutput: false });
+    const r = runXllm(['--mode', 'challenge', '--diff-cmd', 'echo diff', '--cwd', dir], mockDir, dir);
+    assert(r.status !== 0, 'C: child exit 1 makes adapter exit non-zero', `status=${r.status}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario D — malformed JSON in the -o file.
+  {
+    const dir = mkTmp('xllm-d');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-d-mock-'));
+    writeMockCodex(mockDir, { payload: 'this is not { json at all', exitCode: 0 });
+    const r = runXllm(['--mode', 'challenge', '--diff-cmd', 'echo diff', '--cwd', dir], mockDir, dir);
+    assert(r.status !== 0, 'D: malformed JSON makes adapter exit non-zero', `status=${r.status}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario E — timeout: mock sleeps longer than --timeout 1 → killed, bounded wall time.
+  {
+    const dir = mkTmp('xllm-e');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-e-mock-'));
+    writeMockCodex(mockDir, { sleepSecs: 5, exitCode: 0, payload: JSON.stringify({ objections: [] }) });
+    const t0 = Date.now();
+    const r = runXllm(['--mode', 'challenge', '--diff-cmd', 'echo diff', '--cwd', dir, '--timeout', '1'], mockDir, dir);
+    const elapsed = Date.now() - t0;
+    assert(r.status !== 0, 'E: timeout makes adapter exit non-zero', `status=${r.status}`);
+    assert(elapsed < 10000, 'E: timeout kill is bounded (< 10s wall time)', `elapsed=${elapsed}ms`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario F — rebuttal happy path + out-of-enum verdict rejection.
+  {
+    const dir = mkTmp('xllm-f');
+    const inputFile = path.join(dir, 'input.txt');
+    fs.writeFileSync(inputFile, 'R1: objection text\nDefense: still real\n', 'utf8');
+
+    const mockDirOk = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-f-ok-'));
+    writeMockCodex(mockDirOk, {
+      payload: JSON.stringify({ verdicts: [{ id: 'R1', verdict: 'maintained', rationale: 'still real' }] }),
+      exitCode: 0,
+    });
+    const rOk = runXllm(['--mode', 'rebuttal', '--input', inputFile, '--cwd', dir], mockDirOk, dir);
+    let parsedOk = null;
+    try { parsedOk = JSON.parse(rOk.stdout); } catch (e) { /* leave null */ }
+    assert(rOk.status === 0, 'F: rebuttal happy path exits 0', `status=${rOk.status} stderr=${rOk.stderr}`);
+    assert(!!parsedOk && Array.isArray(parsedOk.verdicts) && parsedOk.verdicts[0]
+      && parsedOk.verdicts[0].verdict === 'maintained' && typeof parsedOk.verdicts[0].reason === 'string',
+      'F: normalized verdict has verdict=maintained and reason', `stdout=${rOk.stdout}`);
+    cleanup(mockDirOk);
+
+    const mockDirBad = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-f-bad-'));
+    writeMockCodex(mockDirBad, {
+      payload: JSON.stringify({ verdicts: [{ id: 'R1', verdict: 'conceded', rationale: 'nope' }] }),
+      exitCode: 0,
+    });
+    const rBad = runXllm(['--mode', 'rebuttal', '--input', inputFile, '--cwd', dir], mockDirBad, dir);
+    assert(rBad.status !== 0, 'F: out-of-enum verdict makes adapter exit non-zero', `status=${rBad.status}`);
+    cleanup(mockDirBad);
+
+    cleanup(dir);
+  }
+}
+
+// ── Section 21: model ID→alias map (live) ────────────────────────────────
+// Exercises scripts/forge-model-alias.js live via spawnSync — the mapping
+// logic must live only in that file; this section calls the helper, it
+// never reimplements the fable/haiku/sonnet/opus regex table.
+function aliasCli(id, extraArgs) {
+  const args = [path.join(SCRIPTS, 'forge-model-alias.js'), '--id', id];
+  if (extraArgs) args.push(...extraArgs);
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8' });
+  return { stdout: (r.stdout || '').trim(), status: r.status };
+}
+
+function smokeModelAlias() {
+  process.stdout.write('\n▸ Section 21: model ID→alias map (live)\n');
+
+  const cases = [
+    ['claude-opus-4-8[1m]', 'opus'],
+    ['claude-fable-5', 'fable'],
+    ['claude-haiku-4-5-20251001', 'haiku'],
+    ['claude-sonnet-5', 'sonnet'],
+    ['gpt-5', ''],
+    ['modelo-desconhecido', ''],
+  ];
+
+  for (const [id, expected] of cases) {
+    const r = aliasCli(id);
+    assert(r.status === 0, `CLI --id '${id}' exits 0`, `status=${r.status}`);
+    assert(r.stdout === expected, `CLI --id '${id}' prints '${expected}'`, `got='${r.stdout}'`);
+  }
+
+  // --json shape
+  {
+    const r = aliasCli('claude-opus-4-8[1m]', ['--json']);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.alias === 'opus' && parsed.mapped === true,
+      '--json prints {alias:"opus", mapped:true}', `stdout=${r.stdout}`);
+  }
+  {
+    const r = aliasCli('gpt-5', ['--json']);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.alias === null && parsed.mapped === false,
+      '--json prints {alias:null, mapped:false} for unmapped', `stdout=${r.stdout}`);
+  }
+
+  // require()-level check — modelToAlias exists and returns the right shape
+  {
+    const { modelToAlias } = require(path.join(SCRIPTS, 'forge-model-alias.js'));
+    const res = modelToAlias('claude-fable-5');
+    assert(typeof modelToAlias === 'function', 'modelToAlias is exported as a function', typeof modelToAlias);
+    assert(res && res.alias === 'fable' && res.mapped === true,
+      'require()d modelToAlias("claude-fable-5") -> {alias:"fable", mapped:true}', JSON.stringify(res));
+  }
+
+  // Structural wiring — dispatch sites call the helper, pass model:$MODEL_ALIAS,
+  // record model_applied, and never reimplement the alias map inline.
+  {
+    const ROOT = path.join(__dirname, '..');
+    const files = {
+      'skills/forge-auto/SKILL.md': fs.readFileSync(path.join(ROOT, 'skills/forge-auto/SKILL.md'), 'utf8'),
+      'skills/forge-next/SKILL.md': fs.readFileSync(path.join(ROOT, 'skills/forge-next/SKILL.md'), 'utf8'),
+      'shared/forge-dispatch.md': fs.readFileSync(path.join(ROOT, 'shared/forge-dispatch.md'), 'utf8'),
+    };
+
+    for (const [name, content] of Object.entries(files)) {
+      assert(content.includes('forge-model-alias.js'),
+        `${name} calls forge-model-alias.js`, 'not found');
+      assert(content.includes('model_applied'),
+        `${name} records model_applied`, 'not found');
+      assert(!/indexOf\(['"]fable['"]\)/.test(content),
+        `${name} does not reimplement the alias map inline`, 'suspicious inline map reimplementation found');
+    }
+
+    for (const name of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
+      const content = files[name];
+      assert(content.includes('model: $MODEL_ALIAS'),
+        `${name} passes model: $MODEL_ALIAS to Agent()`, 'not found');
+      assert(content.includes('MODEL_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$MODEL_ID")'),
+        `${name} resolves MODEL_ALIAS via the canonical helper invocation`, 'not found');
+    }
+  }
+
+  // Live bash reproduction of the MODEL_APPLIED_JSON glue + event line assembly —
+  // catches malformed-JSON regressions that pure substring asserts miss (R2 fix).
+  {
+    const buildAndParse = (modelAlias) => {
+      const script = [
+        `MODEL_ALIAS='${modelAlias}'`,
+        `MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')`,
+        `echo "{\\"ts\\":\\"2026-01-01T00:00:00Z\\",\\"event\\":\\"dispatch\\",\\"unit\\":\\"execute-task/T01\\",\\"model\\":\\"claude-sonnet-5\\",\\"input_tokens\\":1,\\"output_tokens\\":1,\\"tier\\":\\"standard\\",\\"reason\\":\\"default\\",\\"effort\\":\\"low\\",\\"effort_reason\\":\\"default\\",\\"model_applied\\":$MODEL_APPLIED_JSON}"`,
+      ].join('\n');
+      const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+      let parsed = null;
+      try { parsed = JSON.parse((r.stdout || '').trim()); } catch (e) { /* leave null */ }
+      return { raw: (r.stdout || '').trim(), parsed };
+    };
+
+    const withAlias = buildAndParse('sonnet');
+    assert(!!withAlias.parsed, 'MODEL_APPLIED_JSON glue produces valid JSON when MODEL_ALIAS non-empty', withAlias.raw);
+    assert(withAlias.parsed && withAlias.parsed.model_applied === 'sonnet',
+      'model_applied === "sonnet" when MODEL_ALIAS="sonnet"', JSON.stringify(withAlias.parsed));
+
+    const withoutAlias = buildAndParse('');
+    assert(!!withoutAlias.parsed, 'MODEL_APPLIED_JSON glue produces valid JSON when MODEL_ALIAS empty', withoutAlias.raw);
+    assert(withoutAlias.parsed && withoutAlias.parsed.model_applied === null,
+      'model_applied === null when MODEL_ALIAS=""', JSON.stringify(withoutAlias.parsed));
+  }
+}
+
+// ── Section 22: review challenger wiring (spec invariants + live adapter parse) ──
+// Guards T01's Codex challenger wiring in shared/forge-review.md: structural
+// token asserts over the spec text, plus a live re-run of the Section 20
+// harness in --mode challenge to lock the {objections:[...]} contract the
+// spec's Codex branch actually consumes.
+function smokeChallengerWiring() {
+  process.stdout.write('\n▸ Section 22: review challenger wiring (spec invariants + live adapter parse)\n');
+
+  const ROOT = path.join(__dirname, '..');
+  const spec = fs.readFileSync(path.join(ROOT, 'shared', 'forge-review.md'), 'utf8');
+
+  assert(spec.includes('challenger:'), 'spec Step 0 reads challenger:', 'token "challenger:" not found');
+  assert(spec.includes('challenger_model'), 'spec Step 0 reads challenger_model', 'token "challenger_model" not found');
+  assert(spec.includes('review-challenger-fallback'), 'spec defines review-challenger-fallback event', 'token not found');
+  assert(spec.includes('engine-workflow-forced-agents'), 'spec has codex x workflow precedence reason', 'token "engine-workflow-forced-agents" not found');
+  assert(spec.includes('Challenger:'), 'spec Step 6 has Challenger: header', 'token "Challenger:" not found');
+  assert(spec.includes('"challenger"'), 'spec Step 8 event has challenger field', 'token \'"challenger"\' not found');
+  assert(spec.includes('scripts/forge-xllm.js'), 'spec invokes the forge-xllm.js adapter', 'token not found');
+
+  // Live scenario — reuse the Section 20 mock-codex harness in challenge mode
+  // and assert the normalized {objections:[...]} contract the spec's Codex
+  // branch parses (path_line -> file/line, claim/suggested_fix -> issue/fix).
+  {
+    const dir = mkTmp('challenger-wiring');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-challenger-mock-'));
+    const payload = 'Some prose from codex...\n' + JSON.stringify({
+      objections: [{ id: 'R1', path_line: 'src/x.js:3', claim: 'c', suggested_fix: 'f', challenge: 'q?', severity: 'high' }],
+    });
+    writeMockCodex(mockDir, { payload, exitCode: 0 });
+    const r = runXllm(['--mode', 'challenge', '--diff-cmd', 'echo diff', '--cwd', dir], mockDir, dir);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { /* leave null */ }
+    assert(r.status === 0, 'live challenge: adapter exits 0 with mock codex', `status=${r.status} stderr=${r.stderr}`);
+    assert(!!parsed && Array.isArray(parsed.objections) && parsed.objections.length === 1,
+      'live challenge: stdout parses to objections array', `stdout=${r.stdout}`);
+    const o = parsed && parsed.objections && parsed.objections[0];
+    assert(!!o && o.id === 'R1' && o.severity === 'high' && o.file === 'src/x.js' && o.line === 3
+      && typeof o.issue === 'string' && typeof o.fix === 'string' && typeof o.challenge === 'string',
+      'live challenge: normalized objection shape matches spec contract', `objection=${JSON.stringify(o)}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Live scenario — run the actual Step 0 cascade script (mirrors the node -e
+  // in shared/forge-review.md Step 0) against a temp prefs file, asserting
+  // challenger/challengerModel resolve correctly and invalid challenger falls
+  // back to the "claude" whitelist default (regression guard for the \Z/regex
+  // class of bugs on the new cascade lines).
+  {
+    const cascadeScript = `
+const fs=require('fs'),path=require('path'),os=require('os');
+const wd=process.env.WORKING_DIR||process.cwd();
+const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+             path.join(wd,'.gsd','claude-agent-prefs.md'),
+             path.join(wd,'.gsd','prefs.local.md')];
+let mode='enabled',style='dialectic',rounds=1,askAuto='defer',fixConceded=true,engine='agents',challenger='claude',challengerModel=null;
+for(const f of files){try{
+  const r=fs.readFileSync(f,'utf8');
+  const blk=(r.match(/^review:[ \\t]*\\n((?:[ \\t]+.*\\n?)*)/m)||[])[1]||'';
+  let m;
+  if(m=blk.match(/^[ \\t]+mode:[ \\t]*(\\w+)/m))mode=m[1].toLowerCase();
+  if(m=blk.match(/^[ \\t]+style:[ \\t]*(\\w+)/m))style=m[1].toLowerCase();
+  if(m=blk.match(/^[ \\t]+rounds:[ \\t]*(\\d+)/m))rounds=parseInt(m[1],10);
+  if(m=blk.match(/^[ \\t]+ask_in_auto:[ \\t]*(\\w+)/m))askAuto=m[1].toLowerCase();
+  if(m=blk.match(/^[ \\t]+fix_conceded:[ \\t]*(\\w+)/m))fixConceded=m[1].toLowerCase()!=='false';
+  if(m=blk.match(/^[ \\t]+engine:[ \\t]*(\\w+)/m))engine=m[1].toLowerCase();
+  if(m=blk.match(/^[ \\t]+challenger:[ \\t]*(\\w+)/m))challenger=m[1].toLowerCase();
+  if(m=blk.match(/^[ \\t]+challenger_model:[ \\t]*(\\S+)/m))challengerModel=m[1];
+}catch(e){}}
+if(!['enabled','disabled'].includes(mode))mode='enabled';
+if(!['dialectic','flags'].includes(style))style='dialectic';
+if(!Number.isInteger(rounds)||rounds<0||rounds>3)rounds=1;
+if(!['defer','pause'].includes(askAuto))askAuto='defer';
+if(!['agents','workflow'].includes(engine))engine='agents';
+if(!['claude','codex'].includes(challenger))challenger='claude';
+process.stdout.write(JSON.stringify({mode,style,rounds,askAuto,fixConceded,engine,challenger,challengerModel}));
+`;
+    const dir = mkTmp('challenger-cascade');
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    const cascadePath = path.join(dir, 'cascade.js');
+    fs.writeFileSync(cascadePath, cascadeScript);
+
+    // Case 1: challenger: codex + challenger_model: gpt-5-test
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'),
+      'review:\n  challenger: codex\n  challenger_model: gpt-5-test\n');
+    const r1 = spawnSync(process.execPath, [cascadePath], { cwd: dir, env: { ...process.env, WORKING_DIR: dir }, encoding: 'utf8' });
+    let p1 = null;
+    try { p1 = JSON.parse(r1.stdout); } catch (e) { /* leave null */ }
+    assert(!!p1 && p1.challenger === 'codex' && p1.challengerModel === 'gpt-5-test',
+      'Step 0 cascade: challenger/challenger_model resolve from prefs', `stdout=${r1.stdout} stderr=${r1.stderr}`);
+
+    // Case 2: challenger: invalido -> whitelist fallback to "claude"
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'),
+      'review:\n  challenger: invalido\n');
+    const r2 = spawnSync(process.execPath, [cascadePath], { cwd: dir, env: { ...process.env, WORKING_DIR: dir }, encoding: 'utf8' });
+    let p2 = null;
+    try { p2 = JSON.parse(r2.stdout); } catch (e) { /* leave null */ }
+    assert(!!p2 && p2.challenger === 'claude',
+      'Step 0 cascade: invalid challenger falls back to claude whitelist default', `stdout=${r2.stdout} stderr=${r2.stderr}`);
+
+    cleanup(dir);
+  }
+}
+
+// ── Section 23: advocate model (spec invariants + live cascade + alias CLI) ──
+// Guards T01's advocate_model wiring in shared/forge-review.md +
+// agents/forge-advocate.md + forge-agent-prefs.md: structural token asserts,
+// plus a live re-run of the Section 22 Step 0 cascade harness extended with
+// the advocate_model line, plus the forge-model-alias.js CLI round-trip.
+function smokeAdvocateModel() {
+  process.stdout.write('\n▸ Section 23: advocate model (spec invariants + live cascade + alias CLI)\n');
+
+  const ROOT = path.join(__dirname, '..');
+
+  // Block A — structural asserts
+  {
+    const spec = fs.readFileSync(path.join(ROOT, 'shared', 'forge-review.md'), 'utf8');
+    assert(spec.includes('advocate_model'), 'spec Step 0 reads advocate_model', 'token "advocate_model" not found');
+    assert(spec.includes('ADVOCATE_MODEL'), 'spec derives ADVOCATE_MODEL', 'token "ADVOCATE_MODEL" not found');
+    assert(spec.includes('forge-model-alias.js'), 'spec invokes forge-model-alias.js for the advocate', 'token "forge-model-alias.js" not found');
+    assert(spec.includes('"advocate"'), 'spec Step 8 event has advocate field', 'token \'"advocate"\' not found');
+
+    const agentSpec = fs.readFileSync(path.join(ROOT, 'agents', 'forge-advocate.md'), 'utf8');
+    assert(agentSpec.includes('model: claude-fable-5'), 'forge-advocate.md frontmatter has model: claude-fable-5', 'token "model: claude-fable-5" not found');
+    assert(agentSpec.includes('thinking: adaptive'), 'forge-advocate.md frontmatter has thinking: adaptive', 'token "thinking: adaptive" not found');
+    assert(!agentSpec.includes('thinking: disabled'), 'forge-advocate.md frontmatter does NOT have thinking: disabled', 'token "thinking: disabled" found');
+
+    const prefs = fs.readFileSync(path.join(ROOT, 'forge-agent-prefs.md'), 'utf8');
+    assert(prefs.includes('advocate_model'), 'forge-agent-prefs.md Review Settings has advocate_model', 'token "advocate_model" not found');
+  }
+
+  // Block B — live round-trip of the Step 0 cascade, extended with advocate_model
+  {
+    const cascadeScript = `
+const fs=require('fs'),path=require('path'),os=require('os');
+const wd=process.env.WORKING_DIR||process.cwd();
+const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+             path.join(wd,'.gsd','claude-agent-prefs.md'),
+             path.join(wd,'.gsd','prefs.local.md')];
+let challengerModel=null,advocateModel='claude-fable-5';
+for(const f of files){try{
+  const r=fs.readFileSync(f,'utf8');
+  const blk=(r.match(/^review:[ \\t]*\\n((?:[ \\t]+.*\\n?)*)/m)||[])[1]||'';
+  let m;
+  if(m=blk.match(/^[ \\t]+challenger_model:[ \\t]*(\\S+)/m))challengerModel=m[1];
+  if(m=blk.match(/^[ \\t]+advocate_model:[ \\t]*(\\S+)/m))advocateModel=m[1];
+}catch(e){}}
+process.stdout.write(JSON.stringify({challengerModel,advocateModel}));
+`;
+    const dir = mkTmp('advocate-cascade');
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    const cascadePath = path.join(dir, 'cascade.js');
+    fs.writeFileSync(cascadePath, cascadeScript);
+
+    // Case 1: no advocate_model pref -> default claude-fable-5
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'), 'review:\n  mode: enabled\n');
+    const r1 = spawnSync(process.execPath, [cascadePath], { cwd: dir, env: { ...process.env, WORKING_DIR: dir }, encoding: 'utf8' });
+    let p1 = null;
+    try { p1 = JSON.parse(r1.stdout); } catch (e) { /* leave null */ }
+    assert(!!p1 && p1.advocateModel === 'claude-fable-5',
+      'Step 0 cascade: advocateModel defaults to claude-fable-5 when unset', `stdout=${r1.stdout} stderr=${r1.stderr}`);
+
+    // Case 2: advocate_model override
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'), 'review:\n  advocate_model: claude-opus-4-8\n');
+    const r2 = spawnSync(process.execPath, [cascadePath], { cwd: dir, env: { ...process.env, WORKING_DIR: dir }, encoding: 'utf8' });
+    let p2 = null;
+    try { p2 = JSON.parse(r2.stdout); } catch (e) { /* leave null */ }
+    assert(!!p2 && p2.advocateModel === 'claude-opus-4-8',
+      'Step 0 cascade: advocate_model override resolves', `stdout=${r2.stdout} stderr=${r2.stderr}`);
+
+    cleanup(dir);
+  }
+
+  // Block C — forge-model-alias.js CLI round-trip
+  {
+    const r1 = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'forge-model-alias.js'), '--id', 'claude-fable-5'], { encoding: 'utf8' });
+    assert(r1.stdout.trim() === 'fable', 'forge-model-alias.js --id claude-fable-5 -> "fable"', `stdout="${r1.stdout}" stderr=${r1.stderr}`);
+
+    const r2 = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'forge-model-alias.js'), '--id', 'foo-model-inexistente'], { encoding: 'utf8' });
+    assert(r2.stdout.trim() === '', 'forge-model-alias.js --id foo-model-inexistente -> ""', `stdout="${r2.stdout}" stderr=${r2.stderr}`);
+  }
+
+  // Block D — live bash reproduction of the "advocate" event-line glue
+  // (mirrors the Section 8 event assembly in shared/forge-review.md), asserting
+  // valid JSON + advocate === "fable" / null (mirror of Section 21's
+  // model_applied glue test, R2 fix).
+  {
+    const buildAndParse = (advocateAlias) => {
+      const script = [
+        `ADVOCATE_ALIAS='${advocateAlias}'`,
+        `echo "{\\"ts\\":\\"2026-01-01T00:00:00Z\\",\\"event\\":\\"review\\",\\"unit\\":\\"S04\\",\\"challenger\\":\\"claude\\",\\"advocate\\":$([ -n "$ADVOCATE_ALIAS" ] && printf '"%s"' "$ADVOCATE_ALIAS" || printf 'null')}"`,
+      ].join('\n');
+      const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+      let parsed = null;
+      try { parsed = JSON.parse((r.stdout || '').trim()); } catch (e) { /* leave null */ }
+      return { raw: (r.stdout || '').trim(), parsed };
+    };
+
+    const withAlias = buildAndParse('fable');
+    assert(!!withAlias.parsed, 'advocate event-line glue produces valid JSON when ADVOCATE_ALIAS non-empty', withAlias.raw);
+    assert(withAlias.parsed && withAlias.parsed.advocate === 'fable',
+      'advocate === "fable" when ADVOCATE_ALIAS="fable"', JSON.stringify(withAlias.parsed));
+
+    const withoutAlias = buildAndParse('');
+    assert(!!withoutAlias.parsed, 'advocate event-line glue produces valid JSON when ADVOCATE_ALIAS empty', withoutAlias.raw);
+    assert(withoutAlias.parsed && withoutAlias.parsed.advocate === null,
+      'advocate === null when ADVOCATE_ALIAS=""', JSON.stringify(withoutAlias.parsed));
+  }
+}
+
+// ── Section 24: forge-status CLI packaging ──────────────────────────────────
 function smokeStatusPackaging() {
-  process.stdout.write('\n▸ Section 20: forge-status CLI packaging\n');
+  process.stdout.write('\n▸ Section 24: forge-status CLI packaging\n');
   const REPO = path.dirname(SCRIPTS);
   const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
 
@@ -1513,6 +1983,10 @@ function main() {
     smokeEffort();
     smokeUsageIndicator();
     smokePlanGateDegradation();
+    smokeXllm();
+    smokeModelAlias();
+    smokeChallengerWiring();
+    smokeAdvocateModel();
     smokeStatusPackaging();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);

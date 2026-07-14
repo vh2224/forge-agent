@@ -138,7 +138,7 @@ Read `~/.claude/forge-agent-prefs.md` to get the current model for each agent, t
 | `forge-completer` | **[Phase → Agent Routing: complete-slice model]** | complete-slice, complete-milestone |
 | `forge-memory` | **[Phase → Agent Routing: memory-extract model]** | extração de memórias pós-unidade |
 
-> Modelos: `opus` → `claude-opus-4-8[1m]` (fallback `claude-opus-4-7`) · `sonnet` → `claude-sonnet-4-6` · `haiku` → `claude-haiku-4-5-20251001`
+> Modelos: `opus` → `claude-opus-4-8[1m]` (fallback `claude-opus-4-7`) · `sonnet` → `claude-sonnet-5` · `haiku` → `claude-haiku-4-5-20251001`
 > Para mudar: `forge-prefs set <fase> <modelo>`
 
 ---

@@ -147,6 +147,13 @@ see [docs/fragment-store.md](docs/fragment-store.md).
 
 > **Nota — `review.engine: workflow` e approval prompt:** quando `review.engine: workflow` está configurado, cada debate de review usa a tool `Workflow` do Claude Code (requer ≥ v2.1.154). Em `permissions.defaultMode` padrão, **cada invocação Workflow pede aprovação do operador** — o que pausa o `forge-auto` silenciosamente. Para uso autônomo, configure `permissions.defaultMode: bypassPermissions` (usuários com a statusline ativa já têm — ativado pelo `merge-settings.js`). Se a tool `Workflow` não estiver disponível ou a invocação falhar, o gate faz **fallback automático para `engine: agents`** com um warning e regista o evento `review-engine-fallback` — nunca bloqueia.
 
+> **Pré-requisito — `review.challenger: codex`:** o challenger Codex requer o [Codex CLI](https://github.com/openai/codex) (`codex`) instalado e autenticado, por um destes dois caminhos:
+>
+> - **Login por assinatura ChatGPT** (recomendado): `codex login` — abre um fluxo de browser, credencial gerenciada pelo próprio CLI.
+> - **`OPENAI_API_KEY`** no ambiente: exporte a variável de uma fonte segura (`.env` gitignored ou secret manager) — **nunca** hardcoded em prefs commitáveis (`.gsd/claude-agent-prefs.md` é versionado; uma chave ali seria vazamento).
+>
+> O forge **não instala nem autentica** tooling de terceiros — apenas invoca o `codex` já configurado pelo usuário via `scripts/forge-xllm.js`, que nunca recebe a credencial por argumento (a auth é gerenciada inteiramente pelo próprio CLI). Sem `codex` disponível, o gate faz **fallback automático para `forge-reviewer` (Claude)** com o evento `review-challenger-fallback` — nunca bloqueia. Implicação de privacidade: com `challenger: codex`, o diff do slice sai da máquina local para a API da OpenAI.
+
 ---
 
 ## Atualizar

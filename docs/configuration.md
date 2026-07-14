@@ -40,13 +40,13 @@ main_branch: main
 O Forge instala uma status line customizada para o Claude Code que substitui a nativa. Ela não é ativada automaticamente — você escolhe quando habilitar.
 
 ```
-Forge │ Claude Sonnet 4.6 │ meu-projeto │ M-20260522…/S02 │ █████░░░░░ 47% │ $0.0042 │ ↑12k ↓3k 💾8k
+Forge │ Claude Sonnet 5 │ meu-projeto │ M-20260522…/S02 │ █████░░░░░ 47% │ $0.0042 │ ↑12k ↓3k 💾8k
 ✓ forge-executor: implement auth middleware  2m ago (3 units)
 ```
 
 | Campo | O que mostra |
 |-------|-------------|
-| `Claude Sonnet 4.6` | Modelo ativo na sessão |
+| `Claude Sonnet 5` | Modelo ativo na sessão |
 | `meu-projeto` | Pasta atual |
 | `M-20260522…/S02` | Milestone e slice ativos (lido de `.gsd/STATE.md`) |
 | `█████░░░░░ 47%` | Uso da context window |

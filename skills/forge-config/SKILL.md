@@ -169,7 +169,7 @@ If exit code is 0, print:
 
 Reinicie o Claude Code para aplicar.
 Visualização:
-  Forge │ Claude Sonnet 4.6 │ <projeto> │ M001/S01 │ ██░░░░░░░░ 18% │ $0.0000 │ ↑0 ↓0 💾0
+  Forge │ Claude Sonnet 5 │ <projeto> │ M001/S01 │ ██░░░░░░░░ 18% │ $0.0000 │ ↑0 ↓0 💾0
 ```
 
 If exit code != 0, show the error output.

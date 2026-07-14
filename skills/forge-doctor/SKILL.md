@@ -146,10 +146,10 @@ Also: if active task has `status: DONE` and continue.md exists in that slice →
 
 ## C5: Prefs
 
-Valid IDs: `claude-opus-4-8[1m]`, `claude-opus-4-7` (fallback), `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
-Aliases: opus→opus-4-7 (fallback opus-4-6), sonnet→sonnet-4-6, haiku→haiku-4-5-20251001 (expand to full ID on fix)
+Valid IDs: `claude-opus-4-8[1m]`, `claude-opus-4-7` (fallback), `claude-sonnet-5`, `claude-haiku-4-5-20251001`
+Aliases: opus→opus-4-7 (fallback opus-4-6), sonnet→sonnet-5, haiku→haiku-4-5-20251001 (expand to full ID on fix)
 
-Defaults: discuss/research/plan phases → opus-4-7 (fallback opus-4-6) | execute/complete → sonnet-4-6 | memory → haiku-4-5-20251001
+Defaults: discuss/research/plan phases → opus-4-7 (fallback opus-4-6) | execute/complete → sonnet-5 | memory → haiku-4-5-20251001
 
 Check both prefs files (already loaded). For each routing table row: alias → expand; invalid ID → replace with default.
 
