@@ -3306,6 +3306,296 @@ function smokeReviewPairingPrefsSchema() {
     '(e) § Review Settings preserva os eixos challenger_model/advocate_model (MODELO, ortogonal a auto=FAMÍLIA)', 'eixos de modelo ausentes');
 }
 
+// ── Section 32: routing resolver (célula a célula + identidade legado) ─────
+// M007 S01 T04. Exercita forge-routing.js (readRoutingConfig/resolveRoute)
+// via require() e via CLI subprocess (runScript), incluindo o assert de
+// identidade byte-idêntica com readTierChain() quando não há bloco routing:.
+function smokeRouting() {
+  process.stdout.write('\n▸ Section 32: routing resolver (célula a célula + identidade legado)\n');
+  const { resolveRoute, readRoutingConfig } = require('./forge-routing');
+  const { modelFamily } = require('./forge-model-alias');
+  const { readTierChain } = require('./forge-tier-chain');
+
+  const qStatuses = []; // (q) exit 0 sempre — coletado em cada runScript abaixo
+
+  const writeRoutingPrefs = (dir, bodyText, filename) => {
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.gsd', filename || 'claude-agent-prefs.md'),
+      'routing:\n' + bodyText,
+      'utf8'
+    );
+  };
+
+  // (a) precedência: routing.<domínio>.<fase>.<tier> presente → routing-hit
+  const dirA = mkTmp('routing-a');
+  writeRoutingPrefs(dirA,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n'
+  );
+  const rA = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirA });
+  assert(rA.source === 'routing' && /routing-hit/.test(rA.reason) && rA.domain_used === 'backend',
+    '(a) precedência: célula routing.<domínio>.<fase>.<tier> → source:routing, reason:routing-hit, domain_used:<domínio>',
+    JSON.stringify(rA));
+  cleanup(dirA);
+
+  // (b) routing-default: célula do domínio ausente, routing.default presente
+  const dirB = mkTmp('routing-b');
+  writeRoutingPrefs(dirB,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      heavy: [claude-opus-4-8]\n' +
+    '  default:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n'
+  );
+  const rB = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirB });
+  assert(rB.source === 'routing' && /routing-default/.test(rB.reason) && rB.domain_used === 'default',
+    '(b) routing-default: célula ausente no domínio → cai para routing.default.<fase>.<tier>',
+    JSON.stringify(rB));
+  cleanup(dirB);
+
+  // (c) tier_models legado: domínio+default ausentes para a fase/tier pedidos
+  const dirC = mkTmp('routing-c');
+  writeRoutingPrefs(dirC,
+    '  frontend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n'
+  );
+  const rC = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirC });
+  assert(rC.source === 'tier_models', '(c) domínio+default ausentes → source:tier_models (legado)', JSON.stringify(rC));
+  cleanup(dirC);
+
+  // (d) frontmatter override: tier/worker fixados no frontmatter vencem o source
+  const dirD = mkTmp('routing-d');
+  writeRoutingPrefs(dirD,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n'
+  );
+  const rD1 = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', frontmatterTier: 'heavy', cwd: dirD });
+  assert(rD1.source === 'frontmatter' && /frontmatter-tier/.test(rD1.reason),
+    '(d) frontmatter-tier vence o rótulo de source (mesmo resolvendo via routing/legado no tier fixado)',
+    JSON.stringify(rD1));
+  const rD2 = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', frontmatterWorker: 'claude-opus-4-8', cwd: dirD });
+  assert(rD2.source === 'frontmatter' && /frontmatter-worker/.test(rD2.reason) && rD2.chain.length === 1 && rD2.chain[0].id === 'claude-opus-4-8',
+    '(d) frontmatter-worker fixa um único membro de cadeia, vence a precedência inteira',
+    JSON.stringify(rD2));
+  cleanup(dirD);
+
+  // (e) parse-error: indentação quebrada (dedent para nível desconhecido) → all-or-nothing
+  const dirE = mkTmp('routing-e');
+  writeRoutingPrefs(dirE,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n' +
+    '   fallback: claude-haiku-4-5-20251001\n'
+  );
+  const cfgE = readRoutingConfig(dirE);
+  assert(cfgE.present === true && cfgE.ok === false && cfgE.error === 'routing-parse-error',
+    '(e) indentação quebrada → present:true, ok:false, error:routing-parse-error', JSON.stringify(cfgE));
+  const rE = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirE });
+  assert(rE.source === 'tier_models' && /routing-parse-error/.test(rE.reason),
+    '(e) resolveRoute degrada para tier_models com routing-parse-error no reason', JSON.stringify(rE));
+  const eCli = runScript('forge-routing.js', ['--unit-type', 'execute-task', '--tier', 'standard', '--domain', 'backend', '--cwd', dirE]);
+  qStatuses.push(eCli.status);
+  assert(eCli.status === 0, '(e) CLI com bloco malformado ainda sai 0', `status=${eCli.status}`);
+  cleanup(dirE);
+
+  // (f) tabs vs espaços: indentação relativa (não absoluta) → mesmo resultado de parse
+  const dirF1 = mkTmp('routing-f1');
+  writeRoutingPrefs(dirF1,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n' +
+    '      fallback: claude-haiku-4-5-20251001\n'
+  );
+  const dirF2 = mkTmp('routing-f2');
+  writeRoutingPrefs(dirF2,
+    '\tbackend:\n' +
+    '\t\texecutor:\n' +
+    '\t\t\tstandard: [claude-sonnet-5]\n' +
+    '\t\t\tfallback: claude-haiku-4-5-20251001\n'
+  );
+  const cfgF1 = readRoutingConfig(dirF1);
+  const cfgF2 = readRoutingConfig(dirF2);
+  assert(cfgF1.ok === true && cfgF2.ok === true, '(f) blocos com espaços e com tabs ambos parseiam ok:true',
+    `f1.ok=${cfgF1.ok} f2.ok=${cfgF2.ok}`);
+  assert(JSON.stringify(cfgF1.routing) === JSON.stringify(cfgF2.routing),
+    '(f) tabs vs espaços → parse idêntico (indentação relativa, não absoluta)',
+    `${JSON.stringify(cfgF1.routing)} !== ${JSON.stringify(cfgF2.routing)}`);
+  cleanup(dirF1);
+  cleanup(dirF2);
+
+  // (g) domínio duplicado entre arquivos da cascata → last-wins por domínio inteiro
+  const dirG = mkTmp('routing-g');
+  writeRoutingPrefs(dirG,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n',
+    'claude-agent-prefs.md'
+  );
+  fs.writeFileSync(
+    path.join(dirG, '.gsd', 'prefs.local.md'),
+    'routing:\n  backend:\n    executor:\n      standard: [claude-opus-4-8]\n',
+    'utf8'
+  );
+  const cfgG = readRoutingConfig(dirG);
+  assert(cfgG.routing.backend.executor.standard[0] === 'claude-opus-4-8',
+    '(g) domínio redefinido em arquivo mais específico → last-wins por domínio inteiro (nunca merge de campo)',
+    JSON.stringify(cfgG.routing));
+  cleanup(dirG);
+
+  // (h) célula mista claude/gpt: chain com engine por membro
+  const dirH = mkTmp('routing-h');
+  writeRoutingPrefs(dirH,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5, gpt-5-codex]\n'
+  );
+  const rH = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirH });
+  assert(rH.chain.length === 2 && rH.chain[0].engine === 'claude' && rH.chain[1].engine === 'gpt',
+    '(h) célula mista claude/gpt → cadeia com 2 membros, engine correto por membro', JSON.stringify(rH.chain));
+  cleanup(dirH);
+
+  // (i) membro com família desconhecida (gemini) é pulado da cadeia
+  const dirI = mkTmp('routing-i');
+  writeRoutingPrefs(dirI,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5, gemini-2-pro]\n'
+  );
+  const rI = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirI });
+  assert(rI.chain.length === 1 && rI.chain[0].id === 'claude-sonnet-5',
+    '(i) membro gemini (família desconhecida) → pulado, cadeia final só com claude', JSON.stringify(rI.chain));
+  assert(/skipped-unknown-family/.test(rI.reason), '(i) reason contém skipped-unknown-family', rI.reason);
+  cleanup(dirI);
+
+  // (j) cadeia de 5 membros → cap em 3, reason chain-capped
+  const dirJ = mkTmp('routing-j');
+  writeRoutingPrefs(dirJ,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5, claude-opus-4-8, claude-haiku-4-5-20251001, claude-sonnet-5, claude-opus-4-8]\n'
+  );
+  const rJ = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirJ });
+  assert(rJ.chain.length === 3, '(j) cadeia de 5 membros → truncada em 3 (CHAIN_CAP)', `got length=${rJ.chain.length}`);
+  assert(/chain-capped/.test(rJ.reason), '(j) reason contém chain-capped', rJ.reason);
+  cleanup(dirJ);
+
+  // (k) fallback configurado não-claude/não-mapeado → substituído pelo default do tier
+  const dirK = mkTmp('routing-k');
+  writeRoutingPrefs(dirK,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n' +
+    '      fallback: gpt-5-codex\n'
+  );
+  const rK = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirK });
+  assert(/fallback-invalid-substituted/.test(rK.reason), '(k) fallback gpt → reason fallback-invalid-substituted', rK.reason);
+  assert(rK.fallback.id !== 'gpt-5-codex' && modelFamily(rK.fallback.id) === 'claude',
+    '(k) fallback substituído pelo default claude/mapeado do tier', JSON.stringify(rK.fallback));
+  const kCli = runScript('forge-routing.js', ['--unit-type', 'execute-task', '--tier', 'standard', '--domain', 'backend', '--cwd', dirK]);
+  qStatuses.push(kCli.status);
+  assert(kCli.status === 0, '(k) CLI com fallback inválido ainda sai 0', `status=${kCli.status}`);
+  cleanup(dirK);
+
+  // (l) plan-milestone NUNCA é capturado pelo routing, mesmo com célula presente
+  const dirL = mkTmp('routing-l');
+  writeRoutingPrefs(dirL,
+    '  default:\n' +
+    '    plan:\n' +
+    '      standard: [claude-fable-5]\n'
+  );
+  const rL = resolveRoute({ unitType: 'plan-milestone', tier: 'standard', domain: 'backend', cwd: dirL });
+  assert(/phase-not-routable/.test(rL.reason), '(l) plan-milestone → phase-not-routable (nunca célula do routing)', rL.reason);
+  const cliL = runScript('forge-routing.js', ['--unit-type', 'plan-milestone', '--tier', 'standard', '--domain', 'backend', '--cwd', dirL]);
+  qStatuses.push(cliL.status);
+  let parsedL = null;
+  try { parsedL = JSON.parse(cliL.stdout); } catch {}
+  assert(cliL.status === 0 && parsedL !== null && /phase-not-routable/.test(parsedL.reason),
+    '(l) CLI contrato JSON confirma phase-not-routable, sai 0', `status=${cliL.status} stdout=${cliL.stdout}`);
+  cleanup(dirL);
+
+  // (m) fases claude-only (discuss-slice, memory) também são phase-not-routable
+  const dirM = mkTmp('routing-m');
+  const rM1 = resolveRoute({ unitType: 'discuss-slice', tier: 'standard', cwd: dirM });
+  assert(/phase-not-routable/.test(rM1.reason), '(m) discuss-slice → phase-not-routable', rM1.reason);
+  const rM2 = resolveRoute({ unitType: 'memory', tier: 'standard', cwd: dirM });
+  assert(/phase-not-routable/.test(rM2.reason), '(m) memory → phase-not-routable', rM2.reason);
+  cleanup(dirM);
+
+  // (n) --next-after: cadeia resolvida (2 membros) → segundo, depois fallback, depois ''
+  const dirN = mkTmp('routing-n');
+  writeRoutingPrefs(dirN,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5, claude-opus-4-8]\n' +
+    '      fallback: claude-haiku-4-5-20251001\n'
+  );
+  const baseArgsN = ['--unit-type', 'execute-task', '--tier', 'standard', '--domain', 'backend', '--cwd', dirN];
+  const n1 = runScript('forge-routing.js', [...baseArgsN, '--next-after', 'claude-sonnet-5']);
+  qStatuses.push(n1.status);
+  assert(n1.status === 0 && n1.stdout.trim() === 'claude-opus-4-8',
+    '(n) --next-after do primeiro membro → segundo membro da cadeia', `status=${n1.status} stdout='${n1.stdout.trim()}'`);
+  const n2 = runScript('forge-routing.js', [...baseArgsN, '--next-after', 'claude-opus-4-8']);
+  qStatuses.push(n2.status);
+  assert(n2.status === 0 && n2.stdout.trim() === 'claude-haiku-4-5-20251001',
+    '(n) --next-after do último membro → fallback de categoria', `status=${n2.status} stdout='${n2.stdout.trim()}'`);
+  const n3 = runScript('forge-routing.js', [...baseArgsN, '--next-after', 'claude-haiku-4-5-20251001']);
+  qStatuses.push(n3.status);
+  assert(n3.status === 0 && n3.stdout.trim() === '',
+    '(n) --next-after do fallback já usado → string vazia (cadeia esgotada)', `status=${n3.status} stdout='${n3.stdout.trim()}'`);
+  cleanup(dirN);
+
+  // (o) --explain: marcadores pt-BR de precedência/degradação presentes
+  const dirO = mkTmp('routing-o');
+  writeRoutingPrefs(dirO,
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n'
+  );
+  const o1 = runScript('forge-routing.js', ['--unit-type', 'execute-task', '--tier', 'standard', '--domain', 'backend', '--explain', '--cwd', dirO]);
+  qStatuses.push(o1.status);
+  assert(o1.status === 0, '(o) --explain sai 0', `status=${o1.status}`);
+  assert(/Explicação da rota/.test(o1.stdout) && /camada de precedência vencedora/.test(o1.stdout) && /Cadeia final/.test(o1.stdout),
+    '(o) --explain contém marcadores pt-BR da decisão (célula/precedência/degradação)', o1.stdout.slice(0, 300));
+  cleanup(dirO);
+
+  // (p) IDENTIDADE byte-idêntica: sem bloco routing:, chain/fallback == readTierChain()
+  const projChain = (arr) => arr.map((m) => ({ id: m.id, alias: m.alias, mapped: m.mapped }));
+
+  const dirP1 = mkTmp('routing-p-scalar');
+  fs.mkdirSync(path.join(dirP1, '.gsd'), { recursive: true });
+  fs.writeFileSync(path.join(dirP1, '.gsd', 'claude-agent-prefs.md'), 'tier_models:\n  standard: claude-sonnet-5\n', 'utf8');
+  const rP1 = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'x', cwd: dirP1 });
+  const legacyP1 = readTierChain('standard', dirP1);
+  assert(JSON.stringify(projChain(rP1.chain)) === JSON.stringify(projChain(legacyP1)),
+    '(p) IDENTIDADE: sem routing:, chain byte-idêntica ao readTierChain (escalar)',
+    `${JSON.stringify(rP1.chain)} vs ${JSON.stringify(legacyP1)}`);
+  assert(rP1.fallback.id === legacyP1[0].id && rP1.fallback.alias === legacyP1[0].alias,
+    '(p) IDENTIDADE: fallback byte-idêntico ao primeiro membro legado (escalar)', JSON.stringify(rP1.fallback));
+  cleanup(dirP1);
+
+  const dirP2 = mkTmp('routing-p-list');
+  fs.mkdirSync(path.join(dirP2, '.gsd'), { recursive: true });
+  fs.writeFileSync(path.join(dirP2, '.gsd', 'claude-agent-prefs.md'),
+    'tier_models:\n  standard: [claude-sonnet-5, claude-haiku-4-5-20251001]\n', 'utf8');
+  const rP2 = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'x', cwd: dirP2 });
+  const legacyP2 = readTierChain('standard', dirP2);
+  assert(JSON.stringify(projChain(rP2.chain)) === JSON.stringify(projChain(legacyP2)),
+    '(p) IDENTIDADE: sem routing:, chain byte-idêntica ao readTierChain (lista inline)',
+    `${JSON.stringify(rP2.chain)} vs ${JSON.stringify(legacyP2)}`);
+  cleanup(dirP2);
+
+  // (q) exit 0 sempre — todos os runScript('forge-routing.js', ...) acima retornaram status 0,
+  // inclusive nos caminhos de degradação (e/f/k/l).
+  assert(qStatuses.length > 0 && qStatuses.every((s) => s === 0),
+    '(q) todos os runScript(forge-routing.js, ...) desta Section retornam status 0 (inclusive degradações)',
+    JSON.stringify(qStatuses));
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -3344,6 +3634,7 @@ async function main() {
     smokeReviewPairing();
     smokeReviewPairingWiring();
     smokeReviewPairingPrefsSchema();
+    smokeRouting();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
