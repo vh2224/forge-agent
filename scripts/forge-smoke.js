@@ -1478,7 +1478,7 @@ function shQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-// Section 24 helper — plain git repo fixture (init + initial commit so the
+// Section 25 helper — plain git repo fixture (init + initial commit so the
 // working tree starts clean). Reusable by S02/S04.
 function mkGitRepo(dir) {
   const run = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
@@ -1926,13 +1926,13 @@ process.stdout.write(JSON.stringify({challengerModel,advocateModel}));
   }
 }
 
-// ── Section 24: forge-xllm execute mode (mock codex on PATH) ────────────────
+// ── Section 25: forge-xllm execute mode (mock codex on PATH) ────────────────
 // Live-spawns the T01 adapter in --mode execute against a mock `codex` that can
 // write real files, spawn orphans, commit, or hang — regression guard for the
 // S01-RISK contract: heartbeat, process-group timeout kill, no-commit, dirty
 // guard, result-file-outside-workspace guard, .gsd/ advisory warning.
 async function smokeXllmExecute() {
-  process.stdout.write('\n▸ Section 24: forge-xllm execute mode (mock codex on PATH)\n');
+  process.stdout.write('\n▸ Section 25: forge-xllm execute mode (mock codex on PATH)\n');
 
   const validPayload = JSON.stringify({
     status: 'done',
@@ -2192,7 +2192,7 @@ async function smokeXllmExecute() {
   }
 }
 
-// ── Section 25: engine dispatch (reset + fallback + dirty guard) ────────────
+// ── Section 26: engine dispatch (reset + fallback + dirty guard) ────────────
 // Validates the SCRIPTABLE pieces of the T01/S02 "worker-engine-fallback"
 // contract in isolation: (A) happy path — result JSON carries the fields the
 // orchestrator reads to assemble the SUMMARY, no commit is made; (B) failure
@@ -2202,7 +2202,7 @@ async function smokeXllmExecute() {
 // orchestration (decision to reset, dispatch of the Claude fallback) is
 // markdown-only (T02/T03) — this smoke proves the pieces that ARE scriptable.
 function smokeEngineDispatch() {
-  process.stdout.write('\n▸ Section 25: engine dispatch (reset + fallback + dirty guard)\n');
+  process.stdout.write('\n▸ Section 26: engine dispatch (reset + fallback + dirty guard)\n');
 
   const validPayload = JSON.stringify({
     status: 'done',
@@ -2434,7 +2434,7 @@ function smokeEngineDispatch() {
   }
 }
 
-// ── Section 26: forge-xllm plan mode (mock codex on PATH) ───────────────────
+// ── Section 27: forge-xllm plan mode (mock codex on PATH) ───────────────────
 // Offline, live-spawn coverage of the T01 --mode plan adapter: (A) happy path
 // + materialization-ready shape, asserting read-only (no repo/.gsd writes) and
 // that the generated T##-PLAN content passes forge-must-haves.js standalone;
@@ -2442,7 +2442,7 @@ function smokeEngineDispatch() {
 // (the ENFORCING in-sidecar gate from runPlan); (C) codex absent from PATH →
 // exit 2 (spawn ENOENT), mirroring the execute-mode offline scenario.
 async function smokeXllmPlan() {
-  process.stdout.write('\n▸ Section 26: forge-xllm plan mode (mock codex on PATH)\n');
+  process.stdout.write('\n▸ Section 27: forge-xllm plan mode (mock codex on PATH)\n');
 
   function runPlanXllm(args, mockDir, cwd) {
     const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
@@ -2639,6 +2639,52 @@ async function smokeXllmPlan() {
   }
 }
 
+// ── Section 24: forge-status CLI packaging ──────────────────────────────────
+function smokeStatusPackaging() {
+  process.stdout.write('\n▸ Section 24: forge-status CLI packaging\n');
+  const REPO = path.dirname(SCRIPTS);
+  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+
+  // (a) engine pure-read: no real write-API calls, no forge-lock require
+  const eng = rd('scripts/forge-status.js');
+  assert(eng.length > 0, '(a) scripts/forge-status.js lê conteúdo não-vazio', 'arquivo ausente ou vazio');
+  const code = eng.split('\n').filter((l) => !l.trimStart().startsWith('//')).join('\n');
+  assert(!/fs\.writeFileSync\(|fs\.appendFileSync\(|fs\.mkdirSync\(|fs\.unlinkSync\(|fs\.renameSync\(/.test(code),
+    '(a) engine é pure-read (sem write-API em código)', 'chamada de write-API encontrada fora de comentários');
+  assert(!/require\(['"]\.\/forge-lock\.js['"]\)/.test(code),
+    '(a) engine não requer forge-lock', 'require de forge-lock.js encontrado');
+
+  // (b) --json parseável
+  const dir = mkTmp('status-json');
+  fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true }); // fixture: valid (idle) GSD project
+  const r = spawnSync('node', [path.join(SCRIPTS, 'forge-status.js'), '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
+  assert(r.status === 0, '(b) forge-status.js --json sai 0', `exit=${r.status} stderr=${(r.stderr || '').slice(0, 200)}`);
+  let parsed = null;
+  try { parsed = JSON.parse(r.stdout); } catch {}
+  assert(parsed !== null, '(b) --json stdout é JSON válido', `stdout não é JSON parseável: ${(r.stdout || '').slice(0, 200)}`);
+  cleanup(dir);
+
+  // (c) bin wrappers presentes
+  // (c) presence-only by design: executing the bash wrapper from smoke would break Windows CI (no bash guarantee); the engine itself is exercised end-to-end in (b).
+  assert(fs.existsSync(path.join(REPO, 'bin', 'forge-status')), '(c) bin/forge-status existe', 'arquivo ausente');
+  assert(fs.existsSync(path.join(REPO, 'bin', 'forge-status.cmd')), '(c) bin/forge-status.cmd existe', 'arquivo ausente');
+
+  // (d) install.ps1 Join-Path + no-\f
+  const ps1 = rd('install.ps1');
+  assert(/Join-Path[^\n]*forge-status\.cmd/.test(ps1),
+    '(d) install.ps1 copia forge-status.cmd via Join-Path', 'bloco Join-Path ... forge-status.cmd não encontrado');
+  const ps1buf = fs.readFileSync(path.join(REPO, 'install.ps1'));
+  assert(!ps1buf.includes(0x0C), '(d) install.ps1 sem byte 0x0C (literal \\f)', 'byte 0x0C encontrado em install.ps1');
+
+  // (e) SKILL thin shim
+  const skill = rd('skills/forge-status/SKILL.md');
+  assert(!/phaseOrder|byPhase|### Slices/.test(skill),
+    '(e) SKILL sem template de agregação (thin shim)', 'template de agregação legado ainda presente');
+  assert(/forge-status\.js/.test(skill), '(e) SKILL referencia o engine', 'referência a forge-status.js ausente');
+  assert(/verbatim|cru|sem (interpretar|resumir|reformatar)|não .*(resumir|interpretar|reformatar)/i.test(skill),
+    '(e) SKILL instrui pass-through cru', 'instrução de pass-through cru não encontrada');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -2670,6 +2716,7 @@ async function main() {
     smokeModelAlias();
     smokeChallengerWiring();
     smokeAdvocateModel();
+    smokeStatusPackaging();
     smokeEngineDispatch();
     await smokeXllmPlan();
   } catch (e) {

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# forge-status — thin CLI wrapper over scripts/forge-status.js
+#
+# Pure pass-through: forge-status.js already accepts flags directly
+# (positional <M-id> + --json/--tokens/--watch/--cwd), so there is no
+# subcommand syntax to translate — unlike forge-accounts.
+#
+# Installed to a bin dir on PATH by install.sh. Resolves the engine in
+# ~/.claude first, then falls back to the repo (repo_path in prefs) for
+# dev/dogfood. Pure-read/zero-token — never reprocesses the engine output.
+set -euo pipefail
+
+ENGINE="$HOME/.claude/scripts/forge-status.js"
+if [ ! -f "$ENGINE" ]; then
+  REPO="$(grep 'repo_path:' "$HOME/.claude/forge-agent-prefs.md" 2>/dev/null | cut -d: -f2 | tr -d ' ' || true)"
+  [ -n "${REPO:-}" ] && ENGINE="$REPO/scripts/forge-status.js"
+fi
+if [ ! -f "$ENGINE" ]; then
+  echo "forge-status: engine não encontrado. Rode /forge-update." >&2
+  exit 1
+fi
+
+exec node "$ENGINE" "$@"
