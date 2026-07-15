@@ -228,7 +228,246 @@ function readRoutingConfig(cwd) {
   return { present: true, ok: true, routing: merged, error: null };
 }
 
-module.exports = { readRoutingConfig };
+// ═══════════════════════════════════════════════════════════════════════════
+// T02 — resolveRoute(): precedence, phase mapping, cross-engine chain, cap,
+// validated category fallback, byte-identical legacy compat.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Reuse (never reimplemented here):
+//   • readTierChain  — the legacy tier_models chain (compat path + non-routable
+//     phases). We delegate; the canonical DEFAULT_TIER_MODEL and tier
+//     normalization live inside forge-tier-chain.js, not duplicated here.
+//   • modelToAlias   — Agent()-accepted alias + mapped flag per member.
+//   • modelFamily    — engine per member ('claude' | 'gpt' | null). null =
+//     unknown family (e.g. gemini today) → member is skipped (S05 refines the
+//     warning to phase-unsupported-family once gemini becomes a real engine).
+//
+// Precedence (6 sources, highest first) — matches M007-CONTEXT § Locked:
+//   frontmatter tier:/worker:  >  routing.<d>.<f>.<t>  >  routing.default.<f>.<t>
+//   >  tier_models  >  workers  >  canonical default
+// The last three collapse into readTierChain (tier_models + canonical default);
+// per-phase `workers:` pinning is honored at the top via frontmatterWorker.
+//
+// Contract returned: { chain, fallback, source, domain_used, phase, reason }.
+//   source ∈ 'frontmatter' | 'routing' | 'tier_models' (winning layer).
+//   reason is a `; `-joined composition of discriminators (buildReason pattern
+//   from forge-review-pairing.js) — degradations are NEVER silent.
+//
+// resolveRoute is a PURE LIBRARY function — no printing. The CLI (contract
+// JSON, --next-after, --explain) is built in T03 on top of these exports.
+
+const { readTierChain } = require('./forge-tier-chain');
+const { modelToAlias, modelFamily } = require('./forge-model-alias');
+
+const CHAIN_CAP = 3; // resolved chain hard cap (fallback is separate, uncapped)
+
+// ── Phase mapping ───────────────────────────────────────────────────────────
+// execute-task → executor; plan-slice → planner. plan-milestone is NEVER
+// captured (locked max/Fable). discuss-*/memory/complete-*/unknown → null.
+// null ⇒ phase-not-routable (resolves via the legacy tier chain).
+function mapPhase(unitType) {
+  if (unitType === 'execute-task') return 'executor';
+  if (unitType === 'plan-slice') return 'planner';
+  return null;
+}
+
+// ── Reason composition — `; `-joined discriminators, order-preserving ──────
+function buildReason(parts) {
+  return parts.filter((p) => p != null && p !== '').join('; ');
+}
+
+// ── Cell resolution (1-path: domain → default → null) ───────────────────────
+// Tries routing.<domain>.<phase>.<tier> (routing-hit, domain_used=<domain>),
+// then routing.default.<phase>.<tier> (routing-default, domain_used='default').
+// null ⇒ caller falls to the legacy tier_models chain. Config incompleteness
+// inherits down this path; the CATEGORY fallback is a RUNTIME net only.
+function resolveCell(routing, domain, phase, tier) {
+  const tryDomain = (dKey, reason) => {
+    const d = routing[dKey];
+    if (!d || !d[phase] || !Array.isArray(d[phase][tier])) return null;
+    return {
+      ids: d[phase][tier],
+      fallbackId: d[phase].fallback != null ? d[phase].fallback : null,
+      domain_used: reason === 'routing-hit' ? dKey : 'default',
+      reason,
+    };
+  };
+
+  if (domain && Object.prototype.hasOwnProperty.call(routing, domain)) {
+    const hit = tryDomain(domain, 'routing-hit');
+    if (hit) return hit;
+  }
+  const def = tryDomain('default', 'routing-default');
+  if (def) return def;
+  return null;
+}
+
+// ── Chain builder — each id → { id, alias, mapped, engine } ─────────────────
+// Members whose modelFamily() is null (unknown family) are DROPPED from the
+// resolved chain and accumulate a `skipped-unknown-family` discriminator. The
+// cap and --next-after operate on the already-pruned chain.
+function buildChain(ids, reasonParts) {
+  const list = Array.isArray(ids) ? ids : [ids];
+  const chain = [];
+  let skipped = false;
+  for (const id of list) {
+    const engine = modelFamily(id);
+    if (engine === null) {
+      skipped = true;
+      continue;
+    }
+    const { alias, mapped } = modelToAlias(id);
+    chain.push({ id, alias, mapped, engine });
+  }
+  if (skipped && reasonParts) reasonParts.push('skipped-unknown-family');
+  return chain;
+}
+
+// ── Cap — hard-truncate above CHAIN_CAP, never silent ───────────────────────
+function capChain(chain, reasonParts) {
+  if (chain.length > CHAIN_CAP) {
+    if (reasonParts) reasonParts.push('chain-capped');
+    return chain.slice(0, CHAIN_CAP);
+  }
+  return chain;
+}
+
+// ── Fallback validation — claude + mapped, else default-of-tier ─────────────
+// A configured fallback that is not a mapped Claude model is substituted by the
+// tier default with reason `fallback-invalid-substituted`. A MISSING fallback
+// (null) silently uses the tier default (no reason — it is the natural net, not
+// an invalid config). Tier default = readTierChain(tier)[0] (respects
+// tier_models config; canonical default folded inside readTierChain).
+function validateFallback(fallbackId, tier, cwd, reasonParts) {
+  if (fallbackId != null && String(fallbackId).length > 0) {
+    const fam = modelFamily(fallbackId);
+    const { alias, mapped } = modelToAlias(fallbackId);
+    if (fam === 'claude' && mapped) {
+      return { id: fallbackId, alias };
+    }
+    if (reasonParts) reasonParts.push('fallback-invalid-substituted');
+  }
+  const def = readTierChain(tier, cwd)[0];
+  return { id: def.id, alias: def.alias };
+}
+
+// ── Walk the resolved chain, then the fallback once, then '' ────────────────
+// Cross-engine aware: does NOT filter by mapped (a gpt member routes via the
+// sidecar and is a legitimate next target). T03's --next-after builds on this.
+function nextInChain(chain, fallback, id) {
+  const ids = (Array.isArray(chain) ? chain : []).map((m) => m.id);
+  if (fallback && fallback.id) ids.push(fallback.id);
+  const idx = ids.indexOf(id);
+  if (idx === -1) return '';
+  return idx + 1 < ids.length ? ids[idx + 1] : '';
+}
+
+// ── The resolver ────────────────────────────────────────────────────────────
+function resolveRoute(opts) {
+  const o = opts || {};
+  const unitType = o.unitType;
+  const tier = o.tier;
+  const domain = o.domain;
+  const frontmatterTier = o.frontmatterTier;
+  const frontmatterWorker = o.frontmatterWorker;
+  const cwd = o.cwd || process.cwd();
+
+  const reasonParts = [];
+  // Frontmatter fixes the tier/worker; it does NOT replace the whole chain —
+  // the chain still resolves at the effective tier through routing/legacy.
+  const effectiveTier =
+    frontmatterTier != null && String(frontmatterTier).length > 0
+      ? frontmatterTier
+      : tier;
+
+  const phase = mapPhase(unitType);
+  const phaseField = phase !== null ? phase : unitType != null ? unitType : '';
+
+  // ── Precedence 1a: frontmatter worker pins an explicit model ──────────────
+  if (frontmatterWorker != null && String(frontmatterWorker).length > 0) {
+    reasonParts.push('frontmatter-worker');
+    const chain = capChain(buildChain([frontmatterWorker], reasonParts), reasonParts);
+    const fallback = validateFallback(null, effectiveTier, cwd, reasonParts);
+    return {
+      chain,
+      fallback,
+      source: 'frontmatter',
+      domain_used: 'default',
+      phase: phaseField,
+      reason: buildReason(reasonParts),
+    };
+  }
+
+  // frontmatter tier wins the SOURCE label even when the chain comes from
+  // routing/legacy at the fixed tier.
+  const frontmatterFixesTier =
+    frontmatterTier != null && String(frontmatterTier).length > 0;
+  if (frontmatterFixesTier) reasonParts.push('frontmatter-tier');
+
+  const cfg = readRoutingConfig(cwd);
+
+  // ── Early degradations → legacy tier chain (readTierChain) ────────────────
+  let useRouting = false;
+  let cell = null;
+  if (cfg.ok === false) {
+    reasonParts.push('routing-parse-error');
+  } else if (phase === null) {
+    reasonParts.push('phase-not-routable');
+  } else if (cfg.present === false) {
+    reasonParts.push('tier_models'); // compat path — byte-identical legacy
+  } else {
+    cell = resolveCell(cfg.routing, domain, phase, effectiveTier);
+    if (cell) {
+      reasonParts.push(cell.reason); // routing-hit | routing-default
+      useRouting = true;
+    } else {
+      reasonParts.push('tier_models'); // cell + default missing → legacy
+    }
+  }
+
+  if (useRouting) {
+    const chain = capChain(buildChain(cell.ids, reasonParts), reasonParts);
+    const fallback = validateFallback(cell.fallbackId, effectiveTier, cwd, reasonParts);
+    return {
+      chain,
+      fallback,
+      source: frontmatterFixesTier ? 'frontmatter' : 'routing',
+      domain_used: cell.domain_used,
+      phase: phaseField,
+      reason: buildReason(reasonParts),
+    };
+  }
+
+  // ── Legacy path — byte-identical to readTierChain (engine field additive) ──
+  const legacy = readTierChain(effectiveTier, cwd);
+  const chain = legacy.map((m) => ({
+    id: m.id,
+    alias: m.alias,
+    mapped: m.mapped,
+    engine: modelFamily(m.id),
+  }));
+  const fallback = validateFallback(null, effectiveTier, cwd, reasonParts);
+  return {
+    chain,
+    fallback,
+    source: frontmatterFixesTier ? 'frontmatter' : 'tier_models',
+    domain_used: 'default',
+    phase: phaseField,
+    reason: buildReason(reasonParts),
+  };
+}
+
+module.exports = {
+  readRoutingConfig,
+  resolveRoute,
+  mapPhase,
+  resolveCell,
+  buildChain,
+  capChain,
+  validateFallback,
+  buildReason,
+  nextInChain,
+};
 
 // ── CLI entrypoint (minimal — full CLI arrives in T03) ─────────────────────
 if (require.main === module) {
