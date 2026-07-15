@@ -1,10 +1,9 @@
 # PR brief — Review cross-model (Codex/xLLM) não funciona em working copy SVN
 
-> **Status:** 🟡 **parcial** (2026-07-15). Descoberto ao ativar o challenger Codex no repo **WDMA**
-> (working copy **SVN**, sem `.git`). O login do Codex é válido e o adaptador funciona, mas o
-> review gate inteiro é git-only, então nem o challenger padrão (Claude) nem o Codex disparam ali.
-> **Issue 2 (adaptador) é corrigido nesta PR**; **Issue 1 (diff SVN) segue aberto** — precisa de
-> decisão de design sobre o baseline de slice em SVN.
+> **Status:** 🟢 **resolvido** (2026-07-15). Descoberto ao ativar o challenger Codex no repo **WDMA**
+> (working copy **SVN**, sem `.git`). **Issue 2 (adaptador `--skip-git-repo-check`) foi mergeado na PR #42.**
+> **Issue 1 (diff SVN) é corrigido NESTE branch** (`feat/review-svn-diff`): `Step 1` do
+> `shared/forge-review.md` agora detecta o VCS e usa `svn diff` em working copies SVN.
 > **Origem:** sessão `/forge-prefs` — reconfiguração de modelos + tentativa de ligar `review.challenger: codex`.
 
 ## TL;DR
@@ -31,19 +30,28 @@ review gate em geral é um no-op silencioso.
 
 ---
 
-## 🔴 Issue 1 — `DIFF_CMD` hardcoded em git; sem caminho SVN
+## ✅ Issue 1 — `DIFF_CMD` hardcoded em git; sem caminho SVN (corrigido neste branch)
 
-**Onde:** `shared/forge-review.md` (linhas ~141-148, tabela de boundaries linhas ~5-8).
+**Onde:** `shared/forge-review.md` `Step 1 — Compute the slice diff` + tabela de boundaries.
 
-**Proposta:** detectar o VCS do `WORKING_DIR` e escolher o `DIFF_CMD` correspondente:
+**Correção aplicada:** `Step 1` agora detecta o VCS antes de montar o `DIFF_CMD`:
 
-- git → `git diff {merge-base}...HEAD` (atual).
-- svn → algo como `svn diff` (uncommitted) ou `svn diff -r {BASE}:HEAD` quando houver baseline de slice.
-  Como o forge em SVN normalmente trabalha na `master`/trunk sem branch por slice (a equipe segura
-  commits e commita "completo"), o diff útil é o **uncommitted** (`svn diff` + arquivos não-versionados
-  relevantes). Definir o baseline de slice em SVN é o ponto de design em aberto.
+- **git** → `git diff {merge-base}...HEAD` (com fallback `git diff HEAD`) — inalterado.
+- **svn** (`svn info` sucede) → `svn diff` do working copy. Decisão de design: o forge em SVN
+  trabalha na trunk **sem branch por slice** (a equipe segura commits e commita "completo"), então
+  o diff revisável é o **uncommitted** — não há merge-base/baseline de slice a computar.
+- **VCS desconhecido / CLI ausente** → degrada para o caminho "no diff to review", nunca erra.
 
-Sem isso, todo o gate (challenge/defense/rebuttal) fica inerte em SVN.
+Serve tanto o review de slice (`forge-auto`/`forge-next`) quanto o de task (`forge-task` Step 5.5),
+pois ambos consomem o `Step 1`.
+
+**Ressalva conhecida (polish futuro):** `svn diff` é **unscoped** — inclui qualquer arquivo versionado
+modificado no working copy, inclusive artefatos de build versionados (ex.: `obj/*.json`, `*.nuget.*`).
+Em git o `.gitignore` os exclui; em SVN eles entram no diff. O adaptador trunca em 4000 linhas, então
+não quebra, mas gera ruído. Refino possível: scoping por path ou respeitar um ignore-list no `Step 1`. **Fora de escopo (follow-up):** o modo **execute** do codex
+(`--mode execute` em `scripts/forge-xllm.js`) e o diff `START_SHA`-based do `forge-task` continuam
+git-only (`git rev-parse`/`git diff --name-status $START_SHA` + reset via `git checkout`/`clean`) —
+rodar TASK via codex em SVN é um item maior, separado deste.
 
 ## ✅ Issue 2 — `forge-xllm.js` não passa `--skip-git-repo-check` (corrigido nesta PR)
 

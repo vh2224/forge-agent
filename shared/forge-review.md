@@ -4,7 +4,7 @@ Authoritative spec for the **review gate**: a two-agent confrontation on a compl
 
 | Consumer | Boundary | DIFF_CMD | Artifact | MODE |
 |----------|----------|----------|----------|------|
-| `forge-auto` / `forge-next` (before `complete-slice`) | per-slice — branch `gsd/{M###}/{S##}` still **unmerged** | `git diff {merge-base}...HEAD` (Step 1) | `{S##}-REVIEW.md` | `auto` / `interactive` |
+| `forge-auto` / `forge-next` (before `complete-slice`) | per-slice — branch `gsd/{M###}/{S##}` still **unmerged** | git: `git diff {merge-base}...HEAD` · svn: `svn diff` (Step 1, VCS-aware) | `{S##}-REVIEW.md` | `auto` / `interactive` |
 | `forge-task` (Step 5.5) | standalone task | `git diff {START_SHA}..HEAD` (worktree fallback) | `{TASK_ID}-REVIEW.md` | `interactive` |
 
 Steps 2–8 below are boundary-agnostic — only the four bindings above differ. Step 9 (milestone-final triage) applies only to the per-slice boundary. The rest of this doc is written in slice terms (`{S##}-REVIEW.md`); substitute the task bindings when invoked from `forge-task`.
@@ -134,13 +134,25 @@ If `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` already e
 
 ## Step 1 — Compute the slice diff
 
-Default to the slice-branch range (`auto_commit: true` — the common case, branch still unmerged):
+Detect the VCS of `WORKING_DIR` first, then compute `DIFF_CMD` accordingly. Git is the default
+(slice-branch range, `auto_commit: true`, branch still unmerged). SVN working copies have no
+per-slice branch and no merge-base — the team works on trunk and holds commits — so the reviewable
+change is the uncommitted working copy. Run this from INSIDE `WORKING_DIR` (the diff target lives there).
 
 ```bash
-BASE=$(git merge-base HEAD master 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo HEAD~10)
-DIFF_CMD="git diff ${BASE}...HEAD"
-# Fallback for auto_commit: false (work uncommitted in the worktree) or an empty branch range:
-if [ -z "$(eval "$DIFF_CMD" --name-only 2>/dev/null)" ]; then
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # git — default to the slice-branch range (auto_commit: true — common case, branch still unmerged)
+  BASE=$(git merge-base HEAD master 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo HEAD~10)
+  DIFF_CMD="git diff ${BASE}...HEAD"
+  # Fallback for auto_commit: false (work uncommitted in the worktree) or an empty branch range:
+  if [ -z "$(eval "$DIFF_CMD" --name-only 2>/dev/null)" ]; then
+    DIFF_CMD="git diff HEAD"
+  fi
+elif svn info >/dev/null 2>&1; then
+  # svn — no per-slice branch/merge-base; the reviewable change is the uncommitted working copy.
+  DIFF_CMD="svn diff"
+else
+  # unknown VCS (or CLI absent) — degrade to the no-diff path below, never error.
   DIFF_CMD="git diff HEAD"
 fi
 ```
