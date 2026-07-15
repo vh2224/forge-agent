@@ -837,6 +837,322 @@ Placeholder classification:
 
 ---
 
+### Worker Engine Routing
+
+**Purpose:** Control-flow section that runs **before** Tier Resolution and Effort Resolution, on every worker dispatch that supports engine routing. It translates `unit_type + T##-PLAN frontmatter + prefs` into a concrete `ENGINE ∈ {claude, codex}` decision and, when `ENGINE == codex` for a routable unit, drives the detached sidecar (`scripts/forge-xllm.js --mode execute`) through a background+polling state machine — falling back to the in-context `forge-executor` (Claude) on any failure with a reset to the pre-dispatch commit. Like the Retry Handler, Token Telemetry, Tier Resolution and Effort Resolution, this is **control flow — not data flow** — and therefore lives outside the fenced template blocks (MEM011). No new Node script is introduced here: the adapter (`scripts/forge-xllm.js`) shipped in M005 S01; this section wires it into the loop.
+
+> **Spec-first.** This section is canonical. `skills/forge-auto/SKILL.md` (T02), `skills/forge-next/SKILL.md` (T03) and `skills/forge-task/SKILL.md` (T05) carry the **executable mirror** of this algorithm in their Step 4 / Step 5 dispatch. Any change to engine routing lands here first, then propagates to those three mirrors.
+
+> **Cross-reference:** The reader follows the `readEvidenceMode` / [`shared/forge-review.md § Step 0`](forge-review.md) regex-over-raw-prefs model. The fallback (`worker-engine-fallback`) is a clone of the `review-challenger-fallback` in [`shared/forge-review.md § Fallback challenger`](forge-review.md). The adapter contract (result-file JSON, heartbeat, exit codes) is defined in `scripts/forge-xllm.js` (S01).
+
+#### When to apply
+
+Engine Routing runs at the **top** of the Step 4 dispatch for a worker, **before** Tier Resolution (and therefore before Effort Resolution, which depends on `$MODEL_ID`). The ordering is deliberate: when `ENGINE == codex` the Claude Tier/Effort Resolution is **skipped entirely** (Codex resolves its own model), and only runs on the Claude path — including the fallback path, where the fallback re-enters Tier/Effort Resolution as a normal Claude dispatch.
+
+Applicability by `unit_type`:
+
+| `unit_type` | Engine routing | Sidecar dispatch |
+|-------------|----------------|--------------------------|
+| `execute-task` | **active** | yes — routes to the sidecar `--mode execute` when `ENGINE == codex` (Branch C) |
+| `plan-slice` | **active** (S03) | yes — routes to the sidecar `--mode plan` (read-only) when `ENGINE == codex` (Branch D) |
+| all others (`plan-milestone`, `discuss-*`, `research-*`, `complete-*`, `memory-extract`, …) | **never** — always Claude | no |
+
+`plan-milestone` is **never** covered by `workers:` (locked) — it stays on tier `max`/Fable regardless of prefs.
+
+The `claude` path is **byte-identical** to the current loop: when `ENGINE == claude` this section is a no-op that hands control straight to Tier Resolution. Only a non-`claude` resolution changes behavior. Two routable unit types dispatch the sidecar: `execute-task` (Branch C — `--mode execute`, read-write) and `plan-slice` (Branch D — `--mode plan`, **read-only**). The two branches diverge on side effects: execute captures/resets `START_SHA` and forbids codex commits; plan writes nothing (codex only reasons and returns markdown), so there is **no dirty-tree guard, no `START_SHA`, no reset** — the orchestrator materializes the returned plan content into `.gsd/**` itself.
+
+#### Engine resolution algorithm (first match wins)
+
+Resolve `ENGINE` and `ENGINE_REASON` in precedence order — the first rule that matches wins:
+
+1. **`worker:` in T##-PLAN frontmatter** (only when `unit_type == execute-task`). Whitelist `claude | codex`; any other value → ignore this rule (fall through). Match → `ENGINE = <val>`, `ENGINE_REASON = "frontmatter-worker:<val>"`. Mirrors the `tier:` frontmatter override.
+2. **Pref `workers.<unit_type>`** (3-file cascade — see reader below). Whitelist `claude | codex`, default-safe `claude`. Match → `ENGINE = <val>`, `ENGINE_REASON = "workers.<unit_type>:<val>"`.
+3. **Default** → `ENGINE = "claude"`, `ENGINE_REASON = "default:claude"`.
+
+```bash
+# Step 4.0a — extract frontmatter worker override (execute-task only; empty otherwise)
+PLAN_WORKER=""
+if [ "$UNIT_TYPE" = "execute-task" ]; then
+  PLAN_WORKER=$(node -e "
+    const fs=require('fs');
+    const text=fs.readFileSync('$PLAN_PATH','utf8');
+    const m=text.match(/^---[\s\S]*?---/);
+    if(!m)process.exit(0);
+    let v=((m[0].match(/^worker:[ \t]*(\S+)/m)||[])[1]||'').trim().toLowerCase();
+    if(v!=='claude'&&v!=='codex')v='';   // whitelist; invalid → fall through
+    process.stdout.write(v);
+  ")
+fi
+
+# Step 4.0b — resolve ENGINE (precedence: frontmatter > pref > default)
+if [ -n "$PLAN_WORKER" ]; then
+  ENGINE="$PLAN_WORKER";        ENGINE_REASON="frontmatter-worker:$PLAN_WORKER"
+elif [ -n "$WORKERS_ENGINE" ] && [ "$WORKERS_ENGINE" != "claude" ]; then
+  ENGINE="$WORKERS_ENGINE";     ENGINE_REASON="workers.$UNIT_TYPE:$WORKERS_ENGINE"
+else
+  ENGINE="claude";              ENGINE_REASON="default:claude"
+fi
+```
+
+`$WORKERS_ENGINE`, `$WORKERS_TIMEOUT` and `$CODEX_MODEL` are derived by the reader below (the pref value for the *current* `unit_type`). `$PLAN_PATH` is the absolute path to the `T##-PLAN.md`; `$UNIT_TYPE` and `$CODE_DIR` come from the isolation/dispatch header.
+
+#### Prefs reader — regex-over-raw-prefs (never `prefs-resolved.json`)
+
+**`prefs-resolved.json` does NOT exist** (MEM001 M005): the aggregated-prefs read is broken and never written. The `workers:` reader MUST cascade the three raw prefs files directly, mirroring `readEvidenceMode` / `shared/forge-review.md § Step 0`. Regexes use `[ \t]` (never `\s`, which matches `\n` and leaks into the next line — MEM011) and never anchor with `\Z` (not a JS regex token — it matches a literal `Z`). Last file wins (user-global → repo shared → local personal).
+
+```bash
+WORKERS_CFG=$(WORKING_DIR="$WORKING_DIR" UNIT_TYPE="$UNIT_TYPE" node -e "
+const fs=require('fs'),path=require('path'),os=require('os');
+const wd=process.env.WORKING_DIR||process.cwd();
+const unit=process.env.UNIT_TYPE||'execute-task';
+const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),
+             path.join(wd,'.gsd','claude-agent-prefs.md'),
+             path.join(wd,'.gsd','prefs.local.md')];
+let engine=null,timeout=1800,codexModel=null;   // engine null → 'claude' resolved downstream
+for(const f of files){try{
+  const r=fs.readFileSync(f,'utf8');
+  const blk=(r.match(/^workers:[ \t]*\n((?:[ \t]+.*\n?)*)/m)||[])[1]||'';
+  let m;
+  // per-unit-type engine: workers.<unit_type>
+  const unitRe=new RegExp('^[ \\\\t]+'+unit.replace(/[-]/g,'\\\\-')+':[ \\\\t]*(\\\\w+)','m');
+  if(m=blk.match(unitRe)){const v=m[1].toLowerCase();if(v==='claude'||v==='codex')engine=v;}
+  if(m=blk.match(/^[ \t]+timeout:[ \t]*(\d+)/m))timeout=parseInt(m[1],10);
+  if(m=blk.match(/^[ \t]+codex_model:[ \t]*(\S+)/m))codexModel=m[1];
+}catch(e){}}
+if(engine!=='claude'&&engine!=='codex')engine='claude';   // default-safe
+if(!Number.isInteger(timeout)||timeout<=0)timeout=1800;
+process.stdout.write(JSON.stringify({engine,timeout,codexModel}));
+")
+
+WORKERS_ENGINE=$(printf '%s' "$WORKERS_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).engine||'claude')}catch(e){process.stdout.write('claude')}})")
+WORKERS_TIMEOUT=$(printf '%s' "$WORKERS_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(String(JSON.parse(d).timeout||1800))}catch(e){process.stdout.write('1800')}})")
+CODEX_MODEL=$(printf '%s' "$WORKERS_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).codexModel||'')}catch(e){process.stdout.write('')}})")
+```
+
+The reader is safe with **no scaffold present**: absent a `workers:` block, `WORKERS_ENGINE=claude`, `WORKERS_TIMEOUT=1800`, `CODEX_MODEL=""` (unset). The commented `workers:` scaffold in `forge-agent-prefs.md § Workers Settings` ships in **S05** — the S02 reader does not depend on it (no blocking cross-slice dependency; the requirement is merely assigned to the S05 owner to respect one-owner-per-file).
+
+#### Sidecar dispatch state machine (`ENGINE == codex && UNIT_TYPE == execute-task`)
+
+When `ENGINE` resolves to `codex` **and** the unit is `execute-task`, the orchestrator drives the detached adapter instead of `Agent("forge-executor")`. States: `started → polling → done | failed`.
+
+**1. Capture `START_SHA` (orchestrator, authoritative) and persist the sidecar state to disk.** BEFORE anything else:
+
+```bash
+START_SHA=$(git -C "$CODE_DIR" rev-parse HEAD)
+XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-{unitId}.json"
+mkdir -p "$WORKING_DIR/.gsd/forge/"
+printf '{"start_sha":"%s","reason":"","result_file":"","code_dir":"%s"}\n' \
+  "$START_SHA" "$CODE_DIR" > "$XLLM_STATE"
+```
+
+This is the orchestrator's own capture — the **source of truth for the fallback reset**, independent of whatever the adapter reports in its JSON (`start_sha`). The adapter has its own guard (S01), but the reset below trusts only `$START_SHA`.
+
+**Branch C spans multiple Bash tool invocations** (the poll loop below is a sequence of separate Bash calls, and may cross an auto-compact) — shell variables do NOT survive between them. The state file `.gsd/forge/xllm-state-{unitId}.json` (under `WORKING_DIR/.gsd`, never `CODE_DIR`) is the durable carrier of `{start_sha, reason, result_file, code_dir}`, mirroring the `auto-mode-started.txt` pattern. **The success block AND the fallback block re-read this file from disk** rather than trusting in-memory shell vars. It is rewritten at result-file allocation (step 3) and whenever `reason` is set on a failure trigger.
+
+**2. Clean-tree guard.** If the working tree is dirty, **do NOT dispatch the sidecar** — never discard someone else's uncommitted work:
+
+```bash
+if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+  # → fallback to Claude with reason: dirty-tree-guard (see Fallback below). No reset here
+  #   (nothing codex-authored to undo — a reset would wipe the pre-existing dirty work).
+  ...
+fi
+```
+
+`dirty-tree-guard` is the one fallback trigger that **must NOT run the reset** — the dirty state predates the (never-dispatched) sidecar. All other triggers reset to `$START_SHA`.
+
+**3. Allocate the result-file OUTSIDE `CODE_DIR`.** The S01 contract forbids the result-file inside the workspace (codex could overwrite it):
+
+```bash
+RESULT_FILE=$(mktemp -t forge-xllm-result.XXXXXX.json)   # tmpdir, never under $CODE_DIR
+# Persist result_file into the durable state (survives the poll loop / auto-compact).
+printf '{"start_sha":"%s","reason":"","result_file":"%s","code_dir":"%s"}\n' \
+  "$START_SHA" "$RESULT_FILE" "$CODE_DIR" > "$XLLM_STATE"
+```
+
+**4. Dispatch detached via `run_in_background`.** The Bash tool's 600s foreground ceiling does not apply to `run_in_background: true` (MEM: sidecar dispatch via background + poll). `--model` is appended **only when `$CODEX_MODEL` is non-empty** (null → CLI default, mirroring the challenger-model pattern):
+
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "$HOME/.claude/scripts")
+node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
+  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
+  --timeout "$WORKERS_TIMEOUT" \
+  $([ -n "$CODEX_MODEL" ] && printf -- '--model %s' "$CODEX_MODEL")
+# ↑ dispatched with the Bash tool's run_in_background: true
+```
+
+**5. Poll the result-file (`polling` state).** Read `$RESULT_FILE` periodically (e.g. every ~5–10s — the S01 UAT showed tasks finishing in ~50s, far under the 1800s default, and the heartbeat appears in <3s, so no long grace period is needed). The adapter re-writes the file with a heartbeat `{status, pid, adapter_pid, started_at, updated_at}` while running:
+
+- `status == "running"` → keep polling; check liveness (next bullet).
+- `status == "done"` → **success** (state `done`). Go to step 6.
+- `status == "error"` / adapter exit `!= 0` / unparseable JSON → **failure** (state `failed`). Go to Fallback with the matching `reason`.
+
+**Orphan detection.** The heartbeat's `updated_at` is the liveness signal. If `updated_at` is older than a threshold of ~2–3× the heartbeat interval (the S01 heartbeat cadence is 3s → stale beyond ~9s while the process should still be alive), treat the sidecar as an **orphan**: `kill "$pid"` (from the heartbeat) and go to Fallback with `reason: codex-orphan`. The adapter's own `--timeout` (process-group SIGKILL) is the backstop for the case where the orchestrator itself stalls.
+
+**6. Success — orchestrator assembles the artifacts (`done` state).** First re-read the durable state from disk (the poll loop crossed multiple Bash invocations — shell vars are gone):
+
+```bash
+START_SHA=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).start_sha" 2>/dev/null)
+CODE_DIR=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).code_dir" 2>/dev/null)
+RESULT_FILE=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).result_file" 2>/dev/null)
+```
+
+On `status: done` with exit 0, the orchestrator reads the JSON and **builds** both `T##-SUMMARY.md` and the `---GSD-WORKER-RESULT---` block itself. **Codex NEVER touches `.gsd/**` and NEVER commits** (locked) — `git log` is unchanged and no `.gsd/**` path appears in `git -C "$CODE_DIR" diff --name-status $START_SHA`. JSON fields consumed:
+
+| JSON field | Use |
+|------------|-----|
+| `status` | `done` → success; anything else → failure |
+| `summary` | one-liner + narrative seed for `T##-SUMMARY.md` |
+| `must_haves_status` | carried into the returned `---GSD-WORKER-RESULT---` (`must_haves_status`) |
+| `files_changed_declared` | **primary source of the file-audit** — file-granular (codex self-report) |
+| `files_changed` | structural cross-check — git-derived, **directory-granular** for new dirs (S01 Forward Intel), so NOT reliable as the file-audit primary |
+| `start_sha` / `head_sha` | audit trail; the orchestrator's own `$START_SHA` is authoritative for the reset |
+
+After assembling the SUMMARY + result block, control **rejoins the normal Process-result path** exactly as if a Claude `forge-executor` had returned — downstream verification (must_haves, verifier, file-audit, review dialético) runs **byte-identical** on codex-authored code. Nothing downstream changes.
+
+**7. Synthesized evidence (advisory).** Because the PostToolUse hook only logs the orchestrator's own tool calls — not the detached codex process — append synthesized evidence lines to `.gsd/forge/evidence-{unitId}.jsonl` derived read-only from `git -C "$CODE_DIR" diff --name-status $START_SHA`, tagged `source: codex-sidecar`. This is a **documented gap**, advisory only — it never blocks.
+
+#### Sidecar dispatch state machine — Branch D (`ENGINE == codex && UNIT_TYPE == plan-slice`)
+
+When `ENGINE` resolves to `codex` **and** the unit is `plan-slice`, the orchestrator drives the adapter in **`--mode plan`** instead of `Agent("forge-planner")`. Branch D is the **read-only twin** of Branch C: codex only *reads* the codebase + planning context to reason and returns the full markdown content of the slice plan and each task plan in the result JSON. It never writes — **only the orchestrator writes `.gsd/**`** (invariant preserved), materializing the returned content after a successful run. Because nothing is codex-authored on disk, Branch D has **no dirty-tree guard, no `START_SHA` capture, no reset, no no-commit check** (contrast Branch C, which needs all four). States: `started → polling → done | failed`.
+
+**1. Assemble the plan-context file (orchestrator).** Before dispatch, the orchestrator concatenates into a **temp file OUTSIDE `.gsd/` and `CODE_DIR`** (via `mktemp`) the exact artifacts the Claude `forge-planner` would receive for this slice — so codex plans from the same information:
+
+- the slice's ROADMAP entry from `.gsd/milestones/{M###}/{M###}-ROADMAP.md`
+- `M###-CONTEXT.md` (milestone decisions) — full
+- `S##-CONTEXT.md` (slice decisions) — **if it exists**
+- the `T##-SUMMARY.md` (or `S##-SUMMARY.md`) of each dependency slice — the "prior context"
+- `.gsd/CODING-STANDARDS.md` (Asset Map + Pattern Catalog)
+- `S##-RISK.md` — **if it exists** (risk-radar output)
+
+```bash
+CTX_FILE=$(mktemp -t forge-plan-context.XXXXXX.md)   # tmpdir, never under $CODE_DIR or .gsd
+# → orchestrator appends the artifacts above (Read + concatenate). Absent optional files are skipped.
+```
+
+**2. Persist the durable state to disk.** Branch D spans multiple Bash tool invocations (poll loop, possible auto-compact) — shell vars do not survive. The state file `.gsd/forge/xllm-state-{unitId}.json` (under `WORKING_DIR/.gsd`, never `CODE_DIR`) carries `{reason, result_file, code_dir, ctx_file}` — **no `start_sha`** (read-only; nothing to reset):
+
+```bash
+XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-{unitId}.json"
+mkdir -p "$WORKING_DIR/.gsd/forge/"
+RESULT_FILE=$(mktemp -t forge-xllm-result.XXXXXX.json)   # tmpdir, never under $CODE_DIR
+printf '{"reason":"","result_file":"%s","code_dir":"%s","ctx_file":"%s"}\n' \
+  "$RESULT_FILE" "$CODE_DIR" "$CTX_FILE" > "$XLLM_STATE"
+```
+
+**3. Dispatch detached via `run_in_background`.** Same background+poll pattern as Branch C (the Bash 600s foreground ceiling does not apply to `run_in_background: true`), but `--mode plan` and passing `--plan-context` instead of `--plan`. `--model` is appended **only when `$CODEX_MODEL` is non-empty**:
+
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "$HOME/.claude/scripts")
+node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode plan \
+  --plan-context "$CTX_FILE" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
+  --timeout "$WORKERS_TIMEOUT" \
+  $([ -n "$CODEX_MODEL" ] && printf -- '--model %s' "$CODEX_MODEL")
+# ↑ dispatched with the Bash tool's run_in_background: true
+```
+
+**4. Poll the result-file (`polling` state).** Identical to Branch C step 5: read `$RESULT_FILE` every ~5–10s, honor the heartbeat `{status, pid, adapter_pid, started_at, updated_at}`, apply the same orphan detection (`updated_at` stale beyond ~2–3× the heartbeat interval → `kill "$pid"` → Fallback `reason: codex-orphan`). `status == "done"` → step 5; `status == "error"` / exit `!= 0` / unparseable JSON → Fallback with the matching `reason`.
+
+**5. Success — orchestrator materializes the plans (`done` state).** Re-read the durable state from disk (shell vars are gone), then read the result JSON and **write** each plan file into `.gsd/**` (creating dirs). The adapter already validated every task plan's `must_haves` **in-sidecar** (S01/T01 — throw → exit 2 before `status: done`), so a `status: done` result carries only schema-valid plans; the orchestrator trusts the exit but the downstream symbol-check/plan-check gates still run as a second advisory layer.
+
+```bash
+RESULT_FILE=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).result_file" 2>/dev/null)
+# Materialize (orchestrator ONLY — codex never touched .gsd):
+#   slice_plan.content        → .gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN.md
+#   task_plans[i].content     → .gsd/milestones/{M###}/slices/{S##}/tasks/{id}/{id}-PLAN.md
+# mkdir -p each tasks/{id}/ dir before writing.
+```
+
+**Path-traversal guard (untrusted codex output).** `task_plans[].id` and `.filename` are UNTRUSTED — codex is an external, potentially-compromised model. `validatePlanResult` in `forge-xllm.js` is the gate: it rejects (exit 2 → Fallback) any task plan whose `id` isn't `^T\d+$` or whose `filename` isn't a plain `.md` basename (`^[A-Za-z0-9._-]+\.md$` — no `/`, `\`, or `..`). Defense in depth: **re-derive the task plan path from the validated `id` alone** — `.gsd/milestones/{M###}/slices/{S##}/tasks/{id}/{id}-PLAN.md`. Treat `filename` only as an optional equality-check against `{id}-PLAN.md`; **never concatenate the raw `filename` into a filesystem path.**
+
+After materializing, the orchestrator emits the `dispatch` event (`engine:"codex"`, unit `plan-slice/{S##}`) and control **rejoins the normal `plan-slice` completion path** exactly as if a Claude `forge-planner` had just written the files: the **plan-check gate**, the **symbol-check gate** and the interactive **plan_gate** all run over the materialized files, agnostic of origin (locked — **nothing in those gates changes**). No `T##-SUMMARY`/`---GSD-WORKER-RESULT---` is synthesized here — plan-slice produces plan files, not a task result.
+
+#### Fallback — `worker-engine-fallback`
+
+Clone of `review-challenger-fallback` (`shared/forge-review.md`). **One event type, triggers discriminated by `reason`.** On any trigger the work reverts to a single Claude dispatch — **no retry of the codex work, no 4th recovery layer**. The fallback target depends on the unit: `execute-task` → `forge-executor` (Branch C), `plan-slice` → `forge-planner` (Branch D).
+
+Triggers (`reason` value):
+
+| `reason` | Cause | Applies to |
+|----------|-------|------------|
+| `dirty-tree-guard` | `git status --porcelain` non-empty pre-dispatch — sidecar never launched | execute-task only (plan is read-only — no working-tree precondition) |
+| `codex-exit-nonzero` | adapter exit `!= 0` (binary absent, auth, quota — cause on stderr; **plan: also `must_haves` invalid in-sidecar → exit 2**) | both |
+| `codex-timeout` | adapter hit its `--timeout` backstop | both |
+| `codex-invalid-json` | result-file present but unparseable / schema-invalid | both |
+| `codex-orphan` | heartbeat `updated_at` stale beyond threshold → killed | both |
+
+**Branch D (plan-slice) fallback is read-only — no reset.** Codex wrote nothing on disk (plan mode reasons and returns markdown in the result JSON), so there is **nothing codex-authored to undo**: the fallback simply **discards the result JSON** and dispatches a single Claude `forge-planner` for the same slice. The `git checkout … + clean` reset in the action sequence below **does not run for plan-slice** — same exemption as `dirty-tree-guard`, but for the whole branch. The fallback re-enters Tier/Effort Resolution as a normal `plan-slice` dispatch (a `risk:high` slice escalates `heavy → max`/Fable exactly as today).
+
+**Action sequence:**
+
+1. **Reset to `$START_SHA`** (scoped to `CODE_DIR`) — **except for `dirty-tree-guard` and for all `plan-slice` (Branch D) fallbacks**, which skip the reset (dirty work predates the sidecar / plan mode wrote nothing — a reset would destroy pre-existing work or is a no-op). Re-read `$START_SHA`/`$CODE_DIR` from the durable state first (this block may be a later Bash invocation — shell vars are gone; note Branch D's state has no `start_sha`, so this step is skipped entirely for plan-slice):
+   ```bash
+   START_SHA=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).start_sha" 2>/dev/null)
+   CODE_DIR=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).code_dir" 2>/dev/null)
+   git -C "$CODE_DIR" checkout "$START_SHA" -- . ':(exclude).gsd' && git -C "$CODE_DIR" clean -fd -e .gsd
+   # → git diff --name-only $START_SHA is now empty in CODE_DIR (except .gsd/**). The reset is
+   #   protected by the dirty-tree-guard + the .gsd exclusion scope (NOT by gitignore — user
+   #   projects may commit .gsd), so it never reverts the orchestrator's own .gsd writes
+   #   (events.jsonl / evidence) made during the poll.
+   ```
+2. **Echo** the degradation (Portuguese UX): `⚠ worker: codex indisponível (<reason>) — usando forge-executor`.
+3. **Append** the event (additive fields; `<ISO>` from bash, never from inside a script). The `unit` reflects the dispatched unit — `execute-task/{T##}` on Branch C, `plan-slice/{S##}` on Branch D:
+   ```json
+   {"ts":"<ISO>","event":"worker-engine-fallback","milestone":"{M###}","slice":"{S##}","unit":"execute-task/{T##}","reason":"<reason>"}
+   ```
+   ```bash
+   # execute-task (Branch C):
+   printf '{"ts":"%s","event":"worker-engine-fallback","milestone":"%s","slice":"%s","unit":"execute-task/%s","reason":"%s"}\n' \
+     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{M###}" "{S##}" "{T##}" "$REASON" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+   # plan-slice (Branch D):
+   printf '{"ts":"%s","event":"worker-engine-fallback","milestone":"%s","slice":"%s","unit":"plan-slice/%s","reason":"%s"}\n' \
+     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{M###}" "{S##}" "{S##}" "$REASON" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+   ```
+4. **Dispatch a single Claude worker** for the same unit — `forge-executor` on Branch C, `forge-planner` on Branch D. This Claude dispatch **now runs the Tier Resolution and Effort Resolution** that were skipped on the codex path (they only ever run on the Claude branch). No re-resolution of engine — the fallback is unconditionally Claude.
+
+> **Not a 4th recovery layer.** `worker-engine-fallback` is part of the dispatch (Step 4), NOT an extension of the Failure Taxonomy nor the Retry Handler — those layers are mutually exclusive (MEM). It fires once, in-band, at dispatch time; the Retry Handler and blocker taxonomy operate on the *result* of whichever engine ultimately ran.
+
+#### Event log extension — additive `engine` field on `dispatch`
+
+The `dispatch` event schema (Token Telemetry + Tier Resolution) is extended **additively** with one field: `engine ∈ {claude, codex}`. No existing field is renamed or removed. S03 readers that parse by known field names and ignore unknowns continue to work; events lacking `engine` are valid (treat as `undefined`, not error).
+
+```json
+{"ts":"2026-07-14T10:00:05Z","event":"dispatch","unit":"execute-task/T04","model":"gpt-5-codex","input_tokens":2100,"output_tokens":0,"tier":"heavy","reason":"unit-type:execute-task","engine":"codex"}
+```
+
+On the codex path `model` carries the codex model id (or the CLI default label when `$CODEX_MODEL` is unset) and `output_tokens` may be `0` (the adapter's token channel is git-derived, not SDK usage). On the claude path the field is `"engine":"claude"` and all other fields are exactly as Tier/Effort Resolution produce them.
+
+#### Result schema — `--mode plan` (Branch D)
+
+The JSON the adapter writes to `$RESULT_FILE` on a `--mode plan` run, consumed by Branch D step 5. The adapter validated every `task_plans[].content` against `forge-must-haves.js` **in-sidecar** before writing `status: done` (S01/T01), so on `status: done` every plan is schema-valid; a `must_haves`-invalid plan yields `status: error` + exit 2 → Fallback.
+
+| Field | Use |
+|-------|-----|
+| `status` | `done` → materialize; anything else (`error`) → Fallback (`codex-exit-nonzero` / `codex-invalid-json`) |
+| `summary` | one-liner seed for the STATE/log line |
+| `slice_plan.filename` | target basename (e.g. `S##-PLAN.md`) under `.gsd/milestones/{M###}/slices/{S##}/` |
+| `slice_plan.content` | full markdown → written to `{S##}-PLAN.md` (orchestrator) |
+| `task_plans[].id` | task id (e.g. `T01`) → `tasks/{id}/` dir |
+| `task_plans[].filename` | target basename (e.g. `T01-PLAN.md`) |
+| `task_plans[].content` | full markdown → written to `tasks/{id}/{filename}`; **already passed `forge-must-haves.js` in-sidecar** |
+
+Materialization is **orchestrator-only** — codex never touches `.gsd/**`. After writing, the plan-check / symbol-check / plan_gate gates run over the materialized files unchanged (second advisory layer over the in-sidecar validation).
+
+> **Cross-reference — executable mirrors (T03):** `skills/forge-auto/SKILL.md` and `skills/forge-next/SKILL.md` carry the executable mirror of Branch D in their dispatch step. `skills/forge-task/SKILL.md` does **not** — a `/forge-task` unit is a standalone task (execute-task path), never a `plan-slice`, so Branch D never applies there.
+
+#### Prefs contract — `workers:`
+
+| Key | Type | Default (when absent) | Description |
+|-----|------|-----------------------|-------------|
+| `workers.execute-task` | enum `claude \| codex` | `claude` | Engine for `execute-task` dispatch. `codex` routes to the sidecar; invalid → `claude` |
+| `workers.plan-slice` | enum `claude \| codex` | `claude` | Engine for `plan-slice` dispatch. `codex` routes to the sidecar `--mode plan` (read-only, Branch D); invalid → `claude` |
+| `workers.timeout` | int (seconds) | `1800` | Forwarded to the adapter as `--timeout`; non-positive/invalid → `1800` |
+| `workers.codex_model` | string (model id) | unset (`null`) | Forwarded as `--model` only when set; unset → Codex CLI default |
+
+`plan-milestone` is intentionally **absent** from this table — it is never routed through `workers:` (locked; stays tier `max`/Fable). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.md § Workers Settings` (S05); the reader operates with the safe defaults above without it.
+
+---
+
 ### Tier Resolution
 
 **Purpose:** Control-flow section that runs before every `Agent()` call. It translates `unit_type + frontmatter hints + prefs` into a concrete `{tier, model, reason}` triple that the dispatch loop passes to `Agent()`. Like the Retry Handler and Token Telemetry, this is control flow — not data flow — and lives outside the fenced template blocks (MEM011). No new Node script is introduced: tier classification is pure Markdown rules + a `node -e` one-liner for frontmatter extraction (M002-CONTEXT D7, Hybrid C approach). This section fulfils the S04 extension note in Token Telemetry above: the `dispatch` event schema is extended additively with `tier` and `reason` fields.

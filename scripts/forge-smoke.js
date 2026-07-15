@@ -1450,12 +1450,17 @@ function writeMockCodex(dir, opts) {
     '#!/bin/sh',
     '# forge-smoke mock codex — writes payload to the -o file, honors exit code / sleep',
     'OUT=""',
+    'CODEXCWD=""',
     'prev=""',
     'for arg in "$@"; do',
     '  if [ "$prev" = "-o" ]; then OUT="$arg"; fi',
+    '  if [ "$prev" = "-C" ]; then CODEXCWD="$arg"; fi',
     '  prev="$arg"',
     'done',
     opts.sleepSecs ? `sleep ${opts.sleepSecs}` : '',
+    // extraScript runs BEFORE the -o write — same default byte-shape for
+    // Section 20–23 callers that never pass it (opts.extraScript undefined).
+    opts.extraScript || '',
     opts.writeOutput === false
       ? ''
       : `if [ -n "$OUT" ]; then printf '%s' ${shQuote(opts.payload || '')} > "$OUT"; fi`,
@@ -1471,6 +1476,16 @@ function writeMockCodex(dir, opts) {
 function shQuote(s) {
   // single-quote for POSIX sh, escaping embedded single quotes
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+// Section 24 helper — plain git repo fixture (init + initial commit so the
+// working tree starts clean). Reusable by S02/S04.
+function mkGitRepo(dir) {
+  const run = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  run(['init', '-q']);
+  run(['add', '-A']);
+  run(['-c', 'user.email=smoke@forge', '-c', 'user.name=smoke', 'commit', '-q', '--allow-empty', '-m', 'init']);
+  return dir;
 }
 
 function runXllm(args, mockDir, cwd) {
@@ -1911,7 +1926,720 @@ process.stdout.write(JSON.stringify({challengerModel,advocateModel}));
   }
 }
 
-function main() {
+// ── Section 24: forge-xllm execute mode (mock codex on PATH) ────────────────
+// Live-spawns the T01 adapter in --mode execute against a mock `codex` that can
+// write real files, spawn orphans, commit, or hang — regression guard for the
+// S01-RISK contract: heartbeat, process-group timeout kill, no-commit, dirty
+// guard, result-file-outside-workspace guard, .gsd/ advisory warning.
+async function smokeXllmExecute() {
+  process.stdout.write('\n▸ Section 24: forge-xllm execute mode (mock codex on PATH)\n');
+
+  const validPayload = JSON.stringify({
+    status: 'done',
+    summary: 'did the task',
+    must_haves_status: [{ item: 'truth 1', status: 'met', note: 'ok' }],
+    files_changed: ['task-file.txt'],
+  });
+
+  function runExecuteXllm(args, mockDir, cwd, opts) {
+    const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
+    const env = mockDir
+      ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
+      : { ...process.env, PATH: '' };
+    const r = spawnSync(process.execPath, [xllmPath, '--mode', 'execute', ...args], {
+      encoding: 'utf8',
+      cwd: cwd || process.cwd(),
+      env,
+      ...(opts || {}),
+    });
+    return { stdout: r.stdout || '', stderr: r.stderr || '', status: r.status };
+  }
+
+  // Scenario A — happy path: real file write in the repo, no-commit, exit 0.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-a'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-a-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-a-mock-'));
+    writeMockCodex(mockDir, {
+      payload: validPayload,
+      exitCode: 0,
+      extraScript: `printf 'x' > "$CODEXCWD/task-file.txt"`,
+    });
+    const beforeLog = spawnSync('git', ['log', '--oneline'], { cwd: repo, encoding: 'utf8' }).stdout;
+    const beforeHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+    const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status === 0, 'A: happy execute exits 0', `status=${r.status} stderr=${r.stderr}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'done', 'A: result-file has status done', JSON.stringify(parsed));
+    assert(!!parsed && Array.isArray(parsed.files_changed)
+      && parsed.files_changed.some((f) => f.path === 'task-file.txt' && f.status === 'A'),
+      'A: files_changed derived includes real write (status A)', JSON.stringify(parsed && parsed.files_changed));
+    assert(!!parsed && parsed.start_sha === beforeHead, 'A: start_sha matches pre-run HEAD', `start_sha=${parsed && parsed.start_sha} beforeHead=${beforeHead}`);
+    const afterHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+    assert(afterHead === beforeHead, 'A: HEAD unchanged (no-commit)', `before=${beforeHead} after=${afterHead}`);
+    const afterLog = spawnSync('git', ['log', '--oneline'], { cwd: repo, encoding: 'utf8' }).stdout;
+    assert(afterLog === beforeLog, 'A: git log unchanged (no-commit)', `before=${JSON.stringify(beforeLog)} after=${JSON.stringify(afterLog)}`);
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario B — dirty guard: sujar o repo antes de rodar; mock never invoked.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-b'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    fs.writeFileSync(path.join(repo, 'dirty.txt'), 'uncommitted\n', 'utf8'); // dirties the tree
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-b-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-b-marker-'));
+    const marker = path.join(markerDir, 'invoked.marker');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-b-mock-'));
+    writeMockCodex(mockDir, { payload: validPayload, exitCode: 0, extraScript: `: > "$MARKER"` });
+    const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo,
+      { env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, MARKER: marker } });
+    assert(r.status !== 0, 'B: dirty tree makes adapter exit non-zero', `status=${r.status}`);
+    assert(/dirty/i.test(r.stderr), 'B: dirty guard message mentions dirty', `stderr=${r.stderr}`);
+    assert(!fs.existsSync(marker), 'B: mock codex never invoked (marker absent)', `marker=${marker}`);
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(markerDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario C — timeout with an orphaned background child: adapter still
+  // returns in bounded time (codex#7852 mitigation — group SIGKILL).
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-c'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-c-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-c-mock-'));
+    writeMockCodex(mockDir, {
+      payload: validPayload,
+      exitCode: 0,
+      extraScript: 'sleep 60 &\nsleep 30',
+    });
+    const t0 = Date.now();
+    const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo, '--timeout', '1'], mockDir, repo);
+    const elapsed = Date.now() - t0;
+    assert(r.status !== 0, 'C: timeout with orphan makes adapter exit non-zero', `status=${r.status}`);
+    assert(elapsed < 10000, 'C: timeout kill is bounded (< 10s wall time)', `elapsed=${elapsed}ms`);
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario D — malformed JSON payload → adapter-failed best-effort result-file.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-d'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-d-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-d-mock-'));
+    writeMockCodex(mockDir, { payload: 'not { json', exitCode: 0 });
+    const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status !== 0, 'D: malformed JSON makes adapter exit non-zero', `status=${r.status}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'adapter-failed', 'D: result-file best-effort adapter-failed', JSON.stringify(parsed));
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario E — no-commit violated: mock commits inside CODEXCWD → invariant error.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-e'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-e-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-e-mock-'));
+    writeMockCodex(mockDir, {
+      payload: validPayload,
+      exitCode: 0,
+      extraScript: `git -C "$CODEXCWD" -c user.email=m@m -c user.name=m commit -q --allow-empty -m sneaky`,
+    });
+    const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status !== 0, 'E: sneaky commit makes adapter exit non-zero', `status=${r.status}`);
+    assert(/commit|HEAD/i.test(r.stderr), 'E: stderr mentions commit/HEAD invariant', `stderr=${r.stderr}`);
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario F — result-file inside the repo → refused before codex is invoked.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-f'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    const resultFile = path.join(repo, 'result.json'); // INSIDE cwd — must be refused
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-f-marker-'));
+    const marker = path.join(markerDir, 'invoked.marker');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-f-mock-'));
+    writeMockCodex(mockDir, { payload: validPayload, exitCode: 0, extraScript: `: > "$MARKER"` });
+    const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo,
+      { env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, MARKER: marker } });
+    assert(r.status !== 0, 'F: result-file inside workspace makes adapter exit non-zero', `status=${r.status}`);
+    assert(!fs.existsSync(marker), 'F: mock codex never invoked (marker absent)', `marker=${marker}`);
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(markerDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario G — heartbeat mid-run: async spawn + poll result-file for status
+  // 'running' + numeric pid before the final JSON lands.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-g'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-g-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-g-mock-'));
+    writeMockCodex(mockDir, { payload: validPayload, exitCode: 0, sleepSecs: 3 });
+
+    const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
+    const env = { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH };
+    const { spawn } = require('child_process');
+    const child = spawn(process.execPath, [
+      xllmPath, '--mode', 'execute', '--plan', planFile, '--result-file', resultFile, '--cwd', repo,
+    ], { cwd: repo, env });
+
+    let sawRunningHeartbeat = false;
+    const pollStart = Date.now();
+    while (Date.now() - pollStart < 15000) {
+      if (fs.existsSync(resultFile)) {
+        try {
+          const j = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+          if (j && j.status === 'running' && typeof j.pid === 'number') {
+            sawRunningHeartbeat = true;
+            break;
+          }
+        } catch (e) { /* file mid-write — retry */ }
+      }
+      // Busy-poll with a tiny synchronous sleep (Atomics.wait keeps this smoke test
+      // dependency-free — no extra package for an async sleep).
+      const sab = new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(sab, 0, 0, 200);
+    }
+    assert(sawRunningHeartbeat, 'G: heartbeat observed with status running + numeric pid', `resultFile=${fs.existsSync(resultFile) ? fs.readFileSync(resultFile, 'utf8') : '(missing)'}`);
+
+    // Wait for the real 'exit' event via a Promise + setTimeout bound — NOT the
+    // Atomics.wait busy-poll used above: Atomics.wait blocks the JS thread
+    // synchronously (no libuv turns), so the child's 'exit' event (delivered via
+    // SIGCHLD -> libuv) would never be processed while busy-polling. Awaiting
+    // lets the event loop run and actually deliver it.
+    const exitResult = await new Promise((resolve) => {
+      let done = false;
+      const finish = (code) => { if (!done) { done = true; resolve(code); } };
+      child.on('exit', (code) => finish(code));
+      setTimeout(() => finish(null), 15000).unref?.();
+    });
+    assert(exitResult !== null, 'G: adapter process exits within bound', `exitResult=${exitResult}`);
+    assert(exitResult === 0, 'G: adapter exits 0 on final settle', `exitResult=${exitResult}`);
+    let finalParsed = null;
+    try { finalParsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!finalParsed && finalParsed.status === 'done', 'G: final result-file has status done', JSON.stringify(finalParsed));
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario H — .gsd/ warning: advisory only, run still succeeds.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-exec-h'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-h-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-h-mock-'));
+    writeMockCodex(mockDir, {
+      payload: validPayload,
+      exitCode: 0,
+      extraScript: `mkdir -p "$CODEXCWD/.gsd" && printf 'x' > "$CODEXCWD/.gsd/x.md"`,
+    });
+    const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status === 0, 'H: .gsd/ touch is advisory only — exit 0', `status=${r.status} stderr=${r.stderr}`);
+    assert(/\.gsd/.test(r.stderr) && /warn/i.test(r.stderr), 'H: stderr contains .gsd warning', `stderr=${r.stderr}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'done', 'H: run still completes normally (status done)', JSON.stringify(parsed));
+    cleanup(repo);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+}
+
+// ── Section 25: engine dispatch (reset + fallback + dirty guard) ────────────
+// Validates the SCRIPTABLE pieces of the T01/S02 "worker-engine-fallback"
+// contract in isolation: (A) happy path — result JSON carries the fields the
+// orchestrator reads to assemble the SUMMARY, no commit is made; (B) failure
+// post-write — the canonical reset (`git checkout START_SHA -- . && git clean
+// -fd`) empties the diff and a worker-engine-fallback event line is appended;
+// (C) the dirty-tree guard refuses before codex ever runs. The full
+// orchestration (decision to reset, dispatch of the Claude fallback) is
+// markdown-only (T02/T03) — this smoke proves the pieces that ARE scriptable.
+function smokeEngineDispatch() {
+  process.stdout.write('\n▸ Section 25: engine dispatch (reset + fallback + dirty guard)\n');
+
+  const validPayload = JSON.stringify({
+    status: 'done',
+    summary: 'did the task',
+    must_haves_status: [{ item: 'truth 1', status: 'met', note: 'ok' }],
+    files_changed: ['task-file.txt'],
+  });
+
+  // Scenario A — happy: mock codex writes a real file + valid result JSON.
+  // Orchestrator-readable fields present, no commit made.
+  {
+    const repo = mkGitRepo(mkTmp('engine-a'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-a-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T04\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-a-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-a-mock-'));
+    writeMockCodex(mockDir, {
+      payload: validPayload,
+      exitCode: 0,
+      extraScript: `printf 'x' > "$CODEXCWD/task-file.txt"`,
+    });
+    const startSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+    const beforeLog = spawnSync('git', ['log', '--oneline'], { cwd: repo, encoding: 'utf8' }).stdout;
+    const r = runXllm(['--mode', 'execute', '--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status === 0, 'A: happy execute exits 0', `status=${r.status} stderr=${r.stderr}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'done', 'A: result JSON has status', JSON.stringify(parsed));
+    assert(!!parsed && typeof parsed.summary === 'string' && parsed.summary.length > 0,
+      'A: result JSON has summary', JSON.stringify(parsed));
+    assert(!!parsed && Array.isArray(parsed.must_haves_status),
+      'A: result JSON has must_haves_status array', JSON.stringify(parsed));
+    assert(!!parsed && Array.isArray(parsed.files_changed)
+      && parsed.files_changed.some((f) => f.path === 'task-file.txt' && f.status === 'A'),
+      'A: result JSON has files_changed with real write', JSON.stringify(parsed && parsed.files_changed));
+    const afterLog = spawnSync('git', ['log', '--oneline'], { cwd: repo, encoding: 'utf8' }).stdout;
+    assert(afterLog === beforeLog, 'A: git log unchanged (no-commit)', `before=${JSON.stringify(beforeLog)} after=${JSON.stringify(afterLog)}`);
+    const diffNames = spawnSync('git', ['diff', '--name-status', startSha], { cwd: repo, encoding: 'utf8' }).stdout;
+    assert(!/\.gsd\//.test(diffNames), 'A: no .gsd/ path in diff against START_SHA', diffNames);
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario B — failure post-write: mock writes a real file then fails; the
+  // canonical reset (checkout START_SHA -- . && clean -fd) must fully restore
+  // the tree, and a worker-engine-fallback event line must be appended.
+  {
+    const repo = mkGitRepo(mkTmp('engine-b'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-b-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T04\ndo the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-b-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-b-mock-'));
+    writeMockCodex(mockDir, {
+      writeOutput: false,
+      exitCode: 1,
+      extraScript: `printf 'dirty' > "$CODEXCWD/leftover.txt"`,
+    });
+    const startSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+    const r = runXllm(['--mode', 'execute', '--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status !== 0, 'B: codex failure makes adapter exit non-zero', `status=${r.status}`);
+    // Confirm the tree was actually dirtied before applying the reset.
+    const dirtyStatus = spawnSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).stdout;
+    assert(dirtyStatus.trim().length > 0, 'B: tree is dirty pre-reset (mock wrote leftover.txt)', dirtyStatus);
+
+    // Canonical reset — shared/forge-dispatch.md § Fallback, Action sequence.
+    spawnSync('git', ['checkout', startSha, '--', '.'], { cwd: repo, encoding: 'utf8' });
+    spawnSync('git', ['clean', '-fd'], { cwd: repo, encoding: 'utf8' });
+
+    const diffAfterReset = spawnSync('git', ['diff', '--name-only', startSha], { cwd: repo, encoding: 'utf8' }).stdout;
+    assert(diffAfterReset.trim() === '', 'B: git diff --name-only START_SHA is empty after reset', diffAfterReset);
+    const statusAfterReset = spawnSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).stdout;
+    assert(statusAfterReset.trim() === '', 'B: git status --porcelain is empty after reset', statusAfterReset);
+
+    // worker-engine-fallback event — shared/forge-dispatch.md § Fallback.
+    const eventsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-b-events-'));
+    const eventsFile = path.join(eventsDir, 'events.jsonl');
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      event: 'worker-engine-fallback',
+      milestone: 'M005',
+      slice: 'S02',
+      unit: 'execute-task/T04',
+      reason: 'codex-exit-nonzero',
+    });
+    fs.appendFileSync(eventsFile, line + '\n', 'utf8');
+    const eventsRaw = fs.readFileSync(eventsFile, 'utf8').trim().split('\n');
+    let eventParsed = null;
+    try { eventParsed = JSON.parse(eventsRaw[eventsRaw.length - 1]); } catch (e) { /* leave null */ }
+    assert(!!eventParsed && eventParsed.event === 'worker-engine-fallback',
+      'B: events.jsonl has a worker-engine-fallback line', JSON.stringify(eventParsed));
+    assert(!!eventParsed && eventParsed.reason === 'codex-exit-nonzero',
+      'B: fallback event reason is codex-exit-nonzero', JSON.stringify(eventParsed));
+
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+    cleanup(eventsDir);
+  }
+
+  // Scenario C — dirty-tree guard: tree dirty BEFORE dispatch, adapter refuses
+  // (exit != 0) proving the orchestrator never resets/dispatches over
+  // uncommitted work.
+  {
+    const repo = mkGitRepo(mkTmp('engine-c'));
+    const planDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-c-plan-'));
+    const planFile = path.join(planDir, 'plan.md');
+    fs.writeFileSync(planFile, '# T04\ndo the thing\n', 'utf8');
+    fs.writeFileSync(path.join(repo, 'dirty.txt'), 'uncommitted\n', 'utf8'); // dirties tree pre-dispatch
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-c-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-c-marker-'));
+    const marker = path.join(markerDir, 'invoked.marker');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-c-mock-'));
+    writeMockCodex(mockDir, { payload: validPayload, exitCode: 0, extraScript: `: > "$MARKER"` });
+    const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
+    const r = spawnSync(process.execPath, [
+      xllmPath, '--mode', 'execute', '--plan', planFile, '--result-file', resultFile, '--cwd', repo,
+    ], {
+      encoding: 'utf8',
+      cwd: repo,
+      env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, MARKER: marker },
+    });
+    assert(r.status !== 0, 'C: dirty tree pre-dispatch makes adapter exit non-zero', `status=${r.status}`);
+    assert(!fs.existsSync(marker), 'C: mock codex never invoked (marker absent — dirty-tree-guard)', `marker=${marker}`);
+    cleanup(repo);
+    cleanup(planDir);
+    cleanup(resultDir);
+    cleanup(markerDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario D — prefs reader (R2): env vars must be passed PREFIX form so `node -e`
+  // receives them via process.env (postfix form after the closing quote becomes ignored
+  // argv). Round-trips the canonical reader over a temp prefs that sets ONLY
+  // workers.plan-slice — asserting it does NOT leak to workers.execute-task.
+  {
+    const wd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-d-wd-'));
+    fs.mkdirSync(path.join(wd, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(wd, '.gsd', 'claude-agent-prefs.md'),
+      'workers:\n  plan-slice: codex\n', 'utf8');
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-d-home-'));
+    const readerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-d-reader-'));
+    const readerFile = path.join(readerDir, 'reader.js');
+    // Canonical reader body (un-bash-escaped) — mirror of the WORKERS_CFG node -e in
+    // shared/forge-dispatch.md + the three SKILL.md mirrors.
+    fs.writeFileSync(readerFile, [
+      "const fs=require('fs'),path=require('path'),os=require('os');",
+      "const wd=process.env.WORKING_DIR||process.cwd();",
+      "const unit=process.env.UNIT_TYPE||'execute-task';",
+      "const files=[path.join(os.homedir(),'.claude','forge-agent-prefs.md'),",
+      "             path.join(wd,'.gsd','claude-agent-prefs.md'),",
+      "             path.join(wd,'.gsd','prefs.local.md')];",
+      "let engine=null,timeout=1800,codexModel=null;",
+      "for(const f of files){try{",
+      "  const r=fs.readFileSync(f,'utf8');",
+      "  const blk=(r.match(/^workers:[ \\t]*\\n((?:[ \\t]+.*\\n?)*)/m)||[])[1]||'';",
+      "  let m;",
+      "  const unitRe=new RegExp('^[ \\\\t]+'+unit.replace(/[-]/g,'\\\\-')+':[ \\\\t]*(\\\\w+)','m');",
+      "  if(m=blk.match(unitRe)){const v=m[1].toLowerCase();if(v==='claude'||v==='codex')engine=v;}",
+      "  if(m=blk.match(/^[ \\t]+timeout:[ \\t]*(\\d+)/m))timeout=parseInt(m[1],10);",
+      "  if(m=blk.match(/^[ \\t]+codex_model:[ \\t]*(\\S+)/m))codexModel=m[1];",
+      "}catch(e){}}",
+      "if(engine!=='claude'&&engine!=='codex')engine='claude';",
+      "if(!Number.isInteger(timeout)||timeout<=0)timeout=1800;",
+      "process.stdout.write(JSON.stringify({engine,timeout,codexModel}));",
+    ].join('\n'), 'utf8');
+    const runReader = (unitType) => {
+      const rr = spawnSync(process.execPath, [readerFile], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir, WORKING_DIR: wd, UNIT_TYPE: unitType },
+      });
+      try { return JSON.parse(rr.stdout); } catch (e) { return null; }
+    };
+    const execCfg = runReader('execute-task');
+    const planCfg = runReader('plan-slice');
+    assert(!!execCfg && execCfg.engine === 'claude',
+      'D: workers.plan-slice does NOT leak to execute-task (engine=claude)', JSON.stringify(execCfg));
+    assert(!!planCfg && planCfg.engine === 'codex',
+      'D: workers.plan-slice reads back for plan-slice (engine=codex, prefix-form env passed)', JSON.stringify(planCfg));
+    cleanup(wd);
+    cleanup(homeDir);
+    cleanup(readerDir);
+  }
+
+  // Scenario E — durable sidecar state (R1): the state file persisted at dispatch
+  // must round-trip start_sha/result_file/code_dir from disk (shell vars do not
+  // survive the poll loop across Bash invocations).
+  {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-engine-e-'));
+    const stateFile = path.join(stateDir, 'xllm-state-T04.json');
+    const startSha = 'abc123def456';
+    const codeDir = '/some/code/dir';
+    const resultFile = '/tmp/forge-xllm-result.XXXX.json';
+    fs.writeFileSync(stateFile,
+      JSON.stringify({ start_sha: startSha, reason: '', result_file: resultFile, code_dir: codeDir }) + '\n', 'utf8');
+    const readField = (field) => spawnSync(process.execPath,
+      ['-pe', `JSON.parse(require('fs').readFileSync('${stateFile}','utf8')).${field}`],
+      { encoding: 'utf8' }).stdout.trim();
+    assert(readField('start_sha') === startSha, 'E: start_sha round-trips from state file', readField('start_sha'));
+    assert(readField('code_dir') === codeDir, 'E: code_dir round-trips from state file', readField('code_dir'));
+    assert(readField('result_file') === resultFile, 'E: result_file round-trips from state file', readField('result_file'));
+    cleanup(stateDir);
+  }
+
+  // Scenario F — scoped reset (R4): the fallback reset must exclude .gsd/ so the
+  // orchestrator's own .gsd writes (events.jsonl / evidence) made during the poll
+  // survive even when .gsd is committed (user projects may commit it).
+  {
+    const repo = mkGitRepo(mkTmp('engine-f'));
+    const startSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+    // Simulate codex-authored source change + orchestrator's own .gsd writes during the poll.
+    fs.writeFileSync(path.join(repo, 'src.txt'), 'codex change\n', 'utf8');
+    fs.mkdirSync(path.join(repo, '.gsd', 'forge'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.gsd', 'forge', 'events.jsonl'), '{"event":"dispatch"}\n', 'utf8');
+    // Scoped reset — shared/forge-dispatch.md § Fallback (R4): exclude .gsd/.
+    spawnSync('git', ['checkout', startSha, '--', '.', ':(exclude).gsd'], { cwd: repo, encoding: 'utf8' });
+    spawnSync('git', ['clean', '-fd', '-e', '.gsd'], { cwd: repo, encoding: 'utf8' });
+    assert(!fs.existsSync(path.join(repo, 'src.txt')), 'F: codex source change reverted by scoped reset', 'src.txt still present');
+    assert(fs.existsSync(path.join(repo, '.gsd', 'forge', 'events.jsonl')),
+      'F: .gsd/ writes survive the scoped reset (events.jsonl preserved)', '.gsd events.jsonl was wiped');
+    cleanup(repo);
+  }
+}
+
+// ── Section 26: forge-xllm plan mode (mock codex on PATH) ───────────────────
+// Offline, live-spawn coverage of the T01 --mode plan adapter: (A) happy path
+// + materialization-ready shape, asserting read-only (no repo/.gsd writes) and
+// that the generated T##-PLAN content passes forge-must-haves.js standalone;
+// (B) malformed must_haves in a returned task_plan → exit 2 + adapter-failed
+// (the ENFORCING in-sidecar gate from runPlan); (C) codex absent from PATH →
+// exit 2 (spawn ENOENT), mirroring the execute-mode offline scenario.
+async function smokeXllmPlan() {
+  process.stdout.write('\n▸ Section 26: forge-xllm plan mode (mock codex on PATH)\n');
+
+  function runPlanXllm(args, mockDir, cwd) {
+    const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
+    const env = mockDir
+      ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
+      : { ...process.env, PATH: '' };
+    const r = spawnSync(process.execPath, [xllmPath, '--mode', 'plan', ...args], {
+      encoding: 'utf8',
+      cwd: cwd || process.cwd(),
+      env,
+    });
+    return { stdout: r.stdout || '', stderr: r.stderr || '', status: r.status };
+  }
+
+  // A valid T##-PLAN.md body — frontmatter carries a well-formed must_haves
+  // block (mirrors the schema this task's own T04-PLAN.md uses).
+  const validTaskPlanContent = [
+    '---',
+    'id: T01',
+    'slice: S99',
+    'milestone: M999',
+    'must_haves:',
+    '  truths:',
+    '    - "the thing works"',
+    '  artifacts:',
+    '    - path: "src/thing.js"',
+    '      provides: "the thing"',
+    '      min_lines: 5',
+    '  key_links:',
+    '    - from: "src/thing.js"',
+    '      to: "src/other.js"',
+    '      via: "import"',
+    'expected_output:',
+    '  - src/thing.js',
+    '---',
+    '',
+    '# T01: do the thing',
+    '',
+    '## Steps',
+    '1. Do the thing.',
+    '',
+  ].join('\n');
+
+  // Malformed variant — artifacts[0] is missing min_lines (required number field).
+  const invalidTaskPlanContent = [
+    '---',
+    'id: T01',
+    'slice: S99',
+    'milestone: M999',
+    'must_haves:',
+    '  truths:',
+    '    - "the thing works"',
+    '  artifacts:',
+    '    - path: "src/thing.js"',
+    '      provides: "the thing"',
+    '  key_links: []',
+    'expected_output:',
+    '  - src/thing.js',
+    '---',
+    '',
+    '# T01: do the thing (broken)',
+    '',
+  ].join('\n');
+
+  function planPayload(taskPlanContent) {
+    return JSON.stringify({
+      status: 'done',
+      summary: 'planned the slice',
+      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\ntasks: T01\n' },
+      task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: taskPlanContent }],
+    });
+  }
+
+  // Scenario A — happy path + materialization-ready shape, read-only.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-plan-a'));
+    const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-ctx-'));
+    const ctxFile = path.join(ctxDir, 'plan-context.md');
+    fs.writeFileSync(ctxFile, '# Slice context\nplan the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-a-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-a-mock-'));
+    writeMockCodex(mockDir, { payload: planPayload(validTaskPlanContent), exitCode: 0 });
+    const beforeStatus = spawnSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).stdout;
+    const r = runPlanXllm(['--plan-context', ctxFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status === 0, 'A: happy plan exits 0', `status=${r.status} stderr=${r.stderr}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'done', 'A: result-file has status done', JSON.stringify(parsed));
+    assert(!!parsed && !!parsed.slice_plan && typeof parsed.slice_plan.content === 'string' && parsed.slice_plan.content.length > 0,
+      'A: slice_plan.content is non-empty', JSON.stringify(parsed && parsed.slice_plan));
+    assert(!!parsed && Array.isArray(parsed.task_plans) && parsed.task_plans.length >= 1,
+      'A: task_plans has at least one entry', JSON.stringify(parsed && parsed.task_plans));
+    const afterStatus = spawnSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).stdout;
+    assert(afterStatus === beforeStatus && afterStatus.trim() === '', 'A: repo working tree stays clean (read-only)', `before=${JSON.stringify(beforeStatus)} after=${JSON.stringify(afterStatus)}`);
+    // mkTmp() pre-seeds .gsd/forge/ (committed by mkGitRepo's init commit), so
+    // .gsd/ existing is expected — the read-only invariant is that git status
+    // stays clean (asserted above), i.e. no NEW file lands under .gsd/ either.
+
+    // Assert the generated T##-PLAN content passes forge-must-haves.js standalone.
+    const tpContentFile = path.join(resultDir, 'T01-PLAN.md');
+    fs.writeFileSync(tpContentFile, parsed.task_plans[0].content, 'utf8');
+    const mh = spawnSync(process.execPath, [path.join(SCRIPTS, 'forge-must-haves.js'), '--check', tpContentFile], { encoding: 'utf8' });
+    assert(mh.status === 0, 'A: generated task_plans[0].content passes forge-must-haves.js --check', `status=${mh.status} stdout=${mh.stdout} stderr=${mh.stderr}`);
+
+    cleanup(repo);
+    cleanup(ctxDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario B — malformed must_haves in the returned task_plan → exit 2 + adapter-failed.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-plan-b'));
+    const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-ctx-'));
+    const ctxFile = path.join(ctxDir, 'plan-context.md');
+    fs.writeFileSync(ctxFile, '# Slice context\nplan the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-b-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-b-mock-'));
+    writeMockCodex(mockDir, { payload: planPayload(invalidTaskPlanContent), exitCode: 0 });
+    const r = runPlanXllm(['--plan-context', ctxFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status === 2, 'B: malformed must_haves makes adapter exit 2', `status=${r.status} stderr=${r.stderr}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'adapter-failed', 'B: result-file marks status adapter-failed', JSON.stringify(parsed));
+    assert(!!parsed && /must_haves|T01/i.test(parsed.reason || ''), 'B: adapter-failed reason mentions must_haves/T01', JSON.stringify(parsed));
+    cleanup(repo);
+    cleanup(ctxDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+
+  // Scenario C — codex absent from PATH (offline) → exit 2.
+  {
+    const repo = mkGitRepo(mkTmp('xllm-plan-c'));
+    const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-ctx-'));
+    const ctxFile = path.join(ctxDir, 'plan-context.md');
+    fs.writeFileSync(ctxFile, '# Slice context\nplan the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-c-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const r = runPlanXllm(['--plan-context', ctxFile, '--result-file', resultFile, '--cwd', repo], null, repo);
+    assert(r.status === 2, 'C: codex absent (offline) makes adapter exit 2', `status=${r.status} stderr=${r.stderr}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'adapter-failed', 'C: result-file marks status adapter-failed on offline failure', JSON.stringify(parsed));
+    cleanup(repo);
+    cleanup(ctxDir);
+    cleanup(resultDir);
+  }
+
+  // Path-traversal + empty-summary guards (validatePlanResult defense-in-depth).
+  // id/filename are untrusted codex output that Branch D concatenates into a
+  // filesystem path with mkdir -p; validatePlanResult must reject anything that
+  // isn't a bare task id / plain .md basename before materialization.
+  function badPlanPayload({ id, filename, summary } = {}) {
+    return JSON.stringify({
+      status: 'done',
+      summary: summary !== undefined ? summary : 'planned the slice',
+      slice_plan: { filename: 'S99-PLAN.md', content: '# S99: slice plan\n\ntasks: T01\n' },
+      task_plans: [{
+        id: id !== undefined ? id : 'T01',
+        filename: filename !== undefined ? filename : 'T01-PLAN.md',
+        content: validTaskPlanContent,
+      }],
+    });
+  }
+  const traversalCases = [
+    { name: 'D: task_plan id="../evil" rejected', payload: badPlanPayload({ id: '../evil' }) },
+    { name: 'D: task_plan id with slash rejected', payload: badPlanPayload({ id: 'T01/../../x' }) },
+    { name: 'E: filename="../x.md" rejected', payload: badPlanPayload({ filename: '../x.md' }) },
+    { name: 'E: filename with slash rejected', payload: badPlanPayload({ filename: 'a/b.md' }) },
+    { name: 'F: empty summary rejected', payload: badPlanPayload({ summary: '   ' }) },
+  ];
+  for (let i = 0; i < traversalCases.length; i++) {
+    const tc = traversalCases[i];
+    const repo = mkGitRepo(mkTmp(`xllm-plan-guard-${i}`));
+    const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-ctx-'));
+    const ctxFile = path.join(ctxDir, 'plan-context.md');
+    fs.writeFileSync(ctxFile, '# Slice context\nplan the thing\n', 'utf8');
+    const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-guard-result-'));
+    const resultFile = path.join(resultDir, 'result.json');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-plan-guard-mock-'));
+    writeMockCodex(mockDir, { payload: tc.payload, exitCode: 0 });
+    const r = runPlanXllm(['--plan-context', ctxFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo);
+    assert(r.status === 2, tc.name + ' → adapter exit 2', `status=${r.status} stderr=${r.stderr}`);
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch (e) { /* leave null */ }
+    assert(!!parsed && parsed.status === 'adapter-failed', tc.name + ' → result-file adapter-failed', JSON.stringify(parsed));
+    cleanup(repo);
+    cleanup(ctxDir);
+    cleanup(resultDir);
+    cleanup(mockDir);
+  }
+}
+
+async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
 
@@ -1938,9 +2666,12 @@ function main() {
     smokeUsageIndicator();
     smokePlanGateDegradation();
     smokeXllm();
+    await smokeXllmExecute();
     smokeModelAlias();
     smokeChallengerWiring();
     smokeAdvocateModel();
+    smokeEngineDispatch();
+    await smokeXllmPlan();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
