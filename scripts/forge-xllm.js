@@ -348,6 +348,12 @@ function invokeCodex(opts) {
     const args = [
       'exec',
       '--sandbox', 'read-only',
+      // Allow running outside a Git repository (e.g. SVN working copies). Codex
+      // otherwise aborts with "Not inside a trusted directory and --skip-git-repo-check
+      // was not specified", and a non-git dir can never become a "trusted directory"
+      // (no config/trust bypasses it — only this flag). The read-only sandbox already
+      // bounds the blast radius, so this does not weaken isolation. See docs/xllm-review-svn-gap.md.
+      '--skip-git-repo-check',
       '-C', cwd,
       '-o', lastMsgFile,
       '--output-schema', schemaFile,
