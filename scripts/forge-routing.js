@@ -134,7 +134,7 @@ const INDENT_RE = /^[ \t]*/;
 // first indented line of each nesting sets that level's width), never by an
 // absolute space count. Any inconsistency → { ok:false } (all-or-nothing).
 function parseRoutingBlock(block) {
-  const lines = block.split('\n');
+  const lines = block.split(/\r?\n/);
   const routing = {};
   const indentStack = []; // widths; index 0 = level 1 (domain)
   let curDomain = null;
@@ -225,7 +225,15 @@ function readRoutingConfig(cwd) {
     } catch {
       continue; // missing/unreadable → skip (silent-fail)
     }
-    const blockMatch = raw.match(/^routing:[ \t]*\n((?:[ \t]+.+\n?)+)/m);
+    // Block extraction: accept CRLF after `routing:`, and let the block span
+    // blank lines (blank lines between domains must not truncate it) — but
+    // still stop at the next non-blank, non-indented top-level key. Each
+    // captured line is either indented-non-blank OR fully blank; a top-level
+    // key line (no leading whitespace, non-blank) matches neither and ends
+    // the block naturally, so a following key is never swallowed.
+    const blockMatch = raw.match(
+      /^routing:[ \t]*\r?\n((?:[ \t]+.*\r?\n?|[ \t]*\r?\n)*)/m
+    );
     if (!blockMatch) continue;
 
     present = true;

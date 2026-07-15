@@ -204,6 +204,73 @@ withCascade({
   test('error routing-parse-error', () => assertEq(r.error, 'routing-parse-error'));
 });
 
+// --- Scenario 12: blank line between two domains inside the block ---
+console.log('\nScenario 12: blank line between two domains does not truncate the block');
+withCascade({
+  repo:
+    'routing:\n' +
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: claude-sonnet-5\n' +
+    '\n' +
+    '  frontend:\n' +
+    '    executor:\n' +
+    '      standard: claude-opus-4-8\n',
+}, (cwd) => {
+  const r = readRoutingConfig(cwd);
+  test('ok true', () => assert(r.ok, JSON.stringify(r)));
+  test('present true', () => assertEq(r.present, true));
+  test('backend domain parsed', () =>
+    assertEq(r.routing.backend.executor.standard, ['claude-sonnet-5']));
+  test('frontend domain parsed (past the blank line)', () =>
+    assertEq(r.routing.frontend.executor.standard, ['claude-opus-4-8']));
+});
+
+// --- Scenario 13: blank-line block followed by another top-level key ---
+console.log('\nScenario 13: blank-line block does not swallow a following top-level key');
+withCascade({
+  repo:
+    'routing:\n' +
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: claude-sonnet-5\n' +
+    '\n' +
+    '  frontend:\n' +
+    '    executor:\n' +
+    '      standard: claude-opus-4-8\n' +
+    '\n' +
+    'review:\n' +
+    '  mode: dialectic\n',
+}, (cwd) => {
+  const r = readRoutingConfig(cwd);
+  test('ok true', () => assert(r.ok, JSON.stringify(r)));
+  test('backend domain parsed', () =>
+    assertEq(r.routing.backend.executor.standard, ['claude-sonnet-5']));
+  test('frontend domain parsed', () =>
+    assertEq(r.routing.frontend.executor.standard, ['claude-opus-4-8']));
+  test('no stray "review" domain captured', () =>
+    assert(!Object.prototype.hasOwnProperty.call(r.routing, 'review'), JSON.stringify(r.routing)));
+});
+
+// --- Scenario 14: CRLF line endings parse identically to LF ---
+console.log('\nScenario 14: CRLF routing block parses identically to the LF equivalent');
+withCascade({
+  repo:
+    'routing:\r\n' +
+    '  backend:\r\n' +
+    '    executor:\r\n' +
+    '      standard: claude-sonnet-5\r\n' +
+    '      fallback: claude-opus-4-8\r\n',
+}, (cwd) => {
+  const r = readRoutingConfig(cwd);
+  test('ok true', () => assert(r.ok, JSON.stringify(r)));
+  test('present true', () => assertEq(r.present, true));
+  test('backend cell parsed', () =>
+    assertEq(r.routing.backend.executor.standard, ['claude-sonnet-5']));
+  test('fallback parsed', () =>
+    assertEq(r.routing.backend.executor.fallback, 'claude-opus-4-8'));
+});
+
 // --- Summary ---
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 
