@@ -1451,12 +1451,20 @@ function writeMockCodex(dir, opts) {
     '# forge-smoke mock codex — writes payload to the -o file, honors exit code / sleep',
     'OUT=""',
     'CODEXCWD=""',
+    // PROMPTLEN_FILE is intentionally NOT initialized here — it comes from the
+    // environment (set by the large-prompt smoke scenario) so the mock can record
+    // the stdin-received prompt length. Clobbering it to "" would disable the assert.
     'prev=""',
     'for arg in "$@"; do',
     '  if [ "$prev" = "-o" ]; then OUT="$arg"; fi',
     '  if [ "$prev" = "-C" ]; then CODEXCWD="$arg"; fi',
     '  prev="$arg"',
     'done',
+    // New transport: the prompt arrives on stdin (`codex exec -`), NOT argv. Drain
+    // it fully — this both exercises the stdin pipe/EOF contract and lets callers
+    // that set PROMPTLEN_FILE assert the received byte length (large-prompt test).
+    'PROMPT="$(cat -)"',
+    'if [ -n "$PROMPTLEN_FILE" ]; then printf %s "${#PROMPT}" > "$PROMPTLEN_FILE"; fi',
     opts.sleepSecs ? `sleep ${opts.sleepSecs}` : '',
     // extraScript runs BEFORE the -o write — same default byte-shape for
     // Section 20–23 callers that never pass it (opts.extraScript undefined).
@@ -1488,11 +1496,12 @@ function mkGitRepo(dir) {
   return dir;
 }
 
-function runXllm(args, mockDir, cwd) {
+function runXllm(args, mockDir, cwd, extraEnv) {
   const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
   const env = mockDir
     ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
     : { ...process.env, PATH: '' };
+  if (extraEnv) Object.assign(env, extraEnv);
   const r = spawnSync(process.execPath, [xllmPath, ...args], {
     encoding: 'utf8',
     cwd: cwd || process.cwd(),
@@ -1522,6 +1531,35 @@ function smokeXllm() {
     assert(!!o && o.id === 'R1' && o.severity === 'high' && o.file === 'src/a.js' && o.line === 12
       && typeof o.issue === 'string' && typeof o.fix === 'string',
       'A: normalized objection has id/severity/file/line/issue/fix', `objection=${JSON.stringify(o)}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario A2 — large prompt via stdin: a >40KB diff must NOT hit the argv/command-line
+  // cap (Windows ENAMETOOLONG). The mock reads the prompt from stdin (`codex exec -`) and
+  // records the received byte length to PROMPTLEN_FILE — proving the full prompt crossed
+  // the stdin pipe (not truncated by any argv limit) and the adapter still exits 0.
+  {
+    const dir = mkTmp('xllm-a2');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-a2-mock-'));
+    const lenFile = path.join(dir, 'promptlen.txt');
+    // >40KB of diff-ish content embedded in the prompt via the diff command output.
+    const bigDiff = '+ line of a very large generated diff payload aaaaaaaaaaaaaaaaaa\n'.repeat(700);
+    fs.writeFileSync(path.join(dir, 'big.txt'), bigDiff, 'utf8');
+    const payload = JSON.stringify({ objections: [] });
+    writeMockCodex(mockDir, { payload, exitCode: 0 });
+    const r = runXllm(
+      ['--mode', 'challenge', '--diff-cmd', 'cat big.txt', '--cwd', dir],
+      mockDir, dir, { PROMPTLEN_FILE: lenFile },
+    );
+    assert(bigDiff.length > 40 * 1024, 'A2: fixture diff is >40KB', `len=${bigDiff.length}`);
+    assert(r.status === 0, 'A2: large-prompt challenge exits 0 (no ENAMETOOLONG)', `status=${r.status} stderr=${r.stderr}`);
+    let receivedLen = 0;
+    try { receivedLen = parseInt(fs.readFileSync(lenFile, 'utf8'), 10) || 0; } catch (e) { /* leave 0 */ }
+    assert(receivedLen > 40 * 1024, 'A2: mock received >40KB prompt via stdin', `receivedLen=${receivedLen}`);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { /* leave null */ }
+    assert(!!parsed && Array.isArray(parsed.objections), 'A2: stdout parses to objections array', `stdout=${r.stdout.slice(0, 200)}`);
     cleanup(dir);
     cleanup(mockDir);
   }
