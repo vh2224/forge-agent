@@ -609,10 +609,15 @@ function invokeCodex(opts) {
     if (model) {
       args.push('-m', model);
     }
-    args.push(prompt);
+    // Prompt via stdin (`codex exec -`), NOT argv: a large slice diff embedded in
+    // the prompt (60k+ chars) overflows the Windows CreateProcess command-line cap
+    // (~32KB → ENAMETOOLONG, exit 2) and is bounded on POSIX too (ARG_MAX). spawnSync's
+    // `input` writes the prompt to stdin and closes it — EOF guaranteed (codex#20919).
+    args.push('-');
 
     const { cmd, prefixArgs } = resolveCodexCommand();
     const res = spawnSync(cmd, [...prefixArgs, ...args], {
+      input: prompt,
       timeout: timeoutSecs * 1000,
       killSignal: 'SIGKILL',
       encoding: 'utf8',
@@ -659,8 +664,12 @@ function invokeCodex(opts) {
  * runs (S01-RISK blocker #2), which is mechanically impossible under the blocking
  * spawnSync. detached:true gives codex its own process group so a timeout can SIGKILL
  * the WHOLE group (`process.kill(-pid)`) — orphaned children never survive (codex#7852).
- * stdio: stdin closed (codex#20919), stdout NEVER held on a pipe (result comes from the
- * -o file — codex#7852 mitigation), stderr piped with a small cap.
+ * stdio: stdin is a PIPE carrying the prompt (`codex exec -`) — we write it and then
+ * `end()` immediately, so codex gets EOF and never hangs waiting on an open stdin
+ * (codex#20919). This replaces prompt-as-argv, which overflowed the Windows
+ * CreateProcess command-line cap (~32KB → ENAMETOOLONG) on large slice diffs
+ * (60k+ chars) and is bounded on POSIX too (ARG_MAX). stdout is NEVER held on a pipe
+ * (result comes from the -o file — codex#7852 mitigation), stderr piped with a small cap.
  *
  * @param {object} opts
  * @param {string} opts.prompt
@@ -723,7 +732,9 @@ function invokeCodexDetached(opts) {
       if (model) {
         args.push('-m', model);
       }
-      args.push(prompt);
+      // Prompt via stdin (`codex exec -`), NOT argv — see function doc: avoids the
+      // Windows CreateProcess command-line cap (ENAMETOOLONG on large diffs).
+      args.push('-');
 
       // Windows-safe binary resolution (spawn ENOENT for .cmd/.bat shims):
       // route through resolveCodexCommand() exactly as invokeCodex does.
@@ -731,8 +742,16 @@ function invokeCodexDetached(opts) {
       const { cmd, prefixArgs } = resolveCodexCommand();
       child = spawn(cmd, [...prefixArgs, ...args], {
         detached: true,
-        stdio: ['ignore', 'ignore', 'pipe'],
+        // stdin = pipe (prompt transport), stdout ignored (result via -o file), stderr piped.
+        stdio: ['pipe', 'ignore', 'pipe'],
       });
+
+      // Feed the prompt and close stdin immediately → codex gets EOF (codex#20919).
+      if (child.stdin) {
+        child.stdin.on('error', () => { /* best-effort — EPIPE if codex exits early */ });
+        child.stdin.write(prompt);
+        child.stdin.end();
+      }
     } catch (e) {
       settle(reject, new Error(`codex spawn failed: ${e.message}`));
       return;
