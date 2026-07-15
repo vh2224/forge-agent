@@ -154,6 +154,13 @@ see [docs/fragment-store.md](docs/fragment-store.md).
 >
 > O forge **não instala nem autentica** tooling de terceiros — apenas invoca o `codex` já configurado pelo usuário via `scripts/forge-xllm.js`, que nunca recebe a credencial por argumento (a auth é gerenciada inteiramente pelo próprio CLI). Sem `codex` disponível, o gate faz **fallback automático para `forge-reviewer` (Claude)** com o evento `review-challenger-fallback` — nunca bloqueia. Implicação de privacidade: com `challenger: codex`, o diff do slice sai da máquina local para a API da OpenAI.
 
+> **Pré-requisito — `review.challenger: gemini`:** o challenger Gemini requer o [Antigravity CLI](https://antigravity.google) (`agy`) instalado e autenticado, por um destes dois caminhos:
+>
+> - **Login no Antigravity** (recomendado): faça login uma vez (IDE ou CLI) — em headless o `agy` usa a auth silenciosa por keyring, com refresh automático de token.
+> - **`GEMINI_API_KEY`** (ou `ANTIGRAVITY_API_KEY`) no ambiente: exporte de uma fonte segura (`.env` gitignored ou secret manager) — **nunca** hardcoded em prefs commitáveis.
+>
+> O modelo é opcional: `challenger_model` aceita um **label** do `agy models` (pode conter espaços — use aspas: `"Gemini 3.1 Pro (High)"`); unset usa o default do CLI. O adapter invoca `agy --print` com `--sandbox` (restrições de terminal) e o mesmo contrato do codex: sem `agy` disponível (binário, auth, quota, rede, stdout vazio), **fallback automático para `forge-reviewer` (Claude)** com o evento `review-challenger-fallback` (`gemini-exit-nonzero`) — nunca bloqueia. Implicação de privacidade: com `challenger: gemini`, o diff do slice sai da máquina local para a API do Google.
+
 ---
 
 ## Atualizar

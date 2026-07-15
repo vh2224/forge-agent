@@ -460,8 +460,8 @@ The produced `T##-SECURITY.md` will be injected into that task's worker prompt a
 
 1. Idempotency: if `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` already exists → skip the gate, proceed to `complete-slice`.
 2. Read `review.{mode,style,rounds,ask_in_auto,engine,challenger,challenger_model}` via the cascade in `shared/forge-review.md § Step 0`. If `mode == disabled` → skip.
-   - Challenger routing (`review.challenger: claude|codex`) follows `shared/forge-review.md § Step 0` + the Codex branch in Steps 2/4 — single fallback to `forge-reviewer` when codex is unavailable.
-   - `challenger: codex` forces `engine: agents` (the `workflow` script cannot route Codex) — see the precedence block in the spec.
+   - Challenger routing (`review.challenger: claude|codex|gemini`) follows `shared/forge-review.md § Step 0` + the adapter branch in Steps 2/4 (`--engine codex|agy`) — single fallback to `forge-reviewer` when the external CLI is unavailable.
+   - `challenger: codex|gemini` forces `engine: agents` (the `workflow` script cannot route an external CLI) — see the precedence block in the spec.
 3. Execute the procedure in **`shared/forge-review.md`** with `MODE = auto`:
    > Antes de despachar cada agente (Challenge e Defense abaixo), exiba o **Spawn Liveness Banner** referenciado em `shared/forge-dispatch.md § Spawn Liveness Banner` com duração estimada para `review-challenger` / `review-advocate`.
    - **Engine** (`shared/forge-review.md § Engine workflow`): se `engine: workflow` e a tool `Workflow` estiver no seu tool list (introspecção — NÃO ToolSearch), os três dispatches abaixo (Challenge/Defense/Rebuttal) são substituídos por UMA invocação Workflow; em tool ausente ou erro → fallback agents com warning + evento `review-engine-fallback`. O render do Step 6 e os Steps 7a/7b/8 não mudam.

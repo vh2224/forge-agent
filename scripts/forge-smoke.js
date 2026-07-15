@@ -1441,9 +1441,11 @@ function smokePlanGateDegradation() {
     '(d) plan_gate.ask_in_auto defaults to defer', 'ask_in_auto: defer missing');
 }
 
-// ── Section 20: forge-xllm adapter (mock codex on PATH) ─────────────────────
+// ── Section 20: forge-xllm adapter (mock codex on PATH + mock agy via env) ──
 // Live-spawns the T01 adapter against a mock `codex` shell binary prepended to
 // PATH — structural (token-presence) asserts don't catch runtime failures.
+// The agy engine scenarios (G–M) inject a Node mock via FORGE_XLLM_AGY_BIN
+// instead, which also runs on Windows.
 function writeMockCodex(dir, opts) {
   opts = opts || {};
   const script = [
@@ -1473,11 +1475,45 @@ function shQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-function runXllm(args, mockDir, cwd) {
+// Mock agy as a Node script injected via FORGE_XLLM_AGY_BIN — cross-platform
+// (unlike the POSIX-sh mock codex), so the agy scenarios run on Windows too.
+// The mock prints `payload` to stdout and exits `exitCode`. With checkContract
+// it first verifies the adapter's invocation contract (--sandbox present, -p
+// carries a "Read the file at <path>" instruction, the prompt file exists and
+// holds the real payload) and exits 3 on any violation.
+function writeMockAgy(dir, opts) {
+  opts = opts || {};
+  const js = [
+    '// forge-smoke mock agy',
+    "const fs = require('fs');",
+    'const args = process.argv.slice(2);',
+    "const pIdx = args.indexOf('-p');",
+    "const inline = pIdx >= 0 ? String(args[pIdx + 1] || '') : '';",
+    `if (${opts.checkContract ? 'true' : 'false'}) {`,
+    "  if (!args.includes('--sandbox')) { process.stderr.write('mock: no --sandbox'); process.exit(3); }",
+    '  const m = inline.match(/Read the file at (.+?) and follow/);',
+    "  if (!m) { process.stderr.write('mock: no prompt-file instruction'); process.exit(3); }",
+    "  let t = ''; try { t = fs.readFileSync(m[1], 'utf8'); } catch (e) { process.stderr.write('mock: prompt file unreadable'); process.exit(3); }",
+    "  if (!t.includes('DIFF START') && !t.includes('OBJECTIONS')) { process.stderr.write('mock: prompt file misses payload'); process.exit(3); }",
+    '}',
+    opts.sleepMs
+      ? `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${opts.sleepMs});`
+      : '',
+    `process.stdout.write(${JSON.stringify(String(opts.payload == null ? '' : opts.payload))});`,
+    `process.exit(${typeof opts.exitCode === 'number' ? opts.exitCode : 0});`,
+    '',
+  ].join('\n');
+  const agyPath = path.join(dir, 'mock-agy.js');
+  fs.writeFileSync(agyPath, js, 'utf8');
+  return agyPath;
+}
+
+function runXllm(args, mockDir, cwd, extraEnv) {
   const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
   const env = mockDir
     ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
     : { ...process.env, PATH: '' };
+  Object.assign(env, extraEnv || {});
   const r = spawnSync(process.execPath, [xllmPath, ...args], {
     encoding: 'utf8',
     cwd: cwd || process.cwd(),
@@ -1588,6 +1624,111 @@ function smokeXllm() {
     assert(rBad.status !== 0, 'F: out-of-enum verdict makes adapter exit non-zero', `status=${rBad.status}`);
     cleanup(mockDirBad);
 
+    cleanup(dir);
+  }
+
+  // ── agy engine scenarios (mock injected via FORGE_XLLM_AGY_BIN — cross-platform) ──
+
+  // Scenario G — agy happy challenge WITH contract check: --sandbox present,
+  // -p carries a "Read the file at <path>" instruction, prompt file exists and
+  // holds the diff payload. Narration prose before the JSON must be tolerated.
+  {
+    const dir = mkTmp('xllm-g');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-g-mock-'));
+    const payload = 'I will inspect the diff...\nStep narration line 2.\n' + JSON.stringify({
+      objections: [{ id: 'R1', path_line: 'src/a.js:12', claim: 'x', suggested_fix: 'y', challenge: 'z?', severity: 'high' }],
+    });
+    const mockPath = writeMockAgy(mockDir, { payload, exitCode: 0, checkContract: true });
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir],
+      null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { /* leave null */ }
+    assert(r.status === 0, 'G: agy happy challenge exits 0 (contract honored)', `status=${r.status} stderr=${r.stderr}`);
+    const o = parsed && parsed.objections && parsed.objections[0];
+    assert(!!o && o.id === 'R1' && o.severity === 'high' && o.file === 'src/a.js' && o.line === 12,
+      'G: agy stdout normalizes to objections contract', `stdout=${r.stdout}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario H — agy missing binary: no override, PATH-hermetic → exit non-zero.
+  {
+    const dir = mkTmp('xllm-h');
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir], null, dir);
+    assert(r.status !== 0, 'H: agy missing binary exits non-zero', `status=${r.status}`);
+    assert(r.stderr.length > 0, 'H: agy missing binary writes stderr', `stderr=${r.stderr}`);
+    cleanup(dir);
+  }
+
+  // Scenario I — agy exit 0 with EMPTY stdout (the known non-TTY dropout) → adapter non-zero.
+  {
+    const dir = mkTmp('xllm-i');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-i-mock-'));
+    const mockPath = writeMockAgy(mockDir, { payload: '', exitCode: 0 });
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir],
+      null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
+    assert(r.status !== 0, 'I: agy empty stdout (non-TTY dropout) exits non-zero', `status=${r.status}`);
+    assert(/empty stdout/.test(r.stderr), 'I: agy empty stdout cause is on stderr', `stderr=${r.stderr}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario J — agy child exit ≠ 0 → adapter non-zero.
+  {
+    const dir = mkTmp('xllm-j');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-j-mock-'));
+    const mockPath = writeMockAgy(mockDir, { payload: '', exitCode: 1 });
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir],
+      null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
+    assert(r.status !== 0, 'J: agy child exit 1 makes adapter exit non-zero', `status=${r.status}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario K — agy timeout: mock sleeps past --timeout 1 (+5s grace) → killed, bounded.
+  {
+    const dir = mkTmp('xllm-k');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-k-mock-'));
+    const mockPath = writeMockAgy(mockDir, { sleepMs: 20000, exitCode: 0, payload: JSON.stringify({ objections: [] }) });
+    const t0 = Date.now();
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir, '--timeout', '1'],
+      null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
+    const elapsed = Date.now() - t0;
+    assert(r.status !== 0, 'K: agy timeout makes adapter exit non-zero', `status=${r.status}`);
+    assert(elapsed < 15000, 'K: agy timeout kill is bounded (< 15s wall time)', `elapsed=${elapsed}ms`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario L — agy rebuttal happy path (contract check verifies OBJECTIONS payload reached the prompt file).
+  {
+    const dir = mkTmp('xllm-l');
+    const inputFile = path.join(dir, 'input.txt');
+    fs.writeFileSync(inputFile, 'R1: objection text\nDefense: still real\n', 'utf8');
+    const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-l-mock-'));
+    const mockPath = writeMockAgy(mockDir, {
+      payload: JSON.stringify({ verdicts: [{ id: 'R1', verdict: 'maintained', rationale: 'still real' }] }),
+      exitCode: 0,
+      checkContract: true,
+    });
+    const r = runXllm(['--mode', 'rebuttal', '--engine', 'agy', '--input', inputFile, '--cwd', dir],
+      null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch (e) { /* leave null */ }
+    assert(r.status === 0, 'L: agy rebuttal happy path exits 0', `status=${r.status} stderr=${r.stderr}`);
+    assert(!!parsed && parsed.verdicts && parsed.verdicts[0] && parsed.verdicts[0].verdict === 'maintained'
+      && typeof parsed.verdicts[0].reason === 'string',
+      'L: agy normalized verdict has verdict=maintained and reason', `stdout=${r.stdout}`);
+    cleanup(dir);
+    cleanup(mockDir);
+  }
+
+  // Scenario M — unknown --engine value is rejected up front.
+  {
+    const dir = mkTmp('xllm-m');
+    const r = runXllm(['--mode', 'challenge', '--engine', 'llama', '--diff-cmd', 'echo diff', '--cwd', dir], null, dir);
+    assert(r.status !== 0, 'M: unknown --engine exits non-zero', `status=${r.status}`);
+    assert(/unknown --engine/.test(r.stderr), 'M: unknown --engine cause is on stderr', `stderr=${r.stderr}`);
     cleanup(dir);
   }
 }
@@ -1715,10 +1856,15 @@ function smokeChallengerWiring() {
   assert(spec.includes('challenger:'), 'spec Step 0 reads challenger:', 'token "challenger:" not found');
   assert(spec.includes('challenger_model'), 'spec Step 0 reads challenger_model', 'token "challenger_model" not found');
   assert(spec.includes('review-challenger-fallback'), 'spec defines review-challenger-fallback event', 'token not found');
-  assert(spec.includes('engine-workflow-forced-agents'), 'spec has codex x workflow precedence reason', 'token "engine-workflow-forced-agents" not found');
+  assert(spec.includes('engine-workflow-forced-agents'), 'spec has external-challenger x workflow precedence reason', 'token "engine-workflow-forced-agents" not found');
   assert(spec.includes('Challenger:'), 'spec Step 6 has Challenger: header', 'token "Challenger:" not found');
   assert(spec.includes('"challenger"'), 'spec Step 8 event has challenger field', 'token \'"challenger"\' not found');
   assert(spec.includes('scripts/forge-xllm.js'), 'spec invokes the forge-xllm.js adapter', 'token not found');
+  assert(spec.includes("'claude','codex','gemini'"), 'spec Step 0 whitelist includes gemini', 'whitelist token not found');
+  assert(spec.includes('XLLM_ENGINE'), 'spec Step 0 derives XLLM_ENGINE', 'token "XLLM_ENGINE" not found');
+  assert(spec.includes('gemini-exit-nonzero'), 'spec has gemini-exit-nonzero fallback reason', 'token not found');
+  assert(spec.includes('--engine "$XLLM_ENGINE"'), 'spec Steps 2/4 pass --engine to the adapter', 'token not found');
+  assert(spec.includes('--model "$CHALLENGER_MODEL"'), 'spec Steps 2/4 quote --model (agy labels have spaces)', 'token not found');
 
   // Live scenario — reuse the Section 20 mock-codex harness in challenge mode
   // and assert the normalized {objections:[...]} contract the spec's Codex
@@ -1768,14 +1914,14 @@ for(const f of files){try{
   if(m=blk.match(/^[ \\t]+fix_conceded:[ \\t]*(\\w+)/m))fixConceded=m[1].toLowerCase()!=='false';
   if(m=blk.match(/^[ \\t]+engine:[ \\t]*(\\w+)/m))engine=m[1].toLowerCase();
   if(m=blk.match(/^[ \\t]+challenger:[ \\t]*(\\w+)/m))challenger=m[1].toLowerCase();
-  if(m=blk.match(/^[ \\t]+challenger_model:[ \\t]*(\\S+)/m))challengerModel=m[1];
+  if(m=blk.match(/^[ \\t]+challenger_model:[ \\t]*([^#\\n]+)/m)){const v=m[1].trim().replace(/^["']|["']$/g,'');if(v)challengerModel=v;}
 }catch(e){}}
 if(!['enabled','disabled'].includes(mode))mode='enabled';
 if(!['dialectic','flags'].includes(style))style='dialectic';
 if(!Number.isInteger(rounds)||rounds<0||rounds>3)rounds=1;
 if(!['defer','pause'].includes(askAuto))askAuto='defer';
 if(!['agents','workflow'].includes(engine))engine='agents';
-if(!['claude','codex'].includes(challenger))challenger='claude';
+if(!['claude','codex','gemini'].includes(challenger))challenger='claude';
 process.stdout.write(JSON.stringify({mode,style,rounds,askAuto,fixConceded,engine,challenger,challengerModel}));
 `;
     const dir = mkTmp('challenger-cascade');
@@ -1800,6 +1946,24 @@ process.stdout.write(JSON.stringify({mode,style,rounds,askAuto,fixConceded,engin
     try { p2 = JSON.parse(r2.stdout); } catch (e) { /* leave null */ }
     assert(!!p2 && p2.challenger === 'claude',
       'Step 0 cascade: invalid challenger falls back to claude whitelist default', `stdout=${r2.stdout} stderr=${r2.stderr}`);
+
+    // Case 3: challenger: gemini + quoted spaced agy label -> quotes stripped, spaces kept
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'),
+      'review:\n  challenger: gemini\n  challenger_model: "Gemini 3.1 Pro (High)"\n');
+    const r3 = spawnSync(process.execPath, [cascadePath], { cwd: dir, env: { ...process.env, WORKING_DIR: dir }, encoding: 'utf8' });
+    let p3 = null;
+    try { p3 = JSON.parse(r3.stdout); } catch (e) { /* leave null */ }
+    assert(!!p3 && p3.challenger === 'gemini' && p3.challengerModel === 'Gemini 3.1 Pro (High)',
+      'Step 0 cascade: gemini + spaced quoted label resolve from prefs', `stdout=${r3.stdout} stderr=${r3.stderr}`);
+
+    // Case 4: challenger_model with only an inline comment -> stays null (latent "#" bug guard)
+    fs.writeFileSync(path.join(dir, '.gsd', 'prefs.local.md'),
+      'review:\n  challenger: gemini\n  challenger_model:        # (unset) — comentário inline\n');
+    const r4 = spawnSync(process.execPath, [cascadePath], { cwd: dir, env: { ...process.env, WORKING_DIR: dir }, encoding: 'utf8' });
+    let p4 = null;
+    try { p4 = JSON.parse(r4.stdout); } catch (e) { /* leave null */ }
+    assert(!!p4 && p4.challenger === 'gemini' && p4.challengerModel === null,
+      'Step 0 cascade: comment-only challenger_model stays null (never "#")', `stdout=${r4.stdout} stderr=${r4.stderr}`);
 
     cleanup(dir);
   }

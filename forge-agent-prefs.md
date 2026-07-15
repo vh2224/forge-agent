@@ -598,18 +598,19 @@ review:
   rounds: 1           # 0–3 rodadas de réplica do reviewer sobre a defesa
   ask_in_auto: defer  # defer | pause
   fix_conceded: true  # true | false — corrige automaticamente as objeções concedidas
-  challenger: claude       # claude | codex — quem desafia (codex via scripts/forge-xllm.js)
-  challenger_model:        # (unset) — passa -m <valor> ao codex; vazio = default do CLI
-                           #   ex.: challenger_model: gpt-5.2-codex
+  challenger: claude       # claude | codex | gemini — quem desafia (externos via scripts/forge-xllm.js)
+  challenger_model:        # (unset) — passa --model <valor> ao CLI externo; vazio = default do CLI
+                           #   codex ex.: challenger_model: gpt-5.2-codex
+                           #   gemini ex.: challenger_model: "Gemini 3.1 Pro (High)"  (label do `agy models`)
   advocate_model: claude-fable-5   # modelo do defender (alias via forge-model-alias.js)
                                    #   ex.: advocate_model: claude-opus-4-8  (defesa mais barata)
 ```
 
-### Exemplo — review cross-model (GPT ataca × Fable 5 defende)
+### Exemplo — review cross-model (GPT ou Gemini ataca × Fable 5 defende)
 
 O ganho do multi-LLM: challenger e advocate da MESMA família compartilham pontos cegos; um GPT
-desafiando código escrito por Claude acha classes de bug que dois Claudes não acham. Para ativar,
-cole em `.gsd/prefs.local.md` (pessoal, gitignored) ou `.gsd/claude-agent-prefs.md` (repo):
+ou Gemini desafiando código escrito por Claude acha classes de bug que dois Claudes não acham.
+Para ativar, cole em `.gsd/prefs.local.md` (pessoal, gitignored) ou `.gsd/claude-agent-prefs.md` (repo):
 
 ```yaml
 review:
@@ -619,10 +620,24 @@ review:
   # advocate_model: claude-fable-5   # já é o default — melhor Claude defendendo
 ```
 
-**Pré-requisitos (uma vez por máquina):** `npm install -g @openai/codex` + `codex login`
-(assinatura ChatGPT — recomendado) OU `OPENAI_API_KEY` no ambiente. O forge NÃO instala nem
-armazena credenciais — a auth é 100% do Codex CLI. Sem codex disponível (binário, auth, quota,
-rede), o gate cai automaticamente no `forge-reviewer` Claude com evento
+ou, para Gemini via Antigravity CLI (`agy`):
+
+```yaml
+review:
+  challenger: gemini           # Gemini via Antigravity CLI (agy) assume challenge + réplica
+  # challenger_model:          # deixe unset → modelo default do agy; pin explícito por label:
+  #                            # challenger_model: "Gemini 3.1 Pro (High)"  (ver `agy models`)
+```
+
+**Pré-requisitos codex (uma vez por máquina):** `npm install -g @openai/codex` + `codex login`
+(assinatura ChatGPT — recomendado) OU `OPENAI_API_KEY` no ambiente.
+
+**Pré-requisitos gemini (uma vez por máquina):** [Antigravity CLI](https://antigravity.google) instalado
+(binário `agy` no PATH) + login no Antigravity (a auth silenciosa por keyring cobre o headless)
+OU `GEMINI_API_KEY`/`ANTIGRAVITY_API_KEY` no ambiente.
+
+O forge NÃO instala nem armazena credenciais — a auth é 100% do CLI externo. Sem o CLI disponível
+(binário, auth, quota, rede), o gate cai automaticamente no `forge-reviewer` Claude com evento
 `review-challenger-fallback` — nunca trava, nunca bloqueia.
 
 ### Semântica
@@ -637,8 +652,8 @@ rede), o gate cai automaticamente no `forge-reviewer` Claude com evento
 - `rounds` (padrão `1`): quantas vezes o reviewer replica à defesa do advocate. `0` = sem réplica (toda objeção contestada vira `aberta`). Cap em `3`.
 - `ask_in_auto` (padrão `defer`): em `forge-auto`, `defer` **não pausa no meio do loop** — marca as `aberta`s como `deferido → triagem no fim da milestone` e segue (honra a AUTONOMY RULE). **Defer não engole:** todo item deferido é apresentado ao operador na triagem final, antes do `complete-milestone` rodar de fato. `pause` faz o `forge-auto` perguntar ao humano por slice, mesmo no modo autônomo (opt-in).
 - `fix_conceded` (padrão `true`): objeções **concedidas** (challenger e advocate concordam que o problema é real) disparam um `review-fix` — `forge-executor` corrige só os itens listados, commit `fix(review): ...`, ainda no branch do slice. Sem re-review do commit de fix (evita ping-pong). `false`: volta ao comportamento legado — concedidas são registradas e (em modo interativo) perguntadas uma vez.
-- `challenger` (padrão `claude`): quem roda o papel de challenger (Steps 2/4). `claude` mantém o comportamento atual — os agentes `forge-reviewer`/`forge-advocate` em contexto. `codex` roteia challenge e rebuttal pelo adapter `scripts/forge-xllm.js` (GPT via `codex exec`); valor inválido cai no fallback da whitelist (`claude`). Precede `engine: workflow`: `challenger: codex` força `engine: agents` (o script workflow não roteia codex) — ver `shared/forge-review.md § Step 0 § Precedência`.
-- `challenger_model` (padrão unset): nome do modelo — não é credencial — repassado como `--model <valor>` ao adapter quando `challenger: codex`; vazio/unset usa o default do Codex CLI. Ignorado quando `challenger: claude`.
+- `challenger` (padrão `claude`): quem roda o papel de challenger (Steps 2/4). `claude` mantém o comportamento atual — os agentes `forge-reviewer`/`forge-advocate` em contexto. `codex` roteia challenge e rebuttal pelo adapter `scripts/forge-xllm.js` com `--engine codex` (GPT via `codex exec`); `gemini` roteia pelo mesmo adapter com `--engine agy` (Gemini via Antigravity CLI `agy --print`); valor inválido cai no fallback da whitelist (`claude`). Precede `engine: workflow`: qualquer challenger externo força `engine: agents` (o script workflow não roteia CLI externo) — ver `shared/forge-review.md § Step 0 § Precedência`.
+- `challenger_model` (padrão unset): nome do modelo — não é credencial — repassado como `--model <valor>` ao adapter quando `challenger != claude`; vazio/unset usa o default do CLI externo. Ignorado quando `challenger: claude`. Para `gemini` o valor é o **label** do `agy models` e pode conter espaços — use aspas: `challenger_model: "Gemini 3.1 Pro (High)"`. Comentários `#` na mesma linha são ignorados pelo reader.
 - `advocate_model` (padrão `claude-fable-5`, literal — nunca null): modelo do defender (`forge-advocate`). Resolvido para um alias de dispatch via `scripts/forge-model-alias.js` (única fonte do mapa ID→alias — não duplicar) e passado como `model:` no `Agent()` do Step 3 só quando o alias não é vazio; um id sem alias conhecido omite `model:` (o frontmatter de `agents/forge-advocate.md` governa) e emite um warning de uma linha. **Guard Fable 400:** o frontmatter de `agents/forge-advocate.md` usa `thinking: adaptive` (nunca `disabled`) — Fable 5 retorna HTTP 400 em `thinking` explicitamente desabilitado. **Nota de reinstall:** mudar `advocate_model` (ou o frontmatter de `agents/forge-advocate.md`) só tem efeito em runtime após `/forge-update`/reinstall — as cópias em `~/.claude/` divergem do repo até a sincronização (installed-copies drift).
 
 ### Resolução das objeções
@@ -660,7 +675,7 @@ rede), o gate cai automaticamente no `forge-reviewer` Claude com evento
 - Dispatch guard: `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md` (antes de `complete-slice`; idempotente — se `S##-REVIEW.md` já existe, pula). Triagem final: mesmos skills, antes de `complete-milestone` (`shared/forge-review.md § Step 9`).
 - Artefato gerado: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (per-slice) ou `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md` (task solta) — durável com a unidade; limpo por `milestone_cleanup`. Follow-ups da triagem final vão para `.gsd/KNOWLEDGE.md § Review follow-ups` (sobrevive cleanup).
 - Dois boundaries: per-slice (gate antes de `complete-slice` em `forge-auto`/`forge-next`) e task solta (`/forge-task` step 5.5, sempre interativo). Ambos honram `mode`/`style`/`rounds`/`fix_conceded`/`engine`/`challenger`/`challenger_model`/`advocate_model`; `ask_in_auto` só se aplica ao `forge-auto`.
-- Challenger Codex: `shared/forge-review.md § Step 0` (cascata + precedência vs `engine: workflow`) e `scripts/forge-xllm.js` (adapter — nunca recebe credencial por argv; auth é do próprio Codex CLI).
+- Challengers externos (Codex/Gemini): `shared/forge-review.md § Step 0` (cascata + precedência vs `engine: workflow`) e `scripts/forge-xllm.js` (adapter `--engine codex|agy` — nunca recebe credencial por argv; auth é do próprio CLI externo).
 
 ## Plan Gate Settings
 
