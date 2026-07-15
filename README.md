@@ -156,6 +156,56 @@ see [docs/fragment-store.md](docs/fragment-store.md).
 
 ---
 
+## Multi-LLM fase 2 — workers GPT via sidecar
+
+Além do challenger de review Codex (acima), o forge permite rotear as próprias fases de trabalho —
+`execute-task` e `plan-slice` — para GPT via o mesmo sidecar `codex exec`, através das prefs
+`workers.execute-task: codex` / `workers.plan-slice: codex` (ver
+[`forge-agent-prefs.md` § Workers Settings](forge-agent-prefs.md)). O default continua `claude`
+— é **opt-in**, não uma migração de engine.
+
+Mecanicamente, `scripts/forge-xllm.js --mode execute|plan` invoca `codex exec` como sidecar,
+lê um plano (`T##-PLAN.md`) e retorna um result-file estruturado (`status`, `summary`,
+`must_haves_status`, `files_changed`, `start_sha`) — mesma interface de contrato que um worker
+Claude nativo devolveria. Isso significa que **todos os gates de verificação Claude rodam
+intactos sobre código produzido por GPT**: o schema `must_haves` continua enforcing, o
+goal-backward verifier continua auditando os artefatos declarados, o file-audit continua
+comparando o diff contra `expected_output`, e o review dialético continua rodando — com o
+challenger Claude revisando o código GPT. É a **inversão simétrica** do challenger Codex do M004
+(lá, GPT revisa código Claude; aqui, Claude revisa código GPT).
+
+### Limitações
+
+Três limitações são aceitas e documentadas explicitamente — não são bugs, são o contrato atual:
+
+1. **Blast radius `workspace-write`:** o sidecar de execução roda `codex exec --sandbox
+   workspace-write` — um raio de ação mais amplo que o `--sandbox read-only` do challenger de
+   review (M004). O invariante "`.gsd/` intocado, nenhum `git commit` feito pelo sidecar" é
+   **contrato + detecção pós-hoc** (o orquestrador confere o diff depois), **não é
+   sandbox-enforced** pelo próprio `codex`. Na prática, isso significa que o raio de ação de um
+   eventual prompt-injection no conteúdo processado é igual ao workspace inteiro, não limitado
+   a leitura. Aceite essa superfície antes de ativar `workers.execute-task: codex` em repositórios
+   sensíveis.
+2. **Evidence sintetizado, não capturado ao vivo:** para um worker Claude nativo, cada chamada
+   Bash/Write/Edit grava uma linha no evidence log em tempo real (hook `PostToolUse`). Para o
+   sidecar codex, o evidence é **sintetizado pós-hoc** a partir de `git diff --name-status
+   {START_SHA}` ao final da execução (`source: codex-sidecar`) — é **advisory**, útil para
+   auditoria, mas não tem a granularidade por-chamada do caminho nativo. Como o invariante
+   no-commit mantém `HEAD == {START_SHA}`, esse `git diff --name-status` **não inclui arquivos
+   novos não-rastreados (untracked)** — para tasks que criam arquivos, o evidence log fica quase
+   vazio. A lista de arquivos autoritativa não é esse evidence: é o result JSON do sidecar
+   (`files_changed_declared`, declarado pela task, mais `files_changed`, derivado de `git status
+   --porcelain`, que captura untracked) — é essa fonte que o file-audit usa, não o
+   `--name-status`. Blind spot residual aceito: arquivos **gitignored** criados pelo sidecar não
+   aparecem nem no `--name-status` nem no `git status --porcelain`, e não são removidos pelo
+   reset `git clean -fd` (sem `-x`) — fora do escopo de detecção atual.
+3. **Sem retry do trabalho codex (fail-once):** se o sidecar falhar por qualquer motivo (exit
+   code ≠ 0, timeout, JSON de result-file inválido), o orquestrador reseta o repositório para
+   `START_SHA` e faz **um único** fallback ao worker Claude equivalente — não há retry do
+   trabalho GPT. Uma falha do sidecar custa, no máximo, uma tentativa perdida.
+
+---
+
 ## Atualizar
 
 ```bash

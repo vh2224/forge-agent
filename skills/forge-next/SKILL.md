@@ -249,17 +249,28 @@ if [ "$unit_type" = "plan-slice" ]; then
   fi
 fi
 
-# Step 4: resolve model — PREFS.tier_models[tier] with fallback to forge-tiers.md defaults
-MODEL_ID=$(node -e "
-  let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
-  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-5','heavy':'claude-opus-4-8','max':'claude-fable-5'};
-  const tier='$TIER';
-  const validTiers=['light','standard','heavy','max'];
-  const t=validTiers.includes(tier)?tier:'standard';
-  process.stdout.write((p.tier_models||{})[t]||d[t]);
-")
+# Step 4: resolve model via the intra-tier chain (raw cascade — NEVER prefs-resolved.json; MEM001 M005)
+TIER_CHAIN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --cwd "$WORKING_DIR" --json)
+MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1])[0].id)" "$TIER_CHAIN_JSON")
+# $TIER_CHAIN_JSON carries forward unmodified — consumed by the Failure Taxonomy via
+# `node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --next-after "$MODEL_ID"` on
+# model_refusal/429/400, BEFORE any cross-tier escalation (context_overflow's ladder is separate
+# and unchanged — see shared/forge-tiers.md § Tier Chains — Scalar vs. List).
+
+# Step 4b: tier-chain cursor (consume-once) — makes the "next run will use $NEXT" message from a
+# prior model_refusal/429/400 failure REAL. Without this, a fresh /forge-next re-resolves MODEL_ID
+# from chain[0] (same refused primary) every time — an indefinite same-primary loop. See step
+# "Persist tier-chain cursor" in the Failure Taxonomy below for the write side.
+TIER_CURSOR_FILE="$WORKING_DIR/.gsd/forge/tier-cursor-${RUN_ID:-legacy}-${unit_type}-${unit_id}.json"
+if [ -f "$TIER_CURSOR_FILE" ]; then
+  CURSOR_MODEL=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).model||'')" "$TIER_CURSOR_FILE" 2>/dev/null)
+  if [ -n "$CURSOR_MODEL" ]; then
+    MODEL_ID="$CURSOR_MODEL"; REASON="tier-chain-cursor:$MODEL_ID"
+  fi
+  rm -f "$TIER_CURSOR_FILE"
+fi
 ```
-`TIER`, `MODEL_ID`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
+`TIER`, `MODEL_ID`, `TIER_CHAIN_JSON`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
 
 > **Fable 5 thinking guard:** if `$MODEL_ID` is `claude-fable-5`, inject `thinking: adaptive` in the
 > worker prompt header (or omit the `thinking:` line) regardless of the phase's `thinking:` pref —
@@ -1088,9 +1099,11 @@ Parse the `---GSD-WORKER-RESULT---` block:
 
 | Class | Signals | Message to user |
 |-------|---------|-----------------|
-| `context_overflow` | "context limit", "too long", "token" | "Task too large for one context window. Run `/forge-next` again — it will retry with a more capable model." |
+| `context_overflow` | "context limit", "too long", "token" | "Task too large for one context window. Run `/forge-next` again — it will retry with a more capable model." **Unchanged — climbs tiers (`standard → heavy → max`), does NOT consume `$TIER_CHAIN`.** |
 | `scope_exceeded` | "out of scope", "too broad" | "Task scope too broad. Ask the planner to split T## before continuing." |
-| `model_refusal` | "cannot", "I'm not able", "policy" | "Model refused the task. Try `/forge-next` again or adjust the task plan." |
+| `model_refusal` | "cannot", "I'm not able", "policy" | Consume the intra-tier chain: `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --next-after "$MODEL_ID" --cwd "$WORKING_DIR")`. **Persist tier-chain cursor:** if `$NEXT` is non-empty, write it to `$WORKING_DIR/.gsd/forge/tier-cursor-${RUN_ID:-legacy}-${unit_type}-${unit_id}.json` as `{"model": "$NEXT", "ts": "<ISO8601 now>"}` (`mkdir -p` the dir first) — Step 4b above consumes-and-deletes this file on the *next* `/forge-next` invocation, so the fallback below is real, not just advertised. `forge-next` does not auto-recover mid-unit (step mode surfaces to the user) — so surface: "Model refused the task. Run `/forge-next` again — it will retry with the next model in the tier chain (`$NEXT`)." If `$NEXT` is empty (chain exhausted) → do NOT write a cursor file; surface "Model refused the task and the tier chain is exhausted. Adjust the task plan or tier config." |
+| `429` | "rate limit", "429", "quota" | Same chain-walk + cursor-persist semantics as `model_refusal` — surface: "Rate limited. Run `/forge-next` again — it will retry with the next model in the tier chain (`$NEXT`)." or "chain exhausted" message if `$NEXT` empty (no cursor written). This is a `status: blocked` classification (Layer 2), distinct from a transient 429 raised as an `Agent()` exception (Retry Handler, Layer 1). |
+| `400` | "400", "bad request", "invalid" | Same chain-walk + cursor-persist semantics as `model_refusal`. |
 | `tooling_failure` | "command not found", "permission denied", "ENOENT" | "Tooling error — check that required tools are installed." |
 | `external_dependency` | "API", "network", "not running" | "External dependency unavailable — resolve it and re-run `/forge-next`." |
 | `unknown` | anything else | Surface raw blocker message. |

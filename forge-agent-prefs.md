@@ -363,7 +363,31 @@ tier_models:
   standard: claude-sonnet-5              # balanced (execute-task default, research, discuss)
   heavy:    "claude-opus-4-8[1m]"          # deep reasoning (plan-slice default)
   max:      claude-fable-5                 # frontier (plan-milestone, risk:high plan-slice, blocker escalation) — 2x opus cost
+  # standard: [claude-sonnet-5, claude-haiku-4-5-20251001]  # forma-lista: primário + fallback intra-tier
 ```
+
+### Forma-lista (cadeia de fallback intra-tier)
+
+`tier_models.<tier>` aceita, além do escalar acima, uma **lista** `[primário, ...fallbacks]`:
+
+```
+tier_models:
+  standard: [claude-sonnet-5, claude-haiku-4-5-20251001]   # primário + 1 fallback intra-tier
+```
+
+- O **primeiro** membro é o primário — mesmo comportamento do escalar (compat byte-idêntica quando
+  a lista tem 1 item só, ou quando o campo continua escalar).
+- Os membros seguintes formam uma **escada intra-tier** consumida pela Failure Taxonomy para as
+  classes `model_refusal`, `429` e `400`: o dispatch tenta o próximo membro da lista **antes** de
+  escalar de tier. `context_overflow` continua subindo de tier normalmente (`standard → heavy →
+  max`), sem consumir a escada intra-tier — os dois mecanismos são independentes.
+- Membro **sem entrada no mapa ID→alias** (`scripts/forge-model-alias.js`) é **pulado** com warning
+  e `model_applied: null` no evento — mesma regra do escalar, aplicada item a item.
+- Um ID de outra família (ex.: um modelo GPT) numa entrada de `tier_models` **não** vira worker
+  nativo automaticamente — isso é o eixo distinto `workers:` (ver S02). A lista aqui só afeta
+  qual `model:` é passado ao `Agent()`; não implica em roteamento de worker alternativo.
+- Cross-ref: [`shared/forge-tiers.md`](shared/forge-tiers.md) (tabela canônica de tiers) e
+  `scripts/forge-tier-chain.js` (consumidor da escada intra-tier na Failure Taxonomy).
 
 ### How this block works
 
@@ -436,6 +460,58 @@ skip-rule logic. Do not update model IDs there; update `tier_models:` instead.
   `tier → default model` tables. Edit to add new unit types or tiers.
 - [`shared/forge-dispatch.md § Tier Resolution`](shared/forge-dispatch.md) — runtime resolution
   algorithm; reads `forge-tiers.md` tables then applies `tier_models:` overrides from prefs.
+
+## Workers Settings
+
+Controla o **eixo `workers:`** — qual engine (`claude` ou `codex`) executa cada `unit_type`
+routável. Este eixo é **ortogonal** ao `tier_models:` lista (§ Tier Settings acima):
+`tier_models:` escolhe qual modelo Claude concreto roda dentro do worker Claude (fallback
+intra-tier — S04); `workers:` escolhe **qual engine** roda a unidade — Claude nativo em
+contexto (comportamento atual) ou um sidecar externo `codex` via `scripts/forge-xllm.js`
+(S01). Não confundir os dois: um ID de outra família dentro de `tier_models` NÃO ativa
+roteamento de worker alternativo — só o bloco abaixo faz isso.
+
+```
+workers:
+  execute-task: claude     # claude | codex  (default claude)
+  plan-slice:   claude     # claude | codex  (default claude)
+  timeout: 1800            # segundos — teto do sidecar codex antes do SIGKILL
+  codex_model:             # unset = default do codex-cli; ex.: gpt-5.6-sol
+```
+
+### Semântica
+
+- `execute-task` / `plan-slice` (padrão `claude` em ambos): únicos `unit_type` cobertos pelo
+  eixo `workers:`. `claude` mantém o comportamento atual byte-a-byte — o worker Claude
+  (`forge-executor`/`forge-planner`) roda em contexto, sem nenhuma mudança de fluxo. `codex`
+  roteia a unidade ao sidecar externo (`scripts/forge-xllm.js --mode execute` ou `--mode plan`,
+  este último read-only — não escreve `.gsd/**` diretamente, o orquestrador materializa o
+  retorno). Qualquer falha do sidecar (binário ausente, auth, timeout, quota) faz reset ao
+  `START_SHA` (só em `execute-task`; `plan-slice` não tem side effects a desfazer) e cai num
+  **fallback único** ao worker Claude nativo — sem retry, evento `worker-engine-fallback`.
+- `timeout` (padrão `1800`, segundos): teto do sidecar codex antes do processo receber SIGKILL.
+  Aplica-se apenas quando `ENGINE == codex`; irrelevante no caminho `claude`.
+- `codex_model` (padrão unset): repassado como `-m <valor>` ao `codex-cli` quando definido;
+  unset usa o modelo default do CLI instalado. Ignorado quando o engine resolvido é `claude`.
+- **`plan-milestone` NÃO é coberto** por este eixo (locked) — permanece sempre no tier `max`
+  (Fable), independente do que este bloco configure. Nenhuma outra fase (`discuss-*`,
+  `research-*`, `complete-*`, `memory-extract`) é routável por `workers:`.
+- **Precedência (maior ganha):** (1) frontmatter `worker: claude|codex` em `T##-PLAN.md`
+  (só `execute-task`) — espelha o override `tier:` por task; (2) pref `workers.<unit_type>`
+  deste bloco (cascata 3-arquivos, último ganha); (3) default `claude`.
+- Default `claude` em todo o bloco preserva o comportamento atual sem nenhuma mudança —
+  o eixo é inteiramente opt-in.
+
+### Cross-references
+
+- Spec canônica: [`shared/forge-dispatch.md § Worker Engine Routing`](shared/forge-dispatch.md) —
+  algoritmo de resolução completo, reader regex-over-raw-prefs, branches C (`execute-task`) e
+  D (`plan-slice`), fallback.
+- Adapter: `scripts/forge-xllm.js` (S01) — sidecar `codex-cli`, background+polling, result-file JSON.
+- Não confundir com: `forge-agent-prefs.md § Tier Settings` (`tier_models:` — fallback intra-tier
+  Claude, S04; eixo de *modelo*, não de *engine*).
+- Consumidores: `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`, `skills/forge-task/SKILL.md`
+  (Step 4/5 dispatch — mirror executável do algoritmo canônico).
 
 ## Verification Settings
 

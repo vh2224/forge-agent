@@ -1191,16 +1191,24 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
    - Else if `PLAN_TAG == "docs"` → `tier = "light"`, `reason = "frontmatter-tag:docs"`.
    - Else if `unit_type == plan-slice` AND the slice is tagged `risk:high` in the milestone ROADMAP → `tier = "max"`, `reason = "risk-escalation:high"`. (Same ROADMAP check that triggers the `forge-risk-radar` gate.)
    - Else → `tier` stays as unit-type default, `reason = "unit-type:${unit_type}"`.
-4. **Resolve model.** Look up `PREFS.tier_models[tier]`; fall back to the [Tier → Default Model](forge-tiers.md#tier--default-model) table when the key is absent:
+4. **Resolve model via the tier chain.** `tier_models.<tier>` in the raw prefs cascade may be a
+   scalar model ID (legacy/common case) or an ordered fallback chain `[primary, ...fallbacks]`.
+   Read it through [`scripts/forge-tier-chain.js`](../scripts/forge-tier-chain.js) — **never**
+   `.gsd/prefs-resolved.json` (that file is never written; MEM001 M005):
    ```bash
-   model=$(node -e "
-     const prefs=require('./.gsd/prefs-resolved.json')||{};
-     const defaults={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-5','heavy':'claude-opus-4-8','max':'claude-fable-5'};
-     const m=(prefs.tier_models||{})['$tier']||defaults['$tier'];
-     process.stdout.write(m);
-   ")
+   TIER_CHAIN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --cwd "$WORKING_DIR" --json)
+   MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1])[0].id)" "$TIER_CHAIN_JSON")
    ```
-   If `tier` is not one of `light | standard | heavy | max`, treat as `standard` (defensive fallback).
+   `MODEL_ID` is always `chain[0].id` — the primary member (identical to today's scalar resolution
+   when `tier_models.<tier>` is a scalar; a scalar is just a one-member chain). `$TIER_CHAIN_JSON` is
+   the full ordered chain (`[{id, alias, mapped}, ...]`); carry it forward unmodified — the Failure
+   Taxonomy consumes it via `--next-after <id>` to walk the intra-tier fallback ladder on
+   `model_refusal`/429/400 **before** escalating tier (see
+   [`shared/forge-tiers.md § Tier Chains — Scalar vs. List`](forge-tiers.md#tier-chains--scalar-vs-list)
+   for the full semantics; this is a **separate ladder** from `context_overflow`'s cross-tier
+   `standard→heavy→max` escalation, which is unchanged and does not consume the chain).
+   If `tier` is not one of `light | standard | heavy | max`, `forge-tier-chain.js` treats it as
+   `standard` internally (defensive fallback) — no separate guard needed here.
 
    > **Fable 5 thinking guard:** when the resolved model is `claude-fable-5`, force the worker prompt
    > header to `thinking: adaptive` (or omit the `thinking:` line) regardless of phase prefs —
@@ -1220,6 +1228,14 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
 | `tier_models.standard` | string (model ID) | `claude-sonnet-5` | Model used when tier resolves to `standard` |
 | `tier_models.heavy` | string (model ID) | `claude-opus-4-8` | Model used when tier resolves to `heavy` |
 | `tier_models.max` | string (model ID) | `claude-fable-5` | Model used when tier resolves to `max` (plan-milestone, `risk:high` plan-slice, blocker escalation). 2x the cost of opus — never a default for high-volume unit types |
+
+Each `tier_models.<tier>` key accepts either form:
+- **Scalar** — `tier_models.standard: claude-sonnet-5` — a single-member chain, byte-identical to
+  today's behavior. `$MODEL_ID` = that value, `$TIER_CHAIN` = `[{id, alias, mapped:true}]`.
+- **List** — `tier_models.standard: [claude-sonnet-5, claude-haiku-4-5-20251001]` — ordered
+  primary-first fallback chain. `$MODEL_ID` = the first (primary) member; `$TIER_CHAIN` = the full
+  chain, consumed by the Failure Taxonomy's intra-tier ladder (see
+  [`shared/forge-tiers.md § Tier Chains — Scalar vs. List`](forge-tiers.md#tier-chains--scalar-vs-list)).
 
 The `tier_models` block ships in T05. Until then, the resolver falls back to the defaults above silently.
 
@@ -1302,6 +1318,25 @@ Dispatch event:
 {"ts":"2026-04-16T10:07:00Z","event":"dispatch","unit":"execute-task/T09","model":"claude-haiku-4-5-20251001","input_tokens":1100,"output_tokens":200,"tier":"light","reason":"frontmatter-tag:docs"}
 ```
 
+**Example D — `execute-task` with `tier_models.standard` set as a fallback list**
+
+```
+unit_type       : execute-task   → default tier = standard
+PLAN_TIER       : (absent)
+PLAN_TAG        : (absent)
+tier_models.standard : [claude-sonnet-5, claude-haiku-4-5-20251001]   ← list form
+
+→ tier        = standard
+→ TIER_CHAIN  = [{"id":"claude-sonnet-5","alias":"sonnet","mapped":true},{"id":"claude-haiku-4-5-20251001","alias":"haiku","mapped":true}]
+→ MODEL_ID    = "claude-sonnet-5"   (chain[0].id — the primary)
+→ reason      = "unit-type:execute-task"
+```
+
+`$TIER_CHAIN` is carried forward, unused unless the Failure Taxonomy hits `model_refusal`/429/400 on
+this dispatch — at that point it walks `--next-after claude-sonnet-5` to get `claude-haiku-4-5-20251001`
+**without** escalating tier. Scalar `tier_models.standard: claude-sonnet-5` produces the identical
+`MODEL_ID` here — only `$TIER_CHAIN` differs (one member vs. two).
+
 #### Wiring snippet
 
 Drop this block into the dispatch loop (e.g. `skills/forge-auto/SKILL.md` Step 3, before the `Agent()` call). It is self-contained and copy-paste-adaptable for both `forge-auto` (T04) and `forge-next` (T04).
@@ -1340,9 +1375,13 @@ if [ "$UNIT_TYPE" = "plan-slice" ]; then
   fi
 fi
 
-# Step 4: resolve model
-declare -A TIER_MODELS=([light]="claude-haiku-4-5-20251001" [standard]="claude-sonnet-5" [heavy]="claude-opus-4-8" [max]="claude-fable-5")
-MODEL_ID=$(node -e "const p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8')||'{}');const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-5','heavy':'claude-opus-4-8','max':'claude-fable-5'};process.stdout.write((p.tier_models||{})['$TIER']||d['$TIER'])")
+# Step 4: resolve model via the intra-tier chain (raw cascade — never prefs-resolved.json)
+TIER_CHAIN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --cwd "$WORKING_DIR" --json)
+MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1])[0].id)" "$TIER_CHAIN_JSON")
+# $TIER_CHAIN_JSON carries forward unmodified — consumed by the Failure Taxonomy via
+# `node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --next-after "$MODEL_ID"` on
+# model_refusal/429/400, BEFORE any cross-tier escalation (context_overflow's ladder is separate
+# and unchanged — see shared/forge-tiers.md § Tier Chains — Scalar vs. List).
 
 # Step 4b: Fable 5 thinking guard — claude-fable-5 400s on explicit thinking:disabled.
 # When MODEL_ID is claude-fable-5, inject "thinking: adaptive" in the worker prompt

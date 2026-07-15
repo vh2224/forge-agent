@@ -393,17 +393,15 @@ if [ "$unit_type" = "plan-slice" ]; then
   fi
 fi
 
-# Step 4: resolve model — PREFS.tier_models[tier] with fallback to forge-tiers.md defaults
-MODEL_ID=$(node -e "
-  let p={};try{p=JSON.parse(require('fs').readFileSync('.gsd/prefs-resolved.json','utf8'));}catch(e){}
-  const d={'light':'claude-haiku-4-5-20251001','standard':'claude-sonnet-5','heavy':'claude-opus-4-8','max':'claude-fable-5'};
-  const tier='$TIER';
-  const validTiers=['light','standard','heavy','max'];
-  const t=validTiers.includes(tier)?tier:'standard';
-  process.stdout.write((p.tier_models||{})[t]||d[t]);
-")
+# Step 4: resolve model via the intra-tier chain (raw cascade — NEVER prefs-resolved.json; MEM001 M005)
+TIER_CHAIN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --cwd "$WORKING_DIR" --json)
+MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1])[0].id)" "$TIER_CHAIN_JSON")
+# $TIER_CHAIN_JSON carries forward unmodified — consumed by the Failure Taxonomy via
+# `node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --next-after "$MODEL_ID"` on
+# model_refusal/429/400, BEFORE any cross-tier escalation (context_overflow's ladder is separate
+# and unchanged — see shared/forge-tiers.md § Tier Chains — Scalar vs. List).
 ```
-`TIER`, `MODEL_ID`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
+`TIER`, `MODEL_ID`, `TIER_CHAIN_JSON`, and `REASON` are now set. Use `$MODEL_ID` in the `Agent()` call below (Step 4). `$TIER` and `$REASON` are injected into the dispatch event.
 
 > **Fable 5 thinking guard:** if `$MODEL_ID` is `claude-fable-5`, inject `thinking: adaptive` in the
 > worker prompt header (or omit the `thinking:` line) regardless of the phase's `thinking:` pref —
@@ -1254,14 +1252,16 @@ Parse the `---GSD-WORKER-RESULT---` block:
 
 | Class | Signals | Auto-recovery |
 |-------|---------|---------------|
-| `context_overflow` | "context limit", "too long", "token" | Retry one tier up: `standard → heavy` (opus), `heavy → max` (fable). If already `max` → stop loop, surface to user. Apply the Fable 5 thinking guard when escalating to `max`. |
+| `context_overflow` | "context limit", "too long", "token" | Retry one tier up: `standard → heavy` (opus), `heavy → max` (fable). If already `max` → stop loop, surface to user. Apply the Fable 5 thinking guard when escalating to `max`. **This ladder is unchanged — it climbs tiers, it does NOT consume `$TIER_CHAIN`.** |
 | `scope_exceeded` | "out of scope", "too broad", "multiple tasks" | Stop loop. Tell user: "Task scope too broad — ask forge-planner to split T## into smaller tasks." |
-| `model_refusal` | "cannot", "I'm not able", "policy" | Retry once with a different model (sonnet ↔ opus). If fails again → stop loop, surface to user. |
+| `model_refusal` | "cannot", "I'm not able", "policy" | Consume the intra-tier chain first: `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --next-after "$MODEL_ID" --cwd "$WORKING_DIR")`. If `$NEXT` non-empty → re-dispatch with `MODEL_ID=$NEXT` (re-resolve `$MODEL_ALIAS` via `forge-model-alias.js`; members with no alias are skipped automatically by `--next-after`). If the chain is exhausted (`$NEXT` empty) → stop loop, surface to user. **Does not escalate tier.** |
+| `429` | "rate limit", "429", "quota" | Same intra-tier chain walk as `model_refusal` (`--next-after "$MODEL_ID"`). Chain exhausted → stop loop, surface to user. This is a `status: blocked` classification (Layer 2) — distinct from a transient 429 raised as an `Agent()` exception, which the Retry Handler (Layer 1) already handles; do not double-recover the same failure across layers. |
+| `400` | "400", "bad request", "invalid" | Same intra-tier chain walk as `model_refusal` (`--next-after "$MODEL_ID"`). Chain exhausted → stop loop, surface to user. |
 | `tooling_failure` | "command not found", "permission denied", "ENOENT" | Stop loop. Tell user: "Tooling error — check that required tools are installed and accessible." |
 | `external_dependency` | "API", "network", "not running", "connection refused" | Stop loop. Tell user: "External dependency unavailable — resolve and re-run /forge-auto." |
 | `unknown` | anything else | Stop loop. Surface raw blocker to user. |
 
-Auto-recovery attempts (context_overflow, model_refusal) count as units toward `COMPACT_AFTER`.
+Auto-recovery attempts (context_overflow, model_refusal, 429, 400) count as units toward `COMPACT_AFTER`.
 
 **Before any auto-recovery retry:** If the failed unit spawned a background task (visible via `TaskList` with `status: in_progress` and no owner), call `TaskStop({ task_id: <id> })` to terminate it cleanly before dispatching the retry.
 

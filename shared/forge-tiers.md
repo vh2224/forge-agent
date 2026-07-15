@@ -61,6 +61,45 @@ The four tiers map to four model aliases. Operators can override the model for a
 
 ---
 
+## Tier Chains — Scalar vs. List
+
+`tier_models.<tier>` in the raw prefs cascade (`~/.claude/forge-agent-prefs.md` >
+`.gsd/claude-agent-prefs.md` > `.gsd/prefs.local.md`, last-wins) accepts two forms, both read via
+[`scripts/forge-tier-chain.js`](../scripts/forge-tier-chain.js) — **never**
+`.gsd/prefs-resolved.json` (that file is never written; MEM001 M005):
+
+- **Scalar** — `tier_models.standard: claude-sonnet-5`. A single-member chain. Byte-identical
+  compat with the pre-M005-S04 resolver: `$MODEL_ID` = that value, nothing else changes.
+- **List** — `tier_models.standard: [claude-sonnet-5, claude-haiku-4-5-20251001]`. An ordered,
+  primary-first fallback chain. `$MODEL_ID` = the first (primary) member; the remaining members are
+  the **intra-tier fallback ladder**.
+
+`readTierChain(tier, cwd)` returns `[{ id, alias, mapped }, ...]` — every member annotated with its
+`Agent()`-alias via the shared [`forge-model-alias.js`](../scripts/forge-model-alias.js) map (never
+reimplemented here or in `forge-dispatch.md`, matching the ID→alias pattern documented above).
+`nextAfter(chain, id)` returns the next **mapped** member after `id`, or `''` when the chain is
+exhausted — a member with no known alias (`mapped: false`) is skipped, not returned, and the
+orchestrator logs a `model_applied: null` warning for it (same degrade rule as the ID→alias map
+above: never pass an unmapped ID straight to `Agent()`).
+
+### Two distinct ladders — do not conflate
+
+The Failure Taxonomy's model-level recovery has **two separate axes**, triggered by different
+failure classes and consuming different state:
+
+| Ladder | Triggered by | Consumes | Direction |
+|---|---|---|---|
+| **Intra-tier chain** (this section) | `model_refusal`, HTTP 429, HTTP 400 | `$TIER_CHAIN` via `forge-tier-chain.js --next-after` | Walks fallback members **within the same tier** — never changes tier |
+| **Cross-tier escalation** (existing, unchanged) | `context_overflow` | The tier itself | Escalates `standard → heavy → max`; does not touch the chain |
+
+The intra-tier chain is consumed **before** any cross-tier escalation would apply — a `model_refusal`
+never triggers a tier bump; it only walks `$TIER_CHAIN`. If the chain is exhausted (`nextAfter`
+returns `''`) on a `model_refusal`/429/400, the Failure Taxonomy's existing escalation/surface rules
+for that failure class apply unchanged (this file does not alter those rules — see the Failure
+Taxonomy spec in the consuming skills for the terminal behavior).
+
+---
+
 ## Frontmatter Overrides
 
 Both fields are optional. When present in a `T##-PLAN.md` frontmatter block, they take effect
@@ -106,3 +145,5 @@ Highest precedence first. The first matching rule wins.
 - [`shared/forge-dispatch.md § Tier Resolution`](forge-dispatch.md) — the `### Tier Resolution` block reads this file's tables at runtime to resolve the model for each dispatched unit (to be added in T02).
 - [`skills/forge-auto/SKILL.md`](../skills/forge-auto/SKILL.md) — the main dispatch loop; reads resolved tier from `### Tier Resolution` before invoking `Agent()`.
 - [`skills/forge-next/SKILL.md`](../skills/forge-next/SKILL.md) — step-mode execution; same tier resolution path as forge-auto.
+- [`scripts/forge-tier-chain.js`](../scripts/forge-tier-chain.js) — reads `tier_models.<tier>` from the raw prefs cascade (scalar or list), exports `readTierChain(tier, cwd)` and `nextAfter(chain, id)`; sole implementation of the [Tier Chains — Scalar vs. List](#tier-chains--scalar-vs-list) parsing — never reimplemented in markdown.
+- Failure Taxonomy (Failure recovery skills, e.g. `skills/forge-auto/SKILL.md`) — consumes `$TIER_CHAIN` via `--next-after` for `model_refusal`/429/400 recovery; keeps `context_overflow`'s cross-tier `standard→heavy→max` escalation unchanged and separate.

@@ -2685,6 +2685,115 @@ function smokeStatusPackaging() {
     '(e) SKILL instrui pass-through cru', 'instrução de pass-through cru não encontrada');
 }
 
+// ── Section 28: tier fallback chain (scalar/list parsing + ladder) ─────────
+function smokeTierChain() {
+  process.stdout.write('\n▸ Section 28: tier fallback chain (scalar/list parsing + ladder)\n');
+  const { readTierChain, nextAfter } = require('./forge-tier-chain');
+
+  const writePrefs = (dir, tierModelsBlockLines) => {
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    const body = 'tier_models:\n' + tierModelsBlockLines.map((l) => '  ' + l + '\n').join('');
+    fs.writeFileSync(path.join(dir, '.gsd', 'claude-agent-prefs.md'), body, 'utf8');
+  };
+
+  // (a) scalar → 1-member chain (compat)
+  const dirScalar = mkTmp('tierchain-scalar');
+  writePrefs(dirScalar, ['standard: claude-sonnet-5']);
+  const chainScalar = readTierChain('standard', dirScalar);
+  assert(Array.isArray(chainScalar) && chainScalar.length === 1,
+    '(a) tier_models escalar → cadeia de 1 membro', `got length=${chainScalar.length}`);
+  assert(chainScalar[0].id === 'claude-sonnet-5' && chainScalar[0].mapped === true && chainScalar[0].alias === 'sonnet',
+    '(a) membro escalar mapeado corretamente (alias=sonnet)', JSON.stringify(chainScalar[0]));
+  cleanup(dirScalar);
+
+  // (b) inline list → cadeia ordenada primário-primeiro, N membros
+  const dirList = mkTmp('tierchain-list');
+  writePrefs(dirList, ['standard: [claude-sonnet-5, claude-haiku-4-5-20251001]']);
+  const chainList = readTierChain('standard', dirList);
+  assert(Array.isArray(chainList) && chainList.length === 2,
+    '(b) tier_models lista inline → cadeia com N membros', `got length=${chainList.length}`);
+  assert(chainList[0].id === 'claude-sonnet-5' && chainList[1].id === 'claude-haiku-4-5-20251001',
+    '(b) ordem primário-primeiro preservada', JSON.stringify(chainList));
+  assert(chainList[0].mapped === true && chainList[1].mapped === true,
+    '(b) ambos os membros mapeados (sonnet, haiku)', JSON.stringify(chainList));
+  cleanup(dirList);
+
+  // (c) membro com ID sem alias entre membros mapeados → mapped:false, pulado
+  const dirNoAlias = mkTmp('tierchain-noalias');
+  writePrefs(dirNoAlias, ['standard: [claude-sonnet-5, some-unknown-model-xyz, claude-haiku-4-5-20251001]']);
+  const chainNoAlias = readTierChain('standard', dirNoAlias);
+  assert(chainNoAlias.length === 3, '(c) cadeia mantém os 3 membros (inclusive o sem alias)', `got length=${chainNoAlias.length}`);
+  assert(chainNoAlias[1].id === 'some-unknown-model-xyz' && chainNoAlias[1].mapped === false && chainNoAlias[1].alias === null,
+    '(c) membro sem alias → mapped:false, alias:null', JSON.stringify(chainNoAlias[1]));
+
+  // (d) --next-after: próximo membro mapeado por classe de falha, pulando o sem-alias
+  const next1 = nextAfter(chainNoAlias, 'claude-sonnet-5');
+  assert(next1 === 'claude-haiku-4-5-20251001',
+    '(d) --next-after pula o membro sem alias e retorna o próximo mapeado', `got '${next1}'`);
+  const next2 = nextAfter(chainNoAlias, 'claude-haiku-4-5-20251001');
+  assert(next2 === '', '(d) --next-after em cadeia esgotada retorna string vazia', `got '${next2}'`);
+  cleanup(dirNoAlias);
+
+  // (d2) mesmo comportamento via CLI --next-after
+  const dirCli = mkTmp('tierchain-cli');
+  writePrefs(dirCli, ['standard: [claude-sonnet-5, claude-haiku-4-5-20251001]']);
+  const cliNext2 = runScript('forge-tier-chain.js', ['--tier', 'standard', '--cwd', dirCli, '--next-after', 'claude-sonnet-5']);
+  assert(cliNext2.status === 0 && cliNext2.stdout.trim() === 'claude-haiku-4-5-20251001',
+    '(d2) CLI --next-after retorna próximo membro mapeado', `status=${cliNext2.status} stdout='${cliNext2.stdout.trim()}'`);
+  cleanup(dirList);
+  cleanup(dirCli);
+
+  // (e) doc-presence: context_overflow ainda escala tier standard→heavy→max (escada de modelo intocada)
+  const REPO = path.dirname(SCRIPTS);
+  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+  const tiersDoc = rd('shared/forge-tiers.md');
+  const skillDoc = rd('skills/forge-auto/SKILL.md');
+
+  assert(/context_overflow[\s\S]{0,400}standard\s*→\s*heavy/.test(tiersDoc) || /context_overflow[\s\S]{0,400}standard\s*→\s*heavy/.test(skillDoc),
+    '(e) context_overflow ainda descrito com subida standard→heavy', 'menção de escalação standard→heavy não encontrada');
+  assert(/heavy\s*→\s*max/.test(tiersDoc) || /heavy\s*→\s*max/.test(skillDoc),
+    '(e) escalação heavy→max presente na doc', 'menção heavy→max não encontrada');
+  assert(/[Ii]ntra-tier chain/.test(tiersDoc) && /[Ii]ntra-tier chain/.test(skillDoc),
+    '(e) cadeia intra-tier documentada em forge-tiers.md e forge-auto SKILL.md', 'menção "intra-tier chain" ausente em uma das docs');
+  assert(!/prefs-resolved\.json/.test(rd('scripts/forge-tier-chain.js')) || /never/.test(rd('scripts/forge-tier-chain.js')),
+    '(e) forge-tier-chain.js não lê prefs-resolved.json (ou documenta explicitamente que nunca lê)',
+    'nenhuma menção a prefs-resolved.json / never encontrada');
+  assert(/does not escalate tier|Does not escalate tier|não escala tier/.test(skillDoc),
+    '(e) doc confirma que a cadeia intra-tier NÃO substitui a escada cross-tier', 'confirmação de não-substituição não encontrada');
+
+  // (f) doc-presence: forge-next persists + consumes the tier-chain cursor across invocations
+  // (review-fix R2, M005 S04) — closes the "advertised fallback never happens" gap in step mode.
+  const nextDoc = rd('skills/forge-next/SKILL.md');
+  assert(/tier-cursor-.*unit_id.*\.json/.test(nextDoc),
+    '(f) forge-next grava cursor de cadeia de tier em disco (tier-cursor-*.json)', 'padrão do nome do arquivo de cursor não encontrado');
+  assert(/Step 4b[\s\S]{0,600}TIER_CURSOR_FILE[\s\S]{0,400}rm -f "\$TIER_CURSOR_FILE"/.test(nextDoc),
+    '(f) forge-next consome e apaga o cursor no início da Tier Resolution (consume-once)', 'consumo/limpeza do cursor não encontrado');
+
+  // (g) review-fix M005 triage FIX 1: Windows process-tree kill in invokeCodexDetached
+  const xllmSrc = rd('scripts/forge-xllm.js');
+  assert(/win32/.test(xllmSrc) && /taskkill/.test(xllmSrc) && /'\/T'/.test(xllmSrc) && /'\/F'/.test(xllmSrc),
+    '(g) invokeCodexDetached mata a árvore de processos no Windows via taskkill /T /F', 'guard win32 + taskkill /T /F não encontrado em forge-xllm.js');
+  assert(/process\.kill\(-child\.pid, 'SIGKILL'\)/.test(xllmSrc),
+    '(g) caminho POSIX process.kill(-pid) permanece intocado', 'process.kill(-child.pid, \'SIGKILL\') não encontrado');
+
+  // (h) review-fix M005 triage FIX 2: malformed tier_models inline-list rejected, not corrupted
+  const dirMalformed = mkTmp('tierchain-malformed');
+  writePrefs(dirMalformed, ['standard: [a, b']); // unbalanced — no closing bracket
+  const chainMalformed = readTierChain('standard', dirMalformed);
+  assert(Array.isArray(chainMalformed) && chainMalformed.length === 1 && chainMalformed[0].id === 'claude-sonnet-5',
+    '(h) lista inline malformada (sem colchete de fechamento) degrada para o default seguro do tier',
+    `got ${JSON.stringify(chainMalformed)}`);
+  cleanup(dirMalformed);
+
+  // (h2) valid inline list still parses byte-identically after the hardening
+  const dirValidAgain = mkTmp('tierchain-valid-again');
+  writePrefs(dirValidAgain, ['standard: [claude-sonnet-5, claude-haiku-4-5-20251001]']);
+  const chainValidAgain = readTierChain('standard', dirValidAgain);
+  assert(chainValidAgain.length === 2 && chainValidAgain[0].id === 'claude-sonnet-5' && chainValidAgain[1].id === 'claude-haiku-4-5-20251001',
+    '(h2) lista inline válida continua parseando corretamente', JSON.stringify(chainValidAgain));
+  cleanup(dirValidAgain);
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -2719,6 +2828,7 @@ async function main() {
     smokeStatusPackaging();
     smokeEngineDispatch();
     await smokeXllmPlan();
+    smokeTierChain();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }

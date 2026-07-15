@@ -756,9 +756,18 @@ function invokeCodexDetached(opts) {
     }
 
     // Timeout: kill the whole process group, then the child as a fallback.
+    // Windows has no process groups — `process.kill(-pid)` throws for a negative
+    // pid there, and `child.kill()` alone only kills the direct child, leaving
+    // grandchildren orphaned (codex#7852). Use `taskkill /T /F` to kill the tree.
     timeoutTimer = setTimeout(() => {
       timedOut = true;
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group gone */ }
+      if (process.platform === 'win32') {
+        try {
+          spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { shell: false });
+        } catch { /* best-effort */ }
+      } else {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* group gone */ }
+      }
       try { child.kill('SIGKILL'); } catch { /* already dead */ }
     }, timeoutSecs * 1000);
 
