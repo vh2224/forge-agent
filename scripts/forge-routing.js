@@ -57,9 +57,27 @@
  *
  * Exports:
  *   readRoutingConfig(cwd) -> { present, ok, routing, error }
+ *   resolveRoute(opts)     -> { chain, fallback, source, domain_used, phase, reason }
  *
- * CLI usage (minimal until T03):
- *   node forge-routing.js --dump-config [--cwd <dir>]   # prints parser JSON
+ * CLI usage — exit 0 ALWAYS (degrades, never throws to the caller):
+ *   # Contract JSON (default and --json are identical):
+ *   node forge-routing.js --unit-type execute-task --tier standard \
+ *     --domain backend --cwd <dir>
+ *   node forge-routing.js --unit-type plan-slice --tier heavy --json
+ *
+ *   # Walk the RESOLVED chain, then the category fallback ONCE, then '':
+ *   node forge-routing.js --unit-type execute-task --tier standard \
+ *     --domain backend --next-after claude-sonnet-5 --cwd <dir>
+ *
+ *   # Step-by-step precedence trace (pt-BR — shadowing mitigation, v1):
+ *   node forge-routing.js --unit-type execute-task --tier standard \
+ *     --domain backend --explain --cwd <dir>
+ *
+ * Flags: --unit-type <v> --tier <v> --domain <v> --frontmatter-tier <v>
+ *        --frontmatter-worker <v> --cwd <dir> --next-after <id> --explain --json
+ * Defaults: --tier standard, --cwd process.cwd(), --domain absent → resolver
+ * uses the `default` domain. Unexpected runtime failure is caught by a
+ * last-resort try/catch that still emits the ordered contract and exits 0.
  */
 
 'use strict';
@@ -469,16 +487,211 @@ module.exports = {
   nextInChain,
 };
 
-// ── CLI entrypoint (minimal — full CLI arrives in T03) ─────────────────────
-if (require.main === module) {
-  const args = process.argv.slice(2);
-  let cwd = process.cwd();
+// ═══════════════════════════════════════════════════════════════════════════
+// T03 — CLI: arg parsing, contract JSON, --next-after, --explain, last-resort
+// try/catch. resolveRoute is NOT reimplemented here — the CLI only wires it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Arg parsing (forge-review-pairing.js loop pattern) ──────────────────────
+function parseArgs(args) {
+  const parsed = {
+    unitType: null,
+    tier: 'standard',
+    domain: null,
+    frontmatterTier: null,
+    frontmatterWorker: null,
+    cwd: process.cwd(),
+    nextAfter: null,
+    hasNextAfter: false,
+    explain: false,
+    asJson: false,
+  };
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--cwd' && args[i + 1] !== undefined) {
-      cwd = args[++i];
+    const value = args[i + 1];
+    if (args[i] === '--unit-type' && value !== undefined) {
+      parsed.unitType = value;
+      i += 1;
+    } else if (args[i] === '--tier' && value !== undefined) {
+      parsed.tier = value;
+      i += 1;
+    } else if (args[i] === '--domain' && value !== undefined) {
+      parsed.domain = value;
+      i += 1;
+    } else if (args[i] === '--frontmatter-tier' && value !== undefined) {
+      parsed.frontmatterTier = value;
+      i += 1;
+    } else if (args[i] === '--frontmatter-worker' && value !== undefined) {
+      parsed.frontmatterWorker = value;
+      i += 1;
+    } else if (args[i] === '--cwd' && value !== undefined) {
+      parsed.cwd = value;
+      i += 1;
+    } else if (args[i] === '--next-after' && value !== undefined) {
+      parsed.hasNextAfter = true;
+      parsed.nextAfter = value;
+      i += 1;
+    } else if (args[i] === '--explain') {
+      parsed.explain = true;
+    } else if (args[i] === '--json') {
+      parsed.asJson = true;
     }
   }
-  // Debug flag only for now; the contract CLI is built in T03. Exit 0 always.
-  process.stdout.write(JSON.stringify(readRoutingConfig(cwd)) + '\n');
+  return parsed;
+}
+
+// ── --explain — pt-BR precedence trace (v1 shadowing mitigation) ────────────
+// Discriminator → human sentence. Absent discriminators are simply not shown.
+const REASON_TEXT = {
+  'routing-hit': 'célula routing.<domínio>.<fase>.<tier> encontrada',
+  'routing-default':
+    'célula do domínio ausente — usou routing.default.<fase>.<tier>',
+  tier_models: 'cadeia legada tier_models (sem routing, ou célula+default ausentes)',
+  'frontmatter-tier': 'tier fixado no frontmatter venceu o rótulo de source',
+  'frontmatter-worker': 'worker fixado no frontmatter venceu a precedência',
+  'routing-parse-error':
+    'anomalia de parse no bloco routing: — degradou para a cadeia legada',
+  'phase-not-routable':
+    'fase não-roteável (plan-milestone/discuss/memory/completer/desconhecida) — cadeia legada',
+  'fallback-invalid-substituted':
+    'fallback configurado não-claude/não-mapeado — substituído pelo default do tier',
+  'chain-capped': 'cadeia truncada no cap de ' + CHAIN_CAP,
+  'skipped-unknown-family':
+    'membro com família desconhecida (modelFamily null) pulado da cadeia',
+  'routing-runtime-error':
+    'falha runtime inesperada — degradou preservando o contrato',
+};
+
+function explainRoute(r, o) {
+  const reasons = r.reason ? r.reason.split('; ').filter((p) => p !== '') : [];
+  const reqTier = o.frontmatterTier || o.tier;
+  const lines = [];
+  lines.push('── Explicação da rota (forge-routing) ──');
+  lines.push(
+    'unit_type: ' +
+      (o.unitType || '(nenhum)') +
+      ' → fase mapeada: ' +
+      (r.phase || '(não-roteável)')
+  );
+  lines.push(
+    'tier: ' +
+      reqTier +
+      (o.frontmatterTier ? ' (fixado pelo frontmatter)' : '')
+  );
+  lines.push(
+    'domínio consultado: ' +
+      (o.domain || '(nenhum)') +
+      ' → domain_used: ' +
+      r.domain_used +
+      ' (last-wins por domínio inteiro)'
+  );
+  lines.push('camada de precedência vencedora (source): ' + r.source);
+  lines.push('');
+  lines.push('Passo a passo / degradações aplicadas:');
+  if (reasons.length === 0) {
+    lines.push('  • (nenhum discriminador registrado)');
+  } else {
+    for (const rp of reasons) {
+      lines.push('  • ' + rp + ' — ' + (REASON_TEXT[rp] || 'discriminador'));
+    }
+  }
+  lines.push('');
+  lines.push('Cadeia final (engine por membro):');
+  if (!r.chain || r.chain.length === 0) {
+    lines.push('  (vazia)');
+  } else {
+    r.chain.forEach((m, idx) => {
+      lines.push(
+        '  ' +
+          (idx + 1) +
+          '. ' +
+          m.id +
+          ' [alias: ' +
+          m.alias +
+          ', engine: ' +
+          m.engine +
+          ', mapped: ' +
+          m.mapped +
+          ']'
+      );
+    });
+  }
+  lines.push(
+    'fallback de categoria: ' +
+      r.fallback.id +
+      ' [alias: ' +
+      r.fallback.alias +
+      ']'
+  );
+  return lines.join('\n');
+}
+
+// ── runCli — resolve, then emit the requested view. exit 0 handled by caller ─
+function runCli(args) {
+  const o = parseArgs(args);
+  const r = resolveRoute({
+    unitType: o.unitType,
+    tier: o.tier,
+    domain: o.domain,
+    frontmatterTier: o.frontmatterTier,
+    frontmatterWorker: o.frontmatterWorker,
+    cwd: o.cwd,
+  });
+
+  // --next-after walks the RESOLVED chain (already pruned + capped), then the
+  // category fallback ONCE, then '' — nextInChain implements exactly this.
+  if (o.hasNextAfter) {
+    process.stdout.write(nextInChain(r.chain, r.fallback, o.nextAfter) + '\n');
+    return;
+  }
+  if (o.explain) {
+    process.stdout.write(explainRoute(r, o) + '\n');
+    return;
+  }
+  // default and --json emit the same one-line contract JSON.
+  process.stdout.write(JSON.stringify(r) + '\n');
+}
+
+module.exports.parseArgs = parseArgs;
+module.exports.explainRoute = explainRoute;
+module.exports.runCli = runCli;
+
+// ── CLI entrypoint — exit 0 ALWAYS, last-resort degradation preserves order ──
+if (require.main === module) {
+  try {
+    runCli(process.argv.slice(2));
+  } catch {
+    // Unexpected runtime failure: emit a valid degraded contract from the
+    // legacy tier chain, preserving the ordered field contract. Never throw.
+    let tier = 'standard';
+    let cwd = process.cwd();
+    const a = process.argv.slice(2);
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] === '--tier' && a[i + 1] !== undefined) tier = a[++i];
+      else if (a[i] === '--cwd' && a[i + 1] !== undefined) cwd = a[++i];
+    }
+    let chain = [];
+    let fallback = { id: '', alias: null };
+    try {
+      const legacy = readTierChain(tier, cwd);
+      chain = legacy.map((m) => ({
+        id: m.id,
+        alias: m.alias,
+        mapped: m.mapped,
+        engine: modelFamily(m.id),
+      }));
+      if (legacy[0]) fallback = { id: legacy[0].id, alias: legacy[0].alias };
+    } catch {
+      /* even the legacy chain failed — emit the minimal ordered contract */
+    }
+    const result = {
+      chain,
+      fallback,
+      source: 'tier_models',
+      domain_used: 'default',
+      phase: '',
+      reason: buildReason(['routing-runtime-error', 'tier_models']),
+    };
+    process.stdout.write(JSON.stringify(result) + '\n');
+  }
   process.exit(0);
 }
