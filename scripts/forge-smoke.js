@@ -2794,6 +2794,480 @@ function smokeTierChain() {
   cleanup(dirValidAgain);
 }
 
+// ── Section 29: review pairing (família + agregador de autoria) ────────────
+function smokeReviewPairing() {
+  process.stdout.write('\n▸ Section 29: review pairing (família + agregador de autoria)\n');
+  const { modelFamily, engineFamily } = require('./forge-model-alias');
+
+  // (a) família — via require
+  assert(modelFamily('claude-fable-5') === 'claude', '(a) modelFamily(claude-fable-5)===claude', `got ${modelFamily('claude-fable-5')}`);
+  assert(modelFamily('claude-opus-4-8') === 'claude', '(a) modelFamily(claude-opus-4-8)===claude', `got ${modelFamily('claude-opus-4-8')}`);
+  assert(modelFamily('gpt-5-codex') === 'gpt', '(a) modelFamily(gpt-5-codex)===gpt', `got ${modelFamily('gpt-5-codex')}`);
+  assert(modelFamily('gemini-2') === null, '(a) modelFamily(gemini-2)===null', `got ${modelFamily('gemini-2')}`);
+  assert(modelFamily('') === null, "(a) modelFamily('')===null", `got ${modelFamily('')}`);
+  assert(engineFamily('claude') === 'claude', '(a) engineFamily(claude)===claude', `got ${engineFamily('claude')}`);
+  assert(engineFamily('codex') === 'gpt', '(a) engineFamily(codex)===gpt', `got ${engineFamily('codex')}`);
+  assert(engineFamily('x') === null, '(a) engineFamily(x)===null', `got ${engineFamily('x')}`);
+
+  // (a2) família — via CLI
+  const rFamily1 = runScript('forge-model-alias.js', ['--family', 'claude-fable-5']);
+  assert(rFamily1.status === 0 && rFamily1.stdout.trim() === 'claude',
+    '(a2) CLI --family claude-fable-5 → stdout claude', `status=${rFamily1.status} stdout='${rFamily1.stdout.trim()}'`);
+  const rFamily2 = runScript('forge-model-alias.js', ['--family', 'gemini-2']);
+  assert(rFamily2.status === 0 && rFamily2.stdout.trim() === '',
+    '(a2) CLI --family gemini-2 → stdout vazio', `status=${rFamily2.status} stdout='${rFamily2.stdout.trim()}'`);
+
+  // helper de fixture
+  const writeEvents = (dir, lines) => {
+    const forgeDir = path.join(dir, '.gsd', 'forge');
+    fs.mkdirSync(forgeDir, { recursive: true });
+    const file = path.join(forgeDir, 'events.jsonl');
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + (lines.length ? '\n' : ''), 'utf8');
+    return file;
+  };
+
+  const runPairing = (eventsFile, dir, extraArgs) => {
+    const args = ['--slice', 'S02', '--milestone', 'M006', '--cwd', dir, '--events', eventsFile, ...(extraArgs || [])];
+    const r = runScript('forge-review-pairing.js', args);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout.trim()); } catch {}
+    return { r, parsed };
+  };
+
+  // (b) misto: 2 codex + 1 claude
+  const dirMisto = mkTmp('pairing-misto');
+  const evMisto = writeEvents(dirMisto, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex' },
+    { event: 'dispatch', unit: 'execute-task/T03', engine: 'claude' },
+  ]);
+  const { parsed: pMisto } = runPairing(evMisto, dirMisto);
+  assert(pMisto && pMisto.author === 'gpt' && pMisto.author_engine === 'codex' &&
+    pMisto.challenger === 'claude' && pMisto.policy === 'majority',
+    '(b) fixture misto → author=gpt, challenger=claude, policy=majority', JSON.stringify(pMisto));
+
+  // (c) puro-claude
+  const dirPuroClaude = mkTmp('pairing-puro-claude');
+  const evPuroClaude = writeEvents(dirPuroClaude, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'claude' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'claude' },
+    { event: 'dispatch', unit: 'execute-task/T03', engine: 'claude' },
+  ]);
+  const { parsed: pPuroClaude } = runPairing(evPuroClaude, dirPuroClaude, ['--advocate', 'auto']);
+  assert(pPuroClaude && pPuroClaude.author === 'claude' && pPuroClaude.challenger === 'codex' &&
+    pPuroClaude.advocate === 'claude' && pPuroClaude.fallbacks.length === 0,
+    '(c) fixture puro-claude → author=claude, challenger=codex, advocate=claude, fallbacks vazio', JSON.stringify(pPuroClaude));
+
+  // (d) puro-codex
+  const dirPuroCodex = mkTmp('pairing-puro-codex');
+  const evPuroCodex = writeEvents(dirPuroCodex, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex' },
+  ]);
+  const { parsed: pPuroCodex } = runPairing(evPuroCodex, dirPuroCodex);
+  assert(pPuroCodex && pPuroCodex.author === 'gpt' && pPuroCodex.challenger === 'claude',
+    '(d) fixture puro-codex → author=gpt, challenger=claude', JSON.stringify(pPuroCodex));
+
+  // (e) sem-engine: campo engine ausente em eventos presentes
+  const dirSemEngine = mkTmp('pairing-sem-engine');
+  const evSemEngine = writeEvents(dirSemEngine, [
+    { event: 'dispatch', unit: 'execute-task/T01' },
+    { event: 'dispatch', unit: 'execute-task/T02' },
+  ]);
+  const { parsed: pSemEngine } = runPairing(evSemEngine, dirSemEngine);
+  assert(pSemEngine && pSemEngine.author === 'claude' && !pSemEngine.fallbacks.includes('no-authorship-data'),
+    '(e) fixture sem-engine → author=claude, SEM no-authorship-data', JSON.stringify(pSemEngine));
+
+  // (f) zero-events
+  const dirZero = mkTmp('pairing-zero-events');
+  const evZero = writeEvents(dirZero, []);
+  const { parsed: pZero } = runPairing(evZero, dirZero);
+  assert(pZero && pZero.author === 'claude' && pZero.policy === 'no-authorship-data' &&
+    pZero.fallbacks.includes('no-authorship-data'),
+    '(f) fixture zero-events → author=claude, policy=no-authorship-data, fallbacks inclui marcador', JSON.stringify(pZero));
+
+  // (g) review-fix ignorado
+  const dirReviewFix = mkTmp('pairing-review-fix');
+  const evReviewFix = writeEvents(dirReviewFix, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex' },
+    { event: 'dispatch', unit: 'review-fix/S02', engine: 'claude' },
+  ]);
+  const { parsed: pReviewFix } = runPairing(evReviewFix, dirReviewFix);
+  assert(pReviewFix && pReviewFix.counts.claude === 0 && pReviewFix.author === 'gpt',
+    '(g) evento review-fix ignorado → counts.claude=0, author=gpt', JSON.stringify(pReviewFix));
+
+  // (h) empate (tie-last) — última = claude
+  const dirTie1 = mkTmp('pairing-tie-claude-last');
+  const evTie1 = writeEvents(dirTie1, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'claude' },
+  ]);
+  const { parsed: pTie1 } = runPairing(evTie1, dirTie1);
+  assert(pTie1 && pTie1.author === 'claude' && pTie1.policy === 'tie-last',
+    '(h) empate, última=claude → author=claude, policy=tie-last', JSON.stringify(pTie1));
+
+  // (h2) empate — última = codex (ordem invertida)
+  const dirTie2 = mkTmp('pairing-tie-codex-last');
+  const evTie2 = writeEvents(dirTie2, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'claude' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex' },
+  ]);
+  const { parsed: pTie2 } = runPairing(evTie2, dirTie2);
+  assert(pTie2 && pTie2.author === 'gpt' && pTie2.policy === 'tie-last',
+    '(h2) empate, última=codex → author=gpt, policy=tie-last', JSON.stringify(pTie2));
+
+  // (i) defend-mode: puro-codex + --advocate auto
+  const { parsed: pDefend1 } = runPairing(evPuroCodex, dirPuroCodex, ['--advocate', 'auto']);
+  assert(pDefend1 && pDefend1.advocate === 'claude' && pDefend1.fallbacks.includes('defend-mode-unavailable'),
+    '(i) puro-codex + advocate=auto → advocate=claude, fallback defend-mode-unavailable', JSON.stringify(pDefend1));
+
+  // (i2) defend-mode: puro-claude + --advocate auto → sem fallback
+  const { parsed: pDefend2 } = runPairing(evPuroClaude, dirPuroClaude, ['--advocate', 'auto']);
+  assert(pDefend2 && pDefend2.advocate === 'claude' && !pDefend2.fallbacks.includes('defend-mode-unavailable'),
+    '(i2) puro-claude + advocate=auto → advocate=claude, sem defend-mode-unavailable', JSON.stringify(pDefend2));
+
+  // (j) explícito vence resolução por autoria
+  const { parsed: pExplicit } = runPairing(evMisto, dirMisto, ['--challenger', 'codex']);
+  assert(pExplicit && pExplicit.challenger === 'codex',
+    '(j) fixture misto + challenger=codex explícito → challenger=codex', JSON.stringify(pExplicit));
+
+  // (k) determinismo — duas execuções byte-idênticas sobre o mesmo fixture
+  const r1 = runScript('forge-review-pairing.js', ['--slice', 'S02', '--milestone', 'M006', '--cwd', dirMisto, '--events', evMisto]);
+  const r2 = runScript('forge-review-pairing.js', ['--slice', 'S02', '--milestone', 'M006', '--cwd', dirMisto, '--events', evMisto]);
+  assert(r1.stdout === r2.stdout && r1.stdout.length > 0,
+    '(k) determinismo — stdout byte-idêntico entre duas execuções', `stdout1='${r1.stdout}' stdout2='${r2.stdout}'`);
+
+  // (l) --milestone filtra eventos de mesma slice em milestone diferente
+  const dirCrossMs = mkTmp('pairing-cross-milestone');
+  const evCrossMs = writeEvents(dirCrossMs, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex', milestone: 'M005' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex', milestone: 'M005' },
+    { event: 'dispatch', unit: 'execute-task/T03', engine: 'claude', milestone: 'M006' },
+  ]);
+  const { parsed: pCrossMs } = runPairing(evCrossMs, dirCrossMs);
+  assert(pCrossMs && pCrossMs.author === 'claude' && pCrossMs.counts.claude === 1 && pCrossMs.counts.codex === 0,
+    '(l) --milestone M006 filtra eventos de M005 → author=claude, counts.codex=0', JSON.stringify(pCrossMs));
+
+  // (l2) sem --milestone, os mesmos eventos contam ambos (M005 M006) → author flips to gpt
+  const rNoMs = runScript('forge-review-pairing.js', ['--slice', 'S02', '--cwd', dirCrossMs, '--events', evCrossMs]);
+  let pNoMs = null;
+  try { pNoMs = JSON.parse(rNoMs.stdout.trim()); } catch {}
+  assert(pNoMs && pNoMs.author === 'gpt' && pNoMs.counts.codex === 2 && pNoMs.counts.claude === 1,
+    '(l2) sem --milestone → todos os eventos contam, author=gpt (majority)', JSON.stringify(pNoMs));
+
+  // (m) eventos sem campo milestone permanecem elegíveis (lenient-when-absent)
+  const dirNoMsField = mkTmp('pairing-no-milestone-field');
+  const evNoMsField = writeEvents(dirNoMsField, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex' },
+  ]);
+  const { parsed: pNoMsField } = runPairing(evNoMsField, dirNoMsField);
+  assert(pNoMsField && pNoMsField.author === 'gpt' && pNoMsField.counts.codex === 2,
+    '(m) eventos sem campo milestone continuam elegíveis com --milestone informado', JSON.stringify(pNoMsField));
+
+  // (n) --policy last: 3 eventos cross-engine (2 old claude + 1 latest codex)
+  // → last-dispatch-wins escolhe o autor da execução mais recente (codex),
+  // contra a maioria majority (claude) — cenário do forge-task boundary com
+  // resumes cross-engine (S02 R3).
+  const dirLastPolicy = mkTmp('pairing-last-policy');
+  const evLastPolicy = writeEvents(dirLastPolicy, [
+    { event: 'dispatch', unit: 'execute-task/T-loose', engine: 'claude' },
+    { event: 'dispatch', unit: 'execute-task/T-loose', engine: 'claude' },
+    { event: 'dispatch', unit: 'execute-task/T-loose', engine: 'codex' },
+  ]);
+  const { parsed: pLast } = runPairing(evLastPolicy, dirLastPolicy, ['--policy', 'last']);
+  assert(pLast && pLast.author === 'gpt' && pLast.author_engine === 'codex' && pLast.policy === 'last-dispatch',
+    '(n) --policy last: 2 claude + 1 codex (última) → author=gpt, policy=last-dispatch', JSON.stringify(pLast));
+
+  // (n2) mesma fixture, default majority → author=claude (contraste)
+  const { parsed: pMajorityContrast } = runPairing(evLastPolicy, dirLastPolicy);
+  assert(pMajorityContrast && pMajorityContrast.author === 'claude' && pMajorityContrast.policy === 'majority',
+    '(n2) mesma fixture, policy default (majority) → author=claude (contraste com (n))', JSON.stringify(pMajorityContrast));
+
+  cleanup(dirMisto);
+  cleanup(dirPuroClaude);
+  cleanup(dirPuroCodex);
+  cleanup(dirSemEngine);
+  cleanup(dirZero);
+  cleanup(dirReviewFix);
+  cleanup(dirTie1);
+  cleanup(dirTie2);
+  cleanup(dirCrossMs);
+  cleanup(dirNoMsField);
+  cleanup(dirLastPolicy);
+}
+
+// ── Section 30: review pairing wiring (precedência + pré-escopo + fallbacks) ──
+// Gate estrutural do S02: assere a cadeia inteira T01→T02→T03 sobre o wiring do
+// pairing no Step 0. Duas classes de assert: (1) comportamental — invoca o CLI
+// congelado forge-review-pairing.js sobre fixtures pré-escopadas exatamente como
+// o Step 0 faz; (2) estrutural — readFileSync sobre spec/skills editados.
+function smokeReviewPairingWiring() {
+  process.stdout.write('\n▸ Section 30: review pairing wiring (precedência + pré-escopo estrito + fallbacks)\n');
+
+  const REPO = path.dirname(SCRIPTS);
+  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+  const countOccur = (hay, needle) => (hay.length && needle.length) ? hay.split(needle).length - 1 : 0;
+
+  // Fixture helpers — raw JSONL stream + strict pre-scope mirror do Step 0.
+  const writeRaw = (dir, events) => {
+    const forgeDir = path.join(dir, '.gsd', 'forge');
+    fs.mkdirSync(forgeDir, { recursive: true });
+    const file = path.join(forgeDir, 'events.jsonl');
+    fs.writeFileSync(file, events.map((e) => JSON.stringify(e)).join('\n') + (events.length ? '\n' : ''), 'utf8');
+    return file;
+  };
+
+  // Réplica BYTE-A-BYTE do filtro estrito do Step 0 (shared/forge-review.md L103-117):
+  // dispatch + unit começa com execute-task/ + slice E milestone casam por IGUALDADE.
+  // Campo ausente/divergente → EXCLUÍDO (não lenient). É o coração da decisão de scoping.
+  const strictPreScope = (rawFile, slice, ms, outFile) => {
+    let raw = ''; try { raw = fs.readFileSync(rawFile, 'utf8'); } catch (_) { raw = ''; }
+    const out = [];
+    for (const ln of raw.split('\n')) {
+      if (!ln.trim()) continue;
+      let e; try { e = JSON.parse(ln); } catch (_) { continue; }
+      if (e.event !== 'dispatch') continue;
+      if (typeof e.unit !== 'string' || !e.unit.startsWith('execute-task/')) continue;
+      if (e.slice !== slice || e.milestone !== ms) continue; // estrito
+      out.push(ln);
+    }
+    fs.writeFileSync(outFile, out.length ? out.join('\n') + '\n' : '', 'utf8');
+    return out.length;
+  };
+
+  const cliParse = (args) => {
+    const r = runScript('forge-review-pairing.js', args);
+    let parsed = null; try { parsed = JSON.parse(r.stdout.trim()); } catch (_) {}
+    return { r, parsed };
+  };
+  // Chamada escopada (pré-escopa ANTES, como o Step 0) — --cwd sempre $WORKING_DIR.
+  const runScoped = (dir, rawFile, extraArgs) => {
+    const scoped = path.join(dir, 'scoped.jsonl');
+    const kept = strictPreScope(rawFile, 'S02', 'M006', scoped);
+    const { parsed } = cliParse(['--events', scoped, '--slice', 'S02', '--milestone', 'M006', '--cwd', dir, ...(extraArgs || [])]);
+    return { parsed, kept };
+  };
+
+  // ── (a) PRÉ-ESCOPO ESTRITO — o teste-âncora da decisão de scoping ────────────
+  // Stream com eventos legados claude SEM discriminador + eventos codex tagueados.
+  const dirScope = mkTmp('pairing-wire-prescope');
+  const rawScope = writeRaw(dirScope, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'claude' },              // legado
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'claude' },              // legado
+    { event: 'dispatch', unit: 'execute-task/T03', engine: 'claude' },              // legado
+    { event: 'dispatch', unit: 'execute-task/T04', engine: 'codex', slice: 'S02', milestone: 'M006' },
+    { event: 'dispatch', unit: 'execute-task/T05', engine: 'codex', slice: 'S02', milestone: 'M006' },
+  ]);
+  const scoped = runScoped(dirScope, rawScope);
+  assert(scoped.kept === 2, '(a) pré-escopo estrito mantém só os 2 eventos tagueados (3 legados excluídos)', `kept=${scoped.kept}`);
+  assert(scoped.parsed && scoped.parsed.author === 'gpt' && scoped.parsed.counts.codex === 2 && scoped.parsed.counts.claude === 0,
+    '(a) pré-escopo estrito → author=gpt (só codex tagueado conta; legados excluídos por construção)', JSON.stringify(scoped.parsed));
+
+  // Contra-teste: SEM pré-escopo (stream inteiro, lenient-when-absent) → legados contam → author claude.
+  const { parsed: lenient } = cliParse(['--events', rawScope, '--slice', 'S02', '--milestone', 'M006', '--cwd', dirScope]);
+  assert(lenient && lenient.author === 'claude' && lenient.counts.claude === 3 && lenient.counts.codex === 2,
+    '(a) contra-teste sem pré-escopo (lenient) → author=claude (68-legado leak) — demonstra por que o pré-escopo é necessário', JSON.stringify(lenient));
+  cleanup(dirScope);
+
+  // ── (b) PLAN-CHECK FIX — discriminadores presentes mas engine AUSENTE ────────
+  // Distinto de zero-events: contam como claude (default) COM sinal de autoria, SEM no-authorship-data.
+  const dirNoEngine = mkTmp('pairing-wire-no-engine');
+  const rawNoEngine = writeRaw(dirNoEngine, [
+    { event: 'dispatch', unit: 'execute-task/T01', slice: 'S02', milestone: 'M006' }, // sem engine
+    { event: 'dispatch', unit: 'execute-task/T02', slice: 'S02', milestone: 'M006' }, // sem engine
+  ]);
+  const noEngine = runScoped(dirNoEngine, rawNoEngine);
+  assert(noEngine.kept === 2 && noEngine.parsed && noEngine.parsed.author === 'claude' &&
+    noEngine.parsed.policy !== 'no-authorship-data' && !noEngine.parsed.fallbacks.includes('no-authorship-data'),
+    '(b) discriminadores presentes + engine ausente → author=claude COM sinal (policy≠no-authorship-data)', JSON.stringify(noEngine.parsed));
+  cleanup(dirNoEngine);
+
+  // Célula de contraste: ZERO eventos escopados → no-authorship-data COM evento/marcador.
+  const dirZeroScope = mkTmp('pairing-wire-zero-scope');
+  const rawZeroScope = writeRaw(dirZeroScope, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'claude' }, // legado → excluído pelo pré-escopo
+  ]);
+  const zeroScope = runScoped(dirZeroScope, rawZeroScope);
+  assert(zeroScope.kept === 0 && zeroScope.parsed && zeroScope.parsed.policy === 'no-authorship-data' &&
+    zeroScope.parsed.author === 'claude' && zeroScope.parsed.fallbacks.includes('no-authorship-data'),
+    '(b) zero eventos escopados → no-authorship-data + author=claude (distinto de engine-ausente)', JSON.stringify(zeroScope.parsed));
+  cleanup(dirZeroScope);
+
+  // ── (c) MATRIZ DE PRECEDÊNCIA célula-a-célula ───────────────────────────────
+  const dirClaude = mkTmp('pairing-wire-claude');
+  const rawClaude = writeRaw(dirClaude, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'claude', slice: 'S02', milestone: 'M006' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'claude', slice: 'S02', milestone: 'M006' },
+  ]);
+  const dirCodex = mkTmp('pairing-wire-codex');
+  const rawCodex = writeRaw(dirCodex, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex', slice: 'S02', milestone: 'M006' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex', slice: 'S02', milestone: 'M006' },
+  ]);
+
+  // (c1) challenger codex EXPLÍCITO + advocate auto, autor claude → challenger=codex (não derivado), advocate por família.
+  const c1 = runScoped(dirClaude, rawClaude, ['--challenger', 'codex', '--advocate', 'auto']);
+  assert(c1.parsed && c1.parsed.challenger === 'codex' && c1.parsed.advocate === 'claude',
+    '(c1) challenger:codex explícito vence resolução; advocate auto → claude (same-family)', JSON.stringify(c1.parsed));
+
+  // (c2) challenger auto + autor gpt → challenger=claude (oposto).
+  const c2 = runScoped(dirCodex, rawCodex, ['--challenger', 'auto']);
+  assert(c2.parsed && c2.parsed.author === 'gpt' && c2.parsed.challenger === 'claude',
+    '(c2) challenger:auto + autor gpt → challenger=claude', JSON.stringify(c2.parsed));
+
+  // (c3) challenger auto + autor claude → challenger=codex (oposto).
+  const c3 = runScoped(dirClaude, rawClaude, ['--challenger', 'auto']);
+  assert(c3.parsed && c3.parsed.author === 'claude' && c3.parsed.challenger === 'codex',
+    '(c3) challenger:auto + autor claude → challenger=codex', JSON.stringify(c3.parsed));
+
+  // (c4) BLOCKER: challenger auto + autor claude → RESOLVIDO codex (comportamental).
+  // O force engine=agents é lógica de Step 0 markdown (não executável) → combinar com assert
+  // estrutural de que a regra workflow testa o RESOLVIDO e roda APÓS a resolução (abaixo, (e)).
+  assert(c3.parsed && c3.parsed.challenger === 'codex',
+    '(c4) BLOCKER célula: auto+autor-claude resolve para codex (não `auto` cru) — insumo do force engine=agents', JSON.stringify(c3.parsed));
+
+  // (c5) advocate auto + autor gpt → advocate=claude + fallback defend-mode-unavailable.
+  const c5 = runScoped(dirCodex, rawCodex, ['--advocate', 'auto']);
+  assert(c5.parsed && c5.parsed.advocate === 'claude' && c5.parsed.fallbacks.includes('defend-mode-unavailable'),
+    '(c5) advocate:auto + autor gpt → advocate=claude, fallback defend-mode-unavailable', JSON.stringify(c5.parsed));
+
+  // ── (d) EXCLUSÃO review-fix — unit não começa com execute-task/ ──────────────
+  const dirRfix = mkTmp('pairing-wire-review-fix');
+  const rawRfix = writeRaw(dirRfix, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex', slice: 'S02', milestone: 'M006' },
+    { event: 'dispatch', unit: 'review-fix/S02', engine: 'claude', slice: 'S02', milestone: 'M006' },
+  ]);
+  // Via pré-escopo: o filtro execute-task/ já dropa o review-fix.
+  const rfixScoped = runScoped(dirRfix, rawRfix);
+  assert(rfixScoped.kept === 1,
+    '(d) pré-escopo dropa review-fix/S02 (unit não começa com execute-task/) → 1 evento mantido', `kept=${rfixScoped.kept}`);
+  // Via CLI direto no stream inteiro: aggregateAuthor também ignora o review-fix.
+  const { parsed: rfixCli } = cliParse(['--events', rawRfix, '--slice', 'S02', '--milestone', 'M006', '--cwd', dirRfix]);
+  assert(rfixCli && rfixCli.counts.claude === 0 && rfixCli.author === 'gpt',
+    '(d) CLI ignora review-fix na autoria → counts.claude=0, author=gpt', JSON.stringify(rfixCli));
+  cleanup(dirRfix);
+  cleanup(dirClaude);
+  cleanup(dirCodex);
+
+  // ── (e) ASSERTS ESTRUTURAIS sobre spec/skills editados (T01/T02/T03) ─────────
+  const reviewMd = rd('shared/forge-review.md');
+  const autoMd = rd('skills/forge-auto/SKILL.md');
+  const nextMd = rd('skills/forge-next/SKILL.md');
+  const taskMd = rd('skills/forge-task/SKILL.md');
+  const dispatchMd = rd('shared/forge-dispatch.md');
+
+  // (e1) whitelist do reader inclui `auto`.
+  assert(reviewMd.includes("['claude','codex','auto'].includes(challenger)"),
+    '(e1) forge-review.md: whitelist do reader inclui auto para challenger', 'whitelist auto não encontrada');
+
+  // (e2) bloco de resolução + evento review-pairing-fallback presentes.
+  assert(reviewMd.includes('Resolução de pairing') && reviewMd.includes('review-pairing-fallback'),
+    '(e2) forge-review.md: bloco de resolução de pairing + evento review-pairing-fallback presentes', 'bloco/evento ausente');
+
+  // (e3) ORDEM DE PRECEDÊNCIA: a chamada ao CLI (resolução) vem ANTES do check workflow-força-agents.
+  const idxResolve = reviewMd.indexOf('--events "$SCOPED" --slice "{S##}" --milestone "{M###}" --cwd "$WORKING_DIR"');
+  const idxWorkflow = reviewMd.indexOf('[ "$RESOLVED_CHALLENGER" = "codex" ] && [ "$ENGINE" = "workflow" ]');
+  assert(idxResolve > -1 && idxWorkflow > -1 && idxResolve < idxWorkflow,
+    '(e3) resolução de pairing precede o check engine:workflow-força-agents (ordem canônica)', `idxResolve=${idxResolve} idxWorkflow=${idxWorkflow}`);
+
+  // (e4) a regra workflow testa o RESOLVIDO (nunca `auto` cru).
+  assert(reviewMd.includes('[ "$RESOLVED_CHALLENGER" = "codex" ] && [ "$ENGINE" = "workflow" ]'),
+    '(e4) forge-review.md: regra workflow-força-agents testa $RESOLVED_CHALLENGER (não auto cru)', 'check do resolvido não encontrado');
+
+  // (e5) codex-unavailable é distinto de codex-exit-nonzero (check command -v codex no Step 0).
+  assert(reviewMd.includes('command -v codex') && reviewMd.includes('"reason":"codex-unavailable"') && reviewMd.includes('codex-exit-nonzero'),
+    '(e5) forge-review.md: codex-unavailable (command -v codex) distinto de codex-exit-nonzero', 'distinção codex-unavailable/codex-exit-nonzero ausente');
+
+  // (e6) guard: CLI não é chamado quando nenhum eixo é auto (ambos explícitos vencem).
+  assert(reviewMd.includes('if [ "$CHALLENGER" = auto ] || [ "$ADVOCATE" = auto ]'),
+    '(e6) forge-review.md: guard chama o CLI só quando challenger|advocate == auto', 'guard de chamada condicional ausente');
+
+  // (e7) --cwd "$WORKING_DIR" explícito na chamada do CLI; nunca CODE_DIR.
+  assert(reviewMd.includes('--cwd "$WORKING_DIR"'),
+    '(e7) forge-review.md: chamada do CLI passa --cwd "$WORKING_DIR" explícito', '--cwd "$WORKING_DIR" ausente');
+
+  // (e8) exit status do CLI é capturado E o JSON é validado uma única vez ANTES dos parsers por-campo.
+  assert(reviewMd.includes('PAIR_EXIT=$?') && reviewMd.includes('PAIR_VALID='),
+    '(e8) forge-review.md: exit status (PAIR_EXIT) + validação one-shot (PAIR_VALID) do JSON antes dos parsers', 'PAIR_EXIT/PAIR_VALID ausentes');
+
+  // (e9) falha de resolução (crash/JSON inválido) degrada para estático + evento diagnóstico dedicado.
+  assert(reviewMd.includes('"reason":"%s"') && reviewMd.includes('"pairing-resolution-failed"'),
+    '(e9) forge-review.md: falha de exit/JSON emite review-pairing-fallback reason pairing-resolution-failed', 'reason pairing-resolution-failed ausente');
+  assert(!/forge-review-pairing\.js[^\n]*CODE_DIR/.test(reviewMd),
+    '(e7) forge-review.md: chamada do CLI nunca usa CODE_DIR (worktree gotcha, MEM018)', 'CODE_DIR encontrado na chamada do CLI');
+
+  // (e8) linha **Pairing:** montada no Step 0 e consumida no Step 6.
+  assert(reviewMd.includes('PAIRING_LINE="**Pairing:**') && reviewMd.includes('{$PAIRING_LINE}'),
+    '(e8) forge-review.md: $PAIRING_LINE montada no Step 0 e renderizada no header do Step 6', 'PAIRING_LINE/render ausente');
+
+  // (e9) discriminadores slice+milestone nos 5 emission sites (3 forge-auto + 2 forge-next).
+  const discNeedle = '\\"slice\\":\\"{S##}\\",\\"milestone\\":\\"${RUN_ID:-{M###}}\\"';
+  const autoHits = countOccur(autoMd, discNeedle);
+  const nextHits = countOccur(nextMd, discNeedle);
+  assert(autoHits >= 3,
+    '(e9) forge-auto: discriminadores slice+milestone nos 3 execute-task dispatch emits', `hits=${autoHits}`);
+  assert(nextHits >= 2,
+    '(e9) forge-next: discriminadores slice+milestone nos 2 execute-task dispatch emits', `hits=${nextHits}`);
+
+  // (e10) forge-dispatch.md declara a fonte canônica + schema additivo slice/milestone.
+  assert(dispatchMd.includes('additive `slice` + `milestone`') && dispatchMd.includes('Fonte canônica de autoria'),
+    '(e10) forge-dispatch.md: schema additivo slice/milestone + fonte canônica de autoria declarados', 'declaração de schema/fonte ausente');
+
+  // (e11) forge-task Step 5.5 referencia a resolução auto + task-unit scoping + Pairing header.
+  assert(taskMd.includes('Resolução de pairing') && taskMd.includes('execute-task/{TASK_ID}') &&
+    taskMd.includes('**Pairing:**') && taskMd.includes('$PAIRING_LINE'),
+    '(e11) forge-task Step 5.5: resolução auto + task-unit scoping + Pairing header ($PAIRING_LINE)', 'referências do forge-task ausentes');
+}
+
+// ── Section 31: review pairing prefs schema (auto) ─────────────────────────
+// Regression guards do schema de prefs de M006: challenger/advocate auto
+// documentados, default challenger:claude preservado, e a semântica de
+// ortogonalidade (auto=família) citando shared/forge-review.md.
+function smokeReviewPairingPrefsSchema() {
+  process.stdout.write('\n▸ Section 31: review pairing prefs schema (auto)\n');
+
+  const REPO = path.dirname(SCRIPTS);
+  let prefs = '';
+  try { prefs = fs.readFileSync(path.join(REPO, 'forge-agent-prefs.md'), 'utf8'); } catch (_) { prefs = ''; }
+
+  // Escopa ao bloco "## Review Settings" (até o próximo "## " no início de linha) — MEM030.
+  const startIdx = prefs.indexOf('## Review Settings');
+  assert(startIdx > -1, '(a) forge-agent-prefs.md contém a seção ## Review Settings', 'seção ausente');
+  let block = '';
+  if (startIdx > -1) {
+    const rest = prefs.slice(startIdx + '## Review Settings'.length);
+    const nextIdx = rest.search(/\n##[ \t]/);
+    block = nextIdx > -1 ? rest.slice(0, nextIdx) : rest;
+  }
+
+  // (b) challenger: auto e advocate: auto documentados no bloco.
+  assert(/challenger:[ \t]*auto/.test(block),
+    '(b) § Review Settings documenta "challenger: ... auto" na semântica', 'challenger auto não encontrado no bloco');
+  assert(/advocate:[ \t]+\S[^\n]*\|[ \t]*auto/.test(block) || /`advocate`[^\n]*auto/.test(block),
+    '(b) § Review Settings documenta "advocate: ... auto" na semântica', 'advocate auto não encontrado no bloco');
+
+  // (c) guard anti-flip — default do bloco fenced ainda é challenger: claude.
+  const fencedMatch = block.match(/```\n(review:[\s\S]*?)```/);
+  const fenced = fencedMatch ? fencedMatch[1] : '';
+  assert(fenced.length > 0, '(c) bloco fenced review: encontrado dentro de § Review Settings', 'bloco fenced ausente');
+  assert(/challenger:[ \t]+claude[ \t]/.test(fenced) || /challenger:[ \t]+claude[ \t]*(#|$)/m.test(fenced),
+    '(c) default do bloco fenced permanece "challenger: claude" (guard anti-flip acidental)', `fenced='${fenced.slice(0, 200)}'`);
+  assert(!/challenger:[ \t]+auto[ \t]*(#|$)/m.test(fenced),
+    '(c) default do bloco fenced NÃO é challenger: auto', 'default acidentalmente virou auto');
+
+  // (d) ortogonalidade (auto=família) documentada + citação de shared/forge-review.md (fonte, não redefinida).
+  assert(block.includes('família OPOSTA ao autor') || block.includes('MESMA família do autor'),
+    '(d) § Review Settings documenta a semântica de família (ortogonalidade auto)', 'semântica de família ausente');
+  assert(block.includes('shared/forge-review.md'),
+    '(d) § Review Settings cita shared/forge-review.md como fonte da matriz (não redefinida)', 'citação a shared/forge-review.md ausente');
+
+  // (e) modelo (challenger_model/advocate_model) segue documentado — eixo ortogonal MODELO intacto.
+  assert(block.includes('challenger_model') && block.includes('advocate_model'),
+    '(e) § Review Settings preserva os eixos challenger_model/advocate_model (MODELO, ortogonal a auto=FAMÍLIA)', 'eixos de modelo ausentes');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -2829,6 +3303,9 @@ async function main() {
     smokeEngineDispatch();
     await smokeXllmPlan();
     smokeTierChain();
+    smokeReviewPairing();
+    smokeReviewPairingWiring();
+    smokeReviewPairingPrefsSchema();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }

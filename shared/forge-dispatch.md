@@ -1122,6 +1122,18 @@ The `dispatch` event schema (Token Telemetry + Tier Resolution) is extended **ad
 
 On the codex path `model` carries the codex model id (or the CLI default label when `$CODEX_MODEL` is unset) and `output_tokens` may be `0` (the adapter's token channel is git-derived, not SDK usage). On the claude path the field is `"engine":"claude"` and all other fields are exactly as Tier/Effort Resolution produce them.
 
+#### Event log extension — additive `slice` + `milestone` fields on `dispatch` (autoria de review)
+
+O schema `dispatch` é estendido **aditivamente** com dois campos nos **execute-task dispatch events** de `forge-auto` e `forge-next`: `slice` (ex.: `"S02"`) e `milestone` (ex.: `"M006"` ou o `RUN_ID` do run multi-run). Nenhum campo existente é renomeado ou removido. Readers S01/S03 que parseiam por nomes de campos conhecidos e ignoram desconhecidos continuam funcionando; eventos legados sem os campos permanecem JSON válido (tratar `slice`/`milestone` ausentes como `undefined`, nunca erro).
+
+```json
+{"ts":"2026-07-15T10:00:05Z","event":"dispatch","unit":"execute-task/T04","model":"gpt-5-codex","reason":"unit-type:execute-task","engine":"codex","slice":"S02","milestone":"M006","input_tokens":2100,"output_tokens":0}
+```
+
+Estes campos são consumidos por `scripts/forge-review-pairing.js § isAuthorshipEvent` para escopar a autoria de review por slice/milestone (filtro **lenient-when-absent**: um evento sem o campo ainda conta, então o pré-escopo estrito exclui eventos legados sem discriminador antes de chamar o CLI — ver `shared/forge-review.md § Step 0`). Emitidos em ambos os caminhos claude e codex de `execute-task`. `forge-task` emite um único `execute-task/{TASK_ID}` (unit já único) e portanto **não** carrega os discriminadores.
+
+**Fonte canônica de autoria (declarada aqui):** a fonte de autoria para o review pairing é o **global `$WORKING_DIR/.gsd/forge/events.jsonl`** — nunca arquivado; é onde vivem todos os `dispatch` events com `engine`. O `{M###}-events.jsonl` per-milestone guarda apenas eventos `repair`/`plan_check` (NÃO os `dispatch` de autoria) e é movido em `milestone_cleanup: archive` — portanto **explicitamente NÃO é fonte de autoria**. Qualquer consumidor de autoria (pré-escopo do Step 0, `forge-review-pairing.js`) lê o stream global, nunca o per-milestone.
+
 #### Result schema — `--mode plan` (Branch D)
 
 The JSON the adapter writes to `$RESULT_FILE` on a `--mode plan` run, consumed by Branch D step 5. The adapter validated every `task_plans[].content` against `forge-must-haves.js` **in-sidecar** before writing `status: done` (S01/T01), so on `status: done` every plan is schema-valid; a `must_haves`-invalid plan yields `status: error` + exit 2 → Fallback.

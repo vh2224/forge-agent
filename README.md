@@ -206,6 +206,24 @@ Três limitações são aceitas e documentadas explicitamente — não são bugs
 
 ---
 
+## Multi-LLM fase 3 — pairing de review por autoria
+
+A partir da M006, cada review dialético resolve seu challenger e advocate **pela autoria do código**, não por explícito. Via prefs `review.challenger: auto` e `review.advocate: auto` — que permanecem desativadas por padrão (`claude` / `claude`), decisão pós-dogfood:
+
+- **`challenger: auto`** → resolve para a família **OPOSTA** ao autor (Claude code → GPT challenger; GPT code → Claude challenger). Reduz viés de auto-preferência: um desafiante de fora encontra classes de bug que dois Claudes não acham.
+- **`advocate: auto`** → resolve para a **MESMA família** do autor (autor Claude → advocate Claude; autor GPT → advocate Claude, enquanto `--mode defend` não existe em fase 2). Mantém a defesa competente.
+
+Autoria é derivada do campo `engine` dos dispatch events (`.gsd/forge/events.jsonl`), agregada por majority determinística — o orquestrador chama `scripts/forge-review-pairing.js` uma única vez por review antes da challenge. Degradações (autor sem evento de autoria, ou GPT sem `--mode defend` disponível) emitem `review-pairing-fallback` e retornam ao padrão Claude — nunca bloqueiam. Matriz canônica de resolver sem redefini-la: `shared/forge-review.md § Step 0`.
+
+**Ativar:** edite `forge-agent-prefs.md` (ou `.gsd/prefs.local.md`):
+```yaml
+review:
+  challenger: auto    # resolve de verdade na próxima review dialética
+  advocate: auto      # resolve junto
+```
+
+---
+
 ## Atualizar
 
 ```bash

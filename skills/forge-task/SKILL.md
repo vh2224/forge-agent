@@ -859,9 +859,11 @@ Runs the **challenger × advocate** confrontation on the task diff — the same 
 - `review.mode: disabled` in merged prefs, OR
 - `.gsd/tasks/{TASK_ID}/{TASK_ID}-REVIEW.md` already exists (idempotent resume).
 
-**Read review prefs** (`mode`, `style`, `rounds`, `fix_conceded`, `challenger`, `challenger_model` — 3-file cascade, exactly as `shared/forge-review.md § Step 0`). If `mode == disabled` → skip Step 5.5 entirely.
+**Read review prefs** (`mode`, `style`, `rounds`, `fix_conceded`, `challenger`, `challenger_model`, `advocate`, `advocate_model` — 3-file cascade, exactly as `shared/forge-review.md § Step 0`). If `mode == disabled` → skip Step 5.5 entirely.
 
 Challenger routing (`review.challenger: claude|codex`) follows `shared/forge-review.md § Step 0` + the Codex branch in Steps 2/4 — single fallback to `forge-reviewer` when codex is unavailable.
+
+**Pairing resolution (`challenger`/`advocate: auto`).** When either axis reads `auto`, run `shared/forge-review.md § "Resolução de pairing (auto)"` unchanged, with the **task-unit scoping** called out there: skip `--slice`/`--milestone` entirely, filter `$WORKING_DIR/.gsd/forge/events.jsonl` by `e.unit === "execute-task/{TASK_ID}"` (usually one dispatch event, but cross-engine resumes of the same loose task can produce more than one), then call `forge-review-pairing.js --events "$SCOPED" --cwd "$WORKING_DIR" --challenger "$CHALLENGER" --advocate "$ADVOCATE" --policy last` (no `--slice`/`--milestone`). The task boundary always passes `--policy last` — **last-dispatch-wins**, not majority: the engine of the most recent matching dispatch is the author, since that is the engine that actually produced the final `START_SHA..HEAD` diff (with 3+ dispatches an older-engine majority could otherwise outvote the latest execution). This yields the same `$RESOLVED_CHALLENGER`/`$RESOLVED_ADVOCATE`/`$AUTHOR_ENGINE`/`$PAIR_MODE`/`$PAIR_POLICY`/`$PAIRING_LINE` used by the per-slice boundary — consumed identically from here on (Steps 2/3/4/6 of the shared spec). `$PAIRING_LINE` reflects `(last-dispatch)` as the applied policy for this boundary.
 
 **Compute DIFF_CMD** (task boundary — START_SHA marker). In `worktree` mode the commits live in `CODE_DIR`, so every git call targets it via `git -C`:
 ```bash
@@ -888,7 +890,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
 - **Challenge** → `Agent({ subagent_type: 'forge-reviewer', prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: task/{TASK_ID}\nDIFF_CMD: {DIFF_CMD}" })`. `NO_FLAGS` → clean REVIEW, done.
 - **Defense** → `Agent({ subagent_type: 'forge-advocate', prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: task/{TASK_ID}\nDIFF_CMD: {DIFF_CMD}\nOBJECTIONS:\n{OBJECTIONS}" })`.
 - **Rebuttal** × `rounds` (default 1) → `forge-reviewer` with `DEFENSE` injected (rebuttal mode).
-- **Resolve** via the Step 5 truth table; write the dialogue to `{TASK_ID}-REVIEW.md` (Step 6 template, `## Pattern hits` from `PATTERN_HITS`).
+- **Resolve** via the Step 5 truth table; write the dialogue to `{TASK_ID}-REVIEW.md` (Step 6 template, `## Pattern hits` from `PATTERN_HITS`). The header carries the `**Pairing:**` line (`$PAIRING_LINE`, assembled in Step 0 of the shared spec) exactly as in `S##-REVIEW.md` — boundary-agnostic, no task-specific variant.
 - **CONCEDED items → fix now (Step 7a):** dispatch `forge-executor` with `UNIT: review-fix/{TASK_ID}` (isolation header when `ISOLATION_MODE != shared` — fixes land in `CODE_DIR`) to fix ONLY the conceded items, minimal diffs, commit `fix(review): {TASK_ID} conceded items`. Mark each `**Correção:** aplicada — commit {sha}` or `falhou — virou follow-up`. Skip when `review.fix_conceded: false` — then list and ask once (legacy behavior). No re-review of the fix commit.
 - **OPEN items (Step 7b):** for each, `AskUserQuestion` live (`Manter` / `Refatorar agora` — dispatches a `review-fix` unit / `Criar follow-up`) and record the decision.
 - Any `Agent()` throw is recorded; the review **never aborts the task**.

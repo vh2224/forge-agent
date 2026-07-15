@@ -501,6 +501,9 @@ Somente o check de schema do executor (S01, componente #1) é enforcing em M003.
 
 Antes de ativar qualquer um destes em um projeto de produção: rode ≥ 1 milestone completo em modo advisory para medir a taxa de falsos positivos das heurísticas (regex stub, depth-2 walker, dimension scoring). M003 explicitamente não recomenda flipping defaults em v1.
 
+### Review pairing dinâmico por autoria (M006)
+Resolver o challenger e advocate de cada review pela autoria do código reflete a realidade de que desafios independentes (de quem não escreveu) encontram brechas que dois Claudes não acham. `challenger: auto` resolve para a família **OPOSTA** ao autor (reduz viés de auto-preferência — paper arxiv 2404.13076); `advocate: auto` resolve para a **MESMA família** do autor. Autoria é derivada do campo `engine` dos dispatch events (Claude vs Codex) agregada por majority determinística. Enquanto `--mode defend` não existe (fase 2), autor GPT degrada para advocate Claude com evento `review-pairing-fallback: defend-mode-unavailable` — nunca bloqueia. Lógica em `scripts/forge-review-pairing.js`; Step 0 roda a CLI uma única vez por review. Defaults `challenger: claude` e `advocate: claude` permanecem — flip de `auto` é decisão pós-dogfood. Spec canônica sem redefinição: `shared/forge-review.md § Step 0`.
+
 ## Estado atual
 
 - **Milestone ativo:** — (M001 concluído)
