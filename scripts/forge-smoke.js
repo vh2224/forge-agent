@@ -1489,6 +1489,16 @@ function runXllm(args, mockDir, cwd) {
 function smokeXllm() {
   process.stdout.write('\n▸ Section 20: forge-xllm adapter (mock codex on PATH)\n');
 
+  // Regression guard — prompt MUST be delivered to codex via stdin, never as an
+  // argv positional. A large diff embedded in the prompt easily exceeds the OS
+  // command-line length limit (~32KB on Windows → ENAMETOOLONG). See invokeCodex.
+  {
+    const src = fs.readFileSync(path.join(SCRIPTS, 'forge-xllm.js'), 'utf8');
+    assert(/input:\s*prompt/.test(src), 'S20 guard: codex prompt delivered via stdin (input: prompt)');
+    assert(!/args\.push\(prompt\)/.test(src), 'S20 guard: prompt is NOT pushed as an argv positional');
+    assert(/args\.push\('-'\)/.test(src), "S20 guard: codex reads prompt from stdin via '-' positional");
+  }
+
   // Scenario A — happy challenge: prose + valid JSON extraction, normalized shape.
   {
     const dir = mkTmp('xllm-a');

@@ -355,10 +355,15 @@ function invokeCodex(opts) {
     if (model) {
       args.push('-m', model);
     }
-    args.push(prompt);
+    // Prompt is delivered via stdin, NOT as a positional argv token: the prompt
+    // embeds the full diff and easily exceeds the OS command-line length limit
+    // (~32KB on Windows → ENAMETOOLONG). `codex exec -` reads the prompt from
+    // stdin, which has no such limit. See `codex exec --help` [PROMPT].
+    args.push('-');
 
     const { cmd, prefixArgs } = resolveCodexCommand();
     const res = spawnSync(cmd, [...prefixArgs, ...args], {
+      input: prompt,
       timeout: timeoutSecs * 1000,
       killSignal: 'SIGKILL',
       encoding: 'utf8',
