@@ -9,7 +9,7 @@
 const { readTierChain } = require('./forge-tier-chain.js');
 
 const VALID_TIERS = ['light', 'standard', 'heavy', 'max'];
-const USAGE = 'Uso: node scripts/forge-tier-explain.js --tier <light|standard|heavy|max> [--cwd <dir>] [--json]\n';
+const USAGE = 'Uso: node scripts/forge-tier-explain.js (--tier <light|standard|heavy|max> | --all) [--cwd <dir>] [--json]\n';
 
 function formatMember(member) {
   const alias = member.mapped ? member.alias : '—';
@@ -34,10 +34,12 @@ function formatChain(chain, tier) {
 }
 
 function parseArgs(args) {
-  const options = { tier: null, cwd: process.cwd(), json: false };
+  const options = { tier: null, cwd: process.cwd(), json: false, all: false };
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === '--json') {
       options.json = true;
+    } else if (args[i] === '--all') {
+      options.all = true;
     } else if (
       (args[i] === '--tier' || args[i] === '--cwd') &&
       args[i + 1] !== undefined &&
@@ -49,6 +51,7 @@ function parseArgs(args) {
       return null;
     }
   }
+  if (options.all && options.tier) return null;
   return options;
 }
 
@@ -56,9 +59,17 @@ module.exports = { formatChain };
 
 if (require.main === module) {
   const options = parseArgs(process.argv.slice(2));
-  if (!options || !VALID_TIERS.includes(options.tier)) {
+  if (!options || (!options.all && !VALID_TIERS.includes(options.tier))) {
     process.stderr.write(USAGE);
     process.exitCode = 2;
+  } else if (options.all) {
+    const chains = Object.fromEntries(
+      VALID_TIERS.map((tier) => [tier, readTierChain(tier, options.cwd)]),
+    );
+    const output = options.json
+      ? JSON.stringify(chains)
+      : VALID_TIERS.map((tier) => formatChain(chains[tier], tier)).join('\n\n');
+    process.stdout.write(`${output}\n`);
   } else {
     const chain = readTierChain(options.tier, options.cwd);
     const output = options.json
