@@ -4140,6 +4140,30 @@ function smokeGeminiFamily() {
     `spec=${specHasWhitelist} cli=${cliHasGemini}`);
 }
 
+function smokeRoutingScaffoldDocs() {
+  process.stdout.write('\n▸ Section 36: scaffold routing: + docs fase 4 (drift-guard)\n');
+  const ROOT36 = path.join(__dirname, '..');
+  const prefsTxt = fs.readFileSync(path.join(ROOT36, 'forge-agent-prefs.md'), 'utf8');
+  const readmeTxt = fs.readFileSync(path.join(ROOT36, 'README.md'), 'utf8');
+  const tiersTxt = fs.readFileSync(path.join(ROOT36, 'shared', 'forge-tiers.md'), 'utf8');
+
+  assert(/## Routing Settings/.test(prefsTxt),
+    'forge-agent-prefs.md contém "## Routing Settings"',
+    '"## Routing Settings" não encontrado em forge-agent-prefs.md');
+
+  assert(/#\s*routing:/.test(prefsTxt),
+    'forge-agent-prefs.md contém um bloco routing: de exemplo comentado (opt-in)',
+    'linha "# routing:" (comentada) não encontrada em forge-agent-prefs.md');
+
+  assert(/## Multi-LLM fase 4/.test(readmeTxt),
+    'README.md contém "## Multi-LLM fase 4"',
+    '"## Multi-LLM fase 4" não encontrado em README.md');
+
+  assert(/forge-routing\.js/.test(tiersTxt),
+    'shared/forge-tiers.md menciona forge-routing.js (cross-ref do resolver)',
+    'forge-routing.js não encontrado em shared/forge-tiers.md');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -4182,6 +4206,7 @@ async function main() {
     smokeRoutingWiring();
     smokeDomainEmission();
     smokeGeminiFamily();
+    smokeRoutingScaffoldDocs();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
