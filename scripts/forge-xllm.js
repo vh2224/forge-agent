@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
- * forge-xllm.js — zero-dep sidecar adapter for `codex exec`.
- *   • challenge / rebuttal : GPT review challenger/rebuttal (read-only sandbox, spawnSync).
+ * forge-xllm.js — zero-dep sidecar adapter for external review challengers/rebuttals + execute.
+ * Engines: `codex` (OpenAI Codex CLI, `codex exec`) and `agy` (Google Antigravity CLI,
+ * `agy --print` — Gemini).
+ *   • challenge / rebuttal : review challenger/rebuttal (read-only sandbox, spawnSync) — codex or agy.
  *   • execute              : run a T##-PLAN.md via codex under workspace-write, detached,
- *                            with heartbeat + process-group timeout, result-file only.
+ *                            with heartbeat + process-group timeout, result-file only (codex only).
  *
  * Exports:
  *   runChallenge(opts)         → { objections: [...] }   (or throws)
@@ -17,8 +19,8 @@
  *   readWorkersTimeout(dir)    → number|null       (prefs cascade)
  *
  * CLI usage:
- *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--model <id>] [--timeout 300] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--model <id>] [--timeout 300] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--engine codex|agy] [--model <id>] [--timeout 300] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--engine codex|agy] [--model <id>] [--timeout 300] [--cwd <dir>]
  *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> [--model <id>] [--timeout <secs>]
  *
  * Exit contract: 0 on success. For challenge/rebuttal the normalized JSON goes to stdout
@@ -44,7 +46,7 @@
  *    `--diff-cmd`) — never from codex output or any untrusted source.
  *
  * Security notes:
- *  - `codex` is invoked EXCLUSIVELY via array args (spawnSync / spawn) — never shell:true.
+ *  - `codex`/`agy` are invoked EXCLUSIVELY via array args (spawnSync / spawn) — never shell:true.
  *  - `--diff-cmd` IS executed via execSync({shell:true}) because it legitimately needs
  *    pipes/redirection. This value must come ONLY from the orchestrator — never from
  *    codex output, --input file content, or any other untrusted source.
@@ -827,6 +829,167 @@ function invokeCodexDetached(opts) {
   });
 }
 
+// ── Agy (Antigravity CLI / Gemini) invocation ────────────────────────────────
+
+/**
+ * Resolve a directly-spawnable agy command, keeping shell:false on every platform.
+ *
+ * Antigravity CLI may ship as a native binary (`agy.exe`) OR as an npm-style shim
+ * (`agy.cmd`/`agy.bat`) on Windows. spawnSync does not apply PATHEXT and Node
+ * refuses to spawn .cmd/.bat without shell:true (CVE-2024-27980), so a bare
+ * `spawn('agy')` fails with ENOENT for shim installs. R4 (class of fix #40): iterate
+ * PATHEXT explicitly, resolving the first matching entry point on PATH — a `.exe`
+ * spawns directly; a `.cmd`/`.bat` is launched via `cmd.exe /c` (shell:false preserved).
+ *
+ * FORGE_XLLM_AGY_BIN overrides resolution (trusted env, same trust level as
+ * PATH): a `.js` value is launched with the current Node binary — this is how
+ * forge-smoke.js injects a cross-platform mock.
+ *
+ * @returns {{cmd: string, prefixArgs: string[]}}
+ */
+function resolveAgyCommand() {
+  const override = process.env.FORGE_XLLM_AGY_BIN;
+  if (override) {
+    return override.endsWith('.js')
+      ? { cmd: process.execPath, prefixArgs: [override] }
+      : { cmd: override, prefixArgs: [] };
+  }
+
+  if (process.platform !== 'win32') {
+    return { cmd: 'agy', prefixArgs: [] };
+  }
+
+  // PATHEXT precedence (default .COM;.EXE;.BAT;.CMD) — resolve the first entry point.
+  const exts = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((e) => e.trim())
+    .filter(Boolean);
+  for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, `agy${ext}`);
+      if (fs.existsSync(candidate)) {
+        const lower = ext.toLowerCase();
+        // .cmd/.bat are batch scripts — Node cannot spawn them directly without
+        // shell:true; route through `cmd.exe /c` (shell:false preserved).
+        if (lower === '.cmd' || lower === '.bat') {
+          return { cmd: process.env.ComSpec || 'cmd.exe', prefixArgs: ['/c', candidate] };
+        }
+        return { cmd: candidate, prefixArgs: [] };
+      }
+    }
+  }
+
+  // Nothing resolvable — spawn by name so the caller surfaces the usual ENOENT.
+  return { cmd: 'agy', prefixArgs: [] };
+}
+
+/**
+ * Invoke `agy --print` headless. No retry.
+ *
+ * Deviations from the codex path, all empirically verified (2026-07-15, agy 1.0.16):
+ *  - stdin MUST be 'ignore': agy blocks forever when stdin is an open non-TTY pipe.
+ *  - The full prompt is delivered via a tmp file + a short argv instruction telling
+ *    the agent to read it. `-p` only takes its value inline on argv, and Windows
+ *    CreateProcess caps the command line at ~32K chars — a slice diff would not fit.
+ *    agy's print mode runs the full agent (it CAN read files), which makes this work.
+ *  - `--sandbox` bounds the agent's terminal access (print mode is agentic, unlike
+ *    `codex exec` which is inference-only with a read-only sandbox flag).
+ *  - No `-o` last-message file and no `--output-schema`: the response is scraped from
+ *    stdout, which may include agent step narration before the final JSON —
+ *    extractLastJsonBlock() already handles that. Known upstream issue: under non-TTY,
+ *    print mode can exit 0 with an EMPTY stdout; that surfaces here as a throw
+ *    (adapter exit 2) and the orchestrator falls back per shared/forge-review.md.
+ *
+ * @param {object} opts
+ * @param {string} opts.prompt
+ * @param {string} opts.cwd
+ * @param {string} [opts.model]  — agy model LABEL, may contain spaces (e.g. "Gemini 3.1 Pro (High)")
+ * @param {number} opts.timeoutSecs
+ * @returns {string} raw stdout of the agy process
+ * @throws {Error} on any invocation failure — cause in message
+ */
+function invokeAgy(opts) {
+  const { prompt, cwd, model, timeoutSecs } = opts;
+
+  // R3: the tmpdir MUST live INSIDE the cwd. agy's --sandbox roots the agent at the
+  // cwd, so a prompt file under os.tmpdir() is UNREADABLE by the sandboxed agent.
+  // Creating it under the cwd (a dotted prefix, git-ignored, cleaned in finally) keeps
+  // it within the sandbox root. Never committed — it is removed in the finally block.
+  let tmpDir;
+  try {
+    tmpDir = fs.mkdtempSync(path.join(cwd, '.forge-xllm-'));
+  } catch (e) {
+    throw new Error(`failed to create tmpdir: ${e.message}`);
+  }
+
+  const promptFile = path.join(tmpDir, 'prompt.txt');
+
+  try {
+    fs.writeFileSync(promptFile, prompt, 'utf8');
+
+    const inline = `Read the file at ${promptFile} and follow the instructions in it exactly. `
+      + 'Your entire response must be ONLY the JSON object it specifies — no prose, no markdown fences.';
+
+    const args = ['--sandbox', '-p', inline, '--print-timeout', `${timeoutSecs}s`];
+    if (model) {
+      args.push('--model', model);
+    }
+
+    const { cmd, prefixArgs } = resolveAgyCommand();
+    const res = spawnSync(cmd, [...prefixArgs, ...args], {
+      cwd,
+      // agy's own --print-timeout fires first and lets it exit cleanly; the spawn
+      // timeout is a 5s-grace hard backstop for a hung process (the non-TTY hang).
+      timeout: timeoutSecs * 1000 + 5000,
+      killSignal: 'SIGKILL',
+      encoding: 'utf8',
+      maxBuffer: MAX_BUFFER,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    if (res.error) {
+      throw new Error(`agy spawn failed: ${res.error.code || res.error.message}`);
+    }
+    if (res.signal === 'SIGKILL') {
+      throw new Error(`agy killed after exceeding timeout (${timeoutSecs}s + 5s grace)`);
+    }
+    if (res.status !== 0) {
+      const stderrSnippet = (res.stderr ? String(res.stderr) : '').trim().slice(0, 200);
+      throw new Error(`agy exited ${res.status}${stderrSnippet ? `: ${stderrSnippet}` : ''}`);
+    }
+
+    const content = res.stdout;
+    if (!content || !content.trim()) {
+      throw new Error('agy print mode produced empty stdout (known non-TTY dropout — treat as unavailable)');
+    }
+
+    return content;
+  } finally {
+    // Best-effort cleanup — the prompt file contains diff excerpts.
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (e) {
+      // ignore — best-effort
+    }
+  }
+}
+
+// ── Engine routing ────────────────────────────────────────────────────────────
+
+const ENGINE_ENUM = ['codex', 'agy'];
+
+/**
+ * Route one prompt to the selected engine. `schema` is honored by codex only
+ * (agy has no --output-schema; the prompt text already pins the JSON shape and
+ * the defensive parse path never trusted schema conformance anyway).
+ * @param {string} engine
+ * @param {object} opts — { prompt, schema, cwd, model, timeoutSecs }
+ * @returns {string} raw model output
+ */
+function invokeEngine(engine, opts) {
+  return engine === 'agy' ? invokeAgy(opts) : invokeCodex(opts);
+}
+
 // ── Normalization ─────────────────────────────────────────────────────────────
 
 function splitPathLine(pathLine) {
@@ -969,10 +1132,11 @@ function readWorkersTimeout(baseDir) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Run challenge mode: acquire diff via diffCmd, invoke codex, validate, normalize.
+ * Run challenge mode: acquire diff via diffCmd, invoke the engine, validate, normalize.
  * @param {object} opts
  * @param {string} opts.diffCmd
  * @param {string} opts.cwd
+ * @param {string} [opts.engine] — 'codex' (default) | 'agy'
  * @param {string} [opts.model]
  * @param {number} [opts.timeoutSecs]
  * @returns {{objections: object[]}}
@@ -981,24 +1145,26 @@ function readWorkersTimeout(baseDir) {
 function runChallenge(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const engine = opts.engine || 'codex';
   if (!opts.diffCmd) throw new Error('challenge mode requires --diff-cmd');
 
   const diffText = acquireDiff(opts.diffCmd, cwd);
   const prompt = buildChallengePrompt(diffText);
-  const rawContent = invokeCodex({ prompt, schema: challengeSchema, cwd, model: opts.model, timeoutSecs });
+  const rawContent = invokeEngine(engine, { prompt, schema: challengeSchema, cwd, model: opts.model, timeoutSecs });
 
   const parsed = extractLastJsonBlock(rawContent);
-  if (parsed === null) throw new Error('no parseable JSON block found in codex output');
-  if (!validateObjections(parsed)) throw new Error('codex output failed objections validation');
+  if (parsed === null) throw new Error(`no parseable JSON block found in ${engine} output`);
+  if (!validateObjections(parsed)) throw new Error(`${engine} output failed objections validation`);
 
   return normalizeChallenge(parsed);
 }
 
 /**
- * Run rebuttal mode: read objections+defenses from --input file, invoke codex, validate, normalize.
+ * Run rebuttal mode: read objections+defenses from --input file, invoke the engine, validate, normalize.
  * @param {object} opts
  * @param {string} opts.inputFile
  * @param {string} opts.cwd
+ * @param {string} [opts.engine] — 'codex' (default) | 'agy'
  * @param {string} [opts.model]
  * @param {number} [opts.timeoutSecs]
  * @returns {{verdicts: object[]}}
@@ -1007,6 +1173,7 @@ function runChallenge(opts) {
 function runRebuttal(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const engine = opts.engine || 'codex';
   if (!opts.inputFile) throw new Error('rebuttal mode requires --input <file>');
 
   let inputText;
@@ -1017,7 +1184,7 @@ function runRebuttal(opts) {
   }
 
   const prompt = buildRebuttalPrompt(inputText);
-  const rawContent = invokeCodex({
+  const rawContent = invokeEngine(engine, {
     prompt,
     schema: verdictSchema(VERDICT_ENUM),
     cwd,
@@ -1026,8 +1193,8 @@ function runRebuttal(opts) {
   });
 
   const parsed = extractLastJsonBlock(rawContent);
-  if (parsed === null) throw new Error('no parseable JSON block found in codex output');
-  if (!validateVerdicts(parsed)) throw new Error('codex output failed verdicts validation');
+  if (parsed === null) throw new Error(`no parseable JSON block found in ${engine} output`);
+  if (!validateVerdicts(parsed)) throw new Error(`${engine} output failed verdicts validation`);
 
   return normalizeRebuttal(parsed);
 }
@@ -1304,7 +1471,18 @@ if (require.main === module) {
   const mode = args.mode;
 
   if (mode !== 'challenge' && mode !== 'rebuttal' && mode !== 'execute' && mode !== 'plan') {
-    process.stderr.write('Usage: forge-xllm.js --mode challenge|rebuttal|execute|plan [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--plan-context <file>] [--result-file <path>] [--model <id>] [--timeout <secs>] [--cwd <dir>]\n');
+    process.stderr.write('Usage: forge-xllm.js --mode challenge|rebuttal|execute|plan [--engine codex|agy] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--plan-context <file>] [--result-file <path>] [--model <id>] [--timeout <secs>] [--cwd <dir>]\n');
+    process.exit(2);
+  }
+
+  // Engine selection applies to challenge/rebuttal only; execute/plan are codex-only.
+  const engine = typeof args.engine === 'string' ? args.engine : 'codex';
+  if (!ENGINE_ENUM.includes(engine)) {
+    process.stderr.write(`forge-xllm: unknown --engine "${engine}" (expected codex|agy)\n`);
+    process.exit(2);
+  }
+  if (engine === 'agy' && (mode === 'execute' || mode === 'plan')) {
+    process.stderr.write(`forge-xllm: --engine agy supports only challenge|rebuttal (not ${mode})\n`);
     process.exit(2);
   }
 
@@ -1379,9 +1557,9 @@ if (require.main === module) {
   try {
     let result;
     if (mode === 'challenge') {
-      result = runChallenge({ diffCmd: args['diff-cmd'], cwd, model, timeoutSecs });
+      result = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, model, timeoutSecs });
     } else {
-      result = runRebuttal({ inputFile: args.input, cwd, model, timeoutSecs });
+      result = runRebuttal({ inputFile: args.input, cwd, engine, model, timeoutSecs });
     }
     process.stdout.write(JSON.stringify(result) + '\n');
     process.exit(0);

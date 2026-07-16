@@ -47,7 +47,7 @@ for(const f of files){try{
   if(m=blk.match(/^[ \t]+engine:[ \t]*(\w+)/m))engine=m[1].toLowerCase();
   if(m=blk.match(/^[ \t]+challenger:[ \t]*(\w+)/m))challenger=m[1].toLowerCase();
   if(m=blk.match(/^[ \t]+advocate:[ \t]*(\w+)/m))advocate=m[1].toLowerCase();
-  if(m=blk.match(/^[ \t]+challenger_model:[ \t]*(\S+)/m))challengerModel=m[1];
+  if(m=blk.match(/^[ \t]+challenger_model:[ \t]*([^#\n]+)/m)){const v=m[1].trim().replace(/^["']|["']$/g,'');if(v)challengerModel=v;}
   if(m=blk.match(/^[ \t]+advocate_model:[ \t]*(\S+)/m))advocateModel=m[1];
 }catch(e){}}
 if(!['enabled','disabled'].includes(mode))mode='enabled';
@@ -55,28 +55,31 @@ if(!['dialectic','flags'].includes(style))style='dialectic';
 if(!Number.isInteger(rounds)||rounds<0||rounds>3)rounds=1;
 if(!['defer','pause'].includes(askAuto))askAuto='defer';
 if(!['agents','workflow'].includes(engine))engine='agents';
-if(!['claude','codex','auto'].includes(challenger))challenger='claude';
+if(!['claude','codex','gemini','auto'].includes(challenger))challenger='claude';
 if(!['claude','auto'].includes(advocate))advocate='claude';
 process.stdout.write(JSON.stringify({mode,style,rounds,askAuto,fixConceded,engine,challenger,advocate,challengerModel,advocateModel}));
 " WORKING_DIR=\"$WORKING_DIR\")
 
+CHALLENGER=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.challenger||'claude')}catch(e){process.stdout.write('claude')}})")
 CHALLENGER_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.challengerModel||'')}catch(e){process.stdout.write('')}})")
 ADVOCATE_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.advocateModel||'')}catch(e){process.stdout.write('')}})")
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-model-alias.js ] && echo scripts || echo "$HOME/.claude/scripts")
 ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")
+# Adapter engine for the external challenger: codex → `codex exec`, gemini → `agy --print` (Antigravity CLI)
+XLLM_ENGINE=$([ "$CHALLENGER" = "gemini" ] && echo agy || echo codex)
 ```
 
-`$CHALLENGER_MODEL` and `$ADVOCATE_MODEL` are derived immediately after `$REVIEW_CFG` (same JSON-aware pattern as the `engine==workflow && challenger==codex` precedence check below) so Steps 2/3/4's `[ -n "$CHALLENGER_MODEL" ]` / `[ -n "$ADVOCATE_ALIAS" ]` guards have a value to test — never left unassigned.
+`$CHALLENGER`, `$CHALLENGER_MODEL`, `$ADVOCATE_MODEL` and `$XLLM_ENGINE` are derived immediately after `$REVIEW_CFG` (same JSON-aware pattern as the `engine==workflow` precedence check below) so Steps 2/3/4's `[ -n "$CHALLENGER_MODEL" ]` / `[ -n "$ADVOCATE_ALIAS" ]` guards have a value to test — never left unassigned.
 
 **Prefs read here:**
-- `challenger` — whitelist `claude|codex`, default `claude`. `claude` (or any invalid value → whitelist fallback) runs the in-context `forge-reviewer`/`forge-advocate` agents unchanged. `codex` routes the challenge (Step 2) and rebuttal (Step 4) through the `scripts/forge-xllm.js` adapter (GPT via `codex exec`).
-- `challengerModel` — default `null` (unset). When set (e.g. `gpt-5-x`), it is forwarded to the adapter as `--model {challenger_model}`; when `null`, `-m`/`--model` is omitted and the adapter uses the Codex CLI default model. Only meaningful when `challenger == codex`.
+- `challenger` — whitelist `claude|codex|gemini`, default `claude`. `claude` (or any invalid value → whitelist fallback) runs the in-context `forge-reviewer`/`forge-advocate` agents unchanged. `codex` and `gemini` route the challenge (Step 2) and rebuttal (Step 4) through the `scripts/forge-xllm.js` adapter — `codex` = GPT via `codex exec` (`--engine codex`), `gemini` = Gemini via the Antigravity CLI `agy --print` (`--engine agy`).
+- `challengerModel` — default `null` (unset). When set, it is forwarded to the adapter as `--model {challenger_model}`; when `null`, `--model` is omitted and the CLI's default model is used. Only meaningful when `challenger != claude`. Codex takes model ids (e.g. `gpt-5.2-codex`); agy takes model **labels which may contain spaces** (e.g. `Gemini 3.1 Pro (High)` — see `agy models`), so the value is read to end-of-line (`#` starts a comment; surrounding quotes are stripped) and must always be expanded quoted (`--model "$CHALLENGER_MODEL"`).
 - `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Resolved to a dispatch alias via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id with no known alias resolves to an empty string; Step 3 then omits `model:` entirely (frontmatter governs) and echoes a warning — degradation is documented, not silent.
 - The regexes use `[ \t]` (never `\s`, which would match `\n` and leak into the next line — MEM), following the `readEvidenceMode` reader model.
 
 ### Resolução de pairing (`auto`) — uma vez, antes de tudo
 
-`challenger`/`advocate` aceitam agora `claude | codex | auto` (advocate: `claude | auto` — advocate GPT é fase 2, ver M006-CONTEXT #1). Quando **qualquer** eixo é `auto`, o pairing é resolvido **por autoria do diff** via `scripts/forge-review-pairing.js` — **uma única vez**, e essa resolução acontece **ANTES** da regra `engine: workflow força agents` (precedência abaixo) e **ANTES** do branch `style: flags`. `auto` cru nunca é testado por nenhuma regra a jusante; só o valor **resolvido** (`RESOLVED_CHALLENGER`/`RESOLVED_ADVOCATE`) é consumido dali em diante.
+`challenger`/`advocate` aceitam agora `claude | codex | gemini | auto` (advocate: `claude | auto` — advocate GPT/Gemini é fase 2, ver M006-CONTEXT #1). Quando **qualquer** eixo é `auto`, o pairing é resolvido **por autoria do diff** via `scripts/forge-review-pairing.js` — **uma única vez**, e essa resolução acontece **ANTES** da regra `engine: workflow força agents` (precedência abaixo) e **ANTES** do branch `style: flags`. `auto` cru nunca é testado por nenhuma regra a jusante; só o valor **resolvido** (`RESOLVED_CHALLENGER`/`RESOLVED_ADVOCATE`) é consumido dali em diante.
 
 **Fonte de autoria = stream GLOBAL canônico** `$WORKING_DIR/.gsd/forge/events.jsonl` (declarado em `shared/forge-dispatch.md`; nunca arquivado — os dispatch events `execute-task/*` com `engine`/`slice`/`milestone` vivem lá; o per-milestone `{M###}-events.jsonl` guarda `repair`/`plan_check` e é movido no `milestone_cleanup`, portanto **não** é fonte). Se **nenhum** eixo é `auto` (ambos explícitos) → o CLI **não é chamado** (explícito vence; o CLI respeita o valor explícito, não deriva por autoria).
 
@@ -192,24 +195,24 @@ A partir daqui, **todo o gate consome os resolvidos**: Steps 2/4 e a regra workf
 
 **Boundary-aware — task binding (forge-task Step 5.5):** substituir o pré-escopo por unit único e omitir `--slice`/`--milestone`. O filtro-linha mantém `e.unit === "execute-task/{TASK_ID}"` (unit já único da task solta, mas resumes cross-engine da mesma task avulsa podem produzir mais de um dispatch); a chamada vira `... --events "$SCOPED" --cwd "$WORKING_DIR" --challenger "$CHALLENGER" --advocate "$ADVOCATE" --policy last`. O boundary de task avulsa usa **last-dispatch-wins** (não majority): com 3+ dispatches cross-engine, uma maioria de um engine mais antigo poderia vencer a última execução — que é a que de fato domina o diff final `START_SHA..HEAD`. O boundary por slice (multi-task) mantém `majority`/`tie-last` — ali maioria é o critério correto. Todo o resto (captura, fallbacks, codex-unavailable, substituição) é idêntico. `review-fix/*` nunca entra na autoria — o filtro `execute-task/` já o exclui por construção.
 
-### Precedence — `challenger: codex` × `engine: workflow`
+### Precedence — external challenger (`codex`/`gemini`) × `engine: workflow`
 
-The `engine: workflow` script hardcodes `agentType: 'forge-reviewer'` and cannot route Codex. So a **resolved** challenger of `codex` **forces `engine = 'agents'`** — never a silent state. **Ordem fixada (BLOCKER 1):** este check roda **APÓS** a resolução de pairing acima — ele testa `$RESOLVED_CHALLENGER` (o valor resolvido), **nunca** o `auto` cru nem `c.challenger` do JSON. Assim, `challenger: auto` + autor claude → resolvido = codex → o force dispara; `auto` cru jamais dispara o force (só o `codex` resolvido). No orquestrador:
+The `engine: workflow` script hardcodes `agentType: 'forge-reviewer'` and cannot route an external CLI. So a **resolved** challenger of `codex` OR `gemini` **forces `engine = 'agents'`** — never a silent state. **Ordem fixada (BLOCKER 1, R2):** este check roda **APÓS** a resolução de pairing acima — ele testa `$RESOLVED_CHALLENGER` (o valor resolvido), **nunca** o `auto` cru nem `c.challenger` do JSON. Assim, `challenger: auto` + autor claude → resolvido = codex → o force dispara; `auto` cru jamais dispara o force (só um challenger externo resolvido). No orquestrador:
 
 ```bash
 ENGINE=$(printf '%s' "$REVIEW_CFG" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).engine||"agents")}catch(e){process.stdout.write("agents")}})')
-if [ "$RESOLVED_CHALLENGER" = "codex" ] && [ "$ENGINE" = "workflow" ]; then
-  echo "⚠ challenger: codex força engine agents (workflow não roteia codex)"
+if [ "$RESOLVED_CHALLENGER" != "claude" ] && [ "$ENGINE" = "workflow" ]; then
+  echo "⚠ challenger: $RESOLVED_CHALLENGER força engine agents (workflow não roteia challenger externo)"
   printf '{"ts":"%s","event":"review-challenger-fallback","milestone":"%s","slice":"%s","reason":"engine-workflow-forced-agents"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{M###}" "{S##}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
   # treat engine as 'agents' for the rest of the gate
 fi
 ```
 
-The Codex challenger still runs — only the `workflow` transport is overridden to `agents` (which is where the Codex branch of Steps 2/4 lives). `<ISO>` comes from bash, never from inside a script. See **Fallback challenger (review-challenger-fallback)** below.
+The external challenger still runs — only the `workflow` transport is overridden to `agents` (which is where the adapter branch of Steps 2/4 lives). `<ISO>` comes from bash, never from inside a script. See **Fallback challenger (review-challenger-fallback)** below.
 
 - `mode == disabled` → **skip the entire gate.** Proceed straight to `complete-slice`.
-- `style == flags` → run the **legacy single-pass** (challenge only; write a `## ⚠ Review Flags`-style section into `{S##}-REVIEW.md`; no defense, no rebuttal, no Ask). Back-compat for users who don't want the debate. **`flags` respects the resolved pairing:** o branch `flags` roda **depois** da resolução de pairing (decisão #31), então consome `$RESOLVED_CHALLENGER` — nunca o `auto` cru. The single-pass runs Step 2 (challenge) only, so when the resolved challenger is `codex` the challenge is routed to the adapter (`--mode challenge`) exactly as in the dialectic path; resolved `claude` runs `forge-reviewer`. A `flags` run has no rebuttal, so the Codex rebuttal branch never applies.
+- `style == flags` → run the **legacy single-pass** (challenge only; write a `## ⚠ Review Flags`-style section into `{S##}-REVIEW.md`; no defense, no rebuttal, no Ask). Back-compat for users who don't want the debate. **`flags` respects the resolved pairing:** o branch `flags` roda **depois** da resolução de pairing (decisão #31), então consome `$RESOLVED_CHALLENGER` — nunca o `auto` cru. The single-pass runs Step 2 (challenge) only, so when the resolved challenger is `codex`/`gemini` the challenge is routed to the adapter (`--mode challenge --engine $XLLM_ENGINE`) exactly as in the dialectic path; resolved `claude` runs `forge-reviewer`. A `flags` run has no rebuttal, so the adapter rebuttal branch never applies.
 - `style == dialectic` (default) → run Steps 1–7 below. Engine routing applies within this path:
   - `engine == agents` (default) → Steps 1–9 as-is (zero change).
   - `engine == workflow` AND `style == dialectic` → **detect by introspection:** check whether the tool `Workflow` is present in **your own tool list** (when available, `Workflow` is a top-level tool — **do NOT use ToolSearch**, which only finds deferred tools and would return empty even when `Workflow` is available). Tool present → run Step 1 then execute **`## Engine workflow`** in place of Steps 2–5; Steps 6, 7a, 7b, 8, 9 are unchanged. Tool absent → **fallback agents** (see sub-section below).
@@ -237,17 +240,18 @@ Proceed via Steps 2–5 (agents). Defense/rebuttal `null` **never** reach this p
 
 Modeled on **Fallback agents** above. One event type, two triggers discriminated by `reason`:
 
-**(a) `engine-workflow-forced-agents`** (precedence, resolved at Step 0 — see the precedence sub-section above): `challenger == 'codex'` AND `engine == 'workflow'` → force `engine = 'agents'`, echo `⚠ challenger: codex força engine agents (workflow não roteia codex)`, append to `{WORKING_DIR}/.gsd/forge/events.jsonl`:
+**(a) `engine-workflow-forced-agents`** (precedence, resolved at Step 0 — see the precedence sub-section above): `challenger != 'claude'` AND `engine == 'workflow'` → force `engine = 'agents'`, echo `⚠ challenger: $CHALLENGER força engine agents (workflow não roteia challenger externo)`, append to `{WORKING_DIR}/.gsd/forge/events.jsonl`:
 ```json
 {"ts":"<ISO>","event":"review-challenger-fallback","milestone":"{M###}","slice":"{S##}","reason":"engine-workflow-forced-agents"}
 ```
 
-**(b) `codex-exit-nonzero`** (adapter unavailable/failed at the challenge stage — Step 2): the `scripts/forge-xllm.js` challenge invocation exits `!= 0` (binary absent, auth, quota, timeout, parse — the adapter does not distinguish; cause on its stderr) → **single fallback** to `Agent("forge-reviewer")` (no retry), echo `⚠ challenger: codex indisponível (exit ≠ 0) — usando forge-reviewer`, append:
+**(b) `{challenger}-exit-nonzero`** (adapter unavailable/failed at the challenge stage — Step 2): the `scripts/forge-xllm.js` challenge invocation exits `!= 0` (binary absent, auth, quota, timeout, parse, empty stdout — the adapter does not distinguish; cause on its stderr) → **single fallback** to `Agent("forge-reviewer")` (no retry), echo `⚠ challenger: $CHALLENGER indisponível (exit ≠ 0) — usando forge-reviewer`, append with the literal reason `codex-exit-nonzero` (challenger `codex`) or `gemini-exit-nonzero` (challenger `gemini`):
 ```json
 {"ts":"<ISO>","event":"review-challenger-fallback","milestone":"{M###}","slice":"{S##}","reason":"codex-exit-nonzero"}
+{"ts":"<ISO>","event":"review-challenger-fallback","milestone":"{M###}","slice":"{S##}","reason":"gemini-exit-nonzero"}
 ```
 
-> `<ISO>` for both comes from bash (`date -u +%Y-%m-%dT%H:%M:%SZ`) — never from inside a script. **Rebuttal has no fallback of its own:** a Codex rebuttal failure degrades non-conceded objections to `maintained` (conservative), it does NOT emit this event nor dispatch an agent (see Step 4).
+> `<ISO>` for both comes from bash (`date -u +%Y-%m-%dT%H:%M:%SZ`) — never from inside a script. **Rebuttal has no fallback of its own:** an adapter rebuttal failure degrades non-conceded objections to `maintained` (conservative), it does NOT emit this event nor dispatch an agent (see Step 4).
 
 ## Step 0a — Idempotency
 
@@ -282,7 +286,7 @@ If `$DIFF_CMD` still produces no changes → write a minimal `{S##}-REVIEW.md` s
 
 ## Step 2 — Challenge
 
-Routed by `challenger` (from Step 0). `challenger == 'claude'` (default) runs the in-context agent unchanged; `challenger == 'codex'` runs the S01 adapter.
+Routed by `challenger` (from Step 0). `challenger == 'claude'` (default) runs the in-context agent unchanged; `challenger == 'codex' | 'gemini'` runs the S01 adapter with `--engine $XLLM_ENGINE`.
 
 ### `challenger == 'claude'` (default agent)
 
@@ -297,18 +301,21 @@ Parse the result:
 
 If the `Agent()` call **throws** → record a one-line note, write a `{S##}-REVIEW.md` stub noting the review could not run, and proceed. **Review failures never abort `complete-slice`.**
 
-### `challenger == 'codex'` (S01 adapter)
+### `challenger == 'codex' | 'gemini'` (S01 adapter)
 
-Invoke the adapter (parsing is **not** reimplemented — the adapter of S01 already validates and normalizes; see `scripts/forge-xllm.js`). Append `--model {challenger_model}` **only when `challengerModel != null`**; `--timeout` is optional:
+Invoke the adapter (parsing is **not** reimplemented — the adapter of S01 already validates and normalizes; see `scripts/forge-xllm.js`). Pass `--model "$CHALLENGER_MODEL"` **only when non-empty, always quoted** (agy labels contain spaces); `--timeout` is optional:
 
 ```bash
-node scripts/forge-xllm.js --mode challenge --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} \
-  $([ -n "$CHALLENGER_MODEL" ] && printf -- '--model %s' "$CHALLENGER_MODEL")
+if [ -n "$CHALLENGER_MODEL" ]; then
+  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
+else
+  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR}
+fi
 XLLM_EXIT=$?
 ```
 
 - **exit 0** → stdout is JSON `{objections:[{id,severity,file,line,issue,fix,challenge}]}` (already normalized by the adapter). Map each objection into the same `OBJECTIONS` contract the Claude branch produces — id (`R#`), `path:line` (`file:line`), severity, claim (`issue`), suggested fix (`fix`), and the `challenge` question — so Steps 3/5/6 consume it identically. Empty `objections` array → treat as `NO_FLAGS` (write a clean `{S##}-REVIEW.md`, proceed).
-- **exit != 0** → **single fallback** (no retry) to `Agent("forge-reviewer")` (the `challenger == 'claude'` invocation above), echo `⚠ challenger: codex indisponível (exit ≠ 0) — usando forge-reviewer`, and append a `review-challenger-fallback` event with `reason: "codex-exit-nonzero"` (cause is on the adapter's stderr). See **Fallback challenger (review-challenger-fallback)** (trigger b). The gate then continues with the agent's objections.
+- **exit != 0** → **single fallback** (no retry) to `Agent("forge-reviewer")` (the `challenger == 'claude'` invocation above), echo `⚠ challenger: $CHALLENGER indisponível (exit ≠ 0) — usando forge-reviewer`, and append a `review-challenger-fallback` event with `reason: "{challenger}-exit-nonzero"` (`codex-exit-nonzero` or `gemini-exit-nonzero`; cause is on the adapter's stderr). See **Fallback challenger (review-challenger-fallback)** (trigger b). The gate then continues with the agent's objections.
 
 ## Step 3 — Defense (forge-advocate)
 
@@ -352,13 +359,16 @@ Agent({ subagent_type: 'forge-reviewer',
 
 When `DEFENSE` is present the reviewer runs in **rebuttal mode** (`agents/forge-reviewer.md § Rebuttal mode`): it only re-litigates objections the advocate `refuted` or marked `open`, returning `maintained` or `withdrawn` + a reason. Objections the advocate `conceded` are carried through as `conceded` (settled — nothing to rebut). A throw → treat all non-conceded objections as `maintained` (conservative). Only the last round's verdicts count.
 
-### `challenger == 'codex'` (S01 adapter)
+### `challenger == 'codex' | 'gemini'` (S01 adapter)
 
-Write the OBJECTIONS + DEFENSE dialogue to a temp file (the adapter reads the rebuttal input from disk), then invoke the adapter (`--model` only when `challengerModel != null`):
+Write the OBJECTIONS + DEFENSE dialogue to a temp file (the adapter reads the rebuttal input from disk), then invoke the adapter (`--model "$CHALLENGER_MODEL"` only when non-empty, always quoted):
 
 ```bash
-node scripts/forge-xllm.js --mode rebuttal --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} \
-  $([ -n "$CHALLENGER_MODEL" ] && printf -- '--model %s' "$CHALLENGER_MODEL")
+if [ -n "$CHALLENGER_MODEL" ]; then
+  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
+else
+  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR}
+fi
 XLLM_EXIT=$?
 ```
 
@@ -556,7 +566,7 @@ The artifact is the **dialogue**, not a flag dump. Auditable, durable with the m
 # S##: <slice title> — Review (Dialectic)
 **Slice:** S##  **Milestone:** M###  **Reviewed:** YYYY-MM-DD  **Rounds:** {rounds}
 **Outcome:** {X resolved · Y conceded · Z open}
-**Challenger:** {claude|codex} (<model|default>)
+**Challenger:** {claude|codex|gemini} (<model|default>)
 **Defender:** {advocate_model|alias}
 {$PAIRING_LINE}
 
@@ -583,7 +593,7 @@ The artifact is the **dialogue**, not a flag dump. Auditable, durable with the m
 
 Omit any section with zero items.
 
-**`Challenger` line:** `claude` → `**Challenger:** claude`. `codex` with `challengerModel` set → `**Challenger:** codex (gpt-5-x)`; `codex` with model unset → `**Challenger:** codex (default do CLI)`. When a challenge fell back from codex to the agent (`review-challenger-fallback` / `codex-exit-nonzero`), stamp `**Challenger:** claude (fallback de codex)` to keep the artifact honest about what actually ran.
+**`Challenger` line:** `claude` → `**Challenger:** claude`. External challenger with `challengerModel` set → `**Challenger:** codex (gpt-5-x)` / `**Challenger:** gemini (Gemini 3.1 Pro (High))`; model unset → `**Challenger:** codex (default do CLI)` / `**Challenger:** gemini (default do CLI)`. When a challenge fell back from the external CLI to the agent (`review-challenger-fallback` / `{challenger}-exit-nonzero`), stamp `**Challenger:** claude (fallback de codex)` / `**Challenger:** claude (fallback de gemini)` to keep the artifact honest about what actually ran.
 
 **`Defender` line:** `ADVOCATE_ALIAS` non-empty → `**Defender:** {advocate_model} ({ADVOCATE_ALIAS})` (e.g. `**Defender:** claude-fable-5 (fable)`); `ADVOCATE_ALIAS` empty (id with no known alias) → `**Defender:** {advocate_model} (frontmatter — sem alias)`, matching the Step 3 warning.
 
@@ -628,7 +638,7 @@ Append one line per agent dispatch to `{WORKING_DIR}/.gsd/forge/events.jsonl` (I
 {"ts":"<ISO-8601>","event":"review","milestone":"${RUN_ID:-{M###}}","slice":"{S##}","style":"dialectic","rounds":N,"counts":{"resolved":N,"conceded":N,"open":N},"conceded_fixed":N,"engine":"agents","challenger":"claude","advocate":$([ -n "$ADVOCATE_ALIAS" ] && printf '"%s"' "$ADVOCATE_ALIAS" || printf 'null')}
 ```
 
-`conceded_fixed`, `engine`, `challenger` and `advocate` are additive fields (readers that ignore unknown fields stay compatible — same convention as `tier`/`reason` from M002). `engine` is either `"agents"` or `"workflow"` and is emitted by **both** engine paths. `conceded_fixed`: number of conceded items whose Step 7a fix landed. `challenger` is `"claude"` or `"codex"` — the challenger that actually ran the challenge (so a codex→agent fallback records `"claude"`). `advocate` is the resolved `ADVOCATE_ALIAS` (e.g. `"fable"`) or JSON `null` when the id had no known alias (frontmatter governed instead) — same optional-field glue pattern as the rest of this event.
+`conceded_fixed`, `engine`, `challenger` and `advocate` are additive fields (readers that ignore unknown fields stay compatible — same convention as `tier`/`reason` from M002). `engine` is either `"agents"` or `"workflow"` and is emitted by **both** engine paths. `conceded_fixed`: number of conceded items whose Step 7a fix landed. `challenger` is `"claude"`, `"codex"` or `"gemini"` — the challenger that actually ran the challenge (so an external→agent fallback records `"claude"`). `advocate` is the resolved `ADVOCATE_ALIAS` (e.g. `"fable"`) or JSON `null` when the id had no known alias (frontmatter governed instead) — same optional-field glue pattern as the rest of this event.
 
 ## Step 9 — Milestone-final triage (before `complete-milestone`)
 
@@ -650,12 +660,12 @@ Consumer: `forge-auto` / `forge-next`, when the derived unit is `complete-milest
 
 ## Legacy `style: flags` single-pass
 
-When `style == flags`: run Step 2 only — routed by `challenger` (so `codex` uses the adapter's `--mode challenge`, `claude` uses `forge-reviewer`). Write the findings (+ optional pattern hits) into `{S##}-REVIEW.md` under a single `## ⚠ Review Flags` heading. No advocate, no rebuttal, no Ask. This reproduces the pre-dialectic advisory behavior for users who opt out of the debate.
+When `style == flags`: run Step 2 only — routed by `challenger` (so `codex`/`gemini` use the adapter's `--mode challenge --engine $XLLM_ENGINE`, `claude` uses `forge-reviewer`). Write the findings (+ optional pattern hits) into `{S##}-REVIEW.md` under a single `## ⚠ Review Flags` heading. No advocate, no rebuttal, no Ask. This reproduces the pre-dialectic advisory behavior for users who opt out of the debate.
 
 ## Cross-references
 - `agents/forge-reviewer.md` — challenger + rebuttal mode
 - `agents/forge-advocate.md` — defender
 - `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md` — gate invocation (before `complete-slice`) + milestone-final triage (Step 9, before `complete-milestone`)
-- `scripts/forge-xllm.js` — S01 adapter for the Codex challenger (`--mode challenge|rebuttal`); parsing/validation lives there, not here
+- `scripts/forge-xllm.js` — S01 adapter for the external challengers (`--mode challenge|rebuttal`, `--engine codex|agy` — GPT via Codex CLI, Gemini via Antigravity CLI); parsing/validation lives there, not here
 - `forge-agent-prefs.md § Review Settings` — `review.{mode,style,rounds,ask_in_auto,fix_conceded,engine,challenger,challenger_model,advocate_model}`
 - Artifact: `.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` (durable with the milestone; cleaned by `milestone_cleanup`)
