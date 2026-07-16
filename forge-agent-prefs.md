@@ -513,6 +513,79 @@ workers:
 - Consumidores: `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`, `skills/forge-task/SKILL.md`
   (Step 4/5 dispatch — mirror executável do algoritmo canônico).
 
+## Routing Settings
+
+Controla o **eixo `routing:`** — roteamento *domain-first* (M007): em vez de escolher tier/engine
+por `unit_type` apenas, o operador pode rotear por **domínio de trabalho** (ex.: `backend`,
+`frontend`) e por **fase** (`executor`/`planner`), escolhendo inclusive **cadeias cross-engine**
+(misturar IDs Claude e GPT numa mesma célula). É inteiramente **opt-in** — sem o bloco `routing:`
+definido, o comportamento é 100% idêntico ao legado (`tier_models:`/`workers:` decidem sozinhos).
+A cascata é **last-wins por domínio inteiro** (nunca merge campo-a-campo — ver header de
+`scripts/forge-routing.js`).
+
+```
+# routing:
+#   default:
+#     executor:
+#       standard: [claude-sonnet-5]
+#       heavy:    [claude-opus-4-8, gpt-5]     # cadeia cross-engine (claude → gpt sidecar)
+#       fallback: claude-sonnet-5              # categoria: 1 Claude mapeado
+#     planner:
+#       heavy:    [claude-opus-4-8]
+#   backend:
+#     executor:
+#       standard: [gpt-5, claude-sonnet-5]     # gpt primário, claude na cadeia
+#       fallback: claude-sonnet-5
+```
+
+Como no exemplo forma-lista de `tier_models:` (§ Tier Settings), o bloco acima está **inteiramente
+comentado** — copie, descomente e ajuste os IDs para os que casam o mapa ID→alias
+(`scripts/forge-model-alias.js`) antes de usar.
+
+### Semântica
+
+- **Fases roteáveis:** apenas `executor` (unidades `execute-task`) e `planner` (unidades
+  `plan-slice`). `plan-milestone` **nunca** é capturado por este eixo — permanece locked no tier
+  `max` (Fable), igual ao `workers:` acima.
+- **Nesting (3 níveis):** `routing.<domain>.<phase>.<tier> = [chain]` +
+  `routing.<domain>.<phase>.fallback = <id>`. `<tier>` é qualquer alias de tier (`light`,
+  `standard`, `heavy`, `max`); `<chain>` é uma lista de IDs (1 ou mais, cross-engine permitido).
+- **Domínio:** chaves de domínio são abertas — `default` é obrigatório (usado quando a task/slice
+  não declara `domain:`); qualquer outra chave (`backend`, `frontend`, ...) é definida pelo
+  operador. Resolução de domínio da unidade: frontmatter `domain:` da task > tag de domínio na
+  linha do slice no ROADMAP > `default`.
+- **Célula ausente → `default → legado`:** se o domínio resolvido não tem entrada para a fase/tier
+  necessários, o resolvedor tenta o domínio `default`; se `default` também não cobrir, cai para o
+  comportamento legado (`tier_models:`/`workers:`) — nunca erro, sempre degrade silencioso.
+- **Fallback de categoria:** `fallback:` deve apontar para **1 modelo Claude mapeado** (nunca uma
+  lista, nunca um ID não mapeado). Um `fallback:` inválido (ausente do mapa ID→alias, ou vazio) é
+  substituído pelo fallback legado e registrado como `fallback-invalid-substituted` no `reason` do
+  contrato JSON — nunca aborta o dispatch.
+- **Caveat gemini (`phase-unsupported-family`):** um ID de família `gemini` numa cadeia é
+  reconhecido pelo parser mas **não é roteável** como `executor`/`planner` hoje — não há worker
+  nativo Gemini no orquestrador. Uma cadeia contendo um ID gemini é tratada como
+  `phase-unsupported-family`: o membro gemini é pulado (mesma regra de "membro sem entrada no
+  mapa ID→alias" de `tier_models:`) e a resolução segue para o próximo membro da cadeia.
+
+### Override precedence (highest wins)
+
+1. **`T##-PLAN.md` frontmatter `tier:`/`worker:`** — explicit assignment; sempre vence, igual ao
+   comportamento já documentado em § Tier Settings / § Workers Settings.
+2. **`routing:`** — este bloco, quando presente e a célula `<domain>.<phase>.<tier>` resolve.
+3. **`tier_models:`/`workers:`** — comportamento legado (§ Tier Settings / § Workers Settings),
+   usado quando não há `routing:` definido ou a célula não resolve (ver "Célula ausente" acima).
+
+### Cross-references
+
+- Spec canônica: [`shared/forge-dispatch.md § Worker Engine Routing`](shared/forge-dispatch.md) —
+  onde a resolução domain-first se encaixa no algoritmo de dispatch existente.
+- Resolvedor: `scripts/forge-routing.js` — `readRoutingConfig(cwd)` (parser da cascata) e
+  `resolveRoute(opts)` (precedência + mapeamento de fase + cadeia cross-engine); CLI com
+  `--explain`/`--list-domains` para inspecionar a resolução sem disparar dispatch real.
+- Não confundir com: `§ Tier Settings` (`tier_models:` — fallback intra-tier Claude, eixo de
+  *modelo*) e `§ Workers Settings` (`workers:` — eixo de *engine* por `unit_type`, sem domínio).
+  `routing:` é um terceiro eixo que, quando presente, tem precedência sobre ambos.
+
 ## Verification Settings
 
 O verification gate executa comandos de lint/typecheck/test antes de uma task ser marcada como concluída e antes de um slice ser squash-mergeado. Configurável pelo bloco abaixo — ou desabilitado globalmente com `enabled: false`. Quando `preference_commands` estiver vazio, o gate usa a ordem de descoberta descrita na subseção abaixo.
