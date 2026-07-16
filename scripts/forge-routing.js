@@ -513,6 +513,7 @@ function parseArgs(args) {
     hasNextAfter: false,
     explain: false,
     asJson: false,
+    listDomains: false,
   };
   for (let i = 0; i < args.length; i++) {
     const value = args[i + 1];
@@ -542,6 +543,8 @@ function parseArgs(args) {
       parsed.explain = true;
     } else if (args[i] === '--json') {
       parsed.asJson = true;
+    } else if (args[i] === '--list-domains') {
+      parsed.listDomains = true;
     }
   }
   return parsed;
@@ -636,6 +639,25 @@ function explainRoute(r, o) {
 // ── runCli — resolve, then emit the requested view. exit 0 handled by caller ─
 function runCli(args) {
   const o = parseArgs(args);
+
+  // --list-domains is an early-exit path: no --unit-type/--tier required.
+  // Reuses readRoutingConfig() — never reimplements the parser. Contract:
+  // JSON array of routing: domain keys, or '[]' on absent/parse-error
+  // (silent-fail — exit 0 always, handled by the caller).
+  if (o.listDomains) {
+    let domains = [];
+    try {
+      const cfg = readRoutingConfig(o.cwd);
+      if (cfg.present && cfg.ok && cfg.routing) {
+        domains = Object.keys(cfg.routing);
+      }
+    } catch {
+      domains = [];
+    }
+    process.stdout.write(JSON.stringify(domains) + '\n');
+    return;
+  }
+
   const r = resolveRoute({
     unitType: o.unitType,
     tier: o.tier,

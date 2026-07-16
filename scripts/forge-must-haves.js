@@ -3,7 +3,7 @@
 //
 // Exports:
 //   hasStructuredMustHaves(planContent) → boolean
-//   parseMustHaves(planContent) → { truths, artifacts, key_links, expected_output }
+//   parseMustHaves(planContent) → { truths, artifacts, key_links, expected_output, domain }
 //
 // CLI usage:
 //   node scripts/forge-must-haves.js --check <plan.md>
@@ -257,14 +257,15 @@ function hasStructuredMustHaves(content) {
  *   truths: string[],
  *   artifacts: Array<{ path: string, provides: string, min_lines: number, stub_patterns?: string[] }>,
  *   key_links: Array<{ from: string, to: string, via: string }>,
- *   expected_output: string[]
+ *   expected_output: string[],
+ *   domain: string|null
  * }
  *
  * Throws Error("malformed must_haves schema: <field> — <reason>") on invalid shape.
  * Throws Error("plan is legacy — use hasStructuredMustHaves to pre-check") for legacy plans.
  *
  * @param {string} content  Full plan file content
- * @returns {{ truths: string[], artifacts: object[], key_links: object[], expected_output: string[] }}
+ * @returns {{ truths: string[], artifacts: object[], key_links: object[], expected_output: string[], domain: string|null }}
  */
 function parseMustHaves(content) {
   if (!hasStructuredMustHaves(content)) {
@@ -362,11 +363,26 @@ function parseMustHaves(content) {
     }
   }
 
+  // Validate domain (top-level key, sibling to must_haves) — optional, additive.
+  // Absent or empty-after-trim → null (tolerant — resolved to a default downstream, not here).
+  // Non-string value (array/object/number) → malformed schema error.
+  const domainRaw = extractTopLevelValue(fm, 'domain');
+  let domain;
+  if (domainRaw === undefined || domainRaw === null) {
+    domain = null;
+  } else if (typeof domainRaw === 'string') {
+    const trimmed = domainRaw.trim();
+    domain = trimmed === '' ? null : trimmed;
+  } else {
+    throw new Error('malformed must_haves schema: domain — must be a string when present');
+  }
+
   return {
     truths,
     artifacts,
     key_links: keyLinks,
     expected_output: expectedOutput,
+    domain,
   };
 }
 
@@ -410,8 +426,8 @@ if (require.main === module) {
 
     // Structured — try to parse
     try {
-      parseMustHaves(content);
-      process.stdout.write(JSON.stringify({ legacy: false, valid: true, errors: [] }) + '\n');
+      const parsed = parseMustHaves(content);
+      process.stdout.write(JSON.stringify({ legacy: false, valid: true, errors: [], domain: parsed.domain }) + '\n');
       process.exit(0);
     } catch (parseErr) {
       process.stdout.write(JSON.stringify({ legacy: false, valid: false, errors: [parseErr.message] }) + '\n');

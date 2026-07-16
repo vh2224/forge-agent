@@ -57,7 +57,7 @@ If `.gsd/CODING-STANDARDS.md` has a **Directory Conventions** table, respect it 
 Write `M###-ROADMAP.md`:
 - Vision paragraph
 - 4-10 slices ordered by risk (highest first)
-- Each slice: `- [ ] **S##: Title** \`risk:high|medium|low\` \`depends:[]\`` + demo sentence
+- Each slice: `- [ ] **S##: Title** \`risk:high|medium|low\` \`depends:[]\` \`domain:<name>\`` (the `domain:<name>` tag is optional) + demo sentence. Emit the tag only when the slice's work maps to a domain that exists as a key in the `routing:` block of prefs (open-set — see § Must-Haves Schema for the same rule applied at task level); when absent or invalid, downstream resolution falls back to `default` with no error. This tag feeds domain-first routing at `plan-slice` dispatch time (consumed by the S02-wired resolver in `shared/forge-dispatch.md § Worker Engine Routing`).
 - **Boundary Map** section: for each slice → pair, list what it produces and consumes
 
 ## For slice planning (plan-slice)
@@ -115,6 +115,7 @@ depends: [T01, T02]              # task IDs in this slice that must complete fir
 writes:                           # files/globs this task will create or modify
   - "src/auth/jwt.ts"
   - "src/auth/__tests__/**"
+domain: backend                  # optional — see domain: contract below
 must_haves:
   truths:
     - "Observable outcome (used for verification)"
@@ -141,6 +142,11 @@ expected_output:
 - `key_links[]` REQUIRES `from`, `to`, `via`.
 - `expected_output` is a **top-level sibling** of `must_haves` (not nested inside it) — a flat array of path strings.
 - **Unconditional** — emit the block on every net-new T##-PLAN, even when artifacts are minor. The executor's verification gate (`scripts/forge-must-haves.js`) parses and validates this shape; a missing or malformed block causes the gate to fail.
+- `domain` is **optional** (unlike the fields above). Emit it only when the task's work maps to a domain that is an **existing key in the `routing:` block** of the prefs cascade (open-set — you do not invent new keys, you only reference ones already configured). If no `routing:` block exists, or the task doesn't clearly belong to one of its keys, **omit the field** — it resolves to `default` downstream with no error, never a failure. **No keyword auto-detection**: judge the domain from the actual nature of the task's work, don't pattern-match on filenames/strings. Additive: T##-PLANs without `domain:` remain fully valid — `forge-must-haves.js` accepts its absence.
+
+**Domain metadata precedence (fixed by S02, documented here for the emitting side):** frontmatter `domain:` on the T##-PLAN > the slice's `` `domain:<name>` `` tag on its ROADMAP line (§ For milestone planning above) > `default`. `domain:` is an axis **independent of `tier:`/`effort:`** below — set it (or leave it unset) purely on the task's subject matter, not on its complexity.
+
+Example: a slice tagged `` `domain:backend` `` in the ROADMAP whose T03 sets `domain: frontend` in its own frontmatter resolves to `frontend` for that task (frontmatter wins); a sibling T04 with no `domain:` field falls through to the slice tag `backend`; a task in a slice with no tag and no frontmatter field resolves to `default`.
 
 ## Effort & Tier Hints (routing — judge per task)
 
