@@ -845,7 +845,7 @@ function invokeCodexDetached(opts) {
  * PATH): a `.js` value is launched with the current Node binary — this is how
  * forge-smoke.js injects a cross-platform mock.
  *
- * @returns {{cmd: string, prefixArgs: string[]}}
+ * @returns {{cmd: string, prefixArgs: string[], viaCmdShell?: boolean}}
  */
 function resolveAgyCommand() {
   const override = process.env.FORGE_XLLM_AGY_BIN;
@@ -869,10 +869,24 @@ function resolveAgyCommand() {
       const candidate = path.join(dir, `agy${ext}`);
       if (fs.existsSync(candidate)) {
         const lower = ext.toLowerCase();
-        // .cmd/.bat are batch scripts — Node cannot spawn them directly without
-        // shell:true; route through `cmd.exe /c` (shell:false preserved).
         if (lower === '.cmd' || lower === '.bat') {
-          return { cmd: process.env.ComSpec || 'cmd.exe', prefixArgs: ['/c', candidate] };
+          // Preferred (mirrors resolveCodexCommand): a .cmd/.bat is an npm shim
+          // that ultimately just runs `node <pkg>/…/agy.js %*`. Resolve that JS
+          // entry point and launch it with the current Node binary — this keeps
+          // arguments OFF cmd.exe entirely, closing the CVE-2024-27980 re-parse
+          // hole (an embedded double-quote in an untrusted --model value can
+          // break out of `cmd.exe /c` even with shell:false).
+          const js = resolveShimJsEntry(candidate);
+          if (js) {
+            return { cmd: process.execPath, prefixArgs: [js] };
+          }
+          // Last resort: route through `cmd.exe /c`. The caller MUST validate
+          // every argument that crosses this shell (see assertSafeForCmdShell).
+          return {
+            cmd: process.env.ComSpec || 'cmd.exe',
+            prefixArgs: ['/c', candidate],
+            viaCmdShell: true,
+          };
         }
         return { cmd: candidate, prefixArgs: [] };
       }
@@ -881,6 +895,59 @@ function resolveAgyCommand() {
 
   // Nothing resolvable — spawn by name so the caller surfaces the usual ENOENT.
   return { cmd: 'agy', prefixArgs: [] };
+}
+
+/**
+ * Given a Windows npm shim (`agy.cmd`/`agy.bat`), resolve the underlying Node
+ * `.js` entry point it launches, so we can run it via `process.execPath` and
+ * bypass cmd.exe entirely (mirrors how resolveCodexCommand locates codex.js).
+ *
+ * npm-generated shims embed the entry-point path as a `%~dp0\…\<file>.js`
+ * reference (or `%dp0%\…`). Extract the first such relative path, resolve it
+ * against the shim's directory, and return it only if the file exists.
+ *
+ * @param {string} shimPath absolute path to the .cmd/.bat shim
+ * @returns {string|null} absolute path to the JS entry point, or null
+ */
+function resolveShimJsEntry(shimPath) {
+  let content;
+  try {
+    content = fs.readFileSync(shimPath, 'utf8');
+  } catch (e) {
+    return null;
+  }
+  // Match `%~dp0\...\foo.js` or `%dp0%\...\foo.js` (quotes optional), capturing
+  // the path fragment after the dp0 anchor. npm shims always anchor at %~dp0.
+  const m = content.match(/%[~]?dp0%?[\\/]+([^"%\r\n]+?\.js)/i);
+  if (!m) {
+    return null;
+  }
+  const rel = m[1].trim().replace(/[\\/]+/g, path.sep);
+  const abs = path.resolve(path.dirname(shimPath), rel);
+  return fs.existsSync(abs) ? abs : null;
+}
+
+/**
+ * Guard for the cmd.exe /c fallback path (Windows shim with no resolvable JS
+ * entry point). cmd.exe re-parses the command line AFTER /c even when spawnSync
+ * runs with shell:false, so an untrusted argument (challenger_model is
+ * repo-committed — see the threat model) containing shell metacharacters or a
+ * double-quote can break out (CVE-2024-27980 class). Reject any such argument;
+ * the throw surfaces as a non-zero adapter exit and the orchestrator falls back
+ * per shared/forge-review.md.
+ *
+ * @param {string[]} args every argument that will cross cmd.exe (prefixArgs + args)
+ * @throws {Error} if any argument contains a cmd metacharacter or double-quote
+ */
+function assertSafeForCmdShell(args) {
+  const UNSAFE = /[&|<>^%"]/;
+  for (const a of args) {
+    if (typeof a === 'string' && UNSAFE.test(a)) {
+      throw new Error(
+        `agy argument rejected: contains cmd.exe metacharacter/quote (CVE-2024-27980 guard): ${JSON.stringify(a)}`,
+      );
+    }
+  }
 }
 
 /**
@@ -935,7 +1002,13 @@ function invokeAgy(opts) {
       args.push('--model', model);
     }
 
-    const { cmd, prefixArgs } = resolveAgyCommand();
+    const { cmd, prefixArgs, viaCmdShell } = resolveAgyCommand();
+    // On the cmd.exe /c last-resort path, cmd re-parses arguments after /c
+    // (CVE-2024-27980) — reject any that carry shell metacharacters/quotes
+    // before they reach the shell. The JS-entry-point path never hits cmd.exe.
+    if (viaCmdShell) {
+      assertSafeForCmdShell([...prefixArgs, ...args]);
+    }
     const res = spawnSync(cmd, [...prefixArgs, ...args], {
       cwd,
       // agy's own --print-timeout fires first and lets it exit cleanly; the spawn
@@ -1462,6 +1535,8 @@ module.exports = {
   buildPlanPrompt,
   deriveFilesChanged,
   readWorkersTimeout,
+  assertSafeForCmdShell,
+  resolveShimJsEntry,
 };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────

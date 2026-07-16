@@ -1783,6 +1783,30 @@ function smokeXllm() {
     assert(/unknown --engine/.test(r.stderr), 'M: unknown --engine cause is on stderr', `stderr=${r.stderr}`);
     cleanup(dir);
   }
+
+  // Scenario N — CVE-2024-27980 guard: on the cmd.exe /c last-resort path, any
+  // argument carrying a shell metacharacter/quote (an untrusted challenger_model
+  // is repo-committed and reaches argv as --model <value>) must be rejected
+  // before it crosses cmd.exe. Unit-test the exported guard directly (the
+  // cmd.exe path only triggers on win32, so a live subprocess can't exercise it
+  // cross-platform).
+  {
+    const xllm = require(path.join(SCRIPTS, 'forge-xllm.js'));
+    assert(typeof xllm.assertSafeForCmdShell === 'function',
+      'N: forge-xllm exports assertSafeForCmdShell', `got ${typeof xllm.assertSafeForCmdShell}`);
+    // Safe args (incl. an agy label with spaces + parens) must pass unharmed.
+    let safeOk = true;
+    try { xllm.assertSafeForCmdShell(['--model', 'Gemini 3.1 Pro (High)', '--sandbox']); }
+    catch (e) { safeOk = false; }
+    assert(safeOk, 'N: safe args (spaces/parens) pass the cmd-shell guard', 'unexpected throw');
+    // The exact breakout payload from the review objection must be rejected.
+    for (const evil of ['x" & echo PWNED & "', 'a|b', 'a&b', 'a>b', 'a<b', 'a^b', 'a%PATH%b']) {
+      let threw = false;
+      try { xllm.assertSafeForCmdShell(['--model', evil]); }
+      catch (e) { threw = /CVE-2024-27980/.test(e.message); }
+      assert(threw, `N: cmd-shell guard rejects metachar payload ${JSON.stringify(evil)}`, 'no throw / wrong message');
+    }
+  }
 }
 
 // ── Section 21: model ID→alias map (live) ────────────────────────────────
