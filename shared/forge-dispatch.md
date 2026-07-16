@@ -839,11 +839,11 @@ Placeholder classification:
 
 ### Worker Engine Routing
 
-**Purpose:** Control-flow section that runs **before** Tier Resolution and Effort Resolution, on every worker dispatch that supports engine routing. It translates `unit_type + T##-PLAN frontmatter + prefs` into a concrete `ENGINE ∈ {claude, codex}` decision and, when `ENGINE == codex` for a routable unit, drives the detached sidecar (`scripts/forge-xllm.js --mode execute`) through a background+polling state machine — falling back to the in-context `forge-executor` (Claude) on any failure with a reset to the pre-dispatch commit. Like the Retry Handler, Token Telemetry, Tier Resolution and Effort Resolution, this is **control flow — not data flow** — and therefore lives outside the fenced template blocks (MEM011). No new Node script is introduced here: the adapter (`scripts/forge-xllm.js`) shipped in M005 S01; this section wires it into the loop.
+**Purpose:** Control-flow section that runs **before** Tier Resolution and Effort Resolution, on every worker dispatch that supports engine routing. As of M007 S02 the engine decision and the tier-chain resolution **collapse into a single call** to [`scripts/forge-routing.js`](../scripts/forge-routing.js) per dispatch: that one call translates `unit_type + T##-PLAN frontmatter + prefs + domain` into a cross-engine **chain** `[{id, alias, mapped, engine}]` where **every member already carries its own `engine`** (`claude` or `codex`/`gemini`, derived via `modelFamily()` inside the resolver). The orchestrator no longer runs a separate Engine Resolution step *and* a separate tier-chain resolution — the chain returned by `forge-routing.js` is the single source of both the engine-to-dispatch and the ordered fallback ladder. When the dispatched chain member has `engine == codex` for a routable unit, the orchestrator drives the detached sidecar (`scripts/forge-xllm.js --mode execute`) through a background+polling state machine — falling back to the in-context `forge-executor` (Claude) on any failure with a verified reset to the pre-dispatch commit. Like the Retry Handler, Token Telemetry, Tier Resolution and Effort Resolution, this is **control flow — not data flow** — and therefore lives outside the fenced template blocks (MEM011). No new Node script is introduced *here*: the resolver (`scripts/forge-routing.js`) shipped in M007 S01 and the sidecar adapter (`scripts/forge-xllm.js`) in M005 S01; this section wires them into the loop.
 
-> **Spec-first.** This section is canonical. `skills/forge-auto/SKILL.md` (T02), `skills/forge-next/SKILL.md` (T03) and `skills/forge-task/SKILL.md` (T05) carry the **executable mirror** of this algorithm in their Step 4 / Step 5 dispatch. Any change to engine routing lands here first, then propagates to those three mirrors.
+> **Spec-first.** This section is canonical. `skills/forge-auto/SKILL.md` (T02) and `skills/forge-next/SKILL.md` (T03) carry the **executable mirror** of this algorithm in their Step 4 dispatch. Any change to engine/route resolution lands here first, then propagates to those two mirrors in lockstep (T04's smoke Section 33 greps all three files and fails if they diverge). `skills/forge-task/SKILL.md` is **explicitly out of scope of S02** — a `/forge-task` unit uses its own standalone dispatch path; whether it inherits domain-first routing is a **declared follow-up (out-of-scope), not a silent omission** (see § forge-task — out of scope below).
 
-> **Cross-reference:** The reader follows the `readEvidenceMode` / [`shared/forge-review.md § Step 0`](forge-review.md) regex-over-raw-prefs model. The fallback (`worker-engine-fallback`) is a clone of the `review-challenger-fallback` in [`shared/forge-review.md § Fallback challenger`](forge-review.md). The adapter contract (result-file JSON, heartbeat, exit codes) is defined in `scripts/forge-xllm.js` (S01).
+> **Cross-reference:** The resolver call and the cross-engine chain contract are defined in `scripts/forge-routing.js` (S01) — see § Single-call resolver below. The `workers:` prefs reader (legacy compat path) follows the `readEvidenceMode` / [`shared/forge-review.md § Step 0`](forge-review.md) regex-over-raw-prefs model. The fallback (`worker-engine-fallback`) is a clone of the `review-challenger-fallback` in [`shared/forge-review.md § Fallback challenger`](forge-review.md). The sidecar adapter contract (result-file JSON, heartbeat, exit codes) is defined in `scripts/forge-xllm.js` (S01).
 
 #### When to apply
 
@@ -861,30 +861,63 @@ Applicability by `unit_type`:
 
 The `claude` path is **byte-identical** to the current loop: when `ENGINE == claude` this section is a no-op that hands control straight to Tier Resolution. Only a non-`claude` resolution changes behavior. Two routable unit types dispatch the sidecar: `execute-task` (Branch C — `--mode execute`, read-write) and `plan-slice` (Branch D — `--mode plan`, **read-only**). The two branches diverge on side effects: execute captures/resets `START_SHA` and forbids codex commits; plan writes nothing (codex only reasons and returns markdown), so there is **no dirty-tree guard, no `START_SHA`, no reset** — the orchestrator materializes the returned plan content into `.gsd/**` itself.
 
-#### Engine resolution algorithm (first match wins)
+#### Single-call resolver — `forge-routing.js` (ONE call per dispatch)
 
-Resolve `ENGINE` and `ENGINE_REASON` in precedence order — the first rule that matches wins:
+The Engine Resolution (the old step 1.45) and the tier-chain resolution of § Tier Resolution (the old step 4, `forge-tier-chain.js --json`) **collapse into ONE call** to `forge-routing.js`. The resolver is a **superset** of `readTierChain()`: the chain it returns already carries the `engine` per member, so the wiring calls the CLI **once** with all inputs and consumes the chain — never re-resolving mid-unit (`--next-after` is used only on a failure trigger; see § Cross-engine chain walk).
 
-1. **`worker:` in T##-PLAN frontmatter** (only when `unit_type == execute-task`). Whitelist `claude | codex`; any other value → ignore this rule (fall through). Match → `ENGINE = <val>`, `ENGINE_REASON = "frontmatter-worker:<val>"`. Mirrors the `tier:` frontmatter override.
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "$HOME/.claude/scripts")
+ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
+  --unit-type "$UNIT_TYPE" \
+  --tier "$TIER" \
+  --domain "$DOMAIN" \
+  --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" \
+  --cwd "$WORKING_DIR")     # SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018) — o resolvedor lê prefs do workspace original
+# → { chain:[{id,alias,mapped,engine}], fallback:{id,alias}, source, domain_used, phase, reason }
+```
+
+Inputs (all resolved before this call):
+- `$UNIT_TYPE` — `execute-task` | `plan-slice` (the only two routable types; all others are never captured — the resolver echoes `phase-not-routable` and returns the legacy chain).
+- `$TIER` — the tier already resolved by § Tier Resolution steps 1–3 (unit-type default + frontmatter `tier:` + `risk:high` escalation). Passing the *resolved* tier keeps this call the single point of model resolution.
+- `$DOMAIN` — the domain metadata extracted for this unit (see § Domain metadata below); absent → the resolver uses the `default` domain.
+- `$PLAN_TIER` / `$PLAN_WORKER` — the raw T##-PLAN frontmatter `tier:` / `worker:` values (execute-task only; empty otherwise). The resolver internalizes the precedence `frontmatter tier:/worker: > routing: > tier_models/workers legado` — the wiring does **not** re-implement it (M004 S02 pattern: describe/reference the resolver, never re-encode its logic in markdown).
+- `--cwd "$WORKING_DIR"` — **always** the original workspace, never `$CODE_DIR` (MEM018: the resolver reads the prefs cascade from `$WORKING_DIR/.gsd/**`; `$CODE_DIR` is a worktree without the prefs).
+
+The contract JSON fields consumed by the wiring:
+
+| Field | Use |
+|-------|-----|
+| `chain[]` | ordered cross-engine ladder `[{id, alias, mapped, engine}]`. `chain[0]` is the primary to dispatch; the tail is the intra-chain fallback (walked via `--next-after`). |
+| `fallback` | `{id, alias}` — the validated category fallback (1 mapped Claude member, S01), dispatched **once** after the chain is exhausted, before `blocked → human`. |
+| `source` | `frontmatter` \| `routing` \| `tier_models` — the **`route_source`**; drives the engine-decision table below and the shadowing warning. |
+| `domain_used` | the domain actually applied (`<domain>` or `default`) — carried into the `dispatch` event. |
+| `phase` | `executor` \| `planner` \| echoed `unit_type` — internal phase mapping (execute-task→executor, plan-slice→planner). |
+| `reason` | `;`-joined discriminators (degradations: `routing-parse-error`, `phase-not-routable`, `fallback-invalid-substituted`, `chain-capped`, `skipped-unknown-family`, …) — surfaced in `--explain` and echoed into the dispatch reason. |
+
+`forge-routing.js` **exit 0 ALWAYS** (a last-resort try/catch preserves the ordered contract even on an unexpected failure), so the wiring never needs to guard the exit code — a degradation shows up as a `reason` discriminator, never a thrown error.
+
+#### Engine decision by `route_source` (the table)
+
+The engine to dispatch is decided by `source` (`route_source`) — **not** by a separate Engine Resolution step:
+
+| `route_source` | Path | Engine | Model |
+|----------------|------|--------|-------|
+| `routing` / `frontmatter` (routing block drives, or frontmatter `worker:`/`tier:` wins) | **routing drives** | `chain[0].engine` (`claude` or `codex`/`gemini`) | `chain[0].id` / `chain[0].alias` |
+| `tier_models` (no `routing:` block, OR the cell fell through to the legacy 1-path) | **legacy, byte-identical M006** | the existing **Engine Resolution** (`workers:` pref + frontmatter `worker:`) decides | claude → `Agent(chain[0])` identical to `readTierChain`; codex → sidecar resolves its own model (`CODEX_MODEL`/CLI default) |
+
+**Compat consequence:** with **no `routing:` block**, `route_source == tier_models` always → the legacy Engine Resolution (workers pref) stays the authority of engine, and `chain[0].id == readTierChain(tier)[0]` — exactly the M006/M005 path (byte-identical). The global precedence remains `frontmatter tier:/worker: > routing: > tier_models/workers legado`.
+
+#### Engine resolution — legacy compat path (`route_source == tier_models` ONLY)
+
+When `route_source == tier_models` the engine is **not** taken from `chain[0].engine`; instead the pre-M007 Engine Resolution runs, consulting the `workers:` pref + frontmatter `worker:` (first match wins). This preserves M006 behavior byte-for-byte for projects with no `routing:` block. It is **not** a duplicate resolution alongside the routing call — it is the sanctioned fallback for the one `route_source` where routing did not drive.
+
+1. **`worker:` in T##-PLAN frontmatter** (only when `unit_type == execute-task`). Whitelist `claude | codex`; any other value → ignore (fall through). Match → `ENGINE = <val>`, `ENGINE_REASON = "frontmatter-worker:<val>"`. (Note: `$PLAN_WORKER` was already passed to `forge-routing.js` as `--frontmatter-worker`; when routing drives, the resolver honors it and returns `route_source: frontmatter`. This legacy rule fires **only** when routing did *not* drive.)
 2. **Pref `workers.<unit_type>`** (3-file cascade — see reader below). Whitelist `claude | codex`, default-safe `claude`. Match → `ENGINE = <val>`, `ENGINE_REASON = "workers.<unit_type>:<val>"`.
 3. **Default** → `ENGINE = "claude"`, `ENGINE_REASON = "default:claude"`.
 
 ```bash
-# Step 4.0a — extract frontmatter worker override (execute-task only; empty otherwise)
-PLAN_WORKER=""
-if [ "$UNIT_TYPE" = "execute-task" ]; then
-  PLAN_WORKER=$(node -e "
-    const fs=require('fs');
-    const text=fs.readFileSync('$PLAN_PATH','utf8');
-    const m=text.match(/^---[\s\S]*?---/);
-    if(!m)process.exit(0);
-    let v=((m[0].match(/^worker:[ \t]*(\S+)/m)||[])[1]||'').trim().toLowerCase();
-    if(v!=='claude'&&v!=='codex')v='';   // whitelist; invalid → fall through
-    process.stdout.write(v);
-  ")
-fi
-
-# Step 4.0b — resolve ENGINE (precedence: frontmatter > pref > default)
+# Legacy compat path — runs ONLY when route_source == tier_models.
+# Step L.0b — resolve ENGINE (precedence: frontmatter > pref > default)
 if [ -n "$PLAN_WORKER" ]; then
   ENGINE="$PLAN_WORKER";        ENGINE_REASON="frontmatter-worker:$PLAN_WORKER"
 elif [ -n "$WORKERS_ENGINE" ] && [ "$WORKERS_ENGINE" != "claude" ]; then
@@ -894,7 +927,20 @@ else
 fi
 ```
 
-`$WORKERS_ENGINE`, `$WORKERS_TIMEOUT` and `$CODEX_MODEL` are derived by the reader below (the pref value for the *current* `unit_type`). `$PLAN_PATH` is the absolute path to the `T##-PLAN.md`; `$UNIT_TYPE` and `$CODE_DIR` come from the isolation/dispatch header.
+When `route_source ∈ {routing, frontmatter}` this legacy block is skipped entirely: `ENGINE = chain[0].engine`, `ENGINE_REASON = "route:$ROUTE_SOURCE:${chain[0].engine}"`. `$WORKERS_ENGINE`, `$WORKERS_TIMEOUT` and `$CODEX_MODEL` are derived by the reader below (the pref value for the *current* `unit_type`). `$PLAN_PATH` is the absolute path to the `T##-PLAN.md`; `$UNIT_TYPE` and `$CODE_DIR` come from the isolation/dispatch header.
+
+#### Shadowing warning (risk #3 mitigation)
+
+When `route_source != routing` **but** a `routing:` block IS configured in the prefs cascade (i.e. a `routing.<domain>.<phase>.<tier>` cell exists but lost to a frontmatter override or fell through to the legacy `tier_models` path), the orchestrator emits a single warning line so the operator sees that their routing config was shadowed rather than silently ignored:
+
+```bash
+# ROUTE_SOURCE from the contract; ROUTING_PRESENT from `forge-routing.js --explain` (or readRoutingConfig().present)
+if [ "$ROUTE_SOURCE" != "routing" ] && [ "$ROUTING_PRESENT" = "true" ]; then
+  echo "⚠ routing: configurado mas não aplicado (route_source=$ROUTE_SOURCE) — frontmatter/legado venceu para $UNIT_TYPE/$UNIT_ID" >&2
+fi
+```
+
+This is advisory (stderr only) — it never blocks the dispatch. `--explain` (pt-BR) gives the full precedence trace when the operator wants to know *why* the cell lost.
 
 #### Prefs reader — regex-over-raw-prefs (never `prefs-resolved.json`)
 
@@ -933,21 +979,24 @@ The reader is safe with **no scaffold present**: absent a `workers:` block, `WOR
 
 #### Sidecar dispatch state machine (`ENGINE == codex && UNIT_TYPE == execute-task`)
 
-When `ENGINE` resolves to `codex` **and** the unit is `execute-task`, the orchestrator drives the detached adapter instead of `Agent("forge-executor")`. States: `started → polling → done | failed`.
+When the dispatched chain member resolves to `engine == codex` **and** the unit is `execute-task`, the orchestrator drives the detached adapter instead of `Agent("forge-executor")`. States: `started → polling → done | failed`. Because a cross-engine chain (e.g. `gpt→claude→gpt`) can dispatch the sidecar **more than once in the same unit**, the state machine is parameterized by a per-unit attempt counter — see § BLOCKER: cross-engine sidecar safety contract below for the invariants (state fresh per attempt, verified reset, hard cap).
 
-**1. Capture `START_SHA` (orchestrator, authoritative) and persist the sidecar state to disk.** BEFORE anything else:
+**0. Increment the sidecar attempt counter (`SIDECAR_ATTEMPT`).** Before dispatching *any* sidecar for this unit, increment a per-unit counter `SIDECAR_ATTEMPT` (starts at 1 for the first sidecar dispatch of the unit). It is hard-capped by the number of `engine == codex` members in the resolved chain (≤3, S01 cap). Exceeding the cap → abort the chain to the Claude fallback (`reason: sidecar-cap-exceeded`). The counter is persisted in the per-attempt state file (below) so it survives an auto-compact mid-unit.
+
+**1. Capture `START_SHA` (orchestrator, authoritative) and persist a FRESH per-attempt state file to disk.** BEFORE anything else, capture the pre-dispatch SHA and write a state file whose name carries the attempt number `N = SIDECAR_ATTEMPT` — **never overwriting a prior attempt's file** (audit preserved, post-compact recovery unambiguous):
 
 ```bash
 START_SHA=$(git -C "$CODE_DIR" rev-parse HEAD)
-XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-{unitId}.json"
+N="$SIDECAR_ATTEMPT"                                              # 1, 2, 3 — one per codex member dispatched
+XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-{unitId}-attempt-$N.json"
 mkdir -p "$WORKING_DIR/.gsd/forge/"
-printf '{"start_sha":"%s","reason":"","result_file":"","code_dir":"%s"}\n' \
-  "$START_SHA" "$CODE_DIR" > "$XLLM_STATE"
+printf '{"attempt":%s,"start_sha":"%s","reason":"","result_file":"","code_dir":"%s"}\n' \
+  "$N" "$START_SHA" "$CODE_DIR" > "$XLLM_STATE"
 ```
 
-This is the orchestrator's own capture — the **source of truth for the fallback reset**, independent of whatever the adapter reports in its JSON (`start_sha`). The adapter has its own guard (S01), but the reset below trusts only `$START_SHA`.
+This is the orchestrator's own capture — the **source of truth for the fallback reset**, independent of whatever the adapter reports in its JSON (`start_sha`). The adapter has its own guard (S01), but the reset below trusts only `$START_SHA`. The `-attempt-$N` suffix is the BLOCKER invariant (S02-RISK): a second sidecar dispatch in the same unit writes `…-attempt-2.json`, **never clobbering** `…-attempt-1.json`.
 
-**Branch C spans multiple Bash tool invocations** (the poll loop below is a sequence of separate Bash calls, and may cross an auto-compact) — shell variables do NOT survive between them. The state file `.gsd/forge/xllm-state-{unitId}.json` (under `WORKING_DIR/.gsd`, never `CODE_DIR`) is the durable carrier of `{start_sha, reason, result_file, code_dir}`, mirroring the `auto-mode-started.txt` pattern. **The success block AND the fallback block re-read this file from disk** rather than trusting in-memory shell vars. It is rewritten at result-file allocation (step 3) and whenever `reason` is set on a failure trigger.
+**Branch C spans multiple Bash tool invocations** (the poll loop below is a sequence of separate Bash calls, and may cross an auto-compact) — shell variables do NOT survive between them. The per-attempt state file `.gsd/forge/xllm-state-{unitId}-attempt-{N}.json` (under `WORKING_DIR/.gsd`, never `CODE_DIR`) is the durable carrier of `{attempt, start_sha, reason, result_file, code_dir}`, mirroring the `auto-mode-started.txt` pattern. **The success block AND the fallback block re-read the state of the CURRENT attempt `N` from disk** rather than trusting in-memory shell vars. It is rewritten at result-file allocation (step 3) and whenever `reason` is set on a failure trigger — always to the `-attempt-$N` file of the current attempt.
 
 **2. Clean-tree guard.** If the working tree is dirty, **do NOT dispatch the sidecar** — never discard someone else's uncommitted work:
 
@@ -965,9 +1014,10 @@ fi
 
 ```bash
 RESULT_FILE=$(mktemp -t forge-xllm-result.XXXXXX.json)   # tmpdir, never under $CODE_DIR
-# Persist result_file into the durable state (survives the poll loop / auto-compact).
-printf '{"start_sha":"%s","reason":"","result_file":"%s","code_dir":"%s"}\n' \
-  "$START_SHA" "$RESULT_FILE" "$CODE_DIR" > "$XLLM_STATE"
+# Persist result_file into the durable per-attempt state (survives the poll loop / auto-compact).
+# $XLLM_STATE is the …-attempt-$N.json of the CURRENT attempt — never a prior attempt's file.
+printf '{"attempt":%s,"start_sha":"%s","reason":"","result_file":"%s","code_dir":"%s"}\n' \
+  "$N" "$START_SHA" "$RESULT_FILE" "$CODE_DIR" > "$XLLM_STATE"
 ```
 
 **4. Dispatch detached via `run_in_background`.** The Bash tool's 600s foreground ceiling does not apply to `run_in_background: true` (MEM: sidecar dispatch via background + poll). `--model` is appended **only when `$CODEX_MODEL` is non-empty** (null → CLI default, mirroring the challenger-model pattern):
@@ -1110,17 +1160,63 @@ Triggers (`reason` value):
    ```
 4. **Dispatch a single Claude worker** for the same unit — `forge-executor` on Branch C, `forge-planner` on Branch D. This Claude dispatch **now runs the Tier Resolution and Effort Resolution** that were skipped on the codex path (they only ever run on the Claude branch). No re-resolution of engine — the fallback is unconditionally Claude.
 
-> **Not a 4th recovery layer.** `worker-engine-fallback` is part of the dispatch (Step 4), NOT an extension of the Failure Taxonomy nor the Retry Handler — those layers are mutually exclusive (MEM). It fires once, in-band, at dispatch time; the Retry Handler and blocker taxonomy operate on the *result* of whichever engine ultimately ran.
+> **Not a 4th recovery layer.** `worker-engine-fallback` is part of the dispatch (Step 4), NOT an extension of the Failure Taxonomy nor the Retry Handler — those layers are mutually exclusive (MEM001). It fires once, in-band, at dispatch time; the Retry Handler and blocker taxonomy operate on the *result* of whichever engine ultimately ran.
+
+#### BLOCKER — cross-engine sidecar safety contract (S02-RISK, first-class content)
+
+A cross-engine chain such as `gpt→claude→gpt` dispatches the sidecar **multiple times in the same unit**. The M005 fallback assumed "codex fails → 1 Claude retry"; the multi-member chain breaks that assumption. This contract is defined here as **first-class content** (not an afterthought) and is honored structurally by T01 (this spec) + T02/T03 (executable mirrors) + T04 (smoke doc-presence). Three invariants:
+
+1. **State fresh per attempt.** Each sidecar dispatch in the chain writes its own state file `xllm-state-{unitId}-attempt-{N}.json` (suffix `-attempt-N`, `N` incrementing per codex dispatch of the unit). It **NEVER overwrites** the prior attempt's state — audit preserved, post-compact recovery unambiguous. The success/fallback block re-reads the state of the **CURRENT** attempt `N` from disk (shell vars are gone across the poll loop). This closes risk #2b (state file clobbered between attempts → lost audit).
+
+2. **Verified reset before the next sidecar attempt.** After a codex member fails, the orchestrator resets the workspace to `$START_SHA` scoped to `CODE_DIR` (excluding `.gsd`):
+   ```bash
+   git -C "$CODE_DIR" checkout "$START_SHA" -- . ':(exclude).gsd' && git -C "$CODE_DIR" clean -fd -e .gsd
+   # Then VERIFY the reset actually cleaned the tree before dispatching the next sidecar attempt:
+   if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+     # reset did not fully clean → do NOT inherit a dirty tree into attempt N+1.
+     # → abort the chain to the Claude fallback with reason: dirty-tree-guard
+     REASON="dirty-tree-guard"
+   fi
+   ```
+   Only when `git -C "$CODE_DIR" status --porcelain` is **clean** may the next sidecar attempt dispatch. A still-dirty tree → **abort the whole chain to the Claude fallback** (class `dirty-tree-guard`), never inheriting a dirty tree into a 2nd attempt. This closes risk #2a (a 1st-attempt reset that silently failed → the 2nd attempt captures `START_SHA` on top of dirty work → spurious fallback / lost work). `dirty-tree-guard` is the **only** class that does **not** run the reset — the dirty state predates the never-launched sidecar (a reset would wipe pre-existing uncommitted work).
+
+3. **Hard cap on sidecar attempts per unit.** The resolved chain is ≤3 members + 1 category fallback (S01 cap). The number of sidecar (`engine == codex`) dispatches per unit is bounded by the count of `engine == codex` members in the resolved chain (≤3). An explicit counter `SIDECAR_ATTEMPT` is incremented on each sidecar dispatch and hard-capped by that count; exceeding it → abort to the Claude fallback/human (`reason: sidecar-cap-exceeded`). **The ≤3-members-plus-fallback chain from S01 already includes the sidecar attempts** — there is no separate budget; the chain length *is* the budget.
+
+These three invariants apply identically on Branch C (execute-task) and, where relevant, are the reason Branch D (plan-slice, read-only) needs **none of the reset machinery** — plan mode writes nothing on disk, so there is no dirty-tree guard and no reset between attempts; only the state-fresh-per-attempt and cap invariants carry over.
+
+#### Cross-engine chain walk — unification of Layer 2
+
+The old intra-tier walk (`forge-tier-chain.js --next-after`) is **replaced** by `forge-routing.js --next-after <id>`, which walks the **resolved cross-engine chain** → the category fallback ONCE → `''` (exhausted). This is the **SAME Failure Taxonomy Layer 2** with the new resolver — **never a 4th recovery layer** (MEM001). A member failure advances to the next member, whose `engine` is re-inspected and dispatched appropriately (sidecar for `codex`, `Agent()` for `claude`):
+
+```bash
+NEXT_ID=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
+  --unit-type "$UNIT_TYPE" --tier "$TIER" --domain "$DOMAIN" \
+  --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" \
+  --cwd "$WORKING_DIR" --next-after "$CURRENT_ID")
+# NEXT_ID == '' → chain + category fallback exhausted → blocked → human (never a 4th layer)
+```
+
+Rules by member-failure kind:
+
+| Member | Failure signal | Action |
+|--------|----------------|--------|
+| **claude** member | `status: blocked` (`model_refusal` / `429` / `400`) | **Layer 2** advances the chain via `--next-after` (this *is* the walk that replaces `forge-tier-chain --next-after` — same layer, new resolver). |
+| **claude** member | `Agent()` **throw** (API 500 / timeout) | **Layer 1** Retry Handler (per member, unchanged) — not the chain walk. |
+| **codex** member | sidecar failure (`codex-exit-nonzero` / `codex-timeout` / `codex-orphan` / `codex-invalid-json`) | **verified reset** (BLOCKER item 2) + advance the chain via `--next-after`. |
+| **codex** member | `dirty-tree-guard` (reset left the tree dirty, or pre-dispatch dirty) | **abort** the chain to the Claude fallback (no advance). |
+| **chain exhausted** | `--next-after` returns `''` | dispatch the **category fallback** ONCE (1 mapped Claude, validated S01) → if that too fails, `blocked → human`. |
+
+`worker-engine-fallback` continues to fire **in-band** at dispatch time, once per trigger; it is NOT the chain walk and NOT a new layer. The chain walk is Layer 2 (`status: blocked` results); the fallback is the dispatch-time degradation when a codex member cannot run at all. Both feed the same ≤3-members-plus-fallback budget.
 
 #### Event log extension — additive `engine` field on `dispatch`
 
-The `dispatch` event schema (Token Telemetry + Tier Resolution) is extended **additively** with one field: `engine ∈ {claude, codex}`. No existing field is renamed or removed. S03 readers that parse by known field names and ignore unknowns continue to work; events lacking `engine` are valid (treat as `undefined`, not error).
+The `dispatch` event schema (Token Telemetry + Tier Resolution) is extended **additively** with four routing fields: `engine ∈ {claude, codex, gemini}`, `domain` (the `domain_used` from the resolver — a domain name or `default`), `route_source ∈ {frontmatter, routing, tier_models}` (the `source` from the resolver), and `chain_len` (the number of members in the resolved chain, an integer ≥1). No existing field is renamed or removed. S03/M006/M005 readers that parse by known field names and ignore unknowns continue to work; events lacking any of these fields are valid (treat as `undefined`, not error) — the M006 `slice`/`milestone` discriminators and the M005 `engine` field are preserved alongside.
 
 ```json
-{"ts":"2026-07-14T10:00:05Z","event":"dispatch","unit":"execute-task/T04","model":"gpt-5-codex","input_tokens":2100,"output_tokens":0,"tier":"heavy","reason":"unit-type:execute-task","engine":"codex"}
+{"ts":"2026-07-15T10:00:05Z","event":"dispatch","unit":"execute-task/T04","model":"gpt-5-codex","input_tokens":2100,"output_tokens":0,"tier":"heavy","reason":"unit-type:execute-task","engine":"codex","domain":"backend","route_source":"routing","chain_len":3}
 ```
 
-On the codex path `model` carries the codex model id (or the CLI default label when `$CODEX_MODEL` is unset) and `output_tokens` may be `0` (the adapter's token channel is git-derived, not SDK usage). On the claude path the field is `"engine":"claude"` and all other fields are exactly as Tier/Effort Resolution produce them.
+On the codex path `model` carries the codex model id (or the CLI default label when `$CODEX_MODEL` is unset) and `output_tokens` may be `0` (the adapter's token channel is git-derived, not SDK usage). On the claude path the field is `"engine":"claude"` and all other fields are exactly as Tier/Effort Resolution produce them. `domain`/`route_source`/`chain_len` come straight from the single `forge-routing.js` call — `domain_used`, `source`, and `chain.length` respectively — and are emitted on **both** the claude and codex paths of `execute-task` and `plan-slice`. Legacy dispatch events (no `routing:` block → `route_source:"tier_models"`, `domain:"default"`, `chain_len` = the legacy chain length) remain byte-compatible with the M005/M006 path.
 
 #### Event log extension — additive `slice` + `milestone` fields on `dispatch` (autoria de review)
 
@@ -1163,11 +1259,44 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 
 `plan-milestone` is intentionally **absent** from this table — it is never routed through `workers:` (locked; stays tier `max`/Fable). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.md § Workers Settings` (S05); the reader operates with the safe defaults above without it.
 
+#### Domain metadata — format fixed by S02, emitted by S03
+
+Domain-first routing keys on a `domain` string per unit. The format is **fixed here (S02 reads it)** and **emitted by S03** (per the Boundary Map note `*`: S03 emits, S02 reads). Two carriers, by unit type:
+
+- **Task-level (for `execute-task`):** a `domain:` field in the T##-PLAN.md frontmatter. Read when dispatching `execute-task`.
+- **Slice-level (for `plan-slice`):** a `` `domain:<name>` `` tag on the slice's checkbox line in `{M###}-ROADMAP.md`, alongside `risk:` / `depends:`. Read by the orchestrator when dispatching `plan-slice`.
+
+**Extraction (precedence for `execute-task`):** frontmatter `domain:` → else the slice's `domain:<name>` ROADMAP tag → else `default`. `plan-slice` greps the slice line in the ROADMAP for `domain:<name>`. Absent/invalid → `default` (the resolver uses the `routing.default.*` cell, or the legacy path with no error).
+
+```bash
+# execute-task: parse `domain:` from the T##-PLAN frontmatter (same shape as PLAN_TIER / PLAN_TAG)
+DOMAIN=$(node -e "const fs=require('fs');const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);if(!m)process.exit(0);const r=(m[0].match(/^domain:[ \t]*(.+)$/m)||[])[1]||'';process.stdout.write(r.trim())")
+if [ -z "$DOMAIN" ] && [ -n "$SLICE_ID" ]; then
+  # fall back to the slice's ROADMAP domain: tag
+  ROADMAP_PATH=".gsd/milestones/${MILESTONE_ID}/${MILESTONE_ID}-ROADMAP.md"
+  DOMAIN=$(grep -E "\b${SLICE_ID}\b" "$ROADMAP_PATH" 2>/dev/null | grep -oE 'domain:[A-Za-z0-9_-]+' | head -1 | cut -d: -f2)
+fi
+[ -z "$DOMAIN" ] && DOMAIN="default"
+
+# plan-slice: grep the slice line in the ROADMAP directly
+if [ "$UNIT_TYPE" = "plan-slice" ]; then
+  ROADMAP_PATH=".gsd/milestones/${MILESTONE_ID}/${MILESTONE_ID}-ROADMAP.md"
+  DOMAIN=$(grep -E "\b${UNIT_ID}\b" "$ROADMAP_PATH" 2>/dev/null | grep -oE 'domain:[A-Za-z0-9_-]+' | head -1 | cut -d: -f2)
+  [ -z "$DOMAIN" ] && DOMAIN="default"
+fi
+```
+
+`$DOMAIN` is passed to the single `forge-routing.js` call as `--domain "$DOMAIN"`. The resolver echoes the domain it actually applied as `domain_used` (which is `default` when the domain was absent or its cell fell through), and that value is what lands in the `dispatch` event's `domain` field.
+
+#### `forge-task` — out of scope of S02 (declared follow-up, not omission)
+
+`skills/forge-task/SKILL.md` (a standalone `/forge-task` unit) is **explicitly out of scope of S02**. A `/forge-task` unit runs its own dispatch path (execute-task shape, but a single unit with no slice/milestone routing metadata) and is **not** wired to domain-first routing in this milestone. Whether it inherits `forge-routing.js` is a **declared follow-up (out-of-scope)** — recorded here so it is a conscious deferral, **not a silent omission**. The executable mirrors that S02 keeps in lockstep are therefore **two** (`forge-auto`, `forge-next`), not three; the spec-first banner at the top of this section reflects that. `forge-task` continues to route engine via its existing standalone `worker:`/`workers:` path (unchanged by S02).
+
 ---
 
 ### Tier Resolution
 
-**Purpose:** Control-flow section that runs before every `Agent()` call. It translates `unit_type + frontmatter hints + prefs` into a concrete `{tier, model, reason}` triple that the dispatch loop passes to `Agent()`. Like the Retry Handler and Token Telemetry, this is control flow — not data flow — and lives outside the fenced template blocks (MEM011). No new Node script is introduced: tier classification is pure Markdown rules + a `node -e` one-liner for frontmatter extraction (M002-CONTEXT D7, Hybrid C approach). This section fulfils the S04 extension note in Token Telemetry above: the `dispatch` event schema is extended additively with `tier` and `reason` fields.
+**Purpose:** Control-flow section that runs before every `Agent()` call. It translates `unit_type + frontmatter hints + prefs + domain` into a concrete `{tier, model, chain, reason}` result that the dispatch loop passes to `Agent()` (or the sidecar). Steps 1–3 (tier classification) are pure Markdown rules + a `node -e` one-liner for frontmatter extraction (M002-CONTEXT D7, Hybrid C approach); **step 4 (model + chain resolution) is the SINGLE `forge-routing.js` call shared with § Worker Engine Routing** — one call per dispatch, replacing the old `forge-tier-chain.js --json` initial resolution. Like the Retry Handler and Token Telemetry, this is control flow — not data flow — and lives outside the fenced template blocks (MEM011). This section extends the `dispatch` event schema additively with `tier`/`reason` (M002) and `domain`/`route_source`/`chain_len` (M007 S02).
 
 > **Cross-reference:** Canonical tier tables — see [`shared/forge-tiers.md`](forge-tiers.md). Override precedence and `tag: docs` semantics are locked in that file. The retry path (see `### Retry Handler` above) preserves the same `tier` and `model` on re-dispatch — do NOT re-resolve tier inside the retry loop.
 
@@ -1203,24 +1332,34 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
    - Else if `PLAN_TAG == "docs"` → `tier = "light"`, `reason = "frontmatter-tag:docs"`.
    - Else if `unit_type == plan-slice` AND the slice is tagged `risk:high` in the milestone ROADMAP → `tier = "max"`, `reason = "risk-escalation:high"`. (Same ROADMAP check that triggers the `forge-risk-radar` gate.)
    - Else → `tier` stays as unit-type default, `reason = "unit-type:${unit_type}"`.
-4. **Resolve model via the tier chain.** `tier_models.<tier>` in the raw prefs cascade may be a
-   scalar model ID (legacy/common case) or an ordered fallback chain `[primary, ...fallbacks]`.
-   Read it through [`scripts/forge-tier-chain.js`](../scripts/forge-tier-chain.js) — **never**
-   `.gsd/prefs-resolved.json` (that file is never written; MEM001 M005):
+4. **Resolve model + chain via `forge-routing.js` (the SINGLE call — replaces `forge-tier-chain.js --json`).**
+   As of M007 S02 the initial tier-chain resolution is folded into the **same** `forge-routing.js`
+   call that § Worker Engine Routing makes — one call per dispatch, not two. `forge-routing.js`
+   internalizes `readTierChain()` on its legacy path, so the `tier_models.<tier>` cascade (scalar
+   model ID or ordered `[primary, ...fallbacks]` list) is still honored byte-identically when no
+   `routing:` block applies. The old `forge-tier-chain.js --json` initial resolution is **removed**
+   from the loop; `forge-tier-chain.js` survives **only** as an internal legacy reader called from
+   *inside* `forge-routing.js`. **Never** read `.gsd/prefs-resolved.json` (that file is never
+   written; MEM001 M005):
    ```bash
-   TIER_CHAIN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --cwd "$WORKING_DIR" --json)
-   MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1])[0].id)" "$TIER_CHAIN_JSON")
+   ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
+     --unit-type "$UNIT_TYPE" --tier "$TIER" --domain "$DOMAIN" \
+     --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" \
+     --cwd "$WORKING_DIR")     # SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018)
+   MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).chain[0].id)" "$ROUTE_JSON")
+   ROUTE_SOURCE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).source)" "$ROUTE_JSON")
+   CHAIN_LEN=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).chain.length))" "$ROUTE_JSON")
+   DOMAIN_USED=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).domain_used)" "$ROUTE_JSON")
    ```
    `MODEL_ID` is always `chain[0].id` — the primary member (identical to today's scalar resolution
-   when `tier_models.<tier>` is a scalar; a scalar is just a one-member chain). `$TIER_CHAIN_JSON` is
-   the full ordered chain (`[{id, alias, mapped}, ...]`); carry it forward unmodified — the Failure
-   Taxonomy consumes it via `--next-after <id>` to walk the intra-tier fallback ladder on
-   `model_refusal`/429/400 **before** escalating tier (see
-   [`shared/forge-tiers.md § Tier Chains — Scalar vs. List`](forge-tiers.md#tier-chains--scalar-vs-list)
-   for the full semantics; this is a **separate ladder** from `context_overflow`'s cross-tier
-   `standard→heavy→max` escalation, which is unchanged and does not consume the chain).
-   If `tier` is not one of `light | standard | heavy | max`, `forge-tier-chain.js` treats it as
-   `standard` internally (defensive fallback) — no separate guard needed here.
+   when `tier_models.<tier>` is a scalar; a scalar is just a one-member chain). The full ordered
+   chain `chain[]` (`[{id, alias, mapped, engine}, ...]`) is carried forward unmodified — the Failure
+   Taxonomy walks it via `forge-routing.js --next-after <id>` on `model_refusal`/429/400 **before**
+   escalating tier (see § Cross-engine chain walk in Worker Engine Routing above; this is the SAME
+   Layer 2 with the new resolver, and a **separate ladder** from `context_overflow`'s cross-tier
+   `standard→heavy→max` escalation — see the note below). If `tier` is not one of
+   `light | standard | heavy | max`, the internal `readTierChain()` treats it as `standard`
+   (defensive fallback) — no separate guard needed here.
 
    > **Fable 5 thinking guard:** when the resolved model is `claude-fable-5`, force the worker prompt
    > header to `thinking: adaptive` (or omit the `thinking:` line) regardless of phase prefs —
@@ -1231,6 +1370,22 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
    - `"frontmatter-tag:docs"` — `tag: docs` in frontmatter, no explicit `tier:`.
    - `"risk-escalation:high"` — `plan-slice` on a `risk:high` slice; tier escalated `heavy → max`.
    - `"prefs-override:tier_models.<tier>"` — `PREFS.tier_models[tier]` was present (the model was overridden, but tier itself came from default or tag). Note: this reason is only appended as a suffix when the model diverges from the tier default, e.g. `"unit-type:execute-task|prefs-override:tier_models.standard"`. Implementations MAY omit the suffix for simplicity; the first three forms are canonical.
+
+#### `context_overflow` — separate tier ladder, re-resolved THROUGH routing
+
+`context_overflow` (Failure Taxonomy) keeps its **own separate cross-tier ladder** (`standard → heavy → max`) — it is a capacity failure, distinct from the intra-chain `--next-after` walk (which handles `model_refusal`/429/400) and **never** consumes `chain[]`. This is unchanged from M002. What S02 changes: on a `context_overflow` escalation the orchestrator does **not** call `forge-tier-chain.js` for the escalated tier — it **re-resolves THROUGH routing** at the escalated tier, keeping the same domain, so a domain-specific `routing.<domain>.<phase>.<escalated-tier>` cell (or its `default` fallback) is honored on the retry:
+
+```bash
+# context_overflow: climb the tier ladder, then re-resolve through routing at the escalated tier.
+ESCALATED_TIER="heavy"        # standard → heavy → max (max is terminal; if already max → blocked → human)
+ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
+  --unit-type "$UNIT_TYPE" --tier "$ESCALATED_TIER" --domain "$DOMAIN" \
+  --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" \
+  --cwd "$WORKING_DIR")
+MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).chain[0].id)" "$ROUTE_JSON")
+```
+
+This "climbs tiers" — it does **not** consume `$TIER_CHAIN`/`chain[]` (that is the intra-tier ladder for a different failure class). The two ladders remain mutually exclusive (MEM001: never a 4th layer). When the escalated tier is already `max`, `context_overflow` stops and surfaces `blocked → human` (no further tier to climb).
 
 #### Prefs contract
 
@@ -1245,8 +1400,10 @@ Each `tier_models.<tier>` key accepts either form:
 - **Scalar** — `tier_models.standard: claude-sonnet-5` — a single-member chain, byte-identical to
   today's behavior. `$MODEL_ID` = that value, `$TIER_CHAIN` = `[{id, alias, mapped:true}]`.
 - **List** — `tier_models.standard: [claude-sonnet-5, claude-haiku-4-5-20251001]` — ordered
-  primary-first fallback chain. `$MODEL_ID` = the first (primary) member; `$TIER_CHAIN` = the full
-  chain, consumed by the Failure Taxonomy's intra-tier ladder (see
+  primary-first fallback chain. `$MODEL_ID` = the first (primary) member; the full chain is now
+  returned as `chain[]` by `forge-routing.js` (which internalizes `readTierChain()` on the legacy
+  path) and consumed by the Failure Taxonomy's Layer 2 walk via `forge-routing.js --next-after`
+  (see § Cross-engine chain walk above and
   [`shared/forge-tiers.md § Tier Chains — Scalar vs. List`](forge-tiers.md#tier-chains--scalar-vs-list)).
 
 The `tier_models` block ships in T05. Until then, the resolver falls back to the defaults above silently.
@@ -1260,22 +1417,26 @@ The `tier_models` block ships in T05. Until then, the resolver falls back to the
 
 #### Event log extension
 
-The `dispatch` event schema (defined in Token Telemetry above) is extended additively with two new fields. No existing fields are renamed or removed.
+The `dispatch` event schema (defined in Token Telemetry above) is extended additively — with `tier`/`reason` (M002) and, as of M007 S02, with `domain`, `route_source`, and `chain_len` (mirroring the additive extension documented in § Worker Engine Routing → Event log extension). No existing fields are renamed or removed.
 
 ```json
 {
-  "ts": "2026-04-16T10:00:05Z",
+  "ts": "2026-07-15T10:00:05Z",
   "event": "dispatch",
   "unit": "execute-task/T03",
   "model": "claude-sonnet-5",
   "input_tokens": 2000,
   "output_tokens": 300,
   "tier": "standard",
-  "reason": "unit-type:execute-task"
+  "reason": "unit-type:execute-task",
+  "engine": "claude",
+  "domain": "default",
+  "route_source": "tier_models",
+  "chain_len": 1
 }
 ```
 
-**Compatibility:** Existing S03 readers that parse `dispatch` events by known field names and ignore unknown fields continue to work without modification. The `tier` and `reason` fields are present on every new dispatch event; S03-era events in the log (which lack these fields) are valid — readers must treat missing `tier`/`reason` as `undefined`, not as an error.
+**Compatibility:** Existing S03/M006/M005 readers that parse `dispatch` events by known field names and ignore unknown fields continue to work without modification. The `tier`/`reason` (M002), `engine` (M005), `slice`/`milestone` (M006), and `domain`/`route_source`/`chain_len` (M007 S02) fields are all present on every new dispatch event; older events in the log (which lack some of these fields) are valid — readers must treat any missing field as `undefined`, not as an error. `domain`/`route_source`/`chain_len` come from the single `forge-routing.js` call (`domain_used`, `source`, `chain.length`).
 
 #### Worked examples
 
@@ -1338,16 +1499,22 @@ PLAN_TIER       : (absent)
 PLAN_TAG        : (absent)
 tier_models.standard : [claude-sonnet-5, claude-haiku-4-5-20251001]   ← list form
 
-→ tier        = standard
-→ TIER_CHAIN  = [{"id":"claude-sonnet-5","alias":"sonnet","mapped":true},{"id":"claude-haiku-4-5-20251001","alias":"haiku","mapped":true}]
-→ MODEL_ID    = "claude-sonnet-5"   (chain[0].id — the primary)
-→ reason      = "unit-type:execute-task"
+→ tier         = standard
+→ route_source = tier_models   (no routing: block → legacy 1-path, byte-identical M006)
+→ chain[]      = [{"id":"claude-sonnet-5","alias":"sonnet","mapped":true,"engine":"claude"},{"id":"claude-haiku-4-5-20251001","alias":"haiku","mapped":true,"engine":"claude"}]
+→ chain_len    = 2
+→ MODEL_ID     = "claude-sonnet-5"   (chain[0].id — the primary)
+→ domain_used  = "default"
+→ reason       = "unit-type:execute-task"
 ```
 
-`$TIER_CHAIN` is carried forward, unused unless the Failure Taxonomy hits `model_refusal`/429/400 on
-this dispatch — at that point it walks `--next-after claude-sonnet-5` to get `claude-haiku-4-5-20251001`
-**without** escalating tier. Scalar `tier_models.standard: claude-sonnet-5` produces the identical
-`MODEL_ID` here — only `$TIER_CHAIN` differs (one member vs. two).
+`chain[]` (from the single `forge-routing.js` call, legacy `tier_models` path here) is carried
+forward, unused unless the Failure Taxonomy hits `model_refusal`/429/400 on this dispatch — at that
+point Layer 2 walks `forge-routing.js --next-after claude-sonnet-5` to get
+`claude-haiku-4-5-20251001` **without** escalating tier. Scalar `tier_models.standard: claude-sonnet-5`
+produces the identical `MODEL_ID` here — only `chain[]` differs (one member vs. two). Because there is
+no `routing:` block, `route_source == tier_models` and the whole result is byte-identical to the
+M005/M006 path (the engine is decided by the legacy Engine Resolution, the model by `readTierChain`).
 
 #### Wiring snippet
 
@@ -1387,13 +1554,31 @@ if [ "$UNIT_TYPE" = "plan-slice" ]; then
   fi
 fi
 
-# Step 4: resolve model via the intra-tier chain (raw cascade — never prefs-resolved.json)
-TIER_CHAIN_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --cwd "$WORKING_DIR" --json)
-MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1])[0].id)" "$TIER_CHAIN_JSON")
-# $TIER_CHAIN_JSON carries forward unmodified — consumed by the Failure Taxonomy via
-# `node "$FORGE_SCRIPTS_DIR/forge-tier-chain.js" --tier "$TIER" --next-after "$MODEL_ID"` on
-# model_refusal/429/400, BEFORE any cross-tier escalation (context_overflow's ladder is separate
-# and unchanged — see shared/forge-tiers.md § Tier Chains — Scalar vs. List).
+# Step 3c: extract domain metadata (execute-task frontmatter domain: → slice ROADMAP domain: tag → default)
+DOMAIN=$(node -e "const fs=require('fs');try{const t=fs.readFileSync('$PLAN_PATH','utf8');const m=t.match(/^---[\s\S]*?---/);process.stdout.write(m?((m[0].match(/^domain:[ \t]*(.+)$/m)||[])[1]||'').trim():'')}catch(e){}" 2>/dev/null)
+if [ -z "$DOMAIN" ]; then
+  ROADMAP_PATH=".gsd/milestones/${MILESTONE_ID}/${MILESTONE_ID}-ROADMAP.md"
+  DOMAIN=$(grep -E "\b${UNIT_ID}\b" "$ROADMAP_PATH" 2>/dev/null | grep -oE 'domain:[A-Za-z0-9_-]+' | head -1 | cut -d: -f2)
+fi
+[ -z "$DOMAIN" ] && DOMAIN="default"
+
+# Step 4: resolve model + cross-engine chain via the SINGLE forge-routing.js call (raw cascade —
+# never prefs-resolved.json). Replaces the old forge-tier-chain.js --json initial resolution;
+# forge-tier-chain.js survives ONLY as an internal legacy reader inside forge-routing.js.
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "$HOME/.claude/scripts")
+ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
+  --unit-type "$UNIT_TYPE" --tier "$TIER" --domain "$DOMAIN" \
+  --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" \
+  --cwd "$WORKING_DIR")     # SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018)
+MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).chain[0].id)" "$ROUTE_JSON")
+ROUTE_SOURCE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).source)" "$ROUTE_JSON")
+CHAIN_LEN=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).chain.length))" "$ROUTE_JSON")
+DOMAIN_USED=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).domain_used)" "$ROUTE_JSON")
+# $ROUTE_JSON.chain carries forward unmodified — consumed by the Failure Taxonomy via
+# `node "$FORGE_SCRIPTS_DIR/forge-routing.js" ... --next-after "$MODEL_ID"` on model_refusal/429/400
+# (walks the cross-engine chain → category fallback → ''), BEFORE any cross-tier escalation
+# (context_overflow's ladder is separate and unchanged — re-resolves THROUGH routing at the
+# escalated tier; see § context_overflow above and shared/forge-tiers.md § Tier Chains).
 
 # Step 4b: Fable 5 thinking guard — claude-fable-5 400s on explicit thinking:disabled.
 # When MODEL_ID is claude-fable-5, inject "thinking: adaptive" in the worker prompt
@@ -1422,11 +1607,12 @@ MODEL_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$MODEL_ID")
 # call Agent() without a model: param (the warning above was already echoed).
 
 # Step 5: extend dispatch event (append after Token Telemetry builds dispatchEvent)
-# Add:  ,"tier":"$TIER","reason":"$REASON","effort":"$EFFORT","effort_reason":"$EFFORT_REASON","model_applied":$MODEL_APPLIED_JSON
+# Add (M002):  ,"tier":"$TIER","reason":"$REASON","effort":"$EFFORT","effort_reason":"$EFFORT_REASON","model_applied":$MODEL_APPLIED_JSON
+# Add (M007 S02, additive):  ,"domain":"$DOMAIN_USED","route_source":"$ROUTE_SOURCE","chain_len":$CHAIN_LEN
 # (build MODEL_APPLIED_JSON safely — never interpolate MODEL_ALIAS directly into JSON)
 # Example (forge-auto line 259 extended):
 MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
-echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_APPLIED_JSON}" >> .gsd/forge/events.jsonl
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_APPLIED_JSON,\"engine\":\"$ENGINE\",\"domain\":\"$DOMAIN_USED\",\"route_source\":\"$ROUTE_SOURCE\",\"chain_len\":$CHAIN_LEN}" >> .gsd/forge/events.jsonl
 ```
 
 ---
