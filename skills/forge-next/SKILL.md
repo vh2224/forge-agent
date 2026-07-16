@@ -960,20 +960,23 @@ if [ "$SIDECAR_ATTEMPT" -gt "${CODEX_MEMBERS:-1}" ]; then
   REASON="sidecar-cap-exceeded"   # → Claude fallback (never a 4th recovery layer)
 fi
 ```
+When `REASON == sidecar-cap-exceeded`, **skip steps 1–4 entirely** (no `START_SHA` capture, no state/result-file allocation, no sidecar launch) and go DIRECTLY to the **Fallback** block below (R3). Steps 1–3 below run **only** in the `else` — they are guarded by the same `if [ "$REASON" != "sidecar-cap-exceeded" ]` condition.
 
-1. **Capture `START_SHA` (authoritative for the reset — independent of the adapter's own `start_sha`) and persist a FRESH per-attempt state file to disk.** Branch C spans multiple Bash tool invocations (the poll loop) and may cross an auto-compact, so shell vars do NOT survive — the state file (under `WORKING_DIR/.gsd`, never `CODE_DIR`) is the durable carrier of `{attempt, start_sha, reason, result_file, code_dir}`, mirroring `auto-mode-started.txt`. **The name carries the attempt number `N = SIDECAR_ATTEMPT` (`-attempt-$N`) and NEVER overwrites a prior attempt's file** (audit preserved, post-compact recovery unambiguous — BLOCKER invariant #1). The success AND fallback blocks re-read the state of the **CURRENT** attempt from disk:
+1. **Capture `START_SHA` (authoritative for the reset — independent of the adapter's own `start_sha`) and persist a FRESH per-attempt state file to disk.** Branch C spans multiple Bash tool invocations (the poll loop) and may cross an auto-compact, so shell vars do NOT survive — the state file (under `WORKING_DIR/.gsd`, never `CODE_DIR`) is the durable carrier of `{attempt, start_sha, reason, result_file, code_dir}`, mirroring `auto-mode-started.txt`. **The name carries the attempt number `N = SIDECAR_ATTEMPT` (`-attempt-$N`) and NEVER overwrites a prior attempt's file** (audit preserved, post-compact recovery unambiguous — BLOCKER invariant #1). The success AND fallback blocks re-read the state of the **CURRENT** attempt from disk. The whole step is gated on the cap (R3 — the real `if/else` whose cap branch went straight to Fallback above):
 ```bash
-CODE_DIR="${WORKER_CWD:-$WORKING_DIR}"
-START_SHA=$(git -C "$CODE_DIR" rev-parse HEAD)
-N="$SIDECAR_ATTEMPT"                                              # 1, 2, 3 — one per codex member dispatched
-XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-${T##}-attempt-${N}.json"
-mkdir -p "$WORKING_DIR/.gsd/forge/"
-printf '{"attempt":%s,"start_sha":"%s","reason":"","result_file":"","code_dir":"%s"}\n' "$N" "$START_SHA" "$CODE_DIR" > "$XLLM_STATE"
+if [ "$REASON" != "sidecar-cap-exceeded" ]; then
+  CODE_DIR="${WORKER_CWD:-$WORKING_DIR}"
+  START_SHA=$(git -C "$CODE_DIR" rev-parse HEAD)
+  N="$SIDECAR_ATTEMPT"                                              # 1, 2, 3 — one per codex member dispatched
+  XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-${T##}-attempt-${N}.json"
+  mkdir -p "$WORKING_DIR/.gsd/forge/"
+  printf '{"attempt":%s,"start_sha":"%s","reason":"","result_file":"","code_dir":"%s"}\n' "$N" "$START_SHA" "$CODE_DIR" > "$XLLM_STATE"
+fi
 ```
 
-2. **Clean-tree guard.** Dirty tree → do NOT dispatch the sidecar (never discard uncommitted work); go to Fallback with `REASON=dirty-tree-guard` and **skip the reset** (the dirty work predates the never-launched sidecar):
+2. **Clean-tree guard.** Dirty tree → do NOT dispatch the sidecar (never discard uncommitted work); go to Fallback with `REASON=dirty-tree-guard` and **skip the reset** (the dirty work predates the never-launched sidecar). Scope the porcelain to exclude `.gsd/` (orchestrator writes `.gsd` during the flow; `.gsd` may be committed in user projects) — R6:
 ```bash
-if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+if [ -n "$(git -C "$CODE_DIR" status --porcelain -- . ':(exclude).gsd')" ]; then
   REASON="dirty-tree-guard"   # → Fallback below WITHOUT reset, then the Claude dispatch
   printf '{"attempt":%s,"start_sha":"%s","reason":"%s","result_file":"","code_dir":"%s"}\n' "$N" "$START_SHA" "$REASON" "$CODE_DIR" > "$XLLM_STATE"
 fi
@@ -1013,45 +1016,81 @@ CODE_DIR=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')
 # The .gsd exclusion protects the orchestrator's own .gsd writes (events.jsonl / evidence) made during
 # the poll — guarded by the dirty-tree-guard + .gsd exclusion scope, NOT by gitignore (user projects
 # may commit .gsd).
-if [ "$REASON" != "dirty-tree-guard" ]; then
+if [ "$REASON" != "dirty-tree-guard" ] && [ "$REASON" != "sidecar-cap-exceeded" ]; then
   git -C "$CODE_DIR" checkout "$START_SHA" -- . ':(exclude).gsd' && git -C "$CODE_DIR" clean -fd -e .gsd
   # BLOCKER invariant #2 — VERIFY the reset actually cleaned the tree. A still-dirty tree must NOT be
   # inherited into a subsequent sidecar attempt (cross-engine chain: the next member may be codex).
-  if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
-    REASON="dirty-tree-guard"   # reset left the tree dirty → abort the chain to the Claude fallback
+  # Scope to exclude .gsd/ (orchestrator .gsd writes during the poll; .gsd may be committed) — R6.
+  if [ -n "$(git -C "$CODE_DIR" status --porcelain -- . ':(exclude).gsd')" ]; then
+    REASON="verified-reset-failed"   # reset left the tree dirty → abort the chain to the Claude fallback
   fi
 fi
-echo "⚠ worker: codex indisponível ($REASON) — usando forge-executor"
-mkdir -p "$WORKING_DIR/.gsd/forge/"
-printf '{"ts":"%s","event":"worker-engine-fallback","milestone":"%s","slice":"%s","unit":"execute-task/%s","reason":"%s"}\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${M###}" "${S##}" "${T##}" "$REASON" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+
+# Cross-engine chain walk (Layer 2) — after the verified reset, resolve the next chain member and,
+# if one exists, PERSIST it in the consume-once tier-cursor (same pattern the model_refusal row uses;
+# Step 4b consumes it). This is what makes the CODEX_MEMBERS cap non-dead code (R2). forge-next is
+# step mode: it executes ONE unit, so the advance is NOT dispatched now — the NEXT /forge-next
+# invocation consumes the cursor and dispatches $NEXT (Branch codex if gpt, else the Claude Agent).
+# Abort reasons (dirty-tree-guard / sidecar-cap-exceeded / verified-reset-failed) forbid advancement
+# → no cursor, take the generic Claude fallback below.
+NEXT=""
+if [ "$REASON" != "dirty-tree-guard" ] && [ "$REASON" != "sidecar-cap-exceeded" ] && [ "$REASON" != "verified-reset-failed" ]; then
+  NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
+    --unit-type "$unit_type" --tier "$TIER" --domain "$DOMAIN" \
+    --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" \
+    --cwd "$WORKING_DIR" --next-after "$MODEL_ID")
+  if [ -n "$NEXT" ]; then
+    case "$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --family "$NEXT" 2>/dev/null)" in gpt) NEXT_ENGINE=codex;; *) NEXT_ENGINE=claude;; esac
+    TIER_CURSOR_FILE="$WORKING_DIR/.gsd/forge/tier-cursor-${RUN_ID:-legacy}-${unit_type}-${unit_id}.json"
+    mkdir -p "$WORKING_DIR/.gsd/forge/"
+    printf '{"model":"%s","engine":"%s","ts":"%s"}\n' "$NEXT" "$NEXT_ENGINE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TIER_CURSOR_FILE"
+  fi
+fi
+
+# Generic Claude fallback — ONLY when the chain is exhausted ($NEXT empty) or an abort reason forbids
+# advancement. Mutually exclusive with the cursor-persist above (a persisted $NEXT means the next
+# /forge-next dispatches that member, NOT this fallback).
+if [ -z "$NEXT" ]; then
+  echo "⚠ worker: codex indisponível ($REASON) — usando forge-executor"
+  mkdir -p "$WORKING_DIR/.gsd/forge/"
+  printf '{"ts":"%s","event":"worker-engine-fallback","milestone":"%s","slice":"%s","unit":"execute-task/%s","reason":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${M###}" "${S##}" "${T##}" "$REASON" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+fi
 ```
-Then set `ENGINE=claude`, **run Tier Resolution (step 1.5) and Effort Resolution (step 1.55) now** (they were skipped on the codex path), and dispatch the single `forge-executor` Claude worker via the machinery below. No re-resolution of engine (fallback is unconditionally Claude); no retry.
+**If a next member was persisted (`$NEXT` non-empty):** surface "Codex worker failed (`$REASON`). Run `/forge-next` again — it will retry with the next model in the chain (`$NEXT`)." and stop this unit — step mode picks up the advance via the cursor on the next invocation (Step 4b), which re-inspects the engine to route to Branch codex or the Claude Agent. **If `$NEXT` was empty or an abort reason fired:** set `ENGINE=claude`, **run Tier Resolution (step 1.5) and Effort Resolution (step 1.55) now** (they were skipped on the codex path), and dispatch the single `forge-executor` Claude worker via the machinery below. The generic Claude fallback (with its `worker-engine-fallback` event) fires only on the exhausted/abort path — mutually exclusive with the chain-advance cursor (R2). No retry.
 
 ---
 
 **Branch D — sidecar codex plan (`$ENGINE == codex` && `$unit_type == plan-slice`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine — Branch D`. Read-only twin of Branch codex above: codex only *reads* the codebase + planning context and returns markdown plan content in the result JSON — it never writes `.gsd/**`, so this branch has **no dirty-tree guard, no `START_SHA` capture, no reset**. When `$ENGINE == claude` (or the unit is not `plan-slice`), skip this branch entirely. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
 
-1. **Assemble the plan-context file (orchestrator)** — temp file OUTSIDE `.gsd/` and `CODE_DIR`, concatenating the exact artifacts the Claude `forge-planner` would receive for this slice: the slice's ROADMAP entry, `M###-CONTEXT.md` (full), `S##-CONTEXT.md` (if it exists), each dependency slice's `T##-SUMMARY.md`/`S##-SUMMARY.md`, `.gsd/CODING-STANDARDS.md`, and `S##-RISK.md` (if it exists):
-```bash
-CODE_DIR="${WORKER_CWD:-$WORKING_DIR}"
-CTX_FILE=$(mktemp -t forge-plan-context.XXXXXX.md)   # tmpdir, never under $CODE_DIR or .gsd
-# → orchestrator appends the artifacts above (Read + concatenate); absent optional files are skipped.
-```
-
-2. **Persist durable state to disk** (no `start_sha` — read-only, nothing to reset). State is **fresh per attempt** (BLOCKER invariant #1 + #3): on a cross-engine chain with multiple codex members the `-attempt-$N` suffix keeps each attempt's state distinct, and `SIDECAR_ATTEMPT` is hard-capped by the count of `engine == codex` members in `$ROUTE_JSON.chain` (≤3). Branch D needs **none of the reset machinery** (read-only — invariant #2 does not apply), only state-fresh-per-attempt + cap:
+0. **Increment the sidecar attempt counter + cap check FIRST (R3).** State is **fresh per attempt** (BLOCKER invariant #1 + #3): on a cross-engine chain with multiple codex members the `-attempt-$N` suffix keeps each attempt's state distinct, and `SIDECAR_ATTEMPT` is hard-capped by the count of `engine == codex` members in `$ROUTE_JSON.chain` (≤3). When the cap is exceeded, **skip steps 1–4 entirely** (no plan-context assembly, no state/result-file allocation, no sidecar launch) and go DIRECTLY to the **Fallback** block below:
 ```bash
 CODEX_MEMBERS=$(node -e "process.stdout.write(String((JSON.parse(process.argv[1]).chain||[]).filter(m=>m.engine==='codex').length))" "$ROUTE_JSON")
 SIDECAR_ATTEMPT=$(( ${SIDECAR_ATTEMPT:-0} + 1 ))
 if [ "$SIDECAR_ATTEMPT" -gt "${CODEX_MEMBERS:-1}" ]; then
   REASON="sidecar-cap-exceeded"   # → Claude forge-planner fallback (never a 4th recovery layer)
 fi
-N="$SIDECAR_ATTEMPT"
-XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-${S##}-attempt-${N}.json"
-mkdir -p "$WORKING_DIR/.gsd/forge/"
-RESULT_FILE=$(mktemp -t forge-xllm-result.XXXXXX.json)   # tmpdir, never under $CODE_DIR
-printf '{"attempt":%s,"reason":"","result_file":"%s","code_dir":"%s","ctx_file":"%s"}\n' \
-  "$N" "$RESULT_FILE" "$CODE_DIR" "$CTX_FILE" > "$XLLM_STATE"
+```
+
+1. **Assemble the plan-context file (orchestrator)** — temp file OUTSIDE `.gsd/` and `CODE_DIR`, concatenating the exact artifacts the Claude `forge-planner` would receive for this slice: the slice's ROADMAP entry, `M###-CONTEXT.md` (full), `S##-CONTEXT.md` (if it exists), each dependency slice's `T##-SUMMARY.md`/`S##-SUMMARY.md`, `.gsd/CODING-STANDARDS.md`, and `S##-RISK.md` (if it exists). Guarded by the cap (R3 — the real `if/else` whose cap branch went straight to Fallback above):
+```bash
+if [ "$REASON" != "sidecar-cap-exceeded" ]; then
+  CODE_DIR="${WORKER_CWD:-$WORKING_DIR}"
+  CTX_FILE=$(mktemp -t forge-plan-context.XXXXXX.md)   # tmpdir, never under $CODE_DIR or .gsd
+  # → orchestrator appends the artifacts above (Read + concatenate); absent optional files are skipped.
+fi
+```
+
+2. **Persist durable state to disk** (no `start_sha` — read-only, nothing to reset). Branch D needs **none of the reset machinery** (read-only — invariant #2 does not apply), only state-fresh-per-attempt + cap. Same cap guard (R3):
+```bash
+if [ "$REASON" != "sidecar-cap-exceeded" ]; then
+  N="$SIDECAR_ATTEMPT"
+  XLLM_STATE="$WORKING_DIR/.gsd/forge/xllm-state-${S##}-attempt-${N}.json"
+  mkdir -p "$WORKING_DIR/.gsd/forge/"
+  RESULT_FILE=$(mktemp -t forge-xllm-result.XXXXXX.json)   # tmpdir, never under $CODE_DIR
+  printf '{"attempt":%s,"reason":"","result_file":"%s","code_dir":"%s","ctx_file":"%s"}\n' \
+    "$N" "$RESULT_FILE" "$CODE_DIR" "$CTX_FILE" > "$XLLM_STATE"
+fi
 ```
 
 3. **Dispatch detached via `run_in_background: true`**, `--mode plan` + `--plan-context` instead of `--plan`; `--model` appended only when `$CODEX_MODEL` is non-empty:

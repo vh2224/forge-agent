@@ -1001,7 +1001,10 @@ This is the orchestrator's own capture — the **source of truth for the fallbac
 **2. Clean-tree guard.** If the working tree is dirty, **do NOT dispatch the sidecar** — never discard someone else's uncommitted work:
 
 ```bash
-if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+# Scope the porcelain to exclude .gsd/ — the orchestrator writes .gsd files during the flow
+# (xllm-state-*, events.jsonl, evidence) and .gsd may be COMMITTED in user projects, so an
+# unscoped check would always trip (R6). Consistent with the reset's own ':(exclude).gsd'.
+if [ -n "$(git -C "$CODE_DIR" status --porcelain -- . ':(exclude).gsd')" ]; then
   # → fallback to Claude with reason: dirty-tree-guard (see Fallback below). No reset here
   #   (nothing codex-authored to undo — a reset would wipe the pre-existing dirty work).
   ...
@@ -1171,8 +1174,9 @@ A cross-engine chain such as `gpt→claude→gpt` dispatches the sidecar **multi
 2. **Verified reset before the next sidecar attempt.** After a codex member fails, the orchestrator resets the workspace to `$START_SHA` scoped to `CODE_DIR` (excluding `.gsd`):
    ```bash
    git -C "$CODE_DIR" checkout "$START_SHA" -- . ':(exclude).gsd' && git -C "$CODE_DIR" clean -fd -e .gsd
-   # Then VERIFY the reset actually cleaned the tree before dispatching the next sidecar attempt:
-   if [ -n "$(git -C "$CODE_DIR" status --porcelain)" ]; then
+   # Then VERIFY the reset actually cleaned the tree before dispatching the next sidecar attempt.
+   # Scope to exclude .gsd/ (orchestrator .gsd writes during the poll; .gsd may be committed) — R6.
+   if [ -n "$(git -C "$CODE_DIR" status --porcelain -- . ':(exclude).gsd')" ]; then
      # reset did not fully clean → do NOT inherit a dirty tree into attempt N+1.
      # → abort the chain to the Claude fallback with reason: dirty-tree-guard
      REASON="dirty-tree-guard"
