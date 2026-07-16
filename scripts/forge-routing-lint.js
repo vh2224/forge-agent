@@ -60,10 +60,31 @@ function lintRouting(cwd) {
       const fallback = phaseConfig.fallback == null
         ? null
         : memberDetails(phaseConfig.fallback);
+      const tiers = Object.keys(phaseConfig).filter((key) => key !== 'fallback');
 
-      for (const tier of Object.keys(phaseConfig)) {
-        if (tier === 'fallback') continue;
+      if (tiers.length === 0) {
+        report.warnings.push(
+          finding(
+            'warning',
+            'phase-without-tiers',
+            'A fase não possui nenhum tier configurado.',
+            { domain, phase }
+          )
+        );
 
+        if (fallback && (fallback.engine !== 'claude' || !fallback.mapped)) {
+          report.errors.push(
+            finding(
+              'error',
+              'invalid-fallback',
+              'O fallback deve pertencer à família claude e possuir alias mapeado.',
+              { domain, phase, id: fallback.id }
+            )
+          );
+        }
+      }
+
+      for (const tier of tiers) {
         const chain = phaseConfig[tier].map(memberDetails);
         const cell = { domain, phase, tier, chain, fallback, findings: [] };
 

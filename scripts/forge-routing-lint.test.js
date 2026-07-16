@@ -17,19 +17,23 @@ function scenario(name, prefs, check) {
   const home = path.join(root, 'home');
   fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
   fs.mkdirSync(home, { recursive: true });
-  if (prefs !== null) {
-    fs.writeFileSync(path.join(cwd, '.gsd', 'prefs.local.md'), prefs);
-  }
-
   const previousHome = process.env.HOME;
   process.env.HOME = home;
   try {
-    const report = lintRouting(cwd);
-    const cli = spawnSync(process.execPath, [CLI, '--lint', '--json', '--cwd', cwd], {
-      encoding: 'utf8',
-      env: Object.assign({}, process.env, { HOME: home }),
-    });
-    check(report, cli);
+    const evaluate = (contents) => {
+      const prefsPath = path.join(cwd, '.gsd', 'prefs.local.md');
+      if (contents === null) fs.rmSync(prefsPath, { force: true });
+      else fs.writeFileSync(prefsPath, contents);
+      return {
+        report: lintRouting(cwd),
+        cli: spawnSync(process.execPath, [CLI, '--lint', '--json', '--cwd', cwd], {
+          encoding: 'utf8',
+          env: Object.assign({}, process.env, { HOME: home }),
+        }),
+      };
+    };
+    const result = evaluate(prefs);
+    check(result.report, result.cli, evaluate);
     passed += 1;
     process.stdout.write('ok - ' + name + '\n');
   } finally {
@@ -123,6 +127,31 @@ scenario('erro de parse interrompe células', `routing:
   assert.deepStrictEqual(codes(report.errors), ['routing-parse-error']);
   assert.strictEqual(report.cells.length, 0);
   assert.strictEqual(cli.status, 1);
+});
+
+scenario('fase só-com-fallback valida fallback e avisa sobre tiers', `routing:
+  default:
+    planner:
+      fallback: claude-sonnet-4-5
+`, (report, cli, evaluate) => {
+  assert.strictEqual(report.cells.length, 0);
+  assert.deepStrictEqual(codes(report.errors), []);
+  assert.deepStrictEqual(codes(report.warnings), ['phase-without-tiers']);
+  assert.strictEqual(report.warnings[0].phase, 'planner');
+  assert.strictEqual(cli.status, 0);
+
+  const invalid = evaluate(`routing:
+  default:
+    planner:
+      fallback: gpt-5.6-sol
+`);
+  assert.strictEqual(invalid.report.cells.length, 0);
+  assert.deepStrictEqual(codes(invalid.report.errors), ['invalid-fallback']);
+  assert.deepStrictEqual(codes(invalid.report.warnings), ['phase-without-tiers']);
+  assert.strictEqual(invalid.report.errors[0].domain, 'default');
+  assert.strictEqual(invalid.report.errors[0].phase, 'planner');
+  assert.strictEqual(invalid.report.errors[0].id, 'gpt-5.6-sol');
+  assert.strictEqual(invalid.cli.status, 1);
 });
 
 const text = formatText({
