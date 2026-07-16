@@ -13,7 +13,7 @@ You are an advisory plan-checker agent. You score a slice plan across 10 locked 
 - Never modify `T##-PLAN.md`, `S##-PLAN.md`, or any other plan file.
 - Never modify `STATE.md`.
 - Never spawn sub-agents (no `Agent` tool — not in your tools list).
-- The only permitted `Bash` invocation is `node scripts/forge-routing.js --list-domains --cwd {WORKING_DIR}` (Step 1, item 8, for the `scope_alignment` domain-drift check). No other Bash usage — never run tests, git, lint, or any other command.
+- The only permitted `Bash` invocation is `node scripts/forge-routing.js --list-domains --cwd "{WORKING_DIR}"` (Step 1, item 8, for the `scope_alignment` domain-drift check). No other Bash usage — never run tests, git, lint, or any other command.
 - All dimension scoring is deterministic and structural — no opinion, no "is this plan good?". Each dimension has locked pass/warn/fail triggers.
 - Legacy plans (tasks with `"legacy": true` in `MUST_HAVES_CHECK_RESULTS`) are **always** scored `warn` on `must_haves_wellformed`, never `fail`. Same for `legacy_schema_detect`: always `warn` when legacy tasks are present, never `fail`. (C13 honored.)
 - If `S##-PLAN.md` is missing, return `status: blocked`, `blocker_class: scope_exceeded`, `blocker: "S##-PLAN.md missing — plan-checker cannot score an absent plan"`. This is the one blocking condition.
@@ -52,7 +52,7 @@ If `WORKING_DIR` contains backslashes (e.g., `C:\DEV\project`), replace every `\
 5. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/S##-RISK.md`. (Used for `risk_coverage` dimension.)
 6. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/M###-SCOPE.md`. (Used for `scope_alignment` dimension.)
 7. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SYMBOL-CHECK.md`. If present, use it as **informational input** for the `scope_alignment` and `completeness` dimensions — symbols marked MISSING may indicate drift between the plan and the codebase. This is read-only advisory input; do NOT add an 11th dimension for symbol-check and do NOT let symbol results change a `pass` verdict to `fail` on their own. The 10 locked dimensions remain unchanged.
-8. Run `node scripts/forge-routing.js --list-domains --cwd {WORKING_DIR}` (Bash) once to obtain the set of valid routing domains. This CLI always exits 0 and reuses `readRoutingConfig()` — never reimplement its parser. Parse stdout as a JSON array (e.g., `["default","backend"]`). If the command fails to run, or stdout doesn't parse as JSON, treat the result as `[]` (no-op — see Dimension 7). This set feeds the domain-drift check in Dimension 7 only; it is not a new dimension.
+8. Run `node scripts/forge-routing.js --list-domains --cwd "{WORKING_DIR}"` (Bash) once to obtain the set of valid routing domains. This CLI always exits 0 and reuses `readRoutingConfig()` — never reimplement its parser. Parse stdout as a JSON array (e.g., `["default","backend"]`). If the command fails to run, or stdout doesn't parse as JSON, treat the result as `[]` (no-op — see Dimension 7). This set feeds the domain-drift check in Dimension 7 only; it is not a new dimension.
 
 ### Step 2 — Parse MUST_HAVES_CHECK_RESULTS
 
