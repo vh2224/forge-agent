@@ -3004,7 +3004,8 @@ function smokeReviewPairing() {
   assert(modelFamily('claude-fable-5') === 'claude', '(a) modelFamily(claude-fable-5)===claude', `got ${modelFamily('claude-fable-5')}`);
   assert(modelFamily('claude-opus-4-8') === 'claude', '(a) modelFamily(claude-opus-4-8)===claude', `got ${modelFamily('claude-opus-4-8')}`);
   assert(modelFamily('gpt-5-codex') === 'gpt', '(a) modelFamily(gpt-5-codex)===gpt', `got ${modelFamily('gpt-5-codex')}`);
-  assert(modelFamily('gemini-2') === null, '(a) modelFamily(gemini-2)===null', `got ${modelFamily('gemini-2')}`);
+  assert(modelFamily('gemini-2') === 'gemini', '(a) modelFamily(gemini-2)===gemini', `got ${modelFamily('gemini-2')}`);
+  assert(modelFamily('mistral-7b') === null, '(a) modelFamily(mistral-7b)===null', `got ${modelFamily('mistral-7b')}`);
   assert(modelFamily('') === null, "(a) modelFamily('')===null", `got ${modelFamily('')}`);
   assert(engineFamily('claude') === 'claude', '(a) engineFamily(claude)===claude', `got ${engineFamily('claude')}`);
   assert(engineFamily('codex') === 'gpt', '(a) engineFamily(codex)===gpt', `got ${engineFamily('codex')}`);
@@ -3015,8 +3016,8 @@ function smokeReviewPairing() {
   assert(rFamily1.status === 0 && rFamily1.stdout.trim() === 'claude',
     '(a2) CLI --family claude-fable-5 → stdout claude', `status=${rFamily1.status} stdout='${rFamily1.stdout.trim()}'`);
   const rFamily2 = runScript('forge-model-alias.js', ['--family', 'gemini-2']);
-  assert(rFamily2.status === 0 && rFamily2.stdout.trim() === '',
-    '(a2) CLI --family gemini-2 → stdout vazio', `status=${rFamily2.status} stdout='${rFamily2.stdout.trim()}'`);
+  assert(rFamily2.status === 0 && rFamily2.stdout.trim() === 'gemini',
+    '(a2) CLI --family gemini-2 → stdout gemini', `status=${rFamily2.status} stdout='${rFamily2.stdout.trim()}'`);
 
   // helper de fixture
   const writeEvents = (dir, lines) => {
@@ -3622,16 +3623,16 @@ function smokeRouting() {
     '(h) célula mista claude/gpt → cadeia com 2 membros, engine correto por membro', JSON.stringify(rH.chain));
   cleanup(dirH);
 
-  // (i) membro com família desconhecida (gemini) é pulado da cadeia
+  // (i) membro com família desconhecida (não-gemini) é pulado da cadeia
   const dirI = mkTmp('routing-i');
   writeRoutingPrefs(dirI,
     '  backend:\n' +
     '    executor:\n' +
-    '      standard: [claude-sonnet-5, gemini-2-pro]\n'
+    '      standard: [claude-sonnet-5, mistral-7b]\n'
   );
   const rI = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirI });
   assert(rI.chain.length === 1 && rI.chain[0].id === 'claude-sonnet-5',
-    '(i) membro gemini (família desconhecida) → pulado, cadeia final só com claude', JSON.stringify(rI.chain));
+    '(i) membro família desconhecida → pulado, cadeia final só com claude', JSON.stringify(rI.chain));
   assert(/skipped-unknown-family/.test(rI.reason), '(i) reason contém skipped-unknown-family', rI.reason);
   cleanup(dirI);
 

@@ -28,7 +28,12 @@
  * CLI usage:
  *   node forge-review-pairing.js --slice S02 --milestone M006 --cwd <dir>
  *   node forge-review-pairing.js --events <fixture.jsonl> [--json]
- *     [--challenger auto|claude|codex] [--advocate auto|claude|codex]
+ *     [--challenger auto|claude|codex|gemini] [--advocate auto|claude|codex|gemini]
+ *
+ * Whitelist reconciled with the spec side (shared/forge-review.md § Step 0):
+ * claude | codex | gemini | auto. `gemini` is a valid EXPLICIT challenger
+ * request (never normalized to `auto`); it stays challenge/rebuttal-only until
+ * the agy engine grows --mode execute/plan.
  */
 
 'use strict';
@@ -37,7 +42,10 @@ const fs = require('fs');
 const path = require('path');
 const { engineFamily } = require('./forge-model-alias');
 
-const VALID_REQUESTS = ['auto', 'claude', 'codex'];
+// Reconciled with shared/forge-review.md § Step 0 (R5). `gemini` is an
+// explicit challenger request (R1) — normalizeRequest must preserve it, never
+// collapse it to 'auto'.
+const VALID_REQUESTS = ['auto', 'claude', 'codex', 'gemini'];
 
 // Event readers are intentionally silent-fail. Telemetry writers have a
 // different contract; this module only consumes an append-only event stream.
@@ -145,9 +153,19 @@ function normalizeRequest(value) {
   return VALID_REQUESTS.includes(value) ? value : 'auto';
 }
 
+// opposite() — 3-family rule (M007-CONTEXT decision #4 item c):
+// opposite(X) = claude if X ≠ claude, else codex (the native engine as the
+// default opposite). Keeps challenger independent from the author's family so
+// a Claude author is challenged by codex and any non-Claude author (gpt/gemini)
+// by claude.
+function opposite(family) {
+  return family === 'claude' ? 'codex' : 'claude';
+}
+
 function resolvePairing(author, opts) {
   const options = opts || {};
-  const family = author === 'gpt' ? 'gpt' : 'claude';
+  const family =
+    author === 'gpt' || author === 'gemini' ? author : 'claude';
   const challengerReq = normalizeRequest(options.challengerReq);
   const advocateReq = normalizeRequest(options.advocateReq);
   const fallbacks = Array.isArray(options.fallbacks)
@@ -156,9 +174,11 @@ function resolvePairing(author, opts) {
 
   const challengerExplicit = challengerReq !== 'auto';
   const advocateExplicit = advocateReq !== 'auto';
+  // An explicit challenger request (incl. gemini) is respected verbatim; auto
+  // resolves to the opposite family of the author.
   const challenger = challengerExplicit
     ? challengerReq
-    : (family === 'claude' ? 'codex' : 'claude');
+    : opposite(family);
 
   let advocate;
   if (advocateExplicit) {
@@ -178,7 +198,7 @@ function resolvePairing(author, opts) {
     challengerPolicy: challengerExplicit ? 'explicit' : 'opposite',
     advocatePolicy: advocateExplicit
       ? 'explicit'
-      : (family === 'gpt' ? 'defend-mode-unavailable' : 'same-family'),
+      : (family === 'claude' ? 'same-family' : 'defend-mode-unavailable'),
     fallbacks,
     requested: { challenger: challengerReq, advocate: advocateReq },
   };

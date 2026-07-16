@@ -264,9 +264,11 @@ function readRoutingConfig(cwd) {
 //     phases). We delegate; the canonical DEFAULT_TIER_MODEL and tier
 //     normalization live inside forge-tier-chain.js, not duplicated here.
 //   • modelToAlias   — Agent()-accepted alias + mapped flag per member.
-//   • modelFamily    — engine per member ('claude' | 'gpt' | null). null =
-//     unknown family (e.g. gemini today) → member is skipped (S05 refines the
-//     warning to phase-unsupported-family once gemini becomes a real engine).
+//   • modelFamily    — engine per member ('claude' | 'gpt' | 'gemini' | null).
+//     null = unknown family → member is skipped (skipped-unknown-family).
+//     'gemini' is now a KNOWN family (agy engine) but executor/planner chains
+//     cannot route it (agy has no --mode execute/plan) → member is skipped with
+//     the distinct discriminator phase-unsupported-family (S05 T02, item d).
 //
 // Precedence (6 sources, highest first) — matches M007-CONTEXT § Locked:
 //   frontmatter tier:/worker:  >  routing.<d>.<f>.<t>  >  routing.default.<f>.<t>
@@ -329,23 +331,32 @@ function resolveCell(routing, domain, phase, tier) {
 }
 
 // ── Chain builder — each id → { id, alias, mapped, engine } ─────────────────
-// Members whose modelFamily() is null (unknown family) are DROPPED from the
-// resolved chain and accumulate a `skipped-unknown-family` discriminator. The
-// cap and --next-after operate on the already-pruned chain.
+// Two classes of member are DROPPED from the resolved chain, each with its own
+// non-silent discriminator:
+//   • modelFamily() === null → unknown family → `skipped-unknown-family`.
+//   • modelFamily() === 'gemini' → KNOWN family, but executor/planner cannot
+//     route it (agy has no --mode execute/plan) → `phase-unsupported-family`.
+// The cap and --next-after operate on the already-pruned chain.
 function buildChain(ids, reasonParts) {
   const list = Array.isArray(ids) ? ids : [ids];
   const chain = [];
-  let skipped = false;
+  let skippedUnknown = false;
+  let skippedUnsupported = false;
   for (const id of list) {
     const engine = modelFamily(id);
     if (engine === null) {
-      skipped = true;
+      skippedUnknown = true;
+      continue;
+    }
+    if (engine === 'gemini') {
+      skippedUnsupported = true;
       continue;
     }
     const { alias, mapped } = modelToAlias(id);
     chain.push({ id, alias, mapped, engine });
   }
-  if (skipped && reasonParts) reasonParts.push('skipped-unknown-family');
+  if (skippedUnsupported && reasonParts) reasonParts.push('phase-unsupported-family');
+  if (skippedUnknown && reasonParts) reasonParts.push('skipped-unknown-family');
   return chain;
 }
 

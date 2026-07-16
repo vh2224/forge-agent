@@ -15,7 +15,7 @@
  *
  * Exports:
  *   modelToAlias(id) -> { alias: 'haiku'|'sonnet'|'opus'|'fable'|null, mapped: boolean }
- *   modelFamily(id) -> 'claude'|'gpt'|null
+ *   modelFamily(id) -> 'claude'|'gpt'|'gemini'|null
  *   engineFamily(engine) -> 'claude'|'gpt'|null
  *
  * CLI usage:
@@ -49,8 +49,9 @@ function modelToAlias(id) {
 
 // ── Family classification ───────────────────────────────────────────────
 // Classifies an arbitrary model ID/alias into a family. Returns a plain
-// string (not an object like modelToAlias) — 'claude' | 'gpt' | null.
-// Unknown/empty id -> null (treated as no-authorship-data downstream).
+// string (not an object like modelToAlias) — 'claude' | 'gpt' | 'gemini' | null.
+// Detection order: claude → gpt → gemini → null. Substring match on the
+// lowercased id. Unknown/empty id -> null (no-authorship-data downstream).
 function modelFamily(id) {
   const str = id === null || id === undefined ? '' : String(id).toLowerCase();
   if (str === '') return null;
@@ -67,6 +68,13 @@ function modelFamily(id) {
 
   if (str.indexOf('gpt') !== -1 || str.indexOf('codex') !== -1) {
     return 'gpt';
+  }
+
+  // Gemini via the agy engine (Google Antigravity CLI): ids look like
+  // 'agy/gemini-3.1-pro' or bare 'gemini'. Kept AFTER claude/gpt so the
+  // established substring matches win first (none of them contain 'gemini'/'agy').
+  if (str.indexOf('gemini') !== -1 || str.indexOf('agy') !== -1) {
+    return 'gemini';
   }
 
   return null;
