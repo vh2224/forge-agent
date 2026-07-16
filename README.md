@@ -253,16 +253,22 @@ e continuam na próxima.
   **nunca** é capturado por este eixo — permanece locked no tier `max` (Fable).
 - **Nesting:** `routing.<domínio>.<fase>.<tier> = [id, ...]` + `routing.<domínio>.<fase>.fallback = <id>`.
   `<tier>` é qualquer alias de tier (`light`, `standard`, `heavy`, `max`).
-- **Domínios:** chaves de domínio são abertas — `default` é obrigatório (usado quando a task/slice
-  não declara `domain:`); qualquer outra chave (`backend`, `frontend`, ...) é definida pelo operador.
+- **Domínios:** chaves de domínio são abertas — `default` é recomendado (usado quando a task/slice
+  não declara `domain:`); sem ele, unidades sem `domain:` correspondente caem direto no legado
+  (`tier_models`), nunca erro. Qualquer outra chave (`backend`, `frontend`, ...) é definida pelo operador.
 - **Precedência:** frontmatter `tier:`/`worker:` na task (item 1, sempre ganha) > bloco `routing:` aqui
   (quando célula resolve) > comportamento legado `tier_models:`/`workers:` (quando não há `routing:` ou
   a célula não resolve).
-- **Engine derivation:** IDs com substring `claude` → engine `Agent` (nativo em contexto); IDs com
-  substring `gpt` → engine `codex` (sidecar `forge-xllm.js`); outras famílias → `phase-unsupported-family`.
+- **Engine derivation:** resolvida por `modelFamily()` (`scripts/forge-model-alias.js`) — aliases
+  `claude`/`fable`/`opus`/`sonnet`/`haiku` → engine `Agent` (nativo em contexto); `gpt`/`codex` → engine
+  `codex` (sidecar `forge-xllm.js`); família desconhecida (`modelFamily()` retorna `null`) → membro
+  pulado com `skipped-unknown-family`; `gemini` (família conhecida, mas não roteável) → pulado com
+  `phase-unsupported-family`.
 - **Fallback de categoria:** `fallback:` deve apontar para **1 modelo Claude mapeado**. Um `fallback:`
-  inválido ou ausente é substituído pelo fallback legado (`tier_models:`) e registrado como
-  `fallback-invalid-substituted` no reason — nunca aborta o dispatch.
+  presente porém inválido (família não-Claude ou não mapeada) é substituído pelo fallback legado
+  (`tier_models:`) e registrado como `fallback-invalid-substituted` no reason. Um `fallback:` ausente
+  usa o fallback legado silenciosamente (sem reason — é o comportamento natural, não uma config inválida)
+  — nunca aborta o dispatch.
 - **Caveat gemini (`phase-unsupported-family`):** um ID de família `gemini` numa cadeia é reconhecido
   mas **não é roteável** como `executor`/`planner` hoje — não há worker nativo Gemini. Um membro gemini
   é pulado silenciosamente e a resolução segue para o próximo membro.

@@ -550,17 +550,20 @@ comentado** — copie, descomente e ajuste os IDs para os que casam o mapa ID→
 - **Nesting (3 níveis):** `routing.<domain>.<phase>.<tier> = [chain]` +
   `routing.<domain>.<phase>.fallback = <id>`. `<tier>` é qualquer alias de tier (`light`,
   `standard`, `heavy`, `max`); `<chain>` é uma lista de IDs (1 ou mais, cross-engine permitido).
-- **Domínio:** chaves de domínio são abertas — `default` é obrigatório (usado quando a task/slice
-  não declara `domain:`); qualquer outra chave (`backend`, `frontend`, ...) é definida pelo
+- **Domínio:** chaves de domínio são abertas — `default` é recomendado (usado quando a task/slice
+  não declara `domain:`) — sem ele, unidades sem `domain:` correspondente caem direto no legado
+  (`tier_models`), nunca erro; qualquer outra chave (`backend`, `frontend`, ...) é definida pelo
   operador. Resolução de domínio da unidade: frontmatter `domain:` da task > tag de domínio na
   linha do slice no ROADMAP > `default`.
 - **Célula ausente → `default → legado`:** se o domínio resolvido não tem entrada para a fase/tier
   necessários, o resolvedor tenta o domínio `default`; se `default` também não cobrir, cai para o
   comportamento legado (`tier_models:`/`workers:`) — nunca erro, sempre degrade silencioso.
 - **Fallback de categoria:** `fallback:` deve apontar para **1 modelo Claude mapeado** (nunca uma
-  lista, nunca um ID não mapeado). Um `fallback:` inválido (ausente do mapa ID→alias, ou vazio) é
-  substituído pelo fallback legado e registrado como `fallback-invalid-substituted` no `reason` do
-  contrato JSON — nunca aborta o dispatch.
+  lista, nunca um ID não mapeado). Um `fallback:` **presente porém inválido** (ausente do mapa
+  ID→alias, ou de família não-Claude) é substituído pelo fallback legado e registrado como
+  `fallback-invalid-substituted` no `reason` do contrato JSON. Um `fallback:` **ausente** usa o
+  fallback legado silenciosamente (sem reason — comportamento natural, não config inválida) —
+  nunca aborta o dispatch.
 - **Caveat gemini (`phase-unsupported-family`):** um ID de família `gemini` numa cadeia é
   reconhecido pelo parser mas **não é roteável** como `executor`/`planner` hoje — não há worker
   nativo Gemini no orquestrador. Uma cadeia contendo um ID gemini é tratada como
