@@ -3998,6 +3998,124 @@ function smokeDomainEmission() {
     'ocorrência inesperada de "Dimension 11"');
 }
 
+// ── Section 35: guard de integração 3-família (gemini) + R5 whitelist ──────
+// Guarda a integração ponta-a-ponta da 3ª família gemini: modelFamily,
+// pairing (R1 preserve + explicit-respect + opposite), routing
+// (phase-unsupported-family) e a reconciliação R5 da whitelist entre
+// shared/forge-review.md (spec) e forge-review-pairing.js (CLI). Os cenários
+// G–M do adapter agy (Section 20/smokeXllm) NÃO são responsabilidade desta
+// seção — só o eixo 3-família + R5.
+function smokeGeminiFamily() {
+  process.stdout.write('\n▸ Section 35: integração 3-família (gemini) + R5 reconciliação\n');
+  const { modelFamily } = require('./forge-model-alias');
+  const { resolveRoute } = require('./forge-routing');
+
+  // (a) modelFamily — gemini via agy/gemini-* e bare 'gemini'
+  assert(modelFamily('agy/gemini-3.1-pro') === 'gemini',
+    "(a) modelFamily('agy/gemini-3.1-pro')==='gemini'", `got ${modelFamily('agy/gemini-3.1-pro')}`);
+  assert(modelFamily('gemini') === 'gemini',
+    "(a) modelFamily('gemini')==='gemini'", `got ${modelFamily('gemini')}`);
+  // (a2) regression — claude/gpt não regrediram com a introdução de gemini
+  assert(modelFamily('claude-opus-4-8') === 'claude',
+    "(a2) regression: modelFamily('claude-opus-4-8')==='claude'", `got ${modelFamily('claude-opus-4-8')}`);
+  assert(modelFamily('gpt-5.2') === 'gpt',
+    "(a2) regression: modelFamily('gpt-5.2')==='gpt'", `got ${modelFamily('gpt-5.2')}`);
+
+  // helper de fixture de eventos (mesmo padrão de Section 29/30)
+  const writeEvents = (dir, lines) => {
+    const forgeDir = path.join(dir, '.gsd', 'forge');
+    fs.mkdirSync(forgeDir, { recursive: true });
+    const file = path.join(forgeDir, 'events.jsonl');
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + (lines.length ? '\n' : ''), 'utf8');
+    return file;
+  };
+  const runPairing = (eventsFile, dir, extraArgs) => {
+    const args = ['--slice', 'S02', '--milestone', 'M007', '--cwd', dir, '--events', eventsFile, ...(extraArgs || [])];
+    const r = runScript('forge-review-pairing.js', args);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout.trim()); } catch {}
+    return { r, parsed };
+  };
+
+  // (b) R1 — normalizeRequest preserva 'gemini' explícito (via CLI --challenger gemini,
+  // aferido pelo campo requested.challenger, não colapsado para 'auto')
+  const dirClaude = mkTmp('gemini-fam-claude');
+  const evClaude = writeEvents(dirClaude, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'claude' },
+  ]);
+  const { parsed: pGeminiExplicit } = runPairing(evClaude, dirClaude, ['--challenger', 'gemini']);
+  assert(pGeminiExplicit && pGeminiExplicit.requested.challenger === 'gemini' && pGeminiExplicit.challenger === 'gemini',
+    "(b) R1: --challenger gemini → requested.challenger='gemini' (preservado, não normalizado para auto), challenger='gemini' (respeitado)",
+    JSON.stringify(pGeminiExplicit));
+
+  // (b2) regression — valor desconhecido colapsa para 'auto' (normalizeRequest não regrediu)
+  const { parsed: pUnknownReq } = runPairing(evClaude, dirClaude, ['--challenger', 'mistral']);
+  assert(pUnknownReq && pUnknownReq.requested.challenger === 'auto',
+    "(b2) regression: --challenger mistral (inválido) → requested.challenger='auto'",
+    JSON.stringify(pUnknownReq));
+
+  // (c) challenger gemini explícito respeitado independente do author (author=gpt)
+  const dirCodex = mkTmp('gemini-fam-codex');
+  const evCodex = writeEvents(dirCodex, [
+    { event: 'dispatch', unit: 'execute-task/T01', engine: 'codex' },
+    { event: 'dispatch', unit: 'execute-task/T02', engine: 'codex' },
+  ]);
+  const { parsed: pGeminiOverGpt } = runPairing(evCodex, dirCodex, ['--challenger', 'gemini']);
+  assert(pGeminiOverGpt && pGeminiOverGpt.author === 'gpt' && pGeminiOverGpt.challenger === 'gemini',
+    "(c) author=gpt + --challenger gemini explícito → challenger='gemini' (explicit vence opposite)",
+    JSON.stringify(pGeminiOverGpt));
+
+  // (d) opposite — auto (sem override): opposite(claude)==='codex' e opposite(gpt)==='claude'
+  const { parsed: pOppositeClaude } = runPairing(evClaude, dirClaude);
+  assert(pOppositeClaude && pOppositeClaude.author === 'claude' && pOppositeClaude.challenger === 'codex',
+    "(d) opposite(claude)==='codex' — author=claude, auto → challenger=codex",
+    JSON.stringify(pOppositeClaude));
+  const { parsed: pOppositeGpt } = runPairing(evCodex, dirCodex);
+  assert(pOppositeGpt && pOppositeGpt.author === 'gpt' && pOppositeGpt.challenger === 'claude',
+    "(d) opposite(gpt)==='claude' — author=gpt, auto → challenger=claude",
+    JSON.stringify(pOppositeGpt));
+
+  cleanup(dirClaude);
+  cleanup(dirCodex);
+
+  // (e) routing — membro gemini na cadeia produz phase-unsupported-family
+  // (NÃO skipped-unknown-family, que é reservado a famílias desconhecidas/null)
+  const dirRouting = mkTmp('gemini-fam-routing');
+  fs.mkdirSync(path.join(dirRouting, '.gsd'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dirRouting, '.gsd', 'claude-agent-prefs.md'),
+    'routing:\n  backend:\n    executor:\n      standard: [claude-sonnet-5, agy/gemini-3.1-pro]\n',
+    'utf8'
+  );
+  const rGemini = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirRouting });
+  assert(rGemini.chain.length === 1 && rGemini.chain[0].id === 'claude-sonnet-5',
+    '(e) membro gemini pulado da cadeia resolvida → só o membro claude sobrevive',
+    JSON.stringify(rGemini.chain));
+  assert(/phase-unsupported-family/.test(rGemini.reason),
+    '(e) reason contém phase-unsupported-family', rGemini.reason);
+  assert(!/skipped-unknown-family/.test(rGemini.reason),
+    '(e) reason NÃO contém skipped-unknown-family (gemini é família conhecida, discriminador distinto)',
+    rGemini.reason);
+  cleanup(dirRouting);
+
+  // (f) R5 — reconciliação de whitelist nos dois lados: spec (shared/forge-review.md)
+  // e CLI (VALID_REQUESTS de forge-review-pairing.js) precisam bater em gemini.
+  const ROOT35 = path.join(__dirname, '..');
+  const reviewSpecTxt = fs.readFileSync(path.join(ROOT35, 'shared', 'forge-review.md'), 'utf8');
+  const pairingSrcTxt = fs.readFileSync(path.join(ROOT35, 'scripts', 'forge-review-pairing.js'), 'utf8');
+  const specHasWhitelist = /claude\|codex\|gemini/.test(reviewSpecTxt);
+  const cliHasGemini = /VALID_REQUESTS\s*=\s*\[[^\]]*'gemini'[^\]]*\]/.test(pairingSrcTxt);
+  assert(specHasWhitelist,
+    "(f) R5: shared/forge-review.md contém a whitelist 'claude|codex|gemini'",
+    'padrão claude|codex|gemini não encontrado em shared/forge-review.md');
+  assert(cliHasGemini,
+    "(f) R5: VALID_REQUESTS em forge-review-pairing.js inclui 'gemini'",
+    'VALID_REQUESTS sem gemini em forge-review-pairing.js');
+  assert(specHasWhitelist === cliHasGemini,
+    '(f) R5: os 2 lados batem (nenhum drift entre spec e CLI)',
+    `spec=${specHasWhitelist} cli=${cliHasGemini}`);
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -4039,6 +4157,7 @@ async function main() {
     smokeRouting();
     smokeRoutingWiring();
     smokeDomainEmission();
+    smokeGeminiFamily();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
