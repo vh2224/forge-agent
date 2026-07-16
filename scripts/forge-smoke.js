@@ -3596,6 +3596,116 @@ function smokeRouting() {
     JSON.stringify(qStatuses));
 }
 
+// ── Section 33: routing wiring (call-sites + eventos + contrato BLOCKER) ────
+// M007 S02 T04. Doc-presence guards (grep-over-file) que verificam o wiring
+// de T01/T02/T03 nos 3 arquivos: canônico shared/forge-dispatch.md, e os
+// dois mirrors executáveis skills/forge-auto/SKILL.md e forge-next/SKILL.md.
+// Não exercita runtime — apenas confirma que os textos/call-sites existem.
+function smokeRoutingWiring() {
+  process.stdout.write('\n▸ Section 33: routing wiring (call-sites + eventos + contrato BLOCKER)\n');
+
+  const dispatchPath = path.join(__dirname, '..', 'shared', 'forge-dispatch.md');
+  const autoPath = path.join(__dirname, '..', 'skills', 'forge-auto', 'SKILL.md');
+  const nextPath = path.join(__dirname, '..', 'skills', 'forge-next', 'SKILL.md');
+
+  const dispatchTxt = fs.readFileSync(dispatchPath, 'utf8');
+  const autoTxt = fs.readFileSync(autoPath, 'utf8');
+  const nextTxt = fs.readFileSync(nextPath, 'utf8');
+
+  const files = [
+    { name: 'shared/forge-dispatch.md', txt: dispatchTxt },
+    { name: 'skills/forge-auto/SKILL.md', txt: autoTxt },
+    { name: 'skills/forge-next/SKILL.md', txt: nextTxt },
+  ];
+
+  // (a) call-sites: forge-routing.js aparece como call de dispatch (perto de --unit-type)
+  // nos 3 arquivos.
+  for (const f of files) {
+    const hasCallSite = /forge-routing\.js["'`]?[\s\S]{0,120}--unit-type/.test(f.txt) ||
+      /--unit-type[\s\S]{0,300}forge-routing\.js/.test(f.txt);
+    assert(hasCallSite,
+      `(a) ${f.name} contém forge-routing.js como call de dispatch (perto de --unit-type)`,
+      `forge-routing.js count=${(f.txt.match(/forge-routing\.js/g) || []).length}`);
+  }
+
+  // (b) os mirrors NÃO retêm a resolução inicial de cadeia via forge-tier-chain.js --json
+  // (só pode sobrar menção descritiva "replaces the old forge-tier-chain.js --json", nunca
+  // um call-site ativo tipo `node ... forge-tier-chain.js ... --json` fora de comentário/prosa).
+  const activeTierChainJsonCall = /\$\([^)]*forge-tier-chain\.js[^)]*--json[^)]*\)/;
+  for (const f of [{ name: 'skills/forge-auto/SKILL.md', txt: autoTxt }, { name: 'skills/forge-next/SKILL.md', txt: nextTxt }]) {
+    assert(!activeTierChainJsonCall.test(f.txt),
+      `(b) ${f.name} não retém call-site ativo de forge-tier-chain.js --json (resolução inicial substituída)`,
+      'encontrado call-site ativo');
+  }
+  // e o dispatch canônico também não descreve forge-routing.js como opcional/paralelo —
+  // assert positivo: o step 4 de Tier Resolution é a chamada forge-routing.js.
+  assert(/forge-routing\.js/.test(dispatchTxt) && /SINGLE.{0,20}call/i.test(dispatchTxt),
+    '(b) shared/forge-dispatch.md descreve forge-routing.js como a chamada ÚNICA (single call)',
+    'marcador "SINGLE ... call" ausente');
+
+  // (c) eventos aditivos: os 3 arquivos documentam/emitem domain/route_source/chain_len
+  // no evento dispatch.
+  for (const f of files) {
+    assert(/route_source/.test(f.txt) && /chain_len/.test(f.txt) && /\bdomain\b/.test(f.txt),
+      `(c) ${f.name} documenta os campos aditivos domain/route_source/chain_len no evento dispatch`,
+      `route_source=${/route_source/.test(f.txt)} chain_len=${/chain_len/.test(f.txt)} domain=${/\bdomain\b/.test(f.txt)}`);
+  }
+
+  // (d) contrato BLOCKER (doc-presence): sufixo -attempt- (state fresco por tentativa),
+  // reset verificado (git status --porcelain) e cap SIDECAR_ATTEMPT presentes em
+  // forge-auto e forge-next; o canônico descreve os três.
+  for (const f of [{ name: 'skills/forge-auto/SKILL.md', txt: autoTxt }, { name: 'skills/forge-next/SKILL.md', txt: nextTxt }]) {
+    assert(/-attempt-/.test(f.txt),
+      `(d) ${f.name} contém o sufixo -attempt- (state fresco por tentativa)`, 'ausente');
+    assert(/porcelain/.test(f.txt),
+      `(d) ${f.name} contém 'porcelain' (reset verificado via git status --porcelain)`, 'ausente');
+    assert(/SIDECAR_ATTEMPT/.test(f.txt),
+      `(d) ${f.name} contém o cap SIDECAR_ATTEMPT`, 'ausente');
+  }
+  assert(/-attempt-/.test(dispatchTxt) && /porcelain/.test(dispatchTxt) && /SIDECAR_ATTEMPT/.test(dispatchTxt),
+    '(d) shared/forge-dispatch.md descreve os três invariantes do contrato BLOCKER (-attempt-, porcelain, SIDECAR_ATTEMPT)',
+    `attempt=${/-attempt-/.test(dispatchTxt)} porcelain=${/porcelain/.test(dispatchTxt)} cap=${/SIDECAR_ATTEMPT/.test(dispatchTxt)}`);
+
+  // (e) Layer 2 / MEM001: forge-routing.js aparece perto de --next-after; context_overflow
+  // re-resolve via routing (não forge-tier-chain na row); e o texto reforça "nunca 4ª camada".
+  for (const f of [{ name: 'shared/forge-dispatch.md', txt: dispatchTxt }, { name: 'skills/forge-auto/SKILL.md', txt: autoTxt }, { name: 'skills/forge-next/SKILL.md', txt: nextTxt }]) {
+    assert(/forge-routing\.js[\s\S]{0,400}--next-after/.test(f.txt) || /--next-after[\s\S]{0,400}forge-routing\.js/.test(f.txt),
+      `(e) ${f.name}: forge-routing.js aparece perto de --next-after (Layer 2 via routing)`,
+      'padrão não encontrado');
+  }
+  assert(/never a 4th layer|nunca.{0,10}4ª camada|never.{0,10}4th layer/i.test(dispatchTxt),
+    '(e) shared/forge-dispatch.md reforça "nunca 4ª camada" (MEM001)', 'marcador ausente');
+  assert(/never a 4th layer/i.test(autoTxt), '(e) skills/forge-auto/SKILL.md reforça "never a 4th layer" (MEM001)', 'marcador ausente');
+  assert(/never a 4th layer/i.test(nextTxt), '(e) skills/forge-next/SKILL.md reforça "never a 4th layer" (MEM001)', 'marcador ausente');
+
+  // (f) context_overflow re-resolve THROUGH routing (não uma linha isolada com
+  // forge-tier-chain.js na tabela de failure taxonomy).
+  for (const f of files) {
+    assert(/context_overflow/.test(f.txt),
+      `(f) ${f.name} contém 'context_overflow' na Failure Taxonomy`, 'ausente');
+  }
+  assert(/context_overflow[\s\S]{0,600}forge-routing\.js/.test(dispatchTxt) || /forge-routing\.js[\s\S]{0,600}context_overflow/.test(dispatchTxt),
+    '(f) shared/forge-dispatch.md: context_overflow re-resolve THROUGH forge-routing.js (proximidade textual)',
+    'padrão não encontrado');
+
+  // (g) compat: route_source/tier_models como caminho byte-idêntico legado (source:tier_models).
+  for (const f of files) {
+    assert(/tier_models/.test(f.txt),
+      `(g) ${f.name} menciona tier_models (caminho legado byte-idêntico)`, 'ausente');
+  }
+  assert(/tier_models[\s\S]{0,400}(byte-idêntic|byte-identical)|(byte-idêntic|byte-identical)[\s\S]{0,400}tier_models/.test(dispatchTxt),
+    '(g) shared/forge-dispatch.md descreve tier_models como caminho legado byte-idêntico',
+    'padrão não encontrado');
+
+  // (h) stub check — nenhum dos 3 arquivos ganhou placeholder no wiring de S02.
+  const stubPatterns = [/\bTODO\b/, /\bTBD\b/, /\bFIXME\b/, /\bPLACEHOLDER\b/];
+  for (const f of files) {
+    for (const re of stubPatterns) {
+      assert(!re.test(f.txt), `(h) ${f.name} não contém stub pattern ${re}`, 'stub encontrado');
+    }
+  }
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -3635,6 +3745,7 @@ async function main() {
     smokeReviewPairingWiring();
     smokeReviewPairingPrefsSchema();
     smokeRouting();
+    smokeRoutingWiring();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
