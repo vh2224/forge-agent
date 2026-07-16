@@ -3706,6 +3706,134 @@ function smokeRoutingWiring() {
   }
 }
 
+// ── Section 34: emissão de domínio (schema aditivo + planner + plan-checker) ─
+// M007 S03 T04. Asserts behaviorais sobre o schema aditivo `domain:` de
+// forge-must-haves.js e sobre forge-routing.js --list-domains, mais drift
+// guards (grep de presença/ausência) sobre a guidance de emissão em
+// agents/forge-planner.md e a extensão da dimension 7 em
+// agents/forge-plan-checker.md.
+function smokeDomainEmission() {
+  process.stdout.write('\n▸ Section 34: emissão de domínio (schema aditivo + planner + plan-checker)\n');
+
+  const mustHavesScript = path.join(SCRIPTS, 'forge-must-haves.js');
+
+  const runCheck = (content) => {
+    const dir = mkTmp('domain-mh');
+    const file = path.join(dir, 'T01-PLAN.md');
+    fs.writeFileSync(file, content, 'utf8');
+    const r = spawnSync(process.execPath, [mustHavesScript, '--check', file], { encoding: 'utf8' });
+    cleanup(dir);
+    let parsed = null;
+    try { parsed = JSON.parse(r.stdout); } catch {}
+    return { status: r.status, parsed, raw: r.stdout, stderr: r.stderr };
+  };
+
+  const structuredWith = (domainLine) =>
+    '---\n' +
+    'id: T01\n' +
+    'slice: S01\n' +
+    'milestone: M999\n' +
+    'title: "fixture"\n' +
+    'worker: forge-executor\n' +
+    (domainLine ? domainLine + '\n' : '') +
+    'must_haves:\n' +
+    '  truths:\n' +
+    '    - "algo verdadeiro"\n' +
+    '  artifacts:\n' +
+    '    - path: "scripts/x.js"\n' +
+    '      provides: "x"\n' +
+    '      min_lines: 1\n' +
+    '  key_links: []\n' +
+    'expected_output:\n' +
+    '  - scripts/x.js\n' +
+    '---\n\n# T01: fixture\n';
+
+  const legacyPlan =
+    '---\n' +
+    'id: T01\n' +
+    'slice: S01\n' +
+    'milestone: M999\n' +
+    'title: "fixture legada"\n' +
+    'worker: forge-executor\n' +
+    '---\n\n# T01: fixture legada\n\n## Must-Haves\n- algo verdadeiro (free-text, sem bloco structured).\n';
+
+  // (a) structured COM domain: backend → valid:true, domain refletido.
+  const rA = runCheck(structuredWith('domain: backend'));
+  assert(rA.status === 0 && rA.parsed && rA.parsed.legacy === false && rA.parsed.valid === true && rA.parsed.domain === 'backend',
+    '(a) structured COM domain: backend → valid:true, domain:"backend"', JSON.stringify(rA));
+
+  // (b) structured SEM domain: → valid:true, domain null/ausente.
+  const rB = runCheck(structuredWith(null));
+  assert(rB.status === 0 && rB.parsed && rB.parsed.legacy === false && rB.parsed.valid === true &&
+    (rB.parsed.domain === null || rB.parsed.domain === undefined),
+    '(b) structured SEM domain: → valid:true, domain null/ausente (campo aditivo)', JSON.stringify(rB));
+
+  // (c) legacy (must_haves free-text) → legacy:true, valid:true.
+  const rC = runCheck(legacyPlan);
+  assert(rC.status === 0 && rC.parsed && rC.parsed.legacy === true && rC.parsed.valid === true,
+    '(c) plano legacy (free-text) → legacy:true, valid:true', JSON.stringify(rC));
+
+  // (d) domain: malformado (lista) → valid:false.
+  const rD = runCheck(structuredWith('domain: [backend, frontend]'));
+  assert(rD.status !== 0 && rD.parsed && rD.parsed.legacy === false && rD.parsed.valid === false,
+    '(d) domain: malformado (lista) → valid:false, exit != 0', JSON.stringify(rD));
+
+  // ── --list-domains behavioral ──────────────────────────────────────────
+  const writeRoutingPrefsDom = (dir, bodyText) => {
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gsd', 'claude-agent-prefs.md'), 'routing:\n' + bodyText, 'utf8');
+  };
+
+  // (e) dir com bloco routing: (2 domínios) → --list-domains retorna ambos, exit 0.
+  const dirE = mkTmp('domain-list-e');
+  writeRoutingPrefsDom(dirE,
+    '  default:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n' +
+    '  backend:\n' +
+    '    executor:\n' +
+    '      standard: [claude-sonnet-5]\n'
+  );
+  const eR = runScript('forge-routing.js', ['--list-domains', '--cwd', dirE]);
+  let eParsed = null;
+  try { eParsed = JSON.parse(eR.stdout); } catch {}
+  assert(eR.status === 0 && Array.isArray(eParsed) && eParsed.includes('default') && eParsed.includes('backend'),
+    '(e) --list-domains com bloco routing: (2 domínios) → JSON array com ambas as chaves, exit 0',
+    `status=${eR.status} stdout=${eR.stdout}`);
+  cleanup(dirE);
+
+  // (f) dir SEM bloco routing: → --list-domains retorna [], exit 0.
+  const dirF = mkTmp('domain-list-f');
+  fs.mkdirSync(path.join(dirF, '.gsd'), { recursive: true });
+  const fR = runScript('forge-routing.js', ['--list-domains', '--cwd', dirF]);
+  let fParsed = null;
+  try { fParsed = JSON.parse(fR.stdout); } catch {}
+  assert(fR.status === 0 && Array.isArray(fParsed) && fParsed.length === 0,
+    '(f) --list-domains sem bloco routing: → [], exit 0', `status=${fR.status} stdout=${fR.stdout}`);
+  cleanup(dirF);
+
+  // ── Drift guards — markdown (grep de presença/ausência) ────────────────
+  const plannerTxt = fs.readFileSync(path.join(__dirname, '..', 'agents', 'forge-planner.md'), 'utf8');
+  const planCheckerTxt = fs.readFileSync(path.join(__dirname, '..', 'agents', 'forge-plan-checker.md'), 'utf8');
+
+  // (g) planner: guidance de domain: no frontmatter da task.
+  assert(/domain:\s*backend/.test(plannerTxt) || /`domain:`/.test(plannerTxt),
+    '(g) agents/forge-planner.md contém guidance de domain: no frontmatter da task', 'padrão não encontrado');
+
+  // (h) planner: tag domain:<name> na linha do slice do ROADMAP.
+  assert(/domain:<name>/.test(plannerTxt),
+    '(h) agents/forge-planner.md referencia a tag `domain:<name>` na linha do slice do ROADMAP', 'padrão não encontrado');
+
+  // (i) plan-checker: dimension 7 (scope_alignment) referencia domínio / --list-domains.
+  assert(/scope_alignment/.test(planCheckerTxt) && /--list-domains/.test(planCheckerTxt),
+    '(i) agents/forge-plan-checker.md: dimension 7 (scope_alignment) referencia --list-domains', 'padrão não encontrado');
+
+  // (j) plan-checker: NÃO existe uma "Dimension 11" — extensão fica na dim-7 existente.
+  assert(!/Dimension 11/.test(planCheckerTxt),
+    '(j) agents/forge-plan-checker.md NÃO contém "Dimension 11" (extensão aditiva à dim-7, sem 11ª dimensão)',
+    'ocorrência inesperada de "Dimension 11"');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -3746,6 +3874,7 @@ async function main() {
     smokeReviewPairingPrefsSchema();
     smokeRouting();
     smokeRoutingWiring();
+    smokeDomainEmission();
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
