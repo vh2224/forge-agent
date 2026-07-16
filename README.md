@@ -231,6 +231,72 @@ review:
 
 ---
 
+## Multi-LLM fase 4 — routing model-first por domínio
+
+O forge permite rotear os workers — `execute-task` e `plan-slice` — por **domínio de trabalho** e
+**fase**, escolhendo inclusive **cadeias cross-engine** (misturar IDs Claude e GPT numa mesma
+célula). Diferente da fase 2 (`workers:`, que escolhe engine por `unit_type`), o routing é
+inteiramente **opt-in** — sem o bloco `routing:` definido nas prefs, o comportamento é 100%
+idêntico aos tiers legados (`tier_models:`/`workers:` decidem sozinhos). A cascata responde
+à última reescrita **por domínio inteiro** — nunca merge campo-a-campo, para evitar meia-domain
+de um arquivo + meia-domain de outro = misroute silencioso.
+
+Mecanicamente, cada célula `routing.<domínio>.<fase>.<tier> = [cadeia]` contém uma **lista
+ordenada de modelos** (Claude e/ou GPT, cross-engine permitido), com um `fallback:` de categoria
+definindo um modelo Claude mapeado para casos de esgotamento. O resolvedor `scripts/forge-routing.js`
+usa **precedência explícita** (`frontmatter > routing > tier_models legacy`) e **engine derivation**
+por família (IDs `claude-*` → `Agent(model)`, IDs `gpt-*` → sidecar `forge-xllm.js`). Cadeias
+com membros de família não-roteável (ex.: Gemini) skip o membro com `phase-unsupported-family`
+e continuam na próxima.
+
+- **Fases roteáveis:** apenas `executor` (`execute-task`) e `planner` (`plan-slice`). `plan-milestone`
+  **nunca** é capturado por este eixo — permanece locked no tier `max` (Fable).
+- **Nesting:** `routing.<domínio>.<fase>.<tier> = [id, ...]` + `routing.<domínio>.<fase>.fallback = <id>`.
+  `<tier>` é qualquer alias de tier (`light`, `standard`, `heavy`, `max`).
+- **Domínios:** chaves de domínio são abertas — `default` é obrigatório (usado quando a task/slice
+  não declara `domain:`); qualquer outra chave (`backend`, `frontend`, ...) é definida pelo operador.
+- **Precedência:** frontmatter `tier:`/`worker:` na task (item 1, sempre ganha) > bloco `routing:` aqui
+  (quando célula resolve) > comportamento legado `tier_models:`/`workers:` (quando não há `routing:` ou
+  a célula não resolve).
+- **Engine derivation:** IDs com substring `claude` → engine `Agent` (nativo em contexto); IDs com
+  substring `gpt` → engine `codex` (sidecar `forge-xllm.js`); outras famílias → `phase-unsupported-family`.
+- **Fallback de categoria:** `fallback:` deve apontar para **1 modelo Claude mapeado**. Um `fallback:`
+  inválido ou ausente é substituído pelo fallback legado (`tier_models:`) e registrado como
+  `fallback-invalid-substituted` no reason — nunca aborta o dispatch.
+- **Caveat gemini (`phase-unsupported-family`):** um ID de família `gemini` numa cadeia é reconhecido
+  mas **não é roteável** como `executor`/`planner` hoje — não há worker nativo Gemini. Um membro gemini
+  é pulado silenciosamente e a resolução segue para o próximo membro.
+
+### Ativar:
+
+Edite `forge-agent-prefs.md` (ou `.gsd/prefs.local.md`), vá para `## Routing Settings` e descomente o
+bloco `routing:`. Exemplo de célula cross-engine:
+
+```yaml
+routing:
+  default:
+    executor:
+      standard: [claude-sonnet-5]
+      heavy:    [claude-opus-4-8, gpt-5]     # cadeia cross-engine (claude → gpt sidecar)
+      fallback: claude-sonnet-5              # categoria: 1 Claude mapeado
+  backend:
+    executor:
+      standard: [gpt-5, claude-sonnet-5]     # gpt primário, claude fallback
+      fallback: claude-sonnet-5
+```
+
+Para inspecionar a resolução sem disparar dispatch real, use o CLI:
+
+```bash
+node scripts/forge-routing.js --unit-type execute-task --tier heavy \
+  --domain backend --explain
+```
+
+A matriz canônica de resolver está em [`scripts/forge-routing.js`](scripts/forge-routing.js)
+(`resolveRoute(opts)`); precedência completa em [`shared/forge-dispatch.md`](shared/forge-dispatch.md).
+
+---
+
 ## Atualizar
 
 ```bash
