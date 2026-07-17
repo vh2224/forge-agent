@@ -697,6 +697,120 @@ test('existing exports still present (regression)', () => {
   assert(mod._private && typeof mod._private.checkSubstantive === 'function', 'checkSubstantive in _private');
 });
 
+// ── Section 12: custom stub_patterns literal escape (Bug 1 fix) ────────────────
+console.log('\nSection 12: custom stub_patterns literal escape\n');
+
+test('checkSubstantive: literal-paren stub pattern does not throw (repro)', () => {
+  const { checkSubstantive } = _private;
+  const artifact = fakeArtifact('x.js', {
+    min_lines: 1,
+    stub_patterns: ['throw new Error("unimplemented'],
+  });
+  const result = checkSubstantive('some ok line', 1, artifact);
+  assert(result && typeof result.pass === 'boolean', 'should return a verdict, not throw');
+});
+
+test('checkSubstantive: content containing the literal pattern is flagged', () => {
+  const { checkSubstantive } = _private;
+  const artifact = fakeArtifact('x.js', {
+    min_lines: 1,
+    stub_patterns: ['throw new Error("unimplemented'],
+  });
+  const content = 'function f() {\n  throw new Error("unimplemented\n}';
+  const result = checkSubstantive(content, 3, artifact);
+  assert(result.pass === false, 'should fail: literal pattern present');
+  assert(result.flags.some(f => f.regex_name === 'custom_stub_0'),
+    'flag should reference custom_stub_0');
+});
+
+test('checkSubstantive: content without the literal pattern passes', () => {
+  const { checkSubstantive } = _private;
+  const artifact = fakeArtifact('x.js', {
+    min_lines: 1,
+    stub_patterns: ['throw new Error("unimplemented'],
+  });
+  const result = checkSubstantive('function f() { return 42; }', 1, artifact);
+  assert(result.pass === true, 'should pass: literal pattern absent');
+});
+
+test('checkSubstantive: literal semantics — regex metachars matched literally, not as regex', () => {
+  const { checkSubstantive } = _private;
+  const artifact = fakeArtifact('x.js', {
+    min_lines: 1,
+    stub_patterns: ['return null; // (x)'],
+  });
+  // Exact literal present → flagged
+  const hit = checkSubstantive('return null; // (x)', 1, artifact);
+  assert(hit.pass === false, 'exact literal text should match');
+  // Text that would match if '(x)' were interpreted as a regex group but isn't the literal → passes
+  const miss = checkSubstantive('return null; // (y)', 1, artifact);
+  assert(miss.pass === true, 'non-literal text should not match');
+});
+
+test('checkSubstantive: DEFAULT_STUB_REGEXES untouched (still regex, not escaped)', () => {
+  const { checkSubstantive } = _private;
+  const artifact = fakeArtifact('x.js', { min_lines: 1 }); // no stub_patterns → defaults only
+  const content = 'return null;';
+  const result = checkSubstantive(content, 1, artifact);
+  assert(result.pass === false, 'default stub regex (return_null_function) should still catch bare return null;');
+  assert(result.flags.some(f => f.regex_name === 'return_null_function'),
+    'flag should reference the default regex name, unchanged');
+});
+
+// A non-string entry reaching the library API directly whose stringification
+// itself throws — the realistic trigger for an uncompilable extra after escaping
+// (escapeRegExp neutralizes all regex metachars, so any successfully-stringified
+// value always compiles; only a throwing toString can still fail loud).
+function unstringifiable() {
+  return { toString() { throw new Error('cannot stringify'); } };
+}
+
+test('checkSubstantive: uncompilable extra fails loud with invalid_stub_pattern flag, never throws', () => {
+  const { checkSubstantive } = _private;
+  const artifact = fakeArtifact('x.js', {
+    min_lines: 1,
+    stub_patterns: [unstringifiable()],
+  });
+  let result;
+  result = checkSubstantive('some ok line here', 1, artifact);
+  assert(result && typeof result.pass === 'boolean', 'should return a verdict, not throw');
+  assert(result.pass === true, 'no default/valid stub match → pass true with flags');
+  assert(Array.isArray(result.flags) && result.flags.length > 0,
+    'should carry invalid_stub_pattern flags');
+  assert(result.flags.every(f => f.reason === 'invalid_stub_pattern'),
+    'all flags should be invalid_stub_pattern reason');
+});
+
+test('checkSubstantive: scanning proceeds with defaults + remaining valid extras after an invalid one', () => {
+  const { checkSubstantive } = _private;
+  const artifact = fakeArtifact('x.js', {
+    min_lines: 1,
+    stub_patterns: [unstringifiable(), 'MY_CUSTOM_STUB_MARKER'],
+  });
+  const content = 'this line has MY_CUSTOM_STUB_MARKER in it';
+  const result = checkSubstantive(content, 1, artifact);
+  assert(result.pass === false, 'valid extra should still match despite invalid sibling');
+  assert(result.flags.some(f => f.reason === 'invalid_stub_pattern'),
+    'invalid_stub_pattern flag present');
+  assert(result.flags.some(f => f.regex_name === 'custom_stub_1'),
+    'valid extra (index 1) should still be applied and flagged');
+});
+
+// ── Section 13: error_count wiring for invalid_stub_pattern (Bug 1 fix) ────────
+console.log('\nSection 13: error_count wiring for invalid_stub_pattern\n');
+
+test('verifyArtifact: invalid_stub_pattern flag surfaces on row even when substantive passes', () => {
+  writeTmp('s13/ok.js', 'function f() { return 42; }\n'.repeat(5));
+  const artifact = fakeArtifact('s13/ok.js', { min_lines: 1, stub_patterns: [unstringifiable()] });
+  const mustHaves = mkMustHaves([artifact]);
+  const result = verifyArtifact(mustHaves, [], { cwd: ROOT });
+  const row = result.rows[0];
+  assert(row.substantive === true, 'substantive should pass (no default/valid stub matched)');
+  assert(Array.isArray(row.flags), 'row should carry flags array');
+  assert(row.flags.some(f => f.reason === 'invalid_stub_pattern'),
+    'row flags should include invalid_stub_pattern');
+});
+
 // ── Cleanup and summary ───────────────────────────────────────────────────────
 try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}
 

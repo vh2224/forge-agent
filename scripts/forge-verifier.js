@@ -369,13 +369,24 @@ function checkExists(artifactPath, cwd) {
  * stub_patterns behaviour:
  *   undefined        → use DEFAULT_STUB_REGEXES
  *   []               → detection disabled; only min_lines applies
- *   string[]         → compile extras, append to DEFAULT_STUB_REGEXES
+ *   string[]         → plan-supplied extras are LITERAL STRINGS (reading (a)), regex-escaped
+ *                      before compile, then appended to DEFAULT_STUB_REGEXES. DEFAULT_STUB_REGEXES
+ *                      themselves stay real regexes — names are LOCKED (referenced by external
+ *                      VERIFICATION.md files) and are NEVER escaped. An extra that still fails to
+ *                      compile after escaping (e.g. a non-string entry reaching this function
+ *                      directly via the library API) never throws: it is skipped and surfaces as
+ *                      an `invalid_stub_pattern` flag instead (fail-loud inside the exit-0 JSON,
+ *                      not a crash — see verifyArtifact/runSliceVerification).
  *
  * @param {string} content     File content
  * @param {number} lineCount   Number of lines
  * @param {object} artifact    Artifact descriptor from must_haves.artifacts[]
  * @returns {{ pass: boolean, flags?: object[] }}
  */
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function checkSubstantive(content, lineCount, artifact) {
   const minLines = artifact.min_lines || 0;
 
@@ -396,18 +407,36 @@ function checkSubstantive(content, lineCount, artifact) {
   // ── Determine effective regex list ────────────────────────────────────────
   const stubPatterns = artifact.stub_patterns;
   let effectiveRegexes;
+  const invalidPatternFlags = [];
 
   if (Array.isArray(stubPatterns)) {
     if (stubPatterns.length === 0) {
       // Explicitly disabled for this artifact
       effectiveRegexes = [];
     } else {
-      // Caller-supplied extras + defaults
-      const extras = stubPatterns.map((src, i) => ({
-        name: `custom_stub_${i}`,
-        regex: new RegExp(src),
-        description: `Custom stub pattern: ${src}`,
-      }));
+      // Caller-supplied extras are LITERAL STRINGS — escape before compile.
+      // DEFAULT_STUB_REGEXES are appended untouched (real regexes, names LOCKED).
+      const extras = [];
+      stubPatterns.forEach((src, i) => {
+        try {
+          extras.push({
+            name: `custom_stub_${i}`,
+            regex: new RegExp(escapeRegExp(src)),
+            description: `Custom stub pattern: ${src}`,
+          });
+        } catch (err) {
+          // Fail-loud, never throw: flag it and keep scanning with the rest.
+          let patternStr;
+          try { patternStr = String(src); } catch (_) { patternStr = '<unstringifiable>'; }
+          invalidPatternFlags.push({
+            level: 'substantive',
+            reason: 'invalid_stub_pattern',
+            pattern: patternStr,
+            error: err.message,
+            path: artifact.path,
+          });
+        }
+      });
       effectiveRegexes = [...DEFAULT_STUB_REGEXES, ...extras];
     }
   } else {
@@ -415,7 +444,9 @@ function checkSubstantive(content, lineCount, artifact) {
   }
 
   if (effectiveRegexes.length === 0) {
-    return { pass: true };
+    return invalidPatternFlags.length > 0
+      ? { pass: true, flags: invalidPatternFlags }
+      : { pass: true };
   }
 
   // ── Scan lines for stub patterns ──────────────────────────────────────────
@@ -440,10 +471,12 @@ function checkSubstantive(content, lineCount, artifact) {
   }
 
   if (matchedFlags.length > 0) {
-    return { pass: false, flags: matchedFlags };
+    return { pass: false, flags: [...invalidPatternFlags, ...matchedFlags] };
   }
 
-  return { pass: true };
+  return invalidPatternFlags.length > 0
+    ? { pass: true, flags: invalidPatternFlags }
+    : { pass: true };
 }
 
 // ── Level 3: Wired ────────────────────────────────────────────────────────────
@@ -823,7 +856,7 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
     );
     const wiredResult = checkWired(artifact, isNonJsTs, candidateFiles, cwd);
 
-    const rowFlags = [];
+    const rowFlags = [...(subResult.flags || [])];
     if (wiredResult.flag) rowFlags.push(wiredResult.flag);
 
     // ── Level 4: Test-quality ─────────────────────────────────────────────
@@ -1035,6 +1068,13 @@ function runSliceVerification(opts) {
 
   const duration_ms = Number(process.hrtime.bigint() - start) / 1e6;
 
+  // Additive to agg.errors.length (plan-file read failures) — never mutate agg.errors
+  // itself, since that array also generates the `exists: null` schema rows above.
+  const invalidStubCount = rows.reduce(
+    (n, r) => n + ((r.flags || []).filter(f => f.reason === 'invalid_stub_pattern').length),
+    0
+  );
+
   return {
     slice: opts.slice,
     milestone: opts.milestone,
@@ -1043,7 +1083,7 @@ function runSliceVerification(opts) {
     rows,
     legacy_count: agg.legacy.length,
     malformed_count: agg.malformed.length,
-    error_count: agg.errors.length,
+    error_count: agg.errors.length + invalidStubCount,
     no_tasks_dir: noTasksDir,
   };
 }

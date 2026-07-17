@@ -498,7 +498,7 @@ function buildPlanPrompt(contextText) {
     '          - path: "<relative path>"',
     '            provides: "<what this file provides>"',
     '            min_lines: <integer>',
-    '            stub_patterns: [ "<optional regex to reject stubs>", ... ]',
+    '            stub_patterns: [ "<optional literal string that marks a stub, e.g. return null>", ... ]',
     '        key_links:',
     '          - from: "<path>"',
     '            to: "<path>"',
