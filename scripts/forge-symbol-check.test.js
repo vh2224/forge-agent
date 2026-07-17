@@ -465,6 +465,112 @@ No symbols mentioned here.
   assert(Array.isArray(result.coverage.greenfield), 'coverage.greenfield must be array');
 });
 
+// ── Section 6: deadline degradation (Bug 2 fix) ──────────────────────────────
+
+process.stdout.write('\nSection 6: deadline degradation\n\n');
+
+test('checkSymbols: budgetMs 0 → timeout status with checked:0, total:N', () => {
+  const dir = mkTmpDir('deadline-zero');
+  writeFile(dir, 'lib.js', 'function fnA() {}\nfunction fnB() {}\n');
+
+  const plan = `---
+id: T01
+slice: S01
+milestone: M-test
+must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output: []
+---
+
+## Must-Haves
+
+- \`fnA\` must exist
+- \`fnB\` must exist
+`;
+
+  const result = checkSymbols(plan, dir, { budgetMs: 0 });
+  assertEq(result.status, 'timeout', 'status should be timeout');
+  assertEq(result.checked, 0, 'checked should be 0 with zero budget');
+  assertEq(result.total, 2, 'total should equal the number of checkable symbols');
+  assert(typeof result.counts === 'object' && result.counts !== null, 'counts must be present');
+  assert(typeof result.coverage === 'object' && result.coverage !== null, 'coverage must be present');
+  const unchecked = result.coverage.unchecked;
+  assert(unchecked.every(u => u.reason === 'deadline-exceeded'),
+    'all unchecked entries should carry deadline-exceeded reason');
+  assertEq(result.counts.uncheckable, unchecked.length,
+    'counts.uncheckable should match coverage.unchecked length');
+});
+
+test('checkSymbols: default call (no opts) has no status field, unchanged shape', () => {
+  const dir = mkTmpDir('deadline-default');
+  writeFile(dir, 'lib.js', 'function fnC() {}\n');
+  const plan = `---
+id: T01
+slice: S01
+milestone: M-test
+must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output: []
+---
+
+## Must-Haves
+
+- \`fnC\` must exist
+`;
+
+  const result = checkSymbols(plan, dir);
+  assert(!('status' in result), 'status field should not be present when no deadline fires');
+  assert(!('checked' in result), 'checked field should not be present when no deadline fires');
+  assert(!('total' in result), 'total field should not be present when no deadline fires');
+  assert(Array.isArray(result.symbols) && typeof result.counts === 'object' && typeof result.coverage === 'object',
+    'shape should still have symbols/counts/coverage');
+});
+
+// ── Section 7: rg/grep --glob/--include parity (Bug 2 fix) ──────────────────
+
+process.stdout.write('\nSection 7: glob/include filter parity\n\n');
+
+test('resolveSymbol: symbol defined only in .jsx → MISSING (glob excludes .jsx)', () => {
+  const dir = mkTmpDir('glob-jsx-missing');
+  writeFile(dir, 'component.jsx', [
+    '\'use strict\';',
+    'function jsxOnlySymbol() { return null; }',
+    'module.exports = { jsxOnlySymbol };',
+  ].join('\n'));
+
+  const result = resolveSymbol('jsxOnlySymbol', dir);
+  assertEq(result.state, 'MISSING', 'symbol defined only in .jsx should be MISSING (excluded by glob filter)');
+});
+
+test('resolveSymbol: same definition in .js → VERIFIED', () => {
+  const dir = mkTmpDir('glob-js-verified');
+  writeFile(dir, 'component.js', [
+    '\'use strict\';',
+    'function jsOnlySymbol() { return null; }',
+    'module.exports = { jsOnlySymbol };',
+  ].join('\n'));
+
+  const result = resolveSymbol('jsOnlySymbol', dir);
+  assertEq(result.state, 'VERIFIED', 'symbol defined in .js should be VERIFIED');
+});
+
+// ── Section 8: signature compatibility (Bug 2 fix) ───────────────────────────
+
+process.stdout.write('\nSection 8: resolveSymbol signature compat\n\n');
+
+test('resolveSymbol: two-arg call (symbol, cwd) still works unmodified', () => {
+  const dir = mkTmpDir('signature-compat');
+  writeFile(dir, 'fixture.js', 'function twoArgFn() {}\nmodule.exports = { twoArgFn };\n');
+  const result = resolveSymbol('twoArgFn', dir);
+  assertEq(result.state, 'VERIFIED', 'two-arg call should still resolve correctly');
+});
+
 // ── Cleanup ────────────────────────────────────────────────────────────────────
 
 try {

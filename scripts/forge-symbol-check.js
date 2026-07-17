@@ -71,24 +71,40 @@ const EXPORT_PATTERNS = [
   /\bexports\b\./,
 ];
 
+// Fixed internal deadline for checkSymbols — < 120s Claude Code Bash tool default
+// that kills the gate externally when no deadline is enforced internally.
+// LOCKED: no env var, no pref, no CLI flag.
+const SYMBOL_CHECK_BUDGET_MS = 90000;
+
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+// Memoization cache for isToolAvailable — at most one `--version` spawn per
+// tool per process (process lifetime = one CLI run, safe to cache module-level).
+const toolCache = Object.create(null);
 
 /**
  * Check if a tool is available via spawnSync --version probe.
+ * Memoized: result is cached per tool name for the lifetime of the process.
  *
  * @param {string} tool
  * @returns {boolean}
  */
 function isToolAvailable(tool) {
+  if (Object.prototype.hasOwnProperty.call(toolCache, tool)) {
+    return toolCache[tool];
+  }
+  let available;
   try {
     const result = spawnSync(tool, ['--version'], {
       encoding: 'utf-8',
       timeout: 5000,
     });
-    return result.status === 0;
+    available = result.status === 0;
   } catch (_) {
-    return false;
+    available = false;
   }
+  toolCache[tool] = available;
+  return available;
 }
 
 /**
@@ -97,9 +113,10 @@ function isToolAvailable(tool) {
  *
  * @param {string} symbol
  * @param {string} cwd
+ * @param {number} [timeoutMs=30000]  Per-spawn timeout (default preserves prior behavior)
  * @returns {Array<{file:string,line:number,text:string}>|null}
  */
-function runRipgrep(symbol, cwd) {
+function runRipgrep(symbol, cwd, timeoutMs = 30000) {
   try {
     const result = spawnSync(
       'rg',
@@ -107,11 +124,17 @@ function runRipgrep(symbol, cwd) {
         '--json',
         '-n',
         '--no-heading',
+        // File-type filters: MUST stay identical to runGrep's --include set below
+        // (deliberately NOT `-t js`/`-t ts`, which bundle `.jsx`/`.tsx`).
+        '--glob', '*.js',
+        '--glob', '*.ts',
+        '--glob', '*.mjs',
+        '--glob', '*.cjs',
         '-e',
         `\\b${symbol}\\b`,
         cwd,
       ],
-      { encoding: 'utf-8', timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
+      { encoding: 'utf-8', timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
     );
     if (result.error) return null;
 
@@ -144,9 +167,10 @@ function runRipgrep(symbol, cwd) {
  *
  * @param {string} symbol
  * @param {string} cwd
+ * @param {number} [timeoutMs=30000]  Per-spawn timeout (default preserves prior behavior)
  * @returns {Array<{file:string,line:number,text:string}>|null}
  */
-function runGrep(symbol, cwd) {
+function runGrep(symbol, cwd, timeoutMs = 30000) {
   try {
     const result = spawnSync(
       'grep',
@@ -160,7 +184,7 @@ function runGrep(symbol, cwd) {
         `\\b${symbol}\\b`,
         cwd,
       ],
-      { encoding: 'utf-8', timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
+      { encoding: 'utf-8', timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
     );
     if (result.error) return null;
 
@@ -376,9 +400,12 @@ function parseSymbolsFromPlan(planContent) {
  *
  * @param {string} symbol
  * @param {string} cwd  Directory to search in
+ * @param {{deadline?: number}} [opts]  Optional deadline (epoch ms). When set, the
+ *   per-spawn timeout is clamped to the remaining budget so one slow rg/grep call
+ *   cannot eat the whole checkSymbols budget. Default undefined = no deadline (full 30s).
  * @returns {{ state: string, [key: string]: * }}
  */
-function resolveSymbol(symbol, cwd) {
+function resolveSymbol(symbol, cwd, opts = {}) {
   try {
     // Guard: dynamic symbol detection (interpolation / template literals in symbol name itself)
     if (symbol.includes('${') || symbol.includes('`')) {
@@ -393,13 +420,17 @@ function resolveSymbol(symbol, cwd) {
       return { state: 'UNCHECKABLE', reason: 'no-ripgrep-or-grep' };
     }
 
+    const spawnTimeout = opts.deadline
+      ? Math.max(1, Math.min(30000, opts.deadline - Date.now()))
+      : 30000;
+
     // Run search
     let matches = null;
     if (hasRg) {
-      matches = runRipgrep(symbol, cwd);
+      matches = runRipgrep(symbol, cwd, spawnTimeout);
     }
     if (matches === null && hasGrep) {
-      matches = runGrep(symbol, cwd);
+      matches = runGrep(symbol, cwd, spawnTimeout);
     }
     if (matches === null) {
       return { state: 'UNCHECKABLE', reason: 'search-tool-error' };
@@ -461,15 +492,22 @@ function resolveSymbol(symbol, cwd) {
  *
  * @param {string} planContent  Full plan file content
  * @param {string} cwd  Directory to search symbols in
+ * @param {{budgetMs?: number}} [opts]  For testability only — default SYMBOL_CHECK_BUDGET_MS.
+ *   Never exposed via CLI flag, env var, or pref (LOCKED internal deadline).
  * @returns {{
  *   symbols: Array<{symbol: string, state: string, [key: string]: *}>,
+ *   counts: object,
  *   coverage: {
  *     unchecked: Array<{symbol: string, reason: string}>,
  *     greenfield: string[]
- *   }
+ *   },
+ *   status?: 'timeout',
+ *   checked?: number,
+ *   total?: number
  * }}
  */
-function checkSymbols(planContent, cwd) {
+function checkSymbols(planContent, cwd, opts = {}) {
+  const budgetMs = typeof opts.budgetMs === 'number' ? opts.budgetMs : SYMBOL_CHECK_BUDGET_MS;
   const rawSymbols = parseSymbolsFromPlan(planContent);
   const greenfieldSet = buildGreenfieldSet(planContent);
 
@@ -486,13 +524,26 @@ function checkSymbols(planContent, cwd) {
 
   const symbols = [];
   const unchecked = [];
+  const deadline = Date.now() + budgetMs;
+  let checkedCount = 0;
+  let timedOut = false;
 
-  for (const symbol of toCheck) {
-    const result = resolveSymbol(symbol, cwd);
+  for (let i = 0; i < toCheck.length; i++) {
+    const symbol = toCheck[i];
+    if (Date.now() >= deadline) {
+      timedOut = true;
+      for (let j = i; j < toCheck.length; j++) {
+        symbols.push({ symbol: toCheck[j], state: 'UNCHECKABLE', reason: 'deadline-exceeded' });
+        unchecked.push({ symbol: toCheck[j], reason: 'deadline-exceeded' });
+      }
+      break;
+    }
+    const result = resolveSymbol(symbol, cwd, { deadline });
     symbols.push({ symbol, ...result });
     if (result.state === 'UNCHECKABLE') {
       unchecked.push({ symbol, reason: result.reason });
     }
+    checkedCount++;
   }
 
   // counts: explicit numeric contract for shell/gate consumers (S02 review R1).
@@ -505,7 +556,7 @@ function checkSymbols(planContent, cwd) {
     greenfield: greenfield.length,
   };
 
-  return {
+  const result = {
     symbols,
     counts,
     coverage: {
@@ -513,6 +564,14 @@ function checkSymbols(planContent, cwd) {
       greenfield,
     },
   };
+
+  if (timedOut) {
+    result.status = 'timeout';
+    result.checked = checkedCount;
+    result.total = toCheck.length;
+  }
+
+  return result;
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────

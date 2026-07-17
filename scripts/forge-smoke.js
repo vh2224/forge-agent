@@ -609,6 +609,52 @@ Implement \`newThing\` in code/newThing.js.
     `flags: ${JSON.stringify(tqResult && tqResult.flags)}`
   );
 
+  // ── Assert #4 (Bug 1 regression guard): literal-paren stub pattern never throws ──
+  const { _private: verifierPrivate } = require('./forge-verifier');
+  let bug1Result;
+  let bug1Threw = false;
+  try {
+    bug1Result = verifierPrivate.checkSubstantive(
+      'function f() {\n  throw new Error("unimplemented\n}',
+      3,
+      { path: 'x.js', min_lines: 1, stub_patterns: ['throw new Error("unimplemented'] }
+    );
+  } catch (_) {
+    bug1Threw = true;
+  }
+  assert(!bug1Threw, 'Bug 1 regression: literal-paren stub pattern must not throw');
+  assert(
+    bug1Result && bug1Result.pass === false && bug1Result.flags.some(f => f.regex_name === 'custom_stub_0'),
+    'Bug 1 regression: literal-paren pattern flags matching content',
+    `result: ${JSON.stringify(bug1Result)}`
+  );
+
+  // ── Assert #5 (Bug 2 regression guard): symbol-check JSON always has counts/coverage ──
+  assert(
+    symbolResult !== null && typeof symbolResult.counts === 'object' && typeof symbolResult.coverage === 'object',
+    'Bug 2 regression: symbol-check CLI output always contains counts and coverage'
+  );
+  const { checkSymbols } = require('./forge-symbol-check');
+  const timeoutPlan = `---
+must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output: []
+---
+
+## Steps
+
+Use \`someSymbol\` here.
+`;
+  const timeoutResult = checkSymbols(timeoutPlan, dir, { budgetMs: 0 });
+  assert(
+    timeoutResult.status === 'timeout' && typeof timeoutResult.counts === 'object' && typeof timeoutResult.coverage === 'object',
+    'Bug 2 regression: checkSymbols timeout shape still carries counts/coverage',
+    `result: ${JSON.stringify(timeoutResult)}`
+  );
+
   cleanup(dir);
 }
 
