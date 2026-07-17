@@ -363,6 +363,10 @@ function checkExists(artifactPath, cwd) {
 
 // ── Level 2: Substantive ──────────────────────────────────────────────────────
 
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Level-2 check: is the artifact substantive (line count + no stub patterns)?
  *
@@ -383,10 +387,6 @@ function checkExists(artifactPath, cwd) {
  * @param {object} artifact    Artifact descriptor from must_haves.artifacts[]
  * @returns {{ pass: boolean, flags?: object[] }}
  */
-function escapeRegExp(str) {
-  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function checkSubstantive(content, lineCount, artifact) {
   const minLines = artifact.min_lines || 0;
 
