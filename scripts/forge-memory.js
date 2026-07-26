@@ -169,8 +169,10 @@ function acquireFragmentLock(cwd, fpath, opts) {
   const token = crypto.randomUUID();
 
   for (let attempt = 0; attempt < attempts; attempt++) {
+    let owned = false;
     try {
       fs.mkdirSync(lockDir);
+      owned = true;
       fs.writeFileSync(path.join(lockDir, 'owner.json'), JSON.stringify({
         token,
         pid: process.pid,
@@ -191,11 +193,23 @@ function acquireFragmentLock(cwd, fpath, opts) {
         },
       };
     } catch (error) {
-      if (error.code !== 'EEXIST') {
-        // If mkdir succeeded but owner creation failed, remove only our empty dir.
+      if (owned) {
+        // mkdir succeeded and owner creation failed: remove only our own empty
+        // dir. Gated on `owned` so a failed mkdir can never delete the lock
+        // directory another writer is holding.
         try { fs.rmdirSync(lockDir); } catch (_) {}
         throw error;
       }
+      // Windows reports EPERM (sometimes EACCES) instead of EEXIST when mkdir
+      // races the rmdir a releasing writer is doing: the directory sits in
+      // pending-delete state, where it neither exists nor can be created.
+      // Treating that as fatal killed a contended writer with exit 1 —
+      // observed as `EPERM: operation not permitted, mkdir '<hash>.lock'` under
+      // 20 concurrent writers on windows-latest — when it is contention, the
+      // one thing this loop already knows how to wait out.
+      const contended = error.code === 'EEXIST'
+        || (process.platform === 'win32' && (error.code === 'EPERM' || error.code === 'EACCES'));
+      if (!contended) throw error;
       if (removeStaleFragmentLock(lockDir, ttlMs)) {
         attempt--;
         continue;

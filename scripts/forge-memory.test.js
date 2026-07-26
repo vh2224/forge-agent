@@ -213,6 +213,79 @@ test('concurrent background writers preserve every merged fact and stat', async 
   }
 });
 
+// Regression guard: on Windows a mkdir that races the rmdir of a lock another
+// writer is releasing reports EPERM (the directory is in pending-delete state),
+// not EEXIST. The retry loop only tolerated EEXIST, so a contended writer died
+// with exit 1 — reproduced on windows-latest under 20 concurrent writers. Both
+// the platform and the errno are stubbed so the guard is deterministic on every
+// runner instead of waiting for the race to happen again.
+for (const code of ['EPERM', 'EACCES']) {
+  test(`a Windows ${code} on the lock directory is contention, not a fatal write`, () => withTemp(cwd => {
+    const realPlatform = process.platform;
+    const realMkdir = fs.mkdirSync;
+    let injected = 0;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    fs.mkdirSync = function stubbedMkdir(target, ...rest) {
+      if (typeof target === 'string' && target.endsWith('.lock') && injected === 0) {
+        injected += 1;
+        const error = new Error(`${code}: operation not permitted, mkdir '${target}'`);
+        error.code = code;
+        throw error;
+      }
+      return realMkdir.call(fs, target, ...rest);
+    };
+    try {
+      memory.writeFragment(cwd, {
+        unit_id: 'T01',
+        facts: [fact('MEM001', 'gotcha', 'written despite a contended lock', 'execute-task/T01')],
+        stats: [seed('MEM001', 0.8, 0)],
+      });
+    } finally {
+      fs.mkdirSync = realMkdir;
+      Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
+    }
+    assert.strictEqual(injected, 1, 'the stub must have fired once');
+    assert.strictEqual(memory.readFragment(cwd, 'T01').facts[0].text, 'written despite a contended lock');
+    assert.deepStrictEqual(fs.readdirSync(path.join(cwd, '.gsd', 'memory', '.locks')), [],
+      'the retry must not leave a lock behind');
+  }));
+}
+
+// A failed mkdir must never delete the directory another writer owns: that
+// cleanup exists only for "mkdir succeeded, owner.json did not".
+test('a non-contention mkdir failure surfaces and leaves a held lock intact', () => withTemp(cwd => {
+  const realMkdir = fs.mkdirSync;
+  let held = null;
+  fs.mkdirSync = function stubbedMkdir(target, ...rest) {
+    if (typeof target === 'string' && target.endsWith('.lock')) {
+      held = target;
+      realMkdir.call(fs, target, ...rest);
+      const error = new Error(`EROFS: read-only file system, mkdir '${target}'`);
+      error.code = 'EROFS';
+      throw error;
+    }
+    return realMkdir.call(fs, target, ...rest);
+  };
+  let raised = null;
+  try {
+    memory.writeFragment(cwd, {
+      unit_id: 'T01',
+      facts: [fact('MEM001', 'gotcha', 'never written', 'execute-task/T01')],
+      stats: [seed('MEM001', 0.8, 0)],
+    });
+  } catch (error) {
+    raised = error;
+  } finally {
+    fs.mkdirSync = realMkdir;
+  }
+  assert(raised && raised.code === 'EROFS', `EROFS must not be swallowed as contention: ${raised && raised.code}`);
+  // The stub created the directory before throwing, standing in for a lock some
+  // other writer holds. Our failed mkdir must have left it alone.
+  const survived = Boolean(held) && fs.existsSync(held);
+  if (held) { try { fs.rmSync(held, { recursive: true, force: true }); } catch (_) {} }
+  assert(survived, 'a failed mkdir must not remove a lock directory it does not own');
+}));
+
 test('supports documented supersede old_id shape without pruning a sibling fragment', () => withTemp(cwd => {
   memory.writeFragment(cwd, {
     unit_id: 'T01',
