@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const {
-  needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify, spawnPlan,
+  needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify, spawnPlan, resolveExecutable,
 } = require('./forge-reverify.js');
 
 const SCRIPT = path.join(__dirname, 'forge-reverify.js');
@@ -156,10 +156,13 @@ function testPlatformRouting() {
     assert(shim && /cmd\.exe$/i.test(shim.file) && shim.args[0] === '/d'
       && shim.options.windowsVerbatimArguments === true,
     'a .cmd shim is routed through ComSpec with verbatim arguments', JSON.stringify(shim));
-    // The line is `"<quoted shim path> <args>"` — cmd /s strips that outer pair
-    // and runs the rest verbatim, which is why the path may itself be quoted.
-    assert(shim && /npm\.(cmd|bat)"/i.test(shim.args[3]),
-      'PATHEXT resolution picks npm.cmd, not the extensionless POSIX sibling', JSON.stringify(shim && shim.args));
+    // Asserted on the resolver itself, not on the assembled command line: the
+    // line only quotes the path when it contains a space, so matching quotes
+    // there would pass on a host with "Program Files" in PATH and fail on a
+    // runner without it.
+    const resolvedShim = resolveExecutable('npm');
+    assert(/npm\.(cmd|bat)$/i.test(resolvedShim || ''),
+      'PATHEXT resolution picks npm.cmd, not the extensionless POSIX sibling', String(resolvedShim));
   }
 
   // Behavioural, every platform: the project's exit code must survive the
