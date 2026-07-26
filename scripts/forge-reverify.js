@@ -57,14 +57,72 @@ function outputTail(run) {
   return value.slice(-500).replace(/\s+/g, ' ');
 }
 
+// Windows ships npm/pnpm/yarn as `.cmd` shims. CreateProcess cannot execute a
+// batch file, and Node >= 18.20 rejects one outright with EINVAL (the
+// CVE-2024-27980 mitigation), so a bare spawnSync('npm', …) fails on every
+// Windows host — re-verification silently degraded to no-command there and the
+// TASK-015 gate was inert on the whole platform. Resolve the real target
+// through PATH/PATHEXT and route ONLY a shim through the interpreter, so a real
+// executable (go, cargo, pytest) keeps the direct shell-free spawn.
+//
+// `shell: true` would be shorter — it is what forge-isolation.js uses for
+// installs — but it also turns an absent runner into cmd's exit 1, which reads
+// as `failed` and routes the task into the failure path. Resolving first keeps
+// every verdict's meaning intact: unresolvable → no-command without ever
+// spawning, timeout → ETIMEDOUT, project exit code → verbatim.
+function resolveExecutable(command) {
+  const name = String(command || '');
+  if (!name) return null;
+  if (name.includes(path.sep) || name.includes('/')) {
+    return fs.existsSync(name) ? name : null;
+  }
+  const extensions = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    // PATHEXT first: npm ships an extensionless POSIX sibling next to npm.cmd,
+    // and picking that one hands Windows a file it cannot execute.
+    for (const extension of [...extensions, '']) {
+      const candidate = path.join(dir, name + extension);
+      try { if (fs.statSync(candidate).isFile()) return candidate; } catch { /* keep looking */ }
+    }
+  }
+  return null;
+}
+
+function quoteWindowsArg(arg) {
+  const value = String(arg);
+  return /[\s"]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
+}
+
+// null means "this command cannot be spawned at all" — the caller turns that
+// into no-command without touching the payload.
+function spawnPlan(argv) {
+  if (process.platform !== 'win32') return { file: argv[0], args: argv.slice(1), options: {} };
+  const resolved = resolveExecutable(argv[0]);
+  if (!resolved) return null;
+  if (!/\.(cmd|bat)$/i.test(resolved)) return { file: resolved, args: argv.slice(1), options: {} };
+  const line = [resolved, ...argv.slice(1)].map(quoteWindowsArg).join(' ');
+  return {
+    file: process.env.ComSpec || 'cmd.exe',
+    // windowsVerbatimArguments: Node must not re-escape a line that is already
+    // quoted for cmd — without it the nested quotes are mangled and cmd runs
+    // something else entirely (and reports exit 0 for it).
+    args: ['/d', '/s', '/c', `"${line}"`],
+    options: { windowsVerbatimArguments: true },
+  };
+}
+
 function runVerification({ argv, codeDir, timeoutMs }) {
   if (!Array.isArray(argv) || !argv.length) return { verdict: 'no-command', command: '', exit_code: null };
-  const run = spawnSync(argv[0], argv.slice(1), {
+  const planned = spawnPlan(argv);
+  if (!planned) return { verdict: 'no-command', command: commandText(argv), exit_code: null };
+  const run = spawnSync(planned.file, planned.args, {
     cwd: codeDir,
     encoding: 'utf8',
     shell: false,
     timeout: Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_TIMEOUT_MS,
     maxBuffer: 16 * 1024 * 1024,
+    ...planned.options,
   });
   const base = { command: commandText(argv), exit_code: typeof run.status === 'number' ? run.status : null };
   if (run.error && (run.error.code === 'ENOENT' || run.error.code === 'ETIMEDOUT')) {
@@ -181,4 +239,8 @@ function runCli(args) {
 
 if (require.main === module) process.exitCode = runCli(process.argv.slice(2));
 
-module.exports = { needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify, runCli };
+module.exports = {
+  needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify, runCli,
+  // Exported for the platform-routing regression guard only.
+  spawnPlan, resolveExecutable,
+};
