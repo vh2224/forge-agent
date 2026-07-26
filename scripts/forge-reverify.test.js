@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const {
-  needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify,
+  needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify, spawnPlan,
 } = require('./forge-reverify.js');
 
 const SCRIPT = path.join(__dirname, 'forge-reverify.js');
@@ -134,12 +134,59 @@ function testAmbiguousMultiCommand() {
     'entries naming the same command still promote in bulk', JSON.stringify(sameCommandOutcome));
 }
 
+// Regression guard: npm/pnpm/yarn are `.cmd` shims on Windows, which
+// spawnSync cannot execute directly (EINVAL since the CVE-2024-27980
+// mitigation). The whole re-verification gate was inert on that platform —
+// every project command came back no-command with exit_code null. These
+// assertions are platform-aware where the routing differs and behavioural
+// where it must not.
+function testPlatformRouting() {
+  const windows = process.platform === 'win32';
+
+  const direct = spawnPlan([process.execPath, '-e', 'process.exit(0)']);
+  assert(direct && direct.file === process.execPath && !direct.options.windowsVerbatimArguments,
+    'a real executable is spawned directly, never through an interpreter', JSON.stringify(direct));
+
+  const missing = spawnPlan(['forge-no-such-binary-xyz']);
+  assert(windows ? missing === null : missing.file === 'forge-no-such-binary-xyz',
+    'an unresolvable command is refused before spawning on Windows', JSON.stringify(missing));
+
+  if (windows) {
+    const shim = spawnPlan(['npm', 'test']);
+    assert(shim && /cmd\.exe$/i.test(shim.file) && shim.args[0] === '/d'
+      && shim.options.windowsVerbatimArguments === true,
+    'a .cmd shim is routed through ComSpec with verbatim arguments', JSON.stringify(shim));
+    // The line is `"<quoted shim path> <args>"` — cmd /s strips that outer pair
+    // and runs the rest verbatim, which is why the path may itself be quoted.
+    assert(shim && /npm\.(cmd|bat)"/i.test(shim.args[3]),
+      'PATHEXT resolution picks npm.cmd, not the extensionless POSIX sibling', JSON.stringify(shim && shim.args));
+  }
+
+  // Behavioural, every platform: the project's exit code must survive the
+  // routing. A mangled command line makes cmd report 0 for a failing suite —
+  // that would promote a red test run to `verified`.
+  const passing = fixture();
+  write(passing, 'package.json', '{"scripts":{"test":"node -e \\\"process.exit(0)\\\""}}');
+  write(passing, 'package-lock.json', '{}');
+  const green = runVerification({ argv: resolveVerifyCommand(passing), codeDir: passing });
+  assert(green.verdict === 'verified' && green.exit_code === 0,
+    'the project command runs and a green suite verifies', JSON.stringify(green));
+
+  const failing = fixture();
+  write(failing, 'package.json', '{"scripts":{"test":"node -e \\\"process.exit(1)\\\""}}');
+  write(failing, 'package-lock.json', '{}');
+  const red = runVerification({ argv: resolveVerifyCommand(failing), codeDir: failing });
+  assert(red.verdict === 'failed' && red.exit_code === 1,
+    'a red suite reports failed with its real exit code, never verified', JSON.stringify(red));
+}
+
 try {
   testTrigger();
   testResolution();
   testRunAndApply();
   testModeAndCli();
   testAmbiguousMultiCommand();
+  testPlatformRouting();
 } finally {
   for (const dir of fixtures) {
     if (KEEP) process.stdout.write(`  (kept ${dir})\n`);
