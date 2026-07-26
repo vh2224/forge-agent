@@ -324,6 +324,36 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  // Regression: parseArgs always seeds effortMap `{}`, and `{}` is truthy — a
+  // ternary made prefs.effort unreachable from the CLI, which is the only path
+  // forge-auto/forge-next/forge-task use. The whole `effort` prefs block was inert.
+  runCase('prefs.effort is honoured through the CLI, and --effort- overrides it', () => {
+    const f = mkFixture({ prefsJsonc: '{"effort":{"execute-task":"medium","plan-slice":"high"}}' });
+
+    // In-process, no effortMap at all: the pref wins over EFFORT_DEFAULTS ('low').
+    assertEqual(dispatch(f, { unitType: 'execute-task' }).effort, 'medium', 'pref beats EFFORT_DEFAULTS in-process');
+
+    // The CLI seeds effortMap {} with no --effort- flag; the pref must still win.
+    const bare = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--cwd', f.dir], { encoding: 'utf8', env: cliEnv });
+    let parsed = null;
+    try { parsed = JSON.parse(bare.stdout); } catch (error) { fail('bare CLI stdout is valid JSON', error.message); }
+    assertEqual(bare.status, 0, 'bare CLI exits 0');
+    assert(parsed && parsed.effort === 'medium', 'bare CLI honours prefs.effort', bare.stdout);
+
+    // An explicit flag still overrides the pref (its documented role).
+    const flagged = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--effort-execute-task', 'low', '--cwd', f.dir], { encoding: 'utf8', env: cliEnv });
+    let over = null;
+    try { over = JSON.parse(flagged.stdout); } catch (error) { fail('flagged CLI stdout is valid JSON', error.message); }
+    assert(over && over.effort === 'low', '--effort- flag overrides prefs.effort', flagged.stdout);
+
+    // Merge, not replace: a flag for one unit must not erase the pref for another.
+    assertEqual(dispatch(f, { unitType: 'plan-slice', effortMap: { 'execute-task': 'low' } }).effort, 'high', 'unrelated flag leaves other prefs intact');
+
+    // A unit absent from both prefs and flags still falls back to EFFORT_DEFAULTS.
+    assertEqual(dispatch(f, { unitType: 'complete-slice' }).effort, 'low', 'unset unit still uses EFFORT_DEFAULTS');
+    cleanup(f);
+  });
+
   runCase('CLI matches in-process resolver and degrades on missing plan', () => {
     const f = mkFixture({});
     const expected = dispatch(f, { unitType: 'execute-task', planPath: path.join(f.dir, 'missing-PLAN.md') });

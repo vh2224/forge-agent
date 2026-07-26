@@ -230,7 +230,14 @@ function resolveDispatch(opts) {
     engineReason = 'default:claude';
   }
 
-  const effortMap = o.effortMap && typeof o.effortMap === 'object' ? o.effortMap : (prefs.effort || {});
+  // Merged, never either-or. The CLI ALWAYS supplies an effortMap object (parseArgs
+  // seeds `{}` and only fills the keys `--effort-<unit>` named), and `{}` is truthy —
+  // so a ternary here made prefs.effort unreachable from every CLI caller, which is
+  // every real caller: forge-auto/forge-next/forge-task invoke the resolver with no
+  // --effort-* flag at all. The `effort` block of a user's prefs was silently inert,
+  // always falling through to EFFORT_DEFAULTS. Merging keeps the flag an override of
+  // the pref (its documented role) while restoring the pref as the base.
+  const effortMap = { ...(prefs.effort || {}), ...(o.effortMap && typeof o.effortMap === 'object' ? o.effortMap : {}) };
   let effort = effortMap[unitType] !== undefined ? effortMap[unitType] : (EFFORT_DEFAULTS[unitType] || 'low');
   let effortReason = `unit-type:${unitType}`;
   if (unitType === 'execute-task' && plan.effort) {
