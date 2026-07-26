@@ -3053,10 +3053,19 @@ async function smokeXllmPlan() {
     // stays clean (asserted above), i.e. no NEW file lands under .gsd/ either.
 
     // Assert the generated T##-PLAN content passes forge-must-haves.js standalone.
-    const tpContentFile = path.join(resultDir, 'T01-PLAN.md');
-    fs.writeFileSync(tpContentFile, parsed.task_plans[0].content, 'utf8');
-    const mh = spawnSync(process.execPath, [path.join(SCRIPTS, 'forge-must-haves.js'), '--check', tpContentFile], { encoding: 'utf8' });
-    assert(mh.status === 0, 'A: generated task_plans[0].content passes forge-must-haves.js --check', `status=${mh.status} stdout=${mh.stdout} stderr=${mh.stderr}`);
+    // The asserts above only RECORD a missing task_plans — they do not stop this
+    // scenario — so read the entry defensively. Dereferencing it blind is what
+    // turned an adapter failure into a TypeError that aborted the whole suite.
+    const firstTaskPlan = parsed && Array.isArray(parsed.task_plans) ? parsed.task_plans[0] : null;
+    if (firstTaskPlan && typeof firstTaskPlan.content === 'string') {
+      const tpContentFile = path.join(resultDir, 'T01-PLAN.md');
+      fs.writeFileSync(tpContentFile, firstTaskPlan.content, 'utf8');
+      const mh = spawnSync(process.execPath, [path.join(SCRIPTS, 'forge-must-haves.js'), '--check', tpContentFile], { encoding: 'utf8' });
+      assert(mh.status === 0, 'A: generated task_plans[0].content passes forge-must-haves.js --check', `status=${mh.status} stdout=${mh.stdout} stderr=${mh.stderr}`);
+    } else {
+      assert(false, 'A: generated task_plans[0].content passes forge-must-haves.js --check',
+        `no task_plans[0] in the adapter result: ${JSON.stringify(parsed && parsed.task_plans)}`);
+    }
 
     cleanup(repo);
     cleanup(ctxDir);
@@ -8983,92 +8992,171 @@ function smokePhasesTable() {
   }
 }
 
+const crashedSections = [];
+
+// One section's crash must not cost the sections behind it. The label is read
+// back out of the thunk's own source so each call site stays a literal
+// `smokeThing();` — several sections assert their own registration in main() by
+// grepping for exactly that text.
+async function runSection(body) {
+  const label = (String(body).match(/smoke\w+/) || ['unknown-section'])[0];
+  try {
+    await body();
+  } catch (error) {
+    crashedSections.push(label);
+    fail(`${label} crashed — every assertion left in it was skipped`,
+      (error && (error.stack || error.message)) || String(error));
+  }
+}
+
+// ── Section 73: the harness protects its own coverage ──────────────────────
+async function smokeSectionIsolation() {
+  process.stdout.write('\n▸ Section 73: section isolation\n');
+  // Normalized: this section slices its own source, and a CRLF checkout would
+  // otherwise make every '\n'-anchored boundary miss silently.
+  const src = fs.readFileSync(__filename, 'utf8').replace(/\r\n/g, '\n');
+  const mainBody = src.slice(src.indexOf('async function main()'));
+
+  // (a) No section may be called bare inside main() — a bare call is exactly
+  // the shape that let one throw abort the run.
+  const bare = mainBody.split('\n').filter(line => /^\s*(await )?smoke\w+\(\);\s*$/.test(line));
+  assert(bare.length === 0, '(a) every section in main() is routed through runSection', `bare calls=${JSON.stringify(bare)}`);
+  assert(/\]\) await runSection\(body\);/.test(mainBody), '(a) main() awaits runSection for each section body');
+
+  // (b) A crashed section is announced separately from the pass/fail tally.
+  assert(/crashedSections\.length > 0/.test(mainBody) && /section\(s\) crashed and did not finish/.test(mainBody),
+    '(b) a crashed section is reported loudly, not folded into the tally');
+
+  // (c) Behavioural: instantiate the real runSection with stubbed collaborators
+  // and prove a throwing body is contained, labelled and recorded.
+  const declaration = src.slice(src.indexOf('async function runSection(body)'));
+  const source = declaration.slice(0, declaration.indexOf('\n}\n') + 3);
+  const recorded = [];
+  const crashes = [];
+  const isolated = new Function('fail', 'crashedSections',
+    `${source}; return runSection;`)((name, detail) => recorded.push({ name, detail }), crashes);
+
+  let escaped = null;
+  try {
+    await isolated(() => { smokeBoomFixture(); });
+  } catch (error) { escaped = error; }
+  assert(escaped === null, '(c) a throwing section does not escape runSection', String(escaped && escaped.message));
+  assert(crashes.length === 1 && crashes[0] === 'smokeBoomFixture',
+    '(c) the crashed section is labelled from its own call site', JSON.stringify(crashes));
+  assert(recorded.length === 1 && /crashed/.test(recorded[0].name),
+    '(c) the crash is recorded as a failure', JSON.stringify(recorded));
+
+  let ran = false;
+  await isolated(() => { ran = true; });
+  assert(ran && crashes.length === 1, '(c) a healthy section still runs and records no crash');
+}
+
+// Deliberately throws — the fixture body for the isolation guard above.
+function smokeBoomFixture() {
+  throw new TypeError("Cannot read properties of undefined (reading '0')");
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
 
   const start = Date.now();
   try {
-    smokeRuns();
-    smokeLock();
-    smokeState();
-    smokeDashboard();
-    smokeMerger();
-    smokeFilelock();
-    smokeRepos();
-    smokeCliHelpers();
-    smokeIsolation();
-    smokeLivenessBanner();
-    smokeSymbolAndTestQuality();
-    smokeContextMonitor();
-    smokeNodeRepair();
-    smokeStopHook();
-    smokeNotifications();
-    smokeReviewEngine();
-    smokeAccounts();
-    smokeEffort();
-    smokeUsageIndicator();
-    smokePlanGateDegradation();
-    smokeXllm();
-    await smokeXllmExecute();
-    await smokeSidecarContextParity();
-    smokeModelAlias();
-    smokeChallengerWiring();
-    smokeAdvocateModel();
-    smokeStatusPackaging();
-    smokeEngineDispatch();
-    await smokeXllmPlan();
-    smokeTierChain();
-    smokeReviewPairing();
-    smokeReviewPairingWiring();
-    smokeReviewPairingPrefsSchema();
-    smokeRouting();
-    smokeRoutingWiring();
-    smokeDomainEmission();
-    smokeGeminiFamily();
-    smokeRoutingScaffoldDocs();
-    smokePrefsEngine();
-    smokePrefsCatalog();
-    smokePrefsCutover();
-    smokeSkillsCutover();
-    smokePrefsMigration();
-    smokePrefsViewerDoctor();
-    smokePrefsMigrationFidelity();
-    smokeInitSetupScaffold();
-    smokeStubPatternRobustness();
-    smokeDispatchResolve();
-    smokeSurgicalReset();
-    smokeSidecarLayer1Retry();
-    smokeSidecarPolicyGuard();
-    smokePrefsChokepoints();
-    smokePrefsConsumers();
-    smokePrefsCutoverGuards();
-    smokeHeartbeatContract();
-    smokeSidecarGptCap();
-    smokeSidecarEnvContract();
-    smokeSchemaExtraction();
-    smokeRequireWorktree();
-    smokeSidecarEnvPromotion();
-    smokeSandboxExecBlocked();
-    smokeCleanupRegistryMode();
-    smokeXllmStateSliceQualified();
-    smokeReviewModelDiscipline();
-    smokeXllmResultFileGuard();
-    smokeRoutingDomains();
-    smokeInitGitGuarantee();
-    smokeCodeDirMultiRepo();
-    smokeReviewAgentUnavailable();
-    smokeSharedGlob();
-    smokePhasesTable();
-    smokeSidecarModel();
-    smokeVerifierCodeDir();
-    smokeWindowsSandboxAndWorktreeDeps();
+    // Sections are isolated from one another: a throw inside one is recorded as
+    // a failure and every later section still runs. Before this, a single
+    // try/catch wrapped the whole list, so one unguarded dereference in an early
+    // section skipped all 45 sections behind it — roughly 1200 assertions —
+    // while the summary still printed an ordinary "Results: N passed, M failed"
+    // and exit 1. A release gate that can drop three quarters of its coverage
+    // without saying so is worse than a red one.
+    for (const body of [
+      () => { smokeRuns(); },
+      () => { smokeLock(); },
+      () => { smokeState(); },
+      () => { smokeDashboard(); },
+      () => { smokeMerger(); },
+      () => { smokeFilelock(); },
+      () => { smokeRepos(); },
+      () => { smokeCliHelpers(); },
+      () => { smokeIsolation(); },
+      () => { smokeLivenessBanner(); },
+      () => { smokeSymbolAndTestQuality(); },
+      () => { smokeContextMonitor(); },
+      () => { smokeNodeRepair(); },
+      () => { smokeStopHook(); },
+      () => { smokeNotifications(); },
+      () => { smokeReviewEngine(); },
+      () => { smokeAccounts(); },
+      () => { smokeEffort(); },
+      () => { smokeUsageIndicator(); },
+      () => { smokePlanGateDegradation(); },
+      () => { smokeXllm(); },
+      async () => { await smokeXllmExecute(); },
+      async () => { await smokeSidecarContextParity(); },
+      () => { smokeModelAlias(); },
+      () => { smokeChallengerWiring(); },
+      () => { smokeAdvocateModel(); },
+      () => { smokeStatusPackaging(); },
+      () => { smokeEngineDispatch(); },
+      async () => { await smokeXllmPlan(); },
+      () => { smokeTierChain(); },
+      () => { smokeReviewPairing(); },
+      () => { smokeReviewPairingWiring(); },
+      () => { smokeReviewPairingPrefsSchema(); },
+      () => { smokeRouting(); },
+      () => { smokeRoutingWiring(); },
+      () => { smokeDomainEmission(); },
+      () => { smokeGeminiFamily(); },
+      () => { smokeRoutingScaffoldDocs(); },
+      () => { smokePrefsEngine(); },
+      () => { smokePrefsCatalog(); },
+      () => { smokePrefsCutover(); },
+      () => { smokeSkillsCutover(); },
+      () => { smokePrefsMigration(); },
+      () => { smokePrefsViewerDoctor(); },
+      () => { smokePrefsMigrationFidelity(); },
+      () => { smokeInitSetupScaffold(); },
+      () => { smokeStubPatternRobustness(); },
+      () => { smokeDispatchResolve(); },
+      () => { smokeSurgicalReset(); },
+      () => { smokeSidecarLayer1Retry(); },
+      () => { smokeSidecarPolicyGuard(); },
+      () => { smokePrefsChokepoints(); },
+      () => { smokePrefsConsumers(); },
+      () => { smokePrefsCutoverGuards(); },
+      () => { smokeHeartbeatContract(); },
+      () => { smokeSidecarGptCap(); },
+      () => { smokeSidecarEnvContract(); },
+      () => { smokeSchemaExtraction(); },
+      () => { smokeRequireWorktree(); },
+      () => { smokeSidecarEnvPromotion(); },
+      () => { smokeSandboxExecBlocked(); },
+      () => { smokeCleanupRegistryMode(); },
+      () => { smokeXllmStateSliceQualified(); },
+      () => { smokeReviewModelDiscipline(); },
+      () => { smokeXllmResultFileGuard(); },
+      () => { smokeRoutingDomains(); },
+      () => { smokeInitGitGuarantee(); },
+      () => { smokeCodeDirMultiRepo(); },
+      () => { smokeReviewAgentUnavailable(); },
+      () => { smokeSharedGlob(); },
+      () => { smokePhasesTable(); },
+      () => { smokeSidecarModel(); },
+      () => { smokeVerifierCodeDir(); },
+      () => { smokeWindowsSandboxAndWorktreeDeps(); },
+      async () => { await smokeSectionIsolation(); },
+    ]) await runSection(body);
   } catch (e) {
     fail('unhandled exception', e.stack || e.message);
   }
 
   const ms = Date.now() - start;
   process.stdout.write('\n' + '─'.repeat(50) + '\n');
+  // Loud by construction: a crashed section costs every assertion behind it, so
+  // it must never be readable as "just another failure" in the tally.
+  if (crashedSections.length > 0) {
+    process.stdout.write(`⚠ ${crashedSections.length} section(s) crashed and did not finish: ${crashedSections.join(', ')}\n`);
+  }
   process.stdout.write(`Results: ${passes} passed, ${fails} failed (${ms}ms)\n`);
   if (failures.length > 0) {
     process.stdout.write('\nFailures:\n');
