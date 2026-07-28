@@ -61,8 +61,10 @@ function extractBoldField(body, label) {
 }
 
 function extractSection(body, heading) {
-  // Match "## heading" followed by content until next ## or end
-  const re = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|$)`, 'mi');
+  // Match "## heading" followed by content until next ## or end.
+  // The lookahead ends on end-of-STRING — `$` would end on end-of-LINE under the
+  // `m` flag (needed by `^##`), truncating the section to its first line.
+  const re = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|(?![\\s\\S]))`, 'mi');
   const m = body.match(re);
   return m ? m[1].trim() : null;
 }

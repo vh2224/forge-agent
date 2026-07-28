@@ -12,6 +12,15 @@
 - Sidecar file changes are Git-derived and authoritative; model-declared paths are advisory only.
 - Installers deploy and back up dispatch templates. The preference schema adds cost-policy controls.
 
+### Fixed
+
+- **Silent data loss in per-milestone STATE files.** `forge-state.js` parsed a `##` section
+  down to its first line only, so every write path (`--update`, `--push-recent`) reserialized
+  the file with the rest of `## Recent units (last 10)` and `## Notes` erased — exit 0, no
+  warning. Installed copies have been dropping unit history since the per-milestone STATE
+  format shipped; the loss is only visible by re-reading the `.md`. The truncated history
+  cannot be recovered, but no further lines are lost after this fix.
+
 ### Documentation
 
 - Added `docs/cost-optimization.md`, including Claude Code commands that complement the Forge workflow.
