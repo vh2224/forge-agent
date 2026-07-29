@@ -14,6 +14,18 @@
 
 ### Fixed
 
+- **The smoke suite spent real money on Windows.** The mock `codex` was a `#!/bin/sh`
+  file, which `CreateProcess` cannot execute, so `resolveCodexCommand()` fell through
+  to whatever `codex` was on `PATH` — a real, billable one. `forge-xllm.js` now honors
+  `FORGE_XLLM_CODEX_BIN` (mirroring `FORGE_XLLM_AGY_BIN`), and the suite injects a Node
+  shim that runs the same POSIX fixture through Git's own `sh.exe`, resolved from
+  `git --exec-path` with its `usr/bin` prepended to the child's `PATH` so `cat`,
+  `printf` and `sleep` resolve outside Git Bash. Bare `sh` was not enough: PowerShell
+  has none on `PATH`, and bare `bash` there is WSL's — a different filesystem view.
+- **Phantom drift reported against correct documents.** Repo docs are matched with
+  LF-anchored regexes and `indexOf` anchors, but `core.autocrlf=true` with no
+  `.gitattributes` delivers CRLF on a Windows checkout, so every anchor missed and the
+  assert blamed the document. Repo text is now normalized on read.
 - **Silent data loss in per-milestone STATE files.** `forge-state.js` parsed a `##` section
   down to its first line only, so every write path (`--update`, `--push-recent`) reserialized
   the file with the rest of `## Recent units (last 10)` and `## Notes` erased — exit 0, no

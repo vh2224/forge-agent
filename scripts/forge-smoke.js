@@ -27,6 +27,16 @@ const { spawnSync, execFileSync } = require('child_process');
 const SCRIPTS = __dirname;
 const KEEP = process.argv.includes('--keep');
 
+// Repo docs are pattern-matched with LF-anchored regexes and indexOf anchors
+// ('```js\n…', '\n\nlet challenge = null'). This repo has core.autocrlf=true and
+// no .gitattributes, so a Windows checkout delivers CRLF and every such anchor
+// silently misses — the extraction yields nothing and the assert then reports a
+// phantom drift in a document that is actually correct. Line endings are not
+// content: normalize on read. Use this for any file read out of the repo.
+function readRepoText(p) {
+  return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
+}
+
 let passes = 0;
 let fails = 0;
 const failures = [];
@@ -271,7 +281,7 @@ function smokeDashboard() {
   let r = runScript('forge-dashboard.js', ['--cwd', dir]);
   assert(r.status === 0, 'dashboard regen exits ok', r.stderr);
 
-  const dashboard = fs.readFileSync(path.join(dir, '.gsd/STATE.md'), 'utf8');
+  const dashboard = readRepoText(path.join(dir, '.gsd/STATE.md'));
   assert(/AUTO-GENERATED/.test(dashboard), 'dashboard has AUTO-GENERATED header');
   assert(/\*\*M050\*\* — milestone · phase: execute-task/.test(dashboard), 'dashboard shows phase from STATE (not "—")');
   assert(/slice: S02/.test(dashboard), 'dashboard shows active_slice');
@@ -1474,7 +1484,7 @@ function smokeAccounts() {
 function smokeEffort() {
   process.stdout.write('\n▸ Section 17: dynamic effort\n');
   const REPO = path.dirname(SCRIPTS);
-  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+  const rd = (p) => { try { return readRepoText(path.join(REPO, p)); } catch { return ''; } };
 
   const auto = rd('skills/forge-auto/SKILL.md');
   const next = rd('skills/forge-next/SKILL.md');
@@ -1550,7 +1560,7 @@ function smokeUsageIndicator() {
 function smokePlanGateDegradation() {
   process.stdout.write('\n▸ Section 19: plan gate degradation (forge-auto never conducts)\n');
   const REPO = path.dirname(SCRIPTS);
-  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+  const rd = (p) => { try { return readRepoText(path.join(REPO, p)); } catch { return ''; } };
 
   const gate  = rd('shared/forge-plan-gate.md');
   const task  = rd('skills/forge-task/SKILL.md');
@@ -1621,6 +1631,39 @@ function smokePlanGateDegradation() {
 // PATH — structural (token-presence) asserts don't catch runtime failures.
 // The agy engine scenarios (G–M) inject a Node mock via FORGE_XLLM_AGY_BIN
 // instead, which also runs on Windows.
+// The Node shim below shells out to a POSIX `sh` to run the fixture. On win32 a
+// bare `sh` is NOT safe to assume:
+//   • PowerShell (this project's primary shell) has no `sh` on PATH at all — the
+//     shim dies with ENOENT and every mocked scenario fails.
+//   • A bare `bash` is worse than useless: on Windows it resolves to
+//     C:\WINDOWS\system32\bash.exe (WSL), a different filesystem view where the
+//     Windows fixture path does not exist.
+// Derive Git's own sh.exe from `git --exec-path`
+// (…/Git/mingw64/libexec/git-core → …/Git/usr/bin/sh.exe). git is already a hard
+// dependency of this suite, so this adds no new requirement. Fall back to bare
+// `sh` on a non-standard layout: failing loudly at spawn beats silently running
+// the wrong interpreter.
+// Resolving the interpreter is only half the job: the fixture body calls
+// `cat`, `printf` and `sleep`, which on Windows are separate .exe files living
+// in that same usr/bin. Git Bash has it on PATH; PowerShell does not, so sh
+// would start and then fail every builtin-looking command — the mock exits
+// instantly with no -o file, and the suite reads that as "prompt never arrived"
+// / "timeout never fired" instead of "coreutils missing". Return the bin dir so
+// the shim can prepend it to the child's PATH.
+let POSIX_SH = null;
+function resolvePosixSh() {
+  if (POSIX_SH) return POSIX_SH;
+  if (process.platform !== 'win32') { POSIX_SH = { sh: 'sh', bin: '' }; return POSIX_SH; }
+  try {
+    const execPath = execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim();
+    const bin = path.join(path.resolve(execPath, '..', '..', '..'), 'usr', 'bin');
+    const candidate = path.join(bin, 'sh.exe');
+    if (fs.existsSync(candidate)) { POSIX_SH = { sh: candidate, bin }; return POSIX_SH; }
+  } catch { /* fall through to bare sh */ }
+  POSIX_SH = { sh: 'sh', bin: '' };
+  return POSIX_SH;
+}
+
 function writeMockCodex(dir, opts) {
   opts = opts || {};
   const script = [
@@ -1655,6 +1698,42 @@ function writeMockCodex(dir, opts) {
   const codexPath = path.join(dir, 'codex');
   fs.writeFileSync(codexPath, script, 'utf8');
   fs.chmodSync(codexPath, 0o755);
+
+  // Windows does not honor the shebang above, so a bare `codex` on PATH is not
+  // spawnable there — resolveCodexCommand() then fell through to a REAL codex on
+  // PATH, which made the suite non-deterministic and billable. Emit a Node shim
+  // that re-launches the SAME POSIX fixture through `sh`, injected via
+  // FORGE_XLLM_CODEX_BIN. Keeping the sh body verbatim preserves every
+  // extraScript snippet callers rely on (git commit, mkdir, sleep, stderr…).
+  const shim = [
+    '// forge-smoke mock codex shim (see writeMockCodex in forge-smoke.js)',
+    "const { spawn } = require('child_process');",
+    `const script = ${JSON.stringify(codexPath.replace(/\\/g, '/'))};`,
+    // Git Bash's sh does not resolve a backslashed drive path in a redirection —
+    // `> "C:\\a\\b.txt"` silently lands somewhere else, so the adapter reads an
+    // empty -o file. Normalize only args that are Windows absolute paths; every
+    // other argument (flags, the bare `-`) is forwarded byte-identical.
+    "const argv = process.argv.slice(2).map((a) => (/^[A-Za-z]:[\\\\/]/.test(a) ? a.replace(/\\\\/g, '/') : a));",
+    // stdout/stderr are piped through this shim rather than inherited: a fixture
+    // that backgrounds a child (`sleep 60 &`) would otherwise hand that orphan a
+    // dup of the ADAPTER's pipe, so the adapter blocks on EOF long after it killed
+    // us (codex#7852 scenario — 60s instead of the asserted <10s bound). With pipes,
+    // the orphan only holds OUR fds, and they die with this process.
+    `const SH = ${JSON.stringify(resolvePosixSh().sh)};`,
+    `const SH_BIN = ${JSON.stringify(resolvePosixSh().bin)};`,
+    "const env = SH_BIN ? { ...process.env, PATH: SH_BIN + require('path').delimiter + (process.env.PATH || '') } : process.env;",
+    "const child = spawn(SH, [script, ...argv], { stdio: ['inherit', 'pipe', 'pipe'], env });",
+    "child.stdout.on('data', (d) => process.stdout.write(d));",
+    "child.stderr.on('data', (d) => process.stderr.write(d));",
+    "child.on('error', (e) => { process.stderr.write('mock codex shim: ' + e.message); process.exit(127); });",
+    // 'exit', never 'close': 'close' waits for the pipes to drain, which a
+    // backgrounded grandchild can defer indefinitely — the exact hang this avoids.
+    "child.on('exit', (code, signal) => {",
+    "  setTimeout(() => process.exit(typeof code === 'number' ? code : (signal ? 1 : 0)), 50);",
+    '});',
+    '',
+  ].join('\n');
+  fs.writeFileSync(path.join(dir, 'codex-mock.js'), shim, 'utf8');
   return dir;
 }
 
@@ -1709,7 +1788,7 @@ function writeMockAgy(dir, opts) {
 function runXllm(args, mockDir, cwd, extraEnv) {
   const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
   const env = mockDir
-    ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
+    ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js') }
     : { ...process.env, PATH: '' };
   if (extraEnv) Object.assign(env, extraEnv);
   const r = spawnSync(process.execPath, [xllmPath, ...args], {
@@ -2043,9 +2122,9 @@ function smokeModelAlias() {
   {
     const ROOT = path.join(__dirname, '..');
     const files = {
-      'skills/forge-auto/SKILL.md': fs.readFileSync(path.join(ROOT, 'skills/forge-auto/SKILL.md'), 'utf8'),
-      'skills/forge-next/SKILL.md': fs.readFileSync(path.join(ROOT, 'skills/forge-next/SKILL.md'), 'utf8'),
-      'shared/forge-dispatch.md': fs.readFileSync(path.join(ROOT, 'shared/forge-dispatch.md'), 'utf8'),
+      'skills/forge-auto/SKILL.md': readRepoText(path.join(ROOT, 'skills/forge-auto/SKILL.md')),
+      'skills/forge-next/SKILL.md': readRepoText(path.join(ROOT, 'skills/forge-next/SKILL.md')),
+      'shared/forge-dispatch.md': readRepoText(path.join(ROOT, 'shared/forge-dispatch.md')),
     };
 
     for (const [name, content] of Object.entries(files)) {
@@ -2102,7 +2181,7 @@ function smokeChallengerWiring() {
   process.stdout.write('\n▸ Section 22: review challenger wiring (spec invariants + live adapter parse)\n');
 
   const ROOT = path.join(__dirname, '..');
-  const spec = fs.readFileSync(path.join(ROOT, 'shared', 'forge-review.md'), 'utf8');
+  const spec = readRepoText(path.join(ROOT, 'shared', 'forge-review.md'));
 
   assert(spec.includes('challenger:'), 'spec Step 0 reads challenger:', 'token "challenger:" not found');
   assert(spec.includes('challenger_model'), 'spec Step 0 reads challenger_model', 'token "challenger_model" not found');
@@ -2262,13 +2341,13 @@ function smokeAdvocateModel() {
 
   // Block A — structural asserts
   {
-    const spec = fs.readFileSync(path.join(ROOT, 'shared', 'forge-review.md'), 'utf8');
+    const spec = readRepoText(path.join(ROOT, 'shared', 'forge-review.md'));
     assert(spec.includes('advocate_model'), 'spec Step 0 reads advocate_model', 'token "advocate_model" not found');
     assert(spec.includes('ADVOCATE_MODEL'), 'spec derives ADVOCATE_MODEL', 'token "ADVOCATE_MODEL" not found');
     assert(spec.includes('forge-model-alias.js'), 'spec invokes forge-model-alias.js for the advocate', 'token "forge-model-alias.js" not found');
     assert(spec.includes('"advocate"'), 'spec Step 8 event has advocate field', 'token \'"advocate"\' not found');
 
-    const agentSpec = fs.readFileSync(path.join(ROOT, 'agents', 'forge-advocate.md'), 'utf8');
+    const agentSpec = readRepoText(path.join(ROOT, 'agents', 'forge-advocate.md'));
     assert(agentSpec.includes('model: claude-fable-5'), 'forge-advocate.md frontmatter has model: claude-fable-5', 'token "model: claude-fable-5" not found');
     assert(agentSpec.includes('thinking: adaptive'), 'forge-advocate.md frontmatter has thinking: adaptive', 'token "thinking: adaptive" not found');
     assert(!agentSpec.includes('thinking: disabled'), 'forge-advocate.md frontmatter does NOT have thinking: disabled', 'token "thinking: disabled" found');
@@ -2374,7 +2453,7 @@ async function smokeXllmExecute() {
   function runExecuteXllm(args, mockDir, cwd, opts) {
     const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
     const env = mockDir
-      ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
+      ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js') }
       : { ...process.env, PATH: '' };
     const r = spawnSync(process.execPath, [xllmPath, '--mode', 'execute', ...args], {
       encoding: 'utf8',
@@ -2438,7 +2517,7 @@ async function smokeXllmExecute() {
     const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-b-mock-'));
     writeMockCodex(mockDir, { payload: validPayload, exitCode: 0, extraScript: `: > "$FORGE_MARKER"` });
     const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo,
-      { env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_MARKER: marker } });
+      { env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js'), FORGE_MARKER: marker } });
     assert(r.status === 0, 'B: dirty tree no longer refuses (refuse→snapshot) → exit 0', `status=${r.status} stderr=${r.stderr}`);
     assert(!/refusing to start/i.test(r.stderr), 'B: no dirty-guard refusal message', `stderr=${r.stderr}`);
     assert(fs.existsSync(marker), 'B: mock codex IS invoked on dirty tree (marker present)', `marker=${marker}`);
@@ -2536,7 +2615,7 @@ async function smokeXllmExecute() {
     const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-exec-f-mock-'));
     writeMockCodex(mockDir, { payload: validPayload, exitCode: 0, extraScript: `: > "$FORGE_MARKER"` });
     const r = runExecuteXllm(['--plan', planFile, '--result-file', resultFile, '--cwd', repo], mockDir, repo,
-      { env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_MARKER: marker } });
+      { env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js'), FORGE_MARKER: marker } });
     assert(r.status !== 0, 'F: result-file inside workspace makes adapter exit non-zero', `status=${r.status}`);
     assert(!fs.existsSync(marker), 'F: mock codex never invoked (marker absent)', `marker=${marker}`);
     cleanup(repo);
@@ -2558,7 +2637,7 @@ async function smokeXllmExecute() {
     writeMockCodex(mockDir, { payload: validPayload, exitCode: 0, sleepSecs: 3 });
 
     const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
-    const env = { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH };
+    const env = { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js') };
     const { spawn } = require('child_process');
     const child = spawn(process.execPath, [
       xllmPath, '--mode', 'execute', '--plan', planFile, '--result-file', resultFile, '--cwd', repo,
@@ -2724,7 +2803,7 @@ async function smokeSidecarContextParity() {
     fs.writeFileSync(security, '## Security Checklist\n\n- SENTINEL-SEC-XYZ\n', 'utf8');
     fs.writeFileSync(bundle, '## Lint & Format Commands\n\nSENTINEL-CTX-XYZ\n', 'utf8');
     writeMockCodex(mock, { payload, extraScript: 'printf %s "$PROMPT" > "$FORGE_PROMPT_FILE"' });
-    const env = { ...process.env, PATH: mock + path.delimiter + process.env.PATH, FORGE_PROMPT_FILE: promptFile };
+    const env = { ...process.env, PATH: mock + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mock, 'codex-mock.js'), FORGE_PROMPT_FILE: promptFile };
     const inline = runScript('forge-xllm.js', ['--mode', 'execute', '--plan', plan, '--result-file', result,
       '--cwd', repo, '--security', security, '--context-bundle', bundle], { cwd: repo, env });
     const captured = fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '';
@@ -2968,7 +3047,7 @@ function smokeEngineDispatch() {
     ], {
       encoding: 'utf8',
       cwd: repo,
-      env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_MARKER: marker },
+      env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js'), FORGE_MARKER: marker },
     });
     assert(r.status === 0, 'C: dirty tree no longer refuses (refuse→snapshot) → exit 0', `status=${r.status} stderr=${r.stderr}`);
     assert(fs.existsSync(marker), 'C: mock codex IS invoked over dirty tree (snapshot, not refuse)', `marker=${marker}`);
@@ -3091,7 +3170,7 @@ async function smokeXllmPlan() {
   function runPlanXllm(args, mockDir, cwd) {
     const xllmPath = path.join(SCRIPTS, 'forge-xllm.js');
     const env = mockDir
-      ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH }
+      ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js') }
       : { ...process.env, PATH: '' };
     const r = spawnSync(process.execPath, [xllmPath, '--mode', 'plan', ...args], {
       encoding: 'utf8',
@@ -3296,7 +3375,7 @@ async function smokeXllmPlan() {
 function smokeStatusPackaging() {
   process.stdout.write('\n▸ Section 24: forge-status CLI packaging\n');
   const REPO = path.dirname(SCRIPTS);
-  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+  const rd = (p) => { try { return readRepoText(path.join(REPO, p)); } catch { return ''; } };
 
   // (a) engine pure-read: no real write-API calls, no forge-lock require
   const eng = rd('scripts/forge-status.js');
@@ -3404,7 +3483,7 @@ function smokeTierChain() {
 
   // (e) doc-presence: context_overflow ainda escala tier standard→heavy→max (escada de modelo intocada)
   const REPO = path.dirname(SCRIPTS);
-  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+  const rd = (p) => { try { return readRepoText(path.join(REPO, p)); } catch { return ''; } };
   const tiersDoc = rd('shared/forge-tiers.md');
   const skillDoc = rd('skills/forge-auto/SKILL.md');
 
@@ -3712,7 +3791,7 @@ function smokeReviewPairingWiring() {
   process.stdout.write('\n▸ Section 30: review pairing wiring (precedência + pré-escopo estrito + fallbacks)\n');
 
   const REPO = path.dirname(SCRIPTS);
-  const rd = (p) => { try { return fs.readFileSync(path.join(REPO, p), 'utf8'); } catch { return ''; } };
+  const rd = (p) => { try { return readRepoText(path.join(REPO, p)); } catch { return ''; } };
   const countOccur = (hay, needle) => (hay.length && needle.length) ? hay.split(needle).length - 1 : 0;
 
   // Fixture helpers — raw JSONL stream + strict pre-scope mirror do Step 0.
@@ -4519,8 +4598,8 @@ function smokeDomainEmission() {
   cleanup(dirF);
 
   // ── Drift guards — markdown (grep de presença/ausência) ────────────────
-  const plannerTxt = fs.readFileSync(path.join(__dirname, '..', 'agents', 'forge-planner.md'), 'utf8');
-  const planCheckerTxt = fs.readFileSync(path.join(__dirname, '..', 'agents', 'forge-plan-checker.md'), 'utf8');
+  const plannerTxt = readRepoText(path.join(__dirname, '..', 'agents', 'forge-planner.md'));
+  const planCheckerTxt = readRepoText(path.join(__dirname, '..', 'agents', 'forge-plan-checker.md'));
 
   // (g) planner: guidance de domain: no frontmatter da task.
   assert(/domain:\s*backend/.test(plannerTxt) || /`domain:`/.test(plannerTxt),
@@ -4640,7 +4719,7 @@ function smokeGeminiFamily() {
   // (f) R5 — reconciliação de whitelist nos dois lados: spec (shared/forge-review.md)
   // e CLI (VALID_REQUESTS de forge-review-pairing.js) precisam bater em gemini.
   const ROOT35 = path.join(__dirname, '..');
-  const reviewSpecTxt = fs.readFileSync(path.join(ROOT35, 'shared', 'forge-review.md'), 'utf8');
+  const reviewSpecTxt = readRepoText(path.join(ROOT35, 'shared', 'forge-review.md'));
   const pairingSrcTxt = fs.readFileSync(path.join(ROOT35, 'scripts', 'forge-review-pairing.js'), 'utf8');
   const specHasWhitelist = /claude\|codex\|gemini/.test(reviewSpecTxt);
   const cliHasGemini = /VALID_REQUESTS\s*=\s*\[[^\]]*'gemini'[^\]]*\]/.test(pairingSrcTxt);
@@ -4659,8 +4738,8 @@ function smokeRoutingScaffoldDocs() {
   process.stdout.write('\n▸ Section 36: scaffold routing: + docs fase 4 (drift-guard)\n');
   const ROOT36 = path.join(__dirname, '..');
   const prefsTxt = SCAFFOLD;
-  const readmeTxt = fs.readFileSync(path.join(ROOT36, 'README.md'), 'utf8');
-  const tiersTxt = fs.readFileSync(path.join(ROOT36, 'shared', 'forge-tiers.md'), 'utf8');
+  const readmeTxt = readRepoText(path.join(ROOT36, 'README.md'));
+  const tiersTxt = readRepoText(path.join(ROOT36, 'shared', 'forge-tiers.md'));
 
   assert(/"routing":/.test(prefsTxt),
     'generated scaffold contém routing',
@@ -5235,7 +5314,7 @@ function smokePrefsCutover() {
     fs.mkdirSync(globalDir, { recursive: true });
     const legacy = path.join(globalDir, 'forge-agent-prefs.md');
     fs.writeFileSync(legacy, 'review:\n  rounds: 2\n', 'utf8');
-    const contract = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-prefs-cutover.md'), 'utf8');
+    const contract = readRepoText(path.join(__dirname, '..', 'shared', 'forge-prefs-cutover.md'));
     const match = /## § Canonical message[^]*?```text\n([^\n]+)\n```/.exec(contract);
     const actual = prefsExports.readPrefs(dir).errors[0];
     const command = path.join(SCRIPTS, 'forge-prefs-migrate.js');
@@ -5508,7 +5587,7 @@ function smokeSkillsCutover() {
   const cascadeArrayRe = /const\s+files\s*=\s*\[[^\]]*forge-agent-prefs\.md/;
   const repoPathGrepRe = /grep\s+['"]repo_path:['"][^\n]*forge-agent-prefs\.md/;
   for (const rel of closedSkillsFiles) {
-    const source = fs.readFileSync(path.join(ROOT40, rel), 'utf8');
+    const source = readRepoText(path.join(ROOT40, rel));
     assert(!cascadeArrayRe.test(source), `(c) ${rel}: legacy cascade-array construct absent`);
     assert(!repoPathGrepRe.test(source), `(c) ${rel}: legacy repo_path-grep construct absent`);
     // Wired half: every cut-over file references the new engine. forge-sweep's
@@ -5518,7 +5597,7 @@ function smokeSkillsCutover() {
 
   // forge-sweep's protect-list must include both the new local jsonc and the
   // global jsonc catalogue names, so a sweep never treats them as orphans.
-  const sweepSource = fs.readFileSync(path.join(ROOT40, 'skills/forge-sweep/SKILL.md'), 'utf8');
+  const sweepSource = readRepoText(path.join(ROOT40, 'skills/forge-sweep/SKILL.md'));
   assert(sweepSource.includes('forge-prefs.jsonc') && sweepSource.includes('forge-agent-prefs.jsonc'),
     '(c) forge-sweep protect-list includes forge-prefs.jsonc + forge-agent-prefs.jsonc');
 
@@ -5533,7 +5612,7 @@ function smokeSkillsCutover() {
   // a non-default `review:` block — it must parse (exit 0) and return the
   // configured values, not the catch-branch defaults.
   {
-    const reviewMd = fs.readFileSync(path.join(ROOT40, 'shared/forge-review.md'), 'utf8');
+    const reviewMd = readRepoText(path.join(ROOT40, 'shared/forge-review.md'));
     const cfgMatch = reviewMd.match(/REVIEW_CFG=\$\(printf '%s' "\$PREFS_JSON" \| node -e "([\s\S]*?)"\)/);
     assert(!!cfgMatch, '(d) R1: REVIEW_CFG node -e snippet extracted from shared/forge-review.md');
     if (cfgMatch) {
@@ -5707,7 +5786,7 @@ function smokePrefsMigration() {
   { const d = dirs(); writeFixture(d, f2); const before = snapshot(d); const dry = cli(d, ['--dry-run']); assert(dry.status === 0 && JSON.stringify(before) === JSON.stringify(snapshot(d)), '(c) --dry-run performs zero writes'); cleanup(d.root); }
   { const d = dirs(); writeFixture(d, f2); const before = snapshot(d); const stopped = cli(d, [], { FORGE_PREFS_MIGRATE_TEST_MUTATE: '1' }); const output = `${stopped.stdout}${stopped.stderr}`; assert(stopped.status === 3 && output.includes('__forge_test_mutation') && JSON.stringify(before) === JSON.stringify(snapshot(d)), '(c) mutate hook gate-STOP exits 3, reports diff and writes zero bytes', output); cleanup(d.root); }
   { const d = dirs(); writeFixture(d, f4); const stopped = cli(d); assert(stopped.status === 4 && fs.existsSync(path.join(d.globalDir, 'forge-agent-prefs.md')) && !fs.existsSync(path.join(d.globalDir, 'forge-agent-prefs.jsonc')), '(c) malformed routing exits 4 and leaves md intact', `${stopped.stdout}${stopped.stderr}`); cleanup(d.root); }
-  { const d = dirs(); writeFixture(d, f3Shared, f3Local); const result = cli(d); const local = fs.readFileSync(path.join(d.localDir, 'forge-prefs.jsonc'), 'utf8'); const ignored = migrate.ensureGitignore(d.root, { execFileSync: (_cmd, args) => { if (args[0] === 'check-ignore') throw new Error('unignored'); }, writeFileSync: fs.writeFileSync }); const resolved = migrate.resolveCurrent(d.root, { globalDir: d.globalDir, localDir: d.localDir }).prefs; const backup = fs.readFileSync(path.join(d.localDir, 'prefs.local.md.bak'), 'utf8'); assert(result.status === 0 && resolved.repo_path === '/personal' && resolved.review.rounds === 2 && backup.includes('typo_knob: preserved'), '(d) repo-shared × prefs.local fold is directional: local old value wins and typo fixture is retained in .bak', JSON.stringify(resolved)); assert(ignored.action === 'appended' && /\.gsd\/forge-prefs\.jsonc/.test(fs.readFileSync(path.join(d.root, '.gitignore'), 'utf8')) && local.includes('repo_path'), '(d) local catalog is protected by the .gitignore fold', result.stderr); cleanup(d.root); }
+  { const d = dirs(); writeFixture(d, f3Shared, f3Local); const result = cli(d); const local = readRepoText(path.join(d.localDir, 'forge-prefs.jsonc')); const ignored = migrate.ensureGitignore(d.root, { execFileSync: (_cmd, args) => { if (args[0] === 'check-ignore') throw new Error('unignored'); }, writeFileSync: fs.writeFileSync }); const resolved = migrate.resolveCurrent(d.root, { globalDir: d.globalDir, localDir: d.localDir }).prefs; const backup = readRepoText(path.join(d.localDir, 'prefs.local.md.bak')); assert(result.status === 0 && resolved.repo_path === '/personal' && resolved.review.rounds === 2 && backup.includes('typo_knob: preserved'), '(d) repo-shared × prefs.local fold is directional: local old value wins and typo fixture is retained in .bak', JSON.stringify(resolved)); assert(ignored.action === 'appended' && /\.gsd\/forge-prefs\.jsonc/.test(readRepoText(path.join(d.root, '.gitignore'))) && local.includes('repo_path'), '(d) local catalog is protected by the .gitignore fold', result.stderr); cleanup(d.root); }
   { const d = dirs(); writeFixture(d, f2); const migrated = cli(d); const original = fs.readFileSync(path.join(d.globalDir, 'forge-agent-prefs.jsonc'), 'utf8'); const set = runScript('forge-prefs-migrate.js', ['--cwd', d.root, '--global-dir', d.globalDir, '--local-dir', d.localDir, '--layer', 'global', '--set', 'review.rounds=2', '--json'], { cwd: d.root }); const updated = fs.readFileSync(path.join(d.globalDir, 'forge-agent-prefs.jsonc'), 'utf8'); const resolved = migrate.resolveCurrent(d.root, { globalDir: d.globalDir, localDir: d.localDir }).prefs; assert(migrated.status === 0 && set.status === 0 && resolved.review.rounds === 2, '(d2) --set review.rounds=2 updates a migrated catalog', `${set.stdout}${set.stderr}`); const sectionAt = (text) => text.indexOf('  "review":'); assert(sectionAt(updated) === sectionAt(original) && updated.slice(0, sectionAt(updated)) === original.slice(0, sectionAt(original)), '(d2) --set rewrites the touched section where it already sits and preserves every byte above it', `${sectionAt(original)} → ${sectionAt(updated)}`); assert((updated.match(/^ {2}"review":/gm) || []).length === 1 && !updated.includes('set by forge-prefs-migrate --set'), '(d2) --set leaves one active block and no appended duplicate that would shadow a hand edit', `${original.length} → ${updated.length}`); cleanup(d.root); }
   { const d = dirs(); writeFixture(d, f2); cli(d); const before = snapshot(d); const refusedEnum = runScript('forge-prefs-migrate.js', ['--cwd', d.root, '--global-dir', d.globalDir, '--local-dir', d.localDir, '--layer', 'global', '--set', 'plan_check.mode=banana', '--json'], { cwd: d.root }); const afterEnum = snapshot(d); const refusedBool = runScript('forge-prefs-migrate.js', ['--cwd', d.root, '--global-dir', d.globalDir, '--local-dir', d.localDir, '--layer', 'global', '--set', 'workers.require_worktree=atuo', '--json'], { cwd: d.root }); const afterBool = snapshot(d); assert(refusedEnum.status !== 0 && `${refusedEnum.stdout}${refusedEnum.stderr}`.includes('plan_check.mode') && JSON.stringify(before) === JSON.stringify(afterEnum), '(d3) --set plan_check.mode=banana is refused: exit!=0, stderr names the key, zero writes', `${refusedEnum.stdout}${refusedEnum.stderr}`); assert(refusedBool.status !== 0 && `${refusedBool.stdout}${refusedBool.stderr}`.includes('workers.require_worktree') && JSON.stringify(before) === JSON.stringify(afterBool), '(d3) --set workers.require_worktree=atuo is refused: exit!=0, stderr names the key, zero writes', `${refusedBool.stdout}${refusedBool.stderr}`); cleanup(d.root); }
   { const d = dirs(); writeFixture(d, f2); cli(d); const acceptBool = runScript('forge-prefs-migrate.js', ['--cwd', d.root, '--global-dir', d.globalDir, '--local-dir', d.localDir, '--layer', 'global', '--set', 'workers.require_worktree=false', '--json'], { cwd: d.root }); const acceptEnum = runScript('forge-prefs-migrate.js', ['--cwd', d.root, '--global-dir', d.globalDir, '--local-dir', d.localDir, '--layer', 'global', '--set', 'workers.require_worktree=auto', '--json'], { cwd: d.root }); const resolved = migrate.resolveCurrent(d.root, { globalDir: d.globalDir, localDir: d.localDir }).prefs; assert(acceptBool.status === 0 && acceptEnum.status === 0 && resolved.workers.require_worktree === 'auto', '(d3) --set continues accepting valid values: bool then mixed-type enum-string', `${acceptBool.stdout}${acceptBool.stderr} / ${acceptEnum.stdout}${acceptEnum.stderr}`); cleanup(d.root); }
@@ -6024,7 +6103,7 @@ function smokeInitSetupScaffold() {
   assert(/"\$schema":\s*"custom\.json"/.test(custom),
     '(c) --scaffold --schema-ref custom.json emite custom.json', custom.slice(0, 300));
 
-  const read = (file) => fs.readFileSync(path.join(repo, file), 'utf8');
+  const read = (file) => readRepoText(path.join(repo, file));
   const init = read('commands/forge-init.md');
   assert(init.includes('--setup-scaffold'), '(d) forge-init referencia --setup-scaffold');
   assert(init.includes('ensureGitignore'), '(d) forge-init referencia ensureGitignore');
@@ -6127,7 +6206,7 @@ function smokeDispatchResolve() {
   const ROOT46 = path.join(__dirname, '..');
   const cutoverSkills = ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'];
   for (const rel of cutoverSkills) {
-    const source = fs.readFileSync(path.join(ROOT46, rel), 'utf8');
+    const source = readRepoText(path.join(ROOT46, rel));
     assert(source.includes('forge-dispatch-resolve.js'), `(c) ${rel}: calls forge-dispatch-resolve.js`);
     assert(!/declare -A TIER_DEFAULTS/.test(source), `(c) ${rel}: no duplicated declare -A TIER_DEFAULTS`);
     assert(!/declare -A EFFORT_DEFAULTS/.test(source), `(c) ${rel}: no duplicated declare -A EFFORT_DEFAULTS`);
@@ -6140,7 +6219,7 @@ function smokeDispatchResolve() {
   // assert is mutation-sensitive: generic occurrences of tier:/effort:/domain:
   // elsewhere in the file must NOT satisfy it.
   {
-    const source = fs.readFileSync(path.join(ROOT46, 'skills/forge-task/SKILL.md'), 'utf8');
+    const source = readRepoText(path.join(ROOT46, 'skills/forge-task/SKILL.md'));
     const startAnchor = 'Write {TASK_ID}-PLAN.md';
     const endAnchor = 'Iron rule:';
     const startIdx = source.indexOf(startAnchor);
@@ -6175,7 +6254,7 @@ function smokeDispatchResolve() {
   // (M012 S02 review-fix R1: the failure-taxonomy paths re-resolve routing with these raw inputs;
   //  the cutover dropped their assignment, silently collapsing every retry to the default domain.)
   for (const rel of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
-    const source = fs.readFileSync(path.join(ROOT46, rel), 'utf8');
+    const source = readRepoText(path.join(ROOT46, rel));
     assert(/^DOMAIN=.*domain_input/m.test(source), `(f) ${rel}: restores DOMAIN= from resolver domain_input`);
     assert(/^PLAN_TIER=.*frontmatter_tier/m.test(source), `(f) ${rel}: restores PLAN_TIER= from resolver frontmatter_tier`);
     assert(/^PLAN_WORKER=.*plan_worker/m.test(source), `(f) ${rel}: restores PLAN_WORKER= from resolver plan_worker`);
@@ -6237,7 +6316,7 @@ function smokeDispatchResolve() {
   // ── (j) doc-presence: the 3 SKILLs extract DISPATCH_ENGINE + gate branches on it, ──
   //     and the old $ENGINE == codex trigger is gone from the branch/trigger sites.
   for (const rel of cutoverSkills) {
-    const source = fs.readFileSync(path.join(ROOT46, rel), 'utf8');
+    const source = readRepoText(path.join(ROOT46, rel));
     assert(/DISPATCH_ENGINE=\$\(node -e .*dispatch_engine/.test(source),
       `(j) ${rel}: extracts DISPATCH_ENGINE from ROUTE_JSON .dispatch_engine`);
     assert(/DISPATCH_ENGINE == codex/.test(source),
@@ -6251,7 +6330,7 @@ function smokeDispatchResolve() {
 
   // ── (k) spec canonical: shared/forge-dispatch.md defines dispatch_engine as the branch trigger ──
   {
-    const spec = fs.readFileSync(path.join(ROOT46, 'shared/forge-dispatch.md'), 'utf8');
+    const spec = readRepoText(path.join(ROOT46, 'shared/forge-dispatch.md'));
     assert(/dispatch_engine/.test(spec), '(k) spec mentions dispatch_engine');
     assert(/dispatch_engine == codex/.test(spec), '(k) spec defines dispatch_engine == codex as the sidecar branch trigger');
   }
@@ -6519,7 +6598,7 @@ function smokeSurgicalReset() {
     fs.writeFileSync(planFile, '# T01\ndo the thing\n', 'utf8');
     const rr = spawnSync(process.execPath, [xllmPath, '--mode', 'execute', '--plan', planFile, '--result-file', resultFile, '--cwd', dir], {
       encoding: 'utf8', cwd: dir,
-      env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH },
+      env: { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js') },
     });
     assert(rr.status !== 0, '(g) sidecar fails on codex bad-JSON, NOT on the dirty guard', `status=${rr.status} stderr=${rr.stderr}`);
     assert(!/refusing to start/i.test(rr.stderr), '(g) no dirty-guard refusal — ran on dirty tree', rr.stderr);
@@ -6682,7 +6761,7 @@ function smokeSidecarLayer1Retry() {
     for (const d of DOCS) {
       const p = path.join(REPO, d.rel);
       assert(fs.existsSync(p), `(c) ${d.label} exists on disk`, p);
-      texts[d.rel] = fs.readFileSync(p, 'utf8');
+      texts[d.rel] = readRepoText(p);
     }
 
     for (const d of DOCS) {
@@ -6729,7 +6808,7 @@ function smokeSidecarLayer1Retry() {
       }
     }
     function texts_or_read(rel) {
-      return fs.readFileSync(path.join(REPO, rel), 'utf8');
+      return readRepoText(path.join(REPO, rel));
     }
   }
 
@@ -6768,7 +6847,7 @@ function smokeSidecarPolicyGuard() {
   for (const d of DOCS) {
     const p = path.join(REPO, d.rel);
     assert(fs.existsSync(p), `(setup) ${d.label} exists on disk`, p);
-    texts[d.rel] = fs.readFileSync(p, 'utf8');
+    texts[d.rel] = readRepoText(p);
   }
 
   // ── (a) default-policy byte-identity gate ──
@@ -7022,7 +7101,7 @@ function smokePrefsConsumers() {
     'skills/forge-task/SKILL.md',
   ];
   for (const rel of skillFiles) {
-    const content = fs.readFileSync(path.join(REPO, rel), 'utf8');
+    const content = readRepoText(path.join(REPO, rel));
     assert(!content.includes('Deprecation warning (once per session)'),
       `(a) ${rel} has no deprecation warning`, rel);
     assert(!content.includes('md-legacy'),
@@ -7034,7 +7113,7 @@ function smokePrefsConsumers() {
   // Doctor reports the blocked layer and its --fix path delegates migration
   // to the local-only migrator, without reviving the removed source label.
   const doctorRel = 'skills/forge-doctor/SKILL.md';
-  const doctor = fs.readFileSync(path.join(REPO, doctorRel), 'utf8');
+  const doctor = readRepoText(path.join(REPO, doctorRel));
   assert(doctor.includes('md-blocked'),
     '(b) forge-doctor detects md-blocked', doctorRel);
   const fixStart = doctor.indexOf('## C5a:');
@@ -7047,7 +7126,7 @@ function smokePrefsConsumers() {
   // Hook diagnostics are best-effort: one prefs-blocked event per process,
   // and every filesystem failure is swallowed so hooks remain fail-open.
   const hookRel = 'scripts/forge-hook.js';
-  const hook = fs.readFileSync(path.join(REPO, hookRel), 'utf8');
+  const hook = readRepoText(path.join(REPO, hookRel));
   assert(/let\s+_prefsBlockedEventLogged\s*=\s*false/.test(hook),
     '(c) forge-hook has a module-level once-per-process guard', hookRel);
   assert(/appendFileSync\([\s\S]*events\.jsonl[\s\S]*JSON\.stringify\(event\)/.test(hook),
@@ -7061,7 +7140,7 @@ function smokePrefsConsumers() {
 
   // Statusline consumes the generic hadError signal and still renders a line.
   const statusRel = 'scripts/forge-statusline.js';
-  const statusline = fs.readFileSync(path.join(REPO, statusRel), 'utf8');
+  const statusline = readRepoText(path.join(REPO, statusRel));
   assert(/resolvedPrefs\.hadError\)\s*forgeVersionTail\s*\+=\s*['"][^'"\n]*⚠ prefs/.test(statusline),
     '(d) forge-statusline emits ⚠ prefs through hadError', statusRel);
   assert(statusline.includes('prefs-error.json'),
@@ -7107,7 +7186,7 @@ function smokePrefsCutoverGuards() {
   for (const rel of tracked) {
     if (rel.split('/').includes('.gsd') || rel.split('/').includes('node_modules') || rel.endsWith('.bak')) continue;
     let text = '';
-    try { text = fs.readFileSync(path.join(REPO, rel), 'utf8'); } catch { continue; }
+    try { text = readRepoText(path.join(REPO, rel)); } catch { continue; }
     if (/forge-agent-prefs\.md/i.test(text) && !allowlist.has(rel)) offenders.push(rel);
   }
   assert(!offenders.includes('.forge-smoke-untracked-prefs-probe'),
@@ -7124,20 +7203,20 @@ function smokePrefsCutoverGuards() {
     'skills/forge-prefs/SKILL.md', 'commands/forge-init.md',
   ];
   const dualReadHits = dualReadTargets.filter((rel) =>
-    /dual-read/i.test(fs.readFileSync(path.join(REPO, rel), 'utf8')));
+    /dual-read/i.test(readRepoText(path.join(REPO, rel))));
   assert(dualReadHits.length === 0,
     '(b) dual-read ausente das specs e skills sancionadas', dualReadHits.join(', '));
 
   const loopSkills = ['forge-auto', 'forge-next', 'forge-task'];
   for (const skill of loopSkills) {
-    const text = fs.readFileSync(path.join(REPO, 'skills', skill, 'SKILL.md'), 'utf8');
+    const text = readRepoText(path.join(REPO, 'skills', skill, 'SKILL.md'));
     assert(/never/i.test(text) && /cascade/i.test(text) && /scripts\/forge-prefs\.js/.test(text),
       `(c) ${skill}/SKILL.md preserva MEM001 (never + cascade + scripts/forge-prefs.js)`);
   }
 
-  const changelog = fs.readFileSync(path.join(REPO, 'CHANGELOG.md'), 'utf8');
+  const changelog = readRepoText(path.join(REPO, 'CHANGELOG.md'));
   const v2 = changelog.slice(0, changelog.indexOf('\n## v1.35.0'));
-  const canonical = fs.readFileSync(path.join(REPO, 'shared/forge-prefs-cutover.md'), 'utf8');
+  const canonical = readRepoText(path.join(REPO, 'shared/forge-prefs-cutover.md'));
   const commandFormula = canonical.match(/node \"\{command\}\" --cwd \"\{cwd\}\"/);
   assert(v2.includes('forge-prefs-migrate.js') && v2.includes('--cwd'),
     '(d) CHANGELOG v2.0.0 cita forge-prefs-migrate.js + --cwd');
@@ -7165,7 +7244,7 @@ function smokeHeartbeatContract() {
   for (const d of DOCS) {
     const p = path.join(REPO, d.rel);
     assert(fs.existsSync(p), `(setup) ${d.label} exists on disk`, p);
-    texts[d.rel] = fs.readFileSync(p, 'utf8');
+    texts[d.rel] = readRepoText(p);
   }
 
   // Locate the one canonical fenced block by its stable anchor. Keeping the
@@ -7375,7 +7454,7 @@ function smokeSidecarGptCap() {
   const REPO = path.dirname(SCRIPTS);
   const mirrors = ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md'];
   for (const rel of mirrors) {
-    const text = fs.readFileSync(path.join(REPO, rel), 'utf8');
+    const text = readRepoText(path.join(REPO, rel));
     const matches = text.match(/CODEX_MEMBERS=\$\(node -e "[^"]*filter\(m=>m\.engine==='gpt'\|\|m\.engine==='codex'\)[^"]*" \"\$ROUTE_JSON\"[^\n]*/g) || [];
     assert(matches.length === 2, `(cap) ${rel} has two corrected executable predicates`, `found=${matches.length}`);
     for (const [index, snippet] of matches.entries()) {
@@ -7609,7 +7688,11 @@ function smokeSchemaExtraction() {
     '(b) adapter verdictSchema function has no inline schema object body', adapterPath);
 
   const reviewPath = path.join(REPO, 'shared', 'forge-review.md');
-  const reviewSource = fs.readFileSync(reviewPath, 'utf8');
+  // The anchors below are LF-only ('\n\nlet challenge = null'). With core.autocrlf=true a
+  // Windows checkout delivers CRLF, indexOf misses, and the slice runs to end-of-block —
+  // which then fails to parse and reports a phantom schema drift. Line endings are not
+  // content, so normalize before anchoring.
+  const reviewSource = readRepoText(reviewPath);
   const engineStart = reviewSource.indexOf("export const meta = {");
   const engineEnd = reviewSource.indexOf('**Return schema:**', engineStart);
   const engine = reviewSource.slice(engineStart, engineEnd);
@@ -8000,7 +8083,7 @@ function smokeSidecarEnvPromotion() {
     JSON.stringify(donePromotion));
 
   // C — canonical spec, executable mirrors, and planner guidance.
-  const dispatch = fs.readFileSync(path.join(REPO, 'shared', 'forge-dispatch.md'), 'utf8');
+  const dispatch = readRepoText(path.join(REPO, 'shared', 'forge-dispatch.md'));
   assert(/forge-env-promote\.js/.test(dispatch)
       && ['git-commit-required', 'gsd-write-refused', 'out-of-scope-test-failure', 'network-required', 'sandbox-exec-blocked']
         .every(reason => dispatch.includes(reason))
@@ -8017,7 +8100,7 @@ function smokeSidecarEnvPromotion() {
       .every(reason => new RegExp(`['"]${reason}['"]`).test(skill)),
     `(c) ${name} mirror does not redefine the environment allowlist`);
   }
-  const planner = fs.readFileSync(path.join(REPO, 'agents', 'forge-planner.md'), 'utf8');
+  const planner = readRepoText(path.join(REPO, 'agents', 'forge-planner.md'));
   assert(/sidecar/.test(planner) && /\.gsd\/\*\*/.test(planner),
     '(c) planner guidance marks .gsd/** as sidecar/orchestrator-owned');
   const source = fs.readFileSync(__filename, 'utf8');
@@ -8119,10 +8202,10 @@ function smokeSandboxExecBlocked() {
   cleanup(fixture);
 
   const files = ['scripts/forge-xllm.js', 'scripts/forge-env-promote.js', 'shared/forge-dispatch.md', 'scripts/forge-smoke.js', 'scripts/forge-reverify.js', 'scripts/forge-reverify.test.js'];
-  for (const file of files) assert((fs.readFileSync(path.join(REPO, file), 'utf8').match(/sandbox-exec-blocked/g) || []).length >= 1,
+  for (const file of files) assert((readRepoText(path.join(REPO, file)).match(/sandbox-exec-blocked/g) || []).length >= 1,
     `(d) ${file} contains sandbox-exec-blocked`);
   for (const name of ['forge-auto', 'forge-next', 'forge-task']) {
-    const skill = fs.readFileSync(path.join(REPO, 'skills', name, 'SKILL.md'), 'utf8');
+    const skill = readRepoText(path.join(REPO, 'skills', name, 'SKILL.md'));
     assert(/node "\$FORGE_SCRIPTS_DIR\/forge-reverify\.js"[^\n]*--apply/.test(skill) && /orchestrator_reverification/.test(skill),
       `(d) ${name} mirror has executable re-verification invocation and event`);
     assert(!['git-commit-required', 'gsd-write-refused', 'out-of-scope-test-failure', 'network-required', 'sandbox-exec-blocked']
@@ -8276,10 +8359,10 @@ function smokeCleanupRegistryMode() {
 function smokeXllmStateSliceQualified() {
   process.stdout.write('\n▸ Section 59: slice-qualified task-level xllm state contract\n');
   const repo = path.dirname(SCRIPTS);
-  const auto = fs.readFileSync(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'), 'utf8');
-  const next = fs.readFileSync(path.join(repo, 'skills', 'forge-next', 'SKILL.md'), 'utf8');
-  const task = fs.readFileSync(path.join(repo, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
-  const spec = fs.readFileSync(path.join(repo, 'shared', 'forge-dispatch.md'), 'utf8');
+  const auto = readRepoText(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'));
+  const next = readRepoText(path.join(repo, 'skills', 'forge-next', 'SKILL.md'));
+  const task = readRepoText(path.join(repo, 'skills', 'forge-task', 'SKILL.md'));
+  const spec = readRepoText(path.join(repo, 'shared', 'forge-dispatch.md'));
 
   const EXPECTED_HELPER_COUNT = { 'forge-auto': 5, 'forge-next': 4 };
   for (const [name, mirror] of [['forge-auto', auto], ['forge-next', next]]) {
@@ -8308,12 +8391,12 @@ function smokeXllmStateSliceQualified() {
 function smokeReviewModelDiscipline() {
   process.stdout.write('\n▸ Section 72: review model discipline\n');
   const repo = path.dirname(SCRIPTS); const files = ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md', 'shared/forge-review.md'];
-  for (const rel of files) { const text = fs.readFileSync(path.join(repo, rel), 'utf8'); assert(!/forge-(advocate|reviewer).*model:\s*['"](sonnet|opus|fable|haiku)['"]/.test(text), `${rel}: no literal review model`); }
-  const review = fs.readFileSync(path.join(repo, 'shared/forge-review.md'), 'utf8');
+  for (const rel of files) { const text = readRepoText(path.join(repo, rel)); assert(!/forge-(advocate|reviewer).*model:\s*['"](sonnet|opus|fable|haiku)['"]/.test(text), `${rel}: no literal review model`); }
+  const review = readRepoText(path.join(repo, 'shared/forge-review.md'));
   assert(review.includes('review-config-inert') && review.includes('intra_family_debate') && review.includes('Adversarialidade reduzida'), 'review visibility fields wired');
   const resolver = fs.readFileSync(path.join(repo, 'scripts/forge-dispatch-resolve.js'), 'utf8');
   assert(resolver.includes("'review-fix': 'standard'"), 'review-fix tier declared');
-  assert((review + fs.readFileSync(path.join(repo, 'skills/forge-auto/SKILL.md'), 'utf8') + fs.readFileSync(path.join(repo, 'skills/forge-next/SKILL.md'), 'utf8') + fs.readFileSync(path.join(repo, 'skills/forge-task/SKILL.md'), 'utf8')).split('--unit-type review-fix').length - 1 === 4, 'four review-fix resolver sites');
+  assert((review + readRepoText(path.join(repo, 'skills/forge-auto/SKILL.md')) + readRepoText(path.join(repo, 'skills/forge-next/SKILL.md')) + readRepoText(path.join(repo, 'skills/forge-task/SKILL.md'))).split('--unit-type review-fix').length - 1 === 4, 'four review-fix resolver sites');
   assert(fs.existsSync(path.join(repo, 'scripts/forge-review-audit.js')), 'review audit exists');
 }
 
@@ -8378,11 +8461,11 @@ function smokeXllmResultFileGuard() {
   cleanup(mockDir);
 
   // (d) doc-presence with exact per-file counts — never document-wide includes() (M016 S03 R2 lesson).
-  const spec = fs.readFileSync(path.join(repo, 'shared', 'forge-dispatch.md'), 'utf8');
-  const auto = fs.readFileSync(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'), 'utf8');
-  const next = fs.readFileSync(path.join(repo, 'skills', 'forge-next', 'SKILL.md'), 'utf8');
-  const task = fs.readFileSync(path.join(repo, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
-  const review = fs.readFileSync(path.join(repo, 'shared', 'forge-review.md'), 'utf8');
+  const spec = readRepoText(path.join(repo, 'shared', 'forge-dispatch.md'));
+  const auto = readRepoText(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'));
+  const next = readRepoText(path.join(repo, 'skills', 'forge-next', 'SKILL.md'));
+  const task = readRepoText(path.join(repo, 'skills', 'forge-task', 'SKILL.md'));
+  const review = readRepoText(path.join(repo, 'shared', 'forge-review.md'));
 
   const NEEDLE = 'Engine Fallback Discipline';
   const EXPECTED = {
@@ -8483,7 +8566,7 @@ function smokeRoutingDomains() {
 function smokeInitGitGuarantee() {
   process.stdout.write('\n▸ Section 62: /forge-init git guarantee (rev-parse check + AskUserQuestion)\n');
   const repo = path.dirname(SCRIPTS);
-  const read = (file) => fs.readFileSync(path.join(repo, file), 'utf8');
+  const read = (file) => readRepoText(path.join(repo, file));
   const init = read('commands/forge-init.md');
 
   assert(init.includes('git rev-parse --git-dir'),
@@ -8529,7 +8612,7 @@ function smokeInitGitGuarantee() {
 function smokeCodeDirMultiRepo() {
   process.stdout.write('\n▸ Section 63: CODE_DIR multi-repo resolver + sidecar refusal reasons\n');
   const repoRoot = path.dirname(SCRIPTS);
-  const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  const read = (file) => readRepoText(path.join(repoRoot, file));
 
   // Fixture: 2 real git repos under a NON-git root (the multi-repo workspace shape that
   // made the blind find(x=>x.worktree...) point the sidecar at the wrong repo). The
@@ -8642,7 +8725,7 @@ function smokeCodeDirMultiRepo() {
 
     // The three orchestrator mirrors must consume it, or the resolver change is inert.
     for (const skill of ['forge-auto', 'forge-next', 'forge-task']) {
-      const body = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'skills', skill, 'SKILL.md'), 'utf8');
+      const body = readRepoText(path.join(path.dirname(SCRIPTS), 'skills', skill, 'SKILL.md'));
       assert(/CODE_DIR_MULTI_ROOT=\$\(node -e .*multi_repo_root/.test(body),
         `(e2) ${skill} reads multi_repo_root from the resolver`);
       assert(/\[ "\$CODE_DIR_STATUS" != "ok" \] && \[ -n "\$CODE_DIR_MULTI_ROOT" \] && CODE_DIR="\$CODE_DIR_MULTI_ROOT"/.test(body),
@@ -8833,7 +8916,7 @@ function smokeWorkspaceRepos() {
   };
   const contents = {};
   for (const [file, count] of Object.entries(expected)) {
-    contents[file] = fs.readFileSync(path.join(repoRoot, file), 'utf8');
+    contents[file] = readRepoText(path.join(repoRoot, file));
     const got = contents[file].split('WORKSPACE_REPOS').length - 1;
     assert(got === count, `(a) ${file} has exact WORKSPACE_REPOS count (expected ${count}, got ${got})`);
   }
@@ -8949,7 +9032,7 @@ function smokeWindowsSandboxAndWorktreeDeps() {
   assert(['15850', '17179', '14367', '5824', 'assertNoProtectedSidecarChanges'].every((s) => gateComment.includes(s)),
     '70d: gate comment documents Windows issues and surviving defense');
 
-  const template = fs.readFileSync(path.join(SCRIPTS, '..', 'shared', 'templates', 'dispatch', 'execute-task.md'), 'utf8');
+  const template = readRepoText(path.join(SCRIPTS, '..', 'shared', 'templates', 'dispatch', 'execute-task.md'));
   const sentinel = 'dependencies may not be installed';
   const prompt = buildExecutePrompt('# T70\n');
   assert(template.split(sentinel).length - 1 === 1 && prompt.includes(sentinel)
@@ -9024,7 +9107,7 @@ function smokeWindowsSandboxAndWorktreeDeps() {
 function smokeReviewAgentUnavailable() {
   process.stdout.write('\n▸ Section 64: review-agent-unavailable — retry classifier + sanctioned path\n');
   const repoRoot = path.dirname(SCRIPTS);
-  const read = (file) => fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  const read = (file) => readRepoText(path.join(repoRoot, file));
 
   // (a) behavioural: the classifier CLI drives the retry decision of the review binding.
   // The CLI always exits 0 — read the JSON on stdout, never the exit status.
@@ -9220,7 +9303,7 @@ function smokePhasesTable() {
     const actual = table.unit_types;
     assert(expected.every((unitType) => actual.includes(unitType)) && actual.every((unitType) => expected.includes(unitType)),
       '(d) buildPhases unit_types and TIER_DEFAULTS match bidirectionally');
-    const tierDoc = fs.readFileSync(path.join(repoRoot, 'shared', 'forge-tiers.md'), 'utf8');
+    const tierDoc = readRepoText(path.join(repoRoot, 'shared', 'forge-tiers.md'));
     const section = tierDoc.slice(tierDoc.indexOf('## Unit Type → Default Tier'))
       .split(/\n(?:## |---)/)[0];
     const docTypes = [...section.matchAll(/^\|\s*`([a-z-]+)`\s*\|\s*(light|standard|heavy|max)\s*\|/gm)]
@@ -9233,7 +9316,7 @@ function smokePhasesTable() {
       '(e) execute-task renders multiple domains with distinct routing keys', JSON.stringify(executeRows));
 
     const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, 'forge-prefs.schema.json'), 'utf8'));
-    const skill = fs.readFileSync(path.join(repoRoot, 'skills', 'forge-prefs', 'SKILL.md'), 'utf8');
+    const skill = readRepoText(path.join(repoRoot, 'skills', 'forge-prefs', 'SKILL.md'));
     const resolver = fs.readFileSync(path.join(SCRIPTS, 'forge-dispatch-resolve.js'), 'utf8');
     assert(/### Domain-routable vs tier_models-only/.test(tierDoc), '(f) tier documentation has routability subsection');
     assert(schema.properties.routing.description.includes('Somente execute-task (executor) e plan-slice (planner)'),
@@ -9323,7 +9406,7 @@ function smokeDoctorPlanRepo() {
   // (c) anti-inertia: extract the real one-liner from each mirror and RUN it. A mirror that
   // copied the pipeline wrong prints nothing and fails here, not silently in production.
   for (const file of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md']) {
-    const body = fs.readFileSync(path.join(repoRoot, file), 'utf8');
+    const body = readRepoText(path.join(repoRoot, file));
     const m = body.match(/CODE_DIR_HINT=\$\(node -e "([^"]+)" "\$CD_JSON"\)/);
     assert(m, `(c) ${file} has an extractable CODE_DIR_HINT one-liner`);
     if (!m) continue; // a missing pipeline is already a failure; never crash the section
@@ -9335,7 +9418,7 @@ function smokeDoctorPlanRepo() {
   }
   // (d) F2: the loose-task mirror keeps its own run id — removing it to "match" the others
   // would be a regression in the forge-task path.
-  const taskMirror = fs.readFileSync(path.join(repoRoot, 'skills/forge-task/SKILL.md'), 'utf8');
+  const taskMirror = readRepoText(path.join(repoRoot, 'skills/forge-task/SKILL.md'));
   assert(/forge-code-dir\.js[\s\S]{0,400}--run "\$TASK_ID"/.test(taskMirror),
     '(d) forge-task still passes --run "$TASK_ID" to forge-code-dir.js');
 

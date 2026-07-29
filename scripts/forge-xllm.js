@@ -652,9 +652,23 @@ function buildPlanPrompt(contextText) {
  * the npm shim's sibling `node_modules/@openai/codex/bin/codex.js`, launched with
  * the current Node binary — which is what codex.cmd does internally anyway.
  *
+ * FORGE_XLLM_CODEX_BIN overrides resolution (trusted env, same trust level as
+ * PATH): a `.js` value is launched with the current Node binary — this is how
+ * forge-smoke.js injects a cross-platform mock. Without it the smoke could only
+ * mock codex by prepending a `#!/bin/sh` script to PATH, which Windows does not
+ * execute; resolution then fell through to a REAL codex on PATH, turning the
+ * suite non-deterministic (and billable). Mirrors FORGE_XLLM_AGY_BIN.
+ *
  * @returns {{cmd: string, prefixArgs: string[]}}
  */
 function resolveCodexCommand() {
+  const override = process.env.FORGE_XLLM_CODEX_BIN;
+  if (override) {
+    return override.endsWith('.js')
+      ? { cmd: process.execPath, prefixArgs: [override] }
+      : { cmd: override, prefixArgs: [] };
+  }
+
   if (process.platform !== 'win32') {
     return { cmd: 'codex', prefixArgs: [] };
   }
