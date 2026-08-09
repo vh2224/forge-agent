@@ -127,7 +127,7 @@ const INVENTORY = [
   // — evidence —
   { key: 'evidence.mode', type: 'string', default: 'lenient', source: "scripts/forge-hook.js readEvidenceMode (let mode = 'lenient'; whitelist fallback lenient)" },
   // — file_audit —
-  { key: 'file_audit.ignore_list', type: 'array', default: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'dist/**', 'build/**', '.next/**', '.gsd/**'], source: 'agents/forge-completer.md:156 hardcoded DEFAULT list' },
+  { key: 'file_audit.ignore_list', type: 'array', default: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'dist/**', 'build/**', '.next/**', '.gsd/**', 'node_modules/**'], source: 'agents/forge-completer.md:146 hardcoded DEFAULT list' },
   // — memory cost policy —
   { key: 'memory.extraction', type: 'string', default: 'adaptive', source: 'scripts/forge-cost-policy.js normalizeMemoryMode; skills forge-auto/next/task adaptive gate' },
   // — checker_memory —
@@ -391,6 +391,29 @@ function schemaDefault(key) {
   if (!hit) throw new Error(`${key}: not in schema`);
   return hit.node.default;
 }
+// ── 6b. Island join: schema default ↔ the list hardcoded in the completer ────
+// The parity net was TWO DISCONNECTED ISLANDS: (A) schema ↔ INVENTORY ↔
+// reference.md, and (B) completer.md ↔ Swift defaultIgnoreList. Nothing asserted
+// A == B — the INVENTORY's `source:` field naming agents/forge-completer.md:146 is
+// a COMMENT, not a read. Editing the schema and forgetting the completer left both
+// suites green, which is the same "the 4th site nobody wired" shape that produced
+// the T03 repair (S03 review R23). This check reads the completer's real literals.
+check('file_audit.ignore_list: schema default == the completer.md hardcoded fallback', () => {
+  const completerPath = path.join(__dirname, '..', 'agents', 'forge-completer.md');
+  const text = fs.readFileSync(completerPath, 'utf8');
+  // Both occurrences on the FILE_AUDIT_IGNORE line: the parse branch and the catch
+  // branch. They must agree with each other AND with the schema.
+  const literals = [...text.matchAll(/\[\s*'package-lock\.json'[^\]]*\]/g)]
+    .map((src) => JSON.parse(src[0].replace(/'/g, '"')));
+  assert(literals.length >= 2,
+    `expected >= 2 hardcoded ignore_list literals in agents/forge-completer.md, found ${literals.length} — extraction regressed`);
+  const fromSchema = schemaDefault('file_audit.ignore_list');
+  literals.forEach((literal, i) => {
+    assert(deepEqual(literal, fromSchema),
+      `completer.md literal #${i + 1} diverges from the schema default:\n    completer: ${JSON.stringify(literal)}\n    schema:    ${JSON.stringify(fromSchema)}`);
+  });
+});
+
 const WITNESSES = [
   // hook-only keys (read by scripts/forge-hook.js, some absent from template blocks)
   ['evidence.mode', 'lenient', "scripts/forge-hook.js readEvidenceMode: let mode = 'lenient'"],

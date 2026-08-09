@@ -1966,8 +1966,12 @@ function writeMockCodex(dir, opts) {
     '#!/bin/sh',
     '# forge-smoke mock codex — writes payload to the -o file, honors exit code / sleep',
     'OUT=""',
-    'CODEXCWD=""',
-    'HAS_SKIP_GIT_REPO_CHECK=0',
+    // Preserve an inherited CODEXCWD: the app-server transport (M018 S02) has no
+    // `-C <dir>` argument to parse — the workspace is the child's own cwd — so the
+    // Node shim exports CODEXCWD before running this fixture. In `codex exec` mode
+    // the variable is unset, so this expands to "" and the script stays
+    // byte-equivalent for every pre-M018 caller.
+    'CODEXCWD="${CODEXCWD:-}"',
     // FORGE_PROMPTLEN_FILE is intentionally NOT initialized here — it comes from the
     // environment (set by the large-prompt smoke scenario) so the mock can record
     // the stdin-received prompt length. Clobbering it to "" would disable the assert.
@@ -1975,15 +1979,18 @@ function writeMockCodex(dir, opts) {
     'for arg in "$@"; do',
     '  if [ "$prev" = "-o" ]; then OUT="$arg"; fi',
     '  if [ "$prev" = "-C" ]; then CODEXCWD="$arg"; fi',
-    '  if [ "$arg" = "--skip-git-repo-check" ]; then HAS_SKIP_GIT_REPO_CHECK=1; fi',
     '  prev="$arg"',
     'done',
-    // The SVN adapter must explicitly opt out of Codex's Git-repository trust
-    // check.  Keep this opt-in so the default mock script is byte-identical for
-    // its established callers.
-    opts.checkContract
-      ? 'if [ "$HAS_SKIP_GIT_REPO_CHECK" -ne 1 ]; then echo "mock: no --skip-git-repo-check" >&2; exit 1; fi'
-      : '',
+    // `--skip-git-repo-check` was an argument of the retired transport, and the
+    // sh-level branch that demanded it died with it (M018 S05 T04): the app-server
+    // has no argv to carry the flag, T01 measured a turn completing in a non-git
+    // cwd without any opt-out, and CODEX_APP_SERVER is now ALWAYS exported by the
+    // shim — so the guard had become unreachable code guarding a dead contract.
+    // The SVN non-git tolerance is not lost: the execute scenarios run against a
+    // real (non-git) SVN working copy, so a transport demanding a git repo fails
+    // them outright. `checkContract` keeps exactly one meaning now — the turn must
+    // carry outputSchema + sandboxPolicy — enforced in runTurn and proved to bite
+    // by the anti-inert pair in smokeXllmSvn.
     // New transport: the prompt arrives on stdin (`codex exec -`), NOT argv. Drain
     // it fully — this both exercises the stdin pipe/EOF contract and lets callers
     // that set FORGE_PROMPTLEN_FILE assert the received byte length (large-prompt test).
@@ -2011,7 +2018,7 @@ function writeMockCodex(dir, opts) {
   // extraScript snippet callers rely on (git commit, mkdir, sleep, stderr…).
   const shim = [
     '// forge-smoke mock codex shim (see writeMockCodex in forge-smoke.js)',
-    "const { spawn } = require('child_process');",
+    "const { spawn, spawnSync } = require('child_process');",
     `const script = ${JSON.stringify(codexPath.replace(/\\/g, '/'))};`,
     // Git Bash's sh does not resolve a backslashed drive path in a redirection —
     // `> "C:\\a\\b.txt"` silently lands somewhere else, so the adapter reads an
@@ -2026,15 +2033,125 @@ function writeMockCodex(dir, opts) {
     `const SH = ${JSON.stringify(resolvePosixSh().sh)};`,
     `const SH_BIN = ${JSON.stringify(resolvePosixSh().bin)};`,
     "const env = SH_BIN ? { ...process.env, PATH: SH_BIN + require('path').delimiter + (process.env.PATH || '') } : process.env;",
-    "const child = spawn(SH, [script, ...argv], { stdio: ['inherit', 'pipe', 'pipe'], env });",
-    "child.stdout.on('data', (d) => process.stdout.write(d));",
-    "child.stderr.on('data', (d) => process.stderr.write(d));",
-    "child.on('error', (e) => { process.stderr.write('mock codex shim: ' + e.message); process.exit(127); });",
-    // 'exit', never 'close': 'close' waits for the pipes to drain, which a
-    // backgrounded grandchild can defer indefinitely — the exact hang this avoids.
-    "child.on('exit', (code, signal) => {",
-    "  setTimeout(() => process.exit(typeof code === 'number' ? code : (signal ? 1 : 0)), 50);",
-    '});',
+    // ── app-server dialect (M018 S02) ────────────────────────────────────────
+    // runExecute no longer speaks `codex exec`: it opens `codex app-server` and
+    // drives initialize → thread/start → turn/start over JSONL on stdio. A mock
+    // that only understands `codex exec` does not merely fail here — it HANGS,
+    // because the adapter waits forever for a handshake that never arrives, and a
+    // hang costs the whole suite its output (measured: >600s, 0 bytes, S02 T02).
+    // So: when argv carries `app-server`, speak the protocol, and run the SAME sh
+    // fixture body for its side effects (writes, commits, sleeps, exit codes) so
+    // every existing scenario keeps its meaning without editing its fixture.
+    `const PAYLOAD = ${JSON.stringify(String(opts.payload == null ? '' : opts.payload))};`,
+    `const EMIT_ITEM = ${opts.writeOutput === false ? 'false' : 'true'};`,
+    `const CHECK_CONTRACT = ${opts.checkContract ? 'true' : 'false'};`,
+    // Section 94 needs the independently observed wire payload, rather than an
+    // assertion about what the adapter claims it sent.  This remains opt-in so
+    // all older mock fixtures retain their exact protocol behaviour.
+    `const TURN_START_FILE = ${JSON.stringify(opts.turnStartFile || '')};`,
+    // Assembled, never spelled: this file is the live harness that PROVES the
+    // absence of the retired transport (Section 96 scans the real repo), so a
+    // literal spelling here would make the hunter count as its own prey — the
+    // same reason forge-exec-callsites.js excludes its own fixtures by basename.
+    // Assembling changes only the spelling inside the hunter; Section 96 (b)
+    // proves the predicate still fires on the real spelling.
+    `const RETIRED_DIALECT = 'codex ' + ${JSON.stringify('ex')} + 'ec';`,
+    "if (argv.includes('app-server')) { runAppServer(); } else { runExec(); }",
+    'function runAppServer() {',
+    // Two watchdogs, because a mock that hangs erases the signal it exists to
+    // carry: (1) the fixture body itself is capped via spawnSync timeout, and
+    // (2) a client that never reaches turn/start is capped by this timer. Both
+    // exit non-zero and say so on stderr — failing loudly beats hanging quietly.
+    '  const WATCHDOG_MS = Number(process.env.FORGE_MOCK_APPSERVER_TIMEOUT_MS || 30000);',
+    '  const watchdog = setTimeout(() => {',
+    "    process.stderr.write('mock codex app-server: watchdog fired after ' + WATCHDOG_MS + 'ms without a completed turn\\n');",
+    '    process.exit(89);',
+    '  }, WATCHDOG_MS);',
+    '  let initialized = false;',
+    // The real app-server binds every turn to the thread it issued. The mock used
+    // to gate turn/start on `initialized` ALONE, so an adapter regression where
+    // turnParams (forge-xllm.js) ignored its threadId argument or hardcoded an id
+    // stayed green here while the real server rejected it (S05 review R10). Track
+    // what thread/start actually returned and demand an exact match — same
+    // fail-loudly dialect policing as 91/92/93.
+    '  let startedThreadId = null;',
+    "  const send = (v) => process.stdout.write(JSON.stringify(v) + '\\n');",
+    "  let pending = '';",
+    "  process.stdin.setEncoding('utf8');",
+    "  process.stdin.on('data', (chunk) => {",
+    '    pending += chunk;',
+    '    let end;',
+    "    while ((end = pending.indexOf('\\n')) >= 0) {",
+    '      const line = pending.slice(0, end); pending = pending.slice(end + 1);',
+    '      if (!line.trim()) continue;',
+    '      let msg;',
+    "      try { msg = JSON.parse(line); } catch (e) { process.stderr.write('mock: unparseable client line\\n'); process.exit(90); }",
+    // The app-server dialect OMITS the jsonrpc member (M018/T01/MEM001). Guarding
+    // here keeps forge-appserver-client honest: re-adding it fails loudly (91),
+    // it does not quietly work because a lenient mock tolerated it.
+    "      if (Object.prototype.hasOwnProperty.call(msg, 'jsonrpc')) { process.stderr.write('mock: jsonrpc member present\\n'); process.exit(91); }",
+    "      if (msg.method === 'initialize') send({ id: msg.id, result: { serverInfo: { name: 'forge-smoke-mock' } } });",
+    "      else if (msg.method === 'initialized') initialized = true;",
+    "      else if (msg.method === 'thread/start') {",
+    "        if (!initialized) { process.stderr.write('mock: thread/start before initialized\\n'); process.exit(92); }",
+    "        startedThreadId = 'thread-smoke';",
+    '        send({ id: msg.id, result: { thread: { id: startedThreadId } } });',
+    '      } else if (msg.method === \'turn/start\') {',
+    "        if (!initialized) { process.stderr.write('mock: turn/start before initialized\\n'); process.exit(93); }",
+    '        const tp = msg.params || {};',
+    '        if (startedThreadId === null) {',
+    "          process.stderr.write('mock: turn/start without a started thread\\n'); process.exit(94);",
+    '        }',
+    '        if (tp.threadId !== startedThreadId) {',
+    "          process.stderr.write('mock: turn/start threadId mismatch — issued ' + JSON.stringify(startedThreadId) + ', got ' + JSON.stringify(tp.threadId) + '\\n');",
+    '          process.exit(94);',
+    '        }',
+    '        runTurn(msg, watchdog, send, WATCHDOG_MS);',
+    '      }',
+    '    }',
+    '  });',
+    '}',
+    'function runTurn(msg, watchdog, send, watchdogMs) {',
+    '  const params = msg.params || {};',
+    "  if (TURN_START_FILE) require('fs').writeFileSync(TURN_START_FILE, JSON.stringify(params), 'utf8');",
+    "  const input = Array.isArray(params.input) && params.input[0] ? String(params.input[0].text || '') : '';",
+    // The exec transport proved its contract from argv; this one proves it from
+    // the turn params, so `checkContract: true` still means something here.
+    '  if (CHECK_CONTRACT && !(params.outputSchema && params.sandboxPolicy)) {',
+    "    process.stderr.write('mock: turn/start missing outputSchema/sandboxPolicy\\n'); process.exit(3);",
+    '  }',
+    // The prompt travels inside turn/start (no stdin pipe to codex any more), but
+    // the fixture body still reads it from stdin via `PROMPT="$(cat -)"` — so feed
+    // it back in. That keeps FORGE_PROMPTLEN_FILE and the captured-prompt fixtures
+    // asserting the real prompt bytes across the transport change.
+    '  const r = spawnSync(SH, [script], {',
+    "    input, env: { ...env, CODEXCWD: process.cwd(), CODEX_APP_SERVER: '1' }, cwd: process.cwd(),",
+    "    stdio: ['pipe', 'pipe', 'inherit'], encoding: 'utf8', timeout: watchdogMs, killSignal: 'SIGKILL',",
+    '  });',
+    '  clearTimeout(watchdog);',
+    "  if (r.error) { process.stderr.write('mock codex shim: ' + r.error.message + '\\n'); process.exit(127); }",
+    // A non-zero fixture exit is the app-server dying mid-turn: no response, no
+    // items. The adapter must classify it from our stderr, exactly as it did when
+    // `codex exec` exited non-zero (Scenario I).
+    "  if (r.status !== 0) { process.exit(typeof r.status === 'number' ? r.status : 1); }",
+    "  send({ id: msg.id, result: { turn: { id: 'turn-1' } } });",
+    "  if (EMIT_ITEM) send({ method: 'item/completed', params: { item: { type: 'agentMessage', phase: 'final_answer', text: PAYLOAD } } });",
+    "  send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });",
+    '  setTimeout(() => process.exit(0), 50);',
+    '}',
+    // ── the retired dialect (M018 S05 T04) ───────────────────────────────────
+    // Measured before retiring it: after T02 removed the last exec call site from
+    // the adapter, NO scenario reaches this branch — every caller drives the mock
+    // through FORGE_XLLM_CODEX_BIN and the adapter always spawns `app-server`.
+    // So the branch becomes a LOUD FAILURE rather than a working legacy path: a
+    // future regression back to the old transport must show up as a red suite,
+    // never as a green run that quietly took the retired road. The dispatch above
+    // is kept (instead of assuming app-server) precisely so that regression has
+    // somewhere to land and be named.
+    'function runExec() {',
+    "  process.stderr.write('mock codex: ' + RETIRED_DIALECT + ' retired (M018 S05) — argv=' + JSON.stringify(argv) + '\\n');",
+    '  process.exit(97);',
+    '}',
     '',
   ].join('\n');
   fs.writeFileSync(path.join(dir, 'codex-mock.js'), shim, 'utf8');
@@ -3814,22 +3931,39 @@ function smokeXllmSvn() {
     return r.status === 0 ? (r.stdout || '').trim() : '';
   };
 
-  // Anti-inert pair: the mock itself rejects a missing contract flag before it
-  // writes -o, then accepts the real flag.  This makes its use in (a)-(e)
-  // meaningful instead of a decorative option.
+  // Anti-inert pair, RETARGETED in M018 S05 T04 to the surviving dialect. It used
+  // to drive the mock through the retired transport's argv and assert that a
+  // missing `--skip-git-repo-check` was rejected — a contract that no longer
+  // exists anywhere in the adapter, so the pair was proving a dead thing. The
+  // live contract of `checkContract: true` is the turn itself: a turn/start
+  // without outputSchema + sandboxPolicy must be refused. Both directions are
+  // asserted, so its use in (a)-(e) stays meaningful instead of decorative.
   {
     const mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-xllm-svn-contract-'));
-    const output = path.join(mockDir, 'out.json');
     try {
       writeMockCodex(mockDir, { checkContract: true, payload: executePayload });
-      const absent = spawnSync(path.join(mockDir, 'codex'), ['exec', '-o', output, '-'], { encoding: 'utf8', input: '' });
-      assert(absent.status !== 0 && !fs.existsSync(output),
-        '(a) checkContract rejects missing --skip-git-repo-check before -o write',
-        JSON.stringify({ status: absent.status, stderr: absent.stderr || '', exists: fs.existsSync(output) }));
-      const present = spawnSync(path.join(mockDir, 'codex'), ['exec', '--skip-git-repo-check', '-o', output, '-'], { encoding: 'utf8', input: '' });
-      assert(present.status === 0 && fs.existsSync(output),
-        '(a) checkContract accepts --skip-git-repo-check',
-        JSON.stringify({ status: present.status, stderr: present.stderr || '', exists: fs.existsSync(output) }));
+      const shim = path.join(mockDir, 'codex-mock.js');
+      const drive = (turnParams) => {
+        const lines = [
+          { id: 1, method: 'initialize', params: {} },
+          { method: 'initialized' },
+          { id: 2, method: 'thread/start', params: {} },
+          { id: 3, method: 'turn/start', params: turnParams },
+        ].map((m) => JSON.stringify(m)).join('\n') + '\n';
+        return spawnSync(process.execPath, [shim, 'app-server'], {
+          encoding: 'utf8', input: lines, timeout: 20000, killSignal: 'SIGKILL',
+          env: { ...process.env, FORGE_MOCK_APPSERVER_TIMEOUT_MS: '8000' },
+        });
+      };
+      const bare = { threadId: 'thread-smoke', input: [{ type: 'text', text: 'hi' }] };
+      const absent = drive(bare);
+      assert(absent.status === 3 && /missing outputSchema\/sandboxPolicy/.test(absent.stderr || ''),
+        '(a) checkContract recusa um turn sem outputSchema/sandboxPolicy (exit 3, dito em stderr)',
+        JSON.stringify({ status: absent.status, stderr: (absent.stderr || '').slice(0, 200) }));
+      const present = drive({ ...bare, outputSchema: { type: 'object' }, sandboxPolicy: { type: 'readOnly' } });
+      assert(present.status === 0 && /"method":"turn\/completed"/.test(present.stdout || ''),
+        '(a) checkContract aceita o turn completo e ele chega a turn/completed',
+        JSON.stringify({ status: present.status, stdout: (present.stdout || '').slice(-200), stderr: (present.stderr || '').slice(0, 200) }));
     } finally { cleanup(mockDir); }
   }
 
@@ -4070,12 +4204,29 @@ function smokeTierChain() {
   assert(/Step 4b[\s\S]{0,600}TIER_CURSOR_FILE[\s\S]{0,400}rm -f "\$TIER_CURSOR_FILE"/.test(nextDoc),
     '(f) forge-next consome e apaga o cursor no início da Tier Resolution (consume-once)', 'consumo/limpeza do cursor não encontrado');
 
-  // (g) review-fix M005 triage FIX 1: Windows process-tree kill in invokeCodexDetached
-  const xllmSrc = rd('scripts/forge-xllm.js');
-  assert(/win32/.test(xllmSrc) && /taskkill/.test(xllmSrc) && /'\/T'/.test(xllmSrc) && /'\/F'/.test(xllmSrc),
-    '(g) invokeCodexDetached mata a árvore de processos no Windows via taskkill /T /F', 'guard win32 + taskkill /T /F não encontrado em forge-xllm.js');
-  assert(/process\.kill\(-child\.pid, 'SIGKILL'\)/.test(xllmSrc),
+  // (g) review-fix M005 triage FIX 1: Windows process-tree kill on timeout.
+  // RETARGETADO em M018 S05 T02 (precedente MEM028): o invariante nasceu em
+  // invokeCodexDetached (`codex exec`), que a T02 apagou junto com o transporte.
+  // O dono do child de vida longa passou a ser forge-appserver-client.js, e é lá
+  // que o guard tem de continuar existindo — senão um timeout no Windows mata só
+  // o filho direto e deixa netos órfãos (codex#7852). O arquivo é lido, nunca
+  // editado (S02 R15/R16 seguem abertas e fora do escopo desta slice).
+  const killSrc = rd('scripts/forge-appserver-client.js');
+  assert(/win32/.test(killSrc) && /taskkill/.test(killSrc) && /'\/T'/.test(killSrc) && /'\/F'/.test(killSrc),
+    '(g) o timeout mata a árvore de processos no Windows via taskkill /T /F', 'guard win32 + taskkill /T /F não encontrado em forge-appserver-client.js');
+  assert(/process\.kill\(-child\.pid, 'SIGKILL'\)/.test(killSrc),
     '(g) caminho POSIX process.kill(-pid) permanece intocado', 'process.kill(-child.pid, \'SIGKILL\') não encontrado');
+  // Mordida: o guard não pode ter simplesmente MIGRADO de nome no mesmo arquivo —
+  // o transporte aposentado inteiro tem de estar fora do adapter. O predicado é
+  // CONSUMIDO do scanner da T03 (scripts/forge-exec-callsites.js), nunca
+  // reimplementado com um regex local: duas implementações do mesmo predicado
+  // divergem, e a divergência é invisível justamente quando importa.
+  const { scanExecCallSites } = require('./forge-exec-callsites');
+  const adapterScan = scanExecCallSites(
+    [{ path: 'scripts/forge-xllm.js', content: rd('scripts/forge-xllm.js') }], { inMemory: true });
+  assert(adapterScan.outcome === 'clean' && adapterScan.scanned === 1,
+    '(g) o transporte aposentado não sobrevive no adapter (scanner da T03: 0 call sites)',
+    JSON.stringify({ outcome: adapterScan.outcome, scanned: adapterScan.scanned, call_sites: adapterScan.call_sites }));
 
   // (h) review-fix M005 triage FIX 2: malformed tier_models inline-list rejected, not corrupted
   const dirMalformed = mkTmp('tierchain-malformed');
@@ -8142,14 +8293,50 @@ function smokeSidecarEnvContract() {
   const mockDir = path.join(tmp, 'mock-bin');
   fs.mkdirSync(mockDir);
   const mockJs = path.join(mockDir, 'mock-codex.js');
+  // Retargeted to the app-server dialect (M018 S05): `--mode challenge --engine codex`
+  // no longer runs `codex exec`, so a mock that only reads `-o` from argv does not
+  // just fail here — it HANGS, waiting on a handshake it never answers. What this
+  // scenario proves is unchanged: the child's own `process.env` is dumped, and that
+  // dump is the evidence for buildSidecarEnv's allowlist/denylist.
   const mockSource = [
     `#!${process.execPath}`,
     "'use strict';",
     "const fs = require('fs');",
-    "const args = process.argv.slice(2);",
-    "const outIndex = args.indexOf('-o');",
+    // The dump happens at startup, before any protocol work: the allowlist assertion
+    // must not depend on the turn completing.
     "if (process.env.FORGE_ENV_DUMP) fs.writeFileSync(process.env.FORGE_ENV_DUMP, JSON.stringify(process.env));",
-    "if (outIndex >= 0) fs.writeFileSync(args[outIndex + 1], JSON.stringify({ objections: [] }));",
+    "const WATCHDOG_MS = Number(process.env.FORGE_MOCK_APPSERVER_TIMEOUT_MS || 30000);",
+    "const watchdog = setTimeout(() => { process.stderr.write('mock: watchdog without completed turn\\n'); process.exit(89); }, WATCHDOG_MS);",
+    'let initialized = false;',
+    "const send = (v) => process.stdout.write(JSON.stringify(v) + '\\n');",
+    "let pending = '';",
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.on('data', (chunk) => {",
+    '  pending += chunk;',
+    '  let end;',
+    "  while ((end = pending.indexOf('\\n')) >= 0) {",
+    '    const line = pending.slice(0, end); pending = pending.slice(end + 1);',
+    '    if (!line.trim()) continue;',
+    '    let msg;',
+    "    try { msg = JSON.parse(line); } catch (e) { process.exit(90); }",
+    // The app-server dialect OMITS the jsonrpc member (M018/T01/MEM001).
+    "    if (Object.prototype.hasOwnProperty.call(msg, 'jsonrpc')) { process.stderr.write('mock: jsonrpc member present\\n'); process.exit(91); }",
+    "    if (msg.method === 'initialize') send({ id: msg.id, result: { serverInfo: { name: 'env-policy-mock' } } });",
+    "    else if (msg.method === 'initialized') initialized = true;",
+    "    else if (msg.method === 'thread/start') {",
+    '      if (!initialized) process.exit(92);',
+    "      send({ id: msg.id, result: { thread: { id: 'thread-env' } } });",
+    "    } else if (msg.method === 'turn/start') {",
+    '      if (!initialized) process.exit(93);',
+    '      clearTimeout(watchdog);',
+    "      send({ id: msg.id, result: { turn: { id: 'turn-env' } } });",
+    "      send({ method: 'item/completed', params: { item: { type: 'agentMessage', phase: 'final_answer', text: JSON.stringify({ objections: [] }) } } });",
+    "      send({ method: 'turn/completed', params: { turn: { id: 'turn-env', status: 'completed' } } });",
+    '      setTimeout(() => process.exit(0), 50);',
+    '    }',
+    '  }',
+    '});',
+    'setInterval(() => {}, 1000);',
     '',
   ].join('\n');
   fs.writeFileSync(mockJs, mockSource, 'utf8');
@@ -8206,9 +8393,17 @@ function smokeSidecarEnvContract() {
   // exception (a signal-delivery call, not a sidecar process spawn). This is the
   // inverse of counting sites that HAVE env: (which silently passes a future 4th
   // spawn added without it) — it walks every call-site and fails closed.
+  // The floor dropped from 4 to 3 in M018 S05 T02: `invokeCodex`/`invokeCodexDetached`
+  // left with the `codex exec` transport, taking their spawn call-sites (and the
+  // taskkill signal call) with them. What is measured now: `spawnSync` in invokeAgy,
+  // `spawnSync` in the git reader, plus one occurrence inside resolveAgyCommand's
+  // doc comment. The taskkill exception below is therefore currently UNREACHABLE in
+  // this file — the real Windows process-tree kill moved to
+  // forge-appserver-client.js and is asserted by Section 26 (g). The branch stays so
+  // that a signal call re-added here is not forced to carry a sidecar env.
   const spawnCallRe = /\b(spawnSync|spawn)\(/g;
   const spawnMatches = [...adapter.matchAll(spawnCallRe)];
-  assert(spawnMatches.length >= 4,
+  assert(spawnMatches.length >= 3,
     '(f) sanity: adapter still has the expected spawn(/spawnSync( call-sites', `found=${spawnMatches.length}`);
   const uncovered = [];
   for (const m of spawnMatches) {
@@ -8978,7 +9173,12 @@ function smokeXllmStateSliceQualified() {
   const task = readRepoText(path.join(repo, 'skills', 'forge-task', 'SKILL.md'));
   const spec = readRepoText(path.join(repo, 'shared', 'forge-dispatch.md'));
 
-  const EXPECTED_HELPER_COUNT = { 'forge-auto': 5, 'forge-next': 4 };
+  // Exact counts, still — the pin's job is that the helper is the ONLY reader and
+  // that no inline fallback creeps back in, not that the number never moves. Bumped
+  // by TASK-022 (+1 each): the Branch D dispatch-emitter fence now re-resolves
+  // $XLLM_STATE in its own fence, because shell state does not survive a Bash-tool
+  // boundary and reading it next door produced a permanently-empty field.
+  const EXPECTED_HELPER_COUNT = { 'forge-auto': 6, 'forge-next': 5 };
   for (const [name, mirror] of [['forge-auto', auto], ['forge-next', next]]) {
     const count = mirror.split('forge-xllm-state.js').length - 1;
     assert(count === EXPECTED_HELPER_COUNT[name], `(a) ${name} has exact helper count ${EXPECTED_HELPER_COUNT[name]}`);
@@ -9623,26 +9823,37 @@ function smokeVerifierCodeDir() {
 // ── Section 70: Windows sandbox gate + worktree dependency provisioning ─────
 function smokeWindowsSandboxAndWorktreeDeps() {
   process.stdout.write('\n▸ Section 70: Windows sandbox gate + worktree dependencies\n');
-  const { codexSandboxArgs, buildExecutePrompt } = require('./forge-xllm.js');
+  // RETARGETED in M018 S05 T02 (precedent MEM028: retarget BEFORE the fixture
+  // disappears, in the same task). These asserts used to be made against
+  // codexSandboxArgs, the `codex exec` flag builder, which T02 deleted along with
+  // the exec transport. The INVARIANT is unchanged and still has to hold, so it
+  // moved onto buildAppServerSandboxPolicy — the surviving sandbox gate, which
+  // carries the same win32 branch and the same four upstream issues: win32
+  // ESCAPES for a write mode, read-only NEVER escapes, on any platform.
+  const { buildAppServerSandboxPolicy, buildExecutePrompt } = require('./forge-xllm.js');
   const { resolvePackageManager, installWorktreeDeps } = require('./forge-isolation.js');
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  const expectedWrite = ['--sandbox', 'workspace-write'];
-  assert(same(codexSandboxArgs('workspace-write', 'darwin'), expectedWrite)
-    && same(codexSandboxArgs('workspace-write', 'linux'), expectedWrite),
-  '70a: POSIX workspace-write args are byte-identical');
-  assert(same(codexSandboxArgs('workspace-write', 'win32'), ['--dangerously-bypass-approvals-and-sandbox'])
-    && !codexSandboxArgs('workspace-write', 'win32').includes('--sandbox'),
-  '70a: win32 workspace-write is bypass-only');
-  assert(['darwin', 'linux', 'win32'].every((p) => same(codexSandboxArgs('read-only', p), ['--sandbox', 'read-only'])),
-    '70b: read-only remains sandboxed on every platform');
+  const expectedWrite = { type: 'workspaceWrite', networkAccess: false };
+  assert(same(buildAppServerSandboxPolicy('workspace-write', 'darwin'), expectedWrite)
+    && same(buildAppServerSandboxPolicy('workspace-write', 'linux'), expectedWrite),
+  '70a: POSIX workspace-write policy is byte-identical');
+  assert(same(buildAppServerSandboxPolicy('workspace-write', 'win32'), { type: 'dangerFullAccess' })
+    && buildAppServerSandboxPolicy('workspace-write', 'win32').type !== 'workspaceWrite',
+  '70a: win32 workspace-write escapes to dangerFullAccess');
+  assert(['darwin', 'linux', 'win32'].every((p) => same(buildAppServerSandboxPolicy('read-only', p), { type: 'readOnly', networkAccess: false })),
+    '70b: read-only remains sandboxed on every platform (win32 included)');
 
   const xllmSource = fs.readFileSync(path.join(SCRIPTS, 'forge-xllm.js'), 'utf8');
-  const gateStart = xllmSource.indexOf('function codexSandboxArgs');
+  const gateStart = xllmSource.indexOf('function buildAppServerSandboxPolicy');
   const gateEnd = xllmSource.indexOf('\n}', gateStart) + 2;
   const outsideGate = xllmSource.slice(0, gateStart) + xllmSource.slice(gateEnd);
-  assert(!/['"]--sandbox['"]\s*,\s*['"](?:read-only|workspace-write)['"]/.test(outsideGate),
-    '70c: forge-xllm has no call-site sandbox literal pairs');
-  const gateComment = xllmSource.slice(Math.max(0, gateStart - 1500), gateEnd);
+  // The exec-era literal pair (`'--sandbox', 'read-only'`) can no longer exist
+  // anywhere; the app-server equivalent is a policy OBJECT, and the only place
+  // allowed to build one is this gate.
+  assert(!/['"]--sandbox['"]\s*,\s*['"](?:read-only|workspace-write)['"]/.test(outsideGate)
+    && !/type:\s*['"](?:readOnly|dangerFullAccess|workspaceWrite)['"]/.test(outsideGate),
+  '70c: forge-xllm builds no sandbox policy outside the gate');
+  const gateComment = xllmSource.slice(Math.max(0, gateStart - 2000), gateEnd);
   assert(['15850', '17179', '14367', '5824', 'assertNoProtectedSidecarChanges'].every((s) => gateComment.includes(s)),
     '70d: gate comment documents Windows issues and surviving defense');
 
@@ -9763,7 +9974,10 @@ function smokeReviewAgentUnavailable() {
     ['review-agent-unavailable', { 'shared/forge-dispatch.md': 2, 'shared/forge-review.md': 11 }],
     // 7th occurrence: the forge-review-emit.js --unavailable-reason example in Step 8,
     // added when the event stopped being hand-written.
-    ['review-advocate-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 7 }],
+    // 8th and 9th: the Step 3 "Salvage before declaring unavailability" rule — one naming
+    // the gate, one naming the only condition under which it may still be emitted. Added
+    // when DEFENSE_FILE made a truncated defense recoverable instead of total loss.
+    ['review-advocate-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 9 }],
     ['review-challenger-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 5 }],
     ['review-rebuttal-unavailable', { 'shared/forge-dispatch.md': 1, 'shared/forge-review.md': 3 }],
   ];
@@ -12581,6 +12795,2544 @@ function smokeControlBytes() {
     'com mordida e volta ao verde provadas no fixture');
 }
 
+// ── Section 92: guard de drift do schema pinado do app-server ─────────────
+// O fixture começa na projeção pequena do pin, não no schema bruto gerado pelo
+// app-server. Isso mantém o smoke determinístico e ainda atravessa a CLI real,
+// que é a fronteira usada pelo orquestrador.
+function smokeAppServerSchemaPin() {
+  process.stdout.write('\n▸ Section 92: guard de drift do schema pinado do app-server\n');
+  const dir = mkTmp('schema-pin');
+  const root = path.dirname(SCRIPTS);
+  const pin = JSON.parse(fs.readFileSync(path.join(root, 'shared', 'schemas', 'codex-appserver-pin.json'), 'utf8'));
+  const schemaFile = 'codex_app_server_protocol.v2.schemas.json';
+  const projectedFiles = {
+    TurnStartParams: path.join('v2', 'TurnStartParams.json'),
+    ItemCompletedNotification: path.join('v2', 'ItemCompletedNotification.json'),
+    TurnCompletedNotification: path.join('v2', 'TurnCompletedNotification.json'),
+    JSONRPCError: 'JSONRPCError.json',
+  };
+
+  const writeJson = (file, value) => {
+    const target = path.join(dir, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  };
+  const projectedType = (name, value) => ({
+    title: value.title || name,
+    type: value.type || 'object',
+    required: value.required || [],
+    properties: value.properties || {},
+  });
+  // The fixture carries the referenced closure too: the roots are all-`$ref`, so an
+  // aggregate holding only ThreadItem would leave every pointer unresolved.
+  const writeFixture = (mutate) => {
+    const definitions = JSON.parse(JSON.stringify(pin.definitions));
+    const referenced = JSON.parse(JSON.stringify(pin.referenced));
+    if (mutate) mutate(definitions, referenced);
+    writeJson(schemaFile, { definitions: { ThreadItem: definitions.ThreadItem, ...referenced } });
+    for (const [name, file] of Object.entries(projectedFiles)) {
+      writeJson(file, projectedType(name, definitions[name]));
+    }
+  };
+  const reorder = (value, parentKey) => {
+    if (Array.isArray(value)) {
+      const items = value.map((item) => reorder(item));
+      return parentKey === 'required' && items.every((item) => typeof item === 'string')
+        ? items.reverse() : items;
+    }
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).reverse().map(([key, child]) => [key, reorder(child, key)]));
+  };
+  const check = (extraArgs, env) => {
+    const result = runScript('forge-schema-pin.js', ['--check', '--json', ...extraArgs], { env: { ...process.env, ...env } });
+    let json = null;
+    try { json = JSON.parse(result.stdout); } catch {}
+    return { ...result, json };
+  };
+  try {
+    // (a) object keys and required arrays are ordering noise, not drift.
+    // On its own this case cannot fail: it applies exactly the two transformations
+    // canonicalize implements, so it is a tautology unless something pins down what
+    // the fixture actually did. Two things do. First, the reordering must be REAL —
+    // a no-op `reorder` would make the green meaningless. Second, case (a2) below
+    // reorders an array whose order IS semantic, and must come out red: together the
+    // pair states that the green in (a) is a claim about one bounded, closed set of
+    // noise, and shows where that set ends.
+    writeFixture((definitions, referenced) => {
+      for (const name of Object.keys(definitions)) definitions[name] = reorder(definitions[name]);
+      for (const name of Object.keys(referenced)) referenced[name] = reorder(referenced[name]);
+    });
+    const rawReordered = fs.readFileSync(path.join(dir, schemaFile), 'utf8');
+    assert(rawReordered !== JSON.stringify({ definitions: { ThreadItem: pin.definitions.ThreadItem, ...pin.referenced } }, null, 2) + '\n'
+      && /"required": \[\s*"type"/.test(rawReordered),
+      '(a0) a fixture reordenada difere byte a byte da projeção pinada (o caso (a) não é no-op)');
+    const reordered = check(['--schema-dir', dir]);
+    assert(reordered.status === 0 && reordered.json && reordered.json.outcome === 'match',
+      '(a) fixture reordenada preserva match (B1)', JSON.stringify(reordered.json));
+
+    // (a2) the bite of (a): oneOf order is semantic, so canonicalize must NOT absorb it.
+    writeFixture((definitions) => {
+      definitions.ThreadItem.oneOf = definitions.ThreadItem.oneOf.slice().reverse();
+    });
+    const resorted = check(['--schema-dir', dir]);
+    assert(resorted.status !== 0 && resorted.json && resorted.json.outcome === 'drift',
+      '(a2) reordenar oneOf (ordem semântica) rende drift — a tolerância de (a) tem fronteira',
+      JSON.stringify(resorted.json));
+
+    // (b) a renamed field must name the exact removed path in the JSON result.
+    writeFixture((definitions) => {
+      const variant = definitions.ThreadItem.oneOf.find((item) => item.title === 'CommandExecutionThreadItem');
+      variant.properties.exit_code = variant.properties.exitCode;
+      delete variant.properties.exitCode;
+    });
+    const renamed = check(['--schema-dir', dir]);
+    const renamedPaths = (renamed.json && renamed.json.fields || []).map((field) => field.path);
+    assert(renamed.status !== 0 && renamed.json && renamed.json.outcome === 'drift'
+      && renamedPaths.includes('definitions.ThreadItem.oneOf[5].properties.exitCode'),
+      '(b) rename rende drift e nomeia definitions.ThreadItem.oneOf[5].properties.exitCode',
+      JSON.stringify(renamed.json));
+
+    // (b2) THE R1 CASE. The roots keep `properties` verbatim, and those properties are
+    // `$ref` pointers, so a change INSIDE a referenced type leaves every root byte-
+    // identical. Measured before the closure existed: renaming SandboxPolicy.networkAccess
+    // and replacing CommandExecutionStatus' enum both returned `match`, exit 0 — and
+    // networkAccess is the exact field premise A2 was executed to prove, while
+    // commandExecution.status is what S04/S06 read. Without this case the closure is
+    // unverified, and cases (a)–(d) all pass on a pin that sees none of it.
+    writeFixture((definitions, referenced) => {
+      referenced.SandboxPolicy = JSON.parse(JSON.stringify(referenced.SandboxPolicy).replace(/networkAccess/g, 'network_access'));
+      referenced.CommandExecutionStatus = { enum: ['totally', 'different'], type: 'string' };
+    });
+    const inner = check(['--schema-dir', dir]);
+    const innerPaths = (inner.json && inner.json.fields || []).map((field) => field.path);
+    assert(inner.status !== 0 && inner.json && inner.json.outcome === 'drift'
+      && innerPaths.some((p) => p.startsWith('referenced.SandboxPolicy') && p.endsWith('networkAccess'))
+      && innerPaths.some((p) => p.startsWith('referenced.CommandExecutionStatus.enum'))
+      && inner.json.counts.referenced_compared > 0,
+      '(b2) mutação DENTRO de um tipo referenciado rende drift nomeando referenced.SandboxPolicy…networkAccess e referenced.CommandExecutionStatus.enum (R1)',
+      JSON.stringify(inner.json));
+
+    // (c) inability to invoke the generator is explicitly not a clean result.
+    const missing = check([], { FORGE_SCHEMA_PIN_CODEX_BIN: path.join(dir, 'does-not-exist') });
+    assert(missing.status !== 0 && missing.json && missing.json.outcome === 'generator-missing'
+      && missing.json.outcome !== 'match',
+      '(c) binário ausente rende generator-missing, nunca match (D8)',
+      JSON.stringify(missing.json));
+
+    // (c2) the same floor on the guard's OWN input. An absent or truncated pin used to
+    // leave through an uncaught readJson/JSON.parse, printing a stack trace that parses
+    // as neither match nor drift — every generator-side error had a named outcome and
+    // the pin side had none. "Could not read the pin" is never "no drift" (D8).
+    writeFixture();
+    const truncated = path.join(dir, 'truncated-pin.json');
+    fs.writeFileSync(truncated, '{ "definitions": ', 'utf8');
+    for (const [label, pinFile] of [['truncado', truncated], ['ausente', path.join(dir, 'no-such-pin.json')]]) {
+      const unreadable = check(['--schema-dir', dir], { FORGE_SCHEMA_PIN_FILE: pinFile });
+      assert(unreadable.status !== 0 && unreadable.json && unreadable.json.outcome === 'pin-unreadable'
+        && unreadable.json.outcome !== 'match' && unreadable.json.outcome !== 'drift'
+        && unreadable.json.counts.definitions_compared === 0,
+        `(c2) pin ${label} rende pin-unreadable dentro do enum fechado, nunca match (D8/R6)`,
+        JSON.stringify(unreadable.json) + ' | stderr=' + String(unreadable.stderr).slice(0, 200));
+    }
+
+    // (d) an upstream ThreadItem variant changes the measured oneOf shape.
+    writeFixture((definitions) => {
+      definitions.ThreadItem.oneOf.push({
+        title: 'FutureThreadItem', type: 'object', required: ['id', 'type'],
+        properties: { id: { type: 'string' }, type: { enum: ['futureThreadItem'], type: 'string' } },
+      });
+    });
+    const extra = check(['--schema-dir', dir]);
+    const extraPaths = (extra.json && extra.json.fields || []).map((field) => field.path);
+    assert(extra.status !== 0 && extra.json && extra.json.outcome === 'drift'
+      && extraPaths.includes('definitions.ThreadItem.oneOf[18]'),
+      '(d) 19ª variante rende drift nomeando definitions.ThreadItem.oneOf[18]',
+      JSON.stringify(extra.json));
+
+    // (e) exercise generation against the installed binary when available.
+    const codex = spawnSync('codex', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] });
+    if (codex.status === 0) {
+      const live = check([]);
+      assert(live.status === 0 && live.json && live.json.outcome === 'match',
+        '(e) live codex app-server schema matches the pin', JSON.stringify(live.json));
+    } else {
+      skip('(e) live codex schema check', 'codex binary not installed — live check coberto pelas fixtures');
+    }
+
+    const source = fs.readFileSync(__filename, 'utf8');
+    const mainBody = source.slice(source.lastIndexOf('async function main()'));
+    assert(/\(\) => \{ smokeAppServerSchemaPin\(\); \}/.test(mainBody),
+      '(g) Section 92 is registered through a closure in main()');
+    pass('(final) Section 92: reordenação verde com fronteira provada, rename/variante/tipo-referenciado nomeados, generator-missing e pin-unreadable distintos de match, live verificado');
+  } finally { cleanup(dir); }
+}
+
+// ── Section 93: transporte app-server do execute, ponta a ponta ─────────────
+// A Seção 92 prova o SCHEMA pinado; esta prova o TRANSPORTE: a CLI real
+// (`forge-xllm.js --mode execute`) conversando com um app-server mockado, a
+// degradação nomeada nas DUAS direções, a tolerância do caminho `agy` a um
+// cliente de sessão envenenado (IN-15) e a permanência de `extractLastJsonBlock`
+// (D9). Desde M018 S05 T02 a varredura também prova a AUSÊNCIA: `runPlan` migrou
+// para o app-server e não tem mais call site de `invokeCodexDetached` — o assert
+// (d) inverteu de `>= 1` para `=== 0`, e o controle sintético de (e) inverteu
+// junto (fonte COM o call site, para provar que o scanner ainda acusa a
+// presença). Um scanner que só sabe dizer "sim" é o defeito que esta milestone
+// existe para eliminar; um que só sabe dizer "não" também.
+
+// Mock do app-server no molde da suíte reparada da T03 (forge-xllm-appserver.test.js):
+// programa Node puro — nada de shell, quoting ou utilitário POSIX no fixture do
+// protocolo — lançado via FORGE_XLLM_CODEX_BIN.
+function writeMockAppServer(dir) {
+  const source = String.raw`'use strict';
+const scenario = process.env.FORGE_MOCK_SCENARIO || 'conforming';
+// Watchdog: um mock que trava apaga o sinal da suíte inteira (medido: >600s, 0
+// bytes de saída, S02 T02). Falhar alto é sempre melhor que pendurar.
+const WATCHDOG_MS = Number(process.env.FORGE_MOCK_APPSERVER_TIMEOUT_MS || 30000);
+const watchdog = setTimeout(() => {
+  process.stderr.write('mock app-server: watchdog ' + WATCHDOG_MS + 'ms sem turn completo\n');
+  process.exit(89);
+}, WATCHDOG_MS);
+let initialized = false;
+function send(value) { process.stdout.write(JSON.stringify(value) + '\n'); }
+function result() {
+  return { status: 'done', summary: 'section 93 result', must_haves_status: [], files_changed: [] };
+}
+function answer() {
+  if (scenario === 'narrated') {
+    return 'Narrating the work first.\nHere is the result:\n' + JSON.stringify(result()) + '\nDone.';
+  }
+  return JSON.stringify(result());
+}
+let pending = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  pending += chunk;
+  let end;
+  while ((end = pending.indexOf('\n')) >= 0) {
+    const line = pending.slice(0, end); pending = pending.slice(end + 1);
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
+    // O dialeto do app-server OMITE o membro jsonrpc (M018/T01/MEM001).
+    if (Object.prototype.hasOwnProperty.call(message, 'jsonrpc')) process.exit(91);
+    if (message.method === 'initialize') send({ id: message.id, result: { serverInfo: { name: 'smoke-93' } } });
+    else if (message.method === 'initialized') initialized = true;
+    else if (message.method === 'thread/start') {
+      if (!initialized) process.exit(92);
+      send({ id: message.id, result: { thread: { id: 'thread-93' } } });
+    } else if (message.method === 'turn/start') {
+      if (!initialized) process.exit(93);
+      clearTimeout(watchdog);
+      send({ id: message.id, result: { turn: { id: 'turn-93' } } });
+      // Extra ThreadItems, opt-in via env, so Section 95 can drive a REAL item
+      // stream through the real adapter without a second mock (the Standards of
+      // T04 name this file as the single source). Unset env => byte-identical
+      // behaviour for Section 93, which is why the branch is env-gated and not a
+      // new parameter threaded through every caller.
+      const extra = process.env.FORGE_MOCK_EXTRA_ITEMS;
+      if (extra) {
+        for (const item of JSON.parse(extra)) send({ method: 'item/completed', params: { item: item } });
+      }
+      send({ method: 'item/completed', params: { item: { type: 'agentMessage', phase: 'final_answer', text: answer() } } });
+      send({ method: 'turn/completed', params: { turn: { id: 'turn-93', status: 'completed' } } });
+      setTimeout(() => process.exit(0), 50);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`;
+  const file = path.join(dir, 'mock-app-server.js');
+  fs.writeFileSync(file, source, 'utf8');
+  return file;
+}
+
+// Varredura IN-PROCESS de scripts/forge-xllm.js: `fs.readFileSync`, zero
+// shell-out. O `grep` deste shell é uma função sobre `ugrep --ignore-files`, que
+// honra .gitignore — não serve como prova (achado da S06). Contagem exata via
+// split(NEEDLE).length-1, nunca includes() sobre o documento inteiro.
+// Needle ASSEMBLED, never spelled out: this file is the live harness that proves
+// the retired transport's absence (Section 96 scans the REAL repo through the T03
+// scanner), so a literal call-form spelling here would make the hunter count as
+// its own prey — the same reason forge-exec-callsites.js excludes its own fixture
+// files by basename ("permanent, unfixable noise, never a real violation"). The
+// assembly changes only the spelling INSIDE the hunter, never the predicate:
+// Section 96 (b) proves the predicate still fires on the real spelling, from a
+// fixture written to disk.
+const DETACHED_NEEDLE = `invokeCodexDetached${'('}`;
+const RETIRED_PHRASE = `codex ${'ex'}ec`;
+const EXEC_ARG_TOKEN = `${'ex'}ec`;
+
+function scanXllmContracts(source) {
+  const count = (haystack, needle) => haystack.split(needle).length - 1;
+  const between = (start, end) => {
+    const from = source.indexOf(start);
+    if (from < 0) return '';
+    const to = end ? source.indexOf(end, from + start.length) : -1;
+    return to < 0 ? source.slice(from) : source.slice(from, to);
+  };
+  const exportsBlock = between('module.exports = {', '};');
+  const executeBody = between('async function runExecute(', '\nasync function ');
+  const planBody = between('async function runPlan(', '\nmodule.exports');
+  const lines = source.split('\n');
+  // Top-level = coluna 0: um require fora de corpo de função carrega o cliente de
+  // sessão em TODO consumidor do adapter, inclusive o caminho agy (IN-15).
+  const clientRequire = /require\(['"]\.\/forge-appserver-client(\.js)?['"]\)/;
+  let topLevelClientRequires = 0;
+  let lazyClientRequires = 0;
+  for (const line of lines) {
+    if (!clientRequire.test(line)) continue;
+    if (/^\S/.test(line)) topLevelClientRequires += 1; else lazyClientRequires += 1;
+  }
+  return {
+    exportsExtractLastJsonBlock: count(exportsBlock, 'extractLastJsonBlock'),
+    executeExtractCallSites: count(executeBody, 'extractLastJsonBlock('),
+    planDetachedCallSites: count(planBody, DETACHED_NEEDLE),
+    planAppServerCallSites: count(planBody, 'invokeCodexAppServer('),
+    topLevelClientRequires,
+    lazyClientRequires,
+  };
+}
+
+async function smokeAppServerTransport() {
+  process.stdout.write('\n▸ Section 93: transporte app-server do execute (e2e, degradação, IN-15, D9)\n');
+
+  const dir = mkTmp('appserver-transport');
+  // S06 review R12: declared OUTSIDE the try so the `finally` can reach them.
+  // They used to be cleaned by the last statement INSIDE each block, so any red
+  // assert leaked a git repo per run — and a dirty tree is load-bearing here
+  // (cleanupWorktreeOne refuses --force on one). Same declare-outside pattern
+  // this same diff already uses in Sections 94 and 95.
+  let happyRepo = null;
+  let narratedRepo = null;
+  let agyDir = null;
+  let agyRepo = null;
+  let poisonedRepo = null;
+  try {
+    const mock = writeMockAppServer(dir);
+    const planFile = path.join(dir, 'T93-PLAN.md');
+    fs.writeFileSync(planFile, '# T93\nexecute fixture for the app-server transport\n', 'utf8');
+
+    const runExecuteCli = (repo, resultFile, extraEnv) => {
+      const env = {
+        ...process.env,
+        FORGE_XLLM_CODEX_BIN: mock,
+        FORGE_MOCK_SCENARIO: (extraEnv && extraEnv.FORGE_MOCK_SCENARIO) || 'conforming',
+        ...(extraEnv || {}),
+      };
+      const r = spawnSync(process.execPath, [
+        path.join(SCRIPTS, 'forge-xllm.js'), '--mode', 'execute',
+        '--plan', planFile, '--result-file', resultFile, '--cwd', repo, '--timeout', '20',
+      ], { encoding: 'utf8', cwd: repo, env });
+      let parsed = null;
+      try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch { /* leave null */ }
+      return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', parsed };
+    };
+
+    // (a) e2e pela CLI: o transporte completa e o result-file nomeia o caminho
+    // de parse. O happy path NÃO pode carregar `degradation` — é a metade
+    // "verde" da mordida bidirecional.
+    {
+      happyRepo = mkGitRepo(mkTmp('appserver-transport-happy'));
+      const resultFile = path.join(dir, 'happy-result.json');
+      const r = runExecuteCli(happyRepo, resultFile);
+      assert(r.status === 0, '(a) execute via app-server pela CLI sai 0', `status=${r.status} stderr=${r.stderr}`);
+      assert(!!r.parsed && r.parsed.status === 'done' && r.parsed.parse_path === 'output-schema',
+        '(a) result-file traz parse_path=output-schema', JSON.stringify(r.parsed));
+      assert(!!r.parsed && !Object.prototype.hasOwnProperty.call(r.parsed, 'degradation'),
+        '(a) happy path NÃO emite degradation (mordida na direção verde)', JSON.stringify(r.parsed));
+      assert(!!r.parsed && r.parsed.appserver && typeof r.parsed.appserver.discarded_count === 'number',
+        '(a) diagnostics do app-server chegam ao result-file', JSON.stringify(r.parsed && r.parsed.appserver));
+    }
+
+    // (b) degradação nomeada (IN-6/D9): a MESMA CLI, o MESMO mock, só a resposta
+    // narrada — parse_path muda e `degradation` aparece. Sem (a), este assert não
+    // provaria que o campo distingue alguma coisa.
+    {
+      narratedRepo = mkGitRepo(mkTmp('appserver-transport-narrated'));
+      const resultFile = path.join(dir, 'narrated-result.json');
+      const r = runExecuteCli(narratedRepo, resultFile, { FORGE_MOCK_SCENARIO: 'narrated' });
+      assert(r.status === 0, '(b) resposta narrada ainda completa (degradação, não falha)', `status=${r.status} stderr=${r.stderr}`);
+      assert(!!r.parsed && r.parsed.parse_path === 'extract-last-json-block',
+        '(b) parse_path=extract-last-json-block no caminho degradado', JSON.stringify(r.parsed));
+      assert(!!r.parsed && r.parsed.degradation === 'output-schema-not-honored',
+        "(b) degradation === 'output-schema-not-honored'", JSON.stringify(r.parsed));
+      assert(/outputSchema degraded/.test(r.stderr),
+        '(b) a degradação também é dita em stderr', `stderr=${r.stderr}`);
+    }
+
+    // (c) IN-15 com controle positivo: um preload faz o require de
+    // forge-appserver-client LANÇAR. O caminho agy completa mesmo assim (nunca
+    // carrega código de sessão) e o MESMO veneno derruba o execute codex — sem o
+    // controle, (c1) passaria num mundo onde o shim não morde nada.
+    {
+      const poison = path.join(dir, 'poison-preload.js');
+      fs.writeFileSync(poison, [
+        "'use strict';",
+        "const Module = require('module');",
+        'const load = Module._load;',
+        'Module._load = function (request) {',
+        "  if (String(request).includes('forge-appserver-client')) {",
+        "    throw new Error('poisoned: forge-appserver-client loaded on a path that must not need it');",
+        '  }',
+        // eslint-disable-next-line prefer-rest-params — o preload precisa repassar a assinatura original
+        '  return load.apply(this, arguments);',
+        '};',
+        '',
+      ].join('\n'), 'utf8');
+      const nodeOptions = `--require "${poison.replace(/\\/g, '/')}"`;
+
+      agyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-93-agy-'));
+      agyRepo = mkTmp('appserver-transport-agy');
+      const agyPayload = JSON.stringify({
+        objections: [{ id: 'R1', path_line: 'src/a.js:12', claim: 'x', suggested_fix: 'y', challenge: 'z?', severity: 'high' }],
+      });
+      const agyMock = writeMockAgy(agyDir, { payload: agyPayload, exitCode: 0 });
+      const agy = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', agyRepo],
+        null, agyRepo, { FORGE_XLLM_AGY_BIN: agyMock, NODE_OPTIONS: nodeOptions });
+      assert(agy.status === 0, '(c1) IN-15: challenge --engine agy completa COM o cliente envenenado',
+        `status=${agy.status} stderr=${agy.stderr}`);
+
+      poisonedRepo = mkGitRepo(mkTmp('appserver-transport-poisoned'));
+      const poisonedResult = path.join(dir, 'poisoned-result.json');
+      const poisoned = runExecuteCli(poisonedRepo, poisonedResult, { NODE_OPTIONS: nodeOptions });
+      assert(poisoned.status !== 0, '(c2) controle positivo: o MESMO veneno derruba o execute codex',
+        `status=${poisoned.status} stderr=${poisoned.stderr}`);
+      assert(/poisoned: forge-appserver-client/.test(poisoned.stderr),
+        '(c2) o erro nomeia o require envenenado (o shim mordeu de fato)', `stderr=${poisoned.stderr}`);
+    }
+
+    // (d) D9/IN-6 + ausência do transporte exec em runPlan, por varredura
+    // in-process do adapter real.
+    const xllmSource = fs.readFileSync(path.join(SCRIPTS, 'forge-xllm.js'), 'utf8');
+    const scan = scanXllmContracts(xllmSource);
+    assert(scan.exportsExtractLastJsonBlock >= 1,
+      '(d) D9: extractLastJsonBlock permanece em module.exports', JSON.stringify(scan));
+    assert(scan.executeExtractCallSites >= 1,
+      '(d) D9: extractLastJsonBlock tem call site no caminho de execute', JSON.stringify(scan));
+    assert(scan.topLevelClientRequires === 0 && scan.lazyClientRequires >= 1,
+      '(d) IN-15: o require de forge-appserver-client é lazy (0 no topo, >= 1 em função)', JSON.stringify(scan));
+    assert(scan.planDetachedCallSites === 0,
+      '(d) runPlan não tem mais call site de invokeCodexDetached (S05 migrou)', JSON.stringify(scan));
+    assert(scan.planAppServerCallSites >= 1,
+      '(d) runPlan alcança o app-server (invokeCodexAppServer tem call site no corpo)', JSON.stringify(scan));
+
+    // (e) mordida do próprio scanner: nas fontes sintéticas abaixo cada asserção
+    // de (d) TEM de virar falsa. Um scanner que só sabe dizer "sim" é o defeito
+    // que esta milestone existe para eliminar.
+    {
+      const stripped = [
+        "const x = require('./forge-appserver-client');",
+        'async function runExecute(o) { return JSON.parse(o); }',
+        // INVERTIDO em M018 S05 T02: antes esta fonte NÃO tinha o call site e
+        // provava que o scanner acusa a ausência. Agora o adapter real é o que
+        // não o tem, então a fonte sintética precisa TÊ-LO para provar que o
+        // scanner ainda acusa a PRESENÇA — e que o `=== 0` de (d) é um fato
+        // medido, não um predicado que perdeu a mordida.
+        `async function runPlan(o) { return ${DETACHED_NEEDLE}o); }`,
+        'module.exports = { runExecute };',
+        '',
+      ].join('\n');
+      const bitten = scanXllmContracts(stripped);
+      assert(bitten.exportsExtractLastJsonBlock === 0 && bitten.executeExtractCallSites === 0,
+        '(e) fonte sem extractLastJsonBlock: o scanner acusa (D9 morde)', JSON.stringify(bitten));
+      assert(bitten.topLevelClientRequires === 1 && bitten.lazyClientRequires === 0,
+        '(e) require no topo é contado como top-level (IN-15 morde)', JSON.stringify(bitten));
+      assert(bitten.planDetachedCallSites === 1 && bitten.planAppServerCallSites === 0,
+        '(e) runPlan COM invokeCodexDetached: o scanner acusa a presença (e não vê app-server)', JSON.stringify(bitten));
+    }
+
+    // R6 (nenhum mirror tocado) é acceptance DA SLICE, verificada pelo orquestrador
+    // contra o diff do branch — deliberadamente fora daqui: uma asserção sobre a
+    // working tree do momento viraria mina para qualquer slice futura que edite
+    // skills/ legitimamente, e um smoke vermelho por isso não diria nada sobre o
+    // transporte que esta seção existe para provar.
+
+    // (g) auto-registro em main() por closure — a Section 73 rejeita chamada bare,
+    // e uma seção não registrada é uma seção que some em silêncio.
+    const selfSource = fs.readFileSync(__filename, 'utf8');
+    const mainBody = selfSource.slice(selfSource.lastIndexOf('async function main()'));
+    // Strict form only. The second alternative was a SUBSTRING of the first, so the
+    // disjunction accepted a bare call in main() — the very form Section 73 rejects,
+    // and the form Sections 92/94 assert against (S03 review R9).
+    assert(/\(\) => \{ await smokeAppServerTransport\(\); \}/.test(mainBody),
+      '(g) Section 93 is registered through a closure in main()');
+
+    pass('(final) Section 93: execute completa pela CLI via app-server, degradação nomeada nas duas direções, '
+      + 'IN-15 provado com controle positivo, D9 e a AUSÊNCIA do exec em runPlan verificados por varredura in-process com mordida');
+  } finally {
+    for (const leaked of [happyRepo, narratedRepo, agyDir, agyRepo, poisonedRepo]) {
+      if (leaked) cleanup(leaked);
+    }
+    cleanup(dir);
+  }
+}
+
+// ── Section 94: capability por turn do app-server ─────────────────────────
+// This fixture is deliberately a wire observer: writeMockCodex records the
+// actual turn/start params that arrived over JSONL, so each direction can fail
+// independently of the adapter's own return value.
+async function smokeCapabilityPerTurn() {
+  process.stdout.write('\n▸ Section 94: capability por turn (mock app-server + guidance)\n');
+  const dir = mkTmp('capability-per-turn');
+  const { buildExecutePrompt, buildPlanPrompt } = require('./forge-xllm');
+  const expectedPolicies = {
+    readonly: { type: 'readOnly', networkAccess: false },
+    workspace: { type: 'workspaceWrite', networkAccess: false },
+    networked: { type: 'workspaceWrite', networkAccess: true },
+  };
+  const planText = (capability) => [
+    '---',
+    'id: T94',
+    'slice: S03',
+    'milestone: M018',
+    'title: capability fixture',
+    ...(capability === null ? [] : [`capability: ${capability}`]),
+    'must_haves:',
+    '  truths:',
+    '    - "fixture truth"',
+    '  artifacts: []',
+    '  key_links: []',
+    '  expected_output: []',
+    '---',
+    '# fixture',
+    '',
+  ].join('\n');
+  // Declared OUTSIDE the try so the finally can reach them: cleanup(mockDir) and
+  // cleanup(repo) used to be the last statements INSIDE the try, so any red assert
+  // leaked a mock dir and a git repo per run — and a dirty tree is load-bearing here
+  // (cleanupWorktreeOne refuses --force on one) (S03 review R11).
+  let mockDir = null;
+  let repo = null;
+  try {
+    mockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-94-mock-'));
+    repo = mkGitRepo(mkTmp('capability-per-turn-repo'));
+    const payload = JSON.stringify({ status: 'done', summary: 'section 94', must_haves_status: [], files_changed: [] });
+    const runFixture = (name, capability) => {
+      const plan = path.join(dir, `${name}-PLAN.md`);
+      const result = path.join(dir, `${name}-result.json`);
+      const observed = path.join(dir, `${name}-turn-start.json`);
+      fs.writeFileSync(plan, planText(capability), 'utf8');
+      writeMockCodex(mockDir, { payload, checkContract: true, turnStartFile: observed });
+      const r = runXllm([
+        '--mode', 'execute', '--engine', 'codex', '--plan', plan,
+        '--result-file', result, '--cwd', repo, '--timeout', '20',
+      ], mockDir, repo);
+      let params = null;
+      let parsed = null;
+      try { params = JSON.parse(fs.readFileSync(observed, 'utf8')); } catch { /* assertion below names the missing observation */ }
+      try { parsed = JSON.parse(fs.readFileSync(result, 'utf8')); } catch { /* assertion below names the missing result */ }
+      return { r, params, parsed };
+    };
+
+    for (const [capability, expected] of Object.entries(expectedPolicies)) {
+      const got = runFixture(capability, capability);
+      assert(got.r.status === 0, `(a) ${capability}: execute mockado termina 0`, `stderr=${got.r.stderr}`);
+      assert(!!got.params && JSON.stringify(got.params.sandboxPolicy) === JSON.stringify(expected),
+        `(a) ${capability}: mock observou a sandboxPolicy correta no turn/start`, JSON.stringify(got.params));
+    }
+
+    const legacy = runFixture('legacy', null);
+    const legacyLiteral = { type: 'workspaceWrite', networkAccess: false };
+    assert(legacy.r.status === 0, '(b) plano legado sem capability termina 0', `stderr=${legacy.r.stderr}`);
+    assert(!!legacy.params && JSON.stringify(legacy.params.sandboxPolicy) === JSON.stringify(legacyLiteral),
+      '(b) plano legado preserva o literal exato workspaceWrite/networkAccess:false', JSON.stringify(legacy.params));
+
+    const unknown = runFixture('banana', 'banana');
+    assert(unknown.r.status === 0, '(c) capability desconhecida completa pela rota de downgrade', `stderr=${unknown.r.stderr}`);
+    // O FIO, antes do auto-relato. Este era o único caso que lia só `parsed`: provava
+    // que o adapter DIZ workspace sem provar que o turn enviado não carregava
+    // networkAccess:true — a direção em que um bug de resolução é escape de sandbox
+    // (S03 review R8).
+    assert(!!unknown.params && JSON.stringify(unknown.params.sandboxPolicy) === JSON.stringify(legacyLiteral),
+      '(c) o turn do downgrade carrega a policy de workspace no fio, não apenas no relato',
+      JSON.stringify(unknown.params));
+    assert(!!unknown.parsed && unknown.parsed.capability === 'workspace'
+      && unknown.parsed.capability_declared === 'banana'
+      && unknown.parsed.capability_event === 'capability-unrecognized',
+    '(c) result-file expõe capability, declaração e evento capability-unrecognized', JSON.stringify(unknown.parsed));
+
+    // W2: in-process document proof; restrict the counts to the one section so
+    // a word elsewhere in the planner cannot satisfy the claim accidentally.
+    const planner = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'agents', 'forge-planner.md'), 'utf8');
+    const marker = '## Capability Hints';
+    const hints = planner.split(marker)[1] || '';
+    const nextHeading = hints.search(/\n## /);
+    const hintSection = nextHeading >= 0 ? hints.slice(0, nextHeading) : hints;
+    assert(planner.split(marker).length - 1 === 1, '(d) agents/forge-planner.md tem exatamente uma seção Capability Hints');
+    // Direção, não frequência. As contagens exatas ({readonly:4, workspace:6,
+    // networked:6}) quebravam com qualquer reescrita inócua e passavam com a guidance
+    // INVERTIDA de mesma contagem — asseriam que as palavras estão lá, nunca que dizem
+    // a coisa certa (S03 review R10). Cada asserção abaixo lê a LINHA da tabela que
+    // define a capability, então trocar duas posturas de lugar fica vermelho.
+    const rowFor = (name) => (hintSection.split('\n').find((line) => line.trim().startsWith(`| \`${name}\``)) || '');
+    for (const name of ['readonly', 'workspace', 'networked']) {
+      assert(rowFor(name) !== '', `(d) Capability Hints tem a linha de tabela de ${name}`, hintSection);
+    }
+    assert(/no files/i.test(rowFor('readonly')) && !/network/i.test(rowFor('readonly')),
+      '(d) readonly é definido por ausência de escrita, não por rede', rowFor('readonly'));
+    assert(/default/i.test(rowFor('workspace')) && /no network|sem rede/i.test(rowFor('workspace')),
+      '(d) workspace é o default e não concede rede', rowFor('workspace'));
+    assert(/network/i.test(rowFor('networked')) && /install|fetch/i.test(rowFor('networked')),
+      '(d) networked é a única postura que nomeia rede/install', rowFor('networked'));
+    assert(/Emit only `readonly`, `workspace`, or `networked`/.test(hintSection),
+      '(d) o conjunto fechado é declarado com os três valores exatos', hintSection);
+    // R26: onde o campo vai. `tier:`/`effort:` dizem; `capability:` não dizia, e um
+    // planner que o aninhasse sob must_haves produziria sandbox inerte SEM evento.
+    assert(/top-level/i.test(hintSection) && /must_haves/.test(hintSection),
+      '(d) a guidance diz que capability é chave top-level irmã de must_haves', hintSection);
+
+    const workspacePrompt = buildExecutePrompt('# plan', { capability: 'workspace' });
+    const networkedPrompt = buildExecutePrompt('# plan', { capability: 'networked' });
+    const baselinePlanPrompt = buildPlanPrompt('context');
+    assert(workspacePrompt.includes('Git reads are allowed') && workspacePrompt.includes('NEVER write with git'),
+      '(e) buildExecutePrompt mantém a postura git bidirecional');
+    assert(workspacePrompt.includes('The network is DISABLED') && !workspacePrompt.includes('Network access is ENABLED'),
+      '(e) capability workspace produz linha de rede bloqueada');
+    assert(networkedPrompt.includes('Network access is ENABLED') && !networkedPrompt.includes('The network is DISABLED'),
+      '(e) capability networked produz linha de rede habilitada');
+    assert(baselinePlanPrompt.includes('but you must NOT change anything.'),
+      '(e) buildPlanPrompt permanece com postura legada read-only');
+
+    // (f) ANTI-INERTE do guard turn↔thread (S05 review R10). A ligação entre o
+    // turn e a thread emitida era gateada só por `initialized`, então um adapter
+    // que ignorasse o threadId (ou o hardcodasse) ficava VERDE na suíte inteira
+    // enquanto o app-server real rejeitava. Aqui o mock é dirigido DIRETAMENTE
+    // por um cliente JSONL de fixture, sem passar pelo adapter, para que o guard
+    // seja provado nas duas direções sem depender do que o adapter faz hoje.
+    const driveMock = (turnStartMsg) => {
+      const child = spawnSync(process.execPath, [path.join(mockDir, 'codex-mock.js'), 'app-server'], {
+        input: [
+          JSON.stringify({ id: 1, method: 'initialize', params: {} }),
+          JSON.stringify({ method: 'initialized', params: {} }),
+          JSON.stringify({ id: 2, method: 'thread/start', params: {} }),
+          JSON.stringify(turnStartMsg),
+          '',
+        ].join('\n'),
+        encoding: 'utf8',
+        env: { ...process.env, FORGE_MOCK_APPSERVER_TIMEOUT_MS: '8000' },
+        cwd: repo,
+        timeout: 20000,
+      });
+      return child;
+    };
+    const wrongId = driveMock({ id: 3, method: 'turn/start', params: { threadId: 'thread-WRONG', input: [{ type: 'text', text: 'x' }] } });
+    assert(wrongId.status === 94, '(f) turn/start com threadId errado morre com o código dedicado 94', `status=${wrongId.status} stderr=${wrongId.stderr}`);
+    assert(/threadId mismatch/.test(String(wrongId.stderr)), '(f) o guard nomeia o mismatch em stderr', String(wrongId.stderr));
+
+    const absentId = driveMock({ id: 3, method: 'turn/start', params: { input: [{ type: 'text', text: 'x' }] } });
+    assert(absentId.status === 94, '(f) turn/start sem threadId também morre 94 — ausência não é passe livre', `status=${absentId.status} stderr=${absentId.stderr}`);
+
+    // Controle positivo: o mesmo cliente, com o id EXATO que o thread/start
+    // devolveu, atravessa o guard e chega ao runTurn (que roda a fixture sh e
+    // sai 0). Sem isto, um guard que rejeitasse tudo passaria nos dois asserts
+    // acima e quebraria o transporte inteiro sem ser notado.
+    const rightId = driveMock({ id: 3, method: 'turn/start', params: { threadId: 'thread-smoke', input: [{ type: 'text', text: 'x' }], outputSchema: {}, sandboxPolicy: { type: 'workspaceWrite', networkAccess: false } } });
+    assert(rightId.status === 0, '(f) controle positivo: o threadId correto atravessa o guard e o turn completa', `status=${rightId.status} stderr=${rightId.stderr}`);
+
+    const source = fs.readFileSync(__filename, 'utf8');
+    const mainBody = source.slice(source.lastIndexOf('async function main()'));
+    assert(/\(\) => \{ await smokeCapabilityPerTurn\(\); \}/.test(mainBody),
+      '(g) Section 94 is registered through a closure in main()');
+    pass('(final) Section 94: três capabilities observadas no fio, legado byte-idêntico, downgrade visível, guidance/prompt provados e o vínculo turn↔thread provado nas duas direções');
+  } finally {
+    if (mockDir) cleanup(mockDir);
+    if (repo) cleanup(repo);
+    cleanup(dir);
+  }
+}
+
+// ── Section 95: evidência runtime-observada (S04) ──────────────────────────
+// A Seção 94 prova a POLICY que o turn carrega; esta prova o que o turn
+// DEVOLVE virando evidência: admissibilidade por nome, rejeição de variante
+// desconhecida, a contagem de 18 confrontada com o pin, os três desfechos do
+// materializador distintos DOIS A DOIS, e a coexistência das duas `source` no
+// mesmo arquivo.
+//
+// Varredura de documento é IN-PROCESS (`fs` + split exato), nunca `grep` de
+// shell: o `grep` deste shell honra .gitignore e não serve como prova (S06).
+// `includes()` sobre o documento inteiro também não conta — a pergunta aqui é
+// "quantas vezes", e um mirror que invoca o materializador duas vezes escreveria
+// dois censos para uma unidade, que é justamente o silêncio invertido.
+const INVOKE_NEEDLE = 'node "$FORGE_SCRIPTS_DIR/forge-evidence-materialize.js"';
+
+function scanEvidenceDocs(dispatchSource, mirrorSources) {
+  const count = (haystack, needle) => haystack.split(needle).length - 1;
+  const from = dispatchSource.indexOf('**7. Evidence lines into');
+  let section7 = '';
+  if (from >= 0) {
+    const to = dispatchSource.indexOf('\n#### ', from);
+    section7 = to < 0 ? dispatchSource.slice(from) : dispatchSource.slice(from, to);
+  }
+  const bIndex = section7.indexOf('**7b.');
+  const part7b = bIndex < 0 ? '' : section7.slice(bIndex);
+  const part7a = (() => {
+    const aIndex = section7.indexOf('**7a.');
+    if (aIndex < 0) return '';
+    return bIndex > aIndex ? section7.slice(aIndex, bIndex) : section7.slice(aIndex);
+  })();
+  return {
+    section7Found: from >= 0,
+    parts7a: count(section7, '**7a.'),
+    parts7b: count(section7, '**7b.'),
+    runtimeObservedHeading: count(section7, '**7b. Runtime-observed lines'),
+    // A afirmação de A7 é sobre a evidência NOVA: o 7b não pode chamá-la de
+    // sintetizada. O 7a continua devendo chamar — as duas metades abaixo são a
+    // mordida nas duas direções da mesma varredura.
+    synthesizedIn7b: count(part7b, 'ynthesized'),
+    synthesizedIn7a: count(part7a, 'ynthesized'),
+    runtimeSourceIn7b: count(part7b, 'codex-runtime'),
+    // INVOCAÇÃO, não menção. O 7b nomeia o script duas vezes de propósito — uma
+    // no bloco de comando e outra na prosa que o declara dono da fórmula — então
+    // contar o nome mede a redação, não o número de vezes que o materializador
+    // roda. A pergunta que importa ("quantos censos uma unidade gera") só é
+    // respondida pela linha de comando. Medido: contar o nome dava 2 no §7b real.
+    materializeIn7b: count(part7b, INVOKE_NEEDLE),
+    mentionsIn7b: count(part7b, 'forge-evidence-materialize.js'),
+    mirrorInvocations: mirrorSources.map((source) => count(source, INVOKE_NEEDLE)),
+    // S06 review R9: a contagem sozinha não diz ONDE. Invocado só no passo
+    // Success, a terceira linha da tabela canônica (result-file ilegível →
+    // collector-failed) era INALCANÇÁVEL de todo call site — uma linha que
+    // documenta um detector que nada consegue disparar. A invocação tem de
+    // pousar ANTES do split Success/Failure, isto é, antes do primeiro
+    // `**Success` do mirror. -1 em qualquer um dos dois é reportado como -1,
+    // nunca coagido a "está tudo bem".
+    mirrorInvokeBeforeSuccess: mirrorSources.map((source) => {
+      const invoke = source.indexOf(INVOKE_NEEDLE);
+      const success = source.indexOf('**Success');
+      return { invoke, success, ok: invoke >= 0 && success >= 0 && invoke < success };
+    }),
+  };
+}
+
+function smokeEvidenceRuntime() {
+  process.stdout.write('\n▸ Section 95: evidência runtime-observada (admissibilidade, rejeição, contagem confrontada, 3 desfechos, coexistência, §7)\n');
+  const {
+    evidenceFileName, SOURCE, LEGACY_SOURCE, CENSUS_KIND,
+  } = require('./forge-evidence-materialize');
+
+  const dir = mkTmp('evidence-runtime');
+  // Declarados FORA do try para que o finally os alcance mesmo com assert
+  // vermelho — a pegadinha já anotada na Seção 94 (um repo git vazado deixa
+  // árvore suja, e cleanupWorktreeOne recusa --force sobre uma).
+  let repo = null;
+  try {
+    const mock = writeMockAppServer(dir);
+    const planFile = path.join(dir, 'T95-PLAN.md');
+    fs.writeFileSync(planFile, '# T95\nexecute fixture for runtime evidence\n', 'utf8');
+    repo = mkGitRepo(mkTmp('evidence-runtime-repo'));
+
+    // Roda o adapter REAL pela CLI contra o mock, com os itens do stream
+    // controlados por env. O que se mede aqui é o que o adapter de fato grava no
+    // result-file — não uma chamada direta ao classificador, que provaria só o
+    // classificador.
+    const runExecute = (label, extraItems) => {
+      const resultFile = path.join(dir, `${label}-result.json`);
+      const r = spawnSync(process.execPath, [
+        path.join(SCRIPTS, 'forge-xllm.js'), '--mode', 'execute',
+        '--plan', planFile, '--result-file', resultFile, '--cwd', repo, '--timeout', '20',
+      ], {
+        encoding: 'utf8',
+        cwd: repo,
+        env: {
+          ...process.env,
+          FORGE_XLLM_CODEX_BIN: mock,
+          FORGE_MOCK_SCENARIO: 'conforming',
+          FORGE_MOCK_EXTRA_ITEMS: JSON.stringify(extraItems),
+        },
+      });
+      let parsed = null;
+      try { parsed = JSON.parse(fs.readFileSync(resultFile, 'utf8')); } catch { /* asserção abaixo nomeia a ausência */ }
+      return { r, parsed, resultFile };
+    };
+
+    // (a) ADMISSIBILIDADE. Um turn cujos itens são só prosa do modelo produz
+    // ZERO entries — e mesmo assim é `collected`, com o censo contando os itens.
+    // "Nada admitido" e "nada coletado" são fatos diferentes.
+    {
+      const prose = [
+        { type: 'agentMessage', text: 'narrating the work' },
+        { type: 'reasoning', text: 'thinking about it' },
+        { type: 'plan', steps: [] },
+      ];
+      const got = runExecute('prose', prose);
+      assert(got.r.status === 0, '(a) execute com itens só-prosa termina 0', `status=${got.r.status} stderr=${got.r.stderr}`);
+      const ev = got.parsed && got.parsed.runtime_evidence;
+      assert(!!ev && ev.census.outcome === 'collected' && ev.census.admitted === 0 && ev.entries.length === 0,
+        '(a) agentMessage/reasoning/plan produzem ZERO entries e censo collected/admitted:0', JSON.stringify(ev));
+      // O piso: coletado-e-vazio nunca vira not-collected, nem no result-file
+      // nem no jsonl. Sem esta linha, (a) passaria num mundo onde o vazio é
+      // relatado como "não coletei" — o defeito de origem desta milestone.
+      assert(ev.census.outcome !== 'not-collected' && ev.census.items_received >= 3,
+        '(a) coletado-e-vazio NÃO colapsa em not-collected e o censo conta os itens recebidos', JSON.stringify(ev.census));
+
+      const cwdA = mkTmp('evidence-runtime-empty');
+      try {
+        const mat = runScript('forge-evidence-materialize.js',
+          ['--result', got.resultFile, '--unit', 'execute-task/T95', '--cwd', cwdA, '--json']);
+        const out = JSON.parse(mat.stdout);
+        const lines = fs.readFileSync(path.join(cwdA, '.gsd', 'forge', evidenceFileName('execute-task/T95')), 'utf8')
+          .trim().split('\n').map((l) => JSON.parse(l));
+        assert(out.outcome === 'collected' && out.entries_written === 0 && out.census_written === 1,
+          '(a) materializador rende collected com 0 entries e EXATAMENTE 1 censo', mat.stdout);
+        assert(lines.length === 1 && lines[0].kind === CENSUS_KIND && lines[0].outcome === 'collected'
+          && lines[0].admitted === 0 && lines[0].written === 0,
+          '(a) o jsonl do coletado-e-vazio tem só a linha de censo, e ela diz collected/admitted:0', JSON.stringify(lines));
+      } finally { cleanup(cwdA); }
+    }
+
+    // (b) REJEIÇÃO de variante desconhecida, com um item admissível ao lado: sem
+    // o vizinho admitido, "entries não contém a desconhecida" seria satisfeito
+    // por um coletor que não produz entry nenhuma.
+    let mixedResultFile = null;
+    {
+      const mixed = [
+        { type: 'quantumThing', payload: 'from a future protocol' },
+        {
+          type: 'commandExecution', id: 'exec-95', command: 'node -e "process.exit(3)"',
+          cwd: '/tmp/section-95', status: 'failed', exitCode: 3, durationMs: 12,
+        },
+      ];
+      const got = runExecute('mixed', mixed);
+      mixedResultFile = got.resultFile;
+      assert(got.r.status === 0, '(b) execute com variante desconhecida termina 0 (coletor nunca derruba a unidade)', `stderr=${got.r.stderr}`);
+      const ev = got.parsed && got.parsed.runtime_evidence;
+      const rejected = (ev && ev.census.rejected) || [];
+      assert(rejected.some((entry) => entry.type === 'quantumThing' && entry.count === 1),
+        '(b) census.rejected NOMEIA quantumThing', JSON.stringify(ev && ev.census));
+      assert(!ev.entries.some((entry) => JSON.stringify(entry).includes('quantumThing')),
+        '(b) entries NÃO contém a variante rejeitada (nunca repassada)', JSON.stringify(ev.entries));
+      // IN-4: o exit code vem do STREAM, não de inferência sobre a árvore.
+      const command = ev.entries.find((entry) => entry.kind === 'command');
+      assert(!!command && command.exit_code === 3 && command.source === SOURCE,
+        '(b) a entry de comando carrega exit_code:3 lido do item do stream, com source codex-runtime', JSON.stringify(ev.entries));
+      assert(ev.census.admitted === 1,
+        '(b) o censo admite exatamente o item admissível, ao lado da rejeição', JSON.stringify(ev.census));
+    }
+
+    // (c) CONTAGEM CONFRONTADA. Mordida nas duas direções sobre um pin FIXTURE —
+    // o pin real nunca é editado (é o oráculo; mutá-lo em disco trocaria o
+    // oráculo pelo teste).
+    {
+      const realPin = path.join(path.dirname(SCRIPTS), 'shared', 'schemas', 'codex-appserver-pin.json');
+      const realPinBytes = fs.readFileSync(realPin, 'utf8');
+      const pin = JSON.parse(realPinBytes);
+      const intact = path.join(dir, 'pin-intact.json');
+      fs.writeFileSync(intact, JSON.stringify(pin), 'utf8');
+      const okRun = runScript('forge-evidence-admit.js', ['--check-schema', '--pin', intact, '--json']);
+      const okJson = JSON.parse(okRun.stdout);
+      assert(okRun.status === 0 && okJson.ok === true && okJson.variants === 18 && okJson.admissible === 2,
+        '(c) pin íntegro passa: 18 variantes, 2 admissíveis', okRun.stdout);
+
+      const mutated = JSON.parse(JSON.stringify(pin));
+      const dropped = 'sleep';
+      mutated.definitions.ThreadItem.oneOf = mutated.definitions.ThreadItem.oneOf.filter((variant) => {
+        const typeProp = variant && variant.properties && variant.properties.type;
+        return !(typeProp && Array.isArray(typeProp.enum) && typeProp.enum[0] === dropped);
+      });
+      // meta.variant_count acompanha, senão o guard para antes na checagem do pin
+      // contra SI MESMO e nunca chega à confrontação por nome — o caso (c) mediria
+      // a consistência interna do pin, não a cobertura do mapa.
+      if (mutated.meta) mutated.meta.variant_count = mutated.definitions.ThreadItem.oneOf.length;
+      const mutatedFile = path.join(dir, 'pin-17.json');
+      fs.writeFileSync(mutatedFile, JSON.stringify(mutated), 'utf8');
+      const badRun = runScript('forge-evidence-admit.js', ['--check-schema', '--pin', mutatedFile, '--json']);
+      const badJson = JSON.parse(badRun.stdout);
+      assert(mutated.definitions.ThreadItem.oneOf.length === 17,
+        '(c) o fixture mutado de fato tem 17 variantes (o caso não é no-op)');
+      assert(badRun.status !== 0 && badJson.ok === false
+        && (badJson.missing_in_pin || []).includes(dropped),
+        `(c) pin com 17 variantes falha NOMEANDO '${dropped}', nunca só uma contagem`, badRun.stdout);
+      // Igualdade estrita contra os bytes lidos ANTES do caso. Uma disjunção com
+      // `existsSync` passaria sempre — o pin é o oráculo, e um caso que o edita
+      // troca o oráculo pelo teste sem que nada fique vermelho.
+      assert(fs.readFileSync(realPin, 'utf8') === realPinBytes,
+        '(c) o pin real permanece byte-idêntico — a mordida foi toda sobre fixture');
+    }
+
+    // (d) OS TRÊS DESFECHOS, comparados DOIS A DOIS. Ler um só e declarar
+    // "distinto" é exatamente a forma de erro que esta milestone existe para
+    // fechar: distinção é uma afirmação sobre um par.
+    {
+      const scenarios = {
+        // `collected` com admitted 0 — o desfecho que mais se parece com os outros
+        // dois e que jamais pode ser confundido com eles.
+        'collected-empty': {
+          status: 'done',
+          runtime_evidence: {
+            census: {
+              outcome: 'collected', items_received: 2, types_seen: { agentMessage: 2 },
+              admitted: 0, inadmissible: 2, rejected: [], turn_status: 'completed',
+            },
+            entries: [],
+          },
+        },
+        // Campo AUSENTE — a única entrada que pode render not-collected.
+        'not-collected': { status: 'done' },
+        // Campo presente e malformado (`null`): hasOwnProperty distingue isto de
+        // ausência, e o desfecho tem de ser outro.
+        'collector-failed': { status: 'done', runtime_evidence: null },
+      };
+      const rendered = {};
+      for (const [label, payload] of Object.entries(scenarios)) {
+        const resultFile = path.join(dir, `${label}-payload.json`);
+        fs.writeFileSync(resultFile, JSON.stringify(payload), 'utf8');
+        const cwdX = mkTmp(`evidence-runtime-${label}`);
+        try {
+          const mat = runScript('forge-evidence-materialize.js',
+            ['--result', resultFile, '--unit', 'execute-task/T95', '--cwd', cwdX, '--json']);
+          const jsonl = fs.readFileSync(path.join(cwdX, '.gsd', 'forge', evidenceFileName('execute-task/T95')), 'utf8');
+          const lines = jsonl.trim().split('\n').map((l) => JSON.parse(l));
+          assert(mat.status === 0, `(d) ${label}: materializador sai 0 (advisory)`, mat.stderr);
+          assert(lines.filter((l) => l.kind === CENSUS_KIND).length === 1,
+            `(d) ${label}: EXATAMENTE uma linha de censo, inclusive sem entries`, jsonl);
+          // ts e o caminho absoluto do tmpdir variam por execução; normalizá-los é
+          // o que torna a distinção atribuível ao DESFECHO, e não ao relógio.
+          const normalize = (text) => text.replace(/"ts":"[^"]*"/g, '"ts":"<ts>"').replace(/[^"]*\.gsd/g, '<cwd>/.gsd');
+          rendered[label] = {
+            jsonl: normalize(jsonl),
+            stdout: normalize(mat.stdout),
+            outcome: JSON.parse(mat.stdout).outcome,
+          };
+        } finally { cleanup(cwdX); }
+      }
+
+      const labels = Object.keys(rendered);
+      let pairs = 0;
+      for (let i = 0; i < labels.length; i += 1) {
+        for (let j = i + 1; j < labels.length; j += 1) {
+          const a = rendered[labels[i]];
+          const b = rendered[labels[j]];
+          pairs += 1;
+          assert(a.jsonl !== b.jsonl && a.stdout !== b.stdout && a.outcome !== b.outcome,
+            `(d) ${labels[i]} × ${labels[j]}: jsonl, stdout e outcome distintos`,
+            `${a.jsonl} || ${b.jsonl}`);
+        }
+      }
+      // Piso anti-silêncio do próprio caso (d), no molde de S07: um comparador
+      // que não comparou par nenhum não pode reportar "distintos".
+      assert(pairs === 3, '(d) os três desfechos foram comparados nos 3 pares, não um só', `pairs=${pairs}`);
+      assert(rendered['collected-empty'].outcome === 'collected'
+        && rendered['not-collected'].outcome === 'not-collected'
+        && rendered['collector-failed'].outcome === 'collector-failed',
+        '(d) zero admitido renderiza collected — nunca "not collected"',
+        JSON.stringify(Object.fromEntries(labels.map((l) => [l, rendered[l].outcome]))));
+    }
+
+    // (e) COEXISTÊNCIA das duas `source` no MESMO arquivo, separáveis por
+    // igualdade estrita. A linha sintetizada legada é pré-gravada como o §7a a
+    // grava; o materializador acrescenta as runtime.
+    {
+      const cwdE = mkTmp('evidence-runtime-coexist');
+      try {
+        const file = path.join(cwdE, '.gsd', 'forge', evidenceFileName('execute-task/T95'));
+        fs.writeFileSync(file, `${JSON.stringify({
+          ts: new Date().toISOString(), source: LEGACY_SOURCE, kind: 'file',
+          unit: 'execute-task/T95', file: 'scripts/x.js', change_kind: 'M',
+        })}\n`, 'utf8');
+        // O payload MENTE a source: declara codex-sidecar numa entry runtime. Se
+        // o materializador confiasse no payload, as duas ficariam indistinguíveis
+        // — que é o oposto exato do ponto.
+        const lying = JSON.parse(fs.readFileSync(mixedResultFile, 'utf8'));
+        lying.runtime_evidence.entries = lying.runtime_evidence.entries.map((entry) => ({ ...entry, source: LEGACY_SOURCE }));
+        const lyingFile = path.join(dir, 'lying-result.json');
+        fs.writeFileSync(lyingFile, JSON.stringify(lying), 'utf8');
+
+        const mat = runScript('forge-evidence-materialize.js',
+          ['--result', lyingFile, '--unit', 'execute-task/T95', '--cwd', cwdE, '--json']);
+        assert(mat.status === 0, '(e) materializador sai 0 sobre o arquivo que já tinha linha legada', mat.stderr);
+        const lines = fs.readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+        const legacy = lines.filter((l) => l.source === LEGACY_SOURCE);
+        const runtime = lines.filter((l) => l.source === SOURCE);
+        assert(legacy.length === 1 && runtime.length === lines.length - 1 && runtime.length >= 2,
+          '(e) as duas source coexistem e um filtro de igualdade estrita as separa', JSON.stringify(lines));
+        assert(legacy[0].kind === 'file' && legacy[0].file === 'scripts/x.js',
+          '(e) a linha sintetizada legada sobrevive intacta (D7 não aposenta nada)', JSON.stringify(legacy));
+        assert(runtime.some((l) => l.kind === 'command' && l.exit_code === 3),
+          '(e) a linha runtime carrega o exit_code observado no stream', JSON.stringify(runtime));
+        assert(!runtime.some((l) => l.source === LEGACY_SOURCE),
+          '(e) source é FORÇADA: o payload mentiroso não disfarça uma linha runtime de sintetizada', JSON.stringify(runtime));
+      } finally { cleanup(cwdE); }
+    }
+
+    // (f) §7 e os 3 mirrors, por varredura IN-PROCESS com contagem exata.
+    {
+      const root = path.dirname(SCRIPTS);
+      const dispatch = fs.readFileSync(path.join(root, 'shared', 'forge-dispatch.md'), 'utf8');
+      const mirrorFiles = [
+        path.join(root, 'skills', 'forge-auto', 'SKILL.md'),
+        path.join(root, 'skills', 'forge-next', 'SKILL.md'),
+        path.join(root, 'skills', 'forge-task', 'SKILL.md'),
+      ];
+      const scan = scanEvidenceDocs(dispatch, mirrorFiles.map((f) => fs.readFileSync(f, 'utf8')));
+      assert(scan.section7Found && scan.parts7a === 1 && scan.parts7b === 1,
+        '(f) §7 tem exatamente uma parte 7a e uma parte 7b', JSON.stringify(scan));
+      assert(scan.runtimeObservedHeading === 1 && scan.runtimeSourceIn7b >= 1,
+        '(f) a parte 7b é a runtime-observada e nomeia source codex-runtime', JSON.stringify(scan));
+      assert(scan.synthesizedIn7b === 0 && scan.synthesizedIn7a >= 1,
+        '(f) A7: o 7b NÃO chama essa evidência de sintetizada, e o 7a (legado) continua chamando',
+        JSON.stringify(scan));
+      assert(scan.materializeIn7b === 1,
+        '(f) a INVOCAÇÃO do materializador aparece exatamente uma vez no 7b', JSON.stringify(scan));
+      assert(scan.mentionsIn7b > scan.materializeIn7b,
+        '(f) o 7b também NOMEIA o script fora do bloco de comando — por isso a contagem é sobre a invocação, não sobre o nome',
+        JSON.stringify(scan));
+      assert(scan.mirrorInvocations.length === 3 && scan.mirrorInvocations.every((n) => n === 1),
+        '(f) cada um dos 3 mirrors invoca o materializador EXATAMENTE uma vez', JSON.stringify(scan.mirrorInvocations));
+      // R9: e essa única invocação está no passo de DESFECHO TERMINAL, antes do
+      // split Success/Failure — senão a linha "result-file ilegível →
+      // collector-failed" segue sem call site. Um censo por desfecho terminal,
+      // nunca um por retry: por isso a contagem exata de 1 CONTINUA valendo.
+      assert(scan.mirrorInvokeBeforeSuccess.length === 3
+        && scan.mirrorInvokeBeforeSuccess.every((p) => p.ok === true),
+        '(f) R9: nos 3 mirrors a invocação vem ANTES do passo Success (alcançável em qualquer desfecho)',
+        JSON.stringify(scan.mirrorInvokeBeforeSuccess));
+
+      // Mordida do próprio scanner: sobre fontes sintéticas cada asserção acima
+      // tem de virar falsa. Um scanner que só sabe dizer "sim" é o defeito que
+      // esta seção existe para eliminar (mesmo molde do (e) da Seção 93).
+      const stripped = [
+        '**7. Evidence lines into `.gsd/forge/evidence-{unitId}.jsonl`.**',
+        '**7a. Synthesized lines (legacy, advisory — preserved).** tagged `source: codex-sidecar`.',
+        '',
+        '#### Sidecar dispatch state machine — Branch D',
+        `${INVOKE_NEEDLE} --result "$RESULT_FILE"`,
+        '',
+      ].join('\n');
+      const bitten = scanEvidenceDocs(stripped, ['', `${INVOKE_NEEDLE} x ${INVOKE_NEEDLE}`]);
+      assert(bitten.parts7b === 0 && bitten.runtimeObservedHeading === 0 && bitten.materializeIn7b === 0,
+        '(f) doc sem a parte 7b: o scanner acusa — e a invocação DEPOIS do §7 não conta como dentro dele',
+        JSON.stringify(bitten));
+      assert(bitten.synthesizedIn7a === 1 && bitten.synthesizedIn7b === 0,
+        '(f) o scanner localiza "synthesized" na parte certa, não no documento inteiro', JSON.stringify(bitten));
+      assert(JSON.stringify(bitten.mirrorInvocations) === JSON.stringify([0, 2]),
+        '(f) mirror sem invocação e mirror com invocação dupla são ambos contados', JSON.stringify(bitten.mirrorInvocations));
+      // Mordida do predicado posicional de R9: um mirror que invoca DEPOIS do
+      // `**Success` é o defeito original, e tem de ser acusado. Sem isto, o
+      // `every(ok)` acima seria compatível com um predicado sempre-verdadeiro.
+      const positional = scanEvidenceDocs(stripped, [
+        `**Success — passo 6.**\n${INVOKE_NEEDLE} --result "$RESULT_FILE"`,
+        `4.5 desfecho terminal\n${INVOKE_NEEDLE} --result "$RESULT_FILE"\n**Success — passo 6.**`,
+      ]).mirrorInvokeBeforeSuccess;
+      assert(positional[0].ok === false && positional[1].ok === true,
+        '(f) R9 mordida: invocação DEPOIS do Success é acusada; antes dele passa',
+        JSON.stringify(positional));
+    }
+
+    const source = fs.readFileSync(__filename, 'utf8');
+    const mainBody = source.slice(source.lastIndexOf('async function main()'));
+    assert(/\(\) => \{ smokeEvidenceRuntime\(\); \}/.test(mainBody),
+      '(g) Section 95 is registered through a closure in main()');
+    pass('(final) Section 95: prosa não vira evidência, desconhecida é rejeitada por nome, 18 confrontadas com mordida, '
+      + '3 desfechos distintos nos 3 pares, duas source coexistindo e §7b/mirrors contados in-process com mordida');
+  } finally {
+    if (repo) cleanup(repo);
+    cleanup(dir);
+  }
+}
+
+// ── Section 96: o transporte aposentado, provado ausente AO VIVO ───────────
+// A Seção 93 prova que o transporte NOVO funciona; esta prova que o VELHO acabou.
+// Três coisas, e cada uma existe porque a outra sozinha seria insuficiente:
+//   • a ausência é medida contra os arquivos REAIS do repo, pela CLI da T03 —
+//     este smoke CONSOME o scanner, nunca reimplementa o predicado (duas
+//     implementações do mesmo predicado divergem, e a divergência é invisível
+//     exatamente quando importa);
+//   • o predicado MORDE — fonte sintética com call site é acusada nomeando
+//     arquivo e linha, nas duas formas que (d) depende (argv e símbolo removido);
+//   • e o piso anti-silêncio: uma varredura que não leu nada FALHA, jamais
+//     "passa limpa" (mesmo invariante da S06 `scanned===0` e da S07
+//     `pairs_compared===0` → inconclusive).
+// O número 96 foi verificado contra o máximo REAL do arquivo (95 = Section 95),
+// não herdado do ROADMAP nem do Asset Map — que ainda diz "próxima livre = 92" e
+// está desatualizado. A lição da S04 é justamente essa.
+function smokeExecCallSitesRetired() {
+  process.stdout.write('\n▸ Section 96: o transporte aposentado, ausência ao vivo + verdade documental\n');
+  const dir = mkTmp('exec-callsites-retired');
+  const root = path.dirname(SCRIPTS);
+  const scan = (args, cwd) => {
+    const r = runScript('forge-exec-callsites.js', ['--check', '--json', ...args], { cwd });
+    let json = null;
+    try { json = JSON.parse(r.stdout); } catch { /* leave null — the assert says so */ }
+    return { ...r, json };
+  };
+  const count = (haystack, needle) => haystack.split(needle).length - 1;
+  const between = (source, start, end) => {
+    const from = source.indexOf(start);
+    if (from < 0) return '';
+    const to = source.indexOf(end, from + start.length);
+    return to < 0 ? source.slice(from) : source.slice(from, to);
+  };
+
+  try {
+    // (a) AUSÊNCIA AO VIVO — a CLI real, contra o repo real. Esta é a evidência do
+    // critério de aceitação #1 da slice. A mensagem de falha IMPRIME os call sites:
+    // um assert vermelho que não diz ONDE custa uma rodada inteira de investigação.
+    {
+      const live = scan([], root);
+      const found = (live.json && live.json.call_sites) || [];
+      assert(live.status === 0 && !!live.json && live.json.outcome === 'clean',
+        '(a) o repo real não tem call site executável do transporte aposentado',
+        `status=${live.status} outcome=${live.json && live.json.outcome} call_sites=${JSON.stringify(found, null, 1)}`);
+      assert(!!live.json && live.json.scanned > 0 && found.length === 0,
+        '(a) a varredura leu arquivos de verdade e não achou nenhum call site',
+        JSON.stringify({ scanned: live.json && live.json.scanned, hits: found.length }));
+      // Anti-vacuidade do próprio (a): o repo CONTINUA falando do transporte antigo
+      // em prosa (docs, comentários, este arquivo). Se as menções sumissem, o verde
+      // acima poderia significar "o scanner não leu nada relevante" em vez de
+      // "leu e classificou como prosa".
+      const prose = (live.json && live.json.prose_mentions) || [];
+      assert(prose.length > 0 && prose.some((m) => m.file.endsWith('.md')),
+        '(a) menções em PROSA sobrevivem e são classificadas como prosa (o verde não é vácuo)',
+        JSON.stringify({ prose: prose.length, md: prose.filter((m) => m.file.endsWith('.md')).length }));
+    }
+
+    // (b) MORDIDA na direção da presença — duas fontes sintéticas em disco, uma por
+    // forma que (d) depende. Sem este ponto, (a) passaria num mundo onde o scanner
+    // não morde nada, e um scanner que só sabe dizer "não" é o mesmo defeito de um
+    // que só sabe dizer "sim".
+    {
+      const fixtureDir = path.join(dir, 'fixture');
+      fs.mkdirSync(fixtureDir, { recursive: true });
+      // Os tokens são MONTADOS aqui pela mesma razão declarada em DETACHED_NEEDLE:
+      // este arquivo é o caçador, e (a) o varre. A montagem muda a grafia dentro do
+      // caçador; o arquivo escrito em disco carrega a grafia REAL, que é o que o
+      // predicado enxerga — por isso é aqui, e não em (a), que a mordida é provada.
+      const argvFixture = [
+        "const { spawnSync } = require('child_process');",
+        "function resolveCodexCommand() { return { cmd: 'codex', prefixArgs: [] }; }",
+        `const args = ['${EXEC_ARG_TOKEN}', '--sandbox', 'read-only'];`,
+        'spawnSync(resolveCodexCommand().cmd, args);',
+        '',
+      ].join('\n');
+      const symbolFixture = [
+        'async function runPlan(o) {',
+        `  return ${DETACHED_NEEDLE}o);`,
+        '}',
+        '',
+      ].join('\n');
+      fs.writeFileSync(path.join(fixtureDir, 'argv-call-site.js'), argvFixture, 'utf8');
+      fs.writeFileSync(path.join(fixtureDir, 'symbol-call-site.js'), symbolFixture, 'utf8');
+
+      const bitten = scan(['--root', '.'], fixtureDir);
+      const sites = (bitten.json && bitten.json.call_sites) || [];
+      assert(bitten.status === 2 && !!bitten.json && bitten.json.outcome === 'found',
+        '(b) fonte sintética com call site: outcome=found e exit 2 (nunca clean)',
+        `status=${bitten.status} ${JSON.stringify(bitten.json && bitten.json.outcome)}`);
+      const argvHit = sites.find((s) => s.file.endsWith('argv-call-site.js'));
+      assert(!!argvHit && argvHit.line === 3 && argvHit.form === 'exec-arg-array',
+        '(b) o item nomeia ARQUIVO e LINHA do argv (argv-call-site.js:3, forma exec-arg-array)',
+        JSON.stringify(sites));
+      const symbolHit = sites.find((s) => s.file.endsWith('symbol-call-site.js'));
+      assert(!!symbolHit && symbolHit.line === 2 && symbolHit.form === 'removed-symbol',
+        '(b) e nomeia arquivo e linha do símbolo removido (symbol-call-site.js:2, forma removed-symbol)',
+        JSON.stringify(sites));
+      assert(!!bitten.json && bitten.json.files_with_hits === 2,
+        '(b) as duas formas são contadas em arquivos distintos', JSON.stringify(bitten.json && bitten.json.files_with_hits));
+    }
+
+    // (c) PISO ANTI-SILÊNCIO, nas duas maneiras de não ler nada: um root vazio e um
+    // root inexistente. Nenhuma das duas pode render `clean` — um detector que
+    // relata a própria inatividade como boa notícia é byte a byte indistinguível
+    // de um detector quebrado, e é o defeito de origem desta milestone.
+    {
+      const emptyDir = path.join(dir, 'empty-root');
+      fs.mkdirSync(emptyDir, { recursive: true });
+      const empty = scan(['--root', '.'], emptyDir);
+      assert(empty.status === 2 && !!empty.json && empty.json.outcome === 'scan-failed'
+        && empty.json.outcome !== 'clean' && empty.json.scanned === 0,
+        '(c) root vazio: scanned=0 rende scan-failed, jamais clean', JSON.stringify(empty.json));
+
+      const absent = scan(['--root', 'does-not-exist'], dir);
+      const reasons = ((absent.json && absent.json.skipped) || []).map((s) => s.reason);
+      assert(absent.status === 2 && !!absent.json && absent.json.outcome === 'scan-failed'
+        && reasons.includes('root-not-found'),
+        '(c) root inexistente: scan-failed COM razão nomeada (root-not-found), nunca descarte silencioso',
+        JSON.stringify(absent.json && absent.json.skipped));
+    }
+
+    // (d) SÍMBOLOS REMOVIDOS — varredura in-process do adapter real, contagem exata
+    // (`split(NEEDLE).length-1`), nunca includes() sobre o documento inteiro. As
+    // agulhas com parêntese são montadas (ver DETACHED_NEEDLE); os nomes nus não
+    // precisam ser, porque nome nu não é forma de chamada.
+    const xllm = readRepoText(path.join(SCRIPTS, 'forge-xllm.js'));
+    const PAREN = '(';
+    const REMOVED = ['invokeCodex', 'invokeCodexDetached', 'codexSandboxArgs'];
+    for (const name of REMOVED) {
+      assert(count(xllm, `function ${name}${PAREN}`) === 0,
+        `(d) a declaração de ${name} não existe mais em forge-xllm.js`,
+        `count=${count(xllm, `function ${name}${PAREN}`)}`);
+    }
+    // `module.exports` precisa de igualdade por ENTRADA, não de substring:
+    // `invokeCodexAppServer` CONTÉM `invokeCodex`, então um count() ingênuo daria
+    // falso positivo permanente sobre o símbolo que SUBSTITUIU os removidos.
+    const exportsBlock = between(xllm, 'module.exports = {', '\n};');
+    const exportedNames = new Set(exportsBlock.split('\n')
+      .map((line) => line.trim().replace(/,$/, '').split(':')[0].trim())
+      .filter(Boolean));
+    for (const name of REMOVED) {
+      assert(!exportedNames.has(name), `(d) ${name} não está em module.exports`,
+        JSON.stringify([...exportedNames].filter((n) => n.toLowerCase().includes('codex'))));
+    }
+    // Controle positivo: um arquivo vazio (ou um `between` que não casou nada)
+    // passaria em TODOS os asserts acima. Estes dizem que o adapter lido é o real e
+    // que o transporte que substituiu os removidos está de fato alcançável.
+    assert(exportedNames.has('invokeCodexAppServer'),
+      '(d) controle positivo: invokeCodexAppServer ESTÁ em module.exports',
+      JSON.stringify([...exportedNames].slice(0, 8)));
+    const planBody = between(xllm, 'async function runPlan(', '\nmodule.exports');
+    const engineBody = between(xllm, 'function invokeEngine(', '\nfunction ');
+    assert(count(planBody, 'invokeCodexAppServer(') >= 1,
+      '(d) o caminho de plan alcança o app-server', `count=${count(planBody, 'invokeCodexAppServer(')}`);
+    assert(count(engineBody, 'invokeCodexAppServer(') >= 1,
+      '(d) o caminho de review (invokeEngine) alcança o app-server', `count=${count(engineBody, 'invokeCodexAppServer(')}`);
+    for (const mode of ['runChallenge', 'runDefend', 'runRebuttal']) {
+      const body = between(xllm, `async function ${mode}(`, '\nasync function ');
+      assert(count(body, 'invokeEngine(') >= 1,
+        `(d) ${mode} chega ao transporte pelo invokeEngine`, `count=${count(body, 'invokeEngine(')}`);
+    }
+    // Mordida de (d): sobre uma fonte que RESSUSCITA os símbolos, cada contagem
+    // acima tem de virar diferente de zero. Sem isto, os `=== 0` seriam compatíveis
+    // com um scanner que não conta nada.
+    {
+      const revived = [
+        `function invokeCodex${PAREN}o) { return 1; }`,
+        `function invokeCodexDetached${PAREN}o) { return 2; }`,
+        `function codexSandboxArgs${PAREN}) { return []; }`,
+        'module.exports = {',
+        '  invokeCodex,',
+        '  codexSandboxArgs,',
+        '};',
+        '',
+      ].join('\n');
+      const revivedExports = new Set(between(revived, 'module.exports = {', '\n};').split('\n')
+        .map((line) => line.trim().replace(/,$/, '').split(':')[0].trim()).filter(Boolean));
+      assert(REMOVED.every((name) => count(revived, `function ${name}${PAREN}`) === 1),
+        '(d) fonte que ressuscita os 3 símbolos: a contagem de declaração acusa cada um');
+      assert(revivedExports.has('invokeCodex') && revivedExports.has('codexSandboxArgs')
+        && !revivedExports.has('invokeCodexAppServer'),
+        '(d) e a igualdade por entrada acusa a reexportação sem confundir com invokeCodexAppServer',
+        JSON.stringify([...revivedExports]));
+    }
+
+    // (e) VERDADE DOCUMENTAL — presença POR ARQUIVO, contagem exata, mensagem
+    // distinta em cada um. Nunca `includes()` sobre o documento inteiro (lição
+    // M016 S03 R2 + M013 S04 R1): um assert que só sabe dizer "a palavra aparece
+    // em algum lugar" não distingue a correção do documento errado.
+    {
+      const reviewDoc = readRepoText(path.join(root, 'shared', 'forge-review.md'));
+      assert(count(reviewDoc, RETIRED_PHRASE) === 0,
+        '(e) shared/forge-review.md não descreve mais o challenger rodando pelo transporte aposentado',
+        `count=${count(reviewDoc, RETIRED_PHRASE)}`);
+      assert(count(reviewDoc, 'codex app-server') >= 1,
+        '(e) shared/forge-review.md nomeia o app-server como o transporte do challenger codex',
+        `count=${count(reviewDoc, 'codex app-server')}`);
+      // A MECÂNICA do fallback não pode ter sido reescrita de passagem junto com a
+      // descrição do transporte — é contrato, não prosa de apoio.
+      assert(count(reviewDoc, 'review-challenger-fallback') >= 1 && count(reviewDoc, 'forge-reviewer') >= 1,
+        '(e) e a mecânica do fallback (review-challenger-fallback → forge-reviewer) segue intacta',
+        JSON.stringify({ fallback: count(reviewDoc, 'review-challenger-fallback'), reviewer: count(reviewDoc, 'forge-reviewer') }));
+
+      const prefsDoc = readRepoText(path.join(root, 'shared', 'forge-prefs-reference.md'));
+      assert(count(prefsDoc, RETIRED_PHRASE) === 0,
+        '(e) shared/forge-prefs-reference.md corrige a descrição de review.challenger',
+        `count=${count(prefsDoc, RETIRED_PHRASE)}`);
+      assert(count(prefsDoc, 'codex app-server') >= 1,
+        '(e) shared/forge-prefs-reference.md nomeia o app-server na mesma descrição',
+        `count=${count(prefsDoc, 'codex app-server')}`);
+
+      // O documento histórico é o caso INVERSO, e é por isso que ele está aqui: a
+      // medição de 2026-07-15 continua válida COMO REGISTRO. Reescrevê-la seria
+      // apagar arqueologia; o que ele ganha é uma nota datada. Se alguém "limpar" as
+      // ocorrências do corpo, este assert fica vermelho — de propósito.
+      const gapDoc = readRepoText(path.join(root, 'docs', 'xllm-review-svn-gap.md'));
+      const gapBody = gapDoc.slice(gapDoc.indexOf('## TL;DR'));
+      assert(gapBody.length > 0 && count(gapBody, RETIRED_PHRASE) === 6,
+        '(e) docs/xllm-review-svn-gap.md MANTÉM as 6 ocorrências históricas no corpo (não reescrito)',
+        `count=${count(gapBody, RETIRED_PHRASE)}`);
+      assert(count(gapDoc, 'DOCUMENTO HISTÓRICO') === 1 && count(gapDoc, 'M018/S05') >= 1,
+        '(e) e ganhou exatamente uma nota datada declarando-o histórico, nomeando M018/S05',
+        JSON.stringify({ nota: count(gapDoc, 'DOCUMENTO HISTÓRICO'), ref: count(gapDoc, 'M018/S05') }));
+      assert(gapDoc.indexOf('DOCUMENTO HISTÓRICO') < gapDoc.indexOf('## TL;DR'),
+        '(e) a nota está NO TOPO, antes do corpo que ela contextualiza');
+    }
+
+    // (f) R6 (nenhum dos 3 mirrors tocado) é acceptance DA SLICE, verificada pelo
+    // orquestrador contra o diff do branch — deliberadamente FORA daqui, pela mesma
+    // razão que a Section 93 escreve: uma asserção sobre a working tree do momento
+    // vira mina para qualquer slice futura que edite skills/ legitimamente, e um
+    // smoke vermelho por isso não diria nada sobre a ausência que esta seção existe
+    // para provar. Não "completar" esta seção com esse assert depois.
+
+    // (g) auto-registro em main() por closure — chamada bare é rejeitada pela
+    // Section 73, e uma seção não registrada é uma seção que some em silêncio.
+    const source = fs.readFileSync(__filename, 'utf8');
+    const mainBody = source.slice(source.lastIndexOf('async function main()'));
+    assert(/\(\) => \{ smokeExecCallSitesRetired\(\); \}/.test(mainBody),
+      '(g) Section 96 is registered through a closure in main()');
+
+    pass('(final) Section 96: ausência do transporte aposentado provada AO VIVO pela CLI da T03, '
+      + 'predicado mordendo nas duas formas com arquivo e linha, piso anti-silêncio nas duas maneiras de não ler nada, '
+      + '3 símbolos ausentes com controle positivo, e a verdade documental corrigida sem reescrever a arqueologia');
+  } finally { cleanup(dir); }
+}
+
+// ── Section 97 (M018 S06/T05) ──────────────────────────────────────────────
+//
+// Amarra os cinco entregáveis da S06 numa seção que FALHA quando qualquer um
+// deles for desfeito. Todo bloco traz o contrafactual junto da direção que
+// passa: um assert que só sabe dizer "sim" não distingue o código correto de um
+// predicado que nunca morde — e foi exatamente por isso que a Section 96 da S05
+// abriu VERMELHA, que era o desfecho certo.
+//
+// O que NÃO está aqui, e por quê: nenhum assert contra o `M018-CONTEXT.md` ao
+// vivo. O CODE_DIR é um worktree sem `.gsd/` (medido: ENOENT), então um assert
+// desses ou deriva um caminho de fora do worktree (frágil, específico da
+// máquina) ou degrada em skip silencioso — o piso que esta slice inteira existe
+// para sustentar. A paridade doc↔código é critério de aceitação MANUAL (#2 do
+// S06-PLAN), rodado à mão com a saída colada no summary. Não "completar" esta
+// seção com esse assert depois.
+//
+// O número 97 foi medido contra o máximo REAL do arquivo (96 = Section 96), não
+// herdado do Asset Map — que já esteve 4 seções desatualizado (lição da S04).
+function smokeEnvCoverage() {
+  process.stdout.write('\n▸ Section 97: cobertura por reason — tabela IN-14, runtime-first, fallback nomeado e os dois itens de backlog\n');
+  const dir = mkTmp('env-coverage');
+  const root = path.dirname(SCRIPTS);
+  const count = (haystack, needle) => haystack.split(needle).length - 1;
+  const coverage = require(path.join(SCRIPTS, 'forge-env-coverage.js'));
+  const promote = require(path.join(SCRIPTS, 'forge-env-promote.js'));
+  const reverifyMod = require(path.join(SCRIPTS, 'forge-reverify.js'));
+  const { ENV_REASON_ENUM } = require(path.join(SCRIPTS, 'forge-xllm.js'));
+  // Contrato travado da T02: `fallbacks` é CONDICIONALMENTE presente (só existe
+  // quando algo caiu no textual), porque um `fallbacks: []` incondicional
+  // quebraria o guard de identidade-por-objeto em :8933. Ausente = "nada caiu",
+  // nunca "o campo sumiu". Ler de qualquer outra forma reintroduz o bug.
+  const fallbacksOf = (r) => (Array.isArray(r.fallbacks) ? r.fallbacks : []);
+
+  try {
+    // (a) TABELA IN-14 — mordida nas duas direções sobre fixture-string.
+    // As 5 linhas são escritas LITERALMENTE aqui, não geradas a partir de
+    // REASON_COVERAGE: uma tabela derivada do mapa passaria por construção
+    // (tautologia) e nunca acusaria uma troca de veredito no mapa. Escrita à
+    // mão, a fixture íntegra passar JÁ é o confronto literal × mapa.
+    const HEADING = coverage.DOC_SECTION_HEADING;
+    const docRows = {
+      'out-of-scope-test-failure': '| `out-of-scope-test-failure` | promotable | commandExecution.exitCode | n/a (coberto) | A4 classe (b): o runner roda e o runtime emite exit code. |',
+      'network-required': '| `network-required` | promotable | commandExecution.exitCode | n/a (coberto) | A4 classe (b): controle negativo de A2 com exitCode 6. |',
+      'sandbox-exec-blocked': '| `sandbox-exec-blocked` | measured-gap | nenhuma | true | A4 classe (c) medida: negação só em prosa, zero commandExecution. |',
+      'git-commit-required': '| `git-commit-required` | categorical | nenhuma | false | A evidência seria a ausência de uma ação; nenhum stream testemunha ausência. |',
+      'gsd-write-refused': '| `gsd-write-refused` | categorical | nenhuma | false | Mesma classe: a escrita em .gsd/** nunca acontece (TASK-020 R1). |',
+    };
+    const buildDoc = (rows) => [
+      '# Fixture',
+      '',
+      HEADING,
+      '',
+      '| reason | veredito | fonte runtime | re-testável no upgrade | razão |',
+      '|---|---|---|---|---|',
+      ...Object.keys(rows).map((r) => rows[r]),
+      '',
+    ].join('\n');
+
+    {
+      const intact = coverage.checkDocTable(buildDoc(docRows));
+      assert(intact.ok === true && intact.parsed === 5,
+        '(a) tabela íntegra: ok=true e parsed=5 — as 5 linhas foram de fato lidas',
+        JSON.stringify(intact));
+
+      // Veredito APAGADO num reason: a célula em branco jamais pode ser lida
+      // como concordância com o mapa, e a falha tem de NOMEAR o reason — "5
+      // divergências" manda o revisor para uma escavação.
+      const erased = { ...docRows, 'network-required': '| `network-required` |  | commandExecution.exitCode | n/a (coberto) | idem. |' };
+      const bitten = coverage.checkDocTable(buildDoc(erased));
+      const missing = bitten.problems.filter((p) => p.kind === 'missing-verdict');
+      assert(bitten.ok === false && missing.length === 1
+        && missing[0].reason === 'network-required'
+        && missing[0].detail.includes('network-required'),
+        '(a) veredito apagado: ok=false E a mensagem NOMEIA o reason afetado',
+        JSON.stringify(bitten.problems));
+
+      // Piso anti-silêncio: markdown sem nenhuma linha não é "passou limpo".
+      const empty = coverage.checkDocTable('# Fixture\n\nsem tabela nenhuma aqui\n');
+      assert(empty.ok === false && empty.parsed === 0
+        && empty.problems.length === 1 && empty.problems[0].kind === 'anti-silence',
+        '(a) zero linhas parseadas: FALHA por anti-silêncio, jamais um passe limpo',
+        JSON.stringify(empty));
+
+      // Vocabulário fechado: um veredito inventado é acusado por nome próprio,
+      // não confundido com "ausente".
+      const invented = { ...docRows, 'sandbox-exec-blocked': '| `sandbox-exec-blocked` | promovivel | nenhuma | true | idem. |' };
+      const unknown = coverage.checkDocTable(buildDoc(invented));
+      assert(unknown.ok === false
+        && unknown.problems.some((p) => p.kind === 'unknown-verdict' && p.reason === 'sandbox-exec-blocked'),
+        '(a) veredito fora do enum: unknown-verdict, distinto de missing-verdict',
+        JSON.stringify(unknown.problems));
+
+      // Colapso pelo lado do DOCUMENTO: documentar o measured-gap como
+      // não-reabrível é a fusão que a DP5 proíbe, e a coluna a carrega.
+      const collapsedDoc = { ...docRows, 'sandbox-exec-blocked': '| `sandbox-exec-blocked` | measured-gap | nenhuma | false | idem. |' };
+      const collapsed = coverage.checkDocTable(buildDoc(collapsedDoc));
+      assert(collapsed.ok === false
+        && collapsed.problems.some((p) => p.kind === 'retestable-mismatch' && p.reason === 'sandbox-exec-blocked'),
+        '(a) colapso documental do measured-gap: retestable-mismatch nomeando o reason',
+        JSON.stringify(collapsed.problems));
+
+      // S06 review R1: a coluna de FONTE RUNTIME era conferida só por não-vazio,
+      // então um doc alegando `agentMessage.text` contra o
+      // `commandExecution.exitCode` do mapa PASSAVA no --check-doc. A coluna que
+      // carrega a distinção inteira era a única que nada confrontava. Mutação
+      // não-vazia-mas-errada: tem de morder, nomeando o reason e os dois valores.
+      const wrongSource = {
+        ...docRows,
+        'network-required': '| `network-required` | promotable | agentMessage.text | n/a (coberto) | idem. |',
+      };
+      const sourceBitten = coverage.checkDocTable(buildDoc(wrongSource));
+      const mismatch = sourceBitten.problems.filter((p) => p.kind === 'runtime-source-mismatch');
+      assert(sourceBitten.ok === false && mismatch.length === 1
+        && mismatch[0].reason === 'network-required'
+        && mismatch[0].detail.includes('agentMessage.text')
+        && mismatch[0].detail.includes('commandExecution.exitCode'),
+        '(a) R1: fonte runtime não-vazia mas ERRADA morde, nomeando o reason e os dois valores',
+        JSON.stringify(sourceBitten.problems));
+      // Contrafactual do mesmo predicado: célula VAZIA continua sendo
+      // missing-runtime-source, distinta do mismatch. Sem isto, o novo kind
+      // poderia ter engolido o antigo.
+      const emptySource = {
+        ...docRows,
+        'network-required': '| `network-required` | promotable |  | n/a (coberto) | idem. |',
+      };
+      const emptyBitten = coverage.checkDocTable(buildDoc(emptySource));
+      assert(emptyBitten.ok === false
+        && emptyBitten.problems.some((p) => p.kind === 'missing-runtime-source' && p.reason === 'network-required')
+        && !emptyBitten.problems.some((p) => p.kind === 'runtime-source-mismatch'),
+        '(a) R1: célula vazia segue missing-runtime-source, jamais confundida com mismatch',
+        JSON.stringify(emptyBitten.problems));
+      // Controle verde: decoração (crases) não é divergência — a comparação é
+      // sobre o VALOR normalizado, não sobre bytes de markdown.
+      const decorated = {
+        ...docRows,
+        'network-required': '| `network-required` | promotable | `commandExecution.exitCode` | n/a (coberto) | idem. |',
+      };
+      assert(coverage.checkDocTable(buildDoc(decorated)).ok === true,
+        '(a) R1: controle — a mesma fonte com crases continua limpa (compara valor, não decoração)');
+    }
+
+    // (b) AS TRÊS CLASSES NÃO COLAPSAM (DP5) — asserido por comparação, não por
+    // prosa numa célula. O total é conferido contra ENV_REASON_ENUM para que a
+    // contagem não possa concordar consigo mesma sobre um mapa encolhido.
+    {
+      const counts = coverage.coverageCounts();
+      assert(counts.promotable === 2 && counts['measured-gap'] === 1 && counts.categorical === 2,
+        '(b) contagem por classe: {promotable:2, measured-gap:1, categorical:2}',
+        JSON.stringify(counts));
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      assert(total === ENV_REASON_ENUM.length && total === 5,
+        '(b) o total classificado bate com ENV_REASON_ENUM (nada fora do mapa, nada a mais)',
+        JSON.stringify({ total, enum: ENV_REASON_ENUM.length }));
+
+      const map = coverage.REASON_COVERAGE;
+      assert(map['sandbox-exec-blocked'].retestable_on_upgrade === true
+        && map['git-commit-required'].retestable_on_upgrade === false
+        && map['gsd-write-refused'].retestable_on_upgrade === false,
+        '(b) measured-gap é re-testável e os dois categóricos NÃO são — a distinção é executável',
+        JSON.stringify({
+          gap: map['sandbox-exec-blocked'].retestable_on_upgrade,
+          git: map['git-commit-required'].retestable_on_upgrade,
+          gsd: map['gsd-write-refused'].retestable_on_upgrade,
+        }));
+      // `null` nos promotable é valor OBSERVADO ("não se aplica, já coberto"),
+      // nunca sinônimo de false. Coagir os dois ao mesmo valor de célula é o
+      // colapso silencioso pelo terceiro lado.
+      assert(map['network-required'].retestable_on_upgrade === null
+        && map['out-of-scope-test-failure'].retestable_on_upgrade === null,
+        '(b) os promotable carregam null (n/a), jamais false');
+
+      // Mordida do invariante: um mapa que FUNDE o gap medido nos categóricos
+      // tem de estourar CLASS_COLLAPSE nomeando o reason. Sem isto, os asserts
+      // acima seriam compatíveis com um assertReasonCoverage que não checa nada.
+      assert(coverage.assertReasonCoverage().ok === true,
+        '(b) controle positivo: o mapa íntegro passa em assertReasonCoverage');
+      const collapsedMap = {
+        ...coverage.REASON_COVERAGE,
+        'sandbox-exec-blocked': { ...coverage.REASON_COVERAGE['sandbox-exec-blocked'], verdict: 'categorical' },
+      };
+      let collapseError = null;
+      try { coverage.assertReasonCoverage(ENV_REASON_ENUM, collapsedMap); } catch (e) { collapseError = e; }
+      assert(!!collapseError && collapseError.code === 'CLASS_COLLAPSE'
+        && collapseError.message.includes('sandbox-exec-blocked'),
+        '(b) mapa com as classes fundidas: CLASS_COLLAPSE nomeando sandbox-exec-blocked',
+        collapseError ? `${collapseError.code}: ${collapseError.message}` : 'nenhum erro lançado');
+    }
+
+    // (c) RUNTIME-FIRST NOS DOIS SENTIDOS, PELA CLI. Spawnar é o ponto: exit
+    // code e contrato de saída são propriedades do PROCESSO, não afirmações de
+    // um require() no mesmo heap. As duas notas são escolhidas para inverter o
+    // veredito textual: em (i) a note DIRIA sim e o runtime recusa; em (ii) a
+    // note DIRIA não e o runtime promove. É isso que prova qual dos dois manda.
+    {
+      const planPath = path.join(dir, 'plan.md');
+      fs.writeFileSync(planPath, '# Plano\n\nNada aqui cita caminho de teste.\n', 'utf8');
+      const runPromote = (result) => {
+        const resultPath = path.join(dir, 'result.json');
+        fs.writeFileSync(resultPath, JSON.stringify(result), 'utf8');
+        const r = runScript('forge-env-promote.js', ['--result', resultPath, '--plan', planPath, '--json']);
+        let json = null;
+        try { json = JSON.parse(r.stdout); } catch { /* deixa null — o assert fala */ }
+        return { ...r, json };
+      };
+      const claim = (note, runtimeEvidence) => {
+        const base = {
+          status: 'partial',
+          must_haves_status: [{ item: 'baixar dependências', status: 'unmet', scope: 'environment', reason: 'network-required', note }],
+        };
+        return runtimeEvidence === undefined ? base : { ...base, runtime_evidence: runtimeEvidence };
+      };
+      const collected = (entries) => ({ census: { outcome: 'collected' }, entries });
+
+      const refused = runPromote(claim(
+        'precisei de network install a partir do registry para provar o item',
+        collected([{ kind: 'command', cmd: 'npm test', exit_code: 0 }]),
+      ));
+      assert(refused.status === 0 && !!refused.json && refused.json.promote === false,
+        '(c)(i) stream coletado sem comando de rede que falhe: promote=false pela CLI (exit 0, JSON no stdout)',
+        `status=${refused.status} stdout=${refused.stdout}`);
+      assert(!!refused.json && refused.json.rejected.length === 1
+        && refused.json.rejected[0].why.includes('runtime'),
+        '(c)(i) e o why nomeia que a recusa veio da EVIDÊNCIA RUNTIME, jamais de regex',
+        JSON.stringify(refused.json && refused.json.rejected));
+
+      const promoted = runPromote(claim(
+        'o item não pôde ser provado neste ambiente',
+        collected([{ kind: 'command', cmd: 'curl https://registry.npmjs.org/forge', exit_code: 6 }]),
+      ));
+      assert(promoted.status === 0 && !!promoted.json && promoted.json.promote === true
+        && promoted.json.env_constraints.length === 1 && promoted.json.rejected.length === 0,
+        '(c)(ii) mesma alegação com curl exit_code 6 observado: promote=true, pela CLI',
+        `status=${promoted.status} stdout=${promoted.stdout}`);
+      // Controle da direção textual: a note de (ii), SEM stream, é recusada.
+      // Sem este assert, (ii) poderia estar passando pelo corroborador textual.
+      const textualOnly = runPromote(claim('o item não pôde ser provado neste ambiente'));
+      assert(!!textualOnly.json && textualOnly.json.promote === false,
+        '(c)(ii) controle: a MESMA note sem stream é recusada — quem promoveu foi o exit code observado',
+        JSON.stringify(textualOnly.json));
+      // DP4: `null` é valor observado, não falha. Coagi-lo a "≠ 0" seria o edit
+      // mais danoso possível — fabricaria uma falha que nada mediu.
+      const nullExit = runPromote(claim(
+        'o item não pôde ser provado neste ambiente',
+        collected([{ kind: 'command', cmd: 'curl https://registry.npmjs.org/forge', exit_code: null }]),
+      ));
+      assert(!!nullExit.json && nullExit.json.promote === false,
+        '(c) exit_code null NÃO corrobora falha (DP4)', JSON.stringify(nullExit.json));
+    }
+
+    // (d) FALLBACK NOMEADO E DISTINTO. Quatro estados, quatro nomes próprios —
+    // e o censo de PARES comparados junto, molde S07/S04: um comparador que não
+    // comparou nada não pode reportar sucesso.
+    {
+      const planText = '# Plano\n';
+      const payload = (runtimeEvidence) => {
+        const base = {
+          status: 'partial',
+          must_haves_status: [{ item: 'baixar dependências', status: 'unmet', scope: 'environment', reason: 'network-required', note: 'network install a partir do registry' }],
+        };
+        return runtimeEvidence === undefined ? base : { ...base, runtime_evidence: runtimeEvidence };
+      };
+      const states = {
+        'campo ausente': payload(undefined),
+        'collector-failed': payload({ census: { outcome: 'collector-failed' }, entries: [] }),
+        malformed: payload({ census: { outcome: 'collected' } }),
+        'coletado com zero comandos': payload({ census: { outcome: 'collected' }, entries: [{ kind: 'agentMessage', text: 'sem rede' }] }),
+      };
+      const named = {};
+      for (const [label, result] of Object.entries(states)) {
+        const out = promote.checkEnvPromotion(result, planText);
+        const fb = fallbacksOf(out);
+        assert(fb.length === 1 && typeof fb[0].fallback === 'string' && fb[0].fallback.length > 0
+          && fb[0].reason === 'network-required',
+          `(d) ${label}: cai no textual COM fallback nomeado (nunca aceite silencioso)`,
+          JSON.stringify(out));
+        named[label] = fb.length === 1 ? fb[0].fallback : null;
+      }
+      const values = Object.values(named);
+      let pairs = 0;
+      let distinct = true;
+      for (let i = 0; i < values.length; i += 1) {
+        for (let j = i + 1; j < values.length; j += 1) {
+          pairs += 1;
+          if (values[i] === values[j] || values[i] === null) distinct = false;
+        }
+      }
+      assert(pairs === 6 && distinct,
+        '(d) os quatro nomes são distintos DOIS A DOIS, com o censo de pares comparados (6)',
+        JSON.stringify({ pairs, named }));
+      // Contrato de aditividade estrita da T02: sem fallback, a chave NÃO
+      // existe. Um `fallbacks: []` incondicional afrouxaria o guard de
+      // identidade-por-objeto de :8933 — o próprio guard que isto protege.
+      const clean = promote.checkEnvPromotion(payload({
+        census: { outcome: 'collected' },
+        entries: [{ kind: 'command', cmd: 'npm install', exit_code: 1 }],
+      }), planText);
+      assert(clean.promote === true && !Object.prototype.hasOwnProperty.call(clean, 'fallbacks'),
+        '(d) quando nada cai no textual, a chave fallbacks é AUSENTE (presença é o sinal)',
+        JSON.stringify(clean));
+    }
+
+    // (e) WIRING DO EVENTO, POR CONTAGEM EXATA (`split(N).length-1`), nunca
+    // includes() document-wide: um assert que só sabe dizer "aparece em algum
+    // lugar" não distingue a correção do documento errado (M016 S03 R2).
+    {
+      const EVENT = 'sidecar_env_corroboration_fallback';
+      const mirrors = [
+        path.join(root, 'skills', 'forge-auto', 'SKILL.md'),
+        path.join(root, 'skills', 'forge-next', 'SKILL.md'),
+        path.join(root, 'skills', 'forge-task', 'SKILL.md'),
+      ];
+      const canonical = path.join(root, 'shared', 'forge-dispatch.md');
+      const canonicalText = readRepoText(canonical);
+      // Composição MEDIDA das 2 ocorrências no canônico (não um "2" herdado):
+      // 1 é a definição em negrito que abre o parágrafo, 1 é o campo `"event"`
+      // da linha JSONL que ela especifica. Fixar o total em 2 sozinho seria
+      // frouxo — uma SEGUNDA definição em outro parágrafo passaria se alguém
+      // apagasse a forma JSON. Por isso cada forma é contada em separado: a
+      // definição é exatamente uma, e é isso que "declarado aqui e só aqui"
+      // quer dizer de forma executável.
+      assert(count(canonicalText, `**\`${EVENT}\``) === 1,
+        '(e) shared/forge-dispatch.md DEFINE o evento exatamente uma vez (forma em negrito)',
+        `count=${count(canonicalText, `**\`${EVENT}\``)}`);
+      assert(count(canonicalText, `"event":"${EVENT}"`) === 1,
+        '(e) e especifica exatamente uma vez a forma da linha de evento (campo "event")',
+        `count=${count(canonicalText, `"event":"${EVENT}"`)}`);
+      assert(count(canonicalText, EVENT) === 2,
+        '(e) e o total no canônico é 2 = definição + forma JSON, sem terceira menção solta',
+        `count=${count(canonicalText, EVENT)}`);
+      for (const mirror of mirrors) {
+        const text = readRepoText(mirror);
+        assert(count(text, EVENT) === 1,
+          `(e) ${path.basename(path.dirname(mirror))} invoca o evento exatamente uma vez`,
+          `count=${count(text, EVENT)}`);
+        // S06 review R8: a contagem exata continua 1, mas 1 não diz ONDE. A
+        // frase estava presa ao bullet do `status == "partial"`, enquanto um
+        // SEGUNDO caminho (o `status == "done"` com entradas env não atendidas,
+        // M016 S01 R1) roda a MESMA invocação do checker e nunca consumia
+        // `PROMOTION.fallbacks`. A ocorrência única agora tem de (i) vir DEPOIS
+        // do bullet do done — logo não pode estar presa ao do partial — e (ii)
+        // nomear os DOIS caminhos no próprio parágrafo.
+        const eventIdx = text.indexOf(EVENT);
+        const doneBulletIdx = text.indexOf('M016 S01 review R1');
+        assert(doneBulletIdx >= 0 && eventIdx > doneBulletIdx,
+          `(e) R8: em ${path.basename(path.dirname(mirror))} a emissão vem DEPOIS do bullet do done (não presa ao do partial)`,
+          JSON.stringify({ eventIdx, doneBulletIdx }));
+        const paragraph = text.slice(text.lastIndexOf('\n', eventIdx) + 1, text.indexOf('\n', eventIdx));
+        assert(paragraph.includes('status == "partial"') && paragraph.includes('status == "done"'),
+          `(e) R8: e o parágrafo da emissão nomeia AMBAS as invocações em ${path.basename(path.dirname(mirror))}`,
+          paragraph);
+        // Anti-vacuidade: o arquivo lido é o mirror REAL e a frase pousou no
+        // bullet que já existia, não num rodapé solto. Sem isto, um mirror
+        // esvaziado passaria no assert de contagem 0 do vocabulário abaixo.
+        assert(count(text, 'sidecar_env_promotion') >= 1,
+          `(e) e a frase pousou no bullet de promoção que já existia em ${path.basename(path.dirname(mirror))}`,
+          `count=${count(text, 'sidecar_env_promotion')}`);
+      }
+      // Enum-definido-uma-vez virando teste: o vocabulário fechado dos estados
+      // vive SÓ no canônico. Os três nomes hifenizados são termos de arte; a
+      // palavra nua "malformed" NÃO entra aqui de propósito — é inglês comum e
+      // já aparece 2x no forge-auto falando de JSON, então exigir 0 seria falsa
+      // precisão, um vermelho que não diz nada sobre o enum.
+      // `coverage-unavailable` entrou em S06 review R4 como QUINTO nome do
+      // vocabulário fechado: também é termo de arte, também vive só no canônico.
+      const VOCAB = ['not-collected', 'collector-failed', 'no-command-entries', 'coverage-unavailable'];
+      for (const term of VOCAB) {
+        assert(count(canonicalText, term) >= 1,
+          `(e) o canônico declara o estado '${term}'`, `count=${count(canonicalText, term)}`);
+        for (const mirror of mirrors) {
+          assert(count(readRepoText(mirror), term) === 0,
+            `(e) e '${term}' NÃO é restatado em ${path.basename(path.dirname(mirror))}`,
+            `count=${count(readRepoText(mirror), term)}`);
+        }
+      }
+      // Mordida do (e): sobre um texto que RESTATA o enum, a mesma contagem tem
+      // de acusar. Sem isto, os `=== 0` seriam compatíveis com um count() cego.
+      const restating = `um mirror que copia o enum: not-collected, collector-failed, no-command-entries, coverage-unavailable.`;
+      assert(VOCAB.every((term) => count(restating, term) === 1),
+        '(e) mordida: num texto que restata o enum, a contagem acusa os três estados');
+    }
+
+    // (f) OS DOIS ITENS DE BACKLOG.
+    {
+      // `git switch -c` é o alias moderno de `checkout -b`: sem ele uma escrita
+      // git legítima lê como não-escrita e a alegação é recusada por engano.
+      assert(promote.corroborates({ reason: 'git-commit-required', item: 'x', note: 'rodei git switch -c feature para provar o item' }, '') === null,
+        "(f) `git switch -c feature` numa note corrobora git-commit-required (alias novo)");
+      assert(promote.corroborates({ reason: 'git-commit-required', item: 'x', note: 'rodei git switch -C feature' }, '') === null,
+        '(f) e a variante -C também');
+      // Aditivo, não substitutivo: nenhuma operação já reconhecida saiu.
+      assert(promote.corroborates({ reason: 'git-commit-required', item: 'x', note: 'rodei git checkout -b feature' }, '') === null,
+        '(f) controle: `git checkout -b` continua corroborando (o alias é ADITIVO)');
+      // O contrafactual medido da TASK-020, ainda recusado: uma note que apenas
+      // MENCIONA git — inclusive a que dizia literalmente que a task proíbe
+      // rodar git — não é evidência de escrita nenhuma.
+      const merelyMentions = promote.corroborates(
+        { reason: 'git-commit-required', item: 'commit the change with git', note: 'the task prohibits running any git command' }, '',
+      );
+      assert(typeof merelyMentions === 'string' && merelyMentions.includes('git write operation'),
+        '(f) contrafactual da TASK-020: note que apenas MENCIONA git segue recusada, com o porquê',
+        JSON.stringify(merelyMentions));
+      // E o `item` (boilerplate ecoado do plano) nunca corrobora sozinho.
+      assert(typeof promote.corroborates({ reason: 'git-commit-required', item: 'git commit -m done', note: '' }, '') === 'string',
+        '(f) o item ecoado do plano não corrobora — só a note é relatório de execução');
+
+      // hasDivergentCommandNotes: uma entry cuja note não nomeia runner token
+      // NENHUM gateia o veredito em bloco, porque um único exit code não fala
+      // sobre ela em direção alguma.
+      const tokenless = [
+        { item: 'A', status: 'unmet', scope: 'environment', reason: 'out-of-scope-test-failure', note: 'npm test falhou numa suíte alheia' },
+        { item: 'B', status: 'unmet', scope: 'environment', reason: 'sandbox-exec-blocked', note: 'o ambiente recusou a operação' },
+      ];
+      assert(reverifyMod.hasDivergentCommandNotes(tokenless) === true,
+        '(f) note sem runner token nenhum: o gate dispara (não entra em veredito de bloco)');
+      // Contrafactual: com as duas notes nomeando o MESMO runner, o gate NÃO
+      // dispara. Sem este assert, um `return true` incondicional passaria.
+      const agreeing = [
+        { ...tokenless[0] },
+        { ...tokenless[1], note: 'npm test também falhou aqui' },
+      ];
+      assert(reverifyMod.hasDivergentCommandNotes(agreeing) === false,
+        '(f) contrafactual: duas notes nomeando o mesmo runner NÃO gateiam (o gate não é sempre-true)');
+      assert(reverifyMod.hasDivergentCommandNotes([tokenless[0]]) === false,
+        '(f) e uma entrada só nunca é ambígua');
+
+      // Pela porta da frente (`reverify`), com as entradas conferidas INTOCADAS:
+      // o veredito ambíguo retorna ANTES de qualquer resolução de comando, então
+      // nada é executado — razão pela qual o caso NEGATIVO acima é asserido no
+      // predicado e não por aqui (chamar reverify sem o gate rodaria a suíte do
+      // projeto de verdade).
+      const result = { status: 'partial', must_haves_status: tokenless.map((e) => ({ ...e })) };
+      const emptyCodeDir = path.join(dir, 'code');
+      fs.mkdirSync(emptyCodeDir, { recursive: true });
+      const outcome = reverifyMod.reverify({ result, codeDir: emptyCodeDir, gsdDir: path.join(emptyCodeDir, '.gsd'), apply: true });
+      assert(outcome.verdict === 'ambiguous-multi-command' && outcome.entries === 2,
+        '(f) payload de 2 entradas com uma note sem token: verdict=ambiguous-multi-command',
+        JSON.stringify(outcome));
+      assert(result.must_haves_status.every((e, i) => e.status === 'unmet' && e.scope === 'environment'
+        && e.note === tokenless[i].note),
+        '(f) e as entradas ficam INTOCADAS mesmo com apply:true',
+        JSON.stringify(result.must_haves_status));
+    }
+
+    // (h) S06 REVIEW R4 — O FAIL-OPEN NOMEADO, PROVADO COM O MESMO HOOK DE
+    // `Module._load` que o achou. Um `catch { promotable = []; }` desligava o
+    // gate runtime-first INTEIRO quando forge-env-coverage.js falhava ao
+    // carregar: uma REJEIÇÃO runtime explícita virava `promote:true` sem
+    // NENHUMA entrada em `fallbacks[]` — aceite silencioso. Deliberado-e-
+    // inominado continua inominado.
+    //
+    // Roda em processo FILHO de propósito: envenenar `Module._load` no heap
+    // deste smoke contaminaria todas as seções seguintes.
+    {
+      const child = path.join(dir, 'r4-coverage-poison.js');
+      const promotePath = path.join(SCRIPTS, 'forge-env-promote.js').replace(/\\/g, '\\\\');
+      fs.writeFileSync(child, [
+        "'use strict';",
+        "const Module = require('module');",
+        'const load = Module._load;',
+        "const poison = process.env.R4_POISON === '1';",
+        'Module._load = function (request) {',
+        "  if (poison && String(request).includes('forge-env-coverage')) {",
+        "    throw new Error('poisoned: forge-env-coverage failed to load');",
+        '  }',
+        // eslint-disable-next-line prefer-rest-params — repassa a assinatura original
+        '  return load.apply(this, arguments);',
+        '};',
+        `const promote = require('${promotePath}');`,
+        // Alegação `network-required` com stream COLETADO e nenhum comando de
+        // rede que falhe: o corroborador runtime REJEITA. Textualmente a mesma
+        // note seria aceita ("network ... registry"), que é exatamente o flip.
+        'const payload = {',
+        "  status: 'partial',",
+        "  must_haves_status: [{ item: 'baixar deps', status: 'unmet', scope: 'environment', reason: 'network-required', note: 'network install a partir do registry' }],",
+        "  runtime_evidence: { census: { outcome: 'collected' }, entries: [{ kind: 'command', cmd: 'npm test', exit_code: 1 }] },",
+        '};',
+        "process.stdout.write(JSON.stringify(promote.checkEnvPromotion(payload, '# Plano\\n')));",
+        '',
+      ].join('\n'), 'utf8');
+
+      const runChild = (poisoned) => {
+        const r = spawnSync(process.execPath, [child], {
+          encoding: 'utf8', env: { ...process.env, R4_POISON: poisoned ? '1' : '0' },
+        });
+        let json = null;
+        try { json = JSON.parse(r.stdout); } catch { /* fica null */ }
+        return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', json };
+      };
+
+      // Controle positivo (módulo íntegro): a rejeição runtime já vale, e NADA
+      // cai no textual — a chave `fallbacks` fica AUSENTE. Sem este controle, o
+      // assert envenenado abaixo passaria num mundo onde tudo é sempre recusado.
+      const healthy = runChild(false);
+      assert(healthy.status === 0 && !!healthy.json && healthy.json.promote === false
+        && !Object.prototype.hasOwnProperty.call(healthy.json, 'fallbacks'),
+        '(h) R4 controle: com o módulo íntegro a rejeição runtime vale e não há fallback nenhum',
+        `status=${healthy.status} stdout=${healthy.stdout} stderr=${healthy.stderr}`);
+
+      const poisoned = runChild(true);
+      assert(poisoned.status === 0 && !!poisoned.json,
+        '(h) R4: com o módulo quebrado o checker ainda responde (a falha de carga não derruba o gate)',
+        `status=${poisoned.status} stdout=${poisoned.stdout} stderr=${poisoned.stderr}`);
+      const poisonedFallbacks = poisoned.json ? fallbacksOf(poisoned.json) : [];
+      assert(poisonedFallbacks.length === 1
+        && poisonedFallbacks[0].fallback === promote.COVERAGE_UNAVAILABLE
+        && poisonedFallbacks[0].reason === 'network-required',
+        '(h) R4: a falha de carga emite SINAL NOMEADO próprio (coverage-unavailable), nunca silêncio',
+        JSON.stringify(poisoned.json));
+      assert(!!poisoned.json && poisoned.json.promote === false
+        && poisoned.json.rejected.length === 1
+        && poisoned.json.rejected[0].why.includes('coverage table unavailable'),
+        '(h) R4: e a rejeição runtime NÃO vira aceite silencioso — fail-closed com o porquê',
+        JSON.stringify(poisoned.json));
+      // O quinto nome é distinto dos quatro estados de runtime — não é um
+      // apelido de `not-collected` (que diria "o sidecar não coletou nada",
+      // uma afirmação falsa sobre um stream que EXISTE).
+      assert(!Object.values(promote.RUNTIME_STATES).includes(promote.COVERAGE_UNAVAILABLE),
+        '(h) R4: coverage-unavailable é distinto dos estados do stream (não é apelido de not-collected)',
+        JSON.stringify({ states: promote.RUNTIME_STATES, name: promote.COVERAGE_UNAVAILABLE }));
+      // Sem stream nenhum, a degradação textual continua permitida — mas NOMEADA.
+      const noStream = promote.checkEnvPromotion({
+        status: 'partial',
+        must_haves_status: [{ item: 'x', status: 'unmet', scope: 'environment', reason: 'network-required', note: 'network install a partir do registry' }],
+      }, '# Plano\n');
+      assert(fallbacksOf(noStream).length === 1,
+        '(h) R4: controle — sem stream, o textual segue valendo e continua nomeado em fallbacks');
+    }
+
+    // (g) auto-registro em main() por closure — chamada bare é rejeitada pela
+    // Section 73, e uma seção não registrada é uma seção que some em silêncio.
+    const source = fs.readFileSync(__filename, 'utf8');
+    const mainBody = source.slice(source.lastIndexOf('async function main()'));
+    assert(/\(\) => \{ smokeEnvCoverage\(\); \}/.test(mainBody),
+      '(g) Section 97 is registered through a closure in main()');
+
+    pass('(final) Section 97: a tabela IN-14 morde nas duas direções nomeando o reason e falha por anti-silêncio '
+      + 'quando não lê linha nenhuma, as três classes não colapsam (CLASS_COLLAPSE provado), o runtime-first foi '
+      + 'exercido PELA CLI nos dois sentidos com o controle textual invertido, os quatro fallbacks são nomeados e '
+      + 'distintos com censo de 6 pares, o evento tem 1 definição e 1 forma JSON no canônico e é invocado 1x por '
+      + 'mirror sem restatar o enum, '
+      + 'e os dois itens de backlog têm alias novo aceito com o contrafactual da TASK-020 ainda recusado');
+  } finally { cleanup(dir); }
+}
+
+// ── Section 98: turn/interrupt antes do SIGKILL ────────────────────────────
+// Escreve um mock app-server PRÓPRIO (não o do forge-appserver-client.test.js —
+// papel diferente: este é o gate durável que o ROADMAP aloca a S07, não a prova
+// rápida junto ao código) que carimba em ARQUIVO cada mensagem recebida, e um
+// driver temporário que dá require() no cliente real e chama startAppServerTurn
+// diretamente contra o mock. A ordem e a permanência do fallback são provadas
+// pelo registro do MOCK (o peer), nunca por leitura do código do cliente.
+function writeMockTurnInterrupt(dir) {
+  const js = [
+    "'use strict';",
+    "const fs = require('fs');",
+    "const mode = process.env.FORGE_T02_MODE || 'ignored';",
+    "const logFile = process.env.FORGE_T02_LOG_FILE;",
+    "const grandchildPidFile = process.env.FORGE_T02_GRANDCHILD_PID_FILE;",
+    // Um neto no MESMO process group, spawnado ANTES de qualquer resposta —
+    // garantido existir quando o timeout dispara. Não é detached: pertence ao
+    // grupo que o cliente cria com `detached: true` e só morre por
+    // process.kill(-pid); child.kill() sozinho o deixaria vivo.
+    'if (grandchildPidFile) {',
+    "  const gc = require('child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore' });",
+    '  fs.writeFileSync(grandchildPidFile, String(gc.pid));',
+    '}',
+    // O PRÓPRIO PEER carimba o que recebeu — é essa gravação, não o código do
+    // cliente, que prova a ordem e alimenta o piso anti-silêncio.
+    'function log(method, params) {',
+    '  if (!logFile) return;',
+    "  fs.appendFileSync(logFile, JSON.stringify({ method, params, at: Date.now() }) + '\\n');",
+    '}',
+    "function send(v) { process.stdout.write(JSON.stringify(v) + '\\n'); }",
+    'let initialized = false;',
+    "let pending = '';",
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.on('data', (chunk) => {",
+    '  pending += chunk;',
+    '  let end;',
+    "  while ((end = pending.indexOf('\\n')) >= 0) {",
+    '    const line = pending.slice(0, end); pending = pending.slice(end + 1);',
+    '    if (!line.trim()) continue;',
+    '    let msg;',
+    '    try { msg = JSON.parse(line); } catch { continue; }',
+    '    log(msg.method, msg.params);',
+    "    if (msg.method === 'initialize') { send({ id: msg.id, result: { serverInfo: { name: 'forge-smoke-t02-mock' } } }); }",
+    "    else if (msg.method === 'initialized') { initialized = true; }",
+    "    else if (msg.method === 'thread/start') {",
+    '      if (!initialized) continue;',
+    "      send({ id: msg.id, result: { thread: { id: 'thread-1' } } });",
+    "    } else if (msg.method === 'turn/start') {",
+    '      if (!initialized) continue;',
+    // (h) no-turn-start: recebe e REGISTRA, mas nunca responde nem notifica —
+    // o cliente chega ao timeout sem turnId, único caminho para
+    // SKIPPED_NO_TURN_ID. O registro do peer continua existindo, então a
+    // barreira de handshake abaixo ainda distingue "não respondeu de
+    // propósito" de "a máquina nunca entregou a mensagem".
+    "      if (mode === 'no-turn-start') { continue; }",
+    "      send({ id: msg.id, result: { turn: { id: 'turn-1' } } });",
+    "      send({ method: 'turn/started', params: { turn: { id: 'turn-1' } } });",
+    // happy: só existe para MEDIR o handshake nesta máquina sob esta carga —
+    // a janela dos cenários é dimensionada a partir dele, nunca de uma
+    // constante escolhida numa máquina ociosa.
+    "      if (mode === 'happy') {",
+    "        send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });",
+    '      }',
+    "    } else if (msg.method === 'turn/interrupt') {",
+    // (a)/(b) ignored: nunca responde — a grace estoura.
+    "      if (mode === 'ignored') { /* silêncio deliberado */ }",
+    // (c) acked: responde de imediato.
+    "      else if (mode === 'acked') { send({ id: msg.id, result: {} }); }",
+    // (f) error-ack: responde com ERRO RPC — o cliente classifica ERROR, que
+    // não é a mesma coisa que "não respondeu" (GRACE_EXPIRED) nem que
+    // "respondeu ok" (ACKNOWLEDGED).
+    "      else if (mode === 'error-ack') { send({ id: msg.id, error: { code: -32000, message: 'interrupt refused' } }); }",
+    // (d) latch: emite turn/completed{status:'interrupted'} PRIMEIRO, com o ack
+    // atrasado (~40ms) — se o ack chegasse no MESMO chunk, a ordem passaria por
+    // acaso de microtask em vez de provar o latch (medido pelo T01).
+    "      else if (mode === 'then-completed') {",
+    "        send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'interrupted' } } });",
+    "        setTimeout(() => { send({ id: msg.id, result: {} }); }, 40);",
+    '      }',
+    '    }',
+    '  }',
+    '});',
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n');
+  const file = path.join(dir, 'mock-turn-interrupt.js');
+  fs.writeFileSync(file, js, 'utf8');
+  return file;
+}
+
+// Driver temporário: dá require() no CLIENTE REAL (caminho absoluto do repo,
+// nunca uma cópia) e chama startAppServerTurn diretamente contra o mock —
+// "cliente dirige o mock por fora do adapter" (MEM006). Uma linha de JSON no
+// stdout é o único contrato com quem o spawnou.
+function writeTurnInterruptDriver(dir) {
+  const js = [
+    "'use strict';",
+    "const fs = require('fs');",
+    "const { startAppServerTurn } = require(process.env.FORGE_T02_CLIENT_PATH);",
+    "const pidFile = process.env.FORGE_T02_PID_FILE;",
+    'startAppServerTurn({',
+    '  cmd: process.execPath,',
+    '  args: [process.env.FORGE_T02_MOCK_PATH],',
+    '  env: process.env,',
+    '  timeoutMs: Number(process.env.FORGE_T02_TIMEOUT_MS),',
+    '  interruptGraceMs: Number(process.env.FORGE_T02_GRACE_MS),',
+    "  onSpawn: (pid) => { if (pidFile) fs.writeFileSync(pidFile, String(pid)); },",
+    '}).then(',
+    "  () => { process.stdout.write(JSON.stringify({ ok: true, message: null, interrupt: null, turnId: null }) + '\\n'); },",
+    '  (error) => {',
+    '    process.stdout.write(JSON.stringify({',
+    '      ok: false, message: error.message, interrupt: error.interrupt, turnId: error.turnId,',
+    "    }) + '\\n');",
+    '  },',
+    ');',
+    '',
+  ].join('\n');
+  const file = path.join(dir, 'turn-interrupt-driver.js');
+  fs.writeFileSync(file, js, 'utf8');
+  return file;
+}
+
+function t02Alive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function t02Sleep(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+async function t02WaitForFile(file, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(file)) {
+      const raw = fs.readFileSync(file, 'utf8').trim();
+      if (raw) return raw;
+    }
+    await t02Sleep(5);
+  }
+  return null;
+}
+
+// Corre em paralelo ao driver, amostrando alive(pid) a cada 5ms: é essa
+// amostragem — feita PELO PROCESSO PAI, nunca pelo peer que está prestes a
+// morrer de SIGKILL — que dá o carimbo de "o pid deixou de existir" contra o
+// qual o `at` do turn/interrupt registrado pelo mock é comparado.
+async function t02WatchDeath(pid, maxWaitMs) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (!t02Alive(pid)) return Date.now();
+    await t02Sleep(5);
+  }
+  return null;
+}
+
+// WATCHDOG (S07 review R5). Resolver só em `close`/`error` deixava esta seção
+// capaz de TRAVAR em vez de falhar: se o driver nunca fechasse (cliente
+// pendurado, mock que não responde, pipe preso), a Promise nunca resolveria e
+// a suíte INTEIRA ficaria sem sinal — medido nesta mesma milestone, >600s com
+// 0 bytes de saída. A ironia está no registro: a T02 pôs um watchdog DENTRO do
+// mock exatamente por isso e esqueceu o mesmo guard em quem o spawnou. Um
+// travamento apaga o sinal; uma falha alta sempre é melhor.
+// `timedOut: true` é um desfecho NOMEADO, nunca um `code` inventado — o
+// chamador assere que nenhum cenário terminou por aqui.
+function t02SpawnDriverAsync(driverPath, env, watchdogMs) {
+  const { spawn } = require('child_process');
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [driverPath], { env });
+    let stdout = '';
+    let done = false;
+    const finish = (value) => { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(value); };
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* já morto */ }
+      finish({ stdout, code: null, timedOut: true, watchdogMs });
+    }, watchdogMs);
+    if (timer.unref) timer.unref();
+    child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+    child.on('close', (code) => finish({ stdout, code, timedOut: false }));
+    child.on('error', (e) => finish({ stdout, code: null, error: e.message, timedOut: false }));
+  });
+}
+
+function t02ReadLog(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+async function smokeTurnInterrupt() {
+  process.stdout.write('\n▸ Section 98: turn/interrupt antes do SIGKILL — ordem, permanência do fallback e o latch\n');
+  const dir = mkTmp('turn-interrupt');
+  const clientPath = path.join(SCRIPTS, 'forge-appserver-client.js');
+  const { INTERRUPT_OUTCOMES } = require(clientPath);
+  const mockPath = writeMockTurnInterrupt(dir);
+  const driverPath = writeTurnInterruptDriver(dir);
+
+  // A mensagem de timeout é load-bearing e continua ancorada; só o VALOR se
+  // move, e ele vem da MESMA aritmética que o cliente usa — uma mudança de
+  // formato ainda falha aqui. Substitui o `0\.09s` fixo, que amarrava a seção
+  // a uma janela escolhida numa máquina ociosa (mesma patologia já medida em
+  // forge-appserver-client.test.js: o cliente arma o timer no spawn, então o
+  // boot do node + handshake precisam CABER na janela; sob contenção, 10 de 12
+  // execuções falharam, todas colapsando em SKIPPED_NO_TURN_ID).
+  const timeoutMessageRe = (timeoutMs) => {
+    const seconds = String(Number((timeoutMs / 1000).toFixed(3))).replace('.', '\\.');
+    return new RegExp(`^forge-appserver-client: timeout after ${seconds}s$`);
+  };
+
+  const baseEnv = (mode, stem, timeoutMs, graceMs) => ({
+    ...process.env,
+    FORGE_T02_CLIENT_PATH: clientPath,
+    FORGE_T02_MOCK_PATH: mockPath,
+    FORGE_T02_PID_FILE: `${stem}-pid.txt`,
+    FORGE_T02_TIMEOUT_MS: String(timeoutMs),
+    FORGE_T02_GRACE_MS: String(graceMs),
+    FORGE_T02_MODE: mode,
+    FORGE_T02_LOG_FILE: `${stem}-log.jsonl`,
+    FORGE_T02_GRANDCHILD_PID_FILE: `${stem}-grandchild-pid.txt`,
+  });
+
+  // Medido, nunca assumido: uma volta completa no caminho feliz nesta máquina,
+  // sob ESTA carga, com uma janela folgada que não participa da corrida.
+  const measureHandshakeMs = async () => {
+    const stem = path.join(dir, 'measure');
+    const started = Date.now();
+    const result = await t02SpawnDriverAsync(driverPath, baseEnv('happy', stem, 20000, 500), 30000);
+    assert(result.timedOut === false, '(medição) o driver do caminho feliz terminou sozinho, sem watchdog', JSON.stringify(result));
+    let parsed = null;
+    try { parsed = JSON.parse((result.stdout || '').trim().split('\n').filter(Boolean).pop()); } catch { /* o assert fala */ }
+    assert(!!parsed && parsed.ok === true,
+      '(medição) o caminho feliz resolve — sem isso a janela seria dimensionada por um erro, não por um handshake',
+      JSON.stringify({ parsed, stdout: result.stdout }));
+    return Date.now() - started;
+  };
+
+  const budget = Math.max(90, (await measureHandshakeMs()) * 3);
+
+  // BARREIRA CARIMBADA PELO PEER, não uma esperança: se o mock não registrou
+  // `turn/start`, o handshake provadamente não coube na janela — inanição
+  // desta máquina, não defeito do cliente —, e só então a janela dobra. Uma
+  // tentativa cujo registro MOSTRA turn/start nunca é repetida, então uma
+  // regressão real na captura do turnId (mesmo sintoma observável,
+  // SKIPPED_NO_TURN_ID) ainda falha na primeira tentativa. Nenhum assert é
+  // relaxado — a cura é janela medida + barreira, jamais um sleep maior.
+  const runScenario = async (mode, graceFactor, label) => {
+    let timeoutMs = Math.round(budget);
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const stem = path.join(dir, `${mode}-${attempt}`);
+      const pidFile = `${stem}-pid.txt`;
+      const grandchildPidFile = `${stem}-grandchild-pid.txt`;
+      const logFile = `${stem}-log.jsonl`;
+      const graceMs = Math.max(120, Math.round(timeoutMs * graceFactor));
+      // Folgado de propósito: o watchdog existe para FALHAR ALTO num
+      // travamento, não para competir com a janela do cenário.
+      const watchdogMs = Math.max(15000, (timeoutMs + graceMs) * 20);
+      const driverPromise = t02SpawnDriverAsync(driverPath, baseEnv(mode, stem, timeoutMs, graceMs), watchdogMs);
+      const rawPid = await t02WaitForFile(pidFile, 3000);
+      const pid = rawPid ? Number(rawPid) : null;
+      const deathPromise = pid ? t02WatchDeath(pid, 5000) : Promise.resolve(null);
+      const [driverResult, deathAt] = await Promise.all([driverPromise, deathPromise]);
+      assert(driverResult.timedOut === false,
+        `(watchdog) ${label}: o driver terminou por conta própria — um travamento aqui apagaria o sinal da suíte inteira`,
+        JSON.stringify({ watchdogMs, stdout: driverResult.stdout }));
+      let parsed = null;
+      try { parsed = JSON.parse((driverResult.stdout || '').trim().split('\n').filter(Boolean).pop()); } catch { /* leave null — the assert speaks */ }
+      // A grace extra depois de fechado o driver: o SIGKILL é síncrono no cliente,
+      // mas a morte OBSERVÁVEL do processo (kernel) pode chegar alguns ms depois.
+      await t02Sleep(200);
+      const grandchildRaw = fs.existsSync(grandchildPidFile) ? fs.readFileSync(grandchildPidFile, 'utf8').trim() : null;
+      const grandchildPid = grandchildRaw ? Number(grandchildRaw) : null;
+      const log = t02ReadLog(logFile);
+      if (!log.some((e) => e.method === 'turn/start') && attempt < 4) { timeoutMs *= 2; continue; }
+      return { parsed, pid, deathAt, grandchildPid, log, timeoutMs };
+    }
+    throw new Error(`${label}: o peer nunca recebeu turn/start dentro da janela após 4 alargamentos`);
+  };
+
+  try {
+    // Piso anti-silêncio, checado uma vez por cenário abaixo — nunca deixado
+    // implícito no fato de os outros asserts passarem: um mock que não gravou
+    // nada é indistinguível de um detector quebrado (molde forge-doc-claims.js).
+    const censusNamed = (label, log) => {
+      assert(log.length > 0, `(anti-silêncio) ${label}: o registro do mock tem ao menos uma linha`, JSON.stringify(log));
+    };
+
+    // (a) ordem + (b) permanência — mesmo cenário: interrupt ignorado, grace
+    // estoura, e o process group inteiro (app-server + neto) morre.
+    let a;
+    {
+      a = await runScenario('ignored', 1.5, '(a) ignored');
+      censusNamed('(a) ignored', a.log);
+      assert(!!a.parsed && a.parsed.ok === false && timeoutMessageRe(a.timeoutMs).test(a.parsed.message || ''),
+        '(a) interrupt ignorado: a sessão rejeita com a mensagem de timeout inalterada',
+        JSON.stringify({ parsed: a.parsed, timeoutMs: a.timeoutMs }));
+      assert(!!a.parsed && a.parsed.interrupt === INTERRUPT_OUTCOMES.GRACE_EXPIRED,
+        '(a) o desfecho é INTERRUPT_OUTCOMES.GRACE_EXPIRED, lido da constante exportada', JSON.stringify(a.parsed));
+      const interruptEntry = a.log.find((e) => e.method === 'turn/interrupt');
+      assert(!!interruptEntry, '(a) o mock registrou ter recebido turn/interrupt', JSON.stringify(a.log));
+      assert(a.deathAt !== null, '(a) o pid do app-server deixou de existir dentro da janela observada', `pid=${a.pid}`);
+      assert(!!interruptEntry && a.deathAt !== null && interruptEntry.at <= a.deathAt,
+        '(a) ORDEM provada pelo registro do próprio mock: turn/interrupt chegou antes de o processo morrer',
+        JSON.stringify({ interruptAt: interruptEntry && interruptEntry.at, deathAt: a.deathAt }));
+      // (b) permanência: não é só o app-server que morre — o process group
+      // INTEIRO, incluindo o neto, é o que prova que o interrupt não substituiu
+      // o SIGKILL, apenas o precedeu.
+      assert(a.grandchildPid !== null, '(b) o mock spawnou um neto para este cenário significar algo', JSON.stringify(a));
+      assert(t02Alive(a.pid) === false, '(b) permanência: o app-server está morto após a grace estourar', `pid=${a.pid}`);
+      if (process.platform === 'win32') {
+        skip('(b) permanência do neto (grupo de processo negativo)', 'win32: process.kill(-pid) e grupos de processo não existem lá — o cliente usa taskkill /T /F');
+      } else {
+        assert(t02Alive(a.grandchildPid) === false,
+          '(b) permanência: o process group INTEIRO (incluindo o neto) está morto — o SIGKILL não foi substituído',
+          `grandchildPid=${a.grandchildPid}`);
+      }
+    }
+
+    // (c) acked — params corretos, contra o turnId que o T01 passou a capturar.
+    let c;
+    {
+      c = await runScenario('acked', 5, '(c) acked');
+      censusNamed('(c) acked', c.log);
+      assert(!!c.parsed && c.parsed.interrupt === INTERRUPT_OUTCOMES.ACKNOWLEDGED,
+        '(c) interrupt respondido: INTERRUPT_OUTCOMES.ACKNOWLEDGED', JSON.stringify(c.parsed));
+      const interruptEntry = c.log.find((e) => e.method === 'turn/interrupt');
+      assert(!!interruptEntry && interruptEntry.params
+        && interruptEntry.params.threadId === 'thread-1' && interruptEntry.params.turnId === 'turn-1',
+        '(c) os params registrados pelo peer têm threadId=thread-1 e turnId=turn-1 — params errados = interrupt inerte',
+        JSON.stringify(interruptEntry));
+      // Mesmo acked, o desfecho continua sendo o TIMEOUT — um interrupt que
+      // funciona nunca vira sucesso (piso anti-silêncio da slice, D-S07-2/3).
+      assert(!!c.parsed && c.parsed.ok === false,
+        '(c) mesmo com o interrupt reconhecido, a sessão CONTINUA rejeitando com o timeout', JSON.stringify(c.parsed));
+    }
+
+    // (d) latch — o critério que mais importa: turn/completed{status:'interrupted'}
+    // durante a grace NÃO pode virar sucesso.
+    let d;
+    {
+      d = await runScenario('then-completed', 5, '(d) then-completed');
+      censusNamed('(d) then-completed', d.log);
+      assert(!!d.parsed && d.parsed.ok === false && timeoutMessageRe(d.timeoutMs).test(d.parsed.message || ''),
+        '(d) LATCH: turn/completed{status:"interrupted"} durante a grace NÃO vira sucesso — a sessão rejeita com o timeout '
+        + '(sem o latch, isto resolveria como êxito — a patologia que a milestone existe para matar)',
+        JSON.stringify(d.parsed));
+      assert(!!d.parsed && d.parsed.interrupt === INTERRUPT_OUTCOMES.ACKNOWLEDGED,
+        '(d) o interrupt em si foi reconhecido — é o latch, não a falta de ack, que barra o sucesso', JSON.stringify(d.parsed));
+    }
+
+    // (f) error — o peer RESPONDE ao interrupt, mas com erro RPC. Sem cenário
+    // próprio, ERROR era indistinguível de um desfecho coberto: o assert
+    // antigo dizia "ao menos dois distintos" e passava com três dos cinco
+    // desfechos jamais exercitados (S07 review R6).
+    let f;
+    {
+      f = await runScenario('error-ack', 5, '(f) error-ack');
+      censusNamed('(f) error-ack', f.log);
+      assert(!!f.parsed && f.parsed.interrupt === INTERRUPT_OUTCOMES.ERROR,
+        '(f) interrupt recusado pelo peer: INTERRUPT_OUTCOMES.ERROR — responder com erro NÃO é o mesmo que não responder',
+        JSON.stringify(f.parsed));
+      assert(!!f.parsed && f.parsed.ok === false,
+        '(f) mesmo recusado, a sessão continua rejeitando com o timeout', JSON.stringify(f.parsed));
+    }
+
+    // (h) skipped:no-turn-id — o peer nunca responde a turn/start, então não
+    // há turnId bem-formado para enviar. O kill acontece do mesmo jeito: o
+    // desfecho é REGISTRADO, nunca convertido em desculpa para não agir.
+    let h;
+    {
+      h = await runScenario('no-turn-start', 5, '(h) no-turn-start');
+      censusNamed('(h) no-turn-start', h.log);
+      assert(!!h.parsed && h.parsed.interrupt === INTERRUPT_OUTCOMES.SKIPPED_NO_TURN_ID,
+        '(h) sem turnId observado: INTERRUPT_OUTCOMES.SKIPPED_NO_TURN_ID', JSON.stringify(h.parsed));
+      assert(!!h.parsed && h.parsed.turnId === null,
+        '(h) o turnId ausente é reportado como null, não omitido', JSON.stringify(h.parsed));
+      const startEntry = h.log.find((e) => e.method === 'turn/start');
+      assert(!!startEntry,
+        '(h) o peer REGISTROU turn/start (recebeu e escolheu não responder) — sem isso o cenário seria inanição, não o desfecho medido',
+        JSON.stringify(h.log));
+      assert(h.deathAt !== null, '(h) o app-server morreu mesmo sem interrupt enviável', `pid=${h.pid}`);
+    }
+
+    // (e) censo dos desfechos — PARTIÇÃO EXPLÍCITA do enum exportado. Um
+    // desfecho não exercitado não pode ser indistinguível de um coberto (a
+    // tese inteira desta milestone), então cada valor cai em exatamente um dos
+    // dois mapas abaixo e o assert falha se a união não for o enum, se os dois
+    // se sobrepuserem, ou se um valor declarado COBERTO não tiver aparecido de
+    // fato num desfecho observado.
+    {
+      const values = Object.values(INTERRUPT_OUTCOMES);
+      const observed = {
+        [INTERRUPT_OUTCOMES.GRACE_EXPIRED]: '(a) ignored — o peer nunca responde e a grace estoura',
+        [INTERRUPT_OUTCOMES.ACKNOWLEDGED]: '(c) acked / (d) then-completed — o peer responde ok',
+        [INTERRUPT_OUTCOMES.ERROR]: '(f) error-ack — o peer responde com erro RPC',
+        [INTERRUPT_OUTCOMES.SKIPPED_NO_TURN_ID]: '(h) no-turn-start — nunca houve turnId para enviar',
+      };
+      // NÃO EXERCITADO, e dito em voz alta no próprio assert com o motivo:
+      // UNSENT exige que o stream de escrita já esteja destruído no instante
+      // do timeout. Deste driver caixa-preta isso é inalcançável — quem
+      // destrói o stdin do filho é o próprio cliente (no cleanup, depois de
+      // resolvido) e a morte do peer antes do timeout é classificada como
+      // saída do processo, não como timeout. Fabricá-lo exigiria o handle do
+      // filho, que só o cliente tem. Coberto por teste unitário do lado do
+      // cliente, jamais por este smoke.
+      const unexercised = {
+        [INTERRUPT_OUTCOMES.UNSENT]: 'stdin já destruído no instante do timeout — inalcançável por este driver caixa-preta; '
+          + 'o handle do filho pertence ao cliente. Coberto em forge-appserver-client.test.js, não aqui.',
+      };
+      const covered = Object.keys(observed);
+      const declaredUnexercised = Object.keys(unexercised);
+      const union = covered.concat(declaredUnexercised).sort();
+      assert(JSON.stringify(union) === JSON.stringify(values.slice().sort()),
+        '(e) o censo PARTICIONA o enum exportado: todo desfecho ou tem cenário nomeado ou está declarado não-exercitado com motivo '
+        + '— um valor novo sem entrada em nenhum dos dois mapas é falha do guard, nunca passe limpo',
+        JSON.stringify({ covered, declaredUnexercised, enum: values }));
+      assert(covered.every((v) => !declaredUnexercised.includes(v)),
+        '(e) os dois mapas são disjuntos — nenhum desfecho pode ser coberto e não-exercitado ao mesmo tempo',
+        JSON.stringify({ covered, declaredUnexercised }));
+      const exercised = [a.parsed.interrupt, c.parsed.interrupt, d.parsed.interrupt, f.parsed.interrupt, h.parsed.interrupt];
+      assert(exercised.every((v) => values.includes(v)),
+        '(e) todo desfecho exercitado neste smoke pertence ao enum exportado', JSON.stringify(exercised));
+      const missing = covered.filter((v) => !exercised.includes(v));
+      assert(missing.length === 0,
+        '(e) todo desfecho DECLARADO coberto foi de fato observado num cenário — declarar cobertura sem observá-la é a patologia, '
+        + 'não a cura',
+        JSON.stringify({ missing, exercised }));
+      assert(declaredUnexercised.every((v) => !exercised.includes(v)),
+        '(e) um desfecho declarado NÃO-exercitado que aparecer num cenário significa que o motivo declarado ficou obsoleto — '
+        + 'atualize o mapa em vez de deixar a declaração mentir',
+        JSON.stringify({ declaredUnexercised, exercised }));
+    }
+
+    // (g) auto-registro em main() por closure — chamada bare é rejeitada pela
+    // Section 73, e uma seção não registrada é uma seção que some em silêncio.
+    const source = fs.readFileSync(__filename, 'utf8');
+    const mainBody = source.slice(source.lastIndexOf('async function main()'));
+    assert(/async \(\) => \{ await smokeTurnInterrupt\(\); \}/.test(mainBody),
+      '(g) Section 98 is registered through a closure in main()');
+
+    pass('(final) Section 98: turn/interrupt é tentado antes do SIGKILL — ordem provada pelo carimbo do próprio mock, '
+      + 'o process group inteiro (incluindo o neto) permanece morto no fallback, o latch de terminalidade impede que '
+      + 'um turn/completed{status:"interrupted"} durante a grace vire sucesso, os params (threadId/turnId) chegam '
+      + 'corretos ao peer, o censo PARTICIONA os 5 desfechos de INTERRUPT_OUTCOMES entre cenários observados e '
+      + 'não-exercitados com motivo declarado, a janela é MEDIDA nesta máquina com barreira carimbada pelo peer, '
+      + 'todo driver corre sob watchdog (travar apagaria o sinal da suíte) e a seção está registrada em '
+      + 'main() por closure com self-check (g)');
+  } finally { cleanup(dir); }
+}
+
+// ── Section 99: as três rotas inertes do routing, fechadas ─────────────────
+// Uma decisão tomada num lugar que não alcança o consumidor é o defeito de
+// classe da TASK-021. As três aqui foram MEDIDAS na M018:
+//   (1) `worker: claude` no frontmatter vazava para o slot de MODELO
+//       (model='claude', alias=null) → o orquestrador omitia `model:` do
+//       Agent() e o worker rodava no default do agente, ignorando o tier; e o
+//       clamp de effort (chaveado em `claude-(haiku|sonnet)`) não casava com o
+//       token, deixando `effort: high` passar para um Sonnet (HTTP 400).
+//   (2) o planner decidia o engine em PROSA (key_decisions) e não emitia
+//       `worker:` — decisão inerte por construção.
+//   (3) o caminho de sucesso da Branch C escrevia o SUMMARY em nome do sidecar
+//       e NÃO marcava `status: DONE` no plano, deixando a slice com cara de
+//       incompleta para todo consumidor que lê `status:`.
+// (1) é provada por COMPORTAMENTO (o resolver de verdade, fixture hermética);
+// (2) e (3) são contratos de prompt — provados por presença do texto que
+// executa, no canônico E em cada mirror que enumera o passo.
+function smokeInertRoutes() {
+  process.stdout.write('\n▸ Section 99: as três rotas inertes do routing, fechadas\n');
+  const ROOT = path.dirname(SCRIPTS);
+  const { resolveDispatch } = require('./forge-dispatch-resolve.js');
+
+  // ── (1) comportamental — a família nunca chega ao slot de modelo ─────────
+  // Fixture hermética: o bloco routing: da camada repo vence a cascata, então
+  // as prefs globais do operador não podem mudar o resultado desta prova.
+  const dir = mkTmp('inert-routes');
+  try {
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gsd', 'forge-prefs.jsonc'),
+      '{"routing":{"default":{"executor":{"standard":["claude-sonnet-5","gpt-5.6-luna"],"heavy":["claude-opus-5"]}}}}');
+    const plan = (fm) => {
+      const p = path.join(dir, `T-${Math.random().toString(36).slice(2)}-PLAN.md`);
+      fs.writeFileSync(p, `---\n${fm}---\n# task\n`);
+      return p;
+    };
+    const run = (fm) => resolveDispatch({ unitType: 'execute-task', cwd: dir, planPath: plan(fm) });
+
+    const control = run('');
+    assert(control.model === 'claude-sonnet-5' && control.engine === 'claude',
+      '(1a) controle: sem worker:, a cadeia roteada resolve normalmente', JSON.stringify(control.chain));
+
+    const pinned = run('worker: claude\ntier: heavy\neffort: high\n');
+    assert(pinned.engine === 'claude', '(1b) worker: claude ainda fixa o engine claude', pinned.engine);
+    assert(pinned.route_source === 'frontmatter', '(1b) frontmatter ainda vence o rótulo de source', pinned.route_source);
+    assert(pinned.model === 'claude-opus-5',
+      '(1b) o MODELO vem do tier (heavy), não do token da família — a rota do tier deixou de ser inerte', pinned.model);
+    assert(pinned.alias === 'opus',
+      '(1b) alias mapeado: o Agent() recebe um model: de verdade em vez de omitir o param', String(pinned.alias));
+    assert(pinned.model !== 'claude' && pinned.alias !== null,
+      '(1b) o token da família NUNCA aparece no slot de modelo (o defeito medido em M018/S02/T01)');
+
+    const clamped = run('worker: claude\neffort: high\n');
+    assert(clamped.model === 'claude-sonnet-5' && clamped.effort === 'medium',
+      '(1c) numa task standard o clamp de effort volta a morder (era o HTTP 400 no Sonnet)',
+      JSON.stringify({ model: clamped.model, effort: clamped.effort }));
+    assert(/clamped:model-cap/.test(clamped.effort_reason),
+      '(1c) o clamp é registrado, nunca silencioso', clamped.effort_reason);
+
+    const codex = run('worker: codex\n');
+    assert(codex.dispatch_engine === 'codex' && codex.model === 'gpt-5.6-luna' && codex.sidecar_model === 'gpt-5.6-luna',
+      '(1d) worker: codex filtra a cadeia para o membro gpt roteado — o sidecar recebe o modelo real',
+      JSON.stringify({ e: codex.dispatch_engine, m: codex.model, s: codex.sidecar_model }));
+
+    // Precedência preservada: um id CONCRETO continua vencendo o tier.
+    const { resolveRoute } = require('./forge-routing.js');
+    const concrete = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'default', frontmatterWorker: 'gpt-5.6-terra', cwd: dir });
+    assert(concrete.chain.length === 1 && concrete.chain[0].id === 'gpt-5.6-terra',
+      '(1e) um worker: com id concreto continua fixando o modelo (precedência não invertida)', JSON.stringify(concrete.chain));
+  } finally { cleanup(dir); }
+
+  // ── (2) o planner emite o campo, e o plan-checker cruza writes × engine ──
+  const planner = readRepoText(path.join(ROOT, 'agents', 'forge-planner.md'));
+  assert(/^worker:\s*claude\s+#/m.test(planner) || /```yaml\n[\s\S]*?^worker:/m.test(planner),
+    '(2a) forge-planner mostra `worker:` como campo de frontmatter a emitir');
+  assert(/[Pp]rose is inert|prosa é inerte/.test(planner),
+    '(2a) forge-planner diz com todas as letras que a decisão em prosa é INERTE — uma key_decision não roteia nada');
+  assert(/MUST\*{0,2}\s*emit that conclusion|\*\*MUST\*\* emit/.test(planner),
+    '(2a) a emissão do campo é obrigação, não sugestão');
+  assert(/writing\/creating `\.gsd\/\*\*`/.test(planner) && /worker: claude/.test(planner),
+    '(2a) a tabela nomeia `.gsd/**` entre os casos em que `worker: claude` é obrigatório');
+
+  const checker = readRepoText(path.join(ROOT, 'agents', 'forge-plan-checker.md'));
+  assert(/forge-dispatch-resolve\.js[^\n]*--plan/.test(checker),
+    '(2b) o plan-checker resolve o engine pela CLI canônica em vez de adivinhar');
+  assert(/dispatch_engine/.test(checker) && /Engine ↔ `\.gsd\/\*\*` check/.test(checker),
+    '(2b) existe o cruzamento writes/expected_output `.gsd/**` × engine resolvido');
+  assert(/\*\*1 or more\*\* tasks[\s\S]{0,200}?\*\*`fail`\*\*/.test(checker),
+    '(2b) uma única ocorrência já é `fail` — a barra do sidecar contra `.gsd/**` é absoluta');
+  assert(!/Dimension 11|#### Dimension 1[1-9]/.test(checker),
+    '(2b) nenhuma 11ª dimensão foi criada — as 10 travadas seguem travadas (MEM013)');
+  // O guard só morde porque (1) foi corrigido: com o bug, `worker: claude`
+  // resolvia com model='claude'/engine claude — o cruzamento continuaria
+  // apontando claude e o defeito real (plano SEM worker:) é o que ele pega.
+  // Ancorado na frase do PRÓPRIO guard: 'camada 1'/'camada 2' já aparecem no
+  // Step 3.5 pré-existente, então um anchor solto passaria mesmo com o guard
+  // removido (medido ao mutar) — cobertura declarada sem mordida.
+  assert(/forge-planner\.md § Worker Engine/.test(checker),
+    '(2b) o guard nomeia o constraint do planner que ele detecta (camada 1 ↔ camada 2), e não passa por texto vizinho');
+
+  // ── (3) Branch C fecha o plano, no canônico e em cada mirror que enumera ─
+  // Mecanismo espelhado, não inventado: é a MESMA edição do step 13 do
+  // agents/forge-executor.md, que é como o caminho Claude marca.
+  assert(/13\.\s*\*\*Mark task complete:\*\*\s*update `status: DONE`/.test(
+    readRepoText(path.join(ROOT, 'agents', 'forge-executor.md'))),
+    '(3a) o caminho Claude marca `status: DONE` no step 13 do executor — a fonte que a Branch C espelha');
+
+  const branchC = [
+    ['shared/forge-dispatch.md', 'canônico'],
+    ['skills/forge-auto/SKILL.md', 'mirror forge-auto'],
+    ['skills/forge-next/SKILL.md', 'mirror forge-next'],
+  ];
+  for (const [rel, label] of branchC) {
+    const text = readRepoText(path.join(ROOT, rel));
+    assert(/status: DONE[\s\S]{0,400}?T##-PLAN\.md|T##-PLAN\.md[\s\S]{0,400}?status: DONE/.test(text),
+      `(3b) ${label} (${rel}) manda marcar \`status: DONE\` no T##-PLAN.md`);
+    assert(/forge-executor\.md`? step 13|step 13 (of|performs)/.test(text),
+      `(3b) ${label} referencia o step 13 do executor — espelha o mecanismo existente, não inventa outro`);
+  }
+
+  const task = readRepoText(path.join(ROOT, 'skills', 'forge-task', 'SKILL.md'));
+  assert(/No plan-status marking here — deliberate, not an omission/.test(task),
+    '(3c) forge-task declara EXPLICITAMENTE que não marca — a ausência é decisão registrada, não esquecimento');
+  assert(/\{TASK_ID\}-SUMMARY\.md/.test(task),
+    '(3c) e nomeia o sinal de done que ele realmente usa (existência do SUMMARY)');
+
+  const source = fs.readFileSync(__filename, 'utf8');
+  const mainBody = source.slice(source.lastIndexOf('async function main()'));
+  assert(/\(\) => \{ smokeInertRoutes\(\); \}/.test(mainBody),
+    '(4) Section 99 está registrada em main() por closure — seção não-registrada é seção que some em silêncio');
+
+  pass('(final) Section 99: o token de família volta a pinar só o engine (modelo e clamp vêm do tier, provado no resolver '
+    + 'real com fixture hermética e precedência de id concreto preservada), o planner é obrigado a emitir `worker:` e o '
+    + 'plan-checker cruza `.gsd/**` × engine resolvido dentro das 10 dimensões travadas, e a Branch C fecha o plano com a '
+    + 'mesma edição do step 13 no canônico e nos dois mirrors que enumeram o passo — com a não-aplicabilidade do '
+    + 'forge-task declarada em vez de silenciosa');
+}
+
+// ── Section 100: o campo `transport` chega aos 9 emissores ────────────────
+// Um campo decidido num helper e não emitido pelo emissor é o defeito de classe
+// da TASK-021: a decisão existe, o consumidor nunca a vê. Aqui a prova é feita
+// com LEITURA IN-PROCESS (`fs`), NUNCA com `grep` de shell — o `grep` deste
+// ambiente é `ugrep --ignore-files` e honra `.gitignore`, então pode varrer nada
+// e ainda assim reportar sucesso (achado da S06).
+// Três armadilhas medidas, cada uma com controle positivo (o assert é rodado
+// contra uma cópia MUTADA em memória, provando que ele morde de verdade):
+//   (a) censo — exatamente 9 linhas de emissor, TODAS com `transport`. Contagem
+//       e predicado juntos: acrescentar um 10º emissor sem o campo falha.
+//   (b) fence — nos sites 2 e 4 (Branch D) o fence do `echo` precisa RESOLVER
+//       $RESULT_FILE ele mesmo; estado de shell não sobrevive à fronteira do
+//       Bash tool (foi o que produziu o `hint` permanentemente vazio).
+//   (c) sem default otimista — `:-app-server` (ou qualquer default que não seja
+//       `unknown`) num fence de emissor transforma "não observei" em "observei".
+function smokeTransportField() {
+  process.stdout.write('\n▸ Section 100: o campo `transport` chega aos 9 emissores\n');
+  const ROOT = path.dirname(SCRIPTS);
+  const FILES = [
+    path.join(ROOT, 'skills', 'forge-auto', 'SKILL.md'),
+    path.join(ROOT, 'skills', 'forge-next', 'SKILL.md'),
+    path.join(ROOT, 'skills', 'forge-task', 'SKILL.md'),
+  ];
+  const EMITTER = '\\"event\\":\\"dispatch\\"';
+
+  const emitterLines = (text) => text.split('\n').filter(l => l.includes(EMITTER) && l.includes('echo '));
+
+  // ── (a) censo: 9 emissores, todos com transport ──────────────────────────
+  const all = [];
+  for (const file of FILES) all.push(...emitterLines(readRepoText(file)).map(line => ({ file, line })));
+  assert(all.length === 9,
+    `(a) exatamente 9 linhas de emissor de dispatch nos três SKILL.md (achadas: ${all.length})`,
+    all.map(e => path.basename(path.dirname(e.file))).join(', '));
+  // Case-insensitive on purpose: the codex emitters carry the field through the
+  // shell variable ${TRANSPORT_TAIL}, the claude ones through the literal key.
+  const withoutField = all.filter(e => !/transport/i.test(e.line));
+  assert(withoutField.length === 0,
+    '(a) TODOS os 9 emissores carregam `transport` — contagem e predicado juntos, para que um 10º emissor sem o campo falhe',
+    `${withoutField.length} sem o campo`);
+
+  const claudeLines = all.filter(e => e.line.includes('\\"transport\\":\\"in-process\\"'));
+  const codexLines = all.filter(e => e.line.includes('${TRANSPORT_TAIL}'));
+  assert(claudeLines.length === 4,
+    `(a) os 4 emissores do caminho claude carregam a constante in-process (achados: ${claudeLines.length})`);
+  assert(codexLines.length === 5,
+    `(a) os 5 emissores do caminho codex carregam o TRANSPORT_TAIL derivado do result file (achados: ${codexLines.length})`);
+  assert(claudeLines.length + codexLines.length === all.length,
+    '(a) o censo PARTICIONA os 9 emissores — nenhum fica fora das duas classes');
+  for (const e of claudeLines) {
+    assert(!e.line.includes('transport_version') && !e.line.includes('transport_reason'),
+      '(a) o caminho claude NÃO emite transport_version nem transport_reason — versão só faz sentido com processo remoto, razão só com kind unknown',
+      e.file);
+  }
+
+  // ── (b) fence trap: sites 2 e 4 resolvem o estado no próprio fence ───────
+  // Um fence é delimitado por ```bash … ```; a busca é pelo bloco que CONTÉM o
+  // echo do plan-slice, e o teste é sobre esse bloco, não sobre o arquivo.
+  const fenceContaining = (text, needle) => {
+    const blocks = text.split('```');
+    return blocks.find(b => b.includes(needle) && b.includes('echo '));
+  };
+  for (const file of FILES.slice(0, 2)) {
+    const text = readRepoText(file);
+    const fence = fenceContaining(text, 'plan-slice/${S##}');
+    assert(!!fence, `(b) fence do emissor plan-slice encontrado em ${path.basename(path.dirname(file))}`);
+    assert(/forge-xllm-state\.js"? --mode read/.test(fence),
+      '(b) o fence do echo plan-slice RE-RESOLVE o state file nele mesmo — estado de shell não cruza a fronteira do Bash tool',
+      file);
+    assert(/RESULT_FILE=/.test(fence),
+      '(b) e atribui RESULT_FILE no mesmo fence — sem isso o transporte nasce permanentemente vazio (forma da TASK-021)',
+      file);
+  }
+
+  // ── (c) sem default otimista ─────────────────────────────────────────────
+  const OPTIMISTIC = /\$\{TRANSPORT[A-Z_]*:-(?!unknown)[^}]*\}/;
+  for (const file of FILES) {
+    const text = readRepoText(file);
+    assert(!OPTIMISTIC.test(text),
+      '(c) nenhum default de shell para o transporte além de `unknown` — `:-app-server` transformaria "não observei" em "observei"',
+      file);
+    assert(text.includes(':-unknown}') || !text.includes('TRANSPORT'),
+      '(c) o default nomeado `unknown` está presente onde o transporte é lido');
+  }
+
+  // ── controles positivos: cada assert acima morde ─────────────────────────
+  // Um gate que reporta a própria inatividade como boa notícia é o defeito que
+  // este repo já pagou três vezes. Cada predicado é rodado contra uma cópia
+  // MUTADA que deveria reprová-lo.
+  const autoText = readRepoText(FILES[0]);
+  const strippedField = autoText.replace(/,\$\{TRANSPORT_TAIL\}/g, '').replace(/,\\"transport\\":\\"in-process\\"/g, '');
+  assert(emitterLines(strippedField).some(l => !/transport/i.test(l)),
+    '(controle) o predicado do censo REPROVA uma cópia em que o campo foi removido');
+  const strippedFence = autoText.replace(/XLLM_STATE=\$\(node "\$FORGE_SCRIPTS_DIR\/forge-xllm-state\.js" --mode read[^\n]*\n/g, '');
+  const brokenFence = fenceContaining(strippedFence, 'plan-slice/${S##}');
+  assert(!!brokenFence && !/forge-xllm-state\.js"? --mode read/.test(brokenFence),
+    '(controle) o predicado do fence REPROVA uma cópia em que a re-resolução foi "simplificada" para fora');
+  assert(OPTIMISTIC.test('TRANSPORT_TAIL="\\"transport\\":\\"${TRANSPORT:-app-server}\\""'),
+    '(controle) o predicado do default otimista REPROVA um `:-app-server` de verdade');
+  assert(!OPTIMISTIC.test('X="${TRANSPORT:-unknown}"'),
+    '(controle) e NÃO reprova o default nomeado `unknown` — o predicado distingue os dois');
+
+  // ── o helper existe, exporta o contrato e a doc bate com o emitido ───────
+  const transport = require('./forge-transport.js');
+  assert(transport.TRANSPORT_KINDS.includes('app-server')
+    && transport.TRANSPORT_KINDS.includes('in-process')
+    && transport.TRANSPORT_KINDS.includes('unknown'),
+    '(d) o enum de kinds do helper cobre os três valores que os emissores escrevem');
+  assert(transport.deriveTransport({ initializeResult: {}, threadStartResult: {} }).kind === 'app-server',
+    '(d) o kind vem da PRESENÇA — objetos de handshake vazios ainda são app-server (imune à divergência mock × servidor real)');
+  assert(transport.deriveTransport({ initializeResult: {}, threadStartResult: null }).kind === 'unknown',
+    '(d) e um handshake ausente é `unknown`, nomeado, nunca otimista');
+
+  const doc = readRepoText(path.join(ROOT, 'shared', 'forge-dispatch.md'));
+  assert(/\| `transport` \|/.test(doc) && /\| `transport_version` \|/.test(doc) && /\| `transport_reason` \|/.test(doc),
+    '(e) as três linhas do contrato estão na tabela de campos de shared/forge-dispatch.md');
+  assert(/[Aa]bsence of `transport` means the record predates TASK-022/.test(doc),
+    '(e) a doc DIZ que ausência = registro anterior à TASK-022 — nunca in-process, nunca unknown');
+  assert(/never the raw `userAgent`/.test(doc),
+    '(e) e que só a versão extraída é logada, nunca o userAgent cru (que carrega SO e arquitetura)');
+
+  const source = fs.readFileSync(__filename, 'utf8');
+  const mainBody = source.slice(source.lastIndexOf('async function main()'));
+  assert(/\(\) => \{ smokeTransportField\(\); \}/.test(mainBody),
+    '(f) Section 100 está registrada em main() por closure — seção não-registrada é seção que some em silêncio');
+
+  pass('(final) Section 100: os 9 emissores de dispatch carregam `transport` (5 do codex derivados do result file, 4 do '
+    + 'claude com a constante in-process e sem os companheiros), os fences da Branch D re-resolvem $RESULT_FILE neles '
+    + 'mesmos, nenhum default de shell é otimista, o kind vem da presença do handshake, e a doc declara o significado da '
+    + 'ausência — com controle positivo provando que cada predicado morde');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -12687,6 +15439,15 @@ async function main() {
       () => { smokeRunOverlapSignal(); },
       () => { smokeSchemaGuardWiring(); },
       () => { smokeControlBytes(); },
+      () => { smokeAppServerSchemaPin(); },
+      async () => { await smokeAppServerTransport(); },
+      async () => { await smokeCapabilityPerTurn(); },
+      () => { smokeEvidenceRuntime(); },
+      () => { smokeExecCallSitesRetired(); },
+      () => { smokeEnvCoverage(); },
+      async () => { await smokeTurnInterrupt(); },
+      () => { smokeInertRoutes(); },
+      () => { smokeTransportField(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {

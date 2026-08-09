@@ -143,14 +143,48 @@ Given all `T##-SUMMARY.md` files from the slice:
     c. **Read `file_audit.ignore_list` from the JSONC-only engine CLI** (default list on absent prefs or engine errors):
        ```bash
        FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
-       FILE_AUDIT_IGNORE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key file_audit.ignore_list --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(JSON.stringify(Array.isArray(v)&&v.length?v:['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**']))}catch{process.stdout.write(JSON.stringify(['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**']))}})")
+       FILE_AUDIT_IGNORE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key file_audit.ignore_list --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(JSON.stringify(Array.isArray(v)&&v.length?v:['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**','node_modules/**']))}catch{process.stdout.write(JSON.stringify(['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**','node_modules/**']))}})")
        ```
 
     d. **Filter both sides with ignore_list.** A path matches a glob when:
        - Pattern has no `*` / `?` → exact prefix match (`.gsd/` matches `.gsd/anything/here`).
-       - Pattern ends with `/**` → prefix match of everything before `/**`.
+       - Pattern ends with `/**` → matches any path having everything before `/**` as a **path-segment prefix at any depth**. `node_modules/**` matches `node_modules/x.js` *and* `packages/app/node_modules/x.js`; it never matches `my_node_modules/x.js` (segment boundary, not substring).
        - Pattern has a single `**` in the middle → split on `**`, match start + end substrings.
        - Otherwise → escape regex metachars, convert `*` to `[^/]*`, anchor at both ends.
+
+       > **S03 review R24 — which side moved, and what else it affects.** These
+       > globs used to match `X/**` at the ROOT only, while the surgical-reset
+       > engine's `isInstallArtifactPath` (`scripts/forge-surgical-reset.js`)
+       > matches `node_modules` **by path segment at any depth**. Two engines
+       > reading the same repo disagreed about what an install artifact is: a
+       > nested `packages/app/node_modules/**` was excluded from a reset and
+       > simultaneously audited as an unexpected file change.
+       >
+       > **The glob side moved** — the reset engine is untouched. Its segment
+       > semantics is the correct one (nested `node_modules` is real and
+       > commonplace in workspaces/monorepos), and it is also the side with
+       > destructive consequences, so it is the wrong side to loosen.
+       >
+       > **The default list is unchanged** (`node_modules/**` still reads
+       > `node_modules/**`), so nothing ripples into `forge-prefs.schema.json`,
+       > `shared/forge-prefs-reference.md` or the prefs-schema test that pins
+       > this exact array. What changes is how those same strings are READ.
+       >
+       > **What else this affects — say it plainly, it is not only
+       > `node_modules`.** The rule is general, so `dist/**`, `build/**`,
+       > `.next/**` and `.gsd/**` now also match at any depth. This is the
+       > breadth S03 deferred, and it is accepted deliberately: a nested
+       > `packages/*/dist/**` is a build artifact by exactly the same argument
+       > as a root one, and a nested `.gsd/**` is Forge bookkeeping wherever it
+       > sits. The effect is confined to the **file audit**, which is advisory
+       > and only decides whether a path is *reported* as unexpected/missing —
+       > it never resets, deletes, or blocks anything.
+       >
+       > **Still divergent, and left so knowingly:** `isGsdPath` in
+       > `scripts/forge-vcs.js` is root-anchored (`p === '.gsd' ||
+       > p.startsWith('.gsd/')`). Widening what the reset engine treats as
+       > protected is a change with destructive-path consequences and belongs to
+       > its own review, not to a glob-semantics fix in an advisory audit.
 
        Filter both `ACTUAL_AM` and `EXPECTED` through the ignore matcher. Any path matching any ignore pattern is dropped from that side.
 

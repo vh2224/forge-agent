@@ -10,7 +10,7 @@ const os = require('os');
 const path = require('path');
 const {
   buildSidecarEnv,
-  codexSandboxArgs,
+  buildAppServerSandboxPolicy,
   authorizeSidecar,
   assertUntrustedOutputBarrier,
   terminateOwnedProcessTree,
@@ -50,10 +50,18 @@ try {
   assert.strictEqual(inherited.OPENAI_API_KEY, undefined);
   assert.strictEqual(inherited.CODEX_HOME, undefined);
 
-  assert.deepStrictEqual(codexSandboxArgs('read-only', 'win32'), ['--sandbox', 'read-only']);
-  assert.deepStrictEqual(codexSandboxArgs('workspace-write', 'darwin'), ['--sandbox', 'workspace-write']);
-  assert.deepStrictEqual(codexSandboxArgs('workspace-write', 'linux'), ['--sandbox', 'workspace-write']);
-  assert.deepStrictEqual(codexSandboxArgs('workspace-write', 'win32'), ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.deepStrictEqual(buildAppServerSandboxPolicy('read-only', 'win32'), {
+    type: 'readOnly', networkAccess: false,
+  });
+  assert.deepStrictEqual(buildAppServerSandboxPolicy('workspace-write', 'darwin'), {
+    type: 'workspaceWrite', networkAccess: false,
+  });
+  assert.deepStrictEqual(buildAppServerSandboxPolicy('workspace-write', 'linux'), {
+    type: 'workspaceWrite', networkAccess: false,
+  });
+  assert.deepStrictEqual(buildAppServerSandboxPolicy('workspace-write', 'win32'), {
+    type: 'dangerFullAccess',
+  });
 
   const execute = authorizeSidecar('execute', {
     cwd: workspace, workspaceRoot: workspace, hostRuntime: 'codex', engine: 'codex',

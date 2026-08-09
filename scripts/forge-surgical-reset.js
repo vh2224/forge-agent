@@ -35,8 +35,109 @@ const fs = require('fs');
 const path = require('path');
 const vcs = require('./forge-vcs.js');
 
-const OPTS = { exclude: vcs.isGsdPath, maxBuffer: 32 * 1024 * 1024 };
 const { isGsdPath, parsePorcelainZ, parseNameStatusZ, pruneEmptyParents } = vcs;
+
+/**
+ * Named install-artifact rule (S03 B2/W4). S03 is the first networked/npm
+ * install path: a failed install can leave thousands of files behind, and
+ * comparing them would turn the overlap hard-guard into a volume failure.
+ * The 2026-06-10 incident established why this must remain conservative: a
+ * dirty worktree was removed with --force. Removing this rule makes the first
+ * failed install after npm has run either inoperable or destructive.
+ */
+function isInstallArtifactPath(p) {
+  const normalized = String(p == null ? '' : p).replace(/\\/g, '/').replace(/^\.\//, '');
+  return normalized.split('/').some((segment) => segment === 'node_modules');
+}
+
+/**
+ * @param {string} p
+ * @param {Set<string>} [trackedInstall] paths under node_modules that ARE tracked
+ */
+function isExcludedPath(p, trackedInstall) {
+  if (isGsdPath(p)) return true;
+  if (!isInstallArtifactPath(p)) return false;
+  // A TRACKED path under node_modules is ordinary version-controlled content; the
+  // install rule exists for the thousands of UNTRACKED files a failed install leaves.
+  // Excluding a tracked one applied to EVERY site sharing this predicate, including
+  // restoreAndRemove and verifyReset: a tracked node_modules file the sidecar modified
+  // was never restored, never raised as overlap, and verifyReset then returned
+  // verified:true over a tree it had not inspected (S03 review R6).
+  return !(trackedInstall && trackedInstall.has(p));
+}
+
+const OPTS = { exclude: isExcludedPath, maxBuffer: 32 * 1024 * 1024 };
+
+// Memo for the tracked-install set, keyed per (cwd, vcs). Cleared at the top of
+// every resetFromState so staleness can never outlive one reset: within a reset the
+// index membership of install paths is stable (this engine never runs add/rm, and
+// `checkout <sha> -- <paths>` only rewrites entries for paths already tracked).
+const trackedInstallCache = new Map();
+
+function trackedInstallArtifacts(cwd, vcsName = 'git') {
+  const key = `${cwd}:${vcsName}`;
+  if (trackedInstallCache.has(key)) return trackedInstallCache.get(key);
+  const set = new Set();
+  // Non-git backends and an unaskable question both fall back to the pre-R6 posture
+  // (treat every install path as excluded) rather than to the opposite, which would
+  // feed a failed install's whole output into the overlap comparison — the volume
+  // failure this rule was created to prevent.
+  const result = vcs.listTracked(cwd, { maxBuffer: OPTS.maxBuffer, vcs: vcsName });
+  if (result.ok) {
+    for (const p of result.paths) if (isInstallArtifactPath(p)) set.add(p);
+  }
+  trackedInstallCache.set(key, set);
+  return set;
+}
+
+function optionsFor(cwd, vcsName, census) {
+  const trackedInstall = trackedInstallArtifacts(cwd, vcsName);
+  return {
+    maxBuffer: OPTS.maxBuffer,
+    exclude(p) {
+      const excluded = isExcludedPath(p, trackedInstall);
+      if (census && excluded && isInstallArtifactPath(p)) census.add(String(p));
+      return excluded;
+    },
+  };
+}
+
+function attachCensus(entries, census) {
+  if (census && census.size > 0) {
+    Object.defineProperty(entries, 'excluded_install_artifacts', {
+      value: census.size,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  return entries;
+}
+
+/**
+ * Census the install artifacts git never reports. When node_modules is gitignored
+ * (the common case) porcelain lists nothing, so the exclude callback sees nothing
+ * and the telemetry would read 0. Adds REAL relative paths to the same Set the
+ * callback fills, so the two sources union instead of double-counting — they were
+ * summed before, reporting ~2x whenever node_modules was NOT ignored (S03 review R7).
+ * Counts files only (directories are not artifacts to compare) and finds nested
+ * node_modules too, matching the segment-wise predicate rather than the root alone.
+ */
+function censusInstallArtifacts(cwd, census, trackedInstall) {
+  const pending = [''];
+  while (pending.length) {
+    const rel = pending.pop();
+    let children;
+    try { children = fs.readdirSync(path.join(cwd, rel) || cwd, { withFileTypes: true }); } catch { continue; }
+    for (const child of children) {
+      if (child.name === '.git') continue;
+      const childRel = rel ? `${rel}/${child.name}` : child.name;
+      if (child.isDirectory() && !child.isSymbolicLink()) { pending.push(childRel); continue; }
+      // Tracked install paths are no longer excluded (R6), so they are not part of
+      // the exclusion census either — the number must count what was left out.
+      if (isInstallArtifactPath(childRel) && !trackedInstall.has(childRel)) census.add(childRel);
+    }
+  }
+}
 
 /**
  * git hash-object of the CURRENT content of <relPath> in <cwd>. Returns the SHA-1
@@ -44,7 +145,7 @@ const { isGsdPath, parsePorcelainZ, parseNameStatusZ, pruneEmptyParents } = vcs;
  * @returns {string|null}
  */
 function hashObject(cwd, relPath, vcsName = 'git') {
-  const result = vcs.hashPath(cwd, relPath, { ...OPTS, vcs: vcsName });
+  const result = vcs.hashPath(cwd, relPath, { ...optionsFor(cwd, vcsName), vcs: vcsName });
   return result.ok ? result.hash : null;
 }
 
@@ -56,11 +157,12 @@ function hashObject(cwd, relPath, vcsName = 'git') {
  * @returns {{path:string, hash:string|null}[]}
  */
 function captureSnapshot(cwd, vcsName = 'git') {
-  const result = vcs.captureDirty(cwd, { ...OPTS, vcs: vcsName });
+  const census = new Set();
+  const result = vcs.captureDirty(cwd, { ...optionsFor(cwd, vcsName, census), vcs: vcsName });
   // Never trust `.entries` without checking `.ok` on a SAFETY-CRITICAL path: a silent
   // `[]` here would make the engine believe there was no pre-existing dirty work (R1).
   if (!result.ok) throw new Error(`git status failed: ${result.error}`);
-  return result.entries;
+  return attachCensus(result.entries, census);
 }
 
 /**
@@ -70,8 +172,14 @@ function captureSnapshot(cwd, vcsName = 'git') {
  *   - untracked files from `git status --porcelain -uall -z` (?? → A).
  * @returns {{path:string, status:'A'|'M'|'D'}[]}
  */
-function computePostChanges(cwd, startSha, vcsName = 'git') {
-  return vcs.postChanges(cwd, startSha, { ...OPTS, vcs: vcsName }).entries;
+function computePostChanges(cwd, startSha, vcsName = 'git', options = {}) {
+  const census = new Set();
+  const result = vcs.postChanges(cwd, startSha, { ...optionsFor(cwd, vcsName, census), vcs: vcsName });
+  // The filesystem census is telemetry only. It used to run on EVERY call, and
+  // computeLeftover calls this function again, so a full recursive walk happened
+  // twice per reset on the critical path for a number nobody reads on that route.
+  if (options.census !== false) censusInstallArtifacts(cwd, census, trackedInstallArtifacts(cwd, vcsName));
+  return attachCensus(result.entries, census);
 }
 
 // ── the pure decision function (the heart of the engine) ────────────────────────
@@ -83,7 +191,7 @@ function computePostChanges(cwd, startSha, vcsName = 'git') {
  * @param {{path:string,status:'A'|'M'|'D'}[]} postChanges
  * @param {{path:string,hash:string|null}[]} preDirty
  * @param {(path:string)=>string|null} hashNow  re-hash of current content (injectable)
- * @returns {{restore:string[], remove:string[], preserved:string[], overlap:string[]}}
+ * @returns {{restore:string[], remove:string[], preserved:string[], overlap:string[], excluded_install_artifacts?:number}}
  *
  * OVERLAP is computed over EVERY pre_dirty path (re-hashed), independent of the
  * post-run diff: a pre-dirty path whose current hash diverges from the snapshot
@@ -109,7 +217,11 @@ function computeResetTarget(postChanges, preDirty, hashNow) {
     else restore.push(p); // M or D → restore from START_SHA
   }
 
-  return { restore, remove, preserved, overlap };
+  const target = { restore, remove, preserved, overlap };
+  if (postChanges.excluded_install_artifacts > 0) {
+    target.excluded_install_artifacts = postChanges.excluded_install_artifacts;
+  }
+  return target;
 }
 
 // ── reset execution + verification ──────────────────────────────────────────────
@@ -122,7 +234,7 @@ function computeResetTarget(postChanges, preDirty, hashNow) {
  * @returns {{restored:string[], removed:string[]}}
  */
 function executeReset(cwd, startSha, target, vcsName = 'git') {
-  const result = vcs.restoreAndRemove(cwd, startSha, target, { ...OPTS, vcs: vcsName });
+  const result = vcs.restoreAndRemove(cwd, startSha, target, { ...optionsFor(cwd, vcsName), vcs: vcsName });
   if (!result.ok) throw new Error(`surgical reset checkout failed: ${result.error}`);
   return { restored: result.restored, removed: result.removed };
 }
@@ -140,7 +252,11 @@ function executeReset(cwd, startSha, target, vcsName = 'git') {
  */
 function computeLeftover(cwd, startSha, preDirty, vcsName = 'git') {
   const preByPath = new Map(preDirty.map((d) => [d.path, d.hash]));
-  const post = computePostChanges(cwd, startSha, vcsName);
+  // No census on this route: `leftover` is consumed as a plain array (serialized in
+  // the ok:false result, or read for .length by verifyReset), so attaching a
+  // non-enumerable count here was dead — unlike the computePostChanges attachment,
+  // which computeResetTarget really reads (S03 review R12, half-true).
+  const post = computePostChanges(cwd, startSha, vcsName, { census: false });
   const leftover = [];
   for (const { path: p } of post) {
     if (!preByPath.has(p)) { leftover.push(p); continue; }
@@ -281,6 +397,10 @@ function updateState(stateFile, patch) {
  * exit 0 ok / 3 overlap-abort (reset NOTHING) / 2 verify-failed.
  */
 function resetFromState(stateFile) {
+  // Bound the tracked-install memo to ONE reset. The set cannot change during a
+  // reset, but a long-lived process (or a test) that resets twice must re-ask
+  // rather than decide a destructive question from a stale answer.
+  trackedInstallCache.clear();
   const state = readState(stateFile);
   const cwd = state.code_dir;
   const startSha = state.start_sha;
@@ -334,7 +454,14 @@ function resetFromState(stateFile) {
   const target = computeResetTarget(post, preDirty, (p) => hashObject(cwd, p, vcsName));
 
   if (target.overlap.length !== 0) {
-    return { code: 3, result: { ok: false, overlap: target.overlap, preserved: target.preserved } };
+    return { code: 3, result: {
+      ok: false,
+      overlap: target.overlap,
+      preserved: target.preserved,
+      ...(target.excluded_install_artifacts > 0
+        ? { excluded_install_artifacts: target.excluded_install_artifacts }
+        : {}),
+    } };
   }
 
   let done;
@@ -368,12 +495,16 @@ function resetFromState(stateFile) {
       removed: done.removed,
       preserved: target.preserved,
       verified: true,
+      ...(target.excluded_install_artifacts > 0
+        ? { excluded_install_artifacts: target.excluded_install_artifacts }
+        : {}),
     },
   };
 }
 
 module.exports = {
   isGsdPath,
+  isInstallArtifactPath,
   parsePorcelainZ,
   parseNameStatusZ,
   parseSvnBaseline,

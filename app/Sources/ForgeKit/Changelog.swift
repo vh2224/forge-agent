@@ -40,19 +40,64 @@ public struct ReleaseSection: Identifiable, Hashable {
     public let kind: Kind
     public let entries: [String]
 
-    public var id: String { kind.rawValue }
+    public var id: String { kind.key }
 
-    public enum Kind: String, Hashable, Sendable {
-        case added = "Added"
-        case changed = "Changed"
-        case fixed = "Fixed"
-        case removed = "Removed"
-        case documentation = "Documentation"
-        case security = "Security"
-        case other = "Outros"
+    /// The kind of a section — and, for any heading this app does not model,
+    /// THE HEADING ITSELF rather than a bucket.
+    ///
+    /// `.other` used to be a plain case whose `rawValue` was "Outros", and
+    /// `ReleaseSection.id` is that string, so every unmodelled heading produced
+    /// the SAME id. `Breaking`, `Notes`, `Not shipped`, `Known, not fixed` and
+    /// `Architecture (…)` are all real headings in this repo's file, and a
+    /// release carrying two of them handed `ForEach` two identical ids —
+    /// undefined behaviour in SwiftUI, and silent. It is exactly the defect D36
+    /// exists against, one level down: D36 guards release ids, nothing guarded
+    /// section ids, and eight releases in the file were in that state.
+    ///
+    /// Carrying the text fixes both halves with one change. The id becomes the
+    /// heading — unique, measured at 0 repeats within a release across the
+    /// file's 83 sections — and the label stops rendering 17 distinct headings
+    /// as "OUTROS", which threw away the only thing each heading said.
+    public enum Kind: Hashable, Sendable {
+        case added
+        case changed
+        case fixed
+        case removed
+        case documentation
+        case security
+        case other(String)
+
+        private static let known: [String: Kind] = [
+            "Added": .added,
+            "Changed": .changed,
+            "Fixed": .fixed,
+            "Removed": .removed,
+            "Documentation": .documentation,
+            "Security": .security,
+        ]
 
         public static func from(_ raw: String) -> Kind {
-            Kind(rawValue: raw.trimmingCharacters(in: .whitespaces)) ?? .other
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if let k = known[trimmed] { return k }
+            // An empty `### ` heading keeps the old bucket rather than an empty
+            // id: degenerate input should degrade to the previous behaviour,
+            // not to a section that renders as a blank label.
+            return .other(trimmed.isEmpty ? "Outros" : trimmed)
+        }
+
+        /// Structural identity: stable, English, never displayed. `label` is the
+        /// display string and is translated — keying a `ForEach` on it would
+        /// make a row's identity depend on the UI language.
+        public var key: String {
+            switch self {
+            case .added:              return "Added"
+            case .changed:            return "Changed"
+            case .fixed:              return "Fixed"
+            case .removed:            return "Removed"
+            case .documentation:      return "Documentation"
+            case .security:           return "Security"
+            case .other(let heading): return heading
+            }
         }
 
         public var label: String {
@@ -63,7 +108,16 @@ public struct ReleaseSection: Identifiable, Hashable {
             case .removed:       return "Removido"
             case .documentation: return "Documentação"
             case .security:      return "Segurança"
-            case .other:         return "Outros"
+            case .other(let heading):
+                // The view uppercases this into a caption, and two headings in
+                // this file run to 85 characters (`Architecture (M004 decisions
+                // … — see …)`). Cut at the first parenthetical or dash, the same
+                // separator the release heading itself is split on. Identity is
+                // unaffected: `key` keeps the whole heading.
+                let cuts = [" (", " — ", " - "].compactMap { heading.range(of: $0)?.lowerBound }
+                guard let first = cuts.min() else { return heading }
+                let head = String(heading[..<first]).trimmingCharacters(in: .whitespaces)
+                return head.isEmpty ? heading : head
             }
         }
 

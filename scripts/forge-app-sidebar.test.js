@@ -49,7 +49,15 @@
 //      at all (D36). `Release.id` is the version string, so a repeat is a
 //      duplicate id in a `ForEach` — undefined behaviour, and silent. This was
 //      real: `## Unreleased` sat at line 1 and line 104. Renaming the two fixed
-//      the file; only this guard stops the habit that produced them.
+//      the file; only this guard stops the habit that produced them. The
+//      detection is the APP'S OWN rule, not a literal string: the literal
+//      `'\n## Unreleased'` this guard used ran green across the six tags from
+//      v4.2.0 to v4.6.1 while line 1 read `## [Unreleased]`. Two brackets
+//      evaded the only mechanism that existed against exactly that regression,
+//      so the guard is paired with a case proving it bites. Section ids are
+//      guarded on the same footing: `ReleaseSection.id` identifies a section
+//      inside the card, and while every heading outside the enum collapsed to
+//      `.other` ("Outros") eight releases handed `ForEach` repeated ids.
 //
 // Pure file reading, like forge-app-update.test.js and unlike forge-app.test.js:
 // no swift invocation, so it NEVER skips and runs everywhere, Windows included.
@@ -716,15 +724,87 @@ check('nenhum heading `## <version>` se repete em CHANGELOG.md (D36)', () => {
   assert(seen.size > 10, `só ${seen.size} headings lidos em CHANGELOG.md — o formato mudou`);
 });
 
+/// Headings de release "Unreleased", pela MESMA regra que o app aplica em runtime:
+/// `Release.isUnreleased` (Changelog.swift) é `version.lowercased().contains("unreleased")`,
+/// e `version` é o que vem ANTES do travessão. Duas cópias de uma regra que casavam
+/// por acaso: este guard comparava com o literal `'\n## Unreleased'` e ficou cego para
+/// `## [Unreleased]` — a forma que de fato sobreviveu na linha 1 por seis tags, de
+/// v4.2.0 a v4.6.1, sempre verde. Agora a regra é uma só, e é a que o app executa.
+function unreleasedHeadings(source) {
+  return source
+    .split('\n')
+    .filter((line) => line.startsWith('## '))
+    .filter((line) => line.slice(3).split(/ — | - /)[0].trim().toLowerCase().includes('unreleased'));
+}
+
 check('nenhum `## Unreleased` sobrou em CHANGELOG.md (D36)', () => {
-  const n = countOf(read(changelogMd), '\n## Unreleased');
-  const first = read(changelogMd).startsWith('## Unreleased') ? 1 : 0;
+  const found = unreleasedHeadings(read(changelogMd));
   assert(
-    n + first === 0,
-    `${n + first} heading(s) \`## Unreleased\` em CHANGELOG.md. Todos colidem no mesmo `
-      + 'id, e o hábito de abrir um e não fechá-lo é exatamente como a colisão voltou '
-      + 'a existir na linha 1 depois de já ter sido criada a tag v3.2.0'
+    found.length === 0,
+    `${found.length} heading(s) Unreleased em CHANGELOG.md: ${found.join(' | ')} — todos `
+      + 'colidem no mesmo id, e o hábito de abrir um e não fechá-lo é exatamente como a '
+      + 'colisão voltou a existir na linha 1 depois de já ter sido criada a tag v3.2.0'
   );
+});
+
+check('o detector de Unreleased morde as formas que já apareceram no arquivo', () => {
+  // Sem este caso o guard acima é indistinguível de uma asserção vazia: ele prova
+  // que o arquivo está limpo, não que a sujeira seria vista. A forma com colchetes
+  // não é hipotética — é a que evadiu a comparação literal ao longo de seis tags.
+  for (const linha of [
+    '## Unreleased',
+    '## [Unreleased]',
+    '## [Unreleased] — o bloco que vazou de v4.2.0 a v4.6.1',
+    '## UNRELEASED - caixa alta e travessão simples',
+  ]) {
+    assert(unreleasedHeadings(linha).length === 1, `não mordeu: ${linha}`);
+  }
+  // O outro sentido: a palavra fora do slot da versão não é um heading Unreleased,
+  // senão o guard passaria a acusar release legítima e seria desligado por ruído.
+  for (const linha of [
+    '## v4.6.1 — Three copies of one rule stop disagreeing',
+    '## v4.6.0 — o que ficou unreleased até aqui',
+    '### Unreleased',
+    '- um bullet que menciona Unreleased',
+  ]) {
+    assert(unreleasedHeadings(linha).length === 0, `falso positivo: ${linha}`);
+  }
+});
+
+check('nenhuma release repete um heading `### <seção>` em CHANGELOG.md (D36)', () => {
+  // Um nível abaixo da checagem de versão: `ReleaseSection.id` é a identidade da
+  // seção dentro do card. Enquanto todo heading fora do enum virava `.other`
+  // (id "Outros"), OITO releases deste arquivo entregavam ids repetidos ao
+  // `ForEach` — `Breaking` + `Notes` na mesma release bastava. Agora `.other`
+  // carrega o próprio heading (Changelog.swift), então a colisão exige o MESMO
+  // heading literal duas vezes na mesma release, que é o que se assere aqui.
+  // Espelha o teste Swift porque este arquivo roda sem swift, Windows incluído.
+  const src = read(changelogMd);
+  let release = null;
+  let sections = 0;
+  const perRelease = new Map();
+  for (const line of src.split('\n')) {
+    if (line.startsWith('## ')) {
+      release = line.slice(3).split(/ — | - /)[0].trim();
+      perRelease.set(release, new Map());
+    } else if (line.startsWith('### ') && release) {
+      const heading = line.slice(4).trim();
+      const seen = perRelease.get(release);
+      seen.set(heading, (seen.get(heading) || 0) + 1);
+      sections++;
+    }
+  }
+  const dupes = [];
+  for (const [rel, seen] of perRelease) {
+    for (const [heading, n] of seen) if (n > 1) dupes.push(`${rel} › ${heading} (${n}x)`);
+  }
+  assert(
+    dupes.length === 0,
+    `heading de seção repetido na mesma release: ${dupes.join(', ')} — dois ids iguais `
+      + 'num ForEach é comportamento indefinido em SwiftUI. Funda as duas seções ou '
+      + 'renomeie uma delas para o que ela de fato é'
+  );
+  assert(sections > 10, `só ${sections} seções \`###\` lidas em CHANGELOG.md — o formato mudou`);
 });
 
 check('as entradas que a D36 nomeia existem em CHANGELOG.md', () => {

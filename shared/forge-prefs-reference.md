@@ -508,7 +508,7 @@ Filtro do file-audit do forge-completer (seção ## File Audit no S##-SUMMARY): 
 ### `file_audit.ignore_list`
 
 - **Tipo:** array
-- **Default:** `["package-lock.json","yarn.lock","pnpm-lock.yaml","dist/**","build/**",".next/**",".gsd/**"]`
+- **Default:** `["package-lock.json","yarn.lock","pnpm-lock.yaml","dist/**","build/**",".next/**",".gsd/**","node_modules/**"]`
 - **Descrição:** Globs excluídos de ambos os lados do diff (evita ruído de lockfiles e build). Suporta prefix exato, ** (qualquer profundidade) e * dentro de segmento. Bloco ausente/vazio = este default hardcoded, sem erro.
 
 ## memory
@@ -613,7 +613,7 @@ Review gate dialético antes de complete-slice (branch ainda não-mergeado): cha
 - **Tipo:** string
 - **Default:** `"claude"`
 - **Valores permitidos:** `claude`, `codex`, `gemini`, `auto`
-- **Descrição:** Quem desafia (challenge + rebuttal). codex = GPT via codex exec; gemini = Antigravity CLI agy — ambos via scripts/forge-xllm.js, com fallback automático ao forge-reviewer Claude em qualquer falha. auto = família OPOSTA ao autor do código (reduz viés de auto-preferência). Valor inválido cai em claude.
+- **Descrição:** Quem desafia (challenge + rebuttal). codex = GPT via o protocolo codex app-server (transporte argv anterior aposentado em M018 S05); gemini = Antigravity CLI agy — ambos via scripts/forge-xllm.js, com fallback automático ao forge-reviewer Claude em qualquer falha. auto = família OPOSTA ao autor do código (reduz viés de auto-preferência). Valor inválido cai em claude.
 
 ### `review.advocate`
 

@@ -417,6 +417,12 @@ Use the template below. Fill sections with actual detected findings. For section
 - **Lint:** `{detected lint command or "(none detected)"}`
 - **Format:** `{detected format command or "(none detected)"}`
 - **Type check:** `{detected typecheck command or "(none detected)"}`
+- **Test:** `{detected test command or "(none detected)"}`
+
+`- **Test:**` is not decoration: `resolveVerifyCommand` in `scripts/forge-reverify.js` falls back to
+this exact line when no stack detector matches (zero-dep projects), so omitting it leaves orchestrator
+re-verification with no command to run and an unproven `environment` claim gets accepted by default.
+Write ONE command inside backticks, spawnable without a shell (no quotes, globs, pipes or `$`).
 
 ## Asset Map
 

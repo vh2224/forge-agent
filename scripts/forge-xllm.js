@@ -1,12 +1,21 @@
 #!/usr/bin/env node
 /**
  * forge-xllm.js — zero-dep sidecar adapter for external review challengers/rebuttals + execute.
- * Engines: `codex` (OpenAI Codex CLI, `codex exec`) and `agy` (Google Antigravity CLI,
+ * Engines: `codex` (OpenAI Codex CLI, `codex app-server`) and `agy` (Google Antigravity CLI,
  * `agy --print` — Gemini).
- *   • challenge / defend / rebuttal : the three review dialogue turns (read-only sandbox,
- *                            spawnSync) — codex or agy.
- *   • execute              : run a T##-PLAN.md via codex under workspace-write, detached,
- *                            with heartbeat + process-group timeout, result-file only (codex only).
+ *   • challenge / defend / rebuttal : the three review dialogue turns (read-only sandbox)
+ *                            — codex over the app-server transport (M018 S05), or agy
+ *                            over spawnSync.
+ *   • execute              : run a T##-PLAN.md via codex under workspace-write, over the
+ *                            app-server transport, with heartbeat + timeout, result-file
+ *                            only (codex only).
+ *   • plan                 : decompose a slice via codex in a READ-ONLY app-server turn,
+ *                            result-file only (codex only) — M018 S05.
+ *
+ * Since M018 S05 the `codex app-server` transport is the ONLY codex transport (D6):
+ * `codex exec` (invokeCodex / invokeCodexDetached / codexSandboxArgs) is gone, and there
+ * is deliberately no exec fallback — a failure degrades through the three existing
+ * layers, never a fourth.
  *
  * `defend` completes the dialogue. Without it, `advocate: auto` could not honor its own
  * rule (defender = the AUTHOR's family): every GPT/Gemini author degraded to a Claude
@@ -14,9 +23,11 @@
  * one family with the author's family absent from its own defense.
  *
  * Exports:
- *   runChallenge(opts)         → { objections: [...] }   (or throws)
- *   runDefend(opts)            → { verdicts: [...] }      (or throws) — refuted|conceded|open
- *   runRebuttal(opts)          → { verdicts: [...] }      (or throws) — maintained|withdrawn
+ *   runChallenge(opts)         → Promise<{ objections: [...] }>  (or rejects)
+ *   runDefend(opts)            → Promise<{ verdicts: [...] }>    (or rejects) — refuted|conceded|open
+ *   runRebuttal(opts)          → Promise<{ verdicts: [...] }>    (or rejects) — maintained|withdrawn
+ *   (the three above became async in M018 S05 when codex moved to the app-server
+ *    transport: argument errors now arrive as a REJECTION, never a sync throw)
  *   runExecute(opts)           → Promise<result object>   (or rejects) — writes result-file
  *   extractLastJsonBlock(text) → object|array|null
  *   validateObjections(obj)    → boolean
@@ -59,7 +70,8 @@
  *    `--diff-cmd`) — never from codex output or any untrusted source.
  *
  * Security notes:
- *  - `codex`/`agy` are invoked EXCLUSIVELY via array args (spawnSync / spawn) — never shell:true.
+ *  - `codex`/`agy` are invoked EXCLUSIVELY via array args (spawnSync here, spawn inside
+ *    forge-appserver-client.js) — never shell:true.
  *  - `--diff-cmd` IS executed via execSync({shell:true}) because it legitimately needs
  *    pipes/redirection. This value must come ONLY from the orchestrator — never from
  *    codex output, --input file content, or any other untrusted source.
@@ -80,7 +92,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawnSync, spawn, execSync } = require('child_process');
+// `spawn` left with the `codex exec` cluster (M018 S05 T02): the only long-running
+// child is now spawned by forge-appserver-client.js, which owns its own import.
+const { spawnSync, execSync } = require('child_process');
 const { readPrefsCached } = require('./forge-prefs.js');
 const {
   captureAttemptSnapshot,
@@ -90,6 +104,7 @@ const dispatchPolicy = require('./forge-dispatch-policy.js');
 const vcs = require('./forge-vcs.js');
 const { classifyError, isTransient } = require('./forge-classify-error.js');
 const { countTokens, truncateAtSectionBoundary } = require('./forge-tokens.js');
+const { deriveTransport } = require('./forge-transport.js');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -542,6 +557,15 @@ function buildExecutePrompt(planText, extras) {
   // Preserve the exact historical array when no optional context is supplied.
   const securityText = extras && typeof extras.securityText === 'string' ? extras.securityText : '';
   const contextText = extras && typeof extras.contextText === 'string' ? extras.contextText : '';
+  // Three postures, not two. Collapsing `readonly` into the workspace text handed a
+  // readOnly-sandboxed turn a prompt telling it to write: the model tries, the sandbox
+  // denies, and the denial is reported back as an environment blocker — the exact class
+  // TASK-020 measured 13 times (S03 review R16). `workspace` remains the default for
+  // any other value, so legacy prompts stay byte-identical.
+  const declaredCapability = extras && typeof extras.capability === 'string' ? extras.capability : '';
+  const capability = (declaredCapability === 'networked' || declaredCapability === 'readonly')
+    ? declaredCapability
+    : 'workspace';
   const prompt = [
     'You are a senior software engineer executing a single, fully-specified task plan.',
     'The task plan (a T##-PLAN.md) is embedded verbatim below between delimiters.',
@@ -555,13 +579,28 @@ function buildExecutePrompt(planText, extras) {
     '    naming, reuse, lint expectations).',
     '',
     'HARD PROHIBITIONS (violating any of these fails the task):',
-    ' (a) NEVER run any `git` command — no commit, no add, no checkout, no clean, no reset,',
-    '     no stash. Leave version control entirely alone.',
+    // D5: HEAD != START_SHA and assertNoProtectedSidecarChanges are the real guards.
+    // A total git ban kept the git-commit-required environment classification alive
+    // for read-only commands (6/13 false positives in M017), so execute permits only
+    // inspection while explicitly naming every prohibited write operation.
+    ' (a) Git reads are allowed: `git status`, `git diff`, `git log`, `git show`, and `git rev-parse`.',
+    '     NEVER write with git: no commit, add, checkout, switch, reset, clean, stash, push, merge, rebase, or tag.',
     ' (b) NEVER create or modify anything under `.gsd/` — that tree belongs to the',
     '     orchestrator, not to you.',
     ' (c) NEVER write outside the working directory you were started in.',
-    ' (d) The network is DISABLED — the task must be self-contained. Do not attempt any',
-    '     install, fetch, clone, or other network access.',
+    capability === 'networked'
+      ? ' (d) Network access is ENABLED for this task — installs/fetches are allowed; write only inside the working directory.'
+      : ' (d) The network is DISABLED — the task must be self-contained. Do not attempt any',
+    ...(capability === 'networked' ? [] : [
+      '     install, fetch, clone, or other network access.',
+    ]),
+    // Only the readonly posture adds a line, so the workspace/networked prompts stay
+    // byte-identical to the ones already measured on the wire.
+    ...(capability === 'readonly' ? [
+      ' (e) This task is READ-ONLY: NEVER create, modify, or delete ANY file. The sandbox',
+      '     enforces this, so an attempted write is a denial you caused, not an environment',
+      '     blocker — report your findings in the JSON result instead of writing them out.',
+    ] : []),
     '',
     'The working directory may be a fresh worktree where dependencies may not be installed.',
     'A missing module/package error (`Cannot find module`, `Cannot find package`, `ModuleNotFoundError`,',
@@ -613,24 +652,104 @@ function buildExecutePrompt(planText, extras) {
   return prompt.join('\n');
 }
 
-// Windows workspace-write sandbox failures are tracked in openai/codex#15850
-// (legitimate writes fail), #5824 (write failures), #17179 (ownership corruption),
-// and #14367 (unified_exec can bypass the sandbox). Windows therefore does not
-// receive a protection that works reliably: it breaks legitimate writes and can
-// corrupt ownership. The bypass is deliberately limited to workspace-write.
+// SOLE sandbox gate of the adapter since M018 S05 T02 removed codexSandboxArgs (the
+// `codex exec` flag builder) together with the exec transport it existed to serve.
+// The app-server takes a structured SandboxPolicy rather than CLI flags, and the
+// REASON of the win32 branch had to survive its twin: Windows workspace-write
+// failures are tracked in openai/codex#15850 (legitimate writes fail), #5824 (write
+// failures), #17179 (ownership corruption), and #14367 (unified_exec bypasses the
+// sandbox). Windows therefore does not receive a protection that works reliably —
+// it breaks legitimate writes and can corrupt ownership — so the escape hatch is
+// deliberately limited to the workspace/networked modes. Removing it regresses
+// Windows, and no darwin test catches it. It is reachable ONLY through the platform
+// branch, never through a capability axis (M018/T02/MEM005).
+// Read-only intentionally keeps its sandbox on EVERY platform, win32 included:
+// challenge/defend/rebuttal/plan must NEVER write, so bypassing it would remove a
+// real defense with no documented read-capability benefit.
 // Defense in depth remains active independently of Codex sandboxing:
-// assertNoProtectedSidecarChanges throws for .gsd/** changes, fallback performs a
-// surgical reset, buildSidecarEnv provides an environment allowlist, -C cwd bounds
-// the working directory, and the prompt's HARD PROHIBITIONS remain binding.
-// Read-only intentionally keeps its sandbox on every platform: challenge/rebuttal/
-// plan paths must NEVER write, so bypassing it would remove a real defense without
-// documented read capability benefit.
-function codexSandboxArgs(mode, platform = process.platform) {
-  if (mode === 'read-only') return ['--sandbox', 'read-only'];
-  if (platform === 'win32') return ['--dangerously-bypass-approvals-and-sandbox'];
-  return ['--sandbox', mode];
+// assertNoProtectedSidecarChanges throws for .gsd/** changes, the fallback performs
+// a surgical reset, buildSidecarEnv provides an environment allowlist, the turn cwd
+// bounds the working directory, and the prompt's HARD PROHIBITIONS remain binding.
+// Capability → app-server sandbox mode. This lived as an inline ternary inside
+// runExecute, where it was UNTESTABLE: the only test that claimed to cover it
+// called buildAppServerSandboxPolicy('workspace-write') with a hardcoded literal,
+// so a one-character drift ('readonly' vs 'read-only') fell through to the
+// workspace default and granted WRITE to a task declared read-only, in silence,
+// with nothing failing (S03 review R15). Keeping the table here — total, named,
+// exported — is what lets a test derive the expected policy FROM the capability.
+const CAPABILITY_SANDBOX_MODE = {
+  readonly: 'read-only',
+  workspace: 'workspace-write',
+  networked: 'networked',
+};
+
+// S04 R7 guards + SANDBOX_MODES live BELOW the gate on purpose — see the note there.
+function buildAppServerSandboxPolicy(mode, platform = process.platform) {
+  // Validated FIRST, before any platform branch: otherwise a typo on win32
+  // returns dangerFullAccess and never reaches the check at all — the widest
+  // possible policy handed out for the least recognisable input.
+  assertKnownSandboxMode(mode, 'buildAppServerSandboxPolicy');
+  if (mode === 'read-only') return { type: 'readOnly', networkAccess: false };
+  if (platform === 'win32') return { type: 'dangerFullAccess' };
+  if (mode === 'networked') return { type: 'workspaceWrite', networkAccess: true };
+  // W3: keep the default workspace policy byte-for-byte explicit; the omitted
+  // network default was never measured, so changing this can silently grant access.
+  // Reached ONLY by 'workspace-write' now — the guard owns everything else.
+  return { type: 'workspaceWrite', networkAccess: false };
 }
 
+// The closed set of modes the table can produce. Derived from it, never re-typed:
+// a fourth capability added to CAPABILITY_SANDBOX_MODE must be handled by the gate
+// or throw, and a literal list here would let the two drift while both looked
+// complete.
+const SANDBOX_MODES = Object.freeze(Object.values(CAPABILITY_SANDBOX_MODE));
+
+// PLACEMENT, deliberate and load-bearing: these guards sit AFTER the gate rather
+// than between the gate and the long Windows/defense comment that precedes it.
+// Putting them in between pushed that comment out of the 2000-char window
+// forge-smoke.js (assert 70d) reads — measured, red — and 70d exists precisely
+// because a Windows-specific defense lost its explanation once before. Function
+// declarations hoist and SANDBOX_MODES is only read at call time, so the gate can
+// use both from above.
+//
+// S04 review R7. BOTH functions used to FAIL OPEN: an unrecognised capability
+// and an unrecognised mode each fell through to `workspaceWrite`, so a typo
+// ('readonly' vs 'read-only', 'read_only', a capability added upstream) silently
+// GRANTED FILESYSTEM WRITE to a turn that asked for none — the precise drift the
+// gate comment above says this extraction exists to prevent. That the sole
+// production call site feeds a validated enum member is true and does not bind
+// anyone else: both are exported, and an exported default that grants is a
+// permission decision delegated to whoever misspells something.
+//
+// S07 settled the shape of the answer: a guard that throws beats a default that
+// grants. An unknown mode must be impossible to MISTAKE for workspaceWrite, and
+// the only value that cannot be mistaken for a policy is no value at all.
+function assertKnownSandboxMode(mode, fn) {
+  if (!SANDBOX_MODES.includes(mode)) {
+    throw new Error(
+      `${fn}: unknown sandbox mode ${JSON.stringify(mode)} — expected one of ${SANDBOX_MODES.join(', ')}. `
+      + 'Refusing to fall back to workspace-write: an unrecognised mode must never grant filesystem write.'
+    );
+  }
+}
+
+function capabilityToSandboxMode(capability) {
+  if (!Object.prototype.hasOwnProperty.call(CAPABILITY_SANDBOX_MODE, capability)) {
+    throw new Error(
+      `capabilityToSandboxMode: unknown capability ${JSON.stringify(capability)} — expected one of `
+      + `${Object.keys(CAPABILITY_SANDBOX_MODE).join(', ')}. Refusing to default to workspace-write.`
+    );
+  }
+  return CAPABILITY_SANDBOX_MODE[capability];
+}
+
+// The total `git` prohibition below DIVERGES from buildExecutePrompt, where M018 D5
+// deliberately allowed READ-ONLY git (diff/status/log) while keeping writes barred.
+// The divergence is DELIBERATE, not an oversight left behind by that change: Branch D
+// is read-only by design — codex only reasons over the embedded context plus the
+// codebase and returns markdown the orchestrator materializes — and no measured use
+// case requires it to read a diff. Anyone reconciling the two prompts "for symmetry"
+// is widening a sandbox with no consumer asking for it.
 function buildPlanPrompt(contextText) {
   return [
     'You are a senior software planner decomposing ONE slice of work into an executable',
@@ -645,21 +764,35 @@ function buildPlanPrompt(contextText) {
     '    per task. Return the FULL markdown content of every file — you write NOTHING to',
     '    disk; the orchestrator materializes your output.',
     ' 3. Every T##-PLAN.md MUST carry a YAML frontmatter block with this exact structured',
-    '    schema (the executor enforces it — a missing or malformed block fails the task):',
-    '      must_haves:',
-    '        truths: [ "<observable truth that must hold>", ... ]',
-    '        artifacts:',
-    '          - path: "<relative path>"',
-    '            provides: "<what this file provides>"',
-    '            min_lines: <integer>',
-    '            stub_patterns: [ "<optional regex to reject stubs>", ... ]',
-    '        key_links:',
-    '          - from: "<path>"',
-    '            to: "<path>"',
-    '            via: "<how they connect — import/call/require>"',
-    '      expected_output: [ "<relative path the task writes>", ... ]',
-    '      depends: [ "<task id this depends on>", ... ]',
-    '      writes: [ "<relative path this task owns>", ... ]',
+    '    schema (the executor enforces it — a missing or malformed block fails the task).',
+    '    INDENTATION IS PART OF THE CONTRACT. `must_haves:` has EXACTLY THREE children:',
+    '    truths, artifacts, key_links. EVERY OTHER KEY sits at column 0 of the frontmatter,',
+    '    as a sibling of must_haves: — expected_output, depends, writes, and also',
+    '    capability, repo, domain, tier, effort, worker, tag. Nesting any of them under',
+    '    must_haves makes it invisible to every reader (all are matched anchored at',
+    '    column 0) and FAILS the gate with a `nested-top-level-key` error.',
+    '    Here is the schema. The `|` markers show column 0 — they are NOT part of the file;',
+    '    strip them and keep the indentation that follows each `|`:',
+    '      |must_haves:',
+    '      |  truths: [ "<observable truth that must hold>", ... ]',
+    '      |  artifacts:',
+    '      |    - path: "<relative path>"',
+    '      |      provides: "<what this file provides>"',
+    '      |      min_lines: <integer>',
+    '      |      stub_patterns: [ "<optional regex to reject stubs>", ... ]',
+    '      |  key_links:',
+    '      |    - from: "<path>"',
+    '      |      to: "<path>"',
+    '      |      via: "<how they connect — import/call/require>"',
+    '      |expected_output: [ "<relative path the task writes>", ... ]',
+    '      |depends: [ "<task id this depends on>", ... ]',
+    '      |writes: [ "<relative path this task owns>", ... ]',
+    '    WRONG (this exact mistake was measured on 2 of 3 real plans — do not repeat it):',
+    '      |must_haves:',
+    '      |  truths: [ ... ]',
+    '      |  expected_output: [ ... ]   <-- WRONG: indented, so nobody can read it',
+    '      |  writes: [ ... ]            <-- WRONG',
+    '      |  depends: []                <-- WRONG',
     '    (artifacts[].min_lines is REQUIRED and must be a number. truths/artifacts/key_links',
     '     are all required arrays. Omitting any required field fails the enforcing gate.)',
     '',
@@ -739,111 +872,76 @@ function resolveCodexCommand() {
 }
 
 /**
- * Invoke `codex exec` headless with a strict, minimal flag set. No retry.
- * @param {object} opts
- * @param {string} opts.prompt
- * @param {object} opts.schema
- * @param {string} opts.cwd
- * @param {string} [opts.model]
- * @param {number} opts.timeoutSecs
- * @returns {string} raw content of the -o (last-message) file
- * @throws {Error} on any invocation/parse failure — cause in message
+ * Read the `status` of the `turn/completed` notification the client observed.
+ *
+ * Returns null when no such notification carries a string status. `null` means
+ * NOT OBSERVED and must never be rendered as 'completed' by optimism: S02 R15
+ * (S04-PLAN § Notes) is open — `turn/completed` resolves without matching the
+ * turn id, so a census can in principle be taken under someone else's turn. The
+ * raw status is recorded precisely so triage can tell that case apart. Inventing
+ * 'completed' here would erase the only signal that distinguishes them.
  */
-function invokeCodex(opts) {
-  const { prompt, schema, cwd, model, timeoutSecs, envPolicy = 'minimal' } = opts;
-
-  let tmpDir;
-  try {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xllm-'));
-  } catch (e) {
-    throw new Error(`failed to create tmpdir: ${e.message}`);
+function readTurnStatus(notifications) {
+  const list = Array.isArray(notifications) ? notifications : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const message = list[i];
+    if (!message || message.method !== 'turn/completed') continue;
+    const params = message.params || {};
+    const turn = params.turn || {};
+    if (typeof turn.status === 'string') return turn.status;
+    if (typeof params.status === 'string') return params.status;
   }
+  return null;
+}
 
-  const lastMsgFile = path.join(tmpDir, 'last-message.txt');
-  const schemaFile = path.join(tmpDir, 'schema.json');
-
+/**
+ * Classify the turn's ThreadItems into runtime-observed evidence.
+ *
+ * REPORT-ONLY, and that is a contract, not an implementation detail (S04-PLAN
+ * contract 8): the direct precedent is deriveFilesChanged (`a hash that fails
+ * becomes 'changed', because aborting the whole dispatch from a reporting path
+ * is the defect, not the protection`). Any failure — the module missing, an item
+ * whose `type` accessor throws, a census that does not add up — becomes
+ * `outcome: 'collector-failed'` with a NAMED reason, and the unit still
+ * completes. Nothing here may throw.
+ *
+ * The require is LATE ON PURPOSE (IN-15, asserted by Section 93's in-process
+ * scan): a top-level require would load the collector for every consumer of this
+ * adapter, including the `agy` path, which must never load execute-side code.
+ *
+ * @param {object[]} items already-unwrapped ThreadItems
+ * @param {object[]} notifications the raw notification stream (for turn_status)
+ * @param {string|null} unit unit id stamped onto each entry
+ * @returns {{census: object, entries: object[]}}
+ */
+function collectRuntimeEvidence(items, notifications, unit) {
+  let turnStatus = null;
   try {
-    fs.writeFileSync(schemaFile, JSON.stringify(schema), 'utf8');
-
-    const args = [
-      'exec',
-      ...codexSandboxArgs('read-only'),
-      // Allow running outside a Git repository (e.g. SVN working copies). Codex
-      // otherwise aborts with "Not inside a trusted directory and --skip-git-repo-check
-      // was not specified", and a non-git dir can never become a "trusted directory"
-      // (no config/trust bypasses it — only this flag). The read-only sandbox already
-      // bounds the blast radius, so this does not weaken isolation. See docs/xllm-review-svn-gap.md.
-      '--skip-git-repo-check',
-      '-C', cwd,
-      '-o', lastMsgFile,
-      '--output-schema', schemaFile,
-    ];
-    if (model) {
-      args.push('-m', model);
-    }
-    // Prompt via stdin (`codex exec -`), NOT argv: a large slice diff embedded in
-    // the prompt (60k+ chars) overflows the Windows CreateProcess command-line cap
-    // (~32KB → ENAMETOOLONG, exit 2) and is bounded on POSIX too (ARG_MAX). spawnSync's
-    // `input` writes the prompt to stdin and closes it — EOF guaranteed (codex#20919).
-    args.push('-');
-
-    const { cmd, prefixArgs } = resolveCodexCommand();
-    const res = spawnSync(cmd, [...prefixArgs, ...args], {
-      shell: false,
-      input: prompt,
-      timeout: timeoutSecs * 1000,
-      killSignal: 'SIGKILL',
-      encoding: 'utf8',
-      maxBuffer: MAX_BUFFER,
-      env: buildSidecarEnv(envPolicy),
-    });
-
-    if (res.error) {
-      // ENOENT (missing binary), ETIMEDOUT, etc.
-      throw new Error(`codex spawn failed: ${res.error.code || res.error.message}`);
-    }
-    if (res.signal === 'SIGKILL') {
-      throw new Error(`codex killed after exceeding timeout (${timeoutSecs}s)`);
-    }
-    if (res.status !== 0) {
-      const stderrSnippet = (res.stderr ? String(res.stderr) : '').trim().slice(0, 200);
-      throw new Error(`codex exited ${res.status}${stderrSnippet ? `: ${stderrSnippet}` : ''}`);
-    }
-
-    let content;
-    try {
-      content = fs.readFileSync(lastMsgFile, 'utf8');
-    } catch (e) {
-      throw new Error(`codex -o file missing or unreadable: ${e.message}`);
-    }
-    if (!content || !content.trim()) {
-      throw new Error('codex -o file is empty');
-    }
-
-    return content;
-  } finally {
-    // Best-effort cleanup — the -o file may contain diff excerpts.
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch (e) {
-      // ignore — best-effort
-    }
+    turnStatus = readTurnStatus(notifications);
+    const { buildRuntimeEvidence } = require('./forge-evidence-admit');
+    return buildRuntimeEvidence(items, { unit: unit || null, turnStatus });
+  } catch (error) {
+    return {
+      census: {
+        outcome: 'collector-failed',
+        items_received: Array.isArray(items) ? items.length : 0,
+        types_seen: {},
+        admitted: 0,
+        inadmissible: 0,
+        rejected: [],
+        turn_status: turnStatus,
+        reason: error && error.message ? error.message : String(error),
+      },
+      entries: [],
+    };
   }
 }
 
 /**
- * Invoke `codex exec --sandbox workspace-write` DETACHED for execute mode.
- *
- * Why detached + spawn (not spawnSync): the heartbeat must be re-written WHILE codex
- * runs (S01-RISK blocker #2), which is mechanically impossible under the blocking
- * spawnSync. detached:true gives codex its own process group so a timeout can SIGKILL
- * the WHOLE group (`process.kill(-pid)`) — orphaned children never survive (codex#7852).
- * stdio: stdin is a PIPE carrying the prompt (`codex exec -`) — we write it and then
- * `end()` immediately, so codex gets EOF and never hangs waiting on an open stdin
- * (codex#20919). This replaces prompt-as-argv, which overflowed the Windows
- * CreateProcess command-line cap (~32KB → ENAMETOOLONG) on large slice diffs
- * (60k+ chars) and is bounded on POSIX too (ARG_MAX). stdout is NEVER held on a pipe
- * (result comes from the -o file — codex#7852 mitigation), stderr piped with a small cap.
+ * Invoke ONE Codex app-server turn — the adapter's only codex transport since
+ * M018 S05 (D6). Every mode routes through here: execute (workspace/networked),
+ * challenge/defend/rebuttal and plan (read-only). There is deliberately no exec
+ * fallback; a failure degrades through the three existing layers, never a fourth.
  *
  * @param {object} opts
  * @param {string} opts.prompt
@@ -851,163 +949,132 @@ function invokeCodex(opts) {
  * @param {string} opts.cwd
  * @param {string} [opts.model]
  * @param {number} opts.timeoutSecs
- * @param {(pid:number)=>void} [opts.onHeartbeat] called at start and every HEARTBEAT_INTERVAL_MS
- * @param {'read-only'|'workspace-write'} [opts.sandbox] codex sandbox; default 'workspace-write'
- *        (execute). Plan mode passes 'read-only' — codex only reasons, never writes.
- * @returns {Promise<string>} raw content of the -o (last-message) file
+ * @param {(pid:number)=>void} [opts.onHeartbeat]
+ * @param {'read-only'|'workspace-write'|'networked'} [opts.sandbox] the three values
+ *   capabilityToSandboxMode can produce. runExecute passes 'networked' and the JSDoc
+ *   omitted it (S03 review R19). Since S04 R7 buildAppServerSandboxPolicy THROWS on
+ *   anything outside that set rather than rendering the workspace default, so a typo
+ *   here is now loud rather than indistinguishable from a deliberate workspace turn.
+ * @param {'minimal'|'inherit'} [opts.envPolicy]
+ * @param {number} [opts.heartbeatIntervalMs] test-only override; production never
+ *   passes it. Validated as a finite positive integer when present (S05 review R2) —
+ *   a negative reaches setInterval as a tight loop, and 0/NaN both used to slip
+ *   through the `||` fallback as "absent" or as the same tight loop.
+ * @returns {Promise<{finalText:string,agentTexts:string,diagnostics:object}>}
  */
-function invokeCodexDetached(opts) {
-  const { prompt, schema, cwd, model, timeoutSecs, onHeartbeat, sandbox, envPolicy = 'minimal' } = opts;
+function invokeCodexAppServer(opts) {
+  // Lazy by contract: agy and every non-execute path must never load the app-server
+  // client. Keeping this require here also lets a missing optional client fail only
+  // for the transport that needs it.
+  const { startAppServerTurn } = require('./forge-appserver-client');
+  const {
+    prompt, schema, cwd, model, timeoutSecs, onHeartbeat, sandbox,
+    envPolicy = 'minimal', heartbeatIntervalMs,
+  } = opts;
+  const { cmd, prefixArgs } = resolveCodexCommand();
+  // S05 review R2. `heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS` conflated three
+  // different bad values with absence: 0 and NaN fell back silently (so a test
+  // asking for 0 measured the 30s production cadence and would have "passed"
+  // against a contract it never exercised), and a NEGATIVE passed straight into
+  // setInterval, which clamps it to 1ms — a tight loop calling onHeartbeat
+  // thousands of times a second for the whole turn. Documented test-only with one
+  // caller is a reason to validate cheaply, not a reason to trust the input.
+  // `??` after validation, never `||`: presence is decided by the value being
+  // undefined, not by it being falsy.
+  if (heartbeatIntervalMs !== undefined
+    && !(Number.isInteger(heartbeatIntervalMs) && heartbeatIntervalMs > 0)) {
+    throw new Error(
+      `invokeCodexAppServer: heartbeatIntervalMs must be a finite positive integer (got ${JSON.stringify(heartbeatIntervalMs)})`
+    );
+  }
+  const heartbeatMs = heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+  let heartbeatTimer = null;
+  let pid = null;
 
-  return new Promise((resolve, reject) => {
-    let tmpDir;
-    try {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xllm-exec-'));
-    } catch (e) {
-      reject(new Error(`failed to create tmpdir: ${e.message}`));
-      return;
-    }
+  const stopHeartbeat = () => {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  };
+  const onSpawn = (childPid) => {
+    pid = childPid;
+    if (typeof onHeartbeat !== 'function' || !pid) return;
+    try { onHeartbeat(pid); } catch { /* heartbeat is best-effort */ }
+    // Test-only so T03 can prove a silent turn keeps beating at 50ms. Production
+    // never supplies it; removing the adapter-owned timer would regress the silent
+    // turn heartbeat contract measured for codex#7852.
+    heartbeatTimer = setInterval(() => {
+      try { onHeartbeat(pid); } catch { /* heartbeat is best-effort */ }
+    }, heartbeatMs);
+  };
 
-    const lastMsgFile = path.join(tmpDir, 'last-message.txt');
-    const schemaFile = path.join(tmpDir, 'schema.json');
+  // T01 B3 could not observe a turn-scoped model readback, so it is
+  // indistinguishable: provide opts.model at BOTH accepted positions rather than
+  // risking an implicit CLI default at either one.
+  const threadParams = { approvalPolicy: 'never', ephemeral: true };
+  if (model) threadParams.model = model;
 
-    let heartbeatTimer = null;
-    let timeoutTimer = null;
-    let timedOut = false;
-    let settled = false;
-    let stderrBuf = '';
-
-    const cleanup = () => {
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      try {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
-      } catch { /* best-effort — the -o file may contain work excerpts */ }
+  return startAppServerTurn({
+    cmd,
+    args: prefixArgs,
+    cwd,
+    env: buildSidecarEnv(envPolicy),
+    timeoutMs: timeoutSecs * 1000,
+    threadParams,
+    turnParams: (threadId) => {
+      const params = {
+        threadId,
+        input: [{ type: 'text', text: prompt }],
+        outputSchema: schema,
+        sandboxPolicy: buildAppServerSandboxPolicy(sandbox || 'workspace-write'),
+      };
+      if (model) params.model = model;
+      return params;
+    },
+    onSpawn,
+  }).then((session) => {
+    stopHeartbeat();
+    // The client preserves item/completed params verbatim; the pinned protocol
+    // carries the ThreadItem at params.item. Accept a direct item as well so this
+    // adapter remains compatible with an already-normalized client surface.
+    const items = (session.items || []).map((record) => (record && record.item ? record.item : record));
+    const agentItems = items
+      .filter((item) => item && item.type === 'agentMessage' && typeof item.text === 'string');
+    const finalItems = agentItems.filter((item) => item.phase === 'final_answer');
+    const finalItem = finalItems.length ? finalItems[finalItems.length - 1] : null;
+    return {
+      finalText: finalItem ? finalItem.text : '',
+      agentTexts: agentItems.map((item) => item.text).join('\n'),
+      // Additive: the three fields above keep their names and shapes. Until S04
+      // the rest of `items` was read for the final answer and DISCARDED — this
+      // is the whole reason runtime evidence did not exist.
+      evidence: collectRuntimeEvidence(items, session.notifications, opts.evidenceUnit),
+      // TASK-022: `initializeResult` and `threadStartResult` are resolved by
+      // forge-appserver-client.js:578-593 and, before this line existed, DIED HERE —
+      // the seam returned four keys and both handshake results were dropped, which is
+      // why no dispatch record could ever say which transport carried the turn.
+      // deriveTransport reads only their PRESENCE (never a key inside them), so the
+      // measured mock × real-server divergence (serverInfo vs userAgent) cannot make a
+      // live app-server session report as `unknown`.
+      transport: deriveTransport(session),
+      diagnostics: {
+        discarded: session.discarded || { count: 0, kinds: {} },
+        inbound_requests: (session.inboundRequests || []).length,
+      },
     };
-
-    const settle = (fn, arg) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      fn(arg);
-    };
-
-    let child;
-    try {
-      fs.writeFileSync(schemaFile, JSON.stringify(schema), 'utf8');
-
-      const args = [
-        'exec',
-        ...codexSandboxArgs(sandbox || 'workspace-write'),
-        // Allow running outside a Git repository (e.g. SVN working copies). Codex
-        // otherwise aborts with "Not inside a trusted directory and --skip-git-repo-check
-        // was not specified", and a non-git dir can never become a "trusted directory"
-        // (no config/trust bypasses it — only this flag). The sandbox already bounds
-        // the blast radius, so this does not weaken isolation. See docs/xllm-review-svn-gap.md.
-        '--skip-git-repo-check',
-        '-C', cwd,
-        '-o', lastMsgFile,
-        '--output-schema', schemaFile,
-      ];
-      if (model) {
-        args.push('-m', model);
-      }
-      // Prompt via stdin (`codex exec -`), NOT argv — see function doc: avoids the
-      // Windows CreateProcess command-line cap (ENAMETOOLONG on large diffs).
-      args.push('-');
-
-      // Windows-safe binary resolution (spawn ENOENT for .cmd/.bat shims):
-      // route through resolveCodexCommand() exactly as invokeCodex does.
-      // POSIX → { cmd: 'codex', prefixArgs: [] } (byte-identical to a bare spawn).
-      const { cmd, prefixArgs } = resolveCodexCommand();
-      child = spawn(cmd, [...prefixArgs, ...args], {
-        shell: false,
-        // POSIX: detached puts codex in its own process group so the timeout below can
-        // SIGKILL the WHOLE group via `process.kill(-pid)` (codex#7852).
-        // Windows: detached leaves codex with NO console, so every shell command it runs
-        // hands off to the default terminal app — one real, focus-stealing window per
-        // command (measured: 3-4 windows and 3-8 focus steals per run; zero without
-        // detached). The Windows timeout path below kills the tree by pid (/T /F) and
-        // needs no process group, so dropping detached there costs nothing.
-        detached: process.platform !== 'win32',
-        // stdin = pipe (prompt transport), stdout ignored (result via -o file), stderr piped.
-        stdio: ['pipe', 'ignore', 'pipe'],
-        env: buildSidecarEnv(envPolicy),
-      });
-
-      // Feed the prompt and close stdin immediately → codex gets EOF (codex#20919).
-      if (child.stdin) {
-        child.stdin.on('error', () => { /* best-effort — EPIPE if codex exits early */ });
-        child.stdin.write(prompt);
-        child.stdin.end();
-      }
-    } catch (e) {
-      settle(reject, new Error(`codex spawn failed: ${e.message}`));
-      return;
+  }, (error) => {
+    stopHeartbeat();
+    // The app-server names its own failure on stderr ("429 …", "invalid api key",
+    // ECONNRESET). The client keeps that tail as a property, but classifyErrorClass
+    // reads the MESSAGE — so without this splice every process-exit failure lands as
+    // `terminal` and the orchestrator's transient retry (M013) dies silently. The
+    // `codex exec` path already did exactly this at its own close handler; the
+    // app-server transport must not lose the signal on the way in.
+    const tail = error && typeof error.stderrTail === 'string' ? error.stderrTail.trim() : '';
+    if (tail) {
+      const snippet = tail.slice(-MAX_STDERR_SNIPPET);
+      if (!String(error.message || '').includes(snippet)) error.message = `${error.message}: ${snippet}`;
     }
-
-    child.on('error', (err) => {
-      // ENOENT (missing binary), EACCES, etc.
-      settle(reject, new Error(`codex spawn failed: ${err.code || err.message}`));
-    });
-
-    if (child.stderr) {
-      child.stderr.on('data', (chunk) => {
-        stderrBuf += chunk.toString('utf8');
-        // Keep only the tail — never buffer the whole child stderr.
-        if (stderrBuf.length > MAX_STDERR_SNIPPET * 4) {
-          stderrBuf = stderrBuf.slice(-MAX_STDERR_SNIPPET * 4);
-        }
-      });
-    }
-
-    // Heartbeat: fire immediately (pid known) then on interval.
-    if (typeof onHeartbeat === 'function' && child.pid) {
-      try { onHeartbeat(child.pid); } catch { /* heartbeat is best-effort */ }
-      heartbeatTimer = setInterval(() => {
-        try { onHeartbeat(child.pid); } catch { /* best-effort */ }
-      }, HEARTBEAT_INTERVAL_MS);
-    }
-
-    // Timeout: kill the whole process group, then the child as a fallback.
-    // Windows has no process groups — `process.kill(-pid)` throws for a negative
-    // pid there, and `child.kill()` alone only kills the direct child, leaving
-    // grandchildren orphaned (codex#7852). Use `taskkill /T /F` to kill the tree.
-    timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      terminateOwnedProcessTree(child);
-    }, timeoutSecs * 1000);
-
-    child.on('close', (code, signal) => {
-      if (timedOut) {
-        const error = new Error(`codex killed after exceeding timeout (${timeoutSecs}s)`);
-        error.code = 'process-timeout'; settle(reject, error);
-        return;
-      }
-      if (signal) {
-        const error = new Error(`codex terminated by signal ${signal}`);
-        error.code = 'process-terminated'; settle(reject, error);
-        return;
-      }
-      if (code !== 0) {
-        const snippet = stderrBuf.trim().slice(-MAX_STDERR_SNIPPET);
-        settle(reject, new Error(`codex exited ${code}${snippet ? `: ${snippet}` : ''}`));
-        return;
-      }
-
-      let content;
-      try {
-        content = fs.readFileSync(lastMsgFile, 'utf8');
-      } catch (e) {
-        settle(reject, new Error(`codex -o file missing or unreadable: ${e.message}`));
-        return;
-      }
-      if (!content || !content.trim()) {
-        settle(reject, new Error('codex -o file is empty'));
-        return;
-      }
-      settle(resolve, content);
-    });
+    throw error;
   });
 }
 
@@ -1236,15 +1303,51 @@ function invokeAgy(opts) {
 const ENGINE_ENUM = ['codex', 'agy'];
 
 /**
- * Route one prompt to the selected engine. `schema` is honored by codex only
- * (agy has no --output-schema; the prompt text already pins the JSON shape and
- * the defensive parse path never trusted schema conformance anyway).
+ * Route one review prompt to the selected engine and resolve to the RAW model output.
+ *
+ * ALWAYS returns a Promise, for BOTH engines. `agy` stays synchronous on the inside —
+ * wrapping `invokeAgy` keeps that path from loading any session code, which is what
+ * IN-15/D11 require (agy gets tolerance, not parity, and must never pull in
+ * forge-appserver-client). But the SIGNATURE must not vary by engine: a router that
+ * returns a string for one engine and a Promise for the other hands the first
+ * distracted consumer an `undefined` — a `.then` on a string, or a Promise
+ * serialized into a prompt — with nothing failing. One shape, always.
+ *
+ * `schema` is honored by codex only (agy has no --output-schema; the prompt text
+ * already pins the JSON shape and the defensive parse path never trusted schema
+ * conformance anyway).
+ *
+ * codex speaks the app-server transport (M018 D6 — the ONLY transport; there is
+ * deliberately no exec fallback). Raw text is `finalText || agentTexts`, the same
+ * pair runExecute consumes, so a server that never tagged an item `final_answer`
+ * still yields its answer instead of an empty string.
+ *
  * @param {string} engine
- * @param {object} opts — { prompt, schema, cwd, model, timeoutSecs, envPolicy }
- * @returns {string} raw model output
+ * @param {object} opts — { prompt, schema, cwd, model, timeoutSecs, envPolicy, sandbox }
+ * @returns {Promise<string>} raw model output
  */
 function invokeEngine(engine, opts) {
-  return engine === 'agy' ? invokeAgy(opts) : invokeCodex(opts);
+  // Every mode routed through here is a review turn, and review turns are read-only
+  // by contract. Asserting the caller's value (instead of defaulting it here) keeps
+  // ONE place deciding the sandbox. S04 R7 is now CLOSED at the source:
+  // buildAppServerSandboxPolicy throws on any unlisted mode instead of rendering
+  // the WORKSPACE default, so a mode added later cannot acquire write access by
+  // omission. This assertion stays anyway — it is a narrower contract (review
+  // turns are read-only, not merely well-formed) and defence in depth.
+  if (opts.sandbox !== CAPABILITY_SANDBOX_MODE.readonly) {
+    throw new Error(`invokeEngine is the review router: sandbox must be '${CAPABILITY_SANDBOX_MODE.readonly}' (got ${JSON.stringify(opts.sandbox)})`);
+  }
+  if (engine === 'agy') return Promise.resolve(invokeAgy(opts));
+  return invokeCodexAppServer(opts).then((output) => {
+    const raw = output.finalText || output.agentTexts;
+    // Anti-silence floor: an empty turn is a FAILURE, never an empty review accepted
+    // in silence. `codex exec` enforced this as "codex -o file is empty"; the
+    // app-server transport must not lose the guard on the way in.
+    if (!raw || !raw.trim()) {
+      throw new Error('codex app-server produced no agent message (empty output)');
+    }
+    return raw;
+  });
 }
 
 // ── Normalization ─────────────────────────────────────────────────────────────
@@ -1485,10 +1588,10 @@ function readSidecarsEnvPolicy(baseDir) {
  * @param {string} [opts.engine] — 'codex' (default) | 'agy'
  * @param {string} [opts.model]
  * @param {number} [opts.timeoutSecs]
- * @returns {{objections: object[]}}
- * @throws {Error} on any failure — cause in message
+ * @returns {Promise<{objections: object[]}>}
+ * @throws {Error} rejects on any failure — cause in message
  */
-function runChallenge(opts) {
+async function runChallenge(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
   const engine = opts.engine || 'codex';
@@ -1497,8 +1600,10 @@ function runChallenge(opts) {
 
   const diffText = acquireDiff(opts.diffCmd, cwd);
   const prompt = buildChallengePrompt(diffText);
-  const rawContent = invokeEngine(engine, {
+  const rawContent = await invokeEngine(engine, {
     prompt, schema: challengeSchema, cwd, model: opts.model, timeoutSecs, envPolicy: opts.envPolicy || 'minimal',
+    // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
+    sandbox: CAPABILITY_SANDBOX_MODE.readonly,
   });
 
   const parsed = extractLastJsonBlock(rawContent);
@@ -1530,10 +1635,10 @@ function runChallenge(opts) {
  * @param {string} [opts.engine] — 'codex' (default) | 'agy'
  * @param {string} [opts.model]
  * @param {number} [opts.timeoutSecs]
- * @returns {{verdicts: object[]}}
- * @throws {Error} on any failure — cause in message
+ * @returns {Promise<{verdicts: object[]}>}
+ * @throws {Error} rejects on any failure — cause in message
  */
-function runDefend(opts) {
+async function runDefend(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
   const engine = opts.engine || 'codex';
@@ -1551,13 +1656,15 @@ function runDefend(opts) {
   }
 
   const prompt = buildDefendPrompt(inputText);
-  const rawContent = invokeEngine(engine, {
+  const rawContent = await invokeEngine(engine, {
     prompt,
     schema: verdictSchema(DEFEND_VERDICT_ENUM),
     cwd,
     model: opts.model,
     timeoutSecs,
     envPolicy: opts.envPolicy || 'minimal',
+    // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
+    sandbox: CAPABILITY_SANDBOX_MODE.readonly,
   });
 
   const parsed = extractLastJsonBlock(rawContent);
@@ -1577,10 +1684,10 @@ function runDefend(opts) {
  * @param {string} [opts.engine] — 'codex' (default) | 'agy'
  * @param {string} [opts.model]
  * @param {number} [opts.timeoutSecs]
- * @returns {{verdicts: object[]}}
- * @throws {Error} on any failure — cause in message
+ * @returns {Promise<{verdicts: object[]}>}
+ * @throws {Error} rejects on any failure — cause in message
  */
-function runRebuttal(opts) {
+async function runRebuttal(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
   const engine = opts.engine || 'codex';
@@ -1595,13 +1702,15 @@ function runRebuttal(opts) {
   }
 
   const prompt = buildRebuttalPrompt(inputText);
-  const rawContent = invokeEngine(engine, {
+  const rawContent = await invokeEngine(engine, {
     prompt,
     schema: verdictSchema(VERDICT_ENUM),
     cwd,
     model: opts.model,
     timeoutSecs,
     envPolicy: opts.envPolicy || 'minimal',
+    // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
+    sandbox: CAPABILITY_SANDBOX_MODE.readonly,
   });
 
   const parsed = extractLastJsonBlock(rawContent);
@@ -1724,7 +1833,23 @@ async function runExecute(opts) {
   }
   if (!planText.trim()) throw new Error('--plan file is empty');
 
+  // T01 owns frontmatter parsing. Keep this require late so non-execute routes do
+  // not load the capability adapter, and downgrade unknown declarations visibly.
+  const cap = require('./forge-must-haves').resolveCapability(planText);
+  const sandbox = capabilityToSandboxMode(cap.capability);
+  if (cap.event) {
+    process.stderr.write(`forge-xllm: capability-unrecognized — declared "${String(cap.declared)}", downgraded to workspace\n`);
+  }
+
   // Guard: cwd must be a git work tree.
+  // T01 M2 measured that app-server ACCEPTS a non-git cwd — but acceptance is not
+  // capability, and that thread comes up `readOnly`. The write probe (`--probe
+  // nongit-write`) closed the gap with ground truth on disk: the turn's explicit
+  // `sandboxPolicy: workspaceWrite` OVERRIDES the inherited readOnly and the file is
+  // really written (same cwd under `readOnly` writes nothing). So SVN needs no
+  // appserver-specific refusal guard here; its existing baseline guards remain.
+  // This holds ONLY while turn/start keeps carrying an explicit sandboxPolicy —
+  // pinned by the SVN guard in forge-xllm-appserver.test.js.
   if (vcsName !== 'svn') {
     const insideRepo = gitRead('rev-parse --is-inside-work-tree', cwd, 'git repo check');
     if (insideRepo !== 'true') throw new Error(`--cwd is not inside a git work tree: ${cwd}`);
@@ -1754,7 +1879,7 @@ async function runExecute(opts) {
   const startSha = attemptSnapshot.start_sha;
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const prompt = buildExecutePrompt(planText, { securityText, contextText });
+  const prompt = buildExecutePrompt(planText, { securityText, contextText, capability: cap.capability });
   const inputTokens = countTokens(prompt);
 
   // Initial heartbeat — pid unknown until the child spawns.
@@ -1788,15 +1913,20 @@ async function runExecute(opts) {
     });
   };
 
-  const rawContent = await invokeCodexDetached({
+  const appServerOutput = await invokeCodexAppServer({
     prompt,
     schema: executeSchema,
     cwd,
     model: opts.model,
     timeoutSecs,
     onHeartbeat,
+    sandbox,
     envPolicy: opts.envPolicy || 'minimal',
+    // The dispatch id is the only unit-shaped identifier the adapter holds; the
+    // orchestrator (T03) owns the file name of the evidence log.
+    evidenceUnit: dispatchId,
   });
+  const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   const outputTokens = countTokens(rawContent);
 
   // Persist response telemetry before post-response gates. If JSON/schema/HEAD/.gsd
@@ -1834,10 +1964,24 @@ async function runExecute(opts) {
     }
   }
 
-  const parsed = extractLastJsonBlock(rawContent);
-  if (parsed === null) throw new Error('no parseable JSON block found in codex output');
+  let parsed = null;
+  let parsePath = 'output-schema';
+  let degradation;
+  try {
+    const primary = JSON.parse(appServerOutput.finalText);
+    if (validateExecuteResult(primary)) parsed = primary;
+  } catch { /* outputSchema is a hint; the named fallback below remains required */ }
+  if (parsed === null) {
+    const fallback = extractLastJsonBlock(appServerOutput.agentTexts);
+    if (fallback !== null && validateExecuteResult(fallback)) {
+      parsed = fallback;
+      parsePath = 'extract-last-json-block';
+      degradation = 'output-schema-not-honored';
+      process.stderr.write('forge-xllm: outputSchema degraded — falling back to extractLastJsonBlock\n');
+    }
+  }
+  if (parsed === null) throw new Error('no parseable/valid execute result in app-server output');
   assertUntrustedOutputBarrier(parsed);
-  if (!validateExecuteResult(parsed)) throw new Error('codex output failed execute-result validation');
 
   const derived = deriveFilesChanged(cwd, preDirtyAll, startSha, vcsName);
   // Protected metadata is outside the surgical reset set. A sidecar-owned `.gsd`
@@ -1845,6 +1989,10 @@ async function runExecute(opts) {
   assertNoProtectedSidecarChanges(derived);
   const finishedAt = new Date().toISOString();
 
+  // Never optional-chained into a bare `undefined`: a seam that stopped reporting the
+  // transport must degrade to the NAMED floor, not to an absent field that a reader
+  // cannot tell apart from a pre-TASK-022 adapter.
+  const appServerTransport = appServerOutput.transport || { kind: 'unknown', version: 'unknown' };
   const result = {
     status: parsed.status,
     protocol_version: PROTOCOL_VERSION,
@@ -1863,6 +2011,30 @@ async function runExecute(opts) {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     token_method: 'heuristic-chars-4',
+    parse_path: parsePath,
+    ...(degradation ? { degradation } : {}),
+    capability: cap.capability,
+    ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
+    ...(cap.event ? { capability_event: cap.event } : {}),
+    appserver: {
+      discarded_count: appServerOutput.diagnostics.discarded.count,
+      discarded_kinds: appServerOutput.diagnostics.discarded.kinds,
+      inbound_requests: appServerOutput.diagnostics.inbound_requests,
+      // TASK-022: NESTED HERE, NOT AT THE TOP LEVEL, and that is load-bearing.
+      // forge-xllm-evidence.test.js:53-58,209-213 freezes BASELINE_RESULT_KEYS (20
+      // keys) and asserts the only added top-level key is `runtime_evidence`; a new
+      // top-level `transport` fails that suite. `appserver` is already in the
+      // baseline and is inspected field-by-field (:221), not by key set, so adding
+      // fields inside it is additive by construction. Moving these two keys up one
+      // level breaks the additive-safety invariant, not just a test.
+      transport: appServerTransport.kind,
+      transport_version: appServerTransport.version,
+    },
+    // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
+    // no existing key changes name or shape, and validateExecuteResult does NOT
+    // require this one (it validates the JSON the MODEL returns; this field is
+    // the adapter's own). A reader that ignores it sees a byte-identical result.
+    ...(appServerOutput.evidence ? { runtime_evidence: appServerOutput.evidence } : {}),
   };
 
   writeJsonAtomic(resultFile, result);
@@ -1870,7 +2042,7 @@ async function runExecute(opts) {
 }
 
 /**
- * Run plan mode: guards → prompt → codex (READ-ONLY, detached, heartbeat, timeout) →
+ * Run plan mode: guards → prompt → codex app-server (READ-ONLY turn, heartbeat, timeout) →
  * validate shape → validate each task_plan's must_haves IN-SIDECAR → normalized result-file.
  *
  * Read-only profile (LOCKED — S03-PLAN design): codex only READS the codebase + the
@@ -1954,16 +2126,43 @@ async function runPlan(opts) {
     });
   };
 
-  const rawContent = await invokeCodexDetached({
+  // M018 S05 T02: plan speaks the app-server transport, like every other codex mode
+  // (D6 — the ONLY transport; there is deliberately no exec fallback). The read-only
+  // profile is passed by VALUE OF THE CLOSED ENUM, never a fresh string:
+  // buildAppServerSandboxPolicy now THROWS on any unlisted mode (S04 R7, closed),
+  // so a typo here fails loudly instead of silently granting write access to a
+  // read-only branch. Passing the enum value keeps the typo impossible in the
+  // first place; the guard is what makes the second line of defence real.
+  // `finalText || agentTexts` is the same pair runExecute consumes: a server that
+  // never tagged an item `final_answer` still yields its answer instead of ''.
+  // Deliberately NOT added here (S05-PLAN § Notes 4 and 5): `runtime_evidence`
+  // (a read-only turn produces no fileChange, and materializing it would require
+  // touching the 3 mirrors — forbidden by R6) and `parse_path`/`degradation`
+  // (plan has always parsed through extractLastJsonBlock alone — D9).
+  // Deliberately INCLUDED since TASK-022 (D8): an `appserver` sub-object carrying
+  // `transport`/`transport_version`. It is the only field of runExecute's envelope
+  // whose absence here would be READ by a consumer — the Branch D emitters read the
+  // transport off this result file, so omitting it would make every plan-slice
+  // dispatch report `no-transport-field` forever.
+  const appServerOutput = await invokeCodexAppServer({
     prompt,
     schema: planSchema,
     cwd,
     model: opts.model,
     timeoutSecs,
     onHeartbeat,
-    sandbox: 'read-only',
+    sandbox: CAPABILITY_SANDBOX_MODE.readonly,
     envPolicy: opts.envPolicy || 'minimal',
   });
+  const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
+  // Anti-silence floor: an empty turn is a FAILURE, never an empty plan accepted in
+  // silence. `codex exec` enforced this as "codex -o file is empty"; the app-server
+  // transport must not lose the guard on the way in (same floor invokeEngine keeps
+  // for the review modes). Without it, extractLastJsonBlock(null) below would report
+  // the generic "no parseable JSON block" and hide an empty turn as a parse problem.
+  if (!rawContent || !rawContent.trim()) {
+    throw new Error('codex app-server produced no agent message (empty output)');
+  }
   const outputTokens = countTokens(rawContent);
 
   // Preserve spent output tokens if a post-response validation gate fails.
@@ -2002,12 +2201,23 @@ async function runPlan(opts) {
   }
 
   const finishedAt = new Date().toISOString();
+  const planTransport = appServerOutput.transport || { kind: 'unknown', version: 'unknown' };
   const result = {
     status: parsed.status,
     protocol_version: PROTOCOL_VERSION,
     summary: parsed.summary,
     slice_plan: parsed.slice_plan,
     task_plans: parsed.task_plans,
+    // TASK-022 / D8: the plan envelope gets an `appserver` sub-object it never had,
+    // for one reason — emitter sites forge-auto:1201 and forge-next:1165 read the
+    // transport off this file. Without it, Branch D would emit `no-transport-field`
+    // on every plan-slice forever: degraded BY CONSTRUCTION, which is precisely the
+    // silence this field exists to end. There is no key-set pin on this envelope
+    // (measured: the BASELINE_RESULT_KEYS pin is runExecute-only).
+    appserver: {
+      transport: planTransport.kind,
+      transport_version: planTransport.version,
+    },
     started_at: startedAt,
     finished_at: finishedAt,
     duration_secs: Math.round((Date.now() - startedMs) / 1000),
@@ -2051,13 +2261,17 @@ module.exports = {
   readResultTelemetry,
   readWorkersTimeout,
   readSidecarsEnvPolicy,
+  resolveCodexCommand,
   buildSidecarEnv,
   authorizeSidecar,
   assertUntrustedOutputBarrier,
   terminateOwnedProcessTree,
-  invokeCodexDetached,
   buildExecutePrompt,
-  codexSandboxArgs,
+  buildAppServerSandboxPolicy,
+  capabilityToSandboxMode,
+  invokeCodexAppServer,
+  collectRuntimeEvidence,
+  readTurnStatus,
   assertSafeForCmdShell,
   resolveShimJsEntry,
   classifyErrorClass,
@@ -2194,21 +2408,30 @@ if (require.main === module) {
     return;
   }
 
-  // Synchronous modes (challenge / defend / rebuttal) — JSON on stdout.
+  // Review modes (challenge / defend / rebuttal) — JSON on stdout, and ONLY stdout.
+  // The three drivers became async in M018 S05 (codex now speaks the app-server
+  // transport), so this is .then/.catch rather than try/catch. The CHANNEL does not
+  // move: stdout stays the sole result channel for these three, exactly as the
+  // per-mode contract locks it (--result-file is exclusive to execute/plan, and the
+  // guard above already rejected it before any spawn). A try/catch left here would
+  // catch nothing and let every failure escape as an unhandled rejection — exit 0
+  // with empty stdout, which is the silent-success shape this adapter exists to deny.
   const timeoutSecs = args.timeout ? Number(args.timeout) : DEFAULT_TIMEOUT_SECS;
-  try {
-    let result;
-    if (mode === 'challenge') {
-      result = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, model, timeoutSecs, envPolicy });
-    } else if (mode === 'defend') {
-      result = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, model, timeoutSecs, envPolicy });
-    } else {
-      result = runRebuttal({ inputFile: args.input, cwd, engine, model, timeoutSecs, envPolicy });
-    }
-    process.stdout.write(JSON.stringify(result) + '\n');
-    process.exit(0);
-  } catch (e) {
-    process.stderr.write(`forge-xllm: ${e.message}\n`);
-    process.exit(2);
+  let pending;
+  if (mode === 'challenge') {
+    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, model, timeoutSecs, envPolicy });
+  } else if (mode === 'defend') {
+    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, model, timeoutSecs, envPolicy });
+  } else {
+    pending = runRebuttal({ inputFile: args.input, cwd, engine, model, timeoutSecs, envPolicy });
   }
+  pending
+    .then((result) => {
+      process.stdout.write(JSON.stringify(result) + '\n');
+      process.exit(0);
+    })
+    .catch((e) => {
+      process.stderr.write(`forge-xllm: ${e.message}\n`);
+      process.exit(2);
+    });
 }

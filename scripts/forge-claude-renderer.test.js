@@ -38,7 +38,7 @@ try {
   assert(first.artifacts.some((item) => item.destination.endsWith(path.join('CLAUDE.md'))));
   assert(first.artifacts.every((item) => !item.content.includes('\r')));
   assert(first.artifacts.find((item) => item.source === 'CLAUDE.md').content.startsWith('<!-- forge-source:claude-instructions'));
-  const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.6.0.golden.json'), 'utf8'));
+  const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.8.0.golden.json'), 'utf8'));
   assert.strictEqual(golden.runtime, first.runtime);
   assert.strictEqual(golden.version, renderer.VERSION);
   for (const surface of golden.surfaces) {

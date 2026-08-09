@@ -123,6 +123,49 @@ const { modelToAlias, modelFamily, isMalformedId } = require('./forge-model-alia
 
 const CHAIN_CAP = 3; // resolved chain hard cap (fallback is separate, uncapped)
 
+// ── Family-only worker pin ──────────────────────────────────────────────────
+// `worker:` in a T##-PLAN frontmatter is written two very different ways:
+//   • a CONCRETE model id (`gpt-5.6-terra`) — the author picked the model;
+//   • a FAMILY token (`claude`, `codex`) — the author picked only the ENGINE.
+// Treating the second as a model id is what made the whole tier resolution
+// inert: `worker: claude` produced chain `[{id:'claude', alias:null}]`, so the
+// orchestrator omitted `model:` from Agent() (alias null → documented
+// degradation) and the worker silently ran on its agent-frontmatter default
+// instead of the tier's model — and the effort clamp, which keys off
+// `claude-(haiku|sonnet)`, never matched the token `claude`, so a `standard`
+// task could be dispatched at `high` effort (HTTP 400 on Sonnet).
+// A family token therefore pins ONLY the engine: the chain keeps resolving
+// through routing/tier_models at the effective tier and is then FILTERED to
+// that family. Precedence is unchanged — the frontmatter still wins the
+// `source` label, and a concrete id still short-circuits exactly as before.
+const WORKER_FAMILY_TOKENS = {
+  claude: 'claude',
+  gpt: 'gpt',
+  codex: 'gpt',
+  gemini: 'gemini',
+  agy: 'gemini',
+};
+
+function workerFamilyToken(value) {
+  if (value === null || value === undefined) return null;
+  const key = String(value).trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(WORKER_FAMILY_TOKENS, key)
+    ? WORKER_FAMILY_TOKENS[key]
+    : null;
+}
+
+// Filter a resolved chain down to the pinned family. An EMPTY result is never
+// silent and never leaves the caller with an empty chain: the pin degrades to
+// the pre-fix literal-token chain (byte-identical to the old behavior for that
+// case) with its own discriminator, so a family the tier cannot supply cannot
+// regress into "no chain at all".
+function applyFamilyPin(chain, familyPin, rawWorker, reasonParts) {
+  const kept = (Array.isArray(chain) ? chain : []).filter((m) => m && m.engine === familyPin);
+  if (kept.length > 0) return kept;
+  if (reasonParts) reasonParts.push('frontmatter-worker-family-unmatched');
+  return buildChain([rawWorker], reasonParts);
+}
+
 // ── Phase mapping ───────────────────────────────────────────────────────────
 // execute-task → executor; plan-slice → planner. plan-milestone is NEVER
 // captured (locked max/Fable). discuss-*/memory/complete-*/unknown → null.
@@ -272,7 +315,11 @@ function resolveRoute(opts) {
   const phaseField = phase !== null ? phase : unitType != null ? unitType : '';
 
   // ── Precedence 1a: frontmatter worker pins an explicit model ──────────────
-  if (frontmatterWorker != null && String(frontmatterWorker).length > 0) {
+  // A family-only token (claude/codex/gpt/gemini/agy) is NOT a model id — it
+  // pins the engine and lets tier resolution continue (see applyFamilyPin).
+  const familyPin = workerFamilyToken(frontmatterWorker);
+  if (familyPin !== null) reasonParts.push('frontmatter-worker-family');
+  if (familyPin === null && frontmatterWorker != null && String(frontmatterWorker).length > 0) {
     reasonParts.push('frontmatter-worker');
     const chain = capChain(buildChain([frontmatterWorker], reasonParts), reasonParts);
     const fallback = validateFallback(null, effectiveTier, cwd, reasonParts);
@@ -314,12 +361,13 @@ function resolveRoute(opts) {
   }
 
   if (useRouting) {
-    const chain = capChain(buildChain(cell.ids, reasonParts), reasonParts);
+    let chain = capChain(buildChain(cell.ids, reasonParts), reasonParts);
+    if (familyPin !== null) chain = applyFamilyPin(chain, familyPin, frontmatterWorker, reasonParts);
     const fallback = validateFallback(cell.fallbackId, effectiveTier, cwd, reasonParts);
     return {
       chain,
       fallback,
-      source: frontmatterFixesTier ? 'frontmatter' : 'routing',
+      source: frontmatterFixesTier || familyPin !== null ? 'frontmatter' : 'routing',
       domain_used: cell.domain_used,
       phase: phaseField,
       reason: buildReason(reasonParts),
@@ -328,17 +376,18 @@ function resolveRoute(opts) {
 
   // ── Legacy path — byte-identical to readTierChain (engine field additive) ──
   const legacy = readTierChain(effectiveTier, cwd);
-  const chain = legacy.map((m) => ({
+  let chain = legacy.map((m) => ({
     id: m.id,
     alias: m.alias,
     mapped: m.mapped,
     engine: modelFamily(m.id),
   }));
+  if (familyPin !== null) chain = applyFamilyPin(chain, familyPin, frontmatterWorker, reasonParts);
   const fallback = validateFallback(null, effectiveTier, cwd, reasonParts);
   return {
     chain,
     fallback,
-    source: frontmatterFixesTier ? 'frontmatter' : 'tier_models',
+    source: frontmatterFixesTier || familyPin !== null ? 'frontmatter' : 'tier_models',
     domain_used: 'default',
     phase: phaseField,
     reason: buildReason(reasonParts),
@@ -355,6 +404,9 @@ module.exports = {
   validateFallback,
   buildReason,
   nextInChain,
+  workerFamilyToken,
+  applyFamilyPin,
+  WORKER_FAMILY_TOKENS,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -421,6 +473,10 @@ const REASON_TEXT = {
   tier_models: 'cadeia legada tier_models (sem routing, ou célula+default ausentes)',
   'frontmatter-tier': 'tier fixado no frontmatter venceu o rótulo de source',
   'frontmatter-worker': 'worker fixado no frontmatter venceu a precedência',
+  'frontmatter-worker-family':
+    'worker do frontmatter nomeia só a família (engine) — a cadeia continua resolvendo pelo tier e é filtrada por essa família',
+  'frontmatter-worker-family-unmatched':
+    'nenhum membro da cadeia do tier pertence à família pinada — degradou para a cadeia literal do token (comportamento pré-fix)',
   'routing-parse-error':
     'anomalia de parse no bloco routing: — degradou para a cadeia legada',
   'phase-not-routable':

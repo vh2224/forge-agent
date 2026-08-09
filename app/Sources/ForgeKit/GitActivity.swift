@@ -82,6 +82,7 @@ public enum GitActivity {
         "build/**",
         ".next/**",
         ".gsd/**",
+        "node_modules/**",
     ]
 
     /// Caller-resolved value wins; empty or absent falls back to the engine
@@ -209,16 +210,26 @@ public enum GitActivity {
     /// deliberately not a general matcher, because anything it accepts becomes
     /// a promise. Semantics, and nothing else:
     ///
-    ///   - trailing `/**` → matches the directory prefix (`dist/**` matches
-    ///     `dist/a/b.js`, and does NOT match `mydist/a.js`);
+    ///   - trailing `/**` → matches the directory as a PATH SEGMENT at ANY
+    ///     depth (`dist/**` matches `dist/a/b.js` and `packages/app/dist/a.js`),
+    ///     and never as a substring (it does NOT match `mydist/a.js` nor
+    ///     `a/mydist/b.js`);
     ///   - a pattern with no `/` → matched against the BASENAME, so
     ///     `package-lock.json` is ignored in any directory;
     ///   - `*` matches within one segment only (never across `/`).
+    ///
+    /// The depth rule is not a convenience: it is the semantics
+    /// `agents/forge-completer.md` (S03 review R24) and
+    /// `isInstallArtifactPath` in `scripts/forge-surgical-reset.js` already
+    /// speak, and this matcher was the one copy still anchored at the root.
+    /// A vendored `packages/app/node_modules/**` counted thousands of lines
+    /// into the metrics panel — a wrong number that nobody reads as wrong.
     public enum Glob {
         public static func matches(_ pattern: String, _ path: String) -> Bool {
             if pattern.hasSuffix("/**") {
-                let dir = String(pattern.dropLast(2))  // keep the trailing "/"
-                return path.hasPrefix(dir)
+                let dir = String(pattern.dropLast(3))  // drop "/**", keep the dir
+                guard !dir.isEmpty else { return false }
+                return path.hasPrefix(dir + "/") || path.contains("/" + dir + "/")
             }
             let subject = pattern.contains("/")
                 ? path

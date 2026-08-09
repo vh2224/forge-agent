@@ -1,5 +1,15 @@
 # PR brief — Review cross-model (Codex/xLLM) não funciona em working copy SVN
 
+> **📜 DOCUMENTO HISTÓRICO (nota acrescentada em 2026-08-06, M018/S05).** O corpo abaixo é a medição
+> original e **não foi reescrito** — vale como registro do que foi observado em 2026-07-15. O que mudou
+> desde então: o **transporte** que ele descreve (`codex exec`, invocado por argv) foi **aposentado** em
+> M018/S05, e o engine `codex` do adapter passou a falar o protocolo `codex app-server` por JSONL.
+> Consequência direta para a **Issue 2** deste brief: `--skip-git-repo-check` era um **argumento de
+> `codex exec`**, e o app-server não tem argv que o carregue — a S01 mediu o app-server **completando um
+> turn num cwd não-git sem nenhum opt-out**, então o problema descrito na Issue 2 deixou de existir
+> junto com o transporte, e não por alguma correção nova. A **Issue 1** (aquisição do diff em SVN) é
+> ortogonal ao transporte e permanece resolvida como o corpo descreve.
+
 > **Status:** 🟢 **resolvido** (2026-07-15). Descoberto ao ativar o challenger Codex no store de referência
 > (working copy **SVN**, sem `.git`). **Issue 2 (adaptador `--skip-git-repo-check`) foi mergeado na PR #42.**
 > **Issue 1 (diff SVN) foi corrigido** (`feat/review-svn-diff`): `Step 1` do

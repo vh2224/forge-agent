@@ -40,7 +40,7 @@ selecionado não é criado, lido nem escrito.
 ## Atualização e rollback
 
 `--update`/`-Update` copia os arquivos gerenciados atuais para
-`<FORGE_HOME>/backups/backup-4.6.0-<timestamp>` antes de substituir. As
+`<FORGE_HOME>/backups/backup-4.8.0-<timestamp>` antes de substituir. As
 preferências existentes, `.gsd`, hooks e arquivos não gerenciados ficam fora
 do conjunto gerenciado. Uma preferência legada em
 `<claude-home>/forge-agent-prefs.jsonc` é lida como migração não destrutiva

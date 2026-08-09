@@ -11,7 +11,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
+const { hasStructuredMustHaves, parseMustHaves, resolveCapability } = require('./forge-must-haves.js');
 
 const SCRIPT = path.join(__dirname, 'forge-must-haves.js');
 // Temp dir for CLI --check tests
@@ -723,6 +723,266 @@ expected_output: []`));
     assertEq(result.legacy, false);
     assert(result.errors.length > 0, 'expected errors array');
   }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Nested top-level keys (regression — real dogfood plans)
+//
+// Measured defect: 2 of 3 sidecar-generated plans in a single real run indented
+// `expected_output`/`writes`/`depends` under `must_haves:`. forge-code-dir.js saw
+// `paths_considered: 0` and refused the sidecar; this validator stamped all three
+// `valid: true`. The fixtures below are those three plans, copied byte-for-byte.
+//
+// This axis must bite in BOTH directions: the flat plan stays valid, the nested
+// ones fail. A guard that only rejects is as blind as one that only accepts.
+// ─────────────────────────────────────────────────────────────
+
+const FIXTURES = path.join(__dirname, 'fixtures', 'nested-keys');
+
+function checkFixture(name) {
+  const p = path.join(FIXTURES, name);
+  try {
+    return { exit: 0, result: JSON.parse(execFileSync('node', [SCRIPT, '--check', p], { encoding: 'utf8' })) };
+  } catch (e) {
+    if (e.stdout === undefined) throw e;
+    return { exit: e.status, result: JSON.parse(e.stdout.toString()) };
+  }
+}
+
+test('nested-keys: real S01 plan (keys at column 0) stays valid — exit 0', () => {
+  const { exit, result } = checkFixture('s01-top-level-PLAN.md');
+  assertEq(exit, 0, 'flat plan must still exit 0');
+  assertEq(result.valid, true);
+  assertEq(result.legacy, false);
+});
+
+test('nested-keys: real S01 plan still yields its expected_output paths', () => {
+  // Guards the "only rejects" failure mode at the parse level, not just the exit code:
+  // a flat plan must keep producing the paths downstream consumers read.
+  const parsed = parseMustHaves(fs.readFileSync(path.join(FIXTURES, 's01-top-level-PLAN.md'), 'utf8'));
+  assert(parsed.expected_output.length > 0, 'flat plan lost its expected_output');
+});
+
+for (const fixture of ['s02-nested-PLAN.md', 's03-nested-PLAN.md']) {
+  test(`nested-keys: real ${fixture.slice(0, 3).toUpperCase()} plan (keys indented) → valid:false, exit 2`, () => {
+    const { exit, result } = checkFixture(fixture);
+    assertEq(exit, 2, 'nested plan must exit 2');
+    assertEq(result.valid, false);
+    assertEq(result.legacy, false);
+    assert(/nested-top-level-key/.test(result.errors[0]), `error must be named: ${result.errors[0]}`);
+  });
+
+  test(`nested-keys: ${fixture} error names every offending key and where it belongs`, () => {
+    const { result } = checkFixture(fixture);
+    const err = result.errors[0];
+    for (const k of ['expected_output', 'writes', 'depends']) {
+      assert(err.includes(k), `error must name \`${k}\`: ${err}`);
+    }
+    assert(/column 0/.test(err), `error must state the fix: ${err}`);
+    assert(/frontmatter line \d/.test(err), `error must locate the offence: ${err}`);
+  });
+}
+
+test('nested-keys: each forbidden key trips the guard on its own', () => {
+  for (const key of ['expected_output', 'writes', 'depends']) {
+    const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+  ${key}: []`);
+    let threw = null;
+    try { parseMustHaves(plan); } catch (e) { threw = e.message; }
+    assert(threw !== null, `nested \`${key}\` was accepted`);
+    assert(threw.includes('nested-top-level-key') && threw.includes(key), `wrong error for ${key}: ${threw}`);
+  }
+});
+
+test('nested-keys: guard does not fire on schema fields inside sequence items', () => {
+  // `from`/`to`/`via`/`path` live legitimately under must_haves. A guard that
+  // matched any indented key would reject every well-formed plan in the repo.
+  const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts:
+    - path: "src/a.ts"
+      provides: "thing"
+      min_lines: 5
+  key_links:
+    - from: "src/a.ts"
+      to: "src/b.ts"
+      via: "import"
+expected_output:
+  - src/a.ts
+writes:
+  - src/a.ts
+depends: []`);
+  const parsed = parseMustHaves(plan);
+  assertEq(parsed.expected_output.length, 1);
+  assertEq(parsed.artifacts.length, 1);
+});
+
+// ── Review objections R1/R2/R3 — conceded, fixed, guarded ────────────────────
+
+test('R1: blank line inside must_haves does not end the scan (nested writes still caught)', () => {
+  // A blank line does not terminate a YAML mapping. The original boundary treated
+  // it as the end, so one blank line hid a nested `writes:` from both the guard
+  // and the parser and the plan validated clean.
+  const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+
+  writes:
+    - "src/a.ts"
+expected_output: []`);
+  let threw = null;
+  try { parseMustHaves(plan); } catch (e) { threw = e.message; }
+  assert(threw !== null, 'nested `writes:` behind a blank line was accepted');
+  assert(threw.includes('nested-top-level-key') && threw.includes('writes'), `wrong error: ${threw}`);
+});
+
+test('R1: a comment line inside must_haves does not end the scan either', () => {
+  const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+# a comment at column 0
+  depends: []
+expected_output: []`);
+  let threw = null;
+  try { parseMustHaves(plan); } catch (e) { threw = e.message; }
+  assert(threw !== null, 'nested `depends:` behind a comment line was accepted');
+  assert(threw.includes('nested-top-level-key'), `wrong error: ${threw}`);
+});
+
+test('R1 (accept side): a blank line inside a LEGITIMATE must_haves keeps its content', () => {
+  // The boundary fix must not only reject more — it must read more. Under the old
+  // rule everything after the blank line was dropped, so `key_links` went missing
+  // and this well-formed plan failed for the wrong reason.
+  const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+
+  artifacts:
+    - path: "src/a.ts"
+      provides: "thing"
+      min_lines: 5
+
+  key_links:
+    - from: "src/a.ts"
+      to: "src/b.ts"
+      via: "import"
+expected_output:
+  - src/a.ts`);
+  const parsed = parseMustHaves(plan);
+  assertEq(parsed.truths.length, 1, 'truths lost');
+  assertEq(parsed.artifacts.length, 1, 'artifacts lost across the blank line');
+  assertEq(parsed.key_links.length, 1, 'key_links lost across the blank line');
+  assertEq(parsed.expected_output.length, 1, 'expected_output lost');
+});
+
+test('R1: a non-blank column-0 line still ends the block', () => {
+  // The boundary was loosened for blanks/comments only. A real top-level key must
+  // still terminate must_haves, or every sibling below it would be scanned as nested.
+  const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output:
+  - src/a.ts
+writes:
+  - src/a.ts
+depends: []
+capability: networked
+repo: api`);
+  const parsed = parseMustHaves(plan);
+  assertEq(parsed.expected_output.length, 1);
+  assertEq(parsed.capability, 'networked');
+});
+
+test('R2: every key in NESTED_SIBLING_KEYS trips the guard when nested', () => {
+  const keys = ['expected_output', 'writes', 'depends', 'capability', 'repo',
+                'domain', 'tier', 'effort', 'worker', 'tag'];
+  for (const key of keys) {
+    const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+  ${key}: somevalue`);
+    let threw = null;
+    try { parseMustHaves(plan); } catch (e) { threw = e.message; }
+    assert(threw !== null, `nested \`${key}\` was accepted`);
+    assert(threw.includes('nested-top-level-key') && threw.includes(key), `wrong error for ${key}: ${threw}`);
+  }
+});
+
+test('R2: nested capability no longer resolves to a silent workspace sandbox', () => {
+  // The consequence that made this more than a formatting nit: a genuinely
+  // networked task validated clean, ran in `workspace`, and emitted no
+  // capability-unrecognized event.
+  const plan = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+  capability: networked
+expected_output: []`);
+  let threw = null;
+  try { parseMustHaves(plan); } catch (e) { threw = e.message; }
+  assert(threw !== null && threw.includes('capability'), `nested capability accepted: ${threw}`);
+});
+
+test('R3: `capability: null` with an inline comment agrees across both routes', () => {
+  // The null check ran before the comment strip and was not repeated after, so the
+  // gate threw while the adapter resolved cleanly.
+  const plan = mkPlan(`capability: null # legacy plan
+must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output: []`);
+  const parsed = parseMustHaves(plan);            // must not throw
+  assertEq(parsed.capability, null, 'gate route');
+  const resolved = resolveCapability(plan);
+  assertEq(resolved.capability, 'workspace', 'adapter route capability');
+  assertEq(resolved.declared, null, 'adapter route declared');
+  assertEq(resolved.event, null, 'adapter must not emit capability-unrecognized');
+});
+
+test('R3: a real bad capability still throws (the fix did not swallow the enum)', () => {
+  const plan = mkPlan(`capability: bogus # nope
+must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output: []`);
+  let threw = null;
+  try { parseMustHaves(plan); } catch (e) { threw = e.message; }
+  assert(threw !== null && /must be one of/.test(threw), `bogus capability accepted: ${threw}`);
+});
+
+test('nested-keys: a legacy plan is untouched by the guard', () => {
+  // Legacy plans never reach parseMustHaves — the CLI short-circuits before it.
+  // Asserted at the CLI, which is where the executor's step 1a reads the verdict.
+  const planPath = path.join(ROOT, 'legacy-nested.md');
+  fs.writeFileSync(planPath, `---
+id: T01
+---
+
+## Must-Haves
+- expected_output: whatever, free text
+`);
+  const out = execFileSync('node', [SCRIPT, '--check', planPath], { encoding: 'utf8' });
+  const result = JSON.parse(out);
+  assertEq(result.legacy, true);
+  assertEq(result.valid, true);
 });
 
 // ─────────────────────────────────────────────────────────────

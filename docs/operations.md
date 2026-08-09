@@ -92,7 +92,7 @@ em `FORGE_HOME`, configuração do operador, `.gsd` do projeto e fontes legadas
 Claude 3.1.4 permanecem byte-idênticas por padrão; a projeção legada sem
 marcadores é reportada como conflito. Para migrá-la explicitamente, use
 `--migrate-legacy`, que cria backup antes de substituir os arquivos canônicos.
-O próximo pacote proposto é 4.6.0 (baseado em v4.5.1). Para conferir o pacote de release:
+O próximo pacote proposto é 4.8.0 (baseado em v4.7.0). Para conferir o pacote de release:
 
 ```powershell
 node scripts/forge-package.js --output '.\forge-release' --json

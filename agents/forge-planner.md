@@ -143,6 +143,34 @@ expected_output:
 - `artifacts[].path` + `min_lines` + `provides` are REQUIRED per entry; `stub_patterns` is OPTIONAL.
 - `key_links[]` REQUIRES `from`, `to`, `via`.
 - `expected_output` is a **top-level sibling** of `must_haves` (not nested inside it) — a flat array of path strings.
+
+**Indentation is part of the contract — the single most common way to emit an invalid plan.** `must_haves:` has exactly **three** children: `truths`, `artifacts`, `key_links`. **Every other key you write sits at column 0**, as a sibling of `must_haves:` — that includes `expected_output`, `depends`, `writes`, and also `capability`, `repo`, `domain`, `tier`, `effort`, `worker`, `tag`. Nesting any of them is rejected with a named `nested-top-level-key` error.
+
+```yaml
+# RIGHT — four sibling keys at column 0
+must_haves:
+  truths: ["..."]
+  artifacts: [...]
+  key_links: [...]
+expected_output:
+  - src/a.ts
+depends: []
+writes:
+  - src/a.ts
+```
+
+```yaml
+# WRONG — measured on 2 of 3 real plans in a single dogfood run
+must_haves:
+  truths: ["..."]
+  expected_output:      # ← indented: invisible to every reader
+    - src/a.ts
+  depends: []           # ← indented
+  writes:               # ← indented
+    - src/a.ts
+```
+
+Why this is fatal rather than cosmetic: every consumer matches these keys **anchored at column 0**. An indented `expected_output:` silently parses as the empty array (the `complete-slice` file audit then compares against nothing), and an indented `writes:` makes `forge-code-dir.js` report `paths_considered: 0` → `undeclared` → the task is refused its routed engine and falls back, with nothing in the chain saying why. `scripts/forge-must-haves.js` now rejects this with a named `nested-top-level-key` error, so a plan with this shape **blocks the task** — it does not degrade quietly.
 - **Unconditional** — emit the block on every net-new T##-PLAN, even when artifacts are minor. The executor's verification gate (`scripts/forge-must-haves.js`) parses and validates this shape; a missing or malformed block causes the gate to fail.
 - `domain` is **optional** (unlike the fields above). The prompt header carries the list of valid keys as `ROUTING_DOMAINS: <comma-separated list>` (or `(none — omit domain:)`) — judge the domain from the actual nature of the task's work and emit **only** a key from that list (open-set — you do not invent new keys, you only reference ones already present in that list). If that list is absent or `(none)`, or the task doesn't clearly belong to one of its keys, **omit the field** — it resolves to `default` downstream with no error, never a failure. **No keyword auto-detection**: judge the domain from the actual nature of the task's work, don't pattern-match on filenames/strings. Additive: T##-PLANs without `domain:` remain fully valid — `forge-must-haves.js` accepts its absence.
 - `repo` is optional and additive. When the injected `WORKSPACE_REPOS` list names multiple repos, emit only one of those names; never invent a repo. Omit `repo:` when the injected repo list says single repo or is absent. Plans without it remain valid and use legacy attribution/probing.
@@ -174,9 +202,74 @@ effort: low | medium | high | xhigh | max  # how hard it reasons (optional; defa
 
 **Omit both fields** for the common case — a routine `standard` task at the unit-type default effort (`low`). Only add them when the task deviates from routine. Emit them on the same frontmatter block as `must_haves`/`depends`/`writes`.
 
+## Capability Hints (sandbox — judge per task)
+
+`capability` is an optional, closed-set sandbox declaration for the task. Emit exactly one
+of the three values below when the task needs to make its execution posture explicit:
+
+| Capability | When to emit | Observable boundary |
+|---|---|---|
+| `readonly` | A task that only reads or analyzes | The sidecar creates or modifies no files |
+| `workspace` | **Default** for ordinary implementation work | Writes in the working directory, with no network; byte-identical to today's behavior |
+| `networked` | A task that genuinely needs an install or fetch such as `npm install`, `curl`, or a clone | Network access is an explicit per-task opt-in |
+
+**Where it goes:** `capability:` is a **top-level key of the `T##-PLAN.md` frontmatter**, a
+sibling of `must_haves:`, `depends:`, `writes:`, `tier:`, and `effort:` — exactly like `domain:`
+and `repo:`. Never nest it *inside* `must_haves:`: the resolver only reads the top level, so a
+nested declaration produces an inert sandbox and emits **no** event to notice it by.
+
+A plan without `capability:` resolves to `workspace`, preserving compatibility with legacy
+plans. The field is independent of `tier:`, `effort:`, and `domain:`: judge it from what the
+task touches and the operations it requires, not from its complexity or routing domain.
+
+The set is closed and gate-validated. Emit only `readonly`, `workspace`, or `networked`;
+there is no fourth catch-all value. This is intentionally unlike `domain:`, whose valid
+keys come from the prompt's open-set routing configuration. Do not invent a capability or
+try to use a general-purpose label as a substitute for the three calibrated postures.
+
+`networked` is deliberate opt-in by task and must never become a blanket milestone switch.
+Per decision W6, `networked` does not require a worktree in M018: protection comes from the
+reset/ignore rule in S03/T03. Prefer isolation in a worktree when one is available, but do
+not reject a valid networked plan solely because it does not declare one.
+
+When choosing between `readonly` and `workspace`, look at the sidecar's actual file effects.
+Reading source, inspecting status, and reporting findings are `readonly`; generating a
+report or applying a code/documentation change is `workspace`. A task that both reads and
+writes uses `workspace`. A task that writes and also needs a fetch uses `networked`.
+
+## Worker Engine — decide it in the frontmatter, never only in prose
+
+`worker:` is the **only** place an engine decision becomes real. If you conclude that a task
+must run on a specific engine, you **MUST** emit that conclusion as a top-level frontmatter
+field of the `T##-PLAN.md`:
+
+```yaml
+worker: claude          # claude | codex   (family token — pins the ENGINE only)
+```
+
+A family token pins the engine and **leaves `tier:`/`effort:` resolution untouched** — the
+model still comes from the tier. A concrete model id (`gpt-5.6-terra`) pins the model itself.
+Omit the field for the common case and let `routing:`/`workers:` decide.
+
+**Prose is inert.** A `key_decision` reading *"T04/T05 run on Claude only, never the sidecar"*
+changes **nothing**: the resolver reads frontmatter, not narrative. Measured (M018/S01): exactly
+that decision was recorded, neither plan emitted `worker:`, and both tasks were routed to a
+sidecar model — the operator had to preempt the dispatch by hand. Record the reasoning in
+`key_decisions` **and** emit the field; the field is what executes.
+
+**When `worker: claude` is mandatory** — any task that cannot be done by the codex sidecar
+under its own contract:
+
+| Task needs | Why the sidecar cannot |
+|---|---|
+| writing/creating `.gsd/**` | contractually barred (orchestrator-owned; see Parallelism Guidance below) |
+| network access | sandboxed by default (`capability: networked` is the *sandbox* axis, not the engine axis) |
+| real multi-turn interaction, `Agent`/`AskUserQuestion`/`Skill` | the sidecar is a single non-interactive run |
+| git write operations | the sidecar never commits (locked) |
+
 ## Parallelism Guidance
 
-Plans routable to the codex sidecar must not include steps that create/modify `.gsd/**` — those are orchestrator-owned (TASK-004); a sidecar-refused `.gsd` step becomes an `env_constraint`, not a failure.
+Plans routable to the codex sidecar must not include steps that create/modify `.gsd/**` — those are orchestrator-owned (TASK-004); a sidecar-refused `.gsd` step becomes an `env_constraint`, not a failure. A task that genuinely must write `.gsd/**` is therefore not routable: emit `worker: claude` on it (see § Worker Engine above) rather than leaving the routing to discover the impossibility at dispatch time.
 
 When decomposing a slice into tasks, explicitly think about which tasks **can** run concurrently. Two tasks are safely parallel when:
 

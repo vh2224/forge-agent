@@ -1118,9 +1118,68 @@ test("separa a frase-título do resto") {
     assertTrue("**".changelogLead == nil, "negrito vazio não conta")
 }
 
-test("seção desconhecida cai em Outros") {
-    assertEqual(ReleaseSection.Kind.from("Deprecated"), .other)
+test("seção desconhecida carrega o próprio heading, não um balde") {
+    assertEqual(ReleaseSection.Kind.from("Deprecated"), .other("Deprecated"))
     assertEqual(ReleaseSection.Kind.from("Fixed"), .fixed)
+    // Duas desconhecidas DIFERENTES têm de ter ids diferentes: era aqui que a
+    // colisão nascia — ambas viravam `.other`, id "Outros", e o `ForEach` da
+    // tela recebia dois ids iguais sem que nada avisasse.
+    assertFalse(ReleaseSection.Kind.from("Breaking").key == ReleaseSection.Kind.from("Notes").key,
+                "dois headings distintos com a mesma identidade voltam a colidir no ForEach")
+    // `key` é estrutural e `label` é exibição: keyar a linha pelo texto
+    // traduzido faria a identidade depender do idioma da UI.
+    assertEqual(ReleaseSection.Kind.fixed.key, "Fixed")
+    assertEqual(ReleaseSection.Kind.fixed.label, "Correções")
+    assertEqual(ReleaseSection.Kind.from("  Breaking  ").label, "Breaking")
+}
+
+test("o label de uma seção desconhecida é cortado para caber na caption") {
+    // A tela faz `label.uppercased()` num caption; dois headings deste arquivo
+    // têm 85 caracteres. O corte é de EXIBIÇÃO — `key` guarda o heading inteiro,
+    // senão o corte reintroduziria colisão entre dois `Architecture (…)`.
+    let longo = ReleaseSection.Kind.from("Architecture (M004 decisions D-M004-1..12 — see .gsd/)")
+    assertEqual(longo.label, "Architecture")
+    assertEqual(longo.key, "Architecture (M004 decisions D-M004-1..12 — see .gsd/)")
+    assertFalse(longo.key == ReleaseSection.Kind.from("Architecture (M005 decisions)").key,
+                "o corte de exibição não pode fundir duas seções distintas")
+    assertEqual(ReleaseSection.Kind.from("Known, not fixed").label, "Known, not fixed",
+                "heading curto sem separador não é cortado")
+    // Heading vazio degrada para o balde antigo em vez de virar um label em branco.
+    assertEqual(ReleaseSection.Kind.from("   ").label, "Outros")
+}
+
+test("o detector de seção morde: dois headings iguais na mesma release colidem") {
+    // Sem este caso o teste acima prova que o arquivo está limpo, não que a
+    // sujeira seria vista.
+    let md = """
+    ## v9.9.9 — duas seções com o mesmo heading
+
+    ### Breaking
+
+    - primeira
+
+    ### Breaking
+
+    - segunda
+    """
+    let sections = ChangelogParser.parse(md)[0].sections
+    assertEqual(sections.count, 2, "as duas seções têm de chegar ao ForEach")
+    assertEqual(sections[0].id, sections[1].id, "é exatamente esta igualdade que o teste acima proíbe")
+    // E o contraste: headings distintos, ids distintos — o que antes NÃO valia.
+    let ok = """
+    ## v9.9.8 — duas seções distintas fora do enum
+
+    ### Breaking
+
+    - primeira
+
+    ### Notes
+
+    - segunda
+    """
+    let distintas = ChangelogParser.parse(ok)[0].sections
+    assertFalse(distintas[0].id == distintas[1].id,
+                "`Breaking` e `Notes` compartilhavam o id 'Outros' — era a colisão real")
 }
 
 test("changelog vazio não quebra") {
@@ -1176,6 +1235,31 @@ test("o CHANGELOG.md real tem no máximo um `## Unreleased` (D36)") {
     assertLessOrEqual(unreleased.count, 1,
                       "\(unreleased.count) entradas `Unreleased` em CHANGELOG.md — todas "
                       + "colidem no mesmo id. Feche a antiga com a versão em que ela saiu")
+}
+
+test("nenhuma release do CHANGELOG.md real tem seções com id duplicado") {
+    // Mesma classe da D36, um nível abaixo: `ReleaseSection.id` alimenta o
+    // `ForEach` interno do card. Oito releases do arquivo estavam nesse estado
+    // enquanto TODO heading fora do enum compartilhava o id "Outros" — D36
+    // guardava o id da release e ninguém guardava o da seção. O caso sintético
+    // logo abaixo prova que este cálculo morde.
+    let text = (try? String(contentsOfFile: repoChangelogPath, encoding: .utf8)) ?? ""
+    let releases = ChangelogParser.parse(text)
+    assertGreater(releases.count, 10,
+                  "o CHANGELOG real não foi lido — este teste passaria por vacuidade")
+    var offenders: [String] = []
+    var sectionsSeen = 0
+    for r in releases {
+        sectionsSeen += r.sections.count
+        var seen: [String: Int] = [:]
+        for s in r.sections { seen[s.id, default: 0] += 1 }
+        for (id, n) in seen where n > 1 { offenders.append("\(r.version): \(id) (\(n)x)") }
+    }
+    assertGreater(sectionsSeen, 10,
+                  "nenhuma seção lida — o formato mudou e o invariante parou de medir")
+    assertTrue(offenders.isEmpty,
+               "seções com id repetido: \(offenders.sorted().joined(separator: ", ")) — dois ids "
+               + "iguais num ForEach é comportamento indefinido. Renomeie o heading repetido")
 }
 
 test("o detector morde: duas entradas Unreleased dão dois ids iguais") {
@@ -3084,10 +3168,27 @@ test("linesTouched soma só o que está fora dos ignore-globs") {
 
 test("Glob fala exatamente o vocabulário da lista default") {
     assertTrue(GitActivity.Glob.matches(".gsd/**", ".gsd/forge/events.jsonl"),
-               "sufixo /** casa o prefixo de diretório em qualquer profundidade")
+               "sufixo /** casa abaixo do diretório na raiz")
     assertFalse(GitActivity.Glob.matches("dist/**", "mydist/a.js"),
                 "dist/** é um diretório, não um prefixo de nome — mydist/ não é dist/")
     assertTrue(GitActivity.Glob.matches("dist/**", "dist/a/b.js"))
+
+    // A regra de profundidade, exercitada onde o comentário antigo dizia que
+    // era exercitada e não era: o diretório NÃO na raiz. Sem estes casos o
+    // matcher ancorado na raiz passava no teste que afirmava o contrário.
+    assertTrue(GitActivity.Glob.matches("node_modules/**", "packages/app/node_modules/x.js"),
+               "/** casa o segmento em qualquer profundidade — node_modules aninhado de monorepo")
+    assertTrue(GitActivity.Glob.matches("dist/**", "packages/app/dist/a.js"),
+               "a regra é geral, não só node_modules")
+    assertTrue(GitActivity.Glob.matches(".gsd/**", "sub/repo/.gsd/forge/events.jsonl"))
+    // O lado negativo do alargamento: segmento, jamais substring.
+    assertFalse(GitActivity.Glob.matches("node_modules/**", "packages/app/my_node_modules/x.js"),
+                "profundidade não pode virar substring — my_node_modules não é node_modules")
+    assertFalse(GitActivity.Glob.matches("dist/**", "a/mydist/b.js"),
+                "mydist aninhado continua fora, como mydist na raiz")
+    assertFalse(GitActivity.Glob.matches("dist/**", "a/distal/b.js"))
+    assertFalse(GitActivity.Glob.matches("dist/**", "src/a.js"),
+                "um matcher que casa tudo é tão errado quanto um que casa pouco")
     assertTrue(GitActivity.Glob.matches("package-lock.json", "app/nested/package-lock.json"),
                "padrão sem / casa o basename em qualquer diretório")
     assertTrue(GitActivity.Glob.matches("package-lock.json", "package-lock.json"))
@@ -3105,8 +3206,9 @@ test("resolveIgnoreList: caller manda; ausente ou vazio cai no default do engine
                 "lista vazia da cascata significa 'chave não definida', como no completer")
     assertEqual(GitActivity.resolveIgnoreList(prefValue: ["só-isto"]), ["só-isto"],
                 "valor resolvido pelo caller ganha")
-    assertEqual(GitActivity.defaultIgnoreList.count, 7,
-                "os 7 defaults do engine — divergir de agents/forge-completer.md é o que "
+    assertEqual(GitActivity.defaultIgnoreList.count, 8,
+                "os 8 defaults do engine (inclui node_modules/** desde TASK-repair S03-T03) — "
+                + "divergir de agents/forge-completer.md é o que "
                 + "scripts/forge-app-progress.test.js existe para pegar")
 }
 

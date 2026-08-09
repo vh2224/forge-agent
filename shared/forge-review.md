@@ -77,14 +77,14 @@ CHALLENGER_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.o
 ADVOCATE_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.advocateModel||'')}catch(e){process.stdout.write('')}})")
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-model-alias.js ] && echo scripts || echo "$HOME/.claude/scripts")
 ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")
-# Adapter engine for the external challenger: codex → `codex exec`, gemini → `agy --print` (Antigravity CLI)
+# Adapter engine for the external challenger: codex → `codex app-server` (protocolo JSONL), gemini → `agy --print` (Antigravity CLI)
 XLLM_ENGINE=$([ "$CHALLENGER" = "gemini" ] && echo agy || echo codex)
 ```
 
 `$CHALLENGER`, `$CHALLENGER_MODEL`, `$ADVOCATE_MODEL` and `$XLLM_ENGINE` are derived immediately after `$REVIEW_CFG` (same JSON-aware pattern as the `engine==workflow` precedence check below) so Steps 2/3/4's `[ -n "$CHALLENGER_MODEL" ]` / `[ -n "$ADVOCATE_ALIAS" ]` guards have a value to test — never left unassigned.
 
 **Prefs read here:**
-- `challenger` — whitelist `claude|codex|gemini`, default `claude`. `claude` (or any invalid value → whitelist fallback) runs the in-context `forge-reviewer`/`forge-advocate` agents unchanged. `codex` and `gemini` route the challenge (Step 2) and rebuttal (Step 4) through the `scripts/forge-xllm.js` adapter — `codex` = GPT via `codex exec` (`--engine codex`), `gemini` = Gemini via the Antigravity CLI `agy --print` (`--engine agy`).
+- `challenger` — whitelist `claude|codex|gemini`, default `claude`. `claude` (or any invalid value → whitelist fallback) runs the in-context `forge-reviewer`/`forge-advocate` agents unchanged. `codex` and `gemini` route the challenge (Step 2) and rebuttal (Step 4) through the `scripts/forge-xllm.js` adapter — `codex` = GPT via the `codex app-server` protocol (`--engine codex` — the adapter opens one app-server turn per invocation; the argv-based transport it used before was retired in M018 S05), `gemini` = Gemini via the Antigravity CLI `agy --print` (`--engine agy`).
 - `challengerModel` — default `null` (unset). When set, it is forwarded to the adapter as `--model {challenger_model}`; when `null`, `--model` is omitted and the CLI's default model is used. Only meaningful when `challenger != claude`. Codex takes model ids (e.g. `gpt-5.2-codex`); agy takes model **labels which may contain spaces** (e.g. `Gemini 3.1 Pro (High)` — see `agy models`), so the value is read to end-of-line (`#` starts a comment; surrounding quotes are stripped) and must always be expanded quoted (`--model "$CHALLENGER_MODEL"`).
 - `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Resolved to a dispatch alias via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id with no known alias resolves to an empty string; Step 3 then omits `model:` entirely (frontmatter governs) and echoes a warning — degradation is documented, not silent.
 - Prefs parsing (block capture, `[ \t]` class, EOF-safe boundaries) now lives entirely in `scripts/forge-prefs.js` (S01); Step 0 only extracts resolved knobs off `.prefs` and applies the whitelist/clamp fallbacks above. The CLI resolves values without defaulting them — the defaults here are the review gate's own concern.
@@ -303,7 +303,7 @@ Rationale: o orquestrador é o **autor** do dispatch (e, no loop, do próprio c�
 
 **4. Política por modo.**
 
-- **`review-advocate-unavailable`** (Step 3 não pôde ser ouvido) — todas as objeções ficam `open` **cruas**, sem veredito fabricado, e o **Step 4 (rebuttal) é PULADO**: sem defesa não há contraditório, e forçar a réplica seria o challenger julgando a própria objeção. `MODE == interactive` → as objeções sobem ao humano pelo `AskUserQuestion` do Step 7b já existente, com a ressalva de adversarialidade reduzida escrita no artefato. `MODE == auto` → `ask_in_auto: defer` marca cada uma `**Decisão:** deferido → triagem no fim da milestone` (Step 9), sem pausar o loop.
+- **`review-advocate-unavailable`** (Step 3 não pôde ser ouvido — e **só depois** de a salvage do `DEFENSE_FILE` do Step 3 não render nenhum veredito; uma defesa truncada é recuperável, e recuperá-la não é fabricar) — todas as objeções ficam `open` **cruas**, sem veredito fabricado, e o **Step 4 (rebuttal) é PULADO**: sem defesa não há contraditório, e forçar a réplica seria o challenger julgando a própria objeção. `MODE == interactive` → as objeções sobem ao humano pelo `AskUserQuestion` do Step 7b já existente, com a ressalva de adversarialidade reduzida escrita no artefato. `MODE == auto` → `ask_in_auto: defer` marca cada uma `**Decisão:** deferido → triagem no fim da milestone` (Step 9), sem pausar o loop.
 - **`review-challenger-unavailable`** (Step 2 in-context não pôde rodar) — não há objeções para debater. Escrever um `{S##}-REVIEW.md` / `{TASK_ID}-REVIEW.md` **mínimo que registra a indisponibilidade** e seguir; o gate prossegue para `complete-slice` normalmente. **PROIBIDO** renderizar esse caminho como limpo — nada de `NO_FLAGS`, "Reviewer found nothing to challenge.", "no flags" ou artefato sem bloco de indisponibilidade: **ausência de review não é aprovação**.
 - **`review-rebuttal-unavailable`** (Step 4 in-context não pôde rodar, defesa já ouvida no Step 3) — a réplica nunca aconteceu, então nenhum veredito de challenger (`maintained`/`withdrawn`) pode ser fabricado pelo orquestrador. Os vereditos do advocate (`refuted`/`open`/`conceded`) são carregados adiante **exatamente como o advocate os deixou**, sem synthesis. `MODE == interactive` → sobem ao humano no `AskUserQuestion` do Step 7b, com a ressalva de que a rodada de réplica não ocorreu escrita no artefato. `MODE == auto` → `ask_in_auto: defer` marca cada item não-`conceded` `**Decisão:** deferido → triagem no fim da milestone` (Step 9), sem pausar o loop.
 
@@ -537,6 +537,21 @@ XLLM_DEFEND_EXIT=$?
 
 ### `advocate == 'claude'` (forge-advocate)
 
+**`DEFENSE_FILE` — crash rail for the defense (M018).** The advocate's whole deliverable is prose in
+its final message and it owns no artifact, so any truncation of that message loses **every** verdict
+at once — including the ones already formed. Measured six times in M018 (S05, S06, S07×3): the
+investigation happened, nothing arrived, and the orchestrator is forbidden from inventing verdicts in
+its place, so six objections went to triage raw. Before dispatching, define
+
+```bash
+DEFENSE_FILE="{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-DEFENSE.md"   # task boundary: .gsd/tasks/{TASK_ID}/{TASK_ID}-DEFENSE.md
+rm -f "$DEFENSE_FILE"   # a stale file from a previous attempt must never be read as this attempt's defense
+```
+
+and pass it in the prompt (`agents/forge-advocate.md § Persist as you go`): the advocate appends each
+verdict line as it settles it, so a cut costs at most one verdict instead of all of them. It is the
+advocate's **only** permitted write target.
+
 `ADVOCATE_ALIAS` was resolved in Step 0 from `advocate_model` (default `claude-fable-5`) via `scripts/forge-model-alias.js`. **The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literal sonnet/fable/opus/haiku is a violation detected post-hoc by `forge-review-audit.js`.** Pass `model:` only when the alias is non-empty:
 
 ```
@@ -544,7 +559,7 @@ if [ -n "$ADVOCATE_ALIAS" ]; then
 ```
 ```
 Agent({ subagent_type: 'forge-advocate', model: '{ADVOCATE_ALIAS}',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nOBJECTIONS:\n{OBJECTIONS}" })
+  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nDEFENSE_FILE: {DEFENSE_FILE}\nOBJECTIONS:\n{OBJECTIONS}" })
 ```
 ```
 else
@@ -552,7 +567,7 @@ else
 ```
 ```
 Agent({ subagent_type: 'forge-advocate',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nOBJECTIONS:\n{OBJECTIONS}" })
+  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nDEFENSE_FILE: {DEFENSE_FILE}\nOBJECTIONS:\n{OBJECTIONS}" })
 ```
 ```
 fi
@@ -562,7 +577,24 @@ fi
 
 **Scope of the override:** this `model:` override only applies to the `engine: agents` dispatch path above (Step 3). Under `engine: workflow`, the advocate runs as `agentType: 'forge-advocate'` inside the workflow script (see `## Engine workflow` below) — the script does not accept a per-call `model:` override, so the agent's own frontmatter (now Fable 5 by default) governs there instead.
 
-Capture per-objection verdicts: `R# → {refuted | conceded | open} + rationale`. A throw here → apply **§ Agent unavailability (review-agent-unavailable)** above: retry first (Retry Handler); if the advocate stays unavailable, emit `review-advocate-unavailable`, leave every objection `open` **cru** (no fabricated verdict), **skip Step 4 entirely**, and continue via the per-mode policy (interactive → human at Step 7b; auto → `defer` → Step 9).
+Capture per-objection verdicts: `R# → {refuted | conceded | open} + rationale`.
+
+**Salvage before declaring unavailability (LOCKED).** The advocate is `review-advocate-unavailable`
+only when **neither** channel carries a verdict. Order of consultation:
+
+1. **Inline `### Defense` block** in the returned message — authoritative when present.
+2. **`DEFENSE_FILE`** — read it whenever the inline block is missing, or carries fewer lines than the
+   number of objections, or the agent returned **only** the result block (the counts with no
+   attribution — the exact M018 signature). Verdicts present in the file are used as the advocate's
+   own; the file is the agent's own writing, so using it is **not** fabrication.
+3. Ids missing from both stay `open` **cru**, with the caveat rendered in the artifact. Only when
+   **zero** verdicts survive both channels do you emit `review-advocate-unavailable` and skip Step 4.
+
+A partial defense is still a defense: Step 4 runs on the ids that have one. Never reconcile the file
+against the result-block counts by guessing which objection a missing verdict belonged to — a
+scoreboard without attribution stays a scoreboard.
+
+A throw here → apply **§ Agent unavailability (review-agent-unavailable)** above: retry first (Retry Handler); if the advocate stays unavailable, emit `review-advocate-unavailable`, leave every objection `open` **cru** (no fabricated verdict), **skip Step 4 entirely**, and continue via the per-mode policy (interactive → human at Step 7b; auto → `defer` → Step 9).
 
 ## Step 4 — Rebuttal (rebuttal mode) × `rounds`
 
@@ -644,7 +676,7 @@ Replaces Steps 2–5 when `engine: workflow` and the `Workflow` tool is present 
 
 ```
 Workflow({ script: <contents of the fenced block below>,
-           args: { wd: "{WORKING_DIR}", unit: "complete-slice/{S##}", diffCmd: "{DIFF_CMD}", rounds: {rounds} } })
+           args: { wd: "{WORKING_DIR}", unit: "complete-slice/{S##}", diffCmd: "{DIFF_CMD}", defenseFile: "{DEFENSE_FILE}", rounds: {rounds} } })
 ```
 
 **Script constraints:**
@@ -655,6 +687,7 @@ Workflow({ script: <contents of the fenced block below>,
 - `rounds` always comes from `args` (never hardcoded).
 - Truth table is deterministic code **inside the script** (not prose).
 - Only the last rebuttal round's verdicts count.
+- `defenseFile` is forwarded to the advocate as the same crash rail Step 3 defines. The sandbox has no `fs`, so the script itself cannot read it back — when the Defense phase yields `null` (throw/truncation) and the script falls through to `defesa indisponivel … tratada como open`, the **orchestrator** applies **§ Step 3 → Salvage before declaring unavailability** to `DEFENSE_FILE` after the Workflow returns, and replaces the placeholder `open` verdicts with the advocate's own recovered lines. Ids absent from the file keep the placeholder.
 
 **The script:**
 
@@ -665,7 +698,7 @@ description: 'Review dialetico: challenge (forge-reviewer) -> defense (forge-adv
 phases: [{ title: 'Challenge' }, { title: 'Defense' }, { title: 'Rebuttal' }]
 }
 
-const { wd, unit, diffCmd, rounds } = args
+const { wd, unit, diffCmd, defenseFile, rounds } = args
 
 // inline por necessidade — o sandbox do Workflow não tem require/fs; Section 52 guarda o sync com shared/schemas/*.json
 const challengeSchema = {
@@ -718,7 +751,9 @@ const verdictSchema = function (allowed) {
 let defense = null
 try {
   defense = await agent(
-    'WORKING_DIR: ' + wd + '\nUNIT: ' + unit + '\nDIFF_CMD: ' + diffCmd + '\nExecute DIFF_CMD from INSIDE WORKING_DIR (cd to it first) — the diff target lives there, not in your default cwd.\nOBJECTIONS:\n' + objText,
+    'WORKING_DIR: ' + wd + '\nUNIT: ' + unit + '\nDIFF_CMD: ' + diffCmd +
+      (defenseFile ? '\nDEFENSE_FILE: ' + defenseFile : '') +
+      '\nExecute DIFF_CMD from INSIDE WORKING_DIR (cd to it first) — the diff target lives there, not in your default cwd.\nOBJECTIONS:\n' + objText,
     { label: 'Defense', phase: 'Defense', agentType: 'forge-advocate',
       schema: verdictSchema(['refuted', 'conceded', 'open']) })
 } catch (e) { defense = null }

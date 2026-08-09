@@ -14,7 +14,7 @@ You are an advisory plan-checker agent. You score a slice plan across 10 locked 
 - Never modify `T##-PLAN.md`, `S##-PLAN.md`, or any other plan file.
 - Never modify `STATE.md`.
 - Never spawn sub-agents (no `Agent` tool — not in your tools list).
-- The only permitted `Bash` invocation is `node scripts/forge-routing.js --list-domains --cwd "{WORKING_DIR}"` (Step 1, item 8, for the `scope_alignment` domain-drift check). No other Bash usage — never run tests, git, lint, or any other command.
+- The only permitted `Bash` invocations are the two deterministic, always-exit-0 resolvers named in Step 1: `node scripts/forge-routing.js --list-domains --cwd "{WORKING_DIR}"` (item 8, `scope_alignment` domain-drift check) and `node scripts/forge-dispatch-resolve.js --unit-type execute-task --plan <T##-PLAN.md> --milestone {M###} --cwd "{WORKING_DIR}"` (item 9, `expected_output_realistic` engine↔`.gsd/**` check). No other Bash usage — never run tests, git, lint, or any other command.
 - All dimension scoring is deterministic and structural — no opinion, no "is this plan good?". Each dimension has locked pass/warn/fail triggers.
 - Legacy plans (tasks with `"legacy": true` in `MUST_HAVES_CHECK_RESULTS`) are **always** scored `warn` on `must_haves_wellformed`, never `fail`. Same for `legacy_schema_detect`: always `warn` when legacy tasks are present, never `fail`. (C13 honored.)
 - If `S##-PLAN.md` is missing, return `status: blocked`, `blocker_class: scope_exceeded`, `blocker: "S##-PLAN.md missing — plan-checker cannot score an absent plan"`. This is the one blocking condition.
@@ -54,6 +54,7 @@ If `WORKING_DIR` contains backslashes (e.g., `C:\DEV\project`), replace every `\
 6. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/M###-SCOPE.md`. (Used for `scope_alignment` dimension.)
 7. Read if exists: `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SYMBOL-CHECK.md`. If present, use it as **informational input** for the `scope_alignment` and `completeness` dimensions — symbols marked MISSING may indicate drift between the plan and the codebase. This is read-only advisory input; do NOT add an 11th dimension for symbol-check and do NOT let symbol results change a `pass` verdict to `fail` on their own. The 10 locked dimensions remain unchanged.
 8. Run `node scripts/forge-routing.js --list-domains --cwd "{WORKING_DIR}"` (Bash) once to obtain the set of valid routing domains. This CLI always exits 0 and reuses `readRoutingConfig()` — never reimplement its parser. Parse stdout as a JSON array (e.g., `["default","backend"]`). If the command fails to run, or stdout doesn't parse as JSON, treat the result as `[]` (no-op — see Dimension 7). This set feeds the domain-drift check in Dimension 7 only; it is not a new dimension.
+9. For **each** T##-PLAN.md whose `writes:` or `expected_output:` contains at least one path under `.gsd/` (literal or glob — `.gsd/...`, `.gsd/**`, `{WORKING_DIR}/.gsd/...`), run `node scripts/forge-dispatch-resolve.js --unit-type execute-task --plan "<path to that T##-PLAN.md>" --milestone {M###} --cwd "{WORKING_DIR}"` (Bash) and read `dispatch_engine` from the JSON on stdout. This CLI always exits 0 and is the single source of engine resolution — never reimplement or guess the routing. If it fails to run or stdout does not parse, treat that task's engine as `unknown` (the check is a no-op for it — an unresolvable engine is not evidence of a defect). Skip the call entirely for tasks with no `.gsd/` path — this feeds the engine↔`.gsd/**` check in Dimension 9 only; it is not a new dimension.
 
 ### Step 2 — Parse MUST_HAVES_CHECK_RESULTS
 
@@ -154,6 +155,14 @@ To score: extract the numbered decisions (D1, D2, … or bulleted entries) from 
 - `fail` — 2 or more suspicious paths OR any duplicate `expected_output` path across tasks.
 
 Note: `expected_output:` is a **top-level** YAML key in each T##-PLAN.md (not nested under `must_haves`). Read the frontmatter of each plan file to extract it.
+
+**Engine ↔ `.gsd/**` check (same dimension, no new dimension — the 10 locked dimensions are unchanged):** a declared output is *realistic* only if the engine the plan resolves to is contractually allowed to produce it. The codex sidecar **NEVER writes `.gsd/**`** (locked invariant — `shared/forge-dispatch.md § Sidecar dispatch state machine`), so a task that declares a `.gsd/` path in `writes:`/`expected_output:` **and** resolves to a sidecar engine is a defect detectable before dispatch: at dispatch time it can only end as a refusal, an `env_constraint`, or an engine fallback.
+
+- For each task from Step 1, item 9, compare its declared `.gsd/` paths against its resolved `dispatch_engine`. `dispatch_engine == claude` (or `unknown`) → no finding.
+- **1 or more** tasks with a `.gsd/` path resolving to a non-`claude` `dispatch_engine` → **`fail`**. Not `warn`, and not scaled by count: the sidecar `.gsd/**` bar is absolute, so even a single occurrence is a guaranteed dispatch defect (same posture as Dimension 8, which fails at 1). The dimension verdict is the worst of all triggers — this one and the base rubric above are never double-counted.
+- Justification must name the offending task IDs, the resolved engine, and the fix, e.g. "T04 declares `writes: [.gsd/tasks/**]` but resolves to `dispatch_engine: codex` — the sidecar cannot write `.gsd/**`; emit `worker: claude` in its frontmatter".
+
+This is the detection layer (camada 2) for the planner's `worker:` constraint (camada 1, `agents/forge-planner.md § Worker Engine`): the planner is told to emit the engine decision as a field, and this check catches the case where it did not.
 
 #### Dimension 10: `legacy_schema_detect`
 

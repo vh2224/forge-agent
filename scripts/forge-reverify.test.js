@@ -9,6 +9,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const {
   needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify, spawnPlan, resolveExecutable,
+  hasDivergentCommandNotes,
 } = require('./forge-reverify.js');
 
 const SCRIPT = path.join(__dirname, 'forge-reverify.js');
@@ -94,6 +95,33 @@ function testResolution() {
     'stack detection precedes the CODING-STANDARDS fallback');
 }
 
+// I-20260729180247-forge-init-template-nao. The CODING-STANDARDS fallback above
+// only fires if the file being read actually carries the line — and `/forge-init`,
+// which writes that file for every new project, emitted Lint/Format/Type check and
+// no Test. Zero-dep projects (no package.json, no go.mod) are exactly the ones the
+// fallback exists for, and they were initialised without it.
+//
+// Asserting only "the string appears in the template" would pass on a line the
+// consumer cannot read, so the second half renders the template's own section
+// through resolveVerifyCommand: the guard fails both when the line is deleted and
+// when it is present in a shape the parser does not accept.
+function testForgeInitEmitsTestLine() {
+  const template = fs.readFileSync(path.join(__dirname, '..', 'commands', 'forge-init.md'), 'utf8');
+  const header = template.match(/^## Lint & Format Commands[ \t]*$/m);
+  assert(Boolean(header), 'forge-init.md still has a `## Lint & Format Commands` section to render');
+  const section = header ? template.slice(header.index + header[0].length).split(/^## /m)[0] : '';
+  assert(/^- \*\*Test:\*\*/m.test(section), 'forge-init CODING-STANDARDS template emits a `- **Test:**` line');
+
+  const dir = fixture();
+  const gsd = path.join(dir, 'external-gsd');
+  fs.mkdirSync(gsd, { recursive: true });
+  const rendered = `## Lint & Format Commands\n${section.replace(/\{detected test command or "\(none detected\)"\}/, 'node scripts/run-tests.js')}`;
+  fs.writeFileSync(path.join(gsd, 'CODING-STANDARDS.md'), rendered, 'utf8');
+  assert(JSON.stringify(resolveVerifyCommand(dir, gsd)) === JSON.stringify(['node', 'scripts/run-tests.js']),
+    'a CODING-STANDARDS rendered from the forge-init template is readable by resolveVerifyCommand',
+    JSON.stringify(resolveVerifyCommand(dir, gsd)));
+}
+
 function testRunAndApply() {
   const cwd = fixture();
   assert(runVerification({ argv: [process.execPath, '-e', 'process.exit(0)'], codeDir: cwd }).verdict === 'verified', 'runVerification reports verified');
@@ -174,6 +202,38 @@ function testAmbiguousMultiCommand() {
   const sameCommandOutcome = reverify({ result: sameCommand, codeDir: dir, apply: true });
   assert(sameCommandOutcome.verdict === 'verified',
     'entries naming the same command still promote in bulk', JSON.stringify(sameCommandOutcome));
+}
+
+// I-20260729180247-hasdivergentcommandnotes (TASK-020 review R1, 2026-08-06):
+// a note that names no runner token at all used to be filtered out of the
+// comparison instead of gating it. It must now gate a multi-entry payload
+// unconditionally, while a single-entry payload with the same note is
+// unaffected and still applies its normal verdict.
+function testTokenlessNoteGates() {
+  const dir = fixture();
+  write(dir, 'package.json', '{"scripts":{"test":"node -e \\\"process.exit(0)\\\""}}');
+  write(dir, 'package-lock.json', '{}');
+
+  const mixed = result([
+    entry({ note: 'ran `npm test`: EPERM: operation not permitted' }),
+    entry({ note: 'blocked by the environment' }),
+  ]);
+  const mixedOutcome = reverify({ result: mixed, codeDir: dir, apply: true });
+  assert(mixedOutcome.verdict === 'ambiguous-multi-command' && mixedOutcome.entries === 2,
+    'a token-less note gates a multi-entry payload', JSON.stringify(mixedOutcome));
+  assert(mixed.must_haves_status.every(e => e.scope === 'environment'),
+    'ambiguous-multi-command from a token-less note leaves every entry untouched');
+
+  const single = result([entry({ note: 'blocked by the environment' })]);
+  const singleOutcome = reverify({ result: single, codeDir: dir, apply: true });
+  assert(singleOutcome.verdict === 'verified',
+    'a single-entry payload with a token-less note still applies the normal verdict', JSON.stringify(singleOutcome));
+
+  assert(hasDivergentCommandNotes([entry({ note: 'blocked by the environment' })]) === false,
+    'hasDivergentCommandNotes([oneEntry]) stays false — cardinality guard preserved');
+
+  assert(typeof hasDivergentCommandNotes === 'function',
+    'hasDivergentCommandNotes is exported from forge-reverify.js');
 }
 
 // TASK-020 review R1: gsd-write-refused alleges a .gsd/** write was refused —
@@ -263,9 +323,11 @@ function testPlatformRouting() {
 try {
   testTrigger();
   testResolution();
+  testForgeInitEmitsTestLine();
   testRunAndApply();
   testModeAndCli();
   testAmbiguousMultiCommand();
+  testTokenlessNoteGates();
   testGsdWriteRefusedSeparation();
   testPlatformRouting();
 } finally {

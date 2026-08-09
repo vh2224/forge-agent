@@ -594,7 +594,8 @@
             "dist/**",
             "build/**",
             ".next/**",
-            ".gsd/**"
+            ".gsd/**",
+            "node_modules/**"
           ],
           "description": "Globs excluídos de ambos os lados do diff (evita ruído de lockfiles e build). Suporta prefix exato, ** (qualquer profundidade) e * dentro de segmento. Bloco ausente/vazio = este default hardcoded, sem erro."
         }
@@ -734,7 +735,7 @@
             "auto"
           ],
           "default": "claude",
-          "description": "Quem desafia (challenge + rebuttal). codex = GPT via codex exec; gemini = Antigravity CLI agy — ambos via scripts/forge-xllm.js, com fallback automático ao forge-reviewer Claude em qualquer falha. auto = família OPOSTA ao autor do código (reduz viés de auto-preferência). Valor inválido cai em claude."
+          "description": "Quem desafia (challenge + rebuttal). codex = GPT via o protocolo codex app-server (transporte argv anterior aposentado em M018 S05); gemini = Antigravity CLI agy — ambos via scripts/forge-xllm.js, com fallback automático ao forge-reviewer Claude em qualquer falha. auto = família OPOSTA ao autor do código (reduz viés de auto-preferência). Valor inválido cai em claude."
         },
         "advocate": {
           "type": "string",

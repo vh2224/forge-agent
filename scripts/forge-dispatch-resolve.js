@@ -24,6 +24,11 @@ const { modelToAlias, modelFamily } = require('./forge-model-alias.js');
 const { readPrefsCached } = require('./forge-prefs.js');
 const { readTierChain } = require('./forge-tier-chain.js');
 const { resolveWorker, RuntimeContractError } = require('./forge-runtime.js');
+// Imported, not re-typed: forge-must-haves.js reads the same `domain:` key from
+// the same frontmatter, and a second copy of the strip rule is how the two
+// readers drift apart. Requires whitespace before the `#`, which is what
+// separates a comment from a `#` inside the value.
+const { stripInlineComment } = require('./forge-must-haves.js');
 
 const TIER_DEFAULTS = {
   'memory-extract': 'light',
@@ -91,7 +96,11 @@ function readPlanFrontmatter(planPath) {
   return {
     tier: frontmatterValue(block, /^tier:\s*(.+)$/m),
     tag: frontmatterValue(block, /^tag:\s*(.+)$/m),
-    domain: frontmatterValue(block, /^domain:[ \t]*(.+)$/m),
+    // Only `domain` is stripped here: it is the sole key on this line-up that a
+    // SECOND module also parses, so it is the sole one where a comment can make
+    // two readers disagree. tier/tag/effort/slice have one reader each and are
+    // left exactly as they were rather than changed by resemblance.
+    domain: stripInlineComment(frontmatterValue(block, /^domain:[ \t]*(.+)$/m)).trim(),
     effort: frontmatterValue(block, /^effort:\s*(.+)$/m),
     worker: worker === 'claude' || worker === 'codex' ? worker : '',
     slice: frontmatterValue(block, /^slice:\s*(.+)$/m),

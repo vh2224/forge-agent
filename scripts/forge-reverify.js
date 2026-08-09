@@ -171,11 +171,23 @@ function affectedEntries(result) {
 // resolveVerifyCommand (project-derived), never from must-have prose. This
 // helper's only job is to say "these notes look like different commands, so
 // don't blanket-apply one verdict to every entry" and let a human sort it out.
+//
+// 2026-08-06 (I-20260729180247-hasdivergentcommandnotes, TASK-020 review R1):
+// an entry whose note names NO runner token at all used to be filtered out of
+// the comparison (`.filter(tokens => tokens.length > 0)`) before the pairwise
+// disjoint check ran. A token-less note describes no command, so a single
+// re-run's exit code is not evidence about it either way — dropping it from
+// the gate silently granted the bulk verdict to exactly the entry least able
+// to support it (the TASK-020 class — "environment from the sidecar is never
+// evidence" — one level up, applied to the gate itself instead of the
+// corroborator). Now: if ANY entry's token set is empty, gate unconditionally
+// (return true) before the pairwise comparison ever runs. Restoring the old
+// `.filter(...)` would silently re-admit that entry into a bulk verdict it
+// never spoke to.
 function hasDivergentCommandNotes(entries) {
-  const tokenSets = entries
-    .map(entry => extractRunnerTokens(typeof entry.note === 'string' ? entry.note : ''))
-    .filter(tokens => tokens.length > 0);
-  if (tokenSets.length < 2) return false;
+  if (entries.length < 2) return false;
+  const tokenSets = entries.map(entry => extractRunnerTokens(typeof entry.note === 'string' ? entry.note : ''));
+  if (tokenSets.some(tokens => tokens.length === 0)) return true;
   for (let i = 0; i < tokenSets.length; i += 1) {
     for (let j = i + 1; j < tokenSets.length; j += 1) {
       const disjoint = tokenSets[i].every(token => !tokenSets[j].includes(token));
@@ -269,6 +281,7 @@ if (require.main === module) process.exitCode = runCli(process.argv.slice(2));
 
 module.exports = {
   isEnvironmentUnmet, isReverifiable, needsReverification, resolveVerifyCommand, runVerification, applyVerdict, reverify, runCli,
+  hasDivergentCommandNotes,
   // Exported for the platform-routing regression guard only.
   spawnPlan, resolveExecutable,
 };

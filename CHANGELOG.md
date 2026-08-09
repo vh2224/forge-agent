@@ -1,4 +1,129 @@
-## [Unreleased]
+## v4.8.0 — One core, two native runtimes
+
+Forge Agent now installs one shared core in `FORGE_HOME` and projects native surfaces
+for both Claude Code and Codex CLI on Windows, macOS and Linux.
+
+### Added
+
+- Runtime-aware installation, capability discovery and offline diagnosis for Claude Code
+  and Codex CLI without copying login state, keychains or credentials between hosts.
+- Auditable cross-runtime handoff contracts, bounded workflow control and deterministic
+  generation from a source manifest shared by both projections.
+- Release packaging and compatibility gates that exercise the supported host/runtime
+  matrix before publishing.
+
+## v4.6.1 — Three copies of one rule stop disagreeing
+
+Follow-up batch to M018. Every item here has the same shape: a rule written in more than
+one place, where only one copy was ever measured.
+
+### Fixed
+
+- **`GitActivity.Glob` matched `X/**` anchored at the root — and, worse, by substring**, so
+  `dist/**` matched `distal/a.js`, and the `assertFalse` that should have caught it passed
+  by lexical accident. Two of the three implementations of this rule
+  (`agents/forge-completer.md`, `isInstallArtifactPath`) already spoke segment depth per the
+  S03 review R24 decision; the Swift matcher was the copy that never got the memo. The
+  consumer chain is single — `Glob` → `isIgnored` → `linesTouched` → the metrics panel — so
+  a vendored `packages/app/node_modules/` inflated a line count. The matcher moved, with
+  both directions proven by mutation: 3 failures reverting to anchored, 4 widening to
+  substring.
+- **`domain:` had no inline-comment strip in `scripts/forge-must-haves.js`.** Its sibling
+  reader in `scripts/forge-dispatch-resolve.js` had none either, so the two agreed by
+  accident — fixing one side alone would have manufactured the divergence the capability fix
+  exists to prevent. Both now import one `stripInlineComment`: a single copy of the rule,
+  not two that match.
+- **`/forge-init` never emitted `- **Test:**`**, so `resolveVerifyCommand`'s zero-dep
+  fallback had nothing to read and an unproven `environment` claim was accepted by default —
+  the gap TASK-020 recorded rather than closed. The guard measures whether the consumer can
+  read the line, not whether a literal is present: `- **Tests:**` fails it too.
+- The test comment claiming `/**` matches at any depth now describes what the test does —
+  the non-root directory case it always claimed to exercise.
+- `CLAUDE.md` carried two contradicting `## Estado atual` sections after the M018 merge; the
+  stray heading also orphaned two architecture-decision entries under it.
+
+### Notes
+
+- **Not fixed, with the measurement that decided it:** gating the single-entry case in
+  `hasDivergentCommandNotes` does not leave the claim pending — it drops to the textual
+  corroborator, which accepts it for two of four reasons, trading a real exit code for
+  acceptance by prose. Recorded as `I-20260808023107-s06-r7-atalho`.
+- Baselines: 111 JS suites, 2502 smoke passed / 0 failed / 1 skipped, 515 Swift asserts.
+
+## v4.6.0 — The sidecar stops shelling out
+
+M018, seven slices. The sidecar no longer spawns a process per invocation: it speaks
+JSON-RPC over stdio to a long-lived `codex app-server`, which is what makes per-turn
+capability, real interruption and first-class evidence reachable at all.
+
+### Breaking
+
+- **`codex exec` is no longer the sidecar transport, and its absence is proven rather than
+  asserted.** S05 migrated the remaining review modes and deleted the old path;
+  `scripts/forge-exec-callsites.js` is an in-process scanner reporting `outcome: clean` over
+  312 files with 0 call sites — a removal claim a grep in a session transcript cannot make,
+  because the scanner enumerates what it scanned and treats a zero-file scan as a failure.
+
+### Added
+
+- **A JSON-RPC/stdio protocol floor (S01)** — a client for `codex app-server` with a pinned
+  schema and a drift guard that names the divergent field instead of failing generically.
+  Premises A1/A2/A4 measured against `0.144.4` rather than assumed.
+- **`runExecute` completes over the app-server (S02).** Premise B3 was measured as
+  `indistinguishable`: the protocol never exposes which model ran the turn, so nothing
+  downstream is allowed to claim it did.
+- **Per-turn capability (S03)**, with the pre-existing sandbox guards extended to the new
+  transport rather than re-implemented beside it.
+- **Evidence as a first-class artifact (S04)**, plus the floor that refuses to report an
+  unexamined scan as clean.
+- **Environment coverage by reason (S06)** — two reasons promoted to observed exit codes,
+  three kept textual with a named reason each, so "not covered" never renders identically to
+  "covered and passed".
+- **`turn/interrupt` before `SIGKILL` (S07)**, with the terminality latch.
+
+### Fixed
+
+- **Codex ran without a console on Windows, and every command it shelled out to stole the
+  user's focus.** `invokeCodexDetached()` passed `detached: true` on every platform; on
+  Windows that leaves the process with no console, so each shell command codex runs hands
+  off to the default terminal app — one real window per command, raised to the foreground
+  while the user is typing into something else. Measured with a real run: `detached: true` →
+  3 windows / 3 focus steals; `detached: true` + `windowsHide` → 4 windows / 8 focus steals;
+  no `detached` → 0 / 0. `windowsHide` does **not** fix this — it applies to the codex
+  process itself, not to the console handoff its grandchildren trigger. POSIX keeps
+  `detached`, because its timeout path kills the whole process group via
+  `process.kill(-pid)`; Windows never needed it, since that path kills the tree by pid with
+  `/T /F`. Anyone re-measuring this should count `GetWindowRect` and `GetForegroundWindow`,
+  not raw window creations: the 0×0 px PseudoConsoleWindow handles make both cases tie at 10
+  and make the fix look useless.
+- **The `worker:` family token leaked into the model slot** — a bare `claude` resolved to
+  alias `null`, silently dropping the task to the agent's frontmatter default instead of the
+  tier's model.
+- **The plan-checker gained a `.gsd/**` × `dispatch_engine` check inside dimension 9.** The
+  sidecar cannot write `.gsd/**`, so such a plan is a dispatch defect detectable *before*
+  dispatch rather than after it fails.
+- **Branch C marks `status: DONE` on the plan it completed**; without it `forge-parallelism`
+  kept reporting finished tasks as ready.
+- **The `SubagentStop` repair message asked for the result block *alone***, which an obedient
+  agent obeys literally: six advocate defenses were lost this way, three of them coming back
+  as a bare scoreboard. It now asks for the complete answer while still forbidding tool
+  re-runs, and `forge-advocate` gets `maxTurns: 48` plus a defense file, so a truncation
+  costs one verdict instead of all of them.
+- **Ten top-level keys nested under `must_haves:` now fail validation with a named error**
+  (`expected_output`, `writes` and `depends` among them). Measured in a two-repo dogfood: two
+  of three GPT-authored plans nested them, the validator called all three valid, and the
+  `CODE_DIR` resolver then saw zero paths and refused the sidecar. The block boundary is now
+  a single function shared by parser and guard, so they cannot disagree, and the sidecar
+  planning prompt is anchored at column 0 — where the ambiguity actually originated.
+
+## v4.5.0 — Sweeps are triggered, not scheduled
+
+PR 2 of two (`M-20260804003633`) — the mutating half. The fragment store gains a grouped
+container, all four readers learn the format in the same slice, and `CURRENT_SCHEMA` is
+bumped in the same commit that makes the format writable, so the directional guard PR 1
+shipped fires instead of standing decorative. The calendar axis introduced mid-milestone
+was then removed entirely: a sweep happens because an operator judged that enough has
+accumulated, not because a quarter ended.
 
 ### Breaking
 
@@ -14,39 +139,20 @@
   fail-open with a loud warning. `scripts/forge-migrate.js` widens its already-migrated
   shortcut to tolerate exactly one major behind, so the bump cannot resurrect the
   documented `.bak` destructive-backup bug.
+- **`CURRENT_SCHEMA` moves from `fragment-store@2.0.0` to `fragment-store@3.0.0`**
+  (`scripts/forge-doctor.js`), landed in the same commit as the container format change
+  (`116007a`), never as a follow-up — a bump that arrives separately from the format it
+  guards is a guard that fires on the wrong thing. This bump is effectively irreversible in
+  practice: once a store writes `sweep-project-NN` containers, reverting the tooling means
+  a developer's writes get refused until they update, and no S10 exists to soften a second
+  bump — this is the last slice before the PR. Legacy `YYYY-QN` containers (from the
+  epoch-grouping code S03 shipped) are still **read** by `isGroupedFile`/`parseGroup`
+  (`EPOCH_LABEL_RE`, preserved read-only in `scripts/forge-epoch.js`) but are **never
+  written or migrated** by any code on this branch — a store that already has a `2026-Q1.md`
+  container keeps it exactly as-is; only new sweeps use the new name.
 
 ### Added
 
-- **Forge Agent 4.6.0 multi-runtime:** um único core em `FORGE_HOME` com projeções
-  selecionáveis para Claude Code e Codex CLI, instaladores compartilhados para Windows,
-  macOS e Linux, diagnóstico/capabilities offline por host e handoff auditável sem copiar
-  login, keychain ou credenciais entre runtimes.
-- **Truncation that talks.** Both dispatch truncators — `truncateChars`/`boundStandards`/
-  `truncateContext` in `scripts/forge-prompt.js` (the Claude worker render) and
-  `truncateAtSectionBoundary` in `scripts/forge-tokens.js` (the sidecar/CLI path) — now
-  emit a marker naming what was cut and where to read the rest (`.gsd/CODING-STANDARDS.md
-  § <section>`, `.gsd/memory/`), instead of a mute `…`. The marker is charged against the
-  same budget it protects: the reserve is derived from the worst-case digit count, not a
-  fixed constant, so it can never itself overflow `maxChars`/`budgetChars`. Additive —
-  byte-identical when no `source` is passed.
-- **`scripts/forge-schema-guard.js`**, a directional schema guard: compares only the
-  major of `.gsd/SCHEMA-VERSION` against the schema the tooling understands. Fail-open on
-  read (absence, unreadable stamp, or major ≤ understood all pass clean, with a loud
-  warning plus a `partial` result when the data is ahead). The write side refuses outright
-  (non-zero exit) in **two** cases: when the data's major is ahead of the tooling's, and
-  when the stamp exists but could not be read at all (a directory in its place,
-  `EACCES`/`EPERM`, …) — the refusal names the errno and claims nothing about direction,
-  because a guard that could not read the stamp measured nothing. Absence and readable
-  garbage still write, unchanged: only the read failure closes. Wired into the four
-  fragment-store readers — `forge-projection.js`, `forge-ledger.js`, `forge-decisions.js`,
-  `forge-memory.js` — at every read and write entry point, so stale tooling can no longer
-  silently clobber a store written by newer code.
-- **`scripts/forge-memory-index.js`**, a source-file → facts index derived from
-  `.gsd/memory/*.md`. Generated on demand (`--write`), never injected into any
-  prompt/template/budget. Every render carries an unconditional "Cobertura e descarte"
-  section enumerating which file citations resolved, which didn't and why
-  (`not-found`/`ambiguous-basename`/`outside-root`/`dynamic`), and which facts carried no
-  citation at all — a coverage gate that can't silently under-report.
 - **Epoch grouping: one byte-exact container per sealed quarter.** `scripts/forge-epoch.js`
   derives `YYYY-QN` labels, sealed epochs and wrapper dirs from the store contents at
   runtime — no cutoff date, no threshold constant. `scripts/forge-grouped-file.js` is the
@@ -122,114 +228,6 @@
   warning (that class's guarantee is the VCS, not the journal). The CLI gained `--undo
   <container>`, restoring a container's members via `ungroup`, resolved strictly from
   journal-recorded containers.
-
-### Changed
-
-- **The citation extractor in `scripts/forge-memory-index.js` recognises the file forms it
-  was missing**: a wider extension vocabulary (`tsx`, `jsx`, `vue`, `html`, `css`, `scss`,
-  `aspx`, `svg`), `@` accepted inside a path segment (so a versioned directory such as
-  `SERVICES/services@1.2.0/...` stops being truncated), dotted basenames aligned between the
-  backticked and bare variants, and two new patterns (`package-ref` for `name@version` with
-  a digit-led version, `bare-path-traversal` which reports a containment rejection and never
-  probes the disk). Measured against the real reference store, same store state on both sides:
-  `facts_with_resolved` 117→177, `citations_resolved` 144→227, `files_indexed` 72→126.
-- **Coverage reports three labelled buckets instead of one.** `facts_no_file_mention` (a),
-  `facts_missed_by_extractor` (b, enumerated with `mem_id`/`storage_key`/`sample_token`) and
-  `facts_unresolved_only` (c) are all derived by `filter()` from a single classification
-  list, never by parallel counters, and the sum identity is locked **per fact** and tested:
-  `facts_total = facts_with_resolved + (a) + (b) + (c)` (`177+416+5+109=707` on the real
-  store). Per-fact is a conscious trade-off with a known cost, recorded in the open review
-  items below.
-
-### Fixed
-
-- `shared/forge-dispatch.md § Budgeted Section Injection` previously described only one
-  of the two real truncators; now documents both, each with its own explicit degradation
-  ladder (the two builders intentionally degrade differently — the shared prose that used
-  to cover both was actually wrong for one of them).
-- **The schema write guard could be disabled by a directory** (found by dogfood review on
-  PR #70). `readSchemaVersion` collapsed every read error into `null`, and
-  `checkSchemaDirection` then read that `null` as "not ahead" — so a `.gsd/SCHEMA-VERSION`
-  that existed as a *directory* (`EISDIR`) made every fragment-store write sail through
-  with exit 0 and a file on disk. The `catch` inside `assertWrite` was never the fix: it
-  was unreachable, because nothing on that path ever threw. The information now originates
-  where the errno is visible — `readSchemaVersionDetailed` in `scripts/forge-migrate.js`
-  reports `{ value, unreadable, errno }` — and survives to the write side as a first-class
-  `unreadable` field. Read behaviour is untouched in all three stamp states.
-- **Raw NUL bytes in three source files made git and grep treat them as binary.**
-  `scripts/forge-memory-index.js` (two, a `Map` key separator) and
-  `scripts/forge-review-diff.test.js` (one, in the assertion string that checks NULs never
-  reach the reviewer) carried literal `0x00`s where the two-character escape `\0` was
-  meant. The cost was review visibility, not behaviour: `grep` answered "Binary file …
-  matches" and diffs refused to display. Escaped, byte-behaviour-identical, and now locked
-  by a new `forge-smoke.js` section that scans `scripts/*.js` for `0x00`/`0x0b`/`0x0c` with
-  an anti-silence floor (0 files scanned is a failure, not a clean pass).
-
-- **`docs/memory-index-citation-coverage.md`** names the cause of the unresolved citations
-  instead of inheriting a hypothesis. The 261 unresolvable citations decompose by reason
-  with the sum closing (`94+94+53+16+4=261`), and the tie is the finding: `not-found` and
-  `ambiguous-basename` land on **94 each**, which **refutes** the D5-inherited hypothesis
-  that file renaming dominated. The clearer structural cause is basename ambiguity in a
-  directory-versioned monorepo. Two backlogs are named rather than fixed here
-  (`BACKLOG-MEMORY-STORE-SKIP-28` — 28 of 145 fragments outside the index;
-  `BACKLOG-UNRESOLVED-CITATION-POLICY`), because correcting the cause would reopen the very
-  numbers this table measures.
-- `scripts/forge-migrate.js`'s header comment described a rule the code does not implement
-  (the already-migrated shortcut accepts any stamp not newer than `CURRENT_SCHEMA`, not
-  "exactly one major behind"). Comment-only diff.
-
-### Not shipped
-
-- **S04 (legacy-residue cleanup) was cut by its own gate, with verdict `NO-TARGET`.** The
-  slice opened with a precision gate that had to produce a verdict before a line of cleanup
-  was written, and the verdict was measured against the real reference store: the D9 signature
-  matched **0 facts out of 707 evaluated across 117 fragments, with 0 false positives**
-  (negative control: a naive line grep "matches" 64, all of them the JSON end-of-line comma,
-  i.e. the record delimiter rather than the data). The cut is informative rather than empty,
-  because the residue *does* exist — roughly 25 multi-source entries, the largest `MEM077`
-  with 11 sources — but it lives in the **markdown body** of `.gsd/memory/legacy-orphan.md`
-  in the legacy `- source: a, b, c` form, outside `facts[].source_unit`, which is the only
-  surface the D9 signature inspects. Widening the signature is a re-scope of D9 and an
-  operator decision, so it was not taken here; the count is recorded as named backlog. The
-  cleanup engine (T02) and its registration as operation #2 (T03) were therefore never
-  dispatched. What stays on the branch is the read-only detector and its 19 tests.
-
-**Review triage — six objections arbitrated, all closed.** S05 R3 closed with **no code
-change**: both proposed remediations (widening `--force`, adding a dedicated
-`--force-untracked`) were rejected as weakening the eligibility gate that was just built;
-**S08's undo journal resolves the substance instead** — `tool-undo` makes
-`untracked`/`ignored` targets eligible without `--force` at all. S05 R9 closed: the
-fail-closed test no longer passes green without git — the suite now exits non-zero unless
-`FORGE_ALLOW_NO_GIT=1` is set, removing the silent-skip-behind-`if (gitAvailable())` path.
-S05 R13 closed: the `shell:false` hardening in `optionsFor()` is **kept** — reverting
-correct hardening to satisfy scope discipline would make the module worse — and the scope
-deviation is recorded rather than undone. S05 R16 closed: the D11 gate stays closed, but
-the count of protected wrapper dirs is now always reported, so a wrapper target vanishing
-from `skipped` is no longer indistinguishable from a broken detector. S06 R3/R4 closed:
-the coverage labels are corrected to state exactly what they measure — no new bucket was
-added and the four-way sum identity is untouched, only the wording changed to stop
-`facts_missed_by_extractor` reading as a defect count it never was, and to stop
-`package-ref`/`dynamic` rendering as "could not be located" when they are, by design, not
-files at all.
-
-**S09 — the calendar axis is gone; sweeps are triggered, not scheduled.**
-
-### Breaking
-
-- **`CURRENT_SCHEMA` moves from `fragment-store@2.0.0` to `fragment-store@3.0.0`**
-  (`scripts/forge-doctor.js`), landed in the same commit as the container format change
-  (`116007a`), never as a follow-up — a bump that arrives separately from the format it
-  guards is a guard that fires on the wrong thing. This bump is effectively irreversible in
-  practice: once a store writes `sweep-project-NN` containers, reverting the tooling means
-  a developer's writes get refused until they update, and no S10 exists to soften a second
-  bump — this is the last slice before the PR. Legacy `YYYY-QN` containers (from the
-  epoch-grouping code S03 shipped) are still **read** by `isGroupedFile`/`parseGroup`
-  (`EPOCH_LABEL_RE`, preserved read-only in `scripts/forge-epoch.js`) but are **never
-  written or migrated** by any code on this branch — a store that already has a `2026-Q1.md`
-  container keeps it exactly as-is; only new sweeps use the new name.
-
-### Added
-
 - **On-demand sweeps replace the calendar axis.** The quarter/calendar label (`YYYY-QN`)
   that `scripts/forge-epoch.js` derived from wall-clock time is gone; grouping now fires
   because an operator judged that enough has accumulated, not because a quarter boundary
@@ -274,8 +272,38 @@ files at all.
   live inline) is removed now that `forge-sweep-sealed.js` owns that guard uniformly for
   all three stores.
 
+### Changed
+
+- **The citation extractor in `scripts/forge-memory-index.js` recognises the file forms it
+  was missing**: a wider extension vocabulary (`tsx`, `jsx`, `vue`, `html`, `css`, `scss`,
+  `aspx`, `svg`), `@` accepted inside a path segment (so a versioned directory such as
+  `SERVICES/services@1.2.0/...` stops being truncated), dotted basenames aligned between the
+  backticked and bare variants, and two new patterns (`package-ref` for `name@version` with
+  a digit-led version, `bare-path-traversal` which reports a containment rejection and never
+  probes the disk). Measured against the real reference store, same store state on both sides:
+  `facts_with_resolved` 117→177, `citations_resolved` 144→227, `files_indexed` 72→126.
+- **Coverage reports three labelled buckets instead of one.** `facts_no_file_mention` (a),
+  `facts_missed_by_extractor` (b, enumerated with `mem_id`/`storage_key`/`sample_token`) and
+  `facts_unresolved_only` (c) are all derived by `filter()` from a single classification
+  list, never by parallel counters, and the sum identity is locked **per fact** and tested:
+  `facts_total = facts_with_resolved + (a) + (b) + (c)` (`177+416+5+109=707` on the real
+  store). Per-fact is a conscious trade-off with a known cost, recorded in the open review
+  items below.
+
 ### Fixed
 
+- **`docs/memory-index-citation-coverage.md`** names the cause of the unresolved citations
+  instead of inheriting a hypothesis. The 261 unresolvable citations decompose by reason
+  with the sum closing (`94+94+53+16+4=261`), and the tie is the finding: `not-found` and
+  `ambiguous-basename` land on **94 each**, which **refutes** the D5-inherited hypothesis
+  that file renaming dominated. The clearer structural cause is basename ambiguity in a
+  directory-versioned monorepo. Two backlogs are named rather than fixed here
+  (`BACKLOG-MEMORY-STORE-SKIP-28` — 28 of 145 fragments outside the index;
+  `BACKLOG-UNRESOLVED-CITATION-POLICY`), because correcting the cause would reopen the very
+  numbers this table measures.
+- `scripts/forge-migrate.js`'s header comment described a rule the code does not implement
+  (the already-migrated shortcut accepts any stamp not newer than `CURRENT_SCHEMA`, not
+  "exactly one major behind"). Comment-only diff.
 - `ungroup()` (`scripts/forge-epoch-group.js`) and the S08 undo journal are unaffected by
   the axis swap by construction, not by assumption: the journal records container paths,
   timestamps and an advisory sha256 of the container — **never** the label — so a journal
@@ -299,7 +327,41 @@ files at all.
   of a future parser change, so a later widening of `parseStorageKey` fails loudly instead
   of silently re-admitting members proof (c) already sealed.
 
-### Dogfood — one bug live proof-of-narrowing missed, found by running the tool for real
+### Notes
+
+- **S04 (legacy-residue cleanup) was cut by its own gate, with verdict `NO-TARGET`.** The
+  slice opened with a precision gate that had to produce a verdict before a line of cleanup
+  was written, and the verdict was measured against the real reference store: the D9 signature
+  matched **0 facts out of 707 evaluated across 117 fragments, with 0 false positives**
+  (negative control: a naive line grep "matches" 64, all of them the JSON end-of-line comma,
+  i.e. the record delimiter rather than the data). The cut is informative rather than empty,
+  because the residue *does* exist — roughly 25 multi-source entries, the largest `MEM077`
+  with 11 sources — but it lives in the **markdown body** of `.gsd/memory/legacy-orphan.md`
+  in the legacy `- source: a, b, c` form, outside `facts[].source_unit`, which is the only
+  surface the D9 signature inspects. Widening the signature is a re-scope of D9 and an
+  operator decision, so it was not taken here; the count is recorded as named backlog. The
+  cleanup engine (T02) and its registration as operation #2 (T03) were therefore never
+  dispatched. What stays on the branch is the read-only detector and its 19 tests.
+
+**Review triage — six objections arbitrated, all closed.** S05 R3 closed with **no code
+change**: both proposed remediations (widening `--force`, adding a dedicated
+`--force-untracked`) were rejected as weakening the eligibility gate that was just built;
+**S08's undo journal resolves the substance instead** — `tool-undo` makes
+`untracked`/`ignored` targets eligible without `--force` at all. S05 R9 closed: the
+fail-closed test no longer passes green without git — the suite now exits non-zero unless
+`FORGE_ALLOW_NO_GIT=1` is set, removing the silent-skip-behind-`if (gitAvailable())` path.
+S05 R13 closed: the `shell:false` hardening in `optionsFor()` is **kept** — reverting
+correct hardening to satisfy scope discipline would make the module worse — and the scope
+deviation is recorded rather than undone. S05 R16 closed: the D11 gate stays closed, but
+the count of protected wrapper dirs is now always reported, so a wrapper target vanishing
+from `skipped` is no longer indistinguishable from a broken detector. S06 R3/R4 closed:
+the coverage labels are corrected to state exactly what they measure — no new bucket was
+added and the four-way sum identity is untouched, only the wording changed to stop
+`facts_missed_by_extractor` reading as a defect count it never was, and to stop
+`package-ref`/`dynamic` rendering as "could not be located" when they are, by design, not
+files at all.
+
+**Dogfood — one bug live proof-of-narrowing missed, found by running the tool for real.**
 
 - **Preview run against the real reference store** (dry-run only, nothing applied) turned
   up a `high` bug that no earlier mechanism — not the three narrowings above, not the 21
@@ -312,6 +374,204 @@ files at all.
   a reason, and the totals reconcile** (`508 + 21 = 529`).
 
 **Review across the milestone: 21 objections raised, 21 closed, zero open.**
+
+## v4.4.0 — Truncation that talks, and a guard that can refuse
+
+PR 1 of the two deliberately separated halves of the `.gsd/` stratification
+(`M-20260803205433`). Everything here is additive: no data format changes,
+`SCHEMA-VERSION` is not bumped, and anyone who installs it and does nothing else sees
+nothing break. Shipping it first is the point — the guard has to be installed *before*
+the format that needs it, because a `.gsd/` store travels with the VCS on its own while
+the tooling only arrives when someone runs `/forge-update`.
+
+### Added
+
+- **Truncation that talks.** Both dispatch truncators — `truncateChars`/`boundStandards`/
+  `truncateContext` in `scripts/forge-prompt.js` (the Claude worker render) and
+  `truncateAtSectionBoundary` in `scripts/forge-tokens.js` (the sidecar/CLI path) — now
+  emit a marker naming what was cut and where to read the rest (`.gsd/CODING-STANDARDS.md
+  § <section>`, `.gsd/memory/`), instead of a mute `…`. The marker is charged against the
+  same budget it protects: the reserve is derived from the worst-case digit count, not a
+  fixed constant, so it can never itself overflow `maxChars`/`budgetChars`. Additive —
+  byte-identical when no `source` is passed.
+- **`scripts/forge-schema-guard.js`**, a directional schema guard: compares only the
+  major of `.gsd/SCHEMA-VERSION` against the schema the tooling understands. Fail-open on
+  read (absence, unreadable stamp, or major ≤ understood all pass clean, with a loud
+  warning plus a `partial` result when the data is ahead). The write side refuses outright
+  (non-zero exit) in **two** cases: when the data's major is ahead of the tooling's, and
+  when the stamp exists but could not be read at all (a directory in its place,
+  `EACCES`/`EPERM`, …) — the refusal names the errno and claims nothing about direction,
+  because a guard that could not read the stamp measured nothing. Absence and readable
+  garbage still write, unchanged: only the read failure closes. Wired into the four
+  fragment-store readers — `forge-projection.js`, `forge-ledger.js`, `forge-decisions.js`,
+  `forge-memory.js` — at every read and write entry point, so stale tooling can no longer
+  silently clobber a store written by newer code.
+- **`scripts/forge-memory-index.js`**, a source-file → facts index derived from
+  `.gsd/memory/*.md`. Generated on demand (`--write`), never injected into any
+  prompt/template/budget. Every render carries an unconditional "Cobertura e descarte"
+  section enumerating which file citations resolved, which didn't and why
+  (`not-found`/`ambiguous-basename`/`outside-root`/`dynamic`), and which facts carried no
+  citation at all — a coverage gate that can't silently under-report.
+
+### Fixed
+
+- `shared/forge-dispatch.md § Budgeted Section Injection` previously described only one
+  of the two real truncators; now documents both, each with its own explicit degradation
+  ladder (the two builders intentionally degrade differently — the shared prose that used
+  to cover both was actually wrong for one of them).
+- **The schema write guard could be disabled by a directory** (found by dogfood review on
+  PR #70). `readSchemaVersion` collapsed every read error into `null`, and
+  `checkSchemaDirection` then read that `null` as "not ahead" — so a `.gsd/SCHEMA-VERSION`
+  that existed as a *directory* (`EISDIR`) made every fragment-store write sail through
+  with exit 0 and a file on disk. The `catch` inside `assertWrite` was never the fix: it
+  was unreachable, because nothing on that path ever threw. The information now originates
+  where the errno is visible — `readSchemaVersionDetailed` in `scripts/forge-migrate.js`
+  reports `{ value, unreadable, errno }` — and survives to the write side as a first-class
+  `unreadable` field. Read behaviour is untouched in all three stamp states.
+- **Raw NUL bytes in three source files made git and grep treat them as binary.**
+  `scripts/forge-memory-index.js` (two, a `Map` key separator) and
+  `scripts/forge-review-diff.test.js` (one, in the assertion string that checks NULs never
+  reach the reviewer) carried literal `0x00`s where the two-character escape `\0` was
+  meant. The cost was review visibility, not behaviour: `grep` answered "Binary file …
+  matches" and diffs refused to display. Escaped, byte-behaviour-identical, and now locked
+  by a new `forge-smoke.js` section that scans `scripts/*.js` for `0x00`/`0x0b`/`0x0c` with
+  an anti-silence floor (0 files scanned is a failure, not a clean pass).
+
+## v4.3.0 — A review that reads only what the unit owns
+
+`skills/forge-task/SKILL.md` declared the gap this closes: SVN review scoping was Phase 2
+and outside M017, so in an SVN working copy every loose task shipped with **no dialectic
+review at all** — the primary way of working in at least one real project.
+
+### Added
+
+- **Scoped SVN review diff (`scripts/forge-review-diff.js`), and `/forge-task` Phase 2.**
+  Porting the slice boundary's branch would have closed the "no diff" symptom and inherited
+  three defects, each measured against the real client rather than assumed: (1) **scope** —
+  `svn diff` with no paths is the *whole* working copy, which in a copy routinely shared by
+  several developers carries their uncommitted work, measured at 49 files with 8 of them the
+  unit's, so the challenger spends its budget objecting to code the unit does not own;
+  (2) **untracked** — `svn diff` cannot render an unversioned file at all, so a slice whose
+  entire change was two new files would have read nothing and rendered CLEAN, the worst
+  outcome a gate has; (3) **appended arguments** — three consumers append to `DIFF_CMD`
+  (`--name-only` in the pattern scan and the empty-diff probe, `-- <files>` in Step 2.0
+  sharding) and `svn diff --name-only` does not exist, so `DIFF_CMD="svn diff"` broke all
+  three silently. That third one is why this is a program and not a longer shell string: a
+  composed command satisfies none of the three consumers. One command is now the SVN
+  `DIFF_CMD` for **both** boundaries, because the slice gate had the same three defects and
+  fixing only the task boundary would have left two divergent copies of the wrong thing.
+- **Peg revisions, where the obvious fix is backwards.** A path containing `@`
+  (`SERVICES/services@1.2.0`) is read by most subcommands as `path@rev`, and the documented
+  escape is a trailing `@` — applied to `svn diff` it breaks *every* path. Measured on svn
+  1.14.2 against working-copy targets: `svn diff -- src/services@1.2.0.ts` works, the same
+  path with a trailing `@` gives `E155010`, and `svn info` is the exact inverse. `svn diff`
+  does not peg-parse working-copy targets; `svn info`/`add`/`delete` do. Diff targets are
+  therefore passed literally, and both halves of the asymmetry are pinned by a test that
+  runs the real client, because getting this backwards drops files from a review with no
+  error and no exit code. (`--targets <file>` would sidestep it; `svn diff` rejects that
+  option — hence argv batching under the Windows 32K command-line cap.)
+
+### Fixed
+
+- **`--check projection-versioned` accused every projection monolith it was supposed to
+  clear**, and exited 1, in a correctly configured SVN working copy. None of them were
+  versioned: `svn status` only omits an ignored path while *scanning* a directory; name the
+  path explicitly and it prints `I <path>` — non-empty and not `?`-prefixed, so the prefix
+  test read *ignored* as *tracked*. The same oracle was wrong in the other direction, which
+  the report did not cover: `svn status` is silent for a versioned file with no local
+  modification, so a projection that was committed — the worst case this layer exists to
+  catch — read as clean and passed. `svn status` cannot answer "is this path under version
+  control?" at all; `svn info` answers it by exit code, one call per path, no parsing. The
+  membership question moved behind the `forge-vcs.js` seam as `isTracked(cwd, relPath,
+  {vcs})` (git via `ls-files --error-unmatch`, SVN via `svn info`), because re-implementing
+  VCS access beside the seam that exists to normalise it is what produced the bug.
+- **The manifest reader could not read the shape every `T##-PLAN.md` in this repo writes.**
+  `artifacts` was listed among `PLAN_LIST_KEYS`, but a mapping entry (`- path: "x"`) carrying
+  its own nested keys made the first entry a quote-mangled string, and `min_lines:` — neither
+  a list item nor blank — ended the loop, dropping every entry after it in silence. That is
+  under-inclusion, the direction the manifest comment calls out by name, masked only because
+  `expected_output` is mandatory and validated. A non-item line indented deeper than the
+  items is now a nested key of the current entry rather than the end of the list; a list
+  nested under such a key is skipped instead of mistaken for paths; and a mapping led by
+  anything other than `path:`/`file:` contributes nothing instead of a garbage entry.
+  Measured over the 125 plans and summaries on disk: 50 garbage entries before, 0 after, no
+  declared path lost in either direction.
+
+### Documentation
+
+- **`docs/forge-v2.md`, `docs/forge-v2-build-spec.md` and `docs/forge-v2-research.md`** —
+  the argument (why-first, for a human deciding), the same content as constraints (20
+  numbered MUST/MUST NOT invariants, decisions split into closed `D-01..D-07` and open
+  `Q-01..Q-09` with what closes each, falsifiable phase-0 acceptance criteria, machine
+  -readable constants, and a "do not build" list), and the source survey kept as the
+  evidence archive. All three carry the same 64 references and the same measured numbers,
+  and the verification marks survive in each — without them the eleven-failure catalogue
+  reads as a design constraint sourced from an unconfirmed third party.
+- **The peg-escape comment in `forge-vcs.js` described coverage the code does not have.**
+  The header claimed every path handed to `svn` goes through `svnPegSafe`; only
+  `svnIsTracked` does, while `svnRevertBatch` and both argv-routed reverts pass raw targets
+  — in a file marked SAFETY-CRITICAL, the kind of note that makes the next reader assume an
+  invariant that does not hold. Narrowed to what is true, with the consequence measured (svn
+  1.14.2): a raw target containing `@` gets `E200009` from `svn revert` in both the argv and
+  the `--targets` form, and the batch form aborts the whole set, leaving a second innocent
+  path in the same batch unreverted. The failure is closed and loud, so nothing is applied by
+  halves.
+
+## v4.2.0 — The terminal gains zoom, images and a screen of its own
+
+Three movements, one screen. The terminal was a real emulator with none of the affordances
+that make one usable, sitting behind a modal that asked what you wanted before letting you
+do anything. SwiftTerm ships `zoomIn`/`zoomOut`/`zoomReset` as **empty stubs**, never calls
+`registerForDraggedTypes`, and its `paste(_:)` reads only `.string` — so there was no zoom, a
+dropped file did nothing, and a pasted screenshot was discarded in silence. All three are
+additions in `ForgeTerminalView`, so the vendored dependency stays upgradable.
+
+### Added
+
+- **Zoom by pinch and ⌘= / ⌘− / ⌘0**, one size for every tab, persisted, with a floating HUD
+  instead of a control pinned to the toolbar.
+- **Drop and ⌘V resolve to a path typed at the prompt** — the third method the Claude Code
+  docs list — plus a floating thumbnail, because the terminal grid cannot hold the image
+  (Claude Code repaints over anything drawn into it) and a path is not something you can see.
+- **⌘F, ⌘T, ⌘W, ⌘1…⌘9 and ⌘⇧[ / ⌘⇧]**, scrollback from 500 to 10.000, and `currentDirectory:`
+  at spawn instead of swapping the whole process's cwd. SwiftTerm's find bar existed all
+  along and was simply never exposed.
+
+### Changed
+
+- **"Início" is removed, not renamed.** It had no content of its own left: the composer moved
+  into Terminal, the run strips were a thinner `RunsView`, and the gate banner — the one
+  thing that *was* unique — moved to Terminal too. `rawValue` is the persistence key, so the
+  fallback moves to `.terminal` and anyone with "Início" saved lands on the screen that
+  absorbed it. The orange badge followed its meaning (something is asking you) rather than
+  its position.
+- **A run is not a terminal session, and the app now says so.** Runs are records on disk read
+  by `forge-runs.js`; sessions are child processes that die with the app. `RunsView` and the
+  terminal screen distinguish "Ir para o terminal" from "Abrir aqui", and label a run with no
+  session here.
+- **The composer states where it will run instead of demanding a project.** With no project,
+  a shell or a plain conversation opens in the configured session root, and only a
+  `/forge-*` command still requires one — because a wrong-repo dispatch is indistinguishable
+  from a correct one. It also names the account it will actually use, with the source
+  recorded: `env_active` (a token inherited by this app process outranks the registry) reads
+  identically to the registry default on screen and means something different.
+- **`TerminalView.swift` (571 lines, four responsibilities) is split by responsibility**, and
+  the composer is lifted out of `NowView` so there is one input rather than two that drift.
+
+### Fixed
+
+- **`resume()` built `claude "/forge-auto <id>"` with no `--account` while labelling the tab
+  with the run's account** — the tab named one account and the shell ran on another.
+- **`applyFontSize` is idempotent by contract.** SwiftTerm's font setter calls
+  `selectNone()`, so the old `applyTheme` was clearing the operator's text selection on every
+  unrelated SwiftUI rebuild.
+- **One guard suite had gone vacuously green.** It forbade `LocalProcessTerminalView(frame`
+  in `makeNSView`, a name the subclass rename made unreachable, so the original bug could
+  have walked back in under a passing test. Four suites that pinned the old shape were
+  updated with the reason rather than the number, and new guards pin that "Início" cannot
+  return unannounced, that the `lastSection` fallback names a section that exists, that
+  `draggingEntered` never writes to disk, and that a slash command still cannot launch into
+  the session root.
 
 ## v4.1.0 — What a project is, and what the screen may claim about it
 

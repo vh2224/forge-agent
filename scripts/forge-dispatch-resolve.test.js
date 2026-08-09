@@ -359,6 +359,131 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  // ── Family-only `worker:` must NOT leak into the model slot ───────────────
+  // Measured (M018/S02/T01): `worker: claude` produced model 'claude' /
+  // alias null, so the orchestrator omitted `model:` from Agent() and the
+  // worker silently ran on its agent-frontmatter default instead of the
+  // tier's model — and the effort clamp (keyed on `claude-(haiku|sonnet)`)
+  // never matched the bare token, so a `standard` task could be dispatched
+  // at `high` effort (HTTP 400 on Sonnet). A family token pins the ENGINE;
+  // the MODEL still comes from the tier.
+  runCase('family-only worker: claude keeps tier resolution (heavy → opus)', () => {
+    const f = mkFixture({ plan: '---\nworker: claude\ntier: heavy\neffort: high\n---\n# task\n' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.engine, 'claude', 'engine still pinned to claude by the frontmatter worker');
+    assertEqual(r.route_source, 'frontmatter', 'frontmatter still wins the source label');
+    assertEqual(r.model, 'claude-opus-5', 'model comes from tier heavy, not from the token');
+    assertEqual(r.alias, 'opus', 'alias is mapped — Agent() gets a real model:');
+    assertEqual(r.model_applied, 'opus', 'model_applied is the mapped alias');
+    assertEqual(r.effort, 'high', 'heavy tier keeps high effort');
+    assert(r.chain.length === 1 && r.chain[0].id === 'claude-opus-5',
+      'chain carries the tier model, not the family token', JSON.stringify(r.chain));
+    cleanup(f);
+  });
+
+  runCase('family-only worker: claude on a standard task clamps effort (the HTTP-400 hazard)', () => {
+    const f = mkFixture({ plan: '---\nworker: claude\neffort: high\n---\n# task\n' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.model, 'claude-sonnet-5', 'standard tier model, not the token');
+    assertEqual(r.alias, 'sonnet', 'alias mapped');
+    assertEqual(r.effort, 'medium', 'effort clamped down by the sonnet cap');
+    assertEqual(r.effort_reason, 'frontmatter-effort:high|clamped:model-cap', 'clamp is recorded, never silent');
+    cleanup(f);
+  });
+
+  runCase('family worker: codex filters the routed chain to the gpt member', () => {
+    const f = mkFixture({
+      plan: '---\nworker: codex\nslice: S01\n---\n# task\n',
+      prefsJsonc: '{"routing":{"default":{"executor":{"standard":["claude-sonnet-5","gpt-5.6-luna"]}}}}',
+    });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.engine, 'gpt', 'engine pinned to the gpt family');
+    assertEqual(r.dispatch_engine, 'codex', 'dispatch trigger normalizes to codex');
+    assertEqual(r.model, 'gpt-5.6-luna', 'chain filtered to the routed gpt member, not the token');
+    assertEqual(r.sidecar_model, 'gpt-5.6-luna', 'sidecar gets the real routed model');
+    cleanup(f);
+  });
+
+  runCase('family worker: claude filters a mixed routed chain to the claude member', () => {
+    const f = mkFixture({
+      plan: '---\nworker: claude\nslice: S01\n---\n# task\n',
+      prefsJsonc: '{"routing":{"default":{"executor":{"standard":["gpt-5.6-luna","claude-sonnet-5"]}}}}',
+    });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.engine, 'claude', 'engine claude');
+    assertEqual(r.dispatch_engine, 'claude', 'no sidecar dispatch');
+    assertEqual(r.model, 'claude-sonnet-5', 'gpt head skipped, claude member selected');
+    assertEqual(r.alias, 'sonnet', 'alias mapped');
+    cleanup(f);
+  });
+
+  runCase('unmatchable family pin degrades to the literal token, never to an empty chain', () => {
+    // No routing block → the legacy tier chain is all-claude, so a codex pin
+    // has nothing to select. Behavior is byte-identical to the pre-fix path
+    // (literal token chain) and the degradation is named in `reason`.
+    const f = mkFixture({ plan: '---\nworker: codex\n---\n# task\n' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.engine, 'gpt', 'engine still gpt');
+    assertEqual(r.dispatch_engine, 'codex', 'still routes to the sidecar');
+    assertEqual(r.chain_len, 1, 'exactly one member — never an empty chain');
+    assertEqual(r.model, 'codex', 'degrades to the literal token as before the fix');
+    cleanup(f);
+  });
+
+  runCase('a CONCRETE worker id still short-circuits tier resolution (precedence unchanged)', () => {
+    const { resolveRoute } = require('./forge-routing.js');
+    const f = mkFixture({});
+    const r = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'default', frontmatterWorker: 'gpt-5.6-terra', cwd: f.dir });
+    assertEqual(r.source, 'frontmatter', 'source frontmatter');
+    assertEqual(r.chain.length, 1, 'single pinned member');
+    assertEqual(r.chain[0].id, 'gpt-5.6-terra', 'the concrete id IS the chain — tier never consulted');
+    assert(/\bfrontmatter-worker\b/.test(r.reason) && !/frontmatter-worker-family/.test(r.reason),
+      'concrete id keeps the frontmatter-worker discriminator, not the family one', r.reason);
+    cleanup(f);
+  });
+
+  // Two modules parse `domain:` out of the same frontmatter: this resolver and
+  // scripts/forge-must-haves.js. Neither stripped a YAML inline comment, so they
+  // agreed on a value no routing cell can match (`payments  # cross-repo`), and
+  // the unit silently fell to `default`. The bite has to be two-sided: the value
+  // must be stripped (behaviour), AND the two readers must return the same thing
+  // (parity) — fixing one reader alone turns a shared wrong answer into a
+  // divergence, which is the failure this pair exists to prevent.
+  runCase('domain strips an inline comment, and both readers agree', () => {
+    const { parseMustHaves } = require('./forge-must-haves.js');
+    const plan = [
+      '---',
+      'id: T01',
+      'domain: payments  # cross-repo, see CONTEXT',
+      'must_haves:',
+      '  truths:',
+      '    - it routes',
+      '  artifacts: []',
+      '  key_links: []',
+      'expected_output: [a.js]',
+      '---',
+      '',
+      '# T01',
+      '',
+    ].join('\n');
+    const f = mkFixture({ plan });
+    const resolved = dispatch(f, { unitType: 'execute-task' }).domain_input;
+    const gate = parseMustHaves(fs.readFileSync(f.planPath, 'utf8')).domain;
+    assertEqual(resolved, 'payments', 'resolver strips the inline comment from domain');
+    assertEqual(gate, 'payments', 'the must-haves gate strips the inline comment from domain');
+    assertEqual(resolved, gate, 'both readers of `domain:` return the identical value');
+
+    // A `#` with no whitespace before it is part of the value, not a comment —
+    // the discriminator the shared helper is built on. Asserted so a future
+    // "simplification" to /#.*$/ cannot pass.
+    const hashPlan = plan.replace('domain: payments  # cross-repo, see CONTEXT', 'domain: pay#1');
+    const g = mkFixture({ plan: hashPlan });
+    assertEqual(dispatch(g, { unitType: 'execute-task' }).domain_input, 'pay#1', 'a `#` inside the value survives in the resolver');
+    assertEqual(parseMustHaves(fs.readFileSync(g.planPath, 'utf8')).domain, 'pay#1', 'a `#` inside the value survives at the gate');
+    cleanup(g);
+    cleanup(f);
+  });
+
   runCase('CLI matches in-process resolver and degrades on missing plan', () => {
     const f = mkFixture({});
     const expected = dispatch(f, { unitType: 'execute-task', planPath: path.join(f.dir, 'missing-PLAN.md') });

@@ -147,6 +147,20 @@ function gitIsTracked(cwd, relPath, opts) {
   return { ok: true, tracked: result.status === 0 };
 }
 
+/*
+ * Every tracked path in the working copy, NUL-delimited so paths with spaces,
+ * quotes, or newlines survive. Callers need the WHOLE set (not a per-path
+ * question) when a decision must be made about a large family of paths at once
+ * without paying one process per path. `ok: false` means the question could not
+ * be asked and must never be rendered by a caller as "nothing is tracked".
+ */
+function gitListTracked(cwd, opts) {
+  const result = git(cwd, ['ls-files', '-z'], opts);
+  if (result.status !== 0) return { ok: false, paths: [], error: stderrOf(result, 'git ls-files failed') };
+  const paths = result.stdout.toString('utf8').split('\0').filter(Boolean);
+  return { ok: true, paths };
+}
+
 function gitHashObject(cwd, relPath, opts) {
   const abs = path.join(cwd, relPath);
   if (!fs.existsSync(abs)) return { ok: true, hash: null };
@@ -540,6 +554,21 @@ function isTracked(cwd, relPath, opts = {}) {
     : { vcs, ok: false, tracked: false, error: result.error };
 }
 
+/**
+ * Version-control membership of EVERY tracked path, as a set-sized answer.
+ * Same contract as isTracked: `{ ok: false }` is "could not ask", never "no".
+ * Non-git backends return unsupported rather than an empty list, so a caller
+ * cannot mistake an unanswered question for an empty repository.
+ */
+function listTracked(cwd, opts = {}) {
+  const vcs = opts.vcs === undefined ? 'git' : opts.vcs;
+  if (vcs !== 'git') return unsupported(vcs, { paths: [] });
+  const result = gitListTracked(cwd, opts);
+  return result.ok
+    ? { vcs, ok: true, paths: result.paths }
+    : { vcs, ok: false, paths: [], error: result.error };
+}
+
 function captureDirty(cwd, opts = {}) {
   const vcs = opts.vcs === undefined ? 'git' : opts.vcs;
   if (vcs === 'svn') {
@@ -646,6 +675,7 @@ module.exports = {
   baselineId,
   hashPath,
   isTracked,
+  listTracked,
   svnPegSafe,
   captureDirty,
   postChanges,
