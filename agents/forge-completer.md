@@ -462,6 +462,12 @@ Given all `T##-SUMMARY.md` files from the slice:
    ```
    On failure: log a warning and continue — the LEDGER fragment is non-critical relative to the merger. Do not return `status: blocked`.
 
+   **D4 — the NEW entry stays under 15 rendered lines.** The cap is on the **rendered block** (what `renderLedger` emits into `LEDGER.md`), not on `body` alone: `slices[]` + `key_files[]` + `key_decisions[]` are what make an entry fat, so trimming only the prose changes nothing. `--write` measures the block after writing and reports the additive fields `rendered_lines`, `cap` and `over_cap` inside its exit-0 JSON (plus one warning line on stderr when over). It never trims and never refuses.
+
+   When the envelope says `"over_cap": true`, **rewrite your own new entry leaner and re-run `--write`** (fewer `key_files`, fewer `key_decisions`, a shorter `body`) before moving on. Re-writing is idempotent — the same id is overwritten in place.
+
+   **Entries that already exist are never rewritten.** D4 applies from here forward only; the accumulated size of older entries is handled elsewhere, not by this step.
+
    **5b. Invoke the merger** to promote all per-milestone files to workspace globals under lockfile. Note: the merger no longer touches LEDGER (handled by the fragment write in 5a); DECISIONS/AUTO-MEMORY/CHECKER/events still merge normally.
    ```bash
    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-merger.js ] && echo scripts || echo "$HOME/.claude/scripts")

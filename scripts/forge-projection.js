@@ -161,45 +161,66 @@ function renderLedger(cwd) {
   });
 
   for (const { id, frag } of parsed) {
-    // Emit block header
-    lines.push(`## ${frag.id || id}`);
-    if (frag.title) lines.push(`**${frag.title}**`);
-    if (frag.completed_at) lines.push(`Completed: ${frag.completed_at}`);
-    lines.push('');
-
-    const hasStructured = (frag.slices && frag.slices.length > 0)
-      || (frag.key_files && frag.key_files.length > 0)
-      || (frag.key_decisions && frag.key_decisions.length > 0);
-
-    if (frag.slices && frag.slices.length > 0) {
-      lines.push(`**Slices:** ${frag.slices.join(', ')}`);
-    }
-    if (frag.key_files && frag.key_files.length > 0) {
-      lines.push('**Key files:**');
-      for (const kf of frag.key_files) {
-        lines.push(`  - ${kf}`);
-      }
-    }
-    if (frag.key_decisions && frag.key_decisions.length > 0) {
-      lines.push('**Key decisions:**');
-      for (const kd of frag.key_decisions) {
-        lines.push(`  - ${kd}`);
-      }
-    }
-
-    // Only emit body when no structured fields were parsed — body is derived
-    // from the raw block and duplicates structured fields when they are present.
-    if (!hasStructured && frag.body) {
-      lines.push('');
-      lines.push(frag.body);
-    }
-
-    lines.push('');
-    lines.push('---');
-    lines.push('');
+    lines.push(...renderLedgerBlock(frag, id));
   }
 
   return lines.join('\n');
+}
+
+// ── renderLedgerBlock ─────────────────────────────────────────────────────────
+// The shape of ONE ledger entry as it appears in LEDGER.md, extracted from
+// renderLedger so the D4 line cap in forge-ledger.js measures the very same
+// bytes the reader sees. A second copy of this shape would let the cap drift
+// away from the thing it claims to measure, so this function is the only place
+// the block shape exists.
+//
+// Returns the block lines INCLUDING the trailing separation ('', '---', '') —
+// renderLedger relies on them. The cap is about the entry's own content, not
+// the punctuation between entries, so callers measuring size subtract
+// LEDGER_BLOCK_SEPARATOR_LINES (see forge-ledger.js).
+const LEDGER_BLOCK_SEPARATOR_LINES = 3;
+
+function renderLedgerBlock(frag, id) {
+  const lines = [];
+
+  // Emit block header
+  lines.push(`## ${frag.id || id}`);
+  if (frag.title) lines.push(`**${frag.title}**`);
+  if (frag.completed_at) lines.push(`Completed: ${frag.completed_at}`);
+  lines.push('');
+
+  const hasStructured = (frag.slices && frag.slices.length > 0)
+    || (frag.key_files && frag.key_files.length > 0)
+    || (frag.key_decisions && frag.key_decisions.length > 0);
+
+  if (frag.slices && frag.slices.length > 0) {
+    lines.push(`**Slices:** ${frag.slices.join(', ')}`);
+  }
+  if (frag.key_files && frag.key_files.length > 0) {
+    lines.push('**Key files:**');
+    for (const kf of frag.key_files) {
+      lines.push(`  - ${kf}`);
+    }
+  }
+  if (frag.key_decisions && frag.key_decisions.length > 0) {
+    lines.push('**Key decisions:**');
+    for (const kd of frag.key_decisions) {
+      lines.push(`  - ${kd}`);
+    }
+  }
+
+  // Only emit body when no structured fields were parsed — body is derived
+  // from the raw block and duplicates structured fields when they are present.
+  if (!hasStructured && frag.body) {
+    lines.push('');
+    lines.push(frag.body);
+  }
+
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  return lines;
 }
 
 // ── renderDecisions ───────────────────────────────────────────────────────────
@@ -923,6 +944,8 @@ function writeAll(cwd, opts) {
 // ── Module exports ────────────────────────────────────────────────────────────
 module.exports = {
   renderLedger,
+  renderLedgerBlock,
+  LEDGER_BLOCK_SEPARATOR_LINES,
   renderDecisions,
   projectMemoryEntries,
   queryMemoryEntries,
