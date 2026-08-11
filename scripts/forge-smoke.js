@@ -15546,6 +15546,97 @@ function smokeLedgerSnapshotRendered() {
     + 'blind; and the template-level assert targets plan-slice.md, the executable template, never the prose mirror');
 }
 
+// ── Section 103: memory-index command proven in the EXECUTABLE TEMPLATE and ──
+// ── in the RENDERED plan-slice prompt (D3: command, not content) ─────────────
+//
+// T02 wired a query command for scripts/forge-memory-index.js into
+// shared/templates/dispatch/plan-slice.md, deliberately never the full index
+// content (D3 — the whole point of --file is that the consult stays cheap).
+// The MEM002 / PR #77 lesson is that a guard anchored on shared/forge-dispatch.md
+// (the prose mirror) proves nothing about what forge-prompt.js actually reads —
+// so this section asserts on BOTH: the executable template read straight off
+// disk, and a real rendered plan-slice prompt produced by renderPrompt (mold:
+// Section 102). A positive control (plan-slice sees the command) is asserted
+// BEFORE the negative control (execute-task does not) so the absence assert is
+// never a blind, always-green predicate. The token ceiling on the section is
+// what makes "command, not content" falsifiable: if anyone ever inlines index
+// facts into this block, the section grows past the ceiling and turns red.
+function smokeMemoryIndexCommandRendered() {
+  process.stdout.write('\n▸ Section 103: memory-index command in the executable template and the rendered plan-slice prompt\n');
+  const { renderPrompt } = require('./forge-prompt.js');
+  const { countTokens } = require('./forge-tokens.js');
+  const repoRoot = path.dirname(SCRIPTS);
+  const templateDir = path.join(repoRoot, 'shared', 'templates', 'dispatch');
+  const dir = mkTmp('memory-index-command-rendered');
+  try {
+    // (a) executable template, never the prose mirror (MEM002 / PR #77).
+    const sliceTemplate = readRepoText(path.join(templateDir, 'plan-slice.md'));
+    const cmdLine = sliceTemplate.split('\n').find(l => l.includes('forge-memory-index.js'));
+    assert(!!cmdLine,
+      '(a) shared/templates/dispatch/plan-slice.md (executable template) contains a forge-memory-index.js command line');
+    assert(!!cmdLine && cmdLine.includes('--file'),
+      '(a) the same command line also carries --file, never a bare invocation',
+      cmdLine || '(no line found)');
+    assert(!!cmdLine && /--cwd\s+"\{WORKING_DIR\}"/.test(cmdLine),
+      '(a) --cwd is quoted around {WORKING_DIR} in the template line — S02/R1: a bare path with a space breaks a pasted command',
+      cmdLine || '(no line found)');
+
+    // (b) rendered prompt — placeholders resolved, {WORKING_DIR} value quoted.
+    const slice = renderPrompt({
+      cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01', templateDir, memories: [],
+    });
+    const renderedLine = slice.prompt.split('\n').find(l => l.includes('forge-memory-index.js'));
+    assert(!!renderedLine, '(b) rendered plan-slice prompt contains a forge-memory-index.js command line');
+    assert(!!renderedLine && !/\{[A-Z_]+\}/.test(renderedLine),
+      '(b) no raw {PLACEHOLDER} token survives on the rendered command line — every brace was resolved',
+      renderedLine || '(no line found)');
+    assert(!!renderedLine && renderedLine.includes('--file'),
+      '(b) the rendered command line also carries --file');
+    assert(!!renderedLine && new RegExp(`--cwd\\s+"${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`).test(renderedLine),
+      '(b) --cwd is quoted around the resolved WORKING_DIR value on the rendered line',
+      renderedLine || '(no line found)');
+
+    // (c) controls — positive ordered before negative, so the absence assert
+    // below is never a blind predicate (Section 102 mold).
+    assert(slice.prompt.includes('forge-memory-index.js'),
+      '(c control) positive control — the predicate DOES see the command when it is actually injected (plan-slice)');
+    const task = renderPrompt({
+      cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', templateDir, memories: [],
+    });
+    assert(!task.prompt.includes('forge-memory-index.js'),
+      '(c) rendered execute-task prompt does not carry the memory-index command');
+    const execTemplate = readRepoText(path.join(templateDir, 'execute-task.md'));
+    assert(!execTemplate.includes('forge-memory-index.js'),
+      '(c) shared/templates/dispatch/execute-task.md (executable template) does not carry the memory-index command');
+
+    // (d) D3 — command, not content: the section itself stays under a small
+    // fixed token ceiling, and the rendered prompt never carries an actual
+    // index fact line or the index artifact's own header. If someone later
+    // injects index content here, both asserts below turn red — that is the
+    // design (T03 must-have #4).
+    const sectionMatch = sliceTemplate.match(/## Memory Index[\s\S]*?(?=\n## Instructions)/);
+    assert(!!sectionMatch, '(d) shared/templates/dispatch/plan-slice.md carries a ## Memory Index section');
+    const sectionTokens = sectionMatch ? countTokens(sectionMatch[0]) : Infinity;
+    assert(sectionTokens <= 150,
+      `(d D3) the ## Memory Index section measures <= 150 tokens (command, not content) — measured ${sectionTokens}`);
+    assert(!slice.prompt.includes('# Índice de memória por arquivo-fonte'),
+      '(d D3) rendered plan-slice prompt does NOT contain the memory-index artifact\'s own header');
+    assert(!/—\s*origem:\s*/.test(slice.prompt),
+      '(d D3) rendered plan-slice prompt does NOT contain an index fact line ("— origem: ")');
+
+    // (e) registered in main().
+    const mainBody = fs.readFileSync(__filename, 'utf8').slice(fs.readFileSync(__filename, 'utf8').lastIndexOf('async function main()'));
+    assert(/smokeMemoryIndexCommandRendered\(\);/.test(mainBody), '(e) Section 103 is registered in main()');
+  } finally {
+    cleanup(dir);
+  }
+  pass('(final) Section 103: the memory-index query command lands in shared/templates/dispatch/plan-slice.md (the '
+    + 'executable template, never the prose mirror — MEM002) and in a real rendered plan-slice prompt with placeholders '
+    + 'resolved and --cwd quoted; execute-task carries neither (template nor render), proven with a positive control '
+    + 'ordered first; and the section itself measures <= 150 tokens with no index fact line ever landing in the '
+    + 'rendered prompt — command, not content (D3)');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -15663,6 +15754,7 @@ async function main() {
       () => { smokeTransportField(); },
       () => { smokeRoutingDomainsRendered(); },
       () => { smokeLedgerSnapshotRendered(); },
+      () => { smokeMemoryIndexCommandRendered(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {
