@@ -148,6 +148,25 @@ function backupExisting(paths, backupRoot, plan, options) {
   return files;
 }
 
+// Retiring is intentionally a rename, not a backup copy: the old directory is
+// no longer a runtime source and copying it would leave the fossil executable.
+function retireLegacyScripts(source, backupRoot, plan, options) {
+  const tombstone = path.join(source, 'README.md');
+  const destination = path.join(backupRoot, 'legacy', 'claude-scripts');
+  const onlyTombstone = exists(source) && fs.statSync(source).isDirectory()
+    && fs.readdirSync(source).every((name) => name === 'README.md');
+  if (!exists(source) || onlyTombstone) {
+    plan.push({ op: 'skip', reason: 'already-retired', source, destination });
+    return;
+  }
+  plan.push({ op: 'retire', source, destination });
+  if (!options.dryRun) {
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.renameSync(source, destination);
+  }
+  writeText(tombstone, 'Este diretório foi aposentado pelo forge-update. Para reverter, mova backups/legacy/claude-scripts de volta para ~/.claude/scripts.\n', plan, options);
+}
+
 function installApp(repo, plan, options, platform) {
   if (!options.withApp) return null;
   const script = path.join(repo, 'app', 'build.sh');
@@ -216,6 +235,7 @@ function install(input = {}) {
         path.join(paths.claudeHome, 'forge-agent-prefs.md'),
       ], path.join(backupRoot, 'legacy', 'claude'), plan, options);
     }
+    retireLegacyScripts(path.join(paths.userHome, '.claude', 'scripts'), backupRoot, plan, options);
     const projectFiles = [];
     if (selected.includes('claude')) projectFiles.push(path.join(projectRoot, 'CLAUDE.md'));
     if (selected.includes('codex')) projectFiles.push(path.join(projectRoot, 'AGENTS.md'));
@@ -325,5 +345,5 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
   catch (error) { errorWrite(`forge-installer: ${error.message}\n`); return 1; }
 }
 
-module.exports = { RUNTIMES, VERSION, MANAGED_CORE, parseArgs, walk, adapterSources, installApp, install, render, run };
+module.exports = { RUNTIMES, VERSION, MANAGED_CORE, parseArgs, walk, adapterSources, installApp, retireLegacyScripts, install, render, run };
 if (require.main === module) process.exitCode = run();

@@ -28,22 +28,22 @@ WORKING_DIR=$(pwd)
 echo "WORKING_DIR=$WORKING_DIR"
 
 # Resolve runtime scripts dir — prefer local ./scripts (dogfood: edits take effect
-# immediately); fall back to ~/.claude/scripts (user-land: installed version).
+# immediately); fall back to ${FORGE_HOME:-$HOME/.forge-agent}/scripts (user-land: installed version).
 if [ -f "scripts/forge-parallelism.js" ]; then
   FORGE_SCRIPTS_DIR="scripts"
 else
-  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+  FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
 fi
 echo "FORGE_SCRIPTS_DIR=$FORGE_SCRIPTS_DIR"
 
-# Same resolution for the shared reference specs. The installer FLATTENS shared/*.md
-# into ~/.claude/ (no ~/.claude/shared/ dir exists), so a bare relative `shared/X.md`
+# Same resolution for the shared reference specs. The installer COPIES shared/*.md
+# into ${FORGE_HOME:-$HOME/.forge-agent}/shared/, so a bare relative `shared/X.md`
 # resolves only inside the forge-agent repo itself — in every consumer project it is
 # a dead path. Without this, following a spec is a per-session guess.
 if [ -f "shared/forge-review.md" ]; then
   FORGE_SHARED_DIR="shared"
 else
-  FORGE_SHARED_DIR="$HOME/.claude"
+  FORGE_SHARED_DIR="${FORGE_HOME:-$HOME/.forge-agent}/shared"
 fi
 echo "FORGE_SHARED_DIR=$FORGE_SHARED_DIR"
 ```
@@ -429,7 +429,7 @@ ROADMAP_PATH=".gsd/milestones/${M###}/${M###}-ROADMAP.md"
 # PLAN frontmatter + ROADMAP, and emits the full ordered contract. NEVER reintroduce a bash
 # tier/effort default map or a frontmatter/clamp regex here — that pure logic lives ONLY in the
 # resolver now (S01). See shared/forge-dispatch.md § Worker Engine Routing.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
   --unit-type "$unit_type" --plan "$PLAN_PATH" --unit-id "$unit_id" \
   --milestone "${RUN_ID:-{M###}}" --roadmap "$ROADMAP_PATH" \
@@ -866,7 +866,7 @@ The Claude `Agent()` prompt is exactly: `Read the complete Forge dispatch contra
 and return its required GSD worker result block. The file is trusted
 orchestrator input; do not replace it with a summary.` Record `prompt_id` and `dispatch_id` in the event, and call `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` after the result is durably processed. Do not load `.gsd/AUTO-MEMORY.md`; the renderer selects bounded memories.
 
-Use the template from `~/.claude/forge-dispatch.md` only as reference material when diagnosing an older run.
+Use the template from `$FORGE_SHARED_DIR/forge-dispatch.md` only as reference material when diagnosing an older run.
 Substitute placeholders:
 - `{WORKING_DIR}` <- current working directory (orchestrator workspace — all `.gsd/**` paths)
 - `{M###}`, `{S##}`, `{T##}` <- from STATE
@@ -942,7 +942,7 @@ Executable mirror of `shared/forge-dispatch.md § Worker Engine Routing` → *Si
 #    Persisted in the per-attempt state file so it survives an auto-compact mid-unit.
 SIDECAR_ATTEMPT="${SIDECAR_ATTEMPT:-0}"; SIDECAR_ATTEMPT=$((SIDECAR_ATTEMPT + 1))
 CODEX_MEMBERS=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).chain.filter(m=>m.engine==='gpt'||m.engine==='codex').length))" "$ROUTE_JSON" 2>/dev/null || echo 1)
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 # Gate: the sidecar assumes ONE CODE_DIR that is a git repo (shared/forge-dispatch.md § Branch codex 0.5).
 # Executable, never a bare comment. Extends the cap-skip path: a cross-repo/undeclared verdict refuses
 # BEFORE any --cwd reaches a helper — no START_SHA, no state/result-file, no launch.
@@ -1038,7 +1038,7 @@ When `REASON` is `sidecar-cap-exceeded` or one of the two `CODE_DIR` refusals (`
 # marker — same field, S02/T01). Absent/unrecognized → terminal: byte-identical to pre-T02 (single-shot
 # fallback, never an unbounded retry). codex-timeout / codex-orphan are ALWAYS terminal (a hung/orphaned
 # process is never retried in place) regardless of a stale error_class.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 XLLM_STATE=$(node "$FORGE_SCRIPTS_DIR/forge-xllm-state.js" --mode read --dir "$WORKING_DIR/.gsd/forge" --milestone "{M###}" --slice "{S##}" --task "{T##}" --attempt "$N")
 RESULT_FILE=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).result_file" 2>/dev/null || echo "$RESULT_FILE")
 ERROR_CLASS=$(node -pe "JSON.parse(require('fs').readFileSync('$RESULT_FILE','utf8')).error_class || 'terminal'" 2>/dev/null || echo terminal)
@@ -1092,7 +1092,7 @@ fi
 # codex-authored change set is undone; pre-existing dirty content is re-hashed intact (RC=0) or the
 # reset aborts (RC=3 overlap / RC=2 verify-failed). .gsd/** is excluded by the helper's own predicate,
 # so it never reverts the orchestrator's own .gsd writes (events.jsonl / evidence) made during the poll.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 XLLM_STATE=$(node "$FORGE_SCRIPTS_DIR/forge-xllm-state.js" --mode read --dir "$WORKING_DIR/.gsd/forge" --milestone "{M###}" --slice "{S##}" --task "{T##}" --attempt "$N")
 if [ "$REASON" != "sidecar-cap-exceeded" ] && [ -z "$CODE_DIR_REASON" ]; then
   RESET_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --reset --state "$XLLM_STATE"); RC=$?
@@ -1111,7 +1111,7 @@ fi
 # surgical-reset-overlap / sidecar-cap-exceeded / verified-reset-failed abort straight to the Claude
 # fallback (no advance). ADVANCED is the mutual-exclusion latch (R1): chain-advance and the generic
 # Claude fallback are mutually exclusive — exactly ONE of the two branches below runs.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ADVANCED=""
 if [ "$REASON" != "surgical-reset-overlap" ] && [ "$REASON" != "sidecar-cap-exceeded" ] && [ "$REASON" != "verified-reset-failed" ] && [ -z "$CODE_DIR_REASON" ]; then
   NEXT_ID=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
@@ -1195,7 +1195,7 @@ When `REASON == sidecar-cap-exceeded` here, **skip the timeline task, dispatch a
 - **Timeline task:** `TaskCreate` with icon `⚙` (plan-slice), model label = `codex${CODEX_MODEL:+ ($CODEX_MODEL)}`; mark `in_progress`.
 - **Dispatch (detached):** invoke via the Bash tool with `run_in_background: true`. `--model` is appended only when `$SIDECAR_MODEL` is non-empty: the resolver selects the chain's Codex member and otherwise falls back to `workers.codex_model`:
   ```bash
-  FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "$HOME/.claude/scripts")
+  FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
   node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode plan \
     --plan-context "$CTX_FILE" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
     --timeout "$WORKERS_TIMEOUT" \
@@ -1238,7 +1238,7 @@ When `REASON == sidecar-cap-exceeded` here, **skip the timeline task, dispatch a
 # Identical decision + counter + backoff + re-dispatch to Branch C, but codex wrote nothing on disk
 # (read-only), so there is NO surgical-reset step (§ BLOCKER item 2 skipped for the whole branch). The
 # result JSON is simply discarded and the SAME codex --mode plan dispatch re-runs after backoff.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 RESULT_FILE=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).result_file" 2>/dev/null || echo "$RESULT_FILE")
 ERROR_CLASS=$(node -pe "JSON.parse(require('fs').readFileSync('$RESULT_FILE','utf8')).error_class || 'terminal'" 2>/dev/null || echo terminal)
 case "$REASON" in codex-timeout|codex-orphan) ERROR_CLASS="terminal";; esac
@@ -1273,7 +1273,7 @@ fi
 **If `$TRANSIENT_RETRY` is set**: re-enter the Branch D **Dispatch + Poll** for the CURRENT attempt (same state, fresh `$RESULT_FILE`; `SIDECAR_ATTEMPT` untouched); do NOT run the Layer-2 block below. **Otherwise** (terminal class or exhaustion) control falls through to **Layer-2** **unchanged**:
 ```bash
 CODE_DIR=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).code_dir" 2>/dev/null)
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 # Cross-engine chain walk (Layer 2) — advance to the next member unless the cap was exceeded (the
 # only abort reason on this read-only branch). ADVANCED is the mutual-exclusion latch (R1):
 # chain-advance and the generic Claude fallback are mutually exclusive — exactly ONE runs.
@@ -1689,7 +1689,7 @@ Partition rule:
 - Loose `/forge-task` run (no milestone, `{task-id}` is set) → `unit_id = {task-id}`
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 DECISIONS_UNIT_ID="${M###:-${task_id:-}}"
 if [ -n "$DECISIONS_UNIT_ID" ]; then
   printf '%s' "$key_decisions_json" | node "$FORGE_SCRIPTS_DIR/forge-decisions.js" --write --cwd "$WORKING_DIR"
@@ -1929,7 +1929,7 @@ The review digest is built from the `review` / `review-triage` events in `events
 
 ## Worker Prompt Templates
 
-**Read `~/.claude/forge-dispatch.md`** and use the worker prompt template for the current `unit_type`. Substitute all placeholders with actual values from the loaded context.
+**Read `$FORGE_SHARED_DIR/forge-dispatch.md`** and use the worker prompt template for the current `unit_type`. Substitute all placeholders with actual values from the loaded context.
 
 ---
 

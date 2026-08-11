@@ -21,9 +21,9 @@ que ele pode trocar sem relançar.
 ## Localizar o engine
 
 ```bash
-FA="$HOME/.claude/scripts/forge-accounts.js"
+FA="${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-accounts.js"
 if [ ! -f "$FA" ]; then
-  PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="$HOME/.claude/scripts/forge-prefs.js"
+  PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs.js"
   REPO=$(node "$PREFS_ENGINE" --resolved --key repo_path 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(v?String(v):'')}catch{process.stdout.write('')}})")
   [ -n "$REPO" ] && FA="$REPO/scripts/forge-accounts.js"
 fi
@@ -84,7 +84,7 @@ Notas para mencionar quando fizer sentido:
   `setup-token` — cada execução pega o token da conta logada naquele momento.
 - Se o comando `forge-accounts` não for encontrado, o `~/.local/bin` não está no PATH:
   rode `export PATH="$HOME/.local/bin:$PATH"` (ou use a forma longa
-  `node ~/.claude/scripts/forge-accounts.js --add <nome>`).
+  `node ${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-accounts.js --add <nome>`).
 - Alternativas (raramente necessárias): `forge-accounts add <nome> --token <sk-ant-oat01-…>`
   para um token já gerado, ou paste via stdin.
 

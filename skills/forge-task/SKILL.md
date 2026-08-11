@@ -77,14 +77,15 @@ Read:
 if [ -f "scripts/forge-prefs.js" ]; then
   FORGE_SCRIPTS_DIR="scripts"
 else
-  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+  FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
 fi
-# Same resolution for the shared reference specs — the installer FLATTENS shared/*.md
-# into ~/.claude/, so a bare relative `shared/X.md` is a dead path in every consumer project.
+# Same resolution for the shared reference specs — the installer COPIES shared/*.md
+# into ${FORGE_HOME:-$HOME/.forge-agent}/shared/, so a bare relative `shared/X.md`
+# is a dead path in every consumer project.
 if [ -f "shared/forge-review.md" ]; then
   FORGE_SHARED_DIR="shared"
 else
-  FORGE_SHARED_DIR="$HOME/.claude"
+  FORGE_SHARED_DIR="${FORGE_HOME:-$HOME/.forge-agent}/shared"
 fi
 WORKING_DIR="${WORKING_DIR:-$(pwd)}"
 PREFS_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --explain --cwd "$WORKING_DIR")
@@ -136,7 +137,7 @@ if [ -n "$ITEM_REF" ]; then
   if [ -f "scripts/forge-items.js" ]; then
     FORGE_SCRIPTS_DIR="scripts"
   else
-    FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+    FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
   fi
   WORKING_DIR="${WORKING_DIR:-$(pwd)}"
 
@@ -197,7 +198,7 @@ fi
 if [ -f "scripts/forge-runs.js" ]; then
   FORGE_SCRIPTS_DIR="scripts"
 else
-  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+  FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
 fi
 ```
 
@@ -455,7 +456,7 @@ Write {TASK_ID}-CONTEXT.md to .gsd/tasks/{TASK_ID}/ with sections:
   ## Decisions, ## Agent's Discretion, ## Open Questions, ## Out of Scope
 Append significant decisions to the **fragment store** via `forge-decisions.js --write` (stdin JSON) — do NOT write to `.gsd/DECISIONS.md` directly. Use:
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 printf '%s' "$key_decisions_json" | node "$FORGE_SCRIPTS_DIR/forge-decisions.js" --write --cwd "$WORKING_DIR"
 ```
 Where `key_decisions_json` is `{ "unit_id": "{TASK_ID}", "decisions": [{when, scope, decision, choice, rationale, revisable}, ...] }`. The global `.gsd/DECISIONS.md` is rebuilt from fragments during `complete-milestone` (forge-merger).
@@ -635,7 +636,7 @@ Roda o handshake do plan gate (spec autoritativa: `shared/forge-plan-gate.md`) n
 Resolve prefs once through the S01 engine CLI (never a `files=[…forge-agent-prefs.jsonc…]` cascade merge) — see `shared/forge-dispatch.md § Per-unit prefs resolution` and `shared/forge-plan-gate.md § Step 0`.
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 PREFS_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --cwd "$WORKING_DIR")
 if [ $? -ne 0 ]; then
   # M008-CONTEXT decision #2 — loud stop, never a silent default. errors[] (file+line)
@@ -869,7 +870,7 @@ node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --baseline --cwd "${CODE_DIR:-.}" > .gsd/
 # forge-prefs.js --resolved call (reads the jsonc catalog per layer; legacy Markdown without jsonc
 # hard-stops — see shared/forge-prefs-cutover.md; NEVER a 3-file cascade node -e merge,
 # MEM001 M005). See shared/forge-dispatch.md § Per-unit prefs resolution.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 PREFS_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --cwd "$WORKING_DIR")
 if [ $? -ne 0 ]; then
   # Loud stop (M008-CONTEXT #2): errors[] ({file,line,message}) on stdout, human hint on stderr.
@@ -886,7 +887,7 @@ fi
 # it (frontmatter worker: > routing: > pref > default precedence owned by the resolver, MEM018 reads
 # prefs from $WORKING_DIR). Loose task → NO --roadmap (risk-escalation inert). --cwd "$WORKING_DIR".
 PLAN_PATH=".gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN.md"
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
   --unit-type execute-task --plan "$PLAN_PATH" --unit-id "{TASK_ID}" --cwd "$WORKING_DIR" --json)
 if [ $? -ne 0 ]; then
@@ -1032,7 +1033,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\"
 # — same field, S02/T01). Absent/unrecognized → terminal: byte-identical to pre-T02 (single-shot
 # fallback, never an unbounded retry). codex-timeout / codex-orphan are ALWAYS terminal (a hung/orphaned
 # process is never retried in place) regardless of a stale error_class.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 RESULT_FILE=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).result_file" 2>/dev/null || echo "$RESULT_FILE")
 ERROR_CLASS=$(node -pe "JSON.parse(require('fs').readFileSync('$RESULT_FILE','utf8')).error_class || 'terminal'" 2>/dev/null || echo terminal)
 case "$REASON" in codex-timeout|codex-orphan) ERROR_CLASS="terminal";; esac
@@ -1346,7 +1347,7 @@ Agent("forge-memory", "WORKING_DIR: {WORKING_DIR}\nUNIT_TYPE: execute-task\nUNIT
 
 **Write ledger entry to fragment store** — pipe a JSON payload to `forge-ledger.js --write`. The global LEDGER is rebuilt from fragments by the merger; do not append to it directly.
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-ledger.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-ledger.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 node "$FORGE_SCRIPTS_DIR/forge-ledger.js" --write --cwd . <<'EOF'
 {
   "id": "{TASK_ID}",

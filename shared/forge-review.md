@@ -25,8 +25,8 @@ The human only adjudicates what the two AIs genuinely disagree on. Everything el
 - `{S##}` — slice being completed
 - `MODE` — `interactive` (forge-next) or `auto` (forge-auto)
 - `FORGE_SCRIPTS_DIR` / `FORGE_SHARED_DIR` — resolved by the calling skill's bootstrap. Every
-  `scripts/<x>.js` and `shared/<x>.md` named below is opened through them; the installer flattens
-  `shared/*.md` into `~/.claude/`, so the bare relative path only exists inside the forge-agent
+  `scripts/<x>.js` and `shared/<x>.md` named below is opened through them; the installer copies
+  `shared/*.md` into `${FORGE_HOME:-$HOME/.forge-agent}/shared/`, so the bare relative path only exists inside the forge-agent
   repo. If the calling skill did not export them, resolve them the same way before Step 0.
 
 > **This spec is executed, not consulted.** Every step below is a procedure with a fixed output
@@ -43,7 +43,7 @@ The human only adjudicates what the two AIs genuinely disagree on. Everything el
 Resolve prefs once through the S01 engine CLI (`scripts/forge-prefs.js --resolved`, the canonical per-unit helper defined in `shared/forge-dispatch.md § Per-unit prefs resolution`) — it reads the JSONC catalog per layer, and legacy Markdown without JSONC hard-stops with the canonical repair message in `shared/forge-prefs-cutover.md`, so no `files=[…]` 3-file cascade merge is re-implemented here. Read every `review.*` knob off `.prefs`, applying the SAME whitelist/clamp + default each had inline. The single `REVIEW_CFG` JSON below preserves the exact shape downstream steps consume:
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 PREFS_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --cwd "$WORKING_DIR")
 if [ $? -ne 0 ]; then
   # M008-CONTEXT decision #2 — loud stop, never a silent default. errors[] (file+line)
@@ -75,7 +75,7 @@ process.stdout.write(JSON.stringify({mode,style,trigger,adaptiveFlagsLines,adapt
 CHALLENGER=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.challenger||'claude')}catch(e){process.stdout.write('claude')}})")
 CHALLENGER_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.challengerModel||'')}catch(e){process.stdout.write('')}})")
 ADVOCATE_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.advocateModel||'')}catch(e){process.stdout.write('')}})")
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-model-alias.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-model-alias.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")
 # Adapter engine for the external challenger: codex → `codex app-server` (protocolo JSONL), gemini → `agy --print` (Antigravity CLI)
 XLLM_ENGINE=$([ "$CHALLENGER" = "gemini" ] && echo agy || echo codex)

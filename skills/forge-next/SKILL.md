@@ -21,21 +21,22 @@ WORKING_DIR=$(pwd)
 echo "WORKING_DIR=$WORKING_DIR"
 
 # Resolve runtime scripts dir — prefer local ./scripts (dogfood: edits take effect
-# immediately); fall back to ~/.claude/scripts (user-land: installed version).
+# immediately); fall back to ${FORGE_HOME:-$HOME/.forge-agent}/scripts (user-land: installed version).
 if [ -f "scripts/forge-parallelism.js" ]; then
   FORGE_SCRIPTS_DIR="scripts"
 else
-  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+  FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
 fi
 echo "FORGE_SCRIPTS_DIR=$FORGE_SCRIPTS_DIR"
 
-# Same resolution for the shared reference specs — the installer FLATTENS shared/*.md
-# into ~/.claude/, so a bare relative `shared/X.md` is a dead path in every consumer
+# Same resolution for the shared reference specs — the installer COPIES shared/*.md
+# into ${FORGE_HOME:-$HOME/.forge-agent}/shared/, so a bare relative `shared/X.md`
+# is a dead path in every consumer
 # project. See the path convention note right below this block.
 if [ -f "shared/forge-review.md" ]; then
   FORGE_SHARED_DIR="shared"
 else
-  FORGE_SHARED_DIR="$HOME/.claude"
+  FORGE_SHARED_DIR="${FORGE_HOME:-$HOME/.forge-agent}/shared"
 fi
 echo "FORGE_SHARED_DIR=$FORGE_SHARED_DIR"
 ```
@@ -216,7 +217,7 @@ ROADMAP_PATH=".gsd/milestones/${M###}/${M###}-ROADMAP.md"
 # PLAN frontmatter + ROADMAP, and emits the full ordered contract. NEVER reintroduce a bash
 # tier/effort default map or a frontmatter/clamp regex here — that pure logic lives ONLY in the
 # resolver now (S01). See shared/forge-dispatch.md § Worker Engine Routing.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
   --unit-type "$unit_type" --plan "$PLAN_PATH" --unit-id "$unit_id" \
   --milestone "${RUN_ID:-{M###}}" --roadmap "$ROADMAP_PATH" \
@@ -846,7 +847,7 @@ Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` se
 
 > For human-readable consolidation, run `/forge-doctor --regen-projection` to rebuild the monolith from fragments (writes `AUTO-MEMORY.md` via `forge-memory.js --write-all`). See `forge-projection` in doctor help.
 
-Use the template from `~/.claude/forge-dispatch.md` for the current `unit_type`.
+Use the template from `$FORGE_SHARED_DIR/forge-dispatch.md` for the current `unit_type`.
 Substitute placeholders:
 - `{WORKING_DIR}` <- current working directory (orchestrator workspace — all `.gsd/**` paths)
 - `{M###}`, `{S##}`, `{T##}` <- from STATE
@@ -997,7 +998,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\"
 # marker — same field, S02/T01). Absent/unrecognized → terminal: byte-identical to pre-T02 (single-shot
 # fallback, never an unbounded retry). codex-timeout / codex-orphan are ALWAYS terminal (a hung/orphaned
 # process is never retried in place) regardless of a stale error_class.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 XLLM_STATE=$(node "$FORGE_SCRIPTS_DIR/forge-xllm-state.js" --mode read --dir "$WORKING_DIR/.gsd/forge" --milestone "{M###}" --slice "{S##}" --task "{T##}" --attempt "$N")
 RESULT_FILE=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).result_file" 2>/dev/null || echo "$RESULT_FILE")
 ERROR_CLASS=$(node -pe "JSON.parse(require('fs').readFileSync('$RESULT_FILE','utf8')).error_class || 'terminal'" 2>/dev/null || echo terminal)
@@ -1141,7 +1142,7 @@ fi
 
 3. **Dispatch detached via `run_in_background: true`**, `--mode plan` + `--plan-context` instead of `--plan`; `--model` is appended only when `$SIDECAR_MODEL` is non-empty; the resolver selects the chain's Codex member, then falls back to `workers.codex_model`:
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode plan \
   --plan-context "$CTX_FILE" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
   --timeout "$WORKERS_TIMEOUT" \
@@ -1185,7 +1186,7 @@ and **rejoin the normal `plan-slice` completion path**: the **plan-check gate**,
 # Identical decision + counter + backoff + re-dispatch to Branch C, but codex wrote nothing on disk
 # (read-only), so there is NO surgical-reset step (§ BLOCKER item 2 skipped for the whole branch). The
 # result JSON is simply discarded and the SAME codex --mode plan dispatch re-runs after backoff.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-surgical-reset.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 RESULT_FILE=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).result_file" 2>/dev/null || echo "$RESULT_FILE")
 ERROR_CLASS=$(node -pe "JSON.parse(require('fs').readFileSync('$RESULT_FILE','utf8')).error_class || 'terminal'" 2>/dev/null || echo terminal)
 case "$REASON" in codex-timeout|codex-orphan) ERROR_CLASS="terminal";; esac
@@ -1407,7 +1408,7 @@ Partition rule:
 - Loose `/forge-task` run (no milestone, `{task-id}` is set) → `unit_id = {task-id}`
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 DECISIONS_UNIT_ID="${M###:-${task_id:-}}"
 if [ -n "$DECISIONS_UNIT_ID" ]; then
   printf '%s' "$key_decisions_json" | node "$FORGE_SCRIPTS_DIR/forge-decisions.js" --write --cwd "$WORKING_DIR"
@@ -1495,7 +1496,7 @@ Display the progress line AND the next action (read from the per-run `M###-STATE
 
 ## Worker Prompt Templates
 
-**Read `~/.claude/forge-dispatch.md`** and use the worker prompt template for the current `unit_type`. Substitute all placeholders with actual values from the loaded context.
+**Read `$FORGE_SHARED_DIR/forge-dispatch.md`** and use the worker prompt template for the current `unit_type`. Substitute all placeholders with actual values from the loaded context.
 
 ---
 

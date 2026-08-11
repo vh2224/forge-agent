@@ -208,7 +208,7 @@ Adicionar/atualizar a linha deste probe com verdict + tags.
 
 ```bash
 # Ler auto_commit das prefs (canonical CLI — jsonc)
-PREFS_ENGINE=$([ -f scripts/forge-prefs.js ] && echo scripts/forge-prefs.js || echo "$HOME/.claude/scripts/forge-prefs.js")
+PREFS_ENGINE=$([ -f scripts/forge-prefs.js ] && echo scripts/forge-prefs.js || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs.js")
 AUTO_COMMIT=$(node "$PREFS_ENGINE" --resolved --key auto_commit 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(String(v).toLowerCase()==='true'?'true':'false')}catch{process.stdout.write('false')}})")
 
 if [ "$AUTO_COMMIT" = "true" ]; then

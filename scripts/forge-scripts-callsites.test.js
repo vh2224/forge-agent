@@ -1,0 +1,116 @@
+#!/usr/bin/env node
+'use strict';
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const guard = require('./forge-scripts-callsites.js');
+let passed = 0;
+let skipped = 0;
+function test(name, fn) {
+  const result = fn();
+  if (result && result.skip) { skipped++; process.stdout.write(`  - ${name} (skipped: ${result.skip})\n`); return; }
+  passed++;
+  process.stdout.write(`  [PASS] ${name}\n`);
+}
+function fixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-scripts-callsites-'));
+  for (const dir of ['agents', 'commands', 'skills', 'shared', 'bin']) fs.mkdirSync(path.join(root, dir), { recursive: true });
+  fs.writeFileSync(path.join(root, 'commands', 'one.md'), 'FORGE_SCRIPTS_DIR=$([ -f scripts/a.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")\n');
+  fs.writeFileSync(path.join(root, 'skills', 'bare.md'), 'FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"\nTOOL="$FORGE_SCRIPTS_DIR/a.js"\n');
+  fs.writeFileSync(path.join(root, 'shared', 'shared.md'), 'FORGE_SHARED_DIR="${FORGE_HOME:-$HOME/.forge-agent}/shared"\n');
+  fs.writeFileSync(path.join(root, 'bin', 'run'), '#!/usr/bin/env bash\nENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/a.js"\n');
+  fs.writeFileSync(path.join(root, 'bin', 'run.cmd'), 'set "FORGE_ROOT=%FORGE_HOME%"\r\nif not defined FORGE_ROOT set "FORGE_ROOT=%USERPROFILE%\\.forge-agent"\r\nset "ENGINE=%FORGE_ROOT%\\scripts\\a.js"\r\n');
+  fs.writeFileSync(path.join(root, 'agents', 'prose.md'), 'The canonical chain uses Forge home.\n');
+  return root;
+}
+const familyFile = { 'one-liner': ['commands/one.md', 'FORGE_SCRIPTS_DIR=$([ -f scripts/a.js ] && echo scripts || echo "~/.claude/scripts")'], 'bare-assign': ['skills/bare.md', 'FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"'], 'aliased-var': ['skills/bare.md', 'TOOL="$HOME/.claude/scripts/a.js"'], 'shared-dir': ['shared/shared.md', 'FORGE_SHARED_DIR="$HOME/.claude"'], 'bin-bash': ['bin/run', 'ENGINE="$HOME/.claude/scripts/a.js"'], 'bin-cmd': ['bin/run.cmd', 'set "ENGINE=%USERPROFILE%\\.claude\\scripts\\a.js"'], prose: ['agents/prose.md', 'The destination was ~/.claude/scripts.'] };
+for (const [family, [relative, bad]] of Object.entries(familyFile)) test(`rejects ${family} with file and line`, () => {
+  const root = fixture(); try { const file = path.join(root, relative); fs.appendFileSync(file, `\n${bad}\n`); const report = guard.scan({ root }); assert.strictEqual(report.outcome, 'findings'); const hit = report.findings.find((x) => x.family === family); assert(hit && hit.path === relative && hit.line > 0); fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(`\n${bad}\n`, '\n')); assert.strictEqual(guard.scan({ root }).outcome, 'clean'); } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+// R3: the prose family used to have no pattern of its own — it was only the
+// fallback label for a literal `.claude/scripts` hit, so prose describing the
+// retired resolution chain in any other wording was invisible.  Bite is proved
+// in both directions: each shape below is a finding, and the legitimate
+// `~/.claude` mentions (runtime home of agents/skills/settings/prefs, layout
+// tables) stay clean — a pattern that flagged those would kill the guard by noise.
+const PROSE_BAD = [
+  'Use the template from `~/.claude/forge-dispatch.md` only as reference material.',
+  'The installer flattens shared/*.md into ~/.claude/, so a bare path is dead.',
+  '# ~/.claude first, then falls back to the repo (repo_path in prefs).',
+  '# Installed by install.sh. Resolves the engine in ~/.claude for dev/dogfood.',
+  'This file lands in `~/.claude/shared/` on the next install run.',
+];
+const PROSE_OK = [
+  'node ~/.claude/forge-settings.js ~/.claude/settings.json --mcp-list',
+  '| `~/.claude/forge-agent-prefs.jsonc` | Global | Modelos por fase |',
+  'ls ~/.claude/skills/ 2>/dev/null',
+  '`forge-agent-prefs.jsonc` ficam no Forge home; `~/.claude` e `~/.codex` são projeções.',
+  '| macOS | `$HOME/.forge-agent` | `$HOME/.claude` | `$HOME/.codex` |',
+];
+test('prose family detects the resolution chain and spares legitimate ~/.claude mentions', () => {
+  const root = fixture();
+  try {
+    const file = path.join(root, 'agents', 'prose.md');
+    const base = fs.readFileSync(file, 'utf8');
+    for (const bad of PROSE_BAD) {
+      fs.writeFileSync(file, `${base}${bad}\n`);
+      const report = guard.scan({ root });
+      assert.strictEqual(report.outcome, 'findings', `prose must be detected: ${bad}`);
+      const hit = report.findings.find((x) => x.family === 'prose');
+      assert(hit && hit.path === 'agents/prose.md', `prose finding must be classified as prose: ${bad}`);
+    }
+    fs.writeFileSync(file, `${base}${PROSE_OK.join('\n')}\n`);
+    const clean = guard.scan({ root });
+    assert.strictEqual(clean.outcome, 'clean', `legitimate mentions must not be findings: ${JSON.stringify(clean.findings)}`);
+    assert.strictEqual(clean.counts_by_family.prose, 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('prose in bin/ is classified as prose, not bin-bash', () => {
+  const root = fixture();
+  try {
+    fs.appendFileSync(path.join(root, 'bin', 'run'), '\n# ~/.claude first, then falls back to the repo.\n');
+    const report = guard.scan({ root });
+    assert.strictEqual(report.outcome, 'findings');
+    assert.strictEqual(report.findings.length, 1);
+    assert.strictEqual(report.findings[0].family, 'prose');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('never says clean for an empty or incomplete census', () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-scripts-empty-')); try { assert.strictEqual(guard.scan({ root }).outcome, 'scan-failed'); fs.mkdirSync(path.join(root, 'agents')); fs.writeFileSync(path.join(root, 'agents', 'a.md'), 'x\n'); const report = guard.scan({ root }); assert.strictEqual(report.outcome, 'scan-failed'); assert(report.missing_families.includes('bin-cmd')); } finally { fs.rmSync(root, { recursive: true, force: true }); } });
+test('real markdown snippets resolve scripts and shared without legacy poison', () => {
+  const scriptSource = fs.readFileSync(path.join(__dirname, '..', 'commands', 'forge-init.md'), 'utf8');
+  const scriptMatch = scriptSource.match(/FORGE_SCRIPTS_DIR=\$\([^\n]+\)/); assert(scriptMatch, 'real scripts snippet');
+  const sharedSource = fs.readFileSync(path.join(__dirname, '..', 'skills', 'forge-next', 'SKILL.md'), 'utf8');
+  const sharedMatch = sharedSource.match(/FORGE_SHARED_DIR="\$\{FORGE_HOME:-\$HOME\/.forge-agent\}\/shared"/); assert(sharedMatch, 'real shared snippet');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-scripts-consumer-'));
+  const home = path.join(root, 'home'); const override = path.join(root, 'override'); const marker = path.join(root, 'legacy-executed');
+  const writeProbe = (file, body) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`); };
+  const run = (code, forgeHome) => spawnSync('bash', ['-c', code], { cwd: root, env: { ...process.env, HOME: home, FORGE_HOME: forgeHome, FORGE_POISON_MARKER: marker }, encoding: 'utf8' });
+  try {
+    for (const base of [path.join(home, '.forge-agent'), override]) {
+      writeProbe(path.join(base, 'scripts', 'probe'), ':');
+      writeProbe(path.join(base, 'shared', 'probe'), ':');
+    }
+    writeProbe(path.join(home, '.claude', 'scripts', 'probe'), 'printf legacy > "$FORGE_POISON_MARKER"');
+    writeProbe(path.join(home, '.claude', 'probe'), 'printf legacy > "$FORGE_POISON_MARKER"');
+    const scriptCode = `${scriptMatch[0]}; "$FORGE_SCRIPTS_DIR/probe"; printf '%s' "$FORGE_SCRIPTS_DIR"`;
+    const sharedCode = `${sharedMatch[0]}; "$FORGE_SHARED_DIR/probe"; printf '%s' "$FORGE_SHARED_DIR"`;
+    let out = run(scriptCode, '');
+    if (out.error && out.error.code === 'ENOENT') return { skip: 'bash unavailable (ENOENT)' };
+    assert.match(out.stdout, /[\\/]home[\\/]\.forge-agent[\\/]scripts$/);
+    assert.strictEqual(fs.existsSync(marker), false, 'legacy scripts poison must not execute');
+    out = run(sharedCode, '');
+    assert.match(out.stdout, /[\\/]home[\\/]\.forge-agent[\\/]shared$/);
+    assert.strictEqual(fs.existsSync(marker), false, 'legacy shared poison must not execute');
+    out = run(scriptCode, override); assert.match(out.stdout, /[\\/]override[\\/]scripts$/);
+    out = run(sharedCode, override); assert.match(out.stdout, /[\\/]override[\\/]shared$/);
+    assert.strictEqual(fs.existsSync(marker), false, 'FORGE_HOME override must not execute legacy poison');
+    const legacyScriptCode = `${scriptMatch[0].replace('${FORGE_HOME:-$HOME/.forge-agent}/scripts', '$HOME/.claude/scripts')}; "$FORGE_SCRIPTS_DIR/probe"`;
+    run(legacyScriptCode, ''); assert.strictEqual(fs.existsSync(marker), true, 'scripts control must execute legacy poison');
+    fs.rmSync(marker);
+    const legacySharedCode = `${sharedMatch[0].replace('${FORGE_HOME:-$HOME/.forge-agent}/shared', '$HOME/.claude')}; "$FORGE_SHARED_DIR/probe"`;
+    run(legacySharedCode, ''); assert.strictEqual(fs.existsSync(marker), true, 'shared control must execute legacy poison');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+process.stdout.write(`[RESULT] ${passed} passed, ${skipped} skipped\n`);

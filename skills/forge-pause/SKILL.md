@@ -11,7 +11,7 @@ allowed-tools: Bash, Read
 if [ -f "scripts/forge-runs.js" ]; then
   FORGE_SCRIPTS_DIR="scripts"
 else
-  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+  FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
 fi
 ```
 

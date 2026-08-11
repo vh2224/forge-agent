@@ -15422,6 +15422,19 @@ function smokeRoutingDomainsRendered() {
   pass('(final) Section 101: real rendered planner prompts carry routing and repository values with a biting fixture guard');
 }
 
+// ── Section 102: canonical Forge script call sites ────────────────────────
+function smokeScriptsCallSitesCanonical() {
+  process.stdout.write('\n▸ Section 102: canonical Forge script call sites\n');
+  const guard = require('./forge-scripts-callsites.js');
+  const report = guard.scan({ root: path.resolve(__dirname, '..') });
+  assert(report.outcome === 'clean', 'real tree is clean above the per-family census floor');
+  for (const family of guard.CALL_SITE_FAMILIES) assert(report.scanned_by_family[family] > 0, `family scanned: ${family}`);
+  const source = fs.readFileSync(__filename, 'utf8');
+  const mainBody = source.slice(source.lastIndexOf('async function main()'));
+  assert(/\(\) => \{ smokeScriptsCallSitesCanonical\(\); \}/.test(mainBody), '(e) Section 102 is registered in main()');
+  pass('Section 102: canonical path guard is clean, census is non-silent, and registration is biting');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -15538,6 +15551,7 @@ async function main() {
       () => { smokeInertRoutes(); },
       () => { smokeTransportField(); },
       () => { smokeRoutingDomainsRendered(); },
+      () => { smokeScriptsCallSitesCanonical(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {

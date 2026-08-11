@@ -232,7 +232,7 @@ If user said **"salvar decisão: [text]"**:
 - <!-- pre-S03: this used to Edit/cat >> .gsd/DECISIONS.md directly -->
 - Invoke via Bash (sidesteps the PreToolUse Write-block since the script does the write):
   ```bash
-  FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "$HOME/.claude/scripts")
+  FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
   SESSION_ID="{session-id}"   # from the active session frontmatter
   echo '{"unit_id":"ask-'"$SESSION_ID"'","decisions":[{"when":"'"$(date +%Y-%m-%d)"'","scope":"ask","decision":"[text from user]","choice":"","rationale":"","revisable":"yes"}]}' | node "$FORGE_SCRIPTS_DIR/forge-decisions.js" --write --cwd "$(pwd)"
   ```

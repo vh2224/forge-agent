@@ -217,6 +217,23 @@ test('update dry-run keeps a deterministic non-colliding backup plan', () => {
   } finally { data.cleanup(); }
 });
 
+test('update retires legacy Claude scripts only on apply and leaves a tombstone', () => {
+  const data = fixture();
+  try {
+    const legacy = path.join(data.root, '.claude', 'scripts');
+    fs.mkdirSync(legacy, { recursive: true });
+    fs.writeFileSync(path.join(legacy, 'old.js'), 'legacy\n');
+    const dry = installer.install({ ...data.options, runtime: 'claude', update: true, dryRun: true });
+    assert(dry.plan.some((entry) => entry.op === 'retire' && entry.source === legacy));
+    assert.strictEqual(fs.existsSync(path.join(legacy, 'old.js')), true);
+    const applied = installer.install({ ...data.options, runtime: 'claude', update: true });
+    assert.strictEqual(fs.existsSync(path.join(legacy, 'README.md')), true);
+    assert(applied.plan.some((entry) => entry.op === 'retire'));
+    const second = installer.install({ ...data.options, runtime: 'claude', update: true });
+    assert(second.plan.some((entry) => entry.op === 'skip' && entry.reason === 'already-retired'));
+  } finally { data.cleanup(); }
+});
+
 test('Claude 3.1.4 fixture preserves JSONC, Markdown, hooks and project .gsd on update', () => {
   const data = fixture();
   try {

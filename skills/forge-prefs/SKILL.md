@@ -25,7 +25,7 @@ O motor real é `scripts/forge-prefs-view.js` (`renderView(cwd)` / `buildCatalog
 resolução de camadas ou a escrita de catálogos — apenas invoca o helper e, na
 edição, delega a `scripts/forge-prefs-migrate.js --set` (primitivo
 block-preserving já testado em S05). Resolver o script: preferir
-`scripts/forge-prefs-view.js` do repo; se ausente, `~/.claude/scripts/forge-prefs-view.js`.
+`scripts/forge-prefs-view.js` do repo; se ausente, `${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs-view.js`.
 
 ---
 
@@ -36,7 +36,7 @@ block-preserving já testado em S05). Resolver o script: preferir
 Rode o helper e exiba a saída **verbatim** — não resuma, não reformate:
 
 ```bash
-SCRIPT=$([ -f scripts/forge-prefs-view.js ] && echo scripts/forge-prefs-view.js || echo "$HOME/.claude/scripts/forge-prefs-view.js")
+SCRIPT=$([ -f scripts/forge-prefs-view.js ] && echo scripts/forge-prefs-view.js || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs-view.js")
 node "$SCRIPT" --cwd .
 ```
 
@@ -58,7 +58,7 @@ Para ver qual modelo roda cada fase e onde configurá-lo: `/forge-prefs phases`.
 Rode o helper e imprima a saída verbatim — não resuma, não reformate:
 
 ```bash
-SCRIPT=$([ -f scripts/forge-phases.js ] && echo scripts/forge-phases.js || echo "$HOME/.claude/scripts/forge-phases.js")
+SCRIPT=$([ -f scripts/forge-phases.js ] && echo scripts/forge-phases.js || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-phases.js")
 node "$SCRIPT" --cwd .
 ```
 
@@ -75,7 +75,7 @@ Rota **sempre** pelo primitivo `--set` de `forge-prefs-migrate.js` — nunca edi
 um `.jsonc` de preferências manualmente com `Edit`/`Write`:
 
 ```bash
-MIGRATE=$([ -f scripts/forge-prefs-migrate.js ] && echo scripts/forge-prefs-migrate.js || echo "$HOME/.claude/scripts/forge-prefs-migrate.js")
+MIGRATE=$([ -f scripts/forge-prefs-migrate.js ] && echo scripts/forge-prefs-migrate.js || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs-migrate.js")
 node "$MIGRATE" --set "<dotted.key>=<value>" --cwd . [--layer global|local] [--create]
 ```
 

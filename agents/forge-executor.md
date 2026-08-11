@@ -26,7 +26,7 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
 1a. **Validate must_haves schema (BEFORE setting `status: RUNNING`):**
     Run:
     ```bash
-    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-must-haves.js ] && echo scripts || echo "$HOME/.claude/scripts")
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-must-haves.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
     node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md"
     ```
     Parse the JSON on stdout:
@@ -53,7 +53,7 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
 9. Verify every must-have (see ladder below)
 10. **Verification gate** — invoke:
     ```bash
-    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "$HOME/.claude/scripts")
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
     node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
     ```
     Parse the JSON result:

@@ -45,7 +45,7 @@ Do NOT read anything else. Do NOT read source code.
 if [ -f "scripts/forge-ids.js" ]; then
   FORGE_SCRIPTS_DIR="scripts"
 else
-  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+  FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
 fi
 ```
 
@@ -72,7 +72,7 @@ Lista os itens abertos do backlog (`.gsd/items/`) antes do brainstorm, deixa o o
 if [ -f "scripts/forge-items.js" ]; then
   FORGE_SCRIPTS_DIR="scripts"
 else
-  FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"
+  FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"
 fi
 ```
 
@@ -295,7 +295,7 @@ Write decisions to `.gsd/milestones/{MILESTONE_ID}/{MILESTONE_ID}-CONTEXT.md`:
 For each significant decision made during this discuss unit, pipe a JSON fragment to `forge-decisions.js --write`:
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 echo '{
   "unit_id": "{MILESTONE_ID}",
   "decisions": [
@@ -326,7 +326,7 @@ Emita o banner de liveness (ver `shared/forge-dispatch.md § Spawn Liveness Bann
 
 Derive the valid domain list for the header below:
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 routing_domains=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --list-domains --cwd "$(pwd)" \
   | node -e 'const a=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(a.length?a.join(", "):"(none — omit domain:)")')
 ```

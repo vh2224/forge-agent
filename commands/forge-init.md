@@ -71,7 +71,7 @@ The project is already managed by gsd-pi. Your job is to:
    - If `.gsd/forge-prefs.jsonc`, `.gsd/claude-agent-prefs.md`, or `.gsd/prefs.local.md` already exists, preserve it and do not force a migration. Migration of legacy preferences belongs to `/forge-update`.
    - Otherwise, create the curated local preferences scaffold with:
      ```bash
-     FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+     FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
      node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --setup-scaffold \
        --out .gsd/forge-prefs.jsonc
      ```
@@ -81,7 +81,7 @@ The project is already managed by gsd-pi. Your job is to:
 5. **Keep existing preference files backward-compatible:** Case A does not migrate or overwrite legacy `.md` preferences. The local JSONC file is gitignored by the shared preference tooling when it is created; do not reimplement `.gitignore` editing here.
    - When step 4 creates `.gsd/forge-prefs.jsonc`, run the same helper:
      ```bash
-     FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs-migrate.js ] && echo scripts || echo "$HOME/.claude/scripts")
+     FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs-migrate.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
      node -e "require('$FORGE_SCRIPTS_DIR/forge-prefs-migrate.js').ensureGitignore(process.cwd())"
      ```
    - If a JSONC or legacy preference file already exists, leave both the file and its ignore state untouched.
@@ -205,7 +205,7 @@ The project is already managed by gsd-pi. Your job is to:
 
 4. **Create the curated local preferences JSONC** using the answer from step 2:
    ```bash
-   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --setup-scaffold \
      --out .gsd/forge-prefs.jsonc \
      --set-active auto_commit=<true|false conforme resposta>
@@ -215,7 +215,7 @@ The project is already managed by gsd-pi. Your job is to:
 
 5. **Add `.gsd/forge-prefs.jsonc` to `.gitignore` by reusing the migration helper:**
    ```bash
-   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs-migrate.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs-migrate.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    node -e "require('$FORGE_SCRIPTS_DIR/forge-prefs-migrate.js').ensureGitignore(process.cwd())"
    ```
    Do not replace this with a `grep`/`echo` implementation. If `node` is unavailable, report that the helper was skipped alongside the scaffold fallback.
@@ -467,7 +467,7 @@ Create or update `.claude/settings.json` in the project root with the Forge Agen
 
 ## MCP Setup
 
-Configure MCP servers for enhanced agent capabilities. Read `~/.claude/forge-mcps.md` (the MCP catalog) for available MCPs, detection patterns, config templates, and credential safety rules.
+Configure MCP servers for enhanced agent capabilities. Read `${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-mcps.md` (the MCP catalog) for available MCPs, detection patterns, config templates, and credential safety rules.
 
 ### Step 1: Detect stack and check existing MCPs
 

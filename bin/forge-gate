@@ -18,18 +18,18 @@
 # Long flags are passed straight through, so `forge-gate --list` also works.
 #
 # Installed to a bin dir on PATH by install.sh. Resolves the engine in
-# ~/.claude first, then falls back to the repo (repo_path in prefs) for
-# dev/dogfood.
+# ${FORGE_HOME:-$HOME/.forge-agent} first, then falls back to the repo
+# (repo_path in prefs) for dev/dogfood.
 set -euo pipefail
 
-ENGINE="$HOME/.claude/scripts/forge-gate.js"
+ENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-gate.js"
 if [ ! -f "$ENGINE" ]; then
   # Read repo_path from the current prefs format (JSONC). Two traps, both real:
   # the scaffold ships a COMMENTED repo_path hundreds of lines above the live
   # one, and the value is a JSON string. So: drop comment lines, keep the LAST
   # live assignment, strip quotes/commas.
-  PREFS="$HOME/.claude/forge-agent-prefs.jsonc"
-  [ -f "$PREFS" ] || PREFS="$HOME/.claude/forge-agent-prefs.json"
+  PREFS="${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.jsonc"
+  [ -f "$PREFS" ] || PREFS="${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.json"
   if [ -f "$PREFS" ]; then
     REPO="$(sed 's/[[:space:]]*\/\/.*$//' "$PREFS" 2>/dev/null \
       | grep -E '^[[:space:]]*"repo_path"[[:space:]]*:' \
