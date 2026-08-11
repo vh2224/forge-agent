@@ -167,6 +167,55 @@ test('measureRenderedBlock excludes the separator lines', () => {
   assert.strictEqual(ledger.LEDGER_LINE_CAP, 15);
 });
 
+// ── 4. Physical lines, not array elements (review S01 R1) ─────────────────────
+// renderLedgerBlock pushes `frag.body` as ONE array element even when it holds
+// embedded newlines, so counting elements reported 6 for a block the reader
+// sees as 21 lines. The CLI takes the entry as JSON on stdin, so a multi-line
+// body is ordinary input, not a contrived fixture.
+
+function unstructuredMultilineEntry(id) {
+  return {
+    id,
+    title: `Prose ${id}`,
+    completed_at: '2026-03-01T00:00:00Z',
+    // No slices/key_files/key_decisions — otherwise renderLedgerBlock
+    // suppresses body entirely and there is nothing multi-line to measure.
+    body: Array.from({ length: 17 }, (_, i) => `prose line ${i}`).join('\n'),
+  };
+}
+
+test('a multi-line body is measured in physical lines, not array elements', () => {
+  const cwd = tmpCwd();
+  const entry = unstructuredMultilineEntry('M015');
+  ledger.writeFragment(cwd, entry);
+  const content = fs.readFileSync(ledger.fragmentPath(cwd, 'M015'), 'utf8');
+
+  const block = projection.renderLedgerBlock(ledger.parseFragment(content), 'M015');
+  const elementCount = block.length - projection.LEDGER_BLOCK_SEPARATOR_LINES;
+  const physical = block
+    .slice(0, block.length - projection.LEDGER_BLOCK_SEPARATOR_LINES)
+    .join('\n')
+    .split(/\r?\n/).length;
+  assert.ok(physical > elementCount, `sanity: the fixture is actually multi-line (${physical} vs ${elementCount})`);
+
+  const measured = ledger.measureRenderedBlock(content, 'M015');
+  assert.strictEqual(measured, physical, 'measured lines must equal what renderLedger emits');
+  assert.ok(measured > ledger.LEDGER_LINE_CAP, `expected over the cap, got ${measured}`);
+});
+
+test('--write flags a multi-line-body entry as over_cap (regression: reported 6, over_cap:false)', () => {
+  const cwd = tmpCwd();
+  const res = writeViaCli(cwd, unstructuredMultilineEntry('M016'));
+  assert.strictEqual(res.status, 0, `expected exit 0, got ${res.status}: ${res.stderr}`);
+  const out = JSON.parse(res.stdout);
+  assert.strictEqual(out.over_cap, true);
+  assert.ok(out.rendered_lines > 15, `expected > 15 rendered lines, got ${out.rendered_lines}`);
+
+  // Advisory (D4): flagged, never trimmed.
+  const text = fs.readFileSync(ledger.fragmentPath(cwd, 'M016'), 'utf8');
+  assert.ok(text.includes('prose line 16'), 'the body survives the warning intact');
+});
+
 if (failed) {
   for (const failure of failures) console.error(`- ${failure.name}: ${failure.error.stack}`);
   process.exitCode = 1;

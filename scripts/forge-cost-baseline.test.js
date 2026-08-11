@@ -47,6 +47,21 @@ test('measureBaseline is deterministic across two consecutive calls', () => {
   assert.deepStrictEqual(first.totals, second.totals);
 });
 
+// Review S01 R2: `label` used to be interpolated into the rendered
+// `description`, so two labels measured different prompt text (`before` 5977 vs
+// `after` 5976; a long label +254). The label is metadata only.
+test('label does not change the measurement (R2)', () => {
+  const before = measureBaseline(root, { label: 'before' });
+  const after = measureBaseline(root, { label: 'after' });
+  const long = measureBaseline(root, { label: 'x'.repeat(400) });
+  assert.deepStrictEqual(before.by_unit_type, after.by_unit_type);
+  assert.deepStrictEqual(before.by_unit_type, long.by_unit_type);
+  assert.deepStrictEqual(before.totals, after.totals);
+  assert.deepStrictEqual(before.totals, long.totals);
+  assert.strictEqual(before.label, 'before');
+  assert.strictEqual(after.label, 'after', 'label still travels as result metadata');
+});
+
 test('renderMarkdown contains one row per unit_type', () => {
   const result = measureBaseline(root, {});
   const markdown = renderMarkdown(result);

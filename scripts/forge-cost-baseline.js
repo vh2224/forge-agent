@@ -18,14 +18,18 @@ const { TEMPLATE_FILES, renderPrompt } = require('./forge-prompt.js');
 
 // Deterministic inputs shared across unit types — mirrors
 // forge-context-budget.test.js:39-60 baseOptions(). Never derived from disk.
-function baseOptions(cwd, unitType, label) {
+// `label` is deliberately NOT a parameter here: it used to be interpolated into
+// `description`, which made two runs with different labels measure different
+// prompt text (`--label before` 5977 vs `--label after` 5976 tokens, a long
+// label +254). The label is result metadata only — the measured input is fixed.
+function baseOptions(cwd, unitType) {
   return {
     cwd,
     unitType,
     milestoneId: 'M001',
     sliceId: 'S01',
     taskId: 'T01',
-    description: `Cost baseline measurement (${label || 'baseline'})`,
+    description: 'Cost baseline measurement',
     unitEffort: 'medium',
     thinking: 'adaptive',
     autoCommit: false,
@@ -67,7 +71,7 @@ function measureBaseline(cwd, opts) {
 
   for (const unitType of Object.keys(TEMPLATE_FILES)) {
     try {
-      const rendered = renderPrompt(baseOptions(resolvedCwd, unitType, label));
+      const rendered = renderPrompt(baseOptions(resolvedCwd, unitType));
       const templateTokens = templateTokensFor(resolvedCwd, TEMPLATE_FILES[unitType]);
       byUnitType[unitType] = {
         rendered_tokens: rendered.input_tokens,

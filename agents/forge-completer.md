@@ -464,7 +464,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
    **D4 — the NEW entry stays under 15 rendered lines.** The cap is on the **rendered block** (what `renderLedger` emits into `LEDGER.md`), not on `body` alone: `slices[]` + `key_files[]` + `key_decisions[]` are what make an entry fat, so trimming only the prose changes nothing. `--write` measures the block after writing and reports the additive fields `rendered_lines`, `cap` and `over_cap` inside its exit-0 JSON (plus one warning line on stderr when over). It never trims and never refuses.
 
-   When the envelope says `"over_cap": true`, **rewrite your own new entry leaner and re-run `--write`** (fewer `key_files`, fewer `key_decisions`, a shorter `body`) before moving on. Re-writing is idempotent — the same id is overwritten in place.
+   When the envelope says `"over_cap": true`, **rewrite your own new entry leaner and re-run `--write`** (fewer `key_files`, fewer `key_decisions`) before moving on. Shortening `body` is **not** a lever for the entries this step writes: `renderLedgerBlock` suppresses `body` entirely whenever any of `slices`/`key_files`/`key_decisions` is present, and the template above always emits all three. A shorter `body` only reduces `rendered_lines` for entries that carry none of those three fields. Re-writing is idempotent — the same id is overwritten in place.
 
    **Entries that already exist are never rewritten.** D4 applies from here forward only; the accumulated size of older entries is handled elsewhere, not by this step.
 

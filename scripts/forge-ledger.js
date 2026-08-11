@@ -332,7 +332,15 @@ function measureRenderedBlock(content, id) {
   const projection = require('./forge-projection');
   const frag = parseFragment(content);
   const block = projection.renderLedgerBlock(frag, id);
-  return Math.max(0, block.length - projection.LEDGER_BLOCK_SEPARATOR_LINES);
+  // Count PHYSICAL lines, not array elements: renderLedgerBlock pushes
+  // `frag.body` as ONE element even when it carries embedded newlines, so an
+  // unstructured entry with a 16-newline body used to measure 6. Join the
+  // content portion back into the exact text the reader sees and split on
+  // real line breaks. renderLedgerBlock itself is untouched — renderLedger's
+  // byte-for-byte output must not change.
+  const contentLines = block.slice(0, Math.max(0, block.length - projection.LEDGER_BLOCK_SEPARATOR_LINES));
+  if (contentLines.length === 0) return 0;
+  return contentLines.join('\n').split(/\r?\n/).length;
 }
 
 // ── readFragment ──────────────────────────────────────────────────────────────
