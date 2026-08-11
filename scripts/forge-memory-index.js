@@ -897,9 +897,26 @@ function normalizeQueryPath(p) {
 // (can match more than one entry — all are returned, per T01 step 5). Never a
 // parallel counter: `matched`/`unmatched` are always derived by filtering the
 // `requested` array itself (invariant 3 at the top of this file).
+//
+// The `reason` on each unmatched request is derived from the COMPLETENESS of the
+// result, never from the mere fact that nothing matched (S03 R1). "Não achei
+// fato" só é evidência de ausência quando o índice está completo; se a listagem
+// de fragmentos falhou, ou se o resultado é parcial por schema à frente, a
+// ausência NÃO é estabelecível e a razão tem de dizer isso — mesmo invariante
+// que a correção de S02 R3 escreveu neste arquivo (um consumidor tem de
+// distinguir "não consegui ler o store" de "o store está vazio") e a regra
+// durável do repo: inconclusivo nunca colapsa em limpo.
+function unmatchedReason(result) {
+  const coverage = (result && result.coverage) || {};
+  if (coverage.fragment_listing_failed) return 'index-unavailable';
+  if (result && result.partial) return 'index-partial-no-match';
+  return 'no-facts-for-file';
+}
+
 function queryIndex(result, files) {
   const entries = Array.isArray(result && result.entries) ? result.entries : [];
   const requested = Array.isArray(files) ? files : [];
+  const reason = unmatchedReason(result);
 
   const byExact = new Map(); // normalized entry.file -> entry
   const byBasename = new Map(); // basename -> entries[]
@@ -927,7 +944,7 @@ function queryIndex(result, files) {
       matched.push({ requested: req, entries: byBase.slice() });
       continue;
     }
-    unmatched.push({ requested: req, reason: 'no-facts-for-file' });
+    unmatched.push({ requested: req, reason });
   }
 
   return { requested, matched, unmatched };
@@ -981,6 +998,13 @@ function renderQuery(result, query) {
     lines.push('_O store não pôde ser lido — os arquivos abaixo NÃO foram confirmados como "sem fato", apenas não casaram com o índice (possivelmente vazio por falha de leitura):_');
     lines.push('');
     for (const u of unmatched) lines.push(`- ${codeCell(u.requested)} — ${cell(u.reason)}`);
+  } else if (partial) {
+    // Resultado parcial (schema à frente) — a ausência NÃO é estabelecível, então
+    // o corpo não pode afirmar "o índice foi lido e nenhum fato cita" duas linhas
+    // abaixo do aviso de leitura incompleta (S03 R1).
+    lines.push('_O índice está INCOMPLETO — os arquivos abaixo NÃO foram confirmados como "sem fato", apenas não casaram com a porção do índice que a tooling local conseguiu ler:_');
+    lines.push('');
+    for (const u of unmatched) lines.push(`- ${codeCell(u.requested)} — ${cell(u.reason)}`);
   } else {
     lines.push('_O índice foi lido e nenhum fato cita estes arquivos:_');
     lines.push('');
@@ -1015,24 +1039,28 @@ module.exports = {
 function parseCliArgs(argv) {
   const KNOWN = new Set(['--write', '--json', '--out', '--cwd', '--file']);
   const out = { write: false, json: false, out: undefined, cwd: undefined, files: [], valid: true };
+  // Uma opção que pede valor nunca consome a PRÓXIMA OPÇÃO como se fosse valor
+  // (S03 R2): `--file --json` viraria consulta por um arquivo chamado `--json`,
+  // engolindo em silêncio o modo pedido e devolvendo exit 0 com alegação falsa de
+  // ausência. Valor ausente OU próximo token conhecido → args inválidos (exit 2).
+  const takesValue = (arg, i) => {
+    const next = argv[i + 1];
+    if (next === undefined) return null;
+    if (KNOWN.has(next)) return null;
+    return next;
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!KNOWN.has(arg)) { out.valid = false; return out; }
     if (arg === '--write') { out.write = true; continue; }
     if (arg === '--json') { out.json = true; continue; }
-    if (arg === '--out') {
-      if (argv[i + 1] === undefined) { out.valid = false; return out; }
-      out.out = argv[++i];
-      continue;
-    }
-    if (arg === '--cwd') {
-      if (argv[i + 1] === undefined) { out.valid = false; return out; }
-      out.cwd = argv[++i];
-      continue;
-    }
-    if (arg === '--file') {
-      if (argv[i + 1] === undefined) { out.valid = false; return out; }
-      out.files.push(argv[++i]);
+    if (arg === '--out' || arg === '--cwd' || arg === '--file') {
+      const value = takesValue(arg, i);
+      if (value === null) { out.valid = false; return out; }
+      i++;
+      if (arg === '--out') out.out = value;
+      else if (arg === '--cwd') out.cwd = value;
+      else out.files.push(value);
       continue;
     }
   }
