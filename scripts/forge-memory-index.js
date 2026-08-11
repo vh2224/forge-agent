@@ -669,6 +669,21 @@ function prose(value) {
   return cell(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ── factLine ──────────────────────────────────────────────────────────────────
+// Single source of truth for the fact-line format. Extracted from renderIndex's
+// loop (T01 step 2) — renderIndex and renderQuery (T01 step 6) both consume this;
+// neither owns a second copy of the format. Mirrors the renderLedgerBlock
+// precedent (one source for the shape of a block).
+function factLine(fact) {
+  const memId = fact.mem_id ? codeCell(fact.mem_id) : '(sem mem_id)';
+  const category = fact.category ? prose(fact.category) : '(sem categoria)';
+  const summary = fact.summary ? prose(fact.summary) : '(sem resumo)';
+  const unit = (fact.unit_id || fact.storage_key)
+    ? codeCell(fact.unit_id || fact.storage_key)
+    : '(unidade desconhecida)';
+  return `- ${memId} (${category}) — ${summary} — origem: ${unit}`;
+}
+
 function renderIndex(result, opts) {
   opts = opts || {};
   const entries = Array.isArray(result && result.entries) ? result.entries : [];
@@ -701,13 +716,7 @@ function renderIndex(result, opts) {
       lines.push(`### ${codeCell(entry.file)}`);
       lines.push('');
       for (const fact of entry.facts) {
-        const memId = fact.mem_id ? codeCell(fact.mem_id) : '(sem mem_id)';
-        const category = fact.category ? prose(fact.category) : '(sem categoria)';
-        const summary = fact.summary ? prose(fact.summary) : '(sem resumo)';
-        const unit = (fact.unit_id || fact.storage_key)
-          ? codeCell(fact.unit_id || fact.storage_key)
-          : '(unidade desconhecida)';
-        lines.push(`- ${memId} (${category}) — ${summary} — origem: ${unit}`);
+        lines.push(factLine(fact));
       }
       lines.push('');
     }
@@ -870,6 +879,118 @@ function writeIndex(result, cwd, opts) {
   return { path: outAbs, bytes: Buffer.byteLength(md, 'utf8'), changed: !unchanged };
 }
 
+// ── normalizeQueryPath ──────────────────────────────────────────────────────────
+// Same normalization for the requested path AND for entry.file (T01 must-have:
+// "a normalização é a mesma para o pedido e para entry.file") — a single
+// function, called on both sides at the comparison site, never two divergent
+// implementations.
+function normalizeQueryPath(p) {
+  if (typeof p !== 'string') return '';
+  let n = p.split('\\').join('/');
+  if (n.startsWith('./')) n = n.slice(2);
+  return n;
+}
+
+// ── queryIndex ────────────────────────────────────────────────────────────────
+// Filters `result.entries` by one or more requested files. Exact match against
+// entry.file (both sides normalized) first; if nothing matches, basename match
+// (can match more than one entry — all are returned, per T01 step 5). Never a
+// parallel counter: `matched`/`unmatched` are always derived by filtering the
+// `requested` array itself (invariant 3 at the top of this file).
+function queryIndex(result, files) {
+  const entries = Array.isArray(result && result.entries) ? result.entries : [];
+  const requested = Array.isArray(files) ? files : [];
+
+  const byExact = new Map(); // normalized entry.file -> entry
+  const byBasename = new Map(); // basename -> entries[]
+  for (const entry of entries) {
+    const norm = normalizeQueryPath(entry.file);
+    byExact.set(norm, entry);
+    const base = norm.split('/').pop();
+    if (!byBasename.has(base)) byBasename.set(base, []);
+    byBasename.get(base).push(entry);
+  }
+
+  const matched = [];
+  const unmatched = [];
+
+  for (const req of requested) {
+    const normReq = normalizeQueryPath(req);
+    const exact = byExact.get(normReq);
+    if (exact) {
+      matched.push({ requested: req, entries: [exact] });
+      continue;
+    }
+    const base = normReq.split('/').pop();
+    const byBase = byBasename.get(base);
+    if (byBase && byBase.length > 0) {
+      matched.push({ requested: req, entries: byBase.slice() });
+      continue;
+    }
+    unmatched.push({ requested: req, reason: 'no-facts-for-file' });
+  }
+
+  return { requested, matched, unmatched };
+}
+
+// ── renderQuery ───────────────────────────────────────────────────────────────
+// Short markdown for stdout: one `### <file>` per matched entry (fact lines via
+// the SAME factLine helper renderIndex uses — never a second copy of the
+// format), and an UNCONDITIONAL "## Arquivos sem fato" section enumerating the
+// unmatched requests (same anti-silence floor as renderIndex's "Cobertura e
+// descarte"). When the underlying result is partial/failed-listing, the top of
+// the output carries the read-failure warning and the body does NOT claim
+// absence of facts — same posture as renderIndex:718-724, not a second wording.
+function renderQuery(result, query) {
+  const coverage = (result && result.coverage) || {};
+  const partial = !!(result && result.partial);
+  const matched = (query && Array.isArray(query.matched)) ? query.matched : [];
+  const unmatched = (query && Array.isArray(query.unmatched)) ? query.unmatched : [];
+
+  const lines = [];
+
+  lines.push('# Consulta ao índice de memória por arquivo-fonte');
+  lines.push('');
+
+  if (coverage.fragment_listing_failed) {
+    lines.push(`> 🛑 **Não foi possível LER o store de memória** (\`fragment_listing_failed\`): ${prose(coverage.fragment_listing_failed)}`);
+    lines.push('> Os arquivos abaixo listados como "sem fato" podem simplesmente não ter sido lidos — isto NÃO é evidência de ausência.');
+    lines.push('');
+  } else if (partial) {
+    lines.push('> ⚠️ **Índice parcial** — o dado em `.gsd/SCHEMA-VERSION` está à frente da tooling local.');
+    lines.push('> Esta consulta pode estar incompleta até a tooling ser atualizada (`/forge-update`).');
+    lines.push('');
+  }
+
+  for (const m of matched) {
+    for (const entry of m.entries) {
+      lines.push(`### ${codeCell(entry.file)}`);
+      lines.push('');
+      for (const fact of entry.facts) {
+        lines.push(factLine(fact));
+      }
+      lines.push('');
+    }
+  }
+
+  lines.push('## Arquivos sem fato');
+  lines.push('');
+  if (unmatched.length === 0) {
+    lines.push('_Todos os arquivos pedidos têm fato._');
+  } else if (coverage.fragment_listing_failed) {
+    lines.push('_O store não pôde ser lido — os arquivos abaixo NÃO foram confirmados como "sem fato", apenas não casaram com o índice (possivelmente vazio por falha de leitura):_');
+    lines.push('');
+    for (const u of unmatched) lines.push(`- ${codeCell(u.requested)} — ${cell(u.reason)}`);
+  } else {
+    lines.push('_O índice foi lido e nenhum fato cita estes arquivos:_');
+    lines.push('');
+    for (const u of unmatched) lines.push(`- ${codeCell(u.requested)} — ${cell(u.reason)}`);
+  }
+  lines.push('');
+
+  return lines.join('\n') + '\n';
+}
+
 module.exports = {
   CITATION_REGEXES,
   extractCitations,
@@ -879,6 +1000,10 @@ module.exports = {
   buildFileIndex,
   renderIndex,
   writeIndex,
+  factLine,
+  normalizeQueryPath,
+  queryIndex,
+  renderQuery,
   DEFAULT_INDEX_PATH,
 };
 
@@ -888,8 +1013,8 @@ module.exports = {
 // {error} em stderr, exits 0/1/2). Exit 2 rejeita args inválidos explicitamente
 // (S01's guard CLI took a review objection precisely for accepting bad args).
 function parseCliArgs(argv) {
-  const KNOWN = new Set(['--write', '--json', '--out', '--cwd']);
-  const out = { write: false, json: false, out: undefined, cwd: undefined, valid: true };
+  const KNOWN = new Set(['--write', '--json', '--out', '--cwd', '--file']);
+  const out = { write: false, json: false, out: undefined, cwd: undefined, files: [], valid: true };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!KNOWN.has(arg)) { out.valid = false; return out; }
@@ -905,23 +1030,65 @@ function parseCliArgs(argv) {
       out.cwd = argv[++i];
       continue;
     }
+    if (arg === '--file') {
+      if (argv[i + 1] === undefined) { out.valid = false; return out; }
+      out.files.push(argv[++i]);
+      continue;
+    }
   }
+  // --write grava o índice COMPLETO em .gsd/MEMORY-INDEX-BY-FILE.md; escrever um
+  // índice filtrado por cima do completo destruiria o artefato sem nenhum sinal
+  // (T01 step 3) — recusado nos args, antes de qualquer leitura do store.
+  if (out.files.length > 0 && out.write === true) { out.valid = false; return out; }
   return out;
 }
 
 function runCli(argv) {
   const args = parseCliArgs(argv);
   if (!args.valid) {
-    process.stderr.write(JSON.stringify({ error: 'Usage: forge-memory-index.js [--write] [--json] [--out <path>] [--cwd <dir>]' }) + '\n');
+    process.stderr.write(JSON.stringify({ error: 'Usage: forge-memory-index.js [--write] [--json] [--out <path>] [--cwd <dir>] [--file <path>]…' }) + '\n');
     return 2;
   }
 
   const cwd = args.cwd ? path.resolve(args.cwd) : process.cwd();
-  // Sem flag de saída explícita → default --write (step 6 do plano).
-  const doWrite = args.write || !args.json;
+  const isQuery = args.files.length > 0;
+  // Sem flag de saída explícita → default --write (step 6 do plano) — EXCETO em
+  // modo consulta: `--file` sozinho nunca escreve (T01 step 4; sem isto, o
+  // default implícito sobrescreveria o artefato completo com um índice filtrado
+  // — a mesma armadilha que o guard de args do step 3 fecha, pelo outro lado).
+  const doWrite = args.write || (!args.json && !isQuery);
 
   try {
     const result = buildFileIndex(cwd, {});
+
+    if (isQuery) {
+      const query = queryIndex(result, args.files);
+
+      if (args.json) {
+        const envelope = {
+          partial: result.partial,
+          counts: {
+            fragments_read: result.coverage.fragments_read,
+            facts_total: result.coverage.facts_total,
+            facts_with_resolved: result.coverage.facts_with_resolved,
+            facts_no_file_mention: Array.isArray(result.coverage.facts_no_file_mention) ? result.coverage.facts_no_file_mention.length : 0,
+            facts_missed_by_extractor: Array.isArray(result.coverage.facts_missed_by_extractor) ? result.coverage.facts_missed_by_extractor.length : 0,
+            facts_unresolved_only: Array.isArray(result.coverage.facts_unresolved_only) ? result.coverage.facts_unresolved_only.length : 0,
+            citations_total: result.coverage.citations_total,
+            citations_resolved: result.coverage.citations_resolved,
+          },
+          coverage: result.coverage,
+          files_indexed: result.coverage.files_indexed,
+          query,
+          out: null,
+        };
+        process.stdout.write(JSON.stringify(envelope) + '\n');
+      } else {
+        process.stdout.write(renderQuery(result, query));
+      }
+
+      return 0;
+    }
 
     let writeInfo = null;
     if (doWrite) {

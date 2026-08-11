@@ -31,6 +31,8 @@ const {
   buildFileIndex,
   renderIndex,
   writeIndex,
+  queryIndex,
+  renderQuery,
   DEFAULT_INDEX_PATH,
 } = require('./forge-memory-index.js');
 
@@ -1076,6 +1078,263 @@ test('absent .gsd/memory keeps working — the report never becomes a crash path
     assertEq(result.coverage.fragments_skipped_by_store, [], 'no memory dir → empty list, no throw');
     const md = renderIndex(result, {});
     assert(md.includes('### Fragmentos descartados pelo store'), 'section still rendered without a memory dir');
+  } finally {
+    cleanup(root);
+  }
+});
+
+// ── Section 15: --file query mode (T01) ──────────────────────────────────────
+console.log('\nSection 15: --file query mode\n');
+
+test('queryIndex: repeated --file returns only the requested files', () => {
+  const root = mkStore(
+    [
+      { unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-q-1' },
+      { unitId: 'T02', text: 'Fixed `scripts/forge-beta.js` today.', mem_id: 'mem-q-2' },
+      { unitId: 'T03', text: 'Fixed `scripts/forge-gamma.js` today.', mem_id: 'mem-q-3' },
+    ],
+    ['scripts/forge-alpha.js', 'scripts/forge-beta.js', 'scripts/forge-gamma.js'],
+  );
+  try {
+    const result = buildFileIndex(root, {});
+    const query = queryIndex(result, ['scripts/forge-alpha.js', 'scripts/forge-beta.js']);
+    assertEq(query.matched.length, 2, 'expected two matched requests');
+    const matchedFiles = query.matched.flatMap((m) => m.entries.map((e) => e.file)).sort();
+    assertEq(matchedFiles, ['scripts/forge-alpha.js', 'scripts/forge-beta.js']);
+    assert(!matchedFiles.includes('scripts/forge-gamma.js'), 'gamma was not requested and must not leak into the result');
+    assertEq(query.unmatched.length, 0);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('queryIndex: matches by basename when the exact relative path was not requested', () => {
+  const root = mkStore(
+    [{ unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-q-4' }],
+    ['scripts/forge-alpha.js'],
+  );
+  try {
+    const result = buildFileIndex(root, {});
+    const query = queryIndex(result, ['forge-alpha.js']);
+    assertEq(query.matched.length, 1, 'expected one matched request via basename');
+    assertEq(query.matched[0].entries[0].file, 'scripts/forge-alpha.js');
+    assertEq(query.unmatched.length, 0);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('queryIndex: normalizes backslash separators and a leading ./ the same way on both sides', () => {
+  const root = mkStore(
+    [{ unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-q-5' }],
+    ['scripts/forge-alpha.js'],
+  );
+  try {
+    const result = buildFileIndex(root, {});
+    const query = queryIndex(result, ['./scripts\\forge-alpha.js']);
+    assertEq(query.matched.length, 1, 'expected the normalized request to match the normalized entry');
+    assertEq(query.unmatched.length, 0);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('queryIndex: a requested file with no fact is enumerated in unmatched with a named reason, never silently dropped', () => {
+  const root = mkStore(
+    [{ unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-q-6' }],
+    ['scripts/forge-alpha.js', 'scripts/forge-nobody-cites-this.js'],
+  );
+  try {
+    const result = buildFileIndex(root, {});
+    const query = queryIndex(result, ['scripts/forge-alpha.js', 'scripts/forge-nobody-cites-this.js']);
+    assertEq(query.matched.length, 1);
+    assertEq(query.unmatched.length, 1);
+    assertEq(query.unmatched[0].requested, 'scripts/forge-nobody-cites-this.js');
+    assertEq(query.unmatched[0].reason, 'no-facts-for-file');
+
+    const md = renderQuery(result, query);
+    assert(md.includes('## Arquivos sem fato'), 'expected the unconditional "sem fato" section');
+    assert(md.includes('scripts/forge-nobody-cites-this.js'), 'the unmatched file must be enumerated in the markdown, never omitted');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('renderQuery: an unmatched-only request still renders the section (never omitted)', () => {
+  const root = mkStore([], []);
+  try {
+    const result = buildFileIndex(root, {});
+    const query = queryIndex(result, ['scripts/never-existed.js']);
+    const md = renderQuery(result, query);
+    assert(md.includes('## Arquivos sem fato'), 'section must be unconditional even with zero matches');
+    assert(md.includes('scripts/never-existed.js'));
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('renderQuery: a store that could not be read shows a read-failure warning, never "sem fato" as if it were confirmed-empty', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-memory-index-test-'));
+  const realReaddirSync = fs.readdirSync;
+  fs.readdirSync = function (p, ...rest) {
+    if (typeof p === 'string' && p.replace(/\\/g, '/').endsWith('/.gsd/memory')) {
+      throw new Error('EIO: simulated enumeration failure');
+    }
+    return realReaddirSync.call(fs, p, ...rest);
+  };
+  try {
+    fs.mkdirSync(path.join(root, '.gsd', 'memory'), { recursive: true });
+    const result = buildFileIndex(root, {});
+    assert(result.coverage.fragment_listing_failed, 'fixture must actually trigger the read failure');
+    const query = queryIndex(result, ['scripts/whatever.js']);
+    const md = renderQuery(result, query);
+    assert(/N[ãa]o foi poss[íi]vel LER/.test(md), 'expected the read-failure warning at the top of the query output');
+    assert(md.includes('NÃO foram confirmados como "sem fato"'), 'must not assert absence of facts when the store could not be read');
+  } finally {
+    fs.readdirSync = realReaddirSync;
+    cleanup(root);
+  }
+});
+
+// ── Section 15 mutation control (T01 step 9) ─────────────────────────────────
+// A test that passes both with AND without the filter proves nothing about the
+// filter. This case calls queryIndex with a filter that DOES exclude entries
+// (via the real implementation) and independently re-derives the expected
+// "everything, unfiltered" shape to prove the two are NOT the same set — a
+// mechanical guard that a future edit collapsing the filter to a no-op (e.g.
+// `matched = entries.map(...)` regardless of `requested`) would turn red here.
+test('mutation control: querying a strict subset yields fewer matched files than the full index — the filter is not a no-op', () => {
+  const root = mkStore(
+    [
+      { unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-q-7' },
+      { unitId: 'T02', text: 'Fixed `scripts/forge-beta.js` today.', mem_id: 'mem-q-8' },
+      { unitId: 'T03', text: 'Fixed `scripts/forge-gamma.js` today.', mem_id: 'mem-q-9' },
+    ],
+    ['scripts/forge-alpha.js', 'scripts/forge-beta.js', 'scripts/forge-gamma.js'],
+  );
+  try {
+    const result = buildFileIndex(root, {});
+    assertEq(result.entries.length, 3, 'fixture sanity: three files must be indexed');
+
+    const query = queryIndex(result, ['scripts/forge-alpha.js']);
+    const matchedFiles = query.matched.flatMap((m) => m.entries.map((e) => e.file));
+
+    assertEq(matchedFiles.length, 1, 'a real filter over a strict subset must return fewer files than the full index');
+    assert(matchedFiles.length < result.entries.length, 'matched set must be a strict subset of the full index — a filter that returns everything is not measuring anything');
+    assertEq(matchedFiles, ['scripts/forge-alpha.js']);
+  } finally {
+    cleanup(root);
+  }
+});
+
+// ── Section 16: CLI --file (T01) ──────────────────────────────────────────────
+console.log('\nSection 16: CLI --file\n');
+
+test('CLI: --file --write exits 2 with {error} in stderr (never overwrites the full artifact with a filtered one)', () => {
+  const root = mkStore(
+    [{ unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-cli-3' }],
+    ['scripts/forge-alpha.js'],
+  );
+  try {
+    const res = spawnSync(process.execPath, [SCRIPT_PATH, '--file', 'scripts/forge-alpha.js', '--write', '--cwd', root], { encoding: 'utf8' });
+    assertEq(res.status, 2, `expected exit 2 for --file + --write, got ${res.status}`);
+    let parsed;
+    assert((() => { parsed = JSON.parse(res.stderr.trim()); return true; })(), 'stderr must be valid JSON with an {error} field');
+    assert(typeof parsed.error === 'string' && parsed.error.length > 0, 'expected a non-empty {error} message');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('CLI: --file alone does NOT write the artifact, even though a bare run without flags would', () => {
+  const root = mkStore(
+    [{ unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-cli-4' }],
+    ['scripts/forge-alpha.js'],
+  );
+  try {
+    const artifactPath = path.join(root, DEFAULT_INDEX_PATH);
+    assert(!fs.existsSync(artifactPath), 'fixture sanity: artifact must not pre-exist');
+
+    const res = spawnSync(process.execPath, [SCRIPT_PATH, '--file', 'scripts/forge-alpha.js', '--cwd', root], { encoding: 'utf8' });
+    assertEq(res.status, 0, `expected exit 0, got ${res.status}; stderr: ${res.stderr}`);
+    assert(!fs.existsSync(artifactPath), 'query mode with --file must NEVER write .gsd/MEMORY-INDEX-BY-FILE.md');
+    assert(res.stdout.includes('scripts/forge-alpha.js'), 'expected the queried file in stdout');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('CLI: --file repeated on the command line accumulates, unmatched files are still enumerated', () => {
+  const root = mkStore(
+    [{ unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-cli-5' }],
+    ['scripts/forge-alpha.js', 'scripts/forge-nothing.js'],
+  );
+  try {
+    const res = spawnSync(process.execPath, [
+      SCRIPT_PATH, '--file', 'scripts/forge-alpha.js', '--file', 'scripts/forge-nothing.js', '--cwd', root,
+    ], { encoding: 'utf8' });
+    assertEq(res.status, 0, `expected exit 0, got ${res.status}; stderr: ${res.stderr}`);
+    assert(res.stdout.includes('scripts/forge-alpha.js'), 'expected the matched file');
+    assert(res.stdout.includes('## Arquivos sem fato'), 'expected the unmatched section');
+    assert(res.stdout.includes('scripts/forge-nothing.js'), 'the unmatched file must be enumerated, not silently dropped');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('CLI: --file missing a value exits 2', () => {
+  const res = spawnSync(process.execPath, [SCRIPT_PATH, '--file'], { encoding: 'utf8' });
+  assertEq(res.status, 2, `expected exit 2 for --file missing a value, got ${res.status}`);
+});
+
+test('CLI: --file --json prints an additive envelope with query.requested/matched/unmatched, existing keys intact', () => {
+  const root = mkStore(
+    [
+      { unitId: 'T01', text: 'Fixed `scripts/forge-alpha.js` today.', mem_id: 'mem-cli-6' },
+    ],
+    ['scripts/forge-alpha.js', 'scripts/forge-missing.js'],
+  );
+  try {
+    const res = spawnSync(process.execPath, [
+      SCRIPT_PATH, '--file', 'scripts/forge-alpha.js', '--file', 'scripts/forge-missing.js', '--json', '--cwd', root,
+    ], { encoding: 'utf8' });
+    assertEq(res.status, 0, `expected exit 0, got ${res.status}; stderr: ${res.stderr}`);
+    const stdoutLines = res.stdout.split('\n').filter((l) => l.length > 0);
+    assertEq(stdoutLines.length, 1, 'expected exactly one non-empty stdout line');
+    const parsed = JSON.parse(stdoutLines[0]);
+
+    // Existing envelope keys stay intact (additive convention, T01 must-have).
+    assert(typeof parsed.coverage === 'object', 'expected the existing coverage object');
+    assert(typeof parsed.counts === 'object', 'expected the existing counts object');
+    assertEq(parsed.out, null, 'query mode never writes, out must be null');
+
+    // New, additive key.
+    assert(typeof parsed.query === 'object', 'expected the additive query key');
+    assertEq(parsed.query.requested, ['scripts/forge-alpha.js', 'scripts/forge-missing.js']);
+    assertEq(parsed.query.matched.length, 1);
+    assertEq(parsed.query.unmatched.length, 1);
+    assertEq(parsed.query.unmatched[0].requested, 'scripts/forge-missing.js');
+    assertEq(parsed.query.unmatched[0].reason, 'no-facts-for-file');
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('CLI: an unreadable store queried with --file reports a read-failure, distinct from "no facts"', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-memory-index-test-'));
+  try {
+    // Same fixture shape used across this suite for an EISDIR-style unreadable
+    // store: a memory dir that exists but is not a real directory forces the
+    // guard/listing path to fail without relying on platform-specific perms.
+    fs.writeFileSync(path.join(root, '.gsd-memory-marker'), '', 'utf8'); // fixture sanity anchor, unused by the CLI
+    fs.mkdirSync(path.join(root, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.gsd', 'memory'), '', 'utf8'); // FILE where a DIR is expected → readdirSync throws ENOTDIR/EISDIR-shaped
+
+    const res = spawnSync(process.execPath, [SCRIPT_PATH, '--file', 'scripts/whatever.js', '--json', '--cwd', root], { encoding: 'utf8' });
+    assertEq(res.status, 0, `expected exit 0 (a read failure is reported, not a crash), got ${res.status}; stderr: ${res.stderr}`);
+    const parsed = JSON.parse(res.stdout.trim());
+    assert(parsed.coverage.fragment_listing_failed, 'expected fragment_listing_failed to be set for a store that cannot be enumerated');
+    assertEq(parsed.partial, true, 'an unreadable store must mark the result partial');
   } finally {
     cleanup(root);
   }
