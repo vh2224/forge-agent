@@ -15422,6 +15422,130 @@ function smokeRoutingDomainsRendered() {
   pass('(final) Section 101: real rendered planner prompts carry routing and repository values with a biting fixture guard');
 }
 
+// ── Section 102: ledger snapshot proven in the RENDERED prompt + D1 exclusion ──
+//
+// S02's whole claim in one section: the ledger snapshot reaches plan-slice —
+// newest entries whole, oldest omitted, exact-entry marker, literal re-read
+// command — proven on the RENDERED prompt (never the template alone, the #77 /
+// MEM002 mold: a green guard anchored on the wrong artifact hid an inert wire
+// for weeks); and execute-task receives none of it (D1), with a positive
+// control proving the absence assert is not blind — the predicate is shown
+// seeing the ids in plan-slice BEFORE it is trusted to report their absence in
+// execute-task.
+//
+// The maxTokens budget below is never hand-computed: it is found by scanning
+// the REAL renderLedgerSnapshot() until it reports omitted_count === 2 — the
+// builder (S02 B1) is the single source of the block shape and the selection,
+// so a hardcoded byte count here would silently drift from what it claims to
+// measure the moment the block shape changes.
+function smokeLedgerSnapshotRendered() {
+  process.stdout.write('\n▸ Section 102: ledger snapshot in the rendered plan-slice prompt + D1 exclusion for execute-task\n');
+  const { renderPrompt } = require('./forge-prompt.js');
+  const projection = require('./forge-projection.js');
+  const repoRoot = path.dirname(SCRIPTS);
+  const dir = mkTmp('ledger-snapshot-rendered');
+  const templateDir = path.join(repoRoot, 'shared', 'templates', 'dispatch');
+  try {
+    const ledgerDir = path.join(dir, '.gsd', 'ledger');
+    fs.mkdirSync(ledgerDir, { recursive: true });
+
+    // 4 deterministic fragments, distinct greppable ids and controlled
+    // completed_at dates (molde seções 88-90). Equal-size bodies keep every
+    // entry's token weight uniform so the calibration scan below is stable.
+    const entries = [
+      { id: 'M-20260101000000-oldest-aa', completed_at: '2026-01-01T00:00:00Z', title: 'Oldest' },
+      { id: 'M-20260202000000-second-bb', completed_at: '2026-02-02T00:00:00Z', title: 'Second' },
+      { id: 'M-20260303000000-recent-cc', completed_at: '2026-03-03T00:00:00Z', title: 'Recent' },
+      { id: 'M-20260404000000-newest-dd', completed_at: '2026-04-04T00:00:00Z', title: 'Newest' },
+    ];
+    const body = 'x'.repeat(200);
+    for (const e of entries) {
+      const content = [
+        '---',
+        `id: ${e.id}`,
+        `title: ${e.title}`,
+        `completed_at: ${e.completed_at}`,
+        'slices: []',
+        'key_files: []',
+        'key_decisions: []',
+        '---',
+        '',
+        body,
+        '',
+      ].join('\n');
+      fs.writeFileSync(path.join(ledgerDir, `${e.id}.md`), content, 'utf8');
+    }
+
+    let maxTokens = null;
+    let snap = null;
+    for (let candidate = 40; candidate <= 2000; candidate += 5) {
+      const s = projection.renderLedgerSnapshot(dir, { maxTokens: candidate });
+      if (s.omitted_count === 2 && s.included_ids.length === 2) { maxTokens = candidate; snap = s; break; }
+    }
+    assert(maxTokens != null,
+      '(setup) a maxTokens exists where exactly 2 of the 4 fixture entries survive',
+      `no candidate in 40..2000 produced omitted_count===2 (last snap=${JSON.stringify(snap)})`);
+    assert(!!snap && snap.included_ids.join(',') === 'M-20260404000000-newest-dd,M-20260303000000-recent-cc',
+      '(setup) the 2 surviving ids are the 2 NEWEST fragments — recency selection, not directory order',
+      snap ? JSON.stringify(snap.included_ids) : '(no snap)');
+
+    // Disk path end-to-end, no options.ledger / ledgerProvider — the coupled
+    // API seam (forge-prompt → forge-projection.renderLedgerSnapshot) is what
+    // is under test, not a fixture-supplied override.
+    const slice = renderPrompt({
+      cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01',
+      templateDir, ledgerMaxTokens: maxTokens, memories: [],
+    });
+
+    assert(slice.prompt.includes('M-20260404000000-newest-dd'),
+      '(a) rendered plan-slice prompt contains the newest fixture id');
+    assert(slice.prompt.includes('M-20260303000000-recent-cc'),
+      '(a) rendered plan-slice prompt contains the second-newest fixture id');
+    assert(!slice.prompt.includes('M-20260101000000-oldest-aa'),
+      '(b B1) rendered plan-slice prompt does NOT contain the oldest fixture id');
+    assert(!slice.prompt.includes('M-20260202000000-second-bb'),
+      '(b B1) rendered plan-slice prompt does NOT contain the second-oldest fixture id');
+    assert(/\[\.\.\.truncated 2 ledger entries — see node scripts\/forge-projection\.js --render ledger/.test(slice.prompt),
+      '(c W1) the marker names exactly the 2 omitted ENTRIES (never sections) and the literal re-read command',
+      slice.prompt.slice(-400));
+    assert(slice.prompt.includes('[DATA FROM "LEDGER"') && slice.prompt.includes('[END DATA FROM "LEDGER"]'),
+      '(c) the snapshot is wrapped in the DATA FROM / END DATA FROM markers');
+
+    // D1 positive control BEFORE the absence assert: the predicate must first
+    // be shown seeing the fixture ids at all (it just did, in plan-slice above)
+    // so the execute-task absence assert below is not a blind, always-green
+    // check on an id nothing ever produces.
+    assert(slice.prompt.includes('M-20260404000000-newest-dd'),
+      '(d control) positive control — the predicate DOES see fixture ids when they are actually injected (plan-slice)');
+
+    const task = renderPrompt({
+      cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+      templateDir, ledgerMaxTokens: maxTokens, memories: [],
+    });
+    for (const e of entries) {
+      assert(!task.prompt.includes(e.id), `(d D1) rendered execute-task prompt does not contain fixture id ${e.id}`);
+    }
+
+    const execTemplate = readRepoText(path.join(templateDir, 'execute-task.md'));
+    assert(!execTemplate.includes('{LEDGER}'),
+      '(d D1) shared/templates/dispatch/execute-task.md (executable template, never the prose mirror) does not contain {LEDGER}');
+
+    const sliceTemplate = readRepoText(path.join(templateDir, 'plan-slice.md'));
+    const dataBlock = sliceTemplate.match(/\[DATA FROM "LEDGER"[^\n]*\n([\s\S]*?)\[END DATA FROM "LEDGER"\]/);
+    assert(!!dataBlock, '(e) shared/templates/dispatch/plan-slice.md carries the LEDGER DATA markers');
+    assert(!!dataBlock && dataBlock[1].includes('{LEDGER}'),
+      '(e) shared/templates/dispatch/plan-slice.md (executable template) contains {LEDGER} between the DATA markers');
+
+    const mainBody = fs.readFileSync(__filename, 'utf8').slice(fs.readFileSync(__filename, 'utf8').lastIndexOf('async function main()'));
+    assert(/smokeLedgerSnapshotRendered\(\);/.test(mainBody), '(f) Section 102 is registered in main()');
+  } finally {
+    cleanup(dir);
+  }
+  pass('(final) Section 102: {LEDGER} lands in the RENDERED plan-slice prompt with recency, an exact-entry marker and the '
+    + 'literal re-read command; execute-task proves the absence (D1) with a positive control proving the predicate is not '
+    + 'blind; and the template-level assert targets plan-slice.md, the executable template, never the prose mirror');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -15538,6 +15662,7 @@ async function main() {
       () => { smokeInertRoutes(); },
       () => { smokeTransportField(); },
       () => { smokeRoutingDomainsRendered(); },
+      () => { smokeLedgerSnapshotRendered(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {
