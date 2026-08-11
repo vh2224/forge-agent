@@ -22,6 +22,9 @@ const MAX_STATIC_TEMPLATE_TOKENS = 800;
 const MAX_STATIC_TEMPLATE_TOTAL_TOKENS = 4500;
 const MAX_BASELINE_RENDERED_TOKENS = 1500;
 const MAX_POINTER_TOKENS = 64;
+// Mirrors the literal default of `ledgerMaxTokens` in forge-prompt.js
+// (validateRenderOptions, S02 B2) — not a second budget, the same one.
+const MAX_LEDGER_SNAPSHOT_TOKENS = 1500;
 
 let passed = 0;
 let failed = 0;
@@ -52,6 +55,16 @@ function baseOptions(unitType) {
     planCheckMode: 'advisory',
     mustHavesCheckResults: 'pass: 4\nwarn: 0\nfail: 0',
     memories: ['Use deterministic prompt artifacts', 'Keep context bounded'],
+    // S02-RISK B3, outcome (a): MAX_BASELINE_RENDERED_TOKENS stays literally 1500.
+    // This gate measures the baseline prompt WITHOUT a real ledger snapshot, so the
+    // injected value is small and deterministic — otherwise every rendered unit type
+    // would depend on how many milestones this repo happens to have closed.
+    // The snapshot's real ceiling is covered by the dedicated assert below.
+    // Silently bumping the 1500 is forbidden: it would turn the cost gate this
+    // milestone exists to honour into decoration.
+    // Parity note: scripts/forge-cost-baseline.js carries the same `ledger:` for the
+    // same reason — the two baseOptions moulds must move together.
+    ledger: '- deterministic ledger snapshot entry',
     standards: {
       CS_LINT: 'npm test',
       CS_STRUCTURE: 'Source files live in scripts/.',
@@ -94,6 +107,27 @@ test(`baseline rendered prompts stay below ${MAX_BASELINE_RENDERED_TOKENS} heuri
       `${unitType}: ${rendered.input_tokens} tokens`,
     );
   }
+});
+
+// The ceiling the baseline gate above deliberately does NOT measure (S02-RISK B3):
+// plan-slice is the one unit type carrying {LEDGER}, so an oversized snapshot must
+// still land inside baseline + the snapshot's own 1500-token budget, and must say
+// out loud that it dropped something.
+test(`plan-slice with an oversized ledger stays below ${MAX_BASELINE_RENDERED_TOKENS} + ${MAX_LEDGER_SNAPSHOT_TOKENS} and announces the cut`, () => {
+  const oversized = Array.from(
+    { length: 200 },
+    (_, i) => `## M${String(i).padStart(3, '0')} deterministic ledger entry line for budget testing`,
+  ).join('\n\n');
+  const rendered = renderPrompt({ ...baseOptions('plan-slice'), ledger: oversized });
+  assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt));
+  assert.ok(
+    rendered.input_tokens <= MAX_BASELINE_RENDERED_TOKENS + MAX_LEDGER_SNAPSHOT_TOKENS,
+    `plan-slice with oversized ledger: ${rendered.input_tokens} tokens`,
+  );
+  assert.ok(
+    rendered.prompt.includes('[...truncated '),
+    'oversized ledger must be truncated with a talking marker, not silently dropped',
+  );
 });
 
 test('auto and next request selective memory without loading the monolith', () => {

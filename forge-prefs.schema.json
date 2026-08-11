@@ -804,8 +804,10 @@
         },
         "ledger_snapshot": {
           "type": "integer",
+          "minimum": 1,
+          "maximum": 16000,
           "default": 1500,
-          "description": "Cap em tokens do snippet do LEDGER.md ({LEDGER}) quando injetado."
+          "description": "Cap em tokens do snapshot do ledger ({LEDGER}), injetado apenas no template plan-slice.md."
         },
         "coding_standards": {
           "type": "integer",

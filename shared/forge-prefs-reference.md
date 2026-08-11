@@ -672,7 +672,7 @@ Cap (em tokens, heurística chars/4) das seções OPCIONAIS injetadas nos prompt
 
 - **Tipo:** integer
 - **Default:** `1500`
-- **Descrição:** Cap em tokens do snippet do LEDGER.md ({LEDGER}) quando injetado.
+- **Descrição:** Cap em tokens do snapshot do ledger ({LEDGER}), injetado apenas no template plan-slice.md.
 
 ### `token_budget.coding_standards`
 

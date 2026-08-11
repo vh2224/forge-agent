@@ -17,12 +17,12 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "6185ca2eb66d6993825cc99eeeedc7e999cb7abb9594f14a1dcfb53d1fd3a888"
+      "sha256": "7df753f84b8211bb8a4092919e46586924ae4f80f0f69ee1dd2f42d25dc39a24"
     },
     {
       "source_id": "dispatch-templates",
       "target": "shared/templates/dispatch",
-      "sha256": "e2a2e9b6e255fe56880dbf1790a3feef5deda7d003be87052792565f2899b295"
+      "sha256": "ed65afb6efebf9e1a7bc51f26d9ba0e366b427b801d663215b3d8c26c06acfbc"
     },
     {
       "source_id": "hooks",
@@ -47,7 +47,7 @@
     {
       "source_id": "configuration",
       "target": "forge-capabilities.json;forge-prefs.schema.json",
-      "sha256": "b93df4f7081b7ab3a3760d7e3e620ad6a60a75c4a6a62cc12659b50aadf9fdfc"
+      "sha256": "81a691001ac7cf528d5894c0a82277652e09f7f4e554acd07061441b49c6d7d9"
     }
   ]
 }

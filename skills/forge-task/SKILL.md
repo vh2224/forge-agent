@@ -1129,7 +1129,8 @@ PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type execute-loos
   --task "$TASK_ID" --dispatch-id "$DISPATCH_ID" --unit-effort "$EFFORT" --thinking "$THINKING_OPUS" \
   --isolation-mode "$ISOLATION_MODE" --branch "$BRANCH" --code-dir "$CODE_DIR" \
   --memory-query "$TASK_DESCRIPTION" --memory-max-tokens "${PREFS[token_budget][auto_memory]:-1200}" \
-  --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}") || { echo 'prompt render failed'; stop; }
+  --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}" \
+  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}") || { echo 'prompt render failed'; stop; }
 PROMPT_PATH=$(node -pe 'JSON.parse(process.argv[1]).prompt_path' "$PROMPT_META")
 PROMPT_ID=$(node -pe 'JSON.parse(process.argv[1]).prompt_id' "$PROMPT_META")
 ```

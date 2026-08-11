@@ -37,6 +37,13 @@ function baseOptions(cwd, unitType) {
     planCheckMode: 'advisory',
     mustHavesCheckResults: 'pass: 4\nwarn: 0\nfail: 0',
     memories: ['Use deterministic prompt artifacts', 'Keep context bounded'],
+    // Same deterministic `ledger:` as forge-context-budget.test.js baseOptions, and
+    // for the same reason (S02-RISK B3): without it, plan-slice would read the real
+    // .gsd/ledger/ store of whatever cwd is measured, so the number would move every
+    // time a milestone closes — a cost baseline that changes without any prompt
+    // change measures the repo's history, not the dispatch cost.
+    // Parity note: the two baseOptions moulds must move together.
+    ledger: '- deterministic ledger snapshot entry',
     standards: {
       CS_LINT: 'npm test',
       CS_STRUCTURE: 'Source files live in scripts/.',
