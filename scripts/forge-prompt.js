@@ -44,6 +44,7 @@ const ALLOWED_PLACEHOLDERS = new Set([
   'CS_STRUCTURE',
   'CS_RULES',
   'TOP_MEMORIES',
+  'LEDGER',
   'description',
   'PLAN_CHECK_MODE',
   'MUST_HAVES_CHECK_RESULTS',
@@ -61,6 +62,7 @@ const MAX_DATA_BYTES = 512 * 1024;
 const MAX_CONTEXT_TOKENS = 16000;
 const DEFAULT_STANDARDS_REL = '.gsd/CODING-STANDARDS.md';
 const MEMORY_FRAGMENT_POINTER = '.gsd/memory/';
+const LEDGER_FRAGMENT_POINTER = '.gsd/ledger/';
 const NO_DOMAINS_NOTICE = '(none — omit domain:)';
 const SINGLE_REPO_NOTICE = '(single repo — omit repo:)';
 
@@ -411,6 +413,55 @@ function resolveMemories(options) {
   return '(none)';
 }
 
+/**
+ * Format whatever the ledger seam returned into the {LEDGER} slot.
+ * Accepts a plain string (direct override / provider) or the builder's envelope
+ * ({ markdown, included_ids, omitted_count }).
+ *
+ * The final char bound is belt-and-suspenders for the DIRECT path only: the
+ * builder already honours the budget and pays for its own entry-counting marker,
+ * so this truncation does not fire behind it.
+ */
+function formatLedgerResult(result, maxTokens) {
+  if (result == null) return '(none)';
+  const pointer = { source: LEDGER_FRAGMENT_POINTER };
+  const text = typeof result === 'string'
+    ? result
+    : typeof result.markdown === 'string'
+      ? result.markdown
+      : '';
+  const trimmed = validateText(String(text).trim(), 'ledger');
+  if (!trimmed) return '(none)';
+  return truncateContext(trimmed, maxTokens, pointer);
+}
+
+function resolveLedger(options) {
+  if (options.ledger != null) return formatLedgerResult(options.ledger, options.ledgerMaxTokens);
+
+  const query = {
+    cwd: options.cwd,
+    maxTokens: options.ledgerMaxTokens,
+    unitType: options.unitType,
+    milestoneId: options.milestoneId,
+    sliceId: options.sliceId,
+  };
+
+  if (typeof options.ledgerProvider === 'function') {
+    return formatLedgerResult(options.ledgerProvider(query), query.maxTokens);
+  }
+
+  // Only the selector coupled to this renderer, for the same reason as
+  // resolveMemories: requiring a project-local `scripts/forge-projection.js`
+  // would execute arbitrary workspace JavaScript in the orchestrator process
+  // merely because a file had a matching name.
+  const api = require('./forge-projection.js');
+  if (typeof api.renderLedgerSnapshot === 'function') {
+    return formatLedgerResult(api.renderLedgerSnapshot(options.cwd, { maxTokens: query.maxTokens }), query.maxTokens);
+  }
+
+  return '(none)';
+}
+
 function boolString(value, defaultValue = false) {
   if (value == null || value === '') return String(defaultValue);
   if (typeof value === 'boolean') return String(value);
@@ -444,6 +495,11 @@ function validateRenderOptions(rawOptions) {
   options.memoryLimit = boundedInteger(options.memoryLimit, 12, 1, 50, 'memory_limit');
   options.memoryMaxTokens = boundedInteger(options.memoryMaxTokens, 1200, 2, MAX_CONTEXT_TOKENS, 'memory_max_tokens');
   options.standardsMaxTokens = boundedInteger(options.standardsMaxTokens, 3000, 3, MAX_CONTEXT_TOKENS, 'standards_max_tokens');
+  // The ledger snapshot budget default lives HERE, as a literal (S02 B2). The
+  // skill lines that read `${PREFS[token_budget][ledger_snapshot]:-1500}` are
+  // model-interpreted best effort; prefs-absent is this repo's real state, so
+  // the renderer must resolve 1500 on its own with nothing configured anywhere.
+  options.ledgerMaxTokens = boundedInteger(options.ledgerMaxTokens, 1500, 2, MAX_CONTEXT_TOKENS, 'ledger_max_tokens');
   options.milestoneCleanup = validateText(options.milestoneCleanup || 'keep', 'milestone_cleanup', 128);
   if (!['keep', 'archive', 'delete'].includes(options.milestoneCleanup)) {
     throw new Error(`Invalid milestone_cleanup: ${options.milestoneCleanup}`);
@@ -520,6 +576,9 @@ function buildValues(options, template) {
     })
     : { CS_LINT: '', CS_STRUCTURE: '', CS_RULES: '' };
   const memories = template.includes('{TOP_MEMORIES}') ? resolveMemories(options) : '';
+  // Gated on the placeholder: the 10 unit types without {LEDGER} pay nothing —
+  // no store read, no provider call.
+  const ledger = template.includes('{LEDGER}') ? resolveLedger(options) : '';
   const routingOverride = typeof options.routingDomains === 'string' && options.routingDomains.trim()
     ? options.routingDomains
     : null;
@@ -546,6 +605,7 @@ function buildValues(options, template) {
     CS_STRUCTURE: normalizedStandards.CS_STRUCTURE,
     CS_RULES: normalizedStandards.CS_RULES,
     TOP_MEMORIES: memories,
+    LEDGER: ledger,
     description: options.description,
     PLAN_CHECK_MODE: options.planCheckMode,
     MUST_HAVES_CHECK_RESULTS: options.mustHavesCheckResults,
@@ -691,6 +751,7 @@ function parseArgs(argv) {
     'auto-commit', 'milestone-cleanup', 'standards-file', 'template-dir',
     'must-haves-file', 'memories-file', 'memories', 'memory-query',
     'memory-query-file', 'memory-limit', 'memory-max-tokens', 'standards-max-tokens',
+    'ledger', 'ledger-max-tokens',
     'isolation-mode', 'branch', 'code-dir', 'vars-json', 'cleanup',
     'routing-domains', 'workspace-repos',
   ]);
@@ -760,6 +821,8 @@ function cliOptions(args) {
     memoryLimit: args['memory-limit'] || base.memoryLimit || base.memory_limit,
     memoryMaxTokens: args['memory-max-tokens'] || base.memoryMaxTokens || base.memory_max_tokens,
     standardsMaxTokens: args['standards-max-tokens'] || base.standardsMaxTokens || base.standards_max_tokens,
+    ledger: args.ledger != null ? args.ledger : base.ledger,
+    ledgerMaxTokens: args['ledger-max-tokens'] || base.ledgerMaxTokens || base.ledger_max_tokens,
     routingDomains: args['routing-domains'] || base.routingDomains || base.routing_domains,
     workspaceRepos: args['workspace-repos'] || base.workspaceRepos || base.workspace_repos,
   };
@@ -803,6 +866,8 @@ Core options:
   --memory-limit N       Maximum selected memory entries (default: 12)
   --memory-max-tokens N  Selected-memory budget (default: 1200)
   --standards-max-tokens N Combined coding-standards budget (default: 3000)
+  --ledger TEXT          Inject a deterministic ledger snapshot ("(none)" = none)
+  --ledger-max-tokens N  Ledger snapshot budget (default: 1500)
   --routing-domains TEXT Test/deterministic routing-domains override
   --workspace-repos TEXT  Test/deterministic workspace-repos override
   --stdin-json           Read all options as JSON from stdin
@@ -838,13 +903,14 @@ module.exports = {
   resolveTemplate,
   extractStandards,
   resolveMemories,
+  resolveLedger,
   renderTemplate,
   applyIsolationHeader,
   renderPrompt,
   materializePrompt,
   cleanupPrompt,
   validateDispatchId,
-  _private: { truncateChars, truncateContext, boundStandards, standardsPointer, NO_DOMAINS_NOTICE, SINGLE_REPO_NOTICE, resolveRoutingDomains, resolveWorkspaceRepos },
+  _private: { truncateChars, truncateContext, boundStandards, standardsPointer, formatLedgerResult, LEDGER_FRAGMENT_POINTER, NO_DOMAINS_NOTICE, SINGLE_REPO_NOTICE, resolveRoutingDomains, resolveWorkspaceRepos },
 };
 
 if (require.main === module) {

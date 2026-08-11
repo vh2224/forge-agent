@@ -257,6 +257,95 @@ test('does not load optional memory or standards for templates that do not refer
   assert.ok(result.prompt.includes('Complete GSD milestone M001'));
 });
 
+// ── {LEDGER} slot (S02 T01) ───────────────────────────────────────────────────
+// The real plan-slice template does not carry {LEDGER} yet (that lands in T02),
+// so these cases render against an explicit template dir — the seam is what is
+// under test here, not the shipped template text.
+function ledgerTemplateDir(cwd, body) {
+  const dir = path.join(cwd, 'ledger-templates');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'plan-slice.md'), body);
+  return dir;
+}
+
+test('renders a direct ledger override into the {LEDGER} slot', () => {
+  const cwd = tempWorkspace('ledger-direct');
+  const templateDir = ledgerTemplateDir(cwd, 'WORKING_DIR: {WORKING_DIR}\nLEDGER:\n{LEDGER}\n');
+  const result = renderPrompt({
+    ...baseOptions(cwd, 'plan-slice'),
+    templateDir,
+    ledger: '## M001\n**Shipped the thing**',
+  });
+  assert.ok(result.prompt.includes('## M001'));
+  assert.ok(result.prompt.includes('**Shipped the thing**'));
+  assert.ok(!result.prompt.includes('{LEDGER}'));
+});
+
+test('renders a ledger provider envelope and hands it the resolved query', () => {
+  const cwd = tempWorkspace('ledger-provider');
+  const templateDir = ledgerTemplateDir(cwd, 'WORKING_DIR: {WORKING_DIR}\n{LEDGER}\n');
+  let received;
+  const result = renderPrompt({
+    ...baseOptions(cwd, 'plan-slice'),
+    templateDir,
+    ledgerProvider: query => {
+      received = query;
+      return { markdown: '## M042\n**From the provider**' };
+    },
+  });
+  assert.strictEqual(received.unitType, 'plan-slice');
+  assert.strictEqual(received.milestoneId, 'M001');
+  assert.strictEqual(received.sliceId, 'S01');
+  assert.strictEqual(received.cwd, cwd);
+  assert.ok(result.prompt.includes('**From the provider**'));
+});
+
+test('resolves the ledger budget to the literal default 1500 with no prefs anywhere', () => {
+  // B2: prefs-absent is this repo's real state, so the default has to come from
+  // validateRenderOptions, not from a skill line a model interpreted.
+  const cwd = tempWorkspace('ledger-default-budget');
+  const templateDir = ledgerTemplateDir(cwd, 'WORKING_DIR: {WORKING_DIR}\n{LEDGER}\n');
+  const home = path.join(cwd, 'empty-home');
+  fs.mkdirSync(home, { recursive: true });
+  assert.strictEqual(fs.existsSync(path.join(cwd, '.gsd', 'prefs.local.md')), false);
+  let seen;
+  const options = { ...baseOptions(cwd, 'plan-slice'), templateDir, ledgerProvider: q => { seen = q.maxTokens; return '(none)'; } };
+  assert.strictEqual(options.ledgerMaxTokens, undefined, 'no budget is supplied by the caller');
+  withIsolatedHome(home, () => renderPrompt(options));
+  assert.strictEqual(seen, 1500);
+});
+
+test('never calls the ledger provider for a template without {LEDGER}', () => {
+  const cwd = tempWorkspace('ledger-unused');
+  let calls = 0;
+  const result = renderPrompt({
+    ...baseOptions(cwd, 'execute-task'),
+    ledgerProvider: () => {
+      calls += 1;
+      throw new Error('unused ledger provider should not run');
+    },
+  });
+  assert.strictEqual(calls, 0);
+  assert.ok(!result.prompt.includes('{LEDGER}'));
+});
+
+test('renders (none) for an empty ledger and bounds an oversized direct override', () => {
+  const cwd = tempWorkspace('ledger-bounds');
+  const templateDir = ledgerTemplateDir(cwd, 'WORKING_DIR: {WORKING_DIR}\nA{LEDGER}B\n');
+  const empty = renderPrompt({ ...baseOptions(cwd, 'plan-slice'), templateDir, ledger: '   ' });
+  assert.ok(empty.prompt.includes('A(none)B'));
+
+  const oversized = renderPrompt({
+    ...baseOptions(cwd, 'plan-slice'),
+    templateDir,
+    ledger: 'ledger-line '.repeat(400),
+    ledgerMaxTokens: 20,
+  });
+  const block = oversized.prompt.match(/\nA([\s\S]*?)B\n/)[1];
+  assert.ok(block.length <= 80, `ledger chars=${block.length}`);
+  assert.ok(block.includes('[...truncated '), `shared marker family: ${block.slice(-80)}`);
+});
+
 test('renders routing domains and workspace repositories through the plan-slice renderer path', () => {
   const cwd = tempWorkspace('routing-positive');
   const home = path.join(cwd, 'home');

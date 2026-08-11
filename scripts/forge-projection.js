@@ -39,6 +39,9 @@ const memoryMod    = require('./forge-memory');
 const checkerMod   = require('./forge-checker-memory');
 const storeStateMod = require('./forge-store-state');
 const itemsMod     = require('./forge-items');
+// Same heuristic the renderer charges the prompt with — the snapshot budget has
+// to be measured in the very unit forge-prompt.js later reports as input_tokens.
+const { countTokens } = require('./forge-tokens');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -221,6 +224,172 @@ function renderLedgerBlock(frag, id) {
   lines.push('');
 
   return lines;
+}
+
+// ── renderLedgerSnapshot ──────────────────────────────────────────────────────
+// The ledger as it enters a dispatch prompt: the most recently completed
+// milestones, WHOLE, until the token budget runs out, closing with a marker that
+// says how many ENTRIES were left out and the exact command that prints them.
+//
+// Why the selection lives here and not in a truncator (S02 B1): renderLedger
+// emits ASCENDING completed_at (oldest first) because forge-dashboard's
+// readLedgerTail takes the file tail as "most recent". Handing that string to
+// any tail-cutting truncator therefore retains the OLDEST entries — the literal
+// opposite of what a prompt wants. Recency is a property of the selection, so
+// the selector owns it, and renderLedger is NOT reordered.
+//
+// Display order is newest-first: this artifact is new and has no legacy reader,
+// so the most valuable entry can come first.
+const LEDGER_SNAPSHOT_EMPTY = '(none)';
+
+// POSIX separators and no newlines: the pointer is embedded in a one-line
+// marker read by models on every platform, and must not break out of it.
+function snapshotPointer(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\\/g, '/').replace(/[\r\n]+/g, ' ').trim();
+}
+
+// Marker builders in decreasing order of information, sharing the
+// `[...truncated ` family with forge-prompt.js and forge-tokens.js. The unit is
+// ENTRIES, never sections — the builder is the only place that knows how many
+// whole entries it dropped (S02 W1).
+function snapshotMarkerBuilders(cwd) {
+  const pointer = snapshotPointer(cwd);
+  const command = 'node scripts/forge-projection.js --render ledger';
+  const noun = n => (n === 1 ? 'ledger entry' : 'ledger entries');
+  const builders = [];
+  if (pointer) builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command} --cwd ${pointer}]`);
+  builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command}]`);
+  builders.push(n => `[...truncated ${n} ${noun(n)}]`);
+  return builders;
+}
+
+// Accumulate whole blocks newest-first until maxTokens, reserving the marker
+// space UP FRONT from the same budget it protects (MEM002). The reserve uses
+// the worst-case count (every entry omitted) so the marker finally emitted —
+// built from the real, smaller count — can only be shorter than budgeted for.
+function accumulateSnapshot(units, maxTokens, cwd) {
+  const total = units.length;
+  const builders = snapshotMarkerBuilders(cwd);
+  const build = builders.find(fn => countTokens(fn(total)) <= maxTokens) || null;
+
+  const selected = [];
+  for (const unit of units) {
+    const projectedOmitted = total - (selected.length + 1);
+    const body = selected.concat([unit]).map(item => item.text).join('\n');
+    const reserve = projectedOmitted > 0 && build ? `\n\n${build(total)}` : '';
+    if (countTokens(`${body}${reserve}`) > maxTokens) break;
+    selected.push(unit);
+  }
+
+  const omitted = total - selected.length;
+  const body = selected.map(item => item.text).join('\n');
+  let markdown = body;
+  if (omitted > 0 && build) markdown = body ? `${body}\n\n${build(omitted)}` : build(omitted);
+  // Degenerate budget: not even the shortest marker fits. Never exceed the
+  // budget we were handed — an over-budget "honest" marker is still over budget.
+  if (countTokens(markdown) > maxTokens) markdown = markdown.slice(0, maxTokens * 4);
+
+  return {
+    markdown: markdown || LEDGER_SNAPSHOT_EMPTY,
+    included_ids: selected.map(item => item.id),
+    omitted_count: omitted,
+    source: null,
+  };
+}
+
+// Fragments, newest first. Missing completed_at sorts LAST here (unknown recency
+// is not evidence of recency); id breaks ties so the output is deterministic.
+function snapshotUnitsFromFragments(cwd) {
+  const fragments = ledgerMod.listFragments(cwd);
+  const parsed = [];
+  for (const entry of fragments) {
+    const { id } = entry;
+    try {
+      const text = ledgerMod.readFragmentText(cwd, entry);
+      parsed.push({ id, frag: ledgerMod.parseFragment(text) });
+    } catch (e) {
+      // One bad fragment degrades to a warning; the snapshot still ships.
+      process.stderr.write(`[forge-projection] warn: skipping ledger fragment ${id}: ${e.message}\n`);
+    }
+  }
+
+  parsed.sort((a, b) => {
+    const ca = String(a.frag.completed_at || '');
+    const cb = String(b.frag.completed_at || '');
+    if (ca === cb) return a.id.localeCompare(b.id);
+    if (!ca) return 1;
+    if (!cb) return -1;
+    return ca < cb ? 1 : -1;
+  });
+
+  return parsed.map(({ id, frag }) => ({
+    id,
+    // renderLedgerBlock is the single source of the block shape (S01).
+    text: renderLedgerBlock(frag, id).join('\n'),
+  }));
+}
+
+// Fallback ONLY when the fragment store is empty: .gsd/LEDGER.md is a stale
+// projection whenever fragments exist (measured 3 entries vs 8). The monolith is
+// append-only, so its LAST blocks are the newest — we take from the end and
+// reverse into the same newest-first display order.
+function snapshotUnitsFromMonolith(cwd) {
+  const target = path.join(cwd || process.cwd(), LEDGER_FILE);
+  let text;
+  try {
+    if (!fs.existsSync(target)) return [];
+    text = fs.readFileSync(target, 'utf8');
+  } catch (e) {
+    process.stderr.write(`[forge-projection] warn: skipping ledger monolith: ${e.message}\n`);
+    return [];
+  }
+
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+  const units = [];
+  let current = null;
+  for (const line of lines) {
+    const header = line.match(/^##\s+(.+?)\s*$/);
+    if (header) {
+      if (current) units.push(current);
+      current = { id: header[1], lines: [line] };
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  if (current) units.push(current);
+
+  return units
+    .map(unit => ({ id: unit.id, text: unit.lines.join('\n').trimEnd() }))
+    .reverse();
+}
+
+/**
+ * renderLedgerSnapshot(cwd, { maxTokens }) →
+ *   { markdown, included_ids, omitted_count, source }
+ *
+ * `markdown` is what enters the prompt; `included_ids`/`omitted_count` let a
+ * caller (and the tests) assert WHICH entries survived without parsing prose.
+ */
+function renderLedgerSnapshot(cwd, options = {}) {
+  guardReadHere(cwd);
+  const maxTokens = Number.isSafeInteger(options.maxTokens) && options.maxTokens > 0
+    ? options.maxTokens
+    : 1500;
+
+  let source = 'fragments';
+  let units = snapshotUnitsFromFragments(cwd);
+  if (units.length === 0) {
+    units = snapshotUnitsFromMonolith(cwd);
+    source = units.length > 0 ? 'monolith' : 'empty';
+  }
+  if (units.length === 0) {
+    return { markdown: LEDGER_SNAPSHOT_EMPTY, included_ids: [], omitted_count: 0, source };
+  }
+
+  const result = accumulateSnapshot(units, maxTokens, cwd);
+  result.source = source;
+  return result;
 }
 
 // ── renderDecisions ───────────────────────────────────────────────────────────
@@ -945,6 +1114,7 @@ function writeAll(cwd, opts) {
 module.exports = {
   renderLedger,
   renderLedgerBlock,
+  renderLedgerSnapshot,
   LEDGER_BLOCK_SEPARATOR_LINES,
   renderDecisions,
   projectMemoryEntries,
