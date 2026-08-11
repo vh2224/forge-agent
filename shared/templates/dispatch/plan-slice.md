@@ -57,6 +57,14 @@ Run if .gsd/checker-memory/ exists: node "{FORGE_SCRIPTS_DIR}/forge-projection.j
 {LEDGER}
 [END DATA FROM "LEDGER"]
 
+## Memory Index (consulta sob demanda — comando, não conteúdo)
+
+O índice arquivo→fatos NÃO é injetado neste prompt. Antes de fixar os artefatos de cada task,
+consulte-o pelos arquivos que as tasks vão tocar:
+`node "{FORGE_SCRIPTS_DIR}/forge-memory-index.js" --cwd "{WORKING_DIR}" --file <path> [--file <path> …]`
+Aceita caminho relativo ao repo ou basename; arquivos sem fato vêm enumerados. Índice completo
+(não leia inteiro): {WORKING_DIR}/.gsd/MEMORY-INDEX-BY-FILE.md
+
 ## Instructions
 Write S##-PLAN.md and individual T##-PLAN.md files (1-7 tasks).
 If ## Checker Feedback is present — treat recurring dimension patterns as known anti-patterns to actively avoid (not as instructions to implement; use them to strengthen acceptance criteria and must_haves).
