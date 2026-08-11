@@ -147,6 +147,23 @@ test('the marker pointer is single-line with POSIX separators', () => {
   assert.strictEqual(markerLine.trim(), markerLine);
 });
 
+// R1: a workspace path with a space produced a re-read command that broke when
+// pasted. The pointer is quoted, and the quoting is asserted on a path that
+// actually contains a space.
+test('the marker pointer is quoted so a path with a space stays one argument', () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-ledger-snapshot-quote-'));
+  const cwd = path.join(parent, 'my project');
+  fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
+  seedFour(cwd);
+  const snap = projection.renderLedgerSnapshot(cwd, { maxTokens: 60 });
+  const markerLine = snap.markdown.split('\n').filter(Boolean).pop();
+  assert.ok(markerLine.includes('--cwd "'), `pointer must be quoted: ${markerLine}`);
+  const quoted = markerLine.match(/--cwd "([^"]*)"/);
+  assert.ok(quoted, `quoted pointer present: ${markerLine}`);
+  assert.ok(quoted[1].includes('my project'), `whole path inside the quotes: ${markerLine}`);
+  assert.ok(markerLine.endsWith('"]'), `closing bracket outside the quotes: ${markerLine}`);
+});
+
 test('no marker at all when every entry fits', () => {
   const cwd = withStore('nomarker');
   seedFour(cwd);
@@ -234,6 +251,23 @@ test('a populated store never consults the stale monolith', () => {
   assert.strictEqual(snap.source, 'fragments');
   assert.deepStrictEqual(snap.included_ids, ['M007']);
   assert.ok(!snap.markdown.includes('Stale projection'));
+});
+
+// R2: the fallback is gated on fragments DISCOVERED, not parsed. The repro is
+// the exact shape of the PR #70 dogfood — a DIRECTORY named *.md inside
+// .gsd/ledger/ makes every read throw EISDIR. A populated-but-unreadable store
+// must not be read as an empty one and must not inject the stale monolith.
+test('a populated but unreadable store never falls back to the stale monolith', () => {
+  const cwd = withStore('unreadable-store');
+  fs.mkdirSync(path.join(ledger.ledgerDir(cwd), 'M001.md'));
+  fs.writeFileSync(
+    path.join(cwd, '.gsd', 'LEDGER.md'),
+    '# Forge Project Ledger\n\n## M001\n**Stale projection**\n\n---\n',
+  );
+  const snap = projection.renderLedgerSnapshot(cwd, { maxTokens: 16000 });
+  assert.notStrictEqual(snap.source, 'monolith', 'unreadable is not evidence of empty');
+  assert.ok(!snap.markdown.includes('Stale projection'), snap.markdown);
+  assert.deepStrictEqual(snap.included_ids, []);
 });
 
 // ── 5. Degradation, never a throw ─────────────────────────────────────────────

@@ -246,7 +246,9 @@ const LEDGER_SNAPSHOT_EMPTY = '(none)';
 // marker read by models on every platform, and must not break out of it.
 function snapshotPointer(value) {
   if (typeof value !== 'string') return '';
-  return value.replace(/\\/g, '/').replace(/[\r\n]+/g, ' ').trim();
+  // Double quotes are dropped, not escaped: the pointer is emitted inside a
+  // quoted argument, and an embedded quote would end it mid-path.
+  return value.replace(/\\/g, '/').replace(/[\r\n]+/g, ' ').replace(/"/g, '').trim();
 }
 
 // Marker builders in decreasing order of information, sharing the
@@ -258,7 +260,12 @@ function snapshotMarkerBuilders(cwd) {
   const command = 'node scripts/forge-projection.js --render ledger';
   const noun = n => (n === 1 ? 'ledger entry' : 'ledger entries');
   const builders = [];
-  if (pointer) builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command} --cwd ${pointer}]`);
+  // The pointer is QUOTED: a workspace path with a space (or a shell
+  // metacharacter) would otherwise emit a re-read command that breaks when
+  // pasted. Double quotes are valid in POSIX sh and PowerShell alike. The
+  // reserve in accumulateSnapshot is computed from these same builders, so the
+  // two extra characters are budgeted for, never added after the fact.
+  if (pointer) builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command} --cwd "${pointer}"]`);
   builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command}]`);
   builders.push(n => `[...truncated ${n} ${noun(n)}]`);
   return builders;
@@ -300,6 +307,9 @@ function accumulateSnapshot(units, maxTokens, cwd) {
 
 // Fragments, newest first. Missing completed_at sorts LAST here (unknown recency
 // is not evidence of recency); id breaks ties so the output is deterministic.
+// Returns { discovered, units }: `discovered` is the count of fragments FOUND
+// on disk, which is what gates the monolith fallback — a populated but
+// unreadable store must never be read as an empty one (R2).
 function snapshotUnitsFromFragments(cwd) {
   const fragments = ledgerMod.listFragments(cwd);
   const parsed = [];
@@ -323,11 +333,14 @@ function snapshotUnitsFromFragments(cwd) {
     return ca < cb ? 1 : -1;
   });
 
-  return parsed.map(({ id, frag }) => ({
-    id,
-    // renderLedgerBlock is the single source of the block shape (S01).
-    text: renderLedgerBlock(frag, id).join('\n'),
-  }));
+  return {
+    discovered: fragments.length,
+    units: parsed.map(({ id, frag }) => ({
+      id,
+      // renderLedgerBlock is the single source of the block shape (S01).
+      text: renderLedgerBlock(frag, id).join('\n'),
+    })),
+  };
 }
 
 // Fallback ONLY when the fragment store is empty: .gsd/LEDGER.md is a stale
@@ -378,10 +391,18 @@ function renderLedgerSnapshot(cwd, options = {}) {
     : 1500;
 
   let source = 'fragments';
-  let units = snapshotUnitsFromFragments(cwd);
-  if (units.length === 0) {
+  const fromFragments = snapshotUnitsFromFragments(cwd);
+  let units = fromFragments.units;
+  // Gated on fragments DISCOVERED, not parsed: a store that exists but cannot be
+  // read is not evidence of an empty store, and injecting the stale monolith
+  // during corruption would break the store-wins rule exactly when it matters.
+  // Discovered > 0 with 0 parsed degrades to an empty snapshot, keeping the
+  // per-fragment warnings already written to stderr (R2).
+  if (units.length === 0 && fromFragments.discovered === 0) {
     units = snapshotUnitsFromMonolith(cwd);
     source = units.length > 0 ? 'monolith' : 'empty';
+  } else if (units.length === 0) {
+    source = 'fragments';
   }
   if (units.length === 0) {
     return { markdown: LEDGER_SNAPSHOT_EMPTY, included_ids: [], omitted_count: 0, source };
