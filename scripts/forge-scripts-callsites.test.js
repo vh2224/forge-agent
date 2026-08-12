@@ -102,8 +102,61 @@ test('unmeasured prefs shape is named, censused, and not a finding', () => {
     fs.appendFileSync(path.join(root, 'bin', 'run'), '\nPREFS="$XDG_CONFIG_HOME/forge-agent-prefs.jsonc"\n');
     const report = guard.scan({ root });
     assert.strictEqual(report.outcome, 'clean');
-    assert.strictEqual(report.scanned_by_family['prefs-path'], 1);
+    assert.strictEqual(report.scanned_by_family['prefs-path'], 2);
     assert.deepStrictEqual(report.unmeasured, [{ path: 'bin/run', line: 5, reason: 'prefs-shape-unmeasured' }]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+/*
+ * R1: every fixture above writes the destination as a BARE assignment, but three
+ * of the four rungs the wrappers actually write are conditional one-liners, and
+ * the old trigger required the line to start with the variable name.  Poisoning
+ * rung 2 — the conditional form — is therefore the case the family exists for
+ * and the case it could not see: 15 of the 20 real assignment sites went
+ * unevaluated, and they did not even reach `unmeasured`.
+ */
+const RUNGS = [
+  '  PREFS="${FORGE_HOME:-$HOME/.forge-agent}/forge-agent-prefs.jsonc"',
+  '  [ -f "$PREFS" ] || PREFS="${FORGE_HOME:-$HOME/.forge-agent}/forge-agent-prefs.json"',
+  '  [ -f "$PREFS" ] || PREFS="$HOME/.claude/forge-agent-prefs.jsonc"',
+  '  [ -f "$PREFS" ] || PREFS="$HOME/.claude/forge-agent-prefs.json"',
+];
+function chainFixture(rungs) {
+  const root = fixture();
+  fs.writeFileSync(path.join(root, 'bin', 'run'), `#!/usr/bin/env bash\nENGINE="\${FORGE_HOME:-$HOME/.forge-agent}/scripts/a.js"\n${rungs.join('\n')}\n`);
+  return root;
+}
+test('the real four-rung conditional chain is measured on every rung', () => {
+  const root = chainFixture(RUNGS);
+  try {
+    const report = guard.scan({ root });
+    assert.strictEqual(report.outcome, 'clean', JSON.stringify(report.findings));
+    assert.strictEqual(report.scanned_by_family['prefs-path'], 4, 'each rung must be counted, not the file');
+    assert.deepStrictEqual(report.unmeasured, []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('a poisoned conditional rung is a finding that names the directory', () => {
+  const poisoned = RUNGS.slice();
+  poisoned[1] = '  [ -f "$PREFS" ] || PREFS="${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.json"';
+  const root = chainFixture(poisoned);
+  try {
+    const report = guard.scan({ root });
+    assert.strictEqual(report.outcome, 'findings', 'rung 2 is the shape the old trigger could not see');
+    const hit = report.findings.find((x) => x.family === 'prefs-path');
+    assert(hit, 'poisoned rung must produce a prefs-path finding');
+    assert.strictEqual(hit.directory, '.forge-agent/shared');
+    assert.strictEqual(hit.path, 'bin/run');
+    assert.strictEqual(hit.line, 4);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('a conditional rung outside the measured prefix table is unmeasured, never judged', () => {
+  const rungs = RUNGS.concat(['  [ -f "$PREFS" ] || PREFS="$XDG_CONFIG_HOME/forge/forge-agent-prefs.json"']);
+  const root = chainFixture(rungs);
+  try {
+    const report = guard.scan({ root });
+    assert.strictEqual(report.outcome, 'clean', JSON.stringify(report.findings));
+    assert.strictEqual(report.counts_by_family['prefs-path'], 0);
+    assert.strictEqual(report.scanned_by_family['prefs-path'], 5);
+    assert.deepStrictEqual(report.unmeasured, [{ path: 'bin/run', line: 7, reason: 'prefs-shape-unmeasured' }]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 test('authority loss is scan-failed, never clean', () => {

@@ -42,17 +42,39 @@ const LEGACY_PROSE = Object.freeze([
 ]);
 function isLegacyProse(line) { return LEGACY_PROSE.some((pattern) => pattern.test(line)); }
 function isLegacyLine(line) { return LEGACY_CALL_SITE.test(line) || isLegacyProse(line); }
-function isPrefsAssignment(line) { return /^[ \t]*[A-Z_]+="[^"]*forge-agent-prefs\.jsonc?"[ \t]*$/.test(line); }
+/*
+ * Two jobs, deliberately split.  TRIGGER is broad so no prefs-shaped assignment
+ * escapes notice: the wrappers write the destination on four rungs, one bare
+ * (`VAR="…"`) and three conditional (`[ -f "$VAR" ] || VAR="…"`), and a single
+ * anchored-assignment regex saw only the first — 15 of 20 real sites went
+ * unevaluated without appearing anywhere in the report.  EXTRACTION stays narrow:
+ * the value is read only through the two measured assignment shapes and the
+ * closed prefix table, so a shape nobody measured is never judged.  Prose is
+ * spared because a mention of the filename is not an assignment.
+ */
+const PREFS_FILE = /forge-agent-prefs\.jsonc?/;
+const PREFS_ASSIGN = /[A-Z_][A-Z0-9_]*=/;
+const PREFS_BARE = /^[ \t]*[A-Z_][A-Z0-9_]*="([^"]*forge-agent-prefs\.jsonc?)"[ \t]*$/;
+const PREFS_RUNG = /^[ \t]*\[[^\]]*\][ \t]*\|\|[ \t]*[A-Z_][A-Z0-9_]*="([^"]*forge-agent-prefs\.jsonc?)"[ \t]*$/;
+// Closed table of MEASURED prefixes.  Never substring-search an approved
+// directory against the raw line: `${FORGE_HOME:-$HOME/.forge-agent}` literally
+// contains `$HOME/.forge-agent`, so a `/shared/` line would self-approve.
+const PREFS_PREFIXES = Object.freeze([
+  ['${FORGE_HOME:-$HOME/.forge-agent}', '.forge-agent'],
+  ['$HOME/.claude', '.claude'],
+  ['~/.claude', '.claude'],
+]);
+function isPrefsAssignment(line) { return PREFS_ASSIGN.test(line) && PREFS_FILE.test(line); }
+function prefsAssignmentValue(line) { const match = line.match(PREFS_BARE) || line.match(PREFS_RUNG); return match ? match[1] : null; }
 function preferenceDirectories() {
   const candidates = require('./forge-home.js').resolvePreferencePaths(SENTINEL_CWD, { userHome: SENTINEL_HOME, env: {} }).jsoncCandidates;
   return candidates.map((candidate) => path.relative(SENTINEL_HOME, path.dirname(candidate)).replace(/\\/g, '/'));
 }
 function preferenceDirectory(line) {
-  const value = line.match(/^[ \t]*[A-Z_]+="([^"]*)"[ \t]*$/)[1];
+  const value = prefsAssignmentValue(line);
+  if (value === null) return null;
   const suffix = value.replace(/\/forge-agent-prefs\.jsonc?$/, '');
-  if (suffix.startsWith('${FORGE_HOME:-$HOME/.forge-agent}')) return `.forge-agent${suffix.slice('${FORGE_HOME:-$HOME/.forge-agent}'.length)}`;
-  if (suffix.startsWith('$HOME/.claude')) return `.claude${suffix.slice('$HOME/.claude'.length)}`;
-  if (suffix.startsWith('~/.claude')) return `.claude${suffix.slice('~/.claude'.length)}`;
+  for (const [prefix, home] of PREFS_PREFIXES) if (suffix.startsWith(prefix)) return `${home}${suffix.slice(prefix.length)}`;
   return null;
 }
 
@@ -81,7 +103,9 @@ function familiesFor(file, text, root) {
   if (/\.md$/i.test(file) && /FORGE_SHARED_DIR=/.test(text)) out.push('shared-dir');
   if (rel.startsWith('bin/') && !/\.(cmd|bat)$/i.test(file)) out.push('bin-bash');
   if (/\.(cmd|bat)$/i.test(file)) out.push('bin-cmd');
-  if (text.split('\n').some(isPrefsAssignment)) out.push('prefs-path');
+  // prefs-path is counted per LINE in scan(), not here: a file scoring 1 while
+  // three of its four rungs were never evaluated is a census that overstates
+  // its own coverage.  Adding a rung must move the number.
   return out;
 }
 function findingFamily(file, line) {
@@ -109,6 +133,7 @@ function scan(options = {}) {
     const families = familiesFor(file, text, root); for (const family of families) scanned_by_family[family]++;
     text.split('\n').forEach((line, index) => {
       if (isPrefsAssignment(line)) {
+        scanned_by_family['prefs-path']++;
         const directory = preferenceDirectory(line);
         if (directory === null) unmeasured.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, reason: SKIP_REASONS.PREFS_SHAPE_UNMEASURED });
         else if (!approvedDirectories.includes(directory)) {
