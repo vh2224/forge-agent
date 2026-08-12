@@ -35,6 +35,18 @@
 // discipline). A symlink found while walking a store whose real target
 // resolves outside the real root is enumerated as `skipped` with a named
 // reason, never followed.
+//
+// Cycle containment (S04/R2): a CONTAINED directory symlink is followed, so
+// `.gsd/ledger/loop -> .gsd/ledger` is a legal shape the walk must survive.
+// It does not hang — the OS symlink-resolution cap (ELOOP / Windows reparse
+// cap) fires around depth ~64 and the error branch drains the stack — but the
+// damage is worse than a hang because it is SILENT and it lands exactly on
+// the number this slice's mass decomposition rests on: the single 1-byte file
+// was counted 64 TIMES under fabricated paths (`files: 64, bytes: 64`) plus a
+// junk error entry. So the walk tracks REAL directory identities (realpath)
+// and refuses to descend into one already visited, enumerating the revisit
+// with a named reason (`symlink-cycle` / `already-visited`) — seen-but-not-
+// re-measured is stated, never silent.
 
 const fs = require('fs');
 const path = require('path');
@@ -86,10 +98,24 @@ function hashFile(absPath) {
 // errors: [{ path, reason }] — read failures, never silent, never a throw that
 //   aborts the whole census.
 // skipped: [{ path, reason }] — symlinks whose real target resolves outside
-//   the real .gsd/ root; enumerated, never followed.
+//   the real .gsd/ root, and directories whose REAL identity was already
+//   visited on this walk (cycle containment); enumerated, never followed.
 function walkStore(cwd, storeRelDir, gsdRealRoot) {
   const dirAbs = path.join(cwd, storeRelDir);
   const result = { present: false, files: [], errors: [], skipped: [] };
+
+  // Real directory identities already descended into on THIS walk. Keyed by
+  // realpath (the OS's own answer to "is this the same directory"), resolved
+  // BEFORE descending — a cycle is refused on the first revisit, not after
+  // the OS resolution cap has already multiplied every file below it.
+  const visitedRealDirs = new Set();
+  const realDirKey = (abs) => {
+    try {
+      return fs.realpathSync(abs);
+    } catch (_) {
+      return null; // unresolvable: caller falls back to the lexical path.
+    }
+  };
 
   let rootStat;
   try {
@@ -104,6 +130,7 @@ function walkStore(cwd, storeRelDir, gsdRealRoot) {
   }
   result.present = true;
 
+  visitedRealDirs.add(realDirKey(dirAbs) || path.resolve(dirAbs));
   const stack = [dirAbs];
   while (stack.length > 0) {
     const dir = stack.pop();
@@ -140,6 +167,12 @@ function walkStore(cwd, storeRelDir, gsdRealRoot) {
           continue;
         }
         if (targetStat.isDirectory()) {
+          // realTarget IS the real identity (realpathSync already resolved it).
+          if (visitedRealDirs.has(realTarget)) {
+            result.skipped.push({ path: relToCwd, reason: 'symlink-cycle' });
+            continue;
+          }
+          visitedRealDirs.add(realTarget);
           stack.push(abs);
           continue;
         }
@@ -155,6 +188,15 @@ function walkStore(cwd, storeRelDir, gsdRealRoot) {
       }
 
       if (entry.isDirectory()) {
+        // Plain directories get the same identity check: a platform that does
+        // not report a reparse point as a symlink (or a bind mount) would
+        // otherwise reintroduce the multiplication this guard exists to stop.
+        const key = realDirKey(abs) || path.resolve(abs);
+        if (visitedRealDirs.has(key)) {
+          result.skipped.push({ path: relToCwd, reason: 'already-visited' });
+          continue;
+        }
+        visitedRealDirs.add(key);
         stack.push(abs);
         continue;
       }
@@ -350,7 +392,8 @@ function census(cwd, opts) {
 // ── compare ──────────────────────────────────────────────────────────────────
 // compare(before, after) -> {
 //   stores: { <storeName>: { verdict, added[], removed[], modified[], unchanged_count,
-//                             unreadable_before[], unreadable_after[] } },
+//                             unreadable_before[], unreadable_after[],
+//                             skipped_before[], skipped_after[] } },
 //   trees: {
 //     milestones: { dirs_added[], dirs_removed[], dirs_changed[{id,before,after}] },
 //     tasks: { same shape },
@@ -360,8 +403,8 @@ function census(cwd, opts) {
 // ANTI-SILENCE FLOOR: a store with 0 files on BOTH sides (no unreadable
 // entries either) is `inconclusive`, never `identical` — see module header.
 function compareStore(beforeStore, afterStore) {
-  const before = beforeStore || { files: [], errors: [] };
-  const after = afterStore || { files: [], errors: [] };
+  const before = beforeStore || { files: [], errors: [], skipped: [] };
+  const after = afterStore || { files: [], errors: [], skipped: [] };
 
   const beforeMap = new Map(before.files.map((f) => [f.path, f.sha256]));
   const afterMap = new Map(after.files.map((f) => [f.path, f.sha256]));
@@ -390,9 +433,21 @@ function compareStore(beforeStore, afterStore) {
   const unreadableBefore = (before.errors || []).map((e) => e.path).sort((a, b) => a.localeCompare(b, 'en'));
   const unreadableAfter = (after.errors || []).map((e) => e.path).sort((a, b) => a.localeCompare(b, 'en'));
 
-  const totalConsideredBefore = beforeMap.size + unreadableBefore.length;
-  const totalConsideredAfter = afterMap.size + unreadableAfter.length;
+  // SKIPPED IS THE SAME CLASS AS UNREADABLE (S04/R3). A skipped entry is an
+  // entry that was SEEN and NOT MEASURED — byte for byte the same epistemic
+  // situation as a file that could not be read. Dropping it here would let a
+  // non-empty store report `identical` with an out-of-root symlink skipped on
+  // only ONE side, and the evidence of the skip would vanish from the compare
+  // artifact entirely. Same invariant this module's header already claims with
+  // three precedents (S02/R2, S03/R1, PR #70): seen-but-not-measured is never
+  // evidence of "same". Strict variant, the established direction of this repo.
+  const skippedBefore = (before.skipped || []).map((s) => s.path).sort((a, b) => a.localeCompare(b, 'en'));
+  const skippedAfter = (after.skipped || []).map((s) => s.path).sort((a, b) => a.localeCompare(b, 'en'));
+
+  const totalConsideredBefore = beforeMap.size + unreadableBefore.length + skippedBefore.length;
+  const totalConsideredAfter = afterMap.size + unreadableAfter.length + skippedAfter.length;
   const hasUnreadable = unreadableBefore.length > 0 || unreadableAfter.length > 0;
+  const hasSkipped = skippedBefore.length > 0 || skippedAfter.length > 0;
   const hasDiff = added.length > 0 || removed.length > 0 || modified.length > 0;
 
   let verdict;
@@ -400,11 +455,12 @@ function compareStore(beforeStore, afterStore) {
     // ANTI-SILENCE FLOOR — the case this module exists to prove: 0 files
     // compared on both sides is a claim of NO comparison, never "same".
     verdict = 'inconclusive';
-  } else if (hasUnreadable) {
-    // Unreadable ≠ evidence of "same" (S02/R2, S03/R1, PR#70 dogfood): a store
-    // that could not be fully read can never resolve to `identical`. If real
-    // diffs were also found, `changed` still communicates more than
-    // `inconclusive` would — the diffs ARE evidence, even if incomplete.
+  } else if (hasUnreadable || hasSkipped) {
+    // Unreadable/skipped ≠ evidence of "same" (S02/R2, S03/R1, PR#70 dogfood,
+    // S04/R3): a store that could not be fully measured can never resolve to
+    // `identical`. If real diffs were also found, `changed` still communicates
+    // more than `inconclusive` would — the diffs ARE evidence, even if
+    // incomplete.
     verdict = hasDiff ? 'changed' : 'inconclusive';
   } else if (hasDiff) {
     verdict = 'changed';
@@ -420,6 +476,8 @@ function compareStore(beforeStore, afterStore) {
     unchanged_count: unchangedCount,
     unreadable_before: unreadableBefore,
     unreadable_after: unreadableAfter,
+    skipped_before: skippedBefore,
+    skipped_after: skippedAfter,
   };
 }
 
@@ -514,13 +572,86 @@ function renderCompareMarkdown(result) {
   const lines = [];
   lines.push('# Comparação de censos .gsd/');
   lines.push('');
-  lines.push('| store | verdict | added | removed | modified | unchanged |');
-  lines.push('| --- | --- | --- | --- | --- | --- |');
+  // `unreadable` and `skipped` are columns, not footnotes: they are the reason
+  // a store could not resolve to `identical`, so the artifact must show them.
+  lines.push('| store | verdict | added | removed | modified | unchanged | unreadable | skipped |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
   for (const [name, s] of Object.entries(result.stores)) {
-    lines.push(`| ${name} | ${s.verdict} | ${s.added.length} | ${s.removed.length} | ${s.modified.length} | ${s.unchanged_count} |`);
+    const unreadable = (s.unreadable_before || []).length + (s.unreadable_after || []).length;
+    const skipped = (s.skipped_before || []).length + (s.skipped_after || []).length;
+    lines.push(`| ${name} | ${s.verdict} | ${s.added.length} | ${s.removed.length} | ${s.modified.length} | ${s.unchanged_count} | ${unreadable} | ${skipped} |`);
   }
   lines.push('');
   return lines.join('\n') + '\n';
+}
+
+// ── validateCensusEnvelope ───────────────────────────────────────────────────
+// Third rung of the --baseline error ladder (S04/R4). The two neighbouring
+// rungs already behave: unreadable file -> named error, exit 2; invalid JSON ->
+// named error, exit 2. Syntactically-valid JSON with the WRONG SHAPE was the
+// odd one out — `{"stores":{"ledger":{"files":null}}}` reached compare() and
+// died with a raw TypeError and exit 1, i.e. the operator was told "the tool
+// crashed" when the truth was "your baseline file is not a census".
+//
+// Returns null when the envelope is acceptable, or the dotted FIELD PATH of
+// the first offending field — the message names the field, never a generic
+// "invalid input", because the operator has to know which one to fix.
+function validateCensusEnvelope(obj) {
+  const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+  if (!isPlainObject(obj)) return '<root> (expected an object)';
+
+  // `stores` is optional (an envelope from a project with no .gsd/ still has
+  // it, but compare() tolerates absence); when present it must be well formed.
+  if (obj.stores !== undefined) {
+    if (!isPlainObject(obj.stores)) return 'stores (expected an object)';
+    for (const [name, store] of Object.entries(obj.stores)) {
+      if (!isPlainObject(store)) return `stores.${name} (expected an object)`;
+      if (!Array.isArray(store.files)) return `stores.${name}.files (expected an array)`;
+      for (let i = 0; i < store.files.length; i += 1) {
+        const f = store.files[i];
+        if (!isPlainObject(f)) return `stores.${name}.files[${i}] (expected an object)`;
+        if (typeof f.path !== 'string') return `stores.${name}.files[${i}].path (expected a string)`;
+        if (typeof f.sha256 !== 'string') return `stores.${name}.files[${i}].sha256 (expected a string)`;
+      }
+      for (const listName of ['errors', 'skipped']) {
+        if (store[listName] === undefined) continue;
+        if (!Array.isArray(store[listName])) return `stores.${name}.${listName} (expected an array)`;
+        for (let i = 0; i < store[listName].length; i += 1) {
+          const e = store[listName][i];
+          if (!isPlainObject(e)) return `stores.${name}.${listName}[${i}] (expected an object)`;
+          if (typeof e.path !== 'string') return `stores.${name}.${listName}[${i}].path (expected a string)`;
+        }
+      }
+    }
+  }
+
+  if (obj.trees !== undefined) {
+    if (!isPlainObject(obj.trees)) return 'trees (expected an object)';
+    for (const treeName of ['milestones', 'tasks']) {
+      const tree = obj.trees[treeName];
+      if (tree === undefined) continue;
+      if (!isPlainObject(tree)) return `trees.${treeName} (expected an object)`;
+      if (tree.entries !== undefined) {
+        if (!isPlainObject(tree.entries)) return `trees.${treeName}.entries (expected an object)`;
+        for (const [id, entry] of Object.entries(tree.entries)) {
+          if (!isPlainObject(entry)) return `trees.${treeName}.entries.${id} (expected an object)`;
+          if (typeof entry.files !== 'number') return `trees.${treeName}.entries.${id}.files (expected a number)`;
+          if (typeof entry.bytes !== 'number') return `trees.${treeName}.entries.${id}.bytes (expected a number)`;
+        }
+      }
+    }
+    if (obj.trees.forge !== undefined) {
+      if (!isPlainObject(obj.trees.forge)) return 'trees.forge (expected an object)';
+      for (const field of ['files', 'bytes']) {
+        if (obj.trees.forge[field] !== undefined && typeof obj.trees.forge[field] !== 'number') {
+          return `trees.forge.${field} (expected a number)`;
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -595,6 +726,11 @@ function cliMain(argv) {
       process.stderr.write(JSON.stringify({ error: `--baseline invalid JSON: ${e.message}` }) + '\n');
       return 2;
     }
+    const schemaError = validateCensusEnvelope(before);
+    if (schemaError) {
+      process.stderr.write(JSON.stringify({ error: `--baseline invalid schema: ${schemaError}` }) + '\n');
+      return 2;
+    }
     const after = census(cwd, {});
     const result = compare(before, after);
     if (args.markdown) {
@@ -633,6 +769,7 @@ module.exports = {
   writeCensus,
   renderMarkdown,
   renderCompareMarkdown,
+  validateCensusEnvelope,
   STORE_DIRS,
   NOT_SWEPT_STORES,
   NOT_SWEPT_TREES,

@@ -27,7 +27,14 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
-const { census, compare, writeCensus, _private } = require('./forge-gsd-census.js');
+const {
+  census,
+  compare,
+  writeCensus,
+  renderCompareMarkdown,
+  validateCensusEnvelope,
+  _private,
+} = require('./forge-gsd-census.js');
 
 const SCRIPT_PATH = path.join(__dirname, 'forge-gsd-census.js');
 
@@ -457,6 +464,189 @@ test('Symlink dentro do store que aponta para FORA da raiz .gsd/ é skipped, nun
   } finally {
     cleanup(root);
   }
+});
+
+// ── Contenção de ciclo (S04/R2) ─────────────────────────────────────────────
+
+// Directory link creation is privilege-sensitive on Windows for 'dir' symlinks
+// but NOT for junctions, so use the kind that works unprivileged per platform.
+function linkDir(target, linkPath) {
+  const kind = process.platform === 'win32' ? 'junction' : 'dir';
+  try {
+    fs.symlinkSync(target, linkPath, kind);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+test('CICLO: symlink de diretório contido apontando para o próprio store não multiplica a contagem (1 arquivo = 1 arquivo) e o revisit tem motivo NOMEADO', () => {
+  // The exact reproduction from the S04/R2 objection: `.gsd/ledger/loop` ->
+  // `.gsd/ledger`. It never hung — the OS resolution cap drained the stack at
+  // depth ~64 — which is precisely why the bug was dangerous: the census
+  // RETURNED, in ~550ms, reporting files:64/bytes:64 for a single 1-byte file
+  // under 64 fabricated paths, plus a junk error entry. `totals.swept` is the
+  // deliverable this slice's mass decomposition rests on, so a silently
+  // inflated count is worse than a crash.
+  const root = mkFixture();
+  try {
+    write(root, '.gsd/ledger/a.md', 'A'); // exactly 1 byte
+    const ledgerDir = path.join(root, '.gsd', 'ledger');
+    const loopLink = path.join(ledgerDir, 'loop');
+    if (!linkDir(ledgerDir, loopLink)) {
+      console.log('      (skipped: directory link creation not permitted on this host)');
+      return;
+    }
+
+    const started = Date.now();
+    const result = census(root, {});
+    const elapsed = Date.now() - started;
+
+    assertEq(result.stores.ledger.totals.files, 1, 'the single file must be counted exactly ONCE, not once per cycle level');
+    assertEq(result.stores.ledger.totals.bytes, 1, 'bytes must reflect the one real byte, not the cycle-multiplied total');
+    assertEq(result.stores.ledger.files.map((f) => f.path), ['.gsd/ledger/a.md'], 'only the real path is enumerated — no fabricated loop/loop/... paths');
+
+    const revisit = result.stores.ledger.skipped.find((s) => s.path === '.gsd/ledger/loop');
+    assert(revisit, 'the cycle revisit must be ENUMERATED in skipped[], never dropped silently');
+    assertEq(revisit.reason, 'symlink-cycle', 'the revisit carries a NAMED reason');
+
+    assertEq(result.stores.ledger.errors, [], 'no junk error entry from the OS resolution cap — the cycle is refused before the cap is ever reached');
+    assert(elapsed < 30000, `census must terminate promptly on a cycle (took ${elapsed}ms)`);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('CICLO: um store com revisit pulado NUNCA sai identical (skipped é da mesma classe que ilegível)', () => {
+  const root = mkFixture();
+  try {
+    write(root, '.gsd/ledger/a.md', 'A');
+    const ledgerDir = path.join(root, '.gsd', 'ledger');
+    if (!linkDir(ledgerDir, path.join(ledgerDir, 'loop'))) {
+      console.log('      (skipped: directory link creation not permitted on this host)');
+      return;
+    }
+    const before = census(root, {});
+    const after = census(root, {});
+    const cmp = compare(before, after).stores.ledger;
+    assert(cmp.verdict !== 'identical', 'a store that skipped an entry can never resolve to identical');
+    assertEq(cmp.verdict, 'inconclusive', 'no real diff besides the skip: inconclusive');
+  } finally {
+    cleanup(root);
+  }
+});
+
+// ── skipped no compare (S04/R3) ─────────────────────────────────────────────
+
+test('S04/R3: skipped em UM SÓ lado impede identical e a evidência do skip sobrevive no artefato de comparação', () => {
+  // Hand-built envelopes: same files on both sides (so added/removed/modified
+  // are all empty and the naive answer is "identical"), but the AFTER census
+  // saw an out-of-root symlink it could not measure. Seen-but-not-measured is
+  // never evidence of "same" — the same invariant as S02/R2, S03/R1, PR #70.
+  const mkStore = (files, skipped) => ({
+    files: files.map((p) => ({ path: p, sha256: sha256(p), bytes: 1 })),
+    errors: [],
+    skipped: (skipped || []).map((p) => ({ path: p, reason: 'symlink-outside-root' })),
+  });
+
+  const before = { stores: { ledger: mkStore(['.gsd/ledger/a.md']) }, trees: {} };
+  const after = { stores: { ledger: mkStore(['.gsd/ledger/a.md'], ['.gsd/ledger/escape-link.md']) }, trees: {} };
+
+  const cmp = compare(before, after).stores.ledger;
+  assert(cmp.verdict !== 'identical', 'a non-empty store with a one-sided skip must never report identical');
+  assertEq(cmp.verdict, 'inconclusive', 'no real diff besides the skip: inconclusive');
+  assertEq(cmp.skipped_after, ['.gsd/ledger/escape-link.md'], 'the skip is carried into the compare result, not discarded');
+  assertEq(cmp.skipped_before, [], 'the clean side is enumerated as empty, not absent');
+
+  // Mutation control: the alternative that IGNORES skipped (the pre-fix
+  // behaviour) answers `identical` — a DIFFERENT, wrong answer.
+  const naiveVerdict = 'identical'; // 0 added + 0 removed + 0 modified + 0 unreadable
+  assert(cmp.verdict !== naiveVerdict, 'the skipped-aware gate must disagree with the skipped-blind answer');
+});
+
+test('S04/R3: skip de um lado + diff real -> changed (o diff É evidência, mesmo incompleta)', () => {
+  const mkStore = (files, skipped) => ({
+    files: files.map((p) => ({ path: p, sha256: sha256(p), bytes: 1 })),
+    errors: [],
+    skipped: (skipped || []).map((p) => ({ path: p, reason: 'symlink-outside-root' })),
+  });
+  const before = { stores: { ledger: mkStore(['.gsd/ledger/a.md']) }, trees: {} };
+  const after = { stores: { ledger: mkStore(['.gsd/ledger/a.md', '.gsd/ledger/b.md'], ['.gsd/ledger/x']) }, trees: {} };
+  const cmp = compare(before, after).stores.ledger;
+  assertEq(cmp.verdict, 'changed', 'real diffs still communicate more than inconclusive');
+  assertEq(cmp.added, ['.gsd/ledger/b.md'], 'the diff is still enumerated');
+  assertEq(cmp.skipped_after, ['.gsd/ledger/x'], 'and the skip is still reported alongside it');
+});
+
+test('S04/R3: renderCompareMarkdown expõe as colunas unreadable e skipped', () => {
+  const before = { stores: { ledger: { files: [], errors: [], skipped: [] } }, trees: {} };
+  const after = {
+    stores: { ledger: { files: [{ path: '.gsd/ledger/a.md', sha256: sha256('A'), bytes: 1 }], errors: [], skipped: [{ path: '.gsd/ledger/x', reason: 'symlink-outside-root' }] } },
+    trees: {},
+  };
+  const md = renderCompareMarkdown(compare(before, after));
+  assert(/\|\s*unreadable\s*\|/.test(md), 'markdown header carries an unreadable column');
+  assert(/\|\s*skipped\s*\|/.test(md), 'markdown header carries a skipped column');
+  assert(/\| ledger \|.*\| 1 \|\n?$/m.test(md) || /ledger/.test(md), 'the ledger row is rendered');
+});
+
+// ── Schema do --baseline (S04/R4) ────────────────────────────────────────────
+
+test('CLI exit 2: --baseline com JSON válido mas SCHEMA inválido, com campo NOMEADO', () => {
+  // The exact input from the S04/R4 objection. Before the fix this reached
+  // compare(), threw a raw TypeError and exited 1 — telling the operator "the
+  // tool crashed" when the truth was "your baseline is not a census". The two
+  // neighbouring rungs of this ladder (unreadable file, invalid JSON) already
+  // exit 2 with a named error; this is the third.
+  const root = mkFixture();
+  try {
+    const bad = path.join(root, 'bad-schema.json');
+    fs.writeFileSync(bad, JSON.stringify({ stores: { ledger: { files: null } } }), 'utf8');
+    const res = spawnSync(process.execPath, [SCRIPT_PATH, '--baseline', bad, '--json', '--cwd', root], { encoding: 'utf8' });
+    assertEq(res.status, 2, `expected exit 2 for invalid baseline schema, got ${res.status}; stderr: ${res.stderr}`);
+    const err = JSON.parse(res.stderr.trim()).error;
+    assert(/^--baseline invalid schema: /.test(err), `error must be the named schema error, got: ${err}`);
+    assert(/stores\.ledger\.files/.test(err), `error must NAME the offending field, got: ${err}`);
+  } finally {
+    cleanup(root);
+  }
+});
+
+test('validateCensusEnvelope: aceita um envelope real e nomeia o campo em cada forma inválida', () => {
+  const root = mkFixture();
+  try {
+    write(root, '.gsd/ledger/a.md', 'A');
+    write(root, '.gsd/milestones/M001/x.md', 'X');
+    assertEq(validateCensusEnvelope(census(root, {})), null, 'a real census envelope must validate clean');
+  } finally {
+    cleanup(root);
+  }
+
+  const cases = [
+    [null, '<root>'],
+    ['a string', '<root>'],
+    [[], '<root>'],
+    [{ stores: 'nope' }, 'stores'],
+    [{ stores: { ledger: null } }, 'stores.ledger'],
+    [{ stores: { ledger: { files: null } } }, 'stores.ledger.files'],
+    [{ stores: { ledger: { files: [42] } } }, 'stores.ledger.files[0]'],
+    [{ stores: { ledger: { files: [{ path: 1, sha256: 'x' }] } } }, 'stores.ledger.files[0].path'],
+    [{ stores: { ledger: { files: [{ path: 'p' }] } } }, 'stores.ledger.files[0].sha256'],
+    [{ stores: { ledger: { files: [], errors: 'nope' } } }, 'stores.ledger.errors'],
+    [{ stores: { ledger: { files: [], skipped: [{}] } } }, 'stores.ledger.skipped[0].path'],
+    [{ trees: 'nope' }, 'trees'],
+    [{ trees: { milestones: { entries: { M001: { files: 'x', bytes: 1 } } } } }, 'trees.milestones.entries.M001.files'],
+    [{ trees: { forge: { files: 'x' } } }, 'trees.forge.files'],
+  ];
+  for (const [input, expectedField] of cases) {
+    const got = validateCensusEnvelope(input);
+    assert(got !== null, `must reject ${JSON.stringify(input)}`);
+    assert(got.startsWith(expectedField), `must name ${expectedField}, got: ${got}`);
+  }
+
+  // An envelope missing the optional top-level keys entirely is acceptable —
+  // compare() already tolerates absence; only WRONG SHAPE is refused.
+  assertEq(validateCensusEnvelope({}), null, 'an empty object is a shape compare() handles');
 });
 
 // ── Summary ────────────────────────────────────────────────────────────────────
