@@ -46,7 +46,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     Read the merged `evidence.mode` pref through the JSONC-only engine CLI (default `lenient` on absent prefs or engine errors):
     ```bash
-    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
     EVIDENCE_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key evidence.mode --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write(v==='disabled'?'disabled':'lenient')}catch{process.stdout.write('lenient')}}")
     ```
     If `EVIDENCE_MODE` is `disabled` → SKIP this entire sub-step. Do NOT write `## Evidence Flags`, not even an empty one.
@@ -112,7 +112,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     b. **Build expected_output union.** For each `T##-PLAN.md` under `.gsd/milestones/M###/slices/S##/tasks/T##/`:
        ```bash
-       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-must-haves.js ] && echo scripts || echo "$HOME/.claude/scripts")
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-must-haves.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
        node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check .gsd/milestones/M###/slices/S##/tasks/T##/T##-PLAN.md
        ```
        Parse the JSON stdout:
@@ -142,7 +142,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     c. **Read `file_audit.ignore_list` from the JSONC-only engine CLI** (default list on absent prefs or engine errors):
        ```bash
-       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
        FILE_AUDIT_IGNORE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key file_audit.ignore_list --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(JSON.stringify(Array.isArray(v)&&v.length?v:['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**','node_modules/**']))}catch{process.stdout.write(JSON.stringify(['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**','node_modules/**']))}})")
        ```
 
@@ -214,7 +214,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     a. **Invoke the verifier CLI:**
        ```bash
-       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verifier.js ] && echo scripts || echo "$HOME/.claude/scripts")
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verifier.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
        node "$FORGE_SCRIPTS_DIR/forge-verifier.js" \
          --slice {S##} \
          --milestone {M###} \
@@ -271,7 +271,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     a. **Invoke the detector CLI:**
        ```bash
-       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-route-audit.js ] && echo scripts || echo "$HOME/.claude/scripts")
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-route-audit.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
        node "$FORGE_SCRIPTS_DIR/forge-route-audit.js" \
          --slice {S##} \
          --milestone {M###} \
@@ -297,7 +297,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
     Read the merged `checker_memory.mode` pref through the JSONC-only engine CLI (default `enabled` on absent prefs or engine errors):
     ```bash
-    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
     CHECKER_MEMORY_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key checker_memory.mode --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write(v==='disabled'?'disabled':'enabled')}catch{process.stdout.write('enabled')}}")
     ```
     If `CHECKER_MEMORY_MODE` is `disabled` → SKIP this entire sub-step.
@@ -344,7 +344,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
 3. **Verification gate** — invoke:
    ```bash
-   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd {WORKING_DIR} --unit complete-slice/{S##}
    ```
    Parse result:
@@ -356,7 +356,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
    Read the merged `review.mode` pref through the JSONC-only engine CLI (default `enabled` on absent prefs or engine errors):
    ```bash
-   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    REVIEW_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key review.mode --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write(v==='disabled'?'disabled':'enabled')}catch{process.stdout.write('enabled')}}")
    ```
    If `REVIEW_MODE` is `disabled` → SKIP this entire step. Continue to step 5.
@@ -447,7 +447,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
    **5a. Write LEDGER fragment** to `.gsd/ledger/<milestone-id>.md` via `forge-ledger.js`. The fragment is the source of truth — no global `LEDGER.md` write path in this step. Build a JSON payload and pipe it to the script:
    ```bash
-   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-ledger.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-ledger.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    node "$FORGE_SCRIPTS_DIR/forge-ledger.js" --write --cwd "{WORKING_DIR}" <<'EOF'
    {
      "id": "{M###}",
@@ -470,7 +470,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 
    **5b. Invoke the merger** to promote all per-milestone files to workspace globals under lockfile. Note: the merger no longer touches LEDGER (handled by the fragment write in 5a); DECISIONS/AUTO-MEMORY/CHECKER/events still merge normally.
    ```bash
-   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-merger.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-merger.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    node "$FORGE_SCRIPTS_DIR/forge-merger.js" --milestone {M###} --cwd "{WORKING_DIR}" --holder "completer:{M###}"
    ```
    The merger reads:
@@ -500,7 +500,7 @@ Given all `T##-SUMMARY.md` files from the slice:
 7. **Deactivate run in registry** (M005+ — multi-run aware). After cleanup, mark the run as `active:false` in `runs/{id}.json` and regenerate the dashboard. Idempotent: safe to skip if `runs/{id}.json` does not exist (legacy single-run workspace):
 
    ```bash
-   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-runs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-runs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    if [ -f "{WORKING_DIR}/.gsd/forge/runs/{M###}.json" ]; then
      node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "{M###}" --json '{"active":false,"deactivated_reason":"complete-milestone"}' --cwd "{WORKING_DIR}" > /dev/null
      node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "{WORKING_DIR}" > /dev/null || true

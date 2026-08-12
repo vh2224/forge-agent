@@ -128,7 +128,7 @@ Call `ExitPlanMode`. The CONTEXT file above is your plan — the user will revie
 For each significant decision made during this discuss unit, pipe a JSON fragment to `forge-decisions.js --write`:
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 echo '{
   "unit_id": "{M###}",
   "decisions": [

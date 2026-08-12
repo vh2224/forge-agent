@@ -121,4 +121,4 @@ No installer change needed. `shared/*.md` is glob-installed by both installers:
 - `install.sh` (`shared` copy loop, ~line 427) — globs `*.md` inside `shared/`.
 - `install.ps1` (`Join-Path … 'shared'` block, ~line 360) — same glob, PowerShell form.
 
-This file lands in `~/.claude/shared/` on the next `./install.sh` / `install.ps1` run without any script edit. Confirmed by inspection of both loops (see task step 5).
+This file lands in `${FORGE_HOME:-$HOME/.forge-agent}/shared/` on the next `./install.sh` / `install.ps1` run without any script edit. Confirmed by inspection of both loops (see task step 5).

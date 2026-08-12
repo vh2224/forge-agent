@@ -986,6 +986,109 @@ id: T01
 });
 
 // ─────────────────────────────────────────────────────────────
+// CRLF / CR-only normalization (T-20260811190103)
+//
+// extractFrontmatter normalizes /\r\n?/g → \n at the single funnel every
+// export reads through (hasStructuredMustHaves, parseMustHaves,
+// resolveCapability). Bite proven in BOTH directions (valid stays valid,
+// nested still rejects) across LF/CRLF/CR-only, all synthesized here in
+// tmpdir — never inherited from this checkout's on-disk line endings.
+// ─────────────────────────────────────────────────────────────
+
+function toCRLF(s) { return s.replace(/\n/g, '\r\n'); }
+function toCROnly(s) { return s.replace(/\n/g, '\r'); }
+
+function writeAndCheck(name, content) {
+  const p = path.join(ROOT, name);
+  fs.writeFileSync(p, content);
+  try {
+    return { exit: 0, result: JSON.parse(execFileSync('node', [SCRIPT, '--check', p], { encoding: 'utf8' })) };
+  } catch (e) {
+    if (e.stdout === undefined) throw e;
+    return { exit: e.status, result: JSON.parse(e.stdout.toString()) };
+  }
+}
+
+const CRLF_VALID_LF = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output: []`);
+
+const CRLF_NESTED_LF = mkPlan(`must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+  expected_output: []`);
+
+const BOM = '\uFEFF';
+for (const [label, toEol] of [['CRLF', toCRLF], ['CR-only', toCROnly], ['BOM+LF', s => BOM + s], ['BOM+CRLF', s => BOM + toCRLF(s)]]) {
+  test(`${label}: valid plan → hasStructuredMustHaves true + CLI exit 0, legacy:false, valid:true`, () => {
+    const content = toEol(CRLF_VALID_LF);
+    assertEq(hasStructuredMustHaves(content), true, `hasStructuredMustHaves must see must_haves: under ${label}`);
+    const { exit, result } = writeAndCheck(`${label}-valid.md`, content);
+    assertEq(exit, 0);
+    assertEq(result.legacy, false);
+    assertEq(result.valid, true);
+  });
+
+  test(`${label}: plan with nested top-level key → CLI exit 2, error names the offending key`, () => {
+    const content = toEol(CRLF_NESTED_LF);
+    const { exit, result } = writeAndCheck(`${label}-nested.md`, content);
+    assertEq(exit, 2, 'nested plan must exit 2');
+    assertEq(result.valid, false);
+    assert(/nested-top-level-key/.test(result.errors[0]), `error must be named: ${result.errors[0]}`);
+    assert(result.errors[0].includes('expected_output'), `error must name the offending key: ${result.errors[0]}`);
+  });
+}
+
+test('CRLF vs LF vs CR-only: identical verdict AND identical reported line numbers for the same nested plan', () => {
+  const forms = { LF: CRLF_NESTED_LF, CRLF: toCRLF(CRLF_NESTED_LF), CR: toCROnly(CRLF_NESTED_LF) };
+  const results = {};
+  for (const [label, content] of Object.entries(forms)) {
+    let threw = null;
+    try { parseMustHaves(content); } catch (e) { threw = e.message; }
+    assert(threw !== null, `${label}: nested key was accepted`);
+    results[label] = threw;
+  }
+  assertEq(results.LF, results.CRLF, 'CRLF error text must match LF exactly, including line numbers');
+  assertEq(results.LF, results.CR, 'CR-only error text must match LF exactly, including line numbers');
+});
+
+test('resolveCapability: CRLF plan agrees with LF, and agrees with hasStructuredMustHaves across forms', () => {
+  const lf = mkPlan(`capability: networked
+must_haves:
+  truths:
+    - "it works"
+  artifacts: []
+  key_links: []
+expected_output: []`);
+  const crlf = toCRLF(lf);
+  const cr = toCROnly(lf);
+
+  const capLf = resolveCapability(lf);
+  const capCrlf = resolveCapability(crlf);
+  const capCr = resolveCapability(cr);
+
+  assertEq(capLf.capability, 'networked');
+  assertEq(capLf.declared, 'networked');
+  assertEq(capCrlf, capLf, 'resolveCapability must agree between LF and CRLF');
+  assertEq(capCr, capLf, 'resolveCapability must agree between LF and CR-only');
+
+  // Concordance assert: resolveCapability and hasStructuredMustHaves must agree
+  // on "is this plan readable as structured" across all three forms — this is
+  // the invariant that breaks if a parallel reader bypasses extractFrontmatter.
+  for (const [label, content] of Object.entries({ LF: lf, CRLF: crlf, CR: cr })) {
+    const structured = hasStructuredMustHaves(content);
+    const cap = resolveCapability(content);
+    assertEq(structured, true, `${label}: hasStructuredMustHaves must be true`);
+    assert(cap.declared === 'networked', `${label}: resolveCapability must see the declared capability (concordance with hasStructuredMustHaves)`);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // Cleanup and summary
 // ─────────────────────────────────────────────────────────────
 try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}

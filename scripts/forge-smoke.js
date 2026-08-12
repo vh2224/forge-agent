@@ -15637,6 +15637,19 @@ function smokeMemoryIndexCommandRendered() {
     + 'rendered prompt — command, not content (D3)');
 }
 
+// ── Section 104: canonical Forge script call sites ────────────────────────
+function smokeScriptsCallSitesCanonical() {
+  process.stdout.write('\n▸ Section 104: canonical Forge script call sites\n');
+  const guard = require('./forge-scripts-callsites.js');
+  const report = guard.scan({ root: path.resolve(__dirname, '..') });
+  assert(report.outcome === 'clean', 'real tree is clean above the per-family census floor');
+  for (const family of guard.CALL_SITE_FAMILIES) assert(report.scanned_by_family[family] > 0, `family scanned: ${family}`);
+  const source = fs.readFileSync(__filename, 'utf8');
+  const mainBody = source.slice(source.lastIndexOf('async function main()'));
+  assert(/\(\) => \{ smokeScriptsCallSitesCanonical\(\); \}/.test(mainBody), '(e) Section 104 is registered in main()');
+  pass('Section 104: canonical path guard is clean, census is non-silent, and registration is biting');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -15755,6 +15768,7 @@ async function main() {
       () => { smokeRoutingDomainsRendered(); },
       () => { smokeLedgerSnapshotRendered(); },
       () => { smokeMemoryIndexCommandRendered(); },
+      () => { smokeScriptsCallSitesCanonical(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {

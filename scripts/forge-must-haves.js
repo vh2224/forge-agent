@@ -89,11 +89,18 @@ function stripInlineComment(value) {
  * Adapted from scripts/forge-verify.js lines 422-430.
  * Returns the frontmatter string (without delimiters) or null.
  *
+ * Normalizes CRLF/CR to LF here, and only here: this is the single funnel
+ * every public export (`hasStructuredMustHaves`, `parseMustHaves`,
+ * `resolveCapability`) reads through — none of them touch raw `content`.
+ *
  * @param {string} content
  * @returns {string|null}
  */
 function extractFrontmatter(content) {
-  const m = content.match(/^---\n([\s\S]*?)\n---/);
+  const m = String(content)
+    .replace(/^﻿/, '')
+    .replace(/\r\n?/g, '\n')
+    .match(/^---\n([\s\S]*?)\n---/);
   return m ? m[1] : null;
 }
 

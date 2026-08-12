@@ -30,8 +30,11 @@ function parseArgs(argv = process.argv.slice(2)) {
 
 function update(input = {}, dependencies = {}) {
   const plan = maintenance.planUpdate(input);
-  if (!input.apply) return { ...plan, applied: false };
   const install = dependencies.install || installer.install;
+  // A preview must stay side-effect free: the installer runs only to compute the
+  // retire plan, so capability probing (which spawns `claude`/`codex --version`)
+  // is suppressed here rather than left to a flag the CLI never sets.
+  const preview = !input.apply;
   const installed = install({
     repo: input.repo,
     runtime: plan.runtime,
@@ -48,10 +51,12 @@ function update(input = {}, dependencies = {}) {
     platform: input.platform,
     binaries: input.binaries,
     capabilityTimeout: input.capabilityTimeout,
-    noModelProbe: input.noModelProbe,
-    skipCapabilityCheck: input.skipCapabilityCheck,
+    noModelProbe: preview ? true : input.noModelProbe,
+    skipCapabilityCheck: preview ? true : input.skipCapabilityCheck,
     migrateLegacy: input.migrateLegacy,
+    dryRun: preview,
   });
+  if (preview) return { ...plan, applied: false, installer: installed, retirements: installed.plan.filter((entry) => entry.op === 'retire' || (entry.op === 'skip' && entry.reason === 'already-retired')) };
   return { ...plan, applied: true, changed: installed.changed, backup: installed.backup, installer: installed };
 }
 
@@ -64,6 +69,10 @@ function render(report) {
   ];
   if (report.legacy_migration) lines.push(`legacy migration: ${report.legacy_migration.release} (${report.legacy_migration.runtime})`);
   if (report.installer && report.installer.backup) lines.push(`backup created: ${report.installer.backup}`);
+  for (const retirement of report.retirements || []) {
+    const state = retirement.op === 'skip' ? 'skipped' : 'retire';
+    lines.push(`${state}: ${retirement.source} -> ${retirement.destination}`);
+  }
   const conflicts = report.installer && report.installer.manifest && report.installer.manifest.adapters
     ? Object.values(report.installer.manifest.adapters).reduce((total, adapter) => total + (Array.isArray(adapter.conflicts) ? adapter.conflicts.length : 0), 0)
     : 0;

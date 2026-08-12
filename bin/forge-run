@@ -37,12 +37,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-ENGINE="${FORGE_ENGINE:-$HOME/.claude/scripts/forge-accounts.js}"
+ENGINE="${FORGE_ENGINE:-${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-accounts.js}"
 if [ ! -f "$ENGINE" ]; then
   # Read repo_path from the current prefs format (JSONC): the scaffold ships a
   # COMMENTED repo_path hundreds of lines above the live one, and the value is
   # a JSON string — so drop comments, keep the LAST live assignment, unquote.
-  PREFS="$HOME/.claude/forge-agent-prefs.jsonc"
+  PREFS="${FORGE_HOME:-$HOME/.forge-agent}/forge-agent-prefs.jsonc"
+  [ -f "$PREFS" ] || PREFS="${FORGE_HOME:-$HOME/.forge-agent}/forge-agent-prefs.json"
+  [ -f "$PREFS" ] || PREFS="$HOME/.claude/forge-agent-prefs.jsonc"
   [ -f "$PREFS" ] || PREFS="$HOME/.claude/forge-agent-prefs.json"
   REPO="$(sed 's/[[:space:]]*\/\/.*$//' "$PREFS" 2>/dev/null \
     | grep -E '^[[:space:]]*"repo_path"[[:space:]]*:' \

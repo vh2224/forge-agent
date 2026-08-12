@@ -57,7 +57,7 @@ O output inclui nome e escopo de cada MCP. Parse e construa o conjunto de nomes 
 
 **Step 2 — Ler catálogo:**
 
-Leia `~/.claude/forge-mcps.md`. Extraia nomes de MCP dos headings `### <name>`.
+Leia `${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-mcps.md`. Extraia nomes de MCP dos headings `### <name>`.
 Catálogo conhecido: `fetch`, `context7`, `brave-search`, `github`, `postgres`, `redis`, `puppeteer`, `sqlite`, `semgrep`, `snyk`, `trivy`.
 Bundles: `security` (componentes: `semgrep`, `snyk`, `trivy`).
 
@@ -111,7 +111,7 @@ MCPs — Forge Agent
 
 Extraia o nome de $ARGUMENTS (strip "add ").
 
-Leia `~/.claude/forge-mcps.md` para saber se é MCP conhecido ou bundle.
+Leia `${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-mcps.md` para saber se é MCP conhecido ou bundle.
 
 **Se bundle (ex: "security"):**
 

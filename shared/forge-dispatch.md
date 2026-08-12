@@ -1093,7 +1093,7 @@ The `claude` path is **byte-identical** to the current loop: when `ENGINE == cla
 The Engine Resolution (the old step 1.45) and the tier-chain resolution of § Tier Resolution (the old step 4, `forge-tier-chain.js --json`) **collapse into ONE call** to `forge-routing.js`. The resolver is a **superset** of `readTierChain()`: the chain it returns already carries the `engine` per member, so the wiring calls the CLI **once** with all inputs and consumes the chain — never re-resolving mid-unit (`--next-after` is used only on a failure trigger; see § Cross-engine chain walk).
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-routing.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
   --unit-type "$UNIT_TYPE" \
   --tier "$TIER" \
@@ -1176,7 +1176,7 @@ This is advisory (stderr only) — it never blocks the dispatch. `--explain` (pt
 
 ```bash
 # ── Canonical per-unit prefs resolution (ONE call; read all knobs off $PREFS_JSON) ──
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 PREFS_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --cwd "$WORKING_DIR")
 if [ $? -ne 0 ]; then
   # M008-CONTEXT decision #2 — loud stop, NEVER a silent default. The CLI already
@@ -1289,7 +1289,7 @@ node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --state-update \
 **Context parity (canonical).** The sidecar receives Security and the informational context core **inlined**, rather than paths: on macOS/Linux its `workspace-write -C CODE_DIR` sandbox cannot read `.gsd/**` under `WORKING_DIR`. On win32 the adapter uses `--dangerously-bypass-approvals-and-sandbox`: Codex issues #15850, #5824, #17179 and #14367 show that the Windows sandbox fails legitimate writes, can corrupt ownership, and is not a reliable boundary. `assertNoProtectedSidecarChanges`, the fallback surgical reset, `buildSidecarEnv`'s allowlist, and `-C CODE_DIR` remain active independently. Both flags below are unconditional; absent or empty files simply omit their prompt section. Security is a non-truncatable must-have, while the assembled bundle contains only informational data. Follow-up, intentionally out of scope: `## Slice Plan`, `## Prior Context`, and `## Checker Feedback`.
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 SIDECAR_DISPATCH_ID=$(node -e "process.stdout.write(require('crypto').randomUUID())")
 node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --state-update \
   --state "$XLLM_STATE" --dispatch-id "$SIDECAR_DISPATCH_ID"
@@ -1481,7 +1481,7 @@ printf '{"reason":"","result_file":"%s","code_dir":"%s","ctx_file":"%s"}\n' \
 **3. Dispatch detached via `run_in_background`.** Same background+poll pattern as Branch C (the Bash 600s foreground ceiling does not apply to `run_in_background: true`), but `--mode plan` and passing `--plan-context` instead of `--plan`. `--model` is appended **only when `$SIDECAR_MODEL` is non-empty**: the resolver selects the chain's Codex member, then falls back to `workers.codex_model`:
 
 ```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 SIDECAR_DISPATCH_ID=$(node -e "process.stdout.write(require('crypto').randomUUID())")
 node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --state-update \
   --state "$XLLM_STATE" --dispatch-id "$SIDECAR_DISPATCH_ID"
@@ -2114,7 +2114,7 @@ block as a bug.
 # PLAN frontmatter + ROADMAP, and emits the full ordered contract. NEVER reintroduce a bash
 # tier/effort default map or a frontmatter/clamp regex here — that pure logic lives ONLY in the
 # resolver now (S01/S02).
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "$HOME/.claude/scripts")
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
   --unit-type "$UNIT_TYPE" --plan "$PLAN_PATH" --unit-id "$UNIT_ID" \
   --milestone "$MILESTONE_ID" --roadmap "$ROADMAP_PATH" \

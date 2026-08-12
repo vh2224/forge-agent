@@ -2,7 +2,7 @@
 
 Single source of truth for available MCPs. Read by `forge-init` (detection + setup) and `forge-config` (add/remove/list).
 
-Agents: read this file at `~/.claude/forge-mcps.md` when handling MCP operations. Do NOT inline catalog data in commands.
+Agents: read this file at `${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-mcps.md` when handling MCP operations. Do NOT inline catalog data in commands.
 
 ---
 

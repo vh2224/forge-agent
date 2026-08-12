@@ -318,10 +318,29 @@ function reinjectDiff({ planContent, verificationContent, prunedIds = [], mustHa
  * @param {string} planContent  Full T##-PLAN.md content
  * @returns {boolean}
  */
+/**
+ * normalizePlanText — strip a leading UTF-8 BOM and fold CRLF/CR to LF.
+ *
+ * READ-ONLY normalization: every caller below matches against the returned copy
+ * and never writes it back. `incrementRepairCount` deliberately does NOT use
+ * this — it rewrites the file, so it matches with BOM/EOL-tolerant patterns and
+ * preserves the operator's original bytes instead.
+ *
+ * A plan authored on Windows arrives as BOM and/or CRLF. Both make `^---` miss,
+ * and a miss here reads as "no frontmatter" → `repair_count: 0` forever, which
+ * silently disables the only guard against an infinite repair loop.
+ *
+ * @param {string} planContent
+ * @returns {string}
+ */
+function normalizePlanText(planContent) {
+  return String(planContent || '').replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+}
+
 function isLargeTask(planContent) {
   if (!planContent) return false;
 
-  const fm = planContent.match(/^---[\s\S]*?---/);
+  const fm = normalizePlanText(planContent).match(/^---[\s\S]*?---/);
   if (fm) {
     const explicit = fm[0].match(/^large_task:[ \t]*(true|false)/m);
     if (explicit) return explicit[1] === 'true';
@@ -351,7 +370,7 @@ function isLargeTask(planContent) {
  * @returns {number}
  */
 function readRepairCount(planContent) {
-  const fm = (planContent || '').match(/^---[\s\S]*?---/);
+  const fm = normalizePlanText(planContent).match(/^---[\s\S]*?---/);
   if (!fm) return 0;
   const m = fm[0].match(/^repair_count:[ \t]*(\d+)/m);
   return m ? parseInt(m[1], 10) : 0;
@@ -370,8 +389,13 @@ function readRepairCount(planContent) {
  */
 function incrementRepairCount(planPath) {
   const content = fs.readFileSync(planPath, 'utf-8');
-  const fm = content.match(/^---\n([\s\S]*?)\n---/);
-  if (!fm) throw new Error(`no frontmatter in ${planPath} — cannot persist repair_count`);
+  // BOM/EOL-tolerant, and NOT normalized: this function writes the file back, so
+  // folding CRLF→LF here would silently rewrite every line of a Windows-authored
+  // plan. Match around the operator's bytes; preserve them.
+  const open = content.match(/^(﻿?---)(\r?\n)/);
+  const fm = content.match(/^﻿?---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm || !open) throw new Error(`no frontmatter in ${planPath} — cannot persist repair_count`);
+  const eol = open[2];
 
   const current = readRepairCount(content);
   const next = current + 1;
@@ -380,7 +404,7 @@ function incrementRepairCount(planPath) {
   if (/^repair_count:[ \t]*\d+/m.test(fm[1])) {
     updated = content.replace(/^(repair_count:[ \t]*)\d+/m, `$1${next}`);
   } else {
-    updated = content.replace(/^---\n/, `---\nrepair_count: ${next}\n`);
+    updated = content.replace(/^(﻿?---\r?\n)/, `$1repair_count: ${next}${eol}`);
   }
 
   fs.writeFileSync(planPath, updated);

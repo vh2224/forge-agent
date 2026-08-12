@@ -7,17 +7,17 @@
     {
       "source_id": "agents",
       "target": "agents",
-      "sha256": "3bb5bb1777c24547966ef16ca23e9ce453be7074a516a941e2a548a487b82512"
+      "sha256": "6bee493af0d983aa2575c9f012298ee1ad85e4411925d7a4c48fa52349327ca1"
     },
     {
       "source_id": "commands",
       "target": "commands",
-      "sha256": "da87e8818a14b72037f5a5b11c3a7b9cba72faff42164a6d7f51519d02bbd947"
+      "sha256": "e636ae65a7ea6836daf596f2a35926faa805443f0ea1289bfebac28a986a7435"
     },
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "7df753f84b8211bb8a4092919e46586924ae4f80f0f69ee1dd2f42d25dc39a24"
+      "sha256": "546eeba71f15381a88d5fdedae98532934e26d6419e25e7ec0f996dd42946c1c"
     },
     {
       "source_id": "dispatch-templates",
@@ -32,7 +32,7 @@
     {
       "source_id": "mcp",
       "target": "forge/forge-mcps.md",
-      "sha256": "92410fd8882e916c5ddb014ca0c3f0a79fa054f7426cd61e7c4b9783aa53a0f0"
+      "sha256": "c457c106b7e58051598092b48d7e4a8221a986c4f2cd6ac6d73b7ccb814bbef0"
     },
     {
       "source_id": "claude-instructions",

@@ -52,7 +52,7 @@ node ~/.claude/forge-settings.js .claude/settings.json --mcp-list 2>/dev/null
 
 **Step 2 — Read catalog:**
 
-Read `~/.claude/forge-mcps.md`. Extract all MCP names from `### <name>` headings.
+Read `${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-mcps.md`. Extract all MCP names from `### <name>` headings.
 
 **Step 3 — Compute:**
 - Count how many catalog MCPs are installed (N_INSTALLED)
@@ -140,7 +140,7 @@ test -f ~/.claude/forge-settings.js && echo "exists" || echo "missing"
 If "missing": resolve `repo_path` from the JSONC catalog with the engine CLI and copy the script:
 
 ```bash
-PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="$HOME/.claude/scripts/forge-prefs.js"
+PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs.js"
 REPO=$(node "$PREFS_ENGINE" --resolved --key repo_path 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(v?String(v):'')}catch{process.stdout.write('')}})")
 if [ -n "$REPO" ] && [ -f "$REPO/scripts/merge-settings.js" ]; then
   cp "$REPO/scripts/merge-settings.js" ~/.claude/forge-settings.js && echo "installed"
@@ -217,7 +217,7 @@ Parse the output to build a set of installed MCP names (both scopes).
 
 **Step 2 — Read the catalog:**
 
-Read `~/.claude/forge-mcps.md`. Extract all MCP names from `### <name>` headings.
+Read `${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-mcps.md`. Extract all MCP names from `### <name>` headings.
 Known catalog MCPs: `fetch`, `context7`, `github`, `postgres`, `redis`, `puppeteer`, `sqlite`.
 
 **Step 3 — Build the unified view:**

@@ -401,6 +401,177 @@ function testNonGitWriteProbeStaysRegistered() {
   );
 }
 
+/**
+ * TASK-023 — the cross-root probe, pinned the same way its neighbour is, plus the
+ * verdict ladder exercised WITHOUT the binary.
+ *
+ * The ladder is a pure function precisely so these asserts can run with no codex,
+ * no network and no auth. Two of them are non-degradation asserts, and they are the
+ * point of the whole suite: a probe that quietly turns "did not run" into "measured
+ * and negative", or "the control also wrote" into "proven", would print a verdict in
+ * the same channel and shape as a real measurement — ready to be pasted into an
+ * artifact as evidence.
+ */
+function testCrossRootProbe() {
+  const probe = require('./forge-appserver-probe.js');
+  assert.strictEqual(typeof probe.probeCrossRootWrite, 'function', 'crossroot-write probe must be exported');
+  assert.strictEqual(typeof probe.crossRootVerdict, 'function', 'the verdict ladder must be exported as a pure function');
+  const usage = spawnSync(process.execPath, [path.join(__dirname, 'forge-appserver-probe.js'), '--probe', 'nope'], { encoding: 'utf8' });
+  assert(String(usage.stderr).includes('crossroot-write'), 'crossroot-write must stay in the dispatchable PROBES list');
+
+  const { crossRootVerdict, CROSSROOT_VERDICTS: V } = probe;
+  const wrote = { exists: true };
+  const absent = { exists: false };
+  // An arm that did NOT write but DID run: a completed commandExecution citing its own
+  // target. This is the shape review R1 requires before any absence may be read as a
+  // sandbox denial.
+  const ranButAbsent = (target, exitCode) => ({
+    exists: false,
+    target,
+    items: [{ type: 'commandExecution', status: 'completed', command: `/bin/zsh -lc "touch '${target}'"`, exitCode }],
+  });
+
+  // (1) NON-DEGRADATION: a timeout carries NO `infra` flag, so a ladder that read
+  // `!infra` as "measured" would grade an outage as a measurement.
+  const timedOut = crossRootVerdict({
+    ctrlAttempt: wrote, ctrlDeny: absent,
+    treat: { exists: false, error: 'timeout after 120s' }, replaceCheck: absent,
+  });
+  assert.strictEqual(timedOut.verdict, V.UNKNOWN, 'an arm that did not run is unknown');
+  assert.notStrictEqual(timedOut.verdict, V.FALHOU, 'unknown must NEVER degrade into a negative verdict');
+  assert(timedOut.reason.includes('TREAT') && timedOut.reason.includes('timeout after 120s'),
+    'the unknown reason must name the arm and the message');
+  for (const [label, arms] of [
+    ['CTRL-ATTEMPT', { ctrlAttempt: { error: 'boom' }, ctrlDeny: ranButAbsent('/B/deny.txt', 1), treat: wrote }],
+    ['CTRL-DENY', { ctrlAttempt: wrote, ctrlDeny: { error: 'boom' }, treat: wrote }],
+  ]) {
+    const r = crossRootVerdict({ ...arms, replaceCheck: absent });
+    assert.strictEqual(r.verdict, V.UNKNOWN, `${label} not measured => unknown`);
+    assert.notStrictEqual(r.verdict, V.PROVADA, `${label} not measured must never read as proven`);
+  }
+
+  // (2) the positive control never executed: absence elsewhere is noise, not denial.
+  const noAttempt = crossRootVerdict({ ctrlAttempt: absent, ctrlDeny: absent, treat: absent, replaceCheck: absent });
+  assert.strictEqual(noAttempt.verdict, V.INCONCLUSIVA);
+  assert(noAttempt.reason.includes('variante ii'), 'the prescribed re-run must be printed');
+
+  // (3) NON-DEGRADATION: the negative control wrote => B was already writable.
+  const denyWrote = crossRootVerdict({ ctrlAttempt: wrote, ctrlDeny: wrote, treat: wrote, replaceCheck: wrote });
+  assert.strictEqual(denyWrote.verdict, V.INCONCLUSIVA, 'ctrlDeny writing must force inconclusiva');
+  assert.notStrictEqual(denyWrote.verdict, V.PROVADA,
+    'a treatment that wrote alongside a control that ALSO wrote proves nothing about writableRoots');
+
+  // (4) proven — and the reason must carry the REPLACE-CHECK result in all three states.
+  const sum = crossRootVerdict({ ctrlAttempt: wrote, ctrlDeny: ranButAbsent('/B/deny.txt', 1), treat: wrote, replaceCheck: wrote });
+  assert.strictEqual(sum.verdict, V.PROVADA);
+  assert(/SOMA/.test(sum.reason), 'REPLACE-CHECK wrote => SUM semantics named in the reason');
+  const replaced = crossRootVerdict({
+    ctrlAttempt: wrote, ctrlDeny: ranButAbsent('/B/deny.txt', 1), treat: wrote, replaceCheck: ranButAbsent('/A/rc.txt', 1),
+  });
+  assert.strictEqual(replaced.verdict, V.PROVADA);
+  assert(/SUBSTITUI/.test(replaced.reason), 'REPLACE-CHECK absent => REPLACEMENT semantics named as a production risk');
+  // R1, one level down: an absent REPLACE-CHECK with NO execution evidence must not
+  // publish a production risk manufactured from a model that never ran the touch.
+  const replaceNoEvidence = crossRootVerdict({ ctrlAttempt: wrote, ctrlDeny: ranButAbsent('/B/deny.txt', 1), treat: wrote, replaceCheck: absent });
+  assert.strictEqual(replaceNoEvidence.verdict, V.PROVADA, 'the main verdict is untouched by the REPLACE-CHECK arm');
+  assert(/NÃO MEDIDO/.test(replaceNoEvidence.reason) && !/SUBSTITUI/.test(replaceNoEvidence.reason),
+    'REPLACE-CHECK without execution evidence is NOT MEASURED, never "replacement"');
+  const unmeasured = crossRootVerdict({
+    ctrlAttempt: wrote, ctrlDeny: ranButAbsent('/B/deny.txt', 1), treat: wrote, replaceCheck: { exists: false, error: 'timeout after 120s' },
+  });
+  assert.strictEqual(unmeasured.verdict, V.PROVADA,
+    'a REPLACE-CHECK that did not run does not undo the main verdict — it is SAID, not inferred');
+  assert(/NÃO MEDIDO/.test(unmeasured.reason), 'the unmeasured REPLACE-CHECK must be named in the reason');
+
+  // (5) measured and negative: the field delimits, it does not enlarge. Both absent arms
+  // must be EVIDENCED to have run — otherwise this is the exact substitution R1 attacks.
+  const failed = crossRootVerdict({
+    ctrlAttempt: wrote,
+    ctrlDeny: ranButAbsent('/B/deny.txt', 1),
+    treat: ranButAbsent('/B/treat.txt', 1),
+    replaceCheck: wrote,
+  });
+  assert.strictEqual(failed.verdict, V.FALHOU);
+
+  /* ---------------------------------------------------------------- R1 ---
+   * Execution evidence per arm. `exists === false` is byte-identical between
+   * "the sandbox denied it" and "the model completed the turn without running
+   * the command", and the ladder used to read the first out of the second.
+   */
+  // (6a) CTRL-DENY absent with NO item and NO permissive same-dir control => unknown.
+  const denyBlind = crossRootVerdict({
+    ctrlAttempt: wrote, ctrlDeny: absent, treat: absent, replaceCheck: absent,
+  });
+  assert.strictEqual(denyBlind.verdict, V.UNKNOWN,
+    'CTRL-DENY without execution evidence is NOT MEASURED — model refusal must never be published as sandbox denial');
+  assert.notStrictEqual(denyBlind.verdict, V.FALHOU, 'unknown must never degrade into a negative verdict');
+  assert(/CTRL-DENY/.test(denyBlind.reason) && /EVIDÊNCIA DE EXECUÇÃO/.test(denyBlind.reason),
+    'the reason must name the arm and the missing evidence');
+
+  // (6b) TREAT absent, evidence only on CTRL-DENY => still unknown. TREAT is itself the
+  // permissive arm, so no control can stand in for it: only its own item admits FALHOU.
+  const treatBlind = crossRootVerdict({
+    ctrlAttempt: wrote, ctrlDeny: ranButAbsent('/B/deny.txt', 1), treat: absent, replaceCheck: wrote,
+  });
+  assert.strictEqual(treatBlind.verdict, V.UNKNOWN, 'TREAT without execution evidence is NOT MEASURED');
+  assert(/TREAT/.test(treatBlind.reason), 'the reason must name TREAT');
+
+  // (6c) The `control` route, borrowed verbatim from probeCapReadonly (:631-654): an arm
+  // that emitted no item is still admissible when a PERMISSIVE arm against the SAME
+  // target dir ran and wrote. Weaker than an own item, and LABELLED as such.
+  const denyViaControl = crossRootVerdict({
+    ctrlAttempt: wrote,
+    ctrlDeny: { exists: false, items: [], targetDir: '/B', target: '/B/deny.txt' },
+    treat: { exists: true, items: [{ type: 'commandExecution', status: 'completed', command: "touch '/B/treat.txt'", exitCode: 0 }], targetDir: '/B', target: '/B/treat.txt' },
+    replaceCheck: wrote,
+  });
+  assert.strictEqual(denyViaControl.verdict, V.PROVADA, 'a permissive same-dir control admits the negative control');
+  assert(/MAIS FRACA/.test(denyViaControl.reason), 'the control route must be reported as weaker evidence, not folded into a boolean');
+
+  // (6d) THE INVARIANT. Fed the shape MEASURED in probe-crossroot-write.log against
+  // codex-cli 0.144.4, the ladder must still say `provada`. CTRL-DENY there emitted
+  // `commandExecution items: []` (log:149) — it is admitted by the control route, via
+  // TREAT, which ran and wrote into the SAME dir B. If this assert ever fails, the
+  // refactor is wrong, not the published verdict.
+  const A = '/private/tmp/forge-xroot-a-d4oycN';
+  const B = '/private/tmp/forge-xroot-b-AWuaoE';
+  const loggedItem = (target) => ({
+    type: 'commandExecution', status: 'completed', exitCode: 0,
+    command: `/bin/zsh -lc "touch '${target}'"`, cwd: A,
+  });
+  const measured = crossRootVerdict({
+    ctrlAttempt: { exists: true, targetDir: A, target: `${A}/forge-write-probe-CTRL-ATTEMPT.txt`, items: [loggedItem(`${A}/forge-write-probe-CTRL-ATTEMPT.txt`)] },
+    ctrlDeny: { exists: false, targetDir: B, target: `${B}/forge-write-probe-CTRL-DENY.txt`, items: [] },
+    treat: { exists: true, targetDir: B, target: `${B}/forge-write-probe-TREAT.txt`, items: [loggedItem(`${B}/forge-write-probe-TREAT.txt`)] },
+    replaceCheck: { exists: true, targetDir: A, target: `${A}/forge-write-probe-REPLACE-CHECK.txt`, items: [loggedItem(`${A}/forge-write-probe-REPLACE-CHECK.txt`)] },
+  });
+  assert.strictEqual(measured.verdict, V.PROVADA,
+    'the verdict measured in probe-crossroot-write.log must survive the R1 refactor unchanged');
+  assert(/SOMA/.test(measured.reason), 'and it must still carry the measured SUM semantics');
+
+  /* ---------------------------------------------------------------- R2 ---
+   * The fifth arm's evidence helper. The arm itself needs the binary, but the
+   * predicate that decides whether its ABSENCE is reportable does not.
+   */
+  const { armExecution, CROSSROOT_EXEC: E } = probe;
+  assert.strictEqual(armExecution({ exists: false, items: [], target: '/B/rr.txt' }, null).kind, E.NONE,
+    'RUNTIME-ROOTS absent with no item is NOT evidence of a denial');
+  assert.strictEqual(armExecution({ exists: false, target: '/B/rr.txt', items: [{ type: 'commandExecution', status: 'completed', command: "touch '/B/rr.txt'", exitCode: 1 }] }, null).kind, E.ITEM,
+    'a completed item citing the target admits the absence');
+  assert.strictEqual(armExecution({ exists: false, target: '/B/rr.txt', items: [{ type: 'commandExecution', status: 'completed', command: "touch '/OTHER/x.txt'", exitCode: 0 }] }, null).kind, E.NONE,
+    'an item for a DIFFERENT target is not evidence about this one');
+  assert(/exitCode:1/.test(armExecution({ exists: false, target: '/B/rr.txt', items: [{ type: 'commandExecution', status: 'completed', command: "touch '/B/rr.txt'", exitCode: 1 }] }, null).detail),
+    'the exit status is carried when the server supplied one');
+
+  // The fifth arm's caveat text must exist in BOTH branches of the source, not only
+  // where it happened to write (R2, Decisão 6). Asserted structurally: one shared
+  // constant, used by the positive branch and by the negative one.
+  const src = fs.readFileSync(path.join(__dirname, 'forge-appserver-probe.js'), 'utf8');
+  const fifthBlock = src.slice(src.indexOf('ARM RUNTIME-ROOTS'));
+  assert.strictEqual((fifthBlock.match(/\$\{FIFTH_CAVEAT\}/g) || []).length, 2,
+    'the weaker-confidence caveat belongs to the ARM, so both the positive and the negative branch must carry it');
+}
+
 function binaryPresent(bin) {
   try { return spawnSync(bin, ['--version', '--quiet'], { encoding: 'utf8' }).status === 0; }
   catch { return false; }
@@ -563,6 +734,7 @@ async function main() {
     await testSvnTurnCarriesExplicitSandboxPolicy(mock, root);
     await testTransportField(mock, realMock, root);
     testNonGitWriteProbeStaysRegistered();
+    testCrossRootProbe();
     process.stdout.write('forge-xllm-appserver.test.js: ok\n');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

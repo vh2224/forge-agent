@@ -116,6 +116,43 @@ test('block scalar (verify: |) is skipped → null', () => {
   assertEqual(parsePlanVerify(fm('verify: |\n  npm test')), null, 'block scalar skipped');
 });
 
+console.log('parsePlanVerify — CRLF / CR-only normalization (T-20260811190103)');
+
+function toCRLF(s) { return s.replace(/\n/g, '\r\n'); }
+function toCROnly(s) { return s.replace(/\n/g, '\r'); }
+
+const SHAPES = {
+  'single-line': fm('verify: npm test'),
+  'inline array': fm('verify: [npm test, npm run lint]'),
+  'multi-line list': fm('verify:\n  - npm test\n  - npm run lint'),
+};
+
+for (const [label, lfContent] of Object.entries(SHAPES)) {
+  const expected = parsePlanVerify(lfContent);
+
+  test(`CRLF: ${label} returns the same value as LF`, () => {
+    assertEqual(parsePlanVerify(toCRLF(lfContent)), expected, `${label} under CRLF`);
+  });
+
+  test(`CR-only: ${label} returns the same value as LF`, () => {
+    assertEqual(parsePlanVerify(toCROnly(lfContent)), expected, `${label} under CR-only`);
+  });
+
+  test(`BOM+LF: ${label} returns the same value as LF`, () => {
+    assertEqual(parsePlanVerify('\uFEFF' + lfContent), expected, `${label} under BOM+LF`);
+  });
+
+  test(`BOM+CRLF: ${label} returns the same value as LF`, () => {
+    assertEqual(parsePlanVerify('\uFEFF' + toCRLF(lfContent)), expected, `${label} under BOM+CRLF`);
+  });
+}
+
+test('CRLF: multi-line list join has no residual \\r in any item', () => {
+  const result = parsePlanVerify(toCRLF(SHAPES['multi-line list']));
+  assert(!result.includes('\r'), `residual \\r left in: ${JSON.stringify(result)}`);
+  assertEqual(result, 'npm test && npm run lint', 'CRLF multi-line list value');
+});
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 
 console.log('');

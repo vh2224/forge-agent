@@ -426,6 +426,76 @@ ${expectedOutput}
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+// ── BOM / CRLF tolerance (attack on the T-20260811190103 fix) ────────────────
+//
+// A plan authored on Windows arrives as BOM and/or CRLF. `^---` misses both,
+// and a miss reads as "no frontmatter" → repair_count 0 forever, disabling the
+// only guard against an infinite repair loop. incrementRepairCount WRITES the
+// file, so it must also leave the operator's BOM and line endings untouched.
+
+{
+  const LF_PLAN = [
+    '---',
+    'id: T01',
+    'repair_count: 2',
+    'must_haves:',
+    '  truths:',
+    '    - "it works"',
+    '  artifacts: []',
+    '  key_links: []',
+    'expected_output: []',
+    '---',
+    '',
+    '# Body',
+    '',
+  ].join('\n');
+
+  const toCRLF = (s) => s.replace(/\n/g, '\r\n');
+  const FORMS = {
+    'LF': LF_PLAN,
+    'CRLF': toCRLF(LF_PLAN),
+    'BOM+LF': '﻿' + LF_PLAN,
+    'BOM+CRLF': '﻿' + toCRLF(LF_PLAN),
+  };
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repair-eol-'));
+
+  for (const [label, content] of Object.entries(FORMS)) {
+    assertEqual(readRepairCount(content), 2, `readRepairCount sees the real value under ${label}`);
+
+    const p = path.join(dir, `${label.replace('+', '-')}.md`);
+    fs.writeFileSync(p, content);
+    const next = incrementRepairCount(p);
+    assertEqual(next, 3, `incrementRepairCount bumps 2 -> 3 under ${label}`);
+
+    const after = fs.readFileSync(p, 'utf8');
+    assertEqual(after.charCodeAt(0) === 0xFEFF, content.charCodeAt(0) === 0xFEFF,
+      `BOM presence preserved under ${label}`);
+    assertEqual((after.match(/\r\n/g) || []).length, (content.match(/\r\n/g) || []).length,
+      `CRLF count preserved under ${label}`);
+    assertEqual(after.replace('repair_count: 3', 'repair_count: 2'), content,
+      `only the counter changed under ${label}`);
+    assertEqual(readRepairCount(after), 3, `re-read after write agrees under ${label}`);
+  }
+
+  // Insertion path (no repair_count key yet) must also preserve bytes.
+  for (const [label, content] of Object.entries(FORMS)) {
+    const stripped = content.replace(/repair_count: 2(\r?\n)/, '');
+    const p = path.join(dir, `ins-${label.replace('+', '-')}.md`);
+    fs.writeFileSync(p, stripped);
+    assertEqual(incrementRepairCount(p), 1, `insertion bumps 0 -> 1 under ${label}`);
+    const after = fs.readFileSync(p, 'utf8');
+    assertEqual(after.charCodeAt(0) === 0xFEFF, stripped.charCodeAt(0) === 0xFEFF,
+      `BOM preserved on insertion under ${label}`);
+    assertEqual((after.match(/\r\n/g) || []).length,
+      (stripped.match(/\r\n/g) || []).length + (label.includes('CRLF') ? 1 : 0),
+      `inserted line uses the file's own EOL under ${label}`);
+    assertEqual(readRepairCount(after), 1, `insertion re-reads as 1 under ${label}`);
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 
 process.stdout.write(`\n${passCount} tests passed, ${failCount} failed.\n`);

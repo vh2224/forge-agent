@@ -397,7 +397,11 @@ function runVerificationGate(options) {
  * multi-line branch below and produced spurious verification failures.
  */
 function parsePlanVerify(planContent) {
-  const fmMatch = planContent.match(/^---\n([\s\S]*?)\n---/);
+  // Normalize CRLF/CR to LF at entry, before the frontmatter match — the
+  // multi-line branch below re-scans `frontmatter`, which descends from this
+  // match, so normalizing here (not per-shape) fixes all three shapes at once.
+  const src = String(planContent).replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const fmMatch = src.match(/^---\n([\s\S]*?)\n---/);
   if (!fmMatch) return null;
   const frontmatter = fmMatch[1];
 

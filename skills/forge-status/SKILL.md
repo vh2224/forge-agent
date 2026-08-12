@@ -13,7 +13,7 @@ ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 ```
 
 ```bash
-PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="$HOME/.claude/scripts/forge-prefs.js"
+PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs.js"
 REPO=$(node "$PREFS_ENGINE" --resolved --key repo_path 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(v?String(v):'')}catch{process.stdout.write('')}})")
 if [ -n "$REPO" ] && [ -d "$REPO/.git" ]; then
   LOCAL=$(cd "$REPO" && git describe --tags --always 2>/dev/null)
@@ -47,9 +47,9 @@ fi
 if command -v forge-status >/dev/null 2>&1; then
   forge-status $ARGUMENTS
 else
-  ENGINE="$HOME/.claude/scripts/forge-status.js"
+  ENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-status.js"
   if [ ! -f "$ENGINE" ]; then
-    PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="$HOME/.claude/scripts/forge-prefs.js"
+    PREFS_ENGINE="$FORGE_SCRIPTS_DIR/forge-prefs.js"; [ -f "$PREFS_ENGINE" ] || PREFS_ENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs.js"
     REPO_PATH=$(node "$PREFS_ENGINE" --resolved --key repo_path 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(v?String(v):'')}catch{process.stdout.write('')}})")
     ENGINE="$REPO_PATH/scripts/forge-status.js"
   fi

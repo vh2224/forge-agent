@@ -27,6 +27,7 @@ const DEFAULT_TIMEOUT_SECS = 120;
 const PROBES = [
   'handshake', 'a1', 'a2', 'a4-ok', 'a4-fail', 'a4-denied',
   'model-thread-only', 'model-turn-only', 'model-conflict', 'nongit-cwd', 'nongit-write',
+  'crossroot-write',
   'cap-networked', 'cap-workspace', 'cap-readonly',
   'evidence-runtime',
 ];
@@ -1341,6 +1342,453 @@ async function probeNonGitWrite({ timeoutSecs }) {
   }
 }
 
+/* ----------------------------------------------------------- cross-root ---
+ * Does `sandboxPolicy.writableRoots` ENLARGE the writable set, or does it only
+ * DELIMIT inside a root the server already granted?
+ *
+ * The existing arm C of `nongit-write` cannot answer this: it sends
+ * `writableRoots: [nonGitDir]` where `nonGitDir` IS the cwd, so it asks "does the
+ * field reopen the cwd", not "does the field open a directory OUTSIDE it". This
+ * probe puts the target in a SIBLING repo B while the turn runs with cwd = A.
+ *
+ * Geometry (asserted, never assumed): A and B are two sibling throwaway git repos
+ * under os.tmpdir(), realpath'd; the target of the treatment arm lives in B and is
+ * provably NOT a descendant of A.
+ *
+ * The four arms all carry the SAME POLICY_BASE, so the only variable between
+ * CTRL-DENY and TREAT is `writableRoots` itself. `excludeSlashTmp` /
+ * `excludeTmpdirEnvVar` are emitted true in every arm as a best-effort narrowing —
+ * this does NOT assume the runtime honours them. If it ignores them, the one who
+ * says so is CTRL-DENY (it writes into B without the field) and the prescribed
+ * outcome is `inconclusiva`, never positive.
+ */
+const CROSSROOT_VERDICTS = {
+  PROVADA: 'provada',
+  FALHOU: 'falhou',
+  INCONCLUSIVA: 'inconclusiva',
+  PARCIAL: 'parcial',
+  UNKNOWN: 'unknown',
+};
+
+// The re-run prescribed by both inconclusive routes: siege A and B outside os.tmpdir().
+const CROSSROOT_RERUN = 'Re-rodada prescrita (variante ii): recriar A e B FORA de os.tmpdir() e repetir os quatro braços.';
+
+/**
+ * EXECUTION EVIDENCE (review R1).
+ *
+ * `exists === false` is byte-identical between "the sandbox denied the write" and
+ * "the model completed the turn without ever running the touch". The ladder used to
+ * read the first meaning out of the second by assumption. It no longer does: every
+ * arm whose claim rests on an ABSENCE must carry evidence that the command actually
+ * ran in that arm.
+ *
+ * Three admissible kinds, ordered strongest first — and each one is NAMED in the
+ * verdict reason, never folded into a boolean:
+ *
+ *  - `write-effect` — the target appeared. Something executed; no further proof is
+ *    conceivable or needed. (Arms that WROTE never need an item.)
+ *  - `item` — a COMPLETED `commandExecution` citing this arm's target, with its exit
+ *    status carried when the server supplied one.
+ *  - `control` — the arm emitted no item, and a PERMISSIVE arm against the SAME
+ *    target directory did run and did write. This is the shape `probeCapReadonly`
+ *    (:631-654) already established for exactly this ambiguity: it does not prove
+ *    THIS arm ran, it proves the turn executes this command in this shape when the
+ *    sandbox allows it, which is what separates a sandbox denial from a model
+ *    refusal. Deliberately reused rather than reinvented, and deliberately labelled
+ *    weaker than `item`.
+ *
+ * Absent all three the answer is `unknown` = NOT MEASURED. Never `falhou`.
+ */
+const CROSSROOT_EXEC = { WRITE: 'write-effect', ITEM: 'item', CONTROL: 'control', NONE: 'none' };
+
+// A completed commandExecution citing this arm's target. `status` is checked when the
+// server supplied it (the real 0.144.4 items carry `status:"completed"`); the probe's
+// own collector already drops started-without-completion items, so absence of the
+// field is not treated as a failure.
+function completedExecFor(arm) {
+  if (!arm || !Array.isArray(arm.items)) return null;
+  const completed = arm.items.filter(i => i && i.type === 'commandExecution'
+    && (i.status === undefined || i.status === 'completed'));
+  if (completed.length === 0) return null;
+  const target = typeof arm.target === 'string' && arm.target ? arm.target : null;
+  const matched = target
+    ? completed.filter(i => typeof i.command === 'string' && i.command.includes(target))
+    : completed;
+  if (matched.length === 0) return null;
+  const item = matched[0];
+  const exit = (item.exitCode === undefined || item.exitCode === null)
+    ? 'sem exit status'
+    : `exitCode:${item.exitCode}`;
+  return {
+    item,
+    detail: target
+      ? `commandExecution completado citando o alvo (${exit})`
+      : `commandExecution completado, alvo não confrontado — braço sem target (${exit})`,
+  };
+}
+
+/**
+ * `control` is only admissible from an arm that (a) targets the same directory,
+ * (b) actually wrote, and (c) itself carries direct execution evidence. Anything
+ * weaker would be one absence corroborating another.
+ */
+function armExecution(arm, control) {
+  if (!arm) return { kind: CROSSROOT_EXEC.NONE, detail: 'braço ausente' };
+  if (arm.exists === true) {
+    return { kind: CROSSROOT_EXEC.WRITE, detail: 'o alvo apareceu — o comando executou, por efeito' };
+  }
+  const direct = completedExecFor(arm);
+  if (direct) return { kind: CROSSROOT_EXEC.ITEM, detail: direct.detail };
+  if (control && control.arm && control.arm.exists === true && completedExecFor(control.arm)
+      && control.arm.targetDir !== undefined && arm.targetDir !== undefined
+      && control.arm.targetDir === arm.targetDir) {
+    return {
+      kind: CROSSROOT_EXEC.CONTROL,
+      detail: `sem commandExecution próprio; CONTROLE PERMISSIVO ${control.label} rodou e escreveu no MESMO diretório-alvo (evidência MAIS FRACA que item próprio: prova que o turn executa este comando nesta forma quando o sandbox permite, logo a ausência aqui é negação do sandbox e não recusa do modelo)`,
+    };
+  }
+  return { kind: CROSSROOT_EXEC.NONE, detail: 'nenhum commandExecution completado citando o alvo e nenhum controle permissivo no mesmo diretório-alvo' };
+}
+
+/**
+ * PURE. No I/O, no binary, no network — that is what makes the must-haves
+ * checkable without the sidecar being reachable.
+ *
+ * `unknown` is NEW vocabulary in this file and it means, with all the letters:
+ * NOT MEASURED. It never means "measured and negative". A probe that failed to
+ * run (spawn, auth, network, timeout) has produced no evidence about
+ * `writableRoots`, and degrading that silence into `falhou` would manufacture a
+ * measurement out of an outage — the exact failure class this repo keeps paying
+ * for. Note that a TIMEOUT does not carry `error.infra` (runProbeSession only
+ * sets `infra` on spawn failure), so treating `!infra` as "measured" would grade
+ * a timeout as a measurement. It is treated as `unknown` here.
+ *
+ * Evaluation order — first match wins.
+ */
+function crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck }) {
+  const V = CROSSROOT_VERDICTS;
+
+  // (1) Any DECISIVE arm that did not run at all => unknown. Never `falhou`.
+  const decisive = [
+    ['CTRL-ATTEMPT', ctrlAttempt],
+    ['CTRL-DENY', ctrlDeny],
+    ['TREAT', treat],
+  ];
+  for (const [label, arm] of decisive) {
+    if (!arm || arm.error) {
+      const message = arm && arm.error ? arm.error : 'braço ausente do resultado';
+      return {
+        verdict: V.UNKNOWN,
+        reason: `braço ${label} NÃO MEDIDO (${message}) — sem os três braços decisivos não há medição sobre writableRoots. "unknown" significa NÃO MEDIDO e nunca "medido e negativo".`,
+      };
+    }
+  }
+
+  // (2) The turn never executed the command in this shape: absence is noise, not denial.
+  if (ctrlAttempt.exists === false) {
+    return {
+      verdict: V.INCONCLUSIVA,
+      reason: `CTRL-ATTEMPT não escreveu DENTRO do próprio cwd (A) — nesta forma o turn não executa o comando (ou excludeSlashTmp/excludeTmpdirEnvVar fecharam o próprio cwd), então a ausência nos demais braços é ruído e não negação. ${CROSSROOT_RERUN}`,
+    };
+  }
+
+  // (2b) CTRL-DENY rests entirely on an ABSENCE, so it must carry execution evidence
+  // (R1). Without it, "the sandbox denied" is indistinguishable from "the model never
+  // ran the touch" — and reporting a model non-compliance as a sandbox denial is the
+  // exact substitution this probe exists to refuse. `unknown` = NOT MEASURED.
+  const denyExec = armExecution(ctrlDeny, { label: 'TREAT', arm: treat });
+  if (ctrlDeny.exists === false && denyExec.kind === CROSSROOT_EXEC.NONE) {
+    return {
+      verdict: V.UNKNOWN,
+      reason: `CTRL-DENY não escreveu, mas NÃO HÁ EVIDÊNCIA DE EXECUÇÃO desse braço (${denyExec.detail}) — "o sandbox negou" é indistinguível de "o modelo não rodou o comando". "unknown" significa NÃO MEDIDO e nunca "medido e negativo". ${CROSSROOT_RERUN}`,
+    };
+  }
+
+  // (3) Negative control wrote => B was already writable; the field is not what did it.
+  if (ctrlDeny.exists === true) {
+    return {
+      verdict: V.INCONCLUSIVA,
+      reason: `CONTROLE NEGATIVO escreveu em B SEM writableRoots — B já era gravável, logo nenhuma escrita em B pode ser atribuída ao campo. Degradar este caso para positivo é proibido. ${CROSSROOT_RERUN}`,
+    };
+  }
+
+  // (4) Treatment wrote where the control could not: the field ENLARGES.
+  if (treat.exists === true) {
+    let replace;
+    if (!replaceCheck || replaceCheck.error) {
+      const message = replaceCheck && replaceCheck.error ? replaceCheck.error : 'braço ausente do resultado';
+      replace = `REPLACE-CHECK NÃO MEDIDO: ${message} — soma vs. substituição fica em aberto, dito e não inferido`;
+    } else if (replaceCheck.exists === true) {
+      replace = 'REPLACE-CHECK escreveu dentro de A: semântica de SOMA — writableRoots acrescenta B sem fechar a raiz implícita do cwd';
+    } else {
+      // Same asymmetry as CTRL-DENY, one level down: calling this arm "REPLACEMENT"
+      // without execution evidence would publish a production risk manufactured out
+      // of a model that simply did not run the touch (R1). Not measured is SAID.
+      const replaceExec = armExecution(replaceCheck, { label: 'CTRL-ATTEMPT', arm: ctrlAttempt });
+      replace = replaceExec.kind === CROSSROOT_EXEC.NONE
+        ? `REPLACE-CHECK NÃO MEDIDO: o alvo dentro de A não apareceu, mas não há evidência de execução do braço (${replaceExec.detail}) — soma vs. substituição fica EM ABERTO; ler esta ausência como semântica de substituição seria inventar a medição`
+        : `REPLACE-CHECK NÃO escreveu dentro de A (execução evidenciada: ${replaceExec.detail}): semântica de SUBSTITUIÇÃO — risco de produção nomeado, emitir writableRoots fecharia o próprio cwd em silêncio`;
+    }
+    return {
+      verdict: V.PROVADA,
+      reason: `writableRoots ALARGA a escrita: com cwd=A o alvo em B (fora de A) foi escrito COM o campo e NÃO foi escrito SEM ele — a única variável entre os dois braços é writableRoots. Evidência de execução do CTRL-DENY: ${denyExec.detail}. ${replace}.`,
+    };
+  }
+
+  // (5) TREAT did not write either — the only route to a MEASURED negative. It carries
+  // the same burden as CTRL-DENY, and here no permissive same-dir control can exist
+  // (TREAT is itself the permissive arm), so only direct item evidence admits it.
+  const treatExec = armExecution(treat, null);
+  if (treatExec.kind === CROSSROOT_EXEC.NONE) {
+    return {
+      verdict: V.UNKNOWN,
+      reason: `TREAT não escreveu e NÃO HÁ EVIDÊNCIA DE EXECUÇÃO desse braço (${treatExec.detail}) — sem ela, "writableRoots não alarga" seria uma recusa do modelo reportada como negação do sandbox. "unknown" significa NÃO MEDIDO e nunca "medido e negativo". ${CROSSROOT_RERUN}`,
+    };
+  }
+
+  // (6) Measured and negative: the field delimits, it does not enlarge.
+  return {
+    verdict: V.FALHOU,
+    reason: `writableRoots NÃO alarga: com cwd=A o alvo em B não foi escrito nem com o campo (TREAT, execução evidenciada: ${treatExec.detail}), enquanto o CTRL-ATTEMPT provou que o turn de fato executa comandos nesta forma. Evidência de execução do CTRL-DENY: ${denyExec.detail}. O campo delimita dentro de uma raiz já concedida.`,
+  };
+}
+
+async function probeCrossRootWrite({ timeoutSecs }) {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { spawnSync } = require('child_process');
+
+  // Step 1 — handshake precondition, zero inference cost. A probe that could not
+  // even open a session must never print a negative verdict about writableRoots.
+  const { cmd, args, env } = resolveCommand();
+  let binaryVersion = 'unknown';
+  try {
+    const hs = await runProbeHandshake({ cmd, args, env, timeoutSecs });
+    const init = (hs && hs.initializeResult) || {};
+    const thread = (hs && hs.threadStartResult && hs.threadStartResult.thread) || {};
+    // Real shape measured in TASK-022: userAgent on initialize, cliVersion on the thread.
+    binaryVersion = thread.cliVersion || init.userAgent || 'unknown';
+    process.stdout.write(`# binary version (medida no handshake): ${binaryVersion}\n`);
+    process.stdout.write(`# thread/start.result runtimeWorkspaceRoots=${JSON.stringify(hs.threadStartResult && hs.threadStartResult.runtimeWorkspaceRoots)}\n`);
+  } catch (error) {
+    if (error.infra) {
+      process.stderr.write(`forge-appserver-probe: infra failure — ${error.message}\n`);
+      process.exitCode = 2;
+      return;
+    }
+    printVerdict('crossroot-write', CROSSROOT_VERDICTS.UNKNOWN,
+      `handshake não fechou (${error.message.replace(/\n/g, ' ')}) — NADA foi medido sobre writableRoots. "unknown" é NÃO MEDIDO, nunca "medido e negativo".`);
+    return;
+  }
+
+  const isGitRepo = (dir) => {
+    const r = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+      cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return r.status === 0 && String(r.stdout).trim() === 'true';
+  };
+
+  // Local copy, declared: `isWithin` exists twice in scripts/ and NEITHER is exported
+  // (forge-prompt.js:89, forge-memory-index.js:28). This is a copy by necessity, not
+  // a reuse someone forgot.
+  const isWithin = (root, candidate) => {
+    const rel = path.relative(root, candidate);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+
+  // Step 2 — two SIBLING throwaway git repos. Both are git on purpose: this task's
+  // question is not about git-ness, so that variable is removed by holding it fixed.
+  const dirA = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xroot-a-')));
+  const dirB = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xroot-b-')));
+  // `git init` runs only in tmpdirs this probe just created — never the operator's repo.
+  const initA = spawnSync('git', ['init', '-q'], { cwd: dirA, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const initB = spawnSync('git', ['init', '-q'], { cwd: dirB, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+  const cleanup = () => {
+    fs.rmSync(dirA, { recursive: true, force: true });
+    fs.rmSync(dirB, { recursive: true, force: true });
+  };
+
+  // Step 3 — preconditions ASSERTED, never assumed.
+  const aIsGit = isGitRepo(dirA);
+  const bIsGit = isGitRepo(dirB);
+  process.stdout.write(`# probe crossroot-write: A(cwd)=${dirA} is-git=${aIsGit} (git init status=${initA.status}) | B(alvo)=${dirB} is-git=${bIsGit} (git init status=${initB.status})\n`);
+  if (!aIsGit || !bIsGit) {
+    process.stderr.write('forge-appserver-probe: crossroot-write precondition failed — A e B precisam ser repos git\n');
+    process.exitCode = 2;
+    cleanup();
+    return;
+  }
+
+  const targetsInB = ['CTRL-DENY', 'TREAT'].map(label => path.join(dirB, `forge-write-probe-${label}.txt`));
+  const geometryOk = dirA !== dirB
+    && !isWithin(dirA, dirB) && !isWithin(dirB, dirA)
+    && targetsInB.every(t => !isWithin(dirA, t));
+  process.stdout.write(`# geometria: A!==B=${dirA !== dirB} A⊅B=${!isWithin(dirA, dirB)} B⊅A=${!isWithin(dirB, dirA)} alvos-em-B-fora-de-A=${targetsInB.every(t => !isWithin(dirA, t))}\n`);
+  if (!geometryOk) {
+    process.stderr.write('forge-appserver-probe: crossroot-write geometry assert failed — o alvo precisa estar FORA do cwd; medir a geometria errada e chamar de veredito é exatamente o erro que este probe existe para atacar\n');
+    process.exitCode = 2;
+    cleanup();
+    return;
+  }
+
+  /**
+   * Local copy of probeNonGitWrite's `runArm` (:1213). DELIBERATE duplication, not an
+   * oversight: probeNonGitWrite produced a PUBLISHED verdict, and hoisting the helper
+   * to module scope would put that verdict at regression risk in exchange for reusing
+   * ~40 lines. A future reader who "fixes" this duplication is undoing a decision.
+   * Two mandatory differences from the original: `timeoutSecs` is a parameter, and
+   * `targetDir` is separate from `cwd` — that separation IS what this task measures.
+   */
+  const runArm = async (label, { cwd, targetDir, sandboxPolicy, note }) => {
+    // Per-arm target (Pitfall 3): two arms sharing a path make arm N report arm A's
+    // leftover file as its own write.
+    const target = path.join(targetDir, `forge-write-probe-${label}.txt`);
+    const command = `touch ${shellQuote(target)}`;
+    const arm = { label, cwd, targetDir, target };
+    process.stdout.write(`\n# --- ARM ${label} ${note} ---\n# cwd=${cwd} targetDir=${targetDir} sandboxPolicy=${JSON.stringify(sandboxPolicy)}\n# command=${command}\n`);
+    try { fs.rmSync(target, { force: true }); } catch { /* asserted next */ }
+    const presentBefore = fs.existsSync(target);
+    process.stdout.write(`# precondition — target absent before turn: ${!presentBefore}\n`);
+    if (presentBefore) {
+      arm.error = 'precondition failed: target present before the turn';
+      arm.exists = false;
+      process.stdout.write(`# ARM ${label} NÃO MEDIDO: ${arm.error}\n`);
+      return arm;
+    }
+    try {
+      const r = await runCapabilityTurn({ timeoutSecs, command, sandboxPolicy, cwd });
+      const ts = r.result.threadStartResult || {};
+      arm.exists = fs.existsSync(target);
+      arm.items = r.commandItems;
+      arm.startedOnly = r.startedOnly;
+      arm.threadSandbox = ts.sandbox;
+      arm.profile = ts.activePermissionProfile;
+      arm.gitInfo = ts.thread ? ts.thread.gitInfo : undefined;
+      // Narration is CORROBORATION, never evidence (TASK-020). It never enters the ladder.
+      arm.narration = (r.result.items || [])
+        .map(e => (e && e.item ? e.item : e))
+        .filter(i => i && i.type === 'agentMessage' && typeof i.text === 'string' && i.text.trim())
+        .map(i => i.text.trim());
+      arm.denialNarrated = arm.narration.some(t => /not permitted|permission denied|read-only file system|operation not permitted/i.test(t));
+      process.stdout.write(`# agentMessage narration: ${JSON.stringify(arm.narration)}\n# denial signature in narration (corroboração, NÃO evidência): ${arm.denialNarrated}\n`);
+      process.stdout.write(`# thread/start.result sandbox=${JSON.stringify(arm.threadSandbox)} activePermissionProfile=${JSON.stringify(arm.profile)} gitInfo=${JSON.stringify(arm.gitInfo)}\n`);
+      process.stdout.write(`# commandExecution items: ${JSON.stringify(arm.items)}\n`);
+      process.stdout.write(`# commandExecution started-without-completion: ${JSON.stringify(arm.startedOnly)}\n`);
+      process.stdout.write(`# GROUND TRUTH — target exists after turn: ${arm.exists}\n`);
+    } catch (error) {
+      arm.error = error.message.replace(/\n/g, ' ');
+      arm.exists = false;
+      process.stdout.write(`# ARM ${label} NÃO MEDIDO: ${arm.error}\n`);
+    }
+    return arm;
+  };
+
+  // Identical in every arm, so the ONLY variable between CTRL-DENY and TREAT is
+  // writableRoots. The two exclude* flags are a best-effort narrowing whose failure
+  // is DETECTED by CTRL-DENY, not assumed away.
+  const POLICY_BASE = {
+    type: 'workspaceWrite',
+    networkAccess: false,
+    excludeSlashTmp: true,
+    excludeTmpdirEnvVar: true,
+  };
+
+  try {
+    const ctrlAttempt = await runArm('CTRL-ATTEMPT', {
+      cwd: dirA, targetDir: dirA, sandboxPolicy: POLICY_BASE,
+      note: 'CONTROLE POSITIVO: cwd=A, alvo DENTRO de A — prova que o turn de fato executa comandos nesta forma; sem ele, ausência é ruído e não negação',
+    });
+    const ctrlDeny = await runArm('CTRL-DENY', {
+      cwd: dirA, targetDir: dirB, sandboxPolicy: POLICY_BASE,
+      note: 'CONTROLE NEGATIVO: cwd=A, alvo em B, SEM writableRoots — se escrever, B já era gravável e nada é atribuível ao campo',
+    });
+    const treat = await runArm('TREAT', {
+      cwd: dirA, targetDir: dirB, sandboxPolicy: { ...POLICY_BASE, writableRoots: [dirB] },
+      note: 'TRATAMENTO: cwd=A, alvo em B, COM writableRoots:[B] — a pergunta da task',
+    });
+    // Runs on EVERY path that reaches a measured verdict, including the positive one:
+    // "B appeared" alone does not distinguish SUM from REPLACEMENT, and replacement
+    // means production would break in silence the day someone emits the field.
+    const replaceCheck = await runArm('REPLACE-CHECK', {
+      cwd: dirA, targetDir: dirA, sandboxPolicy: { ...POLICY_BASE, writableRoots: [dirB] },
+      note: 'cwd=A, alvo DENTRO de A, COM writableRoots:[B] — writableRoots SOMA B ou SUBSTITUI a raiz implícita do cwd?',
+    });
+
+    const { verdict, reason } = crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck });
+
+    // Step 8 — fifth arm, gated on a measured negative only (Decisão 6).
+    if (verdict === CROSSROOT_VERDICTS.FALHOU) {
+      process.stdout.write('\n# --- ARM RUNTIME-ROOTS (gated: só roda com writableRoots medido negativo) ---\n');
+      const target = path.join(dirB, 'forge-write-probe-RUNTIME-ROOTS.txt');
+      const command = `touch ${shellQuote(target)}`;
+      let fifthWrote = false;
+      let fifthError = null;
+      let fifthItems = [];
+      try { fs.rmSync(target, { force: true }); } catch { /* asserted next */ }
+      if (fs.existsSync(target)) {
+        fifthError = 'precondition failed: target present before the turn';
+      } else {
+        try {
+          // runCapabilityTurn accepts only cwd/threadSandbox as thread params (:537-539),
+          // so the seam for an arbitrary thread-level field is runProbeSession itself.
+          // Not one line of runCapabilityTurn is edited — it is module scope, shared by
+          // the three cap-* probes.
+          const fifth = await runProbeSession({
+            cmd, args, env, timeoutSecs,
+            threadParams: { approvalPolicy: 'never', cwd: dirA, runtimeWorkspaceRoots: [dirB] },
+            buildTurnParams: (threadId) => ({
+              threadId,
+              input: [{ type: 'text', text: `Run this exact shell command and report its output verbatim: ${command}` }],
+              sandboxPolicy: POLICY_BASE,
+            }),
+          });
+          fifthWrote = fs.existsSync(target);
+          // R2: this arm used to look at nothing but `fs.existsSync`. Its NEGATIVE
+          // branch therefore appended "também não escreveu" to the primary verdict
+          // with no way to tell a sandbox denial from a model that never ran the
+          // command. Collect the same evidence the four main arms carry.
+          fifthItems = (fifth.items || [])
+            .filter(entry => entry && entry.item && entry.item.type === 'commandExecution')
+            .map(entry => entry.item);
+        } catch (error) {
+          fifthError = error.message.replace(/\n/g, ' ');
+        }
+      }
+      const fifthExec = armExecution({ exists: fifthWrote, items: fifthItems, target }, null);
+      process.stdout.write(`# GROUND TRUTH — RUNTIME-ROOTS target exists after turn: ${fifthWrote} (error=${JSON.stringify(fifthError)})\n`);
+      process.stdout.write(`# RUNTIME-ROOTS commandExecution items: ${JSON.stringify(fifthItems)}\n# RUNTIME-ROOTS evidência de execução: ${fifthExec.kind} — ${fifthExec.detail}\n`);
+      // ONE caveat string for BOTH branches (Decisão 6 + review R2): the weaker
+      // posture is a property of the ARM, not of the outcome, so it cannot live only
+      // where the arm happened to write.
+      const FIFTH_CAVEAT = 'CAVEAT PROBATÓRIO OBRIGATÓRIO: runtimeWorkspaceRoots NÃO é coberto pelo schema pinado (shared/schemas/codex-appserver-pin.json não modela params de ThreadStart) e este braço não tem controle positivo próprio (nada análogo ao CTRL-ATTEMPT) — postura probatória MAIS FRACA que a da ladder de quatro braços, e não deve ser reportado com a mesma confiança.';
+      if (fifthWrote) {
+        printVerdict('crossroot-write', CROSSROOT_VERDICTS.PARCIAL,
+          `${reason} PORÉM o braço thread-level escreveu em B com ThreadStartParams.runtimeWorkspaceRoots:[B] (execução evidenciada: ${fifthExec.detail}). ${FIFTH_CAVEAT} Versão do binário: ${binaryVersion}.`);
+        return;
+      }
+      // An absence here is only reportable as "did not write" if the command is
+      // evidenced to have run at all.
+      let fifthPhrase;
+      if (fifthError) {
+        fifthPhrase = `NÃO FOI MEDIDO (${fifthError})`;
+      } else if (fifthExec.kind === CROSSROOT_EXEC.NONE) {
+        fifthPhrase = `NÃO FOI MEDIDO: o alvo não apareceu, mas não há evidência de execução do braço (${fifthExec.detail}) — "não escreveu" seria indistinguível de "o modelo não rodou o comando"`;
+      } else {
+        fifthPhrase = `não escreveu (execução evidenciada: ${fifthExec.detail})`;
+      }
+      printVerdict('crossroot-write', verdict,
+        `${reason} O braço thread-level runtimeWorkspaceRoots também ${fifthPhrase}. ${FIFTH_CAVEAT} Versão do binário: ${binaryVersion}.`);
+      return;
+    }
+
+    printVerdict('crossroot-write', verdict, `${reason} Versão do binário: ${binaryVersion}.`);
+  } finally {
+    cleanup();
+  }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.error) {
@@ -1363,6 +1811,7 @@ async function main() {
   else if (opts.probe === 'cap-readonly') await probeCapReadonly(opts);
   else if (opts.probe === 'evidence-runtime') await probeEvidenceRuntime(opts);
   else if (opts.probe === 'nongit-write') await probeNonGitWrite(opts);
+  else if (opts.probe === 'crossroot-write') await probeCrossRootWrite(opts);
   else await probeNonGitCwd(opts);
 }
 
@@ -1378,4 +1827,6 @@ module.exports = {
   collectModelFields, scopeOfSurface, collectModelReadbacks,
   probeModelConflict, probeNonGitCwd, B3_VERDICTS,
   probeNonGitWrite, NONGIT_WRITE_VERDICTS, shellQuote,
+  probeCrossRootWrite, crossRootVerdict, CROSSROOT_VERDICTS,
+  armExecution, CROSSROOT_EXEC,
 };
