@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 
 const CALL_SITE_FAMILIES = Object.freeze(['one-liner', 'bare-assign', 'aliased-var', 'shared-dir', 'bin-bash', 'bin-cmd', 'prose', 'prefs-path']);
-const SKIP_REASONS = Object.freeze({ EXTENSION_NOT_SCANNED: 'extension-not-scanned', UNREADABLE: 'unreadable', SELF_FIXTURE: 'self-fixture', ROOT_NOT_FOUND: 'root-not-found', NOT_A_SCRIPT: 'not-a-script', AUTHORITY_UNAVAILABLE: 'authority-unavailable', PREFS_SHAPE_UNMEASURED: 'prefs-shape-unmeasured' });
+const SKIP_REASONS = Object.freeze({ EXTENSION_NOT_SCANNED: 'extension-not-scanned', UNREADABLE: 'unreadable', SELF_FIXTURE: 'self-fixture', ROOT_NOT_FOUND: 'root-not-found', NOT_A_SCRIPT: 'not-a-script', AUTHORITY_UNAVAILABLE: 'authority-unavailable', PREFS_SHAPE_UNMEASURED: 'prefs-shape-unmeasured', PREFS_SHAPE_UNMEASURED_EXECUTABLE: 'prefs-shape-unmeasured-executable' });
 const SENTINEL_CWD = path.join(path.sep, 'forge-callsites-sentinel-cwd');
 const SENTINEL_HOME = path.join(path.sep, 'forge-callsites-sentinel-home');
 const DEFAULT_ROOTS = Object.freeze(['agents', 'commands', 'skills', 'shared', 'bin']);
@@ -82,6 +82,15 @@ function isShellScript(file) {
   if (path.extname(file)) return EXTENSIONS.has(path.extname(file));
   try { return fs.readFileSync(file, 'utf8').startsWith('#!'); } catch { return false; }
 }
+/*
+ * The executable axis deliberately covers Windows wrappers anywhere and files
+ * under bin/. It does not classify .sh/.js files outside bin/ as executable.
+ */
+function executableFamily(file, root) {
+  if (/\.(cmd|bat)$/i.test(file)) return 'bin-cmd';
+  const rel = path.relative(root, file).replace(/\\/g, '/');
+  return rel.startsWith('bin/') ? 'bin-bash' : null;
+}
 function walk(root, files, skipped) {
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { skipped.push({ path: root, reason: fs.existsSync(root) ? SKIP_REASONS.UNREADABLE : SKIP_REASONS.ROOT_NOT_FOUND }); return; }
@@ -101,18 +110,18 @@ function familiesFor(file, text, root) {
   if (/\.md$/i.test(file) && /FORGE_SCRIPTS_DIR=/.test(text)) out.push('bare-assign');
   if (/\.md$/i.test(file) && /\b[A-Z_]+="\$FORGE_SCRIPTS_DIR\//.test(text)) out.push('aliased-var');
   if (/\.md$/i.test(file) && /FORGE_SHARED_DIR=/.test(text)) out.push('shared-dir');
-  if (rel.startsWith('bin/') && !/\.(cmd|bat)$/i.test(file)) out.push('bin-bash');
-  if (/\.(cmd|bat)$/i.test(file)) out.push('bin-cmd');
+  const executable = executableFamily(file, root);
+  if (executable) out.push(executable);
   // prefs-path is counted per LINE in scan(), not here: a file scoring 1 while
   // three of its four rungs were never evaluated is a census that overstates
   // its own coverage.  Adding a rung must move the number.
   return out;
 }
-function findingFamily(file, line) {
+function findingFamily(file, line, root) {
   // Prose is decided before location: a sentence in bin/ is still prose.
   if (!LEGACY_CALL_SITE.test(line) && isLegacyProse(line)) return 'prose';
-  if (/\.(cmd|bat)$/i.test(file)) return 'bin-cmd';
-  if (path.dirname(file).endsWith(`${path.sep}bin`)) return 'bin-bash';
+  const executable = executableFamily(file, root);
+  if (executable) return executable;
   if (/FORGE_SHARED_DIR=.*(?:\.claude|\/shared"?$)/.test(line)) return 'shared-dir';
   if (/^[A-Z_]+="(?:\$FORGE_SCRIPTS_DIR\/|(?:~|\$HOME|%USERPROFILE%)[\\/])/.test(line) && !/^FORGE_SCRIPTS_DIR=/.test(line)) return 'aliased-var';
   if (/FORGE_SCRIPTS_DIR=\$\(/.test(line)) return 'one-liner';
@@ -135,20 +144,23 @@ function scan(options = {}) {
       if (isPrefsAssignment(line)) {
         scanned_by_family['prefs-path']++;
         const directory = preferenceDirectory(line);
-        if (directory === null) unmeasured.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, reason: SKIP_REASONS.PREFS_SHAPE_UNMEASURED });
+        if (directory === null) unmeasured.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, reason: SKIP_REASONS.PREFS_SHAPE_UNMEASURED, executable: executableFamily(file, root) !== null });
         else if (!approvedDirectories.includes(directory)) {
           counts_by_family['prefs-path']++; findings.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, family: 'prefs-path', text: line.trim(), directory });
         }
         return;
       }
       if (isLegacyLine(line)) {
-        const family = findingFamily(file, line); counts_by_family[family]++; findings.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, family, text: line.trim() });
+        const family = findingFamily(file, line, root); counts_by_family[family]++; findings.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, family, text: line.trim() });
       }
     });
   }
   const missing = CALL_SITE_FAMILIES.filter((family) => scanned_by_family[family] === 0);
-  const outcome = findings.length ? 'findings' : (files.length === 0 || missing.length ? 'scan-failed' : 'clean');
-  return { outcome, scanned: files.length, counts_by_family, scanned_by_family, missing_families: missing, findings, skipped, unmeasured, prefs_path_scope: 'prefs-path measures destination directory, not candidate order; a wrapper that puts ~/.claude before canonical passes clean.' };
+  const unmeasuredExecutable = unmeasured.filter((entry) => entry.executable);
+  const outcome = unmeasuredExecutable.length ? 'scan-failed' : findings.length ? 'findings' : (files.length === 0 || missing.length ? 'scan-failed' : 'clean');
+  const report = { outcome, scanned: files.length, counts_by_family, scanned_by_family, missing_families: missing, findings, skipped, unmeasured, prefs_path_scope: 'prefs-path measures destination directory, not candidate order; a wrapper that puts ~/.claude before canonical passes clean.' };
+  if (unmeasuredExecutable.length) report.reason = SKIP_REASONS.PREFS_SHAPE_UNMEASURED_EXECUTABLE;
+  return report;
 }
 function parseArgs(argv) { const out = {}; for (let i = 0; i < argv.length; i++) { const arg = argv[i]; if (arg === '--check' || arg === '--json') continue; if (arg === '--root' || arg === '--cwd') out.root = argv[++i]; else throw new Error(`unknown argument: ${arg}`); } return out; }
 function run(argv = process.argv.slice(2), write = process.stdout.write.bind(process.stdout)) { try { const report = scan(parseArgs(argv)); write(`${JSON.stringify(report)}\n`); return report.outcome === 'clean' ? 0 : 2; } catch (error) { write(`${JSON.stringify({ outcome: 'scan-failed', error: error.message })}\n`); return 2; } }

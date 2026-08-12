@@ -99,11 +99,11 @@ test('prefs-path spares prose and the legitimate legacy fallback', () => {
 test('unmeasured prefs shape is named, censused, and not a finding', () => {
   const root = fixture();
   try {
-    fs.appendFileSync(path.join(root, 'bin', 'run'), '\nPREFS="$XDG_CONFIG_HOME/forge-agent-prefs.jsonc"\n');
+    fs.appendFileSync(path.join(root, 'agents', 'prose.md'), '\nPREFS="$XDG_CONFIG_HOME/forge-agent-prefs.jsonc"\n');
     const report = guard.scan({ root });
     assert.strictEqual(report.outcome, 'clean');
     assert.strictEqual(report.scanned_by_family['prefs-path'], 2);
-    assert.deepStrictEqual(report.unmeasured, [{ path: 'bin/run', line: 5, reason: 'prefs-shape-unmeasured' }]);
+    assert.deepStrictEqual(report.unmeasured, [{ path: 'agents/prose.md', line: 3, reason: 'prefs-shape-unmeasured', executable: false }]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 /*
@@ -149,14 +149,14 @@ test('a poisoned conditional rung is a finding that names the directory', () => 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 test('a conditional rung outside the measured prefix table is unmeasured, never judged', () => {
-  const rungs = RUNGS.concat(['  [ -f "$PREFS" ] || PREFS="$XDG_CONFIG_HOME/forge/forge-agent-prefs.json"']);
-  const root = chainFixture(rungs);
+  const root = chainFixture(RUNGS);
   try {
+    fs.appendFileSync(path.join(root, 'agents', 'prose.md'), '\n  [ -f "$PREFS" ] || PREFS="$XDG_CONFIG_HOME/forge/forge-agent-prefs.json"\n');
     const report = guard.scan({ root });
     assert.strictEqual(report.outcome, 'clean', JSON.stringify(report.findings));
     assert.strictEqual(report.counts_by_family['prefs-path'], 0);
     assert.strictEqual(report.scanned_by_family['prefs-path'], 5);
-    assert.deepStrictEqual(report.unmeasured, [{ path: 'bin/run', line: 7, reason: 'prefs-shape-unmeasured' }]);
+    assert.deepStrictEqual(report.unmeasured, [{ path: 'agents/prose.md', line: 3, reason: 'prefs-shape-unmeasured', executable: false }]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 test('authority loss is scan-failed, never clean', () => {
@@ -174,6 +174,51 @@ test('prefs-path bite is proved by spawned CLI in both directions', () => {
     fs.writeFileSync(file, good.replace('/forge-agent-prefs.jsonc', '/shared/forge-agent-prefs.jsonc'));
     out = runCli(); const poisoned = JSON.parse(out.stdout); assert.strictEqual(out.status, 2); assert.strictEqual(poisoned.outcome, 'findings'); assert.strictEqual(poisoned.findings[0].family, 'prefs-path'); assert.strictEqual(poisoned.findings[0].directory, '.forge-agent/shared');
     fs.writeFileSync(file, good); out = runCli(); assert.strictEqual(out.status, 0); assert.strictEqual(JSON.parse(out.stdout).outcome, 'clean');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+// Forms 3-6 from lines 3-6 of the PR #84 maintainer review table: four
+// unmeasured shapes means this test must exercise four forms, not one as proof.
+const UNMEASURED_SHAPES = Object.freeze([
+  { name: 'unquoted', lines: ['PREFS=${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.jsonc'] },
+  { name: 'single-quoted', lines: ["PREFS='${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.jsonc'"] },
+  { name: 'hoisted-prefix', lines: ['D="${FORGE_HOME:-$HOME/.forge-agent}/shared"', 'PREFS="$D/forge-agent-prefs.jsonc"'] },
+  { name: 'variable-basename', lines: ['D="${FORGE_HOME:-$HOME/.forge-agent}/shared"', 'NAME="forge-agent-prefs.jsonc"', 'PREFS="$D/$NAME"'] },
+]);
+function cliReport(cli, root) {
+  const result = spawnSync(process.execPath, [cli, '--root', root], { encoding: 'utf8' });
+  return { result, report: JSON.parse(result.stdout) };
+}
+test('unmeasured executable prefs shapes fail the spawned CLI as a complete class', () => {
+  assert.strictEqual(UNMEASURED_SHAPES.length, 4, 'the four known unmeasured forms must all be exercised');
+  const root = fixture(); const CLI = path.join(__dirname, 'forge-scripts-callsites.js'); const file = path.join(root, 'bin', 'run');
+  try {
+    for (const shape of UNMEASURED_SHAPES) {
+      const good = fs.readFileSync(file, 'utf8');
+      try {
+        fs.appendFileSync(file, `\n${shape.lines.join('\n')}\n`);
+        const { result, report } = cliReport(CLI, root);
+        assert.strictEqual(result.status, 2, `${shape.name} must fail the CLI process`);
+        assert.strictEqual(report.outcome, 'scan-failed');
+        assert.strictEqual(report.reason, 'prefs-shape-unmeasured-executable');
+        assert.strictEqual(report.findings.length, 0);
+        const entries = report.unmeasured.filter((entry) => entry.executable && entry.path.startsWith('bin/'));
+        assert.strictEqual(entries.length, 1, `${shape.name} must produce one executable unmeasured entry`);
+      } finally { fs.writeFileSync(file, good); }
+      const { result, report } = cliReport(CLI, root);
+      assert.strictEqual(result.status, 0, `${shape.name} restoration must pass the CLI process`);
+      assert.strictEqual(report.outcome, 'clean');
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('unmeasured prefs shapes in prose remain clean', () => {
+  const root = fixture(); const CLI = path.join(__dirname, 'forge-scripts-callsites.js');
+  try {
+    fs.appendFileSync(path.join(root, 'agents', 'prose.md'), `\n${UNMEASURED_SHAPES.flatMap((shape) => shape.lines).join('\n')}\n`);
+    const { result, report } = cliReport(CLI, root);
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(report.outcome, 'clean');
+    assert.strictEqual(report.unmeasured.length, 4);
+    assert(report.unmeasured.every((entry) => entry.path === 'agents/prose.md' && entry.executable === false));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 test('never says clean for an empty or incomplete census', () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-scripts-empty-')); try { assert.strictEqual(guard.scan({ root }).outcome, 'scan-failed'); fs.mkdirSync(path.join(root, 'agents')); fs.writeFileSync(path.join(root, 'agents', 'a.md'), 'x\n'); const report = guard.scan({ root }); assert.strictEqual(report.outcome, 'scan-failed'); assert(report.missing_families.includes('bin-cmd')); } finally { fs.rmSync(root, { recursive: true, force: true }); } });
