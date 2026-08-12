@@ -697,6 +697,74 @@ test('existing exports still present (regression)', () => {
   assert(mod._private && typeof mod._private.checkSubstantive === 'function', 'checkSubstantive in _private');
 });
 
+// ── Non-clobbering output guard ───────────────────────────────────────────────
+//
+// `{S##}-VERIFICATION.md` is also a legal `writes:` target for a task. Measured
+// incident: a T04 declared that exact name and had 307 lines of proof replaced
+// by 68 lines of generic heuristic; `.gsd/` is not a git repo in a consumer
+// workspace, so nothing could undo it. Advisory output must never destroy a
+// deliverable. Four states, because `unreadable` must collapse into neither
+// "ours" nor "not ours".
+
+{
+  const { writeVerificationMd, isOurOutput } = require('./forge-verifier.js')._private;
+  const MINE = [
+    '---', 'id: S03-VERIFICATION', 'slice: S03', 'milestone: M1',
+    'generated_at: 2026-01-01T00:00:00Z', 'duration_ms: 12.3', '---', '', '# generated', '',
+  ].join('\n');
+  const DELIVERABLE = ['---', 'id: S03-VERIFICATION', 'slice: S03', '---', '']
+    .concat(Array(307).fill('proof line')).join('\n');
+
+  const mkdir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-clobber-'));
+
+  test('absent target: writes the canonical name', () => {
+    const d = mkdir();
+    assertEq(path.basename(writeVerificationMd(d, 'S03', MINE)), 'S03-VERIFICATION.md');
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  test('own previous output: overwrites in place (stays idempotent)', () => {
+    const d = mkdir();
+    writeVerificationMd(d, 'S03', MINE);
+    const out = writeVerificationMd(d, 'S03', MINE);
+    assertEq(path.basename(out), 'S03-VERIFICATION.md');
+    assertEq(fs.readFileSync(out, 'utf-8'), MINE);
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  test('foreign deliverable at the path: refuses, preserves it byte-for-byte, lands beside', () => {
+    const d = mkdir();
+    const target = path.join(d, 'S03-VERIFICATION.md');
+    fs.writeFileSync(target, DELIVERABLE);
+    const out = writeVerificationMd(d, 'S03', MINE);
+    assertEq(path.basename(out), 'S03-VERIFICATION.generated.md');
+    assertEq(fs.readFileSync(target, 'utf-8'), DELIVERABLE, 'deliverable was modified');
+    assertEq(fs.readFileSync(out, 'utf-8'), MINE, 'verification was lost');
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  test('unreadable target: refuses without throwing — unreadable is not evidence of ownership', () => {
+    const d = mkdir();
+    fs.mkdirSync(path.join(d, 'S03-VERIFICATION.md'));
+    const state = isOurOutput(path.join(d, 'S03-VERIFICATION.md'), 'S03');
+    assertEq(state.unreadable, true);
+    assertEq(state.ours, false);
+    const out = writeVerificationMd(d, 'S03', MINE);
+    assertEq(path.basename(out), 'S03-VERIFICATION.generated.md');
+    assert(fs.statSync(path.join(d, 'S03-VERIFICATION.md')).isDirectory(), 'target was replaced');
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  test('a foreign file whose frontmatter names another slice is not ours', () => {
+    const d = mkdir();
+    const target = path.join(d, 'S03-VERIFICATION.md');
+    fs.writeFileSync(target, MINE.replace('id: S03-VERIFICATION', 'id: S04-VERIFICATION'));
+    assertEq(isOurOutput(target, 'S03').ours, false);
+    assertEq(path.basename(writeVerificationMd(d, 'S03', MINE)), 'S03-VERIFICATION.generated.md');
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+}
+
 // ── Cleanup and summary ───────────────────────────────────────────────────────
 try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}
 

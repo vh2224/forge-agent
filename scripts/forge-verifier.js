@@ -889,6 +889,10 @@ module.exports = {
     detectPatternSets,
     auditTestQuality,
     isTestFile,
+    // Non-clobbering output guard (function declarations are hoisted, so these
+    // resolve even though they are defined below this block).
+    isOurOutput,
+    writeVerificationMd,
   },
 };
 
@@ -1221,7 +1225,48 @@ function formatVerificationMd(result) {
 }
 
 /**
+ * isOurOutput — does the file at `p` carry this tool's own signature?
+ *
+ * `duration_ms:` is emitted unconditionally by formatVerificationMd and is not
+ * something a human writes into a deliverable, so it is the discriminator.
+ * `id: {sliceId}-VERIFICATION` pins it to THIS slice.
+ *
+ * Returns a THREE-state result, never a boolean: `unreadable` must not collapse
+ * into `not ours` OR into `ours`. A file we could not inspect is not evidence
+ * in either direction — the same rule the schema guard applies to an unreadable
+ * stamp — so the caller refuses to overwrite it.
+ *
+ * @param {string} p
+ * @param {string} sliceId
+ * @returns {{ours: boolean, unreadable: boolean, errno: string|null}}
+ */
+function isOurOutput(p, sliceId) {
+  let text;
+  try {
+    text = fs.readFileSync(p, 'utf-8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { ours: false, unreadable: false, errno: 'ENOENT' };
+    return { ours: false, unreadable: true, errno: (e && e.code) || 'UNKNOWN' };
+  }
+  const fm = String(text).replace(/^﻿/, '').replace(/\r\n?/g, '\n').match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return { ours: false, unreadable: false, errno: null };
+  const block = fm[1];
+  const ours = /^duration_ms:[ \t]*[\d.]+$/m.test(block)
+    && new RegExp(`^id:[ \\t]*${sliceId}-VERIFICATION[ \\t]*$`, 'm').test(block);
+  return { ours, unreadable: false, errno: null };
+}
+
+/**
  * Write the VERIFICATION.md to the slice directory.
+ *
+ * REFUSES to clobber a file at that path that is not this tool's own output.
+ * The path is also a legal `writes:` target for a task — measured: a T04 that
+ * declared `{S##}-VERIFICATION.md` had 307 lines of proof replaced by 68 lines
+ * of generic heuristic, and `.gsd/` is not a git repo in a consumer workspace,
+ * so there was no `git checkout` to undo it. Advisory output must never destroy
+ * a deliverable; when the path is taken, the verification lands beside it under
+ * `{sliceId}-VERIFICATION.generated.md` and the collision is named on stderr.
+ *
  * @param {string} sliceDir  Absolute path to the slice directory
  * @param {string} sliceId   e.g. "S03"
  * @param {string} md        Formatted markdown content
@@ -1230,6 +1275,20 @@ function formatVerificationMd(result) {
 function writeVerificationMd(sliceDir, sliceId, md) {
   const outPath = path.join(sliceDir, `${sliceId}-VERIFICATION.md`);
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
+
+  const state = isOurOutput(outPath, sliceId);
+  if (state.errno !== 'ENOENT' && (!state.ours || state.unreadable)) {
+    const altPath = path.join(sliceDir, `${sliceId}-VERIFICATION.generated.md`);
+    const why = state.unreadable
+      ? `existing file could not be read (${state.errno}) — unreadable is not evidence of ownership`
+      : 'existing file is not this tool\'s output (no duration_ms/id signature)';
+    process.stderr.write(
+      `[forge-verifier] refusing to overwrite ${outPath}: ${why}. Wrote ${altPath} instead.\n`,
+    );
+    fs.writeFileSync(altPath, md, 'utf-8');
+    return altPath;
+  }
+
   fs.writeFileSync(outPath, md, 'utf-8');
   return outPath;
 }
