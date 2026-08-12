@@ -64,6 +64,44 @@ function seedFour(cwd) {
   for (const e of FOUR) ledger.writeFragment(cwd, e);
 }
 
+// Monolith fixture: an empty store plus a .gsd/LEDGER.md of bulky blocks, which
+// is the ONLY route to source === 'monolith'. Blocks are bulky on purpose — a
+// half-of-full budget must hold some-but-not-all of them, otherwise the cut
+// proves nothing.
+function monolithBlock(id, label) {
+  return [
+    `## ${id}`,
+    `**${label}**`,
+    '',
+    ...Array.from({ length: 10 }, (_, i) => `  - ${id} key file scripts/${id}-file-${i}.js`),
+    '',
+    '---',
+    '',
+  ];
+}
+
+function seedMonolith(label) {
+  const cwd = tmpCwd(label);
+  fs.writeFileSync(path.join(cwd, '.gsd', 'LEDGER.md'), [
+    '# Forge Project Ledger',
+    '',
+    ...monolithBlock('M001', 'Oldest'),
+    ...monolithBlock('M002', 'Middle'),
+    ...monolithBlock('M003', 'Newest'),
+  ].join('\n'));
+  return cwd;
+}
+
+// The marker is the last non-empty line of a truncated snapshot.
+function markerLineOf(snap) {
+  return snap.markdown.split('\n').filter(Boolean).pop();
+}
+
+// The projection command is a POINTER, and a pointer that resolves to something
+// which denies the entries just counted is the F1 defect. Its absence is half of
+// every monolith assertion (D5) — without it, a marker that still lies passes.
+const PROJECTION_COMMAND = 'forge-projection.js --render ledger';
+
 // ── 1. Recency selection, asserted by id (B1) ─────────────────────────────────
 
 test('a budget that forces a cut retains the NEWEST entries and drops the oldest, by id', () => {
@@ -213,25 +251,7 @@ test('empty store and no monolith renders (none)', () => {
 });
 
 test('empty store + LEDGER.md falls back to monolith blocks taken from the END (append-only)', () => {
-  const cwd = tmpCwd('monolith');
-  // Blocks are bulky on purpose: a half-of-full budget must be able to hold
-  // some-but-not-all of them, otherwise the cut proves nothing.
-  const block = (id, label) => [
-    `## ${id}`,
-    `**${label}**`,
-    '',
-    ...Array.from({ length: 10 }, (_, i) => `  - ${id} key file scripts/${id}-file-${i}.js`),
-    '',
-    '---',
-    '',
-  ];
-  fs.writeFileSync(path.join(cwd, '.gsd', 'LEDGER.md'), [
-    '# Forge Project Ledger',
-    '',
-    ...block('M001', 'Oldest'),
-    ...block('M002', 'Middle'),
-    ...block('M003', 'Newest'),
-  ].join('\n'));
+  const cwd = seedMonolith('monolith');
 
   const full = projection.renderLedgerSnapshot(cwd, { maxTokens: 16000 });
   assert.strictEqual(full.source, 'monolith');
@@ -241,6 +261,68 @@ test('empty store + LEDGER.md falls back to monolith blocks taken from the END (
   assert.ok(cut.included_ids.includes('M003'), `tail of the monolith is the newest: ${cut.included_ids}`);
   assert.ok(!cut.included_ids.includes('M001'), `head of the monolith is the oldest: ${cut.included_ids}`);
   assert.ok(cut.markdown.includes('[...truncated '));
+
+  // F1: "truncated?" without "truncated, and pointed WHERE?" is the assert that
+  // let the defect ship. The monolith marker must point at the file the entries
+  // actually came from, and must NOT carry the projection command — that command,
+  // run against this same cwd, renders an EMPTY ledger and denies the very
+  // entries the marker just counted.
+  const markerLine = markerLineOf(cut);
+  assert.ok(markerLine.includes('.gsd/LEDGER.md'), `monolith marker points at the monolith: ${markerLine}`);
+  assert.ok(
+    !markerLine.includes(PROJECTION_COMMAND),
+    `monolith marker must not point at the projection command: ${markerLine}`,
+  );
+});
+
+// F1 (D8): the monolith pointer is a THREE-rung ladder, decreasing in
+// information exactly like the fragments one. Covering only the top rung proves
+// one instance — the shape that shipped green in PR #84 while 15 of 20 sites
+// stayed broken. The sweep covers the CLASS: every rung must be observed, and
+// no rung anywhere in the ladder may carry the projection command.
+test('the monolith marker ladder shows all three rungs, and no rung ever names the projection command', () => {
+  const cwd = seedMonolith('ladder');
+  const full = projection.renderLedgerSnapshot(cwd, { maxTokens: 16000 });
+  assert.strictEqual(full.source, 'monolith');
+  const ceiling = countTokens(full.markdown);
+
+  const seen = { absolute: 0, relative: 0, bare: 0 };
+  for (let budget = 6; budget <= ceiling; budget += 1) {
+    const snap = projection.renderLedgerSnapshot(cwd, { maxTokens: budget });
+    if (snap.omitted_count === 0) continue;
+    const line = markerLineOf(snap);
+    if (!line.startsWith('[...truncated ') || !line.endsWith(']')) continue;
+
+    // Holds for EVERY budget, not just the top rung: the false pointer is
+    // forbidden all the way down the ladder.
+    assert.ok(
+      !line.includes(PROJECTION_COMMAND),
+      `budget=${budget} emitted the projection command on a monolith marker: ${line}`,
+    );
+
+    if (line.includes(' — see "') && line.includes('.gsd/LEDGER.md')) seen.absolute++;
+    else if (line.includes(' — see .gsd/LEDGER.md')) seen.relative++;
+    else if (!line.includes(' — see ')) seen.bare++;
+    else assert.fail(`budget=${budget} emitted an unclassifiable monolith marker: ${line}`);
+  }
+
+  for (const rung of ['absolute', 'relative', 'bare']) {
+    assert.ok(seen[rung] > 0, `rung never observed across the budget sweep: ${rung} (seen=${JSON.stringify(seen)})`);
+  }
+});
+
+// D4/MEM003: the new ladder must respect the budget it is charged against —
+// covered by an assert over the whole sweep, never by a comment.
+test('countTokens(monolith snapshot) <= maxTokens across every budget, marker included', () => {
+  const cwd = seedMonolith('monolith-budget');
+  const ceiling = countTokens(projection.renderLedgerSnapshot(cwd, { maxTokens: 16000 }).markdown);
+  for (let budget = 2; budget <= ceiling + 20; budget += 1) {
+    const snap = projection.renderLedgerSnapshot(cwd, { maxTokens: budget });
+    assert.ok(
+      countTokens(snap.markdown) <= budget,
+      `budget=${budget} produced ${countTokens(snap.markdown)} tokens`,
+    );
+  }
 });
 
 test('a populated store never consults the stale monolith', () => {

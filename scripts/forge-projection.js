@@ -255,7 +255,15 @@ function snapshotPointer(value) {
 // `[...truncated ` family with forge-prompt.js and forge-tokens.js. The unit is
 // ENTRIES, never sections — the builder is the only place that knows how many
 // whole entries it dropped (S02 W1).
-function snapshotMarkerBuilders(cwd) {
+// The pointer differs BY ORIGIN because it has to lead to the entries that were
+// actually counted. When the snapshot came from the monolith, the fragment store
+// is empty, so `--render ledger` against that same cwd renders an empty ledger —
+// a pointer that denies the entries the marker just counted (PR #87 F1). The
+// monolith case therefore points at .gsd/LEDGER.md, the file the entries came
+// from. `empty` never reaches here (renderLedgerSnapshot returns early), so no
+// third form exists. The invariant is held by the budget sweep in
+// scripts/forge-ledger-snapshot.test.js, not by this comment.
+function snapshotMarkerBuilders(cwd, source) {
   const pointer = snapshotPointer(cwd);
   const command = 'node scripts/forge-projection.js --render ledger';
   const noun = n => (n === 1 ? 'ledger entry' : 'ledger entries');
@@ -265,8 +273,16 @@ function snapshotMarkerBuilders(cwd) {
   // pasted. Double quotes are valid in POSIX sh and PowerShell alike. The
   // reserve in accumulateSnapshot is computed from these same builders, so the
   // two extra characters are budgeted for, never added after the fact.
-  if (pointer) builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command} --cwd "${pointer}"]`);
-  builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command}]`);
+  if (source === 'monolith') {
+    // Same three-rung shape, same decreasing information: absolute (resolvable
+    // from any cwd) → relative (resolvable inside the workspace) → bare.
+    const file = snapshotPointer(LEDGER_FILE);
+    if (pointer) builders.push(n => `[...truncated ${n} ${noun(n)} — see "${pointer}/${file}"]`);
+    builders.push(n => `[...truncated ${n} ${noun(n)} — see ${file}]`);
+  } else {
+    if (pointer) builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command} --cwd "${pointer}"]`);
+    builders.push(n => `[...truncated ${n} ${noun(n)} — see ${command}]`);
+  }
   builders.push(n => `[...truncated ${n} ${noun(n)}]`);
   return builders;
 }
@@ -275,9 +291,9 @@ function snapshotMarkerBuilders(cwd) {
 // space UP FRONT from the same budget it protects (MEM002). The reserve uses
 // the worst-case count (every entry omitted) so the marker finally emitted —
 // built from the real, smaller count — can only be shorter than budgeted for.
-function accumulateSnapshot(units, maxTokens, cwd) {
+function accumulateSnapshot(units, maxTokens, cwd, source) {
   const total = units.length;
-  const builders = snapshotMarkerBuilders(cwd);
+  const builders = snapshotMarkerBuilders(cwd, source);
   const build = builders.find(fn => countTokens(fn(total)) <= maxTokens) || null;
 
   const selected = [];
@@ -408,7 +424,9 @@ function renderLedgerSnapshot(cwd, options = {}) {
     return { markdown: LEDGER_SNAPSHOT_EMPTY, included_ids: [], omitted_count: 0, source };
   }
 
-  const result = accumulateSnapshot(units, maxTokens, cwd);
+  // `source` travels as a PARAMETER: the marker is built inside accumulateSnapshot,
+  // so the assignment below is an output field of the API, never the channel (D1).
+  const result = accumulateSnapshot(units, maxTokens, cwd, source);
   result.source = source;
   return result;
 }
