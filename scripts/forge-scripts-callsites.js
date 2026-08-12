@@ -4,16 +4,19 @@
 /*
  * In-process canonical-path guard.  It deliberately reads the filesystem
  * rather than grep: ignored files must not turn an incomplete census into a
- * clean verdict.  The seven families are separate because each exists for a
- * different reason: local script preference, installed script fallback,
- * aliases after resolution, the distinct shared suffix, POSIX wrappers,
- * Windows wrappers, and prose that would otherwise teach the retired path.
+ * clean verdict.  The eight families are separate because each exists for a
+ * different reason: seven prove the absence of retired script paths (local
+ * script preference, installed fallback, aliases, shared suffix, POSIX and
+ * Windows wrappers, and prose); prefs-path positively proves an approved
+ * prefs destination. Absence of the old path is not presence of the right one.
  */
 const fs = require('fs');
 const path = require('path');
 
-const CALL_SITE_FAMILIES = Object.freeze(['one-liner', 'bare-assign', 'aliased-var', 'shared-dir', 'bin-bash', 'bin-cmd', 'prose']);
-const SKIP_REASONS = Object.freeze({ EXTENSION_NOT_SCANNED: 'extension-not-scanned', UNREADABLE: 'unreadable', SELF_FIXTURE: 'self-fixture', ROOT_NOT_FOUND: 'root-not-found', NOT_A_SCRIPT: 'not-a-script' });
+const CALL_SITE_FAMILIES = Object.freeze(['one-liner', 'bare-assign', 'aliased-var', 'shared-dir', 'bin-bash', 'bin-cmd', 'prose', 'prefs-path']);
+const SKIP_REASONS = Object.freeze({ EXTENSION_NOT_SCANNED: 'extension-not-scanned', UNREADABLE: 'unreadable', SELF_FIXTURE: 'self-fixture', ROOT_NOT_FOUND: 'root-not-found', NOT_A_SCRIPT: 'not-a-script', AUTHORITY_UNAVAILABLE: 'authority-unavailable', PREFS_SHAPE_UNMEASURED: 'prefs-shape-unmeasured' });
+const SENTINEL_CWD = path.join(path.sep, 'forge-callsites-sentinel-cwd');
+const SENTINEL_HOME = path.join(path.sep, 'forge-callsites-sentinel-home');
 const DEFAULT_ROOTS = Object.freeze(['agents', 'commands', 'skills', 'shared', 'bin']);
 const SELF_FIXTURE_BASENAMES = new Set(['forge-scripts-callsites.js', 'forge-scripts-callsites.test.js']);
 const EXTENSIONS = new Set(['.md', '.cmd', '.bat', '.sh', '.bash', '.js']);
@@ -39,6 +42,19 @@ const LEGACY_PROSE = Object.freeze([
 ]);
 function isLegacyProse(line) { return LEGACY_PROSE.some((pattern) => pattern.test(line)); }
 function isLegacyLine(line) { return LEGACY_CALL_SITE.test(line) || isLegacyProse(line); }
+function isPrefsAssignment(line) { return /^[ \t]*[A-Z_]+="[^"]*forge-agent-prefs\.jsonc?"[ \t]*$/.test(line); }
+function preferenceDirectories() {
+  const candidates = require('./forge-home.js').resolvePreferencePaths(SENTINEL_CWD, { userHome: SENTINEL_HOME, env: {} }).jsoncCandidates;
+  return candidates.map((candidate) => path.relative(SENTINEL_HOME, path.dirname(candidate)).replace(/\\/g, '/'));
+}
+function preferenceDirectory(line) {
+  const value = line.match(/^[ \t]*[A-Z_]+="([^"]*)"[ \t]*$/)[1];
+  const suffix = value.replace(/\/forge-agent-prefs\.jsonc?$/, '');
+  if (suffix.startsWith('${FORGE_HOME:-$HOME/.forge-agent}')) return `.forge-agent${suffix.slice('${FORGE_HOME:-$HOME/.forge-agent}'.length)}`;
+  if (suffix.startsWith('$HOME/.claude')) return `.claude${suffix.slice('$HOME/.claude'.length)}`;
+  if (suffix.startsWith('~/.claude')) return `.claude${suffix.slice('~/.claude'.length)}`;
+  return null;
+}
 
 function isShellScript(file) {
   if (path.extname(file)) return EXTENSIONS.has(path.extname(file));
@@ -65,6 +81,7 @@ function familiesFor(file, text, root) {
   if (/\.md$/i.test(file) && /FORGE_SHARED_DIR=/.test(text)) out.push('shared-dir');
   if (rel.startsWith('bin/') && !/\.(cmd|bat)$/i.test(file)) out.push('bin-bash');
   if (/\.(cmd|bat)$/i.test(file)) out.push('bin-cmd');
+  if (text.split('\n').some(isPrefsAssignment)) out.push('prefs-path');
   return out;
 }
 function findingFamily(file, line) {
@@ -80,13 +97,25 @@ function findingFamily(file, line) {
 }
 function scan(options = {}) {
   const root = path.resolve(options.root || process.cwd()); const files = []; const skipped = [];
+  let approvedDirectories;
+  try { approvedDirectories = preferenceDirectories(); } catch (error) {
+    return { outcome: 'scan-failed', scanned: 0, counts_by_family: Object.fromEntries(CALL_SITE_FAMILIES.map((x) => [x, 0])), scanned_by_family: Object.fromEntries(CALL_SITE_FAMILIES.map((x) => [x, 0])), missing_families: CALL_SITE_FAMILIES, findings: [], skipped, unmeasured: [], reason: SKIP_REASONS.AUTHORITY_UNAVAILABLE, authority_error: error.message, prefs_path_scope: 'prefs-path measures destination directory, not candidate order; a wrapper that puts ~/.claude before canonical passes clean.' };
+  }
   for (const name of DEFAULT_ROOTS) walk(path.join(root, name), files, skipped);
   const counts_by_family = Object.fromEntries(CALL_SITE_FAMILIES.map((x) => [x, 0]));
-  const scanned_by_family = Object.fromEntries(CALL_SITE_FAMILIES.map((x) => [x, 0])); const findings = [];
+  const scanned_by_family = Object.fromEntries(CALL_SITE_FAMILIES.map((x) => [x, 0])); const findings = []; const unmeasured = [];
   for (const file of files) {
     let text; try { text = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'); } catch { skipped.push({ path: file, reason: SKIP_REASONS.UNREADABLE }); continue; }
     const families = familiesFor(file, text, root); for (const family of families) scanned_by_family[family]++;
     text.split('\n').forEach((line, index) => {
+      if (isPrefsAssignment(line)) {
+        const directory = preferenceDirectory(line);
+        if (directory === null) unmeasured.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, reason: SKIP_REASONS.PREFS_SHAPE_UNMEASURED });
+        else if (!approvedDirectories.includes(directory)) {
+          counts_by_family['prefs-path']++; findings.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, family: 'prefs-path', text: line.trim(), directory });
+        }
+        return;
+      }
       if (isLegacyLine(line)) {
         const family = findingFamily(file, line); counts_by_family[family]++; findings.push({ path: path.relative(root, file).replace(/\\/g, '/'), line: index + 1, family, text: line.trim() });
       }
@@ -94,7 +123,7 @@ function scan(options = {}) {
   }
   const missing = CALL_SITE_FAMILIES.filter((family) => scanned_by_family[family] === 0);
   const outcome = findings.length ? 'findings' : (files.length === 0 || missing.length ? 'scan-failed' : 'clean');
-  return { outcome, scanned: files.length, counts_by_family, scanned_by_family, missing_families: missing, findings, skipped };
+  return { outcome, scanned: files.length, counts_by_family, scanned_by_family, missing_families: missing, findings, skipped, unmeasured, prefs_path_scope: 'prefs-path measures destination directory, not candidate order; a wrapper that puts ~/.claude before canonical passes clean.' };
 }
 function parseArgs(argv) { const out = {}; for (let i = 0; i < argv.length; i++) { const arg = argv[i]; if (arg === '--check' || arg === '--json') continue; if (arg === '--root' || arg === '--cwd') out.root = argv[++i]; else throw new Error(`unknown argument: ${arg}`); } return out; }
 function run(argv = process.argv.slice(2), write = process.stdout.write.bind(process.stdout)) { try { const report = scan(parseArgs(argv)); write(`${JSON.stringify(report)}\n`); return report.outcome === 'clean' ? 0 : 2; } catch (error) { write(`${JSON.stringify({ outcome: 'scan-failed', error: error.message })}\n`); return 2; } }

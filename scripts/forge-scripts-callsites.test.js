@@ -20,12 +20,12 @@ function fixture() {
   fs.writeFileSync(path.join(root, 'commands', 'one.md'), 'FORGE_SCRIPTS_DIR=$([ -f scripts/a.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")\n');
   fs.writeFileSync(path.join(root, 'skills', 'bare.md'), 'FORGE_SCRIPTS_DIR="${FORGE_HOME:-$HOME/.forge-agent}/scripts"\nTOOL="$FORGE_SCRIPTS_DIR/a.js"\n');
   fs.writeFileSync(path.join(root, 'shared', 'shared.md'), 'FORGE_SHARED_DIR="${FORGE_HOME:-$HOME/.forge-agent}/shared"\n');
-  fs.writeFileSync(path.join(root, 'bin', 'run'), '#!/usr/bin/env bash\nENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/a.js"\n');
+  fs.writeFileSync(path.join(root, 'bin', 'run'), '#!/usr/bin/env bash\nENGINE="${FORGE_HOME:-$HOME/.forge-agent}/scripts/a.js"\nPREFS="${FORGE_HOME:-$HOME/.forge-agent}/forge-agent-prefs.jsonc"\n');
   fs.writeFileSync(path.join(root, 'bin', 'run.cmd'), 'set "FORGE_ROOT=%FORGE_HOME%"\r\nif not defined FORGE_ROOT set "FORGE_ROOT=%USERPROFILE%\\.forge-agent"\r\nset "ENGINE=%FORGE_ROOT%\\scripts\\a.js"\r\n');
   fs.writeFileSync(path.join(root, 'agents', 'prose.md'), 'The canonical chain uses Forge home.\n');
   return root;
 }
-const familyFile = { 'one-liner': ['commands/one.md', 'FORGE_SCRIPTS_DIR=$([ -f scripts/a.js ] && echo scripts || echo "~/.claude/scripts")'], 'bare-assign': ['skills/bare.md', 'FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"'], 'aliased-var': ['skills/bare.md', 'TOOL="$HOME/.claude/scripts/a.js"'], 'shared-dir': ['shared/shared.md', 'FORGE_SHARED_DIR="$HOME/.claude"'], 'bin-bash': ['bin/run', 'ENGINE="$HOME/.claude/scripts/a.js"'], 'bin-cmd': ['bin/run.cmd', 'set "ENGINE=%USERPROFILE%\\.claude\\scripts\\a.js"'], prose: ['agents/prose.md', 'The destination was ~/.claude/scripts.'] };
+const familyFile = { 'one-liner': ['commands/one.md', 'FORGE_SCRIPTS_DIR=$([ -f scripts/a.js ] && echo scripts || echo "~/.claude/scripts")'], 'bare-assign': ['skills/bare.md', 'FORGE_SCRIPTS_DIR="$HOME/.claude/scripts"'], 'aliased-var': ['skills/bare.md', 'TOOL="$HOME/.claude/scripts/a.js"'], 'shared-dir': ['shared/shared.md', 'FORGE_SHARED_DIR="$HOME/.claude"'], 'bin-bash': ['bin/run', 'ENGINE="$HOME/.claude/scripts/a.js"'], 'bin-cmd': ['bin/run.cmd', 'set "ENGINE=%USERPROFILE%\\.claude\\scripts\\a.js"'], prose: ['agents/prose.md', 'The destination was ~/.claude/scripts.'], 'prefs-path': ['bin/run', 'PREFS="${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.jsonc"'] };
 for (const [family, [relative, bad]] of Object.entries(familyFile)) test(`rejects ${family} with file and line`, () => {
   const root = fixture(); try { const file = path.join(root, relative); fs.appendFileSync(file, `\n${bad}\n`); const report = guard.scan({ root }); assert.strictEqual(report.outcome, 'findings'); const hit = report.findings.find((x) => x.family === family); assert(hit && hit.path === relative && hit.line > 0); fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(`\n${bad}\n`, '\n')); assert.strictEqual(guard.scan({ root }).outcome, 'clean'); } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -77,6 +77,52 @@ test('prose in bin/ is classified as prose, not bin-bash', () => {
     assert.strictEqual(report.findings[0].family, 'prose');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+test('prefs-path in bin is classified positively, not as bin-bash', () => {
+  const root = fixture();
+  try {
+    fs.appendFileSync(path.join(root, 'bin', 'run'), '\nPREFS="${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.jsonc"\n');
+    const report = guard.scan({ root });
+    assert.strictEqual(report.outcome, 'findings');
+    assert.strictEqual(report.findings[0].family, 'prefs-path');
+    assert.strictEqual(report.findings[0].directory, '.forge-agent/shared');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('prefs-path spares prose and the legitimate legacy fallback', () => {
+  const root = fixture();
+  try {
+    fs.appendFileSync(path.join(root, 'agents', 'prose.md'), '\n| `~/.claude/forge-agent-prefs.jsonc` | Global |\nPREFS="$HOME/.claude/forge-agent-prefs.jsonc"\n');
+    const report = guard.scan({ root });
+    assert.strictEqual(report.outcome, 'clean');
+    assert.strictEqual(report.counts_by_family['prefs-path'], 0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('unmeasured prefs shape is named, censused, and not a finding', () => {
+  const root = fixture();
+  try {
+    fs.appendFileSync(path.join(root, 'bin', 'run'), '\nPREFS="$XDG_CONFIG_HOME/forge-agent-prefs.jsonc"\n');
+    const report = guard.scan({ root });
+    assert.strictEqual(report.outcome, 'clean');
+    assert.strictEqual(report.scanned_by_family['prefs-path'], 1);
+    assert.deepStrictEqual(report.unmeasured, [{ path: 'bin/run', line: 5, reason: 'prefs-shape-unmeasured' }]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('authority loss is scan-failed, never clean', () => {
+  const home = require('./forge-home.js'); const original = home.resolvePreferencePaths;
+  home.resolvePreferencePaths = () => { throw new Error('authority unavailable for test'); };
+  const root = fixture();
+  try { const report = guard.scan({ root }); assert.strictEqual(report.outcome, 'scan-failed'); assert.strictEqual(report.reason, 'authority-unavailable'); } finally { home.resolvePreferencePaths = original; fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('prefs-path bite is proved by spawned CLI in both directions', () => {
+  const root = fixture(); const CLI = path.join(__dirname, 'forge-scripts-callsites.js');
+  const runCli = () => spawnSync(process.execPath, [CLI, '--root', root], { encoding: 'utf8' });
+  try {
+    let out = runCli(); assert.strictEqual(out.status, 0); assert.strictEqual(JSON.parse(out.stdout).outcome, 'clean');
+    const file = path.join(root, 'bin', 'run'); const good = fs.readFileSync(file, 'utf8');
+    fs.writeFileSync(file, good.replace('/forge-agent-prefs.jsonc', '/shared/forge-agent-prefs.jsonc'));
+    out = runCli(); const poisoned = JSON.parse(out.stdout); assert.strictEqual(out.status, 2); assert.strictEqual(poisoned.outcome, 'findings'); assert.strictEqual(poisoned.findings[0].family, 'prefs-path'); assert.strictEqual(poisoned.findings[0].directory, '.forge-agent/shared');
+    fs.writeFileSync(file, good); out = runCli(); assert.strictEqual(out.status, 0); assert.strictEqual(JSON.parse(out.stdout).outcome, 'clean');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 test('never says clean for an empty or incomplete census', () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-scripts-empty-')); try { assert.strictEqual(guard.scan({ root }).outcome, 'scan-failed'); fs.mkdirSync(path.join(root, 'agents')); fs.writeFileSync(path.join(root, 'agents', 'a.md'), 'x\n'); const report = guard.scan({ root }); assert.strictEqual(report.outcome, 'scan-failed'); assert(report.missing_families.includes('bin-cmd')); } finally { fs.rmSync(root, { recursive: true, force: true }); } });
 test('real markdown snippets resolve scripts and shared without legacy poison', () => {
   const scriptSource = fs.readFileSync(path.join(__dirname, '..', 'commands', 'forge-init.md'), 'utf8');
@@ -85,7 +131,9 @@ test('real markdown snippets resolve scripts and shared without legacy poison', 
   const sharedMatch = sharedSource.match(/FORGE_SHARED_DIR="\$\{FORGE_HOME:-\$HOME\/.forge-agent\}\/shared"/); assert(sharedMatch, 'real shared snippet');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-scripts-consumer-'));
   const home = path.join(root, 'home'); const override = path.join(root, 'override'); const marker = path.join(root, 'legacy-executed');
-  const writeProbe = (file, body) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`); };
+  // Without execute permission POSIX returns status 126, making each "must not execute"
+  // assertion vacuous; NTFS ignores this bit, so Windows cannot verify the fix.
+  const writeProbe = (file, body) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 }); fs.chmodSync(file, 0o755); };
   const run = (code, forgeHome) => spawnSync('bash', ['-c', code], { cwd: root, env: { ...process.env, HOME: home, FORGE_HOME: forgeHome, FORGE_POISON_MARKER: marker }, encoding: 'utf8' });
   try {
     for (const base of [path.join(home, '.forge-agent'), override]) {

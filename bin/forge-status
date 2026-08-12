@@ -17,8 +17,10 @@ if [ ! -f "$ENGINE" ]; then
   # the scaffold ships a COMMENTED repo_path hundreds of lines above the live
   # one, and the value is a JSON string. So: drop comment lines, keep the LAST
   # live assignment, strip quotes/commas.
-  PREFS="${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.jsonc"
-  [ -f "$PREFS" ] || PREFS="${FORGE_HOME:-$HOME/.forge-agent}/shared/forge-agent-prefs.json"
+  PREFS="${FORGE_HOME:-$HOME/.forge-agent}/forge-agent-prefs.jsonc"
+  [ -f "$PREFS" ] || PREFS="${FORGE_HOME:-$HOME/.forge-agent}/forge-agent-prefs.json"
+  [ -f "$PREFS" ] || PREFS="$HOME/.claude/forge-agent-prefs.jsonc"
+  [ -f "$PREFS" ] || PREFS="$HOME/.claude/forge-agent-prefs.json"
   if [ -f "$PREFS" ]; then
     REPO="$(sed 's/[[:space:]]*\/\/.*$//' "$PREFS" 2>/dev/null \
       | grep -E '^[[:space:]]*"repo_path"[[:space:]]*:' \
