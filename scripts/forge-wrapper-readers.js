@@ -43,6 +43,13 @@ const WRAPPER_DIR_READERS = Object.freeze([
     why: 'The explicit entry.isDirectory() filter intentionally limits this writer to loose wrapper directories; existing epoch.md containers are skipped rather than misread as wrappers.',
   },
   {
+    file: 'forge-gsd-census.js',
+    dirs: Object.freeze(['.gsd/milestones', '.gsd/tasks']),
+    evidence: 'forge-gsd-census.js:333-334 — census() calls walkTreeDirs(cwd, \'.gsd/milestones\') and walkTreeDirs(cwd, \'.gsd/tasks\'); walkTreeDirs:281 fs.readdirSync(parentAbs) and :287 if (!entry.isDirectory()) continue.',
+    verdict: 'breaks',
+    why: 'Both wrapper roots are enumerated directly (not below a caller-selected unit) and every non-directory entry is discarded, so an epoch.md container is dropped rather than parsed — the same shape as forge-status.js. The consequence is specific to this module: the census exists to prove no bytes were lost, so grouped milestone/task mass would silently vanish from trees.totals and a post-sweep compare would read as a shrink instead of a relocation.',
+  },
+  {
     file: 'forge-ids.js',
     dirs: Object.freeze(['.gsd/milestones', '.gsd/tasks']),
     evidence: 'forge-ids.js:249-280 — listExistingIds readdirSync(d) then reads grouped .md files with forge-grouped-file.readGroupedUnits().',
