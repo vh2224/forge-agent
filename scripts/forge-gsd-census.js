@@ -529,13 +529,64 @@ function compare(before, after) {
 }
 
 // ── writeCensus ──────────────────────────────────────────────────────────────
-// The ONLY write path in this module. Contained under cwd via isWithin — same
-// discipline as forge-memory-index.js writeIndex.
+// The ONLY write path in this module. Containment is TWO rungs, not one
+// (S04/R1, arbitrated at the milestone-final triage):
+//
+//   rung 1 — LEXICAL: `isWithin(root, outAbs)`. Cheap, catches `../escape.json`
+//     and absolute paths outside the root. Kept as the first gate.
+//   rung 2 — REAL: the nearest EXISTING ancestor of the output path (and the
+//     output path itself, when it already exists) is resolved with
+//     `fs.realpathSync` and re-checked against the REAL root. Without this,
+//     an existing directory under cwd that is a symlink/junction to somewhere
+//     else makes a lexically-contained value such as `link/report.json` pass
+//     rung 1 while `fs.writeFileSync` lands OUTSIDE the promised root — and
+//     possibly on top of an external file. Same realpath-vs-realpath
+//     discipline the walk already uses for its containment (module header).
+//
+// The check runs BEFORE `mkdirSync` and before any write: a refused output
+// path must leave the disk exactly as it was, with a NAMED reason.
+//
+// KNOWN SIBLING DIVERGENCE: forge-memory-index.js `writeIndex`
+// (scripts/forge-memory-index.js:855-863) still applies rung 1 only on its
+// `--out` path; its realpath re-check was deliberately scoped to untrusted
+// citation strings (S06 R6), not to `--out`. The two siblings follow
+// different rules from here on. Recorded, not silently unified.
+function nearestExistingDir(startAbs) {
+  let cur = startAbs;
+  for (;;) {
+    if (fs.existsSync(cur)) return cur;
+    const parent = path.dirname(cur);
+    if (parent === cur) return cur; // filesystem root: nothing left to climb.
+    cur = parent;
+  }
+}
+
 function writeCensus(result, cwd, outRel) {
   const root = path.resolve(cwd);
   const outAbs = path.resolve(root, outRel);
+  // rung 1 — lexical.
   if (!isWithin(root, outAbs)) {
     throw new Error(`--out escapes cwd: ${outRel}`);
+  }
+  // rung 2 — real. Resolve the deepest part of the path that actually exists
+  // (the file itself if present, otherwise its nearest existing ancestor) and
+  // compare real-against-real. An unresolvable root is not evidence of safety,
+  // so a realpath failure on the ROOT refuses the write too.
+  let realRoot;
+  try {
+    realRoot = fs.realpathSync(root);
+  } catch (e) {
+    throw new Error(`--out escapes cwd via unresolvable root: ${outRel} (${e.code || e.message})`);
+  }
+  const anchor = fs.existsSync(outAbs) ? outAbs : nearestExistingDir(path.dirname(outAbs));
+  let realAnchor;
+  try {
+    realAnchor = fs.realpathSync(anchor);
+  } catch (e) {
+    throw new Error(`--out escapes cwd via unresolvable path: ${outRel} (${e.code || e.message})`);
+  }
+  if (!isWithin(realRoot, realAnchor)) {
+    throw new Error(`--out escapes cwd via symlink: ${outRel} -> ${realAnchor}`);
   }
   fs.mkdirSync(path.dirname(outAbs), { recursive: true });
   fs.writeFileSync(outAbs, JSON.stringify(result) + '\n', 'utf8');

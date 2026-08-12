@@ -244,6 +244,61 @@ test('--out escapando cwd é recusado', () => {
   }
 });
 
+// S04/R1 — rung 2. The lexical guard above is necessary and NOT sufficient:
+// `link/report.json` is lexically contained, but if `link` is a junction to a
+// directory outside cwd the write lands outside the promised root. Junctions
+// need no privilege on Windows (proven by the R2 cycle tests), so this bites on
+// this host rather than skipping.
+test('--out lexicamente contido MAS através de junction/symlink para fora é recusado (S04/R1)', () => {
+  const root = mkFixture();
+  const outsideDir = mkFixture();
+  try {
+    // An external file that a successful escape would overwrite.
+    const victim = path.join(outsideDir, 'victim.json');
+    fs.writeFileSync(victim, 'ORIGINAL', 'utf8');
+
+    const linkPath = path.join(root, 'link');
+    if (!linkDir(outsideDir, linkPath)) {
+      console.log('      (skipped: directory link creation not permitted on this host)');
+      return;
+    }
+
+    const result = census(root, {});
+    let threw = false;
+    try {
+      writeCensus(result, root, 'link/victim.json');
+    } catch (e) {
+      threw = true;
+      assert(/escapes cwd via symlink/.test(e.message), `error must name the symlink escape, got: ${e.message}`);
+    }
+    assert(threw, 'writeCensus must REFUSE a lexically-contained path whose real parent is outside cwd');
+    assertEq(fs.readFileSync(victim, 'utf8'), 'ORIGINAL', 'the external file must be untouched');
+  } finally {
+    cleanup(root);
+    cleanup(outsideDir);
+  }
+});
+
+// Control: the guard must not be blind — a link to a directory INSIDE cwd is
+// legitimate containment and must still be allowed to write.
+test('--out através de link para diretório DENTRO do cwd continua permitido (rung 2 não é cego)', () => {
+  const root = mkFixture();
+  try {
+    const insideDir = path.join(root, 'reports');
+    fs.mkdirSync(insideDir, { recursive: true });
+    const linkPath = path.join(root, 'link');
+    if (!linkDir(insideDir, linkPath)) {
+      console.log('      (skipped: directory link creation not permitted on this host)');
+      return;
+    }
+    const result = census(root, {});
+    const info = writeCensus(result, root, 'link/ok.json');
+    assert(fs.existsSync(info.path), 'a contained link target must still be writable');
+  } finally {
+    cleanup(root);
+  }
+});
+
 // ── compare(): identical / changed ──────────────────────────────────────────
 
 test('compare(): store idêntico nos dois lados -> identical, listas vazias', () => {
