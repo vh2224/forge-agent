@@ -37,7 +37,7 @@
     {
       "source_id": "claude-instructions",
       "target": "project/CLAUDE.md",
-      "sha256": "386d6c6d5e8194572a9ef7a6c960257e58cc85ca7aae4b9ec5ed20fc859350d3"
+      "sha256": "07b327995c6ab29acdfdf2814ba8dd93a5a54abb958557a0c692a0b5e5c6b400"
     },
     {
       "source_id": "claude-settings",
