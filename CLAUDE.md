@@ -596,6 +596,54 @@ desfaz o container, não a mescla que já aconteceu na próxima escrita). `CURRE
 commit separado, porque é a última slice antes da PR e o bump é, na prática, irreversível.
 Containers `YYYY-QN` legados continuam **lidos**, nunca escritos ou migrados.
 
+### Worker truncado deixa de ser um ramo que não existe (Layer 0)
+
+Um subagente cuja mensagem final é cortada chega, a jusante, **byte a byte igual** a um que
+terminou: nos dois casos a chamada `Agent()` retornou. O bloco `---GSD-WORKER-RESULT---` é a única
+coisa que os separa — e ele está ausente exatamente no caso em que importa. O defeito não era uma
+heurística fraca: era a **ausência de ramo**. Um `grep` por tratamento de bloco faltante nos três
+orquestradores (`skills/forge-{auto,next,task}`) devolvia **zero**: o `Step 5. Process result`
+tratava `done`/`partial`/`blocked` e não tinha linha para "nenhum bloco". Sem ramo nomeado o modelo
+improvisa — numa sessão medida ele inventou um resume-por-`agentId` enquanto o trabalho de um
+executor de 17 min e 300k tokens estava **pronto no disco, não lido**. A improvisação não é o
+defeito; o ramo faltante é.
+
+**Layer 0** entra antes das três camadas existentes (Retry Handler / Failure Taxonomy / Node
+Repair), e a precedência é a justificativa: as três leem um sinal que o worker **emitiu**; um worker
+truncado não emitiu nenhum, então roteá-lo para qualquer uma delas é classificar um valor que
+ninguém leu. `scripts/forge-worker-result.js` decide por **marcador + enum de status**, e por mais
+nada — o **último** marcador vence (agentes citam o próprio template na prosa, e um placeholder
+`blocker: <description>` vazando do template citado vira uma objeção que o worker nunca reportou;
+o teste que prova isso precisou ser reescrito depois que um bite mostrou que asserir só sobre
+`status` não morde — a sobrescrita de chave concorda com as duas escolhas de marcador).
+**Deliberadamente não distinguido:** "o stream cortou" × "o agente esqueceu o bloco". O remédio é o
+mesmo, então um rótulo separando os dois compra zero decisão — e a única forma de adivinhá-lo é
+heurística de forma de prosa (cerca não fechada, sem pontuação final), o tipo de sinal confiante e
+não-medido que este repo já teve que apagar antes.
+
+A recuperação lê **o que o próprio worker escreveu**, nunca inventa: `worker-event` (a linha que o
+executor appenda em `{M###}-events.jsonl` **imediatamente antes** do bloco — mesmo precedente do
+salvage de `DEFENSE_FILE` em `shared/forge-review.md § Step 3`), ou `summary-file` **E**
+`plan-status: DONE` juntos — nunca um sozinho, porque um worker que fez só um está em voo.
+`vcs-delta` **nunca** decide: arquivo mudado significa que houve trabalho, não que a task concluiu;
+ele existe para separar "não fez nada" de "fez muito e perdemos o relatório", que é a diferença
+entre re-despachar barato e re-despachar por cima de trabalho vivo. `must_haves_status` **nunca** é
+sintetizado — é a alegação medida do worker sobre os próprios must-haves; ausente, fica ausente,
+para o verifier e a Layer 3 rodarem sobre evidência real. Piso anti-silêncio: as 4 sondas são
+sempre reportadas com desfecho do conjunto fechado `hit | miss | unavailable`, e `miss` (olhou, não
+achou) nunca colapsa em `unavailable` (não conseguiu olhar).
+
+**O hook parou de lavar o escape em sucesso.** `validateForgeSubagentResult` bloqueava o primeiro
+stop para pedir o re-emit e, no segundo passe (`stop_hook_active`), falhava aberto — correto, evita
+loop infinito — mas retornava **antes de computar `hasBlock`**, e o chamador gravava `status: 'done'`
+para um worker que nunca emitiu o contrato: a patologia "truncado é indistinguível de terminado",
+carimbada no artefato cuja função é distingui-los. Agora falha aberto **e diz o que houve**
+(`contract-missed`), e cada miss vira uma linha em `.gsd/forge/contract-miss.jsonl` com o `agent_id`
+— que é o único cabo para o resume. Nunca cria `.gsd/forge` num repo que não é Forge; silent-fail
+em tudo (MEM008). **Fronteira:** só o caminho Claude `Agent()`. O sidecar não precisa — o contrato
+dele é um JSON em disco e uma resposta cortada já aparece como `codex-invalid-json`, reason terminal
+com fallback existente; nada na máquina de estados do sidecar muda.
+
 ## Estado atual
 
 - **Milestone ativo:** — nenhum. **M018** (Sidecar multi-LLM autônomo via `codex app-server`) fechada, **mergeada na `master`** em `eaeb556` (fast-forward) e pushada para `origin/master`.

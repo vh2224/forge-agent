@@ -233,17 +233,32 @@ const RESULT_BLOCK_AGENTS = new Set([
 
 const validateForgeSubagentResult = (data) => {
   const agentType = String(data && data.agent_type || '');
-  if (!RESULT_BLOCK_AGENTS.has(agentType)) return { ok: true, reason: 'not-forge-worker' };
+  if (!RESULT_BLOCK_AGENTS.has(agentType)) {
+    return { ok: true, reason: 'not-forge-worker', tracked: false, hasBlock: null };
+  }
+
+  const message = String(data && data.last_assistant_message || '');
+  const hasBlock = message.includes('---GSD-WORKER-RESULT---');
 
   // Claude Code sets stop_hook_active on the continuation caused by a blocking
   // stop hook.  Fail open then, even if the worker ignored the feedback, so a
   // malformed model response can never create an infinite hook loop.
-  if (data && data.stop_hook_active === true) return { ok: true, reason: 'retry-escape' };
+  //
+  // Failing open is right; reporting the escape as success is not.  This branch
+  // used to return before `hasBlock` was ever computed, so the caller wrote
+  // `status: 'done'` for a worker that never emitted the contract — the very
+  // "a truncated agent is indistinguishable from a finished one" pathology,
+  // stamped into the artifact meant to tell them apart.  `hasBlock` now rides
+  // along on every return so the caller can fail open AND say what happened.
+  if (data && data.stop_hook_active === true) {
+    return { ok: true, reason: 'retry-escape', tracked: true, hasBlock };
+  }
 
-  const message = String(data && data.last_assistant_message || '');
-  if (!message.includes('---GSD-WORKER-RESULT---')) {
+  if (!hasBlock) {
     return {
       ok: false,
+      tracked: true,
+      hasBlock: false,
       // The wording matters more than it looks. The previous text said "only
       // inspect your current result and emit the missing structured block",
       // which a compliant agent obeys literally: it emits the result block
@@ -264,7 +279,36 @@ const validateForgeSubagentResult = (data) => {
     };
   }
 
-  return { ok: true, reason: 'valid' };
+  return { ok: true, reason: 'valid', tracked: true, hasBlock: true };
+};
+
+// Durable record of a worker that stopped without its contract.
+//
+// The blocking stdout above is transient: it goes to the subagent, never to the
+// orchestrator, and nothing survives the turn.  When the repair pass also comes
+// back without the block, the orchestrator is handed a truncated message and no
+// way to know a contract miss even happened — so it infers, and the inference is
+// where sessions start improvising.  One append-only line puts the fact
+// somewhere the model does not author.
+//
+// Silent-fail throughout (MEM008): a hook must never abort the tool call it
+// observes.  Never creates `.gsd/forge` — in a non-Forge repo there is nothing
+// to record and nothing to scaffold.
+const recordContractMiss = (cwd, data, missPhase, agentType) => {
+  try {
+    const forgeDir = path.join(cwd, '.gsd', 'forge');
+    if (!fs.existsSync(forgeDir)) return;
+    const message = String(data && data.last_assistant_message || '');
+    fs.appendFileSync(path.join(forgeDir, 'contract-miss.jsonl'), JSON.stringify({
+      ts        : new Date().toISOString(),
+      session_id: data && data.session_id ? String(data.session_id) : '',
+      agent_id  : data && data.agent_id ? String(data.agent_id) : '',
+      agent_type: agentType,
+      phase     : missPhase, // 'repair-requested' → blocked once | 'escaped' → failed open
+      chars     : message.length,
+      tail      : truncate(message.slice(-240), 240),
+    }) + '\n', 'utf8');
+  } catch { /* recording a miss must never become a second failure */ }
 };
 
 // ── Schema-mismatch guard helpers (SessionStart) ──────────────────────────────
@@ -401,7 +445,10 @@ process.stdin.on('end', () => {
       const durationMs = Date.now() - started;
 
       const contract = validateForgeSubagentResult(data);
+      const agentType = String(data && data.agent_type || existing.subagent_type || '');
+
       if (!contract.ok) {
+        recordContractMiss(cwd, data, 'repair-requested', agentType);
         fs.writeFileSync(liveFile, JSON.stringify({
           ...existing,
           status           : 'repairing-contract',
@@ -416,9 +463,15 @@ process.stdin.on('end', () => {
         return;
       }
 
+      // Failed open on the repair pass and STILL no contract.  The stop is
+      // allowed (no infinite loop), but it is not reported as `done`: the
+      // orchestrator's missing-result branch keys off exactly this distinction.
+      const escaped = contract.tracked === true && contract.hasBlock === false;
+      if (escaped) recordContractMiss(cwd, data, 'escaped', agentType);
+
       fs.writeFileSync(liveFile, JSON.stringify({
         ...existing,
-        status           : 'done',
+        status           : escaped ? 'contract-missed' : 'done',
         subagent_duration: durationMs,
         completed_at     : Date.now(),
       }), 'utf8');

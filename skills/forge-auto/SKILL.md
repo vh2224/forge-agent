@@ -1580,6 +1580,26 @@ fi
 - `status: done` → `TaskUpdate({ taskId: current_task_id, status: "completed" })`
 - `status: partial` or `status: blocked` → leave task as `in_progress` (shows it was interrupted)
 
+**5.0 — Contract miss gate (Layer 0), BEFORE any status parsing.** Never eyeball the return for a block; classify it:
+
+```bash
+CLASSIFY=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --classify --inline "$result")
+SHAPE=$(printf '%s' "$CLASSIFY" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).shape")
+```
+
+`SHAPE == complete` → fall through to the normal parse below, unchanged. Anything else (`absent` / `status-missing` / `empty`) → run the **recovery ladder** in `shared/forge-dispatch.md § Missing worker result (contract miss)`: salvage from disk → resume the same subagent (`SendMessage`, when present) → re-dispatch → `blocked`. That section is canonical for the ladder, the salvage bases, the repair wording and the `contract_miss` event; **do not restate any of them here**. Salvage invocation for this boundary:
+
+```bash
+SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
+  --unit "execute-task/{T##}" --plan "$PLAN_PATH" \
+  --summary "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-SUMMARY.md" \
+  --events "$WORKING_DIR/.gsd/milestones/{M###}/{M###}-events.jsonl" \
+  --events "$WORKING_DIR/.gsd/forge/events.jsonl" \
+  --code-dir "$CODE_DIR" --since "$START_SHA" --vcs "${DISPATCH_VCS:-git}")
+```
+
+A rung that yields a status hands back a `recovered.block` — parse **that** with the rows below and continue the loop normally; the run is not stopped for a contract miss that was recovered. **This gate never pauses to ask the user** (AUTONOMY RULE intact): every rung is mechanical, and rung 4 is the existing `blocked` path with its existing item capture. `agent_id` for the resume rung, when needed, comes from the last `phase: "escaped"` line in `.gsd/forge/contract-miss.jsonl`.
+
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping, then **immediately continue loop** (do NOT pause or ask user)
 - `status: partial` → write `continue.md`, update STATE, emit compact signal, **fire push (call-site 1):** use Push helper with message `"Forge {RUN_ID} travou — partial: {resumo do blocker}. Run pausado, requer ação manual."`, then **deactivate run NOW** (`node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}'` — see `## Deactivate auto-mode indicator`), **stop loop**

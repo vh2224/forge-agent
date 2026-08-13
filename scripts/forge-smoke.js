@@ -15650,6 +15650,104 @@ function smokeScriptsCallSitesCanonical() {
   pass('Section 104: canonical path guard is clean, census is non-silent, and registration is biting');
 }
 
+// ── Section 105: the contract-miss branch exists in all three orchestrators ──
+//
+// The defect this guards is an ABSENCE, which is the hardest kind to keep
+// fixed: before this work, grepping skills/forge-{auto,next,task} for missing
+// result-block handling returned nothing at all, so a truncated worker had no
+// named branch and the model improvised one at runtime. A guard on the canonical
+// prose alone would repeat the MEM002 / PR #77 mistake — shared/forge-dispatch.md
+// is the spec, but the SKILL.md files are what the orchestrator actually reads,
+// so both are asserted, and the classifier is exercised behaviorally so the
+// section can never go green over a wired-but-inert helper.
+function smokeContractMissBranch() {
+  process.stdout.write('\n▸ Section 105: contract-miss (Layer 0) branch wired in all three orchestrators\n');
+  const repoRoot = path.dirname(SCRIPTS);
+  const wr = require('./forge-worker-result.js');
+
+  // (a) canonical spec — the section, its ladder and its boundary.
+  const dispatch = readRepoText(path.join(repoRoot, 'shared', 'forge-dispatch.md'));
+  assert(dispatch.includes('## Missing worker result (contract miss)'),
+    '(a) shared/forge-dispatch.md carries the canonical § Missing worker result (contract miss)');
+  const section = dispatch.slice(dispatch.indexOf('## Missing worker result (contract miss)'),
+    dispatch.indexOf('## Node Repair'));
+  for (const rung of ['worker-event', 'summary-file', 'plan-status', 'vcs-delta']) {
+    assert(section.includes(rung), `(a) the canonical section names the ${rung} probe`);
+  }
+  assert(/never carries a verdict/i.test(section),
+    '(a) the canonical section states that the VCS delta alone never carries a verdict');
+  assert(/must_haves_status`?\*{0,2}\s+is never synthesized/i.test(section),
+    '(a) the canonical section forbids synthesizing must_haves_status');
+  assert(/codex-invalid-json/.test(section),
+    '(a) the canonical section names the sidecar boundary rather than leaving it implied');
+
+  // (b) Layer 0 is in the precedence table — otherwise the ladder is a section
+  //     nothing routes into.
+  assert(/\|\s*\*\*0\*\*\s*\|\s*Missing Result Contract\s*\|/.test(dispatch),
+    '(b) the recovery-layer precedence table carries the Layer 0 row');
+
+  // (c) executable surfaces — all three skills classify BEFORE parsing status.
+  //     The call sites are shell lines, so the script name is followed by a
+  //     closing quote before the flag: anchoring on the bare `script --flag`
+  //     string matches nothing. That is not a nit — the first run of this
+  //     section failed on exactly that, which is the section doing its job on
+  //     itself before it ever guarded the feature.
+  const CLASSIFY_CALL = /forge-worker-result\.js"?\s+--classify/;
+  const SALVAGE_CALL = /forge-worker-result\.js"?\s+--salvage/;
+  for (const skill of ['forge-auto', 'forge-next', 'forge-task']) {
+    const text = readRepoText(path.join(repoRoot, 'skills', skill, 'SKILL.md'));
+    assert(CLASSIFY_CALL.test(text),
+      `(c) skills/${skill}/SKILL.md classifies the return before parsing it`);
+    assert(SALVAGE_CALL.test(text),
+      `(c) skills/${skill}/SKILL.md invokes the disk salvage`);
+    assert(text.includes('§ Missing worker result (contract miss)'),
+      `(c) skills/${skill}/SKILL.md names the canonical section instead of restating the ladder`);
+    const classifyAt = text.search(CLASSIFY_CALL);
+    const parseAt = text.search(/Parse the `---GSD-WORKER-RESULT---` block:|\*\*Process result:\*\*/);
+    assert(classifyAt !== -1 && parseAt !== -1 && classifyAt < parseAt,
+      `(c) skills/${skill}/SKILL.md runs the gate BEFORE the status parse — a Layer 0 that fires after Layer 2 read the status is inert`);
+  }
+
+  // (d) behavioral floor — the classifier separates the two returns that the
+  //     whole layer exists to tell apart, with the positive control first so
+  //     the negative assert is never blind.
+  const complete = wr.classifyReturn('did the work\n\n---GSD-WORKER-RESULT---\nstatus: done\nsummary: x\n');
+  assert(complete.shape === 'complete' && complete.status === 'done',
+    '(d control) positive control — a well-formed return still classifies as complete');
+  const truncated = wr.classifyReturn('Implemented T05, ran the gate, and then the message stops mid-sen');
+  assert(truncated.shape === 'absent' && truncated.status === null,
+    '(d) a truncated return does NOT resolve to a status');
+  const cutBlock = wr.classifyReturn('narration\n---GSD-WORKER-RESULT---\nunit_type: execute-ta');
+  assert(cutBlock.shape === 'status-missing',
+    '(d) a block cut before its status is status-missing, not a verdict');
+
+  // (e) salvage never invents: zero inputs yields a named reason and a full
+  //     probe census, never a bare empty object that reads like "all clear".
+  const empty = wr.salvageUnit({ unit: 'execute-task/T05' });
+  assert(empty.recovered === null && empty.reason === 'no-evidence',
+    '(e) a salvage with nothing to read recovers nothing and names why');
+  assert(empty.probes.length === 4 && empty.probes.every(p => ['hit', 'miss', 'unavailable'].includes(p.outcome)),
+    '(e) every probe is reported with a closed-set outcome — a report of only its hits is indistinguishable from one that never ran');
+
+  // (f) the hook stops laundering a failed-open escape into `done`.
+  const hook = readRepoText(path.join(SCRIPTS, 'forge-hook.js'));
+  assert(hook.includes('contract-miss.jsonl'),
+    '(f) forge-hook.js records the contract miss durably');
+  assert(/status\s*:\s*escaped\s*\?\s*'contract-missed'\s*:\s*'done'/.test(hook),
+    '(f) the SubagentStop escape path writes contract-missed, not done');
+
+  // (g) registered in main().
+  const source = fs.readFileSync(__filename, 'utf8');
+  const mainBody = source.slice(source.lastIndexOf('async function main()'));
+  assert(/\(\) => \{ smokeContractMissBranch\(\); \}/.test(mainBody), '(g) Section 105 is registered in main()');
+
+  pass('(final) Section 105: the Layer 0 contract-miss branch is canonical in shared/forge-dispatch.md (ladder, probe '
+    + 'names, the vcs-delta-never-decides rule and the sidecar boundary), sits in the recovery-layer precedence table, '
+    + 'and is wired BEFORE the status parse in all three orchestrator skills; the classifier separates a truncated '
+    + 'return from a complete one behaviorally, the salvage names its nothing instead of returning a silent empty, and '
+    + 'the SubagentStop escape no longer reports a contract-less worker as done');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -15769,6 +15867,7 @@ async function main() {
       () => { smokeLedgerSnapshotRendered(); },
       () => { smokeMemoryIndexCommandRendered(); },
       () => { smokeScriptsCallSitesCanonical(); },
+      () => { smokeContractMissBranch(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {

@@ -89,6 +89,70 @@ try {
     assert.strictEqual(output, '');
   });
 
+  // ── Failing open is not the same as succeeding ─────────────────────────────
+  // The escape hatch must stay (no infinite hook loop), but a worker that never
+  // emitted its contract must not be recorded as `done`: that stamps "finished"
+  // onto the artifact whose whole job is to tell finished from truncated.
+
+  const liveFile = path.join(os.tmpdir(), `forge-live-subagent-stop-test-${process.pid}.json`);
+  const missFile = path.join(cwd, '.gsd', 'forge', 'contract-miss.jsonl');
+  const readLive = () => JSON.parse(fs.readFileSync(liveFile, 'utf8'));
+  const readMisses = () => fs.readFileSync(missFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+
+  test('no .gsd/forge → nothing is recorded and no directory is scaffolded', () => {
+    run({ agent_type: 'forge-executor', stop_hook_active: true, last_assistant_message: 'cut off' });
+    assert.strictEqual(fs.existsSync(path.join(cwd, '.gsd')), false,
+      'the hook created .gsd in a repo that is not a Forge project');
+  });
+
+  fs.mkdirSync(path.join(cwd, '.gsd', 'forge'), { recursive: true });
+
+  test('the escape pass records `contract-missed`, not `done`', () => {
+    const output = run({
+      agent_type: 'forge-executor',
+      agent_id: 'a4e38a47da744d58b',
+      stop_hook_active: true,
+      last_assistant_message: 'Implemented T05 and then the message stops mid-sen',
+    });
+    assert.strictEqual(output, '', 'the escape must still fail open');
+    assert.strictEqual(readLive().status, 'contract-missed');
+
+    const misses = readMisses();
+    const last = misses[misses.length - 1];
+    assert.strictEqual(last.phase, 'escaped');
+    assert.strictEqual(last.agent_type, 'forge-executor');
+    assert.strictEqual(last.agent_id, 'a4e38a47da744d58b',
+      'the agent id is the only handle on a resume — it must survive');
+    assert.ok(last.tail.endsWith('mid-sen'), 'the tail must show where the message stopped');
+  });
+
+  test('the first (blocking) pass is recorded too, under its own phase', () => {
+    const before = readMisses().length;
+    run({ agent_type: 'forge-planner', stop_hook_active: false, last_assistant_message: 'no block' });
+    const misses = readMisses();
+    assert.strictEqual(misses.length, before + 1);
+    assert.strictEqual(misses[misses.length - 1].phase, 'repair-requested');
+  });
+
+  test('an escape whose worker DID emit the block is a plain `done`', () => {
+    const before = readMisses().length;
+    run({
+      agent_type: 'forge-executor',
+      stop_hook_active: true,
+      last_assistant_message: 'fixed it\n---GSD-WORKER-RESULT---\nstatus: done',
+    });
+    assert.strictEqual(readLive().status, 'done');
+    assert.strictEqual(readMisses().length, before, 'a repaired worker was recorded as a miss');
+  });
+
+  test('agents outside the contract set are never recorded as missing it', () => {
+    const before = readMisses().length;
+    run({ agent_type: 'forge-memory', stop_hook_active: true, last_assistant_message: '' });
+    run({ agent_type: 'code-reviewer', stop_hook_active: true, last_assistant_message: '' });
+    assert.strictEqual(readLive().status, 'done');
+    assert.strictEqual(readMisses().length, before);
+  });
+
   process.stdout.write(`\n${passed} passed, 0 failed\n`);
 } finally {
   fs.rmSync(cwd, { recursive: true, force: true });

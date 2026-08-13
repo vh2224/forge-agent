@@ -1197,6 +1197,25 @@ DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd
 echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/{TASK_ID}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"claude\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"milestone\":\"\",\"input_tokens\":${INPUT_TOKENS:-0},\"output_tokens\":${OUTPUT_TOKENS:-0},\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-git}\",\"transport\":\"in-process\"}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
 ```
 
+**Contract miss gate (Layer 0) — BEFORE parsing any status.** Classify the return rather than eyeballing it:
+
+```bash
+CLASSIFY=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --classify --inline "$result")
+SHAPE=$(printf '%s' "$CLASSIFY" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).shape")
+```
+
+`SHAPE == complete` → fall through unchanged. Anything else → the **recovery ladder** in `shared/forge-dispatch.md § Missing worker result (contract miss)`, canonical for the ladder, the salvage bases, the repair wording and the `contract_miss` event. A loose task has no slice tree, so the salvage points at the task dir and there is no per-milestone events file:
+
+```bash
+SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
+  --unit "execute-task/{TASK_ID}" --plan "$PLAN_PATH" \
+  --summary "$WORKING_DIR/.gsd/tasks/{TASK_ID}/{TASK_ID}-SUMMARY.md" \
+  --events "$WORKING_DIR/.gsd/forge/events.jsonl" \
+  --code-dir "${CODE_DIR:-$WORKING_DIR}" --since "$START_SHA" --vcs "${DISPATCH_VCS:-git}")
+```
+
+The `summary-file` + `plan-status` rung still applies here even though this skill does **not** stamp `status: DONE` on the sidecar path (see step 6 above): the rung reads whatever the *Claude* worker wrote, and a plan without the field simply makes that probe a `miss` with a named detail — never a false verdict. `/forge-task` is always interactive, so rung 4 (`blocked`) shows the operator the salvage census verbatim.
+
 **Process result:**
 - `status: done` → `TaskUpdate({ status: "completed" })`, proceed to post-task
 - `status: partial` → `TaskUpdate` left in_progress, emit compact signal, deactivate run, stop:

@@ -2345,6 +2345,87 @@ A worker that routes verification failures through the Retry Handler risks infin
 
 ---
 
+## Missing worker result (contract miss)
+
+**Purpose:** Layer 0 — the branch for `Agent()` returning **without** a parseable `---GSD-WORKER-RESULT---` block. A worker whose final message was cut off arrives, downstream, byte-for-byte identical to one that finished: the tool call returned either way. The result block is the only thing separating them, and it is absent in exactly the case where it matters.
+
+**Measured origin.** This section exists because the branch did not. Grepping the three orchestrator skills for missing-block handling returned nothing: `Step 5. Process result` parsed `done` / `partial` / `blocked` and had no row for "no block at all". With no named branch the model improvises — an observed session invented an ad-hoc resume-by-`agentId` while a 17-minute, 300k-token executor's finished work sat on disk, unread. The improvisation is not the defect; the missing branch is.
+
+### Detection (deterministic — never a prose heuristic)
+
+```bash
+CLASSIFY=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --classify --file "$RETURN_FILE")
+SHAPE=$(printf '%s' "$CLASSIFY" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).shape")
+```
+
+| `shape` | Meaning | Route |
+|---------|---------|-------|
+| `complete` | Marker present, `status` in the closed enum | Normal path — Layer 0 does not fire |
+| `status-missing` | Marker present, no status in the enum (the block itself was cut) | Layer 0 |
+| `absent` | No marker anywhere in the return | Layer 0 |
+| `empty` | No non-whitespace return at all | Layer 0 |
+
+The **last** marker wins: agent instructions quote the literal marker in their own prose, and a worker restating its template would otherwise hand the orchestrator the template's placeholders as its verdict.
+
+**Deliberately not distinguished: "the stream was cut" vs "the agent forgot the block".** Both have the same remedy, so a label separating them buys no decision — and the only way to guess it is a prose-shape heuristic (unclosed fence, no terminal punctuation) that would be confident and unmeasured. The classifier reads the marker and the status enum, and nothing else about the text.
+
+**Second signal, model-independent:** `scripts/forge-hook.js` (SubagentStop) appends one line per contract miss to `.gsd/forge/contract-miss.jsonl` — `phase: "repair-requested"` when it blocked the stop to ask for a re-emit, `phase: "escaped"` when the repair pass also came back without the block and the hook failed open. The `escaped` line carries the `agent_id`, which is the handle rung 2 below needs. The hook records `status: "contract-missed"` (not `done`) in the live file on that path: failing open is correct, reporting the escape as success is not.
+
+### Recovery ladder
+
+Each rung is tried in order; the first that yields a status wins, and the run rejoins the normal path at whatever layer that status selects. **No rung fabricates a status** — each one reads it off something the worker itself wrote.
+
+1. **Salvage from disk.** Cheapest and most often decisive, because the executor's last acts before returning the block are writes:
+
+   ```bash
+   SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
+     --unit "execute-task/{T##}" \
+     --plan "$PLAN_PATH" --summary "$SUMMARY_PATH" \
+     --events "$WORKING_DIR/.gsd/milestones/{M###}/{M###}-events.jsonl" \
+     --events "$WORKING_DIR/.gsd/forge/events.jsonl" \
+     --code-dir "$CODE_DIR" --since "$START_SHA" --vcs "$DISPATCH_VCS")
+   ```
+
+   Two bases can carry a verdict, and only these two:
+   - **`worker-event`** — the worker's own `{M###}-events.jsonl` line for this unit, appended immediately *before* the result block (`agents/forge-executor.md`). It carries the worker's status and one-liner in its own words. Same precedent as `shared/forge-review.md § Step 3 → Salvage before declaring unavailability`, which recovers advocate verdicts from `DEFENSE_FILE`: using the agent's own writing is recovery, not fabrication.
+   - **`summary-file` + `plan-status: DONE`** — **both**, never either alone. Writing `T##-SUMMARY.md` and stamping the plan `DONE` are the executor's last two steps; a worker that did both reached its conclusion, and a worker that did one is mid-flight.
+
+   **`vcs-delta` never carries a verdict.** Changed files mean work happened, not that the task concluded. It exists to tell "the worker did nothing" from "the worker did a lot and we lost the report" — which is the difference between re-dispatching cheaply and re-dispatching over live work.
+
+   **`must_haves_status` is never synthesized.** It is the worker's measured claim about its own must-haves; absent, it stays absent, so the verifier and Layer 3 run against real evidence rather than a value the salvage invented. A recovered block carries `salvaged: true` and `salvage_basis: <probe names>` so every downstream reader can tell it apart from a worker-authored one.
+
+   **Anti-silence floor:** the report always lists all four probes with an outcome from the closed set `hit | miss | unavailable`. `miss` (looked, found nothing) and `unavailable` (could not look) never collapse into each other, and a report that listed only its hits would be indistinguishable from one whose probes never ran.
+
+2. **Resume the same subagent.** Only when salvage returned `recovered: null` **and** `SendMessage` is present in the orchestrator's own tool list **and** an `agent_id` is known (from the `escaped` line in `contract-miss.jsonl`, or from the tool result). Resume with the § *repair wording* below. This preserves the worker's whole context — the alternative re-runs 15–30 minutes of tool calls to recover one block. Claude Code exposes `SendMessage` only under `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`; Forge never sets that flag itself, so this rung is **frequently unavailable by design** and its absence is a skip, never an error.
+
+3. **Re-dispatch.** Only when rungs 1 and 2 both came up empty **and** the `vcs-delta` probe was a `miss` — re-running a worker over its own uncommitted output risks conflicting with live work. Counts against `repair.budget`, same as a Layer 3 RETRY.
+
+4. **`blocked`.** Nothing recovered. Emit `status: blocked` with `blocker_class: tooling_failure` and `blocker: contract-miss — <shape>, salvage reason <reason>, <n> path(s) changed since baseline`, capture a work-item per `shared/forge-review.md § Item capture`, and follow the normal blocked path. The salvage census goes into the item body verbatim: the operator needs to know what was looked for, not just that it failed.
+
+### Repair wording (rungs 2 and 3)
+
+Ask for the **complete** answer, and forbid only the expensive part:
+
+> Re-emit your COMPLETE final answer in ONE message: every inline deliverable your agent instructions require, followed by the `---GSD-WORKER-RESULT---` block. Do not re-run tools or redo investigation — restate the conclusions you already reached. A message containing only the result block discards your work: the orchestrator reads this message and nothing else.
+
+Wording is load-bearing and the failure it avoids was measured. An earlier version said "emit the missing structured block", which a compliant agent obeys literally — it emits the block **alone**. For agents whose deliverable is inline prose in that same message (`forge-advocate` verdicts, `forge-reviewer` findings), the orchestrator then reads a scoreboard with the payload stripped off. M018 lost six advocate defenses that way, three returning exactly `refuted=3 conceded=2 open=1` and nothing else. Keep the two clauses together: *complete answer* **and** *no re-running tools*.
+
+### Events
+
+Append one `contract_miss` line to `events.jsonl` per Layer 0 entry, whatever the outcome:
+
+```json
+{"ts":"{ISO8601}","event":"contract_miss","unit":"{unit_type}/{unit_id}","shape":"absent|status-missing|empty","rung":"salvage|resume|redispatch|blocked","basis":"worker-event","salvage_reason":null,"milestone":"{M###}"}
+```
+
+Emitted on **every** outcome including a clean salvage. A layer that only logs its failures reports a silence indistinguishable from never having run — the defect this section was written to remove.
+
+### Boundary
+
+Layer 0 governs the **Claude `Agent()`** path only. The sidecar (`dispatch_engine: codex`) does not need it: its contract is a JSON file on disk, and a truncated adapter answer surfaces as the already-named terminal reason `codex-invalid-json`, which routes to the existing fallback. Nothing in the sidecar state machine changes.
+
+---
+
 ## Node Repair
 
 **Purpose:** Third recovery layer — acts after a worker returns `status: done` but post-verification signals indicate must_haves were not satisfied, or after a worker returns `status: partial` with unmet must_haves. Unlike the Retry Handler (Layer 1, `Agent()` exceptions) and the Failure Taxonomy (Layer 2, `status: blocked`), Node Repair targets **verification-signal failures**: cases where the worker claimed success but structured evidence (verifier rows, test-quality flags, symbol-check) contradicts it. The orchestrator classifies the failure shape into one of three strategies (RETRY / DECOMPOSE / PRUNE) and re-routes accordingly — or falls back to the existing `blocked → human` path when the budget is exhausted or the shape is unrecognised.
@@ -2357,12 +2438,14 @@ The three recovery layers are **mutually exclusive**. Every failure enters exact
 
 | Layer | Name | Trigger signal | Mechanism | Reference |
 |-------|------|---------------|-----------|-----------|
+| **0** | Missing Result Contract | `Agent()` **returns** without a parseable `---GSD-WORKER-RESULT---` block | `forge-worker-result.js --classify` → `--salvage` → resume → re-dispatch → `blocked` | `§ Missing worker result (contract miss)` below |
 | **1** | Retry Handler | `Agent()` **throws** (network/rate-limit/server/stream) | `forge-classify-error.js` → backoff + re-dispatch (max `retry.max_transient_retries`) | `§ Retry Handler` above |
 | **2** | Failure Taxonomy | Worker returns `status: blocked` | `blocker_class` table → auto-recovery (`context_overflow`→opus model, `model_refusal`→alternate model, others→stop) | `skills/forge-auto § Failure Taxonomy` |
 | **3** | Node Repair | Worker returns `status: done` **and** verification signals must_have failures **OR** `status: partial` with unmet must_haves | `forge-repair.js --classify` → RETRY \| DECOMPOSE \| PRUNE \| `blocked` | This section + T02 |
 
 **Absolute precedence rules:**
 
+0. If `Agent()` returns and the return carries no parseable status → **Layer 0 only**, and it runs **before** every other layer. Layers 1–3 all key off a signal the worker emitted; a truncated worker emitted none, so routing it into any of them means classifying a value that was never read. Layer 0 either produces a status (from salvage or resume) — after which the normal path resumes at whichever layer that status selects — or it declares `blocked`.
 1. If `Agent()` throws → Layer 1 only. Never reaches Layer 2 or 3.
 2. If worker returns `status: blocked` → Layer 2 only. Never reaches Layer 1 or 3.
 3. If worker returns `status: done` or `status: partial` → verification gate runs. If signals show must_have drift → Layer 3 only. The Retry Handler never sees verification results (Anti-recursion rule above).

@@ -1301,6 +1301,26 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\"
 - `status: done` → `TaskUpdate({ taskId: current_task_id, status: "completed" })`
 - `status: partial` or `status: blocked` → leave task as `in_progress` (shows it was interrupted)
 
+**5.0 — Contract miss gate (Layer 0), BEFORE any status parsing.** Classify the return instead of eyeballing it for a block:
+
+```bash
+CLASSIFY=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --classify --inline "$result")
+SHAPE=$(printf '%s' "$CLASSIFY" | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).shape")
+```
+
+`SHAPE == complete` → fall through unchanged. Anything else (`absent` / `status-missing` / `empty`) → run the **recovery ladder** in `shared/forge-dispatch.md § Missing worker result (contract miss)` — canonical for the ladder, the salvage bases, the repair wording and the `contract_miss` event; do not restate them here:
+
+```bash
+SALVAGE=$(node "$FORGE_SCRIPTS_DIR/forge-worker-result.js" --salvage \
+  --unit "execute-task/{T##}" --plan "$PLAN_PATH" \
+  --summary "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-SUMMARY.md" \
+  --events "$WORKING_DIR/.gsd/milestones/{M###}/{M###}-events.jsonl" \
+  --events "$WORKING_DIR/.gsd/forge/events.jsonl" \
+  --code-dir "$CODE_DIR" --since "$START_SHA" --vcs "${DISPATCH_VCS:-git}")
+```
+
+A rung that yields a status hands back a `recovered.block` — parse **that** with the rows below. `/forge-next` is always `MODE = interactive`, so when the ladder reaches rung 4 (`blocked`), show the operator the salvage census verbatim before surfacing: what was probed and what each probe found is the actionable part, not the verdict alone.
+
 Parse the `---GSD-WORKER-RESULT---` block:
 - `status: done` → proceed to post-unit housekeeping
 - `status: partial` → write `continue.md`, update STATE, emit compact signal, stop
