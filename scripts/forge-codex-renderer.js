@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { resolveForgePaths } = require('./forge-home');
 const sourceManifest = require('./forge-source-manifest');
+const ownership = require('./forge-projection-ownership');
 const { VERSION } = require('./forge-version');
 
 const RUNTIME = 'codex';
@@ -111,14 +112,27 @@ function render(options = {}) {
 }
 function write(options = {}) {
   const report = render(options); const written = []; const preserved = []; const conflicts = [];
+  // Same ownership rule as the Claude renderer, from the same module. This host
+  // projects `capabilities.json`, a format that can never carry a marker — so
+  // without the digest rung that file froze on first divergence exactly like the
+  // Claude-side JSON did, and each run reported success over it.
+  const recorded = (options.ownership && typeof options.ownership === 'object') ? options.ownership : {};
   for (const artifact of report.artifacts) {
     const current = exists(artifact.destination) ? fs.readFileSync(artifact.destination, 'utf8') : null;
     if (current !== null && norm(current) === artifact.content) { preserved.push({ ...artifact, reason: 'already-current' }); continue; }
-    if (current !== null && !hasOrigin(current)) { preserved.push({ ...artifact, reason: REASON.user_owned }); conflicts.push({ destination: artifact.destination, reason: REASON.user_owned }); continue; }
+    const verdict = ownership.decide({
+      current,
+      recordedDigest: recorded[ownership.keyFor(artifact.destination)],
+      markerPresent: current !== null && hasOrigin(current),
+      migrateLegacy: Boolean(options.update && options.migrateLegacy),
+    });
+    if (!verdict.ours) { preserved.push({ ...artifact, reason: REASON.user_owned }); conflicts.push({ destination: artifact.destination, reason: REASON.user_owned }); continue; }
     if (options.dryRun) { written.push({ ...artifact, dry_run: true }); continue; }
     fs.mkdirSync(path.dirname(artifact.destination), { recursive: true }); fs.writeFileSync(artifact.destination, artifact.content, 'utf8'); written.push(artifact);
   }
-  return { ...report, written, preserved, conflicts, changed: written.some((item) => !item.dry_run), dry_run: Boolean(options.dryRun) };
+  const ownedNow = [...written, ...preserved.filter((item) => item.reason === 'already-current')];
+  const nextOwnership = { ...recorded, ...ownership.recordOf(ownedNow) };
+  return { ...report, written, preserved, conflicts, ownership: options.dryRun ? recorded : nextOwnership, changed: written.some((item) => !item.dry_run), dry_run: Boolean(options.dryRun) };
 }
 function parseArgs(argv = process.argv.slice(2)) { const out = { repo: path.resolve(__dirname, '..') }; for (let i = 0; i < argv.length; i++) { const arg = argv[i]; if (arg === '--repo') out.repo = argv[++i]; else if (arg === '--codex-home') out.codexHome = argv[++i]; else if (arg === '--forge-home') out.forgeHome = argv[++i]; else if (arg === '--project-root') out.projectRoot = argv[++i]; else if (arg === '--manifest') out.manifestFile = argv[++i]; else if (arg === '--dry-run') out.dryRun = true; else if (arg === '--json') out.json = true; else if (arg === '--help' || arg === '-h') out.help = true; else throw Object.assign(new Error(`opção desconhecida: ${arg}`), { code: REASON.invalid_options }); } return out; }
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), error = process.stderr.write.bind(process.stderr)) { try { const options = parseArgs(argv); if (options.help) { output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--dry-run] [--json]\n'); return 0; } const report = write(options); output(options.json ? `${JSON.stringify(report)}\n` : `Codex renderer ${VERSION}: ${report.written.length} written, ${report.preserved.length} preserved\n`); return 0; } catch (e) { error(`forge-codex-renderer: ${e.code || 'error'}: ${e.message}\n`); return 1; } }

@@ -270,6 +270,82 @@ try {
     fs.rmSync(home, { recursive: true, force: true });
   }
 
+  // ── The JSON freeze, reproduced and then removed ──────────────────────────
+  // JSON has no comment syntax, so a JSON projection can never carry the marker.
+  // Step (b) below reproduces the defect on purpose — without the ownership
+  // record the destination IS a conflict — so step (c) proves the fix against a
+  // demonstrated failure instead of asserting into a vacuum.
+  {
+    const root = fixtureRepo();
+    const home = temp('ownership-home');
+    const opts = { repo: root, projectRoot: root, claudeHome: home, forgeHome: path.join(home, 'forge') };
+    const schemaSource = path.join(root, 'forge-prefs.schema.json');
+    const schemaDest = path.join(home, 'forge-prefs.schema.json');
+    const isConflict = (report) => report.conflicts.some((item) => path.resolve(item.destination) === path.resolve(schemaDest));
+
+    // (a) fresh install writes it and hands back a record.
+    const first = renderer.write(opts);
+    assert(fs.existsSync(schemaDest), 'instalação limpa não projetou o schema JSON');
+    assert(first.ownership && first.ownership[path.resolve(schemaDest)],
+      '(a) write() não devolveu registro de propriedade para o destino JSON');
+    assert(!renderer.hasOriginMarker(fs.readFileSync(schemaDest, 'utf8')),
+      '(a) JSON ganhou marcador — se isso passar a existir, este bloco testa outra coisa');
+
+    // (b) the release changes the schema. WITHOUT the record this is the freeze.
+    fs.writeFileSync(schemaSource, '{"version":"segunda release"}\n', 'utf8');
+    assert(isConflict(renderer.write({ ...opts, update: true })),
+      '(b controle) sem registro o JSON deveria ser conflito — a reprodução do defeito falhou, então (c) não prova nada');
+    assert(!/segunda release/.test(fs.readFileSync(schemaDest, 'utf8')),
+      '(b controle) o destino foi atualizado sem registro — o defeito não existe como descrito');
+
+    // (c) THE FIX: with the record carried forward, the same update lands.
+    const second = renderer.write({ ...opts, update: true, ownership: first.ownership });
+    assert(!isConflict(second), '(c) JSON continua congelado mesmo com registro de propriedade');
+    assert.match(fs.readFileSync(schemaDest, 'utf8'), /segunda release/,
+      '(c) o destino JSON não foi atualizado — a projeção segue write-once');
+
+    // (d) the record follows the new bytes, so a third release also lands.
+    fs.writeFileSync(schemaSource, '{"version":"terceira release"}\n', 'utf8');
+    const third = renderer.write({ ...opts, update: true, ownership: second.ownership });
+    assert.match(fs.readFileSync(schemaDest, 'utf8'), /terceira release/,
+      '(d) o registro não acompanhou a escrita — só a primeira atualização funcionaria');
+    assert(!isConflict(third), '(d) terceira release virou conflito');
+
+    // (e) the guard still bites: an operator edit diverges from the record.
+    fs.writeFileSync(schemaDest, '{"version":"editado pelo operador"}\n', 'utf8');
+    fs.writeFileSync(schemaSource, '{"version":"quarta release"}\n', 'utf8');
+    assert(isConflict(renderer.write({ ...opts, update: true, ownership: third.ownership })),
+      '(e) arquivo divergente do registro deixou de ser conflito — o guard do operador morreu');
+    assert.match(fs.readFileSync(schemaDest, 'utf8'), /editado pelo operador/,
+      '(e) a edição do operador foi sobrescrita');
+
+    // (f) `already-current` must ENTER the record, not merely survive in it.
+    //     The case that matters is a destination that is byte-identical to what
+    //     we would write but has NO prior record — a reinstall over an existing
+    //     tree. Asserting with a record already in hand proves nothing: the
+    //     carry-forward spread would keep the entry even if already-current
+    //     files were dropped (verified — that version of this assert did not
+    //     bite). So: fresh home, file pre-created, EMPTY record.
+    const home2 = temp('ownership-already-current');
+    const opts2 = { repo: root, projectRoot: root, claudeHome: home2, forgeHome: path.join(home2, 'forge') };
+    const planned = renderer.render(opts2).artifacts.find((a) => a.destination.endsWith('forge-prefs.schema.json'));
+    fs.mkdirSync(path.dirname(planned.destination), { recursive: true });
+    fs.writeFileSync(planned.destination, planned.content, 'utf8');
+    const reinstall = renderer.write({ ...opts2, update: true, ownership: {} });
+    assert(reinstall.preserved.some((item) => item.destination === planned.destination && item.reason === 'already-current'),
+      '(f controle) o destino não foi classificado como already-current — o cenário não é o que este assert testa');
+    assert(reinstall.ownership[path.resolve(planned.destination)],
+      '(f) already-current não entrou no registro — na próxima release esse JSON não tem marcador nem digest e congela');
+    fs.rmSync(home2, { recursive: true, force: true });
+
+    // (g) a dry run must not record bytes it never wrote.
+    const dry = renderer.write({ ...opts, update: true, dryRun: true, ownership: {} });
+    assert.deepStrictEqual(dry.ownership, {},
+      '(g) dry-run registrou propriedade — a próxima execução acreditaria ser dona de algo que não escreveu');
+
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+
   console.log('forge-claude-renderer tests passed');
 } finally {
   cleanup();

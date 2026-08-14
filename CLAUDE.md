@@ -679,6 +679,34 @@ loop) em vez de ler o resumo. Agora cada preservado sai nomeado, separado por re
 conseguir carregá-lo** — e o formato que não consegue (JSON) tem que aparecer nomeado no relatório.
 Contagem sem nome é silêncio com aparência de informação.
 
+### A prova de propriedade sai de dentro do arquivo (digest no manifesto)
+
+Fecha o que ficou em pé acima. Marcador de script resolveu o congelamento para **um** formato a mais
+e deixou a forma intacta: uma prova embutida no conteúdo não pode existir para um formato sem
+sintaxe de comentário. JSON é esse formato — `forge-prefs.schema.json` e o `capabilities.json` do
+renderer do Codex congelavam idêntico, com cada `--update` preservando e reportando sucesso.
+
+`scripts/forge-projection-ownership.js` formula a decisão **uma vez** para os dois renderers
+(antes cada um tinha a sua cópia, e o do Codex nunca tinha sido tocado). A escada é o contrato:
+(1) nada em disco → nosso; (2) `--migrate-legacy` → nosso (escape do operador, intocado);
+(3) marcador presente → nosso (comportamento anterior, **nunca estreitado**); (4) **digest bate com
+o registrado** → nosso — a única rung que um formato sem marcador alcança; (5) senão, conflito.
+
+**Estritamente aditivo, e isso é decisão.** O digest só é consultado quando o marcador falta: pode
+**conceder** propriedade, nunca revogar. Uma regra digest-first seria defensável e um pouco mais
+forte (impediria o instalador de sobrescrever a edição do operador num arquivo marcado, coisa que
+hoje ele faz de bom grado), mas transformaria em conflito arquivos que hoje atualizam — mudança de
+comportamento bem além de fechar o congelamento. Fica **registrada como não-mudança deliberada**,
+com assert próprio, não como descuido.
+
+Detalhes que custaram teste: CRLF e LF **têm** que digerir igual (checkout com `autocrlf` reportaria
+todo destino como editado e recongelaria tudo); `already-current` precisa **entrar** no registro, não
+só sobreviver nele (o caso real é reinstalação sobre árvore existente, sem registro anterior — e a
+primeira versão desse assert **não mordia**, porque o spread do carry-forward mantinha a entrada de
+qualquer jeito); dry-run **não** registra (registrar bytes nunca escritos faria a execução seguinte
+se achar dona de um arquivo que não tocou); e o instalador **mescla** em vez de substituir, para um
+run `--runtime claude` não derrubar os destinos do Codex.
+
 ## Estado atual
 
 - **Milestone ativo:** — nenhum. **M018** (Sidecar multi-LLM autônomo via `codex app-server`) fechada, **mergeada na `master`** em `eaeb556` (fast-forward) e pushada para `origin/master`.

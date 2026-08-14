@@ -335,6 +335,60 @@ test('preserved conflicts are named, not just counted', () => {
   } finally { data.cleanup(); }
 });
 
+// The renderer owns the ownership BEHAVIOR; the installer owns its PERSISTENCE.
+// A record that is not carried across runs is no record at all — every JSON
+// projection would re-freeze on the next update, which is the defect this
+// closes, reintroduced one layer up.
+test('the ownership record is persisted in the manifest and survives a second run', () => {
+  const data = fixture();
+  try {
+    installer.install({ ...data.options, runtime: 'claude' });
+    const manifestPath = path.join(data.forgeHome, 'manifest.json');
+    const first = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+    assert.ok(first.ownership && typeof first.ownership === 'object', 'manifesto não persistiu o registro de propriedade');
+    const schemaDest = path.join(data.claudeHome, 'forge-prefs.schema.json');
+    assert.ok(first.ownership[path.resolve(schemaDest)],
+      'o destino JSON — o que não pode carregar marcador — ficou de fora do registro');
+    for (const [file, sha] of Object.entries(first.ownership)) {
+      assert.ok(path.isAbsolute(file), `chave do registro não é caminho absoluto: ${file}`);
+      assert.match(sha, /^[0-9a-f]{64}$/, `digest malformado para ${file}`);
+    }
+
+    const second = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    installer.install({ ...data.options, runtime: 'claude', update: true });
+    const third = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    assert.ok(third.ownership[path.resolve(schemaDest)],
+      'o registro do destino JSON sumiu no update — ele volta a congelar na execução seguinte');
+    assert.strictEqual(third.ownership[path.resolve(schemaDest)], second.ownership[path.resolve(schemaDest)],
+      'o digest mudou sem que o conteúdo mudasse');
+  } finally { data.cleanup(); }
+});
+
+// Held by TWO independent mechanisms — the renderer spreads the record it was
+// given into the one it returns, and the installer merges over the prior
+// manifest. Removing either alone keeps this green; removing both turns it red
+// (verified). Kept as a property test rather than split into two line-level
+// asserts: what matters is that a Codex destination survives a Claude-only run,
+// not which of the two layers happened to carry it.
+test('a single-runtime run merges the record instead of replacing it', () => {
+  const data = fixture();
+  try {
+    installer.install({ ...data.options, runtime: 'both' });
+    const manifestPath = path.join(data.forgeHome, 'manifest.json');
+    const both = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const codexEntries = Object.keys(both.ownership).filter((file) => file.startsWith(path.resolve(data.codexHome)));
+    assert.ok(codexEntries.length > 0, 'controle: a instalação both não registrou nenhum destino do Codex');
+
+    installer.install({ ...data.options, runtime: 'claude', update: true });
+    const after = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    for (const file of codexEntries) {
+      assert.ok(after.ownership[file],
+        `um run --runtime claude derrubou o registro do Codex (${file}) — a próxima instalação Codex trataria tudo como estranho`);
+    }
+  } finally { data.cleanup(); }
+});
+
 test('a clean update names nothing — the section is absent, not empty', () => {
   const data = fixture();
   try {

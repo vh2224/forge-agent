@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 const { resolveForgePaths } = require('./forge-home');
 const sourceManifest = require('./forge-source-manifest');
+const ownership = require('./forge-projection-ownership');
 const { VERSION } = require('./forge-version');
 
 const RUNTIME = 'claude';
@@ -300,6 +301,7 @@ function write(options = {}) {
   const written = [];
   const preserved = [];
   const conflicts = [];
+  const recorded = (options.ownership && typeof options.ownership === 'object') ? options.ownership : {};
   const backupRoot = options.backupDir ? path.resolve(options.backupDir) : null;
   for (const artifact of report.artifacts) {
     const destination = artifact.destination;
@@ -315,7 +317,16 @@ function write(options = {}) {
       conflicts.push({ destination, source_id: artifact.source_id, reason: REASON.USER_OWNED });
       continue;
     }
-    if (current !== null && !hasOriginMarker(current) && !(options.update && options.migrateLegacy)) {
+    // Ownership is decided in one place for both renderers (§ forge-projection-ownership).
+    // The digest rung is what a marker-less format (JSON) can reach; the marker
+    // rung is unchanged, so nothing that was ours stops being ours.
+    const verdict = ownership.decide({
+      current,
+      recordedDigest: recorded[ownership.keyFor(destination)],
+      markerPresent: hasOriginMarker(current),
+      migrateLegacy: Boolean(options.update && options.migrateLegacy),
+    });
+    if (!verdict.ours) {
       preserved.push({ ...artifact, reason: REASON.USER_OWNED });
       conflicts.push({ destination, source_id: artifact.source_id, reason: REASON.USER_OWNED });
       continue;
@@ -332,7 +343,24 @@ function write(options = {}) {
       ? { ...artifact, reason: 'legacy-migrated' }
       : artifact);
   }
-  return { ...report, changed: written.some((item) => !item.dry_run), written, preserved, conflicts, dry_run: Boolean(options.dryRun) };
+  // The record carries forward: destinations we own but did NOT rewrite this run
+  // (`already-current`) must keep their digest, or the next run finds no record,
+  // no marker on a JSON file, and re-freezes it. Conflicts are excluded — we did
+  // not write them, so we have no claim to record.
+  const ownedNow = [
+    ...written,
+    ...preserved.filter((item) => item.reason === 'already-current'),
+  ];
+  const nextOwnership = { ...recorded, ...ownership.recordOf(ownedNow) };
+  return {
+    ...report,
+    changed: written.some((item) => !item.dry_run),
+    written,
+    preserved,
+    conflicts,
+    ownership: options.dryRun ? recorded : nextOwnership,
+    dry_run: Boolean(options.dryRun),
+  };
 }
 
 function parseArgs(argv = process.argv.slice(2)) {
