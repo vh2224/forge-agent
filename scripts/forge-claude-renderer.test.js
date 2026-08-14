@@ -204,6 +204,72 @@ try {
     fs.rmSync(home, { recursive: true, force: true });
   }
 
+  // ── Script projections must be able to prove they are ours ────────────────
+  // The ownership probe is the marker, and `addOriginHeader` used to add one
+  // only to Markdown. A managed `.js` therefore never satisfied `hasOriginMarker`,
+  // so the write path read every existing script destination as user-owned and
+  // preserved it — forever. Measured on a live install: ~/.claude/hooks/forge-hook.js
+  // frozen releases behind while each --update reported success. A projection
+  // writable exactly once is not managed, so the asserts below are about the
+  // SECOND write, never the first.
+  {
+    const root = fixtureRepo();
+    const home = temp('script-marker-home');
+    const opts = { repo: root, projectRoot: root, claudeHome: home, forgeHome: path.join(home, 'forge') };
+
+    renderer.write(opts);
+    const flat = path.join(home, 'forge-hook.js');
+    const nested = path.join(home, 'hooks', 'forge-hook.js');
+
+    // Both destinations are projected: settings.json runs the flat path (see
+    // scripts/merge-settings.js), while the renderer historically maintained only
+    // the nested one — so the copy that actually executes had no owner.
+    assert(fs.existsSync(flat), 'o hook plano (~/.claude/forge-hook.js) não é projetado — é o caminho que settings.json executa');
+    assert(fs.existsSync(nested), 'o hook aninhado (~/.claude/hooks/forge-hook.js) deixou de ser projetado');
+    assert.strictEqual(fs.readFileSync(flat, 'utf8'), fs.readFileSync(nested, 'utf8'),
+      'as duas projeções do hook divergiram — uma delas vai congelar');
+
+    const installed = fs.readFileSync(flat, 'utf8');
+    assert(renderer.hasOriginMarker(installed), 'projeção de script não carrega prova de propriedade');
+    assert.strictEqual(installed.split('\n')[0], '#!/usr/bin/env node',
+      'o marcador foi posto ACIMA do shebang — o arquivo deixa de executar direto');
+    assert.match(installed.split('\n')[1], /^\/\/ forge-source:hooks /,
+      'o marcador de script não está na linha imediatamente abaixo do shebang');
+    assert(!installed.startsWith('<!--'), 'CommonJS recebeu marcador HTML e deixou de ser parseável');
+    assert.strictEqual(
+      renderer.stripOriginHeader(installed),
+      normalize(fs.readFileSync(path.join(root, 'scripts/forge-hook.js'), 'utf8')),
+      'strip(add(x)) !== x para script — o marcador não é reversível',
+    );
+
+    // THE consequence: a second write updates the script instead of preserving it.
+    // Positive control first (the destination really is ours), then the update.
+    fs.writeFileSync(path.join(root, 'scripts/forge-hook.js'), '#!/usr/bin/env node\n// v2 do hook\n');
+    const second = renderer.write({ ...opts, update: true });
+    assert(!second.conflicts.some((item) => path.resolve(item.destination) === path.resolve(flat)),
+      'a projeção de script marcada foi tratada como user_owned — o congelamento silencioso voltou');
+    assert.match(fs.readFileSync(flat, 'utf8'), /v2 do hook/,
+      'segunda escrita não atualizou o hook: a projeção continua write-once');
+
+    // ...and the guard still bites: an UNMARKED script on disk is a real conflict.
+    fs.writeFileSync(flat, '#!/usr/bin/env node\n// editado pelo operador\n');
+    const third = renderer.write({ ...opts, update: true });
+    assert(third.conflicts.some((item) => path.resolve(item.destination) === path.resolve(flat)),
+      'script sem marcador deixou de ser conflito — o guard de arquivo do operador morreu');
+    assert.match(fs.readFileSync(flat, 'utf8'), /editado pelo operador/,
+      'arquivo sem marcador foi sobrescrito');
+
+    // JSON genuinely cannot carry a comment, so it stays a conflict. Asserted so
+    // the limitation is a decision on record rather than a surprise later.
+    const schema = path.join(home, 'forge-prefs.schema.json');
+    fs.writeFileSync(path.join(root, 'forge-prefs.schema.json'), '{"v":2}\n');
+    const fourth = renderer.write({ ...opts, update: true });
+    assert(fourth.conflicts.some((item) => path.resolve(item.destination) === path.resolve(schema)),
+      'projeção JSON deixou de ser reportada como conflito — sem marcador possível, ela PRECISA aparecer no relatório');
+
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+
   console.log('forge-claude-renderer tests passed');
 } finally {
   cleanup();

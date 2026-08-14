@@ -338,9 +338,22 @@ function render(report) {
     ? Object.values(report.manifest.adapters).flatMap((adapter) => (Array.isArray(adapter.conflicts) ? adapter.conflicts : []))
     : [];
   const operatorOwned = allConflicts.filter((item) => path.basename(String(item && item.destination || '')) === 'settings.json');
-  const legacy = allConflicts.length - operatorOwned.length;
-  if (legacy) lines.push(`Conflicts preserved: ${legacy}; use --migrate-legacy to replace unmarked legacy projections.`);
-  if (operatorOwned.length) lines.push(`Operator-owned preserved: ${operatorOwned.length} (settings.json) — Forge never replaces it; use scripts/merge-settings.js to add Forge's hooks/statusLine keys.`);
+  const legacyConflicts = allConflicts.filter((item) => !operatorOwned.includes(item));
+  // Name them. A bare count is the reason this drift stays invisible: the
+  // operator is told that N files were left behind but not WHICH, so a stale
+  // destination on the execution path reads exactly like a stale destination
+  // nobody loads. Measured cost of the anonymous form: an `--update` that
+  // reported success left `~/.claude/forge-hook.js` — the file `settings.json`
+  // actually runs — frozen several releases back, and finding that took a
+  // byte-compare against repo history rather than reading the summary.
+  if (legacyConflicts.length) {
+    lines.push(`Conflicts preserved: ${legacyConflicts.length}; use --migrate-legacy to replace unmarked legacy projections.`);
+    for (const item of legacyConflicts) lines.push(`  [preserved] ${item.destination}`);
+  }
+  if (operatorOwned.length) {
+    lines.push(`Operator-owned preserved: ${operatorOwned.length} (settings.json) — Forge never replaces it; use scripts/merge-settings.js to add Forge's hooks/statusLine keys.`);
+    for (const item of operatorOwned) lines.push(`  [operator-owned] ${item.destination}`);
+  }
   return lines.join('\n') + '\n';
 }
 

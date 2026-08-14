@@ -27,7 +27,7 @@
     {
       "source_id": "hooks",
       "target": "hooks/forge-hook.js",
-      "sha256": "7ad13b8054064f71b572765ec7adf81e303dc616b4d1817e489862e36ddeb752"
+      "sha256": "eaecc5a781b86fb81d66cdc767a1c99a72615f65a650c25b6729e6a981f0648c"
     },
     {
       "source_id": "mcp",
@@ -37,7 +37,7 @@
     {
       "source_id": "claude-instructions",
       "target": "project/CLAUDE.md",
-      "sha256": "1036639a5476ec4943be561e92bb71e7fdfb22cd49d4108d32ea90dba2aaae05"
+      "sha256": "7f6c62b9cd6623f2eb879901c1f027d295d32a9f83627e2af94c3031cf139417"
     },
     {
       "source_id": "claude-settings",

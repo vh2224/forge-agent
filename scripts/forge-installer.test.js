@@ -294,5 +294,55 @@ test('Claude 3.1.4 fixture is versioned with prefs, Markdown, hooks, templates a
   assert.match(fs.readFileSync(path.join(fixtureRoot, 'forge-agent-prefs.jsonc'), 'utf8'), /fixture_version/);
 });
 
+// ── The summary names what it left behind ───────────────────────────────────
+// A bare "Conflicts preserved: N" is why this drift stays invisible: the
+// operator learns that N destinations were skipped but not WHICH, so a stale
+// file on the hook execution path reads exactly like a stale file nobody loads.
+// Measured: an `--update` that reported success left ~/.claude/forge-hook.js
+// frozen several releases back, and finding it took a byte-compare against repo
+// history instead of reading the summary.
+test('preserved conflicts are named, not just counted', () => {
+  const data = fixture();
+  try {
+    installer.install({ ...data.options, runtime: 'claude' });
+
+    // Make two destinations conflict for the two DIFFERENT reasons the summary
+    // distinguishes: an unmarked legacy projection, and the operator-owned file.
+    const legacy = path.join(data.claudeHome, 'forge-prefs.schema.json');
+    fs.writeFileSync(legacy, '{"editado":true}\n', 'utf8');
+    const settings = path.join(data.claudeHome, 'settings.json');
+    fs.writeFileSync(settings, '{"hooks":{}}\n', 'utf8');
+
+    const report = installer.install({ ...data.options, runtime: 'claude', update: true });
+    const text = installer.render(report);
+
+    // Positive control first: the counts still exist, so the asserts below are
+    // about naming and not about a summary that lost its conflict section.
+    assert.match(text, /Conflicts preserved: \d+/, 'a linha de contagem sumiu do resumo');
+    assert.match(text, /Operator-owned preserved: \d+/, 'a linha de operator-owned sumiu do resumo');
+
+    assert.ok(text.includes(`  [preserved] ${legacy}`),
+      `o resumo não nomeou a projeção legada preservada:\n${text}`);
+    assert.ok(text.includes(`  [operator-owned] ${settings}`),
+      `o resumo não nomeou o arquivo do operador preservado:\n${text}`);
+
+    // Every named line must point at a real path — a label with no destination
+    // would be the anonymous count wearing a different shape.
+    for (const line of text.split('\n')) {
+      const named = /^ {2}\[(?:preserved|operator-owned)\] (.+)$/.exec(line);
+      if (named) assert.ok(path.isAbsolute(named[1]), `caminho não absoluto no resumo: ${line}`);
+    }
+  } finally { data.cleanup(); }
+});
+
+test('a clean update names nothing — the section is absent, not empty', () => {
+  const data = fixture();
+  try {
+    installer.install({ ...data.options, runtime: 'claude' });
+    const text = installer.render(installer.install({ ...data.options, runtime: 'claude', update: true }));
+    assert.ok(!/\[preserved\]/.test(text), 'resumo listou preservados num update sem conflito');
+  } finally { data.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);
 

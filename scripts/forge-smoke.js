@@ -15748,6 +15748,78 @@ function smokeContractMissBranch() {
     + 'the SubagentStop escape no longer reports a contract-less worker as done');
 }
 
+// ── Section 106: the hook path that runs is the hook path that is managed ────
+//
+// Two files have to agree and neither can see the other: `merge-settings.js`
+// writes the hook command into settings.json, and `forge-source-manifest.json`
+// decides which destinations the installer maintains. They disagreed — settings
+// wired `~/.claude/forge-hook.js` while the manifest projected only
+// `~/.claude/hooks/forge-hook.js` — so the copy Claude Code actually executes
+// was maintained by nobody and sat frozen across releases while every
+// `--update` reported success. No unit test owns this pair, which is exactly
+// what a smoke section is for.
+function smokeHookPathManaged() {
+  process.stdout.write('\n▸ Section 106: the executed hook path is a managed projection\n');
+  const repoRoot = path.dirname(SCRIPTS);
+  const renderer = require('./forge-claude-renderer.js');
+
+  // (a) every hook command merge-settings.js emits, mined from its source.
+  const merge = readRepoText(path.join(SCRIPTS, 'merge-settings.js'));
+  const wired = [...merge.matchAll(/node\s+(~\/[^\s`'"]*forge-hook\.js)/g)].map((m) => m[1]);
+  assert(wired.length > 0,
+    '(a) merge-settings.js still emits at least one forge-hook.js command — the miner is not blind');
+  const wiredPaths = [...new Set(wired)];
+
+  // (b) the manifest's projected destinations for the hooks source, expressed in
+  //     the same `~/…` vocabulary merge-settings.js writes. The tilde is the
+  //     USER home, not the Claude home, so the fake home below is laid out the
+  //     way a real install is (`<home>/.claude`) and paths are made relative to
+  //     the user home — comparing against the Claude home instead yields
+  //     `~/forge-hook.js` and the agreement check silently never matches.
+  const userHome = path.join(os.tmpdir(), 'forge-smoke-hookpath-home');
+  const report = renderer.render({
+    repo: repoRoot,
+    projectRoot: repoRoot,
+    claudeHome: path.join(userHome, '.claude'),
+    forgeHome: path.join(userHome, '.forge-agent'),
+  });
+  const projected = report.artifacts
+    .filter((a) => a.source_id === 'hooks')
+    .map((a) => '~/' + path.relative(userHome, a.destination).split(path.sep).join('/'));
+  assert(projected.length > 0, '(b) the hooks source projects at least one destination');
+  assert(projected.every((p) => p.startsWith('~/.claude/')),
+    `(b) projected hook paths are expressed against the user home — got ${JSON.stringify(projected)}`);
+
+  // (c) the agreement itself.
+  for (const p of wiredPaths) {
+    assert(projected.includes(p),
+      `(c) settings.json runs ${p} but no projection maintains it — that copy will freeze silently`);
+  }
+
+  // (d) control — the predicate is capable of failing. A path nobody wires must
+  //     not be reported as wired, otherwise (c) is green for any input.
+  assert(!wiredPaths.includes('~/.claude/nonexistent-hook.js'),
+    '(d control) the wired-path miner does not invent paths');
+
+  // (e) script projections carry the ownership proof, so a second --update can
+  //     replace them. Without this the fix in (c) maintains a file the write
+  //     path still refuses to touch.
+  const hookArtifact = report.artifacts.find((a) => a.source_id === 'hooks');
+  assert(renderer.hasOriginMarker(hookArtifact.content),
+    '(e) the hook projection carries an origin marker — otherwise it is preserved as user_owned forever');
+  assert(hookArtifact.content.split('\n')[0].startsWith('#!'),
+    '(e) the shebang stays on line 1 — a marker above it stops the file executing');
+
+  // (f) registered in main().
+  const source = fs.readFileSync(__filename, 'utf8');
+  assert(/\(\) => \{ smokeHookPathManaged\(\); \}/.test(source.slice(source.lastIndexOf('async function main()'))),
+    '(f) Section 106 is registered in main()');
+
+  pass('(final) Section 106: every forge-hook.js path merge-settings.js wires into settings.json is a destination the '
+    + 'source manifest projects, so the copy Claude Code executes is maintained rather than frozen; and that projection '
+    + 'carries an origin marker below an intact shebang, so the installer can actually replace it on a later update');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -15868,6 +15940,7 @@ async function main() {
       () => { smokeMemoryIndexCommandRendered(); },
       () => { smokeScriptsCallSitesCanonical(); },
       () => { smokeContractMissBranch(); },
+      () => { smokeHookPathManaged(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {

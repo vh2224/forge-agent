@@ -644,6 +644,41 @@ em tudo (MEM008). **Fronteira:** só o caminho Claude `Agent()`. O sidecar não 
 dele é um JSON em disco e uma resposta cortada já aparece como `codex-invalid-json`, reason terminal
 com fallback existente; nada na máquina de estados do sidecar muda.
 
+### Uma projeção que só pode ser escrita uma vez não é gerenciada (install)
+
+Achado ao instalar o Layer 0: `install.sh --update` reportou sucesso e **o conserto do hook ficou
+inerte**. Três defeitos que se compõem, todos da mesma família — a instalação afirmando estar em dia
+sobre um arquivo que ela não toca há releases.
+
+**(1) A prova de propriedade não existia para não-Markdown.** `addOriginHeader` só acrescentava o
+marcador `<!-- forge-source:… -->` a Markdown; para qualquer outro formato devolvia o conteúdo
+intacto. Como o caminho de escrita lê destino existente **sem** marcador como `user_owned`, toda
+projeção `.js` virava conflito permanente na primeira vez que divergisse — congelada nos bytes da
+release que a criou, com cada `--update` seguinte preservando e reportando sucesso. Medido ao vivo:
+`~/.claude/hooks/forge-hook.js` parado várias releases atrás. Agora scripts recebem `// forge-source:…`
+**imediatamente abaixo do shebang** (acima quebraria a execução direta — mesma regra que o
+frontmatter já impunha ao Markdown), e `hasOriginMarker`/`stripOriginHeader` reconhecem a forma nova.
+JSON continua sem marcador possível — não tem sintaxe de comentário — e isso é **limitação nomeada e
+asserida**, não descuido: a compensação é o defeito (3).
+
+**(2) O caminho que executa não era projetado por ninguém.** `scripts/merge-settings.js` fia os 8
+hooks como `node ~/.claude/forge-hook.js`, mas o `forge-source-manifest.json` projetava só
+`hooks/forge-hook.js`. Dois arquivos que precisam concordar e nenhum enxerga o outro: a cópia que o
+Claude Code realmente roda não tinha dono. Corrigido no manifesto (o mesmo input com dois
+`render_targets`), sem tocar em `settings.json` — que é operator-owned por decisão e o instalador
+nunca reescreve. Guard: **Seção 106** do `forge-smoke.js` minera os comandos que o `merge-settings.js`
+emite e exige que cada um seja destino projetado, com controle positivo para o minerador não ser cego.
+
+**(3) O relatório era anônimo.** `Conflicts preserved: 3` sem nomear os arquivos é o que torna o
+drift invisível: um destino velho no caminho de execução lê exatamente igual a um que ninguém carrega.
+Achar o hook congelado custou byte-comparar contra o histórico do repo (`git show <sha>:<path>` em
+loop) em vez de ler o resumo. Agora cada preservado sai nomeado, separado por remédio
+(`[preserved]` × `[operator-owned]`).
+
+**Regra durável:** o marcador é a prova de propriedade, então **todo formato gerenciado precisa
+conseguir carregá-lo** — e o formato que não consegue (JSON) tem que aparecer nomeado no relatório.
+Contagem sem nome é silêncio com aparência de informação.
+
 ## Estado atual
 
 - **Milestone ativo:** — nenhum. **M018** (Sidecar multi-LLM autônomo via `codex app-server`) fechada, **mergeada na `master`** em `eaeb556` (fast-forward) e pushada para `origin/master`.

@@ -80,14 +80,53 @@ const FRONTMATTER = /^---[ \t]*\n[\s\S]*?\n---[ \t]*(?:\n|$)/;
 const MARKER_AT_TOP = /^<!-- forge-source:[^\n]* -->[ \t]*\n\n?/;
 const MARKER_AFTER_FRONTMATTER = /^(---[ \t]*\n[\s\S]*?\n---[ \t]*\n)\n?<!-- forge-source:[^\n]* -->[ \t]*\n/;
 
+// Script projections carry the SAME ownership fact in the only syntax their
+// format accepts. Without this, `addOriginHeader` returned script content
+// untouched, so a managed `.js` destination could never satisfy `hasOriginMarker`
+// — and the write path reads an unmarked existing destination as user-owned.
+// Consequence, measured on a live install: `~/.claude/hooks/forge-hook.js` was a
+// permanent `user_owned` conflict, frozen at the bytes of whatever release first
+// created it, and every subsequent `--update` preserved it while reporting
+// success. A projection that can only ever be written once is not managed.
+//
+// The shebang must stay on line 1 — a comment above it stops the file from
+// executing directly — so this mirrors the frontmatter rule exactly: marker
+// immediately after the line that must come first, or at the top when absent.
+const SHEBANG = /^#![^\n]*(?:\n|$)/;
+const SCRIPT_MARKER_AT_TOP = /^\/\/ forge-source:[^\n]*\n\n?/;
+const SCRIPT_MARKER_AFTER_SHEBANG = /^(#![^\n]*\n)\n?\/\/ forge-source:[^\n]*\n/;
+
+function isScript(file) {
+  return /\.(?:js|cjs|mjs)$/i.test(file);
+}
+
+function scriptOriginHeader(sourceId, sourcePath) {
+  return `// forge-source:${sourceId} source=${sourcePath} version=${VERSION}`;
+}
+
 function addOriginHeader(content, source, sourcePath) {
   const normalized = normalizeNewlines(content);
-  if (!isMarkdown(sourcePath)) return normalized;
-  const marker = originHeader(source.source_id, sourcePath);
   const body = stripOriginHeader(normalized);
-  const fence = FRONTMATTER.exec(body);
-  if (fence) return `${body.slice(0, fence[0].length)}\n${marker}\n${body.slice(fence[0].length)}`;
-  return `${marker}\n\n${body}`;
+
+  if (isMarkdown(sourcePath)) {
+    const marker = originHeader(source.source_id, sourcePath);
+    const fence = FRONTMATTER.exec(body);
+    if (fence) return `${body.slice(0, fence[0].length)}\n${marker}\n${body.slice(fence[0].length)}`;
+    return `${marker}\n\n${body}`;
+  }
+
+  if (isScript(sourcePath)) {
+    const marker = scriptOriginHeader(source.source_id, sourcePath);
+    const shebang = SHEBANG.exec(body);
+    if (shebang) return `${body.slice(0, shebang[0].length)}${marker}\n${body.slice(shebang[0].length)}`;
+    return `${marker}\n\n${body}`;
+  }
+
+  // JSON has no comment syntax, so a JSON projection genuinely cannot carry the
+  // proof and stays a conflict until `--migrate-legacy`. That is a real limit,
+  // not an oversight — and it is reported by name in the installer summary
+  // rather than folded into an anonymous count.
+  return normalized;
 }
 
 // Strips the marker from either accepted position — the top (pre-4.8.1 layout,
@@ -98,6 +137,8 @@ function stripOriginHeader(content) {
   const text = String(content);
   if (MARKER_AT_TOP.test(text)) return text.replace(MARKER_AT_TOP, '');
   if (MARKER_AFTER_FRONTMATTER.test(text)) return text.replace(MARKER_AFTER_FRONTMATTER, '$1');
+  if (SCRIPT_MARKER_AFTER_SHEBANG.test(text)) return text.replace(SCRIPT_MARKER_AFTER_SHEBANG, '$1');
+  if (SCRIPT_MARKER_AT_TOP.test(text)) return text.replace(SCRIPT_MARKER_AT_TOP, '');
   return text;
 }
 
@@ -114,7 +155,10 @@ function stripOriginHeader(content) {
 // misread as user-owned, which is the exact silent-stop this fix exists to avoid.
 function hasOriginMarker(content) {
   const text = normalizeNewlines(String(content));
-  return MARKER_AT_TOP.test(text) || MARKER_AFTER_FRONTMATTER.test(text);
+  return MARKER_AT_TOP.test(text)
+    || MARKER_AFTER_FRONTMATTER.test(text)
+    || SCRIPT_MARKER_AFTER_SHEBANG.test(text)
+    || SCRIPT_MARKER_AT_TOP.test(text);
 }
 
 function walk(root) {
