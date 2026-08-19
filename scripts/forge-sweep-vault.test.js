@@ -179,12 +179,18 @@ test('an authorization naming a member that does not match authorizes nothing', 
 });
 
 // The caller may hand the id back the way the host spells paths. Authorization
-// is compared at the normalized member-id boundary, so a `\`-separated or
+// is compared at the normalized member-id boundary, so a NATIVE-separator or
 // `./`-prefixed spelling of the SAME member is the same member -- and nothing
 // else is.
+//
+// The input is native BY CONSTRUCTION (`path.sep`), never a hand-written literal:
+// `normalizeMemberId` -> `toPosix` folds `path.sep` only, so a literal `\` would
+// exercise the intent on win32 and assert a falsehood on POSIX, where `\` is a
+// legal filename character and must NOT be read as a separator.
 test('authorization matches the normalized member id, not the raw spelling', () => {
   const f = twoDivergentMembers();
-  const result = restoreVault(f.cwd, f.vault.containerPath, { overwrite: ['./.gsd\\memory\\a.md'] });
+  const nativeSpelling = '.' + path.sep + ['.gsd', 'memory', 'a.md'].join(path.sep);
+  const result = restoreVault(f.cwd, f.vault.containerPath, { overwrite: [nativeSpelling] });
   assert(result.restored.length === 1, 'a normalized spelling of the id must still authorize');
   assert(Buffer.compare(f.originalA, fs.readFileSync(f.memberA)) === 0, 'A restored to original bytes');
   remove(f.cwd);
