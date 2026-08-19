@@ -75,24 +75,71 @@ test('frontmatter declara identidade, ferramenta e invocação humana', () => {
 // while blind. Measure the committed range too.
 //
 // ATRIBUIÇÃO POR COMMIT, NÃO POR RANGE (precedente medido: S07 desta mesma
-// milestone). O range `merge-base..HEAD` acusa qualquer commit da branch, não só
-// os da curadoria — e a branch legitimamente carrega o commit de OUTRA task
-// (T-20260819190830, achado A2 do review da PR #125) que acrescenta ao
-// `forge-sweep/SKILL.md` a regra de leitura de `quarantined:true`. Sob o range,
-// esta cerca condenava a task errada. Ela pergunta, por commit, se foi a
-// curadoria que tocou o arquivo.
+// milestone, `scripts/forge-smoke.js` § (e)). O range `merge-base..HEAD` acusa
+// qualquer commit da branch, não só os da curadoria — e a branch legitimamente
+// carrega o commit de OUTRA task (T-20260819190830, achado A2 do review da
+// PR #125) que acrescenta ao `forge-sweep/SKILL.md` a regra de leitura de
+// `quarantined:true`. Sob o range, esta cerca condenava a task errada.
+//
+// DOIS PRONGS, como o precedente (`isS07 = assunto OU caminho exclusivo`). O
+// prong de assunto sozinho tem escape MEDIDO nesta branch: dos 3 commits que
+// tocam caminho exclusivo da curadoria, só 1 traz `curate` no assunto — os
+// outros dois ("fix(review): S07 conceded item …") escapariam da cerca inteira.
+//
+// O QUE NÃO ENTRA NA LISTA, e por quê: `scripts/forge-curate-skill.test.js` foi
+// criado pela curadoria (6ad9e2b), mas é o INSTRUMENTO de medição, não o
+// produto. Um instrumento que conta a própria edição como prova de autoria do
+// medido é circular — toda task que endurece esta cerca (inclusive esta) viraria
+// "a curadoria". A lista carrega só o produto.
 const CURATE_SUBJECT = /curate|curadoria/i;
+const CURATE_EXCLUSIVE = [
+  'skills/forge-curate/',              // prefixo de diretório
+  'scripts/forge-sweep-curate.js',
+  'scripts/forge-sweep-curate.test.js',
+];
+const SWEEP_REL = 'skills/forge-sweep/SKILL.md';
+// Predicado de caminho, compartilhado pelas duas pernas (commit e working tree).
+// Função pura de propósito: é o que torna a mordida de cada perna provável sobre
+// estado sintético, sem depender do que a branch por acaso tem em disco.
+function touchesCurate(files) {
+  return files.some(f => CURATE_EXCLUSIVE.some(e => (e.endsWith('/') ? f.startsWith(e) : f === e)));
+}
+function isCurateCommit(c) { return CURATE_SUBJECT.test(c.subject) || touchesCurate(c.files); }
+// Veredicto da working tree — MESMA lógica de dois prongs, por co-ocorrência de
+// caminho. Uma edição não commitada não tem assunto, mas tem caminhos: se ela
+// toca forge-sweep E TAMBÉM caminho exclusivo da curadoria, é a curadoria
+// mexendo e a cerca REPROVA; se toca forge-sweep sozinho, é inatribuível pelo
+// mesmo critério e vira skip NOMEADO. Isso fecha a janela de falso negativo sem
+// reintroduzir o falso positivo medido (a edição legítima do achado A2).
+function workingVerdict(paths) {
+  if (!paths.includes(SWEEP_REL)) return 'clean';
+  return touchesCurate(paths) ? 'fail' : 'skip';
+}
+
 test('a curadoria não alterou skills/forge-sweep', () => {
   assert(fs.existsSync(sweepPath));
   const repo = path.join(__dirname, '..');
   const git = args => require('child_process').spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
-  const working = git(['diff', '--name-only', '--', 'skills/forge-sweep/SKILL.md']);
-  assert.strictEqual(working.status, 0, `git indisponível: ${working.stderr || working.error}`);
-  if (working.stdout.trim()) {
-    // Uma edição não commitada não tem autoria atribuível — não existe assunto
-    // de commit para perguntar. Skip NOMEADO, nunca um verde afirmando limpeza.
-    console.log('    ↳ perna de working tree pulada (nomeada): edição não commitada em skills/forge-sweep é inatribuível');
+  // A lista é confirmada no disco: um caminho renomeado faria o prong parar de
+  // casar em silêncio, que é a forma de falha que esta milestone inteira caça.
+  for (const entry of CURATE_EXCLUSIVE) {
+    assert(fs.existsSync(path.join(repo, entry)), `caminho exclusivo da curadoria sumiu do disco: ${entry}`);
   }
+
+  // Perna 1: working tree, dois prongs.
+  const status = git(['status', '--porcelain']);
+  assert.strictEqual(status.status, 0, `git indisponível: ${status.stderr || status.error}`);
+  const workingPaths = status.stdout.split('\n').map(line => line.slice(3).trim())
+    .filter(Boolean).map(line => (line.includes(' -> ') ? line.split(' -> ')[1] : line))
+    .map(line => line.replace(/^"|"$/g, ''));
+  const verdict = workingVerdict(workingPaths);
+  assert.notStrictEqual(verdict, 'fail',
+    `working tree: a curadoria tocou ${SWEEP_REL} (co-ocorrência com caminho exclusivo):\n${workingPaths.join('\n')}`);
+  if (verdict === 'skip') {
+    console.log(`    ↳ perna de working tree pulada (nomeada): ${SWEEP_REL} editado sem co-ocorrência com caminho exclusivo da curadoria — inatribuível`);
+  }
+
+  // Perna 2: range commitado, dois prongs, atribuição por commit.
   const base = ['master', 'origin/master']
     .map(ref => git(['merge-base', 'HEAD', ref]))
     .find(result => result.status === 0 && result.stdout.trim());
@@ -102,16 +149,55 @@ test('a curadoria não alterou skills/forge-sweep', () => {
     console.log('    ↳ pulado (nomeado): merge-base indisponível — nem master nem origin/master resolvem');
     return;
   }
-  const log = git(['log', '--format=%H %s', `${base.stdout.trim()}..HEAD`, '--', 'skills/forge-sweep/SKILL.md']);
-  assert.strictEqual(log.status, 0, `git log merge-base..HEAD falhou: ${log.stderr}`);
-  const commits = log.stdout.split('\n').map(line => line.trim()).filter(Boolean);
-  // Piso anti-silêncio: o minerador tem que ser capaz de ver um assunto de
-  // curadoria. Controle positivo — se o predicado não morde nem no assunto que
-  // ele existe para pegar, a cerca é cega e o verde não vale nada.
-  assert(CURATE_SUBJECT.test('abc curate xyz'), 'predicado de assunto cego');
-  const offenders = commits.filter(line => CURATE_SUBJECT.test(line.slice(41)));
+  const shas = (git(['rev-list', `${base.stdout.trim()}..HEAD`]).stdout || '').split('\n').filter(Boolean);
+  const commits = shas.map(sha => ({
+    sha,
+    subject: (git(['log', '-1', '--format=%s', sha]).stdout || '').trim(),
+    files: (git(['show', '--name-only', '--format=', sha]).stdout || '')
+      .split('\n').map(line => line.trim()).filter(Boolean),
+  }));
+  const selected = commits.filter(isCurateCommit);
+  const bySubject = selected.filter(commit => CURATE_SUBJECT.test(commit.subject));
+  const onlyByPath = selected.filter(commit => !CURATE_SUBJECT.test(commit.subject));
+  const offenders = selected.filter(commit => commit.files.includes(SWEEP_REL))
+    .map(commit => `${commit.sha.slice(0, 7)} ${commit.subject}`);
   assert.deepStrictEqual(offenders, [], `commit da curadoria alterou skills/forge-sweep:\n${offenders.join('\n')}`);
-  console.log(`    ↳ commits examinados que tocam skills/forge-sweep: ${commits.length}`);
+
+  // CONTROLE POSITIVO SOBRE A POPULAÇÃO REAL, nunca contra uma constante — um
+  // assert do regex contra uma string literal testa o literal, não o minerador.
+  // O censo é impresso sempre; quando a população não sustenta um piso, a
+  // limitação é NOMEADA em vez de o controle passar sem olhar dado.
+  console.log(`    ↳ censo: ${commits.length} commits no range · ${selected.length} da curadoria`
+    + ` (${bySubject.length} por assunto, ${onlyByPath.length} SÓ por caminho exclusivo)`);
+  if (selected.length === 0) {
+    console.log('    ↳ controle limitado (nomeado): nenhum commit da curadoria nesta população — o seletor não pôde ser visto mordendo na população real');
+  } else if (onlyByPath.length > 0) {
+    console.log(`    ↳ segundo prong mordeu na população real: ${onlyByPath.map(c => c.sha.slice(0, 7)).join(', ')} escapariam do prong de assunto`);
+  } else {
+    console.log('    ↳ limitação nomeada: nesta população o prong de caminho não acrescentou commit ao conjunto do prong de assunto');
+  }
+});
+
+// Mordida de cada perna nova, sobre estado SINTÉTICO — o repo real só oferece um
+// estado por vez, então provar "reprova" exige montar o estado que deve reprovar.
+test('as duas pernas mordem: co-ocorrência reprova, forge-sweep sozinho pula', () => {
+  assert.strictEqual(workingVerdict([SWEEP_REL, 'scripts/forge-sweep-curate.js']), 'fail',
+    'co-ocorrência na working tree tem que REPROVAR');
+  assert.strictEqual(workingVerdict([SWEEP_REL, 'skills/forge-curate/SKILL.md']), 'fail',
+    'co-ocorrência por prefixo de diretório tem que REPROVAR');
+  assert.strictEqual(workingVerdict([SWEEP_REL, 'scripts/forge-distill.js']), 'skip',
+    'forge-sweep sem co-ocorrência é inatribuível — skip nomeado, não reprovação');
+  assert.strictEqual(workingVerdict([SWEEP_REL, 'scripts/forge-curate-skill.test.js']), 'skip',
+    'o instrumento de medição não é prova de autoria do medido — seria circular');
+  assert.strictEqual(workingVerdict(['scripts/forge-sweep-curate.js']), 'clean',
+    'sem tocar forge-sweep não há o que atribuir');
+  // O prong de commit, mordendo nos dois sentidos.
+  assert.strictEqual(isCurateCommit({ subject: 'fix(review): S07 conceded item', files: ['scripts/forge-sweep-curate.js'] }), true,
+    'o assunto genérico que ESCAPAVA da cerca tem que ser pego pelo caminho exclusivo');
+  assert.strictEqual(isCurateCommit({ subject: 'feat: curadoria de memória', files: ['outro.js'] }), true,
+    'o prong de assunto continua valendo sozinho');
+  assert.strictEqual(isCurateCommit({ subject: 'fix(review): A2 instrução aos consumidores', files: [SWEEP_REL, 'scripts/forge-curate-skill.test.js'] }), false,
+    'editar a cerca + forge-sweep não é a curadoria — o falso positivo medido continua fechado');
 });
 
 test('Steps 3, 5 e 6 mantêm a ordem operacional', () => {
