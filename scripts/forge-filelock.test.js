@@ -111,6 +111,93 @@ function testHolderAbsentVersusIllegible() {
     assert.strictEqual(now.acquired, true, 'measured-ended + stale is what the clock is FOR');
   } finally { remove(cwd); }
 }
+// ── The lock leak by path LENGTH (Q1(a)) ───────────────────────────────────────────────────────
+//
+// The release used to rename the lock to `${file}.release-${generation}-${uuid}` — +78 chars —
+// before unlinking. Crossing the OS component limit (255 bytes on POSIX; 255 chars per component
+// on win32 too) made the bare `catch` answer `already_released`, a NAME for an outcome that did
+// not happen, and the orphan then killed the SECOND write to the same fragment inside the TTL.
+//
+// The bite is calibrated on the lock's BASENAME, not on the caller's path: `lockPathFor` base64s
+// the whole canonical path, so the name grows ~4/3 of it. The window that makes the acquire pass
+// (its temp suffix costs ~47) and the OLD release fail (~78) is basename ∈ [178, 208]. The target
+// need not exist on disk — only the locks directory is ever created.
+const DEEP_BASENAME_TARGET = 195;
+function targetWithLockBasename(cwd, want) {
+  // Grow a single relative segment until the lock basename lands on `want`. Deriving the length
+  // instead of hard-coding a path is what keeps the window honest under any tmpdir depth.
+  let segment = 'a';
+  let last = null;
+  for (let i = 0; i < 4096; i++) {
+    const candidate = `deep/${segment}.json`;
+    const length = path.basename(filelock.lockPathFor(cwd, candidate)).length;
+    if (length >= want) return { target: candidate, length };
+    last = length;
+    segment += 'a';
+  }
+  throw new Error(`could not reach a lock basename of ${want} (stopped at ${last})`);
+}
+function locksLeftIn(cwd) {
+  const dir = path.join(cwd, '.gsd', 'forge', 'file-locks');
+  try { return fs.readdirSync(dir); } catch { return []; }
+}
+function testReleaseSurvivesADeepLockName() {
+  const cwd = temporary();
+  try {
+    const { target, length } = targetWithLockBasename(cwd, DEEP_BASENAME_TARGET);
+    assert(length >= 178 && length <= 208, `lock basename ${length} must sit in the biting window`);
+    const owner = filelock.acquireFileLock(cwd, target, 'run-deep', 's', { ttlMs: 5000 });
+    assert.strictEqual(owner.acquired, true, 'the acquire still fits: only the OLD release overflowed');
+    assert.strictEqual(
+      filelock.releaseFileLock(cwd, target, 'run-deep', owner.owner_token, owner.generation), true,
+      'a deep lock name must still be releasable — this is the leak that orphaned 205 locks',
+    );
+    assert.deepStrictEqual(locksLeftIn(cwd), [], 'and it leaves NOTHING behind, neither lock nor rename debris');
+  } finally { remove(cwd); }
+}
+// The control. A test that only fails deep and never passes shallow cannot tell a fix from an
+// environment — it must pass both before and after the production change.
+function testReleaseWithAShortLockName() {
+  const cwd = temporary();
+  try {
+    const target = 'raso.json';
+    assert(path.basename(filelock.lockPathFor(cwd, target)).length < 178, 'the control stays out of the window');
+    const owner = filelock.acquireFileLock(cwd, target, 'run-raso', 's', { ttlMs: 5000 });
+    assert.strictEqual(owner.acquired, true);
+    assert.strictEqual(filelock.releaseFileLock(cwd, target, 'run-raso', owner.owner_token, owner.generation), true);
+    assert.deepStrictEqual(locksLeftIn(cwd), [], 'nothing left behind on the shallow path either');
+  } finally { remove(cwd); }
+}
+// A removal that fails is named by its errno. `already_released` is reserved to `!existing` —
+// that is the whole defect class this milestone exists to close.
+function testRemovalFailureIsNamedByErrno() {
+  const cwd = temporary();
+  const realUnlink = fs.unlinkSync;
+  try {
+    const target = 'errno.json';
+    // The one case where `already_released` is TRUE, measured BEFORE any stub is in place:
+    // nothing was there to remove.
+    const never = filelock.acquireFileLock(cwd, 'nunca.json', 'run-x', 's', { ttlMs: 5000 });
+    assert.strictEqual(filelock.releaseFileLock(cwd, 'nunca.json', 'run-x', never.owner_token, never.generation), true);
+    const absent = filelock.releaseFileLockDetailed(cwd, 'nunca.json', 'run-x', never.owner_token, never.generation);
+    assert.strictEqual(absent.ok, false);
+    assert.strictEqual(absent.reason, 'already_released', 'that name is reserved to "nothing was there"');
+
+    const owner = filelock.acquireFileLock(cwd, target, 'run-errno', 's', { ttlMs: 5000 });
+    assert.strictEqual(owner.acquired, true);
+    // The stub also reaches the internal mutex's own release, so this is the LAST measurement
+    // taken on this cwd: the guard file it leaves behind is expected debris, not a finding.
+    fs.unlinkSync = () => { throw Object.assign(new Error('name too long'), { code: 'ENAMETOOLONG' }); };
+    const detailed = filelock.releaseFileLockDetailed(cwd, target, 'run-errno', owner.owner_token, owner.generation);
+    assert.strictEqual(detailed.ok, false);
+    assert.strictEqual(detailed.reason, 'release-failed', 'a removal that failed is never called "already_released"');
+    assert.strictEqual(detailed.errno, 'ENAMETOOLONG', 'and the errno that caused it is carried, not swallowed');
+    fs.unlinkSync = realUnlink;
+    // The boolean shape of `releaseFileLock` is asserted by the six existing call sites and by
+    // the two length tests above; re-asserting it on this cwd would measure the stub's debris,
+    // not the export.
+  } finally { fs.unlinkSync = realUnlink; remove(cwd); }
+}
 function main() {
   console.log(`forge-filelock tests on ${process.platform}`);
   testOwnerScopedLifecycle();
@@ -118,6 +205,9 @@ function main() {
   testFreshOtherOwnerIsBusy();
   testCanonicalPathIdentity();
   testHolderAbsentVersusIllegible();
+  testReleaseSurvivesADeepLockName();
+  testReleaseWithAShortLockName();
+  testRemovalFailureIsNamedByErrno();
   console.log('forge-filelock tests passed');
 }
 try { main(); } catch (error) { console.error(error.stack || error); process.exitCode = 1; }

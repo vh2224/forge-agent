@@ -129,12 +129,45 @@ function renewFileLock(cwd, filePath, ownerToken, generation, opts) {
   return withGuard(cwd, canonical, (guard) => { const existing = readLock(file); if (!existing) return { ok: false, reason: 'already_released' }; if (existing.owner_token !== ownerToken || existing.generation !== generation) return { ok: false, reason: 'owner_mismatch' }; const renewed = { ...existing, renewed_at: now, ttl_ms: positive(opts.ttlMs, existing.ttl_ms || DEFAULT_TTL_MS) }; writeAtomic(file, renewed, guard); return { ok: true, reason: 'renewed', metadata: renewed }; });
 }
 function touchFileLock(cwd, filePath, opts) { opts = opts || {}; const canonical = canonicalPath(cwd, filePath), file = lockPathFor(cwd, canonical); return withGuard(cwd, canonical, (guard) => { const existing = readLock(file); if (!existing || existing.run_id !== opts.runId || existing.session_id !== opts.sessionId) return { ok:false, reason:'owner_mismatch' }; const renewed = { ...existing, renewed_at: nowOf(opts) }; writeAtomic(file, renewed, guard); return { ok:true, reason:'renewed', metadata:renewed }; }); }
-function releaseFileLock(cwd, filePath, runId, ownerToken, generation) {
+// The release used to rename the lock to `${file}.release-${generation}-${uuid}` before
+// unlinking it — **+78 characters** onto a name that already has no ceiling (`lockPathFor`
+// base64-encodes the whole absolute path). Once that crossed the OS limit (NAME_MAX 255 per
+// component on POSIX, MAX_PATH on win32) the bare `catch` answered
+// `{ ok: false, reason: 'already_released' }` — a NAME for an outcome that did not happen —
+// and `writeAtomic`'s callers swallow the `false`. The orphaned lock then killed the SECOND
+// write to the same fragment inside the TTL. Measured: 205 orphaned locks alive in this
+// workspace, and the active worktree's lock path at 316 chars (361 after the rename).
+//
+// The fix is to stop lengthening: unlink the lock itself. `mutex.assertOwned(guard)` now runs
+// immediately before the removal — strictly stronger than before (the release asserted no
+// ownership at all; the acquire already asserts), and it is what the rename used to stand in
+// for. `already_released` is RESERVED to the one case where it is true: `!existing`.
+// A removal that fails is named by its errno, never by a guess.
+//
+// The name without a ceiling is the ORIGIN cause and is deliberately NOT fixed here — see
+// `.gsd/items/` (Q1(d)): capping it changes the name of EVERY lock.
+function releaseFileLockDetailed(cwd, filePath, runId, ownerToken, generation) {
   // runId is retained for call-shape compatibility, but cannot prove ownership.
-  if (!ownerToken || !generation) return false;
+  if (!ownerToken || !generation) return { ok: false, reason: 'owner_token_required' };
   const canonical = canonicalPath(cwd, filePath); const file = lockPathFor(cwd, canonical);
-  const result = withGuard(cwd, canonical, () => { const existing = readLock(file); if (!existing) return { ok: false, reason: 'already_released' }; if (existing.owner_token !== ownerToken || existing.generation !== generation) return { ok: false, reason: 'owner_mismatch' }; const quarantine = `${file}.release-${generation}-${crypto.randomUUID()}`; try { fs.renameSync(file, quarantine); fs.unlinkSync(quarantine); return { ok: true, reason: 'released' }; } catch { return { ok: false, reason: 'already_released' }; } });
-  return result.ok;
+  const result = withGuard(cwd, canonical, (guard) => {
+    const existing = readLock(file);
+    if (!existing) return { ok: false, reason: 'already_released' };
+    if (existing.owner_token !== ownerToken || existing.generation !== generation) return { ok: false, reason: 'owner_mismatch' };
+    try { mutex.assertOwned(guard); fs.unlinkSync(file); return { ok: true, reason: 'released' }; }
+    catch (error) { return { ok: false, reason: 'release-failed', errno: (error && error.code) || null }; }
+  });
+  // `withGuard` answers `{ acquired: false, reason: 'guard_busy' }` when the mutex is taken —
+  // an object with no `.ok` at all. Normalizing it here is what keeps the detailed outcome from
+  // being born `undefined` (the boolean export read `result.ok` on that shape already).
+  if (!result || typeof result !== 'object') return { ok: false, reason: 'guard_busy' };
+  if (!('ok' in result)) return { ok: false, reason: result.reason || 'guard_busy' };
+  return result;
+}
+// Kept BOOLEAN: six call sites in the tests and `cliMain` depend on that shape.
+// `releaseFileLockDetailed` is the ADDITIVE export that makes the outcome observable.
+function releaseFileLock(cwd, filePath, runId, ownerToken, generation) {
+  return releaseFileLockDetailed(cwd, filePath, runId, ownerToken, generation).ok === true;
 }
 function checkFileLock(cwd, filePath, opts) {
   opts = opts || {}; const existing = readLock(lockPathFor(cwd, filePath)); if (!existing) return { held: false };
@@ -152,4 +185,4 @@ if (require.main === module) cliMain();
 // comportamento — só a visibilidade. Um helper privado conta como código
 // existente, então a saída para o TTL-como-rede de `forge-claim-release.js` é
 // exportar o dono, nunca uma terceira cópia do predicado de run inativa.
-module.exports = { acquireFileLock, renewFileLock, touchFileLock, releaseFileLock, checkFileLock, lockPathFor, encodePath, isHolderRunActive, classifyHolder, HOLDER_ACTIVITY, HOLDER_REASONS, DEFAULT_TTL_MS };
+module.exports = { acquireFileLock, renewFileLock, touchFileLock, releaseFileLock, releaseFileLockDetailed, checkFileLock, lockPathFor, encodePath, isHolderRunActive, classifyHolder, HOLDER_ACTIVITY, HOLDER_REASONS, DEFAULT_TTL_MS };
