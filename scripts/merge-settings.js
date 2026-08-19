@@ -9,6 +9,20 @@
 const fs   = require('fs');
 const path = require('path');
 
+// Resolved from the SAME source the installer uses, never reimplemented here:
+// a third copy of the home-resolution rule is exactly what this repo forbids.
+// Loaded defensively because this script's whole job is to write settings.json:
+// if the sibling is somehow absent, emitting the conventional path (what this
+// file did before) beats crashing and leaving the operator with no statusline
+// and no hooks at all. The catch is narrowed to THIS module not being found —
+// a syntax error inside forge-home.js must still be loud.
+let forgeHome = null;
+try {
+  forgeHome = require('./forge-home');
+} catch (error) {
+  if (error.code !== 'MODULE_NOT_FOUND' || !String(error.message).includes('forge-home')) throw error;
+}
+
 const settingsFile = process.argv[2];
 const remove       = process.argv.includes('--remove');
 const mcpAdd       = process.argv.includes('--mcp-add');
@@ -180,9 +194,41 @@ if (remove) {
 // (`.includes('forge-statusline.js')`), so both the old and the new path stay
 // removable; and because this assignment is unconditional, existing installs
 // migrate to the maintained path on their next merge.
+//
+// The `~/` form is DELIBERATE for the conventional home and is not laziness: a
+// settings.json carrying a tilde survives being synced to another machine or
+// another user, and an absolute path does not. It is also the literal Section
+// 106 of forge-smoke.js mines out of THIS source to prove the path is a managed
+// projection — a template expression here would blind that guard, which has
+// already been blind twice.
+//
+// So the tilde stays the default, and only a RELOCATED Forge home (#105) gets
+// an absolute path: `FORGE_HOME` is an operator-set variable that `~/` cannot
+// express, and emitting the default for that operator points the statusline at
+// a directory that may not exist.
+const STATUSLINE_CONVENTIONAL = 'node ~/.forge-agent/scripts/forge-statusline.js';
+
+// Forward slashes, always: Node accepts them on Windows too, while a backslash
+// inside a shell-quoted string is an escape on sh and a separator on cmd. The
+// quotes cover a home directory containing spaces.
+function statuslineCommand() {
+  if (!forgeHome) {
+    if (process.env.FORGE_HOME) {
+      console.error('  aviso: FORGE_HOME definido mas forge-home.js não foi encontrado ao lado deste script;'
+        + ' a statusline aponta para o caminho convencional e pode não existir');
+    }
+    return STATUSLINE_CONVENTIONAL;
+  }
+  const resolved = path.resolve(forgeHome.resolveForgeHome({}));
+  const conventional = path.resolve(path.join(forgeHome.resolveUserHome({}), '.forge-agent'));
+  if (resolved === conventional) return STATUSLINE_CONVENTIONAL;
+  const script = path.join(resolved, 'scripts', 'forge-statusline.js').split(path.sep).join('/');
+  return `node "${script}"`;
+}
+
 settings.statusLine = {
   type           : 'command',
-  command        : 'node ~/.forge-agent/scripts/forge-statusline.js',
+  command        : statuslineCommand(),
   refreshInterval: 1,
 };
 

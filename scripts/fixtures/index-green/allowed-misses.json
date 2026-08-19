@@ -20,10 +20,29 @@
     "MEM001/`expected_output:, MEM022/settings.json, MEM001/.md) foram todas medidas obsoletas contra",
     "o F2 pós-S05 deste repo — quatro fantasmas (mem_id não existe mais no store) e duas curadas",
     "(mem_id vivo, a menção específica não falha mais) — e removidas.",
-    "As três entradas abaixo foram adicionadas a partir da medição direta do store deste repo pós-S05",
+    "As três entradas então adicionadas vieram da medição direta do store deste repo pós-S05",
     "(nenhum valor inventado): `node scripts/forge-index-f2.js --cwd . --json`, inspecionando",
     "facts_missed_total/facts_missed_partial por mem_id e lendo o storage_key carregado por",
-    "classifyFact para cada fato correspondente."
+    "classifyFact para cada fato correspondente.",
+    "SUPERSEDIDO por _migration_A3 abaixo — o extrator mudou desde essa medição. Mantido como",
+    "registro de contra qual estado a lista de três entradas foi medida."
+  ],
+  "_migration_A3": [
+    "RE-MEDIDO no merge de origin/master a16581e8 (base eca7bfce) na branch da PR #125.",
+    "Motivo: a #124 mudou o extrator (fechou quatro dos seis gaps de citação), então o conjunto de",
+    "misses medido em S06 deixou de valer — as três entradas de _migration_S06 foram medidas contra",
+    "o extrator ANTIGO. As duas entradas que vinham de origin/master (MEM058/.md e MEM001/.md, sem",
+    "storage_key) também não sobreviveram: não aparecem em nenhum dos dois buckets desta medição.",
+    "A lista abaixo NÃO é a união dos dois lados do conflito — é o que o instrumento reportou.",
+    "Medição: `node scripts/forge-index-f2.js --cwd <workspace> --json` com o código pós-merge,",
+    "contra o store dogfood deste repo (.gsd/memory, 21 fragmentos, gitignored — vive no workspace",
+    "principal, não no worktree). Resultado: f2_recall 0.9230769230769231, citations_total 38,",
+    "facts_missed_total 1 fato, facts_missed_partial 1 fato — duas chaves qualificadas ao todo.",
+    "Removida por CURA (não por escolha): T-20260717151823-corrigir-bug-1-stub::MEM003::.tsx —",
+    "o par de extensões nuas (.jsx/.tsx) passou a ser citado pelo extrator da #124 e não falha mais.",
+    "Mantê-la seria entrada stale, que reprova o gate na direção inversa por desenho.",
+    "As duas entradas sobreviventes conservam item e reason da medição de S06 — a razão da miss",
+    "(extensão nua, sem arquivo concreto) não mudou; só a população medida mudou."
   ],
   "allowed": [
     {
@@ -32,13 +51,6 @@
       "mention": ".swift",
       "item": "#107",
       "reason": "menção da extensão .swift nua (não de um arquivo concreto) — o extrator corretamente não cita"
-    },
-    {
-      "storage_key": "T-20260717151823-corrigir-bug-1-stub",
-      "mem_id": "MEM003",
-      "mention": ".tsx",
-      "item": "#107",
-      "reason": "par de extensões nuas (.jsx/.tsx), não um arquivo concreto — o extrator corretamente não cita"
     },
     {
       "storage_key": "M-20260813131121-varredura-classe-eol__T01",

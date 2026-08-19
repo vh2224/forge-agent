@@ -62,7 +62,13 @@ const CITATION_REGEXES = [
   {
     name: 'bare-path',
     // some/dir/file.ext outside backticks
-    regex: new RegExp('(?<![`\\w./\\-@])([\\w.\\-@]+(?:/[\\w.\\-@]+)+\\.' + CODE_EXT + ')(?::(\\d+))?(?:[ \\t]+linha[ \\t]+(\\d+))?(?![`\\w])', 'g'),
+    // #107: `~/...` é caminho relativo ao home. O lookbehind bloqueava `/`,
+    // então NENHUM padrão via a menção: nem este (a extensão está lá, mas a
+    // varredura só podia começar depois do `/`, que é caractere bloqueado) nem
+    // `bare-basename` (o `/` imediatamente antes do nome também o bloqueia).
+    // O prefixo entra explícito em vez de `~` entrar na classe geral: assim a
+    // única forma nova aceita é a que foi medida, e `a~b/c.js` não vira caso.
+    regex: new RegExp('(?<![`\\w./\\-@~])((?:~/)?[\\w.\\-@]+(?:/[\\w.\\-@]+)+\\.' + CODE_EXT + ')(?::(\\d+))?(?:[ \\t]+linha[ \\t]+(\\d+))?(?![`\\w])', 'g'),
     description: 'Caminho com barra e extensão de código/markdown fora de crases.',
   },
   {
@@ -510,6 +516,18 @@ function resolveCitation(citation, cwd, index) {
 
     const root = path.resolve(cwd);
     const candidatePath = citation.path;
+
+    // #107: `~/...` é relativo ao HOME, nunca ao workspace. Sem esta linha o
+    // caminho cai em `path.resolve(root, '~/x')` — lexicamente dentro da raiz —
+    // e termina em `not-found`, que AFIRMA que um arquivo está faltando quando
+    // ele nunca deveria estar aqui. Pior: o casamento por basename poderia
+    // resolvê-lo para um arquivo homônimo do repo, citando o arquivo errado.
+    // `outside-root` é a razão que já existe e já significa exatamente isto —
+    // o relatório a agrupa em "por design não são arquivo", junto de
+    // package-ref e dynamic.
+    if (/^~[\/]/.test(candidatePath)) {
+      return { state: 'UNRESOLVED', reason: 'outside-root' };
+    }
 
     // Absolute path or path escaping the root → outside-root, before any disk access.
     if (path.isAbsolute(candidatePath)) {

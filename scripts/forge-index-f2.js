@@ -108,6 +108,28 @@ function detectorFalsePositive(mention) {
   // are keywords/flags. A backticked token only stays signal with a slash or a
   // real file extension.
   if (wrapped && !inner.includes('/') && (!suffix || !REAL_FILE_EXT.has(suffix))) return 'keyword/flag entre crases, sem extensão de arquivo nem barra';
+  // #107: a slash does not make a path. Two shapes reached here as signal and
+  // depressed recall against an extractor that was RIGHT to ignore them.
+  //
+  // (a) A list of backticked tokens joined by `/` — ``writes:`/`expected_output:`` — is
+  //     schema keys, not a path. The tell is exact and cannot occur in a real
+  //     path: after the OUTER backticks come off, a backtick is still inside.
+  //     A genuine backticked path (`scripts/foo.js`) unwraps to none.
+  if (wrapped && inner.includes('`')) return 'lista de tokens entre crases unida por /, não um caminho';
+  // (b) A pair of bare extensions — `(.cmd/.bat)` — names two suffixes, not a
+  //     file. Every segment being a bare `.ext` is what separates it from a
+  //     real path: `src/.env` has a segment that is not an extension, and a
+  //     lone `.env` has no slash at all, so neither is touched. This is the
+  //     narrow half of the ambiguity #107 describes — the lone `.md` case
+  //     stays deliberately unfixed, because no lexical tell separates it from
+  //     a real dotfile.
+  // `parts`, não `segments`: `mentionKind` acima tem uma linha quase idêntica
+  // (`segments.length >= 2 && segments.every(...)`) e os dois nomes iguais em
+  // funções vizinhas já confundiram uma edição desta própria PR.
+  const parts = inner.split('/');
+  if (parts.length >= 2 && parts.every((part) => /^\.[A-Za-z0-9]{1,6}$/.test(part))) {
+    return 'par/lista de extensões nuas unidas por /, não um arquivo concreto';
+  }
   // Dotted identifiers (`JSON.parse`, `turn.id`, `v2.0`, `cmd.exe`) end in a
   // "suffix" that is not a real file extension — prose, not a citation target.
   if (suffix && !REAL_FILE_EXT.has(suffix)) return 'sufixo não é extensão de arquivo real (identificador com ponto)';

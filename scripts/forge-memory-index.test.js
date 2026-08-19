@@ -237,6 +237,55 @@ test('false negative: name@version is enumerated as package-ref', () => {
   assertEq(resolved.reason, 'package-ref');
 });
 
+// ── #107: `~/...` era invisível para TODOS os padrões ──────────────────────
+//
+// O lookbehind de `bare-path` bloqueia `/`, então a varredura não podia começar
+// em `.claude`; e `bare-basename` também é bloqueado pelo `/` imediatamente
+// antes do nome. Resultado medido: duas menções reais do store
+// (o arquivo de prefs global e `~/.claude/settings.json`) sem citação
+// nenhuma, e nada no relatório dizia por quê.
+
+test('#107 uma menção ~/ é citada, inteira, pelo bare-path', () => {
+  for (const [text, expected] of [
+    // Nome neutro de propósito: o gap medido é o PREFIXO `~/`, e o arquivo de
+    // prefs legado tem guard próprio no smoke restringindo onde pode aparecer.
+    ['As anotações globais vivem em ~/.claude/anotacoes.md hoje.', '~/.claude/anotacoes.md'],
+    ['O hook é registrado em ~/.claude/settings.json pelo merge.', '~/.claude/settings.json'],
+  ]) {
+    const cites = extractCitations(text);
+    assertEq(cites.length, 1);
+    assertEq(cites[0].path, expected);
+    assertEq(cites[0].pattern, 'bare-path');
+  }
+});
+
+test('#107 a citação ~/ é outside-root, nunca not-found nem resolvida por homônimo', () => {
+  // A razão importa: `not-found` AFIRMA que um arquivo do repo está faltando.
+  // Um caminho relativo ao home nunca deveria estar aqui, e o relatório agrupa
+  // `outside-root` em "por design não é arquivo", junto de package-ref/dynamic.
+  const cite = extractCitations('O hook fica em ~/.claude/settings.json hoje.')[0];
+  const resolved = resolveCitation(cite, process.cwd(), null);
+  assertEq(resolved.state, 'UNRESOLVED');
+  assertEq(resolved.reason, 'outside-root');
+
+  // E o risco pior, coberto: sem a checagem ANTES do disco, o casamento por
+  // basename poderia resolver `~/.claude/settings.json` para um settings.json
+  // qualquer do repo — citando o arquivo errado com ar de sucesso.
+  const index = { files: ['a/settings.json'], byBasename: new Map([['settings.json', ['a/settings.json']]]), capped: false };
+  assertEq(resolveCitation(cite, process.cwd(), index).reason, 'outside-root');
+});
+
+test('#107 controle: o alargamento é só do prefixo ~/, e caminhos normais não mudam', () => {
+  // Se `~` tivesse entrado na classe geral em vez de como prefixo explícito,
+  // este caso viraria uma citação inventada.
+  assertEq(extractCitations('Cerca de ~15/20 unidades foram medidas.').length, 0);
+  const normal = extractCitations('Veja scripts/forge-runs.js aqui.');
+  assertEq(normal.length, 1);
+  assertEq(normal[0].path, 'scripts/forge-runs.js');
+  assertEq(normal[0].pattern, 'bare-path');
+});
+
+
 test('locked citation pattern names remain present', () => {
   const names = CITATION_REGEXES.map((entry) => entry.name);
   for (const name of ['backticked-path', 'bare-path', 'backticked-basename', 'bare-basename']) {

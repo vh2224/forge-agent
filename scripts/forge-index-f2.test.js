@@ -297,4 +297,47 @@ test('descarte das novas classes é enumerado no relatório com motivo nomeado',
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
+// ── #107: duas classes que o detector contava como sinal e o extrator estava
+// CERTO em ignorar. Corrigi-las no DETECTOR, e não alargando o extrator, é a
+// diferença entre subtrair ruído do denominador e fabricar citação irresolúvel.
+
+test('#107 lista de tokens entre crases unida por / não é caminho', () => {
+  const motivo = 'lista de tokens entre crases unida por /, não um caminho';
+  const fps = new Map(fpOf('Os campos `writes:`/`expected_output:` do frontmatter.'));
+  assert.strictEqual([...fps.values()][0], motivo, JSON.stringify([...fps]));
+  assert.deepStrictEqual(detectSignalMentions('Os campos `writes:`/`expected_output:` ali.'), []);
+
+  // Controle: um caminho REAL entre crases não tem crase por dentro depois de
+  // desembrulhado, então continua sendo sinal. Sem este assert a regra poderia
+  // matar toda citação backticada e o teste acima ainda passaria.
+  assert.deepStrictEqual(
+    detectSignalMentions('Veja `scripts/forge-runs.js` aqui.').map((m) => m.normalized),
+    ['forge-runs.js']);
+});
+
+test('#107 par de extensões nuas unidas por / não é arquivo', () => {
+  const motivo = 'par/lista de extensões nuas unidas por /, não um arquivo concreto';
+  const fps = new Map(fpOf('O wrapper existe nas formas (.cmd/.bat) no PATH.'));
+  assert.strictEqual(fps.get('(.cmd/.bat)'), motivo, JSON.stringify([...fps]));
+  assert.deepStrictEqual(detectSignalMentions('Formas (.cmd/.bat) no PATH.'), []);
+
+  // Controles nas DUAS direções em que a regra poderia ser larga demais:
+  // um dotfile real com barra tem segmento que não é extensão...
+  assert.deepStrictEqual(
+    detectSignalMentions('O arquivo src/.env é lido em runtime.').map((m) => m.normalized),
+    ['.env']);
+  // ...e um dotfile solto não tem barra nenhuma, então a regra nem a alcança.
+  assert.deepStrictEqual(detectSignalMentions('Leia o .env da raiz.').map((m) => m.normalized), ['.env']);
+});
+
+test('#107 controle: a extensão .md nua PERMANECE sinal — ambiguidade declarada, não conserto silencioso', () => {
+  // `.md` e `.env` têm a mesma forma e um dos dois é arquivo real. Nenhuma regra
+  // lexical os separa, então esta entrada segue na allowed-misses por decisão.
+  // O assert existe para que um conserto futuro tenha de removê-la de propósito.
+  assert.deepStrictEqual(
+    detectSignalMentions('A extensão .md é tratada de forma especial.').map((m) => m.normalized),
+    ['.md']);
+});
+
+
 console.log(`\n${passed} testes F2 passaram`);

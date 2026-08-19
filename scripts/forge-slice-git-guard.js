@@ -21,8 +21,21 @@
 // move the default branch, or create a merge commit.
 //
 // Usage:
-//   node forge-slice-git-guard.js --snapshot --cwd <dir> --unit complete-slice/S05
-//   node forge-slice-git-guard.js --verify   --cwd <dir> --unit complete-slice/S05
+//   node forge-slice-git-guard.js --snapshot --cwd <dir> --unit complete-slice/S05 \
+//        --gsd-dir <workspace>/.gsd --run <RUN_ID>
+//   node forge-slice-git-guard.js --verify   --cwd <dir> --unit complete-slice/S05 \
+//        --gsd-dir <workspace>/.gsd --run <RUN_ID>
+//
+// WHAT THIS GUARD DOES NOT SEE (item #112, documented rather than fixed, so a
+// clean verdict is never read as more than it is):
+//   * `git push` — no remote state is consulted at all, so the template's
+//     prohibition on pushing is unverifiable from here.
+//   * `rebase` / `pull --rebase` of the run branch — the branch name does not
+//     move and no merge commit appears, so all three checks stay clean.
+//   * `reset --hard` that DISCARDS commits — check 1 compares branch NAMES and
+//     check 3 asks `rev-list old..new`, which is empty when history rewinds.
+// So `clean` means "none of the three measured violations happened", never
+// "the repository was not touched".
 //
 // The snapshot is persisted to disk (.gsd/forge/), never carried in a shell
 // variable: shell state does not survive between orchestrator Bash calls (the
@@ -54,9 +67,29 @@ function isGitRepo(cwd) {
   return git(cwd, ['rev-parse', '--is-inside-work-tree']) === 'true';
 }
 
-function snapshotPath(cwd, unit) {
-  const slug = String(unit || 'unit').replace(/[^A-Za-z0-9._-]+/g, '-');
-  return path.join(cwd, '.gsd', 'forge', `slice-git-snapshot-${slug}.json`);
+function slug(value, fallback) {
+  return String(value || fallback).replace(/[^A-Za-z0-9._-]+/g, '-');
+}
+
+// Two facts decide this path, and both were wrong before (item #112).
+//
+// WHERE. Callers pass `--cwd "$CODE_DIR"`, so under `worktree` isolation this
+// wrote `.gsd/` INSIDE the worktree — against the standing convention that
+// `.gsd/**` always lives in the original workspace, and creating an untracked
+// file that can make `cleanupWorktreeOne`'s dirty-check report `skipped (dirty)`
+// in a project that does not gitignore `.gsd/`. `--gsd-dir` is the same seam
+// TASK-020 added to `forge-reverify`, with the same meaning: the path OF the
+// `.gsd` directory, not of the workspace above it.
+//
+// WHICH RUN. The name carried the unit and nothing else, so two runs closing
+// the same `S##` in one workspace wrote the same file — one run's baseline
+// silently answering for the other's. `--run` scopes it. Omitting the flag
+// reproduces the previous name byte for byte, so a caller with no run id is
+// never forced to invent one.
+function snapshotPath(cwd, unit, opts = {}) {
+  const gsdDir = opts.gsdDir ? path.resolve(opts.gsdDir) : path.join(cwd, '.gsd');
+  const run = opts.run ? slug(opts.run, 'run') + '-' : '';
+  return path.join(gsdDir, 'forge', 'slice-git-snapshot-' + run + slug(unit, 'unit') + '.json');
 }
 
 // ---------------------------------------------------------------- snapshot
@@ -81,17 +114,46 @@ function snapshot(cwd, unit) {
   };
 }
 
-function writeSnapshot(cwd, unit) {
+function writeSnapshot(cwd, unit, opts = {}) {
   const snap = snapshot(cwd, unit);
-  const file = snapshotPath(cwd, unit);
+  const file = snapshotPath(cwd, unit, opts);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(snap, null, 2) + '\n', 'utf8');
   return { snapshot: snap, file };
 }
 
-function readSnapshot(cwd, unit) {
-  try { return JSON.parse(fs.readFileSync(snapshotPath(cwd, unit), 'utf8')); }
+function readSnapshot(cwd, unit, opts = {}) {
+  try { return JSON.parse(fs.readFileSync(snapshotPath(cwd, unit, opts), 'utf8')); }
   catch { return null; }
+}
+
+// A snapshot is a baseline for exactly ONE verify, and it is spent by being
+// read. Leaving it on disk is what let a skipped snapshot step be answered by
+// an older session's baseline — the caller cannot tell a fresh reading from a
+// stale one, and the guard reported `clean` against a world that had moved.
+//
+// Consumption is preferred over an age threshold on `taken_at` because there is
+// no measured number to put in one: a `complete-slice` worker legitimately runs
+// for minutes, and any cutoff would be invented rather than derived. Removing
+// the file turns "stale baseline" into `snapshot-missing`, which this module
+// already reports as `inconclusive` — the direction this repo always errs in.
+// The age is still reported, so a reader can see how old the baseline was.
+function consumeSnapshot(cwd, unit, opts = {}) {
+  const file = snapshotPath(cwd, unit, opts);
+  const snap = readSnapshot(cwd, unit, opts);
+  let removed = false;
+  if (snap !== null) {
+    try { fs.unlinkSync(file); removed = true; } catch { /* best effort: the verdict never depends on it */ }
+  }
+  return { snapshot: snap, file, removed };
+}
+
+// `null` when the snapshot carries no usable `taken_at` — absent and unparseable
+// are the same fact here (we cannot say how old it is) and neither of them is 0.
+function snapshotAgeMs(snap, now = Date.now()) {
+  if (!snap || !snap.taken_at) return null;
+  const taken = Date.parse(snap.taken_at);
+  return Number.isFinite(taken) ? now - taken : null;
 }
 
 // ------------------------------------------------------------------ verify
@@ -225,13 +287,15 @@ function finalize(checks) {
 // --------------------------------------------------------------------- CLI
 
 function parseArgv(argv) {
-  const out = { mode: null, cwd: process.cwd(), unit: 'complete-slice' };
+  const out = { mode: null, cwd: process.cwd(), unit: 'complete-slice', gsdDir: null, run: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--snapshot') out.mode = 'snapshot';
     else if (a === '--verify') out.mode = 'verify';
     else if (a === '--cwd') out.cwd = argv[++i];
     else if (a === '--unit') out.unit = argv[++i];
+    else if (a === '--gsd-dir') out.gsdDir = argv[++i];
+    else if (a === '--run') out.run = argv[++i];
   }
   return out;
 }
@@ -239,17 +303,24 @@ function parseArgv(argv) {
 function main(argv) {
   const opts = parseArgv(argv);
   if (!opts.mode) {
-    process.stderr.write('usage: forge-slice-git-guard.js --snapshot|--verify --cwd <dir> --unit <unit>\n');
+    process.stderr.write('usage: forge-slice-git-guard.js --snapshot|--verify --cwd <dir> --unit <unit> [--gsd-dir <dir>] [--run <id>]\n');
     return EXIT.ERROR;
   }
   const cwd = path.resolve(opts.cwd);
+  const where = { gsdDir: opts.gsdDir, run: opts.run };
   if (opts.mode === 'snapshot') {
-    const res = writeSnapshot(cwd, opts.unit);
+    const res = writeSnapshot(cwd, opts.unit, where);
     process.stdout.write(JSON.stringify(res) + '\n');
     return EXIT.OK;
   }
-  const result = verify(cwd, readSnapshot(cwd, opts.unit));
+  // Consumed, not merely read: see consumeSnapshot. `snapshot_removed` is
+  // reported so a failure to remove is visible rather than assumed.
+  const taken = consumeSnapshot(cwd, opts.unit, where);
+  const result = verify(cwd, taken.snapshot);
   result.unit = opts.unit;
+  result.snapshot_file = taken.file;
+  result.snapshot_removed = taken.removed;
+  result.snapshot_age_ms = snapshotAgeMs(taken.snapshot);
   process.stdout.write(JSON.stringify(result) + '\n');
   if (result.verdict === VERDICTS.VIOLATION) {
     for (const v of result.violations) {
@@ -263,4 +334,4 @@ function main(argv) {
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));
 
-module.exports = { VERDICTS, EXIT, snapshot, writeSnapshot, readSnapshot, snapshotPath, verify, main };
+module.exports = { VERDICTS, EXIT, snapshot, writeSnapshot, readSnapshot, consumeSnapshot, snapshotAgeMs, snapshotPath, verify, main };

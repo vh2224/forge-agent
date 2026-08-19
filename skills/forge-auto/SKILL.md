@@ -710,12 +710,12 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
 
 ```bash
 # before Agent("forge-completer", ...)
-node "$FORGE_SCRIPTS_DIR/forge-slice-git-guard.js" --snapshot --cwd "$CODE_DIR" --unit "complete-slice/{S##}" > /dev/null
+node "$FORGE_SCRIPTS_DIR/forge-slice-git-guard.js" --snapshot --cwd "$CODE_DIR" --gsd-dir "$WORKING_DIR/.gsd" --run "$RUN_ID" --unit "complete-slice/{S##}" > /dev/null
 # after it returns
-node "$FORGE_SCRIPTS_DIR/forge-slice-git-guard.js" --verify --cwd "$CODE_DIR" --unit "complete-slice/{S##}"
+node "$FORGE_SCRIPTS_DIR/forge-slice-git-guard.js" --verify --cwd "$CODE_DIR" --gsd-dir "$WORKING_DIR/.gsd" --run "$RUN_ID" --unit "complete-slice/{S##}"
 ```
 
-The snapshot is written to `.gsd/forge/` on purpose — shell variables do not survive between Bash calls. Exit `3` = violation (moved checkout, advanced default branch, or new merge commit): print it LOUDLY, append a `slice-git-violation` event, and **suppress any push for the rest of this run** regardless of `auto_push` — nothing is pushed yet, so `git reset --hard` on the default branch still recovers it. A violation is one of the few conditions worth surfacing mid-loop: an incomplete milestone on the default branch, or a checkout left outside the isolation branch, corrupts every subsequent slice. Verdict `inconclusive` means nothing was measurable and **must not** be read as clean. The guard never blocks the loop; it reports.
+The snapshot is written to `.gsd/forge/` on purpose — shell variables do not survive between Bash calls. `--gsd-dir` and `--run` are **not optional here** (item #112): `--cwd` is the `CODE_DIR`, so without `--gsd-dir` the baseline lands inside the worktree — against the `.gsd/**`-stays-in-the-workspace convention, and as an untracked file that can make `cleanupWorktreeOne` report `skipped (dirty)`; and without `--run` two runs closing the same `{S##}` in one workspace share a file, so one run's baseline answers for the other. The baseline is **spent by the verify** — call `--snapshot` immediately before every dispatch, never once for several verifies, or the second one reports `inconclusive` (never `clean`). Exit `3` = violation (moved checkout, advanced default branch, or new merge commit): print it LOUDLY, append a `slice-git-violation` event, and **suppress any push for the rest of this run** regardless of `auto_push` — nothing is pushed yet, so `git reset --hard` on the default branch still recovers it. A violation is one of the few conditions worth surfacing mid-loop: an incomplete milestone on the default branch, or a checkout left outside the isolation branch, corrupts every subsequent slice. Verdict `inconclusive` means nothing was measurable and **must not** be read as clean. The guard never blocks the loop; it reports.
 
 **Review triage gate (before complete-milestone):** If `unit_type == complete-milestone`, run the **milestone-final triage** (`shared/forge-review.md § Step 9`) BEFORE dispatching `forge-completer` — i.e., before the milestone is finalized "de fato" (final close-out, LEDGER entry, cleanup):
 

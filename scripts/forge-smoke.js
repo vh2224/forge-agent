@@ -9048,9 +9048,20 @@ function smokeSandboxExecBlocked() {
     ['skills/forge-next/SKILL.md', '--gsd-dir "$WORKING_DIR/.gsd"'],
     ['skills/forge-task/SKILL.md', '--gsd-dir "${WORKING_DIR:-.}/.gsd"'],
   ];
+  // Scoped to the forge-reverify invocation ON PURPOSE. Counting the bare flag
+  // string anywhere in the file was a proxy, and it broke the moment another
+  // script legitimately needed the same seam: item #112 gave
+  // forge-slice-git-guard `--gsd-dir` for exactly the reason TASK-020 gave it to
+  // forge-reverify. That is the mirror image of the Section 106 mistake — a
+  // guard written around one caller going blind, or loud, at the next one. What
+  // this assertion actually means is "the re-verification call is wired with the
+  // workspace .gsd, once", and that is what it now measures.
   for (const [file, flag] of gsdFlagDocs) {
-    const count = fs.readFileSync(path.join(REPO, file), 'utf8').split(flag).length - 1;
-    assert(count === 1, `(d) ${file} carries exactly one executable --gsd-dir flag`, String(count));
+    const calls = fs.readFileSync(path.join(REPO, file), 'utf8').split('\n')
+      .filter((line) => line.includes('forge-reverify.js'));
+    const carrying = calls.filter((line) => line.includes(flag));
+    assert(carrying.length === 1,
+      `(d) ${file} wires exactly one executable --gsd-dir on the forge-reverify call`, String(carrying.length));
   }
   const wrapper = new Function('exports', 'require', 'module', '__filename', '__dirname',
     `${fs.readFileSync(path.join(SCRIPTS, 'forge-xllm.js'), 'utf8').replace(/^#![^\n]*\n/, '')}\nmodule.exports.__section71={planSchema,buildPlanPrompt};`);

@@ -29,6 +29,12 @@
 //     both directions.
 // R4  enable is idempotent: a second run leaves settings byte-identical and
 //     never duplicates hook entries.
+// R5  a RELOCATED Forge home (#105) is followed instead of assumed: the tilde
+//     form is emitted for the conventional home and only for it, so the fix
+//     never absolutizes a settings.json that was portable before.
+// R6  --remove still deletes a statusLine written in the relocated (absolute)
+//     form — a third vintage of the path, and the basename predicate has to
+//     cover it or a relocated operator cannot turn the statusline off.
 //
 // Zero deps. Standalone runner, repo convention: exit != 0 on failure.
 
@@ -82,9 +88,9 @@ function cleanup() {
 }
 
 /** Run the real CLI against a settings file; return { status, settings }. */
-function run(settingsFile, extraArgs) {
+function run(settingsFile, extraArgs, env) {
   const r = spawnSync(process.execPath, [MODULE, settingsFile, ...(extraArgs || [])],
-    { encoding: 'utf8', stdio: 'pipe' });
+    { encoding: 'utf8', stdio: 'pipe', env: env ? { ...process.env, ...env } : process.env });
   let settings = null;
   try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { /* asserted by caller */ }
   return { status: r.status, settings, stderr: r.stderr };
@@ -188,6 +194,73 @@ test('R4: enable twice is byte-identical and never duplicates hook entries', () 
   const postAgent = (settings.hooks.PostToolUse || []).find((e) => e.matcher === 'Agent');
   assert(postAgent && postAgent.hooks.filter((h) => (h.command || '').includes('forge-hook.js')).length === 1,
     'exactly one forge hook per matcher entry after two enables');
+});
+
+// ── R5: a relocated Forge home is followed, not assumed ─────────────────────
+//
+// The path was hardcoded. `resolveForgeHome` reads FORGE_HOME from the
+// environment, so an operator who relocated the home got a statusline aimed at
+// `~/.forge-agent`, which for them may not exist. Note the asymmetry that scopes
+// this fix: the CLAUDE home has NO environment variable — `resolveRuntimeHome`
+// takes it as a caller option only — so the hook commands cannot be resolved the
+// same way from a standalone CLI, and are deliberately left alone here.
+
+test('R5: a relocated FORGE_HOME is followed — absolute, forward-slashed, quoted', () => {
+  const home = path.join(mktmp(), 'forge home relocado');   // space on purpose
+  const file = seed(mktmp(), {});
+  const { status, settings } = run(file, [], { FORGE_HOME: home });
+  assertEqual(status, 0, 'enable exits 0 with a relocated home');
+  const command = settings.statusLine.command;
+  assert(command !== MAINTAINED_COMMAND,
+    'the relocated home still got the conventional path — the defect #105 describes');
+  assert(command.includes(path.basename(home)),
+    `the command does not name the relocated home: ${command}`);
+  assert(command.endsWith('/forge-statusline.js"'),
+    `the command must end at the quoted script, forward-slashed: ${command}`);
+  // String.fromCharCode(92) instead of a literal: this assertion is about the
+  // backslash itself, and writing one here would put the reader in the same
+  // escaping layer the assertion exists to police.
+  assert(!command.includes(String.fromCharCode(92)),
+    `no backslash may reach the shell (escape on sh, separator on cmd): ${command}`);
+  assert(/^node "/.test(command),
+    `a home containing a space must be quoted or the command splits: ${command}`);
+});
+
+test('R5b control: FORGE_HOME pointing AT the conventional home keeps the tilde', () => {
+  // The rule is "relocated", not "always absolute". Without this control the
+  // implementation could satisfy R5 by absolutizing everyone — silently
+  // destroying the portability of every settings.json that syncs across
+  // machines, which is the whole reason the tilde is there.
+  const conventional = path.join(os.homedir(), '.forge-agent');
+  const file = seed(mktmp(), {});
+  const { status, settings } = run(file, [], { FORGE_HOME: conventional });
+  assertEqual(status, 0, 'enable exits 0');
+  assertEqual(settings.statusLine.command, MAINTAINED_COMMAND,
+    'an explicitly-conventional FORGE_HOME must collapse back to the portable tilde form');
+});
+
+test('R5c control: with no FORGE_HOME the emitted command is byte-identical to before', () => {
+  const file = seed(mktmp(), {});
+  const { status, settings } = run(file, [], { FORGE_HOME: '' });
+  assertEqual(status, 0, 'enable exits 0');
+  assertEqual(settings.statusLine.command, MAINTAINED_COMMAND,
+    'the default path changed — this fix must be invisible to everyone who did not relocate');
+});
+
+// ── R6: remove covers the third vintage of the path ─────────────────────────
+
+test('R6: --remove deletes a statusLine written in the relocated absolute form', () => {
+  const home = path.join(mktmp(), 'forge home relocado');
+  const dir = mktmp();
+  const file = seed(dir, {});
+  run(file, [], { FORGE_HOME: home });
+  const relocated = JSON.parse(fs.readFileSync(file, 'utf8')).statusLine.command;
+  assert(relocated.includes('forge-statusline.js'), 'precondition: the relocated command was written');
+
+  const { status, settings } = run(file, ['--remove'], { FORGE_HOME: home });
+  assertEqual(status, 0, 'remove exits 0');
+  assert(!settings.statusLine,
+    'a relocated operator could not turn the statusline off — the basename predicate missed the third vintage');
 });
 
 // ── summary ─────────────────────────────────────────────────────────────────
