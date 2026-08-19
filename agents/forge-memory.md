@@ -169,6 +169,8 @@ The CLI merges with any existing fragment (dedup by `mem_id` for facts, dedup by
 
 After the `--write` call, check its exit code. If non-zero, output the stderr to the result block as a warning. Do not retry.
 
+**Exit 0 with `"quarantined": true` in the stdout JSON is NOT a failure — and NOT a successful write either.** The unit's envelope already lives inside a grouped container, so the write was **refused by design** and the facts did **not** enter the store; the bytes were parked in the quarantine sidecar named by `path`. Do **not** retry, do **not** treat it as an error of this unit, and do **not** report the fragment as written. Report the refusal in the result block naming the `container` and the `remedy` copied verbatim from the same JSON, then continue. (The exit code stays 0 on purpose — decision S03/IN-14, "the hot caller never breaks"; the audible signal is this field, not `$?`.)
+
 The fragment file is now at:
 ```
 <WORKING_DIR>/.gsd/memory/<MILESTONE_ID>__<UNIT_ID>.md

@@ -9,6 +9,7 @@ const { spawnSync } = require('child_process');
 const memory = require('./forge-memory');
 const ledger = require('./forge-ledger');
 const distill = require('./forge-distill');
+const { serializeGroup } = require('./forge-grouped-file');
 
 const ID = 'M123';
 const script = path.join(__dirname, 'forge-distill.js');
@@ -866,6 +867,46 @@ console.log('PASS: forge-distill S02/T03 (ANY labels shipped with enumerated con
   const plan = summaryOnly('## Decisões-chave do milestone\n- D3: um bullet, uma vez só\n');
   assert.deepStrictEqual(plan.id_collisions, []);
   assert.strictEqual(plan.candidates.length, 1, JSON.stringify(plan.candidates));
+}
+
+// A1 (review PR #125) — a write REFUSED by the grouped-member quarantine is not
+// an APPLIED one. Real fixture, not a monkeypatch: the milestone's own envelope is
+// moved into a container (the mould from forge-memory-quarantine.test.js) and the
+// loose file removed, so writeFragment takes the refusal branch for real.
+// Before the fix this returned verdict APPLIED with `fragment_path` naming the
+// quarantine sidecar, and `written: false` could not tell it apart from the
+// idempotent no-op, which returns the very same value.
+{
+  const cwd = fixture(); const c = candidate(cwd);
+  // Seed the milestone fragment, group it, drop the loose file.
+  memory.writeFragment(cwd, { unit_id: ID, facts: [{ mem_id: 'MEM001', category: 'test', text: 'sealed fact', source: 'a1-test' }], stats: [] }, {});
+  const loose = memory.fragmentPath(cwd, ID, {});
+  const units = [{ id: memory.qualifiedStorageKey(ID, null), content: fs.readFileSync(loose) }];
+  const container = path.join(memory.memoryDir(cwd), 'sweep-project-01.md');
+  fs.writeFileSync(container, serializeGroup({ epoch: 'sweep-project-01', units }).buffer);
+  fs.unlinkSync(loose);
+
+  const originalWrite = process.stderr.write; // the refusal narrates on stderr by design
+  let result;
+  try { process.stderr.write = () => true; result = distill.applyDistill(cwd, ID, completeSelection(cwd, [keep(c)])); }
+  finally { process.stderr.write = originalWrite; }
+
+  assert.strictEqual(result.verdict, 'QUARANTINED', JSON.stringify(result));
+  assert.strictEqual(result.fragment_path, null, 'the quarantine sidecar is NOT the fragment');
+  assert.strictEqual(result.written, false);
+  assert.strictEqual(result.reason, 'grouped-member');
+  assert.strictEqual(result.container, container);
+  assert(typeof result.remedy === 'string' && result.remedy.length > 0, 'the remedy must reach the consumer');
+  assert(typeof result.quarantine_path === 'string' && result.quarantine_path.length > 0, JSON.stringify(result));
+  assert(fs.existsSync(result.quarantine_path), 'the quarantine record must exist on disk');
+  assert.strictEqual(path.basename(path.dirname(result.quarantine_path)), 'quarantine');
+  assert.strictEqual(path.dirname(path.dirname(result.quarantine_path)), memory.memoryDir(cwd));
+  // No key the APPLIED path emitted may go missing: no --json consumer loses a field.
+  for (const key of ['verdict', 'written', 'already_present', 'deduped_in_batch', 'fragment_path', 'dst_facts_total', 'preview']) {
+    assert(key in result, `QUARANTINED dropped the key ${key}`);
+  }
+  // And nothing landed in the store.
+  assert.strictEqual(fs.existsSync(loose), false, 'a refused write must not create the loose fragment');
 }
 
 console.log('PASS: forge-distill review-fix/S02 (R1 inline flow, R2 full-digest dedupe)');

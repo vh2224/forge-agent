@@ -627,6 +627,29 @@ function applyDistill(cwd, milestoneId, selection, opts = {}) {
   let fragmentPath = current.fragment ? memory.listFragments(cwd).find(entry => entry.unitId === milestoneId)?.path : undefined;
   if (facts.length) {
     const result = memory.writeFragment(cwd, { unit_id: milestoneId, facts }, {});
+    // A1 (review PR #125) — a refused write is NOT an applied one. writeFragment
+    // returns { quarantined: true, path: <quarantine sidecar>, container, reason,
+    // remedy } when the unit's key already lives inside a grouped container: the
+    // facts never reach the store. Reporting that as APPLIED with `path` in
+    // `fragment_path` names the quarantine sidecar as if it were the fragment, and
+    // `written: false` cannot disambiguate it — that is the very same value the
+    // idempotent no-op returns. Own verdict, `fragment_path: null`, and the
+    // quarantine path in a field of its own.
+    if (result.quarantined) {
+      return {
+        verdict: 'QUARANTINED',
+        written: false,
+        quarantine_path: result.path,
+        container: result.container,
+        reason: result.reason,
+        remedy: result.remedy,
+        already_present: checked.already,
+        deduped_in_batch: checked.dedupedInBatch,
+        fragment_path: null,
+        dst_facts_total: total,
+        preview: opts.preview || false
+      };
+    }
     written = result.created;
     fragmentPath = result.path;
   }

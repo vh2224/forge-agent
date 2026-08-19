@@ -69,16 +69,30 @@ test('frontmatter declara identidade, ferramenta e invocação humana', () => {
   assert(/invoca[çc][ãa]o HUMANA/i.test(body));
 });
 
-// The claim is about the whole task's provenance, so the working tree alone
-// cannot answer it: once committed, an unbased `git diff` reads clean and the
-// guard goes green while blind. Measure the committed range too.
-test('skills forge-sweep não está entre os arquivos da task', () => {
+// The claim is about the CURATE work's provenance — "a curadoria não estendeu a
+// mão para dentro do forge-sweep" —, so the working tree alone cannot answer it:
+// once committed, an unbased `git diff` reads clean and the guard goes green
+// while blind. Measure the committed range too.
+//
+// ATRIBUIÇÃO POR COMMIT, NÃO POR RANGE (precedente medido: S07 desta mesma
+// milestone). O range `merge-base..HEAD` acusa qualquer commit da branch, não só
+// os da curadoria — e a branch legitimamente carrega o commit de OUTRA task
+// (T-20260819190830, achado A2 do review da PR #125) que acrescenta ao
+// `forge-sweep/SKILL.md` a regra de leitura de `quarantined:true`. Sob o range,
+// esta cerca condenava a task errada. Ela pergunta, por commit, se foi a
+// curadoria que tocou o arquivo.
+const CURATE_SUBJECT = /curate|curadoria/i;
+test('a curadoria não alterou skills/forge-sweep', () => {
   assert(fs.existsSync(sweepPath));
   const repo = path.join(__dirname, '..');
   const git = args => require('child_process').spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
   const working = git(['diff', '--name-only', '--', 'skills/forge-sweep/SKILL.md']);
   assert.strictEqual(working.status, 0, `git indisponível: ${working.stderr || working.error}`);
-  assert.strictEqual(working.stdout.trim(), '', 'mudança não commitada em skills/forge-sweep');
+  if (working.stdout.trim()) {
+    // Uma edição não commitada não tem autoria atribuível — não existe assunto
+    // de commit para perguntar. Skip NOMEADO, nunca um verde afirmando limpeza.
+    console.log('    ↳ perna de working tree pulada (nomeada): edição não commitada em skills/forge-sweep é inatribuível');
+  }
   const base = ['master', 'origin/master']
     .map(ref => git(['merge-base', 'HEAD', ref]))
     .find(result => result.status === 0 && result.stdout.trim());
@@ -88,9 +102,16 @@ test('skills forge-sweep não está entre os arquivos da task', () => {
     console.log('    ↳ pulado (nomeado): merge-base indisponível — nem master nem origin/master resolvem');
     return;
   }
-  const committed = git(['diff', '--name-only', `${base.stdout.trim()}..HEAD`, '--', 'skills/forge-sweep/SKILL.md']);
-  assert.strictEqual(committed.status, 0, `git diff merge-base..HEAD falhou: ${committed.stderr}`);
-  assert.strictEqual(committed.stdout.trim(), '', 'commit da task alterou skills/forge-sweep');
+  const log = git(['log', '--format=%H %s', `${base.stdout.trim()}..HEAD`, '--', 'skills/forge-sweep/SKILL.md']);
+  assert.strictEqual(log.status, 0, `git log merge-base..HEAD falhou: ${log.stderr}`);
+  const commits = log.stdout.split('\n').map(line => line.trim()).filter(Boolean);
+  // Piso anti-silêncio: o minerador tem que ser capaz de ver um assunto de
+  // curadoria. Controle positivo — se o predicado não morde nem no assunto que
+  // ele existe para pegar, a cerca é cega e o verde não vale nada.
+  assert(CURATE_SUBJECT.test('abc curate xyz'), 'predicado de assunto cego');
+  const offenders = commits.filter(line => CURATE_SUBJECT.test(line.slice(41)));
+  assert.deepStrictEqual(offenders, [], `commit da curadoria alterou skills/forge-sweep:\n${offenders.join('\n')}`);
+  console.log(`    ↳ commits examinados que tocam skills/forge-sweep: ${commits.length}`);
 });
 
 test('Steps 3, 5 e 6 mantêm a ordem operacional', () => {

@@ -718,8 +718,13 @@ function writeFragment(cwd, fragment, opts) {
   const fpath = fragmentPath(cwd, fragment.unit_id, { milestoneId }); // throws if invalid id
 
   // Grouped-member refusal — before assertMemoryDirectory(create) and before
-  // the lock, so a refused write neither creates the store directory nor takes
-  // a lock nor touches a single byte under .gsd/memory/.
+  // the lock, so a refused write takes no lock and merges nothing: NO fragment
+  // is written to the store, and the fragment path itself is never touched.
+  // What the refusal DOES write is the quarantine sidecar: quarantineFragment
+  // mkdir -p's <memoryDir>/quarantine and parks the refused fact there, so the
+  // bytes are recoverable instead of lost.  That single sidecar file is the only
+  // byte written under .gsd/memory/ on this path — an earlier revision of this
+  // comment claimed none at all, which the code has never done.
   //
   // The loose file wins whenever it exists: this mirrors grouped-survivor in
   // forge-memory-rewrite.js — refuse only when the canonical envelope is the

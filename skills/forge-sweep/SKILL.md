@@ -262,6 +262,8 @@ echo '{"kind":"prune","mem_id":"<mem_id>","ts":"<ISO8601>","reason":"<below-thre
   | node scripts/forge-memory.js --write --cwd .
 ```
 
+Se a CLI sair **0** e o JSON do stdout trouxer `"quarantined": true`, o evento **não foi gravado**: a unidade vive num container agrupado e a escrita foi recusada por desenho (o fato ficou no sidecar de quarentena apontado por `path`). Isso **não é falha** — não retente e não aborte o sweep: registre no log a recusa nomeando `container` e `remedy` do próprio JSON e siga para o próximo. (O exit 0 é deliberado — decisão S03/IN-14; o sinal é o campo, não `$?`.)
+
 Do NOT rewrite `.gsd/AUTO-MEMORY.md`. Do NOT delete fragment files here (see physical deletion step below).
 
 **b) DECISIONS sweep — no-op**
