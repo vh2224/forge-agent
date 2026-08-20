@@ -87,17 +87,16 @@ const SKIP_REASONS = [
 const UNMEASURED_REASONS = ['heartbeat-absent', 'heartbeat-not-a-number'];
 
 /**
- * Is this claim still holding, or was it already released?
+ * Describe persisted claim history for diagnostic details.
  *
  * A release PRESERVES the claim object and appends a `released` envelope onto it
  * (`forge-write-claim.js` — "reading a cleared run and a released run must never look the same").
- * `classifyRunLiveness` does not make that distinction: any non-null `write_claim` is
- * `holds-claim`. So a run whose claim was legitimately released and which then went silent is
- * ALSO unreachable by the reaper — with nothing left to protect.
+ * `classifyRunLiveness` makes that distinction through the canonical `isHeld` accessor: a released
+ * claim follows the normal heartbeat path, while a live claim remains `holds-claim`.
  *
- * That difference is the single most decision-relevant fact this census can carry, because the
- * remedy the issue floats first ("extend the reaper when the claimed tree is clean") is precisely
- * about runs with nothing to protect. Reporting it is diagnosis; acting on it is not this module.
+ * Effective ownership itself is decided canonically by `classifyRunLiveness`, which delegates to
+ * `forge-write-claim.isHeld`. Consequently a released envelope never reaches the stuck population:
+ * it follows the reaper's normal heartbeat classification instead.
  *
  * A claim of unexpected SHAPE (not an object, or an unreadable `released`) reads as `live`. That
  * direction is deliberate: `released` is the state that says "nothing left to protect", so guessing

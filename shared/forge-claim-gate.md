@@ -452,6 +452,14 @@ with a **named** skip (`claim-released:committed` / `:ttl-expired` / `:explicit`
 census — it never falls through to `claim-absent`, which would turn a release into
 `undeclared-writes` and make the release *worsen* the block it came to fix.
 
+The orphan-run reaper follows the same ownership rule through `forge-write-claim.isHeld`: a
+persisted release envelope is historical evidence, not effective possession. An active run with a
+released claim therefore returns to the ordinary heartbeat classification and may be reversibly
+deactivated when stale; the claim object and its release evidence remain intact in the RunRecord.
+A live claim remains `holds-claim` regardless of heartbeat age or apparent tree cleanliness. The
+reaper repeats this classification under the registry lock, so a new live claim written between
+the census and mutation prevents deactivation.
+
 ### Where the release is asked for
 
 At the **unit boundary**, by both orchestrators, in Post-unit housekeeping — `skills/forge-auto`

@@ -30,6 +30,7 @@
 const fs = require('fs');
 const path = require('path');
 const runs = require('./forge-runs.js');
+const { isHeld } = require('./forge-write-claim.js');
 
 // == forge-prefs.schema.json parallelism.orphan_run_ms.default. Not a new constant: it is the same
 // 30 min already documented in forge-runs.js:29, re-aimed at a REVERSIBLE action.
@@ -74,10 +75,10 @@ function classifyRunLiveness(record, opts) {
   // Only an ACTIVE run is reapable. An inactive one is already where reaping would put it.
   if (record.active !== true) return { state: 'unmeasured', reason: 'run-inactive' };
 
-  // The claim gate: `undefined` means the field was never written, which for a RunRecord that
-  // predates write claims is "never claimed". `null` is the explicit cleared claim. Anything else
-  // is a live claim and the clock has no business here.
-  if (record.write_claim !== null && record.write_claim !== undefined) {
+  // The claim gate follows the canonical ownership accessor. A released claim remains persisted
+  // as evidence, but no longer represents possession; only an effectively held claim takes this
+  // run out of the clock's jurisdiction.
+  if (isHeld(record.write_claim)) {
     return { state: 'holds-claim', reason: 'claim-present' };
   }
 
