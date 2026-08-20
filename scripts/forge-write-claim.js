@@ -356,7 +356,14 @@ function releaseClaim(cwd, runId, release, opts) {
  * see S05-PLAN.md contract #6.
  */
 function isHeld(claim) {
-  return !!claim && !claim.released;
+  if (!claim) return false;
+  try {
+    return normalizeReleased(claim.released) === null;
+  } catch {
+    // A malformed release envelope cannot prove that ownership ended. Legacy,
+    // hand-edited and partially-corrupt records stay protected (fail closed).
+    return true;
+  }
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────

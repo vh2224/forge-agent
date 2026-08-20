@@ -562,7 +562,7 @@ test('L9: CLI em diretório sem .gsd sai 0 e não fabrica .gsd/', () => {
 // ── Suite close ─────────────────────────────────────────────────────────────
 test('claim released volta ao relógio e é desativado sem perder evidência', () => {
   const released = Object.assign(claim(['released.js']), {
-    released: { at: NOW - 1000, mechanism: 'released-committed', evidence: { commit: 'abc123' } },
+    released: { at: NOW - 1000, mechanism: 'committed', evidence: { commit: 'abc123' } },
   });
   const classified = record(classifyRunLiveness(
     { id: 'M-released-unit', active: true, last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 2, write_claim: released },
@@ -581,7 +581,7 @@ test('claim released volta ao relógio e é desativado sem perder evidência', (
 
 test('claim released que vira live entre censo e lock NÃO é desativado', () => {
   const released = Object.assign(claim(['old.js']), {
-    released: { at: NOW - 1000, mechanism: 'released-committed', evidence: {} },
+    released: { at: NOW - 1000, mechanism: 'committed', evidence: {} },
   });
   const { runFiles, out } = raceFixture(
     [{ id: 'M-reclaim', last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 3, write_claim: released }],
@@ -592,6 +592,17 @@ test('claim released que vira live entre censo e lock NÃO é desativado', () =>
   const skip = out.skipped.find((s) => s.id === 'M-reclaim');
   assertEqual(skip.reason, 'reclassified-under-lock', 'corrida nomeada');
   assertEqual(skip.recheck.state, 'holds-claim', 'revalidação vê posse efetiva');
+});
+
+test('release malformado nunca autoriza reap', () => {
+  for (const released of ['corrupt', {}]) {
+    const c = classifyRunLiveness({
+      id: 'M-corrupt', active: true, last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 3,
+      write_claim: { paths: ['valuable.js'], released },
+    }, { now: NOW });
+    assertEqual(c.state, 'holds-claim', `shape ${JSON.stringify(released)}`);
+    assertEqual(c.reason, 'claim-present', 'razão fail-closed');
+  }
 });
 
 cleanup();

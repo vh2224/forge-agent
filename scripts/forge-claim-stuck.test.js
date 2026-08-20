@@ -248,7 +248,7 @@ test('somente claim ativo é travado; claim já liberado volta ao alcance do rea
     {
       id: 'M-released',
       last_heartbeat: OLD,
-      write_claim: claim({ released: { at: NOW - 3600000, mechanism: 'released-committed', evidence: {} } }),
+      write_claim: claim({ released: { at: NOW - 3600000, mechanism: 'committed', evidence: {} } }),
     },
   ]);
   const r = record(findStuckClaims(ws, OPTS));
@@ -266,7 +266,7 @@ test('claim de forma inesperada lê como `live`, nunca como liberado', () => {
   // uma forma que não deu para ler subestimaria o risco da própria run que estamos reportando.
   assertEqual(claimState('não-é-objeto').state, 'live', 'claim não-objeto');
   assertEqual(claimState({ released: 'lixo' }).state, 'live', 'envelope ilegível');
-  assertEqual(claimState({ released: { at: 'x', mechanism: 7 } }).state, 'released', 'envelope presente mas com campos ruins ainda é liberado');
+  assertEqual(claimState({ released: { at: 'x', mechanism: 7 } }).state, 'live', 'envelope parcial permanece protegido');
   assertEqual(claimState({ released: { at: 'x', mechanism: 7 } }).released_at, null, 'campo ruim vira null, nunca um palpite');
 });
 

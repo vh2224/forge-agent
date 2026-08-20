@@ -69,6 +69,7 @@
 const path = require('path');
 const runs = require('./forge-runs.js');
 const { classifyRunLiveness, DEFAULT_THRESHOLD_MS } = require('./forge-run-reaper.js');
+const { isHeld } = require('./forge-write-claim.js');
 
 // Closed set, both directions. `stuck` and `clean` are verdicts about a census that RAN;
 // `inconclusive` is the floor above.
@@ -103,7 +104,7 @@ const UNMEASURED_REASONS = ['heartbeat-absent', 'heartbeat-not-a-number'];
  * it from a shape we could not parse would understate the risk of the very run we are reporting.
  */
 function claimState(claim) {
-  if (!claim || typeof claim !== 'object') return { state: 'live', released_at: null, mechanism: null };
+  if (isHeld(claim)) return { state: 'live', released_at: null, mechanism: null };
   const released = claim.released;
   if (!released || typeof released !== 'object') {
     return { state: 'live', released_at: null, mechanism: null };

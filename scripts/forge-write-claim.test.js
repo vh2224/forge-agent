@@ -509,6 +509,11 @@ test('R13: absent, claimed-empty and released are three distinct facts, each wit
   assert(readClaim(recReleased) !== null, 'fact 3 remains non-null (re-asserted) — released ≠ absent');
 });
 
+test('R13b: malformed release envelope remains held (fail closed)', () => {
+  assertEqual(isHeld({ paths: ['valuable.js'], released: 'corrupt' }), true, 'string ilegível');
+  assertEqual(isHeld({ paths: ['valuable.js'], released: {} }), true, 'objeto parcial');
+});
+
 // ── R14: legacy record — vcs_baseline/released default null, sha256 unchanged by read
 test('R14: legacy record (no vcs_baseline/released) reads both as null, sha256 unchanged', () => {
   const { wsDir, runFile } = makeFixture('M-20260813-legacy-r14');
