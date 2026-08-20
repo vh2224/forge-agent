@@ -32,7 +32,11 @@ function assert(value, message) {
 }
 
 function fixture() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'forge-sweep-vault-test-'));
+  // realpath, never the raw mkdtemp: this cwd is handed to production, which resolves it
+  // — on macOS os.tmpdir() is a symlink to /private/..., so an unresolved fixture root
+  // makes asserts like `refused[0].path === f.memberB` compare two spellings of the same
+  // file and fail. The symlink case below exists precisely because of this. Do not "simplify".
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-sweep-vault-test-')));
 }
 
 function write(cwd, relative, bytes) {

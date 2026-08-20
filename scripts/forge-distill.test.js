@@ -15,7 +15,10 @@ const ID = 'M123';
 const script = path.join(__dirname, 'forge-distill.js');
 
 function fixture() {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-distill-t02-'));
+  // realpath, never the raw mkdtemp: this cwd is handed to production, which resolves
+  // it — on macOS os.tmpdir() is a symlink to /private/..., so an unresolved fixture
+  // root makes every path comparison against production output fail. Do not "simplify".
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-distill-t02-')));
   const root = path.join(cwd, '.gsd', 'milestones', ID);
   fs.mkdirSync(path.join(root, 'slices', 'S02'), { recursive: true });
   ledger.writeFragment(cwd, { id: ID, title: 'fixture' });
@@ -390,7 +393,10 @@ const TASK_ID = 'T-20260101010101-demo';
 const MS_ID = 'M-20260811134201-controle-contexto-gsd';
 const SUMMARY_BODY = '---\nkey_decisions:\n  - "Resolve the wrapper where it lives"\n---\n';
 
-function tmpCwd() { return fs.mkdtempSync(path.join(os.tmpdir(), 'forge-distill-t02-in-')); }
+// realpath, never the raw mkdtemp: this cwd is handed to production (planDistill /
+// checkEligibility), which resolves it — on macOS os.tmpdir() is a symlink to
+// /private/..., so an unresolved fixture root breaks path comparison. Do not "simplify".
+function tmpCwd() { return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-distill-t02-in-'))); }
 
 // Builds a wrapper under `.gsd/<bucket>/<id>` with an explicit file name list, so a
 // test can express "two files match the suffix" without depending on the id shape.
