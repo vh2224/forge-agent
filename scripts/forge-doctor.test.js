@@ -61,5 +61,28 @@ test('help advertises the capabilities check and selected runtime', () => {
   assert.match(out.stdout, /--runtime/);
 });
 
+
+// R1 (review dialetico, conceded): an errored `memory-quarantine` result carries
+// `{ pending: 0, skipped: 'error: ...' }` — rendering ✓ there communicates a clean
+// quarantine at exactly the moment the state was never measured. Assert the RENDERED
+// icon, not the result shape: the bug lived in `formatResults`, not in the check.
+test('memory-quarantine that could not be measured renders warn, never check', () => {
+  const rendered = doctor.formatResults([{
+    check: 'memory-quarantine',
+    ok: true,
+    pending: 0,
+    files: [],
+    skipped: 'error: boom',
+    message: 'forge-doctor: erro ao ler a quarentena de memoria (boom) — advisory, nao bloqueia.',
+  }]);
+  assert.ok(rendered.includes('⚠ Advisory — Memory quarantine'), `unmeasured quarantine must render warn, got: ${rendered}`);
+  assert.ok(!rendered.includes('✓ Advisory — Memory quarantine'), `unmeasured quarantine must not render check, got: ${rendered}`);
+});
+
+test('memory-quarantine measured clean still renders check', () => {
+  const rendered = doctor.formatResults([{ check: 'memory-quarantine', ok: true, pending: 0, files: [], message: 'clean' }]);
+  assert.ok(rendered.includes('✓ Advisory — Memory quarantine'), `measured-clean quarantine must render check, got: ${rendered}`);
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);
 

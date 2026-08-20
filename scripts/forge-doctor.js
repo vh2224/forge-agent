@@ -617,6 +617,9 @@ module.exports = {
   checkResources,
   checkMemoryQuarantine,
   checkClaimStuck,
+  // Additive export (R1 guard): lets the regression test assert the RENDERED
+  // icon, not just the check result shape. No existing signature changed.
+  formatResults,
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -783,7 +786,11 @@ function formatResults(results) {
       || (r.check === 'workspace-consistency' && r.divergentCount > 0)
       || (r.check === 'run-overlap' && (r.verdict === 'overlap' || r.verdict === 'inconclusive'))
       || (r.check === 'resources' && ((r.verdict && r.verdict !== 'clean') || Boolean(r.skipped)))
-      || (r.check === 'memory-quarantine' && r.pending > 0)
+      // Same R5 arbitration (R1, conceded): `checkMemoryQuarantine` returns
+      // `{ ok: true, pending: 0, skipped: 'error: ...' }` when `listQuarantine`
+      // throws — a ✓ there claims 'quarentena limpa' precisely when the state was
+      // never measured. Mirrors the `resources` clause on this same expression.
+      || (r.check === 'memory-quarantine' && (r.pending > 0 || Boolean(r.skipped)))
       // Same R5 arbitration: a run out of the reaper's reach, and an `inconclusive` census that
       // classified nothing, must not both render ✓ next to a genuinely measured clean.
       || (r.check === 'claim-stuck' && r.verdict !== 'clean');
