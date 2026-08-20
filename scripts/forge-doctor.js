@@ -9,6 +9,7 @@
 //   checkWorkspaceConsistency(cwd) // (cwd?) → { ok: true, workspaces, divergentCount, skipped?, message }  (advisory, D3)
 //   checkResources(cwd, options)   // (cwd?, { platform?, poolDir? }?) → { ok: true, verdict?, pool?, census?, skipped?, message }  (advisory)
 //   checkMemoryQuarantine(cwd)     // (cwd?) → { ok: true, pending, files: string[], skipped?, message }  (advisory, S03/T03)
+//   checkClaimStuck(cwd)           // (cwd?) → { ok: true, verdict, stuck, unmeasured, census, skipped?, message }  (advisory, #120)
 //
 // CLI:
 //   node forge-doctor.js --check schema [--cwd <dir>]
@@ -18,6 +19,7 @@
 //   node forge-doctor.js --check run-overlap [--cwd <dir>]
 //   node forge-doctor.js --check resources [--cwd <dir>]
 //   node forge-doctor.js --check memory-quarantine [--cwd <dir>]
+//   node forge-doctor.js --check claim-stuck [--cwd <dir>]
 //   node forge-doctor.js --check all [--cwd <dir>]
 //   node forge-doctor.js --fix [--cwd <dir>]
 //   node forge-doctor.js --regen-projection [--cwd <dir>]
@@ -45,7 +47,7 @@ const SCHEMA_FILE = '.gsd/SCHEMA-VERSION';
 // Single source of truth for the check names this CLI accepts via `--check`.
 // `runCheck` dispatches these; the unknown-check message and `--help` text
 // must both be derived from this array — never hand-repeated.
-const VALID_CHECKS = ['schema', 'projection-versioned', 'review-model-drift', 'plan-repo-declared', 'capabilities', 'workspace-consistency', 'run-overlap', 'resources', 'memory-quarantine'];
+const VALID_CHECKS = ['schema', 'projection-versioned', 'review-model-drift', 'plan-repo-declared', 'capabilities', 'workspace-consistency', 'run-overlap', 'resources', 'memory-quarantine', 'claim-stuck'];
 
 // ── checkSchema ───────────────────────────────────────────────────────────────
 /**
@@ -614,6 +616,7 @@ module.exports = {
   checkRunOverlap,
   checkResources,
   checkMemoryQuarantine,
+  checkClaimStuck,
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -628,6 +631,73 @@ function parseArgs(argv) {
     else { args[key] = true; }
   }
   return args;
+}
+
+// ── checkClaimStuck ──────────────────────────────────────────────────────────
+/**
+ * Advisory guard (issue #120): surfaces the runs the reaper can NEVER reach —
+ * active, holding a write claim, and with a heartbeat already past the same
+ * threshold `forge-run-reaper.js` uses. Wraps `findStuckClaims`
+ * (`forge-claim-stuck.js`); this function does not implement the census, it
+ * only shapes the result the way this CLI's other checks are shaped (molde:
+ * `checkRunOverlap`).
+ *
+ * Why it earns a place on the dashboard: today that state has no automatic
+ * exit and no name. It shows up to the operator as a recurring `Bloqueado:`
+ * with no root cause, and the only remedy (`/forge-pause <run>`) is invisible
+ * unless you already know which run is stuck. Counting AND naming them is what
+ * makes the state legible — and it is also the measurement that later decides
+ * the policy question the issue deliberately leaves open.
+ *
+ * ALWAYS `ok: true` — a stuck run is advisory information, never a failure of
+ * this CLI. `--check all` never turns red because of it, including when the
+ * verdict is `stuck`. Deciding what to DO about the run is not this check's
+ * job and not this module's (see forge-claim-stuck.js § What this module
+ * REFUSES to do).
+ *
+ * @param {string} [cwd] - Working directory (default: process.cwd())
+ * @returns {{ ok: true, verdict: string, stuck: object[], unmeasured: object[], census: object, skipped?: string, message: string }}
+ */
+function checkClaimStuck(cwd) {
+  const dir = cwd || process.cwd();
+
+  const runsDir = path.join(dir, '.gsd', 'forge', 'runs');
+  if (!fs.existsSync(runsDir)) {
+    return {
+      ok: true,
+      verdict: 'inconclusive',
+      stuck: [],
+      unmeasured: [],
+      census: { runs_examined: 0, runs_classified: 0, claim_holders: 0, skipped: [], unparseable: [] },
+      skipped: 'no-runs-registry',
+      message: 'forge-claim-stuck: sem .gsd/forge/runs/ — nada a classificar (advisory).',
+    };
+  }
+
+  let result;
+  try {
+    const { findStuckClaims, formatStuck } = require('./forge-claim-stuck');
+    result = findStuckClaims(dir, {});
+    return {
+      ok: true, // advisory — never fails `--check all`, including verdict === 'stuck'
+      verdict: result.verdict,
+      stuck: result.stuck,
+      unmeasured: result.unmeasured,
+      census: result.census,
+      threshold_ms: result.threshold_ms,
+      message: formatStuck(result),
+    };
+  } catch (e) {
+    return {
+      ok: true, // advisory — an internal error here still must not fail `--check all`
+      verdict: 'inconclusive',
+      stuck: [],
+      unmeasured: [],
+      census: { runs_examined: 0, runs_classified: 0, claim_holders: 0, skipped: [], unparseable: [] },
+      skipped: `error: ${e.message}`,
+      message: `forge-claim-stuck: erro ao classificar runs (${e.message}) — advisory, não bloqueia.`,
+    };
+  }
 }
 
 function runCheck(name, cwd, options = {}) {
@@ -685,6 +755,13 @@ function runCheck(name, cwd, options = {}) {
       // Advisory: `r.ok` is always true, so this never flips `allOk` — pending
       // quarantine entries must never fail `--check all`.
       if (!r.ok) allOk = false;
+    } else if (c === 'claim-stuck') {
+      const r = checkClaimStuck(cwd);
+      results.push({ check: c, ...r });
+      // Advisory: `r.ok` is always true, so this never flips `allOk` — a run
+      // out of the reaper's reach is a fact to surface, never a failure of the
+      // diagnostic that surfaced it.
+      if (!r.ok) allOk = false;
     } else {
       process.stderr.write(`forge-doctor: unknown check "${c}". Valid: ${VALID_CHECKS.join(', ')}, all\n`);
       process.exit(2);
@@ -706,7 +783,10 @@ function formatResults(results) {
       || (r.check === 'workspace-consistency' && r.divergentCount > 0)
       || (r.check === 'run-overlap' && (r.verdict === 'overlap' || r.verdict === 'inconclusive'))
       || (r.check === 'resources' && ((r.verdict && r.verdict !== 'clean') || Boolean(r.skipped)))
-      || (r.check === 'memory-quarantine' && r.pending > 0);
+      || (r.check === 'memory-quarantine' && r.pending > 0)
+      // Same R5 arbitration: a run out of the reaper's reach, and an `inconclusive` census that
+      // classified nothing, must not both render ✓ next to a genuinely measured clean.
+      || (r.check === 'claim-stuck' && r.verdict !== 'clean');
     const icon = advisoryWarn ? '⚠' : (r.ok ? '✓' : '✗');
     const label = r.check === 'schema' ? 'Layer 2 — Schema version'
       : r.check === 'review-model-drift' ? 'Advisory — Review model drift'
@@ -716,7 +796,12 @@ function formatResults(results) {
       : r.check === 'run-overlap' ? 'Advisory — Cross-run overlap'
       : r.check === 'resources' ? 'Advisory — Resource control'
       : r.check === 'memory-quarantine' ? 'Advisory — Memory quarantine'
-      : 'Layer 3 — Projection versioned';
+      : r.check === 'claim-stuck' ? 'Advisory — Runs fora do alcance do reaper'
+      : r.check === 'projection-versioned' ? 'Layer 3 — Projection versioned'
+      // Named, never inherited. This chain used to END at the projection label, so a check added
+      // without one rendered under ANOTHER check's name — a diagnostic lying about what it
+      // measured, which is the exact failure this file exists to catch elsewhere.
+      : r.check;
     lines.push(`  ${icon} ${label}`);
     lines.push(`    ${r.message}`);
     if (!r.ok && r.tracked && r.tracked.length > 0) {

@@ -39,6 +39,15 @@ else
   FORGE_SHARED_DIR="${FORGE_HOME:-$HOME/.forge-agent}/shared"
 fi
 echo "FORGE_SHARED_DIR=$FORGE_SHARED_DIR"
+
+# ── Routing contract (multi-LLM) ────────────────────────────────────────────
+# The rules the SESSION itself must obey — resolver decides the engine, sidecar
+# gets what routes to it, fallback only via `worker-engine-fallback` — live in
+# the project's instruction file, refreshed here so a stale copy never governs a
+# run. Idempotent, splices only its own marked block, and prints only changes
+# and refusals. Advisory: a failure here is reported, never a reason to stop.
+node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --sync --cwd "$WORKING_DIR" --no-create --quiet 2>&1 \
+  || echo "⚠ routing contract sync falhou (advisory — o loop segue)"
 ```
 
 **Path convention — binding for the whole skill.** Every reference below written as

@@ -1083,6 +1083,51 @@ Placeholder classification:
 
 ---
 
+### Routing Contract Projection (the session is a party to the routing decision)
+
+**Purpose:** everything below this heading tells the orchestrator how the engine is
+*decided*. None of it constrains the one agent that reads the decision — the session-owner
+model — and a decision a model can read is a decision a model can talk itself out of.
+Measured (TASK-021, recorded in this repo's `CLAUDE.md`): four tasks routed to a non-Claude
+engine ran **4/4 in Claude**, and the only trace was one log line the session narrated away
+as a "fleet tooling bug". The harness had already printed the exact fix. The lesson was not
+that a check was missing — the right check ran and the narration went over it.
+
+So the rules are projected into the surface a session always reads and never summarizes:
+the project's own instruction file. `scripts/forge-instructions.js` writes them as a managed
+block into `CLAUDE.md` (and `AGENTS.md` when the project has one), delimited by
+`<!-- forge:routing-contract:start … -->` / `<!-- forge:routing-contract:end -->`.
+
+| Property | Rule |
+|---|---|
+| Ownership | The marker pair **is** the proof of ownership — same rule as the installer's origin marker (`shared/forge-ownership.md`). Bytes outside the markers are spliced back untouched. |
+| Idempotence | Re-running rewrites the block in place; identical content reports `unchanged`, never a second block. |
+| Refusal | Ambiguous markers (two starts, two ends, an end before a start, a lone marker) are **refused by name** (`malformed-block:<reason>`) and nothing is written. Repairing by guess means choosing which of the operator's bytes to delete. |
+| Fence-blindness | A marker quoted inside a fenced code block is documentation, not a block — this spec quotes them above. |
+| Line endings | The file's own EOL wins; a CRLF checkout is not rewritten as LF. |
+| Claims | The block asserts the **invariant** and names the command that reports the live decision. It never embeds a snapshot of this project's `routing:`/`workers:` config — a claim measured once at sync time is wrong the first time prefs change. |
+| Posture | Advisory at every call site. A failed sync is printed and the run continues; it never blocks a dispatch. |
+
+**Call sites:** `/forge-init` (§ Routing Contract Injection) is the only one that may
+**create** an instruction file — it is the initializer. The four loop entry points
+(`skills/forge-auto`, `skills/forge-next`, `skills/forge-task`, `commands/forge.md`) call it
+`--no-create --quiet`: they refresh what a project already has and never seed a file, because
+seeding `CLAUDE.md` in an uninitialized directory would make the next run's "projeto não
+inicializado" guard read as initialized — a guard defeated by the tool that ran before it.
+Refreshing at bootstrap is what keeps a project from running under a contract written by an
+older release; `--quiet` suppresses only `unchanged` and `absent-and-not-requested`, so a
+**refusal is never silent**.
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --sync --cwd "$WORKING_DIR" [--host claude|codex|both] [--no-create] [--quiet] [--json]
+node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --check --cwd "$WORKING_DIR"   # read-only; exit 1 on drift
+```
+
+Guard: `scripts/forge-instructions.test.js` (idempotence, splice safety, EOL, fence bite in
+both directions, refusal-without-writing, anti-silence floor).
+
+---
+
 ### Worker Engine Routing
 
 **Purpose:** Control-flow section that runs **before** Tier Resolution and Effort Resolution on every routable worker dispatch. `forge-dispatch-resolve.js` returns a cross-model chain plus a normalized `dispatch_engine`. Model family (`claude|gpt|gemini`) and dispatch engine (`claude|codex|agy`) are distinct: only `dispatch_engine` selects a sidecar branch, while the persisted `dispatch` event records the normalized engine actually used (`claude|codex|agy`). A failed write-capable sidecar is surgically reset to its pre-dispatch snapshot, preserving pre-existing dirty files, before the chain advances or Claude fallback runs.

@@ -17045,6 +17045,94 @@ function smokeResourcesObservabilityCensus() {
     + 'zero pollution of events.jsonl, and the real machine pool root never touched');
 }
 
+// ── Section 114: routing contract projected into the project instruction file ──
+//
+// Section number MEASURED at execution time (`grep -oE "Section [0-9]+"
+// scripts/forge-smoke.js | sort -u`) — measured AFTER a first draft collided with
+// the existing Section 113 (smokeVersionTagLine) because the grep was run after
+// the insert instead of before it. Measure on the tree you are changing, not the
+// one you already changed.
+//
+// The defect this guards is the one TASK-021 already paid for once: the routing
+// decision is made by a resolver, but the agent that READS it is the session
+// itself, and a rule the session never reads cannot bind it. The contract lives
+// in the project's instruction file for that reason — so this section asserts
+// (a) the projector exists and behaves, (b) every start-of-work entry point
+// actually calls it (wiring, not intention), (c) the canonical spec carries the
+// section, and (d) the projector is non-destructive under the two conditions a
+// naive implementation gets wrong: a quoted marker pair, and a malformed block.
+//
+// (a) and (d) are BEHAVIORAL — run against a real temp project — because a
+// presence-only guard goes green over a wired-but-inert helper, which is the
+// exact failure this repo has shipped before.
+function smokeRoutingContractProjection() {
+  process.stdout.write('\n▸ Section 114: routing contract projected into CLAUDE.md\n');
+  const repoRoot = path.dirname(SCRIPTS);
+  const mod = require('./forge-instructions.js');
+
+  // (a) behavioral: sync writes the block, and a second sync changes nothing.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-contract-'));
+  try {
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# Projeto\n\nRegras do operador.\n', 'utf8');
+    const first = mod.syncInstructions(root);
+    assert(first.files.find((f) => f.host === 'claude').outcome === 'updated', '(a) primeiro sync escreve');
+    const bytes = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
+    assert(bytes.includes('forge-dispatch-resolve.js') && bytes.includes('worker-engine-fallback'),
+      '(a) o bloco escrito nomeia o resolvedor e o fallback nomeado');
+    const second = mod.syncInstructions(root);
+    assert(second.changed === 0 && fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8') === bytes,
+      '(a) o segundo sync é byte-idêntico');
+
+    // (d1) malformed block: refused by name, nothing written.
+    const bad = `# P\n\n${mod.MARKER_END}\n`;
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), bad, 'utf8');
+    const refused = mod.syncInstructions(root).files.find((f) => f.host === 'claude');
+    assert(refused.outcome === 'skipped' && /^malformed-block:/.test(refused.reason),
+      '(d1) bloco malformado recusado por nome');
+    assert(fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8') === bad,
+      '(d1) recusa que ainda escreveu — a forma de falha que um assert de string não vê');
+
+    // (d2) a marker pair quoted inside a code fence is documentation, and the
+    // positive control proves the fixture would fool a naive detector.
+    const quoted = ['```markdown', `${mod.MARKER_START} version=X -->`, 'NAO-PODE-SUMIR', mod.MARKER_END, '```', ''].join('\n');
+    assert(/^<!-- forge:routing-contract:start[^\n]*-->[ \t]*$/m.test(quoted),
+      '(d2) controle positivo: o fixture casaria num detector ingênuo');
+    assert(mod.findBlock(quoted) === null, '(d2) marcador em fence lido como bloco');
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), quoted, 'utf8');
+    mod.syncInstructions(root);
+    assert(fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8').includes('NAO-PODE-SUMIR'),
+      '(d2) o splice comeu o exemplo citado');
+  } finally {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+
+  // (b) wiring: every start-of-work entry point invokes the projector. Intention
+  // in prose is not wiring — the call must be in an executable line.
+  const CALL_SITES = [
+    'skills/forge-auto/SKILL.md',
+    'skills/forge-next/SKILL.md',
+    'skills/forge-task/SKILL.md',
+    'commands/forge.md',
+    'commands/forge-init.md',
+  ];
+  for (const relative of CALL_SITES) {
+    const text = readRepoText(path.join(repoRoot, relative));
+    assert(/^node "\$FORGE_SCRIPTS_DIR\/forge-instructions\.js" --sync/m.test(text),
+      `(b) ${relative} não invoca forge-instructions.js --sync`);
+  }
+
+  // (c) canonical spec carries the section the mirrors point at.
+  const dispatch = readRepoText(path.join(repoRoot, 'shared', 'forge-dispatch.md'));
+  assert(dispatch.includes('### Routing Contract Projection'), '(c) spec sem a seção canônica');
+  assert(dispatch.includes('scripts/forge-instructions.js'), '(c) spec não nomeia o projetor');
+
+  // (e) registration bites — the section must be reachable from main().
+  const mainBody = fs.readFileSync(__filename, 'utf8').slice(fs.readFileSync(__filename, 'utf8').lastIndexOf('async function main()'));
+  assert(/\(\) => \{ smokeRoutingContractProjection\(\); \}/.test(mainBody), '(e) Section 114 registrada em main()');
+
+  pass('Section 114: routing contract is projected, wired at every entry point, and non-destructive');
+}
+
 // ── Section 112: S06/T01-T04 guard — signal-not-clock SIGINT, enforcement:off ─
 // bypass contrast, bench JSONL+prefs-restore, and anti-silence floor bite on
 // the bench harness — number MEASURED at execution time (max observed was
@@ -17396,6 +17484,7 @@ async function main() {
       () => { smokeVerifyReverifyChildSideE2E(); },
       () => { smokeResourcesObservabilityCensus(); },
       () => { smokeResourcesFlakeAndBenchGuard(); },
+      () => { smokeRoutingContractProjection(); },
       () => { smokeVersionTagLine(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);

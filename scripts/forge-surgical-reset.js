@@ -236,7 +236,14 @@ function computeResetTarget(postChanges, preDirty, hashNow) {
 function executeReset(cwd, startSha, target, vcsName = 'git') {
   const result = vcs.restoreAndRemove(cwd, startSha, target, { ...optionsFor(cwd, vcsName), vcs: vcsName });
   if (!result.ok) throw new Error(`surgical reset checkout failed: ${result.error}`);
-  return { restored: result.restored, removed: result.removed };
+  // #104: the restore is a `git checkout`, which honours `core.autocrlf`. Where
+  // that converts (or where the probe could not tell), the operator hears it
+  // HERE -- at the reset -- instead of meeting a silently CRLF-normalised file
+  // later. `eol` is null when nothing was restored, and its `message` is null
+  // whenever conversion was measured NOT to apply, so the quiet case stays
+  // quiet. The behaviour is unchanged: this says what happened, it does not
+  // change what happens.
+  return { restored: result.restored, removed: result.removed, eol: result.eol || null };
 }
 
 /**
@@ -467,6 +474,7 @@ function resetFromState(stateFile) {
   let done;
   try {
     done = executeReset(cwd, startSha, target, vcsName);
+    if (done.eol && done.eol.message) process.stderr.write(`${done.eol.message}\n`);
   } catch (e) {
     // Best-effort diagnostic (R1): the tree is in an UNKNOWN state per the
     // S03/R2 contract, so this MUST re-query live state, never trust `result`

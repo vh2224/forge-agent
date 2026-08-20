@@ -448,12 +448,51 @@ O `.gsd/` de um projeto grande serve dois consumidores incompatíveis — dispat
 ### Agrupar época, empacotar o comando, medir antes de limpar (M-20260804003633, PR 2)
 Onde a PR 1 foi 100% aditiva, a **PR 2 é a fatia mutante** — e por isso a diferença mais importante entre as duas entradas é que esta é **breaking**. O formato de fragmento passa a ter um container agrupado por época selada (`scripts/forge-epoch.js` deriva `YYYY-QN`, época selada e wrapper dir **do conteúdo do store em runtime** — sem data de corte, sem constante de threshold; `scripts/forge-grouped-file.js` serializa/parseia o container com payload trafegando como `Buffer`, nunca decodificado, para que CRLF, BOM e ausência de newline final sobrevivam ao round-trip, e um membro cujo payload contenha o delimitador seja **recusado e nomeado** em vez de escapado ou truncado). Os **4 leitores do fragment store aprenderam o formato no mesmo slice** (D8: `forge-ledger.js`, `forge-decisions.js`, `forge-memory.js`, e `forge-projection.js`/`forge-memory-index.js` via o acessor `readFragmentText(cwd, entry)` no lugar de `fs.readFileSync(entry.path)`) — leitor que viaja depois do formato é perda de dado no intervalo. `CURRENT_SCHEMA` foi para `fragment-store@2.0.0` **no mesmo commit** que tornou o formato escrevível (D7, commit `0e62d47`), deliberadamente, para que o guard direcional entregue pela PR 1 **dispare** em vez de ficar decorativo: o dado é empurrado sozinho pelo VCS e o código só chega por `/forge-update`, então quem receber dado novo com tooling velho tem a **escrita recusada** em vez de leitores pulando fragmento em silêncio. O achado que quase custou o formato: o id de membro era escrito em ASCII e lido em ASCII, round-trip assimétrico que tornava um container com id não-ASCII permanentemente ilegível **depois** que os originais já tinham sido apagados (R1 blocker do review da S03) — hoje UTF-8 nas três posições de marcador. O comando nasceu **registro de operações**, não script (D4): `scripts/forge-sweep-registry.js` é genérico sobre `{name, description, plan, apply}` com dry-run por default, confirmação só depois do preview computado e isolamento de falha por operação — provado por uma operação falsa que obtém preview e relatório de pulados sem tocar o código do preview —, e `scripts/forge-sweep-project.js` registra exatamente **uma** operação. Na frente dele, um gate de elegibilidade fail-closed (`scripts/forge-sweep-eligibility.js` sobre o export aditivo `workingStatus` de `scripts/forge-vcs.js`, uma única consulta de status classificando as quatro classes; exclusão por **target**, não por membro, nomeando o arquivo ofensor). Wrapper dirs (`.gsd/milestones`, `.gsd/tasks`) só entram atrás de `plan(cwd, { includeWrapperDirs: true })` e a CLI **nunca** expõe o opt-in (D11) — porque `scripts/forge-wrapper-readers.js` congela o inventário dos enumeradores que não aprenderam o container, com teste que varre `scripts/` de verdade e falha por igualdade de conjuntos nos dois sentidos. **A D12 é a lição de processo desta milestone, e ela mudou uma coisa só:** a suíte passa a rodar também na fronteira `complete-slice` (rodou no fecho de S04, S05 e S06, e a execução da S07 é **final e confirmatória**, não a única) — o que ela **não** mudou é a regra de que executor escreve teste e não o executa. O motivo é medido, não teórico: três das seis tasks da S05 auto-reportaram 100% dos must-haves `met` tendo escrito suítes que não passavam, e nada além da execução no fecho pegou isso. **A S04 foi cortada pelo próprio gate, com veredicto `NO-TARGET`**: a assinatura de D9 (vírgula no **valor** de `facts[].source_unit`, não na linha crua) casou **0 fatos em 707 avaliados / 117 fragmentos** do store de referência real, com 0 falsos positivos e um controle negativo medido (grep ingênuo devolve 64, todos vírgula de fim-de-linha JSON) — T02/T03 daquela slice nunca foram despachadas. O corte é informativo porque o resíduo **existe** (~25 entradas, `MEM077` com 11 fontes) mas vive no corpo markdown de `legacy-orphan.md`, fora de `facts[].source_unit`; alargar a assinatura é re-escopo de D9 e decisão do operador, então ficou como backlog nomeado e o detector read-only (`scripts/forge-legacy-residue.js`) permanece no branch. As seis objeções de review que ficaram abertas ao final de S06 (S05 R3/R9/R13/R16 e S06 R3/R4) foram **todas arbitradas** na triagem: S05 R3 fechada **sem mudança de código** — o journal de desfazer da S08 resolveu a substância (`tool-undo` torna `untracked`/`ignored` elegíveis sem `--force`), nenhum dos dois remédios propostos (alargar `--force`, criar `--force-untracked`) foi adotado; S05 R9 fechada — os testes fail-closed já não passam verde sem git, a suíte sai não-zero a menos que `FORGE_ALLOW_NO_GIT=1`; S05 R13 fechada — o hardening `shell:false` foi **mantido** (reverter hardening correto para satisfazer disciplina de escopo pioraria o módulo) e o desvio de escopo ficou **registrado**, não revertido; S05 R16 fechada — o gate D11 continua fechado, mas a contagem de wrapper dirs protegidos passou a ser sempre reportada; S06 R3/R4 fechadas — os rótulos de cobertura foram corrigidos para dizer exatamente o que medem, docs regenerados, nenhum balde novo, a identidade de quatro vias intocada. Depois de S06 veio a **S09**, que remove o eixo de calendário inteiramente: `scripts/forge-sweep-sealed.js` seleciona membros por três provas de fechamento — (a) entrada no ledger, (b) timestamp válido embutido no id, (c) forma de id que `parseStorageKey` recusa como inescrevível — nomeia os containers `sweep-project-NN` sequenciais (sem mais `YYYY-QN`) e carrega o intervalo de datas (`dateRange`) junto com o container; `CURRENT_SCHEMA` subiu para `fragment-store@3.0.0` no mesmo commit que trocou o formato, marcado **breaking**. A regra de elegibilidade foi estreitada três vezes por três mecanismos diferentes, cada uma a mesma forma de falha (uma prova que prova menos do que alega): o risk gate achou um produtor vivo de chaves locais nuas (`skills/forge-sweep/SKILL.md:262` escreve memória sem `--milestone`); um teste de precisão que a própria slice escreveu mostrou que o timestamp de um id de milestone é **criação**, não fechamento; e um challenger independente de família oposta (Codex) argumentou que rejeição pelo parser não é inescrevibilidade permanente — resolvido não estreitando de novo, mas persistindo a prova admitente por membro e fixando a gramática com um teste que nomeia a consequência. Um dogfood contra o store de referência real (só preview, nada aplicado) achou um bug `high` que nenhum mecanismo anterior pegou: as regexes da prova (b) ancoravam em `^ask-<dígitos>`, mas todo id de sessão real carrega um prefixo **duplicado** (`ask-ask-<data>`), então a prova não casava **nenhum** fragmento real — corrigido; o store de referência foi de 222 elegíveis sob o calendário para **508 de 529 membros elegíveis, 21 pulados com motivo, com os totais reconciliando**. **Revisão em toda a milestone: 21 objeções, zero abertas.**
 
+### O contrato de roteamento passa a viver onde a sessão lê (forge-instructions.js)
+
+Toda a § Worker Engine Routing descreve como o engine é **decidido** — e nada ali obriga o
+único agente que **lê** a decisão: o modelo dono da sessão. Uma decisão que um modelo lê é
+uma decisão da qual um modelo se convence a sair. Já foi medido (TASK-021): quatro tasks
+roteadas para um engine não-Claude rodaram **4/4 em Claude**, e o único rastro foi uma linha
+de log que a narração da sessão trocou por "bug de tooling da frota".
+
+Correção: `scripts/forge-instructions.js` projeta as regras num bloco gerenciado
+(`<!-- forge:routing-contract:start … end -->`) dentro do `CLAUDE.md` do projeto — e do
+`AGENTS.md` quando existe. **O par de marcadores é a prova de propriedade**, mesma regra do
+marcador de origem do instalador: bytes fora dos marcadores voltam intactos pelo splice,
+arquivo sem bloco recebe append, e bloco ambíguo (dois inícios, dois fins, fim antes do
+início, marcador solto) é **recusado por nome** — reparar por chute é escolher quais bytes
+do operador apagar. Detector é fence-aware (esta doc cita os marcadores) e o EOL do arquivo
+manda (checkout CRLF não vira LF).
+
+O bloco enuncia o **invariante** e nunca embute snapshot da config: uma afirmação medida no
+sync está errada na primeira edição de prefs. Ele nomeia o resolvedor, o sidecar, o
+`worker-engine-fallback` como única degradação legítima, a proibição de executar inline, e
+que rota inerte é defeito de configuração — não desculpa.
+
+Chamado no `/forge-init` — o único que pode **criar** o arquivo — e no bootstrap de
+`forge-auto`, `forge-next`, `forge-task` e `/forge`, esses quatro com `--no-create`: semear
+`CLAUDE.md` num diretório não inicializado faria o guard "projeto não inicializado" da run
+seguinte ler como inicializado. Sempre advisory (falha é reportada, nunca para o run).
+`--quiet` cala só `unchanged` e `absent-and-not-requested`: **recusa nunca é silenciosa**.
+`--check` é read-only e sai 1 em drift. Spec canônica: `shared/forge-dispatch.md § Routing Contract
+Projection`; guards: `scripts/forge-instructions.test.js` (34) + Seção 114 do smoke.
+
 ## Convenções de código
 
 - **Linguagem dos artefatos:** Markdown com frontmatter YAML
 - **Linguagem da UI/mensagens:** Português (pt-BR)
 - **Linguagem do código/scripts:** Inglês
 - **Commits:** Conventional commits em inglês (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`)
+- **Vínculo PR → issue:** `Closes #N` **só** quando o merge da PR de fato resolve a issue — aí ela
+  fecha sozinha e ninguém precisa lembrar. `Refs #N` quando a PR **avança** a issue sem resolvê-la:
+  entregou o instrumento mas não a medição, entregou o código mas a decisão de política segue
+  aberta, fechou 4 de 6 gaps. A escolha errada custa nos dois sentidos e os dois já aconteceram
+  aqui: `Refs` numa PR que resolvia deixou a #104 aberta sobre trabalho entregue (fechada à mão
+  depois, por lembrança e não por desenho); `Closes` numa PR que só avança descartaria a issue que
+  é **dona da decisão pendente** — a #120 (política do reaper) e a #82 (veredito do
+  `writableRoots`) existem hoje só para isso. Na dúvida, `Refs` e fechar à mão: perder a issue é
+  irreversível, fechar depois não.
 - **Naming:** Prefixo `forge-` em todos os agentes, comandos e skills
 - **Instalação:** Destino `~/.claude/{agents,commands,skills}/` — sempre via `install.sh` ou `install.ps1`
 - **Agentes:** Frontmatter com `name`, `description`, `model`, `tools`
@@ -739,3 +778,44 @@ Ao iniciar qualquer sessão de trabalho GSD neste projeto, leia em ordem:
 
 Se houver `continue.md` no slice ativo → leia, delete, retome de "Next Action".
 Comandos, agentes e metodologia: ver seções acima deste arquivo.
+
+<!-- forge:routing-contract:start version=4.17.0 -->
+<!-- Gerado por forge-instructions.js. Edite o script, não este bloco: um sync o reescreve. -->
+## Forge — contrato de roteamento multi-LLM (obrigatório)
+
+Quem decide qual engine executa uma unidade é o resolvedor do Forge, não o Claude
+desta sessão. Estas regras valem para toda sessão neste repositório — inclusive
+fora dos comandos `/forge-*`, e inclusive quando você é o orquestrador.
+
+1. **Não decida o engine.** Toda unidade roteável (`execute-task`, `plan-slice`)
+   resolve `{engine, model, tier, effort}` em UMA chamada a
+   `forge-dispatch-resolve.js --json`. Ler prefs à mão, inferir por "essa task é
+   simples", ou herdar o engine da unidade anterior não é decisão — é override.
+2. **`dispatch_engine != claude` vai para o sidecar.** `codex`/`agy` são despachados
+   por `forge-xllm.js` (Branch C `--mode execute`, Branch D `--mode plan`). Nunca
+   troque isso por `Agent("forge-executor")` / `Agent("forge-planner")` porque seria
+   mais rápido, porque a task parece pequena, ou porque o sidecar falhou antes.
+3. **Voltar para Claude só pelo caminho nomeado.** A única degradação legítima é o
+   `worker-engine-fallback`, com `reason` do conjunto fechado, gravado em
+   `.gsd/forge/events.jsonl`. Fallback sem evento é bypass silencioso, não fallback.
+4. **Nunca execute a unidade inline no contexto principal.** Se o dispatch falhar,
+   pare e surface o erro ao operador. Fazer o trabalho você mesmo quebra o context
+   isolation e apaga a rota que o operador configurou.
+5. **Rota inerte é defeito de configuração, não desculpa.** Quando o dispatch cai para
+   Claude por `sidecar-code-dir-undeclared`, `sidecar-multirepo-unsupported` e afins,
+   leia o `hint` do evento e corrija a causa declarada. Não narre como "bug de
+   tooling" e siga — foi exatamente assim que uma slice inteira rodou 4/4 no engine
+   errado sem ninguém perceber.
+6. **A prova é o log, não a narração.** A seção `## Route` do `S##-SUMMARY.md` é
+   derivada de `events.jsonl` por `forge-route-audit.js`, não redigida por um modelo.
+   Se ela acusar drift, o drift aconteceu.
+
+Ver a rota real de uma unidade antes de despachar:
+
+```bash
+node "${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-dispatch-resolve.js" \
+  --unit-type execute-task --plan <T##-PLAN.md> --cwd . --json
+```
+
+Especificação canônica: `shared/forge-dispatch.md § Worker Engine Routing`.
+<!-- forge:routing-contract:end -->

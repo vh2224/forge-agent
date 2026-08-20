@@ -9,6 +9,10 @@ allowed-tools: Read, Bash, Skill, AskUserQuestion, TaskCreate, TaskUpdate
 ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
 ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
 pwd
+# Routing contract (multi-LLM): refresh the block the session itself must obey.
+# Idempotent, advisory, only prints changes and refusals.
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-instructions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --sync --cwd . --no-create --quiet 2>&1 || true
 ```
 
 **Se CLAUDE.md não existe:** Stop. Tell the user:

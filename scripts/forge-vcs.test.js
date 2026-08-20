@@ -28,13 +28,15 @@ function fixture() {
   // fixture bytes as CRLF and the byte-for-byte asserts below (e.g.
   // restoreAndRemove comparing against 'before\n') were red on Windows only.
   //
-  // KNOWN PRODUCTION LIMITATION — deliberately NOT fixed here: forge-vcs.js
-  // restores via plain `git checkout`, so for a real Windows user with
-  // autocrlf=true the "restores byte-for-byte" promise is FALSE (the working
-  // tree comes back CRLF-normalized, not with the pre-reset bytes). Making
-  // restore pass `-c core.autocrlf=false` is a PRODUCT decision — it changes
-  // what the user's working tree contains — and is tracked as an open item.
-  // This pin only makes the test's own fixture deterministic.
+  // KNOWN PRODUCTION LIMITATION, now DECLARED rather than tracked (#104,
+  // decided 2026-08-19 as option 3): forge-vcs.js restores via plain
+  // `git checkout`, so for a real Windows user with autocrlf=true the working
+  // tree comes back CRLF-normalized, not with the pre-reset bytes. Passing
+  // `-c core.autocrlf=false` on the restore was REJECTED — it would hand that
+  // user LF where the rest of their tree has CRLF, in a recovery path. The
+  // behaviour stays; what changed is that `eolRestoreFidelity` now SAYS so at
+  // reset time instead of the claim living only in comments like this one.
+  // This pin still only makes the test's own fixture deterministic.
   run(cwd, ['config', 'core.autocrlf', 'false']);
   fs.writeFileSync(path.join(cwd, 'modified.txt'), 'before\n');
   fs.writeFileSync(path.join(cwd, 'deleted.txt'), 'delete me\n');
@@ -167,7 +169,17 @@ test('restoreAndRemove restores modifications, removes additions, and guards ove
     fs.writeFileSync(path.join(cwd, 'modified.txt'), 'changed\n');
     fs.writeFileSync(path.join(cwd, 'new.txt'), 'new\n');
     const done = vcs.restoreAndRemove(cwd, baseline, { restore: ['modified.txt'], remove: ['new.txt'], overlap: [] });
-    assert.deepStrictEqual(done, { vcs: 'git', ok: true, restored: ['modified.txt'], removed: ['new.txt'] });
+    // `eol` is the #104 advisory. It is additive for readers that pick fields
+    // (and for JSON consumers), but a deep-equality assert is NOT such a
+    // reader — it sees every key, which is why this expectation carries it.
+    // The fixture pins core.autocrlf=false, so the advisory is the silent one.
+    assert.deepStrictEqual(done, {
+      vcs: 'git',
+      ok: true,
+      restored: ['modified.txt'],
+      removed: ['new.txt'],
+      eol: { converts: false, autocrlf: 'false', source: 'config', message: null },
+    });
     assert.strictEqual(fs.readFileSync(path.join(cwd, 'modified.txt'), 'utf8'), 'before\n');
     assert.strictEqual(fs.existsSync(path.join(cwd, 'new.txt')), false);
     assert.throws(() => vcs.restoreAndRemove(cwd, baseline, { restore: [], remove: [], overlap: ['modified.txt'] }), /overlap is non-empty/);
@@ -421,6 +433,176 @@ test('all primitives use explicit vcs and do not call detectVcs', () => {
     ignore.__setExecFileSync(previous);
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+
+// ── #104 — EOL fidelity advisory ────────────────────────────────────────────
+//
+// The restore is a `git checkout`, which honours `core.autocrlf`, so for a user
+// with `autocrlf=true` the restored file comes back CRLF-normalised instead of
+// carrying the pre-reset bytes. Decision on #104 was option (3): keep the
+// behaviour, SAY it. These asserts exist so the saying cannot drift from the
+// doing.
+//
+//   E1  the advisory is tied to a MEASURED conversion, not to a string: the
+//       same fixture that fires the warning is checked to really come back
+//       CRLF. An advisory nobody can falsify is decoration.
+//   E2  and the mirror: with conversion off, the bytes really are byte-faithful
+//       AND the advisory is SILENT (`message: null`). A warning that fires
+//       always trains people to skip the one that matters.
+//   E3  `input` converts on CHECK-IN only — a checkout writes what the blob
+//       holds — so it is silent too, and asserted separately from `false`.
+//   E4  key absent from EVERY scope is a MEASURED absence (git's built-in
+//       default is `false`), and carries its own `source` — never confused with
+//       a probe that could not run.
+//   E5  unknown is NOT false: an unrecognised value yields `converts: null`,
+//       so no caller can read it as "no conversion".
+//   E6  a probe that could not run yields `converts: null` with its own source.
+//   E7  no restore, no advisory: `eol` is null when nothing was checked out.
+//   E8  closed sets crossed in BOTH directions.
+
+const EOL_SEEN_VALUES = new Set();
+const EOL_SEEN_SOURCES = new Set();
+
+function eolFixture(autocrlf) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-vcs-eol-'));
+  run(cwd, ['init', '-q']);
+  if (autocrlf !== null) run(cwd, ['config', 'core.autocrlf', autocrlf]);
+  fs.writeFileSync(path.join(cwd, 'text.txt'), 'a\nb\n');
+  run(cwd, ['add', '.']);
+  run(cwd, ['-c', 'user.name=Forge Test', '-c', 'user.email=forge@example.invalid', 'commit', '-qm', 'init']);
+  return cwd;
+}
+
+function eolRestore(cwd) {
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).stdout.trim();
+  fs.writeFileSync(path.join(cwd, 'text.txt'), 'clobbered\n');
+  const result = vcs.restoreAndRemove(cwd, head, { restore: ['text.txt'], remove: [], overlap: [] }, {});
+  if (result.eol) {
+    EOL_SEEN_VALUES.add(result.eol.autocrlf);
+    EOL_SEEN_SOURCES.add(result.eol.source);
+  }
+  return result;
+}
+
+test('#104 E1 — autocrlf=true: a conversão REALMENTE acontece, e o aviso a acompanha', () => {
+  const cwd = eolFixture('true');
+  try {
+    const result = eolRestore(cwd);
+    assert.strictEqual(result.ok, true);
+    // O fato medido primeiro: os bytes restaurados NÃO são os de antes.
+    const bytes = fs.readFileSync(path.join(cwd, 'text.txt'), 'utf8');
+    assert.strictEqual(bytes, 'a\r\nb\r\n', 'a limitação tem de ser real, senão o aviso é decoração');
+    // E só então o aviso que a descreve.
+    assert.strictEqual(result.eol.converts, true);
+    assert.strictEqual(result.eol.autocrlf, 'true');
+    assert.strictEqual(result.eol.source, 'config');
+    assert.ok(result.eol.message && result.eol.message.includes('CRLF'), 'a mensagem nomeia o que muda');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('#104 E2 — autocrlf=false: bytes fiéis E aviso SILENCIOSO', () => {
+  const cwd = eolFixture('false');
+  try {
+    const result = eolRestore(cwd);
+    const bytes = fs.readFileSync(path.join(cwd, 'text.txt'), 'utf8');
+    assert.strictEqual(bytes, 'a\nb\n', 'sem conversão os bytes voltam iguais');
+    assert.strictEqual(result.eol.converts, false);
+    assert.strictEqual(result.eol.message, null, 'nada a avisar tem de sair calado');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('#104 E3 — autocrlf=input converte só no check-in, então também é silencioso', () => {
+  const cwd = eolFixture('input');
+  try {
+    const result = eolRestore(cwd);
+    assert.strictEqual(fs.readFileSync(path.join(cwd, 'text.txt'), 'utf8'), 'a\nb\n');
+    assert.strictEqual(result.eol.converts, false);
+    assert.strictEqual(result.eol.autocrlf, 'input');
+    assert.strictEqual(result.eol.message, null);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('#104 E4 — chave ausente em TODO escopo é ausência medida, com fonte própria', () => {
+  const cwd = eolFixture(null);
+  try {
+    // A cascata inclui system e global — nesta máquina o instalador do Git for
+    // Windows grava core.autocrlf=true no system. Para medir "ausente em todo
+    // escopo" é preciso isolar os dois, apontando-os para arquivos que não
+    // existem (git trata config ausente como vazia).
+    const missing = path.join(cwd, 'no-such-gitconfig');
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: missing, GIT_CONFIG_SYSTEM: missing };
+    const eol = vcs.eolRestoreFidelity(cwd, { env });
+    EOL_SEEN_VALUES.add(eol.autocrlf);
+    EOL_SEEN_SOURCES.add(eol.source);
+    assert.strictEqual(eol.source, 'git-default', 'ausência medida != probe que não rodou');
+    assert.strictEqual(eol.converts, false, 'o default embutido do git é false');
+    assert.strictEqual(eol.message, null);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('#104 E5 — valor não reconhecido é `unknown`, NUNCA `false`', () => {
+  // `git config core.autocrlf quicksand` é RECUSADO pelo próprio git
+  // (`fatal: bad boolean config value`), então o valor só chega ao disco por
+  // edição manual do arquivo — e é assim que o fixture o produz.
+  //
+  // Medido junto: num repo nesse estado, `git status` sai 128. Ou seja, o git
+  // inteiro está quebrado ali e o reset falharia de qualquer forma. Este ramo
+  // é defensivo, não um caminho comum — o que ele garante é que a sonda diga
+  // "não sei" em vez de "não converte", que é a única resposta que um chamador
+  // poderia usar para afirmar fidelidade de bytes que ninguém verificou.
+  const cwd = eolFixture('false');
+  try {
+    fs.appendFileSync(path.join(cwd, '.git', 'config'), '\n[core]\n\tautocrlf = quicksand\n');
+    const eol = vcs.eolRestoreFidelity(cwd, {});
+    EOL_SEEN_VALUES.add(eol.autocrlf);
+    EOL_SEEN_SOURCES.add(eol.source);
+    assert.strictEqual(eol.converts, null, 'null, não false — ninguém pode ler isso como "não converte"');
+    assert.notStrictEqual(eol.converts, false);
+    assert.strictEqual(eol.autocrlf, 'unknown');
+    assert.strictEqual(eol.source, 'unrecognised-value');
+    assert.ok(eol.message, 'e diz que não sabe');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('#104 E6 — probe que não pôde rodar também é `unknown`, com fonte própria', () => {
+  const missing = path.join(os.tmpdir(), 'forge-vcs-eol-nao-existe-' + process.pid);
+  const eol = vcs.eolRestoreFidelity(missing, {});
+  EOL_SEEN_VALUES.add(eol.autocrlf);
+  EOL_SEEN_SOURCES.add(eol.source);
+  assert.strictEqual(eol.converts, null);
+  assert.strictEqual(eol.source, 'probe-failed');
+  assert.ok(eol.message, 'silêncio por falha de sonda seria a mesma classe de defeito');
+});
+
+test('#104 E7 — sem restore não há aviso: eol é null', () => {
+  const cwd = eolFixture('true');
+  try {
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).stdout.trim();
+    fs.writeFileSync(path.join(cwd, 'extra.txt'), 'novo\n');
+    const result = vcs.restoreAndRemove(cwd, head, { restore: [], remove: ['extra.txt'], overlap: [] }, {});
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.eol, null, 'nada foi checked out, então não há conversão a avisar');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('#104 E8 — conjuntos fechados cruzados nos dois sentidos', () => {
+  for (const v of EOL_SEEN_VALUES) assert.ok(vcs.AUTOCRLF_VALUES.includes(v), `valor fora do conjunto: ${v}`);
+  for (const src of EOL_SEEN_SOURCES) assert.ok(vcs.EOL_SOURCES.includes(src), `fonte fora do conjunto: ${src}`);
+  for (const v of vcs.AUTOCRLF_VALUES) assert.ok(EOL_SEEN_VALUES.has(v), `valor declarado e nunca emitido: ${v}`);
+  for (const src of vcs.EOL_SOURCES) assert.ok(EOL_SEEN_SOURCES.has(src), `fonte declarada e nunca emitida: ${src}`);
 });
 
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

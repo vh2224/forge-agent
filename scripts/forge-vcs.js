@@ -401,15 +401,127 @@ function pruneEmptyParents(cwd, relPath) {
   }
 }
 
+// -- EOL fidelity advisory (issue #104) --------------------------------------
+//
+// The restore path below is `git checkout <baseline> -- <paths>`, and a checkout
+// HONOURS the user's `core.autocrlf`. On a Windows install where that is `true`
+// -- what the Git for Windows installer writes to the SYSTEM config when the
+// user picks "Checkout Windows-style" -- a text file stored with LF comes back
+// CRLF. So the "restores byte-for-byte" promise is FALSE for that user, and it
+// was false SILENTLY: the claim lived only in code and test comments, where
+// nobody but an implementer would ever meet it.
+//
+// The decision on #104 was option (3): keep the behaviour, tell the truth. The
+// two rejected alternatives are worth naming so this is not re-litigated by
+// accident. Passing `-c core.autocrlf=false` on the restore (option 1) would
+// make the restore byte-faithful at the cost of handing that user LF where the
+// rest of their tree has CRLF -- the tool would stop honouring the checkout
+// configuration they chose, in a RECOVERY path, which is exactly where a
+// surprise costs most. Editing prose (option 2) is nearly a no-op: there is no
+// user-facing document making the promise to correct.
+//
+// What is deliberately NOT attempted: deciding per FILE whether conversion
+// would really change bytes. That answer needs git's own text/binary
+// resolution (the `text` attribute, `text=auto` content sniffing), and a
+// per-file claim derived from anything less would be a guess dressed as a
+// measurement. So the advisory is scoped to the CONFIGURATION that creates the
+// class, and it says "text files" -- never "these files".
+//
+// `unknown` is not `false`. A probe that could not run (no git, spawn failure,
+// an unrecognised value) yields `converts: null` and its own message.
+// Collapsing that into "no conversion" would be silence-by-probe-failure --
+// the same defect class the issue describes, arriving through a different door.
+
+const AUTOCRLF_VALUES = ['true', 'input', 'false', 'unknown'];
+const EOL_SOURCES = ['config', 'git-default', 'unrecognised-value', 'probe-failed'];
+
+const EOL_UNKNOWN_TAIL = 'nao da para afirmar se o restore devolve os bytes de antes.';
+
+/**
+ * Resolve the EFFECTIVE `core.autocrlf` for `cwd` and say whether a checkout
+ * there converts line endings.
+ *
+ * `git config --get` already resolves the whole cascade (system -> global ->
+ * local), which is why the Git for Windows system default is SEEN here rather
+ * than guessed from `process.platform`. Exit 1 means the key is set NOWHERE,
+ * and git's compiled-in default for it is `false`.
+ *
+ * @returns {{ converts: boolean|null, autocrlf: string, source: string, message: string|null }}
+ */
+function eolRestoreFidelity(cwd, opts) {
+  let result;
+  try {
+    result = git(cwd, ['config', '--get', 'core.autocrlf'], opts);
+  } catch (e) {
+    return {
+      converts: null,
+      autocrlf: 'unknown',
+      source: 'probe-failed',
+      message: 'forge-vcs: nao foi possivel ler core.autocrlf ('
+        + ((e && e.message) || 'falha ao invocar git') + ') -- ' + EOL_UNKNOWN_TAIL,
+    };
+  }
+
+  if (!result || result.error || typeof result.status !== 'number') {
+    return {
+      converts: null,
+      autocrlf: 'unknown',
+      source: 'probe-failed',
+      message: 'forge-vcs: nao foi possivel ler core.autocrlf -- ' + EOL_UNKNOWN_TAIL,
+    };
+  }
+
+  // Exit 1 = key absent from every scope. git's built-in default is `false`;
+  // this is a MEASURED absence, not a failed probe, so it carries its own source.
+  if (result.status === 1) {
+    return { converts: false, autocrlf: 'false', source: 'git-default', message: null };
+  }
+  if (result.status !== 0) {
+    return {
+      converts: null,
+      autocrlf: 'unknown',
+      source: 'probe-failed',
+      message: 'forge-vcs: git config --get core.autocrlf saiu ' + result.status + ' -- ' + EOL_UNKNOWN_TAIL,
+    };
+  }
+
+  const raw = (result.stdout ? result.stdout.toString('utf8') : '').trim().toLowerCase();
+  // `input` converts on CHECK-IN only; a checkout writes what the blob holds.
+  if (raw === 'false' || raw === 'input') {
+    return { converts: false, autocrlf: raw, source: 'config', message: null };
+  }
+  if (raw === 'true') {
+    return {
+      converts: true,
+      autocrlf: 'true',
+      source: 'config',
+      message: 'forge-vcs: core.autocrlf=true neste repo -- o restore usa `git checkout`, que honra essa '
+        + 'configuracao, entao arquivos de TEXTO voltam normalizados para CRLF, e nao com os bytes que '
+        + 'tinham antes do reset. O conteudo restaurado e o do baseline; a diferenca e so de fim de linha.',
+    };
+  }
+  return {
+    converts: null,
+    autocrlf: 'unknown',
+    source: 'unrecognised-value',
+    message: 'forge-vcs: core.autocrlf tem valor nao reconhecido (' + JSON.stringify(raw) + ') -- ' + EOL_UNKNOWN_TAIL,
+  };
+}
+
 function gitRestoreAndRemove(cwd, baseline, target, opts) {
   if (target.overlap.length !== 0) {
     throw new Error('executeReset refused: overlap is non-empty (caller must abort)');
   }
   const restored = [];
   const removed = [];
+  // Probed only when a restore actually happens: nothing checked out, nothing to
+  // convert, and an advisory nobody needs is noise that trains people to skip
+  // the ones that matter.
+  let eol = null;
   if (target.restore.length) {
+    eol = eolRestoreFidelity(cwd, opts);
     const checkout = git(cwd, ['checkout', baseline, '--', ...target.restore], opts);
-    if (checkout.status !== 0) return { ok: false, restored, removed, error: stderrOf(checkout, 'git checkout failed') };
+    if (checkout.status !== 0) return { ok: false, restored, removed, eol, error: stderrOf(checkout, 'git checkout failed') };
     restored.push(...target.restore);
   }
   for (const rel of target.remove) {
@@ -421,7 +533,7 @@ function gitRestoreAndRemove(cwd, baseline, target, opts) {
       pruneEmptyParents(cwd, rel);
     } catch { /* best-effort — leftover surfaces in caller verification */ }
   }
-  return { ok: true, restored, removed };
+  return { ok: true, restored, removed, eol };
 }
 
 // ── SVN snapshot / post-run computation ─────────────────────────────────────
@@ -724,9 +836,15 @@ function restoreAndRemove(cwd, baseline, target, opts = {}) {
   }
   if (vcs !== 'git') return unsupported(vcs, { restored: [], removed: [] });
   const result = gitRestoreAndRemove(cwd, baseline, target, opts);
+  // `eol` is additive for readers that PICK fields, and for JSON consumers; it
+  // is `null` whenever nothing was restored (see gitRestoreAndRemove). It is
+  // NOT invisible to a deep-equality assertion, which sees every key -- one in
+  // forge-vcs.test.js had to learn the field. Saying "additive, nobody is
+  // affected" without that caveat would be the kind of claim this repo keeps
+  // having to retract.
   return result.ok
-    ? { vcs, ok: true, restored: result.restored, removed: result.removed }
-    : { vcs, ok: false, restored: result.restored, removed: result.removed, error: result.error };
+    ? { vcs, ok: true, restored: result.restored, removed: result.removed, eol: result.eol }
+    : { vcs, ok: false, restored: result.restored, removed: result.removed, eol: result.eol, error: result.error };
 }
 
 /*
@@ -815,6 +933,11 @@ module.exports = {
   mapSvnItem,
   pruneEmptyParents,
   isGsdPath,
+  // Additive (#104): the EOL advisory, exported so the reset CLI can surface it
+  // and so the closed sets can be crossed from a test.
+  eolRestoreFidelity,
+  AUTOCRLF_VALUES,
+  EOL_SOURCES,
 };
 
 function parseArgs(argv) {

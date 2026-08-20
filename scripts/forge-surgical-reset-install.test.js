@@ -38,14 +38,13 @@ function makeRepo() {
   // and verifyReset went red on Windows only. Repo-local config outranks the
   // global one.
   //
-  // KNOWN PRODUCTION LIMITATION — deliberately NOT fixed here: the surgical
-  // reset restores via plain `git checkout`, so for a real Windows user with
-  // autocrlf=true its "restores byte-for-byte" promise is FALSE — restored
-  // files come back CRLF-normalized. The code-side fix (passing
-  // `-c core.autocrlf=false` on the restore commands) would change what the
-  // user's working tree contains after a reset, which is a PRODUCT decision;
-  // it is tracked as an open item, and this pin only makes the fixture
-  // deterministic.
+  // KNOWN PRODUCTION LIMITATION, now DECLARED rather than tracked (#104,
+  // decided 2026-08-19 as option 3): the surgical reset restores via plain
+  // `git checkout`, so for a real Windows user with autocrlf=true restored
+  // files come back CRLF-normalized. Passing `-c core.autocrlf=false` was
+  // REJECTED — it changes what the user's working tree contains after a reset.
+  // The behaviour stays; the reset now WARNS when that configuration is in
+  // force. This pin only makes the fixture deterministic.
   git(cwd, ['config', 'core.autocrlf', 'false']);
   fs.writeFileSync(path.join(cwd, 'tracked.txt'), 'baseline\n');
   fs.mkdirSync(path.join(cwd, 'node_modules', 'vendored'), { recursive: true });

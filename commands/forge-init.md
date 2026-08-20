@@ -64,6 +64,8 @@ The project is already managed by gsd-pi. Your job is to:
 
 2. **Create or update `CLAUDE.md`** in project root (see template below)
    - If CLAUDE.md already exists: add the GSD section only if not already present
+   - Then run the **Routing Contract Injection** step (see below) — the multi-LLM rules
+     the session itself must obey. Capture its per-file outcomes for the final report.
 
 3. **Create `.gsd/AUTO-MEMORY.md`** if it doesn't exist (empty, with header only)
 
@@ -110,7 +112,7 @@ The project is already managed by gsd-pi. Your job is to:
     Ignore rules added: <N> (or "(none — already up to date)")
 
     Files created:
-    - CLAUDE.md ✓
+    - CLAUDE.md ✓ (+ bloco `forge:routing-contract`: <created|updated|unchanged|skipped:<reason>>)
     - .claude/settings.json ✓ (bypass permissions + MCPs)
     - .gsd/AUTO-MEMORY.md ✓
     - .gsd/forge-prefs.jsonc ✓ (created when no existing prefs were found; otherwise preserved)
@@ -201,7 +203,8 @@ The project is already managed by gsd-pi. Your job is to:
    <!-- ranked by: confidence × (1 + hits × 0.1) | cap: 50 active -->
    ```
 
-3. **Create `CLAUDE.md`** (see template below)
+3. **Create `CLAUDE.md`** (see template below), then run the **Routing Contract Injection**
+   step (see below). Capture its per-file outcomes for the final report.
 
 4. **Create the curated local preferences JSONC** using the answer from step 2:
    ```bash
@@ -248,7 +251,7 @@ The project is already managed by gsd-pi. Your job is to:
     Ignore rules added: <N> (or "(none — already up to date)")
 
     Files created:
-    - CLAUDE.md
+    - CLAUDE.md                   ← inclui o bloco `forge:routing-contract` (multi-LLM)
     - .claude/settings.json       ← bypass permissions + MCPs (commit this)
     - .gsd/PROJECT.md
     - .gsd/REQUIREMENTS.md
@@ -270,6 +273,33 @@ The project is already managed by gsd-pi. Your job is to:
 
     Next: /forge-new-milestone <descrição do que entregar primeiro>
     ```
+
+---
+
+## Routing Contract Injection
+
+Runs for BOTH Case A and Case B, **after** `CLAUDE.md` exists.
+
+The Forge resolver decides which engine runs each unit — but the agent that reads that
+decision is the session-owner model itself, and a decision a model can read is a decision
+a model can talk itself out of. Measured (this repo's `CLAUDE.md`, TASK-021): four tasks
+routed to a non-Claude engine ran 4/4 in Claude, and the only trace was one log line the
+session narrated away as a "fleet tooling bug". So the rules go into the one surface every
+session reads and never summarizes: the project's own instruction file.
+
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-instructions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --sync --cwd .
+```
+
+The command is idempotent and splices only its own marked block
+(`<!-- forge:routing-contract:start … end -->`): bytes outside the markers are carried over
+untouched, and a file whose markers are malformed is **refused by name**, never repaired by
+guess. It reports one line per candidate target (`CLAUDE.md`, `AGENTS.md`) — report those
+outcomes verbatim; a `skipped (malformed-block:…)` is an operator action, not noise.
+
+Re-running it later is free: `/forge-auto`, `/forge-next` and `/forge-task` each refresh the
+block at bootstrap, so a project never runs under a stale contract.
 
 ---
 

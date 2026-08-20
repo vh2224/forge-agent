@@ -443,8 +443,40 @@ test('R1: a nested template literal does not desynchronise the tokenizer', () =>
   // then misread. Measured in scripts/forge-appserver-probe.js: two real
   // `.replace(/\n/g, ' ')` call sites were being reported as comment prose.
   const probePath = path.join(__dirname, 'forge-appserver-probe.js');
-  const probe = anchors.classifyFile({ path: probePath, content: fs.readFileSync(probePath, 'utf8') });
-  for (const line of [954, 970]) {
+  const content = fs.readFileSync(probePath, 'utf8');
+  const probe = anchors.classifyFile({ path: probePath, content });
+
+  // The specimens are LOCATED, not pinned. This assert used to name lines 954 and
+  // 970 by integer, and an edit elsewhere in forge-appserver-probe.js — one that
+  // inserted lines ABOVE them and touched nothing they depend on — turned it red.
+  // A check that fails for a reason other than the property it guards is a defect
+  // in the check: it costs a diagnosis and teaches the reader to distrust it.
+  //
+  // The property is stated generally instead: every executable occurrence of the
+  // call must survive tokenization. That is exactly what the nested-template-literal
+  // bug broke (occurrences after it were misread as comment prose), and it cannot be
+  // moved by inserting unrelated lines.
+  //
+  // The comment filter is deliberately crude and lives on the TEST side, never
+  // borrowed from the tokenizer under test — asking the subject to classify its own
+  // specimens would make the assert circular. Measured 2026-08-19: 20 occurrences,
+  // zero of them in comments, so the filter is a no-op today and exists only so a
+  // future quoted mention does not turn this red for the wrong reason.
+  const NEEDLE = ".replace(/\\n/g, ' ')";
+  const expected = content.split('\n')
+    .map((text, index) => ({ line: index + 1, text }))
+    .filter(({ text }) => text.includes(NEEDLE))
+    .filter(({ text }) => {
+      const trimmed = text.trim();
+      return !trimmed.startsWith('//') && !trimmed.startsWith('*');
+    });
+
+  // Anti-vacuity floor: a needle that stops matching would make this test pass by
+  // asserting nothing at all — the failure mode this repo keeps paying for.
+  assert(expected.length >= 2,
+    `the in-tree specimen must still exist in forge-appserver-probe.js (found ${expected.length})`);
+
+  for (const { line } of expected) {
     assert(probe.call_sites.some((site) => site.line === line),
       `the real call site at forge-appserver-probe.js:${line} must survive tokenization`);
   }

@@ -103,6 +103,28 @@ function runProbeHandshake({ cmd, args, env, timeoutSecs, threadParams = { appro
     const pending = new Map();
     let child;
 
+    // Kill, then WAIT FOR THE REAP before handing control back.
+    //
+    // Measured (2026-08-19, two runs of `--probe crossroot-write` against codex
+    // 0.146.0 on Windows): the arm that follows another arm died reproducibly with
+    // `failed to initialize sqlite state runtime under ~/.codex`. The kill above is
+    // `/F` — the OS tears the process down without letting it close its sqlite
+    // handles, and the NEXT app-server spawned against the same CODEX_HOME cannot
+    // initialize the state runtime while those handles are still held.
+    //
+    // Resolving before the child is reaped is what turned an ordering detail into a
+    // failed measurement: the caller starts the next session immediately. The wait is
+    // BOUNDED — a probe that hangs waiting for a corpse would be a worse defect than
+    // the one it fixes — and its expiry is silent by design: the exit code of a
+    // process we already force-killed carries no information about the measurement.
+    const reap = (fn, value) => {
+      if (!child || child.exitCode !== null || child.signalCode !== null) return fn(value);
+      let done = false;
+      const go = () => { if (done) return; done = true; clearTimeout(guard); fn(value); };
+      const guard = setTimeout(go, REAP_TIMEOUT_MS);
+      child.once('exit', go);
+    };
+
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -113,7 +135,7 @@ function runProbeHandshake({ cmd, args, env, timeoutSecs, threadParams = { appro
           else process.kill(-child.pid, 'SIGKILL');
         } catch { /* already gone */ }
       }
-      fn(value);
+      reap(fn, value);
     };
 
     const send = (message) => {
@@ -203,6 +225,12 @@ function runProbeHandshake({ cmd, args, env, timeoutSecs, threadParams = { appro
  * a1/a2 drive the wire directly — reusing only encodeMessage/decodeLine
  * (the framing contract) from the client, exactly as the handshake probe does.
  */
+// How long to wait for a force-killed app-server to be reaped before moving on. See
+// `reap` below: bounded so the probe can never hang on it.
+const REAP_TIMEOUT_MS = 4000;
+// Delay before the single retry described in the crossroot arm runner.
+const RETRY_DELAY_MS = 1500;
+
 function runProbeSession({ cmd, args, env, timeoutSecs, threadParams, buildTurnParams }) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -217,6 +245,28 @@ function runProbeSession({ cmd, args, env, timeoutSecs, threadParams, buildTurnP
     const inboundRequests = [];
     let child;
 
+    // Kill, then WAIT FOR THE REAP before handing control back.
+    //
+    // Measured (2026-08-19, two runs of `--probe crossroot-write` against codex
+    // 0.146.0 on Windows): the arm that follows another arm died reproducibly with
+    // `failed to initialize sqlite state runtime under ~/.codex`. The kill above is
+    // `/F` — the OS tears the process down without letting it close its sqlite
+    // handles, and the NEXT app-server spawned against the same CODEX_HOME cannot
+    // initialize the state runtime while those handles are still held.
+    //
+    // Resolving before the child is reaped is what turned an ordering detail into a
+    // failed measurement: the caller starts the next session immediately. The wait is
+    // BOUNDED — a probe that hangs waiting for a corpse would be a worse defect than
+    // the one it fixes — and its expiry is silent by design: the exit code of a
+    // process we already force-killed carries no information about the measurement.
+    const reap = (fn, value) => {
+      if (!child || child.exitCode !== null || child.signalCode !== null) return fn(value);
+      let done = false;
+      const go = () => { if (done) return; done = true; clearTimeout(guard); fn(value); };
+      const guard = setTimeout(go, REAP_TIMEOUT_MS);
+      child.once('exit', go);
+    };
+
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -227,7 +277,7 @@ function runProbeSession({ cmd, args, env, timeoutSecs, threadParams, buildTurnP
           else process.kill(-child.pid, 'SIGKILL');
         } catch { /* already gone */ }
       }
-      fn(value);
+      reap(fn, value);
     };
 
     const send = (message) => {
@@ -1251,6 +1301,11 @@ async function probeNonGitWrite({ timeoutSecs }) {
       arm.denialNarrated = arm.narration.some(t => /not permitted|permission denied|read-only file system|operation not permitted/i.test(t));
       process.stdout.write(`# agentMessage narration: ${JSON.stringify(arm.narration)}\n# denial signature in narration (corroboração, NÃO evidência): ${arm.denialNarrated}\n`);
       process.stdout.write(`# thread/start.result sandbox=${JSON.stringify(arm.threadSandbox)} activePermissionProfile=${JSON.stringify(arm.profile)} gitInfo=${JSON.stringify(arm.gitInfo)}\n`);
+      // Reported per arm, always — including when it is null. A precondition that is
+      // only mentioned when it bites reads, on the quiet runs, exactly like a check
+      // that stopped running.
+      const refusal = policyRefusal(arm);
+      process.stdout.write(`# recusa por POLÍTICA neste braço: ${refusal ? refusal.detail : 'nenhuma'}\n`);
       process.stdout.write(`# commandExecution items: ${JSON.stringify(arm.items)}\n`);
       process.stdout.write(`# commandExecution started-without-completion: ${JSON.stringify(arm.startedOnly)}\n`);
       process.stdout.write(`# GROUND TRUTH — target exists after turn: ${arm.exists}\n`);
@@ -1465,6 +1520,50 @@ function armExecution(arm, control) {
  *
  * Evaluation order — first match wins.
  */
+/**
+ * Did the POLICY refuse this arm's command, as opposed to the command never having
+ * been run?
+ *
+ * The distinction is the whole reason this helper exists. Rule (2) below reads
+ * `ctrlAttempt.exists === false` as "the turn does not execute the command in this
+ * shape" — true when the model never issued it, and FALSE when the model issued it
+ * and the server declined. Measured on 2026-08-19: every arm came back
+ * `status: "declined"` / `rejected: blocked by policy`, on a thread that
+ * `thread/start` had already opened as `readOnly` with
+ * `activePermissionProfile: ":read-only"`, because a throwaway `mkdtemp` directory
+ * is not in the operator's codex trust list. Reporting that as "the turn does not
+ * execute this shape" would be a measurement about the COMMAND published from a fact
+ * about the DIRECTORY.
+ *
+ * Two independent signals, both from the server, neither inferred from narration:
+ *   - `declined` — a commandExecution the server itself marked refused. Strongest:
+ *     it proves the command reached the sandbox and was turned away.
+ *   - `readOnlyThread` — thread/start answered `readOnly` while the arm asked for
+ *     `workspaceWrite`. Proves the session could never have written, whatever the
+ *     model did afterwards.
+ *
+ * Either one alone is enough to disqualify the run as a measurement of
+ * `writableRoots`; both are reported so the operator sees which fired.
+ */
+function policyRefusal(arm) {
+  if (!arm) return null;
+  const items = Array.isArray(arm.items) ? arm.items : [];
+  const declined = items.filter(i => i && i.type === 'commandExecution' && i.status === 'declined');
+  const readOnlyThread = Boolean(
+    (arm.threadSandbox && arm.threadSandbox.type === 'readOnly')
+    || (arm.profile && arm.profile.id === ':read-only'),
+  );
+  if (declined.length === 0 && !readOnlyThread) return null;
+  const parts = [];
+  if (declined.length > 0) {
+    parts.push(`${declined.length} commandExecution com status:"declined" (o servidor recusou o comando, ele NÃO deixou de ser emitido)`);
+  }
+  if (readOnlyThread) {
+    parts.push(`thread/start abriu sandbox=${JSON.stringify(arm.threadSandbox)} profile=${JSON.stringify(arm.profile)} embora o braço tenha pedido workspaceWrite`);
+  }
+  return { declined: declined.length > 0, readOnlyThread, detail: parts.join('; ') };
+}
+
 function crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck }) {
   const V = CROSSROOT_VERDICTS;
 
@@ -1482,6 +1581,25 @@ function crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck }) {
         reason: `braço ${label} NÃO MEDIDO (${message}) — sem os três braços decisivos não há medição sobre writableRoots. "unknown" significa NÃO MEDIDO e nunca "medido e negativo".`,
       };
     }
+  }
+
+  // (1b) PRECONDITION, and it MUST precede (2). When the positive control did not
+  // write AND the server refused by policy, the environment — not the command shape —
+  // is what stopped the measurement. Rule (2) would name the command shape, which is
+  // a claim about something nobody tested here.
+  //
+  // `unknown` is the right verdict and not a new one: NOT MEASURED is exactly what
+  // happened. What this branch adds is a reason an operator can act on, instead of a
+  // diagnosis pointing at the wrong subject.
+  const attemptRefusal = policyRefusal(ctrlAttempt);
+  if (ctrlAttempt.exists === false && attemptRefusal) {
+    return {
+      verdict: V.UNKNOWN,
+      reason: 'PRECONDIÇÃO NÃO SATISFEITA — o CONTROLE POSITIVO não escreveu nem dentro do próprio cwd, e a causa medida é recusa por POLÍTICA, não forma do comando: '
+        + `${attemptRefusal.detail}. Um diretório recém-criado por mkdtemp não está na lista de trust do codex, e trust NÃO é herdado do diretório pai (medido: repetir com A e B sob uma raiz confiada dá o mesmo readOnly). `
+        + 'Enquanto todo comando é recusado, nenhum braço pode escrever e NADA sobre writableRoots é atribuível. "unknown" significa NÃO MEDIDO e nunca "medido e negativo". '
+        + 'Remédio: rodar os braços num diretório confiado, ou abrir a thread com sandbox de escrita já em thread/start.',
+    };
   }
 
   // (2) The turn never executed the command in this shape: absence is noise, not denial.
@@ -1658,7 +1776,19 @@ async function probeCrossRootWrite({ timeoutSecs }) {
       return arm;
     }
     try {
-      const r = await runCapabilityTurn({ timeoutSecs, command, sandboxPolicy, cwd });
+      // One bounded retry, and ONLY for the state-runtime contention named in
+      // `reap` above. The reap fixes the cause; this covers the residue (a handle
+      // the OS has not released yet). Any other error falls straight through —
+      // retrying an unknown failure would turn a measurement into a coin flip.
+      let r;
+      try {
+        r = await runCapabilityTurn({ timeoutSecs, command, sandboxPolicy, cwd });
+      } catch (first) {
+        if (!/failed to initialize sqlite state runtime/i.test(first.message || '')) throw first;
+        process.stdout.write(`# ARM ${label}: state runtime ocupado — uma nova tentativa após ${RETRY_DELAY_MS}ms (causa nomeada, nunca retry cego)\n`);
+        await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+        r = await runCapabilityTurn({ timeoutSecs, command, sandboxPolicy, cwd });
+      }
       const ts = r.result.threadStartResult || {};
       arm.exists = fs.existsSync(target);
       arm.items = r.commandItems;
@@ -1674,6 +1804,11 @@ async function probeCrossRootWrite({ timeoutSecs }) {
       arm.denialNarrated = arm.narration.some(t => /not permitted|permission denied|read-only file system|operation not permitted/i.test(t));
       process.stdout.write(`# agentMessage narration: ${JSON.stringify(arm.narration)}\n# denial signature in narration (corroboração, NÃO evidência): ${arm.denialNarrated}\n`);
       process.stdout.write(`# thread/start.result sandbox=${JSON.stringify(arm.threadSandbox)} activePermissionProfile=${JSON.stringify(arm.profile)} gitInfo=${JSON.stringify(arm.gitInfo)}\n`);
+      // Reported per arm, always — including when it is null. A precondition that is
+      // only mentioned when it bites reads, on the quiet runs, exactly like a check
+      // that stopped running.
+      const refusal = policyRefusal(arm);
+      process.stdout.write(`# recusa por POLÍTICA neste braço: ${refusal ? refusal.detail : 'nenhuma'}\n`);
       process.stdout.write(`# commandExecution items: ${JSON.stringify(arm.items)}\n`);
       process.stdout.write(`# commandExecution started-without-completion: ${JSON.stringify(arm.startedOnly)}\n`);
       process.stdout.write(`# GROUND TRUTH — target exists after turn: ${arm.exists}\n`);
@@ -1829,4 +1964,7 @@ module.exports = {
   probeNonGitWrite, NONGIT_WRITE_VERDICTS, shellQuote,
   probeCrossRootWrite, crossRootVerdict, CROSSROOT_VERDICTS,
   armExecution, CROSSROOT_EXEC,
+  // Exported so the precondition gate is provable without the sidecar being
+  // reachable — same reason crossRootVerdict is pure and exported.
+  policyRefusal,
 };
