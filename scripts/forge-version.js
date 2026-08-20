@@ -13,7 +13,7 @@
 //   2. atualizar os literais fixados em forge-installer.test.js e
 //      forge-package.test.js — eles são propositalmente literais, para que um
 //      bump seja um ato consciente e não um efeito colateral.
-const VERSION = '4.18.1';
+const VERSION = '4.19.0';
 const LEGACY_VERSION = '3.1.4';
 
 module.exports = { VERSION, LEGACY_VERSION };
