@@ -148,7 +148,9 @@ function registerRun(ws, id, opts) {
     session_id: `sess-${id}`,
     active: o.active === undefined ? true : o.active,
     started_at: 1785763253000,
-    last_heartbeat: 1785763253000,
+    // Keep the run live while this repro isolates claim-release semantics.
+    // Tests that need an old claim age write `write_claim.at` explicitly.
+    last_heartbeat: Date.now(),
     worker: null,
     worker_started: null,
     isolation_mode: 'worktree',
