@@ -95,13 +95,24 @@ async function withTrackedProbeResources({ fsApi, osApi, pathApi }, operation) {
       return dir;
     },
   };
-  try {
-    return await operation(resources);
-  } finally {
-    for (const target of created.reverse()) {
-      try { fsApi.rmSync(target, { recursive: true, force: true }); } catch { /* best-effort probe hygiene */ }
-    }
+  let result;
+  let primaryError = null;
+  try { result = await operation(resources); } catch (error) { primaryError = error; }
+  const cleanupErrors = [];
+  for (const target of created.reverse()) {
+    try { fsApi.rmSync(target, { recursive: true, force: true }); }
+    catch (error) { cleanupErrors.push(new Error(`cleanup failed for ${target}: ${error.message}`, { cause: error })); }
   }
+  if (cleanupErrors.length > 0) {
+    const errors = primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors;
+    const aggregate = new AggregateError(errors,
+      `crossroot probe cleanup incomplete (${cleanupErrors.length} path(s))`,
+      primaryError ? { cause: primaryError } : undefined);
+    aggregate.code = 'PROBE_CLEANUP_FAILED';
+    throw aggregate;
+  }
+  if (primaryError) throw primaryError;
+  return result;
 }
 
 // Single-quoted: an unquoted `touch ${target}` splits a path containing a space into
@@ -118,6 +129,16 @@ function crossPlatformWriteCommand(target, platform = process.platform) {
 
 function printVerdict(probeName, verdict, reason) {
   process.stdout.write(`\nVERDICT: ${probeName} = ${verdict} — ${reason}\n`);
+}
+
+function reportProbeInfraFailure(error, { stderr = process.stderr, processRef = process } = {}) {
+  const cleanupDetails = error instanceof AggregateError
+    ? error.errors.slice(error.cause ? 1 : 0).map(item => item.message).join('; ')
+    : '';
+  stderr.write(`forge-appserver-probe: infra failure — ${error.message}`
+    + `${error.cause ? `; primary: ${error.cause.message}` : ''}`
+    + `${cleanupDetails ? `; cleanup: ${cleanupDetails}` : ''}\n`);
+  processRef.exitCode = 2;
 }
 
 function logWire(direction, payload) {
@@ -1612,6 +1633,15 @@ function threadWritePrecondition(arm) {
   };
 }
 
+function runtimeRootWritePrecondition(threadStartResult) {
+  const thread = threadStartResult || {};
+  return threadWritePrecondition({
+    requestedThreadSandbox: 'workspace-write',
+    threadSandbox: thread.sandbox,
+    profile: thread.activePermissionProfile,
+  });
+}
+
 function crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck }) {
   const V = CROSSROOT_VERDICTS;
 
@@ -1778,6 +1808,10 @@ async function runCrossRootArmSequence({ runArm, dirA, dirB, policyBase }) {
       cwd: dirA, targetDir: dirA, sandboxPolicy: { ...policyBase, writableRoots: [dirB] },
       note: 'cwd=A, alvo DENTRO de A, COM writableRoots:[B] — writableRoots SOMA B ou SUBSTITUI a raiz implícita do cwd?',
     });
+    const replaceGrant = threadWritePrecondition(replaceCheck);
+    if (replaceGrant) {
+      replaceCheck = { ...replaceCheck, error: `PRECONDIÇÃO NÃO SATISFEITA — ${replaceGrant.detail}` };
+    }
     outcome = crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck });
   }
   return { executed, arms: { ctrlAttempt, ctrlDeny, treat, replaceCheck }, outcome };
@@ -1789,7 +1823,11 @@ async function probeCrossRootWrite({ timeoutSecs }) {
   const path = require('path');
   const { spawnSync } = require('child_process');
 
-  return withTrackedProbeResources({ fsApi: fs, osApi: os, pathApi: path }, async (resources) => {
+  let pendingVerdict = null;
+  const deferVerdict = (verdict, reason) => { pendingVerdict = { verdict, reason }; };
+
+  try {
+    await withTrackedProbeResources({ fsApi: fs, osApi: os, pathApi: path }, async (resources) => {
 
   // One private SQLite home per app-server session removes cross-arm lock
   // contention without copying CODEX_HOME, auth.json or config.toml.
@@ -1814,11 +1852,9 @@ async function probeCrossRootWrite({ timeoutSecs }) {
     process.stdout.write(`# thread/start.result runtimeWorkspaceRoots=${JSON.stringify(hs.threadStartResult && hs.threadStartResult.runtimeWorkspaceRoots)}\n`);
   } catch (error) {
     if (error.infra) {
-      process.stderr.write(`forge-appserver-probe: infra failure — ${error.message}\n`);
-      process.exitCode = 2;
-      return;
+      throw error;
     }
-    printVerdict('crossroot-write', CROSSROOT_VERDICTS.UNKNOWN,
+    deferVerdict(CROSSROOT_VERDICTS.UNKNOWN,
       `handshake não fechou (${error.message.replace(/\n/g, ' ')}) — NADA foi medido sobre writableRoots. "unknown" é NÃO MEDIDO, nunca "medido e negativo".`);
     return;
   }
@@ -1941,7 +1977,7 @@ async function probeCrossRootWrite({ timeoutSecs }) {
   {
     const sequence = await runCrossRootArmSequence({ runArm, dirA, dirB, policyBase: POLICY_BASE });
     if (sequence.terminal) {
-      printVerdict('crossroot-write', sequence.terminal.verdict,
+      deferVerdict(sequence.terminal.verdict,
         `${sequence.terminal.reason}. Braços executados: ${sequence.executed.join(', ')}. Versão do binário: ${binaryVersion}.`);
       return;
     }
@@ -1955,6 +1991,7 @@ async function probeCrossRootWrite({ timeoutSecs }) {
       let fifthWrote = false;
       let fifthError = null;
       let fifthItems = [];
+      let fifthGrant = null;
       try { fs.rmSync(target, { force: true }); } catch { /* asserted next */ }
       if (fs.existsSync(target)) {
         fifthError = 'precondition failed: target present before the turn';
@@ -1974,6 +2011,7 @@ async function probeCrossRootWrite({ timeoutSecs }) {
             }),
           });
           fifthWrote = fs.existsSync(target);
+          fifthGrant = runtimeRootWritePrecondition(fifth.threadStartResult);
           // R2: this arm used to look at nothing but `fs.existsSync`. Its NEGATIVE
           // branch therefore appended "também não escreveu" to the primary verdict
           // with no way to tell a sandbox denial from a model that never ran the
@@ -1992,29 +2030,36 @@ async function probeCrossRootWrite({ timeoutSecs }) {
       // posture is a property of the ARM, not of the outcome, so it cannot live only
       // where the arm happened to write.
       const FIFTH_CAVEAT = 'CAVEAT PROBATÓRIO OBRIGATÓRIO: runtimeWorkspaceRoots NÃO é coberto pelo schema pinado (shared/schemas/codex-appserver-pin.json não modela params de ThreadStart) e este braço não tem controle positivo próprio (nada análogo ao CTRL-ATTEMPT) — postura probatória MAIS FRACA que a da ladder de quatro braços, e não deve ser reportado com a mesma confiança.';
-      if (fifthWrote) {
-        printVerdict('crossroot-write', CROSSROOT_VERDICTS.PARCIAL,
+      if (fifthWrote && !fifthGrant) {
+        deferVerdict(CROSSROOT_VERDICTS.PARCIAL,
           `${reason} PORÉM o braço thread-level escreveu em B com ThreadStartParams.runtimeWorkspaceRoots:[B] (execução evidenciada: ${fifthExec.detail}). ${FIFTH_CAVEAT} Versão do binário: ${binaryVersion}.`);
         return;
       }
       // An absence here is only reportable as "did not write" if the command is
       // evidenced to have run at all.
       let fifthPhrase;
-      if (fifthError) {
+      if (fifthGrant) {
+        fifthPhrase = `NÃO FOI MEDIDO (${fifthGrant.detail}) — nem a presença nem a ausência podem ser atribuídas ao mecanismo auxiliar`;
+      } else if (fifthError) {
         fifthPhrase = `NÃO FOI MEDIDO (${fifthError})`;
       } else if (fifthExec.kind === CROSSROOT_EXEC.NONE) {
         fifthPhrase = `NÃO FOI MEDIDO: o alvo não apareceu, mas não há evidência de execução do braço (${fifthExec.detail}) — "não escreveu" seria indistinguível de "o modelo não rodou o comando"`;
       } else {
         fifthPhrase = `não escreveu (execução evidenciada: ${fifthExec.detail})`;
       }
-      printVerdict('crossroot-write', verdict,
+      deferVerdict(verdict,
         `${reason} O braço thread-level runtimeWorkspaceRoots também ${fifthPhrase}. ${FIFTH_CAVEAT} Versão do binário: ${binaryVersion}.`);
       return;
     }
 
-    printVerdict('crossroot-write', verdict, `${reason} Versão do binário: ${binaryVersion}.`);
+    deferVerdict(verdict, `${reason} Versão do binário: ${binaryVersion}.`);
   }
-  });
+    });
+  } catch (error) {
+    reportProbeInfraFailure(error);
+    return;
+  }
+  if (pendingVerdict) printVerdict('crossroot-write', pendingVerdict.verdict, pendingVerdict.reason);
 }
 
 async function main() {
@@ -2059,5 +2104,5 @@ module.exports = {
   armExecution, CROSSROOT_EXEC,
   // Exported so the precondition gate is provable without the sidecar being
   // reachable — same reason crossRootVerdict is pure and exported.
-  policyRefusal, threadWritePrecondition,
+  policyRefusal, threadWritePrecondition, runtimeRootWritePrecondition, reportProbeInfraFailure,
 };

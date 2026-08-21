@@ -485,6 +485,43 @@ async function testCrossRootProbe() {
   assert.strictEqual(partialCreation.removed.length, 2,
     'failure while creating B must clean exactly sqliteRoot and A, never an uncreated B');
 
+  const lockedFs = {
+    mkdtempSync(prefix) { return `${prefix}locked`; },
+    realpathSync(value) { return value; },
+    mkdirSync() {},
+    rmSync() { throw new Error('EPERM locked'); },
+  };
+  let cleanupOnly;
+  try {
+    await probe.withTrackedProbeResources(
+      { fsApi: lockedFs, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); return 'would-have-succeeded'; },
+    );
+  } catch (error) { cleanupOnly = error; }
+  assert(cleanupOnly instanceof AggregateError && cleanupOnly.code === 'PROBE_CLEANUP_FAILED',
+    'cleanup failure after success must become an infrastructure AggregateError');
+  assert(/EPERM locked/.test(cleanupOnly.errors[0].message), 'cleanup diagnostic must preserve the lock error');
+
+  const primary = new Error('primary measurement outage');
+  let combined;
+  try {
+    await probe.withTrackedProbeResources(
+      { fsApi: lockedFs, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); throw primary; },
+    );
+  } catch (error) { combined = error; }
+  assert(combined instanceof AggregateError && combined.cause === primary,
+    'cleanup failure must preserve the primary error as cause');
+  assert.strictEqual(combined.errors[0], primary, 'aggregate must retain the primary error verbatim');
+  let diagnostic = '';
+  const fakeProcess = { exitCode: 0 };
+  probe.reportProbeInfraFailure(combined, {
+    stderr: { write(value) { diagnostic += value; } }, processRef: fakeProcess,
+  });
+  assert.strictEqual(fakeProcess.exitCode, 2, 'cleanup failure must surface as infrastructure exit 2');
+  assert(/primary measurement outage/.test(diagnostic) && /EPERM locked/.test(diagnostic),
+    'stderr must carry both the primary failure and cleanup failure');
+
   const { crossRootVerdict, CROSSROOT_VERDICTS: V } = probe;
   const wrote = { exists: true };
   const absent = { exists: false };
@@ -524,6 +561,21 @@ async function testCrossRootProbe() {
   const positive = await sequence([liveWrote, liveAbsent('/B/deny.txt'), liveWrote, liveWrote]);
   assert.deepStrictEqual(positive.executed, ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT', 'REPLACE-CHECK'],
     'REPLACE-CHECK must run after a measured positive because it distinguishes sum from replacement');
+  const replaceReadOnly = await sequence([
+    liveWrote,
+    liveAbsent('/B/deny.txt'),
+    liveWrote,
+    requestedWrite({ exists: true }, { type: 'readOnly' }),
+  ]);
+  assert.strictEqual(replaceReadOnly.outcome.verdict, V.PROVADA,
+    'invalid REPLACE-CHECK must not erase the already-measured main conclusion');
+  assert(/NÃO MEDIDO/.test(replaceReadOnly.outcome.reason) && !/semântica de SOMA/.test(replaceReadOnly.outcome.reason),
+    'readOnly REPLACE-CHECK cannot be interpreted as sum or replacement');
+  const runtimeReadOnly = probe.runtimeRootWritePrecondition({
+    sandbox: { type: 'readOnly' }, activePermissionProfile: { id: ':read-only' },
+  });
+  assert(runtimeReadOnly && /workspaceWrite/.test(runtimeReadOnly.detail),
+    'readOnly RUNTIME-ROOTS must be rejected before interpreting presence or absence');
 
   const readOnlyPrecondition = crossRootVerdict({
     ctrlAttempt: requestedWrite({ exists: false, items: [] }, { type: 'readOnly' }),
