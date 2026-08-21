@@ -931,6 +931,8 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
   let firstLine = null;
   let stderr = '';
   let earlyExit = null;
+  let controllerSpawned = false;
+  let controllerSpawnError = null;
 
   if (process.platform === 'win32') {
     const protocolDir = path.join(dir, 'protocol space Ω');
@@ -960,6 +962,8 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', WINDOWS_CTRL_C_PATH, '-ConfigPath', configPath,
     ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    child.once('spawn', () => { controllerSpawned = true; });
+    child.once('error', (error) => { controllerSpawnError = error; });
     child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
     child.once('exit', (code, signal) => { earlyExit = { code, signal }; });
     controllerExit = waitForExit(child).then((exit) => {
@@ -976,13 +980,21 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
 
   try {
     if (process.platform === 'win32') {
+      await waitFor(
+        () => {
+          if (controllerSpawnError) throw new Error(`windows-controller-process-spawn: ${controllerSpawnError.message}`);
+          return controllerSpawned;
+        },
+        10000,
+        'windows-controller-process-spawn',
+      );
       const rawController = await waitFor(
         () => {
           if (earlyExit) throw new Error(`windows-controller-launch: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
           const controllerPath = path.join(dir, 'protocol space Ω', 'controller.json');
           return fs.existsSync(controllerPath) && fs.readFileSync(controllerPath, 'utf8');
         },
-        10000,
+        60000,
         'windows-controller-launch',
       );
       const controller = JSON.parse(rawController);
