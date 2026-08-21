@@ -988,7 +988,9 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
       );
       const controller = JSON.parse(rawController);
       assertEqual(controller.nonce, nonce, 'controller protocol nonce must match');
-      assertEqual(controller.stage, 'controller-started');
+      assert(Number.isInteger(controller.pid) && controller.pid > 0, 'controller protocol PID must identify the owned host');
+      assert(['controller-started', 'add-type-complete', 'create-child'].includes(controller.stage),
+        `controller protocol stage must be monotonic and known, got ${controller.stage}`);
       let lastControllerStage = controller.stage;
       let rawStarted;
       try {
