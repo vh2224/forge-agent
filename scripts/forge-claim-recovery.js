@@ -8,6 +8,8 @@ const runs = require('./forge-runs.js');
 const vcs = require('./forge-vcs.js');
 const { findStuckClaims } = require('./forge-claim-stuck.js');
 const { isHeld, recoverClaim, validateHeldClaim } = require('./forge-write-claim.js');
+const { claimPathMatches } = require('./forge-parallelism.js');
+const { IN_FLIGHT_KINDS } = require('./forge-claim-release.js');
 
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
 function lstatOrAbsent(target) {
@@ -49,7 +51,7 @@ function ancestryIdentity(root, target, label) {
   return identity.join('/');
 }
 
-function secureDirChain(cwd, relative, create, label) {
+function secureDirChain(cwd, relative, create, label, createdParents) {
   const base = path.resolve(cwd);
   const baseStat = lstatOrAbsent(base);
   if (!baseStat || !baseStat.isDirectory() || baseStat.isSymbolicLink()) throw new Error(`${label}-cwd-unsafe`);
@@ -61,6 +63,7 @@ function secureDirChain(cwd, relative, create, label) {
     if (stat === null) {
       if (!create) throw new Error(`${label}-root-missing`);
       try { fs.mkdirSync(cursor); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+      if (Array.isArray(createdParents)) createdParents.push(path.dirname(cursor));
       stat = fs.lstatSync(cursor);
     }
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label}-root-reparse`);
@@ -77,7 +80,7 @@ function normalizeScope(raw) {
     return rel;
   });
 }
-function inScope(rel, scope) { return scope.some((p) => rel === p || rel.startsWith(`${p}/`)); }
+function inScope(rel, scope) { return scope.some((p) => claimPathMatches(p, rel)); }
 function recoveryRoot(cwd, id) { return path.join(cwd, '.gsd', 'forge', 'claim-recovery', encodeURIComponent(id)); }
 function recoveryStore(cwd, id, create) {
   return secureDirChain(cwd, `.gsd/forge/claim-recovery/${encodeURIComponent(id)}`, create, 'recovery');
@@ -100,17 +103,22 @@ function inspect(cwd, runId, opts = {}) {
   const statusReader = opts.workingStatus || vcs.workingStatus;
   const status = statusReader(codeDir, { vcs: claim.vcs_baseline && claim.vcs_baseline.vcs });
   if (!status.ok) return { ok: false, eligible: false, reason: `vcs-status-failed:${status.error}` };
-  const dirty = status.entries.filter((entry) => inScope(entry.path.replace(/\\/g, '/'), scope));
+  const dirty = status.entries.filter((entry) => IN_FLIGHT_KINDS.includes(entry.kind)
+    && inScope(entry.path.replace(/\\/g, '/'), scope));
   return { ok: true, eligible: true, run_id: runId, record, claim, code_dir: codeDir, scope, dirty, status_reader: statusReader };
 }
 
-function fsyncDirectory(dir, io) {
+function fsyncDirectory(dir, io, required) {
   const o = io || {};
-  if (typeof o.fsyncDir === 'function') return o.fsyncDir(dir);
+  if (typeof o.fsyncDir === 'function') {
+    try { return o.fsyncDir(dir); }
+    catch (error) { if (required) throw new Error(`directory-fsync-unavailable:${error.code || 'unknown'}`); return; }
+  }
   let handle;
   try { handle = fs.openSync(dir, 'r'); fs.fsyncSync(handle); }
   catch (error) {
     if (!error || !['EPERM', 'EACCES', 'EINVAL', 'EISDIR', 'ENOTSUP'].includes(error.code)) throw error;
+    if (required) throw new Error(`directory-fsync-unavailable:${error.code}`);
   } finally { if (handle !== undefined) fs.closeSync(handle); }
 }
 
@@ -132,7 +140,7 @@ function appendEvent(cwd, event, io) {
     writeAllSync(handle, bytes, io && io.writeSync);
     ((io && io.fsyncSync) || fs.fsyncSync)(handle);
   } finally { if (handle !== undefined) fs.closeSync(handle); }
-  fsyncDirectory(forgeRoot, io);
+  fsyncDirectory(forgeRoot, io, true);
 }
 
 function attemptName(now, nonce) {
@@ -142,13 +150,15 @@ function attemptName(now, nonce) {
 }
 
 function createBundle(cwd, preview, now, name, io) {
-  const parent = secureDirChain(cwd, '.gsd/forge/claim-recovery', true, 'recovery');
-  const runRoot = secureDirChain(parent, `${encodeURIComponent(preview.run_id)}/attempts`, true, 'recovery');
+  const createdParents = [];
+  const parent = secureDirChain(cwd, '.gsd/forge/claim-recovery', true, 'recovery', createdParents);
+  const runRoot = secureDirChain(parent, `${encodeURIComponent(preview.run_id)}/attempts`, true, 'recovery', createdParents);
   const rootPath = path.join(runRoot, name || attemptName(now));
   if (lstatOrAbsent(rootPath) !== null) throw new Error('recovery-bundle-already-exists');
   fs.mkdirSync(rootPath);
+  createdParents.push(runRoot);
   const root = secureDirChain(runRoot, path.basename(rootPath), false, 'recovery');
-  const payloadRoot = secureDirChain(root, 'payload', true, 'recovery-payload');
+  const payloadRoot = secureDirChain(root, 'payload', true, 'recovery-payload', createdParents);
   const entries = [];
   try {
     for (let i = 0; i < preview.dirty.length; i++) {
@@ -179,7 +189,8 @@ function createBundle(cwd, preview, now, name, io) {
       const payload = fs.readFileSync(path.join(root, entry.payload));
       if (sha256(payload) !== entry.sha256) throw new Error(`bundle-verify-failed:${entry.path}`);
     }
-    fsyncDirectory(payloadRoot, io); fsyncDirectory(root, io); fsyncDirectory(runRoot, io);
+    fsyncDirectory(payloadRoot, io, true); fsyncDirectory(root, io, true);
+    for (const dir of Array.from(new Set(createdParents)).reverse()) fsyncDirectory(dir, io, true);
     return { root, manifest, manifest_sha256: sha256(bytes) };
   } catch (error) {
     fs.rmSync(root, { recursive: true, force: true });
@@ -190,7 +201,8 @@ function createBundle(cwd, preview, now, name, io) {
 function verifyDirtyUnchanged(preview, bundle) {
   const current = preview.status_reader(preview.code_dir, { vcs: preview.claim.vcs_baseline && preview.claim.vcs_baseline.vcs });
   if (!current.ok) throw new Error(`vcs-status-failed:${current.error}`);
-  const dirty = current.entries.filter((entry) => inScope(entry.path.replace(/\\/g, '/'), preview.scope));
+  const dirty = current.entries.filter((entry) => IN_FLIGHT_KINDS.includes(entry.kind)
+    && inScope(entry.path.replace(/\\/g, '/'), preview.scope));
   const expected = bundle ? bundle.manifest.entries : [];
   const key = (entry) => `${entry.path}\0${entry.kind}\0${entry.code}`;
   if (dirty.length !== expected.length || dirty.map(key).sort().join('\n') !== expected.map(key).sort().join('\n')) {

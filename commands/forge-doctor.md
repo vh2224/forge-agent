@@ -33,7 +33,7 @@ Primeiro faça somente o preview:
 node scripts/forge-doctor.js --recover-claim "<run-id>" --cwd "<workspace>"
 ```
 
-Somente depois de confirmar externamente que o proprietário parou, aplique com as duas flags:
+Somente depois de confirmar externamente que o proprietário parou, aplique com as três flags obrigatórias (`--apply`, `--confirm-owner-stopped` e `--confirm-workspace-quiescent`):
 
 ```bash
 node scripts/forge-doctor.js --recover-claim "<run-id>" --apply --confirm-owner-stopped --confirm-workspace-quiescent --cwd "<workspace>"

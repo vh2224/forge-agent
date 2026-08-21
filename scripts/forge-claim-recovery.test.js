@@ -15,7 +15,7 @@ function fixture(id = 'T-recovery') {
   const code = path.join(cwd, 'code'); fs.mkdirSync(code, { recursive: true }); fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
   runs.add(cwd, { id, kind: 'task', session_id: 's', active: true, last_heartbeat: 1 });
   recordClaim(cwd, id, { at: 2, unit: 'execute-task/T01', source: 'manual', code_dir: code, paths: ['src'], vcs_baseline: { vcs: 'git', id: 'abc' } });
-  const common = { confirmWorkspaceQuiescent: true, findStuckClaims: () => ({ stuck: [{ id }] }), workingStatus: () => ({ ok: true, vcs: 'git', entries: [] }) };
+  const common = { confirmWorkspaceQuiescent: true, io: { fsyncDir: () => {} }, findStuckClaims: () => ({ stuck: [{ id }] }), workingStatus: () => ({ ok: true, vcs: 'git', entries: [] }) };
   return { cwd, code, id, common };
 }
 function events(cwd) { const f = path.join(cwd, '.gsd', 'forge', 'events.jsonl'); return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []; }
@@ -202,6 +202,26 @@ test('ausência capturada que reaparece vira presence-conflict', () => {
 test('apply exige workspace quiescent em recovery e restore', () => {
   const f = fixture('T-quiescent'); const refused = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, confirmWorkspaceQuiescent: false }); assert.strictEqual(refused.reason, 'workspace-quiescent-attestation-required');
   assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true }).reason, 'workspace-quiescent-attestation-required');
+});
+
+test('recovery reutiliza matching/kinds canônicos e ignora ignored', () => {
+  const f = fixture('T-canonical-scope'); const claim = runs.get(f.cwd, f.id).write_claim; runs.update(f.cwd, f.id, { write_claim: { ...claim, paths: ['src/*.js', 'deep/**'] } });
+  const status = () => ({ ok: true, entries: [
+    { path: 'src/a.js', kind: 'modified', code: ' M' },
+    { path: 'src/deeper/a.js', kind: 'modified', code: ' M' },
+    { path: 'deep/x/y.txt', kind: 'untracked', code: '??' },
+    { path: 'src/secret.js', kind: 'ignored', code: '!!' },
+  ] });
+  const out = recovery.inspect(f.cwd, f.id, { ...f.common, workingStatus: status }); assert.deepStrictEqual(out.dirty.map(e => e.path), ['src/a.js', 'deep/x/y.txt']);
+});
+
+test('criação fsynca parents novos bottom-up e indisponibilidade aborta named', () => {
+  const f = fixture('T-dir-durable'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('x')); const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); const synced = [];
+  const out = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty, io: { fsyncDir: dir => synced.push(path.resolve(dir)) } }); assert.strictEqual(out.ok, true);
+  const attempt = path.resolve(f.cwd, out.bundle); const expected = [attempt, path.dirname(attempt), path.dirname(path.dirname(attempt)), path.dirname(path.dirname(path.dirname(attempt))), path.dirname(path.dirname(path.dirname(path.dirname(attempt))))];
+  let cursor = -1; for (const dir of expected) { const next = synced.findIndex((value, index) => index > cursor && value === dir); assert(next > cursor, `fsync bottom-up ausente: ${dir}\n${synced.join('\n')}`); cursor = next; }
+
+  const g = fixture('T-dir-unavailable'); const unavailable = new Error('unsupported'); unavailable.code = 'EPERM'; const refused = recovery.apply(g.cwd, g.id, { ...g.common, confirmOwnerStopped: true, io: { fsyncDir: () => { throw unavailable; } } }); assert.strictEqual(refused.reason, 'directory-fsync-unavailable:EPERM'); assert.strictEqual(runs.get(g.cwd, g.id).active, true);
 });
 
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });

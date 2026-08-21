@@ -29,7 +29,7 @@ Hooks sem confiança explícita são somente diagnóstico. Não altere trust, cr
 
 ### Claim travado
 
-Use `--recover-claim <run-id>` sem `--apply` para preview. Aplique somente com as duas atestações literais: `--apply --confirm-owner-stopped --confirm-workspace-quiescent`. Nunca deduza morte por PID, sessão ou heartbeat.
+Use `--recover-claim <run-id>` sem `--apply` para preview. Aplique somente com as três flags obrigatórias: `--apply --confirm-owner-stopped --confirm-workspace-quiescent`. Nunca deduza morte por PID, sessão ou heartbeat.
 
 Para workspace dirty, a ordem obrigatória é `intent → bundle reaberto/verificado → segunda medição do dirty scope → CAS`. `--restore-claim <run-id>` é preview; o `--apply` restaura paths ausentes e extrai conflitos sem sobrescrever bytes divergentes.
 

@@ -114,7 +114,7 @@ const vcsDefault = require('./forge-vcs.js');
 const { DEFAULT_TTL_MS, DEFAULT_GRACE_MS } = require('./forge-unit-lease.js');
 const { isHolderRunActive } = require('./forge-filelock.js');
 const { readClaim, releaseClaim, isHeld } = require('./forge-write-claim.js');
-const { normalizePath } = require('./forge-parallelism.js');
+const { normalizePath, claimPathMatches } = require('./forge-parallelism.js');
 const runs = require('./forge-runs.js');
 
 /**
@@ -185,11 +185,7 @@ function measureBaseline(codeDir, opts = {}) {
  * pontas passam pelo `normalizePath` IMPORTADO — nunca uma segunda
  * normalização local (a terceira cópia é o defeito que os Standards proíbem).
  */
-function covers(claimPath, statusPath) {
-  if (claimPath === '' || statusPath === '') return false;
-  if (claimPath === statusPath) return true;
-  return statusPath.startsWith(`${claimPath}/`);
-}
+const covers = claimPathMatches;
 
 /**
  * Sonda B: quais paths DO CLAIM ainda estão em voo. `kind ∈ {modified, added,

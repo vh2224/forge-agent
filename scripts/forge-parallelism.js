@@ -75,6 +75,16 @@ function normalizePath(p) {
   return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
+// Canonical one-way relation: a claim declaration covers a concrete path by
+// equality, directory ancestry, or glob syntax. The concrete path is never
+// interpreted as a pattern.
+function claimPathMatches(claimPath, realPath) {
+  const claim = normalizePath(claimPath); const real = normalizePath(realPath);
+  if (!claim || !real) return false;
+  if (claim === real || real.startsWith(`${claim}/`)) return true;
+  try { return globToRegex(claim).test(real); } catch { return false; }
+}
+
 // Two write-declarations conflict iff any literal-or-glob on one side matches the other.
 function pathsOverlap(a, b) {
   const na = normalizePath(a);
@@ -338,6 +348,7 @@ if (require.main === module) {
 module.exports = {
   globToRegex,
   normalizePath,
+  claimPathMatches,
   pathsOverlap,
   writesConflict,
   parseTaskFrontmatter,

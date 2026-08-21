@@ -427,6 +427,16 @@ console.log('\nScenario 25: sub-task discovery and decimal-aware sort');
   });
 }
 
+test('claimPathMatches cobre glob *, **, ?, diretório e não-match', () => {
+  const { claimPathMatches } = require('./forge-parallelism.js');
+  assert(claimPathMatches('src/*.js', 'src/a.js'), '* não casou');
+  assert(!claimPathMatches('src/*.js', 'src/deep/a.js'), '* atravessou segmento');
+  assert(claimPathMatches('src/**', 'src/deep/a.js'), '** não casou');
+  assert(claimPathMatches('src/a?.js', 'src/ab.js'), '? não casou');
+  assert(claimPathMatches('src', 'src/deep/a.js'), 'diretório não cobriu descendente');
+  assert(!claimPathMatches('src/*.js', 'test/a.js'), 'não-match virou match');
+});
+
 // --- Summary ---
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 
