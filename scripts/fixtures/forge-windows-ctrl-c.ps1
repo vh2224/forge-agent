@@ -16,6 +16,8 @@ $result = [ordered]@{
   exit_code = $null
   timeout = $false
   cleanup_forced = $false
+  rollback_pid = $null
+  rollback_exit_observed = $false
   error = $null
 }
 
@@ -89,15 +91,19 @@ public sealed class ForgeCtrlCSession : IDisposable {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GenerateConsoleCtrlEvent(uint ctrlEvent, uint processGroupId);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr process, uint exitCode);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
 
   IntPtr process = IntPtr.Zero;
   IntPtr job = IntPtr.Zero;
   bool exited;
+  bool assignedToJob;
   bool disposed;
   public uint ProcessId { get; private set; }
   public int LastError { get; private set; }
   public bool CleanupForced { get; private set; }
+  public static uint LastRollbackPid { get; private set; }
+  public static bool LastRollbackExitObserved { get; private set; }
 
   static void Check(bool ok, string operation) {
     if (!ok) throw new Win32Exception(Marshal.GetLastWin32Error(), operation);
@@ -115,7 +121,7 @@ public sealed class ForgeCtrlCSession : IDisposable {
     return output.ToString();
   }
 
-  public ForgeCtrlCSession(string nodePath, string[] arguments, string cwd) {
+  public ForgeCtrlCSession(string nodePath, string[] arguments, string cwd, bool forceAssignFailure) {
     PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
     IntPtr limit = IntPtr.Zero;
     try {
@@ -137,10 +143,22 @@ public sealed class ForgeCtrlCSession : IDisposable {
       Check(CreateProcessW(nodePath, commandLine, IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED,
         IntPtr.Zero, cwd, ref startup, out pi), "CreateProcessW");
       process = pi.hProcess; ProcessId = pi.dwProcessId;
+      if (forceAssignFailure) throw new InvalidOperationException("injected-assign-failure");
       Check(AssignProcessToJobObject(job, process), "AssignProcessToJobObject");
+      assignedToJob = true;
       Check(SetConsoleCtrlHandler(IntPtr.Zero, true), "SetConsoleCtrlHandler");
       if (ResumeThread(pi.hThread) == UInt32.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread");
-    } catch { Dispose(); throw; }
+    } catch {
+      if (process != IntPtr.Zero && !assignedToJob) {
+        LastRollbackPid = ProcessId;
+        if (TerminateProcess(process, 201)) {
+          LastRollbackExitObserved = WaitForSingleObject(process, 5000) == WAIT_OBJECT_0;
+          exited = LastRollbackExitObserved;
+        }
+      }
+      Dispose();
+      throw;
+    }
     finally {
       if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
       if (limit != IntPtr.Zero) Marshal.FreeHGlobal(limit);
@@ -172,7 +190,12 @@ public sealed class ForgeCtrlCSession : IDisposable {
 
   $stage = 'create-child'
   $arguments = @([string]$config.benchPath) + @($config.argv | ForEach-Object { [string]$_ })
-  $session = [ForgeCtrlCSession]::new([string]$config.nodePath, $arguments, [string]$config.cwd)
+  $session = [ForgeCtrlCSession]::new(
+    [string]$config.nodePath,
+    $arguments,
+    [string]$config.cwd,
+    [bool]$config.forceAssignFailure
+  )
   $result.pid = $session.ProcessId
   Publish-JsonAtomic ([string]$config.startedPath) ([ordered]@{ nonce = $result.nonce; pid = $result.pid; stage = 'started' })
 
@@ -182,7 +205,15 @@ public sealed class ForgeCtrlCSession : IDisposable {
     if ([IO.File]::Exists([string]$config.cancelPath)) {
       $cancel = Get-Content -LiteralPath ([string]$config.cancelPath) -Raw -Encoding UTF8 | ConvertFrom-Json
       if ([string]$cancel.nonce -ne $result.nonce -or [uint32]$cancel.pid -ne $result.pid) { throw 'invalid-cancel-binding' }
-      throw 'controller-cancelled'
+      $stage = 'cancel-send-event'
+      $result.event_sent = $session.SendCtrlC()
+      $result.win32_error = $session.LastError
+      if (-not $result.event_sent) { throw "cancel-GenerateConsoleCtrlEvent:$($result.win32_error)" }
+      $stage = 'cancel-wait-child'
+      try { $result.exit_code = $session.WaitAndGetExitCode([uint32]$config.postEventTimeoutMs) }
+      catch [TimeoutException] { $result.timeout = $true; throw }
+      $stage = 'cancelled-gracefully'
+      throw 'controller-cancelled-after-graceful-sigint'
     }
     if ($session.HasExited()) { throw 'child-exit-before-trigger' }
     if ([DateTime]::UtcNow -ge $deadline) { $result.timeout = $true; throw 'trigger-timeout' }
@@ -206,6 +237,12 @@ public sealed class ForgeCtrlCSession : IDisposable {
   if ($session) {
     $session.Dispose()
     $result.cleanup_forced = $session.CleanupForced
+  }
+  try {
+    $result.rollback_pid = [ForgeCtrlCSession]::LastRollbackPid
+    $result.rollback_exit_observed = [ForgeCtrlCSession]::LastRollbackExitObserved
+  } catch {
+    # Add-Type itself failed; the named stage/error remains authoritative.
   }
   $result.stage = $stage
   if ($config -and $config.resultPath) {

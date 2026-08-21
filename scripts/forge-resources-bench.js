@@ -202,23 +202,87 @@ function collectContractWitness(cwd) {
 // D5 is NOT weakened: these are descendants of processes this module itself
 // created. It still never signals a process it did not spawn.
 const liveChildren = new Set();
+const TASKKILL_TIMEOUT_MS = 5000;
 
-function killTree(child) {
-  if (!child || child.killed || typeof child.pid !== 'number') return;
+function killTree(child, options = {}) {
+  if (!child || child.killed || typeof child.pid !== 'number') return { ok: true, skipped: true };
+  const platform = options.platform || process.platform;
+  const spawnSyncImpl = options.spawnSyncImpl || spawnSync;
+  const reportDegraded = options.reportDegraded || ((reason) => {
+    process.stderr.write(`forge-resources-bench: cleanup-tree-degraded pid=${child.pid} reason=${reason}\n`);
+  });
   try {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    if (platform === 'win32') {
+      const result = spawnSyncImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        timeout: TASKKILL_TIMEOUT_MS,
+      });
+      if (result.error || result.status !== 0) {
+        const reason = result.error && result.error.code ? result.error.code : `exit-${result.status}`;
+        reportDegraded(reason);
+        child.kill('SIGKILL');
+        return { ok: false, degraded: true, reason };
+      }
     } else {
       process.kill(-child.pid, 'SIGKILL');
     }
+    return { ok: true };
   } catch {
     try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    return { ok: false, degraded: true, reason: 'exception' };
   }
 }
 
 function killAllLive() {
   for (const child of Array.from(liveChildren)) killTree(child);
   liveChildren.clear();
+}
+
+function killTreeAsync(child, options = {}) {
+  if (!child || child.killed || typeof child.pid !== 'number') return Promise.resolve({ ok: true, skipped: true });
+  if ((options.platform || process.platform) !== 'win32') return Promise.resolve(killTree(child, options));
+  const spawnImpl = options.spawnImpl || spawn;
+  const timeoutMs = options.timeoutMs || TASKKILL_TIMEOUT_MS;
+  const reportDegraded = options.reportDegraded || ((reason) => {
+    process.stderr.write(`forge-resources-bench: cleanup-tree-degraded pid=${child.pid} reason=${reason}\n`);
+  });
+  return new Promise((resolve) => {
+    let settled = false;
+    let killer;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const fallback = (reason) => {
+      reportDegraded(reason);
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      finish({ ok: false, degraded: true, reason });
+    };
+    try {
+      killer = spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {
+      fallback('spawn-exception');
+      return;
+    }
+    timer = setTimeout(() => {
+      try { killer.kill(); } catch { /* already gone */ }
+      fallback('timeout');
+    }, timeoutMs);
+    killer.once('error', (error) => fallback(error.code || 'spawn-error'));
+    killer.once('close', (code) => {
+      if (code === 0) finish({ ok: true });
+      else fallback(`exit-${code}`);
+    });
+  });
+}
+
+async function killAllLiveAsync() {
+  const children = Array.from(liveChildren);
+  liveChildren.clear();
+  await Promise.all(children.map((child) => killTreeAsync(child)));
 }
 
 // Spawn one child in its own process group, resolving with a classified
@@ -596,9 +660,12 @@ async function runMatrix(opts) {
   // MID-corrida instead of only after the child returned — that was the
   // signal-path hole T06 reported under SIGTERM. Children live in their own
   // process groups, so they must be reaped explicitly (R3) before exit.
-  const onSignal = (sig) => () => {
-    killAllLive();
+  let signalCleanupStarted = false;
+  const onSignal = (sig) => async () => {
+    if (signalCleanupStarted) return;
+    signalCleanupStarted = true;
     doRestore();
+    await killAllLiveAsync();
     process.exit(sig === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', onSignal('SIGINT'));
@@ -672,6 +739,8 @@ module.exports = {
   runChild,
   spawnCompetitor,
   killTree,
+  killTreeAsync,
+  TASKKILL_TIMEOUT_MS,
   ENFORCEMENT_REASONS,
   evaluateEnforcement,
   withDumpPreload,

@@ -292,9 +292,13 @@ test('Windows Ctrl+C fixture: encodes the private-console protocol and forbidden
     'WaitForSingleObject', 'GetExitCodeProcess', 'Publish-JsonAtomic',
   ]) assert(source.includes(required), `fixture must contain ${required}`);
   for (const forbidden of [
-    'CREATE_NEW_PROCESS_' + 'GROUP', 'CTRL_' + 'BREAK_EVENT', 'Terminate' + 'Process',
+    'CREATE_NEW_PROCESS_' + 'GROUP', 'CTRL_' + 'BREAK_EVENT',
     'task' + 'kill', 'Stop-' + 'Process', 'WaitFor' + 'InputIdle',
   ]) assert(!source.includes(forbidden), `fixture must not contain forbidden transport ${forbidden}`);
+  const terminateCalls = source.match(/TerminateProcess\(/g) || [];
+  assertEqual(terminateCalls.length, 2, 'TerminateProcess may appear only as one declaration and one pre-assignment rollback call');
+  assert(/!assignedToJob[\s\S]{0,300}TerminateProcess\(process, 201\)/.test(source),
+    'TerminateProcess must remain fenced to rollback of the owned, not-yet-job-assigned process');
   for (const diagnostic of ['invalid-config:', 'child-exit-before-trigger', 'trigger-timeout', 'post-event-timeout']) {
     assert(source.includes(diagnostic), `fixture must preserve named diagnostic ${diagnostic}`);
   }
@@ -315,9 +319,58 @@ test('PowerShell host discovery: probes both supported hosts and returns every i
   assertEqual(hosts.join(','), 'pwsh.exe', 'host discovery must retain each successful probe');
 });
 
+test('killTree: a hung taskkill has a finite timeout and falls back only to its owned child handle', () => {
+  const calls = [];
+  const child = {
+    pid: 424242,
+    killed: false,
+    kill(signal) { calls.push(['child.kill', signal]); return true; },
+  };
+  const degraded = [];
+  const result = bench.killTree(child, {
+    platform: 'win32',
+    spawnSyncImpl(command, argv, options) {
+      calls.push([command, argv, options]);
+      return { status: null, error: { code: 'ETIMEDOUT' } };
+    },
+    reportDegraded: (reason) => degraded.push(reason),
+  });
+  assertEqual(calls[0][0], 'taskkill');
+  assertEqual(calls[0][2].timeout, bench.TASKKILL_TIMEOUT_MS, 'taskkill must carry the production finite timeout');
+  assertEqual(calls[1].join(','), 'child.kill,SIGKILL', 'fallback must target only the owned child handle');
+  assertEqual(degraded.join(','), 'ETIMEDOUT', 'degradation must be named');
+  assertEqual(result.degraded, true);
+});
+
+test('SIGINT handler restores preferences before any potentially blocking tree cleanup', () => {
+  const source = fs.readFileSync(BENCH_PATH, 'utf8');
+  const handler = source.slice(source.indexOf('const onSignal'), source.indexOf("process.on('SIGINT'"));
+  assert(handler.indexOf('doRestore()') < handler.indexOf('await killAllLiveAsync()'),
+    'signal handler must restore operator bytes before external cleanup');
+  assert(handler.includes('await killAllLiveAsync()'), 'signal handler cleanup must not block the event loop with spawnSync');
+});
+
 // ── Behavioral: runMatrix with an injected fast command ────────────────────
 
 async function runAsyncTests() {
+
+await testAsync('killTreeAsync: a hung taskkill cannot block SIGINT cleanup past its deadline', async () => {
+  const { EventEmitter } = require('events');
+  const killer = new EventEmitter();
+  killer.kill = () => true;
+  const ownedSignals = [];
+  const child = { pid: 434343, killed: false, kill: (signal) => { ownedSignals.push(signal); return true; } };
+  const degraded = [];
+  const result = await bench.killTreeAsync(child, {
+    platform: 'win32',
+    timeoutMs: 10,
+    spawnImpl: () => killer,
+    reportDegraded: (reason) => degraded.push(reason),
+  });
+  assertEqual(result.reason, 'timeout');
+  assertEqual(degraded.join(','), 'timeout');
+  assertEqual(ownedSignals.join(','), 'SIGKILL', 'timeout fallback must target only the owned child handle');
+});
 
 await testAsync('runMatrix: writes one JSONL line per corrida with a fresh in-cell witness, and restores prefs on normal exit', async () => {
   const dir = tmpDir('forge-bench-matrix-');
@@ -435,6 +488,7 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
   fs.writeFileSync(prefsPath, original, 'utf8');
   const outFile = path.join(dir, 'out.jsonl');
   const marker = path.join(dir, 'first-done.marker');
+  const blockedMarker = path.join(dir, 'second-started.marker');
 
   // The claim under test is that a COMPLETED record survives the interrupt,
   // so the fixture must guarantee one exists before SIGINT lands: rep 1
@@ -443,8 +497,8 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
   // first append deterministically never happened and the assertion — gated
   // on the file existing — passed over ZERO records.
   const fixture = ['node', '-e',
-    `const fs=require('fs');const m=${JSON.stringify(marker)};`
-    + 'if(fs.existsSync(m)){setTimeout(()=>{},60000);}else{fs.writeFileSync(m,"1");}'];
+    `const fs=require('fs');const m=${JSON.stringify(marker)};const b=${JSON.stringify(blockedMarker)};`
+    + 'if(fs.existsSync(m)){fs.writeFileSync(b,"1");setTimeout(()=>{},60000);}else{fs.writeFileSync(m,"1");}'];
 
   const benchArgv = [
     BENCH_PATH, '--cwd', dir, '--reps', '3', '--cells', 'solo/off',
@@ -460,6 +514,7 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
   let cancelPath = null;
   let controllerSettled = false;
   let primaryError = null;
+  let firstLine = null;
   let stderr = '';
   let earlyExit = null;
 
@@ -482,7 +537,7 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
       triggerPath,
       cancelPath,
       resultPath,
-      triggerTimeoutMs: 20000,
+      triggerTimeoutMs: 60000,
       postEventTimeoutMs: 20000,
     });
     child = spawn(powerShellHost, [
@@ -516,12 +571,9 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
       started = JSON.parse(rawStarted);
       assertEqual(started.nonce, nonce, 'started protocol nonce must match');
     }
-    if (injectFailureAfterStart) throw new Error('injected-pre-trigger-failure');
-
   // Poll until the first completed corrida is actually on disk — never a
   // fixed sleep, which is what made the old test vacuous.
-  const deadline = Date.now() + 20000;
-  let firstLine = null;
+  const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
     if (fs.existsSync(outFile)) {
       const lines = fs.readFileSync(outFile, 'utf8').split('\n').filter(Boolean);
@@ -534,6 +586,8 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
   const before = JSON.parse(firstLine);
   assertEqual(before.status, 'ok', 'precondition: the completed corrida must be an ok record');
   assertEqual(before.rep, 1);
+  await waitFor(() => fs.existsSync(blockedMarker), 60000, 'second-workload-started');
+  if (injectFailureAfterStart) throw new Error('injected-pre-trigger-failure');
 
   if (process.platform === 'win32') {
     writeJsonAtomic(path.join(dir, 'protocol space Ω', 'trigger.json'), { nonce, pid: started.pid });
@@ -579,7 +633,7 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
         }
       }
       try {
-        const cleanupExit = await settleWithin(controllerExit, 5000, 'controller-cleanup');
+        const cleanupExit = await settleWithin(controllerExit, 25000, 'controller-cleanup');
         if (primaryError) primaryError.cleanupExit = cleanupExit;
       } catch (cleanupError) {
         const killed = child.kill();
@@ -591,8 +645,53 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
       if (primaryError && resultPath && fs.existsSync(resultPath)) {
         primaryError.cleanupResult = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
       }
+      if (primaryError) {
+        primaryError.cleanupPrefs = fs.existsSync(prefsPath) ? fs.readFileSync(prefsPath) : null;
+        const cleanupLines = fs.existsSync(outFile)
+          ? fs.readFileSync(outFile, 'utf8').split('\n').filter(Boolean)
+          : [];
+        for (const line of cleanupLines) JSON.parse(line);
+        primaryError.cleanupLines = cleanupLines;
+        primaryError.expectedFirstLine = firstLine;
+      }
     }
   }
+}
+
+async function runAssignmentRollbackContract(powerShellHost) {
+  const dir = tmpDir('forge assign rollback Ω-');
+  const configPath = path.join(dir, 'config.json');
+  const resultPath = path.join(dir, 'result.json');
+  const nonce = `rollback-${process.pid}-${Date.now()}-Ω`;
+  writeJsonAtomic(configPath, {
+    nonce,
+    nodePath: process.execPath,
+    benchPath: BENCH_PATH,
+    cwd: dir,
+    argv: ['--dry-run', '--cwd', dir],
+    startedPath: path.join(dir, 'started.json'),
+    triggerPath: path.join(dir, 'trigger.json'),
+    cancelPath: path.join(dir, 'cancel.json'),
+    resultPath,
+    triggerTimeoutMs: 2000,
+    postEventTimeoutMs: 2000,
+    forceAssignFailure: true,
+  });
+  const controller = spawn(powerShellHost, [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', WINDOWS_CTRL_C_PATH, '-ConfigPath', configPath,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  let stderr = '';
+  controller.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  const exited = await settleWithin(waitForExit(controller), 10000, 'assignment-rollback-controller');
+  assertEqual(exited.code, 1, `injected assignment failure must be diagnostic: ${stderr}`);
+  assert(fs.existsSync(resultPath), `assignment rollback must publish result: ${stderr}`);
+  const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+  assert(result.rollback_pid > 0, `rollback must report owned PID: ${JSON.stringify(result)}`);
+  assertEqual(result.rollback_exit_observed, true, `rollback must await owned process exit: ${JSON.stringify(result)}`);
+  let alive = true;
+  try { process.kill(result.rollback_pid, 0); } catch { alive = false; }
+  assertEqual(alive, false, `pre-assignment child pid ${result.rollback_pid} survived rollback`);
 }
 
 if (process.platform === 'win32') {
@@ -603,6 +702,9 @@ if (process.platform === 'win32') {
   for (const host of powerShellHosts) {
     // eslint-disable-next-line no-await-in-loop
     await testAsync(`${SIGINT_TEST_NAME} [${host}]`, () => runSigintContract(host));
+    // eslint-disable-next-line no-await-in-loop
+    await testAsync(`Windows Ctrl+C controller: pre-assignment rollback reaps owned child [${host}]`,
+      () => runAssignmentRollbackContract(host));
   }
   await testAsync('Windows Ctrl+C controller: pre-trigger assertion failure cancels and reaps the owned tree', async () => {
     let failedAsInjected = false;
@@ -610,9 +712,14 @@ if (process.platform === 'win32') {
       failedAsInjected = error.message === 'injected-pre-trigger-failure';
       assert(error.cleanupExit && error.cleanupExit.code === 1,
         `cancelled controller must exit diagnostically, got ${JSON.stringify(error.cleanupExit)}`);
-      assert(error.cleanupResult && error.cleanupResult.error === 'controller-cancelled',
+      assert(error.cleanupResult && error.cleanupResult.error === 'controller-cancelled-after-graceful-sigint',
         `cancel protocol must be observed, got ${JSON.stringify(error.cleanupResult)}`);
-      assertEqual(error.cleanupResult.cleanup_forced, true, 'cancel must close the owned Job Object tree');
+      assertEqual(error.cleanupResult.exit_code, 130, 'cancel must let the benchmark SIGINT handler exit naturally');
+      assertEqual(error.cleanupResult.cleanup_forced, false, 'graceful cancel must not kill the Job Object tree');
+      assertEqual(error.cleanupPrefs.toString('utf8'), JSON.stringify({ resources: { enforcement: 'clamp' } }),
+        'benchmark must restore preferences byte-identically during graceful cancellation');
+      assert(error.cleanupLines.length >= 1, 'graceful cancellation must retain completed JSONL records');
+      assertEqual(error.cleanupLines[0], error.expectedFirstLine, 'graceful cancellation must preserve the first line byte-identically');
     }
     assert(failedAsInjected, 'the injected pre-trigger failure must propagate after cleanup');
   });
