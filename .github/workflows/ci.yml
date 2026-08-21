@@ -73,6 +73,10 @@ jobs:
         with:
           node-version: 22
 
+      - name: Verify product version matches the prospective release
+        if: runner.os == 'Linux'
+        run: node scripts/forge-release-version.js --check
+
       - name: Install Subversion (smoke fixture gate)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y subversion
