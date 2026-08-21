@@ -704,6 +704,15 @@ test('R18d: recoverClaim aborta CAS quando a run mudou fora do claim', () => {
   assertEqual(runs.get(wsDir, expected.id).active, true);
 });
 
+test('R18e: precondition falha dentro da transição sem publicar patch', () => {
+  const { wsDir } = makeFixture('M-20260813-r18e');
+  recordClaim(wsDir, 'M-20260813-r18e', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18e'); let called = false;
+  let reason = null;
+  try { recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: {} }, { precondition: () => { called = true; throw new Error('precondition-refused'); } }); } catch (error) { reason = error.message; }
+  assertEqual(called, true); assertEqual(reason, 'precondition-refused'); assertEqual(runs.get(wsDir, expected.id).active, true); assertEqual(runs.get(wsDir, expected.id).write_claim.released, null);
+});
+
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

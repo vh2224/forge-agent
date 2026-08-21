@@ -661,6 +661,10 @@ intenção, persiste, reabre e verifica um bundle byte-preserving, registra `bun
 dirty scope novamente. A transição final é CAS, sob o lock da run, para
 `released.mechanism: manual` e `active:false`.
 
+`--confirm-owner-stopped` é o fence explícito contra writers externos ao protocolo. A segunda
+medição é uma precondition executada dentro do lock de `runs.updateWith`, imediatamente antes do
+patch; junto ao CAS do RunRecord completo, ela fecha a concorrência cooperativa.
+
 O restore do bundle também é preview-first e idempotente. Um destino ausente recebe os bytes
 capturados; bytes já idênticos são mantidos; bytes divergentes nunca são sobrescritos e o payload é
 extraído sob `conflicts/` na área de recuperação.

@@ -347,7 +347,8 @@ function releaseClaim(cwd, runId, release, opts) {
  * Operator recovery transition. The measured claim and run activity are
  * compared under the run lock; a changed record is never released.
  */
-function recoverClaim(cwd, runId, expectedRecord, release) {
+function recoverClaim(cwd, runId, expectedRecord, release, opts) {
+  const o = opts || {};
   const released = normalizeReleased(release);
   if (!expectedRecord || expectedRecord.active !== true) {
     return { ok: false, reason: 'stale-run' };
@@ -359,6 +360,9 @@ function recoverClaim(cwd, runId, expectedRecord, release) {
     result = runs.updateWith(cwd, runId, (current) => {
       if (current.active !== true || JSON.stringify(current) !== expectedRecordJson) return null;
       if (!isHeld(current.write_claim)) return null;
+      // Executes while the run lock is held, immediately before publication.
+      // Recovery uses this for the final dirty-scope measurement.
+      if (typeof o.precondition === 'function') o.precondition(current);
       const nextClaim = Object.assign({}, current.write_claim, { released });
       outcome = { ok: true, claim: nextClaim };
       return { write_claim: nextClaim, active: false, ended_at: released.at };
