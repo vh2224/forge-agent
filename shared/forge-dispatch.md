@@ -2610,6 +2610,18 @@ The failure shape determines the strategy deterministically. `forge-repair.js --
 
 ### Context-monitor suppression
 
+Codex context health uses a versioned, host-separated bridge selected by explicit
+`host_runtime: codex`; payload shape never selects an adapter. It carries `source`,
+`session_id`, `timestamp`, `epoch`, `measurement: measured|unknown`, and capability.
+Percentages exist only for fresh formal telemetry. Missing, invalid, stale, or
+unsupported telemetry renders `ctx ?` and cannot alert or suppress repair. A formal
+baseline is required before `compact x0`; attach without one remains unknown.
+
+The first measured checkpoint crossing per session/epoch records one idempotent event
+and requests a Continue-Here checkpoint at the next safe boundary without pausing the
+run. WARNING and CRITICAL retain their existing behavior. The existing Claude
+statusline, bridge, hooks, and lifecycle remain on the separate Claude path.
+
 Before executing DECOMPOSE or PRUNE, the orchestrator reads the S03 context-monitor bridge file:
 
 ```

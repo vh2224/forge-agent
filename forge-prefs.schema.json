@@ -915,13 +915,35 @@
           "default": true,
           "description": "true = injeção proativa ativa (debounce de 5 tool-uses; escalada WARNING→CRITICAL fura o debounce). false = branch no-op."
         },
+        "alerts_enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "true = permite alertas percentuais para snapshots frescos e medidos; unknown e stale nunca alertam."
+        },
+        "debounce_tool_uses": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 5,
+          "description": "Quantidade de tool-uses entre alertas da mesma severidade; escalada ignora a janela."
+        },
+        "checkpoint_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 0.4,
+          "description": "Fração restante que pede checkpoint no próximo boundary seguro. Deve ser maior que warning e critical."
+        },
         "warning_threshold": {
           "type": "number",
+          "minimum": 0,
+          "maximum": 100,
           "default": 0.35,
           "description": "Fração de contexto RESTANTE que dispara WARNING (encerre a task atual, não inicie trabalho complexo novo). Aceita percentual (35) — normalizado para fração quando > 1."
         },
         "critical_threshold": {
           "type": "number",
+          "minimum": 0,
+          "maximum": 100,
           "default": 0.25,
           "description": "Fração de contexto RESTANTE que dispara CRITICAL (pare, salve o estado em continue.md e retorne partial). Testado antes do warning — mais grave ganha."
         }

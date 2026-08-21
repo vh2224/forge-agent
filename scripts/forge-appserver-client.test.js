@@ -11,7 +11,13 @@ const { spawnSync } = require('child_process');
 const {
   startAppServerTurn, encodeMessage, decodeLine, INTERRUPT_OUTCOMES, INTERRUPT_GRACE_MS,
   RETENTION_LIMITS, TURN_STATUS_SUCCESS, STDERR_TAIL_BYTES, tailBytes,
+  isContextNotification,
 } = require('./forge-appserver-client');
+
+assert.strictEqual(isContextNotification({ method: 'thread/started', params: {} }), true);
+assert.strictEqual(isContextNotification({ method: 'thread/compacted', params: { cycle_id: 'c1' } }), true);
+assert.strictEqual(isContextNotification({ method: 'turn/completed', params: { context_window: { used_percentage: 0 } } }), true);
+assert.strictEqual(isContextNotification({ method: 'turn/completed', params: {} }), false);
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'forge-appserver-client-test-'));
