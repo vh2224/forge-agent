@@ -144,8 +144,10 @@ async function testContextHealthFlow(mock, root) {
   const working = path.join(root, 'context-working');
   const forgeDir = path.join(working, '.gsd', 'forge');
   fs.mkdirSync(forgeDir, { recursive: true });
+  const options = executeOptions(repo, planFile(root), path.join(root, 'flat-os-temp-result.json'), 'context-model');
+  options.contextRoot = working;
   const result = await withMock(mock, 'conforming', path.join(root, 'context-capture.json'),
-    () => runExecute(executeOptions(repo, planFile(root), path.join(forgeDir, 'result.json'), 'context-model')));
+    () => runExecute(options));
   assert.strictEqual(result.appserver.context_health.scope, 'sidecar-thread');
   assert.strictEqual(result.appserver.context_health.measurement, 'unknown', 'pinned protocol has no formal usage percentage');
   assert.strictEqual(result.appserver.context_health.compaction_measurement, 'known');

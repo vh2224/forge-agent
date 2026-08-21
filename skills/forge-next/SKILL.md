@@ -1071,7 +1071,7 @@ CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
 node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
   --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
-  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
+  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" --context-root "$WORKING_DIR" \
   --writable-roots-file "$CODE_DIR_WRITABLE_ROOTS_FILE" \
   --timeout "$WORKERS_TIMEOUT" \
   --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE" \
@@ -1080,6 +1080,7 @@ node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
 ```
 
 4. **Poll `$RESULT_FILE`** (state `polling`) every ~5–10s: `status==running` → keep polling + liveness check; `status==done` → success (step 5); `status==error` / adapter exit `!= 0` / unparseable JSON → failure with the matching `REASON` (`codex-exit-nonzero` / `codex-timeout` / `codex-invalid-json`) → Fallback. **Orphan:** heartbeat `updated_at` stale beyond the dynamic threshold `max(heartbeat_interval_ms × 4, 30s)` (field absent → assume 15s → 60s) → run the canonical liveness snippet (`shared/forge-dispatch.md § Orphan detection`): `stale-dead` → `kill "$pid"` (from the heartbeat) + `REASON=codex-orphan` → Fallback; `stale-alive` → grace of one more poll cycle, then kill if still stale.
+4.25. **Context boundary:** run `CONTEXT_BOUNDARY=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --result "$RESULT_FILE" --cwd "$WORKING_DIR" --plan "$PLAN_PATH")` after the terminal poll. Display `.indicator`, carry `.additional_context` to the next Agent boundary, and honor `.checkpoint_required` as an already-materialized Continue-Here checkpoint without pausing automatically. Unknown health is always inert.
 
 4.5. **Terminal outcome — runtime evidence materialization (step 7b), on EVERY outcome:** as soon as the poll loop settles a terminal outcome for this dispatch — `done`, **or** a failure `REASON` that Layer-1 transient retry will not retry in place (including `codex-invalid-json` and an unreadable `$RESULT_FILE`) — invoke exactly once `node "$FORGE_SCRIPTS_DIR/forge-evidence-materialize.js" --result "$RESULT_FILE" --unit "execute-task/{T##}" --milestone "{M###}" --slice "{S##}" --cwd "$WORKING_DIR" --json`. **All three axes, never `--unit` alone** (S01 review R2): the file name is the composite key, so an invocation missing the two axes lands under the `_no-milestone_`/`_no-slice_` sentinels, which parse back to `null` and can never match the real `{M###, S##, T##}` at resolution time — written and never found. Step **7b** of `shared/forge-dispatch.md § Sidecar dispatch state machine` owns its outcome enum, naming and census; this mirror only invokes and never restates them (exit 0 always, advisory). It sits **before** the Success/Failure split on purpose (S06 review R9): invoked only from Success, the canonical table's unreadable-result-file row was unreachable from every call site. **One census per terminal outcome, never one per retry** — a Layer-1 in-place retry has not reached a terminal outcome yet and does not invoke it.
 

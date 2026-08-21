@@ -42,7 +42,7 @@
  *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--engine codex|agy] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
  *   node scripts/forge-xllm.js --mode defend --input <objections> [--diff-cmd "git diff"] [--engine codex|agy] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
  *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--engine codex|agy] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
+ *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> --context-root <WORKING_DIR> [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
  *   node scripts/forge-xllm.js --mode plan --plan-context <file> --result-file <path> --cwd <repo> [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
  *
  * Exit contract: 0 on success. For challenge/defend/rebuttal the normalized JSON goes to stdout
@@ -1896,6 +1896,15 @@ async function runExecute(opts) {
   // real parent and rejects symlink/junction tricks, including case-folded Windows
   // paths that lexically appear outside the workspace.
   const resultFile = validateResultFileTarget(opts.resultFile, cwd);
+  let contextRoot = null;
+  if (opts.contextRoot) {
+    const requested = path.resolve(opts.contextRoot);
+    let stat;
+    try { stat = fs.statSync(requested); } catch (error) { throw new Error(`context-root is not readable: ${error.message}`); }
+    if (!stat.isDirectory()) throw new Error('context-root must be a directory');
+    contextRoot = fs.realpathSync(requested);
+    if (!fs.existsSync(path.join(contextRoot, '.gsd'))) throw new Error('context-root must contain .gsd');
+  }
 
   let planText;
   try {
@@ -2007,9 +2016,7 @@ async function runExecute(opts) {
     // orchestrator (T03) owns the file name of the evidence log.
     evidenceUnit: dispatchId,
     writableRoots,
-    contextRoot: path.basename(path.dirname(resultFile)).toLowerCase() === 'forge'
-      && path.basename(path.dirname(path.dirname(resultFile))).toLowerCase() === '.gsd'
-      ? path.dirname(path.dirname(path.dirname(resultFile))) : null,
+    contextRoot,
   });
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   const outputTokens = countTokens(rawContent);
@@ -2394,7 +2401,7 @@ if (require.main === module) {
   const mode = args.mode;
 
   if (mode !== 'challenge' && mode !== 'defend' && mode !== 'rebuttal' && mode !== 'execute' && mode !== 'plan') {
-    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit] [--cwd <dir>]\n');
+    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--context-root <WORKING_DIR>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit] [--cwd <dir>]\n');
     process.exit(2);
   }
 
@@ -2477,7 +2484,7 @@ if (require.main === module) {
       catch (error) { process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
     }
 
-    runExecute({ planFile: args.plan, resultFile, cwd, model, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
+    runExecute({ planFile: args.plan, resultFile, cwd, contextRoot: args['context-root'], model, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         let safeResultFile = null;

@@ -1435,7 +1435,7 @@ CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
 node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
   --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
 XLLM_ARGS=(--mode execute --plan "$PLAN_PATH" --result-file "$RESULT_FILE" \
-  --cwd "$CODE_DIR" --timeout "$WORKERS_TIMEOUT" --dispatch-id "$SIDECAR_DISPATCH_ID" \
+  --cwd "$CODE_DIR" --context-root "$WORKING_DIR" --timeout "$WORKERS_TIMEOUT" --dispatch-id "$SIDECAR_DISPATCH_ID" \
   --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE")
 [ -n "$SIDECAR_MODEL" ] && XLLM_ARGS+=(--model "$SIDECAR_MODEL")
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" "${XLLM_ARGS[@]}"
@@ -1443,6 +1443,8 @@ node "$FORGE_SCRIPTS_DIR/forge-xllm.js" "${XLLM_ARGS[@]}"
 ```
 
 **5. Poll the result-file (`polling` state).** Read `$RESULT_FILE` periodically. The adapter atomically re-writes a heartbeat containing `{status, protocol_version, pid, adapter_pid, heartbeat_interval_ms, dispatch_id, input_tokens, started_at, updated_at}` while running:
+
+After the terminal poll and before selecting success/failure, consume the sidecar context boundary exactly once with `CONTEXT_BOUNDARY=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --result "$RESULT_FILE" --cwd "$WORKING_DIR" --plan "$PLAN_PATH")`. Render `.indicator`; inject non-empty `.additional_context` only at the next safe Agent boundary. `.checkpoint_required:true` means Continue-Here was materialized beside the plan and its consumption marker committed; continue without auto-pausing. Unknown/stale health is inert and cannot create urgency.
 
 - `status == "running"` → keep polling; check liveness (next bullet).
 - `status == "done"` → **success** (state `done`). Go to step 6.
