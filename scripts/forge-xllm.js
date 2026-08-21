@@ -2027,7 +2027,8 @@ async function runExecute(opts) {
       current = parsedBaseline.range;
     } else current = gitRead('rev-parse HEAD', snapshot.code_dir, 'git rev-parse HEAD (post-run)');
     if (current !== snapshot.start_sha) {
-      throw new Error(`no-commit invariant violated: codex moved baseline in ${snapshot.code_dir} (${snapshot.start_sha} -> ${current}); no update is allowed`);
+      const prefix = snapshot.vcs === 'svn' ? 'svn-revision-moved' : 'no-commit invariant violated';
+      throw new Error(`${prefix}: codex moved baseline in ${snapshot.code_dir} (${snapshot.start_sha} -> ${current}); no update is allowed`);
     }
     return { repo: snapshot.code_dir, start_sha: snapshot.start_sha, head_sha: current, vcs: snapshot.vcs };
   });

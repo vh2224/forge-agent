@@ -334,6 +334,20 @@ test('R12b — cross-repo declarado resolve cwd primario e writable root adicion
   assertEqual(path.resolve(out.writable_roots[0]), path.resolve(f.wts, 'api'), 'api como writable root');
 });
 
+test('R12c — escopo parcialmente atribuivel recusa antes do dispatch', () => {
+  const f = makeFixture({ noRepoField: true });
+  const plan = path.join(f.root, 'T02-partial-PLAN.md');
+  const outside = path.join(f.root, 'repo-nao-isolado', 'secret.ts');
+  fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${path.join(f.web, 'a.ts')}"`,
+    `  - "${outside}"`, '---', ''].join('\n'));
+  const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+  assertEqual(out.status, 'cross-repo', 'status fail-closed');
+  assertEqual(out.reason, 'sidecar-multirepo-unsupported', 'reason');
+  assertEqual(out.paths_unmatched, 1, 'path omitido permanece visivel');
+  assertEqual(out.code_dir, '', 'nenhum cwd parcial e emitido');
+  assertEqual(out.repo_roots.length, 0, 'nenhum snapshot parcial e autorizado');
+});
+
 test('R12 — exit 5 (undeclared)', () => {
   const f = makeFixture({ noRepoField: true });
   const r = runCli(['--resolve', '--iso-result', JSON.stringify(f.isoResult),

@@ -550,6 +550,19 @@ function resolveCodeDir(opts) {
         hint: hintFor({ status: 'undeclared', declared_repo: declaredRepo, declared_repo_status: match.status,
           declared_repo_path: match.path || '' }) });
     }
+    // A partially attributed declaration is not a single-repo plan. Accepting the
+    // known subset would omit the unknown scope from writableRoots, snapshots and
+    // reset. Relative-only plans with no attributed root retain the historical
+    // declared-repo path below; mixed known/unknown scope always fails closed.
+    if (touched.size > 0 && unmatched > 0) {
+      const touchedPaths = Array.from(touched.keys());
+      return emptyResult({ status: 'cross-repo', repos_touched: touchedPaths,
+        paths_considered: considered.length, paths_unmatched: unmatched, source, run,
+        reason: REASON_CROSS_REPO, multi_repo_root: commonWorktreeRoot(usable),
+        declared_repo: declaredRepo, declared_repo_status: 'partial-scope',
+        declared_repo_path: match.path || '',
+        hint: hintFor({ status: 'cross-repo', declared_repo: declaredRepo, repos_touched: touchedPaths }) });
+    }
     if (touched.size === 1 && normalizePath(touched.keys().next().value) !== normalizePath(match.repo.path)) {
       return emptyResult({ status: 'undeclared', paths_considered: considered.length, paths_unmatched: unmatched, source, run,
         reason: REASON_UNDECLARED, multi_repo_root: commonWorktreeRoot(usable), declared_repo: declaredRepo,
