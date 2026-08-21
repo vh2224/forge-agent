@@ -376,11 +376,15 @@ function probeClaim(claim, opts = {}) {
     return facts;
   }
 
-  const claimed = (Array.isArray(claim.paths) ? claim.paths : []).map(normalizePath).filter((p) => p !== '');
+  let claimed;
+  try { claimed = (Array.isArray(claim.paths) ? claim.paths : []).map(normalizePath).filter((p) => p !== ''); }
+  catch { facts.probe_error = 'claim-path-invalid'; return facts; }
   const dirty = [];
   for (const entry of status.entries || []) {
     if (!IN_FLIGHT_KINDS.includes(entry.kind)) continue;
-    const statusPath = normalizePath(entry.path);
+    let statusPath;
+    try { statusPath = normalizePath(entry.path); }
+    catch { facts.probe_error = 'working-path-invalid'; return facts; }
     if (claimed.some((c) => covers(c, statusPath)) && !dirty.includes(statusPath)) dirty.push(statusPath);
   }
   facts.dirty_paths = dirty;

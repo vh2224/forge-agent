@@ -8,7 +8,7 @@ const runs = require('./forge-runs.js');
 const vcs = require('./forge-vcs.js');
 const { findStuckClaims } = require('./forge-claim-stuck.js');
 const { isHeld, recoverClaim, validateHeldClaim } = require('./forge-write-claim.js');
-const { claimPathMatches } = require('./forge-parallelism.js');
+const { claimPathMatches, normalizePath } = require('./forge-parallelism.js');
 const { IN_FLIGHT_KINDS } = require('./forge-claim-release.js');
 
 function sha256(buffer) { return crypto.createHash('sha256').update(buffer).digest('hex'); }
@@ -75,9 +75,7 @@ function normalizeScope(raw) {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('claim-paths-invalid');
   return raw.map((item) => {
     if (typeof item !== 'string' || item === '' || path.isAbsolute(item) || item.includes('\0')) throw new Error('claim-path-invalid');
-    const rel = item.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/$/, '');
-    if (rel === '' || rel === '..' || rel.startsWith('../')) throw new Error('claim-path-escape');
-    return rel;
+    try { return normalizePath(item); } catch { throw new Error('claim-path-escape'); }
   });
 }
 function inScope(rel, scope) { return scope.some((p) => claimPathMatches(p, rel)); }

@@ -72,24 +72,38 @@ function globToRegex(glob) {
 }
 
 function normalizePath(p) {
-  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const raw = String(p || '').replace(/\\/g, '/');
+  if (raw === '') return '';
+  const stack = [];
+  for (const segment of raw.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (stack.length === 0) throw new Error(`path escapes root: ${raw}`);
+      stack.pop();
+    } else stack.push(segment);
+  }
+  return stack.length === 0 ? '.' : stack.join('/');
 }
 
 // Canonical one-way relation: a claim declaration covers a concrete path by
 // equality, directory ancestry, or glob syntax. The concrete path is never
 // interpreted as a pattern.
 function claimPathMatches(claimPath, realPath) {
-  const claim = normalizePath(claimPath); const real = normalizePath(realPath);
+  let claim; let real;
+  try { claim = normalizePath(claimPath); real = normalizePath(realPath); }
+  catch { return true; } // malformed/escaping claims cover everything (fail closed)
   if (!claim || !real) return false;
+  if (claim === '.') return true;
   if (claim === real || real.startsWith(`${claim}/`)) return true;
   try { return globToRegex(claim).test(real); } catch { return false; }
 }
 
 // Two write-declarations conflict iff any literal-or-glob on one side matches the other.
 function pathsOverlap(a, b) {
-  const na = normalizePath(a);
-  const nb = normalizePath(b);
+  let na; let nb;
+  try { na = normalizePath(a); nb = normalizePath(b); } catch { return true; }
   if (!na || !nb) return true; // defensive: empty path = unknown = conflict
+  if (na === '.' || nb === '.') return true; // workspace claim overlaps every path
   if (na === nb) return true;
 
   // Directory prefix: "src/" should conflict with anything under it.

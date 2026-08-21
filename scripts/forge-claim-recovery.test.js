@@ -241,5 +241,21 @@ test('glob **/ captura dirty diretamente sob diretório', () => {
   const dirty = () => ({ ok: true, entries: [{ path: 'src/a.js', kind: 'modified', code: ' M' }] }); const out = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(out.ok, true); const manifest = JSON.parse(fs.readFileSync(path.join(f.cwd, out.bundle, 'manifest.json'))); assert.deepStrictEqual(manifest.entries.map(e => e.path), ['src/a.js']);
 });
 
+test("claim '.' captura dirty na raiz e escape malformado nunca libera", () => {
+  const workspace = fixture('T-workspace-root'); const claim = runs.get(workspace.cwd, workspace.id).write_claim;
+  runs.update(workspace.cwd, workspace.id, { write_claim: { ...claim, paths: ['.'] } });
+  fs.writeFileSync(path.join(workspace.code, 'root.bin'), Buffer.from('root-dirty'));
+  const dirty = () => ({ ok: true, entries: [{ path: 'root.bin', kind: 'modified', code: ' M' }] });
+  const applied = recovery.apply(workspace.cwd, workspace.id, { ...workspace.common, confirmOwnerStopped: true, workingStatus: dirty });
+  assert.strictEqual(applied.ok, true); assert(applied.bundle, 'dirty na raiz virou clean');
+  const manifest = JSON.parse(fs.readFileSync(path.join(workspace.cwd, applied.bundle, 'manifest.json')));
+  assert.deepStrictEqual(manifest.entries.map(entry => entry.path), ['root.bin']);
+
+  const malformed = fixture('T-malformed-escape'); const malformedClaim = runs.get(malformed.cwd, malformed.id).write_claim;
+  runs.update(malformed.cwd, malformed.id, { write_claim: { ...malformedClaim, paths: ['../x'] } });
+  const refused = recovery.apply(malformed.cwd, malformed.id, { ...malformed.common, confirmOwnerStopped: true });
+  assert.strictEqual(refused.reason, 'claim-path-escape'); assert.strictEqual(runs.get(malformed.cwd, malformed.id).active, true); assert.strictEqual(runs.get(malformed.cwd, malformed.id).write_claim.released, null);
+});
+
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
 if (!process.exitCode) process.stdout.write(`\n${passed} passed, 0 failed\n`);

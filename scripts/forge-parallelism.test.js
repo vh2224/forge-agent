@@ -428,7 +428,7 @@ console.log('\nScenario 25: sub-task discovery and decimal-aware sort');
 }
 
 test('claimPathMatches cobre glob *, **, ?, diretório e não-match', () => {
-  const { claimPathMatches } = require('./forge-parallelism.js');
+  const { claimPathMatches, normalizePath, pathsOverlap } = require('./forge-parallelism.js');
   assert(claimPathMatches('src/*.js', 'src/a.js'), '* não casou');
   assert(!claimPathMatches('src/*.js', 'src/deep/a.js'), '* atravessou segmento');
   assert(claimPathMatches('src/**', 'src/deep/a.js'), '** não casou');
@@ -438,6 +438,17 @@ test('claimPathMatches cobre glob *, **, ?, diretório e não-match', () => {
   assert(claimPathMatches('src/a?.js', 'src/ab.js'), '? não casou');
   assert(claimPathMatches('src', 'src/deep/a.js'), 'diretório não cobriu descendente');
   assert(!claimPathMatches('src/*.js', 'test/a.js'), 'não-match virou match');
+  assert(normalizePath('.') === '.', 'dot must represent the workspace');
+  assert(normalizePath('./src') === 'src', './src must canonicalize to src');
+  assert(normalizePath('src/../src') === 'src', 'internal dot segment must reduce lexically');
+  let escaped = false; try { normalizePath('../x'); } catch (_) { escaped = true; }
+  assert(escaped, 'escape above root must be rejected');
+  assert(claimPathMatches('.', 'root.txt'), 'workspace claim must cover root file');
+  assert(claimPathMatches('./src', 'src/a.js'), './src must share canonical matcher');
+  assert(claimPathMatches('src/../src', 'src/a.js'), 'dot segments must share canonical matcher');
+  assert(claimPathMatches('../x', 'anything.txt'), 'malformed claim must fail closed');
+  assert(pathsOverlap('.', 'any/path'), 'workspace must overlap any path');
+  assert(pathsOverlap('../x', 'other'), 'malformed overlap must fail closed');
 });
 
 // --- Summary ---

@@ -5,6 +5,10 @@ will write code, it records what that unit claims to write into its own `RunReco
 that claim against the claims of every other active run sharing the same `CODE_DIR`. A measured
 collision **stops the dispatch** — it never becomes a merge conflict discovered hours later.
 
+Claim paths use one POSIX lexical contract across gate, release and recovery: `.` means the entire
+workspace, `./src` and `src/../src` canonicalize to `src`, and a `..` that would escape above the
+workspace root is invalid and fails closed. Glob tokens remain intact during this canonicalization.
+
 This file is boundary-agnostic and has **three consumers**, exactly like `shared/forge-review.md`:
 
 | Consumer | Boundary | MODE | Unit types gated |
