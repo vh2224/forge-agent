@@ -8,7 +8,9 @@ const { spawnSync } = require('child_process');
 const { writeFragment } = require('./forge-memory');
 const {
   DETECTOR_VERSION,
+  DETECTOR_TAXONOMY,
   METALINGUISTIC_EXTENSION_REASON,
+  fingerprintTaxonomy,
   detectMentions,
   detectSignalMentions,
   detectorFalsePositive,
@@ -345,6 +347,9 @@ test('#126 gramática metalinguística cobre singular, plural, pontuação, list
     'As extensões .js e .ts são aceitas.',
     'Extensões: .swift, .kt ou .tsx.',
     'Use a extensão `.env` neste exemplo.',
+    'Extensões .js,.ts e .tsx.',
+    'Extensões:.js;.ts.',
+    'Extensões – .js — .ts.',
   ]) {
     const mentions = detectMentions(text);
     assert.ok(mentions.length > 0, text);
@@ -366,10 +371,15 @@ test('#126 palavras lexicais interrompem o governo e dotfiles concretos permanec
   }
 });
 
-test('#126 preserva shape público enumerável e torna o descarte diagnóstico', () => {
+test('#126 contexto público aditivo sobrevive a JSON e spread e torna o descarte diagnóstico', () => {
   const mention = detectMentions('A extensão .md é metalinguagem.')[0];
-  assert.deepStrictEqual(Object.keys(mention), ['raw', 'normalized', 'why']);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(mention)), { raw: '.md', normalized: '.md', why: 'suffix' });
+  assert.deepStrictEqual(Object.keys(mention), ['raw', 'normalized', 'why', 'detector_context']);
+  const roundTripped = JSON.parse(JSON.stringify(mention));
+  const spread = { ...mention };
+  assert.deepStrictEqual(roundTripped, mention);
+  assert.deepStrictEqual(spread, mention);
+  assert.strictEqual(detectorFalsePositive(roundTripped), METALINGUISTIC_EXTENSION_REASON);
+  assert.strictEqual(detectorFalsePositive(spread), METALINGUISTIC_EXTENSION_REASON);
   assert.strictEqual(detectorFalsePositive(mention), METALINGUISTIC_EXTENSION_REASON);
 
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'f2-meta-ext-'));
@@ -386,7 +396,19 @@ test('#126 preserva shape público enumerável e torna o descarte diagnóstico',
 test('#126 classifica pelo texto apenas e expõe identidade estável da taxonomia', () => {
   const text = 'Extensões .md e .env; depois leia src/.env.';
   assert.deepStrictEqual(detectMentions(text), detectMentions(text));
-  assert.match(DETECTOR_VERSION, /^f2-mentions-v\d+-[a-z0-9-]+$/);
+  assert.match(DETECTOR_VERSION, /^sha256:[a-f0-9]{64}$/);
+  assert.strictEqual(DETECTOR_VERSION, fingerprintTaxonomy(DETECTOR_TAXONOMY));
+  assert.notStrictEqual(
+    fingerprintTaxonomy({ ...DETECTOR_TAXONOMY, list_conjunctions: [...DETECTOR_TAXONOMY.list_conjunctions, 'nem'] }),
+    DETECTOR_VERSION,
+    'alterar a especificação consumida deve necessariamente alterar o fingerprint');
+});
+
+test('#126 scanner adjacente não confunde caminhos com listas metalinguísticas', () => {
+  assert.deepStrictEqual(detectSignalMentions('Extensões src/.env e lib/.npmrc.').map((item) => item.normalized), ['.env', '.npmrc']);
+  assert.deepStrictEqual(detectSignalMentions('Leia src/.ts e lib/.md.').map((item) => item.normalized), ['.ts', '.md']);
+  const pathLike = detectMentions('Extensões .js/path não formam uma lista.')[0];
+  assert.notStrictEqual(detectorFalsePositive(pathLike), METALINGUISTIC_EXTENSION_REASON);
 });
 
 

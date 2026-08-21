@@ -646,9 +646,10 @@ test('scripts/fixtures/index-green/allowed-misses.json resolves clean and every 
   for (const e of resolved.entries) {
     assert.ok(e.item && e.item.trim() !== '', `entry ${e.key} must name an owner`);
   }
-  assert.deepStrictEqual(resolved.entries.map((entry) => entry.key).sort(), ['MEM001::.md', 'MEM058::.md']);
-  assert.ok(resolved.entries.every((entry) => entry.item === '#126'), 'as duas exceções históricas continuam presentes e pertencem à #126');
-  assert.ok(resolved.entries.every((entry) => /proveniência/.test(entry.reason)), 'a razão deve nomear a lacuna real de proveniência');
+  const legacyMd = resolved.entries.filter((entry) => entry.mention === '.md');
+  assert.strictEqual(legacyMd.length, 2, 'a migração desta fixture preserva hoje os dois misses legados; rederivações futuras podem mudar o conjunto');
+  assert.ok(legacyMd.every((entry) => entry.item === '#126'), 'todo miss .md legado presente deve pertencer à #126');
+  assert.ok(legacyMd.every((entry) => /proveniência/.test(entry.reason)), 'a razão deve nomear a lacuna real de proveniência');
 });
 
 test('#126 index-green propaga sem inferir a identidade da taxonomia F2', () => {

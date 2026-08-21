@@ -4,6 +4,7 @@
 // Este módulo só lê o store e o índice; a escrita permanece deliberadamente fora
 // desta superfície, para que a medição possa ser executada em produção.
 const path = require('path');
+const crypto = require('crypto');
 const { buildFileIndex, extractCitations } = require('./forge-memory-index');
 const { listFragments, parseFragment, readFragmentText } = require('./forge-memory');
 
@@ -13,8 +14,24 @@ const TRAILING_PUNCTUATION = '.,;:!?)]}>';
 const LEADING_PUNCTUATION = '(\'"[';
 const VERSION_RE = /^\d+(?:\.\d+)+$/;
 const PLAIN_NOISE = new Set(['e/ou', 'n/a', 'na', 'ou']);
-const DETECTOR_VERSION = 'f2-mentions-v2-contextual-extension';
 const METALINGUISTIC_EXTENSION_REASON = 'menção metalinguística de extensão, não arquivo concreto';
+const DETECTOR_TAXONOMY = Object.freeze({
+  schema: 2,
+  extension_governors: Object.freeze(['extensão', 'extensões']),
+  list_conjunctions: Object.freeze(['e', 'ou']),
+  structural_separator_pattern: '[\\s\\u00a0,:;/()\\[\\]\\-\\u2013\\u2014]',
+  bare_extension_pattern: '\\.[A-Za-z0-9]{1,6}',
+  metalinguistic_reason: METALINGUISTIC_EXTENSION_REASON,
+});
+
+function fingerprintTaxonomy(spec) {
+  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(spec)).digest('hex')}`;
+}
+
+const DETECTOR_VERSION = fingerprintTaxonomy(DETECTOR_TAXONOMY);
+const STRUCTURAL_SEPARATOR_RE = new RegExp(DETECTOR_TAXONOMY.structural_separator_pattern, 'u');
+const BARE_EXTENSION_AT_RE = new RegExp(`^${DETECTOR_TAXONOMY.bare_extension_pattern}`);
+const LIST_CONJUNCTION_AT_RE = new RegExp(`^(?:${DETECTOR_TAXONOMY.list_conjunctions.join('|')})\\b`, 'iu');
 // Latin prose abbreviations that survive punctuation stripping as `x.y` tokens.
 const LATIN_ABBREVIATION_RE = /^(?:e\.g|i\.e|p\.ex)$/;
 // Template markers (`T##-PLAN.md`), interpolations (`{id}`, `${N}`), angle
@@ -71,63 +88,93 @@ function mentionKind(value) {
   return null;
 }
 
-function bareExtensionToken(raw) {
-  const core = cleanToken(raw);
-  const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`'
-    ? core.slice(1, -1)
-    : core;
-  return /^\.[A-Za-z0-9]{1,6}$/.test(inner);
+function isStructuralSeparator(char) {
+  return STRUCTURAL_SEPARATOR_RE.test(char);
 }
 
-function lexicalToken(raw) {
-  return cleanToken(raw).toLowerCase();
+function skipStructural(text, start) {
+  let cursor = start;
+  while (cursor < text.length && isStructuralSeparator(text[cursor])) cursor += 1;
+  return cursor;
+}
+
+function readBareExtension(text, start) {
+  let cursor = start;
+  const wrapped = text[cursor] === '`';
+  if (wrapped) cursor += 1;
+  const match = BARE_EXTENSION_AT_RE.exec(text.slice(cursor));
+  if (!match) return null;
+  cursor += match[0].length;
+  if (/[A-Za-z0-9]/.test(text[cursor] || '')) return null;
+  if (wrapped) {
+    if (text[cursor] !== '`') return null;
+    cursor += 1;
+  }
+  return { start, end: cursor, raw: text.slice(start, cursor) };
+}
+
+function metalinguisticExtensionRanges(text) {
+  const ranges = [];
+  const governors = new RegExp(`\\b(?:${DETECTOR_TAXONOMY.extension_governors.join('|')})\\b`, 'giu');
+  let governor;
+  while ((governor = governors.exec(text)) !== null) {
+    let cursor = skipStructural(text, governor.index + governor[0].length);
+    let candidate = readBareExtension(text, cursor);
+    if (!candidate) continue;
+    while (candidate) {
+      if (text[candidate.end] === '/' && !readBareExtension(text, candidate.end + 1)) break;
+      ranges.push(candidate);
+      cursor = skipStructural(text, candidate.end);
+      const conjunction = LIST_CONJUNCTION_AT_RE.exec(text.slice(cursor));
+      if (conjunction) cursor = skipStructural(text, cursor + conjunction[0].length);
+      candidate = readBareExtension(text, cursor);
+    }
+  }
+  return ranges;
 }
 
 function detectMentions(text) {
   if (typeof text !== 'string' || !text) return [];
   const mentions = [];
+  const contextual = metalinguisticExtensionRanges(text);
   const tokenRe = /\S+/g;
-  let extensionList = false;
-  let extensionSeen = false;
   let match;
   while ((match = tokenRe.exec(text)) !== null) {
+    const tokenStart = match.index;
+    const tokenEnd = tokenStart + match[0].length;
+    if (contextual.some((range) => range.start < tokenEnd && range.end > tokenStart)) continue;
     const raw = match[0];
     const core = cleanToken(raw);
     const why = mentionKind(core);
-    const lexical = lexicalToken(raw);
-    const bareExtension = bareExtensionToken(raw);
-    const metalinguisticExtension = extensionList && bareExtension;
     if (why) {
       const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`' ? core.slice(1, -1) : core;
-      const mention = { raw, normalized: basename(inner), why };
-      Object.defineProperty(mention, '_metalinguisticExtension', {
-        value: metalinguisticExtension,
-        enumerable: false,
-      });
-      mentions.push(mention);
-    }
-
-    if (lexical === 'extensão' || lexical === 'extensões') {
-      extensionList = true;
-      extensionSeen = false;
-    } else if (metalinguisticExtension) {
-      extensionSeen = true;
-    } else if (extensionList && extensionSeen && (lexical === 'e' || lexical === 'ou')) {
-      // A conjunção fechada prolonga somente uma lista que já começou.
-    } else if (extensionList && /^[,:;/()\[\]-]+$/.test(raw)) {
-      // Pontuação estrutural isolada pode separar o governador da lista.
-    } else {
-      extensionList = false;
-      extensionSeen = false;
+      mentions.push({ start: tokenStart, mention: { raw, normalized: basename(inner), why } });
     }
   }
-  return mentions;
+  for (const range of contextual) {
+    const raw = range.raw;
+    const inner = raw[0] === '`' ? raw.slice(1, -1) : raw;
+    mentions.push({
+      start: range.start,
+      mention: {
+        raw,
+        normalized: basename(inner),
+        why: 'suffix',
+        detector_context: {
+          classification: 'metalinguistic-extension',
+          taxonomy: DETECTOR_VERSION,
+          span: { start: range.start, end: range.end },
+        },
+      },
+    });
+  }
+  return mentions.sort((left, right) => left.start - right.start).map((entry) => entry.mention);
 }
 
 function detectorFalsePositive(mention) {
   const normalized = mention.normalized;
   const raw = String(mention.raw || '').toLowerCase();
-  if (mention._metalinguisticExtension === true) return METALINGUISTIC_EXTENSION_REASON;
+  if (mention.detector_context && mention.detector_context.classification === 'metalinguistic-extension') return DETECTOR_TAXONOMY.metalinguistic_reason;
   if (PLAIN_NOISE.has(raw)) return 'segmentos de prosa, não caminho de arquivo';
   if (VERSION_RE.test(normalized)) return 'número decimal ou versão nua';
   if (/^[a-z]\/([a-z]|\d)$/i.test(raw)) return 'abreviação com barra';
@@ -140,7 +187,7 @@ function detectorFalsePositive(mention) {
   const wrapped = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`';
   const inner = wrapped ? core.slice(1, -1) : core;
   const suffix = dotSuffix(normalized);
-  const bareDotfile = /^\.[A-Za-z0-9]{1,6}$/.test(inner);
+  const bareDotfile = /(?:^|\/)\.[A-Za-z0-9]{1,6}$/.test(inner);
   // A trailing slash names a DIRECTORY (`.gsd/`): its basename is empty, so it
   // could never match a file citation — enumerate instead of leaving a
   // permanently unmatchable mention in the denominator.
@@ -310,5 +357,5 @@ function runCli(argv) {
   } catch (error) { process.stderr.write(JSON.stringify({ error: error.message || String(error) }) + '\n'); return 1; }
 }
 
-module.exports = { DETECTOR_VERSION, METALINGUISTIC_EXTENSION_REASON, detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
+module.exports = { DETECTOR_TAXONOMY, DETECTOR_VERSION, METALINGUISTIC_EXTENSION_REASON, fingerprintTaxonomy, metalinguisticExtensionRanges, detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
 if (require.main === module) process.exitCode = runCli(process.argv.slice(2));
