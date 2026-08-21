@@ -348,6 +348,37 @@ test('invalid threshold ordering rejects the whole block', () => {
   assert(threw, 'invalid relational block must be rejected observably');
 });
 
+test('legacy warning/critical layer without the new checkpoint knob completes to a valid block', () => {
+  const fakeCwd = path.join(ROOT, 'legacy-cutover-project');
+  writeTmp('legacy-cutover-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "enabled": false, "warning_threshold": 40, "critical_threshold": 0.2 }
+}`);
+  const prefs = readContextMonitorPrefs(fakeCwd);
+  assertEq(prefs.thresholds.warning, 0.4);
+  assertEq(prefs.thresholds.critical, 0.2);
+  assertEq(prefs.thresholds.checkpoint, 0.45, 'absent new checkpoint completes above the legacy warning');
+});
+
+test('explicit checkpoint collision still rejects atomically during cutover', () => {
+  const fakeCwd = path.join(ROOT, 'explicit-cutover-invalid-project');
+  writeTmp('explicit-cutover-invalid-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "checkpoint_threshold": 0.4, "warning_threshold": 40, "critical_threshold": 0.2 }
+}`);
+  let code = '';
+  try { readContextMonitorPrefs(fakeCwd); } catch (error) { code = error.code; }
+  assertEq(code, 'FORGE_PREFS_INVALID_CONTEXT_MONITOR');
+});
+
+test('explicit partial relational override still rejects atomically', () => {
+  const fakeCwd = path.join(ROOT, 'explicit-partial-invalid-project');
+  writeTmp('explicit-partial-invalid-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "warning_threshold": 0.2 }
+}`);
+  let code = '';
+  try { readContextMonitorPrefs(fakeCwd); } catch (error) { code = error.code; }
+  assertEq(code, 'FORGE_PREFS_INVALID_CONTEXT_MONITOR');
+});
+
 test('alerts disabled makes the production enabled gate false', () => {
   const fakeCwd = path.join(ROOT, 'alerts-off-project');
   writeTmp('alerts-off-project/.gsd/forge-prefs.jsonc', `{

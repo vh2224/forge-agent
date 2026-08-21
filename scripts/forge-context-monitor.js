@@ -245,9 +245,18 @@ function readContextMonitorPrefs(cwd) {
     n = n > 1 ? n / 100 : n;
     return n >= 0 && n <= 1 ? n : NaN;
   };
+  const checkpointExplicit = Object.prototype.hasOwnProperty.call(monitor, 'checkpoint_threshold');
   checkpoint = normalize(monitor.checkpoint_threshold, checkpoint);
   warning = normalize(monitor.warning_threshold, warning);
   critical = normalize(monitor.critical_threshold, critical);
+  // Backward-compatible cutover: warning/critical predate checkpoint_threshold.
+  // A legacy layer may validly set warning to the old 40% boundary while omitting
+  // the new key; complete only that absent field so the resolved block remains
+  // ordered. Once checkpoint_threshold is explicitly present, never repair the
+  // relation — an invalid explicit/partial override must reject atomically below.
+  if (!checkpointExplicit && Number.isFinite(warning) && checkpoint <= warning && warning < 1) {
+    checkpoint = Math.min(1, warning + 0.05);
+  }
   if (![checkpoint, warning, critical].every(Number.isFinite) || !(checkpoint > warning && warning > critical)) {
     const error = new Error('context_monitor thresholds must be finite, in 0..1, and checkpoint > warning > critical');
     error.code = 'FORGE_PREFS_INVALID_CONTEXT_MONITOR';
