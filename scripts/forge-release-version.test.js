@@ -56,6 +56,10 @@ try {
   git(repo, ['add', 'a.txt']);
   git(repo, ['commit', '-q', '-m', 'feat: api', '-m', 'BREAKING CHANGE: removed field']);
   assert.strictEqual(api.resolveVersion(repo).new_tag, 'v2.0.0');
+  const nestedArchive = path.join(repo, 'vendor', 'forge-agent-4.20.7');
+  fs.mkdirSync(nestedArchive, { recursive: true });
+  assert.throws(() => api.resolveVersion(nestedArchive), error => error.code === 'version-not-git');
+  assert.strictEqual(product.archiveVersion(nestedArchive), '4.20.7');
   const shallow = `${repo}-shallow`;
   const cloned = spawnSync('git', ['clone', '-q', '--depth', '1', '--no-tags', `file:///${repo.replace(/\\/g, '/')}`, shallow],
     { encoding: 'utf8', shell: false });

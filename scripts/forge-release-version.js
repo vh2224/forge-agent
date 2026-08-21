@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const { spawnSync } = require('child_process');
 
 function parseTag(tag) {
@@ -56,6 +57,18 @@ function resolveVersion(cwd = process.cwd()) {
   const inside = spawnSync('git', ['-C', cwd, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8', shell: false });
   if (!inside || inside.status !== 0 || String(inside.stdout || '').trim() !== 'true') {
     const error = new Error('version provenance unavailable: source is not a Git worktree');
+    error.code = 'version-not-git';
+    throw error;
+  }
+  const top = spawnSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', shell: false });
+  const comparable = value => {
+    try {
+      const real = fs.realpathSync(path.resolve(String(value || '').trim()));
+      return process.platform === 'win32' ? real.toLowerCase() : real;
+    } catch (_) { return null; }
+  };
+  if (!top || top.status !== 0 || comparable(top.stdout) !== comparable(cwd)) {
+    const error = new Error('version provenance unavailable: Git belongs to an ancestor, not this Forge root');
     error.code = 'version-not-git';
     throw error;
   }
