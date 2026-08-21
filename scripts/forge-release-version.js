@@ -61,13 +61,14 @@ function resolveVersion(cwd = process.cwd()) {
     throw error;
   }
   const top = spawnSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', shell: false });
-  const comparable = value => {
+  const sameDirectory = (left, right) => {
     try {
-      const real = fs.realpathSync(path.resolve(String(value || '').trim()));
-      return process.platform === 'win32' ? real.toLowerCase() : real;
-    } catch (_) { return null; }
+      const a = fs.statSync(path.resolve(String(left || '').trim()));
+      const b = fs.statSync(path.resolve(String(right || '').trim()));
+      return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+    } catch (_) { return false; }
   };
-  if (!top || top.status !== 0 || comparable(top.stdout) !== comparable(cwd)) {
+  if (!top || top.status !== 0 || !sameDirectory(top.stdout, cwd)) {
     const error = new Error('version provenance unavailable: Git belongs to an ancestor, not this Forge root');
     error.code = 'version-not-git';
     throw error;
