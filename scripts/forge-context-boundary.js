@@ -1,22 +1,57 @@
 #!/usr/bin/env node
 'use strict';
-
 const fs = require('fs');
 const path = require('path');
 const { usableSnapshot } = require('./forge-context-monitor');
 
-function sanitize(value) {
-  return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160) || 'unknown';
-}
-
-function atomicJson(file, value) {
+function sanitize(value) { return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160) || 'unknown'; }
+function atomicWrite(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, 'utf8');
+  fs.writeFileSync(temp, content, 'utf8');
   fs.renameSync(temp, file);
 }
-
-function consume(result, cwd, planFile) {
+function atomicJson(file, value) { atomicWrite(file, `${JSON.stringify(value)}\n`); }
+function unitIdentity(planFile, unit, step) {
+  const normalized = planFile ? path.resolve(planFile).replace(/\\/g, '/') : '';
+  const milestone = normalized.match(/\/milestones\/(M[^/]+)\//i);
+  const slice = normalized.match(/\/slices\/(S[^/]+)\//i);
+  const task = normalized.match(/\/tasks\/([^/]+)\//i) || normalized.match(/\/([^/]+)-PLAN\.md$/i);
+  return { unit: unit || (task ? `execute-task/${task[1]}` : 'unknown'), milestone: milestone && milestone[1],
+    slice: slice && slice[1], task: task && task[1], step: step || 'next-safe-agent-boundary' };
+}
+function checkpointContent(identity, health) {
+  const fields = [['Milestone', identity.milestone], ['Slice', identity.slice], ['Task', identity.task],
+    ['Unit', identity.unit], ['Step', identity.step]].filter(([, value]) => value);
+  return '# Continue Here\n\n' + fields.map(([key, value]) => `- ${key}: ${value}`).join('\n')
+    + '\n\n## Completed Work\n\n- The Codex sidecar reached a terminal poll boundary and persisted its result.\n'
+    + '\n## Remaining Work\n\n- Resume the authoritative active plan; this checkpoint does not claim that its remaining steps are complete.\n'
+    + '\n## Decisions Made\n\n- Context health is sidecar-scoped. The run was not paused automatically.\n'
+    + `- Checkpoint source: Codex sidecar session ${health.session_id}, epoch ${health.epoch}.\n`
+    + '\n## Next Action\n\n'
+    + `- Continue ${identity.unit} at ${identity.step}, using the active plan as the source of truth.\n`;
+}
+function pathsFor(cwd, unit, pendingId) {
+  const root = path.join(cwd, '.gsd', 'forge', 'context');
+  return { pending: path.join(root, 'pending', `${sanitize(unit)}.json`),
+    delivered: path.join(root, 'delivered', `${sanitize(pendingId)}.json`) };
+}
+function peek(cwd, unit) {
+  const file = pathsFor(cwd, unit).pending;
+  if (!fs.existsSync(file)) return { pending: false, unit, additional_context: '' };
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return { pending: true, unit, pending_id: record.pending_id, additional_context: record.additional_context, pending_file: file };
+}
+function acknowledge(cwd, unit, pendingId) {
+  const files = pathsFor(cwd, unit, pendingId);
+  if (!fs.existsSync(files.pending)) return { acknowledged: fs.existsSync(files.delivered), pending: false };
+  const record = JSON.parse(fs.readFileSync(files.pending, 'utf8'));
+  if (!pendingId || record.pending_id !== pendingId) return { acknowledged: false, pending: true };
+  fs.mkdirSync(path.dirname(files.delivered), { recursive: true });
+  fs.renameSync(files.pending, files.delivered);
+  return { acknowledged: true, pending: false, pending_id: pendingId };
+}
+function consume(result, cwd, planFile, options = {}) {
   const appserver = result && result.appserver;
   const health = appserver && appserver.context_health;
   const boundary = appserver && appserver.context_boundary;
@@ -25,48 +60,54 @@ function consume(result, cwd, planFile) {
   const output = { indicator: boundary.indicator, severity: boundary.severity || 'none',
     additional_context: typeof boundary.additionalContext === 'string' ? boundary.additionalContext : '',
     checkpoint_required: false, consumed: false };
-  if (health.measurement !== 'measured' || !usableSnapshot(health)) {
-    output.severity = 'none'; output.additional_context = '';
-  }
-  if (boundary.checkpoint === true && health.measurement === 'measured') {
-    const key = `${sanitize(health.session_id)}-${sanitize(health.epoch)}`;
-    const marker = path.join(cwd, '.gsd', 'forge', 'context', 'boundaries', `${key}.json`);
-    if (!fs.existsSync(marker)) {
-      if (planFile) {
-        const resolvedPlan = path.resolve(planFile);
-        const continueFile = path.join(path.dirname(resolvedPlan), 'continue.md');
-        const content = '# Continue Here\n\n'
-          + 'Checkpoint seguro solicitado pelo monitor de contexto da thread sidecar Codex.\n\n'
-          + `- Session: ${health.session_id}\n- Epoch: ${health.epoch}\n- Scope: sidecar-thread\n`
-          + '- A run não foi pausada automaticamente; retome no próximo boundary seguro.\n';
-        fs.writeFileSync(`${continueFile}.tmp`, content, 'utf8');
-        fs.renameSync(`${continueFile}.tmp`, continueFile);
+  if (health.measurement !== 'measured' || !usableSnapshot(health)) { output.severity = 'none'; output.additional_context = ''; return output; }
+  const identity = unitIdentity(planFile, options.unit, options.step);
+  const key = `${sanitize(identity.unit)}-${sanitize(health.session_id)}-${sanitize(health.epoch)}`;
+  const marker = path.join(cwd, '.gsd', 'forge', 'context', 'boundaries', `${key}.json`);
+  if (fs.existsSync(marker)) return output;
+  if (output.additional_context) {
+    const pendingFile = pathsFor(cwd, identity.unit).pending;
+    if (!fs.existsSync(pendingFile)) {
+      atomicJson(pendingFile, { version: 1, pending_id: key, unit: identity.unit,
+        additional_context: output.additional_context, created_at: new Date().toISOString() });
+      output.pending_id = key;
+    } else {
+      const pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+      if (!pending.additional_context.includes(output.additional_context)) {
+        pending.additional_context += `\n\n${output.additional_context}`;
+        atomicJson(pendingFile, pending);
       }
-      atomicJson(marker, { version: 1, scope: 'sidecar-thread', session_id: health.session_id,
-        epoch: health.epoch, consumed_at: new Date().toISOString() });
-      output.checkpoint_required = true;
-      output.consumed = true;
+      output.pending_id = pending.pending_id;
     }
   }
+  if (boundary.checkpoint === true && planFile) {
+    const continueFile = path.join(path.dirname(path.resolve(planFile)), 'continue.md');
+    if (!fs.existsSync(continueFile)) atomicWrite(continueFile, checkpointContent(identity, health));
+    output.checkpoint_required = true;
+  }
+  atomicJson(marker, { version: 2, scope: 'sidecar-thread', unit: identity.unit, session_id: health.session_id,
+    epoch: health.epoch, pending_id: output.pending_id || null, consumed_at: new Date().toISOString() });
+  output.consumed = true;
   return output;
 }
-
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) if (argv[i].startsWith('--')) args[argv[i].slice(2)] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
   return args;
 }
-
-module.exports = { consume };
-
+module.exports = { acknowledge, checkpointContent, consume, peek, unitIdentity };
 if (require.main === module) {
   try {
     const args = parseArgs(process.argv.slice(2));
-    if (typeof args.result !== 'string' || typeof args.cwd !== 'string') throw new Error('--result and --cwd are required');
-    const result = JSON.parse(fs.readFileSync(args.result, 'utf8'));
-    process.stdout.write(`${JSON.stringify(consume(result, path.resolve(args.cwd), args.plan))}\n`);
-  } catch (error) {
-    process.stderr.write(`forge-context-boundary: ${error.message}\n`);
-    process.exitCode = 2;
-  }
+    if (typeof args.cwd !== 'string') throw new Error('--cwd is required');
+    const cwd = path.resolve(args.cwd);
+    const action = args.action || 'consume';
+    if (action === 'peek') process.stdout.write(`${JSON.stringify(peek(cwd, args.unit))}\n`);
+    else if (action === 'ack') process.stdout.write(`${JSON.stringify(acknowledge(cwd, args.unit, args['pending-id']))}\n`);
+    else {
+      if (typeof args.result !== 'string') throw new Error('--result is required for consume');
+      const result = JSON.parse(fs.readFileSync(args.result, 'utf8'));
+      process.stdout.write(`${JSON.stringify(consume(result, cwd, args.plan, { unit: args.unit, step: args.step }))}\n`);
+    }
+  } catch (error) { process.stderr.write(`forge-context-boundary: ${error.message}\n`); process.exitCode = 2; }
 }
