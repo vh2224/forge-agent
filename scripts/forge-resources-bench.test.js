@@ -348,6 +348,10 @@ test('SIGINT handler restores preferences before any potentially blocking tree c
   assert(handler.indexOf('doRestore()') < handler.indexOf('await killAllLiveAsync()'),
     'signal handler must restore operator bytes before external cleanup');
   assert(handler.includes('await killAllLiveAsync()'), 'signal handler cleanup must not block the event loop with spawnSync');
+  assert(handler.indexOf('await killAllLiveAsync()') < handler.indexOf('doRestore(true)'),
+    'signal handler must repair any concurrent rewrite after async cleanup');
+  assert(handler.indexOf('doRestore(true)') < handler.indexOf('process.exit('),
+    'no await may separate the final byte restoration from exit');
 });
 
 // ── Behavioral: runMatrix with an injected fast command ────────────────────

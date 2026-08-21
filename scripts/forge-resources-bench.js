@@ -645,8 +645,8 @@ async function runMatrix(opts) {
   const prefsPath = localPrefsPath(cwd);
   const snapshot = snapshotPrefsFile(prefsPath);
   let restored = false;
-  const doRestore = () => {
-    if (restored) return;
+  const doRestore = (force = false) => {
+    if (restored && !force) return;
     restored = true;
     try {
       restorePrefsFile(prefsPath, snapshot);
@@ -666,6 +666,10 @@ async function runMatrix(opts) {
     signalCleanupStarted = true;
     doRestore();
     await killAllLiveAsync();
+    // Async cleanup lets the interrupted run's Promise continuations execute.
+    // One of them may rewrite enforcement before cleanup settles, so restore
+    // once more with no await between this write and process.exit.
+    doRestore(true);
     process.exit(sig === 'SIGINT' ? 130 : 143);
   };
   process.on('SIGINT', onSignal('SIGINT'));
