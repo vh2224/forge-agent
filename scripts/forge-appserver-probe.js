@@ -72,11 +72,26 @@ function resolveCommand() {
   return { cmd, args: prefixArgs, env };
 }
 
+/** Keep config/auth in CODEX_HOME while isolating only the mutable SQLite runtime. */
+function buildIsolatedSqliteEnv(baseEnv, sqliteHome) {
+  if (!baseEnv || typeof baseEnv !== 'object') throw new Error('baseEnv must be an object');
+  if (typeof sqliteHome !== 'string' || !sqliteHome) throw new Error('sqliteHome must be a non-empty absolute path');
+  const path = require('path');
+  if (!path.isAbsolute(sqliteHome)) throw new Error('sqliteHome must be a non-empty absolute path');
+  return { ...baseEnv, CODEX_SQLITE_HOME: sqliteHome };
+}
+
 // Single-quoted: an unquoted `touch ${target}` splits a path containing a space into
 // two wrong files, the declared target stays absent, and the probe prints the
 // premise as proven off a path bug (S03 review R4). Shared by every probe whose
 // ground truth is "does this exact path exist after the turn".
 const shellQuote = (p) => `'${String(p).replace(/'/g, `'\\''`)}'`;
+
+function crossPlatformWriteCommand(target, platform = process.platform) {
+  if (platform !== 'win32') return `touch ${shellQuote(target)}`;
+  const literal = String(target).replace(/'/g, "''");
+  return `powershell.exe -NoProfile -NonInteractive -Command "[System.IO.File]::WriteAllText('${literal}','')"`;
+}
 
 function printVerdict(probeName, verdict, reason) {
   process.stdout.write(`\nVERDICT: ${probeName} = ${verdict} — ${reason}\n`);
@@ -228,9 +243,6 @@ function runProbeHandshake({ cmd, args, env, timeoutSecs, threadParams = { appro
 // How long to wait for a force-killed app-server to be reaped before moving on. See
 // `reap` below: bounded so the probe can never hang on it.
 const REAP_TIMEOUT_MS = 4000;
-// Delay before the single retry described in the crossroot arm runner.
-const RETRY_DELAY_MS = 1500;
-
 function runProbeSession({ cmd, args, env, timeoutSecs, threadParams, buildTurnParams }) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -583,8 +595,10 @@ function hasHttp200(commandItems) {
 // `cwd` and `threadSandbox` are optional and default to absent, so every existing
 // caller keeps byte-identical thread/start params. They exist for the M2 write probe,
 // whose whole question is what the SERVER does with a cwd it cannot see git in.
-async function runCapabilityTurn({ timeoutSecs, sandboxPolicy, command, cwd, threadSandbox }) {
-  const { cmd, args, env } = resolveCommand();
+async function runCapabilityTurn({ timeoutSecs, sandboxPolicy, command, cwd, threadSandbox, sessionEnv }) {
+  const resolved = resolveCommand();
+  const { cmd, args } = resolved;
+  const env = sessionEnv === undefined ? resolved.env : sessionEnv;
   const threadParams = { approvalPolicy: 'never' };
   if (cwd !== undefined) threadParams.cwd = cwd;
   if (threadSandbox !== undefined) threadParams.sandbox = threadSandbox;
@@ -1564,6 +1578,17 @@ function policyRefusal(arm) {
   return { declined: declined.length > 0, readOnlyThread, detail: parts.join('; ') };
 }
 
+function threadWritePrecondition(arm) {
+  // Historical/pure ladder fixtures predate this transport precondition. Only a
+  // live arm that declares the requested grant is eligible for this gate.
+  if (!arm || arm.requestedThreadSandbox === undefined) return null;
+  const type = arm && arm.threadSandbox && arm.threadSandbox.type;
+  if (type === 'workspaceWrite') return null;
+  return {
+    detail: `thread/start não confirmou sandbox workspaceWrite (recebido=${JSON.stringify(arm && arm.threadSandbox)}, profile=${JSON.stringify(arm && arm.profile)})`,
+  };
+}
+
 function crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck }) {
   const V = CROSSROOT_VERDICTS;
 
@@ -1579,6 +1604,16 @@ function crossRootVerdict({ ctrlAttempt, ctrlDeny, treat, replaceCheck }) {
       return {
         verdict: V.UNKNOWN,
         reason: `braço ${label} NÃO MEDIDO (${message}) — sem os três braços decisivos não há medição sobre writableRoots. "unknown" significa NÃO MEDIDO e nunca "medido e negativo".`,
+      };
+    }
+  }
+
+  for (const [label, arm] of decisive) {
+    const missingWriteGrant = threadWritePrecondition(arm);
+    if (missingWriteGrant) {
+      return {
+        verdict: V.UNKNOWN,
+        reason: `PRECONDIÇÃO NÃO SATISFEITA no braço ${label} — ${missingWriteGrant.detail}. Sem o grant de thread idêntico nos três braços decisivos, NADA sobre writableRoots é atribuível. "unknown" significa NÃO MEDIDO.`,
       };
     }
   }
@@ -1677,12 +1712,22 @@ async function probeCrossRootWrite({ timeoutSecs }) {
   const path = require('path');
   const { spawnSync } = require('child_process');
 
+  // One private SQLite home per app-server session removes cross-arm lock
+  // contention without copying CODEX_HOME, auth.json or config.toml.
+  const sqliteRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xroot-sqlite-')));
+  const sessionEnv = (label, baseEnv) => {
+    const sqliteHome = path.join(sqliteRoot, label);
+    fs.mkdirSync(sqliteHome, { recursive: false });
+    return buildIsolatedSqliteEnv(baseEnv, sqliteHome);
+  };
+  const cleanupSqlite = () => fs.rmSync(sqliteRoot, { recursive: true, force: true });
+
   // Step 1 — handshake precondition, zero inference cost. A probe that could not
   // even open a session must never print a negative verdict about writableRoots.
   const { cmd, args, env } = resolveCommand();
   let binaryVersion = 'unknown';
   try {
-    const hs = await runProbeHandshake({ cmd, args, env, timeoutSecs });
+    const hs = await runProbeHandshake({ cmd, args, env: sessionEnv('HANDSHAKE', env), timeoutSecs });
     const init = (hs && hs.initializeResult) || {};
     const thread = (hs && hs.threadStartResult && hs.threadStartResult.thread) || {};
     // Real shape measured in TASK-022: userAgent on initialize, cliVersion on the thread.
@@ -1693,10 +1738,12 @@ async function probeCrossRootWrite({ timeoutSecs }) {
     if (error.infra) {
       process.stderr.write(`forge-appserver-probe: infra failure — ${error.message}\n`);
       process.exitCode = 2;
+      cleanupSqlite();
       return;
     }
     printVerdict('crossroot-write', CROSSROOT_VERDICTS.UNKNOWN,
       `handshake não fechou (${error.message.replace(/\n/g, ' ')}) — NADA foi medido sobre writableRoots. "unknown" é NÃO MEDIDO, nunca "medido e negativo".`);
+    cleanupSqlite();
     return;
   }
 
@@ -1726,6 +1773,7 @@ async function probeCrossRootWrite({ timeoutSecs }) {
   const cleanup = () => {
     fs.rmSync(dirA, { recursive: true, force: true });
     fs.rmSync(dirB, { recursive: true, force: true });
+    cleanupSqlite();
   };
 
   // Step 3 — preconditions ASSERTED, never assumed.
@@ -1763,8 +1811,8 @@ async function probeCrossRootWrite({ timeoutSecs }) {
     // Per-arm target (Pitfall 3): two arms sharing a path make arm N report arm A's
     // leftover file as its own write.
     const target = path.join(targetDir, `forge-write-probe-${label}.txt`);
-    const command = `touch ${shellQuote(target)}`;
-    const arm = { label, cwd, targetDir, target };
+    const command = crossPlatformWriteCommand(target);
+    const arm = { label, cwd, targetDir, target, requestedThreadSandbox: 'workspace-write' };
     process.stdout.write(`\n# --- ARM ${label} ${note} ---\n# cwd=${cwd} targetDir=${targetDir} sandboxPolicy=${JSON.stringify(sandboxPolicy)}\n# command=${command}\n`);
     try { fs.rmSync(target, { force: true }); } catch { /* asserted next */ }
     const presentBefore = fs.existsSync(target);
@@ -1776,19 +1824,11 @@ async function probeCrossRootWrite({ timeoutSecs }) {
       return arm;
     }
     try {
-      // One bounded retry, and ONLY for the state-runtime contention named in
-      // `reap` above. The reap fixes the cause; this covers the residue (a handle
-      // the OS has not released yet). Any other error falls straight through —
-      // retrying an unknown failure would turn a measurement into a coin flip.
-      let r;
-      try {
-        r = await runCapabilityTurn({ timeoutSecs, command, sandboxPolicy, cwd });
-      } catch (first) {
-        if (!/failed to initialize sqlite state runtime/i.test(first.message || '')) throw first;
-        process.stdout.write(`# ARM ${label}: state runtime ocupado — uma nova tentativa após ${RETRY_DELAY_MS}ms (causa nomeada, nunca retry cego)\n`);
-        await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
-        r = await runCapabilityTurn({ timeoutSecs, command, sandboxPolicy, cwd });
-      }
+      const r = await runCapabilityTurn({
+        timeoutSecs, command, sandboxPolicy, cwd,
+        threadSandbox: 'workspace-write',
+        sessionEnv: sessionEnv(label, env),
+      });
       const ts = r.result.threadStartResult || {};
       arm.exists = fs.existsSync(target);
       arm.items = r.commandItems;
@@ -1835,6 +1875,27 @@ async function probeCrossRootWrite({ timeoutSecs }) {
       cwd: dirA, targetDir: dirA, sandboxPolicy: POLICY_BASE,
       note: 'CONTROLE POSITIVO: cwd=A, alvo DENTRO de A — prova que o turn de fato executa comandos nesta forma; sem ele, ausência é ruído e não negação',
     });
+    // Fail fast before spending three more turns when the positive control already
+    // proves that this run cannot measure writableRoots.
+    if (ctrlAttempt.error) {
+      printVerdict('crossroot-write', CROSSROOT_VERDICTS.UNKNOWN,
+        `braço CTRL-ATTEMPT NÃO MEDIDO (${ctrlAttempt.error}) — nenhum braço comparativo foi executado. Versão do binário: ${binaryVersion}.`);
+      return;
+    }
+    const ctrlGrant = threadWritePrecondition(ctrlAttempt);
+    if (ctrlGrant) {
+      printVerdict('crossroot-write', CROSSROOT_VERDICTS.UNKNOWN,
+        `PRECONDIÇÃO NÃO SATISFEITA no braço CTRL-ATTEMPT — ${ctrlGrant.detail}. Nenhum braço comparativo foi executado. Versão do binário: ${binaryVersion}.`);
+      return;
+    }
+    if (ctrlAttempt.exists === false) {
+      const refusal = policyRefusal(ctrlAttempt);
+      printVerdict('crossroot-write', refusal ? CROSSROOT_VERDICTS.UNKNOWN : CROSSROOT_VERDICTS.INCONCLUSIVA,
+        refusal
+          ? `CTRL-ATTEMPT foi recusado por política (${refusal.detail}) — NADA foi medido. Versão do binário: ${binaryVersion}.`
+          : `CTRL-ATTEMPT não escreveu dentro do próprio cwd apesar do grant workspaceWrite; sem controle positivo, ausências posteriores seriam ruído. Nenhum braço comparativo foi executado. Versão do binário: ${binaryVersion}.`);
+      return;
+    }
     const ctrlDeny = await runArm('CTRL-DENY', {
       cwd: dirA, targetDir: dirB, sandboxPolicy: POLICY_BASE,
       note: 'CONTROLE NEGATIVO: cwd=A, alvo em B, SEM writableRoots — se escrever, B já era gravável e nada é atribuível ao campo',
@@ -1857,7 +1918,7 @@ async function probeCrossRootWrite({ timeoutSecs }) {
     if (verdict === CROSSROOT_VERDICTS.FALHOU) {
       process.stdout.write('\n# --- ARM RUNTIME-ROOTS (gated: só roda com writableRoots medido negativo) ---\n');
       const target = path.join(dirB, 'forge-write-probe-RUNTIME-ROOTS.txt');
-      const command = `touch ${shellQuote(target)}`;
+      const command = crossPlatformWriteCommand(target);
       let fifthWrote = false;
       let fifthError = null;
       let fifthItems = [];
@@ -1871,8 +1932,8 @@ async function probeCrossRootWrite({ timeoutSecs }) {
           // Not one line of runCapabilityTurn is edited — it is module scope, shared by
           // the three cap-* probes.
           const fifth = await runProbeSession({
-            cmd, args, env, timeoutSecs,
-            threadParams: { approvalPolicy: 'never', cwd: dirA, runtimeWorkspaceRoots: [dirB] },
+            cmd, args, env: sessionEnv('RUNTIME-ROOTS', env), timeoutSecs,
+            threadParams: { approvalPolicy: 'never', cwd: dirA, sandbox: 'workspace-write', runtimeWorkspaceRoots: [dirB] },
             buildTurnParams: (threadId) => ({
               threadId,
               input: [{ type: 'text', text: `Run this exact shell command and report its output verbatim: ${command}` }],
@@ -1955,16 +2016,16 @@ if (require.main === module) {
 }
 
 module.exports = {
-  runProbeHandshake, runProbeSession, resolveCommand,
+  runProbeHandshake, runProbeSession, resolveCommand, buildIsolatedSqliteEnv,
   runProbeA4Ok, runProbeA4Fail, runProbeA4Denied,
   runCapabilityTurn, probeCapNetworked, probeCapWorkspace, probeCapReadonly,
   probeEvidenceRuntime, EVIDENCE_EXPECTED_EXIT,
   collectModelFields, scopeOfSurface, collectModelReadbacks,
   probeModelConflict, probeNonGitCwd, B3_VERDICTS,
-  probeNonGitWrite, NONGIT_WRITE_VERDICTS, shellQuote,
+  probeNonGitWrite, NONGIT_WRITE_VERDICTS, shellQuote, crossPlatformWriteCommand,
   probeCrossRootWrite, crossRootVerdict, CROSSROOT_VERDICTS,
   armExecution, CROSSROOT_EXEC,
   // Exported so the precondition gate is provable without the sidecar being
   // reachable — same reason crossRootVerdict is pure and exported.
-  policyRefusal,
+  policyRefusal, threadWritePrecondition,
 };

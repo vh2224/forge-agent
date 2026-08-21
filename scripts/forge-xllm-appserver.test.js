@@ -429,6 +429,25 @@ function testCrossRootProbe() {
   const usage = spawnSync(process.execPath, [path.join(__dirname, 'forge-appserver-probe.js'), '--probe', 'nope'], { encoding: 'utf8' });
   assert(String(usage.stderr).includes('crossroot-write'), 'crossroot-write must stay in the dispatchable PROBES list');
 
+  // The probe must isolate only SQLite. CODEX_HOME remains the source of auth,
+  // config and projections; mutating or copying it would widen credential exposure.
+  const baseEnv = { CODEX_HOME: path.resolve('codex-home'), PATH: 'sentinel-path' };
+  const sqliteHome = path.resolve('sqlite-arm-a');
+  const isolated = probe.buildIsolatedSqliteEnv(baseEnv, sqliteHome);
+  assert.notStrictEqual(isolated, baseEnv, 'per-arm env must be a clone');
+  assert.strictEqual(isolated.CODEX_HOME, baseEnv.CODEX_HOME, 'CODEX_HOME/auth/config must be preserved');
+  assert.strictEqual(isolated.PATH, baseEnv.PATH, 'unrelated allowlisted env must be preserved');
+  assert.strictEqual(isolated.CODEX_SQLITE_HOME, sqliteHome, 'only the SQLite runtime is redirected');
+  assert.strictEqual(baseEnv.CODEX_SQLITE_HOME, undefined, 'base env must not be mutated');
+  assert.throws(() => probe.buildIsolatedSqliteEnv(baseEnv, 'relative/sqlite'), /absolute path/,
+    'a relative SQLite home could escape under a model-controlled cwd');
+  assert.strictEqual(probe.crossPlatformWriteCommand('/tmp/a b', 'linux'), "touch '/tmp/a b'",
+    'POSIX keeps the already-measured touch command');
+  const windowsWrite = probe.crossPlatformWriteCommand("C:\\tmp\\a'b.txt", 'win32');
+  assert(windowsWrite.startsWith('powershell.exe -NoProfile -NonInteractive -Command '),
+    'Windows must use a native non-interactive writer instead of the non-portable touch command');
+  assert(windowsWrite.includes("a''b.txt"), 'PowerShell single-quoted paths must double embedded quotes');
+
   const { crossRootVerdict, CROSSROOT_VERDICTS: V } = probe;
   const wrote = { exists: true };
   const absent = { exists: false };
@@ -440,6 +459,34 @@ function testCrossRootProbe() {
     target,
     items: [{ type: 'commandExecution', status: 'completed', command: `/bin/zsh -lc "touch '${target}'"`, exitCode }],
   });
+
+  const requestedWrite = (arm, threadSandbox = { type: 'workspaceWrite' }) => ({
+    ...arm, requestedThreadSandbox: 'workspace-write', threadSandbox,
+  });
+
+  const readOnlyPrecondition = crossRootVerdict({
+    ctrlAttempt: requestedWrite({ exists: false, items: [] }, { type: 'readOnly' }),
+    ctrlDeny: requestedWrite(ranButAbsent('/B/deny.txt', 1)),
+    treat: requestedWrite(wrote),
+    replaceCheck: requestedWrite(wrote),
+  });
+  assert.strictEqual(readOnlyPrecondition.verdict, V.UNKNOWN,
+    'a live arm whose requested thread grant was not effective is NOT MEASURED');
+  assert(/CTRL-ATTEMPT/.test(readOnlyPrecondition.reason) && /workspaceWrite/.test(readOnlyPrecondition.reason),
+    'the failed precondition must name the arm and expected effective sandbox');
+
+  const source = fs.readFileSync(path.join(__dirname, 'forge-appserver-probe.js'), 'utf8');
+  for (const label of ['HANDSHAKE', 'RUNTIME-ROOTS']) {
+    assert(source.includes(`sessionEnv('${label}'`), `${label} must receive an isolated SQLite runtime`);
+  }
+  assert(source.includes('sessionEnv(label, env)'), 'every main runArm invocation must derive its own SQLite home from its label');
+  for (const label of ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT', 'REPLACE-CHECK']) {
+    assert(source.includes(`runArm('${label}'`), `${label} must keep a distinct arm label for SQLite isolation`);
+  }
+  assert(source.includes("threadSandbox: 'workspace-write'"),
+    'all four main arms must request the same writable thread sandbox');
+  assert(source.includes("sandbox: 'workspace-write', runtimeWorkspaceRoots"),
+    'the gated fifth arm must use the same writable thread precondition');
 
   // (1) NON-DEGRADATION: a timeout carries NO `infra` flag, so a ladder that read
   // `!infra` as "measured" would grade an outage as a measurement.
@@ -576,7 +623,7 @@ function testCrossRootProbe() {
   // The fifth arm's caveat text must exist in BOTH branches of the source, not only
   // where it happened to write (R2, Decisão 6). Asserted structurally: one shared
   // constant, used by the positive branch and by the negative one.
-  const src = fs.readFileSync(path.join(__dirname, 'forge-appserver-probe.js'), 'utf8');
+  const src = source;
   const fifthBlock = src.slice(src.indexOf('ARM RUNTIME-ROOTS'));
   assert.strictEqual((fifthBlock.match(/\$\{FIFTH_CAVEAT\}/g) || []).length, 2,
     'the weaker-confidence caveat belongs to the ARM, so both the positive and the negative branch must carry it');
