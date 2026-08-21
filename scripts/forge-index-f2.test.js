@@ -8,9 +8,10 @@ const { spawnSync } = require('child_process');
 const { writeFragment } = require('./forge-memory');
 const {
   DETECTOR_VERSION,
-  DETECTOR_TAXONOMY,
+  DETECTOR_FINGERPRINT_TABLES,
+  DETECTOR_FINGERPRINT_FUNCTIONS,
   METALINGUISTIC_EXTENSION_REASON,
-  fingerprintTaxonomy,
+  computeDetectorVersion,
   detectMentions,
   detectSignalMentions,
   detectorFalsePositive,
@@ -397,11 +398,21 @@ test('#126 classifica pelo texto apenas e expõe identidade estável da taxonomi
   const text = 'Extensões .md e .env; depois leia src/.env.';
   assert.deepStrictEqual(detectMentions(text), detectMentions(text));
   assert.match(DETECTOR_VERSION, /^sha256:[a-f0-9]{64}$/);
-  assert.strictEqual(DETECTOR_VERSION, fingerprintTaxonomy(DETECTOR_TAXONOMY));
+  assert.strictEqual(DETECTOR_VERSION, computeDetectorVersion());
   assert.notStrictEqual(
-    fingerprintTaxonomy({ ...DETECTOR_TAXONOMY, list_conjunctions: [...DETECTOR_TAXONOMY.list_conjunctions, 'nem'] }),
+    computeDetectorVersion({
+      tables: { ...DETECTOR_FINGERPRINT_TABLES, real_file_ext: [...DETECTOR_FINGERPRINT_TABLES.real_file_ext, 'changed'] },
+    }),
     DETECTOR_VERSION,
-    'alterar a especificação consumida deve necessariamente alterar o fingerprint');
+    'alterar o vocabulário efetivo deve necessariamente alterar o fingerprint');
+  assert.notStrictEqual(
+    computeDetectorVersion({
+      functions: DETECTOR_FINGERPRINT_FUNCTIONS.map((fn) => fn.name === 'detectorFalsePositive'
+        ? function detectorFalsePositive() { return 'changed'; }
+        : fn),
+    }),
+    DETECTOR_VERSION,
+    'alterar o comportamento serializado do detector deve necessariamente alterar o fingerprint');
 });
 
 test('#126 scanner adjacente não confunde caminhos com listas metalinguísticas', () => {
@@ -409,6 +420,22 @@ test('#126 scanner adjacente não confunde caminhos com listas metalinguísticas
   assert.deepStrictEqual(detectSignalMentions('Leia src/.ts e lib/.md.').map((item) => item.normalized), ['.ts', '.md']);
   const pathLike = detectMentions('Extensões .js/path não formam uma lista.')[0];
   assert.notStrictEqual(detectorFalsePositive(pathLike), METALINGUISTIC_EXTENSION_REASON);
+});
+
+test('#126 boundary posterior recusa sufixos mistos e preserva o restante concreto do token', () => {
+  for (const text of ['Extensões .js_foo', 'Extensões .js.map']) {
+    const mentions = detectMentions(text);
+    assert.ok(mentions.every((item) => detectorFalsePositive(item) !== METALINGUISTIC_EXTENSION_REASON), text);
+  }
+  const mixedPath = detectMentions('Extensões .js,src/.env');
+  assert.deepStrictEqual(mixedPath.map((item) => item.normalized), ['.js', '.env']);
+  assert.strictEqual(detectorFalsePositive(mixedPath[0]), METALINGUISTIC_EXTENSION_REASON);
+  assert.strictEqual(detectorFalsePositive(mixedPath[1]), null);
+
+  const mixedFile = detectMentions('Extensões .js,config.ts');
+  assert.deepStrictEqual(mixedFile.map((item) => item.normalized), ['.js', 'config.ts']);
+  assert.strictEqual(detectorFalsePositive(mixedFile[0]), METALINGUISTIC_EXTENSION_REASON);
+  assert.strictEqual(detectorFalsePositive(mixedFile[1]), null);
 });
 
 

@@ -24,11 +24,7 @@ const DETECTOR_TAXONOMY = Object.freeze({
   metalinguistic_reason: METALINGUISTIC_EXTENSION_REASON,
 });
 
-function fingerprintTaxonomy(spec) {
-  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(spec)).digest('hex')}`;
-}
-
-const DETECTOR_VERSION = fingerprintTaxonomy(DETECTOR_TAXONOMY);
+let DETECTOR_VERSION;
 const STRUCTURAL_SEPARATOR_RE = new RegExp(DETECTOR_TAXONOMY.structural_separator_pattern, 'u');
 const BARE_EXTENSION_AT_RE = new RegExp(`^${DETECTOR_TAXONOMY.bare_extension_pattern}`);
 const LIST_CONJUNCTION_AT_RE = new RegExp(`^(?:${DETECTOR_TAXONOMY.list_conjunctions.join('|')})\\b`, 'iu');
@@ -105,10 +101,12 @@ function readBareExtension(text, start) {
   const match = BARE_EXTENSION_AT_RE.exec(text.slice(cursor));
   if (!match) return null;
   cursor += match[0].length;
-  if (/[A-Za-z0-9]/.test(text[cursor] || '')) return null;
   if (wrapped) {
     if (text[cursor] !== '`') return null;
     cursor += 1;
+  } else if (cursor < text.length && !isStructuralSeparator(text[cursor])) {
+    const terminalPunctuation = /[.!?]/.test(text[cursor]) && (cursor + 1 === text.length || /[\s\u00a0]/u.test(text[cursor + 1]));
+    if (!terminalPunctuation) return null;
   }
   return { start, end: cursor, raw: text.slice(start, cursor) };
 }
@@ -142,13 +140,33 @@ function detectMentions(text) {
   while ((match = tokenRe.exec(text)) !== null) {
     const tokenStart = match.index;
     const tokenEnd = tokenStart + match[0].length;
-    if (contextual.some((range) => range.start < tokenEnd && range.end > tokenStart)) continue;
-    const raw = match[0];
-    const core = cleanToken(raw);
-    const why = mentionKind(core);
-    if (why) {
-      const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`' ? core.slice(1, -1) : core;
-      mentions.push({ start: tokenStart, mention: { raw, normalized: basename(inner), why } });
+    const overlaps = contextual.filter((range) => range.start < tokenEnd && range.end > tokenStart);
+    const uncovered = [];
+    if (overlaps.length === 0) {
+      uncovered.push({ start: tokenStart, end: tokenEnd });
+    } else {
+      let cursor = tokenStart;
+      for (const range of overlaps) {
+        if (cursor < range.start) uncovered.push({ start: cursor, end: range.start });
+        cursor = Math.max(cursor, range.end);
+      }
+      if (cursor < tokenEnd) uncovered.push({ start: cursor, end: tokenEnd });
+    }
+    for (const span of uncovered) {
+      let start = span.start;
+      let end = span.end;
+      if (overlaps.length > 0) {
+        while (start < end && /[,:;()\[\]\-\u2013\u2014]/u.test(text[start])) start += 1;
+        while (end > start && /[,:;()\[\]\-\u2013\u2014]/u.test(text[end - 1])) end -= 1;
+      }
+      if (start >= end) continue;
+      const raw = text.slice(start, end);
+      const core = cleanToken(raw);
+      const why = mentionKind(core);
+      if (why) {
+        const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`' ? core.slice(1, -1) : core;
+        mentions.push({ start, mention: { raw, normalized: basename(inner), why } });
+      }
     }
   }
   for (const range of contextual) {
@@ -233,6 +251,42 @@ function detectorFalsePositive(mention) {
 function signalMentions(mentions) {
   return (Array.isArray(mentions) ? mentions : []).filter((item) => !detectorFalsePositive(item));
 }
+
+const DETECTOR_FINGERPRINT_TABLES = Object.freeze({
+  trailing_punctuation: TRAILING_PUNCTUATION,
+  leading_punctuation: LEADING_PUNCTUATION,
+  version_pattern: VERSION_RE.source,
+  plain_noise: Object.freeze([...PLAIN_NOISE].sort()),
+  latin_abbreviation_pattern: LATIN_ABBREVIATION_RE.source,
+  placeholder_pattern: PLACEHOLDER_RE.source,
+  real_file_ext: Object.freeze([...REAL_FILE_EXT].sort()),
+});
+const DETECTOR_FINGERPRINT_FUNCTIONS = Object.freeze([
+  cleanToken,
+  dotSuffix,
+  basename,
+  mentionKind,
+  isStructuralSeparator,
+  skipStructural,
+  readBareExtension,
+  metalinguisticExtensionRanges,
+  detectMentions,
+  detectorFalsePositive,
+  signalMentions,
+]);
+
+function computeDetectorVersion(overrides) {
+  const options = overrides || {};
+  const functions = options.functions || DETECTOR_FINGERPRINT_FUNCTIONS;
+  const payload = {
+    taxonomy: options.taxonomy || DETECTOR_TAXONOMY,
+    tables: options.tables || DETECTOR_FINGERPRINT_TABLES,
+    function_sources: functions.map((fn) => Function.prototype.toString.call(fn)),
+  };
+  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
+}
+
+DETECTOR_VERSION = computeDetectorVersion();
 
 // Menções já filtradas de ruído, para consumidores fora deste módulo (o índice
 // usa isto no bucket (b)) — assim os dois lados classificam pelo mesmo critério.
@@ -357,5 +411,5 @@ function runCli(argv) {
   } catch (error) { process.stderr.write(JSON.stringify({ error: error.message || String(error) }) + '\n'); return 1; }
 }
 
-module.exports = { DETECTOR_TAXONOMY, DETECTOR_VERSION, METALINGUISTIC_EXTENSION_REASON, fingerprintTaxonomy, metalinguisticExtensionRanges, detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
+module.exports = { DETECTOR_TAXONOMY, DETECTOR_FINGERPRINT_TABLES, DETECTOR_FINGERPRINT_FUNCTIONS, DETECTOR_VERSION, METALINGUISTIC_EXTENSION_REASON, computeDetectorVersion, metalinguisticExtensionRanges, detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
 if (require.main === module) process.exitCode = runCli(process.argv.slice(2));
