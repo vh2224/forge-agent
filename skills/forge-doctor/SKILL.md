@@ -31,6 +31,6 @@ Hooks sem confiança explícita são somente diagnóstico. Não altere trust, cr
 
 Use `--recover-claim <run-id>` sem `--apply` para preview. Aplique somente quando o operador atestar que o proprietário parou, encaminhando literalmente `--apply --confirm-owner-stopped`. Nunca deduza morte por PID, sessão ou heartbeat.
 
-Para workspace dirty, exija que o script conclua e reabra o bundle verificado antes da liberação. `--restore-claim <run-id>` é preview; o `--apply` restaura paths ausentes e extrai conflitos sem sobrescrever bytes divergentes.
+Para workspace dirty, a ordem obrigatória é `intent → bundle reaberto/verificado → segunda medição do dirty scope → CAS`. `--restore-claim <run-id>` é preview; o `--apply` restaura paths ausentes e extrai conflitos sem sobrescrever bytes divergentes.
 
 Sem flags, não escreva. Com `--fix --dry-run`, descreva somente reparos reversíveis. Com `--fix`, encaminhe ao script e aplique apenas reparos que ele declara; backup/migração precedem qualquer escrita. Nunca acesse o home do runtime não selecionado.

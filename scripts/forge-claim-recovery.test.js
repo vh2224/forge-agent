@@ -62,5 +62,42 @@ test('payload corrompido e containment falham fechado', () => {
 });
 test('fora do censo falha fechado', () => { const f = fixture(); assert.strictEqual(recovery.inspect(f.cwd, f.id, { ...f.common, findStuckClaims: () => ({ stuck: [] }) }).reason, 'not-in-stuck-census'); });
 
+test('symlink intermediário bloqueia captura e restore', () => {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-outside-')); roots.push(outside); fs.writeFileSync(path.join(outside, 'a.bin'), Buffer.from('outside'));
+  const capture = fixture('T-link-capture');
+  fs.symlinkSync(outside, path.join(capture.code, 'src'), process.platform === 'win32' ? 'junction' : 'dir');
+  const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] });
+  const blocked = recovery.apply(capture.cwd, capture.id, { ...capture.common, confirmOwnerStopped: true, workingStatus: dirty });
+  assert.match(blocked.reason, /dirty-path-reparse/); assert.strictEqual(runs.get(capture.cwd, capture.id).active, true);
+
+  const restored = fixture('T-link-restore'); fs.mkdirSync(path.join(restored.code, 'src')); fs.writeFileSync(path.join(restored.code, 'src', 'a.bin'), Buffer.from('saved'));
+  assert.strictEqual(recovery.apply(restored.cwd, restored.id, { ...restored.common, confirmOwnerStopped: true, workingStatus: dirty }).ok, true);
+  fs.rmSync(path.join(restored.code, 'src'), { recursive: true, force: true }); fs.symlinkSync(outside, path.join(restored.code, 'src'), process.platform === 'win32' ? 'junction' : 'dir');
+  const restoreResult = recovery.restore(restored.cwd, restored.id, { apply: true }); assert.match(restoreResult.reason, /manifest-path-reparse/); assert.strictEqual(fs.readFileSync(path.join(outside, 'a.bin'), 'utf8'), 'outside');
+});
+
+test('segunda medição detecta novo dirty path e mutação após snapshot', () => {
+  const added = fixture('T-drift-added'); fs.mkdirSync(path.join(added.code, 'src')); fs.writeFileSync(path.join(added.code, 'src', 'a.bin'), Buffer.from('a')); fs.writeFileSync(path.join(added.code, 'src', 'b.bin'), Buffer.from('b'));
+  let calls = 0; const changingSet = () => ({ ok: true, entries: ++calls === 1 ? [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] : [{ path: 'src/a.bin', kind: 'modified', code: ' M' }, { path: 'src/b.bin', kind: 'untracked', code: '??' }] });
+  const first = recovery.apply(added.cwd, added.id, { ...added.common, confirmOwnerStopped: true, workingStatus: changingSet }); assert.strictEqual(first.reason, 'dirty-scope-drift'); assert.strictEqual(runs.get(added.cwd, added.id).active, true);
+
+  const mutated = fixture('T-drift-bytes'); fs.mkdirSync(path.join(mutated.code, 'src')); const target = path.join(mutated.code, 'src', 'a.bin'); fs.writeFileSync(target, Buffer.from('before')); let reads = 0;
+  const changingBytes = () => { if (++reads === 2) fs.writeFileSync(target, Buffer.from('after')); return { ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }; };
+  const second = recovery.apply(mutated.cwd, mutated.id, { ...mutated.common, confirmOwnerStopped: true, workingStatus: changingBytes }); assert.strictEqual(second.reason, 'dirty-scope-drift'); assert.strictEqual(runs.get(mutated.cwd, mutated.id).active, true);
+});
+
+test('conflict existente divergente nunca é sobrescrito', () => {
+  const f = fixture('T-conflict-divergent'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('saved'));
+  const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); assert.strictEqual(recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }).ok, true);
+  fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('current')); assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true }).restored, true);
+  const conflict = path.join(f.cwd, '.gsd', 'forge', 'claim-recovery', encodeURIComponent(f.id), 'conflicts', 'src', 'a.bin'); fs.writeFileSync(conflict, Buffer.from('operator'));
+  const result = recovery.restore(f.cwd, f.id, { apply: true }); assert.match(result.reason, /conflict-existing-divergent/); assert.strictEqual(fs.readFileSync(conflict, 'utf8'), 'operator');
+});
+
+test('documentação fixa a ordem intent → bundle-verified → segunda medição → CAS', () => {
+  const command = fs.readFileSync(path.join(__dirname, '..', 'commands', 'forge-doctor.md'), 'utf8'); const shared = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-claim-gate.md'), 'utf8');
+  for (const text of [command, shared]) { const intent = text.indexOf('intenção'); const verified = text.indexOf('bundle-verified'); const measure = text.indexOf('dirty scope', verified); const cas = text.indexOf('CAS', measure); assert(intent >= 0 && verified > intent && measure > verified && cas > measure); }
+});
+
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
 if (!process.exitCode) process.stdout.write(`\n${passed} passed, 0 failed\n`);

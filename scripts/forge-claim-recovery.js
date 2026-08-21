@@ -14,6 +14,25 @@ function inside(root, target) {
   const rel = path.relative(root, target);
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
+function assertSafePath(root, target, label) {
+  const base = path.resolve(root); const resolved = path.resolve(target);
+  if (!inside(base, resolved)) throw new Error(`${label}-path-escape`);
+  let baseStat;
+  try { baseStat = fs.lstatSync(base); } catch { throw new Error(`${label}-root-missing`); }
+  if (!baseStat.isDirectory() || baseStat.isSymbolicLink()) throw new Error(`${label}-path-reparse`);
+  const realBase = fs.realpathSync.native(base);
+  const rel = path.relative(base, resolved);
+  let cursor = base;
+  for (const component of rel.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, component);
+    if (!fs.existsSync(cursor)) break;
+    const stat = fs.lstatSync(cursor);
+    if (stat.isSymbolicLink()) throw new Error(`${label}-path-reparse`);
+    const real = fs.realpathSync.native(cursor);
+    if (!inside(realBase, real)) throw new Error(`${label}-path-escape`);
+  }
+  return resolved;
+}
 function normalizeScope(raw) {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('claim-paths-invalid');
   return raw.map((item) => {
@@ -40,10 +59,11 @@ function inspect(cwd, runId, opts = {}) {
   let stat;
   try { stat = fs.lstatSync(codeDir); } catch { return { ok: false, eligible: false, reason: 'code-dir-missing' }; }
   if (!stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, eligible: false, reason: 'code-dir-unsafe' };
-  const status = (opts.workingStatus || vcs.workingStatus)(codeDir, { vcs: claim.vcs_baseline && claim.vcs_baseline.vcs });
+  const statusReader = opts.workingStatus || vcs.workingStatus;
+  const status = statusReader(codeDir, { vcs: claim.vcs_baseline && claim.vcs_baseline.vcs });
   if (!status.ok) return { ok: false, eligible: false, reason: `vcs-status-failed:${status.error}` };
   const dirty = status.entries.filter((entry) => inScope(entry.path.replace(/\\/g, '/'), scope));
-  return { ok: true, eligible: true, run_id: runId, record, claim, code_dir: codeDir, scope, dirty };
+  return { ok: true, eligible: true, run_id: runId, record, claim, code_dir: codeDir, scope, dirty, status_reader: statusReader };
 }
 
 function appendEvent(cwd, event) {
@@ -61,8 +81,7 @@ function createBundle(cwd, preview, now) {
     for (let i = 0; i < preview.dirty.length; i++) {
       const dirty = preview.dirty[i];
       const rel = dirty.path.replace(/\\/g, '/');
-      const abs = path.resolve(preview.code_dir, rel);
-      if (!inside(preview.code_dir, abs)) throw new Error('dirty-path-escape');
+      const abs = assertSafePath(preview.code_dir, path.resolve(preview.code_dir, rel), 'dirty');
       let present = false; let hash = null; let payload = null;
       if (fs.existsSync(abs)) {
         const st = fs.lstatSync(abs);
@@ -91,6 +110,28 @@ function createBundle(cwd, preview, now) {
   }
 }
 
+function verifyDirtyUnchanged(preview, bundle) {
+  const current = preview.status_reader(preview.code_dir, { vcs: preview.claim.vcs_baseline && preview.claim.vcs_baseline.vcs });
+  if (!current.ok) throw new Error(`vcs-status-failed:${current.error}`);
+  const dirty = current.entries.filter((entry) => inScope(entry.path.replace(/\\/g, '/'), preview.scope));
+  const expected = bundle ? bundle.manifest.entries : [];
+  const key = (entry) => `${entry.path}\0${entry.kind}`;
+  if (dirty.length !== expected.length || dirty.map(key).sort().join('\n') !== expected.map(key).sort().join('\n')) {
+    throw new Error('dirty-scope-drift');
+  }
+  const byPath = new Map(expected.map((entry) => [entry.path, entry]));
+  for (const entry of dirty) {
+    const rel = entry.path.replace(/\\/g, '/'); const saved = byPath.get(rel);
+    const abs = assertSafePath(preview.code_dir, path.resolve(preview.code_dir, rel), 'dirty');
+    const present = fs.existsSync(abs);
+    if (present !== saved.present) throw new Error('dirty-scope-drift');
+    if (present) {
+      const stat = fs.lstatSync(abs);
+      if (!stat.isFile() || stat.isSymbolicLink() || sha256(fs.readFileSync(abs)) !== saved.sha256) throw new Error('dirty-scope-drift');
+    }
+  }
+}
+
 function apply(cwd, runId, opts = {}) {
   if (opts.confirmOwnerStopped !== true) return { ok: false, applied: false, reason: 'owner-stop-attestation-required' };
   const preview = inspect(cwd, runId, opts);
@@ -105,6 +146,7 @@ function apply(cwd, runId, opts = {}) {
     if (preview.dirty.length) bundle = createBundle(cwd, preview, now);
     const evidence = { intent: 'operator-confirmed-owner-stopped', dirty_paths: preview.dirty.map((e) => e.path), bundle: bundle ? path.relative(cwd, bundle.root).replace(/\\/g, '/') : null, manifest_sha256: bundle && bundle.manifest_sha256 };
     if (bundle) appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-bundle-verified', run_id: runId, evidence });
+    verifyDirtyUnchanged(preview, bundle);
     const transition = (opts.recoverClaim || recoverClaim)(cwd, runId, preview.record, { at: now, mechanism: 'manual', evidence });
     if (!transition.ok) return { ok: false, applied: false, reason: transition.reason, bundle: evidence.bundle };
     let event_warning = null;
@@ -136,8 +178,7 @@ function restore(cwd, runId, opts = {}) {
   try {
     for (const entry of manifest.entries) {
       if (typeof entry.path !== 'string' || path.isAbsolute(entry.path) || entry.path.startsWith('../')) throw new Error('manifest-path-escape');
-      const target = path.resolve(manifest.code_dir, entry.path);
-      if (!inside(manifest.code_dir, target)) throw new Error('manifest-path-escape');
+      const target = assertSafePath(manifest.code_dir, path.resolve(manifest.code_dir, entry.path), 'manifest');
       if (!entry.present) { actions.push({ path: entry.path, action: 'absence-recorded' }); continue; }
       const payloadPath = path.resolve(root, entry.payload || '');
       if (!inside(path.join(root, 'payload'), payloadPath)) throw new Error('payload-path-escape');
@@ -153,12 +194,23 @@ function restore(cwd, runId, opts = {}) {
     const result = { ok: conflicts.length === 0, restored: false, apply_required: opts.apply !== true, actions: actions.map(({ path: p, action }) => ({ path: p, action })), conflicts: conflicts.map((c) => c.path) };
     if (opts.apply !== true) return result;
     for (const action of actions) if (action.action === 'restore') {
-      fs.mkdirSync(path.dirname(action.target), { recursive: true }); fs.writeFileSync(action.target, action.bytes);
+      assertSafePath(manifest.code_dir, action.target, 'restore');
+      fs.mkdirSync(path.dirname(action.target), { recursive: true });
+      assertSafePath(manifest.code_dir, action.target, 'restore');
+      fs.writeFileSync(action.target, action.bytes);
     }
     for (const conflict of conflicts) {
       const out = path.resolve(root, 'conflicts', conflict.path);
-      if (!inside(path.join(root, 'conflicts'), out)) throw new Error('conflict-path-escape');
-      fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, conflict.bytes);
+      const conflictRoot = path.join(root, 'conflicts');
+      assertSafePath(root, out, 'conflict');
+      if (fs.existsSync(out)) {
+        const stat = fs.lstatSync(out);
+        if (!stat.isFile() || stat.isSymbolicLink() || sha256(fs.readFileSync(out)) !== sha256(conflict.bytes)) throw new Error(`conflict-existing-divergent:${conflict.path}`);
+        continue;
+      }
+      fs.mkdirSync(path.dirname(out), { recursive: true });
+      assertSafePath(conflictRoot, out, 'conflict');
+      fs.writeFileSync(out, conflict.bytes);
     }
     result.restored = true; result.apply_required = false;
     try { appendEvent(cwd, { ts: new Date().toISOString(), event: 'claim-recovery-restore', run_id: runId, conflicts: result.conflicts }); }
@@ -167,4 +219,4 @@ function restore(cwd, runId, opts = {}) {
   } catch (error) { return { ok: false, restored: false, reason: error.message }; }
 }
 
-module.exports = { inspect, apply, restore, createBundle, normalizeScope, inScope, sha256 };
+module.exports = { inspect, apply, restore, createBundle, verifyDirtyUnchanged, assertSafePath, normalizeScope, inScope, sha256 };

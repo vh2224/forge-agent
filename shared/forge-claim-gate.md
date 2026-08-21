@@ -656,8 +656,9 @@ never defaulted to proceed.
 Um claim live nunca é liberado por inferência de PID, sessão ou idade. Quando a run aparece no censo
 `forge-claim-stuck`, o operador pode usar `forge-doctor --recover-claim <id>` para preview. A mutação
 exige simultaneamente `--apply --confirm-owner-stopped`. O fluxo mede apenas paths dirty dentro do
-escopo declarado usando `forge-vcs.workingStatus`; para escopo dirty, persiste, reabre e verifica um
-bundle byte-preserving antes do evento de intenção. A transição final é CAS, sob o lock da run, para
+escopo declarado usando `forge-vcs.workingStatus`; para escopo dirty, registra primeiro o evento de
+intenção, persiste, reabre e verifica um bundle byte-preserving, registra `bundle-verified` e mede o
+dirty scope novamente. A transição final é CAS, sob o lock da run, para
 `released.mechanism: manual` e `active:false`.
 
 O restore do bundle também é preview-first e idempotente. Um destino ausente recebe os bytes

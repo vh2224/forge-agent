@@ -39,7 +39,7 @@ Somente depois de confirmar externamente que o proprietário parou, aplique com 
 node scripts/forge-doctor.js --recover-claim "<run-id>" --apply --confirm-owner-stopped --cwd "<workspace>"
 ```
 
-O comando só aceita uma run presente no censo `claim-stuck`. Ele não infere morte por PID, sessão ou idade. Em escopo dirty, cria e verifica um bundle byte-preserving antes de registrar a intenção e fazer a transição CAS para `released/manual` e `active:false`.
+O comando só aceita uma run presente no censo `claim-stuck`. Ele não infere morte por PID, sessão ou idade. A ordem é explícita: registra a intenção antes de qualquer mutação, cria e reabre o bundle byte-preserving, registra `bundle-verified`, mede novamente todo o dirty scope e só então tenta a transição CAS para `released/manual` e `active:false`.
 
 Restauração também começa por preview. O apply nunca sobrescreve bytes divergentes; esses payloads são extraídos na área `conflicts` do bundle:
 
