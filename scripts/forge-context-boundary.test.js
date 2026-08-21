@@ -80,7 +80,8 @@ try {
     const source = fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
     assert(source.includes('--action peek'), `${relative} must retrieve durable pending context`);
     assert(source.includes('--action ack'), `${relative} must acknowledge only after handoff`);
-    assert(source.includes('PENDING_CONTEXT_FILE'), `${relative} must splice pending context into the Agent prompt`);
+    assert(source.includes('PENDING_CONTEXT_FILE'), `${relative} must carry the durable pending path`);
+    assert(source.includes('--pending-context-file'), `${relative} must splice pending context into the rendered prompt artifact`);
     assert(source.includes('--run'), `${relative} must scope pending context by run`);
     assert(source.includes('--task'), `${relative} must scope pending context by task`);
     if (relative !== 'skills/forge-task/SKILL.md') {

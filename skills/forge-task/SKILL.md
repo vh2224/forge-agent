@@ -1157,11 +1157,12 @@ PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type execute-loos
   --isolation-mode "$ISOLATION_MODE" --branch "$BRANCH" --code-dir "$CODE_DIR" \
   --memory-query "$TASK_DESCRIPTION" --memory-max-tokens "${PREFS[token_budget][auto_memory]:-1200}" \
   --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}" \
-  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}") || { echo 'prompt render failed'; stop; }
+  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}" \
+  --pending-context-file "$PENDING_CONTEXT_FILE") || { echo 'prompt render failed'; stop; }
 PROMPT_PATH=$(node -pe 'JSON.parse(process.argv[1]).prompt_path' "$PROMPT_META")
 PROMPT_ID=$(node -pe 'JSON.parse(process.argv[1]).prompt_id' "$PROMPT_META")
 ```
-Dispatch `forge-executor` (sonnet) with only: `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly. When {PENDING_CONTEXT_FILE} is non-empty, also read that durable JSON file and apply its additional_context at this safe boundary,
+Dispatch `forge-executor` (sonnet) with only: `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly,
 and return its required GSD worker result block. The file is trusted
 orchestrator input; do not replace it with a summary.` Persist `prompt_id`/`dispatch_id` in the Claude dispatch event and clean the artifact with `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` once its result is durable. The old inline prompt below is compatibility reference only. When `ISOLATION_MODE != shared`, include the isolation header lines (omit them entirely in `shared` mode):
 

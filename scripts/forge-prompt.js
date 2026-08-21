@@ -533,6 +533,20 @@ function applyIsolationHeader(prompt, options) {
   return prompt.slice(0, insertAt) + header + prompt.slice(insertAt);
 }
 
+function appendPendingContext(prompt, options) {
+  if (!options.pendingContextFile) return prompt;
+  const expectedRoot = path.join(options.cwd, '.gsd', 'forge', 'context', 'pending');
+  const target = path.resolve(options.pendingContextFile);
+  if (!isWithin(expectedRoot, target)) throw new Error(`pending_context_file must stay inside ${expectedRoot}`);
+  const safeTarget = resolveRegularFileWithin(expectedRoot, target, 'pending_context_file', MAX_DATA_BYTES);
+  const record = JSON.parse(fs.readFileSync(safeTarget, 'utf8'));
+  if (!record || typeof record.additional_context !== 'string' || !record.additional_context.trim()) {
+    throw new Error('pending_context_file has no additional_context');
+  }
+  const context = validateText(record.additional_context, 'pending_context', 32 * 1024);
+  return `${prompt.replace(/\s+$/, '')}\n\n## Pending Context Boundary\n\n${context}\n`;
+}
+
 function resolveRoutingDomains(cwd) {
   let list = [];
   try {
@@ -638,7 +652,7 @@ function renderPrompt(rawOptions) {
   const template = resolveTemplate(options.unitType, options);
   const values = buildValues(options, template.content);
   const basePrompt = renderTemplate(template.content, values, template.path);
-  const prompt = applyIsolationHeader(basePrompt, options);
+  const prompt = appendPendingContext(applyIsolationHeader(basePrompt, options), options);
   const templateSha256 = crypto.createHash('sha256').update(template.content).digest('hex');
   return {
     prompt,
@@ -753,7 +767,7 @@ function parseArgs(argv) {
     'memory-query-file', 'memory-limit', 'memory-max-tokens', 'standards-max-tokens',
     'ledger', 'ledger-max-tokens',
     'isolation-mode', 'branch', 'code-dir', 'vars-json', 'cleanup',
-    'routing-domains', 'workspace-repos',
+    'routing-domains', 'workspace-repos', 'pending-context-file',
   ]);
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
@@ -825,6 +839,7 @@ function cliOptions(args) {
     ledgerMaxTokens: args['ledger-max-tokens'] || base.ledgerMaxTokens || base.ledger_max_tokens,
     routingDomains: args['routing-domains'] || base.routingDomains || base.routing_domains,
     workspaceRepos: args['workspace-repos'] || base.workspaceRepos || base.workspace_repos,
+    pendingContextFile: args['pending-context-file'] || base.pendingContextFile || base.pending_context_file,
   };
   if (args['must-haves-file']) options.mustHavesCheckResults = readFileWithinCwd(cwd, args['must-haves-file'], 'must-haves');
   if (args['memories-file']) options.memories = readFileWithinCwd(cwd, args['memories-file'], 'memories');
@@ -870,6 +885,7 @@ Core options:
   --ledger-max-tokens N  Ledger snapshot budget (default: 1500)
   --routing-domains TEXT Test/deterministic routing-domains override
   --workspace-repos TEXT  Test/deterministic workspace-repos override
+  --pending-context-file P Append a validated durable sidecar boundary inside the prompt artifact
   --stdin-json           Read all options as JSON from stdin
   --print-prompt         Print the rendered body instead of result metadata
   --cleanup ID           Safely remove exactly one rendered prompt artifact

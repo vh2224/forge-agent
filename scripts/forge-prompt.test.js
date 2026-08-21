@@ -645,6 +645,18 @@ test('boundStandards keeps the sum of injected sections inside the token budget'
   assert.match(roomy.CS_RULES, /see docs\/STANDARDS\.md § Code Rules\]$/);
 });
 
+test('appends pending context inside the artifact while rejecting paths outside its durable root', () => {
+  const cwd = tempWorkspace('pending-context');
+  const pendingDir = path.join(cwd, '.gsd', 'forge', 'context', 'pending');
+  fs.mkdirSync(pendingDir, { recursive: true });
+  const pendingFile = path.join(pendingDir, 'scope.json');
+  fs.writeFileSync(pendingFile, JSON.stringify({ additional_context: 'Resume after the safe boundary.' }));
+  const rendered = renderPrompt({ ...baseOptions(cwd, 'execute-task'), pendingContextFile: pendingFile });
+  assert.match(rendered.prompt, /## Pending Context Boundary\n\nResume after the safe boundary\./);
+  const outside = path.join(cwd, 'outside.json'); fs.writeFileSync(outside, JSON.stringify({ additional_context: 'no' }));
+  assert.throws(() => renderPrompt({ ...baseOptions(cwd, 'execute-task'), pendingContextFile: outside }), /must stay inside/);
+});
+
 process.on('exit', () => {
   for (const root of tempRoots) {
     try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) { /* best effort */ }

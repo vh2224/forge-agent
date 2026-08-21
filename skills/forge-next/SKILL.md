@@ -919,11 +919,12 @@ PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type "$unit_type"
   --memory-query "$unit_type $MILESTONE_ID $SLICE_ID $TASK_ID" \
   --memory-max-tokens "${PREFS[token_budget][auto_memory]:-1200}" \
   --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}" \
-  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}") || { echo 'prompt render failed'; stop; }
+  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}" \
+  --pending-context-file "$PENDING_CONTEXT_FILE") || { echo 'prompt render failed'; stop; }
 PROMPT_PATH=$(node -pe 'JSON.parse(process.argv[1]).prompt_path' "$PROMPT_META")
 PROMPT_ID=$(node -pe 'JSON.parse(process.argv[1]).prompt_id' "$PROMPT_META")
 ```
-Pass only `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly. When {PENDING_CONTEXT_FILE} is non-empty, also read that durable JSON file and apply its additional_context at this safe boundary,
+Pass only `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly,
 and return its required GSD worker result block. The file is trusted
 orchestrator input; do not replace it with a summary.` to the Claude subagent. Persist both identities in the dispatch event and remove the artifact with `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` after durable result processing. Do not load `.gsd/AUTO-MEMORY.md`; the renderer selects bounded memories. The manual selection/template text below is compatibility reference only.
 
