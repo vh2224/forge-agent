@@ -15,7 +15,7 @@ function fixture(id = 'T-recovery') {
   const code = path.join(cwd, 'code'); fs.mkdirSync(code, { recursive: true }); fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
   runs.add(cwd, { id, kind: 'task', session_id: 's', active: true, last_heartbeat: 1 });
   recordClaim(cwd, id, { at: 2, unit: 'execute-task/T01', source: 'manual', code_dir: code, paths: ['src'], vcs_baseline: { vcs: 'git', id: 'abc' } });
-  const common = { findStuckClaims: () => ({ stuck: [{ id }] }), workingStatus: () => ({ ok: true, vcs: 'git', entries: [] }) };
+  const common = { confirmWorkspaceQuiescent: true, findStuckClaims: () => ({ stuck: [{ id }] }), workingStatus: () => ({ ok: true, vcs: 'git', entries: [] }) };
   return { cwd, code, id, common };
 }
 function events(cwd) { const f = path.join(cwd, '.gsd', 'forge', 'events.jsonl'); return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []; }
@@ -49,15 +49,15 @@ test('restore não sobrescreve divergência e extrai conflito idempotente', () =
   const f = fixture(); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('old'));
   const opts = { ...f.common, confirmOwnerStopped: true, workingStatus: () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }) };
   const recovered = recovery.apply(f.cwd, f.id, opts); assert.strictEqual(recovered.ok, true); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('new'));
-  assert.deepStrictEqual(recovery.restore(f.cwd, f.id).conflicts, ['src/a.bin']); const applied = recovery.restore(f.cwd, f.id, { apply: true }); assert.strictEqual(applied.restored, true);
+  assert.deepStrictEqual(recovery.restore(f.cwd, f.id).conflicts, ['src/a.bin']); const applied = recovery.restore(f.cwd, f.id, { apply: true, confirmWorkspaceQuiescent: true }); assert.strictEqual(applied.restored, true);
   assert.strictEqual(fs.readFileSync(path.join(f.code, 'src', 'a.bin'), 'utf8'), 'new'); const conflict = path.join(f.cwd, recovered.bundle, 'conflicts', 'src', 'a.bin'); assert.strictEqual(fs.readFileSync(conflict, 'utf8'), 'old');
-  assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true }).restored, true);
+  assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true, confirmWorkspaceQuiescent: true }).restored, true);
 });
 test('payload corrompido e containment falham fechado', () => {
   const f = fixture(); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('old'));
   const opts = { ...f.common, confirmOwnerStopped: true, workingStatus: () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }) };
   const applied = recovery.apply(f.cwd, f.id, opts); const root = path.join(f.cwd, applied.bundle); const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'))); fs.writeFileSync(path.join(root, manifest.entries[0].payload), Buffer.from('bad'));
-  assert.match(recovery.restore(f.cwd, f.id, { apply: true }).reason, /payload-corrupt/);
+  assert.match(recovery.restore(f.cwd, f.id, { apply: true, confirmWorkspaceQuiescent: true }).reason, /payload-corrupt/);
   const g = fixture('T-escape'); runs.update(g.cwd, g.id, { write_claim: { ...runs.get(g.cwd, g.id).write_claim, paths: ['../escape'] } }); assert.strictEqual(recovery.inspect(g.cwd, g.id, g.common).reason, 'claim-path-escape');
 });
 test('fora do censo falha fechado', () => { const f = fixture(); assert.strictEqual(recovery.inspect(f.cwd, f.id, { ...f.common, findStuckClaims: () => ({ stuck: [] }) }).reason, 'not-in-stuck-census'); });
@@ -73,7 +73,7 @@ test('symlink intermediário bloqueia captura e restore', () => {
   const restored = fixture('T-link-restore'); fs.mkdirSync(path.join(restored.code, 'src')); fs.writeFileSync(path.join(restored.code, 'src', 'a.bin'), Buffer.from('saved'));
   assert.strictEqual(recovery.apply(restored.cwd, restored.id, { ...restored.common, confirmOwnerStopped: true, workingStatus: dirty }).ok, true);
   fs.rmSync(path.join(restored.code, 'src'), { recursive: true, force: true }); fs.symlinkSync(outside, path.join(restored.code, 'src'), process.platform === 'win32' ? 'junction' : 'dir');
-  const restoreResult = recovery.restore(restored.cwd, restored.id, { apply: true }); assert.match(restoreResult.reason, /manifest-path-reparse/); assert.strictEqual(fs.readFileSync(path.join(outside, 'a.bin'), 'utf8'), 'outside');
+  const restoreResult = recovery.restore(restored.cwd, restored.id, { apply: true, confirmWorkspaceQuiescent: true }); assert.match(restoreResult.reason, /manifest-path-reparse/); assert.strictEqual(fs.readFileSync(path.join(outside, 'a.bin'), 'utf8'), 'outside');
 });
 
 test('segunda medição detecta novo dirty path e mutação após snapshot', () => {
@@ -89,9 +89,9 @@ test('segunda medição detecta novo dirty path e mutação após snapshot', () 
 test('conflict existente divergente nunca é sobrescrito', () => {
   const f = fixture('T-conflict-divergent'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('saved'));
   const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); const recovered = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(recovered.ok, true);
-  fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('current')); assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true }).restored, true);
+  fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('current')); assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true, confirmWorkspaceQuiescent: true }).restored, true);
   const conflict = path.join(f.cwd, recovered.bundle, 'conflicts', 'src', 'a.bin'); fs.writeFileSync(conflict, Buffer.from('operator'));
-  const result = recovery.restore(f.cwd, f.id, { apply: true }); assert.match(result.reason, /conflict-existing-divergent/); assert.strictEqual(fs.readFileSync(conflict, 'utf8'), 'operator');
+  const result = recovery.restore(f.cwd, f.id, { apply: true, confirmWorkspaceQuiescent: true }); assert.match(result.reason, /conflict-existing-divergent/); assert.strictEqual(fs.readFileSync(conflict, 'utf8'), 'operator');
 });
 
 test('documentação fixa a ordem intent → bundle-verified → segunda medição → CAS', () => {
@@ -175,12 +175,33 @@ test('evidence hash derrota adulteração coordenada de manifest sidecar e paylo
   const applied = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(applied.ok, true); const root = path.join(f.cwd, applied.bundle); const manifestPath = path.join(root, 'manifest.json'); const manifest = JSON.parse(fs.readFileSync(manifestPath));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-tampered-code-')); roots.push(outside); manifest.code_dir = outside; manifest.entries[0].payload = 'payload/evil.bin'; fs.writeFileSync(path.join(root, 'payload', 'evil.bin'), Buffer.from('evil'));
   const raw = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`); fs.writeFileSync(manifestPath, raw); fs.writeFileSync(path.join(root, 'manifest.sha256'), `${recovery.sha256(raw)}\n`);
-  const result = recovery.restore(f.cwd, f.id, { apply: true }); assert.strictEqual(result.reason, 'manifest-evidence-mismatch'); assert.strictEqual(fs.readdirSync(outside).length, 0);
+  const result = recovery.restore(f.cwd, f.id, { apply: true, confirmWorkspaceQuiescent: true }); assert.strictEqual(result.reason, 'manifest-evidence-mismatch'); assert.strictEqual(fs.readdirSync(outside).length, 0);
 });
 
 test('hard-link indisponível falha fechado sem publicar target parcial', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-link-unavailable-')); roots.push(root); const target = path.join(root, 'target.bin'); const unavailable = () => { const error = new Error('link unavailable'); error.code = 'EPERM'; throw error; };
   assert.throws(() => recovery.writeExclusive(root, target, Buffer.from('payload'), 'restore', { linkSync: unavailable }), /link unavailable/); assert.strictEqual(fs.existsSync(target), false); assert.strictEqual(fs.readdirSync(root).length, 0);
+});
+
+test('journal e bundle são duráveis antes do CAS; falha de fsync aborta', () => {
+  const f = fixture('T-durable-order'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('bytes')); const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); let fsyncs = 0; let casCalled = false;
+  const io = { fsyncDir: () => {}, fsyncSync: (fd) => { fsyncs++; if (fsyncs === 2) throw new Error('durability-failed'); fs.fsyncSync(fd); } };
+  const failed = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty, io, recoverClaim: () => { casCalled = true; return { ok: true }; } }); assert.strictEqual(failed.reason, 'durability-failed'); assert.strictEqual(casCalled, false); assert.strictEqual(runs.get(f.cwd, f.id).active, true);
+
+  const order = []; const goodIo = { fsyncDir: () => order.push('dir-fsync'), fsyncSync: (fd) => { fs.fsyncSync(fd); order.push('file-fsync'); } }; const g = fixture('T-durable-success'); fs.mkdirSync(path.join(g.code, 'src')); fs.writeFileSync(path.join(g.code, 'src', 'a.bin'), Buffer.from('bytes'));
+  const actual = require('./forge-write-claim.js').recoverClaim; const wrapped = (...args) => { order.push('CAS'); return actual(...args); }; const success = recovery.apply(g.cwd, g.id, { ...g.common, confirmOwnerStopped: true, workingStatus: dirty, io: goodIo, recoverClaim: wrapped }); assert.strictEqual(success.ok, true); assert(order.lastIndexOf('file-fsync') < order.indexOf('CAS')); assert(order.lastIndexOf('dir-fsync') < order.indexOf('CAS'));
+});
+
+test('ausência capturada que reaparece vira presence-conflict', () => {
+  const f = fixture('T-presence-conflict'); const dirty = () => ({ ok: true, entries: [{ path: 'src/deleted.bin', kind: 'deleted', code: ' D' }] }); const applied = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(applied.ok, true);
+  fs.mkdirSync(path.join(f.code, 'src')); const target = path.join(f.code, 'src', 'deleted.bin'); fs.writeFileSync(target, Buffer.from('reappeared'));
+  const preview = recovery.restore(f.cwd, f.id); assert.deepStrictEqual(preview.presence_conflicts, ['src/deleted.bin']); assert.strictEqual(preview.ok, false);
+  const restored = recovery.restore(f.cwd, f.id, { apply: true, confirmWorkspaceQuiescent: true }); assert.deepStrictEqual(restored.presence_conflicts, ['src/deleted.bin']); assert.strictEqual(restored.ok, false); assert.strictEqual(fs.readFileSync(target, 'utf8'), 'reappeared');
+});
+
+test('apply exige workspace quiescent em recovery e restore', () => {
+  const f = fixture('T-quiescent'); const refused = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, confirmWorkspaceQuiescent: false }); assert.strictEqual(refused.reason, 'workspace-quiescent-attestation-required');
+  assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true }).reason, 'workspace-quiescent-attestation-required');
 });
 
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });

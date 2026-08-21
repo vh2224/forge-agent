@@ -66,6 +66,7 @@ test('help advertises explicit claim recovery and restore surfaces', () => {
   assert.strictEqual(out.status, 0);
   assert.match(out.stdout, /--recover-claim/);
   assert.match(out.stdout, /--confirm-owner-stopped/);
+  assert.match(out.stdout, /--confirm-workspace-quiescent/);
   assert.match(out.stdout, /--restore-claim/);
 });
 

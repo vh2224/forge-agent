@@ -661,7 +661,10 @@ intenção, persiste, reabre e verifica um bundle byte-preserving, registra `bun
 dirty scope novamente. A transição final é CAS, sob o lock da run, para
 `released.mechanism: manual` e `active:false`.
 
-`--confirm-owner-stopped` é o fence explícito contra writers externos ao protocolo. A segunda
+`--confirm-owner-stopped` e `--confirm-workspace-quiescent` são fences explícitos: o segundo cobre
+troca externa concorrente dos paths. Node cross-platform não fornece `openat`/no-follow
+handle-relative; lstat, identidade e revalidação cobrem estado preexistente, não prometem
+atomicidade contra processo hostil ainda ativo. Journal e bundle são fsyncados antes do CAS. A segunda
 medição é uma precondition executada dentro do lock de `runs.updateWith`, imediatamente antes do
 patch; junto ao CAS do RunRecord completo, ela fecha a concorrência cooperativa.
 

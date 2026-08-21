@@ -37,6 +37,17 @@ function assertSafePath(root, target, label) {
   }
   return resolved;
 }
+function ancestryIdentity(root, target, label) {
+  assertSafePath(root, target, label);
+  const base = path.resolve(root); const parts = [''].concat(path.relative(base, path.resolve(target)).split(path.sep).filter(Boolean));
+  let cursor = base; const identity = [];
+  for (const part of parts) {
+    if (part) cursor = path.join(cursor, part);
+    const stat = lstatOrAbsent(cursor); if (stat === null) break;
+    identity.push(`${stat.dev}:${stat.ino}`);
+  }
+  return identity.join('/');
+}
 
 function secureDirChain(cwd, relative, create, label) {
   const base = path.resolve(cwd);
@@ -93,10 +104,35 @@ function inspect(cwd, runId, opts = {}) {
   return { ok: true, eligible: true, run_id: runId, record, claim, code_dir: codeDir, scope, dirty, status_reader: statusReader };
 }
 
-function appendEvent(cwd, event) {
+function fsyncDirectory(dir, io) {
+  const o = io || {};
+  if (typeof o.fsyncDir === 'function') return o.fsyncDir(dir);
+  let handle;
+  try { handle = fs.openSync(dir, 'r'); fs.fsyncSync(handle); }
+  catch (error) {
+    if (!error || !['EPERM', 'EACCES', 'EINVAL', 'EISDIR', 'ENOTSUP'].includes(error.code)) throw error;
+  } finally { if (handle !== undefined) fs.closeSync(handle); }
+}
+
+function durableWrite(file, bytes, io) {
+  const o = io || {}; let handle;
+  try {
+    handle = fs.openSync(file, 'wx');
+    writeAllSync(handle, bytes, o.writeSync);
+    (o.fsyncSync || fs.fsyncSync)(handle);
+  } finally { if (handle !== undefined) fs.closeSync(handle); }
+}
+
+function appendEvent(cwd, event, io) {
   const forgeRoot = secureDirChain(cwd, '.gsd/forge', true, 'event');
   const file = path.join(forgeRoot, 'events.jsonl');
-  fs.appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8');
+  const bytes = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8'); let handle;
+  try {
+    handle = fs.openSync(file, 'a');
+    writeAllSync(handle, bytes, io && io.writeSync);
+    ((io && io.fsyncSync) || fs.fsyncSync)(handle);
+  } finally { if (handle !== undefined) fs.closeSync(handle); }
+  fsyncDirectory(forgeRoot, io);
 }
 
 function attemptName(now, nonce) {
@@ -105,7 +141,7 @@ function attemptName(now, nonce) {
   return `${now}-${suffix}`;
 }
 
-function createBundle(cwd, preview, now, name) {
+function createBundle(cwd, preview, now, name, io) {
   const parent = secureDirChain(cwd, '.gsd/forge/claim-recovery', true, 'recovery');
   const runRoot = secureDirChain(parent, `${encodeURIComponent(preview.run_id)}/attempts`, true, 'recovery');
   const rootPath = path.join(runRoot, name || attemptName(now));
@@ -124,9 +160,11 @@ function createBundle(cwd, preview, now, name) {
       if (existing !== null) {
         const st = existing;
         if (!st.isFile() || st.isSymbolicLink()) throw new Error(`dirty-path-unsafe:${rel}`);
+        const ancestry = ancestryIdentity(preview.code_dir, abs, 'dirty');
         const bytes = fs.readFileSync(abs);
+        if (ancestryIdentity(preview.code_dir, abs, 'dirty') !== ancestry) throw new Error(`dirty-ancestry-drift:${rel}`);
         present = true; hash = sha256(bytes); payload = `payload/${i}.bin`;
-        fs.writeFileSync(path.join(payloadRoot, `${i}.bin`), bytes);
+        durableWrite(path.join(payloadRoot, `${i}.bin`), bytes, io);
         const check = fs.readFileSync(path.join(payloadRoot, `${i}.bin`));
         if (sha256(check) !== hash) throw new Error(`bundle-verify-failed:${rel}`);
       }
@@ -134,13 +172,14 @@ function createBundle(cwd, preview, now, name) {
     }
     const manifest = { version: 1, run_id: preview.run_id, created_at: now, code_dir: preview.code_dir, claim_identity_sha256: sha256(Buffer.from(JSON.stringify(preview.claim))), claim: preview.claim, entries };
     const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-    fs.writeFileSync(path.join(root, 'manifest.json'), bytes);
-    fs.writeFileSync(path.join(root, 'manifest.sha256'), `${sha256(bytes)}\n`, 'ascii');
+    durableWrite(path.join(root, 'manifest.json'), bytes, io);
+    durableWrite(path.join(root, 'manifest.sha256'), Buffer.from(`${sha256(bytes)}\n`, 'ascii'), io);
     const reopened = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json')));
     for (const entry of reopened.entries) if (entry.present) {
       const payload = fs.readFileSync(path.join(root, entry.payload));
       if (sha256(payload) !== entry.sha256) throw new Error(`bundle-verify-failed:${entry.path}`);
     }
+    fsyncDirectory(payloadRoot, io); fsyncDirectory(root, io); fsyncDirectory(runRoot, io);
     return { root, manifest, manifest_sha256: sha256(bytes) };
   } catch (error) {
     fs.rmSync(root, { recursive: true, force: true });
@@ -173,6 +212,7 @@ function verifyDirtyUnchanged(preview, bundle) {
 
 function apply(cwd, runId, opts = {}) {
   if (opts.confirmOwnerStopped !== true) return { ok: false, applied: false, reason: 'owner-stop-attestation-required' };
+  if (opts.confirmWorkspaceQuiescent !== true) return { ok: false, applied: false, reason: 'workspace-quiescent-attestation-required' };
   const preview = inspect(cwd, runId, opts);
   if (!preview.eligible) return { ...preview, applied: false };
   const now = typeof opts.now === 'number' ? opts.now : Date.now();
@@ -182,10 +222,10 @@ function apply(cwd, runId, opts = {}) {
     const plannedBundle = preview.dirty.length
       ? path.relative(cwd, path.join(recoveryRoot(cwd, runId), 'attempts', attempt)).replace(/\\/g, '/') : null;
     // Journal first: even creation of the recovery bundle is a mutation.
-    appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-intent', run_id: runId, evidence: { intent: 'operator-confirmed-owner-stopped', dirty_paths: preview.dirty.map((e) => e.path), bundle: plannedBundle } });
-    if (preview.dirty.length) bundle = createBundle(cwd, preview, now, attempt);
-    const evidence = { intent: 'operator-confirmed-owner-stopped', dirty_paths: preview.dirty.map((e) => e.path), bundle: bundle ? path.relative(cwd, bundle.root).replace(/\\/g, '/') : null, manifest_sha256: bundle && bundle.manifest_sha256 };
-    if (bundle) appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-bundle-verified', run_id: runId, evidence });
+    appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-intent', run_id: runId, evidence: { intent: 'operator-confirmed-owner-stopped', workspace_quiescent_attested: true, dirty_paths: preview.dirty.map((e) => e.path), bundle: plannedBundle } }, opts.io);
+    if (preview.dirty.length) bundle = createBundle(cwd, preview, now, attempt, opts.io);
+    const evidence = { intent: 'operator-confirmed-owner-stopped', workspace_quiescent_attested: true, dirty_paths: preview.dirty.map((e) => e.path), bundle: bundle ? path.relative(cwd, bundle.root).replace(/\\/g, '/') : null, manifest_sha256: bundle && bundle.manifest_sha256 };
+    if (bundle) appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-bundle-verified', run_id: runId, evidence }, opts.io);
     const transition = (opts.recoverClaim || recoverClaim)(cwd, runId, preview.record,
       { at: now, mechanism: 'manual', evidence }, { precondition: () => verifyDirtyUnchanged(preview, bundle) });
     if (!transition.ok) return { ok: false, applied: false, reason: transition.reason, bundle: evidence.bundle };
@@ -242,6 +282,7 @@ function writeExclusive(root, target, bytes, label, opts) {
   secureDirChain(root, parentRel, true, label);
   assertSafePath(root, path.dirname(target), label);
   const parent = path.dirname(target);
+  const parentIdentity = ancestryIdentity(root, parent, label);
   const staging = path.join(parent, `.forge-recovery-${crypto.randomBytes(16).toString('hex')}.tmp`);
   let handle; let stagingIdentity = null; let originalError = null;
   try {
@@ -250,6 +291,7 @@ function writeExclusive(root, target, bytes, label, opts) {
     writeAllSync(handle, bytes, o.writeSync);
     (o.fsyncSync || fs.fsyncSync)(handle);
     fs.closeSync(handle); handle = undefined;
+    if (ancestryIdentity(root, parent, label) !== parentIdentity) throw new Error(`${label}-ancestry-drift`);
     try {
       (o.linkSync || fs.linkSync)(staging, target);
       return { written: true };
@@ -275,6 +317,7 @@ function writeExclusive(root, target, bytes, label, opts) {
 }
 
 function restore(cwd, runId, opts = {}) {
+  if (opts.apply === true && opts.confirmWorkspaceQuiescent !== true) return { ok: false, restored: false, reason: 'workspace-quiescent-attestation-required' };
   let loaded;
   try { loaded = loadManifest(cwd, runId); } catch (error) { return { ok: false, restored: false, reason: error.message }; }
   const { root, manifest } = loaded;
@@ -284,7 +327,11 @@ function restore(cwd, runId, opts = {}) {
     for (const entry of manifest.entries) {
       if (typeof entry.path !== 'string' || path.isAbsolute(entry.path) || entry.path.startsWith('../')) throw new Error('manifest-path-escape');
       const target = assertSafePath(manifest.code_dir, path.resolve(manifest.code_dir, entry.path), 'manifest');
-      if (!entry.present) { actions.push({ path: entry.path, action: 'absence-recorded' }); continue; }
+      if (!entry.present) {
+        if (lstatOrAbsent(target) !== null) conflicts.push({ path: entry.path, presence: true });
+        else actions.push({ path: entry.path, action: 'absence-confirmed' });
+        continue;
+      }
       const payloadPath = path.resolve(root, entry.payload || '');
       if (!inside(path.join(root, 'payload'), payloadPath)) throw new Error('payload-path-escape');
       const bytes = fs.readFileSync(payloadPath);
@@ -296,13 +343,13 @@ function restore(cwd, runId, opts = {}) {
         else actions.push({ path: entry.path, action: 'already-restored' });
       }
     }
-    const result = { ok: conflicts.length === 0, restored: false, apply_required: opts.apply !== true, actions: actions.map(({ path: p, action }) => ({ path: p, action })), conflicts: conflicts.map((c) => c.path) };
+    const result = { ok: conflicts.length === 0, restored: false, apply_required: opts.apply !== true, actions: actions.map(({ path: p, action }) => ({ path: p, action })), conflicts: conflicts.map((c) => c.path), presence_conflicts: conflicts.filter(c => c.presence).map(c => c.path) };
     if (opts.apply !== true) return result;
     for (const action of actions) if (action.action === 'restore') {
       assertSafePath(manifest.code_dir, path.dirname(action.target), 'restore');
       writeExclusive(manifest.code_dir, action.target, action.bytes, 'restore');
     }
-    for (const conflict of conflicts) {
+    for (const conflict of conflicts.filter(c => !c.presence)) {
       const out = path.resolve(root, 'conflicts', conflict.path);
       const conflictRoot = path.join(root, 'conflicts');
       assertSafePath(root, out, 'conflict');
@@ -322,4 +369,4 @@ function restore(cwd, runId, opts = {}) {
   } catch (error) { return { ok: false, restored: false, reason: error.message }; }
 }
 
-module.exports = { inspect, apply, restore, createBundle, verifyDirtyUnchanged, assertSafePath, secureDirChain, writeAllSync, writeExclusive, normalizeScope, inScope, sha256 };
+module.exports = { inspect, apply, restore, createBundle, verifyDirtyUnchanged, assertSafePath, ancestryIdentity, secureDirChain, writeAllSync, durableWrite, appendEvent, writeExclusive, normalizeScope, inScope, sha256 };

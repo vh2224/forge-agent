@@ -29,10 +29,10 @@ Hooks sem confiança explícita são somente diagnóstico. Não altere trust, cr
 
 ### Claim travado
 
-Use `--recover-claim <run-id>` sem `--apply` para preview. Aplique somente quando o operador atestar que o proprietário parou, encaminhando literalmente `--apply --confirm-owner-stopped`. Nunca deduza morte por PID, sessão ou heartbeat.
+Use `--recover-claim <run-id>` sem `--apply` para preview. Aplique somente com as duas atestações literais: `--apply --confirm-owner-stopped --confirm-workspace-quiescent`. Nunca deduza morte por PID, sessão ou heartbeat.
 
 Para workspace dirty, a ordem obrigatória é `intent → bundle reaberto/verificado → segunda medição do dirty scope → CAS`. `--restore-claim <run-id>` é preview; o `--apply` restaura paths ausentes e extrai conflitos sem sobrescrever bytes divergentes.
 
-A confirmação humana é o fence contra writer externo. A segunda medição é precondition dentro do lock, imediatamente antes do CAS do RunRecord, e protege a concorrência que coopera com o Forge.
+A atestação de workspace quiescente é o fence contra troca externa de paths. Node não fornece `openat`/no-follow portável: lstat e revalidação cobrem estado preexistente, não um processo hostil ativo. A segunda medição é precondition dentro do lock, imediatamente antes do CAS do RunRecord, e protege a concorrência que coopera com o Forge. Restore apply também exige `--confirm-workspace-quiescent`.
 
 Sem flags, não escreva. Com `--fix --dry-run`, descreva somente reparos reversíveis. Com `--fix`, encaminhe ao script e aplique apenas reparos que ele declara; backup/migração precedem qualquer escrita. Nunca acesse o home do runtime não selecionado.
