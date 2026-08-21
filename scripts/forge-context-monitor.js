@@ -39,12 +39,53 @@ const { readPrefsCached } = require('./forge-prefs.js');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const DEFAULT_THRESHOLDS = { warning: 0.35, critical: 0.25 };
+const DEFAULT_THRESHOLDS = Object.freeze({ checkpoint: 0.40, warning: 0.35, critical: 0.25 });
 const DEBOUNCE_TOOLUSES = 5;
 const STALE_MS = 60_000;
+const BRIDGE_VERSION = 2;
+const HOST_SOURCES = Object.freeze({ claude: 'claude-statusline', codex: 'codex-app-server' });
+let configuredDebounceToolUses = DEBOUNCE_TOOLUSES;
 
 // Severity ranking (higher index = more severe)
-const SEVERITY_RANK = { none: 0, warning: 1, critical: 2 };
+const SEVERITY_RANK = { none: 0, checkpoint: 1, warning: 2, critical: 3 };
+
+function normalizePercentage(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) return null;
+  return value / 100;
+}
+
+function createContextSnapshot(input, now) {
+  const source = input && typeof input.source === 'string' ? input.source : 'unknown';
+  const requestedHost = input && input.host_runtime;
+  const hostRuntime = requestedHost === 'claude' || requestedHost === 'codex' ? requestedHost : 'unknown';
+  const recognizedContract = hostRuntime !== 'unknown' && source === HOST_SOURCES[hostRuntime];
+  const sessionId = input && typeof input.session_id === 'string' ? input.session_id : null;
+  const timestamp = Number.isFinite(now) ? now : Date.now();
+  const capability = recognizedContract && input && input.capability === true;
+  const used = capability ? normalizePercentage(input.used_percentage) : null;
+  const snapshot = {
+    version: BRIDGE_VERSION, host_runtime: hostRuntime,
+    source, capability, session_id: sessionId,
+    timestamp, epoch: input && input.epoch != null ? String(input.epoch) : '0',
+    measurement: used === null ? 'unknown' : 'measured',
+  };
+  if (used !== null) {
+    snapshot.used_percentage = used;
+    snapshot.remaining_percentage = 1 - used;
+  }
+  if (input && input.compaction_measurement === 'known' && Number.isInteger(input.compaction_count) && input.compaction_count >= 0) {
+    snapshot.compaction_measurement = 'known';
+    snapshot.compaction_count = input.compaction_count;
+  } else snapshot.compaction_measurement = 'unknown';
+  return snapshot;
+}
+
+function usableSnapshot(snapshot, now, maxAgeMs) {
+  return !!snapshot && snapshot.version === BRIDGE_VERSION && snapshot.measurement === 'measured'
+    && snapshot.capability === true && HOST_SOURCES[snapshot.host_runtime] === snapshot.source
+    && !isStale(snapshot.timestamp, now, maxAgeMs)
+    && Number.isFinite(snapshot.remaining_percentage);
+}
 
 // ── Pure functions ─────────────────────────────────────────────────────────────
 
@@ -61,6 +102,7 @@ function severityFor(pctRemaining, thresholds) {
   // Critical must be tested BEFORE warning (critical < warning threshold).
   if (pctRemaining <= t.critical) return 'critical';
   if (pctRemaining <= t.warning) return 'warning';
+  if (pctRemaining <= t.checkpoint) return 'checkpoint';
   return 'none';
 }
 
@@ -89,7 +131,7 @@ function isStale(ts, now, maxAgeMs) {
  * @param {{ lastSeverity?: string, toolUsesSinceLast?: number }|null} debounceState
  * @returns {{ inject: boolean, nextState: { lastSeverity: string, toolUsesSinceLast: number } }}
  */
-function shouldInject(severity, debounceState) {
+function shouldInject(severity, debounceState, debounceToolUses) {
   const state = debounceState || {};
   const lastSeverity = state.lastSeverity || 'none';
   const toolUsesSinceLast = typeof state.toolUsesSinceLast === 'number'
@@ -116,7 +158,9 @@ function shouldInject(severity, debounceState) {
   }
 
   // Same or lower severity: respect debounce window
-  if (toolUsesSinceLast >= DEBOUNCE_TOOLUSES) {
+  const window = Number.isInteger(debounceToolUses) && debounceToolUses >= 0
+    ? debounceToolUses : configuredDebounceToolUses;
+  if (toolUsesSinceLast >= window) {
     return {
       inject: true,
       nextState: { lastSeverity: severity, toolUsesSinceLast: 0 },
@@ -140,6 +184,11 @@ function shouldInject(severity, debounceState) {
  */
 function buildAdditionalContext(severity, thresholds) {
   const t = thresholds || DEFAULT_THRESHOLDS;
+  if (severity === 'checkpoint') {
+    const pct = Math.round(t.checkpoint * 100);
+    return `[FORGE CONTEXT MONITOR — CHECKPOINT] Contexto medido abaixo de ${pct}% restante. `
+      + 'Conclua a unidade atual e crie ou atualize o checkpoint no próximo boundary seguro; não pause a run.';
+  }
   if (severity === 'warning') {
     const pct = Math.round(t.warning * 100);
     return `[FORGE CONTEXT MONITOR — WARNING] Contexto do agente está abaixo de ${pct}% restante. `
@@ -171,14 +220,20 @@ function buildAdditionalContext(severity, thresholds) {
  */
 function readContextMonitorPrefs(cwd) {
   let enabled = true;
+  let alertsEnabled = true;
+  let debounceToolUses = DEBOUNCE_TOOLUSES;
+  let checkpoint = DEFAULT_THRESHOLDS.checkpoint;
   let warning = DEFAULT_THRESHOLDS.warning;
   let critical = DEFAULT_THRESHOLDS.critical;
   const monitor = readPrefsCached(cwd).prefs.context_monitor;
   if (!monitor || typeof monitor !== 'object' || Array.isArray(monitor)) {
-    return { enabled, thresholds: { warning, critical } };
+    configuredDebounceToolUses = debounceToolUses;
+    return { enabled, alertsEnabled, debounceToolUses, thresholds: { checkpoint, warning, critical } };
   }
 
   if (typeof monitor.enabled === 'boolean') enabled = monitor.enabled;
+  if (typeof monitor.alerts_enabled === 'boolean') alertsEnabled = monitor.alerts_enabled;
+  if (Number.isInteger(monitor.debounce_tool_uses) && monitor.debounce_tool_uses >= 0) debounceToolUses = monitor.debounce_tool_uses;
   const normalize = (value, fallback) => {
     let n = value;
     // Tolerate numeric-string-with-suffix (e.g. "85%", "85abc") — parse the
@@ -187,12 +242,28 @@ function readContextMonitorPrefs(cwd) {
       n = parseFloat(n);
     }
     if (typeof n !== 'number' || !Number.isFinite(n)) return fallback;
-    return n > 1 ? n / 100 : n;
+    n = n > 1 ? n / 100 : n;
+    return n >= 0 && n <= 1 ? n : NaN;
   };
+  const checkpointExplicit = Object.prototype.hasOwnProperty.call(monitor, 'checkpoint_threshold');
+  checkpoint = normalize(monitor.checkpoint_threshold, checkpoint);
   warning = normalize(monitor.warning_threshold, warning);
   critical = normalize(monitor.critical_threshold, critical);
-
-  return { enabled, thresholds: { warning, critical } };
+  // Backward-compatible cutover: warning/critical predate checkpoint_threshold.
+  // A legacy layer may validly set warning to the old 40% boundary while omitting
+  // the new key; complete only that absent field so the resolved block remains
+  // ordered. Once checkpoint_threshold is explicitly present, never repair the
+  // relation — an invalid explicit/partial override must reject atomically below.
+  if (!checkpointExplicit && Number.isFinite(warning) && checkpoint <= warning && warning < 1) {
+    checkpoint = Math.min(1, warning + 0.05);
+  }
+  if (![checkpoint, warning, critical].every(Number.isFinite) || !(checkpoint > warning && warning > critical)) {
+    const error = new Error('context_monitor thresholds must be finite, in 0..1, and checkpoint > warning > critical');
+    error.code = 'FORGE_PREFS_INVALID_CONTEXT_MONITOR';
+    throw error;
+  }
+  configuredDebounceToolUses = debounceToolUses;
+  return { enabled: enabled && alertsEnabled, alertsEnabled, debounceToolUses, thresholds: { checkpoint, warning, critical } };
 }
 
 // ── Module exports ─────────────────────────────────────────────────────────────
@@ -201,6 +272,10 @@ module.exports = {
   DEFAULT_THRESHOLDS,
   DEBOUNCE_TOOLUSES,
   STALE_MS,
+  BRIDGE_VERSION,
+  HOST_SOURCES,
+  createContextSnapshot,
+  usableSnapshot,
   severityFor,
   isStale,
   shouldInject,

@@ -42,7 +42,7 @@
  *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--engine codex|agy] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
  *   node scripts/forge-xllm.js --mode defend --input <objections> [--diff-cmd "git diff"] [--engine codex|agy] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
  *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--engine codex|agy] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
+ *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> --context-root <WORKING_DIR> [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
  *   node scripts/forge-xllm.js --mode plan --plan-context <file> --result-file <path> --cwd <repo> [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
  *
  * Exit contract: 0 on success. For challenge/defend/rebuttal the normalized JSON goes to stdout
@@ -1042,6 +1042,16 @@ function invokeCodexAppServer(opts) {
     onSpawn,
   }).then((session) => {
     stopHeartbeat();
+    let contextHealth = null;
+    let contextBoundary = null;
+    if (opts.contextRoot) {
+      try {
+        const { observeSession, consumeBoundary } = require('./forge-context-codex');
+        contextHealth = observeSession({ cwd: opts.contextRoot, threadStartResult: session.threadStartResult,
+          notifications: session.contextNotifications || [] });
+        if (contextHealth) contextBoundary = consumeBoundary({ cwd: opts.contextRoot, snapshot: contextHealth });
+      } catch { /* context health is best-effort and never controls the turn */ }
+    }
     // The client preserves item/completed params verbatim; the pinned protocol
     // carries the ThreadItem at params.item. Accept a direct item as well so this
     // adapter remains compatible with an already-normalized client surface.
@@ -1065,6 +1075,8 @@ function invokeCodexAppServer(opts) {
       // measured mock × real-server divergence (serverInfo vs userAgent) cannot make a
       // live app-server session report as `unknown`.
       transport: deriveTransport(session),
+      contextHealth,
+      contextBoundary,
       diagnostics: {
         discarded: session.discarded || { count: 0, kinds: {} },
         inbound_requests: (session.inboundRequests || []).length,
@@ -1884,6 +1896,15 @@ async function runExecute(opts) {
   // real parent and rejects symlink/junction tricks, including case-folded Windows
   // paths that lexically appear outside the workspace.
   const resultFile = validateResultFileTarget(opts.resultFile, cwd);
+  let contextRoot = null;
+  if (opts.contextRoot) {
+    const requested = path.resolve(opts.contextRoot);
+    let stat;
+    try { stat = fs.statSync(requested); } catch (error) { throw new Error(`context-root is not readable: ${error.message}`); }
+    if (!stat.isDirectory()) throw new Error('context-root must be a directory');
+    contextRoot = fs.realpathSync(requested);
+    if (!fs.existsSync(path.join(contextRoot, '.gsd'))) throw new Error('context-root must contain .gsd');
+  }
 
   let planText;
   try {
@@ -1995,6 +2016,7 @@ async function runExecute(opts) {
     // orchestrator (T03) owns the file name of the evidence log.
     evidenceUnit: dispatchId,
     writableRoots,
+    contextRoot,
   });
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   const outputTokens = countTokens(rawContent);
@@ -2108,6 +2130,8 @@ async function runExecute(opts) {
       // level breaks the additive-safety invariant, not just a test.
       transport: appServerTransport.kind,
       transport_version: appServerTransport.version,
+      context_health: appServerOutput.contextHealth || { measurement: 'unknown', compaction_measurement: 'unknown', scope: 'sidecar-thread' },
+      context_boundary: appServerOutput.contextBoundary || { indicator: 'ctx ?', severity: 'none', additionalContext: '', checkpoint: false },
     },
     // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
     // no existing key changes name or shape, and validateExecuteResult does NOT
@@ -2377,7 +2401,7 @@ if (require.main === module) {
   const mode = args.mode;
 
   if (mode !== 'challenge' && mode !== 'defend' && mode !== 'rebuttal' && mode !== 'execute' && mode !== 'plan') {
-    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit] [--cwd <dir>]\n');
+    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--context-root <WORKING_DIR>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit] [--cwd <dir>]\n');
     process.exit(2);
   }
 
@@ -2460,7 +2484,7 @@ if (require.main === module) {
       catch (error) { process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
     }
 
-    runExecute({ planFile: args.plan, resultFile, cwd, model, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
+    runExecute({ planFile: args.plan, resultFile, cwd, contextRoot: args['context-root'], model, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         let safeResultFile = null;

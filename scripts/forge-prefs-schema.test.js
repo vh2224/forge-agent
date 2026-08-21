@@ -175,6 +175,9 @@ const INVENTORY = [
   { key: 'symbol_check.mode', type: 'string', default: 'advisory', source: 'scripts/forge-symbol-check.js + skills dispatch guard (advisory default)' },
   // — context_monitor —
   { key: 'context_monitor.enabled', type: 'boolean', default: true, source: 'scripts/forge-context-monitor.js readContextMonitorPrefs (let enabled = true)' },
+  { key: 'context_monitor.alerts_enabled', type: 'boolean', default: true, source: 'scripts/forge-context-monitor.js readContextMonitorPrefs (let alertsEnabled = true)' },
+  { key: 'context_monitor.debounce_tool_uses', type: 'integer', default: 5, source: 'scripts/forge-context-monitor.js DEBOUNCE_TOOLUSES' },
+  { key: 'context_monitor.checkpoint_threshold', type: 'number', default: 0.4, source: 'scripts/forge-context-monitor.js DEFAULT_THRESHOLDS.checkpoint' },
   { key: 'context_monitor.warning_threshold', type: 'number', default: 0.35, source: 'scripts/forge-context-monitor.js:44 DEFAULT_THRESHOLDS.warning' },
   { key: 'context_monitor.critical_threshold', type: 'number', default: 0.25, source: 'scripts/forge-context-monitor.js:44 DEFAULT_THRESHOLDS.critical' },
   // — repair —
@@ -446,6 +449,7 @@ const WITNESSES = [
   // exported reader constants (imported live below in addition to literals)
   ['context_monitor.warning_threshold', DEFAULT_THRESHOLDS.warning, 'scripts/forge-context-monitor.js:44 DEFAULT_THRESHOLDS.warning (imported)'],
   ['context_monitor.critical_threshold', DEFAULT_THRESHOLDS.critical, 'scripts/forge-context-monitor.js:44 DEFAULT_THRESHOLDS.critical (imported)'],
+  ['context_monitor.checkpoint_threshold', DEFAULT_THRESHOLDS.checkpoint, 'scripts/forge-context-monitor.js DEFAULT_THRESHOLDS.checkpoint (imported)'],
   // CLI helper fallback arg
   ['multi_run.refused_when_active_count', 2, "scripts/forge-cli-helpers.js:68 readPref(..., '2')"],
   ['multi_run.stale_cleanup_ms', 1800000, 'scripts/forge-runs.js:27 STALE_THRESHOLD_MS = 30 * 60 * 1000'],

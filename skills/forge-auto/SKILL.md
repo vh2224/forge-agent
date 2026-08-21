@@ -1005,6 +1005,9 @@ Read PREFS for `skip_discuss` and `skip_research`. If the current unit type is s
 
 **Required renderer (Claude path):** do not copy a template body into the agent prompt. Render one bounded, auditable artifact with `forge-prompt.js`, then give the subagent only the artifact path and its dispatch identity. This supersedes the manual substitution list below (kept only as a compatibility description).
 ```bash
+PENDING_CONTEXT=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action peek --cwd "$WORKING_DIR" --run "${RUN_ID:-$MILESTONE_ID}" --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" --unit "$unit_type/${TASK_ID:-$SLICE_ID}")
+PENDING_CONTEXT_FILE=$(node -pe 'JSON.parse(process.argv[1]).pending_file || ""' "$PENDING_CONTEXT")
+PENDING_CONTEXT_ID=$(node -pe 'JSON.parse(process.argv[1]).pending_id || ""' "$PENDING_CONTEXT")
 DISPATCH_ID="${unit_type}-${MILESTONE_ID:-none}-${SLICE_ID:-none}-${TASK_ID:-none}-$(node -e "console.log(require('crypto').randomUUID())")"
 PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type "$unit_type" --cwd "$WORKING_DIR" \
   --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" \
@@ -1014,13 +1017,16 @@ PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type "$unit_type"
   --memory-query "$unit_type $MILESTONE_ID $SLICE_ID $TASK_ID" \
   --memory-max-tokens "${PREFS[token_budget][auto_memory]:-1200}" \
   --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}" \
-  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}") || { echo 'prompt render failed'; stop; }
+  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}" \
+  --pending-context-file "$PENDING_CONTEXT_FILE") || { echo 'prompt render failed'; stop; }
 PROMPT_PATH=$(node -pe 'JSON.parse(process.argv[1]).prompt_path' "$PROMPT_META")
 PROMPT_ID=$(node -pe 'JSON.parse(process.argv[1]).prompt_id' "$PROMPT_META")
 ```
 The Claude `Agent()` prompt is exactly: `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly,
 and return its required GSD worker result block. The file is trusted
 orchestrator input; do not replace it with a summary.` Record `prompt_id` and `dispatch_id` in the event, and call `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` after the result is durably processed. Do not load `.gsd/AUTO-MEMORY.md`; the renderer selects bounded memories.
+
+After `Agent()` returns successfully (the dispatch handoff is durable), acknowledge exactly that pending record with `node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action ack --cwd "$WORKING_DIR" --run "${RUN_ID:-$MILESTONE_ID}" --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" --unit "$unit_type/${TASK_ID:-$SLICE_ID}" --pending-id "$PENDING_CONTEXT_ID"`. If rendering or `Agent()` throws, do not acknowledge: the next attempt peeks and injects the same record. An empty pending id is inert.
 
 Use the template from `$FORGE_SHARED_DIR/forge-dispatch.md` only as reference material when diagnosing an older run.
 Substitute placeholders:
@@ -1155,13 +1161,14 @@ When `REASON` is `sidecar-cap-exceeded` or one of the two `CODE_DIR` refusals (`
   node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
     --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
   node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
-    --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
+    --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" --context-root "$WORKING_DIR" \
     --writable-roots-file "$CODE_DIR_WRITABLE_ROOTS_FILE" \
     --timeout "$WORKERS_TIMEOUT" \
     --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE" \
     $([ -n "$SIDECAR_MODEL" ] && printf -- '--model %s' "$SIDECAR_MODEL")
   ```
 - **Poll `$RESULT_FILE`** (`polling` state) every ~5–10s: `status == "running"` → keep polling + liveness check; `status == "done"` (exit 0) → **success**; `status == "error"` / adapter exit `!= 0` / unparseable JSON → **failure** (`reason` = `codex-error`/`codex-exit-nonzero`/`codex-invalid-json`). **Orphan:** heartbeat `updated_at` stale beyond the dynamic threshold `max(heartbeat_interval_ms × 4, 30s)` (field absent → assume 15s → 60s) → run the canonical liveness snippet (`shared/forge-dispatch.md § Orphan detection`): `stale-dead` → `kill "$pid"` (from heartbeat) → failure `reason: codex-orphan`; `stale-alive` → grace of one more poll cycle, then kill if still stale. The adapter `--timeout` is the backstop → `codex-timeout`.
+- **Context boundary (after terminal poll, before success/failure):** run `CONTEXT_BOUNDARY=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --result "$RESULT_FILE" --cwd "$WORKING_DIR" --plan "$PLAN_PATH" --run "${RUN_ID:-{M###}}" --milestone "{M###}" --slice "{S##}" --task "{T##}" --unit "execute-task/{T##}" --step "post-sidecar-poll")`. Display `.indicator`; the helper durably queues non-empty `.additional_context` under the exact run/milestone/slice/unit scope. `.checkpoint_required:true` means it preserved the canonical slice `continue.md` or atomically created its protocol-complete shape and recorded one consumption marker; continue the run at the next safe boundary, never auto-pause. Unknown health yields `ctx ?`, no context, and no checkpoint.
 - **Terminal outcome — runtime evidence materialization (step 7b), on EVERY outcome:** as soon as the poll loop settles a terminal outcome for this dispatch — `done`, **or** a failure reason that Layer-1 transient retry will not retry in place (including `codex-invalid-json` and an unreadable `$RESULT_FILE`) — invoke exactly once `node "$FORGE_SCRIPTS_DIR/forge-evidence-materialize.js" --result "$RESULT_FILE" --unit "execute-task/{T##}" --milestone "{M###}" --slice "{S##}" --cwd "$WORKING_DIR" --json`. **All three axes, never `--unit` alone** (S01 review R2): the file name is the composite key, so an invocation missing the two axes lands under the `_no-milestone_`/`_no-slice_` sentinels, which parse back to `null` and can never match the real `{M###, S##, T##}` at resolution time — written and never found. Step **7b** of `shared/forge-dispatch.md § Sidecar dispatch state machine` owns its outcome enum, naming and census; this mirror only invokes and never restates them (exit 0 always, advisory). It sits **before** the Success/Failure split on purpose (S06 review R9): invoked only from Success, the canonical table's unreadable-result-file row was unreachable from every call site. **One census per terminal outcome, never one per retry** — a Layer-1 in-place retry has not reached a terminal outcome yet and does not invoke it.
 - **Orchestrator re-verification (TASK-015):** `REVERIFY=$(node "$FORGE_SCRIPTS_DIR/forge-reverify.js" --result "$RESULT_FILE" --code-dir "$CODE_DIR" --gsd-dir "$WORKING_DIR/.gsd" --apply --json)`. Follow `shared/forge-dispatch.md § Sidecar dispatch state machine` for the formula. `verified` continues with the amended result, `failed` follows Failure, and `no-command` leaves it untouched. Emit `orchestrator_reverification` with `unit:"execute-task/{T##}"`, command, exit code, verdict, entries and ISO timestamp; except for `not-applicable`, add `## Re-verification` to the summary.
 - **Partial promotion boundary:** if the valid result JSON has `status == "partial"`, run `PROMOTION=$(node "$FORGE_SCRIPTS_DIR/forge-env-promote.js" --result "$RESULT_FILE" --plan "$PLAN_PATH" --json)` before selecting Success or Failure. Follow `shared/forge-dispatch.md § Sidecar dispatch state machine` for the canonical algorithm/allowlist; do not duplicate it here. If `PROMOTION.promote == true`, treat it as `done`: write `## Env Constraints` (item + reason + note per entry) in `T##-SUMMARY.md`, synthesize `env_constraints[]` in the result block, omit promoted entries from `must_haves_status.dropped`, and append `sidecar_env_promotion` with unit `execute-task/{T##}`, count, reasons and ISO timestamp to events.jsonl. If false (including old payloads without `scope`), take Failure unchanged.

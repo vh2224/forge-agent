@@ -766,6 +766,24 @@ Context-monitor proativo: a statusline grava o % de contexto restante num bridge
 - **Default:** `true`
 - **Descrição:** true = injeção proativa ativa (debounce de 5 tool-uses; escalada WARNING→CRITICAL fura o debounce). false = branch no-op.
 
+### `context_monitor.alerts_enabled`
+
+- **Tipo:** boolean
+- **Default:** `true`
+- **Descrição:** true = permite alertas percentuais para snapshots frescos e medidos; unknown e stale nunca alertam.
+
+### `context_monitor.debounce_tool_uses`
+
+- **Tipo:** integer
+- **Default:** `5`
+- **Descrição:** Quantidade de tool-uses entre alertas da mesma severidade; escalada ignora a janela.
+
+### `context_monitor.checkpoint_threshold`
+
+- **Tipo:** number
+- **Default:** `0.4`
+- **Descrição:** Fração restante que pede checkpoint no próximo boundary seguro. Deve ser maior que warning e critical.
+
 ### `context_monitor.warning_threshold`
 
 - **Tipo:** number

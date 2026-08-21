@@ -1435,7 +1435,7 @@ CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
 node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
   --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
 XLLM_ARGS=(--mode execute --plan "$PLAN_PATH" --result-file "$RESULT_FILE" \
-  --cwd "$CODE_DIR" --timeout "$WORKERS_TIMEOUT" --dispatch-id "$SIDECAR_DISPATCH_ID" \
+  --cwd "$CODE_DIR" --context-root "$WORKING_DIR" --timeout "$WORKERS_TIMEOUT" --dispatch-id "$SIDECAR_DISPATCH_ID" \
   --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE")
 [ -n "$SIDECAR_MODEL" ] && XLLM_ARGS+=(--model "$SIDECAR_MODEL")
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" "${XLLM_ARGS[@]}"
@@ -1443,6 +1443,10 @@ node "$FORGE_SCRIPTS_DIR/forge-xllm.js" "${XLLM_ARGS[@]}"
 ```
 
 **5. Poll the result-file (`polling` state).** Read `$RESULT_FILE` periodically. The adapter atomically re-writes a heartbeat containing `{status, protocol_version, pid, adapter_pid, heartbeat_interval_ms, dispatch_id, input_tokens, started_at, updated_at}` while running:
+
+After the terminal poll and before selecting success/failure, consume the sidecar context boundary exactly once with `CONTEXT_BOUNDARY=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --result "$RESULT_FILE" --cwd "$WORKING_DIR" --plan "$PLAN_PATH" --run "${RUN_ID:-{M###}}" --milestone "{M###}" --slice "{S##}" --task "{T##}" --unit "execute-task/{T##}" --step "post-sidecar-poll")`. Render `.indicator`; the helper persists non-empty `.additional_context` under the exact run/milestone/slice/task/unit scope. `.checkpoint_required:true` means an existing canonical slice Continue-Here was preserved or its YAML-frontmatter protocol shape was atomically materialized at `.gsd/milestones/{M###}/slices/{S##}/continue.md`; continue without auto-pausing. Loose tasks use their distinct task/run scope and `.gsd/tasks/{TASK_ID}/continue.md` shape. Unknown/stale health is inert and cannot create urgency.
+
+At every subsequent safe Claude Agent prompt boundary, retrieve the record in a fresh shell with `PENDING_CONTEXT=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action peek --cwd "$WORKING_DIR" --run "${RUN_ID:-$MILESTONE_ID}" --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" --unit "$unit_type/${TASK_ID:-$SLICE_ID}")`, extract `PENDING_CONTEXT_FILE` and `PENDING_CONTEXT_ID`, and pass `--pending-context-file "$PENDING_CONTEXT_FILE"` to `forge-prompt.js`. The renderer validates that path under the durable pending root and appends `additional_context` inside the prompt artifact. The tiny Agent pointer remains the exact canonical three-line envelope and never grows with boundary context. The record stores the same composite scope and peek/ack reject any mismatch. Only after `Agent()` returns successfully (a durable dispatch handoff) run the matching command with `--action ack`, all the same scope axes, and `--pending-id "$PENDING_CONTEXT_ID"`. A render/dispatch failure must not acknowledge; retry peeks the same record. Ack atomically moves the record to the delivered ledger, making successful injection one-shot across shell/tool boundaries.
 
 - `status == "running"` → keep polling; check liveness (next bullet).
 - `status == "done"` → **success** (state `done`). Go to step 6.
@@ -2609,6 +2613,18 @@ The failure shape determines the strategy deterministically. `forge-repair.js --
 - PRUNE must not be triggered by silent failure alone. The worker must have explicitly explained why the requirement is impossible in its result block or T##-SUMMARY.md.
 
 ### Context-monitor suppression
+
+Codex context health uses a versioned, host-separated bridge selected by explicit
+`host_runtime: codex`; payload shape never selects an adapter. It carries `source`,
+`session_id`, `timestamp`, `epoch`, `measurement: measured|unknown`, and capability.
+Percentages exist only for fresh formal telemetry. Missing, invalid, stale, or
+unsupported telemetry renders `ctx ?` and cannot alert or suppress repair. A formal
+baseline is required before `compact x0`; attach without one remains unknown.
+
+The first measured checkpoint crossing per session/epoch records one idempotent event
+and requests a Continue-Here checkpoint at the next safe boundary without pausing the
+run. WARNING and CRITICAL retain their existing behavior. The existing Claude
+statusline, bridge, hooks, and lifecycle remain on the separate Claude path.
 
 Before executing DECOMPOSE or PRUNE, the orchestrator reads the S03 context-monitor bridge file:
 

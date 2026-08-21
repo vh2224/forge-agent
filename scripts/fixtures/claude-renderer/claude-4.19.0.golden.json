@@ -17,7 +17,7 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "ad111d1e3e1ee47a74d77a696c07bf027de0e1db20b4a4d248326a2b17e6051c"
+      "sha256": "626d376650f8ad19854b55926f3004864f569cd9046aff2edbaf39d88df96ea5"
     },
     {
       "source_id": "dispatch-templates",
@@ -47,7 +47,7 @@
     {
       "source_id": "configuration",
       "target": "forge-capabilities.json;forge-prefs.schema.json",
-      "sha256": "b2cbfd6a45e062e726dcf49c4eb56c6a9d311e4a30ea2bd4aa71de3667587313"
+      "sha256": "1ff68b3e7bfe66ae041064c69ee5c719e240e36f6d309e0f0d52ca07f79cb42c"
     }
   ]
 }

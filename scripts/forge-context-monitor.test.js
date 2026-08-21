@@ -21,6 +21,8 @@ const {
   DEFAULT_THRESHOLDS,
   DEBOUNCE_TOOLUSES,
   STALE_MS,
+  createContextSnapshot,
+  usableSnapshot,
   severityFor,
   isStale,
   shouldInject,
@@ -70,7 +72,7 @@ function writeTmp(relPath, content) {
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 test('DEFAULT_THRESHOLDS has correct values', () => {
-  assertEq(DEFAULT_THRESHOLDS, { warning: 0.35, critical: 0.25 }, 'DEFAULT_THRESHOLDS');
+  assertEq(DEFAULT_THRESHOLDS, { checkpoint: 0.4, warning: 0.35, critical: 0.25 }, 'DEFAULT_THRESHOLDS');
 });
 
 test('DEBOUNCE_TOOLUSES is 5', () => {
@@ -89,8 +91,8 @@ test('0.50 → none (above warning threshold)', () => {
   assertEq(severityFor(0.50), 'none');
 });
 
-test('0.36 → none (just above 0.35)', () => {
-  assertEq(severityFor(0.36), 'none');
+test('0.36 → checkpoint', () => {
+  assertEq(severityFor(0.36), 'checkpoint');
 });
 
 test('0.35 → warning (boundary inclusive)', () => {
@@ -241,7 +243,7 @@ test('prefs.local.md with enabled: false → disabled', () => {
 test('percent threshold 40 → 0.40', () => {
   const fakeCwd = path.join(ROOT, 'percent-project');
   writeTmp('percent-project/.gsd/forge-prefs.jsonc', `{
-  "context_monitor": { "warning_threshold": 40, "critical_threshold": 20 }
+  "context_monitor": { "checkpoint_threshold": 50, "warning_threshold": 40, "critical_threshold": 20 }
 }`);
   const prefs = readContextMonitorPrefs(fakeCwd);
   assertEq(prefs.thresholds.warning, 0.40, 'percent 40 → 0.40');
@@ -251,7 +253,7 @@ test('percent threshold 40 → 0.40', () => {
 test('fraction threshold 0.45 stays as-is', () => {
   const fakeCwd = path.join(ROOT, 'fraction-project');
   writeTmp('fraction-project/.gsd/forge-prefs.jsonc', `{
-  "context_monitor": { "warning_threshold": 0.45 }
+  "context_monitor": { "checkpoint_threshold": 0.50, "warning_threshold": 0.45 }
 }`);
   const prefs = readContextMonitorPrefs(fakeCwd);
   assertEq(prefs.thresholds.warning, 0.45, 'fraction 0.45 stays 0.45');
@@ -260,7 +262,7 @@ test('fraction threshold 0.45 stays as-is', () => {
 test('S03-R3: numeric-string-with-suffix threshold (85% → 0.85)', () => {
   const fakeCwd = path.join(ROOT, 'suffix-project');
   writeTmp('suffix-project/.gsd/forge-prefs.jsonc', `{
-  "context_monitor": { "warning_threshold": "85%", "critical_threshold": "70abc" }
+  "context_monitor": { "checkpoint_threshold": "90%", "warning_threshold": "85%", "critical_threshold": "70abc" }
 }`);
   const prefs = readContextMonitorPrefs(fakeCwd);
   assertEq(prefs.thresholds.warning, 0.85, '"85%" → 0.85 (parseFloat + percent normalize)');
@@ -270,11 +272,11 @@ test('S03-R3: numeric-string-with-suffix threshold (85% → 0.85)', () => {
 test('S03-R3: clean fraction/number strings still behave', () => {
   const fakeCwd = path.join(ROOT, 'suffix-clean-project');
   writeTmp('suffix-clean-project/.gsd/forge-prefs.jsonc', `{
-  "context_monitor": { "warning_threshold": "0.85", "critical_threshold": "85" }
+  "context_monitor": { "checkpoint_threshold": "0.90", "warning_threshold": "0.85", "critical_threshold": "70" }
 }`);
   const prefs = readContextMonitorPrefs(fakeCwd);
   assertEq(prefs.thresholds.warning, 0.85, '"0.85" string → 0.85');
-  assertEq(prefs.thresholds.critical, 0.85, '"85" string → 0.85');
+  assertEq(prefs.thresholds.critical, 0.70, '"70" string → 0.70');
 });
 
 test('S03-R3: non-numeric string still falls back to default', () => {
@@ -292,8 +294,109 @@ test('invalid enabled and thresholds preserve defaults', () => {
   "context_monitor": { "enabled": "maybe", "warning_threshold": "abc", "critical_threshold": null }
 }`);
   const prefs = readContextMonitorPrefs(fakeCwd);
-  assertEq(prefs, { enabled: true, thresholds: { warning: 0.35, critical: 0.25 } },
+  assertEq(prefs, { enabled: true, alertsEnabled: true, debounceToolUses: 5, thresholds: { checkpoint: 0.4, warning: 0.35, critical: 0.25 } },
     'invalid values must fall back to defaults');
+});
+
+test('snapshot preserves real zero and complement', () => {
+  const snapshot = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', capability: true, used_percentage: 0 }, 1000);
+  assertEq(snapshot.measurement, 'measured');
+  assertEq(snapshot.used_percentage, 0);
+  assertEq(snapshot.remaining_percentage, 1);
+});
+
+test('percentage requires explicit capability and recognized host/source', () => {
+  for (const input of [
+    { host_runtime: 'codex', source: 'codex-app-server', capability: false, used_percentage: 50 },
+    { host_runtime: 'codex', source: 'wrong', capability: true, used_percentage: 50 },
+    { host_runtime: 'claude', source: 'codex-app-server', capability: true, used_percentage: 50 },
+  ]) {
+    const snapshot = createContextSnapshot(input, 1000);
+    assertEq(snapshot.measurement, 'unknown');
+    assert(!Object.prototype.hasOwnProperty.call(snapshot, 'used_percentage'), 'fail-closed snapshot omits percentages');
+  }
+});
+
+test('unknown, missing, typo and future hosts never coerce to Claude', () => {
+  for (const host_runtime of [undefined, 'claud', 'future-host']) {
+    const snapshot = createContextSnapshot({ host_runtime, source: 'claude-statusline', capability: true, used_percentage: 50 }, 1000);
+    assertEq(snapshot.host_runtime, 'unknown');
+    assertEq(snapshot.measurement, 'unknown');
+  }
+});
+
+test('missing or invalid telemetry is unknown without percentages', () => {
+  for (const value of [undefined, null, NaN, Infinity, -1, 101, '0']) {
+    const snapshot = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', capability: true, used_percentage: value }, 1000);
+    assertEq(snapshot.measurement, 'unknown');
+    assert(!Object.prototype.hasOwnProperty.call(snapshot, 'used_percentage'), 'unknown must omit used_percentage');
+  }
+});
+
+test('stale measured snapshot is not usable', () => {
+  const snapshot = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', capability: true, used_percentage: 50 }, 1000);
+  assert(usableSnapshot(snapshot, 62_000) === false, 'stale bridge must not alert');
+});
+
+test('invalid threshold ordering rejects the whole block', () => {
+  const fakeCwd = path.join(ROOT, 'invalid-order-project');
+  writeTmp('invalid-order-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "checkpoint_threshold": 0.3, "warning_threshold": 0.35, "critical_threshold": 0.2 }
+}`);
+  let threw = false;
+  try { readContextMonitorPrefs(fakeCwd); } catch (error) { threw = error.code === 'FORGE_PREFS_INVALID_CONTEXT_MONITOR'; }
+  assert(threw, 'invalid relational block must be rejected observably');
+});
+
+test('legacy warning/critical layer without the new checkpoint knob completes to a valid block', () => {
+  const fakeCwd = path.join(ROOT, 'legacy-cutover-project');
+  writeTmp('legacy-cutover-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "enabled": false, "warning_threshold": 40, "critical_threshold": 0.2 }
+}`);
+  const prefs = readContextMonitorPrefs(fakeCwd);
+  assertEq(prefs.thresholds.warning, 0.4);
+  assertEq(prefs.thresholds.critical, 0.2);
+  assertEq(prefs.thresholds.checkpoint, 0.45, 'absent new checkpoint completes above the legacy warning');
+});
+
+test('explicit checkpoint collision still rejects atomically during cutover', () => {
+  const fakeCwd = path.join(ROOT, 'explicit-cutover-invalid-project');
+  writeTmp('explicit-cutover-invalid-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "checkpoint_threshold": 0.4, "warning_threshold": 40, "critical_threshold": 0.2 }
+}`);
+  let code = '';
+  try { readContextMonitorPrefs(fakeCwd); } catch (error) { code = error.code; }
+  assertEq(code, 'FORGE_PREFS_INVALID_CONTEXT_MONITOR');
+});
+
+test('explicit partial relational override still rejects atomically', () => {
+  const fakeCwd = path.join(ROOT, 'explicit-partial-invalid-project');
+  writeTmp('explicit-partial-invalid-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "warning_threshold": 0.2 }
+}`);
+  let code = '';
+  try { readContextMonitorPrefs(fakeCwd); } catch (error) { code = error.code; }
+  assertEq(code, 'FORGE_PREFS_INVALID_CONTEXT_MONITOR');
+});
+
+test('alerts disabled makes the production enabled gate false', () => {
+  const fakeCwd = path.join(ROOT, 'alerts-off-project');
+  writeTmp('alerts-off-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "alerts_enabled": false }
+}`);
+  const prefs = readContextMonitorPrefs(fakeCwd);
+  assertEq(prefs.alertsEnabled, false);
+  assertEq(prefs.enabled, false);
+});
+
+test('configured debounce is used when caller omits the third argument', () => {
+  const fakeCwd = path.join(ROOT, 'debounce-project');
+  writeTmp('debounce-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "debounce_tool_uses": 1 }
+}`);
+  readContextMonitorPrefs(fakeCwd);
+  const result = shouldInject('warning', { lastSeverity: 'warning', toolUsesSinceLast: 1 });
+  assert(result.inject === true, 'production two-argument caller must honor configured debounce');
 });
 
 // ── S03 review fixes: R6 block scoping + R8 threshold-aware messages ──────────

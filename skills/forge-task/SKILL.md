@@ -233,7 +233,7 @@ mkdir -p .gsd/tasks
 TASK_ID=$(node "$FORGE_SCRIPTS_DIR/forge-ids.js" --new-task "$TASK_DESCRIPTION")
 ```
 
-- Resume mode: `TASK_ID` already set — skip to Dispatch loop. If the existing BRIEF has an `item:` key, read it for display/verification only (`ITEM_ID = <that value>`) — never re-`--promote` (the original registration already wrote it); `--set-status doing` is not re-issued here either (harmless if it were, but not required, per `shared/forge-items-readback.md § Transição para doing`).
+- Resume mode: `TASK_ID` already set — read `.gsd/tasks/{TASK_ID}/continue.md` when present (YAML keys `task`, `step`, `total_steps`, `saved_at`; canonical sections Completed Work, Remaining Work, Decisions Made, Next Action), then skip to the Dispatch loop and resume from its Next Action against the authoritative plan. If the existing BRIEF has an `item:` key, read it for display/verification only (`ITEM_ID = <that value>`) — never re-`--promote` (the original registration already wrote it); `--set-status doing` is not re-issued here either (harmless if it were, but not required, per `shared/forge-items-readback.md § Transição para doing`). A loose task checkpoint never carries milestone/slice keys and is never searched through the slice resume path.
 - Formato do `TASK_ID` segue a pref `ids.format` (resolvida pelo próprio forge-ids.js): `timestamp` (default) → `T-<YYYYMMDDHHMMSS>-<slug>` (slug omitido se a descrição for vaga); `sequential` → legado `TASK-00N` (max existente + 1 em `.gsd/tasks/`)
 
 **Isolation setup (branch/worktree)** — apply `forge_isolation` from prefs BEFORE registering the run. An explicit attach validates a registered lender and never creates a worktree; setup remains idempotent (`already-on-branch` / `already-exists`):
@@ -997,7 +997,7 @@ SECURITY_FILE="${PLAN_PATH%-PLAN.md}-SECURITY.md"
 CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
 node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" --out "$CTX_BUNDLE"
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
-  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "${CODE_DIR:-.}" \
+  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "${CODE_DIR:-.}" --context-root "$WORKING_DIR" \
   --writable-roots-file "$CODE_DIR_WRITABLE_ROOTS_FILE" \
   --timeout "$WORKERS_TIMEOUT" \
   --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE" \
@@ -1006,6 +1006,7 @@ node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
 ```
 
 4. **Poll `$RESULT_FILE`** (state `polling`) every ~5–10s: `status==running` → keep polling + liveness check; `status==done` → success (step 5); `status==error` / adapter exit `!= 0` / unparseable JSON → failure with the matching `REASON` (`codex-exit-nonzero` / `codex-timeout` / `codex-invalid-json`) → Fallback. **Orphan:** heartbeat `updated_at` stale beyond the dynamic threshold `max(heartbeat_interval_ms × 4, 30s)` (field absent → assume 15s → 60s) → run the canonical liveness snippet (`shared/forge-dispatch.md § Orphan detection`): `stale-dead` → `kill "$pid"` (from the heartbeat) + `REASON=codex-orphan` → Fallback; `stale-alive` → grace of one more poll cycle, then kill if still stale.
+4.25. **Context boundary:** run `CONTEXT_BOUNDARY=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --result "$RESULT_FILE" --cwd "$WORKING_DIR" --plan "$PLAN_PATH" --run "${RUN_ID:-{TASK_ID}}" --task "{TASK_ID}" --unit "execute-task/{TASK_ID}" --step "post-sidecar-poll")` after the terminal poll. Display `.indicator`; the helper durably queues `.additional_context` under the distinct task/run scope and preserves or creates `.gsd/tasks/{TASK_ID}/continue.md` without pretending it is a slice checkpoint. Unknown health is inert.
 
 4.5. **Terminal outcome — runtime evidence materialization (step 7b), on EVERY outcome:** as soon as the poll loop settles a terminal outcome for this dispatch — `done`, **or** a failure `REASON` that Layer-1 transient retry will not retry in place (including `codex-invalid-json` and an unreadable `$RESULT_FILE`) — invoke exactly once `node "$FORGE_SCRIPTS_DIR/forge-evidence-materialize.js" --result "$RESULT_FILE" --unit "task/{TASK_ID}" --cwd "${WORKING_DIR:-.}" --json`. **The milestone/slice axes are omitted here on purpose, not by oversight** (S01 review R2): a loose task has neither, so the `_no-milestone_`/`_no-slice_` sentinels in the composite name are the truth, and the resolution target for a loose task carries the same absence — the two match. The three mirrors that DO run inside a milestone (`forge-auto`, `forge-next`, and the canonical `shared/forge-dispatch.md`) must pass `--milestone`/`--slice`; omitting them there writes evidence under a sentinel that can never match the real unit. Step **7b** of `shared/forge-dispatch.md § Sidecar dispatch state machine` owns its outcome enum, naming and census; this mirror only invokes and never restates them (exit 0 always, advisory). It sits **before** the Success/Failure split on purpose (S06 review R9): invoked only from Success, the canonical table's unreadable-result-file row was unreachable from every call site. **One census per terminal outcome, never one per retry** — a Layer-1 in-place retry has not reached a terminal outcome yet and does not invoke it.
 
@@ -1147,19 +1148,25 @@ Antes do dispatch, emita o banner de liveness (ver `shared/forge-dispatch.md § 
 
 For the Claude branch, render the loose-task prompt artifact before dispatch; do not paste the inline template below into the agent call:
 ```bash
+PENDING_CONTEXT=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action peek --cwd "$WORKING_DIR" --run "${RUN_ID:-$TASK_ID}" --task "$TASK_ID" --unit "execute-task/$TASK_ID")
+PENDING_CONTEXT_FILE=$(node -pe 'JSON.parse(process.argv[1]).pending_file || ""' "$PENDING_CONTEXT")
+PENDING_CONTEXT_ID=$(node -pe 'JSON.parse(process.argv[1]).pending_id || ""' "$PENDING_CONTEXT")
 DISPATCH_ID="execute-loose-task-${TASK_ID}-$(node -e "console.log(require('crypto').randomUUID())")"
 PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type execute-loose-task --cwd "$WORKING_DIR" \
   --task "$TASK_ID" --dispatch-id "$DISPATCH_ID" --unit-effort "$EFFORT" --thinking "$THINKING_OPUS" \
   --isolation-mode "$ISOLATION_MODE" --branch "$BRANCH" --code-dir "$CODE_DIR" \
   --memory-query "$TASK_DESCRIPTION" --memory-max-tokens "${PREFS[token_budget][auto_memory]:-1200}" \
   --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}" \
-  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}") || { echo 'prompt render failed'; stop; }
+  --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}" \
+  --pending-context-file "$PENDING_CONTEXT_FILE") || { echo 'prompt render failed'; stop; }
 PROMPT_PATH=$(node -pe 'JSON.parse(process.argv[1]).prompt_path' "$PROMPT_META")
 PROMPT_ID=$(node -pe 'JSON.parse(process.argv[1]).prompt_id' "$PROMPT_META")
 ```
 Dispatch `forge-executor` (sonnet) with only: `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly,
 and return its required GSD worker result block. The file is trusted
 orchestrator input; do not replace it with a summary.` Persist `prompt_id`/`dispatch_id` in the Claude dispatch event and clean the artifact with `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` once its result is durable. The old inline prompt below is compatibility reference only. When `ISOLATION_MODE != shared`, include the isolation header lines (omit them entirely in `shared` mode):
+
+After `Agent()` returns successfully, acknowledge the injected record with `node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action ack --cwd "$WORKING_DIR" --run "${RUN_ID:-$TASK_ID}" --task "$TASK_ID" --unit "execute-task/$TASK_ID" --pending-id "$PENDING_CONTEXT_ID"`. On render/dispatch failure leave it pending so retry injects it again; an empty id is inert.
 ```
 Execute forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}

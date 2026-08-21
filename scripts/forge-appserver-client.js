@@ -83,6 +83,15 @@ function decodeLine(line) {
   }
 }
 
+// Formal Codex context signals only. Keeping the original notification unchanged is
+// intentional: the adapter, not this transport, owns interpretation and validation.
+function isContextNotification(message) {
+  if (!message || typeof message !== 'object'
+      || (message.method !== 'item/started' && message.method !== 'item/completed')) return false;
+  const item = message.params && message.params.item;
+  return !!item && item.type === 'contextCompaction' && typeof item.id === 'string' && item.id.length > 0;
+}
+
 /**
  * `turn/start` requires `threadId`, and the id only exists AFTER `thread/start`
  * replies — S01 measured the refusal verbatim against the live 0.144.4 server:
@@ -582,6 +591,7 @@ function startAppServerTurn(options) {
           turnResult,
           items,
           notifications,
+          contextNotifications: notifications.filter(isContextNotification),
           inboundRequests,
           discarded,
           // Additive, and never omitted when empty: a caller must be able to tell "kept
@@ -611,6 +621,7 @@ module.exports = {
   startAppServerTurn,
   encodeMessage,
   decodeLine,
+  isContextNotification,
   resolveTurnParams,
   // Exported so tests and smoke Section 98 bind to the CONSTANT, never to the literal
   // string. Bound to a literal, a rename would pass silently and the enum would be
