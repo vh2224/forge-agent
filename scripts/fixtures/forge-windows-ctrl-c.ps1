@@ -24,7 +24,8 @@ $result = [ordered]@{
 function Publish-JsonAtomic([string]$Path, [object]$Value) {
   $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
   [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Compress -Depth 8), [Text.UTF8Encoding]::new($false))
-  [IO.File]::Move($temporary, $Path)
+  if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $null) }
+  else { [IO.File]::Move($temporary, $Path) }
 }
 
 try {

@@ -290,6 +290,7 @@ test('Windows Ctrl+C fixture: encodes the private-console protocol and forbidden
     'AssignProcessToJobObject', 'SetConsoleCtrlHandler(IntPtr.Zero, true)',
     'ResumeThread', 'GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)',
     'WaitForSingleObject', 'GetExitCodeProcess', 'Publish-JsonAtomic',
+    '[IO.File]::Replace($temporary, $Path, $null)',
     "stage = 'controller-started'", "stage = 'add-type-complete'", "stage = $stage",
   ]) assert(source.includes(required), `fixture must contain ${required}`);
   for (const forbidden of [
