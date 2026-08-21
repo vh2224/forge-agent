@@ -141,6 +141,21 @@ test('writeAllSync completa short writes e recusa progresso zero', () => {
   assert.deepStrictEqual(recovery.writeExclusive(root, path.join(root, 'idempotent.bin'), bytes, 'restore'), { written: true }); assert.deepStrictEqual(recovery.writeExclusive(root, path.join(root, 'idempotent.bin'), bytes, 'restore'), { written: false });
 });
 
+test('journal append nunca usa posiÃ§Ã£o explÃ­cita e preserva JSONL com short writes', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-journal-append-')); roots.push(cwd);
+  fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
+  const positions = [];
+  const shortAppend = (fd, buffer, offset, length, position) => {
+    positions.push(position);
+    return fs.writeSync(fd, buffer, offset, Math.min(3, length), position);
+  };
+  const io = { writeSync: shortAppend, fsyncDir: () => {} };
+  recovery.appendEvent(cwd, { event: 'primeiro', n: 1 }, io);
+  recovery.appendEvent(cwd, { event: 'segundo', n: 2 }, io);
+  assert(positions.length > 2); assert(positions.every(position => position === null));
+  assert.deepStrictEqual(events(cwd).map(event => event.event), ['primeiro', 'segundo']);
+});
+
 test('segunda medição inclui code bruto na identidade do status', () => {
   const f = fixture('T-drift-code'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('same')); let call = 0;
   const changedCode = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ++call === 1 ? ' M' : 'MM' }] });

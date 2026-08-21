@@ -148,7 +148,10 @@ function appendEvent(cwd, event, io) {
   const bytes = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8'); let handle;
   try {
     handle = fs.openSync(file, 'a');
-    writeAllSync(handle, bytes, io && io.writeSync);
+    // Append descriptors are not portable with positional writes: Linux ignores
+    // the position under O_APPEND, while Darwin may honor it and overwrite the
+    // existing JSONL prefix. Keep buffer offset and file position independent.
+    writeAllSync(handle, bytes, io && io.writeSync, null);
     ((io && io.fsyncSync) || fs.fsyncSync)(handle);
   } finally { if (handle !== undefined) fs.closeSync(handle); }
   fsyncDirectory(forgeRoot, io, true);
@@ -288,11 +291,12 @@ function loadManifest(cwd, runId) {
   return { root, manifest };
 }
 
-function writeAllSync(handle, bytes, writer) {
+function writeAllSync(handle, bytes, writer, positionBase = 0) {
   const write = writer || fs.writeSync;
   let offset = 0;
   while (offset < bytes.length) {
-    const written = write(handle, bytes, offset, bytes.length - offset, offset);
+    const position = positionBase === null ? null : positionBase + offset;
+    const written = write(handle, bytes, offset, bytes.length - offset, position);
     if (!Number.isInteger(written) || written <= 0 || written > bytes.length - offset) throw new Error('write-invalid-count');
     offset += written;
   }
