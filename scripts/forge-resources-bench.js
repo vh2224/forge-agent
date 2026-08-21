@@ -421,17 +421,29 @@ function spawnTracked(cmd, args, {
       timedOut = true;
       killTree(child);
     }, timeoutMs);
-    const finish = (payload, exited = false) => {
+    const finish = (payload, untrack = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(killer);
-      liveChildren.delete(child);
-      if (exited) childState.exited = true;
+      if (untrack) liveChildren.delete(child);
       resolve({ wallMs: Date.now() - start, timedOut, ...payload });
     };
-    child.on('exit', (code, signal) => finish({ exitCode: code, signal: signal || null }, true));
-    child.on('close', () => { childState.exited = true; });
-    child.on('error', (e) => finish({ exitCode: null, signal: 'spawn-error', error: e.message }));
+    const observeExit = (payload) => {
+      childState.exited = true;
+      liveChildren.delete(child);
+      finish(payload);
+    };
+    child.on('exit', (code, signal) => observeExit({ exitCode: code, signal: signal || null }));
+    child.on('close', (code, signal) => observeExit({ exitCode: code, signal: signal || null }));
+    child.on('error', (e) => {
+      const ownsProcess = typeof child.pid === 'number';
+      finish({
+        exitCode: null,
+        signal: 'spawn-error',
+        error: e.message,
+        cleanupPending: ownsProcess,
+      }, !ownsProcess);
+    });
   });
 }
 

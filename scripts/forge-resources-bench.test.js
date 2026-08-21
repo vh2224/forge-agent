@@ -538,6 +538,39 @@ await testAsync('killTreeAsync: only exit 128 can use bounded already-exited rec
   }, (owned) => { owned.exitCode = 0; });
 });
 
+await testAsync('spawnTracked: operational error keeps an owned PID available for degraded cancellation cleanup', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 545000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => { throw new Error('owned kill failed'); };
+  const run = bench.spawnTracked('owned', [], {
+    cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned,
+  });
+  owned.emit('error', new Error('operational failure'));
+  const result = await run;
+  assertEqual(result.signal, 'spawn-error');
+  assertEqual(result.cleanupPending, true, 'an operational error with a PID must retain cleanup ownership');
+
+  const killer = new EventEmitter(); killer.kill = () => true;
+  let taskkillCalls = 0;
+  let cleanupError = null;
+  try {
+    await bench.killAllLiveAsync({
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+      spawnImpl: () => {
+        taskkillCalls += 1;
+        queueMicrotask(() => killer.emit('close', 128));
+        return killer;
+      },
+      reportDegraded: () => {},
+    });
+  } catch (error) { cleanupError = error; }
+  assertEqual(taskkillCalls, 1, 'cancel cleanup must still call taskkill for the owned PID');
+  assertEqual(cleanupError && cleanupError.code, 'CLEANUP_DEGRADED');
+  assert(String(cleanupError && cleanupError.message).includes('exit-128'),
+    `failed owned cleanup must remain degraded: ${cleanupError && cleanupError.message}`);
+});
+
 await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {
   const fence = bench.createSpawnFence();
   let releaseCleanup;
