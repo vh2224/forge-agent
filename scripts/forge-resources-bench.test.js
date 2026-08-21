@@ -290,7 +290,6 @@ test('Windows Ctrl+C fixture: encodes the private-console protocol and forbidden
     'AssignProcessToJobObject', 'SetConsoleCtrlHandler(IntPtr.Zero, true)',
     'ResumeThread', 'GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)',
     'WaitForSingleObject', 'GetExitCodeProcess', 'Publish-JsonAtomic',
-    '[IO.File]::Replace($temporary, $Path, $null)',
     "stage = 'controller-started'", "stage = 'add-type-complete'", "stage = $stage",
   ]) assert(source.includes(required), `fixture must contain ${required}`);
   for (const forbidden of [
@@ -989,8 +988,7 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
       const controller = JSON.parse(rawController);
       assertEqual(controller.nonce, nonce, 'controller protocol nonce must match');
       assert(Number.isInteger(controller.pid) && controller.pid > 0, 'controller protocol PID must identify the owned host');
-      assert(['controller-started', 'add-type-complete', 'create-child'].includes(controller.stage),
-        `controller protocol stage must be monotonic and known, got ${controller.stage}`);
+      assertEqual(controller.stage, 'controller-started');
       let lastControllerStage = controller.stage;
       let rawStarted;
       try {
@@ -998,10 +996,15 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
           () => {
             if (earlyExit) throw new Error(`windows-controller-start: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
             const controllerPath = path.join(dir, 'protocol space Ω', 'controller.json');
-            if (fs.existsSync(controllerPath)) {
-              const progress = JSON.parse(fs.readFileSync(controllerPath, 'utf8'));
-              if (progress.nonce !== nonce) throw new Error('windows-controller-start: progress nonce mismatch');
-              lastControllerStage = progress.stage;
+            for (const stage of ['add-type-complete', 'create-child']) {
+              const progressPath = `${controllerPath}.${stage}`;
+              if (!fs.existsSync(progressPath)) continue;
+              const progress = JSON.parse(fs.readFileSync(progressPath, 'utf8'));
+              if (progress.nonce !== nonce || progress.pid !== controller.pid) {
+                throw new Error('windows-controller-start: progress binding mismatch');
+              }
+              if (progress.stage !== stage) throw new Error('windows-controller-start: progress stage mismatch');
+              lastControllerStage = stage;
             }
             return fs.existsSync(startedPath) && fs.readFileSync(startedPath, 'utf8');
           },

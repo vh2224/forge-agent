@@ -24,8 +24,7 @@ $result = [ordered]@{
 function Publish-JsonAtomic([string]$Path, [object]$Value) {
   $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
   [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Compress -Depth 8), [Text.UTF8Encoding]::new($false))
-  if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $null) }
-  else { [IO.File]::Move($temporary, $Path) }
+  [IO.File]::Move($temporary, $Path)
 }
 
 try {
@@ -190,9 +189,9 @@ public sealed class ForgeCtrlCSession : IDisposable {
 }
 '@
 
-  Publish-JsonAtomic ([string]$config.controllerPath) ([ordered]@{ nonce = $result.nonce; pid = $PID; stage = 'add-type-complete' })
+  Publish-JsonAtomic "$([string]$config.controllerPath).add-type-complete" ([ordered]@{ nonce = $result.nonce; pid = $PID; stage = 'add-type-complete' })
   $stage = 'create-child'
-  Publish-JsonAtomic ([string]$config.controllerPath) ([ordered]@{ nonce = $result.nonce; pid = $PID; stage = $stage })
+  Publish-JsonAtomic "$([string]$config.controllerPath).create-child" ([ordered]@{ nonce = $result.nonce; pid = $PID; stage = $stage })
   $arguments = @([string]$config.benchPath) + @($config.argv | ForEach-Object { [string]$_ })
   $session = [ForgeCtrlCSession]::new(
     [string]$config.nodePath,
