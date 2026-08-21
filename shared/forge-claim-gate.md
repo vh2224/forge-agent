@@ -668,6 +668,10 @@ atomicidade contra processo hostil ainda ativo. Journal e bundle são fsyncados 
 medição é uma precondition executada dentro do lock de `runs.updateWith`, imediatamente antes do
 patch; junto ao CAS do RunRecord completo, ela fecha a concorrência cooperativa.
 
+A estratégia de durabilidade é registrada no manifest, evidence e journal. POSIX exige file fsync e
+directory fsync bottom-up. Windows usa file fsync obrigatório e publicação atômica por hard-link
+NTFS; Node não oferece directory fsync portável nessa plataforma e o fluxo não afirma que oferece.
+
 O restore do bundle também é preview-first e idempotente. Um destino ausente recebe os bytes
 capturados; bytes já idênticos são mantidos; bytes divergentes nunca são sobrescritos e o payload é
 extraído sob `conflicts/` na área de recuperação.

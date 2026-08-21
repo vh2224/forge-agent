@@ -432,6 +432,9 @@ test('claimPathMatches cobre glob *, **, ?, diretório e não-match', () => {
   assert(claimPathMatches('src/*.js', 'src/a.js'), '* não casou');
   assert(!claimPathMatches('src/*.js', 'src/deep/a.js'), '* atravessou segmento');
   assert(claimPathMatches('src/**', 'src/deep/a.js'), '** não casou');
+  assert(claimPathMatches('src/**/*.js', 'src/a.js'), '**/ não aceitou zero segmento');
+  assert(claimPathMatches('src/**/*.js', 'src/deep/a.js'), '**/ não aceitou um segmento');
+  assert(claimPathMatches('src/**/*.js', 'src/deep/more/a.js'), '**/ não aceitou múltiplos segmentos');
   assert(claimPathMatches('src/a?.js', 'src/ab.js'), '? não casou');
   assert(claimPathMatches('src', 'src/deep/a.js'), 'diretório não cobriu descendente');
   assert(!claimPathMatches('src/*.js', 'test/a.js'), 'não-match virou match');

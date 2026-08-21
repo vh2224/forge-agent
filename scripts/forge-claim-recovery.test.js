@@ -224,5 +224,16 @@ test('criação fsynca parents novos bottom-up e indisponibilidade aborta named'
   const g = fixture('T-dir-unavailable'); const unavailable = new Error('unsupported'); unavailable.code = 'EPERM'; const refused = recovery.apply(g.cwd, g.id, { ...g.common, confirmOwnerStopped: true, io: { fsyncDir: () => { throw unavailable; } } }); assert.strictEqual(refused.reason, 'directory-fsync-unavailable:EPERM'); assert.strictEqual(runs.get(g.cwd, g.id).active, true);
 });
 
+test('estratégia de durabilidade é explícita em win32 e POSIX', () => {
+  assert.strictEqual(recovery.durabilityStrategy({ platform: 'win32' }), 'file-fsync+ntfs-atomic-link'); assert.strictEqual(recovery.durabilityStrategy({ platform: 'linux' }), 'file-fsync+posix-dir-fsync');
+  const f = fixture('T-platform-strategy'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('x')); const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); const { io, ...withoutIo } = f.common;
+  const applied = recovery.apply(f.cwd, f.id, { ...withoutIo, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(applied.ok, true, JSON.stringify(applied)); const manifest = JSON.parse(fs.readFileSync(path.join(f.cwd, applied.bundle, 'manifest.json'))); const strategy = process.platform === 'win32' ? 'file-fsync+ntfs-atomic-link' : 'file-fsync+posix-dir-fsync'; assert.strictEqual(manifest.durability_strategy, strategy); assert.strictEqual(runs.get(f.cwd, f.id).write_claim.released.evidence.durability_strategy, strategy); assert.strictEqual(events(f.cwd)[0].evidence.durability_strategy, strategy);
+});
+
+test('glob **/ captura dirty diretamente sob diretório', () => {
+  const f = fixture('T-glob-zero-segment'); const claim = runs.get(f.cwd, f.id).write_claim; runs.update(f.cwd, f.id, { write_claim: { ...claim, paths: ['src/**/*.js'] } }); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.js'), Buffer.from('direct'));
+  const dirty = () => ({ ok: true, entries: [{ path: 'src/a.js', kind: 'modified', code: ' M' }] }); const out = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(out.ok, true); const manifest = JSON.parse(fs.readFileSync(path.join(f.cwd, out.bundle, 'manifest.json'))); assert.deepStrictEqual(manifest.entries.map(e => e.path), ['src/a.js']);
+});
+
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
 if (!process.exitCode) process.stdout.write(`\n${passed} passed, 0 failed\n`);

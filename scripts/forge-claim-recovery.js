@@ -110,16 +110,24 @@ function inspect(cwd, runId, opts = {}) {
 
 function fsyncDirectory(dir, io, required) {
   const o = io || {};
+  const platform = typeof o.platform === 'string' ? o.platform : process.platform;
   if (typeof o.fsyncDir === 'function') {
     try { return o.fsyncDir(dir); }
     catch (error) { if (required) throw new Error(`directory-fsync-unavailable:${error.code || 'unknown'}`); return; }
   }
+  // Node on Windows does not expose a portable directory flush primitive.
+  // Durability there relies on file fsync plus same-volume atomic hard-link.
+  if (platform === 'win32') return;
   let handle;
   try { handle = fs.openSync(dir, 'r'); fs.fsyncSync(handle); }
   catch (error) {
     if (!error || !['EPERM', 'EACCES', 'EINVAL', 'EISDIR', 'ENOTSUP'].includes(error.code)) throw error;
     if (required) throw new Error(`directory-fsync-unavailable:${error.code}`);
   } finally { if (handle !== undefined) fs.closeSync(handle); }
+}
+function durabilityStrategy(io) {
+  const platform = io && typeof io.platform === 'string' ? io.platform : process.platform;
+  return platform === 'win32' ? 'file-fsync+ntfs-atomic-link' : 'file-fsync+posix-dir-fsync';
 }
 
 function durableWrite(file, bytes, io) {
@@ -180,7 +188,7 @@ function createBundle(cwd, preview, now, name, io) {
       }
       entries.push({ path: rel, kind: dirty.kind, code: dirty.code, present, sha256: hash, payload });
     }
-    const manifest = { version: 1, run_id: preview.run_id, created_at: now, code_dir: preview.code_dir, claim_identity_sha256: sha256(Buffer.from(JSON.stringify(preview.claim))), claim: preview.claim, entries };
+    const manifest = { version: 1, run_id: preview.run_id, created_at: now, durability_strategy: durabilityStrategy(io), code_dir: preview.code_dir, claim_identity_sha256: sha256(Buffer.from(JSON.stringify(preview.claim))), claim: preview.claim, entries };
     const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
     durableWrite(path.join(root, 'manifest.json'), bytes, io);
     durableWrite(path.join(root, 'manifest.sha256'), Buffer.from(`${sha256(bytes)}\n`, 'ascii'), io);
@@ -234,9 +242,9 @@ function apply(cwd, runId, opts = {}) {
     const plannedBundle = preview.dirty.length
       ? path.relative(cwd, path.join(recoveryRoot(cwd, runId), 'attempts', attempt)).replace(/\\/g, '/') : null;
     // Journal first: even creation of the recovery bundle is a mutation.
-    appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-intent', run_id: runId, evidence: { intent: 'operator-confirmed-owner-stopped', workspace_quiescent_attested: true, dirty_paths: preview.dirty.map((e) => e.path), bundle: plannedBundle } }, opts.io);
+    appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-intent', run_id: runId, evidence: { intent: 'operator-confirmed-owner-stopped', workspace_quiescent_attested: true, durability_strategy: durabilityStrategy(opts.io), dirty_paths: preview.dirty.map((e) => e.path), bundle: plannedBundle } }, opts.io);
     if (preview.dirty.length) bundle = createBundle(cwd, preview, now, attempt, opts.io);
-    const evidence = { intent: 'operator-confirmed-owner-stopped', workspace_quiescent_attested: true, dirty_paths: preview.dirty.map((e) => e.path), bundle: bundle ? path.relative(cwd, bundle.root).replace(/\\/g, '/') : null, manifest_sha256: bundle && bundle.manifest_sha256 };
+    const evidence = { intent: 'operator-confirmed-owner-stopped', workspace_quiescent_attested: true, durability_strategy: durabilityStrategy(opts.io), dirty_paths: preview.dirty.map((e) => e.path), bundle: bundle ? path.relative(cwd, bundle.root).replace(/\\/g, '/') : null, manifest_sha256: bundle && bundle.manifest_sha256 };
     if (bundle) appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-bundle-verified', run_id: runId, evidence }, opts.io);
     const transition = (opts.recoverClaim || recoverClaim)(cwd, runId, preview.record,
       { at: now, mechanism: 'manual', evidence }, { precondition: () => verifyDirtyUnchanged(preview, bundle) });
@@ -381,4 +389,4 @@ function restore(cwd, runId, opts = {}) {
   } catch (error) { return { ok: false, restored: false, reason: error.message }; }
 }
 
-module.exports = { inspect, apply, restore, createBundle, verifyDirtyUnchanged, assertSafePath, ancestryIdentity, secureDirChain, writeAllSync, durableWrite, appendEvent, writeExclusive, normalizeScope, inScope, sha256 };
+module.exports = { inspect, apply, restore, createBundle, verifyDirtyUnchanged, assertSafePath, ancestryIdentity, secureDirChain, writeAllSync, durableWrite, appendEvent, writeExclusive, durabilityStrategy, normalizeScope, inScope, sha256 };
