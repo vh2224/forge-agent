@@ -28,90 +28,15 @@ jobs:
         with:
           node-version: 22
 
-      - name: Run deterministic offline release gate
-        run: node scripts/forge-release-gate.js --report "${{ runner.temp }}/forge-release-report.json"
-
       - name: Fetch tags
         run: git fetch --tags --force
 
       - name: Resolve version
         id: version
-        run: |
-          # If HEAD is already tagged (manual tag push or tag+commit together),
-          # use that tag directly -- skip semver bump entirely.
-          HEAD_TAG=$(git tag --points-at HEAD -l 'v*' | sort -V | tail -1)
-          if [ -n "$HEAD_TAG" ]; then
-            echo "new_tag=$HEAD_TAG" >> "$GITHUB_OUTPUT"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "range=${HEAD_TAG}^..HEAD" >> "$GITHUB_OUTPUT"
-            echo "HEAD is already tagged: $HEAD_TAG -- using as-is"
-            exit 0
-          fi
+        run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT"
 
-          # Triggered by branch push without a tag -- calculate next semver.
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST_TAG" ]; then
-            RANGE="HEAD"
-          else
-            RANGE="${LATEST_TAG}..HEAD"
-          fi
-
-          COMMITS=$(git log "$RANGE" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
-          if [ -z "$COMMITS" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "No commits since $LATEST_TAG, skipping."
-            exit 0
-          fi
-
-          BUMP="none"
-          while IFS= read -r msg; do
-            if echo "$msg" | grep -qiE '^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE'; then
-              BUMP="major"; break
-            fi
-          done <<< "$COMMITS"
-
-          if [ "$BUMP" = "none" ]; then
-            while IFS= read -r msg; do
-              if echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
-                BUMP="minor"; break
-              fi
-            done <<< "$COMMITS"
-          fi
-
-          if [ "$BUMP" = "none" ]; then
-            while IFS= read -r msg; do
-              if echo "$msg" | grep -qE '^fix(\(.+\))?:'; then
-                BUMP="patch"
-              fi
-            done <<< "$COMMITS"
-          fi
-
-          if [ "$BUMP" = "none" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "No releasable commits (feat/fix/breaking), skipping."
-            exit 0
-          fi
-
-          if [ -z "$LATEST_TAG" ]; then
-            MAJOR=0; MINOR=0; PATCH=0
-          else
-            VERSION="${LATEST_TAG#v}"
-            MAJOR=$(echo "$VERSION" | cut -d. -f1)
-            MINOR=$(echo "$VERSION" | cut -d. -f2)
-            PATCH=$(echo "$VERSION" | cut -d. -f3)
-          fi
-
-          case "$BUMP" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-
-          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
-          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
-          echo "Bump type: $BUMP -> $NEW_TAG"
+      - name: Run deterministic offline release gate
+        run: node scripts/forge-release-gate.js --report "${{ runner.temp }}/forge-release-report.json"
 
       - name: Generate changelog
         if: steps.version.outputs.skip != 'true'

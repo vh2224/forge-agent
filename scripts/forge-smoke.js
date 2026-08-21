@@ -15558,54 +15558,40 @@ function smokeRoutingDomainsRendered() {
 // quem instalasse da master recebia projeções com `version=4.11.0` no marcador
 // de origem. O bump manual anterior tratou UMA instância; a causa é o workflow.
 //
-// A comparação é por MAJOR.MINOR, de propósito. Um gate literal
-// `VERSION === <tag>` ficaria vermelho logo após todo merge de `fix:` (patch
-// automático), e um gate permanentemente vermelho é um gate mudo — pior que
-// nenhum. Patch é ruído auto-corrigido no próximo release de feature; minor e
-// major são release de produto e EXIGEM o bump deliberado, com a regeneração
-// do golden e os dois literais fixados (o ritual está escrito no
-// forge-version.js).
+// O resolvedor canônico calcula a mesma tag prospectiva usada pelo workflow e
+// exige igualdade EXATA. Assim um PR `fix:` declara o próximo patch antes do
+// merge, em vez de aceitar drift permanente como ruído.
 //
 // Vive no smoke porque só o job do smoke faz checkout com `fetch-depth: 0` —
 // o job de testes é depth-1 e não enxerga tag nenhuma. Mesmo precedente do
 // gate de escopo S07, e pela mesma razão.
 function smokeVersionTagLine() {
-  process.stdout.write('\n▸ Section 113: VERSION acompanha a linha de release das tags\n');
+  process.stdout.write('\n▸ Section 113: VERSION acompanha exatamente a release prospectiva\n');
   // A linha-resumo desta seção só é emitida se os asserts acima seguraram. O
   // padrão da casa a emite incondicionalmente, o que imprime um ✓ afirmando
   // sucesso ao lado de um ✗ real — uma alegação falsa no artefato cuja função é
   // não fazer alegações falsas. Local a esta seção, sem tocar as outras.
   const failsBefore = fails;
   const { VERSION } = require('./forge-version.js');
+  const releaseVersion = require('./forge-release-version.js');
   const repoRoot = path.resolve(__dirname, '..');
-
-  const shown = spawnSync('git', ['tag', '-l', 'v*', '--sort=-v:refname'],
-    { cwd: repoRoot, encoding: 'utf8' });
-  const tags = shown.status === 0
-    ? shown.stdout.split('\n').map(line => line.trim()).filter(Boolean)
-    : [];
-
-  // Sem tag legível não há como medir — e um gate que passa limpo quando não
-  // mediu nada é indistinguível de um detector quebrado. Falha, nomeando.
-  assert(tags.length > 0,
-    '(a) há ao menos uma tag v* para medir (o job do smoke usa fetch-depth: 0)',
-    `git tag saiu ${shown.status}: ${(shown.stderr || '').trim()}`);
-
-  const line = (value) => String(value).replace(/^v/, '').split('.').slice(0, 2).join('.');
-  const latest = tags[0];
-  assert(line(VERSION) === line(latest),
-    `(b) VERSION (${VERSION}) e a tag mais recente (${latest}) compartilham major.minor`,
-    `bumpe scripts/forge-version.js para a linha ${line(latest)}.x — e no mesmo commit regenere o `
-    + `golden PELO RENDER PATH (o marcador embute version=) e atualize os literais fixados em `
-    + `forge-installer.test.js e forge-package.test.js`);
+  let resolution = null;
+  try { resolution = releaseVersion.resolveVersion(repoRoot); }
+  catch (error) { assert(false, '(a) release prospectiva é mensurável', error.message); }
+  assert(Boolean(resolution && resolution.new_tag), '(a) release prospectiva é mensurável');
+  let checked = null;
+  try { checked = releaseVersion.checkDeclaredVersion(resolution, VERSION); }
+  catch (error) { assert(false, `(b) VERSION ${VERSION} casa exatamente com ${resolution.new_tag}`, error.message); }
+  assert(Boolean(checked && checked.ok), `(b) VERSION ${VERSION} casa exatamente com ${resolution.new_tag}`);
 
   // Controle positivo: a comparação precisa MORDER. Uma linha deliberadamente
   // diferente tem de reprovar pelo mesmo predicado.
-  assert(line('9.99.0') !== line(latest),
-    '(c) controle positivo: uma linha divergente é reprovada pelo mesmo predicado');
+  let bitten = false;
+  try { releaseVersion.checkDeclaredVersion(resolution, '9.99.0'); } catch (_) { bitten = true; }
+  assert(bitten, '(c) controle positivo: uma versão divergente é reprovada pelo mesmo predicado');
 
   if (fails === failsBefore) {
-    pass('Section 113: VERSION e a tag mais recente compartilham major.minor, com piso anti-silêncio');
+    pass('Section 113: VERSION e a release prospectiva coincidem exatamente, com piso anti-silêncio');
   }
 }
 

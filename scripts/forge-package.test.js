@@ -27,7 +27,7 @@ try {
     assert.deepStrictEqual(manifests[0], manifests[1]);
     assert.deepStrictEqual(manifests[1], manifests[2]);
     const manifest = manifests[0];
-    assert.strictEqual(manifest.product_version, '4.19.0');
+    assert.strictEqual(manifest.product_version, installer.VERSION);
     assert.strictEqual(manifest.schema_version, '1.0.0');
     assert.strictEqual(manifest.product_version, installer.VERSION);
     assert(/^[a-f0-9]{64}$/.test(manifest.package_sha256));
