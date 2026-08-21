@@ -493,6 +493,16 @@ function resolveCodeDir(opts) {
   let unmatched = 0;
   let unmatchedAbsolute = 0;
   for (const p of considered) {
+    // Validate the complete declaration before globRoot truncates at `*`/`?`.
+    // A traversal suffix after a wildcard is still executable scope even though
+    // it is not part of the attribution prefix. Drive-relative Windows paths
+    // (`C:foo`) are also outside a portable workspace containment proof.
+    const declared = normalizePath(p);
+    if (declared.split('/').includes('..') || /^[A-Za-z]:(?!\/)/.test(declared)) {
+      unmatched++;
+      unmatchedAbsolute++;
+      continue;
+    }
     const root = globRoot(p);
     if (!root) { unmatched++; continue; }
     const abs = normalizePath(path.resolve(cwd, root));

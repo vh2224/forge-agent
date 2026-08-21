@@ -372,6 +372,22 @@ test('R12e — traversal relativo que escapa do workspace e recusado', () => {
   }
 });
 
+test('R12f — traversal depois de glob e drive-relative recusam antes da atribuicao', () => {
+  const f = makeFixture({ noRepoField: true });
+  for (const [name, escaped] of [['glob', 'web/**/../../outside.ts'], ['drive', 'C:../outside.ts']]) {
+    const plan = path.join(f.root, `T02-pre-glob-${name}-PLAN.md`);
+    fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${escaped}"`, '---', ''].join('\n'));
+    const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+    assertEqual(out.status, 'cross-repo', `${name}: status fail-closed`);
+    assertEqual(out.paths_unmatched, 1, `${name}: declaracao insegura contabilizada`);
+    assertEqual(out.code_dir, '', `${name}: nenhum cwd emitido`);
+  }
+  const legitimate = path.join(f.root, 'T02-legitimate-glob-PLAN.md');
+  fs.writeFileSync(legitimate, ['---', 'id: T02', 'repo: web', 'writes:', '  - "src/**"', '---', ''].join('\n'));
+  assertEqual(resolveCodeDir({ isoResult: f.isoResult, planPath: legitimate, cwd: f.ws }).status, 'ok',
+    'glob interno legitimo preservado');
+});
+
 test('R12 — exit 5 (undeclared)', () => {
   const f = makeFixture({ noRepoField: true });
   const r = runCli(['--resolve', '--iso-result', JSON.stringify(f.isoResult),
