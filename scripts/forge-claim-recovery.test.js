@@ -48,9 +48,9 @@ test('CAS stale aborta sem release', () => {
 test('restore não sobrescreve divergência e extrai conflito idempotente', () => {
   const f = fixture(); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('old'));
   const opts = { ...f.common, confirmOwnerStopped: true, workingStatus: () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }) };
-  assert.strictEqual(recovery.apply(f.cwd, f.id, opts).ok, true); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('new'));
+  const recovered = recovery.apply(f.cwd, f.id, opts); assert.strictEqual(recovered.ok, true); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('new'));
   assert.deepStrictEqual(recovery.restore(f.cwd, f.id).conflicts, ['src/a.bin']); const applied = recovery.restore(f.cwd, f.id, { apply: true }); assert.strictEqual(applied.restored, true);
-  assert.strictEqual(fs.readFileSync(path.join(f.code, 'src', 'a.bin'), 'utf8'), 'new'); const conflict = path.join(f.cwd, '.gsd', 'forge', 'claim-recovery', encodeURIComponent(f.id), 'conflicts', 'src', 'a.bin'); assert.strictEqual(fs.readFileSync(conflict, 'utf8'), 'old');
+  assert.strictEqual(fs.readFileSync(path.join(f.code, 'src', 'a.bin'), 'utf8'), 'new'); const conflict = path.join(f.cwd, recovered.bundle, 'conflicts', 'src', 'a.bin'); assert.strictEqual(fs.readFileSync(conflict, 'utf8'), 'old');
   assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true }).restored, true);
 });
 test('payload corrompido e containment falham fechado', () => {
@@ -88,9 +88,9 @@ test('segunda medição detecta novo dirty path e mutação após snapshot', () 
 
 test('conflict existente divergente nunca é sobrescrito', () => {
   const f = fixture('T-conflict-divergent'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('saved'));
-  const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); assert.strictEqual(recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }).ok, true);
+  const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); const recovered = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(recovered.ok, true);
   fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('current')); assert.strictEqual(recovery.restore(f.cwd, f.id, { apply: true }).restored, true);
-  const conflict = path.join(f.cwd, '.gsd', 'forge', 'claim-recovery', encodeURIComponent(f.id), 'conflicts', 'src', 'a.bin'); fs.writeFileSync(conflict, Buffer.from('operator'));
+  const conflict = path.join(f.cwd, recovered.bundle, 'conflicts', 'src', 'a.bin'); fs.writeFileSync(conflict, Buffer.from('operator'));
   const result = recovery.restore(f.cwd, f.id, { apply: true }); assert.match(result.reason, /conflict-existing-divergent/); assert.strictEqual(fs.readFileSync(conflict, 'utf8'), 'operator');
 });
 
@@ -146,6 +146,29 @@ test('segunda medição inclui code bruto na identidade do status', () => {
   const f = fixture('T-drift-code'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('same')); let call = 0;
   const changedCode = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ++call === 1 ? ' M' : 'MM' }] });
   const result = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: changedCode }); assert.strictEqual(result.reason, 'dirty-scope-drift'); assert.strictEqual(runs.get(f.cwd, f.id).active, true);
+});
+
+test('bundle por tentativa preserva abortados e permite retry sem delete manual', () => {
+  const stale = fixture('T-attempt-stale'); fs.mkdirSync(path.join(stale.code, 'src')); fs.writeFileSync(path.join(stale.code, 'src', 'a.bin'), Buffer.from('same')); const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] });
+  const failed = recovery.apply(stale.cwd, stale.id, { ...stale.common, confirmOwnerStopped: true, workingStatus: dirty, recoverClaim: () => ({ ok: false, reason: 'stale-run' }) }); assert.strictEqual(failed.reason, 'stale-run'); assert(fs.existsSync(path.join(stale.cwd, failed.bundle)));
+  const retried = recovery.apply(stale.cwd, stale.id, { ...stale.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(retried.ok, true); assert.notStrictEqual(retried.bundle, failed.bundle); assert(fs.existsSync(path.join(stale.cwd, failed.bundle))); assert(fs.existsSync(path.join(stale.cwd, retried.bundle)));
+
+  const drift = fixture('T-attempt-drift'); fs.mkdirSync(path.join(drift.code, 'src')); fs.writeFileSync(path.join(drift.code, 'src', 'a.bin'), Buffer.from('same')); let calls = 0; const changesOnce = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ++calls === 2 ? 'MM' : ' M' }] });
+  const drifted = recovery.apply(drift.cwd, drift.id, { ...drift.common, confirmOwnerStopped: true, workingStatus: changesOnce }); assert.strictEqual(drifted.reason, 'dirty-scope-drift');
+  const attemptsRoot = path.join(drift.cwd, '.gsd', 'forge', 'claim-recovery', encodeURIComponent(drift.id), 'attempts'); const before = fs.readdirSync(attemptsRoot); assert.strictEqual(before.length, 1);
+  const driftRetry = recovery.apply(drift.cwd, drift.id, { ...drift.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(driftRetry.ok, true); assert.strictEqual(fs.readdirSync(attemptsRoot).length, 2); assert(fs.existsSync(path.join(attemptsRoot, before[0])));
+});
+
+test('writeExclusive limpa apenas parcial próprio após write/zero/fsync e permite retry', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-exclusive-retry-')); roots.push(root); const bytes = Buffer.from('complete-payload');
+  for (const [name, options, pattern] of [
+    ['throw.bin', { writeSync: (fd, buffer, offset, length, position) => { if (offset > 0) throw new Error('write-boom'); return fs.writeSync(fd, buffer, offset, Math.min(3, length), position); } }, /write-boom/],
+    ['zero.bin', { writeSync: () => 0 }, /write-invalid-count/],
+    ['fsync.bin', { fsyncSync: () => { throw new Error('fsync-boom'); } }, /fsync-boom/],
+  ]) {
+    const target = path.join(root, name); assert.throws(() => recovery.writeExclusive(root, target, bytes, 'restore', options), pattern); assert.strictEqual(fs.existsSync(target), false);
+    assert.deepStrictEqual(recovery.writeExclusive(root, target, bytes, 'restore'), { written: true }); assert.deepStrictEqual(fs.readFileSync(target), bytes);
+  }
 });
 
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });

@@ -99,12 +99,19 @@ function appendEvent(cwd, event) {
   fs.appendFileSync(file, `${JSON.stringify(event)}\n`, 'utf8');
 }
 
-function createBundle(cwd, preview, now) {
+function attemptName(now, nonce) {
+  const suffix = nonce || crypto.randomBytes(12).toString('hex');
+  if (!/^[a-f0-9]{24}$/.test(suffix)) throw new Error('recovery-nonce-invalid');
+  return `${now}-${suffix}`;
+}
+
+function createBundle(cwd, preview, now, name) {
   const parent = secureDirChain(cwd, '.gsd/forge/claim-recovery', true, 'recovery');
-  const rootPath = path.join(parent, encodeURIComponent(preview.run_id));
+  const runRoot = secureDirChain(parent, `${encodeURIComponent(preview.run_id)}/attempts`, true, 'recovery');
+  const rootPath = path.join(runRoot, name || attemptName(now));
   if (lstatOrAbsent(rootPath) !== null) throw new Error('recovery-bundle-already-exists');
   fs.mkdirSync(rootPath);
-  const root = secureDirChain(parent, encodeURIComponent(preview.run_id), false, 'recovery');
+  const root = secureDirChain(runRoot, path.basename(rootPath), false, 'recovery');
   const payloadRoot = secureDirChain(root, 'payload', true, 'recovery-payload');
   const entries = [];
   try {
@@ -125,7 +132,7 @@ function createBundle(cwd, preview, now) {
       }
       entries.push({ path: rel, kind: dirty.kind, code: dirty.code, present, sha256: hash, payload });
     }
-    const manifest = { version: 1, run_id: preview.run_id, created_at: now, code_dir: preview.code_dir, claim: preview.claim, entries };
+    const manifest = { version: 1, run_id: preview.run_id, created_at: now, code_dir: preview.code_dir, claim_identity_sha256: sha256(Buffer.from(JSON.stringify(preview.claim))), claim: preview.claim, entries };
     const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
     fs.writeFileSync(path.join(root, 'manifest.json'), bytes);
     fs.writeFileSync(path.join(root, 'manifest.sha256'), `${sha256(bytes)}\n`, 'ascii');
@@ -171,11 +178,12 @@ function apply(cwd, runId, opts = {}) {
   const now = typeof opts.now === 'number' ? opts.now : Date.now();
   let bundle = null;
   try {
+    const attempt = preview.dirty.length ? attemptName(now) : null;
     const plannedBundle = preview.dirty.length
-      ? path.relative(cwd, recoveryRoot(cwd, runId)).replace(/\\/g, '/') : null;
+      ? path.relative(cwd, path.join(recoveryRoot(cwd, runId), 'attempts', attempt)).replace(/\\/g, '/') : null;
     // Journal first: even creation of the recovery bundle is a mutation.
     appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-intent', run_id: runId, evidence: { intent: 'operator-confirmed-owner-stopped', dirty_paths: preview.dirty.map((e) => e.path), bundle: plannedBundle } });
-    if (preview.dirty.length) bundle = createBundle(cwd, preview, now);
+    if (preview.dirty.length) bundle = createBundle(cwd, preview, now, attempt);
     const evidence = { intent: 'operator-confirmed-owner-stopped', dirty_paths: preview.dirty.map((e) => e.path), bundle: bundle ? path.relative(cwd, bundle.root).replace(/\\/g, '/') : null, manifest_sha256: bundle && bundle.manifest_sha256 };
     if (bundle) appendEvent(cwd, { ts: new Date(now).toISOString(), event: 'claim-recovery-bundle-verified', run_id: runId, evidence });
     const transition = (opts.recoverClaim || recoverClaim)(cwd, runId, preview.record,
@@ -186,18 +194,30 @@ function apply(cwd, runId, opts = {}) {
     catch (error) { event_warning = `outcome-event-failed:${error.message}`; }
     return { ok: true, applied: true, run_id: runId, dirty_paths: evidence.dirty_paths, bundle: evidence.bundle, event_warning };
   } catch (error) {
-    return { ok: false, applied: false, reason: error.message };
+    return { ok: false, applied: false, reason: error.message,
+      bundle: bundle ? path.relative(cwd, bundle.root).replace(/\\/g, '/') : null };
   }
 }
 
 function loadManifest(cwd, runId) {
-  const root = recoveryStore(cwd, runId, false);
+  const record = runs.get(cwd, runId);
+  const bundleRel = record && record.write_claim && record.write_claim.released
+    && record.write_claim.released.evidence && record.write_claim.released.evidence.bundle;
+  if (typeof bundleRel !== 'string' || bundleRel === '') throw new Error('applied-bundle-missing');
+  const runRoot = recoveryStore(cwd, runId, false);
+  const rootPath = path.resolve(cwd, bundleRel);
+  if (!inside(runRoot, rootPath)) throw new Error('bundle-path-escape');
+  const root = secureDirChain(runRoot, path.relative(runRoot, rootPath).replace(/\\/g, '/'), false, 'recovery');
   const file = path.join(root, 'manifest.json');
   const raw = fs.readFileSync(file);
   const expectedHash = fs.readFileSync(path.join(root, 'manifest.sha256'), 'ascii').trim();
   if (!/^[a-f0-9]{64}$/.test(expectedHash) || sha256(raw) !== expectedHash) throw new Error('manifest-corrupt');
   const manifest = JSON.parse(raw.toString('utf8'));
   if (manifest.version !== 1 || manifest.run_id !== runId || !Array.isArray(manifest.entries)) throw new Error('manifest-invalid');
+  if (manifest.claim_identity_sha256 !== sha256(Buffer.from(JSON.stringify(manifest.claim)))) throw new Error('manifest-claim-identity-invalid');
+  const persistedClaim = record.write_claim;
+  const preReleaseClaim = Object.assign({}, persistedClaim, { released: null });
+  if (manifest.claim_identity_sha256 !== sha256(Buffer.from(JSON.stringify(preReleaseClaim)))) throw new Error('manifest-claim-mismatch');
   return { root, manifest };
 }
 
@@ -217,14 +237,24 @@ function writeExclusive(root, target, bytes, label, opts) {
   const parentRel = path.relative(root, path.dirname(target)).replace(/\\/g, '/');
   secureDirChain(root, parentRel, true, label);
   assertSafePath(root, path.dirname(target), label);
-  let handle;
+  let handle; let createdIdentity = null;
   try {
     handle = fs.openSync(target, 'wx');
+    createdIdentity = fs.fstatSync(handle);
     writeAllSync(handle, bytes, o.writeSync);
     (o.fsyncSync || fs.fsyncSync)(handle);
     return { written: true };
   } catch (error) {
-    if (!error || error.code !== 'EEXIST') throw error;
+    if (!error || error.code !== 'EEXIST') {
+      if (handle !== undefined) { try { fs.closeSync(handle); } catch { /* preserve original */ } handle = undefined; }
+      if (createdIdentity) {
+        try {
+          const current = fs.lstatSync(target);
+          if (!current.isSymbolicLink() && current.dev === createdIdentity.dev && current.ino === createdIdentity.ino) fs.unlinkSync(target);
+        } catch { /* preserve original error and never broaden cleanup */ }
+      }
+      throw error;
+    }
     const stat = fs.lstatSync(target);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label}-existing-divergent`);
     if (sha256(fs.readFileSync(target)) !== sha256(bytes)) throw new Error(`${label}-existing-divergent`);
