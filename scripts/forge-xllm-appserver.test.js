@@ -98,11 +98,14 @@ function respondTurn(message) {
   }
   const emit = () => {
     send({ id: message.id, result: { turn: { id: 'turn-1' }, echoParams: params } });
-    send({ method: 'item/completed', params: { item: { type: 'agentMessage', phase: 'final_answer', text: answer(params.model) } } });
+    send({ method: 'item/started', params: { item: { id: 'compact-1', type: 'contextCompaction' } } });
+    send({ method: 'item/completed', params: { item: { id: 'compact-1', type: 'contextCompaction' } } });
+    send({ method: 'item/completed', params: { item: { id: 'answer-1', type: 'agentMessage', phase: 'final_answer', text: answer(params.model) } } });
     send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
   };
   if (scenario === 'silent-then-reply') setTimeout(emit, 320); else emit();
 }
+
 let pending = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {
@@ -134,6 +137,20 @@ setInterval(() => {}, 1000);
   const file = path.join(dir, 'mock-app-server.js');
   fs.writeFileSync(file, source, 'utf8');
   return file;
+}
+
+async function testContextHealthFlow(mock, root) {
+  const repo = fixtureRepo(root);
+  const working = path.join(root, 'context-working');
+  const forgeDir = path.join(working, '.gsd', 'forge');
+  fs.mkdirSync(forgeDir, { recursive: true });
+  const result = await withMock(mock, 'conforming', path.join(root, 'context-capture.json'),
+    () => runExecute(executeOptions(repo, planFile(root), path.join(forgeDir, 'result.json'), 'context-model')));
+  assert.strictEqual(result.appserver.context_health.scope, 'sidecar-thread');
+  assert.strictEqual(result.appserver.context_health.measurement, 'unknown', 'pinned protocol has no formal usage percentage');
+  assert.strictEqual(result.appserver.context_health.compaction_measurement, 'known');
+  assert.strictEqual(result.appserver.context_health.compaction_count, 1, 'started+completed for one item id count exactly once');
+  assert(fs.existsSync(path.join(forgeDir, 'context', 'codex', 'thread-fixed.json')), 'real transport persists its sidecar-thread snapshot');
 }
 
 /**
@@ -976,6 +993,7 @@ async function main() {
     testValidatorBoundary();
     testCommandOverride(mock);
     await testHappyAndWire(mock, root);
+    await testContextHealthFlow(mock, root);
     await testMultiRepoWire(mock, root);
     await testDegradation(mock, root);
     await testHeartbeat(mock, root);

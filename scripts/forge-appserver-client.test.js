@@ -14,10 +14,10 @@ const {
   isContextNotification,
 } = require('./forge-appserver-client');
 
-assert.strictEqual(isContextNotification({ method: 'thread/started', params: {} }), true);
-assert.strictEqual(isContextNotification({ method: 'thread/compacted', params: { cycle_id: 'c1' } }), true);
-assert.strictEqual(isContextNotification({ method: 'turn/completed', params: { context_window: { used_percentage: 0 } } }), true);
-assert.strictEqual(isContextNotification({ method: 'turn/completed', params: {} }), false);
+assert.strictEqual(isContextNotification({ method: 'item/started', params: { item: { id: 'cmp-1', type: 'contextCompaction' } } }), true);
+assert.strictEqual(isContextNotification({ method: 'item/completed', params: { item: { id: 'cmp-1', type: 'contextCompaction' } } }), true);
+assert.strictEqual(isContextNotification({ method: 'item/completed', params: { item: { id: 'm-1', type: 'agentMessage' } } }), false);
+assert.strictEqual(isContextNotification({ method: 'thread/compacted', params: { item: { id: 'cmp-1', type: 'contextCompaction' } } }), false);
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'forge-appserver-client-test-'));
@@ -198,6 +198,10 @@ process.stdin.on('data', chunk => {
       send({ id: 4242, result: { stray: true } });
       setTimeout(() => {
         if (!sawInboundReply) { process.stderr.write('client silently ignored inbound request'); process.exit(93); return; }
+        if (mode === 'formal-compaction') {
+          send({ method: 'item/started', params: { item: { id: 'compact-1', type: 'contextCompaction' } } });
+          send({ method: 'item/completed', params: { item: { id: 'compact-1', type: 'contextCompaction' } } });
+        }
         send({ method: 'item/completed', params: { item: { id: 'item-1', type: 'message' } } });
         send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
       }, 12);
@@ -209,6 +213,16 @@ setInterval(() => {}, 1000);
   const file = path.join(dir, 'mock-app-server.js');
   fs.writeFileSync(file, mock, 'utf8');
   return file;
+}
+
+async function testFormalCompactionNotifications(mock, dir) {
+  const result = await startAppServerTurn({
+    cmd: process.execPath, args: [mock], cwd: dir, timeoutMs: 1500,
+    env: { ...process.env, FORGE_APPSERVER_MOCK_MODE: 'formal-compaction' },
+    threadParams: { cwd: dir }, turnParams: { input: [] },
+  });
+  assert.deepStrictEqual(result.contextNotifications.map(n => [n.method, n.params.item.id]),
+    [['item/started', 'compact-1'], ['item/completed', 'compact-1']]);
 }
 
 function pause(ms) {
@@ -729,6 +743,7 @@ async function main() {
   try {
     await testHelpers();
     await testHappyPath(mock, dir);
+    await testFormalCompactionNotifications(mock, dir);
     await testTurnParamsFunction(mock, dir);
     await testTurnParamsObjectInjection(mock, dir);
     await testOnSpawn(mock, dir);

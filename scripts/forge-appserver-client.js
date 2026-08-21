@@ -86,10 +86,10 @@ function decodeLine(line) {
 // Formal Codex context signals only. Keeping the original notification unchanged is
 // intentional: the adapter, not this transport, owns interpretation and validation.
 function isContextNotification(message) {
-  if (!message || typeof message !== 'object' || typeof message.method !== 'string') return false;
-  if (message.method === 'thread/started' || message.method === 'thread/compacted') return true;
-  const params = message.params && typeof message.params === 'object' ? message.params : null;
-  return !!params && (!!params.context_window || !!params.contextWindow);
+  if (!message || typeof message !== 'object'
+      || (message.method !== 'item/started' && message.method !== 'item/completed')) return false;
+  const item = message.params && message.params.item;
+  return !!item && item.type === 'contextCompaction' && typeof item.id === 'string' && item.id.length > 0;
 }
 
 /**

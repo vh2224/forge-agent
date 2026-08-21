@@ -27,11 +27,9 @@ function readJson(file) {
 }
 
 function extractFormalTelemetry(notification) {
-  if (!notification || typeof notification !== 'object') return { capability: false };
-  const params = notification.params && typeof notification.params === 'object' ? notification.params : {};
-  const context = params.context_window || params.contextWindow;
-  if (!context || typeof context !== 'object' || !Object.prototype.hasOwnProperty.call(context, 'used_percentage')) return { capability: false };
-  return { capability: true, used_percentage: context.used_percentage };
+  // The pinned app-server schema exposes no context-window usage field. Stay unknown
+  // until a formal capability is pinned and covered by a real protocol fixture.
+  return { capability: false };
 }
 
 function observe(options) {
@@ -40,20 +38,32 @@ function observe(options) {
   const previous = readJson(files.state) || { compaction_measurement: 'unknown', seen_cycles: [], checkpoints: [] };
   const telemetry = extractFormalTelemetry(notification);
   const params = notification && notification.params && typeof notification.params === 'object' ? notification.params : {};
-  const epoch = params.epoch == null ? (previous.epoch || '0') : String(params.epoch);
-  const cycleId = params.cycle_id == null ? null : String(params.cycle_id);
-  if (notification && notification.method === 'thread/started') {
+  const item = params.item && typeof params.item === 'object' ? params.item : null;
+  if (options.baseline === true) {
     previous.compaction_measurement = 'known'; previous.compaction_count = previous.compaction_count || 0;
   }
-  if (notification && notification.method === 'thread/compacted' && cycleId && previous.compaction_measurement === 'known'
-      && !previous.seen_cycles.includes(cycleId)) {
-    previous.seen_cycles.push(cycleId); previous.compaction_count += 1;
+  if (notification && (notification.method === 'item/started' || notification.method === 'item/completed')
+      && item && item.type === 'contextCompaction' && typeof item.id === 'string'
+      && previous.compaction_measurement === 'known' && !previous.seen_cycles.includes(item.id)) {
+    previous.seen_cycles.push(item.id); previous.compaction_count += 1;
   }
-  previous.epoch = epoch;
+  previous.epoch = String(previous.compaction_count || 0);
   const snapshot = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', session_id: sessionId,
-    epoch, capability: telemetry.capability, used_percentage: telemetry.used_percentage,
+    epoch: previous.epoch, capability: telemetry.capability, used_percentage: telemetry.used_percentage,
     compaction_measurement: previous.compaction_measurement, compaction_count: previous.compaction_count }, options.now);
+  snapshot.scope = 'sidecar-thread';
+  snapshot.epoch_source = 'forge-local-compaction-count';
   try { atomicJson(files.state, previous); atomicJson(files.snapshot, snapshot); } catch { /* MEM008 */ }
+  return snapshot;
+}
+
+function observeSession(options) {
+  const thread = options.threadStartResult && options.threadStartResult.thread;
+  if (!thread || typeof thread.id !== 'string' || !thread.id) return null;
+  let snapshot = observe({ cwd: options.cwd, session_id: thread.id, baseline: true, now: options.now });
+  for (const notification of options.notifications || []) {
+    snapshot = observe({ cwd: options.cwd, session_id: thread.id, notification, now: options.now });
+  }
   return snapshot;
 }
 
@@ -76,11 +86,11 @@ function checkpointCrossing(options) {
 }
 
 function render(snapshot) {
-  if (!snapshot || snapshot.measurement !== 'measured') return 'ctx ?';
+  const compact = snapshot && snapshot.compaction_measurement === 'known' ? ` compact x${snapshot.compaction_count}` : '';
+  if (!snapshot || snapshot.measurement !== 'measured') return `ctx ?${compact}`;
   const used = Math.round(snapshot.used_percentage * 100);
   const remaining = Math.round(snapshot.remaining_percentage * 100);
-  const compact = snapshot.compaction_measurement === 'known' ? ` compact x${snapshot.compaction_count}` : '';
   return `ctx ${used}% usado/${remaining}% restante${compact}`;
 }
 
-module.exports = { sanitizeIdentity, pathsFor, extractFormalTelemetry, observe, checkpointCrossing, render };
+module.exports = { sanitizeIdentity, pathsFor, extractFormalTelemetry, observe, observeSession, checkpointCrossing, render };

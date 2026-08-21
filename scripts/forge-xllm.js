@@ -1042,6 +1042,14 @@ function invokeCodexAppServer(opts) {
     onSpawn,
   }).then((session) => {
     stopHeartbeat();
+    let contextHealth = null;
+    if (opts.contextRoot) {
+      try {
+        const { observeSession } = require('./forge-context-codex');
+        contextHealth = observeSession({ cwd: opts.contextRoot, threadStartResult: session.threadStartResult,
+          notifications: session.contextNotifications || [] });
+      } catch { /* context health is best-effort and never controls the turn */ }
+    }
     // The client preserves item/completed params verbatim; the pinned protocol
     // carries the ThreadItem at params.item. Accept a direct item as well so this
     // adapter remains compatible with an already-normalized client surface.
@@ -1065,6 +1073,7 @@ function invokeCodexAppServer(opts) {
       // measured mock × real-server divergence (serverInfo vs userAgent) cannot make a
       // live app-server session report as `unknown`.
       transport: deriveTransport(session),
+      contextHealth,
       diagnostics: {
         discarded: session.discarded || { count: 0, kinds: {} },
         inbound_requests: (session.inboundRequests || []).length,
@@ -1995,6 +2004,9 @@ async function runExecute(opts) {
     // orchestrator (T03) owns the file name of the evidence log.
     evidenceUnit: dispatchId,
     writableRoots,
+    contextRoot: path.basename(path.dirname(resultFile)).toLowerCase() === 'forge'
+      && path.basename(path.dirname(path.dirname(resultFile))).toLowerCase() === '.gsd'
+      ? path.dirname(path.dirname(path.dirname(resultFile))) : null,
   });
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   const outputTokens = countTokens(rawContent);
@@ -2108,6 +2120,7 @@ async function runExecute(opts) {
       // level breaks the additive-safety invariant, not just a test.
       transport: appServerTransport.kind,
       transport_version: appServerTransport.version,
+      context_health: appServerOutput.contextHealth || { measurement: 'unknown', compaction_measurement: 'unknown', scope: 'sidecar-thread' },
     },
     // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
     // no existing key changes name or shape, and validateExecuteResult does NOT
