@@ -422,7 +422,7 @@ function testNonGitWriteProbeStaysRegistered() {
  * the same channel and shape as a real measurement — ready to be pasted into an
  * artifact as evidence.
  */
-function testCrossRootProbe() {
+async function testCrossRootProbe() {
   const probe = require('./forge-appserver-probe.js');
   assert.strictEqual(typeof probe.probeCrossRootWrite, 'function', 'crossroot-write probe must be exported');
   assert.strictEqual(typeof probe.crossRootVerdict, 'function', 'the verdict ladder must be exported as a pure function');
@@ -448,6 +448,43 @@ function testCrossRootProbe() {
     'Windows must use a native non-interactive writer instead of the non-portable touch command');
   assert(windowsWrite.includes("a''b.txt"), 'PowerShell single-quoted paths must double embedded quotes');
 
+  const resourceFixture = (failAt) => {
+    const removed = [];
+    let made = 0;
+    const fsApi = {
+      mkdtempSync(prefix) {
+        made += 1;
+        if (made === failAt) throw new Error(`mkdtemp-${made}`);
+        return `${prefix}made-${made}`;
+      },
+      realpathSync(value) { return value; },
+      mkdirSync() {},
+      rmSync(value) { removed.push(value); },
+    };
+    return { fsApi, removed };
+  };
+  const resolveFailure = resourceFixture(99);
+  await assert.rejects(
+    probe.withTrackedProbeResources(
+      { fsApi: resolveFailure.fsApi, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); throw new Error('resolveCommand failed'); },
+    ),
+    /resolveCommand failed/,
+  );
+  assert.strictEqual(resolveFailure.removed.length, 1,
+    'resolveCommand failure after sqliteRoot acquisition must clean the one created path');
+
+  const partialCreation = resourceFixture(3);
+  await assert.rejects(
+    probe.withTrackedProbeResources(
+      { fsApi: partialCreation.fsApi, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); makeTemp('repo-a-'); makeTemp('repo-b-'); },
+    ),
+    /mkdtemp-3/,
+  );
+  assert.strictEqual(partialCreation.removed.length, 2,
+    'failure while creating B must clean exactly sqliteRoot and A, never an uncreated B');
+
   const { crossRootVerdict, CROSSROOT_VERDICTS: V } = probe;
   const wrote = { exists: true };
   const absent = { exists: false };
@@ -463,6 +500,30 @@ function testCrossRootProbe() {
   const requestedWrite = (arm, threadSandbox = { type: 'workspaceWrite' }) => ({
     ...arm, requestedThreadSandbox: 'workspace-write', threadSandbox,
   });
+
+  const liveWrote = requestedWrite({ exists: true });
+  const liveAbsent = (target) => requestedWrite(ranButAbsent(target, 1));
+  const sequence = async (answers) => {
+    let index = 0;
+    return probe.runCrossRootArmSequence({
+      dirA: '/A', dirB: '/B', policyBase: { type: 'workspaceWrite' },
+      runArm: async () => answers[index++],
+    });
+  };
+  const denyFailed = await sequence([liveWrote, { error: 'deny outage' }]);
+  assert.deepStrictEqual(denyFailed.executed, ['CTRL-ATTEMPT', 'CTRL-DENY'],
+    'invalid CTRL-DENY must prevent TREAT and REPLACE-CHECK');
+  assert.strictEqual(denyFailed.terminal.verdict, V.UNKNOWN);
+  const treatFailed = await sequence([liveWrote, liveAbsent('/B/deny.txt'), { error: 'treat outage' }]);
+  assert.deepStrictEqual(treatFailed.executed, ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT'],
+    'invalid TREAT must prevent REPLACE-CHECK');
+  assert.strictEqual(treatFailed.terminal.verdict, V.UNKNOWN);
+  const negative = await sequence([liveWrote, liveAbsent('/B/deny.txt'), liveAbsent('/B/treat.txt')]);
+  assert.deepStrictEqual(negative.executed, ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT'],
+    'REPLACE-CHECK cannot contribute to a measured negative and must not run');
+  const positive = await sequence([liveWrote, liveAbsent('/B/deny.txt'), liveWrote, liveWrote]);
+  assert.deepStrictEqual(positive.executed, ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT', 'REPLACE-CHECK'],
+    'REPLACE-CHECK must run after a measured positive because it distinguishes sum from replacement');
 
   const readOnlyPrecondition = crossRootVerdict({
     ctrlAttempt: requestedWrite({ exists: false, items: [] }, { type: 'readOnly' }),
@@ -481,7 +542,7 @@ function testCrossRootProbe() {
   }
   assert(source.includes('sessionEnv(label, env)'), 'every main runArm invocation must derive its own SQLite home from its label');
   for (const label of ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT', 'REPLACE-CHECK']) {
-    assert(source.includes(`runArm('${label}'`), `${label} must keep a distinct arm label for SQLite isolation`);
+    assert(source.includes(`run('${label}'`), `${label} must keep a distinct arm label for SQLite isolation`);
   }
   assert(source.includes("threadSandbox: 'workspace-write'"),
     'all four main arms must request the same writable thread sandbox');
@@ -791,7 +852,7 @@ async function main() {
     await testSvnTurnCarriesExplicitSandboxPolicy(mock, root);
     await testTransportField(mock, realMock, root);
     testNonGitWriteProbeStaysRegistered();
-    testCrossRootProbe();
+    await testCrossRootProbe();
     process.stdout.write('forge-xllm-appserver.test.js: ok\n');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
