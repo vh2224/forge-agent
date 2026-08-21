@@ -389,6 +389,66 @@ await testAsync('killTreeAsync: a hung taskkill cannot block SIGINT cleanup past
   assertEqual(ownedSignals.join(','), 'SIGKILL', 'timeout fallback must target only the owned child handle');
 });
 
+await testAsync('killAllLiveAsync: real timeout/nonzero/spawn-error paths aggregate degradation', async () => {
+  const { EventEmitter } = require('events');
+  const cases = [
+    {
+      expected: 'timeout',
+      spawnImpl: () => { const killer = new EventEmitter(); killer.kill = () => true; return killer; },
+      timeoutMs: 10,
+    },
+    {
+      expected: 'exit-9',
+      spawnImpl: () => {
+        const killer = new EventEmitter(); killer.kill = () => true;
+        queueMicrotask(() => killer.emit('close', 9)); return killer;
+      },
+      timeoutMs: 100,
+    },
+    { expected: 'spawn-exception', spawnImpl: () => { throw new Error('spawn failed'); }, timeoutMs: 100 },
+  ];
+  for (const scenario of cases) {
+    const owned = new EventEmitter();
+    owned.pid = 500000 + cases.indexOf(scenario); owned.killed = false;
+    owned.kill = () => { queueMicrotask(() => owned.emit('exit', null, 'SIGKILL')); return true; };
+    bench.spawnTracked('owned', [], {
+      cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned,
+    });
+    let observed = null;
+    try {
+      await bench.killAllLiveAsync({
+        platform: 'win32', spawnImpl: scenario.spawnImpl, timeoutMs: scenario.timeoutMs,
+        reportDegraded: () => {},
+      });
+    } catch (error) { observed = error; }
+    assert(observed && observed.code === 'CLEANUP_DEGRADED', `expected aggregate degradation for ${scenario.expected}`);
+    assert(observed.message.includes(scenario.expected), `missing reason ${scenario.expected}: ${observed.message}`);
+  }
+});
+
+await testAsync('signal shutdown: real degraded cleanup selects exit 75 after final restore', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 510000; owned.killed = false;
+  owned.kill = () => { queueMicrotask(() => owned.emit('exit', null, 'SIGKILL')); return true; };
+  bench.spawnTracked('owned', [], { cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned });
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const exits = []; const diagnostics = [];
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT',
+    cancellationFence: bench.createSpawnFence(),
+    restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync({
+      platform: 'win32', spawnImpl: () => killer, timeoutMs: 10, reportDegraded: () => {},
+    }),
+    exit: (code) => exits.push(code),
+    writeDiagnostic: (message) => diagnostics.push(message),
+  });
+  assertEqual(exits.join(','), '75', 'degraded cleanup must never report SIGINT success');
+  assert(diagnostics.some((message) => message.includes('cleanup-degraded:timeout')),
+    `cleanup degradation must be named: ${diagnostics.join(',')}`);
+});
+
 await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {
   const fence = bench.createSpawnFence();
   let releaseCleanup;
@@ -438,6 +498,24 @@ await testAsync('signal shutdown: failed final restoration cannot exit 130 and n
   assert(order.some((entry) => entry === 'diagnostic-final-restore-failed:EACCES'),
     `final restore failure must be named: ${order.join(',')}`);
   assert(!order.includes('exit-130'), 'restore failure must never report SIGINT success');
+});
+
+test('runMatrix finalization: restore failure replaces false success on a normal path', () => {
+  const restoreError = Object.assign(new Error('restore-EACCES'), { code: 'EACCES' });
+  let observed = null;
+  try { bench.assertRestoration(null, { ok: false, error: restoreError }); } catch (error) { observed = error; }
+  assertEqual(observed, restoreError, 'normal completion must become a restoration failure');
+});
+
+test('runMatrix finalization: original and restore failures remain together with original as cause', () => {
+  const original = new Error('corrida-failed');
+  const restoreError = new Error('restore-failed');
+  let observed = null;
+  try { bench.assertRestoration(original, { ok: false, error: restoreError }); } catch (error) { observed = error; }
+  assert(observed instanceof AggregateError, 'dual failure must be AggregateError');
+  assertEqual(observed.cause, original, 'original failure must remain the cause');
+  assertEqual(observed.errors[0], original);
+  assertEqual(observed.errors[1], restoreError);
 });
 
 await testAsync('runMatrix: writes one JSONL line per corrida with a fresh in-cell witness, and restores prefs on normal exit', async () => {

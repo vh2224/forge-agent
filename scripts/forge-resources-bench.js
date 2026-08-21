@@ -281,10 +281,19 @@ function killTreeAsync(child, options = {}) {
   });
 }
 
-async function killAllLiveAsync() {
+async function killAllLiveAsync(options = {}) {
   const children = Array.from(liveChildren);
   liveChildren.clear();
-  await Promise.all(children.map((child) => killTreeAsync(child)));
+  const results = await Promise.all(children.map((child) => killTreeAsync(child, options)));
+  const degraded = results.filter((result) => !result || result.ok === false);
+  if (degraded.length > 0) {
+    const reasons = degraded.map((result) => (result && result.reason) || 'unknown');
+    const error = new Error(`cleanup-degraded:${reasons.join(',')}`);
+    error.code = 'CLEANUP_DEGRADED';
+    error.results = results;
+    throw error;
+  }
+  return { ok: true, results };
 }
 
 function createSpawnFence() {
@@ -315,6 +324,18 @@ async function completeSignalShutdown({
     return;
   }
   exit(signal === 'SIGINT' ? 130 : 143);
+}
+
+function assertRestoration(runError, restoration) {
+  if (restoration.ok) return;
+  if (runError) {
+    throw new AggregateError(
+      [runError, restoration.error],
+      `benchmark failed and preferences could not be restored: ${restoration.error.message}`,
+      { cause: runError },
+    );
+  }
+  throw restoration.error;
 }
 
 // Spawn one child in its own process group, resolving with a classified
@@ -692,13 +713,14 @@ async function runMatrix(opts) {
   } = opts;
   const prefsPath = localPrefsPath(cwd);
   const snapshot = snapshotPrefsFile(prefsPath);
+  const restorePrefs = opts.restorePrefsFile || restorePrefsFile;
   const cancellationFence = createSpawnFence();
   let restored = false;
   const doRestore = (force = false) => {
     if (restored && !force) return { ok: true, skipped: true };
     restored = true;
     try {
-      restorePrefsFile(prefsPath, snapshot);
+      restorePrefs(prefsPath, snapshot);
       return { ok: true };
     } catch (e) {
       process.stderr.write(`forge-resources-bench: ERRO ao restaurar prefs (${e.message}) — verifique ${prefsPath} manualmente.\n`);
@@ -727,6 +749,7 @@ async function runMatrix(opts) {
   process.on('SIGINT', onSignal('SIGINT'));
   process.on('SIGTERM', onSignal('SIGTERM'));
 
+  let runError = null;
   try {
     const plan = planRuns(cells, reps);
     for (const { cell, rep } of plan) {
@@ -738,9 +761,13 @@ async function runMatrix(opts) {
       if (!record || cancellationFence.closed) break;
     }
     return summarizeFile(outFile, cells);
+  } catch (error) {
+    runError = error;
+    throw error;
   } finally {
     killAllLive();
-    doRestore();
+    const restoration = doRestore();
+    assertRestoration(runError, restoration);
   }
 }
 
@@ -798,9 +825,11 @@ module.exports = {
   spawnCompetitor,
   killTree,
   killTreeAsync,
+  killAllLiveAsync,
   createSpawnFence,
   closeSpawnFence,
   completeSignalShutdown,
+  assertRestoration,
   spawnTracked,
   TASKKILL_TIMEOUT_MS,
   ENFORCEMENT_REASONS,
