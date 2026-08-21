@@ -30,7 +30,10 @@ function sourceVersion() {
   try {
     const resolution = require('./forge-release-version.js').resolveVersion(path.resolve(__dirname, '..'));
     return resolution.new_tag ? resolution.new_tag.replace(/^v/, '') : null;
-  } catch (_) { return null; }
+  } catch (error) {
+    if (error && error.code === 'version-not-git') return null;
+    throw error;
+  }
 }
 
 function archiveVersion(root = path.resolve(__dirname, '..')) {

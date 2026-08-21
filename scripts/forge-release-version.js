@@ -26,6 +26,12 @@ function nextTag(latestTag, bump) {
 }
 
 function resolveFromFacts({ headTags = [], latestTag = null, commits = [] } = {}) {
+  const invalidHeadTag = headTags.find(tag => !parseTag(tag));
+  if (invalidHeadTag) {
+    const error = new Error(`invalid release tag at HEAD: ${invalidHeadTag}`);
+    error.code = 'invalid-release-tag';
+    throw error;
+  }
   const validHeadTags = headTags.filter(parseTag).sort((a, b) => {
     const av = parseTag(a); const bv = parseTag(b);
     return av.major - bv.major || av.minor - bv.minor || av.patch - bv.patch;
@@ -47,8 +53,20 @@ function git(cwd, args, allowEmpty = false) {
 }
 
 function resolveVersion(cwd = process.cwd()) {
+  const inside = spawnSync('git', ['-C', cwd, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8', shell: false });
+  if (!inside || inside.status !== 0 || String(inside.stdout || '').trim() !== 'true') {
+    const error = new Error('version provenance unavailable: source is not a Git worktree');
+    error.code = 'version-not-git';
+    throw error;
+  }
+  const shallow = spawnSync('git', ['-C', cwd, 'rev-parse', '--is-shallow-repository'], { encoding: 'utf8', shell: false });
+  if (!shallow || shallow.status !== 0 || String(shallow.stdout || '').trim() === 'true') {
+    const error = new Error('version history incomplete: fetch full history and tags before installing or packaging');
+    error.code = 'version-history-incomplete';
+    throw error;
+  }
   const headTags = git(cwd, ['tag', '--points-at', 'HEAD', '-l', 'v*'], true);
-  const allTags = git(cwd, ['tag', '-l', 'v*', '--sort=-v:refname'], true);
+  const allTags = git(cwd, ['tag', '-l', 'v*', '--sort=-v:refname'], true).filter(parseTag);
   const latestTag = allTags[0] || null;
   const range = latestTag ? `${latestTag}..HEAD` : 'HEAD';
   const log = spawnSync('git', ['-C', cwd, 'log', range, '--pretty=format:%B%x1e'], { encoding: 'utf8', shell: false });

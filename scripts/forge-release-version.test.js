@@ -23,6 +23,8 @@ assert.strictEqual(api.nextTag('v4.19.6', 'minor'), 'v4.20.0');
 assert.strictEqual(api.nextTag('v4.20.0', 'patch'), 'v4.20.1');
 assert.strictEqual(product.archiveVersion(path.join('tmp', 'forge-agent-4.20.7')), '4.20.7');
 assert.strictEqual(product.archiveVersion(path.join('tmp', 'forge-agent-main')), null);
+assert.throws(() => api.resolveFromFacts({ headTags: ['vbanana'], latestTag: 'v4.20.0', commits: [] }),
+  error => error.code === 'invalid-release-tag');
 
 const next = api.resolveFromFacts({ latestTag: 'v4.20.0', commits: ['fix(release): enforce version'] });
 assert.deepStrictEqual(next, { skip: false, new_tag: 'v4.20.1', range: 'v4.20.0..HEAD', bump: 'patch', latest_tag: 'v4.20.0' });
@@ -54,6 +56,12 @@ try {
   git(repo, ['add', 'a.txt']);
   git(repo, ['commit', '-q', '-m', 'feat: api', '-m', 'BREAKING CHANGE: removed field']);
   assert.strictEqual(api.resolveVersion(repo).new_tag, 'v2.0.0');
+  const shallow = `${repo}-shallow`;
+  const cloned = spawnSync('git', ['clone', '-q', '--depth', '1', '--no-tags', `file:///${repo.replace(/\\/g, '/')}`, shallow],
+    { encoding: 'utf8', shell: false });
+  assert.strictEqual(cloned.status, 0, cloned.stderr);
+  assert.throws(() => api.resolveVersion(shallow), error => error.code === 'version-history-incomplete');
+  fs.rmSync(shallow, { recursive: true, force: true });
 } finally { fs.rmSync(repo, { recursive: true, force: true }); }
 
 console.log('forge-release-version tests passed');
