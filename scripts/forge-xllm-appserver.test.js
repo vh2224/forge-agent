@@ -150,6 +150,9 @@ async function testContextHealthFlow(mock, root) {
   assert.strictEqual(result.appserver.context_health.measurement, 'unknown', 'pinned protocol has no formal usage percentage');
   assert.strictEqual(result.appserver.context_health.compaction_measurement, 'known');
   assert.strictEqual(result.appserver.context_health.compaction_count, 1, 'started+completed for one item id count exactly once');
+  assert.strictEqual(result.appserver.context_boundary.indicator, 'ctx ? compact x1');
+  assert.strictEqual(result.appserver.context_boundary.severity, 'none', 'unknown usage cannot evaluate percentage severity');
+  assert.strictEqual(result.appserver.context_boundary.checkpoint, false, 'unknown usage cannot checkpoint');
   assert(fs.existsSync(path.join(forgeDir, 'context', 'codex', 'thread-fixed.json')), 'real transport persists its sidecar-thread snapshot');
 }
 

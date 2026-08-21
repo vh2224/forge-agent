@@ -3,7 +3,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { createContextSnapshot, usableSnapshot } = require('./forge-context-monitor');
+const { createContextSnapshot, usableSnapshot, severityFor, shouldInject,
+  buildAdditionalContext, readContextMonitorPrefs } = require('./forge-context-monitor');
 
 function sanitizeIdentity(value) {
   return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'unknown';
@@ -75,14 +76,53 @@ function checkpointCrossing(options) {
   state.checkpoints = Array.isArray(state.checkpoints) ? state.checkpoints : [];
   const key = String(snapshot.epoch);
   if (state.checkpoints.includes(key)) return { checkpoint: false };
-  state.checkpoints.push(key);
+  const eventId = `context-checkpoint:codex:${sanitizeIdentity(snapshot.session_id)}:${sanitizeIdentity(key)}`;
+  const eventFile = path.join(cwd, '.gsd', 'forge', 'events.jsonl');
+  const io = options.io || {};
+  const append = io.appendEvent || ((file, line) => fs.appendFileSync(file, line));
+  const writeState = io.writeState || atomicJson;
+  const hasEvent = () => {
+    try {
+      return fs.readFileSync(eventFile, 'utf8').split(/\r?\n/).some(line => {
+        try { return JSON.parse(line).event_id === eventId; } catch { return false; }
+      });
+    } catch { return false; }
+  };
   try {
-    atomicJson(files.state, state);
-    const event = { ts: new Date(now || Date.now()).toISOString(), event: 'context-checkpoint', host_runtime: 'codex', session_id: snapshot.session_id, epoch: key };
     fs.mkdirSync(path.join(cwd, '.gsd', 'forge'), { recursive: true });
-    fs.appendFileSync(path.join(cwd, '.gsd', 'forge', 'events.jsonl'), `${JSON.stringify(event)}\n`);
-  } catch { /* MEM008 */ }
+    if (!hasEvent()) {
+      const event = { ts: new Date(now || Date.now()).toISOString(), event: 'context-checkpoint', event_id: eventId,
+        host_runtime: 'codex', scope: 'sidecar-thread', session_id: snapshot.session_id, epoch: key };
+      append(eventFile, `${JSON.stringify(event)}\n`);
+    }
+    if (!hasEvent()) return { checkpoint: false, error: 'event-not-durable' };
+    state.checkpoints.push(key);
+    writeState(files.state, state);
+    const committed = readJson(files.state);
+    if (!committed || !Array.isArray(committed.checkpoints) || !committed.checkpoints.includes(key)) {
+      return { checkpoint: false, error: 'marker-not-durable' };
+    }
+  } catch (error) { return { checkpoint: false, error: error.code || error.message || 'persistence-failed' }; }
   return { checkpoint: true };
+}
+
+function consumeBoundary(options) {
+  const snapshot = options.snapshot;
+  const prefs = options.prefs || readContextMonitorPrefs(options.cwd);
+  const indicator = render(snapshot);
+  const result = { indicator, severity: 'none', additionalContext: '', checkpoint: false };
+  if (!prefs.enabled || !prefs.alertsEnabled || !usableSnapshot(snapshot, options.now)) return result;
+  result.severity = severityFor(snapshot.remaining_percentage, prefs.thresholds);
+  const stateFile = pathsFor(options.cwd, snapshot.session_id).state;
+  const state = readJson(stateFile) || {};
+  const decision = shouldInject(result.severity, state.debounce, prefs.debounceToolUses);
+  state.debounce = decision.nextState;
+  try { atomicJson(stateFile, state); } catch { return result; }
+  if (decision.inject) result.additionalContext = buildAdditionalContext(result.severity, prefs.thresholds);
+  if (snapshot.remaining_percentage <= prefs.thresholds.checkpoint) {
+    result.checkpoint = checkpointCrossing({ cwd: options.cwd, snapshot, thresholds: prefs.thresholds, now: options.now }).checkpoint;
+  }
+  return result;
 }
 
 function render(snapshot) {
@@ -93,4 +133,5 @@ function render(snapshot) {
   return `ctx ${used}% usado/${remaining}% restante${compact}`;
 }
 
-module.exports = { sanitizeIdentity, pathsFor, extractFormalTelemetry, observe, observeSession, checkpointCrossing, render };
+module.exports = { sanitizeIdentity, pathsFor, extractFormalTelemetry, observe, observeSession,
+  checkpointCrossing, consumeBoundary, render };

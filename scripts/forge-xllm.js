@@ -1043,11 +1043,13 @@ function invokeCodexAppServer(opts) {
   }).then((session) => {
     stopHeartbeat();
     let contextHealth = null;
+    let contextBoundary = null;
     if (opts.contextRoot) {
       try {
-        const { observeSession } = require('./forge-context-codex');
+        const { observeSession, consumeBoundary } = require('./forge-context-codex');
         contextHealth = observeSession({ cwd: opts.contextRoot, threadStartResult: session.threadStartResult,
           notifications: session.contextNotifications || [] });
+        if (contextHealth) contextBoundary = consumeBoundary({ cwd: opts.contextRoot, snapshot: contextHealth });
       } catch { /* context health is best-effort and never controls the turn */ }
     }
     // The client preserves item/completed params verbatim; the pinned protocol
@@ -1074,6 +1076,7 @@ function invokeCodexAppServer(opts) {
       // live app-server session report as `unknown`.
       transport: deriveTransport(session),
       contextHealth,
+      contextBoundary,
       diagnostics: {
         discarded: session.discarded || { count: 0, kinds: {} },
         inbound_requests: (session.inboundRequests || []).length,
@@ -2121,6 +2124,7 @@ async function runExecute(opts) {
       transport: appServerTransport.kind,
       transport_version: appServerTransport.version,
       context_health: appServerOutput.contextHealth || { measurement: 'unknown', compaction_measurement: 'unknown', scope: 'sidecar-thread' },
+      context_boundary: appServerOutput.contextBoundary || { indicator: 'ctx ?', severity: 'none', additionalContext: '', checkpoint: false },
     },
     // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
     // no existing key changes name or shape, and validateExecuteResult does NOT

@@ -5,8 +5,8 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { extractFormalTelemetry, observe, observeSession, checkpointCrossing, render, pathsFor } = require('./forge-context-codex');
-const { DEFAULT_THRESHOLDS } = require('./forge-context-monitor');
+const { extractFormalTelemetry, observe, observeSession, checkpointCrossing, consumeBoundary, render, pathsFor } = require('./forge-context-codex');
+const { DEFAULT_THRESHOLDS, createContextSnapshot } = require('./forge-context-monitor');
 
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-context-codex-'));
 try {
@@ -37,6 +37,37 @@ try {
   const other = observeSession({ cwd, threadStartResult: { thread: { id: 'other' } }, notifications: [], now: 8000 });
   assert.strictEqual(other.compaction_count, 0, 'threads must be isolated');
   assert.strictEqual(observeSession({ cwd, threadStartResult: {}, notifications: [] }), null, 'failed/missing thread start cannot establish baseline');
+
+  const measured = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', capability: true,
+    session_id: 'measured', epoch: 'e1', used_percentage: 62 }, 9000);
+  measured.scope = 'sidecar-thread';
+  const alertsOff = consumeBoundary({ cwd, snapshot: measured, now: 9000,
+    prefs: { enabled: true, alertsEnabled: false, debounceToolUses: 0, thresholds: DEFAULT_THRESHOLDS } });
+  assert.strictEqual(alertsOff.indicator, 'ctx 62% usado/38% restante');
+  assert.strictEqual(alertsOff.severity, 'none');
+  assert.strictEqual(alertsOff.checkpoint, false);
+
+  const appendFailure = checkpointCrossing({ cwd, snapshot: { ...measured, session_id: 'append-fail' },
+    thresholds: DEFAULT_THRESHOLDS, now: 9000, io: { appendEvent() { throw new Error('disk full'); } } });
+  assert.strictEqual(appendFailure.checkpoint, false, 'event failure must never report checkpoint success');
+  assert.strictEqual(checkpointCrossing({ cwd, snapshot: { ...measured, session_id: 'append-fail' },
+    thresholds: DEFAULT_THRESHOLDS, now: 9000 }).checkpoint, true, 'failed append remains retryable');
+
+  const partial = { ...measured, session_id: 'partial-fail', epoch: 'e2' };
+  const markerFailure = checkpointCrossing({ cwd, snapshot: partial, thresholds: DEFAULT_THRESHOLDS, now: 9000,
+    io: { writeState() { throw new Error('marker failed'); } } });
+  assert.strictEqual(markerFailure.checkpoint, false, 'marker failure after event must report false');
+  assert.strictEqual(checkpointCrossing({ cwd, snapshot: partial, thresholds: DEFAULT_THRESHOLDS, now: 9000 }).checkpoint, true,
+    'retry must recover from event-written/marker-missing partial failure');
+  const events = fs.readFileSync(path.join(cwd, '.gsd', 'forge', 'events.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+  assert.strictEqual(events.filter(event => event.event_id && event.event_id.includes('partial-fail')).length, 1,
+    'partial-failure retry must not duplicate its durable event');
+
+  const boundary = consumeBoundary({ cwd, snapshot: { ...measured, session_id: 'boundary', epoch: 'e3' }, now: 9000,
+    prefs: { enabled: true, alertsEnabled: true, debounceToolUses: 0, thresholds: DEFAULT_THRESHOLDS } });
+  assert.strictEqual(boundary.severity, 'checkpoint');
+  assert.match(boundary.additionalContext, /pr.ximo boundary seguro/);
+  assert.strictEqual(boundary.checkpoint, true, 'safe boundary consumer performs durable checkpoint crossing');
   process.stdout.write('forge-context-codex.test.js: ok\n');
 } finally {
   fs.rmSync(cwd, { recursive: true, force: true });

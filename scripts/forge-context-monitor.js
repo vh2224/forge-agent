@@ -43,6 +43,8 @@ const DEFAULT_THRESHOLDS = Object.freeze({ checkpoint: 0.40, warning: 0.35, crit
 const DEBOUNCE_TOOLUSES = 5;
 const STALE_MS = 60_000;
 const BRIDGE_VERSION = 2;
+const HOST_SOURCES = Object.freeze({ claude: 'claude-statusline', codex: 'codex-app-server' });
+let configuredDebounceToolUses = DEBOUNCE_TOOLUSES;
 
 // Severity ranking (higher index = more severe)
 const SEVERITY_RANK = { none: 0, checkpoint: 1, warning: 2, critical: 3 };
@@ -54,12 +56,16 @@ function normalizePercentage(value) {
 
 function createContextSnapshot(input, now) {
   const source = input && typeof input.source === 'string' ? input.source : 'unknown';
+  const requestedHost = input && input.host_runtime;
+  const hostRuntime = requestedHost === 'claude' || requestedHost === 'codex' ? requestedHost : 'unknown';
+  const recognizedContract = hostRuntime !== 'unknown' && source === HOST_SOURCES[hostRuntime];
   const sessionId = input && typeof input.session_id === 'string' ? input.session_id : null;
   const timestamp = Number.isFinite(now) ? now : Date.now();
-  const used = normalizePercentage(input && input.used_percentage);
+  const capability = recognizedContract && input && input.capability === true;
+  const used = capability ? normalizePercentage(input.used_percentage) : null;
   const snapshot = {
-    version: BRIDGE_VERSION, host_runtime: input && input.host_runtime === 'codex' ? 'codex' : 'claude',
-    source, capability: input && input.capability === true, session_id: sessionId,
+    version: BRIDGE_VERSION, host_runtime: hostRuntime,
+    source, capability, session_id: sessionId,
     timestamp, epoch: input && input.epoch != null ? String(input.epoch) : '0',
     measurement: used === null ? 'unknown' : 'measured',
   };
@@ -76,7 +82,8 @@ function createContextSnapshot(input, now) {
 
 function usableSnapshot(snapshot, now, maxAgeMs) {
   return !!snapshot && snapshot.version === BRIDGE_VERSION && snapshot.measurement === 'measured'
-    && snapshot.host_runtime && !isStale(snapshot.timestamp, now, maxAgeMs)
+    && snapshot.capability === true && HOST_SOURCES[snapshot.host_runtime] === snapshot.source
+    && !isStale(snapshot.timestamp, now, maxAgeMs)
     && Number.isFinite(snapshot.remaining_percentage);
 }
 
@@ -151,7 +158,8 @@ function shouldInject(severity, debounceState, debounceToolUses) {
   }
 
   // Same or lower severity: respect debounce window
-  const window = Number.isInteger(debounceToolUses) && debounceToolUses >= 0 ? debounceToolUses : DEBOUNCE_TOOLUSES;
+  const window = Number.isInteger(debounceToolUses) && debounceToolUses >= 0
+    ? debounceToolUses : configuredDebounceToolUses;
   if (toolUsesSinceLast >= window) {
     return {
       inject: true,
@@ -219,6 +227,7 @@ function readContextMonitorPrefs(cwd) {
   let critical = DEFAULT_THRESHOLDS.critical;
   const monitor = readPrefsCached(cwd).prefs.context_monitor;
   if (!monitor || typeof monitor !== 'object' || Array.isArray(monitor)) {
+    configuredDebounceToolUses = debounceToolUses;
     return { enabled, alertsEnabled, debounceToolUses, thresholds: { checkpoint, warning, critical } };
   }
 
@@ -244,7 +253,8 @@ function readContextMonitorPrefs(cwd) {
     error.code = 'FORGE_PREFS_INVALID_CONTEXT_MONITOR';
     throw error;
   }
-  return { enabled, alertsEnabled, debounceToolUses, thresholds: { checkpoint, warning, critical } };
+  configuredDebounceToolUses = debounceToolUses;
+  return { enabled: enabled && alertsEnabled, alertsEnabled, debounceToolUses, thresholds: { checkpoint, warning, critical } };
 }
 
 // ── Module exports ─────────────────────────────────────────────────────────────
@@ -254,6 +264,7 @@ module.exports = {
   DEBOUNCE_TOOLUSES,
   STALE_MS,
   BRIDGE_VERSION,
+  HOST_SOURCES,
   createContextSnapshot,
   usableSnapshot,
   severityFor,

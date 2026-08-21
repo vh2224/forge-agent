@@ -305,16 +305,36 @@ test('snapshot preserves real zero and complement', () => {
   assertEq(snapshot.remaining_percentage, 1);
 });
 
+test('percentage requires explicit capability and recognized host/source', () => {
+  for (const input of [
+    { host_runtime: 'codex', source: 'codex-app-server', capability: false, used_percentage: 50 },
+    { host_runtime: 'codex', source: 'wrong', capability: true, used_percentage: 50 },
+    { host_runtime: 'claude', source: 'codex-app-server', capability: true, used_percentage: 50 },
+  ]) {
+    const snapshot = createContextSnapshot(input, 1000);
+    assertEq(snapshot.measurement, 'unknown');
+    assert(!Object.prototype.hasOwnProperty.call(snapshot, 'used_percentage'), 'fail-closed snapshot omits percentages');
+  }
+});
+
+test('unknown, missing, typo and future hosts never coerce to Claude', () => {
+  for (const host_runtime of [undefined, 'claud', 'future-host']) {
+    const snapshot = createContextSnapshot({ host_runtime, source: 'claude-statusline', capability: true, used_percentage: 50 }, 1000);
+    assertEq(snapshot.host_runtime, 'unknown');
+    assertEq(snapshot.measurement, 'unknown');
+  }
+});
+
 test('missing or invalid telemetry is unknown without percentages', () => {
   for (const value of [undefined, null, NaN, Infinity, -1, 101, '0']) {
-    const snapshot = createContextSnapshot({ host_runtime: 'codex', capability: true, used_percentage: value }, 1000);
+    const snapshot = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', capability: true, used_percentage: value }, 1000);
     assertEq(snapshot.measurement, 'unknown');
     assert(!Object.prototype.hasOwnProperty.call(snapshot, 'used_percentage'), 'unknown must omit used_percentage');
   }
 });
 
 test('stale measured snapshot is not usable', () => {
-  const snapshot = createContextSnapshot({ host_runtime: 'codex', capability: true, used_percentage: 50 }, 1000);
+  const snapshot = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', capability: true, used_percentage: 50 }, 1000);
   assert(usableSnapshot(snapshot, 62_000) === false, 'stale bridge must not alert');
 });
 
@@ -326,6 +346,26 @@ test('invalid threshold ordering rejects the whole block', () => {
   let threw = false;
   try { readContextMonitorPrefs(fakeCwd); } catch (error) { threw = error.code === 'FORGE_PREFS_INVALID_CONTEXT_MONITOR'; }
   assert(threw, 'invalid relational block must be rejected observably');
+});
+
+test('alerts disabled makes the production enabled gate false', () => {
+  const fakeCwd = path.join(ROOT, 'alerts-off-project');
+  writeTmp('alerts-off-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "alerts_enabled": false }
+}`);
+  const prefs = readContextMonitorPrefs(fakeCwd);
+  assertEq(prefs.alertsEnabled, false);
+  assertEq(prefs.enabled, false);
+});
+
+test('configured debounce is used when caller omits the third argument', () => {
+  const fakeCwd = path.join(ROOT, 'debounce-project');
+  writeTmp('debounce-project/.gsd/forge-prefs.jsonc', `{
+  "context_monitor": { "debounce_tool_uses": 1 }
+}`);
+  readContextMonitorPrefs(fakeCwd);
+  const result = shouldInject('warning', { lastSeverity: 'warning', toolUsesSinceLast: 1 });
+  assert(result.inject === true, 'production two-argument caller must honor configured debounce');
 });
 
 // ── S03 review fixes: R6 block scoping + R8 threshold-aware messages ──────────
