@@ -405,6 +405,8 @@ function emptyResult(extra) {
     run: '',
     reason: '',
     multi_repo_root: '',
+    repo_roots: [],
+    writable_roots: [],
     declared_repo: '',
     declared_repo_status: '',
     // Additive (S05/T05) — defaults keep every existing reader byte-identical.
@@ -503,12 +505,34 @@ function resolveCodeDir(opts) {
   // repos; a worktree may not yet contain a newly declared file. Limitation C3: when
   // cwd itself is a repo, attribution already claims every relative path and this
   // deliberately does not reinterpret that first-pass result.
-  // P1: directly attributed paths spanning repos are always a genuine sidecar refusal.
+  // P1: a cross-repo unit is routable only when `repo:` names the primary cwd and
+  // every declared non-artifact path was attributed. Additional worktrees become
+  // app-server writableRoots; no first-repo guess is permitted.
   if (touched.size >= 2) {
-    return emptyResult({ status: 'cross-repo', repos_touched: Array.from(touched.keys()), paths_considered: considered.length,
-      paths_unmatched: unmatched, source, run, reason: REASON_CROSS_REPO, multi_repo_root: commonWorktreeRoot(usable),
-      declared_repo: declaredRepo,
-      hint: hintFor({ status: 'cross-repo', declared_repo: declaredRepo, repos_touched: Array.from(touched.keys()) }) });
+    const touchedPaths = Array.from(touched.keys());
+    if (!declaredRepo || unmatched > 0) {
+      return emptyResult({ status: 'cross-repo', repos_touched: touchedPaths, paths_considered: considered.length,
+        paths_unmatched: unmatched, source, run, reason: REASON_CROSS_REPO, multi_repo_root: commonWorktreeRoot(usable),
+        declared_repo: declaredRepo,
+        hint: hintFor({ status: 'cross-repo', declared_repo: declaredRepo, repos_touched: touchedPaths }) });
+    }
+    const primary = matchDeclaredRepo(declaredRepo, usable, cwd, o.repoIndex);
+    if (primary.status !== 'ok' || !touched.has(normalizePath(primary.repo.path))) {
+      return emptyResult({ status: 'undeclared', repos_touched: touchedPaths, paths_considered: considered.length,
+        paths_unmatched: unmatched, source, run, reason: REASON_UNDECLARED, multi_repo_root: commonWorktreeRoot(usable),
+        declared_repo: declaredRepo, declared_repo_status: primary.status === 'ok' ? 'conflict' : primary.status,
+        declared_repo_path: primary.path || '',
+        hint: hintFor({ status: 'undeclared', declared_repo: declaredRepo,
+          declared_repo_status: primary.status === 'ok' ? 'conflict' : primary.status, repos_touched: touchedPaths }) });
+    }
+    const repoRoots = Array.from(touched.values()).map(repo => path.resolve(repo.worktree));
+    const primaryRoot = path.resolve(primary.repo.worktree);
+    return emptyResult({ status: 'ok', code_dir: primaryRoot, repo: primary.repo.path || '',
+      repos_touched: touchedPaths, repo_roots: repoRoots,
+      writable_roots: repoRoots.filter(root => normalizePath(root) !== normalizePath(primaryRoot)),
+      paths_considered: considered.length, paths_unmatched: 0, source, resolution: 'multi-repo-declared', run,
+      declared_repo: declaredRepo, declared_repo_status: 'ok', declared_repo_source: primary.source || '',
+      declared_repo_path: primary.path || '' });
   }
 
   // P2–P4: a declaration is validated before it can select a worktree and never falls through.

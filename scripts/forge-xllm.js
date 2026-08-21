@@ -684,18 +684,27 @@ const CAPABILITY_SANDBOX_MODE = {
 };
 
 // S04 R7 guards + SANDBOX_MODES live BELOW the gate on purpose — see the note there.
-function buildAppServerSandboxPolicy(mode, platform = process.platform) {
+function buildAppServerSandboxPolicy(mode, platform = process.platform, writableRoots = []) {
   // Validated FIRST, before any platform branch: otherwise a typo on win32
   // returns dangerFullAccess and never reaches the check at all — the widest
   // possible policy handed out for the least recognisable input.
   assertKnownSandboxMode(mode, 'buildAppServerSandboxPolicy');
+  if (!Array.isArray(writableRoots) || writableRoots.some(root => typeof root !== 'string' || !path.isAbsolute(root))) {
+    throw new Error('buildAppServerSandboxPolicy: writableRoots must be absolute paths');
+  }
+  if (mode === 'read-only' && writableRoots.length > 0) {
+    throw new Error('buildAppServerSandboxPolicy: read-only cannot carry writableRoots');
+  }
   if (mode === 'read-only') return { type: 'readOnly', networkAccess: false };
-  if (platform === 'win32') return { type: 'dangerFullAccess' };
-  if (mode === 'networked') return { type: 'workspaceWrite', networkAccess: true };
+  // Windows historically required dangerFullAccess for a single root. The measured
+  // cross-root capability is narrower and explicit: when roots are supplied, use
+  // workspaceWrite on every platform and let the app-server enforce the boundary.
+  if (platform === 'win32' && writableRoots.length === 0) return { type: 'dangerFullAccess' };
+  if (mode === 'networked') return { type: 'workspaceWrite', networkAccess: true, ...(writableRoots.length ? { writableRoots } : {}) };
   // W3: keep the default workspace policy byte-for-byte explicit; the omitted
   // network default was never measured, so changing this can silently grant access.
   // Reached ONLY by 'workspace-write' now — the guard owns everything else.
-  return { type: 'workspaceWrite', networkAccess: false };
+  return { type: 'workspaceWrite', networkAccess: false, ...(writableRoots.length ? { writableRoots } : {}) };
 }
 
 // The closed set of modes the table can produce. Derived from it, never re-typed:
@@ -969,7 +978,7 @@ function invokeCodexAppServer(opts) {
   const { startAppServerTurn } = require('./forge-appserver-client');
   const {
     prompt, schema, cwd, model, timeoutSecs, onHeartbeat, sandbox,
-    envPolicy = 'minimal', heartbeatIntervalMs,
+    envPolicy = 'minimal', heartbeatIntervalMs, writableRoots = [],
   } = opts;
   const { cmd, prefixArgs } = resolveCodexCommand();
   // S05 review R2. `heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS` conflated three
@@ -1025,7 +1034,7 @@ function invokeCodexAppServer(opts) {
         threadId,
         input: [{ type: 'text', text: prompt }],
         outputSchema: schema,
-        sandboxPolicy: buildAppServerSandboxPolicy(sandbox || 'workspace-write'),
+        sandboxPolicy: buildAppServerSandboxPolicy(sandbox || 'workspace-write', process.platform, writableRoots),
       };
       if (model) params.model = model;
       return params;
@@ -1859,6 +1868,7 @@ function gitRead(gitArgs, cwd, what) {
  */
 async function runExecute(opts) {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
+  const writableRoots = Array.isArray(opts.writableRoots) ? opts.writableRoots.map(root => path.resolve(root)) : [];
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
   const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
   const dispatchId = normalizeDispatchId(opts.dispatchId, 'execute');
@@ -1976,6 +1986,7 @@ async function runExecute(opts) {
     // The dispatch id is the only unit-shaped identifier the adapter holds; the
     // orchestrator (T03) owns the file name of the evidence log.
     evidenceUnit: dispatchId,
+    writableRoots,
   });
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   const outputTokens = countTokens(rawContent);
@@ -2427,8 +2438,13 @@ if (require.main === module) {
       || DEFAULT_EXECUTE_TIMEOUT_SECS;
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'execute');
+    let writableRoots = [];
+    if (args['writable-roots'] !== undefined) {
+      try { writableRoots = JSON.parse(args['writable-roots']); }
+      catch (error) { process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
+    }
 
-    runExecute({ planFile: args.plan, resultFile, cwd, model, timeoutSecs, envPolicy, dispatchId, securityFile: args.security, contextFile: args['context-bundle'] })
+    runExecute({ planFile: args.plan, resultFile, cwd, model, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         let safeResultFile = null;

@@ -6,6 +6,7 @@
  * SandboxPolicy boundary. No process, repository, or network fixture is needed.
  */
 const assert = require('assert');
+const path = require('path');
 const {
   buildAppServerSandboxPolicy,
   capabilityToSandboxMode,
@@ -143,6 +144,20 @@ test('the W3 workspace default remains the exact measured literal', () => {
   // `sandbox || 'workspace-write'`), not inside the policy builder, where it was
   // indistinguishable from a typo.
   assert.throws(() => buildAppServerSandboxPolicy(undefined, 'darwin'), /unknown sandbox mode/);
+
+  const extraRoot = path.resolve('repo-b');
+  assert.deepStrictEqual(
+    buildAppServerSandboxPolicy('workspace-write', 'linux', [extraRoot]),
+    { type: 'workspaceWrite', networkAccess: false, writableRoots: [extraRoot] },
+    'POSIX multi-root policy carries the measured additional root');
+  assert.deepStrictEqual(
+    buildAppServerSandboxPolicy('workspace-write', 'win32', [extraRoot]),
+    { type: 'workspaceWrite', networkAccess: false, writableRoots: [extraRoot] },
+    'Windows multi-root narrows dangerFullAccess to the measured workspaceWrite policy');
+  assert.throws(() => buildAppServerSandboxPolicy('read-only', 'linux', [extraRoot]), /read-only cannot/,
+    'read-only must never be widened by additional roots');
+  assert.throws(() => buildAppServerSandboxPolicy('workspace-write', 'linux', ['relative']), /absolute paths/,
+    'relative roots are refused before reaching the protocol');
 });
 
 test('Windows dangerFullAccess is platform-only and readonly stays sandboxed', () => {

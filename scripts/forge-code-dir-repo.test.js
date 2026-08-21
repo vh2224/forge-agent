@@ -320,6 +320,20 @@ test('R12 — exit 4 (cross-repo)', () => {
   assertEqual(JSON.parse(r.out).reason, 'sidecar-multirepo-unsupported', 'reason');
 });
 
+test('R12b — cross-repo declarado resolve cwd primario e writable root adicional', () => {
+  const f = makeFixture({ noRepoField: true });
+  const plan = path.join(f.root, 'T02-primary-PLAN.md');
+  fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${path.join(f.web, 'a.ts')}"`,
+    `  - "${path.join(f.api, 'b.ts')}"`, '---', ''].join('\n'));
+  const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+  assertEqual(out.status, 'ok', 'status');
+  assertEqual(out.resolution, 'multi-repo-declared', 'resolution');
+  assertEqual(path.resolve(out.code_dir), path.resolve(f.wts, 'web'), 'cwd primario');
+  assertEqual(out.repo_roots.length, 2, 'todas as raizes');
+  assertEqual(out.writable_roots.length, 1, 'somente raiz adicional');
+  assertEqual(path.resolve(out.writable_roots[0]), path.resolve(f.wts, 'api'), 'api como writable root');
+});
+
 test('R12 — exit 5 (undeclared)', () => {
   const f = makeFixture({ noRepoField: true });
   const r = runCli(['--resolve', '--iso-result', JSON.stringify(f.isoResult),
