@@ -260,6 +260,11 @@ const DETECTOR_FINGERPRINT_TABLES = Object.freeze({
   latin_abbreviation_pattern: LATIN_ABBREVIATION_RE.source,
   placeholder_pattern: PLACEHOLDER_RE.source,
   real_file_ext: Object.freeze([...REAL_FILE_EXT].sort()),
+  compiled_regexes: Object.freeze({
+    structural_separator: Object.freeze({ source: STRUCTURAL_SEPARATOR_RE.source, flags: STRUCTURAL_SEPARATOR_RE.flags }),
+    bare_extension_at: Object.freeze({ source: BARE_EXTENSION_AT_RE.source, flags: BARE_EXTENSION_AT_RE.flags }),
+    list_conjunction_at: Object.freeze({ source: LIST_CONJUNCTION_AT_RE.source, flags: LIST_CONJUNCTION_AT_RE.flags }),
+  }),
 });
 const DETECTOR_FINGERPRINT_FUNCTIONS = Object.freeze([
   cleanToken,

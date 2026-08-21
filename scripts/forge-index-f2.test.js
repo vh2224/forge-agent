@@ -407,6 +407,21 @@ test('#126 classifica pelo texto apenas e expõe identidade estável da taxonomi
     'alterar o vocabulário efetivo deve necessariamente alterar o fingerprint');
   assert.notStrictEqual(
     computeDetectorVersion({
+      tables: {
+        ...DETECTOR_FINGERPRINT_TABLES,
+        compiled_regexes: {
+          ...DETECTOR_FINGERPRINT_TABLES.compiled_regexes,
+          list_conjunction_at: {
+            ...DETECTOR_FINGERPRINT_TABLES.compiled_regexes.list_conjunction_at,
+            flags: DETECTOR_FINGERPRINT_TABLES.compiled_regexes.list_conjunction_at.flags.replace('i', ''),
+          },
+        },
+      },
+    }),
+    DETECTOR_VERSION,
+    'remover uma flag efetivamente compilada deve alterar o fingerprint');
+  assert.notStrictEqual(
+    computeDetectorVersion({
       functions: DETECTOR_FINGERPRINT_FUNCTIONS.map((fn) => fn.name === 'detectorFalsePositive'
         ? function detectorFalsePositive() { return 'changed'; }
         : fn),
