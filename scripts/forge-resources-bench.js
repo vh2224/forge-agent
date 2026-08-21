@@ -820,14 +820,14 @@ async function finalizeRunMatrix({ cancellationFence, cleanup = killAllLiveAsync
   if (!cancellationFence.closed) {
     try { await cleanup(); } catch (error) { cleanupError = error; }
   }
-  const restoration = restore();
-  assertRestoration(runError || cleanupError, restoration);
-  if (cleanupError) {
-    if (runError) {
-      const combined = new AggregateError([runError, cleanupError], 'run and cleanup failed', { cause: runError });
-      throw combined;
-    }
-    throw cleanupError;
+  let restoration;
+  let restoreError = null;
+  try { restoration = restore(); } catch (error) { restoreError = error; }
+  if (!restoreError && restoration && !restoration.ok) restoreError = restoration.error;
+  const errors = [runError, cleanupError, restoreError].filter(Boolean);
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'run matrix finalization failed', { cause: runError || errors[0] });
   }
 }
 

@@ -745,6 +745,46 @@ test('runMatrix finalization: original and restore failures remain together with
   assertEqual(observed.errors[1], restoreError);
 });
 
+await testAsync('runMatrix finalization: cleanup and restore failures are both preserved in order', async () => {
+  const cleanupError = new Error('cleanup-failed');
+  const restoreError = new Error('restore-failed');
+  let observed = null;
+  try {
+    await bench.finalizeRunMatrix({
+      cancellationFence: bench.createSpawnFence(),
+      cleanup: async () => { throw cleanupError; },
+      restore: () => ({ ok: false, error: restoreError }),
+      runError: null,
+    });
+  } catch (error) { observed = error; }
+  assert(observed instanceof AggregateError, 'dual finalization failure must be AggregateError');
+  assertEqual(observed.cause, cleanupError, 'first available failure must be the cause');
+  assertEqual(observed.errors.length, 2);
+  assertEqual(observed.errors[0], cleanupError);
+  assertEqual(observed.errors[1], restoreError);
+});
+
+await testAsync('runMatrix finalization: run, cleanup, and restore failures survive as one ordered aggregate', async () => {
+  const runError = new Error('run-failed');
+  const cleanupError = new Error('cleanup-failed');
+  const restoreError = new Error('restore-failed');
+  let observed = null;
+  try {
+    await bench.finalizeRunMatrix({
+      cancellationFence: bench.createSpawnFence(),
+      cleanup: async () => { throw cleanupError; },
+      restore: () => { throw restoreError; },
+      runError,
+    });
+  } catch (error) { observed = error; }
+  assert(observed instanceof AggregateError, 'triple failure must be AggregateError');
+  assertEqual(observed.cause, runError, 'run failure must remain the cause');
+  assertEqual(observed.errors.length, 3);
+  assertEqual(observed.errors[0], runError);
+  assertEqual(observed.errors[1], cleanupError);
+  assertEqual(observed.errors[2], restoreError);
+});
+
 await testAsync('runMatrix: writes one JSONL line per corrida with a fresh in-cell witness, and restores prefs on normal exit', async () => {
   const dir = tmpDir('forge-bench-matrix-');
   const prefsPath = bench.localPrefsPath(dir);
