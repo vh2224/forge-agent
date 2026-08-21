@@ -633,6 +633,49 @@ await testAsync('spawnTracked: SIGINT shares in-flight operational cleanup befor
   assertEqual(cleanupResult.ok, true, 'shared successful cleanup must not become false exit 75');
 });
 
+await testAsync('runMatrix finalization: closed signal fence leaves an in-flight cleanup retry exclusively to shutdown', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 547000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  const killers = [new EventEmitter(), new EventEmitter()];
+  killers.forEach((killer) => { killer.kill = () => true; });
+  let taskkillCalls = 0;
+  const cleanupOptions = {
+    platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+    spawnImpl: () => killers[taskkillCalls++], reportDegraded: () => {},
+  };
+  const run = bench.spawnTracked('owned', [], {
+    cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned, cleanupOptions,
+  });
+  owned.emit('error', new Error('operational failure'));
+  await Promise.resolve();
+  const fence = bench.createSpawnFence();
+  const exits = [];
+  const shutdown = bench.completeSignalShutdown({
+    signal: 'SIGINT', cancellationFence: fence, restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync(cleanupOptions),
+    exit: (code) => exits.push(code), writeDiagnostic: () => {},
+  });
+  assertEqual(taskkillCalls, 1, 'shutdown must share the first operational cleanup');
+  killers[0].emit('close', 128);
+  await waitFor(() => taskkillCalls === 2, 100, 'sequential-cleanup-retry');
+  assertEqual(taskkillCalls, 2, 'a degraded shared attempt permits one sequential retry');
+  let matrixCleanupCalls = 0;
+  await bench.finalizeRunMatrix({
+    cancellationFence: fence,
+    cleanup: async () => { matrixCleanupCalls += 1; },
+    restore: () => ({ ok: true }),
+    runError: null,
+  });
+  assertEqual(matrixCleanupCalls, 0, 'closed-fence matrix finalization must not start a competing cleanup');
+  assertEqual(taskkillCalls, 2, 'matrix finalization must not create a third taskkill');
+  killers[1].emit('close', 128);
+  await Promise.all([run, shutdown]);
+  assertEqual(exits.join(','), '75', 'one degraded retry must produce the named cleanup failure exit');
+  owned.emit('exit', null, 'SIGKILL');
+});
+
 await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {
   const fence = bench.createSpawnFence();
   let releaseCleanup;

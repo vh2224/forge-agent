@@ -815,6 +815,22 @@ function parseArgs(argv) {
   return args;
 }
 
+async function finalizeRunMatrix({ cancellationFence, cleanup = killAllLiveAsync, restore, runError }) {
+  let cleanupError = null;
+  if (!cancellationFence.closed) {
+    try { await cleanup(); } catch (error) { cleanupError = error; }
+  }
+  const restoration = restore();
+  assertRestoration(runError || cleanupError, restoration);
+  if (cleanupError) {
+    if (runError) {
+      const combined = new AggregateError([runError, cleanupError], 'run and cleanup failed', { cause: runError });
+      throw combined;
+    }
+    throw cleanupError;
+  }
+}
+
 async function runMatrix(opts) {
   const {
     cwd, cells, reps, competitors, command, timeoutMs, outFile,
@@ -873,9 +889,7 @@ async function runMatrix(opts) {
     runError = error;
     throw error;
   } finally {
-    killAllLive();
-    const restoration = doRestore();
-    assertRestoration(runError, restoration);
+    await finalizeRunMatrix({ cancellationFence, restore: doRestore, runError });
   }
 }
 
@@ -938,6 +952,7 @@ module.exports = {
   closeSpawnFence,
   completeSignalShutdown,
   assertRestoration,
+  finalizeRunMatrix,
   spawnTracked,
   TASKKILL_TIMEOUT_MS,
   ENFORCEMENT_REASONS,
