@@ -6,7 +6,18 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { writeFragment } = require('./forge-memory');
-const { detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2 } = require('./forge-index-f2');
+const {
+  DETECTOR_VERSION,
+  DETECTOR_FINGERPRINT_TABLES,
+  DETECTOR_FINGERPRINT_FUNCTIONS,
+  METALINGUISTIC_EXTENSION_REASON,
+  computeDetectorVersion,
+  detectMentions,
+  detectSignalMentions,
+  detectorFalsePositive,
+  classifyCitationPrecision,
+  measureF2,
+} = require('./forge-index-f2');
 
 // Helper for the noise-rule tests: [raw, motivo] for every detected mention.
 function fpOf(text) {
@@ -264,7 +275,7 @@ test('sufixo que não é extensão de arquivo real é identificador, não arquiv
   const motivo = 'sufixo não é extensão de arquivo real (identificador com ponto)';
   // 'JSON.parse' morde: não é crase, não é placeholder, não é versão — só a
   // regra de extensão-real o descarta; revert → volta a inflar o denominador.
-  for (const raw of ['JSON.parse', 'turn.id', 'cmd.exe', 'v2.0', 'it.skip', '.svn', 'evidence.mode']) {
+  for (const raw of ['JSON.parse', 'turn.id', 'cmd.exe', 'v2.0', 'it.skip', 'evidence.mode']) {
     const mention = detectMentions(raw)[0];
     assert(mention, `${raw} deve ser detectado antes de ser classificado`);
     assert.strictEqual(detectorFalsePositive(mention), motivo, raw);
@@ -274,6 +285,7 @@ test('sufixo que não é extensão de arquivo real é identificador, não arquiv
   for (const raw of ['events.jsonl', 'seed.txt', 'GitActivity.swift', 'other.py', 'main.go']) {
     assert.strictEqual(detectorFalsePositive(detectMentions(raw)[0]), null, raw);
   }
+  assert.strictEqual(detectorFalsePositive(detectMentions('`.svn`')[0]), null, 'dotfile arbitrário não depende de cadastro semântico');
 });
 
 test('descarte das novas classes é enumerado no relatório com motivo nomeado', () => {
@@ -330,13 +342,115 @@ test('#107 par de extensões nuas unidas por / não é arquivo', () => {
   assert.deepStrictEqual(detectSignalMentions('Leia o .env da raiz.').map((m) => m.normalized), ['.env']);
 });
 
-test('#107 controle: a extensão .md nua PERMANECE sinal — ambiguidade declarada, não conserto silencioso', () => {
-  // `.md` e `.env` têm a mesma forma e um dos dois é arquivo real. Nenhuma regra
-  // lexical os separa, então esta entrada segue na allowed-misses por decisão.
-  // O assert existe para que um conserto futuro tenha de removê-la de propósito.
-  assert.deepStrictEqual(
-    detectSignalMentions('A extensão .md é tratada de forma especial.').map((m) => m.normalized),
-    ['.md']);
+test('#126 gramática metalinguística cobre singular, plural, pontuação, listas e crases', () => {
+  for (const text of [
+    'A extensão .md é tratada de forma especial.',
+    'As extensões .js e .ts são aceitas.',
+    'Extensões: .swift, .kt ou .tsx.',
+    'Use a extensão `.env` neste exemplo.',
+    'Extensões .js,.ts e .tsx.',
+    'Extensões:.js;.ts.',
+    'Extensões – .js — .ts.',
+  ]) {
+    const mentions = detectMentions(text);
+    assert.ok(mentions.length > 0, text);
+    assert.ok(mentions.every((mention) => detectorFalsePositive(mention) === METALINGUISTIC_EXTENSION_REASON), text);
+    assert.deepStrictEqual(detectSignalMentions(text), [], text);
+  }
+});
+
+test('#126 palavras lexicais interrompem o governo e dotfiles concretos permanecem sinais', () => {
+  for (const text of [
+    'A extensão do arquivo .env deve ser preservada.',
+    'Leia o .env da raiz.',
+    'Crie .md agora.',
+    'Consulte src/.env durante o boot.',
+    'Leia `.npmrc` antes de instalar.',
+    'O arquivo .md tem extensão conhecida.',
+  ]) {
+    assert.ok(detectSignalMentions(text).length > 0, text);
+  }
+});
+
+test('#126 contexto público aditivo sobrevive a JSON e spread e torna o descarte diagnóstico', () => {
+  const mention = detectMentions('A extensão .md é metalinguagem.')[0];
+  assert.deepStrictEqual(Object.keys(mention), ['raw', 'normalized', 'why', 'detector_context']);
+  const roundTripped = JSON.parse(JSON.stringify(mention));
+  const spread = { ...mention };
+  assert.deepStrictEqual(roundTripped, mention);
+  assert.deepStrictEqual(spread, mention);
+  assert.strictEqual(detectorFalsePositive(roundTripped), METALINGUISTIC_EXTENSION_REASON);
+  assert.strictEqual(detectorFalsePositive(spread), METALINGUISTIC_EXTENSION_REASON);
+  assert.strictEqual(detectorFalsePositive(mention), METALINGUISTIC_EXTENSION_REASON);
+
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'f2-meta-ext-'));
+  try {
+    writeFragment(cwd, { unit_id: 'T01', facts: [fact('meta', 'Extensões: .js, .ts e .tsx.')] });
+    const report = measureF2(cwd);
+    assert.strictEqual(report.detector_version, DETECTOR_VERSION);
+    assert.strictEqual(report.verdict, 'EMPTY-DENOMINATOR');
+    assert.strictEqual(report.detector_false_positives.length, 3);
+    assert.ok(report.detector_false_positives.every((item) => item.motivo === METALINGUISTIC_EXTENSION_REASON));
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test('#126 classifica pelo texto apenas e expõe identidade estável da taxonomia', () => {
+  const text = 'Extensões .md e .env; depois leia src/.env.';
+  assert.deepStrictEqual(detectMentions(text), detectMentions(text));
+  assert.match(DETECTOR_VERSION, /^sha256:[a-f0-9]{64}$/);
+  assert.strictEqual(DETECTOR_VERSION, computeDetectorVersion());
+  assert.notStrictEqual(
+    computeDetectorVersion({
+      tables: { ...DETECTOR_FINGERPRINT_TABLES, real_file_ext: [...DETECTOR_FINGERPRINT_TABLES.real_file_ext, 'changed'] },
+    }),
+    DETECTOR_VERSION,
+    'alterar o vocabulário efetivo deve necessariamente alterar o fingerprint');
+  assert.notStrictEqual(
+    computeDetectorVersion({
+      tables: {
+        ...DETECTOR_FINGERPRINT_TABLES,
+        compiled_regexes: {
+          ...DETECTOR_FINGERPRINT_TABLES.compiled_regexes,
+          list_conjunction_at: {
+            ...DETECTOR_FINGERPRINT_TABLES.compiled_regexes.list_conjunction_at,
+            flags: DETECTOR_FINGERPRINT_TABLES.compiled_regexes.list_conjunction_at.flags.replace('i', ''),
+          },
+        },
+      },
+    }),
+    DETECTOR_VERSION,
+    'remover uma flag efetivamente compilada deve alterar o fingerprint');
+  assert.notStrictEqual(
+    computeDetectorVersion({
+      functions: DETECTOR_FINGERPRINT_FUNCTIONS.map((fn) => fn.name === 'detectorFalsePositive'
+        ? function detectorFalsePositive() { return 'changed'; }
+        : fn),
+    }),
+    DETECTOR_VERSION,
+    'alterar o comportamento serializado do detector deve necessariamente alterar o fingerprint');
+});
+
+test('#126 scanner adjacente não confunde caminhos com listas metalinguísticas', () => {
+  assert.deepStrictEqual(detectSignalMentions('Extensões src/.env e lib/.npmrc.').map((item) => item.normalized), ['.env', '.npmrc']);
+  assert.deepStrictEqual(detectSignalMentions('Leia src/.ts e lib/.md.').map((item) => item.normalized), ['.ts', '.md']);
+  const pathLike = detectMentions('Extensões .js/path não formam uma lista.')[0];
+  assert.notStrictEqual(detectorFalsePositive(pathLike), METALINGUISTIC_EXTENSION_REASON);
+});
+
+test('#126 boundary posterior recusa sufixos mistos e preserva o restante concreto do token', () => {
+  for (const text of ['Extensões .js_foo', 'Extensões .js.map']) {
+    const mentions = detectMentions(text);
+    assert.ok(mentions.every((item) => detectorFalsePositive(item) !== METALINGUISTIC_EXTENSION_REASON), text);
+  }
+  const mixedPath = detectMentions('Extensões .js,src/.env');
+  assert.deepStrictEqual(mixedPath.map((item) => item.normalized), ['.js', '.env']);
+  assert.strictEqual(detectorFalsePositive(mixedPath[0]), METALINGUISTIC_EXTENSION_REASON);
+  assert.strictEqual(detectorFalsePositive(mixedPath[1]), null);
+
+  const mixedFile = detectMentions('Extensões .js,config.ts');
+  assert.deepStrictEqual(mixedFile.map((item) => item.normalized), ['.js', 'config.ts']);
+  assert.strictEqual(detectorFalsePositive(mixedFile[0]), METALINGUISTIC_EXTENSION_REASON);
+  assert.strictEqual(detectorFalsePositive(mixedFile[1]), null);
 });
 
 
