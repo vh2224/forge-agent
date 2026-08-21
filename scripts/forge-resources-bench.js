@@ -389,7 +389,7 @@ function assertRestoration(runError, restoration) {
 // (R1's signal-path hole — `spawnSync` blocked them until the child exited),
 // and the group-kill path is shared with the competitors.
 function spawnTracked(cmd, args, {
-  cwd, timeoutMs, env, cancellationFence = null, spawnImpl = spawn,
+  cwd, timeoutMs, env, cancellationFence = null, spawnImpl = spawn, cleanupOptions = {},
 }) {
   if (cancellationFence && cancellationFence.closed) {
     return Promise.resolve({
@@ -401,6 +401,7 @@ function spawnTracked(cmd, args, {
     const start = Date.now();
     let settled = false;
     let timedOut = false;
+    let operationalCleanupStarted = false;
     let child;
     try {
       child = spawnImpl(cmd, args, {
@@ -430,19 +431,34 @@ function spawnTracked(cmd, args, {
     };
     const observeExit = (payload) => {
       childState.exited = true;
+      if (operationalCleanupStarted) return;
       liveChildren.delete(child);
       finish(payload);
     };
     child.on('exit', (code, signal) => observeExit({ exitCode: code, signal: signal || null }));
     child.on('close', (code, signal) => observeExit({ exitCode: code, signal: signal || null }));
-    child.on('error', (e) => {
+    child.on('error', async (e) => {
       const ownsProcess = typeof child.pid === 'number';
+      if (!ownsProcess) {
+        finish({ exitCode: null, signal: 'spawn-error', error: e.message, cleanupPending: false }, true);
+        return;
+      }
+      if (operationalCleanupStarted || settled) return;
+      operationalCleanupStarted = true;
+      clearTimeout(killer);
+      let cleanup;
+      try {
+        cleanup = await killTreeAsync(child, cleanupOptions);
+      } catch (cleanupError) {
+        cleanup = { ok: false, degraded: true, reason: cleanupError.code || cleanupError.message || 'exception' };
+      }
       finish({
         exitCode: null,
         signal: 'spawn-error',
         error: e.message,
-        cleanupPending: ownsProcess,
-      }, !ownsProcess);
+        cleanup,
+        cleanupPending: !cleanup.ok,
+      }, cleanup.ok);
     });
   });
 }
