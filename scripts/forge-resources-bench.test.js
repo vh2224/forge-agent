@@ -72,6 +72,31 @@ function tmpDir(prefix) {
 }
 
 const BENCH_PATH = path.join(__dirname, 'forge-resources-bench.js');
+const WINDOWS_CTRL_C_PATH = path.join(__dirname, 'fixtures', 'forge-windows-ctrl-c.ps1');
+
+function writeJsonAtomic(file, value) {
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(value), 'utf8');
+  fs.renameSync(temporary, file);
+}
+
+async function waitFor(predicate, timeoutMs, stage) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`${stage}: timed out after ${timeoutMs}ms`);
+}
+
+function waitForExit(child) {
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+}
 
 // Fast, deterministic, injectable command — never the real suite.
 function sleepCommand(ms) {
@@ -242,6 +267,28 @@ test('--dry-run: parseArgs recognises the flag without consuming the next token'
   assertEqual(args.reps, '3');
 });
 
+test('Windows Ctrl+C fixture: encodes the private-console protocol and forbidden transports stay absent', () => {
+  const source = fs.readFileSync(WINDOWS_CTRL_C_PATH, 'utf8');
+  for (const required of [
+    'FreeConsole()', 'AllocConsole()', 'CREATE_SUSPENDED', 'CreateProcessW',
+    'AssignProcessToJobObject', 'SetConsoleCtrlHandler(IntPtr.Zero, true)',
+    'ResumeThread', 'GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)',
+    'WaitForSingleObject', 'GetExitCodeProcess', 'Publish-JsonAtomic',
+  ]) assert(source.includes(required), `fixture must contain ${required}`);
+  for (const forbidden of [
+    'CREATE_NEW_PROCESS_' + 'GROUP', 'CTRL_' + 'BREAK_EVENT', 'Terminate' + 'Process',
+    'task' + 'kill', 'Stop-' + 'Process', 'WaitFor' + 'InputIdle',
+  ]) assert(!source.includes(forbidden), `fixture must not contain forbidden transport ${forbidden}`);
+  for (const diagnostic of ['invalid-config:', 'child-exit-before-trigger', 'trigger-timeout', 'post-event-timeout']) {
+    assert(source.includes(diagnostic), `fixture must preserve named diagnostic ${diagnostic}`);
+  }
+  const constructor = source.slice(source.indexOf('public ForgeCtrlCSession'));
+  assert(constructor.indexOf('FreeConsole()') < constructor.indexOf('CreateProcessW'),
+    'runner console must be abandoned before child creation');
+  assert(constructor.indexOf('CreateProcessW') < constructor.indexOf('SetConsoleCtrlHandler(IntPtr.Zero, true)'),
+    'child must be created before the controller enables inherited Ctrl+C ignore');
+});
+
 // ── Behavioral: runMatrix with an injected fast command ────────────────────
 
 async function runAsyncTests() {
@@ -354,19 +401,9 @@ await testAsync('runMatrix / --dry-run: the CLI plans without executing anything
   assertEqual(plan.plan.length, 6, 'dry-run must still report the full interleaved plan');
 });
 
-// Windows signal semantics make this test unrunnable as written: on win32
-// `child.kill('SIGINT')` is TerminateProcess — the child dies immediately and
-// its SIGINT handler NEVER runs, so the prefs-restore path under test cannot
-// execute and the byte-identical restore assert fails against correct code.
-// Real Windows coverage would require GenerateConsoleCtrlEvent delivered to a
-// console process group — its own piece of work, not a weaker assert here.
 const SIGINT_TEST_NAME = 'runMatrix (via CLI subprocess): SIGINT mid-run leaves an already-finished JSONL line intact and restores prefs byte-identically';
-if (process.platform === 'win32') {
-  skip(SIGINT_TEST_NAME,
-    'win32 signal semantics: kill("SIGINT") is TerminateProcess, the SIGINT handler never runs; real coverage needs GenerateConsoleCtrlEvent (separate work)');
-} else {
 await testAsync(SIGINT_TEST_NAME, async () => {
-  const dir = tmpDir('forge-bench-sigint-');
+  const dir = tmpDir(process.platform === 'win32' ? 'forge bench SIGINT Ω-' : 'forge-bench-sigint-');
   const prefsPath = bench.localPrefsPath(dir);
   const original = JSON.stringify({ resources: { enforcement: 'clamp' } });
   fs.writeFileSync(prefsPath, original, 'utf8');
@@ -383,11 +420,60 @@ await testAsync(SIGINT_TEST_NAME, async () => {
     `const fs=require('fs');const m=${JSON.stringify(marker)};`
     + 'if(fs.existsSync(m)){setTimeout(()=>{},60000);}else{fs.writeFileSync(m,"1");}'];
 
-  const child = spawn(process.execPath, [
+  const benchArgv = [
     BENCH_PATH, '--cwd', dir, '--reps', '3', '--cells', 'solo/off',
     '--command', JSON.stringify(fixture),
     '--out', outFile, '--timeout-ms', '30000',
-  ], { stdio: 'ignore' });
+  ];
+  let child;
+  let controllerExit;
+  let resultPath = null;
+  let nonce = null;
+  let started = null;
+
+  if (process.platform === 'win32') {
+    const protocolDir = path.join(dir, 'protocol space Ω');
+    fs.mkdirSync(protocolDir, { recursive: true });
+    const configPath = path.join(protocolDir, 'config.json');
+    const startedPath = path.join(protocolDir, 'started.json');
+    const triggerPath = path.join(protocolDir, 'trigger.json');
+    resultPath = path.join(protocolDir, 'result.json');
+    nonce = `${process.pid}-${Date.now()}-Ω`;
+    writeJsonAtomic(configPath, {
+      nonce,
+      nodePath: process.execPath,
+      benchPath: BENCH_PATH,
+      cwd: dir,
+      argv: benchArgv.slice(1),
+      startedPath,
+      triggerPath,
+      resultPath,
+      triggerTimeoutMs: 20000,
+      postEventTimeoutMs: 20000,
+    });
+    child = spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', WINDOWS_CTRL_C_PATH, '-ConfigPath', configPath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stderr = '';
+    let earlyExit = null;
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.once('exit', (code, signal) => { earlyExit = { code, signal }; });
+    const rawStarted = await waitFor(
+      () => {
+        if (earlyExit) throw new Error(`windows-controller-start: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
+        return fs.existsSync(startedPath) && fs.readFileSync(startedPath, 'utf8');
+      },
+      10000,
+      'windows-controller-start',
+    );
+    started = JSON.parse(rawStarted);
+    assertEqual(started.nonce, nonce, 'started protocol nonce must match');
+    controllerExit = waitForExit(child).then((exit) => ({ ...exit, stderr }));
+  } else {
+    child = spawn(process.execPath, benchArgv, { stdio: 'ignore' });
+    controllerExit = waitForExit(child);
+  }
 
   // Poll until the first completed corrida is actually on disk — never a
   // fixed sleep, which is what made the old test vacuous.
@@ -406,8 +492,28 @@ await testAsync(SIGINT_TEST_NAME, async () => {
   assertEqual(before.status, 'ok', 'precondition: the completed corrida must be an ok record');
   assertEqual(before.rep, 1);
 
-  child.kill('SIGINT');
-  await new Promise((resolve) => child.on('exit', resolve));
+  if (process.platform === 'win32') {
+    writeJsonAtomic(path.join(dir, 'protocol space Ω', 'trigger.json'), { nonce, pid: started.pid });
+  } else {
+    child.kill('SIGINT');
+  }
+  const exited = await controllerExit;
+  if (process.platform === 'win32') {
+    assertEqual(exited.code, 0, `windows-controller-exit: ${exited.stderr}`);
+    assert(fs.existsSync(resultPath), 'windows-controller-result: result.json must exist');
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+    assertEqual(result.nonce, nonce, 'result nonce must match');
+    assertEqual(result.pid, started.pid, 'result PID must match started PID');
+    assertEqual(result.stage, 'complete', `controller stage: ${JSON.stringify(result)}`);
+    assertEqual(result.event, 'CTRL_C_EVENT');
+    assertEqual(result.event_sent, true, `GenerateConsoleCtrlEvent failed: ${JSON.stringify(result)}`);
+    assertEqual(result.win32_error, 0);
+    assertEqual(result.exit_code, 130, `benchmark must exit naturally with 130: ${JSON.stringify(result)}`);
+    assertEqual(result.timeout, false);
+    assertEqual(result.cleanup_forced, false, `forced cleanup cannot prove SIGINT: ${JSON.stringify(result)}`);
+  } else {
+    assertEqual(exited.code, 130, `POSIX benchmark must exit with 130, signal=${exited.signal}`);
+  }
 
   const restored = fs.readFileSync(prefsPath, 'utf8');
   assertEqual(restored, original, 'prefs must be restored to original bytes after SIGINT mid-run');
@@ -418,7 +524,6 @@ await testAsync(SIGINT_TEST_NAME, async () => {
   for (const line of lines) JSON.parse(line); // no torn/partial line
   assertEqual(lines[0], firstLine, 'the exact finished record must survive byte-identically');
 });
-}
 
 // ── R2: the instrument must observe the CHILD, not the parent's intent ─────
 
