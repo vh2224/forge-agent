@@ -344,14 +344,27 @@ test('killTree: a hung taskkill has a finite timeout and falls back only to its 
 
 test('SIGINT handler restores preferences before any potentially blocking tree cleanup', () => {
   const source = fs.readFileSync(BENCH_PATH, 'utf8');
-  const handler = source.slice(source.indexOf('const onSignal'), source.indexOf("process.on('SIGINT'"));
-  assert(handler.indexOf('doRestore()') < handler.indexOf('await killAllLiveAsync()'),
-    'signal handler must restore operator bytes before external cleanup');
-  assert(handler.includes('await killAllLiveAsync()'), 'signal handler cleanup must not block the event loop with spawnSync');
-  assert(handler.indexOf('await killAllLiveAsync()') < handler.indexOf('doRestore(true)'),
-    'signal handler must repair any concurrent rewrite after async cleanup');
-  assert(handler.indexOf('doRestore(true)') < handler.indexOf('process.exit('),
-    'no await may separate the final byte restoration from exit');
+  const shutdown = source.slice(source.indexOf('async function completeSignalShutdown'), source.indexOf('function spawnTracked'));
+  assert(shutdown.indexOf('closeSpawnFence(') < shutdown.indexOf('await cleanup()'),
+    'signal shutdown must close the spawn fence before cleanup yields');
+  assert(shutdown.indexOf('await cleanup()') < shutdown.indexOf('restore(true)'),
+    'signal shutdown must repair concurrent rewrites after async cleanup');
+  assert(shutdown.indexOf('restore(true)') < shutdown.indexOf('exit(signal'),
+    'no await may separate successful final restoration from signal exit');
+});
+
+test('restorePrefsFile: absent snapshots ignore only ENOENT, never sharing or permission failures', () => {
+  const dir = tmpDir('forge-bench-restore-errors-');
+  const prefsPath = bench.localPrefsPath(dir);
+  const realUnlink = fs.unlinkSync;
+  fs.unlinkSync = () => { const error = new Error('sharing violation'); error.code = 'EACCES'; throw error; };
+  try {
+    let threw = false;
+    try { bench.restorePrefsFile(prefsPath, { existed: false, content: null }); } catch (error) {
+      threw = error.code === 'EACCES';
+    }
+    assert(threw, 'non-ENOENT restore failures must propagate');
+  } finally { fs.unlinkSync = realUnlink; }
 });
 
 // ── Behavioral: runMatrix with an injected fast command ────────────────────
@@ -374,6 +387,57 @@ await testAsync('killTreeAsync: a hung taskkill cannot block SIGINT cleanup past
   assertEqual(result.reason, 'timeout');
   assertEqual(degraded.join(','), 'timeout');
   assertEqual(ownedSignals.join(','), 'SIGKILL', 'timeout fallback must target only the owned child handle');
+});
+
+await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {
+  const fence = bench.createSpawnFence();
+  let releaseCleanup;
+  const cleanup = new Promise((resolve) => { releaseCleanup = resolve; });
+  const order = [];
+  const shutdown = bench.completeSignalShutdown({
+    signal: 'SIGINT',
+    cancellationFence: fence,
+    restore: (force = false) => { order.push(force ? 'restore-final' : 'restore-early'); return { ok: true }; },
+    cleanup: () => cleanup,
+    exit: (code) => order.push(`exit-${code}`),
+    writeDiagnostic: (message) => order.push(`diagnostic-${message}`),
+  });
+  await Promise.resolve();
+  let spawned = 0;
+  const fenced = await bench.spawnTracked('never', [], {
+    cwd: process.cwd(), timeoutMs: 100, cancellationFence: fence,
+    spawnImpl: () => { spawned += 1; throw new Error('must-not-spawn'); },
+  });
+  assertEqual(fenced.signal, 'spawn-fenced');
+  assertEqual(spawned, 0, 'no continuation may spawn after the shutdown snapshot');
+  releaseCleanup();
+  await shutdown;
+  assertEqual(order.join(','), 'restore-early,restore-final,exit-130');
+});
+
+await testAsync('signal shutdown: failed final restoration cannot exit 130 and no await follows the final attempt', async () => {
+  const fence = bench.createSpawnFence();
+  const order = [];
+  let calls = 0;
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT',
+    cancellationFence: fence,
+    restore: (force = false) => {
+      calls += 1;
+      order.push(force ? 'restore-final' : 'restore-early');
+      if (force) Promise.resolve().then(() => order.push('microtask-after-final'));
+      return force ? { ok: false, error: new Error('EACCES') } : { ok: true };
+    },
+    cleanup: async () => { order.push('cleanup'); },
+    exit: (code) => order.push(`exit-${code}`),
+    writeDiagnostic: (message) => order.push(`diagnostic-${message}`),
+  });
+  assertEqual(calls, 2);
+  assert(order.indexOf('exit-74') < order.indexOf('microtask-after-final'),
+    `exit decision must be synchronous after final restore: ${order.join(',')}`);
+  assert(order.some((entry) => entry === 'diagnostic-final-restore-failed:EACCES'),
+    `final restore failure must be named: ${order.join(',')}`);
+  assert(!order.includes('exit-130'), 'restore failure must never report SIGINT success');
 });
 
 await testAsync('runMatrix: writes one JSONL line per corrida with a fresh in-cell witness, and restores prefs on normal exit', async () => {

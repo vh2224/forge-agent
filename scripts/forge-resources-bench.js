@@ -92,7 +92,9 @@ function restorePrefsFile(filePath, snapshot) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, snapshot.content);
   } else {
-    try { fs.unlinkSync(filePath); } catch { /* already absent, fine */ }
+    try { fs.unlinkSync(filePath); } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
   }
 }
 
@@ -285,19 +287,57 @@ async function killAllLiveAsync() {
   await Promise.all(children.map((child) => killTreeAsync(child)));
 }
 
+function createSpawnFence() {
+  return { closed: false, reason: null };
+}
+
+function closeSpawnFence(fence, reason) {
+  fence.closed = true;
+  fence.reason = reason;
+}
+
+async function completeSignalShutdown({
+  signal, cancellationFence, restore, cleanup, exit, writeDiagnostic,
+}) {
+  closeSpawnFence(cancellationFence, `signal:${signal}`);
+  restore();
+  let cleanupError = null;
+  try { await cleanup(); } catch (error) { cleanupError = error; }
+  const finalRestore = restore(true);
+  if (!finalRestore.ok) {
+    writeDiagnostic(`final-restore-failed:${finalRestore.error.message}`);
+    exit(74);
+    return;
+  }
+  if (cleanupError) {
+    writeDiagnostic(`signal-cleanup-failed:${cleanupError.message}`);
+    exit(75);
+    return;
+  }
+  exit(signal === 'SIGINT' ? 130 : 143);
+}
+
 // Spawn one child in its own process group, resolving with a classified
 // outcome. Async (never `spawnSync`) for two reasons: the event loop stays
 // free so the SIGINT/SIGTERM prefs-restore handlers actually run mid-corrida
 // (R1's signal-path hole — `spawnSync` blocked them until the child exited),
 // and the group-kill path is shared with the competitors.
-function spawnTracked(cmd, args, { cwd, timeoutMs, env }) {
+function spawnTracked(cmd, args, {
+  cwd, timeoutMs, env, cancellationFence = null, spawnImpl = spawn,
+}) {
+  if (cancellationFence && cancellationFence.closed) {
+    return Promise.resolve({
+      wallMs: 0, exitCode: null, signal: 'spawn-fenced', timedOut: false,
+      error: cancellationFence.reason || 'cancelled',
+    });
+  }
   return new Promise((resolve) => {
     const start = Date.now();
     let settled = false;
     let timedOut = false;
     let child;
     try {
-      child = spawn(cmd, args, {
+      child = spawnImpl(cmd, args, {
         cwd,
         stdio: 'ignore',
         detached: process.platform !== 'win32',
@@ -326,7 +366,10 @@ function spawnTracked(cmd, args, { cwd, timeoutMs, env }) {
 }
 
 async function runChild(cmd, args, cwd, timeoutMs, opts = {}) {
-  const r = await spawnTracked(cmd, args, { cwd, timeoutMs, env: opts.env });
+  const r = await spawnTracked(cmd, args, {
+    cwd, timeoutMs, env: opts.env, cancellationFence: opts.cancellationFence,
+  });
+  if (r.signal === 'spawn-fenced') return { wallMs: 0, exitCode: null, status: 'aborted:signal-cancelled' };
   if (r.timedOut) return { wallMs: r.wallMs, exitCode: null, status: 'aborted:timeout-exceeded' };
   if (r.signal === 'spawn-error') return { wallMs: r.wallMs, exitCode: null, status: 'aborted:spawn-error' };
   if (r.signal) return { wallMs: r.wallMs, exitCode: null, status: `aborted:killed-${r.signal}` };
@@ -337,8 +380,8 @@ async function runChild(cmd, args, cwd, timeoutMs, opts = {}) {
 // Competitors are fire-and-forget context (S06-PLAN.md: "o wall-clock dos
 // competidores é registrado como contexto, não como o número"). They are
 // spawned async, never synchronously blocking the measured corrida's start.
-async function spawnCompetitor(cmd, args, cwd, timeoutMs) {
-  const r = await spawnTracked(cmd, args, { cwd, timeoutMs });
+async function spawnCompetitor(cmd, args, cwd, timeoutMs, cancellationFence = null) {
+  const r = await spawnTracked(cmd, args, { cwd, timeoutMs, cancellationFence });
   return { wallMs: r.wallMs, exitCode: r.exitCode, signal: r.signal || null };
 }
 
@@ -432,8 +475,9 @@ function evaluateEnforcement({
 
 async function runOneCorrida(opts) {
   const {
-    cell, rep, command, cwd, timeoutMs, competitors, outFile,
+    cell, rep, command, cwd, timeoutMs, competitors, outFile, cancellationFence = null,
   } = opts;
+  if (cancellationFence && cancellationFence.closed) return null;
   writeEnforcement(localPrefsPath(cwd), cellEnforcement(cell));
 
   const witness = collectContractWitness(cwd);
@@ -441,11 +485,15 @@ async function runOneCorrida(opts) {
   const [cmd, ...args] = command;
   let competitorPromises = [];
   if (cell.startsWith('batch/') && competitors > 0) {
-    competitorPromises = Array.from({ length: competitors }, () => spawnCompetitor(cmd, args, cwd, timeoutMs));
+    competitorPromises = Array.from(
+      { length: competitors },
+      () => spawnCompetitor(cmd, args, cwd, timeoutMs, cancellationFence),
+    );
   }
 
   // Route the measured workload through the real enforcement entrypoint and
   // give the child a way to testify about what it received.
+  if (cancellationFence && cancellationFence.closed) return null;
   const { clamp, release } = acquireClamp(command, cwd, timeoutMs);
   const dumpFile = path.join(
     path.dirname(outFile),
@@ -465,7 +513,7 @@ async function runOneCorrida(opts) {
   let measured;
   try {
     const [runCmd, ...runArgs] = clamp.argv;
-    measured = await runChild(runCmd, runArgs, cwd, timeoutMs, { env });
+    measured = await runChild(runCmd, runArgs, cwd, timeoutMs, { env, cancellationFence });
   } finally {
     release();
   }
@@ -644,14 +692,17 @@ async function runMatrix(opts) {
   } = opts;
   const prefsPath = localPrefsPath(cwd);
   const snapshot = snapshotPrefsFile(prefsPath);
+  const cancellationFence = createSpawnFence();
   let restored = false;
   const doRestore = (force = false) => {
-    if (restored && !force) return;
+    if (restored && !force) return { ok: true, skipped: true };
     restored = true;
     try {
       restorePrefsFile(prefsPath, snapshot);
+      return { ok: true };
     } catch (e) {
       process.stderr.write(`forge-resources-bench: ERRO ao restaurar prefs (${e.message}) — verifique ${prefsPath} manualmente.\n`);
+      return { ok: false, error: e };
     }
   };
 
@@ -664,13 +715,14 @@ async function runMatrix(opts) {
   const onSignal = (sig) => async () => {
     if (signalCleanupStarted) return;
     signalCleanupStarted = true;
-    doRestore();
-    await killAllLiveAsync();
-    // Async cleanup lets the interrupted run's Promise continuations execute.
-    // One of them may rewrite enforcement before cleanup settles, so restore
-    // once more with no await between this write and process.exit.
-    doRestore(true);
-    process.exit(sig === 'SIGINT' ? 130 : 143);
+    await completeSignalShutdown({
+      signal: sig,
+      cancellationFence,
+      restore: doRestore,
+      cleanup: killAllLiveAsync,
+      exit: (code) => process.exit(code),
+      writeDiagnostic: (message) => process.stderr.write(`forge-resources-bench: ${message}\n`),
+    });
   };
   process.on('SIGINT', onSignal('SIGINT'));
   process.on('SIGTERM', onSignal('SIGTERM'));
@@ -678,10 +730,12 @@ async function runMatrix(opts) {
   try {
     const plan = planRuns(cells, reps);
     for (const { cell, rep } of plan) {
+      if (cancellationFence.closed) break;
       // eslint-disable-next-line no-await-in-loop
-      await runOneCorrida({
-        cell, rep, command, cwd, timeoutMs, competitors, outFile,
+      const record = await runOneCorrida({
+        cell, rep, command, cwd, timeoutMs, competitors, outFile, cancellationFence,
       });
+      if (!record || cancellationFence.closed) break;
     }
     return summarizeFile(outFile, cells);
   } finally {
@@ -744,6 +798,10 @@ module.exports = {
   spawnCompetitor,
   killTree,
   killTreeAsync,
+  createSpawnFence,
+  closeSpawnFence,
+  completeSignalShutdown,
+  spawnTracked,
   TASKKILL_TIMEOUT_MS,
   ENFORCEMENT_REASONS,
   evaluateEnforcement,
