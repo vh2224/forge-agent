@@ -27,7 +27,7 @@ function Publish-JsonAtomic([string]$Path, [object]$Value) {
 
 try {
   $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  foreach ($name in @('nonce', 'nodePath', 'benchPath', 'cwd', 'startedPath', 'triggerPath', 'resultPath')) {
+  foreach ($name in @('nonce', 'nodePath', 'benchPath', 'cwd', 'startedPath', 'triggerPath', 'cancelPath', 'resultPath')) {
     if (-not $config.$name -or -not [IO.Path]::IsPathRooted([string]$config.$name) -and $name -ne 'nonce') {
       throw "invalid-config:$name"
     }
@@ -179,6 +179,11 @@ public sealed class ForgeCtrlCSession : IDisposable {
   $stage = 'wait-trigger'
   $deadline = [DateTime]::UtcNow.AddMilliseconds([int]$config.triggerTimeoutMs)
   while (-not [IO.File]::Exists([string]$config.triggerPath)) {
+    if ([IO.File]::Exists([string]$config.cancelPath)) {
+      $cancel = Get-Content -LiteralPath ([string]$config.cancelPath) -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ([string]$cancel.nonce -ne $result.nonce -or [uint32]$cancel.pid -ne $result.pid) { throw 'invalid-cancel-binding' }
+      throw 'controller-cancelled'
+    }
     if ($session.HasExited()) { throw 'child-exit-before-trigger' }
     if ([DateTime]::UtcNow -ge $deadline) { $result.timeout = $true; throw 'trigger-timeout' }
     Start-Sleep -Milliseconds 20

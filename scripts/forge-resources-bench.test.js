@@ -10,7 +10,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const bench = require('./forge-resources-bench.js');
 
@@ -96,6 +96,22 @@ function waitForExit(child) {
     child.once('error', reject);
     child.once('exit', (code, signal) => resolve({ code, signal }));
   });
+}
+
+function enumeratePowerShellHosts(probe = (host) => spawnSync(host, [
+  '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()',
+], { encoding: 'utf8', windowsHide: true })) {
+  return ['powershell.exe', 'pwsh.exe'].filter((host) => {
+    const result = probe(host);
+    return result && !result.error && result.status === 0;
+  });
+}
+
+function settleWithin(promise, timeoutMs, stage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${stage}: timed out after ${timeoutMs}ms`)), timeoutMs)),
+  ]);
 }
 
 // Fast, deterministic, injectable command — never the real suite.
@@ -289,6 +305,16 @@ test('Windows Ctrl+C fixture: encodes the private-console protocol and forbidden
     'child must be created before the controller enables inherited Ctrl+C ignore');
 });
 
+test('PowerShell host discovery: probes both supported hosts and returns every installed host', () => {
+  const probed = [];
+  const hosts = enumeratePowerShellHosts((host) => {
+    probed.push(host);
+    return host === 'pwsh.exe' ? { status: 0 } : { status: 1 };
+  });
+  assertEqual(probed.join(','), 'powershell.exe,pwsh.exe', 'host discovery must probe the complete supported set');
+  assertEqual(hosts.join(','), 'pwsh.exe', 'host discovery must retain each successful probe');
+});
+
 // ── Behavioral: runMatrix with an injected fast command ────────────────────
 
 async function runAsyncTests() {
@@ -402,7 +428,7 @@ await testAsync('runMatrix / --dry-run: the CLI plans without executing anything
 });
 
 const SIGINT_TEST_NAME = 'runMatrix (via CLI subprocess): SIGINT mid-run leaves an already-finished JSONL line intact and restores prefs byte-identically';
-await testAsync(SIGINT_TEST_NAME, async () => {
+async function runSigintContract(powerShellHost, injectFailureAfterStart = false) {
   const dir = tmpDir(process.platform === 'win32' ? 'forge bench SIGINT Ω-' : 'forge-bench-sigint-');
   const prefsPath = bench.localPrefsPath(dir);
   const original = JSON.stringify({ resources: { enforcement: 'clamp' } });
@@ -430,13 +456,20 @@ await testAsync(SIGINT_TEST_NAME, async () => {
   let resultPath = null;
   let nonce = null;
   let started = null;
+  let startedPath = null;
+  let cancelPath = null;
+  let controllerSettled = false;
+  let primaryError = null;
+  let stderr = '';
+  let earlyExit = null;
 
   if (process.platform === 'win32') {
     const protocolDir = path.join(dir, 'protocol space Ω');
     fs.mkdirSync(protocolDir, { recursive: true });
     const configPath = path.join(protocolDir, 'config.json');
-    const startedPath = path.join(protocolDir, 'started.json');
+    startedPath = path.join(protocolDir, 'started.json');
     const triggerPath = path.join(protocolDir, 'trigger.json');
+    cancelPath = path.join(protocolDir, 'cancel.json');
     resultPath = path.join(protocolDir, 'result.json');
     nonce = `${process.pid}-${Date.now()}-Ω`;
     writeJsonAtomic(configPath, {
@@ -447,33 +480,43 @@ await testAsync(SIGINT_TEST_NAME, async () => {
       argv: benchArgv.slice(1),
       startedPath,
       triggerPath,
+      cancelPath,
       resultPath,
       triggerTimeoutMs: 20000,
       postEventTimeoutMs: 20000,
     });
-    child = spawn('powershell.exe', [
+    child = spawn(powerShellHost, [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', WINDOWS_CTRL_C_PATH, '-ConfigPath', configPath,
     ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    let stderr = '';
-    let earlyExit = null;
     child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
     child.once('exit', (code, signal) => { earlyExit = { code, signal }; });
-    const rawStarted = await waitFor(
-      () => {
-        if (earlyExit) throw new Error(`windows-controller-start: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
-        return fs.existsSync(startedPath) && fs.readFileSync(startedPath, 'utf8');
-      },
-      10000,
-      'windows-controller-start',
-    );
-    started = JSON.parse(rawStarted);
-    assertEqual(started.nonce, nonce, 'started protocol nonce must match');
-    controllerExit = waitForExit(child).then((exit) => ({ ...exit, stderr }));
+    controllerExit = waitForExit(child).then((exit) => {
+      controllerSettled = true;
+      return { ...exit, stderr };
+    });
   } else {
     child = spawn(process.execPath, benchArgv, { stdio: 'ignore' });
-    controllerExit = waitForExit(child);
+    controllerExit = waitForExit(child).then((exit) => {
+      controllerSettled = true;
+      return exit;
+    });
   }
+
+  try {
+    if (process.platform === 'win32') {
+      const rawStarted = await waitFor(
+        () => {
+          if (earlyExit) throw new Error(`windows-controller-start: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
+          return fs.existsSync(startedPath) && fs.readFileSync(startedPath, 'utf8');
+        },
+        10000,
+        'windows-controller-start',
+      );
+      started = JSON.parse(rawStarted);
+      assertEqual(started.nonce, nonce, 'started protocol nonce must match');
+    }
+    if (injectFailureAfterStart) throw new Error('injected-pre-trigger-failure');
 
   // Poll until the first completed corrida is actually on disk — never a
   // fixed sleep, which is what made the old test vacuous.
@@ -523,7 +566,59 @@ await testAsync(SIGINT_TEST_NAME, async () => {
   assert(lines.length >= 1, 'the finished record must survive the interrupt (never zero records)');
   for (const line of lines) JSON.parse(line); // no torn/partial line
   assertEqual(lines[0], firstLine, 'the exact finished record must survive byte-identically');
-});
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    if (child && (!controllerSettled || primaryError)) {
+      if (!controllerSettled) {
+        if (process.platform === 'win32' && started && cancelPath) {
+          try { writeJsonAtomic(cancelPath, { nonce, pid: started.pid }); } catch { /* preserve primary failure */ }
+        } else if (process.platform !== 'win32') {
+          try { child.kill('SIGINT'); } catch { /* process may already be gone */ }
+        }
+      }
+      try {
+        const cleanupExit = await settleWithin(controllerExit, 5000, 'controller-cleanup');
+        if (primaryError) primaryError.cleanupExit = cleanupExit;
+      } catch (cleanupError) {
+        const killed = child.kill();
+        if (!killed) throw new Error(`controller-cleanup: owned process could not be terminated: ${cleanupError.message}`);
+        console.log(`      controller-forced-cleanup: killed owned controller pid=${child.pid} after ${cleanupError.message}`);
+        const cleanupExit = await settleWithin(controllerExit, 5000, 'controller-forced-cleanup');
+        if (primaryError) primaryError.cleanupExit = { ...cleanupExit, forced: true };
+      }
+      if (primaryError && resultPath && fs.existsSync(resultPath)) {
+        primaryError.cleanupResult = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+      }
+    }
+  }
+}
+
+if (process.platform === 'win32') {
+  const powerShellHosts = enumeratePowerShellHosts();
+  test('Windows Ctrl+C live coverage: at least one supported PowerShell host is installed', () => {
+    assert(powerShellHosts.length > 0, 'neither powershell.exe nor pwsh.exe is available; live Windows coverage is mandatory');
+  });
+  for (const host of powerShellHosts) {
+    // eslint-disable-next-line no-await-in-loop
+    await testAsync(`${SIGINT_TEST_NAME} [${host}]`, () => runSigintContract(host));
+  }
+  await testAsync('Windows Ctrl+C controller: pre-trigger assertion failure cancels and reaps the owned tree', async () => {
+    let failedAsInjected = false;
+    try { await runSigintContract(powerShellHosts[0], true); } catch (error) {
+      failedAsInjected = error.message === 'injected-pre-trigger-failure';
+      assert(error.cleanupExit && error.cleanupExit.code === 1,
+        `cancelled controller must exit diagnostically, got ${JSON.stringify(error.cleanupExit)}`);
+      assert(error.cleanupResult && error.cleanupResult.error === 'controller-cancelled',
+        `cancel protocol must be observed, got ${JSON.stringify(error.cleanupResult)}`);
+      assertEqual(error.cleanupResult.cleanup_forced, true, 'cancel must close the owned Job Object tree');
+    }
+    assert(failedAsInjected, 'the injected pre-trigger failure must propagate after cleanup');
+  });
+} else {
+  await testAsync(SIGINT_TEST_NAME, () => runSigintContract(null));
+}
 
 // ── R2: the instrument must observe the CHILD, not the parent's intent ─────
 
