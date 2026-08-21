@@ -89,6 +89,12 @@ async function withTrackedProbeResources({ fsApi, osApi, pathApi }, operation) {
       created.push(raw);
       return fsApi.realpathSync(raw);
     },
+    makeTempAt(root, prefix) {
+      if (!pathApi.isAbsolute(root)) throw new Error('temporary resource root must be absolute');
+      const raw = fsApi.mkdtempSync(pathApi.join(root, prefix));
+      created.push(raw);
+      return fsApi.realpathSync(raw);
+    },
     makeDir(dir) {
       fsApi.mkdirSync(dir, { recursive: false });
       created.push(dir);
@@ -124,7 +130,11 @@ const shellQuote = (p) => `'${String(p).replace(/'/g, `'\\''`)}'`;
 function crossPlatformWriteCommand(target, platform = process.platform) {
   if (platform !== 'win32') return `touch ${shellQuote(target)}`;
   const literal = String(target).replace(/'/g, "''");
-  return `powershell.exe -NoProfile -NonInteractive -Command "[System.IO.File]::WriteAllText('${literal}','')"`;
+  // The Windows app-server executor already hosts the command in PowerShell.
+  // Use a native cmdlet: a nested powershell.exe makes quoting part of the
+  // measurement, while static .NET method calls are blocked by the sandbox's
+  // ConstrainedLanguage mode before filesystem permissions are exercised.
+  return `Set-Content -LiteralPath '${literal}' -Value '' -NoNewline`;
 }
 
 function printVerdict(probeName, verdict, reason) {
@@ -1465,8 +1475,9 @@ async function probeNonGitWrite({ timeoutSecs }) {
  * probe puts the target in a SIBLING repo B while the turn runs with cwd = A.
  *
  * Geometry (asserted, never assumed): A and B are two sibling throwaway git repos
- * under os.tmpdir(), realpath'd; the target of the treatment arm lives in B and is
- * provably NOT a descendant of A.
+ * under the probe invocation cwd, realpath'd; the treatment target lives in B and
+ * is provably NOT a descendant of A. They stay outside os.tmpdir() because every
+ * arm deliberately excludes the process temp root.
  *
  * The four arms all carry the SAME POLICY_BASE, so the only variable between
  * CTRL-DENY and TREAT is `writableRoots` itself. `excludeSlashTmp` /
@@ -1483,8 +1494,8 @@ const CROSSROOT_VERDICTS = {
   UNKNOWN: 'unknown',
 };
 
-// The re-run prescribed by both inconclusive routes: siege A and B outside os.tmpdir().
-const CROSSROOT_RERUN = 'Re-rodada prescrita (variante ii): recriar A e B FORA de os.tmpdir() e repetir os quatro braços.';
+// A second filesystem remains useful for inconclusive platform-specific outcomes.
+const CROSSROOT_RERUN = 'Re-rodada prescrita: repetir os quatro braços em outro filesystem fora de os.tmpdir().';
 
 /**
  * EXECUTION EVIDENCE (review R1).
@@ -1514,18 +1525,29 @@ const CROSSROOT_RERUN = 'Re-rodada prescrita (variante ii): recriar A e B FORA d
  */
 const CROSSROOT_EXEC = { WRITE: 'write-effect', ITEM: 'item', CONTROL: 'control', NONE: 'none' };
 
-// A completed commandExecution citing this arm's target. `status` is checked when the
-// server supplied it (the real 0.144.4 items carry `status:"completed"`); the probe's
-// own collector already drops started-without-completion items, so absence of the
-// field is not treated as a failure.
+// A terminal commandExecution citing this arm's target. A sandbox denial is normally
+// reported as `failed` (0.149.0) or `declined`, and is stronger execution evidence
+// than silence: it proves the exact operation reached the boundary. The collector
+// separately reports started-without-completion items, so admit only closed states.
 function completedExecFor(arm) {
   if (!arm || !Array.isArray(arm.items)) return null;
   const completed = arm.items.filter(i => i && i.type === 'commandExecution'
-    && (i.status === undefined || i.status === 'completed'));
+    && (i.status === undefined || ['completed', 'failed', 'declined'].includes(i.status)));
   if (completed.length === 0) return null;
   const target = typeof arm.target === 'string' && arm.target ? arm.target : null;
+  const windowsTarget = /^[A-Za-z]:[\\/]/.test(target || '') || /^\\\\/.test(target || '');
+  const comparable = value => {
+    const normalized = String(value || '').replace(/\\/g, '/');
+    return windowsTarget ? normalized.toLowerCase() : normalized;
+  };
+  const targetComparable = comparable(target);
+  const citesTarget = item => {
+    const texts = [item.command, ...((Array.isArray(item.commandActions) ? item.commandActions : [])
+      .map(action => action && action.command))];
+    return texts.some(text => comparable(text).includes(targetComparable));
+  };
   const matched = target
-    ? completed.filter(i => typeof i.command === 'string' && i.command.includes(target))
+    ? completed.filter(citesTarget)
     : completed;
   if (matched.length === 0) return null;
   const item = matched[0];
@@ -1876,9 +1898,13 @@ async function probeCrossRootWrite({ timeoutSecs }) {
 
   // Step 2 — two SIBLING throwaway git repos. Both are git on purpose: this task's
   // question is not about git-ness, so that variable is removed by holding it fixed.
-  const dirA = resources.makeTemp('forge-xroot-a-');
-  const dirB = resources.makeTemp('forge-xroot-b-');
-  // `git init` runs only in tmpdirs this probe just created — never the operator's repo.
+  // Keep the git fixtures outside os.tmpdir(): every arm deliberately carries
+  // the same excludeTmpdir policy, which would otherwise deny its own cwd and
+  // invalidate the positive control before writableRoots is measured.
+  const fixtureRoot = fs.realpathSync(process.cwd());
+  const dirA = resources.makeTempAt(fixtureRoot, '.forge-xroot-a-');
+  const dirB = resources.makeTempAt(fixtureRoot, '.forge-xroot-b-');
+  // `git init` runs only in directories this probe just created — never the operator's repo.
   const initA = spawnSync('git', ['init', '-q'], { cwd: dirA, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const initB = spawnSync('git', ['init', '-q'], { cwd: dirB, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
