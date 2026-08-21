@@ -3,7 +3,6 @@
 
 const fs = require('fs');
 const { spawnSync } = require('child_process');
-const { VERSION } = require('./forge-version.js');
 
 function parseTag(tag) {
   const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(String(tag || '').trim());
@@ -52,11 +51,14 @@ function resolveVersion(cwd = process.cwd()) {
   const allTags = git(cwd, ['tag', '-l', 'v*', '--sort=-v:refname'], true);
   const latestTag = allTags[0] || null;
   const range = latestTag ? `${latestTag}..HEAD` : 'HEAD';
-  const commits = git(cwd, ['log', range, '--pretty=format:%s'], true);
+  const log = spawnSync('git', ['-C', cwd, 'log', range, '--pretty=format:%B%x1e'], { encoding: 'utf8', shell: false });
+  if (!log || log.status !== 0) throw new Error(`git log ${range} failed: ${log && log.stderr ? log.stderr.trim() : 'unknown error'}`);
+  const commits = String(log.stdout || '').split('\x1e').map(value => value.trim()).filter(Boolean);
   return resolveFromFacts({ headTags, latestTag, commits });
 }
 
-function checkDeclaredVersion(resolution, declared = VERSION) {
+function checkDeclaredVersion(resolution, declared) {
+  if (declared === undefined) declared = require('./forge-version.js').VERSION;
   const expected = String(resolution.new_tag || '').replace(/^v/, '');
   if (!expected) throw new Error('release version cannot be checked without an expected tag');
   if (declared !== expected) {

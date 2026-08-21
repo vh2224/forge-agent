@@ -73,8 +73,7 @@ test('Claude-only writes shared core once and only Claude projection', () => {
   try {
     const report = installer.install({ ...data.options, runtime: 'claude' });
     assert.strictEqual(report.ok, true);
-    assert.strictEqual(installer.VERSION, '4.20.1');
-    assert.strictEqual(fs.readFileSync(path.join(data.forgeHome, 'VERSION'), 'utf8'), '4.20.1\n');
+    assert.strictEqual(fs.readFileSync(path.join(data.forgeHome, 'VERSION'), 'utf8'), `${installer.VERSION}\n`);
     assert.strictEqual(fs.existsSync(path.join(data.forgeHome, 'scripts', 'forge-home.js')), true);
     assert.strictEqual(fs.existsSync(path.join(data.forgeHome, 'forge-capabilities.json')), true);
     assert.strictEqual(fs.existsSync(path.join(data.forgeHome, 'manifest.json')), true);

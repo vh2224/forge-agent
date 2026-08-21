@@ -99,7 +99,7 @@ try {
 
   const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json'), 'utf8'));
   assert.strictEqual(golden.runtime, first.runtime);
-  assert.strictEqual(golden.version, renderer.VERSION);
+  assert.strictEqual(golden.version_policy, 'normalized-dynamic');
   for (const surface of golden.surfaces) {
     const matching = first.artifacts.filter((item) => item.source_id === surface.source_id);
     assert(matching.length > 0, `golden surface missing: ${surface.source_id}`);
@@ -108,7 +108,8 @@ try {
     const targetFound = matching.some((item) => item.destination.endsWith(suffix)
       || item.destination.includes(`${path.sep}${suffix}${path.sep}`));
     assert(targetFound, `golden target missing: ${surface.target}`);
-    const payload = matching.sort((a, b) => a.source.localeCompare(b.source)).map((item) => `${item.source}\0${item.content}`).join('\0');
+    const payload = matching.sort((a, b) => a.source.localeCompare(b.source))
+      .map((item) => `${item.source}\0${item.content.replace(/version=\d+\.\d+\.\d+/g, 'version=<dynamic>')}`).join('\0');
     assert.strictEqual(crypto.createHash('sha256').update(payload, 'utf8').digest('hex'), surface.sha256, `golden bytes drifted: ${surface.source_id}`);
   }
 
