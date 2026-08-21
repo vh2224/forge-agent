@@ -337,6 +337,7 @@ function computeSubjectReportCriterion(axis) {
 function errorReport(error) {
   return {
     green: false,
+    detector_version: null,
     criteria: [],
     f2_recall: null,
     resolution_rate: null,
@@ -478,6 +479,7 @@ function measureGreenUnsafe(cwd, opts) {
 
   return {
     green,
+    detector_version: f2.detector_version,
     criteria,
     // Informativo, não mais critério — mantido no topo porque é a série
     // temporal que o operador compara entre medições.
@@ -514,6 +516,7 @@ function renderMarkdown(report) {
     `- green: ${report.green}`,
     '- critério: lista enumerada de misses permitidos, duas direções (f2_recall é informativo, não gateia)',
     `- f2_recall (informativo): ${report.f2_recall}`,
+    `- detector_version: ${report.detector_version}`,
     `- resolution_rate: ${report.resolution_rate}`,
     `- unit_axis: ${report.unit_axis.facts_with_unit}/${report.unit_axis.facts_total}`,
     `- subject_report_present: ${report.subject_report_present}`,
