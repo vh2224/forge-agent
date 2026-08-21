@@ -146,7 +146,7 @@ function verifyDirtyUnchanged(preview, bundle) {
   if (!current.ok) throw new Error(`vcs-status-failed:${current.error}`);
   const dirty = current.entries.filter((entry) => inScope(entry.path.replace(/\\/g, '/'), preview.scope));
   const expected = bundle ? bundle.manifest.entries : [];
-  const key = (entry) => `${entry.path}\0${entry.kind}`;
+  const key = (entry) => `${entry.path}\0${entry.kind}\0${entry.code}`;
   if (dirty.length !== expected.length || dirty.map(key).sort().join('\n') !== expected.map(key).sort().join('\n')) {
     throw new Error('dirty-scope-drift');
   }
@@ -201,15 +201,27 @@ function loadManifest(cwd, runId) {
   return { root, manifest };
 }
 
-function writeExclusive(root, target, bytes, label) {
+function writeAllSync(handle, bytes, writer) {
+  const write = writer || fs.writeSync;
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = write(handle, bytes, offset, bytes.length - offset, offset);
+    if (!Number.isInteger(written) || written <= 0 || written > bytes.length - offset) throw new Error('write-invalid-count');
+    offset += written;
+  }
+  return offset;
+}
+
+function writeExclusive(root, target, bytes, label, opts) {
+  const o = opts || {};
   const parentRel = path.relative(root, path.dirname(target)).replace(/\\/g, '/');
   secureDirChain(root, parentRel, true, label);
   assertSafePath(root, path.dirname(target), label);
   let handle;
   try {
     handle = fs.openSync(target, 'wx');
-    fs.writeSync(handle, bytes, 0, bytes.length, 0);
-    fs.fsyncSync(handle);
+    writeAllSync(handle, bytes, o.writeSync);
+    (o.fsyncSync || fs.fsyncSync)(handle);
     return { written: true };
   } catch (error) {
     if (!error || error.code !== 'EEXIST') throw error;
@@ -268,4 +280,4 @@ function restore(cwd, runId, opts = {}) {
   } catch (error) { return { ok: false, restored: false, reason: error.message }; }
 }
 
-module.exports = { inspect, apply, restore, createBundle, verifyDirtyUnchanged, assertSafePath, secureDirChain, writeExclusive, normalizeScope, inScope, sha256 };
+module.exports = { inspect, apply, restore, createBundle, verifyDirtyUnchanged, assertSafePath, secureDirChain, writeAllSync, writeExclusive, normalizeScope, inScope, sha256 };

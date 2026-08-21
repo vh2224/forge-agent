@@ -132,5 +132,21 @@ test('dangling symlink é presença insegura, nunca ausência', () => {
   const capture = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.match(capture.reason, /dirty-path-reparse/); assert.strictEqual(runs.get(f.cwd, f.id).active, true);
 });
 
+test('writeAllSync completa short writes e recusa progresso zero', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-write-all-')); roots.push(root); const target = path.join(root, 'bytes.bin'); const bytes = Buffer.from([0, 1, 2, 3, 255, 10, 13, 8]);
+  let calls = 0; const shortWriter = (fd, buffer, offset, length, position) => { calls++; return fs.writeSync(fd, buffer, offset, Math.min(2, length), position); };
+  let syncedComplete = false; const result = recovery.writeExclusive(root, target, bytes, 'restore', { writeSync: shortWriter, fsyncSync: (fd) => { syncedComplete = fs.fstatSync(fd).size === bytes.length; fs.fsyncSync(fd); } });
+  assert.deepStrictEqual(result, { written: true }); assert(calls > 1); assert.strictEqual(syncedComplete, true); assert.deepStrictEqual(fs.readFileSync(target), bytes);
+  const invalid = path.join(root, 'invalid.bin'); const invalidHandle = fs.openSync(invalid, 'wx'); try { assert.throws(() => recovery.writeAllSync(invalidHandle, Buffer.from('x'), () => 0), /write-invalid-count/); } finally { fs.closeSync(invalidHandle); }
+  assert.strictEqual(fs.statSync(invalid).size, 0);
+  assert.deepStrictEqual(recovery.writeExclusive(root, path.join(root, 'idempotent.bin'), bytes, 'restore'), { written: true }); assert.deepStrictEqual(recovery.writeExclusive(root, path.join(root, 'idempotent.bin'), bytes, 'restore'), { written: false });
+});
+
+test('segunda medição inclui code bruto na identidade do status', () => {
+  const f = fixture('T-drift-code'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('same')); let call = 0;
+  const changedCode = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ++call === 1 ? ' M' : 'MM' }] });
+  const result = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: changedCode }); assert.strictEqual(result.reason, 'dirty-scope-drift'); assert.strictEqual(runs.get(f.cwd, f.id).active, true);
+});
+
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
 if (!process.exitCode) process.stdout.write(`\n${passed} passed, 0 failed\n`);
