@@ -652,7 +652,8 @@ async function testCrossRootProbe() {
   // (2) the positive control never executed: absence elsewhere is noise, not denial.
   const noAttempt = crossRootVerdict({ ctrlAttempt: absent, ctrlDeny: absent, treat: absent, replaceCheck: absent });
   assert.strictEqual(noAttempt.verdict, V.INCONCLUSIVA);
-  assert(noAttempt.reason.includes('variante ii'), 'the prescribed re-run must be printed');
+  assert(noAttempt.reason.includes('outro filesystem fora de os.tmpdir'),
+    'the prescribed cross-filesystem re-run must be printed');
 
   // (3) NON-DEGRADATION: the negative control wrote => B was already writable.
   const denyWrote = crossRootVerdict({ ctrlAttempt: wrote, ctrlDeny: wrote, treat: wrote, replaceCheck: wrote });
@@ -749,6 +750,16 @@ async function testCrossRootProbe() {
   });
   assert.strictEqual(windowsDenied.verdict, V.PROVADA,
     'Windows execution evidence matching must be separator- and case-insensitive');
+  const posixWrongCase = crossRootVerdict({
+    ctrlAttempt: wrote,
+    ctrlDeny: { exists: false, targetDir: '/B', target: '/B/deny.txt', items: [{
+      type: 'commandExecution', status: 'failed', command: "touch '/b/DENY.txt'", exitCode: 1,
+    }] },
+    treat: { exists: false, targetDir: '/B', target: '/B/treat.txt', items: [] },
+    replaceCheck: wrote,
+  });
+  assert.strictEqual(posixWrongCase.verdict, V.UNKNOWN,
+    'POSIX target matching must remain case-sensitive and reject evidence for a different path');
 
   // (6d) THE INVARIANT. Fed the shape MEASURED in probe-crossroot-write.log against
   // codex-cli 0.144.4, the ladder must still say `provada`. CTRL-DENY there emitted

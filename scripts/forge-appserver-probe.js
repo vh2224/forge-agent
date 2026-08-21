@@ -1535,7 +1535,11 @@ function completedExecFor(arm) {
     && (i.status === undefined || ['completed', 'failed', 'declined'].includes(i.status)));
   if (completed.length === 0) return null;
   const target = typeof arm.target === 'string' && arm.target ? arm.target : null;
-  const comparable = value => String(value || '').replace(/\\/g, '/').toLowerCase();
+  const windowsTarget = /^[A-Za-z]:[\\/]/.test(target || '') || /^\\\\/.test(target || '');
+  const comparable = value => {
+    const normalized = String(value || '').replace(/\\/g, '/');
+    return windowsTarget ? normalized.toLowerCase() : normalized;
+  };
   const targetComparable = comparable(target);
   const citesTarget = item => {
     const texts = [item.command, ...((Array.isArray(item.commandActions) ? item.commandActions : [])
