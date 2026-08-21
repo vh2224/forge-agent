@@ -4,14 +4,14 @@
     {
       "mem_id": "MEM058",
       "mention": ".md",
-      "item": "#107",
-      "reason": "menção da extensão .md nua, sem nome de arquivo. Permanentemente ambígua por FORMA: `.env` e `.tsx` têm exatamente o mesmo shape e SÃO arquivos reais, então nenhuma regra lexical separa os dois casos. #107 fechou as outras quatro entradas (~/ x2, par de extensões, lista entre crases); estas duas continuam abertas por decisão, não por falta de tentativa — a única alternativa principiada encontrada (consultar o índice de arquivos do workspace) tornaria o recall dependente do workspace e acoplaria o detector à verdade que ele deveria observar de fora."
+      "item": "#126",
+      "reason": "miss histórico sem texto integral, offsets ou storage_key originais; a gramática contextual foi corrigida, mas a ausência de proveniência impede demonstrar que esta ocorrência específica foi curada"
     },
     {
       "mem_id": "MEM001",
       "mention": ".md",
-      "item": "#107",
-      "reason": "menção da extensão .md nua, sem nome de arquivo. Permanentemente ambígua por FORMA: `.env` e `.tsx` têm exatamente o mesmo shape e SÃO arquivos reais, então nenhuma regra lexical separa os dois casos. #107 fechou as outras quatro entradas (~/ x2, par de extensões, lista entre crases); estas duas continuam abertas por decisão, não por falta de tentativa — a única alternativa principiada encontrada (consultar o índice de arquivos do workspace) tornaria o recall dependente do workspace e acoplaria o detector à verdade que ele deveria observar de fora."
+      "item": "#126",
+      "reason": "miss histórico sem texto integral, offsets ou storage_key originais; a gramática contextual foi corrigida, mas a ausência de proveniência impede demonstrar que esta ocorrência específica foi curada"
     }
   ]
 }

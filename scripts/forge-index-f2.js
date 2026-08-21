@@ -13,6 +13,8 @@ const TRAILING_PUNCTUATION = '.,;:!?)]}>';
 const LEADING_PUNCTUATION = '(\'"[';
 const VERSION_RE = /^\d+(?:\.\d+)+$/;
 const PLAIN_NOISE = new Set(['e/ou', 'n/a', 'na', 'ou']);
+const DETECTOR_VERSION = 'f2-mentions-v2-contextual-extension';
+const METALINGUISTIC_EXTENSION_REASON = 'menção metalinguística de extensão, não arquivo concreto';
 // Latin prose abbreviations that survive punctuation stripping as `x.y` tokens.
 const LATIN_ABBREVIATION_RE = /^(?:e\.g|i\.e|p\.ex)$/;
 // Template markers (`T##-PLAN.md`), interpolations (`{id}`, `${N}`), angle
@@ -69,18 +71,55 @@ function mentionKind(value) {
   return null;
 }
 
+function bareExtensionToken(raw) {
+  const core = cleanToken(raw);
+  const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`'
+    ? core.slice(1, -1)
+    : core;
+  return /^\.[A-Za-z0-9]{1,6}$/.test(inner);
+}
+
+function lexicalToken(raw) {
+  return cleanToken(raw).toLowerCase();
+}
+
 function detectMentions(text) {
   if (typeof text !== 'string' || !text) return [];
   const mentions = [];
   const tokenRe = /\S+/g;
+  let extensionList = false;
+  let extensionSeen = false;
   let match;
   while ((match = tokenRe.exec(text)) !== null) {
     const raw = match[0];
     const core = cleanToken(raw);
     const why = mentionKind(core);
-    if (!why) continue;
-    const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`' ? core.slice(1, -1) : core;
-    mentions.push({ raw, normalized: basename(inner), why });
+    const lexical = lexicalToken(raw);
+    const bareExtension = bareExtensionToken(raw);
+    const metalinguisticExtension = extensionList && bareExtension;
+    if (why) {
+      const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`' ? core.slice(1, -1) : core;
+      const mention = { raw, normalized: basename(inner), why };
+      Object.defineProperty(mention, '_metalinguisticExtension', {
+        value: metalinguisticExtension,
+        enumerable: false,
+      });
+      mentions.push(mention);
+    }
+
+    if (lexical === 'extensão' || lexical === 'extensões') {
+      extensionList = true;
+      extensionSeen = false;
+    } else if (metalinguisticExtension) {
+      extensionSeen = true;
+    } else if (extensionList && extensionSeen && (lexical === 'e' || lexical === 'ou')) {
+      // A conjunção fechada prolonga somente uma lista que já começou.
+    } else if (extensionList && /^[,:;/()\[\]-]+$/.test(raw)) {
+      // Pontuação estrutural isolada pode separar o governador da lista.
+    } else {
+      extensionList = false;
+      extensionSeen = false;
+    }
   }
   return mentions;
 }
@@ -88,6 +127,7 @@ function detectMentions(text) {
 function detectorFalsePositive(mention) {
   const normalized = mention.normalized;
   const raw = String(mention.raw || '').toLowerCase();
+  if (mention._metalinguisticExtension === true) return METALINGUISTIC_EXTENSION_REASON;
   if (PLAIN_NOISE.has(raw)) return 'segmentos de prosa, não caminho de arquivo';
   if (VERSION_RE.test(normalized)) return 'número decimal ou versão nua';
   if (/^[a-z]\/([a-z]|\d)$/i.test(raw)) return 'abreviação com barra';
@@ -100,6 +140,7 @@ function detectorFalsePositive(mention) {
   const wrapped = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`';
   const inner = wrapped ? core.slice(1, -1) : core;
   const suffix = dotSuffix(normalized);
+  const bareDotfile = /^\.[A-Za-z0-9]{1,6}$/.test(inner);
   // A trailing slash names a DIRECTORY (`.gsd/`): its basename is empty, so it
   // could never match a file citation — enumerate instead of leaving a
   // permanently unmatchable mention in the denominator.
@@ -107,7 +148,7 @@ function detectorFalsePositive(mention) {
   // Backticks alone are not evidence of a file: `--cwd`, `default`, `domain:`
   // are keywords/flags. A backticked token only stays signal with a slash or a
   // real file extension.
-  if (wrapped && !inner.includes('/') && (!suffix || !REAL_FILE_EXT.has(suffix))) return 'keyword/flag entre crases, sem extensão de arquivo nem barra';
+  if (wrapped && !inner.includes('/') && !bareDotfile && (!suffix || !REAL_FILE_EXT.has(suffix))) return 'keyword/flag entre crases, sem extensão de arquivo nem barra';
   // #107: a slash does not make a path. Two shapes reached here as signal and
   // depressed recall against an extractor that was RIGHT to ignore them.
   //
@@ -132,7 +173,7 @@ function detectorFalsePositive(mention) {
   }
   // Dotted identifiers (`JSON.parse`, `turn.id`, `v2.0`, `cmd.exe`) end in a
   // "suffix" that is not a real file extension — prose, not a citation target.
-  if (suffix && !REAL_FILE_EXT.has(suffix)) return 'sufixo não é extensão de arquivo real (identificador com ponto)';
+  if (suffix && !bareDotfile && !REAL_FILE_EXT.has(suffix)) return 'sufixo não é extensão de arquivo real (identificador com ponto)';
   return null;
 }
 
@@ -228,6 +269,7 @@ function measureF2(cwd, opts) {
   const falsePositiveCandidates = facts.flatMap((fact) => fact.precision_candidates);
   const denominator = mentioned.length;
   return {
+    detector_version: DETECTOR_VERSION,
     verdict: denominator === 0 ? 'EMPTY-DENOMINATOR' : 'MEASURED',
     facts_that_mention_file: denominator,
     facts_covered: covered,
@@ -268,5 +310,5 @@ function runCli(argv) {
   } catch (error) { process.stderr.write(JSON.stringify({ error: error.message || String(error) }) + '\n'); return 1; }
 }
 
-module.exports = { detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
+module.exports = { DETECTOR_VERSION, METALINGUISTIC_EXTENSION_REASON, detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
 if (require.main === module) process.exitCode = runCli(process.argv.slice(2));

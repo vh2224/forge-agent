@@ -18,6 +18,7 @@ const {
   computeUnitAxisCriterion,
   computeSubjectReportCriterion,
 } = require('./forge-index-green');
+const { DETECTOR_VERSION } = require('./forge-index-f2');
 
 let passed = 0;
 function test(name, fn) {
@@ -645,6 +646,20 @@ test('scripts/fixtures/index-green/allowed-misses.json resolves clean and every 
   for (const e of resolved.entries) {
     assert.ok(e.item && e.item.trim() !== '', `entry ${e.key} must name an owner`);
   }
+  assert.deepStrictEqual(resolved.entries.map((entry) => entry.key).sort(), ['MEM001::.md', 'MEM058::.md']);
+  assert.ok(resolved.entries.every((entry) => entry.item === '#126'), 'as duas exceções históricas continuam presentes e pertencem à #126');
+  assert.ok(resolved.entries.every((entry) => /proveniência/.test(entry.reason)), 'a razão deve nomear a lacuna real de proveniência');
+});
+
+test('#126 index-green propaga sem inferir a identidade da taxonomia F2', () => {
+  const cwd = fixture();
+  try {
+    writeFragment(cwd, { unit_id: 'T01', facts: [fact('MEM001', 'cita `scripts/covered.js`')] });
+    writeAllowed(cwd, []);
+    const report = measureGreen(cwd);
+    assert.strictEqual(report.detector_version, DETECTOR_VERSION);
+    assert.ok(Object.prototype.hasOwnProperty.call(report, 'detector_version'));
+  } finally { cleanup(cwd); }
 });
 
 
