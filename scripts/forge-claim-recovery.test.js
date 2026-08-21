@@ -120,11 +120,10 @@ test('precondition dirty roda dentro do lock e detecta mutação imediatamente a
 });
 
 test('open exclusivo recusa corrida EEXIST divergente sem overwrite', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-exclusive-')); roots.push(root); const target = path.join(root, 'nested', 'file.bin'); const originalOpen = fs.openSync; let injected = false;
-  fs.openSync = function(file, flags, ...rest) { if (!injected && path.resolve(file) === path.resolve(target) && flags === 'wx') { injected = true; fs.writeFileSync(target, Buffer.from('racer')); } return originalOpen.call(fs, file, flags, ...rest); };
-  try { assert.throws(() => recovery.writeExclusive(root, target, Buffer.from('payload'), 'restore'), /restore-existing-divergent/); }
-  finally { fs.openSync = originalOpen; }
-  assert.strictEqual(fs.readFileSync(target, 'utf8'), 'racer');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-exclusive-')); roots.push(root); const target = path.join(root, 'nested', 'file.bin');
+  const racingLink = (staging, destination) => { fs.writeFileSync(destination, Buffer.from('racer')); return fs.linkSync(staging, destination); };
+  assert.throws(() => recovery.writeExclusive(root, target, Buffer.from('payload'), 'restore', { linkSync: racingLink }), /restore-existing-divergent/);
+  assert.strictEqual(fs.readFileSync(target, 'utf8'), 'racer'); assert.strictEqual(fs.readdirSync(path.dirname(target)).some(name => name.startsWith('.forge-recovery-')), false);
 });
 
 test('dangling symlink é presença insegura, nunca ausência', () => {
@@ -166,9 +165,22 @@ test('writeExclusive limpa apenas parcial próprio após write/zero/fsync e perm
     ['zero.bin', { writeSync: () => 0 }, /write-invalid-count/],
     ['fsync.bin', { fsyncSync: () => { throw new Error('fsync-boom'); } }, /fsync-boom/],
   ]) {
-    const target = path.join(root, name); assert.throws(() => recovery.writeExclusive(root, target, bytes, 'restore', options), pattern); assert.strictEqual(fs.existsSync(target), false);
+    const target = path.join(root, name); assert.throws(() => recovery.writeExclusive(root, target, bytes, 'restore', options), pattern); assert.strictEqual(fs.existsSync(target), false); assert.strictEqual(fs.readdirSync(root).some(entry => entry.startsWith('.forge-recovery-')), false);
     assert.deepStrictEqual(recovery.writeExclusive(root, target, bytes, 'restore'), { written: true }); assert.deepStrictEqual(fs.readFileSync(target), bytes);
   }
+});
+
+test('evidence hash derrota adulteração coordenada de manifest sidecar e payload', () => {
+  const f = fixture('T-evidence-anchor'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('saved')); const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] });
+  const applied = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(applied.ok, true); const root = path.join(f.cwd, applied.bundle); const manifestPath = path.join(root, 'manifest.json'); const manifest = JSON.parse(fs.readFileSync(manifestPath));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-tampered-code-')); roots.push(outside); manifest.code_dir = outside; manifest.entries[0].payload = 'payload/evil.bin'; fs.writeFileSync(path.join(root, 'payload', 'evil.bin'), Buffer.from('evil'));
+  const raw = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`); fs.writeFileSync(manifestPath, raw); fs.writeFileSync(path.join(root, 'manifest.sha256'), `${recovery.sha256(raw)}\n`);
+  const result = recovery.restore(f.cwd, f.id, { apply: true }); assert.strictEqual(result.reason, 'manifest-evidence-mismatch'); assert.strictEqual(fs.readdirSync(outside).length, 0);
+});
+
+test('hard-link indisponível falha fechado sem publicar target parcial', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-link-unavailable-')); roots.push(root); const target = path.join(root, 'target.bin'); const unavailable = () => { const error = new Error('link unavailable'); error.code = 'EPERM'; throw error; };
+  assert.throws(() => recovery.writeExclusive(root, target, Buffer.from('payload'), 'restore', { linkSync: unavailable }), /link unavailable/); assert.strictEqual(fs.existsSync(target), false); assert.strictEqual(fs.readdirSync(root).length, 0);
 });
 
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });

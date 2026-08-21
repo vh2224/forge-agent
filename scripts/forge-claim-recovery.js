@@ -201,9 +201,12 @@ function apply(cwd, runId, opts = {}) {
 
 function loadManifest(cwd, runId) {
   const record = runs.get(cwd, runId);
-  const bundleRel = record && record.write_claim && record.write_claim.released
-    && record.write_claim.released.evidence && record.write_claim.released.evidence.bundle;
+  const releaseEvidence = record && record.write_claim && record.write_claim.released
+    && record.write_claim.released.evidence;
+  const bundleRel = releaseEvidence && releaseEvidence.bundle;
   if (typeof bundleRel !== 'string' || bundleRel === '') throw new Error('applied-bundle-missing');
+  const evidenceHash = releaseEvidence && releaseEvidence.manifest_sha256;
+  if (typeof evidenceHash !== 'string' || !/^[a-f0-9]{64}$/.test(evidenceHash)) throw new Error('manifest-evidence-missing');
   const runRoot = recoveryStore(cwd, runId, false);
   const rootPath = path.resolve(cwd, bundleRel);
   if (!inside(runRoot, rootPath)) throw new Error('bundle-path-escape');
@@ -212,6 +215,7 @@ function loadManifest(cwd, runId) {
   const raw = fs.readFileSync(file);
   const expectedHash = fs.readFileSync(path.join(root, 'manifest.sha256'), 'ascii').trim();
   if (!/^[a-f0-9]{64}$/.test(expectedHash) || sha256(raw) !== expectedHash) throw new Error('manifest-corrupt');
+  if (sha256(raw) !== evidenceHash) throw new Error('manifest-evidence-mismatch');
   const manifest = JSON.parse(raw.toString('utf8'));
   if (manifest.version !== 1 || manifest.run_id !== runId || !Array.isArray(manifest.entries)) throw new Error('manifest-invalid');
   if (manifest.claim_identity_sha256 !== sha256(Buffer.from(JSON.stringify(manifest.claim)))) throw new Error('manifest-claim-identity-invalid');
@@ -237,29 +241,37 @@ function writeExclusive(root, target, bytes, label, opts) {
   const parentRel = path.relative(root, path.dirname(target)).replace(/\\/g, '/');
   secureDirChain(root, parentRel, true, label);
   assertSafePath(root, path.dirname(target), label);
-  let handle; let createdIdentity = null;
+  const parent = path.dirname(target);
+  const staging = path.join(parent, `.forge-recovery-${crypto.randomBytes(16).toString('hex')}.tmp`);
+  let handle; let stagingIdentity = null; let originalError = null;
   try {
-    handle = fs.openSync(target, 'wx');
-    createdIdentity = fs.fstatSync(handle);
+    handle = fs.openSync(staging, 'wx');
+    stagingIdentity = fs.fstatSync(handle);
     writeAllSync(handle, bytes, o.writeSync);
     (o.fsyncSync || fs.fsyncSync)(handle);
-    return { written: true };
-  } catch (error) {
-    if (!error || error.code !== 'EEXIST') {
-      if (handle !== undefined) { try { fs.closeSync(handle); } catch { /* preserve original */ } handle = undefined; }
-      if (createdIdentity) {
-        try {
-          const current = fs.lstatSync(target);
-          if (!current.isSymbolicLink() && current.dev === createdIdentity.dev && current.ino === createdIdentity.ino) fs.unlinkSync(target);
-        } catch { /* preserve original error and never broaden cleanup */ }
-      }
-      throw error;
+    fs.closeSync(handle); handle = undefined;
+    try {
+      (o.linkSync || fs.linkSync)(staging, target);
+      return { written: true };
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+      const stat = fs.lstatSync(target);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label}-existing-divergent`);
+      if (sha256(fs.readFileSync(target)) !== sha256(bytes)) throw new Error(`${label}-existing-divergent`);
+      return { written: false };
     }
-    const stat = fs.lstatSync(target);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label}-existing-divergent`);
-    if (sha256(fs.readFileSync(target)) !== sha256(bytes)) throw new Error(`${label}-existing-divergent`);
-    return { written: false };
-  } finally { if (handle !== undefined) fs.closeSync(handle); }
+  } catch (error) {
+    originalError = error;
+    throw error;
+  } finally {
+    if (handle !== undefined) { try { fs.closeSync(handle); } catch { /* preserve original */ } }
+    if (stagingIdentity) {
+      try {
+        const current = fs.lstatSync(staging);
+        if (!current.isSymbolicLink() && current.dev === stagingIdentity.dev && current.ino === stagingIdentity.ino) fs.unlinkSync(staging);
+      } catch (cleanupError) { if (!originalError && cleanupError.code !== 'ENOENT') throw cleanupError; }
+    }
+  }
 }
 
 function restore(cwd, runId, opts = {}) {
