@@ -381,6 +381,7 @@ await testAsync('killTreeAsync: a hung taskkill cannot block SIGINT cleanup past
   const result = await bench.killTreeAsync(child, {
     platform: 'win32',
     timeoutMs: 10,
+    exitConfirmMs: 10,
     spawnImpl: () => killer,
     reportDegraded: (reason) => degraded.push(reason),
   });
@@ -447,6 +448,53 @@ await testAsync('signal shutdown: real degraded cleanup selects exit 75 after fi
   assertEqual(exits.join(','), '75', 'degraded cleanup must never report SIGINT success');
   assert(diagnostics.some((message) => message.includes('cleanup-degraded:timeout')),
     `cleanup degradation must be named: ${diagnostics.join(',')}`);
+});
+
+await testAsync('signal shutdown: taskkill exit 128 plus observed owned-child exit remains successful', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 520000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  bench.spawnTracked('owned', [], { cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned });
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const exits = [];
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT', cancellationFence: bench.createSpawnFence(), restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync({
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 20,
+      spawnImpl: () => {
+        queueMicrotask(() => {
+          owned.exitCode = 130; owned.emit('exit', 130, null); killer.emit('close', 128);
+        });
+        return killer;
+      },
+      reportDegraded: () => {},
+    }),
+    exit: (code) => exits.push(code), writeDiagnostic: () => {},
+  });
+  assertEqual(exits.join(','), '130', 'observed natural exit must not be downgraded by taskkill exit 128');
+});
+
+await testAsync('signal shutdown: taskkill exit 128 with owned child still live selects exit 75', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 530000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => { queueMicrotask(() => owned.emit('exit', null, 'SIGKILL')); return true; };
+  bench.spawnTracked('owned', [], { cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned });
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const exits = []; const diagnostics = [];
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT', cancellationFence: bench.createSpawnFence(), restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync({
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+      spawnImpl: () => { queueMicrotask(() => killer.emit('close', 128)); return killer; },
+      reportDegraded: () => {},
+    }),
+    exit: (code) => exits.push(code), writeDiagnostic: (message) => diagnostics.push(message),
+  });
+  assertEqual(exits.join(','), '75', 'unconfirmed tree cleanup must remain degraded');
+  assert(diagnostics.some((message) => message.includes('cleanup-degraded:exit-128')),
+    `exit-128 degradation must be named: ${diagnostics.join(',')}`);
 });
 
 await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {

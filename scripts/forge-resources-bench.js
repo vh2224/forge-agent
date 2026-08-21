@@ -204,7 +204,42 @@ function collectContractWitness(cwd) {
 // D5 is NOT weakened: these are descendants of processes this module itself
 // created. It still never signals a process it did not spawn.
 const liveChildren = new Set();
+const ownedChildState = new WeakMap();
 const TASKKILL_TIMEOUT_MS = 5000;
+const CHILD_EXIT_CONFIRM_MS = 250;
+
+function hasOwnedChildExited(child) {
+  const state = ownedChildState.get(child);
+  return Boolean(
+    (state && state.exited)
+    || typeof child.exitCode === 'number'
+    || (child.signalCode !== undefined && child.signalCode !== null),
+  );
+}
+
+function confirmOwnedChildExited(child, timeoutMs = CHILD_EXIT_CONFIRM_MS) {
+  if (hasOwnedChildExited(child)) return Promise.resolve(true);
+  if (typeof child.once !== 'function' || typeof child.removeListener !== 'function') {
+    return new Promise((resolve) => {
+      setTimeout(() => resolve(hasOwnedChildExited(child)), timeoutMs);
+    });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      child.removeListener('close', onExit);
+      resolve(exited || hasOwnedChildExited(child));
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+    child.once('close', onExit);
+  });
+}
 
 function killTree(child, options = {}) {
   if (!child || child.killed || typeof child.pid !== 'number') return { ok: true, skipped: true };
@@ -250,6 +285,7 @@ function killTreeAsync(child, options = {}) {
   });
   return new Promise((resolve) => {
     let settled = false;
+    let resolutionStarted = false;
     let killer;
     let timer = null;
     const finish = (result) => {
@@ -263,20 +299,29 @@ function killTreeAsync(child, options = {}) {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
       finish({ ok: false, degraded: true, reason });
     };
+    const resolveNonSuccess = async (reason) => {
+      if (resolutionStarted || settled) return;
+      resolutionStarted = true;
+      if (await confirmOwnedChildExited(child, options.exitConfirmMs)) {
+        finish({ ok: true, alreadyExited: true, taskkillReason: reason });
+        return;
+      }
+      fallback(reason);
+    };
     try {
       killer = spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
     } catch {
-      fallback('spawn-exception');
+      resolveNonSuccess('spawn-exception');
       return;
     }
     timer = setTimeout(() => {
       try { killer.kill(); } catch { /* already gone */ }
-      fallback('timeout');
+      resolveNonSuccess('timeout');
     }, timeoutMs);
-    killer.once('error', (error) => fallback(error.code || 'spawn-error'));
+    killer.once('error', (error) => resolveNonSuccess(error.code || 'spawn-error'));
     killer.once('close', (code) => {
       if (code === 0) finish({ ok: true });
-      else fallback(`exit-${code}`);
+      else resolveNonSuccess(`exit-${code}`);
     });
   });
 }
@@ -369,6 +414,8 @@ function spawnTracked(cmd, args, {
       return;
     }
     liveChildren.add(child);
+    const childState = { exited: false };
+    ownedChildState.set(child, childState);
     const killer = setTimeout(() => {
       if (settled) return;
       timedOut = true;
@@ -379,6 +426,7 @@ function spawnTracked(cmd, args, {
       settled = true;
       clearTimeout(killer);
       liveChildren.delete(child);
+      childState.exited = true;
       resolve({ wallMs: Date.now() - start, timedOut, ...payload });
     };
     child.on('exit', (code, signal) => finish({ exitCode: code, signal: signal || null }));
