@@ -966,10 +966,16 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
     child.once('error', (error) => { controllerSpawnError = error; });
     child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
     child.once('exit', (code, signal) => { earlyExit = { code, signal }; });
-    controllerExit = waitForExit(child).then((exit) => {
-      controllerSettled = true;
-      return { ...exit, stderr };
-    });
+    controllerExit = waitForExit(child).then(
+      (exit) => {
+        controllerSettled = true;
+        return { ...exit, stderr };
+      },
+      (error) => {
+        controllerSettled = true;
+        return { code: null, signal: null, stderr, processAcquired: false, error: error.message };
+      },
+    );
   } else {
     child = spawn(process.execPath, benchArgv, { stdio: 'ignore' });
     controllerExit = waitForExit(child).then((exit) => {
