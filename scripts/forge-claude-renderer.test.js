@@ -97,7 +97,7 @@ try {
     assert.strictEqual(renderer.hasOriginMarker(text), true, `projeção CRLF (${label}) lida como user-owned`);
   }
 
-  const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.18.1.golden.json'), 'utf8'));
+  const golden = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json'), 'utf8'));
   assert.strictEqual(golden.runtime, first.runtime);
   assert.strictEqual(golden.version, renderer.VERSION);
   for (const surface of golden.surfaces) {
