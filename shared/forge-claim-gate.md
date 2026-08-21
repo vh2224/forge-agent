@@ -655,7 +655,7 @@ never defaulted to proceed.
 
 Um claim live nunca é liberado por inferência de PID, sessão ou idade. Quando a run aparece no censo
 `forge-claim-stuck`, o operador pode usar `forge-doctor --recover-claim <id>` para preview. A mutação
-exige simultaneamente `--apply --confirm-owner-stopped`. O fluxo mede apenas paths dirty dentro do
+exige as três flags `--apply --confirm-owner-stopped --confirm-workspace-quiescent`. O fluxo mede apenas paths dirty dentro do
 escopo declarado usando `forge-vcs.workingStatus`; para escopo dirty, registra primeiro o evento de
 intenção, persiste, reabre e verifica um bundle byte-preserving, registra `bundle-verified` e mede o
 dirty scope novamente. A transição final é CAS, sob o lock da run, para
@@ -668,9 +668,10 @@ atomicidade contra processo hostil ainda ativo. Journal e bundle são fsyncados 
 medição é uma precondition executada dentro do lock de `runs.updateWith`, imediatamente antes do
 patch; junto ao CAS do RunRecord completo, ela fecha a concorrência cooperativa.
 
-A estratégia de durabilidade é registrada no manifest, evidence e journal. POSIX exige file fsync e
-directory fsync bottom-up. Windows usa file fsync obrigatório e publicação atômica por hard-link
-NTFS; Node não oferece directory fsync portável nessa plataforma e o fluxo não afirma que oferece.
+A estratégia e suas limitações são registradas no manifest, evidence e journal. Arquivos do bundle
+usam staging + file fsync + publicação atômica; o journal append-only usa file fsync. POSIX também
+exige directory fsync bottom-up. No Windows, Node não oferece directory fsync portável: o fluxo
+registra `directory-entry-durability-not-portable` e não promete sobrevivência dessa entrada a crash.
 
 O restore do bundle também é preview-first e idempotente. Um destino ausente recebe os bytes
 capturados; bytes já idênticos são mantidos; bytes divergentes nunca são sobrescritos e o payload é

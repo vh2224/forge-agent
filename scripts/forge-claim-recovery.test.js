@@ -225,9 +225,15 @@ test('criação fsynca parents novos bottom-up e indisponibilidade aborta named'
 });
 
 test('estratégia de durabilidade é explícita em win32 e POSIX', () => {
-  assert.strictEqual(recovery.durabilityStrategy({ platform: 'win32' }), 'file-fsync+ntfs-atomic-link'); assert.strictEqual(recovery.durabilityStrategy({ platform: 'linux' }), 'file-fsync+posix-dir-fsync');
+  assert.strictEqual(recovery.durabilityStrategy({ platform: 'win32' }), 'file-fsync+atomic-file-publish+no-portable-dir-fsync'); assert.strictEqual(recovery.durabilityStrategy({ platform: 'linux' }), 'file-fsync+atomic-file-publish+posix-dir-fsync'); assert.deepStrictEqual(recovery.durabilityLimitations({ platform: 'win32' }), ['journal-file-fsync-only', 'directory-entry-durability-not-portable']);
   const f = fixture('T-platform-strategy'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('x')); const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); const { io, ...withoutIo } = f.common;
-  const applied = recovery.apply(f.cwd, f.id, { ...withoutIo, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(applied.ok, true, JSON.stringify(applied)); const manifest = JSON.parse(fs.readFileSync(path.join(f.cwd, applied.bundle, 'manifest.json'))); const strategy = process.platform === 'win32' ? 'file-fsync+ntfs-atomic-link' : 'file-fsync+posix-dir-fsync'; assert.strictEqual(manifest.durability_strategy, strategy); assert.strictEqual(runs.get(f.cwd, f.id).write_claim.released.evidence.durability_strategy, strategy); assert.strictEqual(events(f.cwd)[0].evidence.durability_strategy, strategy);
+  const applied = recovery.apply(f.cwd, f.id, { ...withoutIo, confirmOwnerStopped: true, workingStatus: dirty }); assert.strictEqual(applied.ok, true, JSON.stringify(applied)); const manifest = JSON.parse(fs.readFileSync(path.join(f.cwd, applied.bundle, 'manifest.json'))); const strategy = process.platform === 'win32' ? 'file-fsync+atomic-file-publish+no-portable-dir-fsync' : 'file-fsync+atomic-file-publish+posix-dir-fsync'; assert.strictEqual(manifest.durability_strategy, strategy); assert.strictEqual(runs.get(f.cwd, f.id).write_claim.released.evidence.durability_strategy, strategy); assert.strictEqual(events(f.cwd)[0].evidence.durability_strategy, strategy); if (process.platform === 'win32') assert(manifest.durability_limitations.includes('directory-entry-durability-not-portable'));
+});
+
+test('payload manifest e sidecar são publicados atomicamente antes do CAS', () => {
+  const f = fixture('T-pre-cas-publish'); fs.mkdirSync(path.join(f.code, 'src')); fs.writeFileSync(path.join(f.code, 'src', 'a.bin'), Buffer.from('x')); const dirty = () => ({ ok: true, entries: [{ path: 'src/a.bin', kind: 'modified', code: ' M' }] }); let links = 0; const actual = require('./forge-write-claim.js').recoverClaim;
+  const io = { fsyncDir: () => {}, linkSync: (from, to) => { links++; return fs.linkSync(from, to); } }; const guardedCas = (...args) => { assert(links >= 3, `CAS antes das publicações atômicas: ${links}`); return actual(...args); };
+  const out = recovery.apply(f.cwd, f.id, { ...f.common, confirmOwnerStopped: true, workingStatus: dirty, io, recoverClaim: guardedCas }); assert.strictEqual(out.ok, true); assert(links >= 3);
 });
 
 test('glob **/ captura dirty diretamente sob diretório', () => {
