@@ -515,6 +515,14 @@ test('R13b: malformed release envelope remains held (fail closed)', () => {
 });
 
 // ── R14: legacy record — vcs_baseline/released default null, sha256 unchanged by read
+test('R13c: only null/undefined mean absence; malformed falsy claims remain held', () => {
+  assertEqual(isHeld(null), false, 'null is canonical absence');
+  assertEqual(isHeld(undefined), false, 'undefined is canonical absence');
+  for (const malformed of [false, 0, '', NaN]) {
+    assertEqual(isHeld(malformed), true, `malformed claim ${String(malformed)}`);
+  }
+});
+
 test('R14: legacy record (no vcs_baseline/released) reads both as null, sha256 unchanged', () => {
   const { wsDir, runFile } = makeFixture('M-20260813-legacy-r14');
   const before = sha256(runFile);

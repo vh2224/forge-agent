@@ -605,6 +605,17 @@ test('release malformado nunca autoriza reap', () => {
   }
 });
 
+test('claim falsy malformado nunca e confundido com ausencia', () => {
+  for (const write_claim of [false, 0, '', NaN]) {
+    const c = classifyRunLiveness({
+      id: 'M-corrupt-claim', active: true, last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 3,
+      write_claim,
+    }, { now: NOW });
+    assertEqual(c.state, 'holds-claim', `claim ${String(write_claim)}`);
+    assertEqual(c.reason, 'claim-present', 'razao fail-closed');
+  }
+});
+
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

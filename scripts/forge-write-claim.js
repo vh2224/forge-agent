@@ -356,7 +356,10 @@ function releaseClaim(cwd, runId, release, opts) {
  * see S05-PLAN.md contract #6.
  */
 function isHeld(claim) {
-  if (!claim) return false;
+  // Only the canonical absence values mean "no claim". Falsy persisted values
+  // are malformed claims, not proof that ownership ended.
+  if (claim === null || claim === undefined) return false;
+  if (typeof claim !== 'object' || Array.isArray(claim)) return true;
   try {
     return normalizeReleased(claim.released) === null;
   } catch {
