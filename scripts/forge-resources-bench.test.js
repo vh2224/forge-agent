@@ -1094,11 +1094,15 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
         const cleanupExit = await settleWithin(controllerExit, 25000, 'controller-cleanup');
         if (primaryError) primaryError.cleanupExit = cleanupExit;
       } catch (cleanupError) {
-        const killed = child.kill();
-        if (!killed) throw new Error(`controller-cleanup: owned process could not be terminated: ${cleanupError.message}`);
-        console.log(`      controller-forced-cleanup: killed owned controller pid=${child.pid} after ${cleanupError.message}`);
-        const cleanupExit = await settleWithin(controllerExit, 5000, 'controller-forced-cleanup');
-        if (primaryError) primaryError.cleanupExit = { ...cleanupExit, forced: true };
+        if (process.platform === 'win32' && controllerSpawnError && !child.pid) {
+          if (primaryError) primaryError.cleanupExit = { code: null, signal: null, processAcquired: false, error: controllerSpawnError.message };
+        } else {
+          const killed = child.kill();
+          if (!killed) throw new Error(`controller-cleanup: owned process could not be terminated: ${cleanupError.message}`);
+          console.log(`      controller-forced-cleanup: killed owned controller pid=${child.pid} after ${cleanupError.message}`);
+          const cleanupExit = await settleWithin(controllerExit, 5000, 'controller-forced-cleanup');
+          if (primaryError) primaryError.cleanupExit = { ...cleanupExit, forced: true };
+        }
       }
       if (primaryError && resultPath && fs.existsSync(resultPath)) {
         primaryError.cleanupResult = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
@@ -1157,6 +1161,14 @@ if (process.platform === 'win32') {
   const powerShellHosts = enumeratePowerShellHosts();
   test('Windows Ctrl+C live coverage: at least one supported PowerShell host is installed', () => {
     assert(powerShellHosts.length > 0, 'neither powershell.exe nor pwsh.exe is available; live Windows coverage is mandatory');
+  });
+  await testAsync('Windows Ctrl+C controller: spawn failure preserves the original diagnostic without fake cleanup', async () => {
+    let observed = null;
+    try { await runSigintContract(`forge-missing-powershell-${process.pid}.exe`); } catch (error) { observed = error; }
+    assert(observed, 'a missing PowerShell host must fail');
+    assert(observed.message.includes('windows-controller-process-spawn:'), observed.message);
+    assert(observed.cleanupExit && observed.cleanupExit.processAcquired === false,
+      `cleanup must record that no process was acquired: ${JSON.stringify(observed.cleanupExit)}`);
   });
   for (const host of powerShellHosts) {
     // eslint-disable-next-line no-await-in-loop
