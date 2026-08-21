@@ -491,12 +491,17 @@ function resolveCodeDir(opts) {
   // 7. Attribution (D5) — absolute, normalized, longest-prefix.
   const touched = new Map();
   let unmatched = 0;
+  let unmatchedAbsolute = 0;
   for (const p of considered) {
     const root = globRoot(p);
     if (!root) { unmatched++; continue; }
     const abs = normalizePath(path.resolve(cwd, root));
     const repo = attributeRepo(abs, usable);
-    if (!repo) { unmatched++; continue; }
+    if (!repo) {
+      unmatched++;
+      if (path.isAbsolute(root) || /^[A-Za-z]:[\\/]/.test(root) || /^[\\/]{2}/.test(root)) unmatchedAbsolute++;
+      continue;
+    }
     touched.set(normalizePath(repo.path), repo);
   }
 
@@ -554,7 +559,7 @@ function resolveCodeDir(opts) {
     // known subset would omit the unknown scope from writableRoots, snapshots and
     // reset. Relative-only plans with no attributed root retain the historical
     // declared-repo path below; mixed known/unknown scope always fails closed.
-    if (touched.size > 0 && unmatched > 0) {
+    if (unmatched > 0 && (touched.size > 0 || unmatchedAbsolute > 0)) {
       const touchedPaths = Array.from(touched.keys());
       return emptyResult({ status: 'cross-repo', repos_touched: touchedPaths,
         paths_considered: considered.length, paths_unmatched: unmatched, source, run,

@@ -348,6 +348,18 @@ test('R12c — escopo parcialmente atribuivel recusa antes do dispatch', () => {
   assertEqual(out.repo_roots.length, 0, 'nenhum snapshot parcial e autorizado');
 });
 
+test('R12d — path absoluto externo sozinho nunca herda o repo declarado', () => {
+  const f = makeFixture({ noRepoField: true });
+  const plan = path.join(f.root, 'T02-external-only-PLAN.md');
+  const outside = path.join(f.root, 'fora-dos-repos', 'secret.ts');
+  fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${outside}"`, '---', ''].join('\n'));
+  const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+  assertEqual(out.status, 'cross-repo', 'status fail-closed');
+  assertEqual(out.paths_unmatched, 1, 'absoluto externo contabilizado');
+  assertEqual(out.code_dir, '', 'repo declarado nao captura absoluto externo');
+  assertEqual(out.repo_roots.length, 0, 'nenhum escopo incompleto emitido');
+});
+
 test('R12 — exit 5 (undeclared)', () => {
   const f = makeFixture({ noRepoField: true });
   const r = runCli(['--resolve', '--iso-result', JSON.stringify(f.isoResult),
