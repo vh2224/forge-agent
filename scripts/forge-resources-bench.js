@@ -326,10 +326,43 @@ function killTreeAsync(child, options = {}) {
   });
 }
 
+async function cleanupOwnedChild(child, options = {}, { retryDegraded = false } = {}) {
+  let state = ownedChildState.get(child);
+  if (!state) {
+    state = { exited: false, cleanupPromise: null, cleanupResult: null, cleanupRetried: false };
+    ownedChildState.set(child, state);
+  }
+  const startCleanup = () => {
+    const cleanupPromise = killTreeAsync(child, options).catch((error) => ({
+      ok: false,
+      degraded: true,
+      reason: error.code || error.message || 'exception',
+    }));
+    state.cleanupPromise = cleanupPromise;
+    return cleanupPromise.then((result) => {
+      if (state.cleanupPromise === cleanupPromise) state.cleanupPromise = null;
+      state.cleanupResult = result;
+      if (result.ok || state.exited) liveChildren.delete(child);
+      return result;
+    });
+  };
+
+  let result;
+  if (state.cleanupPromise) result = await state.cleanupPromise;
+  else if (state.cleanupResult) result = state.cleanupResult;
+  else result = await startCleanup();
+  if (!result.ok && retryDegraded && liveChildren.has(child) && !state.cleanupRetried) {
+    state.cleanupRetried = true;
+    result = await startCleanup();
+  }
+  return result;
+}
+
 async function killAllLiveAsync(options = {}) {
   const children = Array.from(liveChildren);
-  liveChildren.clear();
-  const results = await Promise.all(children.map((child) => killTreeAsync(child, options)));
+  const results = await Promise.all(children.map((child) => cleanupOwnedChild(
+    child, options, { retryDegraded: true },
+  )));
   const degraded = results.filter((result) => !result || result.ok === false);
   if (degraded.length > 0) {
     const reasons = degraded.map((result) => (result && result.reason) || 'unknown');
@@ -415,7 +448,9 @@ function spawnTracked(cmd, args, {
       return;
     }
     liveChildren.add(child);
-    const childState = { exited: false };
+    const childState = {
+      exited: false, cleanupPromise: null, cleanupResult: null, cleanupRetried: false,
+    };
     ownedChildState.set(child, childState);
     const killer = setTimeout(() => {
       if (settled) return;
@@ -431,7 +466,7 @@ function spawnTracked(cmd, args, {
     };
     const observeExit = (payload) => {
       childState.exited = true;
-      if (operationalCleanupStarted) return;
+      if (operationalCleanupStarted || (settled && childState.cleanupPromise)) return;
       liveChildren.delete(child);
       finish(payload);
     };
@@ -446,12 +481,8 @@ function spawnTracked(cmd, args, {
       if (operationalCleanupStarted || settled) return;
       operationalCleanupStarted = true;
       clearTimeout(killer);
-      let cleanup;
-      try {
-        cleanup = await killTreeAsync(child, cleanupOptions);
-      } catch (cleanupError) {
-        cleanup = { ok: false, degraded: true, reason: cleanupError.code || cleanupError.message || 'exception' };
-      }
+      const cleanup = await cleanupOwnedChild(child, cleanupOptions);
+      operationalCleanupStarted = false;
       finish({
         exitCode: null,
         signal: 'spawn-error',

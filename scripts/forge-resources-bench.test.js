@@ -593,6 +593,44 @@ await testAsync('spawnTracked: operational error keeps an owned PID available fo
   assertEqual(cleanupError && cleanupError.code, 'CLEANUP_DEGRADED');
   assert(String(cleanupError && cleanupError.message).includes('exit-128'),
     `failed owned cleanup must remain degraded: ${cleanupError && cleanupError.message}`);
+  owned.emit('exit', null, 'SIGKILL');
+});
+
+await testAsync('spawnTracked: SIGINT shares in-flight operational cleanup before any sequential retry', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 546000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  const firstKiller = new EventEmitter(); firstKiller.kill = () => true;
+  const retryKiller = new EventEmitter(); retryKiller.kill = () => true;
+  let taskkillCalls = 0;
+  const spawnTaskkill = () => {
+    taskkillCalls += 1;
+    return taskkillCalls === 1 ? firstKiller : retryKiller;
+  };
+  const run = bench.spawnTracked('owned', [], {
+    cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned,
+    cleanupOptions: {
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+      spawnImpl: spawnTaskkill, reportDegraded: () => {},
+    },
+  });
+  owned.emit('error', new Error('operational failure'));
+  await Promise.resolve();
+  const shutdownCleanup = bench.killAllLiveAsync({
+    platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+    spawnImpl: spawnTaskkill, reportDegraded: () => {},
+  });
+  await Promise.resolve();
+  assertEqual(taskkillCalls, 1, 'SIGINT must await the one in-flight taskkill');
+
+  owned.exitCode = 130;
+  owned.emit('exit', 130, null);
+  firstKiller.emit('close', 128);
+  const [runResult, cleanupResult] = await Promise.all([run, shutdownCleanup]);
+  assertEqual(taskkillCalls, 1, 'observed exit-128 success must not trigger a retry');
+  assertEqual(runResult.cleanup && runResult.cleanup.ok, true);
+  assertEqual(cleanupResult.ok, true, 'shared successful cleanup must not become false exit 75');
 });
 
 await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {
