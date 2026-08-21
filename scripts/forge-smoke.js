@@ -9528,6 +9528,10 @@ function smokeCodeDirMultiRepo() {
       '---', 'id: T02', 'writes:', '  - "freyr/src/a.ts"', '  - "asgard/src/b.ts"', '---',
       '', '# plan', '',
     ].join('\n'));
+    const planBothDeclared = writePlan('plan-both-declared.md', [
+      '---', 'id: T02b', 'repo: freyr', 'writes:', '  - "freyr/src/a.ts"', '  - "asgard/src/b.ts"', '---',
+      '', '# plan', '',
+    ].join('\n'));
     const planLegacy = writePlan('plan-legacy.md', [
       '---', 'id: T03', 'tier: heavy', 'effort: high', '---',
       '', '# plan', '', '## Steps', '', '1. do a thing', '',
@@ -9562,6 +9566,15 @@ function smokeCodeDirMultiRepo() {
       '(b) cross-repo yields an EMPTY code_dir + reason sidecar-multirepo-unsupported');
     assert(Array.isArray(b.json.repos_touched) && b.json.repos_touched.length === 2,
       `(b) repos_touched lists both repos (got ${JSON.stringify(b.json.repos_touched)})`);
+
+    // (b1) the same complete scope is supported when repo: selects the primary.
+    const b1 = resolve(isoMulti, planBothDeclared);
+    assert(b1.status === 0 && b1.json.status === 'ok' && b1.json.code_dir === wt('freyr'),
+      `(b1) declared cross-repo primary resolves (got ${b1.status}/${b1.json.status})`);
+    assert(JSON.stringify(b1.json.repo_roots) === JSON.stringify([wt('freyr'), wt('asgard')]),
+      `(b1) repo_roots keeps primary first (got ${JSON.stringify(b1.json.repo_roots)})`);
+    assert(JSON.stringify(b1.json.writable_roots) === JSON.stringify([wt('asgard')]),
+      `(b1) writable_roots contains only the secondary repo (got ${JSON.stringify(b1.json.writable_roots)})`);
 
     // (c) multi-repo + legacy plan with zero declared paths → distinct "planner gap" signal.
     const c = resolve(isoMulti, planLegacy);
@@ -9689,7 +9702,7 @@ function smokeCodeDirMultiRepo() {
 
     // (h) contract note authored ONCE in the canonical spec (D13 formula-once).
     const spec = read('shared/forge-dispatch.md');
-    const note = 'The sidecar assumes ONE `CODE_DIR` that is a working copy of ONE supported VCS (git or svn)';
+    const note = 'The sidecar always has one primary working copy as `--cwd`';
     const noteCount = spec.split(note).length - 1;
     assert(noteCount === 1, `(h) shared/forge-dispatch.md carries the contract note exactly once (got ${noteCount})`);
 
@@ -9701,8 +9714,11 @@ function smokeCodeDirMultiRepo() {
       assert(invocations >= 1, `(i) ${file} invokes forge-code-dir.js (got ${invocations})`);
       const bullet = content.split(/\r?\n/).filter(l => /^- `?(worktree|ISOLATION_MODE == worktree)`? →/.test(l));
       assert(bullet.length === 1, `(i) ${file} has exactly one \`worktree →\` prose bullet (got ${bullet.length})`);
-      assert(bullet[0].includes('UNIT_CODE_DIR'),
-        `(i) ${file} \`worktree →\` prose bullet points CODE_DIR at UNIT_CODE_DIR (Pitfall 2)`);
+      assert(bullet[0].includes('explicit primary repo') && bullet[0].includes('repo_roots') && bullet[0].includes('writable_roots'),
+        `(i) ${file} \`worktree →\` prose bullet names the primary and complete multi-repo scope (Pitfall 2)`);
+      for (const needle of ['--repo-roots-file', '--writable-roots-file', 'multi-repo-reset-unverified']) {
+        assert(content.includes(needle), `(i) ${file} wires ${needle}`);
+      }
     }
 
     // (j) allowlist grep: the blind picker must survive EXACTLY once per mirror — the bootstrap

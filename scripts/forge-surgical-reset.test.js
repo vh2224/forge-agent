@@ -30,5 +30,25 @@ try {
   assert.strictEqual(overlap.reason_code, 'reset-overlap'); assert.strictEqual(fs.existsSync(path.join(overlapRepo, 'sidecar.txt')), true); assert.strictEqual(fs.readFileSync(path.join(overlapRepo, 'operator.txt'), 'utf8'), 'sidecar overlap\n');
   assert.strictEqual(reset.resetFailedAttempt(overlapState, { mode: 'execute', failed: true, codeDir: overlapRepo, repoRoots: [overlapRepo, cwd] }).reason_code, 'reset-refused-multirepo');
   assert.strictEqual(reset.resetFailedAttempt(overlapState, { mode: 'execute', failed: false, codeDir: overlapRepo, repoRoots: [overlapRepo] }).reason_code, 'reset-refused-not-failed');
+
+  const multiA = repo('repo multi A'); const multiB = repo('repo multi B');
+  const multiState = path.join(root, 'attempt-multi.json');
+  const multi = reset.initState(multiState, { cwd: multiA, attempt: 'dispatch-multi', repoRoots: [multiA, multiB] });
+  assert.strictEqual(multi.repos.length, 2); assert.strictEqual(multi.code_dir, path.resolve(multiA));
+  fs.writeFileSync(path.join(multiA, 'sidecar-a.txt'), 'a\n');
+  fs.writeFileSync(path.join(multiB, 'sidecar-b.txt'), 'b\n');
+  const multiDone = reset.resetFromState(multiState);
+  assert.strictEqual(multiDone.code, 0); assert.strictEqual(multiDone.result.verified, true);
+  assert.strictEqual(fs.existsSync(path.join(multiA, 'sidecar-a.txt')), false);
+  assert.strictEqual(fs.existsSync(path.join(multiB, 'sidecar-b.txt')), false);
+
+  const fenceA = repo('repo fence A'); const fenceB = repo('repo fence B');
+  const fenceState = path.join(root, 'attempt-fence.json');
+  reset.initState(fenceState, { cwd: fenceA, attempt: 'dispatch-fence', repoRoots: [fenceA, fenceB] });
+  fs.writeFileSync(path.join(fenceA, 'must-survive.txt'), 'sidecar\n');
+  fs.writeFileSync(path.join(fenceB, 'commit.txt'), 'moved\n'); git(fenceB, ['add', 'commit.txt']); git(fenceB, ['commit', '-m', 'move baseline']);
+  const fenced = reset.resetFromState(fenceState);
+  assert.strictEqual(fenced.code, 3); assert.strictEqual(fenced.result.abort, 'baseline-moved');
+  assert.strictEqual(fs.existsSync(path.join(fenceA, 'must-survive.txt')), true, 'global preflight mutates zero roots');
   console.log('forge-surgical-reset boundary tests passed');
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

@@ -1869,6 +1869,9 @@ function gitRead(gitArgs, cwd, what) {
 async function runExecute(opts) {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
   const writableRoots = Array.isArray(opts.writableRoots) ? opts.writableRoots.map(root => path.resolve(root)) : [];
+  const repoRoots = [cwd, ...writableRoots];
+  const rootKeys = repoRoots.map(root => process.platform === 'win32' ? root.toLowerCase() : root);
+  if (new Set(rootKeys).size !== repoRoots.length) throw new Error('execute repo roots must be unique');
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
   const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
   const dispatchId = normalizeDispatchId(opts.dispatchId, 'execute');
@@ -1923,9 +1926,14 @@ async function runExecute(opts) {
   // This snapshot is AUDIT ONLY — exposed as `pre_dirty` in the result JSON for the
   // orchestrator to cross-check. The AUTHORITATIVE snapshot that drives the post-failure
   // surgical reset lives in the orchestrator's state file (T03/T04); the adapter NEVER resets.
-  const attemptSnapshot = captureAttemptSnapshot(cwd, { attemptId: dispatchId, vcsName });
+  const attemptSnapshots = repoRoots.length > 1
+    ? require('./forge-surgical-reset').captureMultiAttemptSnapshot(repoRoots, { attemptId: dispatchId })
+    : [captureAttemptSnapshot(cwd, { attemptId: dispatchId, vcsName })];
+  const attemptSnapshot = attemptSnapshots[0];
   const preDirty = attemptSnapshot.pre_dirty;
-  const preDirtyAll = captureDirtySnapshot(cwd, vcsName);
+  const preDirtyByRepo = attemptSnapshots.map(snapshot => ({ repo: snapshot.code_dir, entries: snapshot.pre_dirty }));
+  const preDirtyAllByRepo = attemptSnapshots.map(snapshot => ({ repo: snapshot.code_dir, vcs: snapshot.vcs,
+    entries: captureDirtySnapshot(snapshot.code_dir, snapshot.vcs) }));
 
   let securityText = '';
   let contextText = '';
@@ -2009,22 +2017,21 @@ async function runExecute(opts) {
   });
 
   // No-commit invariant: codex must not have moved HEAD.
-  let headSha;
-  if (vcsName === 'svn') {
-    const baseline = vcs.baselineId(cwd, { ...VCS_OPTS, vcs: 'svn' });
-    if (!baseline.ok) throw new Error(baseline.error);
-    const parsedBaseline = parseSvnBaseline(baseline.id);
-    if (!parsedBaseline.ok) throw new Error(parsedBaseline.error);
-    headSha = parsedBaseline.range;
-    if (headSha !== startSha) {
-      throw new Error('svn-revision-moved: working copy revision moved during dispatch (' + startSha + ' -> ' + headSha + ') — no-commit/no-update invariant violated');
+  const postBaselines = attemptSnapshots.map(snapshot => {
+    let current;
+    if (snapshot.vcs === 'svn') {
+      const baseline = vcs.baselineId(snapshot.code_dir, { ...VCS_OPTS, vcs: 'svn' });
+      if (!baseline.ok) throw new Error(baseline.error);
+      const parsedBaseline = parseSvnBaseline(baseline.id);
+      if (!parsedBaseline.ok) throw new Error(parsedBaseline.error);
+      current = parsedBaseline.range;
+    } else current = gitRead('rev-parse HEAD', snapshot.code_dir, 'git rev-parse HEAD (post-run)');
+    if (current !== snapshot.start_sha) {
+      throw new Error(`no-commit invariant violated: codex moved baseline in ${snapshot.code_dir} (${snapshot.start_sha} -> ${current}); no update is allowed`);
     }
-  } else {
-    headSha = gitRead('rev-parse HEAD', cwd, 'git rev-parse HEAD (post-run)');
-    if (headSha !== startSha) {
-      throw new Error('codex moved HEAD (committed) — no-commit invariant violated');
-    }
-  }
+    return { repo: snapshot.code_dir, start_sha: snapshot.start_sha, head_sha: current, vcs: snapshot.vcs };
+  });
+  const headSha = postBaselines[0].head_sha;
 
   let parsed = null;
   let parsePath = 'output-schema';
@@ -2047,7 +2054,13 @@ async function runExecute(opts) {
   // both come from the same untrusted process, so both cross the same barrier.
   assertUntrustedOutputBarrier(parsed);
 
-  const derived = deriveFilesChanged(cwd, preDirtyAll, startSha, vcsName);
+  const labels = repoRoots.map(root => path.basename(root));
+  if (repoRoots.length > 1 && new Set(labels.map(label => process.platform === 'win32' ? label.toLowerCase() : label)).size !== labels.length) {
+    throw new Error('multi-repo roots require unique basenames for result attribution');
+  }
+  const derived = preDirtyAllByRepo.flatMap((snapshot, index) =>
+    deriveFilesChanged(snapshot.repo, snapshot.entries, attemptSnapshots[index].start_sha, snapshot.vcs)
+      .map(entry => repoRoots.length > 1 ? { ...entry, repo: labels[index] } : entry));
   // Protected metadata is outside the surgical reset set. A sidecar-owned `.gsd`
   // delta is therefore a hard terminal failure, never an advisory warning/success.
   assertNoProtectedSidecarChanges(derived);
@@ -2065,6 +2078,7 @@ async function runExecute(opts) {
     files_changed: derived,
     files_changed_declared: parsed.files_changed,
     pre_dirty: preDirty,
+    ...(repoRoots.length > 1 ? { pre_dirty_by_repo: preDirtyByRepo, repo_baselines: postBaselines } : {}),
     start_sha: startSha,
     head_sha: headSha,
     ...(vcsName === 'svn' ? { vcs: 'svn' } : {}),
@@ -2439,8 +2453,9 @@ if (require.main === module) {
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'execute');
     let writableRoots = [];
-    if (args['writable-roots'] !== undefined) {
-      try { writableRoots = JSON.parse(args['writable-roots']); }
+    if (args['writable-roots'] !== undefined || args['writable-roots-file'] !== undefined) {
+      try { writableRoots = JSON.parse(args['writable-roots-file']
+        ? fs.readFileSync(args['writable-roots-file'], 'utf8') : args['writable-roots']); }
       catch (error) { process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
     }
 
