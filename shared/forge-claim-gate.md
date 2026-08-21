@@ -651,6 +651,19 @@ never defaulted to proceed.
   conflict there) and is correct in its own boundary; it is neither imported nor consulted here, and
   suites guard that absence in both modules.
 
+## Recuperação manual de owner interrompido
+
+Um claim live nunca é liberado por inferência de PID, sessão ou idade. Quando a run aparece no censo
+`forge-claim-stuck`, o operador pode usar `forge-doctor --recover-claim <id>` para preview. A mutação
+exige simultaneamente `--apply --confirm-owner-stopped`. O fluxo mede apenas paths dirty dentro do
+escopo declarado usando `forge-vcs.workingStatus`; para escopo dirty, persiste, reabre e verifica um
+bundle byte-preserving antes do evento de intenção. A transição final é CAS, sob o lock da run, para
+`released.mechanism: manual` e `active:false`.
+
+O restore do bundle também é preview-first e idempotente. Um destino ausente recebe os bytes
+capturados; bytes já idênticos são mantidos; bytes divergentes nunca são sobrescritos e o payload é
+extraído sob `conflicts/` na área de recuperação.
+
 ## Cross-references
 
 - `scripts/forge-claim-gate.js` — the decision core and the CLI invoked in **§ Step 2**

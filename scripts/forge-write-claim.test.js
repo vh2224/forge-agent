@@ -32,7 +32,7 @@ const { spawnSync } = require('child_process');
 const MODULE = path.join(__dirname, 'forge-write-claim.js');
 const claimMod = require('./forge-write-claim.js');
 const {
-  normalizeClaim, recordClaim, readClaim, clearClaim, releaseClaim, isHeld,
+  normalizeClaim, recordClaim, readClaim, clearClaim, releaseClaim, recoverClaim, isHeld, validateHeldClaim,
   CLAIM_SOURCES, RELEASE_MECHANISMS,
 } = claimMod;
 const runs = require('./forge-runs.js');
@@ -663,6 +663,47 @@ test('R17e: the library seam keeps the full set — the restriction is CLI-only 
 });
 
 // ── Suite close ──────────────────────────────────────────────────────────
+test('R18: recoverClaim faz release manual + active:false atomicamente', () => {
+  const { wsDir } = makeFixture('M-20260813-r18');
+  recordClaim(wsDir, 'M-20260813-r18', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18');
+  const result = recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: { intent: 'test' } });
+  assertEqual(result.ok, true);
+  const after = runs.get(wsDir, expected.id);
+  assertEqual(after.active, false);
+  assertEqual(after.write_claim.released.mechanism, 'manual');
+  assertEqual(after.ended_at, 9);
+});
+
+test('R18b: recoverClaim aborta CAS quando o claim mudou', () => {
+  const { wsDir } = makeFixture('M-20260813-r18b');
+  recordClaim(wsDir, 'M-20260813-r18b', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18b');
+  recordClaim(wsDir, expected.id, { unit: 'execute-task/T02', source: 'manual', paths: ['b.js'] });
+  const result = recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: {} });
+  assertEqual(result.ok, false);
+  assertEqual(result.reason, 'stale-run');
+  assertEqual(runs.get(wsDir, expected.id).active, true);
+  assertEqual(runs.get(wsDir, expected.id).write_claim.released, null);
+});
+
+test('R18c: validateHeldClaim recusa shape persistido parcial', () => {
+  assertEqual(validateHeldClaim({ at: 1, source: 'manual', code_dir: 'C:/x', paths: [], vcs_baseline: null, released: null }).at, 1);
+  let reason = null;
+  try { validateHeldClaim({ source: 'manual', code_dir: 'C:/x', paths: [], vcs_baseline: null, released: null }); } catch (error) { reason = error.message; }
+  assertEqual(reason, 'claim-at-invalid');
+});
+
+test('R18d: recoverClaim aborta CAS quando a run mudou fora do claim', () => {
+  const { wsDir } = makeFixture('M-20260813-r18d');
+  recordClaim(wsDir, 'M-20260813-r18d', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18d');
+  runs.update(wsDir, expected.id, { last_heartbeat: expected.last_heartbeat + 1 });
+  const result = recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: {} });
+  assertEqual(result.ok, false);
+  assertEqual(runs.get(wsDir, expected.id).active, true);
+});
+
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

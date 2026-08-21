@@ -61,5 +61,12 @@ test('help advertises the capabilities check and selected runtime', () => {
   assert.match(out.stdout, /--runtime/);
 });
 
-process.stdout.write(`\n${passed} passed, 0 failed\n`);
+test('help advertises explicit claim recovery and restore surfaces', () => {
+  const out = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'forge-doctor.js'), '--help'], { encoding: 'utf8' });
+  assert.strictEqual(out.status, 0);
+  assert.match(out.stdout, /--recover-claim/);
+  assert.match(out.stdout, /--confirm-owner-stopped/);
+  assert.match(out.stdout, /--restore-claim/);
+});
 
+process.stdout.write(`\n${passed} passed, 0 failed\n`);

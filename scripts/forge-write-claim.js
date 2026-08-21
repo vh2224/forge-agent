@@ -344,6 +344,34 @@ function releaseClaim(cwd, runId, release, opts) {
 }
 
 /**
+ * Operator recovery transition. The measured claim and run activity are
+ * compared under the run lock; a changed record is never released.
+ */
+function recoverClaim(cwd, runId, expectedRecord, release) {
+  const released = normalizeReleased(release);
+  if (!expectedRecord || expectedRecord.active !== true) {
+    return { ok: false, reason: 'stale-run' };
+  }
+  const expectedRecordJson = JSON.stringify(expectedRecord);
+  let outcome = { ok: false, reason: 'stale-run' };
+  let result;
+  try {
+    result = runs.updateWith(cwd, runId, (current) => {
+      if (current.active !== true || JSON.stringify(current) !== expectedRecordJson) return null;
+      if (!isHeld(current.write_claim)) return null;
+      const nextClaim = Object.assign({}, current.write_claim, { released });
+      outcome = { ok: true, claim: nextClaim };
+      return { write_claim: nextClaim, active: false, ended_at: released.at };
+    });
+  } catch (error) {
+    if (/not found/.test(error.message)) return { ok: false, reason: 'stale-run' };
+    throw error;
+  }
+  if (!result.updated) return { ok: false, reason: 'stale-run' };
+  return outcome;
+}
+
+/**
  * Pure. THREE distinct facts must never collapse when read through here:
  *   - claim absent (`readClaim` -> null)              -> isHeld: false
  *   - claim recorded, honestly empty (`paths: []`)     -> isHeld: true
@@ -367,6 +395,18 @@ function isHeld(claim) {
     // hand-edited and partially-corrupt records stay protected (fail closed).
     return true;
   }
+}
+
+/** Strict read-side validator for a persisted live claim. */
+function validateHeldClaim(claim) {
+  if (!claim || typeof claim !== 'object' || Array.isArray(claim)) throw new Error('claim-invalid');
+  if (typeof claim.at !== 'number' || !Number.isFinite(claim.at)) throw new Error('claim-at-invalid');
+  if (!CLAIM_SOURCES.includes(claim.source)) throw new Error('claim-source-invalid');
+  if (!(claim.code_dir === null || (typeof claim.code_dir === 'string' && claim.code_dir !== ''))) throw new Error('claim-code-dir-invalid');
+  if (!Array.isArray(claim.paths)) throw new Error('claim-paths-invalid');
+  normalizeVcsBaseline(claim.vcs_baseline);
+  if (normalizeReleased(claim.released) !== null) throw new Error('claim-not-live');
+  return claim;
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────
@@ -501,7 +541,9 @@ module.exports = {
   readClaim,
   clearClaim,
   releaseClaim,
+  recoverClaim,
   isHeld,
+  validateHeldClaim,
   CLAIM_SOURCES,
   RELEASE_MECHANISMS,
   CLI_RELEASE_MECHANISMS,

@@ -12,12 +12,12 @@
     {
       "source_id": "commands",
       "target": "commands",
-      "sha256": "9d4dafb0b37777692531c1a95403cf0581bbe55dd3a2a9cfa8cdf72f686c61b6"
+      "sha256": "7e03558422103535722b95effaeeedaca67cde848e03acf6e2d6b2b62b894513"
     },
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "1bcf1e1cd79baf148ad3e40aad65f73a47a342a8fb48d657b2b8c55a3a497b2a"
+      "sha256": "65c001e81a291bee18b12b584eb4f6e328cbb7ae32bd86bc1d77545f354978db"
     },
     {
       "source_id": "dispatch-templates",

@@ -25,4 +25,27 @@ Com `--regen-projection`, encaminhe a flag diretamente ao script e encerre sem e
 node scripts/forge-doctor.js --regen-projection
 ```
 
+## Recuperação de claim travado
+
+Primeiro faça somente o preview:
+
+```bash
+node scripts/forge-doctor.js --recover-claim "<run-id>" --cwd "<workspace>"
+```
+
+Somente depois de confirmar externamente que o proprietário parou, aplique com as duas flags:
+
+```bash
+node scripts/forge-doctor.js --recover-claim "<run-id>" --apply --confirm-owner-stopped --cwd "<workspace>"
+```
+
+O comando só aceita uma run presente no censo `claim-stuck`. Ele não infere morte por PID, sessão ou idade. Em escopo dirty, cria e verifica um bundle byte-preserving antes de registrar a intenção e fazer a transição CAS para `released/manual` e `active:false`.
+
+Restauração também começa por preview. O apply nunca sobrescreve bytes divergentes; esses payloads são extraídos na área `conflicts` do bundle:
+
+```bash
+node scripts/forge-doctor.js --restore-claim "<run-id>" --cwd "<workspace>"
+node scripts/forge-doctor.js --restore-claim "<run-id>" --apply --cwd "<workspace>"
+```
+
 Se a regeneração for recusada porque o fragment store está vazio e o monolito ainda contém dados, recomende primeiro `node scripts/forge-migrate.js`. Só mencione `--force` com um aviso explícito de possível perda de dados.
