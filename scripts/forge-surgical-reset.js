@@ -338,11 +338,54 @@ function captureAttemptSnapshot(cwd, options = {}) {
   return { attempt_id: options.attemptId || null, start_sha: before, pre_dirty: preDirty, code_dir: path.resolve(cwd), vcs: vcsName };
 }
 
+function currentBaseline(cwd, vcsName) {
+  const baseline = vcs.baselineId(cwd, { ...OPTS, vcs: vcsName });
+  if (!baseline.ok) throw new Error(baseline.error || 'baseline-unavailable');
+  if (vcsName !== 'svn') return baseline.id;
+  const parsed = parseSvnBaseline(baseline.id);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.range;
+}
+
+/** Capture every repository as one logical attempt. The final baseline pass closes
+ * the window in which repo A could move while repo B was being snapshotted. */
+function captureMultiAttemptSnapshot(repoRoots, options = {}) {
+  if (!Array.isArray(repoRoots) || repoRoots.length < 2) throw new Error('multi-repo snapshot requires at least two roots');
+  const roots = repoRoots.map(root => path.resolve(root));
+  if (new Set(roots.map(root => process.platform === 'win32' ? root.toLowerCase() : root)).size !== roots.length) {
+    throw new Error('multi-repo snapshot roots must be unique');
+  }
+  const repos = roots.map(root => captureAttemptSnapshot(root, { attemptId: options.attemptId }));
+  for (const repo of repos) {
+    const current = currentBaseline(repo.code_dir, repo.vcs);
+    if (current !== repo.start_sha) {
+      const error = new Error(`baseline moved while capturing multi-repo attempt (${repo.code_dir}: ${repo.start_sha} -> ${current})`);
+      error.code = 'snapshot-baseline-moved'; throw error;
+    }
+  }
+  return repos;
+}
+
 /**
  * Capture START_SHA + the pre-dirty snapshot and write BOTH in ONE atomic write.
  * @returns {object} the written state
  */
-function initState(stateFile, { cwd, attempt }) {
+function initState(stateFile, { cwd, attempt, repoRoots }) {
+  if (Array.isArray(repoRoots) && repoRoots.length > 1) {
+    const primary = path.resolve(cwd);
+    const repos = captureMultiAttemptSnapshot(repoRoots, { attemptId: attempt });
+    if (!repos.some(repo => path.resolve(repo.code_dir) === primary)) throw new Error('primary cwd must be one of repo roots');
+    const primaryState = repos.find(repo => path.resolve(repo.code_dir) === primary);
+    const state = {
+      attempt: attempt == null ? 1 : attempt,
+      start_sha: primaryState.start_sha,
+      pre_dirty: primaryState.pre_dirty,
+      reason: '', result_file: '', code_dir: primary, transient_retry_count: 0,
+      vcs: primaryState.vcs, repos,
+    };
+    writeJsonAtomic(stateFile, state);
+    return state;
+  }
   const snapshot = captureAttemptSnapshot(cwd, { attemptId: attempt });
   const state = {
     attempt: attempt == null ? 1 : attempt,
@@ -356,6 +399,46 @@ function initState(stateFile, { cwd, attempt }) {
   };
   writeJsonAtomic(stateFile, state);
   return state;
+}
+
+function resetMultiFromState(state) {
+  const repos = state.repos;
+  const prepared = [];
+  // Global preflight: no mutation until every root has the expected VCS/baseline
+  // and every pre-dirty hash is proven untouched.
+  for (const repo of repos) {
+    const detected = vcs.detectVcs(repo.code_dir) === 'svn' ? 'svn' : 'git';
+    if (detected !== repo.vcs) return { code: 3, result: { ok: false, abort: 'vcs-state-mismatch', repo: repo.code_dir } };
+    const baseline = currentBaseline(repo.code_dir, repo.vcs);
+    if (baseline !== repo.start_sha) {
+      return { code: 3, result: { ok: false, abort: 'baseline-moved', repo: repo.code_dir,
+        expected: repo.start_sha, current: baseline } };
+    }
+    const preDirty = Array.isArray(repo.pre_dirty) ? repo.pre_dirty : [];
+    const post = computePostChanges(repo.code_dir, repo.start_sha, repo.vcs);
+    const target = computeResetTarget(post, preDirty, p => hashObject(repo.code_dir, p, repo.vcs));
+    prepared.push({ repo, preDirty, target });
+  }
+  const overlap = prepared.flatMap(item => item.target.overlap.map(file => ({ repo: item.repo.code_dir, path: file })));
+  if (overlap.length) return { code: 3, result: { ok: false, overlap, repos: [] } };
+
+  const completed = [];
+  try {
+    for (const item of prepared) {
+      const done = executeReset(item.repo.code_dir, item.repo.start_sha, item.target, item.repo.vcs);
+      completed.push({ repo: item.repo.code_dir, ...done, preserved: item.target.preserved });
+    }
+  } catch (error) {
+    error.multi_repo_partial = completed;
+    error.code = error.code || 'multi-repo-reset-partial';
+    throw error;
+  }
+  const checks = prepared.map(item => ({ repo: item.repo.code_dir,
+    ...verifyReset(item.repo.code_dir, item.repo.start_sha, item.preDirty, item.repo.vcs) }));
+  if (checks.some(check => !check.verified)) {
+    return { code: 2, result: { ok: false, verified: false, repos: completed, checks } };
+  }
+  return { code: 0, result: { ok: true, verified: true, repos: completed, checks } };
 }
 
 /** Reset only a failed execute attempt owned by one declared repository. */
@@ -409,6 +492,7 @@ function resetFromState(stateFile) {
   // rather than decide a destructive question from a stale answer.
   trackedInstallCache.clear();
   const state = readState(stateFile);
+  if (Array.isArray(state.repos) && state.repos.length > 1) return resetMultiFromState(state);
   const cwd = state.code_dir;
   const startSha = state.start_sha;
   const preDirty = Array.isArray(state.pre_dirty) ? state.pre_dirty : [];
@@ -517,6 +601,7 @@ module.exports = {
   parseNameStatusZ,
   parseSvnBaseline,
   captureAttemptSnapshot,
+  captureMultiAttemptSnapshot,
   hashObject,
   captureSnapshot,
   computePostChanges,
@@ -531,6 +616,7 @@ module.exports = {
   initReadOnlyState,
   updateState,
   resetFromState,
+  resetMultiFromState,
   resetFailedAttempt,
 };
 
@@ -568,7 +654,12 @@ function main() {
     if (args['state-init']) {
       if (!args.state || !args.cwd) usageError('--state-init requires --state <file> --cwd <dir>');
       const attempt = args.attempt != null && args.attempt !== true ? parseInt(args.attempt, 10) : 1;
-      const state = initState(args.state, { cwd: args.cwd, attempt });
+      let repoRoots;
+      if (args['repo-roots'] || args['repo-roots-file']) {
+        try { repoRoots = JSON.parse(args['repo-roots-file'] ? fs.readFileSync(args['repo-roots-file'], 'utf8') : args['repo-roots']); }
+        catch (error) { usageError(`--repo-roots must be JSON: ${error.message}`); }
+      }
+      const state = initState(args.state, { cwd: args.cwd, attempt, repoRoots });
       process.stdout.write(state.start_sha + '\n'); // skills capture with $( )
       process.exit(0);
     }

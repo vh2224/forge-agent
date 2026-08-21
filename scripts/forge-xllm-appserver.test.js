@@ -283,6 +283,22 @@ async function testHappyAndWire(mock, root) {
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(resultFile, 'utf8')), result);
 }
 
+async function testMultiRepoWire(mock, root) {
+  const primary = fixtureRepo(root);
+  const secondary = fixtureRepo(root);
+  const capture = path.join(root, 'multi-capture.json');
+  const resultFile = path.join(root, 'multi-result.json');
+  const options = { ...executeOptions(primary, planFile(root), resultFile, 'multi-model'), writableRoots: [secondary] };
+  const result = await withMock(mock, 'conforming', capture, () => runExecute(options));
+  const wire = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.deepStrictEqual(wire.turnParams.sandboxPolicy,
+    buildAppServerSandboxPolicy('workspace-write', process.platform, [path.resolve(secondary)]));
+  assert.strictEqual(result.repo_baselines.length, 2, 'no-commit covers both repository roots');
+  assert.strictEqual(result.pre_dirty_by_repo.length, 2, 'dirty snapshots cover both repository roots');
+  assert(result.repo_baselines.some(entry => entry.repo === path.resolve(secondary)),
+    'secondary root remains explicitly attributable in the result');
+}
+
 async function testDegradation(mock, root) {
   const repo = fixtureRepo(root);
   const plan = planFile(root);
@@ -960,6 +976,7 @@ async function main() {
     testValidatorBoundary();
     testCommandOverride(mock);
     await testHappyAndWire(mock, root);
+    await testMultiRepoWire(mock, root);
     await testDegradation(mock, root);
     await testHeartbeat(mock, root);
     await testGuards(mock, root);

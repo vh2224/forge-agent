@@ -684,18 +684,27 @@ const CAPABILITY_SANDBOX_MODE = {
 };
 
 // S04 R7 guards + SANDBOX_MODES live BELOW the gate on purpose — see the note there.
-function buildAppServerSandboxPolicy(mode, platform = process.platform) {
+function buildAppServerSandboxPolicy(mode, platform = process.platform, writableRoots = []) {
   // Validated FIRST, before any platform branch: otherwise a typo on win32
   // returns dangerFullAccess and never reaches the check at all — the widest
   // possible policy handed out for the least recognisable input.
   assertKnownSandboxMode(mode, 'buildAppServerSandboxPolicy');
+  if (!Array.isArray(writableRoots) || writableRoots.some(root => typeof root !== 'string' || !path.isAbsolute(root))) {
+    throw new Error('buildAppServerSandboxPolicy: writableRoots must be absolute paths');
+  }
+  if (mode === 'read-only' && writableRoots.length > 0) {
+    throw new Error('buildAppServerSandboxPolicy: read-only cannot carry writableRoots');
+  }
   if (mode === 'read-only') return { type: 'readOnly', networkAccess: false };
-  if (platform === 'win32') return { type: 'dangerFullAccess' };
-  if (mode === 'networked') return { type: 'workspaceWrite', networkAccess: true };
+  // Windows historically required dangerFullAccess for a single root. The measured
+  // cross-root capability is narrower and explicit: when roots are supplied, use
+  // workspaceWrite on every platform and let the app-server enforce the boundary.
+  if (platform === 'win32' && writableRoots.length === 0) return { type: 'dangerFullAccess' };
+  if (mode === 'networked') return { type: 'workspaceWrite', networkAccess: true, ...(writableRoots.length ? { writableRoots } : {}) };
   // W3: keep the default workspace policy byte-for-byte explicit; the omitted
   // network default was never measured, so changing this can silently grant access.
   // Reached ONLY by 'workspace-write' now — the guard owns everything else.
-  return { type: 'workspaceWrite', networkAccess: false };
+  return { type: 'workspaceWrite', networkAccess: false, ...(writableRoots.length ? { writableRoots } : {}) };
 }
 
 // The closed set of modes the table can produce. Derived from it, never re-typed:
@@ -969,7 +978,7 @@ function invokeCodexAppServer(opts) {
   const { startAppServerTurn } = require('./forge-appserver-client');
   const {
     prompt, schema, cwd, model, timeoutSecs, onHeartbeat, sandbox,
-    envPolicy = 'minimal', heartbeatIntervalMs,
+    envPolicy = 'minimal', heartbeatIntervalMs, writableRoots = [],
   } = opts;
   const { cmd, prefixArgs } = resolveCodexCommand();
   // S05 review R2. `heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS` conflated three
@@ -1025,7 +1034,7 @@ function invokeCodexAppServer(opts) {
         threadId,
         input: [{ type: 'text', text: prompt }],
         outputSchema: schema,
-        sandboxPolicy: buildAppServerSandboxPolicy(sandbox || 'workspace-write'),
+        sandboxPolicy: buildAppServerSandboxPolicy(sandbox || 'workspace-write', process.platform, writableRoots),
       };
       if (model) params.model = model;
       return params;
@@ -1859,6 +1868,10 @@ function gitRead(gitArgs, cwd, what) {
  */
 async function runExecute(opts) {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
+  const writableRoots = Array.isArray(opts.writableRoots) ? opts.writableRoots.map(root => path.resolve(root)) : [];
+  const repoRoots = [cwd, ...writableRoots];
+  const rootKeys = repoRoots.map(root => process.platform === 'win32' ? root.toLowerCase() : root);
+  if (new Set(rootKeys).size !== repoRoots.length) throw new Error('execute repo roots must be unique');
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
   const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
   const dispatchId = normalizeDispatchId(opts.dispatchId, 'execute');
@@ -1913,9 +1926,14 @@ async function runExecute(opts) {
   // This snapshot is AUDIT ONLY — exposed as `pre_dirty` in the result JSON for the
   // orchestrator to cross-check. The AUTHORITATIVE snapshot that drives the post-failure
   // surgical reset lives in the orchestrator's state file (T03/T04); the adapter NEVER resets.
-  const attemptSnapshot = captureAttemptSnapshot(cwd, { attemptId: dispatchId, vcsName });
+  const attemptSnapshots = repoRoots.length > 1
+    ? require('./forge-surgical-reset').captureMultiAttemptSnapshot(repoRoots, { attemptId: dispatchId })
+    : [captureAttemptSnapshot(cwd, { attemptId: dispatchId, vcsName })];
+  const attemptSnapshot = attemptSnapshots[0];
   const preDirty = attemptSnapshot.pre_dirty;
-  const preDirtyAll = captureDirtySnapshot(cwd, vcsName);
+  const preDirtyByRepo = attemptSnapshots.map(snapshot => ({ repo: snapshot.code_dir, entries: snapshot.pre_dirty }));
+  const preDirtyAllByRepo = attemptSnapshots.map(snapshot => ({ repo: snapshot.code_dir, vcs: snapshot.vcs,
+    entries: captureDirtySnapshot(snapshot.code_dir, snapshot.vcs) }));
 
   let securityText = '';
   let contextText = '';
@@ -1976,6 +1994,7 @@ async function runExecute(opts) {
     // The dispatch id is the only unit-shaped identifier the adapter holds; the
     // orchestrator (T03) owns the file name of the evidence log.
     evidenceUnit: dispatchId,
+    writableRoots,
   });
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   const outputTokens = countTokens(rawContent);
@@ -1998,22 +2017,22 @@ async function runExecute(opts) {
   });
 
   // No-commit invariant: codex must not have moved HEAD.
-  let headSha;
-  if (vcsName === 'svn') {
-    const baseline = vcs.baselineId(cwd, { ...VCS_OPTS, vcs: 'svn' });
-    if (!baseline.ok) throw new Error(baseline.error);
-    const parsedBaseline = parseSvnBaseline(baseline.id);
-    if (!parsedBaseline.ok) throw new Error(parsedBaseline.error);
-    headSha = parsedBaseline.range;
-    if (headSha !== startSha) {
-      throw new Error('svn-revision-moved: working copy revision moved during dispatch (' + startSha + ' -> ' + headSha + ') — no-commit/no-update invariant violated');
+  const postBaselines = attemptSnapshots.map(snapshot => {
+    let current;
+    if (snapshot.vcs === 'svn') {
+      const baseline = vcs.baselineId(snapshot.code_dir, { ...VCS_OPTS, vcs: 'svn' });
+      if (!baseline.ok) throw new Error(baseline.error);
+      const parsedBaseline = parseSvnBaseline(baseline.id);
+      if (!parsedBaseline.ok) throw new Error(parsedBaseline.error);
+      current = parsedBaseline.range;
+    } else current = gitRead('rev-parse HEAD', snapshot.code_dir, 'git rev-parse HEAD (post-run)');
+    if (current !== snapshot.start_sha) {
+      const prefix = snapshot.vcs === 'svn' ? 'svn-revision-moved' : 'no-commit invariant violated';
+      throw new Error(`${prefix}: codex moved baseline in ${snapshot.code_dir} (${snapshot.start_sha} -> ${current}); no update is allowed`);
     }
-  } else {
-    headSha = gitRead('rev-parse HEAD', cwd, 'git rev-parse HEAD (post-run)');
-    if (headSha !== startSha) {
-      throw new Error('codex moved HEAD (committed) — no-commit invariant violated');
-    }
-  }
+    return { repo: snapshot.code_dir, start_sha: snapshot.start_sha, head_sha: current, vcs: snapshot.vcs };
+  });
+  const headSha = postBaselines[0].head_sha;
 
   let parsed = null;
   let parsePath = 'output-schema';
@@ -2036,7 +2055,13 @@ async function runExecute(opts) {
   // both come from the same untrusted process, so both cross the same barrier.
   assertUntrustedOutputBarrier(parsed);
 
-  const derived = deriveFilesChanged(cwd, preDirtyAll, startSha, vcsName);
+  const labels = repoRoots.map(root => path.basename(root));
+  if (repoRoots.length > 1 && new Set(labels.map(label => process.platform === 'win32' ? label.toLowerCase() : label)).size !== labels.length) {
+    throw new Error('multi-repo roots require unique basenames for result attribution');
+  }
+  const derived = preDirtyAllByRepo.flatMap((snapshot, index) =>
+    deriveFilesChanged(snapshot.repo, snapshot.entries, attemptSnapshots[index].start_sha, snapshot.vcs)
+      .map(entry => repoRoots.length > 1 ? { ...entry, repo: labels[index] } : entry));
   // Protected metadata is outside the surgical reset set. A sidecar-owned `.gsd`
   // delta is therefore a hard terminal failure, never an advisory warning/success.
   assertNoProtectedSidecarChanges(derived);
@@ -2054,6 +2079,7 @@ async function runExecute(opts) {
     files_changed: derived,
     files_changed_declared: parsed.files_changed,
     pre_dirty: preDirty,
+    ...(repoRoots.length > 1 ? { pre_dirty_by_repo: preDirtyByRepo, repo_baselines: postBaselines } : {}),
     start_sha: startSha,
     head_sha: headSha,
     ...(vcsName === 'svn' ? { vcs: 'svn' } : {}),
@@ -2427,8 +2453,14 @@ if (require.main === module) {
       || DEFAULT_EXECUTE_TIMEOUT_SECS;
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'execute');
+    let writableRoots = [];
+    if (args['writable-roots'] !== undefined || args['writable-roots-file'] !== undefined) {
+      try { writableRoots = JSON.parse(args['writable-roots-file']
+        ? fs.readFileSync(args['writable-roots-file'], 'utf8') : args['writable-roots']); }
+      catch (error) { process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
+    }
 
-    runExecute({ planFile: args.plan, resultFile, cwd, model, timeoutSecs, envPolicy, dispatchId, securityFile: args.security, contextFile: args['context-bundle'] })
+    runExecute({ planFile: args.plan, resultFile, cwd, model, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         let safeResultFile = null;

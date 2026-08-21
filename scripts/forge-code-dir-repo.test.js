@@ -320,6 +320,74 @@ test('R12 — exit 4 (cross-repo)', () => {
   assertEqual(JSON.parse(r.out).reason, 'sidecar-multirepo-unsupported', 'reason');
 });
 
+test('R12b — cross-repo declarado resolve cwd primario e writable root adicional', () => {
+  const f = makeFixture({ noRepoField: true });
+  const plan = path.join(f.root, 'T02-primary-PLAN.md');
+  fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${path.join(f.web, 'a.ts')}"`,
+    `  - "${path.join(f.api, 'b.ts')}"`, '---', ''].join('\n'));
+  const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+  assertEqual(out.status, 'ok', 'status');
+  assertEqual(out.resolution, 'multi-repo-declared', 'resolution');
+  assertEqual(path.resolve(out.code_dir), path.resolve(f.wts, 'web'), 'cwd primario');
+  assertEqual(out.repo_roots.length, 2, 'todas as raizes');
+  assertEqual(out.writable_roots.length, 1, 'somente raiz adicional');
+  assertEqual(path.resolve(out.writable_roots[0]), path.resolve(f.wts, 'api'), 'api como writable root');
+});
+
+test('R12c — escopo parcialmente atribuivel recusa antes do dispatch', () => {
+  const f = makeFixture({ noRepoField: true });
+  const plan = path.join(f.root, 'T02-partial-PLAN.md');
+  const outside = path.join(f.root, 'repo-nao-isolado', 'secret.ts');
+  fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${path.join(f.web, 'a.ts')}"`,
+    `  - "${outside}"`, '---', ''].join('\n'));
+  const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+  assertEqual(out.status, 'cross-repo', 'status fail-closed');
+  assertEqual(out.reason, 'sidecar-multirepo-unsupported', 'reason');
+  assertEqual(out.paths_unmatched, 1, 'path omitido permanece visivel');
+  assertEqual(out.code_dir, '', 'nenhum cwd parcial e emitido');
+  assertEqual(out.repo_roots.length, 0, 'nenhum snapshot parcial e autorizado');
+});
+
+test('R12d — path absoluto externo sozinho nunca herda o repo declarado', () => {
+  const f = makeFixture({ noRepoField: true });
+  const plan = path.join(f.root, 'T02-external-only-PLAN.md');
+  const outside = path.join(f.root, 'fora-dos-repos', 'secret.ts');
+  fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${outside}"`, '---', ''].join('\n'));
+  const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+  assertEqual(out.status, 'cross-repo', 'status fail-closed');
+  assertEqual(out.paths_unmatched, 1, 'absoluto externo contabilizado');
+  assertEqual(out.code_dir, '', 'repo declarado nao captura absoluto externo');
+  assertEqual(out.repo_roots.length, 0, 'nenhum escopo incompleto emitido');
+});
+
+test('R12e — traversal relativo que escapa do workspace e recusado', () => {
+  const f = makeFixture({ noRepoField: true });
+  for (const [name, escaped] of [['parent', '../outside/x.ts'], ['nested', 'web/../../outside/x.ts']]) {
+    const plan = path.join(f.root, `T02-traversal-${name}-PLAN.md`);
+    fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${escaped}"`, '---', ''].join('\n'));
+    const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+    assertEqual(out.status, 'cross-repo', `${name}: status fail-closed`);
+    assertEqual(out.code_dir, '', `${name}: nenhum cwd parcial`);
+    assertEqual(out.repo_roots.length, 0, `${name}: nenhum escopo parcial`);
+  }
+});
+
+test('R12f — traversal depois de glob e drive-relative recusam antes da atribuicao', () => {
+  const f = makeFixture({ noRepoField: true });
+  for (const [name, escaped] of [['glob', 'web/**/../../outside.ts'], ['drive', 'C:../outside.ts']]) {
+    const plan = path.join(f.root, `T02-pre-glob-${name}-PLAN.md`);
+    fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${escaped}"`, '---', ''].join('\n'));
+    const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+    assertEqual(out.status, 'cross-repo', `${name}: status fail-closed`);
+    assertEqual(out.paths_unmatched, 1, `${name}: declaracao insegura contabilizada`);
+    assertEqual(out.code_dir, '', `${name}: nenhum cwd emitido`);
+  }
+  const legitimate = path.join(f.root, 'T02-legitimate-glob-PLAN.md');
+  fs.writeFileSync(legitimate, ['---', 'id: T02', 'repo: web', 'writes:', '  - "src/**"', '---', ''].join('\n'));
+  assertEqual(resolveCodeDir({ isoResult: f.isoResult, planPath: legitimate, cwd: f.ws }).status, 'ok',
+    'glob interno legitimo preservado');
+});
+
 test('R12 — exit 5 (undeclared)', () => {
   const f = makeFixture({ noRepoField: true });
   const r = runCli(['--resolve', '--iso-result', JSON.stringify(f.isoResult),

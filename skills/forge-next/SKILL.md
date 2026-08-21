@@ -132,7 +132,7 @@ echo "ISOLATION_MODE=$ISOLATION_MODE  WORKTREE_DIR=${WORKTREE_DIR:-—}  ISO_ERR
 Isolation rules (CRITICAL — the operator configured this; honor it):
 - `shared` → `WORKER_CWD = $WORKING_DIR`. Nothing else to do.
 - `branch` → `WORKER_CWD = $WORKING_DIR`. Workers commit on the `forge/{run}` branch the setup just checked out.
-- `worktree` → `WORKER_CWD = $WORKTREE_DIR` (bootstrap value). **In a multi-repo workspace `WORKER_CWD`/`CODE_DIR` does NOT come from this bootstrap value**: once `$PLAN_PATH` exists, the per-unit resolver (`forge-code-dir.js`, § Per-unit `CODE_DIR` resolution in Step 4) attributes the unit's declared paths to ONE repo — when it returns `ok`, `WORKER_CWD = $UNIT_CODE_DIR`; on any refusal (`cross-repo`/`undeclared`) `WORKER_CWD` stays `$WORKTREE_DIR`, exactly today's behavior. ALL code reads/writes/commits happen inside the worktree; `.gsd/**` artifacts ALWAYS stay under `$WORKING_DIR`.
+- `worktree` → `WORKER_CWD = $WORKTREE_DIR` (bootstrap value). In a multi-repo workspace, once `$PLAN_PATH` exists the resolver selects the explicit primary repo and emits the complete `repo_roots`/`writable_roots` scope. A fully attributed cross-repo plan is supported; an ambiguous or incomplete plan is refused. `.gsd/**` artifacts ALWAYS stay under `$WORKING_DIR`.
 - `ISO_ERRORS` non-empty AND no repo succeeded → STOP and surface the errors. Running un-isolated when the operator configured isolation is NOT an acceptable fallback.
 - When mode != shared, emit one line: `⛓ Isolation: {mode} → {branch name or worktree path}`.
 - `workers.require_worktree` elevation is static-at-activation (never mid-run); `auto` (default) elevates `shared→worktree` only when `execute-task` resolves to an external write engine (codex/gpt/gemini); `true` always elevates; `false` never elevates. Read-only paths (Branch D plan-slice, review challenger) are exempt. Warn-and-proceed — never blocks; false-positive acceptable, false-negative not. Keep `shared`: `workers.require_worktree: false`.
@@ -996,7 +996,9 @@ Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g. `execute-task/T01`) and
 ```bash
 UNIT_CODE_DIR=""; CODE_DIR_STATUS="shared"; CODE_DIR_REASON=""; CODE_DIR_MULTI_ROOT=""; CODE_DIR_HINT=""
 CODE_DIR_HINT_FILE="$WORKING_DIR/.gsd/forge/code-dir-hint.json"
-mkdir -p "$WORKING_DIR/.gsd/forge/"; printf '""' > "$CODE_DIR_HINT_FILE"   # reset per unit — never inherit a prior unit's hint
+CODE_DIR_ROOTS_FILE="$WORKING_DIR/.gsd/forge/code-dir-roots.json"
+CODE_DIR_WRITABLE_ROOTS_FILE="$WORKING_DIR/.gsd/forge/code-dir-writable-roots.json"
+mkdir -p "$WORKING_DIR/.gsd/forge/"; printf '""' > "$CODE_DIR_HINT_FILE"; printf '[]' > "$CODE_DIR_ROOTS_FILE"; printf '[]' > "$CODE_DIR_WRITABLE_ROOTS_FILE"
 if [ "$ISOLATION_MODE" = "worktree" ] && [ -n "$PLAN_PATH" ] && [ -n "$ISO_RESULT" ]; then
   CD_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-code-dir.js" --resolve \
     --iso-result "$ISO_RESULT" --plan "$WORKING_DIR/$PLAN_PATH" --cwd "$WORKING_DIR"); CD_RC=$?
@@ -1006,6 +1008,7 @@ if [ "$ISOLATION_MODE" = "worktree" ] && [ -n "$PLAN_PATH" ] && [ -n "$ISO_RESUL
   CODE_DIR_REASON=$(node -e "process.stdout.write((JSON.parse(process.argv[1]).reason)||'')" "$CD_JSON")
   CODE_DIR_MULTI_ROOT=$(node -e "process.stdout.write((JSON.parse(process.argv[1]).multi_repo_root)||'')" "$CD_JSON")
   CODE_DIR_HINT=$(node -e "process.stdout.write((JSON.parse(process.argv[1]).hint)||'')" "$CD_JSON")
+  node -e "const fs=require('fs'),o=JSON.parse(process.argv[1]);fs.writeFileSync(process.argv[2],JSON.stringify(o.repo_roots||[]));fs.writeFileSync(process.argv[3],JSON.stringify(o.writable_roots||[]))" "$CD_JSON" "$CODE_DIR_ROOTS_FILE" "$CODE_DIR_WRITABLE_ROOTS_FILE"
   # Durable hint (shared/forge-dispatch.md § 0.5): shell state does NOT survive a Bash-tool boundary,
   # so the hint is JSON-encoded HERE and persisted for the worker-engine-fallback emitters to re-read.
   HINT_JSON=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]||""))' "$CODE_DIR_HINT")
@@ -1046,7 +1049,7 @@ if [ "$REASON" != "sidecar-cap-exceeded" ] && [ -z "$CODE_DIR_REASON" ]; then
   XLLM_STATE=$(node "$FORGE_SCRIPTS_DIR/forge-xllm-state.js" --mode write --dir "$WORKING_DIR/.gsd/forge" --milestone "{M###}" --slice "{S##}" --task "{T##}" --attempt "$N")
   mkdir -p "$WORKING_DIR/.gsd/forge/"
   START_SHA=$(node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --state-init \
-    --state "$XLLM_STATE" --cwd "$CODE_DIR" --attempt "$N")
+    --state "$XLLM_STATE" --cwd "$CODE_DIR" --attempt "$N" --repo-roots-file "$CODE_DIR_ROOTS_FILE")
   # Guard: if --state-init fails (non-zero exit / empty $START_SHA) → REASON="sidecar-state-init-failed"
   # → Fallback directly, with NO reset (nothing was captured, no valid state file to reset from).
   [ -n "$START_SHA" ] || REASON="sidecar-state-init-failed"
@@ -1069,6 +1072,7 @@ node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
   --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
   --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
+  --writable-roots-file "$CODE_DIR_WRITABLE_ROOTS_FILE" \
   --timeout "$WORKERS_TIMEOUT" \
   --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE" \
   $([ -n "$SIDECAR_MODEL" ] && printf -- '--model %s' "$SIDECAR_MODEL")
@@ -1177,15 +1181,23 @@ fi
 # so it never reverts the orchestrator's own .gsd writes (events.jsonl / evidence) made during the poll.
 if [ "$REASON" != "sidecar-cap-exceeded" ] && [ -z "$CODE_DIR_REASON" ]; then
   RESET_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --reset --state "$XLLM_STATE"); RC=$?
+  IS_MULTI_STATE=$(node -e "const s=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(Array.isArray(s.repos)&&s.repos.length>1?'true':'false')" "$XLLM_STATE" 2>/dev/null || echo false)
   # RC=0 → reset verified (only codex-authored changes undone, pre-dirty snapshot intact) → advance.
   # RC=3 → OVERLAP: a pre-dirty path's hash diverged (the sidecar ALSO wrote it) — the helper reset
   #        NOTHING (leftovers stay on disk, visible for the human — never silently discarded).
   # RC=2 → reset ran but post-verification still found a leftover that isn't an intact pre-dirty path.
-  if [ "$RC" = "3" ]; then
+  if [ "$IS_MULTI_STATE" = "true" ] && [ "$RC" != "0" ]; then
+    REASON="multi-repo-reset-unverified"
+  elif [ "$RC" = "3" ]; then
     REASON="surgical-reset-overlap"   # emit event with the overlap path list from $RESET_JSON; abort chain
   elif [ "$RC" != "0" ]; then
     REASON="verified-reset-failed"    # abort the chain to the Claude fallback — never inherit a dirty tree
   fi
+fi
+if [ "$REASON" = "multi-repo-reset-unverified" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null 2>&1 || true
+  echo "✗ fallback bloqueado: reset multi-repo não foi integralmente verificado; inspeção humana obrigatória" >&2
+  exit 1
 fi
 
 # Cross-engine chain walk (Layer 2) — after the verified reset, resolve the next chain member and,

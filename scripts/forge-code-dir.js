@@ -405,6 +405,8 @@ function emptyResult(extra) {
     run: '',
     reason: '',
     multi_repo_root: '',
+    repo_roots: [],
+    writable_roots: [],
     declared_repo: '',
     declared_repo_status: '',
     // Additive (S05/T05) — defaults keep every existing reader byte-identical.
@@ -489,12 +491,31 @@ function resolveCodeDir(opts) {
   // 7. Attribution (D5) — absolute, normalized, longest-prefix.
   const touched = new Map();
   let unmatched = 0;
+  let unmatchedAbsolute = 0;
   for (const p of considered) {
+    // Validate the complete declaration before globRoot truncates at `*`/`?`.
+    // A traversal suffix after a wildcard is still executable scope even though
+    // it is not part of the attribution prefix. Drive-relative Windows paths
+    // (`C:foo`) are also outside a portable workspace containment proof.
+    const declared = normalizePath(p);
+    if (declared.split('/').includes('..') || /^[A-Za-z]:(?!\/)/.test(declared)) {
+      unmatched++;
+      unmatchedAbsolute++;
+      continue;
+    }
     const root = globRoot(p);
     if (!root) { unmatched++; continue; }
     const abs = normalizePath(path.resolve(cwd, root));
     const repo = attributeRepo(abs, usable);
-    if (!repo) { unmatched++; continue; }
+    if (!repo) {
+      unmatched++;
+      const lexical = path.posix.normalize(normalizePath(root));
+      const escapesWorkspace = lexical === '..' || lexical.startsWith('../');
+      if (path.isAbsolute(root) || /^[A-Za-z]:[\\/]/.test(root) || /^[\\/]{2}/.test(root) || escapesWorkspace) {
+        unmatchedAbsolute++;
+      }
+      continue;
+    }
     touched.set(normalizePath(repo.path), repo);
   }
 
@@ -503,12 +524,34 @@ function resolveCodeDir(opts) {
   // repos; a worktree may not yet contain a newly declared file. Limitation C3: when
   // cwd itself is a repo, attribution already claims every relative path and this
   // deliberately does not reinterpret that first-pass result.
-  // P1: directly attributed paths spanning repos are always a genuine sidecar refusal.
+  // P1: a cross-repo unit is routable only when `repo:` names the primary cwd and
+  // every declared non-artifact path was attributed. Additional worktrees become
+  // app-server writableRoots; no first-repo guess is permitted.
   if (touched.size >= 2) {
-    return emptyResult({ status: 'cross-repo', repos_touched: Array.from(touched.keys()), paths_considered: considered.length,
-      paths_unmatched: unmatched, source, run, reason: REASON_CROSS_REPO, multi_repo_root: commonWorktreeRoot(usable),
-      declared_repo: declaredRepo,
-      hint: hintFor({ status: 'cross-repo', declared_repo: declaredRepo, repos_touched: Array.from(touched.keys()) }) });
+    const touchedPaths = Array.from(touched.keys());
+    if (!declaredRepo || unmatched > 0) {
+      return emptyResult({ status: 'cross-repo', repos_touched: touchedPaths, paths_considered: considered.length,
+        paths_unmatched: unmatched, source, run, reason: REASON_CROSS_REPO, multi_repo_root: commonWorktreeRoot(usable),
+        declared_repo: declaredRepo,
+        hint: hintFor({ status: 'cross-repo', declared_repo: declaredRepo, repos_touched: touchedPaths }) });
+    }
+    const primary = matchDeclaredRepo(declaredRepo, usable, cwd, o.repoIndex);
+    if (primary.status !== 'ok' || !touched.has(normalizePath(primary.repo.path))) {
+      return emptyResult({ status: 'undeclared', repos_touched: touchedPaths, paths_considered: considered.length,
+        paths_unmatched: unmatched, source, run, reason: REASON_UNDECLARED, multi_repo_root: commonWorktreeRoot(usable),
+        declared_repo: declaredRepo, declared_repo_status: primary.status === 'ok' ? 'conflict' : primary.status,
+        declared_repo_path: primary.path || '',
+        hint: hintFor({ status: 'undeclared', declared_repo: declaredRepo,
+          declared_repo_status: primary.status === 'ok' ? 'conflict' : primary.status, repos_touched: touchedPaths }) });
+    }
+    const repoRoots = Array.from(touched.values()).map(repo => path.resolve(repo.worktree));
+    const primaryRoot = path.resolve(primary.repo.worktree);
+    return emptyResult({ status: 'ok', code_dir: primaryRoot, repo: primary.repo.path || '',
+      repos_touched: touchedPaths, repo_roots: repoRoots,
+      writable_roots: repoRoots.filter(root => normalizePath(root) !== normalizePath(primaryRoot)),
+      paths_considered: considered.length, paths_unmatched: 0, source, resolution: 'multi-repo-declared', run,
+      declared_repo: declaredRepo, declared_repo_status: 'ok', declared_repo_source: primary.source || '',
+      declared_repo_path: primary.path || '' });
   }
 
   // P2–P4: a declaration is validated before it can select a worktree and never falls through.
@@ -525,6 +568,19 @@ function resolveCodeDir(opts) {
         declared_repo_path: match.path || '',
         hint: hintFor({ status: 'undeclared', declared_repo: declaredRepo, declared_repo_status: match.status,
           declared_repo_path: match.path || '' }) });
+    }
+    // A partially attributed declaration is not a single-repo plan. Accepting the
+    // known subset would omit the unknown scope from writableRoots, snapshots and
+    // reset. Relative-only plans with no attributed root retain the historical
+    // declared-repo path below; mixed known/unknown scope always fails closed.
+    if (unmatched > 0 && (touched.size > 0 || unmatchedAbsolute > 0)) {
+      const touchedPaths = Array.from(touched.keys());
+      return emptyResult({ status: 'cross-repo', repos_touched: touchedPaths,
+        paths_considered: considered.length, paths_unmatched: unmatched, source, run,
+        reason: REASON_CROSS_REPO, multi_repo_root: commonWorktreeRoot(usable),
+        declared_repo: declaredRepo, declared_repo_status: 'partial-scope',
+        declared_repo_path: match.path || '',
+        hint: hintFor({ status: 'cross-repo', declared_repo: declaredRepo, repos_touched: touchedPaths }) });
     }
     if (touched.size === 1 && normalizePath(touched.keys().next().value) !== normalizePath(match.repo.path)) {
       return emptyResult({ status: 'undeclared', paths_considered: considered.length, paths_unmatched: unmatched, source, run,
