@@ -444,9 +444,38 @@ async function testCrossRootProbe() {
   assert.strictEqual(probe.crossPlatformWriteCommand('/tmp/a b', 'linux'), "touch '/tmp/a b'",
     'POSIX keeps the already-measured touch command');
   const windowsWrite = probe.crossPlatformWriteCommand("C:\\tmp\\a'b.txt", 'win32');
-  assert(windowsWrite.startsWith('powershell.exe -NoProfile -NonInteractive -Command '),
-    'Windows must use a native non-interactive writer instead of the non-portable touch command');
+  assert.strictEqual(windowsWrite, "Set-Content -LiteralPath 'C:\\tmp\\a''b.txt' -Value '' -NoNewline",
+    'Windows must emit a shell-native cmdlet because app-server already wraps it in PowerShell');
+  assert(!/powershell(?:\.exe)?\s/i.test(windowsWrite),
+    'the probe must not nest a second PowerShell process and make quoting part of the capability test');
+  assert(!/\[System\.|::/.test(windowsWrite),
+    'the probe must not depend on static .NET calls rejected by ConstrainedLanguage mode');
   assert(windowsWrite.includes("a''b.txt"), 'PowerShell single-quoted paths must double embedded quotes');
+
+  const fixturePrefixes = [];
+  await probe.withTrackedProbeResources({
+    fsApi: {
+      mkdtempSync(prefix) { fixturePrefixes.push(prefix); return `${prefix}owned`; },
+      realpathSync(value) { return value; },
+      mkdirSync() {},
+      rmSync() {},
+    },
+    osApi: { tmpdir: () => path.resolve('os-temp') },
+    pathApi: path,
+  }, async ({ makeTempAt }) => {
+    makeTempAt(path.resolve('probe-cwd'), '.forge-xroot-a-');
+    makeTempAt(path.resolve('probe-cwd'), '.forge-xroot-b-');
+  });
+  assert(fixturePrefixes.every(prefix => prefix.startsWith(path.resolve('probe-cwd'))),
+    'cross-root fixtures must live outside os.tmpdir so excludeTmp flags do not deny their own cwd');
+  await assert.rejects(
+    probe.withTrackedProbeResources({
+      fsApi: { mkdtempSync() { throw new Error('must not create'); }, realpathSync(v) { return v; }, mkdirSync() {}, rmSync() {} },
+      osApi: { tmpdir: () => path.resolve('os-temp') },
+      pathApi: path,
+    }, async ({ makeTempAt }) => makeTempAt('relative-root', 'x-')),
+    /must be absolute/,
+    'a caller-provided resource root must not escape through cwd-relative resolution');
 
   const resourceFixture = (failAt) => {
     const removed = [];
@@ -697,6 +726,29 @@ async function testCrossRootProbe() {
   });
   assert.strictEqual(denyViaControl.verdict, V.PROVADA, 'a permissive same-dir control admits the negative control');
   assert(/MAIS FRACA/.test(denyViaControl.reason), 'the control route must be reported as weaker evidence, not folded into a boolean');
+
+  const denyWithFailedItem = crossRootVerdict({
+    ctrlAttempt: wrote,
+    ctrlDeny: { exists: false, targetDir: '/B', target: '/B/deny.txt', items: [{
+      type: 'commandExecution', status: 'failed', command: "touch '/B/deny.txt'", exitCode: 1,
+    }] },
+    treat: { exists: true, targetDir: '/B', target: '/B/treat.txt', items: [{
+      type: 'commandExecution', status: 'completed', command: "touch '/B/treat.txt'", exitCode: 0,
+    }] },
+    replaceCheck: wrote,
+  });
+  assert.strictEqual(denyWithFailedItem.verdict, V.PROVADA,
+    'a failed command citing the denied target is direct terminal execution evidence');
+  const windowsDenied = crossRootVerdict({
+    ctrlAttempt: wrote,
+    ctrlDeny: { exists: false, targetDir: 'C:\\repo-b', target: 'C:\\repo-b\\deny.txt', items: [{
+      type: 'commandExecution', status: 'failed', command: "Set-Content -LiteralPath 'c:/REPO-B/deny.txt'", exitCode: 1,
+    }] },
+    treat: { exists: true, targetDir: 'C:\\repo-b', target: 'C:\\repo-b\\treat.txt', items: [] },
+    replaceCheck: wrote,
+  });
+  assert.strictEqual(windowsDenied.verdict, V.PROVADA,
+    'Windows execution evidence matching must be separator- and case-insensitive');
 
   // (6d) THE INVARIANT. Fed the shape MEASURED in probe-crossroot-write.log against
   // codex-cli 0.144.4, the ladder must still say `provada`. CTRL-DENY there emitted
