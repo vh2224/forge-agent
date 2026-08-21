@@ -242,7 +242,7 @@ function confirmOwnedChildExited(child, timeoutMs = CHILD_EXIT_CONFIRM_MS) {
 }
 
 function killTree(child, options = {}) {
-  if (!child || child.killed || typeof child.pid !== 'number') return { ok: true, skipped: true };
+  if (!child || typeof child.pid !== 'number') return { ok: true, skipped: true };
   const platform = options.platform || process.platform;
   const spawnSyncImpl = options.spawnSyncImpl || spawnSync;
   const reportDegraded = options.reportDegraded || ((reason) => {
@@ -276,7 +276,7 @@ function killAllLive() {
 }
 
 function killTreeAsync(child, options = {}) {
-  if (!child || child.killed || typeof child.pid !== 'number') return Promise.resolve({ ok: true, skipped: true });
+  if (!child || typeof child.pid !== 'number') return Promise.resolve({ ok: true, skipped: true });
   if ((options.platform || process.platform) !== 'win32') return Promise.resolve(killTree(child, options));
   const spawnImpl = options.spawnImpl || spawn;
   const timeoutMs = options.timeoutMs || TASKKILL_TIMEOUT_MS;
@@ -302,7 +302,7 @@ function killTreeAsync(child, options = {}) {
     const resolveNonSuccess = async (reason) => {
       if (resolutionStarted || settled) return;
       resolutionStarted = true;
-      if (await confirmOwnedChildExited(child, options.exitConfirmMs)) {
+      if (reason === 'exit-128' && await confirmOwnedChildExited(child, options.exitConfirmMs)) {
         finish({ ok: true, alreadyExited: true, taskkillReason: reason });
         return;
       }
@@ -421,15 +421,16 @@ function spawnTracked(cmd, args, {
       timedOut = true;
       killTree(child);
     }, timeoutMs);
-    const finish = (payload) => {
+    const finish = (payload, exited = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(killer);
       liveChildren.delete(child);
-      childState.exited = true;
+      if (exited) childState.exited = true;
       resolve({ wallMs: Date.now() - start, timedOut, ...payload });
     };
-    child.on('exit', (code, signal) => finish({ exitCode: code, signal: signal || null }));
+    child.on('exit', (code, signal) => finish({ exitCode: code, signal: signal || null }, true));
+    child.on('close', () => { childState.exited = true; });
     child.on('error', (e) => finish({ exitCode: null, signal: 'spawn-error', error: e.message }));
   });
 }

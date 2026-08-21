@@ -497,6 +497,47 @@ await testAsync('signal shutdown: taskkill exit 128 with owned child still live 
     `exit-128 degradation must be named: ${diagnostics.join(',')}`);
 });
 
+await testAsync('killTreeAsync: child.killed without exit evidence remains degraded', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 535000; owned.killed = true; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const resultPromise = bench.killTreeAsync(owned, {
+    platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+    spawnImpl: () => { queueMicrotask(() => killer.emit('close', 128)); return killer; },
+    reportDegraded: () => {},
+  });
+  const result = await resultPromise;
+  assertEqual(result.ok, false, 'child.killed says a signal was sent, not that the process exited');
+  assertEqual(result.reason, 'exit-128');
+});
+
+await testAsync('killTreeAsync: only exit 128 can use bounded already-exited reclassification', async () => {
+  const { EventEmitter } = require('events');
+  const runCase = async (name, spawnImpl, prepareOwned = () => {}) => {
+    const owned = new EventEmitter();
+    owned.pid = 540000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+    owned.kill = () => true;
+    prepareOwned(owned);
+    const result = await bench.killTreeAsync(owned, {
+      platform: 'win32', timeoutMs: 10, exitConfirmMs: 10, spawnImpl, reportDegraded: () => {},
+    });
+    assertEqual(result.ok, false, `${name} must remain degraded even when the root exit is observed`);
+    assert(!result.alreadyExited, `${name} must not claim tree-wide already-exited proof`);
+  };
+
+  await runCase('timeout', () => {
+    const killer = new EventEmitter(); killer.kill = () => true; return killer;
+  }, (owned) => { owned.exitCode = 0; });
+  await runCase('spawn-exception', () => { throw new Error('spawn failed'); }, (owned) => { owned.exitCode = 0; });
+  await runCase('exit-5', () => {
+    const killer = new EventEmitter(); killer.kill = () => true;
+    queueMicrotask(() => killer.emit('close', 5));
+    return killer;
+  }, (owned) => { owned.exitCode = 0; });
+});
+
 await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {
   const fence = bench.createSpawnFence();
   let releaseCleanup;
