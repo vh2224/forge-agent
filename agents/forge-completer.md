@@ -522,9 +522,22 @@ same branch checked out as when you started.** When `auto_commit: false`: no git
    ```
 4. Emit milestone completion report: slices completed, total tasks, key decisions made
 
-5. **Write ledger fragment + run merger** (M001/S02+):
+5. **Persist write-coverage series + write ledger fragment + run merger** (M001/S02+):
 
-   **5a. Write LEDGER fragment** to `.gsd/ledger/<milestone-id>.md` via `forge-ledger.js`. The fragment is the source of truth — no global `LEDGER.md` write path in this step. Build a JSON payload and pipe it to the script:
+   **5a. Measure write coverage while unit refs are still alive.** This runs
+   before cleanup because merged/deleted `forge/*` refs make the attribution
+   axis irreproducible. The adapter appends one compact, mutex-protected JSONL
+   snapshot and deduplicates an identical retry by `measurement_id`:
+   ```bash
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-write-coverage-ledger.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+   node "$FORGE_SCRIPTS_DIR/forge-write-coverage-ledger.js" --milestone "{M###}" --cwd "{WORKING_DIR}"
+   ```
+   `inconclusive` is a durable measurement outcome, not a success and not a
+   reason to block close-out. On any tool error, emit a warning and continue;
+   never fabricate a GO row. The append-only series lives at
+   `.gsd/forge/write-coverage.jsonl` and survives every cleanup mode.
+
+   **5b. Write LEDGER fragment** to `.gsd/ledger/<milestone-id>.md` via `forge-ledger.js`. The fragment is the source of truth — no global `LEDGER.md` write path in this step. Build a JSON payload and pipe it to the script:
    ```bash
    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-ledger.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    node "$FORGE_SCRIPTS_DIR/forge-ledger.js" --write --cwd "{WORKING_DIR}" <<'EOF'
@@ -547,7 +560,7 @@ same branch checked out as when you started.** When `auto_commit: false`: no git
 
    **Entries that already exist are never rewritten.** D4 applies from here forward only; the accumulated size of older entries is handled elsewhere, not by this step.
 
-   **5b. Invoke the merger** to promote all per-milestone files to workspace globals under lockfile. Note: the merger no longer touches LEDGER (handled by the fragment write in 5a); DECISIONS/AUTO-MEMORY/CHECKER/events still merge normally.
+   **5c. Invoke the merger** to promote all per-milestone files to workspace globals under lockfile. Note: the merger no longer touches LEDGER (handled by the fragment write in 5b); DECISIONS/AUTO-MEMORY/CHECKER/events still merge normally.
    ```bash
    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-merger.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
    node "$FORGE_SCRIPTS_DIR/forge-merger.js" --milestone {M###} --cwd "{WORKING_DIR}" --holder "completer:{M###}"
@@ -560,7 +573,7 @@ same branch checked out as when you started.** When `auto_commit: false`: no git
 
    Parse the JSON output. On non-empty `errors` array: emit warning but proceed (cleanup in step 6 is still safe — per-milestone files remain on disk). On success: log merge counts in the completion report.
 
-   The fragment store (`.gsd/ledger/`), `.gsd/items/`, `AUTO-MEMORY.md`, `DECISIONS.md`, `CHECKER-MEMORY.md`, `CODING-STANDARDS.md` and `STATE.md` (dashboard) are durable across `milestone_cleanup` — never touched by archive/delete.
+   The fragment store (`.gsd/ledger/`), `.gsd/forge/write-coverage.jsonl`, `.gsd/items/`, `AUTO-MEMORY.md`, `DECISIONS.md`, `CHECKER-MEMORY.md`, `CODING-STANDARDS.md` and `STATE.md` (dashboard) are durable across `milestone_cleanup` — never touched by archive/delete.
 
 6. **Cleanup milestone artifacts** — based on `milestone_cleanup` from injected config:
    - `keep` (default): do nothing — all files remain

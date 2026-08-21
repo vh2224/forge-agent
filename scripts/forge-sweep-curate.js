@@ -296,14 +296,31 @@ function authorizationPath(cwd, containerPath) {
   return path.join(cwd, AUTH_DIR, `${path.basename(containerPath)}.json`);
 }
 
-function writeAuthorization(cwd, containerPath, members) {
+function writeAuthorization(cwd, containerPath, members, options) {
   const ids = (Array.isArray(members) ? members : []).map(normalizeMemberId).filter(Boolean);
+  const io = Object.assign({}, fs, options && options.io);
+  let temporary = null;
+  let handle = null;
   try {
     const file = authorizationPath(cwd, containerPath);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify({ operation: OPERATION, container: path.basename(containerPath), members: ids }, null, 2)}\n`, 'utf8');
+    io.mkdirSync(path.dirname(file), { recursive: true });
+    temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    handle = io.openSync(temporary, 'wx');
+    io.writeFileSync(handle, `${JSON.stringify({ operation: OPERATION, container: path.basename(containerPath), members: ids }, null, 2)}\n`, 'utf8');
+    io.fsyncSync(handle);
+    io.closeSync(handle);
+    handle = null;
+    // The previous authorization remains intact until this single publication
+    // boundary. A failed/truncated staging write can therefore never erase the
+    // members that already make an interrupted apply undoable.
+    io.renameSync(temporary, file);
+    temporary = null;
     return { ok: true, file, members: ids };
-  } catch (error) { return { ok: false, error: error.message }; }
+  } catch (error) {
+    if (handle !== null) { try { io.closeSync(handle); } catch (_) {} }
+    if (temporary) { try { io.unlinkSync(temporary); } catch (_) {} }
+    return { ok: false, error: error.message };
+  }
 }
 
 // Deny-by-default at every failure: unreadable, malformed, written by another

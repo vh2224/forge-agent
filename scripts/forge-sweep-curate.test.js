@@ -523,8 +523,53 @@ function testAuthorizationFailureIsZeroMutation() {
   } finally { removeDir(dir); }
 }
 
+// A later authorization growth must not destroy the last valid record. The
+// first member is already rewritten when the staging write for the second is
+// truncated and fails; undo must still recover exactly that first member.
+function testAuthorizationGrowthFailurePreservesPreviousUndo() {
+  const dir = realStoreDir();
+  try {
+    writeRealFragment(dir, 'T01', ['MEM001', 'MEM002']);
+    const first = writeRealFragment(dir, 'T02', ['MEM003', 'MEM004']);
+    const second = writeRealFragment(dir, 'T03', ['MEM005', 'MEM006']);
+    const firstBefore = fs.readFileSync(first);
+    const secondBefore = fs.readFileSync(second);
+    const clusters = [cluster('c', [item('T01', 'MEM001'), item('T02', 'MEM003'), item('T03', 'MEM005')])];
+    const doc = arbitration('c', [verdict('T01', 'MEM001', 'manter'), verdict('T02', 'MEM003', 'fundir-no-sobrevivente'), verdict('T03', 'MEM005', 'fundir-no-sobrevivente')]);
+    const ctx = realApplyContext(dir, clusters, doc);
+    const realWrite = internals.writeAuthorization;
+    let writes = 0;
+    ctx.writeAuthorization = (cwd, container, members) => {
+      writes += 1;
+      if (writes !== 3) return realWrite(cwd, container, members);
+      return realWrite(cwd, container, members, { io: {
+        writeFileSync(handle, payload, encoding) {
+          fs.writeFileSync(handle, String(payload).slice(0, 12), encoding);
+          const error = new Error('injected growth failure');
+          error.code = 'ENOSPC';
+          throw error;
+        },
+      } });
+    };
+    const result = internals.applyCurate(ctx, internals.curatePlan(ctx));
+
+    assert.deepStrictEqual(result.written, [first], JSON.stringify(result));
+    assert(result.skipped.some(entry => entry.path === 'T03' && entry.reason.includes(internals.AUTH_MISSING)), JSON.stringify(result.skipped));
+    assert(!fs.readFileSync(first).equals(firstBefore), 'o primeiro membro precisa ter sido reescrito antes da falha');
+    assert.strictEqual(Buffer.compare(fs.readFileSync(second), secondBefore), 0, 'o segundo rewrite nao pode ocorrer sem autorizacao publicada');
+    const authorized = internals.authorizedMembers(dir, result.vault);
+    assert.strictEqual(authorized.length, 1, JSON.stringify(authorized));
+    assert(authorized[0].endsWith('memory/T02.md'), authorized[0]);
+
+    const undo = runCli(dir, ['--undo', '--yes', '--json']);
+    assert.strictEqual(undo.status, 0, `${undo.stderr}${JSON.stringify(undo.payload)}`);
+    assert.strictEqual(Buffer.compare(fs.readFileSync(first), firstBefore), 0, 'undo precisa recuperar os bytes exatos do primeiro membro');
+    assert.strictEqual(Buffer.compare(fs.readFileSync(second), secondBefore), 0, 'undo nao deve tocar o segundo membro');
+  } finally { removeDir(dir); }
+}
+
 function main() {
-  const tests = [testPartialApplyAuthorizesOnlyRewrittenMembers, testRealApplyThenCliUndoRestoresExactBytes, testUndoRefusesDivergentMemberOutsideAuthorization, testAuthorizationRecordIsClosedAndDenyByDefault, testAuthorizationFailureIsZeroMutation,
+  const tests = [testPartialApplyAuthorizesOnlyRewrittenMembers, testRealApplyThenCliUndoRestoresExactBytes, testUndoRefusesDivergentMemberOutsideAuthorization, testAuthorizationRecordIsClosedAndDenyByDefault, testAuthorizationFailureIsZeroMutation, testAuthorizationGrowthFailurePreservesPreviousUndo,
     testEligibilityFilteredClusterSkipsWithoutAborting, testWriteBoundaryConsultsEligibleSetOnly, testRegistry, testClosedVerdicts, testExactlyOneSurvivor, testUnknownItem, testUnjudgedItems, testUnknownCluster, testCompoundAddress, testFingerprintStableAndSensitive, testPlanChangedZeroMutation, testIntentFailureZeroMutation, testRewriteIsolation, testActivePhaseFailClosed, testArgumentCodes, testNoSecondWriterOrContainers, testDefaultIsDryRun, testCliDefaultLeavesDigestUntouched, testParseConflicts, testClusterMustBeJudged, testDuplicateAddressRejected, testNoTargetsNoVault, testDropsGroupedByStorage, testPhaseBlocked];
   for (const test of tests) test();
   process.stdout.write(`forge-sweep-curate: ${tests.length} tests passed\n`);

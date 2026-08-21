@@ -10,7 +10,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const bench = require('./forge-resources-bench.js');
 
@@ -72,6 +72,47 @@ function tmpDir(prefix) {
 }
 
 const BENCH_PATH = path.join(__dirname, 'forge-resources-bench.js');
+const WINDOWS_CTRL_C_PATH = path.join(__dirname, 'fixtures', 'forge-windows-ctrl-c.ps1');
+
+function writeJsonAtomic(file, value) {
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(value), 'utf8');
+  fs.renameSync(temporary, file);
+}
+
+async function waitFor(predicate, timeoutMs, stage) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`${stage}: timed out after ${timeoutMs}ms`);
+}
+
+function waitForExit(child) {
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+}
+
+function enumeratePowerShellHosts(probe = (host) => spawnSync(host, [
+  '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()',
+], { encoding: 'utf8', windowsHide: true })) {
+  return ['powershell.exe', 'pwsh.exe'].filter((host) => {
+    const result = probe(host);
+    return result && !result.error && result.status === 0;
+  });
+}
+
+function settleWithin(promise, timeoutMs, stage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${stage}: timed out after ${timeoutMs}ms`)), timeoutMs)),
+  ]);
+}
 
 // Fast, deterministic, injectable command — never the real suite.
 function sleepCommand(ms) {
@@ -242,9 +283,507 @@ test('--dry-run: parseArgs recognises the flag without consuming the next token'
   assertEqual(args.reps, '3');
 });
 
+test('Windows Ctrl+C fixture: encodes the private-console protocol and forbidden transports stay absent', () => {
+  const source = fs.readFileSync(WINDOWS_CTRL_C_PATH, 'utf8');
+  for (const required of [
+    'FreeConsole()', 'AllocConsole()', 'CREATE_SUSPENDED', 'CreateProcessW',
+    'AssignProcessToJobObject', 'SetConsoleCtrlHandler(IntPtr.Zero, true)',
+    'ResumeThread', 'GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)',
+    'WaitForSingleObject', 'GetExitCodeProcess', 'Publish-JsonAtomic',
+  ]) assert(source.includes(required), `fixture must contain ${required}`);
+  for (const forbidden of [
+    'CREATE_NEW_PROCESS_' + 'GROUP', 'CTRL_' + 'BREAK_EVENT',
+    'task' + 'kill', 'Stop-' + 'Process', 'WaitFor' + 'InputIdle',
+  ]) assert(!source.includes(forbidden), `fixture must not contain forbidden transport ${forbidden}`);
+  const terminateCalls = source.match(/TerminateProcess\(/g) || [];
+  assertEqual(terminateCalls.length, 2, 'TerminateProcess may appear only as one declaration and one pre-assignment rollback call');
+  assert(/!assignedToJob[\s\S]{0,300}TerminateProcess\(process, 201\)/.test(source),
+    'TerminateProcess must remain fenced to rollback of the owned, not-yet-job-assigned process');
+  for (const diagnostic of ['invalid-config:', 'child-exit-before-trigger', 'trigger-timeout', 'post-event-timeout']) {
+    assert(source.includes(diagnostic), `fixture must preserve named diagnostic ${diagnostic}`);
+  }
+  const constructor = source.slice(source.indexOf('public ForgeCtrlCSession'));
+  assert(constructor.indexOf('FreeConsole()') < constructor.indexOf('CreateProcessW'),
+    'runner console must be abandoned before child creation');
+  assert(constructor.indexOf('CreateProcessW') < constructor.indexOf('SetConsoleCtrlHandler(IntPtr.Zero, true)'),
+    'child must be created before the controller enables inherited Ctrl+C ignore');
+});
+
+test('PowerShell host discovery: probes both supported hosts and returns every installed host', () => {
+  const probed = [];
+  const hosts = enumeratePowerShellHosts((host) => {
+    probed.push(host);
+    return host === 'pwsh.exe' ? { status: 0 } : { status: 1 };
+  });
+  assertEqual(probed.join(','), 'powershell.exe,pwsh.exe', 'host discovery must probe the complete supported set');
+  assertEqual(hosts.join(','), 'pwsh.exe', 'host discovery must retain each successful probe');
+});
+
+test('killTree: a hung taskkill has a finite timeout and falls back only to its owned child handle', () => {
+  const calls = [];
+  const child = {
+    pid: 424242,
+    killed: false,
+    kill(signal) { calls.push(['child.kill', signal]); return true; },
+  };
+  const degraded = [];
+  const result = bench.killTree(child, {
+    platform: 'win32',
+    spawnSyncImpl(command, argv, options) {
+      calls.push([command, argv, options]);
+      return { status: null, error: { code: 'ETIMEDOUT' } };
+    },
+    reportDegraded: (reason) => degraded.push(reason),
+  });
+  assertEqual(calls[0][0], 'taskkill');
+  assertEqual(calls[0][2].timeout, bench.TASKKILL_TIMEOUT_MS, 'taskkill must carry the production finite timeout');
+  assertEqual(calls[1].join(','), 'child.kill,SIGKILL', 'fallback must target only the owned child handle');
+  assertEqual(degraded.join(','), 'ETIMEDOUT', 'degradation must be named');
+  assertEqual(result.degraded, true);
+});
+
+test('SIGINT handler restores preferences before any potentially blocking tree cleanup', () => {
+  const source = fs.readFileSync(BENCH_PATH, 'utf8');
+  const shutdown = source.slice(source.indexOf('async function completeSignalShutdown'), source.indexOf('function spawnTracked'));
+  assert(shutdown.indexOf('closeSpawnFence(') < shutdown.indexOf('await cleanup()'),
+    'signal shutdown must close the spawn fence before cleanup yields');
+  assert(shutdown.indexOf('await cleanup()') < shutdown.indexOf('restore(true)'),
+    'signal shutdown must repair concurrent rewrites after async cleanup');
+  assert(shutdown.indexOf('restore(true)') < shutdown.indexOf('exit(signal'),
+    'no await may separate successful final restoration from signal exit');
+});
+
+test('restorePrefsFile: absent snapshots ignore only ENOENT, never sharing or permission failures', () => {
+  const dir = tmpDir('forge-bench-restore-errors-');
+  const prefsPath = bench.localPrefsPath(dir);
+  const realUnlink = fs.unlinkSync;
+  fs.unlinkSync = () => { const error = new Error('sharing violation'); error.code = 'EACCES'; throw error; };
+  try {
+    let threw = false;
+    try { bench.restorePrefsFile(prefsPath, { existed: false, content: null }); } catch (error) {
+      threw = error.code === 'EACCES';
+    }
+    assert(threw, 'non-ENOENT restore failures must propagate');
+  } finally { fs.unlinkSync = realUnlink; }
+});
+
 // ── Behavioral: runMatrix with an injected fast command ────────────────────
 
 async function runAsyncTests() {
+
+await testAsync('killTreeAsync: a hung taskkill cannot block SIGINT cleanup past its deadline', async () => {
+  const { EventEmitter } = require('events');
+  const killer = new EventEmitter();
+  killer.kill = () => true;
+  const ownedSignals = [];
+  const child = { pid: 434343, killed: false, kill: (signal) => { ownedSignals.push(signal); return true; } };
+  const degraded = [];
+  const result = await bench.killTreeAsync(child, {
+    platform: 'win32',
+    timeoutMs: 10,
+    exitConfirmMs: 10,
+    spawnImpl: () => killer,
+    reportDegraded: (reason) => degraded.push(reason),
+  });
+  assertEqual(result.reason, 'timeout');
+  assertEqual(degraded.join(','), 'timeout');
+  assertEqual(ownedSignals.join(','), 'SIGKILL', 'timeout fallback must target only the owned child handle');
+});
+
+await testAsync('killAllLiveAsync: real timeout/nonzero/spawn-error paths aggregate degradation', async () => {
+  const { EventEmitter } = require('events');
+  const cases = [
+    {
+      expected: 'timeout',
+      spawnImpl: () => { const killer = new EventEmitter(); killer.kill = () => true; return killer; },
+      timeoutMs: 10,
+    },
+    {
+      expected: 'exit-9',
+      spawnImpl: () => {
+        const killer = new EventEmitter(); killer.kill = () => true;
+        queueMicrotask(() => killer.emit('close', 9)); return killer;
+      },
+      timeoutMs: 100,
+    },
+    { expected: 'spawn-exception', spawnImpl: () => { throw new Error('spawn failed'); }, timeoutMs: 100 },
+  ];
+  for (const scenario of cases) {
+    const owned = new EventEmitter();
+    owned.pid = 500000 + cases.indexOf(scenario); owned.killed = false;
+    owned.kill = () => { queueMicrotask(() => owned.emit('exit', null, 'SIGKILL')); return true; };
+    bench.spawnTracked('owned', [], {
+      cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned,
+    });
+    let observed = null;
+    try {
+      await bench.killAllLiveAsync({
+        platform: 'win32', spawnImpl: scenario.spawnImpl, timeoutMs: scenario.timeoutMs,
+        reportDegraded: () => {},
+      });
+    } catch (error) { observed = error; }
+    assert(observed && observed.code === 'CLEANUP_DEGRADED', `expected aggregate degradation for ${scenario.expected}`);
+    assert(observed.message.includes(scenario.expected), `missing reason ${scenario.expected}: ${observed.message}`);
+  }
+});
+
+await testAsync('signal shutdown: real degraded cleanup selects exit 75 after final restore', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 510000; owned.killed = false;
+  owned.kill = () => { queueMicrotask(() => owned.emit('exit', null, 'SIGKILL')); return true; };
+  bench.spawnTracked('owned', [], { cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned });
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const exits = []; const diagnostics = [];
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT',
+    cancellationFence: bench.createSpawnFence(),
+    restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync({
+      platform: 'win32', spawnImpl: () => killer, timeoutMs: 10, reportDegraded: () => {},
+    }),
+    exit: (code) => exits.push(code),
+    writeDiagnostic: (message) => diagnostics.push(message),
+  });
+  assertEqual(exits.join(','), '75', 'degraded cleanup must never report SIGINT success');
+  assert(diagnostics.some((message) => message.includes('cleanup-degraded:timeout')),
+    `cleanup degradation must be named: ${diagnostics.join(',')}`);
+});
+
+await testAsync('signal shutdown: taskkill exit 128 plus observed owned-child exit remains successful', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 520000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  bench.spawnTracked('owned', [], { cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned });
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const exits = [];
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT', cancellationFence: bench.createSpawnFence(), restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync({
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 20,
+      spawnImpl: () => {
+        queueMicrotask(() => {
+          owned.exitCode = 130; owned.emit('exit', 130, null); killer.emit('close', 128);
+        });
+        return killer;
+      },
+      reportDegraded: () => {},
+    }),
+    exit: (code) => exits.push(code), writeDiagnostic: () => {},
+  });
+  assertEqual(exits.join(','), '130', 'observed natural exit must not be downgraded by taskkill exit 128');
+});
+
+await testAsync('signal shutdown: taskkill exit 128 with owned child still live selects exit 75', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 530000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => { queueMicrotask(() => owned.emit('exit', null, 'SIGKILL')); return true; };
+  bench.spawnTracked('owned', [], { cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned });
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const exits = []; const diagnostics = [];
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT', cancellationFence: bench.createSpawnFence(), restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync({
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+      spawnImpl: () => { queueMicrotask(() => killer.emit('close', 128)); return killer; },
+      reportDegraded: () => {},
+    }),
+    exit: (code) => exits.push(code), writeDiagnostic: (message) => diagnostics.push(message),
+  });
+  assertEqual(exits.join(','), '75', 'unconfirmed tree cleanup must remain degraded');
+  assert(diagnostics.some((message) => message.includes('cleanup-degraded:exit-128')),
+    `exit-128 degradation must be named: ${diagnostics.join(',')}`);
+});
+
+await testAsync('killTreeAsync: child.killed without exit evidence remains degraded', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 535000; owned.killed = true; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  const killer = new EventEmitter(); killer.kill = () => true;
+  const resultPromise = bench.killTreeAsync(owned, {
+    platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+    spawnImpl: () => { queueMicrotask(() => killer.emit('close', 128)); return killer; },
+    reportDegraded: () => {},
+  });
+  const result = await resultPromise;
+  assertEqual(result.ok, false, 'child.killed says a signal was sent, not that the process exited');
+  assertEqual(result.reason, 'exit-128');
+});
+
+await testAsync('killTreeAsync: only exit 128 can use bounded already-exited reclassification', async () => {
+  const { EventEmitter } = require('events');
+  const runCase = async (name, spawnImpl, prepareOwned = () => {}) => {
+    const owned = new EventEmitter();
+    owned.pid = 540000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+    owned.kill = () => true;
+    prepareOwned(owned);
+    const result = await bench.killTreeAsync(owned, {
+      platform: 'win32', timeoutMs: 10, exitConfirmMs: 10, spawnImpl, reportDegraded: () => {},
+    });
+    assertEqual(result.ok, false, `${name} must remain degraded even when the root exit is observed`);
+    assert(!result.alreadyExited, `${name} must not claim tree-wide already-exited proof`);
+  };
+
+  await runCase('timeout', () => {
+    const killer = new EventEmitter(); killer.kill = () => true; return killer;
+  }, (owned) => { owned.exitCode = 0; });
+  await runCase('spawn-exception', () => { throw new Error('spawn failed'); }, (owned) => { owned.exitCode = 0; });
+  await runCase('exit-5', () => {
+    const killer = new EventEmitter(); killer.kill = () => true;
+    queueMicrotask(() => killer.emit('close', 5));
+    return killer;
+  }, (owned) => { owned.exitCode = 0; });
+});
+
+await testAsync('spawnTracked: operational error keeps an owned PID available for degraded cancellation cleanup', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 545000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => { throw new Error('owned kill failed'); };
+  const killer = new EventEmitter(); killer.kill = () => true;
+  let taskkillCalls = 0;
+  const run = bench.spawnTracked('owned', [], {
+    cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned,
+    cleanupOptions: {
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+      spawnImpl: () => { taskkillCalls += 1; return killer; },
+      reportDegraded: () => {},
+    },
+  });
+  let nextSpawnCalls = 0;
+  const sequence = (async () => {
+    const result = await run;
+    const next = new EventEmitter(); next.pid = 545001; next.killed = false;
+    next.kill = () => true;
+    const nextRun = bench.spawnTracked('next', [], {
+      cwd: process.cwd(), timeoutMs: 100,
+      spawnImpl: () => { nextSpawnCalls += 1; queueMicrotask(() => next.emit('exit', 0, null)); return next; },
+    });
+    await nextRun;
+    return result;
+  })();
+  owned.emit('error', new Error('operational failure'));
+  await Promise.resolve();
+  assertEqual(taskkillCalls, 1, 'operational error must start bounded cleanup immediately');
+  assertEqual(nextSpawnCalls, 0, 'the next spawn must wait for operational cleanup outcome');
+  killer.emit('close', 128);
+  const result = await sequence;
+  assertEqual(result.signal, 'spawn-error');
+  assertEqual(result.cleanupPending, true, 'uncertain operational cleanup must retain ownership');
+  assertEqual(result.cleanup && result.cleanup.reason, 'exit-128');
+  assertEqual(nextSpawnCalls, 1, 'the next spawn may begin only after cleanup was attempted');
+
+  let cleanupError = null;
+  try {
+    await bench.killAllLiveAsync({
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+      spawnImpl: () => {
+        taskkillCalls += 1;
+        const finalKiller = new EventEmitter(); finalKiller.kill = () => true;
+        queueMicrotask(() => finalKiller.emit('close', 128));
+        return finalKiller;
+      },
+      reportDegraded: () => {},
+    });
+  } catch (error) { cleanupError = error; }
+  assertEqual(taskkillCalls, 2, 'final cleanup must retry taskkill for the still-owned PID');
+  assertEqual(cleanupError && cleanupError.code, 'CLEANUP_DEGRADED');
+  assert(String(cleanupError && cleanupError.message).includes('exit-128'),
+    `failed owned cleanup must remain degraded: ${cleanupError && cleanupError.message}`);
+  owned.emit('exit', null, 'SIGKILL');
+});
+
+await testAsync('spawnTracked: SIGINT shares in-flight operational cleanup before any sequential retry', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 546000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  const firstKiller = new EventEmitter(); firstKiller.kill = () => true;
+  const retryKiller = new EventEmitter(); retryKiller.kill = () => true;
+  let taskkillCalls = 0;
+  const spawnTaskkill = () => {
+    taskkillCalls += 1;
+    return taskkillCalls === 1 ? firstKiller : retryKiller;
+  };
+  const run = bench.spawnTracked('owned', [], {
+    cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned,
+    cleanupOptions: {
+      platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+      spawnImpl: spawnTaskkill, reportDegraded: () => {},
+    },
+  });
+  owned.emit('error', new Error('operational failure'));
+  await Promise.resolve();
+  const shutdownCleanup = bench.killAllLiveAsync({
+    platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+    spawnImpl: spawnTaskkill, reportDegraded: () => {},
+  });
+  await Promise.resolve();
+  assertEqual(taskkillCalls, 1, 'SIGINT must await the one in-flight taskkill');
+
+  owned.exitCode = 130;
+  owned.emit('exit', 130, null);
+  firstKiller.emit('close', 128);
+  const [runResult, cleanupResult] = await Promise.all([run, shutdownCleanup]);
+  assertEqual(taskkillCalls, 1, 'observed exit-128 success must not trigger a retry');
+  assertEqual(runResult.cleanup && runResult.cleanup.ok, true);
+  assertEqual(cleanupResult.ok, true, 'shared successful cleanup must not become false exit 75');
+});
+
+await testAsync('runMatrix finalization: closed signal fence leaves an in-flight cleanup retry exclusively to shutdown', async () => {
+  const { EventEmitter } = require('events');
+  const owned = new EventEmitter();
+  owned.pid = 547000; owned.killed = false; owned.exitCode = null; owned.signalCode = null;
+  owned.kill = () => true;
+  const killers = [new EventEmitter(), new EventEmitter()];
+  killers.forEach((killer) => { killer.kill = () => true; });
+  let taskkillCalls = 0;
+  const cleanupOptions = {
+    platform: 'win32', timeoutMs: 100, exitConfirmMs: 10,
+    spawnImpl: () => killers[taskkillCalls++], reportDegraded: () => {},
+  };
+  const run = bench.spawnTracked('owned', [], {
+    cwd: process.cwd(), timeoutMs: 60000, spawnImpl: () => owned, cleanupOptions,
+  });
+  owned.emit('error', new Error('operational failure'));
+  await Promise.resolve();
+  const fence = bench.createSpawnFence();
+  const exits = [];
+  const shutdown = bench.completeSignalShutdown({
+    signal: 'SIGINT', cancellationFence: fence, restore: () => ({ ok: true }),
+    cleanup: () => bench.killAllLiveAsync(cleanupOptions),
+    exit: (code) => exits.push(code), writeDiagnostic: () => {},
+  });
+  assertEqual(taskkillCalls, 1, 'shutdown must share the first operational cleanup');
+  killers[0].emit('close', 128);
+  await waitFor(() => taskkillCalls === 2, 100, 'sequential-cleanup-retry');
+  assertEqual(taskkillCalls, 2, 'a degraded shared attempt permits one sequential retry');
+  let matrixCleanupCalls = 0;
+  await bench.finalizeRunMatrix({
+    cancellationFence: fence,
+    cleanup: async () => { matrixCleanupCalls += 1; },
+    restore: () => ({ ok: true }),
+    runError: null,
+  });
+  assertEqual(matrixCleanupCalls, 0, 'closed-fence matrix finalization must not start a competing cleanup');
+  assertEqual(taskkillCalls, 2, 'matrix finalization must not create a third taskkill');
+  killers[1].emit('close', 128);
+  await Promise.all([run, shutdown]);
+  assertEqual(exits.join(','), '75', 'one degraded retry must produce the named cleanup failure exit');
+  owned.emit('exit', null, 'SIGKILL');
+});
+
+await testAsync('signal shutdown: closes spawn fence before yielding and permits zero post-snapshot spawns', async () => {
+  const fence = bench.createSpawnFence();
+  let releaseCleanup;
+  const cleanup = new Promise((resolve) => { releaseCleanup = resolve; });
+  const order = [];
+  const shutdown = bench.completeSignalShutdown({
+    signal: 'SIGINT',
+    cancellationFence: fence,
+    restore: (force = false) => { order.push(force ? 'restore-final' : 'restore-early'); return { ok: true }; },
+    cleanup: () => cleanup,
+    exit: (code) => order.push(`exit-${code}`),
+    writeDiagnostic: (message) => order.push(`diagnostic-${message}`),
+  });
+  await Promise.resolve();
+  let spawned = 0;
+  const fenced = await bench.spawnTracked('never', [], {
+    cwd: process.cwd(), timeoutMs: 100, cancellationFence: fence,
+    spawnImpl: () => { spawned += 1; throw new Error('must-not-spawn'); },
+  });
+  assertEqual(fenced.signal, 'spawn-fenced');
+  assertEqual(spawned, 0, 'no continuation may spawn after the shutdown snapshot');
+  releaseCleanup();
+  await shutdown;
+  assertEqual(order.join(','), 'restore-early,restore-final,exit-130');
+});
+
+await testAsync('signal shutdown: failed final restoration cannot exit 130 and no await follows the final attempt', async () => {
+  const fence = bench.createSpawnFence();
+  const order = [];
+  let calls = 0;
+  await bench.completeSignalShutdown({
+    signal: 'SIGINT',
+    cancellationFence: fence,
+    restore: (force = false) => {
+      calls += 1;
+      order.push(force ? 'restore-final' : 'restore-early');
+      if (force) Promise.resolve().then(() => order.push('microtask-after-final'));
+      return force ? { ok: false, error: new Error('EACCES') } : { ok: true };
+    },
+    cleanup: async () => { order.push('cleanup'); },
+    exit: (code) => order.push(`exit-${code}`),
+    writeDiagnostic: (message) => order.push(`diagnostic-${message}`),
+  });
+  assertEqual(calls, 2);
+  assert(order.indexOf('exit-74') < order.indexOf('microtask-after-final'),
+    `exit decision must be synchronous after final restore: ${order.join(',')}`);
+  assert(order.some((entry) => entry === 'diagnostic-final-restore-failed:EACCES'),
+    `final restore failure must be named: ${order.join(',')}`);
+  assert(!order.includes('exit-130'), 'restore failure must never report SIGINT success');
+});
+
+test('runMatrix finalization: restore failure replaces false success on a normal path', () => {
+  const restoreError = Object.assign(new Error('restore-EACCES'), { code: 'EACCES' });
+  let observed = null;
+  try { bench.assertRestoration(null, { ok: false, error: restoreError }); } catch (error) { observed = error; }
+  assertEqual(observed, restoreError, 'normal completion must become a restoration failure');
+});
+
+test('runMatrix finalization: original and restore failures remain together with original as cause', () => {
+  const original = new Error('corrida-failed');
+  const restoreError = new Error('restore-failed');
+  let observed = null;
+  try { bench.assertRestoration(original, { ok: false, error: restoreError }); } catch (error) { observed = error; }
+  assert(observed instanceof AggregateError, 'dual failure must be AggregateError');
+  assertEqual(observed.cause, original, 'original failure must remain the cause');
+  assertEqual(observed.errors[0], original);
+  assertEqual(observed.errors[1], restoreError);
+});
+
+await testAsync('runMatrix finalization: cleanup and restore failures are both preserved in order', async () => {
+  const cleanupError = new Error('cleanup-failed');
+  const restoreError = new Error('restore-failed');
+  let observed = null;
+  try {
+    await bench.finalizeRunMatrix({
+      cancellationFence: bench.createSpawnFence(),
+      cleanup: async () => { throw cleanupError; },
+      restore: () => ({ ok: false, error: restoreError }),
+      runError: null,
+    });
+  } catch (error) { observed = error; }
+  assert(observed instanceof AggregateError, 'dual finalization failure must be AggregateError');
+  assertEqual(observed.cause, cleanupError, 'first available failure must be the cause');
+  assertEqual(observed.errors.length, 2);
+  assertEqual(observed.errors[0], cleanupError);
+  assertEqual(observed.errors[1], restoreError);
+});
+
+await testAsync('runMatrix finalization: run, cleanup, and restore failures survive as one ordered aggregate', async () => {
+  const runError = new Error('run-failed');
+  const cleanupError = new Error('cleanup-failed');
+  const restoreError = new Error('restore-failed');
+  let observed = null;
+  try {
+    await bench.finalizeRunMatrix({
+      cancellationFence: bench.createSpawnFence(),
+      cleanup: async () => { throw cleanupError; },
+      restore: () => { throw restoreError; },
+      runError,
+    });
+  } catch (error) { observed = error; }
+  assert(observed instanceof AggregateError, 'triple failure must be AggregateError');
+  assertEqual(observed.cause, runError, 'run failure must remain the cause');
+  assertEqual(observed.errors.length, 3);
+  assertEqual(observed.errors[0], runError);
+  assertEqual(observed.errors[1], cleanupError);
+  assertEqual(observed.errors[2], restoreError);
+});
 
 await testAsync('runMatrix: writes one JSONL line per corrida with a fresh in-cell witness, and restores prefs on normal exit', async () => {
   const dir = tmpDir('forge-bench-matrix-');
@@ -354,24 +893,15 @@ await testAsync('runMatrix / --dry-run: the CLI plans without executing anything
   assertEqual(plan.plan.length, 6, 'dry-run must still report the full interleaved plan');
 });
 
-// Windows signal semantics make this test unrunnable as written: on win32
-// `child.kill('SIGINT')` is TerminateProcess — the child dies immediately and
-// its SIGINT handler NEVER runs, so the prefs-restore path under test cannot
-// execute and the byte-identical restore assert fails against correct code.
-// Real Windows coverage would require GenerateConsoleCtrlEvent delivered to a
-// console process group — its own piece of work, not a weaker assert here.
 const SIGINT_TEST_NAME = 'runMatrix (via CLI subprocess): SIGINT mid-run leaves an already-finished JSONL line intact and restores prefs byte-identically';
-if (process.platform === 'win32') {
-  skip(SIGINT_TEST_NAME,
-    'win32 signal semantics: kill("SIGINT") is TerminateProcess, the SIGINT handler never runs; real coverage needs GenerateConsoleCtrlEvent (separate work)');
-} else {
-await testAsync(SIGINT_TEST_NAME, async () => {
-  const dir = tmpDir('forge-bench-sigint-');
+async function runSigintContract(powerShellHost, injectFailureAfterStart = false) {
+  const dir = tmpDir(process.platform === 'win32' ? 'forge bench SIGINT Ω-' : 'forge-bench-sigint-');
   const prefsPath = bench.localPrefsPath(dir);
   const original = JSON.stringify({ resources: { enforcement: 'clamp' } });
   fs.writeFileSync(prefsPath, original, 'utf8');
   const outFile = path.join(dir, 'out.jsonl');
   const marker = path.join(dir, 'first-done.marker');
+  const blockedMarker = path.join(dir, 'second-started.marker');
 
   // The claim under test is that a COMPLETED record survives the interrupt,
   // so the fixture must guarantee one exists before SIGINT lands: rep 1
@@ -380,19 +910,83 @@ await testAsync(SIGINT_TEST_NAME, async () => {
   // first append deterministically never happened and the assertion — gated
   // on the file existing — passed over ZERO records.
   const fixture = ['node', '-e',
-    `const fs=require('fs');const m=${JSON.stringify(marker)};`
-    + 'if(fs.existsSync(m)){setTimeout(()=>{},60000);}else{fs.writeFileSync(m,"1");}'];
+    `const fs=require('fs');const m=${JSON.stringify(marker)};const b=${JSON.stringify(blockedMarker)};`
+    + 'if(fs.existsSync(m)){fs.writeFileSync(b,"1");setTimeout(()=>{},60000);}else{fs.writeFileSync(m,"1");}'];
 
-  const child = spawn(process.execPath, [
+  const benchArgv = [
     BENCH_PATH, '--cwd', dir, '--reps', '3', '--cells', 'solo/off',
     '--command', JSON.stringify(fixture),
     '--out', outFile, '--timeout-ms', '30000',
-  ], { stdio: 'ignore' });
+  ];
+  let child;
+  let controllerExit;
+  let resultPath = null;
+  let nonce = null;
+  let started = null;
+  let startedPath = null;
+  let cancelPath = null;
+  let controllerSettled = false;
+  let primaryError = null;
+  let firstLine = null;
+  let stderr = '';
+  let earlyExit = null;
 
+  if (process.platform === 'win32') {
+    const protocolDir = path.join(dir, 'protocol space Ω');
+    fs.mkdirSync(protocolDir, { recursive: true });
+    const configPath = path.join(protocolDir, 'config.json');
+    startedPath = path.join(protocolDir, 'started.json');
+    const triggerPath = path.join(protocolDir, 'trigger.json');
+    cancelPath = path.join(protocolDir, 'cancel.json');
+    resultPath = path.join(protocolDir, 'result.json');
+    nonce = `${process.pid}-${Date.now()}-Ω`;
+    writeJsonAtomic(configPath, {
+      nonce,
+      nodePath: process.execPath,
+      benchPath: BENCH_PATH,
+      cwd: dir,
+      argv: benchArgv.slice(1),
+      startedPath,
+      triggerPath,
+      cancelPath,
+      resultPath,
+      triggerTimeoutMs: 60000,
+      postEventTimeoutMs: 20000,
+    });
+    child = spawn(powerShellHost, [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', WINDOWS_CTRL_C_PATH, '-ConfigPath', configPath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.once('exit', (code, signal) => { earlyExit = { code, signal }; });
+    controllerExit = waitForExit(child).then((exit) => {
+      controllerSettled = true;
+      return { ...exit, stderr };
+    });
+  } else {
+    child = spawn(process.execPath, benchArgv, { stdio: 'ignore' });
+    controllerExit = waitForExit(child).then((exit) => {
+      controllerSettled = true;
+      return exit;
+    });
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      const rawStarted = await waitFor(
+        () => {
+          if (earlyExit) throw new Error(`windows-controller-start: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
+          return fs.existsSync(startedPath) && fs.readFileSync(startedPath, 'utf8');
+        },
+        10000,
+        'windows-controller-start',
+      );
+      started = JSON.parse(rawStarted);
+      assertEqual(started.nonce, nonce, 'started protocol nonce must match');
+    }
   // Poll until the first completed corrida is actually on disk — never a
   // fixed sleep, which is what made the old test vacuous.
-  const deadline = Date.now() + 20000;
-  let firstLine = null;
+  const deadline = Date.now() + 60000;
   while (Date.now() < deadline) {
     if (fs.existsSync(outFile)) {
       const lines = fs.readFileSync(outFile, 'utf8').split('\n').filter(Boolean);
@@ -405,9 +999,31 @@ await testAsync(SIGINT_TEST_NAME, async () => {
   const before = JSON.parse(firstLine);
   assertEqual(before.status, 'ok', 'precondition: the completed corrida must be an ok record');
   assertEqual(before.rep, 1);
+  await waitFor(() => fs.existsSync(blockedMarker), 60000, 'second-workload-started');
+  if (injectFailureAfterStart) throw new Error('injected-pre-trigger-failure');
 
-  child.kill('SIGINT');
-  await new Promise((resolve) => child.on('exit', resolve));
+  if (process.platform === 'win32') {
+    writeJsonAtomic(path.join(dir, 'protocol space Ω', 'trigger.json'), { nonce, pid: started.pid });
+  } else {
+    child.kill('SIGINT');
+  }
+  const exited = await controllerExit;
+  if (process.platform === 'win32') {
+    assertEqual(exited.code, 0, `windows-controller-exit: ${exited.stderr}`);
+    assert(fs.existsSync(resultPath), 'windows-controller-result: result.json must exist');
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+    assertEqual(result.nonce, nonce, 'result nonce must match');
+    assertEqual(result.pid, started.pid, 'result PID must match started PID');
+    assertEqual(result.stage, 'complete', `controller stage: ${JSON.stringify(result)}`);
+    assertEqual(result.event, 'CTRL_C_EVENT');
+    assertEqual(result.event_sent, true, `GenerateConsoleCtrlEvent failed: ${JSON.stringify(result)}`);
+    assertEqual(result.win32_error, 0);
+    assertEqual(result.exit_code, 130, `benchmark must exit naturally with 130: ${JSON.stringify(result)}`);
+    assertEqual(result.timeout, false);
+    assertEqual(result.cleanup_forced, false, `forced cleanup cannot prove SIGINT: ${JSON.stringify(result)}`);
+  } else {
+    assertEqual(exited.code, 130, `POSIX benchmark must exit with 130, signal=${exited.signal}`);
+  }
 
   const restored = fs.readFileSync(prefsPath, 'utf8');
   assertEqual(restored, original, 'prefs must be restored to original bytes after SIGINT mid-run');
@@ -417,7 +1033,111 @@ await testAsync(SIGINT_TEST_NAME, async () => {
   assert(lines.length >= 1, 'the finished record must survive the interrupt (never zero records)');
   for (const line of lines) JSON.parse(line); // no torn/partial line
   assertEqual(lines[0], firstLine, 'the exact finished record must survive byte-identically');
-});
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    if (child && (!controllerSettled || primaryError)) {
+      if (!controllerSettled) {
+        if (process.platform === 'win32' && started && cancelPath) {
+          try { writeJsonAtomic(cancelPath, { nonce, pid: started.pid }); } catch { /* preserve primary failure */ }
+        } else if (process.platform !== 'win32') {
+          try { child.kill('SIGINT'); } catch { /* process may already be gone */ }
+        }
+      }
+      try {
+        const cleanupExit = await settleWithin(controllerExit, 25000, 'controller-cleanup');
+        if (primaryError) primaryError.cleanupExit = cleanupExit;
+      } catch (cleanupError) {
+        const killed = child.kill();
+        if (!killed) throw new Error(`controller-cleanup: owned process could not be terminated: ${cleanupError.message}`);
+        console.log(`      controller-forced-cleanup: killed owned controller pid=${child.pid} after ${cleanupError.message}`);
+        const cleanupExit = await settleWithin(controllerExit, 5000, 'controller-forced-cleanup');
+        if (primaryError) primaryError.cleanupExit = { ...cleanupExit, forced: true };
+      }
+      if (primaryError && resultPath && fs.existsSync(resultPath)) {
+        primaryError.cleanupResult = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+      }
+      if (primaryError) {
+        primaryError.cleanupPrefs = fs.existsSync(prefsPath) ? fs.readFileSync(prefsPath) : null;
+        const cleanupLines = fs.existsSync(outFile)
+          ? fs.readFileSync(outFile, 'utf8').split('\n').filter(Boolean)
+          : [];
+        for (const line of cleanupLines) JSON.parse(line);
+        primaryError.cleanupLines = cleanupLines;
+        primaryError.expectedFirstLine = firstLine;
+      }
+    }
+  }
+}
+
+async function runAssignmentRollbackContract(powerShellHost) {
+  const dir = tmpDir('forge assign rollback Ω-');
+  const configPath = path.join(dir, 'config.json');
+  const resultPath = path.join(dir, 'result.json');
+  const nonce = `rollback-${process.pid}-${Date.now()}-Ω`;
+  writeJsonAtomic(configPath, {
+    nonce,
+    nodePath: process.execPath,
+    benchPath: BENCH_PATH,
+    cwd: dir,
+    argv: ['--dry-run', '--cwd', dir],
+    startedPath: path.join(dir, 'started.json'),
+    triggerPath: path.join(dir, 'trigger.json'),
+    cancelPath: path.join(dir, 'cancel.json'),
+    resultPath,
+    triggerTimeoutMs: 2000,
+    postEventTimeoutMs: 2000,
+    forceAssignFailure: true,
+  });
+  const controller = spawn(powerShellHost, [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', WINDOWS_CTRL_C_PATH, '-ConfigPath', configPath,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  let stderr = '';
+  controller.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  const exited = await settleWithin(waitForExit(controller), 10000, 'assignment-rollback-controller');
+  assertEqual(exited.code, 1, `injected assignment failure must be diagnostic: ${stderr}`);
+  assert(fs.existsSync(resultPath), `assignment rollback must publish result: ${stderr}`);
+  const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+  assert(result.rollback_pid > 0, `rollback must report owned PID: ${JSON.stringify(result)}`);
+  assertEqual(result.rollback_exit_observed, true, `rollback must await owned process exit: ${JSON.stringify(result)}`);
+  let alive = true;
+  try { process.kill(result.rollback_pid, 0); } catch { alive = false; }
+  assertEqual(alive, false, `pre-assignment child pid ${result.rollback_pid} survived rollback`);
+}
+
+if (process.platform === 'win32') {
+  const powerShellHosts = enumeratePowerShellHosts();
+  test('Windows Ctrl+C live coverage: at least one supported PowerShell host is installed', () => {
+    assert(powerShellHosts.length > 0, 'neither powershell.exe nor pwsh.exe is available; live Windows coverage is mandatory');
+  });
+  for (const host of powerShellHosts) {
+    // eslint-disable-next-line no-await-in-loop
+    await testAsync(`${SIGINT_TEST_NAME} [${host}]`, () => runSigintContract(host));
+    // eslint-disable-next-line no-await-in-loop
+    await testAsync(`Windows Ctrl+C controller: pre-assignment rollback reaps owned child [${host}]`,
+      () => runAssignmentRollbackContract(host));
+  }
+  await testAsync('Windows Ctrl+C controller: pre-trigger assertion failure cancels and reaps the owned tree', async () => {
+    let failedAsInjected = false;
+    try { await runSigintContract(powerShellHosts[0], true); } catch (error) {
+      failedAsInjected = error.message === 'injected-pre-trigger-failure';
+      assert(error.cleanupExit && error.cleanupExit.code === 1,
+        `cancelled controller must exit diagnostically, got ${JSON.stringify(error.cleanupExit)}`);
+      assert(error.cleanupResult && error.cleanupResult.error === 'controller-cancelled-after-graceful-sigint',
+        `cancel protocol must be observed, got ${JSON.stringify(error.cleanupResult)}`);
+      assertEqual(error.cleanupResult.exit_code, 130, 'cancel must let the benchmark SIGINT handler exit naturally');
+      assertEqual(error.cleanupResult.cleanup_forced, false, 'graceful cancel must not kill the Job Object tree');
+      assertEqual(error.cleanupPrefs.toString('utf8'), JSON.stringify({ resources: { enforcement: 'clamp' } }),
+        'benchmark must restore preferences byte-identically during graceful cancellation');
+      assert(error.cleanupLines.length >= 1, 'graceful cancellation must retain completed JSONL records');
+      assertEqual(error.cleanupLines[0], error.expectedFirstLine, 'graceful cancellation must preserve the first line byte-identically');
+    }
+    assert(failedAsInjected, 'the injected pre-trigger failure must propagate after cleanup');
+  });
+} else {
+  await testAsync(SIGINT_TEST_NAME, () => runSigintContract(null));
 }
 
 // ── R2: the instrument must observe the CHILD, not the parent's intent ─────

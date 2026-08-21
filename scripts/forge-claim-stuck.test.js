@@ -242,22 +242,23 @@ test('um limiar customizado é honrado nos dois sentidos', () => {
 // ── C4 — claim liberado é um fato diferente de claim ativo ─────────────────
 console.log('\nC4 — claim liberado × claim ativo');
 
-test('claim ativo e claim JÁ LIBERADO são ambos travados, com estados distintos', () => {
+test('somente claim ativo é travado; claim já liberado volta ao alcance do reaper', () => {
   const ws = makeFixture([
     { id: 'M-live-claim', last_heartbeat: OLD, write_claim: claim() },
     {
       id: 'M-released',
       last_heartbeat: OLD,
-      write_claim: claim({ released: { at: NOW - 3600000, mechanism: 'released-committed', evidence: {} } }),
+      write_claim: claim({ released: { at: NOW - 3600000, mechanism: 'committed', evidence: {} } }),
     },
   ]);
   const r = record(findStuckClaims(ws, OPTS));
-  assertEqual(r.stuck.length, 2, 'os dois estão igualmente fora do alcance do reaper');
+  assertEqual(r.stuck.length, 1, 'somente posse efetiva fica fora do alcance do reaper');
   const byId = new Map(r.stuck.map((s) => [s.id, s]));
   assertEqual(byId.get('M-live-claim').claim_state, 'live', 'claim ativo');
-  assertEqual(byId.get('M-released').claim_state, 'released', 'claim liberado');
-  assertEqual(byId.get('M-released').release_mechanism, 'released-committed', 'o mecanismo é carregado');
   assert(byId.get('M-live-claim').release_mechanism === null, 'claim ativo não inventa mecanismo');
+  const releasedSkip = r.census.skipped.find((s) => s.id === 'M-released');
+  assertEqual(releasedSkip.reason, 'no-claim', 'envelope released não é holder stuck');
+  assertEqual(r.census.claim_holders, 1, 'o censo conta apenas posse efetiva');
 });
 
 test('claim de forma inesperada lê como `live`, nunca como liberado', () => {
@@ -265,7 +266,7 @@ test('claim de forma inesperada lê como `live`, nunca como liberado', () => {
   // uma forma que não deu para ler subestimaria o risco da própria run que estamos reportando.
   assertEqual(claimState('não-é-objeto').state, 'live', 'claim não-objeto');
   assertEqual(claimState({ released: 'lixo' }).state, 'live', 'envelope ilegível');
-  assertEqual(claimState({ released: { at: 'x', mechanism: 7 } }).state, 'released', 'envelope presente mas com campos ruins ainda é liberado');
+  assertEqual(claimState({ released: { at: 'x', mechanism: 7 } }).state, 'live', 'envelope parcial permanece protegido');
   assertEqual(claimState({ released: { at: 'x', mechanism: 7 } }).released_at, null, 'campo ruim vira null, nunca um palpite');
 });
 

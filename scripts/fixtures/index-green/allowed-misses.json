@@ -44,7 +44,15 @@
     "As duas entradas sobreviventes conservam item e reason da medição de S06 — a razão da miss",
     "(extensão nua, sem arquivo concreto) não mudou; só a população medida mudou."
   ],
-  "allowed": [
+  "_migration_126": [
+    "RE-MEDIDO apos a integracao da gramatica contextual da PR #139 e da master c9717c3.",
+    "Instrumento: node scripts/forge-index-f2.js --cwd C:/dev/forge-agent --json, executado com",
+    "o codigo desta branch combinado a master contra o store dogfood gitignored vigente.",
+    "Populacao: 1 fragmento, 7 fatos; facts_missed_total 0; facts_missed_partial 0; f2_recall 1;",
+    "citations_total 5. As duas entradas .swift anteriores nao existem mais na populacao",
+    "qualificada e seriam ghosts. Nenhuma proveniencia historica foi inventada."
+  ],
+  "_historical_allowed_before_126": [
     {
       "storage_key": "M-20260813131121-varredura-classe-eol__T03",
       "mem_id": "MEM001",
@@ -59,5 +67,6 @@
       "item": "#107",
       "reason": "menção da extensão .swift nua (contagem de suítes), não de um arquivo concreto — o extrator corretamente não cita"
     }
-  ]
+  ],
+  "allowed": []
 }

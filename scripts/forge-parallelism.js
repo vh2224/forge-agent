@@ -56,8 +56,8 @@ function globToRegex(glob) {
   for (let i = 0; i < g.length; i++) {
     const c = g[i];
     if (c === '*' && g[i + 1] === '*') {
-      re += '.*';
-      i++;
+      if (g[i + 2] === '/') { re += '(?:.*/)?'; i += 2; }
+      else { re += '.*'; i++; }
     } else if (c === '*') {
       re += '[^/]*';
     } else if (c === '?') {
@@ -71,15 +71,44 @@ function globToRegex(glob) {
   return new RegExp('^' + re + '$');
 }
 
-function normalizePath(p) {
+function normalizeFilesystemPath(p) {
   return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function canonicalizeClaimPath(p) {
+  const raw = String(p || '').replace(/\\/g, '/');
+  if (raw === '') return '';
+  if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) throw new Error(`claim path must be relative: ${raw}`);
+  const stack = [];
+  for (const segment of raw.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (stack.length === 0) throw new Error(`path escapes root: ${raw}`);
+      stack.pop();
+    } else stack.push(segment);
+  }
+  return stack.length === 0 ? '.' : stack.join('/');
+}
+
+// Canonical one-way relation: a claim declaration covers a concrete path by
+// equality, directory ancestry, or glob syntax. The concrete path is never
+// interpreted as a pattern.
+function claimPathMatches(claimPath, realPath) {
+  let claim; let real;
+  try { claim = canonicalizeClaimPath(claimPath); real = canonicalizeClaimPath(realPath); }
+  catch { return true; } // malformed/escaping claims cover everything (fail closed)
+  if (!claim || !real) return false;
+  if (claim === '.') return true;
+  if (claim === real || real.startsWith(`${claim}/`)) return true;
+  try { return globToRegex(claim).test(real); } catch { return false; }
 }
 
 // Two write-declarations conflict iff any literal-or-glob on one side matches the other.
 function pathsOverlap(a, b) {
-  const na = normalizePath(a);
-  const nb = normalizePath(b);
+  let na; let nb;
+  try { na = canonicalizeClaimPath(a); nb = canonicalizeClaimPath(b); } catch { return true; }
   if (!na || !nb) return true; // defensive: empty path = unknown = conflict
+  if (na === '.' || nb === '.') return true; // workspace claim overlaps every path
   if (na === nb) return true;
 
   // Directory prefix: "src/" should conflict with anything under it.
@@ -231,7 +260,7 @@ function main() {
       done: t.done,
       depends,
       writes,
-      planPath: normalizePath(t.planPath),
+      planPath: normalizeFilesystemPath(t.planPath),
     };
   });
 
@@ -337,7 +366,10 @@ if (require.main === module) {
 
 module.exports = {
   globToRegex,
-  normalizePath,
+  normalizePath: normalizeFilesystemPath,
+  normalizeFilesystemPath,
+  canonicalizeClaimPath,
+  claimPathMatches,
   pathsOverlap,
   writesConflict,
   parseTaskFrontmatter,

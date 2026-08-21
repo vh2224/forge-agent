@@ -19,6 +19,7 @@ const {
   computeUnitAxisCriterion,
   computeSubjectReportCriterion,
 } = require('./forge-index-green');
+const { DETECTOR_VERSION } = require('./forge-index-f2');
 
 let passed = 0;
 function test(name, fn) {
@@ -697,6 +698,17 @@ test('scripts/fixtures/index-green/allowed-misses.json resolves clean and every 
   for (const e of resolved.entries) {
     assert.ok(e.item && e.item.trim() !== '', `entry ${e.key} must name an owner`);
   }
+});
+
+test('#126 index-green propaga sem inferir a identidade da taxonomia F2', () => {
+  const cwd = fixture();
+  try {
+    writeFragment(cwd, { unit_id: 'T01', facts: [fact('MEM001', 'cita `scripts/covered.js`')] });
+    writeAllowed(cwd, []);
+    const report = measureGreen(cwd);
+    assert.strictEqual(report.detector_version, DETECTOR_VERSION);
+    assert.ok(Object.prototype.hasOwnProperty.call(report, 'detector_version'));
+  } finally { cleanup(cwd); }
 });
 
 

@@ -836,6 +836,9 @@ Flags:
                                  all
   --runtime <name>               capabilities host: claude | codex | both
   --json                         emit deterministic JSON for capability checks
+  --recover-claim <run-id>       preview manual recovery of a stuck live claim
+    --apply --confirm-owner-stopped --confirm-workspace-quiescent
+  --restore-claim <run-id>       preview; apply requires --confirm-workspace-quiescent
   --fix [--cwd <dir>] [--migrate]  write SCHEMA-VERSION if missing; suggest ignore
                                  fixes. Refuses to stamp an unmigrated store unless
                                  --migrate is given (then runs forge-migrate first).
@@ -854,6 +857,21 @@ Exit codes:
   }
 
   const cwdArg = typeof args.cwd === 'string' ? path.resolve(args.cwd) : process.cwd();
+
+  if (args['recover-claim'] || args['restore-claim']) {
+    if (args['recover-claim'] && args['restore-claim']) {
+      process.stderr.write('forge-doctor: choose exactly one of --recover-claim or --restore-claim\n');
+      process.exit(2); return;
+    }
+    const recovery = require('./forge-claim-recovery.js');
+    const runId = String(args['recover-claim'] || args['restore-claim']);
+    let result;
+    if (args['restore-claim']) result = recovery.restore(cwdArg, runId, { apply: args.apply === true, confirmWorkspaceQuiescent: args['confirm-workspace-quiescent'] === true });
+    else if (args.apply) result = recovery.apply(cwdArg, runId, { confirmOwnerStopped: args['confirm-owner-stopped'] === true, confirmWorkspaceQuiescent: args['confirm-workspace-quiescent'] === true });
+    else result = recovery.inspect(cwdArg, runId);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.exit(result.ok ? 0 : 1); return;
+  }
 
   if (args.fix) {
     const schemaPath = path.join(cwdArg, SCHEMA_FILE);

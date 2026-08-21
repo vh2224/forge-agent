@@ -422,12 +422,105 @@ function testNonGitWriteProbeStaysRegistered() {
  * the same channel and shape as a real measurement — ready to be pasted into an
  * artifact as evidence.
  */
-function testCrossRootProbe() {
+async function testCrossRootProbe() {
   const probe = require('./forge-appserver-probe.js');
   assert.strictEqual(typeof probe.probeCrossRootWrite, 'function', 'crossroot-write probe must be exported');
   assert.strictEqual(typeof probe.crossRootVerdict, 'function', 'the verdict ladder must be exported as a pure function');
   const usage = spawnSync(process.execPath, [path.join(__dirname, 'forge-appserver-probe.js'), '--probe', 'nope'], { encoding: 'utf8' });
   assert(String(usage.stderr).includes('crossroot-write'), 'crossroot-write must stay in the dispatchable PROBES list');
+
+  // The probe must isolate only SQLite. CODEX_HOME remains the source of auth,
+  // config and projections; mutating or copying it would widen credential exposure.
+  const baseEnv = { CODEX_HOME: path.resolve('codex-home'), PATH: 'sentinel-path' };
+  const sqliteHome = path.resolve('sqlite-arm-a');
+  const isolated = probe.buildIsolatedSqliteEnv(baseEnv, sqliteHome);
+  assert.notStrictEqual(isolated, baseEnv, 'per-arm env must be a clone');
+  assert.strictEqual(isolated.CODEX_HOME, baseEnv.CODEX_HOME, 'CODEX_HOME/auth/config must be preserved');
+  assert.strictEqual(isolated.PATH, baseEnv.PATH, 'unrelated allowlisted env must be preserved');
+  assert.strictEqual(isolated.CODEX_SQLITE_HOME, sqliteHome, 'only the SQLite runtime is redirected');
+  assert.strictEqual(baseEnv.CODEX_SQLITE_HOME, undefined, 'base env must not be mutated');
+  assert.throws(() => probe.buildIsolatedSqliteEnv(baseEnv, 'relative/sqlite'), /absolute path/,
+    'a relative SQLite home could escape under a model-controlled cwd');
+  assert.strictEqual(probe.crossPlatformWriteCommand('/tmp/a b', 'linux'), "touch '/tmp/a b'",
+    'POSIX keeps the already-measured touch command');
+  const windowsWrite = probe.crossPlatformWriteCommand("C:\\tmp\\a'b.txt", 'win32');
+  assert(windowsWrite.startsWith('powershell.exe -NoProfile -NonInteractive -Command '),
+    'Windows must use a native non-interactive writer instead of the non-portable touch command');
+  assert(windowsWrite.includes("a''b.txt"), 'PowerShell single-quoted paths must double embedded quotes');
+
+  const resourceFixture = (failAt) => {
+    const removed = [];
+    let made = 0;
+    const fsApi = {
+      mkdtempSync(prefix) {
+        made += 1;
+        if (made === failAt) throw new Error(`mkdtemp-${made}`);
+        return `${prefix}made-${made}`;
+      },
+      realpathSync(value) { return value; },
+      mkdirSync() {},
+      rmSync(value) { removed.push(value); },
+    };
+    return { fsApi, removed };
+  };
+  const resolveFailure = resourceFixture(99);
+  await assert.rejects(
+    probe.withTrackedProbeResources(
+      { fsApi: resolveFailure.fsApi, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); throw new Error('resolveCommand failed'); },
+    ),
+    /resolveCommand failed/,
+  );
+  assert.strictEqual(resolveFailure.removed.length, 1,
+    'resolveCommand failure after sqliteRoot acquisition must clean the one created path');
+
+  const partialCreation = resourceFixture(3);
+  await assert.rejects(
+    probe.withTrackedProbeResources(
+      { fsApi: partialCreation.fsApi, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); makeTemp('repo-a-'); makeTemp('repo-b-'); },
+    ),
+    /mkdtemp-3/,
+  );
+  assert.strictEqual(partialCreation.removed.length, 2,
+    'failure while creating B must clean exactly sqliteRoot and A, never an uncreated B');
+
+  const lockedFs = {
+    mkdtempSync(prefix) { return `${prefix}locked`; },
+    realpathSync(value) { return value; },
+    mkdirSync() {},
+    rmSync() { throw new Error('EPERM locked'); },
+  };
+  let cleanupOnly;
+  try {
+    await probe.withTrackedProbeResources(
+      { fsApi: lockedFs, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); return 'would-have-succeeded'; },
+    );
+  } catch (error) { cleanupOnly = error; }
+  assert(cleanupOnly instanceof AggregateError && cleanupOnly.code === 'PROBE_CLEANUP_FAILED',
+    'cleanup failure after success must become an infrastructure AggregateError');
+  assert(/EPERM locked/.test(cleanupOnly.errors[0].message), 'cleanup diagnostic must preserve the lock error');
+
+  const primary = new Error('primary measurement outage');
+  let combined;
+  try {
+    await probe.withTrackedProbeResources(
+      { fsApi: lockedFs, osApi: { tmpdir: () => path.resolve('tmp') }, pathApi: path },
+      async ({ makeTemp }) => { makeTemp('sqlite-'); throw primary; },
+    );
+  } catch (error) { combined = error; }
+  assert(combined instanceof AggregateError && combined.cause === primary,
+    'cleanup failure must preserve the primary error as cause');
+  assert.strictEqual(combined.errors[0], primary, 'aggregate must retain the primary error verbatim');
+  let diagnostic = '';
+  const fakeProcess = { exitCode: 0 };
+  probe.reportProbeInfraFailure(combined, {
+    stderr: { write(value) { diagnostic += value; } }, processRef: fakeProcess,
+  });
+  assert.strictEqual(fakeProcess.exitCode, 2, 'cleanup failure must surface as infrastructure exit 2');
+  assert(/primary measurement outage/.test(diagnostic) && /EPERM locked/.test(diagnostic),
+    'stderr must carry both the primary failure and cleanup failure');
 
   const { crossRootVerdict, CROSSROOT_VERDICTS: V } = probe;
   const wrote = { exists: true };
@@ -440,6 +533,73 @@ function testCrossRootProbe() {
     target,
     items: [{ type: 'commandExecution', status: 'completed', command: `/bin/zsh -lc "touch '${target}'"`, exitCode }],
   });
+
+  const requestedWrite = (arm, threadSandbox = { type: 'workspaceWrite' }) => ({
+    ...arm, requestedThreadSandbox: 'workspace-write', threadSandbox,
+  });
+
+  const liveWrote = requestedWrite({ exists: true });
+  const liveAbsent = (target) => requestedWrite(ranButAbsent(target, 1));
+  const sequence = async (answers) => {
+    let index = 0;
+    return probe.runCrossRootArmSequence({
+      dirA: '/A', dirB: '/B', policyBase: { type: 'workspaceWrite' },
+      runArm: async () => answers[index++],
+    });
+  };
+  const denyFailed = await sequence([liveWrote, { error: 'deny outage' }]);
+  assert.deepStrictEqual(denyFailed.executed, ['CTRL-ATTEMPT', 'CTRL-DENY'],
+    'invalid CTRL-DENY must prevent TREAT and REPLACE-CHECK');
+  assert.strictEqual(denyFailed.terminal.verdict, V.UNKNOWN);
+  const treatFailed = await sequence([liveWrote, liveAbsent('/B/deny.txt'), { error: 'treat outage' }]);
+  assert.deepStrictEqual(treatFailed.executed, ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT'],
+    'invalid TREAT must prevent REPLACE-CHECK');
+  assert.strictEqual(treatFailed.terminal.verdict, V.UNKNOWN);
+  const negative = await sequence([liveWrote, liveAbsent('/B/deny.txt'), liveAbsent('/B/treat.txt')]);
+  assert.deepStrictEqual(negative.executed, ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT'],
+    'REPLACE-CHECK cannot contribute to a measured negative and must not run');
+  const positive = await sequence([liveWrote, liveAbsent('/B/deny.txt'), liveWrote, liveWrote]);
+  assert.deepStrictEqual(positive.executed, ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT', 'REPLACE-CHECK'],
+    'REPLACE-CHECK must run after a measured positive because it distinguishes sum from replacement');
+  const replaceReadOnly = await sequence([
+    liveWrote,
+    liveAbsent('/B/deny.txt'),
+    liveWrote,
+    requestedWrite({ exists: true }, { type: 'readOnly' }),
+  ]);
+  assert.strictEqual(replaceReadOnly.outcome.verdict, V.PROVADA,
+    'invalid REPLACE-CHECK must not erase the already-measured main conclusion');
+  assert(/NÃO MEDIDO/.test(replaceReadOnly.outcome.reason) && !/semântica de SOMA/.test(replaceReadOnly.outcome.reason),
+    'readOnly REPLACE-CHECK cannot be interpreted as sum or replacement');
+  const runtimeReadOnly = probe.runtimeRootWritePrecondition({
+    sandbox: { type: 'readOnly' }, activePermissionProfile: { id: ':read-only' },
+  });
+  assert(runtimeReadOnly && /workspaceWrite/.test(runtimeReadOnly.detail),
+    'readOnly RUNTIME-ROOTS must be rejected before interpreting presence or absence');
+
+  const readOnlyPrecondition = crossRootVerdict({
+    ctrlAttempt: requestedWrite({ exists: false, items: [] }, { type: 'readOnly' }),
+    ctrlDeny: requestedWrite(ranButAbsent('/B/deny.txt', 1)),
+    treat: requestedWrite(wrote),
+    replaceCheck: requestedWrite(wrote),
+  });
+  assert.strictEqual(readOnlyPrecondition.verdict, V.UNKNOWN,
+    'a live arm whose requested thread grant was not effective is NOT MEASURED');
+  assert(/CTRL-ATTEMPT/.test(readOnlyPrecondition.reason) && /workspaceWrite/.test(readOnlyPrecondition.reason),
+    'the failed precondition must name the arm and expected effective sandbox');
+
+  const source = fs.readFileSync(path.join(__dirname, 'forge-appserver-probe.js'), 'utf8');
+  for (const label of ['HANDSHAKE', 'RUNTIME-ROOTS']) {
+    assert(source.includes(`sessionEnv('${label}'`), `${label} must receive an isolated SQLite runtime`);
+  }
+  assert(source.includes('sessionEnv(label, env)'), 'every main runArm invocation must derive its own SQLite home from its label');
+  for (const label of ['CTRL-ATTEMPT', 'CTRL-DENY', 'TREAT', 'REPLACE-CHECK']) {
+    assert(source.includes(`run('${label}'`), `${label} must keep a distinct arm label for SQLite isolation`);
+  }
+  assert(source.includes("threadSandbox: 'workspace-write'"),
+    'all four main arms must request the same writable thread sandbox');
+  assert(source.includes("sandbox: 'workspace-write', runtimeWorkspaceRoots"),
+    'the gated fifth arm must use the same writable thread precondition');
 
   // (1) NON-DEGRADATION: a timeout carries NO `infra` flag, so a ladder that read
   // `!infra` as "measured" would grade an outage as a measurement.
@@ -576,7 +736,7 @@ function testCrossRootProbe() {
   // The fifth arm's caveat text must exist in BOTH branches of the source, not only
   // where it happened to write (R2, Decisão 6). Asserted structurally: one shared
   // constant, used by the positive branch and by the negative one.
-  const src = fs.readFileSync(path.join(__dirname, 'forge-appserver-probe.js'), 'utf8');
+  const src = source;
   const fifthBlock = src.slice(src.indexOf('ARM RUNTIME-ROOTS'));
   assert.strictEqual((fifthBlock.match(/\$\{FIFTH_CAVEAT\}/g) || []).length, 2,
     'the weaker-confidence caveat belongs to the ARM, so both the positive and the negative branch must carry it');
@@ -744,7 +904,7 @@ async function main() {
     await testSvnTurnCarriesExplicitSandboxPolicy(mock, root);
     await testTransportField(mock, realMock, root);
     testNonGitWriteProbeStaysRegistered();
-    testCrossRootProbe();
+    await testCrossRootProbe();
     process.stdout.write('forge-xllm-appserver.test.js: ok\n');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

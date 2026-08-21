@@ -4,6 +4,7 @@
 // Este módulo só lê o store e o índice; a escrita permanece deliberadamente fora
 // desta superfície, para que a medição possa ser executada em produção.
 const path = require('path');
+const crypto = require('crypto');
 const { buildFileIndex, extractCitations } = require('./forge-memory-index');
 const { listFragments, parseFragment, readFragmentText } = require('./forge-memory');
 
@@ -13,6 +14,20 @@ const TRAILING_PUNCTUATION = '.,;:!?)]}>';
 const LEADING_PUNCTUATION = '(\'"[';
 const VERSION_RE = /^\d+(?:\.\d+)+$/;
 const PLAIN_NOISE = new Set(['e/ou', 'n/a', 'na', 'ou']);
+const METALINGUISTIC_EXTENSION_REASON = 'menção metalinguística de extensão, não arquivo concreto';
+const DETECTOR_TAXONOMY = Object.freeze({
+  schema: 2,
+  extension_governors: Object.freeze(['extensão', 'extensões']),
+  list_conjunctions: Object.freeze(['e', 'ou']),
+  structural_separator_pattern: '[\\s\\u00a0,:;/()\\[\\]\\-\\u2013\\u2014]',
+  bare_extension_pattern: '\\.[A-Za-z0-9]{1,6}',
+  metalinguistic_reason: METALINGUISTIC_EXTENSION_REASON,
+});
+
+let DETECTOR_VERSION;
+const STRUCTURAL_SEPARATOR_RE = new RegExp(DETECTOR_TAXONOMY.structural_separator_pattern, 'u');
+const BARE_EXTENSION_AT_RE = new RegExp(`^${DETECTOR_TAXONOMY.bare_extension_pattern}`);
+const LIST_CONJUNCTION_AT_RE = new RegExp(`^(?:${DETECTOR_TAXONOMY.list_conjunctions.join('|')})\\b`, 'iu');
 // Latin prose abbreviations that survive punctuation stripping as `x.y` tokens.
 const LATIN_ABBREVIATION_RE = /^(?:e\.g|i\.e|p\.ex)$/;
 // Template markers (`T##-PLAN.md`), interpolations (`{id}`, `${N}`), angle
@@ -69,25 +84,115 @@ function mentionKind(value) {
   return null;
 }
 
+function isStructuralSeparator(char) {
+  return STRUCTURAL_SEPARATOR_RE.test(char);
+}
+
+function skipStructural(text, start) {
+  let cursor = start;
+  while (cursor < text.length && isStructuralSeparator(text[cursor])) cursor += 1;
+  return cursor;
+}
+
+function readBareExtension(text, start) {
+  let cursor = start;
+  const wrapped = text[cursor] === '`';
+  if (wrapped) cursor += 1;
+  const match = BARE_EXTENSION_AT_RE.exec(text.slice(cursor));
+  if (!match) return null;
+  cursor += match[0].length;
+  if (wrapped) {
+    if (text[cursor] !== '`') return null;
+    cursor += 1;
+  } else if (cursor < text.length && !isStructuralSeparator(text[cursor])) {
+    const terminalPunctuation = /[.!?]/.test(text[cursor]) && (cursor + 1 === text.length || /[\s\u00a0]/u.test(text[cursor + 1]));
+    if (!terminalPunctuation) return null;
+  }
+  return { start, end: cursor, raw: text.slice(start, cursor) };
+}
+
+function metalinguisticExtensionRanges(text) {
+  const ranges = [];
+  const governors = new RegExp(`\\b(?:${DETECTOR_TAXONOMY.extension_governors.join('|')})\\b`, 'giu');
+  let governor;
+  while ((governor = governors.exec(text)) !== null) {
+    let cursor = skipStructural(text, governor.index + governor[0].length);
+    let candidate = readBareExtension(text, cursor);
+    if (!candidate) continue;
+    while (candidate) {
+      if (text[candidate.end] === '/' && !readBareExtension(text, candidate.end + 1)) break;
+      ranges.push(candidate);
+      cursor = skipStructural(text, candidate.end);
+      const conjunction = LIST_CONJUNCTION_AT_RE.exec(text.slice(cursor));
+      if (conjunction) cursor = skipStructural(text, cursor + conjunction[0].length);
+      candidate = readBareExtension(text, cursor);
+    }
+  }
+  return ranges;
+}
+
 function detectMentions(text) {
   if (typeof text !== 'string' || !text) return [];
   const mentions = [];
+  const contextual = metalinguisticExtensionRanges(text);
   const tokenRe = /\S+/g;
   let match;
   while ((match = tokenRe.exec(text)) !== null) {
-    const raw = match[0];
-    const core = cleanToken(raw);
-    const why = mentionKind(core);
-    if (!why) continue;
-    const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`' ? core.slice(1, -1) : core;
-    mentions.push({ raw, normalized: basename(inner), why });
+    const tokenStart = match.index;
+    const tokenEnd = tokenStart + match[0].length;
+    const overlaps = contextual.filter((range) => range.start < tokenEnd && range.end > tokenStart);
+    const uncovered = [];
+    if (overlaps.length === 0) {
+      uncovered.push({ start: tokenStart, end: tokenEnd });
+    } else {
+      let cursor = tokenStart;
+      for (const range of overlaps) {
+        if (cursor < range.start) uncovered.push({ start: cursor, end: range.start });
+        cursor = Math.max(cursor, range.end);
+      }
+      if (cursor < tokenEnd) uncovered.push({ start: cursor, end: tokenEnd });
+    }
+    for (const span of uncovered) {
+      let start = span.start;
+      let end = span.end;
+      if (overlaps.length > 0) {
+        while (start < end && /[,:;()\[\]\-\u2013\u2014]/u.test(text[start])) start += 1;
+        while (end > start && /[,:;()\[\]\-\u2013\u2014]/u.test(text[end - 1])) end -= 1;
+      }
+      if (start >= end) continue;
+      const raw = text.slice(start, end);
+      const core = cleanToken(raw);
+      const why = mentionKind(core);
+      if (why) {
+        const inner = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`' ? core.slice(1, -1) : core;
+        mentions.push({ start, mention: { raw, normalized: basename(inner), why } });
+      }
+    }
   }
-  return mentions;
+  for (const range of contextual) {
+    const raw = range.raw;
+    const inner = raw[0] === '`' ? raw.slice(1, -1) : raw;
+    mentions.push({
+      start: range.start,
+      mention: {
+        raw,
+        normalized: basename(inner),
+        why: 'suffix',
+        detector_context: {
+          classification: 'metalinguistic-extension',
+          taxonomy: DETECTOR_VERSION,
+          span: { start: range.start, end: range.end },
+        },
+      },
+    });
+  }
+  return mentions.sort((left, right) => left.start - right.start).map((entry) => entry.mention);
 }
 
 function detectorFalsePositive(mention) {
   const normalized = mention.normalized;
   const raw = String(mention.raw || '').toLowerCase();
+  if (mention.detector_context && mention.detector_context.classification === 'metalinguistic-extension') return DETECTOR_TAXONOMY.metalinguistic_reason;
   if (PLAIN_NOISE.has(raw)) return 'segmentos de prosa, não caminho de arquivo';
   if (VERSION_RE.test(normalized)) return 'número decimal ou versão nua';
   if (/^[a-z]\/([a-z]|\d)$/i.test(raw)) return 'abreviação com barra';
@@ -100,6 +205,7 @@ function detectorFalsePositive(mention) {
   const wrapped = core.length >= 2 && core[0] === '`' && core[core.length - 1] === '`';
   const inner = wrapped ? core.slice(1, -1) : core;
   const suffix = dotSuffix(normalized);
+  const bareDotfile = /(?:^|\/)\.[A-Za-z0-9]{1,6}$/.test(inner);
   // A trailing slash names a DIRECTORY (`.gsd/`): its basename is empty, so it
   // could never match a file citation — enumerate instead of leaving a
   // permanently unmatchable mention in the denominator.
@@ -107,7 +213,7 @@ function detectorFalsePositive(mention) {
   // Backticks alone are not evidence of a file: `--cwd`, `default`, `domain:`
   // are keywords/flags. A backticked token only stays signal with a slash or a
   // real file extension.
-  if (wrapped && !inner.includes('/') && (!suffix || !REAL_FILE_EXT.has(suffix))) return 'keyword/flag entre crases, sem extensão de arquivo nem barra';
+  if (wrapped && !inner.includes('/') && !bareDotfile && (!suffix || !REAL_FILE_EXT.has(suffix))) return 'keyword/flag entre crases, sem extensão de arquivo nem barra';
   // #107: a slash does not make a path. Two shapes reached here as signal and
   // depressed recall against an extractor that was RIGHT to ignore them.
   //
@@ -132,7 +238,7 @@ function detectorFalsePositive(mention) {
   }
   // Dotted identifiers (`JSON.parse`, `turn.id`, `v2.0`, `cmd.exe`) end in a
   // "suffix" that is not a real file extension — prose, not a citation target.
-  if (suffix && !REAL_FILE_EXT.has(suffix)) return 'sufixo não é extensão de arquivo real (identificador com ponto)';
+  if (suffix && !bareDotfile && !REAL_FILE_EXT.has(suffix)) return 'sufixo não é extensão de arquivo real (identificador com ponto)';
   return null;
 }
 
@@ -145,6 +251,47 @@ function detectorFalsePositive(mention) {
 function signalMentions(mentions) {
   return (Array.isArray(mentions) ? mentions : []).filter((item) => !detectorFalsePositive(item));
 }
+
+const DETECTOR_FINGERPRINT_TABLES = Object.freeze({
+  trailing_punctuation: TRAILING_PUNCTUATION,
+  leading_punctuation: LEADING_PUNCTUATION,
+  version_pattern: VERSION_RE.source,
+  plain_noise: Object.freeze([...PLAIN_NOISE].sort()),
+  latin_abbreviation_pattern: LATIN_ABBREVIATION_RE.source,
+  placeholder_pattern: PLACEHOLDER_RE.source,
+  real_file_ext: Object.freeze([...REAL_FILE_EXT].sort()),
+  compiled_regexes: Object.freeze({
+    structural_separator: Object.freeze({ source: STRUCTURAL_SEPARATOR_RE.source, flags: STRUCTURAL_SEPARATOR_RE.flags }),
+    bare_extension_at: Object.freeze({ source: BARE_EXTENSION_AT_RE.source, flags: BARE_EXTENSION_AT_RE.flags }),
+    list_conjunction_at: Object.freeze({ source: LIST_CONJUNCTION_AT_RE.source, flags: LIST_CONJUNCTION_AT_RE.flags }),
+  }),
+});
+const DETECTOR_FINGERPRINT_FUNCTIONS = Object.freeze([
+  cleanToken,
+  dotSuffix,
+  basename,
+  mentionKind,
+  isStructuralSeparator,
+  skipStructural,
+  readBareExtension,
+  metalinguisticExtensionRanges,
+  detectMentions,
+  detectorFalsePositive,
+  signalMentions,
+]);
+
+function computeDetectorVersion(overrides) {
+  const options = overrides || {};
+  const functions = options.functions || DETECTOR_FINGERPRINT_FUNCTIONS;
+  const payload = {
+    taxonomy: options.taxonomy || DETECTOR_TAXONOMY,
+    tables: options.tables || DETECTOR_FINGERPRINT_TABLES,
+    function_sources: functions.map((fn) => Function.prototype.toString.call(fn)),
+  };
+  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
+}
+
+DETECTOR_VERSION = computeDetectorVersion();
 
 // Menções já filtradas de ruído, para consumidores fora deste módulo (o índice
 // usa isto no bucket (b)) — assim os dois lados classificam pelo mesmo critério.
@@ -228,6 +375,7 @@ function measureF2(cwd, opts) {
   const falsePositiveCandidates = facts.flatMap((fact) => fact.precision_candidates);
   const denominator = mentioned.length;
   return {
+    detector_version: DETECTOR_VERSION,
     verdict: denominator === 0 ? 'EMPTY-DENOMINATOR' : 'MEASURED',
     facts_that_mention_file: denominator,
     facts_covered: covered,
@@ -268,5 +416,5 @@ function runCli(argv) {
   } catch (error) { process.stderr.write(JSON.stringify({ error: error.message || String(error) }) + '\n'); return 1; }
 }
 
-module.exports = { detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
+module.exports = { DETECTOR_TAXONOMY, DETECTOR_FINGERPRINT_TABLES, DETECTOR_FINGERPRINT_FUNCTIONS, DETECTOR_VERSION, METALINGUISTIC_EXTENSION_REASON, computeDetectorVersion, metalinguisticExtensionRanges, detectMentions, detectSignalMentions, detectorFalsePositive, classifyCitationPrecision, measureF2, runCli };
 if (require.main === module) process.exitCode = runCli(process.argv.slice(2));

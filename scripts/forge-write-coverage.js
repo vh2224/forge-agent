@@ -143,7 +143,7 @@ function isDecomposed(content) {
  * `*-PLAN-GATE.md` never matches (the file-name test is exact), and that is
  * asserted rather than assumed.
  */
-function discoverCorpus(cwd) {
+function discoverCorpus(cwd, owner) {
   const units = [];
   const swept = [];
   const allExcluded = [];
@@ -160,6 +160,7 @@ function discoverCorpus(cwd) {
       if (!e.isDirectory()) continue;
       const ownerId = e.name;
       if (entityKind(ownerId) !== 'milestone') continue;
+      if (owner && ownerId !== owner) continue;
       milestoneDirs++;
       const before = units.length;
       // Plan FILES seen, counted apart from units ADMITTED. Before the S02
@@ -207,12 +208,13 @@ function discoverCorpus(cwd) {
   }
 
   const tasksRoot = path.join(cwd, '.gsd', 'tasks');
-  if (isDir(tasksRoot)) {
+  if (isDir(tasksRoot) && (!owner || entityKind(owner) === 'task')) {
     rootsScanned.push('.gsd/tasks');
     for (const e of listDir(tasksRoot)) {
       if (!e.isDirectory()) continue;
       const taskId = e.name;
       if (entityKind(taskId) !== 'task') continue;
+      if (owner && taskId !== owner) continue;
       for (const f of listDir(path.join(tasksRoot, taskId))) {
         if (!f.isFile || !f.isFile()) continue;
         // Exact suffix: `*-PLAN.md`. `*-PLAN-GATE.md` ends in `-GATE.md` and
@@ -297,6 +299,36 @@ function indexWritten(delta) {
   const byKey = new Map();
   for (const u of (delta.units || [])) byKey.set(u.unit, u);
   return byKey;
+}
+
+function deltaForOwner(delta, owner) {
+  if (!owner) return delta;
+  const belongs = (row) => row && (
+    row.owner === owner
+    || row.unit === owner
+    || (typeof row.unit === 'string' && (row.unit.startsWith(`${owner}::`) || row.unit.startsWith(`${owner}/`)))
+  );
+  const refBelongs = (row) => row && typeof row.ref === 'string'
+    && (row.ref === `forge/${owner}` || row.ref.endsWith(`/${owner}`));
+  const units = (delta.units || []).filter(belongs);
+  const unattributed = (delta.unattributed || []).filter(refBelongs);
+  const skipped = (delta.skipped || []).filter((row) => belongs(row) || refBelongs(row));
+  const attributed = units.reduce((sum, row) => sum + (row.commits || []).length, 0);
+  const svnUnattributedCannotBeScoped = delta.vcs === 'svn' && (delta.unattributed || []).length > 0;
+  return {
+    ...delta,
+    units,
+    unattributed,
+    skipped,
+    attributed,
+    commits_walked: svnUnattributedCannotBeScoped ? null : attributed + unattributed.length,
+    owner_scope_reconciliation: svnUnattributedCannotBeScoped ? 'unavailable:svn-unattributed-ownerless' : 'scoped',
+    refs_examined: new Set([
+      ...units.map((row) => row.ref),
+      ...unattributed.map((row) => row.ref),
+      ...skipped.map((row) => row.ref),
+    ].filter(Boolean)).size,
+  };
 }
 
 /**
@@ -397,13 +429,13 @@ function verdictFor(coverage, unitsMeasured) {
  */
 function measureCoverage(cwd, opts) {
   const o = opts || {};
-  const corpus = discoverCorpus(cwd);
-  const delta = o.delta || writtenByUnit(cwd, o.deltaOpts || {});
+  const corpus = discoverCorpus(cwd, o.owner);
+  const delta = deltaForOwner(o.delta || writtenByUnit(cwd, o.deltaOpts || {}), o.owner);
   const written = indexWritten(delta);
 
   const refOwners = new Set();
   if (delta.vcs === 'git') {
-    const refs = o.refs || listUnitRefs(cwd);
+    const refs = (o.refs || listUnitRefs(cwd)).filter((row) => !o.owner || row.id === o.owner);
     for (const r of refs) refOwners.add(r.id);
   }
   // svn has no ref axis at all, so `no-branch-ref` is not askable there; an
@@ -514,6 +546,7 @@ function measureCoverage(cwd, opts) {
 
   return {
     generated_at: new Date().toISOString(),
+    scope: { owner: o.owner || null },
     cwd: normalizePath(cwd),
     vcs: delta.vcs,
     corpus: {
@@ -543,6 +576,7 @@ function measureCoverage(cwd, opts) {
         attributed: delta.attributed,
         unattributed: (delta.unattributed || []).length,
         balances: delta.commits_walked === delta.attributed + (delta.unattributed || []).length,
+        source: delta.owner_scope_reconciliation || 'complete-delta',
       },
       refs: refRows,
     },

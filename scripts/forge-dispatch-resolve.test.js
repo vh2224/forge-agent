@@ -179,6 +179,70 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  runCase('non-routable GPT tier resolves to the Claude model that can actually run', () => {
+    const f = mkFixture({ prefsJsonc: '{"tier_models":{"max":"gpt-5.6-sol"}}' });
+    const r = dispatch(f, { unitType: 'plan-milestone' });
+    assertEqual(r.model, 'claude-fable-5', 'non-routable max phase uses canonical Claude model');
+    assertEqual(r.alias, 'fable', 'the selected model is applicable by Agent()');
+    assertEqual(r.engine, 'claude', 'engine names the runtime that actually executes');
+    assertEqual(r.dispatch_engine, 'claude', 'non-routable phase never advertises a missing sidecar');
+    assertEqual(r.engine_reason, 'non-routable-family-substituted:claude', 'reason names the substitution');
+    cleanup(f);
+  });
+
+  runCase('non-routable mixed tier keeps configured Claude members and removes external ones', () => {
+    const f = mkFixture({ prefsJsonc: '{"tier_models":{"max":["gpt-5.6-sol","claude-opus-5"]}}' });
+    const r = dispatch(f, { unitType: 'plan-milestone' });
+    assertEqual(r.model, 'claude-opus-5', 'configured Claude fallback becomes the applied primary');
+    assertEqual(r.chain_len, 1, 'unexecutable GPT member is absent from the phase chain');
+    assertEqual(r.dispatch_engine, 'claude', 'mixed tier remains an in-process dispatch');
+    cleanup(f);
+  });
+
+  runCase('explicit workers.execute-task claude is not overridden by a GPT tier model', () => {
+    const f = mkFixture({ prefsJsonc: '{"workers":{"execute-task":"claude"},"tier_models":{"standard":"gpt-5.6-sol"}}' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.engine, 'claude', 'explicit worker engine wins');
+    assertEqual(r.dispatch_engine, 'claude', 'explicit Claude worker never enters the sidecar');
+    assertEqual(r.model, 'claude-sonnet-5', 'model is applicable to the explicit Claude worker');
+    assertEqual(r.alias, 'sonnet', 'Agent receives the actual selected model alias');
+    assertEqual(r.engine_reason, 'workers.execute-task:claude|model-family-substituted', 'reason names both the pin and substitution');
+    cleanup(f);
+  });
+
+  runCase('tier-only frontmatter does not bypass explicit workers.execute-task claude', () => {
+    const f = mkFixture({
+      prefsJsonc: '{"workers":{"execute-task":"claude"},"tier_models":{"standard":"gpt-5.6-sol"}}',
+      plan: '---\ntier: standard\n---\n# task\n',
+    });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.route_source, 'frontmatter', 'tier remains a frontmatter selection for reporting');
+    assertEqual(r.model, 'claude-sonnet-5', 'tier-only metadata cannot make the Claude worker consume GPT');
+    assertEqual(r.engine, 'claude', 'explicit worker engine still wins');
+    assertEqual(r.dispatch_engine, 'claude', 'no external writer is activated behind the isolation pin');
+    cleanup(f);
+  });
+
+  runCase('frontmatter Codex overrides an explicit Claude worker pin', () => {
+    const f = mkFixture({
+      prefsJsonc: '{"workers":{"execute-task":"claude"},"tier_models":{"standard":"gpt-5.6-sol"}}',
+      plan: '---\nworker: codex\ntier: standard\n---\n# task\n',
+    });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.route_source, 'frontmatter', 'frontmatter remains the highest-precedence source');
+    assertEqual(r.engine, 'gpt', 'frontmatter selects the external model family');
+    assertEqual(r.dispatch_engine, 'codex', 'the write-capable sidecar is activated');
+    cleanup(f);
+  });
+
+  runCase('routable GPT tier without explicit worker still selects Codex', () => {
+    const f = mkFixture({ prefsJsonc: '{"tier_models":{"standard":"gpt-5.6-sol"}}' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.engine, 'gpt', 'routable tier derives GPT family');
+    assertEqual(r.dispatch_engine, 'codex', 'execute-task has a Codex adapter');
+    cleanup(f);
+  });
+
   runCase('routing backend executor selects capped routing chain', () => {
     const f = mkFixture({
       prefsJsonc: '{"routing":{"backend":{"executor":{"standard":["gpt-5-codex","claude-sonnet-5","claude-opus-4-8","claude-haiku-4-5-20251001"]}}}}',

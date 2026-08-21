@@ -144,6 +144,39 @@ function writeLoosePlan(root, taskId, opts) {
   return dir;
 }
 
+test('owner scope isolates one milestone from every other milestone', () => {
+  const root = newRepo('owner-scope');
+  writeUnitPlan(root, 'M101', 'S01', 'T01', { writes: ['src/a.js'], expected: ['src/a.js'] });
+  writeUnitPlan(root, 'M202', 'S01', 'T01', { writes: ['src/other.js'], expected: ['src/other.js'] });
+  const delta = {
+    vcs: 'git', default_branch: 'master', commits_walked: 2, attributed: 2, unattributed: [], skipped: [],
+    units: [
+      { unit: 'M101::S01/T01', owner: 'M101', ref: 'forge/M101', files: ['src/a.js'], commits: ['a'] },
+      { unit: 'M202::S01/T01', owner: 'M202', ref: 'forge/M202', files: ['src/b.js'], commits: ['b'] },
+    ],
+  };
+  const rep = measureCoverage(root, { owner: 'M202', delta, refs: [{ id: 'M101' }, { id: 'M202' }] });
+  assertEqual(rep.scope.owner, 'M202', 'escopo declarado');
+  assertEqual(rep.units_considered, 1, 'somente uma unidade');
+  assertEqual(rep.units[0].owner, 'M202', 'somente o milestone pedido');
+  assertEqual(rep.coverage, 0, 'M101 não melhora a cobertura de M202');
+  assertEqual(rep.reconciliation.commits.commits_walked, 1, 'commits também isolados');
+  assert(rep.reconciliation.commits.balances, 'reconciliação continua fechada');
+});
+
+test('owner scope nunca pinta reconciliação SVN ownerless de verde', () => {
+  const root = newRepo('owner-scope-svn');
+  writeUnitPlan(root, 'M202', 'S01', 'T01', { writes: ['src/b.js'], expected: ['src/b.js'] });
+  const delta = {
+    vcs: 'svn', commits_walked: 2, attributed: 1,
+    units: [{ unit: 'M202::S01/T01', owner: 'M202', files: ['src/b.js'], commits: ['r2'] }],
+    unattributed: [{ sha: 'r1', reason: 'no-unit-marker' }], skipped: [],
+  };
+  const rep = measureCoverage(root, { owner: 'M202', delta });
+  assertEqual(rep.reconciliation.commits.balances, false, 'saldo não é inventado');
+  assertEqual(rep.reconciliation.commits.source, 'unavailable:svn-unattributed-ownerless', 'limitação nomeada');
+});
+
 function sweptMilestone(root, owner) {
   fs.mkdirSync(path.join(root, '.gsd', 'milestones', owner, 'slices'), { recursive: true });
 }

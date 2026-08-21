@@ -560,6 +560,62 @@ test('L9: CLI em diretório sem .gsd sai 0 e não fabrica .gsd/', () => {
 });
 
 // ── Suite close ─────────────────────────────────────────────────────────────
+test('claim released volta ao relógio e é desativado sem perder evidência', () => {
+  const released = Object.assign(claim(['released.js']), {
+    released: { at: NOW - 1000, mechanism: 'committed', evidence: { commit: 'abc123' } },
+  });
+  const classified = record(classifyRunLiveness(
+    { id: 'M-released-unit', active: true, last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 2, write_claim: released },
+    { now: NOW }));
+  assertEqual(classified.state, 'expired', 'released não representa posse efetiva');
+  const { wsDir, runFiles } = makeFixture([
+    { id: 'M-released', last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 3, write_claim: released },
+  ]);
+  const before = JSON.parse(fs.readFileSync(runFiles[0], 'utf8')).write_claim;
+  const out = recordCensus(reapOrphanRuns(wsDir, { now: NOW }));
+  assertEqual(out.reaped.length, 1, 'released não bloqueia o ceife reversível');
+  const after = JSON.parse(fs.readFileSync(runFiles[0], 'utf8'));
+  assertEqual(after.active, false, 'run desativada');
+  assertEqual(JSON.stringify(after.write_claim), JSON.stringify(before), 'evidência preservada');
+});
+
+test('claim released que vira live entre censo e lock NÃO é desativado', () => {
+  const released = Object.assign(claim(['old.js']), {
+    released: { at: NOW - 1000, mechanism: 'committed', evidence: {} },
+  });
+  const { runFiles, out } = raceFixture(
+    [{ id: 'M-reclaim', last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 3, write_claim: released }],
+    (cwd, id) => patchRecord(cwd, id, { write_claim: claim(['new.js']) }),
+  );
+  assertEqual(out.reaped.length, 0, 'a posse adquirida na janela impede a desativação');
+  assertEqual(JSON.parse(fs.readFileSync(runFiles[0], 'utf8')).active, true, 'segue ativa');
+  const skip = out.skipped.find((s) => s.id === 'M-reclaim');
+  assertEqual(skip.reason, 'reclassified-under-lock', 'corrida nomeada');
+  assertEqual(skip.recheck.state, 'holds-claim', 'revalidação vê posse efetiva');
+});
+
+test('release malformado nunca autoriza reap', () => {
+  for (const released of ['corrupt', {}]) {
+    const c = classifyRunLiveness({
+      id: 'M-corrupt', active: true, last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 3,
+      write_claim: { paths: ['valuable.js'], released },
+    }, { now: NOW });
+    assertEqual(c.state, 'holds-claim', `shape ${JSON.stringify(released)}`);
+    assertEqual(c.reason, 'claim-present', 'razão fail-closed');
+  }
+});
+
+test('claim falsy malformado nunca e confundido com ausencia', () => {
+  for (const write_claim of [false, 0, '', NaN]) {
+    const c = classifyRunLiveness({
+      id: 'M-corrupt-claim', active: true, last_heartbeat: NOW - DEFAULT_THRESHOLD_MS * 3,
+      write_claim,
+    }, { now: NOW });
+    assertEqual(c.state, 'holds-claim', `claim ${String(write_claim)}`);
+    assertEqual(c.reason, 'claim-present', 'razao fail-closed');
+  }
+});
+
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -139,7 +139,9 @@ function makeFixture(specs) {
       session_id: 'sess-fixture',
       active: spec.active === undefined ? true : spec.active,
       started_at: 1785763253000,
-      last_heartbeat: 1785763253000,
+      // Fresh by default: release-specific tests exercise the gate census,
+      // not the stale-run reaper that recordAndEvaluate invokes first.
+      last_heartbeat: Date.now(),
       worker: null,
       worker_started: null,
       isolation_mode: spec.isolation_mode || 'branch',

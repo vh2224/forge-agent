@@ -38,6 +38,11 @@ const DEFAULT_TIER_MODEL = {
 
 const VALID_TIERS = ['light', 'standard', 'heavy', 'max'];
 
+function defaultTierModel(tier) {
+  const normalizedTier = VALID_TIERS.includes(tier) ? tier : 'standard';
+  return DEFAULT_TIER_MODEL[normalizedTier];
+}
+
 // ── Engine value-shape normalization ────────────────────────────────────────
 // legacyRead() has already parsed Markdown flow lists: engine values are an
 // Array for valid lists, a string for scalars (and malformed bracket strings),
@@ -103,7 +108,7 @@ function nextAfter(chain, id) {
 }
 
 // ── Exports ──────────────────────────────────────────────────────────────
-module.exports = { readTierChain, nextAfter };
+module.exports = { readTierChain, nextAfter, defaultTierModel };
 
 // ── CLI entrypoint ───────────────────────────────────────────────────────
 if (require.main === module) {

@@ -92,7 +92,9 @@ function restorePrefsFile(filePath, snapshot) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, snapshot.content);
   } else {
-    try { fs.unlinkSync(filePath); } catch { /* already absent, fine */ }
+    try { fs.unlinkSync(filePath); } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
   }
 }
 
@@ -202,17 +204,69 @@ function collectContractWitness(cwd) {
 // D5 is NOT weakened: these are descendants of processes this module itself
 // created. It still never signals a process it did not spawn.
 const liveChildren = new Set();
+const ownedChildState = new WeakMap();
+const TASKKILL_TIMEOUT_MS = 5000;
+const CHILD_EXIT_CONFIRM_MS = 250;
 
-function killTree(child) {
-  if (!child || child.killed || typeof child.pid !== 'number') return;
+function hasOwnedChildExited(child) {
+  const state = ownedChildState.get(child);
+  return Boolean(
+    (state && state.exited)
+    || typeof child.exitCode === 'number'
+    || (child.signalCode !== undefined && child.signalCode !== null),
+  );
+}
+
+function confirmOwnedChildExited(child, timeoutMs = CHILD_EXIT_CONFIRM_MS) {
+  if (hasOwnedChildExited(child)) return Promise.resolve(true);
+  if (typeof child.once !== 'function' || typeof child.removeListener !== 'function') {
+    return new Promise((resolve) => {
+      setTimeout(() => resolve(hasOwnedChildExited(child)), timeoutMs);
+    });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      child.removeListener('close', onExit);
+      resolve(exited || hasOwnedChildExited(child));
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+    child.once('close', onExit);
+  });
+}
+
+function killTree(child, options = {}) {
+  if (!child || typeof child.pid !== 'number') return { ok: true, skipped: true };
+  const platform = options.platform || process.platform;
+  const spawnSyncImpl = options.spawnSyncImpl || spawnSync;
+  const reportDegraded = options.reportDegraded || ((reason) => {
+    process.stderr.write(`forge-resources-bench: cleanup-tree-degraded pid=${child.pid} reason=${reason}\n`);
+  });
   try {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    if (platform === 'win32') {
+      const result = spawnSyncImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        timeout: TASKKILL_TIMEOUT_MS,
+      });
+      if (result.error || result.status !== 0) {
+        const reason = result.error && result.error.code ? result.error.code : `exit-${result.status}`;
+        reportDegraded(reason);
+        child.kill('SIGKILL');
+        return { ok: false, degraded: true, reason };
+      }
     } else {
       process.kill(-child.pid, 'SIGKILL');
     }
+    return { ok: true };
   } catch {
     try { child.kill('SIGKILL'); } catch { /* already gone */ }
+    return { ok: false, degraded: true, reason: 'exception' };
   }
 }
 
@@ -221,19 +275,169 @@ function killAllLive() {
   liveChildren.clear();
 }
 
+function killTreeAsync(child, options = {}) {
+  if (!child || typeof child.pid !== 'number') return Promise.resolve({ ok: true, skipped: true });
+  if ((options.platform || process.platform) !== 'win32') return Promise.resolve(killTree(child, options));
+  const spawnImpl = options.spawnImpl || spawn;
+  const timeoutMs = options.timeoutMs || TASKKILL_TIMEOUT_MS;
+  const reportDegraded = options.reportDegraded || ((reason) => {
+    process.stderr.write(`forge-resources-bench: cleanup-tree-degraded pid=${child.pid} reason=${reason}\n`);
+  });
+  return new Promise((resolve) => {
+    let settled = false;
+    let resolutionStarted = false;
+    let killer;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const fallback = (reason) => {
+      reportDegraded(reason);
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      finish({ ok: false, degraded: true, reason });
+    };
+    const resolveNonSuccess = async (reason) => {
+      if (resolutionStarted || settled) return;
+      resolutionStarted = true;
+      if (reason === 'exit-128' && await confirmOwnedChildExited(child, options.exitConfirmMs)) {
+        finish({ ok: true, alreadyExited: true, taskkillReason: reason });
+        return;
+      }
+      fallback(reason);
+    };
+    try {
+      killer = spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {
+      resolveNonSuccess('spawn-exception');
+      return;
+    }
+    timer = setTimeout(() => {
+      try { killer.kill(); } catch { /* already gone */ }
+      resolveNonSuccess('timeout');
+    }, timeoutMs);
+    killer.once('error', (error) => resolveNonSuccess(error.code || 'spawn-error'));
+    killer.once('close', (code) => {
+      if (code === 0) finish({ ok: true });
+      else resolveNonSuccess(`exit-${code}`);
+    });
+  });
+}
+
+async function cleanupOwnedChild(child, options = {}, { retryDegraded = false } = {}) {
+  let state = ownedChildState.get(child);
+  if (!state) {
+    state = { exited: false, cleanupPromise: null, cleanupResult: null, cleanupRetried: false };
+    ownedChildState.set(child, state);
+  }
+  const startCleanup = () => {
+    const cleanupPromise = killTreeAsync(child, options).catch((error) => ({
+      ok: false,
+      degraded: true,
+      reason: error.code || error.message || 'exception',
+    }));
+    state.cleanupPromise = cleanupPromise;
+    return cleanupPromise.then((result) => {
+      if (state.cleanupPromise === cleanupPromise) state.cleanupPromise = null;
+      state.cleanupResult = result;
+      if (result.ok || state.exited) liveChildren.delete(child);
+      return result;
+    });
+  };
+
+  let result;
+  if (state.cleanupPromise) result = await state.cleanupPromise;
+  else if (state.cleanupResult) result = state.cleanupResult;
+  else result = await startCleanup();
+  if (!result.ok && retryDegraded && liveChildren.has(child) && !state.cleanupRetried) {
+    state.cleanupRetried = true;
+    result = await startCleanup();
+  }
+  return result;
+}
+
+async function killAllLiveAsync(options = {}) {
+  const children = Array.from(liveChildren);
+  const results = await Promise.all(children.map((child) => cleanupOwnedChild(
+    child, options, { retryDegraded: true },
+  )));
+  const degraded = results.filter((result) => !result || result.ok === false);
+  if (degraded.length > 0) {
+    const reasons = degraded.map((result) => (result && result.reason) || 'unknown');
+    const error = new Error(`cleanup-degraded:${reasons.join(',')}`);
+    error.code = 'CLEANUP_DEGRADED';
+    error.results = results;
+    throw error;
+  }
+  return { ok: true, results };
+}
+
+function createSpawnFence() {
+  return { closed: false, reason: null };
+}
+
+function closeSpawnFence(fence, reason) {
+  fence.closed = true;
+  fence.reason = reason;
+}
+
+async function completeSignalShutdown({
+  signal, cancellationFence, restore, cleanup, exit, writeDiagnostic,
+}) {
+  closeSpawnFence(cancellationFence, `signal:${signal}`);
+  restore();
+  let cleanupError = null;
+  try { await cleanup(); } catch (error) { cleanupError = error; }
+  const finalRestore = restore(true);
+  if (!finalRestore.ok) {
+    writeDiagnostic(`final-restore-failed:${finalRestore.error.message}`);
+    exit(74);
+    return;
+  }
+  if (cleanupError) {
+    writeDiagnostic(`signal-cleanup-failed:${cleanupError.message}`);
+    exit(75);
+    return;
+  }
+  exit(signal === 'SIGINT' ? 130 : 143);
+}
+
+function assertRestoration(runError, restoration) {
+  if (restoration.ok) return;
+  if (runError) {
+    throw new AggregateError(
+      [runError, restoration.error],
+      `benchmark failed and preferences could not be restored: ${restoration.error.message}`,
+      { cause: runError },
+    );
+  }
+  throw restoration.error;
+}
+
 // Spawn one child in its own process group, resolving with a classified
 // outcome. Async (never `spawnSync`) for two reasons: the event loop stays
 // free so the SIGINT/SIGTERM prefs-restore handlers actually run mid-corrida
 // (R1's signal-path hole — `spawnSync` blocked them until the child exited),
 // and the group-kill path is shared with the competitors.
-function spawnTracked(cmd, args, { cwd, timeoutMs, env }) {
+function spawnTracked(cmd, args, {
+  cwd, timeoutMs, env, cancellationFence = null, spawnImpl = spawn, cleanupOptions = {},
+}) {
+  if (cancellationFence && cancellationFence.closed) {
+    return Promise.resolve({
+      wallMs: 0, exitCode: null, signal: 'spawn-fenced', timedOut: false,
+      error: cancellationFence.reason || 'cancelled',
+    });
+  }
   return new Promise((resolve) => {
     const start = Date.now();
     let settled = false;
     let timedOut = false;
+    let operationalCleanupStarted = false;
     let child;
     try {
-      child = spawn(cmd, args, {
+      child = spawnImpl(cmd, args, {
         cwd,
         stdio: 'ignore',
         detached: process.platform !== 'win32',
@@ -244,25 +448,57 @@ function spawnTracked(cmd, args, { cwd, timeoutMs, env }) {
       return;
     }
     liveChildren.add(child);
+    const childState = {
+      exited: false, cleanupPromise: null, cleanupResult: null, cleanupRetried: false,
+    };
+    ownedChildState.set(child, childState);
     const killer = setTimeout(() => {
       if (settled) return;
       timedOut = true;
       killTree(child);
     }, timeoutMs);
-    const finish = (payload) => {
+    const finish = (payload, untrack = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(killer);
-      liveChildren.delete(child);
+      if (untrack) liveChildren.delete(child);
       resolve({ wallMs: Date.now() - start, timedOut, ...payload });
     };
-    child.on('exit', (code, signal) => finish({ exitCode: code, signal: signal || null }));
-    child.on('error', (e) => finish({ exitCode: null, signal: 'spawn-error', error: e.message }));
+    const observeExit = (payload) => {
+      childState.exited = true;
+      if (operationalCleanupStarted || (settled && childState.cleanupPromise)) return;
+      liveChildren.delete(child);
+      finish(payload);
+    };
+    child.on('exit', (code, signal) => observeExit({ exitCode: code, signal: signal || null }));
+    child.on('close', (code, signal) => observeExit({ exitCode: code, signal: signal || null }));
+    child.on('error', async (e) => {
+      const ownsProcess = typeof child.pid === 'number';
+      if (!ownsProcess) {
+        finish({ exitCode: null, signal: 'spawn-error', error: e.message, cleanupPending: false }, true);
+        return;
+      }
+      if (operationalCleanupStarted || settled) return;
+      operationalCleanupStarted = true;
+      clearTimeout(killer);
+      const cleanup = await cleanupOwnedChild(child, cleanupOptions);
+      operationalCleanupStarted = false;
+      finish({
+        exitCode: null,
+        signal: 'spawn-error',
+        error: e.message,
+        cleanup,
+        cleanupPending: !cleanup.ok,
+      }, cleanup.ok);
+    });
   });
 }
 
 async function runChild(cmd, args, cwd, timeoutMs, opts = {}) {
-  const r = await spawnTracked(cmd, args, { cwd, timeoutMs, env: opts.env });
+  const r = await spawnTracked(cmd, args, {
+    cwd, timeoutMs, env: opts.env, cancellationFence: opts.cancellationFence,
+  });
+  if (r.signal === 'spawn-fenced') return { wallMs: 0, exitCode: null, status: 'aborted:signal-cancelled' };
   if (r.timedOut) return { wallMs: r.wallMs, exitCode: null, status: 'aborted:timeout-exceeded' };
   if (r.signal === 'spawn-error') return { wallMs: r.wallMs, exitCode: null, status: 'aborted:spawn-error' };
   if (r.signal) return { wallMs: r.wallMs, exitCode: null, status: `aborted:killed-${r.signal}` };
@@ -273,8 +509,8 @@ async function runChild(cmd, args, cwd, timeoutMs, opts = {}) {
 // Competitors are fire-and-forget context (S06-PLAN.md: "o wall-clock dos
 // competidores é registrado como contexto, não como o número"). They are
 // spawned async, never synchronously blocking the measured corrida's start.
-async function spawnCompetitor(cmd, args, cwd, timeoutMs) {
-  const r = await spawnTracked(cmd, args, { cwd, timeoutMs });
+async function spawnCompetitor(cmd, args, cwd, timeoutMs, cancellationFence = null) {
+  const r = await spawnTracked(cmd, args, { cwd, timeoutMs, cancellationFence });
   return { wallMs: r.wallMs, exitCode: r.exitCode, signal: r.signal || null };
 }
 
@@ -368,8 +604,9 @@ function evaluateEnforcement({
 
 async function runOneCorrida(opts) {
   const {
-    cell, rep, command, cwd, timeoutMs, competitors, outFile,
+    cell, rep, command, cwd, timeoutMs, competitors, outFile, cancellationFence = null,
   } = opts;
+  if (cancellationFence && cancellationFence.closed) return null;
   writeEnforcement(localPrefsPath(cwd), cellEnforcement(cell));
 
   const witness = collectContractWitness(cwd);
@@ -377,11 +614,15 @@ async function runOneCorrida(opts) {
   const [cmd, ...args] = command;
   let competitorPromises = [];
   if (cell.startsWith('batch/') && competitors > 0) {
-    competitorPromises = Array.from({ length: competitors }, () => spawnCompetitor(cmd, args, cwd, timeoutMs));
+    competitorPromises = Array.from(
+      { length: competitors },
+      () => spawnCompetitor(cmd, args, cwd, timeoutMs, cancellationFence),
+    );
   }
 
   // Route the measured workload through the real enforcement entrypoint and
   // give the child a way to testify about what it received.
+  if (cancellationFence && cancellationFence.closed) return null;
   const { clamp, release } = acquireClamp(command, cwd, timeoutMs);
   const dumpFile = path.join(
     path.dirname(outFile),
@@ -401,7 +642,7 @@ async function runOneCorrida(opts) {
   let measured;
   try {
     const [runCmd, ...runArgs] = clamp.argv;
-    measured = await runChild(runCmd, runArgs, cwd, timeoutMs, { env });
+    measured = await runChild(runCmd, runArgs, cwd, timeoutMs, { env, cancellationFence });
   } finally {
     release();
   }
@@ -574,20 +815,40 @@ function parseArgs(argv) {
   return args;
 }
 
+async function finalizeRunMatrix({ cancellationFence, cleanup = killAllLiveAsync, restore, runError }) {
+  let cleanupError = null;
+  if (!cancellationFence.closed) {
+    try { await cleanup(); } catch (error) { cleanupError = error; }
+  }
+  let restoration;
+  let restoreError = null;
+  try { restoration = restore(); } catch (error) { restoreError = error; }
+  if (!restoreError && restoration && !restoration.ok) restoreError = restoration.error;
+  const errors = [runError, cleanupError, restoreError].filter(Boolean);
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'run matrix finalization failed', { cause: runError || errors[0] });
+  }
+}
+
 async function runMatrix(opts) {
   const {
     cwd, cells, reps, competitors, command, timeoutMs, outFile,
   } = opts;
   const prefsPath = localPrefsPath(cwd);
   const snapshot = snapshotPrefsFile(prefsPath);
+  const restorePrefs = opts.restorePrefsFile || restorePrefsFile;
+  const cancellationFence = createSpawnFence();
   let restored = false;
-  const doRestore = () => {
-    if (restored) return;
+  const doRestore = (force = false) => {
+    if (restored && !force) return { ok: true, skipped: true };
     restored = true;
     try {
-      restorePrefsFile(prefsPath, snapshot);
+      restorePrefs(prefsPath, snapshot);
+      return { ok: true };
     } catch (e) {
       process.stderr.write(`forge-resources-bench: ERRO ao restaurar prefs (${e.message}) — verifique ${prefsPath} manualmente.\n`);
+      return { ok: false, error: e };
     }
   };
 
@@ -596,26 +857,39 @@ async function runMatrix(opts) {
   // MID-corrida instead of only after the child returned — that was the
   // signal-path hole T06 reported under SIGTERM. Children live in their own
   // process groups, so they must be reaped explicitly (R3) before exit.
-  const onSignal = (sig) => () => {
-    killAllLive();
-    doRestore();
-    process.exit(sig === 'SIGINT' ? 130 : 143);
+  let signalCleanupStarted = false;
+  const onSignal = (sig) => async () => {
+    if (signalCleanupStarted) return;
+    signalCleanupStarted = true;
+    await completeSignalShutdown({
+      signal: sig,
+      cancellationFence,
+      restore: doRestore,
+      cleanup: killAllLiveAsync,
+      exit: (code) => process.exit(code),
+      writeDiagnostic: (message) => process.stderr.write(`forge-resources-bench: ${message}\n`),
+    });
   };
   process.on('SIGINT', onSignal('SIGINT'));
   process.on('SIGTERM', onSignal('SIGTERM'));
 
+  let runError = null;
   try {
     const plan = planRuns(cells, reps);
     for (const { cell, rep } of plan) {
+      if (cancellationFence.closed) break;
       // eslint-disable-next-line no-await-in-loop
-      await runOneCorrida({
-        cell, rep, command, cwd, timeoutMs, competitors, outFile,
+      const record = await runOneCorrida({
+        cell, rep, command, cwd, timeoutMs, competitors, outFile, cancellationFence,
       });
+      if (!record || cancellationFence.closed) break;
     }
     return summarizeFile(outFile, cells);
+  } catch (error) {
+    runError = error;
+    throw error;
   } finally {
-    killAllLive();
-    doRestore();
+    await finalizeRunMatrix({ cancellationFence, restore: doRestore, runError });
   }
 }
 
@@ -672,6 +946,15 @@ module.exports = {
   runChild,
   spawnCompetitor,
   killTree,
+  killTreeAsync,
+  killAllLiveAsync,
+  createSpawnFence,
+  closeSpawnFence,
+  completeSignalShutdown,
+  assertRestoration,
+  finalizeRunMatrix,
+  spawnTracked,
+  TASKKILL_TIMEOUT_MS,
   ENFORCEMENT_REASONS,
   evaluateEnforcement,
   withDumpPreload,

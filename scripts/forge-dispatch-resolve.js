@@ -22,7 +22,7 @@ const path = require('path');
 const { resolveRoute } = require('./forge-routing.js');
 const { modelToAlias, modelFamily } = require('./forge-model-alias.js');
 const { readPrefsCached } = require('./forge-prefs.js');
-const { readTierChain } = require('./forge-tier-chain.js');
+const { readTierChain, defaultTierModel } = require('./forge-tier-chain.js');
 // Imported, not re-typed: forge-must-haves.js reads the same `domain:` key from
 // the same frontmatter, and a second copy of the strip rule is how the two
 // readers drift apart. Requires whitespace before the `#`, which is what
@@ -65,6 +65,16 @@ const EFFORT_RANK = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 };
 
 function text(value) {
   return value === null || value === undefined ? '' : String(value).trim();
+}
+
+function claudeExecutableChain(chain, tier) {
+  const source = Array.isArray(chain) ? chain : [];
+  const kept = source.filter((member) => member && member.engine === 'claude' && member.mapped === true);
+  if (kept.length > 0) return { chain: kept, substituted: kept.length !== source.length };
+  if (source.length === 0) return { chain: source, substituted: false };
+  const id = defaultTierModel(tier);
+  const mapped = modelToAlias(id);
+  return { chain: [{ id, alias: mapped.alias, mapped: mapped.mapped, engine: 'claude' }], substituted: true };
 }
 
 function firstFrontmatter(raw) {
@@ -282,15 +292,38 @@ function resolveDispatch(opts) {
     frontmatterWorker: plan.worker || null,
     cwd,
   });
-  const chain = Array.isArray(route.chain) ? route.chain : [];
-  const model = chain[0] && chain[0].id ? chain[0].id : '';
+  let chain = Array.isArray(route.chain) ? route.chain : [];
+  let nonRoutableSubstitution = false;
+  // Only execute-task and plan-slice have non-Claude adapters. Every other
+  // phase is dispatched through Agent(), whose model parameter accepts only a
+  // mapped Claude alias. Keep the resolver aligned with that executable
+  // boundary: retain configured Claude members when possible, otherwise use
+  // the canonical Claude model for the tier. Reporting the external family
+  // here would make telemetry claim Codex while an in-process Claude agent ran.
+  if (unitType !== 'execute-task' && unitType !== 'plan-slice') {
+    const executable = claudeExecutableChain(chain, tier);
+    chain = executable.chain;
+    nonRoutableSubstitution = executable.substituted;
+  }
   const prefsResult = readPrefsCached(cwd);
   const prefs = prefsResult && prefsResult.prefs ? prefsResult.prefs : {};
   const workers = normalizeWorkers(prefs, unitType);
+  const workersExplicit = Boolean(prefs.workers && typeof prefs.workers === 'object'
+    && Object.prototype.hasOwnProperty.call(prefs.workers, unitType));
+  const routingBacked = route.source === 'routing' || /(?:^|; )routing-(?:hit|default)(?:;|$)/.test(route.reason || '');
+  const legacyTierRoute = route.source === 'tier_models'
+    || (route.source === 'frontmatter' && !plan.worker && !routingBacked);
+  let explicitClaudeSubstitution = false;
+  if (legacyTierRoute && workersExplicit && workers.workers_engine === 'claude') {
+    const executable = claudeExecutableChain(chain, tier);
+    chain = executable.chain;
+    explicitClaudeSubstitution = executable.substituted;
+  }
+  const model = chain[0] && chain[0].id ? chain[0].id : '';
 
   let engine;
   let engineReason;
-  if (route.source === 'routing' || route.source === 'frontmatter') {
+  if (routingBacked || (route.source === 'frontmatter' && Boolean(plan.worker))) {
     engine = chain[0] && chain[0].engine ? chain[0].engine : 'claude';
     engineReason = `route:${route.source}:${engine}`;
   } else if (plan.worker) {
@@ -299,9 +332,21 @@ function resolveDispatch(opts) {
   } else if (workers.workers_engine !== 'claude') {
     engine = workers.workers_engine;
     engineReason = `workers.${unitType}:${engine}`;
+  } else if (workersExplicit) {
+    engine = 'claude';
+    engineReason = explicitClaudeSubstitution
+      ? `workers.${unitType}:claude|model-family-substituted`
+      : `workers.${unitType}:claude`;
+  } else if (!workersExplicit && chain[0] && chain[0].engine && chain[0].engine !== 'claude') {
+    // tier_models is also allowed to carry a cross-provider model.  Treating
+    // every non-routable phase as Claude here made a GPT-only tier catalogue
+    // lie in the live phase matrix and could hand a GPT model id to a Claude
+    // dispatch.  The model-family classifier in forge-routing owns this value.
+    engine = chain[0].engine;
+    engineReason = `tier-model-family:${engine}`;
   } else {
     engine = 'claude';
-    engineReason = 'default:claude';
+    engineReason = nonRoutableSubstitution ? 'non-routable-family-substituted:claude' : 'default:claude';
   }
 
   // Merged, never either-or. The CLI ALWAYS supplies an effortMap object (parseArgs
@@ -439,7 +484,7 @@ function degradedContract(args) {
   };
 }
 
-module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, TIER_DEFAULTS, EFFORT_DEFAULTS };
+module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, claudeExecutableChain, TIER_DEFAULTS, EFFORT_DEFAULTS };
 
 if (require.main === module) {
   // Exit 0 on success; exit 1 ONLY on a prefs loud-stop (M008-CONTEXT #2 — a

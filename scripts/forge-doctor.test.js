@@ -61,7 +61,6 @@ test('help advertises the capabilities check and selected runtime', () => {
   assert.match(out.stdout, /--runtime/);
 });
 
-
 // R1 (review dialetico, conceded): an errored `memory-quarantine` result carries
 // `{ pending: 0, skipped: 'error: ...' }` — rendering ✓ there communicates a clean
 // quarantine at exactly the moment the state was never measured. Assert the RENDERED
@@ -84,5 +83,13 @@ test('memory-quarantine measured clean still renders check', () => {
   assert.ok(rendered.includes('✓ Advisory — Memory quarantine'), `measured-clean quarantine must render check, got: ${rendered}`);
 });
 
-process.stdout.write(`\n${passed} passed, 0 failed\n`);
+test('help advertises explicit claim recovery and restore surfaces', () => {
+  const out = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'forge-doctor.js'), '--help'], { encoding: 'utf8' });
+  assert.strictEqual(out.status, 0);
+  assert.match(out.stdout, /--recover-claim/);
+  assert.match(out.stdout, /--confirm-owner-stopped/);
+  assert.match(out.stdout, /--confirm-workspace-quiescent/);
+  assert.match(out.stdout, /--restore-claim/);
+});
 
+process.stdout.write(`\n${passed} passed, 0 failed\n`);

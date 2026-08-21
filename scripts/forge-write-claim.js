@@ -24,7 +24,7 @@
 // ── Composition, not reimplementation ───────────────────────────────────────
 //
 //   persistence        forge-runs.get / forge-runs.update
-//   path normalization forge-parallelism.normalizePath
+//   path normalization forge-parallelism.canonicalizeClaimPath
 //
 // A second implementation of path normalization here would be the defect
 // this module's own Standards section forbids.
@@ -67,7 +67,7 @@
 'use strict';
 
 const runs = require('./forge-runs.js');
-const { normalizePath } = require('./forge-parallelism.js');
+const { canonicalizeClaimPath } = require('./forge-parallelism.js');
 
 // Closed set. `plan-writes` = came from a T##-PLAN.md `writes:`/`expected_output:`
 // block. `review-fix-paths` = came from the `path:line` of conceded review
@@ -123,7 +123,7 @@ const CLI_RELEASE_MECHANISMS = ['manual'];
  * `CLAIM_SOURCES`; anything else throws, naming both the rejected value and
  * the closed set, and nothing is written. `code_dir` is the GIVEN value —
  * absent means `null`, never derived. `paths` are normalized via the
- * imported `normalizePath` (never reimplemented), empty entries dropped,
+ * imported `canonicalizeClaimPath` (never reimplemented), empty entries dropped,
  * order preserved.
  */
 function normalizeClaim(input) {
@@ -148,7 +148,7 @@ function normalizeClaim(input) {
       `(${typeof opts.code_dir}) — must be a non-empty string or null`);
   }
   const paths = Array.isArray(opts.paths)
-    ? opts.paths.map(normalizePath).filter((p) => p !== '')
+    ? opts.paths.map(canonicalizeClaimPath).filter((p) => p !== '')
     : [];
   return {
     at: opts.at || Date.now(),
@@ -344,6 +344,38 @@ function releaseClaim(cwd, runId, release, opts) {
 }
 
 /**
+ * Operator recovery transition. The measured claim and run activity are
+ * compared under the run lock; a changed record is never released.
+ */
+function recoverClaim(cwd, runId, expectedRecord, release, opts) {
+  const o = opts || {};
+  const released = normalizeReleased(release);
+  if (!expectedRecord || expectedRecord.active !== true) {
+    return { ok: false, reason: 'stale-run' };
+  }
+  const expectedRecordJson = JSON.stringify(expectedRecord);
+  let outcome = { ok: false, reason: 'stale-run' };
+  let result;
+  try {
+    result = runs.updateWith(cwd, runId, (current) => {
+      if (current.active !== true || JSON.stringify(current) !== expectedRecordJson) return null;
+      if (!isHeld(current.write_claim)) return null;
+      // Executes while the run lock is held, immediately before publication.
+      // Recovery uses this for the final dirty-scope measurement.
+      if (typeof o.precondition === 'function') o.precondition(current);
+      const nextClaim = Object.assign({}, current.write_claim, { released });
+      outcome = { ok: true, claim: nextClaim };
+      return { write_claim: nextClaim, active: false, ended_at: released.at };
+    });
+  } catch (error) {
+    if (/not found/.test(error.message)) return { ok: false, reason: 'stale-run' };
+    throw error;
+  }
+  if (!result.updated) return { ok: false, reason: 'stale-run' };
+  return outcome;
+}
+
+/**
  * Pure. THREE distinct facts must never collapse when read through here:
  *   - claim absent (`readClaim` -> null)              -> isHeld: false
  *   - claim recorded, honestly empty (`paths: []`)     -> isHeld: true
@@ -356,7 +388,29 @@ function releaseClaim(cwd, runId, release, opts) {
  * see S05-PLAN.md contract #6.
  */
 function isHeld(claim) {
-  return !!claim && !claim.released;
+  // Only the canonical absence values mean "no claim". Falsy persisted values
+  // are malformed claims, not proof that ownership ended.
+  if (claim === null || claim === undefined) return false;
+  if (typeof claim !== 'object' || Array.isArray(claim)) return true;
+  try {
+    return normalizeReleased(claim.released) === null;
+  } catch {
+    // A malformed release envelope cannot prove that ownership ended. Legacy,
+    // hand-edited and partially-corrupt records stay protected (fail closed).
+    return true;
+  }
+}
+
+/** Strict read-side validator for a persisted live claim. */
+function validateHeldClaim(claim) {
+  if (!claim || typeof claim !== 'object' || Array.isArray(claim)) throw new Error('claim-invalid');
+  if (typeof claim.at !== 'number' || !Number.isFinite(claim.at)) throw new Error('claim-at-invalid');
+  if (!CLAIM_SOURCES.includes(claim.source)) throw new Error('claim-source-invalid');
+  if (!(claim.code_dir === null || (typeof claim.code_dir === 'string' && claim.code_dir !== ''))) throw new Error('claim-code-dir-invalid');
+  if (!Array.isArray(claim.paths)) throw new Error('claim-paths-invalid');
+  normalizeVcsBaseline(claim.vcs_baseline);
+  if (normalizeReleased(claim.released) !== null) throw new Error('claim-not-live');
+  return claim;
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────
@@ -491,7 +545,9 @@ module.exports = {
   readClaim,
   clearClaim,
   releaseClaim,
+  recoverClaim,
   isHeld,
+  validateHeldClaim,
   CLAIM_SOURCES,
   RELEASE_MECHANISMS,
   CLI_RELEASE_MECHANISMS,

@@ -15,7 +15,7 @@
 //       never derived from root/branch/isolation_mode.
 //   R4  `recordClaim` is the ONLY function that writes — `normalizeClaim`
 //       and `readClaim` never touch disk, proved by sha256 before/after.
-//   R5  paths are normalized via the IMPORTED `normalizePath` — `src\a.ts`
+//   R5  paths are normalized via the IMPORTED `canonicalizeClaimPath` — `src\a.ts`
 //       and `src/a.ts` land identical.
 //   R6  `CLAIM_SOURCES` is a closed set, cross-checked in BOTH directions.
 //   R7  the CLI is proved by SPAWN (never in-process call), exit 0 on the
@@ -32,7 +32,7 @@ const { spawnSync } = require('child_process');
 const MODULE = path.join(__dirname, 'forge-write-claim.js');
 const claimMod = require('./forge-write-claim.js');
 const {
-  normalizeClaim, recordClaim, readClaim, clearClaim, releaseClaim, isHeld,
+  normalizeClaim, recordClaim, readClaim, clearClaim, releaseClaim, recoverClaim, isHeld, validateHeldClaim,
   CLAIM_SOURCES, RELEASE_MECHANISMS,
 } = claimMod;
 const runs = require('./forge-runs.js');
@@ -177,7 +177,7 @@ test('R4: readClaim never touches disk', () => {
   assertEqual(after, before, 'readClaim must never write');
 });
 
-// ── R5: paths normalized via imported normalizePath ─────────────────────────
+// ── R5: paths normalized via imported canonicalizeClaimPath ─────────────────
 test('R5: backslash and forward-slash paths normalize identically', () => {
   const { wsDir } = makeFixture('M-20260813-r5a');
   const claimA = recordClaim(wsDir, 'M-20260813-r5a', {
@@ -189,6 +189,13 @@ test('R5: backslash and forward-slash paths normalize identically', () => {
   });
   assertEqual(claimA.paths[0], claimB.paths[0], 'src\\a.ts and src/a.ts must normalize to the same path');
   assertEqual(claimA.paths[0], 'src/a.ts');
+});
+
+test('R5b: paths absolutos POSIX, drive e UNC sÃ£o claims invÃ¡lidos', () => {
+  for (const invalid of ['/x', 'C:\\x', '\\\\server\\share\\x']) {
+    let error = null; try { normalizeClaim({ unit: 'execute-task/T01', source: 'manual', paths: [invalid] }); } catch (e) { error = e; }
+    assert(error && /claim path must be relative/.test(error.message), `${invalid} deve ser recusado`);
+  }
 });
 
 // ── R6: CLAIM_SOURCES closed set, cross-checked both directions ────────────
@@ -509,7 +516,20 @@ test('R13: absent, claimed-empty and released are three distinct facts, each wit
   assert(readClaim(recReleased) !== null, 'fact 3 remains non-null (re-asserted) — released ≠ absent');
 });
 
+test('R13b: malformed release envelope remains held (fail closed)', () => {
+  assertEqual(isHeld({ paths: ['valuable.js'], released: 'corrupt' }), true, 'string ilegível');
+  assertEqual(isHeld({ paths: ['valuable.js'], released: {} }), true, 'objeto parcial');
+});
+
 // ── R14: legacy record — vcs_baseline/released default null, sha256 unchanged by read
+test('R13c: only null/undefined mean absence; malformed falsy claims remain held', () => {
+  assertEqual(isHeld(null), false, 'null is canonical absence');
+  assertEqual(isHeld(undefined), false, 'undefined is canonical absence');
+  for (const malformed of [false, 0, '', NaN]) {
+    assertEqual(isHeld(malformed), true, `malformed claim ${String(malformed)}`);
+  }
+});
+
 test('R14: legacy record (no vcs_baseline/released) reads both as null, sha256 unchanged', () => {
   const { wsDir, runFile } = makeFixture('M-20260813-legacy-r14');
   const before = sha256(runFile);
@@ -650,6 +670,56 @@ test('R17e: the library seam keeps the full set — the restriction is CLI-only 
 });
 
 // ── Suite close ──────────────────────────────────────────────────────────
+test('R18: recoverClaim faz release manual + active:false atomicamente', () => {
+  const { wsDir } = makeFixture('M-20260813-r18');
+  recordClaim(wsDir, 'M-20260813-r18', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18');
+  const result = recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: { intent: 'test' } });
+  assertEqual(result.ok, true);
+  const after = runs.get(wsDir, expected.id);
+  assertEqual(after.active, false);
+  assertEqual(after.write_claim.released.mechanism, 'manual');
+  assertEqual(after.ended_at, 9);
+});
+
+test('R18b: recoverClaim aborta CAS quando o claim mudou', () => {
+  const { wsDir } = makeFixture('M-20260813-r18b');
+  recordClaim(wsDir, 'M-20260813-r18b', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18b');
+  recordClaim(wsDir, expected.id, { unit: 'execute-task/T02', source: 'manual', paths: ['b.js'] });
+  const result = recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: {} });
+  assertEqual(result.ok, false);
+  assertEqual(result.reason, 'stale-run');
+  assertEqual(runs.get(wsDir, expected.id).active, true);
+  assertEqual(runs.get(wsDir, expected.id).write_claim.released, null);
+});
+
+test('R18c: validateHeldClaim recusa shape persistido parcial', () => {
+  assertEqual(validateHeldClaim({ at: 1, source: 'manual', code_dir: 'C:/x', paths: [], vcs_baseline: null, released: null }).at, 1);
+  let reason = null;
+  try { validateHeldClaim({ source: 'manual', code_dir: 'C:/x', paths: [], vcs_baseline: null, released: null }); } catch (error) { reason = error.message; }
+  assertEqual(reason, 'claim-at-invalid');
+});
+
+test('R18d: recoverClaim aborta CAS quando a run mudou fora do claim', () => {
+  const { wsDir } = makeFixture('M-20260813-r18d');
+  recordClaim(wsDir, 'M-20260813-r18d', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18d');
+  runs.update(wsDir, expected.id, { last_heartbeat: expected.last_heartbeat + 1 });
+  const result = recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: {} });
+  assertEqual(result.ok, false);
+  assertEqual(runs.get(wsDir, expected.id).active, true);
+});
+
+test('R18e: precondition falha dentro da transição sem publicar patch', () => {
+  const { wsDir } = makeFixture('M-20260813-r18e');
+  recordClaim(wsDir, 'M-20260813-r18e', { unit: 'execute-task/T01', source: 'manual', paths: ['a.js'] });
+  const expected = runs.get(wsDir, 'M-20260813-r18e'); let called = false;
+  let reason = null;
+  try { recoverClaim(wsDir, expected.id, expected, { at: 9, mechanism: 'manual', evidence: {} }, { precondition: () => { called = true; throw new Error('precondition-refused'); } }); } catch (error) { reason = error.message; }
+  assertEqual(called, true); assertEqual(reason, 'precondition-refused'); assertEqual(runs.get(wsDir, expected.id).active, true); assertEqual(runs.get(wsDir, expected.id).write_claim.released, null);
+});
+
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);
