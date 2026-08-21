@@ -29,13 +29,14 @@ function Publish-JsonAtomic([string]$Path, [object]$Value) {
 
 try {
   $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  foreach ($name in @('nonce', 'nodePath', 'benchPath', 'cwd', 'startedPath', 'triggerPath', 'cancelPath', 'resultPath')) {
+  foreach ($name in @('nonce', 'nodePath', 'benchPath', 'cwd', 'controllerPath', 'startedPath', 'triggerPath', 'cancelPath', 'resultPath')) {
     if (-not $config.$name -or -not [IO.Path]::IsPathRooted([string]$config.$name) -and $name -ne 'nonce') {
       throw "invalid-config:$name"
     }
   }
   if (-not ($config.argv -is [Array])) { throw 'invalid-config:argv' }
   $result.nonce = [string]$config.nonce
+  Publish-JsonAtomic ([string]$config.controllerPath) ([ordered]@{ nonce = $result.nonce; pid = $PID; stage = 'controller-started' })
 
   $stage = 'add-type'
   Add-Type -TypeDefinition @'
@@ -188,7 +189,9 @@ public sealed class ForgeCtrlCSession : IDisposable {
 }
 '@
 
+  Publish-JsonAtomic ([string]$config.controllerPath) ([ordered]@{ nonce = $result.nonce; pid = $PID; stage = 'add-type-complete' })
   $stage = 'create-child'
+  Publish-JsonAtomic ([string]$config.controllerPath) ([ordered]@{ nonce = $result.nonce; pid = $PID; stage = $stage })
   $arguments = @([string]$config.benchPath) + @($config.argv | ForEach-Object { [string]$_ })
   $session = [ForgeCtrlCSession]::new(
     [string]$config.nodePath,

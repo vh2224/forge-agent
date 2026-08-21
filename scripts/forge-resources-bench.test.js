@@ -290,6 +290,7 @@ test('Windows Ctrl+C fixture: encodes the private-console protocol and forbidden
     'AssignProcessToJobObject', 'SetConsoleCtrlHandler(IntPtr.Zero, true)',
     'ResumeThread', 'GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)',
     'WaitForSingleObject', 'GetExitCodeProcess', 'Publish-JsonAtomic',
+    "stage = 'controller-started'", "stage = 'add-type-complete'", "stage = $stage",
   ]) assert(source.includes(required), `fixture must contain ${required}`);
   for (const forbidden of [
     'CREATE_NEW_PROCESS_' + 'GROUP', 'CTRL_' + 'BREAK_EVENT',
@@ -935,6 +936,7 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
     const protocolDir = path.join(dir, 'protocol space Ω');
     fs.mkdirSync(protocolDir, { recursive: true });
     const configPath = path.join(protocolDir, 'config.json');
+    const controllerPath = path.join(protocolDir, 'controller.json');
     startedPath = path.join(protocolDir, 'started.json');
     const triggerPath = path.join(protocolDir, 'trigger.json');
     cancelPath = path.join(protocolDir, 'cancel.json');
@@ -946,6 +948,7 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
       benchPath: BENCH_PATH,
       cwd: dir,
       argv: benchArgv.slice(1),
+      controllerPath,
       startedPath,
       triggerPath,
       cancelPath,
@@ -973,14 +976,38 @@ async function runSigintContract(powerShellHost, injectFailureAfterStart = false
 
   try {
     if (process.platform === 'win32') {
-      const rawStarted = await waitFor(
+      const rawController = await waitFor(
         () => {
-          if (earlyExit) throw new Error(`windows-controller-start: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
-          return fs.existsSync(startedPath) && fs.readFileSync(startedPath, 'utf8');
+          if (earlyExit) throw new Error(`windows-controller-launch: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
+          const controllerPath = path.join(dir, 'protocol space Ω', 'controller.json');
+          return fs.existsSync(controllerPath) && fs.readFileSync(controllerPath, 'utf8');
         },
         10000,
-        'windows-controller-start',
+        'windows-controller-launch',
       );
+      const controller = JSON.parse(rawController);
+      assertEqual(controller.nonce, nonce, 'controller protocol nonce must match');
+      assertEqual(controller.stage, 'controller-started');
+      let lastControllerStage = controller.stage;
+      let rawStarted;
+      try {
+        rawStarted = await waitFor(
+          () => {
+            if (earlyExit) throw new Error(`windows-controller-start: exited ${JSON.stringify(earlyExit)}: ${stderr}`);
+            const controllerPath = path.join(dir, 'protocol space Ω', 'controller.json');
+            if (fs.existsSync(controllerPath)) {
+              const progress = JSON.parse(fs.readFileSync(controllerPath, 'utf8'));
+              if (progress.nonce !== nonce) throw new Error('windows-controller-start: progress nonce mismatch');
+              lastControllerStage = progress.stage;
+            }
+            return fs.existsSync(startedPath) && fs.readFileSync(startedPath, 'utf8');
+          },
+          60000,
+          'windows-controller-start',
+        );
+      } catch (error) {
+        throw new Error(`${error.message}; last-stage=${lastControllerStage}`, { cause: error });
+      }
       started = JSON.parse(rawStarted);
       assertEqual(started.nonce, nonce, 'started protocol nonce must match');
     }
@@ -1082,6 +1109,7 @@ async function runAssignmentRollbackContract(powerShellHost) {
     benchPath: BENCH_PATH,
     cwd: dir,
     argv: ['--dry-run', '--cwd', dir],
+    controllerPath: path.join(dir, 'controller.json'),
     startedPath: path.join(dir, 'started.json'),
     triggerPath: path.join(dir, 'trigger.json'),
     cancelPath: path.join(dir, 'cancel.json'),
