@@ -360,6 +360,18 @@ test('R12d — path absoluto externo sozinho nunca herda o repo declarado', () =
   assertEqual(out.repo_roots.length, 0, 'nenhum escopo incompleto emitido');
 });
 
+test('R12e — traversal relativo que escapa do workspace e recusado', () => {
+  const f = makeFixture({ noRepoField: true });
+  for (const [name, escaped] of [['parent', '../outside/x.ts'], ['nested', 'web/../../outside/x.ts']]) {
+    const plan = path.join(f.root, `T02-traversal-${name}-PLAN.md`);
+    fs.writeFileSync(plan, ['---', 'id: T02', 'repo: web', 'writes:', `  - "${escaped}"`, '---', ''].join('\n'));
+    const out = resolveCodeDir({ isoResult: f.isoResult, planPath: plan, cwd: f.ws });
+    assertEqual(out.status, 'cross-repo', `${name}: status fail-closed`);
+    assertEqual(out.code_dir, '', `${name}: nenhum cwd parcial`);
+    assertEqual(out.repo_roots.length, 0, `${name}: nenhum escopo parcial`);
+  }
+});
+
 test('R12 — exit 5 (undeclared)', () => {
   const f = makeFixture({ noRepoField: true });
   const r = runCli(['--resolve', '--iso-result', JSON.stringify(f.isoResult),

@@ -499,7 +499,11 @@ function resolveCodeDir(opts) {
     const repo = attributeRepo(abs, usable);
     if (!repo) {
       unmatched++;
-      if (path.isAbsolute(root) || /^[A-Za-z]:[\\/]/.test(root) || /^[\\/]{2}/.test(root)) unmatchedAbsolute++;
+      const lexical = path.posix.normalize(normalizePath(root));
+      const escapesWorkspace = lexical === '..' || lexical.startsWith('../');
+      if (path.isAbsolute(root) || /^[A-Za-z]:[\\/]/.test(root) || /^[\\/]{2}/.test(root) || escapesWorkspace) {
+        unmatchedAbsolute++;
+      }
       continue;
     }
     touched.set(normalizePath(repo.path), repo);
