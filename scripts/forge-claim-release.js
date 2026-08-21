@@ -84,7 +84,7 @@
 //   TTL/grace           forge-unit-lease.js → DEFAULT_TTL_MS / DEFAULT_GRACE_MS
 //   run inativa         forge-filelock.js → isHolderRunActive (export aditivo)
 //   persistência        forge-write-claim.js → readClaim / releaseClaim / isHeld
-//   normalização        forge-parallelism.js → normalizePath
+//   normalização        forge-parallelism.js → canonicalizeClaimPath
 //
 // NENHUM `execFileSync`/`spawnSync` de `git` ou `svn` neste módulo — toda
 // interação com VCS passa pelo seam público, e a suíte prova a ausência por
@@ -114,7 +114,7 @@ const vcsDefault = require('./forge-vcs.js');
 const { DEFAULT_TTL_MS, DEFAULT_GRACE_MS } = require('./forge-unit-lease.js');
 const { isHolderRunActive } = require('./forge-filelock.js');
 const { readClaim, releaseClaim, isHeld } = require('./forge-write-claim.js');
-const { normalizePath, claimPathMatches } = require('./forge-parallelism.js');
+const { canonicalizeClaimPath, claimPathMatches } = require('./forge-parallelism.js');
 const runs = require('./forge-runs.js');
 
 /**
@@ -182,7 +182,7 @@ function measureBaseline(codeDir, opts = {}) {
 /**
  * Um path do claim "cobre" um path do status quando são o mesmo path
  * normalizado, ou quando o path do claim é um diretório ancestral dele. As duas
- * pontas passam pelo `normalizePath` IMPORTADO — nunca uma segunda
+ * pontas passam pelo `canonicalizeClaimPath` IMPORTADO — nunca uma segunda
  * normalização local (a terceira cópia é o defeito que os Standards proíbem).
  */
 const covers = claimPathMatches;
@@ -246,7 +246,7 @@ function measureTouched(codeDir, vcs, baselineBefore, opts = {}) {
     }
     const out = [];
     for (const entry of res.entries || []) {
-      const p = normalizePath(entry.path);
+      const p = canonicalizeClaimPath(entry.path);
       if (p !== '' && !out.includes(p)) out.push(p);
     }
     return { ok: true, paths: out, error: null };
@@ -267,7 +267,7 @@ function measureTouched(codeDir, vcs, baselineBefore, opts = {}) {
     const out = [];
     for (const r of log.revisions || []) {
       for (const p of r.paths || []) {
-        const n = normalizePath(String(p.path).replace(/^\/+/, ''));
+        const n = canonicalizeClaimPath(String(p.path).replace(/^\/+/, ''));
         if (n !== '' && !out.includes(n)) out.push(n);
       }
     }
@@ -377,13 +377,13 @@ function probeClaim(claim, opts = {}) {
   }
 
   let claimed;
-  try { claimed = (Array.isArray(claim.paths) ? claim.paths : []).map(normalizePath).filter((p) => p !== ''); }
+  try { claimed = (Array.isArray(claim.paths) ? claim.paths : []).map(canonicalizeClaimPath).filter((p) => p !== ''); }
   catch { facts.probe_error = 'claim-path-invalid'; return facts; }
   const dirty = [];
   for (const entry of status.entries || []) {
     if (!IN_FLIGHT_KINDS.includes(entry.kind)) continue;
     let statusPath;
-    try { statusPath = normalizePath(entry.path); }
+    try { statusPath = canonicalizeClaimPath(entry.path); }
     catch { facts.probe_error = 'working-path-invalid'; return facts; }
     if (claimed.some((c) => covers(c, statusPath)) && !dirty.includes(statusPath)) dirty.push(statusPath);
   }

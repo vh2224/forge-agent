@@ -125,7 +125,7 @@ console.log('\nConcern 2: CLI parity — no args / bad --slice-plan / fixture');
 console.log('\nConcern 3: named exports smoke');
 {
   const mod = require(SCRIPT);
-  const names = ['globToRegex', 'normalizePath', 'pathsOverlap', 'writesConflict',
+  const names = ['globToRegex', 'normalizePath', 'normalizeFilesystemPath', 'canonicalizeClaimPath', 'pathsOverlap', 'writesConflict',
     'parseTaskFrontmatter', 'parseListField', 'discoverTasks'];
   for (const n of names) {
     test(`exports.${n} is a function`, () => assertEq(typeof mod[n], 'function'));

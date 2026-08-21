@@ -255,6 +255,13 @@ test("claim '.' captura dirty na raiz e escape malformado nunca libera", () => {
   runs.update(malformed.cwd, malformed.id, { write_claim: { ...malformedClaim, paths: ['../x'] } });
   const refused = recovery.apply(malformed.cwd, malformed.id, { ...malformed.common, confirmOwnerStopped: true });
   assert.strictEqual(refused.reason, 'claim-path-escape'); assert.strictEqual(runs.get(malformed.cwd, malformed.id).active, true); assert.strictEqual(runs.get(malformed.cwd, malformed.id).write_claim.released, null);
+
+  for (const [suffix, invalid] of [['posix', '/x'], ['drive', 'C:\\x'], ['unc', '\\\\server\\share\\x']]) {
+    const absolute = fixture(`T-malformed-${suffix}`); const held = runs.get(absolute.cwd, absolute.id).write_claim;
+    runs.update(absolute.cwd, absolute.id, { write_claim: { ...held, paths: [invalid] } });
+    const result = recovery.apply(absolute.cwd, absolute.id, { ...absolute.common, confirmOwnerStopped: true });
+    assert.strictEqual(result.ok, false, `${invalid} nÃ£o foi recusado`); assert.strictEqual(runs.get(absolute.cwd, absolute.id).active, true); assert.strictEqual(runs.get(absolute.cwd, absolute.id).write_claim.released, null);
+  }
 });
 
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });

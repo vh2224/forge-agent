@@ -15,7 +15,7 @@
 //       never derived from root/branch/isolation_mode.
 //   R4  `recordClaim` is the ONLY function that writes — `normalizeClaim`
 //       and `readClaim` never touch disk, proved by sha256 before/after.
-//   R5  paths are normalized via the IMPORTED `normalizePath` — `src\a.ts`
+//   R5  paths are normalized via the IMPORTED `canonicalizeClaimPath` — `src\a.ts`
 //       and `src/a.ts` land identical.
 //   R6  `CLAIM_SOURCES` is a closed set, cross-checked in BOTH directions.
 //   R7  the CLI is proved by SPAWN (never in-process call), exit 0 on the
@@ -177,7 +177,7 @@ test('R4: readClaim never touches disk', () => {
   assertEqual(after, before, 'readClaim must never write');
 });
 
-// ── R5: paths normalized via imported normalizePath ─────────────────────────
+// ── R5: paths normalized via imported canonicalizeClaimPath ─────────────────
 test('R5: backslash and forward-slash paths normalize identically', () => {
   const { wsDir } = makeFixture('M-20260813-r5a');
   const claimA = recordClaim(wsDir, 'M-20260813-r5a', {
@@ -189,6 +189,13 @@ test('R5: backslash and forward-slash paths normalize identically', () => {
   });
   assertEqual(claimA.paths[0], claimB.paths[0], 'src\\a.ts and src/a.ts must normalize to the same path');
   assertEqual(claimA.paths[0], 'src/a.ts');
+});
+
+test('R5b: paths absolutos POSIX, drive e UNC sÃ£o claims invÃ¡lidos', () => {
+  for (const invalid of ['/x', 'C:\\x', '\\\\server\\share\\x']) {
+    let error = null; try { normalizeClaim({ unit: 'execute-task/T01', source: 'manual', paths: [invalid] }); } catch (e) { error = e; }
+    assert(error && /claim path must be relative/.test(error.message), `${invalid} deve ser recusado`);
+  }
 });
 
 // ── R6: CLAIM_SOURCES closed set, cross-checked both directions ────────────

@@ -951,6 +951,14 @@ test('claim que escapa da raiz falha fechado e nunca libera', () => {
   assertEqual(status.reason, 'held-probe-unavailable', 'claim malformado deve permanecer retido');
   assertEqual(status.facts.probe_error, 'claim-path-invalid', 'escape deve produzir erro nomeado');
   assertEqual(status.held, true, 'claim malformado nunca pode ser liberado');
+
+  for (const [suffix, invalid] of [['posix', '/x'], ['drive', 'C:\\x'], ['unc', '\\\\server\\share\\x']]) {
+    const id = `M-r3-absolute-${suffix}`; const fixture = makeWorkspace(id);
+    recordClaim(fixture.wsDir, id, { at: 1785763253000, unit: 'execute-task/T02', source: 'manual', code_dir: fixture.wsDir, paths: ['x'], vcs_baseline: { vcs: 'git', id: 'abc' } });
+    const valid = runs.get(fixture.wsDir, id).write_claim; runs.update(fixture.wsDir, id, { write_claim: { ...valid, paths: [invalid] } });
+    const refused = statusOf(fixture.wsDir, id, { vcsSeam: seam });
+    assertEqual(refused.reason, 'held-probe-unavailable', `${invalid} deve permanecer retido`); assertEqual(refused.facts.probe_error, 'claim-path-invalid'); assertEqual(refused.held, true);
+  }
 });
 
 cleanup();

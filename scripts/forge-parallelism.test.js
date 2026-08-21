@@ -77,6 +77,11 @@ console.log('Scenario 1: modern plan, two independent tasks');
 
   test('mode == parallel', () => assertEq(r.mode, 'parallel'));
   test('batch contains T01, T02', () => assertEq(batchIds(r), ['T01', 'T02']));
+  test('batch planPath preserves filesystem root', () => {
+    const expected = path.join(sliceDir, 'tasks', 'T01', 'T01-PLAN.md').replace(/\\/g, '/');
+    assertEq(r.batch[0].planPath, expected);
+    if (process.platform === 'win32') assert(/^[A-Za-z]:\//.test(r.batch[0].planPath), `drive root lost: ${r.batch[0].planPath}`);
+  });
   test('reason mentions ready set count', () => assert(/ready set/.test(r.reason), `got: ${r.reason}`));
 }
 
@@ -428,7 +433,7 @@ console.log('\nScenario 25: sub-task discovery and decimal-aware sort');
 }
 
 test('claimPathMatches cobre glob *, **, ?, diretório e não-match', () => {
-  const { claimPathMatches, normalizePath, pathsOverlap } = require('./forge-parallelism.js');
+  const { claimPathMatches, normalizePath, normalizeFilesystemPath, canonicalizeClaimPath, pathsOverlap } = require('./forge-parallelism.js');
   assert(claimPathMatches('src/*.js', 'src/a.js'), '* não casou');
   assert(!claimPathMatches('src/*.js', 'src/deep/a.js'), '* atravessou segmento');
   assert(claimPathMatches('src/**', 'src/deep/a.js'), '** não casou');
@@ -438,17 +443,26 @@ test('claimPathMatches cobre glob *, **, ?, diretório e não-match', () => {
   assert(claimPathMatches('src/a?.js', 'src/ab.js'), '? não casou');
   assert(claimPathMatches('src', 'src/deep/a.js'), 'diretório não cobriu descendente');
   assert(!claimPathMatches('src/*.js', 'test/a.js'), 'não-match virou match');
-  assert(normalizePath('.') === '.', 'dot must represent the workspace');
-  assert(normalizePath('./src') === 'src', './src must canonicalize to src');
-  assert(normalizePath('src/../src') === 'src', 'internal dot segment must reduce lexically');
-  let escaped = false; try { normalizePath('../x'); } catch (_) { escaped = true; }
+  assert(canonicalizeClaimPath('.') === '.', 'dot must represent the workspace');
+  assert(canonicalizeClaimPath('./src') === 'src', './src must canonicalize to src');
+  assert(canonicalizeClaimPath('src/../src') === 'src', 'internal dot segment must reduce lexically');
+  assert(canonicalizeClaimPath('src\\a.js') === 'src/a.js', 'relative Windows claim must remain supported');
+  let escaped = false; try { canonicalizeClaimPath('../x'); } catch (_) { escaped = true; }
   assert(escaped, 'escape above root must be rejected');
+  assert(normalizeFilesystemPath('/tmp/forge/T01-PLAN.md') === '/tmp/forge/T01-PLAN.md', 'POSIX absolute planPath lost its root');
+  assert(normalizeFilesystemPath('C:\\forge\\T01-PLAN.md') === 'C:/forge/T01-PLAN.md', 'drive-rooted planPath changed semantics');
+  assert(normalizeFilesystemPath('\\\\server\\share\\T01-PLAN.md') === '//server/share/T01-PLAN.md', 'UNC planPath changed semantics');
+  assert(normalizePath('C:\\forge\\T01-PLAN.md') === 'C:/forge/T01-PLAN.md', 'legacy normalizePath export must preserve filesystem API');
   assert(claimPathMatches('.', 'root.txt'), 'workspace claim must cover root file');
   assert(claimPathMatches('./src', 'src/a.js'), './src must share canonical matcher');
   assert(claimPathMatches('src/../src', 'src/a.js'), 'dot segments must share canonical matcher');
   assert(claimPathMatches('../x', 'anything.txt'), 'malformed claim must fail closed');
   assert(pathsOverlap('.', 'any/path'), 'workspace must overlap any path');
   assert(pathsOverlap('../x', 'other'), 'malformed overlap must fail closed');
+  for (const absolute of ['/x', 'C:\\x', '\\\\server\\share\\x']) {
+    assert(claimPathMatches(absolute, 'src/a.js'), `absolute claim must cover-all fail closed: ${absolute}`);
+    assert(pathsOverlap(absolute, 'src'), `absolute claim must conflict fail closed: ${absolute}`);
+  }
 });
 
 // --- Summary ---

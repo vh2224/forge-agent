@@ -7,7 +7,8 @@ collision **stops the dispatch** — it never becomes a merge conflict discovere
 
 Claim paths use one POSIX lexical contract across gate, release and recovery: `.` means the entire
 workspace, `./src` and `src/../src` canonicalize to `src`, and a `..` that would escape above the
-workspace root is invalid and fails closed. Glob tokens remain intact during this canonicalization.
+workspace root is invalid and fails closed. POSIX-absolute, drive-rooted and UNC paths are filesystem
+addresses, never claims, and also fail closed. Glob tokens remain intact during claim canonicalization.
 
 This file is boundary-agnostic and has **three consumers**, exactly like `shared/forge-review.md`:
 

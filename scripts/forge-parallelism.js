@@ -71,9 +71,14 @@ function globToRegex(glob) {
   return new RegExp('^' + re + '$');
 }
 
-function normalizePath(p) {
+function normalizeFilesystemPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function canonicalizeClaimPath(p) {
   const raw = String(p || '').replace(/\\/g, '/');
   if (raw === '') return '';
+  if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) throw new Error(`claim path must be relative: ${raw}`);
   const stack = [];
   for (const segment of raw.split('/')) {
     if (segment === '' || segment === '.') continue;
@@ -90,7 +95,7 @@ function normalizePath(p) {
 // interpreted as a pattern.
 function claimPathMatches(claimPath, realPath) {
   let claim; let real;
-  try { claim = normalizePath(claimPath); real = normalizePath(realPath); }
+  try { claim = canonicalizeClaimPath(claimPath); real = canonicalizeClaimPath(realPath); }
   catch { return true; } // malformed/escaping claims cover everything (fail closed)
   if (!claim || !real) return false;
   if (claim === '.') return true;
@@ -101,7 +106,7 @@ function claimPathMatches(claimPath, realPath) {
 // Two write-declarations conflict iff any literal-or-glob on one side matches the other.
 function pathsOverlap(a, b) {
   let na; let nb;
-  try { na = normalizePath(a); nb = normalizePath(b); } catch { return true; }
+  try { na = canonicalizeClaimPath(a); nb = canonicalizeClaimPath(b); } catch { return true; }
   if (!na || !nb) return true; // defensive: empty path = unknown = conflict
   if (na === '.' || nb === '.') return true; // workspace claim overlaps every path
   if (na === nb) return true;
@@ -255,7 +260,7 @@ function main() {
       done: t.done,
       depends,
       writes,
-      planPath: normalizePath(t.planPath),
+      planPath: normalizeFilesystemPath(t.planPath),
     };
   });
 
@@ -361,7 +366,9 @@ if (require.main === module) {
 
 module.exports = {
   globToRegex,
-  normalizePath,
+  normalizePath: normalizeFilesystemPath,
+  normalizeFilesystemPath,
+  canonicalizeClaimPath,
   claimPathMatches,
   pathsOverlap,
   writesConflict,

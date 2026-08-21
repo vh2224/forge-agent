@@ -24,7 +24,7 @@
 // ── Composition, not reimplementation ───────────────────────────────────────
 //
 //   persistence        forge-runs.get / forge-runs.update
-//   path normalization forge-parallelism.normalizePath
+//   path normalization forge-parallelism.canonicalizeClaimPath
 //
 // A second implementation of path normalization here would be the defect
 // this module's own Standards section forbids.
@@ -67,7 +67,7 @@
 'use strict';
 
 const runs = require('./forge-runs.js');
-const { normalizePath } = require('./forge-parallelism.js');
+const { canonicalizeClaimPath } = require('./forge-parallelism.js');
 
 // Closed set. `plan-writes` = came from a T##-PLAN.md `writes:`/`expected_output:`
 // block. `review-fix-paths` = came from the `path:line` of conceded review
@@ -123,7 +123,7 @@ const CLI_RELEASE_MECHANISMS = ['manual'];
  * `CLAIM_SOURCES`; anything else throws, naming both the rejected value and
  * the closed set, and nothing is written. `code_dir` is the GIVEN value —
  * absent means `null`, never derived. `paths` are normalized via the
- * imported `normalizePath` (never reimplemented), empty entries dropped,
+ * imported `canonicalizeClaimPath` (never reimplemented), empty entries dropped,
  * order preserved.
  */
 function normalizeClaim(input) {
@@ -148,7 +148,7 @@ function normalizeClaim(input) {
       `(${typeof opts.code_dir}) — must be a non-empty string or null`);
   }
   const paths = Array.isArray(opts.paths)
-    ? opts.paths.map(normalizePath).filter((p) => p !== '')
+    ? opts.paths.map(canonicalizeClaimPath).filter((p) => p !== '')
     : [];
   return {
     at: opts.at || Date.now(),
