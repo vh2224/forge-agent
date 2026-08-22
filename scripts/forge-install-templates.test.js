@@ -36,12 +36,16 @@ test('template inventory matches forge-prompt dispatch units', () => {
 });
 
 test('both wrappers delegate runtime/update/dry-run to the shared Node core', () => {
-  assert.match(fs.readFileSync(INSTALL_SH, 'utf8'), /forge-installer\.js/);
-  assert.match(fs.readFileSync(INSTALL_SH, 'utf8'), /"\$@"/);
+  const shell = fs.readFileSync(INSTALL_SH, 'utf8');
+  assert.match(shell, /forge-installer\.js/);
+  assert.match(shell, /forge-update\.js/);
+  assert.match(shell, /"\$\{FORWARDED\[@\]\}"/);
   const powershell = fs.readFileSync(INSTALL_PS1, 'utf8');
   assert.match(powershell, /ValidateSet\('claude', 'codex', 'both'\)/);
   assert.match(powershell, /-DryRun/);
   assert.match(powershell, /forge-installer\.js/);
+  assert.match(powershell, /forge-update\.js/);
+  assert.match(powershell, /PSBoundParameters\.ContainsKey\('Runtime'\)/);
   assert.match(powershell, /ProjectRoot/);
 });
 

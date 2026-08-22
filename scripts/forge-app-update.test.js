@@ -18,10 +18,8 @@
 //   2. Replacing the bundle does not replace the running process, so the app
 //      must offer a relaunch after an update rather than letting a stale window
 //      look current. `needsRelaunch` + `relaunch()` are that affordance.
-//   3. The "Reinstalar" affordance runs NO git. It exists to unblock the machine
-//      where `git pull --ff-only` refuses (uncommitted work, unpushed commits),
-//      so smuggling a pull back into that path would break it precisely where it
-//      is needed — and quietly, since the update path would still work.
+//   3. "Atualizar" uses the remote/stable updater and never pulls the local
+//      clone. "Reinstalar" is the only explicit local-source affordance.
 //
 // Since v3.2.0 the anchors moved rather than loosened: both affordances share one
 // runner (`runInstaller`) and one command builder (`InstallerCommand.build`, in
@@ -197,10 +195,33 @@ check('nem o app nem o install.sh confiam no PATH para achar o node', () => {
 const buildBody = bodyOf(coreCode, 'static func build(');
 const runnerBody = bodyOf(updatesCode, 'func runInstaller(');
 
-check('InstallerCommand.build passa --update E --with-app nos dois modos', () => {
+check('a consulta de versão lê tags do servidor sem fetch no clone', () => {
+  const checkBody = bodyOf(updatesCode, 'func check()');
+  assert(/ls-remote/.test(checkBody), 'check() não consulta as tags diretamente no servidor');
+  assert(!/fetch|origin\/HEAD|--sort=-v:refname/.test(checkBody),
+    'check() voltou a atualizar ou usar refs do clone local');
+});
+
+check('load usa o manifest do FORGE_HOME como fonte primária e tolera checkout ausente', () => {
+  const loadBody = bodyOf(updatesCode, 'func load()');
+  assert(/InstalledForgeVersion\.forgeHome\(/.test(loadBody),
+    'load() não resolve o mesmo FORGE_HOME usado pelo updater remoto');
+  assert(/contents\(atPath:/.test(loadBody) && /manifest\.json/.test(loadBody),
+    'load() não lê FORGE_HOME/manifest.json');
+  assert(/InstalledForgeVersion\.resolve\(/.test(loadBody),
+    'load() não aplica a precedência manifest → clone testada no ForgeKit');
+  assert(!/guard\s+let\s+repo\s+else/.test(loadBody),
+    'load() ainda exige checkout; check/update precisam funcionar só com a instalação');
+  assert(/repo\.flatMap\s*\{\s*git\(\["describe",\s*"--tags",\s*"--abbrev=0"\]/.test(loadBody),
+    'a tag do clone deixou de existir como fallback controlado para dogfood');
+  assert(/repoDescribe\s*=\s*repo\.flatMap/.test(loadBody),
+    'o describe completo do clone não ficou separado como diagnóstico');
+});
+
+check('InstallerCommand.build passa --apply E --with-app nos dois modos', () => {
   assert(
-    buildBody.includes('--update'),
-    'o comando do instalador não passa --update'
+    buildBody.includes('--apply'),
+    'o comando do updater não passa --apply'
   );
   assert(
     buildBody.includes('--with-app'),
@@ -209,19 +230,20 @@ check('InstallerCommand.build passa --update E --with-app nos dois modos', () =>
   );
 });
 
-check('o modo reinstall não roda git nenhum', () => {
-  // `installer` é, por construção, a parte SEM git; o ramo .update é o único que
-  // prefixa o pull. Ancorado no corpo do builder porque o `help` do botão
-  // menciona os mesmos tokens em string literal, que stripLineComments não remove.
+check('update é remoto e reinstall é a única fonte local explícita', () => {
   assert(
-    /case\s+\.reinstall:\s*return\s+installer\b/.test(buildBody),
-    'o modo reinstall não devolve mais a parte crua sem git — reinstalar deixaria ' +
-      'de funcionar exatamente na árvore suja que a afordance existe para atender'
+    /case\s+\.update:\s*return\s+updater\b/.test(buildBody),
+    'o modo update não usa mais o updater remoto padrão'
   );
   assert(
-    /case\s+\.update:[^\n]*pull --ff-only/.test(buildBody),
-    'o `pull --ff-only` não está confinado ao ramo .update'
+    /case\s+\.reinstall:[^\n]*--source local --repo/.test(buildBody),
+    'reinstall não declara a fonte local explicitamente'
   );
+  assert(!/pull --ff-only/.test(buildBody), 'InstallerCommand voltou a puxar o clone local');
+  assert(/FORGE_HOME:-\$HOME\/\.forge-agent/.test(buildBody),
+    'update não executa o forge-update.js instalado em FORGE_HOME');
+  assert(!/install\.sh/.test(buildBody),
+    'update voltou a depender do install.sh do repo');
 });
 
 check('o runner roda o instalador headless, não num Terminal', () => {
@@ -254,27 +276,20 @@ check('as duas entradas delegam ao runner e não constroem comando', () => {
   }
 });
 
-check('o precheck de git só roda no modo .update, nunca em .reinstall', () => {
-  // Invariante 3 é sobre o CONTRATO de runReinstall() — mas os dois modos
-  // compartilham runInstaller(), e antes da v3.2.1 os dois probes de git
-  // (`rev-list` e `Git.isDirty`) rodavam incondicionalmente ali, mesmo que o
-  // resultado fosse descartado via `pulls: false`. Isso contradizia "no git,
-  // no network" em runtime: o subprocesso de git rodava de qualquer forma.
-  // Anexar a checagem ao corpo de `if mode == .update` é o que fecha essa
-  // brecha — mover os probes de volta para fora do `if` é a mutação que este
-  // guard existe para pegar.
-  const ifUpdateBlock = bodyOf(runnerBody, 'if mode == .update');
+check('o runner não inspeciona nem modifica o clone local', () => {
   assert(
-    /Self\.git\(/.test(ifUpdateBlock) && /Git\.isDirty\(/.test(ifUpdateBlock),
-    'os probes de git (Self.git / Git.isDirty) não estão dentro do `if mode == ' +
-      '.update` de runInstaller() — reinstalar voltaria a rodar git sem necessidade'
+    !/Self\.git\(|Git\.isDirty\(|pull --ff-only/.test(runnerBody),
+    'runInstaller voltou a depender do estado do clone local'
   );
-  const outsideIfUpdate = runnerBody.replace(ifUpdateBlock, '');
-  assert(
-    !/Self\.git\(/.test(outsideIfUpdate) && !/Git\.isDirty\(/.test(outsideIfUpdate),
-    'há uma chamada de git fora do `if mode == .update` em runInstaller() — o ' +
-      'modo reinstall voltaria a pagar por um probe cujo resultado é descartado'
-  );
+});
+
+check('update continua funcional sem o checkout salvo', () => {
+  assert(/case\s+\.update:[\s\S]*homeDirectoryForCurrentUser\.path/.test(runnerBody),
+    'update não escolhe um diretório permanente independente do repo');
+  assert(/case\s+\.reinstall:[\s\S]*guard let repo else/.test(runnerBody),
+    'o guard do repo não ficou restrito ao reinstall');
+  assert(/ForgeCore\.stream\(cwd:\s*workingDirectory/.test(runnerBody),
+    'o subprocesso ainda usa o checkout como cwd incondicional');
 });
 
 check('o guard de repo ausente não é mais silencioso', () => {

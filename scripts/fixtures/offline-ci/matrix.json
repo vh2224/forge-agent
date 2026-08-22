@@ -10,6 +10,7 @@
     "forge-mcp.test.js",
     "forge-installer.test.js",
     "forge-update.test.js",
+    "forge-update-remote.test.js",
     "forge-package.test.js",
     "forge-operations-doc.test.js",
     "forge-release-gate.test.js"

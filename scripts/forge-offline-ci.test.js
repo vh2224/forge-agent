@@ -15,14 +15,15 @@ assert.deepStrictEqual(gate.MATRIX.hosts, ['claude', 'codex']);
 assert.deepStrictEqual(gate.MATRIX.platforms, ['win32', 'darwin', 'linux']);
 assert.deepStrictEqual(gate.MATRIX.suites, [
   'forge-operational-parity.test.js', 'forge-dispatch-policy.test.js', 'forge-dispatch-security.test.js',
-  'forge-headless.test.js', 'forge-mcp.test.js', 'forge-installer.test.js', 'forge-update.test.js', 'forge-package.test.js',
+  'forge-headless.test.js', 'forge-mcp.test.js', 'forge-installer.test.js', 'forge-update.test.js',
+  'forge-update-remote.test.js', 'forge-package.test.js',
   'forge-operations-doc.test.js',
   'forge-release-gate.test.js',
 ]);
 
 for (const host of gate.MATRIX.hosts) for (const platform of gate.MATRIX.platforms) {
   const plan = gate.buildPlan({ host, platform });
-  assert.strictEqual(plan.length, 10);
+  assert.strictEqual(plan.length, 11);
   assert(plan.every((entry) => entry.executable === process.execPath && Array.isArray(entry.argv) && entry.shell === false && entry.network === false));
 }
 

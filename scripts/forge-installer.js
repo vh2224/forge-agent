@@ -449,12 +449,42 @@ function install(input = {}) {
   // Forge home holds `scripts/` (managed core) but never
   // `forge-source-manifest.json`, so the renderer died on a raw ENOENT. Recorded
   // additively; readers that predate it simply do not see the key.
-  const manifest = { version: VERSION, runtime: installedHosts.length === 2 ? 'both' : (installedHosts[0] || runtime), project_root: projectRoot, source_repo: repo, core: coreFiles.concat(['VERSION', 'forge-agent-prefs.jsonc']).sort(), adapters: adapterManifest, ownership: ownershipRecord };
+  // A remote update renders from an ephemeral checkout which is deleted after
+  // installation. Persist the pinned server provenance, never that temporary
+  // path. Local/development installs retain source_repo for compatibility.
+  const sourceProvenance = options.sourceProvenance && typeof options.sourceProvenance === 'object'
+    ? { ...options.sourceProvenance }
+    : null;
+  const manifest = {
+    version: VERSION,
+    runtime: installedHosts.length === 2 ? 'both' : (installedHosts[0] || runtime),
+    project_root: projectRoot,
+    ...(sourceProvenance ? { source_remote: sourceProvenance } : { source_repo: repo }),
+    core: coreFiles.concat(['VERSION', 'forge-agent-prefs.jsonc']).sort(),
+    adapters: adapterManifest,
+    ownership: ownershipRecord,
+  };
   writeText(paths.shared.manifest, JSON.stringify(manifest, null, 2) + '\n', plan, options);
   const app = installApp(repo, plan, options, paths.platform);
   const backupPath = path.resolve(backupRoot);
   const hasBackup = options.update && plan.some((entry) => entry.destination && (path.resolve(entry.destination) === backupPath || path.resolve(entry.destination).startsWith(`${backupPath}${path.sep}`)));
   return { ok: true, changed: plan.some((entry) => entry.op === 'copy' || entry.op === 'write' || entry.op === 'app-build'), dry_run: Boolean(options.dryRun), runtime, selected, forge_home: paths.forgeHome, runtime_homes: Object.fromEntries(selected.map((host) => [host, paths.runtimeHomes[host]])), backup: hasBackup ? backupRoot : null, capabilities, plan, manifest, app };
+}
+
+/**
+ * The file-by-file preview, in ONE place.
+ *
+ * `forge-update` renders it too — `install.sh --update --dry-run` used to reach
+ * the installer directly and print this list, and routing that wrapper through
+ * the updater silently replaced 1000+ named operations with a four-line summary.
+ * Two copies of this formatting is how the two previews drift apart, so the
+ * updater borrows this function instead of reimplementing it.
+ */
+function planLines(report) {
+  return [
+    `Dry-run: ${report.plan.length} operation(s), no files written.`,
+    ...report.plan.map((entry) => `  [${entry.op}] ${entry.destination || [entry.command, ...(entry.args || [])].filter(Boolean).join(' ')}`),
+  ];
 }
 
 function render(report) {
@@ -464,10 +494,7 @@ function render(report) {
     lines.push(`Capabilities: ${state}`);
   }
   if (report.already_installed) lines.push('Already installed; use --update to replace managed files.');
-  if (report.dry_run) {
-    lines.push(`Dry-run: ${report.plan.length} operation(s), no files written.`);
-    for (const entry of report.plan) lines.push(`  [${entry.op}] ${entry.destination || [entry.command, ...(entry.args || [])].filter(Boolean).join(' ')}`);
-  }
+  if (report.dry_run) lines.push(...planLines(report));
   else lines.push(`${report.changed ? 'Installed' : 'No changes'}; ${report.plan.length} operation(s).`);
   if (report.app) lines.push(`App: ${report.app.status}${report.app.reason ? ` (${report.app.reason})` : ''}`);
   if (report.backup) lines.push(`Backup: ${report.backup}`);
@@ -545,5 +572,5 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
   catch (error) { errorWrite(`forge-installer: ${error.message}\n`); return 1; }
 }
 
-module.exports = { RUNTIMES, VERSION, MANAGED_CORE, TOMBSTONE, parseArgs, walk, adapterSources, installApp, classifyLegacyScripts, legacyScriptReferences, retireLegacyScripts, install, render, run };
+module.exports = { RUNTIMES, VERSION, MANAGED_CORE, TOMBSTONE, parseArgs, walk, adapterSources, installApp, classifyLegacyScripts, legacyScriptReferences, retireLegacyScripts, install, planLines, render, run };
 if (require.main === module) process.exitCode = run();

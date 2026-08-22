@@ -25,6 +25,35 @@
 
 import Foundation
 
+// MARK: - What version is installed
+
+/// Resolves the installation that the remote updater actually mutates.
+/// `${FORGE_HOME:-$HOME/.forge-agent}` is also `InstallerCommand`'s contract.
+/// A checkout is only a controlled fallback for dogfooding before installation.
+public enum InstalledForgeVersion {
+    public static func forgeHome(environment: [String: String], home: String) -> String {
+        let raw = environment["FORGE_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? (home as NSString).appendingPathComponent(".forge-agent")
+        if (raw as NSString).isAbsolutePath {
+            return (raw as NSString).standardizingPath
+        }
+        return ((home as NSString).appendingPathComponent(raw) as NSString).standardizingPath
+    }
+
+    public static func manifestVersion(from data: Data?) -> String? {
+        guard let data,
+              let decoded = try? JSONSerialization.jsonObject(with: data),
+              let object = decoded as? [String: Any],
+              let raw = object["version"] as? String else { return nil }
+        let version = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return version.isEmpty ? nil : version
+    }
+
+    public static func resolve(manifestData: Data?, cloneVersion: String?) -> String? {
+        manifestVersion(from: manifestData) ?? VersionFooter.stamped(cloneVersion)
+    }
+}
+
 // MARK: - Classifying a line of installer output
 
 /// What one line of installer output means to the progress UI.
@@ -309,6 +338,28 @@ public enum VersionFooter {
     }
 }
 
+// MARK: - Resolving the stable server release
+
+public enum RemoteRelease {
+    /// Parse `git ls-remote --tags` without consulting a local clone. Only
+    /// final `vMAJOR.MINOR.PATCH` tags participate; annotated-tag peel rows are
+    /// naturally deduplicated.
+    public static func latestTag(from output: String?) -> String? {
+        var latest: String?
+        for line in (output ?? "").components(separatedBy: .newlines) {
+            guard let marker = line.range(of: "refs/tags/v") else { continue }
+            var raw = String(line[marker.upperBound...])
+            if raw.hasSuffix("^{}") { raw.removeLast(3) }
+            let pieces = raw.split(separator: ".", omittingEmptySubsequences: false)
+            guard pieces.count == 3,
+                  pieces.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { continue }
+            let tag = "v" + raw
+            if latest == nil || Version.isNewer(tag, than: latest!) { latest = tag }
+        }
+        return latest
+    }
+}
+
 // MARK: - Which release notes are on screen at rest
 
 /// The window of `ReleaseCard`s the update screen shows before anyone asks for
@@ -432,16 +483,13 @@ public enum SectionRestore {
     }
 }
 
-// MARK: - Refusing to start when git cannot fast-forward
+// MARK: - Legacy local-repository diagnostics
 
-/// The update begins with `git pull --ff-only`. When that cannot succeed, the
-/// refusal is the feature: the operator develops Forge in this very repo, and
-/// moving their work aside to install an update is damage, not convenience. So
-/// nothing here ever rewrites the working tree or the history, and the state is
-/// checked BEFORE
-/// the installer starts, rather than after a bar has been on screen for seconds.
+/// Retained for diagnostics of explicitly local workflows. Normal updates no
+/// longer pull or install from this repository: forge-update resolves and pins
+/// the server release in a temporary checkout.
 ///
-/// The refusal applies ONLY to the mode that pulls. With no pull there is no
+/// The refusal applies ONLY to a caller that explicitly pulls. With no pull there is no
 /// `--ff-only` that can fail and no working tree that can be moved aside, so the
 /// damage this check prevents does not exist — and neither does the symptom
 /// ("watching a bar for something that could never have begun"). That is why
@@ -507,12 +555,12 @@ public enum ShellQuote {
 /// leave the one binary the user is looking at on the old version — the update
 /// would appear to have worked while the app stayed exactly as it was.
 ///
-/// Reinstalling never pulls. Three reasons, in order: (a) `--ff-only` would
-/// block the affordance on precisely the machine it exists to unblock — a repo
-/// with uncommitted work or unpushed commits, which is the dogfood loop;
-/// (b) pulling is the semantics of *Atualizar*, and smuggling it in here would
-/// make the same promise the label refuses to make; (c) with no pull there is no
-/// working tree that could be touched at all.
+/// Updating uses forge-update's default remote/stable source and never pulls
+/// this clone. Reinstalling is the explicit escape hatch that reuses this local
+/// source, including uncommitted dogfood work, without contacting the server.
+/// Neither mode pulls, so neither can move the operator's working tree — the
+/// property the old `--ff-only` refusal existed to protect now holds by
+/// construction rather than by a precheck.
 ///
 /// `nodePath` is the interpreter `NodeLocator` resolved, and it is not optional
 /// decoration: the command runs through `bash -lc` from a GUI app, so it
@@ -524,22 +572,23 @@ public enum ShellQuote {
 /// resolved interpreter on PATH for the installer AND every child it spawns,
 /// which is what `install.sh` and `app/build.sh` actually need.
 ///
-/// The prefix lands on the installer, never on the whole command: `.update` is
-/// `.reinstall` plus a pull, and that suffix relationship is a pinned invariant.
+/// The prefix lands on the installed updater, which is the shared head of both
+/// modes. `.reinstall` is `.update` plus the explicit local-source suffix; only
+/// that mode consumes the repository path.
 public enum InstallerCommand {
     public enum Mode { case update, reinstall }
 
     /// - Parameter nodePath: absolute path to the node binary, or nil when
-    ///   nothing resolved. Nil produces the bare command — `install.sh` runs its
-    ///   own bootstrap search and reports a real diagnosis if it also fails.
+    ///   nothing resolved. Nil produces a bare `node` command and therefore uses
+    ///   the environment available to the app's login shell.
     ///   No default value on purpose: a call site that forgets this is exactly
     ///   the regression this parameter exists to prevent.
     public static func build(repo: String, mode: Mode, nodePath: String?) -> String {
-        let installer = nodeEnvPrefix(nodePath)
-            + "bash \(ShellQuote.posix("\(repo)/install.sh")) --update --with-app"
+        let updater = nodeEnvPrefix(nodePath)
+            + "node \"${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-update.js\" --apply --with-app"
         switch mode {
-        case .reinstall: return installer
-        case .update:    return "git -C \(ShellQuote.posix(repo)) pull --ff-only && " + installer
+        case .update:    return updater
+        case .reinstall: return updater + " --source local --repo " + ShellQuote.posix(repo)
         }
     }
 

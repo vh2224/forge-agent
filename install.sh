@@ -171,4 +171,39 @@ fi
 # must use — including app/build.sh.
 PATH="${FORGE_NODE%/*}:${PATH}"; export PATH
 
-exec "${FORGE_NODE}" "${REPO_DIR}/scripts/forge-installer.js" --repo "${REPO_DIR}" "$@"
+# `--update` no longer means "reinstall this clone": it routes to the updater,
+# whose default source is the server. The flag is consumed here rather than
+# forwarded, because the two Node entry points disagree about it — the installer
+# takes `--update`, the updater takes `--apply`/`--dry-run`.
+UPDATE=false
+FORWARDED=()
+for arg in "$@"; do
+  if [[ "$arg" == "--update" ]]; then
+    UPDATE=true
+  else
+    FORWARDED+=("$arg")
+  fi
+done
+
+# `"${FORWARDED[@]}"` on an EMPTY array is an "unbound variable" error under
+# `set -u` in bash 3.2 — which is still /bin/bash on macOS, a platform this
+# installer supports by contract. The previous wrapper forwarded `"$@"`, a
+# special parameter that is always safe when empty, so introducing the array
+# introduced the hazard. `${FORWARDED[@]+...}` expands to nothing at all when the
+# array is empty and is a no-op everywhere else. Not reproduced on this machine
+# (bash 5.2 only); this is the documented 3.2 behaviour, guarded rather than
+# waited for.
+#
+# Both execs use ${FORGE_NODE}, never a bare `node`: the interpreter resolved
+# above is the whole reason this bootstrap exists, and an update launched from a
+# GUI would exit 127 without it.
+if [[ "$UPDATE" == "true" ]]; then
+  HAS_DRY_RUN=false
+  for arg in ${FORWARDED[@]+"${FORWARDED[@]}"}; do
+    [[ "$arg" == "--dry-run" ]] && HAS_DRY_RUN=true
+  done
+  [[ "$HAS_DRY_RUN" == "true" ]] || FORWARDED+=("--apply")
+  exec "${FORGE_NODE}" "${REPO_DIR}/scripts/forge-update.js" ${FORWARDED[@]+"${FORWARDED[@]}"}
+fi
+
+exec "${FORGE_NODE}" "${REPO_DIR}/scripts/forge-installer.js" --repo "${REPO_DIR}" ${FORWARDED[@]+"${FORWARDED[@]}"}

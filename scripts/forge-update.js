@@ -7,17 +7,20 @@ const { spawnSync } = require('child_process');
 const maintenance = require('./forge-maintenance.js');
 const installer = require('./forge-installer.js');
 const { resolveForgeHome } = require('./forge-home.js');
+const remoteUpdater = require('./forge-update-remote.js');
 
 const SOURCE_MANIFEST = 'forge-source-manifest.json';
 
-function parseArgs(argv = process.argv.slice(2)) {
-  // `repo` is deliberately NOT defaulted here. The default belongs to
-  // resolveSourceRepo, which can tell a directory that merely holds this script
-  // from one that can actually render projections — see the note there.
-  const options = { apply: false, json: false };
+function parseArgs(argv = process.argv.slice(2), env = process.env) {
+  // `repo` is deliberately NOT defaulted. Normal updates use the server; only
+  // the explicit local/recovery mode resolves a source repository.
+  const options = { apply: false, json: false, source: 'remote', channel: remoteUpdater.DEFAULT_CHANNEL, remote: remoteUpdater.DEFAULT_REMOTE };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--runtime') options.runtime = argv[++i] || '';
+    else if (arg === '--source') options.source = argv[++i] || '';
+    else if (arg === '--channel') options.channel = argv[++i] || '';
+    else if (arg === '--remote') options.remote = argv[++i] || '';
     else if (arg === '--repo') options.repo = path.resolve(argv[++i] || '');
     else if (arg === '--forge-home') options.forgeHome = path.resolve(argv[++i] || '');
     else if (arg === '--claude-home') options.claudeHome = path.resolve(argv[++i] || '');
@@ -27,12 +30,23 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg === '--dry-run') options.apply = false;
     else if (arg === '--json') options.json = true;
     else if (arg === '--no-model-probe') options.noModelProbe = true;
+    else if (arg === '--with-app') options.withApp = true;
     else if (arg === '--capability-timeout') options.capabilityTimeout = Number(argv[++i] || '');
     else if (arg === '--migrate-legacy') options.migrateLegacy = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`opção desconhecida: ${arg}`);
   }
   if (options.runtime) maintenance.selectedRuntimes(options.runtime);
+  if (!['remote', 'local'].includes(options.source)) throw new Error(`source inválido: ${JSON.stringify(options.source)} (use remote ou local)`);
+  if (!['stable', 'master'].includes(options.channel)) throw new Error(`channel inválido: ${JSON.stringify(options.channel)} (use stable ou master)`);
+  if (options.source === 'remote' && options.repo) throw new Error('`--repo` exige `--source local`; o update padrão ignora clones locais e usa o servidor');
+  if (options.source === 'local' && (options.remote !== remoteUpdater.DEFAULT_REMOTE || options.channel !== remoteUpdater.DEFAULT_CHANNEL)) {
+    throw new Error('`--remote`/`--channel` não podem ser combinados com `--source local`');
+  }
+  if (options.source === 'local' && env.FORGE_UPDATE_REMOTE_PROVENANCE) {
+    try { options.remoteProvenance = JSON.parse(env.FORGE_UPDATE_REMOTE_PROVENANCE); }
+    catch (_) { throw new Error('FORGE_UPDATE_REMOTE_PROVENANCE inválido'); }
+  }
   return options;
 }
 
@@ -45,7 +59,7 @@ function hasSourceManifest(directory) {
 }
 
 /**
- * Where the projections are rendered FROM — which is never the Forge home.
+ * Where explicit local-mode projections are rendered FROM.
  *
  * `scripts/` is managed core (forge-installer.js § MANAGED_CORE), so the
  * documented invocation `node scripts/forge-update.js --apply --json` is
@@ -57,10 +71,8 @@ function hasSourceManifest(directory) {
  * `--repo`: measured on a real 4.8.0 → 4.15.0 update, reproduced on both
  * versions, so the defect was at the tip of master and not a stale install.
  *
- * The durable answer is provenance: the install records which clone rendered
- * the installation, and the update reads it back. Order is the contract —
- * an explicit `--repo` never loses to a recorded value, and a recorded value is
- * only consulted when the entry point itself cannot render.
+ * This compatibility resolver remains for `--source local`. Server updates do
+ * not call it and never consult recorded clone provenance.
  */
 function resolveSourceRepo(input = {}) {
   const candidates = [];
@@ -108,7 +120,7 @@ function declaredVersion(repo) {
 /**
  * Provenance of the bytes about to be installed.
  *
- * `/forge-update` reinstalls WHATEVER IS IN THE CLONE and never fetches. Measured:
+ * Explicit local mode reinstalls WHATEVER IS IN THE CLONE and never fetches. Measured:
  * a clone 113 commits behind (4.8.0 against 4.15.0 at the tip) "updated"
  * successfully to the same version, with no signal of it anywhere in the JSON or
  * the summary — the operator had to run `git fetch` by hand to find out.
@@ -158,26 +170,24 @@ function update(input = {}, dependencies = {}) {
     projectRoot: input.projectRoot,
     platform: input.platform,
     env: input.env,
-    env: input.env,
-    userHome: input.userHome,
-    platform: input.platform,
     binaries: input.binaries,
     capabilityTimeout: input.capabilityTimeout,
     noModelProbe: preview ? true : input.noModelProbe,
     skipCapabilityCheck: preview ? true : input.skipCapabilityCheck,
     migrateLegacy: input.migrateLegacy,
+    withApp: input.withApp,
+    sourceProvenance: input.remoteProvenance,
     dryRun: preview,
   });
   // Retirement is reported on BOTH paths. It used to be summarized only in the
   // preview, so the run that actually moved files — the `--apply` an operator
   // reads once and never again — said nothing about what it retired or kept.
   const retirements = installed.plan.filter((entry) => entry.op === 'retire' || (entry.op === 'skip' && entry.reason === 'already-retired'));
-  if (preview) return { ...plan, source_repo: sourceRepo, applied: false, installer: installed, retirements };
-  return { ...plan, source_repo: sourceRepo, applied: true, changed: installed.changed, backup: installed.backup, installer: installed, retirements };
+  if (preview) return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: false, installer: installed, retirements };
+  return { ...plan, source_repo: sourceRepo, remote_source: input.remoteProvenance || null, applied: true, changed: installed.changed, backup: installed.backup, installer: installed, retirements };
 }
 
-// The clone's own state, and the sentence the summary never said: this command
-// installs what the clone holds and does not refresh it. `behind_tracking` is
+// The clone's own state for explicit local/recovery mode. `behind_tracking` is
 // labelled with the ref it came from, because a number derived from a local
 // remote-tracking ref is only as fresh as the last fetch and must not be read as
 // the distance to the server.
@@ -201,18 +211,38 @@ function sourceRepoLines(source) {
 }
 
 function render(report) {
+  const remote = report.remote_source;
+  const sourceLines = remote
+    ? [
+      `remote source: ${remote.remote}`,
+      `  channel ${remote.channel} | ${remote.ref} | sha ${remote.sha}`,
+      `  declared version ${remote.declared_version || 'unknown'}${remote.version_matches_ref === false ? ' (⚠ difere da tag)' : ''}`,
+      '  clone local ignorado; checkout remoto temporário removido após o update',
+    ]
+    : [
+      `source repo: ${report.source_repo ? `${report.source_repo.path} (${report.source_repo.origin})` : 'não resolvido'}`,
+      ...sourceRepoLines(report.source_repo),
+    ];
   const lines = [
     `Forge update ${report.applied ? 'applied' : 'plan'}`,
     `runtime: ${report.runtime}`,
     `installation: ${report.installation_source}`,
     // Named, not implied: an update that reinstalls whatever the clone happens
     // to hold must say WHICH clone it read, and how it found it.
-    `source repo: ${report.source_repo ? `${report.source_repo.path} (${report.source_repo.origin})` : 'não resolvido'}`,
-    ...sourceRepoLines(report.source_repo),
+    ...sourceLines,
     `backup: ${report.backup_required ? 'required-before-write' : 'not-required'}`,
   ];
   if (report.legacy_migration) lines.push(`legacy migration: ${report.legacy_migration.release} (${report.legacy_migration.runtime})`);
   if (report.installer && report.installer.backup) lines.push(`backup created: ${report.installer.backup}`);
+  // A compatibility bootstrap has no structured plan, so it must SAY so and hand
+  // over the remote installer's own output. Printing nothing here would read as
+  // "nothing to report", which is the one thing it does not mean.
+  if (report.bootstrap && report.bootstrap.mode === 'installer-compat') {
+    lines.push(`bootstrap: installer-compat — ${report.bootstrap.reason}`);
+    lines.push(`runtime resolvido por: ${report.bootstrap.runtime_source}`);
+    lines.push('saída do instalador remoto (plano e retirements vêm dela, não deste resumo):');
+    for (const line of String(report.bootstrap.output || '').split(/\r?\n/)) lines.push(`  | ${line}`);
+  }
   for (const retirement of report.retirements || []) {
     const state = retirement.op === 'skip' ? 'skipped' : 'retire';
     lines.push(`${state}: ${retirement.source} -> ${retirement.destination}`);
@@ -232,6 +262,12 @@ function render(report) {
   if (conflicts) lines.push(`conflicts preserved: ${conflicts}; use --migrate-legacy to replace unmarked legacy projections`);
   if (report.applied) lines.push(report.changed ? 'managed files updated' : 'no managed-file changes');
   else lines.push('no files written; pass --apply to update');
+  // The file-by-file preview an operator had before `install.sh --update
+  // --dry-run` was routed through this updater. Borrowed from the installer's own
+  // formatter so the two previews cannot drift.
+  if (!report.applied && report.installer && report.installer.dry_run && Array.isArray(report.installer.plan)) {
+    lines.push(...installer.planLines(report.installer));
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -239,10 +275,10 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
   try {
     const options = parseArgs(argv);
     if (options.help) {
-      write('Usage: forge-update.js [--runtime claude|codex|both] [--apply|--dry-run] [--repo DIR] [--json] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy]\n');
+      write('Usage: forge-update.js [--runtime claude|codex|both] [--apply|--dry-run] [--channel stable|master] [--remote HTTPS_URL] [--json] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy] [--with-app]\n       forge-update.js --source local --repo DIR [demais opções]\n');
       return 0;
     }
-    const report = update(options);
+    const report = options.source === 'remote' ? remoteUpdater.updateFromRemote(options) : update(options);
     write(options.json ? `${JSON.stringify(report, null, 2)}\n` : render(report));
     return report.ok ? 0 : 1;
   } catch (error) {

@@ -2527,6 +2527,46 @@ test("bundle canônico não gera aviso; um build de dev gera") {
 
 print("\nAtualização — restauração de seção e pré-checagem do git")
 
+test("RemoteRelease escolhe a maior tag semver estável do ls-remote") {
+    let refs = """
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v4.9.0
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v4.10.0
+    cccccccccccccccccccccccccccccccccccccccc\trefs/tags/v4.10.0^{}
+    dddddddddddddddddddddddddddddddddddddddd\trefs/tags/v5.0.0-beta.1
+    """
+    assertEqual(RemoteRelease.latestTag(from: refs), "v4.10.0")
+    assertTrue(RemoteRelease.latestTag(from: nil) == nil)
+}
+
+test("versão instalada vem do manifest mesmo com clone defasado") {
+    let manifest = Data(#"{"runtime":"codex","version":"4.21.2"}"#.utf8)
+    assertEqual(InstalledForgeVersion.resolve(manifestData: manifest, cloneVersion: "v4.20.0"),
+                "4.21.2")
+}
+
+test("versão instalada funciona sem checkout e clone é apenas fallback") {
+    let manifest = Data(#"{"version":" 4.21.2 \n"}"#.utf8)
+    assertEqual(InstalledForgeVersion.resolve(manifestData: manifest, cloneVersion: nil), "4.21.2")
+    assertEqual(InstalledForgeVersion.resolve(manifestData: nil, cloneVersion: " v4.20.0\n"),
+                "v4.20.0")
+    assertTrue(InstalledForgeVersion.resolve(manifestData: Data(#"{"version":42}"#.utf8),
+                                             cloneVersion: nil) == nil)
+}
+
+test("FORGE_HOME segue exatamente o override efetivo do updater") {
+    assertEqual(InstalledForgeVersion.forgeHome(environment: [:], home: "/Users/dev"),
+                "/Users/dev/.forge-agent")
+    assertEqual(InstalledForgeVersion.forgeHome(
+        environment: ["FORGE_HOME": "/Volumes/Forge/runtime"], home: "/Users/dev"),
+        "/Volumes/Forge/runtime")
+    assertEqual(InstalledForgeVersion.forgeHome(
+        environment: ["FORGE_HOME": "runtime/forge"], home: "/Users/dev"),
+        "/Users/dev/runtime/forge")
+    assertEqual(InstalledForgeVersion.forgeHome(
+        environment: ["FORGE_HOME": ""], home: "/Users/dev"),
+        "/Users/dev/.forge-agent")
+}
+
 test("SectionRestore devolve o raw válido e cai no fallback no resto") {
     let valid = ["Início", "Atualizações", "Terminal"]
     assertEqual(SectionRestore.resolve(rawValue: "Atualizações", valid: valid, fallback: "Início"),
@@ -2554,40 +2594,47 @@ test("reinstalar nunca é bloqueado por estado de git") {
                 "o caminho que puxa não mudou")
 }
 
-test("o comando de atualizar puxa antes de instalar, com --update e --with-app") {
+test("o comando de atualizar usa o updater instalado, com --apply e --with-app") {
     let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .update, nodePath: nil)
-    assertTrue(cmd.contains("pull --ff-only"), "sem o pull: \(cmd)")
-    assertTrue(cmd.contains("--update"), "sem --update: \(cmd)")
+    assertTrue(cmd.contains("--apply"), "sem --apply: \(cmd)")
     assertTrue(cmd.contains("--with-app"),
                "sem --with-app o app atualizaria tudo menos ele mesmo: \(cmd)")
+    assertFalse(cmd.contains("--source local"), "update remoto virou fonte local: \(cmd)")
+    assertFalse(cmd.contains("git"), "update voltou a puxar o clone local: \(cmd)")
+    assertTrue(cmd.contains("${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-update.js"),
+               "update não usa o updater instalado: \(cmd)")
+    assertFalse(cmd.contains("/Users/dev/forge-agent/install.sh"),
+                "update depende do install.sh do repo: \(cmd)")
 }
 
-test("o comando de reinstalar não executa git nenhum") {
+test("o comando de reinstalar seleciona explicitamente o repo local") {
     let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .reinstall, nodePath: nil)
-    assertTrue(cmd.contains("--update"), "sem --update: \(cmd)")
+    assertTrue(cmd.contains("--apply"), "sem --apply: \(cmd)")
     assertTrue(cmd.contains("--with-app"),
                "sem --with-app o app reinstalaria tudo menos ele mesmo: \(cmd)")
     assertFalse(cmd.contains("git"), "a reinstalação executa git: \(cmd)")
     assertFalse(cmd.contains("pull"), "a reinstalação puxa: \(cmd)")
+    assertTrue(cmd.contains("--source local --repo '/Users/dev/forge-agent'"),
+               "a reinstalação não fixa a fonte local: \(cmd)")
 }
 
-test("os dois modos diferem só pelo prefixo do pull") {
+test("os dois modos diferem só pela seleção explícita da fonte local") {
     let repo = "/Users/dev/forge-agent"
     let update = InstallerCommand.build(repo: repo, mode: .update, nodePath: nil)
     let reinstall = InstallerCommand.build(repo: repo, mode: .reinstall, nodePath: nil)
-    assertTrue(update.hasSuffix(reinstall),
-               "reinstalar tem que ser exatamente o rabo de atualizar — se divergir, "
+    assertTrue(reinstall.hasPrefix(update),
+               "atualizar tem que ser exatamente a cabeça de reinstalar — se divergir, "
                + "um dos dois botões instala algo diferente do outro:\n\(update)\n\(reinstall)")
-    assertEqual(update, "git -C '\(repo)' pull --ff-only && " + reinstall,
-                "o modo update deixou de produzir a string que a v3.1.4 executava")
+    assertEqual(reinstall, update + " --source local --repo '\(repo)'",
+                "reinstall deve apenas tornar local a fonte do mesmo updater")
 }
 
-test("o comando de atualizar quota um repo com espaço nas duas posições") {
-    let cmd = InstallerCommand.build(repo: "/Users/dev/My Projects/forge-agent", mode: .update, nodePath: nil)
-    assertTrue(cmd.contains("git -C '/Users/dev/My Projects/forge-agent'"),
-               "o repo do git -C não foi quotado: \(cmd)")
-    assertTrue(cmd.contains("'/Users/dev/My Projects/forge-agent/install.sh'"),
-               "o caminho do install.sh não foi quotado: \(cmd)")
+test("os comandos quotam um repo com espaço") {
+    let cmd = InstallerCommand.build(repo: "/Users/dev/My Projects/forge-agent", mode: .reinstall, nodePath: nil)
+    assertTrue(cmd.contains("${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-update.js"),
+               "o updater instalado não foi usado: \(cmd)")
+    assertTrue(cmd.contains("--repo '/Users/dev/My Projects/forge-agent'"),
+               "o argumento --repo não foi quotado: \(cmd)")
 }
 
 test("o comando do instalador põe o node resolvido no PATH") {
@@ -2599,22 +2646,19 @@ test("o comando do instalador põe o node resolvido no PATH") {
     let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .update, nodePath: node)
     assertTrue(cmd.contains("PATH='/Users/dev/.nvm/versions/node/v24.16.0/bin':\"$PATH\""),
                "o diretório do node resolvido não foi prefixado no PATH: \(cmd)")
-    assertTrue(cmd.contains("bash '/Users/dev/forge-agent/install.sh'"),
-               "o prefixo comeu a invocação do instalador: \(cmd)")
+    assertTrue(cmd.contains("node \"${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-update.js\""),
+               "o prefixo comeu a invocação do updater: \(cmd)")
 }
 
-test("o prefixo de PATH cai no instalador, nunca antes do git") {
-    // A relação `update == pull && reinstall` é invariante fixada logo acima:
-    // um prefixo no começo do comando inteiro a quebraria, e os dois botões
-    // passariam a instalar coisas diferentes.
+test("o prefixo de PATH preserva a relação entre update e reinstall") {
     let repo = "/Users/dev/forge-agent"
     let node = "/opt/homebrew/bin/node"
     let update = InstallerCommand.build(repo: repo, mode: .update, nodePath: node)
     let reinstall = InstallerCommand.build(repo: repo, mode: .reinstall, nodePath: node)
-    assertTrue(update.hasSuffix(reinstall),
-               "com node resolvido os dois modos deixaram de diferir só pelo pull:\n\(update)\n\(reinstall)")
-    assertTrue(update.hasPrefix("git -C"),
-               "o prefixo de PATH foi parar antes do git — o pull passaria a rodar com PATH alterado: \(update)")
+    assertEqual(reinstall, update + " --source local --repo '\(repo)'",
+                "com node resolvido os modos devem diferir só pela fonte local:\n\(update)\n\(reinstall)")
+    assertTrue(update.hasPrefix("PATH='/opt/homebrew/bin':\"$PATH\" node "),
+               "o node resolvido não ficou disponível para o updater: \(update)")
 }
 
 test("um repo com aspas no caminho do node é escapado") {
@@ -2624,14 +2668,11 @@ test("um repo com aspas no caminho do node é escapado") {
                "a aspa simples no diretório do node não foi escapada: \(cmd)")
 }
 
-test("sem node resolvido o comando fica cru — o install.sh diagnostica") {
-    // Não é degradação silenciosa: a busca do install.sh é mais larga em um
-    // ponto (sem timeout no shell de login) e, falhando, ela imprime onde
-    // procurou. Recusar aqui trocaria um caso recuperável por um bloqueio.
+test("sem node resolvido o comando usa o node disponível no ambiente") {
     for node in [nil, ""] {
         let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .reinstall, nodePath: node)
         assertFalse(cmd.contains("PATH="), "nodePath \(node ?? "nil") produziu prefixo de PATH: \(cmd)")
-        assertTrue(cmd.hasPrefix("bash "), "o comando cru deixou de começar pelo bash: \(cmd)")
+        assertTrue(cmd.hasPrefix("node "), "o comando cru deixou de começar pelo node: \(cmd)")
     }
 }
 

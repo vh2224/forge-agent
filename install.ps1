@@ -24,8 +24,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath $PSScriptRoot).Path
-$nodeArgs = @('--repo', $repo, '--runtime', $Runtime)
-if ($Update) { $nodeArgs += '--update' }
+$nodeArgs = @()
+# During updates the installed manifest is authoritative. Passing the parameter's
+# legacy default (claude) would silently override a Codex-only installation.
+if (-not $Update -or $PSBoundParameters.ContainsKey('Runtime')) {
+  $nodeArgs += @('--runtime', $Runtime)
+}
 if ($DryRun) { $nodeArgs += '--dry-run' }
 if ($NoModelProbe) { $nodeArgs += '--no-model-probe' }
 if ($WithApp) { $nodeArgs += '--with-app' }
@@ -40,5 +44,11 @@ if ($ClaudeHome) { $nodeArgs += @('--claude-home', $ClaudeHome) }
 if ($CodexHome) { $nodeArgs += @('--codex-home', $CodexHome) }
 if ($ProjectRoot) { $nodeArgs += @('--project-root', $ProjectRoot) }
 
-& node (Join-Path $repo 'scripts/forge-installer.js') @nodeArgs
+if ($Update) {
+  if (-not $DryRun) { $nodeArgs += '--apply' }
+  & node (Join-Path $repo 'scripts/forge-update.js') @nodeArgs
+} else {
+  $nodeArgs = @('--repo', $repo) + $nodeArgs
+  & node (Join-Path $repo 'scripts/forge-installer.js') @nodeArgs
+}
 exit $LASTEXITCODE

@@ -14,6 +14,7 @@ import ForgeKit
 @MainActor
 final class UpdateStore: ObservableObject {
     static let shared = UpdateStore()
+    private static let canonicalRemote = "https://github.com/vh2224/forge-agent.git"
 
     @Published private(set) var installed: String?
     @Published private(set) var latest: String?
@@ -30,11 +31,12 @@ final class UpdateStore: ObservableObject {
     private(set) var running: String? = VersionFooter.stamped(
         Bundle.main.object(forInfoDictionaryKey: "ForgeGitDescribe") as? String)
 
-    /// The repo's describe, FULL — no `--abbrev=0`, unlike `installed`.
+    /// The repo's describe, FULL — no `--abbrev=0`, unlike the clone fallback
+    /// used when no installed manifest exists.
     ///
     /// The two are not interchangeable and neither replaces the other:
-    /// `installed` is a tag, compared semantically against the remote's tag to
-    /// decide whether an update exists; this one carries the commit count and the
+    /// `installed` is the manifest version (or a fallback tag), compared
+    /// semantically against the remote's tag; this one carries the commit count and the
     /// sha, which is the only way "you committed but did not rebuild" is
     /// detectable at all (comparing abbreviated tags says "in sync" across six
     /// commits).
@@ -81,29 +83,35 @@ final class UpdateStore: ObservableObject {
         #if DEBUG
         guard !isStagedPreview else { return }
         #endif
-        guard let repo else {
-            lastError = "repo do Forge não encontrado nas preferências"
-            return
-        }
-        installed = git(["describe", "--tags", "--abbrev=0"], at: repo)
-        repoDescribe = git(["describe", "--tags"], at: repo)
-        if let text = try? String(contentsOfFile: "\(repo)/CHANGELOG.md", encoding: .utf8) {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let forgeHome = InstalledForgeVersion.forgeHome(
+            environment: ProcessInfo.processInfo.environment, home: home)
+        let manifest = FileManager.default.contents(atPath: "\(forgeHome)/manifest.json")
+        let cloneVersion = repo.flatMap { git(["describe", "--tags", "--abbrev=0"], at: $0) }
+        installed = InstalledForgeVersion.resolve(
+            manifestData: manifest, cloneVersion: cloneVersion)
+
+        // Checkout state is diagnostic only; remote update does not move it.
+        repoDescribe = repo.flatMap { git(["describe", "--tags"], at: $0) }
+        if let repo,
+           let text = try? String(contentsOfFile: "\(repo)/CHANGELOG.md", encoding: .utf8) {
             releases = ChangelogParser.parse(text)
+        } else {
+            releases = []
         }
     }
 
     /// Ask the remote what the newest tag is. Network-bound, so never automatic
     /// on a timer — the statusline already does its own throttled check.
     func check() {
-        guard let repo, !checking else { return }
+        guard !checking else { return }
         checking = true
         lastError = nil
         Task.detached(priority: .utility) {
-            // Fetch tags without touching the working tree.
-            _ = Self.git(["fetch", "--tags", "--quiet", "origin"], at: repo)
-            let tag = Self.git(["describe", "--tags", "--abbrev=0", "origin/HEAD"], at: repo)
-                ?? Self.git(["tag", "--sort=-v:refname"], at: repo)?
-                    .components(separatedBy: "\n").first
+            // Resolve tags from the canonical server without reading or
+            // refreshing refs in whatever local clone the app happens to know.
+            let refs = Self.git(["ls-remote", "--tags", Self.canonicalRemote])
+            let tag = RemoteRelease.latestTag(from: refs)
             await MainActor.run {
                 self.latest = tag?.trimmingCharacters(in: .whitespacesAndNewlines)
                 self.checking = false
@@ -122,15 +130,15 @@ final class UpdateStore: ObservableObject {
     /// to keep. The tail is what explains a failure.
     @Published private(set) var log: [String] = []
 
-    /// Why the update refused to start, plus a command the operator can run to
-    /// see the same thing themselves. Set only by the git precheck.
+    /// Legacy diagnostic fields retained for UI/state compatibility. Remote
+    /// updates do not inspect or mutate the local repository.
     @Published private(set) var blockedMessage: String?
     @Published private(set) var blockedCommand: String?
 
     /// Run the installer headless, streaming its output. The ONE execution path
     /// behind both `runUpdate()` and `runReinstall()` — the two differ only in
-    /// the command `InstallerCommand` composes and in whether the git precheck
-    /// applies, so duplicating this body would let them drift apart in behaviour
+    /// the source mode `InstallerCommand` composes, so duplicating this body
+    /// would let them drift apart in behaviour
     /// nobody is watching.
     ///
     /// No Terminal window: under `--update` the installer cannot ask anything.
@@ -143,32 +151,23 @@ final class UpdateStore: ObservableObject {
     /// reinstall mode never pulls — lives in `InstallerCommand` in ForgeKit,
     /// where it is unit-tested. This function does not compose shell strings.
     private func runInstaller(mode: InstallerCommand.Mode) {
-        guard let repo else {
-            // Reachable since v3.2.0: "Reinstalar" renders even with no version
-            // resolved, so a click with no stored repo used to do nothing at all
-            // — no bar, no error.
-            lastError = "não encontrei o repo do Forge nas preferências"
-            return
+        let workingDirectory: String
+        switch mode {
+        case .update:
+            // The installed updater owns remote updates. The checkout saved in
+            // preferences is allowed to have moved or disappeared meanwhile.
+            workingDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+        case .reinstall:
+            guard let repo else {
+                // "Reinstalar" is the one operation that deliberately consumes
+                // the development checkout as its local source.
+                lastError = "não encontrei o repo do Forge nas preferências"
+                return
+            }
+            workingDirectory = repo
         }
         blockedMessage = nil
         blockedCommand = nil
-
-        // Check before starting, not after: `git pull --ff-only` failing halfway
-        // means the operator watched a progress bar for something that could
-        // never have begun. Only the pulling mode can hit it — so only `.update`
-        // pays for the git probes at all. `.reinstall` skips them entirely: not
-        // just `pulls: false` at the call site, but no `git` subprocess spawned,
-        // matching the "no git, no network" contract on `runReinstall()`.
-        if mode == .update {
-            let ahead = Int(Self.git(["rev-list", "--count", "origin/HEAD..HEAD"], at: repo) ?? "") ?? 0
-            if let blocker = UpdatePrecheck.evaluate(dirty: Git.isDirty(at: repo),
-                                                    ahead: ahead,
-                                                    pulls: true) {
-                blockedMessage = UpdatePrecheck.message(for: blocker)
-                blockedCommand = UpdatePrecheck.manualCommand(repo: repo)
-                return
-            }
-        }
 
         updating = true
         phase = "preparando"
@@ -176,10 +175,10 @@ final class UpdateStore: ObservableObject {
         lastError = nil
         needsRelaunch = false
 
-        let cmd = InstallerCommand.build(repo: repo, mode: mode, nodePath: ForgeCore.nodePath)
+        let cmd = InstallerCommand.build(repo: repo ?? "", mode: mode, nodePath: ForgeCore.nodePath)
         var tracker = InstallerPhaseTracker()
 
-        let process = ForgeCore.stream(cwd: repo, command: cmd, onLine: { line in
+        let process = ForgeCore.stream(cwd: workingDirectory, command: cmd, onLine: { line in
             MainActor.assumeIsolated {
                 let store = UpdateStore.shared
                 switch tracker.consume(line) {
@@ -221,12 +220,8 @@ final class UpdateStore: ObservableObject {
     private func finishUpdate(exitCode: Int32) {
         updating = false
         if UpdateOutcome.canRelaunch(exitCode: exitCode) {
-            // A successful update just pulled the repo: `repoDescribe` (and
-            // `installed`) are still whatever `load()` last saw BEFORE the pull,
-            // so without this refresh the still-running old process would keep
-            // comparing its `running` stamp against a stale `repoDescribe` and
-            // read "in sync" at the exact moment the running-vs-repo divergence
-            // becomes real (R6) — the entire reason the footer exists (D25).
+            // Refresh the manifest the remote updater just replaced. The clone
+            // remains a separate dogfood diagnostic and is intentionally stale.
             load()
             needsRelaunch = true
         } else {
@@ -292,10 +287,10 @@ final class UpdateStore: ObservableObject {
 
     private func git(_ args: [String], at path: String) -> String? { Self.git(args, at: path) }
 
-    nonisolated private static func git(_ args: [String], at path: String) -> String? {
+    nonisolated private static func git(_ args: [String], at path: String? = nil) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["-C", path] + args
+        p.arguments = path.map { ["-C", $0] + args } ?? args
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
@@ -449,24 +444,21 @@ struct UpdatesView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
-                // Both can render together on purpose: an available-but-blocked
-                // update (local commits ahead of origin, or a dirty tree) is
-                // exactly the state "Reinstalar" exists to unblock. Hiding it
-                // whenever "Atualizar" shows would hide it in the one state it
-                // matters most — so needsRelaunch still wins the whole slot, but
-                // updateAvailable no longer keeps Reinstalar off-screen.
+                // Both can render together on purpose: Atualizar installs the
+                // pinned server release, while Reinstalar reapplies this local
+                // checkout for dogfood. needsRelaunch still wins the whole slot.
                 VStack(alignment: .trailing, spacing: 6) {
                     if store.updateAvailable {
                         Button("Atualizar") { store.runUpdate() }
                             .controlSize(.large)
                             .disabled(store.updating)
-                            .help("Roda install.sh --update --with-app aqui, mostrando o progresso")
+                            .help("Baixa a release estável do servidor e atualiza o Forge e o app")
                     }
                     Button("Reinstalar") { store.runReinstall() }
                         .controlSize(.small)
                         .disabled(store.updating)
-                        .help("Roda install.sh --update --with-app nesta cópia do repo, "
-                              + "sem git pull: reaplica agentes, skills e scripts e recompila o app")
+                        .help("Reaplica explicitamente esta cópia local, sem git pull, "
+                              + "e recompila o app")
                 }
             }
         }
