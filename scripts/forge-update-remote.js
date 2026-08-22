@@ -258,6 +258,24 @@ function compatInstallerArgs(source, input = {}, runtime) {
   return args;
 }
 
+function normalizeCompatManifest(forgeHome, provenance, io = fs) {
+  const manifestFile = path.join(forgeHome, 'manifest.json');
+  let manifest;
+  try { manifest = JSON.parse(io.readFileSync(manifestFile, 'utf8')); }
+  catch (error) { throw new Error(`bootstrap remoto (compat) não pôde normalizar manifest.json: ${error.message}`); }
+  const normalized = { ...manifest, source_remote: { ...provenance } };
+  delete normalized.source_repo;
+  const temporary = `${manifestFile}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    io.writeFileSync(temporary, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
+    io.renameSync(temporary, manifestFile);
+  } catch (error) {
+    try { io.rmSync(temporary, { force: true }); } catch (_) { /* best effort */ }
+    throw new Error(`bootstrap remoto (compat) não pôde normalizar manifest.json: ${error.message}`);
+  }
+  return normalized;
+}
+
 function runCompatBootstrap(source, input, dependencies, provenance) {
   const runner = dependencies.runner || spawnSync;
   const planUpdate = dependencies.planUpdate || require('./forge-maintenance.js').planUpdate;
@@ -270,11 +288,15 @@ function runCompatBootstrap(source, input, dependencies, provenance) {
     const detail = output.trim() || (result && result.error && result.error.message);
     throw new Error(`bootstrap remoto (compat) falhou${detail ? `: ${String(detail).trim()}` : ''}`);
   }
+  const manifest = input.apply
+    ? normalizeCompatManifest(plan.forge_home, provenance, dependencies.fs || fs)
+    : null;
   return {
     ...plan,
     source_repo: null,
     remote_source: provenance,
     applied: Boolean(input.apply),
+    ...(manifest ? { manifest } : {}),
     // Named, never implied: this path has no structured plan, so it must not
     // present an empty `retirements` array as "nothing was retired".
     bootstrap: {
@@ -331,6 +353,7 @@ module.exports = {
   bootstrapArgs,
   supportsSourceMode,
   compatInstallerArgs,
+  normalizeCompatManifest,
   runCompatBootstrap,
   runBootstrappedUpdate,
   updateFromRemote,

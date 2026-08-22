@@ -143,12 +143,20 @@ final class UpdateStore: ObservableObject {
     /// reinstall mode never pulls — lives in `InstallerCommand` in ForgeKit,
     /// where it is unit-tested. This function does not compose shell strings.
     private func runInstaller(mode: InstallerCommand.Mode) {
-        guard let repo else {
-            // Reachable since v3.2.0: "Reinstalar" renders even with no version
-            // resolved, so a click with no stored repo used to do nothing at all
-            // — no bar, no error.
-            lastError = "não encontrei o repo do Forge nas preferências"
-            return
+        let workingDirectory: String
+        switch mode {
+        case .update:
+            // The installed updater owns remote updates. The checkout saved in
+            // preferences is allowed to have moved or disappeared meanwhile.
+            workingDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+        case .reinstall:
+            guard let repo else {
+                // "Reinstalar" is the one operation that deliberately consumes
+                // the development checkout as its local source.
+                lastError = "não encontrei o repo do Forge nas preferências"
+                return
+            }
+            workingDirectory = repo
         }
         blockedMessage = nil
         blockedCommand = nil
@@ -159,10 +167,10 @@ final class UpdateStore: ObservableObject {
         lastError = nil
         needsRelaunch = false
 
-        let cmd = InstallerCommand.build(repo: repo, mode: mode, nodePath: ForgeCore.nodePath)
+        let cmd = InstallerCommand.build(repo: repo ?? "", mode: mode, nodePath: ForgeCore.nodePath)
         var tracker = InstallerPhaseTracker()
 
-        let process = ForgeCore.stream(cwd: repo, command: cmd, onLine: { line in
+        let process = ForgeCore.stream(cwd: workingDirectory, command: cmd, onLine: { line in
             MainActor.assumeIsolated {
                 let store = UpdateStore.shared
                 switch tracker.consume(line) {

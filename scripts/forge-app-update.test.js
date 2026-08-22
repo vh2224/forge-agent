@@ -202,10 +202,10 @@ check('a consulta de versão lê tags do servidor sem fetch no clone', () => {
     'check() voltou a atualizar ou usar refs do clone local');
 });
 
-check('InstallerCommand.build passa --update E --with-app nos dois modos', () => {
+check('InstallerCommand.build passa --apply E --with-app nos dois modos', () => {
   assert(
-    buildBody.includes('--update'),
-    'o comando do instalador não passa --update'
+    buildBody.includes('--apply'),
+    'o comando do updater não passa --apply'
   );
   assert(
     buildBody.includes('--with-app'),
@@ -216,7 +216,7 @@ check('InstallerCommand.build passa --update E --with-app nos dois modos', () =>
 
 check('update é remoto e reinstall é a única fonte local explícita', () => {
   assert(
-    /case\s+\.update:\s*return\s+installer\b/.test(buildBody),
+    /case\s+\.update:\s*return\s+updater\b/.test(buildBody),
     'o modo update não usa mais o updater remoto padrão'
   );
   assert(
@@ -224,6 +224,10 @@ check('update é remoto e reinstall é a única fonte local explícita', () => {
     'reinstall não declara a fonte local explicitamente'
   );
   assert(!/pull --ff-only/.test(buildBody), 'InstallerCommand voltou a puxar o clone local');
+  assert(/FORGE_HOME:-\$HOME\/\.forge-agent/.test(buildBody),
+    'update não executa o forge-update.js instalado em FORGE_HOME');
+  assert(!/install\.sh/.test(buildBody),
+    'update voltou a depender do install.sh do repo');
 });
 
 check('o runner roda o instalador headless, não num Terminal', () => {
@@ -261,6 +265,15 @@ check('o runner não inspeciona nem modifica o clone local', () => {
     !/Self\.git\(|Git\.isDirty\(|pull --ff-only/.test(runnerBody),
     'runInstaller voltou a depender do estado do clone local'
   );
+});
+
+check('update continua funcional sem o checkout salvo', () => {
+  assert(/case\s+\.update:[\s\S]*homeDirectoryForCurrentUser\.path/.test(runnerBody),
+    'update não escolhe um diretório permanente independente do repo');
+  assert(/case\s+\.reinstall:[\s\S]*guard let repo else/.test(runnerBody),
+    'o guard do repo não ficou restrito ao reinstall');
+  assert(/ForgeCore\.stream\(cwd:\s*workingDirectory/.test(runnerBody),
+    'o subprocesso ainda usa o checkout como cwd incondicional');
 });
 
 check('o guard de repo ausente não é mais silencioso', () => {

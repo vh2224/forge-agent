@@ -543,23 +543,23 @@ public enum ShellQuote {
 /// resolved interpreter on PATH for the installer AND every child it spawns,
 /// which is what `install.sh` and `app/build.sh` actually need.
 ///
-/// The prefix lands on the installer, which is the shared head of both modes:
-/// `.reinstall` is `.update` plus the explicit local-source suffix, and that
-/// relationship is a pinned invariant.
+/// The prefix lands on the installed updater, which is the shared head of both
+/// modes. `.reinstall` is `.update` plus the explicit local-source suffix; only
+/// that mode consumes the repository path.
 public enum InstallerCommand {
     public enum Mode { case update, reinstall }
 
     /// - Parameter nodePath: absolute path to the node binary, or nil when
-    ///   nothing resolved. Nil produces the bare command — `install.sh` runs its
-    ///   own bootstrap search and reports a real diagnosis if it also fails.
+    ///   nothing resolved. Nil produces a bare `node` command and therefore uses
+    ///   the environment available to the app's login shell.
     ///   No default value on purpose: a call site that forgets this is exactly
     ///   the regression this parameter exists to prevent.
     public static func build(repo: String, mode: Mode, nodePath: String?) -> String {
-        let installer = nodeEnvPrefix(nodePath)
-            + "bash \(ShellQuote.posix("\(repo)/install.sh")) --update --with-app"
+        let updater = nodeEnvPrefix(nodePath)
+            + "node \"${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-update.js\" --apply --with-app"
         switch mode {
-        case .update:    return installer
-        case .reinstall: return installer + " --source local --repo " + ShellQuote.posix(repo)
+        case .update:    return updater
+        case .reinstall: return updater + " --source local --repo " + ShellQuote.posix(repo)
         }
     }
 

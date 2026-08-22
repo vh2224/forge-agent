@@ -206,15 +206,38 @@ test('a release predating --source local is bootstrapped through its own install
 // how a Codex-only installation silently becomes a Claude one.
 test('the compat bootstrap always passes an explicit runtime resolved from the manifest', () => {
   const calls = [];
-  const planUpdate = () => ({ ok: true, runtime: 'codex' });
-  const report = remote.runCompatBootstrap(BOOTSTRAP_SOURCE, { apply: true },
-    { runner: bootstrapRunner(calls, LEGACY_HELP), planUpdate }, {});
-  const boot = calls[calls.length - 1];
-  const runtimeIndex = boot.args.indexOf('--runtime');
-  assert(runtimeIndex !== -1, 'no --runtime reached the legacy installer; it would default to claude');
-  assert.strictEqual(boot.args[runtimeIndex + 1], 'codex');
-  assert.strictEqual(boot.args.includes('--dry-run'), false, '--apply must not be previewed');
-  assert.strictEqual(report.bootstrap.runtime_source, 'manifest');
+  const forgeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-compat-home-'));
+  const manifestFile = path.join(forgeHome, 'manifest.json');
+  const legacyManifest = {
+    version: '5.0.0', runtime: 'codex', source_repo: BOOTSTRAP_SOURCE.path,
+    core: ['VERSION'], adapters: { codex: {} }, ownership: {},
+  };
+  fs.writeFileSync(manifestFile, `${JSON.stringify(legacyManifest, null, 2)}\n`);
+  try {
+    const planUpdate = () => ({ ok: true, runtime: 'codex', forge_home: forgeHome });
+    const provenance = {
+      remote: BOOTSTRAP_SOURCE.remote, channel: BOOTSTRAP_SOURCE.channel,
+      ref: BOOTSTRAP_SOURCE.ref, tag: BOOTSTRAP_SOURCE.tag, sha: BOOTSTRAP_SOURCE.sha,
+      declared_version: BOOTSTRAP_SOURCE.declared_version, version_matches_ref: true,
+    };
+    const report = remote.runCompatBootstrap(BOOTSTRAP_SOURCE, { apply: true },
+      { runner: bootstrapRunner(calls, LEGACY_HELP), planUpdate }, provenance);
+    const boot = calls[calls.length - 1];
+    const runtimeIndex = boot.args.indexOf('--runtime');
+    assert(runtimeIndex !== -1, 'no --runtime reached the legacy installer; it would default to claude');
+    assert.strictEqual(boot.args[runtimeIndex + 1], 'codex');
+    assert.strictEqual(boot.args.includes('--dry-run'), false, '--apply must not be previewed');
+    assert.strictEqual(report.bootstrap.runtime_source, 'manifest');
+    const installed = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    assert.deepStrictEqual(installed.source_remote, provenance,
+      'the installed manifest did not retain the validated remote provenance');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(installed, 'source_repo'), false,
+      'the installed manifest still points at the temporary checkout');
+    assert.strictEqual(installed.version, legacyManifest.version,
+      'normalizing provenance must preserve the installed release manifest');
+  } finally {
+    fs.rmSync(forgeHome, { recursive: true, force: true });
+  }
 });
 
 test('runBootstrappedUpdate routes to the compat bridge when --help lacks --source local', () => {
