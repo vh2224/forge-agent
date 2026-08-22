@@ -9,6 +9,7 @@ const { resolveForgePaths } = require('./forge-home');
 const sourceManifest = require('./forge-source-manifest');
 const ownership = require('./forge-projection-ownership');
 const PROVENANCE = require('./forge-projection-provenance');
+const selfProjection = require('./forge-projection-self');
 const { VERSION } = require('./forge-version');
 
 const RUNTIME = 'codex';
@@ -119,7 +120,7 @@ function render(options = {}) {
   return { runtime: RUNTIME, version: VERSION, repo: root.repo, forge_home: root.forgeHome, codex_home: root.codexHome, project_root: root.projectRoot, artifacts };
 }
 function write(options = {}) {
-  const report = render(options); const written = []; const preserved = []; const conflicts = [];
+  const report = render(options); const written = []; const preserved = []; const conflicts = []; const selfSourced = [];
   // Same ownership rule as the Claude renderer, from the same module. This host
   // projects `capabilities.json`, a format that can never carry a marker — so
   // without the digest rung that file froze on first divergence exactly like the
@@ -133,6 +134,15 @@ function write(options = {}) {
     ? null
     : (options.provenance || PROVENANCE.createResolver({ repo: report.repo }));
   for (const artifact of report.artifacts) {
+    // Same guard, same module as the Claude host, ahead of every ownership rung
+    // for the same reason (§ forge-projection-self). No Codex artifact is
+    // self-sourced TODAY — the instructions and the TOML wrappers are
+    // synthesized, so their `source` names no file — but `projectRoot` defaults
+    // to the repo here too, so the shape is one manifest edit away.
+    if (selfProjection.isSelfProjection({ repo: report.repo, source: artifact.source, destination: artifact.destination })) {
+      selfSourced.push({ ...artifact, reason: selfProjection.REASON });
+      continue;
+    }
     const current = exists(artifact.destination) ? fs.readFileSync(artifact.destination, 'utf8') : null;
     if (current !== null && norm(current) === artifact.content) { preserved.push({ ...artifact, reason: 'already-current' }); continue; }
     const verdict = ownership.decide({
@@ -163,7 +173,7 @@ function write(options = {}) {
   }
   const ownedNow = [...written, ...preserved.filter((item) => item.reason === 'already-current')];
   const nextOwnership = { ...recorded, ...ownership.recordOf(ownedNow) };
-  return { ...report, written, preserved, conflicts, ownership: options.dryRun ? recorded : nextOwnership, changed: written.some((item) => !item.dry_run), dry_run: Boolean(options.dryRun) };
+  return { ...report, written, preserved, conflicts, self_sourced: selfSourced, ownership: options.dryRun ? recorded : nextOwnership, changed: written.some((item) => !item.dry_run), dry_run: Boolean(options.dryRun) };
 }
 function parseArgs(argv = process.argv.slice(2)) { const out = { repo: path.resolve(__dirname, '..') }; for (let i = 0; i < argv.length; i++) { const arg = argv[i]; if (arg === '--repo') out.repo = argv[++i]; else if (arg === '--codex-home') out.codexHome = argv[++i]; else if (arg === '--forge-home') out.forgeHome = argv[++i]; else if (arg === '--project-root') out.projectRoot = argv[++i]; else if (arg === '--manifest') out.manifestFile = argv[++i]; else if (arg === '--dry-run') out.dryRun = true; else if (arg === '--json') out.json = true; else if (arg === '--help' || arg === '-h') out.help = true; else throw Object.assign(new Error(`opção desconhecida: ${arg}`), { code: REASON.invalid_options }); } return out; }
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), error = process.stderr.write.bind(process.stderr)) { try { const options = parseArgs(argv); if (options.help) { output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--dry-run] [--json]\n'); return 0; } const report = write(options); output(options.json ? `${JSON.stringify(report)}\n` : `Codex renderer ${VERSION}: ${report.written.length} written, ${report.preserved.length} preserved\n`); return 0; } catch (e) { error(`forge-codex-renderer: ${e.code || 'error'}: ${e.message}\n`); return 1; } }

@@ -431,8 +431,9 @@ function install(input = {}) {
     // proved the bytes were ours. Recorded so the transition is visible in the
     // manifest and not only in one run's stdout.
     const adopted = report ? (report.written || []).filter((item) => item.reason === 'release-adopted').map((item) => item.destination) : [];
-    adapterManifest[host] = { home, project_root: projectRoot, files, project_files: projectFiles, conflicts, adopted };
-    writeText(path.join(root, 'manifest.json'), JSON.stringify({ runtime: host, version: VERSION, files, project_files: projectFiles, conflicts, adopted }, null, 2) + '\n', plan, options);
+    const selfSourced = report ? (report.self_sourced || []).map((item) => item.destination) : [];
+    adapterManifest[host] = { home, project_root: projectRoot, files, project_files: projectFiles, conflicts, adopted, self_sourced: selfSourced };
+    writeText(path.join(root, 'manifest.json'), JSON.stringify({ runtime: host, version: VERSION, files, project_files: projectFiles, conflicts, adopted, self_sourced: selfSourced }, null, 2) + '\n', plan, options);
   }
   const installedHosts = Object.keys(adapterManifest).sort();
   // Merge, never replace: a `--runtime claude` run must not drop the digests of
@@ -509,6 +510,18 @@ function render(report) {
   if (adopted.length) {
     lines.push(`Adopted from release history: ${adopted.length} (bytes matched a past revision of their source — previously frozen as user_owned).`);
     for (const destination of adopted) lines.push(`  [adopted] ${destination}`);
+  }
+  // Named, never a bare count and never silent: this fires on exactly one
+  // machine profile — an install whose project root IS the forge-agent clone —
+  // and an operator who sees no line has no way to tell the guard from its
+  // absence. Not an error: the rest of the install is valid, and this target
+  // was never installable in the first place.
+  const selfSourced = report.manifest && report.manifest.adapters
+    ? Object.values(report.manifest.adapters).flatMap((adapter) => (Array.isArray(adapter.self_sourced) ? adapter.self_sourced : []))
+    : [];
+  if (selfSourced.length) {
+    lines.push(`Self-sourced targets skipped: ${selfSourced.length} — o destino É a própria fonte declarada no manifesto; projetar sobreescreveria o canônico.`);
+    for (const destination of selfSourced) lines.push(`  [self-source] ${destination}`);
   }
   if (legacyConflicts.length) {
     lines.push(`Conflicts preserved: ${legacyConflicts.length}; use --migrate-legacy to replace unmarked legacy projections.`);

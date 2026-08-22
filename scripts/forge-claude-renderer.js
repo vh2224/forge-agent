@@ -9,6 +9,7 @@ const path = require('path');
 const { resolveForgePaths } = require('./forge-home');
 const sourceManifest = require('./forge-source-manifest');
 const ownership = require('./forge-projection-ownership');
+const selfProjection = require('./forge-projection-self');
 const PROVENANCE = require('./forge-projection-provenance');
 const { VERSION } = require('./forge-version');
 
@@ -309,6 +310,11 @@ function write(options = {}) {
   const written = [];
   const preserved = [];
   const conflicts = [];
+  // Destinations refused because they ARE their own source (§ forge-projection-self).
+  // Kept in their own bucket: this is neither a conflict (nothing of the
+  // operator's is being protected) nor a preservation (there is no projection
+  // here to preserve) — it is a target that should never have resolved.
+  const selfSourced = [];
   const recorded = (options.ownership && typeof options.ownership === 'object') ? options.ownership : {};
   // `provenance: null` disables the rung explicitly; absent means build one from
   // the repo we are rendering out of.
@@ -318,6 +324,16 @@ function write(options = {}) {
   const backupRoot = options.backupDir ? path.resolve(options.backupDir) : null;
   for (const artifact of report.artifacts) {
     const destination = artifact.destination;
+    // FIRST, ahead of every ownership rung: those rungs answer "is this file
+    // ours to rewrite", and for the canonical source the answer is yes — which
+    // is exactly why they cannot protect it. The marker rung, the digest rung
+    // and the release rung all GRANT ownership of a file whose bytes came from
+    // this repo, and the source's bytes trivially did. Ordering this after them
+    // would leave the guard unreachable.
+    if (selfProjection.isSelfProjection({ repo: report.repo, source: artifact.source, destination })) {
+      selfSourced.push({ ...artifact, reason: selfProjection.REASON });
+      continue;
+    }
     const current = exists(destination) ? fs.readFileSync(destination, 'utf8') : null;
     const generated = artifact.content;
     if (current !== null && current === generated) { preserved.push({ ...artifact, reason: 'already-current' }); continue; }
@@ -390,6 +406,7 @@ function write(options = {}) {
     written,
     preserved,
     conflicts,
+    self_sourced: selfSourced,
     ownership: options.dryRun ? recorded : nextOwnership,
     dry_run: Boolean(options.dryRun),
   };
