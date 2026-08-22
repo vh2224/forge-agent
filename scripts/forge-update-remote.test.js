@@ -97,6 +97,30 @@ test('stable materialization ignores master, pins the latest semver tag and clea
   } finally { data.cleanup(); }
 });
 
+test('stable tag and declared VERSION mismatch aborts before bootstrap and cleans up', () => {
+  const data = fixtureRemote();
+  const tempParent = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-update-mismatch-'));
+  const calls = [];
+  try {
+    git(data.repo, ['tag', '-f', 'v1.10.0', data.masterSha]);
+    const runner = (command, args, options) => {
+      calls.push({ command, args: [...args] });
+      return spawnSync(command, args, options);
+    };
+    assert.throws(() => remote.updateFromRemote(
+      { remote: data.repo, channel: 'stable' },
+      { allowLocalRemote: true, tempParent, runner },
+    ), /VERSION remota 9\.9\.9 difere da tag estável 1\.10\.0/);
+    assert.strictEqual(calls.some(({ command, args }) => command === process.execPath
+      && args.some((arg) => /forge-update\.js$/.test(arg))), false,
+    'bootstrap executed despite the stable tag/VERSION mismatch');
+    assert.deepStrictEqual(fs.readdirSync(tempParent), [], 'temporary checkout was retained after mismatch');
+  } finally {
+    fs.rmSync(tempParent, { recursive: true, force: true, maxRetries: 3 });
+    data.cleanup();
+  }
+});
+
 test('master channel pins the server head rather than any local clone or stable tag', () => {
   const data = fixtureRemote();
   try {

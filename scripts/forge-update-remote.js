@@ -157,7 +157,10 @@ function validateMaterializedSource(repo, resolved, runner = spawnSync) {
   catch (error) { throw new Error(`manifesto remoto inválido: ${error.message}`); }
   validateSourceManifest(manifest);
   const version = declaredVersion(repo, runner);
-  return { ...resolved, path: repo, declared_version: version, version_matches_ref: resolved.version === null ? null : resolved.version === version };
+  if (resolved.version !== null && resolved.version !== version) {
+    throw new Error(`VERSION remota ${version} difere da tag estável ${resolved.version}`);
+  }
+  return { ...resolved, path: repo, declared_version: version, version_matches_ref: resolved.version === null ? null : true };
 }
 
 function materializeRemoteSource(input = {}, dependencies = {}) {

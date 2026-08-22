@@ -7828,7 +7828,7 @@ function smokePrefsChokepoints() {
     const dryHome = mkTmp('install-dry-home');
     fs.mkdirSync(path.join(dryHome, '.claude'), { recursive: true });
     const dry = spawnSync('bash', [path.join(REPO, 'install.sh'), '--dry-run', '--update',
-      '--source', 'local', '--repo', REPO],
+      '--source', 'local', '--repo', REPO, '--runtime', 'claude'],
       { encoding: 'utf8', env: { ...process.env, HOME: dryHome } });
     cleanup(dryHome);
     const output = `${dry.stdout || ''}${dry.stderr || ''}`;
@@ -10144,7 +10144,7 @@ function smokeSharedGlob() {
     try {
       fs.mkdirSync(path.join(dryHome, '.claude'), { recursive: true });
       const dry = spawnSync('bash', [shPath, '--dry-run', '--update',
-        '--source', 'local', '--repo', repo], {
+        '--source', 'local', '--repo', repo, '--runtime', 'claude'], {
         encoding: 'utf8',
         env: { ...process.env, HOME: dryHome },
       });
