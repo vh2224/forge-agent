@@ -7791,8 +7791,13 @@ function smokePrefsChokepoints() {
     '(a) install.sh does not copy the repository forge-agent-prefs.md template', 'install.sh');
   assert(!sh.includes('forge-agent-prefs.md (novo)'),
     '(a) install.sh has no legacy Portuguese template-copy line', 'install.sh');
-  assert(/exec node .*forge-installer\.js/.test(sh),
+  // Anchored on the exec of the core, not on the literal word `node`: the
+  // wrapper resolves the interpreter itself since 2026-08-20 (a GUI launcher
+  // inherits launchd's minimal PATH, where `exec node` exits 127).
+  assert(/exec\s+"\$\{FORGE_NODE\}"\s+"\$\{REPO_DIR\}\/scripts\/forge-installer\.js"/.test(sh),
     '(a) install.sh delegates preference handling to forge-installer.js', 'install.sh');
+  assert(!/^\s*exec\s+node\s/m.test(sh),
+    '(a) install.sh never execs a bare `node` — under the launchd PATH that is exit 127', 'install.sh');
   assert(/resolveForgePaths/.test(installerSource) && /legacyPrefs/.test(installerSource)
       && /generateScaffold/.test(installerSource),
     '(b) installer core owns legacy fallback and canonical Forge-home scaffold', 'forge-installer.js');

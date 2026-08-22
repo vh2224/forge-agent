@@ -82,6 +82,18 @@ function stripLineComments(source) {
     .join('\n');
 }
 
+// Shell comments, and ONLY whole-line ones. A `#` mid-line is code far more
+// often than prose (`${VAR#prefix}`), and a stripper that ate those would
+// quietly blind every assert below — the failure mode this file exists to
+// prevent. install.sh documents the app build in prose; that is a mention, not
+// a duplication.
+function stripShellComments(source) {
+  return source
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+}
+
 /// Extract a function body by COUNTING BRACES, not by regex.
 ///
 /// The previous version matched `/func runUpdate\(\)\s*\{[\s\S]*?\n    \}/` — non
@@ -138,6 +150,7 @@ const updatesCode = stripLineComments(updatesSource);
 const coreCode = stripLineComments(read(updateCoreSwift));
 const appCode = stripLineComments(read(forgeAppSwift));
 const installSource = read(installSh);
+const installCode = stripShellComments(installSource);
 const installerSource = read(installerJs);
 
 check('o core Node mantém --with-app load-bearing e o shell permanece fino', () => {
@@ -149,10 +162,36 @@ check('o core Node mantém --with-app load-bearing e o shell permanece fino', ()
     /const app = installApp\(repo, plan, options, paths\.platform\)/.test(installerSource),
     'o instalador não encaminha a instalação concluída ao build do app'
   );
-  assert(/exec node .*forge-installer\.js/.test(installSource),
+  assert(/exec\s+"\$\{FORGE_NODE\}"\s+"\$\{REPO_DIR\}\/scripts\/forge-installer\.js"/.test(installSource),
     'install.sh deixou de delegar ao core Node');
-  assert(!/swift build|app\/build\.sh/.test(installSource),
+  assert(!/swift build|app\/build\.sh/.test(installCode),
     'install.sh voltou a duplicar o build do app');
+});
+
+check('nem o app nem o install.sh confiam no PATH para achar o node', () => {
+  // Regressão medida em 2026-08-20 (app v4.18.0): "Atualizar" saía com
+  // "código 127 — exec: node: not found". O app roda o comando por
+  // `bash -lc`, herdando o PATH mínimo do launchd
+  // (/usr/bin:/bin:/usr/sbin:/sbin), e um login bash não lê o ~/.zshrc onde
+  // nvm/fnm se instalam. As duas pontas são consertadas de propósito: o app
+  // injeta o node que o NodeLocator já resolveu, e o install.sh mantém a
+  // própria busca de bootstrap para quem o chama fora do app.
+  assert(!/^\s*exec\s+node\s/m.test(installSource),
+    'install.sh voltou a fazer `exec node` — sob o PATH do launchd isso sai 127');
+  assert(/FORGE_NODE_PATH/.test(installSource),
+    'install.sh não honra mais o override FORGE_NODE_PATH — um node fora do padrão ' +
+      'deixaria de ter escape');
+  assert(/-lic/.test(installSource),
+    'install.sh não pergunta mais ao shell de login — é o único jeito de achar o nvm, ' +
+      'que não publica shim nenhum');
+  // A prova positiva do lado do app: o builder recebe o node e o põe no PATH.
+  assert(/nodePath:\s*String\?/.test(coreCode),
+    'InstallerCommand.build não recebe mais o node resolvido');
+  assert(/PATH=\\\(ShellQuote\.posix\(dir\)\)/.test(coreCode),
+    'o builder não prefixa mais o diretório do node no PATH do instalador');
+  assert(/InstallerCommand\.build\([^)]*nodePath:\s*ForgeCore\.nodePath/.test(updatesCode),
+    'runInstaller() não passa mais ForgeCore.nodePath — o app voltaria a depender ' +
+      'do PATH herdado do launchd');
 });
 
 const buildBody = bodyOf(coreCode, 'static func build(');
@@ -404,6 +443,15 @@ check('bodyOf não trunca em closure aninhada (bite-proof)', () => {
     /onExit/.test(enclosingBlockHeader(fake, at) || ''),
     'enclosingBlockHeader não achou o bloco imediato da atribuição'
   );
+});
+
+check('o stripper de shell ignora comentário mas não engole código (bite-proof)', () => {
+  assert(stripShellComments('# swift build\necho ok').trim() === 'echo ok',
+    'o stripper não removeu um comentário de linha inteira');
+  assert(/swift build/.test(stripShellComments('  swift build --package-path app')),
+    'uma duplicação real do build escapou do assert — o guard ficaria cego');
+  assert(/\$\{PATH#\/usr\}/.test(stripShellComments('X="${PATH#/usr}"')),
+    'o stripper comeu um `#` que era código, não comentário');
 });
 
 console.log(`\n  ${passed} passed, ${failed} failed\n`);

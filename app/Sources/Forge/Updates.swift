@@ -176,7 +176,7 @@ final class UpdateStore: ObservableObject {
         lastError = nil
         needsRelaunch = false
 
-        let cmd = InstallerCommand.build(repo: repo, mode: mode)
+        let cmd = InstallerCommand.build(repo: repo, mode: mode, nodePath: ForgeCore.nodePath)
         var tracker = InstallerPhaseTracker()
 
         let process = ForgeCore.stream(cwd: repo, command: cmd, onLine: { line in

@@ -2555,7 +2555,7 @@ test("reinstalar nunca é bloqueado por estado de git") {
 }
 
 test("o comando de atualizar puxa antes de instalar, com --update e --with-app") {
-    let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .update)
+    let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .update, nodePath: nil)
     assertTrue(cmd.contains("pull --ff-only"), "sem o pull: \(cmd)")
     assertTrue(cmd.contains("--update"), "sem --update: \(cmd)")
     assertTrue(cmd.contains("--with-app"),
@@ -2563,7 +2563,7 @@ test("o comando de atualizar puxa antes de instalar, com --update e --with-app")
 }
 
 test("o comando de reinstalar não executa git nenhum") {
-    let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .reinstall)
+    let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .reinstall, nodePath: nil)
     assertTrue(cmd.contains("--update"), "sem --update: \(cmd)")
     assertTrue(cmd.contains("--with-app"),
                "sem --with-app o app reinstalaria tudo menos ele mesmo: \(cmd)")
@@ -2573,8 +2573,8 @@ test("o comando de reinstalar não executa git nenhum") {
 
 test("os dois modos diferem só pelo prefixo do pull") {
     let repo = "/Users/dev/forge-agent"
-    let update = InstallerCommand.build(repo: repo, mode: .update)
-    let reinstall = InstallerCommand.build(repo: repo, mode: .reinstall)
+    let update = InstallerCommand.build(repo: repo, mode: .update, nodePath: nil)
+    let reinstall = InstallerCommand.build(repo: repo, mode: .reinstall, nodePath: nil)
     assertTrue(update.hasSuffix(reinstall),
                "reinstalar tem que ser exatamente o rabo de atualizar — se divergir, "
                + "um dos dois botões instala algo diferente do outro:\n\(update)\n\(reinstall)")
@@ -2583,11 +2583,56 @@ test("os dois modos diferem só pelo prefixo do pull") {
 }
 
 test("o comando de atualizar quota um repo com espaço nas duas posições") {
-    let cmd = InstallerCommand.build(repo: "/Users/dev/My Projects/forge-agent", mode: .update)
+    let cmd = InstallerCommand.build(repo: "/Users/dev/My Projects/forge-agent", mode: .update, nodePath: nil)
     assertTrue(cmd.contains("git -C '/Users/dev/My Projects/forge-agent'"),
                "o repo do git -C não foi quotado: \(cmd)")
     assertTrue(cmd.contains("'/Users/dev/My Projects/forge-agent/install.sh'"),
                "o caminho do install.sh não foi quotado: \(cmd)")
+}
+
+test("o comando do instalador põe o node resolvido no PATH") {
+    // O app roda o comando por `bash -lc` herdando o PATH mínimo do launchd
+    // (/usr/bin:/bin:/usr/sbin:/sbin), onde um node de gerenciador de versão
+    // não existe. Sem este prefixo o `exec node` do install.sh saía 127 e o app
+    // só dizia "a atualização falhou (código 127)" (medido em 2026-08-20, v4.18.0).
+    let node = "/Users/dev/.nvm/versions/node/v24.16.0/bin/node"
+    let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .update, nodePath: node)
+    assertTrue(cmd.contains("PATH='/Users/dev/.nvm/versions/node/v24.16.0/bin':\"$PATH\""),
+               "o diretório do node resolvido não foi prefixado no PATH: \(cmd)")
+    assertTrue(cmd.contains("bash '/Users/dev/forge-agent/install.sh'"),
+               "o prefixo comeu a invocação do instalador: \(cmd)")
+}
+
+test("o prefixo de PATH cai no instalador, nunca antes do git") {
+    // A relação `update == pull && reinstall` é invariante fixada logo acima:
+    // um prefixo no começo do comando inteiro a quebraria, e os dois botões
+    // passariam a instalar coisas diferentes.
+    let repo = "/Users/dev/forge-agent"
+    let node = "/opt/homebrew/bin/node"
+    let update = InstallerCommand.build(repo: repo, mode: .update, nodePath: node)
+    let reinstall = InstallerCommand.build(repo: repo, mode: .reinstall, nodePath: node)
+    assertTrue(update.hasSuffix(reinstall),
+               "com node resolvido os dois modos deixaram de diferir só pelo pull:\n\(update)\n\(reinstall)")
+    assertTrue(update.hasPrefix("git -C"),
+               "o prefixo de PATH foi parar antes do git — o pull passaria a rodar com PATH alterado: \(update)")
+}
+
+test("um repo com aspas no caminho do node é escapado") {
+    let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .reinstall,
+                                     nodePath: "/Users/dev/it's/bin/node")
+    assertTrue(cmd.contains("PATH='/Users/dev/it'\\''s/bin':\"$PATH\""),
+               "a aspa simples no diretório do node não foi escapada: \(cmd)")
+}
+
+test("sem node resolvido o comando fica cru — o install.sh diagnostica") {
+    // Não é degradação silenciosa: a busca do install.sh é mais larga em um
+    // ponto (sem timeout no shell de login) e, falhando, ela imprime onde
+    // procurou. Recusar aqui trocaria um caso recuperável por um bloqueio.
+    for node in [nil, ""] {
+        let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .reinstall, nodePath: node)
+        assertFalse(cmd.contains("PATH="), "nodePath \(node ?? "nil") produziu prefixo de PATH: \(cmd)")
+        assertTrue(cmd.hasPrefix("bash "), "o comando cru deixou de começar pelo bash: \(cmd)")
+    }
 }
 
 test("o comando manual só inspeciona — nunca stash, reset ou rebase") {
