@@ -513,14 +513,43 @@ public enum ShellQuote {
 /// (b) pulling is the semantics of *Atualizar*, and smuggling it in here would
 /// make the same promise the label refuses to make; (c) with no pull there is no
 /// working tree that could be touched at all.
+///
+/// `nodePath` is the interpreter `NodeLocator` resolved, and it is not optional
+/// decoration: the command runs through `bash -lc` from a GUI app, so it
+/// inherits launchd's minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) — which
+/// cannot contain a version-managed node, and a login bash does not read the
+/// ~/.zshrc where nvm installs itself. `install.sh` then exited 127 and the app
+/// reported "a atualização falhou (código 127)" with no way to act on it
+/// (measured 2026-08-20, v4.18.0). Prefixing the assignment puts the already
+/// resolved interpreter on PATH for the installer AND every child it spawns,
+/// which is what `install.sh` and `app/build.sh` actually need.
+///
+/// The prefix lands on the installer, never on the whole command: `.update` is
+/// `.reinstall` plus a pull, and that suffix relationship is a pinned invariant.
 public enum InstallerCommand {
     public enum Mode { case update, reinstall }
 
-    public static func build(repo: String, mode: Mode) -> String {
-        let installer = "bash \(ShellQuote.posix("\(repo)/install.sh")) --update --with-app"
+    /// - Parameter nodePath: absolute path to the node binary, or nil when
+    ///   nothing resolved. Nil produces the bare command — `install.sh` runs its
+    ///   own bootstrap search and reports a real diagnosis if it also fails.
+    ///   No default value on purpose: a call site that forgets this is exactly
+    ///   the regression this parameter exists to prevent.
+    public static func build(repo: String, mode: Mode, nodePath: String?) -> String {
+        let installer = nodeEnvPrefix(nodePath)
+            + "bash \(ShellQuote.posix("\(repo)/install.sh")) --update --with-app"
         switch mode {
         case .reinstall: return installer
         case .update:    return "git -C \(ShellQuote.posix(repo)) pull --ff-only && " + installer
         }
+    }
+
+    /// `PATH=<dir do node>:"$PATH" ` — a shell assignment prefix, so it scopes to
+    /// the installer's environment and is inherited by its children. Empty when
+    /// there is nothing to add.
+    static func nodeEnvPrefix(_ nodePath: String?) -> String {
+        guard let nodePath, !nodePath.isEmpty else { return "" }
+        let dir = URL(fileURLWithPath: nodePath).deletingLastPathComponent().path
+        guard !dir.isEmpty, dir != "/" else { return "" }
+        return "PATH=\(ShellQuote.posix(dir)):\"$PATH\" "
     }
 }
