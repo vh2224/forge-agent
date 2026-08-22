@@ -28,6 +28,14 @@
 # any interpreter of ours is running.
 set -euo pipefail
 
+# The PATH exactly as the caller handed it over, captured BEFORE the floor below
+# is appended. Rung 2 of the search probes THIS, never the floored PATH: a hit in
+# a directory we ourselves added is not evidence about the caller's environment,
+# and reading it as such suppresses the PATH repair on any system that ships
+# /usr/bin/node — which is the second failure mode (`capability obrigatória
+# ausente para claude`) coming straight back. Measured on the Linux CI runner.
+FORGE_INHERITED_PATH="${PATH:-}"
+
 # The wrapper itself needs a handful of standard tools (mktemp, tail, sleep) and
 # resolves them through the very PATH it is here to repair. Appended, so nothing
 # the caller resolves changes; this only guarantees the floor exists.
@@ -60,6 +68,22 @@ forge_bounded() {
   return "${rc}"
 }
 
+# The fixed-path candidate list, one per line. Split on ':' when the seam is set,
+# so a caller can express an empty search without an empty-string candidate.
+forge_fixed_candidates() {
+  if [ -n "${FORGE_NODE_FIXED_CANDIDATES:-}" ]; then
+    printf '%s\n' "${FORGE_NODE_FIXED_CANDIDATES}" | tr ':' '\n'
+    return 0
+  fi
+  printf '%s\n' \
+    /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node \
+    "${HOME}/.volta/bin/node" \
+    "${HOME}/.asdf/shims/node" \
+    "${HOME}/.local/share/mise/shims/node" \
+    "${HOME}/.local/share/fnm/aliases/default/bin/node" \
+    "${HOME}/.fnm/aliases/default/bin/node"
+}
+
 # Sets FORGE_NODE and FORGE_NODE_SOURCE, or writes a diagnosis to stderr and
 # returns non-zero. Must be called plainly — never inside `$(...)`.
 forge_resolve_node() {
@@ -75,23 +99,30 @@ forge_resolve_node() {
     return 1
   fi
 
-  # 2. Whatever PATH already has — free, and correct in a terminal. A hit here
-  #    is also the evidence that the inherited PATH is the operator's own.
-  found="$(command -v node 2>/dev/null || true)"
+  # 2. Whatever the CALLER's PATH already has — free, and correct in a terminal.
+  #    A hit here is also the evidence that the inherited PATH is the operator's
+  #    own, which is why it must not see the floor this script appends.
+  found="$(PATH="${FORGE_INHERITED_PATH}" command -v node 2>/dev/null || true)"
   if [ -n "${found}" ]; then FORGE_NODE="${found}"; FORGE_NODE_SOURCE="path"; return 0; fi
 
   # 3. Fixed installs, then the shim each version manager publishes at a stable
   #    path. Nothing here hardcodes a version number.
-  for candidate in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node \
-                   "${HOME}/.volta/bin/node" \
-                   "${HOME}/.asdf/shims/node" \
-                   "${HOME}/.local/share/mise/shims/node" \
-                   "${HOME}/.local/share/fnm/aliases/default/bin/node" \
-                   "${HOME}/.fnm/aliases/default/bin/node"; do
+  #
+  #    FORGE_NODE_FIXED_CANDIDATES (colon-separated) replaces this list. It is a
+  #    TEST SEAM, in the same family as FORGE_XLLM_AGY_BIN and
+  #    FORGE_NEW_WINDOW_DRYRUN elsewhere in this repo, and it exists because
+  #    without it the rungs below are unreachable on any machine that ships node
+  #    at a fixed path — every CI runner does. A test that cannot reach the rung
+  #    it names does not fail there: it reports green having measured nothing,
+  #    which is the one outcome worth more than the seam costs.
+  while IFS= read -r candidate; do
+    [ -n "${candidate}" ] || continue
     if [ -x "${candidate}" ]; then
       FORGE_NODE="${candidate}"; FORGE_NODE_SOURCE="fixed"; return 0
     fi
-  done
+  done <<EOF
+$(forge_fixed_candidates)
+EOF
 
   # 4. Ask the login+interactive shell. This is what actually resolves nvm,
   #    which publishes no shim at all — its node lives under a version
@@ -107,8 +138,8 @@ forge_resolve_node() {
     echo "Procurei em:"
     echo "  • FORGE_NODE_PATH: não definido"
     echo "  • \$PATH = ${PATH}"
-    echo "  • caminhos fixos: /opt/homebrew/bin, /usr/local/bin, /usr/bin"
-    echo "  • shims de gerenciador: volta, asdf, mise, fnm"
+    echo "  • caminhos fixos e shims procurados:"
+    forge_fixed_candidates | while IFS= read -r c; do echo "      ${c}"; done
     echo "  • shell de login (${SHELL:-/bin/sh} -lic 'command -v node')"
     echo "Defina o caminho explicitamente:"
     echo "  FORGE_NODE_PATH=/caminho/para/node ./install.sh $*"

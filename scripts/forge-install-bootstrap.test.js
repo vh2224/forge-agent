@@ -92,7 +92,35 @@ function sandbox() {
   ].join('\n'));
   fs.chmodSync(fakeShell, 0o755);
 
-  return { dir, nodeDir, operatorDir, fakeNode, fakeShell };
+  // Stand-ins for the directories a minimal launcher PATH is made of. The
+  // literal '/usr/bin:/bin:/usr/sbin:/sbin' cannot express "a PATH that cannot
+  // resolve node": every CI runner ships /usr/bin/node, so on those machines the
+  // literal string resolves node and the scenario evaporates. These are empty
+  // and owned by the test, so the property is the same everywhere.
+  const sysDirs = ['usr-bin', 'bin'].map((n) => {
+    const d = path.join(dir, 'sys', n);
+    fs.mkdirSync(d, { recursive: true });
+    return d;
+  });
+
+  // A fixed-candidate list that resolves to nothing, for the cases whose whole
+  // subject is what happens when the fixed rung misses. Without it those cases
+  // are unreachable wherever node sits at a fixed path.
+  const noFixed = path.join(dir, 'sem-node', 'node');
+
+  // Um SEGUNDO node de mentira, para o degrau dos caminhos fixos. Precisa ser
+  // distinto do que o shell de login devolve: se os dois degraus respondessem o
+  // mesmo binário, um teste do degrau 3 passaria de graça sempre que a resolução
+  // escorregasse para o degrau 4 — foi assim que a primeira versão deste caso
+  // não mordeu quando o laço foi mutado para rodar em subshell.
+  const fixedNodeDir = path.join(dir, 'fixed', 'bin');
+  fs.mkdirSync(fixedNodeDir, { recursive: true });
+  const fixedNode = path.join(fixedNodeDir, 'node');
+  fs.writeFileSync(fixedNode, '#!/bin/bash\necho "CORE_PATH=$PATH"\nexit 0\n');
+  fs.chmodSync(fixedNode, 0o755);
+
+  return { dir, nodeDir, operatorDir, fakeNode, fakeShell, sysDirs,
+           minimalPath: sysDirs.join(':'), noFixed, fixedNodeDir, fixedNode };
 }
 
 // Run install.sh with a fully controlled environment; returns the PATH the core
@@ -107,14 +135,22 @@ function corePath(env) {
   return { path: line ? line.slice('CORE_PATH='.length) : null, res };
 }
 
-const LAUNCHD_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
-check('sob o PATH do launchd, o core recebe o PATH do operador', () => {
+check('sob o PATH de um launcher, o core recebe o PATH do operador', () => {
+  // Este caso também é o guard do degrau 2 do install.sh, e a razão é medida: o
+  // wrapper apenda um piso (/usr/bin:/bin:...) ao PATH antes de procurar node.
+  // Enquanto o degrau 2 procurava no PATH JÁ com o piso, um /usr/bin/node do
+  // sistema — que todo runner de CI tem — era lido como "o PATH herdado é o do
+  // operador", a fonte virava `path`, o empréstimo era suprimido e o install
+  // morria em "capability obrigatória ausente para claude". Aqui o PATH herdado
+  // não resolve node de jeito nenhum, então exigir o empréstimo reprova aquela
+  // leitura.
   const box = sandbox();
   const { path: got, res } = corePath({
     HOME: box.dir,
-    PATH: LAUNCHD_PATH,
+    PATH: box.minimalPath,
     SHELL: box.fakeShell,
+    FORGE_NODE_FIXED_CANDIDATES: box.noFixed,
     FORGE_LOGIN_TIMEOUT: '5',
   });
   assert(got !== null,
@@ -125,7 +161,7 @@ check('sob o PATH do launchd, o core recebe o PATH do operador', () => {
       `de capability voltaria a falhar com "capability obrigatória ausente".\nPATH: ${got}`);
   assert(dirs[0] === box.nodeDir,
     `o diretório do node resolvido não é o primeiro do PATH: ${got}`);
-  for (const keep of ['/usr/bin', '/bin']) {
+  for (const keep of box.sysDirs) {
     assert(dirs.includes(keep), `o PATH herdado perdeu ${keep}: ${got}`);
   }
 });
@@ -138,14 +174,44 @@ check('o node vem do shell de login quando é a única fonte (o caso nvm)', () =
     HOME: box.dir,
     PATH: path.join(box.dir, 'vazio'), // nada aqui, e HOME sem shim nenhum
     SHELL: box.fakeShell,
+    FORGE_NODE_FIXED_CANDIDATES: box.noFixed, // nem caminho fixo responde antes
     FORGE_LOGIN_TIMEOUT: '5',
   });
-  // Um /opt/homebrew/bin/node ou /usr/local/bin/node real na máquina de teste
-  // responderia antes do shell de login. O que a asserção fixa é o desfecho que
-  // importa: o core foi executado, e não com "node: not found".
+  // Sem a costura acima, um /usr/bin/node do sistema responderia antes do shell
+  // de login e este caso — o único que exercita o degrau que consertou o 127 —
+  // nunca seria alcançado onde ele mais precisa valer.
   assert(res.status === 0, `install.sh saiu ${res.status}: ${res.stderr}`);
   assert(got !== null, `o core não foi executado:\n${res.stdout}\n${res.stderr}`);
   assert(!/not found/i.test(String(res.stderr)), `saída de erro inesperada: ${res.stderr}`);
+});
+
+check('o caminho fixo resolve e ainda assim empresta o PATH do operador', () => {
+  // Duas coisas de uma vez. (a) O degrau dos caminhos fixos não tinha teste
+  // nenhum, e é o que roda num Mac com Homebrew — o caso mais comum que existe.
+  // (b) Ele percorre a lista com `while ... done <<EOF`, e um laço alimentado
+  // por pipe rodaria em subshell: FORGE_NODE seria atribuído lá dentro e
+  // voltaria vazio, o mesmo tropeço de shell que este arquivo documenta no
+  // topo. Se o laço perder a atribuição, o core não é executado e isto reprova.
+  const box = sandbox();
+  const { path: got, res } = corePath({
+    HOME: box.dir,
+    PATH: box.minimalPath, // o PATH herdado não resolve node
+    SHELL: box.fakeShell,
+    FORGE_NODE_FIXED_CANDIDATES: `${path.join(box.dir, 'nao-existe')}:${box.fixedNode}`,
+    FORGE_LOGIN_TIMEOUT: '5',
+  });
+  assert(got !== null,
+    `o degrau fixo não chegou a executar o core (exit ${res.status}):\n${res.stdout}\n${res.stderr}`);
+  const dirs = got.split(':');
+  // O node do degrau fixo é DIFERENTE do que o shell de login devolve, então
+  // esta linha separa os dois degraus: se o laço perder a atribuição num
+  // subshell, a resolução escorrega para o degrau 4 e o primeiro diretório é o
+  // outro — que é como esta asserção morde.
+  assert(dirs[0] === box.fixedNodeDir,
+    `o node do caminho fixo não é o primeiro do PATH (degrau 3 não resolveu): ${got}`);
+  assert(dirs.includes(box.operatorDir),
+    'resolver por caminho fixo não é evidência de que o PATH herdado é o do ' +
+      `operador — o empréstimo tinha de acontecer mesmo assim.\nPATH: ${got}`);
 });
 
 check('com o PATH do operador, nada é emprestado do shell de login', () => {
@@ -155,7 +221,7 @@ check('com o PATH do operador, nada é emprestado do shell de login', () => {
   const box = sandbox();
   const { path: got, res } = corePath({
     HOME: box.dir,
-    PATH: `${box.nodeDir}:${LAUNCHD_PATH}`,
+    PATH: `${box.nodeDir}:${box.minimalPath}`,
     SHELL: box.fakeShell,
     FORGE_LOGIN_TIMEOUT: '5',
   });
@@ -174,7 +240,7 @@ check('um shell de login travado não pendura o instalador', () => {
   const started = Date.now();
   const { path: got, res } = corePath({
     HOME: box.dir,
-    PATH: LAUNCHD_PATH,
+    PATH: box.minimalPath,
     SHELL: box.fakeShell,
     FORGE_NODE_PATH: box.fakeNode, // o node já está resolvido; o probe é só do PATH
     FORGE_LOGIN_TIMEOUT: '2',
@@ -191,7 +257,7 @@ check('um FORGE_NODE_PATH quebrado é recusado, não contornado', () => {
   const res = spawnSync('/bin/bash', [installSh, '--update'], {
     env: {
       HOME: box.dir,
-      PATH: `${box.nodeDir}:${LAUNCHD_PATH}`, // um node BOM está disponível
+      PATH: `${box.nodeDir}:${box.minimalPath}`, // um node BOM está disponível
       SHELL: box.fakeShell,
       FORGE_NODE_PATH: path.join(box.dir, 'nao-existe'),
       FORGE_LOGIN_TIMEOUT: '5',
@@ -210,17 +276,19 @@ check('sem node em lugar nenhum, o erro diz onde se procurou', () => {
   const box = sandbox();
   fs.writeFileSync(box.fakeShell, '#!/bin/bash\nexit 1\n'); // shell não responde
   fs.chmodSync(box.fakeShell, 0o755);
-  // HOME vazio e PATH sem node. Caminhos fixos (/opt/homebrew, /usr/local) são
-  // da máquina real: se um deles tiver node, este caso não é alcançável e o
-  // teste não tem o que afirmar.
-  const hasRealNode = ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node']
-    .some((p) => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } });
-  if (hasRealNode) {
-    console.log('    (a máquina tem node num caminho fixo — caso não alcançável aqui)');
-    return;
-  }
+  // Este caso já se pulou sozinho em toda máquina com node num caminho fixo,
+  // imprimindo uma nota e contando como ✓ — um gate que reporta verde sem ter
+  // medido nada, que é exatamente a patologia que este repo persegue. A costura
+  // de candidatos torna o caso alcançável em qualquer lugar, então o pulo
+  // ambiente saiu.
   const res = spawnSync('/bin/bash', [installSh, '--update'], {
-    env: { HOME: box.dir, PATH: path.join(box.dir, 'vazio'), SHELL: box.fakeShell, FORGE_LOGIN_TIMEOUT: '5' },
+    env: {
+      HOME: box.dir,
+      PATH: path.join(box.dir, 'vazio'),
+      SHELL: box.fakeShell,
+      FORGE_NODE_FIXED_CANDIDATES: box.noFixed,
+      FORGE_LOGIN_TIMEOUT: '5',
+    },
     encoding: 'utf8',
     timeout: 60_000,
   });
