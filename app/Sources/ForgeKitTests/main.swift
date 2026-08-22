@@ -2538,6 +2538,35 @@ test("RemoteRelease escolhe a maior tag semver estável do ls-remote") {
     assertTrue(RemoteRelease.latestTag(from: nil) == nil)
 }
 
+test("versão instalada vem do manifest mesmo com clone defasado") {
+    let manifest = Data(#"{"runtime":"codex","version":"4.21.2"}"#.utf8)
+    assertEqual(InstalledForgeVersion.resolve(manifestData: manifest, cloneVersion: "v4.20.0"),
+                "4.21.2")
+}
+
+test("versão instalada funciona sem checkout e clone é apenas fallback") {
+    let manifest = Data(#"{"version":" 4.21.2 \n"}"#.utf8)
+    assertEqual(InstalledForgeVersion.resolve(manifestData: manifest, cloneVersion: nil), "4.21.2")
+    assertEqual(InstalledForgeVersion.resolve(manifestData: nil, cloneVersion: " v4.20.0\n"),
+                "v4.20.0")
+    assertTrue(InstalledForgeVersion.resolve(manifestData: Data(#"{"version":42}"#.utf8),
+                                             cloneVersion: nil) == nil)
+}
+
+test("FORGE_HOME segue exatamente o override efetivo do updater") {
+    assertEqual(InstalledForgeVersion.forgeHome(environment: [:], home: "/Users/dev"),
+                "/Users/dev/.forge-agent")
+    assertEqual(InstalledForgeVersion.forgeHome(
+        environment: ["FORGE_HOME": "/Volumes/Forge/runtime"], home: "/Users/dev"),
+        "/Volumes/Forge/runtime")
+    assertEqual(InstalledForgeVersion.forgeHome(
+        environment: ["FORGE_HOME": "runtime/forge"], home: "/Users/dev"),
+        "/Users/dev/runtime/forge")
+    assertEqual(InstalledForgeVersion.forgeHome(
+        environment: ["FORGE_HOME": ""], home: "/Users/dev"),
+        "/Users/dev/.forge-agent")
+}
+
 test("SectionRestore devolve o raw válido e cai no fallback no resto") {
     let valid = ["Início", "Atualizações", "Terminal"]
     assertEqual(SectionRestore.resolve(rawValue: "Atualizações", valid: valid, fallback: "Início"),

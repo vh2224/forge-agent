@@ -202,6 +202,22 @@ check('a consulta de versão lê tags do servidor sem fetch no clone', () => {
     'check() voltou a atualizar ou usar refs do clone local');
 });
 
+check('load usa o manifest do FORGE_HOME como fonte primária e tolera checkout ausente', () => {
+  const loadBody = bodyOf(updatesCode, 'func load()');
+  assert(/InstalledForgeVersion\.forgeHome\(/.test(loadBody),
+    'load() não resolve o mesmo FORGE_HOME usado pelo updater remoto');
+  assert(/contents\(atPath:/.test(loadBody) && /manifest\.json/.test(loadBody),
+    'load() não lê FORGE_HOME/manifest.json');
+  assert(/InstalledForgeVersion\.resolve\(/.test(loadBody),
+    'load() não aplica a precedência manifest → clone testada no ForgeKit');
+  assert(!/guard\s+let\s+repo\s+else/.test(loadBody),
+    'load() ainda exige checkout; check/update precisam funcionar só com a instalação');
+  assert(/repo\.flatMap\s*\{\s*git\(\["describe",\s*"--tags",\s*"--abbrev=0"\]/.test(loadBody),
+    'a tag do clone deixou de existir como fallback controlado para dogfood');
+  assert(/repoDescribe\s*=\s*repo\.flatMap/.test(loadBody),
+    'o describe completo do clone não ficou separado como diagnóstico');
+});
+
 check('InstallerCommand.build passa --apply E --with-app nos dois modos', () => {
   assert(
     buildBody.includes('--apply'),

@@ -31,11 +31,12 @@ final class UpdateStore: ObservableObject {
     private(set) var running: String? = VersionFooter.stamped(
         Bundle.main.object(forInfoDictionaryKey: "ForgeGitDescribe") as? String)
 
-    /// The repo's describe, FULL — no `--abbrev=0`, unlike `installed`.
+    /// The repo's describe, FULL — no `--abbrev=0`, unlike the clone fallback
+    /// used when no installed manifest exists.
     ///
     /// The two are not interchangeable and neither replaces the other:
-    /// `installed` is a tag, compared semantically against the remote's tag to
-    /// decide whether an update exists; this one carries the commit count and the
+    /// `installed` is the manifest version (or a fallback tag), compared
+    /// semantically against the remote's tag; this one carries the commit count and the
     /// sha, which is the only way "you committed but did not rebuild" is
     /// detectable at all (comparing abbreviated tags says "in sync" across six
     /// commits).
@@ -82,14 +83,21 @@ final class UpdateStore: ObservableObject {
         #if DEBUG
         guard !isStagedPreview else { return }
         #endif
-        guard let repo else {
-            lastError = "repo do Forge não encontrado nas preferências"
-            return
-        }
-        installed = git(["describe", "--tags", "--abbrev=0"], at: repo)
-        repoDescribe = git(["describe", "--tags"], at: repo)
-        if let text = try? String(contentsOfFile: "\(repo)/CHANGELOG.md", encoding: .utf8) {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let forgeHome = InstalledForgeVersion.forgeHome(
+            environment: ProcessInfo.processInfo.environment, home: home)
+        let manifest = FileManager.default.contents(atPath: "\(forgeHome)/manifest.json")
+        let cloneVersion = repo.flatMap { git(["describe", "--tags", "--abbrev=0"], at: $0) }
+        installed = InstalledForgeVersion.resolve(
+            manifestData: manifest, cloneVersion: cloneVersion)
+
+        // Checkout state is diagnostic only; remote update does not move it.
+        repoDescribe = repo.flatMap { git(["describe", "--tags"], at: $0) }
+        if let repo,
+           let text = try? String(contentsOfFile: "\(repo)/CHANGELOG.md", encoding: .utf8) {
             releases = ChangelogParser.parse(text)
+        } else {
+            releases = []
         }
     }
 
@@ -212,19 +220,8 @@ final class UpdateStore: ObservableObject {
     private func finishUpdate(exitCode: Int32) {
         updating = false
         if UpdateOutcome.canRelaunch(exitCode: exitCode) {
-            // `repoDescribe` (and `installed`) are still whatever `load()` last
-            // saw, so without this refresh the still-running old process would
-            // keep comparing its `running` stamp against a stale `repoDescribe`
-            // and read "in sync" at the exact moment the running-vs-repo
-            // divergence becomes real (R6) — the reason the footer exists (D25).
-            //
-            // KNOWN GAP, named rather than implied: since `.update` stopped
-            // pulling, a remote update does not move this clone at all, so
-            // `installed` (a `git describe` of the clone) no longer describes
-            // what was installed — it describes the clone. After a successful
-            // server update `updateAvailable` therefore stays true until the
-            // operator pulls by hand. The honest source is the Forge home's
-            // `manifest.json § version`, which the app does not read today.
+            // Refresh the manifest the remote updater just replaced. The clone
+            // remains a separate dogfood diagnostic and is intentionally stale.
             load()
             needsRelaunch = true
         } else {

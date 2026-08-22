@@ -25,6 +25,35 @@
 
 import Foundation
 
+// MARK: - What version is installed
+
+/// Resolves the installation that the remote updater actually mutates.
+/// `${FORGE_HOME:-$HOME/.forge-agent}` is also `InstallerCommand`'s contract.
+/// A checkout is only a controlled fallback for dogfooding before installation.
+public enum InstalledForgeVersion {
+    public static func forgeHome(environment: [String: String], home: String) -> String {
+        let raw = environment["FORGE_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? (home as NSString).appendingPathComponent(".forge-agent")
+        if (raw as NSString).isAbsolutePath {
+            return (raw as NSString).standardizingPath
+        }
+        return ((home as NSString).appendingPathComponent(raw) as NSString).standardizingPath
+    }
+
+    public static func manifestVersion(from data: Data?) -> String? {
+        guard let data,
+              let decoded = try? JSONSerialization.jsonObject(with: data),
+              let object = decoded as? [String: Any],
+              let raw = object["version"] as? String else { return nil }
+        let version = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return version.isEmpty ? nil : version
+    }
+
+    public static func resolve(manifestData: Data?, cloneVersion: String?) -> String? {
+        manifestVersion(from: manifestData) ?? VersionFooter.stamped(cloneVersion)
+    }
+}
+
 // MARK: - Classifying a line of installer output
 
 /// What one line of installer output means to the progress UI.
