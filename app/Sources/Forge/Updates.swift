@@ -14,6 +14,7 @@ import ForgeKit
 @MainActor
 final class UpdateStore: ObservableObject {
     static let shared = UpdateStore()
+    private static let canonicalRemote = "https://github.com/vh2224/forge-agent.git"
 
     @Published private(set) var installed: String?
     @Published private(set) var latest: String?
@@ -95,15 +96,14 @@ final class UpdateStore: ObservableObject {
     /// Ask the remote what the newest tag is. Network-bound, so never automatic
     /// on a timer — the statusline already does its own throttled check.
     func check() {
-        guard let repo, !checking else { return }
+        guard !checking else { return }
         checking = true
         lastError = nil
         Task.detached(priority: .utility) {
-            // Fetch tags without touching the working tree.
-            _ = Self.git(["fetch", "--tags", "--quiet", "origin"], at: repo)
-            let tag = Self.git(["describe", "--tags", "--abbrev=0", "origin/HEAD"], at: repo)
-                ?? Self.git(["tag", "--sort=-v:refname"], at: repo)?
-                    .components(separatedBy: "\n").first
+            // Resolve tags from the canonical server without reading or
+            // refreshing refs in whatever local clone the app happens to know.
+            let refs = Self.git(["ls-remote", "--tags", Self.canonicalRemote])
+            let tag = RemoteRelease.latestTag(from: refs)
             await MainActor.run {
                 self.latest = tag?.trimmingCharacters(in: .whitespacesAndNewlines)
                 self.checking = false
@@ -122,15 +122,15 @@ final class UpdateStore: ObservableObject {
     /// to keep. The tail is what explains a failure.
     @Published private(set) var log: [String] = []
 
-    /// Why the update refused to start, plus a command the operator can run to
-    /// see the same thing themselves. Set only by the git precheck.
+    /// Legacy diagnostic fields retained for UI/state compatibility. Remote
+    /// updates do not inspect or mutate the local repository.
     @Published private(set) var blockedMessage: String?
     @Published private(set) var blockedCommand: String?
 
     /// Run the installer headless, streaming its output. The ONE execution path
     /// behind both `runUpdate()` and `runReinstall()` — the two differ only in
-    /// the command `InstallerCommand` composes and in whether the git precheck
-    /// applies, so duplicating this body would let them drift apart in behaviour
+    /// the source mode `InstallerCommand` composes, so duplicating this body
+    /// would let them drift apart in behaviour
     /// nobody is watching.
     ///
     /// No Terminal window: under `--update` the installer cannot ask anything.
@@ -152,23 +152,6 @@ final class UpdateStore: ObservableObject {
         }
         blockedMessage = nil
         blockedCommand = nil
-
-        // Check before starting, not after: `git pull --ff-only` failing halfway
-        // means the operator watched a progress bar for something that could
-        // never have begun. Only the pulling mode can hit it — so only `.update`
-        // pays for the git probes at all. `.reinstall` skips them entirely: not
-        // just `pulls: false` at the call site, but no `git` subprocess spawned,
-        // matching the "no git, no network" contract on `runReinstall()`.
-        if mode == .update {
-            let ahead = Int(Self.git(["rev-list", "--count", "origin/HEAD..HEAD"], at: repo) ?? "") ?? 0
-            if let blocker = UpdatePrecheck.evaluate(dirty: Git.isDirty(at: repo),
-                                                    ahead: ahead,
-                                                    pulls: true) {
-                blockedMessage = UpdatePrecheck.message(for: blocker)
-                blockedCommand = UpdatePrecheck.manualCommand(repo: repo)
-                return
-            }
-        }
 
         updating = true
         phase = "preparando"
@@ -221,12 +204,19 @@ final class UpdateStore: ObservableObject {
     private func finishUpdate(exitCode: Int32) {
         updating = false
         if UpdateOutcome.canRelaunch(exitCode: exitCode) {
-            // A successful update just pulled the repo: `repoDescribe` (and
-            // `installed`) are still whatever `load()` last saw BEFORE the pull,
-            // so without this refresh the still-running old process would keep
-            // comparing its `running` stamp against a stale `repoDescribe` and
-            // read "in sync" at the exact moment the running-vs-repo divergence
-            // becomes real (R6) — the entire reason the footer exists (D25).
+            // `repoDescribe` (and `installed`) are still whatever `load()` last
+            // saw, so without this refresh the still-running old process would
+            // keep comparing its `running` stamp against a stale `repoDescribe`
+            // and read "in sync" at the exact moment the running-vs-repo
+            // divergence becomes real (R6) — the reason the footer exists (D25).
+            //
+            // KNOWN GAP, named rather than implied: since `.update` stopped
+            // pulling, a remote update does not move this clone at all, so
+            // `installed` (a `git describe` of the clone) no longer describes
+            // what was installed — it describes the clone. After a successful
+            // server update `updateAvailable` therefore stays true until the
+            // operator pulls by hand. The honest source is the Forge home's
+            // `manifest.json § version`, which the app does not read today.
             load()
             needsRelaunch = true
         } else {
@@ -292,10 +282,10 @@ final class UpdateStore: ObservableObject {
 
     private func git(_ args: [String], at path: String) -> String? { Self.git(args, at: path) }
 
-    nonisolated private static func git(_ args: [String], at path: String) -> String? {
+    nonisolated private static func git(_ args: [String], at path: String? = nil) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["-C", path] + args
+        p.arguments = path.map { ["-C", $0] + args } ?? args
         let out = Pipe()
         p.standardOutput = out
         p.standardError = Pipe()
@@ -449,24 +439,21 @@ struct UpdatesView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
-                // Both can render together on purpose: an available-but-blocked
-                // update (local commits ahead of origin, or a dirty tree) is
-                // exactly the state "Reinstalar" exists to unblock. Hiding it
-                // whenever "Atualizar" shows would hide it in the one state it
-                // matters most — so needsRelaunch still wins the whole slot, but
-                // updateAvailable no longer keeps Reinstalar off-screen.
+                // Both can render together on purpose: Atualizar installs the
+                // pinned server release, while Reinstalar reapplies this local
+                // checkout for dogfood. needsRelaunch still wins the whole slot.
                 VStack(alignment: .trailing, spacing: 6) {
                     if store.updateAvailable {
                         Button("Atualizar") { store.runUpdate() }
                             .controlSize(.large)
                             .disabled(store.updating)
-                            .help("Roda install.sh --update --with-app aqui, mostrando o progresso")
+                            .help("Baixa a release estável do servidor e atualiza o Forge e o app")
                     }
                     Button("Reinstalar") { store.runReinstall() }
                         .controlSize(.small)
                         .disabled(store.updating)
-                        .help("Roda install.sh --update --with-app nesta cópia do repo, "
-                              + "sem git pull: reaplica agentes, skills e scripts e recompila o app")
+                        .help("Reaplica explicitamente esta cópia local, sem git pull, "
+                              + "e recompila o app")
                 }
             }
         }

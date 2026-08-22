@@ -66,7 +66,7 @@ A partir da v1.0, o Forge Agent usa **3 comandos slash** e **skills** para tudo 
 |---------|-----------|
 | `/forge` | **Entry point principal** — REPL interativo com menu: auto, task, new-milestone, status, help |
 | `/forge-init [descrição]` | Inicializa o projeto GSD — cria `CLAUDE.md` + `.gsd/` + prefs |
-| `/forge-update [caminho]` | Atualiza Forge Agent (git pull + reinstala). Preserva preferências. |
+| `/forge-update` | Atualiza Forge Agent direto da release estável no servidor. Preserva preferências. |
 
 ### Skills de execução e planejamento
 
@@ -324,12 +324,14 @@ A matriz canônica de resolver está em [`scripts/forge-routing.js`](scripts/for
 ## Atualizar
 
 ```bash
-cd forge-agent
-git pull
-bash install.sh --update
+node scripts/forge-update.js --dry-run --json
+node scripts/forge-update.js --apply --json
 ```
 
-Preferências e arquivos de projeto nunca são sobrescritos.
+O updater ignora clones locais por padrão: resolve a release semver mais recente
+no servidor canônico, fixa o SHA e executa um checkout temporário. Preferências
+e arquivos de projeto nunca são sobrescritos. Para desenvolvimento/offline,
+o modo local exige `--source local --repo <clone>` explicitamente.
 
 ---
 

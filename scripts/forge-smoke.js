@@ -6576,7 +6576,9 @@ function smokePrefsMigration() {
   const installerCore = read('scripts/forge-installer.js'); const updateCore = read('scripts/forge-update.js');
   assert(/generateScaffold/.test(installerCore) && !installerCore.includes('.gsd/forge-prefs.jsonc'), '(e) installer core scaffolds the global Forge-home catalog and never creates a local .gsd catalog');
   assert(ps.includes('Join-Path') && !ps.includes('\f') && !ps.includes(String.fromCharCode(0x0c)), '(e) install.ps1 uses Join-Path and contains no form-feed byte');
-  assert(/forge-update\.js --apply/.test(update) && /installer\.install/.test(updateCore), '(e) forge-update thin adapter delegates migration/update ordering to the Node core');
+  assert(/FORGE_HOME/.test(update) && /forge-update\.js/.test(update)
+      && /process\.argv\.slice\(1\)/.test(update) && /installer\.install/.test(updateCore),
+    '(e) forge-update thin adapter resolves the installed engine and delegates migration/update ordering to the Node core');
   assert(/migrateLegacy:\s*input\.migrateLegacy/.test(updateCore), '(e2) forge-update forwards explicit legacy migration without writing repo_path through a local layer');
   for (const skill of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md']) {
     const skillText = read(skill);
@@ -7825,7 +7827,8 @@ function smokePrefsChokepoints() {
     // that directory so the dry-run runs regardless of the runner's real HOME.
     const dryHome = mkTmp('install-dry-home');
     fs.mkdirSync(path.join(dryHome, '.claude'), { recursive: true });
-    const dry = spawnSync('bash', [path.join(REPO, 'install.sh'), '--dry-run', '--update'],
+    const dry = spawnSync('bash', [path.join(REPO, 'install.sh'), '--dry-run', '--update',
+      '--source', 'local', '--repo', REPO],
       { encoding: 'utf8', env: { ...process.env, HOME: dryHome } });
     cleanup(dryHome);
     const output = `${dry.stdout || ''}${dry.stderr || ''}`;
@@ -10140,7 +10143,8 @@ function smokeSharedGlob() {
     const dryHome = mkTmp('install-shared-glob-home');
     try {
       fs.mkdirSync(path.join(dryHome, '.claude'), { recursive: true });
-      const dry = spawnSync('bash', [shPath, '--dry-run', '--update'], {
+      const dry = spawnSync('bash', [shPath, '--dry-run', '--update',
+        '--source', 'local', '--repo', repo], {
         encoding: 'utf8',
         env: { ...process.env, HOME: dryHome },
       });

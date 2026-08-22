@@ -367,4 +367,43 @@ test('the summary always says that refreshing the clone is a separate step', () 
   } finally { data.cleanup(); }
 });
 
+test('CLI defaults to the remote stable channel and local clones require explicit opt-in', () => {
+  const defaults = updater.parseArgs([]);
+  assert.strictEqual(defaults.source, 'remote');
+  assert.strictEqual(defaults.channel, 'stable');
+  assert.match(defaults.remote, /^https:\/\//);
+  assert.throws(() => updater.parseArgs(['--repo', __dirname]), /--source local/);
+  const local = updater.parseArgs(['--source', 'local', '--repo', path.resolve(__dirname, '..')]);
+  assert.strictEqual(local.source, 'local');
+  assert.strictEqual(local.repo, path.resolve(__dirname, '..'));
+});
+
+test('the projected command launches the installed updater instead of a cwd clone', () => {
+  const command = fs.readFileSync(path.join(path.resolve(__dirname, '..'), 'commands', 'forge-update.md'), 'utf8');
+  assert(command.includes("process.env.FORGE_HOME||p.join(o.homedir(),'.forge-agent')"));
+  assert(command.includes("require(p.join(h,'scripts','forge-update.js')).run(process.argv.slice(1))"));
+  assert(!/^node scripts\/forge-update\.js/m.test(command));
+  assert(/Windows,\s*\nmacOS e Linux/.test(command));
+});
+
+test('a remote bootstrap records pinned server provenance instead of its disposable checkout', () => {
+  const data = fixture();
+  try {
+    const provenance = {
+      remote: 'https://github.com/vh2224/forge-agent.git', channel: 'stable',
+      ref: 'refs/tags/v4.18.0', tag: 'v4.18.0', sha: 'a'.repeat(40),
+      declared_version: '4.17.0', version_matches_ref: false,
+    };
+    const report = updater.update({ ...data, runtime: 'both', apply: true, skipCapabilityCheck: true, remoteProvenance: provenance });
+    const manifest = JSON.parse(fs.readFileSync(path.join(data.forgeHome, 'manifest.json'), 'utf8'));
+    assert.deepStrictEqual(manifest.source_remote, provenance);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'source_repo'), false,
+      'the deleted temporary checkout must not become durable provenance');
+    assert.deepStrictEqual(report.remote_source, provenance);
+    const rendered = updater.render(report);
+    assert(rendered.includes('clone local ignorado'));
+    assert(rendered.includes('difere da tag'));
+  } finally { data.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

@@ -2527,6 +2527,17 @@ test("bundle canônico não gera aviso; um build de dev gera") {
 
 print("\nAtualização — restauração de seção e pré-checagem do git")
 
+test("RemoteRelease escolhe a maior tag semver estável do ls-remote") {
+    let refs = """
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v4.9.0
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v4.10.0
+    cccccccccccccccccccccccccccccccccccccccc\trefs/tags/v4.10.0^{}
+    dddddddddddddddddddddddddddddddddddddddd\trefs/tags/v5.0.0-beta.1
+    """
+    assertEqual(RemoteRelease.latestTag(from: refs), "v4.10.0")
+    assertTrue(RemoteRelease.latestTag(from: nil) == nil)
+}
+
 test("SectionRestore devolve o raw válido e cai no fallback no resto") {
     let valid = ["Início", "Atualizações", "Terminal"]
     assertEqual(SectionRestore.resolve(rawValue: "Atualizações", valid: valid, fallback: "Início"),
@@ -2554,40 +2565,43 @@ test("reinstalar nunca é bloqueado por estado de git") {
                 "o caminho que puxa não mudou")
 }
 
-test("o comando de atualizar puxa antes de instalar, com --update e --with-app") {
+test("o comando de atualizar usa o updater remoto padrão, com --update e --with-app") {
     let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .update, nodePath: nil)
-    assertTrue(cmd.contains("pull --ff-only"), "sem o pull: \(cmd)")
     assertTrue(cmd.contains("--update"), "sem --update: \(cmd)")
     assertTrue(cmd.contains("--with-app"),
                "sem --with-app o app atualizaria tudo menos ele mesmo: \(cmd)")
+    assertFalse(cmd.contains("--source local"), "update remoto virou fonte local: \(cmd)")
+    assertFalse(cmd.contains("git"), "update voltou a puxar o clone local: \(cmd)")
 }
 
-test("o comando de reinstalar não executa git nenhum") {
+test("o comando de reinstalar seleciona explicitamente o repo local") {
     let cmd = InstallerCommand.build(repo: "/Users/dev/forge-agent", mode: .reinstall, nodePath: nil)
     assertTrue(cmd.contains("--update"), "sem --update: \(cmd)")
     assertTrue(cmd.contains("--with-app"),
                "sem --with-app o app reinstalaria tudo menos ele mesmo: \(cmd)")
     assertFalse(cmd.contains("git"), "a reinstalação executa git: \(cmd)")
     assertFalse(cmd.contains("pull"), "a reinstalação puxa: \(cmd)")
+    assertTrue(cmd.contains("--source local --repo '/Users/dev/forge-agent'"),
+               "a reinstalação não fixa a fonte local: \(cmd)")
 }
 
-test("os dois modos diferem só pelo prefixo do pull") {
+test("os dois modos diferem só pela seleção explícita da fonte local") {
     let repo = "/Users/dev/forge-agent"
     let update = InstallerCommand.build(repo: repo, mode: .update, nodePath: nil)
     let reinstall = InstallerCommand.build(repo: repo, mode: .reinstall, nodePath: nil)
-    assertTrue(update.hasSuffix(reinstall),
-               "reinstalar tem que ser exatamente o rabo de atualizar — se divergir, "
+    assertTrue(reinstall.hasPrefix(update),
+               "atualizar tem que ser exatamente a cabeça de reinstalar — se divergir, "
                + "um dos dois botões instala algo diferente do outro:\n\(update)\n\(reinstall)")
-    assertEqual(update, "git -C '\(repo)' pull --ff-only && " + reinstall,
-                "o modo update deixou de produzir a string que a v3.1.4 executava")
+    assertEqual(reinstall, update + " --source local --repo '\(repo)'",
+                "reinstall deve apenas tornar local a fonte do mesmo updater")
 }
 
-test("o comando de atualizar quota um repo com espaço nas duas posições") {
-    let cmd = InstallerCommand.build(repo: "/Users/dev/My Projects/forge-agent", mode: .update, nodePath: nil)
-    assertTrue(cmd.contains("git -C '/Users/dev/My Projects/forge-agent'"),
-               "o repo do git -C não foi quotado: \(cmd)")
+test("os comandos quotam um repo com espaço") {
+    let cmd = InstallerCommand.build(repo: "/Users/dev/My Projects/forge-agent", mode: .reinstall, nodePath: nil)
     assertTrue(cmd.contains("'/Users/dev/My Projects/forge-agent/install.sh'"),
                "o caminho do install.sh não foi quotado: \(cmd)")
+    assertTrue(cmd.contains("--repo '/Users/dev/My Projects/forge-agent'"),
+               "o argumento --repo não foi quotado: \(cmd)")
 }
 
 test("o comando do instalador põe o node resolvido no PATH") {

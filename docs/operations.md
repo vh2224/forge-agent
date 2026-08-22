@@ -70,6 +70,9 @@ significa executar a mesma unidade simultaneamente nos dois hosts.
 
 Sempre faça o dry-run primeiro. O runtime explícito impede que uma instalação
 Codex-only seja convertida para `both` ou crie um home Claude por acidente.
+Sem `--source local`, o updater ignora qualquer clone existente, consulta a
+release estável mais recente no servidor canônico via HTTPS, fixa o SHA remoto
+e executa o updater daquela revisão em um checkout temporário.
 
 ```powershell
 # Windows
@@ -92,7 +95,46 @@ em `FORGE_HOME`, configuração do operador, `.gsd` do projeto e fontes legadas
 Claude 3.1.4 permanecem byte-idênticas por padrão; a projeção legada sem
 marcadores é reportada como conflito. Para migrá-la explicitamente, use
 `--migrate-legacy`, que cria backup antes de substituir os arquivos canônicos.
-O próximo pacote proposto é 4.6.0 (baseado em v4.5.1). Para conferir o pacote de release:
+
+Falha de rede, tag ausente, troca de SHA durante o clone ou manifesto remoto
+incompatível abortam antes da instalação — não há fallback silencioso ao clone.
+O canal `master` é opt-in (`--channel master`). Um clone local só pode ser usado
+explicitamente com `--source local --repo <clone>`.
+
+### Transição para o updater remoto
+
+O checkout temporário é clonado com **histórico completo**, nunca `--depth 1`:
+`forge-release-version.js` recusa um repositório raso por contrato
+(`version-history-incomplete`), então um clone raso da release não consegue nem
+declarar a própria versão. Custo medido: ~8 MB.
+
+Nem toda tag publicada entende `--source local` — o flag é mais novo que elas.
+O updater sonda a release baixada com `--help` e escolhe o caminho:
+
+| Sonda `--help` | Bootstrap | Relatório |
+|----------------|-----------|-----------|
+| menciona `--source local` | `forge-update.js` da própria release, modo local | JSON estruturado |
+| não menciona | `forge-installer.js` da própria release, sobre o próprio checkout | `bootstrap.mode: installer-compat`, com a saída íntegra do instalador remoto |
+
+Nos dois caminhos os bytes instalados, o `VERSION` carimbado e o código que
+renderiza vêm da revisão fixada do servidor — nunca de um clone local. No
+caminho de compatibilidade o `--runtime` é resolvido do manifest instalado e
+passado explicitamente: o instalador publicado tem `claude` como default, então
+omiti-lo converteria uma instalação Codex-only em Claude.
+
+Instalações antigas cujo `/forge-update` ainda executa `scripts/forge-update.js`
+relativo ao diretório de trabalho precisam de **uma** atualização pelo caminho
+antigo (ou de um `install.sh --update --source local --repo <clone>`) para
+receber o comando projetado que resolve o updater em `FORGE_HOME`. Depois dessa
+única vez, as atualizações seguintes não dependem de nenhum clone.
+
+Enquanto o servidor não tiver uma tag contendo este updater, o canal `stable`
+exercita o caminho `installer-compat` — verificado contra a `v4.21.0` publicada,
+com clone, verificação de SHA, leitura de `VERSION` e limpeza do temporário. O
+caminho de JSON estruturado só passa a ser exercido quando a primeira tag com
+`--source local` existir.
+
+Para conferir o pacote de release:
 
 ```powershell
 node scripts/forge-package.js --output '.\forge-release' --json
