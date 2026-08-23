@@ -19,7 +19,16 @@
 
 const fs = require('fs');
 const path = require('path');
-const { resolveRoute } = require('./forge-routing.js');
+const { resolveRoute, readRoutingConfig } = require('./forge-routing.js');
+
+function routingPresent(cwd) {
+  try {
+    const cfg = readRoutingConfig(cwd);
+    return cfg.present === true && cfg.ok === true;
+  } catch {
+    return false;
+  }
+}
 const { modelToAlias, modelFamily } = require('./forge-model-alias.js');
 const { readPrefsCached } = require('./forge-prefs.js');
 const { readTierChain, defaultTierModel } = require('./forge-tier-chain.js');
@@ -417,6 +426,11 @@ function resolveDispatch(opts) {
     domain_input: requestedDomain,
     frontmatter_tier: plan.tier,
     thinking_header: thinkingHeaderFor(model, effort),
+    // Additive: whether a parseable routing: block exists in the prefs cascade.
+    // Consumed by the orchestrator's shadowing warning ("routing configured but
+    // not applied") — previously a SECOND forge-routing.js --explain spawn per
+    // dispatch, duplicating the resolution this call already performed.
+    routing_present: routingPresent(cwd),
     // Additive dispatch trigger: normalized from the resolved top-level `engine`
     // (family). gpt→codex, gemini→agy, else→claude. Orchestrator branches gate
     // on this (`== "codex"`), NOT on `engine`/`chain[].engine` (kept family).
@@ -491,18 +505,78 @@ function degradedContract(args) {
     // Emitted explicitly via the same helper for contract stability.
     dispatch_engine: dispatchEngineFor('claude'),
     sidecar_model: sidecarModelFor(dispatchEngineFor('claude'), chain, ''),
+    routing_present: false,
     prefs_ok: true, prefs_errors: [],
     ...runtime,
   };
 }
 
-module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, claudeExecutableChain, TIER_DEFAULTS, EFFORT_DEFAULTS };
+// ── --shell-exports: single-parse emitter for the orchestrator skills ────────
+//
+// The dispatch skills used to burn 19 separate `node -e "JSON.parse(...)"`
+// spawns extracting one field each from $ROUTE_JSON. This emits every shell
+// variable the loop consumes in ONE pass, as eval-safe single-quoted
+// assignments (embedded quotes escaped as '\''), so the skill runs:
+//   eval "$(printf '%s' "$ROUTE_JSON" | node forge-dispatch-resolve.js --shell-exports)"
+// The map is the contract: adding a consumer variable here is additive; the
+// JSON output remains the canonical payload ($ROUTE_JSON.chain is still read
+// directly by Branch C/D and the failure taxonomy).
+
+const SHELL_EXPORT_MAP = [
+  ['MODEL_ID', (r) => r.model],
+  ['MODEL_ALIAS', (r) => r.alias || ''],
+  ['TIER', (r) => r.tier],
+  ['REASON', (r) => r.reason],
+  ['DOMAIN_USED', (r) => r.domain],
+  ['ROUTE_SOURCE', (r) => r.route_source],
+  ['CHAIN_LEN', (r) => String(r.chain_len)],
+  ['ENGINE', (r) => r.engine],
+  ['DISPATCH_ENGINE', (r) => r.dispatch_engine || ''],
+  ['ENGINE_REASON', (r) => r.engine_reason],
+  ['EFFORT', (r) => r.effort],
+  ['EFFORT_REASON', (r) => r.effort_reason],
+  ['WORKERS_TIMEOUT', (r) => String(r.workers_timeout)],
+  ['CODEX_MODEL', (r) => r.codex_model || ''],
+  ['SIDECAR_MODEL', (r) => r.sidecar_model || ''],
+  ['THINKING_HEADER', (r) => r.thinking_header || ''],
+  ['DOMAIN', (r) => r.domain_input || ''],
+  ['PLAN_TIER', (r) => r.frontmatter_tier || ''],
+  ['PLAN_WORKER', (r) => r.plan_worker || ''],
+  ['ROUTING_PRESENT', (r) => (r.routing_present ? 'true' : 'false')],
+  // JSON-literal glue for the dispatch event line (string or null) — replaces
+  // the bash `MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && ...)` derivation.
+  ['MODEL_APPLIED_JSON', (r) => (r.alias ? JSON.stringify(r.alias) : 'null')],
+  ['unit_effort', (r) => r.effort],
+];
+
+function shellQuote(value) {
+  return `'${String(value == null ? '' : value).replace(/'/g, "'\\''")}'`;
+}
+
+function shellExports(route) {
+  return SHELL_EXPORT_MAP.map(([name, pick]) => `${name}=${shellQuote(pick(route))}`).join('\n');
+}
+
+module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, claudeExecutableChain, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
 
 if (require.main === module) {
   // Exit 0 on success; exit 1 ONLY on a prefs loud-stop (M008-CONTEXT #2 — a
   // malformed prefs layer must halt the shell consumer rather than proceed on
   // the claude/effort-default fallback). The last-resort catch below still
   // emits the ordered contract and exits 0 for UNEXPECTED runtime errors.
+  // --shell-exports: transform mode — reads a resolved contract JSON from
+  // stdin and prints eval-safe shell assignments. No resolution happens here;
+  // a malformed payload is a loud exit 2 (an eval of garbage must never run).
+  if (process.argv.includes('--shell-exports')) {
+    try {
+      const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
+      process.stdout.write(shellExports(payload) + '\n');
+      process.exit(0);
+    } catch (error) {
+      process.stderr.write(JSON.stringify({ error: `--shell-exports: unparseable stdin payload (${(error && error.message) || error})` }) + '\n');
+      process.exit(2);
+    }
+  }
   try {
     const result = runCli(process.argv.slice(2));
     process.exit(result && result.prefs_ok === false ? 1 : 0);

@@ -236,27 +236,13 @@ if [ $? -ne 0 ]; then
   echo "✗ dispatch resolver halted (prefs error) — see forge-dispatch-resolve.js prefs_errors" >&2
   exit 1
 fi
-MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).model)" "$ROUTE_JSON")
-MODEL_ALIAS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).alias||'')" "$ROUTE_JSON")
-TIER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).tier)" "$ROUTE_JSON")
-REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).reason)" "$ROUTE_JSON")
-DOMAIN_USED=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).domain)" "$ROUTE_JSON")
-ROUTE_SOURCE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).route_source)" "$ROUTE_JSON")
-CHAIN_LEN=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).chain_len))" "$ROUTE_JSON")
-ENGINE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).engine)" "$ROUTE_JSON")
-DISPATCH_ENGINE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).dispatch_engine||'')" "$ROUTE_JSON")
-ENGINE_REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).engine_reason)" "$ROUTE_JSON")
-EFFORT=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort)" "$ROUTE_JSON")
-EFFORT_REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort_reason)" "$ROUTE_JSON")
-WORKERS_TIMEOUT=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).workers_timeout))" "$ROUTE_JSON")
-CODEX_MODEL=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).codex_model||'')" "$ROUTE_JSON")
-SIDECAR_MODEL=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).sidecar_model||'')" "$ROUTE_JSON")
-THINKING_HEADER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).thinking_header||'')" "$ROUTE_JSON")
-# Raw resolver inputs restored for the failure-taxonomy re-resolution (--next-after / tier escalation).
-DOMAIN=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).domain_input||'')" "$ROUTE_JSON")
-PLAN_TIER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).frontmatter_tier||'')" "$ROUTE_JSON")
-PLAN_WORKER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).plan_worker||'')" "$ROUTE_JSON")
-unit_effort="$EFFORT"
+# Single-parse (diagnóstico 2026-08-23): ONE emitter replaces the 19 per-field
+# `node -e "JSON.parse(...)"` spawns this block used to run. The emitter sets:
+# MODEL_ID, MODEL_ALIAS, TIER, REASON, DOMAIN_USED, ROUTE_SOURCE, CHAIN_LEN,
+# ENGINE, DISPATCH_ENGINE, ENGINE_REASON, EFFORT, EFFORT_REASON, WORKERS_TIMEOUT,
+# CODEX_MODEL, SIDECAR_MODEL, THINKING_HEADER, DOMAIN, PLAN_TIER, PLAN_WORKER,
+# ROUTING_PRESENT, MODEL_APPLIED_JSON, unit_effort — all eval-safe single-quoted.
+eval "$(printf '%s' "$ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)"
 # $ROUTE_JSON.chain carries forward unmodified — consumed by the Failure Taxonomy via
 # `node "$FORGE_SCRIPTS_DIR/forge-routing.js" ... --next-after "$MODEL_ID"` on model_refusal/429/400
 # (walks the cross-engine chain → category fallback → ''), BEFORE any cross-tier escalation
@@ -264,7 +250,7 @@ unit_effort="$EFFORT"
 # the Failure Taxonomy below and shared/forge-dispatch.md § context_overflow).
 
 # Step 4-shadow: shadowing warning (risk #3) — routing: configured but not applied (advisory, stderr).
-ROUTING_PRESENT=$(FSD="$FORGE_SCRIPTS_DIR" node -e "const p=require('path').resolve(process.env.FSD,'forge-routing.js');try{process.stdout.write(String(require(p).readRoutingConfig(process.argv[1]).present))}catch(e){process.stdout.write('false')}" "$WORKING_DIR" 2>/dev/null || echo false)
+# $ROUTING_PRESENT comes from the contract itself — no second routing read.
 if [ "$ROUTE_SOURCE" != "routing" ] && [ "$ROUTING_PRESENT" = "true" ]; then
   echo "⚠ routing: configurado mas não aplicado (route_source=$ROUTE_SOURCE) — frontmatter/legado venceu para $unit_type/$unit_id" >&2
 fi

@@ -282,6 +282,41 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  runCase('--shell-exports emits every loop variable as one eval-safe pass', () => {
+    const f = mkFixture({ plan: '---\ntier: heavy\n---\n# task\n' });
+    const contract = dispatch(f, { unitType: 'execute-task' });
+    const cli = spawnSync('node', [SCRIPT, '--shell-exports'], {
+      encoding: 'utf8', env: cliEnv, input: JSON.stringify(contract),
+    });
+    assertEqual(cli.status, 0, '--shell-exports exits 0 on a valid payload');
+    const lines = cli.stdout.trim().split('\n');
+    const byName = Object.fromEntries(lines.map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+    assertEqual(byName.MODEL_ID, `'${contract.model}'`, 'MODEL_ID mirrors the contract');
+    assertEqual(byName.TIER, "'heavy'", 'TIER mirrors the frontmatter override');
+    assertEqual(byName.unit_effort, `'${contract.effort}'`, 'unit_effort rides along');
+    assertEqual(byName.ROUTING_PRESENT, "'false'", 'no routing block in the fixture');
+    assert(byName.MODEL_APPLIED_JSON === `'${JSON.stringify(contract.alias)}'` || byName.MODEL_APPLIED_JSON === "'null'",
+      'MODEL_APPLIED_JSON is a JSON literal (string or null)', byName.MODEL_APPLIED_JSON);
+    // Every assignment must survive a real shell eval — including quotes.
+    const evil = { ...contract, reason: "o'reilly | x:y" };
+    const evilOut = spawnSync('node', [SCRIPT, '--shell-exports'], { encoding: 'utf8', env: cliEnv, input: JSON.stringify(evil) });
+    const probe = spawnSync('bash', ['-c', `eval "$(cat)"; printf '%s' "$REASON"`], { encoding: 'utf8', input: evilOut.stdout });
+    if (probe.error) { /* bash unavailable (Windows CI) — quoting already asserted above */ }
+    else assertEqual(probe.stdout, "o'reilly | x:y", 'eval round-trips an embedded single quote');
+    const garbage = spawnSync('node', [SCRIPT, '--shell-exports'], { encoding: 'utf8', env: cliEnv, input: '{nope' });
+    assertEqual(garbage.status, 2, 'unparseable stdin is a loud exit 2 — never an eval of garbage');
+    cleanup(f);
+  });
+
+  runCase('contract exposes routing_present so the shadowing warning needs no second spawn', () => {
+    const absent = mkFixture({});
+    assertEqual(dispatch(absent, { unitType: 'execute-task' }).routing_present, false, 'no routing block → false');
+    cleanup(absent);
+    const present = mkFixture({ prefsJsonc: '{"routing":{"default":{"executor":{"standard":["claude-sonnet-5"]}}}}' });
+    assertEqual(dispatch(present, { unitType: 'execute-task' }).routing_present, true, 'parseable routing block → true');
+    cleanup(present);
+  });
+
   runCase('degraded contract keeps the additive sidecar_model key', () => {
     const r = degradedContract(['--unit-type', 'execute-task']);
     assert('sidecar_model' in r, 'degraded contract exposes sidecar_model');
