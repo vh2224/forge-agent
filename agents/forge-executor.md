@@ -2,7 +2,11 @@
 name: forge-executor
 description: GSD execution phase agent. Implements tasks — reads the plan, executes steps, verifies must-haves, commits, writes summary. Used for execute-task units. Balanced model for cost-effective implementation.
 model: claude-sonnet-5
-effort: low
+# medium, not low: this frontmatter is the effort that actually reaches the API —
+# the orchestrator's resolved effort travels only as prompt-header text (Agent()
+# has no effort param). medium is also sonnet's cap in the dispatch clamp, so
+# this aligns the real ceiling with the resolver's model-cap. Diagnóstico 2026-08-23.
+effort: medium
 maxTurns: 80
 tools: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch
 ---
@@ -64,7 +68,7 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
     Full gate contract and CLI shape: see `shared/forge-dispatch.md ## Verification Gate`.
 11. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.
 12. Write `T##-SUMMARY.md` — include `new_helpers` field if you created reusable functions (see Summary Format)
-12a. **Emit `verification_evidence:` frontmatter block** (inside the YAML frontmatter of `T##-SUMMARY.md`). For each command you ran in step 10 (verification gate), produce one entry:
+12a. **Emit `verification_evidence:` frontmatter block** (inside the YAML frontmatter of `T##-SUMMARY.md`). One entry per element of the `checks[]` array in the JSON that step 10 (verification gate) printed:
     ```yaml
     verification_evidence:
       - command: "npm run typecheck"
@@ -76,9 +80,12 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
         matched_line: 43
         evidence_file: "evidence~M###~S01~T04.jsonl"
     ```
-    Derivation:
-    - `command`: the exact shell string you ran (or a stable substring — see below).
-    - `exit_code`: the numeric exit code you observed in your conversation (Claude Code surfaces it in the Bash tool result).
+    Derivation — **copy, never recall**:
+    - `command` and `exit_code`: copied VERBATIM from `checks[].command` and `checks[].exitCode` in the
+      step-10 JSON output. The gate ran the commands and printed both fields — do NOT reconstruct either
+      from conversation memory, and do NOT list a command that is not in `checks[]`. (This block used to
+      ask for values "you observed in your conversation"; measured result was fabricated evidence. If you
+      no longer have the step-10 JSON in context, re-run the gate command and copy from the fresh output.)
     - **Resolve the evidence-log FILE SET first** — one logical unit (`{M###}|{S##}|{T##}`) can be spread
       across the new composite name **and** legacy forms (bare, slice-qualified, milestone-qualified). Do
       NOT read `.gsd/forge/evidence-{T##}.jsonl` by itself — that bare name only ever holds the unqualified
@@ -109,7 +116,7 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
     - Must not contain raw newlines. Collapse to a single line.
     - Quote the string in YAML with double quotes to avoid edge-case parser issues.
 
-    This block is advisory — it is not a verification gate. Emission is mandatory (completer reads it); content accuracy is best-effort.
+    This block is advisory — it is not a verification gate. Emission is mandatory (completer reads it). `command`/`exit_code` are mechanical copies of the gate's JSON — there is no "best-effort" latitude on them; only `matched_line` derives from a grep you run.
 13. **Mark task complete:** update `status: DONE` in the frontmatter of `T##-PLAN.md`
 
 ## Research Freely When Unsure
