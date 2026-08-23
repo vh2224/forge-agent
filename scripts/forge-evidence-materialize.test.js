@@ -479,6 +479,18 @@ function testDocSevenRewritten() {
   check(countOf(doc, 'codex-sidecar') >= 1, 'the legacy source value is still documented (D7: nothing retired)');
 }
 
+// 2026-08-23 sidecar extraction: Branch C/D moved verbatim from the two loop
+// skills to shared/forge-sidecar-{auto,next}.md (loaded on demand). Mirror
+// guards read the pair — the invocation must exist exactly once in the pair.
+function mirrorSurface(rel) {
+  const spec = {
+    'skills/forge-auto/SKILL.md': 'shared/forge-sidecar-auto.md',
+    'skills/forge-next/SKILL.md': 'shared/forge-sidecar-next.md',
+  }[rel];
+  const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+  return spec ? text + '\n' + fs.readFileSync(path.join(REPO_ROOT, spec), 'utf8') : text;
+}
+
 function testMirrorsInvokeAtStepSeven() {
   const mirrors = [
     ['skills/forge-auto/SKILL.md', 'execute-task/{T##}'],
@@ -486,7 +498,7 @@ function testMirrorsInvokeAtStepSeven() {
     ['skills/forge-task/SKILL.md', 'task/{TASK_ID}'],
   ];
   for (const [rel, unitToken] of mirrors) {
-    const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+    const text = mirrorSurface(rel);
     check(text.length > 1000, `${rel} was actually read`);
     equal(countOf(text, 'forge-evidence-materialize.js'), 1,
       `${rel} invokes the materializer exactly once — one point, not many`);
@@ -586,7 +598,7 @@ function testCallSitesPassBothAxes() {
     ['skills/forge-task/SKILL.md', false],
   ];
   for (const [rel, expectsAxes] of sites) {
-    const text = fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+    const text = mirrorSurface(rel);
     check(text.length > 1000, `${rel} was actually read`);
     const idx = text.indexOf('forge-evidence-materialize.js');
     check(idx > -1, `${rel} names the materializer`);

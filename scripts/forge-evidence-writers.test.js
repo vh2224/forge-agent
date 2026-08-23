@@ -53,7 +53,9 @@ console.log('Section 1: known writers, by set equality\n');
 const KNOWN_EVIDENCE_WRITERS = Object.freeze([
   'scripts/forge-hook.js',
   'scripts/forge-evidence-materialize.js',
-  'skills/forge-auto/SKILL.md',
+  // 2026-08-23: the writer text moved VERBATIM out of skills/forge-auto/SKILL.md
+  // when Branch C/D was extracted to the on-demand sidecar spec.
+  'shared/forge-sidecar-auto.md',
 ]);
 
 const REPO_ROOT = path.join(__dirname, '..');
@@ -119,6 +121,12 @@ function scanEvidenceWriters() {
   const candidates = [
     ...listFilesRecursive(path.join(REPO_ROOT, 'scripts'), ['.js']),
     ...listFilesRecursive(path.join(REPO_ROOT, 'skills'), ['.md']),
+    // The extracted sidecar specs are executable mirrors (loaded on demand),
+    // so they stay inside the writer fence. Named individually — scanning all
+    // of shared/ would drag in the CANONICAL spec (forge-dispatch.md), which
+    // documents the write shape without being a dispatch call site.
+    path.join(REPO_ROOT, 'shared', 'forge-sidecar-auto.md'),
+    path.join(REPO_ROOT, 'shared', 'forge-sidecar-next.md'),
   ];
   const found = new Set();
   for (const abs of candidates) {
