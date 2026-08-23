@@ -7936,6 +7936,11 @@ function smokePrefsCutoverGuards() {
     // than silently missed by the repository-wide scan.
     'bin/forge-accounts', 'bin/forge-run', 'bin/forge-status',
     'skills/forge-doctor/SKILL.md', 'CLAUDE.md',
+    // The architecture changelog moved out of CLAUDE.md (2026-08-23 context
+    // diet) into this append-only historical log. Its mentions are RECORDS of
+    // what past entries said when the legacy filename was current — the same
+    // audited-not-rewritten status the CLAUDE.md entry above already had.
+    'docs/DECISIONS-LOG.md',
     // The index-green allowed-misses list keys each accepted miss as
     // `<mem_id>::<normalized mention>`, and one accepted miss IS a memory fact
     // that mentions the legacy prefs filename. The occurrence is a RECORD of
