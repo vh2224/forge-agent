@@ -39,6 +39,26 @@ function readRepoText(p) {
   return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 }
 
+// 2026-08-23 sidecar extraction: Branch C/D moved VERBATIM from the two loop
+// skills to cold specs loaded only when DISPATCH_ENGINE != claude —
+// skills/forge-auto/SKILL.md → shared/forge-sidecar-auto.md and
+// skills/forge-next/SKILL.md → shared/forge-sidecar-next.md. Guards that audit
+// a skill's SIDECAR mechanics read the pair (skill + its extracted spec): the
+// mechanism must exist somewhere in the pair, and a dedicated guard asserts
+// each skill still carries the loader pointer. Guards about the skill's OWN
+// body (Claude path, loop mechanics) keep reading the skill alone.
+const SIDECAR_SPEC_OF = {
+  'skills/forge-auto/SKILL.md': 'shared/forge-sidecar-auto.md',
+  'skills/forge-next/SKILL.md': 'shared/forge-sidecar-next.md',
+};
+function sidecarSurface(p) {
+  const text = readRepoText(p);
+  const repoRootForSpec = path.resolve(__dirname, '..');
+  const rel = path.relative(repoRootForSpec, path.resolve(p)).split(path.sep).join('/');
+  const spec = SIDECAR_SPEC_OF[rel];
+  return spec ? text + '\n' + readRepoText(path.join(repoRootForSpec, spec)) : text;
+}
+
 let passes = 0;
 let fails = 0;
 let skips = 0;
@@ -3425,7 +3445,7 @@ async function smokeSidecarContextParity() {
 
     const sourcePaths = ['shared/forge-dispatch.md', 'skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'];
     for (const relative of sourcePaths) {
-      const text = fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
+      const text = sidecarSurface(path.join(__dirname, '..', relative));  // sidecar surface (2026-08-23)
       assert((text.match(/--security/g) || []).length >= 1 && (text.match(/--context-bundle/g) || []).length >= 1
         && (text.match(/forge-context-bundle\.js/g) || []).length >= 1,
       `69e: ${relative} wires both context flags and assembler`);
@@ -4673,8 +4693,8 @@ function smokeReviewPairingWiring() {
 
   // ── (e) ASSERTS ESTRUTURAIS sobre spec/skills editados (T01/T02/T03) ─────────
   const reviewMd = rd('shared/forge-review.md');
-  const autoMd = rd('skills/forge-auto/SKILL.md');
-  const nextMd = rd('skills/forge-next/SKILL.md');
+  const autoMd = sidecarSurface(path.resolve(__dirname, '..', 'skills/forge-auto/SKILL.md'));  // sidecar surface (2026-08-23)
+  const nextMd = sidecarSurface(path.resolve(__dirname, '..', 'skills/forge-next/SKILL.md'));
   const taskMd = rd('skills/forge-task/SKILL.md');
   const dispatchMd = rd('shared/forge-dispatch.md');
 
@@ -5109,8 +5129,22 @@ function smokeRoutingWiring() {
   const nextPath = path.join(__dirname, '..', 'skills', 'forge-next', 'SKILL.md');
 
   const dispatchTxt = fs.readFileSync(dispatchPath, 'utf8');
-  const autoTxt = fs.readFileSync(autoPath, 'utf8');
-  const nextTxt = fs.readFileSync(nextPath, 'utf8');
+  const autoTxt = sidecarSurface(autoPath);  // sidecar surface (2026-08-23)
+  const nextTxt = sidecarSurface(nextPath);
+
+  // Loader pointers — the other half of the sidecarSurface contract: every
+  // guard above proves the mechanics exist SOMEWHERE in the pair, so these
+  // prove the skill still tells the orchestrator to READ the extracted spec.
+  // Without the pointer the cold path is unreachable and every surface-based
+  // guard above would be green over dead text.
+  assert(fs.readFileSync(autoPath, 'utf8').includes('shared/forge-sidecar-auto.md'),
+    '(loader) forge-auto carries the shared/forge-sidecar-auto.md read pointer');
+  assert(fs.readFileSync(nextPath, 'utf8').includes('shared/forge-sidecar-next.md'),
+    '(loader) forge-next carries the shared/forge-sidecar-next.md read pointer');
+  for (const spec of ['forge-sidecar-auto.md', 'forge-sidecar-next.md']) {
+    assert(fs.existsSync(path.join(__dirname, '..', 'shared', spec)),
+      `(loader) shared/${spec} exists on disk`);
+  }
 
   const files = [
     { name: 'shared/forge-dispatch.md', txt: dispatchTxt },
@@ -7553,7 +7587,7 @@ function smokeSidecarLayer1Retry() {
     for (const d of DOCS) {
       const p = path.join(REPO, d.rel);
       assert(fs.existsSync(p), `(c) ${d.label} exists on disk`, p);
-      texts[d.rel] = readRepoText(p);
+      texts[d.rel] = sidecarSurface(p);  // sidecar surface: skill + extracted shared spec (2026-08-23)
     }
 
     for (const d of DOCS) {
@@ -7600,7 +7634,7 @@ function smokeSidecarLayer1Retry() {
       }
     }
     function texts_or_read(rel) {
-      return readRepoText(path.join(REPO, rel));
+      return sidecarSurface(path.join(REPO, rel));  // sidecar surface (2026-08-23)
     }
   }
 
@@ -7639,7 +7673,7 @@ function smokeSidecarPolicyGuard() {
   for (const d of DOCS) {
     const p = path.join(REPO, d.rel);
     assert(fs.existsSync(p), `(setup) ${d.label} exists on disk`, p);
-    texts[d.rel] = readRepoText(p);
+    texts[d.rel] = sidecarSurface(p);  // sidecar surface: skill + extracted shared spec (2026-08-23)
   }
 
   // ── (a) default-policy byte-identity gate ──
@@ -8044,7 +8078,7 @@ function smokeHeartbeatContract() {
   for (const d of DOCS) {
     const p = path.join(REPO, d.rel);
     assert(fs.existsSync(p), `(setup) ${d.label} exists on disk`, p);
-    texts[d.rel] = readRepoText(p);
+    texts[d.rel] = sidecarSurface(p);  // sidecar surface: skill + extracted shared spec (2026-08-23)
   }
 
   // Locate the one canonical fenced block by its stable anchor. Keeping the
@@ -8259,7 +8293,7 @@ function smokeSidecarGptCap() {
     return;
   }
   for (const rel of mirrors) {
-    const text = readRepoText(path.join(REPO, rel));
+    const text = sidecarSurface(path.join(REPO, rel));  // sidecar surface (2026-08-23)
     const matches = text.match(/CODEX_MEMBERS=\$\(node -e "[^"]*filter\(m=>m\.engine==='gpt'\|\|m\.engine==='codex'\)[^"]*" \"\$ROUTE_JSON\"[^\n]*/g) || [];
     assert(matches.length === 2, `(cap) ${rel} has two corrected executable predicates`, `found=${matches.length}`);
     for (const [index, snippet] of matches.entries()) {
@@ -8948,7 +8982,7 @@ function smokeSidecarEnvPromotion() {
   const skillPaths = ['forge-auto', 'forge-next', 'forge-task'].map(name =>
     path.join(REPO, 'skills', name, 'SKILL.md'));
   for (const skillPath of skillPaths) {
-    const skill = fs.readFileSync(skillPath, 'utf8');
+    const skill = sidecarSurface(skillPath);  // sidecar surface (2026-08-23)
     const name = path.basename(path.dirname(skillPath));
     assert(/forge-env-promote\.js/.test(skill) && /env_constraints/.test(skill),
       `(c) ${name} mirror calls the promotion checker and carries env_constraints`);
@@ -9073,7 +9107,7 @@ function smokeSandboxExecBlocked() {
   for (const file of files) assert((readRepoText(path.join(REPO, file)).match(/sandbox-exec-blocked/g) || []).length >= 1,
     `(d) ${file} contains sandbox-exec-blocked`);
   for (const name of ['forge-auto', 'forge-next', 'forge-task']) {
-    const skill = readRepoText(path.join(REPO, 'skills', name, 'SKILL.md'));
+    const skill = sidecarSurface(path.join(REPO, 'skills', name, 'SKILL.md'));  // sidecar surface (2026-08-23)
     assert(/node "\$FORGE_SCRIPTS_DIR\/forge-reverify\.js"[^\n]*--apply/.test(skill) && /orchestrator_reverification/.test(skill),
       `(d) ${name} mirror has executable re-verification invocation and event`);
     assert(!['git-commit-required', 'gsd-write-refused', 'out-of-scope-test-failure', 'network-required', 'sandbox-exec-blocked']
@@ -9094,7 +9128,7 @@ function smokeSandboxExecBlocked() {
   // this assertion actually means is "the re-verification call is wired with the
   // workspace .gsd, once", and that is what it now measures.
   for (const [file, flag] of gsdFlagDocs) {
-    const calls = fs.readFileSync(path.join(REPO, file), 'utf8').split('\n')
+    const calls = sidecarSurface(path.join(REPO, file)).split('\n')  // sidecar surface (2026-08-23)
       .filter((line) => line.includes('forge-reverify.js'));
     const carrying = calls.filter((line) => line.includes(flag));
     assert(carrying.length === 1,
@@ -9255,8 +9289,8 @@ function smokeCleanupRegistryMode() {
 function smokeXllmStateSliceQualified() {
   process.stdout.write('\n▸ Section 59: slice-qualified task-level xllm state contract\n');
   const repo = path.dirname(SCRIPTS);
-  const auto = readRepoText(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'));
-  const next = readRepoText(path.join(repo, 'skills', 'forge-next', 'SKILL.md'));
+  const auto = sidecarSurface(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'));  // sidecar surface (2026-08-23)
+  const next = sidecarSurface(path.join(repo, 'skills', 'forge-next', 'SKILL.md'));
   const task = readRepoText(path.join(repo, 'skills', 'forge-task', 'SKILL.md'));
   const spec = readRepoText(path.join(repo, 'shared', 'forge-dispatch.md'));
 
@@ -9363,8 +9397,8 @@ function smokeXllmResultFileGuard() {
 
   // (d) doc-presence with exact per-file counts — never document-wide includes() (M016 S03 R2 lesson).
   const spec = readRepoText(path.join(repo, 'shared', 'forge-dispatch.md'));
-  const auto = readRepoText(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'));
-  const next = readRepoText(path.join(repo, 'skills', 'forge-next', 'SKILL.md'));
+  const auto = sidecarSurface(path.join(repo, 'skills', 'forge-auto', 'SKILL.md'));  // sidecar surface (2026-08-23)
+  const next = sidecarSurface(path.join(repo, 'skills', 'forge-next', 'SKILL.md'));
   const task = readRepoText(path.join(repo, 'skills', 'forge-task', 'SKILL.md'));
   const review = readRepoText(path.join(repo, 'shared', 'forge-review.md'));
 
@@ -9517,7 +9551,8 @@ function smokeInitGitGuarantee() {
 function smokeCodeDirMultiRepo() {
   process.stdout.write('\n▸ Section 63: CODE_DIR multi-repo resolver + sidecar refusal reasons\n');
   const repoRoot = path.dirname(SCRIPTS);
-  const read = (file) => readRepoText(path.join(repoRoot, file));
+  // sidecar surface: exact reason counts moved verbatim with the 2026-08-23 extraction
+  const read = (file) => sidecarSurface(path.join(repoRoot, file));
 
   // Fixture: 2 real git repos under a NON-git root (the multi-repo workspace shape that
   // made the blind find(x=>x.worktree...) point the sidecar at the wrong repo). The
@@ -11087,7 +11122,7 @@ function smokeSidecarDiffCanonical() {
     'skills/forge-next/SKILL.md',
     'skills/forge-task/SKILL.md',
   ];
-  const read = (rel) => fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+  const read = (rel) => sidecarSurface(path.join(repoRoot, rel));  // sidecar surface (2026-08-23)
 
   // (a)+(b) Documentation is intentionally a text guard: the executable
   // assertions below own behavior; these prevent mirrors from re-copying the
@@ -11357,7 +11392,7 @@ function smokeIsolationSvnAndVcsTelemetry() {
     ['forge-task', 'forge-task/SKILL.md', 2],
   ];
   for (const [name, rel, expected] of skills) {
-    const source = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'skills', rel), 'utf8');
+    const source = sidecarSurface(path.join(path.dirname(SCRIPTS), 'skills', rel));  // sidecar surface (2026-08-23)
     const lines = source.split(/\r?\n/).filter(line => line.includes('\\"event\\":\\"dispatch\\"'));
     assert(lines.length === expected && lines.every(line => line.includes('\\"vcs\\":')),
       `(d) ${name} has vcs on all ${expected} dispatch event emitters`, JSON.stringify(lines));
@@ -11380,7 +11415,7 @@ function smokeIsolationSvnAndVcsTelemetry() {
   ];
   const dispatchVcsLine = 'DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "git")';
   for (const [name, rel, expected] of dispatchVcsMirrors) {
-    const source = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'skills', rel), 'utf8');
+    const source = sidecarSurface(path.join(path.dirname(SCRIPTS), 'skills', rel));  // sidecar surface (2026-08-23)
     const referenceCount = source.split(dispatchVcsReference).length - 1;
     const extractionLines = source.split(/\r?\n/)
       .map(line => line.trim())
@@ -11436,7 +11471,7 @@ function smokeRouteAudit() {
       ['shared/forge-dispatch.md', 2],
     ];
     for (const [file, count] of expected) {
-      const text = readRepoText(path.join(path.dirname(SCRIPTS), file));
+      const text = sidecarSurface(path.join(path.dirname(SCRIPTS), file));  // sidecar surface (2026-08-23)
       // The hint is computed ONCE, in the fence that resolves CODE_DIR, and persisted; every emitter
       // re-reads it from that durable file, because shell state dies at the Bash-tool boundary.
       assert(text.split('"hint":%s').length - 1 === count, `(e) exact hint emitter count in ${file}`);
@@ -13938,7 +13973,7 @@ function smokeEvidenceRuntime() {
         path.join(root, 'skills', 'forge-next', 'SKILL.md'),
         path.join(root, 'skills', 'forge-task', 'SKILL.md'),
       ];
-      const scan = scanEvidenceDocs(dispatch, mirrorFiles.map((f) => fs.readFileSync(f, 'utf8')));
+      const scan = scanEvidenceDocs(dispatch, mirrorFiles.map((f) => sidecarSurface(f)));  // sidecar surface (2026-08-23)
       assert(scan.section7Found && scan.parts7a === 1 && scan.parts7b === 1,
         '(f) §7 tem exatamente uma parte 7a e uma parte 7b', JSON.stringify(scan));
       assert(scan.runtimeObservedHeading === 1 && scan.runtimeSourceIn7b >= 1,
@@ -14581,7 +14616,7 @@ function smokeEnvCoverage() {
         '(e) e o total no canônico é 2 = definição + forma JSON, sem terceira menção solta',
         `count=${count(canonicalText, EVENT)}`);
       for (const mirror of mirrors) {
-        const text = readRepoText(mirror);
+        const text = sidecarSurface(mirror);  // sidecar surface (2026-08-23)
         assert(count(text, EVENT) === 1,
           `(e) ${path.basename(path.dirname(mirror))} invoca o evento exatamente uma vez`,
           `count=${count(text, EVENT)}`);
@@ -15353,7 +15388,7 @@ function smokeInertRoutes() {
     ['skills/forge-next/SKILL.md', 'mirror forge-next'],
   ];
   for (const [rel, label] of branchC) {
-    const text = readRepoText(path.join(ROOT, rel));
+    const text = sidecarSurface(path.join(ROOT, rel));  // sidecar surface (2026-08-23)
     assert(/status: DONE[\s\S]{0,400}?T##-PLAN\.md|T##-PLAN\.md[\s\S]{0,400}?status: DONE/.test(text),
       `(3b) ${label} (${rel}) manda marcar \`status: DONE\` no T##-PLAN.md`);
     assert(/forge-executor\.md`? step 13|step 13 (of|performs)/.test(text),
@@ -15407,7 +15442,7 @@ function smokeTransportField() {
 
   // ── (a) censo: 9 emissores, todos com transport ──────────────────────────
   const all = [];
-  for (const file of FILES) all.push(...emitterLines(readRepoText(file)).map(line => ({ file, line })));
+  for (const file of FILES) all.push(...emitterLines(sidecarSurface(file)).map(line => ({ file, line })));  // sidecar surface (2026-08-23)
   assert(all.length === 9,
     `(a) exatamente 9 linhas de emissor de dispatch nos três SKILL.md (achadas: ${all.length})`,
     all.map(e => path.basename(path.dirname(e.file))).join(', '));
@@ -15440,7 +15475,7 @@ function smokeTransportField() {
     return blocks.find(b => b.includes(needle) && b.includes('echo '));
   };
   for (const file of FILES.slice(0, 2)) {
-    const text = readRepoText(file);
+    const text = sidecarSurface(file);  // sidecar surface (2026-08-23)
     const fence = fenceContaining(text, 'plan-slice/${S##}');
     assert(!!fence, `(b) fence do emissor plan-slice encontrado em ${path.basename(path.dirname(file))}`);
     assert(/forge-xllm-state\.js"? --mode read/.test(fence),
@@ -15466,7 +15501,7 @@ function smokeTransportField() {
   // Um gate que reporta a própria inatividade como boa notícia é o defeito que
   // este repo já pagou três vezes. Cada predicado é rodado contra uma cópia
   // MUTADA que deveria reprová-lo.
-  const autoText = readRepoText(FILES[0]);
+  const autoText = sidecarSurface(FILES[0]);  // sidecar surface (2026-08-23)
   const strippedField = autoText.replace(/,\$\{TRANSPORT_TAIL\}/g, '').replace(/,\\"transport\\":\\"in-process\\"/g, '');
   assert(emitterLines(strippedField).some(l => !/transport/i.test(l)),
     '(controle) o predicado do censo REPROVA uma cópia em que o campo foi removido');
