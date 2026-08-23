@@ -19,7 +19,16 @@
 
 const fs = require('fs');
 const path = require('path');
-const { resolveRoute } = require('./forge-routing.js');
+const { resolveRoute, readRoutingConfig } = require('./forge-routing.js');
+
+function routingPresent(cwd) {
+  try {
+    const cfg = readRoutingConfig(cwd);
+    return cfg.present === true && cfg.ok === true;
+  } catch {
+    return false;
+  }
+}
 const { modelToAlias, modelFamily } = require('./forge-model-alias.js');
 const { readPrefsCached } = require('./forge-prefs.js');
 const { readTierChain, defaultTierModel } = require('./forge-tier-chain.js');
@@ -103,17 +112,19 @@ function readPlanFrontmatter(planPath) {
   // frontmatter worker value before comparing; mirror it so `worker: Codex`
   // is honoured rather than falling through to claude.
   const worker = frontmatterValue(block, /^worker:[ \t]*(\S+)/m).toLowerCase();
+  // Every value on this line-up is compared against an enum or used as a
+  // lookup key downstream, so an inline YAML comment left in the value makes
+  // the comparison fail SILENTLY: `tier: heavy  # refactor` resolved to an
+  // unknown tier, produced an empty model chain, and the dispatch fell back
+  // to the agent frontmatter model with no warning. Strip comments from all
+  // of them, not just the one a second module happens to parse.
   return {
-    tier: frontmatterValue(block, /^tier:\s*(.+)$/m),
-    tag: frontmatterValue(block, /^tag:\s*(.+)$/m),
-    // Only `domain` is stripped here: it is the sole key on this line-up that a
-    // SECOND module also parses, so it is the sole one where a comment can make
-    // two readers disagree. tier/tag/effort/slice have one reader each and are
-    // left exactly as they were rather than changed by resemblance.
+    tier: stripInlineComment(frontmatterValue(block, /^tier:\s*(.+)$/m)).trim(),
+    tag: stripInlineComment(frontmatterValue(block, /^tag:\s*(.+)$/m)).trim(),
     domain: stripInlineComment(frontmatterValue(block, /^domain:[ \t]*(.+)$/m)).trim(),
-    effort: frontmatterValue(block, /^effort:\s*(.+)$/m),
+    effort: stripInlineComment(frontmatterValue(block, /^effort:\s*(.+)$/m)).trim(),
     worker: worker === 'claude' || worker === 'codex' ? worker : '',
-    slice: frontmatterValue(block, /^slice:\s*(.+)$/m),
+    slice: stripInlineComment(frontmatterValue(block, /^slice:\s*(.+)$/m)).trim(),
   };
 }
 
@@ -368,7 +379,13 @@ function resolveDispatch(opts) {
     effortReason = 'risk-escalation:high';
   }
   effort = text(effort);
-  if (!Object.prototype.hasOwnProperty.call(EFFORT_RANK, effort)) effort = 'medium';
+  if (!Object.prototype.hasOwnProperty.call(EFFORT_RANK, effort)) {
+    // Telemetry must not lie: without this annotation, effort_reason kept
+    // saying `frontmatter-effort:<invalid>` while the value silently became
+    // medium — a reader would believe the frontmatter was honoured.
+    effortReason += `|invalid-effort-defaulted:${effort || '(empty)'}`;
+    effort = 'medium';
+  }
   const cap = /^claude-(haiku|sonnet)/.test(model) ? 'medium' : 'max';
   if (EFFORT_RANK[effort] > EFFORT_RANK[cap]) {
     effort = cap;
@@ -409,6 +426,11 @@ function resolveDispatch(opts) {
     domain_input: requestedDomain,
     frontmatter_tier: plan.tier,
     thinking_header: thinkingHeaderFor(model, effort),
+    // Additive: whether a parseable routing: block exists in the prefs cascade.
+    // Consumed by the orchestrator's shadowing warning ("routing configured but
+    // not applied") — previously a SECOND forge-routing.js --explain spawn per
+    // dispatch, duplicating the resolution this call already performed.
+    routing_present: routingPresent(cwd),
     // Additive dispatch trigger: normalized from the resolved top-level `engine`
     // (family). gpt→codex, gemini→agy, else→claude. Orchestrator branches gate
     // on this (`== "codex"`), NOT on `engine`/`chain[].engine` (kept family).
@@ -470,7 +492,11 @@ function degradedContract(args) {
   return {
     engine: 'claude', model, alias, tier, domain: 'default', route_source: 'tier_models',
     chain, chain_len: chain.length, reason: 'routing-runtime-error; tier_models',
-    effort: 'low', effort_reason: `unit-type:${unitType}`,
+    // effort_reason used to claim `unit-type:<x>` here — but the unit type did
+    // not decide this effort, the crash did. Name the real cause and mark the
+    // whole contract degraded so consumers can tell it from a healthy resolve.
+    degraded: true,
+    effort: 'low', effort_reason: 'degraded:routing-runtime-error',
     model_applied: alias, engine_reason: 'default:claude', workers_engine: 'claude',
     workers_timeout: 1800, codex_model: '', plan_worker: '',
     domain_input: 'default', frontmatter_tier: '',
@@ -479,22 +505,90 @@ function degradedContract(args) {
     // Emitted explicitly via the same helper for contract stability.
     dispatch_engine: dispatchEngineFor('claude'),
     sidecar_model: sidecarModelFor(dispatchEngineFor('claude'), chain, ''),
+    routing_present: false,
     prefs_ok: true, prefs_errors: [],
     ...runtime,
   };
 }
 
-module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, claudeExecutableChain, TIER_DEFAULTS, EFFORT_DEFAULTS };
+// ── --shell-exports: single-parse emitter for the orchestrator skills ────────
+//
+// The dispatch skills used to burn 19 separate `node -e "JSON.parse(...)"`
+// spawns extracting one field each from $ROUTE_JSON. This emits every shell
+// variable the loop consumes in ONE pass, as eval-safe single-quoted
+// assignments (embedded quotes escaped as '\''), so the skill runs:
+//   eval "$(printf '%s' "$ROUTE_JSON" | node forge-dispatch-resolve.js --shell-exports)"
+// The map is the contract: adding a consumer variable here is additive; the
+// JSON output remains the canonical payload ($ROUTE_JSON.chain is still read
+// directly by Branch C/D and the failure taxonomy).
+
+const SHELL_EXPORT_MAP = [
+  ['MODEL_ID', (r) => r.model],
+  ['MODEL_ALIAS', (r) => r.alias || ''],
+  ['TIER', (r) => r.tier],
+  ['REASON', (r) => r.reason],
+  ['DOMAIN_USED', (r) => r.domain],
+  ['ROUTE_SOURCE', (r) => r.route_source],
+  ['CHAIN_LEN', (r) => String(r.chain_len)],
+  ['ENGINE', (r) => r.engine],
+  ['DISPATCH_ENGINE', (r) => r.dispatch_engine || ''],
+  ['ENGINE_REASON', (r) => r.engine_reason],
+  ['EFFORT', (r) => r.effort],
+  ['EFFORT_REASON', (r) => r.effort_reason],
+  ['WORKERS_TIMEOUT', (r) => String(r.workers_timeout)],
+  ['CODEX_MODEL', (r) => r.codex_model || ''],
+  ['SIDECAR_MODEL', (r) => r.sidecar_model || ''],
+  ['THINKING_HEADER', (r) => r.thinking_header || ''],
+  ['DOMAIN', (r) => r.domain_input || ''],
+  ['PLAN_TIER', (r) => r.frontmatter_tier || ''],
+  ['PLAN_WORKER', (r) => r.plan_worker || ''],
+  ['ROUTING_PRESENT', (r) => (r.routing_present ? 'true' : 'false')],
+  // JSON-literal glue for the dispatch event line (string or null) — replaces
+  // the bash `MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && ...)` derivation.
+  ['MODEL_APPLIED_JSON', (r) => (r.alias ? JSON.stringify(r.alias) : 'null')],
+  ['unit_effort', (r) => r.effort],
+];
+
+function shellQuote(value) {
+  return `'${String(value == null ? '' : value).replace(/'/g, "'\\''")}'`;
+}
+
+function shellExports(route) {
+  return SHELL_EXPORT_MAP.map(([name, pick]) => `${name}=${shellQuote(pick(route))}`).join('\n');
+}
+
+module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, claudeExecutableChain, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
 
 if (require.main === module) {
   // Exit 0 on success; exit 1 ONLY on a prefs loud-stop (M008-CONTEXT #2 — a
   // malformed prefs layer must halt the shell consumer rather than proceed on
   // the claude/effort-default fallback). The last-resort catch below still
   // emits the ordered contract and exits 0 for UNEXPECTED runtime errors.
+  // --shell-exports: transform mode — reads a resolved contract JSON from
+  // stdin and prints eval-safe shell assignments. No resolution happens here;
+  // a malformed payload is a loud exit 2 (an eval of garbage must never run).
+  if (process.argv.includes('--shell-exports')) {
+    try {
+      const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
+      process.stdout.write(shellExports(payload) + '\n');
+      process.exit(0);
+    } catch (error) {
+      process.stderr.write(JSON.stringify({ error: `--shell-exports: unparseable stdin payload (${(error && error.message) || error})` }) + '\n');
+      process.exit(2);
+    }
+  }
   try {
     const result = runCli(process.argv.slice(2));
     process.exit(result && result.prefs_ok === false ? 1 : 0);
-  } catch {
+  } catch (error) {
+    // The contract on stdout stays parseable for the shell consumer, but the
+    // degradation itself must be loud: a crash that silently re-routes every
+    // unit to the cheapest effort is exactly the failure mode the diagnosis
+    // caught. stderr is free — the orchestrator surfaces it next to the JSON.
+    process.stderr.write(JSON.stringify({
+      warning: 'forge-dispatch-resolve degraded to the fallback contract',
+      error: (error && error.message) || String(error),
+    }) + '\n');
     process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2))) + '\n');
     process.exit(0);
   }

@@ -905,25 +905,14 @@ if [ $? -ne 0 ]; then
   echo "✗ dispatch resolver halted (prefs error) — see forge-dispatch-resolve.js prefs_errors" >&2
   exit 1
 fi
-MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).model)" "$ROUTE_JSON")
-MODEL_ALIAS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).alias||'')" "$ROUTE_JSON")
-TIER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).tier)" "$ROUTE_JSON")
-REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).reason)" "$ROUTE_JSON")
-DOMAIN_USED=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).domain)" "$ROUTE_JSON")
-ROUTE_SOURCE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).route_source)" "$ROUTE_JSON")
-CHAIN_LEN=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).chain_len))" "$ROUTE_JSON")
-ENGINE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).engine)" "$ROUTE_JSON")
-DISPATCH_ENGINE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).dispatch_engine||'')" "$ROUTE_JSON")
-ENGINE_REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).engine_reason)" "$ROUTE_JSON")
-EFFORT=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort)" "$ROUTE_JSON")
-EFFORT_REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort_reason)" "$ROUTE_JSON")
-WORKERS_TIMEOUT=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).workers_timeout))" "$ROUTE_JSON")
-CODEX_MODEL=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).codex_model||'')" "$ROUTE_JSON")
-THINKING_HEADER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).thinking_header||'')" "$ROUTE_JSON")
-MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
-# The resolver owns sidecar model selection: chain[0].id for a Codex dispatch,
-# with workers.codex_model retained as its legacy fallback.
-SIDECAR_MODEL=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).sidecar_model||'')" "$ROUTE_JSON")
+# Single-parse (diagnóstico 2026-08-23): ONE emitter replaces the per-field
+# `node -e "JSON.parse(...)"` spawns this block used to run. The emitter sets:
+# MODEL_ID, MODEL_ALIAS, TIER, REASON, DOMAIN_USED, ROUTE_SOURCE, CHAIN_LEN,
+# ENGINE, DISPATCH_ENGINE, ENGINE_REASON, EFFORT, EFFORT_REASON, WORKERS_TIMEOUT,
+# CODEX_MODEL, SIDECAR_MODEL (resolver-owned: chain[0].id for a Codex dispatch,
+# workers.codex_model as legacy fallback), THINKING_HEADER, DOMAIN, PLAN_TIER,
+# PLAN_WORKER, ROUTING_PRESENT, MODEL_APPLIED_JSON, unit_effort — eval-safe.
+eval "$(printf '%s' "$ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)"
 # $ROUTE_JSON.chain carries forward unmodified — consumed by Branch codex (SIDECAR_MODEL) and by
 # the Failure Taxonomy via `forge-routing.js ... --next-after "$MODEL_ID"`.
 ```

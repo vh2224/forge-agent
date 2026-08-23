@@ -7,7 +7,7 @@
     {
       "source_id": "agents",
       "target": "agents",
-      "sha256": "50c1e8bcd073da630546474da55d7d6fdbee3574bb98c12f337aba49d5ed4b1e"
+      "sha256": "df535cce6d1405317532a087ea1710314beb6fa0b51765a33ae1b1539e62f795"
     },
     {
       "source_id": "commands",
@@ -17,7 +17,7 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "626d376650f8ad19854b55926f3004864f569cd9046aff2edbaf39d88df96ea5"
+      "sha256": "85cb3dd1e309bfbba2982c340de758e180738506192f36c0546ab61ec3263bc4"
     },
     {
       "source_id": "dispatch-templates",
@@ -37,7 +37,7 @@
     {
       "source_id": "claude-instructions",
       "target": "project/CLAUDE.md",
-      "sha256": "f3139ee58486986ed140cd3a6e42b6f16d48834bbcddb37806c41ea0d51fbe8b"
+      "sha256": "5f3eb3aee6639daab07e776145f05c27cfec1ff9680bc79fbffe662721c3711b"
     },
     {
       "source_id": "claude-settings",
@@ -47,7 +47,7 @@
     {
       "source_id": "configuration",
       "target": "forge-capabilities.json;forge-prefs.schema.json",
-      "sha256": "1ff68b3e7bfe66ae041064c69ee5c719e240e36f6d309e0f0d52ca07f79cb42c"
+      "sha256": "8818ec5e54b671d00a5b74b2c23a495ee1b04b6f691f232a1b3edacbbdce2048"
     }
   ]
 }

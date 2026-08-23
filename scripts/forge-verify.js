@@ -174,17 +174,16 @@ function sanitizeCommand(cmd) {
  *   1. taskPlanVerify (split on &&; untrusted — sanitized via SHELL_INJECTION_PATTERN + isLikelyCommand)
  *   2. preferenceCommands (trusted user prefs — no sanitization)
  *   3. package.json scripts (frozen allow-list: typecheck, lint, test only)
- *   4. None found — returns source:"none" (docs-only repo signal)
+ *   4. Stack probe via forge-reverify's resolveVerifyCommand (go.mod,
+ *      Cargo.toml, pytest configs, Makefile test target, CODING-STANDARDS.md
+ *      § Test line) — source:"stack-probe"
+ *   5. None found — returns source:"none" (docs-only repo signal)
  *
- * The 4-condition AND-gate for "docs-only skip":
- *   - taskPlanVerify absent/empty
- *   - preferenceCommands absent/empty
- *   - package.json absent (or has none of the allow-listed scripts)
- *   - pyproject.toml absent AND go.mod absent
- *   All four → source:"none" → runVerificationGate returns skipped:"no-stack"
+ * "Docs-only skip" now means: every step above came back empty, INCLUDING the
+ * stack probe → source:"none" → runVerificationGate returns skipped:"no-stack".
  *
- * @param {{ preferenceCommands?: string[], taskPlanVerify?: string, cwd: string }} options
- * @returns {{ commands: string[], source: "task-plan"|"preference"|"package-json"|"none" }}
+ * @param {{ preferenceCommands?: string[], taskPlanVerify?: string, cwd: string, gsdDir?: string }} options
+ * @returns {{ commands: string[], source: "task-plan"|"preference"|"package-json"|"stack-probe"|"none" }}
  */
 function discoverCommands(options) {
   const cwd = options.cwd;
@@ -234,11 +233,29 @@ function discoverCommands(options) {
     }
   }
 
-  // 4. Nothing found — check for non-JS stacks (out of scope, but distinguishable via source)
-  // Python and Go projects return source:"none" for now (support is out of scope per S02-PLAN).
-  // The orchestrator can detect non-JS stacks via discoverySource and handle separately.
-  // const hasPython = existsSync(join(cwd, "pyproject.toml"));
-  // const hasGo = existsSync(join(cwd, "go.mod"));
+  // 4. Stack probe fallback — reuse forge-reverify's resolveVerifyCommand
+  // (go.mod, Cargo.toml, pytest configs, Makefile test target, and the
+  // CODING-STANDARDS.md § Test line). This closed the measured hole where the
+  // gate ran 133/133 times with commands:[] in a repo with 200+ test suites:
+  // steps 1-3 only knew package.json, so every non-npm stack was "docs-only".
+  // Lazy require, narrowed to MODULE_NOT_FOUND of that module: an installed
+  // copy missing the sibling degrades to the pre-existing "none", any other
+  // throw is a real defect and must surface.
+  try {
+    const { resolveVerifyCommand } = require("./forge-reverify.js");
+    const argv = resolveVerifyCommand(cwd, options.gsdDir || undefined);
+    if (Array.isArray(argv) && argv.length > 0) {
+      // argv is guaranteed shell-safe by resolveVerifyCommand (it rejects any
+      // command needing shell parsing), so a lossless space-join is exact.
+      return { commands: [argv.join(" ")], source: "stack-probe" };
+    }
+  } catch (error) {
+    const missingSelf = error && error.code === "MODULE_NOT_FOUND"
+      && /forge-reverify\.js/.test(String(error.message || ""));
+    if (!missingSelf) throw error;
+  }
+
+  // 5. Nothing found anywhere — genuine docs-only repo signal.
   return { commands: [], source: "none" };
 }
 
@@ -494,6 +511,7 @@ function runVerificationGate(options) {
     preferenceCommands: options.preferenceCommands,
     taskPlanVerify: options.taskPlanVerify,
     cwd: options.cwd,
+    gsdDir: options.gsdDir,
   });
 
   // Docs-only graceful skip (4-condition AND-gate satisfied)
@@ -685,9 +703,96 @@ function parsePlanVerify(planContent) {
   return taskPlanVerify;
 }
 
+// ── Verification evidence emission ────────────────────────────────────────────
+//
+// The executor's `verification_evidence:` block used to be hand-derived by the
+// worker (command/exit_code recalled from conversation, matched_line from a
+// manual grep) — the single biggest measured fabrication source in the system.
+// The gate already holds every value: it ran the commands (checks[]) and the
+// evidence-log file set is resolvable deterministically. Emit the finished
+// block from here so the worker's only job is to paste it.
+
+/**
+ * Build verification_evidence entries from the gate's own checks[].
+ *
+ * matched_line semantics mirror the completer's classifier exactly (substring
+ * of the log line's `cmd` field, case-sensitive, first 80 chars of the claimed
+ * command): first hit across the resolved file set wins; no hit → 0 with the
+ * last file checked named, so the zero stays diagnosable.
+ *
+ * @param {{ checks: object[], ownerRoot: string|null, milestone?: string|null, slice?: string|null, unit?: string|null }} options
+ * @returns {{ entries: object[]|null, files?: string[], reason?: string }}
+ */
+function buildVerificationEvidence(options) {
+  const checks = Array.isArray(options.checks) ? options.checks : [];
+  if (!options.ownerRoot) return { entries: [], files: [], reason: "no-owner-root" };
+  let resolveEvidenceFiles;
+  try {
+    ({ resolveEvidenceFiles } = require("./forge-evidence-path.js"));
+  } catch (error) {
+    const missingSelf = error && error.code === "MODULE_NOT_FOUND"
+      && /forge-evidence-path\.js/.test(String(error.message || ""));
+    if (!missingSelf) throw error;
+    return { entries: null, reason: "evidence-path-module-missing" };
+  }
+  const resolved = resolveEvidenceFiles(options.ownerRoot, {
+    milestone: options.milestone || null,
+    slice: options.slice || null,
+    unit: options.unit || null,
+  });
+  const files = (resolved && resolved.files) || [];
+  // Empty resolved SET → verification_evidence: [] — the one legitimate
+  // trigger for the completer's evidence_log_missing classification.
+  if (files.length === 0) return { entries: [], files: [] };
+  const dir = join(options.ownerRoot, ".gsd", "forge");
+  const fileLines = files.map((f) => {
+    try { return { name: f.name, lines: readFileSync(join(dir, f.name), "utf-8").split(/\r?\n/) }; }
+    catch { return { name: f.name, lines: [] }; }
+  });
+  const entries = [];
+  for (const check of checks) {
+    const needle = String(check.command || "").slice(0, 80);
+    let matchedLine = 0;
+    let evidenceFile = fileLines[fileLines.length - 1].name;
+    outer: for (const file of fileLines) {
+      for (let i = 0; i < file.lines.length; i++) {
+        if (!file.lines[i]) continue;
+        let cmd = "";
+        try { cmd = String(JSON.parse(file.lines[i]).cmd || ""); } catch { continue; }
+        if (needle && cmd.includes(needle)) { matchedLine = i + 1; evidenceFile = file.name; break outer; }
+      }
+    }
+    entries.push({
+      command: check.command,
+      exit_code: check.exitCode,
+      matched_line: matchedLine,
+      evidence_file: evidenceFile,
+    });
+  }
+  return { entries, files: files.map((f) => f.name) };
+}
+
+/**
+ * Render entries as the exact YAML block T##-SUMMARY.md frontmatter expects.
+ * Applies the executor's command string rules (≤180 chars, single line,
+ * double-quoted) so the output is paste-ready with zero model judgement.
+ */
+function formatEvidenceYaml(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return "verification_evidence: []";
+  const lines = ["verification_evidence:"];
+  for (const entry of entries) {
+    const command = String(entry.command || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    lines.push(`  - command: ${JSON.stringify(command)}`);
+    lines.push(`    exit_code: ${Number.isInteger(entry.exit_code) ? entry.exit_code : 1}`);
+    lines.push(`    matched_line: ${Number.isInteger(entry.matched_line) ? entry.matched_line : 0}`);
+    lines.push(`    evidence_file: ${JSON.stringify(String(entry.evidence_file || ""))}`);
+  }
+  return lines.join("\n");
+}
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
-module.exports = { discoverCommands, runVerificationGate, formatFailureContext, isLikelyCommand, parsePlanVerify };
+module.exports = { discoverCommands, runVerificationGate, formatFailureContext, isLikelyCommand, parsePlanVerify, buildVerificationEvidence, formatEvidenceYaml };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 
@@ -700,6 +805,9 @@ if (require.main === module) {
     let preferenceCommands = [];
     let timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
     let gsdDir = null;
+    let milestone = null;
+    let slice = null;
+    let emitEvidence = false;
     // --from-verify: accepted but ignored (reserved for orchestrator anti-recursion)
     // let fromVerify = false;
 
@@ -716,6 +824,14 @@ if (require.main === module) {
         // to; in worktree isolation mode `.gsd/` is not under CODE_DIR at all,
         // so walking up from --cwd cannot find it.
         gsdDir = args[++i];
+      } else if (arg === "--milestone" && args[i + 1] !== undefined) {
+        milestone = args[++i];
+      } else if (arg === "--slice" && args[i + 1] !== undefined) {
+        slice = args[++i];
+      } else if (arg === "--emit-evidence") {
+        // Attach verification_evidence + verification_evidence_yaml to the
+        // output so the worker pastes the block instead of deriving it.
+        emitEvidence = true;
       } else if (arg === "--preference" && args[i + 1] !== undefined) {
         preferenceCommands.push(args[++i]);
       } else if (arg === "--timeout" && args[i + 1] !== undefined) {
@@ -801,6 +917,22 @@ if (require.main === module) {
       process.stderr.write(JSON.stringify({
         warning: `no owning Forge project at or above ${cwdAbs} — verify event not recorded`,
       }) + "\n");
+    }
+
+    if (emitEvidence) {
+      // Evidence axes use the unit's task token (evidence~M~S~T##.jsonl),
+      // while --unit carries the dispatch form ("execute-task/T##").
+      const unitToken = unit.includes("/") ? unit.split("/").pop() : unit;
+      const evidence = buildVerificationEvidence({
+        checks: result.checks || [],
+        ownerRoot,
+        milestone,
+        slice,
+        unit: unitToken,
+      });
+      result.verification_evidence = evidence.entries;
+      result.verification_evidence_yaml = formatEvidenceYaml(evidence.entries || []);
+      if (evidence.reason) result.verification_evidence_note = evidence.reason;
     }
 
     console.log(JSON.stringify(result));

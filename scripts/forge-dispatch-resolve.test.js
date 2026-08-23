@@ -130,6 +130,31 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  runCase('inline YAML comments on tier/effort/tag do not defeat the override', () => {
+    // Regression: `tier: heavy  # refactor` used to resolve to an unknown tier,
+    // empty the model chain, and silently fall back to the agent frontmatter
+    // model. The comment must be stripped before enum comparison.
+    const clean = mkFixture({ plan: '---\ntier: heavy\neffort: high\n---\n# task\n' });
+    const expected = dispatch(clean, { unitType: 'execute-task' });
+    cleanup(clean);
+    const commented = mkFixture({ plan: '---\ntier: heavy  # cross-cutting refactor\neffort: high # deep pass\n---\n# task\n' });
+    const r = dispatch(commented, { unitType: 'execute-task' });
+    assertEqual(r.tier, 'heavy', 'commented tier still resolves heavy');
+    assertEqual(r.reason, 'frontmatter-override:heavy', 'commented tier keeps override reason');
+    assertEqual(r.effort, 'high', 'commented effort still resolves high');
+    assertEqual(r.model, expected.model, 'commented plan resolves the same model as the clean plan');
+    assert(r.model !== '', 'commented tier never empties the model chain', r.model);
+    cleanup(commented);
+    const taggedClean = mkFixture({ plan: '---\ntag: docs\n---\n# task\n' });
+    const expectedTag = dispatch(taggedClean, { unitType: 'execute-task' });
+    cleanup(taggedClean);
+    const tagged = mkFixture({ plan: '---\ntag: docs  # prose only\n---\n# task\n' });
+    const rt = dispatch(tagged, { unitType: 'execute-task' });
+    assertEqual(rt.tier, 'light', 'commented docs tag still selects light tier');
+    assertEqual(rt.model, expectedTag.model, 'commented tag resolves the same model as the clean tag');
+    cleanup(tagged);
+  });
+
   runCase('execute-task docs tag selects light tier', () => {
     const f = mkFixture({ plan: '---\ntag: docs\n---\n# task\n' });
     const r = dispatch(f, { unitType: 'execute-task' });
@@ -257,10 +282,61 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  runCase('--shell-exports emits every loop variable as one eval-safe pass', () => {
+    const f = mkFixture({ plan: '---\ntier: heavy\n---\n# task\n' });
+    const contract = dispatch(f, { unitType: 'execute-task' });
+    const cli = spawnSync('node', [SCRIPT, '--shell-exports'], {
+      encoding: 'utf8', env: cliEnv, input: JSON.stringify(contract),
+    });
+    assertEqual(cli.status, 0, '--shell-exports exits 0 on a valid payload');
+    const lines = cli.stdout.trim().split('\n');
+    const byName = Object.fromEntries(lines.map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+    assertEqual(byName.MODEL_ID, `'${contract.model}'`, 'MODEL_ID mirrors the contract');
+    assertEqual(byName.TIER, "'heavy'", 'TIER mirrors the frontmatter override');
+    assertEqual(byName.unit_effort, `'${contract.effort}'`, 'unit_effort rides along');
+    assertEqual(byName.ROUTING_PRESENT, "'false'", 'no routing block in the fixture');
+    assert(byName.MODEL_APPLIED_JSON === `'${JSON.stringify(contract.alias)}'` || byName.MODEL_APPLIED_JSON === "'null'",
+      'MODEL_APPLIED_JSON is a JSON literal (string or null)', byName.MODEL_APPLIED_JSON);
+    // Every assignment must survive a real shell eval — including quotes.
+    const evil = { ...contract, reason: "o'reilly | x:y" };
+    const evilOut = spawnSync('node', [SCRIPT, '--shell-exports'], { encoding: 'utf8', env: cliEnv, input: JSON.stringify(evil) });
+    const probe = spawnSync('bash', ['-c', `eval "$(cat)"; printf '%s' "$REASON"`], { encoding: 'utf8', input: evilOut.stdout });
+    if (probe.error) { /* bash unavailable (Windows CI) — quoting already asserted above */ }
+    else assertEqual(probe.stdout, "o'reilly | x:y", 'eval round-trips an embedded single quote');
+    const garbage = spawnSync('node', [SCRIPT, '--shell-exports'], { encoding: 'utf8', env: cliEnv, input: '{nope' });
+    assertEqual(garbage.status, 2, 'unparseable stdin is a loud exit 2 — never an eval of garbage');
+    cleanup(f);
+  });
+
+  runCase('contract exposes routing_present so the shadowing warning needs no second spawn', () => {
+    const absent = mkFixture({});
+    assertEqual(dispatch(absent, { unitType: 'execute-task' }).routing_present, false, 'no routing block → false');
+    cleanup(absent);
+    const present = mkFixture({ prefsJsonc: '{"routing":{"default":{"executor":{"standard":["claude-sonnet-5"]}}}}' });
+    assertEqual(dispatch(present, { unitType: 'execute-task' }).routing_present, true, 'parseable routing block → true');
+    cleanup(present);
+  });
+
   runCase('degraded contract keeps the additive sidecar_model key', () => {
     const r = degradedContract(['--unit-type', 'execute-task']);
     assert('sidecar_model' in r, 'degraded contract exposes sidecar_model');
     assertEqual(r.sidecar_model, '', 'degraded contract sidecar model is empty');
+  });
+
+  runCase('degraded contract names its own cause instead of blaming the unit type', () => {
+    const r = degradedContract(['--unit-type', 'execute-task']);
+    assertEqual(r.degraded, true, 'degraded contracts are marked as such');
+    assertEqual(r.effort_reason, 'degraded:routing-runtime-error',
+      'effort_reason names the crash, not unit-type:<x> — the unit type did not decide this effort');
+  });
+
+  runCase('invalid frontmatter effort is annotated, not silently defaulted', () => {
+    const f = mkFixture({ plan: '---\neffort: turbo\n---\n# task\n' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.effort, 'medium', 'invalid effort still defaults to medium');
+    assert(/invalid-effort-defaulted:turbo/.test(r.effort_reason),
+      'effort_reason records that the frontmatter value was rejected', r.effort_reason);
+    cleanup(f);
   });
 
   runCase('routing falls back to default domain for absent domain cell', () => {

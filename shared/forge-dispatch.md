@@ -2466,7 +2466,7 @@ Fields:
 - `milestone` — e.g. `"M002"`.
 - `slice` — e.g. `"S02"`.
 - `task` — e.g. `"T03"`. **Omit this field at slice level.**
-- `discovery_source` — one of `"task-plan"`, `"preference"`, `"package-json"`, `"none"`.
+- `discovery_source` — one of `"task-plan"`, `"preference"`, `"package-json"`, `"stack-probe"`, `"none"`. (`"stack-probe"` = fallback via `forge-reverify.js#resolveVerifyCommand`: go/cargo/pytest/Makefile test target/`CODING-STANDARDS.md § Test`.)
 - `commands` — array of command strings that were run (or attempted).
 - `passed` — `true` if exit code `0`, `false` otherwise.
 - `skipped` — `"no-stack"` or `"timeout"` when applicable. **Omit when not applicable.**

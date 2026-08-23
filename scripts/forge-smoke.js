@@ -1791,8 +1791,12 @@ function smokeEffort() {
   for (const [label, txt] of [['forge-auto', auto], ['forge-next', next]]) {
     // M012 S02 cutover: effort is resolved by forge-dispatch-resolve.js; the SKILL delegates.
     assert(/forge-dispatch-resolve\.js/.test(txt), `${label}: delegates dispatch resolution to forge-dispatch-resolve.js`, 'resolver call missing');
-    assert(txt.includes('EFFORT=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort)"'), `${label}: extracts effort from the resolver contract`, 'EFFORT extraction missing');
-    assert(txt.includes('EFFORT_REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort_reason)"'), `${label}: extracts effort_reason from the resolver contract`, 'EFFORT_REASON extraction missing');
+    // Single-parse cutover (2026-08-23): the SKILL consumes the contract via ONE
+    // --shell-exports eval instead of per-field node -e spawns. Bite on both
+    // ends — the skill carries the callsite, the emitter maps the field.
+    assert(txt.includes('forge-dispatch-resolve.js" --shell-exports)"'), `${label}: consumes the contract via the --shell-exports eval`, 'eval callsite missing');
+    assert(/\[\s*'EFFORT'\s*,/.test(resolver), `${label}: extracts effort from the resolver contract`, 'EFFORT missing from SHELL_EXPORT_MAP');
+    assert(/\[\s*'EFFORT_REASON'\s*,/.test(resolver), `${label}: extracts effort_reason from the resolver contract`, 'EFFORT_REASON missing from SHELL_EXPORT_MAP');
     // the inline effort block + its default map + clamp must be gone (logic lives only in the resolver)
     assert(!/declare -A EFFORT_DEFAULTS/.test(txt), `${label}: inline EFFORT_DEFAULTS map removed`, 'inline effort map still present');
     // dispatch event carries effort + effort_reason
@@ -2562,9 +2566,16 @@ function smokeModelAlias() {
       const content = files[name];
       assert(content.includes('model: $MODEL_ALIAS'),
         `${name} passes model: $MODEL_ALIAS to Agent()`, 'not found');
-      assert(content.includes("MODEL_ALIAS=$(node -e \"process.stdout.write(JSON.parse(process.argv[1]).alias"),
-        `${name} resolves MODEL_ALIAS from the forge-dispatch-resolve.js contract`, 'not found');
+      // Single-parse cutover (2026-08-23): MODEL_ALIAS arrives via the
+      // --shell-exports eval; the mapping lives in SHELL_EXPORT_MAP.
+      assert(content.includes('forge-dispatch-resolve.js" --shell-exports)"'),
+        `${name} consumes the resolver contract via the --shell-exports eval`, 'not found');
     }
+    const resolverSource = readRepoText(path.join(ROOT, 'scripts/forge-dispatch-resolve.js'));
+    assert(/\[\s*'MODEL_ALIAS'\s*,/.test(resolverSource),
+      'SHELL_EXPORT_MAP maps MODEL_ALIAS from the forge-dispatch-resolve.js contract', 'not found');
+    assert(/\[\s*'MODEL_APPLIED_JSON'\s*,/.test(resolverSource),
+      'SHELL_EXPORT_MAP maps MODEL_APPLIED_JSON (JSON literal for the dispatch event)', 'not found');
   }
 
   // Live bash reproduction of the MODEL_APPLIED_JSON glue + event line assembly —
@@ -6299,7 +6310,7 @@ function smokeSkillsCutover() {
     ['review.mode', 'enabled'],
     ['thinking.opus_phases', 'adaptive'],
     ['repair.budget', 2],
-    ['plan_check.mode', 'advisory'],
+    ['plan_check.mode', 'disabled'],
     ['symbol_check.mode', 'advisory'],
     ['evidence.mode', 'lenient'],
     ['workers.execute-task', 'claude'],
@@ -7021,11 +7032,19 @@ function smokeDispatchResolve() {
   // ── (f) retry re-resolution guard: the 2 loop skills restore DOMAIN/PLAN_TIER/PLAN_WORKER ──
   // (M012 S02 review-fix R1: the failure-taxonomy paths re-resolve routing with these raw inputs;
   //  the cutover dropped their assignment, silently collapsing every retry to the default domain.)
-  for (const rel of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
-    const source = readRepoText(path.join(ROOT46, rel));
-    assert(/^DOMAIN=.*domain_input/m.test(source), `(f) ${rel}: restores DOMAIN= from resolver domain_input`);
-    assert(/^PLAN_TIER=.*frontmatter_tier/m.test(source), `(f) ${rel}: restores PLAN_TIER= from resolver frontmatter_tier`);
-    assert(/^PLAN_WORKER=.*plan_worker/m.test(source), `(f) ${rel}: restores PLAN_WORKER= from resolver plan_worker`);
+  // Single-parse cutover (2026-08-23): the assignments live in SHELL_EXPORT_MAP
+  // (forge-dispatch-resolve.js) and reach the skills through the --shell-exports
+  // eval — assert the mapping exists AND each skill carries the callsite, so
+  // dropping either side (map entry or eval) still trips this guard.
+  {
+    const resolver46 = readRepoText(path.join(ROOT46, 'scripts/forge-dispatch-resolve.js'));
+    assert(/\[\s*'DOMAIN'\s*,\s*\(r\)\s*=>\s*r\.domain_input/.test(resolver46), '(f) SHELL_EXPORT_MAP restores DOMAIN from resolver domain_input');
+    assert(/\[\s*'PLAN_TIER'\s*,\s*\(r\)\s*=>\s*r\.frontmatter_tier/.test(resolver46), '(f) SHELL_EXPORT_MAP restores PLAN_TIER from resolver frontmatter_tier');
+    assert(/\[\s*'PLAN_WORKER'\s*,\s*\(r\)\s*=>\s*r\.plan_worker/.test(resolver46), '(f) SHELL_EXPORT_MAP restores PLAN_WORKER from resolver plan_worker');
+    for (const rel of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
+      const source = readRepoText(path.join(ROOT46, rel));
+      assert(source.includes('forge-dispatch-resolve.js" --shell-exports)"'), `(f) ${rel}: carries the --shell-exports eval callsite`);
+    }
   }
 
   // ── (e) risk-escalation: plan-slice on a risk:high slice still resolves tier/effort=max ──
@@ -7083,9 +7102,14 @@ function smokeDispatchResolve() {
 
   // ── (j) doc-presence: the 3 SKILLs extract DISPATCH_ENGINE + gate branches on it, ──
   //     and the old $ENGINE == codex trigger is gone from the branch/trigger sites.
+  assert(/\[\s*'DISPATCH_ENGINE'\s*,\s*\(r\)\s*=>\s*r\.dispatch_engine/.test(
+    readRepoText(path.join(ROOT46, 'scripts/forge-dispatch-resolve.js'))),
+    '(j) SHELL_EXPORT_MAP maps DISPATCH_ENGINE from .dispatch_engine');
   for (const rel of cutoverSkills) {
     const source = readRepoText(path.join(ROOT46, rel));
-    assert(/DISPATCH_ENGINE=\$\(node -e .*dispatch_engine/.test(source),
+    // Single-parse cutover (2026-08-23): DISPATCH_ENGINE arrives via the
+    // --shell-exports eval; SHELL_EXPORT_MAP owns the .dispatch_engine mapping.
+    assert(source.includes('forge-dispatch-resolve.js" --shell-exports)"'),
       `(j) ${rel}: extracts DISPATCH_ENGINE from ROUTE_JSON .dispatch_engine`);
     assert(/DISPATCH_ENGINE == codex/.test(source),
       `(j) ${rel}: gates a sidecar branch on DISPATCH_ENGINE == codex`);
@@ -7936,6 +7960,11 @@ function smokePrefsCutoverGuards() {
     // than silently missed by the repository-wide scan.
     'bin/forge-accounts', 'bin/forge-run', 'bin/forge-status',
     'skills/forge-doctor/SKILL.md', 'CLAUDE.md',
+    // The architecture changelog moved out of CLAUDE.md (2026-08-23 context
+    // diet) into this append-only historical log. Its mentions are RECORDS of
+    // what past entries said when the legacy filename was current — the same
+    // audited-not-rewritten status the CLAUDE.md entry above already had.
+    'docs/DECISIONS-LOG.md',
     // The index-green allowed-misses list keys each accepted miss as
     // `<mem_id>::<normalized mention>`, and one accepted miss IS a memory fact
     // that mentions the legacy prefs filename. The occurrence is a RECORD of

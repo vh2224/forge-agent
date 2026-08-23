@@ -1,6 +1,8 @@
 ---
 name: forge-worker
 description: Executes a single GSD unit (task execution, slice planning, slice research, milestone discuss, etc.) with a fresh isolated context. Always invoked by the gsd orchestrator — never directly. Receives a fully-specified prompt with inlined file content and returns structured output.
+model: claude-sonnet-5
+effort: low
 maxTurns: 80
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---

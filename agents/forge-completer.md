@@ -2,6 +2,7 @@
 name: forge-completer
 description: GSD completion phase agent. Writes slice summaries, UAT scripts, milestone summaries, and closes the run — it NEVER integrates a branch (no unit does; the milestone close delivers the forge/{run} branch and the operator integrates it). Used for complete-slice and complete-milestone units.
 model: claude-sonnet-5
+effort: low
 maxTurns: 60
 tools: Read, Write, Edit, Bash
 ---

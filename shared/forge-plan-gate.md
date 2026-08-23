@@ -268,7 +268,7 @@ EOF
 The guard is `ask_in_auto: defer` (the default). When `forge-auto` reaches the plan boundary:
 
 1. Run `forge-planner` (batch — unchanged).
-2. Run `forge-plan-checker` (batch advisory — unchanged).
+2. Run `forge-plan-checker` per `plan_check.mode` (default `disabled` since 2026-08-23; batch — unchanged when enabled).
 3. **Skip this gate entirely.** No preview, no `AskUserQuestion`, no approval marker.
 4. Proceed directly to execution.
 
