@@ -304,7 +304,11 @@ if (!gitProbe || gitProbe.status !== 0) {
       git(clone, ['add', '-A']);
       git(clone, ['commit', '-q', '-m', 'v4.8.0']);
       git(clone, ['push', '-q', 'origin', 'HEAD']);
-      git(clone, ['branch', '--set-upstream-to', 'origin/master']);
+      // The branch name comes from the host's init.defaultBranch (master on CI,
+      // main on any machine that set it) — hardcoding origin/master made this
+      // suite fail deterministically on init.defaultBranch=main hosts.
+      const defaultBranch = git(clone, ['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+      git(clone, ['branch', '--set-upstream-to', `origin/${defaultBranch}`]);
 
       const atTip = updater.describeSourceRepo(clone);
       assert.strictEqual(atTip.vcs, 'git');
@@ -331,7 +335,7 @@ if (!gitProbe || gitProbe.status !== 0) {
       git(clone, ['fetch', '-q', 'origin']);
       const behind = updater.describeSourceRepo(clone);
       assert.strictEqual(behind.behind_tracking, 1, 'depois do fetch a distância precisa aparecer');
-      assert.strictEqual(behind.tracking_ref, 'origin/master');
+      assert.strictEqual(behind.tracking_ref, `origin/${defaultBranch}`);
       assert.strictEqual(behind.version, '4.8.0', 'o clone continua em 4.8.0 — é isso que um update instalaria');
 
       fs.writeFileSync(path.join(clone, 'sujo.txt'), 'x\n');
