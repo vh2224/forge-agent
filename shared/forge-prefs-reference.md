@@ -587,6 +587,23 @@ Loop de feedback anti-recidivismo: extrai padrões warn/fail do plan-checker e d
 - **Valores permitidos:** `enabled`, `disabled`
 - **Descrição:** enabled = forge-completer extrai após cada complete-slice. disabled = pula completamente — nenhum CHECKER-MEMORY.md é gerado/atualizado.
 
+## verify
+
+Verification gate (forge-verify.js) — os testes que rodam ao fim de cada execute-task. Existe porque testes por task são a defesa contra o 'done' falso, mas numa máquina apertada podem estourar memória e o operador pode preferir não pagá-los em runs exploratórios. Desligado NUNCA vira pass silencioso: o resultado sai como skipped:'disabled-by-pref', gravado no SUMMARY, no result block e no evento verify. Os comandos do gate passam pelo resource clamp (forge-resources) quando enforcement está ativo — o teto de heap vale aqui também.
+
+### `verify.mode`
+
+- **Tipo:** string
+- **Default:** `"auto"`
+- **Valores permitidos:** `auto`, `ask`, `off`
+- **Descrição:** auto = o gate roda os comandos que a discovery encontrar (plan.verify → prefs → package.json → stack-probe). ask = o forge-auto pergunta UMA vez na ativação da milestone (ponto sancionado, antes do loop; headless degrada para auto com aviso) e persiste a resposta do run em .gsd/forge/verify-mode.json. off = o gate não executa nada e reporta skipped:'disabled-by-pref' — escolha do operador, sempre visível, nunca narrável como 'testes passaram'.
+
+### `verify.timeout_ms`
+
+- **Tipo:** integer
+- **Default:** `120000`
+- **Descrição:** Timeout por comando do gate em milissegundos (default 120000). Suba quando o comando do § Test é uma suíte longa; o estouro vira exitCode 124 → passed:false, nunca um pass.
+
 ## plan_check
 
 Gate do forge-plan-checker entre plan-slice e o primeiro execute-task — pontua 10 dimensões estruturais do plano e grava S##-PLAN-CHECK.md.

@@ -146,6 +146,9 @@ const INVENTORY = [
   { key: 'memory.extraction', type: 'string', default: 'adaptive', source: 'scripts/forge-cost-policy.js normalizeMemoryMode; skills forge-auto/next/task adaptive gate' },
   // — checker_memory —
   { key: 'checker_memory.mode', type: 'string', default: 'enabled', source: 'agents/forge-completer.md sub-step 1.9 (enabled unless explicitly disabled)' },
+  // — verify —
+  { key: 'verify.mode', type: 'string', default: 'auto', source: 'scripts/forge-verify.js resolveVerifyPolicy (auto|ask|off; ask resolves at forge-auto activation, off reports skipped:disabled-by-pref)' },
+  { key: 'verify.timeout_ms', type: 'integer', default: 120000, source: 'scripts/forge-verify.js resolveVerifyPolicy (per-command gate timeout when --timeout absent)' },
   // — plan_check —
   { key: 'plan_check.mode', type: 'string', default: 'disabled', source: 'skills/forge-auto/SKILL.md plan-check gate (default disabled since 2026-08-23 — 21/21 advisory runs never changed the flow; CLAUDE.md § Anti-Hallucination Layer)' },
   // — review —
@@ -437,6 +440,7 @@ const WITNESSES = [
   ['forge_isolation.file_locks', true, 'scripts/forge-hook.js readFileLocksEnabled: let enabled = true (hook-only)'],
   // gates
   ['plan_check.mode', 'disabled', 'CLAUDE.md § Anti-Hallucination Layer + skills plan-check gate (default disabled 2026-08-23)'],
+  ['verify.mode', 'auto', 'scripts/forge-verify.js resolveVerifyPolicy default'],
   ['review.rounds', 1, 'shared/forge-review.md:16 default 1'],
   ['review.advocate_model', 'claude-fable-5', 'shared/forge-review.md:77 literal default'],
   ['plan_gate.interactive', 'always', "shared/forge-plan-gate.md:39 let interactive='always'"],
