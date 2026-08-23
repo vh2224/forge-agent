@@ -1,7 +1,7 @@
 ---
 name: forge-auto
 description: "Executa o milestone inteiro de forma autonoma ate concluir."
-allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
+allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, AskUserQuestion, WebSearch, WebFetch
 ---
 
 ## Provider-neutral loop authority (S07)
@@ -331,6 +331,34 @@ You are the orchestrator. Execute the dispatch loop until the milestone is compl
 The autonomous loop is active as long as `auto-mode.json` shows `active: true`. Context compaction never deactivates it.
 
 **ISOLATION RULE — CRITICAL:** The orchestrator NEVER implements code or modifies project files directly. The tools `Write`, `Edit`, and `Bash` available to the orchestrator exist EXCLUSIVELY for orchestrator bookkeeping: writing `STATE.md`, `events.jsonl`, `auto-mode.json`, `auto-mode-started.txt`, and `continue.md`. Any code change, file creation, or implementation step — no matter how small — MUST happen inside a worker dispatched via `Agent()`. If you find yourself about to use `Edit` or `Write` on a project file, or running implementation commands via `Bash`, STOP immediately: you are violating context isolation. Call `Agent()` instead.
+
+### Verify-mode decision (once, at activation — never mid-loop)
+
+Per-task tests are the defense against self-reported "done", but they can blow memory on a tight
+machine and the operator may prefer not to pay them on an exploratory run. Resolve the decision NOW
+so the loop never revisits it (spec: `shared/forge-dispatch.md § Verification Gate → Operator
+policy`):
+
+```bash
+VERIFY_MODE_PREF=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key verify.mode --cwd "$WORKING_DIR" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{let m=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write((m==='auto'||m==='ask'||m==='off')?m:'auto')}catch(e){process.stdout.write('auto')}}")
+# A stale decision from a PREVIOUS run must never leak into this one.
+rm -f "$WORKING_DIR/.gsd/forge/verify-mode.json"
+```
+
+- `auto` / `off` → nothing else to do here; the gate self-resolves from prefs (`off` is reported as
+  `skipped: "disabled-by-pref"` on every task — visible, never narrated as "tests passed").
+- `ask` → this is a **sanctioned pre-loop ask** (like the review triage gate — the loop has not
+  started, so the AUTONOMY RULE is not in play). Call `AskUserQuestion` ONCE: "Rodar os testes de
+  verificação ao fim de cada task neste run?" with options **Rodar (auto)** — recomendado, o gate
+  roda o que a discovery achar — and **Não rodar (off)** — run exploratório / máquina com pouca
+  memória; cada task sai marcada `verify: skipped(disabled-by-pref)`. Persist the answer so every
+  gate invocation of this run reads it:
+  ```bash
+  printf '{"mode":"%s","run":"%s","ts":"%s"}' "$ANSWER" "${RUN_ID:-legacy}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$WORKING_DIR/.gsd/forge/verify-mode.json"
+  ```
+  Headless (no TTY — `forge-run`/`claude -p`): do NOT block; degrade to `auto` with a stderr note
+  (`verify.mode: ask sem TTY — degradado para auto`). Skipping tests must be an explicit human
+  choice, never a fallthrough.
 
 ### Dispatch Loop
 

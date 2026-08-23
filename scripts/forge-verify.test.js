@@ -266,6 +266,66 @@ test('formatEvidenceYaml applies the command string rules (single line, ≤180, 
   assert(yaml.includes('    exit_code: 0') && yaml.includes('    matched_line: 3'), 'fields present');
 });
 
+// ── resolveVerifyPolicy / --mode off ─────────────────────────────────────────
+//
+// verify.mode exists because per-task tests can blow memory on a tight machine
+// and the operator may choose not to pay them — but "off" must be an explicit,
+// visible choice (skipped:"disabled-by-pref"), never a silent pass and never a
+// fallthrough default.
+
+const { resolveVerifyPolicy } = require('./forge-verify.js');
+const { spawnSync: spawnVerify } = require('child_process');
+
+test('policy precedence: CLI flag beats the run-scoped decision file', () => {
+  const cwd = tmpRepo();
+  const gsdDir = path.join(cwd, '.gsd');
+  fs.mkdirSync(path.join(gsdDir, 'forge'), { recursive: true });
+  fs.writeFileSync(path.join(gsdDir, 'forge', 'verify-mode.json'), JSON.stringify({ mode: 'off' }));
+  const p = resolveVerifyPolicy({ cliMode: 'auto', gsdDir, cwd });
+  assertEqual(p.mode, 'auto', 'CLI wins over run-file');
+  assertEqual(p.source, 'cli', 'source names the CLI');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('policy: run-scoped file (activation ask) decides when no flag is passed', () => {
+  const cwd = tmpRepo();
+  const gsdDir = path.join(cwd, '.gsd');
+  fs.mkdirSync(path.join(gsdDir, 'forge'), { recursive: true });
+  fs.writeFileSync(path.join(gsdDir, 'forge', 'verify-mode.json'), JSON.stringify({ mode: 'off', run: 'M-test' }));
+  const p = resolveVerifyPolicy({ gsdDir, cwd });
+  assertEqual(p.mode, 'off', 'run-file decision applies');
+  assertEqual(p.source, 'run-file', 'source names the run file');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('policy: nothing configured defaults to auto, never to off', () => {
+  const cwd = tmpRepo();
+  const p = resolveVerifyPolicy({ cwd });
+  assertEqual(p.mode, 'auto', 'default is auto');
+  assert(p.timeoutMs >= 1, 'a timeout is always resolved');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('CLI --mode off executes nothing and reports disabled-by-pref, even with a runnable stack', () => {
+  const cwd = tmpRepo();
+  fs.mkdirSync(path.join(cwd, '.gsd', 'forge'), { recursive: true });
+  fs.writeFileSync(path.join(cwd, 'Makefile'), 'test:\n\tfalse\n'); // would FAIL if it ran
+  const r = spawnVerify(process.execPath, [path.join(__dirname, 'forge-verify.js'),
+    '--cwd', cwd, '--unit', 'execute-task/T01', '--gsd-dir', path.join(cwd, '.gsd'), '--mode', 'off'],
+  { encoding: 'utf8' });
+  const j = JSON.parse(r.stdout);
+  assertEqual(r.status, 0, 'off exits 0');
+  assertEqual(j.skipped, 'disabled-by-pref', 'skip reason names the operator choice');
+  assertEqual(j.discoverySource, 'policy-off', 'discovery source is policy-off');
+  assertEqual(j.checks.length, 0, 'zero commands ran — the failing Makefile proves nothing executed');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('CLI rejects an invalid --mode loudly', () => {
+  const r = spawnVerify(process.execPath, [path.join(__dirname, 'forge-verify.js'), '--mode', 'maybe'], { encoding: 'utf8' });
+  assertEqual(r.status, 2, 'invalid mode is exit 2, never a silent default');
+});
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 
 console.log('');
