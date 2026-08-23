@@ -2386,7 +2386,30 @@ The `dispatch` event schema is extended additively with `effort` and `effort_rea
 
 > **Cross-reference:** Verifier CLI — `node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "$PLAN_PATH" --cwd "$CWD" --unit $UNIT`.
 > Output shape (JSON): `{ passed, skipped?, discovery_source, commands[], checks[], duration_ms }`.
-> Discovery chain: `task-plan.verify` → `prefs.preference_commands` → `package.json` allow-list → `skipped:"no-stack"`.
+> Discovery chain: `task-plan.verify` → `prefs.preference_commands` → `package.json` allow-list → stack-probe (`forge-reverify.js#resolveVerifyCommand`) → `skipped:"no-stack"`.
+
+### Operator policy — `verify.mode` (run tests or not, decided once)
+
+Per-task tests are the defense against self-reported "done", but they can blow memory on a tight
+machine and an operator may prefer not to pay them on an exploratory run. The decision belongs to
+the operator, never to the loop's mood:
+
+- **`verify.mode: auto`** (default) — the gate runs whatever discovery finds.
+- **`verify.mode: ask`** — `forge-auto` asks ONCE at milestone activation (a sanctioned pre-loop
+  ask, like the plan gate — never mid-loop) and persists the answer for the run in
+  `.gsd/forge/verify-mode.json` (`{mode, run, ts}`). Headless activation degrades to `auto` with a
+  stderr note — skipping tests must be an explicit choice, never a fallthrough. An unresolved `ask`
+  reaching the gate directly (forge-next, loose task) also degrades to `auto`.
+- **`verify.mode: off`** — the gate executes NOTHING and reports `skipped: "disabled-by-pref"` with
+  `discovery_source: "policy-off"`. The executor surfaces it in the SUMMARY `## Verification`
+  section and the result block — an operator choice is legitimate; narrating it as "tests passed"
+  is not.
+
+Resolution precedence inside `forge-verify.js` (`resolveVerifyPolicy`): `--mode` flag →
+`.gsd/forge/verify-mode.json` → prefs `verify.mode` → `auto`. `verify.timeout_ms` (default 120000)
+sets the per-command timeout when `--timeout` is not passed — raise it when the `§ Test` command is
+a long suite. Gate commands pass through the resource clamp (`forge-resources`) when enforcement is
+on, so the heap ceiling applies here too.
 
 ### Invocation points
 
@@ -2469,7 +2492,7 @@ Fields:
 - `discovery_source` — one of `"task-plan"`, `"preference"`, `"package-json"`, `"stack-probe"`, `"none"`. (`"stack-probe"` = fallback via `forge-reverify.js#resolveVerifyCommand`: go/cargo/pytest/Makefile test target/`CODING-STANDARDS.md § Test`.)
 - `commands` — array of command strings that were run (or attempted).
 - `passed` — `true` if exit code `0`, `false` otherwise.
-- `skipped` — `"no-stack"` or `"timeout"` when applicable. **Omit when not applicable.**
+- `skipped` — `"no-stack"`, `"timeout"` or `"disabled-by-pref"` (operator turned the gate off via `verify.mode`) when applicable. **Omit when not applicable.**
 - `duration_ms` — total wall-clock time for all checks combined.
 
 Do NOT include: raw stderr, command output, file paths outside the project root, or any PII.

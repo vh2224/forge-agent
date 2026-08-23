@@ -6345,6 +6345,7 @@ function smokeSkillsCutover() {
     ['thinking.opus_phases', 'adaptive'],
     ['repair.budget', 2],
     ['plan_check.mode', 'disabled'],
+    ['verify.mode', 'auto'],
     ['symbol_check.mode', 'advisory'],
     ['evidence.mode', 'lenient'],
     ['workers.execute-task', 'claude'],

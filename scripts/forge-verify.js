@@ -703,6 +703,52 @@ function parsePlanVerify(planContent) {
   return taskPlanVerify;
 }
 
+// ── Verify policy (verify.mode / verify.timeout_ms) ──────────────────────────
+//
+// Per-task tests are the defense against self-reported "done", but on a tight
+// machine they can blow memory and the operator may prefer not to pay them on
+// an exploratory run. The decision is the operator's, taken at milestone
+// activation (verify.mode: ask) or by preference — and an "off" NEVER reads as
+// a pass: the gate reports skipped:"disabled-by-pref" and the executor must
+// surface it in the SUMMARY and the result block.
+//
+// Precedence: --mode flag > run-scoped decision file (written by forge-auto's
+// activation ask) > prefs verify.mode > 'auto'. An unresolved 'ask' that
+// reaches the gate (forge-next, loose task, headless) degrades to 'auto' —
+// skipping tests must be an explicit choice, never a fallthrough.
+
+function resolveVerifyPolicy(options) {
+  const opts = options || {};
+  const valid = (v) => v === "auto" || v === "off";
+  let mode = null;
+  let source = "default";
+  if (valid(opts.cliMode)) { mode = opts.cliMode; source = "cli"; }
+  if (mode === null && opts.gsdDir) {
+    try {
+      const raw = JSON.parse(readFileSync(join(opts.gsdDir, "forge", "verify-mode.json"), "utf-8"));
+      const fileMode = raw && String(raw.mode || "").toLowerCase();
+      if (valid(fileMode)) { mode = fileMode; source = "run-file"; }
+    } catch { /* absent/unreadable → next layer */ }
+  }
+  let timeoutMs = Number.isInteger(opts.cliTimeoutMs) && opts.cliTimeoutMs > 0 ? opts.cliTimeoutMs : null;
+  if (mode === null || timeoutMs === null) {
+    try {
+      const { readPrefs } = require("./forge-prefs.js");
+      const prefs = (readPrefs(opts.cwd || process.cwd()) || {}).prefs || {};
+      const v = prefs.verify || {};
+      const prefMode = String(v.mode || "").toLowerCase();
+      if (mode === null && valid(prefMode)) { mode = prefMode; source = "prefs"; }
+      if (mode === null && prefMode === "ask") { mode = "auto"; source = "prefs-ask-degraded"; }
+      if (timeoutMs === null && Number.isInteger(v.timeout_ms) && v.timeout_ms > 0) timeoutMs = v.timeout_ms;
+    } catch (error) {
+      const missingSelf = error && error.code === "MODULE_NOT_FOUND"
+        && /forge-prefs\.js/.test(String(error.message || ""));
+      if (!missingSelf) throw error;
+    }
+  }
+  return { mode: mode || "auto", source, timeoutMs: timeoutMs || DEFAULT_COMMAND_TIMEOUT_MS };
+}
+
 // ── Verification evidence emission ────────────────────────────────────────────
 //
 // The executor's `verification_evidence:` block used to be hand-derived by the
@@ -792,7 +838,7 @@ function formatEvidenceYaml(entries) {
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 
-module.exports = { discoverCommands, runVerificationGate, formatFailureContext, isLikelyCommand, parsePlanVerify, buildVerificationEvidence, formatEvidenceYaml };
+module.exports = { discoverCommands, runVerificationGate, formatFailureContext, isLikelyCommand, parsePlanVerify, buildVerificationEvidence, formatEvidenceYaml, resolveVerifyPolicy };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 
@@ -804,10 +850,12 @@ if (require.main === module) {
     let unit = "unknown";
     let preferenceCommands = [];
     let timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+    let timeoutFromCli = null;
     let gsdDir = null;
     let milestone = null;
     let slice = null;
     let emitEvidence = false;
+    let cliMode = null;
     // --from-verify: accepted but ignored (reserved for orchestrator anti-recursion)
     // let fromVerify = false;
 
@@ -832,6 +880,14 @@ if (require.main === module) {
         // Attach verification_evidence + verification_evidence_yaml to the
         // output so the worker pastes the block instead of deriving it.
         emitEvidence = true;
+      } else if (arg === "--mode" && args[i + 1] !== undefined) {
+        // Explicit policy override (auto|off). 'ask' is never a gate value —
+        // it resolves at milestone activation, upstream of this CLI.
+        cliMode = String(args[++i]).toLowerCase();
+        if (cliMode !== "auto" && cliMode !== "off") {
+          process.stderr.write(JSON.stringify({ error: `Invalid --mode value: ${cliMode} (auto|off)` }) + "\n");
+          process.exit(2);
+        }
       } else if (arg === "--preference" && args[i + 1] !== undefined) {
         preferenceCommands.push(args[++i]);
       } else if (arg === "--timeout" && args[i + 1] !== undefined) {
@@ -841,6 +897,7 @@ if (require.main === module) {
           process.exit(2);
         }
         timeoutMs = parsed;
+        timeoutFromCli = parsed;
       } else if (arg === "--from-verify") {
         // Reserved sentinel for orchestrator anti-recursion — accepted, ignored
       }
@@ -861,13 +918,28 @@ if (require.main === module) {
     }
 
     const startTime = Date.now();
-    const result = runVerificationGate({
-      cwd,
-      preferenceCommands: preferenceCommands.length > 0 ? preferenceCommands : undefined,
-      taskPlanVerify: taskPlanVerify || undefined,
-      commandTimeoutMs: timeoutMs,
-      gsdDir,
-    });
+    // Operator policy (verify.mode / verify.timeout_ms) — resolved before the
+    // gate so an "off" run executes nothing at all, and a prefs timeout applies
+    // when the CLI did not pass one.
+    const policy = resolveVerifyPolicy({ cliMode, cliTimeoutMs: timeoutFromCli, gsdDir, cwd });
+    const result = policy.mode === "off"
+      ? {
+          // Anti-silence: this is an operator choice, not a verified pass —
+          // the executor surfaces it in the SUMMARY and the result block.
+          passed: true,
+          checks: [],
+          discoverySource: "policy-off",
+          skipped: "disabled-by-pref",
+          policy_source: policy.source,
+          timestamp: Date.now(),
+        }
+      : runVerificationGate({
+          cwd,
+          preferenceCommands: preferenceCommands.length > 0 ? preferenceCommands : undefined,
+          taskPlanVerify: taskPlanVerify || undefined,
+          commandTimeoutMs: timeoutFromCli !== null ? timeoutFromCli : policy.timeoutMs,
+          gsdDir,
+        });
     const duration = Date.now() - startTime;
 
     // Telemetry is recorded against the project that *owns* the work, never
