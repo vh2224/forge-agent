@@ -300,22 +300,28 @@ evidence:
 file_audit:
   ignore_list: [package-lock.json, yarn.lock, pnpm-lock.yaml, dist/**, build/**, .next/**, .gsd/**, node_modules/**]
 plan_check:
-  mode: advisory          # advisory | blocking | disabled   (default advisory)
+  mode: disabled          # advisory | blocking | disabled   (default disabled desde 2026-08-23)
 ```
 
 Todos scaffoldados em `forge-agent-prefs.md` e cascateados pela precedência padrão (user → repo → local, last wins).
 
-### Postura advisory por padrão
+### Postura por componente (revisada 2026-08-23)
 
-Somente o check de schema do executor (S01, componente #1) é enforcing em M003. Os outros quatro componentes emitem seções documentais em SUMMARY/VERIFICATION/PLAN-CHECK — nunca bloqueiam o loop. Isso é deliberado: permite que M003 ganhe cobertura sem thrash em falsos positivos enquanto as heurísticas (stub regex, import-chain depth, dimensões de plan-check) amadurecem com uso real.
+Somente o check de schema do executor (S01, componente #1) é enforcing desde M003. A postura
+"advisory por padrão enquanto as heurísticas amadurecem" era deliberada e **a medição que ela
+pedia foi feita** (4 milestones, 22 dias): o plan-check rodou 21× em advisory e **nunca alterou
+o fluxo** (5 `fail` ignorados) — custava 1 chamada de LLM por slice sem decidir nada. Por isso
+o default de `plan_check.mode` virou **`disabled`**; `advisory` (documentação) e `blocking`
+(revision-loop, max 3 rodadas, já instalado nas skills) são opt-in. `symbol_check` permanece
+advisory (é script, custo de segundos, sem LLM). O verification gate (forge-verify) deixou de
+ser no-op na mesma data: discovery com fallback `stack-probe` e `no-stack` nunca mais narrável
+como pass.
 
 ### Como ativar modos stricter
 
 - `evidence.mode: strict` — reservado para M004+. Em M003 `strict` e `lenient` se comportam de forma idêntica no hook; a diferença no completer é futura.
-- `plan_check.mode: blocking` — ativa o revision-loop (max 3 rodadas, decremento monotônico em `fail`). Código já instalado em `skills/forge-auto/SKILL.md` + `skills/forge-next/SKILL.md`, inerte até o pref ser trocado.
+- `plan_check.mode: advisory | blocking` — opt-in; `blocking` ativa o revision-loop (max 3 rodadas, decremento monotônico em `fail`).
 - `file_audit.ignore_list` — customize adicionando/removendo globs. Não muda a postura advisory — só o que é flagged.
-
-Antes de ativar qualquer um destes em um projeto de produção: rode ≥ 1 milestone completo em modo advisory para medir a taxa de falsos positivos das heurísticas (regex stub, depth-2 walker, dimension scoring). M003 explicitamente não recomenda flipping defaults em v1.
 
 ## Estado atual
 

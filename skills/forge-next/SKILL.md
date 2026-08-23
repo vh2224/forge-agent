@@ -448,9 +448,9 @@ After a successful `plan-slice` unit, before dispatching the first `execute-task
 
 1. **Read `plan_check.mode` via the canonical engine CLI** (single-knob convenience form — reads the jsonc catalog per layer; legacy Markdown without jsonc hard-stops — see `shared/forge-prefs-cutover.md`; NEVER a 3-file cascade node -e merge, MEM001 M005):
    ```bash
-   PLAN_CHECK_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key plan_check.mode --cwd "$WORKING_DIR" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{let m=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write((m==='advisory'||m==='blocking'||m==='disabled')?m:'advisory')}catch(e){process.stdout.write('advisory')}})")
+   PLAN_CHECK_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key plan_check.mode --cwd "$WORKING_DIR" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{let m=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write((m==='advisory'||m==='blocking'||m==='disabled')?m:'disabled')}catch(e){process.stdout.write('disabled')}})")
    ```
-   Store as `PLAN_CHECK_MODE` (default `advisory` on absence/parse error).
+   Store as `PLAN_CHECK_MODE` (default `disabled` on absence/parse error — flipped 2026-08-23: 21/21 measured advisory runs never changed the flow; `advisory`/`blocking` are opt-in).
 
 2. **If `PLAN_CHECK_MODE == "disabled"`:** skip — do not invoke the plan-checker. Proceed to first `execute-task`.
 

@@ -147,7 +147,7 @@ const INVENTORY = [
   // — checker_memory —
   { key: 'checker_memory.mode', type: 'string', default: 'enabled', source: 'agents/forge-completer.md sub-step 1.9 (enabled unless explicitly disabled)' },
   // — plan_check —
-  { key: 'plan_check.mode', type: 'string', default: 'advisory', source: 'skills/forge-auto/SKILL.md plan-check gate (default advisory; CLAUDE.md § Anti-Hallucination Layer)' },
+  { key: 'plan_check.mode', type: 'string', default: 'disabled', source: 'skills/forge-auto/SKILL.md plan-check gate (default disabled since 2026-08-23 — 21/21 advisory runs never changed the flow; CLAUDE.md § Anti-Hallucination Layer)' },
   // — review —
   { key: 'review.mode', type: 'string', default: 'enabled', source: 'shared/forge-review.md § Step 0 (gate runs unless disabled)' },
   { key: 'review.engine', type: 'string', default: 'agents', source: 'shared/forge-review.md:217 "engine == agents (default)"' },
@@ -436,7 +436,7 @@ const WITNESSES = [
   ['evidence.mode', 'lenient', "scripts/forge-hook.js readEvidenceMode: let mode = 'lenient'"],
   ['forge_isolation.file_locks', true, 'scripts/forge-hook.js readFileLocksEnabled: let enabled = true (hook-only)'],
   // gates
-  ['plan_check.mode', 'advisory', 'CLAUDE.md § Anti-Hallucination Layer + skills plan-check gate'],
+  ['plan_check.mode', 'disabled', 'CLAUDE.md § Anti-Hallucination Layer + skills plan-check gate (default disabled 2026-08-23)'],
   ['review.rounds', 1, 'shared/forge-review.md:16 default 1'],
   ['review.advocate_model', 'claude-fable-5', 'shared/forge-review.md:77 literal default'],
   ['plan_gate.interactive', 'always', "shared/forge-plan-gate.md:39 let interactive='always'"],

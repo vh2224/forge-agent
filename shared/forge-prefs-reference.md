@@ -594,9 +594,9 @@ Gate do forge-plan-checker entre plan-slice e o primeiro execute-task — pontua
 ### `plan_check.mode`
 
 - **Tipo:** string
-- **Default:** `"advisory"`
+- **Default:** `"disabled"`
 - **Valores permitidos:** `advisory`, `blocking`, `disabled`
-- **Descrição:** advisory = pontua e prossegue independente do veredicto (flags viram documentação). blocking = revision-loop (max 3 rodadas, fails em decremento monotônico; senão pausa e notifica). disabled = pula o gate — nenhum artefato gerado.
+- **Descrição:** advisory = pontua e prossegue independente do veredicto (flags viram documentação). blocking = revision-loop (max 3 rodadas, fails em decremento monotônico; senão pausa e notifica). disabled = pula o gate — nenhum artefato gerado. Default disabled desde 2026-08-23: medição de 4 milestones (21 execuções, 100% advisory, 5 fail ignorados) mostrou que o modo advisory nunca alterou o fluxo — pagava 1 chamada de LLM por slice sem decidir nada. Opt-in para advisory (documentação) ou blocking (enforcement).
 
 ## review
 

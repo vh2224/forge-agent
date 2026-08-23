@@ -6299,7 +6299,7 @@ function smokeSkillsCutover() {
     ['review.mode', 'enabled'],
     ['thinking.opus_phases', 'adaptive'],
     ['repair.budget', 2],
-    ['plan_check.mode', 'advisory'],
+    ['plan_check.mode', 'disabled'],
     ['symbol_check.mode', 'advisory'],
     ['evidence.mode', 'lenient'],
     ['workers.execute-task', 'claude'],
