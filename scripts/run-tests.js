@@ -24,6 +24,12 @@ function usage() {
     '',
     'Options:',
     '  --list             List discovered suites without running them',
+    '  --changed          Run only suites related to files git currently sees as',
+    '                     modified (staged + unstaged + untracked). Built for the',
+    '                     verification gate: static, shell-safe invocation whose',
+    '                     cost scales with the task footprint, not the repo.',
+    '                     Zero related suites is a legitimate pass (docs-only',
+    '                     change); a missing git is a loud error, never a pass.',
     '  --match <text>     Run suites whose filename contains text (repeatable)',
     '  --fail-fast        Stop after the first failing suite',
     '  --verbose          Print output from successful suites too',
@@ -41,6 +47,7 @@ function usage() {
 function parseArgs(argv) {
   const options = {
     list: false,
+    changed: false,
     matches: [],
     failFast: false,
     verbose: false,
@@ -51,6 +58,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--list') options.list = true;
+    else if (arg === '--changed') options.changed = true;
     else if (arg === '--fail-fast') options.failFast = true;
     else if (arg === '--verbose') options.verbose = true;
     else if (arg === '--inherit-home') options.inheritHome = true;
@@ -78,6 +86,52 @@ function discoverTests(matches) {
     .map(entry => entry.name)
     .filter(name => matches.length === 0 || matches.some(match => name.toLowerCase().includes(match)))
     .sort((a, b) => a.localeCompare(b, 'en'));
+}
+
+// ---------------------------------------------------------------------------
+// --changed: task-scoped suite selection
+//
+// Diffs against HEAD (plus untracked), so it measures exactly what the current
+// unit of work touched — earlier commits on the branch are not re-run here;
+// the full suite remains the merge-boundary check. Selection is name-based:
+// `foo.js` selects `foo.test.js` and every `foo-*.test.js` (the repo's
+// convention for satellite suites, e.g. forge-xllm.js → forge-xllm-evidence).
+// Changes outside scripts/*.js select nothing — those surfaces are covered by
+// forge-smoke.js, which does not fit a verification-gate timeout.
+// ---------------------------------------------------------------------------
+
+function collectChangedFiles() {
+  const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: repoRoot, encoding: 'utf8' });
+  if (!probe || probe.status !== 0) return null;
+  const files = [];
+  for (const args of [
+    ['diff', '--name-only', 'HEAD'],
+    ['ls-files', '--others', '--exclude-standard'],
+  ]) {
+    const result = spawnSync('git', args, { cwd: repoRoot, encoding: 'utf8' });
+    if (!result || result.status !== 0) return null;
+    files.push(...result.stdout.split(/\r?\n/).filter(Boolean));
+  }
+  return files;
+}
+
+function suitesForChangedFiles(files, allSuites) {
+  const selected = new Set();
+  for (const rel of files) {
+    const normalized = String(rel).replace(/\\/g, '/');
+    if (!normalized.startsWith('scripts/')) continue;
+    const base = path.posix.basename(normalized);
+    if (base.endsWith('.test.js')) {
+      if (allSuites.includes(base)) selected.add(base);
+      continue;
+    }
+    if (!base.endsWith('.js')) continue;
+    const stem = base.slice(0, -'.js'.length);
+    for (const suite of allSuites) {
+      if (suite === `${stem}.test.js` || suite.startsWith(`${stem}-`)) selected.add(suite);
+    }
+  }
+  return [...selected].sort((a, b) => a.localeCompare(b, 'en'));
 }
 
 // The suite may never reach the real macOS `security` binary. HOME is isolated
@@ -297,7 +351,25 @@ function main(argv) {
     return 0;
   }
 
-  const tests = discoverTests(options.matches);
+  let tests = discoverTests(options.matches);
+  if (options.changed) {
+    if (options.baseline) {
+      process.stderr.write('--baseline requires the full suite set: it is incompatible with --changed.\n');
+      return 2;
+    }
+    const changed = collectChangedFiles();
+    if (changed === null) {
+      // Loud, never a silent pass: a gate consumer must be able to tell
+      // "nothing related changed" apart from "the selector could not look".
+      process.stderr.write('--changed FAILED: git is unavailable or this is not a work tree — refusing to guess.\n');
+      return 2;
+    }
+    tests = suitesForChangedFiles(changed, tests);
+    if (tests.length === 0) {
+      process.stdout.write(`No suites related to the ${changed.length} changed file${changed.length === 1 ? '' : 's'} — nothing to run (legitimate for docs-only changes).\n`);
+      return 0;
+    }
+  }
   if (options.list) {
     process.stdout.write(tests.length ? `${tests.join('\n')}\n` : '');
     return 0;
@@ -404,5 +476,6 @@ module.exports = {
   main,
   parseArgs,
   resolveBaseline,
+  suitesForChangedFiles,
   BASELINE_PLATFORMS,
 };
