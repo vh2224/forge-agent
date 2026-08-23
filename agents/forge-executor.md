@@ -59,7 +59,7 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
     Parse the JSON result:
     - `passed: true` and (no `skipped` OR `skipped: "no-stack"`) → continue to step 11.
     - `passed: false` → STOP. Return `---GSD-WORKER-RESULT---` with `status: partial` and include the `formatFailureContext` output VERBATIM (not summarized) as `## Verification Failures` in the `blocker` field (truncated to 10 KB). Do NOT write T##-SUMMARY.md. Do NOT commit. Do NOT mark the task `DONE` in frontmatter.
-    - `skipped: "no-stack"` at top level → treat as pass; record `discoverySource: "none"` in T##-SUMMARY.md `## Verification` section.
+    - `skipped: "no-stack"` at top level → the gate ran ZERO commands: this is an unverified pass, not a verified one. Continue, but (a) record `discoverySource: "none"` AND the line `verification: SKIPPED (no-stack — zero commands ran)` in the T##-SUMMARY.md `## Verification` section, and (b) carry `verify: skipped(no-stack)` in the result block so the orchestrator and completer see it. Never describe a no-stack skip as "tests passed" — nothing ran. (This should now be rare: discovery falls back to go/cargo/pytest/Makefile/`CODING-STANDARDS.md § Test` before giving up.)
 
     Full gate contract and CLI shape: see `shared/forge-dispatch.md ## Verification Gate`.
 11. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.

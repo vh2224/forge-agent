@@ -174,17 +174,16 @@ function sanitizeCommand(cmd) {
  *   1. taskPlanVerify (split on &&; untrusted — sanitized via SHELL_INJECTION_PATTERN + isLikelyCommand)
  *   2. preferenceCommands (trusted user prefs — no sanitization)
  *   3. package.json scripts (frozen allow-list: typecheck, lint, test only)
- *   4. None found — returns source:"none" (docs-only repo signal)
+ *   4. Stack probe via forge-reverify's resolveVerifyCommand (go.mod,
+ *      Cargo.toml, pytest configs, Makefile test target, CODING-STANDARDS.md
+ *      § Test line) — source:"stack-probe"
+ *   5. None found — returns source:"none" (docs-only repo signal)
  *
- * The 4-condition AND-gate for "docs-only skip":
- *   - taskPlanVerify absent/empty
- *   - preferenceCommands absent/empty
- *   - package.json absent (or has none of the allow-listed scripts)
- *   - pyproject.toml absent AND go.mod absent
- *   All four → source:"none" → runVerificationGate returns skipped:"no-stack"
+ * "Docs-only skip" now means: every step above came back empty, INCLUDING the
+ * stack probe → source:"none" → runVerificationGate returns skipped:"no-stack".
  *
- * @param {{ preferenceCommands?: string[], taskPlanVerify?: string, cwd: string }} options
- * @returns {{ commands: string[], source: "task-plan"|"preference"|"package-json"|"none" }}
+ * @param {{ preferenceCommands?: string[], taskPlanVerify?: string, cwd: string, gsdDir?: string }} options
+ * @returns {{ commands: string[], source: "task-plan"|"preference"|"package-json"|"stack-probe"|"none" }}
  */
 function discoverCommands(options) {
   const cwd = options.cwd;
@@ -234,11 +233,29 @@ function discoverCommands(options) {
     }
   }
 
-  // 4. Nothing found — check for non-JS stacks (out of scope, but distinguishable via source)
-  // Python and Go projects return source:"none" for now (support is out of scope per S02-PLAN).
-  // The orchestrator can detect non-JS stacks via discoverySource and handle separately.
-  // const hasPython = existsSync(join(cwd, "pyproject.toml"));
-  // const hasGo = existsSync(join(cwd, "go.mod"));
+  // 4. Stack probe fallback — reuse forge-reverify's resolveVerifyCommand
+  // (go.mod, Cargo.toml, pytest configs, Makefile test target, and the
+  // CODING-STANDARDS.md § Test line). This closed the measured hole where the
+  // gate ran 133/133 times with commands:[] in a repo with 200+ test suites:
+  // steps 1-3 only knew package.json, so every non-npm stack was "docs-only".
+  // Lazy require, narrowed to MODULE_NOT_FOUND of that module: an installed
+  // copy missing the sibling degrades to the pre-existing "none", any other
+  // throw is a real defect and must surface.
+  try {
+    const { resolveVerifyCommand } = require("./forge-reverify.js");
+    const argv = resolveVerifyCommand(cwd, options.gsdDir || undefined);
+    if (Array.isArray(argv) && argv.length > 0) {
+      // argv is guaranteed shell-safe by resolveVerifyCommand (it rejects any
+      // command needing shell parsing), so a lossless space-join is exact.
+      return { commands: [argv.join(" ")], source: "stack-probe" };
+    }
+  } catch (error) {
+    const missingSelf = error && error.code === "MODULE_NOT_FOUND"
+      && /forge-reverify\.js/.test(String(error.message || ""));
+    if (!missingSelf) throw error;
+  }
+
+  // 5. Nothing found anywhere — genuine docs-only repo signal.
   return { commands: [], source: "none" };
 }
 
@@ -494,6 +511,7 @@ function runVerificationGate(options) {
     preferenceCommands: options.preferenceCommands,
     taskPlanVerify: options.taskPlanVerify,
     cwd: options.cwd,
+    gsdDir: options.gsdDir,
   });
 
   // Docs-only graceful skip (4-condition AND-gate satisfied)

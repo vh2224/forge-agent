@@ -153,6 +153,60 @@ test('CRLF: multi-line list join has no residual \\r in any item', () => {
   assertEqual(result, 'npm test && npm run lint', 'CRLF multi-line list value');
 });
 
+// ── discoverCommands: stack-probe fallback (step 4) ──────────────────────────
+//
+// Regression: the gate ran 133/133 times with commands:[] + skipped:"no-stack"
+// in a repo carrying 200+ test suites, because discovery stopped at the
+// package.json allow-list. Step 4 reuses forge-reverify's resolveVerifyCommand
+// (Makefile test target, go/cargo/pytest, CODING-STANDARDS.md § Test).
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { discoverCommands } = require('./forge-verify.js');
+
+function tmpRepo() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'forge-verify-discover-'));
+}
+
+test('stack-probe: Makefile test target is discovered when package.json is absent', () => {
+  const cwd = tmpRepo();
+  fs.writeFileSync(path.join(cwd, 'Makefile'), 'test:\n\ttrue\n');
+  const r = discoverCommands({ cwd });
+  assertEqual(r.source, 'stack-probe', 'source is stack-probe');
+  assertEqual(r.commands.join(' && '), 'make test', 'Makefile test target becomes the command');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('stack-probe: CODING-STANDARDS § Test line is discovered through gsdDir', () => {
+  const cwd = tmpRepo();
+  const gsdDir = path.join(cwd, 'elsewhere', '.gsd');
+  fs.mkdirSync(gsdDir, { recursive: true });
+  fs.writeFileSync(path.join(gsdDir, 'CODING-STANDARDS.md'),
+    '## Lint & Format Commands\n\n- **Test:** `node scripts/run-tests.js`\n');
+  const r = discoverCommands({ cwd, gsdDir });
+  assertEqual(r.source, 'stack-probe', 'source is stack-probe via gsdDir');
+  assertEqual(r.commands.join(' && '), 'node scripts/run-tests.js', 'standards Test line becomes the command');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('stack-probe never outranks the package.json allow-list', () => {
+  const cwd = tmpRepo();
+  fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node t.js' } }));
+  fs.writeFileSync(path.join(cwd, 'Makefile'), 'test:\n\ttrue\n');
+  const r = discoverCommands({ cwd });
+  assertEqual(r.source, 'package-json', 'package.json still wins over the probe');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('genuinely empty repo still degrades to source none', () => {
+  const cwd = tmpRepo();
+  const r = discoverCommands({ cwd });
+  assertEqual(r.source, 'none', 'no signals anywhere stays none');
+  assertEqual(r.commands.length, 0, 'no commands fabricated');
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 
 console.log('');
