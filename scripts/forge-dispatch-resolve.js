@@ -370,7 +370,13 @@ function resolveDispatch(opts) {
     effortReason = 'risk-escalation:high';
   }
   effort = text(effort);
-  if (!Object.prototype.hasOwnProperty.call(EFFORT_RANK, effort)) effort = 'medium';
+  if (!Object.prototype.hasOwnProperty.call(EFFORT_RANK, effort)) {
+    // Telemetry must not lie: without this annotation, effort_reason kept
+    // saying `frontmatter-effort:<invalid>` while the value silently became
+    // medium — a reader would believe the frontmatter was honoured.
+    effortReason += `|invalid-effort-defaulted:${effort || '(empty)'}`;
+    effort = 'medium';
+  }
   const cap = /^claude-(haiku|sonnet)/.test(model) ? 'medium' : 'max';
   if (EFFORT_RANK[effort] > EFFORT_RANK[cap]) {
     effort = cap;
@@ -472,7 +478,11 @@ function degradedContract(args) {
   return {
     engine: 'claude', model, alias, tier, domain: 'default', route_source: 'tier_models',
     chain, chain_len: chain.length, reason: 'routing-runtime-error; tier_models',
-    effort: 'low', effort_reason: `unit-type:${unitType}`,
+    // effort_reason used to claim `unit-type:<x>` here — but the unit type did
+    // not decide this effort, the crash did. Name the real cause and mark the
+    // whole contract degraded so consumers can tell it from a healthy resolve.
+    degraded: true,
+    effort: 'low', effort_reason: 'degraded:routing-runtime-error',
     model_applied: alias, engine_reason: 'default:claude', workers_engine: 'claude',
     workers_timeout: 1800, codex_model: '', plan_worker: '',
     domain_input: 'default', frontmatter_tier: '',
@@ -496,7 +506,15 @@ if (require.main === module) {
   try {
     const result = runCli(process.argv.slice(2));
     process.exit(result && result.prefs_ok === false ? 1 : 0);
-  } catch {
+  } catch (error) {
+    // The contract on stdout stays parseable for the shell consumer, but the
+    // degradation itself must be loud: a crash that silently re-routes every
+    // unit to the cheapest effort is exactly the failure mode the diagnosis
+    // caught. stderr is free — the orchestrator surfaces it next to the JSON.
+    process.stderr.write(JSON.stringify({
+      warning: 'forge-dispatch-resolve degraded to the fallback contract',
+      error: (error && error.message) || String(error),
+    }) + '\n');
     process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2))) + '\n');
     process.exit(0);
   }

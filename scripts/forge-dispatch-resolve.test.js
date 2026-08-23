@@ -288,6 +288,22 @@ withHermeticHome((cliEnv) => {
     assertEqual(r.sidecar_model, '', 'degraded contract sidecar model is empty');
   });
 
+  runCase('degraded contract names its own cause instead of blaming the unit type', () => {
+    const r = degradedContract(['--unit-type', 'execute-task']);
+    assertEqual(r.degraded, true, 'degraded contracts are marked as such');
+    assertEqual(r.effort_reason, 'degraded:routing-runtime-error',
+      'effort_reason names the crash, not unit-type:<x> — the unit type did not decide this effort');
+  });
+
+  runCase('invalid frontmatter effort is annotated, not silently defaulted', () => {
+    const f = mkFixture({ plan: '---\neffort: turbo\n---\n# task\n' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.effort, 'medium', 'invalid effort still defaults to medium');
+    assert(/invalid-effort-defaulted:turbo/.test(r.effort_reason),
+      'effort_reason records that the frontmatter value was rejected', r.effort_reason);
+    cleanup(f);
+  });
+
   runCase('routing falls back to default domain for absent domain cell', () => {
     const f = mkFixture({
       prefsJsonc: '{"routing":{"default":{"executor":{"standard":["claude-opus-4-8"]}}}}',
