@@ -103,17 +103,19 @@ function readPlanFrontmatter(planPath) {
   // frontmatter worker value before comparing; mirror it so `worker: Codex`
   // is honoured rather than falling through to claude.
   const worker = frontmatterValue(block, /^worker:[ \t]*(\S+)/m).toLowerCase();
+  // Every value on this line-up is compared against an enum or used as a
+  // lookup key downstream, so an inline YAML comment left in the value makes
+  // the comparison fail SILENTLY: `tier: heavy  # refactor` resolved to an
+  // unknown tier, produced an empty model chain, and the dispatch fell back
+  // to the agent frontmatter model with no warning. Strip comments from all
+  // of them, not just the one a second module happens to parse.
   return {
-    tier: frontmatterValue(block, /^tier:\s*(.+)$/m),
-    tag: frontmatterValue(block, /^tag:\s*(.+)$/m),
-    // Only `domain` is stripped here: it is the sole key on this line-up that a
-    // SECOND module also parses, so it is the sole one where a comment can make
-    // two readers disagree. tier/tag/effort/slice have one reader each and are
-    // left exactly as they were rather than changed by resemblance.
+    tier: stripInlineComment(frontmatterValue(block, /^tier:\s*(.+)$/m)).trim(),
+    tag: stripInlineComment(frontmatterValue(block, /^tag:\s*(.+)$/m)).trim(),
     domain: stripInlineComment(frontmatterValue(block, /^domain:[ \t]*(.+)$/m)).trim(),
-    effort: frontmatterValue(block, /^effort:\s*(.+)$/m),
+    effort: stripInlineComment(frontmatterValue(block, /^effort:\s*(.+)$/m)).trim(),
     worker: worker === 'claude' || worker === 'codex' ? worker : '',
-    slice: frontmatterValue(block, /^slice:\s*(.+)$/m),
+    slice: stripInlineComment(frontmatterValue(block, /^slice:\s*(.+)$/m)).trim(),
   };
 }
 

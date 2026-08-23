@@ -130,6 +130,31 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  runCase('inline YAML comments on tier/effort/tag do not defeat the override', () => {
+    // Regression: `tier: heavy  # refactor` used to resolve to an unknown tier,
+    // empty the model chain, and silently fall back to the agent frontmatter
+    // model. The comment must be stripped before enum comparison.
+    const clean = mkFixture({ plan: '---\ntier: heavy\neffort: high\n---\n# task\n' });
+    const expected = dispatch(clean, { unitType: 'execute-task' });
+    cleanup(clean);
+    const commented = mkFixture({ plan: '---\ntier: heavy  # cross-cutting refactor\neffort: high # deep pass\n---\n# task\n' });
+    const r = dispatch(commented, { unitType: 'execute-task' });
+    assertEqual(r.tier, 'heavy', 'commented tier still resolves heavy');
+    assertEqual(r.reason, 'frontmatter-override:heavy', 'commented tier keeps override reason');
+    assertEqual(r.effort, 'high', 'commented effort still resolves high');
+    assertEqual(r.model, expected.model, 'commented plan resolves the same model as the clean plan');
+    assert(r.model !== '', 'commented tier never empties the model chain', r.model);
+    cleanup(commented);
+    const taggedClean = mkFixture({ plan: '---\ntag: docs\n---\n# task\n' });
+    const expectedTag = dispatch(taggedClean, { unitType: 'execute-task' });
+    cleanup(taggedClean);
+    const tagged = mkFixture({ plan: '---\ntag: docs  # prose only\n---\n# task\n' });
+    const rt = dispatch(tagged, { unitType: 'execute-task' });
+    assertEqual(rt.tier, 'light', 'commented docs tag still selects light tier');
+    assertEqual(rt.model, expectedTag.model, 'commented tag resolves the same model as the clean tag');
+    cleanup(tagged);
+  });
+
   runCase('execute-task docs tag selects light tier', () => {
     const f = mkFixture({ plan: '---\ntag: docs\n---\n# task\n' });
     const r = dispatch(f, { unitType: 'execute-task' });
