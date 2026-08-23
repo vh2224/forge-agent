@@ -207,6 +207,65 @@ test('genuinely empty repo still degrades to source none', () => {
   fs.rmSync(cwd, { recursive: true, force: true });
 });
 
+// ── buildVerificationEvidence / formatEvidenceYaml ───────────────────────────
+//
+// The verification_evidence block used to be hand-derived by the worker
+// (exit codes recalled from conversation, matched_line from a manual grep).
+// The gate now emits the finished block; these cases prove the derivation is
+// mechanical and mirrors the completer's classifier semantics.
+
+const { buildVerificationEvidence, formatEvidenceYaml } = require('./forge-verify.js');
+const { buildEvidenceFileName } = require('./forge-evidence-path.js');
+
+test('evidence entries copy checks[] and locate the command in the resolved log set', () => {
+  const ownerRoot = tmpRepo();
+  const forgeDir = path.join(ownerRoot, '.gsd', 'forge');
+  fs.mkdirSync(forgeDir, { recursive: true });
+  const name = buildEvidenceFileName({ milestone: 'M001', slice: 'S01', unit: 'T01' });
+  fs.writeFileSync(path.join(forgeDir, name),
+    JSON.stringify({ tool: 'Bash', cmd: 'echo warmup' }) + '\n'
+    + JSON.stringify({ tool: 'Bash', cmd: 'npm test -- --run' }) + '\n');
+  const out = buildVerificationEvidence({
+    checks: [
+      { command: 'npm test', exitCode: 0 },
+      { command: 'cargo build', exitCode: 1 },
+    ],
+    ownerRoot, milestone: 'M001', slice: 'S01', unit: 'T01',
+  });
+  assertEqual(out.entries.length, 2, 'one entry per check');
+  assertEqual(out.entries[0].exit_code, 0, 'exit_code copied from checks[]');
+  assertEqual(out.entries[0].matched_line, 2, 'first cmd-field hit, 1-indexed');
+  assertEqual(out.entries[0].evidence_file, name, 'hit names its file');
+  assertEqual(out.entries[1].matched_line, 0, 'command absent from the log is the 0 sentinel');
+  assertEqual(out.entries[1].evidence_file, name, 'the 0 sentinel still names the last file checked');
+  fs.rmSync(ownerRoot, { recursive: true, force: true });
+});
+
+test('empty resolved set yields verification_evidence: [] (evidence_log_missing trigger intact)', () => {
+  const ownerRoot = tmpRepo();
+  fs.mkdirSync(path.join(ownerRoot, '.gsd', 'forge'), { recursive: true });
+  const out = buildVerificationEvidence({
+    checks: [{ command: 'npm test', exitCode: 0 }],
+    ownerRoot, milestone: 'M001', slice: 'S01', unit: 'T01',
+  });
+  assertEqual(out.entries.length, 0, 'no fabricated entries without a resolved set');
+  assertEqual(formatEvidenceYaml(out.entries), 'verification_evidence: []', 'empty set renders the [] form');
+  fs.rmSync(ownerRoot, { recursive: true, force: true });
+});
+
+test('formatEvidenceYaml applies the command string rules (single line, ≤180, double-quoted)', () => {
+  const yaml = formatEvidenceYaml([{
+    command: 'npm test \n  -- --grep ' + 'x'.repeat(300),
+    exit_code: 0, matched_line: 3, evidence_file: 'evidence~M001~S01~T01.jsonl',
+  }]);
+  const commandLine = yaml.split('\n')[1];
+  assert(!commandLine.includes('\\n') || !/\n/.test(JSON.parse(commandLine.replace(/^\s*- command: /, ''))),
+    'no raw newlines survive in the command value');
+  assert(JSON.parse(commandLine.replace(/^\s*- command: /, '')).length <= 180, 'command capped at 180 chars');
+  assert(/^\s{2}- command: "/.test(commandLine), 'command is double-quoted YAML');
+  assert(yaml.includes('    exit_code: 0') && yaml.includes('    matched_line: 3'), 'fields present');
+});
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 
 console.log('');

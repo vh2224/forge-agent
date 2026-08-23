@@ -58,7 +58,7 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
 10. **Verification gate** — invoke:
     ```bash
     FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-    node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
+    node "$FORGE_SCRIPTS_DIR/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##} --milestone "{M###}" --slice "{S##}" --emit-evidence
     ```
     Parse the JSON result:
     - `passed: true` and (no `skipped` OR `skipped: "no-stack"`) → continue to step 11.
@@ -68,55 +68,23 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
     Full gate contract and CLI shape: see `shared/forge-dispatch.md ## Verification Gate`.
 11. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.
 12. Write `T##-SUMMARY.md` — include `new_helpers` field if you created reusable functions (see Summary Format)
-12a. **Emit `verification_evidence:` frontmatter block** (inside the YAML frontmatter of `T##-SUMMARY.md`). One entry per element of the `checks[]` array in the JSON that step 10 (verification gate) printed:
-    ```yaml
-    verification_evidence:
-      - command: "npm run typecheck"
-        exit_code: 0
-        matched_line: 42
-        evidence_file: "evidence~M###~S01~T04.jsonl"
-      - command: "npm test"
-        exit_code: 0
-        matched_line: 43
-        evidence_file: "evidence~M###~S01~T04.jsonl"
-    ```
-    Derivation — **copy, never recall**:
-    - `command` and `exit_code`: copied VERBATIM from `checks[].command` and `checks[].exitCode` in the
-      step-10 JSON output. The gate ran the commands and printed both fields — do NOT reconstruct either
-      from conversation memory, and do NOT list a command that is not in `checks[]`. (This block used to
-      ask for values "you observed in your conversation"; measured result was fabricated evidence. If you
-      no longer have the step-10 JSON in context, re-run the gate command and copy from the fresh output.)
-    - **Resolve the evidence-log FILE SET first** — one logical unit (`{M###}|{S##}|{T##}`) can be spread
-      across the new composite name **and** legacy forms (bare, slice-qualified, milestone-qualified). Do
-      NOT read `.gsd/forge/evidence-{T##}.jsonl` by itself — that bare name only ever holds the unqualified
-      slice of the log and silently misses the rest of the set:
-      ```bash
-      FORGE_SCRIPTS_DIR=$([ -f scripts/forge-evidence-path.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-      node "$FORGE_SCRIPTS_DIR/forge-evidence-path.js" --resolve --milestone "{M###}" --slice "{S##}" --unit "{T##}" --json --cwd "{WORKING_DIR}"
-      ```
-      Output: `{files:[{name, form}, ...], by_form:{...}, skipped:[...]}`. `files` is the resolved set —
-      every file in it belongs to this logical unit, none by loose substring guessing.
-    - `matched_line`: search **every file in the resolved set** (in the order returned) for the first
-      line whose `cmd` field contains your command (or a recognisable substring):
-      ```bash
-      grep -n -m 1 -F "<command-substring>" .gsd/forge/<file> | cut -d: -f1
-      ```
-      - First file with a hit → record that `matched_line` (1-indexed) **and** the file name in
-        `evidence_file` on the same entry, so a later `matched_line: 0` claim is diagnosable against a
-        named file instead of a silently-wrong guess.
-      - No hit in any file in the set → record `matched_line: 0`. This is a valid sentinel — the slice
-        completer (forge-completer) will surface it as an advisory flag, not a blocker.
-    - If the resolved set is empty (`files: []` — evidence log missing, disabled mode, or nothing written
-      for this unit yet), emit `verification_evidence: []` (empty array). Do NOT omit the key — the
-      completer expects it. An empty resolved SET is what makes `evidence_log_missing` legitimate — never
-      the absence of the single bare-named file alone.
+12a. **Emit `verification_evidence:` frontmatter block** (inside the YAML frontmatter of `T##-SUMMARY.md`).
+    The step-10 gate computed it for you: its JSON output carries `verification_evidence_yaml` (because
+    step 10 passes `--emit-evidence`). **Paste that string VERBATIM into the frontmatter.** Do not edit,
+    reorder, drop or add entries — the gate copied `command`/`exit_code` from the commands it actually ran
+    and derived `matched_line`/`evidence_file` from the resolved evidence-log file set. There is nothing
+    for you to derive, recall, or judge here.
+    - `verification_evidence: []` in the output is valid — paste it as-is (empty resolved set, disabled
+      evidence mode, or no commands ran). Never omit the key — the completer expects it.
+    - Fallback (ONLY if the step-10 JSON has no `verification_evidence_yaml` field — an older installed
+      gate): emit one entry per `checks[]` element copying `command`/`exit_code` VERBATIM from that JSON
+      (never from conversation memory), resolve the evidence-log file set with
+      `forge-evidence-path.js --resolve --milestone "{M###}" --slice "{S##}" --unit "{T##}" --json`, and
+      grep each resolved file for the command substring: first hit → `matched_line` (1-indexed) +
+      `evidence_file`; no hit anywhere → `matched_line: 0` + last file checked. Command strings: ≤180
+      chars, single line, double-quoted.
 
-    `command` string rules:
-    - Must be ≤ 180 chars. Truncate at word boundary if the real command is longer.
-    - Must not contain raw newlines. Collapse to a single line.
-    - Quote the string in YAML with double quotes to avoid edge-case parser issues.
-
-    This block is advisory — it is not a verification gate. Emission is mandatory (completer reads it). `command`/`exit_code` are mechanical copies of the gate's JSON — there is no "best-effort" latitude on them; only `matched_line` derives from a grep you run.
+    This block is advisory — it is not a verification gate. Emission is mandatory (completer reads it).
 13. **Mark task complete:** update `status: DONE` in the frontmatter of `T##-PLAN.md`
 
 ## Research Freely When Unsure
