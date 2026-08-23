@@ -1132,29 +1132,23 @@ Store the returned `taskId` as `current_task_id`. Then immediately mark it as in
 TaskUpdate({ taskId: current_task_id, status: "in_progress" })
 ```
 
-**Selective memory injection** — before building the worker prompt, source memory entries from the fragment store via the `forge-memory.js` API (D9):
+**Selective memory injection** — one call to the store's own selector (budget-aware, unit-type-aware keyword scoring), then record which facts were actually injected so ranking learns from real use:
 
 ```bash
-# 1. List all available fragment unit IDs
-_frag_list=$(node "$FORGE_SCRIPTS_DIR/forge-memory.js" --list --cwd "$WORKING_DIR" 2>/dev/null || echo "[]")
+# --select ranks by (keyword overlap × category preference × confidence·max(1,hits))
+# under a token budget. --query-file feeds the unit's plan as the query; fall back
+# to --text "" when no plan exists for this unit type.
+_mem_json=$(node "$FORGE_SCRIPTS_DIR/forge-memory.js" --select --unit-type "$unit_type" ${PLAN_PATH:+--query-file "$PLAN_PATH"} --limit 8 --max-tokens 2000 --cwd "$WORKING_DIR" 2>/dev/null || echo '{}')
+RELEVANT_MEMORIES=$(printf '%s' "$_mem_json" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write(j.markdown&&j.markdown.trim()?j.markdown:'(none)')}catch(e){process.stdout.write('(none)')}}")
+# Close the usage loop: one kind:'hit' stat per injected fact (measured before this
+# existed: every fact in the store carried hits:0 — ranking had no feedback signal).
+# Advisory — never blocks the dispatch.
+printf '%s' "$_mem_json" | node "$FORGE_SCRIPTS_DIR/forge-memory.js" --hit --cwd "$WORKING_DIR" >/dev/null 2>&1 || true
 ```
 
-If `_frag_list` is a non-empty JSON array (fragment store is populated):
-- For each `unit_id` in the list, read its fragment:
-  ```bash
-  _frag=$(node "$FORGE_SCRIPTS_DIR/forge-memory.js" --read <unit_id> --cwd "$WORKING_DIR" 2>/dev/null)
-  ```
-  Each fragment has `facts[]`, `category`, `confidence`, `hits`.
-- Apply filter to `facts[]` entries using the same selection logic:
-  - For `execute-task`: read keywords from `T##-PLAN.md` title + step names. Include facts that share ≥2 keywords with the plan. Prefer categories `gotcha` and `convention`. Cap at 8 entries total across all fragments.
-  - For `plan-slice` / `research-slice`: include facts from fragments with `category` = `architecture` or `pattern` related to the milestone scope. Cap at 8 entries.
-  - For other unit types: include top-5 facts by fragment `confidence` score.
-- Collect matching facts into `RELEVANT_MEMORIES` string (same shape as before — one bullet per fact).
+**Fallback:** if the fragment store is empty/absent (`--select` returned no entries and `.gsd/memory/` does not exist — pre-fragment-store workspace), fall back to `ALL_MEMORIES` (loaded from `.gsd/AUTO-MEMORY.md` at Load context) filtered to ≤8 entries sharing keywords with the plan. No hits are recorded on the fallback path (nothing owns the facts).
 
-If `_frag_list` is `[]` or errors (pre-fragment-store workspace — fragment store not yet populated):
-- Fall back to `ALL_MEMORIES` (loaded from `.gsd/AUTO-MEMORY.md` at step 5 of Load context) using the same filter logic above.
-
-If no entries match in either path: set `RELEVANT_MEMORIES` to `(none)`.
+If nothing matches in either path: set `RELEVANT_MEMORIES` to `(none)`.
 
 Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` section instead of the raw full file.
 

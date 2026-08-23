@@ -1055,6 +1055,65 @@ function cliMain(argv) {
     process.exit(0);
   }
 
+  if (cmd === '--hit') {
+    // Records kind:'hit' stat events on the owning fragments for facts that
+    // were actually INJECTED into a worker prompt. This is the usage signal
+    // the ranking (confidence × max(1, hits)) was designed around and never
+    // received: measured before this existed, all 71 facts in this repo's
+    // store carried hits: 0 — selection had no feedback loop.
+    //
+    // stdin: the --select/--query result envelope ({entries:[...]}) or a bare
+    // array of {unit_id, mem_id, milestone_id?}. Piping --select's own output
+    // back in is the intended idiom — no second lookup of who owns which fact.
+    // Advisory by contract: per-owner failures are reported in `skipped`, the
+    // exit is 0 unless the stdin payload itself is unusable.
+    let payload;
+    try {
+      payload = JSON.parse(fs.readFileSync(0, 'utf8'));
+    } catch (e) {
+      process.stderr.write(`--hit: unparseable stdin payload (${e.message})\n`);
+      process.exit(1);
+    }
+    const entries = Array.isArray(payload) ? payload
+      : (payload && Array.isArray(payload.entries)) ? payload.entries : null;
+    if (entries === null) {
+      process.stderr.write('--hit expects a JSON array or a --select envelope ({entries:[...]}) on stdin\n');
+      process.exit(1);
+    }
+    const ts = new Date().toISOString();
+    const byOwner = new Map();
+    const skipped = [];
+    for (const entry of entries) {
+      const unitId = entry && String(entry.unit_id || '').trim();
+      const memId = entry && String(entry.mem_id || '').trim();
+      if (!unitId || !memId) {
+        skipped.push({ entry, reason: 'missing-unit-or-mem-id' });
+        continue;
+      }
+      const owner = `${unitId}\u0000${entry.milestone_id || ''}`;
+      if (!byOwner.has(owner)) {
+        byOwner.set(owner, { unit_id: unitId, milestone_id: entry.milestone_id || null, stats: [] });
+      }
+      byOwner.get(owner).stats.push({ kind: 'hit', mem_id: memId, ts });
+    }
+    const fragments = [];
+    let recorded = 0;
+    for (const owner of byOwner.values()) {
+      try {
+        const fragment = { unit_id: owner.unit_id, facts: [], stats: owner.stats };
+        if (owner.milestone_id) fragment.milestone_id = owner.milestone_id;
+        const written = writeFragment(cwd, fragment, {});
+        const landed = written && !written.quarantined;
+        if (landed) recorded += owner.stats.length;
+        fragments.push({ unit_id: owner.unit_id, hits: owner.stats.length, landed });
+      } catch (e) {
+        skipped.push({ unit_id: owner.unit_id, reason: e.message });
+      }
+    }
+    console.log(JSON.stringify({ recorded, fragments, skipped }));
+    process.exit(0);
+  }
+
   if (cmd === '--query' || cmd === '--select') {
     const allowedOptions = new Set([
       '--unit-type', '--text', '--query-file', '--limit', '--max-tokens', '--format',

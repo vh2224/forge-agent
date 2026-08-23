@@ -916,30 +916,25 @@ orchestrator input; do not replace it with a summary.` to the Claude subagent. P
 
 Only after `Agent()` returns successfully, run `node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action ack --cwd "$WORKING_DIR" --run "${RUN_ID:-$MILESTONE_ID}" --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" --unit "$unit_type/${TASK_ID:-$SLICE_ID}" --pending-id "$PENDING_CONTEXT_ID"`. Rendering/dispatch failure leaves the durable record pending for retry; an empty id is inert.
 
-**Selective memory injection** — read memories from the fragment store, then filter to entries relevant to this unit:
+**Selective memory injection** — one call to the store's own selector (budget-aware, unit-type-aware keyword scoring), then record which facts were actually injected so ranking learns from real use:
 
 ```bash
-FRAGMENT_LIST=$(node "$FORGE_SCRIPTS_DIR/forge-memory.js" --list 2>/dev/null || echo "[]")
+# --select ranks by (keyword overlap × category preference × confidence·max(1,hits))
+# under a token budget. --query-file feeds the unit's plan as the query; fall back
+# to --text "" when no plan exists for this unit type.
+_mem_json=$(node "$FORGE_SCRIPTS_DIR/forge-memory.js" --select --unit-type "$unit_type" ${PLAN_PATH:+--query-file "$PLAN_PATH"} --limit 8 --max-tokens 2000 --cwd "$WORKING_DIR" 2>/dev/null || echo '{}')
+RELEVANT_MEMORIES=$(printf '%s' "$_mem_json" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write(j.markdown&&j.markdown.trim()?j.markdown:'(none)')}catch(e){process.stdout.write('(none)')}}")
+# Close the usage loop: one kind:'hit' stat per injected fact (measured before this
+# existed: every fact in the store carried hits:0 — ranking had no feedback signal).
+# Advisory — never blocks the dispatch.
+printf '%s' "$_mem_json" | node "$FORGE_SCRIPTS_DIR/forge-memory.js" --hit --cwd "$WORKING_DIR" >/dev/null 2>&1 || true
 ```
 
-If `FRAGMENT_LIST` is a non-empty JSON array, iterate over each `unit_id` in the list:
+**Fallback:** if the fragment store is empty/absent (`--select` returned no entries and `.gsd/memory/` does not exist — pre-fragment-store workspace), fall back to `ALL_MEMORIES` (loaded from `.gsd/AUTO-MEMORY.md` at Load context) filtered to ≤8 entries sharing keywords with the plan. No hits are recorded on the fallback path (nothing owns the facts).
 
-```bash
-# For each unit_id in FRAGMENT_LIST:
-FRAGMENT=$(node "$FORGE_SCRIPTS_DIR/forge-memory.js" --read <unit-id> 2>/dev/null || echo "null")
-```
+If nothing matches in either path: set `RELEVANT_MEMORIES` to `(none)`.
 
-Collect fragments where `FRAGMENT` is non-null. Apply the filter rules below to the collected fragments (each fragment has `facts[]`, `category`, `confidence`, `hits`):
-
-- For `execute-task`: read keywords from `T##-PLAN.md` title + step names. Include fragments whose `facts[]` text shares ≥2 keywords with the plan. Prefer categories `gotcha` and `convention`. Cap at 8 entries.
-- For `plan-slice` / `research-slice`: include fragments with categories `architecture` and `pattern` related to the milestone scope. Cap at 8 entries.
-- For other unit types: include top-5 fragments by `confidence` score.
-
-**Fallback:** If `FRAGMENT_LIST` is an empty array `[]` or `forge-memory.js --list` errors, fall back to `ALL_MEMORIES` (loaded from `.gsd/AUTO-MEMORY.md` at step 5 of `## Load context`) and apply the same filter rules above. This preserves backward compatibility with pre-fragment-store workspaces.
-
-If no entries match after filtering: inject `(none)`.
-
-Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` section.
+Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` section instead of the raw full file.
 
 > For human-readable consolidation, run `/forge-doctor --regen-projection` to rebuild the monolith from fragments (writes `AUTO-MEMORY.md` via `forge-memory.js --write-all`). See `forge-projection` in doctor help.
 

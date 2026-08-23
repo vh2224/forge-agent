@@ -458,6 +458,64 @@ test('--query-file cannot escape cwd and unknown query flags fail closed', () =>
   }
 }));
 
+// ── --hit: usage feedback loop ───────────────────────────────────────────────
+//
+// Ranking is confidence × max(1, hits), but nothing ever emitted a hit event —
+// measured: every fact in this repo's store carried hits: 0. --hit closes the
+// loop: the orchestrator pipes --select's own envelope back in after injecting.
+
+test('--hit records a hit stat for each injected fact and ranking sees it', () => withTemp((cwd) => {
+  memory.writeFragment(cwd, {
+    unit_id: 'T-20260823120000-hits',
+    facts: [fact('MEM001', 'gotcha', 'spawnSync shell false rejects glob argv on win32', 'T-20260823120000-hits')],
+    stats: [],
+  });
+  const script = path.join(__dirname, 'forge-memory.js');
+  const select = spawnSync(process.execPath, [script, '--select', '--unit-type', 'execute-task',
+    '--text', 'spawnSync glob argv win32', '--cwd', cwd], { encoding: 'utf8' });
+  const envelope = JSON.parse(select.stdout);
+  assert.strictEqual(envelope.entries[0].hits, 0, 'starts unused');
+  const hit = spawnSync(process.execPath, [script, '--hit', '--cwd', cwd],
+    { encoding: 'utf8', input: select.stdout });
+  const report = JSON.parse(hit.stdout);
+  assert.strictEqual(hit.status, 0);
+  assert.strictEqual(report.recorded, 1, 'one hit recorded');
+  assert.strictEqual(report.fragments[0].landed, true, 'stat landed on the owning fragment');
+  const again = JSON.parse(spawnSync(process.execPath, [script, '--select', '--unit-type', 'execute-task',
+    '--text', 'spawnSync glob argv win32', '--cwd', cwd], { encoding: 'utf8' }).stdout);
+  assert.strictEqual(again.entries[0].hits, 1, 'projection folds the hit');
+  assert.ok(again.entries[0].confidence > envelope.entries[0].confidence, 'hit nudges confidence up');
+}));
+
+test('--hit accepts a bare array, reports unusable rows in skipped, and stays exit 0', () => withTemp((cwd) => {
+  memory.writeFragment(cwd, {
+    unit_id: 'T-20260823120000-hits',
+    facts: [fact('MEM001', 'gotcha', 'x', 'T-20260823120000-hits')],
+    stats: [],
+  });
+  const script = path.join(__dirname, 'forge-memory.js');
+  const r = spawnSync(process.execPath, [script, '--hit', '--cwd', cwd], {
+    encoding: 'utf8',
+    input: JSON.stringify([
+      { unit_id: 'T-20260823120000-hits', mem_id: 'MEM001' },
+      { mem_id: 'MEM-orphan' },
+    ]),
+  });
+  const report = JSON.parse(r.stdout);
+  assert.strictEqual(r.status, 0, 'advisory: per-row problems never fail the call');
+  assert.strictEqual(report.recorded, 1);
+  assert.strictEqual(report.skipped.length, 1, 'the unit-less row is named, not swallowed');
+  assert.strictEqual(report.skipped[0].reason, 'missing-unit-or-mem-id');
+}));
+
+test('--hit refuses unusable stdin loudly (never a silent no-op)', () => withTemp((cwd) => {
+  const script = path.join(__dirname, 'forge-memory.js');
+  const garbage = spawnSync(process.execPath, [script, '--hit', '--cwd', cwd], { encoding: 'utf8', input: '{nope' });
+  assert.strictEqual(garbage.status, 1, 'unparseable stdin is exit 1');
+  const wrongShape = spawnSync(process.execPath, [script, '--hit', '--cwd', cwd], { encoding: 'utf8', input: '{"markdown":"x"}' });
+  assert.strictEqual(wrongShape.status, 1, 'an envelope without entries[] is refused by name');
+}));
+
 runTests().catch(error => {
   console.error(error.stack || error.message);
   process.exit(1);
