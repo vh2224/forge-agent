@@ -7,7 +7,7 @@
     {
       "source_id": "agents",
       "target": "agents",
-      "sha256": "50c1e8bcd073da630546474da55d7d6fdbee3574bb98c12f337aba49d5ed4b1e"
+      "sha256": "ba17c4daf8de4ff79d0ed27cd31b87df755423a431415044c947807e2184b8c5"
     },
     {
       "source_id": "commands",
@@ -37,7 +37,7 @@
     {
       "source_id": "claude-instructions",
       "target": "project/CLAUDE.md",
-      "sha256": "f3139ee58486986ed140cd3a6e42b6f16d48834bbcddb37806c41ea0d51fbe8b"
+      "sha256": "85664eab9d081ed6d4c086905e73f27d2df75cb7a31c22038bb6abe13683cf28"
     },
     {
       "source_id": "claude-settings",
