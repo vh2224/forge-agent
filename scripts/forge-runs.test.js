@@ -378,6 +378,49 @@ test('updateWith refuses a non-function mutator and a missing run, by name', () 
   });
 });
 
+// ── --heartbeat: one-spawn worker stamp (2026-08-24 turn consolidation) ───────
+//
+// The skills used to burn a `node -e Date.now()` spawn + an --update spawn
+// (plus cat+echo on the legacy path) around every dispatch. Date.now and the
+// legacy fallback live in the CLI now; these cases pin the three modes.
+
+test('--heartbeat --run sets worker/slice/started and --clear nulls them (heartbeat kept)', () => {
+  withSandbox((dir) => {
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    spawnSync(process.execPath, [CLI, '--add', '--id', 'M-hb', '--kind', 'milestone', '--session', 's1', '--cwd', dir], { encoding: 'utf8' });
+    const set = spawnSync(process.execPath, [CLI, '--heartbeat', '--run', 'M-hb', '--worker', 'execute-task/T01', '--worker-slice', 'S01', '--cwd', dir], { encoding: 'utf8' });
+    const afterSet = JSON.parse(set.stdout);
+    if (set.status !== 0) throw new Error(`set exited ${set.status}: ${set.stderr}`);
+    if (afterSet.worker !== 'execute-task/T01' || afterSet.worker_slice !== 'S01') throw new Error(`set wrote ${afterSet.worker}/${afterSet.worker_slice}`);
+    if (typeof afterSet.worker_started !== 'number' || typeof afterSet.last_heartbeat !== 'number') throw new Error('timestamps are stamped by the CLI, not the shell');
+    const clear = spawnSync(process.execPath, [CLI, '--heartbeat', '--run', 'M-hb', '--clear', '--cwd', dir], { encoding: 'utf8' });
+    const afterClear = JSON.parse(clear.stdout);
+    if (afterClear.worker !== null || afterClear.worker_slice !== null || afterClear.worker_started !== null) throw new Error('clear must null the worker axis');
+    if (typeof afterClear.last_heartbeat !== 'number' || afterClear.active !== true) throw new Error('clear keeps the run alive and bumped');
+  });
+});
+
+test('--heartbeat without --run takes the legacy auto-mode.json path (started_at preserved)', () => {
+  withSandbox((dir) => {
+    fs.mkdirSync(path.join(dir, '.gsd', 'forge'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gsd', 'forge', 'auto-mode-started.txt'), '1700000000000\n');
+    const r = spawnSync(process.execPath, [CLI, '--heartbeat', '--worker', 'task/T-x', '--cwd', dir], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`legacy set exited ${r.status}: ${r.stderr}`);
+    const legacy = JSON.parse(fs.readFileSync(path.join(dir, '.gsd', 'forge', 'auto-mode.json'), 'utf8'));
+    if (legacy.worker !== 'task/T-x' || legacy.active !== true) throw new Error(`legacy wrote ${JSON.stringify(legacy)}`);
+    if (legacy.started_at !== 1700000000000) throw new Error('started_at must come from auto-mode-started.txt, never re-minted');
+  });
+});
+
+test('--heartbeat without --worker and without --clear is a loud error, never a silent stamp', () => {
+  withSandbox((dir) => {
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    const r = spawnSync(process.execPath, [CLI, '--heartbeat', '--cwd', dir], { encoding: 'utf8' });
+    if (r.status === 0) throw new Error('expected non-zero exit');
+    if (!/--worker|--clear/.test(r.stderr)) throw new Error(`stderr must name the missing flag: ${r.stderr}`);
+  });
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
 

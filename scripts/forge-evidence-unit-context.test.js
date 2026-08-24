@@ -330,17 +330,23 @@ test('skills/forge-next/SKILL.md invokes forge-runs.js (measured 0 before the fi
   const src = fs.readFileSync(path.join(__dirname, '..', 'skills', 'forge-next', 'SKILL.md'), 'utf8');
   const count = src.split('forge-runs.js').length - 1;
   assert(count > 0, `cause (a) not fixed: forge-runs.js invocations in forge-next/SKILL.md = ${count}`);
-  assert(/"worker\\":\\"UNIT_TYPE\/UNIT_ID/.test(src) || src.includes('worker\\":\\"UNIT_TYPE/UNIT_ID'),
+  // 2026-08-24 heartbeat consolidation: the block is now the one-spawn
+  // `--heartbeat` CLI form; the worker value travels as --worker "UNIT_TYPE/UNIT_ID".
+  assert(src.includes('--heartbeat --run "$RUN_ID" --worker "UNIT_TYPE/UNIT_ID"'),
     'the record-worker heartbeat block must be present');
-  assert(src.includes('worker_slice'), 'the slice axis must be emitted by step mode too');
+  assert(src.includes('--worker-slice'), 'the slice axis must be emitted by step mode too');
 });
 
 test('skills/forge-auto/SKILL.md emits worker_slice at every worker site', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'skills', 'forge-auto', 'SKILL.md'), 'utf8');
-  const workerWrites = src.split('\\"worker\\":').length - 1;
-  const sliceWrites = src.split('worker_slice').length - 1;
+  // 2026-08-24 heartbeat consolidation: worker writes are `--worker "<value>"`
+  // CLI flags now. Clear sites null the axis inside the CLI, so the invariant
+  // "every SET site carries the slice axis" is measured over --worker vs
+  // --worker-slice flag counts.
+  const workerWrites = src.split('--worker "').length - 1;
+  const sliceWrites = src.split('--worker-slice').length - 1;
   assertEq(sliceWrites, workerWrites,
-    'every site that writes the worker field must also write the slice axis');
+    'every site that sets the worker field must also set the slice axis');
 });
 
 // ── Result ─────────────────────────────────────────────────────────────────────

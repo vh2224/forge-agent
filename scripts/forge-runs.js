@@ -469,6 +469,8 @@ Flags:
   --update <id> --json <patch-json>                       update fields
   --remove <id>            delete record
   --bump <id>              bump last_heartbeat to now
+  --heartbeat [--run <id>] --worker "<unit>" [--worker-slice <S##>] | --clear
+                           one-spawn worker heartbeat (legacy auto-mode.json when --run absent)
   --cleanup-stale [--threshold-ms <n>]   garbage-collect stale records
   --resolve-session <id>   find active run for session_id
   --refresh-legacy-alias   rewrite auto-mode.json mirror
@@ -525,6 +527,44 @@ Flags:
     } else if (args.remove) {
       remove(cwd, args.remove);
       process.stdout.write('ok\n');
+    } else if (args.heartbeat !== undefined) {
+      // One-spawn worker heartbeat (2026-08-24 diagnosis): the skills used to
+      // burn a `node -e Date.now()` spawn plus a --update spawn (and a cat +
+      // echo pair on the legacy path) around EVERY dispatch, just to stamp or
+      // clear the worker field. Date.now lives here now; the legacy
+      // auto-mode.json fallback too, so the skill block is a single line.
+      //   --heartbeat --run <id> --worker "unit/id" [--worker-slice S##]  → set
+      //   --heartbeat --run <id> --clear                                  → clear
+      //   (--run absent/empty → legacy auto-mode.json path)
+      const now = Date.now();
+      const clearing = args.clear === true;
+      const worker = clearing ? null : (typeof args.worker === 'string' ? args.worker : null);
+      const workerSlice = clearing ? null
+        : (typeof args['worker-slice'] === 'string' && args['worker-slice'] !== 'null' ? args['worker-slice'] : null);
+      if (!clearing && !worker) throw new Error('forge-runs: --heartbeat requires --worker "<unit>" or --clear');
+      const runId = typeof args.run === 'string' ? args.run : '';
+      if (runId) {
+        const r = update(cwd, runId, {
+          worker, worker_slice: workerSlice,
+          worker_started: clearing ? null : now,
+          last_heartbeat: now, active: true,
+        });
+        process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      } else {
+        // Legacy single-run path — auto-mode.json is the only carrier.
+        const legacyPath = path.join(cwd, '.gsd', 'forge', 'auto-mode.json');
+        let startedAt = now;
+        try {
+          const txt = fs.readFileSync(path.join(cwd, '.gsd', 'forge', 'auto-mode-started.txt'), 'utf8').trim();
+          if (/^\d+$/.test(txt)) startedAt = parseInt(txt, 10);
+        } catch { /* absent → now */ }
+        fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+        fs.writeFileSync(legacyPath, JSON.stringify({
+          active: true, started_at: startedAt, last_heartbeat: now,
+          worker, worker_slice: workerSlice, worker_started: clearing ? null : now,
+        }) + '\n');
+        process.stdout.write('ok\n');
+      }
     } else if (args.bump) {
       const r = bumpHeartbeat(cwd, args.bump);
       process.stdout.write(JSON.stringify(r, null, 2) + '\n');

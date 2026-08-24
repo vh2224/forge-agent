@@ -1184,15 +1184,9 @@ Store as `RELEVANT_MEMORIES` and use in the worker prompt `## Project Memory` se
 
 **Heartbeat — record active worker** before dispatching (M005+: writes via forge-runs.js when multi-run, legacy auto-mode.json fallback):
 ```bash
-_now=$(node -e "process.stdout.write(String(Date.now()))")
-if [ -n "$RUN_ID" ]; then
-  # Multi-run: forge-runs.update bumps runs/{id}.json + auto-refreshes legacy alias
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":\"UNIT_TYPE/UNIT_ID\",\"worker_slice\":\"SLICE_ID\",\"worker_started\":$_now,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
-else
-  # Legacy single-run path
-  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
-  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":\"UNIT_TYPE/UNIT_ID\",\"worker_slice\":\"SLICE_ID\",\"worker_started\":$_now}" > .gsd/forge/auto-mode.json
-fi
+# One spawn (2026-08-24): Date.now + multi-run update + legacy auto-mode.json
+# fallback all live inside forge-runs --heartbeat.
+node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat ${RUN_ID:+--run "$RUN_ID"} --worker "UNIT_TYPE/UNIT_ID" --worker-slice "SLICE_ID" > /dev/null
 ```
 Replace `UNIT_TYPE/UNIT_ID` with the actual values (e.g., `execute-task/T01`), and `SLICE_ID` with the slice this unit belongs to (e.g., `S01`) — use `null` (unquoted) when the unit has no slice (`plan-milestone`, `research-milestone`, a loose task). `worker` carries no slice axis, so **this** field is the only thing that tells the evidence log which slice a tool call belonged to (S01/T02). Multi-run uses each run's own `runs/{id}.json` as source-of-truth; `auto-mode.json` is automatically synced to oldest-active by `forge-runs.refreshLegacyAlias` (eliminates cross-tab race). Legacy mode preserved for pre-M004 workspaces.
 
@@ -1256,13 +1250,7 @@ Executing work inline bypasses context isolation and is NEVER acceptable as a fa
 
 **Heartbeat — clear worker field** after Agent() returns (M005+ pattern):
 ```bash
-_now=$(node -e "process.stdout.write(String(Date.now()))")
-if [ -n "$RUN_ID" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":null,\"worker_slice\":null,\"worker_started\":null,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
-else
-  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
-  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":null,\"worker_slice\":null}" > .gsd/forge/auto-mode.json
-fi
+node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat ${RUN_ID:+--run "$RUN_ID"} --clear > /dev/null
 ```
 
 ---
@@ -1279,14 +1267,8 @@ This branch runs ONLY when `forge-parallelism.js` returned `mode: parallel` for 
 
 **c) Heartbeat — record multi-worker** before parallel dispatching (M005+ pattern):
 ```bash
-_now=$(node -e "process.stdout.write(String(Date.now()))")
 # workers_csv = "execute-task/T01,execute-task/T02,..." built from BATCH
-if [ -n "$RUN_ID" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":\"BATCH:$workers_csv\",\"worker_slice\":\"SLICE_ID\",\"worker_started\":$_now,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
-else
-  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
-  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":\"BATCH:$workers_csv\",\"worker_slice\":\"SLICE_ID\",\"worker_started\":$_now}" > .gsd/forge/auto-mode.json
-fi
+node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat ${RUN_ID:+--run "$RUN_ID"} --worker "BATCH:$workers_csv" --worker-slice "SLICE_ID" > /dev/null
 ```
 Use a single `BATCH:<csv>` worker label so the statusline shows the parallel group without special-casing.
 
@@ -1355,13 +1337,7 @@ The extra `batch_size` field lets post-hoc analysis separate parallel from seque
 
 **i) Heartbeat — clear worker field** after all Agent() calls return (M005+ pattern):
 ```bash
-_now=$(node -e "process.stdout.write(String(Date.now()))")
-if [ -n "$RUN_ID" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":null,\"worker_slice\":null,\"worker_started\":null,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null
-else
-  _sa=$(cat .gsd/forge/auto-mode-started.txt 2>/dev/null || node -e "process.stdout.write(String(Date.now()))")
-  echo "{\"active\":true,\"started_at\":$_sa,\"last_heartbeat\":$_now,\"worker\":null,\"worker_slice\":null}" > .gsd/forge/auto-mode.json
-fi
+node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat ${RUN_ID:+--run "$RUN_ID"} --clear > /dev/null
 ```
 
 **j) Process each result serially** — iterate `results` in order and for each, run the full Step 5 (Process result) + Step 6 (Post-unit housekeeping) pipeline. Specifically:
