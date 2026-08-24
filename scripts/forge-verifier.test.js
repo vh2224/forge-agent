@@ -765,6 +765,83 @@ test('existing exports still present (regression)', () => {
   });
 }
 
+// ── runTaskArtifactCheck: enforcing existence at the task boundary ────────────
+//
+// Nothing between the executor's self-report and the (advisory, end-of-slice)
+// verifier checked that a task's DECLARED artifacts exist. Existence is
+// mechanical, so here it ENFORCES (exit 1 → executor returns partial);
+// substantive stays advisory and wired is filtered (the rest of the slice does
+// not exist yet — "no references" is the expected state, not a signal).
+
+const { runTaskArtifactCheck } = require('./forge-verifier.js');
+const os2 = require('os');
+
+function taskFixture(planBody, files) {
+  const dir = fs.mkdtempSync(path.join(os2.tmpdir(), 'forge-taskcheck-'));
+  fs.writeFileSync(path.join(dir, 'T01-PLAN.md'), planBody);
+  for (const [rel, content] of Object.entries(files || {})) {
+    const p = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content);
+  }
+  return dir;
+}
+
+const TASK_PLAN = `---
+id: T01
+must_haves:
+  truths:
+    - "the helper exists"
+  artifacts:
+    - path: lib/created.js
+      provides: "created helper"
+      min_lines: 1
+    - path: lib/missing.js
+      provides: "missing helper"
+      min_lines: 1
+  key_links: []
+expected_output:
+  - lib/created.js
+  - lib/also-missing.txt
+---
+# task
+`;
+
+test('task boundary: every missing declared artifact and expected_output is named, and fails', () => {
+  const dir = taskFixture(TASK_PLAN, { 'lib/created.js': 'module.exports = 1;\n' });
+  try {
+    const r = runTaskArtifactCheck({ taskPlan: path.join(dir, 'T01-PLAN.md'), cwd: dir });
+    assert(r.passed === false, 'a task with missing declared outputs must not pass');
+    const paths = r.missing.map((m) => m.path).sort();
+    assert(JSON.stringify(paths) === JSON.stringify(['lib/also-missing.txt', 'lib/missing.js']),
+      `both misses named, got ${JSON.stringify(paths)}`);
+    assert(!r.advisory_flags.some((f) => f.level === 'wired'),
+      'wired flags are filtered at the task boundary — expected state, not a signal');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('task boundary: all declared outputs present passes (substantive stays advisory)', () => {
+  const dir = taskFixture(TASK_PLAN, {
+    'lib/created.js': 'module.exports = 1;\n',
+    'lib/missing.js': 'function stub() {}\n',
+    'lib/also-missing.txt': 'x\n',
+  });
+  try {
+    const r = runTaskArtifactCheck({ taskPlan: path.join(dir, 'T01-PLAN.md'), cwd: dir });
+    assert(r.passed === true, 'existence satisfied → pass');
+    assert(r.advisory_flags.some((f) => f.level === 'substantive'),
+      'the stub body is still FLAGGED (advisory) — heuristics report, never block');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('task boundary: a legacy plan passes through untouched', () => {
+  const dir = taskFixture('---\nid: T01\n---\n# legacy\n', {});
+  try {
+    const r = runTaskArtifactCheck({ taskPlan: path.join(dir, 'T01-PLAN.md'), cwd: dir });
+    assert(r.legacy === true && r.passed === true, 'legacy plans are not gated here');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ── Cleanup and summary ───────────────────────────────────────────────────────
 try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}
 

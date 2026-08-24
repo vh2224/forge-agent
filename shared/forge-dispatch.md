@@ -2418,6 +2418,13 @@ on, so the heap ceiling applies here too.
 | `execute-task` (`forge-executor`) | Task level | `--plan <path> --cwd <cwd> --unit execute-task/{T##}` | After "Verify every must-have", before writing T##-SUMMARY.md |
 | `complete-slice` (`forge-completer`) | Slice level | `--cwd <cwd> --unit complete-slice/{S##}` (no `--plan`) | Step 3 — before the security scan |
 
+> **Companion (step 10b, ENFORCING):** `forge-verifier.js --task-plan <T##-PLAN.md> --cwd <cwd>` —
+> declared-artifact existence at the task boundary. The gate above proves tests pass; this proves
+> the task delivered what its plan declared (`must_haves.artifacts[].path` + `expected_output[]`).
+> Any missing entry → exit 1 → the executor returns `partial` naming it. Existence is mechanical
+> and enforcing; `substantive` stays advisory and `wired` is not evaluated at task boundary (the
+> rest of the slice does not exist yet). Legacy plans pass through.
+
 ### CLI shape
 
 Task-level invocation (inside `execute-task` worker):

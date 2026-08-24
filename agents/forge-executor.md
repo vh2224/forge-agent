@@ -67,6 +67,20 @@ Key implication for autonomous mode: **never halt to ask the user**. Document as
     - `skipped: "disabled-by-pref"` at top level → the operator turned the gate off for this run (`verify.mode: off`, or the milestone-activation ask). Same loudness as no-stack: record `verification: SKIPPED (disabled-by-pref — operator choice, zero commands ran)` in the `## Verification` section and carry `verify: skipped(disabled-by-pref)` in the result block. The choice is legitimate; describing it as "tests passed" is not.
 
     Full gate contract and CLI shape: see `shared/forge-dispatch.md ## Verification Gate`.
+10b. **Declared-artifact check (ENFORCING)** — the gate above proves the code passes tests; this
+    proves the task delivered what its plan DECLARED. Existence of a declared artifact is
+    mechanical, not heuristic — a `done` with missing declared outputs is a false done:
+    ```bash
+    node "$FORGE_SCRIPTS_DIR/forge-verifier.js" --task-plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}"
+    ```
+    Parse the JSON result:
+    - `passed: true` → continue to step 11. If `advisory_flags` is non-empty, record them in the
+      T##-SUMMARY.md `## Verification` section (substantive heuristics report, never block).
+    - `passed: false` (exit 1) → STOP. Return `---GSD-WORKER-RESULT---` with `status: partial` and
+      a `## Missing Declared Artifacts` section in the `blocker` field listing every `missing[]`
+      entry VERBATIM (path + reason). Do NOT write T##-SUMMARY.md. Do NOT commit. Do NOT mark DONE.
+    - `legacy: true` → continue (legacy plans are not gated here — same posture as step 1a).
+    - Exit 2 / malformed JSON → `status: blocked`, `blocker_class: tooling_failure`, with stderr.
 11. **Git commit (only if `auto_commit: true` in injected config):** `feat(S##/T##): <one-liner>`. If `auto_commit: false` → skip commit entirely, do NOT run any git commands.
 12. Write `T##-SUMMARY.md` — include `new_helpers` field if you created reusable functions (see Summary Format)
 12a. **Emit `verification_evidence:` frontmatter block** (inside the YAML frontmatter of `T##-SUMMARY.md`).
