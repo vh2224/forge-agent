@@ -17,6 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readJsonl } = require('./forge-jsonl.js');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -260,34 +261,6 @@ function clampToBudget(text, budgetChars) {
 }
 
 /**
- * Read a JSONL file tolerantly: malformed/truncated lines are dropped, missing
- * files or I/O errors yield an empty array. Never throws.
- *
- * @param {string} absPath
- * @returns {object[]}
- */
-function readJsonlLines(absPath) {
-  let raw;
-  try {
-    raw = fs.readFileSync(absPath, 'utf8');
-  } catch (e) {
-    return [];
-  }
-  const lines = raw.split(/\r?\n/);
-  const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch (e) {
-      // malformed/truncated line — drop
-    }
-  }
-  return out;
-}
-
-/**
  * Classify the provenance of a token count without treating an arbitrary
  * string as provider billing data.  Existing Forge events use the local
  * chars/4 heuristic; future adapters or an OTel bridge can opt into the
@@ -369,7 +342,7 @@ function aggregate(cwd, opts) {
 
   try {
     const globalPath = path.join(cwd, '.gsd', 'forge', 'events.jsonl');
-    const globalLines = readJsonlLines(globalPath);
+    const globalLines = readJsonl(globalPath).lines;
     const dispatchLines = globalLines.filter((l) => l && l.event === 'dispatch' && typeof l.unit === 'string');
 
     let source = 'none';
@@ -385,7 +358,7 @@ function aggregate(cwd, opts) {
       // different milestone must never be pulled in through unit/timestamp
       // coincidence.
       const perMsPath = path.join(cwd, '.gsd', 'milestones', milestoneId, `${milestoneId}-events.jsonl`);
-      const perMsLines = readJsonlLines(perMsPath);
+      const perMsLines = readJsonl(perMsPath).lines;
       const membership = new Set();
       for (const l of perMsLines) {
         if (l && typeof l.unit === 'string' && typeof l.ts === 'string') {
