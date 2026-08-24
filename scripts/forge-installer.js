@@ -248,25 +248,35 @@ function retireLegacyScripts(source, backupRoot, plan, options, context = {}) {
     plan.push({ op: 'skip', reason: 'already-retired', source, destination, moved: [], retained: [], settings_references: [] });
     return;
   }
-  // A symlink whose real target lives INSIDE the repo currently being
-  // installed from is not a legacy copy — it is a live alias to the source
-  // (a local-dev setup: edit the repo, skip reinstalling to see it in
-  // ~/.claude). `classifyLegacyScripts`/`moveFile` walk through the link
-  // and rename by real path, so "retiring" it would move the repo's own
-  // files into the backup, deleting them from the source tree — measured:
-  // a `--update` run through such a link renamed ~400 of the repo's own
-  // `scripts/*` files out from under it in one pass. Checked by realpath,
-  // not string comparison, so an indirection (another symlink, a relative
-  // path) still resolves to the same on-disk identity.
-  if (context.repo && fs.lstatSync(source).isSymbolicLink()) {
+  // A symlinked legacy dir is NEVER a legacy copy — it is a live alias to a
+  // directory someone else owns (the classic case: ~/.claude/scripts pointing
+  // into a dev checkout's scripts/, so edits show up without reinstalling).
+  // `classifyLegacyScripts`/`moveFile` walk through the link and rename by
+  // real path, so "retiring" it moves the LINK TARGET's files into the backup,
+  // deleting them out of whatever tree owns them — measured three times: two
+  // `--update` runs each renamed ~446 of a dev repo's own `scripts/*` files
+  // out from under it in one pass.
+  //
+  // The first version of this guard compared the link target against
+  // `context.repo` — and was inert in exactly the flow that bit: a REMOTE
+  // update runs from a temporary release checkout, so `context.repo` is the
+  // tmpdir, the dev repo is "outside", and the retire proceeded. The rule that
+  // actually holds is symlink ⇒ skip, unconditionally: retiring means
+  // archiving OUR copy, and a symlink is by definition not a copy. The link
+  // target is still resolved (realpath — an indirection resolves to the same
+  // on-disk identity) and recorded, and the source-repo case keeps its more
+  // specific reason for the report.
+  if (fs.lstatSync(source).isSymbolicLink()) {
     const real = fs.realpathSync(source);
-    const repoReal = fs.realpathSync(context.repo);
-    const relativeToRepo = path.relative(repoReal, real);
-    const insideRepo = relativeToRepo === '' || (!relativeToRepo.startsWith('..') && !path.isAbsolute(relativeToRepo));
-    if (insideRepo) {
-      plan.push({ op: 'skip', reason: 'symlinked-to-source-repo', source, destination, moved: [], retained: [], settings_references: [] });
-      return;
+    let reason = 'symlinked-not-a-copy';
+    if (context.repo) {
+      const repoReal = fs.realpathSync(context.repo);
+      const relativeToRepo = path.relative(repoReal, real);
+      const insideRepo = relativeToRepo === '' || (!relativeToRepo.startsWith('..') && !path.isAbsolute(relativeToRepo));
+      if (insideRepo) reason = 'symlinked-to-source-repo';
     }
+    plan.push({ op: 'skip', reason, link_target: real, source, destination, moved: [], retained: [], settings_references: [] });
+    return;
   }
   const { managed, retained } = classifyLegacyScripts(source, context.inventory);
   const references = legacyScriptReferences(context.settingsFiles, [...managed, ...retained])
