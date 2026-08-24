@@ -204,6 +204,14 @@ test("critical contains 'continue.md'", () => {
   assert(msg.includes('continue.md'), "critical message should mention 'continue.md'");
 });
 
+test("critical is reconciled with Compaction Resilience — checkpoint-now, never a blanket hard stop (2026-08-24)", () => {
+  const msg = buildAdditionalContext('critical', DEFAULT_THRESHOLDS);
+  assert(msg.includes('Checkpoint AGORA'), 'critical directs an immediate checkpoint');
+  assert(msg.includes('NENHUMA unidade nova'), 'critical forbids dispatching new units');
+  assert(msg.includes('Compaction Resilience'), 'critical names the protocol that owns survival');
+  assert(!msg.includes('Pare imediatamente'), 'the unconditional hard-stop directive is gone — it conflicted with the loop design and abandoned in-flight workers');
+});
+
 test("critical contains 'partial'", () => {
   const msg = buildAdditionalContext('critical');
   assert(msg.includes('partial'), "critical message should mention 'partial'");

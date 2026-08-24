@@ -155,6 +155,25 @@ test('extracts only the bounded coding-standard sections', () => {
   assert.ok(!JSON.stringify(standards).includes('large irrelevant context'));
 });
 
+test('auto_commit default matches the schema (true) and resolves from prefs, never a renderer-private false (2026-08-24)', () => {
+  // Measured live: the renderer defaulted auto_commit to false while the
+  // schema default is true — a worker then (correctly) refused a commit its
+  // operator expected. No flag + no pref → schema default true.
+  const cwd = tempWorkspace('auto-commit-default');
+  // baseOptions pins autoCommit:false for determinism elsewhere — the default
+  // path needs the option ABSENT, and an isolated HOME so the developer's real
+  // global prefs can never leak into the assertion.
+  const noFlag = { ...baseOptions(cwd, 'execute-task') };
+  delete noFlag.autoCommit;
+  const home = tempWorkspace('auto-commit-home');
+  withIsolatedHome(home, () => {
+    const bare = renderPrompt(noFlag);
+    assert.ok(bare.prompt.includes('auto_commit: true'), 'schema default true when flag and pref are absent');
+    const flagged = renderPrompt({ ...baseOptions(cwd, 'execute-task'), autoCommit: 'false' });
+    assert.ok(flagged.prompt.includes('auto_commit: false'), 'explicit flag governs');
+  });
+});
+
 test('renders all unit templates with no contract placeholder left behind', () => {
   const cwd = tempWorkspace('all-units');
   for (const unitType of Object.keys(TEMPLATE_FILES)) {

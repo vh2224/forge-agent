@@ -462,6 +462,23 @@ function resolveLedger(options) {
   return '(none)';
 }
 
+// Default for auto_commit when the caller passed no flag. This used to be a
+// hardcoded `false` while the prefs schema default is `true` — measured live
+// (2026-08-24 validation run): a worker was told `auto_commit: false` on a
+// workspace whose resolved pref was unset, then correctly refused a later
+// commit instruction because the per-dispatch contract governs. The renderer
+// now resolves the PREF when the flag is absent, so the contract line always
+// states what the operator actually configured; the schema default (`true`)
+// is the last rung, never a renderer-private constant.
+function resolveAutoCommitDefault(cwd) {
+  try {
+    const { readPrefs } = require('./forge-prefs.js');
+    const prefs = (readPrefs(cwd || process.cwd()) || {}).prefs || {};
+    if (typeof prefs.auto_commit === 'boolean') return prefs.auto_commit;
+  } catch { /* prefs unreadable → schema default below */ }
+  return true;
+}
+
 function boolString(value, defaultValue = false) {
   if (value == null || value === '') return String(defaultValue);
   if (typeof value === 'boolean') return String(value);
@@ -611,7 +628,7 @@ function buildValues(options, template) {
     'M###': options.milestoneId,
     'S##': options.sliceId,
     'T##': options.taskId,
-    auto_commit: boolString(options.autoCommit, false),
+    auto_commit: boolString(options.autoCommit, resolveAutoCommitDefault(options.cwd)),
     milestone_cleanup: options.milestoneCleanup,
     unit_effort: options.unitEffort,
     THINKING_OPUS: options.thinking,

@@ -263,6 +263,22 @@ test('R6: --remove deletes a statusLine written in the relocated absolute form',
     'a relocated operator could not turn the statusline off — the basename predicate missed the third vintage');
 });
 
+// ── evidence matchers (2026-08-24) ──────────────────────────────────────────
+// The evidence branch (forge-hook.js post, Bash|Write|Edit) shipped in M003
+// S02 with matchers that were never registered — zero evidence files across
+// the whole dogfood. This pin makes de-registration loud.
+test('PostToolUse registers the evidence matchers (Agent + Bash + Write + Edit)', () => {
+  const dir = mktmp();
+  const file = path.join(dir, 'settings.json');
+  fs.writeFileSync(file, '{}');
+  const { settings } = run(file);
+  const matchers = (settings.hooks.PostToolUse || []).map((e) => e.matcher).sort();
+  const expected = ['Agent', 'Bash', 'Edit', 'Write'];
+  if (JSON.stringify(matchers) !== JSON.stringify(expected)) {
+    throw new Error(`PostToolUse matchers drifted: ${JSON.stringify(matchers)} (expected ${JSON.stringify(expected)})`);
+  }
+});
+
 // ── summary ─────────────────────────────────────────────────────────────────
 cleanup();
 console.log(`\nmerge-settings.test.js: ${passed} passed, ${failed} failed`);
