@@ -41,7 +41,7 @@ function read(rel) {
 const SLICE_SURFACES = Object.freeze([
   'shared/templates/dispatch/complete-slice.md',
   'shared/forge-dispatch.md#complete-slice',
-  'agents/forge-completer.md#For complete-slice',
+  'shared/forge-completer-slice.md#For complete-slice',
 ]);
 
 // An *instruction* to merge.  Deliberately narrow: the surfaces must be free of
@@ -61,13 +61,11 @@ function sliceSection(surface) {
     return text.slice(start, next === -1 ? text.length : next);
   }
   const start = text.indexOf('## For complete-slice');
-  assert.ok(start !== -1, 'complete-slice section not found in forge-completer.md');
-  // Span everything a complete-slice run is governed by — the steps AND the
-  // Git boundary section — stopping exactly where complete-milestone (which
-  // legitimately keeps git competence) begins.
-  const next = text.indexOf('\n## For complete-milestone', start + 1);
-  assert.ok(next !== -1, 'complete-milestone heading not found — cannot bound the slice surface');
-  return text.slice(start, next);
+  assert.ok(start !== -1, 'complete-slice section not found in the slice spec');
+  // 2026-08-24 completer split: the slice spec carries ONLY the slice unit, so
+  // the surface spans to EOF — there is no complete-milestone heading to stop
+  // at any more (that unit lives in shared/forge-completer-milestone.md).
+  return text.slice(start);
 }
 
 console.log('forge-slice-git-guard — contract');
@@ -107,7 +105,7 @@ for (const surface of SLICE_SURFACES) {
 // close-out's tagging and run-branch push, which are not integration and must
 // survive.
 test('complete-milestone keeps the non-integrating verbs it needs', () => {
-  const text = read('agents/forge-completer.md');
+  const text = read('shared/forge-completer-milestone.md');
   const start = text.indexOf('## For complete-milestone');
   assert.ok(start !== -1, 'complete-milestone section missing');
   const section = text.slice(start);
@@ -120,7 +118,8 @@ test('complete-milestone keeps the non-integrating verbs it needs', () => {
 // Guard against the new contract rotting: BOTH boundaries must state it, and
 // neither may quietly re-grant integration to the unit it covers.
 test('both Git boundary sections state the non-integration rule', () => {
-  const text = read('agents/forge-completer.md');
+  // 2026-08-24 completer split: each boundary lives in its unit's spec.
+  const text = read('shared/forge-completer-slice.md') + '\n' + read('shared/forge-completer-milestone.md');
   for (const heading of ['## Git boundary — complete-slice', '### Git boundary — complete-milestone']) {
     // Anchored at line start: both headings are also CITED inside the prose
     // ("see `## Git boundary — complete-slice` below"), and a bare indexOf

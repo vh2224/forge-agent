@@ -18,7 +18,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const SPEC_PATH = path.join(__dirname, '..', 'agents', 'forge-completer.md');
+// 2026-08-24: the slice body moved verbatim to the on-demand spec — the
+// sub-steps this suite audits live there now (the agent .md is a dispatcher).
+const SPEC_PATH = path.join(__dirname, '..', 'shared', 'forge-completer-slice.md');
 const OMIT_PHRASE = 'omit the section entirely';
 
 let passed = 0;

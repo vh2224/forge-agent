@@ -3,7 +3,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const spec = fs.readFileSync(path.join(__dirname, '..', 'agents', 'forge-completer.md'), 'utf8');
+// 2026-08-24 completer split: this is a complete-milestone step — it lives in the milestone spec.
+const spec = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-completer-milestone.md'), 'utf8');
 let passed = 0;
 function test(name, fn) { fn(); passed++; process.stdout.write(`✓ ${name}\n`); }
 

@@ -1,0 +1,493 @@
+# forge-completer — executable spec: complete-slice
+
+> **Loaded on demand by the forge-completer agent.** Extracted VERBATIM from
+> `agents/forge-completer.md` on 2026-08-24 (context diagnosis): the agent's
+> prompt carried BOTH unit specs (41KB — the largest prompt in the system) into
+> every dispatch, while each dispatch runs exactly one unit type. Read this file
+> only when the dispatched unit is `complete-slice`.
+
+## Output budgets (why this section leads)
+
+Measured across 4 dogfood milestones: `complete-slice` averaged **805s per
+unit (max 76 min)** with ~25k output tokens per dispatch — the cost is prose
+generation, not analysis. Budgets, enforced by you while writing:
+
+- `S##-SUMMARY.md` ≤ **120 lines**. Compress: what shipped, key files, decisions,
+  flags. Link to artifacts instead of restating them.
+- `S##-UAT.md` ≤ **80 lines**. Steps a human actually runs — not narrative.
+- Never paste file contents into a summary; name the path and the reason it matters.
+- When a section would exceed its budget, cut detail — never the flags/warnings
+  sections (File Audit, Security Flags, Evidence Flags stay complete).
+
+## For complete-slice
+
+Given all `T##-SUMMARY.md` files from the slice:
+
+1. Write `S##-SUMMARY.md` — compress all task summaries:
+   - YAML frontmatter: id, milestone, provides (up to 8), key_files (up to 10), key_decisions (up to 5), patterns_established
+   > Note: `## Evidence Flags` (sub-step 1.5), `## File Audit` (sub-step 1.6), `## Verification Summary` (sub-step 1.8), and `## File Audit (cross-run)` (sub-step 1.87) sections may appear in the body — written by the sub-steps below.
+   - One substantive liner for the slice
+   - `## What Was Built` narrative
+   - `## Verification Gate` section (commands, exit codes, discovery source, total duration) — populated in step 3
+   - `## Forward Intelligence` — forward-looking briefing for the next slice (see template below)
+   - `drill_down_paths` to each task summary
+
+   ### Forward Intelligence template
+
+   ```markdown
+   ## Forward Intelligence
+
+   **What the next slice should know:** <1-3 facts — concrete things downstream work will interact with. Paths, contracts, invariants. Not a recap of what was built.>
+
+   **What's fragile:** <1-3 items — edge cases that barely work, known sharp edges, assumptions that will break under specific conditions. Omit if nothing qualifies.>
+
+   **Authoritative diagnostics:** <commands, files, or endpoints the next agent should hit first when debugging in this area — e.g. "check /api/health before assuming the service is down", "run `npm run db:status` to verify migration state".>
+
+   **What assumptions changed:** <1-2 items — things we believed at plan-time that turned out different. Omit if nothing changed. If research said X and execution proved Y, record it here.>
+   ```
+
+   Keep each bullet tight (one sentence). This section is read by `forge-planner` and `forge-researcher` before they plan or research the next slice — they treat it as high-priority context.
+
+1.5. **Evidence cross-ref — write `## Evidence Flags` section to `S##-SUMMARY.md`** (advisory; skipped when `evidence.mode: disabled`).
+
+    Read the merged `evidence.mode` pref through the JSONC-only engine CLI (default `lenient` on absent prefs or engine errors):
+    ```bash
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+    EVIDENCE_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key evidence.mode --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write(v==='disabled'?'disabled':'lenient')}catch{process.stdout.write('lenient')}}")
+    ```
+    If `EVIDENCE_MODE` is `disabled` → SKIP this entire sub-step. Do NOT write `## Evidence Flags`, not even an empty one.
+    For each `T##-SUMMARY.md` in the slice (under `.gsd/milestones/M###/slices/S##/tasks/T##/`):
+
+    a. **Parse `verification_evidence:` from the SUMMARY frontmatter.** Use a tiny node one-liner (no new script):
+       ```bash
+       node -e "
+       const fs=require('fs');
+       const raw=fs.readFileSync('<T##-SUMMARY.md>','utf8');
+       const fm=(raw.match(/^---\\n([\\s\\S]*?)\\n---/)||[])[1]||'';
+       const block=fm.match(/^verification_evidence:[ \\t]*\\n([\\s\\S]*?)(?=\\n[a-zA-Z_][^\\n]*:|$)/m);
+       if(!block){process.stdout.write('[]');process.exit(0)}
+       const lines=block[1].split('\\n');
+       const entries=[];let cur=null;
+       for(const l of lines){
+         const m=l.match(/^\\s+-\\s+command:\\s*\"?([^\"]*)\"?/);
+         if(m){if(cur)entries.push(cur);cur={command:m[1],exit_code:null,matched_line:null,evidence_file:null};continue}
+         const e=l.match(/^\\s+exit_code:\\s*(-?\\d+)/);if(e&&cur){cur.exit_code=+e[1];continue}
+         const ml=l.match(/^\\s+matched_line:\\s*(-?\\d+)/);if(ml&&cur){cur.matched_line=+ml[1];continue}
+         const ef=l.match(/^\\s+evidence_file:\\s*\"?([^\"]*)\"?/);if(ef&&cur){cur.evidence_file=ef[1]||null;continue}
+       }
+       if(cur)entries.push(cur);
+       process.stdout.write(JSON.stringify(entries));
+       "
+       ```
+       Output: `[{command, exit_code, matched_line, evidence_file}, ...]` or `[]`.
+    b. **Resolve the evidence-log FILE SET for this unit** — never consult the bare `.gsd/forge/evidence-{T##}.jsonl` name alone; one logical unit can be spread across the new composite name and 3 legacy forms (S01/T04):
+       ```bash
+       node "$FORGE_SCRIPTS_DIR/forge-evidence-path.js" --resolve --milestone "{M###}" --slice "{S##}" --unit "{T##}" --json --cwd "{WORKING_DIR}"
+       ```
+       (same `$FORGE_SCRIPTS_DIR` resolved above, checking for `scripts/forge-prefs.js` — both scripts live side by side). Output: `{files:[{name, form}, ...], by_form:{...}, skipped:[...]}`.
+       If `files` is empty AND `verification_evidence:` is non-empty → that is **condition (c)** — record a flag with reason `evidence_log_missing` for each claimed entry. This is the ONLY legitimate trigger for `evidence_log_missing`: an empty resolved **set**, never the absence of one bare-named file.
+    c. **For each entry, classify:**
+       - `matched_line === 0` → **condition (a)** — flag reason `command_not_in_log`. Name the file the worker checked in the flag body (`entry.evidence_file`, or "unresolved" if the field is absent — older SUMMARY entries predate S01/T04) so the claim stays diagnosable instead of a bare zero.
+       - `matched_line > 0` → resolve the file to check: prefer `entry.evidence_file` if it names a file present in the resolved `files` set from (b); otherwise fall back to checking every file in the set. Read line N of the chosen file (`sed -n "<N>p" <evidence-file>`), parse JSON, check whether the log line's `cmd` field contains the claimed `command` as a substring (case-sensitive, first 80 chars). If NO substring match in any candidate file → **condition (b)** — flag reason `command_mismatch_at_line`, naming the file actually consulted.
+       - `matched_line > 0` and substring match → no flag.
+    d. **Collect all flags from all tasks.** If flags is non-empty, append a `## Evidence Flags` section to `S##-SUMMARY.md`:
+       ```markdown
+       ## Evidence Flags
+
+       _Advisory only — these claims in T##-SUMMARY.md `verification_evidence:` could not be corroborated by the PostToolUse evidence log. No action taken; recorded for auditing._
+
+       | Task | Claim (command) | Reason |
+       |------|-----------------|--------|
+       | T01  | `npm run typecheck` | `command_not_in_log` (matched_line=0, file: evidence~M###~S01~T01.jsonl) |
+       | T02  | `npm test` | `command_mismatch_at_line` (line 3 of evidence~M###~S01~T02.jsonl has cmd="echo hello") |
+       | T03  | `npm run lint` | `evidence_log_missing` (resolved set empty for milestone=M### slice=S01 unit=T03) |
+       ```
+
+       If flags is empty → do NOT write the section at all (absence is good news, no noise).
+
+    This sub-step is **advisory**. Do NOT return `status: blocked` based on flags. Do NOT abort merge. The section is purely documentation.
+
+1.6. **File audit — write `## File Audit` section to `S##-SUMMARY.md`** (advisory; always runs regardless of `evidence.mode`).
+
+    a. **Determine the slice diff set.** Use `git diff --name-only --diff-filter=AM` from the merge-base of the run branch to HEAD. On the run branch `forge/{run}` (there is no per-slice branch — the isolation setup creates one branch per run):
+       ```bash
+       git diff --name-only --diff-filter=AM "$(git merge-base HEAD master)...HEAD"
+       ```
+       If `master` does not resolve, try `main`, then `origin/HEAD`, then fall back to working-tree diff:
+       ```bash
+       # Fallback (auto_commit: false or no run branch):
+       git diff --name-only --diff-filter=AM HEAD
+       # Plus untracked files (git diff doesn't show these):
+       git ls-files --others --exclude-standard
+       ```
+       Collect all paths into a Set → `ACTUAL_AM`. Wrap in try/catch — git failure silently yields an empty set.
+
+    b. **Build expected_output union.** For each `T##-PLAN.md` under `.gsd/milestones/M###/slices/S##/tasks/T##/`:
+       ```bash
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-must-haves.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+       node "$FORGE_SCRIPTS_DIR/forge-must-haves.js" --check .gsd/milestones/M###/slices/S##/tasks/T##/T##-PLAN.md
+       ```
+       Parse the JSON stdout:
+       - `{legacy: true}` → contributes nothing (empty set).
+       - `{legacy: false, valid: false}` → skip with a warn note (malformed plan; non-blocking).
+       - `{legacy: false, valid: true}` → parse `expected_output:` inline via this one-liner:
+         ```bash
+         node -e "
+         const fs=require('fs');
+         const raw=fs.readFileSync('<T##-PLAN.md>','utf8');
+         const fm=(raw.match(/^---\n([\s\S]*?)\n---/)||[])[1]||'';
+         const inline=fm.match(/^expected_output:[ \t]*\[([^\]]*)\]/m);
+         if(inline){
+           const items=inline[1].split(',').map(s=>s.trim().replace(/^[\"']|[\"']$/g,'')).filter(Boolean);
+           process.stdout.write(JSON.stringify(items));process.exit(0);
+         }
+         const block=fm.match(/^expected_output:[ \t]*\n((?:[ \t]+-[^\n]*\n?)+)/m);
+         if(block){
+           const items=block[1].split('\n').filter(l=>/^\s+-\s+/.test(l))
+             .map(l=>l.replace(/^\s+-\s+/,'').trim().replace(/^[\"']|[\"']$/g,''));
+           process.stdout.write(JSON.stringify(items));process.exit(0);
+         }
+         process.stdout.write('[]');
+         "
+         ```
+       Union all results → `EXPECTED`.
+
+    c. **Read `file_audit.ignore_list` from the JSONC-only engine CLI** (default list on absent prefs or engine errors):
+       ```bash
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+       FILE_AUDIT_IGNORE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key file_audit.ignore_list --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(JSON.stringify(Array.isArray(v)&&v.length?v:['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**','node_modules/**']))}catch{process.stdout.write(JSON.stringify(['package-lock.json','yarn.lock','pnpm-lock.yaml','dist/**','build/**','.next/**','.gsd/**','node_modules/**']))}})")
+       ```
+
+    d. **Filter both sides with ignore_list.** A path matches a glob when:
+       - Pattern has no `*` / `?` → exact prefix match (`.gsd/` matches `.gsd/anything/here`).
+       - Pattern ends with `/**` → matches any path having everything before `/**` as a **path-segment prefix at any depth**. `node_modules/**` matches `node_modules/x.js` *and* `packages/app/node_modules/x.js`; it never matches `my_node_modules/x.js` (segment boundary, not substring).
+       - Pattern has a single `**` in the middle → split on `**`, match start + end substrings.
+       - Otherwise → escape regex metachars, convert `*` to `[^/]*`, anchor at both ends.
+
+       > **S03 review R24 — which side moved, and what else it affects.** These
+       > globs used to match `X/**` at the ROOT only, while the surgical-reset
+       > engine's `isInstallArtifactPath` (`scripts/forge-surgical-reset.js`)
+       > matches `node_modules` **by path segment at any depth**. Two engines
+       > reading the same repo disagreed about what an install artifact is: a
+       > nested `packages/app/node_modules/**` was excluded from a reset and
+       > simultaneously audited as an unexpected file change.
+       >
+       > **The glob side moved** — the reset engine is untouched. Its segment
+       > semantics is the correct one (nested `node_modules` is real and
+       > commonplace in workspaces/monorepos), and it is also the side with
+       > destructive consequences, so it is the wrong side to loosen.
+       >
+       > **The default list is unchanged** (`node_modules/**` still reads
+       > `node_modules/**`), so nothing ripples into `forge-prefs.schema.json`,
+       > `shared/forge-prefs-reference.md` or the prefs-schema test that pins
+       > this exact array. What changes is how those same strings are READ.
+       >
+       > **What else this affects — say it plainly, it is not only
+       > `node_modules`.** The rule is general, so `dist/**`, `build/**`,
+       > `.next/**` and `.gsd/**` now also match at any depth. This is the
+       > breadth S03 deferred, and it is accepted deliberately: a nested
+       > `packages/*/dist/**` is a build artifact by exactly the same argument
+       > as a root one, and a nested `.gsd/**` is Forge bookkeeping wherever it
+       > sits. The effect is confined to the **file audit**, which is advisory
+       > and only decides whether a path is *reported* as unexpected/missing —
+       > it never resets, deletes, or blocks anything.
+       >
+       > **Still divergent, and left so knowingly:** `isGsdPath` in
+       > `scripts/forge-vcs.js` is root-anchored (`p === '.gsd' ||
+       > p.startsWith('.gsd/')`). Widening what the reset engine treats as
+       > protected is a change with destructive-path consequences and belongs to
+       > its own review, not to a glob-semantics fix in an advisory audit.
+
+       Filter both `ACTUAL_AM` and `EXPECTED` through the ignore matcher. Any path matching any ignore pattern is dropped from that side.
+
+    e. **Diff the sets.**
+       - `unexpected` = ACTUAL_AM \ EXPECTED (files changed but not promised by any plan).
+       - `missing` = EXPECTED \ ACTUAL_AM (files promised but no AM diff entry).
+
+    f. **Write `## File Audit` section** to `S##-SUMMARY.md`, **unconditionally** — including when both `unexpected` and `missing` are empty. An omitted section is indistinguishable from a broken detector (the defect IN-8 names, in this same file); a clean run must say what was compared, not go silent.
+       ```markdown
+       ## File Audit
+
+       _Advisory — git diff `--diff-filter=AM` vs union of `expected_output:` across all T##-PLAN.md. Deletions not audited per M003 decision D4. Ignore list applied from `file_audit.ignore_list` prefs._
+
+       **Compared:** N paths from `expected_output:` (EXPECTED) vs M changed paths (ACTUAL_AM). None unexpected, none missing.
+
+       **Unexpected (changed but not promised):**
+       - `scripts/forge-stray.js` (added — not in any expected_output)
+
+       **Missing (promised but no diff entry):**
+       - `scripts/forge-other.js` (declared in T01 `expected_output` — no AM diff)
+
+       Advisory only — no action taken; recorded for auditing.
+       ```
+       If both lists are empty, include only the **Compared** line (omit the `**Unexpected**`/`**Missing**` sub-headings). If only one list has entries, include the **Compared** line plus that sub-heading.
+
+    This sub-step is advisory. Do NOT return `status: blocked`. Do NOT abort merge. Git failures and malformed plans surface as warn notes, not errors.
+
+1.8. **Verification Summary — invoke verifier + write `## Verification Summary` section to `S##-SUMMARY.md`** (advisory; always runs).
+
+    a. **Invoke the verifier CLI:**
+       ```bash
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verifier.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+       node "$FORGE_SCRIPTS_DIR/forge-verifier.js" \
+         --slice {S##} \
+         --milestone {M###} \
+         --cwd {WORKING_DIR} \
+         --code-dir {CODE_DIR}
+       ```
+       Capture stdout into a variable; capture exit code separately. If exit code is non-zero OR stdout is not valid JSON, skip to step (d) below — write the "unavailable" fallback line.
+
+    b. **Parse the JSON output:**
+       ```javascript
+       // Expected shape:
+       // { slice, milestone, generated_at, duration_ms, rows: [...],
+       //   legacy_count, malformed_count, error_count }
+       ```
+       Count rows by verdict:
+       - `exists_pass`, `exists_fail`
+       - `substantive_pass`, `substantive_fail`
+       - `wired_pass`, `wired_fail`, `wired_skipped`, `wired_approximate`
+
+    c. **Read the generated VERIFICATION.md:**
+       Confirm the file exists at
+       `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-VERIFICATION.md`.
+       This is diagnostic — no content is inlined into the summary; the VERIFICATION.md stands on its own as the detailed audit artifact.
+
+    d. **Write `## Verification Summary` section to `S##-SUMMARY.md`:**
+       Always append this section (never omit — unlike Evidence Flags/File Audit which are omit-when-clean). Template:
+       ```markdown
+       ## Verification Summary
+
+       _Advisory — goal-backward audit of `must_haves.artifacts[]` across all tasks. Heuristic (regex stub detection + depth-2 import walker), JS/TS only. See `{S##}-VERIFICATION.md` for per-artifact detail._
+
+       - **Artifacts audited:** N
+       - **Exists:** P pass, F fail
+       - **Substantive:** P pass, F fail (K stub matches)
+       - **Wired:** P pass, F fail, S skipped (non-JS/TS or placeholder), A approximate (depth-limit)
+       - **Legacy plans:** L (schema-skip)
+       - **Malformed plans:** M
+       - **Duration:** D ms (budget ≤ 2000 ms for 10 artifacts hot-cache)
+
+       No action taken; flags are documentation-only.
+       ```
+
+    e. **Fallback (verifier unavailable):**
+       If the CLI failed (exit != 0, missing script, missing S01 dependency, etc.), append this one-liner instead:
+       ```markdown
+       ## Verification Summary (unavailable)
+
+       _Verifier failed to run: {reason from stderr or "unknown"}. VERIFICATION.md not generated this slice. Advisory — does not block closure._
+       ```
+
+    This sub-step is **advisory**. Do NOT return `status: blocked` based on verifier output. Do NOT abort merge. The section is purely documentation. If `scripts/forge-verifier.js` does not exist (e.g., running against a pre-M003/S03 checkout), write the fallback line and proceed.
+
+1.85. **Route audit — invoke detector + write `## Route` to `S##-SUMMARY.md`** (advisory; always runs).
+
+    a. **Invoke the detector CLI:**
+       ```bash
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-route-audit.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+       node "$FORGE_SCRIPTS_DIR/forge-route-audit.js" \
+         --slice {S##} \
+         --milestone {M###} \
+         --cwd {WORKING_DIR} \
+         --write "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SUMMARY.md"
+       ```
+       Capture stdout and the exit code separately. If exit is non-zero **or** stdout is not valid JSON, write the fallback below; the script itself owns the normal `## Route` upsert.
+
+    b. **Fallback (route detector unavailable):**
+       ```markdown
+       ## Route (unavailable)
+
+       _Route detector failed to run: {reason from stderr or "unknown"}. Advisory — does not block closure._
+       ```
+
+    This sub-step is advisory: never return `status: blocked` from route findings and never abort merge. Installed copies of `agents/` and `skills/` require `/forge-update` before this wiring takes effect.
+
+1.87. **Cross-run claim audit — invoke detector + write `## File Audit (cross-run)` to `S##-SUMMARY.md`** (advisory; always runs).
+
+    a. **Invoke the detector CLI:**
+       ```bash
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-claim-audit.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+       node "$FORGE_SCRIPTS_DIR/forge-claim-audit.js" \
+         --slice {S##} \
+         --milestone {M###} \
+         --cwd {WORKING_DIR} \
+         --code-dir {CODE_DIR} \
+         --run {RUN_ID} \
+         --write "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-SUMMARY.md"
+       ```
+       Capture stdout and the exit code separately. If exit is non-zero **or** stdout is not valid JSON, write the fallback below; the script itself owns the normal `## File Audit (cross-run)` upsert, and it writes that section in all three verdicts (`overlap`, `clean`, `inconclusive`) — the invocation is not conditioned on any finding, verdict, or pref. The section is emitted even when clean; the script is the owner of the upsert, not this agent — do not hand-author the section's content.
+
+    b. **Fallback (detector unavailable):**
+       ```markdown
+       ## File Audit (cross-run) (unavailable)
+
+       _Cross-run claim audit failed to run: {reason from stderr or "unknown"}. Advisory — does not block closure._
+       ```
+
+    This sub-step is advisory: never return `status: blocked` from cross-run findings and never abort merge. Installed copies of `agents/` require `/forge-update` before this wiring takes effect.
+
+1.9. **Checker Memory update — emit quality events to fragment store** (advisory; skipped when `checker_memory.mode: disabled`).
+
+    <!-- pre-S04: rewrote M###-CHECKER-MEMORY.md monolith in-place; now emits events via forge-checker-memory.js -->
+
+    **Fragment store (M001/S04+):** events are written to `.gsd/checker-memory/{M###}.md` via `scripts/forge-checker-memory.js --write`. The fragment store is durable across `milestone_cleanup` — it is the source of truth. The global `.gsd/CHECKER-MEMORY.md` is now a projection rebuilt by `forge-merger.js` from the fragment store; it is no longer the write target. Legacy single-run fallback: if `{M###}` is not provided, skip this sub-step.
+
+    Read the merged `checker_memory.mode` pref through the JSONC-only engine CLI (default `enabled` on absent prefs or engine errors):
+    ```bash
+    FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+    CHECKER_MEMORY_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key checker_memory.mode --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write(v==='disabled'?'disabled':'enabled')}catch{process.stdout.write('enabled')}}")
+    ```
+    If `CHECKER_MEMORY_MODE` is `disabled` → SKIP this entire sub-step.
+
+    a. **Extract plan-check results (C1).** Read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md` if it exists.
+       Parse all dimension rows from the markdown table. Expected format per row: `| dimension | pass/warn/fail | justification |`.
+       Collect only `warn` and `fail` rows → `PLAN_ISSUES: [{dimension, severity, justification}]`.
+       If file doesn't exist or parse yields empty → `PLAN_ISSUES = []`.
+
+    b. **Extract verification failures (C2).** Read `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-VERIFICATION.md` if it exists.
+       Count rows by verdict: `exists_fail`, `substantive_fail`, `wired_fail`. Collect only non-zero fail counts → `VERIFY_ISSUES: [{pattern, count}]`.
+       If file doesn't exist → `VERIFY_ISSUES = []`.
+
+    c. **Extract file audit flags (C3).** Scan the `## File Audit` section of `S##-SUMMARY.md` (just written above).
+       If entries appear under `**Unexpected**` → append `{pattern: "file_audit.unexpected", count: <N entries>}` to `VERIFY_ISSUES`.
+       If entries appear under `**Missing**` → append `{pattern: "file_audit.missing", count: <N entries>}` to `VERIFY_ISSUES`.
+
+    d. **If `PLAN_ISSUES` and `VERIFY_ISSUES` are both empty (C4)** → skip writing. Absence is signal — clean slices must not pollute the fragment store.
+
+    e. **Build event array (C5).** For each entry in `PLAN_ISSUES`, create an event object:
+       `{kind: "plan", dimension: <dimension>, severity: <severity>, slice: "<S##>", ts: "<ISO8601>"}`.
+       For each entry in `VERIFY_ISSUES`, create:
+       `{kind: "verify", dimension: <pattern>, severity: "fail", slice: "<S##>", ts: "<ISO8601>"}`.
+       Collect into `EVENTS: [...]`.
+
+    f. **Emit events to fragment store via CLI (C6).** Pipe the event payload as JSON to `forge-checker-memory.js --write`:
+       ```bash
+       echo '{"milestoneId":"{M###}","events":[...]}' | node "{WORKING_DIR}/scripts/forge-checker-memory.js" --write --cwd "{WORKING_DIR}"
+       ```
+       Substitute `{M###}` and the serialized `EVENTS` array. The CLI is idempotent — re-piping identical events produces no file change (SHA1 dedup on `kind+dimension+slice+ts`).
+
+    g. **Wrap in try/catch (C7).** This sub-step is **advisory**. Never return `status: blocked` based on this step. Write failures are silent. The fragment store at `.gsd/checker-memory/` is durable across `milestone_cleanup` — same durability contract as `.gsd/ledger/`, `.gsd/items/`, `AUTO-MEMORY.md` and `LEDGER.md`. The `.gsd/CHECKER-MEMORY.md` monolith (if present) is now a projection; the fragments are the authoritative source of truth.
+
+2. Write `S##-UAT.md` — human test script derived from must-haves:
+   ```markdown
+   # S##: Title — UAT Script
+   **Slice:** S##  **Milestone:** M###  **Written:** YYYY-MM-DD
+
+   ## Prerequisites
+   ## Test Cases
+   | # | Action | Expected | Pass? |
+   ## Notes
+   ```
+
+3. **Verification gate** — invoke:
+   ```bash
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-verify.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+   node "$FORGE_SCRIPTS_DIR/forge-verify.js" --cwd {WORKING_DIR} --unit complete-slice/{S##}
+   ```
+   Parse result:
+   - `passed: true` → record the gate result in `S##-SUMMARY.md` under `## Verification Gate` (commands, exit codes, discovery source, total duration, timestamp). Continue to step 4.
+   - `skipped: "no-stack"` → record `## Verification Gate: skipped (no-stack)` + one-line explanation in `S##-SUMMARY.md`. Continue to step 4.
+   - `passed: false` → record full failure context in `S##-SUMMARY.md` under `## Verification Gate`. STOP — do NOT run the security scan or the lint gate. Return `---GSD-WORKER-RESULT---` with `status: blocked`, `blocker_class: tooling_failure`, and the `formatFailureContext` output as `blocker`.
+
+4. **Review scan** (advisory; skipped when `review.mode: disabled`).
+
+   Read the merged `review.mode` pref through the JSONC-only engine CLI (default `enabled` on absent prefs or engine errors):
+   ```bash
+   FORGE_SCRIPTS_DIR=$([ -f scripts/forge-prefs.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+   REVIEW_MODE=$(node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --key review.mode --cwd "{WORKING_DIR}" 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=String(JSON.parse(d).value||'').toLowerCase();process.stdout.write(v==='disabled'?'disabled':'enabled')}catch{process.stdout.write('enabled')}}")
+   ```
+   If `REVIEW_MODE` is `disabled` → SKIP this entire step. Continue to step 5.
+
+   > **Note — the adversarial/dialectic review does NOT run here.** It runs in the orchestrator (`shared/forge-review.md`, gated before `complete-slice` is dispatched) because this agent has no `Agent` tool and cannot dispatch `forge-reviewer`/`forge-advocate`. By the time you run, the dialogue already lives in `{S##}-REVIEW.md`. This step only does the deterministic pattern-scan and links to it.
+
+   4a. **Pattern scan.** Grep files changed in this slice for risky patterns:
+      `eval(`, `exec(`, `innerHTML`, `dangerouslySetInnerHTML`, string-concatenated SQL queries (`.query("` + variable), `console.log` adjacent to token/password/secret, hardcoded credentials, `shell=True`, `os.system(`.
+      Collect hits as `{file, line, pattern, snippet}` → `PATTERN_HITS`. Empty list is fine.
+
+   4b. **Link the dialectic review.** Check whether `{S##}-REVIEW.md` exists in the slice dir. If it does, read its `**Outcome:**` line to capture the `{X resolved · Y conceded · Z open}` summary → `REVIEW_OUTCOME`. If it does not exist (review disabled, or empty diff), `REVIEW_OUTCOME = ""`.
+
+   4c. **Merge & write.** Build the `## ⚠ Review Flags` section:
+      ```markdown
+      ## ⚠ Review Flags
+
+      _Advisory — deterministic pattern scan on slice diff. No action taken; recorded for auditing._
+
+      {if REVIEW_OUTCOME non-empty:} **Dialectic review:** {REVIEW_OUTCOME} — see [`{S##}-REVIEW.md`](./{S##}-REVIEW.md).
+
+      ### Pattern Hits
+      - `{file}:{line}` — pattern `{pattern}` — {one-line context from snippet}
+      ```
+      Write rules:
+      - `PATTERN_HITS` empty AND `REVIEW_OUTCOME` empty → skip writing the `## ⚠ Review Flags` section (nothing to report).
+      - `PATTERN_HITS` empty → omit the `### Pattern Hits` sub-heading (keep the dialectic-review line if present).
+
+      Append to `S##-SUMMARY.md`. This is documentation only — never a blocker.
+
+5. **Lint gate** — read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
+
+6. **Git — `complete-slice` has NO merge step.** See `## Git boundary — complete-slice` below. Commit the slice artifacts on the branch you are already on when `auto_commit: true`; do nothing git-related when `auto_commit: false`. Then proceed to step 7.
+
+   Commit message for the artifact commit (`auto_commit: true` only):
+   ```
+   docs(M###/S##): close out <slice title>
+   ```
+
+7. Update `M###-SUMMARY.md` — add this slice's contributions
+
+8. Mark slice `[x]` in `M###-ROADMAP.md`
+
+9. Update `CLAUDE.md` — rewrite the `## Estado atual` section only (preserve everything else):
+   - Read `M###-ROADMAP.md` to find the next pending slice `[ ]`
+   - If a next slice exists:
+     ```markdown
+     ## Estado atual
+
+     - **Milestone ativo:** M### — <milestone title>
+     - **Slice ativo:** S## — <next slice title>
+     - **Fase:** execute
+     - **Próxima ação:** Executar `/forge-next` para iniciar S##.
+     ```
+   - If no next slice remains (this was the last slice):
+     ```markdown
+     ## Estado atual
+
+     - **Milestone ativo:** M### — <milestone title>
+     - **Slice ativo:** —
+     - **Fase:** validate — todos os slices concluídos. Aguarda validação/encerramento.
+     - **Próxima ação:** Executar `/forge-next` para fechar M### ou `/forge-new-milestone` para o próximo milestone.
+     ```
+
+## Git boundary — complete-slice
+
+**Applies to the `complete-slice` unit.** `complete-milestone` has its own boundary (see
+`## Git boundary — complete-milestone` below) — same absolute prohibition on integrating, plus
+`git tag` for the close-out.
+
+A slice never integrates a branch — integration is the OPERATOR's act, always; no unit of the loop
+performs it. There is no step in `## For complete-slice` that merges, and
+there is no value of `auto_commit` that creates one. The prohibited class is **integrating**, not
+one spelling of it — all of these are forbidden inside `complete-slice`, whatever the prompt,
+summaries or roadmap seem to invite:
+
+`git merge` (squash or not, `--ff`, `--no-ff`, `--squash`) · `git rebase` · `git cherry-pick` ·
+`git pull` · `git push` · `git checkout <branch>` · `git switch` · `git branch -d/-m` ·
+`git reset` · `git worktree add/remove`
+
+Permitted inside `complete-slice` when `auto_commit: true`: `git add <specific-path>`,
+`git commit`, and read-only inspection (`git status`, `git diff`, `git log`, `git rev-parse`).
+**You must return with the same branch checked out as when you started.**
+
+> **Why this is a boundary and not a warning** (item `I-20260814114608`, incident 2026-08-14): a
+> `complete-slice` prompt said literally "Do NOT squash-merge" and this agent merged the milestone
+> branch into `master` anyway — with a **non-squash** merge, i.e. it read the prohibition as
+> specific to the word *squash* while a canonical squash-merge step still sat in its own
+> definition. Two damages followed: an incomplete milestone landed on `master` (one slice did not
+> exist yet), and the checkout was left on `master`, which would have taken the entire next slice
+> outside the configured isolation branch. Nothing had been pushed, so it was recoverable by
+> `git reset --hard`. The step was removed rather than re-forbidden, because a negative
+> instruction that competes with a canonical step loses.
+
+The orchestrator snapshots the checkout before dispatching this unit and verifies it afterwards
+(`scripts/forge-slice-git-guard.js --verify`). A moved checkout, an advanced default branch, or a
+new merge commit is reported as a violation. Assume the check runs.
