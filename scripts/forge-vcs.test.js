@@ -8,6 +8,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const ignore = require('./forge-ignore.js');
 const vcs = require('./forge-vcs.js');
+const svnLab = require('./forge-svn-lab.js');
 
 let passed = 0;
 function test(name, fn) {
@@ -416,6 +417,57 @@ test('svnPegSafe escapes every target so a path containing @ is not read as a pe
   // and `services@1.2.0` stops parsing as revision "1.2.0" (E205000).
   assert.strictEqual(vcs.svnPegSafe('.gsd/LEDGER.md'), '.gsd/LEDGER.md@');
   assert.strictEqual(vcs.svnPegSafe('SERVICES/services@1.2.0'), 'SERVICES/services@1.2.0@');
+});
+
+test('SVN restore peg-escapes whitespace Unicode and @ while preserving dirty descendants', () => {
+  const lab = svnLab.createLab('forge-vcs-svn-reset-');
+  const svn = (args) => svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
+  try {
+    svnLab.initializeSvn(lab);
+    const ordinary = 'plain space.txt';
+    const atPath = 'unicódé@v1.txt';
+    const dir = 'dir@pkg';
+    const child = `${dir}/keep ü.txt`;
+    fs.mkdirSync(path.join(lab.wc, dir));
+    for (const [name, body] of [[ordinary, 'plain base\n'], [atPath, 'at base\n'], [child, 'child base\n']]) {
+      fs.writeFileSync(path.join(lab.wc, name), body);
+    }
+    assert.strictEqual(svn(['add', `${ordinary}@`, `${atPath}@`, `${dir}@`]).exit, 0);
+    assert.strictEqual(svn(['commit', '-m', 'reset fixture', lab.wc]).exit, 0);
+    fs.writeFileSync(path.join(lab.wc, ordinary), 'plain changed\n');
+    fs.writeFileSync(path.join(lab.wc, atPath), 'at changed\n');
+    fs.writeFileSync(path.join(lab.wc, child), 'child preserved\n');
+    assert.strictEqual(svn(['propset', 'svn:ignore', 'ignored.tmp', `${dir}@`]).exit, 0);
+
+    const result = vcs.restoreAndRemove(lab.wc, '1', {
+      restore: [ordinary, atPath, dir], remove: [], overlap: [], preserved: [child],
+    }, { vcs: 'svn', configDir: lab.config });
+    assert.strictEqual(result.ok, true, JSON.stringify(result));
+    assert.strictEqual(fs.readFileSync(path.join(lab.wc, ordinary), 'utf8'), 'plain base\n');
+    assert.strictEqual(fs.readFileSync(path.join(lab.wc, atPath), 'utf8'), 'at base\n');
+    assert.strictEqual(fs.readFileSync(path.join(lab.wc, child), 'utf8'), 'child preserved\n');
+    assert.notStrictEqual(svn(['propget', 'svn:ignore', `${dir}@`]).exit, 0, 'directory property should be reverted without touching its child');
+  } finally { svnLab.cleanupChildren(lab); }
+});
+
+test('SVN failed revert returns no partial audit claim and caller can re-snapshot', () => {
+  const lab = svnLab.createLab('forge-vcs-svn-resnapshot-');
+  const svn = (args) => svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
+  try {
+    svnLab.initializeSvn(lab);
+    fs.writeFileSync(path.join(lab.wc, 'valid.txt'), 'base\n');
+    assert.strictEqual(svn(['add', 'valid.txt@']).exit, 0);
+    assert.strictEqual(svn(['commit', '-m', 'failure fixture', lab.wc]).exit, 0);
+    fs.writeFileSync(path.join(lab.wc, 'valid.txt'), 'changed\n');
+    const failed = vcs.restoreAndRemove(lab.wc, '1', {
+      restore: ['valid.txt', 'bad\0path\n.txt'], remove: [], overlap: [], preserved: [],
+    }, { vcs: 'svn', configDir: lab.config });
+    assert.strictEqual(failed.ok, false);
+    assert.deepStrictEqual(failed.restored, []);
+    assert.deepStrictEqual(failed.removed, []);
+    const fresh = vcs.postChanges(lab.wc, '1', { vcs: 'svn', configDir: lab.config });
+    assert.strictEqual(fresh.ok, true, JSON.stringify(fresh));
+  } finally { svnLab.cleanupChildren(lab); }
 });
 
 test('all primitives use explicit vcs and do not call detectVcs', () => {

@@ -1,0 +1,38 @@
+{
+  "schema": "forge-wdma-readonly-evidence/v1",
+  "captured_at": "2026-08-24T00:00:00-03:00",
+  "cwd": "C:\\SVN\\CMA\\WDMA",
+  "safety": { "local_only": true, "network": false, "mutators": false, "cleanup": false, "restoration": false },
+  "hash": "sha256 over exact stdout/stderr bytes",
+  "formal_snapshot": {
+    "source": "phase-05 checkpoint (raw captures were not retained)",
+    "before_after": {
+      "svn info --xml": ["30205e5da7b40d9d7b6acea9c433cf250ab014f5f887df1824889ec5dd7e40ca", "76e7368a64bcdff675fcd99bd42c12320124854a92a91166314985a3ef113d7e"],
+      "svn status": ["6c99246af66b1a92dac67310b0195f5573768af119a9d47af87f777e80fba47f", "6c99246af66b1a92dac67310b0195f5573768af119a9d47af87f777e80fba47f"],
+      "svn diff": ["31ad2350596a6f5e0cb67c9c4199d33eaac49ed64fec9c67a4fbf3f26d27edd3", "31ad2350596a6f5e0cb67c9c4199d33eaac49ed64fec9c67a4fbf3f26d27edd3"],
+      "svn proplist": ["de6d9677554514dae0ea58d0f50d2fc4fa1756dca53ee58a85daf49545de73fa", "de6d9677554514dae0ea58d0f50d2fc4fa1756dca53ee58a85daf49545de73fa"],
+      "svn propget": ["0b73371ac22b71adab2657eb287a5b78e1efe248b7f5fc83d712beeae505ae04", "0b73371ac22b71adab2657eb287a5b78e1efe248b7f5fc83d712beeae505ae04"]
+    },
+    "inventories": {
+      "root": { "entries": 22, "sha256": "f454d47e8e4f5e305f70a61788dba347d4a3e053d623875545c1be1994b3d0ed" },
+      ".svn": { "entries": 5960, "sha256": "8fb3dc4905d4570a04d10746df252131352b817dd506ea51e9e3c73b69ebb13e", "fields": ["relative_path", "kind", "length", "last_write_time", "attributes", "file_sha256"] }
+    }
+  },
+  "review_diagnostic": {
+    "argv_inventory": [
+      ["svn", "info", "--xml", "."], ["svn", "status", "."], ["svn", "diff", "."],
+      ["svn", "proplist", "--xml", "--recursive", "."], ["svn", "propget", "svn:ignore", "."], ["svnversion", "."]
+    ],
+    "two_run_results": [
+      { "argv": ["svn", "info", "--xml", "."], "exit": [0, 0], "bytes": [598, 598], "stdout_sha256": ["ecafebcfbd4234a1839abc3e7106596e056e2ae7b9cb991db376f5fc27895346", "ecafebcfbd4234a1839abc3e7106596e056e2ae7b9cb991db376f5fc27895346"] },
+      { "argv": ["svn", "status", "."], "exit": [0, 0], "bytes": [373, 373], "stdout_sha256": ["39bc9eae2e879157e99de02080eb2582dd3a57ccf0716e81e30ebbbb087644c3", "39bc9eae2e879157e99de02080eb2582dd3a57ccf0716e81e30ebbbb087644c3"] },
+      { "argv": ["svn", "diff", "."], "exit": [0, 0], "bytes": [2439, 2439], "stdout_sha256": ["aabf62d182c61f0774091db5b07049bdcdc548ef24b81e396a2f68e64d672304", "aabf62d182c61f0774091db5b07049bdcdc548ef24b81e396a2f68e64d672304"] },
+      { "argv": ["svn", "proplist", "--xml", "--recursive", "."], "exit": [0, 0], "bytes": [20902, 20902], "stdout_sha256": ["55ceb99c0625f769bd2acca33c65dab6c625f69243e9baf6be8099affced3eb4", "55ceb99c0625f769bd2acca33c65dab6c625f69243e9baf6be8099affced3eb4"] },
+      { "argv": ["svn", "propget", "svn:ignore", "."], "exit": [0, 0], "bytes": [89, 89], "stdout_sha256": ["0b73371ac22b71adab2657eb287a5b78e1efe248b7f5fc83d712beeae505ae04", "0b73371ac22b71adab2657eb287a5b78e1efe248b7f5fc83d712beeae505ae04"] },
+      { "argv": ["svnversion", "."], "exit": [0, 0], "bytes": [15, 15], "stdout_sha256": ["acbd4a797ce8aa1fea907e64be284d4003de5b546f2a31c0fa29cc0dca861f65", "acbd4a797ce8aa1fea907e64be284d4003de5b546f2a31c0fa29cc0dca861f65"] }
+    ],
+    "stderr": { "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "all_runs": true },
+    "info_xml_10_run_hashes": ["ecafebcfbd4234a1839abc3e7106596e056e2ae7b9cb991db376f5fc27895346", "ecafebcfbd4234a1839abc3e7106596e056e2ae7b9cb991db376f5fc27895346", "a8cfc8f1f723662ae4b5239e006b5fe4cff0b150e738b065dbd8872a4b65a830", "a8cfc8f1f723662ae4b5239e006b5fe4cff0b150e738b065dbd8872a4b65a830", "ecafebcfbd4234a1839abc3e7106596e056e2ae7b9cb991db376f5fc27895346", "ecafebcfbd4234a1839abc3e7106596e056e2ae7b9cb991db376f5fc27895346", "a8cfc8f1f723662ae4b5239e006b5fe4cff0b150e738b065dbd8872a4b65a830", "a8cfc8f1f723662ae4b5239e006b5fe4cff0b150e738b065dbd8872a4b65a830", "ecafebcfbd4234a1839abc3e7106596e056e2ae7b9cb991db376f5fc27895346", "a8cfc8f1f723662ae4b5239e006b5fe4cff0b150e738b065dbd8872a4b65a830"]
+  },
+  "diagnosis": "Repeated local info XML reads alternate between two equal-length byte variants while every invocation exits 0 and stderr is empty. This proves output volatility is reproducible but does not identify or waive the original formal mismatch."
+}

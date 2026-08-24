@@ -210,12 +210,19 @@ Adicionar/atualizar a linha deste probe com verdict + tags.
 # Ler auto_commit das prefs (canonical CLI — jsonc)
 PREFS_ENGINE=$([ -f scripts/forge-prefs.js ] && echo scripts/forge-prefs.js || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-prefs.js")
 AUTO_COMMIT=$(node "$PREFS_ENGINE" --resolved --key auto_commit 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const v=JSON.parse(d).value;process.stdout.write(String(v).toLowerCase()==='true'?'true':'false')}catch{process.stdout.write('false')}})")
+PROBE_VCS=$(node "$([ -f scripts/forge-vcs.js ] && echo scripts/forge-vcs.js || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts/forge-vcs.js")" --detect --cwd "$PWD" --field vcs 2>/dev/null || echo unknown)
 
-if [ "$AUTO_COMMIT" = "true" ]; then
+if [ "$AUTO_COMMIT" = "true" ] && [ "$PROBE_VCS" = "git" ]; then
   git add .gsd/probes/NNN-descriptive-name/ .gsd/probes/MANIFEST.md
   git commit -m "probe(NNN): [{VERDICT}] — {key finding in one sentence}"
 fi
 ```
+
+In an SVN working copy, leave the probe artifacts uncommitted and report that
+backend-aware completion explicitly; this skill does not have authorization or a
+commit-message contract for an SVN commit. For `none` or `unknown`, report
+`vcs-unavailable:<backend>` and do not claim that auto-commit succeeded. Never run
+Git commands unless `PROBE_VCS` is exactly `git`.
 
 ### i. Reportar antes do próximo probe
 

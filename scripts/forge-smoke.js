@@ -11414,7 +11414,7 @@ function smokeIsolationSvnAndVcsTelemetry() {
     ['forge-next', 'forge-next/SKILL.md', 3],
     ['forge-task', 'forge-task/SKILL.md', 2],
   ];
-  const dispatchVcsLine = 'DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "git")';
+  const dispatchVcsLine = 'DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")';
   for (const [name, rel, expected] of dispatchVcsMirrors) {
     const source = sidecarSurface(path.join(path.dirname(SCRIPTS), 'skills', rel));  // sidecar surface (2026-08-23)
     const referenceCount = source.split(dispatchVcsReference).length - 1;
@@ -11431,6 +11431,11 @@ function smokeIsolationSvnAndVcsTelemetry() {
     `(e) shared/forge-dispatch.md carries the DISPATCH_VCS prelude block exactly once (got ${dispatchVcsTitleCount})`);
   assert(dispatchSpec.includes('forge-vcs.js" --detect --field vcs'),
     '(e) DISPATCH_VCS prelude block invokes forge-vcs.js --detect --field vcs');
+  for (const rel of ['forge-auto/SKILL.md', 'forge-next/SKILL.md', 'forge-task/SKILL.md']) {
+    const text = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'skills', rel), 'utf8');
+    assert(!text.includes('${DISPATCH_VCS:-git}'), `(e) ${rel} never converts none/unknown into git`);
+  }
+  assert(!dispatchSpec.includes('|| echo "git"'), '(e) detector failure is named unknown, never git');
 
   const source = fs.readFileSync(__filename, 'utf8');
   const mainBody = source.slice(source.lastIndexOf('async function main()'));

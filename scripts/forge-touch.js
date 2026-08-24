@@ -49,6 +49,7 @@ const { execFileSync } = require('child_process');
 
 const { resolveRunAddress } = require('./forge-run-address.js');
 const { gitDefaultBranch, realpathCanonical } = require('./forge-isolation.js');
+const vcsApi = require('./forge-vcs.js');
 const runs = require('./forge-runs.js');
 
 // ── Reasons ──────────────────────────────────────────────────────────────
@@ -60,6 +61,8 @@ const runs = require('./forge-runs.js');
 const TOUCH_REASONS = [
   'repo-path-unresolved', // addr.repos[i].path is null — address could not resolve a path for this repo (e.g. discoverRepos' one-level-deep limit, item I-20260803060030)
   'repo-not-git',         // path resolved but `<path>/.git` does not exist — not a git repo
+  'svn-working-copy',     // SVN has no run branch: report the honest current WC delta only
+  'svn-command-failed',   // SVN was detected but its read-only status query failed
   'git-command-failed',   // a git invocation for this repo threw (corrupt repo, permissions, etc.) — the repo is skipped, the run for other repos continues
   'no-merge-base',        // `git merge-base HEAD <default>` failed — no committed diff is computed; uncommitted files are still reported, never invented as "no touches"
   'run-has-no-repos',     // resolveRunAddress returned addr.repos.length === 0 — the census still emits one entry rather than an empty, silent array
@@ -125,14 +128,6 @@ function repoIdentity(p) {
     return realpathCanonical(abs);
   } catch {
     return null;
-  }
-}
-
-function isGitRepo(repoPath) {
-  try {
-    return fs.existsSync(path.join(repoPath, '.git'));
-  } catch {
-    return false;
   }
 }
 
@@ -211,6 +206,15 @@ function touchedFilesFor(repoPath) {
   return { status: 'ok', reason: null, files };
 }
 
+function touchedFilesForSvn(repoPath) {
+  const result = vcsApi.workingStatus(repoPath, { vcs: 'svn' });
+  if (!result.ok) return { status: 'skipped', reason: 'svn-command-failed', files: [] };
+  const files = Array.from(new Set(result.entries
+    .filter((entry) => entry.kind !== 'ignored')
+    .map((entry) => entry.path.split(path.sep).join('/')))).sort();
+  return { status: 'ok', reason: 'svn-working-copy', files };
+}
+
 /**
  * Map ONE address-leg repo `{ name, path }` to its touch entry.
  *
@@ -250,16 +254,17 @@ function deriveRepoEntry(r, worktreeIndex) {
   if (wt && !fs.existsSync(wt)) {
     return { name: r.name, path: wt, source, repo_id: null, status: 'skipped', reason: 'worktree-path-missing', files: [] };
   }
-  if (!isGitRepo(derivePath)) {
+  const vcs = vcsApi.detectVcs(derivePath);
+  if (vcs === 'none') {
     return { name: r.name, path: derivePath, source, repo_id: null, status: 'skipped', reason: 'repo-not-git', files: [] };
   }
 
-  const derived = touchedFilesFor(derivePath);
+  const derived = vcs === 'svn' ? touchedFilesForSvn(derivePath) : touchedFilesFor(derivePath);
   return {
     name: r.name, path: derivePath, source,
     // Identity of the underlying repository, NOT of this checkout — two
     // worktrees of one repo share it, two clones do not. See `repoIdentity`.
-    repo_id: repoIdentity(derivePath),
+    repo_id: vcs === 'git' ? repoIdentity(derivePath) : null,
     status: derived.status, reason: derived.reason || null, files: derived.files,
   };
 }
@@ -401,10 +406,10 @@ module.exports = {
   recordTouched,
   readTouched,
   touchedFilesFor,
+  touchedFilesForSvn,
   deriveRepoEntry,
   worktreeIndexFor,
   repoIdentity,
-  isGitRepo,
   parsePorcelainPath,
   TOUCH_REASONS,
   parseArgs,

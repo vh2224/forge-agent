@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "task_id": "T-20260824120158-auditar-validar",
+  "phase": "phase-02-remote-ownership",
+  "nonce": "2c46193c1f13d05993a2bcb1d8f38def9258bb60db11b0a2",
+  "canonical_url": "https://cvs.cma.local/cma_series_2/CMA/FORGE_SVN_PARITY_TEST_T20260824120158",
+  "canonical_segments": [
+    "cma_series_2",
+    "CMA",
+    "FORGE_SVN_PARITY_TEST_T20260824120158"
+  ],
+  "repository_root": "https://cvs.cma.local/cma_series_2",
+  "repository_uuid": "2211720e-e40a-b547-bb9a-eb178e2eb854",
+  "created_revision": 44723,
+  "binding_revision": 44724,
+  "head_at_checkpoint": 44724,
+  "owner_file": ".forge-svn-owner.json",
+  "manifest_file": ".forge-svn-manifest.json",
+  "externals": false,
+  "cleanup_authorized": false,
+  "local_staging_root": "C:\\Users\\LUIS~1.FER\\AppData\\Local\\Temp\\forge-svn-phase2-eUQgII"
+}

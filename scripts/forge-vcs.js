@@ -10,17 +10,9 @@
  * NUL delimitation (-z) is load-bearing: paths may contain spaces, quotes, and
  * newlines. SVN has no NUL status format: newline-containing paths are routed
  * one-at-a-time in argv rather than through its newline-delimited targets file.
- * SVN targets also carry peg-revision syntax (`path@rev`). svnIsTracked escapes
- * its target through svnPegSafe — see its comment. The revert paths below do
- * NOT, and a path containing a literal `@` therefore fails them: `svn revert`
- * answers E200009 ("a peg revision is not allowed here") for both the argv and
- * the `--targets` form, and the batch form aborts the WHOLE set, reverting none
- * of it. That failure is closed and loud — svnRestoreAndRemove checks the exit
- * status and returns `{ ok: false }`, so nothing is applied by halves — but it
- * is a gap, not a design. Extending the escape is a follow-up: verified against
- * svn 1.14.2 that `svn revert -- 'SERVICES/services@1.2.0.ts@'` reverts the
- * file, so the same helper is the fix; it wants its own regression test before
- * it lands in code this critical.
+ * SVN targets also carry peg-revision syntax (`path@rev`). Every SVN command
+ * target is escaped at its command boundary; raw paths remain authoritative
+ * for classification, filesystem work, preservation checks and reporting.
  * opts.vcs defaults explicitly to 'git' so this seam never probes SVN on its
  * hot path (the M017 S01 4.2–4.9x regression).
  */
@@ -612,7 +604,7 @@ function svnRevertBatch(cwd, paths, depth, opts) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-svn-targets-'));
   const targets = path.join(tmpDir, 'targets');
   try {
-    fs.writeFileSync(targets, `${paths.join('\n')}\n`, 'utf8');
+    fs.writeFileSync(targets, `${paths.map(svnPegSafe).join('\n')}\n`, 'utf8');
     return svnRun(cwd, ['revert', '--depth', depth, '--targets', targets], opts);
   } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
 }
@@ -662,10 +654,13 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
     if (isDirTarget(p) && hasPreservedDescendant(p)) emptyPaths.push(p);
     else infinityPaths.push(p);
   }
-  const newlineInfinity = infinityPaths.filter((p) => /[\r\n]/.test(p));
-  const ordinaryInfinity = infinityPaths.filter((p) => !/[\r\n]/.test(p));
-  const newlineEmpty = emptyPaths.filter((p) => /[\r\n]/.test(p));
-  const ordinaryEmpty = emptyPaths.filter((p) => !/[\r\n]/.test(p));
+  // `--targets` does not reliably apply peg escaping to a literal `@` path:
+  // SVN 1.14.2 can exit 0 while leaving that target modified. Route both `@`
+  // and newline paths through argv, where a trailing `@` is unambiguous.
+  const individualInfinity = infinityPaths.filter((p) => /[\r\n@]/.test(p));
+  const ordinaryInfinity = infinityPaths.filter((p) => !/[\r\n@]/.test(p));
+  const individualEmpty = emptyPaths.filter((p) => /[\r\n@]/.test(p));
+  const ordinaryEmpty = emptyPaths.filter((p) => !/[\r\n@]/.test(p));
   try {
     if (ordinaryInfinity.length) {
       const result = svnRevertBatch(cwd, ordinaryInfinity, 'infinity', opts);
@@ -675,12 +670,12 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
       const result = svnRevertBatch(cwd, ordinaryEmpty, 'empty', opts);
       if (result.status !== 0) return { ok: false, restored, removed, error: svnErrorCode(result, 'svn revert failed') };
     }
-    for (const relPath of newlineInfinity) {
-      const result = svnRun(cwd, ['revert', '--depth', 'infinity', '--', relPath], opts);
+    for (const relPath of individualInfinity) {
+      const result = svnRun(cwd, ['revert', '--depth', 'infinity', '--', svnPegSafe(relPath)], opts);
       if (result.status !== 0) return { ok: false, restored, removed, error: svnErrorCode(result, 'svn revert failed') };
     }
-    for (const relPath of newlineEmpty) {
-      const result = svnRun(cwd, ['revert', '--depth', 'empty', '--', relPath], opts);
+    for (const relPath of individualEmpty) {
+      const result = svnRun(cwd, ['revert', '--depth', 'empty', '--', svnPegSafe(relPath)], opts);
       if (result.status !== 0) return { ok: false, restored, removed, error: svnErrorCode(result, 'svn revert failed') };
     }
   } catch (_) { return { ok: false, restored, removed, error: 'svn-revert-failed' }; }
@@ -705,8 +700,8 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
  * `--` does NOT cover this: peg parsing is part of the target syntax, not
  * option parsing.
  *
- * Call sites: svnIsTracked only. The reverts pass raw targets — see the file
- * header for the measured consequence and why closing it is a follow-up.
+ * Call sites: svnIsTracked and revert command boundaries. Callers retain raw
+ * paths for filesystem checks, preserved descendants and result reporting.
  */
 function svnPegSafe(target) {
   return `${target}@`;

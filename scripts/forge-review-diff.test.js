@@ -92,6 +92,16 @@ test('both boundaries route SVN through this program and keep the appended-arg c
     'the scope report must be captured inside the SVN branch');
 });
 
+test('no-VCS review is explicitly unavailable and never falls back to a Git command', () => {
+  const shared = fs.readFileSync(path.join(REPO_ROOT, 'shared', 'forge-review.md'), 'utf8');
+  const branch = shared.match(/elif svn info[\s\S]*?\nelse\n([\s\S]*?)\nfi\n```/);
+  assert.ok(branch, 'review VCS selection branch must remain structurally visible');
+  assert.ok(branch[1].includes('VCS_UNAVAILABLE_REASON="vcs-unavailable:none-or-detection-failed"'),
+    'no-VCS branch must name why review is unavailable');
+  assert.ok(branch[1].includes('DIFF_CMD=""'), 'no-VCS branch must carry no executable diff command');
+  assert.ok(!/git\s+diff/.test(branch[1]), 'no-VCS branch must not execute or advertise Git');
+});
+
 test('cost policy counts the scoped diff and fails open when the scope misses', () => {
   const { applyScopeFile } = require('./forge-cost-policy.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-rd-policy-'));
