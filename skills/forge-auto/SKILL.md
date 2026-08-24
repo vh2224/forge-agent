@@ -1471,6 +1471,14 @@ Auto-recovery attempts (context_overflow, model_refusal, 429, 400) count as unit
 
 #### 6. Post-unit housekeeping
 
+> **BATCH RULE (2026-08-24, turn consolidation):** compose every input FIRST (event line,
+> STATE patch JSON, `$key_decisions_json`, the memory-policy stdin), then execute the SHELL
+> of sub-steps a/b/c/d(policy)/e-reinject in **as few Bash invocations as possible — target
+> ONE combined fence**. The fences below define WHAT runs and in what order, not how many
+> tool calls you spend; each one as a separate invocation was measured at ~5 extra
+> orchestrator turns per unit. `Agent()` dispatches (memory extraction) and conditional
+> prose branches stay outside the combined fence.
+
 **a) Append to per-milestone event log** — append one line to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-events.jsonl` (M004+; create dir if missing):
 ```json
 {"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"${RUN_ID:-{M###}}","status":"{done|blocked|partial}","summary":"{one-liner}"}
@@ -1588,6 +1596,10 @@ completed_units.append("✓ [M###/S##/T##] {unit_type} — {one-liner}  · {agen
 ```
 
 #### 7. Pause + checkpoint check
+
+> **BATCH RULE (2026-08-24):** same as Step 6 — the rate-limit probe read, the pause-file
+> checks and the heartbeat/claim shell below belong in as few Bash invocations as possible
+> (target one combined fence per outcome path).
 
 After incrementing `session_units`:
 

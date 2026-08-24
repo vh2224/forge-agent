@@ -1211,6 +1211,11 @@ Parse the `---GSD-WORKER-RESULT---` block:
 
 ### 6. Post-unit housekeeping
 
+> **BATCH RULE (2026-08-24, turn consolidation):** compose every input FIRST, then execute
+> the SHELL of the sub-steps below in **as few Bash invocations as possible — target ONE
+> combined fence**. The fences define WHAT runs and in what order, not how many tool calls
+> you spend. `Agent()` dispatches and conditional prose branches stay outside.
+
 **a) Append to per-milestone event log** — append one line to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-events.jsonl` (M004+; create dir if missing):
 ```json
 {"ts":"{ISO8601}","unit":"{unit_type}/{unit_id}","agent":"{agent_name}","milestone":"{M###}","status":"{done|blocked|partial}","summary":"{one-liner}"}
