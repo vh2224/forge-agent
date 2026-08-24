@@ -870,6 +870,7 @@ function verifyArtifact(mustHaves, sliceFiles, opts) {
 
 module.exports = {
   verifyArtifact,
+  runTaskArtifactCheck,
   DEFAULT_STUB_REGEXES,
   IMPORT_PATTERNS,
   SUPPORTED_EXTENSIONS,
@@ -911,6 +912,7 @@ function parseArgv(argv) {
     if (a === '--slice' && argv[i + 1] !== undefined) { opts.slice = argv[++i]; continue; }
     if (a === '--milestone' && argv[i + 1] !== undefined) { opts.milestone = argv[++i]; continue; }
     if (a === '--cwd' && argv[i + 1] !== undefined) { opts.cwd = argv[++i]; continue; }
+    if (a === '--task-plan' && argv[i + 1] !== undefined) { opts.taskPlan = argv[++i]; continue; }
     if (a === '--code-dir' && argv[i + 1] !== undefined) { opts.codeDir = argv[++i]; continue; }
   }
   opts.codeDir = opts.codeDir || opts.cwd;
@@ -1293,8 +1295,71 @@ function writeVerificationMd(sliceDir, sliceId, md) {
   return outPath;
 }
 
+// ── Task-boundary artifact check (2026-08-24) ────────────────────────────────
+//
+// The measured hole: nothing between the executor's self-report and the
+// (advisory, end-of-slice) verifier ever checked that a task's DECLARED
+// artifacts exist — a task could return `done` having created none of them,
+// and the miss surfaced two units later in review (74% objection-concession
+// rate). Existence of a declared artifact is mechanical, not heuristic, so at
+// the task boundary it is ENFORCING: any missing artifact/expected_output is
+// exit 1 and the executor returns `partial` naming it. substantive/wired stay
+// advisory here exactly as they are at the slice boundary — heuristics never
+// block.
+//
+// Legacy plans (no structured must_haves) pass through untouched — the same
+// posture every other consumer of the schema takes.
+function runTaskArtifactCheck(opts) {
+  const cwd = opts.codeDir || opts.cwd || process.cwd();
+  const raw = fs.readFileSync(opts.taskPlan, 'utf8');
+  const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
+  if (!hasStructuredMustHaves(raw)) {
+    return { legacy: true, passed: true, missing: [], advisory_flags: [], checked: { artifacts: 0, expected: 0 } };
+  }
+  const parsed = parseMustHaves(raw);
+  const missing = [];
+  const advisory = [];
+  const rowsResult = verifyArtifact({ artifacts: parsed.artifacts || [] }, [], { cwd });
+  for (const row of rowsResult.rows || []) {
+    if (row.exists === false) {
+      missing.push({ path: row.path, reason: (row.flags.find((f) => f.level === 'exists') || {}).reason || 'file_not_found' });
+    } else {
+      for (const flag of row.flags || []) {
+        // `wired` is structurally meaningless at the task boundary — the rest
+        // of the slice does not exist yet, so "no references found" is the
+        // EXPECTED state, not a signal. Emitting it would train readers to
+        // ignore advisory flags. The slice-boundary run keeps it.
+        if (flag.level !== 'exists' && flag.level !== 'wired') advisory.push(flag);
+      }
+    }
+  }
+  const expected = Array.isArray(parsed.expected_output) ? parsed.expected_output : [];
+  for (const rel of expected) {
+    const p = path.join(cwd, String(rel));
+    if (!fs.existsSync(p)) missing.push({ path: String(rel), reason: 'expected_output_not_found' });
+  }
+  return {
+    legacy: false,
+    passed: missing.length === 0,
+    missing,
+    advisory_flags: advisory,
+    checked: { artifacts: (parsed.artifacts || []).length, expected: expected.length },
+  };
+}
+
 if (require.main === module) {
   const opts = parseArgv(process.argv.slice(2));
+
+  if (opts.taskPlan) {
+    try {
+      const result = runTaskArtifactCheck(opts);
+      process.stdout.write(JSON.stringify(result) + '\n');
+      process.exit(result.passed ? 0 : 1);
+    } catch (e) {
+      process.stderr.write(JSON.stringify({ error: e.message }) + '\n');
+      process.exit(2);
+    }
+  }
 
   if (opts.help || !opts.slice || !opts.milestone) {
     process.stderr.write(
