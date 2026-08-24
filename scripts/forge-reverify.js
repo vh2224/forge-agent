@@ -133,7 +133,7 @@ function spawnPlan(argv) {
     // windowsVerbatimArguments: Node must not re-escape a line that is already
     // quoted for cmd — without it the nested quotes are mangled and cmd runs
     // something else entirely (and reports exit 0 for it).
-    args: ['/d', '/s', '/c', `"${line}"`],
+    args: ['/d', '/s', '/c', `call ${line}`],
     options: { windowsVerbatimArguments: true },
   };
 }

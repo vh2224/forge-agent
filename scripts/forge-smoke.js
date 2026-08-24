@@ -9100,15 +9100,16 @@ function smokeSandboxExecBlocked() {
     '(b) legacy gsd-write-refused output remains byte-identical');
 
   const fixture = mkTmp('sandbox-reverify');
-  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: `${process.execPath} -e "process.exit(0)"` } }), 'utf8');
+  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }), 'utf8');
   fs.writeFileSync(path.join(fixture, 'package-lock.json'), '{}', 'utf8');
   const payload = { ...base, must_haves_status: [env('npm test EPERM')] };
   const verified = reverify.reverify({ result: payload, codeDir: fixture, apply: true });
   assert(verified.verdict === 'verified' && payload.must_haves_status[0].status === 'met'
     && payload.must_haves_status[0].scope === 'task' && payload.must_haves_status[0].reason === '',
-  '(c) re-verification runs project command and deterministically rewrites verified entry');
+  '(c) re-verification runs project command and deterministically rewrites verified entry',
+  JSON.stringify({ verified, entry: payload.must_haves_status[0] }));
   const failedPayload = { ...base, must_haves_status: [env('npm test EPERM')] };
-  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: `${process.execPath} -e "process.exit(1)"` } }), 'utf8');
+  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(1)"' } }), 'utf8');
   const failed = reverify.reverify({ result: failedPayload, codeDir: fixture, apply: true });
   assert(failed.verdict === 'failed' && failedPayload.must_haves_status[0].status === 'unmet'
     && failedPayload.must_haves_status[0].scope === 'task' && checkEnvPromotion(failedPayload, '').promote === false,
@@ -9190,7 +9191,7 @@ function smokeSandboxExecBlocked() {
   // commands must refuse blanket promotion instead of trusting one exit code
   // for all of them.
   const multiFixture = mkTmp('sandbox-reverify-multi');
-  fs.writeFileSync(path.join(multiFixture, 'package.json'), JSON.stringify({ scripts: { test: `${process.execPath} -e "process.exit(0)"` } }), 'utf8');
+  fs.writeFileSync(path.join(multiFixture, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }), 'utf8');
   fs.writeFileSync(path.join(multiFixture, 'package-lock.json'), '{}', 'utf8');
   const divergentPayload = { ...base, must_haves_status: [
     env('ran `npm test`: EPERM: operation not permitted'),

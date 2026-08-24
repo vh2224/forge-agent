@@ -291,6 +291,7 @@ function testPlatformRouting() {
   if (windows) {
     const shim = spawnPlan(['npm', 'test']);
     assert(shim && /cmd\.exe$/i.test(shim.file) && shim.args[0] === '/d'
+      && /^call\s+/i.test(shim.args[3])
       && shim.options.windowsVerbatimArguments === true,
     'a .cmd shim is routed through ComSpec with verbatim arguments', JSON.stringify(shim));
     // Asserted on the resolver itself, not on the assembled command line: the
