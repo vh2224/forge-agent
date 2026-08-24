@@ -26,6 +26,7 @@ const lock = require('./forge-lock.js');
 const forgeState = require('./forge-state.js');
 const { isProject } = require('./forge-workspace.js');
 const { parseEvidenceFileName, collectKnownMilestoneIds } = require('./forge-evidence-path.js');
+const { readJsonl } = require('./forge-jsonl.js');
 
 const STALE_WARNING_MS = 5  * 60 * 1000;  // yellow chip
 const STALE_MS         = 15 * 60 * 1000;  // red chip / "stale" label (M005.3+: 15min matches statusline)
@@ -148,28 +149,14 @@ function readLedgerTail(cwd, maxEntries) {
 function readEventsTail(cwd, milestoneDir, maxLines) {
   const file = path.join(cwd, milestoneDir, path.basename(milestoneDir.replace(/\/$/, '')) + '-events.jsonl');
   if (!fs.existsSync(file)) {
-    // Fallback to global events.jsonl for legacy / non-migrated runs
+    // Fallback to global events.jsonl for legacy / non-migrated runs.
+    // Delegates to forge-jsonl.js (Form A/funnel: normalize once at the
+    // read — events.jsonl is never rewritten by this module, only displayed).
     const fallback = path.join(cwd, '.gsd', 'forge', 'events.jsonl');
-    if (!fs.existsSync(fallback)) return [];
-    try {
-      // Form A/funnel (S03-FIXSET.json): normalize once at the read —
-      // events.jsonl is never rewritten by this module, only displayed.
-      const raw = fs.readFileSync(fallback, 'utf8').replace(/\r\n?/g, '\n').trimEnd();
-      if (!raw) return [];
-      return raw.split('\n').slice(-maxLines)
-        .map(l => { try { return JSON.parse(l); } catch { return null; } })
-        .filter(Boolean);
-    } catch { return []; }
+    return readJsonl(fallback, { maxLines }).lines;
   }
-  try {
-    // Form A/funnel (S03-FIXSET.json): same normalization as the fallback
-    // path above.
-    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n').trimEnd();
-    if (!raw) return [];
-    return raw.split('\n').slice(-maxLines)
-      .map(l => { try { return JSON.parse(l); } catch { return null; } })
-      .filter(Boolean);
-  } catch { return []; }
+  // Same delegation as the fallback path above.
+  return readJsonl(file, { maxLines }).lines;
 }
 
 function tierIcon(unitType) {
