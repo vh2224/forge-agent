@@ -29,7 +29,8 @@ const path = require('path');
 
 const repoRoot = path.resolve(__dirname, '..');
 const gitActivitySwift = path.join(repoRoot, 'app', 'Sources', 'ForgeKit', 'GitActivity.swift');
-const completerMd = path.join(repoRoot, 'agents', 'forge-completer.md');
+// 2026-08-24 completer split: the inline ignore_list literals live in the slice spec.
+const completerMd = path.join(repoRoot, 'shared', 'forge-completer-slice.md');
 
 const REL_SWIFT = path.relative(repoRoot, gitActivitySwift);
 const REL_COMPLETER = path.relative(repoRoot, completerMd);

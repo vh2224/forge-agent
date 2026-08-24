@@ -11484,8 +11484,14 @@ function smokeRouteAudit() {
       assert(text.split('[ -n "$HINT_JSON" ] || HINT_JSON=\'""\'').length - 1 === count + 1,
         `(e) ${file} guards every HINT_JSON against an empty substitution`);
     }
-    const completer = readRepoText(path.join(path.dirname(SCRIPTS), 'agents/forge-completer.md'));
-    assert((completer.match(/^1\.85\./gm) || []).length === 1, '(e) completer has sub-step 1.85');
+    // 2026-08-24: the completer's slice body moved verbatim to the on-demand
+    // spec (agents/forge-completer.md is now a thin dispatcher) — the sub-step
+    // lives in shared/forge-completer-slice.md, and the agent must still point
+    // at that spec or the sub-step is unreachable.
+    const completerSpec = readRepoText(path.join(path.dirname(SCRIPTS), 'shared/forge-completer-slice.md'));
+    assert((completerSpec.match(/^1\.85\./gm) || []).length === 1, '(e) completer has sub-step 1.85');
+    assert(readRepoText(path.join(path.dirname(SCRIPTS), 'agents/forge-completer.md')).includes('shared/forge-completer-slice.md'),
+      '(e) completer agent still points at the slice spec that carries 1.85');
     const source = fs.readFileSync(__filename, 'utf8'); const mainBody = source.slice(source.lastIndexOf('async function main()'));
     assert(/\(\) => \{ smokeRouteAudit\(\); \}/.test(mainBody), '(g) Section 83 is registered through a closure in main()');
     pass('(final) Section 83: detector de rota inerte, upsert, refusal, docs and registration verified');

@@ -141,7 +141,7 @@ const INVENTORY = [
   // — evidence —
   { key: 'evidence.mode', type: 'string', default: 'lenient', source: "scripts/forge-hook.js readEvidenceMode (let mode = 'lenient'; whitelist fallback lenient)" },
   // — file_audit —
-  { key: 'file_audit.ignore_list', type: 'array', default: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'dist/**', 'build/**', '.next/**', '.gsd/**', 'node_modules/**'], source: 'agents/forge-completer.md:146 hardcoded DEFAULT list' },
+  { key: 'file_audit.ignore_list', type: 'array', default: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'dist/**', 'build/**', '.next/**', '.gsd/**', 'node_modules/**'], source: 'shared/forge-completer-slice.md hardcoded DEFAULT list (completer split 2026-08-24)' },
   // — memory cost policy —
   { key: 'memory.extraction', type: 'string', default: 'adaptive', source: 'scripts/forge-cost-policy.js normalizeMemoryMode; skills forge-auto/next/task adaptive gate' },
   // — checker_memory —
@@ -419,7 +419,8 @@ function schemaDefault(key) {
 // suites green, which is the same "the 4th site nobody wired" shape that produced
 // the T03 repair (S03 review R23). This check reads the completer's real literals.
 check('file_audit.ignore_list: schema default == the completer.md hardcoded fallback', () => {
-  const completerPath = path.join(__dirname, '..', 'agents', 'forge-completer.md');
+  // 2026-08-24 completer split: the hardcoded literals live in the slice spec.
+  const completerPath = path.join(__dirname, '..', 'shared', 'forge-completer-slice.md');
   const text = fs.readFileSync(completerPath, 'utf8');
   // Both occurrences on the FILE_AUDIT_IGNORE line: the parse branch and the catch
   // branch. They must agree with each other AND with the schema.
