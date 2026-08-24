@@ -319,7 +319,7 @@ test('retireLegacyScripts refuses a legacy dir symlinked into the source repo', 
 
     const legacy = path.join(data.root, '.claude', 'scripts');
     fs.mkdirSync(path.dirname(legacy), { recursive: true });
-    fs.symlinkSync(repoScripts, legacy, 'dir');
+    fs.symlinkSync(repoScripts, legacy, process.platform === 'win32' ? 'junction' : 'dir');
 
     const backupRoot = path.join(data.root, 'backup');
     const plan = [];
@@ -359,7 +359,7 @@ test('retireLegacyScripts refuses ANY symlinked legacy dir — the remote-checko
 
     const legacy = path.join(data.root, '.claude', 'scripts');
     fs.mkdirSync(path.dirname(legacy), { recursive: true });
-    fs.symlinkSync(devRepoScripts, legacy, 'dir');
+    fs.symlinkSync(devRepoScripts, legacy, process.platform === 'win32' ? 'junction' : 'dir');
 
     const backupRoot = path.join(data.root, 'backup');
     const plan = [];

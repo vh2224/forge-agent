@@ -10773,13 +10773,17 @@ function smokeSvnPrimitives() {
 
     // Newlines must travel as one argv value; --targets would split this into
     // invented paths and leave the file behind while svn still exits zero.
-    write(central.wc, 'nl\nfile.txt', 'newline sidecar junk\n');
-    const newlinePost = vcs.postChanges(central.wc, null, centralOpts);
-    const newlineTarget = computeResetTarget(newlinePost.entries, pre.entries,
-      (p) => vcs.hashPath(central.wc, p, centralOpts).hash);
-    const newlineDone = vcs.restoreAndRemove(central.wc, null, newlineTarget, centralOpts);
-    assert(newlineDone.ok && !fs.existsSync(path.join(central.wc, 'nl\nfile.txt')),
-      '(i) newline path is removed through argv routing', JSON.stringify(newlineDone));
+    if (process.platform === 'win32') {
+      skip('Section 78(i): newline path argv routing', 'Windows filenames cannot contain newline characters');
+    } else {
+      write(central.wc, 'nl\nfile.txt', 'newline sidecar junk\n');
+      const newlinePost = vcs.postChanges(central.wc, null, centralOpts);
+      const newlineTarget = computeResetTarget(newlinePost.entries, pre.entries,
+        (p) => vcs.hashPath(central.wc, p, centralOpts).hash);
+      const newlineDone = vcs.restoreAndRemove(central.wc, null, newlineTarget, centralOpts);
+      assert(newlineDone.ok && !fs.existsSync(path.join(central.wc, 'nl\nfile.txt')),
+        '(i) newline path is removed through argv routing', JSON.stringify(newlineDone));
+    }
     const anchored = vcs.captureDirty(path.join(central.wc, 'sub'), centralOpts);
     assert(!anchored.ok && /svn-wcroot-mismatch/.test(anchored.error) && JSON.stringify(anchored.entries) === '[]',
       '(j) SVN primitives refuse a non-root working-copy path', JSON.stringify(anchored));
@@ -10953,7 +10957,9 @@ function smokeSvnRevisionGuard() {
     const home = path.join(fixture.dir, 'svn-home');
     fs.mkdirSync(home, { recursive: true });
     const configLink = path.join(home, '.subversion');
-    if (!fs.existsSync(configLink)) fs.symlinkSync(fixture.configDir, configLink, 'dir');
+    if (!fs.existsSync(configLink)) {
+      fs.symlinkSync(fixture.configDir, configLink, process.platform === 'win32' ? 'junction' : 'dir');
+    }
     return runScript('forge-surgical-reset.js', args, {
       env: { ...process.env, HOME: home, USERPROFILE: home },
     });
@@ -11234,27 +11240,32 @@ function smokeSidecarDiffCanonical() {
     const initialized = spawnSync('node', [SR, '--state-init', '--state', state, '--cwd', fixture.wc], { encoding: 'utf8' });
     assert(initialized.status === 0 && initialized.stdout.trim() !== '',
       '(e) SVN state-init exits 0 and prints a non-empty START_SHA', JSON.stringify(initialized));
-    const events = path.join(fixture.dir, 'events.jsonl');
-    const guard = spawnSync('bash', ['-c',
-      'START_SHA="$1"; REASON=""; [ -n "$START_SHA" ] || REASON="sidecar-state-init-failed"; [ -n "$REASON" ] && echo "{\\"event\\":\\"worker-engine-fallback\\",\\"reason\\":\\"$REASON\\"}" >> "$2"; echo "REASON=$REASON"',
-      'section81-guard', initialized.stdout.trim(), events], { encoding: 'utf8' });
-    const eventText = fs.existsSync(events) ? fs.readFileSync(events, 'utf8') : '';
-    assert(guard.status === 0 && guard.stdout.trim() === 'REASON=' && !eventText.includes('sidecar-state-init-failed'),
-      '(e) literal mirror guard leaves REASON empty and emits no SVN state-init failure event', JSON.stringify({ guard, eventText }));
-
-    const invalid = mkTmp('section81-invalid-vcs');
-    try {
-      const invalidState = path.join(invalid, 'state.json');
-      const invalidInit = spawnSync('node', [SR, '--state-init', '--state', invalidState, '--cwd', invalid], { encoding: 'utf8' });
-      const invalidEvents = path.join(invalid, 'events.jsonl');
-      const invalidGuard = spawnSync('bash', ['-c',
+    const bashProbe = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+    if (bashProbe.error || bashProbe.status !== 0) {
+      skip('Section 81(e): literal mirror shell guard', 'bash is unavailable on this host');
+    } else {
+      const events = path.join(fixture.dir, 'events.jsonl');
+      const guard = spawnSync('bash', ['-c',
         'START_SHA="$1"; REASON=""; [ -n "$START_SHA" ] || REASON="sidecar-state-init-failed"; [ -n "$REASON" ] && echo "{\\"event\\":\\"worker-engine-fallback\\",\\"reason\\":\\"$REASON\\"}" >> "$2"; echo "REASON=$REASON"',
-        'section81-guard', invalidInit.stdout.trim(), invalidEvents], { encoding: 'utf8' });
-      const invalidText = fs.existsSync(invalidEvents) ? fs.readFileSync(invalidEvents, 'utf8') : '';
-      assert(invalidInit.status !== 0 && invalidInit.stdout === '' && invalidGuard.stdout.trim() === 'REASON=sidecar-state-init-failed'
-        && invalidText.includes('sidecar-state-init-failed'),
-      '(e) literal mirror guard distinguishes a no-VCS state-init failure', JSON.stringify({ invalidInit, invalidGuard, invalidText }));
-    } finally { cleanup(invalid); }
+        'section81-guard', initialized.stdout.trim(), events], { encoding: 'utf8' });
+      const eventText = fs.existsSync(events) ? fs.readFileSync(events, 'utf8') : '';
+      assert(guard.status === 0 && guard.stdout.trim() === 'REASON=' && !eventText.includes('sidecar-state-init-failed'),
+        '(e) literal mirror guard leaves REASON empty and emits no SVN state-init failure event', JSON.stringify({ guard, eventText }));
+
+      const invalid = mkTmp('section81-invalid-vcs');
+      try {
+        const invalidState = path.join(invalid, 'state.json');
+        const invalidInit = spawnSync('node', [SR, '--state-init', '--state', invalidState, '--cwd', invalid], { encoding: 'utf8' });
+        const invalidEvents = path.join(invalid, 'events.jsonl');
+        const invalidGuard = spawnSync('bash', ['-c',
+          'START_SHA="$1"; REASON=""; [ -n "$START_SHA" ] || REASON="sidecar-state-init-failed"; [ -n "$REASON" ] && echo "{\\"event\\":\\"worker-engine-fallback\\",\\"reason\\":\\"$REASON\\"}" >> "$2"; echo "REASON=$REASON"',
+          'section81-guard', invalidInit.stdout.trim(), invalidEvents], { encoding: 'utf8' });
+        const invalidText = fs.existsSync(invalidEvents) ? fs.readFileSync(invalidEvents, 'utf8') : '';
+        assert(invalidInit.status !== 0 && invalidInit.stdout === '' && invalidGuard.stdout.trim() === 'REASON=sidecar-state-init-failed'
+          && invalidText.includes('sidecar-state-init-failed'),
+        '(e) literal mirror guard distinguishes a no-VCS state-init failure', JSON.stringify({ invalidInit, invalidGuard, invalidText }));
+      } finally { cleanup(invalid); }
+    }
   } finally { cleanup(fixture.dir); }
 
   const mainBody = fs.readFileSync(__filename, 'utf8').slice(fs.readFileSync(__filename, 'utf8').lastIndexOf('async function main()'));
