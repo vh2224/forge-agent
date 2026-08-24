@@ -1143,6 +1143,7 @@ PENDING_CONTEXT_ID=$(node -pe 'JSON.parse(process.argv[1]).pending_id || ""' "$P
 DISPATCH_ID="execute-loose-task-${TASK_ID}-$(node -e "console.log(require('crypto').randomUUID())")"
 PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type execute-loose-task --cwd "$WORKING_DIR" \
   --task "$TASK_ID" --dispatch-id "$DISPATCH_ID" --unit-effort "$EFFORT" --thinking "$THINKING_OPUS" \
+  --description "$TASK_DESCRIPTION" \
   --isolation-mode "$ISOLATION_MODE" --branch "$BRANCH" --code-dir "$CODE_DIR" \
   --memory-query "$TASK_DESCRIPTION" --memory-max-tokens "${PREFS[token_budget][auto_memory]:-1200}" \
   --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}" \

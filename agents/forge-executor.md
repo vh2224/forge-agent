@@ -7,7 +7,13 @@ model: claude-sonnet-5
 # has no effort param). medium is also sonnet's cap in the dispatch clamp, so
 # this aligns the real ceiling with the resolver's model-cap. Diagnóstico 2026-08-23.
 effort: medium
-maxTurns: 80
+# 100, not 80: measured 2026-08-24 — a standard task with a byte-identity gate
+# (many small measurement commands) died at exactly turn 80 mid-verification,
+# with all planned files on disk and no result block. Layer 0 recovered it, but
+# a turn-limit kill bypasses the blockable SubagentStop repair hook entirely,
+# so headroom is the cheap prevention. 100 is the ceiling of the runtime
+# sanity bound (forge-native-runtime.test.js pins 4..100).
+maxTurns: 100
 tools: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch
 ---
 
