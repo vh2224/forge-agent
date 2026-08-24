@@ -340,6 +340,56 @@ test('retireLegacyScripts refuses a legacy dir symlinked into the source repo', 
   } finally { data.cleanup(); }
 });
 
+test('retireLegacyScripts refuses ANY symlinked legacy dir — the remote-checkout flow that bit twice', () => {
+  // The first guard compared the link target against context.repo and was
+  // inert in the flow that actually caused the damage: a remote --update runs
+  // from a TEMPORARY release checkout, so context.repo is the tmpdir and the
+  // dev repo the link points into reads as "outside". Measured live, twice:
+  // v4.25.0 and v4.25.1 each retired 446 of the dev repo's own scripts/*
+  // through the ~/.claude/scripts symlink. A symlink is never OUR legacy copy
+  // — skip, whatever it points at.
+  const data = fixture();
+  try {
+    const devRepoScripts = path.join(data.root, 'DevRepo', 'scripts');
+    fs.mkdirSync(devRepoScripts, { recursive: true });
+    fs.writeFileSync(path.join(devRepoScripts, 'forge-example.js'), 'source of truth\n');
+
+    const remoteCheckout = path.join(data.root, 'tmp-remote-checkout');
+    fs.mkdirSync(remoteCheckout, { recursive: true });
+
+    const legacy = path.join(data.root, '.claude', 'scripts');
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.symlinkSync(devRepoScripts, legacy, 'dir');
+
+    const backupRoot = path.join(data.root, 'backup');
+    const plan = [];
+    installer.retireLegacyScripts(legacy, backupRoot, plan, {}, {
+      inventory: new Set(['forge-example.js']),
+      settingsFiles: [],
+      repo: remoteCheckout, // the installing repo is NOT the link target
+    });
+
+    const skipped = plan.find((entry) => entry.op === 'skip' && entry.reason === 'symlinked-not-a-copy');
+    assert(skipped, 'esperava um skip: symlink nunca é cópia legada, aponte para onde apontar');
+    assert.strictEqual(skipped.link_target, fs.realpathSync(devRepoScripts), 'o plano registra o alvo real do link');
+    assert.strictEqual(
+      fs.readFileSync(path.join(devRepoScripts, 'forge-example.js'), 'utf8'),
+      'source of truth\n',
+      'os arquivos do repo de dev nunca podem ser movidos através do symlink',
+    );
+    assert.strictEqual(fs.existsSync(path.join(backupRoot, 'legacy', 'claude-scripts', 'forge-example.js')), false);
+
+    // Sem context.repo nenhum (installs antigos): mesma recusa, mesma razão genérica.
+    const planNoRepo = [];
+    installer.retireLegacyScripts(legacy, backupRoot, planNoRepo, {}, {
+      inventory: new Set(['forge-example.js']),
+      settingsFiles: [],
+    });
+    assert(planNoRepo.find((e) => e.op === 'skip' && e.reason === 'symlinked-not-a-copy'),
+      'sem context.repo a recusa continua — o guard não depende de saber quem instala');
+  } finally { data.cleanup(); }
+});
+
 test('classification: name, inventory and orphan — every leg proven capable of the other verdict', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-classify-Ω-'));
   try {
