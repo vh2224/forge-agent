@@ -7,15 +7,34 @@ const path = require('path');
 const REQUIRED_COLUMNS = ['id', 'surface', 'primitive', 'applicability', 'probe', 'e2e', 'verdict', 'action'];
 const ALLOWED_APPLICABILITY = ['applicable', 'VCS-neutral', 'Git-only', 'macOS-only, VCS-neutral', 'limited by VCS'];
 const ALLOWED_VERDICTS = ['verified', 'verified-neutral', 'declared-limitation'];
+const EVIDENCE_SCHEMA = 'forge-svn-evidence/v1';
+const ALLOWED_RESULTS = ['passed', 'failed', 'non-green'];
 
 function evidenceReferences(root, value) {
-  const names = String(value).match(/[A-Za-z0-9][A-Za-z0-9._/-]*\.(?:js|md|json)\b/g) || [];
-  return names.map((name) => {
+  const matches = [...String(value).matchAll(/([A-Za-z0-9][A-Za-z0-9._/-]*\.(?:json|js|md))(?:#claim=([A-Za-z0-9._-]+))?/g)];
+  return matches.map((match) => {
+    const name = match[1];
     const candidates = name.includes('/')
       ? [path.join(root, name)]
       : [path.join(root, 'scripts', name), path.join(root, 'docs', 'svn-parity-evidence', name), path.join(root, name)];
-    return { name, resolved: candidates.find((candidate) => fs.existsSync(candidate)) || null };
+    return { name, claim: match[2] || null, reference: match[0], resolved: candidates.find((candidate) => fs.existsSync(candidate)) || null };
   });
+}
+
+function validateEvidenceClaim(ref) {
+  if (!ref.resolved || path.extname(ref.resolved) !== '.json') return null;
+  let document;
+  try { document = JSON.parse(fs.readFileSync(ref.resolved, 'utf8')); }
+  catch (_) { return { reason: 'invalid-json' }; }
+  if (document.schema !== EVIDENCE_SCHEMA || !document.claims || Array.isArray(document.claims) || typeof document.claims !== 'object') {
+    return { reason: 'invalid-schema' };
+  }
+  const claimNames = Object.keys(document.claims);
+  if (!ref.claim) return { reason: claimNames.length > 1 ? 'ambiguous-claim' : 'missing-claim-selector' };
+  if (!Object.prototype.hasOwnProperty.call(document.claims, ref.claim)) return { reason: 'missing-claim' };
+  const result = document.claims[ref.claim] && document.claims[ref.claim].result;
+  if (!ALLOWED_RESULTS.includes(result)) return { reason: 'invalid-result' };
+  return { result };
 }
 
 function parseRows(markdown) {
@@ -44,10 +63,23 @@ function audit(root, matrixPath) {
     if (byColumn.every(({ refs }) => refs.length === 0)) unresolved.push({ id: row.id, column: 'evidence', reference: null });
     return unresolved;
   });
-  return { expected_ids: ids.length, observed_ids: matrixIds.filter((id) => ids.includes(id)).length, missing, duplicates, incomplete, invalid_applicability, invalid_verdict, unresolved_evidence, additional_families: extras.length, extra_ids: extras, ok: missing.length === 0 && duplicates.length === 0 && incomplete.length === 0 && invalid_applicability.length === 0 && invalid_verdict.length === 0 && unresolved_evidence.length === 0 };
+  const semantic_evidence_errors = rows.flatMap((row) => {
+    const refs = ['probe', 'e2e'].flatMap((column) => evidenceReferences(root, row[column]).map((ref) => ({ column, ref })));
+    const claims = refs.map(({ column, ref }) => ({ column, ref, validation: validateEvidenceClaim(ref) })).filter((item) => item.validation);
+    const errors = claims.filter(({ validation }) => validation.reason).map(({ column, ref, validation }) => ({ id: row.id, column, reference: ref.reference, claim: ref.claim, reason: validation.reason }));
+    if (errors.length > 0) return errors;
+    if (row.verdict === 'verified' || row.verdict === 'verified-neutral') {
+      const incompatible = claims.filter(({ validation }) => validation.result !== 'passed');
+      if (incompatible.length > 0) return incompatible.map(({ column, ref, validation }) => ({ id: row.id, column, reference: ref.reference, claim: ref.claim, reason: `result-${validation.result}` }));
+      if (!claims.some(({ validation }) => validation.result === 'passed')) return [{ id: row.id, column: 'evidence', reference: null, claim: null, reason: 'missing-passed-claim' }];
+    }
+    return [];
+  });
+  const ok = [missing, duplicates, incomplete, invalid_applicability, invalid_verdict, unresolved_evidence, semantic_evidence_errors].every((items) => items.length === 0);
+  return { expected_ids: ids.length, observed_ids: matrixIds.filter((id) => ids.includes(id)).length, missing, duplicates, incomplete, invalid_applicability, invalid_verdict, unresolved_evidence, semantic_evidence_errors, additional_families: extras.length, extra_ids: extras, ok };
 }
 
-module.exports = { REQUIRED_COLUMNS, ALLOWED_APPLICABILITY, ALLOWED_VERDICTS, evidenceReferences, parseRows, audit };
+module.exports = { REQUIRED_COLUMNS, ALLOWED_APPLICABILITY, ALLOWED_VERDICTS, EVIDENCE_SCHEMA, ALLOWED_RESULTS, evidenceReferences, parseRows, audit };
 
 if (require.main === module) {
   const root = path.resolve(__dirname, '..');
