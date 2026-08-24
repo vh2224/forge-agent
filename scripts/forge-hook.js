@@ -763,6 +763,19 @@ process.stdin.on('end', () => {
           return;
         }
 
+        // Guard 5.5 (2026-08-24): worker in flight — allow + reset. A non-null
+        // run.worker means the orchestrator DISPATCHED a unit and is waiting on
+        // the async Agent() result; ending the turn is the loop's CORRECT state
+        // there (the completion notification re-invokes it). Measured before
+        // this guard: every wait boundary of a live run cost 1 block + 1 filler
+        // tool call just to satisfy the hook — friction, not protection. A
+        // stale worker stamp cannot wedge this open: the heartbeat travels WITH
+        // the worker stamp, and Guard 5 already allowed on a stale heartbeat.
+        if (run.worker) {
+          resetCount();
+          return;
+        }
+
         // Guard 6: counter exhausted (>= 3) — allow + reset (5th will block again)
         const count = readCount();
         if (count >= 3) {

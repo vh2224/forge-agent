@@ -82,7 +82,11 @@ function freshRun(sessionId, id) {
     active: true,
     started_at: Date.now() - 60000,
     last_heartbeat: Date.now(),
-    worker: 'execute-task/T01',
+    // null, not a unit string: Guard 5.5 (2026-08-24) ALLOWS the stop when a
+    // worker is in flight (the orchestrator is legitimately waiting on the
+    // async Agent() result). The block scenarios in this suite model an IDLE
+    // orchestrator abandoning an active run — worker must be null for that.
+    worker: null,
   };
 }
 
@@ -305,6 +309,35 @@ console.log('\nCase 7: never-steal — unknown session, run of other session sta
   const after = fs.readFileSync(runFile, 'utf8');
   assert(before === after, 'runs/M-other.json byte-identical (never touched)');
   cleanCounter(mySess);
+}
+
+// ── Guard 5.5: worker in flight → allow + reset (2026-08-24) ─────────────────
+// A non-null run.worker means the orchestrator dispatched a unit and is waiting
+// on the async Agent() result — ending the turn IS the loop's correct state
+// there. Measured before the guard: every wait boundary cost 1 block + 1 filler
+// tool call. The stale-heartbeat case above already proves Guard 5 wins first.
+{
+  const sessId = uniqueSession();
+  const inFlight = {
+    id: 'M-guard55',
+    kind: 'milestone',
+    session_id: sessId,
+    active: true,
+    started_at: Date.now() - 60000,
+    last_heartbeat: Date.now(),
+    worker: 'execute-task/T07',
+  };
+  const ws = makeTmpWorkspace({ withRunsDir: true, runRecord: inFlight });
+  const res = runStop({ session_id: sessId, cwd: ws });
+  assert(res.status === 0, 'guard 5.5: exit 0');
+  assert(res.stdout === '', 'guard 5.5: empty stdout (allow — worker in flight)');
+  // Counter was reset: a subsequent idle stop (worker null) still blocks fresh.
+  const idle = { ...inFlight, worker: null, last_heartbeat: Date.now() };
+  const fs2 = require('fs'); const path2 = require('path');
+  fs2.writeFileSync(path2.join(ws, '.gsd', 'forge', 'runs', 'M-guard55.json'), JSON.stringify(idle));
+  const res2 = runStop({ session_id: sessId, cwd: ws });
+  assert(res2.stdout.includes('"decision":"block"'), 'guard 5.5: reset counter — idle stop right after still blocks');
+  cleanCounter(sessId);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

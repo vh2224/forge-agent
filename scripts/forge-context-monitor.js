@@ -197,10 +197,17 @@ function buildAdditionalContext(severity, thresholds) {
   }
   if (severity === 'critical') {
     const pct = Math.round(t.critical * 100);
+    // Reconciled with the Compaction Resilience Protocol (2026-08-24, measured
+    // live): the old text demanded an unconditional hard stop, which conflicts
+    // with the loop's own design — a run with a checkpoint on disk SURVIVES
+    // compaction, and abandoning a worker already in flight loses real work
+    // for no safety gain. Checkpoint-now + no-new-units is the directive that
+    // both mechanisms agree on.
     return `[FORGE CONTEXT MONITOR — CRITICAL] Contexto do agente está abaixo de ${pct}% restante. `
-      + 'Pare imediatamente. Salve o estado atual em `continue.md` dentro do diretório da task '
-      + 'e retorne `partial` com o trabalho concluído até agora. '
-      + 'Não tente iniciar nem terminar nenhuma etapa adicional.';
+      + 'Checkpoint AGORA: salve/atualize `continue.md` no diretório da task ou slice, sem esperar o próximo boundary. '
+      + 'Não despache NENHUMA unidade nova. Worker já em voo: aguarde e processe o retorno normalmente — '
+      + 'com o checkpoint em disco, o Compaction Resilience Protocol cobre a sobrevivência à compactação. '
+      + 'Sem worker em voo: encerre a unidade atual com `partial` no próximo passo seguro.';
   }
   return '';
 }

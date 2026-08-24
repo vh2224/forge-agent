@@ -2525,6 +2525,16 @@ A worker that routes verification failures through the Retry Handler risks infin
 
 **Measured origin.** This section exists because the branch did not. Grepping the three orchestrator skills for missing-block handling returned nothing: `Step 5. Process result` parsed `done` / `partial` / `blocked` and had no row for "no block at all". With no named branch the model improvises — an observed session invented an ad-hoc resume-by-`agentId` while a 17-minute, 300k-token executor's finished work sat on disk, unread. The improvisation is not the defect; the missing branch is.
 
+**Boundary of the SubagentStop repair hook (measured 2026-08-24).** The blocking
+`validateForgeSubagentResult` hook is the *first* net, not the authoritative one: a host that
+terminates the subagent at its turn limit (`maxTurns`) can end the agent without a blockable
+stop, so no repair pass runs and `contract-miss.jsonl` stays empty even though the contract was
+missed. Reproduced live: a forge-executor died at exactly turn 80 mid-verification, the hook never
+fired, and the orchestrator-side ladder below (classify → salvage → resume) recovered the unit
+with all work intact. Consequence: an empty `contract-miss.jsonl` is NOT evidence that no miss
+happened — the ladder is the net that always runs, and it must never be skipped on the grounds
+that the hook "would have caught it".
+
 ### Detection (deterministic — never a prose heuristic)
 
 ```bash

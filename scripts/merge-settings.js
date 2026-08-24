@@ -63,9 +63,16 @@ const TOOL_HOOKS = [
 
 // Matchers installed for each tool-use event. `Agent` tracks dispatches;
 // `Write` fires the append-only guard for DECISIONS.md / LEDGER.md (pre only).
+// PostToolUse also needs Bash/Write/Edit: the evidence log branch
+// (forge-hook.js phase==='post', toolName Bash|Write|Edit) was shipped in M003
+// S02 but its matchers were NEVER registered — measured consequence: zero
+// evidence-*.jsonl files across the entire dogfood history, and the completer's
+// Evidence Flags cross-check ran against a log that could not exist. The hook
+// itself gates on evidence.mode (disabled = no write), so registration is what
+// was missing, not another switch.
 const FORGE_MATCHERS = {
   PreToolUse : ['Agent', 'Write'],
-  PostToolUse: ['Agent'],
+  PostToolUse: ['Agent', 'Bash', 'Write', 'Edit'],
 };
 
 // ── MCP operations ──────────────────────────────────────────────────────────
