@@ -39,6 +39,29 @@ function readRepoText(p) {
   return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 }
 
+function comparablePath(p) {
+  let resolved = path.resolve(String(p || ''));
+  try { resolved = fs.realpathSync.native(resolved); } catch { /* compare the unresolved path */ }
+  const normalized = resolved.replace(/\\/g, '/');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function samePath(a, b) {
+  return comparablePath(a) === comparablePath(b);
+}
+
+function pathListIncludes(haystack, needle) {
+  const expected = comparablePath(needle);
+  return String(haystack || '').split(/\r?\n/).some(line => {
+    const candidate = String(line || '').trim().replace(/^worktree\s+/, '');
+    return candidate && samePath(candidate, needle);
+  });
+}
+
+function portableRel(p) {
+  return String(p || '').replace(/\\/g, '/');
+}
+
 // 2026-08-23 sidecar extraction: Branch C/D moved VERBATIM from the two loop
 // skills to cold specs loaded only when DISPATCH_ENGINE != claude —
 // skills/forge-auto/SKILL.md → shared/forge-sidecar-auto.md and
@@ -727,7 +750,7 @@ function smokeIsolation() {
   // lender's path from the borrower's runId).
   r = runScript('forge-isolation.js', ['--cleanup', '--run', 'T-BORROW', '--cwd', repo], { env });
   res = parseJSON(r.stdout);
-  assert(fs.existsSync(lenderWt) && git(['worktree', 'list'], repo).stdout.includes(lenderWt),
+  assert(fs.existsSync(lenderWt) && pathListIncludes(git(['worktree', 'list', '--porcelain'], repo).stdout, lenderWt),
     'borrowed worktree survives its own borrower cleanup and remains registered with git', r.stdout);
   assert(res.mode_source === 'borrowed' && res.borrowed_from === 'M-LENDER' &&
     Array.isArray(res.repos) && res.repos.every(x => x && /borrowed/.test(x.status)),
@@ -738,7 +761,7 @@ function smokeIsolation() {
   // lender's own runId, so this is the guard that is actually load-bearing).
   r = runScript('forge-isolation.js', ['--cleanup', '--run', 'M-LENDER', '--cwd', repo], { env });
   res = parseJSON(r.stdout);
-  assert(fs.existsSync(lenderWt) && git(['worktree', 'list'], repo).stdout.includes(lenderWt),
+  assert(fs.existsSync(lenderWt) && pathListIncludes(git(['worktree', 'list', '--porcelain'], repo).stdout, lenderWt),
     'lender cleanup with an active borrower removes nothing; tree survives on disk and in git worktree list', r.stdout);
   assert(Array.isArray(res.lent_to) && res.lent_to.includes('T-BORROW') &&
     Array.isArray(res.repos) && res.repos.every(x => x && /lent to T-BORROW/.test(x.status)),
@@ -9668,9 +9691,9 @@ function smokeCodeDirMultiRepo() {
     // the blind repos.find() first pick — so a two-repo task ran inside whichever
     // repo sorted first and the operator had to override CODE_DIR by hand.
     const runRoot = path.dirname(wt('freyr'));
-    assert(b.json.multi_repo_root === runRoot,
+    assert(samePath(b.json.multi_repo_root, runRoot),
       `(b2) cross-repo exposes the run root holding every worktree (got ${b.json.multi_repo_root})`);
-    assert(c.json.multi_repo_root === runRoot,
+    assert(samePath(c.json.multi_repo_root, runRoot),
       `(c2) undeclared in a multi-repo workspace exposes the run root (got ${c.json.multi_repo_root})`);
     assert(b.json.code_dir === '' && c.json.code_dir === '',
       '(b2) code_dir stays empty on refusal — it is the sidecar field and the sidecar still has no answer');
@@ -10719,7 +10742,7 @@ function smokeSvnPrimitives() {
       JSON.stringify({ added, committed, updated }));
     return fixture;
   };
-  const entriesHave = (entries, rel) => entries.some((entry) => entry.path === rel);
+  const entriesHave = (entries, rel) => entries.some((entry) => portableRel(entry.path) === portableRel(rel));
   const tree = (root) => {
     const out = new Map();
     const visit = (dir, prefix) => {
@@ -10852,7 +10875,8 @@ function smokeSvnPrimitives() {
     assert(setIgnore.status === 0, '(k) sidecar sets a directory-level prop after snapshot', JSON.stringify(setIgnore));
     const post = vcs.postChanges(dirProp.wc, null, dirPropOpts);
     const target = computeResetTarget(post.entries, pre.entries, (p) => vcs.hashPath(dirProp.wc, p, dirPropOpts).hash);
-    assert(target.overlap.length === 0 && target.restore.includes('dirA') && target.preserved.includes('dirA/keep.txt'),
+    assert(target.overlap.length === 0 && target.restore.some(p => portableRel(p) === 'dirA')
+      && target.preserved.some(p => portableRel(p) === 'dirA/keep.txt'),
       '(k) target restores the dir-prop change and preserves the sibling operator file', JSON.stringify(target));
     const done = vcs.restoreAndRemove(dirProp.wc, null, target, dirPropOpts);
     assert(done.ok, '(k) restore/remove of the dir-prop target succeeds', JSON.stringify(done));
@@ -11654,10 +11678,10 @@ function smokeHierarchyDerived() {
   // (a) containmentCounts is transitive and separator-guarded: a grandparent
   //     counts a grandchild, and a sibling with the same prefix does not fool
   //     the separator check.
-  const grand = '/a/Dev';
-  const parent = '/a/Dev/mid';
-  const child = '/a/Dev/mid/leaf';
-  const sibling = '/a/Development'; // shares the "/a/Dev" prefix but is not under it
+  const grand = path.resolve('/a/Dev');
+  const parent = path.resolve('/a/Dev/mid');
+  const child = path.resolve('/a/Dev/mid/leaf');
+  const sibling = path.resolve('/a/Development'); // shares the "/a/Dev" prefix but is not under it
   const counts = containmentCounts([grand, parent, child, sibling]);
   assert(counts[grand] === 2, '(a) the grandparent counts both the mid child and the deep grandchild', JSON.stringify(counts));
   assert(counts[parent] === 1, '(a) the parent counts only its direct child', JSON.stringify(counts));
@@ -11669,11 +11693,11 @@ function smokeHierarchyDerived() {
   // (b) resolveRole across the four cases, with classifyFn injected so no disk
   //     is touched: workspace, project, folder (including the touched-below
   //     case), null.
-  const rootPath = '/home/dev/lookchina';
-  const memberPath = '/home/dev/lookchina/apps/odin';
-  const touchedPath = '/home/dev/lookchina/services'; // registered as touched, not itself active
-  const foldersOnly = '/home/dev/lookchina/apps'; // never a project, sits above an active member
-  const unrelated = '/home/dev/elsewhere';
+  const rootPath = path.resolve('/home/dev/lookchina');
+  const memberPath = path.resolve('/home/dev/lookchina/apps/odin');
+  const touchedPath = path.resolve('/home/dev/lookchina/services'); // registered as touched, not itself active
+  const foldersOnly = path.resolve('/home/dev/lookchina/apps'); // never a project, sits above an active member
+  const unrelated = path.resolve('/home/dev/elsewhere');
   const classifyFn = p => ({
     kind: (p === rootPath || p === memberPath) ? 'project' : 'none',
     signals: [],
@@ -13496,7 +13520,11 @@ async function smokeCapabilityPerTurn() {
   process.stdout.write('\n▸ Section 94: capability por turn (mock app-server + guidance)\n');
   const dir = mkTmp('capability-per-turn');
   const { buildExecutePrompt, buildPlanPrompt } = require('./forge-xllm');
-  const expectedPolicies = {
+  const expectedPolicies = process.platform === 'win32' ? {
+    readonly: { type: 'readOnly', networkAccess: false },
+    workspace: { type: 'dangerFullAccess' },
+    networked: { type: 'dangerFullAccess' },
+  } : {
     readonly: { type: 'readOnly', networkAccess: false },
     workspace: { type: 'workspaceWrite', networkAccess: false },
     networked: { type: 'workspaceWrite', networkAccess: true },
@@ -13553,7 +13581,9 @@ async function smokeCapabilityPerTurn() {
     }
 
     const legacy = runFixture('legacy', null);
-    const legacyLiteral = { type: 'workspaceWrite', networkAccess: false };
+    const legacyLiteral = process.platform === 'win32'
+      ? { type: 'dangerFullAccess' }
+      : { type: 'workspaceWrite', networkAccess: false };
     assert(legacy.r.status === 0, '(b) plano legado sem capability termina 0', `stderr=${legacy.r.stderr}`);
     assert(!!legacy.params && JSON.stringify(legacy.params.sandboxPolicy) === JSON.stringify(legacyLiteral),
       '(b) plano legado preserva o literal exato workspaceWrite/networkAccess:false', JSON.stringify(legacy.params));
@@ -16493,6 +16523,9 @@ function smokeRewriteCeilingAndE2E() {
       const binPath = path.join(binDir, bin);
       fs.writeFileSync(binPath, shimSrc, 'utf8');
       fs.chmodSync(binPath, 0o755);
+      if (process.platform === 'win32') {
+        fs.writeFileSync(`${binPath}.cmd`, `@node "%~dp0\\${bin}" %*\r\n`, 'utf8');
+      }
     }
 
     let candidatesSent = 0;
