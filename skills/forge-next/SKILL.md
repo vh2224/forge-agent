@@ -970,9 +970,10 @@ Use `$MODEL_ID` resolved by Tier Resolution (step 1.5) above. Do NOT look up mod
 
 Until S01/T02 this skill had **zero** invocations of `forge-runs.js` (measured: `grep -c "forge-runs.js" skills/forge-next/SKILL.md` → `0`), so in step mode `run.worker` was never written and `forge-hook.js::resolveUnitContext` resolved **every** dispatch to `adhoc` — every tool call of every step-mode unit landed in one shared `evidence-…-adhoc.jsonl`. That is cause (a) of IN-2:
 ```bash
-_now=$(node -e "process.stdout.write(String(Date.now()))")
+# One spawn (2026-08-24). Step mode NEVER falls back to auto-mode.json (see note
+# below), so --run is passed only when a run exists — never the legacy branch.
 if [ -n "$RUN_ID" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":\"UNIT_TYPE/UNIT_ID\",\"worker_slice\":\"SLICE_ID\",\"worker_started\":$_now,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null || true
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat --run "$RUN_ID" --worker "UNIT_TYPE/UNIT_ID" --worker-slice "SLICE_ID" > /dev/null || true
 else
   echo "ℹ worker não registrado: RUN_ID ausente (step mode sem run registrada) — evidence desta unidade cai em adhoc"
 fi
@@ -1088,9 +1089,8 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\"
 
 **Heartbeat — clear worker field** after `Agent()` returns (mirror of `forge-auto/SKILL.md`; keeps the run from advertising a worker that already finished):
 ```bash
-_now=$(node -e "process.stdout.write(String(Date.now()))")
 if [ -n "$RUN_ID" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"worker\":null,\"worker_slice\":null,\"worker_started\":null,\"last_heartbeat\":$_now,\"active\":true}" > /dev/null || true
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat --run "$RUN_ID" --clear > /dev/null || true
 fi
 ```
 
@@ -1210,6 +1210,11 @@ Parse the `---GSD-WORKER-RESULT---` block:
    ```
 
 ### 6. Post-unit housekeeping
+
+> **BATCH RULE (2026-08-24, turn consolidation):** compose every input FIRST, then execute
+> the SHELL of the sub-steps below in **as few Bash invocations as possible — target ONE
+> combined fence**. The fences define WHAT runs and in what order, not how many tool calls
+> you spend. `Agent()` dispatches and conditional prose branches stay outside.
 
 **a) Append to per-milestone event log** — append one line to `{WORKING_DIR}/.gsd/milestones/{M###}/{M###}-events.jsonl` (M004+; create dir if missing):
 ```json
