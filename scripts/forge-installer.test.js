@@ -303,6 +303,43 @@ test('retirement moves only what is ours — the operator script and its hook su
   } finally { data.cleanup(); }
 });
 
+// Regression for a real incident: a local-dev setup symlinks ~/.claude/scripts
+// straight into the repo's own scripts/ (edit the repo, skip reinstalling to
+// see it live). retireLegacyScripts walked through that link and renamed the
+// repo's own files into the backup by real path — ~400 files gone from the
+// source tree in one `--update` run. The guard must refuse to touch a legacy
+// dir whose realpath resolves inside the repo being installed from.
+test('retireLegacyScripts refuses a legacy dir symlinked into the source repo', () => {
+  const data = fixture();
+  try {
+    const repo = path.join(data.root, 'Repo');
+    const repoScripts = path.join(repo, 'scripts');
+    fs.mkdirSync(repoScripts, { recursive: true });
+    fs.writeFileSync(path.join(repoScripts, 'forge-example.js'), 'source of truth\n');
+
+    const legacy = path.join(data.root, '.claude', 'scripts');
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.symlinkSync(repoScripts, legacy, 'dir');
+
+    const backupRoot = path.join(data.root, 'backup');
+    const plan = [];
+    installer.retireLegacyScripts(legacy, backupRoot, plan, {}, {
+      inventory: new Set(['forge-example.js']),
+      settingsFiles: [],
+      repo,
+    });
+
+    const skipped = plan.find((entry) => entry.op === 'skip' && entry.reason === 'symlinked-to-source-repo');
+    assert(skipped, 'esperava um skip explicando que o legado aponta pro repo-fonte');
+    assert.strictEqual(
+      fs.readFileSync(path.join(repoScripts, 'forge-example.js'), 'utf8'),
+      'source of truth\n',
+      'o arquivo do repo nunca pode ser movido através do symlink',
+    );
+    assert.strictEqual(fs.existsSync(path.join(backupRoot, 'legacy', 'claude-scripts', 'forge-example.js')), false);
+  } finally { data.cleanup(); }
+});
+
 test('classification: name, inventory and orphan — every leg proven capable of the other verdict', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-classify-Ω-'));
   try {

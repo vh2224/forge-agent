@@ -248,6 +248,26 @@ function retireLegacyScripts(source, backupRoot, plan, options, context = {}) {
     plan.push({ op: 'skip', reason: 'already-retired', source, destination, moved: [], retained: [], settings_references: [] });
     return;
   }
+  // A symlink whose real target lives INSIDE the repo currently being
+  // installed from is not a legacy copy — it is a live alias to the source
+  // (a local-dev setup: edit the repo, skip reinstalling to see it in
+  // ~/.claude). `classifyLegacyScripts`/`moveFile` walk through the link
+  // and rename by real path, so "retiring" it would move the repo's own
+  // files into the backup, deleting them from the source tree — measured:
+  // a `--update` run through such a link renamed ~400 of the repo's own
+  // `scripts/*` files out from under it in one pass. Checked by realpath,
+  // not string comparison, so an indirection (another symlink, a relative
+  // path) still resolves to the same on-disk identity.
+  if (context.repo && fs.lstatSync(source).isSymbolicLink()) {
+    const real = fs.realpathSync(source);
+    const repoReal = fs.realpathSync(context.repo);
+    const relativeToRepo = path.relative(repoReal, real);
+    const insideRepo = relativeToRepo === '' || (!relativeToRepo.startsWith('..') && !path.isAbsolute(relativeToRepo));
+    if (insideRepo) {
+      plan.push({ op: 'skip', reason: 'symlinked-to-source-repo', source, destination, moved: [], retained: [], settings_references: [] });
+      return;
+    }
+  }
   const { managed, retained } = classifyLegacyScripts(source, context.inventory);
   const references = legacyScriptReferences(context.settingsFiles, [...managed, ...retained])
     .map((hit) => ({ ...hit, action: managed.includes(hit.script) ? 'retired' : 'retained' }));
@@ -350,7 +370,7 @@ function install(input = {}) {
       path.join(paths.claudeHome, 'settings.json'),
       path.join(paths.claudeHome, 'settings.local.json'),
     ].map((file) => path.resolve(file)))];
-    retireLegacyScripts(legacyScripts, backupRoot, plan, options, { inventory: scriptInventory, settingsFiles });
+    retireLegacyScripts(legacyScripts, backupRoot, plan, options, { inventory: scriptInventory, settingsFiles, repo });
     const projectFiles = [];
     if (selected.includes('claude')) projectFiles.push(path.join(projectRoot, 'CLAUDE.md'));
     if (selected.includes('codex')) projectFiles.push(path.join(projectRoot, 'AGENTS.md'));

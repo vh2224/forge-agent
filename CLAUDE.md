@@ -1,3 +1,5 @@
+<!-- forge-source:claude-instructions source=CLAUDE.md version=4.25.0 -->
+
 # Forge Agent — Context Engineering Orchestrator for Claude Code
 
 Projeto de agente orquestrador que implementa a metodologia GSD-2 (Get Stuff Done) nativamente no Claude Code. Transforma Claude Code em um sistema multi-agente com context isolation, memória emergente e execução autônoma.
