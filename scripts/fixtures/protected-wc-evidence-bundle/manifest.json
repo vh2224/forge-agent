@@ -1,0 +1,232 @@
+{
+  "schema": "forge-svn-local-evidence/v1",
+  "profile": "svn-local-readonly/v1",
+  "mode": "sanitized",
+  "captured_at": "2026-08-24T00:00:00.000Z",
+  "cwd": "<PROTECTED_WORKING_COPY>",
+  "platform": "fixture",
+  "hash": "sha256",
+  "commands": [
+    {
+      "executable": "svn",
+      "argv": [
+        "info",
+        "--xml",
+        "."
+      ],
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "stdout": {
+        "bytes": 25,
+        "sha256": "5c547888ca622266a2bbf94dd77ee5aebdb281f81d58abe3d6e7290484148e7a",
+        "encoding": "utf8"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encoding": "utf8"
+      }
+    },
+    {
+      "executable": "svn",
+      "argv": [
+        "status",
+        "."
+      ],
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "stdout": {
+        "bytes": 21,
+        "sha256": "8e3ae425facb61994d53720fa0b6299a4f6e0e34532dac4f0931720242f39a14",
+        "encoding": "utf8"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encoding": "utf8"
+      }
+    },
+    {
+      "executable": "svn",
+      "argv": [
+        "diff",
+        "."
+      ],
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "stdout": {
+        "bytes": 19,
+        "sha256": "8b6ebe2c66f8d769d654bb1d97fa02ca6eed3d533fc131af0018785ef1b98697",
+        "encoding": "utf8"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encoding": "utf8"
+      }
+    },
+    {
+      "executable": "svn",
+      "argv": [
+        "proplist",
+        "--xml",
+        "--recursive",
+        "."
+      ],
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "stdout": {
+        "bytes": 41,
+        "sha256": "a3f47a5b349d746afbf173866e09322eb27022485c484e47574ba2f518fa92fb",
+        "encoding": "utf8"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encoding": "utf8"
+      }
+    },
+    {
+      "executable": "svn",
+      "argv": [
+        "propget",
+        "svn:ignore",
+        "."
+      ],
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "stdout": {
+        "bytes": 33,
+        "sha256": "6fea0282d949f4b5a78efbe4c148c7b7ada6050d7a0d2d6e7e5a4e38471e0c50",
+        "encoding": "utf8"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encoding": "utf8"
+      }
+    },
+    {
+      "executable": "svnversion",
+      "argv": [
+        "."
+      ],
+      "exit": 0,
+      "signal": null,
+      "error": null,
+      "stdout": {
+        "bytes": 21,
+        "sha256": "96c69ff1f1032162923a59f59adbd77643b3df83194bfd7e5bcf9e1c93f9fc06",
+        "encoding": "utf8"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encoding": "utf8"
+      }
+    }
+  ],
+  "inventory": [
+    {
+      "path": "commands/00/invocation.json",
+      "bytes": 405,
+      "sha256": "51d7497e83d40f0e0d80865bd3dd35cb64072f020f59ad73cd431bd1cd0e361c"
+    },
+    {
+      "path": "commands/00/stderr.bin",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "commands/00/stdout.bin",
+      "bytes": 25,
+      "sha256": "5c547888ca622266a2bbf94dd77ee5aebdb281f81d58abe3d6e7290484148e7a"
+    },
+    {
+      "path": "commands/01/invocation.json",
+      "bytes": 394,
+      "sha256": "40472d1a2edadc4e9dac04310d0d21a7e76bdcf07d5260e75351294218068e4b"
+    },
+    {
+      "path": "commands/01/stderr.bin",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "commands/01/stdout.bin",
+      "bytes": 21,
+      "sha256": "8e3ae425facb61994d53720fa0b6299a4f6e0e34532dac4f0931720242f39a14"
+    },
+    {
+      "path": "commands/02/invocation.json",
+      "bytes": 392,
+      "sha256": "48a97b8b7c00c9e5f9b1d611d72bd071a11343b397de3796e54be1aefd673971"
+    },
+    {
+      "path": "commands/02/stderr.bin",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "commands/02/stdout.bin",
+      "bytes": 19,
+      "sha256": "8b6ebe2c66f8d769d654bb1d97fa02ca6eed3d533fc131af0018785ef1b98697"
+    },
+    {
+      "path": "commands/03/invocation.json",
+      "bytes": 428,
+      "sha256": "efd217d708645d4f073c8efbb4bac699713a4135bc95d30cb75258aad0556e01"
+    },
+    {
+      "path": "commands/03/stderr.bin",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "commands/03/stdout.bin",
+      "bytes": 41,
+      "sha256": "a3f47a5b349d746afbf173866e09322eb27022485c484e47574ba2f518fa92fb"
+    },
+    {
+      "path": "commands/04/invocation.json",
+      "bytes": 413,
+      "sha256": "aaf06cb89ae1d27204a16bf873b99d81598f1a3ad1ea2cfde2e13aba2eaaf38f"
+    },
+    {
+      "path": "commands/04/stderr.bin",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "commands/04/stdout.bin",
+      "bytes": 33,
+      "sha256": "6fea0282d949f4b5a78efbe4c148c7b7ada6050d7a0d2d6e7e5a4e38471e0c50"
+    },
+    {
+      "path": "commands/05/invocation.json",
+      "bytes": 387,
+      "sha256": "d324fdff636608666c74903f1cc28f2a2f1bd096890270809019d9f68a4a810f"
+    },
+    {
+      "path": "commands/05/stderr.bin",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "commands/05/stdout.bin",
+      "bytes": 21,
+      "sha256": "96c69ff1f1032162923a59f59adbd77643b3df83194bfd7e5bcf9e1c93f9fc06"
+    }
+  ],
+  "derivation": {
+    "source_manifest_sha256": "ef05fab342050988448912e7b13f81a4a44a73557a10fc4d7577143702c26596",
+    "byte_equivalent": false,
+    "note": "text streams sanitized; historical absent bytes are not reconstructed"
+  },
+  "seal": "3f537e9560a89589a4cb32b85484b4d0ce3f0525ab1eea36538f6c4c06fde08d"
+}

@@ -1,12 +1,12 @@
-# Phase 5 — WDMA read-only UAT
+# Phase 5 — protected-wc read-only UAT
 
 ## Verdict
 
-**UAT result: not equivalent under the strict snapshot contract.** The WDMA filesystem and administrative metadata remained identical, as did status, diff, properties and svnversion. However, the first and final `svn info --xml` output hashes differed. The plan requires any difference to stop the successful path, so no restoration or cleanup was attempted and the final task verdict remains `not-100%-complete`.
+**UAT result: not equivalent under the strict snapshot contract.** The protected-wc filesystem and administrative metadata remained identical, as did status, diff, properties and svnversion. However, the first and final `svn info --xml` output hashes differed. The plan requires any difference to stop the successful path, so no restoration or cleanup was attempted and the final task verdict remains `not-100%-complete`.
 
 ## Safety boundary
 
-- Target was the local path `C:\SVN\CMA\WDMA`; no SVN URL was used.
+- Target was the local path `<PROTECTED_WORKING_COPY>`; no SVN URL was used.
 - SVN commands were limited to local `svn info`, `svn status` without `-u`, `svn diff`, `svn proplist`, `svn propget`, and `svnversion`.
 - No network option, update, cleanup, revert, add, delete, move, copy, mkdir, property mutation, switch, resolve, commit, or administrative write was invoked.
 - Filesystem operations were reads, metadata inventory, and SHA-256 hashing only.
@@ -46,9 +46,13 @@ Status remained byte-identical and reported the same pre-existing state: four un
 
 Two subsequent back-to-back local `svn info --xml` reads were byte-equivalent and exited 0. This suggests the earlier mismatch may be output volatility rather than a durable WC mutation. It does not erase the captured mismatch: the strict contract says any difference interrupts, and the identical administrative inventory cannot be used to waive that rule.
 
-Review follow-up retained a deterministic command manifest at `phase-05-wdma-command-manifest.json`. It records the formal hashes, inventory definition, exact diagnostic argv, exits, byte counts, stdout/stderr hashes, and a ten-read `info --xml` series. That series reproducibly alternated between two 598-byte hashes with exit 0 and empty stderr, strengthening the volatility diagnosis without changing this verdict. The follow-up used only the same local read-only allowlist.
+Review follow-up retained a deterministic command manifest at `phase-05-protected-wc-command-manifest.json`. It records the formal hashes, inventory definition, exact diagnostic argv, exits, byte counts, stdout/stderr hashes, and a ten-read `info --xml` series. That series reproducibly alternated between two 598-byte hashes with exit 0 and empty stderr, strengthening the volatility diagnosis without changing this verdict. The follow-up used only the same local read-only allowlist.
+
+The original raw stdout/stderr was not retained and cannot be reconstructed. The
+[prospective bundle contract](../svn-evidence-bundle.md) makes future captures
+recomputable; it does not change this historical evidence or verdict.
 
 ## Cleanup decisions
 
-- Local cleanup: **not run**. A WDMA snapshot difference forbids both cleanups; task-owned lab roots are preserved without attempting ownership validation or deletion.
+- Local cleanup: **not run**. A protected-wc snapshot difference forbids both cleanups; task-owned lab roots are preserved without attempting ownership validation or deletion.
 - Remote cleanup: **not eligible and not run**. Phase 4 was already `not-100%-complete`, and this UAT did not establish strict equivalence. The leaf `FORGE_SVN_PARITY_TEST_T20260824120158` remains preserved at its recorded state. No remote mutator or revalidation was invoked.

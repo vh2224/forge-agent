@@ -9,7 +9,7 @@
 
 ## Preconditions
 
-The local remote guard passed before any corporate mutation. It compares decoded URL segments for exact equality and rejects parent, WDMA, siblings and sibling-prefixes, dot segments, encoded separators/dots, query, fragment, userinfo, scheme/host/port changes, incomplete XML, ambiguous absence, repository identity mismatch, owner/manifest mismatch, nonce/revision/phase mismatch, HEAD divergence and externals.
+The local remote guard passed before any corporate mutation. It compares decoded URL segments for exact equality and rejects parent, protected-wc, siblings and sibling-prefixes, dot segments, encoded separators/dots, query, fragment, userinfo, scheme/host/port changes, incomplete XML, ambiguous absence, repository identity mismatch, owner/manifest mismatch, nonce/revision/phase mismatch, HEAD divergence and externals.
 
 Parent proof immediately before creation:
 
@@ -84,7 +84,7 @@ Post-commit proof:
 - repository log for r44723:r44724 shows every changed path strictly below `/CMA/FORGE_SVN_PARITY_TEST_T20260824120158`;
 - r44723 added the leaf and two files;
 - r44724 modified only the two files;
-- parent `CMA`, `WDMA` and every sibling received no changed path in either revision.
+- parent `CMA`, `protected-wc` and every sibling received no changed path in either revision.
 
 The subtree is intentionally preserved for later phases. No `svn delete`, remote cleanup, update, revert, switch, property mutation, or write under any pre-existing `C:\SVN` WC occurred.
 

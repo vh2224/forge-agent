@@ -48,7 +48,7 @@ An intermediate implementation appended the peg escape inside the `--targets` fi
 - `SVN-001`: fixed in Batch 1; matrix row is `batch-verified`, full Phase 4 E2E remains pending.
 - Remote ownership was revalidated read-only at batch start: exact leaf r44724, creation r44723, expected UUID/nonce, exactly two subtree history entries, no externals.
 - Remote SVN mutations: 0. Corporate leaf was neither modified nor deleted.
-- Writes under `C:\SVN`: 0. WDMA was not accessed.
+- Writes under `C:\SVN`: 0. protected-wc was not accessed.
 - Local disposable lab children were removed after each run; marker/manifest-only roots were preserved for audit.
 - The malformed leading patch marker in local `remote-ownership.json` was removed as a declared evidence-integrity repair; remote ownership files were already valid and unchanged.
 
@@ -100,7 +100,7 @@ Batch 2 has not started.
 - Valid Git and SVN review branches remain byte-compatible; named `none`/`unknown` paths now refuse VCS-sensitive work explicitly.
 - Remote ownership was revalidated read-only at batch start: exact leaf r44724, creation r44723, expected UUID/nonce, exactly two subtree history entries, no externals.
 - Remote SVN mutations: 0. Corporate leaf was neither modified nor deleted.
-- Writes under `C:\SVN`: 0. WDMA was not accessed.
+- Writes under `C:\SVN`: 0. protected-wc was not accessed.
 
 Batch 3 has not started.
 
@@ -165,7 +165,7 @@ Batch 3 has not started.
   r44723, UUID `2211720e-e40a-b547-bb9a-eb178e2eb854`, nonce and equal owner/
   manifest matched, exactly two expected log entries, and no properties/externals.
 - Remote SVN mutations: 0. Corporate leaf was neither modified nor deleted.
-- Writes under `C:\SVN`: 0. WDMA was not accessed.
+- Writes under `C:\SVN`: 0. protected-wc was not accessed.
 
 Batch 4 has not started. Phase 4 has not started.
 
@@ -206,6 +206,6 @@ product evidence. No further Phase 3 correction cluster was reproduced. MCP and
 Claude settings are VCS-neutral host projections; Git branch/worktree isolation
 is intrinsically unavailable in SVN and already degrades explicitly to shared.
 No remote revalidation was needed because this batch performed no SVN operation.
-Remote mutations: 0; writes under `C:\SVN`: 0; WDMA access: none.
+Remote mutations: 0; writes under `C:\SVN`: 0; protected-wc access: none.
 
 Phase 3 is closed. Phase 4 has not started.

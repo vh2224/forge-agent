@@ -12,15 +12,15 @@ function test(name, fn) {
 function refused(url) { assert.throws(() => guard.canonicalUrl(url), /remote-url-/); }
 
 test('accepts only the exact decoded corporate leaf', () => assert.strictEqual(guard.canonicalUrl(guard.EXACT_URL), guard.EXACT_URL));
-test('refuses parent, WDMA and sibling-prefix targets', () => {
+test('refuses parent, protected-wc and sibling-prefix targets', () => {
   refused('https://cvs.cma.local/cma_series_2/CMA');
-  refused('https://cvs.cma.local/cma_series_2/CMA/WDMA');
+  refused('https://cvs.cma.local/cma_series_2/CMA/protected-wc');
   refused(`${guard.EXACT_URL}_OTHER`);
 });
 test('refuses dot segments and encoded separators/dots', () => {
-  refused(`${guard.EXACT_URL}/../WDMA`);
+  refused(`${guard.EXACT_URL}/../protected-wc`);
   refused('https://cvs.cma.local/cma_series_2/CMA/%46ORGE_SVN_PARITY_TEST_T20260824120158%2fchild');
-  refused('https://cvs.cma.local/cma_series_2/CMA/%2e%2e/WDMA');
+  refused('https://cvs.cma.local/cma_series_2/CMA/%2e%2e/protected-wc');
 });
 test('refuses scheme, host, port, userinfo, query and fragment changes', () => {
   refused(guard.EXACT_URL.replace('https:', 'http:'));

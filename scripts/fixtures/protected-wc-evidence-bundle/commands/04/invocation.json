@@ -1,0 +1,21 @@
+{
+  "executable": "svn",
+  "argv": [
+    "propget",
+    "svn:ignore",
+    "."
+  ],
+  "exit": 0,
+  "signal": null,
+  "error": null,
+  "stdout": {
+    "bytes": 33,
+    "sha256": "6fea0282d949f4b5a78efbe4c148c7b7ada6050d7a0d2d6e7e5a4e38471e0c50",
+    "encoding": "utf8"
+  },
+  "stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "encoding": "utf8"
+  }
+}

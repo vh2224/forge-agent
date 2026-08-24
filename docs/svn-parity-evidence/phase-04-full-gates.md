@@ -9,7 +9,7 @@ This verdict deliberately does not claim universal parity or a green full reposi
 ## Safety boundary
 
 - No command read or wrote `C:\SVN`; no pre-existing working copy was touched.
-- WDMA was not accessed.
+- protected-wc was not accessed.
 - No remote SVN endpoint was contacted or mutated.
 - Mutable SVN exercises used task-owned temporary local repositories and working copies outside `C:\SVN`.
 - No cleanup command was run against a pre-existing working copy.

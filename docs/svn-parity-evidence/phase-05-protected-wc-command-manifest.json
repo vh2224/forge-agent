@@ -1,7 +1,7 @@
 {
-  "schema": "forge-wdma-readonly-evidence/v1",
+  "schema": "forge-protected-wc-readonly-evidence/v1",
   "captured_at": "2026-08-24T00:00:00-03:00",
-  "cwd": "C:\\SVN\\CMA\\WDMA",
+  "cwd": "<PROTECTED_WORKING_COPY>",
   "safety": { "local_only": true, "network": false, "mutators": false, "cleanup": false, "restoration": false },
   "hash": "sha256 over exact stdout/stderr bytes",
   "formal_snapshot": {

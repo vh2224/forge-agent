@@ -513,12 +513,12 @@ function wrapperFixture(bucket, id, files) {
   assert(refusal.reason.includes(other) && refusal.reason.includes(MS_ID), refusal.reason);
 }
 
-// R1 unit-level — the prefix rule accepts the canonical and the shortened WDMA
+// R1 unit-level — the prefix rule accepts the canonical and the shortened protected-wc
 // form, and refuses an unrelated stem, at the single-match branch.
 {
   const short = 'M-20260811134201-SUMMARY.md';
   const { root } = wrapperFixture('milestones', MS_ID, { [short]: SUMMARY_BODY });
-  assert(distill._private.findBySuffix(root, '-SUMMARY.md', MS_ID).file.endsWith(short), 'shortened WDMA form must still be accepted');
+  assert(distill._private.findBySuffix(root, '-SUMMARY.md', MS_ID).file.endsWith(short), 'shortened protected-wc form must still be accepted');
   const bad = wrapperFixture('milestones', MS_ID, { 'review-fix-triage-SUMMARY.md': SUMMARY_BODY });
   const refused = distill._private.findBySuffix(bad.root, '-SUMMARY.md', MS_ID);
   assert.strictEqual(refused.file, null);

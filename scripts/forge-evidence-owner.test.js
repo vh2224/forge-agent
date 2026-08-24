@@ -151,7 +151,7 @@ test('an orphan .gsd containing only forge/ between cwd and the real root does n
   fs.mkdirSync(path.join(root, '.gsd', 'forge', 'runs'), { recursive: true });
   const mid = path.join(root, 'mid');
   // The orphan: a .gsd whose entry set is EXACTLY {"forge"} — RUNTIME_ENTRIES
-  // only, no WORK_ENTRIES. This is the literal shape of the SVN/WDMA orphans.
+  // only, no WORK_ENTRIES. This is the literal shape of the SVN/protected-wc orphans.
   fs.mkdirSync(path.join(mid, '.gsd', 'forge'), { recursive: true });
   fs.writeFileSync(path.join(mid, '.gsd', 'forge', 'evidence-adhoc.jsonl'), '{}\n', 'utf8');
   const cwd = path.join(mid, 'deeper');

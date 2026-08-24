@@ -368,7 +368,7 @@ for (const verdict of ['clean', 'inconclusive']) {
 console.log('\nBloco F: originOf classifica narrada × emitida por código, nas DUAS direções (truth 6)');
 
 // Linha HISTÓRICA real, copiada verbatim de um events.jsonl de produção
-// (WDMA, 2026-08-13): a forma escrita à mão, sem marcador.
+// (protected-wc, 2026-08-13): a forma escrita à mão, sem marcador.
 const HISTORICAL = '{"ts":"2026-08-13T04:07:30Z","event":"work-lost","milestone":"M-20260812160209-resize-coluna-arrasto","slice":"S02","unit":"execute-task/S02-T02","cause":"concurrent-run-overwrite","other_run":"T-20260813031731-corrigir-janela-linhas","files":["component-grid-shadow-styled.js","component-grid-shadow.vue"]}';
 
 test('a linha histórica narrada é classificada `narrated` e permanece LEGÍVEL', () => {

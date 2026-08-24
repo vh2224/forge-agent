@@ -1,0 +1,22 @@
+{
+  "executable": "svn",
+  "argv": [
+    "proplist",
+    "--xml",
+    "--recursive",
+    "."
+  ],
+  "exit": 0,
+  "signal": null,
+  "error": null,
+  "stdout": {
+    "bytes": 41,
+    "sha256": "a3f47a5b349d746afbf173866e09322eb27022485c484e47574ba2f518fa92fb",
+    "encoding": "utf8"
+  },
+  "stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "encoding": "utf8"
+  }
+}
