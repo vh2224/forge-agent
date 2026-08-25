@@ -7217,6 +7217,10 @@ function smokeSurgicalReset() {
     gitq(dir, ['init', '-q', '-b', 'main']);
     gitq(dir, ['config', 'user.email', 'smoke@forge']);
     gitq(dir, ['config', 'user.name', 'smoke']);
+    // This section asserts exact LF bytes. Do not inherit a machine-wide
+    // core.autocrlf=true and accidentally turn an EOL-policy test into a
+    // surgical-reset failure; EOL advisory behaviour has its own fixtures.
+    gitq(dir, ['config', 'core.autocrlf', 'false']);
     return dir;
   }
   const W = (dir, rel, content) => {
