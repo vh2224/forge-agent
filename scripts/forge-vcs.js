@@ -66,9 +66,9 @@ function svnRun(cwd, args, opts) {
     cwd,
     encoding: 'buffer',
     maxBuffer: opts.maxBuffer == null ? DEFAULT_MAX_BUFFER : opts.maxBuffer,
-    // LC_ALL must be assigned after opts.env: diagnostics are deliberately
-    // locale-stable even when the caller supplies an environment.
-    env: { ...(opts.env ?? process.env), LC_ALL: 'C' },
+    // Keep diagnostics locale-stable without forcing LC_CTYPE to ASCII.
+    // `LC_ALL=C` makes SVN on Linux reject valid Unicode working-copy paths.
+    env: { ...(opts.env ?? process.env), LC_MESSAGES: 'C' },
   });
 }
 
@@ -77,7 +77,7 @@ function svnversionRun(cwd, opts) {
     cwd,
     encoding: 'buffer',
     maxBuffer: opts.maxBuffer == null ? DEFAULT_MAX_BUFFER : opts.maxBuffer,
-    env: { ...(opts.env ?? process.env), LC_ALL: 'C' },
+    env: { ...(opts.env ?? process.env), LC_MESSAGES: 'C' },
   });
 }
 
