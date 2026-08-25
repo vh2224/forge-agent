@@ -40,6 +40,8 @@ function usage() {
     '                     missing from the baseline is a new red, and a baseline',
     '                     entry whose suite now passes must be removed. All',
     '                     suites still run and log; only the exit code changes.',
+    '  --shard-index <n>  Run zero-based shard n (requires --shard-count)',
+    '  --shard-count <n>  Split the canonical suite list into n disjoint shards',
     '  --help             Show this help',
   ].join('\n');
 }
@@ -53,6 +55,8 @@ function parseArgs(argv) {
     verbose: false,
     inheritHome: false,
     baseline: null,
+    shardIndex: null,
+    shardCount: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -73,9 +77,28 @@ function parseArgs(argv) {
       if (!value || value.startsWith('--')) throw new Error('--baseline requires a file path');
       options.baseline = value;
       index += 1;
+    } else if (arg === '--shard-index' || arg === '--shard-count') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) throw new Error(`${arg} requires a non-negative integer`);
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+        throw new Error(`${arg} requires a non-negative safe integer`);
+      }
+      const key = arg === '--shard-index' ? 'shardIndex' : 'shardCount';
+      if (options[key] !== null) throw new Error(`${arg} may only be specified once`);
+      options[key] = Number(value);
+      index += 1;
     } else {
       throw new Error(`Unknown option: ${arg}`);
     }
+  }
+  if ((options.shardIndex === null) !== (options.shardCount === null)) {
+    throw new Error('--shard-index and --shard-count must be specified together');
+  }
+  if (options.shardCount !== null && options.shardCount < 1) {
+    throw new Error('--shard-count must be greater than zero');
+  }
+  if (options.shardIndex !== null && options.shardIndex >= options.shardCount) {
+    throw new Error('--shard-index must be less than --shard-count');
   }
   return options;
 }
@@ -86,6 +109,26 @@ function discoverTests(matches) {
     .map(entry => entry.name)
     .filter(name => matches.length === 0 || matches.some(match => name.toLowerCase().includes(match)))
     .sort((a, b) => a.localeCompare(b, 'en'));
+}
+
+/**
+ * Select one disjoint shard from the canonical suite order. discoverTests()
+ * supplies that order in production; keeping this helper positional makes the
+ * partition balanced (sizes differ by at most one) and easy to audit. Across
+ * every index in [0, count), each input suite appears exactly once.
+ */
+function suitesForShard(suites, index, count) {
+  return suites.filter((_, position) => position % count === index);
+}
+
+/**
+ * Baseline documents are validated against the complete on-disk suite
+ * universe first. Only after that validation may comparison be narrowed to a
+ * shard, otherwise entries owned by another shard would be reported as stale.
+ */
+function baselineEntriesForSuites(entries, suites) {
+  const selected = new Set(suites);
+  return entries.filter(entry => selected.has(entry.suite));
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +413,10 @@ function main(argv) {
       return 0;
     }
   }
+  const baselineUniverse = tests;
+  if (options.shardIndex !== null) {
+    tests = suitesForShard(tests, options.shardIndex, options.shardCount);
+  }
   if (options.list) {
     process.stdout.write(tests.length ? `${tests.join('\n')}\n` : '');
     return 0;
@@ -398,14 +445,14 @@ function main(argv) {
     const resolved = resolveBaseline({
       text: baselineText,
       platform: process.platform,
-      availableSuites: tests,
+      availableSuites: baselineUniverse,
     });
     if (!resolved.ok) {
       process.stderr.write('Baseline check FAILED: baseline is invalid — refusing to run against it:\n');
       for (const message of resolved.errors) process.stderr.write(`  - ${message}\n`);
       return 2;
     }
-    baselineEntries = resolved.entries;
+    baselineEntries = baselineEntriesForSuites(resolved.entries, tests);
   }
 
   const isolatedRoot = options.inheritHome
@@ -478,4 +525,6 @@ module.exports = {
   resolveBaseline,
   suitesForChangedFiles,
   BASELINE_PLATFORMS,
+  baselineEntriesForSuites,
+  suitesForShard,
 };

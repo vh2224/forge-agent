@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
   push:
+    branches:
+      - master
 
 permissions:
   contents: read
@@ -27,10 +29,7 @@ jobs:
           - host: codex
             os: macos-latest
             platform: darwin
-          - host: claude
-            os: windows-latest
-            platform: win32
-          - host: codex
+          - host: both
             os: windows-latest
             platform: win32
 
@@ -49,15 +48,32 @@ jobs:
         run: node scripts/forge-offline-ci.js --host ${{ matrix.host }} --platform ${{ matrix.platform }}
 
   test:
-    name: Tests (${{ matrix.os }})
+    name: Tests (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            shard-index: 0
+            shard-count: 1
+            label: ubuntu-latest
+          - os: macos-latest
+            platform: darwin
+            shard-index: 0
+            shard-count: 1
+            label: macos-latest
+          - os: windows-latest
+            platform: win32
+            shard-index: 0
+            shard-count: 2
+            label: windows-latest, shard 1/2
+          - os: windows-latest
+            platform: win32
+            shard-index: 1
+            shard-count: 2
+            label: windows-latest, shard 2/2
 
     steps:
       - name: Check out repository
@@ -91,8 +107,31 @@ jobs:
         # rot into a green-but-inert gate. Measured cause: 20 of the last 20 PRs
         # merged with windows-latest red, which is why the wrapper-readers break
         # (the #94 x #98 interaction) was indistinguishable from the chronic noise.
-        run: node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json
+        run: node scripts/run-tests.js --baseline scripts/fixtures/ci-baseline/known-failures.json --shard-index ${{ matrix.shard-index }} --shard-count ${{ matrix.shard-count }}
 
       - name: Smoke suite (release gate)
         if: runner.os != 'Windows'
         run: node scripts/forge-smoke.js
+
+  required-offline-windows:
+    name: Offline ${{ matrix.host }} / win32
+    needs: operational-offline
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        host:
+          - claude
+          - codex
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.operational-offline.result }}" = success
+
+  required-tests-windows:
+    name: Tests (windows-latest)
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.test.result }}" = success

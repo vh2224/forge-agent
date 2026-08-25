@@ -22,7 +22,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`unknown option: ${arg}`);
   }
-  if (options.host && !MATRIX.hosts.includes(options.host)) throw new Error(`invalid host: ${options.host}`);
+  if (options.host && ![...MATRIX.hosts, 'both'].includes(options.host)) throw new Error(`invalid host: ${options.host}`);
   if (!MATRIX.platforms.includes(options.platform)) throw new Error(`invalid platform: ${options.platform}`);
   return options;
 }
@@ -84,7 +84,7 @@ function run(options = {}, dependencies = {}) {
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), errorOutput = process.stderr.write.bind(process.stderr)) {
   let options;
   try { options = parseArgs(argv); } catch (error) { errorOutput(`forge-offline-ci: ${error.message}\n`); return 2; }
-  if (options.help) { output('Usage: node scripts/forge-offline-ci.js [--host claude|codex] [--platform win32|darwin|linux] [--plan] [--verbose]\n'); return 0; }
+  if (options.help) { output('Usage: node scripts/forge-offline-ci.js [--host claude|codex|both] [--platform win32|darwin|linux] [--plan] [--verbose]\n'); return 0; }
   const plan = buildPlan(options);
   if (options.plan) {
     output(`${JSON.stringify({ schema_version: MATRIX.schema_version, host: options.host || 'both', platform: options.platform, suites: plan.map((entry) => path.basename(entry.argv[0])), executable: process.execPath, shell: false, network: false })}\n`);
