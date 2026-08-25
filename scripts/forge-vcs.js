@@ -604,10 +604,10 @@ function svnRevertBatch(cwd, paths, depth, opts) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-svn-targets-'));
   const targets = path.join(tmpDir, 'targets');
   try {
-    // This helper only receives paths without `@` or newlines. In a targets
-    // file, some SVN builds treat the trailing peg escape as a literal byte
-    // instead of stripping it, so adding `@` here makes an existing path look
-    // absent. Peg-sensitive paths are routed through argv by the caller.
+    // Targets files carry literal paths. Some SVN builds do not strip a peg
+    // escape in this format, so never append `@` here. The ordinary batch uses
+    // only non-sensitive paths; a one-path batch is also the compatibility
+    // fallback when an SVN build rejects an argv-escaped `@` directory.
     fs.writeFileSync(targets, `${paths.join('\n')}\n`, 'utf8');
     return svnRun(cwd, ['revert', '--depth', depth, '--targets', targets], opts);
   } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
@@ -677,11 +677,13 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
       if (result.status !== 0) return { ok: false, restored, removed, error: svnErrorCode(result, 'svn revert failed') };
     }
     for (const relPath of individualInfinity) {
-      const result = svnRun(cwd, ['revert', '--depth', 'infinity', '--', svnPegSafe(relPath)], opts);
+      let result = svnRun(cwd, ['revert', '--depth', 'infinity', '--', svnPegSafe(relPath)], opts);
+      if (result.status !== 0 && !/[\r\n]/.test(relPath)) result = svnRevertBatch(cwd, [relPath], 'infinity', opts);
       if (result.status !== 0) return { ok: false, restored, removed, error: svnErrorCode(result, 'svn revert failed') };
     }
     for (const relPath of individualEmpty) {
-      const result = svnRun(cwd, ['revert', '--depth', 'empty', '--', svnPegSafe(relPath)], opts);
+      let result = svnRun(cwd, ['revert', '--depth', 'empty', '--', svnPegSafe(relPath)], opts);
+      if (result.status !== 0 && !/[\r\n]/.test(relPath)) result = svnRevertBatch(cwd, [relPath], 'empty', opts);
       if (result.status !== 0) return { ok: false, restored, removed, error: svnErrorCode(result, 'svn revert failed') };
     }
   } catch (_) { return { ok: false, restored, removed, error: 'svn-revert-failed' }; }

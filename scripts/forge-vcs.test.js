@@ -441,7 +441,7 @@ test('SVN restore peg-escapes whitespace Unicode and @ while preserving dirty de
     assert.strictEqual(svn(['propset', 'svn:ignore', 'ignored.tmp', `${dir}@`]).exit, 0);
 
     const result = vcs.restoreAndRemove(lab.wc, '1', {
-      restore: [ordinary, atPath, dir], remove: [], overlap: [], preserved: [path.join(dir, 'keep Ã¼.txt')],
+      restore: [ordinary, atPath, dir], remove: [], overlap: [], preserved: [child],
     }, { vcs: 'svn', configDir: lab.config });
     assert.strictEqual(result.ok, true, JSON.stringify(result));
     assert.strictEqual(fs.readFileSync(path.join(lab.wc, ordinary), 'utf8'), 'plain base\n');
