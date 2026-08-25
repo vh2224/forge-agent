@@ -112,3 +112,26 @@ jobs:
       - name: Smoke suite (release gate)
         if: runner.os != 'Windows'
         run: node scripts/forge-smoke.js
+
+  required-offline-windows:
+    name: Offline ${{ matrix.host }} / win32
+    needs: operational-offline
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        host:
+          - claude
+          - codex
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.operational-offline.result }}" = success
+
+  required-tests-windows:
+    name: Tests (windows-latest)
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve required-check contract
+        run: test "${{ needs.test.result }}" = success

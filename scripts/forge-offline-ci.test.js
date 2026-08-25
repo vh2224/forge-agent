@@ -72,6 +72,15 @@ assert.deepStrictEqual(testCells, [
   { os: 'windows-latest', platform: 'win32', shardIndex: 1, shardCount: 2, label: 'windows-latest, shard 2/2' },
 ]);
 assert.match(testBlock, /run-tests\.js[^\r\n]+--shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\}/);
+const compatibilityBlock = workflow.slice(workflow.indexOf('\n  required-offline-windows:'));
+assert.match(compatibilityBlock, /name: Offline \$\{\{ matrix\.host \}\} \/ win32/);
+assert.match(compatibilityBlock, /host:\s*\r?\n\s+- claude\s*\r?\n\s+- codex/);
+assert.match(compatibilityBlock, /name: Tests \(windows-latest\)/);
+assert.match(compatibilityBlock, /needs: operational-offline/);
+assert.match(compatibilityBlock, /needs: test/);
+assert.strictEqual((compatibilityBlock.match(/if: \$\{\{ always\(\) \}\}/g) || []).length, 2);
+assert.strictEqual((compatibilityBlock.match(/\.result \}\}" = success/g) || []).length, 2,
+  'required-check compatibility jobs must fail when their real dependency fails');
 // This assertion replaces `assert.match(workflow, /shell:\s*pwsh/)`, which is exactly the
 // kind of guard that proves the wrong property: it matched the TEXT of a workflow GitHub
 // refused to schedule, so it stayed green across two runs on PR #71 that died at the
