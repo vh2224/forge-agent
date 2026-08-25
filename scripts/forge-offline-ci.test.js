@@ -27,6 +27,11 @@ for (const host of gate.MATRIX.hosts) for (const platform of gate.MATRIX.platfor
   assert(plan.every((entry) => entry.executable === process.execPath && Array.isArray(entry.argv) && entry.shell === false && entry.network === false));
 }
 
+const combinedPlan = gate.buildPlan({ host: 'both', platform: 'win32' });
+assert.strictEqual(combinedPlan.length, 11);
+assert(combinedPlan.every((entry) => entry.host === 'both' && entry.platform === 'win32'));
+assert.strictEqual(gate.parseArgs(['--host', 'both', '--platform', 'win32']).host, 'both');
+
 const clean = gate.scrubEnvironment({ PATH: 'safe', ANTHROPIC_API_KEY: 'paid', OPENAI_API_KEY: 'paid', GH_TOKEN: 'paid', CUSTOM_SECRET: 'paid', AWS_ACCESS_KEY_ID: 'paid' });
 assert.strictEqual(clean.PATH, 'safe');
 for (const key of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GH_TOKEN', 'CUSTOM_SECRET', 'AWS_ACCESS_KEY_ID']) assert.strictEqual(clean[key], undefined);
@@ -40,12 +45,33 @@ for (const args of [['--version'], ['--help'], ['--host', 'claude'], ['--host', 
 
 const workflow = fs.readFileSync(WORKFLOW, 'utf8');
 assert.match(workflow, /operational-offline:/);
-assert.strictEqual((workflow.match(/host:\s*(?:claude|codex)/g) || []).length, 6);
-assert.strictEqual((workflow.match(/platform:\s*win32/g) || []).length, 2);
-assert.strictEqual((workflow.match(/platform:\s*darwin/g) || []).length, 2);
-assert.strictEqual((workflow.match(/platform:\s*linux/g) || []).length, 2);
-assert.match(workflow, /windows-latest/);
-assert.match(workflow, /platform:\s*win32/);
+const triggerBlock = workflow.slice(workflow.indexOf('on:'), workflow.indexOf('permissions:'));
+assert.match(triggerBlock, /pull_request:\s*\r?\n/);
+assert.match(triggerBlock, /push:\s*\r?\n\s+branches:\s*\r?\n\s+- master\s*\r?\n/);
+assert.strictEqual((triggerBlock.match(/push:/g) || []).length, 1);
+
+const offlineBlock = workflow.slice(workflow.indexOf('  operational-offline:'), workflow.indexOf('\n  test:'));
+const offlineCells = [...offlineBlock.matchAll(/- host: (claude|codex|both)\s+os: ([^\s]+)\s+platform: (linux|darwin|win32)/g)]
+  .map((match) => ({ host: match[1], os: match[2], platform: match[3] }));
+assert.deepStrictEqual(offlineCells, [
+  { host: 'claude', os: 'ubuntu-latest', platform: 'linux' },
+  { host: 'codex', os: 'ubuntu-latest', platform: 'linux' },
+  { host: 'claude', os: 'macos-latest', platform: 'darwin' },
+  { host: 'codex', os: 'macos-latest', platform: 'darwin' },
+  { host: 'both', os: 'windows-latest', platform: 'win32' },
+]);
+assert.match(offlineBlock, /forge-offline-ci\.js --host \$\{\{ matrix\.host \}\}/);
+
+const testBlock = workflow.slice(workflow.indexOf('\n  test:'));
+const testCells = [...testBlock.matchAll(/- os: ([^\s]+)\s+platform: (linux|darwin|win32)\s+shard-index: (\d+)\s+shard-count: (\d+)\s+label: ([^\r\n]+)/g)]
+  .map((match) => ({ os: match[1], platform: match[2], shardIndex: Number(match[3]), shardCount: Number(match[4]), label: match[5] }));
+assert.deepStrictEqual(testCells, [
+  { os: 'ubuntu-latest', platform: 'linux', shardIndex: 0, shardCount: 1, label: 'ubuntu-latest' },
+  { os: 'macos-latest', platform: 'darwin', shardIndex: 0, shardCount: 1, label: 'macos-latest' },
+  { os: 'windows-latest', platform: 'win32', shardIndex: 0, shardCount: 2, label: 'windows-latest, shard 1/2' },
+  { os: 'windows-latest', platform: 'win32', shardIndex: 1, shardCount: 2, label: 'windows-latest, shard 2/2' },
+]);
+assert.match(testBlock, /run-tests\.js[^\r\n]+--shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\}/);
 // This assertion replaces `assert.match(workflow, /shell:\s*pwsh/)`, which is exactly the
 // kind of guard that proves the wrong property: it matched the TEXT of a workflow GitHub
 // refused to schedule, so it stayed green across two runs on PR #71 that died at the
@@ -59,11 +85,12 @@ assert.match(workflow, /node scripts\/forge-offline-ci\.js/);
 assert(!/(?:claude|codex)\s+(?:exec|--version|--help)/.test(workflow), 'CI must never invoke paid provider CLIs');
 
 let stdout = ''; let stderr = '';
-const exit = gate.main(['--host', 'codex', '--platform', 'win32', '--plan'], (value) => { stdout += value; }, (value) => { stderr += value; });
+const exit = gate.main(['--host', 'both', '--platform', 'win32', '--plan'], (value) => { stdout += value; }, (value) => { stderr += value; });
 assert.strictEqual(exit, 0, stderr);
 const described = JSON.parse(stdout);
 assert.strictEqual(described.shell, false);
 assert.strictEqual(described.network, false);
+assert.strictEqual(described.host, 'both');
 assert.deepStrictEqual(described.suites, gate.MATRIX.suites);
 
-process.stdout.write('forge-offline-ci tests passed (2 hosts × 3 platforms; Node/argv only)\n');
+process.stdout.write('forge-offline-ci tests passed (combined Windows host; sharded CI invariants)\n');
