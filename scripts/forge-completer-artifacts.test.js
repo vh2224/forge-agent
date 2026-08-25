@@ -15,6 +15,9 @@ function test(name, fn) {
   catch (error) { console.error(`  not ok  ${name}: ${error.message}`); process.exitCode = 1; }
 }
 function read(rel) { return fs.readFileSync(path.join(root, rel), 'utf8'); }
+function hasSvnToolchain() {
+  return ['svn', 'svnadmin'].every((command) => spawnSync(command, ['--version', '--quiet'], { encoding: 'utf8' }).status === 0);
+}
 
 test('SVN-005 responsive fast mode uses the VCS seam and has no Git-only command', () => {
   const text = read('skills/forge-responsive/SKILL.md');
@@ -37,6 +40,7 @@ test('SVN-007 completer file audit delegates to a VCS-aware helper and fails hon
 });
 
 test('SVN-007 live no-Git WC returns only added/modified paths', () => {
+  if (!hasSvnToolchain()) return;
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-completer-svn-'));
   try {
     const repo = path.join(rootDir, 'repo');

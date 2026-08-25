@@ -24,12 +24,13 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const MODULE = path.join(__dirname, 'forge-touch.js');
 const touch = require('./forge-touch.js');
 const { collectTouched, recordTouched, readTouched, deriveRepoEntry, TOUCH_REASONS } = touch;
 const runs = require('./forge-runs.js');
+const hasSvnToolchain = ['svn', 'svnadmin'].every((command) => spawnSync(command, ['--version', '--quiet'], { encoding: 'utf8' }).status === 0);
 
 // ── Runner ──────────────────────────────────────────────────────────────────
 let passed = 0;
@@ -268,6 +269,7 @@ test('R3b: a resolved path with no .git -> skipped/repo-not-git, and the repo st
 });
 
 test('SVN-004: a real SVN WC reports modified and unversioned paths without invoking Git', () => {
+  if (!hasSvnToolchain) return;
   const root = mktmp('forge-touch-svn-');
   const repo = path.join(root, 'repo');
   const wc = path.join(root, 'wc');
@@ -509,7 +511,7 @@ test('R4: every emitted reason belongs to TOUCH_REASONS, and every TOUCH_REASONS
   for (const r of reasonsSeen) {
     assert(TOUCH_REASONS.includes(r), `emitted reason "${r}" is not declared in TOUCH_REASONS`);
   }
-  for (const r of TOUCH_REASONS) {
+  for (const r of TOUCH_REASONS.filter((reason) => hasSvnToolchain || reason !== 'svn-working-copy')) {
     assert(reasonsSeen.has(r), `TOUCH_REASONS value "${r}" was never actually emitted by any test`);
   }
 });

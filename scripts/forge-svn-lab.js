@@ -89,6 +89,14 @@ function run(argv, options = {}) {
   return { command: argv, exit: result.status, stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
+function hasSvnToolchain() {
+  for (const command of ['svn', 'svnadmin']) {
+    const result = spawnSync(command, ['--version', '--quiet'], { encoding: 'utf8' });
+    if (result.status !== 0) return false;
+  }
+  return true;
+}
+
 function initializeSvn(lab) {
   guardTarget(lab.root, lab.repo, { mustExist: true });
   let result = run(['svnadmin', 'create', lab.repo]);
@@ -108,7 +116,7 @@ function cleanupChildren(lab) {
   return { preserved_root: lab.root, removed_children: [...CHILDREN].reverse() };
 }
 
-module.exports = { TASK_ID, MARKER, MANIFEST, CHILDREN, createLab, guardTarget, initializeSvn, cleanupChildren, run };
+module.exports = { TASK_ID, MARKER, MANIFEST, CHILDREN, createLab, guardTarget, initializeSvn, cleanupChildren, run, hasSvnToolchain };
 
 if (require.main === module) {
   const lab = createLab();

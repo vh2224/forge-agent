@@ -27,7 +27,7 @@
     {
       "source_id": "hooks",
       "target": "hooks/forge-hook.js",
-      "sha256": "360dad5522d32ba6ead1477e22b4788c80a0c9f1aefbca8afaf35fc37edb17e9"
+      "sha256": "c149db9dd45bed13f05931987217d224a6f23d805dc6e8900e46b32893a41c48"
     },
     {
       "source_id": "mcp",

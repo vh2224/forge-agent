@@ -604,7 +604,11 @@ function svnRevertBatch(cwd, paths, depth, opts) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-svn-targets-'));
   const targets = path.join(tmpDir, 'targets');
   try {
-    fs.writeFileSync(targets, `${paths.map(svnPegSafe).join('\n')}\n`, 'utf8');
+    // This helper only receives paths without `@` or newlines. In a targets
+    // file, some SVN builds treat the trailing peg escape as a literal byte
+    // instead of stripping it, so adding `@` here makes an existing path look
+    // absent. Peg-sensitive paths are routed through argv by the caller.
+    fs.writeFileSync(targets, `${paths.join('\n')}\n`, 'utf8');
     return svnRun(cwd, ['revert', '--depth', depth, '--targets', targets], opts);
   } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
 }

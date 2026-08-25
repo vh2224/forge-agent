@@ -420,6 +420,7 @@ test('svnPegSafe escapes every target so a path containing @ is not read as a pe
 });
 
 test('SVN restore peg-escapes whitespace Unicode and @ while preserving dirty descendants', () => {
+  if (!svnLab.hasSvnToolchain()) return;
   const lab = svnLab.createLab('forge-vcs-svn-reset-');
   const svn = (args) => svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
   try {
@@ -451,6 +452,7 @@ test('SVN restore peg-escapes whitespace Unicode and @ while preserving dirty de
 });
 
 test('SVN failed revert returns no partial audit claim and caller can re-snapshot', () => {
+  if (!svnLab.hasSvnToolchain()) return;
   const lab = svnLab.createLab('forge-vcs-svn-resnapshot-');
   const svn = (args) => svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
   try {

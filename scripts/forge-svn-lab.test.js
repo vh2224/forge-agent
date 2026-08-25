@@ -16,6 +16,7 @@ function test(name, fn) {
 function refuses(fn, code) { assert.throws(fn, (error) => error.message.includes(code)); }
 
 const lab = labApi.createLab();
+const hasSvnToolchain = labApi.hasSvnToolchain();
 try {
   test('root is outside the corporate SVN tree', () => {
     assert(!path.resolve(lab.root).toLowerCase().startsWith(path.resolve('C:\\SVN').toLowerCase() + path.sep));
@@ -46,11 +47,13 @@ try {
     } finally { if (fs.existsSync(link)) fs.unlinkSync(link); fs.rmSync(outside, { recursive: true }); }
   });
   test('local SVN lifecycle uses file URL and a WC without .git', () => {
+    if (!hasSvnToolchain) return;
     const checkout = labApi.initializeSvn(lab);
     assert.strictEqual(checkout.exit, 0);
     assert(!fs.existsSync(path.join(lab.wc, '.git')));
   });
   test('regression SVN-001: restoreAndRemove reverts a versioned @ path', () => {
+    if (!hasSvnToolchain) return;
     const atFile = path.join(lab.wc, 'service@1.2.0.txt');
     fs.writeFileSync(atFile, 'base\n');
     assert.strictEqual(labApi.run(['svn', '--non-interactive', '--config-dir', lab.config, 'add', `${atFile}@`], { cwd: lab.wc }).exit, 0);
