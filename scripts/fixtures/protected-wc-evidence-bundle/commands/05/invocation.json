@@ -1,0 +1,19 @@
+{
+  "executable": "svnversion",
+  "argv": [
+    "."
+  ],
+  "exit": 0,
+  "signal": null,
+  "error": null,
+  "stdout": {
+    "bytes": 21,
+    "sha256": "96c69ff1f1032162923a59f59adbd77643b3df83194bfd7e5bcf9e1c93f9fc06",
+    "encoding": "utf8"
+  },
+  "stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "encoding": "utf8"
+  }
+}

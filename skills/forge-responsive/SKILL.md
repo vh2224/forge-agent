@@ -170,7 +170,18 @@ Flag findings that directly impact CWV with the metric name: `⚠ CLS`, `⚠ LCP
 </process>
 
 <fast_mode>
-When invoked with `-fast` flag: audit only files changed in the current branch (use `git diff --name-only main`). Skip breakpoint consistency and CWV risk table. Focus on critical + warning only.
+When invoked with `-fast` flag, resolve the changed-file set through the VCS-aware
+artifact helper:
+
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-completer-artifacts.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+node "$FORGE_SCRIPTS_DIR/forge-completer-artifacts.js" --actual-am --cwd "$PWD"
+```
+
+Audit only the paths printed by that command. A nonzero exit means the changed-file
+set is unavailable: report the helper's named error and stop fast-mode analysis
+instead of silently auditing an empty set. Skip breakpoint consistency and the CWV
+risk table. Focus on critical + warning only.
 </fast_mode>
 
 <success_criteria>

@@ -359,10 +359,10 @@ test('fail-open: forced-throwing command-rewrite module runs the ORIGINAL comman
 // ── 9. Comando não reconhecido roda byte-identico + razão contada ──────────
 
 test('unrecognized command ("make test") runs byte-identical, with a named+counted reason', () => {
-  const cwdMake = mkTmpDir('forge-verify-resources-make-');
+  const cache = mkTmpDir('forge-verify-resources-make-');
   try {
-    fs.mkdirSync(path.join(cwdMake, '.gsd', 'forge'), { recursive: true });
-    const eventsPath = path.join(cwdMake, '.gsd', 'forge', 'events.jsonl');
+    fs.mkdirSync(path.join(cache, '.gsd', 'forge'), { recursive: true });
+    const eventsPath = path.join(cache, '.gsd', 'forge', 'events.jsonl');
     const before = fs.existsSync(eventsPath) ? fs.readFileSync(eventsPath, 'utf-8').split('\n').filter(Boolean).length : 0;
 
     // Baseline: same command run with the wiring entirely absent (simulates
@@ -370,16 +370,16 @@ test('unrecognized command ("make test") runs byte-identical, with a named+count
     // fail closes off the whole resource branch, degrading to the historic
     // path with zero env overlay).
     const wiredOff = runVerificationGate({
-      cwd: cwdMake,
+      cwd: cache,
       taskPlanVerify: 'echo hi',
-      gsdDir: path.join(cwdMake, '.gsd'),
+      gsdDir: path.join(cache, '.gsd'),
       commandTimeoutMs: 5000,
       requireCommandRewrite: () => { throw new Error('wiring disabled'); },
     });
     const wiredOn = runVerificationGate({
-      cwd: cwdMake,
+      cwd: cache,
       taskPlanVerify: 'echo hi',
-      gsdDir: path.join(cwdMake, '.gsd'),
+      gsdDir: path.join(cache, '.gsd'),
       commandTimeoutMs: 5000,
     });
 
@@ -395,7 +395,7 @@ test('unrecognized command ("make test") runs byte-identical, with a named+count
     assert(clampSkipped.some(l => JSON.parse(l).reason === 'intact:not-runner-command'),
       'the "not a runner command" reason must be named, not generic');
   } finally {
-    fs.rmSync(cwdMake, { recursive: true, force: true });
+    fs.rmSync(cache, { recursive: true, force: true });
   }
 });
 

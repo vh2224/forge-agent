@@ -374,7 +374,7 @@ Proof of commit requires **both**, always:
 Each probe **alone releases wrongly, in opposite directions**. A alone releases a claim whose worker
 has not started writing yet, when an *earlier* commit already touched those paths. (Before D16 made
 A precise, A alone was worse still: any *neighbour's* commit in a shared tree satisfied it —
-literally the SVN/WDMA scenario that originated this milestone.) B alone releases a claim whose
+literally the SVN/protected-wc scenario that originated this milestone.) B alone releases a claim whose
 worker **has not started writing**: zero dirty paths is indistinguishable from "committed
 everything" when nobody looks at the baseline. Relaxing to one probe is a regression, not a
 simplification, and both git and svn go through the same public seam of `scripts/forge-vcs.js` —

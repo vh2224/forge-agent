@@ -167,7 +167,7 @@ function runCli(args) {
 // ════════════════════════════════════════════════════════════════════════════
 
 // (a) Sonda A sozinha: o baseline avançou por um commit de OUTRO arquivo — que
-//     é o commit do VIZINHO na árvore compartilhada, o cenário SVN/WDMA que
+//     é o commit do VIZINHO na árvore compartilhada, o cenário SVN/protected-wc que
 //     originou a milestone — enquanto os paths do claim seguem sujos.
 test('R1a: baseline avançado por commit de OUTRO arquivo, paths do claim sujos -> held-uncommitted', () => {
   const { wsDir, repo, head } = makeScenario('M-r1a');

@@ -13,13 +13,20 @@ const { vaultDir, writeVault, restoreVault, listVaults } = require('./forge-swee
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
+const SKIP = Symbol('skip');
 const failures = [];
+const symlinkUnavailable = (error) => ['EPERM', 'EACCES', 'UNKNOWN'].includes(error && error.code);
 
 function test(name, fn) {
   try {
-    fn();
-    passed++;
-    console.log(`  ok - ${name}`);
+    if (fn() === SKIP) {
+      skipped++;
+      console.log(`  skip - ${name} (symlink unavailable)`);
+    } else {
+      passed++;
+      console.log(`  ok - ${name}`);
+    }
   } catch (error) {
     failed++;
     failures.push({ name, error: error.message });
@@ -279,11 +286,9 @@ test('a symlinked intermediate segment creates nothing outside .gsd', () => {
   try {
     fs.symlinkSync(outside, link, 'junction');
   } catch (error) {
-    // Symlink creation needs privileges on some platforms; the skip is named
-    // rather than silently passing.
-    console.log(`  skip - symlink escape (symlink indisponível: ${error.code || error.message})`);
     remove(cwd);
-    return;
+    if (symlinkUnavailable(error)) return SKIP;
+    throw error;
   }
   const dir = vaultDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
@@ -337,7 +342,7 @@ test('a workspace reached through a symlink yields contained ids, and undo resto
   const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vault-symlink-real-')));
   const link = path.join(fs.realpathSync(os.tmpdir()), `vault-symlink-view-${process.pid}`);
   try { fs.unlinkSync(link); } catch { /* first run */ }
-  fs.symlinkSync(real, link, 'dir');
+  fs.symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir');
   try {
     const memoryDir = path.join(real, '.gsd', 'memory');
     fs.mkdirSync(memoryDir, { recursive: true });
@@ -366,7 +371,7 @@ test('a workspace reached through a symlink yields contained ids, and undo resto
   }
 });
 
-console.log(`\n${passed} passed, ${failed} failed`);
+console.log(`\n${passed} passed, ${failed} failed, ${skipped} skipped`);
 if (failed) {
   for (const failure of failures) console.error(`${failure.name}: ${failure.error}`);
   process.exit(1);

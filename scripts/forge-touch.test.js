@@ -24,12 +24,13 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const MODULE = path.join(__dirname, 'forge-touch.js');
 const touch = require('./forge-touch.js');
 const { collectTouched, recordTouched, readTouched, deriveRepoEntry, TOUCH_REASONS } = touch;
 const runs = require('./forge-runs.js');
+const hasSvnToolchain = ['svn', 'svnadmin'].every((command) => spawnSync(command, ['--version', '--quiet'], { encoding: 'utf8' }).status === 0);
 
 // ── Runner ──────────────────────────────────────────────────────────────────
 let passed = 0;
@@ -77,6 +78,9 @@ function writeJson(file, data) {
 
 function git(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+function svn(cwd, args) {
+  return execFileSync('svn', args, { cwd, encoding: 'utf8' });
 }
 
 // ── R5 (see the closing half) ───────────────────────────────────────────────
@@ -262,6 +266,36 @@ test('R3b: a resolved path with no .git -> skipped/repo-not-git, and the repo st
   assertEqual(t.repos[0].status, 'skipped');
   assertEqual(t.repos[0].reason, 'repo-not-git');
   noteReason(t.repos[0].reason);
+});
+
+test('SVN-004: a real SVN WC reports modified and unversioned paths without invoking Git', () => {
+  if (!hasSvnToolchain) return;
+  const root = mktmp('forge-touch-svn-');
+  const repo = path.join(root, 'repo');
+  const wc = path.join(root, 'wc');
+  execFileSync('svnadmin', ['create', repo], { encoding: 'utf8' });
+  const url = `file:///${repo.replace(/\\/g, '/')}`;
+  const seed = path.join(root, 'seed');
+  fs.mkdirSync(seed);
+  fs.writeFileSync(path.join(seed, 'tracked.txt'), 'base\n');
+  svn(root, ['import', seed, url, '-m', 'initial import', '--quiet']);
+  svn(root, ['checkout', url, wc, '--quiet']);
+  assert(!fs.existsSync(path.join(wc, '.git')), 'SVN fixture must not contain .git');
+  fs.appendFileSync(path.join(wc, 'tracked.txt'), 'changed\n');
+  fs.writeFileSync(path.join(wc, 'new file.txt'), 'new\n');
+
+  const entry = deriveRepoEntry({ name: 'svn-repo', path: wc });
+  assertEqual(entry.status, 'ok', 'SVN WC must be examined, not skipped as repo-not-git');
+  assertEqual(entry.reason, 'svn-working-copy', 'SVN scope limitation must be named');
+  assertEqual(JSON.stringify(entry.files), JSON.stringify(['new file.txt', 'tracked.txt']), 'SVN changes are sorted and complete');
+  noteReason(entry.reason);
+});
+
+test('SVN-004 failure is named and never becomes an empty successful census', () => {
+  const result = touch.touchedFilesForSvn(mktmp('forge-touch-broken-svn-'));
+  assertEqual(result.status, 'skipped');
+  assertEqual(result.reason, 'svn-command-failed');
+  noteReason(result.reason);
 });
 
 test('R3c: no default-branch match -> no-merge-base, uncommitted still reported (never invents a base)', () => {
@@ -477,7 +511,7 @@ test('R4: every emitted reason belongs to TOUCH_REASONS, and every TOUCH_REASONS
   for (const r of reasonsSeen) {
     assert(TOUCH_REASONS.includes(r), `emitted reason "${r}" is not declared in TOUCH_REASONS`);
   }
-  for (const r of TOUCH_REASONS) {
+  for (const r of TOUCH_REASONS.filter((reason) => hasSvnToolchain || reason !== 'svn-working-copy')) {
     assert(reasonsSeen.has(r), `TOUCH_REASONS value "${r}" was never actually emitted by any test`);
   }
 });

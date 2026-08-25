@@ -39,6 +39,29 @@ function readRepoText(p) {
   return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 }
 
+function comparablePath(p) {
+  let resolved = path.resolve(String(p || ''));
+  try { resolved = fs.realpathSync.native(resolved); } catch { /* compare the unresolved path */ }
+  const normalized = resolved.replace(/\\/g, '/');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function samePath(a, b) {
+  return comparablePath(a) === comparablePath(b);
+}
+
+function pathListIncludes(haystack, needle) {
+  const expected = comparablePath(needle);
+  return String(haystack || '').split(/\r?\n/).some(line => {
+    const candidate = String(line || '').trim().replace(/^worktree\s+/, '');
+    return candidate && samePath(candidate, needle);
+  });
+}
+
+function portableRel(p) {
+  return String(p || '').replace(/\\/g, '/');
+}
+
 // 2026-08-23 sidecar extraction: Branch C/D moved VERBATIM from the two loop
 // skills to cold specs loaded only when DISPATCH_ENGINE != claude —
 // skills/forge-auto/SKILL.md → shared/forge-sidecar-auto.md and
@@ -727,7 +750,7 @@ function smokeIsolation() {
   // lender's path from the borrower's runId).
   r = runScript('forge-isolation.js', ['--cleanup', '--run', 'T-BORROW', '--cwd', repo], { env });
   res = parseJSON(r.stdout);
-  assert(fs.existsSync(lenderWt) && git(['worktree', 'list'], repo).stdout.includes(lenderWt),
+  assert(fs.existsSync(lenderWt) && pathListIncludes(git(['worktree', 'list', '--porcelain'], repo).stdout, lenderWt),
     'borrowed worktree survives its own borrower cleanup and remains registered with git', r.stdout);
   assert(res.mode_source === 'borrowed' && res.borrowed_from === 'M-LENDER' &&
     Array.isArray(res.repos) && res.repos.every(x => x && /borrowed/.test(x.status)),
@@ -738,7 +761,7 @@ function smokeIsolation() {
   // lender's own runId, so this is the guard that is actually load-bearing).
   r = runScript('forge-isolation.js', ['--cleanup', '--run', 'M-LENDER', '--cwd', repo], { env });
   res = parseJSON(r.stdout);
-  assert(fs.existsSync(lenderWt) && git(['worktree', 'list'], repo).stdout.includes(lenderWt),
+  assert(fs.existsSync(lenderWt) && pathListIncludes(git(['worktree', 'list', '--porcelain'], repo).stdout, lenderWt),
     'lender cleanup with an active borrower removes nothing; tree survives on disk and in git worktree list', r.stdout);
   assert(Array.isArray(res.lent_to) && res.lent_to.includes('T-BORROW') &&
     Array.isArray(res.repos) && res.repos.every(x => x && /lent to T-BORROW/.test(x.status)),
@@ -7194,6 +7217,10 @@ function smokeSurgicalReset() {
     gitq(dir, ['init', '-q', '-b', 'main']);
     gitq(dir, ['config', 'user.email', 'smoke@forge']);
     gitq(dir, ['config', 'user.name', 'smoke']);
+    // This section asserts exact LF bytes. Do not inherit a machine-wide
+    // core.autocrlf=true and accidentally turn an EOL-policy test into a
+    // surgical-reset failure; EOL advisory behaviour has its own fixtures.
+    gitq(dir, ['config', 'core.autocrlf', 'false']);
     return dir;
   }
   const W = (dir, rel, content) => {
@@ -9077,15 +9104,16 @@ function smokeSandboxExecBlocked() {
     '(b) legacy gsd-write-refused output remains byte-identical');
 
   const fixture = mkTmp('sandbox-reverify');
-  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: `${process.execPath} -e "process.exit(0)"` } }), 'utf8');
+  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }), 'utf8');
   fs.writeFileSync(path.join(fixture, 'package-lock.json'), '{}', 'utf8');
   const payload = { ...base, must_haves_status: [env('npm test EPERM')] };
   const verified = reverify.reverify({ result: payload, codeDir: fixture, apply: true });
   assert(verified.verdict === 'verified' && payload.must_haves_status[0].status === 'met'
     && payload.must_haves_status[0].scope === 'task' && payload.must_haves_status[0].reason === '',
-  '(c) re-verification runs project command and deterministically rewrites verified entry');
+  '(c) re-verification runs project command and deterministically rewrites verified entry',
+  JSON.stringify({ verified, entry: payload.must_haves_status[0] }));
   const failedPayload = { ...base, must_haves_status: [env('npm test EPERM')] };
-  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: `${process.execPath} -e "process.exit(1)"` } }), 'utf8');
+  fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(1)"' } }), 'utf8');
   const failed = reverify.reverify({ result: failedPayload, codeDir: fixture, apply: true });
   assert(failed.verdict === 'failed' && failedPayload.must_haves_status[0].status === 'unmet'
     && failedPayload.must_haves_status[0].scope === 'task' && checkEnvPromotion(failedPayload, '').promote === false,
@@ -9167,7 +9195,7 @@ function smokeSandboxExecBlocked() {
   // commands must refuse blanket promotion instead of trusting one exit code
   // for all of them.
   const multiFixture = mkTmp('sandbox-reverify-multi');
-  fs.writeFileSync(path.join(multiFixture, 'package.json'), JSON.stringify({ scripts: { test: `${process.execPath} -e "process.exit(0)"` } }), 'utf8');
+  fs.writeFileSync(path.join(multiFixture, 'package.json'), JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }), 'utf8');
   fs.writeFileSync(path.join(multiFixture, 'package-lock.json'), '{}', 'utf8');
   const divergentPayload = { ...base, must_haves_status: [
     env('ran `npm test`: EPERM: operation not permitted'),
@@ -9668,9 +9696,9 @@ function smokeCodeDirMultiRepo() {
     // the blind repos.find() first pick — so a two-repo task ran inside whichever
     // repo sorted first and the operator had to override CODE_DIR by hand.
     const runRoot = path.dirname(wt('freyr'));
-    assert(b.json.multi_repo_root === runRoot,
+    assert(samePath(b.json.multi_repo_root, runRoot),
       `(b2) cross-repo exposes the run root holding every worktree (got ${b.json.multi_repo_root})`);
-    assert(c.json.multi_repo_root === runRoot,
+    assert(samePath(c.json.multi_repo_root, runRoot),
       `(c2) undeclared in a multi-repo workspace exposes the run root (got ${c.json.multi_repo_root})`);
     assert(b.json.code_dir === '' && c.json.code_dir === '',
       '(b2) code_dir stays empty on refusal — it is the sidecar field and the sidecar still has no answer');
@@ -10719,7 +10747,7 @@ function smokeSvnPrimitives() {
       JSON.stringify({ added, committed, updated }));
     return fixture;
   };
-  const entriesHave = (entries, rel) => entries.some((entry) => entry.path === rel);
+  const entriesHave = (entries, rel) => entries.some((entry) => portableRel(entry.path) === portableRel(rel));
   const tree = (root) => {
     const out = new Map();
     const visit = (dir, prefix) => {
@@ -10773,13 +10801,17 @@ function smokeSvnPrimitives() {
 
     // Newlines must travel as one argv value; --targets would split this into
     // invented paths and leave the file behind while svn still exits zero.
-    write(central.wc, 'nl\nfile.txt', 'newline sidecar junk\n');
-    const newlinePost = vcs.postChanges(central.wc, null, centralOpts);
-    const newlineTarget = computeResetTarget(newlinePost.entries, pre.entries,
-      (p) => vcs.hashPath(central.wc, p, centralOpts).hash);
-    const newlineDone = vcs.restoreAndRemove(central.wc, null, newlineTarget, centralOpts);
-    assert(newlineDone.ok && !fs.existsSync(path.join(central.wc, 'nl\nfile.txt')),
-      '(i) newline path is removed through argv routing', JSON.stringify(newlineDone));
+    if (process.platform === 'win32') {
+      skip('Section 78(i): newline path argv routing', 'Windows filenames cannot contain newline characters');
+    } else {
+      write(central.wc, 'nl\nfile.txt', 'newline sidecar junk\n');
+      const newlinePost = vcs.postChanges(central.wc, null, centralOpts);
+      const newlineTarget = computeResetTarget(newlinePost.entries, pre.entries,
+        (p) => vcs.hashPath(central.wc, p, centralOpts).hash);
+      const newlineDone = vcs.restoreAndRemove(central.wc, null, newlineTarget, centralOpts);
+      assert(newlineDone.ok && !fs.existsSync(path.join(central.wc, 'nl\nfile.txt')),
+        '(i) newline path is removed through argv routing', JSON.stringify(newlineDone));
+    }
     const anchored = vcs.captureDirty(path.join(central.wc, 'sub'), centralOpts);
     assert(!anchored.ok && /svn-wcroot-mismatch/.test(anchored.error) && JSON.stringify(anchored.entries) === '[]',
       '(j) SVN primitives refuse a non-root working-copy path', JSON.stringify(anchored));
@@ -10848,7 +10880,8 @@ function smokeSvnPrimitives() {
     assert(setIgnore.status === 0, '(k) sidecar sets a directory-level prop after snapshot', JSON.stringify(setIgnore));
     const post = vcs.postChanges(dirProp.wc, null, dirPropOpts);
     const target = computeResetTarget(post.entries, pre.entries, (p) => vcs.hashPath(dirProp.wc, p, dirPropOpts).hash);
-    assert(target.overlap.length === 0 && target.restore.includes('dirA') && target.preserved.includes('dirA/keep.txt'),
+    assert(target.overlap.length === 0 && target.restore.some(p => portableRel(p) === 'dirA')
+      && target.preserved.some(p => portableRel(p) === 'dirA/keep.txt'),
       '(k) target restores the dir-prop change and preserves the sibling operator file', JSON.stringify(target));
     const done = vcs.restoreAndRemove(dirProp.wc, null, target, dirPropOpts);
     assert(done.ok, '(k) restore/remove of the dir-prop target succeeds', JSON.stringify(done));
@@ -10953,7 +10986,9 @@ function smokeSvnRevisionGuard() {
     const home = path.join(fixture.dir, 'svn-home');
     fs.mkdirSync(home, { recursive: true });
     const configLink = path.join(home, '.subversion');
-    if (!fs.existsSync(configLink)) fs.symlinkSync(fixture.configDir, configLink, 'dir');
+    if (!fs.existsSync(configLink)) {
+      fs.symlinkSync(fixture.configDir, configLink, process.platform === 'win32' ? 'junction' : 'dir');
+    }
     return runScript('forge-surgical-reset.js', args, {
       env: { ...process.env, HOME: home, USERPROFILE: home },
     });
@@ -11234,27 +11269,32 @@ function smokeSidecarDiffCanonical() {
     const initialized = spawnSync('node', [SR, '--state-init', '--state', state, '--cwd', fixture.wc], { encoding: 'utf8' });
     assert(initialized.status === 0 && initialized.stdout.trim() !== '',
       '(e) SVN state-init exits 0 and prints a non-empty START_SHA', JSON.stringify(initialized));
-    const events = path.join(fixture.dir, 'events.jsonl');
-    const guard = spawnSync('bash', ['-c',
-      'START_SHA="$1"; REASON=""; [ -n "$START_SHA" ] || REASON="sidecar-state-init-failed"; [ -n "$REASON" ] && echo "{\\"event\\":\\"worker-engine-fallback\\",\\"reason\\":\\"$REASON\\"}" >> "$2"; echo "REASON=$REASON"',
-      'section81-guard', initialized.stdout.trim(), events], { encoding: 'utf8' });
-    const eventText = fs.existsSync(events) ? fs.readFileSync(events, 'utf8') : '';
-    assert(guard.status === 0 && guard.stdout.trim() === 'REASON=' && !eventText.includes('sidecar-state-init-failed'),
-      '(e) literal mirror guard leaves REASON empty and emits no SVN state-init failure event', JSON.stringify({ guard, eventText }));
-
-    const invalid = mkTmp('section81-invalid-vcs');
-    try {
-      const invalidState = path.join(invalid, 'state.json');
-      const invalidInit = spawnSync('node', [SR, '--state-init', '--state', invalidState, '--cwd', invalid], { encoding: 'utf8' });
-      const invalidEvents = path.join(invalid, 'events.jsonl');
-      const invalidGuard = spawnSync('bash', ['-c',
+    const bashProbe = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+    if (bashProbe.error || bashProbe.status !== 0) {
+      skip('Section 81(e): literal mirror shell guard', 'bash is unavailable on this host');
+    } else {
+      const events = path.join(fixture.dir, 'events.jsonl');
+      const guard = spawnSync('bash', ['-c',
         'START_SHA="$1"; REASON=""; [ -n "$START_SHA" ] || REASON="sidecar-state-init-failed"; [ -n "$REASON" ] && echo "{\\"event\\":\\"worker-engine-fallback\\",\\"reason\\":\\"$REASON\\"}" >> "$2"; echo "REASON=$REASON"',
-        'section81-guard', invalidInit.stdout.trim(), invalidEvents], { encoding: 'utf8' });
-      const invalidText = fs.existsSync(invalidEvents) ? fs.readFileSync(invalidEvents, 'utf8') : '';
-      assert(invalidInit.status !== 0 && invalidInit.stdout === '' && invalidGuard.stdout.trim() === 'REASON=sidecar-state-init-failed'
-        && invalidText.includes('sidecar-state-init-failed'),
-      '(e) literal mirror guard distinguishes a no-VCS state-init failure', JSON.stringify({ invalidInit, invalidGuard, invalidText }));
-    } finally { cleanup(invalid); }
+        'section81-guard', initialized.stdout.trim(), events], { encoding: 'utf8' });
+      const eventText = fs.existsSync(events) ? fs.readFileSync(events, 'utf8') : '';
+      assert(guard.status === 0 && guard.stdout.trim() === 'REASON=' && !eventText.includes('sidecar-state-init-failed'),
+        '(e) literal mirror guard leaves REASON empty and emits no SVN state-init failure event', JSON.stringify({ guard, eventText }));
+
+      const invalid = mkTmp('section81-invalid-vcs');
+      try {
+        const invalidState = path.join(invalid, 'state.json');
+        const invalidInit = spawnSync('node', [SR, '--state-init', '--state', invalidState, '--cwd', invalid], { encoding: 'utf8' });
+        const invalidEvents = path.join(invalid, 'events.jsonl');
+        const invalidGuard = spawnSync('bash', ['-c',
+          'START_SHA="$1"; REASON=""; [ -n "$START_SHA" ] || REASON="sidecar-state-init-failed"; [ -n "$REASON" ] && echo "{\\"event\\":\\"worker-engine-fallback\\",\\"reason\\":\\"$REASON\\"}" >> "$2"; echo "REASON=$REASON"',
+          'section81-guard', invalidInit.stdout.trim(), invalidEvents], { encoding: 'utf8' });
+        const invalidText = fs.existsSync(invalidEvents) ? fs.readFileSync(invalidEvents, 'utf8') : '';
+        assert(invalidInit.status !== 0 && invalidInit.stdout === '' && invalidGuard.stdout.trim() === 'REASON=sidecar-state-init-failed'
+          && invalidText.includes('sidecar-state-init-failed'),
+        '(e) literal mirror guard distinguishes a no-VCS state-init failure', JSON.stringify({ invalidInit, invalidGuard, invalidText }));
+      } finally { cleanup(invalid); }
+    }
   } finally { cleanup(fixture.dir); }
 
   const mainBody = fs.readFileSync(__filename, 'utf8').slice(fs.readFileSync(__filename, 'utf8').lastIndexOf('async function main()'));
@@ -11414,7 +11454,7 @@ function smokeIsolationSvnAndVcsTelemetry() {
     ['forge-next', 'forge-next/SKILL.md', 3],
     ['forge-task', 'forge-task/SKILL.md', 2],
   ];
-  const dispatchVcsLine = 'DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "git")';
+  const dispatchVcsLine = 'DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")';
   for (const [name, rel, expected] of dispatchVcsMirrors) {
     const source = sidecarSurface(path.join(path.dirname(SCRIPTS), 'skills', rel));  // sidecar surface (2026-08-23)
     const referenceCount = source.split(dispatchVcsReference).length - 1;
@@ -11431,6 +11471,11 @@ function smokeIsolationSvnAndVcsTelemetry() {
     `(e) shared/forge-dispatch.md carries the DISPATCH_VCS prelude block exactly once (got ${dispatchVcsTitleCount})`);
   assert(dispatchSpec.includes('forge-vcs.js" --detect --field vcs'),
     '(e) DISPATCH_VCS prelude block invokes forge-vcs.js --detect --field vcs');
+  for (const rel of ['forge-auto/SKILL.md', 'forge-next/SKILL.md', 'forge-task/SKILL.md']) {
+    const text = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'skills', rel), 'utf8');
+    assert(!text.includes('${DISPATCH_VCS:-git}'), `(e) ${rel} never converts none/unknown into git`);
+  }
+  assert(!dispatchSpec.includes('|| echo "git"'), '(e) detector failure is named unknown, never git');
 
   const source = fs.readFileSync(__filename, 'utf8');
   const mainBody = source.slice(source.lastIndexOf('async function main()'));
@@ -11638,10 +11683,10 @@ function smokeHierarchyDerived() {
   // (a) containmentCounts is transitive and separator-guarded: a grandparent
   //     counts a grandchild, and a sibling with the same prefix does not fool
   //     the separator check.
-  const grand = '/a/Dev';
-  const parent = '/a/Dev/mid';
-  const child = '/a/Dev/mid/leaf';
-  const sibling = '/a/Development'; // shares the "/a/Dev" prefix but is not under it
+  const grand = path.resolve('/a/Dev');
+  const parent = path.resolve('/a/Dev/mid');
+  const child = path.resolve('/a/Dev/mid/leaf');
+  const sibling = path.resolve('/a/Development'); // shares the "/a/Dev" prefix but is not under it
   const counts = containmentCounts([grand, parent, child, sibling]);
   assert(counts[grand] === 2, '(a) the grandparent counts both the mid child and the deep grandchild', JSON.stringify(counts));
   assert(counts[parent] === 1, '(a) the parent counts only its direct child', JSON.stringify(counts));
@@ -11653,11 +11698,11 @@ function smokeHierarchyDerived() {
   // (b) resolveRole across the four cases, with classifyFn injected so no disk
   //     is touched: workspace, project, folder (including the touched-below
   //     case), null.
-  const rootPath = '/home/dev/lookchina';
-  const memberPath = '/home/dev/lookchina/apps/odin';
-  const touchedPath = '/home/dev/lookchina/services'; // registered as touched, not itself active
-  const foldersOnly = '/home/dev/lookchina/apps'; // never a project, sits above an active member
-  const unrelated = '/home/dev/elsewhere';
+  const rootPath = path.resolve('/home/dev/lookchina');
+  const memberPath = path.resolve('/home/dev/lookchina/apps/odin');
+  const touchedPath = path.resolve('/home/dev/lookchina/services'); // registered as touched, not itself active
+  const foldersOnly = path.resolve('/home/dev/lookchina/apps'); // never a project, sits above an active member
+  const unrelated = path.resolve('/home/dev/elsewhere');
   const classifyFn = p => ({
     kind: (p === rootPath || p === memberPath) ? 'project' : 'none',
     signals: [],
@@ -11936,10 +11981,11 @@ function smokeMultiRepoResolution() {
     ]);
     let withIndexJson = {}; try { withIndexJson = JSON.parse(withIndex.stdout); } catch { withIndexJson = {}; }
     assert(withIndex.status === 5 && withIndexJson.status === 'undeclared'
-      && withIndexJson.declared_repo_status === 'unisolated' && withIndexJson.declared_repo_path === freyr,
+      && withIndexJson.declared_repo_status === 'unisolated' && samePath(withIndexJson.declared_repo_path, freyr),
       '(g) with the index, repo: freyr ADDRESSES to the exact path (unisolated, not unknown) even with no worktree for it',
       JSON.stringify(withIndexJson));
-    assert(typeof withIndexJson.hint === 'string' && withIndexJson.hint.includes(freyr),
+    assert(typeof withIndexJson.hint === 'string'
+      && portableRel(withIndexJson.hint).toLowerCase().includes(portableRel(freyr).toLowerCase()),
       '(g) the refusal hint names the resolved absolute path', withIndexJson.hint);
 
     const withoutIndex = runScript('forge-code-dir.js', [
@@ -13480,7 +13526,11 @@ async function smokeCapabilityPerTurn() {
   process.stdout.write('\n▸ Section 94: capability por turn (mock app-server + guidance)\n');
   const dir = mkTmp('capability-per-turn');
   const { buildExecutePrompt, buildPlanPrompt } = require('./forge-xllm');
-  const expectedPolicies = {
+  const expectedPolicies = process.platform === 'win32' ? {
+    readonly: { type: 'readOnly', networkAccess: false },
+    workspace: { type: 'dangerFullAccess' },
+    networked: { type: 'dangerFullAccess' },
+  } : {
     readonly: { type: 'readOnly', networkAccess: false },
     workspace: { type: 'workspaceWrite', networkAccess: false },
     networked: { type: 'workspaceWrite', networkAccess: true },
@@ -13537,7 +13587,9 @@ async function smokeCapabilityPerTurn() {
     }
 
     const legacy = runFixture('legacy', null);
-    const legacyLiteral = { type: 'workspaceWrite', networkAccess: false };
+    const legacyLiteral = process.platform === 'win32'
+      ? { type: 'dangerFullAccess' }
+      : { type: 'workspaceWrite', networkAccess: false };
     assert(legacy.r.status === 0, '(b) plano legado sem capability termina 0', `stderr=${legacy.r.stderr}`);
     assert(!!legacy.params && JSON.stringify(legacy.params.sandboxPolicy) === JSON.stringify(legacyLiteral),
       '(b) plano legado preserva o literal exato workspaceWrite/networkAccess:false', JSON.stringify(legacy.params));
@@ -16477,6 +16529,9 @@ function smokeRewriteCeilingAndE2E() {
       const binPath = path.join(binDir, bin);
       fs.writeFileSync(binPath, shimSrc, 'utf8');
       fs.chmodSync(binPath, 0o755);
+      if (process.platform === 'win32') {
+        fs.writeFileSync(`${binPath}.cmd`, `@node "%~dp0\\${bin}" %*\r\n`, 'utf8');
+      }
     }
 
     let candidatesSent = 0;

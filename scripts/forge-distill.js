@@ -34,7 +34,7 @@ function readSourceText(file) { return fs.readFileSync(file, 'utf8').replace(/\r
 // Resolve the wrapper root where the wrapper actually lives. The previous version
 // built `.gsd/milestones/<id>` unconditionally, so every wrapper under `.gsd/tasks/`
 // was refused as `wrapper-not-found` and never reached the distiller at all
-// (measured on the WDMA sweep: 189 of 266 wrappers). The fallback returns the
+// (measured on the protected-wc sweep: 189 of 266 wrappers). The fallback returns the
 // milestones path so the original `wrapper-not-found` message and detail survive.
 function wrapperRoot(cwd, unitId) {
   const ms = path.join(cwd, '.gsd', 'milestones', unitId);
@@ -44,7 +44,7 @@ function wrapperRoot(cwd, unitId) {
   return ms;
 }
 // Locate a root artifact by SUFFIX instead of demanding the exact `<id>-<TYPE>.md`
-// name. Measured on the same WDMA sweep: several wrappers store the SUMMARY without
+// name. Measured on the same protected-wc sweep: several wrappers store the SUMMARY without
 // the slug in the file name (`M-20260529-151715-extracao-controllers/` holds
 // `M-20260529-151715-SUMMARY.md`), so the exact name never matched and the richest
 // source file entered the plan as `absent`.
@@ -66,7 +66,7 @@ function wrapperRoot(cwd, unitId) {
 // because the canonical SUMMARY coexists (2 matches). Alone in a wrapper, it would
 // have been read as THE unit summary and written into permanent memory moments
 // before the wrapper is deleted. So the stem (basename minus suffix) must be a
-// PREFIX of the unitId — which accepts the canonical name and the shortened WDMA
+// PREFIX of the unitId — which accepts the canonical name and the shortened protected-wc
 // form (`M-20260811134201` is a prefix of `M-20260811134201-controle-contexto-gsd`)
 // and refuses `review-fix-triage` with a NAMED refusal (data in an exit-0 plan,
 // never a throw). Same asymmetry as above: a refusal costs one manual look.
@@ -125,11 +125,11 @@ function sourceFiles(cwd, milestoneId) {
 // and last quote stripped by regex, so `key: ["first", "second"]` produced the
 // corrupted candidate `first", "second` — YAML syntax residue presented as fact
 // text, in silence. That form is alive in this repo's own generator output
-// (`provides: ["a", "b"]` in a T##-SUMMARY.md), and the WDMA population was never
+// (`provides: ["a", "b"]` in a T##-SUMMARY.md), and the protected-wc population was never
 // measured for item multiplicity, so the reach is real, not hypothetical.
 //
 // Three closed cases, and nothing else is guessed:
-//   - no quote character at all -> ONE item, commas intact (the measured WDMA
+//   - no quote character at all -> ONE item, commas intact (the measured protected-wc
 //     form `[payload whitelisted {reason, status?}]`; splitting it would cut a
 //     fact in half, and that behaviour stays pinned by test).
 //   - every item fully quoted -> N items, quote-aware (a comma inside quotes
@@ -175,7 +175,7 @@ function arrayValues(text, key, refusals) {
       // INLINE YAML form: `key: [content]` on the same line. The original only
       // understood the block list (`key:` followed by `  - item`), so wrappers
       // written with `key_decisions: [...]` extracted ZERO — no error, no warning
-      // (measured on the WDMA sweep: 9 task wrappers).
+      // (measured on the protected-wc sweep: 9 task wrappers).
       // Parsing is delegated to parseInlineFlow — see the three closed cases
       // documented above it. A bare item keeps its commas; a fully quoted flow
       // yields N items; anything else is refused by name.
@@ -194,7 +194,7 @@ function arrayValues(text, key, refusals) {
   return values;
 }
 // Bullets under a bold label (`**Entregas:**`, `**Key Deliverables:**`). Measured
-// on the WDMA sweep: the SUMMARY files without frontmatter — the ones the original
+// on the protected-wc sweep: the SUMMARY files without frontmatter — the ones the original
 // extractor classified as "no recognised source" — are precisely the richest; one
 // of them holds 18 delivery bullets, each naming the file touched and what changed.
 // The capture stops at the first heading or at the next bold label, so it never
@@ -279,7 +279,7 @@ function extractSource(spec, refusals) {
 // path takes the total from 468 to 533 candidates — 1.14x, far from the 3x that named
 // the ANY class explosive elsewhere — but it does lift TWO units from under 100
 // verdicts to over it (87 -> 113 and 93 -> 120). 100 is not a taste call: it is the
-// order of magnitude of the WDMA wrapper that raised the alarm (137 verdicts), and a
+// order of magnitude of the protected-wc wrapper that raised the alarm (137 verdicts), and a
 // unit whose distillation demands that many judgments is not arbitrable in one pass.
 //
 // So the ANY candidates are admitted in order until the unit reaches the cap, and the

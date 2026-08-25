@@ -1533,10 +1533,10 @@ Before the success/failure boundary, a valid result with `status:"partial"` runs
 This one-liner lives here and nowhere else; mirrors reference this section by name and never replicate the command. Every `dispatch` event emitter resolves the `vcs` field for its telemetry line with:
 
 ```bash
-DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "git")
+DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
 ```
 
-`--field vcs` makes `forge-vcs.js --detect` print the raw value instead of the JSON envelope, so the mirror line is a single command with no inline JSON parsing. On any failure (missing script, non-zero exit, empty stdout) the `|| echo "git"` fallback keeps the telemetry field populated with the safe git default rather than emitting nothing.
+`--field vcs` makes `forge-vcs.js --detect` print the observed `git`, `svn`, or `none` value instead of the JSON envelope. A detector/tooling failure is separately named `unknown`; it never impersonates Git. Consumers that require a supported VCS must refuse `none|unknown` explicitly.
 
 #### Post-run change set + baseline (canonical — VCS-agnostic)
 

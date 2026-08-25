@@ -109,18 +109,16 @@ Given all `T##-SUMMARY.md` files from the slice:
 
 1.6. **File audit — write `## File Audit` section to `S##-SUMMARY.md`** (advisory; always runs regardless of `evidence.mode`).
 
-    a. **Determine the slice diff set.** Use `git diff --name-only --diff-filter=AM` from the merge-base of the run branch to HEAD. On the run branch `forge/{run}` (there is no per-slice branch — the isolation setup creates one branch per run):
+    a. **Determine the slice diff set through the VCS seam.** Resolve the helper beside the installed Forge scripts and run it from the project root:
        ```bash
-       git diff --name-only --diff-filter=AM "$(git merge-base HEAD master)...HEAD"
+       FORGE_SCRIPTS_DIR=$([ -f scripts/forge-completer-artifacts.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+       node "$FORGE_SCRIPTS_DIR/forge-completer-artifacts.js" --actual-am --cwd "{WORKING_DIR}"
        ```
-       If `master` does not resolve, try `main`, then `origin/HEAD`, then fall back to working-tree diff:
-       ```bash
-       # Fallback (auto_commit: false or no run branch):
-       git diff --name-only --diff-filter=AM HEAD
-       # Plus untracked files (git diff doesn't show these):
-       git ls-files --others --exclude-standard
-       ```
-       Collect all paths into a Set → `ACTUAL_AM`. Wrap in try/catch — git failure silently yields an empty set.
+       The helper preserves the Git branch/working-copy behavior and uses SVN
+       working status for an SVN WC. Collect stdout paths into a Set → `ACTUAL_AM`.
+       On a nonzero exit, record `file-audit-unavailable:<backend>` from stderr in
+       `## File Audit`; do not replace it with an empty successful set and do not
+       invoke Git as a fallback.
 
     b. **Build expected_output union.** For each `T##-PLAN.md` under `.gsd/milestones/M###/slices/S##/tasks/T##/`:
        ```bash

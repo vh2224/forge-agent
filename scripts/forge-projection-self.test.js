@@ -29,8 +29,14 @@ const claude = require('./forge-claude-renderer');
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
+const SKIP = Symbol('skip');
+const symlinkUnavailable = (error) => ['EPERM', 'EACCES', 'UNKNOWN'].includes(error && error.code);
 function test(name, fn) {
-  try { fn(); passed++; console.log(`  ✓ ${name}`); }
+  try {
+    if (fn() === SKIP) { skipped++; console.log(`  ⊘ ${name} (file symlink unavailable)`); }
+    else { passed++; console.log(`  ✓ ${name}`); }
+  }
   catch (e) { failed++; console.error(`  ✗ ${name}\n    ${e.message}`); }
 }
 
@@ -72,7 +78,11 @@ test('um symlink que aponta para a fonte é a fonte', () => {
   // caso comum) compararia desigual a si mesmo sem resolução real.
   const repo = box();
   const link = path.join(repo, 'LINKED.md');
-  fs.symlinkSync(path.join(repo, 'CLAUDE.md'), link);
+  try { fs.symlinkSync(path.join(repo, 'CLAUDE.md'), link); }
+  catch (error) {
+    if (symlinkUnavailable(error)) return SKIP;
+    throw error;
+  }
   assert.strictEqual(
     self.isSelfProjection({ repo, source: 'CLAUDE.md', destination: link }),
     true);
@@ -128,5 +138,5 @@ test('a recusa vem ANTES da decisão de propriedade, não depois', () => {
     'o CLAUDE.md apareceu como conflict — a cerca certa não é "user_owned"');
 });
 
-console.log(`\n  ${passed} passed, ${failed} failed\n`);
+console.log(`\n  ${passed} passed, ${failed} failed, ${skipped} skipped\n`);
 process.exit(failed === 0 ? 0 : 1);

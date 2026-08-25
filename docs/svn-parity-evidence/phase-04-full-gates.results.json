@@ -1,0 +1,14 @@
+{
+  "schema": "forge-svn-evidence/v1",
+  "source": "docs/svn-parity-evidence/phase-04-full-gates.md",
+  "claims": {
+    "svn-focused": {
+      "result": "passed",
+      "description": "All documented SVN-focused gates and the capability auditor exited successfully."
+    },
+    "repository-global": {
+      "result": "non-green",
+      "description": "The complete repository gates remained non-green because of reproduced base/environment failures."
+    }
+  }
+}

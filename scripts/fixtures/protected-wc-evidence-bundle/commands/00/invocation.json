@@ -1,0 +1,21 @@
+{
+  "executable": "svn",
+  "argv": [
+    "info",
+    "--xml",
+    "."
+  ],
+  "exit": 0,
+  "signal": null,
+  "error": null,
+  "stdout": {
+    "bytes": 25,
+    "sha256": "5c547888ca622266a2bbf94dd77ee5aebdb281f81d58abe3d6e7290484148e7a",
+    "encoding": "utf8"
+  },
+  "stderr": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "encoding": "utf8"
+  }
+}

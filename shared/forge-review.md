@@ -315,8 +315,8 @@ If `{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-REVIEW.md` already e
 
 ## Step 1 — Compute the slice diff
 
-Detect the VCS of `WORKING_DIR` first, then compute `DIFF_CMD` accordingly. Git is the default
-(run-branch range, `auto_commit: true`, branch still unmerged). SVN working copies have no
+Detect the VCS of `WORKING_DIR` first, then compute `DIFF_CMD` accordingly. Git uses the
+run-branch range (`auto_commit: true`, branch still unmerged). SVN working copies have no
 run branch and no merge-base — the team works on trunk and holds commits — so the reviewable
 change is the uncommitted working copy. Run this from INSIDE `WORKING_DIR` (the diff target lives there).
 
@@ -336,8 +336,9 @@ elif svn info >/dev/null 2>&1; then
   # happens to print its usage text.
   SCOPE_REPORT=$(eval "$DIFF_CMD" --scope-report 2>/dev/null || echo "")
 else
-  # unknown VCS (or CLI absent) — degrade to the no-diff path below, never error.
-  DIFF_CMD="git diff HEAD"
+  # No VCS (or detection unavailable) is not Git and is not a clean review.
+  VCS_UNAVAILABLE_REASON="vcs-unavailable:none-or-detection-failed"
+  DIFF_CMD=""
 fi
 ```
 
@@ -370,7 +371,9 @@ Disclose it in the artifact, including `excluded`: a review that skipped files m
 that found nothing. A `reason` of `unscoped:*` means the manifest did not apply and the whole working
 copy was read — the operator has to be able to see that.
 
-If `$DIFF_CMD` still produces no changes → write a minimal `{S##}-REVIEW.md` stating "no diff to review" and proceed. Do not dispatch agents.
+If `$VCS_UNAVAILABLE_REASON` is set → write a minimal `{S##}-REVIEW.md` containing that exact reason and stating that no review ran because no supported VCS could be observed. Proceed without dispatching agents, but never label this path clean or "no diff".
+
+Otherwise, if `$DIFF_CMD` produces no changes → write a minimal `{S##}-REVIEW.md` stating "no diff to review" and proceed. Do not dispatch agents.
 
 ## Step 1.5 — Deterministic cost policy
 

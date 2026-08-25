@@ -1319,7 +1319,7 @@ test('unmet_requirement: an explicit worktree pref + require_worktree:false is S
     });
 });
 
-test('unmet_requirement: require_worktree:auto + an external write engine names asked_by AND write_engine (the WDMA case)', () => {
+test('unmet_requirement: require_worktree:auto + an external write engine names asked_by AND write_engine (the protected-wc case)', () => {
   withSvn({ forge_isolation: { auto_pull_main: false }, workers: { require_worktree: 'auto', 'execute-task': 'codex' } },
     { members: [] }, (s) => {
       const eff = resolveEffectiveMode(s.ws);

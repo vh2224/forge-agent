@@ -1104,7 +1104,7 @@ process.stdin.on('end', () => {
     //
     // S01/T06: the OWNER is resolved BEFORE the unit — never the raw cwd.
     // Without this order the branch below can `mkdirSync` a fresh `.gsd/` at
-    // whatever directory the shell happened to be anchored in (the SVN/WDMA
+    // whatever directory the shell happened to be anchored in (the SVN/protected-wc
     // orphans this task closes). When no owner resolves, `mkdirSync` is
     // UNREACHABLE: the whole branch returns instead — never "create one here".
     if (phase === 'post' && (toolName === 'Bash' || toolName === 'Write' || toolName === 'Edit')) {

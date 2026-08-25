@@ -8,7 +8,13 @@ const child = require('child_process');
 const audit = require('./forge-route-audit');
 
 let passed = 0;
-function test(name, fn) { fn(); passed++; process.stdout.write(`✓ ${name}\n`); }
+let skipped = 0;
+const SKIP = Symbol('skip');
+const symlinkUnavailable = (error) => ['EPERM', 'EACCES', 'UNKNOWN'].includes(error && error.code);
+function test(name, fn) {
+  if (fn() === SKIP) { skipped++; process.stdout.write(`⊘ ${name} (file symlink unavailable)\n`); }
+  else { passed++; process.stdout.write(`✓ ${name}\n`); }
+}
 function event(eventName, extra) { return { event: eventName, milestone: 'M127', slice: 'S03', unit: 'execute-task/T01', ...extra }; }
 
 test('fallback aggregation retains a single composite unit and both engines', () => {
@@ -100,7 +106,12 @@ test('write guard refuses a missing summary and a symlink without throwing', () 
   const real = path.join(dir, 'real.md');
   const link = path.join(gsd, 'link.md');
   fs.writeFileSync(real, 'x\n');
-  fs.symlinkSync(real, link);
+  try { fs.symlinkSync(real, link); }
+  catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (symlinkUnavailable(error)) return SKIP;
+    throw error;
+  }
   assert.equal(audit.upsertRouteSection(link, '## Route\n', dir).written, false);
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -149,4 +160,4 @@ test('normalization rejects unknown casing and values', () => {
   ];
   for (const [input, output] of cases) assert.equal(audit.normalizeEngine(input), output);
 });
-process.stdout.write(`${passed} route-audit tests passed\n`);
+process.stdout.write(`${passed} route-audit tests passed, ${skipped} skipped\n`);
