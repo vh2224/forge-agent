@@ -13,10 +13,12 @@
 const fs = require('fs');
 const path = require('path');
 const {
+  baselineEntriesForSuites,
   compareFailures,
   discoverTests,
   parseArgs,
   resolveBaseline,
+  suitesForShard,
   BASELINE_PLATFORMS,
 } = require('./run-tests.js');
 
@@ -61,6 +63,8 @@ process.stdout.write('Section 1: parseArgs (--baseline is additive)\n');
 {
   const legacy = parseArgs([]);
   assertEqual(legacy.baseline, null, 'no flag -> options.baseline is null (legacy path untouched)');
+  assertEqual(legacy.shardIndex, null, 'no flag -> options.shardIndex is null (legacy path untouched)');
+  assertEqual(legacy.shardCount, null, 'no flag -> options.shardCount is null (legacy path untouched)');
 
   const withFlag = parseArgs(['--baseline', 'scripts/fixtures/ci-baseline/known-failures.json']);
   assertEqual(withFlag.baseline, 'scripts/fixtures/ci-baseline/known-failures.json', '--baseline captures its file path');
@@ -79,6 +83,26 @@ process.stdout.write('Section 1: parseArgs (--baseline is additive)\n');
     mixed.list && mixed.failFast && mixed.verbose && mixed.inheritHome && mixed.matches[0] === 'foo',
     'legacy flags unaffected by the new option'
   );
+
+  const sharded = parseArgs(['--shard-index', '1', '--shard-count', '3']);
+  assertEqual(sharded.shardIndex, 1, '--shard-index captures a zero-based index');
+  assertEqual(sharded.shardCount, 3, '--shard-count captures the partition count');
+
+  for (const [argv, message] of [
+    [['--shard-index', '0'], 'both shard flags are required (missing count)'],
+    [['--shard-count', '2'], 'both shard flags are required (missing index)'],
+    [['--shard-index', '-1', '--shard-count', '2'], 'negative shard index is rejected'],
+    [['--shard-index', '0.5', '--shard-count', '2'], 'fractional shard index is rejected'],
+    [['--shard-index', 'two', '--shard-count', '2'], 'non-numeric shard index is rejected'],
+    [['--shard-index', '0', '--shard-count', '0'], 'zero shard count is rejected'],
+    [['--shard-index', '2', '--shard-count', '2'], 'index equal to count is rejected'],
+    [['--shard-index', '0', '--shard-index', '1', '--shard-count', '2'], 'duplicate shard flag is rejected'],
+    [['--shard-index', '9007199254740992', '--shard-count', '9007199254740993'], 'unsafe integers are rejected'],
+  ]) {
+    let shardThrew = false;
+    try { parseArgs(argv); } catch { shardThrew = true; }
+    assert(shardThrew, message);
+  }
 }
 
 // --- Section 2: resolveBaseline (named failures, never silent) --------------
@@ -292,6 +316,79 @@ process.stdout.write('Section 5: fixture integrity against the suites on disk\n'
   const linux = resolveBaseline({ text, platform: 'linux', availableSuites: realSuites });
   assert(darwin.ok && darwin.entries.length === 0, 'darwin baseline is explicitly empty');
   assert(linux.ok && linux.entries.length === 0, 'linux baseline is explicitly empty');
+}
+
+// --- Section 6: deterministic, complete, disjoint sharding -----------------
+process.stdout.write('Section 6: deterministic suite sharding\n');
+{
+  const suites = Array.from({ length: 17 }, (_, index) => `suite-${String(index).padStart(2, '0')}.test.js`);
+  const shards = Array.from({ length: 4 }, (_, index) => suitesForShard(suites, index, 4));
+
+  assertEqual(shards[0], suitesForShard(suites, 0, 4), 'same input and shard coordinates produce the same selection');
+  assertEqual(suites, Array.from({ length: 17 }, (_, index) => `suite-${String(index).padStart(2, '0')}.test.js`), 'sharding does not mutate the canonical suite list');
+
+  const flattened = shards.flat();
+  const membership = new Map(suites.map(suite => [suite, flattened.filter(candidate => candidate === suite).length]));
+  assert(
+    [...membership.values()].every(count => count === 1),
+    'every suite belongs to exactly one shard (complete coverage without duplication)'
+  );
+  assertEqual([...new Set(flattened)].sort(), [...suites].sort(), 'union of all shards equals the complete suite universe');
+
+  const sizes = shards.map(shard => shard.length);
+  assert(Math.max(...sizes) - Math.min(...sizes) <= 1, 'shard suite counts differ by at most one');
+  assertEqual(suitesForShard(['only.test.js'], 1, 3), [], 'a valid shard may be empty when count exceeds suite count');
+}
+
+// --- Section 7: shard-aware bidirectional baseline -------------------------
+process.stdout.write('Section 7: shard-aware baseline comparison\n');
+{
+  const entries = AVAILABLE.map(entry);
+  const shardZeroSuites = suitesForShard(AVAILABLE, 0, 2);
+  const shardOneSuites = suitesForShard(AVAILABLE, 1, 2);
+  const shardZeroBaseline = baselineEntriesForSuites(entries, shardZeroSuites);
+  const shardOneBaseline = baselineEntriesForSuites(entries, shardOneSuites);
+
+  assertEqual(shardZeroBaseline.map(item => item.suite), ['a.test.js', 'c.test.js'], 'shard 0 keeps only baseline entries for suites it executes');
+  assertEqual(shardOneBaseline.map(item => item.suite), ['b.test.js', 'd.test.js'], 'shard 1 keeps only baseline entries for suites it executes');
+
+  const zeroVerdict = compareFailures({
+    executedCount: shardZeroSuites.length,
+    failedSuites: shardZeroSuites,
+    baselineSuites: shardZeroBaseline.map(item => item.suite),
+  });
+  assert(zeroVerdict.ok === true, 'entries owned by another shard are not reported stale in shard 0');
+
+  const oneVerdict = compareFailures({
+    executedCount: shardOneSuites.length,
+    failedSuites: shardOneSuites,
+    baselineSuites: shardOneBaseline.map(item => item.suite),
+  });
+  assert(oneVerdict.ok === true, 'entries owned by another shard are not reported stale in shard 1');
+
+  const staleWithinShard = compareFailures({
+    executedCount: shardZeroSuites.length,
+    failedSuites: ['a.test.js'],
+    baselineSuites: shardZeroBaseline.map(item => item.suite),
+  });
+  assertEqual(staleWithinShard.staleEntries, ['c.test.js'], 'a cured entry still blocks in the shard that owns it');
+
+  const resolvedWithCrossShardEntries = resolveBaseline({
+    text: doc(entries),
+    platform: 'win32',
+    availableSuites: AVAILABLE,
+  });
+  assert(resolvedWithCrossShardEntries.ok === true, 'baseline is validated against the full universe before shard filtering');
+
+  const ghostOutsideShard = resolveBaseline({
+    text: doc([...entries, entry('ghost.test.js')]),
+    platform: 'win32',
+    availableSuites: AVAILABLE,
+  });
+  assert(
+    ghostOutsideShard.ok === false && ghostOutsideShard.errors.some(error => error.includes('ghost.test.js')),
+    'a ghost entry is rejected even when it would not belong to the current shard'
+  );
 }
 
 process.stdout.write(`\n${passes} passed, ${fails} failed\n`);
