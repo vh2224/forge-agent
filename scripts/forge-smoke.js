@@ -11981,10 +11981,11 @@ function smokeMultiRepoResolution() {
     ]);
     let withIndexJson = {}; try { withIndexJson = JSON.parse(withIndex.stdout); } catch { withIndexJson = {}; }
     assert(withIndex.status === 5 && withIndexJson.status === 'undeclared'
-      && withIndexJson.declared_repo_status === 'unisolated' && withIndexJson.declared_repo_path === freyr,
+      && withIndexJson.declared_repo_status === 'unisolated' && samePath(withIndexJson.declared_repo_path, freyr),
       '(g) with the index, repo: freyr ADDRESSES to the exact path (unisolated, not unknown) even with no worktree for it',
       JSON.stringify(withIndexJson));
-    assert(typeof withIndexJson.hint === 'string' && withIndexJson.hint.includes(freyr),
+    assert(typeof withIndexJson.hint === 'string'
+      && portableRel(withIndexJson.hint).toLowerCase().includes(portableRel(freyr).toLowerCase()),
       '(g) the refusal hint names the resolved absolute path', withIndexJson.hint);
 
     const withoutIndex = runScript('forge-code-dir.js', [

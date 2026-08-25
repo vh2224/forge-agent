@@ -644,8 +644,10 @@ function svnRestoreAndRemove(cwd, baseline, target, opts) { // baseline is inten
     try { return fs.statSync(path.resolve(cwd, p)).isDirectory(); } catch { return false; }
   };
   const hasPreservedDescendant = (dirPath) => {
-    const prefix = `${dirPath}/`;
-    for (const preserved of preservedSet) if (preserved.startsWith(prefix)) return true;
+    const prefix = `${String(dirPath).replace(/\\/g, '/')}/`;
+    for (const preserved of preservedSet) {
+      if (String(preserved).replace(/\\/g, '/').startsWith(prefix)) return true;
+    }
     return false;
   };
   const infinityPaths = [];
