@@ -327,17 +327,10 @@ como pass.
 
 ## Estado atual
 
-- **Milestone ativo:** — (nenhum em curso).
-- **Master:** verde — 39 dos últimos 40 runs de CI passando nas três plataformas (medido
-  2026-08-23); o vermelho herdado dos merges #91/#94/#98 foi fechado nas semanas seguintes.
-- **Suíte local:** 213/214 — única falha conhecida: `forge-update.test.js` hardcoda
-  `origin/master` e quebra em máquina com `init.defaultBranch=main` (a defesa já existe em
-  `forge-curate-skill.test.js:82`; aplicar o mesmo padrão).
-- **Backlog:** `.gsd/items/` (14 abertos) — destaque: heap/RSS (`I-20260814021202`,
-  `I-20260815042402`), 5 flakies (`I-20260814142227`), `discoverRepos` 1 nível
-  (`I-20260803060030`).
-- **Em curso:** P0 do diagnóstico de 2026-08-23 — verification gate no-op (133/133 sem
-  comando), dieta de contexto (este arquivo), effort decorativo, gates advisory inertes.
+- **Milestone ativo:** M-20260825215030-paridade-host-worker — Paridade host/worker no dispatch multi-LLM
+- **Slice ativo:** S04 — Dialeto Codex no renderer — o fence de dispatch, inerte por construção
+- **Fase:** execute
+- **Próxima ação:** Executar `/forge-next` para iniciar S04.
 
 
 ## GSD — Início de sessão obrigatório (dogfood)
