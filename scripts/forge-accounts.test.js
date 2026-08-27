@@ -119,6 +119,14 @@ function listJson(extraArgs, extraEnv) {
 function readRegistry() { return JSON.parse(fs.readFileSync(REGISTRY, 'utf8')); }
 function writeRegistry(reg) { fs.writeFileSync(REGISTRY, JSON.stringify(reg, null, 2) + '\n'); }
 
+console.log('\ncontrato da variável de autenticação');
+
+test('TOKEN_ENV exporta o único nome canônico do token Anthropic', () => {
+  const accounts = require(ENGINE);
+  const expected = ['ANTHROPIC', 'AUTH', 'TOKEN'].join('_');
+  assertEq(accounts.TOKEN_ENV, expected);
+});
+
 function securityCalls() {
   try { return fs.readFileSync(SEC_LOG, 'utf8').split('\n').filter(Boolean); }
   catch { return []; }

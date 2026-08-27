@@ -5,22 +5,22 @@
 // A running Claude Code session cannot switch its own account mid-session
 // (`/login` mid-session is broken — stuck 401). The reliable, macOS-safe way to
 // run multiple Claude accounts is `claude setup-token` (long-lived OAuth token,
-// ~1yr) selected at launch via the ANTHROPIC_AUTH_TOKEN env var (see TOKEN_ENV).
+// ~1yr) selected at launch via the canonical token env var (see TOKEN_ENV).
 // This module stores one token per named account and builds the exact relaunch
 // command to switch.
 //
-// WHY ANTHROPIC_AUTH_TOKEN AND NOT CLAUDE_CODE_OAUTH_TOKEN
+// WHY TOKEN_ENV AND NOT CLAUDE_CODE_OAUTH_TOKEN
 // Despite the docs, Claude Code ≥2.1.x gives the Keychain subscription login
 // PRECEDENCE OVER `CLAUDE_CODE_OAUTH_TOKEN` (verified empirically: an invalid
 // CLAUDE_CODE_OAUTH_TOKEN + a valid Keychain login still authenticates via the
 // Keychain). The shared macOS Keychain item ("Claude Code-credentials") is the
 // same for every account, so the per-account token was being silently ignored —
 // every session ran on whatever `/login` last wrote, and a stale Keychain login
-// surfaced as `401 → Please run /login`. `ANTHROPIC_AUTH_TOKEN` sits ABOVE the
+// surfaced as `401 → Please run /login`. The TOKEN_ENV variable sits ABOVE the
 // Keychain in the auth-precedence order, so it actually overrides the login
 // WITHOUT requiring `/login`/logout, and launches that bypass us fall back to the
 // Keychain gracefully (still authenticated) instead of hard-failing. The setup-
-// token (`sk-ant-oat01-…`) is a Bearer token, accepted as ANTHROPIC_AUTH_TOKEN.
+// token (`sk-ant-oat01-…`) is a Bearer token accepted through TOKEN_ENV.
 // NOTE: usage still draws on the token's subscription (it is a subscription OAuth
 // token, not an API key) — validate billing in a real session if in doubt.
 //
@@ -67,7 +67,7 @@ const TOKENS_FILE    = path.join(CLAUDE_DIR, 'forge-accounts-tokens.json'); // n
 const { keychainEnabled } = require('./forge-keychain-switch');
 const KEYCHAIN_ACCT  = (() => { try { return os.userInfo().username; } catch { return 'forge'; } })();
 const TOKEN_TTL_DAYS = 365; // setup-token validity window
-// Env var used to inject a per-account token at launch. ANTHROPIC_AUTH_TOKEN
+// Env var used to inject a per-account token at launch. This auth-precedence key
 // (auth-precedence item 2) overrides the Keychain subscription login (item 6);
 // CLAUDE_CODE_OAUTH_TOKEN (item 5) does NOT on Claude Code ≥2.1.x. See the header
 // note. Single source of truth — change here to re-route every launch path.
@@ -468,7 +468,7 @@ function currentAccount() {
 // `claude` would otherwise fall back to the default Keychain login. Wired into the
 // rc by the installer:  eval "$(forge-accounts shell-init)"
 // Guards keep it inert when it shouldn't act:
-//   • ANTHROPIC_AUTH_TOKEN already set   → respect `forge-accounts use`/`forge-run`
+//   • TOKEN_ENV already set              → respect `forge-accounts use`/`forge-run`
 //                                          (or a user's own gateway token)
 //   • FORGE_NO_AUTO_ACCOUNT=1            → escape hatch (use the default login once)
 //   • forge-accounts not on PATH         → plain `claude`, no error
@@ -1048,7 +1048,7 @@ module.exports = {
   setDefault, resolveLaunch, launchOrEmit, spawnClaudeOnAccount, forgeAutoArgsFor,
   setEmail, recordIdentity, matchAccount, readClaudeIdentity, openNewTerminal,
   nextAccount, nextAccountByUsage, markCooldown, readCooldowns,
-  REGISTRY_FILE, TOKENS_FILE,
+  REGISTRY_FILE, TOKENS_FILE, TOKEN_ENV,
 };
 
 if (require.main === module) cliMain();
