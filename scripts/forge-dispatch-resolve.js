@@ -37,7 +37,8 @@ const { readTierChain, defaultTierModel } = require('./forge-tier-chain.js');
 // readers drift apart. Requires whitespace before the `#`, which is what
 // separates a comment from a `#` inside the value.
 const { stripInlineComment } = require('./forge-must-haves.js');
-const { resolveWorker, RuntimeContractError } = require('./forge-runtime.js');
+const { resolveWorkerIdentity, resolveWorker, RuntimeContractError } = require('./forge-runtime.js');
+const { evaluateDispatchGuard } = require('./forge-dispatch-guard.js');
 
 const TIER_DEFAULTS = {
   'memory-extract': 'light',
@@ -205,35 +206,37 @@ function sidecarModelFor(dispatchEngine, chain, codexModel) {
 // projects the host/worker axes introduced by forge-runtime.  Accept both the
 // library's camelCase convention and the wire-format snake_case names: this
 // keeps direct JSON callers from needing a second adapter.
-function runtimeInputValue(opts, camel, snake) {
-  if (Object.prototype.hasOwnProperty.call(opts, camel)) return opts[camel];
-  return opts[snake];
+function runtimeInput(opts, camel, snake) {
+  if (Object.prototype.hasOwnProperty.call(opts, camel)) return { provided: true, value: opts[camel] };
+  if (Object.prototype.hasOwnProperty.call(opts, snake)) return { provided: true, value: opts[snake] };
+  return { provided: false, value: undefined };
 }
 
 function runtimeFields(opts, dispatchEngine) {
   const o = opts || {};
+  const hostRuntime = runtimeInput(o, 'hostRuntime', 'host_runtime');
+  const workerEngine = runtimeInput(o, 'workerEngine', 'worker_engine');
+  const workerMode = runtimeInput(o, 'workerMode', 'worker_mode');
+  const sidecarDeclared = runtimeInput(o, 'sidecarDeclared', 'sidecar_declared');
   const input = {
-    host_runtime: runtimeInputValue(o, 'hostRuntime', 'host_runtime'),
-    worker_engine: runtimeInputValue(o, 'workerEngine', 'worker_engine'),
-    worker_mode: runtimeInputValue(o, 'workerMode', 'worker_mode'),
-    sidecar_declared: runtimeInputValue(o, 'sidecarDeclared', 'sidecar_declared'),
+    host_runtime: hostRuntime.value,
+    worker_engine: workerEngine.value,
+    worker_mode: workerMode.value,
+    sidecar_declared: sidecarDeclared.value,
     sidecar: o.sidecar,
   };
-  // The legacy dispatch branch still treats a routed Codex member as a
-  // sidecar. On a Codex host that would recurse unless the caller declared
-  // it, so project that effective worker before asking the canonical runtime
-  // validator. The omitted-host Claude path remains byte-compatible.
-  // A routed Codex member is the legacy default sidecar only when the caller
-  // omitted both worker axes.  Never overwrite an explicit worker target or
-  // mode: the host/worker contract must be able to diagnose a mismatch (or
-  // represent a declared cross-host sidecar) instead of silently rewriting it
-  // from the model family.
-  const workerAxesOmitted = input.worker_engine === undefined && input.worker_mode === undefined;
-  if (workerAxesOmitted && text(input.host_runtime).toLowerCase() === 'codex' && dispatchEngine === 'codex') {
-    input.worker_engine = 'codex';
-    input.worker_mode = 'sidecar';
-  }
   try {
+    // An explicit mode is caller policy and must reach the canonical validator
+    // untouched. With no mode, the adapter owns the projection from the
+    // already-resolved route: fill a missing worker axis, compare concrete
+    // identities through forge-runtime's seam, and declare only cross-host
+    // sidecars that were selected by that route.
+    if (!workerMode.provided) {
+      if (!workerEngine.provided) input.worker_engine = dispatchEngine;
+      const identity = resolveWorkerIdentity(input);
+      input.worker_mode = identity.host_runtime === identity.resolved_engine ? 'native' : 'sidecar';
+      if (input.worker_mode === 'sidecar') input.sidecar_declared = true;
+    }
     const worker = resolveWorker(input);
     return {
       runtime_protocol_version: worker.protocol_version,
@@ -265,7 +268,41 @@ function runtimeFields(opts, dispatchEngine) {
   }
 }
 
-function resolveDispatch(opts) {
+// Runtime validation owns representability; the frozen guard owns posture.
+// Keeping this as a separate step prevents a posture result from laundering a
+// canonical forge-runtime error into a different guard diagnostic.  The
+// environment is an explicit dependency so library callers remain pure and
+// deterministic.  Only evaluateDispatchGuard interprets its enforcement key.
+function composeRuntimePosture(runtime, environment) {
+  if (!runtime || runtime.dispatch_allowed !== true) {
+    const reasonCode = runtime && runtime.dispatch_reason_code
+      ? runtime.dispatch_reason_code
+      : 'invalid-runtime-contract';
+    return {
+      ...(runtime || {}),
+      dispatch_allowed: false,
+      dispatch_reason_code: reasonCode,
+      dispatch_hint: `Corrija o contrato runtime antes do dispatch (${reasonCode}); nenhum worker alternativo foi selecionado.`,
+      dispatch_posture: null,
+      dispatch_decision: 'error',
+    };
+  }
+
+  const guard = evaluateDispatchGuard({
+    host_runtime: runtime.host_runtime,
+    worker_engine: runtime.worker_engine,
+  }, environment);
+  return {
+    ...runtime,
+    dispatch_allowed: guard.dispatch_allowed,
+    dispatch_reason_code: guard.reason_code,
+    dispatch_hint: guard.hint,
+    dispatch_posture: guard.posture,
+    dispatch_decision: guard.decision,
+  };
+}
+
+function resolveDispatch(opts, environment) {
   const o = opts || {};
   const unitType = text(o.unitType);
   const cwd = o.cwd || process.cwd();
@@ -400,7 +437,7 @@ function resolveDispatch(opts) {
   // Resolve this after routing/model-family work. The result is deliberately
   // additive: legacy engine/dispatch_engine/chain retain their 3.1.4 meaning.
   const dispatchEngine = dispatchEngineFor(engine);
-  const runtime = runtimeFields(o, dispatchEngine);
+  const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine), environment);
   return {
     engine,
     model,
@@ -447,7 +484,7 @@ function resolveDispatch(opts) {
 }
 
 function parseArgs(args) {
-  const parsed = { unitType: '', planPath: null, unitId: '', milestoneId: '', roadmapPath: null, domain: '', cwd: process.cwd(), asJson: false, effortMap: {}, hostRuntime: undefined, workerEngine: undefined, workerMode: undefined, sidecarDeclared: undefined };
+  const parsed = { unitType: '', planPath: null, unitId: '', milestoneId: '', roadmapPath: null, domain: '', cwd: process.cwd(), asJson: false, effortMap: {} };
   for (let i = 0; i < args.length; i += 1) {
     const flag = args[i];
     const value = args[i + 1];
@@ -468,14 +505,14 @@ function parseArgs(args) {
   return parsed;
 }
 
-function runCli(args) {
+function runCli(args, environment) {
   const parsed = parseArgs(args || []);
-  const result = resolveDispatch(parsed);
+  const result = resolveDispatch(parsed, environment);
   process.stdout.write(JSON.stringify(result) + '\n');
   return result;
 }
 
-function degradedContract(args) {
+function degradedContract(args, environment) {
   const parsed = parseArgs(args || []);
   const unitType = parsed.unitType;
   const cwd = parsed.cwd || process.cwd();
@@ -488,7 +525,10 @@ function degradedContract(args) {
   } catch { /* minimal ordered contract below */ }
   const model = chain[0] ? chain[0].id : '';
   const alias = modelToAlias(model).alias;
-  const runtime = runtimeFields(parsed, dispatchEngineFor('claude'));
+  const runtime = composeRuntimePosture(
+    runtimeFields(parsed, dispatchEngineFor('claude')),
+    environment,
+  );
   return {
     engine: 'claude', model, alias, tier, domain: 'default', route_source: 'tier_models',
     chain, chain_len: chain.length, reason: 'routing-runtime-error; tier_models',
@@ -547,6 +587,16 @@ const SHELL_EXPORT_MAP = [
   // the bash `MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && ...)` derivation.
   ['MODEL_APPLIED_JSON', (r) => (r.alias ? JSON.stringify(r.alias) : 'null')],
   ['unit_effort', (r) => r.effort],
+  ['HOST_RUNTIME', (r) => r.host_runtime || ''],
+  ['WORKER_ENGINE', (r) => r.worker_engine || ''],
+  ['WORKER_MODE', (r) => r.worker_mode || ''],
+  ['DISPATCH_ALLOWED', (r) => (r.dispatch_allowed === true ? 'true' : 'false')],
+  ['DISPATCH_REASON_CODE', (r) => r.dispatch_reason_code || ''],
+  ['DISPATCH_HINT', (r) => r.dispatch_hint || ''],
+  ['DISPATCH_POSTURE', (r) => r.dispatch_posture || ''],
+  ['DISPATCH_DECISION', (r) => r.dispatch_decision || ''],
+  ['RESOLVED_WORKER_ENGINE', (r) => r.resolved_worker_engine || ''],
+  ['SIDECAR_DECLARED', (r) => (r.sidecar_declared === true ? 'true' : 'false')],
 ];
 
 function shellQuote(value) {
@@ -557,7 +607,7 @@ function shellExports(route) {
   return SHELL_EXPORT_MAP.map(([name, pick]) => `${name}=${shellQuote(pick(route))}`).join('\n');
 }
 
-module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, claudeExecutableChain, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
+module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, composeRuntimePosture, claudeExecutableChain, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
 
 if (require.main === module) {
   // Exit 0 on success; exit 1 ONLY on a prefs loud-stop (M008-CONTEXT #2 — a
@@ -578,7 +628,7 @@ if (require.main === module) {
     }
   }
   try {
-    const result = runCli(process.argv.slice(2));
+    const result = runCli(process.argv.slice(2), process.env);
     process.exit(result && result.prefs_ok === false ? 1 : 0);
   } catch (error) {
     // The contract on stdout stays parseable for the shell consumer, but the
@@ -589,7 +639,7 @@ if (require.main === module) {
       warning: 'forge-dispatch-resolve degraded to the fallback contract',
       error: (error && error.message) || String(error),
     }) + '\n');
-    process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2))) + '\n');
+    process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
     process.exit(0);
   }
 }

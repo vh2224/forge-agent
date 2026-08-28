@@ -24,6 +24,10 @@ The human only adjudicates what the two AIs genuinely disagree on. Everything el
 - `{M###}` — active milestone id
 - `{S##}` — slice being completed
 - `MODE` — `interactive` (forge-next) or `auto` (forge-auto)
+- `HOST_RUNTIME` — the real host runtime exported by the caller's canonical
+  dispatch resolver. The canonical shared-source input is
+  `--host-runtime claude`; a host projection supplies its own resolved value.
+  Never infer this axis from challenger, engine, binary name, or process type.
 - `FORGE_SCRIPTS_DIR` / `FORGE_SHARED_DIR` — resolved by the calling skill's bootstrap. Every
   `scripts/<x>.js` and `shared/<x>.md` named below is opened through them; the installer copies
   `shared/*.md` into `${FORGE_HOME:-$HOME/.forge-agent}/shared/`, so the bare relative path only exists inside the forge-agent
@@ -37,6 +41,11 @@ The human only adjudicates what the two AIs genuinely disagree on. Everything el
 > event shapes across 265 reviews and zero conformant rows in the workspace that surfaced this
 > note. When a step cannot run, use its named degradation path (`§ Agent unavailability`,
 > `review-*-fallback`) and record it — improvising the step is never one of the options.
+
+Every external challenge/defense/rebuttal leg below is an explicitly declared
+sidecar: its `forge-xllm.js` invocation passes both
+`--host-runtime "$HOST_RUNTIME"` and `--sidecar-declared`. The declaration is
+never inferred from using an external adapter.
 
 ## Step 0 — Read review prefs (via the canonical prefs CLI)
 
@@ -503,9 +512,9 @@ Invoke the adapter (parsing is **not** reimplemented — the adapter of S01 alre
 
 ```bash
 if [ -n "$CHALLENGER_MODEL" ]; then
-  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
+  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
 else
-  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR}
+  node scripts/forge-xllm.js --mode challenge --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR}
 fi
 XLLM_EXIT=$?
 ```
@@ -526,9 +535,9 @@ Render the objections into a temp file (the same `OBJECTIONS` contract Step 2 pr
 ```bash
 XLLM_ENGINE_ADVOCATE=$([ "$RESOLVED_ADVOCATE" = "gemini" ] && echo agy || echo codex)
 if [ -n "$ADVOCATE_MODEL_EXTERNAL" ]; then
-  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} --model "$ADVOCATE_MODEL_EXTERNAL"
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR} --model "$ADVOCATE_MODEL_EXTERNAL"
 else
-  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR}
+  node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode defend --engine "$XLLM_ENGINE_ADVOCATE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$DEFENSE_INPUT" --diff-cmd "{DIFF_CMD}" --cwd {WORKING_DIR}
 fi
 XLLM_DEFEND_EXIT=$?
 ```
@@ -645,9 +654,9 @@ Write the OBJECTIONS + DEFENSE dialogue to a temp file (the adapter reads the re
 
 ```bash
 if [ -n "$CHALLENGER_MODEL" ]; then
-  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
+  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR} --model "$CHALLENGER_MODEL"
 else
-  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR}
+  node scripts/forge-xllm.js --mode rebuttal --engine "$XLLM_ENGINE" --host-runtime "$HOST_RUNTIME" --sidecar-declared --input "$REBUTTAL_INPUT" --cwd {WORKING_DIR}
 fi
 XLLM_EXIT=$?
 ```
@@ -899,7 +908,56 @@ A CONCEDED objection is a problem **both agents agree is real** — the confront
 
 Skip if `fixConceded == false` (pref opt-out → conceded items fall through to Step 7b posture as before) or there are zero CONCEDED items.
 
-### Cross-run claim gate (before the dispatch)
+### Runtime resolver gate (before the claim gate and fixer launch)
+
+Resolve the complete review-fix contract once, with the canonical shared host
+declared explicitly. This call already composes the posture owned by
+`scripts/forge-dispatch-guard.js`; this spec consumes its verdict and never
+reproduces host/worker leg conditionals or re-reads `FORGE_RUNTIME_ENFORCE`.
+
+```bash
+RF_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
+  --unit-type review-fix --host-runtime claude --cwd "$WORKING_DIR" --json)
+RF_RESOLVE_EXIT=$?
+if [ "$RF_RESOLVE_EXIT" -ne 0 ]; then
+  echo "✗ review-fix resolver halted — fixer not launched" >&2
+  RF_RUNTIME_READY=false
+else
+  RF_EXPORTS=$(printf '%s' "$RF_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+  if [ $? -ne 0 ]; then
+    echo "✗ review-fix resolver exports invalid — fixer not launched" >&2
+    RF_RUNTIME_READY=false
+  else
+    eval "$RF_EXPORTS"
+    RF_ALIAS="$MODEL_ALIAS"
+    RF_HOST_RUNTIME="$HOST_RUNTIME"
+    RF_WORKER_MODE="$WORKER_MODE"
+    RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
+    if [ "$RF_DISPATCH_ALLOWED" != "true" ]; then
+      printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+      RF_RUNTIME_READY=false
+    else
+      RF_RUNTIME_READY=true
+      if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
+        printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+      fi
+    fi
+  fi
+fi
+```
+
+`RF_RUNTIME_READY != true` stops this review-fix attempt before the claim gate
+and before any worker launch. Mark the conceded items with the established
+`**Correção:** falhou — deferida para triagem final` outcome and continue the
+non-blocking review path; do not invoke another worker, adapter, or fallback.
+The native fixer block below runs only when `RF_WORKER_MODE == native`, passes
+`model: '{RF_ALIAS}'` only when non-empty, and its emitted dispatch record uses
+`host_runtime:"${RF_HOST_RUNTIME}"`, the final `worker_mode`, and the unquoted
+boolean `dispatch_allowed`. A future `sidecar` verdict must use the canonical
+sidecar state machine and explicit host/declaration flags rather than entering
+the native block.
+
+### Cross-run claim gate (after the runtime gate, before the dispatch)
 
 A `review-fix` writes code, so it passes the **cross-run claim gate** like any other writing unit —
 spec autoritativa `shared/forge-claim-gate.md`. Build the claim from the CONCEDED items' `path:line`
@@ -932,8 +990,6 @@ them unclaimed:
 
 **Never blocks the slice.** A `refuse`/`block` here stops the `review-fix` dispatch only; the gate
 proceeds to `complete-slice` regardless, with the affected items marked as above.
-
-Before dispatching `review-fix`, compute `RF_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --unit-type review-fix --cwd "$WORKING_DIR" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).alias||'')}catch(e){}})")`; pass `model: '{RF_ALIAS}'` only when it is non-empty.
 
 ```
 Agent({ subagent_type: 'forge-executor',
@@ -1095,7 +1151,13 @@ Consumer: `forge-auto` / `forge-next`, when the derived unit is `complete-milest
 4. **Triage.** For each item (batched up to 4 per `AskUserQuestion`, header `Review M###`): `Manter abordagem atual` / `Refatorar agora` / `Criar follow-up`.
 5. **Act.** All `Refatorar agora` items → ONE `review-fix` dispatch (Step 7a shape, `UNIT: review-fix/{M###}-triage`, items grouped in a single prompt; the slices have NOT been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). On throw → mark those items `**Decisão:** refatorar — dispatch falhou, virou follow-up` and continue.
 
-   **The claim gate runs here too**, before this dispatch — same invocation as Step 7a's
+   **The runtime resolver gate runs here first.** Reuse Step 7a's full
+   `review-fix` resolver block with canonical `--host-runtime claude`; consume
+   the composed verdict, and on refusal print its reason + hint, mark the items
+   for follow-up, and launch nothing. Only an allowed verdict proceeds to the
+   claim gate below.
+
+   **The claim gate runs here too**, after the runtime gate and before this dispatch — same invocation as Step 7a's
    **§ Cross-run claim gate**, with `--unit "review-fix/{M###}-triage"` and the claim built from the
    `path:line` each triaged item already carries in the digest (Step 3). Decisions follow
    `shared/forge-claim-gate.md § Step 3`; escalation follows its § Step 4; exit `!= 0` / non-JSON

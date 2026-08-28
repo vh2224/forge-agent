@@ -863,6 +863,8 @@ Campos:
 
 ### Step 5 — Execute
 
+<!-- forge:dispatch:start -->
+
 **Skip if:** `.gsd/tasks/{TASK_ID}/{TASK_ID}-SUMMARY.md` already exists (task done).
 
 **Record pre-execute HEAD SHA** (persisted to file so Step 5.5 can diff after executor commits). In `worktree` mode the commits land in `CODE_DIR` — read HEAD from there:
@@ -899,7 +901,8 @@ fi
 PLAN_PATH=".gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN.md"
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
-  --unit-type execute-task --plan "$PLAN_PATH" --unit-id "{TASK_ID}" --cwd "$WORKING_DIR" --json)
+  --unit-type execute-task --plan "$PLAN_PATH" --unit-id "{TASK_ID}" \
+  --host-runtime claude --cwd "$WORKING_DIR" --json)
 if [ $? -ne 0 ]; then
   # Non-zero exit == prefs loud-stop (M008-CONTEXT #2) — the resolver only exits 1 on prefs_ok:false.
   echo "✗ dispatch resolver halted (prefs error) — see forge-dispatch-resolve.js prefs_errors" >&2
@@ -911,14 +914,53 @@ fi
 # ENGINE, DISPATCH_ENGINE, ENGINE_REASON, EFFORT, EFFORT_REASON, WORKERS_TIMEOUT,
 # CODEX_MODEL, SIDECAR_MODEL (resolver-owned: chain[0].id for a Codex dispatch,
 # workers.codex_model as legacy fallback), THINKING_HEADER, DOMAIN, PLAN_TIER,
-# PLAN_WORKER, ROUTING_PRESENT, MODEL_APPLIED_JSON, unit_effort — eval-safe.
+# PLAN_WORKER, ROUTING_PRESENT, MODEL_APPLIED_JSON, unit_effort, HOST_RUNTIME,
+# WORKER_ENGINE, RESOLVED_WORKER_ENGINE, WORKER_MODE, DISPATCH_ALLOWED,
+# DISPATCH_REASON_CODE, DISPATCH_HINT, DISPATCH_DECISION, SIDECAR_DECLARED — eval-safe.
 eval "$(printf '%s' "$ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)"
+# A failed/empty emitter sets nothing. Loud stop — never fall through on a default route.
+[ -n "$WORKER_MODE" ] || { echo "✗ dispatch resolver exports invalid" >&2; exit 2; }
+if [ "$DISPATCH_ALLOWED" != "true" ]; then
+  printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$TASK_ID" --json '{"active":false}' > /dev/null 2>&1 || true
+  node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" --holder "task:$TASK_ID" > /dev/null 2>&1 || true
+  exit 2                         # terminal task boundary; no timeline, prompt, adapter, native worker, or inline fallback
+fi
+if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
+  printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  # FORGE_RUNTIME_ENFORCE=0 is the real resolver escape: observe only, never mutate the resolved route.
+fi
 # $ROUTE_JSON.chain carries forward unmodified — consumed by Branch codex (SIDECAR_MODEL) and by
 # the Failure Taxonomy via `forge-routing.js ... --next-after "$MODEL_ID"`.
 ```
 **Loud-stop on the resolution above (M008-CONTEXT #2 — NOT a bare comment):** if either the `forge-prefs.js --resolved` gate OR the `forge-dispatch-resolve.js` call exited non-zero, STOP this task run now — deactivate the run, surface arquivo + linha + como-corrigir from `errors[]`/`prefs_errors`, and do **NOT** proceed on any claude/effort-default fallback value. The `exit 1` guards halt a shell-executed path; this prose halts the orchestrator-interpreted path.
 
-`$ENGINE`, `$ENGINE_REASON`, `$MODEL_ID`, `$MODEL_ALIAS`, `$TIER`, `$REASON`, `$DOMAIN_USED`, `$ROUTE_SOURCE`, `$CHAIN_LEN`, `$EFFORT`, `$EFFORT_REASON`, `$WORKERS_TIMEOUT`, `$CODEX_MODEL`, `$SIDECAR_MODEL`, `$THINKING_HEADER`, `$MODEL_APPLIED_JSON`, `$PLAN_PATH`, and `$ROUTE_JSON` (with `.chain`) are now set. The dispatch below branches on `$DISPATCH_ENGINE` (the additive normalized dispatch trigger — `gpt→codex`, `gemini→agy`, else `claude`; `$ENGINE`/`chain[].engine` stay family for events); the resolved `$EFFORT`/`$TIER`/`$DOMAIN_USED`/`$ROUTE_SOURCE`/`$CHAIN_LEN` are injected into the dispatch event (both paths).
+`$ENGINE`, `$ENGINE_REASON`, `$MODEL_ID`, `$MODEL_ALIAS`, `$TIER`, `$REASON`, `$DOMAIN_USED`, `$ROUTE_SOURCE`, `$CHAIN_LEN`, `$EFFORT`, `$EFFORT_REASON`, `$WORKERS_TIMEOUT`, `$CODEX_MODEL`, `$SIDECAR_MODEL`, `$THINKING_HEADER`, `$MODEL_APPLIED_JSON`, `$PLAN_PATH`, `$ROUTE_JSON` (with `.chain`), `$HOST_RUNTIME`, `$RESOLVED_WORKER_ENGINE`, `$WORKER_MODE`, `$DISPATCH_ALLOWED`, `$DISPATCH_REASON_CODE`, `$DISPATCH_HINT`, and `$SIDECAR_DECLARED` are now set. The dispatch below branches **only** on `$WORKER_MODE`; `$DISPATCH_ENGINE` remains additive adapter metadata (`gpt→codex`, `gemini→agy`, else `claude`) and never chooses native versus sidecar delivery. The resolved runtime and routing axes are injected into both dispatch event paths.
+
+**Delivery gate — `WORKER_MODE` is authoritative.** Initialize the one-shot native transition before any branch. `native` skips the inline sidecar state machine and reaches the canonical `Agent()` form below. `sidecar` enters the existing adapter state machine only for its supported Codex adapter. An absent/unknown mode or unsupported adapter prints a stable reason + hint and stops this task; it never executes inline or substitutes a worker.
+
+```bash
+NATIVE_TO_SIDECAR_COUNT=0
+case "$WORKER_MODE" in
+  native)
+    : # continue to the canonical native dispatch below
+    ;;
+  sidecar)
+    if [ "$DISPATCH_ENGINE" != "codex" ]; then
+      DISPATCH_REASON_CODE="unsupported-sidecar-unit"
+      DISPATCH_HINT="forge-task não possui adapter sidecar para $DISPATCH_ENGINE; ajuste o contrato runtime e retome $TASK_ID."
+      printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    DISPATCH_REASON_CODE="invalid-worker-mode"
+    DISPATCH_HINT="worker_mode ausente/inválido; corrija o contrato runtime e retome $TASK_ID."
+    printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+    exit 2
+    ;;
+esac
+```
 
 **Per-unit `CODE_DIR` resolution (multi-repo precondition)** — executable mirror of `shared/forge-dispatch.md § Sidecar dispatch state machine step 0.5` (contract prose lives there, never restated here). Runs HERE because `$PLAN_PATH` is only known now — the bootstrap `WORKTREE_DIR` above is derived before any plan exists and stays untouched:
 ```bash
@@ -953,7 +995,7 @@ fi
 ```
 **Never assign to `WORKTREE_DIR` here.** An empty `WORKTREE_DIR` is the "every repo failed" STOP signal of the Isolation rules — a sidecar refusal must never be mistaken for an isolation failure. The two `CODE_DIR=` lines above make the resolved value reach the bash consumers deterministically, without depending on model substitution: status `ok` → the attributed worktree; refusal with a non-empty `multi_repo_root` → the run root holding every worktree, so a genuinely multi-repo unit stops landing in whichever repo sorted first (`multi_repo_root` is empty in a single-repo workspace, which keeps the bootstrap value).
 
-**Branch codex — sidecar (`$DISPATCH_ENGINE == codex`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. When this branch fires, the Claude machinery below (timeline task, guarded `Agent()` dispatch) is **replaced** by the detached adapter + polling; on any failure it resets and **falls through to that same Claude machinery** (fallback). When `$DISPATCH_ENGINE == claude`, skip this branch entirely and proceed with the Claude dispatch below — byte-identical to the current loop.
+**Branch codex — sidecar (`$WORKER_MODE == sidecar`, adapter selected by `$DISPATCH_ENGINE == codex`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. Delivery entered this branch only through the allowed resolver verdict above (or the one-shot declared native transition below); model-family metadata cannot enter it. When this branch fires, the native machinery below (timeline task, guarded `Agent()` dispatch) is **replaced** by the detached adapter + polling; on a failure its verified reset may rejoin the native machinery only through the named fallback boundary. When `$WORKER_MODE == native`, skip this branch entirely and proceed with the canonical host-native dispatch below.
 
 1. **Capture `START_SHA` + the pre-dirty snapshot in ONE atomic write, via the surgical-reset helper.** `--state-init` records `{attempt, start_sha, pre_dirty:[{path,hash}], reason, result_file, code_dir}` in the SAME write (`.gsd/**` excluded), so the snapshot survives the poll loop / an auto-compact (a snapshot in a shell var is lost the moment the process crosses a Bash-tool boundary). Branch C spans multiple Bash tool invocations, so shell vars do NOT survive — the state file (under `WORKING_DIR/.gsd`, never `CODE_DIR`) is the durable carrier. The loose task uses a single, unsuffixed state file (no `-attempt-N` — a `/forge-task` unit dispatches the sidecar once). The success AND fallback blocks re-read it from disk:
 ```bash
@@ -985,12 +1027,19 @@ node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --state-update \
 SECURITY_FILE="${PLAN_PATH%-PLAN.md}-SECURITY.md"
 CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
 node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" --out "$CTX_BUNDLE"
-node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
-  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "${CODE_DIR:-.}" --context-root "$WORKING_DIR" \
-  --writable-roots-file "$CODE_DIR_WRITABLE_ROOTS_FILE" \
-  --timeout "$WORKERS_TIMEOUT" \
-  --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE" \
-  $([ -n "$SIDECAR_MODEL" ] && printf -- '--model %s' "$SIDECAR_MODEL")
+# Credential-boundary assertion: the only runtime value admitted to argv is the public enum.
+# SIDECAR_DECLARED is consumed as the resolver's recorded boolean; false is refused, never re-coerced.
+case "$HOST_RUNTIME" in claude|codex) ;; *) echo "✗ invalid-host-runtime: expected claude|codex" >&2; exit 2 ;; esac
+[ "$SIDECAR_DECLARED" = "true" ] || { echo "✗ sidecar-declaration-required" >&2; exit 2; }
+# Keep argv structured (shell:false equivalent): never concatenate a command string or credential-bearing value.
+XLLM_ARGV=(node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute
+  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "${CODE_DIR:-.}" --context-root "$WORKING_DIR"
+  --writable-roots-file "$CODE_DIR_WRITABLE_ROOTS_FILE"
+  --host-runtime "$HOST_RUNTIME" --sidecar-declared
+  --timeout "$WORKERS_TIMEOUT"
+  --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE")
+[ -n "$SIDECAR_MODEL" ] && XLLM_ARGV+=(--model "$SIDECAR_MODEL")
+"${XLLM_ARGV[@]}"
 # ↑ dispatched with the Bash tool's run_in_background: true
 ```
 
@@ -1025,7 +1074,7 @@ TRANSPORT_REASON=$(node "$FORGE_SCRIPTS_DIR/forge-transport.js" --result "$RESUL
 TRANSPORT_TAIL="\"transport\":\"${TRANSPORT:-unknown}\""
 [ -n "$TRANSPORT_VERSION" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_version\":\"$TRANSPORT_VERSION\""
 [ -n "$TRANSPORT_REASON" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_reason\":\"$TRANSPORT_REASON\""
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/{TASK_ID}\",\"model\":\"${CODEX_MODEL_LABEL}\",\"tier\":\"${TIER}\",\"reason\":\"${ENGINE_REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"codex\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"milestone\":\"\",\"input_tokens\":0,\"output_tokens\":0,\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",${TRANSPORT_TAIL}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/{TASK_ID}\",\"model\":\"${CODEX_MODEL_LABEL}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"tier\":\"${TIER}\",\"reason\":\"${ENGINE_REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"codex\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"milestone\":\"\",\"input_tokens\":0,\"output_tokens\":0,\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",${TRANSPORT_TAIL}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
 # → proceed to "Process result" below. Do NOT run the Claude machinery below.
 ```
 
@@ -1122,9 +1171,19 @@ printf '{"ts":"%s","event":"worker-engine-fallback","milestone":"","slice":"","u
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{TASK_ID}" "$REASON" "$HINT_JSON" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
 # CRITICAL, per-dispatch + evidence-based fallback discipline: shared/forge-dispatch.md § Engine Fallback Discipline
 ```
-Then set `ENGINE=claude` and `DISPATCH_ENGINE=claude` and dispatch the single `forge-executor` Claude worker via the machinery below. No re-resolution of engine (fallback is unconditionally Claude); no retry.
+The named fallback rejoins native delivery only on the Claude host that declared that fallback family. A Codex-native `not-spawned` attempt has already used its sole same-family sidecar transition; if that adapter fails, it stops here instead of crossing into Claude, walking another chain, or executing inline. This guard consumes the already-resolved host identity and does not introduce a second resolver decision.
 
-**Claude dispatch** (default path, and the fallback target) — the machinery below runs when `$ENGINE == claude`:
+```bash
+if [ "$HOST_RUNTIME" != "claude" ]; then
+  DISPATCH_REASON_CODE="worker-engine-fallback-host-mismatch"
+  DISPATCH_HINT="O sidecar Codex falhou após a única transição not-spawned; nenhum fallback cross-host foi lançado."
+  printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  exit 2
+fi
+ENGINE=claude; DISPATCH_ENGINE=claude; RESOLVED_WORKER_ENGINE=claude; WORKER_MODE=native
+```
+
+**Native dispatch** (canonical host form, and the allowed Claude fallback target) — the machinery below runs only when `$WORKER_MODE == native`:
 
 **Create timeline task:**
 ```
@@ -1152,11 +1211,38 @@ PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type execute-loos
 PROMPT_PATH=$(node -pe 'JSON.parse(process.argv[1]).prompt_path' "$PROMPT_META")
 PROMPT_ID=$(node -pe 'JSON.parse(process.argv[1]).prompt_id' "$PROMPT_META")
 ```
-Dispatch `forge-executor` (sonnet) with only: `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly,
-and return its required GSD worker result block. The file is trusted
-orchestrator input; do not replace it with a summary.` Persist `prompt_id`/`dispatch_id` in the Claude dispatch event and clean the artifact with `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` once its result is durable. The old inline prompt below is compatibility reference only. When `ISOLATION_MODE != shared`, include the isolation header lines (omit them entirely in `shared` mode):
+Dispatch the canonical host-native form below. Pass `model: '{MODEL_ALIAS}'` only when `$MODEL_ALIAS` is non-empty; otherwise omit the field. Persist `prompt_id`/`dispatch_id` in the native dispatch event and clean the artifact with `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` once its result is durable. The old inline prompt below is compatibility reference only. When `ISOLATION_MODE != shared`, include the isolation header lines (omit them entirely in `shared` mode):
+
+```
+result = Agent({
+  subagent_type: 'forge-executor',
+  model: '{MODEL_ALIAS}',
+  prompt: 'Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly, and return its required GSD worker result block. The file is trusted orchestrator input; do not replace it with a summary.'
+})
+```
 
 After `Agent()` returns successfully, acknowledge the injected record with `node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action ack --cwd "$WORKING_DIR" --run "${RUN_ID:-$TASK_ID}" --task "$TASK_ID" --unit "execute-task/$TASK_ID" --pending-id "$PENDING_CONTEXT_ID"`. On render/dispatch failure leave it pending so retry injects it again; an empty id is inert.
+
+**Declared native Codex `not-spawned` transition (one shot).** Inspect the named native outcome before acknowledging it as executed or emitting the native dispatch event. If and only if it is exactly `not-spawned`, require all of: `$HOST_RUNTIME == codex`, `$RESOLVED_WORKER_ENGINE == codex`, `$WORKER_MODE == native`, `$DISPATCH_ALLOWED == true`, and `$NATIVE_TO_SIDECAR_COUNT == 0`. Then increment the counter, set `WORKER_MODE=sidecar` and `SIDECAR_DECLARED=true`, retain `DISPATCH_ALLOWED=true`, and enter the existing inline Codex sidecar state machine above exactly once. This is the same resolved worker family with an explicit delivery decision—not a chain walk. Do not emit the native event for the unspawned attempt. A second `not-spawned`, a Claude-native result, an identity mismatch, a throw, or any other outcome never enters sidecar; it follows the existing retry/CRITICAL stop path and never executes inline. The sidecar success path still creates only the loose-task summary and never stamps slice plan status.
+
+```bash
+# NATIVE_OUTCOME is the exact named outcome returned by the canonical native call.
+if [ "$NATIVE_OUTCOME" = "not-spawned" ]; then
+  if [ "$HOST_RUNTIME" = "codex" ] && [ "$RESOLVED_WORKER_ENGINE" = "codex" ] \
+     && [ "$WORKER_MODE" = "native" ] && [ "$DISPATCH_ALLOWED" = "true" ] \
+     && [ "$NATIVE_TO_SIDECAR_COUNT" -eq 0 ]; then
+    NATIVE_TO_SIDECAR_COUNT=$((NATIVE_TO_SIDECAR_COUNT + 1))
+    WORKER_MODE=sidecar
+    SIDECAR_DECLARED=true
+    # Re-enter Branch codex once; skip native acknowledgement and its event.
+  else
+    DISPATCH_REASON_CODE="native-not-spawned-transition-refused"
+    DISPATCH_HINT="not-spawned não corresponde a uma primeira transição Codex→sidecar da mesma família."
+    printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+    exit 2
+  fi
+fi
+```
 ```
 Execute forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
@@ -1208,12 +1294,12 @@ If auto_commit is false: do NOT run any git commands.
 Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
 ```
 
-**Emit the dispatch event (claude path)** — once the `forge-executor` returns. This is the observability WIN: before M012 S02 T02 the claude path emitted NO dispatch event at all. Mirror the `forge-auto` claude-path event shape (full routing fields; `milestone` empty for a loose task). `$INPUT_TOKENS`/`$OUTPUT_TOKENS` come from the `Agent()` result usage (0 if unavailable):
+**Emit the dispatch event (native path)** — once the host-native worker returns (and only after excluding `not-spawned`). Mirror the full routing shape with an empty `milestone` and no `slice` for this loose task. `$INPUT_TOKENS`/`$OUTPUT_TOKENS` come from the `Agent()` result usage (0 if unavailable); the runtime fields are the allowed resolver values and `worker_mode` is the final mode that actually ran:
 ```bash
 mkdir -p "$WORKING_DIR/.gsd/forge/"
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/{TASK_ID}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"claude\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"milestone\":\"\",\"input_tokens\":${INPUT_TOKENS:-0},\"output_tokens\":${OUTPUT_TOKENS:-0},\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/{TASK_ID}\",\"model\":\"${MODEL_ID}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"${DISPATCH_ENGINE:-claude}\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"milestone\":\"\",\"input_tokens\":${INPUT_TOKENS:-0},\"output_tokens\":${OUTPUT_TOKENS:-0},\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
 ```
 
 **Contract miss gate (Layer 0) — BEFORE parsing any status.** Classify the return rather than eyeballing it:
@@ -1324,7 +1410,63 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
 - The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literals are a violation detected by `forge-review-audit.js`.
 - **Resolve** via the Step 5 truth table; write the dialogue to `{TASK_ID}-REVIEW.md` (Step 6 template, `## Pattern hits` from `PATTERN_HITS`). The header carries the `**Pairing:**` line (`$PAIRING_LINE`, assembled in Step 0 of the shared spec) exactly as in `S##-REVIEW.md` — boundary-agnostic, no task-specific variant.
 - **Scope disclosure (SVN only).** When `$SCOPE_REPORT` is non-empty, append a `## Escopo do diff (SVN)` section stating `reason`, the reviewed paths (`scoped`) and — explicitly — the `excluded` ones. Silent truncation reads as "everything was reviewed"; a `reason` of `unscoped:*` means the manifest did not apply and the whole working copy was read, which the operator must be able to see.
-- **CONCEDED items → fix now (Step 7a):** resolve `RF_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --unit-type review-fix --cwd "$WORKING_DIR" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).alias||'')}catch(e){}})")`; dispatch `review-fix/{TASK_ID}` with `model: '{RF_ALIAS}'` only when non-empty.
+- **CONCEDED items → fix now (Step 7a):** consume the full gated contract from `shared/forge-review.md § Step 7a`, not the former alias-only shortcut. The same block is used when an OPEN item is answered `Refatorar agora`.
+
+  ```bash
+  RF_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
+    --unit-type review-fix --unit-id "{TASK_ID}" \
+    --host-runtime claude --cwd "$WORKING_DIR" --json)
+  RF_RESOLVE_EXIT=$?
+  if [ "$RF_RESOLVE_EXIT" -ne 0 ]; then
+    echo "✗ review-fix resolver halted — fixer not launched" >&2
+    RF_RUNTIME_READY=false
+  else
+    RF_EXPORTS=$(printf '%s' "$RF_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+    if [ $? -ne 0 ]; then
+      echo "✗ review-fix resolver exports invalid — fixer not launched" >&2
+      RF_RUNTIME_READY=false
+    else
+      eval "$RF_EXPORTS"
+      RF_ALIAS="$MODEL_ALIAS"
+      RF_HOST_RUNTIME="$HOST_RUNTIME"
+      RF_WORKER_MODE="$WORKER_MODE"
+      RF_DISPATCH_ENGINE="$DISPATCH_ENGINE"
+      RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
+      if [ "$RF_DISPATCH_ALLOWED" != "true" ]; then
+        printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+        RF_RUNTIME_READY=false
+      elif [ "$RF_WORKER_MODE" != "native" ]; then
+        DISPATCH_REASON_CODE="unsupported-sidecar-unit"
+        DISPATCH_HINT="review-fix não possui adapter sidecar neste boundary; nenhum fixer foi lançado."
+        printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+        RF_RUNTIME_READY=false
+      else
+        RF_RUNTIME_READY=true
+        if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
+          printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+        fi
+      fi
+    fi
+  fi
+  ```
+
+  `RF_RUNTIME_READY != true` stops this fixer attempt before the claim gate and every worker/adapter launch. Mark affected items with the shared non-blocking review outcome and continue the dialogue; never execute the fix inline. When ready, run the cross-run claim gate from `shared/forge-review.md § Step 7a` and dispatch only on its `proceed` decision. Pass `model: '{RF_ALIAS}'` only when non-empty:
+
+  ```
+  review_fix_result = Agent({
+    subagent_type: 'forge-executor',
+    model: '{RF_ALIAS}',
+    prompt: 'WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{TASK_ID}\nFix ONLY the accepted review items. Minimal diffs; no refactors or scope creep beyond those items. Return ---GSD-WORKER-RESULT---.'
+  })
+  ```
+
+  After a successful native fixer, its dispatch event records the captured gate axes with no invented milestone or slice:
+
+  ```bash
+  printf '{"ts":"%s","event":"dispatch","unit":"review-fix/%s","model":"%s","host_runtime":"%s","worker_mode":"%s","dispatch_allowed":%s,"engine":"%s","milestone":"","transport":"in-process"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{TASK_ID}" "${RF_ALIAS:-default}" "$RF_HOST_RUNTIME" "$RF_WORKER_MODE" "$RF_DISPATCH_ALLOWED" "${RF_DISPATCH_ENGINE:-claude}" \
+    >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+  ```
 - **OPEN items (Step 7b):** for each, `AskUserQuestion` live (`Manter` / `Refatorar agora` — dispatches a `review-fix` unit / `Criar follow-up`) and record the decision.
   - `Criar follow-up` → create an item per `shared/forge-review.md § Item capture`: `source: review/{TASK_ID}/{R#}`, `origin: auto`, `status: inbox`, `file`/`sha` from the objection's `path:line` + HEAD sha.
   - **Omit** `milestone` — a loose task has none, and inventing one is a RISK violation.
@@ -1383,6 +1525,8 @@ If the decision is `skip`, do not dispatch `forge-memory`; continue directly to 
 ```
 Agent("forge-memory", "WORKING_DIR: {WORKING_DIR}\nUNIT_TYPE: execute-task\nUNIT_ID: {TASK_ID}\n\nSUMMARY_CONTENT:\n{content of {TASK_ID}-SUMMARY.md}\n\nRESULT_BLOCK:\n{full ---GSD-WORKER-RESULT--- block verbatim}\n\nKEY_DECISIONS:\n{key_decisions from SUMMARY.md frontmatter, or '(none)'}")
 ```
+
+<!-- forge:dispatch:end -->
 
 **Write ledger entry to fragment store** — pipe a JSON payload to `forge-ledger.js --write`. The global LEDGER is rebuilt from fragments by the merger; do not append to it directly.
 ```bash

@@ -14,6 +14,13 @@ const { detectEol } = require('./forge-instructions');
 const { VERSION } = require('./forge-version');
 
 const RUNTIME = 'codex';
+// Production callers pass this dialect explicitly. Keeping it as data preserves
+// the renderer seam: the marker scanner identifies the managed span, while the
+// caller decides which native worker syntax and host name belong in that span.
+const PRODUCTION_DISPATCH_DIALECT = Object.freeze({
+  agentInvocation: 'spawn_agent(',
+  hostRuntime: RUNTIME,
+});
 const ORIGIN = '<!-- forge-source:codex -->';
 const TOML_ORIGIN = '# forge-source:codex';
 const REASON = Object.freeze({ unavailable: 'unavailable', user_owned: 'user_owned', invalid_options: 'invalid_options', missing_source: 'missing_source', missing_manifest: 'missing_manifest' });
@@ -119,13 +126,12 @@ function rewriteDispatchDialect(text, options) {
   const original = String(text);
   const interior = original.slice(block.start, block.end);
   const eol = detectEol(original);
-  let rewritten = interior;
+  let agentInvocation = null;
   if (interior.includes('Agent(')) {
     if (typeof settings.agentInvocation !== 'string' || settings.agentInvocation.length === 0) {
       failDispatch(DISPATCH_REASON.AGENT_FORM_REQUIRED, 'agentInvocation não vazio é obrigatório para Agent( cercado');
     }
-    const agentInvocation = normalizeDispatchInsertion(settings.agentInvocation, eol);
-    rewritten = rewritten.split('Agent(').join(agentInvocation);
+    agentInvocation = normalizeDispatchInsertion(settings.agentInvocation, eol);
   }
   const hostRuntime = settings.hostRuntime === undefined ? RUNTIME : settings.hostRuntime;
   // Symmetric with the Agent form above: an unusable value is refused by a named
@@ -135,7 +141,13 @@ function rewriteDispatchDialect(text, options) {
     failDispatch(DISPATCH_REASON.HOST_RUNTIME_INVALID, 'hostRuntime, quando informado, precisa ser string não vazia');
   }
   const runtimeInvocation = normalizeDispatchInsertion(hostRuntime, eol);
-  rewritten = rewritten.split('--host-runtime claude').join(`--host-runtime ${runtimeInvocation}`);
+  // Match both canonical forms on the ORIGINAL interior. String#replace scans
+  // that immutable input once; callback results are opaque. In particular, a
+  // host token deliberately present in agentInvocation is never considered a
+  // second host match and therefore cannot be retargeted accidentally.
+  const rewritten = interior.replace(/Agent\(|--host-runtime claude/g, (match) => (
+    match === 'Agent(' ? agentInvocation : `--host-runtime ${runtimeInvocation}`
+  ));
   return `${original.slice(0, block.start)}${rewritten}${original.slice(block.end)}`;
 }
 
@@ -301,12 +313,56 @@ function write(options = {}) {
   const nextOwnership = { ...recorded, ...ownership.recordOf(ownedNow) };
   return { ...report, written, preserved, conflicts, self_sourced: selfSourced, ownership: options.dryRun ? recorded : nextOwnership, changed: written.some((item) => !item.dry_run), dry_run: Boolean(options.dryRun) };
 }
-function parseArgs(argv = process.argv.slice(2)) { const out = { repo: path.resolve(__dirname, '..') }; for (let i = 0; i < argv.length; i++) { const arg = argv[i]; if (arg === '--repo') out.repo = argv[++i]; else if (arg === '--codex-home') out.codexHome = argv[++i]; else if (arg === '--forge-home') out.forgeHome = argv[++i]; else if (arg === '--project-root') out.projectRoot = argv[++i]; else if (arg === '--manifest') out.manifestFile = argv[++i]; else if (arg === '--dry-run') out.dryRun = true; else if (arg === '--json') out.json = true; else if (arg === '--help' || arg === '-h') out.help = true; else throw Object.assign(new Error(`opção desconhecida: ${arg}`), { code: REASON.invalid_options }); } return out; }
-function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), error = process.stderr.write.bind(process.stderr)) { try { const options = parseArgs(argv); if (options.help) { output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--dry-run] [--json]\n'); return 0; } const report = write(options); output(options.json ? `${JSON.stringify(report)}\n` : `Codex renderer ${VERSION}: ${report.written.length} written, ${report.preserved.length} preserved\n`); return 0; } catch (e) { error(`forge-codex-renderer: ${e.code || 'error'}: ${e.message}\n`); return 1; } }
+function parseArgs(argv = process.argv.slice(2)) {
+  const out = {
+    repo: path.resolve(__dirname, '..'),
+    ...PRODUCTION_DISPATCH_DIALECT,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--repo') out.repo = argv[++i];
+    else if (arg === '--codex-home') out.codexHome = argv[++i];
+    else if (arg === '--forge-home') out.forgeHome = argv[++i];
+    else if (arg === '--project-root') out.projectRoot = argv[++i];
+    else if (arg === '--manifest') out.manifestFile = argv[++i];
+    else if (arg === '--agent-invocation') out.agentInvocation = argv[++i];
+    else if (arg === '--host-runtime') out.hostRuntime = argv[++i];
+    else if (arg === '--dry-run') out.dryRun = true;
+    else if (arg === '--json') out.json = true;
+    else if (arg === '--help' || arg === '-h') out.help = true;
+    else throw Object.assign(new Error(`opção desconhecida: ${arg}`), { code: REASON.invalid_options });
+  }
+  // The CLI defaults are production values, but explicit overrides remain a
+  // useful black-box test seam. Refuse missing/empty overrides before rendering,
+  // even when a particular repository happens not to contain dispatch markers.
+  if (typeof out.agentInvocation !== 'string' || out.agentInvocation.length === 0) {
+    failDispatch(DISPATCH_REASON.AGENT_FORM_REQUIRED, 'agentInvocation não vazio é obrigatório');
+  }
+  if (typeof out.hostRuntime !== 'string' || out.hostRuntime.length === 0) {
+    failDispatch(DISPATCH_REASON.HOST_RUNTIME_INVALID, 'hostRuntime precisa ser string não vazia');
+  }
+  return out;
+}
+function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), error = process.stderr.write.bind(process.stderr)) {
+  try {
+    const options = parseArgs(argv);
+    if (options.help) {
+      output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--agent-invocation PREFIX] [--host-runtime HOST] [--dry-run] [--json]\n');
+      return 0;
+    }
+    const report = write(options);
+    output(options.json ? `${JSON.stringify(report)}\n` : `Codex renderer ${VERSION}: ${report.written.length} written, ${report.preserved.length} preserved\n`);
+    return 0;
+  } catch (e) {
+    error(`forge-codex-renderer: ${e.code || 'error'}: ${e.message}\n`);
+    return 1;
+  }
+}
 if (require.main === module) process.exitCode = main();
 module.exports = {
   VERSION,
   RUNTIME,
+  PRODUCTION_DISPATCH_DIALECT,
   REASON,
   ORIGIN,
   DISPATCH_MARKER_START,

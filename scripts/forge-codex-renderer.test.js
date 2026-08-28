@@ -10,6 +10,7 @@ const claudeRenderer = require('./forge-claude-renderer');
 const root = path.resolve(__dirname, '..'); const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-codex-Ω-')); const versionPattern = renderer.VERSION.replace(/\./g, '\\.');
 
 const {
+  PRODUCTION_DISPATCH_DIALECT,
   DISPATCH_MARKER_START,
   DISPATCH_MARKER_END,
   DISPATCH_REASON,
@@ -109,7 +110,7 @@ function hasAgentOutsideFence(text) {
 }
 try {
   const project = path.join(temp, 'project Ω'); const codex = path.join(temp, 'Codex Home Ω'); const forge = path.join(temp, 'Forge Home Ω'); fs.mkdirSync(project, { recursive: true });
-  const report = renderer.render({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge });
+  const report = renderer.render({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
   assert.strictEqual(report.runtime, 'codex'); assert(report.artifacts.some((item) => item.destination.endsWith(path.join('project Ω', 'AGENTS.md')))); assert(report.artifacts.some((item) => item.destination.endsWith(path.join('Codex Home Ω', 'agents', 'forge-executor.toml')))); assert(report.artifacts.every((item) => !item.destination.includes('.claude'))); assert(report.artifacts.every((item) => !item.content.includes('\r')));
   const agent = report.artifacts.find((item) => item.destination.endsWith(path.join('agents', 'forge-executor.toml')));
   assert.match(agent.content, new RegExp(`^# forge-source:codex-agent-forge-executor version=${versionPattern}$`, 'm'));
@@ -120,7 +121,7 @@ try {
   // instruction value is terminated, so Codex receives a valid agent document.
   const scalarLines = agent.content.split('\n').filter((line) => line && !line.startsWith('#') && !line.startsWith('developer_instructions =') && line !== '"""');
   assert(scalarLines.slice(0, 3).every((line) => /^(name|description|sandbox_mode) = "[^"\n]+"$/.test(line)));
-  const first = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge }); assert(first.written.length > 0); assert(fs.existsSync(path.join(project, 'AGENTS.md'))); assert(fs.existsSync(path.join(codex, 'config.toml'))); assert(!fs.existsSync(path.join(temp, 'Claude Home Ω')));
+  const first = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }); assert(first.written.length > 0); assert(fs.existsSync(path.join(project, 'AGENTS.md'))); assert(fs.existsSync(path.join(codex, 'config.toml'))); assert(!fs.existsSync(path.join(temp, 'Claude Home Ω')));
   assert(fs.existsSync(path.join(codex, 'skills', 'forge-help', 'SKILL.md')));
   assert(fs.existsSync(path.join(codex, 'commands', 'forge.md')));
   assert(fs.existsSync(path.join(codex, 'templates', 'dispatch', 'execute-task.md')));
@@ -137,17 +138,17 @@ try {
   assert.match(fs.readFileSync(path.join(codex, 'config.toml'), 'utf8'), new RegExp(`^# forge-source:codex-config version=${versionPattern}$`, 'm'));
   const reportCapabilities = JSON.parse(fs.readFileSync(path.join(forge, 'adapters', 'codex', 'capabilities.json'), 'utf8'));
   assert(reportCapabilities.surfaces.some((surface) => surface.source_id === 'hooks' && surface.status === 'planned'));
-  const second = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge }); assert.strictEqual(second.written.length, 0); assert(second.preserved.every((item) => item.reason === 'already-current'));
+  const second = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }); assert.strictEqual(second.written.length, 0); assert(second.preserved.every((item) => item.reason === 'already-current'));
   // A projection left by the pre-fix renderer (marker above the fence) is still
   // recognized as generated, so the next write relocates the marker. Reading
   // ownership as "starts with the marker" would flip it to user-owned and stop
   // updates on every file the older renderer had produced.
   const legacySkill = path.join(codex, 'skills', 'forge-help', 'SKILL.md');
   fs.writeFileSync(legacySkill, `<!-- forge-source:codex -->\n\n${fs.readFileSync(path.join(root, 'skills', 'forge-help', 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n')}`);
-  const relocated = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge });
+  const relocated = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
   assert(relocated.written.some((item) => item.destination === legacySkill), 'layout antigo tratado como user-owned');
   assert(fs.readFileSync(legacySkill, 'utf8').startsWith('---'));
-  fs.writeFileSync(path.join(codex, 'config.toml'), 'operator = true\n'); const preserved = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge }); assert(preserved.conflicts.some((item) => item.destination.endsWith(path.join('Codex Home Ω', 'config.toml')))); assert.match(fs.readFileSync(path.join(codex, 'config.toml'), 'utf8'), /operator/);
+  fs.writeFileSync(path.join(codex, 'config.toml'), 'operator = true\n'); const preserved = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }); assert(preserved.conflicts.some((item) => item.destination.endsWith(path.join('Codex Home Ω', 'config.toml')))); assert.match(fs.readFileSync(path.join(codex, 'config.toml'), 'utf8'), /operator/);
 
   // The ownership probe is anchored to the accepted positions, so a user-owned
   // document that merely QUOTES the marker stays theirs. Behavioural on purpose:
@@ -156,11 +157,11 @@ try {
   const operatorDoc = path.join(codex, 'skills', 'forge-help', 'SKILL.md');
   const operatorText = '# Notas do operador\n\nO marcador tem esta forma:\n\n```md\n<!-- forge-source:codex -->\n```\n';
   fs.writeFileSync(operatorDoc, operatorText);
-  const quoted = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge });
+  const quoted = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
   assert(quoted.conflicts.some((item) => item.destination === operatorDoc), 'documento que apenas cita o marcador foi tratado como projeção');
   assert.strictEqual(fs.readFileSync(operatorDoc, 'utf8'), operatorText, 'arquivo do operador foi sobrescrito');
   fs.rmSync(operatorDoc, { force: true });
-  const dry = renderer.write({ repo: root, projectRoot: project, codexHome: path.join(temp, 'dry codex'), forgeHome: path.join(temp, 'dry forge'), dryRun: true }); assert.strictEqual(dry.dry_run, true); assert(!fs.existsSync(path.join(temp, 'dry codex')));
+  const dry = renderer.write({ repo: root, projectRoot: project, codexHome: path.join(temp, 'dry codex'), forgeHome: path.join(temp, 'dry forge'), dryRun: true, ...PRODUCTION_DISPATCH_DIALECT }); assert.strictEqual(dry.dry_run, true); assert(!fs.existsSync(path.join(temp, 'dry codex')));
   assert.throws(() => renderer.render({ repo: root, codexHome: path.join(temp, '.claude') }), error => error.code === 'invalid_options' || error.code === 'host-isolation');
 
   // A repo root without the source manifest is not a clone. Same rule as the
@@ -179,6 +180,35 @@ try {
   const fixturePath = path.join(__dirname, 'fixtures', 'codex-renderer', 'dispatch-fence.md');
   const fixtureText = fs.readFileSync(fixturePath, 'utf8');
   assert(Object.isFrozen(DISPATCH_REASON), 'DISPATCH_REASON precisa ser imutável');
+  assert(Object.isFrozen(PRODUCTION_DISPATCH_DIALECT), 'dialeto de produção precisa ser imutável');
+  assert.deepStrictEqual(PRODUCTION_DISPATCH_DIALECT, {
+    agentInvocation: 'spawn_agent(',
+    hostRuntime: 'codex',
+  });
+  assert.deepStrictEqual(
+    {
+      agentInvocation: renderer.parseArgs([]).agentInvocation,
+      hostRuntime: renderer.parseArgs([]).hostRuntime,
+    },
+    PRODUCTION_DISPATCH_DIALECT,
+    'CLI standalone não semeou o dialeto de produção',
+  );
+  assert.deepStrictEqual(
+    {
+      agentInvocation: renderer.parseArgs(['--agent-invocation', 'test_agent(', '--host-runtime', 'test-host']).agentInvocation,
+      hostRuntime: renderer.parseArgs(['--agent-invocation', 'test_agent(', '--host-runtime', 'test-host']).hostRuntime,
+    },
+    { agentInvocation: 'test_agent(', hostRuntime: 'test-host' },
+    'overrides CLI válidos não foram preservados',
+  );
+  assert.throws(
+    () => renderer.parseArgs(['--agent-invocation', '']),
+    (error) => error.code === DISPATCH_REASON.AGENT_FORM_REQUIRED,
+  );
+  assert.throws(
+    () => renderer.parseArgs(['--host-runtime', '']),
+    (error) => error.code === DISPATCH_REASON.HOST_RUNTIME_INVALID,
+  );
   const naiveStarts = fixtureText.match(/^<!-- forge:dispatch:start -->$/gm) || [];
   const scannedFixture = scanDispatchMarkers(fixtureText);
   assert(naiveStarts.length > 1, 'fixture não morde um detector global ingênuo');
@@ -189,11 +219,11 @@ try {
   const fixturePrefix = fixtureText.slice(0, locatedFixture.start);
   const fixtureInterior = fixtureText.slice(locatedFixture.start, locatedFixture.end);
   const fixtureSuffix = fixtureText.slice(locatedFixture.end);
-  const agentInvocation = 'CodexAgent(';
-  const codexFixture = rewriteDispatchDialect(fixtureText, { agentInvocation });
+  const agentInvocation = PRODUCTION_DISPATCH_DIALECT.agentInvocation;
+  const codexFixture = rewriteDispatchDialect(fixtureText, PRODUCTION_DISPATCH_DIALECT);
   const expectedInterior = fixtureInterior
     .split('Agent(').join(agentInvocation)
-    .split('--host-runtime claude').join(`--host-runtime ${renderer.RUNTIME}`);
+    .split('--host-runtime claude').join(`--host-runtime ${PRODUCTION_DISPATCH_DIALECT.hostRuntime}`);
   assertBytesEqual(codexFixture.slice(0, fixturePrefix.length), fixturePrefix, 'prefixo externo ao splice mudou');
   assert.strictEqual(codexFixture.slice(fixturePrefix.length, fixturePrefix.length + expectedInterior.length), expectedInterior);
   assertBytesEqual(codexFixture.slice(-fixtureSuffix.length), fixtureSuffix, 'sufixo externo ao splice mudou');
@@ -201,6 +231,26 @@ try {
   assert(fixtureSuffix.includes('Agent(') && fixtureSuffix.includes('--host-runtime claude'));
   assert(expectedInterior.includes(agentInvocation) && expectedInterior.includes('--host-runtime codex'));
   assert(!expectedInterior.includes('--host-runtime claude'));
+
+  // R2: both substitutions must be selected from disjoint spans in the original
+  // interior. The Agent replacement deliberately contains the exact host token;
+  // only the independently matched token from the canonical source may change.
+  const opaqueAgentInvocation = 'spawn_agent(/* --host-runtime claude */';
+  const disjointSource = [
+    DISPATCH_MARKER_START,
+    'Agent({ disjoint: true })',
+    'node forge-worker.js --host-runtime claude --mode execute',
+    DISPATCH_MARKER_END,
+    '',
+  ].join('\n');
+  const disjointOutput = rewriteDispatchDialect(disjointSource, {
+    agentInvocation: opaqueAgentInvocation,
+    hostRuntime: PRODUCTION_DISPATCH_DIALECT.hostRuntime,
+  });
+  assert(disjointOutput.includes('spawn_agent(/* --host-runtime claude */{ disjoint: true })'));
+  assert(disjointOutput.includes('node forge-worker.js --host-runtime codex --mode execute'));
+  assert.strictEqual((disjointOutput.match(/--host-runtime claude/g) || []).length, 1, 'texto inserido foi rescaneado');
+  assert.strictEqual((disjointOutput.match(/--host-runtime codex/g) || []).length, 1, 'token de origem não foi retargeted uma vez');
 
   // No marker means byte identity and no option access. This is what keeps the
   // seam inert before canonical fenced sources are introduced in the next slice.
@@ -287,7 +337,7 @@ try {
     projectRoot: path.join(validFixture.repo, 'project'),
     codexHome: path.join(validFixture.repo, 'codex-home'),
     forgeHome: path.join(validFixture.repo, 'forge-home'),
-    agentInvocation,
+    ...PRODUCTION_DISPATCH_DIALECT,
   });
   const codexArtifact = codexFixtureReport.artifacts.find((item) => item.source === 'shared/templates/dispatch/dispatch-fence.md');
   assert(codexArtifact, 'fixture não atravessou o renderer Codex real');
@@ -321,7 +371,7 @@ try {
       projectRoot: atomicProject,
       codexHome: atomicCodex,
       forgeHome: atomicForge,
-      agentInvocation,
+      ...PRODUCTION_DISPATCH_DIALECT,
       provenance: null,
     }),
     (error) => error.code === DISPATCH_REASON.START_WITHOUT_END,
@@ -332,8 +382,8 @@ try {
 
   // Enumerate exactly the four Markdown surfaces from the real manifest. The
   // census is non-empty per surface, excludes shared/forge-dispatch.md, includes
-  // an Agent( outside Markdown fences, and hashes identically before/after the
-  // dialect seam while canonical sources still have no real dispatch marker.
+  // an Agent( outside Markdown fences, and limits the live dialect seam to the
+  // three canonical orchestrator skills that now own one real marker pair.
   const realManifest = JSON.parse(fs.readFileSync(path.join(root, 'forge-source-manifest.json'), 'utf8'));
   const markdownSourceIds = new Set(['agents', 'commands', 'skills', 'dispatch-templates']);
   const census = [];
@@ -354,20 +404,46 @@ try {
   assert(census.length > 0, 'censo Markdown real vazio');
   assert(census.some((entry) => hasAgentOutsideFence(entry.content)), 'controle Agent( fora de fence ausente');
   assert(census.every((entry) => entry.source !== 'shared/forge-dispatch.md'));
-  assert(census.every((entry) => {
+  const managedSources = census.filter((entry) => {
     const markers = scanDispatchMarkers(entry.content);
-    return markers.starts.length === 0 && markers.ends.length === 0;
-  }), 'fonte canônica já contém marker forge:dispatch real');
+    return markers.starts.length > 0 || markers.ends.length > 0;
+  });
+  assert.deepStrictEqual(managedSources.map((entry) => entry.source).sort(), [
+    'skills/forge-auto/SKILL.md',
+    'skills/forge-next/SKILL.md',
+    'skills/forge-task/SKILL.md',
+  ]);
+  for (const entry of managedSources) {
+    const markers = scanDispatchMarkers(entry.content);
+    assert.strictEqual(markers.starts.length, 1, `${entry.source}: start marker inválido`);
+    assert.strictEqual(markers.ends.length, 1, `${entry.source}: end marker inválido`);
+  }
   const rewrittenCensus = census.map((entry) => ({
     ...entry,
-    content: rewriteDispatchDialect(entry.content, { agentInvocation, hostRuntime: renderer.RUNTIME }),
+    content: rewriteDispatchDialect(entry.content, PRODUCTION_DISPATCH_DIALECT),
   }));
   for (let index = 0; index < census.length; index++) {
-    assert.strictEqual(rewrittenCensus[index].content, census[index].content, `drift em ${census[index].source}`);
+    const managed = managedSources.some((entry) => entry.source === census[index].source);
+    if (managed) {
+      assert.notStrictEqual(rewrittenCensus[index].content, census[index].content, `dialeto inerte em ${census[index].source}`);
+      assert(!locateDispatchBlock(rewrittenCensus[index].content)
+        || !rewrittenCensus[index].content.slice(
+          locateDispatchBlock(rewrittenCensus[index].content).start,
+          locateDispatchBlock(rewrittenCensus[index].content).end,
+        ).includes('Agent('), `Agent operacional sobreviveu em ${census[index].source}`);
+    } else {
+      assert.strictEqual(rewrittenCensus[index].content, census[index].content, `drift fora do seam em ${census[index].source}`);
+    }
   }
-  assert.deepStrictEqual(hashCensus(rewrittenCensus), hashCensus(census), 'SHA-256 por source_id mudou');
+  const originalHashes = hashCensus(census);
+  const rewrittenHashes = hashCensus(rewrittenCensus);
+  assert.deepStrictEqual(
+    Object.keys(originalHashes).filter((sourceId) => originalHashes[sourceId] !== rewrittenHashes[sourceId]),
+    ['skills'],
+    'o seam Codex alterou uma superfície diferente de skills',
+  );
 
-  const realCodex = renderer.render({ repo: root, agentInvocation });
+  const realCodex = renderer.render({ repo: root, ...PRODUCTION_DISPATCH_DIALECT });
   const realClaude = claudeRenderer.render({ repo: root });
   assert(realCodex.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
   assert(realClaude.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));

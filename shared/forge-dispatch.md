@@ -936,6 +936,9 @@ There are two identities on the Claude artifact path:
       status: "done", // "error" on a failed call
       unit: `${unitType}/${unitId}`,
       model: modelId,
+      host_runtime: HOST_RUNTIME,
+      worker_mode: WORKER_MODE,
+      dispatch_allowed: DISPATCH_ALLOWED === "true",
       input_tokens,
       output_tokens,
       token_method: "heuristic-chars-4",
@@ -960,6 +963,9 @@ Each dispatch event is a single newline-terminated JSON object appended to `.gsd
 | `status` | `"done" \| "error"` | call outcome; absent means legacy success | `"done"` |
 | `unit` | string | `${unitType}/${unitId}` | `"execute-task/T03"` |
 | `model` | string | PREFS routing | `"claude-sonnet-5"` |
+| `host_runtime` | `"claude" \| "codex"` | resolver shell export for the current host | `"claude"` |
+| `worker_mode` | `"native" \| "sidecar"` | final mode that actually reached the model call | `"native"` |
+| `dispatch_allowed` | boolean | resolver-composed guard verdict; always an unquoted JSON boolean | `true` |
 | `vcs` | string | `detectVcs(CODE_DIR)` | `"git"` |
 | `input_tokens` | integer | `countTokens(finalPrompt)` | `12345` |
 | `output_tokens` | integer | SDK usage or `countTokens(text)` | `3421` |
@@ -968,7 +974,15 @@ Each dispatch event is a single newline-terminated JSON object appended to `.gsd
 | `transport_version` | string | observed CLI version — `thread.cliVersion` → the leading `name/version` token of `initializeResult.userAgent` → `"unknown"`. Present **only** when `transport == "app-server"`, and then **never omitted** | `"0.144.4"` |
 | `transport_reason` | closed set: `no-result-file`, `no-transport-field`, `handshake-not-observed`, `invalid-transport-value` | why the transport could not be observed. Present **only** when `transport == "unknown"` | `"no-result-file"` |
 
-Routing adds `tier`, `reason`, `engine`, `domain`, `route_source`, `chain_len`, `effort`, `effort_reason`, `transport`, `transport_version`, and `transport_reason` fields additively; `vcs` is likewise additive. Implementors must treat the schema as open for extension: old readers ignore unknown fields and no existing field is renamed, retyped, or removed.
+Runtime resolution adds `host_runtime`, `worker_mode`, and boolean
+`dispatch_allowed` to every newly emitted record. `worker_mode` is the final
+mode that actually called the model: a native `not-spawned` transition records
+`sidecar`, never the stale `native` value. Routing adds `tier`, `reason`,
+`engine`, `domain`, `route_source`, `chain_len`, `effort`, `effort_reason`,
+`transport`, `transport_version`, and `transport_reason` fields additively;
+`vcs` is likewise additive. Implementors must treat the schema as open for
+extension: old readers ignore unknown fields and no existing field is renamed,
+retyped, or removed.
 
 **Absence of `transport` means the record predates TASK-022** — it does not mean `"in-process"` and it does not mean `"unknown"`. Both of those are values a live emitter writes on purpose; absence is the only thing that says "nobody asked". This is why the Claude path emits the constant `"in-process"` instead of omitting the field: omission would give the absence two meanings (legacy record × Claude path), and a reader could not separate them.
 
@@ -997,7 +1011,7 @@ Worker returns approximately 1 200 characters of output. Token estimate: `countT
 Event appended to `.gsd/forge/events.jsonl`:
 
 ```json
-{"ts":"2026-04-16T10:00:05Z","event":"dispatch","dispatch_id":"execute-task-T03-a91c4e-a1","prompt_id":"execute-task-T03-a91c4e","attempt":1,"status":"done","unit":"execute-task/T03","model":"claude-sonnet-5","input_tokens":2000,"output_tokens":300,"token_method":"heuristic-chars-4","vcs":"git","transport":"in-process"}
+{"ts":"2026-04-16T10:00:05Z","event":"dispatch","dispatch_id":"execute-task-T03-a91c4e-a1","prompt_id":"execute-task-T03-a91c4e","attempt":1,"status":"done","unit":"execute-task/T03","model":"claude-sonnet-5","host_runtime":"claude","worker_mode":"native","dispatch_allowed":true,"input_tokens":2000,"output_tokens":300,"token_method":"heuristic-chars-4","vcs":"git","transport":"in-process"}
 ```
 
 #### Budgeted Section Injection
@@ -1130,7 +1144,7 @@ both directions, refusal-without-writing, anti-silence floor).
 
 ### Worker Engine Routing
 
-**Purpose:** Control-flow section that runs **before** Tier Resolution and Effort Resolution on every routable worker dispatch. `forge-dispatch-resolve.js` returns a cross-model chain plus a normalized `dispatch_engine`. Model family (`claude|gpt|gemini`) and dispatch engine (`claude|codex|agy`) are distinct: only `dispatch_engine` selects a sidecar branch, while the persisted `dispatch` event records the normalized engine actually used (`claude|codex|agy`). A failed write-capable sidecar is surgically reset to its pre-dispatch snapshot, preserving pre-existing dirty files, before the chain advances or Claude fallback runs.
+**Purpose:** Control-flow section that runs **before** Tier Resolution and Effort Resolution on every routable worker dispatch. `forge-dispatch-resolve.js` returns a cross-model chain, the normalized runtime axes, and the composed dispatch verdict. Model family (`claude|gpt|gemini`) and dispatch engine (`claude|codex|agy`) remain distinct routing metadata, but the executable branch is selected by the normalized `WORKER_MODE` (`native|sidecar`) only after the resolver gate. The persisted `dispatch` event records the normalized engine actually used (`claude|codex|agy`) and the final runtime mode. A failed write-capable sidecar is surgically reset to its pre-dispatch snapshot, preserving pre-existing dirty files, before the chain advances or the named Claude fallback runs.
 
 > **Spec-first.** This section is canonical. `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md`, and the standalone execute path in `skills/forge-task/SKILL.md` carry executable mirrors. All three resolve domain-first routing through `forge-dispatch-resolve.js`.
 
@@ -1138,7 +1152,7 @@ both directions, refusal-without-writing, anti-silence floor).
 
 > **Fonte executável única (M012):** as of M012 S02, engine resolution described here no longer has its own standalone bash block in the skills — it is one of the fields (`engine`/`engine_reason`) emitted by the **same** `scripts/forge-dispatch-resolve.js --json` call that resolves Tier + Effort + Alias (see § Tier Resolution → Wiring snippet). This section remains the canonical spec for *what* the engine decision means (route_source table, sidecar state machine, BLOCKER contract, fallback); the *executable* implementation of the decision logic lives in the resolver.
 
-> **`dispatch_engine` is the canonical branch trigger.** The resolver's chain carries model-family metadata (`claude|gpt|gemini`); `dispatch_engine` normalizes it (`gpt→codex`, `gemini→agy`, otherwise `claude`). Sidecar branches gate only on `$DISPATCH_ENGINE`. Event field `engine` records the normalized engine that actually ran so review pairing and cost aggregation see `claude|codex|agy` consistently.
+> **`WORKER_MODE` is the canonical branch trigger.** The resolver's chain still carries model-family metadata (`claude|gpt|gemini`) and `dispatch_engine` still normalizes it (`gpt→codex`, `gemini→agy`, otherwise `claude`) for adapter selection and telemetry. Neither field may bypass or replace the runtime gate. Sidecar branches require `$WORKER_MODE == sidecar`; native branches require `$WORKER_MODE == native`. Event field `engine` records the normalized engine that actually ran so review pairing and cost aggregation see `claude|codex|agy` consistently.
 
 #### Runtime-neutral host and worker contract (S01/T02)
 
@@ -1159,6 +1173,10 @@ node scripts/forge-dispatch-resolve.js --json --unit-type execute-task \
   --sidecar-declared --cwd "$WORKING_DIR"
 ```
 
+This `text` fence is an illustrative resolver example, not an operational call
+site. The single operational wiring is the marked thin caller in § Tier
+Resolution; examples are never counted as executable consumers.
+
 The following fields are additive and appear after the established resolver
 fields. The ordered legacy prefix remains `engine, model, alias, tier, domain,
 route_source, chain, chain_len, reason, effort, effort_reason`.
@@ -1171,19 +1189,50 @@ route_source, chain, chain_len, reason, effort, effort_reason`.
 | `resolved_worker_engine` | Actual target after resolving `worker_engine:native` solely from `host_runtime`. |
 | `sidecar_declared` | Explicit caller assertion needed for any sidecar combination. It is not a permission grant. |
 | `worker_reason_code` | Stable success or refusal reason from `forge-runtime.js`. |
-| `dispatch_allowed` / `dispatch_reason_code` | Pre-dispatch gate. `false` means do not launch a worker and report the stable reason. |
+| `dispatch_allowed` / `dispatch_reason_code` / `dispatch_hint` | Resolver-composed pre-dispatch gate. `false` means report the stable reason and hint, then stop before any worker work begins. |
 
 `native` has no cross-provider fallback: on `{host_runtime:"codex",
 worker_engine:"native"}` the `resolved_worker_engine` is `codex`, even if the
 routed model is Claude. Conversely, a `gpt-*` model does not change the host.
 The model-routing fields continue to describe their legacy concerns:
-`engine` remains a model family, `dispatch_engine` remains the sidecar branch
-trigger, and `chain`/`route_source` retain their existing meanings. No runtime
-field removes, renames, or reinterprets any of them.
+`engine` remains a model family, `dispatch_engine` selects the adapter only
+after `WORKER_MODE` selects `sidecar`, and `chain`/`route_source` retain their
+existing meanings. No runtime field removes, renames, or reinterprets them.
 
-Before dispatch, consumers must gate on `dispatch_allowed` in addition to
-their existing preferences/error gate. A refused runtime contract never
-silently selects Claude (or another host). In particular,
+#### Mandatory resolver consumer gate and runtime-mode state machine
+
+After `--shell-exports`, every consumer applies this ordering **before anything
+that can begin worker work**:
+
+1. If `DISPATCH_ALLOWED != true`, print `DISPATCH_REASON_CODE` and
+   `DISPATCH_HINT`, then follow that caller's established halt/deactivation
+   path. No worker timeline, prompt rendering, adapter process, or native
+   delegation may begin before this check. This is a refusal, never a legitimate
+   fallback, and it never selects another worker or host.
+2. If `DISPATCH_DECISION == advisory`, continue. The caller may surface
+   `DISPATCH_HINT`, but the hint does not change routing.
+3. Branch on `WORKER_MODE`. `native` reaches the host-native agent mechanism;
+   in the Codex projection that mechanism is `spawn_agent(`. `sidecar` reaches
+   the external adapter selected by `RESOLVED_WORKER_ENGINE`/`DISPATCH_ENGINE`.
+4. The only `native → sidecar` transition is the named native result
+   `not-spawned`. It may happen **once**, for the **same** resolved worker and
+   therefore the same family as the native host. Before loading the adapter,
+   set `WORKER_MODE=sidecar`, retain `DISPATCH_ALLOWED=true`, set
+   `SIDECAR_DECLARED=true`, and pass the explicit declaration to the adapter.
+   Any second transition or any worker substitution follows the established
+   halt/failure path instead.
+
+In the Codex projection this is specifically
+`host_runtime:codex + resolved_worker_engine:codex`: native `spawn_agent(` is
+attempted first, and only its named `not-spawned` result can enter the Codex
+sidecar. It is never a cross-family recovery or a way around a refusal.
+
+`FORGE_RUNTIME_ENFORCE=0` is interpreted once inside the guard composed by the
+resolver. Consumers **must never re-read it** or reproduce the guard's leg
+table: the exported `DISPATCH_ALLOWED`, `DISPATCH_DECISION`,
+`DISPATCH_REASON_CODE`, and `DISPATCH_HINT` are the complete verdict.
+
+A refused runtime contract never silently selects Claude (or another host). In particular,
 `host_runtime:codex + worker_engine:codex + worker_mode:sidecar` without the
 explicit declaration returns `dispatch_allowed:false` and
 `dispatch_reason_code:"implicit-recursion-refused"`. Supplying
@@ -1209,19 +1258,19 @@ shell quoting, PID, or platform-specific fallback participates in resolution.
 
 #### When to apply
 
-Engine Routing runs at the **top** of the Step 4 dispatch for a worker, **before** Tier Resolution (and therefore before Effort Resolution, which depends on `$MODEL_ID`). The ordering is deliberate: when `dispatch_engine == codex` the Claude Tier/Effort Resolution is **skipped entirely** (Codex resolves its own model), and only runs on the Claude path — including the fallback path, where the fallback re-enters Tier/Effort Resolution as a normal Claude dispatch.
+Engine Routing runs at the **top** of the Step 4 dispatch for a worker, **before** Tier Resolution (and therefore before Effort Resolution, which depends on `$MODEL_ID`). The ordering is deliberate: the resolver verdict is consumed first, then `WORKER_MODE` chooses native or sidecar. In `sidecar` mode the selected adapter resolves its own model; in `native` mode Tier/Effort Resolution continues for the host-native call. A named fallback re-enters the same resolver gate and mode decision instead of assigning a branch directly.
 
 Applicability by `unit_type`:
 
 | `unit_type` | Engine routing | Sidecar dispatch |
 |-------------|----------------|--------------------------|
-| `execute-task` | **active** | yes — routes to the sidecar `--mode execute` when `dispatch_engine == codex` (Branch C) |
-| `plan-slice` | **active** (S03) | yes — routes to the sidecar `--mode plan` (read-only) when `dispatch_engine == codex` (Branch D) |
-| all others (`plan-milestone`, `discuss-*`, `research-*`, `complete-*`, `memory-extract`, …) | **never** — always Claude | no |
+| `execute-task` | **active** | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches `--mode execute` (Branch C) |
+| `plan-slice` | **active** (S03) | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches read-only `--mode plan` (Branch D) |
+| all others (`plan-milestone`, `discuss-*`, `research-*`, `complete-*`, `memory-extract`, …) | **never** — host-native mode | no |
 
 `plan-milestone` is **never** covered by `workers:` (locked) — it stays on tier `max`/Fable regardless of prefs.
 
-The `claude` path is **byte-identical** to the current loop: when `ENGINE == claude` this section is a no-op that hands control straight to Tier Resolution. Only a non-`claude` resolution changes behavior. Two routable unit types dispatch the sidecar: `execute-task` (Branch C — `--mode execute`, read-write) and `plan-slice` (Branch D — `--mode plan`, **read-only**). The two branches diverge on side effects: execute captures/resets `START_SHA` and forbids codex commits; plan writes nothing (codex only reasons and returns markdown), so there is **no dirty-tree guard, no `START_SHA`, no reset** — the orchestrator materializes the returned plan content into `.gsd/**` itself.
+The canonical Claude-source `native` path is **byte-identical** to the current loop after the new resolver gate: `WORKER_MODE == native` hands control to Tier Resolution and the host-native call. `WORKER_MODE == sidecar` selects one of two routable adapter modes: `execute-task` (Branch C — `--mode execute`, read-write) or `plan-slice` (Branch D — `--mode plan`, **read-only**). The two branches diverge on side effects: execute captures/resets `START_SHA` and forbids codex commits; plan writes nothing (codex only reasons and returns markdown), so there is **no dirty-tree guard, no `START_SHA`, no reset** — the orchestrator materializes the returned plan content into `.gsd/**` itself.
 
 #### Single-call resolver — `forge-routing.js` (ONE call per dispatch)
 
@@ -1337,7 +1386,7 @@ CODEX_MODEL=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('da
 
 **Equivalence with the old cascade (JSONC shape capture):** the JSONC parser exposes the per-unit-type engine as `.prefs.workers[<unit_type>]` (the `[A-Za-z0-9_.-]` key class covers hyphenated unit types such as `execute-task`); `timeout` as `.prefs.workers.timeout`; `codex_model` as `.prefs.workers.codex_model`. The resolver is safe with **no scaffold present**: absent a `workers:` block, `.prefs.workers` is `undefined`, so `WORKERS_ENGINE=claude`, `WORKERS_TIMEOUT=1800`, `CODEX_MODEL=""` (unset) — byte-identical defaults to the old snippet. The commented `workers:` scaffold in `forge-agent-prefs.jsonc § Workers Settings` ships in **S05**; the resolver does not depend on it (the CLI resolves absent keys to the same safe defaults).
 
-#### Sidecar dispatch state machine (`dispatch_engine == codex && UNIT_TYPE == execute-task`)
+#### Sidecar dispatch state machine (`WORKER_MODE == sidecar && UNIT_TYPE == execute-task`)
 
 **Sidecar environment policy (canonical — mirrors reference this, never copy).** Todo spawn de
 sidecar recebe `env: buildSidecarEnv(policy)`. A resolução é `--env-policy` >
@@ -1345,7 +1394,23 @@ sidecar recebe `env: buildSidecarEnv(policy)`. A resolução é `--env-policy` >
 enquanto `inherit` é o escape hatch inseguro que entrega o ambiente inteiro. Os mirrors não
 repetem a flag nem esta regra: o adapter resolve o pref sozinho a partir da cascata canônica.
 
+**Credential isolation is mandatory.** `buildSidecarEnv` never loads a token
+and never reads a provider credential store. Its default `minimal` policy strips
+credential prefixes; the existing explicit `inherit` escape hatch remains
+unsafe because it forwards the caller's ambient environment, but it still does
+not load a stored token. The one and only credential-loading exception lives in
+`scripts/forge-claude-sidecar.js`, which resolves the selected Claude account
+immediately before launch and places its token only in the child-only
+environment. No resolver, mirror, review adapter, fallback, or new prose here
+authorizes another exception. Examples use variable placeholders only; never a
+real credential value.
+
 When the dispatched chain member resolves to `engine == codex` **and** the unit is `execute-task`, the orchestrator drives the detached adapter instead of `Agent("forge-executor")`. States: `started → polling → done | failed`. Because a cross-engine chain (e.g. `gpt→claude→gpt`) can dispatch the sidecar **more than once in the same unit**, the state machine is parameterized by a per-unit attempt counter — see § BLOCKER: cross-engine sidecar safety contract below for the invariants (state fresh per attempt, verified reset, hard cap).
+
+Runtime-aware entry adds the upstream requirement `WORKER_MODE == sidecar` to
+that preserved adapter-selection description. A `native` entry is legal solely
+through the one-shot `not-spawned` transition, after changing the final mode to
+`sidecar`; `dispatch_engine` identifies the adapter but never bypasses the gate.
 
 **0. Increment the sidecar attempt counter (`SIDECAR_ATTEMPT`).** Before dispatching *any* sidecar for this unit, increment a per-unit counter `SIDECAR_ATTEMPT` (starts at 1 for the first sidecar dispatch of the unit). It is hard-capped by the number of `engine == codex` members in the resolved chain (≤3, S01 cap). Exceeding the cap → abort the chain to the Claude fallback (`reason: sidecar-cap-exceeded`). The counter is persisted in the per-attempt state file (below) so it survives an auto-compact mid-unit.
 
@@ -1434,7 +1499,8 @@ SECURITY_FILE="${PLAN_PATH%-PLAN.md}-SECURITY.md"
 CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
 node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
   --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
-XLLM_ARGS=(--mode execute --plan "$PLAN_PATH" --result-file "$RESULT_FILE" \
+XLLM_ARGS=(--mode execute --host-runtime "$HOST_RUNTIME" --sidecar-declared \
+  --plan "$PLAN_PATH" --result-file "$RESULT_FILE" \
   --cwd "$CODE_DIR" --context-root "$WORKING_DIR" --timeout "$WORKERS_TIMEOUT" --dispatch-id "$SIDECAR_DISPATCH_ID" \
   --security "$SECURITY_FILE" --context-bundle "$CTX_BUNDLE")
 [ -n "$SIDECAR_MODEL" ] && XLLM_ARGS+=(--model "$SIDECAR_MODEL")
@@ -1597,6 +1663,9 @@ node "$FORGE_SCRIPTS_DIR/forge-evidence-materialize.js" \
 
 When `dispatch_engine` resolves to `codex` **and** the unit is `plan-slice`, the orchestrator drives the adapter in **`--mode plan`** instead of `Agent("forge-planner")`. Branch D is the **read-only twin** of Branch C: codex only *reads* the codebase + planning context to reason and returns the full markdown content of the slice plan and each task plan in the result JSON. It never writes — **only the orchestrator writes `.gsd/**`** (invariant preserved), materializing the returned content after a successful run. Because nothing is codex-authored on disk, Branch D has **no dirty-tree guard, no `START_SHA` capture, no reset, no no-commit check** (contrast Branch C, which needs all four). States: `started → polling → done | failed`.
 
+Runtime-aware entry additionally requires `WORKER_MODE == sidecar`; the
+preserved `dispatch_engine` condition selects the adapter only after the gate.
+
 **1. Assemble the plan-context file (orchestrator).** Before dispatch, the orchestrator concatenates into a **temp file OUTSIDE `.gsd/` and `CODE_DIR`** (via `mktemp`) the exact artifacts the Claude `forge-planner` would receive for this slice — so codex plans from the same information:
 
 - the slice's ROADMAP entry from `.gsd/milestones/{M###}/{M###}-ROADMAP.md`
@@ -1629,7 +1698,8 @@ FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "${FORG
 SIDECAR_DISPATCH_ID=$(node -e "process.stdout.write(require('crypto').randomUUID())")
 node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --state-update \
   --state "$XLLM_STATE" --dispatch-id "$SIDECAR_DISPATCH_ID"
-XLLM_ARGS=(--mode plan --plan-context "$CTX_FILE" --result-file "$RESULT_FILE" \
+XLLM_ARGS=(--mode plan --host-runtime "$HOST_RUNTIME" --sidecar-declared \
+  --plan-context "$CTX_FILE" --result-file "$RESULT_FILE" \
   --cwd "$CODE_DIR" --timeout "$WORKERS_TIMEOUT" --dispatch-id "$SIDECAR_DISPATCH_ID")
 [ -n "$SIDECAR_MODEL" ] && XLLM_ARGS+=(--model "$SIDECAR_MODEL")
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" "${XLLM_ARGS[@]}"
@@ -1919,10 +1989,10 @@ Rules by member-failure kind:
 
 #### Event log extension — additive `engine` field on `dispatch`
 
-The `dispatch` event schema (Token Telemetry + Tier Resolution) is extended **additively** with four routing fields: `engine ∈ {claude, codex, gemini}`, `domain` (the `domain_used` from the resolver — a domain name or `default`), `route_source ∈ {frontmatter, routing, tier_models}` (the `source` from the resolver), and `chain_len` (the number of members in the resolved chain, an integer ≥1). No existing field is renamed or removed. S03/M006/M005 readers that parse by known field names and ignore unknowns continue to work; events lacking any of these fields are valid (treat as `undefined`, not error) — the M006 `slice`/`milestone` discriminators and the M005 `engine` field are preserved alongside.
+The `dispatch` event schema (Token Telemetry + Tier Resolution) is extended **additively** with four routing fields: `engine ∈ {claude, codex, gemini}`, `domain` (the `domain_used` from the resolver — a domain name or `default`), `route_source ∈ {frontmatter, routing, tier_models}` (the `source` from the resolver), and `chain_len` (the number of members in the resolved chain, an integer ≥1), plus the runtime fields `host_runtime`, final `worker_mode`, and boolean `dispatch_allowed`. No existing field is renamed or removed. S03/M006/M005 readers that parse by known field names and ignore unknowns continue to work; events lacking any of these fields are valid (treat as `undefined`, not error) — the M006 `slice`/`milestone` discriminators and the M005 `engine` field are preserved alongside.
 
 ```json
-{"ts":"2026-07-15T10:00:05Z","event":"dispatch","dispatch_id":"055f72ac-09cb-4d10-b234-fef01247a8ca","attempt":1,"status":"done","unit":"execute-task/T04","model":"gpt-5-codex","input_tokens":2100,"output_tokens":487,"token_method":"heuristic-chars-4","tier":"heavy","reason":"unit-type:execute-task","engine":"codex","domain":"backend","route_source":"routing","chain_len":3,"transport":"app-server","transport_version":"0.144.4"}
+{"ts":"2026-07-15T10:00:05Z","event":"dispatch","dispatch_id":"055f72ac-09cb-4d10-b234-fef01247a8ca","attempt":1,"status":"done","unit":"execute-task/T04","model":"gpt-5-codex","host_runtime":"claude","worker_mode":"sidecar","dispatch_allowed":true,"input_tokens":2100,"output_tokens":487,"token_method":"heuristic-chars-4","tier":"heavy","reason":"unit-type:execute-task","engine":"codex","domain":"backend","route_source":"routing","chain_len":3,"transport":"app-server","transport_version":"0.144.4"}
 ```
 
 On the codex path `model` carries the codex model id (or the CLI default label when `$CODEX_MODEL` is unset). The adapter estimates both token fields with `chars/4` over its exact built prompt and raw returned text; this is observability, not provider billing usage. On the Claude path `engine` is `"claude"`. `domain`/`route_source`/`chain_len` come from the single resolver call and are emitted on both paths. Legacy dispatch events without the additive fields remain valid.
@@ -1932,7 +2002,7 @@ On the codex path `model` carries the codex model id (or the CLI default label w
 O schema `dispatch` é estendido **aditivamente** com dois campos nos **execute-task dispatch events** de `forge-auto` e `forge-next`: `slice` (ex.: `"S02"`) e `milestone` (ex.: `"M006"` ou o `RUN_ID` do run multi-run). Nenhum campo existente é renomeado ou removido. Readers S01/S03 que parseiam por nomes de campos conhecidos e ignoram desconhecidos continuam funcionando; eventos legados sem os campos permanecem JSON válido (tratar `slice`/`milestone` ausentes como `undefined`, nunca erro).
 
 ```json
-{"ts":"2026-07-15T10:00:05Z","event":"dispatch","dispatch_id":"055f72ac-09cb-4d10-b234-fef01247a8ca","attempt":1,"status":"done","unit":"execute-task/T04","model":"gpt-5-codex","reason":"unit-type:execute-task","engine":"codex","slice":"S02","milestone":"M006","input_tokens":2100,"output_tokens":487,"token_method":"heuristic-chars-4","transport":"app-server","transport_version":"0.144.4"}
+{"ts":"2026-07-15T10:00:05Z","event":"dispatch","dispatch_id":"055f72ac-09cb-4d10-b234-fef01247a8ca","attempt":1,"status":"done","unit":"execute-task/T04","model":"gpt-5-codex","host_runtime":"claude","worker_mode":"sidecar","dispatch_allowed":true,"reason":"unit-type:execute-task","engine":"codex","slice":"S02","milestone":"M006","input_tokens":2100,"output_tokens":487,"token_method":"heuristic-chars-4","transport":"app-server","transport_version":"0.144.4"}
 ```
 
 Estes campos são consumidos por `scripts/forge-review-pairing.js § isAuthorshipEvent` para escopar a autoria de review por slice/milestone (filtro **lenient-when-absent**: um evento sem o campo ainda conta, então o pré-escopo estrito exclui eventos legados sem discriminador antes de chamar o CLI — ver `shared/forge-review.md § Step 0`). Emitidos em ambos os caminhos claude e codex de `execute-task`. `forge-task` emite um único `execute-task/{TASK_ID}` (unit já único) e portanto **não** carrega os discriminadores.
@@ -2140,6 +2210,9 @@ The `dispatch` event schema (defined in Token Telemetry above) is extended addit
   "status": "done",
   "unit": "execute-task/T03",
   "model": "claude-sonnet-5",
+  "host_runtime": "claude",
+  "worker_mode": "native",
+  "dispatch_allowed": true,
   "input_tokens": 2000,
   "output_tokens": 300,
   "token_method": "heuristic-chars-4",
@@ -2152,7 +2225,7 @@ The `dispatch` event schema (defined in Token Telemetry above) is extended addit
 }
 ```
 
-**Compatibility:** Existing S03/M006/M005 readers that parse `dispatch` events by known field names and ignore unknown fields continue to work without modification. The `tier`/`reason` (M002), `engine` (M005), `slice`/`milestone` (M006), and `domain`/`route_source`/`chain_len` (M007 S02) fields are all present on every new dispatch event; older events in the log (which lack some of these fields) are valid — readers must treat any missing field as `undefined`, not as an error. `domain`/`route_source`/`chain_len` come from the single `forge-routing.js` call (`domain_used`, `source`, `chain.length`).
+**Compatibility:** Existing S03/M006/M005 readers that parse `dispatch` events by known field names and ignore unknown fields continue to work without modification. The `tier`/`reason` (M002), `engine` (M005), `slice`/`milestone` (M006), `domain`/`route_source`/`chain_len` (M007 S02), and `host_runtime`/`worker_mode`/`dispatch_allowed` runtime fields are all present on every new dispatch event; older events in the log (which lack some of these fields) are valid — readers must treat any missing field as `undefined`, not as an error. `domain`/`route_source`/`chain_len` come from the single `forge-routing.js` call (`domain_used`, `source`, `chain.length`).
 
 #### Worked examples
 
@@ -2170,7 +2243,7 @@ PLAN_TAG   : (absent)
 
 Dispatch event:
 ```json
-{"ts":"2026-04-16T10:05:00Z","event":"dispatch","dispatch_id":"memory-extract-T01-82b71e-a1","prompt_id":"memory-extract-T01-82b71e","attempt":1,"status":"done","unit":"memory-extract/T01","model":"claude-haiku-4-5-20251001","input_tokens":800,"output_tokens":120,"token_method":"heuristic-chars-4","tier":"light","reason":"unit-type:memory-extract"}
+{"ts":"2026-04-16T10:05:00Z","event":"dispatch","dispatch_id":"memory-extract-T01-82b71e-a1","prompt_id":"memory-extract-T01-82b71e","attempt":1,"status":"done","unit":"memory-extract/T01","model":"claude-haiku-4-5-20251001","host_runtime":"claude","worker_mode":"native","dispatch_allowed":true,"input_tokens":800,"output_tokens":120,"token_method":"heuristic-chars-4","tier":"light","reason":"unit-type:memory-extract"}
 ```
 
 **Example B — `execute-task` with `tier: heavy` AND `tag: docs` in frontmatter (manual wins)**
@@ -2187,7 +2260,7 @@ PLAN_TAG   : docs
 
 Dispatch event:
 ```json
-{"ts":"2026-04-16T10:06:00Z","event":"dispatch","dispatch_id":"execute-task-T07-f2310b-a1","prompt_id":"execute-task-T07-f2310b","attempt":1,"status":"done","unit":"execute-task/T07","model":"claude-opus-5","input_tokens":3200,"output_tokens":540,"token_method":"heuristic-chars-4","tier":"heavy","reason":"frontmatter-override:heavy"}
+{"ts":"2026-04-16T10:06:00Z","event":"dispatch","dispatch_id":"execute-task-T07-f2310b-a1","prompt_id":"execute-task-T07-f2310b","attempt":1,"status":"done","unit":"execute-task/T07","model":"claude-opus-5","host_runtime":"claude","worker_mode":"native","dispatch_allowed":true,"input_tokens":3200,"output_tokens":540,"token_method":"heuristic-chars-4","tier":"heavy","reason":"frontmatter-override:heavy"}
 ```
 
 **Example C — `execute-task` with ONLY `tag: docs` in frontmatter (downgrade applied)**
@@ -2204,7 +2277,7 @@ PLAN_TAG   : docs           ← triggers downgrade
 
 Dispatch event:
 ```json
-{"ts":"2026-04-16T10:07:00Z","event":"dispatch","dispatch_id":"execute-task-T09-5d293c-a1","prompt_id":"execute-task-T09-5d293c","attempt":1,"status":"done","unit":"execute-task/T09","model":"claude-haiku-4-5-20251001","input_tokens":1100,"output_tokens":200,"token_method":"heuristic-chars-4","tier":"light","reason":"frontmatter-tag:docs"}
+{"ts":"2026-04-16T10:07:00Z","event":"dispatch","dispatch_id":"execute-task-T09-5d293c-a1","prompt_id":"execute-task-T09-5d293c","attempt":1,"status":"done","unit":"execute-task/T09","model":"claude-haiku-4-5-20251001","host_runtime":"claude","worker_mode":"native","dispatch_allowed":true,"input_tokens":1100,"output_tokens":200,"token_method":"heuristic-chars-4","tier":"light","reason":"frontmatter-tag:docs"}
 ```
 
 **Example D — `execute-task` with `tier_models.standard` set as a fallback list**
@@ -2252,6 +2325,7 @@ the `Agent()` call). It is self-contained and copy-paste-adaptable for `forge-au
 and `forge-task` — the three files above are the canonical live copies; treat any drift from this
 block as a bug.
 
+<!-- forge:dispatch:start -->
 ```bash
 # ── Dispatch resolution (single call to the shared resolver) ─────────────────────
 # forge-dispatch-resolve.js reads prefs from $WORKING_DIR (MEM018 — never $CODE_DIR), parses the
@@ -2262,25 +2336,39 @@ FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || 
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
   --unit-type "$UNIT_TYPE" --plan "$PLAN_PATH" --unit-id "$UNIT_ID" \
   --milestone "$MILESTONE_ID" --roadmap "$ROADMAP_PATH" \
+  --host-runtime claude \
   --cwd "$WORKING_DIR" --json)    # SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018)
 if [ $? -ne 0 ]; then
   # prefs_ok:false → resolver exit 1 (M008-CONTEXT #2 loud-stop).
   echo "✗ dispatch resolver halted (prefs error) — see forge-dispatch-resolve.js prefs_errors" >&2
   exit 1
 fi
-MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).model)" "$ROUTE_JSON")
-MODEL_ALIAS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).alias||'')" "$ROUTE_JSON")
-TIER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).tier)" "$ROUTE_JSON")
-REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).reason)" "$ROUTE_JSON")
-DOMAIN_USED=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).domain)" "$ROUTE_JSON")
-ROUTE_SOURCE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).route_source)" "$ROUTE_JSON")
-CHAIN_LEN=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).chain_len))" "$ROUTE_JSON")
-ENGINE=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).engine)" "$ROUTE_JSON")
-EFFORT=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort)" "$ROUTE_JSON")
-EFFORT_REASON=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).effort_reason)" "$ROUTE_JSON")
-MODEL_ALIAS_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
-THINKING_HEADER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).thinking_header||'')" "$ROUTE_JSON")
+ROUTE_EXPORTS=$(printf '%s' "$ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+if [ $? -ne 0 ]; then
+  echo "✗ dispatch resolver exports invalid — dispatch halted" >&2
+  exit 1
+fi
+eval "$ROUTE_EXPORTS"
+
+# Mandatory resolver-composed verdict. This precedes timeline creation, prompt
+# rendering, every adapter process, and every host-native delegation.
+if [ "$DISPATCH_ALLOWED" != "true" ]; then
+  printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  # ...caller's established halt/deactivation path, then STOP...
+  exit 1
+fi
+if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
+  printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+fi
 [ -z "$MODEL_ALIAS" ] && echo "⚠ model \"$MODEL_ID\" sem alias — usando frontmatter do agente" >&2
+```
+<!-- forge:dispatch:end -->
+
+The managed resolver block ends before the host-native call prose on purpose.
+The canonical dispatch specification is not a source-manifest input, and none
+of its protected specification occurrences is inside the real marker pair.
+
+```bash
 # When $MODEL_ALIAS is non-empty, pass model: $MODEL_ALIAS to Agent(); when empty,
 # call Agent() without a model: param (the warning above was already echoed).
 # $ROUTE_JSON.chain carries forward unmodified — consumed by the Failure Taxonomy via
@@ -2291,7 +2379,7 @@ THINKING_HEADER=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).thin
 
 # Extend the dispatch event (append after Token Telemetry builds dispatchEvent) with the resolver's
 # fields — additive, no existing field renamed/removed:
-echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"dispatch_id\":\"$ATTEMPT_DISPATCH_ID\",\"prompt_id\":\"$PROMPT_DISPATCH_ID\",\"attempt\":${attempt:-1},\"status\":\"done\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"token_method\":\"heuristic-chars-4\",\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_ALIAS_JSON,\"engine\":\"$ENGINE\",\"domain\":\"$DOMAIN_USED\",\"route_source\":\"$ROUTE_SOURCE\",\"chain_len\":$CHAIN_LEN,\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"dispatch_id\":\"$ATTEMPT_DISPATCH_ID\",\"prompt_id\":\"$PROMPT_DISPATCH_ID\",\"attempt\":${attempt:-1},\"status\":\"done\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"host_runtime\":\"$HOST_RUNTIME\",\"worker_mode\":\"$WORKER_MODE\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"token_method\":\"heuristic-chars-4\",\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_APPLIED_JSON,\"engine\":\"$ENGINE\",\"domain\":\"$DOMAIN_USED\",\"route_source\":\"$ROUTE_SOURCE\",\"chain_len\":$CHAIN_LEN,\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
 ```
 
 `MODEL_ID` is always the resolver's `model` field — `chain[0].id`, the primary member (identical to
@@ -2358,6 +2446,9 @@ The `dispatch` event schema is extended additively with `effort` and `effort_rea
   "status": "done",
   "unit": "execute-task/T03",
   "model": "claude-opus-5",
+  "host_runtime": "claude",
+  "worker_mode": "native",
+  "dispatch_allowed": true,
   "tier": "heavy",
   "reason": "frontmatter-override:heavy",
   "effort": "high",
@@ -2799,7 +2890,7 @@ When `mode == parallel` and `BATCH.length > 1`:
 `dispatch` events for parallel tasks get an additive `batch_size` field:
 
 ```json
-{"ts":"...","event":"dispatch","dispatch_id":"execute-task-T01-4f90ac-a1","prompt_id":"execute-task-T01-4f90ac","attempt":1,"status":"done","unit":"execute-task/T01","model":"...","tier":"...","reason":"...","input_tokens":1234,"output_tokens":5678,"token_method":"heuristic-chars-4","batch_size":3}
+{"ts":"...","event":"dispatch","dispatch_id":"execute-task-T01-4f90ac-a1","prompt_id":"execute-task-T01-4f90ac","attempt":1,"status":"done","unit":"execute-task/T01","model":"...","host_runtime":"claude","worker_mode":"native","dispatch_allowed":true,"tier":"...","reason":"...","input_tokens":1234,"output_tokens":5678,"token_method":"heuristic-chars-4","batch_size":3}
 ```
 
 Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely.
