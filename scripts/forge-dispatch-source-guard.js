@@ -278,7 +278,7 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-emitter-9d3f3d4adce5","skills/forge-task/SKILL.md","emitter","operational","sha256:9d3f3d4adce58d10969a8351c283e813dec00c42f5a9e2a20ca304b670bd071b","",""],
   ["skills-forge-task-skill-md-agent-86f259014c13","skills/forge-task/SKILL.md","agent","excluded","sha256:86f259014c1352f933303c36538b2a439b219b884d895a5116724273feba1c95","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-agent-31fee1f6421a","skills/forge-task/SKILL.md","agent","operational","sha256:31fee1f6421ad996358abd565b0296581e3932b91bcd96df277b82abf349b49c","",""],
-  ["skills-forge-task-skill-md-agent-44e63c9e01ec","skills/forge-task/SKILL.md","agent","excluded","sha256:44e63c9e01ec8131050046bec2c74c20e08770ca3270e70a04bc0818a5c3f958","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-task-skill-md-agent-4862247d599e","skills/forge-task/SKILL.md","agent","excluded","sha256:4862247d599edb85882dc9f209aa0ae9037455cccd15bc8c7c446000f2b0e96a","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-agent-a7f56cf4aa9c","skills/forge-task/SKILL.md","agent","excluded","sha256:a7f56cf4aa9caa265a2cdc04da096bc9d41233d00801a0e5b4747e64b01f400f","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-emitter-7dc46066bf23","skills/forge-task/SKILL.md","emitter","operational","sha256:7dc46066bf234da6b30b6198466704f1193b86883506a2f7cd876a69081f96b4","",""],
   ["skills-forge-task-skill-md-agent-3c945bfefc43","skills/forge-task/SKILL.md","agent","operational","sha256:3c945bfefc4386831f2128411f0026dca517036d07d415c3c3d9c7ca477bb1c8","",""],

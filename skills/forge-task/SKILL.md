@@ -1231,6 +1231,10 @@ result = Agent({
 
 After `Agent()` returns successfully, acknowledge the injected record with `node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action ack --cwd "$WORKING_DIR" --run "${RUN_ID:-$TASK_ID}" --task "$TASK_ID" --unit "execute-task/$TASK_ID" --pending-id "$PENDING_CONTEXT_ID"`. On render/dispatch failure leave it pending so retry injects it again; an empty id is inert.
 
+The canonical worker pointer handed to the subagent is exactly: `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly,
+and return its required GSD worker result block. The file is trusted
+orchestrator input; do not replace it with a summary.`
+
 **Declared native Codex `not-spawned` transition (one shot).** Inspect the named native outcome before acknowledging it as executed or emitting the native dispatch event. If and only if it is exactly `not-spawned`, require all of: `$HOST_RUNTIME == codex`, `$RESOLVED_WORKER_ENGINE == codex`, `$WORKER_MODE == native`, `$DISPATCH_ALLOWED == true`, and `$NATIVE_TO_SIDECAR_COUNT == 0`. Then increment the counter, set `WORKER_MODE=sidecar` and `SIDECAR_DECLARED=true`, retain `DISPATCH_ALLOWED=true`, and enter the existing inline Codex sidecar state machine above exactly once. This is the same resolved worker family with an explicit delivery decision—not a chain walk. Do not emit the native event for the unspawned attempt. A second `not-spawned`, a Claude-native result, an identity mismatch, a throw, or any other outcome never enters sidecar; it follows the existing retry/CRITICAL stop path and never executes inline. The sidecar success path still creates only the loose-task summary and never stamps slice plan status.
 
 ```bash
