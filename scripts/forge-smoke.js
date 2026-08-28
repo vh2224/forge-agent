@@ -17494,6 +17494,512 @@ function smokeResourcesFlakeAndBenchGuard() {
     + 'restore prefs byte-identical (T04), and the bench anti-silence floor proven to bite bidirectionally via copy-mutation (T04)');
 }
 
+// ── Section 115: paridade host/worker — aceitação S01–S06 ──────────────────
+function smokeHostWorkerParityAcceptance() {
+  process.stdout.write('\n▸ Section 115: paridade host/worker — aceitação S01–S06\n');
+
+  const repoRoot = path.dirname(SCRIPTS);
+  const fixtureRoot = mkTmp('host-worker-parity-s01-s06');
+  const trackedWrites = [];
+  const spawnedScripts = [];
+  const capturedNonEnvSurfaces = [];
+  let fixtureRemoved = false;
+
+  const dispatchResolver = require('./forge-dispatch-resolve');
+  const claudeSidecar = require('./forge-claude-sidecar');
+  const forgeAccounts = require('./forge-accounts');
+  const forgeXllm = require('./forge-xllm');
+  const dispatchPolicy = require('./forge-dispatch-policy');
+  const codexRenderer = require('./forge-codex-renderer');
+  const sourceGuard = require('./forge-dispatch-source-guard');
+  const routeAudit = require('./forge-route-audit');
+
+  const inside = (base, target) => {
+    const relative = path.relative(path.resolve(base), path.resolve(target));
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  };
+  const writeFixture = (target, content) => {
+    if (!inside(fixtureRoot, target)) throw new Error(`Section 115 fixture write escaped its root: ${target}`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content, 'utf8');
+    trackedWrites.push(path.resolve(target));
+  };
+  const thrownCode = (fn) => {
+    try { fn(); return null; } catch (error) { return error && error.code; }
+  };
+  const dispatchParts = (text) => {
+    const block = codexRenderer.locateDispatchBlock(text);
+    if (!block) return null;
+    return {
+      before: text.slice(0, block.start),
+      interior: text.slice(block.start, block.end),
+      after: text.slice(block.end),
+    };
+  };
+  const codexPostconditionProblems = (text) => {
+    let parts;
+    try { parts = dispatchParts(text); } catch (error) { return [`marker:${error.code || 'error'}`]; }
+    if (!parts) return ['marker:absent'];
+    const problems = [];
+    if (parts.interior.includes('Agent(')) problems.push('claude-agent-form-present');
+    if (parts.interior.includes('--host-runtime claude')) problems.push('claude-host-form-present');
+    if (!parts.interior.includes('spawn_agent(')) problems.push('codex-agent-form-absent');
+    if (!parts.interior.includes('--host-runtime codex')) problems.push('codex-host-form-absent');
+    return problems;
+  };
+  const runHermeticRouteAudit = (args, cwd, env) => {
+    spawnedScripts.push('forge-route-audit.js');
+    capturedNonEnvSurfaces.push(JSON.stringify(args), ''); // argv and stdin
+    const result = runScript('forge-route-audit.js', args, { cwd, env });
+    capturedNonEnvSurfaces.push(result.stdout, result.stderr);
+    return result;
+  };
+
+  try {
+    // ── A. S01 — same-family native derivation and explicit sidecar ────────
+    const nativeCodex = dispatchResolver.composeRuntimePosture(
+      dispatchResolver.runtimeFields({ hostRuntime: 'codex' }, 'codex'), {});
+    assert(nativeCodex.worker_engine === 'codex' && nativeCodex.worker_mode === 'native'
+      && nativeCodex.dispatch_allowed === true,
+    '(A/S01) omitted worker axes derive codex→codex native and allowed');
+
+    const declaredInput = {
+      hostRuntime: 'codex', workerEngine: 'codex', workerMode: 'sidecar', sidecarDeclared: true,
+    };
+    const declaredSidecar = dispatchResolver.composeRuntimePosture(
+      dispatchResolver.runtimeFields(declaredInput, 'codex'), {});
+    const sameFamilyProblems = (value) => {
+      const problems = [];
+      if (!value || value.host_runtime !== 'codex' || value.resolved_worker_engine !== 'codex') problems.push('identity');
+      if (!value || value.worker_mode !== 'sidecar') problems.push('mode');
+      if (!value || value.sidecar_declared !== true) problems.push('declaration');
+      if (!value || value.dispatch_allowed !== true) problems.push('allowance');
+      return problems;
+    };
+    assert(sameFamilyProblems(declaredSidecar).length === 0,
+      '(A/S01) explicit codex→codex sidecar is representable, declared and allowed');
+
+    const undeclaredInput = { ...declaredInput };
+    delete undeclaredInput.sidecarDeclared;
+    const undeclaredSidecar = dispatchResolver.composeRuntimePosture(
+      dispatchResolver.runtimeFields(undeclaredInput, 'codex'), {});
+    assert(undeclaredSidecar.dispatch_allowed === false
+      && undeclaredSidecar.dispatch_reason_code === 'implicit-recursion-refused',
+    '(A/S01) undeclared codex→codex sidecar is refused with the stable reason');
+    assert(sameFamilyProblems(undeclaredSidecar).includes('declaration')
+      && sameFamilyProblems(undeclaredSidecar).includes('allowance'),
+    '(A/S01) POSITIVE CONTROL: removing sidecar_declared makes the same green predicate bite');
+
+    // ── B. S02 — production posture over every host/worker quadrant ───────
+    const expectedQuadrants = [
+      { host: 'claude', worker: 'claude', mode: 'native', allowed: true, posture: 'observe' },
+      { host: 'claude', worker: 'codex', mode: 'sidecar', allowed: true, posture: 'observe' },
+      { host: 'codex', worker: 'claude', mode: 'sidecar', allowed: false, posture: 'enforce' },
+      { host: 'codex', worker: 'codex', mode: 'native', allowed: true, posture: 'observe' },
+    ];
+    const materializeQuadrant = (row, environment = {}) => {
+      const runtime = dispatchResolver.runtimeFields({
+        hostRuntime: row.host,
+        workerEngine: row.worker,
+      }, row.worker);
+      const posture = dispatchResolver.composeRuntimePosture(runtime, environment);
+      return {
+        host: posture.host_runtime,
+        worker: posture.worker_engine,
+        mode: posture.worker_mode,
+        allowed: posture.dispatch_allowed,
+        posture: posture.dispatch_posture,
+        reason: posture.dispatch_reason_code,
+      };
+    };
+    const actualQuadrants = expectedQuadrants.map((row) => materializeQuadrant(row));
+    const quadrantProblems = (rows) => {
+      const problems = [];
+      for (const expected of expectedQuadrants) {
+        const actual = rows.find((row) => row.host === expected.host && row.worker === expected.worker);
+        if (!actual) { problems.push(`${expected.host}->${expected.worker}:absent`); continue; }
+        for (const field of ['mode', 'allowed', 'posture']) {
+          if (actual[field] !== expected[field]) problems.push(`${expected.host}->${expected.worker}:${field}`);
+        }
+        if (expected.host === 'codex' && expected.worker === 'claude'
+          && actual.reason !== 'codex-claude-unroutable') {
+          problems.push('codex->claude:reason');
+        }
+      }
+      return problems;
+    };
+    assert(quadrantProblems(actualQuadrants).length === 0,
+      '(B/S02) runtimeFields + composeRuntimePosture materialize the four default quadrants and hybrid posture');
+
+    const enforceBefore = process.env.FORGE_RUNTIME_ENFORCE;
+    const enforcingRow = expectedQuadrants.find((row) => row.host === 'codex' && row.worker === 'claude');
+    const escapedEnforcement = materializeQuadrant(enforcingRow, { FORGE_RUNTIME_ENFORCE: '0' });
+    const escapedRows = actualQuadrants.map((row) => (
+      row.host === 'codex' && row.worker === 'claude' ? escapedEnforcement : row
+    ));
+    assert(quadrantProblems(escapedRows).includes('codex->claude:allowed'),
+      '(B/S02) POSITIVE CONTROL: the same default-table detector rejects the explicit enforcement escape');
+    assert(process.env.FORGE_RUNTIME_ENFORCE === enforceBefore,
+      '(B/S02) the enforcement control uses an explicit dependency and never mutates process.env');
+
+    // ── C. S03 — account-backed Claude adapter and credential boundary ────
+    const TOKEN_ENV = forgeAccounts.TOKEN_ENV;
+    const fixtureToken = 'fixture-claude-token-section-115';
+    const fixtureAccount = Object.freeze({ name: 'fixture-default', token: fixtureToken });
+    const sourceEnv = Object.freeze({
+      PATH: 'fixture-path',
+      HOME: path.join(fixtureRoot, 'fixture-home'),
+      SystemRoot: 'fixture-system-root',
+      LANG: 'pt_BR.UTF-8',
+      ANTHROPIC_AUTH_TOKEN: 'ambient-token-must-not-win',
+      ANTHROPIC_API_KEY: 'ambient-anthropic-key',
+      OPENAI_API_KEY: 'ambient-openai-key',
+      GEMINI_API_KEY: 'ambient-gemini-key',
+      SERVICE_PASSWORD: 'ambient-password',
+      FORGE_ACCOUNT: 'ambient-account',
+    });
+    const claudeEnv = claudeSidecar.buildClaudeSidecarEnv(fixtureAccount, sourceEnv, 'win32');
+    const forbiddenClaudeEnv = [
+      'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'SERVICE_PASSWORD',
+    ];
+    const claudeBoundaryProblems = (env) => {
+      const problems = [];
+      if (!env || env[TOKEN_ENV] !== fixtureAccount.token) problems.push('account-token');
+      if (!env || env.FORGE_ACCOUNT !== fixtureAccount.name) problems.push('account-name');
+      if (!env || env.PATH !== sourceEnv.PATH || env.HOME !== sourceEnv.HOME
+        || env.SystemRoot !== sourceEnv.SystemRoot || env.LANG !== sourceEnv.LANG) problems.push('operational-env');
+      for (const key of forbiddenClaudeEnv) {
+        if (env && Object.prototype.hasOwnProperty.call(env, key)) problems.push(`credential:${key}`);
+      }
+      return problems;
+    };
+    assert(claudeBoundaryProblems(claudeEnv).length === 0
+      && claudeEnv[TOKEN_ENV] !== sourceEnv[TOKEN_ENV],
+    '(C/S03) Claude child env is account-backed, allowlisted and replaces ambient auth');
+    assert(thrownCode(() => claudeSidecar.buildClaudeSidecarEnv(null, sourceEnv, 'win32'))
+      === 'claude-account-unavailable',
+    '(C/S03) an absent synthetic account fails with claude-account-unavailable before launch');
+
+    const leakedClaudeEnv = { ...claudeEnv, OPENAI_API_KEY: 'forbidden-copy-mutation' };
+    assert(claudeBoundaryProblems(leakedClaudeEnv).includes('credential:OPENAI_API_KEY'),
+      '(C/S03) POSITIVE CONTROL: inserting a forbidden credential makes the same boundary detector bite');
+
+    const genericSidecarEnv = forgeXllm.buildSidecarEnv('inherit', sourceEnv, 'win32');
+    const genericCredentialKeys = [
+      TOKEN_ENV, 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'SERVICE_PASSWORD',
+    ];
+    assert(genericCredentialKeys.every((key) => !Object.prototype.hasOwnProperty.call(genericSidecarEnv, key))
+      && claudeEnv[TOKEN_ENV] === fixtureToken,
+    '(C/S03 security) generic buildSidecarEnv strips credentials; only forge-claude-sidecar receives account auth');
+
+    const policyDecision = dispatchPolicy.decide({
+      role: 'worker',
+      host_runtime: 'claude',
+      worker_engine: 'codex',
+      worker_mode: 'sidecar',
+      sidecar_declared: true,
+      operation: 'spawn',
+      sandbox_mode: 'workspace-write',
+      required_capabilities: ['process.spawn', 'workspace.write'],
+      available_capabilities: ['process.spawn', 'workspace.write'],
+      workspace_root: fixtureRoot,
+      spawn_cwd: fixtureRoot,
+    });
+    assert(policyDecision.decision === 'allow' && policyDecision.grants.length === 0
+      && policyDecision.permissions.credential_env === false,
+    '(C/S03 security) sidecar policy remains allow-without-grants and credential_env:false');
+    const realProviderTokenPrefix = ['sk', 'ant'].join('-') + '-';
+    assert(!fixtureToken.startsWith(realProviderTokenPrefix)
+      && !Object.values(sourceEnv).some((value) => String(value).startsWith(realProviderTokenPrefix)),
+    '(C/S03 security) every credential value in the fixture is visibly dummy, never a real token form');
+
+    const simulatedProviderTransport = {
+      argv: ['fixture-provider', '-p', 'read fixture prompt'],
+      stdin: 'fixture prompt without credentials',
+      stdout: '{"status":"done"}',
+      stderr: '',
+      resultFile: '{"status":"done","summary":"fixture"}',
+    };
+    capturedNonEnvSurfaces.push(...Object.values(simulatedProviderTransport));
+    assert(Object.values(simulatedProviderTransport).every((value) => !String(value).includes(fixtureToken)),
+      '(C/S03 security) the account token is absent from argv, stdin, stdout, stderr and result-file surfaces');
+
+    // ── D. S04 — fenced, single-pass renderer rewrite ─────────────────────
+    const startMarker = codexRenderer.DISPATCH_MARKER_START;
+    const endMarker = codexRenderer.DISPATCH_MARKER_END;
+    const rendererFixture = [
+      'Outside prose keeps Agent(example) and --host-runtime claude byte-identical.',
+      startMarker,
+      "const worker = Agent({ subagent_type: 'forge-executor' });",
+      'node forge-dispatch-resolve.js --host-runtime claude --json',
+      endMarker,
+      'Outside tail also names Agent(example) and --host-runtime claude.',
+      '',
+    ].join('\n');
+    const renderedFixture = codexRenderer.rewriteDispatchDialect(
+      rendererFixture, codexRenderer.PRODUCTION_DISPATCH_DIALECT);
+    const rawParts = dispatchParts(rendererFixture);
+    const renderedParts = dispatchParts(renderedFixture);
+    assert(rawParts && renderedParts && rawParts.before === renderedParts.before
+      && rawParts.after === renderedParts.after,
+    '(D/S04) bytes outside the dispatch fence remain identical');
+    assert(codexPostconditionProblems(renderedFixture).length === 0,
+      '(D/S04) only the managed interior becomes spawn_agent + codex and retains no Claude operational form');
+    assert(renderedParts && !renderedParts.before.includes('spawn_agent(')
+      && !renderedParts.after.includes('--host-runtime codex'),
+    '(D/S04) Codex substitutions are confined to the managed interior');
+
+    const singlePassFixture = codexRenderer.rewriteDispatchDialect(rendererFixture, {
+      agentInvocation: 'spawn_agent(--host-runtime claude, Agent(',
+      hostRuntime: 'codex',
+    });
+    const singlePassInterior = dispatchParts(singlePassFixture).interior;
+    assert(singlePassInterior.includes('spawn_agent(--host-runtime claude, Agent(')
+      && singlePassInterior.includes('--host-runtime codex'),
+    '(D/S04) generated replacement text is opaque and is not rescanned in the same pass');
+
+    const duplicatedMarker = rendererFixture.replace(startMarker, `${startMarker}\n${startMarker}`);
+    const incompleteMarker = rendererFixture.replace(`${endMarker}\n`, '');
+    assert(thrownCode(() => codexRenderer.rewriteDispatchDialect(
+      duplicatedMarker, codexRenderer.PRODUCTION_DISPATCH_DIALECT))
+      === codexRenderer.DISPATCH_REASON.DUPLICATE_START,
+    '(D/S04) duplicate start marker fails with its named reason code');
+    assert(thrownCode(() => codexRenderer.rewriteDispatchDialect(
+      incompleteMarker, codexRenderer.PRODUCTION_DISPATCH_DIALECT))
+      === codexRenderer.DISPATCH_REASON.START_WITHOUT_END,
+    '(D/S04) incomplete marker pair fails with its named reason code');
+    const preRenderProblems = codexPostconditionProblems(rendererFixture);
+    assert(preRenderProblems.includes('claude-agent-form-present')
+      && preRenderProblems.includes('claude-host-form-present'),
+    '(D/S04) POSITIVE CONTROL: the same postcondition detector rejects the contaminated pre-render fixture');
+
+    // ── E. S05 — bidirectional source registry and in-memory projections ──
+    const cleanSourceReport = sourceGuard.audit({ root: repoRoot });
+    assert(cleanSourceReport.ok === true && cleanSourceReport.unexpected.length === 0
+      && cleanSourceReport.missing.length === 0 && cleanSourceReport.errors.length === 0,
+    '(E/S05) real source audit is bidirectionally equal and structurally clean');
+
+    const discovery = sourceGuard.discover(repoRoot);
+    const discoveredByIdentity = new Map(discovery.candidates.map((item) => [sourceGuard.identity(item), item]));
+    const projectedSkillProblems = [];
+    for (const relative of sourceGuard.PROJECTED_SKILLS) {
+      const source = fs.readFileSync(path.join(repoRoot, relative), 'utf8');
+      const markerState = sourceGuard.markerState(source);
+      if (!markerState.pair || markerState.errors.length > 0) projectedSkillProblems.push(`${relative}:markers`);
+      const projected = codexRenderer.rewriteDispatchDialect(source, codexRenderer.PRODUCTION_DISPATCH_DIALECT);
+      const postcondition = codexPostconditionProblems(projected);
+      for (const problem of postcondition) projectedSkillProblems.push(`${relative}:${problem}`);
+
+      const sourceLines = source.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+      const gateLine = sourceLines.findIndex((line) => line.trim() === 'if [ "$DISPATCH_ALLOWED" != "true" ]; then') + 1;
+      const launchEntries = sourceGuard.SOURCE_REGISTRY
+        .filter((entry) => entry.path === relative && entry.kind === 'agent' && entry.classification === 'operational')
+        .map((entry) => discoveredByIdentity.get(sourceGuard.identity(entry)))
+        .filter(Boolean)
+        .filter((candidate) => {
+          const line = candidate.evidence.trim();
+          return /^(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?Agent\(\{$/.test(line)
+            || /^Agent\(\{\s*subagent_type:/.test(line);
+        });
+      if (gateLine <= 0 || launchEntries.length === 0
+        || launchEntries.some((candidate) => candidate.line <= gateLine)) {
+        projectedSkillProblems.push(`${relative}:dispatch-allowed-not-consumed-before-launch`);
+      }
+
+      const operationalEntries = sourceGuard.SOURCE_REGISTRY
+        .filter((entry) => entry.path === relative && entry.classification === 'operational'
+          && ['resolver', 'agent'].includes(entry.kind));
+      for (const entry of operationalEntries) {
+        const candidate = discoveredByIdentity.get(sourceGuard.identity(entry));
+        if (!candidate || !markerState.pair
+          || !(candidate.line - 1 > markerState.pair.start && candidate.line - 1 < markerState.pair.end)) {
+          projectedSkillProblems.push(`${relative}:${entry.id}:outside-fence`);
+        }
+      }
+    }
+    assert(projectedSkillProblems.length === 0,
+      '(E/S05) every exported projected skill has valid fences, a pre-launch allowance gate and a clean Codex projection',
+      projectedSkillProblems.join(', '));
+
+    const operationalEmitters = sourceGuard.SOURCE_REGISTRY
+      .filter((entry) => entry.kind === 'emitter' && entry.classification === 'operational');
+    const emitterProblems = [];
+    for (const entry of operationalEmitters) {
+      const candidate = discoveredByIdentity.get(sourceGuard.identity(entry));
+      if (!candidate) { emitterProblems.push(`${entry.id}:absent`); continue; }
+      for (const field of ['host_runtime', 'worker_mode', 'dispatch_allowed']) {
+        if (!new RegExp(`(?:\\\\?"${field}\\\\?"|${field})\\s*:`).test(candidate.context)) {
+          emitterProblems.push(`${entry.id}:${field}`);
+        }
+      }
+    }
+    assert(operationalEmitters.length > 0 && emitterProblems.length === 0,
+      '(E/S05) every discovered operational emitter carries host_runtime, worker_mode and dispatch_allowed',
+      emitterProblems.join(', '));
+
+    const removedRegistryEntry = sourceGuard.SOURCE_REGISTRY[0];
+    const registryMutation = sourceGuard.SOURCE_REGISTRY.slice(1);
+    const mutatedSourceReport = sourceGuard.audit({ root: repoRoot, registry: registryMutation });
+    assert(mutatedSourceReport.ok === false && removedRegistryEntry
+      && mutatedSourceReport.unexpected.some((item) => (
+        item.path === removedRegistryEntry.path && item.kind === removedRegistryEntry.kind
+          && item.fingerprint === removedRegistryEntry.fingerprint
+      )),
+    '(E/S05) POSITIVE CONTROL: removing one exported registry row exposes its real disk candidate as unexpected');
+
+    // ── F. S06 — real CLI quadrants, legacy absence and anti-silence ──────
+    const hermeticHome = path.join(fixtureRoot, 'operator-isolation-home');
+    fs.mkdirSync(hermeticHome, { recursive: true });
+    trackedWrites.push(path.resolve(hermeticHome));
+    const hermeticEnv = {
+      PATH: process.env.PATH || process.env.Path || '',
+      HOME: hermeticHome,
+      USERPROFILE: hermeticHome,
+      TEMP: fixtureRoot,
+      TMP: fixtureRoot,
+      SystemRoot: process.env.SystemRoot || process.env.SYSTEMROOT || '',
+      ComSpec: process.env.ComSpec || process.env.COMSPEC || '',
+      PATHEXT: process.env.PATHEXT || '',
+      FORGE_ACCOUNTS_REGISTRY: path.join(hermeticHome, 'absent-accounts.json'),
+    };
+    assert(hermeticEnv.HOME === hermeticHome && hermeticEnv.USERPROFILE === hermeticHome
+      && !fs.existsSync(hermeticEnv.FORGE_ACCOUNTS_REGISTRY)
+      && genericCredentialKeys.every((key) => !Object.prototype.hasOwnProperty.call(hermeticEnv, key)),
+    '(F/G isolation) child HOME, account registry and credential environment are explicit fixture-only values');
+
+    const slice = 'S06';
+    const milestone = 'M115';
+    const event = (unit, engine, runtime = {}) => ({
+      event: 'dispatch', milestone, slice, unit, engine, ...runtime,
+    });
+    const completeEvents = [
+      event('execute-task/T01', 'claude', { host_runtime: 'claude', worker_mode: 'native', dispatch_allowed: true }),
+      event('execute-task/T02', 'codex', { host_runtime: 'claude', worker_mode: 'sidecar', dispatch_allowed: true }),
+      event('execute-task/T03', 'claude', { host_runtime: 'codex', worker_mode: 'sidecar', dispatch_allowed: false }),
+      event('execute-task/T04', 'codex', { host_runtime: 'codex', worker_mode: 'native', dispatch_allowed: true }),
+    ];
+    const completeWorld = path.join(fixtureRoot, 'quadrants');
+    const completeEventsFile = path.join(completeWorld, 'events.jsonl');
+    const completeSummary = path.join(completeWorld, '.gsd', `${slice}-SUMMARY.md`);
+    writeFixture(completeEventsFile, completeEvents.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
+    writeFixture(completeSummary, '# Summary\n\n## Route Notes\nkeep\n\n## Forward Intelligence\nkeep too\n');
+    const completeArgs = [
+      '--slice', slice, '--milestone', milestone, '--cwd', completeWorld,
+      '--events', completeEventsFile, '--write', completeSummary, '--json',
+    ];
+    const completeFirst = runHermeticRouteAudit(completeArgs, completeWorld, hermeticEnv);
+    const completeResult = JSON.parse(completeFirst.stdout);
+    const completeOnce = fs.readFileSync(completeSummary, 'utf8');
+    capturedNonEnvSurfaces.push(completeOnce);
+    const completeSecond = runHermeticRouteAudit(completeArgs, completeWorld, hermeticEnv);
+    const completeTwice = fs.readFileSync(completeSummary, 'utf8');
+    capturedNonEnvSurfaces.push(completeTwice);
+    assert(completeFirst.status === 0 && completeSecond.status === 0
+      && completeResult.runtime_coverage.complete === completeEvents.length
+      && completeResult.runtime_coverage.total === completeEvents.length
+      && completeResult.runtime_coverage.incomplete === 0,
+    '(F/S06) real CLI reports every host/worker quadrant as runtime-complete');
+    assert((completeTwice.match(/^## Route$/gm) || []).length === 1
+      && completeEvents.every((entry) => completeTwice.includes(
+        `Runtime ${entry.unit}: host=${entry.host_runtime}; worker=${entry.engine}; mode=${entry.worker_mode}; allowed=${entry.dispatch_allowed}.`)),
+    '(F/S06) one audible Route section contains the observed values for every quadrant');
+    assert(completeOnce === completeTwice,
+      '(F/S06) repeated complete-quadrant write is byte-identical');
+
+    const legacyEvents = [
+      event('execute-task/T11', 'claude'),
+      event('execute-task/T12', 'codex'),
+    ];
+    const legacyWorld = path.join(fixtureRoot, 'legacy-absence');
+    const legacyEventsFile = path.join(legacyWorld, 'events.jsonl');
+    const legacySummary = path.join(legacyWorld, '.gsd', `${slice}-SUMMARY.md`);
+    writeFixture(legacyEventsFile, legacyEvents.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
+    writeFixture(legacySummary, '# Summary\n\n## Forward Intelligence\nkeep\n');
+    const legacyArgs = [
+      '--slice', slice, '--milestone', milestone, '--cwd', legacyWorld,
+      '--events', legacyEventsFile, '--write', legacySummary, '--json',
+    ];
+    const legacyFirst = runHermeticRouteAudit(legacyArgs, legacyWorld, hermeticEnv);
+    const legacyResult = JSON.parse(legacyFirst.stdout);
+    const legacyOnce = fs.readFileSync(legacySummary, 'utf8');
+    capturedNonEnvSurfaces.push(legacyOnce);
+    const legacySecond = runHermeticRouteAudit(legacyArgs, legacyWorld, hermeticEnv);
+    const legacyTwice = fs.readFileSync(legacySummary, 'utf8');
+    capturedNonEnvSurfaces.push(legacyTwice);
+    assert(legacyFirst.status === 0 && legacySecond.status === 0
+      && legacyResult.runtime_coverage.total === legacyEvents.length
+      && legacyResult.runtime_coverage.complete === 0
+      && legacyResult.runtime_coverage.incomplete === legacyEvents.length
+      && legacyResult.runtime_coverage.missing.host_runtime === legacyEvents.length
+      && legacyResult.runtime_coverage.missing.worker_engine === 0
+      && legacyResult.runtime_coverage.missing.worker_mode === legacyEvents.length
+      && legacyResult.runtime_coverage.missing.dispatch_allowed === legacyEvents.length,
+    '(F/S06) legacy events remain parseable and report exact per-field absence counts');
+    assert((legacyTwice.match(/^## Route$/gm) || []).length === 1
+      && legacyResult.units.every((unit) => unit.host_runtime === undefined
+        && unit.worker_mode === undefined && unit.dispatch_allowed === undefined)
+      && legacyEvents.every((entry) => legacyTwice.includes(
+        `Runtime ${entry.unit}: host=ausente; worker=${entry.engine}; mode=ausente; allowed=ausente.`)),
+    '(F/S06) absent runtime fields stay absent in JSON and render as ausente, never copied from current prefs or a neighbour');
+    assert(legacyOnce === legacyTwice,
+      '(F/S06) repeated legacy write is byte-identical and retains one Route section');
+
+    const coverageProblems = (coverage, expectedComplete, expectedTotal) => {
+      const problems = [];
+      if (!coverage || coverage.complete !== expectedComplete) problems.push('complete');
+      if (!coverage || coverage.total !== expectedTotal) problems.push('total');
+      if (!coverage || coverage.incomplete !== expectedTotal - expectedComplete) problems.push('incomplete');
+      for (const field of ['host_runtime', 'worker_engine', 'worker_mode', 'dispatch_allowed']) {
+        if (!coverage || coverage.missing[field] !== 0) problems.push(`missing:${field}`);
+      }
+      return problems;
+    };
+    const completeUnits = routeAudit.aggregateUnits(completeEvents, {
+      slice, milestone, milestone_aliases: new Set(),
+    });
+    assert(coverageProblems(routeAudit.runtimeCoverage(completeUnits), completeEvents.length, completeEvents.length).length === 0,
+      '(F/S06) the API coverage predicate agrees with the complete CLI fixture');
+    const missingHostMutation = completeEvents.map((entry) => ({ ...entry }));
+    delete missingHostMutation[0].host_runtime;
+    const mutatedUnits = routeAudit.aggregateUnits(missingHostMutation, {
+      slice, milestone, milestone_aliases: new Set(),
+    });
+    assert(coverageProblems(routeAudit.runtimeCoverage(mutatedUnits), completeEvents.length, completeEvents.length)
+      .includes('missing:host_runtime'),
+    '(F/S06) POSITIVE CONTROL: removing host_runtime makes the same complete-coverage detector bite');
+
+    // ── G. registration, anti-silence, offline scope and fixture isolation ─
+    const selfSource = fs.readFileSync(__filename, 'utf8');
+    const mainBody = selfSource.slice(selfSource.lastIndexOf('async function main()'));
+    const acceptanceIndex = mainBody.indexOf('() => { smokeHostWorkerParityAcceptance(); }');
+    const isolationIndex = mainBody.indexOf('async () => { await smokeSectionIsolation(); }');
+    assert(/\(\) => \{ smokeHostWorkerParityAcceptance\(\); \}/.test(mainBody)
+      && acceptanceIndex >= 0 && isolationIndex > acceptanceIndex,
+    '(G) Section 115 is registered by closure while the harness-isolation guard remains last');
+    assert(spawnedScripts.length > 0 && spawnedScripts.every((name) => name === 'forge-route-audit.js'),
+      '(G security) every child process is the offline route-audit CLI; no provider process is spawned');
+    assert(capturedNonEnvSurfaces.length > 0
+      && capturedNonEnvSurfaces.every((value) => !String(value).includes(fixtureToken)),
+    '(G security) the dummy account token never reaches any captured argv/stdin/stdout/stderr/result or summary surface');
+    assert(trackedWrites.length > 0 && trackedWrites.every((target) => inside(fixtureRoot, target))
+      && !inside(repoRoot, fixtureRoot)
+      && trackedWrites.filter((target) => target.split(path.sep).includes('.gsd')).every((target) => inside(fixtureRoot, target)),
+    '(G isolation) every section write, including .gsd summaries, is confined to the temporary fixture outside the checkout');
+    assert([completeFirst, completeSecond, legacyFirst, legacySecond]
+      .every((result) => result.stdout.trim().split(/\r?\n/).filter(Boolean).length > 0),
+    '(G anti-silence) every clean CLI scenario emits parseable non-empty output');
+  } finally {
+    // Acceptance isolation overrides the suite's --keep debug switch: credential
+    // fixtures and synthetic homes must not survive either a green or red path.
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    fixtureRemoved = !fs.existsSync(fixtureRoot);
+  }
+
+  assert(fixtureRemoved, '(G isolation) the complete fixture world is removed in finally');
+  pass('(final) Section 115: aceitação integrada S01–S06, controles positivos, isolamento de credenciais, '
+    + 'source guard bidirecional, renderer cercado e Route anti-silêncio verificados offline');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -17623,6 +18129,7 @@ async function main() {
       () => { smokeResourcesFlakeAndBenchGuard(); },
       () => { smokeRoutingContractProjection(); },
       () => { smokeVersionTagLine(); },
+      () => { smokeHostWorkerParityAcceptance(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {
