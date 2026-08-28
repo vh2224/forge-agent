@@ -282,8 +282,18 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 2                         # terminal step boundary; no timeline, worker, cursor consume, or inline fallback
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-  printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+    printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
+      "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
+      "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+  else
+    printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  fi
   # Advisory is observation only: the resolved runtime/routing fields remain unchanged.
+  # A non-empty $DISPATCH_SUPPRESSED_ACTION is not routine observation: FORGE_RUNTIME_ENFORCE=0
+  # suppressed an enforced refusal on this leg. Append a `runtime-posture-suppressed` line to
+  # events.jsonl in Step 8 carrying suppressed_action/reason_code/posture/leg — an escape that
+  # leaves no durable record is exactly what the frozen posture map exists to prevent.
 fi
 
 # Step 4b consume: $TIER_CURSOR_FILE is deleted here, adjacent to the spend and only after an
@@ -309,7 +319,7 @@ if [ "$ROUTE_SOURCE" != "routing" ] && [ "$ROUTING_PRESENT" = "true" ]; then
 fi
 
 ```
-`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (`chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `THINKING_HEADER`, `unit_effort`, `HOST_RUNTIME`, `WORKER_ENGINE`, `RESOLVED_WORKER_ENGINE`, `WORKER_MODE`, `DISPATCH_ALLOWED`, `DISPATCH_REASON_CODE`, `DISPATCH_HINT`, and `REASON` are now set (the allowed tier cursor may have overridden only the attempt carriers). Branch on `$WORKER_MODE` in Step 4. The runtime axes and existing tier/routing/effort axes are additive fields in every dispatch event.
+`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (`chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `THINKING_HEADER`, `unit_effort`, `HOST_RUNTIME`, `WORKER_ENGINE`, `RESOLVED_WORKER_ENGINE`, `WORKER_MODE`, `DISPATCH_ALLOWED`, `DISPATCH_REASON_CODE`, `DISPATCH_HINT`, `DISPATCH_SUPPRESSED_ACTION` (empty on a routine advisory; `refuse` when `FORGE_RUNTIME_ENFORCE=0` suppressed an enforced refusal — log it), and `REASON` are now set (the allowed tier cursor may have overridden only the attempt carriers). Branch on `$WORKER_MODE` in Step 4. The runtime axes and existing tier/routing/effort axes are additive fields in every dispatch event.
 
 > **Thinking guard (Fable 5 + Opus 5):** the resolver emits `$THINKING_HEADER` (`adaptive` when
 > `$MODEL_ID` is `claude-fable-5`, or `claude-opus-5` with resolved effort `xhigh`/`max`; else empty).
@@ -453,7 +463,13 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 2                     # return to operator; this is not review-agent-unavailable
      fi
      if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-       printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+       if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+         printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
+           "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
+           "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+       else
+         printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+       fi
      fi
      RF_ALIAS="$MODEL_ALIAS"; RF_HOST_RUNTIME="$HOST_RUNTIME"
      RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"

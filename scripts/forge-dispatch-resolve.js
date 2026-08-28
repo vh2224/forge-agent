@@ -285,6 +285,9 @@ function composeRuntimePosture(runtime, environment) {
       dispatch_hint: `Corrija o contrato runtime antes do dispatch (${reasonCode}); nenhum worker alternativo foi selecionado.`,
       dispatch_posture: null,
       dispatch_decision: 'error',
+      // Always present, never conditional: an absent field is indistinguishable
+      // from an unsuppressed one for a reader that only checks truthiness.
+      dispatch_suppressed_action: null,
     };
   }
 
@@ -299,6 +302,10 @@ function composeRuntimePosture(runtime, environment) {
     dispatch_hint: guard.hint,
     dispatch_posture: guard.posture,
     dispatch_decision: guard.decision,
+    // The FORGE_RUNTIME_ENFORCE=0 escape is only auditable if the suppressed
+    // action survives composition: without it a suppressed enforced refusal and
+    // a routine advisory are both just `decision: advisory`.
+    dispatch_suppressed_action: guard.suppressed_action || null,
   };
 }
 
@@ -597,6 +604,9 @@ const SHELL_EXPORT_MAP = [
   ['DISPATCH_DECISION', (r) => r.dispatch_decision || ''],
   ['RESOLVED_WORKER_ENGINE', (r) => r.resolved_worker_engine || ''],
   ['SIDECAR_DECLARED', (r) => (r.sidecar_declared === true ? 'true' : 'false')],
+  // Empty string on a routine advisory; 'refuse' when FORGE_RUNTIME_ENFORCE=0
+  // suppressed an enforced refusal — the marker an orchestrator logs.
+  ['DISPATCH_SUPPRESSED_ACTION', (r) => r.dispatch_suppressed_action || ''],
 ];
 
 function shellQuote(value) {

@@ -333,8 +333,8 @@ withHermeticHome((cliEnv) => {
     ];
     assertEqual(lines.slice(0, preexistingLines.length).join('\n'), preexistingLines.join('\n'),
       'preexisting export lines remain byte-identical for the same contract');
-    assertEqual(lines.slice(-10).map((line) => line.slice(0, line.indexOf('='))).join(','),
-      'HOST_RUNTIME,WORKER_ENGINE,WORKER_MODE,DISPATCH_ALLOWED,DISPATCH_REASON_CODE,DISPATCH_HINT,DISPATCH_POSTURE,DISPATCH_DECISION,RESOLVED_WORKER_ENGINE,SIDECAR_DECLARED',
+    assertEqual(lines.slice(-11).map((line) => line.slice(0, line.indexOf('='))).join(','),
+      'HOST_RUNTIME,WORKER_ENGINE,WORKER_MODE,DISPATCH_ALLOWED,DISPATCH_REASON_CODE,DISPATCH_HINT,DISPATCH_POSTURE,DISPATCH_DECISION,RESOLVED_WORKER_ENGINE,SIDECAR_DECLARED,DISPATCH_SUPPRESSED_ACTION',
       'runtime exports are appended without disturbing the legacy prefix');
     assertEqual(byName.MODEL_ID, `'${contract.model}'`, 'MODEL_ID mirrors the contract');
     assertEqual(byName.TIER, "'heavy'", 'TIER mirrors the frontmatter override');
@@ -853,8 +853,64 @@ withHermeticHome((cliEnv) => {
     assertEqual(escaped.resolved_worker_engine, refused.resolved_worker_engine, 'escape does not alter the worker identity');
     const changedKeys = Object.keys(refused).filter((key) =>
       JSON.stringify(refused[key]) !== JSON.stringify(escaped[key])).sort();
-    assertEqual(changedKeys.join(','), 'dispatch_allowed,dispatch_decision',
-      'escape changes only allowance and decision in the public resolver contract');
+    assertEqual(escaped.dispatch_suppressed_action, 'refuse',
+      'the escape records which action it suppressed, so the bypass is auditable');
+    assertEqual(refused.dispatch_suppressed_action, null,
+      'an active refusal suppressed nothing');
+    assertEqual(changedKeys.join(','), 'dispatch_allowed,dispatch_decision,dispatch_suppressed_action',
+      'escape changes allowance, decision and the suppression marker in the public resolver contract');
+    cleanup(f);
+  });
+
+  // Regression (S02 recheck): before dispatch_suppressed_action reached the public
+  // contract, a suppressed enforced refusal and a routine advisory were both just
+  // `dispatch_decision: 'advisory'` with no other difference, so an operator bypass
+  // was indistinguishable from ordinary observation and left no durable record.
+  runCase('a suppressed enforced refusal is distinguishable from a routine advisory', () => {
+    const f = mkFixture({});
+    const enforcingEnv = { ...cliEnv };
+    delete enforcingEnv.FORGE_RUNTIME_ENFORCE;
+    const run = (env, extraArgs) => {
+      const child = spawnSync(process.execPath, [SCRIPT,
+        '--json', '--unit-type', 'execute-task', '--host-runtime', 'codex',
+        ...extraArgs, '--cwd', f.dir], { encoding: 'utf8', env });
+      assertEqual(child.status, 0, 'resolver verdict is parseable', child.stderr);
+      return JSON.parse(child.stdout);
+    };
+
+    // (a) enforced refusal suppressed by the escape hatch.
+    const suppressed = run({ ...enforcingEnv, FORGE_RUNTIME_ENFORCE: '0' }, []);
+    // (b) routine advisory: an observed leg, no enforcement involved at all.
+    const routine = run(enforcingEnv, ['--worker-engine', 'native']);
+
+    assertEqual(suppressed.dispatch_decision, 'advisory', 'suppressed refusal surfaces as advisory');
+    assertEqual(routine.dispatch_decision, 'advisory', 'routine observation surfaces as advisory');
+    assertEqual(suppressed.dispatch_allowed, true, 'both are allowed to dispatch');
+    assertEqual(routine.dispatch_allowed, true, 'both are allowed to dispatch');
+    assert(suppressed.dispatch_suppressed_action !== routine.dispatch_suppressed_action,
+      'the two advisories are distinguishable in the resolver contract',
+      `${JSON.stringify(suppressed.dispatch_suppressed_action)} vs ${JSON.stringify(routine.dispatch_suppressed_action)}`);
+    assertEqual(suppressed.dispatch_suppressed_action, 'refuse',
+      'the suppressed advisory names the action the escape hatch skipped');
+    assertEqual(routine.dispatch_suppressed_action, null,
+      'the routine advisory suppressed nothing');
+    assertEqual(suppressed.dispatch_posture, 'enforce', 'the frozen posture is untouched by the escape');
+    assertEqual(routine.dispatch_posture, 'observe', 'the routine leg is an observed one');
+
+    // The shell surface must carry the same distinction, since the skills read exports.
+    const exportsFor = (contract) => {
+      const child = spawnSync(process.execPath, [SCRIPT, '--shell-exports'],
+        { encoding: 'utf8', env: cliEnv, input: JSON.stringify(contract) });
+      assertEqual(child.status, 0, 'shell exports emit for the contract', child.stderr);
+      return Object.fromEntries(child.stdout.trim().split('\n').map((line) => {
+        const split = line.indexOf('=');
+        return [line.slice(0, split), line.slice(split + 1)];
+      }));
+    };
+    assertEqual(exportsFor(suppressed).DISPATCH_SUPPRESSED_ACTION, "'refuse'",
+      'DISPATCH_SUPPRESSED_ACTION exports the suppressed action');
+    assertEqual(exportsFor(routine).DISPATCH_SUPPRESSED_ACTION, "''",
+      'a routine advisory exports an empty marker, so `-n` distinguishes the two');
     cleanup(f);
   });
 

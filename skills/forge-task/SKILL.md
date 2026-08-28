@@ -927,7 +927,15 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 2                         # terminal task boundary; no timeline, prompt, adapter, native worker, or inline fallback
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-  printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+    printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
+      "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
+      "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+  else
+    printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  fi
+  # A non-empty $DISPATCH_SUPPRESSED_ACTION is the one advisory that must be logged: an enforced
+  # refusal was skipped. Carry suppressed_action/reason_code/posture/leg into the dispatch event.
   # FORGE_RUNTIME_ENFORCE=0 is the real resolver escape: observe only, never mutate the resolved route.
 fi
 # $ROUTE_JSON.chain carries forward unmodified — consumed by Branch codex (SIDECAR_MODEL) and by
@@ -1443,7 +1451,13 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
       else
         RF_RUNTIME_READY=true
         if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-          printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+          if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+            printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
+              "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
+              "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+          else
+            printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+          fi
         fi
       fi
     fi

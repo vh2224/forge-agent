@@ -507,6 +507,10 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 1                         # terminal loop boundary; no worker launch or inline fallback
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ]; then
+  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+    printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
+      "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+  fi
   printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
   # Advisory is observation only: HOST_RUNTIME/WORKER_MODE/routing fields stay unchanged.
 fi
@@ -589,6 +593,10 @@ for ENTRY in "${BATCH[@]}"; do
     exit 1                       # whole auto run stops; no partial native batch may launch
   fi
   if [ "$DISPATCH_DECISION" = "advisory" ]; then
+    if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+      printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
+        "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+    fi
     printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
     # Advisory never mutates this task's resolved route.
   fi
@@ -801,6 +809,10 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 1                     # enforcing runtime refusal stops auto; review is not launched inline
      fi
      if [ "$DISPATCH_DECISION" = "advisory" ]; then
+       if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+         printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
+           "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+       fi
        printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
        # Advisory continues with the exact resolved host/mode/model fields.
      fi
@@ -1555,6 +1567,10 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 1
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ]; then
+  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
+    printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
+      "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
+  fi
   printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
 fi
 MODEL_ID="$NEXT_MODEL_ID"               # preserve the selected chain member after contract export
