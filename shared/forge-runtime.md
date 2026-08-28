@@ -65,6 +65,90 @@ Omitted worker fields normalize to `worker_engine: native` and
 `{ host_runtime: "codex", worker_engine: "native" }` resolves to Codex even
 when a current route happens to contain a Claude model.
 
+### Concrete identity seam
+
+`resolveWorkerIdentity()` is the canonical, pure identity seam. It normalizes
+only `host_runtime` and `worker_engine`, then returns their concrete identity:
+
+```js
+const { resolveWorkerIdentity } = require('./scripts/forge-runtime.js');
+
+resolveWorkerIdentity({
+  host_runtime: 'codex',
+  worker_engine: 'native',
+});
+// {
+//   host_runtime: 'codex',
+//   worker_engine: 'native',
+//   resolved_engine: 'codex'
+// }
+```
+
+The seam has no `worker_mode`, model, route, preference, or dispatch-engine
+input. Extra fields on a JavaScript object have no bearing on its result. An
+unknown host or worker engine still fails with `invalid-host-runtime` or
+`invalid-worker-engine`, respectively.
+
+`resolveWorker()` uses this seam before it normalizes and validates mode. This
+keeps the `native` → `host_runtime` rule in one executable location while
+leaving mode policy in the full worker validator.
+
+### Direct core calls and dispatch adaptation
+
+There are two distinct normalization levels:
+
+1. A direct `resolveWorker()` call applies the canonical field defaults
+   `worker_engine: native` and `worker_mode: native`.
+2. The dispatch adapter `runtimeFields()` may first project the routed worker
+   engine and derive a mode when the caller omitted `worker_mode`.
+
+The second step belongs exclusively to the adapter. It uses the concrete
+identity from `resolveWorkerIdentity()` to compare the worker with the host;
+it does not move `dispatch_engine`, model IDs, routing, or `workers.*` into the
+core module. The projected fields are then sent through `resolveWorker()`, so
+the core remains responsible for all mode validation and stable reason codes.
+
+In particular, a direct cross-host core call does not infer `sidecar`:
+
+```js
+resolveWorker({
+  host_runtime: 'claude',
+  worker_engine: 'codex',
+});
+// throws RuntimeContractError with code native-engine-host-mismatch
+```
+
+The omitted mode defaults to `native`, and that explicit normalized
+combination is incompatible with a concrete Codex worker on a Claude host.
+Only dispatch callers that pass through `runtimeFields()` receive adapter
+projection. Library callers do not acquire routing behavior implicitly.
+
+When the caller supplies `worker_mode`, the adapter treats it as authoritative
+and never replaces it with a mode derived from a route. Thus this remains a
+core validation error even at the dispatch boundary:
+
+```json
+{
+  "host_runtime": "claude",
+  "worker_engine": "codex",
+  "worker_mode": "native"
+}
+```
+
+It fails with `native-engine-host-mismatch`. A model, `dispatch_engine`, or
+preference cannot turn that explicit incompatible mode into a sidecar.
+
+The ownership split is therefore:
+
+| Concern | Owner |
+| --- | --- |
+| Normalize host and worker engine | `resolveWorkerIdentity()` |
+| Resolve `worker_engine: native` to the host | `resolveWorkerIdentity()` |
+| Project a routed engine | dispatch `runtimeFields()` |
+| Derive an omitted dispatch mode | dispatch `runtimeFields()` |
+| Validate native/sidecar combinations | core `resolveWorker()` |
+| Preserve reason codes | core `resolveWorker()` |
+
 ## Valid worker examples
 
 Native execution on the Claude host:
@@ -119,8 +203,15 @@ This is implicit recursion on the Codex host:
 ```
 
 It is rejected with `implicit-recursion-refused`. The same combination is
-representable only when the caller explicitly sets `sidecar` or
-`sidecar_declared` to `true`.
+representable only when an explicitly supplied `worker_mode: sidecar` is
+accompanied by `sidecar` or `sidecar_declared` set to `true`.
+
+This recursion example is about a mode typed explicitly by the caller.
+`runtimeFields()` derives a mode only when `worker_mode` is absent; that
+adapter derivation is not a behavior of `resolveWorker()` and cannot be
+triggered by adding routing or model fields to a direct core call. The adapter
+must project its derived combination back through the core validator rather
+than bypassing recursion or compatibility checks.
 
 `worker_engine: native` with `worker_mode: sidecar` is always rejected as
 `native-sidecar-conflict`.
