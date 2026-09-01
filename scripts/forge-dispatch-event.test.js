@@ -88,13 +88,19 @@ test('the rendered line is one JSON object carrying every posture axis', () => {
   assert.strictEqual(event.leg, 'claude→claude');
   const line = emitter.renderDispatchEvent({ unit: 'execute-task/T01' }, {
     host_runtime: 'claude', worker_mode: 'native', resolved_worker_engine: 'claude',
-    dispatch_allowed: true,
+    dispatch_allowed: true, dispatch_reason_code: 'runtime-posture-observed',
+    dispatch_posture: 'observe', dispatch_decision: 'advisory',
   }, '2026-09-01T00:00:00Z');
   assert.strictEqual(line.split('\n').length, 2, 'exactly one line plus its terminator');
   assert.doesNotThrow(() => JSON.parse(line));
 });
 
-test('an event that cannot name its posture is refused, never written half-blind', () => withTempDir((dir) => {
+// The identity/allowance axes and the three verdict axes are refused for the
+// same reason but are NOT the same guarantee, so they get their own cases. A
+// single case named after "posture" while only removing `dispatch_allowed` is
+// how the verdict axes went unguarded through three review rounds: the name
+// claimed coverage the body never exercised.
+test('an event missing its runtime identity or allowance is refused, never written half-blind', () => withTempDir((dir) => {
   const target = path.join(dir, 'events.jsonl');
   const missingAllowance = runEmitter(['--unit', 'execute-task/T01',
     '--host-runtime', 'claude', '--worker-mode', 'native',
@@ -114,6 +120,89 @@ test('an event that cannot name its posture is refused, never written half-blind
     '--events', target]);
   assert.strictEqual(notBoolean.status, 2, notBoolean.stdout);
   assert.strictEqual(fs.existsSync(target), false, 'a refused render writes nothing');
+}));
+
+// A fully-named dispatch, from which each verdict axis is removed in turn. The
+// axes are supplied as flags rather than a route so the case isolates the
+// emitter's own guarantee: even a caller that names everything else is refused
+// when one axis is absent.
+const NAMED_DISPATCH = Object.freeze({
+  '--unit': 'execute-task/T01',
+  '--host-runtime': 'claude',
+  '--worker-mode': 'native',
+  '--resolved-worker-engine': 'claude',
+  '--dispatch-allowed': 'true',
+  '--dispatch-reason-code': 'runtime-posture-observed',
+  '--dispatch-posture': 'observe',
+  '--dispatch-decision': 'advisory',
+});
+
+function argsWithout(flag, override) {
+  const args = [];
+  for (const [name, value] of Object.entries(NAMED_DISPATCH)) {
+    if (name === flag) {
+      if (override === undefined) continue;
+      args.push(name, override);
+      continue;
+    }
+    args.push(name, value);
+  }
+  return args;
+}
+
+// One case per axis, deliberately not lumped: a single "posture incomplete"
+// case would again test less than its name claims, and each axis answers a
+// different question in the log (why / how strict / what was done).
+for (const [flag, field] of [
+  ['--dispatch-reason-code', 'dispatch_reason_code'],
+  ['--dispatch-posture', 'dispatch_posture'],
+  ['--dispatch-decision', 'dispatch_decision'],
+]) {
+  test(`a dispatch that cannot name its ${field} is refused, never written half-blind`, () => withTempDir((dir) => {
+    const target = path.join(dir, 'events.jsonl');
+
+    const omitted = runEmitter([...argsWithout(flag), '--events', target]);
+    assert.strictEqual(omitted.status, 2, `omitted ${field} must exit 2, got: ${omitted.stdout}`);
+    assert.match(omitted.stderr, new RegExp(field));
+    assert.strictEqual(fs.existsSync(target), false, `omitted ${field} wrote a line`);
+
+    // The reproduction that exposed this hole produced `""`, not `undefined`:
+    // a truthiness check that lets the empty string through leaves it open.
+    const empty = runEmitter([...argsWithout(flag, ''), '--events', target]);
+    assert.strictEqual(empty.status, 2, `empty ${field} must exit 2, got: ${empty.stdout}`);
+    assert.match(empty.stderr, new RegExp(field));
+    assert.strictEqual(fs.existsSync(target), false, `empty ${field} wrote a line`);
+
+    const blank = runEmitter([...argsWithout(flag, '   '), '--events', target]);
+    assert.strictEqual(blank.status, 2, `whitespace ${field} must exit 2, got: ${blank.stdout}`);
+    assert.match(blank.stderr, new RegExp(field));
+    assert.strictEqual(fs.existsSync(target), false, `whitespace ${field} wrote a line`);
+
+    // Control: with every axis named, the same invocation is accepted — the
+    // refusals above are about the missing axis, not about the arg shape.
+    const named = runEmitter([...argsWithout(null), '--events', target]);
+    assert.strictEqual(named.status, 0, named.stderr);
+    const written = JSON.parse(fs.readFileSync(target, 'utf8').trim());
+    assert.strictEqual(written[field], NAMED_DISPATCH[flag]);
+  }));
+}
+
+// A route carrying every axis is the shape all six skill call sites pass, so
+// the emitter must accept it untouched: the tightening above must not turn a
+// real dispatch into a refusal.
+test('a resolver contract carries all three verdict axes for every routable leg', () => withTempDir((dir) => {
+  for (const legArgs of [
+    ['--host-runtime', 'claude'],
+    ['--host-runtime', 'claude', '--worker-engine', 'codex'],
+    ['--host-runtime', 'codex', '--worker-engine', 'codex'],
+    ['--host-runtime', 'codex', '--worker-engine', 'claude'],
+  ]) {
+    const contract = JSON.parse(resolveContract(dir, legArgs));
+    const event = emitter.buildDispatchEvent({ unit: 'execute-task/T01' }, contract, '2026-09-01T00:00:00Z');
+    for (const field of ['dispatch_reason_code', 'dispatch_posture', 'dispatch_decision']) {
+      assert.notStrictEqual(event[field], '', `${legArgs.join(' ')} → empty ${field}`);
+    }
+  }
 }));
 
 test('the emitter appends to the log and creates its directory', () => withTempDir((dir) => {

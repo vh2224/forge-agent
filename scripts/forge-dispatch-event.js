@@ -131,16 +131,29 @@ function buildDispatchEvent(args, route, now) {
   const hostRuntime = pick(args.hostRuntime, route.host_runtime);
   const workerMode = pick(args.workerMode, route.worker_mode);
   const resolvedWorkerEngine = pick(args.resolvedWorkerEngine, route.resolved_worker_engine);
+  const dispatchReasonCode = pick(args.dispatchReasonCode, route.dispatch_reason_code);
+  const dispatchPosture = pick(args.dispatchPosture, route.dispatch_posture);
+  const dispatchDecision = pick(args.dispatchDecision, route.dispatch_decision);
   const allowedSource = present(args.dispatchAllowed) ? args.dispatchAllowed : route.dispatch_allowed;
   if (allowedSource === undefined || allowedSource === null || text(allowedSource).trim() === '') {
     throw new DispatchEventError('dispatch_allowed ausente: informe --route-json ou --dispatch-allowed');
   }
   // Posture is the whole point of this emitter: a dispatch record that cannot
-  // name its own verdict is refused rather than written without it.
+  // name its own verdict is refused rather than written without it. The three
+  // verdict axes are checked here, before anything is rendered or appended,
+  // because an empty string is exactly the shape a missing axis takes once it
+  // has crossed a shell — a line carrying `"dispatch_posture":""` looks present
+  // in the log and says nothing, which is the failure this emitter exists to
+  // prevent. The resolver leaves `dispatch_posture` null only on legs it has
+  // already refused (invalid contract, unmapped quadrant), so refusing to write
+  // such a record removes no legitimate emission.
   for (const [field, value] of [
     ['host_runtime', hostRuntime],
     ['worker_mode', workerMode],
     ['resolved_worker_engine', resolvedWorkerEngine],
+    ['dispatch_reason_code', dispatchReasonCode],
+    ['dispatch_posture', dispatchPosture],
+    ['dispatch_decision', dispatchDecision],
   ]) {
     if (!present(value)) throw new DispatchEventError(`${field} ausente: informe --route-json ou a flag correspondente`);
   }
@@ -179,9 +192,9 @@ function buildDispatchEvent(args, route, now) {
   // Durable posture axes — always last, always present, additive for readers.
   event.resolved_worker_engine = resolvedWorkerEngine;
   event.leg = `${hostRuntime}→${resolvedWorkerEngine}`;
-  event.dispatch_reason_code = pick(args.dispatchReasonCode, route.dispatch_reason_code);
-  event.dispatch_posture = pick(args.dispatchPosture, route.dispatch_posture);
-  event.dispatch_decision = pick(args.dispatchDecision, route.dispatch_decision);
+  event.dispatch_reason_code = dispatchReasonCode;
+  event.dispatch_posture = dispatchPosture;
+  event.dispatch_decision = dispatchDecision;
   return event;
 }
 
