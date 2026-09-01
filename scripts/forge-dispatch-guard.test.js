@@ -127,34 +127,36 @@ test('observe posture is always advisory and allowed', () => {
     const [host, worker] = leg.split('→');
     const result = evaluate(host, worker);
     assert.strictEqual(result.posture, 'observe', leg);
-    assert.strictEqual(result.enforcement_enabled, true, leg);
     assert.strictEqual(result.decision, 'advisory', leg);
     assert.strictEqual(result.dispatch_allowed, true, leg);
     assert.strictEqual(result.reason_code, 'runtime-posture-observed', leg);
-    assert.strictEqual(result.suppressed_action, null, leg);
+    assert.strictEqual('suppressed_action' in result, false, leg);
   }
 });
 
-test('enforce posture refuses when enforcement is active', () => {
+test('the enforced leg refuses, and the verdict names no suppression', () => {
   const result = evaluate('codex', 'claude');
   assert.strictEqual(result.posture, 'enforce');
-  assert.strictEqual(result.enforcement_enabled, true);
   assert.strictEqual(result.decision, 'refuse');
   assert.strictEqual(result.dispatch_allowed, false);
   assert.strictEqual(result.reason_code, 'codex-claude-unroutable');
-  assert.strictEqual(result.suppressed_action, null);
+  assert.strictEqual('enforcement_enabled' in result, false);
+  assert.strictEqual('suppressed_action' in result, false);
 });
 
-test('only the exact textual zero suppresses an enforcing refusal', () => {
-  const escaped = evaluate('codex', 'claude', { FORGE_RUNTIME_ENFORCE: '0' });
-  assert.strictEqual(escaped.posture, 'enforce');
-  assert.strictEqual(escaped.enforcement_enabled, false);
-  assert.strictEqual(escaped.decision, 'advisory');
-  assert.strictEqual(escaped.dispatch_allowed, true);
-  assert.strictEqual(escaped.suppressed_action, 'refuse');
-  for (const value of [0, '00', 'false', '', ' 0 ']) {
-    const active = evaluate('codex', 'claude', { FORGE_RUNTIME_ENFORCE: value });
-    assert.strictEqual(active.decision, 'refuse', `value ${JSON.stringify(value)} must not suppress`);
+// The escape hatch was removed on purpose: codex→claude has no delivery path
+// (every skill gates its sidecar on a codex worker, and the only --engine claude
+// occurrence in forge-xllm.js is its own rejection message), so an "allowed"
+// verdict for this leg could never be honoured by anything downstream.
+test('no environment value unlocks the enforced leg', () => {
+  const baseline = JSON.stringify(evaluate('codex', 'claude'));
+  for (const value of ['0', 0, '00', 'false', '', ' 0 ', 'off', '1']) {
+    const attempted = evaluate('codex', 'claude', { FORGE_RUNTIME_ENFORCE: value });
+    assert.strictEqual(attempted.decision, 'refuse',
+      `value ${JSON.stringify(value)} must not unlock the enforced leg`);
+    assert.strictEqual(attempted.dispatch_allowed, false, JSON.stringify(value));
+    assert.strictEqual(JSON.stringify(attempted), baseline,
+      `value ${JSON.stringify(value)} changed the verdict at all`);
   }
 });
 
@@ -194,15 +196,15 @@ test('real CLI process keeps codex to codex advisory with status 0', () => {
   assert.strictEqual(result.dispatch_allowed, true);
 });
 
-test('real CLI process honors the exact enforcement escape with status 0', () => {
-  const child = runCli('codex', 'claude', { FORGE_RUNTIME_ENFORCE: '0' });
-  const result = jsonOutput(child);
-  assert.strictEqual(child.status, 0, child.stderr);
-  assert.strictEqual(result.posture, 'enforce');
-  assert.strictEqual(result.enforcement_enabled, false);
-  assert.strictEqual(result.decision, 'advisory');
-  assert.strictEqual(result.dispatch_allowed, true);
-  assert.strictEqual(result.suppressed_action, 'refuse');
+test('real CLI process refuses codex to claude even with the removed escape set', () => {
+  const escapeAttempt = runCli('codex', 'claude', { FORGE_RUNTIME_ENFORCE: '0' });
+  const enforced = runCli('codex', 'claude');
+  assert.strictEqual(escapeAttempt.status, 1, escapeAttempt.stderr);
+  assert.strictEqual(jsonOutput(escapeAttempt).decision, 'refuse');
+  assert.strictEqual(jsonOutput(escapeAttempt).dispatch_allowed, false);
+  // Byte-identical to the run without the variable: a spawned process cannot
+  // tell the two apart, which is the whole point of removing the hatch.
+  assert.strictEqual(escapeAttempt.stdout, enforced.stdout);
 });
 
 test('real CLI process reports an unmapped leg with status 2', () => {

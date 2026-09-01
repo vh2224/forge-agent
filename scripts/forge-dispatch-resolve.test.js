@@ -333,8 +333,8 @@ withHermeticHome((cliEnv) => {
     ];
     assertEqual(lines.slice(0, preexistingLines.length).join('\n'), preexistingLines.join('\n'),
       'preexisting export lines remain byte-identical for the same contract');
-    assertEqual(lines.slice(-11).map((line) => line.slice(0, line.indexOf('='))).join(','),
-      'HOST_RUNTIME,WORKER_ENGINE,WORKER_MODE,DISPATCH_ALLOWED,DISPATCH_REASON_CODE,DISPATCH_HINT,DISPATCH_POSTURE,DISPATCH_DECISION,RESOLVED_WORKER_ENGINE,SIDECAR_DECLARED,DISPATCH_SUPPRESSED_ACTION',
+    assertEqual(lines.slice(-10).map((line) => line.slice(0, line.indexOf('='))).join(','),
+      'HOST_RUNTIME,WORKER_ENGINE,WORKER_MODE,DISPATCH_ALLOWED,DISPATCH_REASON_CODE,DISPATCH_HINT,DISPATCH_POSTURE,DISPATCH_DECISION,RESOLVED_WORKER_ENGINE,SIDECAR_DECLARED',
       'runtime exports are appended without disturbing the legacy prefix');
     assertEqual(byName.MODEL_ID, `'${contract.model}'`, 'MODEL_ID mirrors the contract');
     assertEqual(byName.TIER, "'heavy'", 'TIER mirrors the frontmatter override');
@@ -824,7 +824,7 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
-  runCase('real resolver CLI honors only the exact textual zero escape on the enforcing leg', () => {
+  runCase('no environment value turns the enforcing leg into an allowance', () => {
     const f = mkFixture({});
     const args = ['--json', '--unit-type', 'execute-task', '--host-runtime', 'codex', '--cwd', f.dir];
     const enforcingEnv = { ...cliEnv };
@@ -832,41 +832,37 @@ withHermeticHome((cliEnv) => {
     const refusedChild = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: enforcingEnv });
     const refused = JSON.parse(refusedChild.stdout);
     assertEqual(refusedChild.status, 0, 'dispatch refusal remains a parseable resolver verdict, not a resolver crash');
-    assertEqual(refused.dispatch_allowed, false, 'default CLI environment enforces Codex-to-Claude refusal');
-    assertEqual(refused.dispatch_reason_code, 'codex-claude-unroutable', 'default CLI verdict uses the exact stable reason');
-    assertEqual(refused.dispatch_posture, 'enforce', 'default CLI verdict exposes enforcing posture');
-    assertEqual(refused.dispatch_decision, 'refuse', 'default CLI verdict exposes refusal decision');
+    assertEqual(refused.dispatch_allowed, false, 'the Codex-to-Claude leg is refused');
+    assertEqual(refused.dispatch_reason_code, 'codex-claude-unroutable', 'refusal uses the exact stable reason');
+    assertEqual(refused.dispatch_posture, 'enforce', 'the verdict exposes enforcing posture');
+    assertEqual(refused.dispatch_decision, 'refuse', 'the verdict exposes the refusal decision');
     assert(typeof refused.dispatch_hint === 'string' && refused.dispatch_hint.trim() !== '',
-      'default CLI verdict includes an actionable hint', refused.dispatch_hint);
+      'the refusal includes an actionable hint', refused.dispatch_hint);
+    assert(!('dispatch_suppressed_action' in refused),
+      'the removed suppression marker is gone from the public contract',
+      JSON.stringify(Object.keys(refused)));
 
-    const escapedChild = spawnSync(process.execPath, [SCRIPT, ...args], {
-      encoding: 'utf8',
-      env: { ...enforcingEnv, FORGE_RUNTIME_ENFORCE: '0' },
-    });
-    const escaped = JSON.parse(escapedChild.stdout);
-    assertEqual(escapedChild.status, 0, 'escaped resolver CLI exits normally');
-    assertEqual(escaped.dispatch_allowed, true, 'exact textual zero suppresses only the active refusal');
-    assertEqual(escaped.dispatch_reason_code, 'codex-claude-unroutable', 'escape preserves the enforcing leg diagnostic');
-    assertEqual(escaped.dispatch_posture, 'enforce', 'escape does not rewrite frozen posture');
-    assertEqual(escaped.dispatch_decision, 'advisory', 'escape changes the enforcing decision to advisory');
-    assertEqual(escaped.host_runtime, refused.host_runtime, 'escape does not alter the host identity');
-    assertEqual(escaped.resolved_worker_engine, refused.resolved_worker_engine, 'escape does not alter the worker identity');
-    const changedKeys = Object.keys(refused).filter((key) =>
-      JSON.stringify(refused[key]) !== JSON.stringify(escaped[key])).sort();
-    assertEqual(escaped.dispatch_suppressed_action, 'refuse',
-      'the escape records which action it suppressed, so the bypass is auditable');
-    assertEqual(refused.dispatch_suppressed_action, null,
-      'an active refusal suppressed nothing');
-    assertEqual(changedKeys.join(','), 'dispatch_allowed,dispatch_decision,dispatch_suppressed_action',
-      'escape changes allowance, decision and the suppression marker in the public resolver contract');
+    // The escape hatch (FORGE_RUNTIME_ENFORCE=0) was removed: its only reachable
+    // effect was flipping this leg to allowed, and nothing downstream can deliver
+    // a Claude worker from a Codex host. The contract must now be byte-identical
+    // with and without the variable.
+    for (const value of ['0', '00', 'false', '', 'off']) {
+      const attempt = spawnSync(process.execPath, [SCRIPT, ...args], {
+        encoding: 'utf8',
+        env: { ...enforcingEnv, FORGE_RUNTIME_ENFORCE: value },
+      });
+      assertEqual(attempt.status, 0, `resolver still exits normally with FORGE_RUNTIME_ENFORCE=${value}`);
+      assertEqual(attempt.stdout, refusedChild.stdout,
+        `FORGE_RUNTIME_ENFORCE=${value} changed the resolver contract`);
+    }
     cleanup(f);
   });
 
-  // Regression (S02 recheck): before dispatch_suppressed_action reached the public
-  // contract, a suppressed enforced refusal and a routine advisory were both just
-  // `dispatch_decision: 'advisory'` with no other difference, so an operator bypass
-  // was indistinguishable from ordinary observation and left no durable record.
-  runCase('a suppressed enforced refusal is distinguishable from a routine advisory', () => {
+  // Regression (PR #164 review): the escape used to make an enforced refusal and a
+  // routine advisory both `dispatch_decision: advisory`, distinguishable only by a
+  // marker field. There is now no suppressed state at all — the refusal is a
+  // refusal, and the only advisory is a genuinely observed leg.
+  runCase('an enforced leg and a routine advisory are different verdicts, not two advisories', () => {
     const f = mkFixture({});
     const enforcingEnv = { ...cliEnv };
     delete enforcingEnv.FORGE_RUNTIME_ENFORCE;
@@ -878,23 +874,16 @@ withHermeticHome((cliEnv) => {
       return JSON.parse(child.stdout);
     };
 
-    // (a) enforced refusal suppressed by the escape hatch.
-    const suppressed = run({ ...enforcingEnv, FORGE_RUNTIME_ENFORCE: '0' }, []);
+    // (a) the enforced leg, with the removed escape explicitly requested.
+    const enforced = run({ ...enforcingEnv, FORGE_RUNTIME_ENFORCE: '0' }, []);
     // (b) routine advisory: an observed leg, no enforcement involved at all.
     const routine = run(enforcingEnv, ['--worker-engine', 'native']);
 
-    assertEqual(suppressed.dispatch_decision, 'advisory', 'suppressed refusal surfaces as advisory');
+    assertEqual(enforced.dispatch_decision, 'refuse', 'the enforced leg refuses');
+    assertEqual(enforced.dispatch_allowed, false, 'the enforced leg is not dispatchable');
+    assertEqual(enforced.dispatch_posture, 'enforce', 'the frozen posture is untouched');
     assertEqual(routine.dispatch_decision, 'advisory', 'routine observation surfaces as advisory');
-    assertEqual(suppressed.dispatch_allowed, true, 'both are allowed to dispatch');
-    assertEqual(routine.dispatch_allowed, true, 'both are allowed to dispatch');
-    assert(suppressed.dispatch_suppressed_action !== routine.dispatch_suppressed_action,
-      'the two advisories are distinguishable in the resolver contract',
-      `${JSON.stringify(suppressed.dispatch_suppressed_action)} vs ${JSON.stringify(routine.dispatch_suppressed_action)}`);
-    assertEqual(suppressed.dispatch_suppressed_action, 'refuse',
-      'the suppressed advisory names the action the escape hatch skipped');
-    assertEqual(routine.dispatch_suppressed_action, null,
-      'the routine advisory suppressed nothing');
-    assertEqual(suppressed.dispatch_posture, 'enforce', 'the frozen posture is untouched by the escape');
+    assertEqual(routine.dispatch_allowed, true, 'the observed leg dispatches');
     assertEqual(routine.dispatch_posture, 'observe', 'the routine leg is an observed one');
 
     // The shell surface must carry the same distinction, since the skills read exports.
@@ -907,10 +896,12 @@ withHermeticHome((cliEnv) => {
         return [line.slice(0, split), line.slice(split + 1)];
       }));
     };
-    assertEqual(exportsFor(suppressed).DISPATCH_SUPPRESSED_ACTION, "'refuse'",
-      'DISPATCH_SUPPRESSED_ACTION exports the suppressed action');
-    assertEqual(exportsFor(routine).DISPATCH_SUPPRESSED_ACTION, "''",
-      'a routine advisory exports an empty marker, so `-n` distinguishes the two');
+    assertEqual(exportsFor(enforced).DISPATCH_ALLOWED, "'false'",
+      'the enforced leg exports a false allowance the consumer gate stops on');
+    assertEqual(exportsFor(routine).DISPATCH_ALLOWED, "'true'",
+      'the observed leg exports a true allowance');
+    assert(!('DISPATCH_SUPPRESSED_ACTION' in exportsFor(routine)),
+      'the removed suppression export is gone from the shell surface');
     cleanup(f);
   });
 

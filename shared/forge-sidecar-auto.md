@@ -11,7 +11,7 @@
 > All $VARIABLES below are the ones set by the forge-auto dispatch steps ($ROUTE_JSON,
 > $SIDECAR_MODEL, $WORKERS_TIMEOUT, $CODE_DIR, $WORKING_DIR, $FORGE_SCRIPTS_DIR, ...).
 
-**Branch C — sidecar codex (`WORKER_MODE == sidecar && DISPATCH_ENGINE == codex && unit_type == execute-task && BATCH.length == 1`):**
+**Branch C — sidecar codex (`WORKER_MODE == sidecar && RESOLVED_WORKER_ENGINE == codex && unit_type == execute-task && BATCH.length == 1`):**
 
 Entry is fail-closed: `DISPATCH_ALLOWED` is already `true` before this file is
 loaded. A false verdict prints `DISPATCH_REASON_CODE` + `DISPATCH_HINT` and
@@ -272,7 +272,7 @@ On chain advance, re-enter the canonical resolver/guard for the selected member.
 
 ---
 
-**Branch D — sidecar codex plan (`WORKER_MODE == sidecar && DISPATCH_ENGINE == codex && unit_type == plan-slice`):**
+**Branch D — sidecar codex plan (`WORKER_MODE == sidecar && RESOLVED_WORKER_ENGINE == codex && unit_type == plan-slice`):**
 
 Executable mirror of `shared/forge-dispatch.md § Worker Engine Routing` → *Sidecar dispatch state machine — Branch D* + *BLOCKER contract (state-fresh + cap only)* + *Fallback*. Read-only twin of Branch C: codex only reads the codebase + planning context to reason and returns markdown plan content in the result JSON — it never writes `.gsd/**`, so this branch has **no dirty-tree guard, no `START_SHA` capture, no reset** (BLOCKER item 2 does not apply — nothing codex-authored on disk). Only the **state-fresh-per-attempt** (item 1) and **cap** (item 3) invariants carry over: a multi-codex-member chain for `plan-slice` dispatches the sidecar more than once, so the state file is per-attempt and `SIDECAR_ATTEMPT` is hard-capped. States: `started → polling → done | failed`.
 

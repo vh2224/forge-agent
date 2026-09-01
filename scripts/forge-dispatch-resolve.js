@@ -270,10 +270,10 @@ function runtimeFields(opts, dispatchEngine) {
 
 // Runtime validation owns representability; the frozen guard owns posture.
 // Keeping this as a separate step prevents a posture result from laundering a
-// canonical forge-runtime error into a different guard diagnostic.  The
-// environment is an explicit dependency so library callers remain pure and
-// deterministic.  Only evaluateDispatchGuard interprets its enforcement key.
-function composeRuntimePosture(runtime, environment) {
+// canonical forge-runtime error into a different guard diagnostic.  Posture is
+// a total function of the runtime identity: no environment is consulted here or
+// in the guard, so the same leg yields the same verdict in every shell.
+function composeRuntimePosture(runtime) {
   if (!runtime || runtime.dispatch_allowed !== true) {
     const reasonCode = runtime && runtime.dispatch_reason_code
       ? runtime.dispatch_reason_code
@@ -285,16 +285,13 @@ function composeRuntimePosture(runtime, environment) {
       dispatch_hint: `Corrija o contrato runtime antes do dispatch (${reasonCode}); nenhum worker alternativo foi selecionado.`,
       dispatch_posture: null,
       dispatch_decision: 'error',
-      // Always present, never conditional: an absent field is indistinguishable
-      // from an unsuppressed one for a reader that only checks truthiness.
-      dispatch_suppressed_action: null,
     };
   }
 
   const guard = evaluateDispatchGuard({
     host_runtime: runtime.host_runtime,
     worker_engine: runtime.worker_engine,
-  }, environment);
+  });
   return {
     ...runtime,
     dispatch_allowed: guard.dispatch_allowed,
@@ -302,10 +299,6 @@ function composeRuntimePosture(runtime, environment) {
     dispatch_hint: guard.hint,
     dispatch_posture: guard.posture,
     dispatch_decision: guard.decision,
-    // The FORGE_RUNTIME_ENFORCE=0 escape is only auditable if the suppressed
-    // action survives composition: without it a suppressed enforced refusal and
-    // a routine advisory are both just `decision: advisory`.
-    dispatch_suppressed_action: guard.suppressed_action || null,
   };
 }
 
@@ -444,7 +437,7 @@ function resolveDispatch(opts, environment) {
   // Resolve this after routing/model-family work. The result is deliberately
   // additive: legacy engine/dispatch_engine/chain retain their 3.1.4 meaning.
   const dispatchEngine = dispatchEngineFor(engine);
-  const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine), environment);
+  const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine));
   return {
     engine,
     model,
@@ -532,10 +525,7 @@ function degradedContract(args, environment) {
   } catch { /* minimal ordered contract below */ }
   const model = chain[0] ? chain[0].id : '';
   const alias = modelToAlias(model).alias;
-  const runtime = composeRuntimePosture(
-    runtimeFields(parsed, dispatchEngineFor('claude')),
-    environment,
-  );
+  const runtime = composeRuntimePosture(runtimeFields(parsed, dispatchEngineFor('claude')));
   return {
     engine: 'claude', model, alias, tier, domain: 'default', route_source: 'tier_models',
     chain, chain_len: chain.length, reason: 'routing-runtime-error; tier_models',
@@ -604,9 +594,6 @@ const SHELL_EXPORT_MAP = [
   ['DISPATCH_DECISION', (r) => r.dispatch_decision || ''],
   ['RESOLVED_WORKER_ENGINE', (r) => r.resolved_worker_engine || ''],
   ['SIDECAR_DECLARED', (r) => (r.sidecar_declared === true ? 'true' : 'false')],
-  // Empty string on a routine advisory; 'refuse' when FORGE_RUNTIME_ENFORCE=0
-  // suppressed an enforced refusal — the marker an orchestrator logs.
-  ['DISPATCH_SUPPRESSED_ACTION', (r) => r.dispatch_suppressed_action || ''],
 ];
 
 function shellQuote(value) {

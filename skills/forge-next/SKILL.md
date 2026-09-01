@@ -282,18 +282,8 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 2                         # terminal step boundary; no timeline, worker, cursor consume, or inline fallback
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-    printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
-      "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
-      "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-  else
-    printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
-  fi
+  printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
   # Advisory is observation only: the resolved runtime/routing fields remain unchanged.
-  # A non-empty $DISPATCH_SUPPRESSED_ACTION is not routine observation: FORGE_RUNTIME_ENFORCE=0
-  # suppressed an enforced refusal on this leg. Append a `runtime-posture-suppressed` line to
-  # events.jsonl in Step 8 carrying suppressed_action/reason_code/posture/leg — an escape that
-  # leaves no durable record is exactly what the frozen posture map exists to prevent.
 fi
 
 # Step 4b consume: $TIER_CURSOR_FILE is deleted here, adjacent to the spend and only after an
@@ -319,7 +309,7 @@ if [ "$ROUTE_SOURCE" != "routing" ] && [ "$ROUTING_PRESENT" = "true" ]; then
 fi
 
 ```
-`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (`chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `THINKING_HEADER`, `unit_effort`, `HOST_RUNTIME`, `WORKER_ENGINE`, `RESOLVED_WORKER_ENGINE`, `WORKER_MODE`, `DISPATCH_ALLOWED`, `DISPATCH_REASON_CODE`, `DISPATCH_HINT`, `DISPATCH_SUPPRESSED_ACTION` (empty on a routine advisory; `refuse` when `FORGE_RUNTIME_ENFORCE=0` suppressed an enforced refusal — log it), and `REASON` are now set (the allowed tier cursor may have overridden only the attempt carriers). Branch on `$WORKER_MODE` in Step 4. The runtime axes and existing tier/routing/effort axes are additive fields in every dispatch event.
+`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (`chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `THINKING_HEADER`, `unit_effort`, `HOST_RUNTIME`, `WORKER_ENGINE`, `RESOLVED_WORKER_ENGINE`, `WORKER_MODE`, `DISPATCH_ALLOWED`, `DISPATCH_REASON_CODE`, `DISPATCH_HINT`, and `REASON` are now set (the allowed tier cursor may have overridden only the attempt carriers). Branch on `$WORKER_MODE` in Step 4. The runtime axes and existing tier/routing/effort axes are additive fields in every dispatch event.
 
 > **Thinking guard (Fable 5 + Opus 5):** the resolver emits `$THINKING_HEADER` (`adaptive` when
 > `$MODEL_ID` is `claude-fable-5`, or `claude-opus-5` with resolved effort `xhigh`/`max`; else empty).
@@ -463,13 +453,7 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 2                     # return to operator; this is not review-agent-unavailable
      fi
      if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-       if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-         printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
-           "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
-           "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-       else
-         printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
-       fi
+       printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
      fi
      RF_ALIAS="$MODEL_ALIAS"; RF_HOST_RUNTIME="$HOST_RUNTIME"
      RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
@@ -1093,8 +1077,9 @@ fi
 **Delivery branch — `WORKER_MODE` is authoritative.**
 
 - `WORKER_MODE == sidecar`: only `execute-task` and `plan-slice` with the Codex adapter are
-  supported here; load the sidecar mirror below. `DISPATCH_ENGINE` selects the adapter after the
-  mode decision, never the delivery mode itself.
+  supported here; load the sidecar mirror below. `RESOLVED_WORKER_ENGINE` — the engine that will
+  actually run the worker — selects the adapter after the mode decision, never the delivery mode
+  itself. `DISPATCH_ENGINE` is model-family telemetry and never selects a branch.
 - `WORKER_MODE == native`: continue to the canonical native call below, regardless of model-family
   metadata. In the Codex projection the renderer rewrites that exact `Agent()` form to
   `spawn_agent()`; the source does not route around it.
@@ -1108,14 +1093,14 @@ case "$WORKER_MODE" in
     : # continue to the canonical native block below
     ;;
   sidecar)
-    if { [ "$unit_type" = "execute-task" ] || [ "$unit_type" = "plan-slice" ]; } && [ "$DISPATCH_ENGINE" = "codex" ]; then
+    if { [ "$unit_type" = "execute-task" ] || [ "$unit_type" = "plan-slice" ]; } && [ "$RESOLVED_WORKER_ENGINE" = "codex" ]; then
       SIDECAR_SPEC="$FORGE_SHARED_DIR/forge-sidecar-next.md"
       [ -r "$SIDECAR_SPEC" ] || { DISPATCH_REASON_CODE="sidecar-spec-unavailable"; DISPATCH_HINT="Não foi possível ler $SIDECAR_SPEC; repare a instalação Forge."; dispatch_refusal_stop; exit 2; }
       # The orchestrator reads and executes SIDECAR_SPEC now. It must not continue to the native
       # block unless that spec returns a newly resolved WORKER_MODE=native, allowed verdict.
     else
       DISPATCH_REASON_CODE="unsupported-sidecar-unit"
-      DISPATCH_HINT="worker_mode=sidecar não possui adapter para $unit_type/$DISPATCH_ENGINE; ajuste host/worker e execute /forge-next novamente."
+      DISPATCH_HINT="worker_mode=sidecar não possui adapter para $unit_type/$RESOLVED_WORKER_ENGINE; ajuste host/worker e execute /forge-next novamente."
       dispatch_refusal_stop
       exit 2
     fi
@@ -1153,7 +1138,7 @@ Non-negotiables that bind even before the spec is read (routing contract, CLAUDE
 **Declared Codex-native `not-spawned` transition (one shot):** initialize
 `NATIVE_TO_SIDECAR_COUNT=0` per unit. If, and only if, the projected native call returns the named
 outcome `not-spawned`, require `NATIVE_TO_SIDECAR_COUNT == 0`, `DISPATCH_ALLOWED == true`,
-`DISPATCH_ENGINE == codex`, and `RESOLVED_WORKER_ENGINE == HOST_RUNTIME`. Increment the counter,
+`RESOLVED_WORKER_ENGINE == codex`, and `RESOLVED_WORKER_ENGINE == HOST_RUNTIME`. Increment the counter,
 set only the final mode carrier `WORKER_MODE=sidecar` plus `SIDECAR_DECLARED=true`, retain
 `DISPATCH_ALLOWED=true`, and load `shared/forge-sidecar-next.md` once. Keep `ROUTE_JSON`,
 `HOST_RUNTIME`, `WORKER_ENGINE`, and `RESOLVED_WORKER_ENGINE` unchanged as the original resolver
@@ -1221,10 +1206,16 @@ masquerades as `not-spawned` or creates an implicit native recursion. Then:
 ```bash
 OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
-MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS},\"model_applied\":${MODEL_APPLIED_JSON},\"engine\":\"${ENGINE:-claude}\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+  --unit "${unitType}/${unitId}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
+  --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
+  --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
+  --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \
+  --output-tokens "$OUTPUT_TOKENS" --model-applied "$MODEL_ALIAS" \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --events .gsd/forge/events.jsonl
 ```
 
 **Heartbeat — clear worker field** after `Agent()` returns (mirror of `forge-auto/SKILL.md`; keeps the run from advertising a worker that already finished):

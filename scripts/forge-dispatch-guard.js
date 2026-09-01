@@ -49,12 +49,7 @@ function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
-function enforcementEnabled(environment) {
-  const env = environment && typeof environment === 'object' ? environment : {};
-  return env.FORGE_RUNTIME_ENFORCE !== '0';
-}
-
-function errorResult(reasonCode, hint, enforcement, identity) {
+function errorResult(reasonCode, hint, identity) {
   const known = identity || {};
   return {
     host_runtime: known.host_runtime || '',
@@ -64,26 +59,23 @@ function errorResult(reasonCode, hint, enforcement, identity) {
       ? `${known.host_runtime}→${known.resolved_engine}`
       : '',
     posture: null,
-    enforcement_enabled: enforcement,
     decision: 'error',
     dispatch_allowed: false,
     reason_code: reasonCode,
     hint,
-    suppressed_action: null,
   };
 }
 
 /**
- * Evaluate one explicit dispatch identity. Pure: all inputs, including the
- * enforcement environment, are supplied by the caller and no I/O occurs.
+ * Evaluate one explicit dispatch identity. Pure: posture is a total function of
+ * the identity alone. There is no environment input and therefore no escape:
+ * an enforced leg refuses on every host, in every shell, unconditionally.
  */
-function evaluateDispatchGuard(input, environment) {
-  const enforcement = enforcementEnabled(environment);
+function evaluateDispatchGuard(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return errorResult(
       REASON_CODES.INVALID_RUNTIME_GUARD_INPUT,
       'Informe host_runtime e worker_engine explicitamente.',
-      enforcement,
     );
   }
   if (typeof input.host_runtime !== 'string' || input.host_runtime.trim() === '' ||
@@ -91,7 +83,6 @@ function evaluateDispatchGuard(input, environment) {
     return errorResult(
       REASON_CODES.INVALID_RUNTIME_GUARD_INPUT,
       'Informe host_runtime e worker_engine explicitamente.',
-      enforcement,
     );
   }
 
@@ -102,7 +93,6 @@ function evaluateDispatchGuard(input, environment) {
     return errorResult(
       REASON_CODES.INVALID_RUNTIME_GUARD_INPUT,
       `Corrija a identidade runtime antes do dispatch (${error.code || 'invalid-runtime-identity'}).`,
-      enforcement,
     );
   }
 
@@ -111,26 +101,26 @@ function evaluateDispatchGuard(input, environment) {
     return errorResult(
       REASON_CODES.RUNTIME_POSTURE_UNMAPPED,
       `Nenhuma postura runtime foi configurada para ${leg}; adicione uma célula explícita antes do dispatch.`,
-      enforcement,
       identity,
     );
   }
 
   const policy = RUNTIME_POSTURE_MAP[leg];
-  const refusalActive = policy.posture === 'enforce' && enforcement;
-  const refusalSuppressed = policy.posture === 'enforce' && !enforcement;
+  // An enforced posture is a refusal, full stop. No environment variable, flag
+  // or caller argument can turn it into an allowance: the only leg mapped to
+  // `enforce` has no delivery path, so an "allowed" verdict for it would be a
+  // dispatch nobody can honour.
+  const refusalActive = policy.posture === 'enforce';
   return {
     host_runtime: identity.host_runtime,
     worker_engine: identity.worker_engine,
     resolved_worker_engine: identity.resolved_engine,
     leg,
     posture: policy.posture,
-    enforcement_enabled: enforcement,
     decision: refusalActive ? 'refuse' : 'advisory',
     dispatch_allowed: !refusalActive,
     reason_code: policy.reason_code,
     hint: policy.hint,
-    suppressed_action: refusalSuppressed ? 'refuse' : null,
   };
 }
 
@@ -169,20 +159,21 @@ function exitCodeFor(result) {
   return result.dispatch_allowed ? 0 : 1;
 }
 
+// `environment` is accepted for call-site stability and deliberately unused:
+// posture depends on the identity only, so no ambient variable can change this
+// verdict.
 function main(argv, environment, streams) {
   const args = Array.isArray(argv) ? argv : [];
-  const env = environment && typeof environment === 'object' ? environment : {};
   const io = streams || { stdout: process.stdout, stderr: process.stderr };
   const wantsJson = args.includes('--json');
   let result;
   try {
     const parsed = parseArgs(args);
-    result = evaluateDispatchGuard(parsed, env);
+    result = evaluateDispatchGuard(parsed);
   } catch (error) {
     result = errorResult(
       REASON_CODES.INVALID_RUNTIME_GUARD_INPUT,
       error && error.message ? error.message : 'Entrada inválida para o runtime guard.',
-      enforcementEnabled(env),
     );
   }
 
@@ -200,7 +191,6 @@ module.exports = {
   REASON_CODES,
   RUNTIME_POSTURE_MAP,
   RuntimeGuardInputError,
-  enforcementEnabled,
   evaluateDispatchGuard,
   parseArgs,
   exitCodeFor,

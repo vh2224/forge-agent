@@ -82,6 +82,32 @@ function sidecarSurface(p) {
   return spec ? text + '\n' + readRepoText(path.join(repoRootForSpec, spec)) : text;
 }
 
+// Dispatch events come in two forms since the single-emitter cutover (PR #164):
+// the legacy hand-written shell line (still used by the sidecar mirrors) and a
+// call to scripts/forge-dispatch-event.js, whose flags span continuation lines.
+// Both are returned as ONE text block so a per-emitter field assertion can be
+// written once and bite on either form.
+function dispatchEmitterBlocks(text) {
+  const lines = text.split(/\r?\n/);
+  const blocks = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const canonical = line.includes('forge-dispatch-event.js');
+    const legacy = line.includes('\\"event\\":\\"dispatch\\"')
+      || (/\b(?:echo|printf)\b/.test(line) && line.includes('"event":"dispatch"'));
+    if (!canonical && !legacy) continue;
+    let end = index;
+    let block = line;
+    while (/\\\s*$/.test(lines[end]) && end + 1 < lines.length) {
+      end += 1;
+      block += '\n' + lines[end];
+    }
+    blocks.push({ kind: canonical ? 'canonical' : 'legacy', text: block, line: index + 1 });
+    index = end;
+  }
+  return blocks;
+}
+
 let passes = 0;
 let fails = 0;
 let skips = 0;
@@ -1842,9 +1868,15 @@ function smokeEffort() {
     assert(/\[\s*'EFFORT_REASON'\s*,/.test(resolver), `${label}: extracts effort_reason from the resolver contract`, 'EFFORT_REASON missing from SHELL_EXPORT_MAP');
     // the inline effort block + its default map + clamp must be gone (logic lives only in the resolver)
     assert(!/declare -A EFFORT_DEFAULTS/.test(txt), `${label}: inline EFFORT_DEFAULTS map removed`, 'inline effort map still present');
-    // dispatch event carries effort + effort_reason
-    assert(/event.*dispatch[\s\S]*?effort\\?":\\?"\$\{?EFFORT/.test(txt), `${label}: dispatch event includes effort`, 'effort field missing from event');
-    assert(/effort_reason\\?":\\?"\$\{?EFFORT_REASON/.test(txt), `${label}: dispatch event includes effort_reason`, 'effort_reason field missing');
+    // dispatch event carries effort + effort_reason — since the single-emitter
+    // cutover they are flags handed to scripts/forge-dispatch-event.js, and the
+    // value must still come from a resolver-exported carrier, never a literal.
+    const effortEmitters = dispatchEmitterBlocks(txt);
+    assert(effortEmitters.length > 0
+      && effortEmitters.every((block) => /--effort "\$\{?(?:EFFORT|BATCH_EFFORT)/.test(block.text)),
+    `${label}: dispatch event includes effort`, 'effort field missing from event');
+    assert(effortEmitters.every((block) => /--effort-reason "\$\{?(?:EFFORT_REASON|BATCH_EFFORT_REASON)/.test(block.text)),
+      `${label}: dispatch event includes effort_reason`, 'effort_reason field missing');
   }
 
   // Effort logic (frontmatter axis + model-cap clamp) now lives in the shared resolver.
@@ -2599,7 +2631,7 @@ function smokeModelAlias() {
     for (const [name, content] of Object.entries(files)) {
       assert(content.includes('forge-model-alias.js'),
         `${name} calls forge-model-alias.js`, 'not found');
-      assert(content.includes('model_applied'),
+      assert(content.includes('model_applied') || content.includes('--model-applied'),
         `${name} records model_applied`, 'not found');
       assert(!/indexOf\(['"]fable['"]\)/.test(content),
         `${name} does not reimplement the alias map inline`, 'suspicious inline map reimplementation found');
@@ -4767,8 +4799,10 @@ function smokeReviewPairingWiring() {
 
   // (e9) discriminadores slice+milestone nos 5 emission sites (3 forge-auto + 2 forge-next).
   const discNeedle = '\\"slice\\":\\"{S##}\\",\\"milestone\\":\\"${RUN_ID:-{M###}}\\"';
-  const autoHits = countOccur(autoMd, discNeedle);
-  const nextHits = countOccur(nextMd, discNeedle);
+  // Same discriminators in the canonical-emitter form (PR #164): flags, not keys.
+  const discFlags = '--slice "{S##}" --milestone "${RUN_ID:-{M###}}"';
+  const autoHits = countOccur(autoMd, discNeedle) + countOccur(autoMd, discFlags);
+  const nextHits = countOccur(nextMd, discNeedle) + countOccur(nextMd, discFlags);
   assert(autoHits >= 3,
     '(e9) forge-auto: discriminadores slice+milestone nos 3 execute-task dispatch emits', `hits=${autoHits}`);
   assert(nextHits >= 2,
@@ -7169,8 +7203,10 @@ function smokeDispatchResolve() {
     // --shell-exports eval; SHELL_EXPORT_MAP owns the .dispatch_engine mapping.
     assert(source.includes('forge-dispatch-resolve.js" --shell-exports)"'),
       `(j) ${rel}: extracts DISPATCH_ENGINE from ROUTE_JSON .dispatch_engine`);
-    assert(/DISPATCH_ENGINE == codex/.test(source),
-      `(j) ${rel}: gates a sidecar branch on DISPATCH_ENGINE == codex`);
+    // Adapter selection keys on the engine that will actually run the worker.
+    // DISPATCH_ENGINE is model-family telemetry and must gate no branch.
+    assert(/RESOLVED_WORKER_ENGINE (?:==|=) "?codex/.test(source),
+      `(j) ${rel}: gates a sidecar branch on RESOLVED_WORKER_ENGINE == codex`);
     // The old fuzzy trigger must be absent from every branch/trigger site. Prose that
     // legitimately cites the telemetry family value engine:"codex" is not matched by
     // this anchor (it targets the `== codex` shell/branch condition specifically).
@@ -11430,13 +11466,16 @@ function smokeIsolationSvnAndVcsTelemetry() {
   const skills = [
     ['forge-auto', 'forge-auto/SKILL.md', 4],
     ['forge-next', 'forge-next/SKILL.md', 3],
-    ['forge-task', 'forge-task/SKILL.md', 2],
+    ['forge-task', 'forge-task/SKILL.md', 3],
   ];
   for (const [name, rel, expected] of skills) {
     const source = sidecarSurface(path.join(path.dirname(SCRIPTS), 'skills', rel));  // sidecar surface (2026-08-23)
-    const lines = source.split(/\r?\n/).filter(line => line.includes('\\"event\\":\\"dispatch\\"'));
-    assert(lines.length === expected && lines.every(line => line.includes('\\"vcs\\":')),
-      `(d) ${name} has vcs on all ${expected} dispatch event emitters`, JSON.stringify(lines));
+    // Legacy shell emitters carry the JSON key; canonical ones pass --vcs to the
+    // single emitter. Still per-emitter, so one forgotten site alone turns red.
+    const blocks = dispatchEmitterBlocks(source);
+    assert(blocks.length === expected
+      && blocks.every(block => (block.kind === 'canonical' ? /--vcs /.test(block.text) : block.text.includes('\\"vcs\\":'))),
+    `(d) ${name} has vcs on all ${expected} dispatch event emitters`, JSON.stringify(blocks.map(block => block.text)));
   }
   const dispatchSpec = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'shared', 'forge-dispatch.md'), 'utf8');
   assert(/\| `vcs` \| string \| `detectVcs\(CODE_DIR\)` \| `"git"` \|/.test(dispatchSpec)
@@ -11452,7 +11491,7 @@ function smokeIsolationSvnAndVcsTelemetry() {
   const dispatchVcsMirrors = [
     ['forge-auto', 'forge-auto/SKILL.md', 4],
     ['forge-next', 'forge-next/SKILL.md', 3],
-    ['forge-task', 'forge-task/SKILL.md', 2],
+    ['forge-task', 'forge-task/SKILL.md', 3],
   ];
   const dispatchVcsLine = 'DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")';
   for (const [name, rel, expected] of dispatchVcsMirrors) {
@@ -15472,7 +15511,7 @@ function smokeInertRoutes() {
     + 'forge-task declarada em vez de silenciosa');
 }
 
-// ── Section 100: o campo `transport` chega aos 9 emissores ────────────────
+// ── Section 100: o campo `transport` chega aos 10 emissores ────────────────
 // Um campo decidido num helper e não emitido pelo emissor é o defeito de classe
 // da TASK-021: a decisão existe, o consumidor nunca a vê. Aqui a prova é feita
 // com LEITURA IN-PROCESS (`fs`), NUNCA com `grep` de shell — o `grep` deste
@@ -15480,7 +15519,7 @@ function smokeInertRoutes() {
 // e ainda assim reportar sucesso (achado da S06).
 // Três armadilhas medidas, cada uma com controle positivo (o assert é rodado
 // contra uma cópia MUTADA em memória, provando que ele morde de verdade):
-//   (a) censo — exatamente 9 linhas de emissor, TODAS com `transport`. Contagem
+//   (a) censo — exatamente 10 emissores, TODAS com `transport`. Contagem
 //       e predicado juntos: acrescentar um 10º emissor sem o campo falha.
 //   (b) fence — nos sites 2 e 4 (Branch D) o fence do `echo` precisa RESOLVER
 //       $RESULT_FILE ele mesmo; estado de shell não sobrevive à fronteira do
@@ -15488,7 +15527,7 @@ function smokeInertRoutes() {
 //   (c) sem default otimista — `:-app-server` (ou qualquer default que não seja
 //       `unknown`) num fence de emissor transforma "não observei" em "observei".
 function smokeTransportField() {
-  process.stdout.write('\n▸ Section 100: o campo `transport` chega aos 9 emissores\n');
+  process.stdout.write('\n▸ Section 100: o campo `transport` chega aos 10 emissores\n');
   const ROOT = path.dirname(SCRIPTS);
   const FILES = [
     path.join(ROOT, 'skills', 'forge-auto', 'SKILL.md'),
@@ -15497,29 +15536,32 @@ function smokeTransportField() {
   ];
   const EMITTER = '\\"event\\":\\"dispatch\\"';
 
-  const emitterLines = (text) => text.split('\n').filter(l => l.includes(EMITTER) && l.includes('echo '));
 
-  // ── (a) censo: 9 emissores, todos com transport ──────────────────────────
+  // ── (a) censo: 10 emissores, todos com transport ─────────────────────────
   const all = [];
-  for (const file of FILES) all.push(...emitterLines(sidecarSurface(file)).map(line => ({ file, line })));  // sidecar surface (2026-08-23)
-  assert(all.length === 9,
-    `(a) exatamente 9 linhas de emissor de dispatch nos três SKILL.md (achadas: ${all.length})`,
+  for (const file of FILES) {
+    // sidecar surface (2026-08-23)
+    all.push(...dispatchEmitterBlocks(sidecarSurface(file)).map(block => ({ file, line: block.text, kind: block.kind })));
+  }
+  assert(all.length === 10,
+    `(a) exatamente 10 emissores de dispatch nos três SKILL.md + espelhos (achados: ${all.length})`,
     all.map(e => path.basename(path.dirname(e.file))).join(', '));
   // Case-insensitive on purpose: the codex emitters carry the field through the
-  // shell variable ${TRANSPORT_TAIL}, the claude ones through the literal key.
+  // shell variable ${TRANSPORT_TAIL} or the --transport flag, the claude ones
+  // through the literal key or the in-process flag.
   const withoutField = all.filter(e => !/transport/i.test(e.line));
   assert(withoutField.length === 0,
-    '(a) TODOS os 9 emissores carregam `transport` — contagem e predicado juntos, para que um 10º emissor sem o campo falhe',
+    '(a) TODOS os 10 emissores carregam `transport` — contagem e predicado juntos, para que um 11º emissor sem o campo falhe',
     `${withoutField.length} sem o campo`);
 
-  const claudeLines = all.filter(e => e.line.includes('\\"transport\\":\\"in-process\\"'));
-  const codexLines = all.filter(e => e.line.includes('${TRANSPORT_TAIL}'));
-  assert(claudeLines.length === 4,
-    `(a) os 4 emissores do caminho claude carregam a constante in-process (achados: ${claudeLines.length})`);
+  const claudeLines = all.filter(e => e.line.includes('\\"transport\\":\\"in-process\\"') || /--transport in-process/.test(e.line));
+  const codexLines = all.filter(e => e.line.includes('${TRANSPORT_TAIL}') || /--transport "\$\{TRANSPORT:-unknown\}"/.test(e.line));
+  assert(claudeLines.length === 5,
+    `(a) os 5 emissores do caminho claude carregam a constante in-process (achados: ${claudeLines.length})`);
   assert(codexLines.length === 5,
-    `(a) os 5 emissores do caminho codex carregam o TRANSPORT_TAIL derivado do result file (achados: ${codexLines.length})`);
+    `(a) os 5 emissores do caminho codex derivam o transporte do result file (achados: ${codexLines.length})`);
   assert(claudeLines.length + codexLines.length === all.length,
-    '(a) o censo PARTICIONA os 9 emissores — nenhum fica fora das duas classes');
+    '(a) o censo PARTICIONA os 10 emissores — nenhum fica fora das duas classes');
   for (const e of claudeLines) {
     assert(!e.line.includes('transport_version') && !e.line.includes('transport_reason'),
       '(a) o caminho claude NÃO emite transport_version nem transport_reason — versão só faz sentido com processo remoto, razão só com kind unknown',
@@ -15561,8 +15603,8 @@ function smokeTransportField() {
   // este repo já pagou três vezes. Cada predicado é rodado contra uma cópia
   // MUTADA que deveria reprová-lo.
   const autoText = sidecarSurface(FILES[0]);  // sidecar surface (2026-08-23)
-  const strippedField = autoText.replace(/,\$\{TRANSPORT_TAIL\}/g, '').replace(/,\\"transport\\":\\"in-process\\"/g, '');
-  assert(emitterLines(strippedField).some(l => !/transport/i.test(l)),
+  const strippedField = autoText.replace(/,\$\{TRANSPORT_TAIL\}/g, '').replace(/,\\"transport\\":\\"in-process\\"/g, '').replace(/ --transport [^\s\\]+/g, '');
+  assert(dispatchEmitterBlocks(strippedField).some(block => !/transport/i.test(block.text)),
     '(controle) o predicado do censo REPROVA uma cópia em que o campo foi removido');
   const strippedFence = autoText.replace(/XLLM_STATE=\$\(node "\$FORGE_SCRIPTS_DIR\/forge-xllm-state\.js" --mode read[^\n]*\n/g, '');
   const brokenFence = fenceContaining(strippedFence, 'plan-slice/${S##}');
@@ -15597,7 +15639,7 @@ function smokeTransportField() {
   assert(/\(\) => \{ smokeTransportField\(\); \}/.test(mainBody),
     '(f) Section 100 está registrada em main() por closure — seção não-registrada é seção que some em silêncio');
 
-  pass('(final) Section 100: os 9 emissores de dispatch carregam `transport` (5 do codex derivados do result file, 4 do '
+  pass('(final) Section 100: os 9 emissores de dispatch carregam `transport` (5 do codex derivados do result file, 5 do '
     + 'claude com a constante in-process e sem os companheiros), os fences da Branch D re-resolvem $RESULT_FILE neles '
     + 'mesmos, nenhum default de shell é otimista, o kind vem da presença do handshake, e a doc declara o significado da '
     + 'ausência — com controle positivo provando que cada predicado morde');
@@ -17631,16 +17673,27 @@ function smokeHostWorkerParityAcceptance() {
     assert(quadrantProblems(actualQuadrants).length === 0,
       '(B/S02) runtimeFields + composeRuntimePosture materialize the four default quadrants and hybrid posture');
 
+    // The FORGE_RUNTIME_ENFORCE escape was removed (PR #164 review): posture is a
+    // total function of the identity, so no environment can move the enforcing leg.
     const enforceBefore = process.env.FORGE_RUNTIME_ENFORCE;
     const enforcingRow = expectedQuadrants.find((row) => row.host === 'codex' && row.worker === 'claude');
-    const escapedEnforcement = materializeQuadrant(enforcingRow, { FORGE_RUNTIME_ENFORCE: '0' });
-    const escapedRows = actualQuadrants.map((row) => (
-      row.host === 'codex' && row.worker === 'claude' ? escapedEnforcement : row
+    const enforcedBaseline = JSON.stringify(materializeQuadrant(enforcingRow));
+    for (const value of ['0', '00', 'false', '', 'off']) {
+      const attempted = materializeQuadrant(enforcingRow, { FORGE_RUNTIME_ENFORCE: value });
+      assert(attempted.allowed === false && attempted.posture === 'enforce'
+        && JSON.stringify(attempted) === enforcedBaseline,
+        `(B/S02) FORGE_RUNTIME_ENFORCE=${JSON.stringify(value)} must not unlock codex->claude`,
+        JSON.stringify(attempted));
+    }
+    // POSITIVE CONTROL: the same detector still bites when the leg IS allowed, so
+    // the assertion above is not passing because the detector went blind.
+    const forgedAllowance = actualQuadrants.map((row) => (
+      row.host === 'codex' && row.worker === 'claude' ? { ...row, allowed: true } : row
     ));
-    assert(quadrantProblems(escapedRows).includes('codex->claude:allowed'),
-      '(B/S02) POSITIVE CONTROL: the same default-table detector rejects the explicit enforcement escape');
+    assert(quadrantProblems(forgedAllowance).includes('codex->claude:allowed'),
+      '(B/S02) POSITIVE CONTROL: the default-table detector rejects an allowed codex->claude leg');
     assert(process.env.FORGE_RUNTIME_ENFORCE === enforceBefore,
-      '(B/S02) the enforcement control uses an explicit dependency and never mutates process.env');
+      '(B/S02) the posture probe never mutates process.env');
 
     // ── C. S03 — account-backed Claude adapter and credential boundary ────
     const TOKEN_ENV = forgeAccounts.TOKEN_ENV;
@@ -17824,18 +17877,29 @@ function smokeHostWorkerParityAcceptance() {
     const operationalEmitters = sourceGuard.SOURCE_REGISTRY
       .filter((entry) => entry.kind === 'emitter' && entry.classification === 'operational');
     const emitterProblems = [];
+    let canonicalEmitters = 0;
     for (const entry of operationalEmitters) {
       const candidate = discoveredByIdentity.get(sourceGuard.identity(entry));
       if (!candidate) { emitterProblems.push(`${entry.id}:absent`); continue; }
+      if (sourceGuard.isCanonicalEmitter(candidate)) {
+        // The canonical emitter renders the posture axes itself (and refuses to
+        // write a line that cannot name them — forge-dispatch-event.test.js). The
+        // call site must hand it the resolver contract, the unit, and the log.
+        for (const flag of ['--route-json', '--unit', '--events']) {
+          if (!candidate.context.includes(flag)) emitterProblems.push(`${entry.id}:${flag}`);
+        }
+        canonicalEmitters += 1;
+        continue;
+      }
       for (const field of ['host_runtime', 'worker_mode', 'dispatch_allowed']) {
         if (!new RegExp(`(?:\\\\?"${field}\\\\?"|${field})\\s*:`).test(candidate.context)) {
           emitterProblems.push(`${entry.id}:${field}`);
         }
       }
     }
-    assert(operationalEmitters.length > 0 && emitterProblems.length === 0,
-      '(E/S05) every discovered operational emitter carries host_runtime, worker_mode and dispatch_allowed',
-      emitterProblems.join(', '));
+    assert(operationalEmitters.length > 0 && emitterProblems.length === 0 && canonicalEmitters === 6,
+      '(E/S05) every discovered operational emitter carries the posture axes: the six skill sites through the single emitter, the mirrors inline',
+      `${emitterProblems.join(', ')} | canonical=${canonicalEmitters}`);
 
     const removedRegistryEntry = sourceGuard.SOURCE_REGISTRY[0];
     const registryMutation = sourceGuard.SOURCE_REGISTRY.slice(1);

@@ -8,7 +8,7 @@
 > sidecar. Canonical contract: `shared/forge-dispatch.md § Worker Engine Routing`.
 > forge-next is the interactive boundary — this variant keeps the TTY pause-ask gates.
 
-**Branch codex — sidecar (`$WORKER_MODE == sidecar` && `$DISPATCH_ENGINE == codex` && `$unit_type == execute-task`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. When this branch fires, the native machinery below (timeline task, token telemetry, guarded worker dispatch) is **replaced** by the detached adapter + polling; on any failure it resets and follows the named `worker-engine-fallback` path. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
+**Branch codex — sidecar (`$WORKER_MODE == sidecar` && `$RESOLVED_WORKER_ENGINE == codex` && `$unit_type == execute-task`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. When this branch fires, the native machinery below (timeline task, token telemetry, guarded worker dispatch) is **replaced** by the detached adapter + polling; on any failure it resets and follows the named `worker-engine-fallback` path. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
 
 Entry is fail-closed: `DISPATCH_ALLOWED` is already `true` before this file is
 loaded. A false verdict prints `DISPATCH_REASON_CODE` + `DISPATCH_HINT` and
@@ -242,7 +242,7 @@ fi
 
 ---
 
-**Branch D — sidecar codex plan (`$WORKER_MODE == sidecar` && `$DISPATCH_ENGINE == codex` && `$unit_type == plan-slice`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine — Branch D`. Read-only twin of Branch codex above: codex only *reads* the codebase + planning context and returns markdown plan content in the result JSON — it never writes `.gsd/**`, so this branch has **no dirty-tree guard, no `START_SHA` capture, no reset**. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
+**Branch D — sidecar codex plan (`$WORKER_MODE == sidecar` && `$RESOLVED_WORKER_ENGINE == codex` && `$unit_type == plan-slice`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine — Branch D`. Read-only twin of Branch codex above: codex only *reads* the codebase + planning context and returns markdown plan content in the result JSON — it never writes `.gsd/**`, so this branch has **no dirty-tree guard, no `START_SHA` capture, no reset**. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
 
 0. **Increment the sidecar attempt counter + cap check FIRST (R3).** State is **fresh per attempt** (BLOCKER invariant #1 + #3): on a cross-engine chain with multiple codex members the `-attempt-$N` suffix keeps each attempt's state distinct, and `SIDECAR_ATTEMPT` is hard-capped by the count of `engine == codex` members in `$ROUTE_JSON.chain` (≤3). When the cap is exceeded, **skip steps 1–4 entirely** (no plan-context assembly, no state/result-file allocation, no sidecar launch) and go DIRECTLY to the **Fallback** block below:
 ```bash

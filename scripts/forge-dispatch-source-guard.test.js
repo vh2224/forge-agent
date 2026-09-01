@@ -292,7 +292,7 @@ test('a classified dispatch emitter missing worker_mode is structurally rejected
   appendSeparated(root, relative,
     'echo "{\\"event\\":\\"dispatch\\",\\"host_runtime\\":\\"${HOST_RUNTIME}\\",\\"dispatch_allowed\\":${DISPATCH_ALLOWED}}" >> events.jsonl');
   const item = discovered(root, (candidate) => (
-    candidate.kind === 'emitter' && candidate.evidence.includes('events.jsonl') && !candidate.evidence.includes('worker_mode')
+    candidate.path === relative && candidate.kind === 'emitter' && candidate.evidence.includes('events.jsonl') && !candidate.evidence.includes('worker_mode')
   ));
   const registry = [...guard.SOURCE_REGISTRY, registerCandidate(item)];
   const report = guard.audit({ root, registry });
@@ -394,7 +394,7 @@ test('exact host argv from every canonical rendered resolver block resolves to t
   }
 }));
 
-test('real runtime refusal, enforcement escape, and codex-native advisory remain distinct', () => withFixture((fixture) => {
+test('the real runtime refusal is unconditional and distinct from a codex-native advisory', () => withFixture((fixture) => {
   const refused = runPosture('codex', 'claude', fixture);
   assert.strictEqual(refused.dispatch_decision, 'refuse');
   assert.strictEqual(refused.dispatch_allowed, false);
@@ -402,10 +402,10 @@ test('real runtime refusal, enforcement escape, and codex-native advisory remain
   assert.match(refused.dispatch_hint, /worker Codex roteável/);
   assert.match(refused.dispatch_hint, /host Claude/);
 
-  const escaped = runPosture('codex', 'claude', fixture, cleanRuntimeEnvironment({ FORGE_RUNTIME_ENFORCE: '0' }));
-  assert.strictEqual(escaped.dispatch_decision, 'advisory');
-  assert.strictEqual(escaped.dispatch_allowed, true);
-  assert.strictEqual(escaped.dispatch_posture, 'enforce');
+  // The FORGE_RUNTIME_ENFORCE escape was removed: setting it must change nothing
+  // in a real spawned resolver process.
+  const escapeAttempt = runPosture('codex', 'claude', fixture, cleanRuntimeEnvironment({ FORGE_RUNTIME_ENFORCE: '0' }));
+  assert.deepStrictEqual(escapeAttempt, refused);
 
   const native = runPosture('codex', 'codex', fixture);
   assert.strictEqual(native.host_runtime, 'codex');
@@ -464,15 +464,29 @@ test('every operational adapter carries host runtime and one sidecar declaration
 test('every operational emitter materializes string/string/boolean runtime fields', () => {
   const emitters = guard.SOURCE_REGISTRY.filter((entry) => entry.kind === 'emitter' && entry.classification === 'operational');
   assert(emitters.length > 0);
+  let canonical = 0;
   for (const entry of emitters) {
     const candidate = realByIdentity.get(guard.identity(entry));
     assert(candidate, entry.id);
+    if (guard.isCanonicalEmitter(candidate)) {
+      // The canonical emitter renders the JSON in scripts/forge-dispatch-event.js
+      // (shape asserted by forge-dispatch-event.test.js). The call site only has
+      // to hand it the resolver contract, the unit and the log it appends to.
+      canonical += 1;
+      for (const flag of ['--route-json', '--unit', '--events']) {
+        assert(candidate.context.includes(flag), `${entry.id} lacks ${flag}`);
+      }
+      continue;
+    }
     const event = materializeEmitter(candidate);
     assert.strictEqual(event.event, 'dispatch', entry.id);
     assert.strictEqual(typeof event.host_runtime, 'string', entry.id);
     assert.strictEqual(typeof event.worker_mode, 'string', entry.id);
     assert.strictEqual(typeof event.dispatch_allowed, 'boolean', entry.id);
   }
+  // Every dispatch event written by the three skills now comes from the one
+  // emitter; if this drops to zero a hand-written line came back.
+  assert.strictEqual(canonical, 6, `canonical emitter call sites: ${canonical}`);
 });
 
 test('Claude golden drift before the repin is exactly skills and current report is fully pinned', () => {

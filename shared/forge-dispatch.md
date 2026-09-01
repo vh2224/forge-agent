@@ -1213,7 +1213,10 @@ that can begin worker work**:
    `DISPATCH_HINT`, but the hint does not change routing.
 3. Branch on `WORKER_MODE`. `native` reaches the host-native agent mechanism;
    in the Codex projection that mechanism is `spawn_agent(`. `sidecar` reaches
-   the external adapter selected by `RESOLVED_WORKER_ENGINE`/`DISPATCH_ENGINE`.
+   the external adapter selected by `RESOLVED_WORKER_ENGINE` — the engine that
+   will actually run the worker. `DISPATCH_ENGINE` is model-family telemetry and
+   selects no branch: on an allowed leg it may name a different family than the
+   resolved worker, and the resolved worker is the one that runs.
 4. The only `native → sidecar` transition is the named native result
    `not-spawned`. It may happen **once**, for the **same** resolved worker and
    therefore the same family as the native host. Before loading the adapter,
@@ -1227,9 +1230,11 @@ In the Codex projection this is specifically
 attempted first, and only its named `not-spawned` result can enter the Codex
 sidecar. It is never a cross-family recovery or a way around a refusal.
 
-`FORGE_RUNTIME_ENFORCE=0` is interpreted once inside the guard composed by the
-resolver. Consumers **must never re-read it** or reproduce the guard's leg
-table: the exported `DISPATCH_ALLOWED`, `DISPATCH_DECISION`,
+Posture has **no environment escape**. The guard composed by the resolver is a
+total function of the runtime identity: an `enforce` leg refuses on every host,
+in every shell, and no variable, flag or caller argument turns that refusal into
+an allowance. Consumers must never reproduce the guard's leg table nor invent a
+bypass: the exported `DISPATCH_ALLOWED`, `DISPATCH_DECISION`,
 `DISPATCH_REASON_CODE`, and `DISPATCH_HINT` are the complete verdict.
 
 A refused runtime contract never silently selects Claude (or another host). In particular,
@@ -2226,6 +2231,8 @@ The `dispatch` event schema (defined in Token Telemetry above) is extended addit
 ```
 
 **Compatibility:** Existing S03/M006/M005 readers that parse `dispatch` events by known field names and ignore unknown fields continue to work without modification. The `tier`/`reason` (M002), `engine` (M005), `slice`/`milestone` (M006), `domain`/`route_source`/`chain_len` (M007 S02), and `host_runtime`/`worker_mode`/`dispatch_allowed` runtime fields are all present on every new dispatch event; older events in the log (which lack some of these fields) are valid — readers must treat any missing field as `undefined`, not as an error. `domain`/`route_source`/`chain_len` come from the single `forge-routing.js` call (`domain_used`, `source`, `chain.length`).
+
+Since PR #164 every `dispatch` event written by `forge-auto`, `forge-next` and `forge-task` — including the parallel batch and the review-fix paths — is rendered by `scripts/forge-dispatch-event.js`, never by a hand-written `echo`. The call site passes the resolver contract (`--route-json "$ROUTE_JSON"`), the unit and the target log; the emitter reads host/worker/posture straight from that contract, so the logged verdict cannot drift from the resolved one. It appends five additive axes to every line — `resolved_worker_engine`, `leg` (`host→resolved`), `dispatch_reason_code`, `dispatch_posture`, `dispatch_decision` — which is what makes a refused `codex→claude` dispatch distinguishable from a routine `codex→codex` one in `events.jsonl` after the run. A render that cannot name its posture is refused with exit 2 instead of writing a posture-blind line. The sidecar mirrors (`shared/forge-sidecar-auto.md`, `shared/forge-sidecar-next.md`) still write their Branch C/D lines inline; `scripts/forge-dispatch-source-guard.js` registers both forms and checks each one.
 
 #### Worked examples
 

@@ -927,16 +927,9 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 2                         # terminal task boundary; no timeline, prompt, adapter, native worker, or inline fallback
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-    printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
-      "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
-      "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-  else
-    printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
-  fi
-  # A non-empty $DISPATCH_SUPPRESSED_ACTION is the one advisory that must be logged: an enforced
-  # refusal was skipped. Carry suppressed_action/reason_code/posture/leg into the dispatch event.
-  # FORGE_RUNTIME_ENFORCE=0 is the real resolver escape: observe only, never mutate the resolved route.
+  printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  # Advisory is observation only: never mutate the resolved route. There is no environment escape —
+  # an enforced leg refuses unconditionally and never reaches this branch.
 fi
 # $ROUTE_JSON.chain carries forward unmodified — consumed by Branch codex (SIDECAR_MODEL) and by
 # the Failure Taxonomy via `forge-routing.js ... --next-after "$MODEL_ID"`.
@@ -954,9 +947,9 @@ case "$WORKER_MODE" in
     : # continue to the canonical native dispatch below
     ;;
   sidecar)
-    if [ "$DISPATCH_ENGINE" != "codex" ]; then
+    if [ "$RESOLVED_WORKER_ENGINE" != "codex" ]; then
       DISPATCH_REASON_CODE="unsupported-sidecar-unit"
-      DISPATCH_HINT="forge-task não possui adapter sidecar para $DISPATCH_ENGINE; ajuste o contrato runtime e retome $TASK_ID."
+      DISPATCH_HINT="forge-task não possui adapter sidecar para $RESOLVED_WORKER_ENGINE; ajuste o contrato runtime e retome $TASK_ID."
       printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
       exit 2
     fi
@@ -1003,7 +996,7 @@ fi
 ```
 **Never assign to `WORKTREE_DIR` here.** An empty `WORKTREE_DIR` is the "every repo failed" STOP signal of the Isolation rules — a sidecar refusal must never be mistaken for an isolation failure. The two `CODE_DIR=` lines above make the resolved value reach the bash consumers deterministically, without depending on model substitution: status `ok` → the attributed worktree; refusal with a non-empty `multi_repo_root` → the run root holding every worktree, so a genuinely multi-repo unit stops landing in whichever repo sorted first (`multi_repo_root` is empty in a single-repo workspace, which keeps the bootstrap value).
 
-**Branch codex — sidecar (`$WORKER_MODE == sidecar`, adapter selected by `$DISPATCH_ENGINE == codex`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. Delivery entered this branch only through the allowed resolver verdict above (or the one-shot declared native transition below); model-family metadata cannot enter it. When this branch fires, the native machinery below (timeline task, guarded `Agent()` dispatch) is **replaced** by the detached adapter + polling; on a failure its verified reset may rejoin the native machinery only through the named fallback boundary. When `$WORKER_MODE == native`, skip this branch entirely and proceed with the canonical host-native dispatch below.
+**Branch codex — sidecar (`$WORKER_MODE == sidecar`, adapter selected by `$RESOLVED_WORKER_ENGINE == codex`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. Delivery entered this branch only through the allowed resolver verdict above (or the one-shot declared native transition below); model-family metadata cannot enter it. When this branch fires, the native machinery below (timeline task, guarded `Agent()` dispatch) is **replaced** by the detached adapter + polling; on a failure its verified reset may rejoin the native machinery only through the named fallback boundary. When `$WORKER_MODE == native`, skip this branch entirely and proceed with the canonical host-native dispatch below.
 
 1. **Capture `START_SHA` + the pre-dirty snapshot in ONE atomic write, via the surgical-reset helper.** `--state-init` records `{attempt, start_sha, pre_dirty:[{path,hash}], reason, result_file, code_dir}` in the SAME write (`.gsd/**` excluded), so the snapshot survives the poll loop / an auto-compact (a snapshot in a shell var is lost the moment the process crosses a Bash-tool boundary). Branch C spans multiple Bash tool invocations, so shell vars do NOT survive — the state file (under `WORKING_DIR/.gsd`, never `CODE_DIR`) is the durable carrier. The loose task uses a single, unsuffixed state file (no `-attempt-N` — a `/forge-task` unit dispatches the sidecar once). The success AND fallback blocks re-read it from disk:
 ```bash
@@ -1082,7 +1075,14 @@ TRANSPORT_REASON=$(node "$FORGE_SCRIPTS_DIR/forge-transport.js" --result "$RESUL
 TRANSPORT_TAIL="\"transport\":\"${TRANSPORT:-unknown}\""
 [ -n "$TRANSPORT_VERSION" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_version\":\"$TRANSPORT_VERSION\""
 [ -n "$TRANSPORT_REASON" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_reason\":\"$TRANSPORT_REASON\""
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/{TASK_ID}\",\"model\":\"${CODEX_MODEL_LABEL}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"tier\":\"${TIER}\",\"reason\":\"${ENGINE_REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"codex\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"milestone\":\"\",\"input_tokens\":0,\"output_tokens\":0,\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",${TRANSPORT_TAIL}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+  --unit "execute-task/{TASK_ID}" --model "${CODEX_MODEL_LABEL}" --tier "$TIER" \
+  --reason "$ENGINE_REASON" --effort "$EFFORT" --effort-reason "$EFFORT_REASON" \
+  --engine codex --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
+  --milestone "" --input-tokens 0 --output-tokens 0 --model-applied "$MODEL_ALIAS" \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport "${TRANSPORT:-unknown}" \
+  --transport-version "$TRANSPORT_VERSION" --transport-reason "$TRANSPORT_REASON" \
+  --events "$WORKING_DIR/.gsd/forge/events.jsonl"
 # → proceed to "Process result" below. Do NOT run the Claude machinery below.
 ```
 
@@ -1311,7 +1311,13 @@ Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
 mkdir -p "$WORKING_DIR/.gsd/forge/"
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/{TASK_ID}\",\"model\":\"${MODEL_ID}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"${DISPATCH_ENGINE:-claude}\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"milestone\":\"\",\"input_tokens\":${INPUT_TOKENS:-0},\"output_tokens\":${OUTPUT_TOKENS:-0},\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+  --unit "execute-task/{TASK_ID}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
+  --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${DISPATCH_ENGINE:-claude}" \
+  --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
+  --milestone "" --input-tokens "${INPUT_TOKENS:-0}" --output-tokens "${OUTPUT_TOKENS:-0}" \
+  --model-applied "$MODEL_ALIAS" --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --events "$WORKING_DIR/.gsd/forge/events.jsonl"
 ```
 
 **Contract miss gate (Layer 0) — BEFORE parsing any status.** Classify the return rather than eyeballing it:
@@ -1455,13 +1461,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
       else
         RF_RUNTIME_READY=true
         if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
-          if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-            printf '⚠ [suppressed:%s] %s: %s (leg=%s→%s posture=%s)\n' \
-              "$DISPATCH_SUPPRESSED_ACTION" "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" \
-              "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-          else
-            printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
-          fi
+          printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
         fi
       fi
     fi
@@ -1481,9 +1481,14 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
   After a successful native fixer, its dispatch event records the captured gate axes with no invented milestone or slice:
 
   ```bash
-  printf '{"ts":"%s","event":"dispatch","unit":"review-fix/%s","model":"%s","host_runtime":"%s","worker_mode":"%s","dispatch_allowed":%s,"engine":"%s","milestone":"","transport":"in-process"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{TASK_ID}" "${RF_ALIAS:-default}" "$RF_HOST_RUNTIME" "$RF_WORKER_MODE" "$RF_DISPATCH_ALLOWED" "${RF_DISPATCH_ENGINE:-claude}" \
-    >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+  # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
+  DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
+  node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$RF_ROUTE_JSON" \
+    --unit "review-fix/{TASK_ID}" --model "${RF_ALIAS:-default}" \
+    --host-runtime "$RF_HOST_RUNTIME" --worker-mode "$RF_WORKER_MODE" \
+    --dispatch-allowed "$RF_DISPATCH_ALLOWED" --engine "${RF_DISPATCH_ENGINE:-claude}" \
+    --milestone "" --transport in-process --vcs "${DISPATCH_VCS:-unknown}" \
+    --events "$WORKING_DIR/.gsd/forge/events.jsonl"
   ```
 - **OPEN items (Step 7b):** for each, `AskUserQuestion` live (`Manter` / `Refatorar agora` — dispatches a `review-fix` unit / `Criar follow-up`) and record the decision.
   - `Criar follow-up` → create an item per `shared/forge-review.md § Item capture`: `source: review/{TASK_ID}/{R#}`, `origin: auto`, `status: inbox`, `file`/`sha` from the objection's `path:line` + HEAD sha.

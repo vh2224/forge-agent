@@ -507,10 +507,6 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 1                         # terminal loop boundary; no worker launch or inline fallback
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ]; then
-  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-    printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
-      "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-  fi
   printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
   # Advisory is observation only: HOST_RUNTIME/WORKER_MODE/routing fields stay unchanged.
 fi
@@ -593,10 +589,6 @@ for ENTRY in "${BATCH[@]}"; do
     exit 1                       # whole auto run stops; no partial native batch may launch
   fi
   if [ "$DISPATCH_DECISION" = "advisory" ]; then
-    if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-      printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
-        "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-    fi
     printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
     # Advisory never mutates this task's resolved route.
   fi
@@ -809,10 +801,6 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 1                     # enforcing runtime refusal stops auto; review is not launched inline
      fi
      if [ "$DISPATCH_DECISION" = "advisory" ]; then
-       if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-         printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
-           "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-       fi
        printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
        # Advisory continues with the exact resolved host/mode/model fields.
      fi
@@ -1171,8 +1159,8 @@ Do NOT read artifact files here — templates now pass paths; workers read their
 #### 4. Dispatch
 
 **Branch on BATCH size and resolved worker mode:**
-- `WORKER_MODE == sidecar` AND `unit_type == execute-task` AND `BATCH.length == 1`: load **Branch C — sidecar** below; `DISPATCH_ENGINE` chooses its adapter, never whether a sidecar exists.
-- `WORKER_MODE == sidecar` AND `unit_type == plan-slice`: load **Branch D — sidecar plan** below (read-only); again, `DISPATCH_ENGINE` only chooses the adapter.
+- `WORKER_MODE == sidecar` AND `unit_type == execute-task` AND `BATCH.length == 1` AND `RESOLVED_WORKER_ENGINE == codex`: load **Branch C — sidecar** below. `RESOLVED_WORKER_ENGINE` — the engine that will actually run the worker — chooses the adapter, never whether a sidecar exists; `DISPATCH_ENGINE` is model-family telemetry and selects no branch.
+- `WORKER_MODE == sidecar` AND `unit_type == plan-slice` AND `RESOLVED_WORKER_ENGINE == codex`: load **Branch D — sidecar plan** below (read-only); again, `RESOLVED_WORKER_ENGINE` only chooses the adapter.
 - `WORKER_MODE == native` AND `BATCH.length == 1`: follow the **single-task native flow** below. The source form is canonical `Agent()` on Claude and is projected to `spawn_agent()` by the Codex renderer.
 - `BATCH.length > 1` (execute-task only, when `forge-parallelism.js` returned `mode: parallel`): use each task's stored `BATCH_WORKER_MODE`. Dispatch all `native` entries through the projected native batch mechanism; handle `sidecar` entries serially through the loaded mirror. Never mix sidecars into a native batch and never branch from the scalar route resolved last.
 
@@ -1337,10 +1325,16 @@ Then:
 ```bash
 OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
-MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"${ENGINE:-claude}\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS},\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+  --unit "${unitType}/${unitId}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
+  --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
+  --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
+  --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \
+  --output-tokens "$OUTPUT_TOKENS" --model-applied "$MODEL_ALIAS" \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --events .gsd/forge/events.jsonl
 ```
 
 **Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
@@ -1466,7 +1460,20 @@ for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
   OUTPUT_TOKENS_CURRENT=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "${RESULT_BY_TASK[$ENTRY_ID]}")
   # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
   DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/${ENTRY_ID}\",\"model\":\"${BATCH_MODEL_ID[$ENTRY_ID]}\",\"host_runtime\":\"${BATCH_HOST_RUNTIME[$ENTRY_ID]}\",\"worker_mode\":\"${BATCH_WORKER_MODE[$ENTRY_ID]}\",\"dispatch_allowed\":${BATCH_DISPATCH_ALLOWED[$ENTRY_ID]},\"tier\":\"${BATCH_TIER[$ENTRY_ID]}\",\"reason\":\"${BATCH_REASON[$ENTRY_ID]}\",\"effort\":\"${BATCH_EFFORT[$ENTRY_ID]}\",\"effort_reason\":\"${BATCH_EFFORT_REASON[$ENTRY_ID]}\",\"engine\":\"${BATCH_ENGINE[$ENTRY_ID]}\",\"domain\":\"${BATCH_DOMAIN_USED[$ENTRY_ID]}\",\"route_source\":\"${BATCH_ROUTE_SOURCE[$ENTRY_ID]}\",\"chain_len\":${BATCH_CHAIN_LEN[$ENTRY_ID]},\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":${INPUT_TOKENS_BY_TASK[$ENTRY_ID]},\"output_tokens\":${OUTPUT_TOKENS_CURRENT},\"batch_size\":${BATCH_LENGTH},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+  node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "${BATCH_ROUTE_JSON[$ENTRY_ID]}" \
+    --unit "execute-task/${ENTRY_ID}" --model "${BATCH_MODEL_ID[$ENTRY_ID]}" \
+    --host-runtime "${BATCH_HOST_RUNTIME[$ENTRY_ID]}" --worker-mode "${BATCH_WORKER_MODE[$ENTRY_ID]}" \
+    --resolved-worker-engine "${BATCH_RESOLVED_WORKER[$ENTRY_ID]}" \
+    --dispatch-allowed "${BATCH_DISPATCH_ALLOWED[$ENTRY_ID]}" \
+    --tier "${BATCH_TIER[$ENTRY_ID]}" --reason "${BATCH_REASON[$ENTRY_ID]}" \
+    --effort "${BATCH_EFFORT[$ENTRY_ID]}" --effort-reason "${BATCH_EFFORT_REASON[$ENTRY_ID]}" \
+    --engine "${BATCH_ENGINE[$ENTRY_ID]}" --domain "${BATCH_DOMAIN_USED[$ENTRY_ID]}" \
+    --route-source "${BATCH_ROUTE_SOURCE[$ENTRY_ID]}" --chain-len "${BATCH_CHAIN_LEN[$ENTRY_ID]}" \
+    --model-applied "${BATCH_MODEL_ALIAS[$ENTRY_ID]}" \
+    --slice "{S##}" --milestone "${RUN_ID:-{M###}}" \
+    --input-tokens "${INPUT_TOKENS_BY_TASK[$ENTRY_ID]}" --output-tokens "${OUTPUT_TOKENS_CURRENT}" \
+    --batch-size "${BATCH_LENGTH}" --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+    --events .gsd/forge/events.jsonl
 done
 ```
 
@@ -1567,10 +1574,6 @@ if [ "$DISPATCH_ALLOWED" != "true" ]; then
   exit 1
 fi
 if [ "$DISPATCH_DECISION" = "advisory" ]; then
-  if [ -n "$DISPATCH_SUPPRESSED_ACTION" ]; then
-    printf '⚠ [suppressed:%s] leg=%s→%s posture=%s\nFORGE_RUNTIME_ENFORCE=0 suprimiu uma recusa enforced — registre runtime-posture-suppressed em events.jsonl\n' \
-      "$DISPATCH_SUPPRESSED_ACTION" "$HOST_RUNTIME" "$RESOLVED_WORKER_ENGINE" "$DISPATCH_POSTURE" >&2
-  fi
   printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
 fi
 MODEL_ID="$NEXT_MODEL_ID"               # preserve the selected chain member after contract export

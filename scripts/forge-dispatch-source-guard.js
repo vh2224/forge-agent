@@ -92,6 +92,7 @@ const REGISTRY_ROWS = [
   ["shared-forge-dispatch-md-agent-484b335e2f28","shared/forge-dispatch.md","agent","excluded","sha256:484b335e2f285061defc179782ecc4009247b3021f111d9d2df745b5603826c1","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-dispatch-md-agent-9d84d1006747","shared/forge-dispatch.md","agent","excluded","sha256:9d84d1006747e186a51d5607440ddfded1c0358eb9af59c11f219ec56ba7fabe","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-dispatch-md-emitter-cc6b63db03ab","shared/forge-dispatch.md","emitter","operational","sha256:cc6b63db03ab28a04489b4edee7e6c0f81410859cb433128083e25aa6a148b58","",""],
+  ["shared-forge-dispatch-md-emitter-8a93cd213d3d","shared/forge-dispatch.md","emitter","excluded","sha256:8a93cd213d3d3f8a06748fc2fb752381a611f418e640127a8692e42250c07d9a","prose naming the canonical emitter script; it renders no event",""],
   ["shared-forge-dispatch-md-resolver-55f98edf015c","shared/forge-dispatch.md","resolver","excluded","sha256:55f98edf015caf5056d87fbf096db1d66b6f9c430fce2536a0432825d1879e49","documentation or explanatory resolver reference; it launches no process",""],
   ["shared-forge-dispatch-md-agent-b3f31f6c9ae1","shared/forge-dispatch.md","agent","excluded","sha256:b3f31f6c9ae1facb2da76a9afd734d2c2099fec4bd491849e331b60a3a29e18f","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-dispatch-md-resolver-01679ba2e209","shared/forge-dispatch.md","resolver","excluded","sha256:01679ba2e209570e28fd60b76c5c54dd92506976947ccd4c4cd39c8f0919c874","documentation or explanatory resolver reference; it launches no process",""],
@@ -135,7 +136,7 @@ const REGISTRY_ROWS = [
   ["shared-forge-review-md-adapter-f2f2ffeb20cd","shared/forge-review.md","adapter","operational","sha256:f2f2ffeb20cd17ae75392f0ea166c2679b6bf249844ed0474c73c499e4b1f7fd","",""],
   ["shared-forge-review-md-adapter-b02e3430e7d4","shared/forge-review.md","adapter","operational","sha256:b02e3430e7d47454618ed0d8dc39cfb3e849822a2581d181847e1bd0f55d1569","",""],
   ["shared-forge-review-md-agent-f0a86c73f06b","shared/forge-review.md","agent","excluded","sha256:f0a86c73f06b175b20466fa9e95383ac2c4e23e84f353fa2456afba805cb5ba9","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["shared-forge-review-md-resolver-3b7a44d31fc6","shared/forge-review.md","resolver","operational","sha256:3b7a44d31fc66cd34fb57be153b4c044298d1458265c70c0f965a366dac77caa","","canonical"],
+  ["shared-forge-review-md-resolver-1f207e8f04e5","shared/forge-review.md","resolver","operational","sha256:1f207e8f04e55aefbf5a7cd0497e3a8e55936972332ce58ea5ba905bb3981f6f","","canonical"],
   ["shared-forge-review-md-resolver-141a058b1c4c","shared/forge-review.md","resolver","excluded","sha256:141a058b1c4c83f811ee9e6849ce4b936135057186853374c0d5e21d28ac4a7d","shell-exports parser invocation; it consumes JSON and does not resolve a host",""],
   ["shared-forge-review-md-agent-e8b165a5f6a9","shared/forge-review.md","agent","excluded","sha256:e8b165a5f6a9bb00a1a80b9de1e7a2dd6284a5f765f1c1a1c9a8eba0883b4c69","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-review-md-agent-fbc054284fbd","shared/forge-review.md","agent","excluded","sha256:fbc054284fbd12f4ceb5127c48d529530ed87b83e69097497563e0936e1ec966","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
@@ -201,13 +202,13 @@ const REGISTRY_ROWS = [
   ["skills-forge-auto-skill-md-agent-982f796df502","skills/forge-auto/SKILL.md","agent","operational","sha256:982f796df502d8abc5eb18acbd6aaec559fc607888112239eeb8b5e6985628a0","",""],
   ["skills-forge-auto-skill-md-agent-f0bff0221588","skills/forge-auto/SKILL.md","agent","excluded","sha256:f0bff02215880216b4d3d63cb78cc26eabd71dd82150fd9396fe6a689489803f","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-cdb107786d8b","skills/forge-auto/SKILL.md","agent","excluded","sha256:cdb107786d8bf9e1be72d97cff92c24f026392e6cdf28c4a4ae55ddfc91b85c3","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-auto-skill-md-agent-81bdf88ae1e0","skills/forge-auto/SKILL.md","agent","excluded","sha256:81bdf88ae1e09889e5e97a83c0d1861e3e768a882a6401700dd3d48f0846f1c5","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-auto-skill-md-agent-e561ea4641e5","skills/forge-auto/SKILL.md","agent","excluded","sha256:e561ea4641e5c3aa7e52401561e7e46f6a604b933e724a97c71eafadbaa1eb99","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-7f5b33354627","skills/forge-auto/SKILL.md","agent","operational","sha256:7f5b333546274cd16ceaf5ab94d4df1f1d6fd421d1a32091c0fa0607f1f3d087","",""],
   ["skills-forge-auto-skill-md-agent-4a3c637c4f8c","skills/forge-auto/SKILL.md","agent","excluded","sha256:4a3c637c4f8c2254086d0eb9353a152309d6b9fb5ef564077691ad217ab8cbc5","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-resolver-61ba4f605908","skills/forge-auto/SKILL.md","resolver","excluded","sha256:61ba4f605908b3dcf5bc62efec7091f3724a2e64fa63414acad4062c310df139","documentation or explanatory resolver reference; it launches no process",""],
   ["skills-forge-auto-skill-md-agent-966ffe82d6d3","skills/forge-auto/SKILL.md","agent","operational","sha256:966ffe82d6d3e3ec1aded85ac96c8f7e9be5eab5be86b2e452880727e0ede3a1","",""],
-  ["skills-forge-auto-skill-md-emitter-c4149483367f","skills/forge-auto/SKILL.md","emitter","operational","sha256:c4149483367f834a785e3a0fa8cd8214f8c5171a5bad10e3ba39a5b058d26509","",""],
-  ["skills-forge-auto-skill-md-agent-bf5386e1ea1d","skills/forge-auto/SKILL.md","agent","excluded","sha256:bf5386e1ea1d3dc9e72806a0c8c12c4c5e30004e3727b334fa35db319116933e","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-auto-skill-md-emitter-6842565d1e95","skills/forge-auto/SKILL.md","emitter","operational","sha256:6842565d1e9566168871598dfd0b0d4a12efbacced3a515a231db25d003514bd","",""],
+  ["skills-forge-auto-skill-md-agent-5520e51cc197","skills/forge-auto/SKILL.md","agent","excluded","sha256:5520e51cc1973b0cb3bc908666895276f90c2e9d914c1d36853472d7572672bf","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-fd51f1c271e1","skills/forge-auto/SKILL.md","agent","excluded","sha256:fd51f1c271e1f8821900bd72a4ac3db24da86323ea881776040766b801fe42f8","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-3b710f2f477c","skills/forge-auto/SKILL.md","agent","excluded","sha256:3b710f2f477cbd8152ca9e20c004401a56786dca917b22eee0d4c30f6eab2689","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-aaff68e2bfea","skills/forge-auto/SKILL.md","agent","excluded","sha256:aaff68e2bfea7e7c362fc45e5e61700de5e80237c06c6170083b78faaa6f84de","projected explanatory Agent prose; it is not a worker invocation",""],
@@ -218,7 +219,7 @@ const REGISTRY_ROWS = [
   ["skills-forge-auto-skill-md-agent-eccc879cedcd","skills/forge-auto/SKILL.md","agent","operational","sha256:eccc879cedcd86dd918c1ea8d331e1c59d721e96fa4d277ecead56861ed6d7a5","",""],
   ["skills-forge-auto-skill-md-agent-91ee75476dbc","skills/forge-auto/SKILL.md","agent","excluded","sha256:91ee75476dbce0668745340282042b10d6d28e5ea893c5f1463aa7632fc78bac","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-d4f748cde70e","skills/forge-auto/SKILL.md","agent","excluded","sha256:d4f748cde70ed8c55b87b29b4f16cfc6d9de60927fd9c83b5b82d606a40dbeb8","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-auto-skill-md-emitter-9b0c139427ac","skills/forge-auto/SKILL.md","emitter","operational","sha256:9b0c139427ac2d2e4784708599787e740325931bf164f2c39ea43ef5b669ab28","",""],
+  ["skills-forge-auto-skill-md-emitter-49579e8447bc","skills/forge-auto/SKILL.md","emitter","operational","sha256:49579e8447bc1731ee889a3448eddfaf26259c4973c47c912d7bb03ece315767","",""],
   ["skills-forge-auto-skill-md-agent-ab1f276f779c","skills/forge-auto/SKILL.md","agent","excluded","sha256:ab1f276f779caf086e8cf8ef279dbbc6c8ad29bb1b33a962f995fa977b48dee8","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-f947310b2264","skills/forge-auto/SKILL.md","agent","excluded","sha256:f947310b226499f37cc258d08cc209b2e44d9ccdeacd1335304e07ac47cf2baf","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-resolver-828278bda662","skills/forge-auto/SKILL.md","resolver","operational","sha256:828278bda662d013889b02c9ddf073e8e876b796b6027bcaf333830335212f03","","canonical"],
@@ -251,14 +252,14 @@ const REGISTRY_ROWS = [
   ["skills-forge-next-skill-md-agent-ed7b09e29a6f","skills/forge-next/SKILL.md","agent","excluded","sha256:ed7b09e29a6f5e83c90addf1f6775bec93995e8140643a51f2bc25c4b3057031","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-ebdef6a35c1c","skills/forge-next/SKILL.md","agent","operational","sha256:ebdef6a35c1c24933d723ff771a582d99773e6458ef672ae4646bb70d7287466","",""],
   ["skills-forge-next-skill-md-agent-6c40f3ba04e9","skills/forge-next/SKILL.md","agent","excluded","sha256:6c40f3ba04e95c538a08593a405cc9b56468e179257d0d2544b1987df4e8daaf","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-next-skill-md-agent-94a818bb630f","skills/forge-next/SKILL.md","agent","excluded","sha256:94a818bb630fbb36bb9abe4fd59a41107199b307e1c813f5af7cba6546b5e732","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-next-skill-md-agent-c12a7e952d0c","skills/forge-next/SKILL.md","agent","excluded","sha256:c12a7e952d0c16d5bac8d6c22e2e24bc02a1fbae58f5d61b18a55feb4427822e","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-783fe31e7855","skills/forge-next/SKILL.md","agent","operational","sha256:783fe31e785572fa64f05ddf669bc853d13021192ff367b02975847d85d7dc4f","",""],
   ["skills-forge-next-skill-md-agent-c88978c8bced","skills/forge-next/SKILL.md","agent","excluded","sha256:c88978c8bceddf8b05547efbc9a2e4ec38912049d849c1c695aefb769e7e26e4","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-83b527ba1f39","skills/forge-next/SKILL.md","agent","excluded","sha256:83b527ba1f39b7bb2bcb5f2c894ef41b8647fd851eaf52afc86e468434238b83","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-resolver-a607c005a017","skills/forge-next/SKILL.md","resolver","excluded","sha256:a607c005a01701a925aec7a5275ff01bab3661f96f9047c4be45e05bcc6ec5f1","documentation or explanatory resolver reference; it launches no process",""],
   ["skills-forge-next-skill-md-agent-cbf1cc453272","skills/forge-next/SKILL.md","agent","operational","sha256:cbf1cc453272b76edf4fc253561544eb464e0ea2ce15e92831e48b728a8fd0a5","",""],
-  ["skills-forge-next-skill-md-emitter-bada9904c960","skills/forge-next/SKILL.md","emitter","operational","sha256:bada9904c9607abff56a7f458d542b1fe5f400924b4429795155430a095c9e48","",""],
-  ["skills-forge-next-skill-md-agent-a9415582c739","skills/forge-next/SKILL.md","agent","excluded","sha256:a9415582c739067bcf9e0b779aab846768b6eceaf3163010cae139539d20cee6","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-next-skill-md-emitter-66084c4d46a9","skills/forge-next/SKILL.md","emitter","operational","sha256:66084c4d46a938921bf002627489efc5cae68cb0f6a4c73766912a0dffb1fb23","",""],
+  ["skills-forge-next-skill-md-agent-7a08acaafb3a","skills/forge-next/SKILL.md","agent","excluded","sha256:7a08acaafb3a9dded4b8876af88c6e64e0dd3b2c4269ea416356f80c63da8ae3","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-740bc858dfbf","skills/forge-next/SKILL.md","agent","excluded","sha256:740bc858dfbf5a1210a721b1b98c6ed0de050e9a7ec3d606bf3b2d2dfa0020c9","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-8b9ec476d426","skills/forge-next/SKILL.md","agent","excluded","sha256:8b9ec476d4268b6a4fa9bfc359181dda46353b499d6f2e8ceea65ac68029f683","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-12bced4165f0","skills/forge-next/SKILL.md","agent","operational","sha256:12bced4165f06c305fd78bb84c1ed413e869f15b853ba73335a100e2384d2022","",""],
@@ -273,21 +274,21 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-resolver-72427970217c","skills/forge-task/SKILL.md","resolver","excluded","sha256:72427970217cf1c3e70cc6bec14ae84cd33f33cedff9844dbd81a92d2d435ddb","shell-exports parser invocation; it consumes JSON and does not resolve a host",""],
   ["skills-forge-task-skill-md-resolver-7f0fb7952ab3","skills/forge-task/SKILL.md","resolver","excluded","sha256:7f0fb7952ab334924beb13a81c5ab490faeec4066975e4908d18ca9c214d494a","documentation or explanatory resolver reference; it launches no process",""],
   ["skills-forge-task-skill-md-agent-ff5b9b8404e5","skills/forge-task/SKILL.md","agent","excluded","sha256:ff5b9b8404e5019cbd2f9607d2fbccd9361e9f78f941ddd849890c5d9af0bd39","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-task-skill-md-agent-97ff7812190c","skills/forge-task/SKILL.md","agent","excluded","sha256:97ff7812190c5f551045cbe007b79a1b4a75b63d4f4a5e984e9941262a323030","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-task-skill-md-agent-dd6f612dd16b","skills/forge-task/SKILL.md","agent","excluded","sha256:dd6f612dd16b4aea20f17138fd858a5cc63e94690272f32deb40c051b1229c84","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-adapter-f3bfa7a9562d","skills/forge-task/SKILL.md","adapter","operational","sha256:f3bfa7a9562d44d045abaf98e8f602dfc58a7d6c3823c4fde9de3065f27b9cf2","",""],
-  ["skills-forge-task-skill-md-emitter-9d3f3d4adce5","skills/forge-task/SKILL.md","emitter","operational","sha256:9d3f3d4adce58d10969a8351c283e813dec00c42f5a9e2a20ca304b670bd071b","",""],
+  ["skills-forge-task-skill-md-emitter-c137e151cadc","skills/forge-task/SKILL.md","emitter","operational","sha256:c137e151cadcb34ecd68b5da767853d07b277698a68ea7d9675aff34aad4ef67","",""],
   ["skills-forge-task-skill-md-agent-86f259014c13","skills/forge-task/SKILL.md","agent","excluded","sha256:86f259014c1352f933303c36538b2a439b219b884d895a5116724273feba1c95","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-agent-31fee1f6421a","skills/forge-task/SKILL.md","agent","operational","sha256:31fee1f6421ad996358abd565b0296581e3932b91bcd96df277b82abf349b49c","",""],
   ["skills-forge-task-skill-md-agent-4862247d599e","skills/forge-task/SKILL.md","agent","excluded","sha256:4862247d599edb85882dc9f209aa0ae9037455cccd15bc8c7c446000f2b0e96a","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-agent-a7f56cf4aa9c","skills/forge-task/SKILL.md","agent","excluded","sha256:a7f56cf4aa9caa265a2cdc04da096bc9d41233d00801a0e5b4747e64b01f400f","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-task-skill-md-emitter-7dc46066bf23","skills/forge-task/SKILL.md","emitter","operational","sha256:7dc46066bf234da6b30b6198466704f1193b86883506a2f7cd876a69081f96b4","",""],
-  ["skills-forge-task-skill-md-agent-3c945bfefc43","skills/forge-task/SKILL.md","agent","operational","sha256:3c945bfefc4386831f2128411f0026dca517036d07d415c3c3d9c7ca477bb1c8","",""],
-  ["skills-forge-task-skill-md-agent-a531ba0fd109","skills/forge-task/SKILL.md","agent","operational","sha256:a531ba0fd109c9287bf7dd850210ceb3ee6694d0dfdea97514b37f9b69cc1da9","",""],
-  ["skills-forge-task-skill-md-resolver-37b4afdd65a7","skills/forge-task/SKILL.md","resolver","operational","sha256:37b4afdd65a79537272e0ccbb4421e0d9aa6a1529eb4685eb7601dfde70e9121","","canonical"],
-  ["skills-forge-task-skill-md-resolver-5997cdaa2bb9","skills/forge-task/SKILL.md","resolver","excluded","sha256:5997cdaa2bb91444a584bfd0f25c628aa8088c21186106e1b0d7474c885106f0","shell-exports parser invocation; it consumes JSON and does not resolve a host",""],
-  ["skills-forge-task-skill-md-agent-42a759588ffb","skills/forge-task/SKILL.md","agent","operational","sha256:42a759588ffba66f7a4d1694d8affcd5099a8807b9dec17d3a044d659d9eede6","",""],
-  ["skills-forge-task-skill-md-emitter-7806bea0df54","skills/forge-task/SKILL.md","emitter","operational","sha256:7806bea0df545f3135850bb289405459339c30abebcaef6d1ae6d126ee94f7ea","",""],
-  ["skills-forge-task-skill-md-agent-7181e2fd54f6","skills/forge-task/SKILL.md","agent","excluded","sha256:7181e2fd54f65ea917aee1301c1bcf7351086008c16c18459e014f7d028e07c5","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-task-skill-md-emitter-5c8fded7ba4c","skills/forge-task/SKILL.md","emitter","operational","sha256:5c8fded7ba4cabbf718a8221285547992ff1cfb4739c6c498dec010126444240","",""],
+  ["skills-forge-task-skill-md-agent-f7d0467684f8","skills/forge-task/SKILL.md","agent","operational","sha256:f7d0467684f86908c28564f4289611f6856aafc01498bece1380d7fc6f1e795a","",""],
+  ["skills-forge-task-skill-md-agent-a28b81a862dd","skills/forge-task/SKILL.md","agent","operational","sha256:a28b81a862dd4c08ea6c19f598e4cebcb0d3f01f58816a1282992cd1a7cc10f0","",""],
+  ["skills-forge-task-skill-md-resolver-e9ae4bd03efa","skills/forge-task/SKILL.md","resolver","operational","sha256:e9ae4bd03efa7e7d2925ec9720a202c406ea6c235c603d341f94b6257c1c2d3e","","canonical"],
+  ["skills-forge-task-skill-md-resolver-c79ed7a7364a","skills/forge-task/SKILL.md","resolver","excluded","sha256:c79ed7a7364a92d690fdaeab36828be9913528a9049d36f6b1acb3dbfa6aea76","shell-exports parser invocation; it consumes JSON and does not resolve a host",""],
+  ["skills-forge-task-skill-md-agent-a7434a2d62fc","skills/forge-task/SKILL.md","agent","operational","sha256:a7434a2d62fc6380ceddcbaaddf5a27e83b82bc6be2115183d1af5f26814e644","",""],
+  ["skills-forge-task-skill-md-emitter-6dbf374c5135","skills/forge-task/SKILL.md","emitter","operational","sha256:6dbf374c51351b12b13537324006ab9aa63e208e5c32bc777c619dc855b35865","",""],
+  ["skills-forge-task-skill-md-agent-48804cc9fe76","skills/forge-task/SKILL.md","agent","excluded","sha256:48804cc9fe7690dec103d5cd908181ab11374edaede3a2be0600009b495cf4e7","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-agent-ed8da7be87c8","skills/forge-task/SKILL.md","agent","operational","sha256:ed8da7be87c8993ac7f01a9d80180b1b067a8c3622e7f9e5e37a2107fba8be8a","",""],
 ];
 
@@ -423,10 +424,23 @@ function tokenCandidates(pathName, kind, lines) {
   return found;
 }
 
+// The canonical emitter is a script invocation, not a hand-written JSON line.
+// Both forms are discovered as `emitter`: the legacy shell writers (still used by
+// the sidecar mirrors) and every call site of scripts/forge-dispatch-event.js.
+const CANONICAL_EMITTER = /forge-dispatch-event\.js/;
+
+function isCanonicalEmitter(value) {
+  return CANONICAL_EMITTER.test(typeof value === 'string' ? value : (value && value.evidence) || '');
+}
+
 function emitterCandidates(pathName, lines) {
   const found = [];
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex];
+    if (CANONICAL_EMITTER.test(line)) {
+      found.push(candidate(pathName, 'emitter', lines, lineIndex, line.search(CANONICAL_EMITTER)));
+      continue;
+    }
     const dispatchValue = /(?:\\?"event\\?"\s*:\s*\\?"dispatch\\?"|event\s*:\s*['"]dispatch['"])/.test(line);
     const shellWriter = /\b(?:echo|printf)\b/.test(line);
     if (dispatchValue && shellWriter) found.push(candidate(pathName, 'emitter', lines, lineIndex, line.search(/dispatch/)));
@@ -499,7 +513,17 @@ function structuralErrors(entry, discovered, document) {
       errors.push(`${location} sidecar adapter lacks --sidecar-declared`);
     }
   }
-  if (entry.kind === 'emitter') {
+  if (entry.kind === 'emitter' && isCanonicalEmitter(discovered)) {
+    // The single emitter owns the JSON shape; the call site owns the two things a
+    // script cannot infer: which unit this is and where the line is persisted.
+    // `--route-json` is what makes the posture axes the resolver's rather than a
+    // hand-copied variable's.
+    for (const flag of ['--unit', '--route-json', '--events']) {
+      if (!discovered.context.includes(flag)) {
+        errors.push(`${location} canonical dispatch emitter lacks ${flag}`);
+      }
+    }
+  } else if (entry.kind === 'emitter') {
     for (const field of ['host_runtime', 'worker_mode', 'dispatch_allowed']) {
       if (!new RegExp(`(?:\\\\?"${field}\\\\?"|${field})\\s*:`).test(discovered.context)) {
         errors.push(`${location} dispatch emitter lacks ${field}`);
@@ -591,6 +615,7 @@ module.exports = {
   markerState,
   discover,
   identity,
+  isCanonicalEmitter,
   audit,
   main,
 };

@@ -913,7 +913,8 @@ Skip if `fixConceded == false` (pref opt-out → conceded items fall through to 
 Resolve the complete review-fix contract once, with the canonical shared host
 declared explicitly. This call already composes the posture owned by
 `scripts/forge-dispatch-guard.js`; this spec consumes its verdict and never
-reproduces host/worker leg conditionals or re-reads `FORGE_RUNTIME_ENFORCE`.
+reproduces host/worker leg conditionals; posture takes no environment input, so
+there is nothing ambient to re-read.
 
 ```bash
 RF_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
