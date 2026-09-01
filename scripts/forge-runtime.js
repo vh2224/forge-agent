@@ -113,14 +113,33 @@ function normalizeSecurityMetadata(input) {
   };
 }
 
+// Resolve only the concrete worker identity. This is deliberately narrower
+// than resolveWorker: dispatch adapters may use it while projecting legacy
+// routing data without giving model/routing fields semantic weight in the
+// runtime core.
+//
+// Keep the native -> host rule here as the single executable source. Callers
+// that need worker-mode policy must pass the resulting identity back through
+// resolveWorker instead of duplicating its validation rules.
+function resolveWorkerIdentity(input) {
+  const worker = input || {};
+  const host_runtime = normalizeHostRuntime(worker.host_runtime);
+  const worker_engine = normalizeWorkerEngine(worker.worker_engine);
+
+  return {
+    host_runtime,
+    worker_engine,
+    resolved_engine: worker_engine === 'native' ? host_runtime : worker_engine,
+  };
+}
+
 // The explicit declaration is a caller assertion, never an authorization.
 // Hosts remain able to enforce stricter policy in their own adapter layer.
 function resolveWorker(input) {
   const worker = input || {};
-  const host_runtime = normalizeHostRuntime(worker.host_runtime);
-  const worker_engine = normalizeWorkerEngine(worker.worker_engine);
+  const identity = resolveWorkerIdentity(worker);
+  const { host_runtime, worker_engine, resolved_engine: engine } = identity;
   const worker_mode = normalizeWorkerMode(worker.worker_mode);
-  const engine = worker_engine === 'native' ? host_runtime : worker_engine;
   const sidecar_declared = worker.sidecar === true || worker.sidecar_declared === true;
 
   if (worker_engine === 'native' && worker_mode === 'sidecar') {
@@ -188,6 +207,7 @@ module.exports = {
   normalizeResult,
   normalizeLifecycle,
   normalizeSecurityMetadata,
+  resolveWorkerIdentity,
   resolveWorker,
   validateRuntimeContract,
   runtimeFromModel,

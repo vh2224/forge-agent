@@ -35,6 +35,15 @@ const { resolveRoute, mapPhase } = require('./forge-routing');
  * Unknown and absent engines stay undefined so a historical record never
  * turns into an invented Claude dispatch.
  *
+ * Every dispatch replaces the unit's complete runtime snapshot. The four
+ * axes are historical evidence from that dispatch only: host_runtime,
+ * worker_mode and dispatch_allowed retain their own recorded values, while
+ * worker_engine is normalized exclusively from event.engine. A later legacy
+ * dispatch therefore clears axes it did not record instead of inheriting
+ * them from an earlier attempt, a neighbouring unit, or current preferences.
+ * Only undefined means absent; explicit falsy values (especially the boolean
+ * false) remain present evidence and participate in runtime coverage.
+ *
  * There are exactly two drift signals: the explicit fallback event and a
  * changed first-to-last dispatch engine. The latter covers chain walks, which
  * intentionally do not generate a generic fallback event while a next member
@@ -109,12 +118,23 @@ function aggregateUnits(events, scope) {
       engine_attempted: [], engine_final: undefined, route_source: undefined,
       domain: undefined, tier: undefined, model: undefined, fallback_reason: undefined,
       fallback_hint: undefined, fallback: false,
+      host_runtime: undefined, worker_engine: undefined, worker_mode: undefined,
+      dispatch_allowed: undefined,
     });
     const unit = units.get(key);
     if (event.event === 'dispatch') {
       const engine = normalizeEngine(event.engine);
       unit.engine_attempted.push(engine);
       unit.engine_final = engine;
+      // Last-dispatch-wins as one indivisible snapshot. Do not merge fields
+      // with the previous attempt: an omitted key is itself absence evidence.
+      unit.host_runtime = Object.prototype.hasOwnProperty.call(event, 'host_runtime')
+        ? event.host_runtime : undefined;
+      unit.worker_engine = engine;
+      unit.worker_mode = Object.prototype.hasOwnProperty.call(event, 'worker_mode')
+        ? event.worker_mode : undefined;
+      unit.dispatch_allowed = Object.prototype.hasOwnProperty.call(event, 'dispatch_allowed')
+        ? event.dispatch_allowed : undefined;
       if (unit.engine_attempted.length === 1) {
         unit.route_source = event.route_source;
         unit.domain = event.domain;
@@ -128,6 +148,31 @@ function aggregateUnits(events, scope) {
     }
   }
   return [...units.values()];
+}
+
+const RUNTIME_AXES = ['host_runtime', 'worker_engine', 'worker_mode', 'dispatch_allowed'];
+
+function runtimeCoverage(units) {
+  const list = Array.isArray(units) ? units : [];
+  const missing = Object.fromEntries(RUNTIME_AXES.map(axis => [axis, 0]));
+  let complete = 0;
+  for (const unit of list) {
+    let unitComplete = true;
+    for (const axis of RUNTIME_AXES) {
+      // Empty strings, '-', false and every other explicit value are present.
+      if (!unit || unit[axis] === undefined) {
+        missing[axis] += 1;
+        unitComplete = false;
+      }
+    }
+    if (unitComplete) complete += 1;
+  }
+  return {
+    total: list.length,
+    complete,
+    incomplete: list.length - complete,
+    missing,
+  };
 }
 
 function classifyUnit(unit) {
@@ -160,6 +205,7 @@ function auditSlice(options) {
   // The Configuração line describes the route a task took, so a plan-slice only labels it when the
   // slice has no task evidence at all.
   return { units, task_units, drift_units: units.filter(unit => unit.drift), plan_units,
+    runtime_coverage: runtimeCoverage(units),
     configured_route: configuredRoute(cwd, task_units[0] || units[0]) };
 }
 
@@ -174,6 +220,14 @@ function formatRouteMd(result) {
   else if (driftTasks === 0) lines.push(`- rota configurada rodou em ${taskCount}/${taskCount} tasks.`);
   else lines.push(`- rota configurada rodou em ${taskCount - driftTasks}/${taskCount} tasks; ${driftTasks} drift(s) observado(s).`);
   if (result.plan_units.length) lines.push(`- Planos: ${result.plan_units.length} unidade(s) plan-slice fora do denominador de tasks; ${driftPlans} drift(s) observado(s).`);
+  // Recalculate instead of trusting result.runtime_coverage so callers that
+  // construct result objects manually retain the same formatter contract.
+  const coverage = runtimeCoverage(result.units);
+  lines.push(`- Cobertura runtime: ${coverage.complete}/${coverage.total} completas; ${coverage.incomplete} unidade(s) incompleta(s); ausentes: host_runtime=${coverage.missing.host_runtime}, worker_engine=${coverage.missing.worker_engine}, worker_mode=${coverage.missing.worker_mode}, dispatch_allowed=${coverage.missing.dispatch_allowed}.`);
+  const displayRuntime = value => value === undefined ? 'ausente' : String(value);
+  for (const unit of result.units) {
+    lines.push(`- Runtime ${unit.unit}: host=${displayRuntime(unit.host_runtime)}; worker=${displayRuntime(unit.worker_engine)}; mode=${displayRuntime(unit.worker_mode)}; allowed=${displayRuntime(unit.dispatch_allowed)}.`);
+  }
   for (const unit of result.drift_units) {
     const attempted = unit.engine_attempted.map(engine => engine === undefined ? 'undefined' : engine).join(', ');
     const reason = unit.fallback_reason || (unit.changed ? 'engine-chain-walk' : 'unknown');
@@ -245,7 +299,13 @@ function parseArgs(argv) {
  * task_units:     execute-task entries, the only denominator for N/N
  * plan_units:     plan-slice entries rendered outside that denominator
  * drift_units:    units matching explicit fallback or engine chain walk
+ * runtime_coverage: additive census of complete units and missing runtime axes
  * configured_route: best-effort current resolver output, never a drift input
+ *
+ * Each unit's runtime axes are a last-dispatch-wins snapshot. worker_engine
+ * comes only from normalized event.engine; undefined is absence, while falsy
+ * recorded values are present. The formatter recomputes runtime_coverage from
+ * units so hand-built legacy result objects remain supported.
  *
  * The CLI always serializes this object, including on internal exceptions.
  * Stderr is intentionally human-facing and may contain a write refusal while
@@ -262,7 +322,7 @@ function parseArgs(argv) {
  * an identical file rather than appending a second Route section.
  */
 
-module.exports = { normalizeEngine, inScope, milestoneAliases, aggregateUnits, classifyUnit, auditSlice, formatRouteMd, upsertRouteSection };
+module.exports = { normalizeEngine, inScope, milestoneAliases, aggregateUnits, runtimeCoverage, classifyUnit, auditSlice, formatRouteMd, upsertRouteSection };
 
 if (require.main === module) {
   try {
@@ -275,6 +335,6 @@ if (require.main === module) {
     }
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
-    process.stdout.write(`${JSON.stringify({ units: [], task_units: [], drift_units: [], plan_units: [], error: error.message })}\n`);
+    process.stdout.write(`${JSON.stringify({ units: [], task_units: [], drift_units: [], plan_units: [], runtime_coverage: runtimeCoverage([]), error: error.message })}\n`);
   }
 }

@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const runtime = require('./forge-runtime.js');
+const { resolveWorkerIdentity, resolveWorker } = runtime;
 
 const schemaPath = path.join(__dirname, '..', 'schemas', 'forge-runtime.schema.json');
 const scriptPath = path.join(__dirname, 'forge-runtime.js');
@@ -37,6 +38,7 @@ function enumAt(schema, name) {
 test('exports the versioned protocol surface', () => {
   assert.strictEqual(runtime.PROTOCOL_VERSION, '1.0.0');
   assert(runtime.REASON_CODES.includes('implicit-recursion-refused'));
+  assert.strictEqual(typeof resolveWorkerIdentity, 'function');
   assert.strictEqual(typeof runtime.resolveWorker, 'function');
   assert.strictEqual(typeof runtime.validateRuntimeContract, 'function');
 });
@@ -57,6 +59,81 @@ test('defaults preserve the legacy Claude-first native route', () => {
 test('normalizes both known host runtimes case-insensitively', () => {
   assert.strictEqual(runtime.normalizeHostRuntime('Claude'), 'claude');
   assert.strictEqual(runtime.normalizeHostRuntime(' CODEX '), 'codex');
+});
+
+test('identity seam resolves native strictly from the Claude host', () => {
+  assert.deepStrictEqual(resolveWorkerIdentity({
+    host_runtime: ' Claude ',
+    worker_engine: ' NATIVE ',
+  }), {
+    host_runtime: 'claude',
+    worker_engine: 'native',
+    resolved_engine: 'claude',
+  });
+});
+
+test('identity seam resolves native strictly from the Codex host', () => {
+  assert.deepStrictEqual(resolveWorkerIdentity({
+    host_runtime: 'CODEX',
+    worker_engine: 'native',
+  }), {
+    host_runtime: 'codex',
+    worker_engine: 'native',
+    resolved_engine: 'codex',
+  });
+});
+
+test('identity seam preserves an explicit concrete engine across hosts', () => {
+  assert.deepStrictEqual(resolveWorkerIdentity({
+    host_runtime: 'claude',
+    worker_engine: 'codex',
+  }), {
+    host_runtime: 'claude',
+    worker_engine: 'codex',
+    resolved_engine: 'codex',
+  });
+  assert.strictEqual(resolveWorkerIdentity({
+    host_runtime: 'codex',
+    worker_engine: 'claude',
+  }).resolved_engine, 'claude');
+});
+
+test('identity seam keeps named diagnostics for invalid identity input', () => {
+  expectCode('invalid-host-runtime', () => resolveWorkerIdentity({
+    host_runtime: 'cursor',
+  }));
+  expectCode('invalid-worker-engine', () => resolveWorkerIdentity({
+    worker_engine: 'gpt',
+  }));
+});
+
+test('identity seam ignores mode, routing, model, and preference-shaped fields', () => {
+  const identity = resolveWorkerIdentity({
+    host_runtime: 'codex',
+    worker_engine: 'native',
+    worker_mode: 'not-a-runtime-mode',
+    dispatch_engine: 'claude',
+    model: 'claude-opus-5',
+    route: { engine: 'claude' },
+    workers: { 'execute-task': 'claude' },
+  });
+  assert.deepStrictEqual(identity, {
+    host_runtime: 'codex',
+    worker_engine: 'native',
+    resolved_engine: 'codex',
+  });
+  assert(!Object.prototype.hasOwnProperty.call(identity, 'worker_mode'));
+});
+
+test('identity validation order remains host then worker engine', () => {
+  expectCode('invalid-host-runtime', () => resolveWorkerIdentity({
+    host_runtime: 'invalid-host',
+    worker_engine: 'invalid-engine',
+  }));
+  expectCode('invalid-worker-engine', () => resolveWorker({
+    worker_engine: 'invalid-engine',
+    worker_mode: 'invalid-mode',
+  }));
 });
 
 test('native resolves strictly from the Claude host', () => {
@@ -99,6 +176,17 @@ test('unknown engine has a deterministic diagnostic instead of a fallback', () =
 
 test('unknown mode has a deterministic diagnostic instead of a fallback', () => {
   expectCode('invalid-worker-mode', () => runtime.resolveWorker({ worker_mode: 'remote' }));
+});
+
+test('direct cross-host calls do not derive a mode when it is omitted', () => {
+  expectCode('native-engine-host-mismatch', () => resolveWorker({
+    host_runtime: 'claude',
+    worker_engine: 'codex',
+  }));
+  expectCode('native-engine-host-mismatch', () => resolveWorker({
+    host_runtime: 'codex',
+    worker_engine: 'claude',
+  }));
 });
 
 test('a native mode cannot silently switch from Claude to Codex', () => {

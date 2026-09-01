@@ -2,11 +2,21 @@
 
 > **Loaded on demand.** Extracted VERBATIM from `skills/forge-next/SKILL.md` on 2026-08-23
 > (context diagnosis) — same rationale as `shared/forge-sidecar-auto.md`: a 0%-use path priced
-> into every orchestrator turn. Read ONLY when the resolver returns `DISPATCH_ENGINE != claude`
-> for a routable unit. Canonical contract: `shared/forge-dispatch.md § Worker Engine Routing`.
+> into every orchestrator turn. Read ONLY after the resolver gate, when
+> `WORKER_MODE == sidecar`, or after the one allowed native result
+> `not-spawned` changes that same resolved worker to an explicitly declared
+> sidecar. Canonical contract: `shared/forge-dispatch.md § Worker Engine Routing`.
 > forge-next is the interactive boundary — this variant keeps the TTY pause-ask gates.
 
-**Branch codex — sidecar (`$DISPATCH_ENGINE == codex` && `$unit_type == execute-task`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. When this branch fires, the Claude machinery below (timeline task, token telemetry, guarded `Agent()` dispatch) is **replaced** by the detached adapter + polling; on any failure it resets and **falls through to that same Claude machinery** (fallback). When `$DISPATCH_ENGINE == claude` (or the unit is not `execute-task`), skip this branch entirely and proceed with the Claude dispatch below — byte-identical to the current loop. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
+**Branch codex — sidecar (`$WORKER_MODE == sidecar` && `$RESOLVED_WORKER_ENGINE == codex` && `$unit_type == execute-task`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. When this branch fires, the native machinery below (timeline task, token telemetry, guarded worker dispatch) is **replaced** by the detached adapter + polling; on any failure it resets and follows the named `worker-engine-fallback` path. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
+
+Entry is fail-closed: `DISPATCH_ALLOWED` is already `true` before this file is
+loaded. A false verdict prints `DISPATCH_REASON_CODE` + `DISPATCH_HINT` and
+stops in the caller; it never reaches this mirror or a fallback. When entry
+follows native `not-spawned`, the caller increments its one-shot transition
+counter, verifies `RESOLVED_WORKER_ENGINE == HOST_RUNTIME`, then sets
+`WORKER_MODE=sidecar`, `SIDECAR_DECLARED=true`, and retains
+`DISPATCH_ALLOWED=true`. No other native outcome may enter.
 
 0. **Increment the sidecar attempt counter (`SIDECAR_ATTEMPT`) — BLOCKER cap.** Before dispatching *any* sidecar for this unit, increment a per-unit counter (starts at 1 for the first sidecar dispatch of the unit). It is **hard-capped** by the number of `engine == codex` members in the resolved chain (`$ROUTE_JSON.chain`, ≤3 — the S01 cap). Exceeding the cap → abort the chain to the Claude fallback with `REASON=sidecar-cap-exceeded`. On a cross-engine chain (e.g. `gpt→claude→gpt`) this branch may fire more than once in the same unit; the counter is persisted in the per-attempt state file (below) so it survives an auto-compact:
 ```bash
@@ -52,6 +62,7 @@ CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
 node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
   --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
+  --host-runtime "$HOST_RUNTIME" --sidecar-declared \
   --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" --context-root "$WORKING_DIR" \
   --writable-roots-file "$CODE_DIR_WRITABLE_ROOTS_FILE" \
   --timeout "$WORKERS_TIMEOUT" \
@@ -89,7 +100,7 @@ TRANSPORT_REASON=$(node "$FORGE_SCRIPTS_DIR/forge-transport.js" --result "$RESUL
 TRANSPORT_TAIL="\"transport\":\"${TRANSPORT:-unknown}\""
 [ -n "$TRANSPORT_VERSION" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_version\":\"$TRANSPORT_VERSION\""
 [ -n "$TRANSPORT_REASON" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_reason\":\"$TRANSPORT_REASON\""
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${CODEX_MODEL_LABEL}\",\"reason\":\"${ENGINE_REASON}\",\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":0,\"output_tokens\":0,\"engine\":\"codex\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"vcs\":\"${DISPATCH_VCS:-unknown}\",${TRANSPORT_TAIL}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${CODEX_MODEL_LABEL}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"reason\":\"${ENGINE_REASON}\",\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":0,\"output_tokens\":0,\"engine\":\"codex\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"vcs\":\"${DISPATCH_VCS:-unknown}\",${TRANSPORT_TAIL}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
 # → proceed to Step 5 (Process result). Do NOT run the Claude machinery below.
 ```
 
@@ -207,6 +218,18 @@ fi
 # advancement. Mutually exclusive with the cursor-persist above (a persisted $NEXT means the next
 # /forge-next dispatches that member, NOT this fallback).
 if [ -z "$NEXT" ]; then
+  FALLBACK_TRIGGER="$REASON"
+  FALLBACK_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --unit-type "$unit_type" \
+    --host-runtime "$HOST_RUNTIME" --worker-engine claude --cwd "$WORKING_DIR" --json)
+  [ $? -eq 0 ] || { echo "✗ fallback resolver halted" >&2; exit 1; }
+  FALLBACK_EXPORTS=$(printf '%s' "$FALLBACK_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+  [ $? -eq 0 ] || { echo "✗ fallback resolver exports invalid" >&2; exit 1; }
+  eval "$FALLBACK_EXPORTS"
+  REASON="$FALLBACK_TRIGGER"
+  if [ "$DISPATCH_ALLOWED" != "true" ]; then
+    printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+    exit 1                         # refusal: no fallback event and no alternate worker
+  fi
   echo "⚠ worker: codex indisponível ($REASON) — usando forge-executor"
   mkdir -p "$WORKING_DIR/.gsd/forge/"
   HINT_JSON=$(cat "${CODE_DIR_HINT_FILE:-$WORKING_DIR/.gsd/forge/code-dir-hint.json}" 2>/dev/null); [ -n "$HINT_JSON" ] || HINT_JSON='""'
@@ -215,11 +238,11 @@ if [ -z "$NEXT" ]; then
   # CRITICAL, per-dispatch + evidence-based fallback discipline: shared/forge-dispatch.md § Engine Fallback Discipline
 fi
 ```
-**If a next member was persisted (`$NEXT` non-empty):** surface "Codex worker failed (`$REASON`). Run `/forge-next` again — it will retry with the next model in the chain (`$NEXT`)." and stop this unit — step mode picks up the advance via the cursor on the next invocation (Step 4b), which re-inspects the engine to route to Branch codex or the Claude Agent. **If `$NEXT` was empty or an abort reason fired:** set `ENGINE=claude` and `DISPATCH_ENGINE=claude`, **run Tier Resolution (step 1.5) and Effort Resolution (step 1.55) now** (they were skipped on the codex path), and dispatch the single `forge-executor` Claude worker via the machinery below. The generic Claude fallback (with its `worker-engine-fallback` event) fires only on the exhausted/abort path — mutually exclusive with the chain-advance cursor (R2). No retry.
+**If a next member was persisted (`$NEXT` non-empty):** surface "Codex worker failed (`$REASON`). Run `/forge-next` again — it will retry with the next model in the chain (`$NEXT`)." and stop this unit — step mode picks up the advance via the cursor on the next invocation (Step 4b), re-enters the canonical resolver/guard, and routes by the new `WORKER_MODE`. **If `$NEXT` was empty or an abort reason fired:** run the named `worker-engine-fallback`, resolve the fallback member's runtime axes, and enter its native machinery only after an allowed verdict. The fallback fires only on the exhausted/abort path — mutually exclusive with the chain-advance cursor (R2). No retry and no fallback from a runtime refusal.
 
 ---
 
-**Branch D — sidecar codex plan (`$DISPATCH_ENGINE == codex` && `$unit_type == plan-slice`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine — Branch D`. Read-only twin of Branch codex above: codex only *reads* the codebase + planning context and returns markdown plan content in the result JSON — it never writes `.gsd/**`, so this branch has **no dirty-tree guard, no `START_SHA` capture, no reset**. When `$DISPATCH_ENGINE == claude` (or the unit is not `plan-slice`), skip this branch entirely. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
+**Branch D — sidecar codex plan (`$WORKER_MODE == sidecar` && `$RESOLVED_WORKER_ENGINE == codex` && `$unit_type == plan-slice`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine — Branch D`. Read-only twin of Branch codex above: codex only *reads* the codebase + planning context and returns markdown plan content in the result JSON — it never writes `.gsd/**`, so this branch has **no dirty-tree guard, no `START_SHA` capture, no reset**. `CODE_DIR` resolves to `${WORKER_CWD:-$WORKING_DIR}` (isolation header).
 
 0. **Increment the sidecar attempt counter + cap check FIRST (R3).** State is **fresh per attempt** (BLOCKER invariant #1 + #3): on a cross-engine chain with multiple codex members the `-attempt-$N` suffix keeps each attempt's state distinct, and `SIDECAR_ATTEMPT` is hard-capped by the count of `engine == codex` members in `$ROUTE_JSON.chain` (≤3). When the cap is exceeded, **skip steps 1–4 entirely** (no plan-context assembly, no state/result-file allocation, no sidecar launch) and go DIRECTLY to the **Fallback** block below:
 ```bash
@@ -255,6 +278,7 @@ fi
 ```bash
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-xllm.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
 node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode plan \
+  --host-runtime "$HOST_RUNTIME" --sidecar-declared \
   --plan-context "$CTX_FILE" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" \
   --timeout "$WORKERS_TIMEOUT" \
   $([ -n "$SIDECAR_MODEL" ] && printf -- '--model %s' "$SIDECAR_MODEL")
@@ -287,7 +311,7 @@ TRANSPORT_REASON=$(node "$FORGE_SCRIPTS_DIR/forge-transport.js" --result "$RESUL
 TRANSPORT_TAIL="\"transport\":\"${TRANSPORT:-unknown}\""
 [ -n "$TRANSPORT_VERSION" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_version\":\"$TRANSPORT_VERSION\""
 [ -n "$TRANSPORT_REASON" ] && TRANSPORT_TAIL="$TRANSPORT_TAIL,\"transport_reason\":\"$TRANSPORT_REASON\""
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"plan-slice/${S##}\",\"model\":\"${CODEX_MODEL:-codex-default}\",\"reason\":\"${ENGINE_REASON}\",\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":0,\"output_tokens\":0,\"engine\":\"codex\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"vcs\":\"${DISPATCH_VCS:-unknown}\",${TRANSPORT_TAIL}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
+echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"plan-slice/${S##}\",\"model\":\"${CODEX_MODEL:-codex-default}\",\"host_runtime\":\"${HOST_RUNTIME}\",\"worker_mode\":\"${WORKER_MODE}\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"reason\":\"${ENGINE_REASON}\",\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":0,\"output_tokens\":0,\"engine\":\"codex\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"vcs\":\"${DISPATCH_VCS:-unknown}\",${TRANSPORT_TAIL}}" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
 ```
 and **rejoin the normal `plan-slice` completion path**: the **plan-check gate**, the interactive **plan gate** (`forge-next` is always `MODE = interactive`), and the **symbol-check gate** all run over the materialized files exactly as after a Claude `forge-planner` — nothing in those gates changes. No `T##-SUMMARY`/`---GSD-WORKER-RESULT---` is synthesized here — skip Step 5 (Process result) for this dispatch, going straight to the plan-check gate.
 
@@ -339,6 +363,18 @@ fi
 **If `$PAUSE_ASK_GATE` is set** (TTY present, pause-ask exhaustion): call `AskUserQuestion` with three options — **Retentar codex** (re-enter Branch D Layer-1 for one more transient retry: backoff→`--state-update`→re-dispatch `--mode plan`, counter continuing), **Fallback Claude** (discard the result JSON and dispatch a single Claude `forge-planner` now — the Layer-2 action), **Pausar milestone** (checkpoint via `continue.md` + `status: paused` and stop the loop — same mechanic as review-pause / account-handoff). **Otherwise** (headless degrade, or gate not triggered) control falls through unchanged:
 ```bash
 CODE_DIR=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).code_dir" 2>/dev/null)
+FALLBACK_TRIGGER="$REASON"
+FALLBACK_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --unit-type "$unit_type" \
+  --host-runtime "$HOST_RUNTIME" --worker-engine claude --cwd "$WORKING_DIR" --json)
+[ $? -eq 0 ] || { echo "✗ fallback resolver halted" >&2; exit 1; }
+FALLBACK_EXPORTS=$(printf '%s' "$FALLBACK_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+[ $? -eq 0 ] || { echo "✗ fallback resolver exports invalid" >&2; exit 1; }
+eval "$FALLBACK_EXPORTS"
+REASON="$FALLBACK_TRIGGER"
+if [ "$DISPATCH_ALLOWED" != "true" ]; then
+  printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  exit 1                           # refusal: no fallback event and no alternate worker
+fi
 echo "⚠ worker: codex indisponível ($REASON) — usando forge-planner"
 mkdir -p "$WORKING_DIR/.gsd/forge/"
 HINT_JSON=$(cat "${CODE_DIR_HINT_FILE:-$WORKING_DIR/.gsd/forge/code-dir-hint.json}" 2>/dev/null); [ -n "$HINT_JSON" ] || HINT_JSON='""'
@@ -346,4 +382,7 @@ printf '{"ts":"%s","event":"worker-engine-fallback","milestone":"%s","slice":"%s
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${M###}" "${S##}" "${S##}" "$REASON" "$HINT_JSON" >> "$WORKING_DIR/.gsd/forge/events.jsonl"
 # CRITICAL, per-dispatch + evidence-based fallback discipline: shared/forge-dispatch.md § Engine Fallback Discipline
 ```
-Then set `ENGINE=claude` and `DISPATCH_ENGINE=claude`, **run Tier Resolution (step 1.5) and Effort Resolution (step 1.55) now** (a `risk:high` slice escalates `heavy → max`/Fable exactly as today), and dispatch the single `forge-planner` Claude worker via the plan-slice machinery below. No re-resolution of engine (fallback is unconditionally Claude); no retry — not a 4th recovery layer.
+The allowed fallback contract now carries `WORKER_MODE == native`; run Tier
+Resolution (step 1.5) and Effort Resolution (step 1.55), then use the
+host-native planning machinery. The resolver refusal branch above launches
+nothing and emits no fallback event. No retry — not a 4th recovery layer.

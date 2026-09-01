@@ -82,6 +82,32 @@ function sidecarSurface(p) {
   return spec ? text + '\n' + readRepoText(path.join(repoRootForSpec, spec)) : text;
 }
 
+// Dispatch events come in two forms since the single-emitter cutover (PR #164):
+// the legacy hand-written shell line (still used by the sidecar mirrors) and a
+// call to scripts/forge-dispatch-event.js, whose flags span continuation lines.
+// Both are returned as ONE text block so a per-emitter field assertion can be
+// written once and bite on either form.
+function dispatchEmitterBlocks(text) {
+  const lines = text.split(/\r?\n/);
+  const blocks = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const canonical = line.includes('forge-dispatch-event.js');
+    const legacy = line.includes('\\"event\\":\\"dispatch\\"')
+      || (/\b(?:echo|printf)\b/.test(line) && line.includes('"event":"dispatch"'));
+    if (!canonical && !legacy) continue;
+    let end = index;
+    let block = line;
+    while (/\\\s*$/.test(lines[end]) && end + 1 < lines.length) {
+      end += 1;
+      block += '\n' + lines[end];
+    }
+    blocks.push({ kind: canonical ? 'canonical' : 'legacy', text: block, line: index + 1 });
+    index = end;
+  }
+  return blocks;
+}
+
 let passes = 0;
 let fails = 0;
 let skips = 0;
@@ -1842,9 +1868,15 @@ function smokeEffort() {
     assert(/\[\s*'EFFORT_REASON'\s*,/.test(resolver), `${label}: extracts effort_reason from the resolver contract`, 'EFFORT_REASON missing from SHELL_EXPORT_MAP');
     // the inline effort block + its default map + clamp must be gone (logic lives only in the resolver)
     assert(!/declare -A EFFORT_DEFAULTS/.test(txt), `${label}: inline EFFORT_DEFAULTS map removed`, 'inline effort map still present');
-    // dispatch event carries effort + effort_reason
-    assert(/event.*dispatch[\s\S]*?effort\\?":\\?"\$\{?EFFORT/.test(txt), `${label}: dispatch event includes effort`, 'effort field missing from event');
-    assert(/effort_reason\\?":\\?"\$\{?EFFORT_REASON/.test(txt), `${label}: dispatch event includes effort_reason`, 'effort_reason field missing');
+    // dispatch event carries effort + effort_reason — since the single-emitter
+    // cutover they are flags handed to scripts/forge-dispatch-event.js, and the
+    // value must still come from a resolver-exported carrier, never a literal.
+    const effortEmitters = dispatchEmitterBlocks(txt);
+    assert(effortEmitters.length > 0
+      && effortEmitters.every((block) => /--effort "\$\{?(?:EFFORT|BATCH_EFFORT)/.test(block.text)),
+    `${label}: dispatch event includes effort`, 'effort field missing from event');
+    assert(effortEmitters.every((block) => /--effort-reason "\$\{?(?:EFFORT_REASON|BATCH_EFFORT_REASON)/.test(block.text)),
+      `${label}: dispatch event includes effort_reason`, 'effort_reason field missing');
   }
 
   // Effort logic (frontmatter axis + model-cap clamp) now lives in the shared resolver.
@@ -2599,7 +2631,7 @@ function smokeModelAlias() {
     for (const [name, content] of Object.entries(files)) {
       assert(content.includes('forge-model-alias.js'),
         `${name} calls forge-model-alias.js`, 'not found');
-      assert(content.includes('model_applied'),
+      assert(content.includes('model_applied') || content.includes('--model-applied'),
         `${name} records model_applied`, 'not found');
       assert(!/indexOf\(['"]fable['"]\)/.test(content),
         `${name} does not reimplement the alias map inline`, 'suspicious inline map reimplementation found');
@@ -4767,8 +4799,10 @@ function smokeReviewPairingWiring() {
 
   // (e9) discriminadores slice+milestone nos 5 emission sites (3 forge-auto + 2 forge-next).
   const discNeedle = '\\"slice\\":\\"{S##}\\",\\"milestone\\":\\"${RUN_ID:-{M###}}\\"';
-  const autoHits = countOccur(autoMd, discNeedle);
-  const nextHits = countOccur(nextMd, discNeedle);
+  // Same discriminators in the canonical-emitter form (PR #164): flags, not keys.
+  const discFlags = '--slice "{S##}" --milestone "${RUN_ID:-{M###}}"';
+  const autoHits = countOccur(autoMd, discNeedle) + countOccur(autoMd, discFlags);
+  const nextHits = countOccur(nextMd, discNeedle) + countOccur(nextMd, discFlags);
   assert(autoHits >= 3,
     '(e9) forge-auto: discriminadores slice+milestone nos 3 execute-task dispatch emits', `hits=${autoHits}`);
   assert(nextHits >= 2,
@@ -7169,8 +7203,10 @@ function smokeDispatchResolve() {
     // --shell-exports eval; SHELL_EXPORT_MAP owns the .dispatch_engine mapping.
     assert(source.includes('forge-dispatch-resolve.js" --shell-exports)"'),
       `(j) ${rel}: extracts DISPATCH_ENGINE from ROUTE_JSON .dispatch_engine`);
-    assert(/DISPATCH_ENGINE == codex/.test(source),
-      `(j) ${rel}: gates a sidecar branch on DISPATCH_ENGINE == codex`);
+    // Adapter selection keys on the engine that will actually run the worker.
+    // DISPATCH_ENGINE is model-family telemetry and must gate no branch.
+    assert(/RESOLVED_WORKER_ENGINE (?:==|=) "?codex/.test(source),
+      `(j) ${rel}: gates a sidecar branch on RESOLVED_WORKER_ENGINE == codex`);
     // The old fuzzy trigger must be absent from every branch/trigger site. Prose that
     // legitimately cites the telemetry family value engine:"codex" is not matched by
     // this anchor (it targets the `== codex` shell/branch condition specifically).
@@ -11430,13 +11466,16 @@ function smokeIsolationSvnAndVcsTelemetry() {
   const skills = [
     ['forge-auto', 'forge-auto/SKILL.md', 4],
     ['forge-next', 'forge-next/SKILL.md', 3],
-    ['forge-task', 'forge-task/SKILL.md', 2],
+    ['forge-task', 'forge-task/SKILL.md', 3],
   ];
   for (const [name, rel, expected] of skills) {
     const source = sidecarSurface(path.join(path.dirname(SCRIPTS), 'skills', rel));  // sidecar surface (2026-08-23)
-    const lines = source.split(/\r?\n/).filter(line => line.includes('\\"event\\":\\"dispatch\\"'));
-    assert(lines.length === expected && lines.every(line => line.includes('\\"vcs\\":')),
-      `(d) ${name} has vcs on all ${expected} dispatch event emitters`, JSON.stringify(lines));
+    // Legacy shell emitters carry the JSON key; canonical ones pass --vcs to the
+    // single emitter. Still per-emitter, so one forgotten site alone turns red.
+    const blocks = dispatchEmitterBlocks(source);
+    assert(blocks.length === expected
+      && blocks.every(block => (block.kind === 'canonical' ? /--vcs /.test(block.text) : block.text.includes('\\"vcs\\":'))),
+    `(d) ${name} has vcs on all ${expected} dispatch event emitters`, JSON.stringify(blocks.map(block => block.text)));
   }
   const dispatchSpec = fs.readFileSync(path.join(path.dirname(SCRIPTS), 'shared', 'forge-dispatch.md'), 'utf8');
   assert(/\| `vcs` \| string \| `detectVcs\(CODE_DIR\)` \| `"git"` \|/.test(dispatchSpec)
@@ -11452,7 +11491,7 @@ function smokeIsolationSvnAndVcsTelemetry() {
   const dispatchVcsMirrors = [
     ['forge-auto', 'forge-auto/SKILL.md', 4],
     ['forge-next', 'forge-next/SKILL.md', 3],
-    ['forge-task', 'forge-task/SKILL.md', 2],
+    ['forge-task', 'forge-task/SKILL.md', 3],
   ];
   const dispatchVcsLine = 'DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")';
   for (const [name, rel, expected] of dispatchVcsMirrors) {
@@ -15472,7 +15511,7 @@ function smokeInertRoutes() {
     + 'forge-task declarada em vez de silenciosa');
 }
 
-// ── Section 100: o campo `transport` chega aos 9 emissores ────────────────
+// ── Section 100: o campo `transport` chega aos 10 emissores ────────────────
 // Um campo decidido num helper e não emitido pelo emissor é o defeito de classe
 // da TASK-021: a decisão existe, o consumidor nunca a vê. Aqui a prova é feita
 // com LEITURA IN-PROCESS (`fs`), NUNCA com `grep` de shell — o `grep` deste
@@ -15480,7 +15519,7 @@ function smokeInertRoutes() {
 // e ainda assim reportar sucesso (achado da S06).
 // Três armadilhas medidas, cada uma com controle positivo (o assert é rodado
 // contra uma cópia MUTADA em memória, provando que ele morde de verdade):
-//   (a) censo — exatamente 9 linhas de emissor, TODAS com `transport`. Contagem
+//   (a) censo — exatamente 10 emissores, TODAS com `transport`. Contagem
 //       e predicado juntos: acrescentar um 10º emissor sem o campo falha.
 //   (b) fence — nos sites 2 e 4 (Branch D) o fence do `echo` precisa RESOLVER
 //       $RESULT_FILE ele mesmo; estado de shell não sobrevive à fronteira do
@@ -15488,7 +15527,7 @@ function smokeInertRoutes() {
 //   (c) sem default otimista — `:-app-server` (ou qualquer default que não seja
 //       `unknown`) num fence de emissor transforma "não observei" em "observei".
 function smokeTransportField() {
-  process.stdout.write('\n▸ Section 100: o campo `transport` chega aos 9 emissores\n');
+  process.stdout.write('\n▸ Section 100: o campo `transport` chega aos 10 emissores\n');
   const ROOT = path.dirname(SCRIPTS);
   const FILES = [
     path.join(ROOT, 'skills', 'forge-auto', 'SKILL.md'),
@@ -15497,29 +15536,32 @@ function smokeTransportField() {
   ];
   const EMITTER = '\\"event\\":\\"dispatch\\"';
 
-  const emitterLines = (text) => text.split('\n').filter(l => l.includes(EMITTER) && l.includes('echo '));
 
-  // ── (a) censo: 9 emissores, todos com transport ──────────────────────────
+  // ── (a) censo: 10 emissores, todos com transport ─────────────────────────
   const all = [];
-  for (const file of FILES) all.push(...emitterLines(sidecarSurface(file)).map(line => ({ file, line })));  // sidecar surface (2026-08-23)
-  assert(all.length === 9,
-    `(a) exatamente 9 linhas de emissor de dispatch nos três SKILL.md (achadas: ${all.length})`,
+  for (const file of FILES) {
+    // sidecar surface (2026-08-23)
+    all.push(...dispatchEmitterBlocks(sidecarSurface(file)).map(block => ({ file, line: block.text, kind: block.kind })));
+  }
+  assert(all.length === 10,
+    `(a) exatamente 10 emissores de dispatch nos três SKILL.md + espelhos (achados: ${all.length})`,
     all.map(e => path.basename(path.dirname(e.file))).join(', '));
   // Case-insensitive on purpose: the codex emitters carry the field through the
-  // shell variable ${TRANSPORT_TAIL}, the claude ones through the literal key.
+  // shell variable ${TRANSPORT_TAIL} or the --transport flag, the claude ones
+  // through the literal key or the in-process flag.
   const withoutField = all.filter(e => !/transport/i.test(e.line));
   assert(withoutField.length === 0,
-    '(a) TODOS os 9 emissores carregam `transport` — contagem e predicado juntos, para que um 10º emissor sem o campo falhe',
+    '(a) TODOS os 10 emissores carregam `transport` — contagem e predicado juntos, para que um 11º emissor sem o campo falhe',
     `${withoutField.length} sem o campo`);
 
-  const claudeLines = all.filter(e => e.line.includes('\\"transport\\":\\"in-process\\"'));
-  const codexLines = all.filter(e => e.line.includes('${TRANSPORT_TAIL}'));
-  assert(claudeLines.length === 4,
-    `(a) os 4 emissores do caminho claude carregam a constante in-process (achados: ${claudeLines.length})`);
+  const claudeLines = all.filter(e => e.line.includes('\\"transport\\":\\"in-process\\"') || /--transport in-process/.test(e.line));
+  const codexLines = all.filter(e => e.line.includes('${TRANSPORT_TAIL}') || /--transport "\$\{TRANSPORT:-unknown\}"/.test(e.line));
+  assert(claudeLines.length === 5,
+    `(a) os 5 emissores do caminho claude carregam a constante in-process (achados: ${claudeLines.length})`);
   assert(codexLines.length === 5,
-    `(a) os 5 emissores do caminho codex carregam o TRANSPORT_TAIL derivado do result file (achados: ${codexLines.length})`);
+    `(a) os 5 emissores do caminho codex derivam o transporte do result file (achados: ${codexLines.length})`);
   assert(claudeLines.length + codexLines.length === all.length,
-    '(a) o censo PARTICIONA os 9 emissores — nenhum fica fora das duas classes');
+    '(a) o censo PARTICIONA os 10 emissores — nenhum fica fora das duas classes');
   for (const e of claudeLines) {
     assert(!e.line.includes('transport_version') && !e.line.includes('transport_reason'),
       '(a) o caminho claude NÃO emite transport_version nem transport_reason — versão só faz sentido com processo remoto, razão só com kind unknown',
@@ -15561,8 +15603,8 @@ function smokeTransportField() {
   // este repo já pagou três vezes. Cada predicado é rodado contra uma cópia
   // MUTADA que deveria reprová-lo.
   const autoText = sidecarSurface(FILES[0]);  // sidecar surface (2026-08-23)
-  const strippedField = autoText.replace(/,\$\{TRANSPORT_TAIL\}/g, '').replace(/,\\"transport\\":\\"in-process\\"/g, '');
-  assert(emitterLines(strippedField).some(l => !/transport/i.test(l)),
+  const strippedField = autoText.replace(/,\$\{TRANSPORT_TAIL\}/g, '').replace(/,\\"transport\\":\\"in-process\\"/g, '').replace(/ --transport [^\s\\]+/g, '');
+  assert(dispatchEmitterBlocks(strippedField).some(block => !/transport/i.test(block.text)),
     '(controle) o predicado do censo REPROVA uma cópia em que o campo foi removido');
   const strippedFence = autoText.replace(/XLLM_STATE=\$\(node "\$FORGE_SCRIPTS_DIR\/forge-xllm-state\.js" --mode read[^\n]*\n/g, '');
   const brokenFence = fenceContaining(strippedFence, 'plan-slice/${S##}');
@@ -15597,7 +15639,7 @@ function smokeTransportField() {
   assert(/\(\) => \{ smokeTransportField\(\); \}/.test(mainBody),
     '(f) Section 100 está registrada em main() por closure — seção não-registrada é seção que some em silêncio');
 
-  pass('(final) Section 100: os 9 emissores de dispatch carregam `transport` (5 do codex derivados do result file, 4 do '
+  pass('(final) Section 100: os 9 emissores de dispatch carregam `transport` (5 do codex derivados do result file, 5 do '
     + 'claude com a constante in-process e sem os companheiros), os fences da Branch D re-resolvem $RESULT_FILE neles '
     + 'mesmos, nenhum default de shell é otimista, o kind vem da presença do handshake, e a doc declara o significado da '
     + 'ausência — com controle positivo provando que cada predicado morde');
@@ -17494,6 +17536,534 @@ function smokeResourcesFlakeAndBenchGuard() {
     + 'restore prefs byte-identical (T04), and the bench anti-silence floor proven to bite bidirectionally via copy-mutation (T04)');
 }
 
+// ── Section 115: paridade host/worker — aceitação S01–S06 ──────────────────
+function smokeHostWorkerParityAcceptance() {
+  process.stdout.write('\n▸ Section 115: paridade host/worker — aceitação S01–S06\n');
+
+  const repoRoot = path.dirname(SCRIPTS);
+  const fixtureRoot = mkTmp('host-worker-parity-s01-s06');
+  const trackedWrites = [];
+  const spawnedScripts = [];
+  const capturedNonEnvSurfaces = [];
+  let fixtureRemoved = false;
+
+  const dispatchResolver = require('./forge-dispatch-resolve');
+  const claudeSidecar = require('./forge-claude-sidecar');
+  const forgeAccounts = require('./forge-accounts');
+  const forgeXllm = require('./forge-xllm');
+  const dispatchPolicy = require('./forge-dispatch-policy');
+  const codexRenderer = require('./forge-codex-renderer');
+  const sourceGuard = require('./forge-dispatch-source-guard');
+  const routeAudit = require('./forge-route-audit');
+
+  const inside = (base, target) => {
+    const relative = path.relative(path.resolve(base), path.resolve(target));
+    return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  };
+  const writeFixture = (target, content) => {
+    if (!inside(fixtureRoot, target)) throw new Error(`Section 115 fixture write escaped its root: ${target}`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content, 'utf8');
+    trackedWrites.push(path.resolve(target));
+  };
+  const thrownCode = (fn) => {
+    try { fn(); return null; } catch (error) { return error && error.code; }
+  };
+  const dispatchParts = (text) => {
+    const block = codexRenderer.locateDispatchBlock(text);
+    if (!block) return null;
+    return {
+      before: text.slice(0, block.start),
+      interior: text.slice(block.start, block.end),
+      after: text.slice(block.end),
+    };
+  };
+  const codexPostconditionProblems = (text) => {
+    let parts;
+    try { parts = dispatchParts(text); } catch (error) { return [`marker:${error.code || 'error'}`]; }
+    if (!parts) return ['marker:absent'];
+    const problems = [];
+    if (parts.interior.includes('Agent(')) problems.push('claude-agent-form-present');
+    if (parts.interior.includes('--host-runtime claude')) problems.push('claude-host-form-present');
+    if (!parts.interior.includes('spawn_agent(')) problems.push('codex-agent-form-absent');
+    if (!parts.interior.includes('--host-runtime codex')) problems.push('codex-host-form-absent');
+    return problems;
+  };
+  const runHermeticRouteAudit = (args, cwd, env) => {
+    spawnedScripts.push('forge-route-audit.js');
+    capturedNonEnvSurfaces.push(JSON.stringify(args), ''); // argv and stdin
+    const result = runScript('forge-route-audit.js', args, { cwd, env });
+    capturedNonEnvSurfaces.push(result.stdout, result.stderr);
+    return result;
+  };
+
+  try {
+    // ── A. S01 — same-family native derivation and explicit sidecar ────────
+    const nativeCodex = dispatchResolver.composeRuntimePosture(
+      dispatchResolver.runtimeFields({ hostRuntime: 'codex' }, 'codex'), {});
+    assert(nativeCodex.worker_engine === 'codex' && nativeCodex.worker_mode === 'native'
+      && nativeCodex.dispatch_allowed === true,
+    '(A/S01) omitted worker axes derive codex→codex native and allowed');
+
+    const declaredInput = {
+      hostRuntime: 'codex', workerEngine: 'codex', workerMode: 'sidecar', sidecarDeclared: true,
+    };
+    const declaredSidecar = dispatchResolver.composeRuntimePosture(
+      dispatchResolver.runtimeFields(declaredInput, 'codex'), {});
+    const sameFamilyProblems = (value) => {
+      const problems = [];
+      if (!value || value.host_runtime !== 'codex' || value.resolved_worker_engine !== 'codex') problems.push('identity');
+      if (!value || value.worker_mode !== 'sidecar') problems.push('mode');
+      if (!value || value.sidecar_declared !== true) problems.push('declaration');
+      if (!value || value.dispatch_allowed !== true) problems.push('allowance');
+      return problems;
+    };
+    assert(sameFamilyProblems(declaredSidecar).length === 0,
+      '(A/S01) explicit codex→codex sidecar is representable, declared and allowed');
+
+    const undeclaredInput = { ...declaredInput };
+    delete undeclaredInput.sidecarDeclared;
+    const undeclaredSidecar = dispatchResolver.composeRuntimePosture(
+      dispatchResolver.runtimeFields(undeclaredInput, 'codex'), {});
+    assert(undeclaredSidecar.dispatch_allowed === false
+      && undeclaredSidecar.dispatch_reason_code === 'implicit-recursion-refused',
+    '(A/S01) undeclared codex→codex sidecar is refused with the stable reason');
+    assert(sameFamilyProblems(undeclaredSidecar).includes('declaration')
+      && sameFamilyProblems(undeclaredSidecar).includes('allowance'),
+    '(A/S01) POSITIVE CONTROL: removing sidecar_declared makes the same green predicate bite');
+
+    // ── B. S02 — production posture over every host/worker quadrant ───────
+    const expectedQuadrants = [
+      { host: 'claude', worker: 'claude', mode: 'native', allowed: true, posture: 'observe' },
+      { host: 'claude', worker: 'codex', mode: 'sidecar', allowed: true, posture: 'observe' },
+      { host: 'codex', worker: 'claude', mode: 'sidecar', allowed: false, posture: 'enforce' },
+      { host: 'codex', worker: 'codex', mode: 'native', allowed: true, posture: 'observe' },
+    ];
+    const materializeQuadrant = (row, environment = {}) => {
+      const runtime = dispatchResolver.runtimeFields({
+        hostRuntime: row.host,
+        workerEngine: row.worker,
+      }, row.worker);
+      const posture = dispatchResolver.composeRuntimePosture(runtime, environment);
+      return {
+        host: posture.host_runtime,
+        worker: posture.worker_engine,
+        mode: posture.worker_mode,
+        allowed: posture.dispatch_allowed,
+        posture: posture.dispatch_posture,
+        reason: posture.dispatch_reason_code,
+      };
+    };
+    const actualQuadrants = expectedQuadrants.map((row) => materializeQuadrant(row));
+    const quadrantProblems = (rows) => {
+      const problems = [];
+      for (const expected of expectedQuadrants) {
+        const actual = rows.find((row) => row.host === expected.host && row.worker === expected.worker);
+        if (!actual) { problems.push(`${expected.host}->${expected.worker}:absent`); continue; }
+        for (const field of ['mode', 'allowed', 'posture']) {
+          if (actual[field] !== expected[field]) problems.push(`${expected.host}->${expected.worker}:${field}`);
+        }
+        if (expected.host === 'codex' && expected.worker === 'claude'
+          && actual.reason !== 'codex-claude-unroutable') {
+          problems.push('codex->claude:reason');
+        }
+      }
+      return problems;
+    };
+    assert(quadrantProblems(actualQuadrants).length === 0,
+      '(B/S02) runtimeFields + composeRuntimePosture materialize the four default quadrants and hybrid posture');
+
+    // The FORGE_RUNTIME_ENFORCE escape was removed (PR #164 review): posture is a
+    // total function of the identity, so no environment can move the enforcing leg.
+    const enforceBefore = process.env.FORGE_RUNTIME_ENFORCE;
+    const enforcingRow = expectedQuadrants.find((row) => row.host === 'codex' && row.worker === 'claude');
+    const enforcedBaseline = JSON.stringify(materializeQuadrant(enforcingRow));
+    for (const value of ['0', '00', 'false', '', 'off']) {
+      const attempted = materializeQuadrant(enforcingRow, { FORGE_RUNTIME_ENFORCE: value });
+      assert(attempted.allowed === false && attempted.posture === 'enforce'
+        && JSON.stringify(attempted) === enforcedBaseline,
+        `(B/S02) FORGE_RUNTIME_ENFORCE=${JSON.stringify(value)} must not unlock codex->claude`,
+        JSON.stringify(attempted));
+    }
+    // POSITIVE CONTROL: the same detector still bites when the leg IS allowed, so
+    // the assertion above is not passing because the detector went blind.
+    const forgedAllowance = actualQuadrants.map((row) => (
+      row.host === 'codex' && row.worker === 'claude' ? { ...row, allowed: true } : row
+    ));
+    assert(quadrantProblems(forgedAllowance).includes('codex->claude:allowed'),
+      '(B/S02) POSITIVE CONTROL: the default-table detector rejects an allowed codex->claude leg');
+    assert(process.env.FORGE_RUNTIME_ENFORCE === enforceBefore,
+      '(B/S02) the posture probe never mutates process.env');
+
+    // ── C. S03 — account-backed Claude adapter and credential boundary ────
+    const TOKEN_ENV = forgeAccounts.TOKEN_ENV;
+    const fixtureToken = 'fixture-claude-token-section-115';
+    const fixtureAccount = Object.freeze({ name: 'fixture-default', token: fixtureToken });
+    const sourceEnv = Object.freeze({
+      PATH: 'fixture-path',
+      HOME: path.join(fixtureRoot, 'fixture-home'),
+      SystemRoot: 'fixture-system-root',
+      LANG: 'pt_BR.UTF-8',
+      ANTHROPIC_AUTH_TOKEN: 'ambient-token-must-not-win',
+      ANTHROPIC_API_KEY: 'ambient-anthropic-key',
+      OPENAI_API_KEY: 'ambient-openai-key',
+      GEMINI_API_KEY: 'ambient-gemini-key',
+      SERVICE_PASSWORD: 'ambient-password',
+      FORGE_ACCOUNT: 'ambient-account',
+    });
+    const claudeEnv = claudeSidecar.buildClaudeSidecarEnv(fixtureAccount, sourceEnv, 'win32');
+    const forbiddenClaudeEnv = [
+      'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'SERVICE_PASSWORD',
+    ];
+    const claudeBoundaryProblems = (env) => {
+      const problems = [];
+      if (!env || env[TOKEN_ENV] !== fixtureAccount.token) problems.push('account-token');
+      if (!env || env.FORGE_ACCOUNT !== fixtureAccount.name) problems.push('account-name');
+      if (!env || env.PATH !== sourceEnv.PATH || env.HOME !== sourceEnv.HOME
+        || env.SystemRoot !== sourceEnv.SystemRoot || env.LANG !== sourceEnv.LANG) problems.push('operational-env');
+      for (const key of forbiddenClaudeEnv) {
+        if (env && Object.prototype.hasOwnProperty.call(env, key)) problems.push(`credential:${key}`);
+      }
+      return problems;
+    };
+    assert(claudeBoundaryProblems(claudeEnv).length === 0
+      && claudeEnv[TOKEN_ENV] !== sourceEnv[TOKEN_ENV],
+    '(C/S03) Claude child env is account-backed, allowlisted and replaces ambient auth');
+    assert(thrownCode(() => claudeSidecar.buildClaudeSidecarEnv(null, sourceEnv, 'win32'))
+      === 'claude-account-unavailable',
+    '(C/S03) an absent synthetic account fails with claude-account-unavailable before launch');
+
+    const leakedClaudeEnv = { ...claudeEnv, OPENAI_API_KEY: 'forbidden-copy-mutation' };
+    assert(claudeBoundaryProblems(leakedClaudeEnv).includes('credential:OPENAI_API_KEY'),
+      '(C/S03) POSITIVE CONTROL: inserting a forbidden credential makes the same boundary detector bite');
+
+    const genericSidecarEnv = forgeXllm.buildSidecarEnv('inherit', sourceEnv, 'win32');
+    const genericCredentialKeys = [
+      TOKEN_ENV, 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'SERVICE_PASSWORD',
+    ];
+    assert(genericCredentialKeys.every((key) => !Object.prototype.hasOwnProperty.call(genericSidecarEnv, key))
+      && claudeEnv[TOKEN_ENV] === fixtureToken,
+    '(C/S03 security) generic buildSidecarEnv strips credentials; only forge-claude-sidecar receives account auth');
+
+    const policyDecision = dispatchPolicy.decide({
+      role: 'worker',
+      host_runtime: 'claude',
+      worker_engine: 'codex',
+      worker_mode: 'sidecar',
+      sidecar_declared: true,
+      operation: 'spawn',
+      sandbox_mode: 'workspace-write',
+      required_capabilities: ['process.spawn', 'workspace.write'],
+      available_capabilities: ['process.spawn', 'workspace.write'],
+      workspace_root: fixtureRoot,
+      spawn_cwd: fixtureRoot,
+    });
+    assert(policyDecision.decision === 'allow' && policyDecision.grants.length === 0
+      && policyDecision.permissions.credential_env === false,
+    '(C/S03 security) sidecar policy remains allow-without-grants and credential_env:false');
+    const realProviderTokenPrefix = ['sk', 'ant'].join('-') + '-';
+    assert(!fixtureToken.startsWith(realProviderTokenPrefix)
+      && !Object.values(sourceEnv).some((value) => String(value).startsWith(realProviderTokenPrefix)),
+    '(C/S03 security) every credential value in the fixture is visibly dummy, never a real token form');
+
+    const simulatedProviderTransport = {
+      argv: ['fixture-provider', '-p', 'read fixture prompt'],
+      stdin: 'fixture prompt without credentials',
+      stdout: '{"status":"done"}',
+      stderr: '',
+      resultFile: '{"status":"done","summary":"fixture"}',
+    };
+    capturedNonEnvSurfaces.push(...Object.values(simulatedProviderTransport));
+    assert(Object.values(simulatedProviderTransport).every((value) => !String(value).includes(fixtureToken)),
+      '(C/S03 security) the account token is absent from argv, stdin, stdout, stderr and result-file surfaces');
+
+    // ── D. S04 — fenced, single-pass renderer rewrite ─────────────────────
+    const startMarker = codexRenderer.DISPATCH_MARKER_START;
+    const endMarker = codexRenderer.DISPATCH_MARKER_END;
+    const rendererFixture = [
+      'Outside prose keeps Agent(example) and --host-runtime claude byte-identical.',
+      startMarker,
+      "const worker = Agent({ subagent_type: 'forge-executor' });",
+      'node forge-dispatch-resolve.js --host-runtime claude --json',
+      endMarker,
+      'Outside tail also names Agent(example) and --host-runtime claude.',
+      '',
+    ].join('\n');
+    const renderedFixture = codexRenderer.rewriteDispatchDialect(
+      rendererFixture, codexRenderer.PRODUCTION_DISPATCH_DIALECT);
+    const rawParts = dispatchParts(rendererFixture);
+    const renderedParts = dispatchParts(renderedFixture);
+    assert(rawParts && renderedParts && rawParts.before === renderedParts.before
+      && rawParts.after === renderedParts.after,
+    '(D/S04) bytes outside the dispatch fence remain identical');
+    assert(codexPostconditionProblems(renderedFixture).length === 0,
+      '(D/S04) only the managed interior becomes spawn_agent + codex and retains no Claude operational form');
+    assert(renderedParts && !renderedParts.before.includes('spawn_agent(')
+      && !renderedParts.after.includes('--host-runtime codex'),
+    '(D/S04) Codex substitutions are confined to the managed interior');
+
+    const singlePassFixture = codexRenderer.rewriteDispatchDialect(rendererFixture, {
+      agentInvocation: 'spawn_agent(--host-runtime claude, Agent(',
+      hostRuntime: 'codex',
+    });
+    const singlePassInterior = dispatchParts(singlePassFixture).interior;
+    assert(singlePassInterior.includes('spawn_agent(--host-runtime claude, Agent(')
+      && singlePassInterior.includes('--host-runtime codex'),
+    '(D/S04) generated replacement text is opaque and is not rescanned in the same pass');
+
+    const duplicatedMarker = rendererFixture.replace(startMarker, `${startMarker}\n${startMarker}`);
+    const incompleteMarker = rendererFixture.replace(`${endMarker}\n`, '');
+    assert(thrownCode(() => codexRenderer.rewriteDispatchDialect(
+      duplicatedMarker, codexRenderer.PRODUCTION_DISPATCH_DIALECT))
+      === codexRenderer.DISPATCH_REASON.DUPLICATE_START,
+    '(D/S04) duplicate start marker fails with its named reason code');
+    assert(thrownCode(() => codexRenderer.rewriteDispatchDialect(
+      incompleteMarker, codexRenderer.PRODUCTION_DISPATCH_DIALECT))
+      === codexRenderer.DISPATCH_REASON.START_WITHOUT_END,
+    '(D/S04) incomplete marker pair fails with its named reason code');
+    const preRenderProblems = codexPostconditionProblems(rendererFixture);
+    assert(preRenderProblems.includes('claude-agent-form-present')
+      && preRenderProblems.includes('claude-host-form-present'),
+    '(D/S04) POSITIVE CONTROL: the same postcondition detector rejects the contaminated pre-render fixture');
+
+    // ── E. S05 — bidirectional source registry and in-memory projections ──
+    const cleanSourceReport = sourceGuard.audit({ root: repoRoot });
+    assert(cleanSourceReport.ok === true && cleanSourceReport.unexpected.length === 0
+      && cleanSourceReport.missing.length === 0 && cleanSourceReport.errors.length === 0,
+    '(E/S05) real source audit is bidirectionally equal and structurally clean');
+
+    const discovery = sourceGuard.discover(repoRoot);
+    const discoveredByIdentity = new Map(discovery.candidates.map((item) => [sourceGuard.identity(item), item]));
+    const projectedSkillProblems = [];
+    for (const relative of sourceGuard.PROJECTED_SKILLS) {
+      const source = fs.readFileSync(path.join(repoRoot, relative), 'utf8');
+      const markerState = sourceGuard.markerState(source);
+      if (!markerState.pair || markerState.errors.length > 0) projectedSkillProblems.push(`${relative}:markers`);
+      const projected = codexRenderer.rewriteDispatchDialect(source, codexRenderer.PRODUCTION_DISPATCH_DIALECT);
+      const postcondition = codexPostconditionProblems(projected);
+      for (const problem of postcondition) projectedSkillProblems.push(`${relative}:${problem}`);
+
+      const sourceLines = source.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+      const gateLine = sourceLines.findIndex((line) => line.trim() === 'if [ "$DISPATCH_ALLOWED" != "true" ]; then') + 1;
+      const launchEntries = sourceGuard.SOURCE_REGISTRY
+        .filter((entry) => entry.path === relative && entry.kind === 'agent' && entry.classification === 'operational')
+        .map((entry) => discoveredByIdentity.get(sourceGuard.identity(entry)))
+        .filter(Boolean)
+        .filter((candidate) => {
+          const line = candidate.evidence.trim();
+          return /^(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?Agent\(\{$/.test(line)
+            || /^Agent\(\{\s*subagent_type:/.test(line);
+        });
+      if (gateLine <= 0 || launchEntries.length === 0
+        || launchEntries.some((candidate) => candidate.line <= gateLine)) {
+        projectedSkillProblems.push(`${relative}:dispatch-allowed-not-consumed-before-launch`);
+      }
+
+      const operationalEntries = sourceGuard.SOURCE_REGISTRY
+        .filter((entry) => entry.path === relative && entry.classification === 'operational'
+          && ['resolver', 'agent'].includes(entry.kind));
+      for (const entry of operationalEntries) {
+        const candidate = discoveredByIdentity.get(sourceGuard.identity(entry));
+        if (!candidate || !markerState.pair
+          || !(candidate.line - 1 > markerState.pair.start && candidate.line - 1 < markerState.pair.end)) {
+          projectedSkillProblems.push(`${relative}:${entry.id}:outside-fence`);
+        }
+      }
+    }
+    assert(projectedSkillProblems.length === 0,
+      '(E/S05) every exported projected skill has valid fences, a pre-launch allowance gate and a clean Codex projection',
+      projectedSkillProblems.join(', '));
+
+    const operationalEmitters = sourceGuard.SOURCE_REGISTRY
+      .filter((entry) => entry.kind === 'emitter' && entry.classification === 'operational');
+    const emitterProblems = [];
+    let canonicalEmitters = 0;
+    for (const entry of operationalEmitters) {
+      const candidate = discoveredByIdentity.get(sourceGuard.identity(entry));
+      if (!candidate) { emitterProblems.push(`${entry.id}:absent`); continue; }
+      if (sourceGuard.isCanonicalEmitter(candidate)) {
+        // The canonical emitter renders the posture axes itself (and refuses to
+        // write a line that cannot name them — forge-dispatch-event.test.js). The
+        // call site must hand it the resolver contract, the unit, and the log.
+        for (const flag of ['--route-json', '--unit', '--events']) {
+          if (!candidate.context.includes(flag)) emitterProblems.push(`${entry.id}:${flag}`);
+        }
+        canonicalEmitters += 1;
+        continue;
+      }
+      for (const field of ['host_runtime', 'worker_mode', 'dispatch_allowed']) {
+        if (!new RegExp(`(?:\\\\?"${field}\\\\?"|${field})\\s*:`).test(candidate.context)) {
+          emitterProblems.push(`${entry.id}:${field}`);
+        }
+      }
+    }
+    assert(operationalEmitters.length > 0 && emitterProblems.length === 0 && canonicalEmitters === 6,
+      '(E/S05) every discovered operational emitter carries the posture axes: the six skill sites through the single emitter, the mirrors inline',
+      `${emitterProblems.join(', ')} | canonical=${canonicalEmitters}`);
+
+    const removedRegistryEntry = sourceGuard.SOURCE_REGISTRY[0];
+    const registryMutation = sourceGuard.SOURCE_REGISTRY.slice(1);
+    const mutatedSourceReport = sourceGuard.audit({ root: repoRoot, registry: registryMutation });
+    assert(mutatedSourceReport.ok === false && removedRegistryEntry
+      && mutatedSourceReport.unexpected.some((item) => (
+        item.path === removedRegistryEntry.path && item.kind === removedRegistryEntry.kind
+          && item.fingerprint === removedRegistryEntry.fingerprint
+      )),
+    '(E/S05) POSITIVE CONTROL: removing one exported registry row exposes its real disk candidate as unexpected');
+
+    // ── F. S06 — real CLI quadrants, legacy absence and anti-silence ──────
+    const hermeticHome = path.join(fixtureRoot, 'operator-isolation-home');
+    fs.mkdirSync(hermeticHome, { recursive: true });
+    trackedWrites.push(path.resolve(hermeticHome));
+    const hermeticEnv = {
+      PATH: process.env.PATH || process.env.Path || '',
+      HOME: hermeticHome,
+      USERPROFILE: hermeticHome,
+      TEMP: fixtureRoot,
+      TMP: fixtureRoot,
+      SystemRoot: process.env.SystemRoot || process.env.SYSTEMROOT || '',
+      ComSpec: process.env.ComSpec || process.env.COMSPEC || '',
+      PATHEXT: process.env.PATHEXT || '',
+      FORGE_ACCOUNTS_REGISTRY: path.join(hermeticHome, 'absent-accounts.json'),
+    };
+    assert(hermeticEnv.HOME === hermeticHome && hermeticEnv.USERPROFILE === hermeticHome
+      && !fs.existsSync(hermeticEnv.FORGE_ACCOUNTS_REGISTRY)
+      && genericCredentialKeys.every((key) => !Object.prototype.hasOwnProperty.call(hermeticEnv, key)),
+    '(F/G isolation) child HOME, account registry and credential environment are explicit fixture-only values');
+
+    const slice = 'S06';
+    const milestone = 'M115';
+    const event = (unit, engine, runtime = {}) => ({
+      event: 'dispatch', milestone, slice, unit, engine, ...runtime,
+    });
+    const completeEvents = [
+      event('execute-task/T01', 'claude', { host_runtime: 'claude', worker_mode: 'native', dispatch_allowed: true }),
+      event('execute-task/T02', 'codex', { host_runtime: 'claude', worker_mode: 'sidecar', dispatch_allowed: true }),
+      event('execute-task/T03', 'claude', { host_runtime: 'codex', worker_mode: 'sidecar', dispatch_allowed: false }),
+      event('execute-task/T04', 'codex', { host_runtime: 'codex', worker_mode: 'native', dispatch_allowed: true }),
+    ];
+    const completeWorld = path.join(fixtureRoot, 'quadrants');
+    const completeEventsFile = path.join(completeWorld, 'events.jsonl');
+    const completeSummary = path.join(completeWorld, '.gsd', `${slice}-SUMMARY.md`);
+    writeFixture(completeEventsFile, completeEvents.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
+    writeFixture(completeSummary, '# Summary\n\n## Route Notes\nkeep\n\n## Forward Intelligence\nkeep too\n');
+    const completeArgs = [
+      '--slice', slice, '--milestone', milestone, '--cwd', completeWorld,
+      '--events', completeEventsFile, '--write', completeSummary, '--json',
+    ];
+    const completeFirst = runHermeticRouteAudit(completeArgs, completeWorld, hermeticEnv);
+    const completeResult = JSON.parse(completeFirst.stdout);
+    const completeOnce = fs.readFileSync(completeSummary, 'utf8');
+    capturedNonEnvSurfaces.push(completeOnce);
+    const completeSecond = runHermeticRouteAudit(completeArgs, completeWorld, hermeticEnv);
+    const completeTwice = fs.readFileSync(completeSummary, 'utf8');
+    capturedNonEnvSurfaces.push(completeTwice);
+    assert(completeFirst.status === 0 && completeSecond.status === 0
+      && completeResult.runtime_coverage.complete === completeEvents.length
+      && completeResult.runtime_coverage.total === completeEvents.length
+      && completeResult.runtime_coverage.incomplete === 0,
+    '(F/S06) real CLI reports every host/worker quadrant as runtime-complete');
+    assert((completeTwice.match(/^## Route$/gm) || []).length === 1
+      && completeEvents.every((entry) => completeTwice.includes(
+        `Runtime ${entry.unit}: host=${entry.host_runtime}; worker=${entry.engine}; mode=${entry.worker_mode}; allowed=${entry.dispatch_allowed}.`)),
+    '(F/S06) one audible Route section contains the observed values for every quadrant');
+    assert(completeOnce === completeTwice,
+      '(F/S06) repeated complete-quadrant write is byte-identical');
+
+    const legacyEvents = [
+      event('execute-task/T11', 'claude'),
+      event('execute-task/T12', 'codex'),
+    ];
+    const legacyWorld = path.join(fixtureRoot, 'legacy-absence');
+    const legacyEventsFile = path.join(legacyWorld, 'events.jsonl');
+    const legacySummary = path.join(legacyWorld, '.gsd', `${slice}-SUMMARY.md`);
+    writeFixture(legacyEventsFile, legacyEvents.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
+    writeFixture(legacySummary, '# Summary\n\n## Forward Intelligence\nkeep\n');
+    const legacyArgs = [
+      '--slice', slice, '--milestone', milestone, '--cwd', legacyWorld,
+      '--events', legacyEventsFile, '--write', legacySummary, '--json',
+    ];
+    const legacyFirst = runHermeticRouteAudit(legacyArgs, legacyWorld, hermeticEnv);
+    const legacyResult = JSON.parse(legacyFirst.stdout);
+    const legacyOnce = fs.readFileSync(legacySummary, 'utf8');
+    capturedNonEnvSurfaces.push(legacyOnce);
+    const legacySecond = runHermeticRouteAudit(legacyArgs, legacyWorld, hermeticEnv);
+    const legacyTwice = fs.readFileSync(legacySummary, 'utf8');
+    capturedNonEnvSurfaces.push(legacyTwice);
+    assert(legacyFirst.status === 0 && legacySecond.status === 0
+      && legacyResult.runtime_coverage.total === legacyEvents.length
+      && legacyResult.runtime_coverage.complete === 0
+      && legacyResult.runtime_coverage.incomplete === legacyEvents.length
+      && legacyResult.runtime_coverage.missing.host_runtime === legacyEvents.length
+      && legacyResult.runtime_coverage.missing.worker_engine === 0
+      && legacyResult.runtime_coverage.missing.worker_mode === legacyEvents.length
+      && legacyResult.runtime_coverage.missing.dispatch_allowed === legacyEvents.length,
+    '(F/S06) legacy events remain parseable and report exact per-field absence counts');
+    assert((legacyTwice.match(/^## Route$/gm) || []).length === 1
+      && legacyResult.units.every((unit) => unit.host_runtime === undefined
+        && unit.worker_mode === undefined && unit.dispatch_allowed === undefined)
+      && legacyEvents.every((entry) => legacyTwice.includes(
+        `Runtime ${entry.unit}: host=ausente; worker=${entry.engine}; mode=ausente; allowed=ausente.`)),
+    '(F/S06) absent runtime fields stay absent in JSON and render as ausente, never copied from current prefs or a neighbour');
+    assert(legacyOnce === legacyTwice,
+      '(F/S06) repeated legacy write is byte-identical and retains one Route section');
+
+    const coverageProblems = (coverage, expectedComplete, expectedTotal) => {
+      const problems = [];
+      if (!coverage || coverage.complete !== expectedComplete) problems.push('complete');
+      if (!coverage || coverage.total !== expectedTotal) problems.push('total');
+      if (!coverage || coverage.incomplete !== expectedTotal - expectedComplete) problems.push('incomplete');
+      for (const field of ['host_runtime', 'worker_engine', 'worker_mode', 'dispatch_allowed']) {
+        if (!coverage || coverage.missing[field] !== 0) problems.push(`missing:${field}`);
+      }
+      return problems;
+    };
+    const completeUnits = routeAudit.aggregateUnits(completeEvents, {
+      slice, milestone, milestone_aliases: new Set(),
+    });
+    assert(coverageProblems(routeAudit.runtimeCoverage(completeUnits), completeEvents.length, completeEvents.length).length === 0,
+      '(F/S06) the API coverage predicate agrees with the complete CLI fixture');
+    const missingHostMutation = completeEvents.map((entry) => ({ ...entry }));
+    delete missingHostMutation[0].host_runtime;
+    const mutatedUnits = routeAudit.aggregateUnits(missingHostMutation, {
+      slice, milestone, milestone_aliases: new Set(),
+    });
+    assert(coverageProblems(routeAudit.runtimeCoverage(mutatedUnits), completeEvents.length, completeEvents.length)
+      .includes('missing:host_runtime'),
+    '(F/S06) POSITIVE CONTROL: removing host_runtime makes the same complete-coverage detector bite');
+
+    // ── G. registration, anti-silence, offline scope and fixture isolation ─
+    const selfSource = fs.readFileSync(__filename, 'utf8');
+    const mainBody = selfSource.slice(selfSource.lastIndexOf('async function main()'));
+    const acceptanceIndex = mainBody.indexOf('() => { smokeHostWorkerParityAcceptance(); }');
+    const isolationIndex = mainBody.indexOf('async () => { await smokeSectionIsolation(); }');
+    assert(/\(\) => \{ smokeHostWorkerParityAcceptance\(\); \}/.test(mainBody)
+      && acceptanceIndex >= 0 && isolationIndex > acceptanceIndex,
+    '(G) Section 115 is registered by closure while the harness-isolation guard remains last');
+    assert(spawnedScripts.length > 0 && spawnedScripts.every((name) => name === 'forge-route-audit.js'),
+      '(G security) every child process is the offline route-audit CLI; no provider process is spawned');
+    assert(capturedNonEnvSurfaces.length > 0
+      && capturedNonEnvSurfaces.every((value) => !String(value).includes(fixtureToken)),
+    '(G security) the dummy account token never reaches any captured argv/stdin/stdout/stderr/result or summary surface');
+    assert(trackedWrites.length > 0 && trackedWrites.every((target) => inside(fixtureRoot, target))
+      && !inside(repoRoot, fixtureRoot)
+      && trackedWrites.filter((target) => target.split(path.sep).includes('.gsd')).every((target) => inside(fixtureRoot, target)),
+    '(G isolation) every section write, including .gsd summaries, is confined to the temporary fixture outside the checkout');
+    assert([completeFirst, completeSecond, legacyFirst, legacySecond]
+      .every((result) => result.stdout.trim().split(/\r?\n/).filter(Boolean).length > 0),
+    '(G anti-silence) every clean CLI scenario emits parseable non-empty output');
+  } finally {
+    // Acceptance isolation overrides the suite's --keep debug switch: credential
+    // fixtures and synthetic homes must not survive either a green or red path.
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    fixtureRemoved = !fs.existsSync(fixtureRoot);
+  }
+
+  assert(fixtureRemoved, '(G isolation) the complete fixture world is removed in finally');
+  pass('(final) Section 115: aceitação integrada S01–S06, controles positivos, isolamento de credenciais, '
+    + 'source guard bidirecional, renderer cercado e Route anti-silêncio verificados offline');
+}
+
 async function main() {
   process.stdout.write('forge-smoke — M004+ multi-run primitives\n');
   process.stdout.write('─'.repeat(50) + '\n');
@@ -17623,6 +18193,7 @@ async function main() {
       () => { smokeResourcesFlakeAndBenchGuard(); },
       () => { smokeRoutingContractProjection(); },
       () => { smokeVersionTagLine(); },
+      () => { smokeHostWorkerParityAcceptance(); },
       async () => { await smokeSectionIsolation(); },
     ]) await runSection(body);
   } catch (e) {

@@ -327,18 +327,21 @@ como pass.
 
 ## Estado atual
 
-- **Milestone ativo:** — (nenhum em curso).
+- **Milestone ativo:** `M-20260825215030-paridade-host-worker` — paridade host/worker no dispatch
+  multi-LLM. S01–S03 fechadas; a próxima é S04 (dialeto Codex no renderer), ainda **não planejada**.
 - **Master:** verde — 39 dos últimos 40 runs de CI passando nas três plataformas (medido
   2026-08-23); o vermelho herdado dos merges #91/#94/#98 foi fechado nas semanas seguintes.
-- **Suíte local:** 213/214 — única falha conhecida: `forge-update.test.js` hardcoda
-  `origin/master` e quebra em máquina com `init.defaultBranch=main` (a defesa já existe em
-  `forge-curate-skill.test.js:82`; aplicar o mesmo padrão).
+- **Suíte local:** 235/237 (medido 2026-08-27 no worktree da run, `node scripts/run-tests.js`,
+  704s). Duas falhas, ambas confirmadas **pré-existentes no master** rodando as suítes no
+  checkout limpo: `forge-claim-recovery.test.js` e `forge-resources-bench.test.js` — esta última
+  falha no controlador de Ctrl+C do Windows (`scripts/fixtures/forge-windows-ctrl-c.ps1:257`,
+  `post-event-timeout`). A nota antiga ("213/214 — `forge-update.test.js` hardcoda
+  `origin/master`") está superada: aquela suíte passa hoje; o número e a causa mudaram.
 - **Backlog:** `.gsd/items/` (14 abertos) — destaque: heap/RSS (`I-20260814021202`,
   `I-20260815042402`), 5 flakies (`I-20260814142227`), `discoverRepos` 1 nível
   (`I-20260803060030`).
 - **Em curso:** P0 do diagnóstico de 2026-08-23 — verification gate no-op (133/133 sem
   comando), dieta de contexto (este arquivo), effort decorativo, gates advisory inertes.
-
 
 ## GSD — Início de sessão obrigatório (dogfood)
 

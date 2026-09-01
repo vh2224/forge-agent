@@ -197,10 +197,16 @@ Then proceed with dispatch normally (the executor will overwrite the partial wor
 
 **Effort is resolved in step 1.55 below** (after tier resolution), because the per-model capability clamp needs the resolved `$MODEL_ID`. Do NOT resolve effort here.
 
+<!-- forge:dispatch:start -->
+
 **Resolver args (step 1.45).** As of M012 S02 the entire dispatch resolution (engine decision + tier-chain + domain + effort + alias) **collapses into ONE call** to `forge-dispatch-resolve.js` (made in step 1.5 below). This step resolves only the *file* args that call consumes: `$PLAN_PATH` (execute-task frontmatter source) and `$ROADMAP_PATH` (domain tag + risk-escalation source). Everything else — `$ENGINE`, `$DOMAIN_USED`, `$WORKERS_TIMEOUT`, `$CODEX_MODEL`, `$MODEL_ALIAS`, `$TIER`, `$EFFORT` — is emitted by the resolver. Thin caller of `shared/forge-dispatch.md § Worker Engine Routing` (canonical). `forge-next` is sequential — no parallel-batch — so this is simpler than `forge-auto`; the resolver contract (vars, reasons, event) is otherwise identical to the `forge-auto` mirror.
 > Cross-reference: `shared/forge-dispatch.md § Worker Engine Routing` (single-call resolver, route_source table, prefs reader, sidecar state machine, fallback) + `scripts/forge-dispatch-resolve.js` (S01). Any change lands there first, then propagates here.
 
-When the resolved `$DISPATCH_ENGINE == codex` **and** `$unit_type == execute-task`, the Claude machinery below (alias warning, timeline, guarded `Agent()`) is **skipped** (Codex resolves its own model via the sidecar) — it runs only on the Claude path, including the fallback. When `$DISPATCH_ENGINE == codex` **and** `$unit_type == plan-slice`, the Claude machinery is likewise **skipped** — Branch D (sidecar plan, read-only) fires instead. `$DISPATCH_ENGINE == claude` (or `codex` for a non-routable unit) → control flows straight to the Claude dispatch (byte-identical to the current loop). `execute-task` and `plan-slice` (**active — S03**) are the two routable unit types. (`DISPATCH_ENGINE` is the additive normalized dispatch trigger — `gpt→codex`, `gemini→agy`, else `claude`; `$ENGINE`/`chain[].engine` stay family for events.)
+The runtime gate is the delivery boundary. After it allows the unit, `WORKER_MODE == native`
+uses the canonical `Agent()` form below; the Codex projection alone rewrites that form to
+`spawn_agent()`. `WORKER_MODE == sidecar` loads `shared/forge-sidecar-next.md` on demand for
+the supported execute/plan adapters. `DISPATCH_ENGINE` remains adapter and telemetry metadata;
+it never selects native versus sidecar delivery.
 
 ```bash
 # ── Resolver args (all pure resolution folded into forge-dispatch-resolve.js — step 1.5) ──
@@ -215,10 +221,23 @@ if [ "$unit_type" = "execute-task" ]; then
 fi
 ROADMAP_PATH=".gsd/milestones/${M###}/${M###}-ROADMAP.md"
 ```
-`$PLAN_PATH`, `$ROADMAP_PATH` are now set — the *file* inputs the shared resolver reads. `$ENGINE`/`$ENGINE_REASON`/`$DOMAIN_USED`/`$WORKERS_TIMEOUT`/`$CODEX_MODEL` are resolved **inside** the single `forge-dispatch-resolve.js` call (step 1.5). The Step 4 dispatch then branches on `$ENGINE`.
+`$PLAN_PATH`, `$ROADMAP_PATH` are now set — the *file* inputs the shared resolver reads. `$ENGINE`/`$ENGINE_REASON`/`$DOMAIN_USED`/`$WORKERS_TIMEOUT`/`$CODEX_MODEL` and the runtime verdict are resolved **inside** the single `forge-dispatch-resolve.js` call (step 1.5). The Step 4 dispatch branches on `$WORKER_MODE`.
 
-**Dispatch resolution (step 1.5)** — resolve `{engine, model, alias, tier, domain, route_source, chain, chain_len, reason, effort, effort_reason}` for this dispatch via the **SINGLE `forge-dispatch-resolve.js --json` call**. This one call folds the former Route-resolution-inputs + Tier Resolution + engine-by-route_source + Effort Resolution + Alias Resolution bash — a thin caller now, all pure resolution lives in the resolver. The **tier-chain cursor (Step 4b)** still runs AFTER the resolver as a consume-once override of `$MODEL_ID`/`$ENGINE`/`$DISPATCH_ENGINE`/`$REASON` (the cursor's persisted `engine` is the normalized dispatch-engine — set `$DISPATCH_ENGINE` from it when the cursor is consumed). Once `$DISPATCH_ENGINE` is known: **when `$DISPATCH_ENGINE == codex` && `$unit_type == execute-task`, skip the alias warning and the Claude `Agent()` machinery** — the sidecar resolves its own model. Alias/`Agent()` run only on the Claude path (including the `worker-engine-fallback` path, which re-enters them).
+**Dispatch resolution (step 1.5)** — resolve `{engine, model, alias, tier, domain, route_source, chain, chain_len, reason, effort, effort_reason}` plus the canonical runtime verdict through the **single `forge-dispatch-resolve.js --json` call**. The consume-once tier cursor remains a next-invocation checkpoint: its worker engine is supplied to this same resolver before dispatch, but the cursor is deleted only after an allowed verdict. A refusal therefore preserves the durable advance for the operator's next attempt. No cursor path dispatches or retries in the current invocation.
 > Cross-reference: `shared/forge-dispatch.md § Tier Resolution` + `§ Worker Engine Routing → Single-call resolver` + `§ Effort Resolution` (algorithm) and `shared/forge-tiers.md` (canonical tables). The resolver internally calls `forge-routing.js` (cross-engine chain), `forge-model-alias.js` (alias), and applies the tier/effort defaults + precedence + risk-escalation + model-cap clamp.
+
+**Step dispatch refusal boundary (main and review-fix):** the per-run state and any tier cursor
+already point at the unit that has not started. Print the stable resolver diagnostics and end this
+`/forge-next` invocation. Do not create a timeline task, launch another worker, consume the cursor,
+or perform the unit inline. The non-zero shell exit is the stop signal that returns control to the
+operator; it does not mutate the already-durable cursor/state.
+
+```bash
+dispatch_refusal_stop() {
+  printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  return 2
+}
+```
 
 ```bash
 # ── Dispatch resolution (single call to the shared resolver) ─────────────────────
@@ -227,10 +246,23 @@ ROADMAP_PATH=".gsd/milestones/${M###}/${M###}-ROADMAP.md"
 # tier/effort default map or a frontmatter/clamp regex here — that pure logic lives ONLY in the
 # resolver now (S01). See shared/forge-dispatch.md § Worker Engine Routing.
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+
+# Step 4b consume-once cursor is read before resolution so its worker identity passes through the
+# same runtime guard. It remains on disk until the verdict is allowed; refusal/error preserves it.
+TIER_CURSOR_FILE="$WORKING_DIR/.gsd/forge/tier-cursor-${RUN_ID:-legacy}-${unit_type}-${unit_id}.json"
+CURSOR_MODEL=""; CURSOR_ENGINE=""; RESOLVER_WORKER_ARGS=()
+if [ -f "$TIER_CURSOR_FILE" ]; then
+  CURSOR_MODEL=$(node -pe "(JSON.parse(require('fs').readFileSync('$TIER_CURSOR_FILE','utf8')).model)||''" 2>/dev/null)
+  CURSOR_ENGINE=$(node -pe "(JSON.parse(require('fs').readFileSync('$TIER_CURSOR_FILE','utf8')).engine)||''" 2>/dev/null)
+  if [ -n "$CURSOR_MODEL" ]; then
+    [ -z "$CURSOR_ENGINE" ] && { case "$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --family "$CURSOR_MODEL" 2>/dev/null)" in gpt) CURSOR_ENGINE=codex;; *) CURSOR_ENGINE=claude;; esac; }
+    RESOLVER_WORKER_ARGS=(--worker-engine "$CURSOR_ENGINE")
+  fi
+fi
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
   --unit-type "$unit_type" --plan "$PLAN_PATH" --unit-id "$unit_id" \
   --milestone "${RUN_ID:-{M###}}" --roadmap "$ROADMAP_PATH" \
-  --cwd "$WORKING_DIR" --json)   # SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018)
+  --host-runtime claude "${RESOLVER_WORKER_ARGS[@]}" --cwd "$WORKING_DIR" --json)   # host canônico; renderer projeta codex. SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018)
 if [ $? -ne 0 ]; then
   # prefs_ok:false → resolver exit 1 (M008-CONTEXT #2 loud-stop; the Load-context prefs gate stays too).
   echo "✗ dispatch resolver halted (prefs error) — see forge-dispatch-resolve.js prefs_errors" >&2
@@ -241,8 +273,29 @@ fi
 # MODEL_ID, MODEL_ALIAS, TIER, REASON, DOMAIN_USED, ROUTE_SOURCE, CHAIN_LEN,
 # ENGINE, DISPATCH_ENGINE, ENGINE_REASON, EFFORT, EFFORT_REASON, WORKERS_TIMEOUT,
 # CODEX_MODEL, SIDECAR_MODEL, THINKING_HEADER, DOMAIN, PLAN_TIER, PLAN_WORKER,
-# ROUTING_PRESENT, MODEL_APPLIED_JSON, unit_effort — all eval-safe single-quoted.
+# ROUTING_PRESENT, MODEL_APPLIED_JSON, unit_effort, HOST_RUNTIME, WORKER_ENGINE,
+# RESOLVED_WORKER_ENGINE, WORKER_MODE, DISPATCH_ALLOWED, DISPATCH_REASON_CODE,
+# DISPATCH_HINT, DISPATCH_DECISION, SIDECAR_DECLARED — all eval-safe single-quoted.
 eval "$(printf '%s' "$ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)"
+if [ "$DISPATCH_ALLOWED" != "true" ]; then
+  dispatch_refusal_stop
+  exit 2                         # terminal step boundary; no timeline, worker, cursor consume, or inline fallback
+fi
+if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
+  printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  # Advisory is observation only: the resolved runtime/routing fields remain unchanged.
+fi
+
+# Step 4b consume: $TIER_CURSOR_FILE is deleted here, adjacent to the spend and only after an
+# allowed verdict — a refusal never costs the operator the advance. Consume-once: the file is gone
+# before the model it carries is used. Resolver evidence stays in ROUTE_JSON; the cursor overwrites
+# the selected model/mode carriers and still executes exactly one unit this invocation.
+if [ -n "$CURSOR_MODEL" ]; then
+  rm -f "$TIER_CURSOR_FILE"
+  MODEL_ID="$CURSOR_MODEL"; MODEL_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$CURSOR_MODEL" 2>/dev/null)
+  REASON="tier-chain-cursor:$CURSOR_MODEL"; ENGINE="$CURSOR_ENGINE"; ENGINE_REASON="tier-chain-cursor:$CURSOR_ENGINE"; DISPATCH_ENGINE="$CURSOR_ENGINE"
+  [ "$CURSOR_ENGINE" = "codex" ] && SIDECAR_MODEL="$CURSOR_MODEL"
+fi
 # $ROUTE_JSON.chain carries forward unmodified — consumed by the Failure Taxonomy via
 # `node "$FORGE_SCRIPTS_DIR/forge-routing.js" ... --next-after "$MODEL_ID"` on model_refusal/429/400
 # (walks the cross-engine chain → category fallback → ''), BEFORE any cross-tier escalation
@@ -255,25 +308,8 @@ if [ "$ROUTE_SOURCE" != "routing" ] && [ "$ROUTING_PRESENT" = "true" ]; then
   echo "⚠ routing: configurado mas não aplicado (route_source=$ROUTE_SOURCE) — frontmatter/legado venceu para $unit_type/$unit_id" >&2
 fi
 
-# Step 4b: tier-chain cursor (consume-once) — CROSS-ENGINE — runs AFTER the resolver as an override.
-# A prior model_refusal/429/400 wrote the next chain member (+ its engine) here; consume it so THIS
-# run dispatches $NEXT, not the refused
-# primary. Engine re-derived via forge-model-alias.js --family when absent (legacy cursor). Write side: Failure Taxonomy.
-TIER_CURSOR_FILE="$WORKING_DIR/.gsd/forge/tier-cursor-${RUN_ID:-legacy}-${unit_type}-${unit_id}.json"
-if [ -f "$TIER_CURSOR_FILE" ]; then
-  CM=$(node -pe "(JSON.parse(require('fs').readFileSync('$TIER_CURSOR_FILE','utf8')).model)||''" 2>/dev/null)
-  CE=$(node -pe "(JSON.parse(require('fs').readFileSync('$TIER_CURSOR_FILE','utf8')).engine)||''" 2>/dev/null)
-  rm -f "$TIER_CURSOR_FILE"   # consume-once: delete so the next /forge-next re-resolves from chain[0]
-  if [ -n "$CM" ]; then
-    MODEL_ID="$CM"; REASON="tier-chain-cursor:$CM"
-    # Re-inspect engine → Branch codex or Claude Agent. --family maps id → 'claude'|'gpt'|''; gpt == codex.
-    [ -z "$CE" ] && { case "$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --family "$CM" 2>/dev/null)" in gpt) CE=codex;; *) CE=claude;; esac; }
-    # $CE is the persisted normalized dispatch-engine (codex/claude) → drive both ENGINE and the branch gate DISPATCH_ENGINE.
-    ENGINE="$CE"; ENGINE_REASON="tier-chain-cursor:$CE"; DISPATCH_ENGINE="$CE"
-  fi
-fi
 ```
-`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (`chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `THINKING_HEADER`, `unit_effort`, and `REASON` are now set (the tier-chain cursor above may have overridden `MODEL_ID`/`ENGINE`/`REASON`). Use `$MODEL_ID`/`$ENGINE` in the dispatch below (Step 4). `$TIER`, `$REASON`, `$DOMAIN_USED`, `$ROUTE_SOURCE`, `$CHAIN_LEN`, `$EFFORT`, `$EFFORT_REASON` are injected into the dispatch event.
+`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (`chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `THINKING_HEADER`, `unit_effort`, `HOST_RUNTIME`, `WORKER_ENGINE`, `RESOLVED_WORKER_ENGINE`, `WORKER_MODE`, `DISPATCH_ALLOWED`, `DISPATCH_REASON_CODE`, `DISPATCH_HINT`, and `REASON` are now set (the allowed tier cursor may have overridden only the attempt carriers). Branch on `$WORKER_MODE` in Step 4. The runtime axes and existing tier/routing/effort axes are additive fields in every dispatch event.
 
 > **Thinking guard (Fable 5 + Opus 5):** the resolver emits `$THINKING_HEADER` (`adaptive` when
 > `$MODEL_ID` is `claude-fable-5`, or `claude-opus-5` with resolved effort `xhigh`/`max`; else empty).
@@ -403,10 +439,35 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
    - Rebuttal × `rounds` → `forge-reviewer` in rebuttal mode (DEFENSE injected)
    - The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literals are a violation detected by `forge-review-audit.js`.
    - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6).
-   - **CONCEDED items → fix now (Step 7a):** resolve `RF_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --unit-type review-fix --cwd "$WORKING_DIR" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).alias||'')}catch(e){}})")`; **before dispatching**, run the cross-run claim gate per `shared/forge-review.md § Step 7a → Cross-run claim gate (before the dispatch)` + `shared/forge-claim-gate.md` (same procedure as the execute-task gate above, `--unit "review-fix/{S##}"`, `--conceded` built from the CONCEDED items' `path:line` — act by that spec's decision table, never restated here); dispatch `review-fix/{S##}` with `model: '{RF_ALIAS}'` only when non-empty.
+   - **CONCEDED items → fix now (Step 7a):** bind `RF_UNIT_ID` to `{S##}` (or `{M###}-triage` at the milestone triage boundary), then consume **`shared/forge-review.md § Step 7a → Runtime resolver gate`** before the claim gate. The shared section owns the runtime posture; do not reproduce its host/worker leg table here. Its executable caller seam in step mode is:
+     ```bash
+     RF_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
+       --unit-type review-fix --unit-id "$RF_UNIT_ID" --milestone "${RUN_ID:-{M###}}" \
+       --host-runtime claude --cwd "$WORKING_DIR" --json)
+     [ $? -eq 0 ] || { echo "✗ review-fix resolver halted — fixer not launched" >&2; exit 2; }
+     RF_EXPORTS=$(printf '%s' "$RF_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+     [ $? -eq 0 ] || { echo "✗ review-fix resolver exports invalid — fixer not launched" >&2; exit 2; }
+     eval "$RF_EXPORTS"
+     if [ "$DISPATCH_ALLOWED" != "true" ]; then
+       dispatch_refusal_stop
+       exit 2                     # return to operator; this is not review-agent-unavailable
+     fi
+     if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
+       printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+     fi
+     RF_ALIAS="$MODEL_ALIAS"; RF_HOST_RUNTIME="$HOST_RUNTIME"
+     RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
+     if [ "$RF_WORKER_MODE" = "sidecar" ]; then
+       DISPATCH_REASON_CODE="unsupported-sidecar-unit"
+       DISPATCH_HINT="review-fix não possui adapter sidecar neste boundary; ajuste host/worker e execute /forge-next novamente."
+       dispatch_refusal_stop
+       exit 2
+     fi
+     ```
+     Only after this allowed native verdict, run the cross-run claim gate per that same shared section + `shared/forge-claim-gate.md` (`--unit "review-fix/{S##}"`, `--conceded` from the CONCEDED `path:line` items, and its decision table, never restated here). Dispatch the canonical `Agent()` fixer with `model: '{RF_ALIAS}'` only when non-empty. A resolver refusal ends this step invocation before worker creation; an actual review-worker throw remains advisory under the unavailability rule below.
    - **OPEN items (Step 7b, interactive):** each OPEN objection is put to the user via `AskUserQuestion` — `Manter abordagem` / `Refatorar agora` (dispatches a `review-fix` unit for the accepted items) / `Criar follow-up` (creates an item per `shared/forge-review.md § Item capture`, source `review/{S##}/{R#}`, plus the pointer line in `.gsd/KNOWLEDGE.md § Review follow-ups`) — and the decision is written back into `{S##}-REVIEW.md`.
    - Append the `review` event to `events.jsonl` (Step 8).
-4. The gate **never blocks** — any `Agent()` throw is recorded and the step proceeds to `complete-slice` regardless.
+4. The gate **never blocks on review-worker unavailability** — any `Agent()` throw is recorded and the step proceeds to `complete-slice` regardless. A runtime resolver refusal is an enforcing pre-dispatch boundary and returns control to the operator instead.
    - On throw, follow `shared/forge-review.md § Agent unavailability (review-agent-unavailable)`: retry first via `shared/forge-dispatch.md § Retry Handler`; if the agent stays unavailable, emit `review-agent-unavailable` (`review-advocate-unavailable` | `review-challenger-unavailable`) — **never** the CRITICAL failure path.
 
    > **REGRA CRÍTICA:** o orquestrador NUNCA produz veredito de review no lugar de um agente indisponível — nem defesa, nem réplica, nem julgamento de objeção alheia. A única ação permitida é registrar a indisponibilidade e escalar ao humano (interativo) ou deferir à triagem final (auto).
@@ -1013,26 +1074,87 @@ fi
 ```
 **Never assign to `WORKTREE_DIR` here.** An empty `WORKTREE_DIR` is the "every repo failed" STOP signal of the Isolation rules — a sidecar refusal must never be mistaken for an isolation failure. The two `CODE_DIR=` lines above make the resolved value reach the bash consumers deterministically, without depending on model substitution: status `ok` → the attributed worktree; refusal with a non-empty `multi_repo_root` → the run root holding every worktree, so a genuinely multi-repo unit stops landing in whichever repo sorted first (`multi_repo_root` is empty in a single-repo workspace, which keeps the bootstrap value).
 
-**Branch codex / Branch D — sidecar (`$DISPATCH_ENGINE == codex`): executable spec loaded on demand.**
+**Delivery branch — `WORKER_MODE` is authoritative.**
+
+- `WORKER_MODE == sidecar`: only `execute-task` and `plan-slice` with the Codex adapter are
+  supported here; load the sidecar mirror below. `RESOLVED_WORKER_ENGINE` — the engine that will
+  actually run the worker — selects the adapter after the mode decision, never the delivery mode
+  itself. `DISPATCH_ENGINE` is model-family telemetry and never selects a branch.
+- `WORKER_MODE == native`: continue to the canonical native call below, regardless of model-family
+  metadata. In the Codex projection the renderer rewrites that exact `Agent()` form to
+  `spawn_agent()`; the source does not route around it.
+- Empty/unknown mode, or a sidecar mode with no supported adapter: set the stable
+  `unsupported-sidecar-unit`/`invalid-worker-mode` diagnostic, call `dispatch_refusal_stop`, and
+  return to the operator before timeline creation or worker launch.
+
+```bash
+case "$WORKER_MODE" in
+  native)
+    : # continue to the canonical native block below
+    ;;
+  sidecar)
+    if { [ "$unit_type" = "execute-task" ] || [ "$unit_type" = "plan-slice" ]; } && [ "$RESOLVED_WORKER_ENGINE" = "codex" ]; then
+      SIDECAR_SPEC="$FORGE_SHARED_DIR/forge-sidecar-next.md"
+      [ -r "$SIDECAR_SPEC" ] || { DISPATCH_REASON_CODE="sidecar-spec-unavailable"; DISPATCH_HINT="Não foi possível ler $SIDECAR_SPEC; repare a instalação Forge."; dispatch_refusal_stop; exit 2; }
+      # The orchestrator reads and executes SIDECAR_SPEC now. It must not continue to the native
+      # block unless that spec returns a newly resolved WORKER_MODE=native, allowed verdict.
+    else
+      DISPATCH_REASON_CODE="unsupported-sidecar-unit"
+      DISPATCH_HINT="worker_mode=sidecar não possui adapter para $unit_type/$RESOLVED_WORKER_ENGINE; ajuste host/worker e execute /forge-next novamente."
+      dispatch_refusal_stop
+      exit 2
+    fi
+    ;;
+  *)
+    DISPATCH_REASON_CODE="invalid-worker-mode"
+    DISPATCH_HINT="worker_mode ausente/inválido; corrija o contrato runtime e execute /forge-next novamente."
+    dispatch_refusal_stop
+    exit 2
+    ;;
+esac
+```
+
+**Branch C / Branch D — sidecar (`WORKER_MODE == sidecar`): executable spec loaded on demand.**
 
 The full executable branch text (state machine, BLOCKER contract mechanics, Layer-1 transient
 retry with the TTY pause-ask gate, Layer-2 chain walk, orphan detection, fallback accounting)
-lives in **`shared/forge-sidecar-next.md`** — read it NOW (`shared/forge-sidecar-next.md` if it
-exists in the working repo, else `${FORGE_HOME:-~/.forge-agent}/shared/forge-sidecar-next.md`),
-follow it exactly, and fall through to the **Claude dispatch** below only where that spec says to.
+lives in **`shared/forge-sidecar-next.md`** — read it only after the allowance gate when the
+resolved `WORKER_MODE == sidecar`, or after the one declared native transition below
+(`$FORGE_SHARED_DIR/forge-sidecar-next.md` under the binding path convention). Follow it exactly,
+and return to the **native dispatch** below only where that spec supplies a newly allowed native
+resolver verdict. Do not load it on a successful native path.
 Canonical contract (authoritative, unchanged): `shared/forge-dispatch.md § Worker Engine Routing`.
 
 Non-negotiables that bind even before the spec is read (routing contract, CLAUDE.md):
 - NEVER execute the unit inline in the main context, and NEVER substitute
-  `Agent("forge-executor")`/`Agent("forge-planner")` for a resolved codex route.
+  `Agent("forge-executor")`/`Agent("forge-planner")` for an already-resolved sidecar route.
+  Conversely, a resolved native route MUST use the canonical form even when
+  `DISPATCH_ENGINE == codex`; the renderer owns its `spawn_agent()` projection.
 - The ONLY legitimate degradation to Claude is the named `worker-engine-fallback` event written
   to `.gsd/forge/events.jsonl` by the spec's Layer-2 — fallback without the event is silent bypass.
 - If neither spec path is readable, that is a broken installation: STOP the run and surface it —
   never improvise the branch from memory.
 
+**Declared Codex-native `not-spawned` transition (one shot):** initialize
+`NATIVE_TO_SIDECAR_COUNT=0` per unit. If, and only if, the projected native call returns the named
+outcome `not-spawned`, require `NATIVE_TO_SIDECAR_COUNT == 0`, `DISPATCH_ALLOWED == true`,
+`RESOLVED_WORKER_ENGINE == codex`, and `RESOLVED_WORKER_ENGINE == HOST_RUNTIME`. Increment the counter,
+set only the final mode carrier `WORKER_MODE=sidecar` plus `SIDECAR_DECLARED=true`, retain
+`DISPATCH_ALLOWED=true`, and load `shared/forge-sidecar-next.md` once. Keep `ROUTE_JSON`,
+`HOST_RUNTIME`, `WORKER_ENGINE`, and `RESOLVED_WORKER_ENGINE` unchanged as the original resolver
+evidence. A second transition, a different outcome, or an identity mismatch is a CRITICAL dispatch
+failure and stops; it never recurses into the native call, retries mid-unit, or executes inline.
+The sidecar emitter consequently records the actual final `worker_mode:"sidecar"`.
+
 ---
 
-**Claude dispatch** (default path, and the fallback target) — the machinery below runs when `$ENGINE == claude`:
+**Native dispatch (`WORKER_MODE == native`)** — canonical host form and fallback target.
+Initialize `NATIVE_TO_SIDECAR_COUNT=0` before the first call. The allowance check above is a hard
+precondition for everything below.
+
+```bash
+NATIVE_TO_SIDECAR_COUNT=0
+```
 
 **Create timeline task** — use `TaskCreate` to show progress in the UI:
 ```
@@ -1077,14 +1199,23 @@ Then call `Agent(agent_name, worker_prompt, model: $MODEL_ALIAS)` when `$MODEL_A
   - `research-milestone M001: e-commerce platform`
 - For memory extraction: `extract memories from {unit_id}`
 
-Wait for the result. Then:
+Wait for the result. If its named native outcome is `not-spawned`, apply the one-shot declared
+transition above and enter the loaded sidecar mirror; do not emit the native event below. Every
+other successful native result continues here. A throw still follows the Retry Handler and never
+masquerades as `not-spawned` or creates an implicit native recursion. Then:
 ```bash
 OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
-MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS},\"model_applied\":${MODEL_APPLIED_JSON},\"engine\":\"${ENGINE:-claude}\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+  --unit "${unitType}/${unitId}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
+  --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
+  --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
+  --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \
+  --output-tokens "$OUTPUT_TOKENS" --model-applied "$MODEL_ALIAS" \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --events .gsd/forge/events.jsonl
 ```
 
 **Heartbeat — clear worker field** after `Agent()` returns (mirror of `forge-auto/SKILL.md`; keeps the run from advertising a worker that already finished):
@@ -1129,7 +1260,7 @@ Parse the `---GSD-WORKER-RESULT---` block:
 |-------|---------|-----------------|
 | `context_overflow` | "context limit", "too long", "token" | "Task too large for one context window. Run `/forge-next` again — it will retry with a more capable model." **Climbs the separate tier ladder (`standard → heavy → max`), does NOT consume `chain[]`** — but S02 re-resolves THROUGH routing at the escalated tier so a domain-specific `routing.<domain>.<phase>.<escalated-tier>` cell is honored: `ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$ESCALATED_TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR")` then `MODEL_ID=chain[0].id`. Escalated tier `max` is terminal → `blocked → human`. Persist the cursor `{model, engine, ts}` (engine from `chain[0].engine`) so the next `/forge-next` resumes at the escalated model. |
 | `scope_exceeded` | "out of scope", "too broad" | "Task scope too broad. Ask the planner to split T## before continuing." |
-| `model_refusal` | "cannot", "I'm not able", "policy" | Walk the **cross-engine chain** via routing: `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR" --next-after "$MODEL_ID")` — this replaces the old `forge-tier-chain.js --next-after` (SAME Layer 2, new resolver — never a 4th layer). It walks the resolved chain → category fallback → `''`. **Persist the cross-engine cursor:** if `$NEXT` is non-empty, re-derive its engine (`NEXT_FAMILY=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --family "$NEXT")`; `gpt→codex`, else `claude`) and write `$WORKING_DIR/.gsd/forge/tier-cursor-${RUN_ID:-legacy}-${unit_type}-${unit_id}.json` as `{"model":"$NEXT","engine":"$NEXT_ENGINE","ts":"<ISO8601 now>"}` (`mkdir -p` first) — Step 4b above consumes-and-deletes it on the *next* `/forge-next`, re-inspecting the engine to route to Branch codex or the Claude Agent. If the `$NEXT` member is codex, the verified reset (BLOCKER invariant #2 — `forge-surgical-reset.js --reset` must exit 0) runs before that next attempt captures its snapshot via `--state-init`. `forge-next` does not auto-recover mid-unit (step mode surfaces) — surface: "Model refused the task. Run `/forge-next` again — it will retry with the next model in the chain (`$NEXT`)." If `$NEXT` is empty (chain + category fallback exhausted) → do NOT write a cursor; surface "Model refused the task and the chain is exhausted. Adjust the task plan or routing config." |
+| `model_refusal` | "cannot", "I'm not able", "policy" | Walk the **cross-engine chain** via routing: `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR" --next-after "$MODEL_ID")` — this replaces the old `forge-tier-chain.js --next-after` (SAME Layer 2, new resolver — never a 4th layer). It walks the resolved chain → category fallback → `''`. **Persist the cross-engine cursor:** if `$NEXT` is non-empty, re-derive its engine (`NEXT_FAMILY=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --family "$NEXT")`; `gpt→codex`, else `claude`) and write `$WORKING_DIR/.gsd/forge/tier-cursor-${RUN_ID:-legacy}-${unit_type}-${unit_id}.json` as `{"model":"$NEXT","engine":"$NEXT_ENGINE","ts":"<ISO8601 now>"}` (`mkdir -p` first) — Step 4b above preserves it until the *next* `/forge-next` receives an allowed resolver verdict, then dispatches that member by the resolved `$WORKER_MODE`. If the `$NEXT` member is codex, the verified reset (BLOCKER invariant #2 — `forge-surgical-reset.js --reset` must exit 0) runs before that next attempt captures its snapshot via `--state-init`. `forge-next` does not auto-recover mid-unit (step mode surfaces) — surface: "Model refused the task. Run `/forge-next` again — it will retry with the next model in the chain (`$NEXT`)." If `$NEXT` is empty (chain + category fallback exhausted) → do NOT write a cursor; surface "Model refused the task and the chain is exhausted. Adjust the task plan or routing config." |
 | `429` | "rate limit", "429", "quota" | Same cross-engine chain-walk + cross-engine cursor-persist semantics as `model_refusal` — surface: "Rate limited. Run `/forge-next` again — it will retry with the next model in the chain (`$NEXT`)." or "chain exhausted" message if `$NEXT` empty (no cursor written). This is a `status: blocked` classification (Layer 2), distinct from a transient 429 raised as an `Agent()` exception (Retry Handler, Layer 1). |
 | `400` | "400", "bad request", "invalid" | Same cross-engine chain-walk + cross-engine cursor-persist semantics as `model_refusal`. |
 | `tooling_failure` | "command not found", "permission denied", "ENOENT" | "Tooling error — check that required tools are installed." |
@@ -1277,6 +1408,8 @@ RESULT_BLOCK:
 KEY_DECISIONS:
 {key_decisions field from result, or "(none)"}
 ```
+
+<!-- forge:dispatch:end -->
 
 **d-reinject) Must-haves re-injection diff (scope_reduction)** — runs after memory extraction, before isolation cleanup. Applies to `execute-task` units only.
 

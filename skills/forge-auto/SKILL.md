@@ -413,10 +413,12 @@ Then proceed with dispatch normally (the executor will overwrite the partial wor
 
 **Dynamic routing:** If `T##-PLAN.md` contains `complexity: heavy`, route `execute-task` to `forge-executor` on opus.
 
-**Engine, tier, domain, effort and alias are all resolved in step 1.5 below** by the single `forge-dispatch-resolve.js --json` call. Do NOT resolve any of them here — this block only runs the prefs loud-stop gate and computes the resolver's *file* args (`$PLAN_PATH`, `$ROADMAP_PATH`).
+<!-- forge:dispatch:start -->
 
-**Prefs gate + resolver args (step 1.45)** — run the M008-CONTEXT #2 prefs loud-stop gate, then set `$PLAN_PATH`/`$ROADMAP_PATH`. As of M012 S02 the **engine decision, tier-chain resolution, domain, effort and alias all collapse into ONE `forge-dispatch-resolve.js` call** made in step 1.5 (a thin caller) — so this block resolves only the *file* inputs to that call. When `ENGINE` resolves to `codex` (routable `execute-task`/`plan-slice`) the Claude `Agent()` dispatch + alias warning are **skipped** (Codex resolves its own model) — they run only on the Claude path, including the fallback.
-> Cross-reference: `shared/forge-dispatch.md § Worker Engine Routing` — canonical algorithm (single-call resolver, engine-by-route_source table, sidecar state machine, BLOCKER contract, fallback) + `scripts/forge-dispatch-resolve.js` (S01). This block is the executable mirror; the mechanics are locked there. `plan-slice` engine routing is **active (S03)** — `DISPATCH_ENGINE == codex && unit_type == plan-slice` routes to the sidecar `--mode plan` (read-only, **Branch D**, see Step 4 below). `plan-milestone` is never routed through `workers:`/`routing:` (stays tier `max`/Fable).
+**Engine, tier, domain, effort, alias, host runtime and worker mode are all resolved in step 1.5 below** by the single `forge-dispatch-resolve.js --json` call. Do NOT resolve any of them here — this block only runs the prefs loud-stop gate and computes the resolver's *file* args (`$PLAN_PATH`, `$ROADMAP_PATH`).
+
+**Prefs gate + resolver args (step 1.45)** — run the M008-CONTEXT #2 prefs loud-stop gate, then set `$PLAN_PATH`/`$ROADMAP_PATH`. As of M012 S02 the **engine decision, tier-chain resolution, domain, effort and alias all collapse into ONE `forge-dispatch-resolve.js` call** made in step 1.5 (a thin caller) — so this block resolves only the *file* inputs to that call. The resolver gate runs before every worker launch. After it allows the dispatch, `WORKER_MODE=native` uses the canonical `Agent()` form and `WORKER_MODE=sidecar` loads Branch C/D. The Codex renderer projects that same fenced native form to `spawn_agent()` and retargets the canonical host argument; routing fields never select a branch by themselves.
+> Cross-reference: `shared/forge-dispatch.md § Worker Engine Routing` — canonical guard, native/sidecar state machine, retry/event/refusal contracts, BLOCKER contract, and fallback — plus `scripts/forge-dispatch-resolve.js` (S01). This block is the executable mirror; the mechanics are locked there. `plan-slice` engine routing is **active (S03)**, but Branch D is entered only when `WORKER_MODE == sidecar` (and then uses `DISPATCH_ENGINE` only to choose the adapter). `plan-milestone` is never routed through `workers:`/`routing:` (stays tier `max`/Fable).
 
 ```bash
 # ── Prefs loud-stop gate (M008-CONTEXT #2) — MUST run before the resolver ─────────
@@ -455,10 +457,26 @@ ROADMAP_PATH=".gsd/milestones/${M###}/${M###}-ROADMAP.md"
 
 **Loud-stop on the per-unit prefs re-resolution above (M008-CONTEXT #2 — NOT a bare comment):** if the `forge-prefs.js --resolved` call at the top of this block exited non-zero, the orchestrator MUST STOP the loop now — exactly as the Load-context guard does: deactivate this run (set `auto-mode.json`/runs entry inactive, same mechanic as the `Agent()`-failure halt), surface arquivo + linha + como-corrigir from `errors[]`, and do **NOT** proceed on `WORKERS_ENGINE=claude` / effort defaults / any fallback value. The `exit 1` inside the guard halts a shell-executed path; this prose halts the orchestrator-interpreted path. `warnings[]` (advisory) never stop — only exit≠0 halts.
 
-`$PLAN_PATH`, `$ROADMAP_PATH` are now set — the *file* inputs the shared resolver reads. `ENGINE`, `$DOMAIN_USED`, `$WORKERS_TIMEOUT`, `$CODEX_MODEL` are resolved **inside** the single `forge-dispatch-resolve.js` call (step 1.5, engine-by-route_source decided within it; `DISPATCH_ENGINE` is the additive normalized dispatch trigger — `gpt→codex`, `gemini→agy`, else `claude`). When the resolved `DISPATCH_ENGINE == codex` AND `unit_type == execute-task` AND `BATCH.length == 1`, take **Branch C** in Step 4 (sidecar). When `DISPATCH_ENGINE == codex` AND `unit_type == plan-slice`, take **Branch D** in Step 4 (sidecar plan, read-only). Otherwise (`DISPATCH_ENGINE == claude`, or a non-routable unit) fall through to the `Agent()` dispatch unchanged — the `claude` path is byte-identical.
+`$PLAN_PATH`, `$ROADMAP_PATH` are now set — the *file* inputs the shared resolver reads. `ENGINE`, `$DOMAIN_USED`, `$WORKERS_TIMEOUT`, `$CODEX_MODEL`, `HOST_RUNTIME`, and `WORKER_MODE` are resolved **inside** the single `forge-dispatch-resolve.js` call (step 1.5, engine-by-route_source decided within it; `DISPATCH_ENGINE` remains additive adapter metadata — `gpt→codex`, `gemini→agy`, else `claude`). After the allowance gate, `WORKER_MODE == native` reaches the canonical `Agent()` dispatch. `WORKER_MODE == sidecar` loads Branch C/D for the selected adapter. Thus Claude-host native work is byte-identical, while the rendered Codex-host native path reaches `spawn_agent()` instead of being diverted by model family.
 
 **Dispatch resolution (step 1.5)** — resolve `{engine, model, alias, tier, domain, route_source, chain, chain_len, reason, effort, effort_reason}` for this dispatch via the **single `forge-dispatch-resolve.js --json` call**. This one call folds the former Engine Resolution + Tier Resolution + engine-by-route_source + Effort Resolution + Alias Resolution bash — a thin caller now, all pure resolution lives in the resolver. `route_source` is still `tier_models` on the legacy byte-identical path (no `routing:` block / frontmatter `worker:` not applied), `routing`/`frontmatter` otherwise.
 > Cross-reference: `shared/forge-dispatch.md § Tier Resolution` + `§ Worker Engine Routing → Single-call resolver` + `§ Effort Resolution` (algorithm) and `shared/forge-tiers.md` (canonical tables). The resolver internally calls `forge-routing.js` (cross-engine chain), `forge-model-alias.js` (alias), and applies the tier/effort defaults + precedence + risk-escalation + model-cap clamp.
+
+**Auto dispatch refusal boundary (define once, reuse for main, parallel and review-fix resolution):** the current per-run STATE already points at the unit that has not been dispatched, so preserving it is the durable checkpoint. A runtime refusal prints both canonical diagnostics, then deactivates through the existing `## Deactivate auto-mode indicator` boundary. It never retries, changes routing fields, selects another worker, or executes work inline.
+
+```bash
+dispatch_refusal_stop() {
+  printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  # STATE remains at the pre-dispatch unit: this is the restart checkpoint.
+  if [ -n "$RUN_ID" ]; then
+    node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
+    node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" > /dev/null || true
+  else
+    echo '{"active":false}' > "$WORKING_DIR/.gsd/forge/auto-mode.json"
+  fi
+  return 2
+}
+```
 
 ```bash
 # ── Dispatch resolution (single call to the shared resolver) ─────────────────────
@@ -470,7 +488,7 @@ FORGE_SCRIPTS_DIR=$([ -f scripts/forge-dispatch-resolve.js ] && echo scripts || 
 ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
   --unit-type "$unit_type" --plan "$PLAN_PATH" --unit-id "$unit_id" \
   --milestone "${RUN_ID:-{M###}}" --roadmap "$ROADMAP_PATH" \
-  --cwd "$WORKING_DIR" --json)   # SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018)
+  --host-runtime claude --cwd "$WORKING_DIR" --json)   # host canônico; renderer projeta codex. SEMPRE $WORKING_DIR, nunca $CODE_DIR (MEM018)
 if [ $? -ne 0 ]; then
   # prefs_ok:false → resolver exit 1 (M008-CONTEXT #2 loud-stop — mirrors the prefs gate above;
   # both stay). Deactivate the run + surface prefs_errors[]; never proceed on a fallback value.
@@ -484,6 +502,14 @@ fi
 # CODEX_MODEL, SIDECAR_MODEL, THINKING_HEADER, DOMAIN, PLAN_TIER, PLAN_WORKER,
 # ROUTING_PRESENT, MODEL_APPLIED_JSON, unit_effort — all eval-safe single-quoted.
 eval "$(printf '%s' "$ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)"
+if [ "$DISPATCH_ALLOWED" != "true" ]; then
+  dispatch_refusal_stop
+  exit 1                         # terminal loop boundary; no worker launch or inline fallback
+fi
+if [ "$DISPATCH_DECISION" = "advisory" ]; then
+  printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+  # Advisory is observation only: HOST_RUNTIME/WORKER_MODE/routing fields stay unchanged.
+fi
 # $ROUTE_JSON.chain carries forward unmodified — consumed by Branch C/D (codex-member cap) and by
 # the Failure Taxonomy via `forge-routing.js ... --next-after "$MODEL_ID"` on model_refusal/429/400
 # (walks the cross-engine chain → category fallback → ''), BEFORE any cross-tier escalation
@@ -495,7 +521,7 @@ if [ "$ROUTE_SOURCE" != "routing" ] && [ "$ROUTING_PRESENT" = "true" ]; then
   echo "⚠ routing: configurado mas não aplicado (route_source=$ROUTE_SOURCE) — frontmatter/legado venceu para $unit_type/$unit_id" >&2
 fi
 ```
-`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (with `.chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `DISPATCH_ENGINE`, `THINKING_HEADER`, `MODEL_APPLIED_JSON`, `unit_effort`, and `REASON` are now set. On `DISPATCH_ENGINE == codex` for a routable `execute-task`/`plan-slice`, take **Branch C/D** in Step 4 (the resolver already emitted `$SIDECAR_MODEL`/`$WORKERS_TIMEOUT` + `$ROUTE_JSON.chain` those branches read). Otherwise use `$MODEL_ID`/`$MODEL_ALIAS` in the `Agent()` call. `$TIER`/`$REASON`/`$DOMAIN_USED`/`$ROUTE_SOURCE`/`$CHAIN_LEN`/`$ENGINE`/`$EFFORT`/`$EFFORT_REASON` are injected into the dispatch event (additive).
+`TIER`, `MODEL_ID`, `MODEL_ALIAS`, `ROUTE_JSON` (with `.chain`), `ROUTE_SOURCE`, `CHAIN_LEN`, `DOMAIN_USED`, `ENGINE`, `ENGINE_REASON`, `EFFORT`, `EFFORT_REASON`, `WORKERS_TIMEOUT`, `CODEX_MODEL`, `SIDECAR_MODEL`, `DISPATCH_ENGINE`, `THINKING_HEADER`, `MODEL_APPLIED_JSON`, `unit_effort`, `HOST_RUNTIME`, `WORKER_ENGINE`, `RESOLVED_WORKER_ENGINE`, `WORKER_MODE`, `DISPATCH_ALLOWED`, `DISPATCH_REASON_CODE`, `DISPATCH_HINT`, and `REASON` are now set. Branch first on `WORKER_MODE`: `sidecar` loads Branch C/D with `$SIDECAR_MODEL`/`$WORKERS_TIMEOUT` + `$ROUTE_JSON.chain`; `native` uses `$MODEL_ID`/`$MODEL_ALIAS` in the canonical `Agent()` call. The runtime axes and the existing tier/routing/effort axes are injected additively into the dispatch event.
 
 > **Thinking guard (Fable 5 + Opus 5):** the resolver emits `$THINKING_HEADER` (`adaptive` when
 > `$MODEL_ID` is `claude-fable-5`, or `claude-opus-5` with resolved effort `xhigh`/`max`; else empty).
@@ -541,7 +567,52 @@ When `mode == "legacy"`, emit one line (the first time per slice — not every i
 ↻ Legacy plan — dispatching sequentially (no depends/writes frontmatter)
 ```
 
-**Per-task resolution (parallel only):** If `BATCH.length > 1`, the dispatch resolution block above resolved for `$PLAN_PATH` of the **first** task. Before building prompts, re-run the single `forge-dispatch-resolve.js --json` call once per task in the batch (passing that task's `$PLAN_PATH`) so each one carries its own `{TIER, MODEL_ID, MODEL_ALIAS, ENGINE, DOMAIN_USED, ROUTE_SOURCE, CHAIN_LEN, REASON, EFFORT, EFFORT_REASON, DOMAIN, PLAN_TIER, PLAN_WORKER}` (the last three — the raw resolver inputs `domain_input`/`frontmatter_tier`/`plan_worker` — feed that task's failure-taxonomy re-resolution). Security gate (below) also loops over each task in the batch.
+**Per-task resolution (parallel only):** If `BATCH.length > 1`, the dispatch resolution block above resolved for `$PLAN_PATH` of the **first** task. Before building prompts, re-run the canonical call once per task and store the complete result by task ID. `ENTRY_ID` and `ENTRY_PLAN_PATH` below are the fields from the current `BATCH` entry. The export is only a one-pass parser; it never receives `--host-runtime`. The allowance gate is immediately after that export and precedes prompt rendering, timeline creation, or launch for the batch.
+
+```bash
+declare -A BATCH_ROUTE_JSON BATCH_HOST_RUNTIME BATCH_WORKER_MODE BATCH_DISPATCH_ALLOWED
+declare -A BATCH_RESOLVED_WORKER BATCH_DISPATCH_ENGINE BATCH_ENGINE BATCH_MODEL_ID BATCH_MODEL_ALIAS
+declare -A BATCH_TIER BATCH_REASON BATCH_DOMAIN_USED BATCH_ROUTE_SOURCE BATCH_CHAIN_LEN
+declare -A BATCH_EFFORT BATCH_EFFORT_REASON BATCH_UNIT_EFFORT
+for ENTRY in "${BATCH[@]}"; do
+  # Bind ENTRY_ID/ENTRY_PLAN_PATH from ENTRY before this call; never reuse another task's path.
+  ENTRY_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
+    --unit-type execute-task --plan "$ENTRY_PLAN_PATH" --unit-id "$ENTRY_ID" \
+    --milestone "${RUN_ID:-{M###}}" --roadmap "$ROADMAP_PATH" \
+    --host-runtime claude --cwd "$WORKING_DIR" --json)
+  [ $? -eq 0 ] || { echo "✗ dispatch resolver halted for $ENTRY_ID" >&2; exit 1; }
+  ENTRY_EXPORTS=$(printf '%s' "$ENTRY_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+  [ $? -eq 0 ] || { echo "✗ dispatch resolver exports invalid for $ENTRY_ID" >&2; exit 1; }
+  eval "$ENTRY_EXPORTS"
+  if [ "$DISPATCH_ALLOWED" != "true" ]; then
+    dispatch_refusal_stop
+    exit 1                       # whole auto run stops; no partial native batch may launch
+  fi
+  if [ "$DISPATCH_DECISION" = "advisory" ]; then
+    printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+    # Advisory never mutates this task's resolved route.
+  fi
+  BATCH_ROUTE_JSON["$ENTRY_ID"]="$ENTRY_ROUTE_JSON"
+  BATCH_HOST_RUNTIME["$ENTRY_ID"]="$HOST_RUNTIME"
+  BATCH_WORKER_MODE["$ENTRY_ID"]="$WORKER_MODE"
+  BATCH_DISPATCH_ALLOWED["$ENTRY_ID"]="$DISPATCH_ALLOWED"
+  BATCH_RESOLVED_WORKER["$ENTRY_ID"]="$RESOLVED_WORKER_ENGINE"
+  BATCH_DISPATCH_ENGINE["$ENTRY_ID"]="$DISPATCH_ENGINE"
+  BATCH_ENGINE["$ENTRY_ID"]="$ENGINE"
+  BATCH_MODEL_ID["$ENTRY_ID"]="$MODEL_ID"
+  BATCH_MODEL_ALIAS["$ENTRY_ID"]="$MODEL_ALIAS"
+  BATCH_TIER["$ENTRY_ID"]="$TIER"
+  BATCH_REASON["$ENTRY_ID"]="$REASON"
+  BATCH_DOMAIN_USED["$ENTRY_ID"]="$DOMAIN_USED"
+  BATCH_ROUTE_SOURCE["$ENTRY_ID"]="$ROUTE_SOURCE"
+  BATCH_CHAIN_LEN["$ENTRY_ID"]="$CHAIN_LEN"
+  BATCH_EFFORT["$ENTRY_ID"]="$EFFORT"
+  BATCH_EFFORT_REASON["$ENTRY_ID"]="$EFFORT_REASON"
+  BATCH_UNIT_EFFORT["$ENTRY_ID"]="$unit_effort"
+done
+```
+
+These maps are immutable dispatch inputs for the rest of this batch. Security checks still loop over every task. Partition delivery by `BATCH_WORKER_MODE[$ENTRY_ID]`: all `native` entries use the projected native batch mechanism; each `sidecar` entry is handled serially through the loaded Branch C/D mirror. Never read the scalar values left by the last loop iteration to choose a task's route or write its event.
 
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
@@ -716,10 +787,30 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
    - Rebuttal × `rounds` → `forge-reviewer` in rebuttal mode (DEFENSE injected)
    - The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literals are a violation detected by `forge-review-audit.js`.
    - Resolve (Step 5 truth table), write `{S##}-REVIEW.md` (Step 6).
-   - **CONCEDED items → fix now (Step 7a):** resolve `RF_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --unit-type review-fix --cwd "$WORKING_DIR" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(JSON.parse(d).alias||'')}catch(e){}})")`; **before dispatching**, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here); dispatch `review-fix/{S##}` with `model: '{RF_ALIAS}'` only when non-empty and the gate decision is `proceed`.
+   - **CONCEDED items → fix now (Step 7a):** immediately before either a slice `review-fix/{S##}` or the milestone `review-fix/{M###}-triage`, resolve and gate the repair dispatch with the same canonical host seam:
+     ```bash
+     RF_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
+       --unit-type review-fix --unit-id "$RF_UNIT_ID" --milestone "${RUN_ID:-{M###}}" \
+       --host-runtime claude --cwd "$WORKING_DIR" --json)
+     [ $? -eq 0 ] || { echo "✗ review-fix resolver halted" >&2; exit 1; }
+     RF_EXPORTS=$(printf '%s' "$RF_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+     [ $? -eq 0 ] || { echo "✗ review-fix resolver exports invalid" >&2; exit 1; }
+     eval "$RF_EXPORTS"
+     if [ "$DISPATCH_ALLOWED" != "true" ]; then
+       dispatch_refusal_stop
+       exit 1                     # enforcing runtime refusal stops auto; review is not launched inline
+     fi
+     if [ "$DISPATCH_DECISION" = "advisory" ]; then
+       printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+       # Advisory continues with the exact resolved host/mode/model fields.
+     fi
+     RF_ALIAS="$MODEL_ALIAS"
+     RF_HOST_RUNTIME="$HOST_RUNTIME"; RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
+     ```
+     Set `RF_UNIT_ID` to `{S##}` for Step 7a and `{M###}-triage` for Step 9. Only after this runtime gate, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here); dispatch the canonical `Agent()` form with `model: '{RF_ALIAS}'` only when non-empty, `WORKER_MODE == native`, and the claim-gate decision is `proceed`. A runtime refusal uses the auto stop boundary above; it is not the review gate's non-blocking worker-unavailability case.
    - **OPEN items → posture (Step 7b):** `ask_in_auto: defer` (default) marks each `**Decisão:** deferido → triagem no fim da milestone` and continues WITHOUT pausing — they are guaranteed to surface at the milestone-final triage gate below. `pause` (opt-in) asks per-slice via `AskUserQuestion`.
    - Append the `review` event to `events.jsonl` (Step 8).
-4. The gate **never blocks** — any `Agent()` throw is recorded and the loop proceeds to `complete-slice` regardless.
+4. The gate **never blocks on a review-worker throw** — any `Agent()` throw is recorded and the loop proceeds to `complete-slice` regardless. An enforcing resolver refusal is different: it occurs before launch, invokes `dispatch_refusal_stop`, and terminates the auto loop without inline work.
    - On throw, follow `shared/forge-review.md § Agent unavailability (review-agent-unavailable)`: retry first via `shared/forge-dispatch.md § Retry Handler`; if the agent stays unavailable, emit `review-agent-unavailable` (`review-advocate-unavailable` | `review-challenger-unavailable`) — **never** the CRITICAL failure path of Step 5 below.
 
    > **REGRA CRÍTICA:** o orquestrador NUNCA produz veredito de review no lugar de um agente indisponível — nem defesa, nem réplica, nem julgamento de objeção alheia. A única ação permitida é registrar a indisponibilidade e escalar ao humano (interativo) ou deferir à triagem final (auto).
@@ -744,7 +835,7 @@ The snapshot is written to `.gsd/forge/` on purpose — shell variables do not s
 1. Scan all `{S##}-REVIEW.md` under `.gsd/milestones/{M###}/slices/*/` for pending items: `Decisão: deferido → triagem no fim da milestone`, `Correção: falhou — deferida para triagem final`, or legacy `Decisão: deferido (auto-mode)`.
 2. Zero pending → skip silently and dispatch `complete-milestone` normally.
 3. Otherwise **fire push (call-site 2):** use Push helper with message `"Forge {RUN_ID} — {N} item(ns) de review aguardam sua triagem antes de fechar a milestone."` (N = count of pending items). Then print the digest table (slice · R# · path:line · objeção · status) and triage each item via `AskUserQuestion` (batched up to 4, header `Review M###`): `Manter abordagem atual` / `Refatorar agora` / `Criar follow-up`.
-4. `Refatorar agora` items → ONE `review-fix/{M###}-triage` dispatch to `forge-executor` (nothing has been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). **Before dispatching**, run the cross-run claim gate exactly as `shared/forge-review.md § Step 9` prescribes (it references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation of the triage items — not repeated here); dispatch only when the gate decision is `proceed`. Write every decision back into the R#'s `**Decisão:**` line; `Criar follow-up` items create an item per `shared/forge-review.md § Item capture` (source `review/{S##}/{R#}`, status `inbox`, provenance from the digest row) and append ONLY the pointer line `- {I-id} — {title}` to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing — this survives `milestone_cleanup`; the item is the single destination for full content).
+4. `Refatorar agora` items → ONE `review-fix/{M###}-triage` dispatch to `forge-executor` (nothing has been integrated at this point — the fix commits on the still-checked-out `forge/{run}` branch). **Before dispatching**, set `RF_UNIT_ID={M###}-triage`, run the canonical review-fix resolver/export/allowance gate above, then run the cross-run claim gate exactly as `shared/forge-review.md § Step 9` prescribes (it references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation of the triage items — not repeated here); launch only after both gates allow it. Write every decision back into the R#'s `**Decisão:**` line; `Criar follow-up` items create an item per `shared/forge-review.md § Item capture` (source `review/{S##}/{R#}`, status `inbox`, provenance from the digest row) and append ONLY the pointer line `- {I-id} — {title}` to `.gsd/KNOWLEDGE.md § Review follow-ups` (create the section if missing — this survives `milestone_cleanup`; the item is the single destination for full content).
 5. Append the `review-triage` event to `events.jsonl`. The triage **never blocks** the milestone close-out.
 
 > **This gate is the explicit exception to the AUTONOMY RULE** — at this point every slice is done; asking the operator here is the designed arbitration moment that `defer` postponed to. It does not fire on pause/blocked/partial exits — only when the derived unit is `complete-milestone`.
@@ -1067,11 +1158,13 @@ Do NOT read artifact files here — templates now pass paths; workers read their
 
 #### 4. Dispatch
 
-**Branch on BATCH size and engine:**
-- `DISPATCH_ENGINE == codex` AND `unit_type == execute-task` AND `BATCH.length == 1`: follow **Branch C — sidecar codex** below (dispatch the detached adapter; fall back to Claude on any failure).
-- `DISPATCH_ENGINE == codex` AND `unit_type == plan-slice`: follow **Branch D — sidecar codex plan** below (dispatch the detached adapter in `--mode plan`, read-only; fall back to a single Claude `forge-planner` on any failure).
-- `BATCH.length == 1` (all non-execute-task unit types, plus execute-task when only one task is ready and `ENGINE == claude`): follow the **single-task flow** below (unchanged from pre-parallelism behavior).
-- `BATCH.length > 1` (execute-task only, when `forge-parallelism.js` returned `mode: parallel`): follow the **parallel-batch flow** in Step 4-P after this section. If `DISPATCH_ENGINE == codex` in a parallel batch, see the codex note in Step 4-P (each ready task is handled single-task via Branch C; the Claude parallel batch is never mixed with background sidecars).
+**Branch on BATCH size and resolved worker mode:**
+- `WORKER_MODE == sidecar` AND `unit_type == execute-task` AND `BATCH.length == 1` AND `RESOLVED_WORKER_ENGINE == codex`: load **Branch C — sidecar** below. `RESOLVED_WORKER_ENGINE` — the engine that will actually run the worker — chooses the adapter, never whether a sidecar exists; `DISPATCH_ENGINE` is model-family telemetry and selects no branch.
+- `WORKER_MODE == sidecar` AND `unit_type == plan-slice` AND `RESOLVED_WORKER_ENGINE == codex`: load **Branch D — sidecar plan** below (read-only); again, `RESOLVED_WORKER_ENGINE` only chooses the adapter.
+- `WORKER_MODE == native` AND `BATCH.length == 1`: follow the **single-task native flow** below. The source form is canonical `Agent()` on Claude and is projected to `spawn_agent()` by the Codex renderer.
+- `BATCH.length > 1` (execute-task only, when `forge-parallelism.js` returned `mode: parallel`): use each task's stored `BATCH_WORKER_MODE`. Dispatch all `native` entries through the projected native batch mechanism; handle `sidecar` entries serially through the loaded mirror. Never mix sidecars into a native batch and never branch from the scalar route resolved last.
+
+Any unsupported `WORKER_MODE`, or `sidecar` for a unit without Branch C/D, follows `dispatch_refusal_stop` and stops. It never substitutes a model family, host, or inline implementation.
 
 ---
 
@@ -1108,27 +1201,40 @@ fi
 ```
 **Never assign to `WORKTREE_DIR` here.** An empty `WORKTREE_DIR` is the "every repo failed" STOP signal of the Isolation rules above — a sidecar refusal must never be mistaken for an isolation failure. The two `CODE_DIR=` lines above are what make the resolved value reach the bash consumers (`--state-init --cwd "$CODE_DIR"`, `forge-xllm --cwd`, `git -C "$CODE_DIR"`) deterministically, without depending on model substitution: status `ok` → the attributed worktree; refusal with a non-empty `multi_repo_root` → the run root holding every worktree, so a genuinely multi-repo unit stops landing in whichever repo sorted first (`multi_repo_root` is empty in a single-repo workspace, which keeps the bootstrap value).
 
-**Branch C / Branch D — sidecar (`DISPATCH_ENGINE == codex`): executable spec loaded on demand.**
+**Branch C / Branch D — sidecar (`WORKER_MODE == sidecar`): executable spec loaded on demand.**
 
 The full executable branch text (state machine, BLOCKER contract mechanics, Layer-1 transient
 retry, Layer-2 chain walk, orphan detection, fallback accounting) lives in
-**`shared/forge-sidecar-auto.md`** — read it NOW (`shared/forge-sidecar-auto.md` if it exists in
-the working repo, else `${FORGE_HOME:-~/.forge-agent}/shared/forge-sidecar-auto.md`), follow it
-exactly, and return to the **Single-task flow** below only where that spec says to (Claude
-fallback / chain-advance to a claude member). Canonical contract (authoritative, unchanged):
-`shared/forge-dispatch.md § Worker Engine Routing`.
+**`shared/forge-sidecar-auto.md`**. Read it only after the allowance gate when the current resolved
+`WORKER_MODE == sidecar`, or after the one declared transition below (`shared/forge-sidecar-auto.md`
+if it exists in the working repo, else `${FORGE_HOME:-~/.forge-agent}/shared/forge-sidecar-auto.md`).
+Follow it exactly, and return to the **Single-task native flow** only where that spec says to after
+a newly allowed resolver verdict. Do not read this file on a successful native path. Canonical
+contract (authoritative, unchanged): `shared/forge-dispatch.md § Worker Engine Routing`.
 
 Non-negotiables that bind even before the spec is read (routing contract, CLAUDE.md):
 - NEVER execute the unit inline in the main context, and NEVER substitute
-  `Agent("forge-executor")`/`Agent("forge-planner")` for a resolved codex route.
+  a canonical `Agent("forge-executor")`/`Agent("forge-planner")` call for an already-resolved
+  `sidecar` route. Conversely, a resolved `native` route MUST use that canonical form even when
+  `DISPATCH_ENGINE == codex`; the renderer owns its projection to `spawn_agent()`.
 - The ONLY legitimate degradation to Claude is the named `worker-engine-fallback` event written
   to `.gsd/forge/events.jsonl` by the spec's Layer-2 — fallback without the event is silent bypass.
 - If neither spec path is readable, that is a broken installation: STOP the run and surface it —
   never improvise the branch from memory.
 
+**Declared native `not-spawned` transition (one shot):** initialize `NATIVE_TO_SIDECAR_COUNT=0` per
+unit. If, and only if, the canonical native call returns the named outcome `not-spawned`, verify
+`NATIVE_TO_SIDECAR_COUNT == 0`, the route was allowed, and
+`RESOLVED_WORKER_ENGINE == HOST_RUNTIME` (the same resolved worker; no family substitution). Then
+increment the counter, set `WORKER_MODE=sidecar`, set `SIDECAR_DECLARED=true`, retain
+`DISPATCH_ALLOWED=true`, and load `shared/forge-sidecar-auto.md` once. A second transition, a
+different native outcome, or an identity mismatch follows the existing CRITICAL dispatch-failure
+stop boundary. It never enters the sidecar or executes inline. The sidecar emitter therefore records
+the final actual mode `sidecar`, not the stale initial `native` value.
+
 ---
 
-**Single-task flow (BATCH.length == 1):**
+**Single-task native flow (`BATCH.length == 1 && WORKER_MODE == native`):**
 
 Use `$MODEL_ID` resolved by Tier Resolution (step 1.5) above — do NOT re-read from PREFS Phase-routing table.
 
@@ -1213,14 +1319,22 @@ Then call `Agent(agent_name, worker_prompt, model: $MODEL_ALIAS)` when `$MODEL_A
   - `✔ S01 · auth slice complete`
   - `🧠 S01 · extract memories`
 
-Wait for the result. Then:
+Wait for the result. If its named native outcome is `not-spawned`, apply the one-shot declared transition above and enter the loaded sidecar mirror; do not count it as a completed native call and do not emit the native event below. Every other successful native result continues here. A throw still follows the Retry Handler and never masquerades as `not-spawned`.
+
+Then:
 ```bash
 OUTPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result")
 mkdir -p .gsd/forge/
-MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')
 # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
 DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"${unitType}/${unitId}\",\"model\":\"${MODEL_ID}\",\"tier\":\"${TIER}\",\"reason\":\"${REASON}\",\"effort\":\"${EFFORT}\",\"effort_reason\":\"${EFFORT_REASON}\",\"engine\":\"${ENGINE:-claude}\",\"domain\":\"${DOMAIN_USED}\",\"route_source\":\"${ROUTE_SOURCE}\",\"chain_len\":${CHAIN_LEN},\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":${INPUT_TOKENS},\"output_tokens\":${OUTPUT_TOKENS},\"model_applied\":${MODEL_APPLIED_JSON},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
+  --unit "${unitType}/${unitId}" --model "$MODEL_ID" --tier "$TIER" --reason "$REASON" \
+  --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
+  --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
+  --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \
+  --output-tokens "$OUTPUT_TOKENS" --model-applied "$MODEL_ALIAS" \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --events .gsd/forge/events.jsonl
 ```
 
 **Guarded dispatch — apply the Retry Handler section of `shared/forge-dispatch.md`:** Wrap the `Agent()` call in a try/catch. On throw:
@@ -1259,9 +1373,24 @@ node "$FORGE_SCRIPTS_DIR/forge-runs.js" --heartbeat ${RUN_ID:+--run "$RUN_ID"} -
 
 This branch runs ONLY when `forge-parallelism.js` returned `mode: parallel` for an `execute-task` unit. All tasks in `BATCH` have satisfied `depends:[]` and non-overlapping `writes:[]`.
 
-> **Codex in a parallel batch (S02):** the sidecar is single-task only — background sidecars are NOT mixed with the Claude parallel `Agent()` batch. When engine routing yields `codex` for tasks in a batch, resolve `ENGINE` **per task** (step 1.45 is per-`PLAN_PATH`, like Tier Resolution) and handle each `codex` task **single-task via Branch C** (sequential), keeping the Claude batch below intact for the `claude` tasks. Do not background-dispatch multiple sidecars concurrently in S02.
+> **Runtime modes in a parallel batch:** background sidecars are NEVER mixed with the projected native `Agent()` batch. Partition from the immutable per-task resolver maps: every task whose `BATCH_WORKER_MODE[$ENTRY_ID] == native` participates in the one foreground native multi-call, including Codex-native tasks in the rendered dialect; every `sidecar` task runs single-task and sequentially through Branch C. `DISPATCH_ENGINE` chooses the sidecar adapter but never moves a native task out of the native batch. Do not background-dispatch multiple sidecars.
 
-**a) Per-task resolution** — for each task `T##` in BATCH, already resolved (Per-task resolution step above) so each task has its own `{TIER, MODEL_ID, REASON, SECURITY_PATH, PLAN_PATH}`. Build a **per-task worker prompt** using the same substitution rules as Step 3 (templates from `forge-dispatch.md`, memory filter per-task, coding standards sections, etc.).
+**a) Per-task resolution** — for each task `T##` in BATCH, use only its stored `BATCH_ROUTE_JSON[T##]` and corresponding runtime/routing maps from the gated per-task resolution above. Build a **per-task worker prompt** using the same substitution rules as Step 3 (templates from `forge-dispatch.md`, memory filter per-task, coding standards sections, etc.). No launch may use the scalar exports left by whichever route was resolved last.
+
+Partition explicitly before any launch:
+```bash
+NATIVE_BATCH_IDS=(); SIDECAR_BATCH_IDS=()
+for ENTRY_ID in "${BATCH_TASK_IDS[@]}"; do
+  case "${BATCH_WORKER_MODE[$ENTRY_ID]}" in
+    native)  NATIVE_BATCH_IDS+=("$ENTRY_ID") ;;
+    sidecar) SIDECAR_BATCH_IDS+=("$ENTRY_ID") ;;
+    *) DISPATCH_REASON_CODE="invalid-worker-mode"; DISPATCH_HINT="worker_mode ausente/inválido para $ENTRY_ID"
+       dispatch_refusal_stop; exit 1 ;;
+  esac
+done
+```
+
+Process `SIDECAR_BATCH_IDS` sequentially through `shared/forge-sidecar-auto.md` before or after the native group, never concurrently with it. For each entry bind `$PLAN_PATH` and the other task inputs from that entry, parse its stored `BATCH_ROUTE_JSON[$ENTRY_ID]` with the flag-free `--shell-exports` transform, immediately re-check `DISPATCH_ALLOWED`, then load Branch C. This re-binding cannot borrow another task's scalars and does not re-resolve or change the route.
 
 **b) Create N timeline tasks** — emit one `TaskCreate` per batch member (icon `⚡`, one-liner from T##-PLAN.md). Store returned IDs in parallel array `task_ids = [id1, id2, ...]`. Mark each `in_progress` via `TaskUpdate`.
 
@@ -1274,12 +1403,13 @@ Use a single `BATCH:<csv>` worker label so the statusline shows the parallel gro
 
 **d) Compute per-task INPUT_TOKENS** — loop and capture each:
 ```bash
-INPUT_TOKENS_T01=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$prompt_T01")
-INPUT_TOKENS_T02=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$prompt_T02")
-# ... for each task in BATCH
+declare -A INPUT_TOKENS_BY_TASK
+for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
+  INPUT_TOKENS_BY_TASK["$ENTRY_ID"]=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "${PROMPT_BY_TASK[$ENTRY_ID]}")
+done
 ```
 
-**e) Dispatch ALL N Agent() calls IN ONE RESPONSE MESSAGE** — this is the critical Claude Code semantic: multiple tool-use blocks in a single assistant turn execute concurrently. Emit **all N `Agent()` calls inside the same assistant message** (not sequential messages).
+**e) Dispatch ALL N native Agent() calls IN ONE RESPONSE MESSAGE** — this is the critical native-host semantic: multiple projected native tool-use blocks in a single assistant turn execute concurrently. Emit **all N canonical `Agent()` calls inside the same assistant message** (not sequential messages). In the Codex artifact these forms are `spawn_agent()`; the batch membership and per-task route maps are unchanged.
 
 **⚠ CRITICAL — tool-call shape (read before dispatching):**
 
@@ -1324,13 +1454,27 @@ This branch is a safety net, not a retry path. The right fix is to not backgroun
 - If ANY task throws permanently (classifier `retry: false`, or retries exhausted): apply the CRITICAL path — deactivate auto-mode, surface to user, stop loop. Other batch results are discarded (STATE still reflects the pre-batch position).
 - Transient/retry events append to `events.jsonl` with `unit: "execute-task/T##"` (per-task, not per-batch).
 
-**h) Output tokens + dispatch events** — once all results are back, emit one `dispatch` event per task (not one per batch), preserving the per-task tier/model/reason/effort fields. The single `forge-dispatch-resolve.js --json` call resolves **per task** in batch mode — each task gets its own `$MODEL_ID_T##`/`$ENGINE_T##`/`$DOMAIN_USED_T##`/`$ROUTE_SOURCE_T##`/`$CHAIN_LEN_T##`/`$EFFORT_T##`/`$EFFORT_REASON_T##` from that task's `$PLAN_PATH` (step 1.5 re-run per-`PLAN_PATH`). (Codex tasks in a batch are handled single-task via Branch C — the Claude parallel batch below is never mixed with background sidecars.)
+**h) Output tokens + dispatch events** — once all results are back, emit one `dispatch` event per native task (not one per batch), preserving that task's runtime, tier, model, reason, and effort fields. Sidecar tasks emit from `shared/forge-sidecar-auto.md` with their final actual mode. The corresponding associative-map entry is the event source; never use the last scalar resolver values.
 ```bash
-for each task in BATCH:
-  OUTPUT_TOKENS_T##=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$result_T##")
+for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
+  OUTPUT_TOKENS_CURRENT=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "${RESULT_BY_TASK[$ENTRY_ID]}")
   # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
   DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
-  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"dispatch\",\"unit\":\"execute-task/T##\",\"model\":\"$MODEL_ID_T##\",\"tier\":\"$TIER_T##\",\"reason\":\"$REASON_T##\",\"effort\":\"$EFFORT_T##\",\"effort_reason\":\"$EFFORT_REASON_T##\",\"engine\":\"claude\",\"domain\":\"$DOMAIN_USED_T##\",\"route_source\":\"$ROUTE_SOURCE_T##\",\"chain_len\":$CHAIN_LEN_T##,\"slice\":\"{S##}\",\"milestone\":\"${RUN_ID:-{M###}}\",\"input_tokens\":$INPUT_TOKENS_T##,\"output_tokens\":$OUTPUT_TOKENS_T##,\"batch_size\":${BATCH_LENGTH},\"vcs\":\"${DISPATCH_VCS:-unknown}\",\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+  node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "${BATCH_ROUTE_JSON[$ENTRY_ID]}" \
+    --unit "execute-task/${ENTRY_ID}" --model "${BATCH_MODEL_ID[$ENTRY_ID]}" \
+    --host-runtime "${BATCH_HOST_RUNTIME[$ENTRY_ID]}" --worker-mode "${BATCH_WORKER_MODE[$ENTRY_ID]}" \
+    --resolved-worker-engine "${BATCH_RESOLVED_WORKER[$ENTRY_ID]}" \
+    --dispatch-allowed "${BATCH_DISPATCH_ALLOWED[$ENTRY_ID]}" \
+    --tier "${BATCH_TIER[$ENTRY_ID]}" --reason "${BATCH_REASON[$ENTRY_ID]}" \
+    --effort "${BATCH_EFFORT[$ENTRY_ID]}" --effort-reason "${BATCH_EFFORT_REASON[$ENTRY_ID]}" \
+    --engine "${BATCH_ENGINE[$ENTRY_ID]}" --domain "${BATCH_DOMAIN_USED[$ENTRY_ID]}" \
+    --route-source "${BATCH_ROUTE_SOURCE[$ENTRY_ID]}" --chain-len "${BATCH_CHAIN_LEN[$ENTRY_ID]}" \
+    --model-applied "${BATCH_MODEL_ALIAS[$ENTRY_ID]}" \
+    --slice "{S##}" --milestone "${RUN_ID:-{M###}}" \
+    --input-tokens "${INPUT_TOKENS_BY_TASK[$ENTRY_ID]}" --output-tokens "${OUTPUT_TOKENS_CURRENT}" \
+    --batch-size "${BATCH_LENGTH}" --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+    --events .gsd/forge/events.jsonl
+done
 ```
 
 The extra `batch_size` field lets post-hoc analysis separate parallel from sequential dispatches without breaking S03 telemetry readers (which ignore unknown fields).
@@ -1406,12 +1550,35 @@ Parse the `---GSD-WORKER-RESULT---` block:
 |-------|---------|---------------|
 | `context_overflow` | "context limit", "too long", "token" | Climb one tier up, then **re-resolve THROUGH routing** at the escalated tier (keeps the same `$DOMAIN`, so a `routing.<domain>.<phase>.<escalated-tier>` cell — or its `default` fallback — is honored on the retry): `ESCALATED_TIER=heavy` (`standard → heavy → max`); `ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$ESCALATED_TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR")`; `MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).chain[0].id)" "$ROUTE_JSON")`. If already `max` → stop loop, surface to user. Apply the thinking guard (Fable 5 + Opus 5) when escalating tiers. **This ladder is separate — it climbs tiers, it does NOT consume `chain[]` (the intra-tier chain, now cross-engine, walked via `--next-after`).** |
 | `scope_exceeded` | "out of scope", "too broad", "multiple tasks" | Stop loop. Tell user: "Task scope too broad — ask forge-planner to split T## into smaller tasks." |
-| `model_refusal` | "cannot", "I'm not able", "policy" | Walk the cross-engine chain first (SAME Layer 2, new resolver): `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR" --next-after "$MODEL_ID")`. If `$NEXT` non-empty → re-inspect the next member's engine (sidecar for `codex`, `Agent()` for `claude`), re-dispatch with `MODEL_ID=$NEXT` (re-resolve `$MODEL_ALIAS` via `forge-model-alias.js`; members with no alias are skipped automatically by `--next-after`). If exhausted (`$NEXT` empty — chain + category fallback consumed) → stop loop, surface to user. **Does not escalate tier (never a 4th layer — MEM001).** |
+| `model_refusal` | "cannot", "I'm not able", "policy" | Walk the cross-engine chain first (SAME Layer 2, new resolver): `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR" --next-after "$MODEL_ID")`. If `$NEXT` non-empty → derive its normalized `NEXT_ENGINE`, run the next-member resolver/export/allowance block below, and re-dispatch by its resulting `WORKER_MODE` (`native` canonical form or loaded `sidecar`). Re-resolve `$MODEL_ALIAS` via `forge-model-alias.js`; members with no alias are skipped automatically by `--next-after`. If exhausted (`$NEXT` empty — chain + category fallback consumed) → stop loop, surface to user. **Does not escalate tier (never a 4th layer — MEM001).** |
 | `429` | "rate limit", "429", "quota" | Same cross-engine chain walk as `model_refusal` (`forge-routing.js ... --next-after "$MODEL_ID"`). Chain exhausted → stop loop, surface to user. This is a `status: blocked` classification (Layer 2) — distinct from a transient 429 raised as an `Agent()` exception, which the Retry Handler (Layer 1) already handles; do not double-recover the same failure across layers. |
 | `400` | "400", "bad request", "invalid" | Same cross-engine chain walk as `model_refusal` (`forge-routing.js ... --next-after "$MODEL_ID"`). Chain exhausted → stop loop, surface to user. |
 | `tooling_failure` | "command not found", "permission denied", "ENOENT" | Stop loop. Tell user: "Tooling error — check that required tools are installed and accessible." |
 | `external_dependency` | "API", "network", "not running", "connection refused" | Stop loop. Tell user: "External dependency unavailable — resolve and re-run /forge-auto." |
 | `unknown` | anything else | Stop loop. Surface raw blocker to user. |
+
+For the `model_refusal` / `429` / `400` next-member paths, re-enter the runtime guard instead of assigning a branch from engine metadata:
+
+```bash
+NEXT_MODEL_ID="$NEXT"
+NEXT_ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" \
+  --unit-type "$unit_type" --plan "$PLAN_PATH" --unit-id "$unit_id" \
+  --milestone "${RUN_ID:-{M###}}" --roadmap "$ROADMAP_PATH" \
+  --host-runtime claude --worker-engine "$NEXT_ENGINE" --cwd "$WORKING_DIR" --json)
+[ $? -eq 0 ] || { echo "✗ next-member resolver halted" >&2; exit 1; }
+NEXT_EXPORTS=$(printf '%s' "$NEXT_ROUTE_JSON" | node "$FORGE_SCRIPTS_DIR/forge-dispatch-resolve.js" --shell-exports)
+[ $? -eq 0 ] || { echo "✗ next-member resolver exports invalid" >&2; exit 1; }
+eval "$NEXT_EXPORTS"
+if [ "$DISPATCH_ALLOWED" != "true" ]; then
+  dispatch_refusal_stop
+  exit 1
+fi
+if [ "$DISPATCH_DECISION" = "advisory" ]; then
+  printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
+fi
+MODEL_ID="$NEXT_MODEL_ID"               # preserve the selected chain member after contract export
+# WORKER_MODE=native -> canonical Agent(); WORKER_MODE=sidecar -> load shared/forge-sidecar-auto.md.
+```
 
 Auto-recovery attempts (context_overflow, model_refusal, 429, 400) count as units toward `COMPACT_AFTER`.
 
@@ -1544,6 +1711,8 @@ KEY_DECISIONS:
 ```
 
 Pass `run_in_background: true` to the `Agent()` call. The orchestrator does NOT await this — it proceeds immediately to Step 6e. When the background agent finishes, AUTO-MEMORY.md is updated on disk and will be picked up by the next unit's selective injection filter. If the background agent fails silently, the loss is bounded to that one extraction — the next unit's extraction will still run and AUTO-MEMORY accumulates.
+
+<!-- forge:dispatch:end -->
 
 **e-reinject) Must-haves re-injection diff (scope_reduction)** — runs after memory extraction, before progress tracking. Applies to `execute-task` units only.
 

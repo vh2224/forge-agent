@@ -10,12 +10,146 @@ const sourceManifest = require('./forge-source-manifest');
 const ownership = require('./forge-projection-ownership');
 const PROVENANCE = require('./forge-projection-provenance');
 const selfProjection = require('./forge-projection-self');
+const { detectEol } = require('./forge-instructions');
 const { VERSION } = require('./forge-version');
 
 const RUNTIME = 'codex';
+// Production callers pass this dialect explicitly. Keeping it as data preserves
+// the renderer seam: the marker scanner identifies the managed span, while the
+// caller decides which native worker syntax and host name belong in that span.
+const PRODUCTION_DISPATCH_DIALECT = Object.freeze({
+  agentInvocation: 'spawn_agent(',
+  hostRuntime: RUNTIME,
+});
 const ORIGIN = '<!-- forge-source:codex -->';
 const TOML_ORIGIN = '# forge-source:codex';
 const REASON = Object.freeze({ unavailable: 'unavailable', user_owned: 'user_owned', invalid_options: 'invalid_options', missing_source: 'missing_source', missing_manifest: 'missing_manifest' });
+const DISPATCH_MARKER_START = '<!-- forge:dispatch:start -->';
+const DISPATCH_MARKER_END = '<!-- forge:dispatch:end -->';
+const DISPATCH_REASON = Object.freeze({
+  START_WITHOUT_END: 'dispatch-start-without-end',
+  END_WITHOUT_START: 'dispatch-end-without-start',
+  DUPLICATE_START: 'dispatch-duplicate-start',
+  DUPLICATE_END: 'dispatch-duplicate-end',
+  END_BEFORE_START: 'dispatch-end-before-start',
+  AGENT_FORM_REQUIRED: 'dispatch-agent-form-required',
+  HOST_RUNTIME_INVALID: 'dispatch-host-runtime-invalid',
+});
+
+// Dispatch markers deliberately have their own scanner. The routing-contract
+// scanner in forge-instructions.js has fixed marker regexes because accepting a
+// second managed-block dialect there would widen the ownership boundary of
+// CLAUDE.md/AGENTS.md. Only detectEol is shared between the two mechanisms.
+const DISPATCH_FENCE_RE = /^(`{3,}|~{3,})/;
+
+function isDispatchMarkerLine(line, marker) {
+  return line.startsWith(marker) && /^[ \t]*$/.test(line.slice(marker.length));
+}
+
+function isDispatchFenceClose(line, fenceChar, fenceLength) {
+  if (!line.startsWith(fenceChar.repeat(fenceLength))) return false;
+  let runLength = 0;
+  while (line[runLength] === fenceChar) runLength++;
+  return runLength >= fenceLength && /^[ \t]*$/.test(line.slice(runLength));
+}
+
+function scanDispatchMarkers(text) {
+  const rawLines = String(text).split('\n');
+  const starts = [];
+  const ends = [];
+  let fenceChar = null;
+  let fenceLength = 0;
+  let offset = 0;
+
+  for (let index = 0; index < rawLines.length; index++) {
+    const rawLine = rawLines[index];
+    const line = rawLine.replace(/\r$/, '');
+    if (fenceChar !== null) {
+      if (isDispatchFenceClose(line, fenceChar, fenceLength)) {
+        fenceChar = null;
+        fenceLength = 0;
+      }
+    } else {
+      const fence = DISPATCH_FENCE_RE.exec(line);
+      if (fence) {
+        fenceChar = fence[1][0];
+        fenceLength = fence[1].length;
+      } else {
+        const marker = {
+          start: offset,
+          end: offset + line.length,
+          after: offset + rawLine.length + (index < rawLines.length - 1 ? 1 : 0),
+        };
+        if (isDispatchMarkerLine(line, DISPATCH_MARKER_START)) starts.push(marker);
+        else if (isDispatchMarkerLine(line, DISPATCH_MARKER_END)) ends.push(marker);
+      }
+    }
+    offset += rawLine.length + (index < rawLines.length - 1 ? 1 : 0);
+  }
+  return { starts, ends };
+}
+
+function failDispatch(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  throw error;
+}
+
+function locateDispatchBlock(text) {
+  const { starts, ends } = scanDispatchMarkers(text);
+  if (starts.length === 0 && ends.length === 0) return null;
+  if (starts.length === 0) failDispatch(DISPATCH_REASON.END_WITHOUT_START, 'marker forge:dispatch:end sem start');
+  if (ends.length === 0) failDispatch(DISPATCH_REASON.START_WITHOUT_END, 'marker forge:dispatch:start sem end');
+  if (starts.length > 1) failDispatch(DISPATCH_REASON.DUPLICATE_START, 'marker forge:dispatch:start duplicado');
+  if (ends.length > 1) failDispatch(DISPATCH_REASON.DUPLICATE_END, 'marker forge:dispatch:end duplicado');
+  if (ends[0].start < starts[0].start) failDispatch(DISPATCH_REASON.END_BEFORE_START, 'marker forge:dispatch:end anterior ao start');
+  return {
+    start: starts[0].after,
+    end: ends[0].start,
+    startMarker: starts[0],
+    endMarker: ends[0],
+  };
+}
+
+function normalizeDispatchInsertion(value, eol) {
+  const separator = eol === 'crlf' ? '\r\n' : '\n';
+  return String(value).replace(/\r\n|\r|\n/g, separator);
+}
+
+function rewriteDispatchDialect(text, options) {
+  const block = locateDispatchBlock(text);
+  // This fast path is the compatibility contract for all canonical sources in
+  // this slice: no option is inspected and not even line endings are normalized.
+  if (block === null) return text;
+
+  const settings = options || {};
+  const original = String(text);
+  const interior = original.slice(block.start, block.end);
+  const eol = detectEol(original);
+  let agentInvocation = null;
+  if (interior.includes('Agent(')) {
+    if (typeof settings.agentInvocation !== 'string' || settings.agentInvocation.length === 0) {
+      failDispatch(DISPATCH_REASON.AGENT_FORM_REQUIRED, 'agentInvocation não vazio é obrigatório para Agent( cercado');
+    }
+    agentInvocation = normalizeDispatchInsertion(settings.agentInvocation, eol);
+  }
+  const hostRuntime = settings.hostRuntime === undefined ? RUNTIME : settings.hostRuntime;
+  // Symmetric with the Agent form above: an unusable value is refused by a named
+  // code instead of reaching String() and being spliced as `--host-runtime null`
+  // or `--host-runtime [object Object]` into the projected document.
+  if (typeof hostRuntime !== 'string' || hostRuntime.length === 0) {
+    failDispatch(DISPATCH_REASON.HOST_RUNTIME_INVALID, 'hostRuntime, quando informado, precisa ser string não vazia');
+  }
+  const runtimeInvocation = normalizeDispatchInsertion(hostRuntime, eol);
+  // Match both canonical forms on the ORIGINAL interior. String#replace scans
+  // that immutable input once; callback results are opaque. In particular, a
+  // host token deliberately present in agentInvocation is never considered a
+  // second host match and therefore cannot be retargeted accidentally.
+  const rewritten = interior.replace(/Agent\(|--host-runtime claude/g, (match) => (
+    match === 'Agent(' ? agentInvocation : `--host-runtime ${runtimeInvocation}`
+  ));
+  return `${original.slice(0, block.start)}${rewritten}${original.slice(block.end)}`;
+}
 
 function norm(value) { return String(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n'); }
 function tomlOrigin(kind) { return `${TOML_ORIGIN}-${kind} version=${VERSION}`; }
@@ -88,6 +222,10 @@ function tomlMultiline(value) {
 function render(options = {}) {
   const root = roots(options); const manifest = manifestFor(root, options); const sources = codexSources(manifest); const artifacts = [];
   const add = (sourceId, source, destination, content, kind) => artifacts.push({ source_id: sourceId, source, destination, content: norm(content), newline: 'lf', kind });
+  const rewriteMarkdown = (content) => rewriteDispatchDialect(content, {
+    agentInvocation: options.agentInvocation,
+    hostRuntime: options.hostRuntime,
+  });
   const common = sources.filter((source) => ['agents', 'commands', 'skills', 'dispatch-templates'].includes(source.source_id));
   const agents = sources.find((source) => source.source_id === 'agents');
   const agentFiles = agents ? walk(path.join(root.repo, agents.inputs[0])).filter((file) => file.endsWith('.md')) : [];
@@ -95,22 +233,22 @@ function render(options = {}) {
   add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), instructions, 'instructions');
   for (const file of agentFiles) {
     const name = path.basename(file, '.md');
-    const source = fs.readFileSync(file, 'utf8');
+    const source = rewriteMarkdown(fs.readFileSync(file, 'utf8'));
     const config = [tomlOrigin(`agent-${name}`), `name = "${name}"`, `description = "Forge ${name.replace(/^forge-/, '')} worker"`, 'sandbox_mode = "workspace-write"', 'developer_instructions = """', tomlMultiline(source), '"""', ''].join('\n');
     add('agents', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'agents', `${name}.toml`), config, 'agent');
   }
   const commandSource = sources.find((source) => source.source_id === 'commands');
   if (commandSource) for (const file of walk(path.join(root.repo, commandSource.inputs[0])).filter((item) => item.endsWith('.md'))) {
-    add('commands', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'commands', path.basename(file)), withOrigin(fs.readFileSync(file, 'utf8')), 'command');
+    add('commands', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'commands', path.basename(file)), withOrigin(rewriteMarkdown(fs.readFileSync(file, 'utf8'))), 'command');
   }
   const skillsSource = sources.find((source) => source.source_id === 'skills');
   if (skillsSource) for (const file of walk(path.join(root.repo, skillsSource.inputs[0])).filter((item) => /SKILL\.md$/i.test(item))) {
     const relative = path.relative(path.join(root.repo, skillsSource.inputs[0]), file);
-    add('skills', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'skills', relative), withOrigin(fs.readFileSync(file, 'utf8')), 'skill');
+    add('skills', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'skills', relative), withOrigin(rewriteMarkdown(fs.readFileSync(file, 'utf8'))), 'skill');
   }
   const dispatchSource = sources.find((source) => source.source_id === 'dispatch-templates');
   if (dispatchSource) for (const file of walk(path.join(root.repo, dispatchSource.inputs[0])).filter((item) => item.endsWith('.md'))) {
-    add('dispatch-templates', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'templates', 'dispatch', path.basename(file)), `${ORIGIN}\n\n${norm(fs.readFileSync(file, 'utf8'))}`, 'dispatch');
+    add('dispatch-templates', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'templates', 'dispatch', path.basename(file)), `${ORIGIN}\n\n${norm(rewriteMarkdown(fs.readFileSync(file, 'utf8')))}`, 'dispatch');
   }
   const config = `${tomlOrigin('config')}\n[forge]\nversion = "${VERSION}"\nhost_runtime = "codex"\nsource_manifest = "forge-source-manifest.json"\n`;
   add('codex-config', 'config.toml', path.join(root.codexHome, 'config.toml'), config, 'config');
@@ -175,7 +313,66 @@ function write(options = {}) {
   const nextOwnership = { ...recorded, ...ownership.recordOf(ownedNow) };
   return { ...report, written, preserved, conflicts, self_sourced: selfSourced, ownership: options.dryRun ? recorded : nextOwnership, changed: written.some((item) => !item.dry_run), dry_run: Boolean(options.dryRun) };
 }
-function parseArgs(argv = process.argv.slice(2)) { const out = { repo: path.resolve(__dirname, '..') }; for (let i = 0; i < argv.length; i++) { const arg = argv[i]; if (arg === '--repo') out.repo = argv[++i]; else if (arg === '--codex-home') out.codexHome = argv[++i]; else if (arg === '--forge-home') out.forgeHome = argv[++i]; else if (arg === '--project-root') out.projectRoot = argv[++i]; else if (arg === '--manifest') out.manifestFile = argv[++i]; else if (arg === '--dry-run') out.dryRun = true; else if (arg === '--json') out.json = true; else if (arg === '--help' || arg === '-h') out.help = true; else throw Object.assign(new Error(`opção desconhecida: ${arg}`), { code: REASON.invalid_options }); } return out; }
-function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), error = process.stderr.write.bind(process.stderr)) { try { const options = parseArgs(argv); if (options.help) { output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--dry-run] [--json]\n'); return 0; } const report = write(options); output(options.json ? `${JSON.stringify(report)}\n` : `Codex renderer ${VERSION}: ${report.written.length} written, ${report.preserved.length} preserved\n`); return 0; } catch (e) { error(`forge-codex-renderer: ${e.code || 'error'}: ${e.message}\n`); return 1; } }
+function parseArgs(argv = process.argv.slice(2)) {
+  const out = {
+    repo: path.resolve(__dirname, '..'),
+    ...PRODUCTION_DISPATCH_DIALECT,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--repo') out.repo = argv[++i];
+    else if (arg === '--codex-home') out.codexHome = argv[++i];
+    else if (arg === '--forge-home') out.forgeHome = argv[++i];
+    else if (arg === '--project-root') out.projectRoot = argv[++i];
+    else if (arg === '--manifest') out.manifestFile = argv[++i];
+    else if (arg === '--agent-invocation') out.agentInvocation = argv[++i];
+    else if (arg === '--host-runtime') out.hostRuntime = argv[++i];
+    else if (arg === '--dry-run') out.dryRun = true;
+    else if (arg === '--json') out.json = true;
+    else if (arg === '--help' || arg === '-h') out.help = true;
+    else throw Object.assign(new Error(`opção desconhecida: ${arg}`), { code: REASON.invalid_options });
+  }
+  // The CLI defaults are production values, but explicit overrides remain a
+  // useful black-box test seam. Refuse missing/empty overrides before rendering,
+  // even when a particular repository happens not to contain dispatch markers.
+  if (typeof out.agentInvocation !== 'string' || out.agentInvocation.length === 0) {
+    failDispatch(DISPATCH_REASON.AGENT_FORM_REQUIRED, 'agentInvocation não vazio é obrigatório');
+  }
+  if (typeof out.hostRuntime !== 'string' || out.hostRuntime.length === 0) {
+    failDispatch(DISPATCH_REASON.HOST_RUNTIME_INVALID, 'hostRuntime precisa ser string não vazia');
+  }
+  return out;
+}
+function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), error = process.stderr.write.bind(process.stderr)) {
+  try {
+    const options = parseArgs(argv);
+    if (options.help) {
+      output('Usage: forge-codex-renderer.js [--repo DIR] [--codex-home DIR] [--forge-home DIR] [--project-root DIR] [--agent-invocation PREFIX] [--host-runtime HOST] [--dry-run] [--json]\n');
+      return 0;
+    }
+    const report = write(options);
+    output(options.json ? `${JSON.stringify(report)}\n` : `Codex renderer ${VERSION}: ${report.written.length} written, ${report.preserved.length} preserved\n`);
+    return 0;
+  } catch (e) {
+    error(`forge-codex-renderer: ${e.code || 'error'}: ${e.message}\n`);
+    return 1;
+  }
+}
 if (require.main === module) process.exitCode = main();
-module.exports = { VERSION, RUNTIME, REASON, render, write, parseArgs, main };
+module.exports = {
+  VERSION,
+  RUNTIME,
+  PRODUCTION_DISPATCH_DIALECT,
+  REASON,
+  ORIGIN,
+  DISPATCH_MARKER_START,
+  DISPATCH_MARKER_END,
+  DISPATCH_REASON,
+  scanDispatchMarkers,
+  locateDispatchBlock,
+  rewriteDispatchDialect,
+  render,
+  write,
+  parseArgs,
+  main,
+};
