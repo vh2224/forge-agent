@@ -195,16 +195,17 @@ struct ItemsView: View {
                 // it wraps, leaving the magnifier flush against the edge.
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
+                        .forgeIcon(.small)
                         .foregroundStyle(.secondary)
                     TextField("buscar por título ou id", text: $searchQuery)
                         .textFieldStyle(.plain)
                     if searchQuery.isEmpty {
                         // Reserve the clear button's slot so the text does not
                         // shift the instant the first character lands.
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.clear)
+                        Image(systemName: "xmark.circle.fill").forgeIcon(.small).foregroundStyle(.clear)
                     } else {
                         Button { searchQuery = "" } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                            Image(systemName: "xmark.circle.fill").forgeIcon(.small).foregroundStyle(.tertiary)
                         }
                         .buttonStyle(.borderless)
                         .help("limpar busca")
@@ -331,7 +332,7 @@ struct ItemsView: View {
                 Label(toast.text, systemImage: toast.symbol)
                     .font(.callout)
                     .padding(.horizontal, 14).padding(.vertical, 9)
-                    .background(.regularMaterial, in: Capsule())
+                    .forgeSurface(.panel, in: Capsule())
                     .overlay(Capsule().strokeBorder(.quaternary, lineWidth: 1))
                     .shadow(radius: 8, y: 2)
                     .padding(.bottom, 18)
@@ -352,7 +353,7 @@ struct ItemsView: View {
             if let e = store.error {
                 Label(e, systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(.orange)
-                    .padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .padding(10).forgeSurface(.panel)
                     .padding(.top, 8)
             }
         }
@@ -441,7 +442,7 @@ struct BoardColumnView: View {
                 // in ForgeKitTests): the shape alone has to separate the columns
                 // for anyone who cannot rely on the tone.
                 Image(systemName: symbol)
-                    .font(.caption)
+                    .forgeIcon(.micro)
                     .foregroundStyle(tint.color)
                 Text(title)
                     .font(.subheadline).bold()
@@ -601,12 +602,12 @@ struct ItemCard: View {
                     // status literal written here would break the S04 guard.
                     if let st = item.parsedStatus {
                         Image(systemName: st.symbolName)
-                            .font(.caption2)
+                            .forgeIcon(.micro)
                             .foregroundStyle(st.tint.color)
                             .help("Coluna: \(st.label)")
                     }
                     Text(ItemCardPresentation.displayTitle(item))
-                        .font(.system(size: 13, weight: .medium))
+                        .font(ForgeType.body)
                         .lineLimit(2)
                     Spacer(minLength: 4)
                     // Start lives UP HERE, apart from copy and move.
@@ -632,7 +633,7 @@ struct ItemCard: View {
                                    help: ItemLaunch.refusal(for: item)
                                          ?? "Começar — abre uma aba de terminal com /forge-task",
                                    enabled: ItemLaunch.canStart(item)) {
-                            Image(systemName: "terminal")
+                            Image(systemName: "terminal").forgeIcon(.micro)
                         }
                     }
                     .buttonStyle(.borderless)
@@ -700,7 +701,7 @@ struct ItemCard: View {
                     } label: {
                         IconAction(tint: .orange, help: "Copiar id — \(item.id)",
                                    tintOnHover: true, hovering: copyHover) {
-                            Image(systemName: "doc.on.doc")
+                            Image(systemName: "doc.on.doc").forgeIcon(.micro)
                         }
                     }
                     // `.borderless` is the VERIFIED mitigation for D-S06-5 — a
@@ -746,6 +747,7 @@ struct ItemCard: View {
                             // — it fixed the odd one out by making everything
                             // odd. Scoped to the control that actually deviates.
                             Image(systemName: "arrow.left.arrow.right")
+                                .forgeIcon(.micro)
                                 .imageScale(.small)
                         }
                     }
@@ -780,7 +782,7 @@ struct ItemCard: View {
             .padding(.vertical, 8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .forgeSurface(.raised)
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
@@ -863,12 +865,13 @@ struct ProjectPicker: View {
         Button { open = true } label: {
             HStack(spacing: 7) {
                 Image(systemName: selection.isEmpty ? "square.stack.3d.up" : "folder")
+                    .forgeIcon(.small)
                     .foregroundStyle(.secondary)
                 Text(selection.isEmpty ? "Todos os projetos" : ProjectOrganiser.name(selection))
                     .lineLimit(1)
                 Spacer(minLength: 2)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .forgeIcon(.micro).foregroundStyle(.tertiary)
             }
             // Same reason as the search field: the folder glyph would sit flush
             // against the system container without an inset of its own.
@@ -884,12 +887,12 @@ struct ProjectPicker: View {
         .popover(isPresented: $open, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    Image(systemName: "magnifyingglass").forgeIcon(.small).foregroundStyle(.secondary)
                     TextField("buscar projeto", text: $query)
                         .textFieldStyle(.plain)
                     if !query.isEmpty {
                         Button { query = "" } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                            Image(systemName: "xmark.circle.fill").forgeIcon(.small).foregroundStyle(.tertiary)
                         }
                         .buttonStyle(.borderless)
                     }
@@ -931,11 +934,11 @@ struct ProjectPicker: View {
             open = false
         } label: {
             HStack(spacing: 7) {
-                Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 14)
+                Image(systemName: symbol).forgeIcon(.small).foregroundStyle(.secondary).frame(width: 14)
                 Text(name).lineLimit(1)
                 Spacer(minLength: 4)
                 if selection == path {
-                    Image(systemName: "checkmark").font(.caption).foregroundStyle(.tint)
+                    Image(systemName: "checkmark").forgeIcon(.micro).foregroundStyle(.tint)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 5)
@@ -1163,7 +1166,7 @@ struct ItemDetailSheet: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(item.id, forType: .string)
                 } label: {
-                    Image(systemName: "doc.on.doc").font(.caption2)
+                    Image(systemName: "doc.on.doc").forgeIcon(.micro)
                 }
                 .buttonStyle(.borderless)
                 .help("copiar o id")
@@ -1280,7 +1283,7 @@ struct MarkdownBody: View {
                     Text(language).font(.caption2).foregroundStyle(.tertiary)
                 }
                 // No inline pass: inside a fence `*` and `_` are literal.
-                Text(text).font(.system(size: 12, design: .monospaced))
+                Text(text).font(ForgeType.mono)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(10)
@@ -1315,7 +1318,7 @@ private struct NewItemSheet: View {
             TextField("título", text: $title).textFieldStyle(.roundedBorder)
 
             TextEditor(text: $body_)
-                .font(.system(size: 12))
+                .font(ForgeType.body)
                 .frame(height: 90)
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
 
