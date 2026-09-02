@@ -34,6 +34,11 @@ final class TerminalSession: ObservableObject, Identifiable {
     let runId: String?
     let account: String?
 
+    /// The CLI this session actually opened with (`"claude"`, `"codex"`,
+    /// `"agy"`, ...) — not the picker's default. This is what `persistSessions()`
+    /// carries into the on-disk descriptor (`SessionDescriptor.engine`, T01/S06).
+    let engine: String
+
     @Published var isRunning = true
     @Published var exitLabel: String?
 
@@ -71,12 +76,13 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     init(cwd: String, title: String, bootstrap: String? = nil,
-         runId: String? = nil, account: String? = nil) {
+         runId: String? = nil, account: String? = nil, engine: String = "claude") {
         self.cwd = cwd
         self.title = title
         self.bootstrap = bootstrap
         self.runId = runId
         self.account = account
+        self.engine = engine
     }
 }
 

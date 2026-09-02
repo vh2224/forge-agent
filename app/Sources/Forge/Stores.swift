@@ -189,6 +189,12 @@ final class AppState: ObservableObject {
     /// Live terminal sessions hosted inside the app.
     @Published private(set) var sessions: [TerminalSession] = []
 
+    /// Descriptors loaded from `~/.claude/forge-sessions.json` at launch —
+    /// the offer T04 renders, never opened automatically. Loading this never
+    /// starts a session: doing so would spend the operator's account before
+    /// they asked for anything.
+    @Published private(set) var restorable: [SessionDescriptor] = []
+
     /// Which sidebar section is showing. Owned here rather than as RootView
     /// `@State` because opening a session has to be able to take the operator
     /// to the terminal — the composer that creates it lives on another screen.
@@ -312,6 +318,7 @@ final class AppState: ObservableObject {
     }
 
     init() {
+        restorable = SessionStore.load(path: SessionStore.path(home: NSHomeDirectory()))
         reloadCheap()
         loadAccounts()
         loadAppDefaults()
@@ -610,6 +617,23 @@ final class AppState: ObservableObject {
 
     // MARK: Terminal sessions
 
+    /// Writes the current session list to `~/.claude/forge-sessions.json`,
+    /// applying the 8-per-`cwd` retention rule before saving.
+    ///
+    /// `sessions.reversed()` is deliberate: `append` puts the newest session
+    /// last, but `SessionStore.retained` trusts "first occurrence wins" as
+    /// most-recent-first (T01) — reversing here is what makes "the 8 most
+    /// recent per distinct cwd" mean what it says instead of keeping the 8
+    /// oldest.
+    private func persistSessions() {
+        let descriptors = sessions.reversed().map {
+            SessionDescriptor(cwd: $0.cwd, title: $0.title, engine: $0.engine,
+                               account: $0.account, runId: $0.runId)
+        }
+        SessionStore.save(SessionStore.retained(Array(descriptors)),
+                           to: SessionStore.path(home: NSHomeDirectory()))
+    }
+
     /// Open a terminal inside the app. The account is selected with
     /// `claude --account <name>`, the flag the shell-init hook understands —
     /// never by exporting a token, which would leak it into the environment.
@@ -646,8 +670,9 @@ final class AppState: ObservableObject {
         let title = mode == .shell ? project : "\(project) · \(mode.shortLabel)"
         sessions.append(TerminalSession(
             cwd: cwd, title: title, bootstrap: boot,
-            runId: attachedRun, account: account.isEmpty ? nil : account))
+            runId: attachedRun, account: account.isEmpty ? nil : account, engine: "claude"))
         focus(sessions.last)
+        persistSessions()
     }
 
     /// Open a session from a free-form line. A leading slash command is passed
@@ -687,8 +712,10 @@ final class AppState: ObservableObject {
             ?? "\(project) · \(effective == "claude" ? "chat" : effective)"
         sessions.append(TerminalSession(
             cwd: cwd, title: title, bootstrap: boot,
-            runId: nil, account: effective == "claude" && !account.isEmpty ? account : nil))
+            runId: nil, account: effective == "claude" && !account.isEmpty ? account : nil,
+            engine: effective))
         focus(sessions.last)
+        persistSessions()
     }
 
     @discardableResult
@@ -712,6 +739,7 @@ final class AppState: ObservableObject {
         TerminalViewStore.shared.closeSession(s.id)
         focusedSession = TerminalFocus.afterClosing(
             s.id, selection: focusedSession, remaining: sessions.map(\.id))
+        persistSessions()
         return true
     }
 
@@ -805,8 +833,9 @@ final class AppState: ObservableObject {
         sessions.append(TerminalSession(
             cwd: run.cwd, title: "\(run.projectName) · auto",
             bootstrap: "claude\(claudeArgs) \(shq("/forge-auto \(run.id)"))",
-            runId: run.id, account: run.account))
+            runId: run.id, account: run.account, engine: "claude"))
         focus(sessions.last)
+        persistSessions()
     }
 
     /// The session in THIS app driving `run`, if there is one.
