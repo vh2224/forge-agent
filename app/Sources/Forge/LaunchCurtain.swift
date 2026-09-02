@@ -338,65 +338,60 @@ struct LaunchCurtain: View {
                             .clipShape(head)
                     }
                 }
-                // The top plane, catching the light.
+                // The top plane, catching the light. Fitted straight to the
+                // head's own top polygon (`hammerHeadTop`) instead of a frame
+                // fraction of the box — see the note on `Path.forgeHammerHeadTop`
+                // for why the old `alignment: .top` version never rendered.
                 .overlay {
-                    LinearGradient(colors: [.white.opacity(0.5), .clear],
-                                   startPoint: .top, endPoint: .bottom)
-                    .frame(height: side * 0.07)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .clipShape(head)
+                    Path.forgeHammerHeadTop(fitting: box)
+                        .fill(LinearGradient(colors: [.white.opacity(0.5), .clear],
+                                             startPoint: .top, endPoint: .bottom))
+                        .clipShape(head)
                 }
                 // The collar where the grip enters — the joint, stated. Without
                 // it the head and the grip are two shapes that happen to touch.
                 .overlay {
-                    Rectangle()
+                    Path.forgeHammerCollar(fitting: box)
                         .fill(Color.black.opacity(0.34))
-                        .frame(width: side * 0.26, height: side * 0.030)
-                        .offset(y: -side * 0.205)
                         .clipShape(head)
                 }
                 // Two incised bands. Norse, and structurally useful: a horizontal
                 // line across a block is the cheapest way to say it has a front
-                // face that is being seen straight on.
+                // face that is being seen straight on. The dark groove is the
+                // path itself; the lit lower lip is the same path nudged 0.8pt
+                // toward the viewer's light (a fixed on-screen offset, not a
+                // fraction of `side` — it is not repositioning the overlay,
+                // only drawing its highlight edge).
                 .overlay {
-                    VStack(spacing: side * 0.035) {
-                        band(width: side * 0.62)
-                        band(width: side * 0.62)
-                    }
-                    .offset(y: -side * 0.10)
-                    .clipShape(head)
+                    Path.forgeHammerBands(fitting: box)
+                        .fill(Color.black.opacity(0.34))
+                        .clipShape(head)
                 }
-                // The struck face, in shadow, with the coals under it.
+                .overlay {
+                    Path.forgeHammerBands(fitting: box)
+                        .offset(y: 0.8)
+                        .fill(Color.white.opacity(0.16))
+                        .clipShape(head)
+                }
+                // The struck face, in shadow, with the coals under it — clipped
+                // to the face polygon itself rather than a bottom fraction of
+                // the box frame.
                 .overlay {
                     LinearGradient(colors: [.clear, .black.opacity(0.6)],
                                    startPoint: .top, endPoint: .bottom)
-                    .frame(height: side * 0.10)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                    .clipShape(head)
+                    .clipShape(Path.forgeHammerHeadFace(fitting: box))
                 }
                 .overlay {
                     LinearGradient(
                         colors: [.clear, Color.tone(.ember).opacity(0.45 + 0.45 * heat)],
                         startPoint: .top, endPoint: .bottom)
-                    .frame(height: side * 0.030)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
                     .blendMode(.plusLighter)
-                    .clipShape(head)
+                    .clipShape(Path.forgeHammerHeadFace(fitting: box))
                 }
                 .overlay { head.stroke(Color.black.opacity(0.6), lineWidth: 1) }
                 .shadow(color: Color.tone(.ember).opacity(0.55 * heat), radius: 9)
         }
         .shadow(color: .black.opacity(0.55), radius: 7, y: 5)
-    }
-
-    /// One incised band across the head: a dark groove with a lit lower lip,
-    /// which is what an engraved line looks like when the light is above.
-    private func band(width: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            Rectangle().fill(Color.black.opacity(0.34)).frame(height: 1.2)
-            Rectangle().fill(Color.white.opacity(0.16)).frame(height: 0.8)
-        }
-        .frame(width: width)
     }
 
     /// Sparks off the blow.
@@ -666,6 +661,50 @@ extension Path {
         fit(ForgeMark.anvil, in: rect)
     }
 
+    // MARK: - Head overlays (S02)
+    //
+    // Measured on `c3a7344` before this file changed (see T02-SUMMARY for the
+    // full arithmetic): `tool(box:side:)` fits the whole tool (`ForgeMark.hammer`
+    // — head + handle) into a `side`×`side` box, and the height term wins the
+    // `min(...)` in `fit`, so `scale = side / 0.93` and the head — AppKit y
+    // 0.035…0.445 — lands, in the box's top-left coordinates, at
+    // y ∈ [0.559·side, side]. The bands/collar/top-highlight overlays used to
+    // be drawn centred on the BOX (`.offset(y: -side * 0.10/0.205)`,
+    // `alignment: .top`), which put all three inside y < 0.559·side — above the
+    // head — so `.clipShape(head)` silently erased them every time. These three
+    // helpers fit `ForgeMark.hammerHeadTop/hammerBands/hammerCollar` — data that
+    // lives IN the head's own unit square (see `ForgeMark.swift`) — with the
+    // exact same transform as `forgeHammerHead`, so a caller can place them BY
+    // the head's geometry and the overlay tracks the head even if its
+    // proportions change later.
+    static func forgeHammerHeadTop(fitting rect: CGRect) -> Path {
+        fit(ForgeMark.hammerHeadTop, in: rect, bounds: ForgeMark.hammer)
+    }
+
+    static func forgeHammerHeadBody(fitting rect: CGRect) -> Path {
+        fit(ForgeMark.hammerHeadBody, in: rect, bounds: ForgeMark.hammer)
+    }
+
+    static func forgeHammerHeadFace(fitting rect: CGRect) -> Path {
+        fit(ForgeMark.hammerHeadFace, in: rect, bounds: ForgeMark.hammer)
+    }
+
+    /// The two incised bands, as one path — a rect per entry in
+    /// `ForgeMark.hammerBands`, each fitted with `fitRect` (same scale/offset
+    /// as every other overlay here).
+    static func forgeHammerBands(fitting rect: CGRect) -> Path {
+        var p = Path()
+        for band in ForgeMark.hammerBands {
+            p.addRect(fitRect(band, in: rect, bounds: ForgeMark.hammer))
+        }
+        return p
+    }
+
+    /// The collar where the grip enters, fitted the same way.
+    static func forgeHammerCollar(fitting rect: CGRect) -> Path {
+        Path(fitRect(ForgeMark.hammerCollar, in: rect, bounds: ForgeMark.hammer))
+    }
+
     /// Fits a normalised outline into `rect`, flipping y.
     ///
     /// Shared by both marks because the flip is the part that is easy to get
@@ -673,9 +712,40 @@ extension Path {
     /// origin (it is drawn into a bitmap for the .icns) and `Path` is top-left.
     private static func fit(_ points: [(x: Double, y: Double)], in rect: CGRect,
                             bounds: [(x: Double, y: Double)]? = nil) -> Path {
-        let frame = bounds ?? points
-        let xs = frame.map { CGFloat($0.x) }
-        let ys = frame.map { CGFloat($0.y) }
+        let m = metrics(in: rect, bounds: bounds ?? points)
+        var p = Path()
+        for (i, pt) in points.enumerated() {
+            let point = CGPoint(x: m.ox + (CGFloat(pt.x) - m.minX) * m.scale,
+                                y: m.oy + m.h - (CGFloat(pt.y) - m.minY) * m.scale)
+            if i == 0 { p.move(to: point) } else { p.addLine(to: point) }
+        }
+        p.closeSubpath()
+        return p
+    }
+
+    /// Fits a normalised (x, y, w, h) rect — AppKit y-up, like every other
+    /// literal in `ForgeMark` — into `rect`, flipping y. Reuses `metrics` so
+    /// this can never drift from the point-based `fit` above: same
+    /// scale/offset math, only the shape differs (an axis-aligned box instead
+    /// of a polyline) — the flip `fit`'s own comment warns not to duplicate.
+    private static func fitRect(_ r: (x: Double, y: Double, w: Double, h: Double), in rect: CGRect,
+                                bounds: [(x: Double, y: Double)]) -> CGRect {
+        let m = metrics(in: rect, bounds: bounds)
+        let x = m.ox + (CGFloat(r.x) - m.minX) * m.scale
+        let w = CGFloat(r.w) * m.scale
+        let h = CGFloat(r.h) * m.scale
+        // The rect's AppKit-y-up top edge is (r.y + r.h) — the larger value —
+        // which is the edge `fit` would flip to the SMALLER top-left y.
+        let y = m.oy + m.h - (CGFloat(r.y + r.h) - m.minY) * m.scale
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// The scale/offset shared by every fit above: computed once from
+    /// `bounds`'s own bbox, independent of which points get transformed by it.
+    private static func metrics(in rect: CGRect, bounds: [(x: Double, y: Double)])
+        -> (scale: CGFloat, ox: CGFloat, oy: CGFloat, h: CGFloat, minX: CGFloat, minY: CGFloat) {
+        let xs = bounds.map { CGFloat($0.x) }
+        let ys = bounds.map { CGFloat($0.y) }
         let minX = xs.min()!, maxX = xs.max()!
         let minY = ys.min()!, maxY = ys.max()!
 
@@ -684,14 +754,6 @@ extension Path {
         let h = (maxY - minY) * scale
         let ox = rect.midX - w / 2
         let oy = rect.midY - h / 2
-
-        var p = Path()
-        for (i, pt) in points.enumerated() {
-            let point = CGPoint(x: ox + (CGFloat(pt.x) - minX) * scale,
-                                y: oy + h - (CGFloat(pt.y) - minY) * scale)
-            if i == 0 { p.move(to: point) } else { p.addLine(to: point) }
-        }
-        p.closeSubpath()
-        return p
+        return (scale, ox, oy, h, minX, minY)
     }
 }
