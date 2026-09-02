@@ -8521,6 +8521,121 @@ test("R7 — UnifiedDiff: newline final do git diff não vira uma linha de conte
                 "o \\n final do output não pode acrescentar um .context(\"\") fantasma")
 }
 
+// MARK: - Descritor de sessão: round-trip, load tolerante e retenção (S06)
+
+print("\nSessionPersistence (SessionDescriptor + SessionStore)")
+
+test("SessionDescriptor round-trip preserva os 5 campos preenchidos") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude", account: "mwtelles", runId: "run-1")
+    let data = try SessionStore.encode([d])
+    let decoded = SessionStore.decode(data)
+    assertEqual(decoded.count, 1, "1 descritor")
+    assertEqual(decoded.first, d, "round-trip deve preservar todos os campos")
+}
+
+test("SessionDescriptor round-trip preserva nil em account e runId (não vira string vazia)") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "codex")
+    let data = try SessionStore.encode([d])
+    let decoded = SessionStore.decode(data)
+    assertEqual(decoded.count, 1, "1 descritor")
+    assertNil(decoded.first?.account, "account deve continuar nil")
+    assertNil(decoded.first?.runId, "runId deve continuar nil")
+}
+
+test("SessionStore.path(home:) monta <home>/.claude/forge-sessions.json") {
+    assertEqual(SessionStore.filename, "forge-sessions.json")
+    assertEqual(SessionStore.path(home: "/Users/synthetic"), "/Users/synthetic/.claude/forge-sessions.json",
+                "nunca sob .gsd/, nunca por workspace")
+}
+
+test("SessionStore.load devolve [] para arquivo ausente, sem crash") {
+    let tmp = NSTemporaryDirectory() + "forge-sessions-\(UUID().uuidString.prefix(8))"
+    let path = tmp + "/forge-sessions.json"
+    assertEqual(SessionStore.load(path: path), [], "arquivo ausente deve devolver [] sem lançar")
+}
+
+test("SessionStore.load devolve [] para bytes que não são JSON") {
+    let tmp = NSTemporaryDirectory() + "forge-sessions-\(UUID().uuidString.prefix(8))"
+    try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let path = tmp + "/forge-sessions.json"
+    try! Data("isto não é json {{{".utf8).write(to: URL(fileURLWithPath: path))
+    assertEqual(SessionStore.load(path: path), [], "bytes lixo devem devolver [] sem lançar")
+}
+
+test("SessionStore.load devolve [] quando o JSON é válido mas o top-level não é array") {
+    let tmp = NSTemporaryDirectory() + "forge-sessions-\(UUID().uuidString.prefix(8))"
+    try? FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    let path = tmp + "/forge-sessions.json"
+    try! Data("{\"cwd\": \"/x\"}".utf8).write(to: URL(fileURLWithPath: path))
+    assertEqual(SessionStore.load(path: path), [], "top-level objeto (não array) deve devolver []")
+}
+
+test("SessionStore.decode elemento-a-elemento: 1 de 3 registros inválido não derruba os 2 válidos") {
+    let good1 = SessionDescriptor(cwd: "/a", title: "a", engine: "claude")
+    let good2 = SessionDescriptor(cwd: "/b", title: "b", engine: "codex")
+    // Registro inválido: falta "cwd", que não é opcional em SessionDescriptor.
+    let mixedJSON = """
+    [
+      {"cwd": "/a", "title": "a", "engine": "claude"},
+      {"title": "sem cwd", "engine": "agy"},
+      {"cwd": "/b", "title": "b", "engine": "codex"}
+    ]
+    """
+    let decoded = SessionStore.decode(Data(mixedJSON.utf8))
+    assertEqual(decoded.count, 2, "só os 2 registros válidos devem sobreviver")
+    assertTrue(decoded.contains(good1), "registro válido /a deve estar presente")
+    assertTrue(decoded.contains(good2), "registro válido /b deve estar presente")
+}
+
+test("SessionStore.save→load happy path: lista volta igual") {
+    let tmp = NSTemporaryDirectory() + "forge-sessions-\(UUID().uuidString.prefix(8))"
+    let path = tmp + "/forge-sessions.json"
+    let descriptors = [
+        SessionDescriptor(cwd: "/a", title: "a", engine: "claude", account: "mwtelles", runId: "run-1"),
+        SessionDescriptor(cwd: "/b", title: "b", engine: "codex"),
+    ]
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    SessionStore.save(descriptors, to: path)
+    assertEqual(SessionStore.load(path: path), descriptors, "load subsequente deve devolver a lista igual")
+}
+
+test("SessionStore.save cria diretórios intermediários que faltarem") {
+    let tmp = NSTemporaryDirectory() + "forge-sessions-\(UUID().uuidString.prefix(8))"
+    let path = tmp + "/nested/deeper/forge-sessions.json"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+    assertFalse(FileManager.default.fileExists(atPath: tmp + "/nested"), "diretório não deve existir ainda")
+    let descriptors = [SessionDescriptor(cwd: "/a", title: "a", engine: "claude")]
+    SessionStore.save(descriptors, to: path)
+    assertEqual(SessionStore.load(path: path), descriptors, "load do caminho recém-criado deve devolver a lista salva")
+}
+
+test("SessionStore.retained deduplica por cwd mantendo a primeira ocorrência (a mais recente)") {
+    let recent = SessionDescriptor(cwd: "/a", title: "recente", engine: "claude")
+    let stale = SessionDescriptor(cwd: "/a", title: "antiga", engine: "claude")
+    let other = SessionDescriptor(cwd: "/b", title: "b", engine: "claude")
+    let retained = SessionStore.retained([recent, stale, other])
+    assertEqual(retained.count, 2, "cwd duplicado deve colapsar para 1")
+    assertTrue(retained.contains(recent), "a primeira ocorrência (mais recente) deve sobreviver")
+    assertFalse(retained.contains(stale), "a ocorrência antiga do mesmo cwd deve cair")
+    assertTrue(retained.contains(other), "cwd distinto não deve ser afetado")
+}
+
+test("SessionStore.retained corta em limit default == 8") {
+    let descriptors = (0..<12).map { SessionDescriptor(cwd: "/repo-\($0)", title: "t\($0)", engine: "claude") }
+    let retained = SessionStore.retained(descriptors)
+    assertEqual(retained.count, 8, "limit default deve ser 8")
+    assertEqual(retained.map(\.cwd), descriptors.prefix(8).map(\.cwd), "deve manter os 8 primeiros, em ordem")
+}
+
+test("SessionStore.retained respeita limit explícito") {
+    let descriptors = (0..<5).map { SessionDescriptor(cwd: "/repo-\($0)", title: "t\($0)", engine: "claude") }
+    let retained = SessionStore.retained(descriptors, limit: 3)
+    assertEqual(retained.count, 3, "limit explícito deve ser respeitado")
+    assertEqual(retained.map(\.cwd), descriptors.prefix(3).map(\.cwd))
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
