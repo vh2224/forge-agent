@@ -103,13 +103,13 @@ extension Color {
 /// reads as a rectangle; one pixel of light along the top edge reads as an
 /// object with a lit side, and that single line is most of the distance between
 /// "functional" and "designed".
-struct ForgeSurface: ViewModifier {
+struct ForgeSurface<S: InsettableShape>: ViewModifier {
     let level: SurfaceLevel
+    let shape: S
     var tint: ForgeTone?
     var tintStrength: Double = 0.14
 
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
         content
             .background {
                 shape.fill(
@@ -158,10 +158,26 @@ struct ForgeSurface: ViewModifier {
 }
 
 extension View {
+    /// The default surface shape — a rounded rect at the level's own radius.
+    /// Covers every call site except the three that are capsules.
     func forgeSurface(_ level: SurfaceLevel,
                       tint: ForgeTone? = nil,
                       tintStrength: Double = 0.14) -> some View {
-        modifier(ForgeSurface(level: level, tint: tint, tintStrength: tintStrength))
+        forgeSurface(level,
+                     in: RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous),
+                     tint: tint,
+                     tintStrength: tintStrength)
+    }
+
+    /// The general form. `in shape:` exists because `strokeBorder` requires
+    /// `InsettableShape`, and three call sites need `Capsule()` instead of the
+    /// rounded rect the level otherwise picks — the shape is a parameter, not
+    /// a fourth token.
+    func forgeSurface<S: InsettableShape>(_ level: SurfaceLevel,
+                                          in shape: S,
+                                          tint: ForgeTone? = nil,
+                                          tintStrength: Double = 0.14) -> some View {
+        modifier(ForgeSurface(level: level, shape: shape, tint: tint, tintStrength: tintStrength))
     }
 }
 
@@ -286,6 +302,36 @@ extension NSImage {
         image.isTemplate = true
         image.accessibilityDescription = "Forge"
         return image
+    }
+}
+
+// MARK: - Icons
+
+/// The icon scale. Glyphs are not type, and this is not a seventh step of
+/// `ForgeType`: an SF Symbol renders visually smaller than text of the same
+/// point size beside it, which is why the call sites this replaces paired an
+/// 8pt glyph with 9pt text. Six steps, closed — if a screen wants a seventh,
+/// it is decorating rather than saying something.
+enum ForgeIconSize {
+    case dot, micro, small, medium, large, hero
+    var points: Double {
+        switch self {
+        case .dot:    return 5
+        case .micro:  return 9
+        case .small:  return 12
+        case .medium: return 16
+        case .large:  return 22
+        case .hero:   return 28
+        }
+    }
+}
+
+extension View {
+    /// The single icon treatment. Every `Image(systemName:)` on the five
+    /// screens of S03 goes through here, so that changing how a glyph reads
+    /// is one edit rather than fifty-five.
+    func forgeIcon(_ size: ForgeIconSize, weight: Font.Weight = .regular) -> some View {
+        font(.system(size: size.points, weight: weight))
     }
 }
 
