@@ -199,7 +199,11 @@ final class AppState: ObservableObject {
     /// falls back explicitly; see `SectionRestore`.
     @Published var section: Section? = Section(rawValue: SectionRestore.resolve(
         rawValue: UserDefaults.standard.string(forKey: "lastSection"),
-        valid: Section.allCases.map(\.rawValue),
+        // Work sections only. A settings section restored here would select a
+        // sidebar row that no longer exists, leaving the window on a screen with
+        // nothing highlighted — the state D31's guard exists to prevent, now
+        // reachable from a saved value rather than from a rename.
+        valid: Section.workCases.map(\.rawValue),
         fallback: Section.terminal.rawValue)) ?? .terminal {
         didSet {
             UserDefaults.standard.set(section?.rawValue ?? "", forKey: "lastSection")
@@ -209,6 +213,15 @@ final class AppState: ObservableObject {
     /// Which session the terminal screen shows. Same reason: the creating code
     /// path needs to name it, and the terminal screen may not be on screen yet.
     @Published var focusedSession: UUID?
+
+    /// A line for the composer to adopt, set by something outside it.
+    ///
+    /// Published rather than a binding on the composer's own `text`: the
+    /// composer owns what is typed (it parses `/` and `@` against the caret as
+    /// it goes), and handing that state out would give two writers to one
+    /// string. A seed is a one-shot request — the composer takes it and clears
+    /// it — which is a different thing from shared ownership.
+    @Published var composerSeed: String?
 
     /// Show a session: select it and go to the terminal. Every creation path
     /// ends here, so "created but nothing visibly happened" cannot come back.
@@ -640,13 +653,38 @@ final class AppState: ObservableObject {
     /// Open a session from a free-form line. A leading slash command is passed
     /// through verbatim — whatever Forge gains tomorrow works here with no code
     /// change — and plain text becomes a conversation.
-    func newSessionRaw(cwd: String, prompt: String, account: String) {
-        let claudeArgs = account.isEmpty ? "" : " --account \(shq(account))"
-        let boot = "claude\(claudeArgs) \(shq(prompt))"
+    /// `engine` is the CLI a plain question opens.
+    ///
+    /// A SLASH COMMAND ALWAYS OPENS CLAUDE, whatever the picker says, and that
+    /// is not a limitation — it is the routing contract. `/forge-auto` hands the
+    /// work to the orchestrator, which resolves `{engine, model, tier}` per unit
+    /// from prefs; starting that loop inside Codex would not "run the milestone
+    /// on Codex", it would run it nowhere. The picker governs conversations,
+    /// which is the only thing on this screen that is the operator's to choose.
+    /// `model` is the alias a CONVERSATION opens with (`sonnet`, `opus`, …).
+    ///
+    /// Like `engine`, it is dropped for a slash command, and for the same
+    /// reason: a run resolves its model per unit from the tier tables, so
+    /// pinning one on the command line would override the router for every unit
+    /// the loop dispatches — the exact bypass `CLAUDE.md` forbids. Empty means
+    /// "whatever the CLI defaults to", which is not the same as a choice.
+    func newSessionRaw(cwd: String, prompt: String, account: String,
+                       engine: String = "claude", model: String = "") {
         let (cmd, _) = ComposerParser.split(prompt)
+        let effective = cmd == nil ? engine : "claude"
+        // `--account` is a Claude wrapper flag; passing it to another CLI would
+        // be an unrecognised argument, not a no-op.
+        let accountArgs = (effective == "claude" && !account.isEmpty)
+            ? " --account \(shq(account))" : ""
+        // `--model` only where it is a command a slash command did not claim,
+        // and only for Claude — the other CLIs take a different flag, and
+        // guessing one is how a session opens on an unrecognised argument.
+        let modelArgs = (effective == "claude" && cmd == nil && !model.isEmpty)
+            ? " --model \(shq(model))" : ""
+        let boot = "\(effective)\(accountArgs)\(modelArgs) \(shq(prompt))"
         let project = URL(fileURLWithPath: cwd).lastPathComponent
         let title = cmd.map { "\(project) · \($0.replacingOccurrences(of: "forge-", with: ""))" }
-            ?? "\(project) · chat"
+            ?? "\(project) · \(effective == "claude" ? "chat" : effective)"
         sessions.append(TerminalSession(
             cwd: cwd, title: title, bootstrap: boot,
             runId: nil, account: account.isEmpty ? nil : account))

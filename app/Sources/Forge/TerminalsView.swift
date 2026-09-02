@@ -34,25 +34,99 @@ struct TerminalsView: View {
     @State private var showZoomHud = false
     @State private var zoomFlash = 0
 
+    /// Wall or tabs, and whether the run rail is open. `@AppStorage` and not
+    /// `@State`: both are answers to "how do I like to work", and re-answering
+    /// them at every launch is the kind of small tax that makes a setting feel
+    /// like it was never saved.
+    @AppStorage(TerminalLayout.defaultsKey) private var layoutRaw = TerminalLayout.tabs.rawValue
+    @AppStorage("runRailVisible") private var railVisible = true
+
+    private var layout: TerminalLayout { TerminalLayout(rawValue: layoutRaw) ?? .tabs }
+
+    /// The wall needs at least two sessions to be a wall. Above twelve it stops
+    /// being readable (see `TerminalLayout.columns`) and the tab strip is the
+    /// honest answer — falling back is not a downgrade, it is the layout that
+    /// still works at that count.
+    private var wallApplies: Bool {
+        layout == .grid && state.sessions.count > 1 && state.sessions.count <= 12
+    }
+
+    /// The board takes over as soon as it is chosen, at any session count: with
+    /// one node it is still the screen where you place it and wire the next one
+    /// in. That is the difference between a LAYOUT (which needs several things
+    /// to lay out) and a WORKSPACE.
+    private var boardApplies: Bool { layout == .board && !state.sessions.isEmpty }
+
     var body: some View {
         Group {
             if state.sessions.isEmpty {
-                emptyPane
+                HomeView(state: state)
             } else {
                 sessionsPane
             }
         }
         .navigationTitle("Terminal")
+        // The native inspector, replacing a hand-rolled trailing column.
+        // AppKit gives what the HStack could not: a draggable divider the
+        // operator can size, the standard show/hide animation, and a width the
+        // window remembers. `isPresented` is derived rather than bound straight
+        // to `railVisible` so the rail cannot open over the home screen, where
+        // it would have nothing to report but would still take 268pt.
+        .inspector(isPresented: Binding(
+            get: { railVisible && !state.sessions.isEmpty },
+            set: { railVisible = $0 })
+        ) {
+            RunRail(state: state, session: state.visibleSession)
+                .inspectorColumnWidth(min: 240, ideal: 280, max: 380)
+        }
         .sheet(isPresented: $state.showLauncherSheet) {
             LauncherSheet(state: state, isPresented: $state.showLauncherSheet)
         }
         .toolbar {
+            // Layout and rail only exist once there is something to lay out.
+            // Shown on an empty screen they would be two controls that change
+            // nothing, which teaches the operator to ignore that corner.
+            if !state.sessions.isEmpty {
+                ToolbarItem {
+                    Picker("", selection: $layoutRaw) {
+                        ForEach(TerminalLayout.allCases) { l in
+                            Image(systemName: l.icon).help(l.help).tag(l.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .help("Abas ou mural")
+                }
+                ToolbarItem {
+                    Button { railVisible.toggle() } label: {
+                        Label("Trilho da run",
+                              systemImage: railVisible ? "sidebar.right" : "sidebar.trailing")
+                    }
+                    .help(railVisible ? "Esconder o trilho da run (⌘⇧R)"
+                                      : "Mostrar o trilho da run (⌘⇧R)")
+                }
+            }
             ToolbarItem {
                 Button { state.showComposer = true } label: {
                     Label("Nova sessão", systemImage: "plus")
                 }
                 .help("Nova sessão (⌘T)")
             }
+        }
+        // Shortcuts, not menu items: they steer this screen and only this
+        // screen, so a global CommandMenu entry would be enabled on Métricas.
+        .background {
+            Group {
+                Button("") { layoutRaw = TerminalLayout.tabs.rawValue }
+                    .keyboardShortcut("1", modifiers: [.control, .command])
+                Button("") { layoutRaw = TerminalLayout.grid.rawValue }
+                    .keyboardShortcut("2", modifiers: [.control, .command])
+                Button("") { layoutRaw = TerminalLayout.board.rawValue }
+                    .keyboardShortcut("3", modifiers: [.control, .command])
+                Button("") { railVisible.toggle() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
+            .opacity(0)
         }
         .onChange(of: terminals.fontSize) { _ in flashZoomHud() }
         .onAppear {
@@ -155,6 +229,9 @@ struct TerminalsView: View {
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    /// The terminal screen with sessions open: chrome on top, the terminals
+    /// themselves in the middle, and — when it is open — the run rail down the
+    /// trailing edge.
     private var sessionsPane: some View {
         VStack(spacing: 0) {
             // Gates ride above the tabs, not inside a tab: the run that is
@@ -165,28 +242,51 @@ struct TerminalsView: View {
             // One session needs no tab strip — a slim header with a real
             // "Encerrar" button reads better than a lone tab with a tiny x.
             // Several sessions need to be comparable at a glance, so they
-            // become tabs.
-            if state.sessions.count == 1, let only = state.sessions.first {
+            // become tabs. On the wall each pane carries its own header, so
+            // a strip above them would name every session twice.
+            if state.sessions.count == 1, let only = state.sessions.first, !boardApplies {
                 SingleSessionHeader(session: only, state: state)
-            } else {
+                Divider()
+            } else if !wallApplies && !boardApplies {
                 tabStrip
+                Divider()
             }
-            Divider()
+
+            terminalsPane
+                // The floating layer. Ordered back-to-front: images sit at
+                // the bottom edge, the HUD in the corner, the command bar on
+                // top of both because it is modal in intent even though it
+                // is not a sheet.
+                .overlay(alignment: .bottomTrailing) { imageStrip }
+                .overlay(alignment: .topTrailing) { zoomHud }
+                .overlay(alignment: .top) { floatingComposer }
+        }
+        // Weaker than the home: this one sits behind live terminals, and a
+        // background competing with what an agent is printing is a background
+        // that will be turned off.
+        .background(ForgeBackground(intensity: 0.45, embers: false))
+    }
+
+    /// Wall or stack. Both keep every session mounted — the wall by drawing all
+    /// of them, the stack by hiding rather than unmounting — because losing a
+    /// mount is losing the PTY's scrollback.
+    @ViewBuilder private var terminalsPane: some View {
+        if boardApplies {
+            BoardView(state: state, focused: currentID)
+                // The board's own drag gestures are declared in this space, so
+                // a wire dropped at the far edge of a panned canvas still lands
+                // on the node that is drawn there.
+                .coordinateSpace(name: "boardCanvas")
+        } else if wallApplies {
+            SessionWall(state: state, focused: currentID)
+        } else {
             ZStack {
-                // Every session stays mounted; hiding rather than unmounting
-                // keeps the PTY and scrollback alive when you switch tabs.
                 ForEach(state.sessions) { s in
                     TerminalHost(session: s)
                         .opacity(s.id == currentID ? 1 : 0)
                         .allowsHitTesting(s.id == currentID)
                 }
             }
-            // The floating layer. Ordered back-to-front: images sit at the
-            // bottom edge, the HUD in the corner, the command bar on top of
-            // both because it is modal in intent even though it is not a sheet.
-            .overlay(alignment: .bottomTrailing) { imageStrip }
-            .overlay(alignment: .topTrailing) { zoomHud }
-            .overlay(alignment: .top) { floatingComposer }
         }
     }
 

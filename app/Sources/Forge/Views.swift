@@ -1,12 +1,16 @@
 // Views — the app's surfaces.
 //
 // VISUAL RULES (deliberate, and worth keeping):
-//   1. One accent colour. Orange means "needs you". If nothing is orange,
-//      nothing is waiting. Cost, progress and tokens stay grey — colouring
-//      everything is the same as colouring nothing.
+//   1. One accent colour FOR ATTENTION. Orange means "needs you". If nothing is
+//      orange, nothing is waiting. Cost, progress and tokens stay grey.
+//      REVISED — see `Design.swift`: phase and engine now carry their own
+//      encodings, because an identity is not an alert. Orange's monopoly is on
+//      urgency, not on colour.
 //   2. Hierarchy comes from type size and whitespace, not borders. Cards use a
 //      material fill and no stroke.
-//   3. Native materials so it reads as a Mac app rather than a web page.
+//   3. Native BEHAVIOUR, deliberate surfaces. REVISED — see `Design.swift`:
+//      `.regularMaterial` everywhere was the absence of a decision, not a
+//      decision. Surfaces now come from `SurfaceLevel`.
 //   4. Big numbers only where a decision hangs on them.
 
 import SwiftUI
@@ -14,6 +18,12 @@ import AppKit
 import ForgeKit
 
 // MARK: - Shell
+
+/// One-shot flags for things that happen per LAUNCH rather than per window.
+@MainActor
+enum LaunchOnce {
+    static var curtainPending = true
+}
 
 enum Section: String, CaseIterable, Identifiable {
     // "Início" was removed, not renamed. It had no content of its own left:
@@ -54,6 +64,27 @@ enum Section: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Configuration, not work.
+    ///
+    /// Six of the twelve sections were places you go to SET something up, and
+    /// they sat in the same list as the places you go to WATCH work happen. A
+    /// sidebar that mixes the two is a settings drawer wearing navigation: every
+    /// app the operator compares this one to puts configuration behind ⌘, and
+    /// keeps the sidebar for the user's own material.
+    ///
+    /// They keep their cases. `rawValue` is the persistence key (see `title`),
+    /// `SettingsScene` addresses them by case, and deleting them would break
+    /// both for no gain — what changed is only where they are reachable from.
+    var isSettings: Bool {
+        switch self {
+        case .accounts, .models, .secrets, .prefs, .updates, .examples: return true
+        default: return false
+        }
+    }
+
+    /// What the sidebar lists: work only.
+    static var workCases: [Section] { allCases.filter { !$0.isSettings } }
+
     var icon: String {
         switch self {
         case .terminal: return "terminal"
@@ -93,6 +124,21 @@ struct RootView: View {
     /// expression is evaluated in a nonisolated context (learned in chunk 1).
     @StateObject private var updates = UpdateStore.shared
 
+    /// The launch animation, and whether the shell has arrived behind it.
+    ///
+    /// Seeded from a process-wide one-shot rather than from `true`: `WindowGroup`
+    /// can build a second `RootView` (⌘N, or reopening from the Dock), and a
+    /// splash screen that replays every time a window opens is the exact thing
+    /// that turns charm into an obstacle.
+    @State private var showPalette = false
+    /// The palette can change the terminal layout, which lives in
+    /// `TerminalsView`'s `@AppStorage`. Mirrored here rather than passed down:
+    /// `@AppStorage` on the same key is the same storage, so both views see the
+    /// change without either owning the other.
+    @AppStorage(TerminalLayout.defaultsKey) private var paletteLayout = TerminalLayout.tabs.rawValue
+    @State private var curtain = LaunchOnce.curtainPending
+    @State private var entered = !LaunchOnce.curtainPending
+
     // Section selection lives in AppState, not in `@State`: opening a session
     // from the composer has to move the operator to the terminal, and only
     // shared state can be driven from there.
@@ -119,7 +165,60 @@ struct RootView: View {
             .frame(minWidth: 460, minHeight: 380)
         }
         .overlay(alignment: .bottom) { toast }
+        // ⌘K. An overlay and not a sheet: a sheet would dim and block the window
+        // behind it, and half of what the palette is for is glancing at a run
+        // while you jump somewhere else.
+        .overlay(alignment: .top) {
+            if showPalette {
+                CommandPalette(state: state, isPresented: $showPalette,
+                               layoutRaw: $paletteLayout)
+                    .padding(.top, 64)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .background {
+                        Button("") { showPalette = false }
+                            .keyboardShortcut(.cancelAction).opacity(0)
+                    }
+            }
+        }
+        .background {
+            Button("") { withAnimation(.easeOut(duration: 0.14)) { showPalette.toggle() } }
+                .keyboardShortcut("k", modifiers: .command)
+                .opacity(0)
+        }
+        #if DEBUG
+        // Replays the launch animation. DEBUG only, and it exists for one
+        // reason: tuning a 900ms sequence by relaunching the app means fighting
+        // window focus for every single frame, and the frames that matter are
+        // the ones you cannot screenshot that way. Never compiled into a
+        // release, so it cannot become a shortcut anybody depends on.
+        .background {
+            Button("") { curtain = true; entered = false }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .opacity(0)
+        }
+        #endif
         .animation(.easeInOut(duration: 0.18), value: state.pending.count)
+        // The shell is mounted and live UNDER the curtain from frame one — the
+        // animation never delays a session, it only covers the moment before
+        // anyone could have read the screen anyway. `entered` then rises the
+        // content the last few points, so the app arrives instead of appearing.
+        .opacity(entered ? 1 : 0)
+        .offset(y: entered ? 0 : 6)
+        .overlay {
+            if curtain {
+                LaunchCurtain {
+                    LaunchOnce.curtainPending = false
+                    curtain = false
+                    withAnimation(.easeOut(duration: 0.34)) { entered = true }
+                }
+                .transition(.opacity)
+            }
+        }
+        .onAppear {
+            // Already-seen curtain (a second window): arrive immediately rather
+            // than sitting invisible waiting for an animation that will not run.
+            if !curtain { entered = true }
+        }
     }
 
     /// The sidebar list, extracted from `body` so a canvas can render the whole
@@ -127,7 +226,7 @@ struct RootView: View {
     /// where a `Divider`, or anything added to the footer, has to earn its place.
     private var sidebarList: some View {
         List(selection: $state.section) {
-            ForEach(Section.allCases) { s in
+            ForEach(Section.workCases) { s in
                 Label {
                     HStack {
                         // `.title`, never `.rawValue` — see `Section.title`.
@@ -165,9 +264,29 @@ struct RootView: View {
                 // validator from `allCases` (D31).
                 if s == .runs { Divider() }
             }
+
+            // What is running, in the sidebar rather than on the home.
+            //
+            // It lived on the home, which is the one screen you cannot see once
+            // you are working — so the list of live runs was visible exactly
+            // when there were none of your own to look at. Here it is visible
+            // from every screen, which is what a work list is for. This is the
+            // first half of the sidebar becoming the operator's material
+            // instead of the app's table of contents.
+            if !state.liveRuns.isEmpty {
+                SwiftUI.Section {
+                    ForEach(state.liveRuns) { run in
+                        SidebarRunRow(run: run, state: state)
+                    }
+                } header: {
+                    Text("Rodando")
+                        .font(ForgeType.micro)
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
-        .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
         .safeAreaInset(edge: .bottom) { sidebarFooter }
+        .navigationSplitViewColumnWidth(min: 200, ideal: 232, max: 300)
     }
 
     /// Counts only, and only where a count means something.
@@ -221,7 +340,7 @@ struct RootView: View {
                     running: updates.running,
                     repo: updates.repoDescribe,
                     updateAvailable: updates.updateAvailable,
-                    onTap: { state.section = .updates })
+                    onTap: { SettingsWindow.open(.updates) })
             }
             .padding(.horizontal, 8).padding(.vertical, 8)
         }
@@ -269,6 +388,44 @@ extension RootView {
 /// what makes the four states previewable at a fixed 180pt on a machine with no
 /// Xcode and no stamped bundle, which is the only width where the interesting
 /// question about this view exists.
+/// One live run in the sidebar.
+///
+/// Deliberately not a `Label` with a badge like the section rows above it: a run
+/// is not a destination, it is a thing that is happening, and it needs to say
+/// which unit and whether it still has a heartbeat. Clicking opens or focuses
+/// its terminal, which is the only thing anyone wants from it here.
+struct SidebarRunRow: View {
+    let run: Run
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        Button {
+            state.section = .terminal
+            state.resume(run)
+        } label: {
+            HStack(spacing: 7) {
+                PulseDot(tone: run.isStale ? .slate : .mint,
+                         alive: !run.isStale, size: 5)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(run.projectName)
+                        .font(ForgeType.body)
+                        .lineLimit(1)
+                    if let w = run.workerParts {
+                        Text(w.id.isEmpty ? w.unit : "\(w.unit) \(w.id)")
+                            .font(ForgeType.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Abrir o terminal desta run")
+    }
+}
+
 struct SidebarVersionLabel: View {
     let running: String?
     let repo: String?
@@ -1320,7 +1477,7 @@ struct SectionTitle: View {
     }
 }
 
-extension Color {
-    /// The single accent. Everything else stays neutral on purpose.
-    static let accentOrange = Color(red: 1.0, green: 0.58, blue: 0.13)
-}
+// `Color.accentOrange` moved to `Design.swift`, which is now the one place a
+// colour is spelled. It kept its name and its value: 75 call sites use it, and
+// the accent did not change — what changed is that it is no longer the only
+// colour the app has.

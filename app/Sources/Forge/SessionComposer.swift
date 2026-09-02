@@ -23,12 +23,59 @@ struct SessionComposer: View {
     var editorMaxHeight: CGFloat = 150
     /// Called after a session was created, so a host can dismiss itself.
     var onSubmitted: () -> Void = {}
+    /// Which CLI a plain question opens. Only the home sets it; every other
+    /// call site keeps Claude, which is what they meant before this existed.
+    var engine: String = "claude"
+    /// Model alias for a conversation. Empty = the CLI's own default.
+    var model: String = ""
+    /// Hides the context row until the operator asks for it — by focusing the
+    /// field, hovering the box, or having something worth saying (a project the
+    /// line requires and does not have).
+    ///
+    /// Claude's and ChatGPT's inputs are one line and a caret. The controls are
+    /// still there, they just do not spend attention until you look for them,
+    /// and everything they set is also settable by typing (`@project`, `/`).
+    /// A row of chips that is right 100% of the time and read 1% of the time is
+    /// the definition of chrome.
+    var quietFooter: Bool = false
+    /// The ↩/⇧↩ legend. On by default; the home turns it off.
+    ///
+    /// It is teaching text, and teaching text earns its place exactly once — on
+    /// a surface the operator meets before they know the app. The home is where
+    /// they are AFTER learning it, every single launch, forever.
+    var showsKeyHints: Bool = true
+    /// An extra control for the footer row, supplied by the host.
+    ///
+    /// The alternative was a second row under the composer, which is what the
+    /// home had: three stacked rows of chrome around one input. A host that
+    /// needs one more control should get to put it on the row that already
+    /// exists.
+    var accessory: AnyView? = nil
+    /// Lets a host react to what is being typed — the home uses it to show the
+    /// route for a `/command` and the engine picker for a plain question,
+    /// instead of asking the operator to pick a mode first.
+    var onTextChanged: (String) -> Void = { _ in }
 
-    @State private var text = ""
+    @State private var text = "" {
+        didSet { onTextChanged(text) }
+    }
     @State private var commands: [SlashCommand] = []
     @State private var project = ""
     @State private var account = ""
     @State private var highlighted = 0
+    /// Laid-out height of the typed text, reported by `PromptEditor`.
+    @State private var editorHeight: CGFloat = 20
+    @State private var hovering = false
+
+    /// The context row is shown when it can act, or when it must warn.
+    ///
+    /// `projectMissing` is the "must": a slash command with no project cannot
+    /// be sent, and hiding the control that fixes that would turn a disabled
+    /// send button into a mystery.
+    private var footerShown: Bool {
+        guard quietFooter else { return true }
+        return focused || hovering || projectMissing || !text.isEmpty
+    }
     @FocusState private var focused: Bool
 
     /// Rows currently offered, as a flat list — the menu shows either commands
@@ -82,8 +129,13 @@ struct SessionComposer: View {
                     PromptEditor(
                         text: $text,
                         onKey: { handleKey($0) },
-                        onSubmit: { submit() })
-                    .frame(minHeight: 20, maxHeight: editorMaxHeight)
+                        onSubmit: { submit() },
+                        onHeightChange: { editorHeight = $0 })
+                    // One line until there is a second one. `maxHeight` alone
+                    // gave the editor no intrinsic size, so SwiftUI handed it
+                    // the full allowance and the box opened as a tall empty
+                    // rectangle — the single most un-minimal thing on the home.
+                    .frame(height: min(max(editorHeight, 20), editorMaxHeight))
                     .onChange(of: text) { _ in highlighted = 0 }
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -108,12 +160,19 @@ struct SessionComposer: View {
                 completionMenu
             }
 
-            Divider()
-            footerBar
+            if footerShown {
+                Divider()
+                footerBar
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12)
-            .strokeBorder(focused ? Color.accentOrange.opacity(0.35) : .clear))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: footerShown)
+        .background(Color.forgeRaised, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(focused ? Color.tone(.ember).opacity(0.45)
+                                  : Color.forgeEdge.opacity(0.22), lineWidth: 1))
+        .shadow(color: .black.opacity(0.28), radius: 14, y: 5)
         .onAppear {
             if commands.isEmpty { commands = CommandCatalog.load() }
             // Guarded on `project.isEmpty` so a re-appear (e.g. returning from
@@ -124,7 +183,9 @@ struct SessionComposer: View {
             // landing screen and nothing else was fetching it.
             if state.accounts.isEmpty || state.activeAccount == nil { state.loadAccounts() }
             focused = true
+            adoptSeed()
         }
+        .onChange(of: state.composerSeed) { _ in adoptSeed() }
     }
 
     // MARK: Account
@@ -303,16 +364,20 @@ struct SessionComposer: View {
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .help(accountHelp)
 
-            HStack(spacing: 3) {
-                Text("↩").font(.system(size: 11, design: .monospaced))
-                Text(allowsEmptyShell && text.trimmingCharacters(in: .whitespaces).isEmpty
-                     ? "abre o shell" : "enviar")
-                    .font(.system(size: 10))
-                Text("·").foregroundStyle(.quaternary)
-                Text("⇧↩").font(.system(size: 11, design: .monospaced))
-                Text("nova linha").font(.system(size: 10))
+            if let accessory { accessory }
+
+            if showsKeyHints {
+                HStack(spacing: 3) {
+                    Text("↩").font(ForgeType.mono)
+                    Text(allowsEmptyShell && text.trimmingCharacters(in: .whitespaces).isEmpty
+                         ? "abre o shell" : "enviar")
+                        .font(ForgeType.caption)
+                    Text("·").foregroundStyle(.quaternary)
+                    Text("⇧↩").font(ForgeType.mono)
+                    Text("nova linha").font(ForgeType.caption)
+                }
+                .foregroundStyle(.tertiary)
             }
-            .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
     }
@@ -403,6 +468,16 @@ struct SessionComposer: View {
     /// as-is, so anything Forge gains tomorrow works here without a code change;
     /// plain text opens a conversation; an empty line opens a bare shell where
     /// that is allowed.
+    /// Adopts a line handed in from outside and hands the caret back to the
+    /// operator. Cleared immediately: a seed left standing would re-apply on the
+    /// next redraw and overwrite whatever they typed after it.
+    private func adoptSeed() {
+        guard let seed = state.composerSeed else { return }
+        text = seed
+        state.composerSeed = nil
+        focused = true
+    }
+
     private func submit() {
         guard canSubmit else { return }
         let line = text.trimmingCharacters(in: .whitespaces)
@@ -412,7 +487,8 @@ struct SessionComposer: View {
             guard allowsEmptyShell else { return }
             state.newSession(cwd: cwd, mode: .shell, text: "", account: account)
         } else {
-            state.newSessionRaw(cwd: cwd, prompt: line, account: account)
+            state.newSessionRaw(cwd: cwd, prompt: line, account: account,
+                                engine: engine, model: model)
         }
 
         // Record where work actually happened, so the next launch preselects

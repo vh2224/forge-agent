@@ -58,14 +58,19 @@ struct TerminalHost: NSViewRepresentable {
         _ = TerminalLifecycle.action(for: .viewDismantled)   // .keepAlive
     }
 
-    /// Colours tuned to sit next to the app's own surfaces rather than to
-    /// imitate Terminal.app. The font is NOT set here — it is a setting, owned
-    /// by `TerminalViewStore`, and applying it from two places is how the two
+    /// Ground and text only. The 16 ANSI colours are installed once per session
+    /// in `TerminalViewStore.make(for:)` — `installColors` rebuilds the whole
+    /// 256-entry palette and invalidates every cached run, so calling it from
+    /// here (which runs on every SwiftUI rebuild) would repaint the screen for
+    /// nothing. Both halves come from `ForgeTerminalPalette` so they cannot
+    /// drift apart.
+    ///
+    /// The font is NOT set here — it is a setting, owned by
+    /// `TerminalViewStore`, and applying it from two places is how the two
     /// would disagree.
     static func applyTheme(_ view: ForgeTerminalView) {
-        view.nativeBackgroundColor = NSColor(calibratedRed: 0.07, green: 0.07,
-                                             blue: 0.085, alpha: 1)
-        view.nativeForegroundColor = NSColor(calibratedWhite: 0.88, alpha: 1)
+        view.nativeBackgroundColor = ForgeTerminalPalette.background
+        view.nativeForegroundColor = ForgeTerminalPalette.foreground
     }
 
     @MainActor

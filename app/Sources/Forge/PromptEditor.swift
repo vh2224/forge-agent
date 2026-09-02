@@ -23,6 +23,14 @@ struct PromptEditor: NSViewRepresentable {
     var font: NSFont = .systemFont(ofSize: 15)
     var onKey: (KeyAction) -> Bool = { _ in false }
     var onSubmit: () -> Void = {}
+    /// Reports how tall the laid-out text actually is.
+    ///
+    /// Without it the editor is a `NSViewRepresentable` with no intrinsic
+    /// content size, so SwiftUI hands it the whole height it is allowed and the
+    /// composer sits as a tall empty box waiting for a paragraph nobody is going
+    /// to type. Measuring the laid-out text — not counting "\n" — is the only
+    /// version that is right when a long line wraps.
+    var onHeightChange: (CGFloat) -> Void = { _ in }
 
     enum KeyAction { case up, down, tab, enter, shiftEnter, escape }
 
@@ -60,6 +68,7 @@ struct PromptEditor: NSViewRepresentable {
         tv.textContainer?.lineFragmentPadding = 0
 
         tv.string = text
+        DispatchQueue.main.async { context.coordinator.reportHeight(tv) }
         return scroll
     }
 
@@ -67,6 +76,10 @@ struct PromptEditor: NSViewRepresentable {
         guard let tv = scroll.documentView as? NSTextView else { return }
         if tv.string != text { tv.string = text }
         if tv.font != font { tv.font = font }
+        // Async: measuring inside `updateNSView` reports the height for the
+        // layout that is being replaced, and writing SwiftUI state from within
+        // an update pass is what raises "Modifying state during view update".
+        DispatchQueue.main.async { context.coordinator.reportHeight(tv) }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -76,7 +89,26 @@ struct PromptEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
             parent.text = tv.string
+            reportHeight(tv)
         }
+
+        /// The height of the laid-out text, deduplicated.
+        ///
+        /// `ensureLayout` first: `usedRect` is only meaningful once the layout
+        /// manager has run, and on a view that was just handed a new string it
+        /// has not. The 0.5pt guard stops a re-report loop — a height change
+        /// resizes the view, which triggers another update, which measures
+        /// again.
+        func reportHeight(_ tv: NSTextView) {
+            guard let lm = tv.layoutManager, let tc = tv.textContainer else { return }
+            lm.ensureLayout(for: tc)
+            let h = ceil(lm.usedRect(for: tc).height)
+            guard abs(h - lastReported) > 0.5 else { return }
+            lastReported = h
+            parent.onHeightChange(h)
+        }
+
+        private var lastReported: CGFloat = 0
 
         /// Returns true when the key was consumed by the completion menu.
         func handle(_ action: KeyAction) -> Bool {

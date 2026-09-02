@@ -26,6 +26,13 @@ struct ForgeApp: App {
             RootView(state: state)
         }
         .defaultSize(width: 820, height: 620)
+
+        // ⌘, for free, its own window, and a place in the app menu — see
+        // `SettingsScene` for why this is a scene and not a sheet.
+        Settings {
+            SettingsScene(state: state)
+        }
+
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Atualizar") { state.reloadCheap(); state.loadAccounts(); state.loadAppDefaults() }
@@ -186,8 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// exactly why it is not the primary surface.
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "bolt.fill",
-                                     accessibilityDescription: "Forge")
+        item.button?.image = NSImage.forgeAnvilTemplate(size: 16)
         item.button?.imagePosition = .imageLeading
         item.button?.target = self
         item.button?.action = #selector(openWindow)

@@ -181,6 +181,10 @@ final class TerminalViewStore: ObservableObject {
 
         view.getTerminal().setCursorStyle(.blinkBlock)
         view.changeScrollback(TerminalViewStore.scrollbackLines)
+        // Once per session, here and nowhere else: `installColors` rebuilds the
+        // 256-entry palette and drops every cached attribute run, so it belongs
+        // where a terminal is BORN, not where one is redrawn.
+        view.installColors(ForgeTerminalPalette.ansi)
         TerminalHost.applyTheme(view)
         view.applyFontSize(fontSize)
 
@@ -216,6 +220,37 @@ final class TerminalViewStore: ObservableObject {
         item.tag = NSTextFinder.Action.showFindInterface.rawValue
         view.window?.makeFirstResponder(view)
         view.performTextFinderAction(item)
+    }
+
+    // MARK: Wires
+
+    /// Types `text` into a session's PTY, as if the operator had typed it.
+    ///
+    /// Keystrokes and not argv, for the same reason `sendBootstrap` uses them:
+    /// what arrives has to land in the target's own input line, visible and
+    /// editable, so a wire that sends the wrong thing is something you can see
+    /// and fix rather than something that already ran.
+    ///
+    /// The trailing newline is the caller's decision. A board wire deliberately
+    /// does NOT submit by default — dropping text into another agent's prompt
+    /// and pressing Return for it is how one bad forward becomes two agents
+    /// working on the wrong thing.
+    func sendText(_ text: String, to id: UUID, submit: Bool = false) {
+        guard let view = registry.entry(for: id)?.view else { return }
+        view.send(txt: submit ? text + "\n" : text)
+    }
+
+    /// What the operator has selected in a session, if anything.
+    ///
+    /// Selection and not a buffer scrape. Claude Code runs on the alternate
+    /// screen and repaints continuously, so "the last answer" is not a region
+    /// this app can identify — anything claiming to grab it would be guessing,
+    /// and guessing wrong is a wire that forwards half a spinner.
+    func selection(of id: UUID) -> String? {
+        guard let text = registry.entry(for: id)?.view.getSelection(),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return text
     }
 
     /// Send the queued command once the login shell has had a beat to finish
