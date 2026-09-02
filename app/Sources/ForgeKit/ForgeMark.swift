@@ -75,6 +75,59 @@ public enum ForgeMark {
         (0.090, 0.350),
     ]
 
+    // WHY THE HEAD IS ALSO THREE POLYGONS (S02)
+    // -------------------------------------------------------------------
+    // `hammerHead` above is, and remains, the single 8-point literal every
+    // other surface (`LaunchCurtain`, the .icns generator) reads as `bounds:`
+    // for the whole tool — nothing here changes one of its numbers. But the
+    // render already TREATS the head as three horizontal bands (a lit top, a
+    // plain body, a shadowed striking face) — that split has been implicit
+    // in the drawing code and never named. `hammerHeadTop/Body/Face` name it
+    // as data: three 4-point polygons, built ONLY from vertices already in
+    // `hammerHead` (no interpolated point), whose union is exactly the head
+    // by construction — adjacent polygons share the two vertices at their
+    // seam (top∩body: the two points at y=0.350; body∩face: the two points
+    // at y=0.120), so nothing is added or lost passing from one literal to
+    // three.
+    //
+    // `hammerBands` and `hammerCollar` were already being drawn — as
+    // `.offset(y:)` overlays anchored to the launch-animation box frame, not
+    // to the mark. Measured on `c3a7344`: the box frame is a square of side
+    // `side` and the head occupies only its bottom 44% (y 0.559·side …
+    // 1.0·side); the old offsets (`-side * 0.10` for the bands, `-side *
+    // 0.205` for the collar) land ABOVE that range, so `.clipShape(head)`
+    // silently erased both. Expressing them here, in the mark's own unit
+    // square, is what lets a caller place them BY the head's geometry
+    // instead of by the frame around it.
+    /// Topo da cabeça: a faixa que se alarga da junção com o cabo até a largura plena.
+    public static let hammerHeadTop: [(x: Double, y: Double)] = [
+        (0.155, 0.445), (0.845, 0.445), (0.910, 0.350), (0.090, 0.350),
+    ]
+    /// Corpo: o bloco entre as duas inflexões laterais — onde as bandas incisas vivem.
+    public static let hammerHeadBody: [(x: Double, y: Double)] = [
+        (0.090, 0.350), (0.910, 0.350), (0.930, 0.120), (0.070, 0.120),
+    ]
+    /// Face de golpe: a faixa inferior, em sombra, cujo lado de baixo é a face que bate na bigorna.
+    public static let hammerHeadFace: [(x: Double, y: Double)] = [
+        (0.070, 0.120), (0.930, 0.120), (0.865, 0.035), (0.135, 0.035),
+    ]
+    /// As duas bandas incisas, como retângulos no quadrado da ferramenta (y-up),
+    /// dentro da faixa de y de `hammerHeadBody` — não do frame do box que as
+    /// continha antes (ver nota acima).
+    public static let hammerBands: [(x: Double, y: Double, w: Double, h: Double)] = [
+        (0.190, 0.290, 0.620, 0.014),
+        (0.190, 0.245, 0.620, 0.014),
+    ]
+    /// O collar onde o cabo entra — dentro da faixa de y de `hammerHeadTop`.
+    ///
+    /// Números de bandas e collar podem ser afinados livremente (é
+    /// decoração da cabeça, não o contorno que outras superfícies leem como
+    /// `bounds:`); o que NÃO pode mudar sem revisar `ForgeKitTests` é a
+    /// invariante estrutural: os quatro vértices de cada polígono vêm de
+    /// `hammerHead`, a costura entre polígonos adjacentes é de exatamente
+    /// dois vértices, e a bbox/área da união bate com `hammerHead` original.
+    public static let hammerCollar: (x: Double, y: Double, w: Double, h: Double) = (0.370, 0.400, 0.260, 0.030)
+
     /// The grip: short, straight, with a slight swell at the pommel.
     public static let hammerHandle: [(x: Double, y: Double)] = [
         (0.395, 0.430),

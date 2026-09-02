@@ -7455,6 +7455,155 @@ test("SurfaceLevel: init(rawValue:) fora de 0...3 retorna nil") {
     assertTrue(SurfaceLevel(rawValue: 3) != nil, "rawValue 3 (floating) deveria existir")
 }
 
+// MARK: - ForgeMark: cabeça em três polígonos e bandas (S02)
+
+// A cabeça do Mjölnir sempre foi desenhada como se fosse três faixas
+// horizontais — topo iluminado, corpo neutro, face de golpe em sombra — mas
+// esse fato vivia só no código de render, nunca como dado. `ForgeMark` ganha
+// `hammerHeadTop/Body/Face`: três polígonos de 4 pontos, construídos SÓ com
+// vértices já presentes em `hammerHead` (nenhum ponto interpolado), de modo
+// que a união dos três é o polígono original por construção — não por
+// coincidência numérica, e é exatamente isso que os testes abaixo verificam
+// sem depender de tela: vértice a vértice, aresta de costura a aresta de
+// costura, bbox e área da soma.
+//
+// `hammerBands` e `hammerCollar` também são promovidos aqui. Antes eram
+// overlays posicionados por `.offset(y:)` relativo ao FRAME do box da
+// animação de abertura — e a aritmética medida no planning de S02 (o box é
+// um quadrado de lado `side`, a cabeça ocupa só os 44% de baixo, `y
+// 0.559·side … 1.0·side`) mostra que os offsets antigos caíam ACIMA da
+// cabeça, então `.clipShape(head)` os apagava silenciosamente. Como
+// geometria em `ForgeMark`, bandas e collar são posicionados pela MESMA
+// transformação da cabeça (T02 os consome assim) — e as invariantes de
+// posição (dentro da bbox da cabeça, dentro da faixa de y da faixa que os
+// contém) ficam fixadas aqui, sem tela, como os outros testes desta suíte.
+//
+// `hammerHead` em si — o literal de 8 pontos — não muda uma vírgula: é o
+// `bounds:` que `LaunchCurtain` usa via `hammer` (`hammerHead + hammerHandle`)
+// para o `fit` de toda a animação, e os 6 testes de S01 acima seguem
+// assertando `hammerHead.count == 8` e `hammer[i] == hammerHead[i]` sem
+// edição.
+
+/// Área com sinal de um polígono fechado (shoelace). Negativa = horário em
+/// y-up, a mesma convenção de `ForgeMark.anvil`.
+func shoelace(_ pts: [(x: Double, y: Double)]) -> Double {
+    var area = 0.0
+    let n = pts.count
+    for i in 0..<n {
+        let j = (i + 1) % n
+        area += pts[i].x * pts[j].y - pts[j].x * pts[i].y
+    }
+    return area / 2
+}
+
+/// Caixa envolvente de uma lista de pontos.
+func bbox(_ pts: [(x: Double, y: Double)]) -> (minX: Double, minY: Double, maxX: Double, maxY: Double) {
+    let xs = pts.map(\.x)
+    let ys = pts.map(\.y)
+    return (xs.min()!, ys.min()!, xs.max()!, ys.max()!)
+}
+
+test("ForgeMark: os três polígonos da cabeça têm 4 pontos e ficam no quadrado unitário") {
+    for poly in [ForgeMark.hammerHeadTop, ForgeMark.hammerHeadBody, ForgeMark.hammerHeadFace] {
+        assertEqual(poly.count, 4)
+        for p in poly {
+            assertTrue(p.x >= 0 && p.x <= 1, "x fora do quadrado unitário: \(p.x)")
+            assertTrue(p.y >= 0 && p.y <= 1, "y fora do quadrado unitário: \(p.y)")
+        }
+    }
+}
+
+test("ForgeMark: todo vértice dos três polígonos é vértice de hammerHead (nenhum interpolado)") {
+    let head = ForgeMark.hammerHead
+    for poly in [ForgeMark.hammerHeadTop, ForgeMark.hammerHeadBody, ForgeMark.hammerHeadFace] {
+        for p in poly {
+            let matches = head.contains { abs($0.x - p.x) < 1e-9 && abs($0.y - p.y) < 1e-9 }
+            assertTrue(matches, "vértice (\(p.x), \(p.y)) não está em hammerHead")
+        }
+    }
+}
+
+test("ForgeMark: topo e corpo compartilham exatamente dois vértices (costura contínua)") {
+    let shared = ForgeMark.hammerHeadTop.filter { top in
+        ForgeMark.hammerHeadBody.contains { abs($0.x - top.x) < 1e-9 && abs($0.y - top.y) < 1e-9 }
+    }
+    assertEqual(shared.count, 2, "topo e corpo deveriam compartilhar exatamente 2 vértices")
+}
+
+test("ForgeMark: corpo e face compartilham exatamente dois vértices") {
+    let shared = ForgeMark.hammerHeadBody.filter { body in
+        ForgeMark.hammerHeadFace.contains { abs($0.x - body.x) < 1e-9 && abs($0.y - body.y) < 1e-9 }
+    }
+    assertEqual(shared.count, 2, "corpo e face deveriam compartilhar exatamente 2 vértices")
+}
+
+test("ForgeMark: a divisão é horizontal — top.minY == body.maxY e body.minY == face.maxY") {
+    let top = bbox(ForgeMark.hammerHeadTop)
+    let body = bbox(ForgeMark.hammerHeadBody)
+    let face = bbox(ForgeMark.hammerHeadFace)
+    assertLessOrEqual(abs(top.minY - body.maxY), 1e-9, "top.minY deveria coincidir com body.maxY")
+    assertLessOrEqual(abs(body.minY - face.maxY), 1e-9, "body.minY deveria coincidir com face.maxY")
+    assertLessOrEqual(abs(top.maxY - 0.445), 1e-9)
+    assertLessOrEqual(abs(face.minY - 0.035), 1e-9)
+}
+
+test("ForgeMark: união dos três tem bbox idêntica à de hammerHead: (0.070, 0.035)–(0.930, 0.445)") {
+    let union = ForgeMark.hammerHeadTop + ForgeMark.hammerHeadBody + ForgeMark.hammerHeadFace
+    let unionBox = bbox(union)
+    let headBox = bbox(ForgeMark.hammerHead)
+    assertLessOrEqual(abs(unionBox.minX - 0.070), 1e-9)
+    assertLessOrEqual(abs(unionBox.minY - 0.035), 1e-9)
+    assertLessOrEqual(abs(unionBox.maxX - 0.930), 1e-9)
+    assertLessOrEqual(abs(unionBox.maxY - 0.445), 1e-9)
+    assertLessOrEqual(abs(unionBox.minX - headBox.minX), 1e-9)
+    assertLessOrEqual(abs(unionBox.minY - headBox.minY), 1e-9)
+    assertLessOrEqual(abs(unionBox.maxX - headBox.maxX), 1e-9)
+    assertLessOrEqual(abs(unionBox.maxY - headBox.maxY), 1e-9)
+}
+
+test("ForgeMark: soma das áreas dos três == área de hammerHead (shoelace, 1e-9)") {
+    let sum = shoelace(ForgeMark.hammerHeadTop) + shoelace(ForgeMark.hammerHeadBody) + shoelace(ForgeMark.hammerHeadFace)
+    let headArea = shoelace(ForgeMark.hammerHead)
+    assertLessOrEqual(abs(sum - headArea), 1e-9, "soma das áreas deveria bater com a área de hammerHead")
+}
+
+test("ForgeMark: os três polígonos são horários em y-up, como a bigorna") {
+    assertTrue(shoelace(ForgeMark.hammerHeadTop) < 0, "top deveria ser horário (área negativa)")
+    assertTrue(shoelace(ForgeMark.hammerHeadBody) < 0, "body deveria ser horário (área negativa)")
+    assertTrue(shoelace(ForgeMark.hammerHeadFace) < 0, "face deveria ser horária (área negativa)")
+    assertTrue(shoelace(ForgeMark.anvil) < 0, "anvil deveria ser horária (área negativa)")
+}
+
+test("ForgeMark: as duas bandas têm área > 0, cabem na bbox da cabeça e na faixa de y do corpo, e não se sobrepõem") {
+    let headBox = bbox(ForgeMark.hammerHead)
+    let bodyBox = bbox(ForgeMark.hammerHeadBody)
+    for band in ForgeMark.hammerBands {
+        assertGreater(band.w * band.h, 0.0, "banda deveria ter área positiva")
+        assertTrue(band.x >= headBox.minX && band.x + band.w <= headBox.maxX, "banda fora da bbox da cabeça em x")
+        assertTrue(band.y >= bodyBox.minY && band.y + band.h <= bodyBox.maxY, "banda fora da faixa de y do corpo")
+    }
+    let a = ForgeMark.hammerBands[0]
+    let b = ForgeMark.hammerBands[1]
+    let overlap = a.y < b.y + b.h && b.y < a.y + a.h
+    assertFalse(overlap, "as duas bandas não deveriam se sobrepor")
+}
+
+test("ForgeMark: o collar tem área > 0 e cabe na faixa de y do topo e na bbox da cabeça") {
+    let headBox = bbox(ForgeMark.hammerHead)
+    let topBox = bbox(ForgeMark.hammerHeadTop)
+    let collar = ForgeMark.hammerCollar
+    assertGreater(collar.w * collar.h, 0.0, "collar deveria ter área positiva")
+    assertTrue(collar.x >= headBox.minX && collar.x + collar.w <= headBox.maxX, "collar fora da bbox da cabeça em x")
+    assertTrue(collar.y >= topBox.minY && collar.y + collar.h <= topBox.maxY, "collar fora da faixa de y do topo")
+}
+
+test("ForgeMark: o ponto de golpe está na aresta inferior da face de golpe") {
+    let face = bbox(ForgeMark.hammerHeadFace)
+    assertLessOrEqual(abs(ForgeMark.hammerStrikePoint.y - face.minY), 1e-9, "ponto de golpe deveria estar na aresta inferior da face")
+    assertTrue(ForgeMark.hammerStrikePoint.x >= 0.135 && ForgeMark.hammerStrikePoint.x <= 0.865,
+               "ponto de golpe fora da faixa de x da face de golpe")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
