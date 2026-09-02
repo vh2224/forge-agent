@@ -36,11 +36,20 @@ final class BoardStore: ObservableObject {
 
     @Published var layout = BoardLayout()
 
-    /// Canvas transform. `pan` is in SCREEN points and `scale` multiplies canvas
-    /// coordinates — so a drag translation must be divided by `scale` before it
-    /// becomes a move, which is the one conversion every canvas gets wrong once.
-    @Published var pan: CGSize = .zero
-    @Published var scale: Double = 1.0
+    /// Canvas transform — the ONE copy of it.
+    ///
+    /// `pan` is in SCREEN points and `scale` multiplies canvas coordinates, so a
+    /// drag translation must be divided by `scale` before it becomes a move,
+    /// which is the one conversion every canvas gets wrong once. All of that
+    /// arithmetic — accumulation, the clamp, `fit`, the screen→canvas undo —
+    /// lives in `BoardViewport` (ForgeKit, tested without a window). This store
+    /// keeps the STATE and delegates every rule; `pan`/`scale` below stay as
+    /// computed properties purely so every existing reader keeps its API.
+    @Published var viewport = BoardViewport()
+
+    /// The viewport size at the last sync. The clamp needs it outside `fit(in:)`
+    /// — a scroll or a drag has no `GeometryReader` in hand.
+    var viewportSize: CGSize = .zero
 
     /// A wire being drawn: where it started and where the cursor is, in canvas
     /// coordinates.
@@ -50,24 +59,40 @@ final class BoardStore: ObservableObject {
     /// The wire whose panel is open.
     @Published var selectedEdge: BoardEdge?
 
-    static let minScale = 0.35
-    static let maxScale = 1.6
+    /// The viewport size as `BoardViewport` wants it. Zero until the first
+    /// sync, which is harmless: nothing pans before `onAppear`.
+    private var vp: (w: Double, h: Double) { (viewportSize.width, viewportSize.height) }
 
-    func zoom(by factor: Double) {
-        scale = min(BoardStore.maxScale, max(BoardStore.minScale, scale * factor))
+    /// Screen-space pan. The setter is absolute (a drag's origin + translation)
+    /// and clamps through the same rule the scroll uses — one clamp, two
+    /// gestures, no chance of them drifting apart.
+    var pan: CGSize {
+        get { CGSize(width: viewport.panX, height: viewport.panY) }
+        set { viewport.setPan(newValue.width, newValue.height,
+                              content: layout.contentBounds(), in: vp) }
     }
 
-    func reset() { scale = 1; pan = .zero }
+    /// Canvas scale. The setter clamps, so callers pass raw magnification.
+    var scale: Double {
+        get { viewport.scale }
+        set { viewport.scale(to: newValue) }
+    }
+
+    func zoom(by factor: Double) { viewport.zoom(by: factor) }
+
+    func reset() { viewport.reset() }
 
     /// Frames everything, so a canvas panned into the void has a way home.
-    func fit(in viewport: CGSize) {
-        guard let b = layout.contentBounds() else { reset(); return }
-        let sx = viewport.width / b.w
-        let sy = viewport.height / b.h
-        let s = min(BoardStore.maxScale, max(BoardStore.minScale, min(sx, sy)))
-        scale = s
-        pan = CGSize(width: -b.x * s + (viewport.width - b.w * s) / 2,
-                     height: -b.y * s + (viewport.height - b.h * s) / 2)
+    func fit(in size: CGSize) {
+        viewportSize = size
+        viewport.fit(content: layout.contentBounds(), in: (size.width, size.height))
+    }
+
+    /// A trackpad/wheel scroll, in raw event deltas. Relative accumulation, then
+    /// the same clamp as the drag — see `BoardViewport`.
+    func scroll(dx: Double, dy: Double, precise: Bool) {
+        let d = BoardViewport.scrollDelta(dx: dx, dy: dy, precise: precise)
+        viewport.pan(by: d.x, d.y, content: layout.contentBounds(), in: vp)
     }
 }
 
@@ -96,6 +121,10 @@ struct BoardView: View {
             .onChange(of: state.runs) { _ in
                 for cwd in Set(state.sessions.map(\.cwd)) { routes.refresh(cwd: cwd) }
             }
+            // The clamp lives outside any `GeometryReader` closure, so the size
+            // has to be pushed to the store when the window resizes — otherwise
+            // a scroll after a resize is bounded against the old frame.
+            .onChange(of: geo.size) { board.viewportSize = $0 }
             .overlay(alignment: .bottomTrailing) { controls(viewport: geo.size) }
         }
     }
@@ -103,7 +132,10 @@ struct BoardView: View {
     private func sync(viewport: CGSize) {
         board.layout.reconcile(with: state.sessions.map { $0.id.uuidString })
         for cwd in Set(state.sessions.map(\.cwd)) { routes.refresh(cwd: cwd) }
-        if board.pan == .zero && board.scale == 1 { board.fit(in: viewport) }
+        board.viewportSize = viewport
+        // `isIdentity` rather than comparing pan and scale by hand: the same
+        // question, asked where the transform is defined.
+        if board.viewport.isIdentity { board.fit(in: viewport) }
     }
 
     // MARK: Background
@@ -133,6 +165,20 @@ struct BoardView: View {
             }
         }
         .background(Color.forgeGround)
+        // Two-finger scroll. The catcher is `hitTest → nil`, so it takes
+        // nothing away from the gestures below — see BoardScroll.swift.
+        .background(
+            BoardScrollCatcher { dx, dy, precise, p in
+                let c = board.viewport.canvasPoint(fromScreen: p.x, p.y)
+                // Over a node the event is left alone: that terminal's own
+                // buffer is what the operator means to scroll.
+                if board.layout.node(at: c.x, y: c.y, focused: focused?.uuidString) != nil {
+                    return false
+                }
+                board.scroll(dx: dx, dy: dy, precise: precise)
+                return true
+            }
+        )
         .contentShape(Rectangle())
         // Pan. On the background only: a drag that panned from anywhere would
         // make it impossible to select text inside a terminal.
@@ -157,8 +203,9 @@ struct BoardView: View {
                 .onChanged { g in
                     let origin = magnifyOrigin ?? board.scale
                     if magnifyOrigin == nil { magnifyOrigin = origin }
-                    board.scale = min(BoardStore.maxScale,
-                                      max(BoardStore.minScale, origin * g.magnification))
+                    // No clamp spelled out here: `board.scale`'s setter is the
+                    // clamp, and it is the same one `zoom(by:)` and `fit` use.
+                    board.scale = origin * g.magnification
                 }
                 .onEnded { _ in magnifyOrigin = nil }
         )
@@ -295,9 +342,13 @@ private struct BoardNodeView: View {
     /// `board.layout.node(at:)` — lives in layout coordinates, which the
     /// canvas reaches by `.scaleEffect(anchor: .topLeading)` then `.offset`.
     /// Undo both before using a drag point for anything layout-shaped.
+    ///
+    /// The arithmetic itself lives in `BoardViewport.canvasPoint(fromScreen:)`
+    /// (ForgeKit) so the scroll catcher and this drag cannot end up with two
+    /// subtly different versions of the same undo.
     private func canvasPoint(from location: CGPoint) -> CGPoint {
-        CGPoint(x: (location.x - board.pan.width) / board.scale,
-                y: (location.y - board.pan.height) / board.scale)
+        let p = board.viewport.canvasPoint(fromScreen: location.x, location.y)
+        return CGPoint(x: p.x, y: p.y)
     }
 
     var body: some View {
