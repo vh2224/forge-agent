@@ -342,6 +342,17 @@ como pass.
   (`I-20260803060030`).
 - **Em curso:** P0 do diagnóstico de 2026-08-23 — verification gate no-op (133/133 sem
   comando), dieta de contexto (este arquivo), effort decorativo, gates advisory inertes.
+- **App macOS:** `M-20260902054027-app-macos-ui-recovery` **concluído 2026-09-02** — 7 slices, 40
+  commits na branch `forge/M-20260902054027-app-macos-ui-recovery`, entregue e **não integrado** (a
+  integração é do operador). Suíte Swift: 701 passed / 0 failed (`cd app && swift run ForgeKitTests`),
+  de 535 no início. Todo julgamento visual está UNVERIFIED nos `S##-UAT.md` — a milestone rodou sem
+  ninguém olhando a tela, por desenho. 3 follow-ups de review em `.gsd/KNOWLEDGE.md § Review
+  follow-ups`; o gate `G-20260902211505-27d4` (política da conta ativa fantasma) segue **respondível**.
+- **Dois gates confirmados inertes nesta run** (reforçam o P0 acima, com medição nova):
+  `symbol-check` indexa só `*.js`/`*.ts` e deu 0 verified em 4 slices Swift seguidas
+  (`I-20260902181409`); o verification gate resolveu para `run-tests.js --changed`, que sai 0 em 128 ms
+  sem selecionar suíte Swift (`I-20260902184444`). O security gate por keyword errou a única task que
+  escreve em disco e disparou em três que não escrevem (`I-20260902200610`).
 
 ## GSD — Início de sessão obrigatório (dogfood)
 
