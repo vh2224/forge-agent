@@ -8294,6 +8294,147 @@ test("UnifiedDiff: +++/--- de cabeçalho nunca contam — 1 hunk com 1 adição 
     assertEqual(files.first?.added, 1, "added conta só a linha de conteúdo, não a linha +++ do cabeçalho")
 }
 
+// MARK: - Verification e File Audit: resultado por artefato (S05)
+//
+// `VerificationReport`/`FileAuditReport`/`SliceArtifacts` (ForgeKit) provados
+// contra cópias verbatim de artefatos reais deste repo — não exemplos
+// inventados. `verification-sample.md` é `S01-VERIFICATION.md` (8 linhas, 3
+// tasks); `file-audit-with-unexpected.md` é a seção `## File Audit` de
+// `S01-SUMMARY.md` (1 unexpected); `file-audit-clean.md` é a mesma seção de
+// `S03-SUMMARY.md` (sem listas — auditoria limpa, não ausência de auditoria).
+
+test("Verification: fixture verification-sample parseia 8 linhas, sources == {T01, T02, T03}") {
+    guard let url = reviewFixtureURL("verification-sample.md") else {
+        assertTrue(false, "fixture verification-sample.md não encontrado — falha, não vácuo verde")
+        return
+    }
+    let report = VerificationReport.parse(try String(contentsOf: url, encoding: .utf8))
+    assertEqual(report.rows.count, 8, "verification-sample.md (S01-VERIFICATION.md verbatim) deve conter 8 linhas")
+    let sources = Set(report.rows.map { $0.source })
+    assertEqual(sources, Set(["T01", "T02", "T03"]), "sources distintos da fixture")
+}
+
+test("Verification: toda linha da fixture tem exists == .pass e substantive == .pass; wired == .skipped") {
+    guard let url = reviewFixtureURL("verification-sample.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let report = VerificationReport.parse(try String(contentsOf: url, encoding: .utf8))
+    for row in report.rows {
+        assertEqual(row.exists, .pass, "\(row.path): exists deve ser .pass")
+        assertEqual(row.substantive, .pass, "\(row.path): substantive deve ser .pass")
+        assertEqual(row.wired, .skipped, "\(row.path): wired deve ser .skipped (non_js_ts)")
+    }
+}
+
+test("Verification: a linha de T02 tem path DependencySmoke.swift e flag \"wired: non_js_ts\" sem crases") {
+    guard let url = reviewFixtureURL("verification-sample.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let report = VerificationReport.parse(try String(contentsOf: url, encoding: .utf8))
+    let t02 = report.rows.first { $0.source == "T02" }
+    assertEqual(t02?.path, "app/Sources/Forge/DependencySmoke.swift", "path da linha T02")
+    assertEqual(t02?.flags, ["wired: non_js_ts"], "flags de T02, sem crases no valor")
+}
+
+test("Verification: ✗ numa tabela literal inline vira .fail e aparece em failures") {
+    let text = """
+    | Source | Artifact | Exists | Substantive | Wired | Flags |
+    |--------|----------|--------|-------------|-------|-------|
+    | T01 | app/x.swift | ✓ | ✗ | — | `stub` |
+    """
+    let report = VerificationReport.parse(text)
+    assertEqual(report.rows.count, 1, "1 linha")
+    assertEqual(report.rows.first?.substantive, .fail, "substantive deve ser .fail")
+    assertEqual(report.failures.count, 1, "a linha com ✗ deve aparecer em failures")
+}
+
+test("Verification: tabela sem a coluna Wired (literal inline) → wired == .skipped, sem crash e sem .pass") {
+    let text = """
+    | Source | Artifact | Exists | Substantive | Flags |
+    |--------|----------|--------|-------------|-------|
+    | T01 | app/x.swift | ✓ | ✓ | `nenhuma` |
+    """
+    let report = VerificationReport.parse(text)
+    assertEqual(report.rows.count, 1, "1 linha")
+    assertEqual(report.rows.first?.wired, .skipped, "coluna Wired ausente deve virar .skipped, nunca .pass")
+}
+
+test("FileAudit: file-audit-with-unexpected → 1 unexpected == app/Sources/Forge/Prefs.swift, 0 missing, compared não-nil") {
+    guard let url = reviewFixtureURL("file-audit-with-unexpected.md") else {
+        assertTrue(false, "fixture file-audit-with-unexpected.md não encontrado")
+        return
+    }
+    let text = try String(contentsOf: url, encoding: .utf8)
+    guard let report = FileAuditReport.parse(text) else {
+        assertTrue(false, "FileAuditReport.parse não deveria devolver nil para fixture com seção")
+        return
+    }
+    assertEqual(report.unexpected, ["app/Sources/Forge/Prefs.swift"], "1 unexpected, só o caminho, sem o parêntese")
+    assertEqual(report.missing.count, 0, "0 missing")
+    assertFalse((report.compared ?? "").isEmpty, "compared não deve ser nil/vazio")
+}
+
+test("FileAudit: file-audit-clean → unexpected == [], missing == [], compared não-nil") {
+    guard let url = reviewFixtureURL("file-audit-clean.md") else {
+        assertTrue(false, "fixture file-audit-clean.md não encontrado")
+        return
+    }
+    let text = try String(contentsOf: url, encoding: .utf8)
+    guard let report = FileAuditReport.parse(text) else {
+        assertTrue(false, "FileAuditReport.parse não deveria devolver nil para fixture com seção")
+        return
+    }
+    assertEqual(report.unexpected, [], "auditoria limpa: unexpected vazio")
+    assertEqual(report.missing, [], "auditoria limpa: missing vazio")
+    assertFalse((report.compared ?? "").isEmpty, "compared não deve ser nil/vazio mesmo sem listas")
+}
+
+test("FileAudit: SUMMARY literal sem \"## File Audit\" → parse devolve nil, nunca relatório vazio") {
+    let text = """
+    # S99: exemplo
+
+    ## Outra seção
+
+    conteúdo qualquer, sem nada de file audit aqui.
+    """
+    let report = FileAuditReport.parse(text)
+    assertNil(report, "ausência da seção deve devolver nil, não um relatório vazio indistinguível de auditoria limpa")
+}
+
+test("FileAudit: \"## File Audit\" seguida de \"## File Audit (cross-run)\" — lê a primeira, não vaza a segunda") {
+    let text = """
+    ## File Audit
+
+    **Compared:** 2 paths. 1 unexpected, none missing.
+
+    **Unexpected (changed but not promised):**
+    - `app/Sources/Forge/A.swift` (comentário)
+
+    ## File Audit (cross-run)
+
+    **Compared:** 99 paths. 5 unexpected, none missing.
+
+    **Unexpected (changed but not promised):**
+    - `app/Sources/Forge/NAO-DEVE-APARECER.swift`
+    """
+    guard let report = FileAuditReport.parse(text) else {
+        assertTrue(false, "seção presente, não deve devolver nil")
+        return
+    }
+    assertEqual(report.unexpected, ["app/Sources/Forge/A.swift"], "só a primeira seção deve ser lida")
+    assertFalse((report.compared ?? "").contains("99 paths"), "o conteúdo do cross-run não pode vazar para a primeira seção")
+}
+
+test("SliceArtifacts: paths compõe os 4 caminhos canônicos sob <milestoneDir>/slices/<slice>/") {
+    let paths = SliceArtifacts.paths(milestoneDir: "/m", slice: "S05")
+    assertEqual(paths.review, "/m/slices/S05/S05-REVIEW.md", "review")
+    assertEqual(paths.verification, "/m/slices/S05/S05-VERIFICATION.md", "verification")
+    assertEqual(paths.summary, "/m/slices/S05/S05-SUMMARY.md", "summary")
+    assertEqual(paths.plan, "/m/slices/S05/S05-PLAN.md", "plan")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
