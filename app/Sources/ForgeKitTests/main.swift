@@ -7096,6 +7096,149 @@ test("PaletteRanking: query vazia devolve tudo na ordem original") {
     assertEqual(PaletteRanking.rank(items, query: "   "), ["a", "b"])
 }
 
+// MARK: - Palette: tom, fase, engine e superfície (S01)
+
+// Palette.swift é o vocabulário visual do app inteiro — quatro tipos puros
+// (sem SwiftUI, sem tela) que codificam as decisões travadas no CONTEXT desta
+// milestone: "ember é reservado" (só o pane em foco/gate pendente pode usá-lo),
+// "fase ganha cor, engine ganha tag" (duas dimensões, duas codificações, para
+// não competirem na mesma escala) e "superfície vem de SurfaceLevel" (a
+// profundidade é nomeada e monótona, nunca inventada por chamada). Cada teste
+// abaixo fixa uma dessas frases como dado executável — se algum dia alguém
+// editar Palette.swift de um jeito que quebra a frase, é aqui que isso falha.
+
+test("ForgeTone: conjunto fechado de 8 tons") {
+    assertEqual(ForgeTone.allCases.count, 8)
+}
+
+test("ForgeTone: rawValue faz round-trip em todos os casos") {
+    for t in ForgeTone.allCases {
+        assertEqual(ForgeTone(rawValue: t.rawValue), t)
+    }
+}
+
+test("ForgeTone: ember é reservado — nenhuma fase o usa") {
+    // `ember` é "isto quer você" — gates, perguntas pendentes, o pane em
+    // foco. Nenhuma fase meramente EXISTINDO pode reivindicar esse tom.
+    assertTrue(ForgePhase.allCases.allSatisfy { $0.tone != .ember },
+               "uma fase está usando o tom reservado para atenção")
+}
+
+test("ForgePhase: execute-task/T03 resolve para execute") {
+    assertEqual(ForgePhase(unit: "execute-task/T03"), .execute)
+}
+
+test("ForgePhase: plan-slice e plan-milestone resolvem para plan") {
+    assertEqual(ForgePhase(unit: "plan-slice"), .plan)
+    assertEqual(ForgePhase(unit: "plan-milestone"), .plan)
+}
+
+test("ForgePhase: nil, vazio e verbo desconhecido caem em unknown") {
+    assertEqual(ForgePhase(unit: nil), .unknown)
+    assertEqual(ForgePhase(unit: ""), .unknown)
+    assertEqual(ForgePhase(unit: "deploy-service"), .unknown)
+}
+
+test("ForgePhase: parse ignora caixa") {
+    assertEqual(ForgePhase(unit: "EXECUTE-TASK"), .execute)
+    assertEqual(ForgePhase(unit: "Discuss-Milestone"), .discuss)
+}
+
+test("ForgePhase: tabela de tons — execute é amber, memory e unknown são slate") {
+    // A tabela inteira, um par por caso — não só os três nomeados no título,
+    // porque um enum com 8 casos e uma tabela parcial é exatamente onde um
+    // caso novo escapa sem teste.
+    let expected: [ForgePhase: ForgeTone] = [
+        .discuss: .violet, .research: .teal, .plan: .indigo, .execute: .amber,
+        .review: .rose, .complete: .mint, .memory: .slate, .unknown: .slate,
+    ]
+    for (phase, tone) in expected {
+        assertEqual(phase.tone, tone, "fase \(phase) deveria mapear para \(tone)")
+    }
+    assertEqual(expected.count, ForgePhase.allCases.count,
+                "a tabela do teste não cobre todos os casos do enum")
+}
+
+test("ForgePhase: spineOrder é 0…5 único na espinha e nil fora dela") {
+    assertNil(ForgePhase.memory.spineOrder)
+    assertNil(ForgePhase.unknown.spineOrder)
+    let onSpine = ForgePhase.allCases.compactMap(\.spineOrder).sorted()
+    assertEqual(onSpine, [0, 1, 2, 3, 4, 5])
+}
+
+test("ForgePhase: todo símbolo resolve em NSImage") {
+    // Um nome de SF Symbol inválido renderiza como um quadrado em branco —
+    // só dá para checar isto com AppKit de verdade, não com o tipo.
+    for p in ForgePhase.allCases {
+        assertTrue(NSImage(systemSymbolName: p.symbol, accessibilityDescription: nil) != nil,
+                   "SF Symbol inexistente para a fase \(p): \(p.symbol)")
+    }
+}
+
+test("ForgePhase: labels são não-vazios e únicos") {
+    let labels = ForgePhase.allCases.map(\.label)
+    assertTrue(labels.allSatisfy { !$0.isEmpty }, "toda fase precisa de um rótulo legível")
+    assertEqual(Set(labels).count, labels.count, "duas fases não podem ler igual na tela")
+}
+
+test("ForgeEngine: claude, codex e agy parseiam ignorando caixa; nil e lixo caem em unknown") {
+    assertEqual(ForgeEngine("claude"), .claude)
+    assertEqual(ForgeEngine("CLAUDE"), .claude)
+    assertEqual(ForgeEngine("Codex"), .codex)
+    assertEqual(ForgeEngine("AGY"), .agy)
+    assertEqual(ForgeEngine(nil), .unknown)
+    assertEqual(ForgeEngine("gpt-5"), .unknown)
+}
+
+test("ForgeEngine: toda tag tem exatamente 2 caracteres e é única") {
+    // Curta o bastante para caber num header de pane que já carrega nome de
+    // projeto e conta — e sem ambiguidade entre os três engines que existem.
+    let tags = ForgeEngine.allCases.map(\.tag)
+    for tag in tags {
+        assertEqual(tag.count, 2, "tag \(tag) não tem 2 caracteres")
+    }
+    assertEqual(Set(tags).count, ForgeEngine.allCases.count)
+}
+
+test("ForgeEngine: labels são únicos e unknown se declara") {
+    let labels = ForgeEngine.allCases.map(\.label)
+    assertEqual(Set(labels).count, labels.count)
+    assertTrue(ForgeEngine.unknown.label.contains("não declarado"),
+               "o label de unknown precisa admitir que o engine não foi declarado")
+}
+
+test("SurfaceLevel: rawValue é 0…3 na ordem ground, panel, raised, floating") {
+    assertEqual(SurfaceLevel.ground.rawValue, 0)
+    assertEqual(SurfaceLevel.panel.rawValue, 1)
+    assertEqual(SurfaceLevel.raised.rawValue, 2)
+    assertEqual(SurfaceLevel.floating.rawValue, 3)
+}
+
+test("SurfaceLevel: ground e panel não projetam sombra") {
+    // Um chão com sombra é o tell de um design que aplicou profundidade por
+    // find-and-replace em vez de decidir onde ela pertence.
+    for level in [SurfaceLevel.ground, .panel] {
+        assertEqual(level.shadowRadius, 0, "\(level) não deveria projetar sombra")
+        assertEqual(level.shadowOpacity, 0, "\(level) não deveria ter opacidade de sombra")
+    }
+}
+
+test("SurfaceLevel: sombra e raio nunca diminuem ao subir de nível") {
+    // Profundidade só lê como profundidade quando é CONSISTENTE — três
+    // cartões em três elevações inventadas leem como três erros.
+    let levels = SurfaceLevel.allCases.sorted { $0.rawValue < $1.rawValue }
+    for i in 1..<levels.count {
+        let prev = levels[i - 1]
+        let cur = levels[i]
+        assertTrue(cur.shadowRadius >= prev.shadowRadius,
+                   "shadowRadius caiu de \(prev) para \(cur)")
+        assertTrue(cur.shadowOpacity >= prev.shadowOpacity,
+                   "shadowOpacity caiu de \(prev) para \(cur)")
+        assertTrue(cur.cornerRadius >= prev.cornerRadius,
+                   "cornerRadius caiu de \(prev) para \(cur)")
+    }
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
