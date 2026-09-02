@@ -239,7 +239,7 @@ struct ProjectsView: View {
     @ViewBuilder private var unreadableNotice: some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Color.accentOrange)
+                .forgeIcon(.small).foregroundStyle(Color.accentOrange)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Registro de projetos não pôde ser lido")
                     .font(.callout).bold()
@@ -278,7 +278,7 @@ struct ProjectsView: View {
         if let worst = suspects.first {
             HStack(alignment: .top, spacing: 9) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(Color.accentOrange)
+                    .forgeIcon(.small).foregroundStyle(Color.accentOrange)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(ProjectOrganiser.name(worst.path)) contém \(worst.count) dos outros projetos")
                         .font(.callout)
@@ -319,7 +319,7 @@ struct ProjectsView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 6) {
                 Image(systemName: TouchedRow.sectionSymbol)
-                    .font(.caption).foregroundStyle(.secondary)
+                    .forgeIcon(.micro).foregroundStyle(.secondary)
                 Text(TouchedRow.sectionTitle).font(.callout).bold()
                 Text("\(state.touchedWorkspaces.count)")
                     .font(.caption2).monospacedDigit()
@@ -362,7 +362,7 @@ struct ProjectsView: View {
     @ViewBuilder private func touchedRowView(_ row: TouchedRow) -> some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: "folder")
-                .font(.callout).foregroundStyle(.tertiary)
+                .forgeIcon(.small).foregroundStyle(.tertiary)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.name).font(.callout).lineLimit(1)
@@ -372,7 +372,7 @@ struct ProjectsView: View {
                 HStack(spacing: 10) {
                     ForEach(row.facts, id: \.kind) { fact in
                         HStack(spacing: 3) {
-                            Image(systemName: fact.symbol).font(.caption2)
+                            Image(systemName: fact.symbol).forgeIcon(.micro)
                             Text(fact.text).lineLimit(1)
                         }
                         .font(.caption2)
@@ -416,7 +416,7 @@ struct ProjectsView: View {
     private var empty: some View {
         VStack(spacing: 12) {
             Image(systemName: "folder.badge.plus")
-                .font(.system(size: 30)).foregroundStyle(.tertiary)
+                .forgeIcon(.hero).foregroundStyle(.tertiary)
             Text("Nenhum projeto").font(.headline)
             Text("Adicione a pasta de um projeto que use o Forge (com .gsd/).")
                 .font(.caption).foregroundStyle(.secondary)
@@ -497,8 +497,8 @@ struct ProjectTreeRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 9))
-                    Image(systemName: "folder").font(.caption)
+                        .forgeIcon(.micro)
+                    Image(systemName: "folder").forgeIcon(.micro)
                     Text(node.title)
                         .font(.system(size: weight.titleSize,
                                       weight: weight.isBold ? .bold : .regular))
@@ -691,7 +691,7 @@ struct ProjectCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .forgeSurface(.raised)
         .overlay(RoundedRectangle(cornerRadius: 12)
             .strokeBorder(gatesHere.isEmpty ? Color.clear
                                             : Color.accentOrange.opacity(0.35), lineWidth: 1))
@@ -721,7 +721,7 @@ struct ProjectCard: View {
                     }
                     if contains > 0 {
                         Text("⊃ \(contains)")
-                            .font(.system(size: 9)).foregroundStyle(Color.accentOrange)
+                            .font(ForgeType.micro).foregroundStyle(Color.accentOrange)
                             .help("Contém \(contains) outro(s) projeto(s) registrado(s)")
                     }
                     ForEach(Array(FolderLook.tagColors(for: path).enumerated()), id: \.offset) { _, c in
@@ -734,8 +734,8 @@ struct ProjectCard: View {
                     // rather than printing a measured-looking zero for the most
                     // repo-dense project registered.
                     Text(digest?.roleLine ?? role.label)
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
-                    Text(abbreviatedPath).font(.system(size: 9))
+                        .font(ForgeType.micro).foregroundStyle(.secondary)
+                    Text(abbreviatedPath).font(ForgeType.micro)
                         .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.head)
                 }
             }
@@ -743,7 +743,7 @@ struct ProjectCard: View {
             if loading { ProgressView().controlSize(.small).scaleEffect(0.7) }
             if hovering && !loading {
                 Button { Task { await refresh() } } label: {
-                    Image(systemName: "arrow.clockwise").font(.caption2)
+                    Image(systemName: "arrow.clockwise").forgeIcon(.micro)
                 }
                 .buttonStyle(.plain).foregroundStyle(.tertiary)
                 .help("Atualizar estado")
@@ -780,8 +780,9 @@ struct ProjectCard: View {
     /// ship draws last week's icon and never an empty slot.
     @ViewBuilder private var projectIcon: some View {
         let glyph = stack.map { StackGlyph.of($0, role: role) }
-        brandOrSymbol(glyph?.mark, symbol: glyph?.symbol ?? "circle.dashed", size: 22)
-            .font(.system(size: 22, weight: .regular))
+        brandOrSymbol(glyph?.mark, symbol: glyph?.symbol ?? "circle.dashed",
+                     size: CGFloat(ForgeIconSize.large.points))
+            .forgeIcon(.large)
             .symbolRenderingMode(.hierarchical)
             // Three tones for three kinds of claim, so the glyph's confidence
             // is legible before the tooltip is read: a measured stack is
@@ -847,7 +848,7 @@ struct ProjectCard: View {
                     .lineLimit(2).fixedSize(horizontal: false, vertical: true)
 
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Image(systemName: "arrow.turn.down.right").font(.system(size: 8))
+                    Image(systemName: "arrow.turn.down.right").forgeIcon(.micro)
                         .foregroundStyle(.tertiary)
                     switch d.activity {
                     case .entry(let e):
@@ -911,22 +912,22 @@ struct ProjectCard: View {
                         .accessibilityLabel(g.host.help)
                 }
                 if let symbol = g.symbol {
-                    brandOrSymbol(g.mark, symbol: symbol, size: 9)
-                        .font(.system(size: 9))
+                    brandOrSymbol(g.mark, symbol: symbol, size: CGFloat(ForgeIconSize.micro.points))
+                        .forgeIcon(.micro)
                         .symbolRenderingMode(.hierarchical)
                 }
-                Text(g.text).font(.system(size: 10)).monospaced()
+                Text(g.text).font(ForgeType.caption).monospaced()
                     .lineLimit(1).truncationMode(.middle)
                     .foregroundStyle(gitStyle(g.tone))
             } else {
                 ForEach(g.segments, id: \.kind) { seg in
                     HStack(spacing: 3) {
                         if let symbol = seg.symbol {
-                            brandOrSymbol(seg.mark, symbol: symbol, size: 9)
-                                .font(.system(size: 9))
+                            brandOrSymbol(seg.mark, symbol: symbol, size: CGFloat(ForgeIconSize.micro.points))
+                                .forgeIcon(.micro)
                                 .symbolRenderingMode(.hierarchical)
                         }
-                        Text(seg.text).font(.system(size: 10)).monospaced()
+                        Text(seg.text).font(ForgeType.caption).monospaced()
                             .lineLimit(1).truncationMode(.middle)
                     }
                     .foregroundStyle(gitStyle(seg.tone))
@@ -943,10 +944,10 @@ struct ProjectCard: View {
                 Spacer(minLength: 6)
                 HStack(spacing: 2) {
                     if let symbol = b.symbol {
-                        Image(systemName: symbol).font(.system(size: 8))
+                        Image(systemName: symbol).forgeIcon(.micro)
                             .symbolRenderingMode(.hierarchical)
                     }
-                    Text(b.text).font(.system(size: 9)).monospacedDigit().lineLimit(1)
+                    Text(b.text).font(ForgeType.micro).monospacedDigit().lineLimit(1)
                 }
                 .foregroundStyle(gitStyle(b.tone))
                 .help(b.help)
@@ -1012,8 +1013,8 @@ struct ProjectCard: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8))
-                    Image(systemName: "arrow.triangle.branch").font(.caption2)
+                        .forgeIcon(.micro)
+                    Image(systemName: "arrow.triangle.branch").forgeIcon(.micro)
                     Text(extraCheckouts.count == 1 ? "1 worktree"
                                                    : "\(extraCheckouts.count) worktrees")
                         .font(.caption)
@@ -1031,7 +1032,7 @@ struct ProjectCard: View {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(c.name).font(.caption2).lineLimit(1)
                             if let b = c.branch {
-                                Text(b).font(.system(size: 9))
+                                Text(b).font(ForgeType.micro)
                                     .foregroundStyle(.tertiary).lineLimit(1)
                             }
                         }
@@ -1044,12 +1045,12 @@ struct ProjectCard: View {
                             state.addWorkspaceQuietly(c.path)
                             showLauncher = true
                         } label: {
-                            Image(systemName: "terminal").font(.system(size: 9))
+                            Image(systemName: "terminal").forgeIcon(.micro)
                         }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                         .help("Abrir sessão nesta worktree")
                         Button { ForgeCore.reveal(c.path) } label: {
-                            Image(systemName: "folder").font(.system(size: 9))
+                            Image(systemName: "folder").forgeIcon(.micro)
                         }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                         .help("Ver no Finder")
