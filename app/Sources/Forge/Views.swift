@@ -495,15 +495,17 @@ struct SidebarRunRow: View {
     }
 }
 
-/// One node of the work forest and everything below it: a project header
-/// (only when the node itself owns runs) followed by its runs, then the same
-/// recursively for each child that owns work — `WorkNode` is a tree for the
-/// same reason `ProjectTreeNode` is, and `ProjectTreeRow` (`Projects.swift`)
-/// walks it the same way.
+/// One node of the work forest and everything below it: a header (when the
+/// node owns direct runs or has any descendant that does) followed by its
+/// runs, then the same recursively for each child that owns work —
+/// `WorkNode` is a tree for the same reason `ProjectTreeNode` is, and
+/// `ProjectTreeRow` (`Projects.swift`) walks it the same way.
 ///
 /// A `folder` node — synthesised, not a registered project — never owns
-/// `runs` directly (`WorkTree.swift`'s own invariant), so it only ever shows
-/// up here as a header above the children that do.
+/// `runs` directly (`WorkTree.swift`'s own invariant), but it still renders a
+/// header whenever it has descendant work, so the indentation below always
+/// has a labelled ancestor. Siblings are filtered the same way one level up,
+/// so the predicate here mirrors that filter.
 struct WorkNodeRows: View {
     let node: WorkNode
     let depth: Int
@@ -511,12 +513,14 @@ struct WorkNodeRows: View {
 
     var body: some View {
         Group {
-            if !node.runs.isEmpty {
+            if !node.runs.isEmpty || node.runCount > 0 {
                 Text(node.title)
                     .font(ForgeType.caption)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, CGFloat(depth) * 10)
                     .padding(.top, 2)
+            }
+            if !node.runs.isEmpty {
                 ForEach(node.runs) { run in
                     SidebarRunRow(run: run, state: state)
                         .padding(.leading, CGFloat(depth + 1) * 10)
