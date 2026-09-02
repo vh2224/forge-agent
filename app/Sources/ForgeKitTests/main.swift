@@ -8980,6 +8980,201 @@ test("AccountMerge.outcome devolve .missingFromRegistry e .registeredWithoutToke
                 "conta não existe no resultado")
 }
 
+// MARK: - ProcessReaping (D8/D9/D11 · S1-S6)
+
+// Closing a tab used to send ONE `kill(shellPid, SIGTERM)`, which reached the
+// login shell and nothing under it: every `next dev` and `sleep` started inside
+// the tab survived, reparented to launchd with PPID 1, while the quit alert
+// claimed the opposite. `kill(-pgid)` does not fix it either — zsh job control
+// gives each background job its OWN process group (measured: shell pgid 80273,
+// `sleep 400 &` at pgid 80607), so the shell's group never contains the job.
+// Descendancy by PPID is the mechanism that reaches it, and these tests pin the
+// part that is dangerous to get wrong: WHICH pids are allowed to be signalled.
+// The table is a literal — no syscall, no AppKit.
+
+print("\nProcessReaping (árvore de descendentes e escada de sinais)")
+
+func reapEntry(_ pid: pid_t, _ ppid: pid_t, _ startedAt: UInt64 = 1) -> ProcEntry {
+    ProcEntry(pid: pid, ppid: ppid, startedAt: startedAt)
+}
+
+/// The shape the app actually produces: the login shell is a child of the app
+/// (forkpty), and the job the user started hangs below it. 500 is the app, 400
+/// its parent, 2000 an unrelated process of the same uid.
+let reapAppPid: pid_t = 500
+let reapTree: [ProcEntry] = [
+    reapEntry(400, 1),
+    reapEntry(reapAppPid, 400),
+    reapEntry(1000, reapAppPid),   // login shell (root of the reap)
+    reapEntry(1100, 1000),         // filho:    pnpm
+    reapEntry(1200, 1100),         // neto:     node
+    reapEntry(1300, 1200),         // bisneto:  esbuild
+    reapEntry(2000, 1),            // sem relação com a sessão
+]
+
+test("descendants alcança filho, neto e bisneto do shell") {
+    let found = ProcessReaping.descendants(of: 1000, in: reapTree).map(\.pid)
+    assertEqual(Set(found), Set([1100, 1200, 1300] as [pid_t]),
+                "a varredura não alcançou toda a descendência do shell")
+}
+
+test("descendants não inclui o próprio root nem processo sem relação") {
+    let found = ProcessReaping.descendants(of: 1000, in: reapTree).map(\.pid)
+    assertFalse(found.contains(1000), "o root apareceu na própria lista de descendentes")
+    assertFalse(found.contains(2000), "um processo sem relação com a sessão virou descendente")
+}
+
+test("descendants ordena folha-primeiro: bisneto antes de neto antes de filho") {
+    let found = ProcessReaping.descendants(of: 1000, in: reapTree).map(\.pid)
+    assertEqual(found, [1300, 1200, 1100],
+                "um supervisor sinalizado antes do filho repõe o filho antes de morrer")
+}
+
+test("targets devolve a árvore inteira folha-primeiro com o root por último") {
+    let found = ProcessReaping.targets(roots: [1000], table: reapTree, selfPid: reapAppPid).map(\.pid)
+    assertEqual(found, [1300, 1200, 1100, 1000],
+                "o shell tem de ser o último a receber sinal, não o primeiro")
+}
+
+test("targets alcança um filho com PGID próprio — ProcEntry nem carrega pgid (D8)") {
+    // O caso medido: `sleep 400 &` nasce com pgid próprio, fora do grupo do
+    // shell. Como o parentesco é por PPID, o pgid é irrelevante por construção.
+    let jobComPgidProprio: pid_t = 1100
+    let found = ProcessReaping.targets(roots: [1000], table: reapTree, selfPid: reapAppPid).map(\.pid)
+    assertTrue(found.contains(jobComPgidProprio),
+               "o job em background ficou fora dos alvos — é exatamente o órfão do bug")
+}
+
+test("targets não inclui processo sem relação com a sessão") {
+    let found = ProcessReaping.targets(roots: [1000], table: reapTree, selfPid: reapAppPid).map(\.pid)
+    assertFalse(found.contains(2000), "um processo alheio à sessão virou alvo de sinal")
+}
+
+test("targets varre várias sessões contra um único snapshot, sem duplicar pid") {
+    let duasSessoes: [ProcEntry] = reapTree + [
+        reapEntry(3000, reapAppPid),   // segundo shell
+        reapEntry(3100, 3000),
+    ]
+    let found = ProcessReaping.targets(roots: [1000, 3000, 1000], table: duasSessoes, selfPid: reapAppPid)
+    assertEqual(found.count, Set(found.map(\.pid)).count, "o mesmo pid apareceu mais de uma vez")
+    assertEqual(Set(found.map(\.pid)), Set([1000, 1100, 1200, 1300, 3000, 3100] as [pid_t]),
+                "a varredura do quit não cobriu as duas sessões")
+}
+
+test("S1: targets nunca devolve pid 0, 1 ou negativo") {
+    let tabelaPerigosa: [ProcEntry] = [
+        reapEntry(1000, reapAppPid),
+        reapEntry(0, 1000),     // kill(0) sinaliza o process group do PRÓPRIO app
+        reapEntry(1, 0),        // launchd
+        reapEntry(-1, 1000),    // kill(-1) sinaliza todo processo do uid
+        reapEntry(1100, 1000),
+    ]
+    let found = ProcessReaping.targets(roots: [1000], table: tabelaPerigosa, selfPid: reapAppPid).map(\.pid)
+    assertTrue(found.allSatisfy { $0 > 1 }, "um pid <= 1 sobreviveu ao filtro: \(found)")
+    assertEqual(found, [1100, 1000], "os alvos legítimos mudaram junto com o filtro")
+}
+
+test("S2: targets nunca devolve o pid do próprio app") {
+    // Root é o pai do app: a varredura desce e encontra o app.
+    let found = ProcessReaping.targets(roots: [400], table: reapTree, selfPid: reapAppPid).map(\.pid)
+    assertFalse(found.contains(reapAppPid), "o app entrou na própria lista de alvos — matar-se é indistinguível de crash")
+}
+
+test("S2: targets exclui a cadeia de ancestrais do app quando o root é ancestral") {
+    let comIrmao = reapTree + [reapEntry(600, 400)]
+    let found = ProcessReaping.targets(roots: [400], table: comIrmao, selfPid: reapAppPid).map(\.pid)
+    assertFalse(found.contains(400), "o pai do app virou alvo")
+    assertTrue(found.contains(600), "o filtro de ancestralidade levou junto um processo que não é ancestral")
+}
+
+test("S2: ancestralidade com ciclo na tabela não trava e ainda exclui o app") {
+    let ciclo: [ProcEntry] = [
+        reapEntry(reapAppPid, 8001),
+        reapEntry(8001, 8002),
+        reapEntry(8002, 8001),   // ciclo entre dois ancestrais
+        reapEntry(8100, 8001),
+    ]
+    let found = ProcessReaping.targets(roots: [8001], table: ciclo, selfPid: reapAppPid).map(\.pid)
+    assertFalse(found.contains(reapAppPid), "o app virou alvo por uma tabela corrompida")
+    assertTrue(found.contains(8100), "o ciclo levou junto um processo legítimo")
+}
+
+test("S3: pid citado como ppid mas ausente da tabela nunca vira alvo") {
+    // 1000 é referenciado como pai, mas proc_pidinfo o recusou (outro uid) e ele
+    // não está na tabela. Um pid que o snapshot não descreve não pode ser alvo.
+    let incompleta: [ProcEntry] = [reapEntry(1100, 1000), reapEntry(1200, 1100)]
+    let found = ProcessReaping.targets(roots: [1000], table: incompleta, selfPid: reapAppPid).map(\.pid)
+    assertFalse(found.contains(1000), "um pid ausente da tabela virou alvo de sinal")
+    assertEqual(found, [1200, 1100], "os descendentes descritos na tabela deixaram de ser alvos")
+}
+
+test("S3: tabela vazia devolve nenhum alvo em vez de qualquer coisa") {
+    assertEqual(ProcessReaping.targets(roots: [1000], table: [], selfPid: reapAppPid).count, 0,
+                "um snapshot vazio produziu alvos")
+}
+
+test("S4: survivors devolve vazio quando o pid reaparece com startedAt diferente") {
+    let antes = [reapEntry(1100, 1000, 111)]
+    let depois = [reapEntry(1100, 1000, 999)]   // pid reciclado pelo kernel
+    assertEqual(ProcessReaping.survivors(previous: antes, table: depois).count, 0,
+                "um pid reciclado receberia SIGKILL — mataria um processo inocente")
+}
+
+test("S4: survivors mantém o pid que reaparece com o mesmo startedAt") {
+    let antes = [reapEntry(1100, 1000, 111)]
+    let depois = [reapEntry(1100, 1000, 111), reapEntry(2000, 1, 5)]
+    assertEqual(ProcessReaping.survivors(previous: antes, table: depois).map(\.pid), [1100],
+                "o processo que ignorou a fase educada escapou do SIGKILL")
+}
+
+test("S4: survivors ignora o pid que sumiu da tabela") {
+    let antes = [reapEntry(1100, 1000, 111), reapEntry(1200, 1100, 222)]
+    let depois = [reapEntry(1200, 1100, 222)]
+    assertEqual(ProcessReaping.survivors(previous: antes, table: depois).map(\.pid), [1200],
+                "um processo já morto continuou na lista de escalada")
+}
+
+test("S4: survivors preserva a ordem folha-primeiro de previous") {
+    let antes = [reapEntry(1300, 1200, 3), reapEntry(1200, 1100, 2), reapEntry(1100, 1000, 1)]
+    let depois = [reapEntry(1100, 1000, 1), reapEntry(1200, 1100, 2), reapEntry(1300, 1200, 3)]
+    assertEqual(ProcessReaping.survivors(previous: antes, table: depois).map(\.pid), [1300, 1200, 1100],
+                "a fase force perdeu a ordem folha-primeiro")
+}
+
+test("signals(for: .polite) manda SIGHUP e depois SIGTERM") {
+    assertEqual(ProcessReaping.signals(for: .polite), [SIGHUP, SIGTERM],
+                "a fase educada mudou de sinal — SIGHUP é o que o zsh traduz em hup dos jobs")
+}
+
+test("signals(for: .force) manda apenas SIGKILL") {
+    assertEqual(ProcessReaping.signals(for: .force), [SIGKILL],
+                "a fase final deixou de ser inescapável")
+}
+
+test("descendants termina com ciclo na tabela em vez de entrar em laço infinito") {
+    let ciclo: [ProcEntry] = [reapEntry(7000, 7001), reapEntry(7001, 7000)]
+    assertEqual(ProcessReaping.descendants(of: 7000, in: ciclo).map(\.pid), [7001],
+                "o walk sobre uma tabela corrompida não terminou no conjunto esperado")
+}
+
+test("descendants ignora linha que se declara pai de si mesma") {
+    let corrompida: [ProcEntry] = [reapEntry(9000, 9000), reapEntry(9001, 9000)]
+    assertEqual(ProcessReaping.descendants(of: 9000, in: corrompida).map(\.pid), [9001],
+                "uma linha auto-parental desviou a varredura")
+}
+
+test("reapGracePeriod é um teto de no máximo 2s, não uma espera fixa") {
+    assertLessOrEqual(ProcessReaping.reapGracePeriod, .milliseconds(2000),
+                      "a graça passou do teto medido — o quit fica lento para todo mundo")
+    assertGreater(ProcessReaping.reapGracePeriod, .zero,
+                  "sem graça nenhuma o SIGKILL sai antes de qualquer handler de shutdown rodar")
+}
+
+test("reapPollInterval é bem menor que a graça, para o caso cooperativo sair rápido") {
+    assertLessOrEqual(ProcessReaping.reapPollInterval, .milliseconds(100),
+                      "o poll grosso faz o caso cooperativo (12,8 ms medidos) pagar a graça inteira")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
