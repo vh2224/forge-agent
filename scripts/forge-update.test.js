@@ -382,6 +382,29 @@ test('CLI defaults to the remote stable channel and local clones require explici
   assert.strictEqual(local.repo, path.resolve(__dirname, '..'));
 });
 
+test('an installed updater delegates local recovery to the refreshed clone', () => {
+  const repo = path.resolve(__dirname, '..');
+  const options = updater.parseArgs(['--source', 'local', '--repo', repo, '--apply', '--json']);
+  assert.strictEqual(updater.shouldBootstrapLocal(options, path.join(os.tmpdir(), 'installed-forge')), true,
+    'updater antigo não delegaria ao clone que recebeu pull');
+  assert.strictEqual(updater.shouldBootstrapLocal(options, repo), false,
+    'o updater do próprio clone entraria em recursão');
+  const calls = [];
+  const output = updater.bootstrapLocal(options, {
+    repo,
+    argv: ['--source', 'local', '--repo', repo, '--apply', '--json'],
+    runner(command, args, spawnOptions) {
+      calls.push({ command, args, spawnOptions });
+      return { status: 0, stdout: '{"version":"from-refreshed-clone"}\n', stderr: '' };
+    },
+  });
+  assert.strictEqual(output, '{"version":"from-refreshed-clone"}\n');
+  assert.strictEqual(calls[0].args[0], path.join(repo, 'scripts', 'forge-update.js'));
+  assert.deepStrictEqual(calls[0].args.slice(1), ['--source', 'local', '--repo', repo, '--apply', '--json']);
+  assert.strictEqual(calls[0].spawnOptions.cwd, repo);
+  assert.strictEqual(calls[0].spawnOptions.shell, false);
+});
+
 test('the projected command launches the installed updater instead of a cwd clone', () => {
   const command = fs.readFileSync(path.join(path.resolve(__dirname, '..'), 'commands', 'forge-update.md'), 'utf8');
   assert(command.includes("process.env.FORGE_HOME||p.join(o.homedir(),'.forge-agent')"));

@@ -321,4 +321,27 @@ test('declaredVersion reads a dynamically computed VERSION, not just a literal',
   } finally { fs.rmSync(root, { recursive: true, force: true, maxRetries: 3 }); }
 });
 
+test('a hung remote clone times out and removes its temporary checkout', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-update-timeout-test-'));
+  const sha = 'a'.repeat(40);
+  let temporary;
+  const runner = (command, args, options) => {
+    if (args[0] === 'ls-remote') return { status: 0, stdout: `${sha}\trefs/tags/v9.9.9\n`, stderr: '' };
+    if (args[0] === 'clone') {
+      temporary = path.dirname(args[args.length - 1]);
+      assert.strictEqual(options.timeout, 25, 'o timeout configurado não chegou ao clone');
+      return { status: null, stdout: '', stderr: '', error: { code: 'ETIMEDOUT', message: 'timed out' } };
+    }
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+  try {
+    assert.throws(() => remote.materializeRemoteSource(
+      { remote: 'https://example.test/forge.git', channel: 'stable' },
+      { runner, tempParent: root, gitTimeoutMs: 25 },
+    ), /git clone excedeu o timeout de 0\.025s.*timed out/);
+    assert(temporary, 'o diretório temporário não chegou a ser criado');
+    assert.strictEqual(fs.existsSync(temporary), false, 'o checkout temporário sobreviveu ao timeout');
+  } finally { fs.rmSync(root, { recursive: true, force: true, maxRetries: 3 }); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);
