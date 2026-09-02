@@ -8744,6 +8744,73 @@ test("runId do descritor não influencia o plano de retomada") {
                 "runId não é usado em argv ou cwd — o plano é igual com e sem ele")
 }
 
+// MARK: - Nome de conta: validador único (S07)
+
+test("pattern é a tradução literal de NAME_RE (forge-accounts.js:77)") {
+    assertEqual(AccountName.pattern, "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$",
+                "pattern precisa espelhar NAME_RE sem o flag i (classe já cobre as duas caixas)")
+}
+
+test("string vazia é rejeitada") {
+    assertFalse(AccountName.isValid(""), "nome vazio nunca é válido")
+}
+
+test("espaço interno e nome só de espaços são rejeitados") {
+    assertFalse(AccountName.isValid("mw telles"), "espaço interno não é caractere permitido")
+    assertFalse(AccountName.isValid("   "), "nome só de espaços não é válido")
+}
+
+test("primeiro caractere não-alfanumérico é rejeitado") {
+    assertFalse(AccountName.isValid(".mwtelles"), "começar com . é inválido")
+    assertFalse(AccountName.isValid("_mwtelles"), "começar com _ é inválido")
+    assertFalse(AccountName.isValid("-mwtelles"), "começar com - é inválido")
+    assertFalse(AccountName.isValid("--dangerously-x"), "começar com -- é inválido")
+}
+
+test("32 caracteres é aceito, 33 é rejeitado") {
+    let ok32 = String(repeating: "a", count: 32)
+    let bad33 = String(repeating: "a", count: 33)
+    assertTrue(AccountName.isValid(ok32), "32 caracteres é o limite superior aceito")
+    assertFalse(AccountName.isValid(bad33), "33 caracteres excede o limite")
+}
+
+test("maiúsculas, dígitos, ponto, underscore e hífen depois do primeiro caractere são aceitos") {
+    assertTrue(AccountName.isValid("Mw.Telles-01_x"), "classe de caracteres pós-primeiro cobre A-Z a-z 0-9 . _ -")
+}
+
+test("caracteres de shell são rejeitados (;, |, $, backtick, aspas, /, newline)") {
+    for bad in ["a;b", "a|b", "a$b", "a`b", "a'b", "a\"b", "a/b"] {
+        assertFalse(AccountName.isValid(bad), "'\(bad)' contém metacaractere de shell")
+    }
+}
+
+test("nome iniciado por hífen é rejeitado mesmo parecendo uma flag (--dangerously-x.conta)") {
+    // T01-SECURITY.md Blocker 1: um regex sem âncoras (^$) casaria isto em
+    // qualquer posição via NSRegularExpression.firstMatch. AccountName não
+    // usa NSRegularExpression — varre Character a Character — então este
+    // caso não depende de âncora nenhuma para ser rejeitado.
+    assertFalse(AccountName.isValid("--dangerously-x.conta"),
+                "primeiro caractere '-' já reprova antes de qualquer outra checagem")
+}
+
+test("nome com quebra de linha embutida é rejeitado (ok\\n--flag)") {
+    // T01-SECURITY.md Blocker 1: ICU $ (sem .anchorsMatchLines) casa antes de
+    // uma quebra de linha final — um regex ingênuo "^...$" aceitaria
+    // "validname\n". A varredura por Character rejeita \n como qualquer
+    // outro caractere fora da classe permitida, embutido ou no fim.
+    assertFalse(AccountName.isValid("ok\n--flag"), "quebra de linha embutida não é caractere permitido")
+    assertFalse(AccountName.isValid("validname\n"), "quebra de linha final não deve ser aceita por um $ frouxo")
+}
+
+test("rejection(_:) devolve nil para nome válido") {
+    assertNil(AccountName.rejection("mwtelles"), "nome válido não deve carregar razão de rejeição")
+}
+
+test("rejection(_:) devolve razão em pt-BR não-vazia para nome inválido") {
+    let reason = AccountName.rejection("--dangerously-x.conta")
+    assertTrue(reason != nil && !(reason!.isEmpty), "nome inválido precisa de uma razão legível")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {

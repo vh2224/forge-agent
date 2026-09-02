@@ -642,19 +642,6 @@ final class AppState: ObservableObject {
                            to: SessionStore.path(home: NSHomeDirectory()))
     }
 
-    /// The account-name shape `scripts/forge-accounts.js`'s `NAME_RE` already
-    /// enforces on write: `^[a-z0-9][a-z0-9._-]{0,31}$`, case-insensitive.
-    /// Mirrored here on purpose rather than invented fresh — S07 validates the
-    /// same field on the write path, and the two must agree on what "legal"
-    /// means, or one of them is silently wrong.
-    private static let accountNameRegex = try! NSRegularExpression(
-        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
-
-    private func isValidAccountName(_ name: String) -> Bool {
-        let range = NSRange(name.startIndex..<name.endIndex, in: name)
-        return Self.accountNameRegex.firstMatch(in: name, range: range) != nil
-    }
-
     /// Turns a persisted `SessionDescriptor` (T01) into a live terminal
     /// session — the only place a restorable descriptor is allowed to become
     /// a real process, and only because this is called from a button action
@@ -672,9 +659,12 @@ final class AppState: ObservableObject {
     /// `--account` in the plan's argv, which is a weaker hazard than an
     /// interpolated flag but the same family the S05 review flagged: a
     /// malformed value can still be misread as another option by a CLI arg
-    /// parser. So the shape is checked here, and a malformed account is
-    /// dropped from the resume argv (not sanitised, not silently kept) —
-    /// the session still opens, without `--account`.
+    /// parser. So the shape is checked here against `AccountName.isValid(_:)`
+    /// (ForgeKit) — the single validator S07 promoted this field to, so the
+    /// read path (here) and the write path (account creation) can never
+    /// disagree on what "legal" means — and a malformed account is dropped
+    /// from the resume argv (not sanitised, not silently kept) — the session
+    /// still opens, without `--account`.
     func resumeSession(_ descriptor: SessionDescriptor) {
         guard let plan = SessionResume.plan(for: descriptor) else {
             show("\(descriptor.engine) ainda não retoma sessão — abra um terminal novo", error: true)
@@ -682,7 +672,7 @@ final class AppState: ObservableObject {
         }
         var argv = plan.argv
         var account = descriptor.account
-        if let name = account, !isValidAccountName(name) {
+        if let name = account, !AccountName.isValid(name) {
             account = nil
             if let idx = argv.firstIndex(of: "--account"), idx + 1 < argv.count {
                 argv.removeSubrange(idx...(idx + 1))
