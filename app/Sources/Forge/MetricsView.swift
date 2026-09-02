@@ -5,6 +5,7 @@
 // already on disk.
 
 import SwiftUI
+import Charts
 import ForgeKit
 
 @MainActor
@@ -277,19 +278,15 @@ struct MetricsView: View {
             // explains a bill that the total alone does not.
             if s.totalTokens > 0 {
                 VStack(alignment: .leading, spacing: 3) {
-                    GeometryReader { geo in
-                        // Clamped, and never below a visible sliver: an input
-                        // share of 2% should still read as a segment rather
-                        // than vanish into the rounding.
-                        let inputW = max(3, min(geo.size.width - 3,
-                                                geo.size.width * (1 - s.outputShare)))
-                        HStack(spacing: 2) {
-                            Capsule().fill(Color.secondary.opacity(0.45))
-                                .frame(width: inputW)
-                            Capsule().fill(Color.accentOrange.opacity(0.75))
-                        }
+                    Chart {
+                        BarMark(x: .value("tokens", s.inputTokens))
+                            .foregroundStyle(Color.secondary.opacity(0.45))
+                        BarMark(x: .value("tokens", s.outputTokens))
+                            .foregroundStyle(Color.accentOrange.opacity(0.75))
                     }
-                    .frame(height: 6)
+                    .chartXAxis(.hidden).chartYAxis(.hidden).chartLegend(.hidden)
+                    .chartXScale(domain: 0...max(1, s.totalTokens))
+                    .frame(height: 8)
                     HStack(spacing: 12) {
                         legend(Color.secondary.opacity(0.45),
                                "entrada \(MetricsEngine.tokens(s.inputTokens))")
@@ -384,18 +381,14 @@ struct MetricsView: View {
                 .font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
                 .frame(minWidth: 90, idealWidth: 130, maxWidth: 170, alignment: .leading)
 
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.quaternary).frame(height: 6)
-                    Capsule()
-                        .fill(showFamily ? fam.color.opacity(0.85)
-                                         : Color.accentOrange.opacity(0.7))
-                        .frame(width: geo.size.width
-                               * MetricsEngine.fraction(b.totalTokens, of: peak),
-                               height: 6)
-                }
-                .frame(maxHeight: .infinity, alignment: .center)
+            Chart {
+                BarMark(x: .value("tokens", b.totalTokens), y: .value("bucket", ""))
+                    .foregroundStyle(barColor(b, showFamily: showFamily))
+                    .cornerRadius(3)
             }
+            .chartXScale(domain: 0...max(1, peak))
+            .chartXAxis(.hidden).chartYAxis(.hidden).chartLegend(.hidden)
+            .chartPlotStyle { $0.background(.quaternary, in: Capsule()) }
             .frame(minWidth: 60, maxHeight: 22)
 
             Text(MetricsEngine.tokens(b.totalTokens))
