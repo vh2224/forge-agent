@@ -7743,6 +7743,68 @@ test("BoardViewport: zoom(by:) acumula multiplicativamente antes de saturar") {
     assertLessOrEqual(abs(v.scale - 1.21), 1e-9, "1.1 · 1.1 = 1.21, ainda abaixo de maxScale(1.6)")
 }
 
+// MARK: - Sessões vivas: agrupamento por cwd (S04)
+
+test("Sessões: sessão com runId entra no grupo do seu cwd e ordena primeiro") {
+    let withRun = SessionSnapshot(id: "a", cwd: "/repo/x", title: "a", runId: "run-1")
+    let withoutRun = SessionSnapshot(id: "b", cwd: "/repo/x", title: "b")
+    let groups = SessionOrganiser.groups([withoutRun, withRun], home: "/Users/x")
+    assertEqual(groups.count, 1)
+    assertEqual(groups[0].sessions.map(\.id), ["a", "b"], "com runId ordena primeiro dentro do grupo")
+}
+
+test("Sessões: sessão sem runId sobrevive ao agrupamento e ordena depois") {
+    let withRun = SessionSnapshot(id: "a", cwd: "/repo/y", title: "a", runId: "run-2")
+    let withoutRun = SessionSnapshot(id: "b", cwd: "/repo/y", title: "b")
+    let groups = SessionOrganiser.groups([withRun, withoutRun], home: "/Users/x")
+    assertEqual(groups.count, 1)
+    assertEqual(groups[0].sessions.count, 2, "sessão sem runId não é descartada")
+    assertEqual(groups[0].sessions.last?.id, "b")
+}
+
+test("Sessões: duas sessões no mesmo cwd dão UM grupo com 2 entradas, não dois grupos") {
+    let s1 = SessionSnapshot(id: "a", cwd: "/repo/z", title: "a")
+    let s2 = SessionSnapshot(id: "b", cwd: "/repo/z", title: "b")
+    let groups = SessionOrganiser.groups([s1, s2], home: "/Users/x")
+    assertEqual(groups.count, 1, "mesmo cwd nunca produz dois grupos")
+    assertEqual(groups[0].sessions.count, 2)
+}
+
+test("Sessões: a saída é função do conjunto — entrada embaralhada dá a mesma ordem") {
+    let s1 = SessionSnapshot(id: "a", cwd: "/repo/one", title: "a", runId: "run-a")
+    let s2 = SessionSnapshot(id: "b", cwd: "/repo/two", title: "b")
+    let s3 = SessionSnapshot(id: "c", cwd: "/repo/one", title: "c")
+    let order1 = SessionOrganiser.groups([s1, s2, s3], home: "/Users/x").map { $0.sessions.map(\.id) }
+    let order2 = SessionOrganiser.groups([s3, s1, s2], home: "/Users/x").map { $0.sessions.map(\.id) }
+    assertEqual(order1, order2, "embaralhar a entrada não pode mudar a saída")
+}
+
+test("Sessões: grupos ordenam por nome de projeto, com path como desempate") {
+    let s1 = SessionSnapshot(id: "a", cwd: "/repo-b/app", title: "a")
+    let s2 = SessionSnapshot(id: "b", cwd: "/repo-a/app", title: "b")
+    let groups = SessionOrganiser.groups([s1, s2], home: "/Users/x")
+    assertEqual(groups.map(\.path), ["/repo-a/app", "/repo-b/app"], "mesmo lastPathComponent, path desempata")
+}
+
+test("Sessões: título do grupo é home-relativo (~/...)") {
+    let s = SessionSnapshot(id: "a", cwd: "/Users/x/Development/forge-app", title: "a")
+    let groups = SessionOrganiser.groups([s], home: "/Users/x")
+    assertEqual(groups.first?.title, "~/Development/forge-app")
+}
+
+test("Sessões: lista vazia devolve zero grupos, não um grupo vazio") {
+    let groups = SessionOrganiser.groups([], home: "/Users/x")
+    assertEqual(groups.count, 0)
+}
+
+test("Sessões: runCount conta só as sessões com runId") {
+    let s1 = SessionSnapshot(id: "a", cwd: "/repo/w", title: "a", runId: "run-1")
+    let s2 = SessionSnapshot(id: "b", cwd: "/repo/w", title: "b")
+    let s3 = SessionSnapshot(id: "c", cwd: "/repo/w", title: "c", runId: "run-2")
+    let groups = SessionOrganiser.groups([s1, s2, s3], home: "/Users/x")
+    assertEqual(groups.first?.runCount, 2)
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
