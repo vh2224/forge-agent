@@ -1183,6 +1183,11 @@ struct RunStrip: View {
 struct AccountsView: View {
     @ObservedObject var state: AppState
 
+    /// Backs both the empty-state field and the toolbar field (D11: the
+    /// only door into `startAccountSetup` is a `Button`/`onSubmit`, never
+    /// `onAppear`/`init`/`task`).
+    @State private var newAccountName = ""
+
     /// Only meaningful once usage has actually been polled — ordering by
     /// last_used would look confident while knowing nothing about capacity.
     private var recommended: String? {
@@ -1198,10 +1203,20 @@ struct AccountsView: View {
         return known.reduce(0, +) / Double(known.count)
     }
 
+    private func submitRegistration() {
+        guard AccountName.isValid(newAccountName) else { return }
+        let name = newAccountName
+        newAccountName = ""
+        state.startAccountSetup(name: name)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 summary
+                if let pending = state.pendingAccountSetup {
+                    AccountSetupBanner(name: pending.name, session: pending.session, state: state)
+                }
                 if state.accounts.isEmpty { empty }
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 330), spacing: 14)],
@@ -1219,6 +1234,26 @@ struct AccountsView: View {
         .navigationTitle("Contas")
         .onAppear { state.loadAccounts() }
         .toolbar {
+            ToolbarItem {
+                // Same field the empty state offers — registering the
+                // second (or fifth) account must not require the list to be
+                // empty first.
+                HStack(spacing: 6) {
+                    TextField("nome da conta", text: $newAccountName)
+                        .textFieldStyle(.plain)
+                        .onSubmit { submitRegistration() }
+                    Button {
+                        submitRegistration()
+                    } label: { Image(systemName: "person.badge.plus").forgeIcon(.small) }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .disabled(!AccountName.isValid(newAccountName))
+                    .help(newAccountName.isEmpty
+                          ? "Registrar conta"
+                          : (AccountName.rejection(newAccountName) ?? "Registrar conta"))
+                }
+                .padding(.horizontal, 6)
+                .frame(width: 190, alignment: .leading)
+            }
             ToolbarItem {
                 Button {
                     state.refreshUsage()
@@ -1282,10 +1317,26 @@ struct AccountsView: View {
         VStack(alignment: .leading, spacing: 9) {
             Label("Nenhuma conta registrada", systemImage: "person.crop.circle.badge.questionmark")
                 .font(.callout)
-            // Registration needs a real TTY: `claude setup-token` opens a browser
-            // login, which the app cannot host.
-            Text("Registrar exige um terminal de verdade — o login abre o navegador.")
+            // Login still opens a browser and needs a real TTY — the app now
+            // hosts that TTY itself, inside the embedded terminal, instead of
+            // sending the operator to one of their own.
+            Text("O login abre o navegador; o terminal que o recebe agora vive dentro do app.")
                 .font(.caption).foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField("nome da conta", text: $newAccountName)
+                    .textFieldStyle(.roundedBorder).frame(width: 180)
+                    .onSubmit { submitRegistration() }
+                Button("Registrar conta") { submitRegistration() }
+                    .disabled(!AccountName.isValid(newAccountName))
+            }
+            if !newAccountName.isEmpty, let reason = AccountName.rejection(newAccountName) {
+                Text(reason).font(.caption2).foregroundStyle(.red)
+            }
+
+            // Copying the command and running it outside the app remains a
+            // valid path (D8) — the button above just stops being the only
+            // one.
             HStack(spacing: 6) {
                 Text("forge-accounts add <nome>")
                     .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
@@ -1293,6 +1344,7 @@ struct AccountsView: View {
                     state.copyToPasteboard("forge-accounts add ", label: "Comando")
                 } label: { Image(systemName: "doc.on.doc").forgeIcon(.micro) }
                 .buttonStyle(.plain).foregroundStyle(.tertiary)
+                Text("alternativa fora do app").font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(8)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
@@ -1302,6 +1354,51 @@ struct AccountsView: View {
     }
 }
 
+/// Shown while `AppState.pendingAccountSetup` exists — names the account
+/// being registered and the embedded session running its login.
+///
+/// `@ObservedObject var session` (not just its name) is what makes
+/// `.onChange(of: session.isRunning)` fire: the session is the publisher,
+/// and this view needs the transition, not just a snapshot of it.
+///
+/// This banner never mirrors the terminal's own output — it names the
+/// account and reports on the *relist*, never on what ran inside the PTY
+/// (Security Checklist "Also verify" #2). The verdict is always
+/// `finishAccountSetup()` reading `has_token` off `--list --json`
+/// (T03/D6), never this banner assuming success because the shell exited.
+struct AccountSetupBanner: View {
+    let name: String
+    @ObservedObject var session: TerminalSession
+    @ObservedObject var state: AppState
+
+    private var registeringLabel: String { "Registrando \(name)" }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "person.badge.clock").forgeIcon(.small).foregroundStyle(Color.accentOrange)
+            VStack(alignment: .leading, spacing: 2) {
+                // `name` is operator input rendered through a String
+                // variable, not interpolated into a literal — a literal
+                // interpolation becomes a `LocalizedStringKey` and goes
+                // through markdown parsing + a localization lookup for text
+                // that is neither (Security Checklist "Also verify" #1;
+                // same fix S04/T03 already applied with `Text(snapshot.title)`).
+                Text(registeringLabel).font(.callout).bold()
+                Text("Login em curso no terminal embutido — conclua no navegador que abriu.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Conferir agora") { state.finishAccountSetup() }
+                .buttonStyle(.bordered)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .forgeSurface(.raised)
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(Color.accentOrange.opacity(0.35), lineWidth: 1))
+        .onChange(of: session.isRunning) { if !$0 { state.finishAccountSetup() } }
+    }
+}
 
 /// An icon-only menu button.
 ///
