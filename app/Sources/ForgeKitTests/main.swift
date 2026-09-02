@@ -8435,6 +8435,92 @@ test("SliceArtifacts: paths compõe os 4 caminhos canônicos sob <milestoneDir>/
     assertEqual(paths.plan, "/m/slices/S05/S05-PLAN.md", "plan")
 }
 
+// MARK: - review-fix/S05: R1, R2, R6, R7, R9 conceded review items
+//
+// Each test below is a regression for exactly one item CONCEDED in
+// `S05-REVIEW.md`'s dialectic — see the executor prompt for `review-fix/S05`.
+// R3/R4 (SliceInspector.swift, in the `Forge` executable target) cannot be
+// imported by this test target and are verified separately by `swift build`
+// plus a grep, per the same prompt's instructions.
+
+test("R9 — ReviewDoc Form B (flat bullet) consome continuações indentadas até a linha em branco") {
+    guard let url = reviewFixtureURL("review-flat-multiline.md") else {
+        assertTrue(false, "fixture review-flat-multiline.md não encontrado — falha, não vácuo verde")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    assertEqual(doc.objections.count, 2, "review-flat-multiline.md (S02-REVIEW.md verbatim) deve conter 2 objeções resolvidas, e nenhuma da seção \"## Nota…\" que a segue")
+
+    let r1 = doc.objections.first { $0.id == "R1" }
+    assertTrue((r1?.objection ?? "").contains("OffsetShape<Self>"),
+               "R1: o corpo precisa carregar texto que só existe numa linha de continuação indentada")
+    assertEqual(r1?.status, .resolved, "R1 está na seção Resolvidas no debate")
+
+    let r2 = doc.objections.first { $0.id == "R2" }
+    assertTrue((r2?.objection ?? "").contains("x157/x163"),
+               "R2: o corpo precisa carregar texto da última linha de continuação, não só da primeira")
+    assertEqual(r2?.path, "app/Sources/Forge/MetricsView.swift", "R2: path lido do bullet plano")
+    assertEqual(r2?.line, 282, "R2: line lida do bullet plano")
+}
+
+test("R2 — VerificationReport.parse não crasha com coluna de cabeçalho duplicada; primeira ocorrência vence") {
+    let text = """
+    | Source | Artifact | Exists | Exists | Wired | Flags |
+    |--------|----------|--------|--------|-------|-------|
+    | T01 | app/x.swift | ✓ | ✗ | — | `stub` |
+    """
+    let report = VerificationReport.parse(text)
+    assertEqual(report.rows.count, 1, "1 linha, sem crash na coluna Exists duplicada")
+    assertEqual(report.rows.first?.exists, .pass, "primeira ocorrência de \"Exists\" (índice 2, valor ✓) deve vencer")
+}
+
+test("R1 — FileAuditReport reseta a lista corrente em qualquer outro rótulo em negrito, não vaza bullets não relacionados") {
+    let text = """
+    ## File Audit
+
+    **Compared:** 2 paths. 0 unexpected, none missing.
+
+    **Unexpected (changed but not promised):** None.
+
+    **Missing (declared but not touched):** None.
+
+    **Housekeeping commits (outside task writes):**
+    - `abc123` — commit de limpeza
+    - `def456` — outro commit
+
+    ## Outra seção depois
+    """
+    guard let report = FileAuditReport.parse(text) else {
+        assertTrue(false, "seção presente, não deve devolver nil")
+        return
+    }
+    assertEqual(report.unexpected, [], "auditoria limpa: os bullets de Housekeeping não podem virar unexpected")
+    assertEqual(report.missing, [], "auditoria limpa: os bullets de Housekeeping não podem virar missing")
+}
+
+test("R6 — UnifiedDiff: mudança só de modo (chmod) resolve path pelo header \"diff --git\", nunca /dev/null") {
+    let text = """
+    diff --git a/script.sh b/script.sh
+    old mode 100644
+    new mode 100755
+    """
+    let files = UnifiedDiff.parse(text)
+    assertEqual(files.count, 1, "1 arquivo")
+    let file = files.first
+    assertEqual(file?.oldPath, "script.sh", "oldPath vem do header diff --git, não de /dev/null")
+    assertEqual(file?.newPath, "script.sh", "newPath vem do header diff --git, não de /dev/null")
+    assertEqual(file?.displayPath, "script.sh", "displayPath não pode ser /dev/null para um chmod puro")
+    assertTrue(file?.hunks.isEmpty ?? false, "chmod puro não tem hunks")
+}
+
+test("R7 — UnifiedDiff: newline final do git diff não vira uma linha de contexto fantasma no último hunk") {
+    let text = "diff --git a/f.swift b/f.swift\nindex 1111111..2222222 100644\n--- a/f.swift\n+++ b/f.swift\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
+    let files = UnifiedDiff.parse(text)
+    let lines = files.first?.hunks.first?.lines ?? []
+    assertEqual(lines, [.context("a"), .removed("b"), .added("c")],
+                "o \\n final do output não pode acrescentar um .context(\"\") fantasma")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {

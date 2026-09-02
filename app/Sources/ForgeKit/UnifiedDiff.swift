@@ -106,9 +106,14 @@ public enum UnifiedDiff {
             let line = lines[i]
             guard line.hasPrefix("diff --git ") else { i += 1; continue }
 
+            // Seed both paths from the `diff --git a/… b/…` header line so a
+            // mode-only (chmod) change — which never emits `---`/`+++` — still
+            // resolves to a real path instead of "/dev/null". `---`/`+++`/
+            // rename metadata below overrides these when present.
+            let (headerOld, headerNew) = diffGitHeaderPaths(line)
             i += 1
-            var oldPath = "/dev/null"
-            var newPath = "/dev/null"
+            var oldPath = headerOld
+            var newPath = headerNew
             var isBinary = false
             var isRename = false
             var sawOldPath = false
@@ -220,15 +225,15 @@ public enum UnifiedDiff {
                 j += 1
                 continue
             }
-            // An empty line inside a hunk body (git emits a bare "" for an
-            // empty context line at end of file) — treat as empty context.
-            if raw.isEmpty {
-                bodyLines.append(.context(""))
-                j += 1
-                continue
-            }
-
-            // Anything else ends the hunk body (e.g. trailing blank / EOF).
+            // An unprefixed empty string is NOT a context line — git always
+            // emits a single space (" ") for an empty context line, never a
+            // bare "". A bare "" only appears here because
+            // `components(separatedBy: "\n")` turns the trailing "\n" that
+            // ends every `git diff` output into a synthetic final element;
+            // treating it as `.context("")` made the last hunk of every diff
+            // carry one phantom blank line that was never in the output.
+            // Anything unprefixed — this trailing artifact included — ends
+            // the hunk body.
             break
         }
 
@@ -238,6 +243,22 @@ public enum UnifiedDiff {
     }
 
     // MARK: - Path helpers
+
+    private static let diffGitHeaderRegex = try! NSRegularExpression(
+        pattern: #"^diff --git a/(.*) b/(.*)$"#
+    )
+
+    /// Extracts `oldPath`/`newPath` from a `diff --git a/… b/…` header line —
+    /// the only line a mode-only (chmod) change carries, since it never emits
+    /// `--- `/`+++ `. No match (unrecognised header shape) falls back to
+    /// "/dev/null" for both, same as the pre-header default.
+    private static func diffGitHeaderPaths(_ line: String) -> (old: String, new: String) {
+        let ns = line as NSString
+        guard let m = diffGitHeaderRegex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else {
+            return ("/dev/null", "/dev/null")
+        }
+        return (ns.substring(with: m.range(at: 1)), ns.substring(with: m.range(at: 2)))
+    }
 
     /// Strips the `a/` or `b/` prefix git puts on paths in `--- `/`+++ `/
     /// `rename from`/`rename to` lines and in the `Binary files` line.

@@ -174,10 +174,9 @@ public enum ReviewParser {
             }
 
             if trimmed.hasPrefix("- R"), isFormB(trimmed) {
-                if let objection = parseFormB(trimmed, status: currentStatus) {
-                    objections.append(objection)
-                }
-                i += 1
+                let (objection, consumed) = parseFormB(lines: lines, startIndex: i, status: currentStatus)
+                if let objection = objection { objections.append(objection) }
+                i += consumed
                 continue
             }
 
@@ -191,21 +190,49 @@ public enum ReviewParser {
         return formBBulletRegex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) != nil
     }
 
-    private static func parseFormB(_ line: String, status: ReviewStatus) -> ReviewObjection? {
+    /// Consome o bullet `- R# \`path:line\` — texto` de Form B e as linhas de
+    /// continuação indentadas que o seguem, parando na primeira linha em
+    /// branco, heading, ou próximo item `- R…` de topo (não indentado).
+    /// Devolve a objeção (ou nil se o bullet inicial não casar) e quantas
+    /// linhas foram consumidas a partir de `startIndex` — sem isso, um item
+    /// flat que a Forge quebra em várias linhas (o formato real que
+    /// `S02-REVIEW.md`/`S04-REVIEW.md` produzem) perde tudo além da
+    /// primeira.
+    private static func parseFormB(lines: [String], startIndex: Int, status: ReviewStatus) -> (ReviewObjection?, Int) {
+        let line = lines[startIndex].trimmingCharacters(in: .whitespaces)
         let ns = line as NSString
         guard let m = formBBulletRegex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else {
-            return nil
+            return (nil, 1)
         }
         let id = ns.substring(with: m.range(at: 1))
         let pathLine = ns.substring(with: m.range(at: 2))
         let severity = m.range(at: 3).location != NSNotFound ? ns.substring(with: m.range(at: 3)) : nil
-        let text = ns.substring(with: m.range(at: 4)).trimmingCharacters(in: .whitespaces)
+        var text = ns.substring(with: m.range(at: 4)).trimmingCharacters(in: .whitespaces)
         let (path, lineNum) = splitPathLine(pathLine)
-        return ReviewObjection(
+
+        var j = startIndex + 1
+        while j < lines.count {
+            let rawLine = lines[j]
+            let trimmedLine = rawLine.trimmingCharacters(in: .whitespaces)
+
+            if trimmedLine.isEmpty { j += 1; break }
+            if trimmedLine.hasPrefix("### ") || trimmedLine.hasPrefix("## ") { break }
+
+            let isIndented = rawLine.hasPrefix(" ") || rawLine.hasPrefix("\t")
+            if !isIndented { break }  // next top-level item (incl. another "- R…") ends this one
+
+            if !trimmedLine.isEmpty {
+                text += " " + trimmedLine
+            }
+            j += 1
+        }
+
+        let objection = ReviewObjection(
             id: id, path: path, line: lineNum, severity: severity, status: status,
             objection: text, defense: nil, rebuttal: nil, decision: nil, correction: nil,
             turns: [.challenger(text)]
         )
+        return (objection, j - startIndex)
     }
 
     /// Consome a heading `### R#` e os bullets nomeados que a seguem, juntando

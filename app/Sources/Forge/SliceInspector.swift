@@ -16,6 +16,7 @@
 // reads already-resolved state.
 
 import SwiftUI
+import Foundation
 import ForgeKit
 
 // MARK: - SliceInspector
@@ -40,12 +41,24 @@ struct SliceInspector: View {
     struct Resolved {
         var milestoneDir: String
         var milestoneDirInferred: Bool
-        var diffRange: String
+        var diffRangeDisplay: String
         var diffRangeSource: String
         var reviewText: String?
-        var diffText: String
+        var diffOutcome: DiffOutcome
         var verificationText: String?
         var summaryText: String?
+    }
+
+    /// What the background load resolved the diff to: a genuinely successful
+    /// `git diff` (possibly empty — a real "no changes"), a range the PLAN
+    /// supplied that failed validation before it ever reached git, or a git
+    /// invocation that launched/ran and did not succeed. Three different
+    /// facts a plain `String` cannot tell apart — which is exactly how an
+    /// unreachable range used to render as a false "no changes" (R4).
+    enum DiffOutcome {
+        case text(String)
+        case rangeRejected(rawValue: String, key: String)
+        case gitError(String)
     }
 
     @State private var segment: Segment = .review
@@ -74,7 +87,7 @@ struct SliceInspector: View {
                 Spacer()
             }
             if let resolved {
-                Text("diff \(resolved.diffRange) — \(resolved.diffRangeSource)")
+                Text("diff \(resolved.diffRangeDisplay) — \(resolved.diffRangeSource)")
                     .font(ForgeType.mono)
                     .foregroundStyle(.secondary)
                 if resolved.milestoneDirInferred {
@@ -113,13 +126,34 @@ struct SliceInspector: View {
                         detail: "Nenhum `S##-REVIEW.md` legível em \(resolved.milestoneDir)/slices/\(slice.id).")
                 }
             case .diff:
-                DiffView(diffText: resolved.diffText)
+                diffSegment(resolved.diffOutcome)
             case .audit:
                 auditSegment(resolved)
             }
         } else {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// Only a genuinely successful `git diff` (`.text`, even when empty)
+    /// reaches `DiffView` — that view's own empty state is "no changes",
+    /// which must never stand in for "the diff could not be obtained".
+    @ViewBuilder
+    private func diffSegment(_ outcome: DiffOutcome) -> some View {
+        switch outcome {
+        case .text(let diffText):
+            DiffView(diffText: diffText)
+        case .rangeRejected(let rawValue, let key):
+            InspectorEmptyState(
+                systemName: "exclamationmark.triangle",
+                title: "Range de diff rejeitado",
+                detail: "O valor de `\(key)` no PLAN (\"\(rawValue)\") não é um SHA git válido e foi recusado antes de ser passado ao git.")
+        case .gitError(let message):
+            InspectorEmptyState(
+                systemName: "exclamationmark.triangle",
+                title: "Não foi possível obter o diff",
+                detail: message)
         }
     }
 
@@ -226,18 +260,16 @@ struct SliceInspector: View {
             let summaryText = SliceInspector.readIfExists(paths.summary)
             let planText = SliceInspector.readIfExists(paths.plan)
 
-            let (range, source) = SliceInspector.resolveDiffRange(planText: planText)
-            // Read-only by construction — `diff` is the only subcommand this
-            // host ever passes to `Git.run`, never anything that writes.
-            let diffText = Git.run(["diff", range], at: cwd) ?? ""
+            let (diffDisplay, diffSource, diffOutcome) = SliceInspector.resolveAndRunDiff(
+                planText: planText, cwd: cwd)
 
             return Resolved(
                 milestoneDir: milestoneDir,
                 milestoneDirInferred: inferred,
-                diffRange: range,
-                diffRangeSource: source,
+                diffRangeDisplay: diffDisplay,
+                diffRangeSource: diffSource,
                 reviewText: reviewText,
-                diffText: diffText,
+                diffOutcome: diffOutcome,
                 verificationText: verificationText,
                 summaryText: summaryText
             )
@@ -251,21 +283,87 @@ struct SliceInspector: View {
         return try? String(contentsOfFile: path, encoding: .utf8)
     }
 
+    /// The result of resolving `slice_base_sha`/`base_sha` from the PLAN into
+    /// something safe to interpolate into a `git diff` argument, or a NAMED
+    /// rejection when it is not. A value is never silently coerced back into
+    /// a range once rejected (R3).
+    enum DiffRangeResolution {
+        case resolved(range: String, source: String)
+        case rejected(rawValue: String, key: String)
+    }
+
+    private static let shaRegex = try! NSRegularExpression(pattern: "^[0-9a-f]{7,40}$")
+
+    /// `git` parses any argument starting with `-` as an OPTION, not a
+    /// revision — `--output=/tmp/x` (interpolated as `"--output=/tmp/x..HEAD"`)
+    /// makes `git diff` WRITE that file instead of reading. A PLAN is
+    /// LLM-written and `.gsd/` is committable in user projects, so a cloned
+    /// repo can carry a crafted `slice_base_sha`/`base_sha`. A real git SHA
+    /// (full or abbreviated) only ever contains `[0-9a-f]`, which can never
+    /// start with `-` — so requiring the whole value to match that pattern is
+    /// both the validation and the anti-option guard, not two separate checks.
+    private static nonisolated func validatedRange(sha: String, key: String) -> DiffRangeResolution {
+        let ns = sha as NSString
+        guard shaRegex.firstMatch(in: sha, range: NSRange(location: 0, length: ns.length)) != nil else {
+            return .rejected(rawValue: sha, key: key)
+        }
+        return .resolved(range: "\(sha)..HEAD", source: "do PLAN (\(key))")
+    }
+
     /// `slice_base_sha:` first, `base_sha:` on the fallback, both read from
     /// the slice's own `S##-PLAN.md` frontmatter — same order `S05-PLAN.md`
     /// documents. No PLAN, or neither key present, falls to `HEAD~1..HEAD`.
     /// The word that comes back with the range (`source`) is what the header
     /// shows — a range with no stated origin is indistinguishable from an
     /// empty diff being the wrong one.
-    static nonisolated func resolveDiffRange(planText: String?) -> (range: String, source: String) {
-        guard let planText else { return ("HEAD~1..HEAD", "fallback (PLAN ausente)") }
+    static nonisolated func resolveDiffRange(planText: String?) -> DiffRangeResolution {
+        guard let planText else { return .resolved(range: "HEAD~1..HEAD", source: "fallback (PLAN ausente)") }
         if let sha = firstFrontmatterValue(in: planText, key: "slice_base_sha") {
-            return ("\(sha)..HEAD", "do PLAN (slice_base_sha)")
+            return validatedRange(sha: sha, key: "slice_base_sha")
         }
         if let sha = firstFrontmatterValue(in: planText, key: "base_sha") {
-            return ("\(sha)..HEAD", "do PLAN (base_sha)")
+            return validatedRange(sha: sha, key: "base_sha")
         }
-        return ("HEAD~1..HEAD", "fallback (sem slice_base_sha/base_sha no PLAN)")
+        return .resolved(range: "HEAD~1..HEAD", source: "fallback (sem slice_base_sha/base_sha no PLAN)")
+    }
+
+    /// Resolves the range and, only for a validated one, runs the diff — the
+    /// single call site that both R3 and R4 protect.
+    ///
+    /// The range is validated (`resolveDiffRange`) before it ever reaches
+    /// `git`: a `slice_base_sha`/`base_sha` from the PLAN must match
+    /// `^[0-9a-f]{7,40}$` or the whole range is rejected, never interpolated.
+    /// `--end-of-options` additionally tells git that everything after it is
+    /// a revision, never an option — belt-and-braces alongside the regex, in
+    /// case a future caller loosens the pattern. `-c core.quotePath=false`
+    /// (R8) makes the parser's job possible: without it a non-ASCII path
+    /// comes back C-escaped (`"caf\303\251.txt"`) instead of as the real
+    /// UTF-8 path `UnifiedDiff` expects. Together this is what makes `diff`
+    /// read-only and machine-readable in practice — the old comment on this
+    /// line asserted the first half of that without proving it, and said
+    /// nothing about the second.
+    ///
+    /// `Git.run` — the only cross-module entry point `GitCore.swift` exposes
+    /// for this (`Git.invoke`/`GitRun` are `internal`, and `GitCore.swift` is
+    /// outside this fix's allowed file list) — collapses `.failed`/`.timedOut`/
+    /// `.launchFailed` to `nil` and keeps a genuinely successful (possibly
+    /// empty) run as a non-nil `String`. That is still exactly the
+    /// distinction R4 needs: `nil` is kept as a NAMED error and never
+    /// collapsed to `""`, so an unreachable range can no longer render as a
+    /// false "no changes" — it only loses the finer-grained reason (exit
+    /// code vs timeout vs launch failure) that only `GitRun` itself carries.
+    static nonisolated func resolveAndRunDiff(planText: String?, cwd: String) -> (display: String, source: String, outcome: DiffOutcome) {
+        switch resolveDiffRange(planText: planText) {
+        case .rejected(let rawValue, let key):
+            return ("(rejeitado)", "PLAN (\(key)) rejeitado — não é um SHA válido",
+                    .rangeRejected(rawValue: rawValue, key: key))
+        case .resolved(let range, let source):
+            guard let text = Git.run(["-c", "core.quotePath=false", "diff", "--end-of-options", range], at: cwd) else {
+                return (range, source, .gitError(
+                    "git diff falhou para o range \"\(range)\" — o range pode ser inatingível (SHA ausente, repositório raso), o comando pode ter expirado, ou o git não pôde ser iniciado."))
+            }
+            return (range, source, .text(text))
+        }
     }
 
     private nonisolated static func firstFrontmatterValue(in text: String, key: String) -> String? {

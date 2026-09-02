@@ -61,7 +61,10 @@ public struct VerificationReport: Hashable {
             return VerificationReport(rows: [])
         }
         let headerCells = splitRow(lines[headerIndex])
-        let columnIndex = Dictionary(uniqueKeysWithValues: headerCells.enumerated().map { ($1, $0) })
+        // `uniquingKeysWith` — a duplicated column heading must not crash this
+        // parser: the first occurrence wins and every other column keeps its
+        // documented contract (missing/changed column → `.skipped`, never a trap).
+        let columnIndex = Dictionary(headerCells.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
 
         var rows: [VerificationRow] = []
         var i = headerIndex + 1
@@ -189,6 +192,17 @@ public struct FileAuditReport: Hashable {
             }
             if trimmed.hasPrefix("**Missing") {
                 currentList = 2
+                continue
+            }
+            // Any other bold label (`**Housekeeping commits…:**`) or Markdown
+            // heading ends the Unexpected/Missing block — only bullets that sit
+            // directly under one of those two labels may be collected. Without
+            // this, a later unrelated bullet list inside `## File Audit` gets
+            // appended to whichever list was last opened, and a clean audit
+            // (`**Missing…:** None.` followed by an unrelated bulleted list)
+            // renders as failures.
+            if trimmed.hasPrefix("**") || trimmed.hasPrefix("#") {
+                currentList = 0
                 continue
             }
             if trimmed.hasPrefix("- ") {
