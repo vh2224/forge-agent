@@ -8097,6 +8097,203 @@ test("Review: guarda live — todo *-REVIEW.md real do repo com item parseia com
     }
 }
 
+// MARK: - Diff unificado: arquivos, hunks e contagem (S05)
+//
+// `UnifiedDiff.parse` (ForgeKit) provado contra `app/fixtures/diff-sample.diff`
+// — o diff REAL do próprio repo entre `25bf293..69c7920` para `Design.swift`,
+// `MetricsView.swift` e `TerminalsView.swift` — e contra o `git diff --numstat`
+// pareado do mesmo range, medido no planning (S05-PLAN.md § Medido no
+// planning, T02): 3 arquivos, 21 hunks, 284 linhas, numstat
+// `Design.swift 49/3 · MetricsView.swift 10/10 · TerminalsView.swift 13/13`.
+// Os pares entram literais no teste — não como uma segunda chamada de git em
+// runtime — porque o parser é puro.
+
+func diffSampleFixtureURL() -> URL? {
+    let fromSource = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // ForgeKitTests/
+        .deletingLastPathComponent()   // Sources/
+        .deletingLastPathComponent()   // app/
+        .appendingPathComponent("fixtures/diff-sample.diff")
+    if FileManager.default.fileExists(atPath: fromSource.path) { return fromSource }
+
+    let fromCwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("fixtures/diff-sample.diff")
+    if FileManager.default.fileExists(atPath: fromCwd.path) { return fromCwd }
+
+    return nil
+}
+
+test("UnifiedDiff: fixture diff-sample parseia 3 arquivos e 21 hunks") {
+    guard let url = diffSampleFixtureURL() else {
+        assertTrue(false, "fixture diff-sample.diff não encontrado — falha, não vácuo verde")
+        return
+    }
+    let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    let files = UnifiedDiff.parse(text)
+    assertEqual(files.count, 3, "diff-sample.diff deve conter 3 arquivos")
+    assertEqual(files.reduce(0) { $0 + $1.hunks.count }, 21, "diff-sample.diff deve conter 21 hunks no total")
+}
+
+test("UnifiedDiff: paridade exata com git diff --numstat, arquivo a arquivo") {
+    guard let url = diffSampleFixtureURL() else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    let files = UnifiedDiff.parse(text)
+    // Medido no planning: git diff --numstat 25bf293..69c7920 -- <3 arquivos>
+    let expected: [String: (added: Int, deleted: Int)] = [
+        "Design.swift": (49, 3),
+        "MetricsView.swift": (10, 10),
+        "TerminalsView.swift": (13, 13),
+    ]
+    for file in files {
+        let name = (file.displayPath as NSString).lastPathComponent
+        guard let want = expected[name] else {
+            assertTrue(false, "arquivo inesperado na fixture: \(file.displayPath)")
+            continue
+        }
+        assertEqual(file.added, want.added, "\(name): added deve bater com --numstat")
+        assertEqual(file.deleted, want.deleted, "\(name): deleted deve bater com --numstat")
+    }
+    assertEqual(Set(files.map { ($0.displayPath as NSString).lastPathComponent }), Set(expected.keys),
+                "os 3 arquivos esperados devem estar todos presentes")
+}
+
+test("UnifiedDiff: cabeçalho de hunk lê old/new start/count e o texto após o segundo @@") {
+    let text = """
+    diff --git a/Sources/X.swift b/Sources/X.swift
+    index 1111111..2222222 100644
+    --- a/Sources/X.swift
+    +++ b/Sources/X.swift
+    @@ -313,6 +313,7 @@ enum ForgeIconSize {
+     a
+    +b
+     c
+    """
+    let files = UnifiedDiff.parse(text)
+    assertEqual(files.count, 1, "um arquivo")
+    let hunk = files.first?.hunks.first
+    assertEqual(hunk?.oldStart, 313, "oldStart")
+    assertEqual(hunk?.oldCount, 6, "oldCount")
+    assertEqual(hunk?.newStart, 313, "newStart")
+    assertEqual(hunk?.newCount, 7, "newCount")
+    assertEqual(hunk?.header, "enum ForgeIconSize {", "header é o texto após o segundo @@")
+}
+
+test("UnifiedDiff: @@ -1 +1 @@ com contagem omitida é lido como count 1") {
+    let text = """
+    diff --git a/f.swift b/f.swift
+    index 1111111..2222222 100644
+    --- a/f.swift
+    +++ b/f.swift
+    @@ -1 +1 @@
+    -old
+    +new
+    """
+    let files = UnifiedDiff.parse(text)
+    let hunk = files.first?.hunks.first
+    assertEqual(hunk?.oldCount, 1, "contagem omitida no lado antigo é 1, não nil nem 0")
+    assertEqual(hunk?.newCount, 1, "contagem omitida no lado novo é 1, não nil nem 0")
+}
+
+test("UnifiedDiff: tipagem de linhas — sequência context/added/context, texto sem marcador de coluna 1") {
+    let text = """
+    diff --git a/Sources/X.swift b/Sources/X.swift
+    index 1111111..2222222 100644
+    --- a/Sources/X.swift
+    +++ b/Sources/X.swift
+    @@ -313,6 +313,7 @@ enum ForgeIconSize {
+     a
+    +b
+     c
+    """
+    let files = UnifiedDiff.parse(text)
+    let lines = files.first?.hunks.first?.lines ?? []
+    assertEqual(lines, [.context("a"), .added("b"), .context("c")],
+                "sequência tipada e texto sem o marcador de coluna 1")
+}
+
+test("UnifiedDiff: arquivo novo (--- /dev/null) tem oldPath /dev/null, displayPath == newPath, deleted 0") {
+    let text = """
+    diff --git a/new.swift b/new.swift
+    new file mode 100644
+    index 0000000..abc1234
+    --- /dev/null
+    +++ b/new.swift
+    @@ -0,0 +1,2 @@
+    +line1
+    +line2
+    """
+    let files = UnifiedDiff.parse(text)
+    let file = files.first
+    assertEqual(file?.oldPath, "/dev/null", "arquivo novo: oldPath é /dev/null")
+    assertEqual(file?.displayPath, file?.newPath, "displayPath é newPath quando o arquivo é novo")
+    assertEqual(file?.deleted, 0, "arquivo novo não tem linha removida")
+    assertEqual(file?.added, 2, "arquivo novo: 2 linhas adicionadas")
+}
+
+test("UnifiedDiff: rename devolve oldPath != newPath e isRename true") {
+    let text = """
+    diff --git a/old.swift b/renamed.swift
+    similarity index 100%
+    rename from old.swift
+    rename to renamed.swift
+    """
+    let files = UnifiedDiff.parse(text)
+    let file = files.first
+    assertTrue(file?.isRename ?? false, "isRename deve ser true")
+    assertEqual(file?.oldPath, "old.swift", "oldPath do rename")
+    assertEqual(file?.newPath, "renamed.swift", "newPath do rename")
+    assertTrue(file?.oldPath != file?.newPath, "rename: oldPath e newPath devem diferir")
+}
+
+test("UnifiedDiff: arquivo binário vira DiffFile isBinary true, hunks vazio, contagens 0") {
+    let text = """
+    diff --git a/x.png b/x.png
+    index 1111111..2222222 100644
+    Binary files a/x.png and b/x.png differ
+    """
+    let files = UnifiedDiff.parse(text)
+    let file = files.first
+    assertTrue(file?.isBinary ?? false, "isBinary deve ser true")
+    assertTrue(file?.hunks.isEmpty ?? false, "binário não tem hunks")
+    assertEqual(file?.added, 0, "binário: added 0")
+    assertEqual(file?.deleted, 0, "binário: deleted 0")
+}
+
+test("UnifiedDiff: entrada vazia devolve [], diff truncado no meio de um hunk devolve o que leu sem crash") {
+    let empty = UnifiedDiff.parse("")
+    assertEqual(empty.count, 0, "entrada vazia → []")
+
+    let truncated = """
+    diff --git a/f.swift b/f.swift
+    index 1111111..2222222 100644
+    --- a/f.swift
+    +++ b/f.swift
+    @@ -1,3 +1,3 @@
+     context1
+    -removed1
+    """
+    let files = UnifiedDiff.parse(truncated)
+    assertEqual(files.count, 1, "diff truncado ainda devolve o arquivo lido até onde deu")
+    assertEqual(files.first?.hunks.first?.lines.count, 2, "hunk truncado devolve as linhas que leu, sem crash")
+}
+
+test("UnifiedDiff: +++/--- de cabeçalho nunca contam — 1 hunk com 1 adição tem added == 1, não 2") {
+    let text = """
+    diff --git a/f.swift b/f.swift
+    index 1111111..2222222 100644
+    --- a/f.swift
+    +++ b/f.swift
+    @@ -1,1 +1,2 @@
+     context
+    +added
+    """
+    let files = UnifiedDiff.parse(text)
+    assertEqual(files.first?.added, 1, "added conta só a linha de conteúdo, não a linha +++ do cabeçalho")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {

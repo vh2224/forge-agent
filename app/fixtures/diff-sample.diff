@@ -1,0 +1,284 @@
+diff --git a/app/Sources/Forge/Design.swift b/app/Sources/Forge/Design.swift
+index 31899cf..8d88812 100644
+--- a/app/Sources/Forge/Design.swift
++++ b/app/Sources/Forge/Design.swift
+@@ -103,13 +103,13 @@ extension Color {
+ /// reads as a rectangle; one pixel of light along the top edge reads as an
+ /// object with a lit side, and that single line is most of the distance between
+ /// "functional" and "designed".
+-struct ForgeSurface: ViewModifier {
++struct ForgeSurface<S: InsettableShape>: ViewModifier {
+     let level: SurfaceLevel
++    let shape: S
+     var tint: ForgeTone?
+     var tintStrength: Double = 0.14
+ 
+     func body(content: Content) -> some View {
+-        let shape = RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
+         content
+             .background {
+                 shape.fill(
+@@ -158,10 +158,26 @@ struct ForgeSurface: ViewModifier {
+ }
+ 
+ extension View {
++    /// The default surface shape — a rounded rect at the level's own radius.
++    /// Covers every call site except the three that are capsules.
+     func forgeSurface(_ level: SurfaceLevel,
+                       tint: ForgeTone? = nil,
+                       tintStrength: Double = 0.14) -> some View {
+-        modifier(ForgeSurface(level: level, tint: tint, tintStrength: tintStrength))
++        forgeSurface(level,
++                     in: RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous),
++                     tint: tint,
++                     tintStrength: tintStrength)
++    }
++
++    /// The general form. `in shape:` exists because `strokeBorder` requires
++    /// `InsettableShape`, and three call sites need `Capsule()` instead of the
++    /// rounded rect the level otherwise picks — the shape is a parameter, not
++    /// a fourth token.
++    func forgeSurface<S: InsettableShape>(_ level: SurfaceLevel,
++                                          in shape: S,
++                                          tint: ForgeTone? = nil,
++                                          tintStrength: Double = 0.14) -> some View {
++        modifier(ForgeSurface(level: level, shape: shape, tint: tint, tintStrength: tintStrength))
+     }
+ }
+ 
+@@ -289,6 +305,36 @@ extension NSImage {
+     }
+ }
+ 
++// MARK: - Icons
++
++/// The icon scale. Glyphs are not type, and this is not a seventh step of
++/// `ForgeType`: an SF Symbol renders visually smaller than text of the same
++/// point size beside it, which is why the call sites this replaces paired an
++/// 8pt glyph with 9pt text. Six steps, closed — if a screen wants a seventh,
++/// it is decorating rather than saying something.
++enum ForgeIconSize {
++    case dot, micro, small, medium, large, hero
++    var points: Double {
++        switch self {
++        case .dot:    return 5
++        case .micro:  return 9
++        case .small:  return 12
++        case .medium: return 16
++        case .large:  return 22
++        case .hero:   return 28
++        }
++    }
++}
++
++extension View {
++    /// The single icon treatment. Every `Image(systemName:)` on the five
++    /// screens of S03 goes through here, so that changing how a glyph reads
++    /// is one edit rather than fifty-five.
++    func forgeIcon(_ size: ForgeIconSize, weight: Font.Weight = .regular) -> some View {
++        font(.system(size: size.points, weight: weight))
++    }
++}
++
+ // MARK: - Type
+ 
+ /// The app's type scale.
+diff --git a/app/Sources/Forge/MetricsView.swift b/app/Sources/Forge/MetricsView.swift
+index 7e9fb9d..a9698d9 100644
+--- a/app/Sources/Forge/MetricsView.swift
++++ b/app/Sources/Forge/MetricsView.swift
+@@ -192,7 +192,7 @@ struct ProgressPanel: View {
+                               caption: String? = nil) -> some View {
+         VStack(alignment: .leading, spacing: 1) {
+             Text(value)
+-                .font(.system(size: 22, weight: .semibold)).monospacedDigit()
++                .font(ForgeType.display).monospacedDigit()
+             Text(label).font(.caption2).foregroundStyle(.secondary)
+             if let caption {
+                 Text(caption).font(.caption2).foregroundStyle(.tertiary)
+@@ -315,7 +315,7 @@ struct MetricsView: View {
+         VStack(alignment: .leading, spacing: 1) {
+             HStack(spacing: 3) {
+                 Text(value)
+-                    .font(.system(size: 22, weight: .semibold)).monospacedDigit()
++                    .font(ForgeType.display).monospacedDigit()
+                     .foregroundStyle(accent ? Color.accentOrange : .primary)
+                 if caveat {
+                     Text("+").font(.caption).foregroundStyle(.tertiary)
+@@ -358,7 +358,7 @@ struct MetricsView: View {
+             }
+             .padding(.horizontal, 14).padding(.vertical, 4)
+             .frame(maxWidth: .infinity, alignment: .leading)
+-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
++            .forgeSurface(.raised)
+         }
+     }
+ 
+@@ -373,12 +373,12 @@ struct MetricsView: View {
+         return HStack(spacing: 10) {
+             if showFamily {
+                 Image(systemName: fam.icon)
+-                    .font(.system(size: 12)).foregroundStyle(fam.color)
++                    .forgeIcon(.small).foregroundStyle(fam.color)
+                     .frame(width: 16)
+             }
+ 
+             Text(showFamily ? ModelCatalog.label(for: b.key) : b.key)
+-                .font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
++                .font(ForgeType.label).lineLimit(1).truncationMode(.middle)
+                 .frame(minWidth: 90, idealWidth: 130, maxWidth: 170, alignment: .leading)
+ 
+             Chart {
+@@ -392,17 +392,17 @@ struct MetricsView: View {
+             .frame(minWidth: 60, maxHeight: 22)
+ 
+             Text(MetricsEngine.tokens(b.totalTokens))
+-                .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
++                .font(ForgeType.label).monospacedDigit().foregroundStyle(.secondary)
+                 .frame(width: 58, alignment: .trailing)
+ 
+             VStack(alignment: .trailing, spacing: 0) {
+                 Text(b.cost > 0 ? MetricsEngine.money(b.cost) : "—")
+-                    .font(.system(size: 12)).monospacedDigit()
++                    .font(ForgeType.label).monospacedDigit()
+                     .foregroundStyle(b.cost > 0 ? AnyShapeStyle(.primary)
+                                                 : AnyShapeStyle(.tertiary))
+                 if share >= 0.01 {
+                     Text("\(Int(share * 100))%")
+-                        .font(.system(size: 9)).monospacedDigit().foregroundStyle(.tertiary)
++                        .font(ForgeType.micro).monospacedDigit().foregroundStyle(.tertiary)
+                 }
+             }
+             .frame(width: 64, alignment: .trailing)
+@@ -410,7 +410,7 @@ struct MetricsView: View {
+                   ? "Cobrado fora da Anthropic" : "Custo estimado")
+ 
+             Text("\(b.dispatches)×")
+-                .font(.system(size: 11)).monospacedDigit().foregroundStyle(.tertiary)
++                .font(ForgeType.label).monospacedDigit().foregroundStyle(.tertiary)
+                 .frame(width: 40, alignment: .trailing)
+         }
+         .padding(.vertical, 7)
+@@ -441,7 +441,7 @@ struct MetricsView: View {
+                         ForEach(rows, id: \.0) { name, count in
+                             VStack(alignment: .leading, spacing: 1) {
+                                 Text("\(count)")
+-                                    .font(.system(size: 16, weight: .medium)).monospacedDigit()
++                                    .font(ForgeType.title).monospacedDigit()
+                                     .foregroundStyle(name == "retry" && count > 10
+                                                      ? AnyShapeStyle(Color.orange)
+                                                      : AnyShapeStyle(.primary))
+diff --git a/app/Sources/Forge/TerminalsView.swift b/app/Sources/Forge/TerminalsView.swift
+index d57cfb1..5bd07b0 100644
+--- a/app/Sources/Forge/TerminalsView.swift
++++ b/app/Sources/Forge/TerminalsView.swift
+@@ -90,7 +90,7 @@ struct TerminalsView: View {
+                 ToolbarItem {
+                     Picker("", selection: $layoutRaw) {
+                         ForEach(TerminalLayout.allCases) { l in
+-                            Image(systemName: l.icon).help(l.help).tag(l.rawValue)
++                            Image(systemName: l.icon).forgeIcon(.small).help(l.help).tag(l.rawValue)
+                         }
+                     }
+                     .pickerStyle(.segmented)
+@@ -197,7 +197,7 @@ struct TerminalsView: View {
+     private var gateBanner: some View {
+         VStack(alignment: .leading, spacing: 10) {
+             HStack(spacing: 8) {
+-                Image(systemName: "bolt.fill").foregroundStyle(Color.accentOrange)
++                Image(systemName: "bolt.fill").forgeIcon(.micro).foregroundStyle(Color.accentOrange)
+                 Text(state.pending.count == 1
+                      ? "1 run está esperando você"
+                      : "\(state.pending.count) runs estão esperando você")
+@@ -309,7 +309,7 @@ struct TerminalsView: View {
+             }
+             .frame(maxWidth: 620)
+             .padding(14)
+-            .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 16))
++            .forgeSurface(.floating)
+             .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.quaternary))
+             .shadow(radius: 22, y: 8)
+             .padding(.top, 14)
+@@ -341,9 +341,9 @@ struct TerminalsView: View {
+     @ViewBuilder private var zoomHud: some View {
+         if showZoomHud {
+             Text(TerminalZoom.label(terminals.fontSize))
+-                .font(.system(size: 13, weight: .medium, design: .monospaced))
++                .font(ForgeType.mono)
+                 .padding(.horizontal, 12).padding(.vertical, 7)
+-                .background(.thickMaterial, in: Capsule())
++                .forgeSurface(.floating, in: Capsule())
+                 .overlay(Capsule().strokeBorder(.quaternary))
+                 .padding(12)
+                 .transition(.opacity)
+@@ -460,7 +460,7 @@ struct AttachedImageChip: View {
+                         // Never a blank box: a chip that shows nothing is
+                         // indistinguishable from an attachment that failed.
+                         Image(systemName: "photo")
+-                            .font(.system(size: 18))
++                            .forgeIcon(.large)
+                             .foregroundStyle(.tertiary)
+                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                     }
+@@ -468,7 +468,7 @@ struct AttachedImageChip: View {
+                 .frame(width: 86, height: 60)
+                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+-                .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 8))
++                .forgeSurface(.panel)
+                 .shadow(radius: hovering ? 10 : 4, y: 2)
+             }
+             .buttonStyle(.plain)
+@@ -477,7 +477,7 @@ struct AttachedImageChip: View {
+             if hovering {
+                 Button(action: onDismiss) {
+                     Image(systemName: "xmark.circle.fill")
+-                        .font(.system(size: 14))
++                        .forgeIcon(.medium)
+                         .symbolRenderingMode(.palette)
+                         .foregroundStyle(.white, .black.opacity(0.65))
+                 }
+@@ -557,14 +557,14 @@ struct TerminalTab: View {
+                     Text(session.projectName)
+                     if let a = session.account, !a.isEmpty { Text("· \(a)") }
+                 }
+-                .font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
++                .font(ForgeType.micro).foregroundStyle(.tertiary).lineLimit(1)
+             }
+             .frame(maxWidth: .infinity, alignment: .leading)
+ 
+             if hovering || isActive {
+                 Button(action: onClose) {
+                     Image(systemName: "xmark")
+-                        .font(.system(size: 9, weight: .semibold))
++                        .forgeIcon(.micro, weight: .semibold)
+                         .frame(width: 18, height: 18)
+                         .contentShape(Rectangle())
+                 }
+@@ -573,7 +573,7 @@ struct TerminalTab: View {
+                 .help("Fechar sessão (⌘W)")
+             } else if let shortcutHint {
+                 Text(shortcutHint)
+-                    .font(.system(size: 9, design: .monospaced))
++                    .font(ForgeType.monoSmall)
+                     .foregroundStyle(.quaternary)
+                     .frame(width: 18)
+             }
+@@ -614,7 +614,7 @@ struct RunLaunchRow: View {
+                 HStack(spacing: 6) {
+                     Text(run.projectName).font(.callout)
+                     Text(run.id)
+-                        .font(.system(size: 10, design: .monospaced))
++                        .font(ForgeType.mono)
+                         .foregroundStyle(.tertiary)
+                         .lineLimit(1).truncationMode(.middle)
+                 }
+@@ -623,7 +623,7 @@ struct RunLaunchRow: View {
+                     if let acct = run.account, !acct.isEmpty { Text("· \(acct)") }
+                     Text(attached == nil ? "· sem terminal aqui" : "· aberta neste app")
+                 }
+-                .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
++                .font(ForgeType.caption).foregroundStyle(.tertiary).lineLimit(1)
+             }
+ 
+             Spacer(minLength: 8)
