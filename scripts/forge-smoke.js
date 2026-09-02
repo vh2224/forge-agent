@@ -17256,11 +17256,30 @@ function smokeRoutingContractProjection() {
     const first = mod.syncInstructions(root);
     assert(first.files.find((f) => f.host === 'claude').outcome === 'updated', '(a) primeiro sync escreve');
     const bytes = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
+    assert(bytes.includes('<!-- forge:routing-contract:start -->'), '(a) emits the exact stable marker');
+    assert(!bytes.includes('forge:routing-contract:start version='), '(a) stable output carries no version');
     assert(bytes.includes('forge-dispatch-resolve.js') && bytes.includes('worker-engine-fallback'),
       '(a) o bloco escrito nomeia o resolvedor e o fallback nomeado');
     const second = mod.syncInstructions(root);
     assert(second.changed === 0 && fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8') === bytes,
       '(a) o segundo sync é byte-idêntico');
+
+    const legacy = [
+      '# Project',
+      '<!-- forge:routing-contract:start version=1.2.3 -->',
+      'legacy contract body',
+      mod.MARKER_END,
+      'operator bytes',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), legacy, 'utf8');
+    const migrated = mod.syncInstructions(root).files.find((f) => f.host === 'claude');
+    const migratedBytes = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
+    assert(migrated.outcome === 'updated' && migratedBytes.includes(mod.MARKER_START),
+      '(a) valid legacy marker migrates to stable');
+    assert(migratedBytes.includes('operator bytes'), '(a) legacy migration preserves external bytes');
+    assert(mod.syncInstructions(root).changed === 0 && fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8') === migratedBytes,
+      '(a) migration second sync is byte-identical');
 
     // (d1) malformed block: refused by name, nothing written.
     const bad = `# P\n\n${mod.MARKER_END}\n`;

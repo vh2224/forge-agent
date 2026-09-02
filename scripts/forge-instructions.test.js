@@ -30,6 +30,7 @@ const {
   TARGETS,
   OUTCOMES,
   renderBlock,
+  scanMarkers,
   findBlock,
   detectEol,
   syncFile,
@@ -94,6 +95,14 @@ function read(root, name) {
   return fs.readFileSync(path.join(root, name), 'utf8');
 }
 
+function legacyBlock(version, eol = '\n') {
+  return [
+    `<!-- forge:routing-contract:start version=${version} -->`,
+    'legacy contract body',
+    MARKER_END,
+  ].join(eol);
+}
+
 // ── R1: idempotence ─────────────────────────────────────────────────────────
 
 console.log('R1 — idempotence');
@@ -113,13 +122,13 @@ test('primeiro sync escreve o bloco; o segundo não muda um byte', () => {
 });
 
 test('um bloco de versão antiga é substituído, não duplicado', () => {
-  const stale = renderBlock({ version: '0.0.1' });
+  const stale = legacyBlock('0.0.1');
   const root = project({ 'CLAUDE.md': `# Projeto\n\n${stale}\n` });
   const report = syncInstructions(root);
   assertEqual(report.files.find((f) => f.host === 'claude').outcome, 'updated', 'outcome');
 
   const text = read(root, 'CLAUDE.md');
-  const starts = text.split('\n').filter((l) => l.startsWith(MARKER_START)).length;
+  const starts = text.split('\n').filter((l) => l === MARKER_START).length;
   const ends = text.split('\n').filter((l) => l === MARKER_END).length;
   assertEqual(starts, 1, 'marcadores de início após o refresh');
   assertEqual(ends, 1, 'marcadores de fim após o refresh');
@@ -133,7 +142,7 @@ console.log('R2 — splice preserva tudo fora dos marcadores');
 test('texto antes E depois do bloco sobrevive byte a byte a um refresh', () => {
   const before = '# Projeto\n\nParágrafo do operador com `código` e **negrito**.\n\n';
   const after = '\n## Seção do operador depois do bloco\n\nConteúdo que ninguém pode perder.\n';
-  const root = project({ 'CLAUDE.md': `${before}${renderBlock({ version: '0.0.1' })}${after}` });
+  const root = project({ 'CLAUDE.md': `${before}${legacyBlock('0.0.1')}${after}` });
 
   syncInstructions(root);
   const text = read(root, 'CLAUDE.md');
@@ -171,6 +180,20 @@ test('arquivo CRLF continua 100% CRLF depois do sync', () => {
   assert((text.match(/\r\n/g) || []).length > 20, 'o bloco não foi escrito');
 });
 
+test('legacy CRLF migration preserves external bytes and line endings', () => {
+  const before = '# Project\r\noperator before\r\n';
+  const after = '\r\noperator after\r\n';
+  const original = `${before}${legacyBlock('1.2.3', '\r\n')}${after}`;
+  const root = project({ 'CLAUDE.md': original });
+  syncInstructions(root);
+  const migrated = read(root, 'CLAUDE.md');
+  assert(migrated.startsWith(before) && migrated.endsWith(after), 'external CRLF bytes changed');
+  assertEqual((migrated.match(/(?<!\r)\n/g) || []).length, 0, 'migration introduced lone LF');
+  const second = syncInstructions(root);
+  assertEqual(second.changed, 0, 'migration second sync changed bytes');
+  assertEqual(read(root, 'CLAUDE.md'), migrated, 'migration second sync differs');
+});
+
 test('arquivo LF não ganha nenhum CR', () => {
   const root = project({ 'CLAUDE.md': '# Projeto\n\nLinha.\n' });
   syncInstructions(root);
@@ -187,11 +210,11 @@ test('detectEol classifica pelos bytes, não pela plataforma', () => {
 console.log('R4 — bloco malformado é recusado e nada é escrito');
 
 const MALFORMED = [
-  ['start-marker-without-end', `# P\n\n${MARKER_START} version=1 -->\ncorpo\n`],
+  ['start-marker-without-end', `# P\n\n${MARKER_START}\ncorpo\n`],
   ['end-marker-without-start', `# P\n\ncorpo\n${MARKER_END}\n`],
-  ['end-marker-before-start', `# P\n\n${MARKER_END}\ncorpo\n${MARKER_START} version=1 -->\n`],
-  ['duplicate-start-marker', `${MARKER_START} version=1 -->\na\n${MARKER_START} version=2 -->\nb\n${MARKER_END}\n`],
-  ['duplicate-end-marker', `${MARKER_START} version=1 -->\na\n${MARKER_END}\nb\n${MARKER_END}\n`],
+  ['end-marker-before-start', `# P\n\n${MARKER_END}\ncorpo\n${MARKER_START}\n`],
+  ['duplicate-start-marker', `${MARKER_START}\na\n${legacyBlock('1.2.3')}\n`],
+  ['duplicate-end-marker', `${MARKER_START}\na\n${MARKER_END}\nb\n${MARKER_END}\n`],
 ];
 
 for (const [reason, content] of MALFORMED) {
@@ -211,6 +234,36 @@ test('findBlock nomeia cada forma malformada — nunca devolve um intervalo chut
     assertEqual(found && found.malformed, reason, `findBlock(${reason})`);
     assertEqual(found.start, undefined, `${reason} devolveu um start`);
   }
+});
+
+test('invalid reserved candidates are refused without writing', () => {
+  for (const start of [
+    '<!-- forge:routing-contract:start --> ',
+    '<!-- forge:routing-contract:start version= -->',
+    '<!-- forge:routing-contract:start version=1 -->',
+    '<!-- forge:routing-contract:start version=X -->',
+    '<!-- forge:routing-contract:start version=1.2.3 extra -->',
+    '<!-- forge:routing-contract:start foo=bar -->',
+    '<!-- forge:routing-contract:end extra -->',
+  ]) {
+    const content = `# P\n${start}\n`;
+    const root = project({ 'CLAUDE.md': content });
+    const entry = syncInstructions(root).files.find((f) => f.host === 'claude');
+    assertEqual(entry.reason, 'malformed-block:invalid-marker', start);
+    assertEqual(read(root, 'CLAUDE.md'), content, `${start}: wrote despite refusal`);
+  }
+});
+
+test('scanMarkers inventories valid and invalid reserved candidates separately', () => {
+  const scanned = scanMarkers([
+    MARKER_START,
+    MARKER_END,
+    '<!-- forge:routing-contract:start version=1.2.3 -->',
+    '<!-- forge:routing-contract:start version=X -->',
+  ].join('\n'));
+  assertEqual(scanned.starts.length, 2, 'valid starts');
+  assertEqual(scanned.ends.length, 1, 'valid ends');
+  assertEqual(scanned.invalid.length, 1, 'invalid candidates');
 });
 
 // ── R5: fence awareness, in both directions ─────────────────────────────────
@@ -242,18 +295,52 @@ test('par de marcadores dentro de ``` é ignorado; o arquivo recebe um bloco rea
   assert(text.trimEnd().endsWith(MARKER_END), 'o bloco real não foi anexado');
 });
 
+test('stable and legacy markers in backtick and tilde fences are ignored', () => {
+  for (const [open, close, start] of [
+    ['```markdown', '```', MARKER_START],
+    ['~~~markdown', '~~~', '<!-- forge:routing-contract:start version=1.2.3 -->'],
+  ]) {
+    const doc = [open, start, 'DO-NOT-REMOVE', MARKER_END, close, ''].join('\n');
+    const root = project({ 'CLAUDE.md': doc });
+    assertEqual(findBlock(doc), null, 'fenced marker became managed');
+    syncInstructions(root);
+    const written = read(root, 'CLAUDE.md');
+    assert(written.includes('DO-NOT-REMOVE'), 'fenced bytes lost');
+    assert(written.trimEnd().endsWith(MARKER_END), 'stable block not appended');
+  }
+});
+
+test('indented and long fences do not expose quoted markers', () => {
+  for (const lines of [
+    ['   ```markdown', MARKER_START, 'INDENTED-FENCE-BYTES', MARKER_END, '   ```', ''],
+    ['````markdown', '```', MARKER_START, 'LONG-FENCE-BYTES', MARKER_END, '````', ''],
+  ]) {
+    const doc = lines.join('\n');
+    const root = project({ 'CLAUDE.md': doc });
+    assertEqual(findBlock(doc), null, 'quoted marker became managed');
+    const first = syncInstructions(root);
+    const written = read(root, 'CLAUDE.md');
+    assertEqual(first.files.find((f) => f.host === 'claude').outcome, 'updated', 'sync outcome');
+    assert(written.startsWith(doc), 'fenced bytes changed');
+    assert(written.includes('FENCE-BYTES'), 'fenced content lost');
+    const second = syncInstructions(root);
+    assertEqual(second.changed, 0, 'second sync changed fenced fixture');
+    assertEqual(read(root, 'CLAUDE.md'), written, 'second sync bytes differ');
+  }
+});
+
 test('bite: sem fence-awareness o mesmo fixture seria destrutivo', () => {
   // Positive control for the guard above — proves the fixture actually contains
   // a marker pair a naive (regex-over-the-whole-text) detector WOULD match, so
   // R5 is not passing because the fixture is inert.
   const naive = /^<!-- forge:routing-contract:start[^\n]*-->[ \t]*$/m;
-  const doc = `\`\`\`\n${MARKER_START} version=X -->\nx\n${MARKER_END}\n\`\`\`\n`;
+  const doc = `\`\`\`\n${MARKER_START}\nx\n${MARKER_END}\n\`\`\`\n`;
   assert(naive.test(doc), 'o fixture não contém um marcador que um detector ingênuo casaria');
   assertEqual(findBlock(doc), null, 'o detector real casou um marcador em fence');
 });
 
 test('marcador indentado é prosa, não bloco', () => {
-  assertEqual(findBlock(`  ${MARKER_START} version=1 -->\n  ${MARKER_END}\n`), null, 'marcador indentado casou');
+  assertEqual(findBlock(`  ${MARKER_START}\n  ${MARKER_END}\n`), null, 'marcador indentado casou');
 });
 
 // ── R6: target selection ────────────────────────────────────────────────────
@@ -381,6 +468,12 @@ test('o bloco não afirma nada sobre a config de routing DESTE projeto', () => {
 test('renderBlock respeita o EOL pedido', () => {
   assertEqual(renderBlock({ eol: 'crlf' }).includes('\r\n'), true, 'crlf');
   assertEqual(renderBlock({ eol: 'lf' }).includes('\r'), false, 'lf');
+});
+
+test('renderBlock emits only the stable marker', () => {
+  const block = renderBlock();
+  assert(block.startsWith(`${MARKER_START}\n`), 'exact stable start');
+  assertEqual(block.includes('version='), false, 'renderer emitted version');
 });
 
 // ── R10: CLI argument handling ──────────────────────────────────────────────

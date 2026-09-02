@@ -1114,9 +1114,10 @@ block into `CLAUDE.md` (and `AGENTS.md` when the project has one), delimited by
 
 | Property | Rule |
 |---|---|
+| Marker grammar | New blocks emit exactly `<!-- forge:routing-contract:start -->`. The reader also accepts only the legacy `<!-- forge:routing-contract:start version=<semver> -->` form with three numeric components, migrates it on the first sync, and is byte-identical on the second. |
 | Ownership | The marker pair **is** the proof of ownership — same rule as the installer's origin marker (`shared/forge-ownership.md`). Bytes outside the markers are spliced back untouched. |
 | Idempotence | Re-running rewrites the block in place; identical content reports `unchanged`, never a second block. |
-| Refusal | Ambiguous markers (two starts, two ends, an end before a start, a lone marker) are **refused by name** (`malformed-block:<reason>`) and nothing is written. Repairing by guess means choosing which of the operator's bytes to delete. |
+| Refusal | Ambiguous markers (two starts, two ends, an end before a start, a lone marker) and reserved-prefix variants outside the stable or strict legacy grammar are **refused by name** (`malformed-block:<reason>`) and nothing is written. Repairing by guess means choosing which of the operator's bytes to delete. |
 | Fence-blindness | A marker quoted inside a fenced code block is documentation, not a block — this spec quotes them above. |
 | Line endings | The file's own EOL wins; a CRLF checkout is not rewritten as LF. |
 | Claims | The block asserts the **invariant** and names the command that reports the live decision. It never embeds a snapshot of this project's `routing:`/`workers:` config — a claim measured once at sync time is wrong the first time prefs change. |

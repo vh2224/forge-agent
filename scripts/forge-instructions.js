@@ -23,9 +23,9 @@
 // repaired by guess.
 //
 // Library exports:
-//   MARKER_START / MARKER_END   // marker prefixes (the start marker carries version=)
+//   MARKER_START / MARKER_END   // stable managed-block markers
 //   TARGETS                     // Object.freeze([{ file, host }])
-//   renderBlock(opts)           // ({version, eol}) → block text
+//   renderBlock(opts)           // ({eol}) → block text
 //   findBlock(text)             // → {start, end} | null | {malformed: reason}
 //   syncFile(file, opts)        // one file → {file, host, outcome, reason}
 //   syncInstructions(cwd, opts) // → {cwd, files: [...], changed: n}
@@ -46,8 +46,10 @@ const path = require('path');
 let VERSION = '0.0.0';
 try { VERSION = require('./forge-version').VERSION; } catch (_) { /* standalone copy */ }
 
-const MARKER_START = '<!-- forge:routing-contract:start';
+const MARKER_START = '<!-- forge:routing-contract:start -->';
 const MARKER_END = '<!-- forge:routing-contract:end -->';
+const MARKER_START_PREFIX = '<!-- forge:routing-contract:start';
+const MARKER_END_PREFIX = '<!-- forge:routing-contract:end';
 
 // Candidate instruction files, keyed by the runtime that reads them. Both are
 // project-root files by contract (`shared/forge-install.md § Interface`).
@@ -109,10 +111,9 @@ const CONTRACT_LINES = [
 ];
 
 function renderBlock(options = {}) {
-  const version = options.version || VERSION;
   const eol = options.eol === 'crlf' ? '\r\n' : '\n';
   const lines = [
-    `${MARKER_START} version=${version} -->`,
+    MARKER_START,
     '<!-- Gerado por forge-instructions.js. Edite o script, não este bloco: um sync o reescreve. -->',
     ...CONTRACT_LINES,
     MARKER_END,
@@ -133,37 +134,47 @@ function renderBlock(options = {}) {
 // Anything ambiguous (two starts, two ends, an end before a start, a lone
 // marker) is REFUSED by name. Repairing a malformed block by guess means
 // choosing which of the operator's bytes to delete.
-const START_LINE_RE = /^<!-- forge:routing-contract:start[^\n]*-->[ \t]*$/;
+const START_LINE_RE = /^<!-- forge:routing-contract:start -->$/;
+const LEGACY_START_LINE_RE = /^<!-- forge:routing-contract:start version=\d+\.\d+\.\d+ -->$/;
 const END_LINE_RE = /^<!-- forge:routing-contract:end -->[ \t]*$/;
-const FENCE_RE = /^(?:`{3,}|~{3,})/;
+const FENCE_RE = /^( {0,3})(`{3,}|~{3,})/;
 
 function scanMarkers(text) {
   const rawLines = String(text).split('\n');
   const starts = [];
   const ends = [];
+  const invalid = [];
   let inFence = false;
   let fenceChar = null;
+  let fenceLength = 0;
   let offset = 0;
 
   for (const rawLine of rawLines) {
     const line = rawLine.replace(/\r$/, '');
     const fence = FENCE_RE.exec(line);
-    if (fence) {
-      if (!inFence) { inFence = true; fenceChar = line[0]; }
-      else if (line[0] === fenceChar) { inFence = false; fenceChar = null; }
+    if (!inFence && fence) {
+      inFence = true;
+      fenceChar = fence[2][0];
+      fenceLength = fence[2].length;
+    } else if (inFence && new RegExp(`^ {0,3}${fenceChar}{${fenceLength},}[ \\t]*$`).test(line)) {
+      inFence = false;
+      fenceChar = null;
+      fenceLength = 0;
     } else if (!inFence) {
       // `end` deliberately excludes a trailing \r: the splice must hand the CR
       // back to the untouched remainder, or a CRLF file grows one lone LF line.
-      if (START_LINE_RE.test(line)) starts.push({ start: offset, end: offset + line.length });
+      if (START_LINE_RE.test(line) || LEGACY_START_LINE_RE.test(line)) starts.push({ start: offset, end: offset + line.length });
       else if (END_LINE_RE.test(line)) ends.push({ start: offset, end: offset + line.length });
+      else if (line.startsWith(MARKER_START_PREFIX) || line.startsWith(MARKER_END_PREFIX)) invalid.push({ start: offset, end: offset + line.length });
     }
     offset += rawLine.length + 1;
   }
-  return { starts, ends };
+  return { starts, ends, invalid };
 }
 
 function findBlock(text) {
-  const { starts, ends } = scanMarkers(text);
+  const { starts, ends, invalid } = scanMarkers(text);
+  if (invalid.length > 0) return { malformed: 'invalid-marker' };
   if (starts.length === 0 && ends.length === 0) return null;
   if (starts.length === 0) return { malformed: 'end-marker-without-start' };
   if (ends.length === 0) return { malformed: 'start-marker-without-end' };
@@ -194,7 +205,6 @@ function readFileSafe(file) {
  */
 function syncFile(file, options = {}) {
   const host = options.host || 'claude';
-  const version = options.version || VERSION;
   const dryRun = Boolean(options.dryRun);
   const create = options.create !== false;
   const result = (outcome, reason) => ({ file, host, outcome, reason });
@@ -203,7 +213,7 @@ function syncFile(file, options = {}) {
 
   if (!read.ok && read.absent) {
     if (!create) return result('skipped', 'absent-and-not-requested');
-    const block = `${renderBlock({ version, eol: 'lf' })}\n`;
+    const block = `${renderBlock({ eol: 'lf' })}\n`;
     if (dryRun) return result('created', 'absent-would-create');
     try { fs.writeFileSync(file, block, 'utf8'); }
     catch (error) { return result('skipped', `write-failed:${(error && error.code) || 'EUNKNOWN'}`); }
@@ -213,7 +223,7 @@ function syncFile(file, options = {}) {
 
   const text = read.text;
   const eol = detectEol(text);
-  const block = renderBlock({ version, eol });
+  const block = renderBlock({ eol });
   const found = findBlock(text);
 
   if (found && found.malformed) return result('skipped', `malformed-block:${found.malformed}`);
@@ -273,7 +283,7 @@ function syncInstructions(cwd, options = {}) {
       files.push({ file: full, host: target.host, outcome: 'skipped', reason: 'absent-and-not-requested' });
       continue;
     }
-    files.push(syncFile(full, { host: target.host, version: options.version, dryRun: options.dryRun, create: canCreate }));
+    files.push(syncFile(full, { host: target.host, dryRun: options.dryRun, create: canCreate }));
   }
 
   const changed = files.filter((f) => f.outcome === 'created' || f.outcome === 'updated').length;
