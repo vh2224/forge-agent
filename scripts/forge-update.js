@@ -10,6 +10,7 @@ const { resolveForgeHome } = require('./forge-home.js');
 const remoteUpdater = require('./forge-update-remote.js');
 
 const SOURCE_MANIFEST = 'forge-source-manifest.json';
+const declaredVersionCache = new Map();
 
 function parseArgs(argv = process.argv.slice(2), env = process.env) {
   // `repo` is deliberately NOT defaulted. Normal updates use the server; only
@@ -109,11 +110,22 @@ function gitText(repo, args) {
  * lives in the Forge home and can be several releases behind the clone — or ahead
  * of it. That difference is precisely the signal this reports.
  */
-function declaredVersion(repo) {
+function declaredVersion(repo, runner = spawnSync, revision = null) {
   try {
-    const source = fs.readFileSync(path.join(repo, 'scripts', 'forge-version.js'), 'utf8');
+    const file = path.join(repo, 'scripts', 'forge-version.js');
+    const source = fs.readFileSync(file, 'utf8');
     const match = /const\s+VERSION\s*=\s*'([^']+)'/.exec(source);
-    return match ? match[1] : null;
+    if (match) return match[1];
+    const stat = fs.statSync(file);
+    const cacheKey = `${path.resolve(repo)}\0${revision || `${stat.mtimeMs}:${stat.size}`}`;
+    if (declaredVersionCache.has(cacheKey)) return declaredVersionCache.get(cacheKey);
+    const probe = runner(process.execPath, ['-p', 'require(process.argv[1]).VERSION', file], {
+      cwd: repo, encoding: 'utf8', shell: false, maxBuffer: 8 * 1024 * 1024,
+    });
+    const value = probe && probe.status === 0 ? String(probe.stdout || '').trim() : '';
+    const version = /^\d+\.\d+\.\d+$/.test(value) ? value : null;
+    declaredVersionCache.set(cacheKey, version);
+    return version;
   } catch (_) { return null; }
 }
 
@@ -141,13 +153,47 @@ function describeSourceRepo(repo) {
   const branch = gitText(repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
   return {
     vcs: 'git',
-    version: declaredVersion(repo),
+    version: declaredVersion(repo, spawnSync, head.trim()),
     sha: head.trim() || null,
     branch: branch ? branch.trim() || null : null,
     dirty: status === null ? null : status.trim() !== '',
     tracking_ref: trackingRef,
     behind_tracking: behind === null ? null : Number(behind.trim()),
   };
+}
+
+/**
+ * Local recovery is often launched by the installed (older) updater after the
+ * operator has refreshed the source clone.  Running the installed module in
+ * process would make forge-installer keep its already-loaded VERSION while it
+ * copies bytes from the newer clone.  Hand control to the clone's updater so
+ * code, bytes and version provenance come from one revision, exactly as the
+ * remote bootstrap does.
+ */
+function localBootstrapRepo(options, entryRoot = path.join(__dirname, '..')) {
+  if (!options || options.source !== 'local' || options.remoteProvenance) return null;
+  const repo = resolveSourceRepo({ ...options, entryRoot }).path;
+  return path.resolve(entryRoot) !== repo ? repo : null;
+}
+
+function shouldBootstrapLocal(options, entryRoot = path.join(__dirname, '..')) {
+  return Boolean(localBootstrapRepo(options, entryRoot));
+}
+
+function bootstrapLocal(options, dependencies = {}) {
+  const runner = dependencies.runner || spawnSync;
+  const repo = dependencies.repo || localBootstrapRepo(options);
+  const script = path.join(repo, 'scripts', 'forge-update.js');
+  if (!fs.existsSync(script)) throw new Error(`bootstrap local incompleto: ausente ${script}`);
+  const args = [script, ...(dependencies.argv || [])];
+  const result = runner(process.execPath, args, {
+    cwd: repo, encoding: 'utf8', shell: false, maxBuffer: 64 * 1024 * 1024,
+  });
+  if (!result || result.status !== 0) {
+    const detail = result && (result.stderr || result.stdout || (result.error && result.error.message));
+    throw new Error(`bootstrap local falhou${detail ? `: ${String(detail).trim()}` : ''}`);
+  }
+  return String(result.stdout || '');
 }
 
 function update(input = {}, dependencies = {}) {
@@ -278,6 +324,11 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
       write('Usage: forge-update.js [--runtime claude|codex|both] [--apply|--dry-run] [--channel stable|master] [--remote HTTPS_URL] [--json] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy] [--with-app]\n       forge-update.js --source local --repo DIR [demais opções]\n');
       return 0;
     }
+    const localRepo = localBootstrapRepo(options);
+    if (localRepo) {
+      write(bootstrapLocal(options, { argv, repo: localRepo }));
+      return 0;
+    }
     const report = options.source === 'remote' ? remoteUpdater.updateFromRemote(options) : update(options);
     write(options.json ? `${JSON.stringify(report, null, 2)}\n` : render(report));
     return report.ok ? 0 : 1;
@@ -287,5 +338,5 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
   }
 }
 
-module.exports = { SOURCE_MANIFEST, parseArgs, resolveSourceRepo, describeSourceRepo, update, render, run };
+module.exports = { SOURCE_MANIFEST, parseArgs, resolveSourceRepo, describeSourceRepo, localBootstrapRepo, shouldBootstrapLocal, bootstrapLocal, update, render, run };
 if (require.main === module) process.exitCode = run();

@@ -16,6 +16,7 @@ const DEFAULT_REMOTE = 'https://github.com/vh2224/forge-agent.git';
 const DEFAULT_CHANNEL = 'stable';
 const DEFAULT_BRANCH = 'master';
 const MAX_BUFFER = 64 * 1024 * 1024;
+const DEFAULT_GIT_TIMEOUT_MS = 120000;
 const REQUIRED_SOURCE_FILES = Object.freeze([
   'forge-source-manifest.json',
   'scripts/forge-update.js',
@@ -43,10 +44,11 @@ function validateRemote(remote, options = {}) {
 }
 
 function runGit(runner, args, options = {}) {
-  const result = runner('git', args, { encoding: 'utf8', shell: false, maxBuffer: MAX_BUFFER, ...options });
+  const result = runner('git', args, { encoding: 'utf8', shell: false, maxBuffer: MAX_BUFFER, timeout: DEFAULT_GIT_TIMEOUT_MS, ...options });
   if (!result || result.status !== 0) {
     const detail = result && (result.stderr || (result.error && result.error.message));
-    throw new Error(`git ${args[0]} falhou${detail ? `: ${String(detail).trim()}` : ''}`);
+    const timedOut = result && result.error && result.error.code === 'ETIMEDOUT';
+    throw new Error(`git ${args[0]} ${timedOut ? `excedeu o timeout de ${(options.timeout || DEFAULT_GIT_TIMEOUT_MS) / 1000}s` : 'falhou'}${detail ? `: ${String(detail).trim()}` : ''}`);
   }
   return String(result.stdout || '');
 }
@@ -179,7 +181,9 @@ function materializeRemoteSource(input = {}, dependencies = {}) {
     // shallow clone of the real v4.21.0 cannot report its own version, and the
     // updater we are about to run inside it dies on require. Measured on a
     // local shallow clone of that tag; the full clone is ~8 MB and works.
-    runGit(runner, ['clone', '--quiet', '--single-branch', '--branch', resolved.checkout, resolved.remote, repo]);
+    runGit(runner, ['clone', '--quiet', '--single-branch', '--branch', resolved.checkout, resolved.remote, repo], {
+      timeout: dependencies.gitTimeoutMs || DEFAULT_GIT_TIMEOUT_MS,
+    });
     const source = validateMaterializedSource(repo, resolved, runner);
     retained = true;
     return {
@@ -340,6 +344,7 @@ module.exports = {
   DEFAULT_REMOTE,
   DEFAULT_CHANNEL,
   DEFAULT_BRANCH,
+  DEFAULT_GIT_TIMEOUT_MS,
   REQUIRED_SOURCE_FILES,
   compareSemver,
   validateRemote,

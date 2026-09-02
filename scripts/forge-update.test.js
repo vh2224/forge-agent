@@ -23,7 +23,9 @@ childProcess.spawnSync = function guardedSpawnSync(command, args, options) {
     // other command stays denied, so the assertion below still proves no
     // `claude`/`codex --version` happened, and the recorded log is checked to
     // prove the git calls were read-only.
-    if (command !== 'git') throw new Error(`spawn denied while previewing: ${command}`);
+    const versionProbe = command === process.execPath && Array.isArray(args)
+      && args[0] === '-p' && /forge-version\.js$/.test(String(args[2] || ''));
+    if (command !== 'git' && !versionProbe) throw new Error(`spawn denied while previewing: ${command}`);
   }
   return realSpawnSync.call(this, command, args, options);
 };
@@ -122,11 +124,12 @@ test('dry-run plans retire without capability probing on the CLI path (no skip f
     // Exactly what `forge-update.js --dry-run` builds: parseArgs never sets
     // skipCapabilityCheck or noModelProbe, so neither is passed here.
     try { report = updater.update({ ...data, runtime: 'claude' }); } finally { spawnLog = null; }
-    const probes = spawns.filter((entry) => !entry.startsWith('git '));
+    const probes = spawns.filter((entry) => !entry.startsWith('git ') && !/-p .*forge-version\.js$/i.test(entry));
     assert.deepStrictEqual(probes, [], `dry-run must not spawn a capability probe; spawned: ${probes.join(', ')}`);
     // What the preview IS allowed to spawn, it must spawn read-only: describing the
     // source clone must never mutate it.
     for (const entry of spawns) {
+      if (/-p .*forge-version\.js$/i.test(entry)) continue;
       assert.match(entry, /^git\b.*\b(?:rev-parse|status|rev-list)\b/, `preview spawned a git that is not a read: ${entry}`);
     }
     assert.strictEqual(report.applied, false);
@@ -357,6 +360,16 @@ test('a source repo without git degrades by name instead of pretending to know',
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('source provenance reads the dynamic VERSION used by current releases', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-source-dynamic-version-'));
+  try {
+    fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'scripts', 'forge-version.js'),
+      'const VERSION = [4, 30, 1].join(".");\nmodule.exports = { VERSION };\n');
+    assert.strictEqual(updater.describeSourceRepo(root).version, '4.30.1');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test('the summary always says that refreshing the clone is a separate step', () => {
   const data = fixture();
   try {
@@ -380,6 +393,29 @@ test('CLI defaults to the remote stable channel and local clones require explici
   const local = updater.parseArgs(['--source', 'local', '--repo', path.resolve(__dirname, '..')]);
   assert.strictEqual(local.source, 'local');
   assert.strictEqual(local.repo, path.resolve(__dirname, '..'));
+});
+
+test('an installed updater delegates local recovery to the refreshed clone', () => {
+  const repo = path.resolve(__dirname, '..');
+  const options = updater.parseArgs(['--source', 'local', '--repo', repo, '--apply', '--json']);
+  assert.strictEqual(updater.shouldBootstrapLocal(options, path.join(os.tmpdir(), 'installed-forge')), true,
+    'updater antigo não delegaria ao clone que recebeu pull');
+  assert.strictEqual(updater.shouldBootstrapLocal(options, repo), false,
+    'o updater do próprio clone entraria em recursão');
+  const calls = [];
+  const output = updater.bootstrapLocal(options, {
+    repo,
+    argv: ['--source', 'local', '--repo', repo, '--apply', '--json'],
+    runner(command, args, spawnOptions) {
+      calls.push({ command, args, spawnOptions });
+      return { status: 0, stdout: '{"version":"from-refreshed-clone"}\n', stderr: '' };
+    },
+  });
+  assert.strictEqual(output, '{"version":"from-refreshed-clone"}\n');
+  assert.strictEqual(calls[0].args[0], path.join(repo, 'scripts', 'forge-update.js'));
+  assert.deepStrictEqual(calls[0].args.slice(1), ['--source', 'local', '--repo', repo, '--apply', '--json']);
+  assert.strictEqual(calls[0].spawnOptions.cwd, repo);
+  assert.strictEqual(calls[0].spawnOptions.shell, false);
 });
 
 test('the projected command launches the installed updater instead of a cwd clone', () => {
