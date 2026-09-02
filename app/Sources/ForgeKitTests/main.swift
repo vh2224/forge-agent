@@ -7424,6 +7424,37 @@ test("ForgeMark: constantes do ícone ficam em faixas sãs") {
     assertTrue(ForgeMark.plateCornerRatio > 0 && ForgeMark.plateCornerRatio < 0.5, "plateCornerRatio fora da faixa sã")
 }
 
+// MARK: - Palette: piso de cobertura por caso (S01)
+
+// T03 cobriu regra e forma de ForgeTone/ForgeEngine/SurfaceLevel; esta seção
+// fecha o piso de contagem que a acceptance do slice exige (≥ 4 testes por
+// tipo) sem tocar a seção acima — cada teste aqui verifica uma frase que a
+// seção de T03 ainda não tinha fixado como dado executável.
+
+test("ForgeTone: rawValue de cada caso é o próprio nome do caso, minúsculo") {
+    // O harness e qualquer serialização futura dependem de rawValue == nome —
+    // um rawValue custom quebraria round-trips silenciosamente em outro lugar.
+    for t in ForgeTone.allCases {
+        assertEqual(t.rawValue, String(describing: t))
+    }
+}
+
+test("ForgeEngine: rawValue de claude, codex e agy bate com o nome do caso") {
+    assertEqual(ForgeEngine.claude.rawValue, "claude")
+    assertEqual(ForgeEngine.codex.rawValue, "codex")
+    assertEqual(ForgeEngine.agy.rawValue, "agy")
+    assertEqual(ForgeEngine.unknown.rawValue, "unknown")
+}
+
+test("SurfaceLevel: init(rawValue:) fora de 0...3 retorna nil") {
+    // Os quatro níveis nomeados são o conjunto fechado — um rawValue fora
+    // deles não deve produzir um nível inventado.
+    assertNil(SurfaceLevel(rawValue: -1))
+    assertNil(SurfaceLevel(rawValue: 4))
+    assertTrue(SurfaceLevel(rawValue: 0) != nil, "rawValue 0 (ground) deveria existir")
+    assertTrue(SurfaceLevel(rawValue: 3) != nil, "rawValue 3 (floating) deveria existir")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
