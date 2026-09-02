@@ -23,7 +23,9 @@ childProcess.spawnSync = function guardedSpawnSync(command, args, options) {
     // other command stays denied, so the assertion below still proves no
     // `claude`/`codex --version` happened, and the recorded log is checked to
     // prove the git calls were read-only.
-    if (command !== 'git') throw new Error(`spawn denied while previewing: ${command}`);
+    const versionProbe = command === process.execPath && Array.isArray(args)
+      && args[0] === '-p' && /forge-version\.js$/.test(String(args[2] || ''));
+    if (command !== 'git' && !versionProbe) throw new Error(`spawn denied while previewing: ${command}`);
   }
   return realSpawnSync.call(this, command, args, options);
 };
@@ -122,11 +124,12 @@ test('dry-run plans retire without capability probing on the CLI path (no skip f
     // Exactly what `forge-update.js --dry-run` builds: parseArgs never sets
     // skipCapabilityCheck or noModelProbe, so neither is passed here.
     try { report = updater.update({ ...data, runtime: 'claude' }); } finally { spawnLog = null; }
-    const probes = spawns.filter((entry) => !entry.startsWith('git '));
+    const probes = spawns.filter((entry) => !entry.startsWith('git ') && !/-p .*forge-version\.js$/i.test(entry));
     assert.deepStrictEqual(probes, [], `dry-run must not spawn a capability probe; spawned: ${probes.join(', ')}`);
     // What the preview IS allowed to spawn, it must spawn read-only: describing the
     // source clone must never mutate it.
     for (const entry of spawns) {
+      if (/-p .*forge-version\.js$/i.test(entry)) continue;
       assert.match(entry, /^git\b.*\b(?:rev-parse|status|rev-list)\b/, `preview spawned a git that is not a read: ${entry}`);
     }
     assert.strictEqual(report.applied, false);
@@ -354,6 +357,16 @@ test('a source repo without git degrades by name instead of pretending to know',
     assert.strictEqual(described.version, '9.9.9', 'a versão declarada não depende de git');
     assert.strictEqual(described.sha, null);
     assert.strictEqual(described.behind_tracking, null, 'sem git a distância tem de ser null, nunca 0');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('source provenance reads the dynamic VERSION used by current releases', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-source-dynamic-version-'));
+  try {
+    fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'scripts', 'forge-version.js'),
+      'const VERSION = [4, 30, 1].join(".");\nmodule.exports = { VERSION };\n');
+    assert.strictEqual(updater.describeSourceRepo(root).version, '4.30.1');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

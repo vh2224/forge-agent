@@ -10,6 +10,7 @@ const { resolveForgeHome } = require('./forge-home.js');
 const remoteUpdater = require('./forge-update-remote.js');
 
 const SOURCE_MANIFEST = 'forge-source-manifest.json';
+const declaredVersionCache = new Map();
 
 function parseArgs(argv = process.argv.slice(2), env = process.env) {
   // `repo` is deliberately NOT defaulted. Normal updates use the server; only
@@ -109,11 +110,22 @@ function gitText(repo, args) {
  * lives in the Forge home and can be several releases behind the clone — or ahead
  * of it. That difference is precisely the signal this reports.
  */
-function declaredVersion(repo) {
+function declaredVersion(repo, runner = spawnSync, revision = null) {
   try {
-    const source = fs.readFileSync(path.join(repo, 'scripts', 'forge-version.js'), 'utf8');
+    const file = path.join(repo, 'scripts', 'forge-version.js');
+    const source = fs.readFileSync(file, 'utf8');
     const match = /const\s+VERSION\s*=\s*'([^']+)'/.exec(source);
-    return match ? match[1] : null;
+    if (match) return match[1];
+    const stat = fs.statSync(file);
+    const cacheKey = `${path.resolve(repo)}\0${revision || `${stat.mtimeMs}:${stat.size}`}`;
+    if (declaredVersionCache.has(cacheKey)) return declaredVersionCache.get(cacheKey);
+    const probe = runner(process.execPath, ['-p', 'require(process.argv[1]).VERSION', file], {
+      cwd: repo, encoding: 'utf8', shell: false, maxBuffer: 8 * 1024 * 1024,
+    });
+    const value = probe && probe.status === 0 ? String(probe.stdout || '').trim() : '';
+    const version = /^\d+\.\d+\.\d+$/.test(value) ? value : null;
+    declaredVersionCache.set(cacheKey, version);
+    return version;
   } catch (_) { return null; }
 }
 
@@ -141,7 +153,7 @@ function describeSourceRepo(repo) {
   const branch = gitText(repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
   return {
     vcs: 'git',
-    version: declaredVersion(repo),
+    version: declaredVersion(repo, spawnSync, head.trim()),
     sha: head.trim() || null,
     branch: branch ? branch.trim() || null : null,
     dirty: status === null ? null : status.trim() !== '',
