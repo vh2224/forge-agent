@@ -7049,6 +7049,53 @@ test("TerminalRegistry: entries some junto com a sessão fechada") {
     assertEqual(registry.entries.count, 0)
 }
 
+// MARK: - PaletteRanking (⌘K)
+
+test("PaletteRanking: prefixo simples casa") {
+    assertEqual(PaletteRanking.score("terminal", "term") != nil, true)
+}
+
+test("PaletteRanking: subsequência casa, não só prefixo") {
+    // O caso que quebra uma paleta com filtro por prefixo.
+    assertEqual(PaletteRanking.score("nova sessao", "nsess") != nil, true)
+}
+
+test("PaletteRanking: acento não impede o match") {
+    // Metade da UI é pt-BR e ninguém digita o acento numa paleta.
+    let folded = PaletteRanking.fold("Preferências")
+    assertEqual(PaletteRanking.score(folded, "preferencias") != nil, true)
+}
+
+test("PaletteRanking: o que não é subsequência não casa") {
+    assertEqual(PaletteRanking.score("runs", "xyz") == nil, true)
+}
+
+test("PaletteRanking: início de palavra vale mais que meio de palavra") {
+    let start = PaletteRanking.score("quadro grande", "q")!
+    let middle = PaletteRanking.score("aqui", "q")!
+    assertEqual(start > middle, true)
+}
+
+test("PaletteRanking: caracteres seguidos batem espalhados") {
+    let run = PaletteRanking.score("abcd", "abcd")!
+    let scattered = PaletteRanking.score("axbxcxd", "abcd")!
+    assertEqual(run > scattered, true)
+}
+
+test("PaletteRanking: rank descarta quem não casa e ordena por score") {
+    let items = [(id: "runs", text: "Runs"),
+                 (id: "proj", text: "Projetos"),
+                 (id: "nope", text: "Contas")]
+    let out = PaletteRanking.rank(items, query: "ro")
+    assertEqual(out.contains("nope"), false)
+    assertEqual(out.isEmpty, false)
+}
+
+test("PaletteRanking: query vazia devolve tudo na ordem original") {
+    let items = [(id: "a", text: "Alpha"), (id: "b", text: "Beta")]
+    assertEqual(PaletteRanking.rank(items, query: "   "), ["a", "b"])
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
