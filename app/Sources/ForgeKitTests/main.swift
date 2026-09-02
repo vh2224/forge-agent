@@ -8636,6 +8636,34 @@ test("SessionStore.retained respeita limit explícito") {
     assertEqual(retained.map(\.cwd), descriptors.prefix(3).map(\.cwd))
 }
 
+test("SessionStore.retained(live + restorable): resumir uma sessão não deve derrubar ofertas de outro cwd (R1, S06 review)") {
+    // Reproduz a forma do merge que `AppState.persistSessions()` faz: o disco
+    // tinha [A, B]; A é resumida (vira live), B permanece em `restorable` e
+    // não pode desaparecer do save só porque A foi aberta.
+    let a = SessionDescriptor(cwd: "/repo-a", title: "a", engine: "claude")
+    let b = SessionDescriptor(cwd: "/repo-b", title: "b", engine: "claude")
+    var restorable = [a, b]
+    // resumeSession(a) consome `a` de `restorable`...
+    restorable.removeAll { $0 == a }
+    // ...e o descriptor recém-aberto entra como live, na frente (mais recente).
+    let live = [SessionDescriptor(cwd: a.cwd, title: a.title, engine: a.engine)]
+    let saved = SessionStore.retained(live + restorable)
+    assertEqual(saved.count, 2, "A resumida e B ainda-não-resumida devem sobreviver ao save")
+    assertTrue(saved.contains(where: { $0.cwd == "/repo-a" }), "A (agora live) deve sobreviver")
+    assertTrue(saved.contains(where: { $0.cwd == "/repo-b" }), "B (ainda restorable) não deve ser perdida")
+}
+
+test("SessionStore.retained(live + restorable): live vence colisão de cwd contra restorable obsoleto") {
+    // Mesmo cwd nos dois lados (o snapshot de `restorable` ficou desatualizado
+    // em relação ao título/engine da sessão live) — live deve vencer porque é
+    // passado primeiro, e `retained` mantém a primeira ocorrência.
+    let staleRestorable = SessionDescriptor(cwd: "/repo-a", title: "antigo", engine: "claude")
+    let freshLive = SessionDescriptor(cwd: "/repo-a", title: "novo", engine: "claude")
+    let saved = SessionStore.retained([freshLive] + [staleRestorable])
+    assertEqual(saved.count, 1, "mesmo cwd deve colapsar para 1")
+    assertEqual(saved.first?.title, "novo", "a entrada live (mais recente) deve vencer sobre o snapshot restorable obsoleto")
+}
+
 // MARK: - Retomada de sessão: argv de --continue por engine (S06)
 //
 // `SessionResume.plan(for:)` é pura: recebe um `SessionDescriptor` (T01) e

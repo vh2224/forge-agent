@@ -618,19 +618,27 @@ final class AppState: ObservableObject {
     // MARK: Terminal sessions
 
     /// Writes the current session list to `~/.claude/forge-sessions.json`,
-    /// applying the 8-per-`cwd` retention rule before saving.
+    /// applying the 8-most-recent-deduplicated-by-`cwd` retention rule before
+    /// saving.
     ///
     /// `sessions.reversed()` is deliberate: `append` puts the newest session
     /// last, but `SessionStore.retained` trusts "first occurrence wins" as
     /// most-recent-first (T01) — reversing here is what makes "the 8 most
     /// recent per distinct cwd" mean what it says instead of keeping the 8
     /// oldest.
+    ///
+    /// `restorable` (the launch-time snapshot of descriptors not yet resumed)
+    /// is appended AFTER the live descriptors, never before: live sessions are
+    /// the more recent activity, and `retained` keeps the first occurrence per
+    /// `cwd`, so live must win a `cwd` collision. This is what keeps
+    /// unconsumed restorable offers from being dropped by a save triggered by
+    /// resuming or closing an unrelated session (R1, S06 review).
     private func persistSessions() {
-        let descriptors = sessions.reversed().map {
+        let live = sessions.reversed().map {
             SessionDescriptor(cwd: $0.cwd, title: $0.title, engine: $0.engine,
                                account: $0.account, runId: $0.runId)
         }
-        SessionStore.save(SessionStore.retained(Array(descriptors)),
+        SessionStore.save(SessionStore.retained(Array(live) + restorable),
                            to: SessionStore.path(home: NSHomeDirectory()))
     }
 
@@ -685,6 +693,10 @@ final class AppState: ObservableObject {
             cwd: plan.cwd, title: descriptor.title, bootstrap: boot,
             runId: descriptor.runId, account: account, engine: descriptor.engine))
         focus(sessions.last)
+        // Consumed: it is now a live session, not an unresumed offer — leaving
+        // it in `restorable` would let `persistSessions()` keep re-saving it
+        // as if it were still waiting to be picked up.
+        restorable.removeAll { $0 == descriptor }
         persistSessions()
     }
 
