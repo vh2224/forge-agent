@@ -7239,6 +7239,191 @@ test("SurfaceLevel: sombra e raio nunca diminuem ao subir de nível") {
     }
 }
 
+// MARK: - BoardLayout e ForgeMark: geometria sem tela (S01)
+
+// BoardLayout.swift e ForgeMark.swift são o chão que S02 pisa: S02 divide a
+// cabeça do Mjölnir em três polígonos e promove as bandas para ForgeMark, e
+// nenhuma dessas mudanças pode se dar ao luxo de quebrar silenciosamente o
+// que já está aqui — placement determinístico, reconcile como fonte única de
+// verdade do grafo, e a convenção de orientação (horária, y-up) que S02 vai
+// reusar para asserir "arestas coincidentes" nos três polígonos novos. O
+// board é o lugar onde "usually não sobrepõe" não serve: cada teste abaixo
+// fixa uma garantia geométrica ou de grafo como dado executável.
+
+test("BoardLayout: primeiro nó nasce na origem com defaultSize") {
+    var board = BoardLayout()
+    board.place("a")
+    let n = board.nodes["a"]
+    assertTrue(n != nil, "esperado node para 'a'")
+    assertEqual(n?.x, 0)
+    assertEqual(n?.y, 0)
+    assertEqual(n?.w, BoardLayout.defaultSize.w)
+    assertEqual(n?.h, BoardLayout.defaultSize.h)
+}
+
+test("BoardLayout: quatro nós colocados nunca se sobrepõem") {
+    var board = BoardLayout()
+    for id in ["a", "b", "c", "d"] { board.place(id) }
+    let nodes = Array(board.nodes.values)
+    for i in 0..<nodes.count {
+        for j in (i + 1)..<nodes.count {
+            let a = nodes[i], b = nodes[j]
+            let overlap = a.x < b.right && b.x < a.right && a.y < b.bottom && b.y < a.bottom
+            assertFalse(overlap, "\(a.id) e \(b.id) se sobrepõem")
+        }
+    }
+    // A grade tem 3 colunas — o quarto nó não cabe na primeira linha.
+    assertTrue(board.nodes.values.contains { $0.y > 0 },
+               "o quarto nó deveria cair na segunda linha")
+}
+
+test("BoardLayout: reconcile remove nó morto e o fio que o tocava, e cria o que falta") {
+    var board = BoardLayout()
+    board.place("a"); board.place("b")
+    board.connect(from: "a", to: "b")
+    board.reconcile(with: ["b", "c"])
+    assertTrue(board.nodes["a"] == nil, "'a' deveria ter sido removido")
+    assertTrue(board.nodes["b"] != nil, "'b' deveria continuar existindo")
+    assertTrue(board.nodes["c"] != nil, "'c' deveria ter sido criado")
+    assertTrue(board.edges.isEmpty, "o fio a→b deveria ter sido removido junto com 'a'")
+}
+
+test("BoardLayout: connect recusa self-loop, duplicata e nó inexistente, mas aceita ciclo") {
+    var board = BoardLayout()
+    board.place("a"); board.place("b")
+    assertFalse(board.connect(from: "a", to: "a"), "self-loop deveria ser recusado")
+    assertTrue(board.connect(from: "a", to: "b"), "primeira conexão a→b deveria ser aceita")
+    assertFalse(board.connect(from: "a", to: "b"), "duplicata deveria ser recusada")
+    assertFalse(board.connect(from: "a", to: "zz"), "nó inexistente deveria ser recusado")
+    assertTrue(board.connect(from: "b", to: "a"), "ciclo b→a deveria ser aceito — CYCLES ARE ALLOWED")
+}
+
+test("BoardLayout: targets e sources leem o grafo dos dois lados") {
+    var board = BoardLayout()
+    board.place("a"); board.place("b"); board.place("c")
+    board.connect(from: "a", to: "b")
+    board.connect(from: "a", to: "c")
+    assertEqual(Set(board.targets(of: "a")), Set(["b", "c"]))
+    assertEqual(board.sources(of: "c"), ["a"])
+    board.disconnect(BoardEdge(from: "a", to: "b"))
+    assertEqual(board.targets(of: "a"), ["c"], "disconnect deveria ter removido a→b")
+}
+
+test("BoardLayout: resize respeita minSize e move desloca") {
+    var board = BoardLayout()
+    board.place("a")
+    board.resize("a", dw: -10_000, dh: -10_000)
+    let resized = board.nodes["a"]!
+    assertEqual(resized.w, BoardLayout.minSize.w)
+    assertEqual(resized.h, BoardLayout.minSize.h)
+    board.move("a", dx: 15, dy: -5)
+    let moved = board.nodes["a"]!
+    assertEqual(moved.x, resized.x + 15)
+    assertEqual(moved.y, resized.y - 5)
+}
+
+test("BoardLayout: nó focado desenha por último e é o que o hit-test acha") {
+    var board = BoardLayout()
+    board.place("a"); board.place("b")
+    assertEqual(board.orderedNodes(focused: "a").last?.id, "a")
+    // Sobrepõe os dois de propósito: só o foco decide quem o hit-test acha.
+    board.move("a", dx: -board.nodes["a"]!.x, dy: -board.nodes["a"]!.y)
+    board.move("b", dx: -board.nodes["b"]!.x, dy: -board.nodes["b"]!.y)
+    let hit = board.node(at: 10, y: 10, focused: "a")
+    assertEqual(hit?.id, "a", "o nó focado deveria vencer o hit-test quando sobreposto")
+}
+
+test("BoardLayout: contentBounds é nil vazio e inclui a margem com nós") {
+    let empty = BoardLayout()
+    assertTrue(empty.contentBounds() == nil, "board vazio deveria ter contentBounds nil")
+    var board = BoardLayout()
+    board.place("a")
+    let bounds = board.contentBounds()!
+    assertEqual(bounds.x, -60)
+    assertEqual(bounds.y, -60)
+    assertEqual(bounds.w, BoardLayout.defaultSize.w + 120)
+    assertEqual(bounds.h, BoardLayout.defaultSize.h + 120)
+}
+
+test("BoardLayout: Codable faz round-trip de nós e fios") {
+    var board = BoardLayout()
+    board.place("a"); board.place("b")
+    board.connect(from: "a", to: "b")
+    let data = try JSONEncoder().encode(board)
+    let decoded = try JSONDecoder().decode(BoardLayout.self, from: data)
+    assertEqual(decoded, board)
+}
+
+test("ForgeMark: bigorna tem 14 pontos, todos no quadrado unitário") {
+    assertEqual(ForgeMark.anvil.count, 14)
+    for p in ForgeMark.anvil {
+        assertTrue(p.x >= 0 && p.x <= 1, "x fora do quadrado unitário: \(p.x)")
+        assertTrue(p.y >= 0 && p.y <= 1, "y fora do quadrado unitário: \(p.y)")
+    }
+}
+
+test("ForgeMark: cabeça (8) e cabo (6) do Mjölnir estão no quadrado unitário e hammer é a concatenação") {
+    assertEqual(ForgeMark.hammerHead.count, 8)
+    assertEqual(ForgeMark.hammerHandle.count, 6)
+    assertEqual(ForgeMark.hammer.count, 14)
+    for p in ForgeMark.hammer {
+        assertTrue(p.x >= 0 && p.x <= 1, "x fora do quadrado unitário: \(p.x)")
+        assertTrue(p.y >= 0 && p.y <= 1, "y fora do quadrado unitário: \(p.y)")
+    }
+    for i in 0..<8 {
+        assertEqual(ForgeMark.hammer[i].x, ForgeMark.hammerHead[i].x)
+        assertEqual(ForgeMark.hammer[i].y, ForgeMark.hammerHead[i].y)
+    }
+}
+
+test("ForgeMark: cabo toca a cabeça — o Mjölnir não é duas peças soltas") {
+    let headMaxY = ForgeMark.hammerHead.map(\.y).max()!
+    let headMinX = ForgeMark.hammerHead.map(\.x).min()!
+    let headMaxX = ForgeMark.hammerHead.map(\.x).max()!
+    let handleMinY = ForgeMark.hammerHandle.map(\.y).min()!
+    assertLessOrEqual(handleMinY, headMaxY, "o cabo deveria tocar a cabeça")
+    for p in ForgeMark.hammerHandle {
+        assertTrue(p.x >= headMinX && p.x <= headMaxX, "x do cabo \(p.x) fora da largura da cabeça")
+    }
+}
+
+test("ForgeMark: ponto de golpe está na face inferior da cabeça e a pegada dentro do cabo") {
+    let headMinY = ForgeMark.hammerHead.map(\.y).min()!
+    let headMinX = ForgeMark.hammerHead.map(\.x).min()!
+    let headMaxX = ForgeMark.hammerHead.map(\.x).max()!
+    assertLessOrEqual(abs(ForgeMark.hammerStrikePoint.y - headMinY), 1e-9)
+    assertTrue(ForgeMark.hammerStrikePoint.x >= headMinX && ForgeMark.hammerStrikePoint.x <= headMaxX,
+               "ponto de golpe fora da largura da cabeça")
+    let handleMinX = ForgeMark.hammerHandle.map(\.x).min()!
+    let handleMaxX = ForgeMark.hammerHandle.map(\.x).max()!
+    let handleMinY = ForgeMark.hammerHandle.map(\.y).min()!
+    let handleMaxY = ForgeMark.hammerHandle.map(\.y).max()!
+    assertTrue(ForgeMark.hammerGrip.x >= handleMinX && ForgeMark.hammerGrip.x <= handleMaxX,
+               "pegada fora da largura do cabo")
+    assertTrue(ForgeMark.hammerGrip.y >= handleMinY && ForgeMark.hammerGrip.y <= handleMaxY,
+               "pegada fora da altura do cabo")
+}
+
+test("ForgeMark: bigorna tem área não-nula e orientação horária (y-up)") {
+    let pts = ForgeMark.anvil
+    var area = 0.0
+    for i in 0..<pts.count {
+        let j = (i + 1) % pts.count
+        area += pts[i].x * pts[j].y - pts[j].x * pts[i].y
+    }
+    area /= 2
+    assertGreater(abs(area), 0.1)
+    assertTrue(area < 0, "orientação deveria ser horária (área negativa) em y-up — 'clockwise from the horn tip'")
+}
+
+test("ForgeMark: constantes do ícone ficam em faixas sãs") {
+    assertTrue(ForgeMark.glowCenter.x >= 0 && ForgeMark.glowCenter.x <= 1, "glowCenter.x fora do quadrado unitário")
+    assertTrue(ForgeMark.glowCenter.y >= 0 && ForgeMark.glowCenter.y <= 1, "glowCenter.y fora do quadrado unitário")
+    assertTrue(ForgeMark.glowRadius > 0 && ForgeMark.glowRadius < 1, "glowRadius fora da faixa sã")
+    assertTrue(ForgeMark.plateInset > 0 && ForgeMark.plateInset < 0.5, "plateInset fora da faixa sã")
+    assertTrue(ForgeMark.plateCornerRatio > 0 && ForgeMark.plateCornerRatio < 0.5, "plateCornerRatio fora da faixa sã")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
