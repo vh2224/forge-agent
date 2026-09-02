@@ -7924,6 +7924,179 @@ test("WorkTree: sem projeto nenhum, roots é vazio e toda run é unowned") {
     assertEqual(forest.unowned.count, 2, "sem projeto algum, toda run é unowned")
 }
 
+// MARK: - Review: turnos tipados a partir do artefato real (S05)
+//
+// `ReviewDoc`/`ReviewParser` (ForgeKit) provados contra cópias verbatim de
+// dois `S##-REVIEW.md` reais deste repo — não um exemplo inventado. As
+// contagens abaixo são medidas, não estimadas (S05-PLAN.md § Medido no
+// planning): `review-dialectic.md` é `S01-REVIEW.md` (12 headings `### R`, 3
+// bullets planos em Resolvidas → 15 objeções); `review-flags.md` é
+// `S03-REVIEW.md` (1 objeção `### R1`, aberta, severidade "low").
+
+/// Resolve um fixture de `app/fixtures/` por `#filePath` (mesmo padrão de
+/// `labelParityFixtureURL()`), com fallback para o cwd. `nil` quando nenhum
+/// dos dois existe — falha alta no chamador, nunca um teste verde silencioso.
+func reviewFixtureURL(_ name: String) -> URL? {
+    let fromSource = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // ForgeKitTests/
+        .deletingLastPathComponent()   // Sources/
+        .deletingLastPathComponent()   // app/
+        .appendingPathComponent("fixtures/\(name)")
+    if FileManager.default.fileExists(atPath: fromSource.path) { return fromSource }
+
+    let fromCwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent("fixtures/\(name)")
+    if FileManager.default.fileExists(atPath: fromCwd.path) { return fromCwd }
+
+    return nil
+}
+
+/// Candidatos a raiz do repo — via `#filePath` (compile-time, mais confiável)
+/// e via cwd/cwd-pai (quando o teste roda de outro diretório). `.gsd/` não é
+/// commitado neste repo (CLAUDE.md), então esta varredura é guarda adicional
+/// sobre um artefato que pode não existir num checkout limpo — nunca o piso.
+func candidateRepoRoots() -> [URL] {
+    let fromSource = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // ForgeKitTests/
+        .deletingLastPathComponent()   // Sources/
+        .deletingLastPathComponent()   // app/
+        .deletingLastPathComponent()   // repo root
+    let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    return [fromSource, cwd, cwd.deletingLastPathComponent()]
+}
+
+func liveReviewArtifactURLs() -> [URL] {
+    for root in candidateRepoRoots() {
+        let milestonesDir = root.appendingPathComponent(".gsd/milestones")
+        guard let enumerator = FileManager.default.enumerator(at: milestonesDir, includingPropertiesForKeys: nil) else {
+            continue
+        }
+        var found: [URL] = []
+        for case let url as URL in enumerator {
+            if url.lastPathComponent.hasSuffix("-REVIEW.md") { found.append(url) }
+        }
+        if !found.isEmpty { return found }
+    }
+    return []
+}
+
+test("Review: fixture dialectic existe e parseia 15 objeções") {
+    guard let url = reviewFixtureURL("review-dialectic.md") else {
+        assertTrue(false, "fixture review-dialectic.md não encontrado — falha, não vácuo verde")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    assertEqual(doc.objections.count, 15, "review-dialectic.md (S01-REVIEW.md verbatim) deve conter 15 objeções")
+}
+
+test("Review: contagem por status na fixture dialectic — 1 open, 11 conceded, 3 resolved") {
+    guard let url = reviewFixtureURL("review-dialectic.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    assertEqual(doc.objections(.open).count, 1, "1 objeção aberta (R8)")
+    assertEqual(doc.objections(.conceded).count, 11, "11 objeções concedidas")
+    assertEqual(doc.objections(.resolved).count, 3, "3 objeções resolvidas no debate")
+}
+
+test("Review: R8 (aberta) traz path, line e decisão não-nil") {
+    guard let url = reviewFixtureURL("review-dialectic.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    let r8 = doc.objections.first { $0.id == "R8" }
+    assertEqual(r8?.path, "app/Sources/Forge/RouteResolver.swift", "path de R8")
+    assertEqual(r8?.line, 96, "line de R8")
+    assertEqual(r8?.status, .open, "R8 deve estar aberta")
+    assertFalse((r8?.decision ?? "").isEmpty, "R8 tem decisão registrada (deferido para triagem)")
+}
+
+test("Review: R2 (concedida) tem defense começando por \"conceded\" e correction citando um commit") {
+    guard let url = reviewFixtureURL("review-dialectic.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    let r2 = doc.objections.first { $0.id == "R2" }
+    assertTrue((r2?.defense ?? "").hasPrefix("conceded"), "defense de R2 deve começar por \"conceded\"")
+    assertTrue((r2?.correction ?? "").contains("commit"), "correction de R2 deve citar um commit")
+}
+
+test("Review: seção Resolvidas — R1 vem por bullet plano, sem defense, um único turno challenger") {
+    guard let url = reviewFixtureURL("review-dialectic.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    let r1 = doc.objections.first { $0.id == "R1" && $0.status == .resolved }
+    assertNil(r1?.defense, "bullet plano não tem campo defense nomeado")
+    assertEqual(r1?.turns.count, 1, "bullet plano tem um único turno")
+    if let turn = r1?.turns.first, case .challenger = turn {
+        // ok — único turno é do challenger
+    } else {
+        assertTrue(false, "o único turno de um bullet plano tem de ser .challenger")
+    }
+}
+
+test("Review: fixture flags — 1 objeção, aberta, severidade \"low\"") {
+    guard let url = reviewFixtureURL("review-flags.md") else {
+        assertTrue(false, "fixture review-flags.md não encontrado")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    assertEqual(doc.objections.count, 1, "review-flags.md (S03-REVIEW.md verbatim) deve conter 1 objeção")
+    assertEqual(doc.objections.first?.status, .open, "a única objeção está aberta")
+    assertEqual(doc.objections.first?.severity, "low", "severidade da objeção")
+}
+
+test("Review: objeção multi-linha — corpo da fixture flags carrega texto da 2ª linha da continuação") {
+    guard let url = reviewFixtureURL("review-flags.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    let body = doc.objections.first?.objection ?? ""
+    assertTrue(body.contains("SurfaceLevel.raised.cornerRadius"),
+               "o corpo deve carregar texto que só existe na 2ª linha da continuação indentada")
+}
+
+test("Review: seção \"## Nota sobre …\" não produz objeção") {
+    guard let url = reviewFixtureURL("review-flags.md") else {
+        assertTrue(false, "fixture ausente")
+        return
+    }
+    let doc = ReviewParser.parse(try String(contentsOf: url, encoding: .utf8))
+    assertEqual(doc.objections.count, 1,
+                "a fixture flags tem uma seção \"## Nota sobre o que esta rodada NÃO é\" depois da objeção — ela não pode virar objeção nova")
+}
+
+test("Review: entrada vazia e entrada só com header não crasham e devolvem objections vazio") {
+    let empty = ReviewParser.parse("")
+    assertEqual(empty.objections.count, 0, "entrada vazia → 0 objeções")
+
+    let onlyHeader = ReviewParser.parse("**Slice:** S99  **Milestone:** M-teste\n")
+    assertEqual(onlyHeader.objections.count, 0, "entrada só com header → 0 objeções")
+    assertEqual(onlyHeader.header.sliceId, "S99", "header ainda é lido mesmo sem seções")
+}
+
+test("Review: guarda live — todo *-REVIEW.md real do repo com item parseia com >= 1 objeção") {
+    let urls = liveReviewArtifactURLs()
+    if urls.isEmpty {
+        print("      0 artefatos live — as fixtures carregam o piso")
+        return
+    }
+    for url in urls {
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+        let hasItems = content.range(of: "(?m)^### R", options: .regularExpression) != nil
+            || content.range(of: "(?m)^- R[0-9]", options: .regularExpression) != nil
+        guard hasItems else { continue }
+        let doc = ReviewParser.parse(content)
+        assertGreater(doc.objections.count, 0, "\(url.lastPathComponent) tem item mas o parse devolveu 0 objeções")
+    }
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
