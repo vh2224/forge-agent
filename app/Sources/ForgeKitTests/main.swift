@@ -7604,6 +7604,145 @@ test("ForgeMark: o ponto de golpe está na aresta inferior da face de golpe") {
                "ponto de golpe fora da faixa de x da face de golpe")
 }
 
+// MARK: - BoardViewport: pan, clamp e fit sem tela (S02)
+//
+// A extração de T03: `BoardStore` (app target) ainda faz a própria conta —
+// esta seção prova a matemática pura antes de T04 trocar `BoardStore` para
+// delegar nela, sem mudar comportamento observável em `BoardView`.
+
+test("BoardViewport: nasce identidade") {
+    let v = BoardViewport()
+    assertTrue(v.isIdentity)
+    assertEqual(v.panX, 0.0)
+    assertEqual(v.panY, 0.0)
+    assertEqual(v.scale, 1.0)
+}
+
+test("BoardViewport: zoom(by:) satura em minScale e maxScale") {
+    var up = BoardViewport()
+    up.zoom(by: 100)
+    assertEqual(up.scale, BoardViewport.maxScale)
+    var down = BoardViewport()
+    down.zoom(by: 0.001)
+    assertEqual(down.scale, BoardViewport.minScale)
+}
+
+test("BoardViewport: scale(to:) aplica o mesmo clamp e reset volta à identidade") {
+    var v = BoardViewport()
+    v.scale(to: 100)
+    assertEqual(v.scale, BoardViewport.maxScale)
+    v.scale(to: 0.001)
+    assertEqual(v.scale, BoardViewport.minScale)
+    v.panX = 42
+    v.panY = -7
+    v.reset()
+    assertTrue(v.isIdentity, "reset deveria voltar à identidade")
+}
+
+test("BoardViewport: fit reproduz a fórmula do BoardStore") {
+    var v = BoardViewport()
+    v.fit(content: (x: -60, y: -60, w: 640, h: 480), in: (w: 800, h: 600))
+    // s = min(800/640, 600/480) = 1.25
+    assertLessOrEqual(abs(v.scale - 1.25), 1e-9)
+    // panX = -(-60)·1.25 + (800 - 640·1.25)/2 = 75 + 0 = 75
+    assertLessOrEqual(abs(v.panX - 75.0), 1e-9)
+    assertLessOrEqual(abs(v.panY - 75.0), 1e-9)
+}
+
+test("BoardViewport: fit com conteúdo nil é reset") {
+    var v = BoardViewport(panX: 10, panY: 20, scale: 1.5)
+    v.fit(content: nil, in: (w: 800, h: 600))
+    assertTrue(v.isIdentity, "fit sem conteúdo deveria resetar a identidade")
+}
+
+test("BoardViewport: fit satura a escala em maxScale para conteúdo pequeno e minScale para gigante") {
+    var small = BoardViewport()
+    small.fit(content: (x: 0, y: 0, w: 10, h: 10), in: (w: 800, h: 600))
+    assertEqual(small.scale, BoardViewport.maxScale)
+    var huge = BoardViewport()
+    huge.fit(content: (x: 0, y: 0, w: 10_000, h: 10_000), in: (w: 800, h: 600))
+    assertEqual(huge.scale, BoardViewport.minScale)
+}
+
+test("BoardViewport: o resultado de fit é ponto fixo de clampedPan") {
+    let cases: [((x: Double, y: Double, w: Double, h: Double), (w: Double, h: Double))] = [
+        ((x: -60, y: -60, w: 640, h: 480), (w: 800, h: 600)),
+        ((x: 0, y: 0, w: 10, h: 10), (w: 800, h: 600)),
+        ((x: 0, y: 0, w: 10_000, h: 10_000), (w: 800, h: 600)),
+    ]
+    for (content, viewport) in cases {
+        var v = BoardViewport()
+        v.fit(content: content, in: viewport)
+        let clamped = v.clampedPan(content: content, in: viewport)
+        assertLessOrEqual(abs(clamped.x - v.panX), 1e-9, "fit não é ponto fixo do clamp em x")
+        assertLessOrEqual(abs(clamped.y - v.panY), 1e-9, "fit não é ponto fixo do clamp em y")
+    }
+}
+
+test("BoardViewport: pan(by:) acumula — dois scrolls somam") {
+    var v = BoardViewport()
+    let content = (x: 0.0, y: 0.0, w: 100.0, h: 100.0)
+    let viewport = (w: 10_000.0, h: 10_000.0)
+    v.pan(by: 10, 5, content: content, in: viewport)
+    v.pan(by: 10, 5, content: content, in: viewport)
+    assertLessOrEqual(abs(v.panX - 20.0), 1e-9)
+    assertLessOrEqual(abs(v.panY - 10.0), 1e-9)
+}
+
+test("BoardViewport: pan(by:) para o vazio é puxado de volta até keepVisible pontos visíveis") {
+    let content = (x: 0.0, y: 0.0, w: 100.0, h: 100.0)
+    let viewport = (w: 800.0, h: 600.0)
+    var right = BoardViewport()
+    right.pan(by: 5000, 0, content: content, in: viewport)
+    assertLessOrEqual(abs(right.panX - 720.0), 1e-9, "800 - keepVisible(80) = 720")
+    var left = BoardViewport()
+    left.pan(by: -5000, 0, content: content, in: viewport)
+    assertLessOrEqual(abs(left.panX - (-20.0)), 1e-9, "keepVisible(80) - w(100) = -20")
+}
+
+test("BoardViewport: clamp com conteúdo nil não altera o pan") {
+    let v = BoardViewport(panX: 123, panY: 456, scale: 1)
+    let clamped = v.clampedPan(content: nil, in: (w: 800, h: 600))
+    assertLessOrEqual(abs(clamped.x - 123.0), 1e-9)
+    assertLessOrEqual(abs(clamped.y - 456.0), 1e-9)
+}
+
+test("BoardViewport: scrollDelta preciso passa direto e delta de linha multiplica por lineScrollFactor") {
+    let precise = BoardViewport.scrollDelta(dx: 5, dy: 7, precise: true)
+    assertLessOrEqual(abs(precise.x - 5.0), 1e-9)
+    assertLessOrEqual(abs(precise.y - 7.0), 1e-9)
+    let line = BoardViewport.scrollDelta(dx: 2, dy: 3, precise: false)
+    assertLessOrEqual(abs(line.x - 20.0), 1e-9, "2 · lineScrollFactor(10) = 20")
+    assertLessOrEqual(abs(line.y - 30.0), 1e-9, "3 · lineScrollFactor(10) = 30")
+}
+
+test("BoardViewport: canvasPoint desfaz scaleEffect(topLeading) + offset — (loc − pan) / scale") {
+    let v = BoardViewport(panX: 75, panY: 75, scale: 1.25)
+    let p = v.canvasPoint(fromScreen: 200, 137.5)
+    assertLessOrEqual(abs(p.x - 100.0), 1e-9)
+    assertLessOrEqual(abs(p.y - 50.0), 1e-9)
+}
+
+test("BoardViewport: setPan aplica um pan absoluto (arrasto) e clampa o resultado") {
+    let content = (x: 0.0, y: 0.0, w: 100.0, h: 100.0)
+    let viewport = (w: 800.0, h: 600.0)
+    var inside = BoardViewport()
+    inside.setPan(30, 40, content: content, in: viewport)
+    assertLessOrEqual(abs(inside.panX - 30.0), 1e-9, "dentro do range legal, setPan não deveria mexer no valor")
+    assertLessOrEqual(abs(inside.panY - 40.0), 1e-9)
+    var outside = BoardViewport()
+    outside.setPan(999_999, 0, content: content, in: viewport)
+    assertLessOrEqual(abs(outside.panX - 720.0), 1e-9, "800 - keepVisible(80) = 720, mesmo clamp de pan(by:)")
+}
+
+test("BoardViewport: zoom(by:) acumula multiplicativamente antes de saturar") {
+    var v = BoardViewport()
+    v.zoom(by: 1.1)
+    assertLessOrEqual(abs(v.scale - 1.1), 1e-9)
+    v.zoom(by: 1.1)
+    assertLessOrEqual(abs(v.scale - 1.21), 1e-9, "1.1 · 1.1 = 1.21, ainda abaixo de maxScale(1.6)")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
