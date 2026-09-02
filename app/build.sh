@@ -106,7 +106,8 @@ fi
 ICON="${APP_DIR}/Forge.icns"
 if [ ! -f "$ICON" ]; then
   echo "▸ Gerando ícone"
-  swift "${APP_DIR}/make-icon.swift" "$ICON" || echo "  aviso: ícone não gerado — o app usa o genérico"
+  ( cd "$APP_DIR" && swift run -c release ForgeIcon "$ICON" ) \
+    || echo "  aviso: ícone não gerado — o app usa o genérico"
 fi
 if [ -f "$ICON" ]; then
   cp "$ICON" "${BUNDLE}/Contents/Resources/Forge.icns"
