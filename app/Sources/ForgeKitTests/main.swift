@@ -8636,6 +8636,86 @@ test("SessionStore.retained respeita limit explícito") {
     assertEqual(retained.map(\.cwd), descriptors.prefix(3).map(\.cwd))
 }
 
+// MARK: - Retomada de sessão: argv de --continue por engine (S06)
+//
+// `SessionResume.plan(for:)` é pura: recebe um `SessionDescriptor` (T01) e
+// devolve um `SessionResumePlan?` sem tocar disco, ambiente ou processo. Os
+// casos abaixo cobrem os quatro engines conhecidos (`claude`, `codex`,
+// `agy`, raw desconhecido → `.unknown`), a ordem das flags quando há
+// `account`, o tratamento de `account` em branco como ausência de escolha, e
+// o par de asserts (positivo + negativo) sobre `cwd`: ele viaja como campo
+// do plano e nunca como elemento de `argv` — um positional depois de
+// `--continue` seria lido como prompt pela CLI, não como diretório.
+
+print("\nSessionResume (SessionResumePlan + SessionResume.plan(for:))")
+
+test("claude sem conta: argv exato") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude")
+    let plan = SessionResume.plan(for: d)
+    assertEqual(plan?.argv, ["claude", "--continue"], "sem account, argv não deve carregar --account")
+}
+
+test("claude com conta: argv exato, --account antes de --continue") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude", account: "mwtelles")
+    let plan = SessionResume.plan(for: d)
+    assertEqual(plan?.argv, ["claude", "--account", "mwtelles", "--continue"],
+                "--account deve vir antes de --continue")
+}
+
+test("conta só com espaços não emite --account (string em branco não é uma escolha)") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude", account: "   ")
+    let plan = SessionResume.plan(for: d)
+    assertEqual(plan?.argv, ["claude", "--continue"], "account só com espaços deve ser tratado como ausente")
+}
+
+test("cwd do plano é igual ao cwd do descritor, verbatim") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo-especial", title: "repo", engine: "claude")
+    let plan = SessionResume.plan(for: d)
+    assertEqual(plan?.cwd, "/Users/x/repo-especial", "cwd do plano deve ser exatamente o do descritor")
+}
+
+test("cwd nunca aparece dentro do argv (D5)") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo-especial", title: "repo", engine: "claude", account: "mwtelles")
+    let plan = SessionResume.plan(for: d)
+    assertFalse(plan?.argv.contains("/Users/x/repo-especial") ?? true,
+                "cwd é campo próprio do plano, um positional depois de --continue seria lido como prompt")
+}
+
+test("engine codex devolve nil — nenhuma flag é adivinhada") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "codex")
+    assertNil(SessionResume.plan(for: d), "codex não tem --continue equivalente conhecido")
+}
+
+test("engine agy devolve nil — nenhuma flag é adivinhada") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "agy")
+    assertNil(SessionResume.plan(for: d), "agy não tem --continue equivalente conhecido")
+}
+
+test("engine raw desconhecido (\"gpt\") devolve nil") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "gpt")
+    assertNil(SessionResume.plan(for: d), "raw desconhecido resolve para ForgeEngine.unknown, sem palpite")
+}
+
+test("engine \"CLAUDE\" maiúsculo resolve para claude (plano válido)") {
+    let d = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "CLAUDE")
+    let plan = SessionResume.plan(for: d)
+    assertEqual(plan?.argv, ["claude", "--continue"], "ForgeEngine já lowercasa o raw antes de comparar")
+}
+
+test("argv de claude sempre começa em \"claude\", com ou sem account") {
+    let semConta = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude")
+    let comConta = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude", account: "mwtelles")
+    assertEqual(SessionResume.plan(for: semConta)?.argv.first, "claude")
+    assertEqual(SessionResume.plan(for: comConta)?.argv.first, "claude")
+}
+
+test("runId do descritor não influencia o plano de retomada") {
+    let comRun = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude", runId: "run-42")
+    let semRun = SessionDescriptor(cwd: "/Users/x/repo", title: "repo", engine: "claude", runId: nil)
+    assertEqual(SessionResume.plan(for: comRun), SessionResume.plan(for: semRun),
+                "runId não é usado em argv ou cwd — o plano é igual com e sem ele")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
