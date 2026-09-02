@@ -269,18 +269,65 @@ struct RootView: View {
                 if s == .runs { Divider() }
             }
 
-            // What is running, in the sidebar rather than on the home.
+            // Live terminal sessions, in the sidebar rather than buried in
+            // Terminal's own tab strip. Grouping and ordering are
+            // `SessionOrganiser`'s job (T01) — this view only resolves `home`
+            // (never reads the environment itself) and draws what comes back.
+            let groups = sessionGroups
+            if !groups.isEmpty {
+                SwiftUI.Section {
+                    ForEach(groups) { group in
+                        if group.sessions.count == 1, let only = group.sessions.first {
+                            SidebarSessionRow(snapshot: only, state: state)
+                        } else {
+                            Text(group.title)
+                                .font(ForgeType.caption)
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 2)
+                            ForEach(group.sessions) { snap in
+                                SidebarSessionRow(snapshot: snap, state: state)
+                                    .padding(.leading, 10)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Sessões")
+                        .font(ForgeType.micro)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            // What is running, in the sidebar rather than on the home —
+            // nested under whichever registered project owns each run's
+            // `cwd`, the same ownership `WorkTree.build` (T02) already
+            // derives for `Projects.swift`'s tree. A flat list here would be
+            // the second copy of one rule; this section draws only what the
+            // forest returns.
             //
             // It lived on the home, which is the one screen you cannot see once
             // you are working — so the list of live runs was visible exactly
             // when there were none of your own to look at. Here it is visible
             // from every screen, which is what a work list is for. This is the
-            // first half of the sidebar becoming the operator's material
+            // second half of the sidebar becoming the operator's material
             // instead of the app's table of contents.
-            if !state.liveRuns.isEmpty {
+            let forest = workForest
+            if !forest.roots.isEmpty || !forest.unowned.isEmpty {
                 SwiftUI.Section {
-                    ForEach(state.liveRuns) { run in
-                        SidebarRunRow(run: run, state: state)
+                    ForEach(forest.roots.filter { !$0.runs.isEmpty || $0.runCount > 0 }) { node in
+                        WorkNodeRows(node: node, depth: 0, state: state)
+                    }
+                    // A run whose `cwd` matched no registered project is not
+                    // dropped — silent loss is indistinguishable from a
+                    // broken detector (`WorkTree.swift`'s own words).
+                    if !forest.unowned.isEmpty {
+                        Text("Sem projeto")
+                            .font(ForgeType.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 2)
+                        ForEach(forest.unowned) { run in
+                            SidebarRunRow(run: run, state: state)
+                                .padding(.leading, 10)
+                        }
                     }
                 } header: {
                     Text("Rodando")
@@ -291,6 +338,24 @@ struct RootView: View {
         }
         .safeAreaInset(edge: .bottom) { sidebarFooter }
         .navigationSplitViewColumnWidth(min: 200, ideal: 232, max: 300)
+    }
+
+    /// `state.sessions` reduced to the DTO `SessionOrganiser` groups, and
+    /// grouped/ordered by it — the view contains no ordering rule of its own.
+    private var sessionGroups: [SessionGroup] {
+        let snaps = state.sessions.map {
+            SessionSnapshot(id: $0.id.uuidString, cwd: $0.cwd, title: $0.title,
+                            runId: $0.runId, account: $0.account)
+        }
+        return SessionOrganiser.groups(snaps, home: NSHomeDirectory())
+    }
+
+    /// Registered projects with every live run nested under whichever
+    /// project owns its `cwd` — the same trio of arguments `Projects.swift`
+    /// already passes to `ProjectTree.build`.
+    private var workForest: WorkForest {
+        WorkTree.build(projects: state.workspaces, runs: state.liveRuns,
+                       roots: Workspaces.declaredRoots(), home: NSHomeDirectory())
     }
 
     /// Counts only, and only where a count means something.
@@ -427,6 +492,78 @@ struct SidebarRunRow: View {
         }
         .buttonStyle(.plain)
         .help("Abrir o terminal desta run")
+    }
+}
+
+/// One node of the work forest and everything below it: a project header
+/// (only when the node itself owns runs) followed by its runs, then the same
+/// recursively for each child that owns work — `WorkNode` is a tree for the
+/// same reason `ProjectTreeNode` is, and `ProjectTreeRow` (`Projects.swift`)
+/// walks it the same way.
+///
+/// A `folder` node — synthesised, not a registered project — never owns
+/// `runs` directly (`WorkTree.swift`'s own invariant), so it only ever shows
+/// up here as a header above the children that do.
+struct WorkNodeRows: View {
+    let node: WorkNode
+    let depth: Int
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        Group {
+            if !node.runs.isEmpty {
+                Text(node.title)
+                    .font(ForgeType.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, CGFloat(depth) * 10)
+                    .padding(.top, 2)
+                ForEach(node.runs) { run in
+                    SidebarRunRow(run: run, state: state)
+                        .padding(.leading, CGFloat(depth + 1) * 10)
+                }
+            }
+            ForEach(node.children.filter { !$0.runs.isEmpty || $0.runCount > 0 }) { child in
+                WorkNodeRows(node: child, depth: depth + 1, state: state)
+            }
+        }
+    }
+}
+
+/// One live session in the sidebar's work list.
+///
+/// Deliberately not a `Label` with a badge like the section rows above it,
+/// same reasoning as `SidebarRunRow`: a session is a place to go back to, not
+/// a destination with a count. Clicking goes through `state.focus(_:)` —
+/// the same path every other creation route uses, so "created but nothing
+/// visibly happened" cannot come back through the sidebar either.
+struct SidebarSessionRow: View {
+    let snapshot: SessionSnapshot
+    @ObservedObject var state: AppState
+
+    var body: some View {
+        Button {
+            if let session = state.sessions.first(where: { $0.id.uuidString == snapshot.id }) {
+                state.focus(session)
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "terminal")
+                    .forgeIcon(.small)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(snapshot.title)
+                        .font(ForgeType.body)
+                        .lineLimit(1)
+                    Text(snapshot.runId ?? ProjectOrganiser.abbreviate(snapshot.cwd, home: NSHomeDirectory()))
+                        .font(ForgeType.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Ir para esta sessão")
     }
 }
 
