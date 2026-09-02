@@ -8811,6 +8811,175 @@ test("rejection(_:) devolve razão em pt-BR não-vazia para nome inválido") {
     assertTrue(reason != nil && !(reason!.isEmpty), "nome inválido precisa de uma razão legível")
 }
 
+// MARK: - Registro de conta: argv e merge (S07)
+
+print("\nAccountAdd + AccountMerge (S07)")
+
+/// `Account` não expõe um `init` público — o tipo canônico é `Codable` com
+/// campos simples e o próprio S07-PLAN.md pede fixtures construídas em
+/// memória sem arquivo, então decodificar um JSON literal é a forma
+/// suportada de montar uma fixture a partir de fora do módulo ForgeKit.
+func acct(
+    _ name: String,
+    hasToken: Bool = true,
+    isActive: Bool = false,
+    daysLeft: Int? = 10
+) -> Account {
+    let json = """
+    {"name": "\(name)", "note": null, "store": "keychain", "last_used": null,
+     "days_left": \(daysLeft.map(String.init) ?? "null"), "has_token": \(hasToken),
+     "is_active": \(isActive), "email": null, "account_uuid": null}
+    """
+    return try! JSONDecoder().decode(Account.self, from: Data(json.utf8))
+}
+
+func payload(active: String?, envActive: String?, accounts: [Account]) -> AccountsPayload {
+    let accountsJSON = accounts.map { a -> String in
+        """
+        {"name": "\(a.name)", "note": null, "store": "keychain", "last_used": null,
+         "days_left": \(a.days_left.map(String.init) ?? "null"), "has_token": \(a.has_token),
+         "is_active": \(a.is_active), "email": null, "account_uuid": null}
+        """
+    }.joined(separator: ",")
+    let json = """
+    {"active": \(active.map { "\"\($0)\"" } ?? "null"),
+     "env_active": \(envActive.map { "\"\($0)\"" } ?? "null"),
+     "accounts": [\(accountsJSON)]}
+    """
+    return try! JSONDecoder().decode(AccountsPayload.self, from: Data(json.utf8))
+}
+
+test("AccountAdd.argv devolve [node, script, --add, name, --setup] para nome válido e note nil") {
+    let out = AccountAdd.argv(node: "/usr/bin/node", script: "/repo/scripts/forge-accounts.js", name: "mwtelles")
+    assertEqual(out, ["/usr/bin/node", "/repo/scripts/forge-accounts.js", "--add", "mwtelles", "--setup"],
+                "argv canônico não bate")
+}
+
+test("AccountAdd.argv sempre emite --setup — não depende de TTY dentro do PTY (D2)") {
+    let out = AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles")
+    assertTrue(out?.contains("--setup") == true, "--setup deve estar presente incondicionalmente")
+}
+
+test("AccountAdd.argv devolve nil quando o nome é inválido segundo AccountName.isValid") {
+    assertNil(AccountAdd.argv(node: "node", script: "script.js", name: "--dangerously-x"),
+              "nome inválido não deve produzir argv (a validação vem de AccountName, não é reimplementada aqui)")
+    assertNil(AccountAdd.argv(node: "node", script: "script.js", name: ""),
+              "nome vazio é inválido")
+}
+
+test("AccountAdd.argv devolve nil quando node ou script é string vazia") {
+    assertNil(AccountAdd.argv(node: "", script: "script.js", name: "mwtelles"), "node vazio deve reprovar")
+    assertNil(AccountAdd.argv(node: "node", script: "", name: "mwtelles"), "script vazio deve reprovar")
+}
+
+test("nenhum argv produzido por AccountAdd contém --token, em nenhum caso") {
+    let cases: [[String]?] = [
+        AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles"),
+        AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles", note: "trabalho"),
+        AccountAdd.argv(node: "", script: "script.js", name: "mwtelles"),
+    ]
+    for c in cases {
+        assertFalse(c?.contains("--token") == true, "token nunca passa por este caminho")
+    }
+}
+
+test("note não-vazia vira [--note, note] no fim do argv") {
+    let out = AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles", note: "conta de trabalho")
+    assertEqual(out, ["node", "script.js", "--add", "mwtelles", "--setup", "--note", "conta de trabalho"],
+                "--note deve ser o último par")
+}
+
+test("note vazia ou só-espaços é omitida") {
+    let empty = AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles", note: "")
+    let blank = AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles", note: "   ")
+    assertEqual(empty, ["node", "script.js", "--add", "mwtelles", "--setup"], "note vazia não deve aparecer")
+    assertEqual(blank, ["node", "script.js", "--add", "mwtelles", "--setup"], "note só-espaços não deve aparecer")
+}
+
+test("note começando com - é omitida (parseArgs leria como flag)") {
+    // forge-accounts.js:783-794 — parseArgs trata qualquer token iniciado
+    // por -- como uma nova flag, não como valor da flag anterior.
+    let out = AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles", note: "--dangerously-x")
+    assertEqual(out, ["node", "script.js", "--add", "mwtelles", "--setup"],
+                "note iniciada por - não deve virar argumento posicional de outra flag")
+}
+
+test("AccountAdd não monta linha de comando nem faz quoting — devolve [String] (D4)") {
+    let out = AccountAdd.argv(node: "node", script: "script.js", name: "mwtelles", note: "a b c")
+    assertEqual(out?.count, 7, "cada elemento é um argv item separado, não uma string montada")
+    assertTrue(out?.last == "a b c", "o valor da note chega intacto, sem quoting aplicado por este código")
+}
+
+test("ROADMAP-1: conta presente só no incoming aparece no resultado e em added") {
+    let previous = [acct("alice")]
+    let incoming = payload(active: "alice", envActive: nil, accounts: [acct("alice"), acct("bob")])
+    let result = AccountMerge.reconcile(previous: previous, incoming: incoming)
+    assertTrue(result.accounts.contains { $0.name == "bob" }, "bob deve aparecer no resultado")
+    assertEqual(result.added, ["bob"], "bob deve estar em added")
+}
+
+test("ROADMAP-2: conta presente só no previous some do resultado e está em removed") {
+    let previous = [acct("alice"), acct("bob")]
+    let incoming = payload(active: "alice", envActive: nil, accounts: [acct("alice")])
+    let result = AccountMerge.reconcile(previous: previous, incoming: incoming)
+    assertFalse(result.accounts.contains { $0.name == "bob" }, "bob não deve sobreviver ao merge")
+    assertEqual(result.removed, ["bob"], "bob deve estar em removed")
+}
+
+test("ROADMAP-3: active é preservado — resolve env_active ?? active e o nome resolvido fica is_active") {
+    let previous = [acct("alice", isActive: true), acct("bob")]
+    let incoming = payload(active: "alice", envActive: nil, accounts: [acct("alice", isActive: true), acct("bob")])
+    let result = AccountMerge.reconcile(previous: previous, incoming: incoming)
+    assertEqual(result.active, "alice", "active deve resolver para alice")
+    assertTrue(result.accounts.first { $0.name == "alice" }?.is_active == true,
+               "a conta resolvida continua marcada is_active no resultado")
+}
+
+test("active resolve env_active sobre active quando os dois estão presentes") {
+    let incoming = payload(active: "alice", envActive: "bob", accounts: [acct("alice"), acct("bob")])
+    let result = AccountMerge.reconcile(previous: [], incoming: incoming)
+    assertEqual(result.active, "bob", "env_active vence active")
+}
+
+test("active vira nil quando o nome resolvido não existe entre as contas do incoming") {
+    let incoming = payload(active: "ghost", envActive: nil, accounts: [acct("alice")])
+    let result = AccountMerge.reconcile(previous: [], incoming: incoming)
+    assertNil(result.active, "merge nunca aponta para conta fantasma")
+}
+
+test("ordem: sobreviventes mantêm a ordem do previous e as novas entram depois, na ordem do incoming (D7)") {
+    let previous = [acct("charlie"), acct("alice")]
+    let incoming = payload(active: nil, envActive: nil,
+                            accounts: [acct("dave"), acct("alice"), acct("bob"), acct("charlie")])
+    let result = AccountMerge.reconcile(previous: previous, incoming: incoming)
+    assertEqual(result.accounts.map(\.name), ["charlie", "alice", "dave", "bob"],
+                "recarregar não deve reordenar a lista embaixo do operador")
+}
+
+test("campos de cada conta vêm do incoming, nunca do previous — merge não ressuscita has_token obsoleto") {
+    let previous = [acct("alice", hasToken: false, daysLeft: nil)]
+    let incoming = payload(active: nil, envActive: nil, accounts: [acct("alice", hasToken: true, daysLeft: 5)])
+    let result = AccountMerge.reconcile(previous: previous, incoming: incoming)
+    let alice = result.accounts.first { $0.name == "alice" }
+    assertTrue(alice?.has_token == true, "has_token deve vir do incoming, não do previous obsoleto")
+    assertEqual(alice?.days_left, 5, "days_left deve vir do incoming")
+}
+
+test("AccountMerge.outcome devolve .registered somente quando a conta existe E has_token == true (D6)") {
+    let incoming = payload(active: nil, envActive: nil, accounts: [acct("alice", hasToken: true)])
+    let result = AccountMerge.reconcile(previous: [], incoming: incoming)
+    assertEqual(AccountMerge.outcome(for: "alice", in: result), .registered)
+}
+
+test("AccountMerge.outcome devolve .missingFromRegistry e .registeredWithoutToken corretamente") {
+    let incoming = payload(active: nil, envActive: nil, accounts: [acct("alice", hasToken: false)])
+    let result = AccountMerge.reconcile(previous: [], incoming: incoming)
+    assertEqual(AccountMerge.outcome(for: "alice", in: result), .registeredWithoutToken,
+                "conta existe mas sem token")
+    assertEqual(AccountMerge.outcome(for: "ghost", in: result), .missingFromRegistry,
+                "conta não existe no resultado")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
