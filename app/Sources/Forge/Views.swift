@@ -8,6 +8,9 @@
 //      urgency, not on colour.
 //   2. Hierarchy comes from type size and whitespace, not borders. Cards use a
 //      material fill and no stroke.
+//      REVISED — see `Design.swift`: cards now draw a `ForgeSurface`, which is
+//      a fill plus a hairline edge and a top highlight. The hierarchy claim
+//      still holds; the "no stroke" clause does not.
 //   3. Native BEHAVIOUR, deliberate surfaces. REVISED — see `Design.swift`:
 //      `.regularMaterial` everywhere was the absence of a decision, not a
 //      decision. Surfaces now come from `SurfaceLevel`.
@@ -250,6 +253,7 @@ struct RootView: View {
                     }
                 } icon: {
                     Image(systemName: s.icon)
+                        .forgeIcon(.small)
                         .foregroundStyle(isUrgent(s) ? Color.accentOrange : Color.secondary)
                 }
                 .tag(s)
@@ -353,7 +357,7 @@ struct RootView: View {
                 .font(.caption)
                 .foregroundStyle(t.isError ? .orange : .secondary)
                 .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(.regularMaterial, in: Capsule())
+                .forgeSurface(.panel, in: Capsule())
                 .overlay(Capsule().strokeBorder(.quaternary))
                 .padding(.bottom, 14)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -446,7 +450,7 @@ struct SidebarVersionLabel: View {
                 // second signal saying the same thing — which is how a rule that
                 // says "one place" quietly becomes two.
                 Image(systemName: "hammer.fill")
-                    .font(.caption)
+                    .forgeIcon(.micro)
                     .foregroundStyle(.tertiary)
                     .frame(width: 14)
 
@@ -474,7 +478,7 @@ struct SidebarVersionLabel: View {
                         // this footer has to survive.
                         #if DEBUG
                         Text("dev")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(ForgeType.micro)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 4).padding(.vertical, 1)
                             .background(.quaternary, in: Capsule())
@@ -502,7 +506,7 @@ struct SidebarVersionLabel: View {
                 // bigger reads as a bullet.
                 if updateAvailable {
                     Image(systemName: "circle.fill")
-                        .font(.system(size: 5))
+                        .forgeIcon(.dot)
                         .foregroundStyle(Color.accentOrange)
                 }
             }
@@ -556,7 +560,7 @@ struct GateCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "bolt.fill")
-                    .font(.caption).foregroundStyle(Color.accentOrange)
+                    .forgeIcon(.micro).foregroundStyle(Color.accentOrange)
                 Text(gate.projectName).font(.caption).bold()
                 if !gate.subtitle.isEmpty {
                     Text(gate.subtitle).font(.caption).foregroundStyle(.secondary)
@@ -591,7 +595,7 @@ struct GateCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .forgeSurface(.raised)
         .overlay(RoundedRectangle(cornerRadius: 12)
             .strokeBorder(Color.accentOrange.opacity(0.35), lineWidth: 1))
     }
@@ -716,7 +720,7 @@ struct RunCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .forgeSurface(.raised)
         .overlay(RoundedRectangle(cornerRadius: 12)
             .strokeBorder(gatesHere.isEmpty ? .clear : Color.accentOrange.opacity(0.4), lineWidth: 1))
     }
@@ -760,7 +764,7 @@ struct RunCard: View {
                         .font(.caption).monospacedDigit()
                     Text("· \(p.percent)%").font(.caption).foregroundStyle(.tertiary)
                     Spacer()
-                    Text(run.id).font(.system(size: 9, design: .monospaced))
+                    Text(run.id).font(ForgeType.monoSmall)
                         .foregroundStyle(.tertiary).textSelection(.enabled)
                 }
             }
@@ -769,7 +773,7 @@ struct RunCard: View {
 
     private var noStatusYet: some View {
         HStack(spacing: 6) {
-            Text(run.id).font(.system(size: 10, design: .monospaced))
+            Text(run.id).font(ForgeType.mono)
                 .foregroundStyle(.tertiary).textSelection(.enabled)
             Spacer()
         }
@@ -813,7 +817,7 @@ struct RunCard: View {
     /// A run blocked on a question is the one thing here that needs acting on.
     private var gateRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "bolt.fill").font(.caption2).foregroundStyle(Color.accentOrange)
+            Image(systemName: "bolt.fill").forgeIcon(.micro).foregroundStyle(Color.accentOrange)
             Text(gatesHere.count == 1 ? "1 pergunta esperando" : "\(gatesHere.count) perguntas esperando")
                 .font(.caption).foregroundStyle(Color.accentOrange)
             Spacer()
@@ -827,7 +831,7 @@ struct RunCard: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: showSlices ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8))
+                        .forgeIcon(.micro)
                     Text("Slices").font(.caption)
                     Spacer()
                 }
@@ -841,23 +845,23 @@ struct RunCard: View {
                         HStack(spacing: 6) {
                             Image(systemName: sl.isDone ? "checkmark.circle.fill"
                                   : (sl.id == m.active_slice ? "play.circle.fill" : "circle"))
-                                .font(.system(size: 10))
+                                .forgeIcon(.micro)
                                 .foregroundStyle(sl.isDone ? AnyShapeStyle(Color.green)
                                                  : (sl.id == m.active_slice
                                                     ? AnyShapeStyle(Color.accentOrange)
                                                     : AnyShapeStyle(.tertiary)))
-                            Text(sl.id).font(.system(size: 10, design: .monospaced))
+                            Text(sl.id).font(ForgeType.mono)
                                 .foregroundStyle(.secondary).frame(width: 26, alignment: .leading)
                             Text(sl.title ?? "").font(.caption2).lineLimit(1)
                             if sl.isHighRisk && !sl.isDone {
                                 Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 8)).foregroundStyle(.orange)
+                                    .forgeIcon(.micro).foregroundStyle(.orange)
                                     .help("Slice de risco alto")
                             }
                             Spacer()
                             if sl.totalTasks > 0 {
                                 Text("\(sl.doneTasks)/\(sl.totalTasks)")
-                                    .font(.system(size: 9, design: .monospaced))
+                                    .font(ForgeType.monoSmall)
                                     .foregroundStyle(.tertiary)
                             }
                         }
@@ -926,10 +930,10 @@ struct FinishedRunRow: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: isClean ? "checkmark.circle" : "stop.circle")
-                .font(.caption).foregroundStyle(isClean ? AnyShapeStyle(Color.green)
+                .forgeIcon(.micro).foregroundStyle(isClean ? AnyShapeStyle(Color.green)
                                                         : AnyShapeStyle(.tertiary))
             Text(run.projectName).font(.callout)
-            Text(run.id).font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+            Text(run.id).font(ForgeType.monoSmall).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.middle)
             Spacer()
             Text(reason).font(.caption2).foregroundStyle(.secondary)
@@ -1026,21 +1030,21 @@ struct AccountsView: View {
             if let total = totalHeadroom {
                 Gauge(value: total, tint: Meter.tint(headroom: total), size: 54, lineWidth: 6) {
                     VStack(spacing: -1) {
-                        Text("\(Int(total))%").font(.system(size: 15, weight: .semibold))
+                        Text("\(Int(total))%").font(ForgeType.title)
                             .monospacedDigit()
-                        Text("livre").font(.system(size: 8)).foregroundStyle(.secondary)
+                        Text("livre").font(ForgeType.micro).foregroundStyle(.secondary)
                     }
                 }
             } else {
                 Image(systemName: "chart.pie")
-                    .font(.system(size: 26)).foregroundStyle(.tertiary)
+                    .forgeIcon(.hero).foregroundStyle(.tertiary)
                     .frame(width: 54, height: 54)
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 if let r = recommended {
                     HStack(spacing: 5) {
-                        Image(systemName: "sparkles").foregroundStyle(Color.accentOrange)
+                        Image(systemName: "sparkles").forgeIcon(.small).foregroundStyle(Color.accentOrange)
                         Text("Use \(r)").font(.headline)
                     }
                     Text("Maior folga semanal entre as contas consultadas.")
@@ -1058,7 +1062,7 @@ struct AccountsView: View {
                 VStack(alignment: .trailing, spacing: 1) {
                     Text(at.formatted(date: .omitted, time: .shortened))
                         .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-                    Text("consultado").font(.system(size: 9)).foregroundStyle(.tertiary)
+                    Text("consultado").font(ForgeType.micro).foregroundStyle(.tertiary)
                 }
             }
         }
@@ -1080,7 +1084,7 @@ struct AccountsView: View {
                     .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 Button {
                     state.copyToPasteboard("forge-accounts add ", label: "Comando")
-                } label: { Image(systemName: "doc.on.doc").font(.caption2) }
+                } label: { Image(systemName: "doc.on.doc").forgeIcon(.micro) }
                 .buttonStyle(.plain).foregroundStyle(.tertiary)
             }
             .padding(8)
@@ -1110,7 +1114,7 @@ struct IconMenu<Content: View>: View {
             content()
         } label: {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
+                .forgeIcon(.small, weight: .medium)
                 .frame(width: 26, height: 22)
                 .background(hovering ? AnyShapeStyle(.quaternary)
                                      : AnyShapeStyle(.clear),
@@ -1195,7 +1199,7 @@ struct AccountCard: View {
         }
         .padding(15)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .forgeSurface(.raised)
         .overlay(RoundedRectangle(cornerRadius: 14)
             .strokeBorder(isRecommended ? Color.accentOrange.opacity(0.45) : .clear, lineWidth: 1.5))
         .confirmationDialog("Remover \(account.name)?",
@@ -1217,14 +1221,14 @@ struct AccountCard: View {
             Gauge(value: free, tint: Meter.tint(headroom: free), size: 62, lineWidth: 7) {
                 VStack(spacing: -2) {
                     Text("\(Int(free))").font(.system(size: 19, weight: .semibold)).monospacedDigit()
-                    Text("% livre").font(.system(size: 8)).foregroundStyle(.secondary)
+                    Text("% livre").font(ForgeType.micro).foregroundStyle(.secondary)
                 }
             }
         } else {
             ZStack {
                 Circle().stroke(.quaternary, lineWidth: 7)
                 Image(systemName: "questionmark")
-                    .font(.system(size: 16)).foregroundStyle(.tertiary)
+                    .forgeIcon(.medium).foregroundStyle(.tertiary)
             }
             .frame(width: 62, height: 62)
         }
@@ -1234,17 +1238,17 @@ struct AccountCard: View {
         HStack(spacing: 6) {
             Text(account.name).font(.headline).lineLimit(1)
             if isRecommended {
-                Image(systemName: "sparkles").font(.caption2)
+                Image(systemName: "sparkles").forgeIcon(.micro)
                     .foregroundStyle(Color.accentOrange)
                     .help("Maior folga semanal")
             }
             if isDefault {
-                Image(systemName: "checkmark.circle.fill").font(.caption2)
+                Image(systemName: "checkmark.circle.fill").forgeIcon(.micro)
                     .foregroundStyle(.secondary)
                     .help("Conta padrão — um `claude` sem argumentos entra nela")
             }
             if sessionCount > 0 {
-                Image(systemName: "terminal.fill").font(.caption2)
+                Image(systemName: "terminal.fill").forgeIcon(.micro)
                     .foregroundStyle(.secondary)
                     .help("\(sessionCount) sessão(ões) do app nesta conta")
             }
@@ -1342,7 +1346,7 @@ struct MiniWindow: View {
     var body: some View {
         HStack(spacing: 7) {
             Text(label)
-                .font(.system(size: 9, design: .monospaced))
+                .font(ForgeType.monoSmall)
                 .foregroundStyle(.tertiary).frame(width: 15, alignment: .leading)
 
             GeometryReader { geo in
@@ -1356,11 +1360,11 @@ struct MiniWindow: View {
             .frame(height: 8)
 
             Text("\(Int(free))%")
-                .font(.system(size: 10)).monospacedDigit()
+                .font(ForgeType.caption).monospacedDigit()
                 .foregroundStyle(.secondary).frame(width: 30, alignment: .trailing)
 
             Text(window?.resetsIn ?? "—")
-                .font(.system(size: 9)).foregroundStyle(.tertiary)
+                .font(ForgeType.micro).foregroundStyle(.tertiary)
                 .frame(width: 38, alignment: .trailing)
                 .help("Tempo até esta janela zerar")
         }
@@ -1414,7 +1418,7 @@ struct HistoryView: View {
                     ForEach(state.recent) { g in
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: icon(g.effectiveStatus))
-                                .font(.caption).foregroundStyle(color(g.effectiveStatus))
+                                .forgeIcon(.micro).foregroundStyle(color(g.effectiveStatus))
                                 .frame(width: 16)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(g.question).font(.callout).lineLimit(2)
