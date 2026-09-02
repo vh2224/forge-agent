@@ -39,6 +39,17 @@ final class TerminalSession: ObservableObject, Identifiable {
     /// carries into the on-disk descriptor (`SessionDescriptor.engine`, T01/S06).
     let engine: String
 
+    /// Whether `persistSessions()` (S07) is allowed to write this session to
+    /// `~/.claude/forge-sessions.json`. Default `true` keeps every existing
+    /// call site's behavior identical — the field exists for exactly one
+    /// case: the `setup-token` session `AppState.startAccountSetup` opens,
+    /// which carries an operator-typed Claude token through its PTY and must
+    /// never survive to disk, not even as a resumable descriptor with no
+    /// token in it. This is the mechanism S07/D5 requires — a boolean the
+    /// creator sets deliberately, never a heuristic guessed from `title` or
+    /// `bootstrap` content at save time.
+    let persistable: Bool
+
     @Published var isRunning = true
     @Published var exitLabel: String?
 
@@ -76,13 +87,15 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     init(cwd: String, title: String, bootstrap: String? = nil,
-         runId: String? = nil, account: String? = nil, engine: String = "claude") {
+         runId: String? = nil, account: String? = nil, engine: String = "claude",
+         persistable: Bool = true) {
         self.cwd = cwd
         self.title = title
         self.bootstrap = bootstrap
         self.runId = runId
         self.account = account
         self.engine = engine
+        self.persistable = persistable
     }
 }
 

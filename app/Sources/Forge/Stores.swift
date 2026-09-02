@@ -195,6 +195,12 @@ final class AppState: ObservableObject {
     /// they asked for anything.
     @Published private(set) var restorable: [SessionDescriptor] = []
 
+    /// The account name and `setup-token` session currently in flight, set by
+    /// `startAccountSetup(name:)` and cleared by `finishAccountSetup()`. `nil`
+    /// means no registration is in progress — T04 uses this to render (or
+    /// hide) the "registro em curso" banner.
+    @Published private(set) var pendingAccountSetup: (name: String, session: TerminalSession)?
+
     /// Which sidebar section is showing. Owned here rather than as RootView
     /// `@State` because opening a session has to be able to take the operator
     /// to the terminal — the composer that creates it lives on another screen.
@@ -535,31 +541,114 @@ final class AppState: ObservableObject {
             AccountsPayload.self, "forge-accounts.js", ["--list", "--json"])
         else { return }
         accounts = payload.accounts
-        // Two different facts wear the same name, and which one it is changes
-        // what the operator should do about it:
-        //
-        //   env_active — this app process carries FORGE_ACCOUNT and (crucially)
-        //     ANTHROPIC_AUTH_TOKEN, inherited from whatever launched it. The
-        //     shell-init `claude()` function goes INERT when a token is already
-        //     set without `--account`, so every bare `claude` in a session
-        //     spawned here runs on that account, outranking the registry.
-        //   active — the forge-accounts default, which is what applies when the
-        //     app was launched clean (from the Dock, say).
-        //
-        // env wins because it is what actually happens. Recording WHICH it was
-        // is the point: "vh, herdada do ambiente" and "vh, padrão do registro"
-        // look identical on screen and mean different things when the default
-        // says lookchina.
-        if let env = payload.env_active {
+        resolveActiveAccount(env: payload.env_active, registry: payload.active)
+    }
+
+    /// Resolves `activeAccount`/`activeAccountSource` from the two candidates
+    /// a `--list --json` payload can carry. Shared by `loadAccounts()` and
+    /// `finishAccountSetup()` (S07) so the two call sites can never disagree
+    /// on which one wins — the exact duplication trap S07/D1 names.
+    ///
+    /// Two different facts wear the same name, and which one it is changes
+    /// what the operator should do about it:
+    ///
+    ///   env_active — this app process carries FORGE_ACCOUNT and (crucially)
+    ///     ANTHROPIC_AUTH_TOKEN, inherited from whatever launched it. The
+    ///     shell-init `claude()` function goes INERT when a token is already
+    ///     set without `--account`, so every bare `claude` in a session
+    ///     spawned here runs on that account, outranking the registry.
+    ///   active — the forge-accounts default, which is what applies when the
+    ///     app was launched clean (from the Dock, say).
+    ///
+    /// env wins because it is what actually happens. Recording WHICH it was
+    /// is the point: "vh, herdada do ambiente" and "vh, padrão do registro"
+    /// look identical on screen and mean different things when the default
+    /// says lookchina.
+    private func resolveActiveAccount(env: String?, registry: String?) {
+        if let env {
             activeAccount = env
             activeAccountSource = .environment
-        } else if let reg = payload.active {
+        } else if let reg = registry {
             activeAccount = reg
             activeAccountSource = .registry
         } else {
             activeAccount = nil
             activeAccountSource = .unknown
         }
+    }
+
+    /// Opens `forge-accounts.js --add <name> --setup` inside the app's
+    /// embedded terminal, via the same argv→bootstrap→session path
+    /// `resumeSession` already uses — no bare subprocess spawn, no
+    /// hand-assembled command string.
+    ///
+    /// The session this creates is `persistable: false` (S07/D5): it is the
+    /// one place in the whole app where an operator-typed Claude token
+    /// passes through the PTY, and it must never reach
+    /// `~/.claude/forge-sessions.json`, not even as an unopened resumable
+    /// offer with no token content in it.
+    ///
+    /// Only reachable from a button action (D11) — nothing in
+    /// `onAppear`/`init`/`task` calls this.
+    func startAccountSetup(name: String) {
+        guard AccountName.isValid(name) else {
+            show(AccountName.rejection(name) ?? "nome de conta inválido", error: true)
+            return
+        }
+        guard let node = ForgeCore.nodePath else {
+            show(ForgeCore.nodeError, error: true)
+            return
+        }
+        guard let script = ForgeCore.engine("forge-accounts.js") else {
+            show("forge-accounts.js não encontrado", error: true)
+            return
+        }
+        guard let argv = AccountAdd.argv(node: node, script: script, name: name) else {
+            show(AccountName.rejection(name) ?? "nome de conta inválido", error: true)
+            return
+        }
+        let boot = argv.map(shq).joined(separator: " ")
+        let session = TerminalSession(
+            cwd: resolvedSessionRoot, title: "Registrar \(name)", bootstrap: boot,
+            engine: "claude", persistable: false)
+        sessions.append(session)
+        focus(session)
+        pendingAccountSetup = (name: name, session: session)
+        // Deliberately no persistSessions() here: the session is
+        // non-persistable by construction, and writing now would just
+        // re-save the file without it — a no-op that costs a disk write.
+    }
+
+    /// Relists accounts, reconciles the result against what `startAccountSetup`
+    /// last knew, and decides whether the registration succeeded by reading
+    /// `has_token` off the reconciled list — never the shell's exit code
+    /// (D6): the setup command runs inside a login shell whose own exit code
+    /// is reported by `TerminalHost`, not the setup command's.
+    ///
+    /// Idempotent: a second call with no pending setup is a no-op.
+    func finishAccountSetup() {
+        guard let pending = pendingAccountSetup else { return }
+        guard let payload = ForgeCore.runJSON(
+            AccountsPayload.self, "forge-accounts.js", ["--list", "--json"])
+        else {
+            // Read failed — keep `pendingAccountSetup` rather than asserting
+            // a failure this call never actually measured.
+            show("não consegui confirmar o registro — tente novamente", error: true)
+            return
+        }
+        let merged = AccountMerge.reconcile(previous: accounts, incoming: payload)
+        accounts = merged.accounts
+        resolveActiveAccount(env: payload.env_active, registry: payload.active)
+
+        switch AccountMerge.outcome(for: pending.name, in: merged) {
+        case .registered:
+            show("\(pending.name) registrada com sucesso")
+        case .registeredWithoutToken:
+            show("\(pending.name) registrada, mas ainda sem token", error: true)
+        case .missingFromRegistry:
+            show("\(pending.name) não encontrada no registro", error: true)
+        }
+        pendingAccountSetup = nil
     }
 
     /// Costs a real API call per account — only ever on explicit request.
@@ -634,7 +723,11 @@ final class AppState: ObservableObject {
     /// unconsumed restorable offers from being dropped by a save triggered by
     /// resuming or closing an unrelated session (R1, S06 review).
     private func persistSessions() {
-        let live = sessions.reversed().map {
+        // Filtered by `persistable` (S07/D5) BEFORE mapping to descriptors —
+        // the setup-token session AppState.startAccountSetup opens sets
+        // `persistable: false`, so it never becomes a SessionDescriptor and
+        // never reaches this file, regardless of its title or bootstrap.
+        let live = sessions.reversed().filter(\.persistable).map {
             SessionDescriptor(cwd: $0.cwd, title: $0.title, engine: $0.engine,
                                account: $0.account, runId: $0.runId)
         }
