@@ -7805,6 +7805,125 @@ test("Sessões: runCount conta só as sessões com runId") {
     assertEqual(groups.first?.runCount, 2)
 }
 
+// MARK: - WorkTree: runs sob o projeto do seu cwd (S04)
+
+/// `Run` has no public memberwise init (only `Codable`'s synthesized decoder
+/// is exposed) — per T02-PLAN, fixtures decode a JSON literal instead of
+/// touching `Models.swift`, which is not in this task's `writes`. Optional
+/// fields left out of the literal decode to `nil`.
+private func workRun(id: String, cwd: String, active: Bool = true, started_at: Double = 0) -> Run {
+    let json = """
+    {"kind":"task","id":"\(id)","active":\(active),"started_at":\(started_at),"cwd":"\(cwd)"}
+    """
+    return try! JSONDecoder().decode(Run.self, from: Data(json.utf8))
+}
+
+private func findWorkNode(_ path: String, in nodes: [WorkNode]) -> WorkNode? {
+    for node in nodes {
+        if node.path == path { return node }
+        if let hit = findWorkNode(path, in: node.children) { return hit }
+    }
+    return nil
+}
+
+test("WorkTree: 2 projetos + 3 runs devolvem exatamente 2 raízes e 3 filhos") {
+    let projects = ["/repo/a", "/repo/b"]
+    let runs = [
+        workRun(id: "r1", cwd: "/repo/a", active: true, started_at: 100),
+        workRun(id: "r2", cwd: "/repo/a", active: false, started_at: 50),
+        workRun(id: "r3", cwd: "/repo/b", active: true, started_at: 10),
+    ]
+    let forest = WorkTree.build(projects: projects, runs: runs, roots: [], home: "/Users/x")
+    assertEqual(forest.roots.count, 2, "2 projetos de topo, sem roots declarados → 2 raízes")
+    let total = forest.roots.reduce(0) { $0 + $1.runs.count + $1.runCount }
+    assertEqual(total, 3, "as 3 runs devem estar distribuídas na árvore, nenhuma perdida")
+    assertTrue(forest.unowned.isEmpty, "todas as 3 runs têm dono — unowned deve ficar vazio")
+}
+
+test("WorkTree: run em subdiretório pertence ao projeto mais próximo, nunca ao avô") {
+    let projects = ["/dev/mono", "/dev/mono/services/api"]
+    let run = workRun(id: "r1", cwd: "/dev/mono/services/api/sub")
+    let forest = WorkTree.build(projects: projects, runs: [run], roots: [], home: "/Users/x")
+    let api = findWorkNode("/dev/mono/services/api", in: forest.roots)
+    let mono = findWorkNode("/dev/mono", in: forest.roots)
+    assertEqual(api?.runs.map(\.id), ["r1"], "a run deve pertencer ao projeto mais próximo (api)")
+    assertEqual(mono?.runs.count, 0, "o avô (mono) não pode receber a run de um descendente mais próximo")
+}
+
+test("WorkTree: run sem projeto dono sai em unowned e não some") {
+    let projects = ["/repo/a"]
+    let run = workRun(id: "orphan", cwd: "/somewhere/else")
+    let forest = WorkTree.build(projects: projects, runs: [run], roots: [], home: "/Users/x")
+    assertEqual(forest.unowned.map(\.id), ["orphan"])
+    let total = forest.roots.reduce(0) { $0 + $1.runs.count + $1.runCount }
+    assertEqual(total, 0, "run órfã não pode ser contada em nenhum nó")
+}
+
+test("WorkTree: run com cwd idêntico ao projeto pertence a ele") {
+    let projects = ["/repo/x"]
+    let run = workRun(id: "r1", cwd: "/repo/x")
+    let forest = WorkTree.build(projects: projects, runs: [run], roots: [], home: "/Users/x")
+    let node = findWorkNode("/repo/x", in: forest.roots)
+    assertEqual(node?.runs.map(\.id), ["r1"])
+    assertTrue(forest.unowned.isEmpty)
+}
+
+test("WorkTree: pasta sintetizada nunca é dona de run") {
+    let projects = ["/dev/proj"]
+    let run = workRun(id: "r1", cwd: "/dev")
+    let forest = WorkTree.build(projects: projects, runs: [run], roots: ["/dev"], home: "/Users/x")
+    let folder = findWorkNode("/dev", in: forest.roots)
+    assertEqual(folder?.role, .folder, "raiz declarada sem projeto próprio deve sintetizar folder")
+    assertEqual(folder?.runs.count, 0, "folder nunca é dona de run, mesmo com cwd exatamente igual ao seu path")
+    assertEqual(forest.unowned.map(\.id), ["r1"], "a run cai em unowned, não em silêncio")
+}
+
+test("WorkTree: runs de um nó ordenam active antes de inativa, depois started_at desc") {
+    let projects = ["/repo/n"]
+    let runs = [
+        workRun(id: "b", cwd: "/repo/n", active: false, started_at: 200),
+        workRun(id: "a", cwd: "/repo/n", active: true, started_at: 50),
+        workRun(id: "c", cwd: "/repo/n", active: true, started_at: 150),
+    ]
+    let forest = WorkTree.build(projects: projects, runs: runs, roots: [], home: "/Users/x")
+    let node = findWorkNode("/repo/n", in: forest.roots)
+    assertEqual(node?.runs.map(\.id), ["c", "a", "b"], "ativas por started_at desc, depois inativas")
+}
+
+test("WorkTree: a saída é função do conjunto — runs embaralhadas dão a mesma ordem") {
+    let projects = ["/repo/n"]
+    let runs = [
+        workRun(id: "b", cwd: "/repo/n", active: false, started_at: 200),
+        workRun(id: "a", cwd: "/repo/n", active: true, started_at: 50),
+        workRun(id: "c", cwd: "/repo/n", active: true, started_at: 150),
+    ]
+    let order1 = WorkTree.build(projects: projects, runs: runs, roots: [], home: "/Users/x")
+    let order2 = WorkTree.build(projects: projects, runs: runs.reversed(), roots: [], home: "/Users/x")
+    assertEqual(findWorkNode("/repo/n", in: order1.roots)?.runs.map(\.id),
+                findWorkNode("/repo/n", in: order2.roots)?.runs.map(\.id),
+                "embaralhar a entrada não pode mudar a saída")
+}
+
+test("WorkTree: runCount conta descendentes transitivamente") {
+    let projects = ["/repo/p", "/repo/p/api"]
+    let runs = [
+        workRun(id: "r1", cwd: "/repo/p"),
+        workRun(id: "r2", cwd: "/repo/p/api"),
+        workRun(id: "r3", cwd: "/repo/p/api"),
+    ]
+    let forest = WorkTree.build(projects: projects, runs: runs, roots: [], home: "/Users/x")
+    let p = findWorkNode("/repo/p", in: forest.roots)
+    assertEqual(p?.runs.count, 1, "p só é dono direto da sua própria run")
+    assertEqual(p?.runCount, 2, "runCount deve somar as 2 runs do descendente api")
+}
+
+test("WorkTree: sem projeto nenhum, roots é vazio e toda run é unowned") {
+    let runs = [workRun(id: "r1", cwd: "/repo/a"), workRun(id: "r2", cwd: "/repo/b")]
+    let forest = WorkTree.build(projects: [], runs: runs, roots: [], home: "/Users/x")
+    assertTrue(forest.roots.isEmpty, "nenhum projeto registrado → nenhuma raiz")
+    assertEqual(forest.unowned.count, 2, "sem projeto algum, toda run é unowned")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {
