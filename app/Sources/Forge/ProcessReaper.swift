@@ -57,8 +57,10 @@ enum ProcessTable {
                 ppid: pid_t(bitPattern: info.pbi_ppid),
                 // Start time is the identity check that makes escalating to
                 // SIGKILL safe after a wait: a recycled pid answers with a
-                // different one.
-                startedAt: UInt64(info.pbi_start_tvsec)))
+                // different one. Both fields combined (tvsec, tvusec) — see
+                // `ProcEntry.startedAt` for why sub-second precision matters
+                // even though a same-second collision is not realistic.
+                startedAt: UInt64(info.pbi_start_tvsec) * 1_000_000 + UInt64(info.pbi_start_tvusec)))
         }
         return table
     }
@@ -117,7 +119,18 @@ enum ProcessReaper {
         let deadline = ContinuousClock.now.advanced(by: ProcessReaping.reapGracePeriod)
         while ContinuousClock.now < deadline {
             try? await Task.sleep(for: ProcessReaping.reapPollInterval)
-            remaining = ProcessReaping.survivors(previous: remaining, table: ProcessTable.snapshot())
+            // Not just a re-validation of `remaining`: a supervisor that
+            // respawns a worker during this window forks a child that was
+            // never in `targets` to begin with, and `survivors` alone can
+            // never see it. `rediscover` re-walks the tree from whichever
+            // roots are still alive and politely signals only what is new —
+            // see its doc-comment for the limit this does not close.
+            let (all, newcomers) = ProcessReaping.rediscover(
+                remaining: remaining, table: ProcessTable.snapshot(), selfPid: getpid())
+            if !newcomers.isEmpty {
+                for target in newcomers { for signal in polite { send(signal, to: target.pid) } }
+            }
+            remaining = all
             if remaining.isEmpty { return }
         }
 

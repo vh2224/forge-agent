@@ -9175,6 +9175,82 @@ test("reapPollInterval é bem menor que a graça, para o caso cooperativo sair r
                       "o poll grosso faz o caso cooperativo (12,8 ms medidos) pagar a graça inteira")
 }
 
+// MARK: R1 — identidade sub-segundo (pbi_start_tvsec + pbi_start_tvusec)
+
+test("R1: survivors devolve vazio quando pid+startedAt diferem só nos microssegundos") {
+    let antes = [reapEntry(1100, 1000, 1_000_000)]       // 1s, 0µs
+    let depois = [reapEntry(1100, 1000, 1_000_500)]      // 1s, 500µs — outro processo
+    assertEqual(ProcessReaping.survivors(previous: antes, table: depois).count, 0,
+                "dois processos com o mesmo segundo mas microssegundos diferentes foram tratados como o mesmo")
+}
+
+test("R1: survivors mantém o pid quando startedAt é idêntico até o microssegundo") {
+    let antes = [reapEntry(1100, 1000, 1_000_500)]
+    let depois = [reapEntry(1100, 1000, 1_000_500)]
+    assertEqual(ProcessReaping.survivors(previous: antes, table: depois).map(\.pid), [1100],
+                "identidade idêntica até o microssegundo foi rejeitada")
+}
+
+// MARK: R3 — rediscover encontra descendentes NOVOS surgidos entre polls
+
+test("R3: rediscover encontra um filho novo forkado por um remaining ainda vivo") {
+    // 1000 (shell) segue vivo e forkou 1150 depois do último snapshot.
+    let remaining = [reapEntry(1000, reapAppPid, 1)]
+    let fresh: [ProcEntry] = [
+        reapEntry(reapAppPid, 400),
+        reapEntry(1000, reapAppPid, 1),
+        reapEntry(1150, 1000),   // descendente novo, ausente de `remaining`
+    ]
+    let (all, newcomers) = ProcessReaping.rediscover(remaining: remaining, table: fresh, selfPid: reapAppPid)
+    assertTrue(all.map(\.pid).contains(1150), "o descendente novo não entrou no conjunto atualizado")
+    assertEqual(newcomers.map(\.pid), [1150], "o descendente novo não foi identificado como recém-chegado")
+}
+
+test("R3: rediscover mantém ordem folha-primeiro com o novo descendente à frente do pai") {
+    let remaining = [reapEntry(1000, reapAppPid, 1)]
+    let fresh: [ProcEntry] = [
+        reapEntry(reapAppPid, 400),
+        reapEntry(1000, reapAppPid, 1),
+        reapEntry(1150, 1000),
+    ]
+    let (all, _) = ProcessReaping.rediscover(remaining: remaining, table: fresh, selfPid: reapAppPid)
+    assertEqual(all.map(\.pid), [1150, 1000],
+                "o filho novo tem de ser sinalizado antes do pai, senão o pai reforka ao morrer")
+}
+
+test("R3: rediscover não re-sinaliza quem já estava em remaining") {
+    let remaining = [reapEntry(1000, reapAppPid, 1), reapEntry(1100, 1000, 1)]
+    let fresh: [ProcEntry] = [
+        reapEntry(reapAppPid, 400),
+        reapEntry(1000, reapAppPid, 1),
+        reapEntry(1100, 1000, 1),
+    ]
+    let (_, newcomers) = ProcessReaping.rediscover(remaining: remaining, table: fresh, selfPid: reapAppPid)
+    assertTrue(newcomers.isEmpty, "um pid já conhecido foi tratado como recém-chegado — reiniciaria o relógio de graça dele")
+}
+
+test("R3: rediscover devolve vazio quando todos os remaining já morreram") {
+    let remaining = [reapEntry(1000, reapAppPid, 1)]
+    let fresh: [ProcEntry] = [reapEntry(reapAppPid, 400)]   // 1000 sumiu da tabela
+    let (all, newcomers) = ProcessReaping.rediscover(remaining: remaining, table: fresh, selfPid: reapAppPid)
+    assertTrue(all.isEmpty, "um root morto ainda gerou candidatos a re-descoberta")
+    assertTrue(newcomers.isEmpty, "um root morto ainda gerou recém-chegados")
+}
+
+test("R3: rediscover não usa um root morto (startedAt divergente) para re-varrer") {
+    // 1000 reapareceu com startedAt diferente (pid reciclado) — não é mais o
+    // mesmo processo e não deve servir de raiz para descobrir 1150.
+    let remaining = [reapEntry(1000, reapAppPid, 1)]
+    let fresh: [ProcEntry] = [
+        reapEntry(reapAppPid, 400),
+        reapEntry(1000, reapAppPid, 999),   // pid reciclado
+        reapEntry(1150, 1000),
+    ]
+    let (all, newcomers) = ProcessReaping.rediscover(remaining: remaining, table: fresh, selfPid: reapAppPid)
+    assertTrue(all.isEmpty, "um pid reciclado foi usado como raiz de re-descoberta")
+    assertTrue(newcomers.isEmpty, "um pid reciclado produziu recém-chegados")
+}
+
 print("\n" + String(repeating: "─", count: 60))
 print("  \(passed) passed, \(failed) failed")
 if failed > 0 {

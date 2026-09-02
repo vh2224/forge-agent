@@ -34,10 +34,17 @@ import Foundation
 /// One row of a process table snapshot: enough to rebuild the tree and to
 /// prove, later, that a pid is still the same process it was.
 ///
-/// `startedAt` is `proc_bsdinfo.pbi_start_tvsec`. It exists for one reason:
-/// between the polite phase and `SIGKILL` there is a grace window, and a pid
-/// that died inside it can be recycled by the kernel for an unrelated process.
-/// Escalating on pid alone would kill a stranger.
+/// `startedAt` is `proc_bsdinfo.pbi_start_tvsec` and `pbi_start_tvusec`
+/// combined into one value, in MICROSECONDS SINCE THE EPOCH — not seconds, do
+/// not compare it against `time()`. It exists for one reason: between the
+/// polite phase and `SIGKILL` there is a grace window, and a pid that died
+/// inside it can be recycled by the kernel for an unrelated process.
+/// Escalating on pid alone would kill a stranger. The microsecond component
+/// matters even though PID allocation on macOS is sequential with wraparound
+/// at 99999 (measured: 300 forks advanced the counter by 343) — same-second
+/// reuse would need ~10^5 forks/s to hit the second-granularity version of
+/// this field, but an identity check should not leave a field it already has
+/// unused.
 public struct ProcEntry: Equatable, Sendable {
     public let pid: pid_t
     public let ppid: pid_t
@@ -173,6 +180,45 @@ public enum ProcessReaping {
     public static func survivors(previous: [ProcEntry], table: [ProcEntry]) -> [ProcEntry] {
         let byPid = Dictionary(table.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
         return previous.filter { byPid[$0.pid]?.startedAt == $0.startedAt }
+    }
+
+    /// Re-derives what the poll should track next: the surviving entries from
+    /// `remaining` (by identity, same rule as `survivors`) PLUS any descendant
+    /// that forked, under one of those survivors, AFTER the last snapshot.
+    ///
+    /// WHY THIS EXISTS. `survivors` alone only re-validates pids it already
+    /// knew about — it never asks the tree again. A supervisor with a slow
+    /// SIGTERM handler that respawns a worker during the grace window, or a
+    /// `trap '' TERM` script that keeps forking, produces a child that
+    /// `survivors` can never see: it was never in `remaining` to begin with.
+    /// When the parent is eventually SIGKILLed, that child reparents to
+    /// launchd and survives — the exact failure the quit alert promises not
+    /// to have.
+    ///
+    /// `remaining`'s pids that are STILL ALIVE (per `survivors`) are the roots
+    /// of the re-walk, never the original session root: after `terminate()`
+    /// the login shell is `ZN <defunct>`, and using a zombie as root would
+    /// find an empty tree right as its children are about to reparent.
+    ///
+    /// `newcomers` is `all` minus every pid already present in `remaining` —
+    /// so a target signalled on a previous poll is never re-signalled and
+    /// never gets its grace clock restarted.
+    ///
+    /// MEASURED LIMIT, RECORDED HONESTLY. A fork that happens between the
+    /// LAST poll and the SIGKILL deadline is still unreachable: there is no
+    /// pause-the-world primitive on macOS to freeze forking while this
+    /// decision runs. This narrows that window to one poll interval; it does
+    /// not close it.
+    public static func rediscover(
+        remaining: [ProcEntry], table: [ProcEntry], selfPid: pid_t
+    ) -> (all: [ProcEntry], newcomers: [ProcEntry]) {
+        let survived = survivors(previous: remaining, table: table)
+        guard !survived.isEmpty else { return ([], []) }
+
+        let knownPids = Set(remaining.map(\.pid))
+        let all = targets(roots: survived.map(\.pid), table: table, selfPid: selfPid)
+        let newcomers = all.filter { !knownPids.contains($0.pid) }
+        return (all, newcomers)
     }
 
     /// The signals of one rung, in send order.
