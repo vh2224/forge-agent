@@ -90,7 +90,7 @@ struct TerminalsView: View {
                 ToolbarItem {
                     Picker("", selection: $layoutRaw) {
                         ForEach(TerminalLayout.allCases) { l in
-                            Image(systemName: l.icon).help(l.help).tag(l.rawValue)
+                            Image(systemName: l.icon).forgeIcon(.small).help(l.help).tag(l.rawValue)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -197,7 +197,7 @@ struct TerminalsView: View {
     private var gateBanner: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Image(systemName: "bolt.fill").foregroundStyle(Color.accentOrange)
+                Image(systemName: "bolt.fill").forgeIcon(.micro).foregroundStyle(Color.accentOrange)
                 Text(state.pending.count == 1
                      ? "1 run está esperando você"
                      : "\(state.pending.count) runs estão esperando você")
@@ -309,7 +309,7 @@ struct TerminalsView: View {
             }
             .frame(maxWidth: 620)
             .padding(14)
-            .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .forgeSurface(.floating)
             .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.quaternary))
             .shadow(radius: 22, y: 8)
             .padding(.top, 14)
@@ -341,9 +341,9 @@ struct TerminalsView: View {
     @ViewBuilder private var zoomHud: some View {
         if showZoomHud {
             Text(TerminalZoom.label(terminals.fontSize))
-                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                .font(ForgeType.mono)
                 .padding(.horizontal, 12).padding(.vertical, 7)
-                .background(.thickMaterial, in: Capsule())
+                .forgeSurface(.floating, in: Capsule())
                 .overlay(Capsule().strokeBorder(.quaternary))
                 .padding(12)
                 .transition(.opacity)
@@ -460,7 +460,7 @@ struct AttachedImageChip: View {
                         // Never a blank box: a chip that shows nothing is
                         // indistinguishable from an attachment that failed.
                         Image(systemName: "photo")
-                            .font(.system(size: 18))
+                            .forgeIcon(.large)
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
@@ -468,7 +468,7 @@ struct AttachedImageChip: View {
                 .frame(width: 86, height: 60)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
-                .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .forgeSurface(.panel)
                 .shadow(radius: hovering ? 10 : 4, y: 2)
             }
             .buttonStyle(.plain)
@@ -477,7 +477,7 @@ struct AttachedImageChip: View {
             if hovering {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 14))
+                        .forgeIcon(.medium)
                         .symbolRenderingMode(.palette)
                         .foregroundStyle(.white, .black.opacity(0.65))
                 }
@@ -557,14 +557,14 @@ struct TerminalTab: View {
                     Text(session.projectName)
                     if let a = session.account, !a.isEmpty { Text("· \(a)") }
                 }
-                .font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
+                .font(ForgeType.micro).foregroundStyle(.tertiary).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if hovering || isActive {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
+                        .forgeIcon(.micro, weight: .semibold)
                         .frame(width: 18, height: 18)
                         .contentShape(Rectangle())
                 }
@@ -573,7 +573,7 @@ struct TerminalTab: View {
                 .help("Fechar sessão (⌘W)")
             } else if let shortcutHint {
                 Text(shortcutHint)
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(ForgeType.monoSmall)
                     .foregroundStyle(.quaternary)
                     .frame(width: 18)
             }
@@ -614,7 +614,7 @@ struct RunLaunchRow: View {
                 HStack(spacing: 6) {
                     Text(run.projectName).font(.callout)
                     Text(run.id)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(ForgeType.mono)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1).truncationMode(.middle)
                 }
@@ -623,7 +623,7 @@ struct RunLaunchRow: View {
                     if let acct = run.account, !acct.isEmpty { Text("· \(acct)") }
                     Text(attached == nil ? "· sem terminal aqui" : "· aberta neste app")
                 }
-                .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
+                .font(ForgeType.caption).foregroundStyle(.tertiary).lineLimit(1)
             }
 
             Spacer(minLength: 8)

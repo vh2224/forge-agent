@@ -192,7 +192,7 @@ struct ProgressPanel: View {
                               caption: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(value)
-                .font(.system(size: 22, weight: .semibold)).monospacedDigit()
+                .font(ForgeType.display).monospacedDigit()
             Text(label).font(.caption2).foregroundStyle(.secondary)
             if let caption {
                 Text(caption).font(.caption2).foregroundStyle(.tertiary)
@@ -315,7 +315,7 @@ struct MetricsView: View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 3) {
                 Text(value)
-                    .font(.system(size: 22, weight: .semibold)).monospacedDigit()
+                    .font(ForgeType.display).monospacedDigit()
                     .foregroundStyle(accent ? Color.accentOrange : .primary)
                 if caveat {
                     Text("+").font(.caption).foregroundStyle(.tertiary)
@@ -358,7 +358,7 @@ struct MetricsView: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .forgeSurface(.raised)
         }
     }
 
@@ -373,12 +373,12 @@ struct MetricsView: View {
         return HStack(spacing: 10) {
             if showFamily {
                 Image(systemName: fam.icon)
-                    .font(.system(size: 12)).foregroundStyle(fam.color)
+                    .forgeIcon(.small).foregroundStyle(fam.color)
                     .frame(width: 16)
             }
 
             Text(showFamily ? ModelCatalog.label(for: b.key) : b.key)
-                .font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                .font(ForgeType.label).lineLimit(1).truncationMode(.middle)
                 .frame(minWidth: 90, idealWidth: 130, maxWidth: 170, alignment: .leading)
 
             Chart {
@@ -392,17 +392,17 @@ struct MetricsView: View {
             .frame(minWidth: 60, maxHeight: 22)
 
             Text(MetricsEngine.tokens(b.totalTokens))
-                .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
+                .font(ForgeType.label).monospacedDigit().foregroundStyle(.secondary)
                 .frame(width: 58, alignment: .trailing)
 
             VStack(alignment: .trailing, spacing: 0) {
                 Text(b.cost > 0 ? MetricsEngine.money(b.cost) : "—")
-                    .font(.system(size: 12)).monospacedDigit()
+                    .font(ForgeType.label).monospacedDigit()
                     .foregroundStyle(b.cost > 0 ? AnyShapeStyle(.primary)
                                                 : AnyShapeStyle(.tertiary))
                 if share >= 0.01 {
                     Text("\(Int(share * 100))%")
-                        .font(.system(size: 9)).monospacedDigit().foregroundStyle(.tertiary)
+                        .font(ForgeType.micro).monospacedDigit().foregroundStyle(.tertiary)
                 }
             }
             .frame(width: 64, alignment: .trailing)
@@ -410,7 +410,7 @@ struct MetricsView: View {
                   ? "Cobrado fora da Anthropic" : "Custo estimado")
 
             Text("\(b.dispatches)×")
-                .font(.system(size: 11)).monospacedDigit().foregroundStyle(.tertiary)
+                .font(ForgeType.label).monospacedDigit().foregroundStyle(.tertiary)
                 .frame(width: 40, alignment: .trailing)
         }
         .padding(.vertical, 7)
@@ -441,7 +441,7 @@ struct MetricsView: View {
                         ForEach(rows, id: \.0) { name, count in
                             VStack(alignment: .leading, spacing: 1) {
                                 Text("\(count)")
-                                    .font(.system(size: 16, weight: .medium)).monospacedDigit()
+                                    .font(ForgeType.title).monospacedDigit()
                                     .foregroundStyle(name == "retry" && count > 10
                                                      ? AnyShapeStyle(Color.orange)
                                                      : AnyShapeStyle(.primary))
