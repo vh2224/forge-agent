@@ -83,7 +83,15 @@ enum SettingsWindow {
     static let selectTab = Notification.Name("forge.settings.selectTab")
 
     static func open(_ tab: Section? = nil) {
-        if let tab { NotificationCenter.default.post(name: selectTab, object: tab.rawValue) }
+        if let tab {
+            // On cold start the window (and its sole `.onReceive` observer)
+            // does not exist yet, so this post would be dropped and the
+            // TabView would open on the persisted `@AppStorage` value instead
+            // of the requested tab. Writing the storage key directly covers
+            // that path; the notification still covers the already-open case.
+            UserDefaults.standard.set(tab.rawValue, forKey: "settingsTab")
+            NotificationCenter.default.post(name: selectTab, object: tab.rawValue)
+        }
         NSApp.activate(ignoringOtherApps: true)
         // Renamed in macOS 13 (Ventura): "Preferences" became "Settings" and the
         // selector followed. Both are tried because neither is public API and a

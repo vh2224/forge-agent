@@ -134,6 +134,11 @@ struct SessionWall: View {
         .background(ForgeBackground(intensity: 0.4, embers: false))
         .onAppear { probeRoutes() }
         .onChange(of: state.sessions.count) { _ in probeRoutes() }
+        // Phase is already live via `liveRuns`; the route badge is not — refresh
+        // it on the same run-store signal that already fires on every phase
+        // change, so a dispatch inside an already-open session isn't stuck
+        // showing the pre-dispatch engine/tier badge.
+        .onChange(of: state.runs) { _ in probeRoutes() }
     }
 
     /// The phase a pane belongs to: the run it drives if it drives one, else
@@ -146,7 +151,8 @@ struct SessionWall: View {
            let unit = run.workerParts?.unit {
             return ForgePhase(unit: unit)
         }
-        if let run = state.liveRuns.first(where: { $0.cwd == session.cwd }),
+        if session.runId == nil,
+           let run = state.liveRuns.first(where: { $0.cwd == session.cwd }),
            let unit = run.workerParts?.unit {
             return ForgePhase(unit: unit)
         }
@@ -357,6 +363,10 @@ struct RunRail: View {
         }
         .onAppear { routes.refresh(cwd: session?.cwd) }
         .onChange(of: session?.id) { _ in routes.refresh(cwd: session?.cwd) }
+        // Phase is already live via `liveRuns`/`run`; the route badge is not —
+        // refresh it on the same run-store signal that already fires on every
+        // phase change.
+        .onChange(of: state.runs) { _ in routes.refresh(cwd: session?.cwd) }
     }
 
     // MARK: Blocks

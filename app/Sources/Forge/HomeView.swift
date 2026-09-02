@@ -50,14 +50,38 @@ struct HomeView: View {
     /// the composer's `onTextChanged`; nothing here writes back.
     @State private var draft = ""
 
+    /// The composer's own picked project, mirrored via `onProjectChanged`. The
+    /// composer keeps this in `@State` and only writes it back to `state` at
+    /// submit — without this mirror the route chip would show the workspace of
+    /// a session that has not started yet, between picking another project and
+    /// pressing Enter.
+    @State private var composerProject = ""
+
     /// What the typed line will actually do — the same test `submit()` applies,
     /// so the footer cannot promise something the submission will not honour.
     private var isCommand: Bool {
         draft.trimmingCharacters(in: .whitespaces).hasPrefix("/")
     }
 
+    /// The unit type a typed slash command dispatches, when it dispatches
+    /// exactly one. Per CLAUDE.md the only routable units are `execute-task`
+    /// and `plan-slice` — `/forge-task` runs a single task with no
+    /// milestone/slice, so it is the one command that maps cleanly.
+    /// `/forge-auto` and `/forge-next` run a dispatch loop over many units of
+    /// varying type, and `/forge-new-milestone`, `/forge-discuss`,
+    /// `/forge-status` and the rest dispatch no routable unit at all — none of
+    /// those have a single engine badge to show.
+    private var commandUnitType: String? {
+        guard let cmd = ComposerParser.split(draft).command else { return nil }
+        switch cmd {
+        case "forge-task": return "execute-task"
+        default: return nil
+        }
+    }
+
     private var routeCwd: String? {
-        state.preselection.workspace ?? state.workspaces.first
+        if !composerProject.isEmpty { return composerProject }
+        return state.preselection.workspace ?? state.workspaces.first
     }
 
     var body: some View {
@@ -104,7 +128,8 @@ struct HomeView: View {
             quietFooter: true,
             showsKeyHints: false,
             accessory: AnyView(footerControl),
-            onTextChanged: { draft = $0 })
+            onTextChanged: { draft = $0 },
+            onProjectChanged: { composerProject = $0 })
     }
 
     /// One control, and which one depends on what is typed.
@@ -114,7 +139,7 @@ struct HomeView: View {
     /// size, so the row does not reflow under the caret as you type the slash.
     @ViewBuilder private var footerControl: some View {
         if isCommand {
-            routeChip
+            if commandUnitType != nil { routeChip }
         } else {
             engineMenu
         }
@@ -123,7 +148,7 @@ struct HomeView: View {
     /// The resolved route, as a read-out. Never a picker — see `RouteResolver`
     /// for why a model picker on a run would be a control that controls nothing.
     @ViewBuilder private var routeChip: some View {
-        if let r = resolver.route(cwd: routeCwd) {
+        if let unitType = commandUnitType, let r = resolver.route(cwd: routeCwd, unitType: unitType) {
             HStack(spacing: 4) {
                 Image(systemName: "arrow.triangle.branch").font(.system(size: 9))
                 Text(r.forgeEngine.tag).font(ForgeType.monoSmall)

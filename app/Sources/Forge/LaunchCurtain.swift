@@ -533,14 +533,14 @@ struct LaunchCurtain: View {
             swing = 0.001; ghostNear = 0.001; ghostFar = 0.001
         }
         try? await Task.sleep(for: .milliseconds(290))
-        guard !finished else { return }
+        guard !exiting else { return }
 
         // ── The hold ─────────────────────────────────────────────────────────
         // 90ms of nothing at the top of the arc. This is the cheapest frame in
         // the whole sequence and the one that makes the fall land: stillness
         // before a fast move is what the eye measures the move against.
         try? await Task.sleep(for: .milliseconds(90))
-        guard !finished else { return }
+        guard !exiting else { return }
 
         // ── The fall ─────────────────────────────────────────────────────────
         // 230ms and not 160. The old timing crossed 58° in about six frames,
@@ -555,7 +555,7 @@ struct LaunchCurtain: View {
         withAnimation(fall.delay(0.028)) { ghostNear = 1 }
         withAnimation(fall.delay(0.056)) { ghostFar = 1 }
         try? await Task.sleep(for: .milliseconds(228))
-        guard !finished else { return }
+        guard !exiting else { return }
 
         // ── Contact ──────────────────────────────────────────────────────────
         // The sound goes here and nowhere else: a clang that plays before the
@@ -596,7 +596,7 @@ struct LaunchCurtain: View {
             swing = 0.66; ghostNear = 0.66; ghostFar = 0.66
         }
         try? await Task.sleep(for: .milliseconds(200))
-        guard !finished else { return }
+        guard !exiting else { return }
         withAnimation(.easeInOut(duration: 0.42)) {
             swing = 0.80; ghostNear = 0.80; ghostFar = 0.80
         }
@@ -608,19 +608,20 @@ struct LaunchCurtain: View {
         withAnimation(.easeOut(duration: 0.9)) { embers = 1 }
 
         try? await Task.sleep(for: .milliseconds(430))
-        guard !finished else { return }
+        guard !exiting else { return }
         finish(animated: true)
     }
 
     private func skip() {
-        guard !finished else { return }
+        guard !exiting else { return }
         finish(animated: true)
     }
 
     private func finish(animated: Bool) {
-        finished = true
+        guard !exiting else { return }
         withAnimation(.easeIn(duration: animated ? 0.28 : 0)) { exiting = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + (animated ? 0.30 : 0)) {
+            finished = true
             onFinished()
         }
     }

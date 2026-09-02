@@ -68,6 +68,15 @@ struct PromptEditor: NSViewRepresentable {
         tv.textContainer?.lineFragmentPadding = 0
 
         tv.string = text
+        // A window resize changes the wrap width without touching the text or
+        // firing `textDidChange`, so height reporting has to also hang off the
+        // text view's own frame changes.
+        tv.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.frameChanged(_:)),
+            name: NSView.frameDidChangeNotification,
+            object: tv)
         DispatchQueue.main.async { context.coordinator.reportHeight(tv) }
         return scroll
     }
@@ -90,6 +99,15 @@ struct PromptEditor: NSViewRepresentable {
             guard let tv = notification.object as? NSTextView else { return }
             parent.text = tv.string
             reportHeight(tv)
+        }
+
+        @objc func frameChanged(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            reportHeight(tv)
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: nil)
         }
 
         /// The height of the laid-out text, deduplicated.

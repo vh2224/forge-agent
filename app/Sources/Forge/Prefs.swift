@@ -171,6 +171,10 @@ final class PrefsStore: ObservableObject {
             pendingEdits.removeAll()
             dirty = false
             load()
+            // The resolver caches per launch on the premise that this screen
+            // invalidates it on save — otherwise the pre-save route keeps
+            // being served until restart.
+            RouteResolver.shared.invalidate()
             return nil
         } catch {
             return error.localizedDescription

@@ -89,6 +89,13 @@ struct BoardView: View {
             .clipped()
             .onAppear { sync(viewport: geo.size) }
             .onChange(of: state.sessions.count) { _ in sync(viewport: geo.size) }
+            // Phase is already live via `liveRuns`; the route badge is not —
+            // it only ever refreshes on session-count change, so a dispatch
+            // inside an already-open session left it stale until the board
+            // was closed and reopened.
+            .onChange(of: state.runs) { _ in
+                for cwd in Set(state.sessions.map(\.cwd)) { routes.refresh(cwd: cwd) }
+            }
             .overlay(alignment: .bottomTrailing) { controls(viewport: geo.size) }
         }
     }
@@ -222,8 +229,9 @@ struct BoardView: View {
     }
 
     private func phase(for session: TerminalSession) -> ForgePhase {
-        if let run = state.liveRuns.first(where: { $0.cwd == session.cwd }),
-           let unit = run.workerParts?.unit { return ForgePhase(unit: unit) }
+        let run = state.liveRuns.first(where: { $0.id == session.runId })
+            ?? (session.runId == nil ? state.liveRuns.first(where: { $0.cwd == session.cwd }) : nil)
+        if let unit = run?.workerParts?.unit { return ForgePhase(unit: unit) }
         return routes.route(for: session.cwd)?.forgePhase ?? .unknown
     }
 
@@ -282,6 +290,16 @@ private struct BoardNodeView: View {
     @State private var resizeAccum: CGSize = .zero
     @State private var hovering = false
 
+    /// The out-port's `DragGesture` reports locations in the untransformed
+    /// `"boardCanvas"` space, but everything it feeds — `board.wireTip`,
+    /// `board.layout.node(at:)` — lives in layout coordinates, which the
+    /// canvas reaches by `.scaleEffect(anchor: .topLeading)` then `.offset`.
+    /// Undo both before using a drag point for anything layout-shaped.
+    private func canvasPoint(from location: CGPoint) -> CGPoint {
+        CGPoint(x: (location.x - board.pan.width) / board.scale,
+                y: (location.y - board.pan.height) / board.scale)
+    }
+
     var body: some View {
         SessionPane(
             session: session,
@@ -321,11 +339,12 @@ private struct BoardNodeView: View {
                 DragGesture(coordinateSpace: .named("boardCanvas"))
                     .onChanged { g in
                         board.wireFrom = node.id
-                        board.wireTip = g.location
+                        board.wireTip = canvasPoint(from: g.location)
                     }
                     .onEnded { g in
                         defer { board.wireFrom = nil }
-                        guard let hit = board.layout.node(at: g.location.x, y: g.location.y),
+                        let p = canvasPoint(from: g.location)
+                        guard let hit = board.layout.node(at: p.x, y: p.y),
                               hit.id != node.id else { return }
                         board.layout.connect(from: node.id, to: hit.id)
                     }

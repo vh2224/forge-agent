@@ -55,12 +55,18 @@ struct SessionComposer: View {
     /// route for a `/command` and the engine picker for a plain question,
     /// instead of asking the operator to pick a mode first.
     var onTextChanged: (String) -> Void = { _ in }
+    /// Lets a host follow the picked project as it changes, rather than only
+    /// reading it back at submit — the home uses it to keep its route chip
+    /// pointed at the workspace the session will actually start in.
+    var onProjectChanged: (String) -> Void = { _ in }
 
     @State private var text = "" {
         didSet { onTextChanged(text) }
     }
     @State private var commands: [SlashCommand] = []
-    @State private var project = ""
+    @State private var project = "" {
+        didSet { onProjectChanged(project) }
+    }
     @State private var account = ""
     @State private var highlighted = 0
     /// Laid-out height of the typed text, reported by `PromptEditor`.

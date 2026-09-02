@@ -237,7 +237,17 @@ final class TerminalViewStore: ObservableObject {
     /// working on the wrong thing.
     func sendText(_ text: String, to id: UUID, submit: Bool = false) {
         guard let view = registry.entry(for: id)?.view else { return }
-        view.send(txt: submit ? text + "\n" : text)
+        if submit {
+            view.send(txt: text + "\n")
+            return
+        }
+        // `submit: false` only omits the trailing newline. Embedded newlines —
+        // a multi-line terminal selection forwarded through the composer, say —
+        // would otherwise pass straight to the PTY and execute every line but
+        // the last, which is exactly the accidental execution this flag exists
+        // to prevent. Bracketed paste stops the PTY from treating any of it as
+        // Return.
+        view.send(txt: "\u{1b}[200~\(text)\u{1b}[201~")
     }
 
     /// What the operator has selected in a session, if anything.

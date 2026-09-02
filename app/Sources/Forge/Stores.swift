@@ -687,7 +687,7 @@ final class AppState: ObservableObject {
             ?? "\(project) · \(effective == "claude" ? "chat" : effective)"
         sessions.append(TerminalSession(
             cwd: cwd, title: title, bootstrap: boot,
-            runId: nil, account: account.isEmpty ? nil : account))
+            runId: nil, account: effective == "claude" && !account.isEmpty ? account : nil))
         focus(sessions.last)
     }
 
