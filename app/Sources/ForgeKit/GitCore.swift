@@ -834,7 +834,12 @@ public enum Git {
 
     /// Output-only wrapper for callers that have nothing to do with a failure
     /// beyond skipping it. Anything that puts git on a screen wants `invoke`.
-    static func run(_ args: [String], at path: String, timeout: TimeInterval = 5) -> String? {
+    ///
+    /// `public`: `SliceInspector` (Forge/T06) is the first caller from outside
+    /// this module — a read-only `diff` that never mutates state — and a
+    /// different target cannot see an `internal` static func across the
+    /// package boundary.
+    public static func run(_ args: [String], at path: String, timeout: TimeInterval = 5) -> String? {
         if case .ok(let out) = invoke(args, at: path, timeout: timeout) { return out }
         return nil
     }

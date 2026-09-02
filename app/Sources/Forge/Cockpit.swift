@@ -292,6 +292,12 @@ struct RunRail: View {
     @ObservedObject private var routes: RouteStore = .shared
     let session: TerminalSession?
 
+    /// The slice a `SliceRow` click asked to inspect. `.sheet(item:)` and not
+    /// `.sheet(isPresented:)`: the sheet needs to know WHICH slice, and a
+    /// second `@State` that could disagree with the first is exactly the kind
+    /// of drift `RunRail`'s own doc-comment warns against.
+    @State private var inspecting: SliceStatus?
+
     /// What is happening, as a phase. The worker string first (it is the live
     /// truth), the milestone's own `phase` second, the last dispatch last.
     private var phase: ForgePhase {
@@ -367,6 +373,12 @@ struct RunRail: View {
         // refresh it on the same run-store signal that already fires on every
         // phase change.
         .onChange(of: state.runs) { _ in routes.refresh(cwd: session?.cwd) }
+        // `run` is read here rather than captured at the `SliceRow` tap: the
+        // click only carries WHICH slice, and the inspector needs the run
+        // that owns it resolved at present time, not at click time.
+        .sheet(item: $inspecting) { sl in
+            if let run { SliceInspector(run: run, slice: sl) }
+        }
     }
 
     // MARK: Blocks
@@ -492,7 +504,8 @@ struct RunRail: View {
                 SliceRow(slice: sl,
                          isActive: sl.id == milestone?.active_slice,
                          activeTask: milestone?.active_task,
-                         activeTone: phase.tone)
+                         activeTone: phase.tone,
+                         onOpen: { inspecting = sl })
             }
         }
     }
@@ -532,6 +545,10 @@ private struct SliceRow: View {
     /// in the same colour as everything else that is about right now. A fixed
     /// colour here would have the spine disagree with the rail's own stroke.
     let activeTone: ForgeTone
+    /// Opens the `SliceInspector` sheet for this row — the trilha da run
+    /// becomes the entry point T06 exists to add, without this row needing
+    /// to know anything about `SliceInspector` itself.
+    var onOpen: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -586,6 +603,11 @@ private struct SliceRow: View {
                         .strokeBorder(Color.tone(activeTone).opacity(0.22), lineWidth: 0.5))
             }
         }
+        // `contentShape` first: without it a tap between the row's text and
+        // its trailing edge — most of a row this thin — would miss, because
+        // an unfilled `VStack` only hit-tests the pixels its children paint.
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
     }
 
     private var glyph: String {
