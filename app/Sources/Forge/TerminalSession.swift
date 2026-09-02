@@ -183,12 +183,48 @@ final class TerminalViewStore: ObservableObject {
     /// than on a view coordinator, which is the entire point.
     func claimBootstrap(for id: UUID) -> Bool { registry.claimBootstrap(for: id) }
 
-    /// Genuine session close: terminate the PTY and drop the entry. Nothing
-    /// else in the app may call this — view teardown explicitly must not, see
-    /// `TerminalLifecycle`.
+    /// Genuine session close: terminate the PTY, reap everything the session
+    /// started, and drop the entry. Nothing else in the app may call this —
+    /// view teardown explicitly must not, see `TerminalLifecycle`.
+    ///
+    /// This used to be `terminate()` alone, which is exactly one
+    /// `kill(shellPid, SIGTERM)`: it ended the login shell and left every
+    /// `next dev`, `pnpm` and `sleep` started inside the tab alive, reparented
+    /// to launchd. The tree has to be captured BEFORE the teardown — a snapshot
+    /// taken after it sees a zombie shell and an empty tree, which is why
+    /// `plan` and `execute` are two calls and not one.
     func closeSession(_ id: UUID) {
         guard TerminalLifecycle.action(for: .sessionClosed) == .terminateAndDiscard else { return }
-        registry.discard(id)?.view.terminate()
+        guard let instance = registry.discard(id) else { return }
+
+        // `process` is implicitly unwrapped and is nil until `startProcess` has
+        // run; `shellPid == 0` is SwiftTerm's own "not started" sentinel.
+        let shellPid = instance.view.process?.shellPid ?? 0
+        let targets = shellPid > 1 ? ProcessReaper.plan(roots: [shellPid]) : []
+
+        instance.view.terminate()
+
+        guard !targets.isEmpty else { return }
+        Task.detached(priority: .utility) { await ProcessReaper.execute(targets: targets) }
+    }
+
+    /// The shells of every terminal the registry still owns, for the app-wide
+    /// reap on quit.
+    ///
+    /// Exists as a method because `registry` is private and this class is
+    /// `@MainActor`: the AppDelegate cannot walk `entries` from inside a
+    /// detached task, so the pids — plain values — are what crosses over.
+    ///
+    /// The boundary is `registry.entries` and deliberately NOT
+    /// `sessions.filter(\.isRunning)`: `isRunning` is only ever set to false by
+    /// `processTerminated`, so it means "the shell exited" and says nothing
+    /// about what the shell left behind. Filtering on it would skip precisely
+    /// the session whose shell died and whose children survived it.
+    func shellPidsOfLiveTerminals() -> [pid_t] {
+        registry.entries.compactMap { instance in
+            let pid = instance.view.process?.shellPid ?? 0
+            return pid > 1 ? pid : nil
+        }
     }
 
     private func make(for session: TerminalSession) -> TerminalInstance {
@@ -213,6 +249,13 @@ final class TerminalViewStore: ObservableObject {
         env.append("LANG=en_US.UTF-8")
         // Marks the session so Forge tooling (and the user) can tell where it runs.
         env.append("FORGE_APP=1")
+        // Stamps WHICH session, inherited by every descendant. Nothing reads it
+        // yet, and that is the point: the reap on close walks parentage, which
+        // cannot reach a process that orphaned itself before the snapshot
+        // (`(sleep 402 &)` is born with ppid 1). Recovering those needs identity
+        // that survives reparenting, and identity can only be written at spawn —
+        // a marker not stamped today is an orphan that is anonymous forever.
+        env.append("FORGE_SESSION_ID=\(session.id.uuidString)")
 
         // `currentDirectory:` and not a swap of the process-wide cwd, which is
         // what this did before: changing the app's own working directory to

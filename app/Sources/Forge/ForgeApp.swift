@@ -128,45 +128,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Embedded terminals are CHILD PROCESSES: quitting the app kills every
-    /// session with it, unlike an external Terminal window. Forge itself is
-    /// resumable from disk, so no work is lost — but a unit can be cut off
-    /// mid-dispatch, so this must never happen silently.
+    /// Embedded terminals are child processes of Forge, but NOT in the sense
+    /// that word usually carries. This comment used to say "quitting the app
+    /// kills every session with it", and that was FALSE: `forkpty(3)` calls
+    /// `setsid()` in the child, so each shell is a session leader with its own
+    /// controlling terminal and the kernel propagates nothing to it when Forge
+    /// dies. Sessions — and every `next dev` started inside them — went on
+    /// running after the quit, reparented to launchd with PPID 1, while the
+    /// alert below promised the opposite. The comment sustained the bug.
+    ///
+    /// What makes it true is this method doing it explicitly: before the app
+    /// goes away it snapshots the descendant tree of every terminal the
+    /// registry owns and signals it. Forge itself is resumable from disk, so no
+    /// work is lost — but a unit can be cut off mid-dispatch, so this must never
+    /// happen silently.
+    ///
+    /// EXACTLY ONE `reply`, and only from `finishTerminating()`. Every path that
+    /// returns `.terminateLater` converges there:
+    /// - no session marked running (no alert shown) — the scan still runs, since
+    ///   `isRunning` only means "the shell exited" and says nothing about what
+    ///   the shell left behind;
+    /// - alert confirmed;
+    /// - nothing to signal (empty registry, or a snapshot that came back empty)
+    ///   — `execute` returns immediately;
+    /// - the grace ceiling was reached and SIGKILL was sent — `execute` returns
+    ///   after it; it has no throwing path and no early exit that skips the
+    ///   continuation.
+    /// The only branch that does not reply is cancelling the alert, which
+    /// returns `.terminateCancel` and therefore never promised one. This matters
+    /// more than it looks: a `.terminateLater` with no reply leaves the app
+    /// impossible to quit — a worse failure than the one being fixed.
     @MainActor
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Governs the ALERT only. It must not gate the reap: see above.
         let live = AppState.shared.sessions.filter(\.isRunning)
-        guard !live.isEmpty else { return terminateNow() }
+        if !live.isEmpty {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = live.count == 1
+                ? "1 sessão ainda está rodando"
+                : "\(live.count) sessões ainda estão rodando"
+            alert.informativeText = """
+            Sair encerra \(live.count == 1 ? "essa sessão" : "essas sessões") — \
+            \(live.map(\.tabLabel).joined(separator: ", ")) — e também os processos \
+            iniciados dentro \(live.count == 1 ? "dela" : "delas"), como servidores \
+            de desenvolvimento em segundo plano.
 
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = live.count == 1
-            ? "1 sessão ainda está rodando"
-            : "\(live.count) sessões ainda estão rodando"
-        alert.informativeText = """
-        Sair encerra \(live.count == 1 ? "essa sessão" : "essas sessões") — \
-        \(live.map(\.tabLabel).joined(separator: ", ")).
-
-        O trabalho não se perde: o Forge guarda o estado em disco e você retoma \
-        com "Continuar milestone". Mas a unidade em andamento é interrompida.
-        """
-        alert.addButton(withTitle: "Sair mesmo assim")
-        alert.addButton(withTitle: "Cancelar")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            UpdateStore.shared.cancelRelaunch()
-            return .terminateCancel
+            O trabalho não se perde: o Forge guarda o estado em disco e você retoma \
+            com "Continuar milestone". Mas a unidade em andamento é interrompida.
+            """
+            alert.addButton(withTitle: "Sair mesmo assim")
+            alert.addButton(withTitle: "Cancelar")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                UpdateStore.shared.cancelRelaunch()
+                return .terminateCancel
+            }
         }
-        return terminateNow()
+
+        // Planned here, on the main actor, and BEFORE anything is torn down: the
+        // registry is main-actor state, and a tree snapshotted after teardown
+        // reads as empty.
+        let targets = ProcessReaper.plan(roots: TerminalViewStore.shared.shellPidsOfLiveTerminals())
+        Task.detached(priority: .utility) {
+            await ProcessReaper.execute(targets: targets)
+            await MainActor.run { AppDelegate.finishTerminating() }
+        }
+        return .terminateLater
     }
 
     /// The last thing that happens before the process goes away, and the only
     /// place the replacement instance is started: doing it in `relaunch()` meant
     /// that cancelling this alert left the new copy already running alongside
     /// the old one.
+    ///
+    /// The relaunch stays AFTER the reap and immediately before the reply. It
+    /// costs the update path whatever the reap cost — milliseconds in the
+    /// cooperative case (12.8 ms measured), the 2s ceiling only against a
+    /// process that refuses to leave. The alternative, launching first, would
+    /// have the new instance running while the old one is still sending SIGKILL
+    /// to a tree, which is a worse thing to be true than a slower relaunch.
     @MainActor
-    private func terminateNow() -> NSApplication.TerminateReply {
+    private static func finishTerminating() {
         if UpdateStore.shared.relaunchPending { UpdateStore.shared.launchNewInstance() }
-        return .terminateNow
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 
     /// Clicking the Dock icon after closing the window should bring it back.
