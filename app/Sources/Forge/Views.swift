@@ -1242,11 +1242,12 @@ struct AccountsView: View {
                     TextField("nome da conta", text: $newAccountName)
                         .textFieldStyle(.plain)
                         .onSubmit { submitRegistration() }
+                        .disabled(state.pendingAccountSetup != nil)
                     Button {
                         submitRegistration()
                     } label: { Image(systemName: "person.badge.plus").forgeIcon(.small) }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
-                    .disabled(!AccountName.isValid(newAccountName))
+                    .disabled(state.pendingAccountSetup != nil || !AccountName.isValid(newAccountName))
                     .help(newAccountName.isEmpty
                           ? "Registrar conta"
                           : (AccountName.rejection(newAccountName) ?? "Registrar conta"))
@@ -1327,8 +1328,9 @@ struct AccountsView: View {
                 TextField("nome da conta", text: $newAccountName)
                     .textFieldStyle(.roundedBorder).frame(width: 180)
                     .onSubmit { submitRegistration() }
+                    .disabled(state.pendingAccountSetup != nil)
                 Button("Registrar conta") { submitRegistration() }
-                    .disabled(!AccountName.isValid(newAccountName))
+                    .disabled(state.pendingAccountSetup != nil || !AccountName.isValid(newAccountName))
             }
             if !newAccountName.isEmpty, let reason = AccountName.rejection(newAccountName) {
                 Text(reason).font(.caption2).foregroundStyle(.red)

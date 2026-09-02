@@ -9,6 +9,7 @@
 
 import SwiftUI
 import Foundation
+import Combine
 import ForgeKit
 
 // MARK: - Workspaces
@@ -200,6 +201,13 @@ final class AppState: ObservableObject {
     /// means no registration is in progress — T04 uses this to render (or
     /// hide) the "registro em curso" banner.
     @Published private(set) var pendingAccountSetup: (name: String, session: TerminalSession)?
+
+    /// Owns the observation of `pendingAccountSetup.session.isRunning` so
+    /// reconciliation happens the moment the login shell exits, not only
+    /// when `AccountsView`/`AccountSetupBanner` happen to be mounted
+    /// (`.onChange` on an unmounted view never fires). Subscribed in
+    /// `startAccountSetup`, cancelled in `finishAccountSetup`.
+    private var accountSetupObserver: AnyCancellable?
 
     /// Which sidebar section is showing. Owned here rather than as RootView
     /// `@State` because opening a session has to be able to take the operator
@@ -591,6 +599,10 @@ final class AppState: ObservableObject {
     /// Only reachable from a button action (D11) — nothing in
     /// `onAppear`/`init`/`task` calls this.
     func startAccountSetup(name: String) {
+        guard pendingAccountSetup == nil else {
+            show("já há um registro em curso — conclua-o antes de iniciar outro", error: true)
+            return
+        }
         guard AccountName.isValid(name) else {
             show(AccountName.rejection(name) ?? "nome de conta inválido", error: true)
             return
@@ -614,6 +626,16 @@ final class AppState: ObservableObject {
         sessions.append(session)
         focus(session)
         pendingAccountSetup = (name: name, session: session)
+        // Own the observation here rather than relying on
+        // `AccountSetupBanner.onChange` alone: `focus()` above switches
+        // `section` to `.terminal`, so `AccountsView` (and the banner it
+        // hosts) is typically unmounted for the whole run — if the shell
+        // exits before the operator comes back, nothing would otherwise be
+        // watching. `.filter { !$0 }` also covers the value the session
+        // already had if it exited between creation and this subscribe.
+        accountSetupObserver = session.$isRunning
+            .filter { !$0 }
+            .sink { [weak self] _ in self?.finishAccountSetup() }
         // Deliberately no persistSessions() here: the session is
         // non-persistable by construction, and writing now would just
         // re-save the file without it — a no-op that costs a disk write.
@@ -649,6 +671,8 @@ final class AppState: ObservableObject {
             show("\(pending.name) não encontrada no registro", error: true)
         }
         pendingAccountSetup = nil
+        accountSetupObserver?.cancel()
+        accountSetupObserver = nil
     }
 
     /// Costs a real API call per account — only ever on explicit request.
