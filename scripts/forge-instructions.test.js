@@ -310,6 +310,25 @@ test('stable and legacy markers in backtick and tilde fences are ignored', () =>
   }
 });
 
+test('indented and long fences do not expose quoted markers', () => {
+  for (const lines of [
+    ['   ```markdown', MARKER_START, 'INDENTED-FENCE-BYTES', MARKER_END, '   ```', ''],
+    ['````markdown', '```', MARKER_START, 'LONG-FENCE-BYTES', MARKER_END, '````', ''],
+  ]) {
+    const doc = lines.join('\n');
+    const root = project({ 'CLAUDE.md': doc });
+    assertEqual(findBlock(doc), null, 'quoted marker became managed');
+    const first = syncInstructions(root);
+    const written = read(root, 'CLAUDE.md');
+    assertEqual(first.files.find((f) => f.host === 'claude').outcome, 'updated', 'sync outcome');
+    assert(written.startsWith(doc), 'fenced bytes changed');
+    assert(written.includes('FENCE-BYTES'), 'fenced content lost');
+    const second = syncInstructions(root);
+    assertEqual(second.changed, 0, 'second sync changed fenced fixture');
+    assertEqual(read(root, 'CLAUDE.md'), written, 'second sync bytes differ');
+  }
+});
+
 test('bite: sem fence-awareness o mesmo fixture seria destrutivo', () => {
   // Positive control for the guard above — proves the fixture actually contains
   // a marker pair a naive (regex-over-the-whole-text) detector WOULD match, so

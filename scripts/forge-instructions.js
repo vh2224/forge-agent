@@ -137,7 +137,7 @@ function renderBlock(options = {}) {
 const START_LINE_RE = /^<!-- forge:routing-contract:start -->$/;
 const LEGACY_START_LINE_RE = /^<!-- forge:routing-contract:start version=\d+\.\d+\.\d+ -->$/;
 const END_LINE_RE = /^<!-- forge:routing-contract:end -->[ \t]*$/;
-const FENCE_RE = /^(?:`{3,}|~{3,})/;
+const FENCE_RE = /^( {0,3})(`{3,}|~{3,})/;
 
 function scanMarkers(text) {
   const rawLines = String(text).split('\n');
@@ -146,14 +146,20 @@ function scanMarkers(text) {
   const invalid = [];
   let inFence = false;
   let fenceChar = null;
+  let fenceLength = 0;
   let offset = 0;
 
   for (const rawLine of rawLines) {
     const line = rawLine.replace(/\r$/, '');
     const fence = FENCE_RE.exec(line);
-    if (fence) {
-      if (!inFence) { inFence = true; fenceChar = line[0]; }
-      else if (line[0] === fenceChar) { inFence = false; fenceChar = null; }
+    if (!inFence && fence) {
+      inFence = true;
+      fenceChar = fence[2][0];
+      fenceLength = fence[2].length;
+    } else if (inFence && new RegExp(`^ {0,3}${fenceChar}{${fenceLength},}[ \\t]*$`).test(line)) {
+      inFence = false;
+      fenceChar = null;
+      fenceLength = 0;
     } else if (!inFence) {
       // `end` deliberately excludes a trailing \r: the splice must hand the CR
       // back to the untouched remainder, or a CRLF file grows one lone LF line.
