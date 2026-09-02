@@ -295,6 +295,20 @@ struct RootView: View {
                         .font(ForgeType.micro)
                         .foregroundStyle(.tertiary)
                 }
+            } else if !state.restorable.isEmpty {
+                // No live session, but something is recoverable from the last
+                // launch (T01/T03). The row's label says "sessão anterior" —
+                // it must not read as a live tab, and nothing here opens one
+                // until the row's own `Button` is clicked.
+                SwiftUI.Section {
+                    ForEach(state.restorable, id: \.self) { descriptor in
+                        SidebarRestorableRow(descriptor: descriptor, state: state)
+                    }
+                } header: {
+                    Text("Sessões")
+                        .font(ForgeType.micro)
+                        .foregroundStyle(.tertiary)
+                }
             }
 
             // What is running, in the sidebar rather than on the home —
@@ -568,6 +582,58 @@ struct SidebarSessionRow: View {
         }
         .buttonStyle(.plain)
         .help("Ir para esta sessão")
+    }
+}
+
+/// The "Sessões" section when nothing is live but something is recoverable
+/// (T01/T03). Same visual as `SidebarSessionRow` — typography, icon
+/// treatment, click-to-focus shape — but the label says "sessão anterior" so
+/// the section never pretends a closed session is still open, and a
+/// descriptor whose engine cannot resume gets its engine tag instead of a
+/// live-looking row.
+struct SidebarRestorableRow: View {
+    let descriptor: SessionDescriptor
+    @ObservedObject var state: AppState
+
+    private var resumable: Bool { SessionResume.plan(for: descriptor) != nil }
+
+    var body: some View {
+        Group {
+            if resumable {
+                // The ONLY call site of `resumeSession` in this file — a
+                // `Button` action, never `onAppear`/`init`/`task`.
+                Button { state.resumeSession(descriptor) } label: { rowLabel }
+                    .buttonStyle(.plain)
+                    .help("Retomar sessão anterior")
+            } else {
+                rowLabel
+                    .help("\(descriptor.engine) ainda não retoma sessão")
+            }
+        }
+    }
+
+    private var rowLabel: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "clock.arrow.circlepath")
+                .forgeIcon(.small)
+                .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(descriptor.title)
+                    .font(ForgeType.body)
+                    .lineLimit(1)
+                Text(ProjectOrganiser.abbreviate(descriptor.cwd, home: NSHomeDirectory()))
+                    .font(ForgeType.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if !resumable {
+                Text(ForgeEngine(descriptor.engine).tag)
+                    .font(ForgeType.mono)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 }
 

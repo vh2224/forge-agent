@@ -165,6 +165,15 @@ struct TerminalsView: View {
                     // already running — a run alive on disk with no terminal
                     // here is precisely the thing you came to this screen to
                     // pick up, and it lived one click away on another tab.
+                    // Recoverable sessions from a previous launch. Shown ABOVE
+                    // "Rodando agora" — a restorable session is one click from
+                    // being what "Rodando agora" is about, and the reopen
+                    // offer belongs closest to the composer that opens
+                    // sessions. Nothing here starts a process by itself: every
+                    // descriptor renders a row, and only a tap opens one
+                    // (`AppState.resumeSession`, called from a `Button` action
+                    // only — see `S06-SUMMARY.md` for the grep that proves it).
+                    if !state.restorable.isEmpty { restorableOffer }
                     if !state.liveRuns.isEmpty { runsHere }
                     hints
                 }
@@ -187,6 +196,24 @@ struct TerminalsView: View {
                     .foregroundStyle(Color.accentOrange)
             }
             ForEach(state.liveRuns) { run in RunLaunchRow(run: run, state: state) }
+        }
+    }
+
+    /// Sessions recoverable from `~/.claude/forge-sessions.json` (T01), for
+    /// when there is nothing live to show instead. Retention (8 per distinct
+    /// `cwd`) already happened when the descriptors were written — this view
+    /// renders `state.restorable` as-is, in the order it arrives.
+    private var restorableOffer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Retomar onde parou").font(.subheadline).bold()
+                Text("\(state.restorable.count)")
+                    .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                Spacer()
+            }
+            ForEach(state.restorable, id: \.self) { descriptor in
+                RestorableSessionRow(descriptor: descriptor, state: state)
+            }
         }
     }
 
@@ -636,6 +663,54 @@ struct RunLaunchRow: View {
                 Button("Abrir aqui") { state.resume(run) }
                     .controlSize(.small)
                     .help("Abre uma aba com /forge-auto \(run.id) neste projeto")
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(hovering ? AnyShapeStyle(.quaternary.opacity(0.45))
+                             : AnyShapeStyle(.quaternary.opacity(0.22)),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .onHover { hovering = $0 }
+    }
+}
+
+/// One recoverable session from `state.restorable`. `resumable` mirrors what
+/// `SessionResume.plan(for:)` (T02) decides — a descriptor whose engine
+/// cannot resume gets its engine as a plain label and no button, never a
+/// button that opens nothing: an opção morta is worse than no offer.
+struct RestorableSessionRow: View {
+    let descriptor: SessionDescriptor
+    @ObservedObject var state: AppState
+    @State private var hovering = false
+
+    private var resumable: Bool { SessionResume.plan(for: descriptor) != nil }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "clock.arrow.circlepath")
+                .forgeIcon(.small)
+                .foregroundStyle(.tertiary)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(descriptor.title).font(.callout).lineLimit(1)
+                Text(ProjectOrganiser.abbreviate(descriptor.cwd, home: NSHomeDirectory()))
+                    .font(ForgeType.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            if resumable {
+                // The ONLY place this row calls `resumeSession` — a `Button`
+                // action, never `onAppear`/`init`/`task`.
+                Button("Retomar") { state.resumeSession(descriptor) }
+                    .controlSize(.small)
+                    .help("Reabre esta sessão com claude --continue")
+            } else {
+                Text(ForgeEngine(descriptor.engine).tag)
+                    .font(ForgeType.mono)
+                    .foregroundStyle(.tertiary)
+                    .help("\(descriptor.engine) ainda não retoma sessão")
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
