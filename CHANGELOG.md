@@ -44,6 +44,10 @@ pré-requisito declarado de qualquer recalibragem (itens `I-20260814021202`, `I-
 
 ### Fixed
 
+- **Routing-contract markers no longer create artificial version diffs.** New projections use a stable
+  ownership marker; the first sync automatically migrates existing strict semver markers and later
+  syncs are byte-identical.
+
 - **Um gate lapso deixa de depender de um waiter sobrevivente.** O único código que persistia o
   `timeout-default` vivia dentro de `waitForAnswerSync`, então a resolução era efeito colateral de um
   processo seguir vivo até o instante da expiração. Ele não segue: o call site real
@@ -1359,4 +1363,3 @@ All 9 scripts auto-installed via existing `install.sh` / `install.ps1` globs —
 ### Features
 
 - feat: add CHANGELOG.md generation to release workflow (bfbba43)
-

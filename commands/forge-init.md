@@ -298,6 +298,12 @@ untouched, and a file whose markers are malformed is **refused by name**, never 
 guess. It reports one line per candidate target (`CLAUDE.md`, `AGENTS.md`) — report those
 outcomes verbatim; a `skipped (malformed-block:…)` is an operator action, not noise.
 
+New projections emit exactly `<!-- forge:routing-contract:start -->`. Existing projects with the
+previously emitted `<!-- forge:routing-contract:start version=<semver> -->` marker are read and
+migrated by the first sync; the next sync is byte-identical. Only that strict legacy semver form
+is compatible: duplicate, incomplete, inverted, or otherwise malformed reserved markers are
+refused without writing.
+
 Re-running it later is free: `/forge-auto`, `/forge-next` and `/forge-task` each refresh the
 block at bootstrap, so a project never runs under a stale contract.
 
