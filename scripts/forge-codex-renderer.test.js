@@ -138,7 +138,7 @@ try {
   assert.match(fs.readFileSync(path.join(codex, 'config.toml'), 'utf8'), new RegExp(`^# forge-source:codex-config version=${versionPattern}$`, 'm'));
   const reportCapabilities = JSON.parse(fs.readFileSync(path.join(forge, 'adapters', 'codex', 'capabilities.json'), 'utf8'));
   assert(reportCapabilities.surfaces.some((surface) => surface.source_id === 'hooks' && surface.status === 'planned'));
-  const second = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }); assert.strictEqual(second.written.length, 0); assert(second.preserved.every((item) => item.reason === 'already-current'));
+  const second = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }); assert.strictEqual(second.written.length, 0); assert(second.preserved.every((item) => item.reason === 'already-current' || item.reason === 'status-line-preserved'));
   // A projection left by the pre-fix renderer (marker above the fence) is still
   // recognized as generated, so the next write relocates the marker. Reading
   // ownership as "starts with the marker" would flip it to user-owned and stop
@@ -148,7 +148,7 @@ try {
   const relocated = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT });
   assert(relocated.written.some((item) => item.destination === legacySkill), 'layout antigo tratado como user-owned');
   assert(fs.readFileSync(legacySkill, 'utf8').startsWith('---'));
-  fs.writeFileSync(path.join(codex, 'config.toml'), 'operator = true\n'); const preserved = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }); assert(preserved.conflicts.some((item) => item.destination.endsWith(path.join('Codex Home Ω', 'config.toml')))); assert.match(fs.readFileSync(path.join(codex, 'config.toml'), 'utf8'), /operator/);
+  fs.writeFileSync(path.join(codex, 'config.toml'), 'operator = true\n'); const preserved = renderer.write({ repo: root, projectRoot: project, codexHome: codex, forgeHome: forge, ...PRODUCTION_DISPATCH_DIALECT }); assert(!preserved.conflicts.some((item) => item.destination === path.join(codex, 'config.toml'))); assert.match(fs.readFileSync(path.join(codex, 'config.toml'), 'utf8'), /operator = true/); assert.match(fs.readFileSync(path.join(codex, 'config.toml'), 'utf8'), /context-used/);
 
   // The ownership probe is anchored to the accepted positions, so a user-owned
   // document that merely QUOTES the marker stays theirs. Behavioural on purpose:

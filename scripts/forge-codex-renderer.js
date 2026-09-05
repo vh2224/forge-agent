@@ -12,6 +12,7 @@ const PROVENANCE = require('./forge-projection-provenance');
 const selfProjection = require('./forge-projection-self');
 const { detectEol } = require('./forge-instructions');
 const { VERSION } = require('./forge-version');
+const { DEFAULT_STATUS_LINE, addDefaultStatusLine } = require('./forge-codex-statusline');
 
 const RUNTIME = 'codex';
 // Production callers pass this dialect explicitly. Keeping it as data preserves
@@ -250,7 +251,7 @@ function render(options = {}) {
   if (dispatchSource) for (const file of walk(path.join(root.repo, dispatchSource.inputs[0])).filter((item) => item.endsWith('.md'))) {
     add('dispatch-templates', path.relative(root.repo, file).replace(/\\/g, '/'), path.join(root.codexHome, 'templates', 'dispatch', path.basename(file)), `${ORIGIN}\n\n${norm(rewriteMarkdown(fs.readFileSync(file, 'utf8')))}`, 'dispatch');
   }
-  const config = `${tomlOrigin('config')}\n[forge]\nversion = "${VERSION}"\nhost_runtime = "codex"\nsource_manifest = "forge-source-manifest.json"\n`;
+  const config = `${tomlOrigin('config')}\n[forge]\nversion = "${VERSION}"\nhost_runtime = "codex"\nsource_manifest = "forge-source-manifest.json"\n\n[tui]\nstatus_line = ${JSON.stringify(DEFAULT_STATUS_LINE)}\n`;
   add('codex-config', 'config.toml', path.join(root.codexHome, 'config.toml'), config, 'config');
   const capabilities = { version: VERSION, runtime: RUNTIME, generated: true, surfaces: manifest.sources.map((source) => ({ source_id: source.source_id, status: source.conditional && source.conditional.codex ? source.conditional.codex.status : 'common' })) };
   add('codex-capabilities', 'forge-codex-capabilities.json', path.join(root.forgeHome, 'adapters', 'codex', 'capabilities.json'), `${JSON.stringify(capabilities, null, 2)}\n`, 'capabilities');
@@ -282,6 +283,22 @@ function write(options = {}) {
       continue;
     }
     const current = exists(artifact.destination) ? fs.readFileSync(artifact.destination, 'utf8') : null;
+    // config.toml is shared with the operator, even if an older Forge renderer
+    // put an ownership marker on it. Only add an absent status-line default;
+    // never replace their models, providers, MCPs, or later /statusline choices.
+    if (artifact.kind === 'config' && current !== null) {
+      const merged = addDefaultStatusLine(current);
+      artifact.content = merged.content;
+      artifact.newline = current.includes('\r\n') ? 'crlf' : 'lf';
+      if (merged.content === current) {
+        preserved.push({ ...artifact, reason: merged.reason });
+        if (merged.conflict) conflicts.push({ destination: artifact.destination, reason: merged.reason });
+      } else {
+        if (!options.dryRun) fs.writeFileSync(artifact.destination, merged.content, 'utf8');
+        written.push({ ...artifact, reason: merged.reason, ...(options.dryRun ? { dry_run: true } : {}) });
+      }
+      continue;
+    }
     if (current !== null && norm(current) === artifact.content) { preserved.push({ ...artifact, reason: 'already-current' }); continue; }
     const verdict = ownership.decide({
       current,

@@ -55,6 +55,13 @@ rollback manual.
 
 ## Diagnóstico e matriz offline
 
+Instalações com `--runtime codex` ou `both` também configuram a barra de status
+do Codex CLI com modelo, contexto, tokens, limites, projeto, sessão, permissões
+e interface. Para
+instalações existentes, execute `--update`/`-Update`. Preferências de barra já
+definidas pelo operador são preservadas. Veja os detalhes e os casos de merge
+manual em [Codex renderer](forge-codex-renderer.md#barra-de-status-do-terminal).
+
 Uma instalação real valida fail-closed a capability obrigatória do host
 selecionado antes da primeira escrita. O `--dry-run` não bloqueia por ausência
 do CLI: apenas inclui o diagnóstico no plano, sem escrever nada. O diagnóstico
@@ -71,4 +78,3 @@ CRLF/Unicode e uma fixture Claude 3.1.4; `forge-install-templates.test.js`
 valida o inventário de dispatch e os wrappers Bash/PowerShell. Os testes
 marcam explicitamente PowerShell ou Bash como skip somente quando o shell não
 está disponível. Nenhum caso depende de WSL, GNU, conta paga ou rede.
-
