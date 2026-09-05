@@ -107,7 +107,10 @@ test('Codex install adds status line to user config; dry-run and updates preserv
   try {
     fs.mkdirSync(data.codexHome, { recursive: true });
     const configPath = path.join(data.codexHome, 'config.toml');
-    const original = 'model = "operator-model"\r\n[tui]\r\nnotifications = false\r\n';
+    const original = 'model = "operator-model"\r\n'
+      + 'developer_instructions = "Explain status_line"\r\n'
+      + '[tui]\r\nnotifications = false # configure status_line later\r\n'
+      + '[mcp_servers.example.env]\r\nstatus_line = "verbose"\r\n';
     fs.writeFileSync(configPath, original);
     installer.install({ ...data.options, runtime: 'codex', dryRun: true });
     assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original);
@@ -116,6 +119,7 @@ test('Codex install adds status line to user config; dry-run and updates preserv
     assert.match(installed, /context-used/);
     assert.match(installed, /model = "operator-model"/);
     assert.match(installed, /notifications = false/);
+    assert.strictEqual(installed.replace(/status_line = \[[^\r\n]+\r\n/, ''), original);
     // An older installation without the option receives it on --update too.
     fs.writeFileSync(configPath, original);
     installer.install({ ...data.options, runtime: 'codex', update: true });
