@@ -550,7 +550,9 @@ function render(report) {
     ? Object.values(report.manifest.adapters).flatMap((adapter) => (Array.isArray(adapter.conflicts) ? adapter.conflicts : []))
     : [];
   const operatorOwned = allConflicts.filter((item) => path.basename(String(item && item.destination || '')) === 'settings.json');
-  const legacyConflicts = allConflicts.filter((item) => !operatorOwned.includes(item));
+  const statusLineConflicts = allConflicts.filter((item) => item.reason === 'status-line-manual-merge');
+  for (const item of statusLineConflicts) lines.push(`Status line preserved: ${item.destination}; use Codex /statusline to configure the desired indicators manually.`);
+  const legacyConflicts = allConflicts.filter((item) => !operatorOwned.includes(item) && !statusLineConflicts.includes(item));
   // Name them. A bare count is the reason this drift stays invisible: the
   // operator is told that N files were left behind but not WHICH, so a stale
   // destination on the execution path reads exactly like a stale destination

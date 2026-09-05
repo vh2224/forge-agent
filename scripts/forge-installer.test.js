@@ -93,12 +93,52 @@ test('Codex-only does not read or write Claude home and both keeps one core', ()
     assert.strictEqual(fs.existsSync(data.claudeHome), false);
     assert.strictEqual(fs.existsSync(path.join(data.projectRoot, 'AGENTS.md')), true);
     assert.strictEqual(fs.existsSync(path.join(data.codexHome, 'agents')), true);
+    assert.match(fs.readFileSync(path.join(data.codexHome, 'config.toml'), 'utf8'), /context-used/);
     const both = installer.install({ ...data.options, runtime: 'both', update: true });
     assert.strictEqual(both.ok, true);
     assert.strictEqual(fs.existsSync(path.join(data.claudeHome, 'agents')), true);
     assert.strictEqual(fs.existsSync(path.join(data.codexHome, 'agents')), true);
     assert.strictEqual(files(data.forgeHome).filter((name) => name === 'scripts').length, 1);
   } finally { data.cleanup(); }
+});
+
+test('Codex install adds status line to user config; dry-run and updates preserve user choices', () => {
+  const data = fixture();
+  try {
+    fs.mkdirSync(data.codexHome, { recursive: true });
+    const configPath = path.join(data.codexHome, 'config.toml');
+    const original = 'model = "operator-model"\r\n'
+      + 'developer_instructions = "Explain status_line"\r\n'
+      + '[tui]\r\nnotifications = false # configure status_line later\r\n'
+      + '[mcp_servers.example.env]\r\nstatus_line = "verbose"\r\n';
+    fs.writeFileSync(configPath, original);
+    installer.install({ ...data.options, runtime: 'codex', dryRun: true });
+    assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original);
+    installer.install({ ...data.options, runtime: 'codex' });
+    const installed = fs.readFileSync(configPath, 'utf8');
+    assert.match(installed, /context-used/);
+    assert.match(installed, /model = "operator-model"/);
+    assert.match(installed, /notifications = false/);
+    assert.strictEqual(installed.replace(/status_line = \[[^\r\n]+\r\n/, ''), original);
+    // An older installation without the option receives it on --update too.
+    fs.writeFileSync(configPath, original);
+    installer.install({ ...data.options, runtime: 'codex', update: true });
+    assert.strictEqual(fs.readFileSync(configPath, 'utf8'), installed);
+    const customized = installed.replace(/status_line = [^\r\n]+/, 'status_line = []');
+    fs.writeFileSync(configPath, customized);
+    installer.install({ ...data.options, runtime: 'codex', update: true });
+    assert.strictEqual(fs.readFileSync(configPath, 'utf8'), customized);
+  } finally { data.cleanup(); }
+});
+
+test('ambiguous Codex config is preserved with actionable status-line guidance', () => {
+  const destination = path.join('Codex Home', 'config.toml');
+  const output = installer.render({ runtime: 'codex', forge_home: 'Forge Home', plan: [], manifest: {
+    adapters: { codex: { conflicts: [{ destination, reason: 'status-line-manual-merge' }] } },
+  } });
+  assert(output.includes(destination));
+  assert(output.includes('/statusline'));
+  assert(!output.includes('--migrate-legacy'));
 });
 
 test('update backs up managed files and preserves prefs and unmanaged files', () => {
