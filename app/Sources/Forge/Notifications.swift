@@ -260,6 +260,33 @@ final class Notifier: NSObject, ObservableObject {
         }
     }
 
+    /// Says how many sessions a previous run left behind, after the boot sweep
+    /// ended them.
+    ///
+    /// This is the visibility half of the leak fix, and it earns its place by
+    /// what it would have done: the count was 1, then 5, then 20, then 69 over
+    /// eight days, and nothing ever said so — the first signal the operator got
+    /// was a machine with 56 MB of RAM free and 27 GB of swap in use. A number
+    /// on the second leaked tab makes that a nuisance instead of an outage.
+    /// Silent when the sweep found nothing, which is the normal case.
+    func announceSweep(sessions: Int) {
+        guard sessions > 0 else { return }
+        let body = sessions == 1
+            ? "1 sessão ficou rodando depois que o app fechou. Encerrada agora."
+            : "\(sessions) sessões ficaram rodando depois que o app fechou. Encerradas agora."
+        Self.trace("sweep de boot: \(sessions)")
+        if canAlert {
+            let content = UNMutableNotificationContent()
+            content.title = "Forge — sobras da execução anterior"
+            content.body = body
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "boot-sweep",
+                                             content: content, trigger: nil))
+        } else {
+            postBanner(title: "Forge — sobras da execução anterior", subtitle: "", body: body)
+        }
+    }
+
     /// Forget a gate so a later one with the same id could be announced again.
     func forget(_ id: String) {
         announced.remove(id)
