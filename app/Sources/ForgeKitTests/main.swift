@@ -2387,6 +2387,83 @@ test("fechar a sessão encerra e descarta") {
     assertEqual(TerminalLifecycle.action(for: .sessionClosed), .terminateAndDiscard)
 }
 
+// Este bloco existe porque o teste acima passou verde enquanto 69 sessões
+// vazavam. Ele afirma a DECISÃO (.terminateAndDiscard) e nada sobre o efeito —
+// e o efeito era matar 1 processo de 6. O que segue afirma o conjunto.
+print("\nTerminalReaping (fechar a aba tem que levar a aba inteira)")
+
+// A aba real medida em 2026-09-02, ttys078 = dev 42. Três process groups:
+// o shell de login, o claude com seus MCP servers, e o shell do gitstatusd
+// que o init já adotou (ppid=1).
+let abaReal: [TerminalProcess] = [
+    TerminalProcess(pid: 87979, ppid: 468,   tty: 42),  // -zsh -l   pgid 87979
+    TerminalProcess(pid: 90892, ppid: 87979, tty: 42),  // claude    pgid 90892
+    TerminalProcess(pid: 92507, ppid: 90892, tty: 42),  // npm exec context7-mcp
+    TerminalProcess(pid: 92508, ppid: 90892, tty: 42),  // npm exec playwright/mcp
+    TerminalProcess(pid: 93744, ppid: 92507, tty: 42),  // node context7
+    TerminalProcess(pid: 88023, ppid: 1,     tty: 42),  // -zsh -l adotado pelo init
+    TerminalProcess(pid: 90756, ppid: 88023, tty: 42),  // gitstatusd
+    TerminalProcess(pid: 16920, ppid: 14575, tty: 77),  // claude de OUTRA aba
+    TerminalProcess(pid: 1,     ppid: 0,     tty: TerminalReaping.noTTY),
+    TerminalProcess(pid: 372,   ppid: 1,     tty: TerminalReaping.noTTY),  // daemon
+]
+
+test("leva os três process groups da aba, inclusive o reparentado ao init") {
+    let v = TerminalReaping.victims(onTTY: 42, among: abaReal)
+    assertEqual(v, [87979, 88023, 90756, 90892, 92507, 92508, 93744],
+                "o kill(shellPid) do SwiftTerm pegava só o 87979 — 1 de 7")
+}
+
+test("não encosta em processo de outra aba") {
+    let v = TerminalReaping.victims(onTTY: 42, among: abaReal)
+    assertFalse(v.contains(16920), "16920 é a ttys077, outra sessão")
+}
+
+test("pty ilegível não varre NADA — nem os daemons sem terminal") {
+    // A falha que importa: `noTTY` é o e_tdev de todo daemon da máquina. Se
+    // ele servisse de seletor, fechar uma aba cujo childfd já foi zerado
+    // derrubaria o sistema em vez do tab.
+    assertEqual(TerminalReaping.victims(onTTY: TerminalReaping.noTTY, among: abaReal), [])
+}
+
+test("init e o kernel nunca são sinalizados") {
+    let comInit = abaReal + [TerminalProcess(pid: 1, ppid: 0, tty: 42),
+                             TerminalProcess(pid: 0, ppid: 0, tty: 42)]
+    let v = TerminalReaping.victims(onTTY: 42, among: comInit)
+    assertFalse(v.contains(1))
+    assertFalse(v.contains(0))
+}
+
+test("o próprio Forge é poupado mesmo estando no tty") {
+    let comApp = abaReal + [TerminalProcess(pid: 468, ppid: 1, tty: 42)]
+    let v = TerminalReaping.victims(onTTY: 42, among: comApp, protecting: [468])
+    assertFalse(v.contains(468))
+}
+
+test("a escalada é SIGTERM e depois SIGKILL") {
+    // Medido: 38 das 39 sessões órfãs ignoraram o SIGTERM. Um único sinal
+    // deixa quase tudo vivo e parece ter funcionado.
+    assertEqual(TerminalReaping.escalation.map(\.signal), [SIGTERM, SIGKILL])
+    assertGreater(TerminalReaping.escalation[0].graceSeconds, 0,
+                  "sem carência o KILL chega antes de o TERM ter chance")
+}
+
+test("sobra de execução anterior é achada pelo marcador, não pela idade") {
+    let ttys = TerminalReaping.leftoverTTYs(among: abaReal, owned: []) { pid in
+        pid == 87979 || pid == 90892
+    }
+    assertEqual(ttys, [42])
+}
+
+test("pty de sessão viva do app nunca entra na varredura de boot") {
+    let ttys = TerminalReaping.leftoverTTYs(among: abaReal, owned: [42]) { _ in true }
+    assertEqual(ttys, [77], "42 é nossa; 77 é sobra")
+}
+
+test("sem processo marcado, o boot não varre nada") {
+    assertEqual(TerminalReaping.leftoverTTYs(among: abaReal, owned: []) { _ in false }, [])
+}
+
 print("\nTerminalFocus (qual sessão a tela mostra)")
 
 test("a seleção vale enquanto a sessão existir") {
