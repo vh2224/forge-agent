@@ -394,13 +394,13 @@ test('exact host argv from every canonical rendered resolver block resolves to t
   }
 }));
 
-test('the real runtime refusal is unconditional and distinct from a codex-native advisory', () => withFixture((fixture) => {
+test('supported cross-host delivery and Codex-native delivery are both advisory', () => withFixture((fixture) => {
   const refused = runPosture('codex', 'claude', fixture);
-  assert.strictEqual(refused.dispatch_decision, 'refuse');
-  assert.strictEqual(refused.dispatch_allowed, false);
-  assert.strictEqual(refused.dispatch_reason_code, 'codex-claude-unroutable');
-  assert.match(refused.dispatch_hint, /worker Codex roteável/);
-  assert.match(refused.dispatch_hint, /host Claude/);
+  assert.strictEqual(refused.dispatch_decision, 'advisory');
+  assert.strictEqual(refused.dispatch_allowed, true);
+  assert.strictEqual(refused.dispatch_reason_code, 'runtime-posture-observed');
+  assert.match(refused.dispatch_hint, /sidecar/);
+  assert.match(refused.dispatch_hint, /Claude/);
 
   // The FORGE_RUNTIME_ENFORCE escape was removed: setting it must change nothing
   // in a real spawned resolver process.
@@ -418,7 +418,7 @@ test('simulated native not-spawned makes one declared same-family sidecar transi
   const initial = dispatchResolver.composeRuntimePosture(dispatchResolver.runtimeFields({
     hostRuntime: 'codex',
     workerEngine: 'codex',
-  }, 'codex'), {});
+  }, 'codex'), 'execute-task');
   assert.strictEqual(initial.worker_mode, 'native');
   assert.strictEqual(initial.dispatch_allowed, true);
 
@@ -437,7 +437,7 @@ test('simulated native not-spawned makes one declared same-family sidecar transi
     workerEngine: initial.resolved_worker_engine,
     workerMode: finalMode,
     sidecarDeclared,
-  }, 'codex'), {});
+  }, 'codex'), 'execute-task');
   assert.strictEqual(transitionCount, 1);
   assert.strictEqual(transitioned.worker_mode, 'sidecar');
   assert.strictEqual(transitioned.sidecar_declared, true);

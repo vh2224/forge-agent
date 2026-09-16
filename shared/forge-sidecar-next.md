@@ -1,5 +1,12 @@
 # Sidecar dispatch — executable Branch codex / Branch D (forge-next)
 
+> Bidirectional entry: for Claude sidecars and artifact units on either engine,
+> read `shared/forge-bidirectional-sidecar.md` first and use its unit adapter.
+> This supported branch takes precedence over the historical Codex-only
+> conditions below; never apply their implicit Claude fallback to this branch.
+> The resolver and transport share `forge-transport-capabilities.js`.
+
+
 > **Loaded on demand.** Extracted VERBATIM from `skills/forge-next/SKILL.md` on 2026-08-23
 > (context diagnosis) — same rationale as `shared/forge-sidecar-auto.md`: a 0%-use path priced
 > into every orchestrator turn. Read ONLY after the resolver gate, when

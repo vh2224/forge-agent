@@ -12,6 +12,20 @@ From `$ARGUMENTS`:
 - `auto` → tell the user: "Use `/forge-auto` para modo autônomo." and stop.
 - Anything else → treat as STEP MODE (ignore unknown args)
 
+## Bidirectional delivery
+
+After the resolver allowance gate, a Claude sidecar or any artifact unit on
+Codex uses `shared/forge-bidirectional-sidecar.md` and
+`scripts/forge-unit-sidecar.js`. This branch precedes the historical Codex-only
+Branch C/D conditions below. Read that shared contract in full before dispatch;
+keep the controller-selected unit and snapshot. Supported artifact units are
+research-milestone, research-slice, discuss-milestone, discuss-slice,
+plan-milestone, complete-slice, complete-milestone and plan-check. Execution and
+slice planning on Claude use the same entrypoint with their distinct contracts.
+Native delivery remains native. Unsupported auxiliary units stop specifically.
+After successful housekeeping, acknowledge the unit using the loop adapter's
+`complete` command before requesting `next`; never discard/reset its snapshot.
+
 ## Bootstrap guard
 
 ```bash

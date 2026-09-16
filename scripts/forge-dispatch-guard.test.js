@@ -78,7 +78,7 @@ test('posture map is deeply frozen and covers exactly four quadrants', () => {
   }
 });
 
-test('only codex to claude has enforcing posture', () => {
+test('all four identities have observed posture; units determine delivery', () => {
   const postures = Object.fromEntries(EXPECTED_LEGS.map((leg) => [
     leg,
     guard.RUNTIME_POSTURE_MAP[leg].posture,
@@ -86,7 +86,7 @@ test('only codex to claude has enforcing posture', () => {
   assert.deepStrictEqual(postures, {
     'claude→claude': 'observe',
     'claude→codex': 'observe',
-    'codex→claude': 'enforce',
+    'codex→claude': 'observe',
     'codex→codex': 'observe',
   });
 });
@@ -134,12 +134,12 @@ test('observe posture is always advisory and allowed', () => {
   }
 });
 
-test('the enforced leg refuses, and the verdict names no suppression', () => {
+test('a sidecar without its unit contract refuses, and the verdict names no suppression', () => {
   const result = evaluate('codex', 'claude');
   assert.strictEqual(result.posture, 'enforce');
   assert.strictEqual(result.decision, 'refuse');
   assert.strictEqual(result.dispatch_allowed, false);
-  assert.strictEqual(result.reason_code, 'codex-claude-unroutable');
+  assert.strictEqual(result.reason_code, 'unsupported-sidecar-unit');
   assert.strictEqual('enforcement_enabled' in result, false);
   assert.strictEqual('suppressed_action' in result, false);
 });
@@ -148,12 +148,12 @@ test('the enforced leg refuses, and the verdict names no suppression', () => {
 // (every skill gates its sidecar on a codex worker, and the only --engine claude
 // occurrence in forge-xllm.js is its own rejection message), so an "allowed"
 // verdict for this leg could never be honoured by anything downstream.
-test('no environment value unlocks the enforced leg', () => {
+test('no environment value unlocks a sidecar without its unit contract', () => {
   const baseline = JSON.stringify(evaluate('codex', 'claude'));
   for (const value of ['0', 0, '00', 'false', '', ' 0 ', 'off', '1']) {
     const attempted = evaluate('codex', 'claude', { FORGE_RUNTIME_ENFORCE: value });
     assert.strictEqual(attempted.decision, 'refuse',
-      `value ${JSON.stringify(value)} must not unlock the enforced leg`);
+      `value ${JSON.stringify(value)} must not unlock a sidecar without its unit contract`);
     assert.strictEqual(attempted.dispatch_allowed, false, JSON.stringify(value));
     assert.strictEqual(JSON.stringify(attempted), baseline,
       `value ${JSON.stringify(value)} changed the verdict at all`);
@@ -180,11 +180,11 @@ test('real CLI process refuses codex to claude with status 1 and actionable hint
   const child = runCli('codex', 'claude');
   const result = jsonOutput(child);
   assert.strictEqual(child.status, 1, child.stderr);
-  assert.strictEqual(result.reason_code, 'codex-claude-unroutable');
+  assert.strictEqual(result.reason_code, 'unsupported-sidecar-unit');
   assert.strictEqual(result.decision, 'refuse');
   assert.strictEqual(result.dispatch_allowed, false);
-  assert(/worker Codex roteável/.test(result.hint), result.hint);
-  assert(/host Claude/.test(result.hint), result.hint);
+  assert(/No sidecar contract/.test(result.hint), result.hint);
+  assert(/unit_type/.test(result.hint), result.hint);
 });
 
 test('real CLI process keeps codex to codex advisory with status 0', () => {

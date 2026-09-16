@@ -28,6 +28,8 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   CLEANUP_FAILED: 'claude-cleanup-failed',
   MISSING_PROMPT: 'claude-missing-prompt',
   INVALID_OPTIONS: 'claude-invalid-options',
+  AUTH_FAILED: 'claude-auth-failed',
+  CANCELLED: 'claude-cancelled',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -80,6 +82,8 @@ function sidecarError(code) {
     [CLAUDE_SIDECAR_REASON_CODES.CLEANUP_FAILED]: 'The Claude prompt directory could not be removed.',
     [CLAUDE_SIDECAR_REASON_CODES.MISSING_PROMPT]: 'The Claude sidecar was given no task prompt.',
     [CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS]: 'The Claude sidecar received an invalid launch option.',
+    [CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED]: 'Claude authentication failed. Repair the default account with forge-accounts before retrying.',
+    [CLAUDE_SIDECAR_REASON_CODES.CANCELLED]: 'The Claude worker was cancelled.',
   };
   const error = new Error(messages[code] || 'Claude sidecar failure.');
   error.code = code;
@@ -184,7 +188,7 @@ function isValidMustHave(item) {
   return true;
 }
 
-function parseExecuteCandidate(stdout) {
+function parseExecuteCandidate(stdout, validateCandidate) {
   let classified;
   try {
     classified = classifyReturn(stdout);
@@ -201,6 +205,12 @@ function parseExecuteCandidate(stdout) {
     payload = JSON.parse(classified.fields.result_json);
   } catch {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
+  }
+  if (validateCandidate) {
+    if (!payload || classified.status !== payload.status || !validateCandidate(payload)) {
+      throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
+    }
+    return { candidate: payload, classification: classified };
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
     || !EXECUTE_STATUS_VALUES.has(payload.status)
@@ -234,7 +244,8 @@ function defaultTerminate(child) {
   try { child.kill('SIGKILL'); } catch { /* the owned process already exited */ }
 }
 
-function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat, heartbeatIntervalMs }) {
+function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat, heartbeatIntervalMs, validateCandidate, signal }) {
+  if (signal && signal.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   const startedAt = Date.now();
   let child;
   try {
@@ -258,6 +269,10 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     let stderrBytes = 0;
     let stdoutChunks = [];
     let stderrChunks = [];
+    const cancel = () => terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
+    if (signal) signal.addEventListener('abort', cancel, { once: true });
+    process.once('SIGINT', cancel);
+    process.once('SIGTERM', cancel);
 
     const timer = setTimeout(() => {
       terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT));
@@ -287,6 +302,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       // the turn and keep the adapter's event loop alive.
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       heartbeatTimer = null;
+      if (signal) signal.removeEventListener('abort', cancel);
+      process.removeListener('SIGINT', cancel);
+      process.removeListener('SIGTERM', cancel);
       handler(value);
     }
 
@@ -330,11 +348,20 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     });
     child.once('close', (code, signal) => {
       if (settled || terminalFailurePending) return;
+      const stderr = Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
+      const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+      if ((code !== 0 || !stdout.includes('---GSD-WORKER-RESULT---')) && /\b(?:401|403)\b|authentication[_ -]?(?:failed|error)|invalid[_ -]?(?:token|api[_ -]?key)|please (?:run )?\/login/i.test(stderr + '\n' + stdout)) {
+        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED));
+        return;
+      }
       if (code !== 0) {
         finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO));
         return;
       }
-      const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+      if (stdout.includes(env[TOKEN_ENV])) {
+        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT));
+        return;
+      }
       // Captured stderr is intentionally never returned or interpolated into an
       // error. A provider that repeats its environment cannot leak through us.
       stderrChunks = [];
@@ -345,7 +372,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
 
       let parsed;
       try {
-        parsed = parseExecuteCandidate(stdout);
+        parsed = parseExecuteCandidate(stdout, validateCandidate);
       } catch (error) {
         finish(reject, error);
         return;
@@ -419,6 +446,10 @@ async function invokeClaudeSidecar(opts) {
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
   const model = normalizeModel(options.model);
+  const effort = options.effort;
+  if (effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
+    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  }
   let tempDir = null;
   let primaryError = null;
 
@@ -434,11 +465,20 @@ async function invokeClaudeSidecar(opts) {
     }
 
     const { cmd, prefixArgs } = resolveClaudeCommand(sourceEnv);
-    const args = [...prefixArgs, ...(model ? ['--model', model] : []), '-p', instruction];
+    const args = [...prefixArgs, ...(model ? ['--model', model] : []),
+      ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
+      ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
+      ...(effort ? ['--effort', effort] : []),
+      '--no-session-persistence', '--disable-slash-commands',
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+      '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
+      '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
+      ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
+      '-p', instruction];
     const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
     return await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
-      onHeartbeat, heartbeatIntervalMs,
+      onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
     });
   } catch (error) {
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync

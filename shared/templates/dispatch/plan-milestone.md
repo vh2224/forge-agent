@@ -14,8 +14,7 @@ Read: {WORKING_DIR}/.gsd/REQUIREMENTS.md
 
 ## Delivered Milestones (history)
 
-<!-- pre-S05: monolith → projection. .gsd/LEDGER.md is now rendered by forge-projection.js from .gsd/ledger/ fragments. Use projection output; fall back to monolith if fragments dir absent. -->
-Read stdout of: `node {WORKING_DIR}/scripts/forge-projection.js --render ledger --cwd {WORKING_DIR}` (fragment-store aware; falls back to .gsd/LEDGER.md monolith if no fragments exist)
+Read: `node {WORKING_DIR}/scripts/forge-projection.js --render ledger --cwd {WORKING_DIR}` stdout (falls back to .gsd/LEDGER.md without fragments).
 
 ## Directory Conventions & Asset Map
 
@@ -43,5 +42,7 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SCOPE.md
 
 ## Instructions
 Write M###-ROADMAP.md with 4-10 slices, risk tags, depends, demo sentences, and a Boundary Map section.
+Slice format: `- [ ] **S01: Title**`.
+Read-only sidecar: return artifacts for parent validation/publication.
 Respect directory conventions and reusable assets from Coding Standards when placing new code.
 Return ---GSD-WORKER-RESULT---.

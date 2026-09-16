@@ -159,6 +159,7 @@ function killProcessTree(child) {
  */
 function startAppServerTurn(options) {
   const opts = options || {};
+  if (opts.signal && opts.signal.aborted) return Promise.reject(sessionError('app-server cancelled'));
   const {
     cmd,
     args = [],
@@ -311,6 +312,9 @@ function startAppServerTurn(options) {
     };
 
     const cleanup = () => {
+      if (opts.signal) opts.signal.removeEventListener('abort', cancel);
+      process.removeListener('SIGINT', cancel);
+      process.removeListener('SIGTERM', cancel);
       if (timer) clearTimeout(timer);
       timer = null;
       if (child && child.stdin) {
@@ -328,6 +332,10 @@ function startAppServerTurn(options) {
       const tail = tailBytes(stderrTail, STDERR_TAIL_BYTES);
       settle(reject, sessionError(message, { ...details, stderrTail: tail }), stopChild);
     };
+    const cancel = () => fail('app-server cancelled', null, true);
+    if (opts.signal) opts.signal.addEventListener('abort', cancel, { once: true });
+    process.once('SIGINT', cancel);
+    process.once('SIGTERM', cancel);
     const send = (message) => {
       if (settled || !child || !child.stdin || child.stdin.destroyed) return false;
       try {

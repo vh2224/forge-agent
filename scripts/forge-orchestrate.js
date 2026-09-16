@@ -12,7 +12,7 @@ const forgeController = require('./forge-unit-controller.js');
 const forgeRuntime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = '1.0.0';
-const OPERATIONS = Object.freeze(['init', 'status', 'next']);
+const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete']);
 const OUTCOMES = Object.freeze(['needs_input', 'completed', 'blocked', 'no_work', 'failed']);
 const REASON_CODES = Object.freeze([
   'initialized', 'already-initialized', 'status-ready', 'selected', 'unit-selected',
@@ -64,6 +64,36 @@ function unit(value) {
 }
 function base(operation, outcome, reason, input) {
   return { protocol_version: PROTOCOL_VERSION, operation, outcome, reason_code: reason, milestone: input.milestone, unit: null, state: null, events: [], boundary: null };
+}
+
+// A delivery receipt does not release a lease by itself. Commit through the
+// same controller transaction that began the selected unit, then acknowledge it
+// to the loop. Replaying a stale loop snapshot uses the same completion key.
+function complete(inputValue) {
+  const input = normalizeInput(inputValue);
+  const selected = unit(inputValue.unit);
+  const key = inputValue.begin_key;
+  if (!selected || !key || !inputValue.result || inputValue.result.status !== 'done') {
+    return base('complete', 'blocked', 'unit-result-required', input);
+  }
+  const begun = forgeController.readJson(forgeController.transactionFile(input.cwd, key));
+  if (!begun || begun.unit.key !== selected.key || begun.milestone !== input.milestone
+    || begun.host_runtime !== input.host_runtime || begun.action !== 'begin') {
+    return base('complete', 'blocked', 'unit-identity-mismatch', input);
+  }
+  try {
+    const committed = forgeController.complete(input.cwd, {
+      milestone: input.milestone, unit: selected, host_runtime: input.host_runtime,
+      owner_token: input.owner_token, generation: begun.lease_generation,
+      idempotency_key: `${key}:complete`,
+      result: { status: 'succeeded', output: inputValue.result },
+    }, { prefsReader: input.prefsReader });
+    const output = base('complete', 'completed', committed.reason, input);
+    output.unit = selected; output.boundary = committed.transaction.boundary;
+    return output;
+  } catch (cause) {
+    return base('complete', 'blocked', cause.code || 'completion-failed', input);
+  }
 }
 function publicState(value) {
   if (!value) return null;
@@ -286,6 +316,7 @@ function run(operation, input, options) {
   if (!OPERATIONS.includes(operation)) throw error('invalid-request', `operation inválida: ${operation}`);
   if (operation === 'init') return init(input);
   if (operation === 'status') return status(input);
+  if (operation === 'complete') return complete(input);
   return next(input, options);
 }
 function parseArgs(argv) {
