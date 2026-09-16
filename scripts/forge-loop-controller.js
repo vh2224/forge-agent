@@ -8,7 +8,7 @@ const runtime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = runtime.PROTOCOL_VERSION;
 const MODES = Object.freeze(['auto', 'task']);
-const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status']);
+const COMMANDS = Object.freeze(['next', 'pause', 'resume', 'status', 'complete']);
 const TERMINAL = new Set(['completed', 'blocked', 'failed']);
 
 function error(code, message) { const value = new Error(message); value.code = code; return value; }
@@ -145,6 +145,16 @@ function status(state, input, orchestrate) {
   const delegated = orchestrate.run('status', delegateInput(input, state));
   return publicResult('status', state, 'status', delegated.reason_code || 'status-ready', 'observe', delegated);
 }
+function complete(state, input, orchestrate) {
+  if (state.lifecycle !== 'dispatch_required') return publicResult('complete', state, 'blocked', 'dispatch-not-pending', 'stop', null);
+  const decision = state.last_decision && state.last_decision.controller_result;
+  const beginKey = decision && decision.details && decision.details.transaction && decision.details.transaction.idempotency_key;
+  const delegated = orchestrate.run('complete', { ...delegateInput(input, state), unit: state.current_unit, begin_key: beginKey });
+  if (delegated.outcome !== 'completed') return publicResult('complete', state, 'blocked', delegated.reason_code, 'stop', delegated);
+  state.current_unit = null; state.last_decision = null; state.boundary = delegated.boundary;
+  state.lifecycle = state.mode === 'task' ? 'completed' : 'idle';
+  return publicResult('complete', state, 'completed', delegated.reason_code, state.lifecycle === 'idle' ? 'continue' : 'stop', delegated);
+}
 function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   const state = validateSnapshot(snapshot);
   const command = String(commandValue || '').toLowerCase();
@@ -156,6 +166,7 @@ function advance(snapshot, commandValue, input = {}, dependencies = {}) {
   if (command === 'next') return next(state, input, orchestrate);
   if (command === 'pause') return pause(state, input, orchestrate);
   if (command === 'resume') return resume(state, input, orchestrate);
+  if (command === 'complete') return complete(state, input, orchestrate);
   return status(state, input, orchestrate);
 }
 

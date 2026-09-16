@@ -214,23 +214,23 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
-  runCase('non-routable GPT tier resolves to the Claude model that can actually run', () => {
+  runCase('artifact tier preserves the configured GPT model', () => {
     const f = mkFixture({ prefsJsonc: '{"tier_models":{"max":"gpt-5.6-sol"}}' });
     const r = dispatch(f, { unitType: 'plan-milestone' });
-    assertEqual(r.model, 'claude-fable-5', 'non-routable max phase uses canonical Claude model');
-    assertEqual(r.alias, 'fable', 'the selected model is applicable by Agent()');
-    assertEqual(r.engine, 'claude', 'engine names the runtime that actually executes');
-    assertEqual(r.dispatch_engine, 'claude', 'non-routable phase never advertises a missing sidecar');
-    assertEqual(r.engine_reason, 'non-routable-family-substituted:claude', 'reason names the substitution');
+    assertEqual(r.model, 'gpt-5.6-sol', 'artifact phase keeps its configured model');
+    assertEqual(r.alias, null, 'external model has no native Claude alias');
+    assertEqual(r.engine, 'gpt', 'engine names the runtime that actually executes');
+    assertEqual(r.dispatch_engine, 'codex', 'artifact phase uses its Codex transport');
+    assertEqual(r.engine_reason, 'tier-model-family:gpt', 'reason names the substitution');
     cleanup(f);
   });
 
-  runCase('non-routable mixed tier keeps configured Claude members and removes external ones', () => {
+  runCase('artifact tier preserves the complete cross-engine chain', () => {
     const f = mkFixture({ prefsJsonc: '{"tier_models":{"max":["gpt-5.6-sol","claude-opus-5"]}}' });
     const r = dispatch(f, { unitType: 'plan-milestone' });
-    assertEqual(r.model, 'claude-opus-5', 'configured Claude fallback becomes the applied primary');
-    assertEqual(r.chain_len, 1, 'unexecutable GPT member is absent from the phase chain');
-    assertEqual(r.dispatch_engine, 'claude', 'mixed tier remains an in-process dispatch');
+    assertEqual(r.model, 'gpt-5.6-sol', 'configured primary remains first');
+    assertEqual(r.chain_len, 2, 'both configured members remain in the chain');
+    assertEqual(r.dispatch_engine, 'codex', 'mixed tier selects the first configured engine');
     cleanup(f);
   });
 
@@ -390,7 +390,7 @@ withHermeticHome((cliEnv) => {
       'effort_reason names the crash, not unit-type:<x> — the unit type did not decide this effort');
   });
 
-  runCase('degraded contracts remain parseable and cannot restore the forbidden Codex-to-Claude leg', () => {
+  runCase('degraded contracts remain parseable and refuse delivery without fallback', () => {
     const degraded = degradedContract([
       '--unit-type', 'execute-task',
       '--host-runtime', 'codex',
@@ -400,7 +400,7 @@ withHermeticHome((cliEnv) => {
     assertEqual(roundTrip.host_runtime, 'codex', 'degraded verdict keeps the requested Codex host');
     assertEqual(roundTrip.resolved_worker_engine, 'claude', 'degraded route still resolves the effective Claude worker');
     assertEqual(roundTrip.dispatch_allowed, false, 'degradation does not fail open over the enforcing leg');
-    assertEqual(roundTrip.dispatch_reason_code, 'codex-claude-unroutable', 'degradation uses the guard reason');
+    assertEqual(roundTrip.dispatch_reason_code, 'routing-runtime-error', 'degradation uses the guard reason');
     assertEqual(roundTrip.dispatch_posture, 'enforce', 'degradation keeps the frozen enforcing posture');
     assertEqual(roundTrip.dispatch_decision, 'refuse', 'degradation exposes the refusal decision');
     assert(typeof roundTrip.dispatch_hint === 'string' && roundTrip.dispatch_hint.trim() !== '',
@@ -771,12 +771,12 @@ withHermeticHome((cliEnv) => {
     const quadrants = [
       { host: 'claude', dispatch: 'claude', mode: 'native', posture: 'observe', allowed: true, reason: 'runtime-posture-observed', decision: 'advisory' },
       { host: 'claude', dispatch: 'codex', mode: 'sidecar', posture: 'observe', allowed: true, reason: 'runtime-posture-observed', decision: 'advisory' },
-      { host: 'codex', dispatch: 'claude', mode: 'sidecar', posture: 'enforce', allowed: false, reason: 'codex-claude-unroutable', decision: 'refuse' },
+      { host: 'codex', dispatch: 'claude', mode: 'sidecar', posture: 'observe', allowed: true, reason: 'runtime-posture-observed', decision: 'advisory' },
       { host: 'codex', dispatch: 'codex', mode: 'native', posture: 'observe', allowed: true, reason: 'runtime-posture-observed', decision: 'advisory' },
     ];
     for (const quadrant of quadrants) {
       const validated = runtimeFields({ hostRuntime: quadrant.host }, quadrant.dispatch);
-      const r = composeRuntimePosture(validated, {});
+      const r = composeRuntimePosture(validated, 'execute-task');
       const label = `${quadrant.host}->${quadrant.dispatch}`;
       assertEqual(r.host_runtime, quadrant.host, `${label} keeps the concrete host`);
       assertEqual(r.worker_engine, quadrant.dispatch, `${label} projects the effective route`);
@@ -818,13 +818,13 @@ withHermeticHome((cliEnv) => {
     assert(parsed && parsed.worker_engine === 'claude', 'host-runtime CLI projects the Claude route', cli.stdout);
     assert(parsed && parsed.worker_mode === 'sidecar', 'host-runtime CLI derives cross-host sidecar mode', cli.stdout);
     assert(parsed && parsed.resolved_worker_engine === 'claude', 'host-runtime CLI resolves the projected route', cli.stdout);
-    assert(parsed && parsed.dispatch_allowed === false, 'host-runtime CLI refuses the enforcing Codex-to-Claude leg', cli.stdout);
-    assert(parsed && parsed.dispatch_reason_code === 'codex-claude-unroutable', 'host-runtime CLI carries the stable guard reason', cli.stdout);
+    assert(parsed && parsed.dispatch_allowed === true, 'host-runtime CLI allows supported Codex-to-Claude delivery', cli.stdout);
+    assert(parsed && parsed.dispatch_reason_code === 'runtime-posture-observed', 'host-runtime CLI carries the stable guard reason', cli.stdout);
     assertEqual(Object.keys(parsed || {}).slice(0, 11).join(','), 'engine,model,alias,tier,domain,route_source,chain,chain_len,reason,effort,effort_reason', 'host-runtime preserves ordered legacy prefix');
     cleanup(f);
   });
 
-  runCase('no environment value turns the enforcing leg into an allowance', () => {
+  runCase('environment variables cannot change supported cross-host delivery', () => {
     const f = mkFixture({});
     const args = ['--json', '--unit-type', 'execute-task', '--host-runtime', 'codex', '--cwd', f.dir];
     const enforcingEnv = { ...cliEnv };
@@ -832,10 +832,10 @@ withHermeticHome((cliEnv) => {
     const refusedChild = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: enforcingEnv });
     const refused = JSON.parse(refusedChild.stdout);
     assertEqual(refusedChild.status, 0, 'dispatch refusal remains a parseable resolver verdict, not a resolver crash');
-    assertEqual(refused.dispatch_allowed, false, 'the Codex-to-Claude leg is refused');
-    assertEqual(refused.dispatch_reason_code, 'codex-claude-unroutable', 'refusal uses the exact stable reason');
-    assertEqual(refused.dispatch_posture, 'enforce', 'the verdict exposes enforcing posture');
-    assertEqual(refused.dispatch_decision, 'refuse', 'the verdict exposes the refusal decision');
+    assertEqual(refused.dispatch_allowed, true, 'the supported Codex-to-Claude unit is allowed');
+    assertEqual(refused.dispatch_reason_code, 'runtime-posture-observed', 'refusal uses the exact stable reason');
+    assertEqual(refused.dispatch_posture, 'observe', 'the verdict exposes enforcing posture');
+    assertEqual(refused.dispatch_decision, 'advisory', 'the verdict exposes the refusal decision');
     assert(typeof refused.dispatch_hint === 'string' && refused.dispatch_hint.trim() !== '',
       'the refusal includes an actionable hint', refused.dispatch_hint);
     assert(!('dispatch_suppressed_action' in refused),
@@ -862,7 +862,7 @@ withHermeticHome((cliEnv) => {
   // routine advisory both `dispatch_decision: advisory`, distinguishable only by a
   // marker field. There is now no suppressed state at all — the refusal is a
   // refusal, and the only advisory is a genuinely observed leg.
-  runCase('an enforced leg and a routine advisory are different verdicts, not two advisories', () => {
+  runCase('supported cross-host and native routes both export an allowance', () => {
     const f = mkFixture({});
     const enforcingEnv = { ...cliEnv };
     delete enforcingEnv.FORGE_RUNTIME_ENFORCE;
@@ -879,9 +879,9 @@ withHermeticHome((cliEnv) => {
     // (b) routine advisory: an observed leg, no enforcement involved at all.
     const routine = run(enforcingEnv, ['--worker-engine', 'native']);
 
-    assertEqual(enforced.dispatch_decision, 'refuse', 'the enforced leg refuses');
-    assertEqual(enforced.dispatch_allowed, false, 'the enforced leg is not dispatchable');
-    assertEqual(enforced.dispatch_posture, 'enforce', 'the frozen posture is untouched');
+    assertEqual(enforced.dispatch_decision, 'advisory', 'supported cross-host delivery is advisory');
+    assertEqual(enforced.dispatch_allowed, true, 'supported cross-host delivery is allowed');
+    assertEqual(enforced.dispatch_posture, 'observe', 'cross-host delivery is observed');
     assertEqual(routine.dispatch_decision, 'advisory', 'routine observation surfaces as advisory');
     assertEqual(routine.dispatch_allowed, true, 'the observed leg dispatches');
     assertEqual(routine.dispatch_posture, 'observe', 'the routine leg is an observed one');
@@ -896,8 +896,8 @@ withHermeticHome((cliEnv) => {
         return [line.slice(0, split), line.slice(split + 1)];
       }));
     };
-    assertEqual(exportsFor(enforced).DISPATCH_ALLOWED, "'false'",
-      'the enforced leg exports a false allowance the consumer gate stops on');
+    assertEqual(exportsFor(enforced).DISPATCH_ALLOWED, "'true'",
+      'supported cross-host delivery exports a true allowance');
     assertEqual(exportsFor(routine).DISPATCH_ALLOWED, "'true'",
       'the observed leg exports a true allowance');
     assert(!('DISPATCH_SUPPRESSED_ACTION' in exportsFor(routine)),
@@ -953,10 +953,10 @@ withHermeticHome((cliEnv) => {
     assertEqual(crossHost.worker_mode, 'sidecar', 'explicit sidecar mode survives Codex routing');
     assertEqual(crossHost.resolved_worker_engine, 'claude', 'explicit worker target is resolved without family fallback');
     assertEqual(crossHost.worker_reason_code, 'sidecar-declared', 'runtime validation accepts the declared sidecar');
-    assertEqual(crossHost.dispatch_allowed, false, 'guard posture refuses the otherwise representable Codex-to-Claude leg');
-    assertEqual(crossHost.dispatch_reason_code, 'codex-claude-unroutable', 'guard refusal owns the public dispatch reason');
-    assertEqual(crossHost.dispatch_posture, 'enforce', 'cross-host guard result carries enforcing posture');
-    assertEqual(crossHost.dispatch_decision, 'refuse', 'cross-host guard result carries refusal decision');
+    assertEqual(crossHost.dispatch_allowed, true, 'guard allows the supported Codex-to-Claude unit');
+    assertEqual(crossHost.dispatch_reason_code, 'runtime-posture-observed', 'guard observation owns the public dispatch reason');
+    assertEqual(crossHost.dispatch_posture, 'observe', 'supported cross-host unit carries observed posture');
+    assertEqual(crossHost.dispatch_decision, 'advisory', 'supported cross-host unit carries advisory decision');
 
     const modeOnly = dispatch(f, {
       unitType: 'execute-task', hostRuntime: 'codex', workerMode: 'native',

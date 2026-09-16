@@ -31,3 +31,4 @@ Explore the codebase. Produce S##-RESEARCH.md with:
 - Coding Conventions Detected (naming, structure, imports, error patterns)
 After writing RESEARCH.md, update .gsd/CODING-STANDARDS.md with new findings (Asset Map, conventions).
 Return ---GSD-WORKER-RESULT---.
+With a read-only sidecar delivery contract, return the research document content as an artifact; the parent publishes it after validation.

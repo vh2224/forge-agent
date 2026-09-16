@@ -4,6 +4,7 @@
 // This guard owns posture only. Identity normalization, including the
 // native -> host resolution rule, remains canonical in forge-runtime.
 const { resolveWorkerIdentity } = require('./forge-runtime.js');
+const { capability } = require('./forge-transport-capabilities.js');
 
 const REASON_CODES = Object.freeze({
   RUNTIME_POSTURE_OBSERVED: 'runtime-posture-observed',
@@ -26,9 +27,9 @@ const RUNTIME_POSTURE_MAP = Object.freeze({
     hint: 'Dispatch observed: the Codex worker is routed from the Claude host.',
   }),
   'codex→claude': Object.freeze({
-    posture: 'enforce',
-    reason_code: REASON_CODES.CODEX_CLAUDE_UNROUTABLE,
-    hint: 'Use um worker Codex roteável ou execute sob um host Claude.',
+    posture: 'observe',
+    reason_code: REASON_CODES.RUNTIME_POSTURE_OBSERVED,
+    hint: 'Claude delivery uses the account-backed sidecar contract for the selected unit.',
   }),
   'codex→codex': Object.freeze({
     posture: 'observe',
@@ -67,9 +68,8 @@ function errorResult(reasonCode, hint, identity) {
 }
 
 /**
- * Evaluate one explicit dispatch identity. Pure: posture is a total function of
- * the identity alone. There is no environment input and therefore no escape:
- * an enforced leg refuses on every host, in every shell, unconditionally.
+ * Evaluate an explicit dispatch identity and its unit delivery contract.
+ * Pure: no environment variable can enable a missing transport contract.
  */
 function evaluateDispatchGuard(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -106,10 +106,18 @@ function evaluateDispatchGuard(input) {
   }
 
   const policy = RUNTIME_POSTURE_MAP[leg];
-  // An enforced posture is a refusal, full stop. No environment variable, flag
-  // or caller argument can turn it into an allowance: the only leg mapped to
-  // `enforce` has no delivery path, so an "allowed" verdict for it would be a
-  // dispatch nobody can honour.
+  const sidecar = input.worker_mode === 'sidecar' || identity.host_runtime !== identity.resolved_engine;
+  // Legacy identity-only callers can inspect posture. Actual dispatch callers
+  // pass unit_type and receive the same capability decision as the transport.
+  if (sidecar && (input.unit_type !== undefined || leg === 'codex→claude')) {
+    const transport = capability(identity.resolved_engine, input.unit_type);
+    if (!transport.supported) return {
+      ...errorResult(transport.reason_code, transport.hint, identity),
+      posture: 'enforce', decision: 'refuse',
+    };
+  }
+  // Keep the posture axis for callers; capability refusal above is independent
+  // of the historical identity-only observation map.
   const refusalActive = policy.posture === 'enforce';
   return {
     host_runtime: identity.host_runtime,
@@ -135,7 +143,7 @@ function parseArgs(argv) {
       parsed.json = true;
       continue;
     }
-    if (flag !== '--host-runtime' && flag !== '--worker-engine') {
+    if (flag !== '--host-runtime' && flag !== '--worker-engine' && flag !== '--unit-type') {
       throw new RuntimeGuardInputError(`Opção desconhecida: ${flag}`);
     }
     if (seen.has(flag)) throw new RuntimeGuardInputError(`${flag} só pode ser informado uma vez`);
@@ -145,7 +153,8 @@ function parseArgs(argv) {
     }
     seen.add(flag);
     if (flag === '--host-runtime') parsed.host_runtime = value;
-    else parsed.worker_engine = value;
+    else if (flag === '--worker-engine') parsed.worker_engine = value;
+    else parsed.unit_type = value;
     index += 1;
   }
   if (!parsed.host_runtime || !parsed.worker_engine) {

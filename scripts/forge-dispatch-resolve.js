@@ -273,7 +273,7 @@ function runtimeFields(opts, dispatchEngine) {
 // canonical forge-runtime error into a different guard diagnostic.  Posture is
 // a total function of the runtime identity: no environment is consulted here or
 // in the guard, so the same leg yields the same verdict in every shell.
-function composeRuntimePosture(runtime) {
+function composeRuntimePosture(runtime, unitType) {
   if (!runtime || runtime.dispatch_allowed !== true) {
     const reasonCode = runtime && runtime.dispatch_reason_code
       ? runtime.dispatch_reason_code
@@ -291,6 +291,8 @@ function composeRuntimePosture(runtime) {
   const guard = evaluateDispatchGuard({
     host_runtime: runtime.host_runtime,
     worker_engine: runtime.worker_engine,
+    worker_mode: runtime.worker_mode,
+    unit_type: unitType,
   });
   return {
     ...runtime,
@@ -342,13 +344,9 @@ function resolveDispatch(opts, environment) {
   });
   let chain = Array.isArray(route.chain) ? route.chain : [];
   let nonRoutableSubstitution = false;
-  // Only execute-task and plan-slice have non-Claude adapters. Every other
-  // phase is dispatched through Agent(), whose model parameter accepts only a
-  // mapped Claude alias. Keep the resolver aligned with that executable
-  // boundary: retain configured Claude members when possible, otherwise use
-  // the canonical Claude model for the tier. Reporting the external family
-  // here would make telemetry claim Codex while an in-process Claude agent ran.
-  if (unitType !== 'execute-task' && unitType !== 'plan-slice') {
+  // Supported document units now have transport contracts on both engines;
+  // preserve their configured tier chain rather than filtering out GPT models.
+  if (!require('./forge-transport-capabilities').UNIT_MODES[unitType]) {
     const executable = claudeExecutableChain(chain, tier);
     chain = executable.chain;
     nonRoutableSubstitution = executable.substituted;
@@ -437,7 +435,7 @@ function resolveDispatch(opts, environment) {
   // Resolve this after routing/model-family work. The result is deliberately
   // additive: legacy engine/dispatch_engine/chain retain their 3.1.4 meaning.
   const dispatchEngine = dispatchEngineFor(engine);
-  const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine));
+  const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine), unitType);
   return {
     engine,
     model,
@@ -525,7 +523,10 @@ function degradedContract(args, environment) {
   } catch { /* minimal ordered contract below */ }
   const model = chain[0] ? chain[0].id : '';
   const alias = modelToAlias(model).alias;
-  const runtime = composeRuntimePosture(runtimeFields(parsed, dispatchEngineFor('claude')));
+  const runtime = { ...runtimeFields(parsed, dispatchEngineFor('claude')),
+    dispatch_allowed: false, dispatch_reason_code: 'routing-runtime-error',
+    dispatch_hint: 'Repair the resolver error before dispatch. No fallback worker was selected.',
+    dispatch_posture: 'enforce', dispatch_decision: 'refuse' };
   return {
     engine: 'claude', model, alias, tier, domain: 'default', route_source: 'tier_models',
     chain, chain_len: chain.length, reason: 'routing-runtime-error; tier_models',

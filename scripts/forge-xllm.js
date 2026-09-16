@@ -599,6 +599,8 @@ function buildExecutePrompt(planText, extras) {
     '    naming, reuse, lint expectations).',
     '',
     'HARD PROHIBITIONS (violating any of these fails the task):',
+    ' Never deploy or publish. Sidecar delivery never authorizes release, commit or deployment.',
+    ...(extras && extras.constraints ? [' Operator constraints: ' + JSON.stringify(extras.constraints)] : []),
     // D5: HEAD != START_SHA and assertNoProtectedSidecarChanges are the real guards.
     // A total git ban kept the git-commit-required environment classification alive
     // for read-only commands (6/13 false positives in M017), so execute permits only
@@ -1069,9 +1071,11 @@ function invokeCodexAppServer(opts) {
         sandboxPolicy: buildAppServerSandboxPolicy(sandbox || 'workspace-write', process.platform, writableRoots),
       };
       if (model) params.model = model;
+      if (opts.effort) params.effort = opts.effort;
       return params;
     },
     onSpawn,
+    signal: opts.signal,
   }).then((session) => {
     stopHeartbeat();
     let contextHealth = null;
@@ -1384,11 +1388,11 @@ function normalizePublicSidecarOptions(opts) {
 }
 
 function assertEngineSupportsMode(mode, engine) {
+  if (!['execute', 'plan', 'challenge', 'defend', 'rebuttal'].includes(mode)) {
+    throw boundaryError('unsupported-sidecar-mode', `No sidecar contract for mode ${mode}`);
+  }
   if (!ENGINE_ENUM.includes(engine)) {
     throw new Error(`unknown --engine "${engine}" (expected codex|agy|claude)`);
-  }
-  if (engine === 'claude' && mode !== 'execute') {
-    throw new Error(`--engine claude supports only execute (not ${mode})`);
   }
   if (engine === 'agy' && (mode === 'execute' || mode === 'plan')) {
     throw new Error(`--engine agy supports only review modes (not ${mode})`);
@@ -1432,6 +1436,9 @@ function invokeEngine(engine, opts) {
     throw new Error(`invokeEngine is the review router: sandbox must be '${CAPABILITY_SANDBOX_MODE.readonly}' (got ${JSON.stringify(opts.sandbox)})`);
   }
   if (engine === 'agy') return Promise.resolve(invokeAgy(opts));
+  if (engine === 'claude') return invokeClaudeJson(opts, value => value && value.status === 'done'
+    && (validateObjections(value.output) || validateVerdicts(value.output, DEFEND_VERDICT_ENUM)
+      || validateVerdicts(value.output, VERDICT_ENUM)), true).then(value => JSON.stringify(value.output));
   return invokeCodexAppServer(opts).then((output) => {
     const raw = output.finalText || output.agentTexts;
     // Anti-silence floor: an empty turn is a FAILURE, never an empty review accepted
@@ -1442,6 +1449,16 @@ function invokeEngine(engine, opts) {
     }
     return raw;
   });
+}
+
+// Transport envelope is distinct from each unit's validated result contract.
+// Review's status-less JSON lives under output; planning carries its own status.
+async function invokeClaudeJson(opts, validateCandidate, review = false) {
+  const prompt = opts.prompt + '\n\nReturn only this worker-result block:\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <single-line JSON>\n---END-RESULT---\n'
+    + (review ? 'Use {"status":"done","output":<the requested review JSON>} as result_json.' : 'Use the requested result JSON as result_json.');
+  const output = await invokeClaudeSidecar({ ...opts, prompt, readOnly: true,
+    validateCandidate, terminateChild: terminateOwnedProcessTree });
+  return output.candidate;
 }
 
 // ── Normalization ─────────────────────────────────────────────────────────────
@@ -1685,6 +1702,14 @@ function terminateOwnedProcessTree(child, platform = process.platform, runner = 
 function authorizeSidecar(mode, opts = {}) {
   const readOnly = mode !== 'execute';
   const workerEngine = opts.engine || 'codex';
+  if (workerEngine !== 'agy') {
+    const unitType = opts.unitType || ({ execute: 'execute-task', plan: 'plan-slice',
+      challenge: 'review-challenger', defend: 'review-advocate', rebuttal: 'review-rebuttal' })[mode];
+    const guard = require('./forge-dispatch-guard').evaluateDispatchGuard({
+      host_runtime: opts.hostRuntime, worker_engine: workerEngine, worker_mode: 'sidecar', unit_type: unitType,
+    });
+    if (!guard.dispatch_allowed) throw boundaryError(guard.reason_code, guard.hint);
+  }
   const decision = dispatchPolicy.decide({
     role: readOnly ? 'orchestrator' : 'worker',
     host_runtime: opts.hostRuntime, worker_engine: workerEngine,
@@ -1741,7 +1766,7 @@ async function runChallenge(opts) {
   const diffText = acquireDiff(opts.diffCmd, cwd);
   const prompt = buildChallengePrompt(diffText);
   const rawContent = await invokeEngine(engine, {
-    prompt, schema: challengeSchema, cwd, model: opts.model, timeoutSecs, envPolicy: opts.envPolicy || 'minimal',
+    prompt, schema: challengeSchema, cwd, model: opts.model, effort: opts.effort, signal: opts.signal, timeoutSecs, envPolicy: opts.envPolicy || 'minimal',
     // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
     sandbox: CAPABILITY_SANDBOX_MODE.readonly,
   });
@@ -1803,6 +1828,8 @@ async function runDefend(opts) {
     schema: verdictSchema(DEFEND_VERDICT_ENUM),
     cwd,
     model: opts.model,
+    effort: opts.effort,
+    signal: opts.signal,
     timeoutSecs,
     envPolicy: opts.envPolicy || 'minimal',
     // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
@@ -1851,6 +1878,8 @@ async function runRebuttal(opts) {
     schema: verdictSchema(VERDICT_ENUM),
     cwd,
     model: opts.model,
+    effort: opts.effort,
+    signal: opts.signal,
     timeoutSecs,
     envPolicy: opts.envPolicy || 'minimal',
     // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
@@ -2052,6 +2081,7 @@ async function runExecute(opts) {
     contextText,
     capability: cap.capability,
     outputChannel: engine === 'claude' ? 'worker-result-block' : 'json-only',
+    constraints: opts.constraints,
   });
   const inputTokens = countTokens(prompt);
 
@@ -2097,6 +2127,11 @@ async function runExecute(opts) {
       prompt,
       cwd,
       model: opts.model,
+      effort: opts.effort,
+      readOnly: sandbox === 'read-only',
+      signal: opts.signal,
+      contextRoot,
+      writableRoots,
       timeoutSecs,
       onHeartbeat,
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
@@ -2118,6 +2153,8 @@ async function runExecute(opts) {
       schema: executeSchema,
       cwd,
       model: opts.model,
+      effort: opts.effort,
+      signal: opts.signal,
       timeoutSecs,
       onHeartbeat,
       sandbox,
@@ -2369,16 +2406,21 @@ async function runPlan(opts) {
   // whose absence here would be READ by a consumer — the Branch D emitters read the
   // transport off this result file, so omitting it would make every plan-slice
   // dispatch report `no-transport-field` forever.
-  const appServerOutput = await invokeCodexAppServer({
+  const planOptions = {
     prompt,
     schema: planSchema,
     cwd,
     model: opts.model,
+    effort: opts.effort,
+    signal: opts.signal,
     timeoutSecs,
     onHeartbeat,
     sandbox: CAPABILITY_SANDBOX_MODE.readonly,
     envPolicy: opts.envPolicy || 'minimal',
-  });
+  };
+  const appServerOutput = engine === 'claude'
+    ? { finalText: JSON.stringify(await invokeClaudeJson(planOptions, validatePlanResult)), transport: { kind: 'claude-cli', version: 'unknown' } }
+    : await invokeCodexAppServer(planOptions);
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   // Anti-silence floor: an empty turn is a FAILURE, never an empty plan accepted in
   // silence. `codex exec` enforced this as "codex -o file is empty"; the app-server
@@ -2566,6 +2608,7 @@ if (require.main === module) {
 
   const cwd = args.cwd ? path.resolve(args.cwd) : process.cwd();
   const model = typeof args.model === 'string' ? args.model : undefined;
+  const effort = typeof args.effort === 'string' ? args.effort : undefined;
 
   if (mode === 'plan') {
     // Timeout precedence: --timeout flag > workers.timeout pref > default. Prefs read
@@ -2578,7 +2621,7 @@ if (require.main === module) {
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'plan');
 
-    runPlan({ planContextFile: args['plan-context'], resultFile, cwd, engine, hostRuntime, sidecarDeclared, model, timeoutSecs, envPolicy, dispatchId })
+    runPlan({ planContextFile: args['plan-context'], resultFile, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, dispatchId })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         // Best-effort marker only after the target independently passes the same
@@ -2621,7 +2664,7 @@ if (require.main === module) {
       catch (error) { process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
     }
 
-    runExecute({ planFile: args.plan, resultFile, cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
+    runExecute({ planFile: args.plan, resultFile, cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         let safeResultFile = null;
@@ -2667,11 +2710,11 @@ if (require.main === module) {
   const timeoutSecs = args.timeout ? Number(args.timeout) : DEFAULT_TIMEOUT_SECS;
   let pending;
   if (mode === 'challenge') {
-    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, timeoutSecs, envPolicy });
+    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy });
   } else if (mode === 'defend') {
-    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, timeoutSecs, envPolicy });
+    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy });
   } else {
-    pending = runRebuttal({ inputFile: args.input, cwd, engine, hostRuntime, sidecarDeclared, model, timeoutSecs, envPolicy });
+    pending = runRebuttal({ inputFile: args.input, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy });
   }
   pending
     .then((result) => {

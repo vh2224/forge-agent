@@ -1,5 +1,12 @@
 # Forge Dispatch — Shared Dispatch Control Flow
 
+> Bidirectional entry: for Claude sidecars and artifact units on either engine,
+> read `shared/forge-bidirectional-sidecar.md` first and use its unit adapter.
+> This supported branch takes precedence over the historical Codex-only
+> conditions below; never apply their implicit Claude fallback to this branch.
+> The resolver and transport share `forge-transport-capabilities.js`.
+
+
 Canonical control-flow contract shared by `/forge-auto`, `/forge-next`, and `/forge-task`.
 Executable prompt bodies live under `shared/templates/dispatch/` and are rendered by
 `scripts/forge-prompt.js`; the historical template bodies below are compatibility reference

@@ -1,5 +1,15 @@
 # Forge Review — Dialectic Confrontation
 
+> Host-aware review delivery: after resolving pairing, Claude reviewer/advocate
+> on a Codex host uses the existing external challenge/defend/rebuttal branch
+> with `XLLM_ENGINE=claude` (or `XLLM_ENGINE_ADVOCATE=claude`). Preserve the
+> resolved model and effort and pass the actual host plus `--sidecar-declared`.
+> Conversely, Codex on a Claude host uses `--engine codex`. Same-host native
+> review remains native. This takes precedence over the older statements below
+> that equate Claude with in-process delivery regardless of host. No pairing is
+> changed. See `shared/forge-bidirectional-sidecar.md` for the capability matrix.
+
+
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
 
 Authoritative spec for the **review gate**: a two-agent confrontation on a completed diff, run from the orchestrator context. Two consumers bind it at their own boundary:

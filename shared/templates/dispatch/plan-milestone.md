@@ -43,5 +43,7 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SCOPE.md
 
 ## Instructions
 Write M###-ROADMAP.md with 4-10 slices, risk tags, depends, demo sentences, and a Boundary Map section.
+Use the controller-readable checklist format `- [ ] **S01: Title**` for each slice.
+If the parent supplies a read-only sidecar delivery contract, return the document content through that contract; the parent materializes it.
 Respect directory conventions and reusable assets from Coding Standards when placing new code.
 Return ---GSD-WORKER-RESULT---.

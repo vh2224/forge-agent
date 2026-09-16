@@ -26,7 +26,7 @@ function parseArgs(argv = process.argv.slice(2)) {
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), errorOutput = process.stderr.write.bind(process.stderr)) {
   try {
     const args = parseArgs(argv);
-    if (args.help) { output('Usage: forge-long-workflow-adapter.js --host claude|codex --mode auto|task --command next|pause|resume|status --json JSON [--snapshot JSON]\n'); return 0; }
+    if (args.help) { output('Usage: forge-long-workflow-adapter.js --host claude|codex --mode auto|task --command next|pause|resume|status|complete --json JSON [--snapshot JSON]\n'); return 0; }
     const input = JSON.parse(args.json || '{}'); const snapshot = args.snapshot ? JSON.parse(args.snapshot) : null;
     output(`${JSON.stringify(invoke(args.host, args.mode, args.command, input, snapshot))}\n`); return 0;
   } catch (cause) { errorOutput(`forge-long-workflow-adapter: ${cause.code || 'failed'}: ${cause.message}\n`); return 1; }

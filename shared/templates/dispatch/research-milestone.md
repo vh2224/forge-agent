@@ -30,4 +30,5 @@ Explore the codebase. Produce M###-RESEARCH.md with:
 - Asset Map — Reusable Code (functions, hooks, services to reuse)
 - Coding Conventions Detected (naming, structure, imports, error patterns)
 After writing RESEARCH.md, update .gsd/CODING-STANDARDS.md with new findings (Asset Map, conventions).
+With a read-only sidecar delivery contract, return both document contents as artifacts; the parent publishes them after validation.
 Return ---GSD-WORKER-RESULT---.
