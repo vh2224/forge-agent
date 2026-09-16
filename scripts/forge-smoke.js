@@ -17619,7 +17619,7 @@ function smokeHostWorkerParityAcceptance() {
   try {
     // ── A. S01 — same-family native derivation and explicit sidecar ────────
     const nativeCodex = dispatchResolver.composeRuntimePosture(
-      dispatchResolver.runtimeFields({ hostRuntime: 'codex' }, 'codex'), {});
+      dispatchResolver.runtimeFields({ hostRuntime: 'codex' }, 'codex'), 'execute-task');
     assert(nativeCodex.worker_engine === 'codex' && nativeCodex.worker_mode === 'native'
       && nativeCodex.dispatch_allowed === true,
     '(A/S01) omitted worker axes derive codex→codex native and allowed');
@@ -17628,7 +17628,7 @@ function smokeHostWorkerParityAcceptance() {
       hostRuntime: 'codex', workerEngine: 'codex', workerMode: 'sidecar', sidecarDeclared: true,
     };
     const declaredSidecar = dispatchResolver.composeRuntimePosture(
-      dispatchResolver.runtimeFields(declaredInput, 'codex'), {});
+      dispatchResolver.runtimeFields(declaredInput, 'codex'), 'execute-task');
     const sameFamilyProblems = (value) => {
       const problems = [];
       if (!value || value.host_runtime !== 'codex' || value.resolved_worker_engine !== 'codex') problems.push('identity');
@@ -17643,7 +17643,7 @@ function smokeHostWorkerParityAcceptance() {
     const undeclaredInput = { ...declaredInput };
     delete undeclaredInput.sidecarDeclared;
     const undeclaredSidecar = dispatchResolver.composeRuntimePosture(
-      dispatchResolver.runtimeFields(undeclaredInput, 'codex'), {});
+      dispatchResolver.runtimeFields(undeclaredInput, 'codex'), 'execute-task');
     assert(undeclaredSidecar.dispatch_allowed === false
       && undeclaredSidecar.dispatch_reason_code === 'implicit-recursion-refused',
     '(A/S01) undeclared codex→codex sidecar is refused with the stable reason');
@@ -17655,15 +17655,15 @@ function smokeHostWorkerParityAcceptance() {
     const expectedQuadrants = [
       { host: 'claude', worker: 'claude', mode: 'native', allowed: true, posture: 'observe' },
       { host: 'claude', worker: 'codex', mode: 'sidecar', allowed: true, posture: 'observe' },
-      { host: 'codex', worker: 'claude', mode: 'sidecar', allowed: false, posture: 'enforce' },
+      { host: 'codex', worker: 'claude', mode: 'sidecar', allowed: true, posture: 'observe' },
       { host: 'codex', worker: 'codex', mode: 'native', allowed: true, posture: 'observe' },
     ];
-    const materializeQuadrant = (row, environment = {}) => {
+    const materializeQuadrant = (row, unitType = 'execute-task') => {
       const runtime = dispatchResolver.runtimeFields({
         hostRuntime: row.host,
         workerEngine: row.worker,
       }, row.worker);
-      const posture = dispatchResolver.composeRuntimePosture(runtime, environment);
+      const posture = dispatchResolver.composeRuntimePosture(runtime, unitType);
       return {
         host: posture.host_runtime,
         worker: posture.worker_engine,
@@ -17683,36 +17683,41 @@ function smokeHostWorkerParityAcceptance() {
           if (actual[field] !== expected[field]) problems.push(`${expected.host}->${expected.worker}:${field}`);
         }
         if (expected.host === 'codex' && expected.worker === 'claude'
-          && actual.reason !== 'codex-claude-unroutable') {
+          && actual.reason !== 'runtime-posture-observed') {
           problems.push('codex->claude:reason');
         }
       }
       return problems;
     };
     assert(quadrantProblems(actualQuadrants).length === 0,
-      '(B/S02) runtimeFields + composeRuntimePosture materialize the four default quadrants and hybrid posture');
+      '(B/S02) runtimeFields + composeRuntimePosture allow supported units in all four quadrants');
 
-    // The FORGE_RUNTIME_ENFORCE escape was removed (PR #164 review): posture is a
-    // total function of the identity, so no environment can move the enforcing leg.
+    // Environment overrides cannot enable an unsupported unit or disable a supported one.
     const enforceBefore = process.env.FORGE_RUNTIME_ENFORCE;
     const enforcingRow = expectedQuadrants.find((row) => row.host === 'codex' && row.worker === 'claude');
-    const enforcedBaseline = JSON.stringify(materializeQuadrant(enforcingRow));
-    for (const value of ['0', '00', 'false', '', 'off']) {
-      const attempted = materializeQuadrant(enforcingRow, { FORGE_RUNTIME_ENFORCE: value });
-      assert(attempted.allowed === false && attempted.posture === 'enforce'
-        && JSON.stringify(attempted) === enforcedBaseline,
-        `(B/S02) FORGE_RUNTIME_ENFORCE=${JSON.stringify(value)} must not unlock codex->claude`,
-        JSON.stringify(attempted));
+    const supportedBaseline = JSON.stringify(materializeQuadrant(enforcingRow));
+    try {
+      for (const value of ['0', '00', 'false', '', 'off']) {
+        process.env.FORGE_RUNTIME_ENFORCE = value;
+        const attempted = materializeQuadrant(enforcingRow, 'review-fix');
+        assert(attempted.allowed === false && attempted.posture === 'enforce'
+          && attempted.reason === 'unsupported-sidecar-unit'
+          && JSON.stringify(materializeQuadrant(enforcingRow)) === supportedBaseline,
+          `(B/S02) FORGE_RUNTIME_ENFORCE=${JSON.stringify(value)} preserves unit capability checks`,
+          JSON.stringify(attempted));
+      }
+    } finally {
+      if (enforceBefore === undefined) delete process.env.FORGE_RUNTIME_ENFORCE;
+      else process.env.FORGE_RUNTIME_ENFORCE = enforceBefore;
     }
-    // POSITIVE CONTROL: the same detector still bites when the leg IS allowed, so
-    // the assertion above is not passing because the detector went blind.
-    const forgedAllowance = actualQuadrants.map((row) => (
-      row.host === 'codex' && row.worker === 'claude' ? { ...row, allowed: true } : row
+    // POSITIVE CONTROL: restoring the old blanket refusal must fail the detector.
+    const forgedRefusal = actualQuadrants.map((row) => (
+      row.host === 'codex' && row.worker === 'claude' ? { ...row, allowed: false } : row
     ));
-    assert(quadrantProblems(forgedAllowance).includes('codex->claude:allowed'),
-      '(B/S02) POSITIVE CONTROL: the default-table detector rejects an allowed codex->claude leg');
+    assert(quadrantProblems(forgedRefusal).includes('codex->claude:allowed'),
+      '(B/S02) POSITIVE CONTROL: the matrix detector rejects a blanket codex->claude refusal');
     assert(process.env.FORGE_RUNTIME_ENFORCE === enforceBefore,
-      '(B/S02) the posture probe never mutates process.env');
+      '(B/S02) the posture probe restores process.env');
 
     // ── C. S03 — account-backed Claude adapter and credential boundary ────
     const TOKEN_ENV = forgeAccounts.TOKEN_ENV;
