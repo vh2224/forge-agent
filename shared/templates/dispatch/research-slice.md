@@ -29,6 +29,6 @@ Explore the codebase. Produce S##-RESEARCH.md with:
 - Relevant Code sections
 - Asset Map — Reusable Code (functions, hooks, services to reuse)
 - Coding Conventions Detected (naming, structure, imports, error patterns)
-After writing RESEARCH.md, update .gsd/CODING-STANDARDS.md with new findings (Asset Map, conventions).
+Update .gsd/CODING-STANDARDS.md with asset/convention findings.
 Return ---GSD-WORKER-RESULT---.
-With a read-only sidecar delivery contract, return the research document content as an artifact; the parent publishes it after validation.
+Read-only sidecar: return artifacts for parent validation/publication.
