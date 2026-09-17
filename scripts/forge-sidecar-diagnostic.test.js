@@ -189,9 +189,15 @@ test('interrupted publication preserves validated receipt and resumes without an
   const p = payload();
   p.artifacts.push({ path: optionalPath, content: '# Standards' });
   const r = request(block(p));
+  // macOS temp paths can be aliases (/var -> /private/var). Exercise that
+  // difference on every host: production canonicalizes cwd before publication.
+  const alias = path.join(root, `workspace-alias-${sequence}`);
+  fs.symlinkSync(r.cwd, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  r.cwd = alias;
+  const interruptedTarget = path.join(fs.realpathSync(r.cwd), optionalPath);
   const originalRename = fs.renameSync;
   fs.renameSync = (from, to) => {
-    if (to === path.join(r.cwd, optionalPath)) { const error = Error('private-sentinel'); error.code = 'EACCES'; throw error; }
+    if (to === interruptedTarget) { const error = Error('private-sentinel'); error.code = 'EACCES'; throw error; }
     return originalRename(from, to);
   };
   try { await assert.rejects(unit.runUnitSidecar(r), e => e.code === 'EACCES'); }
