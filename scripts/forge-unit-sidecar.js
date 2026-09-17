@@ -11,8 +11,12 @@ const { invokeClaudeSidecar } = require('./forge-claude-sidecar');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
 const { capability } = require('./forge-transport-capabilities');
 const { renderPrompt } = require('./forge-prompt');
+const { diagnostic } = require('./forge-sidecar-diagnostic');
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
+const MAX_ARTIFACT_BYTES = 512 * 1024;
+// Leave room for the envelope and provider prose within the 1 MiB stream cap.
+const MAX_ARTIFACT_PAYLOAD_BYTES = 900 * 1024;
 
 function fail(code, hint) { const error = new Error(hint || code); error.code = code; throw error; }
 function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
@@ -20,7 +24,8 @@ function atomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   fs.writeFileSync(tmp, value, { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, file);
+  try { fs.renameSync(tmp, file); }
+  finally { try { fs.unlinkSync(tmp); } catch { /* preserve the publication error */ } }
 }
 function json(file, value) { atomic(file, JSON.stringify(value, null, 2) + '\n'); }
 function fileHash(file) { return fs.existsSync(file) ? hash(fs.readFileSync(file)) : null; }
@@ -63,21 +68,31 @@ function target(root, relative) {
   }
   return current;
 }
-function validateArtifacts(value, allowed, required) {
-  if (!value || !['done', 'partial', 'blocked'].includes(value.status)
+function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity) {
+  const bad = reason => ({ ok: false, reason });
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !['done', 'partial', 'blocked'].includes(value.status)
     || typeof value.summary !== 'string' || !value.summary.trim()
     || !Array.isArray(value.questions) || !value.questions.every(q => typeof q === 'string' && q.trim())
-    || !Array.isArray(value.artifacts) || value.artifacts.length > 32
-    || Object.keys(value).some(k => !['status', 'summary', 'questions', 'artifacts'].includes(k))) return false;
+    || !Array.isArray(value.artifacts)
+    || Object.keys(value).some(k => !['status', 'summary', 'questions', 'artifacts'].includes(k))) return bad('schema-invalid');
+  if (value.artifacts.length > 32) return bad('artifact-limit');
   const seen = new Set();
   for (const artifact of value.artifacts) {
-    if (!artifact || !allowed.includes(artifact.path) || seen.has(artifact.path)
-      || typeof artifact.content !== 'string' || !artifact.content.trim()
-      || Buffer.byteLength(artifact.content) > 512 * 1024
-      || Object.keys(artifact).some(k => !['path', 'content'].includes(k))) return false;
+    if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)
+      || typeof artifact.path !== 'string' || typeof artifact.content !== 'string' || !artifact.content.trim()
+      || Object.keys(artifact).some(k => !['path', 'content'].includes(k))) return bad('schema-invalid');
+    if (!allowed.includes(artifact.path)) return bad('artifact-path-invalid');
+    if (seen.has(artifact.path)) return bad('artifact-duplicate');
+    if (Buffer.byteLength(artifact.content) > MAX_ARTIFACT_BYTES) return bad('artifact-limit');
     seen.add(artifact.path);
   }
-  return value.status !== 'done' || (value.questions.length === 0 && required.every(p => seen.has(p)));
+  if (value.status === 'done' && value.questions.length) return bad('questions-on-done');
+  if (value.status === 'done' && !required.every(p => seen.has(p))) return bad('artifact-missing');
+  if (Buffer.byteLength(JSON.stringify(value)) > maxPayloadBytes) return bad('payload-limit');
+  return { ok: true };
+}
+function validateArtifacts(value, allowed, required, maxPayloadBytes) {
+  return inspectArtifacts(value, allowed, required, maxPayloadBytes).ok;
 }
 function markChecked(content, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -122,13 +137,46 @@ async function runUnitSidecar(request) {
   const receiptFile = `${resultFile}.receipt.json`;
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
+  const eventsFile = target(root, '.gsd/forge/events.jsonl');
+  function event(status, reasonCode, detail) {
+    fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
+    fs.appendFileSync(eventsFile, JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
+      workflow_id: r.workflowId, dispatch_id: dispatchId, unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`,
+      host_runtime: route.host_runtime, worker_engine: route.resolved_worker_engine,
+      worker_mode: 'sidecar', model, tier: route.tier, effort: route.effort,
+      status, ...(reasonCode ? { reason_code: reasonCode } : {}),
+      ...(detail ? { diagnostic: diagnostic(detail.reason, detail) } : {}) }) + '\n');
+  }
+  function recordFailure(error) {
+    const code = error.code || 'sidecar-unit-failed';
+    const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    const detail = diagnostic(error.diagnostic?.reason || (code === 'untrusted-output-barrier'
+      ? 'control-data-output' : record.phase === 'ready' ? 'publication-failed' : 'adapter-failed'), error.diagnostic);
+    const failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
+      error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
+      recovery: record.phase === 'ready' ? 'replay-publication' : 'operator-required',
+      failed_at: new Date().toISOString() };
+    // Never overwrite the validated response if publication was interrupted.
+    if (record.phase !== 'ready') json(receiptFile, { ...record, phase: 'failed', failure });
+    json(resultFile, failure);
+    event('failed', code, detail);
+  }
   const existing = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
   if (existing) {
     if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
     if (existing.phase === 'ready') {
-      const result = materialize(r, existing);
-      json(resultFile, result);
-      return result;
+      try {
+        const result = materialize(r, existing);
+        json(resultFile, result);
+        return result;
+      } catch (error) { recordFailure(error); throw error; }
+    }
+    if (existing.phase === 'failed') {
+      const error = new Error('Recorded sidecar attempt failed; no provider was relaunched.');
+      error.code = existing.failure.reason_code;
+      error.diagnostic = diagnostic(existing.failure.diagnostic?.reason, existing.failure.diagnostic);
+      json(resultFile, existing.failure);
+      throw error;
     }
     fail('sidecar-attempt-interrupted', 'Inspect the recorded heartbeat/process and recover this attempt before retrying with a new dispatch id. No worker was relaunched.');
   }
@@ -149,15 +197,6 @@ async function runUnitSidecar(request) {
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before }), { flag: 'wx', mode: 0o600 });
-  const eventsFile = target(root, '.gsd/forge/events.jsonl');
-  function event(status, reasonCode) {
-    fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
-    fs.appendFileSync(eventsFile, JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
-      workflow_id: r.workflowId, dispatch_id: dispatchId, unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`,
-      host_runtime: route.host_runtime, worker_engine: route.resolved_worker_engine,
-      worker_mode: 'sidecar', model, tier: route.tier, effort: route.effort,
-      status, ...(reasonCode ? { reason_code: reasonCode } : {}) }) + '\n');
-  }
   event('started');
   const dispatchEvent = require('./forge-dispatch-event').buildDispatchEvent({
     unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`, milestone: r.milestoneId,
@@ -190,30 +229,39 @@ async function runUnitSidecar(request) {
       artifacts = [{ path: loc.required[0], content: result.slice_plan.content },
         ...result.task_plans.map(p => ({ path: `${loc.slice}/tasks/${p.id}-PLAN.md`, content: p.content }))];
     } else if (transport.mode === 'artifacts') {
+      const payloadLimit = options.engine === 'claude' ? MAX_ARTIFACT_PAYLOAD_BYTES : Infinity;
       const base = r.promptFile ? fs.readFileSync(r.promptFile, 'utf8') : renderPrompt({
         unitType: r.unitType, cwd: root, milestoneId: r.milestoneId, sliceId: r.sliceId,
-        effort: route.effort, autoCommit: false,
+        description: r.description, unitEffort: route.effort, autoCommit: false,
       }).prompt;
       const prompt = base + '\n\n## Sidecar delivery contract (overrides direct-write instructions above)\n'
         + 'Read-only worker. Return artifact CONTENT, never write files, run commands, commit, tag, push, deploy, clean up, update STATE or acquire leases. The orchestrator owns these actions. '
         + 'Do not assume answers to human decisions. Return partial and questions when a decision is required. '
         + 'Operator constraints: ' + JSON.stringify(r.constraints || { auto_commit: false, deploy: false })
         + '\nRequired paths on done: ' + JSON.stringify(loc.required) + '\nOnly allowed artifact paths: ' + JSON.stringify(loc.allowed)
+        + `\nLimits: at most 32 artifacts; each content at most ${MAX_ARTIFACT_BYTES} UTF-8 bytes.`
+        + (Number.isFinite(payloadLimit) ? ` The entire serialized result JSON must fit in ${payloadLimit} UTF-8 bytes.` : '')
+        + ' Return partial with questions if complete delivery cannot fit; never truncate an artifact.'
         + '\nReturn JSON matching: ' + JSON.stringify(schema);
-      const validate = value => validateArtifacts(value, loc.allowed, loc.required);
       xllm.authorizeSidecar('artifacts', options);
       heartbeat(null);
       if (options.engine === 'claude') {
         const output = await invokeClaudeSidecar({ ...options, prompt: prompt
-          + '\nFinish with ---GSD-WORKER-RESULT---\nstatus: <status>\nresult_json: <single-line JSON>\n---END-RESULT---',
-          readOnly: true, validateCandidate: validate, onHeartbeat: heartbeat,
+          + '\nFinish with the following envelope. Markers must be on their own lines. result_json must contain one complete JSON object (compact or multiline); escape newlines inside JSON strings. Do not wrap the JSON in Markdown fences.\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <complete JSON>\n---END-RESULT---',
+          readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         result = output.candidate;
       } else {
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
-      if (!validate(result)) fail('invalid-artifact-result');
+      const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit);
+      if (!verdict.ok) {
+        const error = new Error('Invalid artifact result.');
+        error.code = 'invalid-artifact-result';
+        error.diagnostic = diagnostic(verdict.reason);
+        throw error;
+      }
       if (r.unitType === 'plan-milestone' && result.status === 'done') {
         const roadmap = result.artifacts.find(a => a.path === loc.required[0]);
         const slices = require('./forge-status').parseRoadmap(roadmap.content).slices;
@@ -236,14 +284,12 @@ async function runUnitSidecar(request) {
     event(result.status);
     return result;
   } catch (error) {
-    const code = error.code || 'sidecar-unit-failed';
-    json(resultFile, { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
-      error_class: xllm.classifyErrorClass(error.message), failed_at: new Date().toISOString() });
-    event('failed', code);
+    recordFailure(error);
     throw error;
   }
 }
-module.exports = { schema, locations, validateArtifacts, target, markChecked, materialize, runUnitSidecar };
+module.exports = { schema, locations, validateArtifacts, inspectArtifacts, MAX_ARTIFACT_BYTES,
+  MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, runUnitSidecar };
 if (require.main === module) {
   Promise.resolve().then(() => {
     if (process.argv[2] !== '--request' || !process.argv[3]) fail('request-file-required');

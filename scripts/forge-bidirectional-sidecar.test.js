@@ -128,7 +128,7 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     await rejects(() => unit.runUnitSidecar(req), code);
     const output = fs.readFileSync(req.resultFile, 'utf8');
     assert(!output.includes(token));
-    await rejects(() => unit.runUnitSidecar(req), 'sidecar-attempt-interrupted');
+    await rejects(() => unit.runUnitSidecar(req), code);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'invocations.txt'), 'utf8'), 'spawn\n');
   }
   const waitDir = setup(); write(path.join(waitDir, 'payload.json'), { failure: 'wait' });

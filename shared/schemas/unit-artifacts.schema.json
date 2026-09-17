@@ -17,16 +17,19 @@
       ]
     },
     "summary": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
     },
     "questions": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1
       }
     },
     "artifacts": {
       "type": "array",
+      "maxItems": 32,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -36,10 +39,12 @@
         ],
         "properties": {
           "path": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "content": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           }
         }
       }
