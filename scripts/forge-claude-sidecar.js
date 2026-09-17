@@ -13,7 +13,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { resolveLaunch, TOKEN_ENV } = require('./forge-accounts');
-const { classifyReturn } = require('./forge-worker-result');
+const { parseJsonEnvelope } = require('./forge-worker-result');
+const { diagnostic } = require('./forge-sidecar-diagnostic');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
@@ -68,7 +69,7 @@ const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // published value. A callback wired without a cadence still has to beat.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15000;
 
-function sidecarError(code) {
+function sidecarError(code, reason, counts) {
   const messages = {
     [CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE]: 'No usable default Claude account is available.',
     [CLAUDE_SIDECAR_REASON_CODES.COMMAND_NOT_FOUND]: 'The Claude executable could not be started.',
@@ -87,6 +88,7 @@ function sidecarError(code) {
   };
   const error = new Error(messages[code] || 'Claude sidecar failure.');
   error.code = code;
+  if (reason) error.diagnostic = diagnostic(reason, counts);
   return error;
 }
 
@@ -189,28 +191,20 @@ function isValidMustHave(item) {
 }
 
 function parseExecuteCandidate(stdout, validateCandidate) {
-  let classified;
-  try {
-    classified = classifyReturn(stdout);
-  } catch {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
-  }
-  if (!classified || classified.shape !== 'complete'
-    || typeof classified.fields.result_json !== 'string') {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
-  }
-
-  let payload;
-  try {
-    payload = JSON.parse(classified.fields.result_json);
-  } catch {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
-  }
+  const classified = parseJsonEnvelope(stdout);
+  const invalid = reason => sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, reason,
+    { marker_count: classified.marker_count });
+  if (!classified.ok) throw invalid(classified.reason);
+  const payload = classified.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw invalid('schema-invalid');
+  if (classified.status !== payload.status) throw invalid('status-mismatch');
   if (validateCandidate) {
-    if (!payload || classified.status !== payload.status || !validateCandidate(payload)) {
-      throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
+    let verdict;
+    try { verdict = validateCandidate(payload); } catch { throw invalid('validator-failed'); }
+    if (verdict !== true && (!verdict || verdict.ok !== true)) {
+      throw invalid(verdict && typeof verdict.reason === 'string' ? verdict.reason : 'schema-invalid');
     }
-    return { candidate: payload, classification: classified };
+    return { candidate: payload, classification: { marker_count: classified.marker_count } };
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
     || !EXECUTE_STATUS_VALUES.has(payload.status)
@@ -220,7 +214,7 @@ function parseExecuteCandidate(stdout, validateCandidate) {
     || !Array.isArray(payload.files_changed)
     || !payload.files_changed.every((file) => typeof file === 'string')
     || classified.status !== payload.status) {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
+    throw invalid('schema-invalid');
   }
 
   return {
@@ -230,7 +224,7 @@ function parseExecuteCandidate(stdout, validateCandidate) {
       must_haves_status: payload.must_haves_status.map(normalizeMustHave),
       files_changed: payload.files_changed.slice(),
     },
-    classification: classified,
+    classification: { marker_count: classified.marker_count },
   };
 }
 
@@ -295,6 +289,18 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
 
     function finish(handler, value) {
       if (settled) return;
+      if (handler === reject) {
+        const reasons = {
+          'claude-empty-output': 'output-empty', 'claude-output-limit': 'output-limit',
+          'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
+          'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
+          'claude-command-not-found': 'provider-unavailable', 'claude-spawn-failed': 'provider-unavailable',
+        };
+        value.diagnostic = diagnostic(value.diagnostic?.reason || reasons[value.code], {
+          ...value.diagnostic, stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes,
+          duration_ms: Math.max(0, Date.now() - startedAt),
+        });
+      }
       settled = true;
       clearTimeout(timer);
       // Every settle path — resolve, close-nonzero, spawn error, timeout,
@@ -358,8 +364,8 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO));
         return;
       }
-      if (stdout.includes(env[TOKEN_ENV])) {
-        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT));
+      if (stdout.includes(env[TOKEN_ENV]) || stderr.includes(env[TOKEN_ENV])) {
+        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'secret-output'));
         return;
       }
       // Captured stderr is intentionally never returned or interpolated into an
@@ -373,6 +379,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       let parsed;
       try {
         parsed = parseExecuteCandidate(stdout, validateCandidate);
+        if (JSON.stringify(parsed.candidate).includes(env[TOKEN_ENV])) {
+          throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'secret-output');
+        }
       } catch (error) {
         finish(reject, error);
         return;
