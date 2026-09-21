@@ -593,3 +593,5 @@ For a new project, `/forge-init` creates the curated `.gsd/forge-prefs.jsonc` th
 `scripts/forge-prefs.js --setup-scaffold` and applies the user's `auto_commit` answer.
 The file is local and gitignored. Existing legacy `.md` preferences are preserved for
 backward compatibility; migration is handled by `/forge-update`.
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

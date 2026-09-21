@@ -231,3 +231,5 @@ Print the same format as `/forge-mcps` list output.
 ### Route: "mcps add <name>" / "mcps remove <name>"
 
 Follow the exact same logic as `/forge-mcps add <name>` and `/forge-mcps remove <name>` respectively.
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

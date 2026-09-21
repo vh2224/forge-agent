@@ -165,10 +165,7 @@ try {
   assert.match(sourceText, /host_runtime: opts\.hostRuntime/);
 
   for (const mode of ['challenge', 'defend', 'rebuttal', 'plan']) {
-    const rejected = runCli(['--mode', mode, '--engine', 'claude']);
-    assert.strictEqual(rejected.status, 2, `Claude ${mode} is rejected`);
-    assert.strictEqual(rejected.stdout, '', `Claude ${mode} keeps stdout silent`);
-    assert.match(rejected.stderr, new RegExp(`--engine claude supports only execute \\(not ${mode}\\)`));
+    assert.strictEqual(require('./forge-xllm').assertEngineSupportsMode(mode, 'claude'), 'claude');
   }
   for (const mode of ['execute', 'plan']) {
     const rejected = runCli(['--mode', mode, '--engine', 'agy']);

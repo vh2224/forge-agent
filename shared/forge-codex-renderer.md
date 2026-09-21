@@ -1,5 +1,24 @@
 # Codex renderer
 
+## Interação nativa por host
+
+O renderer inclui o contrato canônico `shared/forge-interaction.md` em
+`AGENTS.md`, agentes, skills, comandos e templates dispatch. Exemplos Claude
+de `AskUserQuestion` representam intenção: no Codex, o contrato exige adaptar
+schema, lotes, opções e multiSelect para uma ferramenta realmente exposta e
+permitida. Restrições de finalidade e modo do host prevalecem. A ferramenta
+assíncrona não resolve uma decisão ao devolver apenas um identificador pendente.
+
+`write` consulta localmente `codex features list`, com execução sem shell e
+timeout limitado, antes de acrescentar o default experimental
+`features.default_mode_request_user_input = true`. O mesmo editor conservador
+do statusline preserva configuração explícita, comentários e EOL; ambiguidades
+são reportadas como `questions-manual-merge`. `render` apenas descreve os
+artefatos base e não executa probes. Dry-run deixa a capacidade pendente com
+`questions-probe-dry-run`, sem consultar o CLI ou alterar arquivos. Veja também
+`shared/forge-install.md`. Testes de projeção e instalação validam estes
+contratos; não validam abas ou bloqueio de entrada na interface do cliente.
+
 `scripts/forge-codex-renderer.js` é a projeção nativa Codex do mesmo
 `forge-source-manifest.json` usado pelo renderer Claude. Ele gera `AGENTS.md`,
 custom agents em `CODEX_HOME/agents`, `config.toml` e um relatório de

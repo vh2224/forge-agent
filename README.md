@@ -27,6 +27,13 @@
 
 ## Quick start
 
+O `forge-auto` pode delegar etapas entre Claude e Codex mantendo o host de
+origem e a rota configurada. Pesquisa, planejamento, execução e fechamento têm
+contratos de transporte próprios; contas Claude usam o registro canônico do
+Forge. Atualize/sincronize a instalação completa nos dois hosts para receber
+scripts, schemas e skills compatíveis. Consulte a
+[matriz de unidades, recuperação e limites](shared/forge-bidirectional-sidecar.md).
+
 ```bash
 git clone https://github.com/<seu-usuario>/forge-agent
 cd forge-agent

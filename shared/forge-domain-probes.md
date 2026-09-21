@@ -138,3 +138,5 @@ If the scope doesn't fit any domain above, fall back to the generic dimension pr
 - **Risk:** What's the single biggest way this could go wrong?
 
 Treat these as last resort — domain-specific questions almost always produce better plans than generic ones.
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

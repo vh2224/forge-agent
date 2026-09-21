@@ -27,9 +27,9 @@ These are closed — do not re-open or re-debate.
 [END DATA FROM "AUTO-MEMORY"]
 
 ## Instructions
-Identify 3-5 gray areas not yet resolved. Ask them ONE AT A TIME using AskUserQuestion — do NOT dump all questions in a single text block.
-For each question, provide 2-4 concrete options derived from the project context. AskUserQuestion adds "Other" automatically — do not add it manually.
-Wait for each answer before asking the next question.
+Read `shared/forge-interaction.md` (fallback: `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md`); apply its host adapter.
+Ask 3-5 unresolved gray areas ONE AT A TIME via AskUserQuestion intent.
+Offer 2-4 contextual options; do not add Other. Wait for each answer.
 Record all answers in S##-CONTEXT.md.
 Append significant decisions to .gsd/DECISIONS.md.
 Return ---GSD-WORKER-RESULT---.

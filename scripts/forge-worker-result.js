@@ -66,6 +66,37 @@ const TAIL_CHARS = 240;
 
 // ── classifyReturn ────────────────────────────────────────────────────────────
 
+/** Strict JSON sidecar envelope, independent of the legacy scalar/list parser.
+ * Markers must occupy a line: literal markers in escaped artifact Markdown are
+ * data. The last framed block wins, but a broken last block never falls back to
+ * an earlier success. JSON.parse consumes the entire payload (including pretty
+ * printed JSON); no repair, partial JSON, or inferred status is permitted.
+ */
+function parseJsonEnvelope(text) {
+  const raw = typeof text === 'string' ? text.replace(/\r\n/g, '\n') : '';
+  const markers = [...raw.matchAll(/^---GSD-WORKER-RESULT---[ \t]*$/gm)];
+  const count = markers.length;
+  const bad = reason => ({ ok: false, reason, marker_count: count });
+  if (!raw.trim()) return bad('output-empty');
+  if (!count) return bad('marker-missing');
+  const last = markers[count - 1];
+  const body = raw.slice(last.index + last[0].length);
+  const end = /^---END-RESULT---[ \t]*$/m.exec(body);
+  if (!end) return bad('end-marker-missing');
+  const framed = body.slice(0, end.index).trim();
+  const statusLine = /^status:[ \t]*([^\n]*)\n?/.exec(framed);
+  if (!statusLine) return bad('status-missing');
+  const status = statusLine[1].trim();
+  if (!STATUS_VALUES.has(status)) return bad('status-invalid');
+  const rest = framed.slice(statusLine[0].length).trim();
+  if (!rest.startsWith('result_json:')) return bad('result-json-missing');
+  const json = rest.slice('result_json:'.length).trim();
+  if (!json) return bad('result-json-missing');
+  let payload;
+  try { payload = JSON.parse(json); } catch { return bad('json-invalid'); }
+  return { ok: true, status, payload, marker_count: count };
+}
+
 /**
  * Classify a worker's returned text against the result-block contract.
  *
@@ -472,6 +503,7 @@ function probeVcsDelta(codeDir, since, vcs) {
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
+  parseJsonEnvelope,
   classifyReturn,
   salvageUnit,
   formatResultBlock,

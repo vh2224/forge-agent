@@ -6,6 +6,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const renderer = require('./forge-codex-renderer');
+const originalWrite = renderer.write;
+renderer.write = (options = {}) => originalWrite({ questionSpawnSync: () => ({ status: 0, stdout: '' }), codexQuestionBinary: 'fixture-codex', ...options });
+const interaction = require('./forge-interaction');
 const claudeRenderer = require('./forge-claude-renderer');
 const root = path.resolve(__dirname, '..'); const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-codex-Ω-')); const versionPattern = renderer.VERSION.replace(/\./g, '\\.');
 
@@ -341,7 +344,7 @@ try {
   });
   const codexArtifact = codexFixtureReport.artifacts.find((item) => item.source === 'shared/templates/dispatch/dispatch-fence.md');
   assert(codexArtifact, 'fixture não atravessou o renderer Codex real');
-  assert.strictEqual(codexArtifact.content, `${renderer.ORIGIN}\n\n${codexFixture.replace(/\r\n/g, '\n').replace(/\r/g, '\n')}`);
+  assert.strictEqual(codexArtifact.content, `${renderer.ORIGIN}\n\n${interaction.project(codexFixture).replace(/\r\n/g, '\n').replace(/\r/g, '\n')}`);
 
   const claudeFixtureReport = claudeRenderer.render({
     repo: validFixture.repo,
@@ -456,6 +459,29 @@ try {
       `renderer Claude alterou projeção histórica de ${artifact.source}`,
     );
   }
+
+  // Inspect actual prompt consumers, not a simulated question state machine.
+  for (const kind of ['instructions', 'agent', 'command', 'skill', 'dispatch']) {
+    const consumers = realCodex.artifacts.filter(item => item.kind === kind);
+    assert(consumers.length > 0);
+    for (const item of consumers) {
+      for (const rule of ['A required live decision remains pending', 'optional-only tool', 'Plan-only tool', 'approval-prohibited tool', 'returned pending handle is not an answer', 'multiSelect', 'questions per batch', 'separate, concise text message', 'auto/headless deferment']) assert(item.content.includes(rule), `${item.source}: ${rule}`);
+    }
+  }
+  const discussion = realCodex.artifacts.find(item => item.destination.endsWith('forge-discusser.toml')).content;
+  assert(!discussion.includes('proceed regardless'));
+  assert(!discussion.includes('orchestrator always has the tool'));
+  for (const name of ['forge-plan-gate.md', 'forge-review.md']) {
+    assert(fs.readFileSync(path.join(root, 'shared', name), 'utf8').includes('shared/forge-interaction.md'));
+  }
+  const conflictHome = path.join(temp, 'questions-conflict');
+  fs.mkdirSync(conflictHome);
+  const conflictConfig = path.join(conflictHome, 'config.toml');
+  fs.writeFileSync(conflictConfig, 'features = {}\n');
+  const conflictReport = renderer.write({ repo: root, ...PRODUCTION_DISPATCH_DIALECT, codexHome: conflictHome, projectRoot: path.join(temp, 'questions-project'), forgeHome: path.join(temp, 'questions-forge'), questionSpawnSync: () => ({ status: 0, stdout: 'default_mode_request_user_input stable false\n' }) });
+  assert(conflictReport.conflicts.some(item => item.destination === conflictConfig && item.reason === 'questions-manual-merge'));
+  assert(fs.readFileSync(conflictConfig, 'utf8').includes('features = {}'));
+  assert(!fs.readFileSync(conflictConfig, 'utf8').includes('default_mode_request_user_input'));
 
   console.log('forge-codex-renderer tests passed');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

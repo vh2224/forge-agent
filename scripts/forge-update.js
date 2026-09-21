@@ -7,6 +7,7 @@ const { spawnSync } = require('child_process');
 const maintenance = require('./forge-maintenance.js');
 const installer = require('./forge-installer.js');
 const { resolveForgeHome } = require('./forge-home.js');
+const { resolveExecutable } = require('./forge-capabilities.js');
 const remoteUpdater = require('./forge-update-remote.js');
 
 const SOURCE_MANIFEST = 'forge-source-manifest.json';
@@ -163,6 +164,45 @@ function describeSourceRepo(repo) {
 }
 
 /**
+ * Borrow the operator's login-shell PATH when the selected runtime CLIs are
+ * not visible on the inherited one.
+ *
+ * This script is now the direct entry point of the macOS app's update and
+ * reinstall buttons (app/Sources/ForgeKit/UpdateCore.swift §
+ * InstallerCommand), which run it under launchd's minimal PATH plus only the
+ * directory of the resolved node. install.sh solves the same problem for its
+ * own children by asking the login shell for its PATH (`forge_login_eval`);
+ * routing the app straight here bypassed that borrowing, and the capability
+ * gate then failed with `capability obrigatória ausente para claude` even
+ * though the CLI was installed (measured 2026-09-07, app v4.32.0, `claude` in
+ * ~/.local/bin). Same contract as install.sh: interactive login shell, because
+ * zsh users export PATH from ~/.zshrc which a plain login shell never reads;
+ * appended, never prepended, so whatever the caller already resolves keeps
+ * winning; bounded, because a hung rc file must not hang the update. The
+ * mutation lands on `env` (process.env in production) so every child — the
+ * capability probes, both bootstraps, the app build — inherits it.
+ */
+function borrowLoginPath({ runtime, env = process.env, platform = process.platform, runner = spawnSync } = {}) {
+  if (platform === 'win32') return null;
+  const selected = runtime === 'both' ? ['claude', 'codex'] : [runtime || 'claude'];
+  const missing = selected.filter((cli) => !resolveExecutable(cli, { env, platform }));
+  if (!missing.length) return null;
+  const shell = env.SHELL || '/bin/sh';
+  const timeout = Math.max(1, Number(env.FORGE_LOGIN_TIMEOUT) || 8) * 1000;
+  const probe = runner(shell, ['-lic', 'printf "%s\\n" "$PATH"'], { encoding: 'utf8', shell: false, timeout, maxBuffer: 1024 * 1024 });
+  // The last line is the answer: an rc file is free to print its own noise
+  // first (same reading install.sh applies to this probe's output).
+  const lines = String((probe && probe.stdout) || '').trim().split('\n');
+  const loginPath = lines[lines.length - 1] || '';
+  if (!loginPath.includes('/')) return null;
+  // ':' literal, not path.delimiter: this branch only runs for POSIX targets,
+  // and the host running the code (tests included) must not leak its own
+  // delimiter into a PATH that a POSIX shell will read.
+  env.PATH = `${env.PATH || ''}:${loginPath}`;
+  return { missing, appended: loginPath };
+}
+
+/**
  * Local recovery is often launched by the installed (older) updater after the
  * operator has refreshed the source clone.  Running the installed module in
  * process would make forge-installer keep its already-loaded VERSION while it
@@ -222,6 +262,10 @@ function update(input = {}, dependencies = {}) {
     skipCapabilityCheck: preview ? true : input.skipCapabilityCheck,
     migrateLegacy: input.migrateLegacy,
     withApp: input.withApp,
+    // In JSON mode this process's stdout IS the report — the remote bootstrap
+    // parses it. The installer needs to know so the app build's progress goes
+    // to stderr instead of corrupting the JSON.
+    jsonOutput: input.json,
     sourceProvenance: input.remoteProvenance,
     dryRun: preview,
   });
@@ -324,6 +368,7 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
       write('Usage: forge-update.js [--runtime claude|codex|both] [--apply|--dry-run] [--channel stable|master] [--remote HTTPS_URL] [--json] [--no-model-probe] [--capability-timeout MS] [--migrate-legacy] [--with-app]\n       forge-update.js --source local --repo DIR [demais opções]\n');
       return 0;
     }
+    borrowLoginPath({ runtime: options.runtime });
     const localRepo = localBootstrapRepo(options);
     if (localRepo) {
       write(bootstrapLocal(options, { argv, repo: localRepo }));
@@ -338,5 +383,5 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
   }
 }
 
-module.exports = { SOURCE_MANIFEST, parseArgs, resolveSourceRepo, describeSourceRepo, localBootstrapRepo, shouldBootstrapLocal, bootstrapLocal, update, render, run };
+module.exports = { SOURCE_MANIFEST, parseArgs, resolveSourceRepo, describeSourceRepo, borrowLoginPath, localBootstrapRepo, shouldBootstrapLocal, bootstrapLocal, update, render, run };
 if (require.main === module) process.exitCode = run();

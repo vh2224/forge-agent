@@ -122,3 +122,5 @@ CODING-STANDARDS.md is the **durable, consolidated** record. RESEARCH.md is the 
 Preserve any user-written content in the `## Code Rules` section — only update auto-detected sections.
 
 Then return the `---GSD-WORKER-RESULT---` block.
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

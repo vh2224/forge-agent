@@ -13,7 +13,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { resolveLaunch, TOKEN_ENV } = require('./forge-accounts');
-const { classifyReturn } = require('./forge-worker-result');
+const { parseJsonEnvelope } = require('./forge-worker-result');
+const { diagnostic } = require('./forge-sidecar-diagnostic');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
@@ -28,6 +29,8 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   CLEANUP_FAILED: 'claude-cleanup-failed',
   MISSING_PROMPT: 'claude-missing-prompt',
   INVALID_OPTIONS: 'claude-invalid-options',
+  AUTH_FAILED: 'claude-auth-failed',
+  CANCELLED: 'claude-cancelled',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -66,7 +69,7 @@ const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // published value. A callback wired without a cadence still has to beat.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15000;
 
-function sidecarError(code) {
+function sidecarError(code, reason, counts) {
   const messages = {
     [CLAUDE_SIDECAR_REASON_CODES.ACCOUNT_UNAVAILABLE]: 'No usable default Claude account is available.',
     [CLAUDE_SIDECAR_REASON_CODES.COMMAND_NOT_FOUND]: 'The Claude executable could not be started.',
@@ -80,9 +83,12 @@ function sidecarError(code) {
     [CLAUDE_SIDECAR_REASON_CODES.CLEANUP_FAILED]: 'The Claude prompt directory could not be removed.',
     [CLAUDE_SIDECAR_REASON_CODES.MISSING_PROMPT]: 'The Claude sidecar was given no task prompt.',
     [CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS]: 'The Claude sidecar received an invalid launch option.',
+    [CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED]: 'Claude authentication failed. Repair the default account with forge-accounts before retrying.',
+    [CLAUDE_SIDECAR_REASON_CODES.CANCELLED]: 'The Claude worker was cancelled.',
   };
   const error = new Error(messages[code] || 'Claude sidecar failure.');
   error.code = code;
+  if (reason) error.diagnostic = diagnostic(reason, counts);
   return error;
 }
 
@@ -184,23 +190,21 @@ function isValidMustHave(item) {
   return true;
 }
 
-function parseExecuteCandidate(stdout) {
-  let classified;
-  try {
-    classified = classifyReturn(stdout);
-  } catch {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
-  }
-  if (!classified || classified.shape !== 'complete'
-    || typeof classified.fields.result_json !== 'string') {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
-  }
-
-  let payload;
-  try {
-    payload = JSON.parse(classified.fields.result_json);
-  } catch {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
+function parseExecuteCandidate(stdout, validateCandidate) {
+  const classified = parseJsonEnvelope(stdout);
+  const invalid = reason => sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, reason,
+    { marker_count: classified.marker_count });
+  if (!classified.ok) throw invalid(classified.reason);
+  const payload = classified.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw invalid('schema-invalid');
+  if (classified.status !== payload.status) throw invalid('status-mismatch');
+  if (validateCandidate) {
+    let verdict;
+    try { verdict = validateCandidate(payload); } catch { throw invalid('validator-failed'); }
+    if (verdict !== true && (!verdict || verdict.ok !== true)) {
+      throw invalid(verdict && typeof verdict.reason === 'string' ? verdict.reason : 'schema-invalid');
+    }
+    return { candidate: payload, classification: { marker_count: classified.marker_count } };
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
     || !EXECUTE_STATUS_VALUES.has(payload.status)
@@ -210,7 +214,7 @@ function parseExecuteCandidate(stdout) {
     || !Array.isArray(payload.files_changed)
     || !payload.files_changed.every((file) => typeof file === 'string')
     || classified.status !== payload.status) {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
+    throw invalid('schema-invalid');
   }
 
   return {
@@ -220,7 +224,7 @@ function parseExecuteCandidate(stdout) {
       must_haves_status: payload.must_haves_status.map(normalizeMustHave),
       files_changed: payload.files_changed.slice(),
     },
-    classification: classified,
+    classification: { marker_count: classified.marker_count },
   };
 }
 
@@ -234,7 +238,8 @@ function defaultTerminate(child) {
   try { child.kill('SIGKILL'); } catch { /* the owned process already exited */ }
 }
 
-function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat, heartbeatIntervalMs }) {
+function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat, heartbeatIntervalMs, validateCandidate, signal }) {
+  if (signal && signal.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   const startedAt = Date.now();
   let child;
   try {
@@ -258,6 +263,10 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     let stderrBytes = 0;
     let stdoutChunks = [];
     let stderrChunks = [];
+    const cancel = () => terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
+    if (signal) signal.addEventListener('abort', cancel, { once: true });
+    process.once('SIGINT', cancel);
+    process.once('SIGTERM', cancel);
 
     const timer = setTimeout(() => {
       terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT));
@@ -280,6 +289,18 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
 
     function finish(handler, value) {
       if (settled) return;
+      if (handler === reject) {
+        const reasons = {
+          'claude-empty-output': 'output-empty', 'claude-output-limit': 'output-limit',
+          'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
+          'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
+          'claude-command-not-found': 'provider-unavailable', 'claude-spawn-failed': 'provider-unavailable',
+        };
+        value.diagnostic = diagnostic(value.diagnostic?.reason || reasons[value.code], {
+          ...value.diagnostic, stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes,
+          duration_ms: Math.max(0, Date.now() - startedAt),
+        });
+      }
       settled = true;
       clearTimeout(timer);
       // Every settle path — resolve, close-nonzero, spawn error, timeout,
@@ -287,6 +308,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       // the turn and keep the adapter's event loop alive.
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       heartbeatTimer = null;
+      if (signal) signal.removeEventListener('abort', cancel);
+      process.removeListener('SIGINT', cancel);
+      process.removeListener('SIGTERM', cancel);
       handler(value);
     }
 
@@ -330,11 +354,20 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     });
     child.once('close', (code, signal) => {
       if (settled || terminalFailurePending) return;
+      const stderr = Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
+      const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+      if ((code !== 0 || !stdout.includes('---GSD-WORKER-RESULT---')) && /\b(?:401|403)\b|authentication[_ -]?(?:failed|error)|invalid[_ -]?(?:token|api[_ -]?key)|please (?:run )?\/login/i.test(stderr + '\n' + stdout)) {
+        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED));
+        return;
+      }
       if (code !== 0) {
         finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO));
         return;
       }
-      const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+      if (stdout.includes(env[TOKEN_ENV]) || stderr.includes(env[TOKEN_ENV])) {
+        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'secret-output'));
+        return;
+      }
       // Captured stderr is intentionally never returned or interpolated into an
       // error. A provider that repeats its environment cannot leak through us.
       stderrChunks = [];
@@ -345,7 +378,10 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
 
       let parsed;
       try {
-        parsed = parseExecuteCandidate(stdout);
+        parsed = parseExecuteCandidate(stdout, validateCandidate);
+        if (JSON.stringify(parsed.candidate).includes(env[TOKEN_ENV])) {
+          throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'secret-output');
+        }
       } catch (error) {
         finish(reject, error);
         return;
@@ -419,6 +455,10 @@ async function invokeClaudeSidecar(opts) {
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
   const model = normalizeModel(options.model);
+  const effort = options.effort;
+  if (effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
+    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  }
   let tempDir = null;
   let primaryError = null;
 
@@ -434,11 +474,20 @@ async function invokeClaudeSidecar(opts) {
     }
 
     const { cmd, prefixArgs } = resolveClaudeCommand(sourceEnv);
-    const args = [...prefixArgs, ...(model ? ['--model', model] : []), '-p', instruction];
+    const args = [...prefixArgs, ...(model ? ['--model', model] : []),
+      ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
+      ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
+      ...(effort ? ['--effort', effort] : []),
+      '--no-session-persistence', '--disable-slash-commands',
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+      '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
+      '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
+      ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
+      '-p', instruction];
     const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
     return await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
-      onHeartbeat, heartbeatIntervalMs,
+      onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
     });
   } catch (error) {
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync

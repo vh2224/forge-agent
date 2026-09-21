@@ -293,3 +293,5 @@ Se sim, adiciona entrada em `.gsd/AUTO-MEMORY.md` com categoria `gotcha` ou `pat
 <fast_mode>
 Com `--quick`: pula decomposição E alinhamento. Trata input como probe único, número 001 (ou próximo disponível). Build direto, verdict direto. Use quando usuário já formulou a pergunta exata.
 </fast_mode>
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

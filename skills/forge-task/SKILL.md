@@ -1616,3 +1616,5 @@ resume: /forge-task --resume {TASK_ID}  # e.g. T-20240115103045-fix-login-bug
 Batch de {N} unidades completo para {TASK_ID}.
 Execute /forge-task --resume {TASK_ID} para continuar.
 ```
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

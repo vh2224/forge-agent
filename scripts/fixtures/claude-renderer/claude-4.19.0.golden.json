@@ -7,22 +7,22 @@
     {
       "source_id": "agents",
       "target": "agents",
-      "sha256": "07a5227717f0226524a393d2ca5860459d492f72e7f3b0ff388e592c08b39509"
+      "sha256": "b630ec49f74dee598860d8770ad58308fbf8cafb9291204879522c4857d2dcda"
     },
     {
       "source_id": "commands",
       "target": "commands",
-      "sha256": "347147d21b31ec5415558edca2224d64397272952dc932ab67fdf85f2f4318f9"
+      "sha256": "5b872dcc16cb9e5345409f58eff4e78d9f4d4893e2aff86bf9ea4d35864ef14c"
     },
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "3dc8aab80089298646b9756f2715effb2eba251ee31562493f7233dc3836bf73"
+      "sha256": "8f9d6f8ec24fe2eaccc8c740ac10afef25ba5bfec672358875b60061691c6d11"
     },
     {
       "source_id": "dispatch-templates",
       "target": "shared/templates/dispatch",
-      "sha256": "968753134892bde2b7a562f43a1a4e2f9013e35d737c372362b6a0366fd0de63"
+      "sha256": "ba41c203e06fe72d84f593164b780b6ae30b35cadbcfa9d43c49c8f2e65e5029"
     },
     {
       "source_id": "hooks",

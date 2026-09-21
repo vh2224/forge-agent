@@ -19,6 +19,20 @@ second lease, invent a boundary, or change host. Only an explicit `resume` with
 the durable boundary may change `host_runtime`. This adapter never spawns or
 implements fallback; dispatch remains the S06 boundary.
 
+## Bidirectional delivery
+
+After the resolver allowance gate, a Claude sidecar or any artifact unit on
+Codex uses `shared/forge-bidirectional-sidecar.md` and
+`scripts/forge-unit-sidecar.js`. This branch precedes the historical Codex-only
+Branch C/D conditions below. Read that shared contract in full before dispatch;
+keep the controller-selected unit and snapshot. Supported artifact units are
+research-milestone, research-slice, discuss-milestone, discuss-slice,
+plan-milestone, complete-slice, complete-milestone and plan-check. Execution and
+slice planning on Claude use the same entrypoint with their distinct contracts.
+Native delivery remains native. Unsupported auxiliary units stop specifically.
+After successful housekeeping, acknowledge the unit using the loop adapter's
+`complete` command before requesting `next`; never discard/reset its snapshot.
+
 ## Bootstrap guard
 
 ```bash
@@ -1968,3 +1982,5 @@ saved_at: {ISO8601}
 3. Emit compact signal and stop.
 
 On resume: STATE has `phase: resume` → read `continue.md`, inline into worker prompt with instruction "Resume from continue.md — skip completed work, start from Next Action."
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

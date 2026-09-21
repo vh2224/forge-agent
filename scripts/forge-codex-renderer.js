@@ -4,6 +4,8 @@
 // Codex-native projection. It consumes the same source manifest as Claude but
 // never resolves, reads, or writes a Claude home.
 const fs = require('fs');
+const interaction = require('./forge-interaction');
+const questions = require('./forge-codex-questions');
 const path = require('path');
 const { resolveForgePaths } = require('./forge-home');
 const sourceManifest = require('./forge-source-manifest');
@@ -223,15 +225,15 @@ function tomlMultiline(value) {
 function render(options = {}) {
   const root = roots(options); const manifest = manifestFor(root, options); const sources = codexSources(manifest); const artifacts = [];
   const add = (sourceId, source, destination, content, kind) => artifacts.push({ source_id: sourceId, source, destination, content: norm(content), newline: 'lf', kind });
-  const rewriteMarkdown = (content) => rewriteDispatchDialect(content, {
+  const rewriteMarkdown = (content) => interaction.project(rewriteDispatchDialect(content, {
     agentInvocation: options.agentInvocation,
     hostRuntime: options.hostRuntime,
-  });
+  }));
   const common = sources.filter((source) => ['agents', 'commands', 'skills', 'dispatch-templates'].includes(source.source_id));
   const agents = sources.find((source) => source.source_id === 'agents');
   const agentFiles = agents ? walk(path.join(root.repo, agents.inputs[0])).filter((file) => file.endsWith('.md')) : [];
   const instructions = [ORIGIN, `# Forge Agent ${VERSION} — Codex host`, '', 'Estas instruções são geradas a partir das fontes canônicas do Forge.', '', '## Superfícies comuns', ...common.map((source) => `- ${source.source_id}: ${source.capability}`), '', '## Agentes customizados', ...agentFiles.map((file) => `- ${path.basename(file, '.md')}: .codex/agents/${path.basename(file, '.md')}.toml`), '', '## Skills e comandos', '- Conteúdo canônico materializado em `$CODEX_HOME/skills`, `$CODEX_HOME/commands` e `$CODEX_HOME/templates/dispatch`.', ''].join('\n');
-  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), instructions, 'instructions');
+  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), interaction.project(instructions), 'instructions');
   for (const file of agentFiles) {
     const name = path.basename(file, '.md');
     const source = rewriteMarkdown(fs.readFileSync(file, 'utf8'));
@@ -259,7 +261,10 @@ function render(options = {}) {
   return { runtime: RUNTIME, version: VERSION, repo: root.repo, forge_home: root.forgeHome, codex_home: root.codexHome, project_root: root.projectRoot, artifacts };
 }
 function write(options = {}) {
-  const report = render(options); const written = []; const preserved = []; const conflicts = []; const selfSourced = [];
+  const report = render(options);
+  const questionCapability = questions.probe(options);
+  report.question_capability = questionCapability;
+  const written = []; const preserved = []; const conflicts = []; const selfSourced = [];
   // Same ownership rule as the Claude renderer, from the same module. This host
   // projects `capabilities.json`, a format that can never carry a marker — so
   // without the digest rung that file froze on first divergence exactly like the
@@ -287,17 +292,28 @@ function write(options = {}) {
     // put an ownership marker on it. Only add an absent status-line default;
     // never replace their models, providers, MCPs, or later /statusline choices.
     if (artifact.kind === 'config' && current !== null) {
-      const merged = addDefaultStatusLine(current);
+      const statusLine = addDefaultStatusLine(current);
+      const questionDefault = questions.addDefaultQuestions(statusLine.content, questionCapability);
+      const merged = { ...statusLine, content: questionDefault.content };
+      artifact.question_reason = questionDefault.reason;
+      for (const change of [statusLine, questionDefault]) {
+        if (change.conflict) conflicts.push({ destination: artifact.destination, reason: change.reason });
+      }
       artifact.content = merged.content;
       artifact.newline = current.includes('\r\n') ? 'crlf' : 'lf';
       if (merged.content === current) {
         preserved.push({ ...artifact, reason: merged.reason });
-        if (merged.conflict) conflicts.push({ destination: artifact.destination, reason: merged.reason });
+
       } else {
         if (!options.dryRun) fs.writeFileSync(artifact.destination, merged.content, 'utf8');
         written.push({ ...artifact, reason: merged.reason, ...(options.dryRun ? { dry_run: true } : {}) });
       }
       continue;
+    }
+    if (artifact.kind === 'config') {
+      const questionDefault = questions.addDefaultQuestions(artifact.content, questionCapability);
+      artifact.content = questionDefault.content;
+      artifact.question_reason = questionDefault.reason;
     }
     if (current !== null && norm(current) === artifact.content) { preserved.push({ ...artifact, reason: 'already-current' }); continue; }
     const verdict = ownership.decide({

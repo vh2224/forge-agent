@@ -12,7 +12,7 @@ Steps 1–5 below are boundary-agnostic — only the four bindings above differ.
 
 The gate is **not** a second plan-checker pass — it is a human-arbitration moment: the operator previews the plan, addresses checker findings interactively, optionally edits the plan in their editor, and approves before any code is written. The `forge-planner` remains a **stateless batch decomposer** — it does not conduct the gate.
 
-> Why the orchestrator/skill and not the planner: the planner runs in an isolated worker context without `AskUserQuestion`. The gate must live in the orchestrator/skill (main context), which owns both `AskUserQuestion` and `Agent`. See CONTEXT D1.
+> Why the orchestrator/skill and not the planner: the planner runs in an isolated worker context without `AskUserQuestion`. The gate must live in the orchestrator/skill (main context), which checks available native question and dispatch tools under the interaction contract. See CONTEXT D1.
 
 ## Inputs
 
@@ -323,3 +323,5 @@ For `forge-task`, `{M###}` may be omitted or set to `""` if the task runs outsid
 - Approval marker: `{S##}-PLAN-GATE.md` (per-slice) or `{TASK_ID}-PLAN-GATE.md` (per-task), written in Step 5. Not committed; cleaned by `milestone_cleanup` with the slice artifacts.
 - Artifact: `.gsd/items/*.md` — work items created by `Deferir` resolutions (durable; never cleaned by `milestone_cleanup`).
 - `scripts/forge-items.js` — the CLI backing `--add`, invoked via the canonical procedure in `shared/forge-review.md § Item capture`.
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

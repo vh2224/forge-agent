@@ -7,7 +7,7 @@
   "required": ["protocol_version", "operation", "outcome", "reason_code"],
   "properties": {
     "protocol_version": { "const": "1.0.0" },
-    "operation": { "enum": ["init", "status", "next", "handoff"] },
+    "operation": { "enum": ["init", "status", "next", "complete", "handoff"] },
     "outcome": { "enum": ["needs_input", "completed", "blocked", "no_work", "failed"] },
     "reason_code": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
     "milestone": { "type": ["string", "null"] },

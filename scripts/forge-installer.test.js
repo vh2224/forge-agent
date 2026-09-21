@@ -16,10 +16,59 @@ function fixture() {
   const claudeHome = path.join(root, 'Claude Home');
   const codexHome = path.join(root, 'Codex Home');
   const projectRoot = path.join(root, 'Project Root');
-  const options = { repo: path.resolve(__dirname, '..'), forgeHome, claudeHome, codexHome, projectRoot, userHome: root, skipCapabilityCheck: true };
+  const options = { repo: path.resolve(__dirname, '..'), forgeHome, claudeHome, codexHome, projectRoot, userHome: root, skipCapabilityCheck: true, codexQuestionBinary: 'fixture-codex', questionSpawnSync: () => ({ status: 0, stdout: '' }) };
   return { root, forgeHome, claudeHome, codexHome, projectRoot, options, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 function files(root) { return fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }).map((entry) => entry.name).sort() : []; }
+
+test('native question contract reaches installed consumers and safe feature defaults', () => {
+  const data = fixture();
+  try {
+    const supported = { ...data.options, runtime: 'both', questionSpawnSync: () => ({ status: 0, stdout: 'default_mode_request_user_input under development false\n' }) };
+    installer.install(supported);
+    const read = file => fs.readFileSync(file, 'utf8');
+    const config = path.join(data.codexHome, 'config.toml');
+    assert(read(config).includes('default_mode_request_user_input = true'));
+    for (const name of ['CLAUDE.md', 'AGENTS.md']) assert(read(path.join(data.projectRoot, name)).includes('A required live decision remains pending'));
+    const contract = read(path.join(data.forgeHome, 'shared', 'forge-interaction.md'));
+    assert(contract.includes('optional-only tool'));
+    assert(read(path.join(data.claudeHome, 'agents', 'forge-discusser.md')).includes('Native questions:'));
+    for (const file of [
+      path.join(data.codexHome, 'agents', 'forge-discusser.toml'),
+      path.join(data.codexHome, 'skills', 'forge-task', 'SKILL.md'),
+      path.join(data.codexHome, 'commands', 'forge.md'),
+      path.join(data.codexHome, 'templates', 'dispatch', 'execute-task.md'),
+    ]) assert(read(file).includes('A required live decision remains pending'), file);
+    const explicit = '# user bytes\r\n[features]\r\ndefault_mode_request_user_input = false # choice\r\n[tui]\r\nstatus_line = []\r\n';
+    fs.writeFileSync(config, explicit);
+    installer.install({ ...supported, update: true });
+    assert.strictEqual(read(config), explicit);
+    const agents = read(path.join(data.projectRoot, 'AGENTS.md'));
+    installer.install({ ...supported, update: true });
+    assert.strictEqual(read(config), explicit);
+    assert.strictEqual(read(path.join(data.projectRoot, 'AGENTS.md')), agents);
+    assert(!fs.existsSync(path.join(data.projectRoot, 'shared')), 'consumer fixture must not own shared/');
+    const installedSync = require(path.join(data.forgeHome, 'scripts', 'forge-instructions.js'));
+    assert.strictEqual(installedSync.syncInstructions(data.projectRoot).files.some(f => f.outcome === 'skipped' && f.reason.startsWith('unreadable')), false);
+  } finally { data.cleanup(); }
+});
+
+test('question feature dry-run is offline and update adds only after supported probing', () => {
+  const data = fixture();
+  try {
+    const config = path.join(data.codexHome, 'config.toml');
+    fs.mkdirSync(data.codexHome, { recursive: true });
+    const original = '[tui]\nstatus_line = []\n# operator\n';
+    fs.writeFileSync(config, original);
+    installer.install({ ...data.options, runtime: 'codex', dryRun: true, questionSpawnSync: () => { throw new Error('must not probe dry run'); } });
+    assert.strictEqual(fs.readFileSync(config, 'utf8'), original);
+    assert(!fs.existsSync(data.forgeHome));
+    installer.install({ ...data.options, runtime: 'codex', questionSpawnSync: () => ({ status: 1 }) });
+    assert.strictEqual(fs.readFileSync(config, 'utf8'), original);
+    installer.install({ ...data.options, runtime: 'codex', update: true, questionSpawnSync: () => ({ status: 0, stdout: 'default_mode_request_user_input stable false\n' }) });
+    assert(fs.readFileSync(config, 'utf8').includes('features.default_mode_request_user_input = true'));
+  } finally { data.cleanup(); }
+});
 
 test('rejects an unknown runtime before writing', () => {
   const data = fixture();
@@ -64,6 +113,19 @@ test('--with-app is planned on macOS, executed through bash, and skipped elsewhe
   assert.strictEqual(built.status, 'installed');
   assert.deepStrictEqual(calls[0].args.slice(-1), ['--install']);
   assert.strictEqual(calls[0].options.shell, false);
+  assert.strictEqual(calls[0].options.stdio, 'inherit');
+  // In JSON mode this process's stdout is the report the remote bootstrap
+  // parses; the swift build's progress corrupted it once (2026-09-07, "▸
+  // Limpando…" inside the JSON) and a fully applied install read as a failure.
+  const jsonCalls = [];
+  const routed = installer.installApp(repo, [], {
+    withApp: true,
+    jsonOutput: true,
+    spawnSync: (command, args, options) => { jsonCalls.push({ command, args, options }); return { status: 0 }; },
+  }, 'darwin');
+  assert.strictEqual(routed.status, 'installed');
+  assert.deepStrictEqual(jsonCalls[0].options.stdio, ['inherit', 2, 'inherit'],
+    'em modo JSON o stdout do build precisa desaguar no stderr, nunca no relatório');
   assert.strictEqual(installer.installApp(repo, [], { withApp: true }, 'linux').reason, 'macos-only');
   assert.strictEqual(installer.installApp(repo, [], { withApp: true }, 'win32').reason, 'macos-only');
 });

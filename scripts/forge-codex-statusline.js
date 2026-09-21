@@ -74,9 +74,9 @@ function keyPath(code) {
 
 // This is a conservative, additive editor, not a TOML serializer. Keep every
 // existing byte and decline ambiguous syntax rather than rewriting user config.
-function addDefaultStatusLine(current) {
+function addDefaultSetting(current, tableName, keyName, assignment, reasonPrefix) {
   const eol = current.includes('\r\n') ? '\r\n' : '\n';
-  const conflict = { content: current, conflict: true, reason: 'status-line-manual-merge' };
+  const conflict = { content: current, conflict: true, reason: `${reasonPrefix}-manual-merge` };
   const entries = statements(current);
   if (!entries) return conflict;
   let section = [], header = null, preserved = false, ambiguous = false, cannotAdd = false;
@@ -86,7 +86,7 @@ function addDefaultStatusLine(current) {
       if (!table || table[1].length !== table[3].length) return conflict;
       section = keyPath(table[2]);
       if (!section) return conflict;
-      if (section[0] === 'tui') {
+      if (section[0] === tableName) {
         if (section.length !== 1 || table[1] !== '[' || header) ambiguous = true;
         else header = entry;
       }
@@ -97,21 +97,25 @@ function addDefaultStatusLine(current) {
     const keys = binding && keyPath(binding[1]);
     if (!keys) return conflict;
     const path = [...section, ...keys];
-    if (path.length === 2 && path[0] === 'tui' && path[1] === 'status_line') preserved = true;
-    else if (path[0] === 'tui' && (path[1] === 'status_line' || !section.length)) cannotAdd = true;
+    if (path.length === 2 && path[0] === tableName && path[1] === keyName) preserved = true;
+    else if (path[0] === tableName && (path[1] === keyName || !section.length)) cannotAdd = true;
   }
   if (ambiguous) return conflict;
-  if (preserved) return { content: current, reason: 'status-line-preserved' };
+  if (preserved) return { content: current, reason: `${reasonPrefix}-preserved` };
   if (cannotAdd) return conflict;
   if (header) {
     const end = header.end;
     const separator = current.slice(header.start, end).endsWith('\n') ? '' : eol;
-    return { content: current.slice(0, end) + separator + assignment + eol + current.slice(end), reason: 'status-line-added' };
+    return { content: current.slice(0, end) + separator + assignment + eol + current.slice(end), reason: `${reasonPrefix}-added` };
   }
   // Root dotted assignment can coexist with other sections and preserves even
   // files without a trailing newline. Keep a BOM at the start when present.
   const bom = current.startsWith('\uFEFF') ? '\uFEFF' : '';
-  return { content: bom + `tui.${assignment}${eol}` + current.slice(bom.length), reason: 'status-line-added' };
+  return { content: bom + `${tableName}.${assignment}${eol}` + current.slice(bom.length), reason: `${reasonPrefix}-added` };
 }
 
-module.exports = { DEFAULT_STATUS_LINE, addDefaultStatusLine };
+function addDefaultStatusLine(current) {
+  return addDefaultSetting(current, 'tui', 'status_line', assignment, 'status-line');
+}
+
+module.exports = { DEFAULT_STATUS_LINE, addDefaultStatusLine, addDefaultSetting };

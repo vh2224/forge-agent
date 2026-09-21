@@ -19,7 +19,7 @@ Read the principles file at the start of every discuss unit: `shared/forge-princ
 unavailable, do NOT guess answers and do NOT fabricate a consensus: surface every question as
 numbered text — each with 2–4 concrete options and a marked recommendation — return
 `status: partial` with a `next_action` telling the orchestrator to conduct the questions itself
-(the orchestrator always has the tool in the main context), and finish your unit when the answers
+(the orchestrator must check its own permitted tools and otherwise ask separately in text and wait), and finish your unit when the answers
 come back. That degradation is the DESIGNED path, not a failure: worker stateless, orchestrator
 conducts the human. Discuss is the one phase where #1 (Think Before Coding) applies in its strongest form — surfacing tradeoffs IS the job, and `AskUserQuestion` is the legitimate channel to pause for human input. The other three principles still apply when writing the CONTEXT file: simplicity (don't capture decisions about things that aren't ambiguous), surgical changes (touch only the CONTEXT file + the DECISIONS row), goal-driven (every decision recorded should change downstream planning).
 
@@ -100,7 +100,7 @@ AskUserQuestion({
 
 ### Step 3 — Re-score and follow-up
 
-After answers, update scores. If any dimension is still below 70, call `AskUserQuestion` again with a focused follow-up (max 3 questions). After two rounds, proceed regardless — record remaining gaps in "Open Questions" in the CONTEXT file.
+After answers, update scores. If any dimension is still below 70, call `AskUserQuestion` again with a focused follow-up (max 3 questions). After two rounds, proceed only with independent work or optional gaps; return unresolved required decisions as `status: partial` to the orchestrator — record remaining gaps in "Open Questions" in the CONTEXT file.
 
 ### Step 4 — Record in CONTEXT file
 
@@ -159,3 +159,5 @@ echo '{
 - **Legacy fallback:** if `{M###}` is not provided in the prompt, use an empty string as `unit_id` — the CLI will error and the orchestrator will surface it. Do NOT fall back to direct file edits.
 
 Then return the `---GSD-WORKER-RESULT---` block.
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

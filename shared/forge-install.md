@@ -1,5 +1,29 @@
 # Instalação multi-runtime
 
+## Perguntas nativas
+
+A instalação e o update distribuem `shared/forge-interaction.md`, incluindo
+regras permanentes em `CLAUDE.md`/`AGENTS.md` e adaptação nas superfícies Codex.
+O bloco `forge:interaction` é independente do bloco de routing; preserva os
+bytes do operador e recusa marcadores ambíguos. Fontes projetadas sobre si
+mesmas continuam excluídas da escrita.
+
+Para Codex, uma consulta local `codex features list` (timeout de 3 segundos,
+sem shell ou rede) verifica suporte antes de adicionar a configuração
+experimental `features.default_mode_request_user_input = true`, somente se
+ausente. Valores explícitos, inclusive `false`, são preservados. Falha, timeout,
+recurso não listado ou TOML ambíguo deixam essa configuração intacta, com motivo
+nomeado no relatório da projeção. A barra de status mantém sua política aditiva
+independente. No dry-run a consulta não roda: `questions-probe-dry-run` significa
+capacidade ainda não determinada, e o possível acréscimo fica para o apply.
+
+O recurso configurado não garante uma ferramenta permitida na sessão atual.
+Decisões obrigatórias aguardam resposta explícita; perguntas assíncronas só
+permitem continuar trabalho independente. Sem ferramenta permitida, o Forge
+apresenta a pergunta separadamente em texto e aguarda. Modos headless mantêm
+suas políticas explícitas de deferimento. Não há promessa de abas idênticas ao
+Claude nem bloqueio do campo de digitação.
+
 `install.sh` e `install.ps1` são wrappers finos para
 `scripts/forge-installer.js`. A lógica de cópia, backup e migração é a mesma
 nos três sistemas suportados (Windows nativo, macOS e Linux); nenhum shell é

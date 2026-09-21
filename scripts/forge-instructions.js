@@ -41,6 +41,7 @@
 'use strict';
 
 const fs = require('fs');
+const interaction = require('./forge-interaction');
 const path = require('path');
 
 let VERSION = '0.0.0';
@@ -213,7 +214,7 @@ function syncFile(file, options = {}) {
 
   if (!read.ok && read.absent) {
     if (!create) return result('skipped', 'absent-and-not-requested');
-    const block = `${renderBlock({ eol: 'lf' })}\n`;
+    const block = interaction.sync(`${renderBlock({ eol: 'lf' })}\n`).content;
     if (dryRun) return result('created', 'absent-would-create');
     try { fs.writeFileSync(file, block, 'utf8'); }
     catch (error) { return result('skipped', `write-failed:${(error && error.code) || 'EUNKNOWN'}`); }
@@ -247,6 +248,9 @@ function syncFile(file, options = {}) {
     reason = 'block-absent';
   }
 
+  const interactive = interaction.sync(next);
+  if (interactive.malformed) return result('skipped', `malformed-block:${interactive.malformed}`);
+  next = interactive.content;
   if (next === text) return result('unchanged', reason);
   if (dryRun) return result('updated', `${reason}-would-write`);
   try { fs.writeFileSync(file, next, 'utf8'); }

@@ -446,4 +446,66 @@ test('a remote bootstrap records pinned server provenance instead of its disposa
   } finally { data.cleanup(); }
 });
 
+test('borrowLoginPath appends the login-shell PATH only when a selected CLI is invisible', () => {
+  // Regressão medida em 2026-09-07 (app v4.32.0): o app chama este script sob o
+  // PATH do launchd + só o diretório do node, e o gate de capability matava o
+  // update com "capability obrigatória ausente para claude" com o CLI instalado
+  // em ~/.local/bin. O empréstimo espelha o forge_login_eval do install.sh.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-login-'));
+  try {
+    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n');
+    fs.chmodSync(path.join(bin, 'claude'), 0o755);
+    const neverAsk = () => { throw new Error('não deveria consultar o shell de login'); };
+
+    // CLI visível → nenhum probe, PATH intocado.
+    const visible = { PATH: bin, SHELL: '/bin/zsh' };
+    assert.strictEqual(updater.borrowLoginPath({ runtime: 'claude', env: visible, platform: 'darwin', runner: neverAsk }), null);
+    assert.strictEqual(visible.PATH, bin);
+
+    // CLI invisível → pergunta ao shell de login (-lic, bounded) e appenda a
+    // ÚLTIMA linha do stdout — um rc file pode imprimir ruído antes.
+    const probes = [];
+    const env = { PATH: '/usr/bin', SHELL: '/bin/zsh' };
+    const result = updater.borrowLoginPath({
+      runtime: 'claude', env, platform: 'darwin',
+      runner: (command, args, options) => { probes.push({ command, args, options }); return { status: 0, stdout: `motd ruidoso\n/usr/bin:${bin}\n` }; },
+    });
+    assert.deepStrictEqual(result.missing, ['claude']);
+    assert.strictEqual(env.PATH, `/usr/bin:/usr/bin:${bin}`, 'o PATH emprestado é appendado, nunca prependado');
+    assert.strictEqual(probes[0].command, '/bin/zsh');
+    assert.deepStrictEqual(probes[0].args, ['-lic', 'printf "%s\\n" "$PATH"']);
+    assert(Number.isFinite(probes[0].options.timeout) && probes[0].options.timeout > 0, 'um rc file pendurado não pode pendurar o update');
+
+    // Resposta sem cara de PATH → nada muda.
+    const garbage = { PATH: '/usr/bin', SHELL: '/bin/zsh' };
+    assert.strictEqual(updater.borrowLoginPath({ runtime: 'claude', env: garbage, platform: 'darwin', runner: () => ({ status: 0, stdout: '' }) }), null);
+    assert.strictEqual(garbage.PATH, '/usr/bin');
+
+    // Windows não tem shell de login para emprestar — no-op declarado.
+    assert.strictEqual(updater.borrowLoginPath({ runtime: 'claude', env: { PATH: '' }, platform: 'win32', runner: neverAsk }), null);
+  } finally { fs.rmSync(bin, { recursive: true, force: true }); }
+});
+
+test('run() borrows the login PATH before resolving any route', () => {
+  // Garantia posicional: o empréstimo precisa acontecer antes do dispatch para
+  // que probes de capability e ambos os bootstraps herdem o PATH corrigido.
+  const source = fs.readFileSync(path.join(__dirname, 'forge-update.js'), 'utf8');
+  const borrow = source.indexOf('borrowLoginPath({ runtime: options.runtime })');
+  const dispatch = source.indexOf('const localRepo = localBootstrapRepo(options)');
+  assert(borrow !== -1, 'run() não empresta mais o PATH do shell de login');
+  assert(dispatch !== -1 && borrow < dispatch, 'o empréstimo precisa preceder o dispatch');
+});
+
+test('update() tells the installer when stdout is a JSON report', () => {
+  const data = fixture();
+  try {
+    const seen = [];
+    const fakeInstall = (input) => { seen.push(input); return { ok: true, changed: false, backup: null, plan: [] }; };
+    updater.update({ ...data, runtime: 'claude', apply: true, json: true, skipCapabilityCheck: true }, { install: fakeInstall });
+    updater.update({ ...data, runtime: 'claude', apply: true, skipCapabilityCheck: true }, { install: fakeInstall });
+    assert.strictEqual(seen[0].jsonOutput, true, 'sem o aviso, o build do app despeja progresso no relatório JSON');
+    assert.strictEqual(Boolean(seen[1].jsonOutput), false);
+  } finally { data.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

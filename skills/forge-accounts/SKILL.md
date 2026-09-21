@@ -156,3 +156,5 @@ Avise que, para voltar a usar essa conta, será preciso `add` de novo (novo
 - O token do `setup-token` vale ~1 ano; o `list` mostra os dias restantes.
 - A statusline mostra a conta ativa (`👤 <nome>`) quando a sessão foi lançada com
   `FORGE_ACCOUNT=<nome>`, ao lado do uso de 5h/semana.
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

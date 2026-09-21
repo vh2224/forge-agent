@@ -435,3 +435,5 @@ Arquivos criados:
 
 Próximo: /gsd para planejar primeiro slice, ou /forge-auto para executar tudo.
 ```
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

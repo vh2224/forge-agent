@@ -19,6 +19,7 @@
 // Zero deps. Standalone runner, repo convention: exit != 0 on failure.
 
 const fs = require('fs');
+const interaction = require('./forge-interaction');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -105,6 +106,25 @@ function legacyBlock(version, eol = '\n') {
 
 // ── R1: idempotence ─────────────────────────────────────────────────────────
 
+test('interaction block is independently owned, fence-aware and refuses malformed spans', () => {
+  const start = interaction.START, end = interaction.END;
+  for (const body of [`${start}\nmissing`, `${end}\n${start}`, `${start}\nx\n${end}\n${start}`, '<!-- forge:interaction:start invalid -->']) {
+    const root = project({ 'AGENTS.md': body });
+    const result = syncFile(path.join(root, 'AGENTS.md'), { host: 'codex' });
+    assertEqual(result.outcome, 'skipped', 'malformed interaction refused');
+    assertEqual(read(root, 'AGENTS.md'), body, 'refusal wrote routing or interaction bytes');
+  }
+  const quoted = `# keep\r\n\r\n~~~md\r\n${start}\r\nx\r\n${end}\r\n~~~\r\n`;
+  const first = interaction.sync(quoted).content;
+  assert(first.startsWith(quoted), 'quoted marker was consumed');
+  assertEqual(interaction.sync(first).content, first, 'interaction sync is not idempotent');
+  const operatorTail = '\r\n# operator tail\r\n';
+  const stale = `prefix\r\n${start}\r\nold\r\n${end}${operatorTail}`;
+  const refreshed = interaction.sync(stale).content;
+  assert(refreshed.startsWith('prefix\r\n') && refreshed.endsWith(operatorTail), 'interaction splice lost external bytes');
+  assertEqual(findBlock(first), null, 'interaction expanded routing marker grammar');
+});
+
 console.log('R1 — idempotence');
 
 test('primeiro sync escreve o bloco; o segundo não muda um byte', () => {
@@ -147,7 +167,7 @@ test('texto antes E depois do bloco sobrevive byte a byte a um refresh', () => {
   syncInstructions(root);
   const text = read(root, 'CLAUDE.md');
   assert(text.startsWith(before), 'o texto anterior ao bloco foi alterado');
-  assert(text.endsWith(after), 'o texto posterior ao bloco foi alterado');
+  assert(text.includes(after + '\n' + interaction.START), 'o texto posterior ao bloco foi alterado');
 });
 
 test('arquivo sem newline final ganha o bloco sem colar na última linha', () => {
@@ -187,7 +207,7 @@ test('legacy CRLF migration preserves external bytes and line endings', () => {
   const root = project({ 'CLAUDE.md': original });
   syncInstructions(root);
   const migrated = read(root, 'CLAUDE.md');
-  assert(migrated.startsWith(before) && migrated.endsWith(after), 'external CRLF bytes changed');
+  assert(migrated.startsWith(before) && migrated.includes(after + '\r\n' + interaction.START), 'external CRLF bytes changed');
   assertEqual((migrated.match(/(?<!\r)\n/g) || []).length, 0, 'migration introduced lone LF');
   const second = syncInstructions(root);
   assertEqual(second.changed, 0, 'migration second sync changed bytes');
@@ -292,7 +312,7 @@ test('par de marcadores dentro de ``` é ignorado; o arquivo recebe um bloco rea
   const text = read(root, 'CLAUDE.md');
   assert(text.includes('CONTEUDO-DE-EXEMPLO-QUE-NAO-PODE-SUMIR'), 'o exemplo dentro da fence foi comido pelo splice');
   assert(text.startsWith(doc.replace(/\n+$/, '')), 'o documento original foi alterado');
-  assert(text.trimEnd().endsWith(MARKER_END), 'o bloco real não foi anexado');
+  assert(text.trimEnd().endsWith(interaction.END), 'o bloco real não foi anexado');
 });
 
 test('stable and legacy markers in backtick and tilde fences are ignored', () => {
@@ -306,7 +326,7 @@ test('stable and legacy markers in backtick and tilde fences are ignored', () =>
     syncInstructions(root);
     const written = read(root, 'CLAUDE.md');
     assert(written.includes('DO-NOT-REMOVE'), 'fenced bytes lost');
-    assert(written.trimEnd().endsWith(MARKER_END), 'stable block not appended');
+    assert(written.trimEnd().endsWith(interaction.END), 'stable block not appended');
   }
 });
 

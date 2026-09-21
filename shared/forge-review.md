@@ -1,5 +1,17 @@
 # Forge Review — Dialectic Confrontation
 
+> Host-aware review delivery: after resolving pairing, Claude reviewer/advocate
+> on a Codex host uses the existing external challenge/defend/rebuttal branch
+> with `XLLM_ENGINE=claude` (or `XLLM_ENGINE_ADVOCATE=claude`). Preserve the
+> resolved model and effort and pass the actual host plus `--sidecar-declared`.
+> Conversely, Codex on a Claude host uses `--engine codex`. Same-host native
+> review remains native. This takes precedence over the older statements below
+> that equate Claude with in-process delivery regardless of host. No pairing is
+> changed. See `shared/forge-bidirectional-sidecar.md` for the capability matrix.
+
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
+
 Authoritative spec for the **review gate**: a two-agent confrontation on a completed diff, run from the orchestrator context. Two consumers bind it at their own boundary:
 
 | Consumer | Boundary | DIFF_CMD | Artifact | MODE |
@@ -17,7 +29,7 @@ The gate stages two independent agents against the slice diff:
 
 The human only adjudicates what the two AIs genuinely disagree on. Everything else resolves between them — and what they **agree** is broken gets fixed on the spot (Step 7a), not archived. The gate **never blocks** `complete-slice` and never returns a blocker; what remains open is guaranteed to reach the operator at the milestone-final triage (Step 9) before `complete-milestone` runs.
 
-> Why the orchestrator and not `forge-completer`: agents cannot call `Agent` or `AskUserQuestion`. The completer (`tools: Read, Write, Edit, Bash`) physically cannot dispatch the reviewer or ask the user. The skills run in the main context and own both tools.
+> Why the orchestrator and not `forge-completer`: agents cannot call `Agent` or `AskUserQuestion`. The completer (`tools: Read, Write, Edit, Bash`) physically cannot dispatch the reviewer or ask the user. The skills run in the main context and check permitted native tools under the interaction contract.
 
 ## Inputs
 - `WORKING_DIR` — absolute project root (bash-captured `pwd`, Windows-safe)

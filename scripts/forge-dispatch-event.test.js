@@ -220,7 +220,7 @@ test('the emitter appends to the log and creates its directory', () => withTempD
 }));
 
 // END-TO-END: real resolver process → real emitter process → persisted file.
-test('a refused leg and a routine one are distinguishable in the written events.jsonl', () => withTempDir((dir) => {
+test('cross-host and native delivery retain distinct mode and leg in events.jsonl', () => withTempDir((dir) => {
   const target = path.join(dir, '.gsd', 'forge', 'events.jsonl');
   const refusedContract = resolveContract(dir, ['--host-runtime', 'codex', '--worker-engine', 'claude']);
   const routineContract = resolveContract(dir, ['--host-runtime', 'codex', '--worker-engine', 'codex']);
@@ -236,10 +236,10 @@ test('a refused leg and a routine one are distinguishable in the written events.
   assert.strictEqual(written.length, 2);
   const [refused, routine] = written;
 
-  assert.strictEqual(refused.dispatch_allowed, false);
-  assert.strictEqual(refused.dispatch_decision, 'refuse');
-  assert.strictEqual(refused.dispatch_posture, 'enforce');
-  assert.strictEqual(refused.dispatch_reason_code, 'codex-claude-unroutable');
+  assert.strictEqual(refused.dispatch_allowed, true);
+  assert.strictEqual(refused.dispatch_decision, 'advisory');
+  assert.strictEqual(refused.dispatch_posture, 'observe');
+  assert.strictEqual(refused.dispatch_reason_code, 'runtime-posture-observed');
   assert.strictEqual(refused.leg, 'codex→claude');
   assert.strictEqual(refused.host_runtime, 'codex');
   assert.strictEqual(refused.resolved_worker_engine, 'claude');
@@ -252,7 +252,7 @@ test('a refused leg and a routine one are distinguishable in the written events.
 
   // The distinction must survive in the file itself: every posture axis differs,
   // so no reader has to guess which of the two it is looking at.
-  for (const field of ['dispatch_allowed', 'dispatch_decision', 'dispatch_posture', 'dispatch_reason_code', 'leg']) {
+  for (const field of ['worker_mode', 'leg']) {
     assert.notStrictEqual(refused[field], routine[field], field);
   }
 }));

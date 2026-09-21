@@ -122,3 +122,5 @@ No installer change needed. `shared/*.md` is glob-installed by both installers:
 - `install.ps1` (`Join-Path … 'shared'` block, ~line 360) — same glob, PowerShell form.
 
 This file lands in `${FORGE_HOME:-$HOME/.forge-agent}/shared/` on the next `./install.sh` / `install.ps1` run without any script edit. Confirmed by inspection of both loops (see task step 5).
+
+**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
