@@ -5,6 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const controller = require('./forge-unit-controller.js');
 const state = require('./forge-state.js');
 const lease = require('./forge-unit-lease.js');
@@ -32,6 +33,73 @@ function testPureSelection() {
     inventory: { roadmap_exists: true, context_exists: true, research_exists: true, slices: [{ id: 'S01', checked: false, plan_exists: true, research_exists: true, tasks: [{ id: 'T01', checked: false }] }] },
   });
   assert.deepStrictEqual({ type: selected.unit.type, id: selected.unit.id }, { type: 'execute-task', id: 'T01' });
+}
+
+function testSelectionPhasesAndCanonicalPrefs() {
+  const current = { milestone: 'M1', active_slice: 'S01' };
+  const slice = { id: 'S01', plan_exists: true, research_exists: true, tasks: [{ id: 'T01', checked: false }] };
+  const inventory = { roadmap_exists: true, context_exists: true, research_exists: true, slices: [slice] };
+  const choose = (changes = {}, prefs = {}) => controller.selectNextUnit({ state: current, inventory: { ...inventory, ...changes }, prefs });
+  for (const [changes, type] of [
+    [{ roadmap_exists: false }, 'plan-milestone'],
+    [{ context_exists: false }, 'discuss-milestone'],
+    [{ research_exists: false }, 'research-milestone'],
+    [{ slices: [{ ...slice, plan_exists: false }] }, 'plan-slice'],
+    [{ slices: [{ ...slice, research_exists: false }] }, 'research-slice'],
+    [{}, 'execute-task'],
+    [{ slices: [{ ...slice, tasks: [] }] }, 'complete-slice'],
+    [{ slices: [{ ...slice, checked: true }] }, 'complete-milestone'],
+  ]) assert.strictEqual(choose(changes).unit.type, type);
+  assert.strictEqual(choose({ milestone_complete: true, slices: [{ ...slice, checked: true }] }).done, true);
+  assert.strictEqual(choose({ context_exists: false }, { skip_discuss: true }).unit.type, 'execute-task');
+  assert.strictEqual(choose({ context_exists: false }, { skip_discuss: false, workflow: { skip_discuss: true } }).unit.type, 'discuss-milestone');
+  const missingResearch = { research_exists: false, slices: [{ ...slice, research_exists: false }] };
+  assert.strictEqual(choose(missingResearch, { skip_research: true }).unit.type, 'research-slice');
+  assert.strictEqual(choose(missingResearch, { skip_slice_research: true }).unit.type, 'research-milestone');
+  assert.strictEqual(choose(missingResearch, { skip_research: true, skip_slice_research: true }).unit.type, 'execute-task');
+  assert.strictEqual(choose(missingResearch, { workflow: { skip_research: true } }).unit.type, 'execute-task', 'legacy aliases remain readable');
+
+  const nextSlice = { ...slice, id: 'S02', research_exists: false };
+  for (const previous of [{ ...slice, checked: true }, { ...slice, tasks: [], summary_exists: true }]) {
+    const next = choose({ slices: [previous, nextSlice] });
+    assert.strictEqual(next.unit.type, 'research-slice', 'next slice uses the same phase rules');
+    assert.strictEqual(next.slice, 'S02', 'stale STATE cannot select a checked slice');
+  }
+}
+
+function testSelectionDiscoversArtifactsWithoutWriting() {
+  const fixture = setup();
+  try {
+    const dir = path.join(fixture.cwd, '.gsd', 'milestones', fixture.milestone);
+    fs.writeFileSync(path.join(dir, `${fixture.milestone}-ROADMAP.md`), '- [x] **S01: Done**\n- [ ] **S02: Next**\n');
+    fs.mkdirSync(path.join(dir, 'slices', 'S02'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'slices', 'S02', 'S02-PLAN.md'), '- [ ] T01: Work\n');
+    const file = state.statePath(fixture.cwd, fixture.milestone);
+    const before = fs.readFileSync(file);
+    const options = { prefsReader: () => ({ ok: true, prefs: { skip_discuss: true, skip_research: true, skip_slice_research: true } }) };
+    const result = controller.select(fixture.cwd, { milestone: fixture.milestone }, options);
+    assert.strictEqual(result.unit.type, 'execute-task');
+    assert.strictEqual(result.slice, 'S02');
+    assert.deepStrictEqual(fs.readFileSync(file), before);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 0);
+    assert.strictEqual(lease.observe(fixture.cwd, result.unit).lease, null);
+    const prefsFile = path.join(fixture.cwd, '.gsd', 'forge-prefs.jsonc');
+    fs.writeFileSync(prefsFile, JSON.stringify(options.prefsReader().prefs));
+    const invoke = () => spawnSync(process.execPath, [path.join(__dirname, 'forge-unit-controller.js'), '--select', fixture.milestone, '--cwd', fixture.cwd], {
+      encoding: 'utf8', env: { ...process.env, HOME: fixture.cwd, USERPROFILE: fixture.cwd, FORGE_HOME: path.join(fixture.cwd, '.forge-agent') },
+    });
+    const cli = invoke();
+    assert.strictEqual(cli.status, 0, cli.stderr);
+    assert.strictEqual(JSON.parse(cli.stdout).slice, 'S02');
+    assert.strictEqual(JSON.parse(cli.stdout).unit.type, 'execute-task');
+    fs.writeFileSync(prefsFile, '{');
+    assert.strictEqual(invoke().status, 1, 'broken preference JSON stops the CLI');
+    assert.deepStrictEqual(fs.readFileSync(file), before);
+    assert.throws(() => controller.select(fixture.cwd, { milestone: fixture.milestone }, {
+      prefsReader: () => ({ ok: false, errors: [{ message: 'broken prefs' }] }),
+    }), /prefs-invalid|prefer/);
+    assert.deepStrictEqual(fs.readFileSync(file), before);
+  } finally { cleanup(fixture.cwd); }
 }
 
 function testBeginCompleteHandoffAndResume() {
@@ -190,6 +258,8 @@ function testProviderProjectionIsNeutral() {
 function main() {
   console.log(`forge-unit-controller tests on ${process.platform}`);
   test('pure deterministic selection', testPureSelection);
+  test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
+  test('artifact discovery selects without leases or STATE writes', testSelectionDiscoversArtifactsWithoutWriting);
   test('begin/complete/handoff/resume', testBeginCompleteHandoffAndResume);
   test('lease negative and boundary deny', testLeaseNegativeAndBoundaryDeny);
   test('pause and failure boundaries', testPauseAndFailureBoundaries);

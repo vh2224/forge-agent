@@ -183,27 +183,21 @@ function selectNextUnit(input) {
   if (!current || !current.milestone) return { ok: false, reason: 'no-next-unit', done: true };
   const milestone = current.milestone;
   if (!inventory.roadmap_exists) return selected('plan-milestone', milestone, milestone, current);
-  const skipDiscuss = preferenceBoolean(prefs, ['workflow.skip_discuss', 'planning.skip_discuss', 'skip.discuss'], false);
-  const skipResearch = preferenceBoolean(prefs, ['workflow.skip_research', 'planning.skip_research', 'skip.research'], false);
+  const skipDiscuss = preferenceBoolean(prefs, ['skip_discuss', 'workflow.skip_discuss', 'planning.skip_discuss', 'skip.discuss'], false);
+  const skipResearch = preferenceBoolean(prefs, ['skip_research', 'workflow.skip_research', 'planning.skip_research', 'skip.research'], false);
+  const skipSliceResearch = preferenceBoolean(prefs, ['skip_slice_research', 'workflow.skip_research', 'planning.skip_research', 'skip.research'], false);
   if (!inventory.context_exists && !skipDiscuss) return selected('discuss-milestone', milestone, milestone, current);
   if (!inventory.research_exists && !skipResearch) return selected('research-milestone', milestone, milestone, current);
   const slices = Array.isArray(inventory.slices) ? inventory.slices : [];
   const activeSlice = inventory.active_slice || current.active_slice;
-  const slice = slices.find(item => item.id === activeSlice) || slices.find(item => !item.checked) || null;
-  if (!slice) {
-    if (inventory.milestone_complete) return { ok: false, reason: 'no-next-unit', done: true, milestone };
-    return selected('complete-milestone', milestone, milestone, current);
-  }
-  if (!slice.plan_exists) return selected('plan-slice', slice.id, milestone, current, slice.id);
-  if (!slice.research_exists && !skipResearch) return selected('research-slice', slice.id, milestone, current, slice.id);
-  const task = (slice.tasks || []).find(item => !item.checked);
-  if (task) return selected('execute-task', task.id, milestone, current, slice.id);
-  if (!slice.summary_exists) return selected('complete-slice', slice.id, milestone, current, slice.id);
-  const remaining = slices.find(item => !item.checked && item.id !== slice.id);
-  if (remaining) {
-    if (!remaining.plan_exists) return selected('plan-slice', remaining.id, milestone, current, remaining.id);
-    const nextTask = (remaining.tasks || []).find(item => !item.checked);
-    if (nextTask) return selected('execute-task', nextTask.id, milestone, current, remaining.id);
+  const pending = slices.filter(item => !item.checked);
+  const ordered = [...pending.filter(item => item.id === activeSlice), ...pending.filter(item => item.id !== activeSlice)];
+  for (const slice of ordered) {
+    if (!slice.plan_exists) return selected('plan-slice', slice.id, milestone, current, slice.id);
+    if (!slice.research_exists && !skipSliceResearch) return selected('research-slice', slice.id, milestone, current, slice.id);
+    const task = (slice.tasks || []).find(item => !item.checked);
+    if (task) return selected('execute-task', task.id, milestone, current, slice.id);
+    if (!slice.summary_exists) return selected('complete-slice', slice.id, milestone, current, slice.id);
   }
   if (!inventory.milestone_complete) return selected('complete-milestone', milestone, milestone, current);
   return { ok: false, reason: 'no-next-unit', done: true, milestone };

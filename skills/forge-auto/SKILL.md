@@ -399,27 +399,10 @@ If the file exists:
 
 If the file does not exist, skip this block entirely.
 
-From STATE, determine `unit_type` and `unit_id` using the dispatch table below.
-
-**Dispatch Table** (evaluate in order — first match wins):
-
-| Condition | unit_type | Agent | Default model |
-|-----------|-----------|-------|---------------|
-| No active milestone | STOP — tell user "no active milestone" | — | — |
-| Milestone has no ROADMAP | plan-milestone | **forge-planner** | opus |
-| Milestone has ROADMAP, no CONTEXT, discuss not skipped | discuss-milestone | **forge-discusser** | opus |
-| Milestone has no RESEARCH, research not skipped | research-milestone | **forge-researcher** | opus |
-| Active slice has no PLAN | plan-slice | **forge-planner** | opus |
-| Active slice has PLAN, no RESEARCH, research not skipped | research-slice | **forge-researcher** | opus |
-| Active slice has incomplete task | execute-task | **forge-executor** | sonnet |
-| All tasks in active slice done, no S##-SUMMARY | complete-slice | **forge-completer** | sonnet |
-| All slices complete, no milestone completion marker | complete-milestone | **forge-completer** | sonnet |
-| All slices `[x]` in ROADMAP and milestone complete | DONE — emit final report and stop | — | — |
-
-To determine which case applies, read (in order, stop as soon as you find the answer):
-1. STATE.md (already loaded) — `next_action` usually tells you directly
-2. `M###-ROADMAP.md` — only if STATE is ambiguous about slices/milestone completion
-3. `S##-PLAN.md` — only if STATE is ambiguous about tasks within a slice
+Read `shared/forge-lifecycle.md` section **Milestone selection authority**.
+Use the existing controller result in auto mode, or its read-only `--select` CLI
+in step mode. Keep the returned milestone/slice/unit identity; do not infer a
+second selection from STATE, ROADMAP or PLAN prose.
 
 **Crash detection:** Before dispatching `execute-task`, read `T##-PLAN.md`. If it contains `status: RUNNING`, the previous session crashed mid-task. Warn the user:
 > ⚠ Task {T##} was interrupted (status: RUNNING). Re-executing from scratch.
@@ -1117,7 +1100,8 @@ Os arquivos de backup das rodadas anteriores estão em:
 
 #### 2. Check skip rules
 
-Read PREFS for `skip_discuss` and `skip_research`. If the current unit type is skipped, advance STATE past it and re-derive (do not count as a unit).
+Skip preferences were applied by the controller during selection. Do not advance
+STATE or re-select a leased unit here; continue with the selected unit.
 
 #### 3. Build worker prompt
 
