@@ -10,7 +10,8 @@ permissions:
   contents: write
 
 # Serialize runs so near-simultaneous pushes (e.g. a batch of merges) don't
-# race on the same computed version. Queue, don't cancel -- every push releases.
+# race on the same computed version. Queue, don't cancel; pushes without a
+# release-worthy conventional commit pass validation but skip publication.
 concurrency:
   group: release
   cancel-in-progress: false
