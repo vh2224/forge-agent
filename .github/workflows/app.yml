@@ -1,0 +1,33 @@
+name: macOS app
+
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - '.github/workflows/app.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'app/**'
+      - '.github/workflows/app.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: Swift app and PTY regressions
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: app/.build
+          key: swift-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('app/Package.resolved', 'app/Package.swift') }}-${{ github.sha }}
+          restore-keys: |
+            swift-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('app/Package.resolved', 'app/Package.swift') }}-
+      - name: Build the app
+        run: swift build --package-path app --product Forge
+      - name: Run Swift contracts and real PTY regressions
+        run: swift run --package-path app ForgeKitTests

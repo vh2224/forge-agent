@@ -174,7 +174,7 @@ final class TerminalViewStore: ObservableObject {
         // Read the pty and the pid BEFORE `terminate()`. Its first act is to
         // close the DispatchIO and set `childfd = -1`, and after that there is
         // nothing left to identify this session's processes by.
-        let tty = TerminalReaper.ttyDevice(of: view.process.childfd)
+        let original = TerminalProcessSystem.capture(fd: view.process.childfd)
         let shellPid = view.process.shellPid
 
         view.terminate()
@@ -187,16 +187,9 @@ final class TerminalViewStore: ObservableObject {
         //
         // Off the main thread: the escalation sleeps between SIGTERM and
         // SIGKILL, and closing a tab must not freeze the UI for two seconds.
-        guard let tty else {
-            // No pty to select on — the process is either already gone or was
-            // never started. Reap whatever child there is and stop; sweeping on
-            // an unreadable device is how this would kill the machine instead
-            // of the tab.
-            DispatchQueue.global(qos: .utility).async { TerminalReaper.reap(shellPid) }
-            return
-        }
         DispatchQueue.global(qos: .utility).async {
-            TerminalReaper.sweep(tty: tty, shellPid: shellPid)
+            TerminalProcessSystem.sweep(original)
+            TerminalProcessSystem.reap(shellPid)
         }
     }
 

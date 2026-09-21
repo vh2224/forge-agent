@@ -26,11 +26,14 @@ public struct TerminalProcess: Equatable, Sendable {
     public let ppid: pid_t
     /// Controlling terminal, as `kinfo_proc.kp_eproc.e_tdev`.
     public let tty: dev_t
+    /// Kernel creation time in microseconds; PID and tty alone are reusable.
+    public let startedAt: UInt64
 
-    public init(pid: pid_t, ppid: pid_t, tty: dev_t) {
+    public init(pid: pid_t, ppid: pid_t, tty: dev_t, startedAt: UInt64 = 0) {
         self.pid = pid
         self.ppid = ppid
         self.tty = tty
+        self.startedAt = startedAt
     }
 }
 
@@ -47,6 +50,57 @@ public struct SignalStep: Equatable, Sendable {
 }
 
 public enum TerminalReaping {
+    /// Keep the original cohort even if its tty disappears after shell exit.
+    public static func survivors(of original: [TerminalProcess],
+                                 among current: [TerminalProcess]) -> [TerminalProcess] {
+        original.filter { old in
+            old.pid > 1 && old.startedAt > 0 && current.contains {
+                $0.pid == old.pid && $0.startedAt == old.startedAt
+            }
+        }
+    }
+
+    /// Refuse a whole tty if any occupant is new or has unknown identity.
+    /// This also protects tabs opened before a delayed boot worker runs.
+    public static func bootCandidates(among table: [TerminalProcess],
+                                      appStartedAt: UInt64,
+                                      marked: (pid_t) -> Bool) -> [TerminalProcess] {
+        guard appStartedAt > 0 else { return [] }
+        let protectedTTYs = Set(table.filter {
+            $0.startedAt == 0 || $0.startedAt >= appStartedAt
+        }.map(\.tty))
+        let ttys = Set(leftoverTTYs(among: table, owned: protectedTTYs, marked: marked))
+        return table.filter { $0.pid > 1 && ttys.contains($0.tty) }
+    }
+
+    /// KERN_PROCARGS2: argc, executable, NUL padding, argc strings, environment.
+    /// An argv token is never evidence of ownership. Malformed input fails closed.
+    public static func environment(in bytes: [UInt8]) -> [String] {
+        guard bytes.count >= MemoryLayout<Int32>.size else { return [] }
+        let argc = bytes.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
+        guard argc > 0, Int(argc) <= bytes.count else { return [] }
+        var offset = MemoryLayout<Int32>.size
+        func string() -> String? {
+            guard offset < bytes.count,
+                  let end = bytes[offset...].firstIndex(of: 0) else { return nil }
+            let value = String(decoding: bytes[offset..<end], as: UTF8.self)
+            offset = end + 1
+            return value
+        }
+        guard string() != nil else { return [] }
+        while offset < bytes.count && bytes[offset] == 0 { offset += 1 }
+        for _ in 0..<Int(argc) {
+            guard string() != nil else { return [] }
+        }
+        var result: [String] = []
+        while offset < bytes.count {
+            guard let entry = string() else { return [] }
+            if entry.isEmpty { break }
+            result.append(entry)
+        }
+        return result
+    }
+
     /// `e_tdev` for "no controlling terminal" (NODEV). Every daemon on the
     /// machine carries it, which is the whole reason it can never be used as a
     /// selector — see the guard in `victims`.

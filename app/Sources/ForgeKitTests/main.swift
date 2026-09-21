@@ -14,6 +14,12 @@ import ForgeKit
 // thing that needs the real symbol set rather than the type system.
 import AppKit
 
+// A real, unrestricted process for KERN_PROCARGS2 integration tests. argv may
+// contain the marker without the environment carrying it.
+if CommandLine.arguments.contains("--terminal-environment-fixture") {
+    while true { Thread.sleep(forTimeInterval: 1) }
+}
+
 var passed = 0
 var failed = 0
 var failures: [(String, String)] = []
@@ -2391,6 +2397,7 @@ test("fechar a sessão encerra e descarta") {
 // vazavam. Ele afirma a DECISÃO (.terminateAndDiscard) e nada sobre o efeito —
 // e o efeito era matar 1 processo de 6. O que segue afirma o conjunto.
 print("\nTerminalReaping (fechar a aba tem que levar a aba inteira)")
+runTerminalReapingTests()
 
 // A aba real medida em 2026-09-02, ttys078 = dev 42. Três process groups:
 // o shell de login, o claude com seus MCP servers, e o shell do gitstatusd
