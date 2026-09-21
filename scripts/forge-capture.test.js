@@ -153,11 +153,14 @@ test('(d) the two blocked-marker blocks are byte-identical across forge-auto and
   assertEq(autoBlock, nextBlock, 'blocked-marker blocks must be byte-identical (RISK warning 2 guard)');
 });
 
-test('(e) forge-task/SKILL.md references review/{TASK_ID}/{R#} at Step 7b and plan-gate/{TASK_ID} at Gate Step 2', () => {
+test('(e) forge-task keeps review capture and binds the shared plan-gate capture', () => {
   assert(forgeTaskSkill.includes('review/{TASK_ID}/{R#}'),
     'forge-task/SKILL.md missing source review/{TASK_ID}/{R#} reference (Step 7b)');
-  assert(forgeTaskSkill.includes('plan-gate/{TASK_ID}'),
-    'forge-task/SKILL.md missing source plan-gate/{TASK_ID} reference (Gate Step 2)');
+  const gate = forgeTaskSkill.slice(forgeTaskSkill.indexOf('### Step 4.5'), forgeTaskSkill.indexOf('### Step 5 '));
+  assert(gate.includes('read and execute') && gate.includes('shared/forge-plan-gate.md') && gate.includes('task/{TASK_ID}'),
+    'forge-task must execute the shared gate with its task binding');
+  assert(forgePlanGate.includes('plan-gate/{TASK_ID}') && forgePlanGate.includes('shared/forge-review.md § Item capture'),
+    'the delegated gate must preserve task item capture');
 });
 
 test('(f) forge-memory.md contains the 4th gate question and both worked examples', () => {

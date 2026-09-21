@@ -710,14 +710,14 @@ for plan in $PLAN_GLOB_FILES; do
     LEGACY=false; VALID=false
     ERRORS="[\"IO error from forge-must-haves.js: $IO_ERR\"]"
   else
-    if ! node -e "JSON.parse(process.env.R)" R="$REVALIDATION" 2>/dev/null; then
+    if ! node -e "JSON.parse(process.argv[1])" "$REVALIDATION" 2>/dev/null; then
       IO_ERR=$(cat "$REVALIDATION_STDERR")
       LEGACY=false; VALID=false
       ERRORS="[\"Non-JSON stdout from forge-must-haves.js (exit $REVALIDATION_EXIT): $IO_ERR\"]"
     else
-      LEGACY=$(node -e "process.stdout.write(String(JSON.parse(process.env.R).legacy))" R="$REVALIDATION")
-      VALID=$(node -e  "process.stdout.write(String(JSON.parse(process.env.R).valid))"  R="$REVALIDATION")
-      ERRORS=$(node -e "process.stdout.write(JSON.stringify(JSON.parse(process.env.R).errors))" R="$REVALIDATION")
+      LEGACY=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).legacy))" "$REVALIDATION")
+      VALID=$(node -e  "process.stdout.write(String(JSON.parse(process.argv[1]).valid))"  "$REVALIDATION")
+      ERRORS=$(node -e "process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).errors))" "$REVALIDATION")
     fi
   fi
   rm -f "$REVALIDATION_STDERR"
