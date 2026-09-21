@@ -66,8 +66,35 @@ function copyFile(source, destination, plan, options) {
   fs.copyFileSync(source, destination);
 }
 
-function copyTree(sourceRoot, destinationRoot, plan, options) {
-  for (const relative of relativeFiles(sourceRoot)) copyFile(path.join(sourceRoot, relative), path.join(destinationRoot, relative), plan, options);
+function isRuntimeFile(relative) {
+  const normalized = relative.replace(/\\/g, '/');
+  return !/^scripts\/[^/]+\.test\.js$/.test(normalized) && normalized !== 'scripts/forge-smoke.js';
+}
+
+function copyTree(sourceRoot, destinationRoot, plan, options, include = () => true) {
+  for (const relative of relativeFiles(sourceRoot)) {
+    if (include(relative)) copyFile(path.join(sourceRoot, relative), path.join(destinationRoot, relative), plan, options);
+  }
+}
+
+// Only retire known, unchanged development files. Unknown or edited files stay
+// with the operator; old versions can be inspected in the regular update backup.
+function retireDevelopmentFiles(repo, forgeHome, backupRoot, plan, options) {
+  const sourceRoot = path.join(repo, 'scripts');
+  for (const relative of relativeFiles(sourceRoot)) {
+    if (isRuntimeFile(path.join('scripts', relative))) continue;
+    const source = path.join(sourceRoot, relative);
+    const destination = path.join(forgeHome, 'scripts', relative);
+    if (!exists(destination) || fs.realpathSync(source) === fs.realpathSync(destination)) continue;
+    const normalize = file => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    if (fs.lstatSync(destination).isSymbolicLink() || normalize(source) !== normalize(destination)) {
+      plan.push({ op: 'skip', reason: 'development-file-customized', destination });
+      continue;
+    }
+    copyFile(destination, path.join(backupRoot, 'scripts', relative), plan, options);
+    plan.push({ op: 'remove', reason: 'development-file', destination });
+    if (!options.dryRun) fs.unlinkSync(destination);
+  }
 }
 
 function backupTree(sourceRoot, destinationRoot, plan, options) {
@@ -401,9 +428,10 @@ function install(input = {}) {
   for (const item of coreFiles) {
     const source = path.join(repo, item);
     const destination = path.join(paths.forgeHome, item);
-    if (fs.statSync(source).isDirectory()) copyTree(source, destination, plan, options);
+    if (fs.statSync(source).isDirectory()) copyTree(source, destination, plan, options, relative => isRuntimeFile(path.join(item, relative)));
     else copyFile(source, destination, plan, options);
   }
+  if (options.update) retireDevelopmentFiles(repo, paths.forgeHome, backupRoot, plan, options);
   // Review schemas historically lived under shared/schemas in the repository,
   // while installed scripts resolve the canonical Forge-home schemas directory.
   copyTree(path.join(repo, 'shared', 'schemas'), paths.shared.schemas, plan, options);
@@ -638,5 +666,5 @@ function run(argv = process.argv.slice(2), write = process.stdout.write.bind(pro
   catch (error) { errorWrite(`forge-installer: ${error.message}\n`); return 1; }
 }
 
-module.exports = { RUNTIMES, VERSION, MANAGED_CORE, TOMBSTONE, parseArgs, walk, adapterSources, installApp, classifyLegacyScripts, legacyScriptReferences, retireLegacyScripts, install, planLines, render, run };
+module.exports = { RUNTIMES, VERSION, MANAGED_CORE, TOMBSTONE, isRuntimeFile, parseArgs, walk, adapterSources, installApp, classifyLegacyScripts, legacyScriptReferences, retireLegacyScripts, install, planLines, render, run };
 if (require.main === module) process.exitCode = run();

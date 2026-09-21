@@ -21,6 +21,34 @@ function fixture() {
 }
 function files(root) { return fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }).map((entry) => entry.name).sort() : []; }
 
+test('runtime install omits tests and update backs up only known unchanged development copies', () => {
+  const data = fixture();
+  try {
+    installer.install({ ...data.options, runtime: 'both' });
+    const scripts = path.join(data.forgeHome, 'scripts');
+    assert(!files(scripts).some(name => name.endsWith('.test.js') || name === 'forge-smoke.js'));
+    assert(fs.existsSync(path.join(scripts, 'forge-doctor.js')));
+    assert(fs.existsSync(path.join(scripts, 'fixtures', 'offline-ci', 'matrix.json')));
+    const unchanged = path.join(scripts, 'forge-hook-stop.test.js');
+    const customized = path.join(scripts, 'forge-installer.test.js');
+    const unknown = path.join(scripts, 'operator.test.js');
+    fs.copyFileSync(path.join(__dirname, 'forge-hook-stop.test.js'), unchanged);
+    fs.writeFileSync(customized, 'operator edits\n');
+    fs.writeFileSync(unknown, 'operator suite\n');
+    const before = fs.readFileSync(unchanged);
+    const options = { ...data.options, runtime: 'both', update: true };
+    const preview = installer.install({ ...options, dryRun: true });
+    assert(preview.plan.some(item => item.op === 'remove' && item.destination === unchanged));
+    assert.deepStrictEqual(fs.readFileSync(unchanged), before, 'dry run preserves installed copies');
+    const applied = installer.install(options);
+    assert(!fs.existsSync(unchanged));
+    assert.deepStrictEqual(fs.readFileSync(path.join(applied.backup, 'scripts', path.basename(unchanged))), before);
+    assert.strictEqual(fs.readFileSync(customized, 'utf8'), 'operator edits\n');
+    assert.strictEqual(fs.readFileSync(unknown, 'utf8'), 'operator suite\n');
+    assert(applied.plan.some(item => item.reason === 'development-file-customized' && item.destination === customized));
+  } finally { data.cleanup(); }
+});
+
 test('native question contract reaches installed consumers and safe feature defaults', () => {
   const data = fixture();
   try {

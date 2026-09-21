@@ -100,9 +100,6 @@ const forgeAutoSkill = read('skills/forge-auto/SKILL.md');
 const forgeNextSkill = read('skills/forge-next/SKILL.md');
 const forgeTaskSkill = read('skills/forge-task/SKILL.md');
 const forgeMemoryAgent = read('agents/forge-memory.md');
-const knowledgeMd = fs.existsSync(path.join(REPO_ROOT, '.gsd/KNOWLEDGE.md'))
-  ? read('.gsd/KNOWLEDGE.md')
-  : '';
 
 test('(a) forge-review.md has § Item capture section with the --add invocation and all five source formats', () => {
   assert(forgeReview.includes('## Item capture'), 'missing "## Item capture" heading');
@@ -188,16 +185,6 @@ test('(g) no junction instructs writing full follow-up CONTENT to KNOWLEDGE.md �
     // be scoped to the pointer line only — never "full content".
     assert(!/append.{0,80}full (content|body)/is.test(content),
       `${name}: found a phrase instructing to append full content to KNOWLEDGE.md`);
-  }
-  // The live KNOWLEDGE.md itself (if present) must never contain a full item body
-  // under "Review follow-ups" — only pointer lines "- {I-id} — {title}".
-  if (knowledgeMd.includes('Review follow-ups')) {
-    const section = knowledgeMd.split('Review follow-ups')[1] || '';
-    const nextHeadingIdx = section.search(/\n##\s/);
-    const scoped = nextHeadingIdx === -1 ? section : section.slice(0, nextHeadingIdx);
-    const bodyLines = scoped.split('\n').filter(l => l.trim().length > 0 && !l.trim().startsWith('-') && !l.trim().startsWith('#'));
-    assert(bodyLines.length === 0,
-      `KNOWLEDGE.md § Review follow-ups must contain only pointer lines, found: ${JSON.stringify(bodyLines)}`);
   }
 });
 

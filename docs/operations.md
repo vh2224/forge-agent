@@ -18,6 +18,16 @@ o texto disser para abrir o projeto de trabalho.
 
 ## Instalação
 
+A instalação e o pacote de distribuição incluem os scripts operacionais, mas não
+as suítes `scripts/*.test.js` nem `forge-smoke.js`. Para testes de desenvolvimento
+e gates de release, use um checkout deste repositório; execute `node scripts/run-tests.js`
+e, para a integração completa, `node scripts/forge-smoke.js`.
+
+No update, cópias instaladas desses arquivos que ainda coincidam com a fonte
+conhecida são removidas após backup. Arquivos alterados, desconhecidos ou de
+versões antigas com conteúdo diferente são preservados para inspeção manual.
+Os testes continuam no repositório e no CI.
+
 ### Windows — PowerShell
 
 ```powershell
