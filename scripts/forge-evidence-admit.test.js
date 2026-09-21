@@ -120,11 +120,11 @@ function testClassification() {
       `malformed item ${JSON.stringify(bad)} is unknown, not admitted`);
   }
 
-  // Exactly 2 of 18 admissible — and by NAME, so a future edit that flips a
+  // Exactly 2 of 19 admissible — and by NAME, so a future edit that flips a
   // model-authored variant to admissible fails here rather than in production.
   equal(admit.ADMISSIBLE_TYPES.slice().sort(), ['commandExecution', 'fileChange'],
     'exactly commandExecution and fileChange are admissible');
-  equal(Object.keys(admit.VARIANT_ADMISSIBILITY).length, 18, 'the map classifies 18 variants');
+  equal(Object.keys(admit.VARIANT_ADMISSIBILITY).length, 19, 'the map classifies 19 variants');
   for (const name of Object.keys(admit.VARIANT_ADMISSIBILITY)) {
     const entry = admit.VARIANT_ADMISSIBILITY[name];
     check(typeof entry.reason === 'string' && entry.reason.length > 0, `${name} has an explicit reason`);
@@ -136,6 +136,14 @@ function testClassification() {
 // ── 2. The anti-silence floor: collected-and-empty ≠ not-collected ─────────
 
 function testCollectedAndEmpty() {
+  const clientOutput = admit.buildRuntimeEvidence([
+    { type: 'functionCallOutput', id: 'client-output', name: 'test', output: 'All tests passed: exitCode=0' },
+    { type: 'agentMessage', text: 'Tests passed.', questions: [{ id: 'q', question: 'Continue?' }] },
+  ], { unit: 'execute-task/T02' });
+  equal(clientOutput.entries, [], 'client-supplied output and model questions cannot attest to execution');
+  equal(clientOutput.census.inadmissible, 2, 'both new protocol surfaces are explicitly inadmissible');
+  equal(admit.VARIANT_ADMISSIBILITY.functionCallOutput.reason, admit.REASONS.TOOL_RESULT_UNVERIFIED,
+    'functionCallOutput remains an unverified tool result');
   const onlyModelAuthored = [
     { type: 'agentMessage', text: 'I ran the tests and they all pass.' },
     { type: 'reasoning', summary: 'looks right' },
@@ -324,33 +332,33 @@ function testCheckSchema() {
   equal(clean.status, 0, `--check-schema must pass against the real pin (stderr: ${clean.stderr})`);
   const payload = JSON.parse(clean.stdout);
   equal(payload.ok, true, 'ok:true against the real pin');
-  equal(payload.variants, 18, 'the pin declares 18 variants');
+  equal(payload.variants, 19, 'the pin declares 19 variants');
   equal(payload.admissible, 2, 'exactly 2 are admissible');
-  equal(payload.inadmissible, 16, 'the other 16 are inadmissible');
-  equal(payload.meta_variant_count, 18, 'meta.variant_count agrees with oneOf.length');
+  equal(payload.inadmissible, 17, 'the other 17 are inadmissible');
+  equal(payload.meta_variant_count, 19, 'meta.variant_count agrees with oneOf.length');
 
   const names = realVariantNames();
-  equal(names.length, 18, 'names are read from the pin, not hardcoded here');
+  equal(names.length, 19, 'names are read from the pin, not hardcoded here');
   equal(names.slice().sort(), Object.keys(admit.VARIANT_ADMISSIBILITY).sort(),
     'the map covers exactly the pin\'s variant names');
 
   const dir = tempDir('pin');
 
-  // Direction A — a variant REMOVED from the pin (17) must fail, naming it.
+  // Direction A — a variant REMOVED from the pin (18) must fail, naming it.
   const removed = names.filter((n) => n !== 'sleep');
   const shortPin = writePin(dir, removed);
   const shortRun = runCli(['--check-schema', '--json', '--pin', shortPin]);
-  check(shortRun.status !== 0, 'a 17-variant pin must fail');
+  check(shortRun.status !== 0, 'a 18-variant pin must fail');
   const shortPayload = JSON.parse(shortRun.stdout);
-  equal(shortPayload.ok, false, 'ok:false for the 17-variant pin');
+  equal(shortPayload.ok, false, 'ok:false for the 18-variant pin');
   equal(shortPayload.missing_in_pin, ['sleep'], 'the failure NAMES the absent variant, not just a count');
   check(shortRun.stderr.includes('sleep'), 'stderr names the divergent variant too');
 
-  // Direction B — a variant ADDED upstream (19) must fail, naming it. This is
+  // Direction B — a variant ADDED upstream (20) must fail, naming it. This is
   // the case that matters most: an unclassified variant must never slide in.
   const longPin = writePin(dir, [...names, 'quantumThing']);
   const longRun = runCli(['--check-schema', '--json', '--pin', longPin]);
-  check(longRun.status !== 0, 'a 19-variant pin must fail');
+  check(longRun.status !== 0, 'a 20-variant pin must fail');
   const longPayload = JSON.parse(longRun.stdout);
   equal(longPayload.missing_in_map, ['quantumThing'], 'the failure NAMES the unclassified variant');
 
@@ -364,7 +372,7 @@ function testCheckSchema() {
   // A pin that disagrees with ITSELF is a pin defect and must surface.
   const inconsistent = path.join(dir, 'inconsistent.json');
   const body = pinWith(names);
-  body.meta.variant_count = 19;
+  body.meta.variant_count = names.length + 1;
   fs.writeFileSync(inconsistent, JSON.stringify(body));
   const incRun = runCli(['--check-schema', '--pin', inconsistent]);
   check(incRun.status !== 0, 'meta.variant_count disagreeing with oneOf.length is a failure');
@@ -378,7 +386,7 @@ function testCheckSchema() {
 
   // A DUPLICATE discriminator is the pin contradicting itself too (S04 review
   // R3). It has to fail HERE, because every later comparison is set-based: all
-  // 18 names plus a repeat passes coverage, and passes the count check as well
+  // 19 names plus a repeat passes coverage, and passes the count check as well
   // (pinWith derives variant_count from the same array — exactly as
   // forge-schema-pin does), while `variants` and the admissible/inadmissible
   // totals it reports overstate reality.
@@ -390,7 +398,7 @@ function testCheckSchema() {
   equal(dupPayload.code, 'PIN_SHAPE_CHANGED', 'reported under the code the module already owns for pin-vs-itself');
   check(dupRun.stderr.includes('sleep'), 'the failure NAMES the duplicated discriminator, not just a count');
   // Bite proof for the fixture: the same builder without the repeat passes, so
-  // the failure comes from the duplication and not from the 19-item shape.
+  // the failure comes from the duplication and not from the item count.
   equal(runCli(['--check-schema', '--pin', writePin(tempDir('dup-control'), names)]).status, 0,
     'the same fixture without the repeat passes — the bite is the duplicate');
 
@@ -428,10 +436,10 @@ function testCheckDoc() {
   fs.writeFileSync(goodFile, docTable(goodDocRows()));
 
   const good = runCli(['--check-doc', goodFile, '--json']);
-  equal(good.status, 0, `a coherent 18-row table passes (stdout: ${good.stdout})`);
+  equal(good.status, 0, `a coherent 19-row table passes (stdout: ${good.stdout})`);
   const goodPayload = JSON.parse(good.stdout);
   equal(goodPayload.ok, true, 'ok:true for the coherent table');
-  equal(goodPayload.parsed, 18, 'exactly the 18 in-section rows are parsed — the out-of-section table is ignored');
+  equal(goodPayload.parsed, 19, 'exactly the 19 in-section rows are parsed — the out-of-section table is ignored');
 
   // Direction A — mutate ONE verdict; must fail naming that variant.
   const mutatedRows = goodDocRows().map((r) => (r.name === 'fileChange' ? { ...r, verdict: 'inadmissível' } : r));

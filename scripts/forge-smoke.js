@@ -13003,175 +13003,19 @@ function smokeControlBytes() {
 }
 
 // ── Section 92: guard de drift do schema pinado do app-server ─────────────
-// O fixture começa na projeção pequena do pin, não no schema bruto gerado pelo
-// app-server. Isso mantém o smoke determinístico e ainda atravessa a CLI real,
-// que é a fronteira usada pelo orquestrador.
+// Deterministic CLI cases live in forge-schema-pin.test.js.
 function smokeAppServerSchemaPin() {
-  process.stdout.write('\n▸ Section 92: guard de drift do schema pinado do app-server\n');
-  const dir = mkTmp('schema-pin');
-  const root = path.dirname(SCRIPTS);
-  const pin = JSON.parse(fs.readFileSync(path.join(root, 'shared', 'schemas', 'codex-appserver-pin.json'), 'utf8'));
-  const schemaFile = 'codex_app_server_protocol.v2.schemas.json';
-  const projectedFiles = {
-    TurnStartParams: path.join('v2', 'TurnStartParams.json'),
-    ItemCompletedNotification: path.join('v2', 'ItemCompletedNotification.json'),
-    TurnCompletedNotification: path.join('v2', 'TurnCompletedNotification.json'),
-    JSONRPCError: 'JSONRPCError.json',
-  };
-
-  const writeJson = (file, value) => {
-    const target = path.join(dir, file);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  };
-  const projectedType = (name, value) => ({
-    title: value.title || name,
-    type: value.type || 'object',
-    required: value.required || [],
-    properties: value.properties || {},
-  });
-  // The fixture carries the referenced closure too: the roots are all-`$ref`, so an
-  // aggregate holding only ThreadItem would leave every pointer unresolved.
-  const writeFixture = (mutate) => {
-    const definitions = JSON.parse(JSON.stringify(pin.definitions));
-    const referenced = JSON.parse(JSON.stringify(pin.referenced));
-    if (mutate) mutate(definitions, referenced);
-    writeJson(schemaFile, { definitions: { ThreadItem: definitions.ThreadItem, ...referenced } });
-    for (const [name, file] of Object.entries(projectedFiles)) {
-      writeJson(file, projectedType(name, definitions[name]));
-    }
-  };
-  const reorder = (value, parentKey) => {
-    if (Array.isArray(value)) {
-      const items = value.map((item) => reorder(item));
-      return parentKey === 'required' && items.every((item) => typeof item === 'string')
-        ? items.reverse() : items;
-    }
-    if (!value || typeof value !== 'object') return value;
-    return Object.fromEntries(Object.entries(value).reverse().map(([key, child]) => [key, reorder(child, key)]));
-  };
-  const check = (extraArgs, env) => {
-    const result = runScript('forge-schema-pin.js', ['--check', '--json', ...extraArgs], { env: { ...process.env, ...env } });
-    let json = null;
-    try { json = JSON.parse(result.stdout); } catch {}
-    return { ...result, json };
-  };
-  try {
-    // (a) object keys and required arrays are ordering noise, not drift.
-    // On its own this case cannot fail: it applies exactly the two transformations
-    // canonicalize implements, so it is a tautology unless something pins down what
-    // the fixture actually did. Two things do. First, the reordering must be REAL —
-    // a no-op `reorder` would make the green meaningless. Second, case (a2) below
-    // reorders an array whose order IS semantic, and must come out red: together the
-    // pair states that the green in (a) is a claim about one bounded, closed set of
-    // noise, and shows where that set ends.
-    writeFixture((definitions, referenced) => {
-      for (const name of Object.keys(definitions)) definitions[name] = reorder(definitions[name]);
-      for (const name of Object.keys(referenced)) referenced[name] = reorder(referenced[name]);
-    });
-    const rawReordered = fs.readFileSync(path.join(dir, schemaFile), 'utf8');
-    assert(rawReordered !== JSON.stringify({ definitions: { ThreadItem: pin.definitions.ThreadItem, ...pin.referenced } }, null, 2) + '\n'
-      && /"required": \[\s*"type"/.test(rawReordered),
-      '(a0) a fixture reordenada difere byte a byte da projeção pinada (o caso (a) não é no-op)');
-    const reordered = check(['--schema-dir', dir]);
-    assert(reordered.status === 0 && reordered.json && reordered.json.outcome === 'match',
-      '(a) fixture reordenada preserva match (B1)', JSON.stringify(reordered.json));
-
-    // (a2) the bite of (a): oneOf order is semantic, so canonicalize must NOT absorb it.
-    writeFixture((definitions) => {
-      definitions.ThreadItem.oneOf = definitions.ThreadItem.oneOf.slice().reverse();
-    });
-    const resorted = check(['--schema-dir', dir]);
-    assert(resorted.status !== 0 && resorted.json && resorted.json.outcome === 'drift',
-      '(a2) reordenar oneOf (ordem semântica) rende drift — a tolerância de (a) tem fronteira',
-      JSON.stringify(resorted.json));
-
-    // (b) a renamed field must name the exact removed path in the JSON result.
-    writeFixture((definitions) => {
-      const variant = definitions.ThreadItem.oneOf.find((item) => item.title === 'CommandExecutionThreadItem');
-      variant.properties.exit_code = variant.properties.exitCode;
-      delete variant.properties.exitCode;
-    });
-    const renamed = check(['--schema-dir', dir]);
-    const renamedPaths = (renamed.json && renamed.json.fields || []).map((field) => field.path);
-    assert(renamed.status !== 0 && renamed.json && renamed.json.outcome === 'drift'
-      && renamedPaths.includes('definitions.ThreadItem.oneOf[5].properties.exitCode'),
-      '(b) rename rende drift e nomeia definitions.ThreadItem.oneOf[5].properties.exitCode',
-      JSON.stringify(renamed.json));
-
-    // (b2) THE R1 CASE. The roots keep `properties` verbatim, and those properties are
-    // `$ref` pointers, so a change INSIDE a referenced type leaves every root byte-
-    // identical. Measured before the closure existed: renaming SandboxPolicy.networkAccess
-    // and replacing CommandExecutionStatus' enum both returned `match`, exit 0 — and
-    // networkAccess is the exact field premise A2 was executed to prove, while
-    // commandExecution.status is what S04/S06 read. Without this case the closure is
-    // unverified, and cases (a)–(d) all pass on a pin that sees none of it.
-    writeFixture((definitions, referenced) => {
-      referenced.SandboxPolicy = JSON.parse(JSON.stringify(referenced.SandboxPolicy).replace(/networkAccess/g, 'network_access'));
-      referenced.CommandExecutionStatus = { enum: ['totally', 'different'], type: 'string' };
-    });
-    const inner = check(['--schema-dir', dir]);
-    const innerPaths = (inner.json && inner.json.fields || []).map((field) => field.path);
-    assert(inner.status !== 0 && inner.json && inner.json.outcome === 'drift'
-      && innerPaths.some((p) => p.startsWith('referenced.SandboxPolicy') && p.endsWith('networkAccess'))
-      && innerPaths.some((p) => p.startsWith('referenced.CommandExecutionStatus.enum'))
-      && inner.json.counts.referenced_compared > 0,
-      '(b2) mutação DENTRO de um tipo referenciado rende drift nomeando referenced.SandboxPolicy…networkAccess e referenced.CommandExecutionStatus.enum (R1)',
-      JSON.stringify(inner.json));
-
-    // (c) inability to invoke the generator is explicitly not a clean result.
-    const missing = check([], { FORGE_SCHEMA_PIN_CODEX_BIN: path.join(dir, 'does-not-exist') });
-    assert(missing.status !== 0 && missing.json && missing.json.outcome === 'generator-missing'
-      && missing.json.outcome !== 'match',
-      '(c) binário ausente rende generator-missing, nunca match (D8)',
-      JSON.stringify(missing.json));
-
-    // (c2) the same floor on the guard's OWN input. An absent or truncated pin used to
-    // leave through an uncaught readJson/JSON.parse, printing a stack trace that parses
-    // as neither match nor drift — every generator-side error had a named outcome and
-    // the pin side had none. "Could not read the pin" is never "no drift" (D8).
-    writeFixture();
-    const truncated = path.join(dir, 'truncated-pin.json');
-    fs.writeFileSync(truncated, '{ "definitions": ', 'utf8');
-    for (const [label, pinFile] of [['truncado', truncated], ['ausente', path.join(dir, 'no-such-pin.json')]]) {
-      const unreadable = check(['--schema-dir', dir], { FORGE_SCHEMA_PIN_FILE: pinFile });
-      assert(unreadable.status !== 0 && unreadable.json && unreadable.json.outcome === 'pin-unreadable'
-        && unreadable.json.outcome !== 'match' && unreadable.json.outcome !== 'drift'
-        && unreadable.json.counts.definitions_compared === 0,
-        `(c2) pin ${label} rende pin-unreadable dentro do enum fechado, nunca match (D8/R6)`,
-        JSON.stringify(unreadable.json) + ' | stderr=' + String(unreadable.stderr).slice(0, 200));
-    }
-
-    // (d) an upstream ThreadItem variant changes the measured oneOf shape.
-    writeFixture((definitions) => {
-      definitions.ThreadItem.oneOf.push({
-        title: 'FutureThreadItem', type: 'object', required: ['id', 'type'],
-        properties: { id: { type: 'string' }, type: { enum: ['futureThreadItem'], type: 'string' } },
-      });
-    });
-    const extra = check(['--schema-dir', dir]);
-    const extraPaths = (extra.json && extra.json.fields || []).map((field) => field.path);
-    assert(extra.status !== 0 && extra.json && extra.json.outcome === 'drift'
-      && extraPaths.includes('definitions.ThreadItem.oneOf[18]'),
-      '(d) 19ª variante rende drift nomeando definitions.ThreadItem.oneOf[18]',
-      JSON.stringify(extra.json));
-
-    // (e) exercise generation against the installed binary when available.
-    const codex = spawnSync('codex', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] });
-    if (codex.status === 0) {
-      const live = check([]);
-      assert(live.status === 0 && live.json && live.json.outcome === 'match',
-        '(e) live codex app-server schema matches the pin', JSON.stringify(live.json));
-    } else {
-      skip('(e) live codex schema check', 'codex binary not installed — live check coberto pelas fixtures');
-    }
-
-    const source = fs.readFileSync(__filename, 'utf8');
-    const mainBody = source.slice(source.lastIndexOf('async function main()'));
-    assert(/\(\) => \{ smokeAppServerSchemaPin\(\); \}/.test(mainBody),
-      '(g) Section 92 is registered through a closure in main()');
-    pass('(final) Section 92: reordenação verde com fronteira provada, rename/variante/tipo-referenciado nomeados, generator-missing e pin-unreadable distintos de match, live verificado');
-  } finally { cleanup(dir); }
+  process.stdout.write('\nSection 92: installed app-server schema\n');
+  const codex = spawnSync('codex', ['--version'], { encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'] });
+  if (codex.status !== 0) {
+    skip('live codex schema check', 'codex binary unavailable; deterministic cases run in forge-schema-pin.test.js');
+    return;
+  }
+  const live = runScript('forge-schema-pin.js', ['--check', '--json']);
+  let result;
+  try { result = JSON.parse(live.stdout); } catch {}
+  assert(live.status === 0 && result && result.outcome === 'match',
+    'installed codex app-server schema matches the pin', live.stdout + live.stderr);
 }
 
 // ── Section 93: transporte app-server do execute, ponta a ponta ─────────────
@@ -13656,7 +13500,7 @@ async function smokeCapabilityPerTurn() {
 // ── Section 95: evidência runtime-observada (S04) ──────────────────────────
 // A Seção 94 prova a POLICY que o turn carrega; esta prova o que o turn
 // DEVOLVE virando evidência: admissibilidade por nome, rejeição de variante
-// desconhecida, a contagem de 18 confrontada com o pin, os três desfechos do
+// desconhecida, a contagem de 19 confrontada com o pin, os três desfechos do
 // materializador distintos DOIS A DOIS, e a coexistência das duas `source` no
 // mesmo arquivo.
 //
@@ -13844,8 +13688,8 @@ function smokeEvidenceRuntime() {
       fs.writeFileSync(intact, JSON.stringify(pin), 'utf8');
       const okRun = runScript('forge-evidence-admit.js', ['--check-schema', '--pin', intact, '--json']);
       const okJson = JSON.parse(okRun.stdout);
-      assert(okRun.status === 0 && okJson.ok === true && okJson.variants === 18 && okJson.admissible === 2,
-        '(c) pin íntegro passa: 18 variantes, 2 admissíveis', okRun.stdout);
+      assert(okRun.status === 0 && okJson.ok === true && okJson.variants === 19 && okJson.admissible === 2,
+        '(c) pin íntegro passa: 19 variantes, 2 admissíveis', okRun.stdout);
 
       const mutated = JSON.parse(JSON.stringify(pin));
       const dropped = 'sleep';
@@ -13857,15 +13701,15 @@ function smokeEvidenceRuntime() {
       // contra SI MESMO e nunca chega à confrontação por nome — o caso (c) mediria
       // a consistência interna do pin, não a cobertura do mapa.
       if (mutated.meta) mutated.meta.variant_count = mutated.definitions.ThreadItem.oneOf.length;
-      const mutatedFile = path.join(dir, 'pin-17.json');
+      const mutatedFile = path.join(dir, 'pin-missing-variant.json');
       fs.writeFileSync(mutatedFile, JSON.stringify(mutated), 'utf8');
       const badRun = runScript('forge-evidence-admit.js', ['--check-schema', '--pin', mutatedFile, '--json']);
       const badJson = JSON.parse(badRun.stdout);
-      assert(mutated.definitions.ThreadItem.oneOf.length === 17,
-        '(c) o fixture mutado de fato tem 17 variantes (o caso não é no-op)');
+      assert(mutated.definitions.ThreadItem.oneOf.length === 18,
+        '(c) o fixture mutado de fato tem 18 variantes (o caso não é no-op)');
       assert(badRun.status !== 0 && badJson.ok === false
         && (badJson.missing_in_pin || []).includes(dropped),
-        `(c) pin com 17 variantes falha NOMEANDO '${dropped}', nunca só uma contagem`, badRun.stdout);
+        `(c) pin com 18 variantes falha NOMEANDO '${dropped}', nunca só uma contagem`, badRun.stdout);
       // Igualdade estrita contra os bytes lidos ANTES do caso. Uma disjunção com
       // `existsSync` passaria sempre — o pin é o oráculo, e um caso que o edita
       // troca o oráculo pelo teste sem que nada fique vermelho.
@@ -14046,7 +13890,7 @@ function smokeEvidenceRuntime() {
     const mainBody = source.slice(source.lastIndexOf('async function main()'));
     assert(/\(\) => \{ smokeEvidenceRuntime\(\); \}/.test(mainBody),
       '(g) Section 95 is registered through a closure in main()');
-    pass('(final) Section 95: prosa não vira evidência, desconhecida é rejeitada por nome, 18 confrontadas com mordida, '
+    pass('(final) Section 95: prosa não vira evidência, desconhecida é rejeitada por nome, 19 confrontadas com mordida, '
       + '3 desfechos distintos nos 3 pares, duas source coexistindo e §7b/mirrors contados in-process com mordida');
   } finally {
     if (repo) cleanup(repo);

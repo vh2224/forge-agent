@@ -55,6 +55,15 @@ não migra o ciclo inteiro nem cria suporte a task standalone no controlador.
 
 ## Próximas etapas
 
+A terceira etapa concentra os cenários determinísticos de schema em
+`forge-schema-pin.test.js` e mantém no smoke a comparação com o CLI instalado.
+A seção 92 perde 156 linhas líquidas; os casos de CLI exclusivos foram
+preservados na suíte específica. Transporte e coleta de evidências continuam
+cobertos por integrações. A atualização do schema para Codex 0.155.0 foi
+[analisada separadamente](codex-schema-0.155.0.md), incluindo a política para
+a nova variante. O pin gerado cresce por refletir o protocolo, portanto esta
+etapa reduz código de testes, mas não o total de linhas do repositório.
+
 - Medir várias execuções do CI antes de alterar o balanceamento dos shards.
 - Migrar cenários de instalação para fixtures menores, mantendo integrações com
   o pacote real e os contratos de projeção e update.

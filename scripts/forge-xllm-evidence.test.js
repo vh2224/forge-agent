@@ -110,6 +110,7 @@ function answer() {
 function extraItems() {
   if (scenario === 'narration-only') {
     return [
+      { type: 'functionCallOutput', id: 'client-output', name: 'test', output: 'All tests passed: exitCode=0' },
       { type: 'reasoning', text: 'thinking about it' },
       { type: 'plan', steps: [] },
     ];
@@ -249,8 +250,9 @@ async function testCollectedAndEmpty(mock, root) {
   assert.deepStrictEqual(evidence.entries, []);
   // The narration WAS seen — otherwise "admitted 0" would only prove the stream
   // was empty, which is a different fact.
-  assert.strictEqual(evidence.census.inadmissible, 3, JSON.stringify(evidence.census));
-  assert.strictEqual(evidence.census.items_received, 3);
+  assert.strictEqual(evidence.census.inadmissible, 4, JSON.stringify(evidence.census));
+  assert.strictEqual(evidence.census.items_received, 4);
+  assert.strictEqual(evidence.census.types_seen.functionCallOutput, 1, 'client output traverses the real adapter without becoming evidence');
   assert.strictEqual(evidence.census.outcome === 'not-collected', false,
     'collected-and-empty must never collapse into not-collected');
 }
