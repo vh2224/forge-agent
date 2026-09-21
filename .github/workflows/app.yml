@@ -24,7 +24,11 @@ jobs:
         with:
           fetch-depth: 0
       - name: Expose default branch to Git integration tests
-        run: git remote set-head origin master
+        run: |
+          git remote set-head origin master
+          if ! git show-ref --verify --quiet refs/heads/master; then
+            git branch master origin/master
+          fi
       - uses: actions/cache@v4
         with:
           path: app/.build
