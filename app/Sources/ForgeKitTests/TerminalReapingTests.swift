@@ -51,6 +51,14 @@ func runTerminalReapingTests() {
             try child.run()
             defer { child.terminate(); child.waitUntilExit() }
             assertEqual(TerminalProcessSystem.carriesForgeMarker(child.processIdentifier), marked)
+            guard let app = TerminalProcessSystem.process(getpid()),
+                  let row = TerminalProcessSystem.process(child.processIdentifier) else {
+                throw Failure(message: "process identity unavailable")
+            }
+            // The cleanup worker starts after this real marked process exists.
+            let tab = TerminalProcess(pid: row.pid, ppid: row.ppid, tty: 42, startedAt: row.startedAt)
+            assertEqual(TerminalReaping.bootCandidates(among: [tab], appStartedAt: app.startedAt,
+                marked: TerminalProcessSystem.carriesForgeMarker), [])
         }
     }
     test("real PTY: master resolves to child controlling slave; TERM then KILL and reap") {
@@ -92,6 +100,9 @@ func runTerminalReapingTests() {
         let cohort = TerminalProcessSystem.capture(fd: master)
         assertTrue(cohort.contains(row), "real process table must capture the child")
         assertEqual(TerminalProcessSystem.capture(fd: -1), [])
+        // Match the app's order: the PTY is released before the async sweep.
+        close(master)
+        master = -1
 
         // A process with the same PID but different creation time must survive.
         let wrong = TerminalProcess(pid: row.pid, ppid: row.ppid, tty: row.tty,

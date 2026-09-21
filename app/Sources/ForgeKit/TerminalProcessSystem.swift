@@ -34,11 +34,11 @@ public enum TerminalProcessSystem {
         return row(info)
     }
 
-    public static func processTable() -> [TerminalProcess] {
+    public static func processTable() -> [TerminalProcess]? {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
         for _ in 0..<3 {
             var size = 0
-            guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+            guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return nil }
             let stride = MemoryLayout<kinfo_proc>.stride
             var rows = [kinfo_proc](repeating: kinfo_proc(), count: size / stride + 32)
             size = rows.count * stride
@@ -47,12 +47,12 @@ public enum TerminalProcessSystem {
             }
             if !ok {
                 if errno == ENOMEM { continue }
-                return []
+                return nil
             }
-            guard size <= rows.count * stride, size % stride == 0 else { return [] }
+            guard size >= 0, size <= rows.count * stride, size % stride == 0 else { return nil }
             return rows.prefix(size / stride).map(row)
         }
-        return []
+        return nil
     }
 
     public static func carriesForgeMarker(_ pid: pid_t) -> Bool {
@@ -69,8 +69,8 @@ public enum TerminalProcessSystem {
 
     /// Capture while the master is still open, before SwiftTerm releases it.
     public static func capture(fd: Int32) -> [TerminalProcess] {
-        guard let tty = ttyDevice(of: fd) else { return [] }
-        return processTable().filter { $0.tty == tty && $0.pid > 1 && $0.pid != getpid() }
+        guard let tty = ttyDevice(of: fd), let table = processTable() else { return [] }
+        return table.filter { $0.tty == tty && $0.pid > 1 && $0.pid != getpid() }
     }
 
     /// Revalidate immediately before each signal, including TERM.
