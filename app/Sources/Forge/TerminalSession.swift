@@ -169,7 +169,28 @@ final class TerminalViewStore: ObservableObject {
     /// `TerminalLifecycle`.
     func closeSession(_ id: UUID) {
         guard TerminalLifecycle.action(for: .sessionClosed) == .terminateAndDiscard else { return }
-        registry.discard(id)?.view.terminate()
+        guard let view = registry.discard(id)?.view else { return }
+
+        // Read the pty and the pid BEFORE `terminate()`. Its first act is to
+        // close the DispatchIO and set `childfd = -1`, and after that there is
+        // nothing left to identify this session's processes by.
+        let original = TerminalProcessSystem.capture(fd: view.process.childfd)
+        let shellPid = view.process.shellPid
+
+        view.terminate()
+
+        // `terminate()` has now signalled the login shell and nothing else: it
+        // does `kill(shellPid, SIGTERM)`, a single pid, while the tab is three
+        // process groups (claude and its MCP servers in one, the gitstatusd
+        // shell that init already adopted in another). Everything but the shell
+        // survives, which is how 69 sessions accumulated over 8 days.
+        //
+        // Off the main thread: the escalation sleeps between SIGTERM and
+        // SIGKILL, and closing a tab must not freeze the UI for two seconds.
+        DispatchQueue.global(qos: .utility).async {
+            TerminalProcessSystem.sweep(original)
+            TerminalProcessSystem.reap(shellPid)
+        }
     }
 
     private func make(for session: TerminalSession) -> TerminalInstance {

@@ -10,6 +10,10 @@
 //
 // NOT RUN ON CI, DELIBERATELY
 // ---------------------------
+// This Node wrapper still skips Swift in the cross-platform matrix. App changes
+// are now built and tested separately by .github/workflows/app.yml on macOS 26,
+// including real PTY regressions; that job does not use this opt-out wrapper.
+//
 // `swift run` resolves and compiles the whole package, and the app depends on
 // SwiftTerm — a VT emulator that takes many minutes to build from cold. On a
 // hosted macOS runner with no SPM cache that turned a one-minute CI job into a

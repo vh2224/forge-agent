@@ -111,6 +111,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installStatusItem()
         refreshBadge()
         Notifier.shared.start()
+        // The net under the net. A correct close path still leaks every session
+        // when the app dies without running it — a crash, a force quit, or any
+        // build from before TerminalReaper existed. That is exactly how 8 days
+        // of use produced 69 live sessions and 27 GB of swap. Off the main
+        // thread: it reads the whole process table and escalates with a grace
+        // period, and launch must not wait for that.
+        DispatchQueue.global(qos: .utility).async { TerminalReaper.sweepLeftovers() }
         // One network check per launch — a release does not land twice in an
         // afternoon, and a timer here would be pure noise.
         UpdateStore.shared.checkOnLaunch()
