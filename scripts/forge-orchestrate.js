@@ -203,11 +203,18 @@ function next(inputValue, options) {
     return result;
   }
   const selectedUnit = unit(selection.unit);
-  const key = input.idempotency_key || `forge-orchestrate-next:${input.milestone}:${selectedUnit.key}`;
-  const request = { milestone: input.milestone, unit: selectedUnit, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session, idempotency_key: key,
-    state_patch: { active_slice: selection.slice || '—' } };
+  const legacyKey = `forge-orchestrate-next:${input.milestone}:${selectedUnit.key}`;
+  let key = input.idempotency_key || (selection.slice ? `${legacyKey}:${selection.slice}` : legacyKey);
   const txOptions = { ...(options || {}), prefsReader: input.prefsReader };
   try {
+    if (!input.idempotency_key && selection.slice) {
+      // Resume pre-slice keys only when their durable state proves the same scope.
+      const prior = forgeController.readJson(forgeController.transactionFile(input.cwd, legacyKey));
+      if (prior && prior.action === 'begin' && prior.milestone === input.milestone
+        && prior.unit.key === selectedUnit.key && prior.after.state.active_slice === selection.slice) key = legacyKey;
+    }
+    const request = { milestone: input.milestone, unit: selectedUnit, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session, idempotency_key: key,
+      state_patch: { active_slice: selection.slice || '—' } };
     // Recovery is explicit and uses the durable S02 transaction record. It is
     // harmless when no transaction exists and makes crash retry deterministic.
     forgeController.resume(input.cwd, { idempotency_key: key, owner_token: input.owner_token }, txOptions);

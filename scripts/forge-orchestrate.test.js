@@ -64,6 +64,30 @@ try {
   assert.strictEqual(nextSlice.state.active_slice, 'S02');
   assert.strictEqual(state.read(advanced.cwd, milestone).active_slice, 'S02');
 
+  // Task IDs repeat across slices; an old completed T01 must not satisfy S02/T01.
+  const sequential = nextInput(setup(), 'claude');
+  delete sequential.idempotency_key;
+  const firstTask = orchestrate.next(sequential);
+  const firstKey = firstTask.details.transaction.idempotency_key;
+  assert.strictEqual(orchestrate.run('complete', { ...sequential, unit: firstTask.unit, begin_key: firstKey, result: { status: 'done' } }).outcome, 'completed');
+  sequential.inventory.slices[0].checked = true;
+  sequential.inventory.slices.push({ ...sequential.inventory.slices[0], id: 'S02', checked: false });
+  const secondTask = orchestrate.next(sequential);
+  assert.strictEqual(secondTask.state.active_slice, 'S02');
+  assert.notStrictEqual(secondTask.details.transaction.idempotency_key, firstKey);
+  assert.deepStrictEqual(orchestrate.next(sequential), secondTask, 'retry within S02 remains idempotent');
+
+  // A crash left by the old release keeps its original key and recovery path.
+  const legacy = nextInput(setup(), 'claude');
+  legacy.idempotency_key = `forge-orchestrate-next:${milestone}:execute-task/T01`;
+  const legacyKey = legacy.idempotency_key;
+  assert.throws(() => orchestrate.next(legacy, { failpoint: point => point === 'after-intent' }), /failpoint/);
+  delete legacy.idempotency_key;
+  const restored = orchestrate.next(legacy);
+  assert.strictEqual(restored.details.transaction.idempotency_key, legacyKey);
+  assert.strictEqual(restored.state.active_slice, 'S01');
+  assert.deepStrictEqual(orchestrate.next(legacy), restored);
+
   // Retry after a crash between intent and publication recovers the S02 transaction.
   const crash = setup();
   assert.throws(() => orchestrate.next(nextInput(crash, 'claude'), { failpoint: point => point === 'after-intent' }), /failpoint/);
