@@ -17,16 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - host: claude
+          - host: both
             os: ubuntu-latest
             platform: linux
-          - host: codex
-            os: ubuntu-latest
-            platform: linux
-          - host: claude
-            os: macos-latest
-            platform: darwin
-          - host: codex
+          - host: both
             os: macos-latest
             platform: darwin
           - host: both
@@ -79,11 +73,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          # Full history: the smoke's S07 scope gate resolves its base as the parent
-          # of the commit that added scripts/forge-touch.js, and that gate FAILS
-          # rather than skipping when the base does not resolve (by design). Under
-          # the default depth-1 checkout every file looks added by the single commit
-          # present and `<sha>^` does not exist, so the gate could never pass on CI.
+          # Release-version validation needs tags and conventional commit history.
           fetch-depth: 0
 
       - name: Set up Node.js
@@ -114,7 +104,7 @@ jobs:
         run: node scripts/forge-smoke.js
 
   required-offline-windows:
-    name: Offline ${{ matrix.host }} / win32
+    name: Offline ${{ matrix.host }} / ${{ matrix.platform }}
     needs: operational-offline
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -123,6 +113,10 @@ jobs:
         host:
           - claude
           - codex
+        platform:
+          - linux
+          - darwin
+          - win32
     steps:
       - name: Preserve required-check contract
         run: test "${{ needs.operational-offline.result }}" = success

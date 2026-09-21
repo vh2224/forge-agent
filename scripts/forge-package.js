@@ -54,7 +54,12 @@ function build(options = {}) {
     for (const item of installer.MANAGED_CORE) {
       const source = path.join(repo, item);
       if (!fs.existsSync(source)) continue;
-      if (fs.statSync(source).isDirectory()) collectTree('core', item, source, entries, sources);
+      if (fs.statSync(source).isDirectory()) {
+        for (const file of walk(source)) {
+          const relative = path.join(item, path.relative(source, file));
+          if (installer.isRuntimeFile(relative)) collectFile('core', relative, file, entries, sources);
+        }
+      }
       else collectFile('core', item, source, entries, sources);
     }
     const version = Buffer.from(`${installer.VERSION}\n`, 'utf8');

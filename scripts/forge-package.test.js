@@ -37,6 +37,10 @@ try {
     }
     assert(manifest.files.some((entry) => entry.component === 'adapter-claude' && entry.path === 'project/CLAUDE.md'));
     assert(manifest.files.some((entry) => entry.component === 'adapter-codex' && entry.path === 'project/AGENTS.md'));
+    const core = manifest.files.filter(entry => entry.component === 'core');
+    assert(!core.some(entry => entry.path.endsWith('.test.js') || entry.path === 'scripts/forge-smoke.js'));
+    assert(core.some(entry => entry.path === 'scripts/forge-doctor.js'));
+    assert(core.some(entry => entry.path === 'scripts/fixtures/offline-ci/matrix.json'));
   });
 
   test('materialized package verifies and detects byte drift', () => {

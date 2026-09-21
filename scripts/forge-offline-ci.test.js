@@ -54,10 +54,8 @@ const offlineBlock = workflow.slice(workflow.indexOf('  operational-offline:'), 
 const offlineCells = [...offlineBlock.matchAll(/- host: (claude|codex|both)\s+os: ([^\s]+)\s+platform: (linux|darwin|win32)/g)]
   .map((match) => ({ host: match[1], os: match[2], platform: match[3] }));
 assert.deepStrictEqual(offlineCells, [
-  { host: 'claude', os: 'ubuntu-latest', platform: 'linux' },
-  { host: 'codex', os: 'ubuntu-latest', platform: 'linux' },
-  { host: 'claude', os: 'macos-latest', platform: 'darwin' },
-  { host: 'codex', os: 'macos-latest', platform: 'darwin' },
+  { host: 'both', os: 'ubuntu-latest', platform: 'linux' },
+  { host: 'both', os: 'macos-latest', platform: 'darwin' },
   { host: 'both', os: 'windows-latest', platform: 'win32' },
 ]);
 assert.match(offlineBlock, /forge-offline-ci\.js --host \$\{\{ matrix\.host \}\}/);
@@ -73,7 +71,8 @@ assert.deepStrictEqual(testCells, [
 ]);
 assert.match(testBlock, /run-tests\.js[^\r\n]+--shard-index \$\{\{ matrix\.shard-index \}\} --shard-count \$\{\{ matrix\.shard-count \}\}/);
 const compatibilityBlock = workflow.slice(workflow.indexOf('\n  required-offline-windows:'));
-assert.match(compatibilityBlock, /name: Offline \$\{\{ matrix\.host \}\} \/ win32/);
+assert.match(compatibilityBlock, /name: Offline \$\{\{ matrix\.host \}\} \/ \$\{\{ matrix\.platform \}\}/);
+assert.match(compatibilityBlock, /platform:\s*\r?\n\s+- linux\s*\r?\n\s+- darwin\s*\r?\n\s+- win32/);
 assert.match(compatibilityBlock, /host:\s*\r?\n\s+- claude\s*\r?\n\s+- codex/);
 assert.match(compatibilityBlock, /name: Tests \(windows-latest\)/);
 assert.match(compatibilityBlock, /needs: operational-offline/);

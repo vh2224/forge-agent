@@ -74,15 +74,13 @@ function observe(rep) {
 
 // ── Fixture builders ───────────────────────────────────────────────────────
 function g(cwd, args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=T', '-c', 'commit.gpgsign=false', ...args],
+    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function newRepo(tag) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `write-cov-${tag}-`));
   g(root, ['init', '-q', '--initial-branch=master', '.']);
-  g(root, ['config', 'user.email', 't@example.com']);
-  g(root, ['config', 'user.name', 'T']);
-  g(root, ['config', 'commit.gpgsign', 'false']);
   fs.writeFileSync(path.join(root, 'README.md'), 'base\n');
   g(root, ['add', '--', 'README.md']);
   g(root, ['commit', '-q', '-m', 'chore: base']);
@@ -94,8 +92,8 @@ function commitFiles(root, files, msg) {
     const abs = path.join(root, f);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, `x\n`);
-    g(root, ['add', '--', f]);
   }
+  if (files.length) g(root, ['add', '--', ...files]);
   g(root, ['commit', '-q', '-m', msg]);
 }
 

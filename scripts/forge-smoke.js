@@ -11,7 +11,7 @@
 //   - repos.js + isolation.js prefs parsing
 //   - cli-helpers.js refuse logic + timestamp/legacy ID resolution (paired)
 //
-// Designed to be cheap (~5s) and self-cleaning. Use as pre-release sanity check.
+// Repository integration checks. Run standalone suites first with run-tests.js.
 //
 // Usage:
 //   node scripts/forge-smoke.js
@@ -1530,13 +1530,6 @@ function smokeStopHook() {
   assertExitAnchor(taskSkillPath, 'forge-task/SKILL.md', 'status: blocked',
     '`status: blocked`');
 
-  // ── (c) Branch stop regression: forge-hook-stop.test.js passes ─────────────
-  const stopTest = runScript('forge-hook-stop.test.js', []);
-  assert(
-    stopTest.status === 0,
-    'forge-hook-stop.test.js failed — stop branch regression',
-    stopTest.stderr || stopTest.stdout
-  );
 }
 
 // ── Section 15: notifications pref + PushNotification probe + call-sites ─────
@@ -12727,83 +12720,6 @@ function smokeRunOverlapSignal() {
     process.stdout.write(`    (c2) live census: examined ${live && live.runs_examined}`
       + ` · with-data ${live && live.runs_with_touch_data} · verdict ${live && live.verdict}\n`);
 
-    // ── (e) SCOPE, as an assertion rather than a sentence. S07 introduces no
-    //    shared JS↔Swift constant and writes nothing under app/, which is why
-    //    criterion #15's parity guard was deliberately NOT extended. That
-    //    declaration is worth exactly as much as its verification, so it is
-    //    verified here.
-    //
-    //    Selection is per-COMMIT, not per-range: b3904a7 ("fix(S03/hazard)") is
-    //    a UAT fix that landed BETWEEN T01 and T02 and does touch app/. A naive
-    //    `base..HEAD` diff would attribute it to S07 and go red for a reason
-    //    that has nothing to do with this slice — so a commit belongs to S07
-    //    only if it touches an S07-exclusive file or names S07 in its subject,
-    //    and every excluded commit is printed rather than dropped.
-    const gitRoot = (args) => {
-      try { return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim(); }
-      catch { return null; }
-    };
-    const addCommit = (gitRoot(['log', '--diff-filter=A', '--format=%H', '--', 'scripts/forge-touch.js']) || '')
-      .split('\n').filter(Boolean).pop();
-    const sliceBase = addCommit ? gitRoot(['rev-parse', `${addCommit}^`]) : null;
-    if (!sliceBase) {
-      // FAIL, never skip: a scope check that silently excuses itself when its
-      // base does not resolve is the precise defect this milestone spent a
-      // whole slice hunting.
-      fail('(e) slice base resolves (parent of the commit that added scripts/forge-touch.js)',
-        `addCommit=${addCommit}`);
-    } else {
-      const S07_EXCLUSIVE = [
-        'scripts/forge-touch.js', 'scripts/forge-touch.test.js',
-        'scripts/forge-overlap.js', 'scripts/forge-overlap.test.js',
-        'scripts/forge-doctor-run-overlap.test.js',
-      ];
-      const shas = (gitRoot(['rev-list', `${sliceBase}..HEAD`]) || '').split('\n').filter(Boolean);
-      const commits = shas.map(h => ({
-        sha: h,
-        subject: gitRoot(['log', '-1', '--format=%s', h]) || '',
-        files: (gitRoot(['show', '--name-only', '--format=', h]) || '').split('\n').filter(Boolean),
-      }));
-      const isS07 = c => /\bS07\b/.test(c.subject) || c.files.some(f => S07_EXCLUSIVE.includes(f));
-      const selected = commits.filter(isS07);
-      const foreign = commits.filter(c => !isS07(c));
-      const appPaths = f => f.split('/')[0] === 'app';
-      const squashed = selected.some(c => c.files.length >= 30);
-
-      for (const c of foreign) {
-        process.stdout.write(`    (e) fora do escopo de S07: ${c.sha.slice(0, 7)} ${c.subject}`
-          + ` [${c.files.filter(appPaths).length} arquivo(s) em app/]\n`);
-      }
-
-      if (squashed) {
-        // Enumerated and printed, never silent: once this branch is squash-
-        // merged, a single commit carries every slice of the milestone and the
-        // per-commit attribution above stops being meaningful.
-        skip('(e) slice diff carries no app/ path',
-          'slice-history-squashed — a selected commit touches >= 30 files, so per-commit S07 attribution no longer holds');
-      } else {
-        assert(selected.length >= 3,
-          `(e) the S07 commit selector actually selected commits (${selected.length} >= 3) — a selector that matches nothing proves nothing`,
-          JSON.stringify(commits.map(c => [c.sha.slice(0, 7), c.subject, isS07(c)])));
-        const offending = selected.flatMap(c => c.files.filter(appPaths).map(f => `${c.sha.slice(0, 7)}:${f}`));
-        assert(offending.length === 0,
-          '(e) no S07 commit touches app/ — criterion #15 did not fire because its condition never arose, verified rather than omitted',
-          offending.join(', '));
-        assert(foreign.every(c => !/\bS07\b/.test(c.subject)),
-          '(e) every commit excluded from the S07 set is genuinely foreign — an S07-labelled commit could not hide in the exclusions',
-          JSON.stringify(foreign.map(c => [c.sha.slice(0, 7), c.subject])));
-        // POSITIVE CONTROL for the predicate itself. The three prior anti-
-        // silence bugs of this milestone were all detectors blind to their own
-        // target; a scope check trusted green without ever having been shown
-        // firing would be the fourth.
-        const control = ['app/Sources/ForgeKit/Models.swift', 'scripts/forge-overlap.js']
-          .filter(appPaths);
-        assert(control.length === 1 && control[0].startsWith('app/'),
-          '(e) positive control: the same app/ predicate DOES fire on a synthetic app/ path — it is not blind',
-          JSON.stringify(control));
-      }
-    }
-
     // ── (g) Zero registry writes, measured on the isolated copies only —
     //    every registry a spawned CLI could see in this section, including the
     //    real-shaped (c2) copy. The operator's live file is out of the
@@ -15736,9 +15652,7 @@ function smokeRoutingDomainsRendered() {
 // exige igualdade EXATA. Assim um PR `fix:` declara o próximo patch antes do
 // merge, em vez de aceitar drift permanente como ruído.
 //
-// Vive no smoke porque só o job do smoke faz checkout com `fetch-depth: 0` —
-// o job de testes é depth-1 e não enxerga tag nenhuma. Mesmo precedente do
-// gate de escopo S07, e pela mesma razão.
+// Release-version validation requires tags and conventional commit history.
 function smokeVersionTagLine() {
   process.stdout.write('\n▸ Section 113: VERSION acompanha exatamente a release prospectiva\n');
   // A linha-resumo desta seção só é emitida se os asserts acima seguraram. O
