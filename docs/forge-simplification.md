@@ -53,7 +53,7 @@ O módulo de paralelismo continua responsável por dependências e lotes, e o
 resolver de dispatch continua responsável por engine/modelo/esforço. Esta etapa
 não migra o ciclo inteiro nem cria suporte a task standalone no controlador.
 
-## Próximas etapas
+## Terceira etapa: schema e smoke
 
 A terceira etapa concentra os cenários determinísticos de schema em
 `forge-schema-pin.test.js` e mantém no smoke a comparação com o CLI instalado.
@@ -64,8 +64,45 @@ cobertos por integrações. A atualização do schema para Codex 0.155.0 foi
 a nova variante. O pin gerado cresce por refletir o protocolo, portanto esta
 etapa reduz código de testes, mas não o total de linhas do repositório.
 
+## Quarta etapa: fixtures de instalação
+
+Sete cenários de configuração e propriedade em `forge-installer.test.js` usam
+uma fonte de quatro arquivos: manifest, capabilities, schema de preferências e
+template de settings. Os três conteúdos de configuração vêm das fontes reais;
+o manifest mantém somente as entradas necessárias, com diretórios vazios para
+as superfícies públicas. O instalador e os renderizadores não são simulados.
+
+Dois cenários de resolução de origem em `forge-update.test.js` preparam apenas
+o manifest instalado que leem, em vez de executar uma instalação para criá-lo.
+Os 55 cenários e suas verificações de comportamento permanecem: duas instalações
+completas são removidas e outras 15 passam à fonte pequena por execução.
+
+Continuam usando a fonte completa os testes de instalação dos hosts, contratos
+nos consumidores, backups, migração legada, atualização real e resolução da
+origem durante apply. Os testes do pacote e dos renderizadores não foram reduzidos.
+O código de produção permanece intacto. O saldo nos dois arquivos de teste é
+de **duas linhas adicionais**; o ganho desta etapa é no custo das preparações.
+
+Medição: três pares antes/depois, alternando a ordem, no mesmo worktree limpo,
+Windows e Node 24.14.1, com HOME isolado pelo runner. Comando:
+`node scripts/run-tests.js --match forge-installer.test --match forge-update.test`.
+Os tempos são observações locais, não uma promessa de ganho igual na CI.
+
+| Execução | Antes | Depois |
+| --- | ---: | ---: |
+| 1 | 43,736 s | 27,348 s |
+| 2 | 42,640 s | 27,231 s |
+| 3 | 43,099 s | 28,563 s |
+| Mediana | 43,099 s | 27,348 s |
+
+A mediana caiu **36,5%** nas duas suítes juntas. Todas as seis execuções
+passaram. A medição inicial, concorrente com o update, foi descartada;
+a tabela usa somente os pares alternados posteriores.
+
+## Próximas etapas
+
 - Medir várias execuções do CI antes de alterar o balanceamento dos shards.
-- Migrar cenários de instalação para fixtures menores, mantendo integrações com
+- Migrar outros cenários de instalação para fixtures menores, mantendo integrações com
   o pacote real e os contratos de projeção e update.
 - Consolidar outras repetições do smoke somente após identificar o responsável
   principal por cada comportamento.
