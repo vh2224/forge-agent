@@ -1713,11 +1713,15 @@ test("sem frontmatter devolve nil em vez de ler o corpo") {
     assertTrue(CommandCatalog.frontmatter("# só markdown\nname: x", key: "name") == nil)
 }
 
-test("catálogo real da máquina tem comandos do forge") {
-    // Reads what is installed, not a list baked into the app.
-    let all = CommandCatalog.load()
-    assertTrue(all.contains { $0.name.hasPrefix("forge") },
-               "esperava comandos forge instalados; achei \(all.count)")
+test("catálogo lê comandos instalados em uma árvore real isolada") {
+    let home = fakeRepo("command-catalog", [
+        ".claude/commands/forge-example.md": "---\ndescription: Fixture command\n---\n",
+        ".claude/skills/forge-extra/SKILL.md": "---\nname: forge-extra\ndescription: Fixture skill\n---\n",
+    ])
+    defer { try? FileManager.default.removeItem(atPath: home) }
+    let all = CommandCatalog.load(home: home)
+    assertEqual(all.map(\.name), ["forge-example", "forge-extra"])
+    assertEqual(all.map(\.source), [.command, .skill])
 }
 
 test("maxTokens usa o maior, não o primeiro") {
@@ -2277,8 +2281,12 @@ test("systemProbe encontra nvm numa árvore real em disco (não a desta máquina
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: "\(bin)/node")
     }
     // PATH mínimo do launchd + $SHELL ausente: só o nvm pode responder.
-    let probe = NodeLocator.systemProbe(environment: ["PATH": launchdPath],
+    var probe = NodeLocator.systemProbe(environment: ["PATH": launchdPath],
                                         home: home, prefValue: nil, shellTimeout: 1)
+    // Keep real filesystem probes inside the fixture. Homebrew on the runner
+    // is otherwise a valid earlier match, regardless of the synthetic HOME.
+    let isExecutable = probe.isExecutable
+    probe.isExecutable = { $0.hasPrefix(home + "/") && isExecutable($0) }
     let outcome = NodeLocator.resolve(probe)
     assertEqual(outcome.path, "\(home)/.nvm/versions/node/v24.11.1/bin/node")
     assertEqual(outcome.source, NodeLocator.Source.versionManager)

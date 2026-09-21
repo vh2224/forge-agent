@@ -70,7 +70,8 @@ public enum TerminalProcessSystem {
     /// Capture while the master is still open, before SwiftTerm releases it.
     public static func capture(fd: Int32) -> [TerminalProcess] {
         guard let tty = ttyDevice(of: fd), let table = processTable() else { return [] }
-        return table.filter { $0.tty == tty && $0.pid > 1 && $0.pid != getpid() }
+        let selected = Set(TerminalReaping.victims(onTTY: tty, among: table, protecting: [getpid()]))
+        return table.filter { selected.contains($0.pid) }
     }
 
     /// Revalidate immediately before each signal, including TERM.

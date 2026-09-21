@@ -16,7 +16,7 @@
 // that is what a tty session means, and the reparented shell is still in it.
 //
 // Policy lives here, free of syscalls, so the selection is a test rather than a
-// hope. The sysctl/kill/waitpid half is Forge/TerminalReaper.swift.
+// hope. The sysctl/kill/waitpid half is TerminalProcessSystem.swift.
 
 import Foundation
 
@@ -40,7 +40,7 @@ public struct TerminalProcess: Equatable, Sendable {
 /// One rung of the escalation.
 public struct SignalStep: Equatable, Sendable {
     public let signal: Int32
-    /// How long to wait before re-reading the table for the next rung.
+    /// How long to wait before revalidating the original cohort for the next rung.
     public let graceSeconds: Double
 
     public init(signal: Int32, graceSeconds: Double) {

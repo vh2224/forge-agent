@@ -21,6 +21,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Expose default branch to Git integration tests
+        run: git remote set-head origin master
       - uses: actions/cache@v4
         with:
           path: app/.build
