@@ -8,7 +8,9 @@ Authoritative spec for the **plan gate**: an interactive handshake that presents
 | `forge-next` (plan-check gate) | per-slice — after `plan-slice` returns, before first `execute-task` | `plan-slice/{S##}` | `{S##}-PLAN.md` + `tasks/*/T##-PLAN.md` | `interactive` | `{S##}-PLAN-GATE.md` |
 | `forge-auto` | — | — | — | `auto` | never conducts — see `## Degradation by mode` |
 
-Steps 1–5 below are boundary-agnostic — only the four bindings above differ. Steps are written in slice terms (`{S##}-PLAN.md`, `{S##}-PLAN-GATE.md`); substitute the task bindings when invoked from `forge-task`.
+The shared steps below include consumer-specific branches. Substitute the task
+bindings for slice paths (`{S##}-PLAN.md`, `{S##}-PLAN-GATE.md`) when invoked from
+`forge-task`, and apply its legacy-plan rules rather than checker-count rules.
 
 The gate is **not** a second plan-checker pass — it is a human-arbitration moment: the operator previews the plan, addresses checker findings interactively, optionally edits the plan in their editor, and approves before any code is written. The `forge-planner` remains a **stateless batch decomposer** — it does not conduct the gate.
 
@@ -27,6 +29,10 @@ The gate is **not** a second plan-checker pass — it is a human-arbitration mom
   - **`forge-next`**: no scalar `PLAN_FILE`; Step 4 loops over every file matched by `PLAN_GLOB` (`{S##}-PLAN.md` + `tasks/*/T##-PLAN.md`)
 - `plan_check_counts` — `{pass, warn, fail}` (parsed from the plan-checker `---GSD-WORKER-RESULT---` block; already in scope after the existing plan-check dispatch in forge-next; not applicable in forge-task legacy plans)
 
+Before resolving prefs, check the approval marker in Step 0a. If already approved,
+record the skipped event and return to execution without asking again. Otherwise
+continue with Step 0; errors must not be converted to default preferences.
+
 ## Step 0 — Read plan_gate prefs (via the canonical prefs CLI)
 
 Resolve prefs once through the S01 engine CLI (`scripts/forge-prefs.js --resolved`, the canonical per-unit helper defined in `shared/forge-dispatch.md § Per-unit prefs resolution`) — it reads the JSONC catalog per layer, and legacy Markdown without JSONC hard-stops with the canonical repair message in `shared/forge-prefs-cutover.md`, so no `files=[…]` 3-file cascade merge is re-implemented here. Read the `plan_gate.*` knobs off `.prefs`:
@@ -38,7 +44,7 @@ if [ $? -ne 0 ]; then
   # M008-CONTEXT decision #2 — loud stop, never a silent default. errors[] (file+line)
   # on stdout ($PREFS_JSON); human message + fix hint on stderr. Halt the gate loop.
   echo "✗ prefs parse error — plan gate halted (see stderr for arquivo:linha)" >&2
-  # ...deactivate run + STOP...
+  exit 1
 fi
 
 # Extract plan_gate knobs off .prefs, preserving the exact whitelist + defaults.
@@ -47,6 +53,10 @@ ASK_AUTO=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data'
 ```
 
 Defaults preserved byte-for-byte: absent `.prefs.plan_gate` (or an out-of-whitelist value) → `INTERACTIVE=always`, `ASK_AUTO=defer` — identical to the old inline cascade.
+
+If the prefs CLI fails, the orchestrator must deactivate the run, surface
+`errors[]` with file/line and repair guidance, and STOP. The shell exit above
+and this instruction both forbid proceeding on fallback defaults.
 
 **Pref semantics:**
 
@@ -118,16 +128,22 @@ For `forge-next`:
   - **Options:** `Manter` / `Corrigir no ato` / `Deferir`
 
 For `forge-task`:
-- `forge-task` plans are **legacy free-text** (no structured `must_haves:` YAML) — the plan-checker always returns `warn` on `legacy_schema_detect` (never `fail`). Surface this one finding and ask the operator to review the plan text directly.
-- If `interactive == always`: conduct regardless (preview + one question per warn/fail).
-- If `interactive == auto` AND `plan_check_counts.warn == 0` AND `plan_check_counts.fail == 0`: auto-approve (legacy plans rarely reach all-pass, but the path is valid — write marker and proceed).
+- The flow does not dispatch the plan-checker and has no `plan_check_counts`.
+  Plans are **legacy free-text**; present the `legacy_schema_detect` warning
+  as a format notice, not a checker result that was observed.
+- Both `interactive == always` and `interactive == auto` conduct preview,
+  optional editing and explicit approval. Missing counts never authorize
+  auto-approval. `off` and an already approved marker remain valid skips.
+- Ask one direct question with `Manter` / `Corrigir no ato` / `Deferir`;
+  there is only one format notice, so no batching applies to this consumer.
 
 **Resolution per option:**
 - `Manter` — accept the finding as-is, no change. Record in the marker.
 - `Corrigir no ato` — operator corrects the plan now. Proceed to Step 3 (free-file edit).
 - `Deferir` — create an item via `shared/forge-review.md § Item capture` (source `plan-gate/{S##}` for `forge-next`, `plan-gate/{TASK_ID}` for `forge-task`; `origin: auto`, `status: inbox`; no `file` — this junction has none). Record in the marker: `{dimensão}: deferido → {I-id} — {title}`. If `--add` fails, `§ Item capture`'s advisory-failure rule applies: the durable fallback is always `.gsd/KNOWLEDGE.md § Review follow-ups` (never the marker alone — the marker is cleaned by `milestone_cleanup`, so a marker-only note would silently vanish).
 
-Batch up to 4 findings per `AskUserQuestion` call when findings are low-severity (all `warn`) and related. Keep `fail`-severity findings as individual questions.
+For `forge-next`, batch related low-severity findings only within the native
+question tool's actual limits. Keep `fail`-severity findings as individual questions.
 
 ## Step 3 — Free-file edit escape hatch
 
@@ -142,7 +158,8 @@ AskUserQuestion({
 ```
 
 - `Confirmar` → re-read the plan file from disk and display the updated plan to the operator. The orchestrator does NOT cache the plan — it always reads the current file. This applies the human's edits as the authoritative plan version.
-- `Pular` → proceed to Step 4.
+- `Pular` → for `forge-task`, proceed directly to Step 5 (no edit to re-validate);
+  for `forge-next`, proceed to Step 4.
 
 This escape hatch covers changes that the plan-checker did not flag: reordering tasks, rephrasing must_haves, adjusting scope — anything the operator wants to change before approving.
 
@@ -182,14 +199,14 @@ if [ $REVALIDATION_EXIT -ne 0 ] && [ $REVALIDATION_EXIT -ne 2 ]; then
   ERRORS="[\"IO error from forge-must-haves.js: $IO_ERR\"]"
 else
   # Safe to JSON.parse stdout; guard against empty/non-JSON stdout.
-  if ! node -e "JSON.parse(process.env.R)" R="$REVALIDATION" 2>/dev/null; then
+  if ! node -e "JSON.parse(process.argv[1])" "$REVALIDATION" 2>/dev/null; then
     IO_ERR=$(cat "$REVALIDATION_STDERR")
     LEGACY=false; VALID=false
     ERRORS="[\"Non-JSON stdout from forge-must-haves.js (exit $REVALIDATION_EXIT): $IO_ERR\"]"
   else
-    LEGACY=$(node -e "process.stdout.write(String(JSON.parse(process.env.R).legacy))" R="$REVALIDATION")
-    VALID=$(node -e  "process.stdout.write(String(JSON.parse(process.env.R).valid))"  R="$REVALIDATION")
-    ERRORS=$(node -e "process.stdout.write(JSON.stringify(JSON.parse(process.env.R).errors))" R="$REVALIDATION")
+    LEGACY=$(node -e "process.stdout.write(String(JSON.parse(process.argv[1]).legacy))" "$REVALIDATION")
+    VALID=$(node -e  "process.stdout.write(String(JSON.parse(process.argv[1]).valid))"  "$REVALIDATION")
+    ERRORS=$(node -e "process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).errors))" "$REVALIDATION")
   fi
 fi
 rm -f "$REVALIDATION_STDERR"
@@ -234,7 +251,7 @@ After findings are addressed and re-validation passes, present the final approva
 ```
 AskUserQuestion({
   header: "Aprovar plano {S##}",  // or {TASK_ID}
-  body: "Plano revisado e validado. Aprovar para iniciar a execução?",
+  body: "Plano revisado. Aprovar para iniciar a execução?",
   options: ["Aprovar — iniciar execução", "Editar mais", "Abortar — replanejar"]
 })
 ```
@@ -296,7 +313,8 @@ Validate via grep: `agents/forge-planner.md` must not contain `EnterPlanMode`.
 
 ## Event log
 
-Append one line to `{WORKING_DIR}/.gsd/forge/events.jsonl` when the gate completes (approved or aborted):
+Append one line to `{WORKING_DIR}/.gsd/forge/events.jsonl` when the gate completes
+(approved, aborted or skipped), creating the directory if absent:
 
 ```json
 {"ts":"<ISO-8601>","event":"plan-gate","milestone":"{M###}","unit":"{UNIT}","mode":"{MODE}","interactive":"{interactive}","outcome":"approved|aborted|skipped","warn":N,"fail":N,"edits":N}
@@ -304,7 +322,7 @@ Append one line to `{WORKING_DIR}/.gsd/forge/events.jsonl` when the gate complet
 
 Field semantics:
 - `outcome`: `approved` (operator approved), `aborted` (operator chose to replan), `skipped` (mode=auto, interactive=off, or idempotency hit).
-- `warn` / `fail`: counts from `plan_check_counts` (0 when not applicable — forge-task legacy plans).
+- `warn` / `fail`: counts from `plan_check_counts` (0 when not applicable — forge-task legacy plans). These telemetry zeroes are not checker results and never authorize task auto-approval.
 - `edits`: number of times Step 3 was visited (0 = no free-file edit).
 
 These are **additive fields** (readers that ignore unknown keys stay compatible — same convention as `tier`/`reason` from CONTEXT M001).

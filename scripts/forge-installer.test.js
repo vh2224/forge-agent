@@ -82,6 +82,15 @@ test('native question contract reaches installed consumers and safe feature defa
       path.join(data.codexHome, 'commands', 'forge.md'),
       path.join(data.codexHome, 'templates', 'dispatch', 'execute-task.md'),
     ]) assert(read(file).includes('A required live decision remains pending'), file);
+    const planGate = read(path.join(data.forgeHome, 'shared', 'forge-plan-gate.md'));
+    assert(planGate.includes('JSON.parse(process.argv[1])'));
+    assert(planGate.includes('Missing counts never authorize'));
+    for (const home of [data.claudeHome, data.codexHome]) {
+      const skill = read(path.join(home, 'skills', 'forge-task', 'SKILL.md'));
+      const gate = skill.slice(skill.indexOf('### Step 4.5'), skill.indexOf('### Step 5 '));
+      assert(gate.includes('read and execute') && gate.includes('shared/forge-plan-gate.md'), home);
+      assert(gate.includes('MODE = interactive') && gate.includes('task/{TASK_ID}'), home);
+    }
     const explicit = '# user bytes\r\n[features]\r\ndefault_mode_request_user_input = false # choice\r\n[tui]\r\nstatus_line = []\r\n';
     fs.writeFileSync(config, explicit);
     installer.install({ ...supported, update: true });

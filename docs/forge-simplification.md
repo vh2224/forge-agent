@@ -99,6 +99,26 @@ A mediana caiu **36,5%** nas duas suítes juntas. Todas as seis execuções
 passaram. A medição inicial, concorrente com o update, foi descartada;
 a tabela usa somente os pares alternados posteriores.
 
+## Quinta etapa: gate de plano standalone
+
+A quinta etapa consolida o gate de plano de `forge-task` no contrato existente
+`shared/forge-plan-gate.md`. O consumidor mantém apenas bindings e retorno;
+retomada por marker, falha de prefs, legado sem contagens, edição/releitura,
+aprovação, captura de itens e eventos ficam no contrato compartilhado.
+
+O parser dos exemplos compartilhados e de `forge-next` agora recebe JSON por
+`process.argv[1]`. Antes, `R=...` era passado depois de `node -e`, como argumento,
+mas o código lia `process.env.R`: JSON válido falhava quando a variável não existia.
+O novo teste reproduziu essa falha antes da correção e executa as expressões
+extraídas das fontes, além do guard shell completo quando Bash está disponível.
+Cobertura: legado, plano estruturado válido/inválido, JSON malformado e erro de IO.
+
+Redução líquida nas três fontes distribuídas: **195 linhas e 11.304 bytes**
+(normalização LF). Nenhum controlador novo foi criado. A instalação real dos
+dois hosts confirma o binding e a disponibilidade do contrato; apenas o golden
+de skills foi atualizado. Os testes de contrato não simulam uma interação humana
+na UI e não demonstram comportamento de abas ou campos do cliente.
+
 ## Próximas etapas
 
 - Medir várias execuções do CI antes de alterar o balanceamento dos shards.
