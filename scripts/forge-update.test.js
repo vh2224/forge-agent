@@ -221,17 +221,10 @@ test('apply resolves the source repo from recorded provenance — the documented
 test('without provenance and without --repo the failure names the flag, not ENOENT', () => {
   const data = fixture();
   try {
-    const base = { ...data, runtime: 'claude', skipCapabilityCheck: true };
-    delete base.root; delete base.cleanup;
-    installer.install(base);
-
     // An installation made by any release before provenance was recorded.
-    const manifestFile = path.join(data.forgeHome, 'manifest.json');
-    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-    delete manifest.source_repo;
-    fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
-
-    const blind = { ...base, apply: true, entryRoot: data.forgeHome };
+    fs.mkdirSync(data.forgeHome, { recursive: true });
+    fs.writeFileSync(path.join(data.forgeHome, 'manifest.json'), '{"runtime":"claude"}\n');
+    const blind = { ...data, apply: true, entryRoot: data.forgeHome };
     delete blind.repo;
     const before = snapshot(data.root);
     assert.throws(() => updater.update(blind), (error) => {
@@ -249,17 +242,11 @@ test('without provenance and without --repo the failure names the flag, not ENOE
 test('precedence: an explicit --repo wins over provenance, and the entry point wins over both', () => {
   const data = fixture();
   try {
-    const base = { ...data, runtime: 'claude', skipCapabilityCheck: true };
-    delete base.root; delete base.cleanup;
-    installer.install(base);
-
-    const manifestFile = path.join(data.forgeHome, 'manifest.json');
-    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-    manifest.source_repo = path.join(data.root, 'clone-que-nao-existe');
-    fs.writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`);
+    fs.mkdirSync(data.forgeHome, { recursive: true });
+    fs.writeFileSync(path.join(data.forgeHome, 'manifest.json'), JSON.stringify({ source_repo: path.join(data.root, 'clone-que-nao-existe') }));
 
     // Explicit flag: used as given, and the stale recorded value is not consulted.
-    const explicit = updater.resolveSourceRepo({ ...base, repo: data.repo });
+    const explicit = updater.resolveSourceRepo({ ...data, repo: data.repo });
     assert.strictEqual(explicit.origin, 'flag');
     assert.strictEqual(explicit.path, data.repo);
     assert.deepStrictEqual(explicit.considered.map((item) => item.origin), ['flag'],
@@ -267,7 +254,7 @@ test('precedence: an explicit --repo wins over provenance, and the entry point w
 
     // No flag, and the entry point IS a clone (a developer running from the repo):
     // it wins without reading the manifest value at all.
-    const fromRepo = { ...base, entryRoot: data.repo };
+    const fromRepo = { ...data, entryRoot: data.repo };
     delete fromRepo.repo;
     assert.strictEqual(updater.resolveSourceRepo(fromRepo).origin, 'entry');
   } finally { data.cleanup(); }

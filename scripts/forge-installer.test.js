@@ -10,13 +10,28 @@ const capabilities = require('./forge-capabilities.js');
 
 let passed = 0;
 function test(name, fn) { fn(); passed++; process.stdout.write(`  ✓ ${name}\n`); }
-function fixture() {
+function fixture({ configurationOnly = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-installer space-Ω-'));
   const forgeHome = path.join(root, 'Forge Home');
   const claudeHome = path.join(root, 'Claude Home');
   const codexHome = path.join(root, 'Codex Home');
   const projectRoot = path.join(root, 'Project Root');
-  const options = { repo: path.resolve(__dirname, '..'), forgeHome, claudeHome, codexHome, projectRoot, userHome: root, skipCapabilityCheck: true, codexQuestionBinary: 'fixture-codex', questionSpawnSync: () => ({ status: 0, stdout: '' }) };
+  let repo = path.resolve(__dirname, '..');
+  if (configurationOnly) {
+    // Configuration/ownership cases need real source bytes, not the entire runtime.
+    const source = repo;
+    repo = path.join(root, 'Source');
+    for (const file of ['forge-source-manifest.json', 'forge-capabilities.json', 'forge-prefs.schema.json', 'shared/templates/claude/settings.jsonc']) {
+      fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+      fs.copyFileSync(path.join(source, file), path.join(repo, file));
+    }
+    const manifestFile = path.join(repo, 'forge-source-manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    manifest.sources = manifest.sources.filter(source => ['agents', 'commands', 'skills', 'dispatch-templates', 'claude-settings', 'configuration'].includes(source.source_id));
+    for (const directory of ['agents', 'commands', 'skills', 'shared/templates/dispatch']) fs.mkdirSync(path.join(repo, directory), { recursive: true });
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+  }
+  const options = { repo, forgeHome, claudeHome, codexHome, projectRoot, userHome: root, skipCapabilityCheck: true, codexQuestionBinary: 'fixture-codex', questionSpawnSync: () => ({ status: 0, stdout: '' }) };
   return { root, forgeHome, claudeHome, codexHome, projectRoot, options, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 function files(root) { return fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }).map((entry) => entry.name).sort() : []; }
@@ -82,7 +97,7 @@ test('native question contract reaches installed consumers and safe feature defa
 });
 
 test('question feature dry-run is offline and update adds only after supported probing', () => {
-  const data = fixture();
+  const data = fixture({ configurationOnly: true });
   try {
     const config = path.join(data.codexHome, 'config.toml');
     fs.mkdirSync(data.codexHome, { recursive: true });
@@ -193,7 +208,7 @@ test('Codex-only does not read or write Claude home and both keeps one core', ()
 });
 
 test('Codex install adds status line to user config; dry-run and updates preserve user choices', () => {
-  const data = fixture();
+  const data = fixture({ configurationOnly: true });
   try {
     fs.mkdirSync(data.codexHome, { recursive: true });
     const configPath = path.join(data.codexHome, 'config.toml');
@@ -628,7 +643,7 @@ test('Claude 3.1.4 fixture is versioned with prefs, Markdown, hooks, templates a
 // frozen several releases back, and finding it took a byte-compare against repo
 // history instead of reading the summary.
 test('preserved conflicts are named, not just counted', () => {
-  const data = fixture();
+  const data = fixture({ configurationOnly: true });
   try {
     installer.install({ ...data.options, runtime: 'claude' });
 
@@ -666,7 +681,7 @@ test('preserved conflicts are named, not just counted', () => {
 // projection would re-freeze on the next update, which is the defect this
 // closes, reintroduced one layer up.
 test('the ownership record is persisted in the manifest and survives a second run', () => {
-  const data = fixture();
+  const data = fixture({ configurationOnly: true });
   try {
     installer.install({ ...data.options, runtime: 'claude' });
     const manifestPath = path.join(data.forgeHome, 'manifest.json');
@@ -698,7 +713,7 @@ test('the ownership record is persisted in the manifest and survives a second ru
 // asserts: what matters is that a Codex destination survives a Claude-only run,
 // not which of the two layers happened to carry it.
 test('a single-runtime run merges the record instead of replacing it', () => {
-  const data = fixture();
+  const data = fixture({ configurationOnly: true });
   try {
     installer.install({ ...data.options, runtime: 'both' });
     const manifestPath = path.join(data.forgeHome, 'manifest.json');
@@ -724,7 +739,7 @@ test('a single-runtime run merges the record instead of replacing it', () => {
 // installer's reporting and persistence, not about git; the history behavior has
 // its own suite (forge-projection-provenance.test.js) with real repos.
 test('an adopted destination is named in the summary and recorded in the manifest', () => {
-  const data = fixture();
+  const data = fixture({ configurationOnly: true });
   try {
     installer.install({ ...data.options, runtime: 'claude' });
     const frozen = path.join(data.claudeHome, 'forge-prefs.schema.json');
@@ -761,7 +776,7 @@ test('an adopted destination is named in the summary and recorded in the manifes
 });
 
 test('a clean update names nothing — the section is absent, not empty', () => {
-  const data = fixture();
+  const data = fixture({ configurationOnly: true });
   try {
     installer.install({ ...data.options, runtime: 'claude' });
     const text = installer.render(installer.install({ ...data.options, runtime: 'claude', update: true }));
