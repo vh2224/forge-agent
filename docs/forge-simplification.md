@@ -119,6 +119,24 @@ dois hosts confirma o binding e a disponibilidade do contrato; apenas o golden
 de skills foi atualizado. Os testes de contrato não simulam uma interação humana
 na UI e não demonstram comportamento de abas ou campos do cliente.
 
+## Publicação das correções: v4.33.4
+
+As cinco etapas acima entraram na `master` com commits `refactor:`. Esse tipo
+não incrementa a versão: o workflow de release valida o código, mas pula a
+publicação quando não há `fix:`, `feat:` ou mudança incompatível desde a última
+tag. Assim, as alterações ainda não estavam disponíveis no canal `stable`.
+
+A v4.33.4 publica esse conjunto, incluindo duas correções de comportamento:
+isolamento das transações pela slice selecionada (#174) e transporte correto
+do JSON na revalidação do gate de plano (#177). O commit de publicação usa
+`fix:` para que o resolvedor derive o próximo patch a partir de v4.33.3.
+
+Para concluir uma entrega destinada ao canal estável, é necessário verificar
+não só o CI e o merge, mas também a criação da release, a tag apontando para o
+commit integrado e a resolução dessa versão pelo updater no canal `stable`.
+Correções de comportamento devem usar `fix:`, mesmo quando acompanhadas de
+refatoração; refatorações puras continuam sem publicação automática.
+
 ## Próximas etapas
 
 - Medir várias execuções do CI antes de alterar o balanceamento dos shards.
