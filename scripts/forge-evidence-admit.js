@@ -3,7 +3,7 @@
 
 /**
  * forge-evidence-admit.js — which `ThreadItem` variants of the codex app-server
- * stream may become EVIDENCE, declared by name for all 18, plus the shape of a
+ * stream may become EVIDENCE, declared by name, plus the shape of a
  * runtime-observed evidence entry (the contract S04/T02 and S04/T03 consume).
  *
  * Why admissibility is declared per name instead of "take whatever has text":
@@ -27,9 +27,8 @@
  *      upstream must FAIL this guard loudly rather than slip into evidence
  *      unclassified — "pass it through, it's probably fine" is exactly how an
  *      unaudited source becomes authoritative by accident.
- *   3. The count of 18 is CONFRONTED with the pinned schema, never hardcoded
- *      and trusted. A literal 18 that nobody checks against the pin is the
- *      inert guard this project rejects on sight.
+ *   3. The complete name set is confronted with the pinned schema; matching
+ *      counts alone cannot detect a variant replaced by another.
  */
 
 const fs = require('fs');
@@ -53,11 +52,11 @@ const REASONS = Object.freeze({
   SESSION_LIFECYCLE: 'session-lifecycle',
 });
 
-// ── The 18 variants, each with an explicit verdict and reason ───────────────
+// ── The 19 variants, each with an explicit verdict and reason ───────────────
 //
 // Nothing is classified by omission: a variant absent from this map is not
 // "assumed inadmissible", it fails assertVariantCoverage by name. Order mirrors
-// `definitions.ThreadItem.oneOf` in the 0.144.4 pin for reviewability, but
+// `definitions.ThreadItem.oneOf` in the 0.155.0 pin for reviewability, but
 // nothing depends on the order — the confrontation is set-based.
 const VARIANT_ADMISSIBILITY = Object.freeze({
   userMessage: Object.freeze({
@@ -71,6 +70,10 @@ const VARIANT_ADMISSIBILITY = Object.freeze({
   agentMessage: Object.freeze({
     admissible: false, reason: REASONS.MODEL_AUTHORED,
     note: 'The model\'s own narration. Admitting it is the TASK-021 defect wearing a JSON envelope.',
+  }),
+  functionCallOutput: Object.freeze({
+    admissible: false, reason: REASONS.TOOL_RESULT_UNVERIFIED,
+    note: 'Client-supplied tool output does not attest to runtime execution.',
   }),
   plan: Object.freeze({
     admissible: false, reason: REASONS.MODEL_AUTHORED,
@@ -161,7 +164,7 @@ function truncate(value, max) {
 // locked in T01-PLAN is asserted by strict equality downstream, so an extra
 // key here is a breaking change, not a nicety. The map still records
 // `runtime-observed` for those two — that value feeds the doc table, which
-// must state a reason for all 18 rows.
+// must state a reason for all 19 rows.
 //
 // `known: false` is a REJECTION, never a pass-through. See floor 2 in the
 // header: an upstream variant we have never classified must not become
@@ -436,9 +439,7 @@ function buildRuntimeEvidence(items, options) {
 
 // ── assertVariantCoverage ──────────────────────────────────────────────────
 //
-// Confronts this module's 18 names with the pinned schema. Throws naming the
-// DIVERGENT VARIANTS, never just a count: "expected 18, got 19" sends a
-// reviewer on an archaeology trip, "missing from map: quantumThing" does not.
+// Confronts this module's names with the pinned schema and names divergent variants.
 function pinVariantNames(pin) {
   const oneOf = pin && pin.definitions && pin.definitions.ThreadItem
     ? pin.definitions.ThreadItem.oneOf
@@ -465,7 +466,7 @@ function pinVariantNames(pin) {
   // A DUPLICATE discriminator is the pin contradicting itself, same class as
   // meta.variant_count disagreeing with oneOf.length below — hence the same
   // error code. It has to be caught here rather than downstream, because every
-  // later comparison is set-based: a pin carrying all 18 names plus a repeat
+  // later comparison is set-based: a pin carrying all 19 names plus a repeat
   // passes coverage AND passes the count check (forge-schema-pin derives
   // meta.variant_count from this same array), while `variants` and the
   // admissible/inadmissible totals reported to the caller overstate reality.
@@ -540,12 +541,12 @@ function assertVariantCoverage(pin) {
 
 // ── checkDocTable ──────────────────────────────────────────────────────────
 //
-// Parses the markdown table in `## Admissibilidade das 18 variantes de
+// Parses the markdown table in `## Admissibilidade das 19 variantes de
 // ThreadItem` and confronts it with the map: name set, verdict per name, and a
 // non-empty reason naming the same reason class. In-process, `fs` only, never
 // a shell-out — the mold is forge-doc-claims.js, whose origin defect was a
 // `grep` that honored `.gitignore` and therefore never saw the file it policed.
-const DOC_SECTION_HEADING = '## Admissibilidade das 18 variantes de ThreadItem';
+const DOC_SECTION_HEADING = '## Admissibilidade das 19 variantes de ThreadItem';
 
 function normalizeCell(cell) {
   return String(cell == null ? '' : cell)

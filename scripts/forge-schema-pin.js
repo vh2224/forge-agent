@@ -358,8 +358,13 @@ if (require.main === module) {
         process.exitCode = 1;
       } else {
         const projection = projectSchema(directory, { codexVersion: generated.codexVersion });
-        if (projection.meta.variant_count !== 18) {
-          printResult({ outcome: 'generator-output-shape-changed', reason: `expected 18 ThreadItem variants, got ${projection.meta.variant_count}` }, args.json);
+        // Every upstream variant needs an explicit evidence policy before repinning.
+        // Load after exports are initialized: evidence-admit shares pinPath above.
+        let coverageError;
+        try { require('./forge-evidence-admit').assertVariantCoverage(projection); }
+        catch (error) { coverageError = error; }
+        if (coverageError) {
+          printResult({ outcome: 'generator-output-shape-changed', reason: coverageError.message }, args.json);
           process.exitCode = 1;
         } else {
           fs.mkdirSync(path.dirname(pinPath()), { recursive: true });

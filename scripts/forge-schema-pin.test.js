@@ -65,6 +65,84 @@ function testCanonicalization() {
   equal(fields[1], { path: 'definitions.ThreadItem.oneOf[0].properties.exitStatus', kind: 'added' }, 'renamed fields must name the added path');
 }
 
+// The CLI contract lives here; smoke retains only the installed-generator probe.
+function testCliDrift() {
+  const directory = tempDir('cli');
+  const pin = JSON.parse(fs.readFileSync(schemaPin.pinPath(), 'utf8'));
+  const fixture = (mutate = () => {}) => {
+    const { definitions, referenced } = JSON.parse(JSON.stringify(pin));
+    mutate(definitions, referenced);
+    writeJson(path.join(directory, 'codex_app_server_protocol.v2.schemas.json'), {
+      definitions: { ThreadItem: definitions.ThreadItem, ...referenced },
+    });
+    for (const name of Object.keys(definitions).filter(name => name !== 'ThreadItem')) {
+      writeJson(path.join(directory, name === 'JSONRPCError' ? `${name}.json` : `v2/${name}.json`), definitions[name]);
+    }
+  };
+  const run = (env = {}, args = ['--check', '--schema-dir', directory]) => {
+    const result = childProcess.spawnSync(process.execPath, [path.join(__dirname, 'forge-schema-pin.js'), ...args, '--json'], {
+      encoding: 'utf8', env: { ...process.env, ...env },
+    });
+    const payload = JSON.parse(result.stdout);
+    equal(result.status, payload.outcome === 'match' ? 0 : 1, 'CLI exit agrees with the named outcome');
+    return payload;
+  };
+  try {
+    fixture((definitions) => {
+      definitions.ThreadItem.oneOf.forEach(item => {
+        item.required.reverse();
+        item.properties = Object.fromEntries(Object.entries(item.properties).reverse());
+      });
+    });
+    equal(run().outcome, 'match', 'object keys and required ordering do not drift');
+    fixture(definitions => definitions.ThreadItem.oneOf.reverse());
+    equal(run().outcome, 'drift', 'oneOf ordering is not normalized away');
+    const commandIndex = pin.definitions.ThreadItem.oneOf.findIndex(item => item.properties.type.enum[0] === 'commandExecution');
+    fixture(definitions => {
+      const props = definitions.ThreadItem.oneOf[commandIndex].properties;
+      props.exit_code = props.exitCode;
+      delete props.exitCode;
+    });
+    check(run().fields.some(field => field.path === `definitions.ThreadItem.oneOf[${commandIndex}].properties.exitCode`), 'renamed runtime field is named');
+    fixture((definitions, referenced) => {
+      referenced.SandboxPolicy = JSON.parse(JSON.stringify(referenced.SandboxPolicy).replace(/networkAccess/g, 'network_access'));
+      referenced.CommandExecutionStatus.enum = ['different'];
+    });
+    const inner = run();
+    equal(inner.outcome, 'drift', 'referenced types participate in drift');
+    for (const prefix of ['referenced.SandboxPolicy', 'referenced.CommandExecutionStatus.enum']) {
+      check(inner.fields.some(field => field.path.startsWith(prefix)), `drift names ${prefix}`);
+    }
+    fixture(definitions => definitions.ThreadItem.oneOf.push({ properties: { type: { enum: ['futureThreadItem'] } } }));
+    check(run().fields.some(field => field.path === `definitions.ThreadItem.oneOf[${pin.meta.variant_count}]`), 'added variant is named');
+    fixture();
+    const truncated = path.join(directory, 'truncated.json');
+    fs.writeFileSync(truncated, '{');
+    for (const file of [truncated, path.join(directory, 'missing.json')]) {
+      equal(run({ FORGE_SCHEMA_PIN_FILE: file }).outcome, 'pin-unreadable', 'unreadable pin is a named CLI failure');
+    }
+    equal(run({ FORGE_SCHEMA_PIN_CODEX_BIN: path.join(directory, 'missing-codex') }, ['--check']).outcome,
+      'generator-missing', 'missing CLI generator fails explicitly');
+
+    // Count alone cannot authorize a replacement variant; failed repins preserve the file.
+    const generator = path.join(directory, 'generator.js');
+    fs.writeFileSync(generator, `const fs=require('fs');const args=process.argv; if(args.includes('--version')) console.log('codex-cli fixture'); else fs.cpSync(${JSON.stringify(directory)},args[args.indexOf('--out')+1],{recursive:true});`);
+    const outputPin = path.join(directory, 'output-pin.json');
+    fs.writeFileSync(outputPin, 'preserve me');
+    fixture(definitions => { definitions.ThreadItem.oneOf[0].properties.type.enum = ['futureThreadItem']; });
+    const refused = run({ FORGE_SCHEMA_PIN_FILE: outputPin, FORGE_SCHEMA_PIN_CODEX_BIN: generator }, ['--generate-pin']);
+    equal(refused.outcome, 'generator-output-shape-changed', 'unreviewed same-count replacement cannot be pinned');
+    check(refused.reason.includes('futureThreadItem'), 'repin refusal names the unreviewed variant');
+    equal(fs.readFileSync(outputPin, 'utf8'), 'preserve me', 'refused repin leaves destination untouched');
+    fixture();
+    equal(run({ FORGE_SCHEMA_PIN_FILE: outputPin, FORGE_SCHEMA_PIN_CODEX_BIN: generator }, ['--generate-pin']).outcome,
+      'match', 'reviewed variants can be pinned through the same CLI');
+    equal(JSON.parse(fs.readFileSync(outputPin, 'utf8')).definitions, pin.definitions, 'successful repin preserves projected definitions');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 function testProjectionFixture() {
   const directory = miniSchemaDir();
   try {
@@ -80,8 +158,8 @@ function testProjectionFixture() {
 
 function testPinnedCount() {
   const pin = JSON.parse(fs.readFileSync(schemaPin.pinPath(), 'utf8'));
-  equal(pin.meta.variant_count, 18, 'real pin declares 18 ThreadItem variants');
-  equal(pin.definitions.ThreadItem.oneOf.length, 18, 'real pin contains 18 ThreadItem variants');
+  equal(pin.meta.variant_count, 19, 'real pin declares 19 ThreadItem variants');
+  equal(pin.definitions.ThreadItem.oneOf.length, 19, 'real pin contains 19 ThreadItem variants');
   // The roots are all-`$ref`; a pin that carries only them pins pointers, not types.
   check(pin.referenced && Object.keys(pin.referenced).length > 0, 'real pin resolves the referenced closure');
   equal(pin.meta.referenced_count, Object.keys(pin.referenced).length, 'meta.referenced_count matches the closure it describes');
@@ -208,6 +286,7 @@ if (process.argv[2] === '--generator-missing-child') {
   }
 } else {
   testCanonicalization();
+  testCliDrift();
   testProjectionFixture();
   testPinnedCount();
   testReferenceClosure();
