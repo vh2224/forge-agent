@@ -32,6 +32,27 @@ O checkout completo permanece necessário para a resolução da versão prospect
 a partir de tags e commits convencionais. A retirada do gate S07 não elimina
 essa dependência.
 
+## Segunda etapa: autoridade de seleção
+
+As tabelas de seleção de fase de `forge-auto` e `forge-next` foram substituídas
+pelo contrato compartilhado em `shared/forge-lifecycle.md`. Auto mantém a unidade
+e o snapshot do controlador; next usa o seletor read-only existente quando não
+há unidade com lease. Nenhum dos prompts avança STATE manualmente para aplicar skip.
+
+O seletor lê os nomes canônicos `skip_discuss`, `skip_research` e
+`skip_slice_research`, mantendo os aliases antigos. As preferências de research
+de milestone e slice são independentes. Slices marcadas como concluídas não são
+selecionadas por um STATE atrasado; a próxima slice passa pelas mesmas regras de
+plan/research/execute/complete. A transação de início persiste a slice selecionada.
+
+Testes cobrem ordenação das fases, preferências, passagem entre slices e seleção
+sem escrita de STATE ou aquisição de lease. As projeções dos hosts continuam
+validadas; apenas o golden da superfície de skills mudou.
+
+O módulo de paralelismo continua responsável por dependências e lotes, e o
+resolver de dispatch continua responsável por engine/modelo/esforço. Esta etapa
+não migra o ciclo inteiro nem cria suporte a task standalone no controlador.
+
 ## Próximas etapas
 
 - Medir várias execuções do CI antes de alterar o balanceamento dos shards.
@@ -43,4 +64,4 @@ essa dependência.
   procedimentos equivalentes dos prompts. O fluxo standalone de task precisa
   de tratamento explícito; não é selecionado pelo controlador de milestones.
 
-Essas etapas posteriores não estão implementadas pela primeira mudança.
+Essas frentes posteriores ainda não estão implementadas.

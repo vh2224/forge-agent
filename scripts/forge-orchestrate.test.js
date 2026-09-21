@@ -55,6 +55,15 @@ try {
   assert.strictEqual(left.unit.key, 'execute-task/T01');
   assert.strictEqual(left.events[0].event, 'unit-began');
 
+  // A stale active slice is corrected by the same transaction that leases work.
+  const advanced = nextInput(setup(), 'codex');
+  advanced.inventory.slices.unshift({ id: 'S00', checked: true });
+  advanced.inventory.slices[1].id = 'S02';
+  const nextSlice = orchestrate.next(advanced);
+  assert.strictEqual(nextSlice.unit.key, 'execute-task/T01');
+  assert.strictEqual(nextSlice.state.active_slice, 'S02');
+  assert.strictEqual(state.read(advanced.cwd, milestone).active_slice, 'S02');
+
   // Retry after a crash between intent and publication recovers the S02 transaction.
   const crash = setup();
   assert.throws(() => orchestrate.next(nextInput(crash, 'claude'), { failpoint: point => point === 'after-intent' }), /failpoint/);

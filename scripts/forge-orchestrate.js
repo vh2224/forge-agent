@@ -204,7 +204,8 @@ function next(inputValue, options) {
   }
   const selectedUnit = unit(selection.unit);
   const key = input.idempotency_key || `forge-orchestrate-next:${input.milestone}:${selectedUnit.key}`;
-  const request = { milestone: input.milestone, unit: selectedUnit, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session, idempotency_key: key };
+  const request = { milestone: input.milestone, unit: selectedUnit, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session, idempotency_key: key,
+    state_patch: { active_slice: selection.slice || '—' } };
   const txOptions = { ...(options || {}), prefsReader: input.prefsReader };
   try {
     // Recovery is explicit and uses the durable S02 transaction record. It is

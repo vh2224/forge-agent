@@ -60,9 +60,9 @@ function isPlainObject(v) {
 const INVENTORY = [
   // — top-level flat keys (NOT extractable by legacyReadFile: the legacy
   //   section parser only captures `section:\n  key: value` blocks) —
-  { key: 'skip_discuss', type: 'boolean', default: false, source: 'skills/forge-auto/SKILL.md § Phase skip check (absent → no skip)' },
-  { key: 'skip_research', type: 'boolean', default: false, source: 'skills/forge-auto/SKILL.md § Phase skip check' },
-  { key: 'skip_slice_research', type: 'boolean', default: false, source: 'shared/forge-dispatch.md § dispatch table (research-slice skip rule)' },
+  { key: 'skip_discuss', type: 'boolean', default: false, source: 'scripts/forge-unit-controller.js selectNextUnit (canonical skip preferences)' },
+  { key: 'skip_research', type: 'boolean', default: false, source: 'scripts/forge-unit-controller.js selectNextUnit (canonical skip preferences)' },
+  { key: 'skip_slice_research', type: 'boolean', default: false, source: 'scripts/forge-unit-controller.js selectNextUnit (independent slice research preference)' },
   { key: 'reassess_after_slice', type: 'boolean', default: false, source: 'skills/forge-auto/SKILL.md § post-slice housekeeping' },
   { key: 'auto_commit', type: 'boolean', default: true, source: 'skills/forge-auto/SKILL.md:876 {auto_commit} injection; agents/forge-executor.md step 11' },
   { key: 'merge_strategy', type: 'string', default: 'squash', source: 'agents/forge-completer.md § complete-slice merge step' },
