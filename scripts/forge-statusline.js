@@ -409,7 +409,7 @@ process.stdin.on('end', () => {
         let updateProvider;
         try { updateProvider = require('./scripts/forge-update-check'); }
         catch { updateProvider = require('./forge-update-check'); }
-        const cache = updateProvider.cachedUpdate(repo);
+        const cache = updateProvider.cachedUpdate(updateProvider.resolveRepoPath(resolvedPrefs.prefs, cwd || process.cwd()));
         forgeVersion = cache.version || '';
         if (cache.has_update && cache.remote_version) forgeUpdate = `\u2191 ${cache.remote_version}`;
       }

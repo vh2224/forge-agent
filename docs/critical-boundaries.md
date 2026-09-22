@@ -151,8 +151,12 @@ deletion is safe but removes freshness evidence; rebuild to establish it again.
 
 `forge-update-check.js` distinguishes `equal`, `behind`, `ahead`, `diverged` and
 `unknown` using Git ancestry. Merely possessing the remote commit is insufficient.
-Behind/diverged states indicate an available update. Cache files in the temporary
-directory are keyed by canonical repository identity, with a ten-minute TTL.
+Behind/diverged states indicate an available update. Cache files are keyed by
+canonical repository identity, with a ten-minute TTL, in a private per-user
+temporary directory. On POSIX the directory must belong to the current user
+and have no group/other permissions; links and unsafe pre-existing directories
+are refused. Publications use exclusive random temporary files with mode 0600.
+Cached display strings must be bounded and free of terminal control characters.
 
 Status rendering returns cached state immediately and schedules a background
 refresh when needed. Git commands in the refresh have two- or five-second
@@ -161,3 +165,11 @@ commit object without advancing the checkout. Network/ancestry failures record
 `unknown` while retaining the last known update indication for the same local
 commit. A changed checkout clears the old indication; an initially empty
 cache is unknown rather than evidence that the checkout is current.
+
+`forge-update-check.js --invalidate --cwd <consumer>` resolves the same
+`repo_path` preference as the statusline; relative paths use the consumer root.
+An unconfigured path reports a no-op. Direct callers can use
+`--invalidate <repo>` or `invalidateCache(repo)`. Invalidation advances a generation
+before removing the cached result. A refresh already in flight may finish writing,
+but readers reject its older generation and request another refresh rather than
+serving that result for a new ten-minute TTL. Other repository caches are untouched.

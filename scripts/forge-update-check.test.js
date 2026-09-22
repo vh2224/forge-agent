@@ -9,7 +9,7 @@ const { execFileSync, spawnSync } = require('child_process');
 const provider = require('./forge-update-check');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-update-check-'));
 const cacheDir = path.join(ROOT, 'cache');
-fs.mkdirSync(cacheDir);
+fs.mkdirSync(cacheDir, { mode: 0o700 });
 let passed = 0;
 
 function git(cwd, ...args) {
@@ -132,9 +132,110 @@ try {
     assert.strictEqual(provider.cachedUpdate(second, { cacheDir }).state, 'equal');
   });
 
+  test('invalidation API removes only the canonical repository cache and is idempotent', () => {
+    const firstFile = provider.cachePath(repo, cacheDir);
+    const secondFile = provider.cachePath(origin, cacheDir);
+    fs.writeFileSync(firstFile, 'first');
+    fs.writeFileSync(secondFile, 'second');
+    assert.strictEqual(provider.invalidateCache(path.join(repo, '.'), { cacheDir }).invalidated, true);
+    assert.strictEqual(fs.existsSync(firstFile), false);
+    assert.strictEqual(fs.readFileSync(secondFile, 'utf8'), 'second');
+    assert.strictEqual(provider.invalidateCache(repo, { cacheDir }).reason, 'cache-missing');
+    assert.throws(() => provider.invalidateCache('', { cacheDir }), /repository path/);
+  });
+
+  test('invalidation CLI maps consumer preferences to the Forge cache without touching other identities', () => {
+    const consumer = path.join(ROOT, 'consumer with spaces');
+    fs.mkdirSync(path.join(consumer, '.gsd'), { recursive: true });
+    const prefsFile = path.join(consumer, '.gsd', 'forge-prefs.jsonc');
+    const firstFile = provider.cachePath(repo, cacheDir);
+    const otherFile = provider.cachePath(origin, cacheDir);
+    const consumerFile = provider.cachePath(consumer, cacheDir);
+    fs.writeFileSync(firstFile, 'forge');
+    fs.writeFileSync(otherFile, 'other');
+    fs.writeFileSync(consumerFile, 'consumer');
+    fs.writeFileSync(prefsFile, JSON.stringify({ repo_path: `  ${repo}  ` }));
+    const invoke = (...args) => {
+      const result = spawnSync(process.execPath, [require.resolve('./forge-update-check'), '--invalidate', ...args], {
+        encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: ROOT, USERPROFILE: ROOT },
+      });
+      assert.strictEqual(result.status, 0, result.stderr);
+      return JSON.parse(result.stdout);
+    };
+    assert.strictEqual(invoke('--cwd', consumer, cacheDir).file, firstFile);
+    assert.strictEqual(fs.existsSync(firstFile), false);
+    assert.strictEqual(fs.readFileSync(otherFile, 'utf8'), 'other');
+    assert.strictEqual(fs.readFileSync(consumerFile, 'utf8'), 'consumer');
+    fs.writeFileSync(firstFile, 'forge-relative');
+    fs.writeFileSync(prefsFile, JSON.stringify({ repo_path: `  ${path.relative(consumer, repo)}  ` }));
+    assert.strictEqual(invoke('--cwd', consumer, cacheDir).file, firstFile);
+    assert.strictEqual(fs.existsSync(firstFile), false);
+    assert.strictEqual(fs.readFileSync(otherFile, 'utf8'), 'other');
+    for (const value of ['', 42]) {
+      fs.writeFileSync(prefsFile, JSON.stringify({ repo_path: value }));
+      assert.strictEqual(invoke('--cwd', consumer, cacheDir).reason, 'repo-path-unconfigured');
+      assert.strictEqual(fs.readFileSync(consumerFile, 'utf8'), 'consumer');
+    }
+    assert.strictEqual(invoke(origin, cacheDir).invalidated, true);
+    assert.strictEqual(fs.existsSync(otherFile), false);
+    assert.strictEqual(fs.readFileSync(consumerFile, 'utf8'), 'consumer');
+  });
+
+  test('milestone template invalidates through the provider with consumer context', () => {
+    const template = fs.readFileSync(path.join(__dirname, '..', 'shared', 'forge-completer-milestone.md'), 'utf8');
+    assert(template.includes('node "$FORGE_SCRIPTS_DIR/forge-update-check.js" --invalidate --cwd "{WORKING_DIR}"'));
+    assert(template.includes('--cwd "{WORKING_DIR}" || echo "Warning: statusline cache invalidation failed; continuing milestone completion."'));
+    assert(template.includes('${FORGE_HOME:-$HOME/.forge-agent}/scripts'));
+    assert(!template.includes('forge-update-check.json'));
+  });
+
+  for (const window of ['during-git', 'before-publication']) {
+    test(`invalidation fences an older refresh ${window}`, () => {
+      const file = provider.cachePath(repo, cacheDir);
+      const gitModule = require('./forge-git-process'), originalGit = gitModule.git;
+      const originalRename = fs.renameSync;
+      const modulePath = require.resolve('./forge-update-check');
+      let invalidated = false;
+      const invalidateOnce = () => {
+        if (!invalidated) { invalidated = true; provider.invalidateCache(repo, { cacheDir }); }
+      };
+      try {
+        if (window === 'during-git') {
+          gitModule.git = (...args) => { invalidateOnce(); return originalGit(...args); };
+        } else {
+          fs.renameSync = function(from, to) {
+            if (to === file) invalidateOnce();
+            return originalRename.call(fs, from, to);
+          };
+        }
+        delete require.cache[modulePath];
+        require('./forge-update-check').refresh(repo, { cacheDir });
+      } finally {
+        gitModule.git = originalGit;
+        fs.renameSync = originalRename;
+        delete require.cache[modulePath];
+      }
+      assert.strictEqual(invalidated, true);
+      const old = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert(Date.now() - old.ts < provider.TTL_MS, 'old worker published a fresh TTL');
+      assert.notStrictEqual(old.generation, fs.readFileSync(`${file}.generation`, 'utf8'));
+      let launches = 0;
+      const value = provider.cachedUpdate(repo, { cacheDir, spawn() {
+        launches++; return { on() {}, unref() {} };
+      } });
+      assert.strictEqual(value.state, 'unknown', 'invalidated worker cannot revive its verdict');
+      assert.strictEqual(value.has_update, false);
+      assert.strictEqual(launches, 1, 'refresh is requested without waiting for the old TTL');
+      fs.unlinkSync(`${file}.refresh`);
+      const current = provider.refresh(repo, { cacheDir });
+      assert.deepStrictEqual(provider.cachedUpdate(repo, { cacheDir }), current);
+    });
+  }
+
   test('cache render schedules once, serves stale data and performs no synchronous Git', () => {
     const file = provider.cachePath(repo, cacheDir);
-    const stale = { ts: 1, state: 'behind', version: 'v1.0', has_update: true, remote_version: 'v2.0' };
+    const stale = { ts: 1, state: 'behind', version: 'v1.0', has_update: true, remote_version: 'v2.0',
+      generation: fs.readFileSync(`${file}.generation`, 'utf8') };
     fs.writeFileSync(file, JSON.stringify(stale));
     const gitModule = require('./forge-git-process'), originalGit = gitModule.git;
     let launches = 0, unrefs = 0;
@@ -166,7 +267,7 @@ try {
 
   test('real render process exits promptly while a scheduled worker is still alive', () => {
     const isolatedCache = path.join(ROOT, 'render-cache');
-    fs.mkdirSync(isolatedCache);
+    fs.mkdirSync(isolatedCache, { mode: 0o700 });
     const pidFile = path.join(ROOT, 'worker.pid');
     let workerPid;
     const started = Date.now();
@@ -206,8 +307,9 @@ try {
     fs.copyFileSync(path.join(__dirname, 'forge-statusline.js'), statusline);
     const called = path.join(installed, 'provider-called.json');
     fs.writeFileSync(path.join(scripts, 'forge-prefs.js'),
-      `module.exports.readPrefsCached = () => ({prefs:{repo_path:${JSON.stringify(repo)}}});`);
+      `module.exports.readPrefsCached = () => ({prefs:{repo_path:${JSON.stringify(path.relative(installed, repo))}}});`);
     fs.writeFileSync(path.join(scripts, 'forge-update-check.js'), `
+      module.exports.resolveRepoPath = require(${JSON.stringify(require.resolve('./forge-update-check'))}).resolveRepoPath;
       module.exports.cachedUpdate = repo => {
         require('fs').writeFileSync(${JSON.stringify(called)}, JSON.stringify(repo));
         return {version:'v1.0.0',has_update:true,remote_version:'v2.0.0',state:'behind'};
