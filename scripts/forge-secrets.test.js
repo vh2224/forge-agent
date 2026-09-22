@@ -328,6 +328,9 @@ test('Keychain travado não pendura — degrada para arquivo', () => {
     assertEq(iso.find(SERVICE + 'to', 'x').store, 'file', 'deve registrar que caiu no arquivo');
     assertEq(iso.get(SERVICE + 'to', 'x'), 'valor', 'o valor tem que continuar acessível');
 
+    // Deletion now reports Keychain failures instead of claiming success. The
+    // fixture was stored in the fallback, so clean it with Keychain disabled.
+    process.env.FORGE_KEYCHAIN_DISABLED = '1';
     iso.remove(SERVICE + 'to', 'x');
   } finally {
     if (prev === undefined) delete process.env.FORGE_KEYCHAIN_TIMEOUT_MS;

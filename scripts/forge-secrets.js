@@ -51,6 +51,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+const mutex = require('./forge-lock');
 const { execFileSync, spawnSync } = require('child_process');
 const keychainDiag = require('./forge-keychain-diagnostics');
 // Every Keychain branch below asks this first. See forge-keychain-switch.js for
@@ -71,6 +73,8 @@ const FALLBACK_FILE = process.env.FORGE_SECRETS_REGISTRY
   ? `${process.env.FORGE_SECRETS_REGISTRY}.secrets`
   : path.join(CLAUDE_DIR, 'forge-secrets-store.json');
 const KEYCHAIN_ACCT = os.userInfo().username;
+const JOURNAL_FILE = `${REGISTRY_FILE}.pending`;
+const GUARD_ROOT = `${REGISTRY_FILE}.guard`;
 
 // ── Known services ───────────────────────────────────────────────────────────
 // The environment variable each CLI reads. Getting this wrong means the command
@@ -98,18 +102,112 @@ function envVarFor(service) {
 }
 
 // ── Registry (non-secret) ────────────────────────────────────────────────────
+function vaultError(code, message) {
+  const error = new Error(`forge-secrets: ${message}`);
+  error.code = code;
+  return error;
+}
+
+function validCredentials(value) {
+  return Array.isArray(value) && value.every(c => c && typeof c === 'object'
+    && typeof c.service === 'string' && typeof c.name === 'string');
+}
+
+function validStore(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.values(value).every(v => typeof v === 'string');
+}
+
+// Only absence authorizes an empty store. Do not include parser errors: they
+// may quote the secret-bearing input in their message.
+function readVaultJson(file, empty, valid) {
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); }
+  catch (error) {
+    if (error.code === 'ENOENT') return empty;
+    throw vaultError('VAULT_UNREADABLE', `cannot read vault file (${error.code || 'IO_ERROR'})`);
+  }
+  let value;
+  try { value = JSON.parse(raw); }
+  catch { throw vaultError('VAULT_INVALID', 'invalid vault JSON; original file preserved'); }
+  if (!valid(value)) throw vaultError('VAULT_INVALID', 'invalid vault schema; original file preserved');
+  return value;
+}
+
+function readRegistry() {
+  return readVaultJson(REGISTRY_FILE, { version: 1, credentials: [] },
+    j => j && j.version === 1 && validCredentials(j.credentials)).credentials;
+}
+
+function readStore() { return readVaultJson(FALLBACK_FILE, {}, validStore); }
+
+function readJournal() {
+  return readVaultJson(JOURNAL_FILE, null, j => j && j.version === 1
+    && ['add', 'remove'].includes(j.operation) && typeof j.service === 'string'
+    && typeof j.name === 'string' && validCredentials(j.credentials)
+    && (j.operation === 'remove' || /^[a-f0-9]{64}$/.test(j.digest)));
+}
+
+function pendingError() {
+  return vaultError('VAULT_RECOVERY_REQUIRED', 'interrupted operation; run --recover or repeat the original add/remove');
+}
+
 function load() {
+  if (readJournal()) throw pendingError();
+  return readRegistry();
+}
+
+// Vault-specific publisher: exclusive 0600 temporary, complete write + fsync,
+// then same-directory rename. A failed write never truncates the old version.
+function publishVaultJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  let fd;
   try {
-    const j = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
-    return Array.isArray(j.credentials) ? j.credentials : [];
-  } catch { return []; }
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, file);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+}
+
+function withVaultLock(fn) {
+  fs.mkdirSync(path.join(GUARD_ROOT, '.gsd'), { recursive: true, mode: 0o700 });
+  // Reclaim only a provably dead local process, never an expired lease. A slow
+  // Keychain call or debugger must not admit a second writer.
+  const dir = mutex.lockPath(GUARD_ROOT, 'vault');
+  const meta = readVaultJson(mutex.metaPath(dir), null,
+    m => m && Number.isSafeInteger(m.holder_pid) && m.holder_pid > 0
+      && typeof m.owner_token === 'string' && typeof m.generation === 'string');
+  if (!meta && fs.existsSync(dir)) {
+    throw vaultError('VAULT_GUARD_INCOMPLETE', 'vault guard has no owner metadata; stop all vault writers, then run --recover --confirm-stopped (original guard will be archived)');
+  }
+  if (meta) {
+    let dead = false;
+    try { process.kill(meta.holder_pid, 0); }
+    catch (error) { dead = error.code === 'ESRCH'; }
+    if (dead) mutex.releaseHandle({ lockDir: dir, ownerToken: meta.owner_token, generation: meta.generation });
+  }
+  const lock = mutex.acquireSync(GUARD_ROOT, 'vault', {
+    retries: 100, backoffMin: 20, backoffMax: 40, allowStaleRecovery: false,
+  });
+  try { return fn(); } finally {
+    const released = lock.release();
+    if (!released.ok) throw vaultError('VAULT_GUARD_RELEASE_FAILED', 'vault mutation may have completed but guard release failed; stop all vault writers, then run --recover --confirm-stopped');
+  }
 }
 
 function save(credentials) {
-  fs.mkdirSync(path.dirname(REGISTRY_FILE), { recursive: true });
-  const tmp = `${REGISTRY_FILE}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify({ version: 1, credentials }, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, REGISTRY_FILE);
+  return withVaultLock(() => {
+    load(); // Refuse to overwrite unreadable or interrupted metadata.
+    if (!validCredentials(credentials)) throw vaultError('VAULT_INVALID', 'invalid credentials');
+    publishVaultJson(REGISTRY_FILE, { version: 1, credentials });
+  });
 }
 
 function keychainService(service, name) {
@@ -117,7 +215,7 @@ function keychainService(service, name) {
 }
 
 // ── Secret storage ───────────────────────────────────────────────────────────
-function storeSecret(service, name, secret) {
+function storeSecret(service, name, secret, store) {
   if (keychainEnabled()) {
     try {
       // See the header note: the secret must go in argv because `security`
@@ -146,14 +244,8 @@ function storeSecret(service, name, secret) {
     }
   }
   // No Keychain: a 0600 file, created before anything is written to it.
-  let store = {};
-  try { store = JSON.parse(fs.readFileSync(FALLBACK_FILE, 'utf8')); } catch {}
   store[keychainService(service, name)] = secret;
-  fs.mkdirSync(path.dirname(FALLBACK_FILE), { recursive: true });
-  const fd = fs.openSync(FALLBACK_FILE, 'w', 0o600);
-  fs.writeSync(fd, JSON.stringify(store, null, 2));
-  fs.closeSync(fd);
-  fs.chmodSync(FALLBACK_FILE, 0o600);
+  publishVaultJson(FALLBACK_FILE, store);
   return 'file';
 }
 
@@ -228,6 +320,8 @@ function fileProbe(service, name) {
 /// could not answer makes the whole answer `unknown`. `absent` requires every
 /// layer to have said so.
 function probeSecret(service, name) {
+  try { if (readJournal()) return { state: 'unknown', value: null }; }
+  catch { return { state: 'unknown', value: null }; }
   let sawUnknown = false;
   if (keychainEnabled()) {
     const k = keychainProbe(service, name);
@@ -252,7 +346,7 @@ function get(service, name) {
   return p.state === 'present' ? p.value : null;
 }
 
-function deleteSecret(service, name) {
+function deleteSecret(service, name, store) {
   if (keychainEnabled()) {
     try {
       execFileSync('security', [
@@ -260,18 +354,17 @@ function deleteSecret(service, name) {
         '-a', KEYCHAIN_ACCT,
         '-s', keychainService(service, name),
       ], { stdio: 'ignore', timeout: KEYCHAIN_TIMEOUT_MS });
-    } catch {}
+    } catch (error) {
+      if (error.status !== KEYCHAIN_NOT_FOUND) {
+        throw vaultError('VAULT_UNREADABLE', 'Keychain deletion failed; operation remains pending');
+      }
+    }
     // No early return: a copy may also exist in the file store from a moment
     // when the Keychain was unavailable, and leaving it behind would mean
     // "removed" was a lie.
   }
-  try {
-    const store = JSON.parse(fs.readFileSync(FALLBACK_FILE, 'utf8'));
-    delete store[keychainService(service, name)];
-    const fd = fs.openSync(FALLBACK_FILE, 'w', 0o600);
-    fs.writeSync(fd, JSON.stringify(store, null, 2));
-    fs.closeSync(fd);
-  } catch {}
+  delete store[keychainService(service, name)];
+  publishVaultJson(FALLBACK_FILE, store);
 }
 
 // ── Operations ───────────────────────────────────────────────────────────────
@@ -279,31 +372,90 @@ function add({ service, name, secret, envVar, note }) {
   service = String(service || '').toLowerCase().trim();
   name = String(name || '').trim();
   if (!service || !name) throw new Error('service e name são obrigatórios');
-  if (!secret) throw new Error('segredo vazio');
+  if (typeof secret !== 'string' || !secret) throw new Error('segredo vazio');
 
-  const store = storeSecret(service, name, secret);
-  const credentials = load().filter(c => !(c.service === service && c.name === name));
-  credentials.push({
-    service,
-    name,
-    env_var: envVar || envVarFor(service),
-    note: note || '',
-    store,
-    added_at: new Date().toISOString(),
+  return withVaultLock(() => {
+    const digest = crypto.createHash('sha256').update(secret).digest('hex');
+    const pending = readJournal();
+    if (pending && (pending.operation !== 'add' || pending.service !== service
+      || pending.name !== name || pending.digest !== digest)) throw pendingError();
+    const before = readRegistry();
+    const fallback = readStore(); // Preflight BOTH files before any backend mutation.
+    const credentials = pending ? pending.credentials
+      : before.filter(c => !(c.service === service && c.name === name));
+    if (!pending) credentials.push({
+      service, name, env_var: envVar || envVarFor(service), note: note || '',
+      store: 'file', added_at: new Date().toISOString(),
+    });
+    const intent = pending || { version: 1, operation: 'add', service, name, digest, credentials };
+    publishVaultJson(JOURNAL_FILE, intent);
+    const store = storeSecret(service, name, secret, fallback);
+    credentials.find(c => c.service === service && c.name === name).store = store;
+    publishVaultJson(REGISTRY_FILE, { version: 1, credentials });
+    fs.unlinkSync(JOURNAL_FILE);
+    return { service, name, store };
   });
-  save(credentials);
-  return { service, name, store };
 }
 
 function remove(service, name) {
   service = String(service || '').toLowerCase();
-  const before = load();
-  const after = before.filter(c => !(c.service === service && c.name === name));
-  if (after.length === before.length) return false;
-  deleteSecret(service, name);
-  save(after);
-  return true;
+  return withVaultLock(() => {
+    const pending = readJournal();
+    if (pending && (pending.operation !== 'remove' || pending.service !== service
+      || pending.name !== name)) throw pendingError();
+    const before = readRegistry();
+    const fallback = readStore();
+    const credentials = pending ? pending.credentials
+      : before.filter(c => !(c.service === service && c.name === name));
+    if (!pending && credentials.length === before.length) return false;
+    const intent = pending || { version: 1, operation: 'remove', service, name, credentials,
+      needsKeychain: keychainEnabled() || before.some(c => c.service === service
+        && c.name === name && c.store === 'keychain') };
+    if (intent.needsKeychain && !keychainEnabled()) throw pendingError();
+    publishVaultJson(JOURNAL_FILE, intent);
+    deleteSecret(service, name, fallback);
+    publishVaultJson(REGISTRY_FILE, { version: 1, credentials });
+    fs.unlinkSync(JOURNAL_FILE);
+    return true;
+  });
 }
+
+// A journal contains intent + metadata, never secret bytes (including Keychain
+// secrets). Recovery commits only after verifying the intended backend result.
+// If the backend write did not finish, repeating the original operation resumes
+// it under the same lock. An unrelated write cannot hide the inconsistency.
+function recover(opts) {
+  let guard;
+  if (opts && opts.confirmStopped === true) {
+    guard = recoverGuard(opts);
+    if (!guard.ok && !['guard_not_held', 'guard_metadata_present'].includes(guard.reason)) {
+      throw vaultError('VAULT_GUARD_RECOVERY_FAILED', guard.reason);
+    }
+  }
+  const recovered = withVaultLock(() => {
+    const pending = readJournal();
+    if (!pending) return false;
+    readRegistry();
+    const fallback = readStore();
+    const key = keychainEnabled() ? keychainProbe(pending.service, pending.name)
+      : { state: pending.needsKeychain ? 'unknown' : 'absent', value: null };
+    const value = fallback[keychainService(pending.service, pending.name)];
+    if (pending.operation === 'add') {
+      const actual = key.state === 'present' ? key.value : value;
+      if (typeof actual !== 'string'
+        || crypto.createHash('sha256').update(actual).digest('hex') !== pending.digest) throw pendingError();
+      const entry = pending.credentials.find(c => c.service === pending.service && c.name === pending.name);
+      if (!entry) throw vaultError('VAULT_INVALID', 'pending credential metadata missing');
+      entry.store = key.state === 'present' ? 'keychain' : 'file';
+    } else if (key.state !== 'absent' || value !== undefined) throw pendingError();
+    publishVaultJson(REGISTRY_FILE, { version: 1, credentials: pending.credentials });
+    fs.unlinkSync(JOURNAL_FILE);
+    return true;
+  });
+  return opts && opts.confirmStopped === true ? { recovered, guard_evidence: guard.evidence || null } : recovered;
+}
+
+function recoverGuard(opts) { return mutex.recoverIncompleteLock(GUARD_ROOT, 'vault', opts); }
 
 /// Registry entries, never the secrets.
 ///
@@ -348,10 +500,13 @@ function forService(service) {
 /// without naming it. Exactly one default per service.
 function setDefault(service, name) {
   service = String(service || '').toLowerCase();
-  const all = load();
-  if (!all.some(c => c.service === service && c.name === name)) return false;
-  save(all.map(c => c.service === service ? { ...c, is_default: c.name === name } : c));
-  return true;
+  return withVaultLock(() => {
+    const all = load();
+    if (!all.some(c => c.service === service && c.name === name)) return false;
+    publishVaultJson(REGISTRY_FILE, { version: 1,
+      credentials: all.map(c => c.service === service ? { ...c, is_default: c.name === name } : c) });
+    return true;
+  });
 }
 
 /// Resolve which entry a command means.
@@ -391,6 +546,7 @@ function usage() {
     '  --exec <serviço> [nome] -- <comando> [args...]',
     '  --default <serviço> <nome>                          padrão do serviço',
     '  --remove <serviço> <nome>',
+    '  --recover [--confirm-stopped]                       recover interrupted write; flag archives an incomplete guard after all writers stop',
     '  --services                                          serviços conhecidos',
     '  --diagnostics [--json]   falhas de escrita no Keychain (sem segredos)',
     '',
@@ -409,6 +565,13 @@ function main(argv) {
   const json = argv.includes('--json');
 
   if (argv.length === 0 || argv.includes('--help')) { console.log(usage()); return 0; }
+
+  if (argv.includes('--recover')) {
+    const result = recover(argv.includes('--confirm-stopped') ? { confirmStopped: true } : undefined);
+    if (result && result.guard_evidence) console.log(`Guard evidence preserved: ${result.guard_evidence}`);
+    console.log((typeof result === 'object' ? result.recovered : result) ? 'Recovered interrupted operation.' : 'No pending operation.');
+    return 0;
+  }
 
   if (argv.includes('--services')) {
     const rows = Object.entries(SERVICES).map(([k, v]) => ({ service: k, ...v }));
@@ -579,7 +742,7 @@ function main(argv) {
 
 module.exports = {
   REGISTRY_FILE, SERVICES,
-  load, save, add, remove, get, list, find, forService, setDefault, resolve,
+  load, save, add, remove, recover, recoverGuard, get, list, find, forService, setDefault, resolve,
   envVarFor, keychainService, probeSecret, secretState,
 };
 

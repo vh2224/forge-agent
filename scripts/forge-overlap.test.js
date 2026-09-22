@@ -364,7 +364,7 @@ test('R3b: inactive runs are excluded by name, and --all brings them back', () =
 
 test('R4: mutating the floor to return "clean" turns R3 red', () => {
   const pristine = fs.readFileSync(MODULE);
-  const src = pristine.toString('utf8');
+  const src = pristine.toString('utf8').replace(/\r\n/g, '\n');
 
   const NEEDLE = "  if (pairs_compared === 0) {\n    verdict = 'inconclusive';";
   assert(src.includes(NEEDLE), 'o alvo da mutação precisa existir literalmente no fonte');

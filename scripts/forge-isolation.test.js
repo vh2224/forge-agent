@@ -1565,7 +1565,7 @@ test('F7: source guard — no exec call carries a POSIX /dev/null redirect, and 
     'positive control: the miner must match a synthetic redirect-in-exec line');
   assert(!REDIRECT_CALL.test(isoSrc),
     'forge-isolation.js must not pass `2>/dev/null` to any exec call — cmd.exe reads it as a literal path and the call itself fails');
-  assert(/execFileSync\('git',\s*\['symbolic-ref'/.test(isoSrc),
+  assert(/git\(repoPath,\s*\['symbolic-ref'/.test(isoSrc) && /execFileSync\('git', args/.test(fs.readFileSync(path.join(__dirname, 'forge-git-process.js'), 'utf8')),
     'gitDefaultBranch must query origin/HEAD via execFileSync argv (no shell), or Windows regresses to permanent fallback');
 });
 

@@ -29,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { isValid, entityKind } = require('./forge-ids');
 const { parseScalar, serializeScalar, writeAtomic } = require('./forge-yaml-safe');
-const { isGroupedFile, readGroupedUnits, readSniffBuffer, publicEntry, unitTextOf } = require('./forge-grouped-file');
+const { isGroupedFile, readGroupedUnits, readSniffBuffer, parseGroup, attachSnapshot, snapshotText, publicEntry, unitTextOf } = require('./forge-grouped-file');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -381,6 +381,8 @@ function readFragment(cwd, id) {
 function readFragmentText(cwd, entry) {
   if (!entry || !entry.path) throw new Error('fragment entry is required');
   if (!entry.grouped) return fs.readFileSync(entry.path, 'utf8');
+  const snapshot = snapshotText(entry);
+  if (snapshot !== undefined) return snapshot;
   const parsed = readGroupedUnits(entry.path);
   const unit = parsed.units.find(item => item.id === entry.id);
   if (!unit) throw new Error(`Grouped ledger unit not found: ${entry.id}`);
@@ -399,6 +401,7 @@ function listFragments(cwd) {
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
   const looseIds = new Set();
   const fragments = [];
+  const buffers = new Map();
   for (const file of files) {
     const filePath = path.join(dir, file);
     // A failed sniff (null) means "not classified as a container": the entry is
@@ -411,16 +414,19 @@ function listFragments(cwd) {
       process.stderr.write(`[forge-ledger] warn: container ${file}: container-unreadable — unidades não listadas\n`);
       continue;
     }
-    if (buffer !== null && isGroupedFile(file, buffer)) continue;
+    if (buffer !== null && isGroupedFile(file, buffer)) {
+      buffers.set(filePath, buffer);
+      continue;
+    }
     const id = file.slice(0, -3);
     looseIds.add(id);
     fragments.push({ id, path: filePath, grouped: false, epoch: null });
   }
   for (const file of files) {
     const filePath = path.join(dir, file);
-    const buffer = readSniffBuffer(filePath);
-    if (buffer === null || !isGroupedFile(file, buffer)) continue;
-    const parsed = readGroupedUnits(filePath);
+    const buffer = buffers.get(filePath);
+    if (!buffer) continue;
+    const parsed = parseGroup(buffer);
     for (const error of parsed.errors) {
       process.stderr.write(`[forge-ledger] warn: container ${file} id ${error.id || '<unknown>'}: ${error.reason}\n`);
     }
@@ -429,7 +435,7 @@ function listFragments(cwd) {
         process.stderr.write(`[forge-ledger] warn: unidade ${unit.id} existe solta e em ${file} — usando a solta\n`);
         continue;
       }
-      fragments.push({ id: unit.id, path: filePath, grouped: true, epoch: parsed.epoch });
+      fragments.push(attachSnapshot({ id: unit.id, path: filePath, grouped: true, epoch: parsed.epoch }, unit.content));
     }
   }
   fragments.sort((a, b) => a.id.localeCompare(b.id));
