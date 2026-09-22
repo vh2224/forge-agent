@@ -39,6 +39,69 @@ async function test(name, fn) {
 }
 
 async function main() {
+  await test('primary vault errors survive guard release failure with separate CLI diagnosis', () => {
+    for (const cli of [false, true]) {
+      const f = fixture();
+      fs.writeFileSync(f.registry, '{ "fictional-private": broken');
+      const result = child(f, `
+        const assert = require('assert'), fs = require('fs'), path = require('path'), unlink = fs.unlinkSync;
+        const target = path.join(process.env.FORGE_SECRETS_REGISTRY + '.guard', '.gsd', '.locks', 'vault', 'metadata.json');
+        fs.unlinkSync = function(file, ...args) {
+          if (file === target) throw Object.assign(new Error('fictional-private'), {code:'EACCES'});
+          return unlink.call(fs, file, ...args);
+        };
+        if (${cli}) {
+          process.argv = [process.execPath, process.argv[1], '--remove', 'example', 'original'];
+          require('module').runMain();
+        } else {
+          assert.throws(() => require(process.argv[1]).save([]), error => {
+            assert.strictEqual(error.code, 'VAULT_INVALID');
+            assert.match(error.message, /invalid vault JSON/);
+            assert.strictEqual(error.guard_release_failure.code, 'VAULT_GUARD_RELEASE_FAILED');
+            assert.match(error.guard_release_failure.message, /--recover --confirm-stopped/);
+            assert(!JSON.stringify(error).includes('fictional-private'));
+            return true;
+          });
+        }
+      `);
+      assert.strictEqual(result.status, cli ? 1 : 0, result.stderr);
+      if (cli) {
+        assert.match(result.stderr, /invalid vault JSON/);
+        assert.match(result.stderr, /VAULT_GUARD_RELEASE_FAILED/);
+        assert.match(result.stderr, /--recover --confirm-stopped/);
+        assert(!result.stderr.includes('fictional-private'));
+      }
+      assert.strictEqual(fs.existsSync(f.pending), false);
+    }
+  });
+
+  await test('unavailable Keychain before intent differs from a genuinely pending removal', () => {
+    const f = fixture();
+    const entries = f.vault.load();
+    entries[0].store = 'keychain';
+    f.vault.save(entries);
+    const before = snapshot(f);
+    assert.throws(() => f.vault.remove('example', 'original'), error => {
+      assert.strictEqual(error.code, 'VAULT_KEYCHAIN_UNAVAILABLE');
+      assert.match(error.message, /Keychain.*retry/i);
+      assert(!error.message.includes('--recover'));
+      return true;
+    });
+    assert.deepStrictEqual(snapshot(f), before);
+    assert.strictEqual(fs.existsSync(f.pending), false);
+    assert.strictEqual(f.vault.recover(), false);
+    const result = child(f, `process.argv = [process.execPath, process.argv[1], '--remove', 'example', 'original']; require('module').runMain();`);
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stderr, /Keychain.*retry/i);
+    assert(!result.stderr.includes('--recover'));
+    fs.writeFileSync(f.pending, JSON.stringify({ version: 1, operation: 'remove', service: 'example', name: 'original', credentials: [], needsKeychain: true }));
+    const pending = fs.readFileSync(f.pending);
+    assert.throws(() => f.vault.remove('example', 'original'), { code: 'VAULT_RECOVERY_REQUIRED' });
+    assert.throws(() => f.vault.recover(), { code: 'VAULT_RECOVERY_REQUIRED' });
+    assert.deepStrictEqual(fs.readFileSync(f.pending), pending);
+    assert.deepStrictEqual(snapshot(f), before);
+  });
+
   await test('hard crash immediately after guard mkdir is explicitly recoverable without guessing owner liveness', () => {
     for (const cli of [false, true]) {
       const f = fixture(), before = snapshot(f);

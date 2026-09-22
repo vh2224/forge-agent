@@ -196,9 +196,17 @@ function withVaultLock(fn) {
   const lock = mutex.acquireSync(GUARD_ROOT, 'vault', {
     retries: 100, backoffMin: 20, backoffMax: 40, allowStaleRecovery: false,
   });
-  try { return fn(); } finally {
-    const released = lock.release();
-    if (!released.ok) throw vaultError('VAULT_GUARD_RELEASE_FAILED', 'vault mutation may have completed but guard release failed; stop all vault writers, then run --recover --confirm-stopped');
+  let operationError;
+  try { return fn(); }
+  catch (error) { operationError = error; throw error; }
+  finally {
+    let released;
+    try { released = lock.release(); } catch { released = { ok: false }; }
+    if (!released.ok) {
+      const failure = vaultError('VAULT_GUARD_RELEASE_FAILED', 'vault mutation may have completed but guard release failed; stop all vault writers, then run --recover --confirm-stopped');
+      if (!operationError) throw failure;
+      operationError.guard_release_failure = { code: failure.code, message: failure.message };
+    }
   }
 }
 
@@ -411,7 +419,10 @@ function remove(service, name) {
     const intent = pending || { version: 1, operation: 'remove', service, name, credentials,
       needsKeychain: keychainEnabled() || before.some(c => c.service === service
         && c.name === name && c.store === 'keychain') };
-    if (intent.needsKeychain && !keychainEnabled()) throw pendingError();
+    if (intent.needsKeychain && !keychainEnabled()) {
+      if (pending) throw pendingError();
+      throw vaultError('VAULT_KEYCHAIN_UNAVAILABLE', 'Keychain unavailable; enable Keychain access and retry removal; no operation was started');
+    }
     publishVaultJson(JOURNAL_FILE, intent);
     deleteSecret(service, name, fallback);
     publishVaultJson(REGISTRY_FILE, { version: 1, credentials });
@@ -748,5 +759,9 @@ module.exports = {
 
 if (require.main === module) {
   try { process.exit(main(process.argv.slice(2))); }
-  catch (e) { console.error(`forge-secrets: ${e.message}`); process.exit(1); }
+  catch (e) {
+    console.error(`forge-secrets: ${e.message}`);
+    if (e.guard_release_failure) console.error(`${e.guard_release_failure.code}: ${e.guard_release_failure.message}`);
+    process.exit(1);
+  }
 }
