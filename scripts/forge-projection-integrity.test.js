@@ -60,6 +60,35 @@ try {
   assert(projection.writeAll(edited).blocked.some(row => row.file.endsWith('AUTO-MEMORY.md')));
   assert.deepStrictEqual(read(editedOutput), editedBytes);
 
+  for (const mode of ['unchanged', 'last-deleted', 'store-missing', 'edited', 'legacy']) {
+    const upgraded = fixture(`renderer-${mode}`);
+    projection.writeAll(upgraded);
+    const receiptPath = path.join(upgraded, '.gsd', 'forge', 'projection-state.json');
+    const receipt = JSON.parse(read(receiptPath));
+    receipt.version = 'previous-renderer';
+    for (const store of Object.values(receipt.stores)) delete store.version;
+    fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+    const target = path.join(upgraded, '.gsd', 'AUTO-MEMORY.md');
+    if (mode !== 'unchanged') fs.unlinkSync(memory.fragmentPath(upgraded, 'M001'));
+    if (mode === 'store-missing') fs.rmSync(path.join(upgraded, '.gsd', 'memory'), { recursive: true });
+    if (mode === 'edited') fs.appendFileSync(target, '\nUser-owned addition\n');
+    if (mode === 'legacy') fs.unlinkSync(receiptPath);
+    const before = read(target);
+    assert.strictEqual(projection.isStale(upgraded).memory, true, 'renderer mismatch invalidates freshness');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = projection.writeAll(upgraded);
+      if (['edited', 'legacy'].includes(mode)) {
+        assert(result.blocked.some(row => row.file.endsWith('AUTO-MEMORY.md')));
+        assert.deepStrictEqual(read(target), before);
+        assert.strictEqual(projection.isStale(upgraded).memory, true);
+      } else {
+        assert.strictEqual(result.blocked.length, 0, 'renderer mismatch retains output provenance');
+        assert.strictEqual(read(target, 'utf8').includes('original content'), mode === 'unchanged');
+        assert.strictEqual(projection.isStale(upgraded).memory, false);
+      }
+    }
+  }
+
   const failure = fixture('read-failure');
   projection.writeAll(failure);
   const protectedOutput = path.join(failure, '.gsd', 'AUTO-MEMORY.md');
