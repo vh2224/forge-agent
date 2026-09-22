@@ -326,6 +326,10 @@ function writeAtomic(filePath, content, lockOpts) {
   const runId     = lockOpts.runId     || null;
   const sessionId = lockOpts.sessionId || null;
 
+  const dir  = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const tmp  = path.join(dir, '.tmp-' + base + '-' + process.pid + '-' + crypto.randomBytes(4).toString('hex'));
+
   const lock = acquireWithRetry(cwd, filePath, runId, sessionId, {
     maxAttempts: lockOpts.maxAttempts,
     backoffMs:   lockOpts.backoffMs,
@@ -333,21 +337,26 @@ function writeAtomic(filePath, content, lockOpts) {
     intent:      lockOpts.intent,
   });
 
-  const dir  = path.dirname(filePath);
-  const base = path.basename(filePath);
-  const tmp  = path.join(dir, '.tmp-' + base + '-' + process.pid + '-' + crypto.randomBytes(4).toString('hex'));
-
-  // Ensure target directory exists
-  fs.mkdirSync(dir, { recursive: true });
-
+  let writeError;
   try {
+    // Every post-acquisition operation must release the lock, including mkdir.
+    fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(tmp, content, 'utf8');
     renameWithRetry(tmp, filePath);
+  } catch (error) {
+    writeError = error;
+    throw error;
   } finally {
     // Always unlink tempfile (harmless if rename already moved it)
     try { fs.unlinkSync(tmp); } catch {}
-    // Always release lock
-    try { lock.release(); } catch {}
+    // A committed rename can still leave a failed guard release. Report it;
+    // when writing already failed, preserve that primary error and add context.
+    try {
+      if (!lock.release()) throw Object.assign(new Error('forge-yaml-safe: file lock release failed'), { code: 'FILE_LOCK_RELEASE_FAILED' });
+    } catch (error) {
+      if (!writeError) throw error;
+      writeError.guard_release_failure = error.guard_release_failure || { code: error.code, message: error.message };
+    }
   }
 }
 

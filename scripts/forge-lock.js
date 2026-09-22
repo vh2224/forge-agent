@@ -174,7 +174,9 @@ function recoverIncompleteLock(cwd, name, opts = {}) {
         // Only callers recovering a short process mutex may opt in. A durable
         // compatibility fence remains owned after its creator exits.
         let dead = false;
-        if (opts.allowDeadProcessOwner === true && Number.isSafeInteger(meta.holder_pid) && meta.holder_pid > 0) {
+        const eligible = opts.allowDeadProcessOwner === true
+          || (typeof opts.allowDeadProcessOwner === 'function' && opts.allowDeadProcessOwner(meta) === true);
+        if (eligible && Number.isSafeInteger(meta.holder_pid) && meta.holder_pid > 0) {
           try { process.kill(meta.holder_pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
         }
         if (!dead) return { ok: false, reason: 'guard_metadata_present' };

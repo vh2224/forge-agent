@@ -87,10 +87,18 @@ an additive `guard_release_failure` diagnostic. Retry only after inspecting the
 operation result and recovering the guards, since the file mutation may have
 already completed. The shared `recoverIncompleteLock` helper preserves residues
 instead of deleting them and refuses intact metadata owners.
-For the short v2 operation mutex only, explicit recovery may also archive a
-complete owner proven dead by `ESRCH`; a crash in compatibility initialization
-can leave that outer mutex intact. This exception is never applied to the
-durable compatibility fence, whose creator may legitimately have exited.
+For the short v2 operation mutex and the legacy v1 compatibility process mutex
+(5-second TTL, no run holder), explicit recovery may also archive a complete
+owner proven dead by `ESRCH`. Live processes, absent PIDs and unreadable process
+liveness remain protected. The compatibility eligibility predicate is evaluated
+against the recovery helper's own metadata snapshot. This exception is never
+applied to the durable v2 compatibility fence, whose creator may legitimately
+have exited. All paths still require `--confirm-stopped` after stopping writers.
+
+`forge-yaml-safe.writeAtomic` propagates guard-release failures even when its
+target rename completed. If writing also failed, the original error is preserved
+with an additive `guard_release_failure` diagnostic. Directory creation is inside
+the same release-protected scope, so a failed mkdir cannot strand the file lock.
 
 ## Git execution and worktree reuse (A3, A6)
 

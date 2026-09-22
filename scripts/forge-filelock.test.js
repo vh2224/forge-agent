@@ -290,6 +290,71 @@ function testBridgeSurvivesProcessExitAndRecoversIncompletePublication() {
   } finally { remove(cwd); }
 }
 
+function testExplicitRecoveryOfCrashedLegacyProcessGuard() {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'fl-v1-crash-'));
+  try {
+    const crashed = spawnSync(process.execPath, ['-e', `
+      const mutex = require(process.argv[1]), acquire = mutex.tryAcquireSync;
+      mutex.tryAcquireSync = (...args) => {
+        const guard = acquire(...args);
+        if (guard) process.exit(73);
+        return guard;
+      };
+      require(process.argv[2]).acquireFileLock(process.argv[3], 'x', null, 'legacy');
+    `, require.resolve('./fixtures/filelock-v1/forge-lock.js'), require.resolve('./fixtures/filelock-v1/forge-filelock.js'), cwd], { encoding: 'utf8', timeout: 10000 });
+    assert.strictEqual(crashed.status, 73, crashed.stderr);
+    const dir = path.join(cwd, '.gsd', '.locks', fs.readdirSync(path.join(cwd, '.gsd', '.locks'))[0]);
+    const before = fs.readFileSync(path.join(dir, 'metadata.json'));
+    assert.strictEqual(JSON.parse(before).ttl_ms, 5000);
+    assert.strictEqual(filelock.acquireFileLock(cwd, 'x', null, 'new').reason, 'guard_busy');
+    assert.strictEqual(filelock.recoverFileLock(cwd, 'x').reason, 'recovery_requires_stopped_writers');
+    const recovered = filelock.recoverFileLock(cwd, 'x', { confirmStopped: true });
+    assert.strictEqual(recovered.ok, true, JSON.stringify(recovered));
+    assert.deepStrictEqual(fs.readFileSync(path.join(recovered.guard_evidence, 'metadata.json')), before);
+    const next = filelock.acquireFileLock(cwd, 'x', null, 'new');
+    assert.strictEqual(next.acquired, true);
+    assert.strictEqual(next.release(), true);
+  } finally { remove(cwd); }
+}
+
+function testRecoveryPreservesLiveUnmeasuredAndDurableGuards() {
+  const mutex = require('./forge-lock.js');
+  for (const liveness of ['live', 'permission-denied', 'pid-absent']) {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'fl-v1-live-'));
+    const kill = process.kill;
+    try {
+      fs.mkdirSync(path.join(cwd, '.gsd'));
+      const canonical = process.platform === 'win32' ? path.resolve(cwd, 'x').toLowerCase() : path.resolve(cwd, 'x');
+      const name = `filelock-${crypto.createHash('sha256').update(canonical).digest('hex')}`;
+      const guard = mutex.tryAcquireSync(cwd, name, { ttlMs: 5000 });
+      if (liveness === 'pid-absent') {
+        const meta = { ...guard.metadata }; delete meta.holder_pid;
+        fs.writeFileSync(mutex.metaPath(guard.lockDir), JSON.stringify(meta));
+      }
+      const before = fs.readFileSync(mutex.metaPath(guard.lockDir));
+      if (liveness === 'permission-denied') process.kill = () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }); };
+      const refused = filelock.recoverFileLock(cwd, 'x', { confirmStopped: true });
+      assert.strictEqual(Boolean(refused.ok), false, liveness);
+      assert.deepStrictEqual(fs.readFileSync(mutex.metaPath(guard.lockDir)), before);
+      assert.strictEqual(mutex.assertOwned(guard), true);
+    } finally { process.kill = kill; remove(cwd); }
+  }
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'fl-v2-dead-'));
+  try {
+    const child = spawnSync(process.execPath, ['-e', 'console.log(JSON.stringify(require(process.argv[1]).acquireFileLock(process.argv[2], "x", null, "child")))', require.resolve('./forge-filelock.js'), cwd], { encoding: 'utf8', timeout: 10000 });
+    assert.strictEqual(child.status, 0, child.stderr);
+    const owner = JSON.parse(child.stdout); assert.strictEqual(owner.acquired, true);
+    const file = filelock.lockPathFor(cwd, 'x'), before = fs.readFileSync(file);
+    const root = path.join(cwd, '.gsd', '.locks'), dir = path.join(root, fs.readdirSync(root)[0]);
+    const fence = fs.readFileSync(path.join(dir, 'metadata.json'));
+    assert.strictEqual(filelock.recoverFileLock(cwd, 'x', { confirmStopped: true }).reason, 'owner_token_required');
+    assert.deepStrictEqual(fs.readFileSync(file), before);
+    assert.deepStrictEqual(fs.readFileSync(path.join(dir, 'metadata.json')), fence);
+    assert.strictEqual(legacy.acquireFileLock(cwd, 'x', null, 'old').acquired, false);
+    assert.strictEqual(filelock.releaseFileLock(cwd, 'x', null, owner.owner_token, owner.generation), true);
+  } finally { remove(cwd); }
+}
+
 function testTemporaryNamesAreBounded() {
   const cwd = temporary();
   const originalWrite = fs.writeFileSync;
@@ -391,6 +456,8 @@ function main() {
   testInvalidReadsFailClosedAndRecoveryKeepsEvidence();
   testActualLegacyAndNewWritersCannotOverlap();
   testBridgeSurvivesProcessExitAndRecoversIncompletePublication();
+  testExplicitRecoveryOfCrashedLegacyProcessGuard();
+  testRecoveryPreservesLiveUnmeasuredAndDurableGuards();
   testTemporaryNamesAreBounded();
   testGuardBootstrapCrashHasExplicitRecovery();
   testGuardReleaseFailuresAreReportedAndRecoverable();

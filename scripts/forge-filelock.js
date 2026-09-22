@@ -244,7 +244,12 @@ function recoverFileLock(cwd, filePath, opts) {
   fs.mkdirSync(locksDir(cwd), { recursive: true });
   const operationBootstrap = mutex.recoverIncompleteLock(cwd, `${guardName(canonical)}-v2`, { ...opts, allowDeadProcessOwner: true });
   if (!operationBootstrap.ok && !['guard_not_held', 'guard_metadata_present'].includes(operationBootstrap.reason)) return operationBootstrap;
-  const bootstrap = mutex.recoverIncompleteLock(cwd, guardName(canonical), opts);
+  // The v1 bridge was a 5s process mutex; the v2 bridge is a durable fence.
+  // Decide on the recovery helper's own metadata snapshot, never a prior status
+  // probe that could accidentally authorize a replacement fence by its PID.
+  const bootstrap = mutex.recoverIncompleteLock(cwd, guardName(canonical), {
+    ...opts, allowDeadProcessOwner: meta => meta.ttl_ms === 5_000 && meta.holder_run_id === null,
+  });
   if (!bootstrap.ok && !['guard_not_held', 'guard_metadata_present'].includes(bootstrap.reason)) return bootstrap;
   const result = withGuard(cwd, canonical, (guard) => {
     const state = readLockState(cwd, canonical);
