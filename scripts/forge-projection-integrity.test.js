@@ -6,7 +6,7 @@ const path = require('path');
 const memory = require('./forge-memory');
 const projection = require('./forge-projection');
 const { serializeGroup } = require('./forge-grouped-file');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-projection-integrity-'));
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-projection-integrity-')));
 const read = fs.readFileSync;
 const rename = fs.renameSync;
 function fixture(name) {
@@ -65,7 +65,7 @@ try {
   const protectedOutput = path.join(failure, '.gsd', 'AUTO-MEMORY.md');
   const prior = read(protectedOutput);
   fs.readFileSync = function(file, ...args) {
-    if (path.resolve(String(file)) === path.resolve(memory.fragmentPath(failure, 'M001'))) throw Object.assign(new Error('fixture denied'), { code: 'EACCES' });
+    if (fs.existsSync(file) && fs.realpathSync.native(file) === fs.realpathSync.native(memory.fragmentPath(failure, 'M001'))) throw Object.assign(new Error('fixture denied'), { code: 'EACCES' });
     return read.call(fs, file, ...args);
   };
   assert.strictEqual(projection.isStale(failure).memory, true);
@@ -84,7 +84,13 @@ try {
 
   const nowMs = Date.parse('2026-09-22');
   for (const count of [10, 100, 500]) {
-    const groupedCwd = path.join(root, `grouped-${count}`);
+    let groupedCwd = path.join(root, `grouped-${count}`);
+    if (count === 10) {
+      fs.mkdirSync(groupedCwd);
+      const alias = path.join(root, 'grouped-alias');
+      fs.symlinkSync(groupedCwd, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      groupedCwd = alias;
+    }
     const dir = path.join(groupedCwd, '.gsd', 'memory');
     fs.mkdirSync(dir, { recursive: true });
     const units = [];
@@ -101,7 +107,7 @@ try {
     let reads = 0; let bytes = 0;
     fs.readFileSync = function(file, ...args) {
       const result = read.call(fs, file, ...args);
-      if (path.resolve(String(file)) === path.resolve(container)) { reads++; bytes += Buffer.byteLength(result); }
+      if (fs.realpathSync.native(file) === fs.realpathSync.native(container)) { reads++; bytes += Buffer.byteLength(result); }
       return result;
     };
     const before = process.memoryUsage();

@@ -10044,7 +10044,7 @@ function smokeWindowsSandboxAndWorktreeDeps() {
   // carries the same win32 branch and the same four upstream issues: win32
   // ESCAPES for a write mode, read-only NEVER escapes, on any platform.
   const { buildAppServerSandboxPolicy, buildExecutePrompt } = require('./forge-xllm.js');
-  const { resolvePackageManager, installWorktreeDeps } = require('./forge-isolation.js');
+  const { resolvePackageManager, installWorktreeDeps, setupWorktreeOne } = require('./forge-isolation.js');
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const expectedWrite = { type: 'workspaceWrite', networkAccess: false };
   assert(same(buildAppServerSandboxPolicy('workspace-write', 'darwin'), expectedWrite)
@@ -10110,9 +10110,43 @@ function smokeWindowsSandboxAndWorktreeDeps() {
   } finally { cleanup(root); }
   const source = fs.readFileSync(__filename, 'utf8');
   const isolationSource = fs.readFileSync(path.join(SCRIPTS, 'forge-isolation.js'), 'utf8');
-  assert(/result\.status = 'created';\s*result\.deps = installWorktreeDeps/.test(isolationSource)
-    && /status: 'skipped'.+worktree-already-exists/.test(isolationSource),
-  '70j: created worktrees receive additive non-fatal deps; existing worktrees skip installs');
+  const provisionRoot = mkTmp('t70-provision');
+  try {
+    const repo = path.join(provisionRoot, 'repo');
+    fs.mkdirSync(repo);
+    const gitOptions = { cwd: repo, encoding: 'utf8', stdio: 'pipe', timeout: 10000 };
+    execFileSync('git', ['init', '-q', '-b', 'main'], gitOptions);
+    fs.writeFileSync(path.join(repo, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(repo, 'package-lock.json'), '{}\n');
+    execFileSync('git', ['add', 'package.json', 'package-lock.json'], gitOptions);
+    execFileSync('git', ['-c', 'user.name=smoke', '-c', 'user.email=smoke@forge', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], gitOptions);
+    let attempts = 0;
+    const setup = () => setupWorktreeOne(repo, 'forge/T70', path.join(provisionRoot, 'trees'), 'T70', false, {
+      runner: () => ({ status: ++attempts === 1 ? 1 : 0, stderr: 'fixture dependency failure' }),
+    });
+    const failedSetup = setup();
+    assert(failedSetup.status === 'error' && failedSetup.reason === 'dependency-install-failed'
+      && failedSetup.deps && failedSetup.deps.status === 'failed' && attempts === 1,
+    '70j: dependency failure refuses worktree readiness', JSON.stringify(failedSetup));
+    const common = path.resolve(repo, execFileSync('git', ['rev-parse', '--git-common-dir'], gitOptions).trim());
+    const journalDir = path.join(common, 'forge-provisioning');
+    const journals = fs.readdirSync(journalDir).filter(name => name.endsWith('.json'));
+    const journal = journals.length === 1 ? path.join(journalDir, journals[0]) : null;
+    const pending = journal ? JSON.parse(fs.readFileSync(journal, 'utf8')) : null;
+    assert(pending && pending.phase === 'deps' && pending.branch === 'forge/T70',
+      '70j: failed provisioning retains its dependency journal', JSON.stringify(pending));
+    const retainedFile = path.join(failedSetup.worktree, 'user.txt');
+    fs.writeFileSync(retainedFile, 'preserve existing work\n');
+    const retried = setup();
+    assert(retried.status === 'already-exists' && retried.deps && retried.deps.status === 'installed'
+      && attempts === 2 && journal && !fs.existsSync(journal),
+    '70j: pending worktree retries installation and clears journal after success', JSON.stringify(retried));
+    assert(fs.readFileSync(retainedFile, 'utf8') === 'preserve existing work\n',
+      '70j: provisioning retry preserves worktree contents');
+    const complete = setup();
+    assert(complete.status === 'already-exists' && complete.deps && complete.deps.status === 'skipped' && attempts === 2,
+      '70j: completed existing worktree skips repeated installs', JSON.stringify(complete));
+  } finally { cleanup(provisionRoot); }
   assert(/smokeWindowsSandboxAndWorktreeDeps\(\);/.test(source.slice(source.lastIndexOf('async function main()'))),
     '(final) Section 70 is registered in main()');
 
@@ -10134,7 +10168,7 @@ function smokeWindowsSandboxAndWorktreeDeps() {
     `70k: readIsolationPrefs() keys all declared in forge_isolation schema (missing: ${missing.join(', ')})`);
   assert(isolationProps.includes('worktree_install_deps'), '70k: worktree_install_deps is declared in the schema');
 
-  pass('(final) Section 70: platform gate and non-fatal dependency provisioning verified');
+  pass('(final) Section 70: platform gate and resumable dependency provisioning verified');
 }
 
 // ── Section 64: review agent unavailability — classifier behaviour + sanctioned path docs ──
