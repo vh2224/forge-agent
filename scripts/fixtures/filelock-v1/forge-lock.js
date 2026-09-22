@@ -132,7 +132,7 @@ function releaseHandle(handle) {
   // We only remove the directory after claiming our unique marker. A new owner
   // cannot be created until this directory is gone.
   try { fs.unlinkSync(metaPath(handle.lockDir)); fs.rmdirSync(`${marker}.released`); fs.rmdirSync(handle.lockDir); return { ok: true, reason: 'released' }; }
-  catch (error) { return { ok: false, reason: 'release_failed', errno: error.code || null }; }
+  catch { return { ok: false, reason: 'already_released' }; }
 }
 // Legacy release lacks proof of ownership. It is kept observable but safely denied.
 function releaseSync(cwd, name, ownerToken, generation) {
@@ -141,63 +141,7 @@ function releaseSync(cwd, name, ownerToken, generation) {
 }
 function status(cwd, name, opts) { const dir = lockPath(cwd, name); if (!fs.existsSync(dir)) return { held: false }; return { held: true, metadata: readMetadata(dir), age_ms: lockAge(dir, nowOf(opts || {})) }; }
 
-// A crash between mkdir and metadata publication has no PID to measure. It
-// must never be inferred dead from age: an initializing writer looks identical.
-// This is an explicit maintenance operation, not an acquisition fallback.
-// confirmStopped asserts ALL writers/contenders have been stopped externally.
-// Preserve the complete directory as evidence. With metadata, archive only a
-// proven interrupted release: exact token's .released marker, no active marker.
-// This also requires stopped contenders: automatic retries of a partial release
-// could race the original releaser and remove a successor (ABA).
-// allowDeadProcessOwner is reserved for short process mutexes, never leases.
-function recoverIncompleteLock(cwd, name, opts = {}) {
-  if (opts.confirmStopped !== true) return { ok: false, reason: 'recovery_requires_stopped_writers' };
-  const dir = lockPath(cwd, name);
-  try {
-    const stat = fs.lstatSync(dir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, reason: 'guard_not_directory' };
-    let raw;
-    try { raw = fs.readFileSync(metaPath(dir), 'utf8'); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
-    let reason = 'guard_recovered';
-    if (raw !== undefined) {
-      let meta;
-      try { meta = JSON.parse(raw); } catch { return { ok: false, reason: 'guard_metadata_present' }; }
-      if (!meta || !/^[A-Za-z0-9._-]{1,160}$/.test(meta.owner_token || '') || !meta.generation) {
-        return { ok: false, reason: 'guard_metadata_present' };
-      }
-      const marker = markerPath(dir, meta.owner_token);
-      let active = false;
-      try { fs.lstatSync(marker); active = true; }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
-      if (active) {
-        // Only callers recovering a short process mutex may opt in. A durable
-        // compatibility fence remains owned after its creator exits.
-        let dead = false;
-        const eligible = opts.allowDeadProcessOwner === true
-          || (typeof opts.allowDeadProcessOwner === 'function' && opts.allowDeadProcessOwner(meta) === true);
-        if (eligible && Number.isSafeInteger(meta.holder_pid) && meta.holder_pid > 0) {
-          try { process.kill(meta.holder_pid, 0); } catch (error) { dead = error.code === 'ESRCH'; }
-        }
-        if (!dead) return { ok: false, reason: 'guard_metadata_present' };
-        reason = 'guard_dead_process_recovered';
-      } else {
-        let released;
-        try { released = fs.lstatSync(`${marker}.released`); }
-        catch (error) { if (error.code === 'ENOENT') return { ok: false, reason: 'guard_metadata_present' }; throw error; }
-        if (!released.isDirectory() || released.isSymbolicLink()) return { ok: false, reason: 'guard_metadata_present' };
-        reason = 'guard_release_recovered';
-      }
-    }
-    const evidence = `${dir}.recovery-${crypto.randomUUID()}`;
-    fs.renameSync(dir, evidence);
-    return { ok: true, reason, evidence };
-  } catch (error) {
-    return { ok: false, reason: error.code === 'ENOENT' ? 'guard_not_held' : 'guard_recovery_failed', errno: error.code };
-  }
-}
-
 function parseArgs(argv) { const out = {}; for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--')) { const k = argv[i].slice(2), n = argv[i + 1]; out[k] = n && !n.startsWith('--') ? (i++, n) : true; } return out; }
 async function cliMain() { const args = parseArgs(process.argv.slice(2)), cwd = args.cwd || process.cwd(); try { if (args.acquire || args['try-acquire']) { const fn = args.acquire ? acquire : tryAcquireSync; const h = await fn(cwd, args.acquire || args['try-acquire'], { ttlMs: args.ttl && Number(args.ttl), holderRunId: args.holder, retries: args.retries && Number(args.retries) }); if (!h) { process.stderr.write('busy\n'); process.exitCode = 1; return; } process.stdout.write(JSON.stringify({ lockDir: h.lockDir, metadata: h.metadata }) + '\n'); } else if (args.release) { const ok = releaseSync(cwd, args.release, args.token, args.generation); process.stdout.write(ok ? 'released\n' : 'not held (token obrigatório)\n'); process.exitCode = ok ? 0 : 1; } else if (args.status) process.stdout.write(JSON.stringify(status(cwd, args.status), null, 2) + '\n'); else { process.stderr.write('forge-lock: comando inválido\n'); process.exitCode = 2; } } catch (e) { process.stderr.write(`forge-lock error: ${e.message}\n`); process.exitCode = 1; } }
 if (require.main === module) cliMain();
-module.exports = { acquire, acquireSync, tryAcquireSync, releaseSync, releaseHandle, renewHandle, assertOwned, status, recoverIncompleteLock, locksDir, lockPath, metaPath, stealIfStale, DEFAULT_TTL_MS };
+module.exports = { acquire, acquireSync, tryAcquireSync, releaseSync, releaseHandle, renewHandle, assertOwned, status, locksDir, lockPath, metaPath, stealIfStale, DEFAULT_TTL_MS };

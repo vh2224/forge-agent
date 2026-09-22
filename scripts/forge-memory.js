@@ -33,7 +33,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { isValid, entityKind } = require('./forge-ids');
 const yamlSafe = require('./forge-yaml-safe');
-const { isGroupedFile, readGroupedUnits, readSniffBuffer, publicEntry, unitTextOf } = require('./forge-grouped-file');
+const { isGroupedFile, readGroupedUnits, readSniffBuffer, parseGroup, attachSnapshot, snapshotText, publicEntry, unitTextOf } = require('./forge-grouped-file');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -848,6 +848,8 @@ function readFragment(cwd, unitId, opts) {
 function readFragmentText(cwd, entry) {
   if (!entry || !entry.path) throw new Error('memory fragment entry is required');
   if (!entry.grouped) return fs.readFileSync(entry.path, 'utf8');
+  const snapshot = snapshotText(entry);
+  if (snapshot !== undefined) return snapshot;
   const parsed = readGroupedUnits(entry.path);
   const unit = parsed.units.find(item => item.id === entry.storageKey);
   if (!unit) throw new Error(`Grouped memory unit not found: ${entry.storageKey}`);
@@ -872,6 +874,7 @@ function listFragments(cwd, opts) {
     .filter(entry => entry.isFile() && entry.name.endsWith('.md'));
   const looseKeys = new Set();
   const fragments = [];
+  const buffers = new Map();
 
   for (const file of files) {
     const filePath = path.join(dir, file.name);
@@ -885,7 +888,10 @@ function listFragments(cwd, opts) {
       process.stderr.write(`[forge-memory] warn: container ${file.name}: container-unreadable — unidades não listadas\n`);
       continue;
     }
-    if (buffer !== null && isGroupedFile(file.name, buffer)) continue;
+    if (buffer !== null && isGroupedFile(file.name, buffer)) {
+      buffers.set(filePath, buffer);
+      continue;
+    }
     const parsed = parseStorageKey(file.name.slice(0, -3));
     if (!parsed) continue;
     looseKeys.add(parsed.storageKey);
@@ -894,9 +900,9 @@ function listFragments(cwd, opts) {
 
   for (const file of files) {
     const filePath = path.join(dir, file.name);
-    const buffer = readSniffBuffer(filePath);
-    if (buffer === null || !isGroupedFile(file.name, buffer)) continue;
-    const grouped = readGroupedUnits(filePath);
+    const buffer = buffers.get(filePath);
+    if (!buffer) continue;
+    const grouped = parseGroup(buffer);
     for (const error of grouped.errors) {
       process.stderr.write(`[forge-memory] warn: container ${file.name} id ${error.id || '<unknown>'}: ${error.reason}\n`);
     }
@@ -910,7 +916,7 @@ function listFragments(cwd, opts) {
         process.stderr.write(`[forge-memory] warn: unidade ${member.id} existe solta e em ${file.name} — usando a solta\n`);
         continue;
       }
-      fragments.push({ ...parsed, path: filePath, grouped: true, epoch: grouped.epoch });
+      fragments.push(attachSnapshot({ ...parsed, path: filePath, grouped: true, epoch: grouped.epoch }, member.content));
     }
   }
 

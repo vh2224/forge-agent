@@ -243,6 +243,18 @@ function isGroupedFile(nameOrPath, buffer) {
   return SWEEP_CONTAINER_RE.test(name) || EPOCH_LABEL_RE.test(name);
 }
 
+// Snapshot payloads belong to the returned entries, never to a global cache.
+// Non-enumerable symbol keeps library/CLI row shapes and JSON stable. Each
+// member references its parsed buffer slice, so there is no per-member reparse.
+const SNAPSHOT = Symbol('grouped-payload');
+function attachSnapshot(entry, payload) {
+  Object.defineProperty(entry, SNAPSHOT, { value: payload });
+  return entry;
+}
+function snapshotText(entry) {
+  return entry[SNAPSHOT] === undefined ? undefined : unitTextOf(entry[SNAPSHOT]);
+}
+
 function readGroupedUnits(filePath) {
   return parseGroup(fs.readFileSync(filePath));
 }
@@ -300,6 +312,8 @@ module.exports = {
   parseGroup,
   isGroupedFile,
   readGroupedUnits,
+  attachSnapshot,
+  snapshotText,
   readSniffBuffer,
   publicEntry,
   unitTextOf,

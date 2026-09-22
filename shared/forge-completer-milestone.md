@@ -31,8 +31,12 @@ same branch checked out as when you started.** When `auto_commit: false`: no git
 
 > After tagging, bust the statusline version cache so the new state shows immediately:
 > ```bash
-> node -e "const fs=require('fs'),os=require('os'),p=os.tmpdir()+'/forge-update-check.json';try{fs.unlinkSync(p)}catch{}" 2>/dev/null || true
+> FORGE_SCRIPTS_DIR=$([ -f scripts/forge-update-check.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+> node "$FORGE_SCRIPTS_DIR/forge-update-check.js" --invalidate --cwd "{WORKING_DIR}" || echo "Warning: statusline cache invalidation failed; continuing milestone completion."
 > ```
+> The helper resolves `repo_path` from the consumer's preferences, matching the
+> statusline's Forge checkout identity. An unconfigured path reports a no-op;
+> it never substitutes the consumer directory. On a cache error, warn and continue.
 
 1. Write final `M###-SUMMARY.md` with all slices summarized
 2. Mark milestone `[x]` in ROADMAP (if exists at milestone level)

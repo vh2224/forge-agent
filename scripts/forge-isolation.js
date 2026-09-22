@@ -27,7 +27,8 @@
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
-const { execSync, spawnSync, execFileSync } = require('child_process');
+const { spawnSync } = require('child_process');
+const { git, validateBranch } = require('./forge-git-process');
 const { readPrefsCached } = require('./forge-prefs.js');
 const { detectVcs } = require('./forge-vcs.js');
 const ws = require('./forge-workspace.js');
@@ -358,24 +359,23 @@ function gitDefaultBranch(repoPath) {
   // stdio (portable), not a redirect; the error semantics are unchanged —
   // any failure still lands in the catch and takes the fallback ladder.
   try {
-    const out = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
-      { cwd: repoPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    return out.replace(/^origin\//, '') || 'main';
+    const out = git(repoPath, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).trim();
+    return validateBranch(repoPath, out.replace(/^origin\//, '') || 'main');
   } catch {}
   for (const b of ['main', 'master']) {
-    try { execSync(`git rev-parse --verify ${b}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'ignore' }); return b; } catch {}
+    try { git(repoPath, ['rev-parse', '--verify', '--end-of-options', b]); return b; } catch {}
   }
   return 'main';
 }
 
 function gitCurrentBranch(repoPath) {
-  try { return execSync('git branch --show-current', { cwd: repoPath, encoding: 'utf8', shell: true }).trim(); }
+  try { return git(repoPath, ['branch', '--show-current']).trim(); }
   catch { return null; }
 }
 
 function gitHasOriginRemote(repoPath) {
   try {
-    execSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'ignore' });
+    git(repoPath, ['remote', 'get-url', 'origin']);
     return true;
   } catch { return false; }
 }
@@ -387,11 +387,12 @@ function gitHasOriginRemote(repoPath) {
 //   { ref: 'origin/<def>', fetched: true }   when the fetch + verify succeeded
 //   { ref: '<def>',        fetched: false }   no origin remote, or fetch failed
 function fetchDefaultBranch(repoPath, def) {
+  validateBranch(repoPath, def);
   if (!gitHasOriginRemote(repoPath)) return { ref: def, fetched: false };
   try {
-    execSync(`git fetch origin ${def} --quiet`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+    git(repoPath, ['fetch', '--quiet', 'origin', def]);
     // Confirm the remote-tracking ref resolves before we rely on it as a base.
-    execSync(`git rev-parse --verify origin/${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'ignore' });
+    git(repoPath, ['rev-parse', '--verify', '--end-of-options', `origin/${def}`]);
     return { ref: `origin/${def}`, fetched: true };
   } catch (e) {
     return { ref: def, fetched: false, warn: `fetch origin ${def} failed: ${e.message.split(/\r?\n/)[0]}` };
@@ -400,7 +401,7 @@ function fetchDefaultBranch(repoPath, def) {
 
 function branchExists(repoPath, branch) {
   try {
-    execSync(`git rev-parse --verify ${branch}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'ignore' });
+    git(repoPath, ['show-ref', '--verify', `refs/heads/${branch}`]);
     return true;
   } catch { return false; }
 }
@@ -409,6 +410,7 @@ function branchExists(repoPath, branch) {
 function setupBranchOne(repoPath, branchName, autoPullMain) {
   const result = { path: repoPath, branch: branchName, status: 'pending' };
   try {
+    validateBranch(repoPath, branchName);
     const currentBranch = gitCurrentBranch(repoPath);
     if (currentBranch === branchName) {
       result.status = 'already-on-branch';
@@ -420,12 +422,12 @@ function setupBranchOne(repoPath, branchName, autoPullMain) {
       const base = fetchDefaultBranch(repoPath, def);
       if (base.warn) result.warn = base.warn;
       try {
-        execSync(`git checkout ${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+        git(repoPath, ['checkout', def]);
         if (base.fetched) {
           // Fast-forward the local default to the freshly-fetched origin tip.
-          execSync(`git merge --ff-only origin/${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+          git(repoPath, ['merge', '--ff-only', `origin/${def}`]);
         } else {
-          execSync(`git pull --ff-only`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+          git(repoPath, ['pull', '--ff-only']);
         }
       } catch (e) {
         result.warn = `update ${def} failed: ${e.message.split(/\r?\n/)[0]}`;
@@ -433,10 +435,10 @@ function setupBranchOne(repoPath, branchName, autoPullMain) {
     }
 
     if (branchExists(repoPath, branchName)) {
-      execSync(`git checkout ${branchName}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+      git(repoPath, ['checkout', branchName]);
       result.status = 'checked-out-existing';
     } else {
-      execSync(`git checkout -b ${branchName}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+      git(repoPath, ['checkout', '-b', branchName]);
       result.status = 'created';
     }
   } catch (e) {
@@ -453,7 +455,7 @@ function cleanupBranchOne(repoPath, branchName) {
     const def = gitDefaultBranch(repoPath);
     const current = gitCurrentBranch(repoPath);
     if (current === branchName) {
-      execSync(`git checkout ${def}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+      git(repoPath, ['checkout', def]);
       result.status = 'checked-out-default';
     } else {
       result.status = 'already-off-branch';
@@ -623,9 +625,22 @@ function addWarn(result, msg) {
   result.warn = result.warn ? `${result.warn}; ${msg}` : msg;
 }
 
+function validateWorktreeIdentity(repoPath, wtPath, branchName) {
+  try {
+    const top = git(wtPath, ['rev-parse', '--show-toplevel']).trim();
+    if (normalizeWorktreePath(top) !== normalizeWorktreePath(wtPath)) return { ok: false, reason: 'not-worktree-root' };
+    const common = dir => normalizeWorktreePath(path.resolve(dir, git(dir, ['rev-parse', '--git-common-dir']).trim()));
+    if (common(repoPath) !== common(wtPath)) return { ok: false, reason: 'wrong-repository' };
+    if (gitCurrentBranch(wtPath) !== branchName) return { ok: false, reason: 'wrong-branch' };
+    const registered = listWorktrees(repoPath).some(entry => normalizeWorktreePath(entry.path) === normalizeWorktreePath(wtPath) && entry.branch === branchName && !entry.prunable);
+    return registered ? { ok: true } : { ok: false, reason: 'unregistered-worktree' };
+  } catch { return { ok: false, reason: 'not-a-worktree' }; }
+}
+
 function setupWorktreeOne(repoPath, branchName, worktreeRoot, runId, autoPullMain, installOpts, anchorOpts) {
   const result = { path: repoPath, branch: branchName, worktree: null, status: 'pending' };
   try {
+    validateBranch(repoPath, branchName);
     const anchor = resolveWorktreeAnchor(repoPath, worktreeRoot, runId, anchorOpts);
     const wtPath = anchor.path;
     result.worktree = wtPath;
@@ -633,15 +648,49 @@ function setupWorktreeOne(repoPath, branchName, worktreeRoot, runId, autoPullMai
     result.root = anchor.root;
     addWarn(result, (anchorOpts || {}).registryWarn);
     addWarn(result, anchor.warn);
+    const journal = provisioningJournal(repoPath, wtPath);
+    let pending;
+    try { pending = JSON.parse(fs.readFileSync(journal, 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (pending && (pending.branch !== branchName || pending.target !== provisioningIdentity(wtPath))) {
+      throw new Error('Worktree provisioning journal identity mismatch');
+    }
+    if (pending && (pending.phase !== 'deps' || !fs.existsSync(wtPath))) {
+      result.status = 'error';
+      result.reason = 'provisioning-incomplete';
+      result.error = `Worktree checkout did not finish; inspect and repair before removing journal: ${journal}`;
+      return result;
+    }
 
-    // Already exists?
+    // Reuse only a registered worktree of this repository on this branch.
     if (fs.existsSync(wtPath)) {
+      const identity = validateWorktreeIdentity(repoPath, wtPath, branchName);
+      if (!identity.ok) {
+        result.status = 'error';
+        result.reason = identity.reason;
+        result.error = `Existing worktree refused: ${identity.reason}`;
+        return result;
+      }
+      if (pending) {
+        result.deps = installWorktreeDeps(repoPath, wtPath, installOpts);
+        if (result.deps.status === 'failed') {
+          result.status = 'error';
+          result.reason = 'dependency-install-failed';
+          result.error = result.deps.error;
+          return result;
+        }
+        fs.unlinkSync(journal);
+        result.status = 'already-exists';
+        return result;
+      }
       result.status = 'already-exists';
       result.deps = { status: 'skipped', manager: null, ms: 0, reason: 'worktree-already-exists' };
       return result;
     }
 
     fs.mkdirSync(path.dirname(wtPath), { recursive: true });
+    fs.mkdirSync(path.dirname(journal), { recursive: true });
+    fs.writeFileSync(journal, JSON.stringify({ target: provisioningIdentity(wtPath), branch: branchName, phase: 'creating' }), { flag: 'wx' });
 
     if (autoPullMain) {
       const def = gitDefaultBranch(repoPath);
@@ -651,17 +700,42 @@ function setupWorktreeOne(repoPath, branchName, worktreeRoot, runId, autoPullMai
       const base = fetchDefaultBranch(repoPath, def);
       addWarn(result, base.warn);
       result.base = base.ref;
-      execSync(`git worktree add "${wtPath}" -b ${branchName} ${base.ref}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+      git(repoPath, ['worktree', 'add', '-b', branchName, '--', wtPath, base.ref]);
     } else {
-      execSync(`git worktree add "${wtPath}" -b ${branchName}`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+      git(repoPath, ['worktree', 'add', '-b', branchName, '--', wtPath]);
     }
     result.status = 'created';
+    const temporary = `${journal}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify({ target: provisioningIdentity(wtPath), branch: branchName, phase: 'deps' }), { flag: 'wx' });
+    fs.renameSync(temporary, journal);
     result.deps = installWorktreeDeps(repoPath, wtPath, installOpts);
+    if (result.deps.status === 'failed') {
+      result.status = 'error';
+      result.reason = 'dependency-install-failed';
+      result.error = result.deps.error;
+    } else fs.unlinkSync(journal);
   } catch (e) {
     result.status = 'error';
     result.error = e.message.split(/\r?\n/)[0];
   }
   return result;
+}
+
+function provisioningJournal(repoPath, wtPath) {
+  const common = path.resolve(repoPath, git(repoPath, ['rev-parse', '--git-common-dir']).trim());
+  const key = require('crypto').createHash('sha256').update(provisioningIdentity(wtPath)).digest('hex');
+  return path.join(common, 'forge-provisioning', `${key}.json`);
+}
+
+function provisioningIdentity(target) {
+  let existing = path.resolve(target);
+  const suffix = [];
+  while (!fs.existsSync(existing) && path.dirname(existing) !== existing) {
+    suffix.unshift(path.basename(existing));
+    existing = path.dirname(existing);
+  }
+  const canonical = path.join(realpathCanonical(existing), ...suffix);
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
 }
 
 function cleanupWorktreeOne(repoPath, worktreePath) {
@@ -674,13 +748,13 @@ function cleanupWorktreeOne(repoPath, worktreePath) {
     // Uncommitted work (modified or untracked) is unrecoverable after removal —
     // commits on the forge/{id} branch survive, the working tree does not.
     // worktree_cleanup_on_complete only authorizes removal of a CLEAN worktree.
-    const dirty = execSync('git status --porcelain', { cwd: worktreePath, encoding: 'utf8', shell: true, stdio: 'pipe' }).trim();
+    const dirty = git(worktreePath, ['status', '--porcelain']).trim();
     if (dirty) {
       result.status = 'skipped (dirty)';
       result.reason = 'uncommitted changes in worktree — commit on the forge branch (or discard) before cleanup; nothing was removed';
       return result;
     }
-    execSync(`git worktree remove "${worktreePath}" --force`, { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+    git(repoPath, ['worktree', 'remove', '--force', '--', worktreePath]);
     result.status = 'removed';
   } catch (e) {
     result.status = 'error';
@@ -765,7 +839,7 @@ function parseWorktreePorcelain(out) {
 function listWorktrees(repoPath) {
   let out = '';
   try {
-    out = execSync('git worktree list --porcelain', { cwd: repoPath, encoding: 'utf8', shell: true, stdio: 'pipe' });
+    out = git(repoPath, ['worktree', 'list', '--porcelain']);
   } catch { return []; }
   const parsed = parseWorktreePorcelain(out).filter(e => e.path && !e.bare);
   const mainPath = normalizeWorktreePath(repoPath);
@@ -813,6 +887,17 @@ function attachForRun(cwd, runId, lenderRunId) {
     if (!entry || typeof entry.path !== 'string' || !fs.existsSync(entry.path) || !fs.statSync(entry.path).isDirectory()) {
       const missingPath = entry && entry.path ? entry.path : '(caminho ausente no registro)';
       return { ok: false, attached: false, reason: 'worktree-path-missing', error: `Worktree registrado não existe ou não é diretório: ${missingPath}.` };
+    }
+    if (typeof entry.repo !== 'string' || typeof lender.branch !== 'string' || !lender.branch) {
+      return { ok: false, attached: false, reason: 'worktree-identity-missing', error: 'Lender registry must identify repository and expected branch.' };
+    }
+    const identity = validateWorktreeIdentity(entry.repo, entry.path, lender.branch);
+    if (!identity.ok) return { ok: false, attached: false, reason: identity.reason, error: `Lender worktree refused: ${identity.reason}` };
+    try {
+      fs.statSync(provisioningJournal(entry.repo, entry.path));
+      return { ok: false, attached: false, reason: 'provisioning-incomplete', error: 'Lender worktree provisioning has not completed.' };
+    } catch (error) {
+      if (error.code !== 'ENOENT') return { ok: false, attached: false, reason: 'provisioning-unreadable', error: 'Cannot inspect lender provisioning state.' };
     }
   }
 
@@ -1165,5 +1250,5 @@ module.exports = {
   resolveBranchName, gitDefaultBranch, gitCurrentBranch,
   gitHasOriginRemote, fetchDefaultBranch,
   resolvePackageManager, installWorktreeDeps, WORKTREE_INSTALL_TIMEOUT_MS,
-  validateCodeDirBoundary,
+  validateCodeDirBoundary, validateWorktreeIdentity,
 };

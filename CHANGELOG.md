@@ -1,3 +1,16 @@
+## v4.33.5 — Correções nas fronteiras de persistência, locks e execução
+
+### Fixed
+
+- **Credenciais (A1):** arquivos ilegíveis ou inválidos deixam de ser tratados como stores vazios. Mutações usam mutex, publicação atômica e journal de intenção sem o segredo; operações interrompidas exigem recuperação explícita, preservando os resíduos para inspeção.
+- **Locks de arquivo (A2, A5):** registros corrompidos ou incompatíveis bloqueiam aquisição, renovação e remoção. Nomes v2 usam SHA-256 com componentes de tamanho limitado, mantendo uma trava de compatibilidade que impede escritores antigos de ignorar os novos locks. Recuperação preserva evidências e exige confirmação de que os escritores foram parados.
+- **Git e worktrees (A3, A6):** comandos Git usam argumentos literais, sem shell, com timeout e entrada não interativa. Reutilização verifica raiz, repositório, branch e registro do worktree; provisionamento interrompido mantém um journal e não reseta nem remove arquivos do usuário. Instalação de dependências que falhou é tentada novamente.
+- **Leituras agrupadas (A4):** cada listagem reutiliza seu próprio snapshot do container, evitando reler e interpretar o arquivo inteiro para cada membro, sem cache global ou mudança no formato JSON público.
+- **Projeções (A7):** recibos de origem e saída invalidam a atualização após exclusão, renomeação, agrupamento, checkout ou mudança do renderer. A remoção do último fragmento limpa somente a projeção gerada cuja integridade ainda pode ser comprovada; saídas modificadas e monólitos sem recibo são preservados.
+- **Avisos de atualização (A8):** comparação por ancestralidade distingue checkout igual, atrasado, adiantado, divergente e desconhecido. A statusline retorna o cache de cada repositório sem aguardar rede; falhas de atualização preservam a última indicação conhecida para o mesmo commit local.
+
+Os contratos e procedimentos de recuperação estão em [docs/critical-boundaries.md](docs/critical-boundaries.md). A versão é derivada das tags e dos commits convencionais; os goldens de renderização normalizam a versão dinâmica. Os testes isolados não cobrem um Keychain macOS real nem comprovam durabilidade dos metadados de diretório após perda de energia.
+
 ## v4.11.0 — Controle de recursos com o eixo de heap declarado, e asserts que param de medir o vizinho
 
 Esta entrada cobre **v4.9.0, v4.10.0 e v4.11.0**. As duas primeiras foram tagueadas sem entrada de
