@@ -731,7 +731,7 @@ function smokeIsolation() {
   const lenderWt = res.repos && res.repos[0] && res.repos[0].worktree;
   assert(lenderWt && fs.existsSync(lenderWt), 'lender setup creates its registered worktree', r.stdout);
   const lenderTrees = JSON.stringify([{ repo, path: lenderWt }]);
-  r = runScript('forge-runs.js', ['--add', '--id', 'M-LENDER', '--kind', 'milestone', '--session', 's-lender', '--isolation-mode', 'worktree', '--worktrees', lenderTrees, '--cwd', repo], { env });
+  r = runScript('forge-runs.js', ['--add', '--id', 'M-LENDER', '--kind', 'milestone', '--session', 's-lender', '--branch', 'forge/M-LENDER', '--isolation-mode', 'worktree', '--worktrees', lenderTrees, '--cwd', repo], { env });
   assert(r.status === 0, 'lender run records its physical worktree', r.stderr);
   const wtCount = () => git(['worktree', 'list'], repo).stdout.trim().split(/\r?\n/).filter(Boolean).length;
   const beforeAttach = wtCount();
@@ -752,6 +752,12 @@ function smokeIsolation() {
   res = parseJSON(r.stdout);
   assert(r.status !== 0 && res.ok === false && res.reason === 'no-worktree-registered' && wtCount() === refusalCount,
     'attach rejects a lender without registered worktrees', r.stdout + r.stderr);
+  r = runScript('forge-runs.js', ['--add', '--id', 'M-NOBRANCH', '--kind', 'milestone', '--session', 's-nobranch', '--worktrees', lenderTrees, '--cwd', repo], { env });
+  assert(r.status === 0, 'missing-branch rejection fixture records the physical worktree', r.stderr);
+  r = runScript('forge-isolation.js', ['--attach', 'M-NOBRANCH', '--run', 'T-REFUSE', '--cwd', repo], { env });
+  res = parseJSON(r.stdout);
+  assert(r.status !== 0 && res.ok === false && res.reason === 'worktree-identity-missing' && wtCount() === refusalCount,
+    'attach rejects a lender without expected branch identity', r.stdout + r.stderr);
   r = runScript('forge-isolation.js', ['--setup', '--run', 'M-MISSING', '--cwd', repo], { env });
   res = parseJSON(r.stdout);
   const missingWt = res.repos && res.repos[0] && res.repos[0].worktree;
