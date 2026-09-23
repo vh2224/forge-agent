@@ -162,6 +162,45 @@ async function main() {
     const redirectedHome = path.join(f.root, 'redirected-home'); fs.mkdirSync(redirectedHome);
     fs.symlinkSync(path.join(f.otherHome, '.forge-personal'), path.join(redirectedHome, '.forge-personal'), process.platform === 'win32' ? 'junction' : 'dir');
     assert.strictEqual(personal.readPersonalSnapshot({ ...f.options, userHome: redirectedHome }).reason, 'namespace-invalid');
+    // Expose only validated, coherent milestone state to status consumers.
+    const milestone = f.work('M005', 'milestone'); f.bind('M005');
+    const validState = fs.readFileSync(milestone.source, 'utf8');
+    const snapshotWork = () => personal.readPersonalSnapshot(f.options).works.find(w => w.id === 'M005');
+    assert.strictEqual(snapshotWork().state.milestone, 'M005');
+    fs.writeFileSync(milestone.source, validState.replace('milestone: M005', 'milestone: M006'));
+    assert.strictEqual(snapshotWork().state, null);
+    assert.strictEqual(snapshotWork().reliability, 'state-invalid');
+    fs.writeFileSync(milestone.source, 'Unstructured state');
+    assert.strictEqual(snapshotWork().state, null);
+    assert.strictEqual(snapshotWork().reliability, 'state-invalid');
+    fs.writeFileSync(milestone.source, validState);
+    const stateReader = require('./forge-state');
+    const readState = stateReader.read;
+    try {
+      stateReader.read = function (project, id) {
+        if (id === 'M005') fs.appendFileSync(milestone.source, 'changed between reads');
+        return readState.apply(this, arguments);
+      };
+      assert.strictEqual(snapshotWork().reliability, 'state-changed');
+      assert.strictEqual(snapshotWork().state, null);
+      stateReader.read = function (project, id) {
+        if (id === 'M005') throw Object.assign(new Error('fixture denied'), { code: 'EACCES' });
+        return readState.apply(this, arguments);
+      };
+      assert.strictEqual(snapshotWork().reliability, 'state-unreadable');
+      assert.strictEqual(snapshotWork().state, null);
+    } finally { stateReader.read = readState; }
+    fs.writeFileSync(milestone.source, validState);
+    personal.saveCheckpoint({ ...f.options, id: 'M005', intent: 'checkpoint', checkpoint: {
+      nextAction: [{ text: 'Current personal action', source: milestone.source }],
+    } });
+    assert.strictEqual(snapshotWork().state.next_action, 'Current personal action');
+    fs.appendFileSync(milestone.source, 'changed checkpoint source');
+    assert.strictEqual(snapshotWork().state, null);
+    assert.strictEqual(snapshotWork().reliability, 'needs-reconciliation');
+    assert.strictEqual(snapshotWork().nextAction.validity, 'reconciliation-required');
+    fs.unlinkSync(milestone.source);
+    assert.strictEqual(snapshotWork().state, null);
     console.log('PASS personal context: isolation, evidence, corruption, atomic failure, concurrency and terminal reconciliation');
   } finally { f.cleanup(); }
 }

@@ -8,6 +8,13 @@
   remains available explicitly with `--scope workspace`; legacy work requires an
   explicitly selected resume. Reads never migrate or create the personal store.
 
+- Provider-neutral status declares `details.status_schema_version: "2.0.0"`: only
+  personal work is listed; validated snapshot state replaces workspace progress,
+  run activity replaces phase/stale, and task status uses the workStatus enum.
+  The operation envelope remains 1.0.0. Invalid or stale state is withheld with
+  diagnostics; status never rereads it to override the personal action. See
+  `shared/forge-lifecycle.md` for the payload contract.
+
 ## v4.33.5 — Correções nas fronteiras de persistência, locks e execução
 
 ### Fixed

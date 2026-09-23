@@ -65,3 +65,38 @@ For the selected unit, set `agent_name` by family: `plan-*` uses `forge-planner`
 Model/engine/effort still come from `forge-dispatch-resolve.js`; these agent names
 do not select a host, delivery mode or model.
 Standalone `/forge-task` remains outside milestone selection.
+
+## Personal status payload (2.0.0)
+
+The provider-neutral forge-orchestrate status operation keeps the operation
+envelope protocol_version at 1.0.0; init, next, complete and handoff are unchanged.
+Its details.status_schema_version is 2.0.0. Consumers must use this status-specific
+version when interpreting state and details; the old workspace status payload
+is not the personal queue contract.
+
+Without an ID, status lists only explicitly bound personal work. Explicit ID
+inspection reads that work without binding it. A single personal milestone can
+provide state; multiple personal milestones have no implicit focus. Empty
+bindings return no_work; a task-only personal view still returns completed.
+Snapshot read errors return failed with warnings rather than a workspace fallback.
+
+- details.scope identifies personal or inspection; details.works carries canonical
+  workStatus, reliability, nextAction, checkpoint and terminalEvidence.
+- state is a validated snapshot projection: milestone, phase, active_slice,
+  active_task, auto_mode and next_action. It never causes another state-file read.
+  Invalid/missing/unreadable/changed state or stale checkpoint evidence yields
+  state=null and the work diagnostic remains visible. next_action, when present,
+  comes from the snapshot action, including a current personal checkpoint.
+- The former state.progress roadmap aggregate is absent. Status does not scan
+  peer roadmaps to populate it.
+- details.runs contains only bound work with activity=active, with id, kind and
+  activity. Former phase/stale run fields are absent; process activity is separate
+  from work completion and evidence reliability.
+- details.autonomous_tasks contains only personal/explicitly inspected tasks.
+  Its status is the workStatus enum: open, pending, unknown or completed, not the
+  previous workspace task-plan status. Use details.works for diagnostic/action
+  information.
+- warnings includes per-work reliability diagnostics and snapshot errors.
+
+No read operation creates bindings, rewrites checkpoints or synchronizes project
+instruction files. Workspace census remains an explicitly separate API.

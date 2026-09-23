@@ -73,6 +73,38 @@ try {
     assert.strictEqual(personalStatus.details.scope, 'personal');
     const explicitStatus = orchestrate.status({ cwd: personalFixture.project, milestone: 'M001' });
     assert.deepStrictEqual(explicitStatus.state, personalStatus.state);
+    assert.strictEqual(personalStatus.details.status_schema_version, '2.0.0');
+    const originalStateRead = state.read;
+    let stateReads = 0;
+    try {
+      state.read = function () {
+        if (++stateReads > 1) throw new Error('status must not reread the snapshot state');
+        return originalStateRead.apply(this, arguments);
+      };
+      assert.deepStrictEqual(orchestrate.status({ cwd: personalFixture.project }).state, personalStatus.state);
+      assert.strictEqual(stateReads, 1);
+      state.read = () => { throw Object.assign(new Error('fixture denied'), { code: 'EACCES' }); };
+      const unreadable = orchestrate.status({ cwd: personalFixture.project });
+      assert.strictEqual(unreadable.state, null);
+      assert(unreadable.warnings.includes('M001: state-unreadable'));
+    } finally { state.read = originalStateRead; }
+    const source = path.join(personalFixture.project, '.gsd', 'milestones', 'M001', 'M001-STATE.md');
+    const stateBytes = fs.readFileSync(source, 'utf8');
+    fs.writeFileSync(source, stateBytes.replace('milestone: M001', 'milestone: M003'));
+    const invalid = orchestrate.status({ cwd: personalFixture.project });
+    assert.strictEqual(invalid.milestone, 'M001');
+    assert.strictEqual(invalid.state, null);
+    assert(invalid.warnings.includes('M001: state-invalid'));
+    fs.writeFileSync(source, stateBytes);
+    require('./forge-personal-context').saveCheckpoint({ ...personalFixture.options, id: 'M001', intent: 'checkpoint',
+      checkpoint: { nextAction: [{ text: 'Personal next action', source }] } });
+    assert.strictEqual(orchestrate.status({ cwd: personalFixture.project }).state.next_action, 'Personal next action');
+    fs.appendFileSync(source, 'changed');
+    const stale = orchestrate.status({ cwd: personalFixture.project });
+    assert.strictEqual(stale.state, null);
+    assert(stale.warnings.includes('M001: needs-reconciliation'));
+    assert.strictEqual(stale.details.works[0].nextAction.validity, 'reconciliation-required');
+    fs.writeFileSync(source, stateBytes);
     assert.deepStrictEqual(deniedReads, []);
     fs.readFileSync = originalRead;
     Object.assign(process.env, { HOME: personalFixture.otherHome, USERPROFILE: personalFixture.otherHome });

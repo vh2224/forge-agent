@@ -166,9 +166,9 @@ function status(inputValue) {
     ? milestones.find((work) => work.id === input.milestone)
     : milestones.length === 1 ? milestones[0] : null;
   result.milestone = focused ? focused.id : input.milestone;
-  result.state = focused && model.project
-    ? publicState(forgeState.read(model.project, focused.id)) : null;
+  result.state = focused ? focused.state : null;
   result.details = {
+    status_schema_version: '2.0.0',
     scope: model.scope,
     works: model.works,
     runs: model.works.filter((work) => work.activity === 'active')
@@ -176,7 +176,9 @@ function status(inputValue) {
     autonomous_tasks: model.works.filter((work) => work.kind === 'task')
       .map((work) => ({ id: work.id, status: work.workStatus })),
   };
-  result.warnings = model.warnings || [];
+  result.warnings = [...(model.warnings || []), ...model.works
+    .filter((work) => work.reliability !== 'current')
+    .map((work) => work.id + ': ' + work.reliability)];
   if (model.status === 'error') { result.outcome = 'failed'; result.reason_code = 'failed'; }
   else if (!model.works.length) { result.outcome = 'no_work'; result.reason_code = 'no-next-unit'; }
   return result;

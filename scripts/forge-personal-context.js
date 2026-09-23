@@ -250,14 +250,17 @@ function inspectWork(project, binding) {
     ? path.join('.gsd', 'tasks', binding.id, `${binding.id}-PLAN.md`)
     : path.join('.gsd', 'milestones', binding.id, `${binding.id}-STATE.md`);
   const terminal = read(terminalFile);
-  let completed = false, nextAction = null;
+  let completed = false, nextAction = null, validatedState = null;
   if (terminal.status === 'ok') {
     if (binding.kind === 'task') completed = /^---\r?\n[\s\S]*?^status:\s*["']?DONE["']?\s*\r?$/m.test(terminal.content.split(/\r?\n---/)[0]);
     else {
       try {
         const current = state.read(project.path, binding.id);
         if (!current || current.milestone !== binding.id || !/^---\r?\n/.test(current._raw)) terminal.reason = 'state-invalid';
+        else if (digest(current._raw) !== terminal.hash) terminal.reason = 'state-changed';
         else {
+          validatedState = { milestone: binding.id, phase: current.phase, active_slice: current.active_slice,
+            active_task: current.active_task, auto_mode: current.auto_mode };
           completed = /^(done|completed)$/i.test(current._frontmatter.status || '');
           nextAction = current.next_action ? { text: current.next_action, source: terminal.source, hash: terminal.hash, validity: 'current' } : null;
         }
@@ -276,10 +279,12 @@ function inspectWork(project, binding) {
   const pending = (checkpoint.pending || []).some(c => !c.resolved) || effectiveAcceptances.some(c => !c.resolved);
   const actionable = (checkpoint.nextAction || []).some(c => !c.resolved);
   const workStatus = completed && !pending && !actionable && !unreliable ? 'completed' : pending ? 'pending' : terminal.status !== 'ok' || terminal.reason ? 'unknown' : 'open';
+  const action = unreliable ? { text: 'Reconcile changed or missing sources; preserve recorded acceptances.', validity: 'reconciliation-required' }
+    : (checkpoint.nextAction || []).find(c => !c.resolved) || nextAction;
   return { id: binding.id, kind: binding.kind, activity, runDiagnostic, workStatus, checkpoint,
+    state: validatedState && !unreliable ? { ...validatedState, next_action: action ? action.text : '' } : null,
     reliability: unreliable ? 'needs-reconciliation' : runDiagnostic && runDiagnostic !== 'missing' ? `run-${runDiagnostic}` : finalResult ? 'current' : terminal.reason || 'current',
-    nextAction: unreliable ? { text: 'Reconcile changed or missing sources; preserve recorded acceptances.', validity: 'reconciliation-required' }
-      : (checkpoint.nextAction || []).find(c => !c.resolved) || nextAction,
+    nextAction: action,
     lastResult: (checkpoint.lastResult || []).filter(c => c.validity === 'current').at(-1) || null,
     terminalEvidence: finalResult ? { source: finalResult.source, hash: finalResult.hash, completed } : terminal.status === 'ok' ? { source: terminal.source, hash: terminal.hash, completed } : { reason: terminal.reason } };
 }

@@ -521,60 +521,48 @@ function smokeRepos() {
 
 // ── Section 8: forge-cli-helpers refuse logic ───────────────────────────────
 function smokeCliHelpers() {
-  process.stdout.write('\n[8/16] forge-cli-helpers\n');
-  const dir = mkTmp('cli');
-
-  // 0 active + no arg → legacy
-  let r = runScript('forge-cli-helpers.js', ['--resolve-args', '--args', '', '--command', 'forge-auto', '--cwd', dir]);
-  assert(r.status === 0, 'resolve-args 0/empty runs');
-  let res = JSON.parse(r.stdout);
-  assert(res.status === 'legacy', '0 active + no arg → legacy');
-
-  // M001 arg → activate-new
-  r = runScript('forge-cli-helpers.js', ['--resolve-args', '--args', 'M001', '--command', 'forge-auto', '--cwd', dir]);
-  res = JSON.parse(r.stdout);
-  assert(res.status === 'activate-new' && res.run_id === 'M001', 'M001 → activate-new');
-
-  // Add 2 runs → no arg → refuse
-  runScript('forge-runs.js', ['--add', '--id', 'M001', '--kind', 'milestone', '--session', 's1', '--cwd', dir]);
-  runScript('forge-runs.js', ['--add', '--id', 'M002', '--kind', 'milestone', '--session', 's2', '--cwd', dir]);
-
-  r = runScript('forge-cli-helpers.js', ['--resolve-args', '--args', '', '--command', 'forge-auto', '--cwd', dir]);
-  res = JSON.parse(r.stdout);
-  assert(res.status === 'refuse', '2+ active + no arg → refuse');
-  assert(/M001/.test(res.message) && /M002/.test(res.message), 'refuse message lists active runs');
-
-  // Remove one → resume (1 active)
-  runScript('forge-runs.js', ['--remove', 'M002', '--cwd', dir]);
-  r = runScript('forge-cli-helpers.js', ['--resolve-args', '--args', '', '--command', 'forge-auto', '--cwd', dir]);
-  res = JSON.parse(r.stdout);
-  assert(res.status === 'resume' && res.run_id === 'M001', '1 active + no arg → resume that one');
-
-  // ── Timestamp milestone ID → activate-new (paired with M001 legacy above) ──
-  const dir2 = mkTmp('cli-ts');
-  const tsMs = 'M-20260522143012-oauth';
-  r = runScript('forge-cli-helpers.js', ['--resolve-args', '--args', tsMs, '--command', 'forge-auto', '--cwd', dir2]);
-  res = JSON.parse(r.stdout);
-  assert(res.status === 'activate-new' && res.run_id === tsMs, `${tsMs} → activate-new`);
-  assert(res.kind === 'milestone', `${tsMs} recognized as kind:milestone`);
-
-  // Timestamp task ID — register then resolve → kind:task, status:resume
-  const tsTask = 'T-20260522143012-fix-typo';
-  runScript('forge-runs.js', ['--add', '--id', tsTask, '--kind', 'task', '--session', 'sess-ts', '--cwd', dir2]);
-  r = runScript('forge-cli-helpers.js', ['--resolve-args', '--args', tsTask, '--command', 'forge-auto', '--cwd', dir2]);
-  res = JSON.parse(r.stdout);
-  assert(res.kind === 'task', `${tsTask} recognized as kind:task`);
-  assert(res.status === 'resume', `${tsTask} returns resume when registered`);
-
-  cleanup(dir2);
-
-  // newTaskId — format changed in T01: now T-<ts>-<slug> (replaces stale legacy regex)
-  // Hermeticity: forge-ids honra a pref global ids.format — pin no formato esperado
-  // para o assert não depender do ~/.claude do dev (achado do M-20260604002929).
-  r = runScript('forge-ids.js', ['--new-task', 'fix typo in readme', '--format', 'timestamp']);
-  assert(/^T-\d{14}(-[a-z0-9-]+)?$/.test(r.stdout.trim()), 'newTaskId format is T-<14digits>-<slug>');
-
-  cleanup(dir);
+  process.stdout.write('\n[8/16] forge-cli-helpers personal resolution\n');
+  const f = require('./forge-personal-context.test').fixture();
+  const personal = require('./forge-personal-context');
+  const resolve = (id = '', home = f.home) => {
+    const result = runScript('forge-cli-helpers.js', ['--resolve-args', '--args', id, '--command', 'forge-auto', '--cwd', f.project], { env: f.env(home) });
+    assert(result.status === 0, 'personal resolve CLI exits zero', result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  try {
+    f.work('M001', 'milestone');
+    assert(resolve().status === 'none', 'no personal bindings means none, never a legacy team fallback');
+    assert(!fs.existsSync(path.join(f.home, '.forge-personal')), 'unbound query is read-only');
+    const explicit = resolve('M001');
+    assert(explicit.status === 'activate-new' && explicit.run_id === 'M001', 'explicit M001 activates an inactive milestone');
+    assert(personal.readPersonalSnapshot(f.options).works.length === 0, 'explicit inspection does not bind');
+    f.work('M001', 'milestone', true);
+    f.work('M002', 'milestone', true);
+    f.bind('M002', { userHome: f.otherHome });
+    assert(resolve().status === 'none', 'active peer runs never become personal candidates');
+    f.bind('M001');
+    const sole = resolve();
+    assert(sole.status === 'resume' && sole.run_id === 'M001', 'sole personal binding resumes only its work');
+    assert(resolve('', f.otherHome).run_id === 'M002', 'second profile selects only its own work');
+    f.bind('M002');
+    const multiple = resolve();
+    assert(multiple.status === 'refuse' && multiple.reason === 'selection-required', 'multiple personal candidates require explicit ID');
+    assert(multiple.candidates.map(w => w.id).sort().join(',') === 'M001,M002', 'refusal lists personal candidates');
+    fs.writeFileSync(path.join(f.project, '.gsd', 'forge-prefs.jsonc'), '{"multi_run":{"refused_when_active_count":999}}');
+    assert(resolve().status === 'refuse', 'deprecated workspace threshold cannot bypass personal ambiguity');
+    assert(resolve('M001').run_id === 'M001', 'explicit choice resolves personal ambiguity');
+    const tsMs = 'M-20260522143012-oauth';
+    f.work(tsMs, 'milestone');
+    const timestamp = resolve(tsMs);
+    assert(timestamp.status === 'activate-new' && timestamp.run_id === tsMs && timestamp.kind === 'milestone', 'timestamp milestone retains activate-new semantics');
+    const tsTask = 'T-20260522143012-fix-typo';
+    f.work(tsTask);
+    const task = resolve(tsTask);
+    assert(task.kind === 'task' && task.status === 'resume', 'explicit registered timestamp task resumes');
+    assert(!personal.readPersonalSnapshot(f.options).works.some(w => w.id === tsMs || w.id === tsTask), 'timestamp inspection also leaves bindings unchanged');
+    const id = runScript('forge-ids.js', ['--new-task', 'fix typo in readme', '--format', 'timestamp'], { env: f.env() });
+    assert(/^T-\d{14}(-[a-z0-9-]+)?$/.test(id.stdout.trim()), 'newTaskId format is T-<14digits>-<slug>');
+  } finally { f.cleanup(); }
 }
 
 // ── Section 9: forge-isolation prefs + setup/cleanup ────────────────────────
@@ -1483,7 +1471,7 @@ function smokeStopHook() {
     windowSize = windowSize || 1000;
     let content;
     try {
-      content = fs.readFileSync(filePath, 'utf8');
+      content = readRepoText(filePath);
     } catch (e) {
       fail(`${fileName} readable`, `file not found or unreadable: ${filePath} — ${e.message}`);
       return;
@@ -5976,8 +5964,13 @@ function smokePrefsCutover() {
       `(a) ${name}: legacy cascade path triple absent`);
     assert(!source.includes('legacySectionBlocks') && !source.includes('(?=^\\w|\\Z)'),
       `(a) ${name}: legacy section-block parser absent`);
-    assert(/forge-prefs\.js/.test(source) && /readPrefsCached/.test(source),
-      `(a) ${name}: imports readPrefsCached`);
+    if (name === 'cli-helpers') {
+      assert(source.includes("require('./forge-personal-context')") && source.includes('personal.selectPersonalWork'),
+        '(a) cli-helpers: personal selection delegates to the canonical resolver');
+    } else {
+      assert(/forge-prefs\.js/.test(source) && /readPrefsCached/.test(source),
+        `(a) ${name}: imports readPrefsCached`);
+    }
   }
   assert(/readPrefsCached/.test(contextSource) && !/fs\.readFileSync|os\.homedir/.test(contextSource),
     '(a) context-monitor: legacy file parser absent');
@@ -6040,7 +6033,8 @@ function smokePrefsCutover() {
     cleanup(dir);
     return result;
   });
-  assert(cliResult.status === 0 && /refuse|legacy|resume/.test(cliResult.stdout), '(c) cli-helpers reads multi_run through engine');
+  assert(cliResult.status === 0 && JSON.parse(cliResult.stdout).status === 'none' &&
+    JSON.parse(cliResult.stdout).reason === 'no-bindings', '(c) legacy multi_run preference never supplies personal candidates');
 
   // T04: hot passive consumers must share the cached resolver's semantics and
   // turn malformed JSONC into a visible, self-healing signal rather than a throw.
@@ -6211,8 +6205,13 @@ function smokePrefsCutover() {
     for (const token of deadParserTokens) {
       assert(!token.test(source), `(e) ${name}: dead parser signature absent`, token.toString());
     }
-    assert(/forge-prefs\.js/.test(source) && /readPrefsCached/.test(source),
-      `(e) ${name}: wired to forge-prefs readPrefsCached`);
+    if (name === 'forge-cli-helpers.js') {
+      assert(source.includes("require('./forge-personal-context')") && source.includes('personal.selectPersonalWork'),
+        '(e) cli-helpers: wired to personal selection after threshold deprecation');
+    } else {
+      assert(/forge-prefs\.js/.test(source) && /readPrefsCached/.test(source),
+        `(e) ${name}: wired to forge-prefs readPrefsCached`);
+    }
   }
 
   // Positive guard for the dual-read boundary. The shared-home boundary owns
@@ -6455,7 +6454,10 @@ function smokeSkillsCutover() {
     assert(!repoPathGrepRe.test(source), `(c) ${rel}: legacy repo_path-grep construct absent`);
     // Wired half: every cut-over file references the new engine. forge-sweep's
     // only mention is a protect-list filename entry (see below), still checked.
-    if (rel === 'skills/forge-doctor/SKILL.md') {
+    if (rel === 'skills/forge-status/SKILL.md') {
+      assert(source.includes('forge-status.js') && source.includes('forge-personal-context.md'),
+        '(c) status skill delegates to personal status and its canonical contract');
+    } else if (rel === 'skills/forge-doctor/SKILL.md') {
       assert(source.includes('forge-doctor.js'), `(c) ${rel}: delegates to forge-doctor.js`);
     } else {
       assert(source.includes('forge-prefs.js'), `(c) ${rel}: references forge-prefs.js`);
@@ -17108,7 +17110,6 @@ function smokeRoutingContractProjection() {
     'skills/forge-auto/SKILL.md',
     'skills/forge-next/SKILL.md',
     'skills/forge-task/SKILL.md',
-    'commands/forge.md',
     'commands/forge-init.md',
   ];
   for (const relative of CALL_SITES) {
@@ -17116,6 +17117,12 @@ function smokeRoutingContractProjection() {
     assert(/^node "\$FORGE_SCRIPTS_DIR\/forge-instructions\.js" --sync/m.test(text),
       `(b) ${relative} não invoca forge-instructions.js --sync`);
   }
+
+  const bootText = readRepoText(path.join(repoRoot, 'commands/forge.md'));
+  assert(!/^node .*forge-instructions\.js.*--sync/m.test(bootText),
+    '(b) boot does not synchronize or rewrite project instructions');
+  assert(bootText.includes('forge-personal-context.js') && bootText.includes('--snapshot'),
+    '(b) boot reads the canonical personal snapshot');
 
   // (c) canonical spec carries the section the mirrors point at.
   const dispatch = readRepoText(path.join(repoRoot, 'shared', 'forge-dispatch.md'));
