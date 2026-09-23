@@ -81,6 +81,16 @@ try {
   assert.strictEqual(runs.listAllDetailed(f.project).parsed.length, 3, 'global census still includes all records');
   assert(status.collect(f.project, { scope: 'workspace' }).autonomous_tasks.some(w => w.id === 'TASK-002'));
   assert.strictEqual(cli('forge-personal-context.js', ['--snapshot', '--cwd', f.project]).works[0].id, 'TASK-001');
+  // The entry points hand over the ambient directory; a real process receiving it
+  // relative must resolve to the same project, not to an unresolved namespace.
+  assert.strictEqual(cli('forge-personal-context.js', ['--snapshot', '--cwd', '.']).works[0].id, 'TASK-001');
+  // A valid project nobody in this profile bound answers no-bindings even though
+  // the store already holds another project — and adopts nothing from it.
+  const bystander = path.join(f.root, 'bystander');
+  fs.mkdirSync(path.join(bystander, '.gsd', 'tasks'), { recursive: true });
+  const unbound = cli('forge-personal-context.js', ['--snapshot', '--cwd', bystander]);
+  assert.strictEqual(unbound.reason, 'no-bindings');
+  assert.deepStrictEqual(unbound.works, []);
   assert.strictEqual(cli('forge-status.js', ['--json', '--cwd', f.project], f.otherHome).works[0].id, 'TASK-002');
   assert.strictEqual(cli('forge-cli-helpers.js', ['--resolve-args', '--cwd', f.project]).run_id, 'TASK-001');
   const bytes = fs.readFileSync(path.join(f.home, '.forge-personal', 'context.json'));

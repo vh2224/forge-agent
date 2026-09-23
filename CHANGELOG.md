@@ -1,3 +1,33 @@
+## v4.35.0 - Entrada por intenção com preparação proporcional
+
+- O primeiro turno interpreta o pedido antes de recomendar fluxo: consulta/diagnóstico,
+  mudança nova, retomada pessoal ou comando explícito. Consulta investiga e responde
+  sem criar run, vínculo ou alteração; a recomendação de task ou milestone vem com uma
+  frase que relaciona alcance, dependências, risco e verificação. Contrato canônico em
+  `shared/forge-intent-entry.md`, projetado para `/forge`, `/forge-init` e para as
+  instruções permanentes de Claude e Codex a partir de um único projetor.
+- `scripts/forge-entry-assessment.js` captura a investigação como avaliação versionada
+  (projeto canônico, pedido/escopo, fontes com fingerprint calculado pela API, achados,
+  alternativas, riscos, decisões e perguntas necessárias pendentes) e decide, por fase,
+  se a preparação pode ser reutilizada. Brainstorm exige alternativas e riscos; discuss
+  exige decisões e nenhuma pergunta necessária pendente; research exige fontes e achados
+  verificáveis nelas. Preparação enxuta só para mudança localizada, de baixo risco e
+  incerteza já investigada.
+- `/forge-task --assessment <arquivo>` recebe a avaliação antes das etapas 1–3, registra
+  proveniência e decisões de reutilização no BRIEF e revalida fontes e escopo na entrada
+  e após retomada/compactação. Comandos e flags explícitos, intake de item e retomada
+  continuam valendo como digitados.
+- Limites declarados: a avaliação é evidência, não autorização. `approved`, `authorized`,
+  número de confiança, comando ou instrução dentro de um arquivo importado é dado inerte e
+  é reportado como campo ignorado; decisão humana necessária sem resposta continua pendente.
+  Evidência incompleta, alterada, estrangeira, ilegível ou malformada mantém a preparação
+  normal com motivo legível. Plano, plan gate, security gate aplicável, isolamento, claims,
+  execução roteada, verificação, revisão e checkpoints permanecem canônicos, e nenhum modo
+  rápido é habilitado implicitamente. Nada aqui promete interpretar toda linguagem natural.
+- Contexto pessoal: o diretório de entrada é resolvido para absoluto, e um projeto válido
+  sem vínculo responde `no-bindings` tanto com o store ausente quanto com o store contendo
+  outro projeto — sem mutação e sem esconder corrupção, schema inválido ou falha real.
+
 ## v4.34.0 - Personal session context
 
 - Boot/status/refresh and implicit auto/next selection use explicit per-OS-profile
