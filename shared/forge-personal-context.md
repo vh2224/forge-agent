@@ -7,6 +7,27 @@ The installed copy of this document is under the same Forge home's `shared/`.
 
 ## Read before discovery
 
+For interrupted or partial work, after the personal snapshot, inspect the explicitly
+chosen ID with `node "<scripts>/forge-doctor.js" --diagnose-recovery TASK-001 --cwd "<project>"`.
+Use `--json` for the same observations in JSON. A milestone controller may be
+observed only with its explicit `--controller-key "<key>"`; standalone tasks do
+not gain controller coverage. The diagnostic does not discover or adopt work.
+An existing binding retains checkpoint, acceptances and pending decisions; only a
+valid `no-bindings` permits unbound inspection. Store errors never authorize fallback.
+
+The report separates proven results, uncertainty, preserved artifacts, personal
+continuity and the next safe inspection/decision. Missing, corrupt, unreadable and
+stale are distinct. A durable release does not need a final event; an orphan bundle
+does not prove release. SUMMARY alone, inactivity and committed controller
+transactions do not prove global completion. Publications can precede phase updates.
+Exit 0 means valid observations, not completion; 1 means partial/uncertain and 2
+invalid arguments. This exclusive mode rejects other operations and mutation or
+attestation flags. It never binds, checkpoints or changes claims, leases or journals.
+Sweep, sidecar reset and other journals remain explicitly unknown/not covered.
+Inspection does not authorize replay or grant attestations; existing authorities
+must revalidate every future action. Preserve current acceptances and leave
+unanswered required decisions pending.
+
 Run `node "<scripts>/forge-personal-context.js" --snapshot --cwd "<current directory>" --json`.
 This reads the OS profile's `.forge-personal/context.json`, independently of FORGE_HOME,
 session ID, LLM account and provider. No separate login or automatic legacy adoption exists.

@@ -1,3 +1,11 @@
+## Unreleased
+
+- `forge-doctor --diagnose-recovery <id>` oferece diagnóstico somente leitura por
+  trabalho, em texto pt-BR ou JSON: resultado comprovado, evidências, artefatos,
+  continuidade pessoal, aceites, pendências e próximo passo seguro. Claims são
+  inspecionados individualmente; controller exige chave explícita e milestone
+  correspondente. Resultado parcial não autoriza replay, adoção ou atestações.
+
 ## v4.35.0 - Entrada por intenção com preparação proporcional
 
 - O primeiro turno interpreta o pedido antes de recomendar fluxo: consulta/diagnóstico,
