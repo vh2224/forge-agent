@@ -12,12 +12,12 @@
     {
       "source_id": "commands",
       "target": "commands",
-      "sha256": "5b872dcc16cb9e5345409f58eff4e78d9f4d4893e2aff86bf9ea4d35864ef14c"
+      "sha256": "847022c5bdec6fe4546e9614ba03fc9052c9ecac8fa574d6bcbcc22da65b403c"
     },
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "d61eeff91a0150a0dd5384f276b360ee5ef94f21aae2d39ae76068100daba549"
+      "sha256": "6d1d062c224379f612b876bb801fb79c355a85a9c27dcd09be4ded4e7a94e045"
     },
     {
       "source_id": "dispatch-templates",
@@ -47,7 +47,7 @@
     {
       "source_id": "configuration",
       "target": "forge-capabilities.json;forge-prefs.schema.json",
-      "sha256": "128f393d58883fec0bfb747e912f437ef4e8e4fe7cf1b71a2fd519e44f336a5b"
+      "sha256": "588c40050e7115b5b476c3b6594db0de98200b7e8127de6ec2bfaf602cfa9d10"
     }
   ]
 }

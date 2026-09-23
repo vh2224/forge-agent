@@ -8,6 +8,7 @@ const { fixture } = require('./forge-personal-context.test');
 const personal = require('./forge-personal-context');
 const helpers = require('./forge-cli-helpers');
 const status = require('./forge-status');
+const orchestrate = require('./forge-orchestrate');
 const runs = require('./forge-runs');
 const instructions = require('./forge-instructions');
 const renderer = require('./forge-codex-renderer');
@@ -48,6 +49,33 @@ try {
     assert.strictEqual(status.collect(f.project, { userHome: emptyHome }).reason, 'no-bindings');
     assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', { userHome: emptyHome }).status, 'none');
     assert(!fs.existsSync(emptyHome));
+    // The host-neutral consumer must retain personal filtering, including when
+    // a team milestone exists but the operator has bound only a task.
+    const savedEnv = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    try {
+      Object.assign(process.env, { HOME: f.home, USERPROFILE: f.home });
+      const ownStatus = orchestrate.status({ cwd: f.project });
+      assert.strictEqual(ownStatus.outcome, 'completed');
+      assert.strictEqual(ownStatus.state, null);
+      assert.deepStrictEqual(ownStatus.details.works.map(w => w.id), ['TASK-001']);
+      assert.deepStrictEqual(ownStatus.details.autonomous_tasks, [{ id: 'TASK-001', status: 'open' }]);
+      const inspected = orchestrate.status({ cwd: f.project, milestone: 'M001' });
+      assert.strictEqual(inspected.state.milestone, 'M001');
+      assert.strictEqual(inspected.state.phase, 'idle');
+      assert.strictEqual(inspected.state.next_action, 'Plan slice');
+      assert.strictEqual(inspected.details.scope, 'inspection');
+      assert.deepStrictEqual(personal.readPersonalSnapshot(f.options).works.map(w => w.id), ['TASK-001'], 'inspection must not bind');
+      Object.assign(process.env, { HOME: emptyHome, USERPROFILE: emptyHome });
+      const noWork = orchestrate.status({ cwd: f.project });
+      assert.strictEqual(noWork.outcome, 'no_work');
+      assert.strictEqual(noWork.state, null);
+      assert.deepStrictEqual(noWork.details.works, []);
+      assert(!fs.existsSync(emptyHome));
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
     assert.deepStrictEqual(forbiddenReads, [], 'even caught peer reads violate isolation');
   } finally { fs.readFileSync = originalRead; }
   assert.strictEqual(runs.listAllDetailed(f.project).parsed.length, 3, 'global census still includes all records');

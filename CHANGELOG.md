@@ -1,4 +1,4 @@
-## Unreleased - personal session context
+## v4.34.0 - Personal session context
 
 - Boot/status/refresh and implicit auto/next selection use explicit per-OS-profile
   work bindings, independently of shared working copies and FORGE_HOME.
