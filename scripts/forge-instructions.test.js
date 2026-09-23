@@ -496,6 +496,36 @@ test('renderBlock emits only the stable marker', () => {
   assertEqual(block.includes('version='), false, 'renderer emitted version');
 });
 
+// ── R9b: the standing entry contract travels with the block ─────────────────
+
+console.log('R9b — contrato de entrada por intenção');
+
+test('o bloco carrega o contrato de entrada, nomeia o helper e a especificação', () => {
+  const block = renderBlock();
+  for (const needle of [
+    'shared/forge-intent-entry.md',
+    'scripts/forge-entry-assessment.js',
+    'consulta/diagnóstico',
+    'não é consentimento',
+    'preparação',
+  ]) {
+    assert(block.includes(needle), `o contrato de entrada não menciona ${needle}`);
+  }
+  assert(block.includes(mod.renderEntryContract()), 'o projetor não embutiu o contrato de entrada');
+});
+
+test('o contrato de entrada não promete autorização nem fase pulada por padrão', () => {
+  // The two claims that would make this block dangerous instead of useful: that
+  // an artifact can consent, and that reuse is the default. Both are asserted
+  // against the rendered bytes, not against the intent of the source.
+  const entry = mod.renderEntryContract();
+  assert(/pendente/.test(entry), 'uma decisão necessária sem resposta deixou de ser pendente');
+  assert(/gates/.test(entry), 'o contrato não devolve a autorização aos gates');
+  assert(/mant[eé]m a prepara[çc][ãa]o/.test(entry), 'evidência insuficiente sem preparação normal');
+  assert(/Revalide fontes e escopo/.test(entry), 'o contrato não exige revalidação antes de pular fase');
+  assert(/nunca crie artefato vazio/.test(entry), 'o contrato não proíbe o stub que compra um skip por existência');
+});
+
 // ── R10: CLI argument handling ──────────────────────────────────────────────
 
 console.log('R10 — CLI');

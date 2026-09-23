@@ -45,11 +45,21 @@ test('runtime install omits tests and update backs up only known unchanged devel
     assert(fs.existsSync(path.join(scripts, 'forge-doctor.js')));
     assert(fs.existsSync(path.join(scripts, 'forge-personal-context.js')));
     assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-personal-context.md')));
+    assert(fs.existsSync(path.join(scripts, 'forge-entry-assessment.js')));
+    assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-intent-entry.md')));
     for (const home of [data.claudeHome, data.codexHome]) {
       const entry = fs.readFileSync(path.join(home, 'commands', 'forge-init.md'), 'utf8');
       assert(entry.includes('forge-personal-context.js') && entry.includes('--snapshot'));
+      // The entry contract is distributed, not hand-maintained inside each home.
+      assert(entry.includes('shared/forge-intent-entry.md'));
+      const boot = fs.readFileSync(path.join(home, 'commands', 'forge.md'), 'utf8');
+      assert(boot.includes('shared/forge-intent-entry.md') && boot.includes('--assessment'));
+      const task = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
+      assert(task.includes('forge-entry-assessment.js') && task.includes('REUSE_RESEARCH'));
     }
-    assert(fs.readFileSync(path.join(data.projectRoot, 'AGENTS.md'), 'utf8').includes('--snapshot'));
+    const projected = fs.readFileSync(path.join(data.projectRoot, 'AGENTS.md'), 'utf8');
+    assert(projected.includes('--snapshot'));
+    assert(projected.includes(require('./forge-instructions.js').renderEntryContract()));
     assert(fs.existsSync(path.join(scripts, 'fixtures', 'offline-ci', 'matrix.json')));
     const unchanged = path.join(scripts, 'forge-hook-stop.test.js');
     const customized = path.join(scripts, 'forge-installer.test.js');

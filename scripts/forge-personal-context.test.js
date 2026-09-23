@@ -49,6 +49,22 @@ async function main() {
     assert.deepStrictEqual(personal.readPersonalSnapshot(f.options).works.map(w => w.id), ['TASK-001']);
     assert.strictEqual(personal.readPersonalSnapshot({ userHome: f.home, cwd: f.root }).reason, 'project-unresolved');
     assert.deepStrictEqual(personal.readPersonalSnapshot({ ...f.options, userHome: f.otherHome }).works.map(w => w.id), ['TASK-002']);
+    // A valid project this profile never bound is `no-bindings`, not a broken
+    // namespace — with the store absent AND with the store holding another
+    // project. Neither case may mutate or create anything.
+    const second = path.join(f.root, 'wc2');
+    fs.mkdirSync(path.join(second, '.gsd', 'tasks'), { recursive: true });
+    const storeBytes = fs.readFileSync(storeFile);
+    assert.strictEqual(personal.readPersonalSnapshot({ userHome: f.home, cwd: second }).reason, 'no-bindings');
+    assert.deepStrictEqual(personal.readPersonalSnapshot({ userHome: f.home, cwd: second }).works, []);
+    const unusedHome = path.join(f.root, 'carol');
+    assert.strictEqual(personal.readPersonalSnapshot({ userHome: unusedHome, cwd: second }).reason, 'no-bindings');
+    assert(!fs.existsSync(unusedHome), 'a no-bindings read created the personal namespace');
+    assert.deepStrictEqual(fs.readFileSync(storeFile), storeBytes, 'a no-bindings read mutated the store');
+    // The ambient directory may arrive relative; resolving it is the caller's
+    // contract, not the operator's.
+    const relative = path.relative(process.cwd(), f.project) || '.';
+    assert.deepStrictEqual(personal.readPersonalSnapshot({ userHome: f.home, cwd: relative }).works.map(w => w.id), ['TASK-001']);
     assert.strictEqual(personal.bindWork({ ...f.options, id: '../../escape', intent: 'create' }).reason, 'invalid-id');
     assert.strictEqual(personal.bindWork({ ...f.options, id: 'TASK-001', intent: 'inspect' }).reason, 'intent-required');
     assert.strictEqual(personal.bindWork({ ...f.options, project: './wc', id: 'TASK-001', intent: 'create' }).status, 'error');

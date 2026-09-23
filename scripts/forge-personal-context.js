@@ -109,15 +109,21 @@ function resolveProject(store, options, mutation = false) {
     if (mutation && canonical(resolveOwner(projectPath) || projectPath) !== projectPath) throw new Error('project-not-owner');
     return { key: digest(projectPath), path: projectPath };
   }
-  const cwd = canonical(options.cwd || process.cwd());
+  // The entry point passes the ambient directory, which a shell may hand over as
+  // `.` or another relative form. Resolving it here keeps a relative invocation a
+  // normal lookup instead of an `absolute-path-required` throw surfaced as
+  // `project-unresolved` — an error about the store for a defect in the call.
+  const cwd = canonical(path.resolve(options.cwd || process.cwd()));
   const candidates = Object.entries(store.projects).filter(([, project]) => within(cwd, project.path)
     || project.aliases.some(a => within(cwd, a.path) && validAlias(project, a)));
   candidates.sort((a, b) => b[1].path.length - a[1].path.length);
   if (candidates.length) return { key: candidates[0][0], path: candidates[0][1].path };
-  if (mutation) {
-    const owner = resolveOwner(cwd);
-    if (owner) return { key: digest(canonical(owner)), path: canonical(owner) };
-  }
+  // Read-only resolution also owns the ADDRESS, not just the bindings: a valid
+  // project that this profile simply never bound must answer `no-bindings`, the
+  // same as an absent store. Reporting `project-unresolved` there would make a
+  // store holding a colleague's project look like a broken personal namespace.
+  const owner = resolveOwner(cwd);
+  if (owner) return { key: digest(canonical(owner)), path: canonical(owner) };
   return null;
 }
 function mutate(options, operation) {

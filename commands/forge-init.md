@@ -289,8 +289,15 @@ session reads and never summarizes: the project's own instruction file.
 
 ```bash
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-instructions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --sync --cwd .
+WORKING_DIR="${WORKING_DIR:-$(pwd)}"
+node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --sync --cwd "$WORKING_DIR"
 ```
+
+The projected block carries three standing contracts from a single source
+(`scripts/forge-instructions.js`): multi-LLM routing, personal session context and
+intent-first entry (`shared/forge-intent-entry.md`). Never hand-edit the installed
+home copies to add or change them — the projector owns those bytes, and an edited
+home drifts away silently at the next sync.
 
 The command is idempotent and splices only its own marked block
 (`<!-- forge:routing-contract:start … end -->`): bytes outside the markers are carried over
@@ -321,14 +328,24 @@ Este projeto usa o workflow GSD para planejamento e execução autônoma.
 ## Início de sessão obrigatório
 
 Ao iniciar, retomar ou receber iniciar, consulte primeiro:
-`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --snapshot --cwd . --json`.
+`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --snapshot --cwd "<diretorio absoluto>" --json`.
 Resolve scripts/ do Forge ou `${FORGE_HOME:-~/.forge-agent}/scripts`.
 Siga `shared/forge-personal-context.md` da origem ou FORGE_HOME.
 Mostre trabalho pessoal, pendencias, aceites, ultimo resultado e proxima acao
 com proveniencia. Ausencia/erro nunca recorre a STATE, ledger ou auto-mode da equipe.
+Projeto valido sem vinculo e no-bindings, nao falha.
 Boot e somente leitura: nao adote legado, nao migre nem apague continue.md.
 Ponteiros operacionais historicos nao prevalecem sobre evidencia pessoal atual.
 Conhecimento tecnico compartilhado usa projecoes canonicas de memoria/decisoes.
+
+## Entrada por intencao
+
+Antes de recomendar fluxo, leia o pedido: consulta/diagnostico, mudanca nova,
+retomada pessoal ou comando explicito. Consulta investiga e responde, sem criar
+run, vinculo ou alteracao. Mudanca nova investiga primeiro e explica a recomendacao
+relacionando alcance, dependencias, risco e verificacao. Contrato canonico:
+`shared/forge-intent-entry.md`. A avaliacao de entrada
+(`scripts/forge-entry-assessment.js`) e evidencia, nunca consentimento.
 
 ## Comandos disponíveis
 
