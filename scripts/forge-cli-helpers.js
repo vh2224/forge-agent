@@ -22,17 +22,8 @@
 const path  = require('path');
 const runs  = require('./forge-runs.js');
 const ids   = require('./forge-ids.js');
-const { readPrefsCached } = require('./forge-prefs.js');
+const personal = require('./forge-personal-context');
 
-// ── Prefs read (multi_run.refused_when_active_count) ────────────────────────
-function readPref(cwd, dottedKey, fallback) {
-  let value = readPrefsCached(cwd).prefs;
-  for (const part of dottedKey.split('.')) {
-    if (value === null || value === undefined || !Object.prototype.hasOwnProperty.call(Object(value), part)) return fallback;
-    value = value[part];
-  }
-  return value === undefined || value === null ? fallback : value;
-}
 
 // ── ID generation ───────────────────────────────────────────────────────────
 // newTaskId delegates to forge-ids.js — no local slugify or crypto needed.
@@ -45,12 +36,20 @@ function newTaskId(description, cwd) {
 // Input: raw argument string (e.g. "M065", "M-20260522143012-oauth",
 //        "T-20260522143012-fix-typo", "task-fix-foo-a3f2", "", "resume")
 // Output:
-//   { run_id, kind: "milestone"|"task"|null, status: "ok"|"refuse"|"activate-new"|"resume"|"error"|"legacy", message }
+//   { run_id, kind: "milestone"|"task"|null, status: "ok"|"refuse"|"activate-new"|"resume"|"error"|"none", message }
 function resolveRunFromArgs(cwd, argsRaw, opts) {
+  const arg = String(argsRaw || '').trim();
+  if (arg && ids.isValid(arg)) {
+    const inspection = personal.readPersonalSnapshot({ ...opts, cwd, id: arg, inspect: true });
+    if (inspection.status !== 'ok') return { run_id: null, kind: null, status: 'error', reason: inspection.reason, message: inspection.message || inspection.reason };
+    return { ...resolveRunInProject(inspection.project, argsRaw, opts), project: inspection.project };
+  }
+  return resolveRunInProject(cwd, argsRaw, opts);
+}
+
+function resolveRunInProject(cwd, argsRaw, opts) {
   opts = opts || {};
   const arg = String(argsRaw || '').trim();
-  const active = runs.listActive(cwd);
-  const refuseThreshold = parseInt(readPref(cwd, 'multi_run.refused_when_active_count', '2'), 10);
 
   // Direct ID arg
   if (arg) {
@@ -93,24 +92,10 @@ function resolveRunFromArgs(cwd, argsRaw, opts) {
     return { run_id: null, kind: null, status: 'error', message: `Argumento "${arg}" não reconhecido. Use M###, M-<ts>..., TASK-### ou T-<ts>...` };
   }
 
-  // No arg — decide based on active count
-  if (active.length === 0) {
-    // Legacy single-run: read .gsd/STATE.md for active milestone
-    return { run_id: null, kind: null, status: 'legacy', message: 'Sem runs ativas. Verifique .gsd/STATE.md legado para Active Milestone.' };
-  }
-
-  if (active.length === 1) {
-    const r = active[0];
-    return { run_id: r.id, kind: r.kind, status: 'resume', message: `↺ Retomando única run ativa: ${r.id}` };
-  }
-
-  // 2+ active and arg absent — apply refuse threshold
-  if (active.length >= refuseThreshold) {
-    return { run_id: null, kind: null, status: 'refuse', message: refuseMessage(active, opts.command || 'forge-auto') };
-  }
-
-  // (Below threshold but >1) — fall back to resume the oldest? Conservative: refuse anyway with friendly message.
-  return { run_id: null, kind: null, status: 'refuse', message: refuseMessage(active, opts.command || 'forge-auto') };
+  const selection = personal.selectPersonalWork({ ...opts, cwd });
+  if (selection.selected) return { run_id: selection.selected.id, kind: selection.selected.kind, project: selection.project, status: 'resume', reason: selection.reason, message: `Retomando trabalho pessoal: ${selection.selected.id}` };
+  return { run_id: null, kind: null, status: selection.status === 'error' ? 'error' : selection.reason === 'selection-required' ? 'refuse' : 'none',
+    reason: selection.reason, candidates: selection.candidates || [], message: selection.message || `Contexto pessoal: ${selection.reason}. Especifique um ID para retomada explícita.` };
 }
 
 function refuseMessage(activeRuns, command) {
@@ -147,7 +132,7 @@ function activateRun(cwd, opts) {
   if (!opts.id || !opts.kind || !opts.session_id) {
     throw new Error('activateRun: id, kind, session_id required');
   }
-  return runs.add(cwd, {
+  const record = runs.add(cwd, {
     id: opts.id,
     kind: opts.kind,
     session_id: opts.session_id,
@@ -156,7 +141,13 @@ function activateRun(cwd, opts) {
     milestone_dir: opts.kind === 'milestone' ? `.gsd/milestones/${opts.id}/` : null,
     cwd: opts.cwd || cwd,
     task_description: opts.task_description,
+    worktrees: opts.worktrees,
+    branch: opts.branch,
   });
+  const binding = personal.bindWork({ ...opts, project: cwd, intent: opts.intent || 'create' });
+  if (binding.status !== 'ok') return { status: 'partial', reason: 'personal-bind-failed', id: opts.id, record, binding,
+    message: `Run ${opts.id} criada; vínculo pessoal falhou (${binding.reason}). Recupere com forge-personal-context.js --bind --project <WORKING_DIR> --id ${opts.id} --intent explicit-resume.` };
+  return record;
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────

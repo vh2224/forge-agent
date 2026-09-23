@@ -233,7 +233,7 @@ function render(options = {}) {
   const agents = sources.find((source) => source.source_id === 'agents');
   const agentFiles = agents ? walk(path.join(root.repo, agents.inputs[0])).filter((file) => file.endsWith('.md')) : [];
   const instructions = [ORIGIN, `# Forge Agent ${VERSION} — Codex host`, '', 'Estas instruções são geradas a partir das fontes canônicas do Forge.', '', '## Superfícies comuns', ...common.map((source) => `- ${source.source_id}: ${source.capability}`), '', '## Agentes customizados', ...agentFiles.map((file) => `- ${path.basename(file, '.md')}: .codex/agents/${path.basename(file, '.md')}.toml`), '', '## Skills e comandos', '- Conteúdo canônico materializado em `$CODEX_HOME/skills`, `$CODEX_HOME/commands` e `$CODEX_HOME/templates/dispatch`.', ''].join('\n');
-  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), interaction.project(instructions), 'instructions');
+  add('codex-instructions', 'AGENTS.md', path.join(root.projectRoot, 'AGENTS.md'), interaction.project(instructions + '\n' + require('./forge-instructions').renderPersonalContract() + '\n'), 'instructions');
   for (const file of agentFiles) {
     const name = path.basename(file, '.md');
     const source = rewriteMarkdown(fs.readFileSync(file, 'utf8'));

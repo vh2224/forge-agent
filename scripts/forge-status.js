@@ -303,6 +303,10 @@ function resolveFocus(cwd, milestoneId, activeRuns) {
 // torn-read tolerant end to end. opts = { milestoneId }.
 function collect(cwd, opts) {
   opts = opts || {};
+  if (opts.scope !== 'workspace') {
+    const snapshot = require('./forge-personal-context').readPersonalSnapshot({ ...opts, cwd, id: opts.milestoneId || opts.id, inspect: Boolean(opts.milestoneId || opts.id) });
+    return { ...snapshot, cwd, generated_at: new Date().toISOString(), warnings: snapshot.status === 'error' ? [snapshot.reason] : [] };
+  }
   const warnings = [];
   const now = Date.now();
 
@@ -435,6 +439,7 @@ function collect(cwd, opts) {
   }
 
   return {
+    scope: 'workspace',
     cwd,
     generated_at: new Date().toISOString(),
     runs: {
@@ -488,11 +493,31 @@ function makePaint(enabled) {
 }
 
 function renderTree(model, opts) {
+  if (model && model.scope !== 'workspace' && Array.isArray(model.works)) {
+    const labels = { pending: 'Pendência', acceptances: 'Aceite registrado', lastResult: 'Resultado registrado', handoff: 'Continuidade', nextAction: 'Próxima ação' };
+    const validity = { current: 'atual', stale: 'fonte alterada', missing: 'fonte ausente', unreadable: 'fonte ilegível' };
+    const reasons = { snapshot: 'evidências dos trabalhos vinculados', 'no-bindings': 'nenhum vínculo pessoal', 'explicit-inspection': 'inspeção solicitada; nenhum vínculo criado' };
+    const situation = { completed: 'concluído', pending: 'pendente', unknown: 'situação desconhecida', open: 'em aberto', active: 'ativo', inactive: 'inativo' };
+    const lines = [`## Contexto ${model.scope === 'inspection' ? 'solicitado (inspeção)' : 'pessoal'}`, '', `Diagnóstico: ${reasons[model.reason] || model.reason}`];
+    for (const work of model.works) {
+      lines.push('', `${work.id} — ${situation[work.workStatus]}; processo: ${situation[work.activity] || 'desconhecido'}`);
+      if (work.reliability !== 'current') lines.push(`Conferir evidências: ${work.reliability}`);
+      if (work.nextAction) lines.push(`Próxima ação: ${work.nextAction.text}`);
+      if (work.lastResult) lines.push(`Último resultado comprovado: ${work.lastResult.text} — ${work.lastResult.source}`);
+      for (const [field, captures] of Object.entries(work.checkpoint)) for (const capture of captures) {
+        if ((field === 'nextAction' && work.nextAction === capture) || (field === 'lastResult' && work.lastResult === capture)) continue;
+        lines.push(`- ${labels[field]}: ${capture.text} [${validity[capture.validity]}${capture.resolved ? ', resolvido' : ''}] — ${capture.source} (${capture.capturedAt.slice(0, 10)})`);
+      }
+      if (work.nextAction && work.nextAction.source) lines.push(`Fonte da próxima ação: ${work.nextAction.source}`);
+      if (work.terminalEvidence.source) lines.push(`Fonte atual: ${work.terminalEvidence.source}`);
+    }
+    return lines.join('\n') + '\n';
+  }
   const paint = makePaint(Boolean(opts && opts.color));
   const lines = [];
 
   if (!model || model.milestone === null) {
-    lines.push(paint.header('## Status GSD'));
+    lines.push(paint.header('## Status GSD — workspace (diagnóstico global)'));
     lines.push('');
     lines.push('Nenhum run ativo. Execute /forge-auto <M-id> ou /forge-task <descrição> para começar.');
     if (model && Array.isArray(model.warnings) && model.warnings.length > 0) {
@@ -504,7 +529,7 @@ function renderTree(model, opts) {
 
   const m = model.milestone;
 
-  lines.push(paint.header('## Status GSD'));
+  lines.push(paint.header('## Status GSD — workspace (diagnóstico global)'));
   lines.push('');
   lines.push(`**Milestone ativo:** ${paint.id(m.id)} — ${m.title}`);
   lines.push(`**Fase:** ${m.phase}`);
@@ -637,7 +662,7 @@ function renderTokensBlock(agg, opts) {
 // Reserve --tokens here so it doesn't accidentally swallow a positional M-id.
 // --watch uses the inline '=' form (--watch=<seconds>) instead of VALUE_FLAGS —
 // see the '=' split below, checked BEFORE the VALUE_FLAGS/boolean branch.
-const VALUE_FLAGS = new Set(['--cwd']);
+const VALUE_FLAGS = new Set(['--cwd', '--scope']);
 
 function parseArgs(argv) {
   const args = {};
@@ -680,6 +705,7 @@ Argumentos:
                       o .gsd/ realmente vive.
   --help             mostra esta ajuda e sai
   --json             emite o modelo de status como JSON (best-effort v1) e sai
+  --scope workspace  diagnóstico global explícito; padrão: contexto pessoal
   --tokens           anexa um bloco de uso de tokens agregado de events.jsonl
   --color            força cores ANSI mesmo sem TTY
   --no-color         desliga cores. Default: auto — cores só em TTY real,
@@ -702,7 +728,7 @@ function emitHumanRender(model, cwd, args) {
   const renderOpts = { color: Boolean(args._color) };
   process.stdout.write(renderTree(model, renderOpts));
 
-  if (args.tokens) {
+  if (args.tokens && model.scope === 'workspace') {
     const focusedId = (model.runs && model.runs.focused) || (model.milestone && model.milestone.id) || null;
     try {
       if (focusedId) {
@@ -768,7 +794,7 @@ function runWatch(cwd, args) {
   function frame() {
     if (stopped) return;
     try {
-      const model = collect(cwd, { milestoneId: args._positional || null });
+      const model = collect(cwd, { milestoneId: args._positional || null, scope: args.scope });
       // R4 fix: a milestone that doesn't exist must fail fast, exactly like
       // the single-shot path does, instead of looping forever re-rendering
       // the same not_found state. A milestone that exists but is missing
@@ -840,6 +866,11 @@ function cliMain() {
   }
 
   const cwd = typeof args.cwd === 'string' && args.cwd ? args.cwd : process.cwd();
+  if (args.scope !== undefined && !['personal', 'workspace'].includes(args.scope)) {
+    process.stderr.write('Invalid --scope: use personal or workspace.\n');
+    process.exitCode = 2;
+    return;
+  }
 
   let hasGsd = false;
   try {
@@ -847,7 +878,7 @@ function cliMain() {
   } catch {
     hasGsd = false;
   }
-  if (!hasGsd) {
+  if (!hasGsd && args.scope === 'workspace') {
     process.stderr.write('Nenhum projeto GSD encontrado neste diretório. Execute /forge-init para começar.\n');
     process.exit(1);
     return;
@@ -855,7 +886,7 @@ function cliMain() {
 
   const milestoneId = args._positional || null;
   if (milestoneId) {
-    if (!ids.isValid(milestoneId) || ids.entityKind(milestoneId) !== 'milestone') {
+    if (!ids.isValid(milestoneId) || !['task', 'milestone'].includes(ids.entityKind(milestoneId))) {
       process.stderr.write(`Id inválido: ${milestoneId} — esperado um id de milestone (ex.: M-20260101000000-slug).\n`);
       process.exit(2);
       return;
@@ -873,14 +904,14 @@ function cliMain() {
   }
 
   try {
-    const model = collect(cwd, { milestoneId });
+    const model = collect(cwd, { milestoneId, scope: args.scope });
     if (args.json) {
       // --json is programmatic consumption: emit the full collect() model
       // as-is (including not_found, if any) and exit 0 — the consumer
       // inspects model.not_found itself, unlike the human render path
       // below which exits 2 on not_found. best-effort v1, no tokens.
       process.stdout.write(JSON.stringify(model, null, 2) + '\n');
-      process.exit(0);
+      process.exit(model.status === 'error' ? 1 : 0);
       return;
     }
     if (model.not_found && model.not_found.code === 'not_found') {
@@ -890,7 +921,7 @@ function cliMain() {
     }
     emitHumanRender(model, cwd, args);
 
-    process.exit(0);
+    process.exit(model.status === 'error' ? 1 : 0);
   } catch (err) {
     process.stderr.write(`forge-status error: ${err && err.message ? err.message : err}\n`);
     process.exit(1);

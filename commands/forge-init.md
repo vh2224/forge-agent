@@ -107,7 +107,7 @@ The project is already managed by gsd-pi. Your job is to:
     Project: <name from PROJECT.md>
     Active milestone: M### — Title (or "none")
     Slices: X done / Y total
-    Next action: <from STATE.md>
+    Next action: <from personal snapshot, with provenance>
     VCS detected: <git|svn|none>
     Ignore rules added: <N> (or "(none — already up to date)")
 
@@ -320,13 +320,15 @@ Este projeto usa o workflow GSD para planejamento e execução autônoma.
 
 ## Início de sessão obrigatório
 
-Ao iniciar qualquer sessão neste projeto, leia em ordem:
-
-1. `.gsd/STATE.md` — posição atual e próxima ação
-2. `.gsd/milestones/<ativo>/M###-CONTEXT.md` — decisões de arquitetura do milestone
-3. `.gsd/AUTO-MEMORY.md` — conhecimento auto-aprendido (se existir)
-
-Se houver `continue.md` no slice ativo → leia, delete, retome de "Next Action".
+Ao iniciar, retomar ou receber iniciar, consulte primeiro:
+`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --snapshot --cwd . --json`.
+Resolve scripts/ do Forge ou `${FORGE_HOME:-~/.forge-agent}/scripts`.
+Siga `shared/forge-personal-context.md` da origem ou FORGE_HOME.
+Mostre trabalho pessoal, pendencias, aceites, ultimo resultado e proxima acao
+com proveniencia. Ausencia/erro nunca recorre a STATE, ledger ou auto-mode da equipe.
+Boot e somente leitura: nao adote legado, nao migre nem apague continue.md.
+Ponteiros operacionais historicos nao prevalecem sobre evidencia pessoal atual.
+Conhecimento tecnico compartilhado usa projecoes canonicas de memoria/decisoes.
 
 ## Comandos disponíveis
 

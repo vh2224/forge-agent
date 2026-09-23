@@ -117,9 +117,35 @@ function renderBlock(options = {}) {
     MARKER_START,
     '<!-- Gerado por forge-instructions.js. Edite o script, não este bloco: um sync o reescreve. -->',
     ...CONTRACT_LINES,
+    '',
+    renderPersonalContract(),
     MARKER_END,
   ];
-  return lines.join(eol);
+  return lines.join('\n').replace(/\r?\n/g, eol);
+}
+
+function renderPersonalContract() {
+  return [
+    '## Forge — contexto pessoal de sessão (obrigatório)',
+    '',
+    'Ao iniciar, retomar, receber “iniciar” ou atualizar status, consulte primeiro:',
+    '`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --snapshot --cwd "<cwd atual>" --json`.',
+    'Resolva FORGE_SCRIPTS_DIR para scripts/ do Forge ou ${FORGE_HOME:-~/.forge-agent}/scripts.',
+    'Siga `shared/forge-personal-context.md` na origem ou no FORGE_HOME. O perfil do sistema',
+    'guarda os vínculos; FORGE_HOME, conta LLM e sessão não são identidade pessoal.',
+    'Mostre trabalhos próprios, pendências, aceites, último resultado comprovado e próxima ação',
+    'com fontes e diagnóstico. Ausência, erro ou fonte stale/missing nunca autorizam fallback',
+    'para STATE, ledger, auto-mode.json ou descoberta de atividades de colegas.',
+    'Esta vista atual prevalece sobre ponteiros operacionais históricos em CLAUDE.md/KNOWLEDGE.md.',
+    'Prosa antiga sem evidência atual é histórica/não verificada; não alegue reconciliá-la inteira.',
+    'Boot/status são somente leitura: não vincule legado, não migre, não apague continue.md.',
+    'Criação e retomada explicitamente escolhida usam --bind com create/explicit-resume;',
+    'inspeção por ID não vincula. Auto/next sem ID usam --select: seleção ambígua ou atenção',
+    'pendente exige resolução explícita, nunca escolha por idade ou atividade.',
+    'Handoffs persistem via --checkpoint; inatividade/idle e SUMMARY isolado não provam conclusão.',
+    'Conhecimento técnico permanece acessível por projeções canônicas de memória/decisões;',
+    'não promova ledger ou ponteiros compartilhados a fila pessoal. Coordenação e locks continuam globais.',
+  ].join('\n');
 }
 
 // ── Block location ────────────────────────────────────────────────────────────
@@ -376,6 +402,7 @@ module.exports = {
   OUTCOMES,
   CONTRACT_LINES,
   renderBlock,
+  renderPersonalContract,
   scanMarkers,
   findBlock,
   detectEol,

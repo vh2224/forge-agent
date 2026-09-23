@@ -1,5 +1,16 @@
 ## v4.33.5 — Correções nas fronteiras de persistência, locks e execução
 
+## Unreleased - personal session context
+
+- Boot/status/refresh and implicit auto/next selection use explicit per-OS-profile
+  work bindings, independently of shared working copies and FORGE_HOME.
+- Durable handoffs retain pending UAT, acceptances and source hashes after process
+  inactivity; missing/corrupt/stale evidence is diagnosed without adopting team work.
+- Claude/Codex distributed instructions share the session contract. Global status
+  remains available explicitly with `--scope workspace`; legacy work requires an
+  explicitly selected resume. Reads never migrate or create the personal store.
+
+
 ### Fixed
 
 - **Credenciais (A1):** arquivos ilegíveis ou inválidos deixam de ser tratados como stores vazios. Mutações usam mutex, publicação atômica e journal de intenção sem o segredo; operações interrompidas exigem recuperação explícita, preservando os resíduos para inspeção.

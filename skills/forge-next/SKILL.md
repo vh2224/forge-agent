@@ -5,12 +5,58 @@ disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
 
+## Personal selection - before any operational load
+
+Read `shared/forge-personal-context.md` from the repo or FORGE_HOME before running
+the adapter or reading any run/state/handoff. When `forge-context-boundary` returns
+personal_checkpoint.status other than ok, report partial continuity and preserve
+artifacts; do not silently claim resume persisted. Resolve scripts and call
+`forge-cli-helpers.js --resolve-args --args "<explicit ID or empty>" --cwd "<cwd>"`.
+An empty argument uses only personal bindings; `none`, `refuse` or `error` stops
+before isolation/dispatch. No STATE, global alias, marker, ledger or legacy fallback.
+Multiple candidates require a selected ID; attention-required requires reconciliation.
+Set RUN_ID/RUN_KIND from the result, WORKING_DIR from the personal snapshot's project.
+A selected task routes to `forge-task --resume ID`; do not run a milestone unit for it.
+For an explicitly supplied ID only, bind with --intent explicit-resume before loading
+its artifacts. Inspecting an ID does not bind. Reconcile stale/missing evidence or
+pending decisions before dispatch; preserve prior acceptances. Global locks/census
+remain concurrency guards, never personal selection inputs.
+All references below to STATE mean `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`.
+RUN_ID is mandatory; historical empty-ID/legacy branches below are unreachable.
+After run/isolation registration, bind idempotently to capture validated worktree aliases.
+After every durable handoff (partial/blocked/pause/account/review/compact), and after
+advancing the next unit, saveCheckpoint per the shared contract before deactivation.
+On complete-milestone, explicitly reconcile pending/nextAction and capture resolved
+lastResult from final state/SUMMARY; process inactivity alone is never completion.
+
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-cli-helpers.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+PERSONAL_ARG="$ARGUMENTS"
+case "$PERSONAL_ARG" in next|step) PERSONAL_ARG="" ;; esac
+RESOLVE=$(node "$FORGE_SCRIPTS_DIR/forge-cli-helpers.js" --resolve-args --args "$PERSONAL_ARG" --cwd "$(pwd)") || exit 1
+STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$RESOLVE")
+case "$STATUS" in resume|activate-new) ;; *) echo "$RESOLVE"; exit 1 ;; esac
+RUN_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).run_id || '')" "$RESOLVE")
+RUN_KIND=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).kind || '')" "$RESOLVE")
+WORKING_DIR=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).project || '')" "$RESOLVE")
+[ -n "$RUN_ID" ] && [ -n "$WORKING_DIR" ] || exit 1
+if [ -n "$PERSONAL_ARG" ]; then
+  if ! node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --bind --project "$WORKING_DIR" --id "$RUN_ID" --intent explicit-resume --json; then
+    echo "Personal resume failed for $RUN_ID; preserve artifacts and recover explicitly." >&2
+    exit 1
+  fi
+fi
+```
+
+After an explicit bind, display --snapshot and reconcile attention-required before
+any adapter or isolation call. This guard grants no new consent for pending decisions.
+
 ## Parse arguments
 
 From `$ARGUMENTS`:
 - Empty, `next`, or `step` → **STEP MODE** (execute one unit, stop)
 - `auto` → tell the user: "Use `/forge-auto` para modo autônomo." and stop.
-- Anything else → treat as STEP MODE (ignore unknown args)
+- A valid work ID selects explicit resume in STEP MODE; invalid arguments stop.
 
 ## Bidirectional delivery
 
@@ -30,8 +76,8 @@ After successful housekeeping, acknowledge the unit using the loop adapter's
 
 ```bash
 ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
-ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
-WORKING_DIR=$(pwd)
+test -d "$WORKING_DIR/.gsd" || exit 1
+[ -n "$WORKING_DIR" ] || exit 1
 echo "WORKING_DIR=$WORKING_DIR"
 
 # Resolve runtime scripts dir — prefer local ./scripts (dogfood: edits take effect
@@ -81,8 +127,8 @@ memory. Same rule for `scripts/<name>.js` → `$FORGE_SCRIPTS_DIR/<name>.js`.
 ## Load context
 
 Read ONLY these files:
-1. `.gsd/STATE.md`
-2. `.gsd/AUTO-MEMORY.md` full file (skip silently if missing) — stored as `ALL_MEMORIES` for selective injection
+1. `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`
+2. Canonical memory projection (`forge-projection.renderMemory`) for selective injection.
 3. `.gsd/CODING-STANDARDS.md` (skip silently if missing)
 
 **Resolve PREFS via the canonical engine CLI (ONE call — never a 3-file md merge in-context).** The S01 engine (`scripts/forge-prefs.js`) reads the jsonc catalog per layer; legacy Markdown without jsonc hard-stops — see `shared/forge-prefs-cutover.md`. It applies the exact same user-global → repo-shared → local-personal precedence (last wins) that the old inline prose described. Do NOT read/merge `~/.claude/forge-agent-prefs.jsonc` + `.gsd/claude-agent-prefs.jsonc` + `.gsd/prefs.local.jsonc` by hand — that is exactly what the CLI does. See `shared/forge-dispatch.md § Per-unit prefs resolution` for the canonical helper.
@@ -132,7 +178,7 @@ If CODING-STANDARDS.md is missing, all section variables are `"(none)"`.
 Apply `forge_isolation` from prefs before dispatching the unit. Idempotent — re-running on every `/forge-next` invocation is safe (`already-on-branch` / `already-exists`). `$ISO_RUN` is the active milestone ID from STATE.md:
 
 ```bash
-ISO_RUN="<active milestone ID from STATE.md>"
+ISO_RUN="$RUN_ID"
 ISO_RESULT=$(node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --setup --run "$ISO_RUN" --cwd "$WORKING_DIR")
 ISOLATION_MODE=$(node -e "process.stdout.write((JSON.parse(process.argv[1]).mode)||'shared')" "$ISO_RESULT")
 WORKTREE_DIR=$(node -e "const r=JSON.parse(process.argv[1]);const w=(r.repos||[]).find(x=>x.worktree&&x.status!=='error');process.stdout.write(w?w.worktree:'')" "$ISO_RESULT")
