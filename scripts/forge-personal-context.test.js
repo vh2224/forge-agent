@@ -47,6 +47,7 @@ async function main() {
     f.bind('TASK-001'); f.bind('TASK-002', { userHome: f.otherHome });
     assert.strictEqual(f.bind('TASK-001', { intent: 'explicit-resume' }).reason, 'already-bound');
     assert.deepStrictEqual(personal.readPersonalSnapshot(f.options).works.map(w => w.id), ['TASK-001']);
+    assert.strictEqual(personal.readPersonalSnapshot({ userHome: f.home, cwd: f.root }).reason, 'project-unresolved');
     assert.deepStrictEqual(personal.readPersonalSnapshot({ ...f.options, userHome: f.otherHome }).works.map(w => w.id), ['TASK-002']);
     assert.strictEqual(personal.bindWork({ ...f.options, id: '../../escape', intent: 'create' }).reason, 'invalid-id');
     assert.strictEqual(personal.bindWork({ ...f.options, id: 'TASK-001', intent: 'inspect' }).reason, 'intent-required');

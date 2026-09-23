@@ -295,6 +295,7 @@ function readPersonalSnapshot(options = {}) {
     ? { status: 'ok', reason: 'no-bindings', works: [], scope: 'personal' } : { ...store, works: [], scope: 'personal' };
   try {
     const address = resolveProject(store.value, options);
+    if (!address) return { ...failure('project-unresolved'), works: [], scope: 'personal' };
     const project = address && store.value.projects[address.key];
     if (!project) return { status: 'ok', reason: 'no-bindings', works: [], scope: 'personal' };
     if (canonical(project.path) !== project.path) return failure('project-changed');
