@@ -81,6 +81,39 @@ try {
   assert.strictEqual(rendered.split('Wait for environment').length - 1, 1, 'next action is not duplicated');
   assert(!rendered.includes(after.checkpoint.acceptances[0].hash), 'full hash remains in JSON, not the human view');
   assert.strictEqual(fs.readFileSync(handoff, 'utf8'), 'UAT environment pending; plan already accepted.');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).status, 'activate-new', 'sole personal milestone without registry must register');
+  // Execute each skill's actual bootstrap/bind block against a fresh milestone.
+  for (const [index, name] of ['forge-auto', 'forge-next'].entries()) {
+    const skill = fs.readFileSync(path.join(__dirname, '..', 'skills', name, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+    const firstBlock = skill.match(/```bash\n([\s\S]*?)```/)[1];
+    const block = firstBlock.slice(firstBlock.indexOf('# Route task IDs'));
+    const id = `M00${index + 7}`;
+    const bootstrap = command(process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe') : 'bash', ['-c', block], { env: { ...f.env(), RUN_KIND: 'milestone', STATUS: 'activate-new', RUN_ID: id,
+      WORKING_DIR: f.project.replace(/\\/g, '/'), FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'), PERSONAL_ARG: id } });
+    assert.strictEqual(bootstrap.status, 0, bootstrap.stdout + bootstrap.stderr);
+    assert(fs.existsSync(path.join(f.project, '.gsd', 'milestones', id, `${id}-STATE.md`)));
+    assert(personal.readPersonalSnapshot(f.options).works.some(w => w.id === id));
+    assert(firstBlock.indexOf('--create') < firstBlock.indexOf('--bind'), 'bootstrap precedes binding');
+    assert(firstBlock.includes('exit 1'), 'failed bootstrap cannot dispatch');
+    const failedId = `M01${index + 7}`;
+    const fail = command(process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe') : 'bash', ['-c', block + '\necho UNREACHABLE'], {
+      env: { ...f.env(), RUN_KIND: 'milestone', STATUS: 'activate-new', RUN_ID: failedId, WORKING_DIR: f.project.replace(/\\/g, '/'),
+        FORGE_SCRIPTS_DIR: f.root.replace(/\\/g, '/'), PERSONAL_ARG: failedId },
+    });
+    assert.strictEqual(fail.status, 1, fail.stdout + fail.stderr);
+    assert(!fail.stdout.includes('UNREACHABLE'), 'bootstrap error terminates executable block');
+    assert(!personal.readPersonalSnapshot(f.options).works.some(w => w.id === failedId));
+    if (name === 'forge-auto') {
+      const update = skill.split('\n').find(line => line.includes('forge-runs.js" --update') && line.includes('SESSION_ID'));
+      const missing = command(process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe') : 'bash', ['-c', update + '\necho UNREACHABLE'], {
+        env: { ...f.env(), RUN_ID: 'M999', SESSION_ID: 'fixture', WORKING_DIR: f.project.replace(/\\/g, '/'),
+          FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'), ISOLATION_MODE: 'shared', WORKTREES_JSON: '[]', RUN_BRANCH: '' },
+      });
+      assert.strictEqual(missing.status, 1, missing.stdout + missing.stderr);
+      assert(!missing.stdout.includes('UNREACHABLE'), 'missing registry update stops dispatch');
+    }
+
+  }
   // Partial creation exposes the failed second write, preserving the run.
   f.work('TASK-003');
   const corruptHome = path.join(f.root, 'corrupt-home'); fs.mkdirSync(path.join(corruptHome, '.forge-personal'), { recursive: true });

@@ -208,7 +208,13 @@ function saveCheckpoint(options = {}) {
         return { text: entry.text, source, hash: digest(fs.readFileSync(source)), capturedAt: new Date().toISOString(), resolved: entry.resolved === true };
       });
       // Acceptances are historical decisions: retain previous observations.
-      next[field] = field === 'acceptances' ? [...(next[field] || []), ...captures.filter(c => !(next[field] || []).some(old => old.text === c.text && old.hash === c.hash))] : captures;
+      if (field === 'acceptances') {
+        next[field] = [...(next[field] || [])];
+        for (const capture of captures) {
+          const latest = next[field].filter(old => old.text === capture.text).at(-1);
+          if (!latest || latest.hash !== capture.hash || latest.source !== capture.source || latest.resolved !== capture.resolved) next[field].push(capture);
+        }
+      } else next[field] = captures;
     }
     binding.checkpoint = next;
     return { status: 'ok', reason: 'checkpoint-saved', id: options.id };
@@ -260,14 +266,14 @@ function inspectWork(project, binding) {
   }
   // Older acceptance observations remain visible, but an explicit recapture of
   // the same decision supersedes their confidence without deleting history.
-  const observations = Object.entries(checkpoint).flatMap(([field, entries]) => field !== 'acceptances' ? entries
-    : entries.filter((capture, index) => !entries.slice(index + 1).some(later => later.text === capture.text)));
+  const effectiveAcceptances = (checkpoint.acceptances || []).filter((capture, index, entries) => !entries.slice(index + 1).some(later => later.text === capture.text));
+  const observations = Object.entries(checkpoint).flatMap(([field, entries]) => field === 'acceptances' ? effectiveAcceptances : entries);
   // Loose-task SUMMARY is only terminal when explicitly captured as the final
   // result after reconciliation. Its presence alone never completes the work.
   const finalResult = (checkpoint.lastResult || []).find(c => c.resolved && c.validity === 'current');
   if (finalResult) completed = true;
   const unreliable = observations.some(c => c.validity !== 'current');
-  const pending = (checkpoint.pending || []).some(c => !c.resolved);
+  const pending = (checkpoint.pending || []).some(c => !c.resolved) || effectiveAcceptances.some(c => !c.resolved);
   const actionable = (checkpoint.nextAction || []).some(c => !c.resolved);
   const workStatus = completed && !pending && !actionable && !unreliable ? 'completed' : pending ? 'pending' : terminal.status !== 'ok' || terminal.reason ? 'unknown' : 'open';
   return { id: binding.id, kind: binding.kind, activity, runDiagnostic, workStatus, checkpoint,

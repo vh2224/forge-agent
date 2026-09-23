@@ -16,8 +16,9 @@ before isolation/dispatch. No STATE, global alias, marker, ledger or legacy fall
 Multiple candidates require a selected ID; attention-required requires reconciliation.
 Set RUN_ID/RUN_KIND from the result, WORKING_DIR from the personal snapshot's project.
 A selected task routes to `forge-task --resume ID`; do not run a milestone unit for it.
-For an explicitly supplied ID only, bind with --intent explicit-resume before loading
-its artifacts. Inspecting an ID does not bind. Reconcile stale/missing evidence or
+Bootstrap an activate-new milestone before binding or loading its state. For an
+explicitly supplied ID, bind with --intent explicit-resume before loading existing
+state or handoff artifacts. Inspecting an ID does not bind. Reconcile stale/missing evidence or
 pending decisions before dispatch; preserve prior acceptances. Global locks/census
 remain concurrency guards, never personal selection inputs.
 All references below to STATE mean `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`.
@@ -39,6 +40,17 @@ RUN_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).run_id || '')
 RUN_KIND=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).kind || '')" "$RESOLVE")
 WORKING_DIR=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).project || '')" "$RESOLVE")
 [ -n "$RUN_ID" ] && [ -n "$WORKING_DIR" ] || exit 1
+# Route task IDs to forge-task --resume before this milestone-only block.
+if [ "$RUN_KIND" = "milestone" ] && [ "$STATUS" = "activate-new" ]; then
+  PER_MILESTONE_STATE="$WORKING_DIR/.gsd/milestones/$RUN_ID/$RUN_ID-STATE.md"
+  if [ ! -f "$PER_MILESTONE_STATE" ]; then
+    mkdir -p "$WORKING_DIR/.gsd/milestones/$RUN_ID" || exit 1
+    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase plan-milestone --next-action "Plan milestone $RUN_ID" --auto-mode on --cwd "$WORKING_DIR" > /dev/null; then
+      echo "Milestone bootstrap failed for $RUN_ID; stop before binding or dispatch." >&2
+      exit 1
+    fi
+  fi
+fi
 if [ -n "$PERSONAL_ARG" ]; then
   if ! node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --bind --project "$WORKING_DIR" --id "$RUN_ID" --intent explicit-resume --json; then
     echo "Personal resume failed for $RUN_ID; preserve artifacts and recover explicitly." >&2
@@ -263,14 +275,14 @@ Branch on `$STATUS`:
 - **`activate-new`** — register the new run:
   ```bash
   SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   echo "$MSG"
   ```
   Then continue to legacy activation (which writes auto-mode-started.txt + alias).
 - **`resume`** — emit `$MSG`, set `RUN_ID` (already set). Update the existing registry entry with the new session_id (the previous orchestrator process exited; this is a fresh session that needs to own heartbeat updates) and the freshly-resolved isolation mode:
   ```bash
   SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" > /dev/null
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   ```
   `branch` is refreshed here for the same reason `isolation_mode` is: it is what the
   setup just resolved, and a record created before the field existed carries `null`.

@@ -369,7 +369,7 @@
         "refused_when_active_count": {
           "type": "integer",
           "default": 2,
-          "description": "/forge-auto sem ID explícito recusa quando >= N runs ativas (1 = sempre exige ID; 999 = nunca recusa)."
+          "description": "Deprecated for personal selection; retained for preference compatibility. Auto/next always require an explicit ID for multiple personal candidates, regardless of this legacy threshold. Workspace concurrency guards remain global."
         },
         "dashboard_refresh_on": {
           "type": "array",

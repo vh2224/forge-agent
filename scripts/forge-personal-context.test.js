@@ -134,6 +134,22 @@ async function main() {
       pending: [], nextAction: [], lastResult: [{ text: 'Task complete, UAT reconciled', source: summary, resolved: true }],
     } }).status, 'ok');
     assert.strictEqual(personal.readPersonalSnapshot(f.options).works[0].workStatus, 'completed');
+    // The latest acceptance supersedes history even when source/hash are unchanged.
+    const accept = resolved => personal.saveCheckpoint({ ...f.options, id: 'TASK-001', intent: 'checkpoint', checkpoint: {
+      acceptances: [{ text: 'Final UAT approval', source: summary, resolved }],
+    } });
+    assert.strictEqual(accept(false).status, 'ok');
+    assert.strictEqual(personal.readPersonalSnapshot(f.options).works[0].workStatus, 'pending');
+    assert.strictEqual(accept(true).status, 'ok');
+    assert.strictEqual(personal.readPersonalSnapshot(f.options).works[0].workStatus, 'completed');
+    assert.strictEqual(accept(false).status, 'ok');
+    assert.strictEqual(personal.readPersonalSnapshot(f.options).works[0].workStatus, 'pending');
+    assert.strictEqual(accept(true).status, 'ok');
+    const history = personal.readPersonalSnapshot(f.options).works[0].checkpoint.acceptances.filter(c => c.text === 'Final UAT approval');
+    assert.deepStrictEqual(history.map(c => c.resolved), [false, true, false, true]);
+    assert.strictEqual(new Set(history.map(c => c.hash)).size, 1);
+    accept(true);
+    assert.strictEqual(personal.readPersonalSnapshot(f.options).works[0].checkpoint.acceptances.length, 5);
     const run = path.join(f.project, '.gsd', 'forge', 'runs', 'TASK-003.json');
     fs.writeFileSync(run, '{broken');
     assert.strictEqual(personal.readPersonalSnapshot(f.options).works.find(w => w.id === 'TASK-003').reliability, 'run-corrupt');

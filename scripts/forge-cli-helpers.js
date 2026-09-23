@@ -20,6 +20,7 @@
 'use strict';
 
 const path  = require('path');
+const fs = require('fs');
 const runs  = require('./forge-runs.js');
 const ids   = require('./forge-ids.js');
 const personal = require('./forge-personal-context');
@@ -79,10 +80,10 @@ function resolveRunInProject(cwd, argsRaw, opts) {
     if (kind === 'task') {
       // Task lookup is format-agnostic — registry key is the ID string as-is
       const existing = runs.get(cwd, arg);
-      if (existing && existing.active) {
+      if (existing || fs.existsSync(path.join(cwd, '.gsd', 'tasks', arg, `${arg}-PLAN.md`))) {
         return { run_id: arg, kind: 'task', status: 'resume', message: `Retomando task run: ${arg}` };
       }
-      return { run_id: null, kind: null, status: 'error', message: `Task ID "${arg}" não encontrado no registry.` };
+      return { run_id: null, kind: null, status: 'error', message: `Task ID "${arg}" não encontrado no registry nem nos artefatos da task.` };
     }
 
     // Neither milestone nor task. Reached by kind === 'item' (I-<ts>-<slug> work
@@ -93,7 +94,11 @@ function resolveRunInProject(cwd, argsRaw, opts) {
   }
 
   const selection = personal.selectPersonalWork({ ...opts, cwd });
-  if (selection.selected) return { run_id: selection.selected.id, kind: selection.selected.kind, project: selection.project, status: 'resume', reason: selection.reason, message: `Retomando trabalho pessoal: ${selection.selected.id}` };
+  if (selection.selected) {
+    const existing = runs.get(selection.project, selection.selected.id);
+    const status = selection.selected.kind === 'milestone' && !existing ? 'activate-new' : 'resume';
+    return { run_id: selection.selected.id, kind: selection.selected.kind, project: selection.project, status, reason: selection.reason, message: `Retomando trabalho pessoal: ${selection.selected.id}` };
+  }
   return { run_id: null, kind: null, status: selection.status === 'error' ? 'error' : selection.reason === 'selection-required' ? 'refuse' : 'none',
     reason: selection.reason, candidates: selection.candidates || [], message: selection.message || `Contexto pessoal: ${selection.reason}. Especifique um ID para retomada explícita.` };
 }

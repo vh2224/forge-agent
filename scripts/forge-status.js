@@ -305,7 +305,7 @@ function collect(cwd, opts) {
   opts = opts || {};
   if (opts.scope !== 'workspace') {
     const snapshot = require('./forge-personal-context').readPersonalSnapshot({ ...opts, cwd, id: opts.milestoneId || opts.id, inspect: Boolean(opts.milestoneId || opts.id) });
-    return { ...snapshot, cwd, generated_at: new Date().toISOString(), warnings: snapshot.status === 'error' ? [snapshot.reason] : [] };
+    return { ...snapshot, scope: snapshot.scope || (opts.milestoneId || opts.id ? 'inspection' : 'personal'), works: snapshot.works || [], cwd, generated_at: new Date().toISOString(), warnings: snapshot.status === 'error' ? [snapshot.reason] : [] };
   }
   const warnings = [];
   const now = Date.now();
@@ -887,7 +887,7 @@ function cliMain() {
   const milestoneId = args._positional || null;
   if (milestoneId) {
     if (!ids.isValid(milestoneId) || !['task', 'milestone'].includes(ids.entityKind(milestoneId))) {
-      process.stderr.write(`Id inválido: ${milestoneId} — esperado um id de milestone (ex.: M-20260101000000-slug).\n`);
+      process.stderr.write(`Id inválido: ${milestoneId} — esperado um id de milestone ou task (ex.: M-20260101000000-slug ou TASK-001).\n`);
       process.exit(2);
       return;
     }

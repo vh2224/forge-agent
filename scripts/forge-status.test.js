@@ -16,6 +16,19 @@ const status = require('./forge-status.js');
 const tokens = require('./forge-tokens.js');
 
 // ── Harness (copied from forge-ids.test.js) ─────────────────────────────────
+// Real CLI inspection outside any project must render a diagnostic, not workspace state.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-unresolved-'));
+  try {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'forge-status.js'), 'TASK-001', '--cwd', dir], {
+      encoding: 'utf8', windowsHide: true, env: { ...process.env, HOME: dir, USERPROFILE: dir },
+    });
+    require('assert').strictEqual(result.status, 1, result.stderr);
+    require('assert')(result.stdout.includes('project-unresolved'), result.stdout);
+    require('assert')(!result.stderr.includes('Cannot read properties'), result.stderr);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
 let passed = 0;
 let failed = 0;
 const failures = [];

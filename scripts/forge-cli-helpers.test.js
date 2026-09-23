@@ -16,6 +16,14 @@ try {
   assert(!fs.existsSync(path.join(f.home, '.forge-personal')), 'ID resolution/inspection is not binding');
   f.bind('M001');
   assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).run_id, 'M001', 'inactive bound milestone beats active peer');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).status, 'resume');
+  fs.unlinkSync(path.join(f.project, '.gsd', 'forge', 'runs', 'M001.json'));
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).status, 'activate-new');
+  f.work('TASK-001');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'TASK-001', f.options).status, 'resume');
+  fs.unlinkSync(path.join(f.project, '.gsd', 'forge', 'runs', 'TASK-001.json'));
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'TASK-001', f.options).status, 'resume');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'TASK-999', f.options).status, 'error');
   f.bind('M002');
   assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).status, 'refuse');
   assert.strictEqual(personal.selectPersonalWork(f.options).reason, 'selection-required');

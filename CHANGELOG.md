@@ -1,5 +1,3 @@
-## v4.33.5 — Correções nas fronteiras de persistência, locks e execução
-
 ## Unreleased - personal session context
 
 - Boot/status/refresh and implicit auto/next selection use explicit per-OS-profile
@@ -10,6 +8,7 @@
   remains available explicitly with `--scope workspace`; legacy work requires an
   explicitly selected resume. Reads never migrate or create the personal store.
 
+## v4.33.5 — Correções nas fronteiras de persistência, locks e execução
 
 ### Fixed
 

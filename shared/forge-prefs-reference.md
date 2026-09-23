@@ -330,7 +330,7 @@ Registro e saúde de runs simultâneas (.gsd/forge/runs/*.json) — staleness, r
 
 - **Tipo:** integer
 - **Default:** `2`
-- **Descrição:** /forge-auto sem ID explícito recusa quando >= N runs ativas (1 = sempre exige ID; 999 = nunca recusa).
+- **Compatibility:** Deprecated for personal selection; retained without rewriting user preferences. Auto/next now always require an explicit ID when multiple personal candidates exist, regardless of this legacy threshold. Workspace concurrency guards remain global and never provide personal candidates.
 
 ### `multi_run.dashboard_refresh_on`
 
