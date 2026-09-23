@@ -417,6 +417,13 @@ isolation_mode: {isolation_mode from prefs}
 **Auto-mode:** off
 **Next Action:** Plan first slice: run /forge-next or /forge-auto
 ```
+Before reporting success (even without an active run), read `shared/forge-personal-context.md`
+and bind the new milestone:
+`node "<FORGE_SCRIPTS_DIR>/forge-personal-context.js" --bind --project "<WORKING_DIR>" --id "<MILESTONE_ID>" --intent create --json`.
+A nonzero result is partial creation: preserve milestone state, report ID and
+explicit-resume recovery, and stop. Capture nextAction with --checkpoint using
+this per-milestone STATE as source. Retain acceptances and any pending decisions.
+
 Then run `node scripts/forge-dashboard.js --cwd .` to regenerate the root dashboard.
 
 Report to user:

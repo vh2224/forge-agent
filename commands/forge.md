@@ -3,155 +3,42 @@ description: "Forge REPL — ponto de entrada unificado. Mostra status do projet
 allowed-tools: Read, Bash, Skill, AskUserQuestion, TaskCreate, TaskUpdate
 ---
 
-## Bootstrap guard
+## Load personal context (also on every refresh)
+
+Read `shared/forge-personal-context.md` from the repository or FORGE_HOME.
+Resolve the scripts directory, then run:
 
 ```bash
-ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
-ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
-pwd
-# Routing contract (multi-LLM): refresh the block the session itself must obey.
-# Idempotent, advisory, only prints changes and refusals.
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-instructions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-node "$FORGE_SCRIPTS_DIR/forge-instructions.js" --sync --cwd . --no-create --quiet 2>&1 || true
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-personal-context.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --snapshot --cwd . --json
 ```
 
-**Se CLAUDE.md não existe:** Stop. Tell the user:
-> Projeto não inicializado. Execute `/forge-init` primeiro — isso cria o `CLAUDE.md` que restaura o contexto automaticamente ao reabrir o chat.
-
-**Se .gsd/STATE.md não existe:** Stop. Tell the user:
-> Nenhum projeto GSD encontrado neste diretório. Execute `/forge-init` para começar.
-
----
-
-## Load context
-
-Read ONLY this file:
-1. `.gsd/STATE.md` — store as `STATE`
-
-> AUTO-MEMORY is NOT loaded here. It will be passed to workers at dispatch time by forge-auto/forge-task/forge-next.
-
-From STATE extract:
-- `PROJECT_NAME` ← `project` field (or filename fallback)
-- `ACTIVE_MILESTONE` ← `active_milestone` field (or `—` if none)
-- `NEXT_ACTION` ← `next_action` field (or `—` if none)
-
----
-
-## Auto-resume detection
-
-Check if auto-mode is already active AND alive (heartbeat-stale detection):
-
-```bash
-AUTO_STATE=$(node -e "
-try {
-  const a = JSON.parse(require('fs').readFileSync('.gsd/forge/auto-mode.json','utf8'));
-  if (a.active !== true) { process.stdout.write('inactive'); return; }
-  const last = a.last_heartbeat || a.worker_started || a.started_at || 0;
-  const age = Date.now() - last;
-  process.stdout.write(age > 300000 ? 'stale' : 'fresh');
-} catch { process.stdout.write('inactive'); }
-")
-```
-
-Branch on `$AUTO_STATE`:
-
-- **`inactive`** — no prior auto session; proceed to REPL loop.
-- **`stale`** — previous auto session died (Ctrl+C, terminal kill). Clear the stale marker silently and proceed to REPL loop as a normal start:
-  ```bash
-  echo '{"active":false}' > .gsd/forge/auto-mode.json
-  ```
-  Do NOT emit a resume message.
-- **`fresh`** — heartbeat within the last 5 minutes → genuine recovery (just-reopened or concurrent instance).
-  → Emit one line: `↺ Auto-mode ativo — retomando forge-auto...`
-  → Call `Skill("forge-auto")` immediately (skip the menu loop entirely)
-  → After skill returns, exit
-
----
+This load is read-only. Do not sync instructions, create memory, migrate state,
+remove continue.md, read global STATE/auto-mode/compact markers, or discover team work.
+Use the snapshot's project, works, pending decisions/acceptances, lastResult,
+nextAction and source/hash/capture diagnostics. Show no-bindings distinctly from
+error or attention-required. Historical operational prose does not override it.
+Technical knowledge remains available through canonical memory/decision projections.
 
 ## REPL loop
 
-Display one-line status then enter the menu loop. Repeat until user selects "sair".
+At the first iteration, after compact recovery, and **after each skill returns**,
+repeat the snapshot command above. Do not infer recovery from process activity.
+Display personal work and next action with provenance; never select by mtime.
+Offer auto, next, task, new-milestone, status, help and sair through the host's
+permitted question adapter (`shared/forge-interaction.md`). Unanswered required
+choices stay pending. `sair` closes this menu without touching another process.
 
-**Status line format:**
-```
-forge  ·  {PROJECT_NAME}  ·  {ACTIVE_MILESTONE}  ·  {NEXT_ACTION}
-```
+| Choice | Action |
+|---|---|
+| auto / next | Run `forge-cli-helpers.js --resolve-args --cwd .` first. Only resume an unambiguous personal candidate. Route a task to `forge-task --resume ID`; a milestone to the chosen auto/next skill with ID. |
+| task | Call `forge-task` for the supplied description. |
+| new-milestone | Call `forge-new-milestone`. |
+| status | Call `forge-status`; workspace diagnostics only when explicitly requested with `--scope workspace`. |
+| help | Call `forge-help`. |
+| sair | Emit `forge encerrado. Execute /forge para retomar.` and stop. |
 
----
-
-### Loop iteration
-
-At the start of EVERY iteration, run the compact recovery check:
-
-```bash
-cat .gsd/forge/compact-signal.json 2>/dev/null
-```
-
-If the file exists:
-1. Re-read `.gsd/STATE.md` → update `STATE`, `PROJECT_NAME`, `ACTIVE_MILESTONE`, `NEXT_ACTION`
-2. Delete the signal: `rm -f .gsd/forge/compact-signal.json`
-3. Check auto-mode:
-   ```bash
-   cat .gsd/forge/auto-mode.json 2>/dev/null
-   ```
-   If `active: true` (regardless of elapsed time):
-   → Emit: `↺ Recovery pós-compactação — retomando forge-auto de: {NEXT_ACTION}`
-   → Call `Skill("forge-auto")` immediately — **do NOT show the menu**
-   → After skill returns, continue the REPL loop normally
-   
-   If auto-mode is not active:
-   → Emit: `↺ Recovery pós-compactação — retomando de: {NEXT_ACTION}`
-   → Fall through to menu normally
-
-If the file does not exist, skip this block entirely.
-
----
-
-### Menu
-
-After the compact recovery check, show the menu via AskUserQuestion:
-
-```
-AskUserQuestion({
-  question: "forge · {PROJECT_NAME} · {ACTIVE_MILESTONE}\n{NEXT_ACTION}\n\nO que você quer fazer?",
-  options: [
-    "auto — modo autônomo (executa o milestone até concluir)",
-    "task — criar e executar uma task avulsa",
-    "new-milestone — planejar um novo milestone",
-    "sair — fechar o forge  |  status · help também disponíveis"
-  ]
-})
-```
-
-**Dispatch based on response:**
-
-| Response starts with | Action |
-|----------------------|--------|
-| `auto` | Call `Skill("forge-auto")`. After skill returns, continue loop. |
-| `task` | Call `Skill("forge-task")`. After skill returns, continue loop. |
-| `new-milestone` | Call `Skill("forge-new-milestone")`. After skill returns, continue loop. |
-| `status` | Call `Skill("forge-status")`. After skill returns, continue loop. |
-| `help` | Call `Skill("forge-help")`. After skill returns, continue loop. |
-| `sair` | Deactivate auto-mode if active, then exit (see below). |
-
-**After each skill returns**, re-read STATE.md to refresh `PROJECT_NAME`, `ACTIVE_MILESTONE`, `NEXT_ACTION`, then go back to the top of the loop (compact recovery check → menu).
-
----
-
-## Exit ("sair")
-
-Deactivate auto-mode indicator if it was active:
-
-```bash
-cat .gsd/forge/auto-mode.json 2>/dev/null | grep '"active":true' && \
-  echo '{"active":false}' > .gsd/forge/auto-mode.json || true
-```
-
-Emit:
-```
-forge encerrado. Execute /forge para retomar a qualquer momento.
-```
-
-Stop. Do not continue the loop.
-
-**Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
+For multiple candidates ask for an ID. Zero bindings or attention-required is not
+permission to discover or dispatch colleagues' work. Explicit inspection does not
+bind; an explicitly selected resume uses the bind contract before reading handoff.
+After any skill returns, refresh with --snapshot and return to the menu.

@@ -105,7 +105,7 @@ const INVENTORY = [
   { key: 'multi_run.stale_cleanup_ms', type: 'integer', default: 1800000, source: 'scripts/forge-runs.js:27 STALE_THRESHOLD_MS = 30 * 60 * 1000' },
   { key: 'multi_run.stale_warning_ms', type: 'integer', default: 180000, source: 'forge-agent-prefs.md § Multi-Run (statusline yellow threshold)' },
   { key: 'multi_run.stale_red_ms', type: 'integer', default: 300000, source: 'forge-agent-prefs.md § Multi-Run (statusline red threshold)' },
-  { key: 'multi_run.refused_when_active_count', type: 'integer', default: 2, source: "scripts/forge-cli-helpers.js:68 readPref(cwd, 'multi_run.refused_when_active_count', '2')" },
+  { key: 'multi_run.refused_when_active_count', type: 'integer', default: 2, source: "shared/forge-prefs-reference.md deprecated compatibility default (no personal selector reader)" },
   { key: 'multi_run.dashboard_refresh_on', type: 'array', default: ['boot', 'exit', 'phase_change'], source: 'skills/forge-auto/SKILL.md:1487 + forge-agent-prefs.md § Multi-Run' },
   { key: 'multi_run.legacy_alias', type: 'boolean', default: true, source: 'scripts/forge-runs.js ALIAS_FILE refresh (auto-mode.json mirror kept by default)' },
   // — parallelism —
@@ -456,7 +456,7 @@ const WITNESSES = [
   ['context_monitor.critical_threshold', DEFAULT_THRESHOLDS.critical, 'scripts/forge-context-monitor.js:44 DEFAULT_THRESHOLDS.critical (imported)'],
   ['context_monitor.checkpoint_threshold', DEFAULT_THRESHOLDS.checkpoint, 'scripts/forge-context-monitor.js DEFAULT_THRESHOLDS.checkpoint (imported)'],
   // CLI helper fallback arg
-  ['multi_run.refused_when_active_count', 2, "scripts/forge-cli-helpers.js:68 readPref(..., '2')"],
+  ['multi_run.refused_when_active_count', 2, "shared/forge-prefs-reference.md retained compatibility default"],
   ['multi_run.stale_cleanup_ms', 1800000, 'scripts/forge-runs.js:27 STALE_THRESHOLD_MS = 30 * 60 * 1000'],
   // sidecar + verify + ids + cleanup + compact
   ['workers.timeout', 1800, 'shared/forge-dispatch.md:969 invalid → 1800'],

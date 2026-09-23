@@ -16,6 +16,19 @@ const status = require('./forge-status.js');
 const tokens = require('./forge-tokens.js');
 
 // ── Harness (copied from forge-ids.test.js) ─────────────────────────────────
+// Real CLI inspection outside any project must render a diagnostic, not workspace state.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-unresolved-'));
+  try {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'forge-status.js'), 'TASK-001', '--cwd', dir], {
+      encoding: 'utf8', windowsHide: true, env: { ...process.env, HOME: dir, USERPROFILE: dir },
+    });
+    require('assert').strictEqual(result.status, 1, result.stderr);
+    require('assert')(result.stdout.includes('project-unresolved'), result.stdout);
+    require('assert')(!result.stderr.includes('Cannot read properties'), result.stderr);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
 let passed = 0;
 let failed = 0;
 const failures = [];
@@ -376,7 +389,7 @@ console.log('3. Milestone tree (collect)');
 
 test('collect builds slice statuses done/active/pending and progress', () => {
   const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   assert(model.milestone !== null, 'milestone present');
   const m = model.milestone;
   assertEq(m.id, milestoneId, 'id');
@@ -397,7 +410,7 @@ test('collect attaches tasks for every slice with a PLAN.md (expanded default)',
     ['# S01 Plan', '', '## Tasks', '', '- [x] T01: done thing', '- [ ] T02: same id as the active task', ''].join('\n'),
     'utf8'
   );
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   const bySlice = Object.fromEntries(model.milestone.slices.map((s) => [s.id, s]));
   assert(bySlice.S02.tasks.length === 4, `expected 4 tasks on S02, got ${bySlice.S02.tasks.length}`);
   assert(bySlice.S01.tasks.length === 2, `expected 2 tasks on S01, got ${bySlice.S01.tasks.length}`);
@@ -417,7 +430,7 @@ test('collect attaches tasks for every slice with a PLAN.md (expanded default)',
 
 test('collect derives task statuses done/active/pending', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   const s02 = model.milestone.slices.find((s) => s.id === 'S02');
   const byTask = Object.fromEntries(s02.tasks.map((t) => [t.id, t]));
   assertEq(byTask.T01.status, 'done', 't01');
@@ -431,7 +444,7 @@ test('collect derives task done from T##-SUMMARY.md when plan checkbox lags', ()
   const t03Dir = path.join(dir, '.gsd', 'milestones', milestoneId, 'slices', 'S02', 'tasks', 'T03');
   fs.mkdirSync(t03Dir, { recursive: true });
   fs.writeFileSync(path.join(t03Dir, 'T03-SUMMARY.md'), '# Summary\n\nDone.\n', 'utf8');
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   const s02 = model.milestone.slices.find((s) => s.id === 'S02');
   const byTask = Object.fromEntries(s02.tasks.map((t) => [t.id, t]));
   assertEq(byTask.T03.status, 'done', 't03 derives done from its summary file');
@@ -471,7 +484,7 @@ test('truncated runs JSON does not throw and is skipped', () => {
   let model;
   let threw = false;
   try {
-    model = status.collect(dir, {});
+    model = status.collect(dir, { scope: 'workspace' });
   } catch {
     threw = true;
   }
@@ -494,7 +507,7 @@ test('truncated ROADMAP + missing STATE produces a model with warnings, no throw
   let model;
   let threw = false;
   try {
-    model = status.collect(dir, {});
+    model = status.collect(dir, { scope: 'workspace' });
   } catch {
     threw = true;
   }
@@ -512,9 +525,9 @@ console.log('6. Pure-read proof');
 test('collect()+renderTree() leaves the fixture .gsd/ byte-for-byte untouched', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
   const before = snapshot(dir);
-  const model1 = status.collect(dir, {});
+  const model1 = status.collect(dir, { scope: 'workspace' });
   status.renderTree(model1);
-  const model2 = status.collect(dir, {});
+  const model2 = status.collect(dir, { scope: 'workspace' });
   status.renderTree(model2);
   const after = snapshot(dir);
   assertEq(after, before, 'snapshot must be identical before/after two full collect+render cycles');
@@ -526,7 +539,7 @@ console.log('7. Render');
 
 test('renderTree output contains expected section markers', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   const out = status.renderTree(model);
   assert(out.includes('## Status GSD'), 'header');
   assert(out.includes('### Slices'), 'slices header');
@@ -545,20 +558,20 @@ test('renderTree lists tasks of non-active slices (expanded default)', () => {
     ['# S01 Plan', '', '## Tasks', '', '- [x] T01: coisa do slice fechado', ''].join('\n'),
     'utf8'
   );
-  const out = status.renderTree(status.collect(dir, {}));
+  const out = status.renderTree(status.collect(dir, { scope: 'workspace' }));
   assert(out.includes('  - [x] T01: coisa do slice fechado'), 'done slice task line rendered');
   assert(out.includes('← ativa'), 'active task marker still present on the active slice');
 });
 
 test('renderTree default output has zero ANSI codes (shim/pipe safety)', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const out = status.renderTree(status.collect(dir, {}));
+  const out = status.renderTree(status.collect(dir, { scope: 'workspace' }));
   assert(!out.includes('\x1b['), 'no escape sequences in default render');
 });
 
 test('renderTree {color:true} paints checkboxes/ids and strips back to the plain render', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   const plain = status.renderTree(model);
   const colored = status.renderTree(model, { color: true });
   assert(colored.includes('\x1b[32m[x]\x1b[0m'), 'green done checkbox');
@@ -572,14 +585,14 @@ test('renderTree {color:true} paints checkboxes/ids and strips back to the plain
 
 test('renderTree on idle model shows "Nenhum run ativo"', () => {
   const { dir } = makeFixture({ milestone: false, runs: [], legacyState: false, autonomousTasks: false });
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   const out = status.renderTree(model);
   assert(out.includes('Nenhum run ativo'), 'idle message');
 });
 
 test('renderTree omits "Tasks autônomas" section when there are none', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }], autonomousTasks: false });
-  const model = status.collect(dir, {});
+  const model = status.collect(dir, { scope: 'workspace' });
   const out = status.renderTree(model);
   assert(!out.includes('### Tasks autônomas'), 'section absent');
 });
@@ -614,7 +627,7 @@ console.log('9. CLI exit codes');
 const CLI_PATH = path.join(__dirname, 'forge-status.js');
 
 function runCli(args) {
-  return spawnSync(process.execPath, [CLI_PATH, ...args], { encoding: 'utf8' });
+  return spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', ...args], { encoding: 'utf8' });
 }
 
 test('CLI exits 0 for a valid fixture + idle project', () => {
@@ -971,7 +984,7 @@ console.log('11. --json CLI');
 
 test('--json produces parseable JSON with collect() keys, exit 0', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
   let parsed;
   let threw = false;
@@ -990,7 +1003,7 @@ test('--json produces parseable JSON with collect() keys, exit 0', () => {
 
 test('--json <valid-milestone-id> focuses that id in output', () => {
   const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--json', milestoneId, '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--json', milestoneId, '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
   const parsed = JSON.parse(res.stdout);
   assertEq(parsed.milestone.id, milestoneId, 'focused id');
@@ -998,14 +1011,14 @@ test('--json <valid-milestone-id> focuses that id in output', () => {
 
 test('--json <invalid-id> exits 2 (parseArgs boolean-flag regression guard)', () => {
   const { dir } = makeFixture({ milestone: false, runs: [], legacyState: false, autonomousTasks: false });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--json', 'not-a-valid-id', '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--json', 'not-a-valid-id', '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 2, `expected 2 (positional was NOT swallowed by --json), got ${res.status}\nstderr: ${res.stderr}`);
 });
 
 test('--json --cwd <no-.gsd> exits 1', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-status-nogsd2-'));
   tmpDirs.push(dir);
-  const res = spawnSync(process.execPath, [CLI_PATH, '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--json', '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 1, `expected 1, got ${res.status}\nstderr: ${res.stderr}`);
 });
 
@@ -1019,7 +1032,7 @@ test('--tokens output contains token-usage block with by-phase dispatch counts',
     perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
     globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 }],
   });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
   assert(res.stdout.includes('### Token usage'), 'block header present');
   assert(res.stdout.includes('execute-task'), 'phase name present');
@@ -1034,7 +1047,7 @@ test('--tokens all-zero-tokens fixture shows the "sem dados de token" note', () 
     perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
     globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 0, output_tokens: 0 }],
   });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
   assert(res.stdout.includes('### Token usage'), 'block header present');
   assert(res.stdout.includes('sem dados de token'), 'all-zero note present');
@@ -1050,7 +1063,7 @@ test('--json --tokens together still emits pure JSON (no "### Token usage" text)
     perMsLines: [{ ts: ts1, unit: 'execute-task/T01', milestone: milestoneId, agent: 'forge-executor', status: 'done' }],
     globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 }],
   });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--json', '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--json', '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
   assert(!res.stdout.includes('### Token usage'), 'no token-usage text mixed into JSON stdout');
   let threw = false;
@@ -1073,7 +1086,7 @@ test('--tokens run leaves .gsd/ byte-for-byte unchanged, creates no .gsd/.locks/
     globalLines: [{ ts: ts1, event: 'dispatch', unit: 'execute-task/T01', input_tokens: 100, output_tokens: 50 }],
   });
   const before = snapshot(dir);
-  const res = spawnSync(process.execPath, [CLI_PATH, '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--tokens', '--cwd', dir], { encoding: 'utf8', input: '' });
   assert(res.status === 0, `expected 0, got ${res.status}\nstderr: ${res.stderr}`);
   const after = snapshot(dir);
   assertEq(after, before, 'snapshot must be identical before/after --tokens run');
@@ -1084,7 +1097,7 @@ test('--tokens run leaves .gsd/ byte-for-byte unchanged, creates no .gsd/.locks/
 console.log('15. --watch (bounded via env cap)');
 
 function runWatch(dir, extraArgs, maxFrames) {
-  return spawnSync(process.execPath, [CLI_PATH, '--watch=0.05', '--cwd', dir, ...(extraArgs || [])], {
+  return spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--watch=0.05', '--cwd', dir, ...(extraArgs || [])], {
     encoding: 'utf8',
     input: '',
     timeout: 10000,
@@ -1152,7 +1165,7 @@ test('--watch --tokens repeats the token block once per frame, exits 0', () => {
 
 test('bare --watch (default interval) capped at 1 frame via env still exits 0 quickly', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--watch', '--cwd', dir], {
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--watch', '--cwd', dir], {
     encoding: 'utf8',
     input: '',
     timeout: 10000,
@@ -1167,7 +1180,7 @@ test('bare --watch (default interval) capped at 1 frame via env still exits 0 qu
 // ── R1 fix: --watch= (empty value) must enter watch mode, not fall through ──
 test('R1: --watch= (empty value) enters watch mode (bounded frames), not single-shot', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--watch=', '--cwd', dir], {
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--watch=', '--cwd', dir], {
     encoding: 'utf8',
     input: '',
     timeout: 10000,
@@ -1182,7 +1195,7 @@ test('R1: --watch= (empty value) enters watch mode (bounded frames), not single-
 
 test('R1: --watch=abc (non-numeric) is rejected with exit 2', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--watch=abc', '--cwd', dir], {
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--watch=abc', '--cwd', dir], {
     encoding: 'utf8',
     input: '',
     timeout: 10000,
@@ -1193,7 +1206,7 @@ test('R1: --watch=abc (non-numeric) is rejected with exit 2', () => {
 // ── R3 fix: FORGE_STATUS_WATCH_MAX=0 must render zero frames, exit 0, no hang ──
 test('R3: FORGE_STATUS_WATCH_MAX=0 exits 0 with ZERO frames rendered, no hang', () => {
   const { dir } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const res = spawnSync(process.execPath, [CLI_PATH, '--watch=0.05', '--cwd', dir], {
+  const res = spawnSync(process.execPath, [CLI_PATH, '--scope', 'workspace', '--watch=0.05', '--cwd', dir], {
     encoding: 'utf8',
     input: '',
     timeout: 10000,
@@ -1208,7 +1221,7 @@ test('R3: FORGE_STATUS_WATCH_MAX=0 exits 0 with ZERO frames rendered, no hang', 
 // ── R4 fix: --watch <bad-id> must fail fast (exit 2), not loop forever ──
 test('R4: --watch <valid-format-but-nonexistent-id> exits 2, not a hang, not exit 0', () => {
   const res = spawnSync(process.execPath, [
-    CLI_PATH, 'M-20990101000000-ghost', '--watch=0.05', '--cwd', makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] }).dir,
+    CLI_PATH, '--scope', 'workspace', 'M-20990101000000-ghost', '--watch=0.05', '--cwd', makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] }).dir,
   ], {
     encoding: 'utf8',
     input: '',
@@ -1253,13 +1266,13 @@ test('R2: --watch child process exits cleanly on SIGINT', () => {
 
 test('--watch=0.05 in-process: collect()+renderTree() reflects an external STATE change across two calls', () => {
   const { dir, milestoneId } = makeFixture({ runs: [{ id: 'M-20260101120000-alpha', startedAt: 1000 }] });
-  const r1 = status.renderTree(status.collect(dir, {}));
+  const r1 = status.renderTree(status.collect(dir, { scope: 'workspace' }));
   fs.writeFileSync(
     path.join(dir, '.gsd', 'milestones', milestoneId, `${milestoneId}-STATE.md`),
     stateText(milestoneId, { active_task: 'T03', next_action: 'Changed' }),
     'utf8'
   );
-  const r2 = status.renderTree(status.collect(dir, {}));
+  const r2 = status.renderTree(status.collect(dir, { scope: 'workspace' }));
   assert(r1 !== r2, 'render reflects external STATE change');
   assert(r2.includes('Changed'), 'new next_action rendered');
 });

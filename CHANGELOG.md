@@ -1,3 +1,20 @@
+## v4.34.0 - Personal session context
+
+- Boot/status/refresh and implicit auto/next selection use explicit per-OS-profile
+  work bindings, independently of shared working copies and FORGE_HOME.
+- Durable handoffs retain pending UAT, acceptances and source hashes after process
+  inactivity; missing/corrupt/stale evidence is diagnosed without adopting team work.
+- Claude/Codex distributed instructions share the session contract. Global status
+  remains available explicitly with `--scope workspace`; legacy work requires an
+  explicitly selected resume. Reads never migrate or create the personal store.
+
+- Provider-neutral status declares `details.status_schema_version: "2.0.0"`: only
+  personal work is listed; validated snapshot state replaces workspace progress,
+  run activity replaces phase/stale, and task status uses the workStatus enum.
+  The operation envelope remains 1.0.0. Invalid or stale state is withheld with
+  diagnostics; status never rereads it to override the personal action. See
+  `shared/forge-lifecycle.md` for the payload contract.
+
 ## v4.33.5 — Correções nas fronteiras de persistência, locks e execução
 
 ### Fixed

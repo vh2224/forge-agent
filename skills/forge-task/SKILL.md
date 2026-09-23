@@ -4,6 +4,24 @@ description: "Task autonoma sem milestone — brainstorm, discuss, plan, execute
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, AskUserQuestion, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
 
+## Personal lifecycle (all exits)
+
+Read `shared/forge-personal-context.md` from the repo or FORGE_HOME.
+When `forge-context-boundary` returns personal_checkpoint.status other than ok,
+report partial continuity and preserve artifacts; do not silently claim resume persisted.
+Fresh creation binds with intent create after the task directory/run exists.
+Explicit --resume binds with intent explicit-resume BEFORE reading continue.md;
+inspection never binds. Bind failure after creation is partial: preserve the run,
+report its ID/recovery command and stop; do not claim personal resume is persisted.
+After EVERY durable pause, blocked/partial, review deferral, account handoff or
+compact checkpoint, saveCheckpoint before returning or deactivating. Capture
+pending UAT/decisions, acceptances, nextAction and latest result with source files.
+A completed implementation with pending UAT is still pending personal work.
+After final housekeeping/archive, reconcile those captures explicitly and save a
+resolved lastResult from the final SUMMARY at its final path, with resolved or
+empty pending/nextAction only when evidence supports it. SUMMARY alone and inactive
+runs are not completion. Failure to save is partial continuity and must be reported.
+
 ## Provider-neutral loop authority (S07) — does NOT govern this skill
 
 Read `shared/forge-lifecycle.md § milestone-scoped`. The S07 loop authority
@@ -233,7 +251,7 @@ mkdir -p .gsd/tasks
 TASK_ID=$(node "$FORGE_SCRIPTS_DIR/forge-ids.js" --new-task "$TASK_DESCRIPTION")
 ```
 
-- Resume mode: `TASK_ID` already set — read `.gsd/tasks/{TASK_ID}/continue.md` when present (YAML keys `task`, `step`, `total_steps`, `saved_at`; canonical sections Completed Work, Remaining Work, Decisions Made, Next Action), then skip to the Dispatch loop and resume from its Next Action against the authoritative plan. If the existing BRIEF has an `item:` key, read it for display/verification only (`ITEM_ID = <that value>`) — never re-`--promote` (the original registration already wrote it); `--set-status doing` is not re-issued here either (harmless if it were, but not required, per `shared/forge-items-readback.md § Transição para doing`). A loose task checkpoint never carries milestone/slice keys and is never searched through the slice resume path.
+- Resume mode: `TASK_ID` already set; first run `forge-personal-context.js --bind --project "<WORKING_DIR>" --id "<TASK_ID>" --intent explicit-resume --json` and stop on failure — read `.gsd/tasks/{TASK_ID}/continue.md` when present (YAML keys `task`, `step`, `total_steps`, `saved_at`; canonical sections Completed Work, Remaining Work, Decisions Made, Next Action), then skip to the Dispatch loop and resume from its Next Action against the authoritative plan. If the existing BRIEF has an `item:` key, read it for display/verification only (`ITEM_ID = <that value>`) — never re-`--promote` (the original registration already wrote it); `--set-status doing` is not re-issued here either (harmless if it were, but not required, per `shared/forge-items-readback.md § Transição para doing`). A loose task checkpoint never carries milestone/slice keys and is never searched through the slice resume path.
 - Formato do `TASK_ID` segue a pref `ids.format` (resolvida pelo próprio forge-ids.js): `timestamp` (default) → `T-<YYYYMMDDHHMMSS>-<slug>` (slug omitido se a descrição for vaga); `sequential` → legado `TASK-00N` (max existente + 1 em `.gsd/tasks/`)
 
 **Isolation setup (branch/worktree)** — apply `forge_isolation` from prefs BEFORE registering the run. An explicit attach validates a registered lender and never creates a worktree; setup remains idempotent (`already-on-branch` / `already-exists`):
@@ -301,6 +319,11 @@ if [ -z "$RESUME_MODE" ]; then
   SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}" 
   WORKTREES_JSON=$(node -e "const r=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify((r.repos||[]).filter(x=>x.worktree&&x.status!=='error').map(x=>({repo:x.path,path:x.worktree}))))" "$ISO_RESULT")
   node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$TASK_ID" --kind task --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --attached-to "${ATTACH_RUN:-}" --branch "${RUN_BRANCH:-}" --cwd "$(pwd)" --task-description "$TASK_DESCRIPTION" > /dev/null
+  mkdir -p "$WORKING_DIR/.gsd/tasks/$TASK_ID"
+  if ! node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --bind --project "$WORKING_DIR" --id "$TASK_ID" --intent create --json; then
+    echo "Partial: run $TASK_ID exists, personal bind failed. Recover with --bind --intent explicit-resume for this ID." >&2
+    exit 1
+  fi
   # Regenerate dashboard
   node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$(pwd)" --holder "task:$TASK_ID" > /dev/null || true
 
@@ -1134,7 +1157,7 @@ The `summary-file` + `plan-status` rung still applies here even though this skil
     node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
     node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$(pwd)" --holder "task:$TASK_ID" > /dev/null || true
   else
-    echo '{"active":false}' > .gsd/forge/auto-mode.json
+    { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
   fi
   ```
 - `status: blocked` → deactivate run, surface blocker to user, stop:
@@ -1143,7 +1166,7 @@ The `summary-file` + `plan-status` rung still applies here even though this skil
     node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
     node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$(pwd)" --holder "task:$TASK_ID" > /dev/null || true
   else
-    echo '{"active":false}' > .gsd/forge/auto-mode.json
+    { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
   fi
   ```
 
@@ -1315,6 +1338,10 @@ rm -f .gsd/tasks/{TASK_ID}/.start-sha .gsd/tasks/{TASK_ID}/.review-manifest
 ---
 
 ## Post-task housekeeping
+
+Before returning, apply Personal lifecycle: after any archive/path change capture the
+final source path and reconcile terminal/pending evidence through --checkpoint.
+
 
 **Append to event log:**
 ```bash

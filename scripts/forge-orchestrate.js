@@ -159,20 +159,28 @@ function status(inputValue) {
   const input = normalizeInput(inputValue);
   const model = forgeStatus.collect(input.cwd, { milestoneId: input.milestone || undefined });
   const result = base('status', 'completed', 'status-ready', input);
-  result.milestone = model.runs.focused || input.milestone || null;
-  result.state = model.milestone ? {
-    milestone: model.milestone.id,
-    phase: model.milestone.phase,
-    active_slice: model.milestone.active_slice,
-    active_task: model.milestone.active_task,
-    progress: model.milestone.progress,
-  } : null;
+  // Only IDs returned by the personal snapshot (or explicit inspection) may be
+  // read here. Never recover the old workspace focus through a global census.
+  const milestones = model.works.filter((work) => work.kind === 'milestone');
+  const focused = input.milestone
+    ? milestones.find((work) => work.id === input.milestone)
+    : milestones.length === 1 ? milestones[0] : null;
+  result.milestone = focused ? focused.id : input.milestone;
+  result.state = focused ? focused.state : null;
   result.details = {
-    runs: (model.runs.active || []).map((run) => ({ id: run.id, kind: run.kind, phase: run.phase, stale: run.stale })),
-    autonomous_tasks: (model.autonomous_tasks || []).map((task) => ({ id: task.id, status: task.status })),
+    status_schema_version: '2.0.0',
+    scope: model.scope,
+    works: model.works,
+    runs: model.works.filter((work) => work.activity === 'active')
+      .map((work) => ({ id: work.id, kind: work.kind, activity: work.activity })),
+    autonomous_tasks: model.works.filter((work) => work.kind === 'task')
+      .map((work) => ({ id: work.id, status: work.workStatus })),
   };
-  result.warnings = model.warnings || [];
-  if (!result.state && !result.milestone) { result.outcome = 'no_work'; result.reason_code = 'no-next-unit'; }
+  result.warnings = [...(model.warnings || []), ...model.works
+    .filter((work) => work.reliability !== 'current')
+    .map((work) => work.id + ': ' + work.reliability)];
+  if (model.status === 'error') { result.outcome = 'failed'; result.reason_code = 'failed'; }
+  else if (!model.works.length) { result.outcome = 'no_work'; result.reason_code = 'no-next-unit'; }
   return result;
 }
 function next(inputValue, options) {

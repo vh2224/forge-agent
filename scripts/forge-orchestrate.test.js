@@ -43,7 +43,86 @@ try {
   const status = orchestrate.status({ cwd, milestone, host_runtime: 'codex', session: 'secret-session' });
   assert.strictEqual(status.reason_code, 'status-ready');
   assert.strictEqual(status.state.milestone, milestone);
+  assert.strictEqual(status.state.phase, 'idle');
+  assert.strictEqual(status.state.next_action, 'plan-milestone');
+  assert.strictEqual(status.details.scope, 'inspection');
   assert(!JSON.stringify(status).includes('secret-session'));
+
+  // Implicit status may read a sole personal milestone, never a peer's state.
+  const personalFixture = require('./forge-personal-context.test').fixture();
+  const savedEnv = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  const originalRead = fs.readFileSync;
+  const deniedReads = [];
+  try {
+    personalFixture.work('M001', 'milestone');
+    personalFixture.work('M002', 'milestone');
+    personalFixture.bind('M001');
+    personalFixture.bind('M002', { userHome: personalFixture.otherHome });
+    Object.assign(process.env, { HOME: personalFixture.home, USERPROFILE: personalFixture.home });
+    fs.readFileSync = function (file) {
+      const name = String(file);
+      if (name.includes('M002') || name.endsWith(path.sep + 'STATE.md') || name.startsWith(personalFixture.otherHome)) {
+        deniedReads.push(name);
+        throw new Error('unrelated work read');
+      }
+      return originalRead.apply(this, arguments);
+    };
+    const personalStatus = orchestrate.status({ cwd: personalFixture.project });
+    assert.strictEqual(personalStatus.milestone, 'M001');
+    assert.strictEqual(personalStatus.state.next_action, 'Plan slice');
+    assert.strictEqual(personalStatus.details.scope, 'personal');
+    const explicitStatus = orchestrate.status({ cwd: personalFixture.project, milestone: 'M001' });
+    assert.deepStrictEqual(explicitStatus.state, personalStatus.state);
+    assert.strictEqual(personalStatus.details.status_schema_version, '2.0.0');
+    const originalStateRead = state.read;
+    let stateReads = 0;
+    try {
+      state.read = function () {
+        if (++stateReads > 1) throw new Error('status must not reread the snapshot state');
+        return originalStateRead.apply(this, arguments);
+      };
+      assert.deepStrictEqual(orchestrate.status({ cwd: personalFixture.project }).state, personalStatus.state);
+      assert.strictEqual(stateReads, 1);
+      state.read = () => { throw Object.assign(new Error('fixture denied'), { code: 'EACCES' }); };
+      const unreadable = orchestrate.status({ cwd: personalFixture.project });
+      assert.strictEqual(unreadable.state, null);
+      assert(unreadable.warnings.includes('M001: state-unreadable'));
+    } finally { state.read = originalStateRead; }
+    const source = path.join(personalFixture.project, '.gsd', 'milestones', 'M001', 'M001-STATE.md');
+    const stateBytes = fs.readFileSync(source, 'utf8');
+    fs.writeFileSync(source, stateBytes.replace('milestone: M001', 'milestone: M003'));
+    const invalid = orchestrate.status({ cwd: personalFixture.project });
+    assert.strictEqual(invalid.milestone, 'M001');
+    assert.strictEqual(invalid.state, null);
+    assert(invalid.warnings.includes('M001: state-invalid'));
+    fs.writeFileSync(source, stateBytes);
+    require('./forge-personal-context').saveCheckpoint({ ...personalFixture.options, id: 'M001', intent: 'checkpoint',
+      checkpoint: { nextAction: [{ text: 'Personal next action', source }] } });
+    assert.strictEqual(orchestrate.status({ cwd: personalFixture.project }).state.next_action, 'Personal next action');
+    fs.appendFileSync(source, 'changed');
+    const stale = orchestrate.status({ cwd: personalFixture.project });
+    assert.strictEqual(stale.state, null);
+    assert(stale.warnings.includes('M001: needs-reconciliation'));
+    assert.strictEqual(stale.details.works[0].nextAction.validity, 'reconciliation-required');
+    fs.writeFileSync(source, stateBytes);
+    assert.deepStrictEqual(deniedReads, []);
+    fs.readFileSync = originalRead;
+    Object.assign(process.env, { HOME: personalFixture.otherHome, USERPROFILE: personalFixture.otherHome });
+    assert.strictEqual(orchestrate.status({ cwd: personalFixture.project }).milestone, 'M002');
+    Object.assign(process.env, { HOME: personalFixture.home, USERPROFILE: personalFixture.home });
+    personalFixture.work('M003', 'milestone');
+    personalFixture.bind('M003');
+    const multiple = orchestrate.status({ cwd: personalFixture.project });
+    assert.strictEqual(multiple.milestone, null, 'multiple personal milestones must not choose an arbitrary focus');
+    assert.strictEqual(multiple.state, null);
+    assert.deepStrictEqual(multiple.details.works.map(work => work.id), ['M001', 'M003']);
+  } finally {
+    fs.readFileSync = originalRead;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    personalFixture.cleanup();
+  }
 
   // The same normalized next input has identical unit/state/event/outcome for both hosts.
   const claude = setup();

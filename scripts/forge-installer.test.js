@@ -43,6 +43,13 @@ test('runtime install omits tests and update backs up only known unchanged devel
     const scripts = path.join(data.forgeHome, 'scripts');
     assert(!files(scripts).some(name => name.endsWith('.test.js') || name === 'forge-smoke.js'));
     assert(fs.existsSync(path.join(scripts, 'forge-doctor.js')));
+    assert(fs.existsSync(path.join(scripts, 'forge-personal-context.js')));
+    assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-personal-context.md')));
+    for (const home of [data.claudeHome, data.codexHome]) {
+      const entry = fs.readFileSync(path.join(home, 'commands', 'forge-init.md'), 'utf8');
+      assert(entry.includes('forge-personal-context.js') && entry.includes('--snapshot'));
+    }
+    assert(fs.readFileSync(path.join(data.projectRoot, 'AGENTS.md'), 'utf8').includes('--snapshot'));
     assert(fs.existsSync(path.join(scripts, 'fixtures', 'offline-ci', 'matrix.json')));
     const unchanged = path.join(scripts, 'forge-hook-stop.test.js');
     const customized = path.join(scripts, 'forge-installer.test.js');

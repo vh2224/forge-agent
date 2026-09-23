@@ -1,0 +1,38 @@
+'use strict';
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const { fixture } = require('./forge-personal-context.test');
+const helpers = require('./forge-cli-helpers');
+const personal = require('./forge-personal-context');
+const f = fixture();
+try {
+  f.work('M001', 'milestone'); f.work('M002', 'milestone', true);
+  const first = helpers.resolveRunFromArgs(f.project, '', f.options);
+  assert.strictEqual(first.reason, 'no-bindings');
+  assert.strictEqual(first.status, 'none');
+  assert(!fs.existsSync(path.join(f.home, '.forge-personal')));
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'M002', f.options).run_id, 'M002');
+  assert(!fs.existsSync(path.join(f.home, '.forge-personal')), 'ID resolution/inspection is not binding');
+  f.bind('M001');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).run_id, 'M001', 'inactive bound milestone beats active peer');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).status, 'resume');
+  fs.unlinkSync(path.join(f.project, '.gsd', 'forge', 'runs', 'M001.json'));
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).status, 'activate-new');
+  f.work('TASK-001');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'TASK-001', f.options).status, 'resume');
+  fs.unlinkSync(path.join(f.project, '.gsd', 'forge', 'runs', 'TASK-001.json'));
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'TASK-001', f.options).status, 'resume');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, 'TASK-999', f.options).status, 'error');
+  f.bind('M002');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '', f.options).status, 'refuse');
+  assert.strictEqual(personal.selectPersonalWork(f.options).reason, 'selection-required');
+  assert(helpers.listActiveSummary(f.project).includes('M002'), 'global technical guard remains global');
+  assert.strictEqual(helpers.resolveRunFromArgs(f.project, '../M001', f.options).status, 'error');
+  const m3 = f.work('M003', 'milestone');
+  const record = helpers.activateRun(f.project, { ...f.options, id: 'M003', kind: 'milestone', session_id: 'synthetic' });
+  assert.strictEqual(record.id, 'M003');
+  assert(personal.readPersonalSnapshot(f.options).works.some(w => w.id === 'M003'));
+  assert(fs.existsSync(m3.source));
+  console.log('PASS cli helpers: explicit resolution, personal default, ambiguity, registration and global guards');
+} finally { f.cleanup(); }

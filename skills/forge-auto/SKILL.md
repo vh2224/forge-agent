@@ -4,6 +4,64 @@ description: "Executa o milestone inteiro de forma autonoma ate concluir."
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, AskUserQuestion, WebSearch, WebFetch
 ---
 
+## Personal selection - before any operational load
+
+Read `shared/forge-personal-context.md` from the repo or FORGE_HOME before running
+the adapter or reading any run/state/handoff. When `forge-context-boundary` returns
+personal_checkpoint.status other than ok, report partial continuity and preserve
+artifacts; do not silently claim resume persisted. Resolve scripts and call
+`forge-cli-helpers.js --resolve-args --args "<explicit ID or empty>" --cwd "<cwd>"`.
+An empty argument uses only personal bindings; `none`, `refuse` or `error` stops
+before isolation/dispatch. No STATE, global alias, marker, ledger or legacy fallback.
+Multiple candidates require a selected ID; attention-required requires reconciliation.
+Set RUN_ID/RUN_KIND from the result, WORKING_DIR from the personal snapshot's project.
+A selected task routes to `forge-task --resume ID`; do not run a milestone unit for it.
+Bootstrap an activate-new milestone before binding or loading its state. For an
+explicitly supplied ID, bind with --intent explicit-resume before loading existing
+state or handoff artifacts. Inspecting an ID does not bind. Reconcile stale/missing evidence or
+pending decisions before dispatch; preserve prior acceptances. Global locks/census
+remain concurrency guards, never personal selection inputs.
+All references below to STATE mean `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`.
+RUN_ID is mandatory; historical empty-ID/legacy branches below are unreachable.
+After run/isolation registration, bind idempotently to capture validated worktree aliases.
+After every durable handoff (partial/blocked/pause/account/review/compact), and after
+advancing the next unit, saveCheckpoint per the shared contract before deactivation.
+On complete-milestone, explicitly reconcile pending/nextAction and capture resolved
+lastResult from final state/SUMMARY; process inactivity alone is never completion.
+
+```bash
+FORGE_SCRIPTS_DIR=$([ -f scripts/forge-cli-helpers.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+PERSONAL_ARG="$ARGUMENTS"
+case "$PERSONAL_ARG" in next|step) PERSONAL_ARG="" ;; esac
+RESOLVE=$(node "$FORGE_SCRIPTS_DIR/forge-cli-helpers.js" --resolve-args --args "$PERSONAL_ARG" --cwd "$(pwd)") || exit 1
+STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$RESOLVE")
+case "$STATUS" in resume|activate-new) ;; *) echo "$RESOLVE"; exit 1 ;; esac
+RUN_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).run_id || '')" "$RESOLVE")
+RUN_KIND=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).kind || '')" "$RESOLVE")
+WORKING_DIR=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).project || '')" "$RESOLVE")
+[ -n "$RUN_ID" ] && [ -n "$WORKING_DIR" ] || exit 1
+# Route task IDs to forge-task --resume before this milestone-only block.
+if [ "$RUN_KIND" = "milestone" ] && [ "$STATUS" = "activate-new" ]; then
+  PER_MILESTONE_STATE="$WORKING_DIR/.gsd/milestones/$RUN_ID/$RUN_ID-STATE.md"
+  if [ ! -f "$PER_MILESTONE_STATE" ]; then
+    mkdir -p "$WORKING_DIR/.gsd/milestones/$RUN_ID" || exit 1
+    if ! node "$FORGE_SCRIPTS_DIR/forge-state.js" --create "$RUN_ID" --phase plan-milestone --next-action "Plan milestone $RUN_ID" --auto-mode on --cwd "$WORKING_DIR" > /dev/null; then
+      echo "Milestone bootstrap failed for $RUN_ID; stop before binding or dispatch." >&2
+      exit 1
+    fi
+  fi
+fi
+if [ -n "$PERSONAL_ARG" ]; then
+  if ! node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --bind --project "$WORKING_DIR" --id "$RUN_ID" --intent explicit-resume --json; then
+    echo "Personal resume failed for $RUN_ID; preserve artifacts and recover explicitly." >&2
+    exit 1
+  fi
+fi
+```
+
+After an explicit bind, display --snapshot and reconcile attention-required before
+any adapter or isolation call. This guard grants no new consent for pending decisions.
+
 ## Provider-neutral loop authority (S07)
 
 Read `shared/forge-lifecycle.md` before entering the unit loop. Resolve the
@@ -37,8 +95,8 @@ After successful housekeeping, acknowledge the unit using the loop adapter's
 
 ```bash
 ls CLAUDE.md 2>/dev/null && echo "ok" || echo "missing"
-ls .gsd/STATE.md 2>/dev/null && echo "ok" || echo "missing"
-WORKING_DIR=$(pwd)
+test -d "$WORKING_DIR/.gsd" || exit 1
+[ -n "$WORKING_DIR" ] || exit 1
 echo "WORKING_DIR=$WORKING_DIR"
 
 # Resolve runtime scripts dir — prefer local ./scripts (dogfood: edits take effect
@@ -88,8 +146,8 @@ memory. Same rule for `scripts/<name>.js` → `$FORGE_SCRIPTS_DIR/<name>.js`.
 ## Load context
 
 Read ONLY these files:
-1. `.gsd/STATE.md`
-2. `.gsd/AUTO-MEMORY.md` full file (skip silently if missing) — stored as `ALL_MEMORIES` for selective injection per unit
+1. `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`
+2. Canonical memory projection (`forge-projection.renderMemory`) for selective injection.
 3. `.gsd/CODING-STANDARDS.md` (skip silently if missing)
 
 **Resolve PREFS via the canonical engine CLI (ONE call — never a 3-file md merge in-context).** The S01 engine (`scripts/forge-prefs.js`) reads the jsonc catalog per layer; legacy Markdown without jsonc hard-stops — see `shared/forge-prefs-cutover.md`. It applies the exact same user-global → repo-shared → local-personal precedence (last wins) that the old inline prose described. Do NOT read/merge `~/.claude/forge-agent-prefs.jsonc` + `.gsd/claude-agent-prefs.jsonc` + `.gsd/prefs.local.jsonc` by hand — that is exactly what the CLI does. See `shared/forge-dispatch.md § Per-unit prefs resolution` for the canonical helper.
@@ -154,42 +212,10 @@ TaskUpdate({ taskId: <id>, status: "completed" })
 ```
 Do this for ALL in_progress tasks before starting the loop. Skip if TaskList returns empty.
 
-**Argumentos ignorados** — `/forge-auto` não aceita argumentos. Se o usuário digitou `/forge-auto resume` ou qualquer outro argumento, ignore-o silenciosamente. O auto-resume é automático via detecção abaixo.
-
-**Auto-resume detection** — check for a previous interrupted session.
-
-Read `auto-mode.json` and compute heartbeat freshness in one shot:
-```bash
-AUTO_STATE=$(node -e "
-try {
-  const a = JSON.parse(require('fs').readFileSync('.gsd/forge/auto-mode.json','utf8'));
-  if (a.active !== true) { process.stdout.write('inactive'); return; }
-  const last = a.last_heartbeat || a.worker_started || a.started_at || 0;
-  const age = Date.now() - last;
-  process.stdout.write(age > 300000 ? 'stale' : 'fresh');
-} catch { process.stdout.write('inactive'); }
-")
-COMPACT_SIGNAL=$(test -f .gsd/forge/compact-signal.json && echo "yes" || echo "no")
-```
-
-Branch on `$AUTO_STATE`:
-
-- **`inactive`** — no prior session; proceed normally to activation.
-- **`stale`** — previous session died (Ctrl+C, terminal kill, OOM). The marker is lying. Clear it silently (M005+ aware of runs/*.json registry) and proceed normally to activation as a fresh start:
-  ```bash
-  # Clean any active runs in registry first
-  for f in .gsd/forge/runs/*.json; do
-    [ -f "$f" ] || continue
-    node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$(basename "$f" .json)" --json '{"active":false}' >/dev/null 2>&1 || true
-  done
-  echo '{"active":false}' > .gsd/forge/auto-mode.json
-  ```
-  Do NOT emit a resume message.
-- **`fresh`** — heartbeat within the last 5 minutes.
-  - If `$COMPACT_SIGNAL == "yes"` → Compact recovery path: skip ALL initialization (activation, load context, etc.). Go directly to the dispatch loop. The compact recovery check at the top of iteration 1 will re-read state from disk and delete the signal.
-  - Otherwise → a session is genuinely in flight (concurrent Claude instance, or just-reopened within 5 min). Emit one line: `↺ Retomando forge-auto após interrupção...` and skip the activation step below — go directly to the dispatch loop. The marker is already set.
-
----
+**Auto-resume:** only the selected bound RUN_ID may be read or updated.
+A stale heartbeat describes process activity, not completion. Never sweep registry
+entries or use auto-mode.json to select/deactivate work. Compact recovery reloads
+the personal snapshot and the selected per-run state, preserving continue.md.
 
 ## Orchestrate — AUTO MODE
 
@@ -197,27 +223,14 @@ Branch on `$AUTO_STATE`:
 
 Resolve which run this invocation operates on, based on `$ARGUMENTS` and the active-run registry. This block runs BEFORE the legacy single-run activation below.
 
-**Step 0 — Migrate legacy STATE.md (idempotent; required BEFORE dashboard regen):**
-If the workspace has a pre-M004 single-run `.gsd/STATE.md` (no `<!-- AUTO-GENERATED -->` header) AND no `runs/*.json` exists yet, migrate the legacy state to per-milestone format. This MUST run before any dashboard regeneration — otherwise the legacy state data is destroyed by the dashboard overwrite.
+Use RESOLVE/STATUS/RUN_ID/RUN_KIND from the personal selection guard above.
+Do not re-resolve from cwd or a shared marker after selecting the owning project.
+
+
+**Isolation setup (branch/worktree)** — when `$STATUS` resolves to `activate-new` or `resume`, apply `forge_isolation` from prefs BEFORE the per-status registry actions below. For `refuse`/`error`, skip entirely — never touch git on a refused invocation. The script is idempotent (re-running on resume is a no-op: `already-on-branch` / `already-exists`). In legacy mode (`RUN_ID` empty), substitute `$ISO_RUN` with the active milestone ID from STATE.md.
 
 ```bash
-node "$FORGE_SCRIPTS_DIR/forge-runs.js" --migrate-legacy --cwd "$WORKING_DIR" > /dev/null 2>&1 || true
-```
-
-The script is idempotent: returns `{migrated: false, reason: "already dashboard"}` if already migrated, or `{migrated: false, reason: "no Active Milestone field"}` if STATE.md doesn't have legacy format. Either case is a no-op. Successful migration creates `M###-STATE.md` from the legacy fields (Active Slice/Task/Phase/Auto-mode/Next Action preserved verbatim).
-
-```bash
-RESOLVE=$(node "$FORGE_SCRIPTS_DIR/forge-cli-helpers.js" --resolve-args --args "$ARGUMENTS" --command forge-auto)
-STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$RESOLVE")
-RUN_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).run_id || '')" "$RESOLVE")
-RUN_KIND=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).kind || '')" "$RESOLVE")
-MSG=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).message || '')" "$RESOLVE")
-```
-
-**Isolation setup (branch/worktree)** — when `$STATUS` resolves to `activate-new`, `resume`, or `legacy`, apply `forge_isolation` from prefs BEFORE the per-status registry actions below. For `refuse`/`error`, skip entirely — never touch git on a refused invocation. The script is idempotent (re-running on resume is a no-op: `already-on-branch` / `already-exists`). In legacy mode (`RUN_ID` empty), substitute `$ISO_RUN` with the active milestone ID from STATE.md.
-
-```bash
-ISO_RUN="${RUN_ID:-<active milestone ID from STATE.md>}"
+ISO_RUN="$RUN_ID"
 ISO_RESULT=$(node "$FORGE_SCRIPTS_DIR/forge-isolation.js" --setup --run "$ISO_RUN" --cwd "$WORKING_DIR")
 ISOLATION_MODE=$(node -e "process.stdout.write((JSON.parse(process.argv[1]).mode)||'shared')" "$ISO_RESULT")
 WORKTREE_DIR=$(node -e "const r=JSON.parse(process.argv[1]);const w=(r.repos||[]).find(x=>x.worktree&&x.status!=='error');process.stdout.write(w?w.worktree:'')" "$ISO_RESULT")
@@ -258,18 +271,18 @@ Branch on `$STATUS`:
 
 - **`refuse`** — emit `$MSG` (lists active runs + example commands) and stop. Do NOT continue.
 - **`error`** — emit `$MSG` and stop.
-- **`legacy`** — zero active runs + no arg + .gsd/STATE.md is single-run legacy format. Run the legacy activation block below (preserves pre-M004 behavior). RUN_ID stays empty; `{M###}` placeholders below resolve from STATE.md as before.
+- **`none`** - display the personal reason and stop without mutation. Legacy/global fallback is forbidden.
 - **`activate-new`** — register the new run:
   ```bash
   SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --add --id "$RUN_ID" --kind "$RUN_KIND" --session "$SESSION_ID" --isolation-mode "$ISOLATION_MODE" --account "${FORGE_ACCOUNT:-}" --worktrees "$WORKTREES_JSON" --branch "${RUN_BRANCH:-}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   echo "$MSG"
   ```
   Then continue to legacy activation (which writes auto-mode-started.txt + alias).
 - **`resume`** — emit `$MSG`, set `RUN_ID` (already set). Update the existing registry entry with the new session_id (the previous orchestrator process exited; this is a fresh session that needs to own heartbeat updates) and the freshly-resolved isolation mode:
   ```bash
   SESSION_ID="${CLAUDE_SESSION_ID:-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")}"
-  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" > /dev/null
+  node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json "{\"session_id\":\"$SESSION_ID\",\"active\":true,\"isolation_mode\":\"$ISOLATION_MODE\",\"worktrees\":$WORKTREES_JSON,\"branch\":\"$RUN_BRANCH\"}" --cwd "$WORKING_DIR" > /dev/null || { echo "Run registration/update failed; stop before dispatch." >&2; exit 1; }
   ```
   `branch` is refreshed here for the same reason `isolation_mode` is: it is what the
   setup just resolved, and a record created before the field existed carries `null`.
@@ -282,6 +295,14 @@ Branch on `$STATUS`:
 
 For all non-legacy paths, the `MILESTONE_DIR` for downstream substitution is `.gsd/milestones/$RUN_ID/` (if kind=milestone) or null (if kind=task). Where bash blocks below reference `{M###}`, substitute `$RUN_ID` (`$RUN_ID` may be a legacy `M###` or a timestamp `M-<ts>-<slug>` ID — the substitution is format-agnostic). Workers receive `{M###}` resolved in their prompt header via the dispatch templates.
 
+After registration/update, persist aliases before any dispatch:
+```bash
+if ! node "$FORGE_SCRIPTS_DIR/forge-personal-context.js" --bind --project "$WORKING_DIR" --id "$RUN_ID" --intent explicit-resume --json; then
+  echo "Partial: run $RUN_ID exists, personal binding failed; recover explicitly with this ID." >&2
+  exit 1
+fi
+```
+
 **Regenerate dashboard** after registry change:
 ```bash
 node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" --holder "auto:$RUN_ID" > /dev/null || true
@@ -289,7 +310,7 @@ node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" --holder "auto
 
 **Bootstrap + re-load per-milestone STATE (M004+, CRITICAL — must run before dispatch loop):**
 
-The initial `## Load context` step above read `.gsd/STATE.md`, which is now a dashboard (auto-generated, no Active Slice/Task/Phase fields). The orchestrator needs the per-milestone STATE to derive the next unit. Bootstrap if absent (brand-new milestone), then re-load:
+Load context reads only the selected per-milestone STATE to derive the next unit. Bootstrap if absent (brand-new milestone), then re-load:
 
 ```bash
 if [ -n "$RUN_ID" ] && [ "$RUN_KIND" = "milestone" ]; then
@@ -314,35 +335,19 @@ fi
 
 For `RUN_KIND=task` runs, STATE is not file-backed (tasks live in `runs/{id}.json` directly per D-M004-12) — `/forge-task` is the canonical entry for those; this skill only handles milestones.
 
-For legacy mode (`STATUS=legacy`, `RUN_ID=""`), STATE was already loaded from `.gsd/STATE.md` in the original format — no override needed.
-
-### Activate auto-mode indicator (legacy single-run alias)
-
-Write marker so the status line shows `▶ AUTO`. With M005+, all `started_at` lives in `runs/{id}.json` (per-run, no sharing). Only legacy mode writes `auto-mode.json` + `auto-mode-started.txt` directly:
-
-```bash
-mkdir -p .gsd/forge
-if [ -z "$RUN_ID" ]; then
-  # Legacy single-run path: write shared files (no contention because legacy ⇒ 1 tab)
-  _forge_now=$(node -e "process.stdout.write(String(Date.now()))")
-  echo $_forge_now > .gsd/forge/auto-mode-started.txt
-  echo '{"active":true,"started_at":'$_forge_now',"worker":null}' > .gsd/forge/auto-mode.json
-fi
-# Multi-run path: `runs/{id}.json.started_at` was set by forge-runs.add earlier (in Multi-run activation).
-# `auto-mode.json` is automatically mirrored from oldest-active by refreshLegacyAlias.
-# `auto-mode-started.txt` is NOT written in multi-run — each tab reads its own started_at from runs/.
-```
+Run identity is mandatory. The registry owns per-run activity and compatibility
+aliases; this skill never reads or writes a global alias to select work.
 
 You are the orchestrator. Execute the dispatch loop until the milestone is complete or a stop condition is hit.
 
 **AUTONOMY RULE — CRITICAL:** This is FULLY AUTONOMOUS mode. After each unit completes with `status: done`, proceed IMMEDIATELY to the next unit. Do NOT pause to ask the user if they want to continue. Do NOT ask for confirmation between units. Do NOT summarize progress and wait for input. The ONLY reasons to STOP the loop are: milestone complete, worker returned `blocked`/`partial`, or pause requested. Between units, emit the progress line and move on — nothing else. **Single sanctioned exception:** the review triage gate before `complete-milestone` (see Dispatch guards) MAY ask the user — every slice is done at that point, so arbitrating deferred review items there does not violate this rule.
 
 **COMPACTION RESILIENCE — CRITICAL:** Claude Code may auto-compact the conversation context during a long autonomous run. This is NOT a stopping condition. If you detect that your in-memory variables (`PREFS`, `EFFORT_MAP`, `THINKING_OPUS`, `session_units`, `ALL_MEMORIES`) appear undefined or missing, context was likely compacted. Recovery protocol — execute immediately without telling the user:
-1. Read `.gsd/forge/auto-mode.json` — if `active: true`, the loop MUST continue
-2. Re-read all context files: `.gsd/STATE.md`, `.gsd/AUTO-MEMORY.md`, `.gsd/CODING-STANDARDS.md`; re-resolve PREFS via the single `node "$FORGE_SCRIPTS_DIR/forge-prefs.js" --resolved --cwd "$WORKING_DIR"` call (NOT a 3-file md re-merge) — same loud-stop-on-exit≠0 posture as Load context
+1. Refresh the personal snapshot and selected run only; continue only while its loop permits it.
+2. Re-read selected per-run STATE, canonical memory projection and CODING-STANDARDS; resolve prefs through the canonical engine with loud failure.
 3. Re-initialize all state variables: `PREFS` = `.prefs` from that call, extract EFFORT_MAP and THINKING_OPUS, set `session_units = 0`, re-extract CS sections
 4. Continue the dispatch loop from Step 1 immediately
-The autonomous loop is active as long as `auto-mode.json` shows `active: true`. Context compaction never deactivates it.
+The autonomous loop is active only while the selected run and its loop adapter permit continuation. Context compaction never deactivates it.
 
 **ISOLATION RULE — CRITICAL:** The orchestrator NEVER implements code or modifies project files directly. The tools `Write`, `Edit`, and `Bash` available to the orchestrator exist EXCLUSIVELY for orchestrator bookkeeping: writing `STATE.md`, `events.jsonl`, `auto-mode.json`, `auto-mode-started.txt`, and `continue.md`. Any code change, file creation, or implementation step — no matter how small — MUST happen inside a worker dispatched via `Agent()`. If you find yourself about to use `Edit` or `Write` on a project file, or running implementation commands via `Bash`, STOP immediately: you are violating context isolation. Call `Agent()` instead.
 
@@ -469,7 +474,7 @@ dispatch_refusal_stop() {
     node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
     node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" > /dev/null || true
   else
-    echo '{"active":false}' > "$WORKING_DIR/.gsd/forge/auto-mode.json"
+    { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
   fi
   return 2
 }
@@ -1010,7 +1015,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
     if [ -n "$RUN_ID" ]; then
       node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
     else
-      echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json
+      { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
     fi
     ```
   - **Stop loop.** Do NOT dispatch the first `execute-task` for this slice. Return.
@@ -1037,7 +1042,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
     if [ -n "$RUN_ID" ]; then
       node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
     else
-      echo '{"active":false}' > {WORKING_DIR}/.gsd/forge/auto-mode.json
+      { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
     fi
     ```
   - **Stop loop.** Do NOT dispatch the first `execute-task` for this slice. Return.
@@ -1350,7 +1355,7 @@ node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
    if [ -n "$RUN_ID" ]; then
      node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
    else
-     echo '{"active":false}' > .gsd/forge/auto-mode.json
+     { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
    fi
    ```
 2. Mark the task as in_progress (leave it — signals interruption): skip TaskUpdate
@@ -1438,7 +1443,7 @@ Agent({ subagent_type: "forge-executor", description: "⚡ T03 · <one-liner>", 
    if [ -n "$RUN_ID" ]; then
      node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
    else
-     echo '{"active":false}' > .gsd/forge/auto-mode.json
+     { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
    fi
    ```
 3. Append one `blocked` event per affected task to `events.jsonl` with `reason: "parallel_dispatch_backgrounded"` and `batch_size: N`.
@@ -1803,13 +1808,13 @@ console.log(JSON.stringify({available:true,window:label,used:Math.round(w.used_p
 ```bash
 # M004 scoped: .gsd/forge/pause-{RUN_ID} where RUN_ID is this orchestrator's run id (e.g. M065)
 PAUSE_SCOPED=".gsd/forge/pause-${RUN_ID}"
-PAUSE_LEGACY=".gsd/forge/pause"
 
-if [ -f "$PAUSE_SCOPED" ] || [ -f "$PAUSE_LEGACY" ]; then
-  rm -f "$PAUSE_SCOPED" "$PAUSE_LEGACY"
+
+if [ -f "$PAUSE_SCOPED" ]; then
+  rm -f "$PAUSE_SCOPED"
   # Deactivate THIS run only — never touches other runs' state
   node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' >/dev/null 2>&1 || \
-    echo '{"active":false}' > .gsd/forge/auto-mode.json   # legacy fallback
+    { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
 fi
 ```
 
@@ -1838,7 +1843,7 @@ if [ -n "$RUN_ID" ]; then
   node "$FORGE_SCRIPTS_DIR/forge-runs.js" --update "$RUN_ID" --json '{"active":false}' > /dev/null
   node "$FORGE_SCRIPTS_DIR/forge-dashboard.js" --cwd "$WORKING_DIR" > /dev/null || true
 else
-  echo '{"active":false}' > .gsd/forge/auto-mode.json
+  { echo "Missing selected run or run update failed; refusing global fallback" >&2; exit 1; }
 fi
 ```
 

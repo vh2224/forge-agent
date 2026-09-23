@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { usableSnapshot } = require('./forge-context-monitor');
+const personal = require('./forge-personal-context');
 
 function sanitize(value) { return String(value || 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 160) || 'unknown'; }
 function atomicWrite(file, content) {
@@ -106,6 +107,13 @@ function consume(result, cwd, planFile, options = {}) {
     const continueFile = checkpointPath(cwd, planFile, identity);
     if (!fs.existsSync(continueFile)) atomicWrite(continueFile, checkpointContent(identity, health));
     output.checkpoint_required = true;
+    const snapshot = personal.readPersonalSnapshot({ ...options, project: cwd, id: scope.run });
+    if (snapshot.status !== 'ok') output.personal_checkpoint = snapshot;
+    else if (snapshot.works.length) {
+      // Add the boundary evidence without replacing useful next actions/acceptances.
+      output.personal_checkpoint = personal.saveCheckpoint({ ...options, project: cwd, id: scope.run, intent: 'checkpoint',
+        checkpoint: { handoff: [{ text: `Continue ${identity.unit} at ${identity.step}`, source: continueFile }] } });
+    }
   }
   atomicJson(marker, { version: 3, telemetry_scope: 'sidecar-thread', dispatch_scope: scope, session_id: health.session_id,
     epoch: health.epoch, pending_id: output.pending_id || null, consumed_at: new Date().toISOString() });
