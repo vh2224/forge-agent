@@ -150,9 +150,12 @@ function executeDeliveryArtifacts(request, loc, result, root, cwd) {
     bindings: [],
     expected_children: [],
   };
-  const output = require('./forge-delivery').buildDelivery(input, { ownerRoot: root, codeDir: cwd });
+  const delivery = require('./forge-delivery');
+  const output = delivery.buildDelivery(input, { ownerRoot: root, codeDir: cwd });
+  const deliveryReference = `./${path.posix.basename(loc.delivery.output)}`;
+  const deliverySection = delivery.renderDeliveryMarkdown(output, { detailReference: deliveryReference });
   const artifacts = [
-    { path: loc.required[0], content: `---\nstatus: done\n---\n\n# ${request.taskId} Summary\n\n${result.summary}\n\n## Must haves\n\n${JSON.stringify(result.must_haves_status, null, 2)}\n` },
+    { path: loc.required[0], content: `---\nstatus: done\n---\n\n# ${request.taskId} Summary\n\n${result.summary}\n\n## Must haves\n\n${JSON.stringify(result.must_haves_status, null, 2)}\n\n${deliverySection}` },
     { path: loc.delivery.input, content: `${JSON.stringify(input, null, 2)}\n` },
     { path: loc.delivery.output, content: `${JSON.stringify(output, null, 2)}\n` },
   ];

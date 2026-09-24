@@ -205,7 +205,7 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
   git(['init', '-q']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture']);
   const startSha = git(['rev-parse', 'HEAD']);
   const planRequest = request(planDir, 'plan-slice');
-  const planContent = '---\ncapability: readonly\nmust_haves:\n  truths: []\n  artifacts: []\n  key_links: []\nexpected_output: []\n---\n# Task\n\n## Standards\nFixture.\n';
+  const planContent = '---\ncapability: readonly\nmust_haves:\n  truths:\n    - "fixture execution stays observable"\n  artifacts: []\n  key_links: []\nexpected_output: []\n---\n# Task\n\n## Standards\nFixture.\n';
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Plan fixture',
     slice_plan: { filename: 'S01-PLAN.md', content: '# Slice\n\n- [ ] T01: Fixture\n' },
     task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: planContent }] });
@@ -224,10 +224,14 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
   for (const required of executeLocations.required) assert.strictEqual(fs.existsSync(path.join(planDir, required)), true, required);
   const deliveryInput = JSON.parse(fs.readFileSync(path.join(planDir, executeLocations.delivery.input), 'utf8'));
   const deliveryOutput = JSON.parse(fs.readFileSync(path.join(planDir, executeLocations.delivery.output), 'utf8'));
+  const executeSummary = fs.readFileSync(path.join(planDir, executeLocations.required[0]), 'utf8');
   assert.deepStrictEqual(deliveryInput.unit, { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' });
   assert.deepStrictEqual(deliveryInput.bindings, []);
   assert.strictEqual(deliveryOutput.generated_by, 'forge-delivery');
+  assert(deliveryOutput.criteria.length > 0);
   assert(deliveryOutput.criteria.every(criterion => criterion.status !== 'verificado'));
+  assert(executeSummary.includes('## Entrega por critério'));
+  assert(executeSummary.includes(`./${path.posix.basename(executeLocations.delivery.output)}`));
   assert.strictEqual(git(['rev-parse', 'HEAD']), startSha);
   assert(fs.readFileSync(path.join(planDir, '.gsd/milestones/M001/slices/S01/S01-PLAN.md'), 'utf8').includes('[x] T01'));
   const reviewOptions = { cwd: planDir, engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, timeoutSecs: 20, model: 'claude-sonnet-5' };
