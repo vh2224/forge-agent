@@ -828,6 +828,37 @@ function formatResults(results) {
 function cliMain() {
   const args = parseArgs(process.argv.slice(2));
 
+  // Exclusive read-only mode: reject conflicts before any existing dispatch.
+  if ('diagnose-recovery' in args || 'controller-key' in args) {
+    const diagnostic = require('./forge-recovery-diagnostic');
+    const allowed = new Set(['diagnose-recovery', 'controller-key', 'cwd', 'json']);
+    const argv = process.argv.slice(2);
+    const seen = new Set();
+    let invalid = false;
+    for (let i = 0; i < argv.length; i++) {
+      const flag = argv[i];
+      if (!flag.startsWith('--') || !allowed.has(flag.slice(2)) || seen.has(flag)) { invalid = true; break; }
+      seen.add(flag);
+      if (flag !== '--json' && (!argv[++i] || argv[i].startsWith('--'))) { invalid = true; break; }
+    }
+    if (invalid || !diagnostic.validId(args['diagnose-recovery'])
+      || ('controller-key' in args && !diagnostic.validKey(args['controller-key']))
+      || ('cwd' in args && typeof args.cwd !== 'string') || ('json' in args && args.json !== true)) {
+      process.stderr.write('forge-doctor: --diagnose-recovery exige ID válido e aceita somente --controller-key, --cwd e --json.\n');
+      process.exitCode = 2; return;
+    }
+    try {
+      const result = diagnostic.inspectRecovery({ cwd: args.cwd, id: args['diagnose-recovery'], controllerKey: args['controller-key'] });
+      process.stdout.write(args.json ? `${JSON.stringify(result, null, 2)}\n` : diagnostic.renderRecovery(result));
+      process.exitCode = result.status === 'ok' ? 0 : 1;
+    } catch {
+      const failure = diagnostic.createRecoveryReport(args['diagnose-recovery'], 'diagnostic');
+      process.stdout.write(args.json ? `${JSON.stringify(failure)}\n` : diagnostic.renderRecovery(failure));
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (args.help) {
     process.stdout.write(`forge-doctor — Forge schema-version and projection-versioned checks
 
@@ -836,6 +867,9 @@ Flags:
                                  all
   --runtime <name>               capabilities host: claude | codex | both
   --json                         emit deterministic JSON for capability checks
+  --diagnose-recovery <id>        diagnóstico somente leitura; texto pt-BR ou --json
+    [--controller-key <key>]      controller por chave explícita, só milestones
+                                 exclusivo; não autoriza ações nem atestações
   --recover-claim <run-id>       preview manual recovery of a stuck live claim
     --apply --confirm-owner-stopped --confirm-workspace-quiescent
   --restore-claim <run-id>       preview; apply requires --confirm-workspace-quiescent
@@ -852,6 +886,8 @@ Exit codes:
   0  all requested checks passed
   1  one or more checks failed
   2  bad arguments
+  Diagnóstico: 0 observação válida; 1 parcial/incerto; 2 argumentos inválidos.
+  Exit 0 do diagnóstico nunca significa trabalho concluído.
 `);
     return;
   }

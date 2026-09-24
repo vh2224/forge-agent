@@ -11,6 +11,38 @@ Use este skill como adaptador fino do contrato JSON versionado.
 
 ## Diagnóstico
 
+### Recuperação guiada por ID
+
+Para interrupção, resultado parcial ou continuidade não comprovada, use o ID
+explicitamente escolhido, sem executar o censo geral abaixo:
+
+```bash
+node scripts/forge-doctor.js --diagnose-recovery TASK-001 --cwd "<projeto>"
+node scripts/forge-doctor.js --diagnose-recovery M005 --controller-key "<chave>" --cwd "<projeto>" --json
+```
+
+Texto pt-BR e JSON apresentam as mesmas observações: fontes e estado de evidência,
+resultado comprovado, incertezas, artefatos preservados, continuidade, aceites,
+decisões pendentes e próximo passo seguro. Exit 0 significa observação válida sem
+bloqueio, nunca conclusão do trabalho; 1 significa parcial/incerto; 2, argumentos
+inválidos. O modo é exclusivo: aceita apenas ID, `--controller-key`, `--cwd` e
+`--json`; outras operações, flags mutantes e atestações são recusadas antecipadamente.
+
+Não seleciona trabalho sem ID, não vincula e não modifica journals, claims, leases
+ou checkpoint. Preserva aceites registrados e mantém decisões não respondidas.
+Release durável continua comprovado mesmo sem evento final; bundle órfão não prova
+release. Existência de artefato não significa integridade verificada; SUMMARY
+isolado ou atividade inativa não comprovam conclusão. Missing, corrupt, unreadable
+e stale exigem encaminhamento explícito, sem converter falha em ausência limpa.
+
+Controller só é observado por chave explícita de milestone; tasks standalone,
+sweep, reset sidecar e outros journals permanecem não cobertos/unknown. Publicação
+pode preceder a fase; committed não prova conclusão global. Inspeção não concede
+autorização nem atestações. Qualquer ação posterior permanece na autoridade
+original, que revalida precondições; não recomende replay pela ausência de evento.
+
+### Diagnóstico geral
+
 Determine o runtime do host atual, sem sondar outro home, e execute:
 
 ```bash
