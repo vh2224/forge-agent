@@ -42,7 +42,7 @@ function identityToken(value) {
   return fingerprint(String(value)).slice(0, 12);
 }
 
-function deduplicate(items, key, entity, diagnostics) {
+function deduplicate(items, key, entity, diagnostics, options = {}) {
   const groups = new Map();
   for (const item of items) {
     const identity = key(item.data);
@@ -53,20 +53,33 @@ function deduplicate(items, key, entity, diagnostics) {
     const variants = groups.get(identity) || new Map();
     const content = fingerprint(item.semantic || item.data);
     const prior = variants.get(content);
-    if (prior) prior.references.push(...item.references);
-    else variants.set(content, { data: item.data, semantic: item.semantic, references: item.references.slice() });
+    if (prior) {
+      prior.references.push(...item.references);
+      prior.attributable = prior.attributable || item.attributable !== false;
+    } else {
+      variants.set(content, {
+        data: item.data,
+        semantic: item.semantic,
+        attributable: item.attributable !== false,
+        references: item.references.slice(),
+      });
+    }
     groups.set(identity, variants);
   }
 
   const values = [];
   const conflicts = [];
   for (const [identity, variants] of groups) {
+    const relevant = [...variants.values()].some((item) => item.attributable);
     if (variants.size > 1) {
-      conflicts.push(identity);
-      addDiagnostic(diagnostics, 'conflict', `${entity}_identity_conflict`, { identity: identityToken(identity) });
+      if (!options.attributionAware || relevant) {
+        conflicts.push(identity);
+        addDiagnostic(diagnostics, 'conflict', `${entity}_identity_conflict`, { identity: identityToken(identity) });
+      }
       continue;
     }
     const item = variants.values().next().value;
+    if (options.attributionAware && !item.attributable) continue;
     item.references = sortReferences(item.references);
     values.push(item);
   }
@@ -209,9 +222,14 @@ function buildAutonomyReport(input, options = {}) {
     };
   }
 
-  const gates = deduplicate(loaded.gates, (gate) => gate.id, 'gate', diagnostics);
-  const dispatches = deduplicate(loaded.dispatches, (dispatch) => dispatch.dispatch_id, 'dispatch', diagnostics);
-  const results = deduplicate(loaded.results, (result) => result.dispatch_id, 'result', diagnostics);
+  const gates = deduplicate(loaded.gates, (gate) => gate.id, 'gate', diagnostics, { attributionAware: true });
+  const dispatches = deduplicate(loaded.dispatches, (dispatch) => dispatch.dispatch_id, 'dispatch', diagnostics, { attributionAware: true });
+  const allDispatchIds = new Set(loaded.dispatches.map((item) => item.data.dispatch_id).filter(Boolean));
+  const targetDispatchIds = new Set(loaded.dispatches.filter((item) => item.attributable).map((item) => item.data.dispatch_id).filter(Boolean));
+  const orphanResultIds = new Set(loaded.results.map((item) => item.data.dispatch_id).filter((id) => !allDispatchIds.has(id)));
+  for (const _id of orphanResultIds) addDiagnostic(diagnostics, 'warning', 'result_orphan');
+  const scopedResults = loaded.results.map((item) => ({ ...item, attributable: targetDispatchIds.has(item.data.dispatch_id) }));
+  const results = deduplicate(scopedResults, (result) => result.dispatch_id, 'result', diagnostics, { attributionAware: true });
   const reviews = deduplicateReviews(loaded.reviews, diagnostics);
 
   const gateReferences = sortReferences(gates.values.flatMap((item) => item.references));
@@ -268,10 +286,6 @@ function buildAutonomyReport(input, options = {}) {
       reworkReferences.push(...dispatchItem.references, ...resultItem.references);
     }
   }
-  for (const dispatchId of resultById.keys()) {
-    if (!dispatchById.has(dispatchId)) addDiagnostic(diagnostics, 'warning', 'result_orphan', { identity: identityToken(dispatchId) });
-  }
-
   const gateFlags = issueFlags(diagnostics, (entry) => entry.code.startsWith('gate_') || (entry.source_kind === 'gates' && entry.severity === 'error'));
   const timeFlags = issueFlags(diagnostics, (entry) => entry.code.startsWith('dispatch_') || entry.code.startsWith('result_')
     || (['events', 'results'].includes(entry.source_kind) && entry.severity === 'error'));

@@ -202,6 +202,27 @@ test('human gates count answers and calculate sum versus union without exposing 
   } finally { f.cleanup(); }
 });
 
+test('producer-shaped bare slice gate contributes to slice and milestone but not another milestone', () => {
+  const f = fixture({ type: 'slice', id: 'S02', milestone: 'M014' });
+  try {
+    gate(f, {
+      id: 'G-review-open', run_id: 'M014', unit_id: 'S02',
+      created_at: 1000, answer: { source: 'human', at: 2000 },
+    });
+    const slice = buildAutonomyReport(f.input);
+    const milestone = buildAutonomyReport({ ...f.input, target: { type: 'milestone', id: 'M014' } });
+    const unrelated = buildAutonomyReport({ ...f.input, target: { type: 'milestone', id: 'M999' } });
+    for (const report of [slice, milestone]) {
+      const measures = report.families.human_interventions.measures;
+      assert.strictEqual(measures.registered_human_answers.value, 1);
+      assert.strictEqual(measures.registered_response_latency_sum_ms.value, 1000);
+      assert.strictEqual(report.valid, true);
+    }
+    assert.strictEqual(unrelated.families.human_interventions.measures.registered_human_answers.value, null);
+    assert(!unrelated.diagnostics.some((entry) => entry.code === 'gate_identity_conflict'));
+  } finally { f.cleanup(); }
+});
+
 test('timeout/default and cancelled gates sustain zero registered human answers but no human latency', () => {
   const f = fixture();
   try {
@@ -358,6 +379,92 @@ test('conflicting dispatch identity excludes its result instead of first/last wi
     const report = buildAutonomyReport(f.input);
     assert.strictEqual(report.families.time.measures.execution_sum_ms.value, null);
     assert.strictEqual(report.families.time.measures.execution_sum_ms.state, 'conflict');
+  } finally { f.cleanup(); }
+});
+
+test('dispatch identity collisions across target scopes conflict before attribution, independent of order', () => {
+  const cases = [
+    {
+      target: { type: 'task', id: 'TASK-014' },
+      targetEvent: dispatch('execute-task/TASK-014', 'D-cross-task'),
+      foreignEvent: dispatch('execute-task/TASK-999', 'D-cross-task'),
+      id: 'D-cross-task',
+    },
+    {
+      target: { type: 'task', id: 'T01', milestone: 'M014', slice: 'S02' },
+      targetEvent: dispatch('execute-task/T01', 'D-cross-slice', { milestone: 'M014', slice: 'S02' }),
+      foreignEvent: dispatch('execute-task/T01', 'D-cross-slice', { milestone: 'M014', slice: 'S01' }),
+      id: 'D-cross-slice',
+    },
+  ];
+  for (const item of cases) {
+    const run = (reverse) => {
+      const f = fixture(item.target);
+      try {
+        writeEvents(f, reverse ? [item.foreignEvent, item.targetEvent] : [item.targetEvent, item.foreignEvent]);
+        writeResult(f, result(item.id, '2026-09-24T10:00:00Z', '2026-09-24T10:00:01Z', 1));
+        const report = buildAutonomyReport(f.input);
+        return {
+          valid: report.valid,
+          value: report.families.time.measures.execution_sum_ms.value,
+          state: report.families.time.measures.execution_sum_ms.state,
+          codes: report.diagnostics.map((entry) => entry.code).sort(),
+        };
+      } finally { f.cleanup(); }
+    };
+    const forward = run(false);
+    assert.deepStrictEqual(forward, run(true));
+    assert.strictEqual(forward.valid, false);
+    assert.strictEqual(forward.value, null);
+    assert.strictEqual(forward.state, 'conflict');
+    assert(forward.codes.includes('dispatch_identity_conflict'));
+  }
+});
+
+test('gate identity collisions across run and unit scopes conflict before attribution, independent of order', () => {
+  const run = (reverse) => {
+    const f = fixture({ type: 'milestone', id: 'M014' });
+    try {
+      const common = { schema: 1, id: 'G-cross-run', cwd: f.root, status: 'answered', created_at: 1000, answer: { source: 'human', at: 2000 } };
+      const target = { ...common, run_id: 'M014', unit_id: 'S02' };
+      const foreign = { ...common, run_id: 'M999', unit_id: 'S09' };
+      for (const value of (reverse ? [foreign, target] : [target, foreign])) f.write('gates', JSON.stringify(value));
+      const report = buildAutonomyReport(f.input);
+      return {
+        valid: report.valid,
+        value: report.families.human_interventions.measures.registered_human_answers.value,
+        state: report.families.human_interventions.measures.registered_human_answers.state,
+        codes: report.diagnostics.map((entry) => entry.code).sort(),
+      };
+    } finally { f.cleanup(); }
+  };
+  const forward = run(false);
+  assert.deepStrictEqual(forward, run(true));
+  assert.strictEqual(forward.valid, false);
+  assert.strictEqual(forward.value, null);
+  assert.strictEqual(forward.state, 'conflict');
+  assert(forward.codes.includes('gate_identity_conflict'));
+});
+
+test('isolated foreign identity collisions stay non-attributable without conflict or content disclosure', () => {
+  const f = fixture();
+  try {
+    writeEvents(f, [
+      dispatch('execute-task/TASK-998', 'D-PRIVATE-FOREIGN'),
+      dispatch('execute-task/TASK-999', 'D-PRIVATE-FOREIGN'),
+    ]);
+    writeResult(f, result('D-PRIVATE-FOREIGN', '2026-09-24T10:00:00Z', '2026-09-24T10:00:01Z', 1));
+    const common = { schema: 1, id: 'G-PRIVATE-FOREIGN', cwd: f.root, status: 'answered', created_at: 1000, answer: { source: 'human', at: 2000 } };
+    f.write('gates', JSON.stringify({ ...common, run_id: 'TASK-998', unit_id: 'execute-task/TASK-998' }));
+    f.write('gates', JSON.stringify({ ...common, run_id: 'TASK-999', unit_id: 'execute-task/TASK-999' }));
+    const report = buildAutonomyReport(f.input);
+    const serialized = JSON.stringify(report);
+    assert.strictEqual(report.valid, true);
+    assert.strictEqual(report.families.time.measures.execution_sum_ms.value, null);
+    assert.strictEqual(report.families.human_interventions.measures.registered_human_answers.value, null);
+    assert(!report.diagnostics.some((entry) => entry.code.endsWith('_identity_conflict')));
+    assert(!report.diagnostics.some((entry) => Object.prototype.hasOwnProperty.call(entry, 'identity')));
+    for (const privateValue of ['D-PRIVATE-FOREIGN', 'G-PRIVATE-FOREIGN', 'TASK-998', 'TASK-999']) assert(!serialized.includes(privateValue));
   } finally { f.cleanup(); }
 });
 
@@ -583,6 +690,45 @@ test('a registered worktree of the declared repository and branch is accepted as
     assert(report.families.human_interventions.measures.registered_human_answers.references[0].source.startsWith('code:'));
   } finally {
     spawnSync('git', ['worktree', 'remove', '--force', worktree], { cwd: owner, encoding: 'utf8' });
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a gate cwd may use the declared lexical root alias while foreign roots remain excluded', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-autonomy-root-alias-'));
+  const realRoot = path.join(base, 'project');
+  const aliasRoot = path.join(base, 'project-alias');
+  const foreignRoot = path.join(base, 'foreign');
+  fs.mkdirSync(path.join(realRoot, '.gsd'), { recursive: true });
+  fs.mkdirSync(foreignRoot, { recursive: true });
+  fs.writeFileSync(path.join(realRoot, '.gsd', 'PROJECT.md'), '# project\n');
+  try {
+    try { fs.symlinkSync(realRoot, aliasRoot, process.platform === 'win32' ? 'junction' : 'dir'); } catch (error) {
+      if (['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) { skip('declared root lexical alias', `platform denied symlink (${error.code})`); return; }
+      throw error;
+    }
+    const telemetry = path.join(realRoot, 'telemetry');
+    fs.mkdirSync(telemetry, { recursive: true });
+    fs.writeFileSync(path.join(telemetry, 'alias.json'), JSON.stringify({
+      schema: 1, id: 'G-alias', cwd: aliasRoot, run_id: 'TASK-014',
+      unit_id: 'execute-task/TASK-014', status: 'answered', created_at: 1,
+      answer: { source: 'human', at: 2 },
+    }));
+    fs.writeFileSync(path.join(telemetry, 'foreign.json'), JSON.stringify({
+      schema: 1, id: 'G-foreign', cwd: foreignRoot, run_id: 'TASK-014',
+      unit_id: 'execute-task/TASK-014', status: 'answered', created_at: 1,
+      answer: { source: 'human', at: 2 },
+    }));
+    const report = buildAutonomyReport({
+      schema_version: 1,
+      owner_root: aliasRoot,
+      target: { type: 'task', id: 'TASK-014' },
+      sources: { gates: ['telemetry/alias.json', 'telemetry/foreign.json'], events: [], results: [] },
+    });
+    assert.strictEqual(report.valid, true, JSON.stringify(report.diagnostics));
+    assert.strictEqual(report.families.human_interventions.measures.registered_human_answers.value, 1);
+    assert(report.diagnostics.some((entry) => entry.code === 'gate_cwd_foreign'));
+  } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
 });

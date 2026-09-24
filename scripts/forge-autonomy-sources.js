@@ -44,6 +44,12 @@ function inside(root, target) {
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
+function rootLabelForCwd(cwd, rootAliases) {
+  if (!path.isAbsolute(cwd)) return null;
+  const match = rootAliases.find((entry) => entry.paths.some((allowed) => samePath(allowed, cwd)));
+  return match ? match.name : null;
+}
+
 function diagnostic(code, fields = {}, severity = 'error') {
   return { severity, code, ...fields };
 }
@@ -98,7 +104,18 @@ function resolveRoots(input, options = {}) {
     const identity = validateWorktreeIdentity(ownerReal, codeReal, branch);
     if (!identity || !identity.ok) return { error: `worktree_${identity && identity.reason ? identity.reason : 'invalid'}` };
   }
-  return { owner: ownerReal, code: codeReal, branch, roots: samePath(ownerReal, codeReal) ? [ownerReal] : [ownerReal, codeReal] };
+  const sameRoot = samePath(ownerReal, codeReal);
+  const ownerAliases = [ownerCandidate, ownerReal];
+  if (sameRoot) ownerAliases.push(codeCandidate);
+  const rootAliases = [{ name: 'owner', paths: ownerAliases }];
+  if (!sameRoot) rootAliases.push({ name: 'code', paths: [codeCandidate, codeReal] });
+  return {
+    owner: ownerReal,
+    code: codeReal,
+    branch,
+    roots: sameRoot ? [ownerReal] : [ownerReal, codeReal],
+    rootAliases,
+  };
 }
 
 function validateManifest(input, options = {}) {
@@ -282,7 +299,8 @@ function gateMatchesTarget(gate, target) {
   if (target.type === 'task') return gate.run_id === target.id && unitNames(target).has(gate.unit_id);
   if (target.type === 'slice') return gate.run_id === target.milestone && unitNames(target).has(gate.unit_id);
   if (gate.run_id !== target.id || !nonEmpty(gate.unit_id)) return false;
-  return unitNames(target).has(gate.unit_id) || /^(?:plan-slice|complete-slice)\/S\d+$/.test(gate.unit_id)
+  return unitNames(target).has(gate.unit_id) || SLICE_RE.test(gate.unit_id)
+    || /^(?:plan-slice|complete-slice)\/S\d+$/.test(gate.unit_id)
     || /^(?:execute-task|review-fix)\/T\d+$/.test(gate.unit_id);
 }
 
@@ -301,14 +319,15 @@ function gateAnswerMatchesStatus(status, answer) {
   return false;
 }
 
-function normalizeGate(value, roots, target) {
+function normalizeGate(value, rootAliases, target) {
   if (!isObject(value) || value.schema !== 1 || !nonEmpty(value.id) || !nonEmpty(value.cwd)
       || !nonEmpty(value.run_id) || !nonEmpty(value.unit_id) || !nonEmpty(value.status)
       || typeof value.created_at !== 'number' || !Number.isFinite(value.created_at) || value.created_at < 0) {
     return { error: 'gate_record_invalid' };
   }
   if (!['pending', 'answered', 'expired', 'cancelled'].includes(value.status)) return { error: 'gate_status_invalid' };
-  if (!path.isAbsolute(value.cwd) || !roots.some((root) => samePath(root, value.cwd))) return { foreign: 'gate_cwd_foreign' };
+  const cwdLabel = rootLabelForCwd(value.cwd, rootAliases);
+  if (!cwdLabel) return { foreign: 'gate_cwd_foreign' };
   const answer = value.answer;
   if (answer !== undefined && answer !== null && !isObject(answer)) return { error: 'gate_answer_invalid' };
   if (!gateAnswerMatchesStatus(value.status, answer)) return { error: 'gate_status_answer_invalid' };
@@ -318,16 +337,18 @@ function normalizeGate(value, roots, target) {
   }
   const normalized = {
     id: value.id,
-    cwd: roots.findIndex((root) => samePath(root, value.cwd)) === 0 ? 'owner' : 'code',
+    cwd: cwdLabel,
     run_id: value.run_id,
     unit_id: value.unit_id,
     status: value.status,
     created_at: value.created_at,
     answer: answer ? { source: nonEmpty(answer.source) ? answer.source : null, at: answer.at } : null,
   };
-  if (!gateMatchesTarget(normalized, target)) return { foreign: 'gate_not_attributable' };
+  const attributable = gateMatchesTarget(normalized, target);
   return {
     value: normalized,
+    attributable,
+    ...(attributable ? {} : { foreign: 'gate_not_attributable' }),
     semantic: {
       schema: value.schema,
       id: value.id,
@@ -355,9 +376,11 @@ function normalizeDispatch(value, target) {
     dispatch_id: nonEmpty(value.dispatch_id) ? value.dispatch_id : null,
     dispatch_allowed: value.dispatch_allowed,
   };
-  if (!unitMatchesTarget(normalized, target)) return { foreign: 'dispatch_not_attributable' };
+  const attributable = unitMatchesTarget(normalized, target);
   return {
     value: normalized,
+    attributable,
+    ...(attributable ? {} : { foreign: 'dispatch_not_attributable' }),
     semantic: {
       ts: value.ts,
       event: value.event,
@@ -495,11 +518,14 @@ function loadAutonomySources(input, options = {}) {
             continue;
           }
           if (normalized.error) output.diagnostics.push(diagnostic(normalized.error, { source_kind: kind, source_index: index, line: record.line }));
-          else if (normalized.foreign) output.diagnostics.push(diagnostic(normalized.foreign, { source_kind: kind, source_index: index, line: record.line }, 'warning'));
-          else {
+          else if (record.value.event === 'review' && normalized.foreign) {
+            output.diagnostics.push(diagnostic(normalized.foreign, { source_kind: kind, source_index: index, line: record.line }, 'warning'));
+          } else {
+            if (normalized.foreign) output.diagnostics.push(diagnostic(normalized.foreign, { source_kind: kind, source_index: index, line: record.line }, 'warning'));
             const item = {
               data: normalized.value,
               semantic: normalized.semantic,
+              attributable: normalized.attributable !== false,
               references: [referenceAt(read.reference, { line: record.line })],
             };
             if (record.value.event === 'dispatch') output.dispatches.push(item);
@@ -516,10 +542,13 @@ function loadAutonomySources(input, options = {}) {
         return;
       }
       if (kind === 'gates') {
-        const normalized = normalizeGate(parsed.value, checked.roots, checked.target);
+        const normalized = normalizeGate(parsed.value, checked.rootAliases, checked.target);
         if (normalized.error) output.diagnostics.push(diagnostic(normalized.error, { source_kind: kind, source_index: index }));
-        else if (normalized.foreign) output.diagnostics.push(diagnostic(normalized.foreign, { source_kind: kind, source_index: index }, 'warning'));
-        else output.gates.push({ data: normalized.value, semantic: normalized.semantic, references: [referenceAt(read.reference, { pointer: '/' })] });
+        else if (normalized.foreign && !normalized.value) output.diagnostics.push(diagnostic(normalized.foreign, { source_kind: kind, source_index: index }, 'warning'));
+        else {
+          if (normalized.foreign) output.diagnostics.push(diagnostic(normalized.foreign, { source_kind: kind, source_index: index }, 'warning'));
+          output.gates.push({ data: normalized.value, semantic: normalized.semantic, attributable: normalized.attributable !== false, references: [referenceAt(read.reference, { pointer: '/' })] });
+        }
       } else {
         const normalized = normalizeResult(parsed.value);
         if (normalized.error) output.diagnostics.push(diagnostic(normalized.error, { source_kind: kind, source_index: index }));

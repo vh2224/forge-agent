@@ -50,6 +50,8 @@ globs, caminhos fora das raízes e symlinks que escapam das raízes são recusad
 é obrigatório e a raiz precisa ser uma worktree registrada do mesmo repositório
 e da branch declarada. O owner precisa ser exatamente o projeto Forge declarado;
 um ancestral encontrado durante a resolução não é adotado silenciosamente.
+O `cwd` de um gate pode usar a forma lexical declarada ou a forma canônica por
+`realpath` dessas raízes validadas. Outros aliases e raízes continuam recusados.
 
 ## Alvos
 
@@ -78,6 +80,10 @@ explicitamente identificados nos registros fornecidos:
 ```json
 { "type": "milestone", "id": "M014" }
 ```
+
+Para gates, `run_id` igual ao milestone e `unit_id` na gramática local exata
+`S##` identifica um gate canônico do slice e participa também do agregado do
+milestone. Um `S##` sob outro run/milestone permanece estrangeiro.
 
 Não há matching por prefixo, proximidade temporal, prosa, atividade recente ou
 mera presença de um arquivo no manifesto. Alias opaco de run não é resolvido.
@@ -170,6 +176,13 @@ Gates usam projeto + `id`; dispatches e resultados usam projeto +
 valores. Conteúdo divergente sob a mesma identidade gera conflito e toda aquela
 entidade é excluída do agregado, independentemente da ordem dos arquivos. O
 primeiro ou último registro nunca vence.
+
+Para gates e dispatches, a colisão de identidade é verificada em todos os
+registros válidos do projeto antes da filtragem pelo alvo. Uma variante
+atribuível e outra de task, slice, unit ou run diferente bloqueiam a entidade.
+Grupos inteiramente estrangeiros continuam fora das métricas e não publicam a
+identidade nem o conteúdo; apenas o diagnóstico sanitizado de não atribuição
+permanece.
 
 A igualdade semântica é independente da projeção pública. Dispatch inclui os
 eixos allowlisted de tentativa, engine, modelo, rota, transporte e escopo; gate
