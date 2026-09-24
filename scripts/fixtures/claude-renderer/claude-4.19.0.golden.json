@@ -22,7 +22,7 @@
     {
       "source_id": "dispatch-templates",
       "target": "shared/templates/dispatch",
-      "sha256": "f67a814a9e18e6de082d7dd80b855541cd9a6a0394f590036883f03cfaa67b8f"
+      "sha256": "e96e0ffcf8033ba3d1a103685014e96e7b713d7954eb94857e04d645a6d64ea7"
     },
     {
       "source_id": "hooks",
