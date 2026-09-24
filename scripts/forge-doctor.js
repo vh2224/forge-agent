@@ -847,9 +847,16 @@ function cliMain() {
       process.stderr.write('forge-doctor: --diagnose-recovery exige ID válido e aceita somente --controller-key, --cwd e --json.\n');
       process.exitCode = 2; return;
     }
-    const result = diagnostic.inspectRecovery({ cwd: args.cwd, id: args['diagnose-recovery'], controllerKey: args['controller-key'] });
-    process.stdout.write(args.json ? `${JSON.stringify(result, null, 2)}\n` : diagnostic.renderRecovery(result));
-    process.exitCode = result.status === 'ok' ? 0 : 1; return;
+    try {
+      const result = diagnostic.inspectRecovery({ cwd: args.cwd, id: args['diagnose-recovery'], controllerKey: args['controller-key'] });
+      process.stdout.write(args.json ? `${JSON.stringify(result, null, 2)}\n` : diagnostic.renderRecovery(result));
+      process.exitCode = result.status === 'ok' ? 0 : 1;
+    } catch {
+      const failure = { id: args['diagnose-recovery'], status: 'partial', reason: 'internal-error' };
+      process.stdout.write(args.json ? `${JSON.stringify(failure)}\n` : 'Diagnóstico parcial: internal-error. Não foi possível concluir a observação.\n');
+      process.exitCode = 1;
+    }
+    return;
   }
 
   if (args.help) {

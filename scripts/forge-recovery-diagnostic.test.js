@@ -87,6 +87,7 @@ test('unbound ID and isolated SUMMARY do not adopt or conclude; retry is read-on
   const r = repeated(f);
   assert.strictEqual(r.continuity.bound, false); assert.strictEqual(r.continuity.state, 'unproven');
   assert.notStrictEqual(r.continuity.workStatus, 'completed'); assert.strictEqual(r.status, 'partial');
+  assert(hasSource(r, 'personal-store', 'missing'));
   assert(!fs.existsSync(path.join(f.home, '.forge-personal')));
 });
 test('durable clean release survives absent event and does not require bundle', f => {
@@ -116,6 +117,8 @@ test('bound decisions/acceptances survive and sources distinguish stale/missing/
     lastResult: [{ text: 'Resultado parcial', source }], nextAction: [{ text: 'Inspecionar evidências', source }],
   } });
   let r = repeated(f); assert.strictEqual(r.acceptances[0].text, 'Plano aprovado'); assert.strictEqual(r.pendingDecisions.length, 1);
+  assert.strictEqual(r.provenResults.find(p => p.kind === 'personal-checkpoint').evidence.resolved, false);
+  assert.notStrictEqual(r.continuity.workStatus, 'completed');
   assert.strictEqual(r.continuity.checkpoint.nextAction[0].text, 'Inspecionar evidências');
   fs.appendFileSync(source, '\nchanged'); r = repeated(f); assert(hasSource(r, 'checkpoint/pending', 'stale'));
   const read = fs.readFileSync;
@@ -214,5 +217,113 @@ test('CLI text/JSON and conflicts preserve fixture bytes, reject before mutation
   }
   for (const flags of [['--diagnose-recovery'], ['--controller-key', 'key'], ['--diagnose-recovery', '../escape']]) assert.strictEqual(cli(flags).status, 2);
   assert.deepStrictEqual(inventory(f.root), before);
+});
+
+test('R1 recaptured acceptance clears current uncertainty but keeps historical evidence', f => {
+  f.bind(f.id); const file = path.join(f.project, '.gsd', 'tasks', f.id, `${f.id}-PLAN.md`);
+  const save = () => personal.saveCheckpoint({ ...f.options, id: f.id, intent: 'checkpoint', checkpoint: {
+    acceptances: [{ text: 'Plano aprovado', source: file, resolved: true }],
+  } });
+  assert.strictEqual(save().status, 'ok'); fs.appendFileSync(file, '\nchanged');
+  assert.strictEqual(repeated(f).status, 'partial'); assert.strictEqual(save().status, 'ok');
+  const r = repeated(f); assert.strictEqual(r.status, 'ok'); assert.strictEqual(r.acceptances.length, 2);
+  assert.strictEqual(r.acceptances[0].validity, 'stale'); assert.strictEqual(r.acceptances[1].validity, 'current');
+});
+test('O1 registry writer defaults and legacy absent address retain bound checkpoint', f => {
+  runs.add(f.project, { id: f.id, kind: 'task', session_id: 'isolated-fixture', active: false });
+  assert.strictEqual(f.readRun().project, null); f.bind(f.id);
+  const file = path.join(f.project, '.gsd', 'tasks', f.id, `${f.id}-PLAN.md`);
+  personal.saveCheckpoint({ ...f.options, id: f.id, intent: 'checkpoint', checkpoint: { nextAction: [{ text: 'Continuar', source: file }] } });
+  const record = f.readRun();
+  for (const value of [null, undefined, '']) {
+    f.writeRun({ ...record, project: value }); const r = repeated(f);
+    assert.strictEqual(r.continuity.bound, true); assert.strictEqual(r.continuity.checkpoint.nextAction[0].text, 'Continuar');
+    assert.strictEqual(r.status, 'ok', JSON.stringify(r));
+  }
+  for (const value of [false, 7, {}, './relative', f.otherHome]) {
+    f.writeRun({ ...record, project: value }); assert(hasSource(repeated(f), 'run-identity', 'schema-invalid'));
+  }
+});
+test('R2 Git worktree alias resolves owner before any .gsd/run read', f => {
+  const git = args => {
+    const result = spawnSync('git', args, { cwd: f.project, encoding: 'utf8', windowsHide: true });
+    assert.strictEqual(result.status, 0, result.stderr); return result;
+  };
+  git(['init']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture']);
+  const wt = path.join(f.root, 'validated-alias'); git(['worktree', 'add', '-b', 'fixture-recovery-alias', wt]);
+  f.writeRun({ ...f.readRun(), branch: 'fixture-recovery-alias', worktrees: [{ repo: f.project, path: wt }] }); f.bind(f.id);
+  const file = path.join(f.project, '.gsd', 'tasks', f.id, `${f.id}-PLAN.md`);
+  personal.saveCheckpoint({ ...f.options, id: f.id, intent: 'checkpoint', checkpoint: {
+    acceptances: [{ text: 'Aceito', source: file, resolved: true }], pending: [{ text: 'Decidir', source: file }],
+    lastResult: [{ text: 'Resultado parcial', source: file }],
+  } });
+  const inspect = () => repeated(f, { project: undefined, cwd: wt });
+  let r = inspect(); assert.strictEqual(r.continuity.bound, true); assert.strictEqual(r.acceptances[0].text, 'Aceito');
+  assert.strictEqual(r.pendingDecisions[0].text, 'Decidir'); assert(r.artifacts.some(a => a.kind === 'plan'));
+  assert(r.provenResults.some(p => p.kind === 'personal-checkpoint'));
+  // A local .gsd must not override a validated personal alias's owner.
+  fs.mkdirSync(path.join(wt, '.gsd')); r = inspect(); assert.strictEqual(r.continuity.bound, true);
+  const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-doctor.js'), '--diagnose-recovery', f.id, '--cwd', wt, '--json'], { env: f.env(), encoding: 'utf8', windowsHide: true });
+  assert.strictEqual(cli.status, 1); assert.strictEqual(JSON.parse(cli.stdout).continuity.bound, true);
+});
+test('R4 undeclared publications are unread; later valid boundary is superseded', f => {
+  f.work('M005', 'milestone'); const key = 'old-key'; const unit = { type: 'execute-task', id: 'T01', key: 'execute-task/T01' };
+  const boundary = { protocol_version: controller.PROTOCOL_VERSION, idempotency_key: 'new-key', milestone: 'M005', unit: unit.key,
+    kind: 'completed', outcome: 'succeeded', handoff_ready: true };
+  const transaction = { protocol_version: controller.PROTOCOL_VERSION, idempotency_key: key, milestone: 'M005', unit, phase: 'committed', action: 'begin', result: null, boundary: null };
+  const file = controller.transactionFile(f.project, key); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(transaction));
+  const boundaryFile = controller.boundaryFile(f.project, unit); fs.mkdirSync(path.dirname(boundaryFile), { recursive: true }); fs.writeFileSync(boundaryFile, JSON.stringify(boundary));
+  const read = fs.readFileSync; let reads = 0;
+  try {
+    fs.readFileSync = function(target, ...args) { if (path.relative(String(target), boundaryFile) === '') reads++; return read.call(this, target, ...args); };
+    const r = f.inspect({ id: 'M005', controllerKey: key }); assert.strictEqual(reads, 0); assert(!r.sources.some(s => s.name.startsWith('controller-boundary')));
+  } finally { fs.readFileSync = read; }
+  fs.writeFileSync(file, JSON.stringify({ ...transaction, action: 'complete', boundary: { ...boundary, idempotency_key: key } }));
+  let r = repeated(f, { id: 'M005', controllerKey: key }); assert(hasSource(r, 'controller-boundary-identity', 'superseded'));
+  assert(!r.provenResults.some(p => p.kind === 'controller-boundary-published'));
+  fs.writeFileSync(boundaryFile, JSON.stringify({ ...boundary, milestone: 'M006' }));
+  r = repeated(f, { id: 'M005', controllerKey: key }); assert(hasSource(r, 'controller-boundary-identity', 'schema-invalid'));
+});
+test('R6 unexpected CLI failure returns sanitized partial without stack/token', f => {
+  const doctor = path.join(__dirname, 'forge-doctor.js');
+  for (const json of [false, true]) {
+    const argv = [process.execPath, doctor, '--diagnose-recovery', f.id, '--cwd', f.project, ...(json ? ['--json'] : [])];
+    const code = `require(${JSON.stringify(path.join(__dirname, 'forge-recovery-diagnostic.js'))}).inspectRecovery=()=>{throw new Error('PRIVATE-TOKEN')};process.argv=${JSON.stringify(argv)};require('module')._load(${JSON.stringify(doctor)},null,true);`;
+    const out = spawnSync(process.execPath, ['-e', code], { env: f.env(), encoding: 'utf8', windowsHide: true });
+    assert.strictEqual(out.status, 1, out.stderr); assert(!`${out.stdout}${out.stderr}`.includes('PRIVATE-TOKEN')); assert.strictEqual(out.stderr, '');
+    if (json) assert.strictEqual(JSON.parse(out.stdout).reason, 'internal-error'); else assert(out.stdout.includes('Diagnóstico parcial: internal-error'));
+  }
+});
+test('R7 key limit uses UTF-8/base64 bytes and I/O errors retain their category', f => {
+  assert.strictEqual(diagnostic.validKey('x'.repeat(187)), true); assert.strictEqual(diagnostic.validKey('x'.repeat(188)), false);
+  assert.strictEqual(diagnostic.validKey('é'.repeat(94)), false); assert.strictEqual(diagnostic.validKey('é'.repeat(93)), true);
+  for (const code of ['ENAMETOOLONG', 'ENOTDIR', 'ELOOP', 'EMFILE', 'EBUSY']) {
+    const read = fs.readFileSync;
+    try {
+      fs.readFileSync = function(target, ...args) { if (path.relative(String(target), f.runFile) === '') throw Object.assign(new Error('private'), { code }); return read.call(this, target, ...args); };
+      assert(hasSource(f.inspect(), 'run', code === 'ENAMETOOLONG' ? 'invalid-name' : 'unreadable'));
+    } finally { fs.readFileSync = read; }
+  }
+  const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-doctor.js'), '--diagnose-recovery', f.id, '--controller-key', 'x'.repeat(300), '--cwd', f.project], { env: f.env(), encoding: 'utf8', windowsHide: true });
+  assert.strictEqual(cli.status, 2);
+});
+test('R8 record/manifest changes during preview cannot verify the earlier artifact', f => {
+  const { bundle } = release(f, true); const originalRun = fs.readFileSync(f.runFile);
+  const manifestFile = path.join(bundle, 'manifest.json'); const originalManifest = fs.readFileSync(manifestFile);
+  const otherBundle = path.join(path.dirname(bundle), 'other-attempt'); fs.cpSync(bundle, otherBundle, { recursive: true });
+  const restore = recovery.restore;
+  try {
+    recovery.restore = (cwd, id, options) => {
+      const record = f.readRun(); record.write_claim.released.evidence.bundle = path.relative(f.project, otherBundle); f.writeRun(record);
+      return restore(cwd, id, options);
+    };
+    let r = f.inspect(); assert(hasSource(r, 'claim-preview', 'snapshot-changed')); assert.strictEqual(r.artifacts.find(a => a.kind === 'claim-bundle').integrity, 'unverified');
+    fs.writeFileSync(f.runFile, originalRun);
+    recovery.restore = (cwd, id, options) => {
+      const preview = restore(cwd, id, options); fs.appendFileSync(manifestFile, '\n'); return preview;
+    };
+    r = f.inspect(); assert(hasSource(r, 'claim-preview', 'snapshot-changed')); assert.strictEqual(r.artifacts.find(a => a.kind === 'claim-bundle').integrity, 'unverified');
+  } finally { recovery.restore = restore; fs.writeFileSync(f.runFile, originalRun); fs.writeFileSync(manifestFile, originalManifest); }
+  assert.strictEqual(repeated(f).artifacts.find(a => a.kind === 'claim-bundle').integrity, 'verified');
 });
 console.log(`${passed} recovery diagnostic tests passed`);

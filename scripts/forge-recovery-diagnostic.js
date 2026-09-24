@@ -16,7 +16,9 @@ const { validateWorktreeIdentity } = require('./forge-isolation');
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validId = id => typeof id === 'string' && ids.isValid(id) && ['task', 'milestone'].includes(ids.entityKind(id));
-const validKey = key => typeof key === 'string' && key.trim() === key && key.length > 0 && key.length <= 1024 && !/[\x00-\x1f\x7f]/.test(key);
+// Controller filenames are base64url(key) + '.json', bounded to 255 bytes.
+const validKey = key => typeof key === 'string' && key.trim() === key && key.length > 0
+  && Buffer.from(key).toString('base64url').length + 5 <= 255 && !/[\x00-\x1f\x7f]/.test(key);
 function samePath(a, b) {
   try { return path.relative(fs.realpathSync.native(a), fs.realpathSync.native(b)) === ''; }
   catch { return false; }
@@ -26,8 +28,9 @@ function samePath(a, b) {
 function reason(error) {
   if (error.code === 'ENOENT') return 'missing';
   if (error instanceof SyntaxError) return 'corrupt';
-  if (['EACCES', 'EPERM', 'EISDIR'].includes(error.code)) return 'unreadable';
-  return 'unsafe-path';
+  if (error.code === 'ENAMETOOLONG') return 'invalid-name';
+  if (error.code) return 'unreadable';
+  return /-(path-escape|path-reparse|root-missing)$/.test(error.message || '') ? 'unsafe-path' : 'internal-error';
 }
 function readEvidence(root, file, json = true) {
   try {
@@ -36,18 +39,18 @@ function readEvidence(root, file, json = true) {
     return { state: 'current', source: file, hash: recovery.sha256(bytes), value: json ? JSON.parse(bytes.toString('utf8')) : bytes };
   } catch (error) { return { state: reason(error) }; }
 }
-function source(report, name, observation) {
+function source(report, name, observation, uncertain = observation.state !== 'current') {
   report.sources.push({ name, state: observation.state, ...(observation.source ? { source: observation.source } : {}), ...(observation.hash ? { hash: observation.hash } : {}) });
-  if (observation.state !== 'current') report.uncertainties.push(`${name}: ${observation.state}`);
+  if (uncertain) report.uncertainties.push(`${name}: ${observation.state}`);
 }
 function safeRoot(project, target, aliases = []) {
   try { recovery.assertSafePath(project, target, 'source'); return project; } catch { /* validated worktree below */ }
   for (const alias of aliases) {
     if (!object(alias) || !path.isAbsolute(alias.repo || '') || !path.isAbsolute(alias.path || '') || typeof alias.branch !== 'string') continue;
     try {
+      recovery.assertSafePath(alias.path, target, 'source');
       recovery.assertSafePath(project, alias.repo, 'repo');
       if (!validateWorktreeIdentity(alias.repo, alias.path, alias.branch).ok) continue;
-      recovery.assertSafePath(alias.path, target, 'source');
       return alias.path;
     } catch { /* fail closed */ }
   }
@@ -56,6 +59,22 @@ function safeRoot(project, target, aliases = []) {
 function capture(value) {
   return { text: value.text, source: value.source, hash: value.hash, capturedAt: value.capturedAt,
     resolved: value.resolved, validity: value.validity };
+}
+
+// Resolve only project metadata, never enumerate runs or inspect peer bindings.
+// This mirrors the personal reader's longest validated project/alias match so
+// all subsequent scoped reads use the owner, including when cwd has no .gsd.
+function diagnosticProject(cwd, options) {
+  const home = resolveUserHome(options);
+  const store = readEvidence(home, path.join(home, '.forge-personal', 'context.json'));
+  if (store.state !== 'current' || !object(store.value) || store.value.schemaVersion !== 1 || !object(store.value.projects)) return cwd;
+  const candidates = Object.entries(store.value.projects).filter(([key, entry]) => {
+    if (!object(entry) || typeof entry.path !== 'string' || !path.isAbsolute(entry.path)
+      || recovery.sha256(Buffer.from(entry.path)) !== key || !Array.isArray(entry.aliases)) return false;
+    try { safeRoot(entry.path, cwd, entry.aliases); return true; } catch { return false; }
+  });
+  candidates.sort((a, b) => b[1].path.length - a[1].path.length);
+  return candidates.length ? candidates[0][1].path : cwd;
 }
 
 function inspectPersonal(project, id, options, report) {
@@ -83,21 +102,22 @@ function inspectPersonal(project, id, options, report) {
       } catch { source(report, 'personal-sources', { state: 'unsafe-path' }); return; }
     }
   }
-  const args = { ...options, project, cwd: project, id };
+  const args = { ...options, project: undefined, cwd: options.project || options.cwd || project, id };
   let snapshot = personal.readPersonalSnapshot(args);
   const bound = snapshot.status === 'ok' && snapshot.reason !== 'no-bindings';
-  if (snapshot.status === 'ok' && snapshot.reason === 'no-bindings') snapshot = personal.readPersonalSnapshot({ ...args, inspect: true });
+  if (snapshot.status === 'ok' && snapshot.reason === 'no-bindings') snapshot = personal.readPersonalSnapshot({ ...args, project, inspect: true });
   if (snapshot.status !== 'ok') {
     source(report, 'personal-store', { state: snapshot.reason }); return;
   }
-  source(report, 'personal-store', { state: 'current', hash: store.hash });
+  source(report, 'personal-store', store, false);
   const work = snapshot.works[0];
   const checkpoint = work.checkpoint;
   report.continuity = { bound, state: Object.values(checkpoint).some(entries => entries.length) ? 'recorded' : 'unproven',
     workStatus: work.workStatus, activity: work.activity,
     checkpoint: Object.fromEntries(Object.entries(checkpoint).map(([field, entries]) => [field, entries.map(capture)])) };
   for (const [field, entries] of Object.entries(checkpoint)) {
-    for (const item of entries) source(report, `checkpoint/${field}`, { state: item.validity, hash: item.hash });
+    const effective = field === 'acceptances' ? entries.filter((item, index) => !entries.slice(index + 1).some(later => later.text === item.text)) : entries;
+    for (const item of effective) source(report, `checkpoint/${field}`, { state: item.validity, hash: item.hash });
   }
   report.pendingDecisions = (checkpoint.pending || []).filter(item => !item.resolved).map(capture);
   const acceptances = checkpoint.acceptances || [];
@@ -109,7 +129,7 @@ function inspectPersonal(project, id, options, report) {
   if (work.reliability !== 'current') report.uncertainties.push(`Continuidade: ${work.reliability}`);
 }
 
-function inspectClaim(project, id, record, report) {
+function inspectClaim(project, id, record, report, runHash) {
   const claim = record.write_claim;
   if (claim == null) { report.claim = { state: 'absent' }; return; }
   try { claims.validateHeldClaim({ ...claim, released: null }); }
@@ -136,6 +156,9 @@ function inspectClaim(project, id, record, report) {
     manifest = readEvidence(project, path.join(bundle, 'manifest.json'));
     source(report, 'claim-manifest', manifest);
     if (manifest.state !== 'current') return;
+    if (manifest.hash !== evidence.manifest_sha256) {
+      source(report, 'claim-preview', { state: 'snapshot-changed' }); return;
+    }
     recovery.assertSafePath(project, path.join(bundle, 'manifest.sha256'), 'bundle');
     const value = manifest.value;
     if (!object(value) || value.version !== 1 || value.run_id !== id || !Array.isArray(value.entries)
@@ -155,7 +178,15 @@ function inspectClaim(project, id, record, report) {
       }
     }
   } catch { source(report, 'claim-bundle', { state: 'unsafe-path' }); return; }
+  const unchanged = () => {
+    const currentRun = readEvidence(project, path.join(project, '.gsd', 'forge', 'runs', `${id}.json`));
+    const currentManifest = readEvidence(project, path.join(bundle, 'manifest.json'));
+    return currentRun.state === 'current' && currentRun.hash === runHash
+      && currentManifest.state === 'current' && currentManifest.hash === manifest.hash;
+  };
+  if (!unchanged()) { source(report, 'claim-preview', { state: 'snapshot-changed' }); return; }
   const preview = recovery.restore(project, id, { apply: false });
+  if (!unchanged()) { source(report, 'claim-preview', { state: 'snapshot-changed' }); return; }
   const verified = Array.isArray(preview.actions) && Array.isArray(preview.conflicts);
   artifact.integrity = verified ? 'verified' : 'unverified';
   artifact.conflicts = verified ? preview.conflicts.length : null;
@@ -179,18 +210,20 @@ function inspectController(project, id, key, report) {
   }
   report.controller = { coverage: 'observed', phase: t.phase, transactionCommitted: t.phase === 'committed', globalCompletion: 'unproven' };
   for (const [name, file] of [['result', controller.resultFile(project, key)], ['boundary', controller.boundaryFile(project, unit)]]) {
+    if (t[name] == null) continue;
     const observed = readEvidence(project, file);
-    // Absence is normal when the transaction does not declare this publication.
-    if (observed.state === 'missing' && t[name] == null) continue;
     source(report, `controller-${name}`, observed);
     if (observed.state !== 'current') continue;
     const v = observed.value;
-    if (!object(v) || v.protocol_version !== controller.PROTOCOL_VERSION || v.idempotency_key !== key || v.milestone !== id || v.unit !== unit) {
+    if (!object(v) || v.protocol_version !== controller.PROTOCOL_VERSION || !validKey(v.idempotency_key) || v.milestone !== id || v.unit !== unit) {
       source(report, `controller-${name}-identity`, { state: 'schema-invalid' }); continue;
     }
     if ((name === 'result' && !RESULT_STATUSES.includes(v.status))
       || (name === 'boundary' && (!controller.BOUNDARY_KINDS.includes(v.kind) || !RESULT_STATUSES.includes(v.outcome) || typeof v.handoff_ready !== 'boolean'))) {
       source(report, `controller-${name}-schema`, { state: 'schema-invalid' }); continue;
+    }
+    if (v.idempotency_key !== key) {
+      source(report, `controller-${name}-identity`, { state: name === 'boundary' ? 'superseded' : 'schema-invalid' }); continue;
     }
     report.artifacts.push({ kind: `controller-${name}`, source: path.relative(project, file), existence: 'observed', integrity: 'identity-checked' });
     report.provenResults.push({ kind: `controller-${name}-published` });
@@ -208,6 +241,7 @@ function inspectRecovery(options = {}) {
   let project;
   try {
     project = path.resolve(options.project || options.cwd || process.cwd());
+    project = diagnosticProject(project, options);
     recovery.assertSafePath(project, path.join(project, '.gsd'), 'project');
     if (!fs.statSync(path.join(project, '.gsd')).isDirectory()) throw new Error('project-invalid');
     // Match personal-context's canonicalization (native realpath expands 8.3
@@ -219,7 +253,7 @@ function inspectRecovery(options = {}) {
   if (run.state !== 'current') return report;
   const r = run.value;
   if (!object(r) || r.id !== options.id || r.kind !== ids.entityKind(options.id) || typeof r.active !== 'boolean'
-    || (r.project !== undefined && (typeof r.project !== 'string' || !path.isAbsolute(r.project) || !samePath(project, r.project)))) {
+    || (r.project != null && r.project !== '' && (typeof r.project !== 'string' || !path.isAbsolute(r.project) || !samePath(project, r.project)))) {
     source(report, 'run-identity', { state: 'schema-invalid' }); return report;
   }
   const directory = path.join(project, '.gsd', r.kind === 'task' ? 'tasks' : 'milestones', options.id);
@@ -235,7 +269,7 @@ function inspectRecovery(options = {}) {
     if (suffix !== 'SUMMARY' || observed.state !== 'missing') source(report, suffix.toLowerCase(), observed);
   }
   inspectPersonal(project, options.id, options, report);
-  inspectClaim(project, options.id, r, report);
+  inspectClaim(project, options.id, r, report, run.hash);
   inspectController(project, options.id, options.controllerKey, report);
   report.status = report.uncertainties.length ? 'partial' : 'ok';
   return report;
