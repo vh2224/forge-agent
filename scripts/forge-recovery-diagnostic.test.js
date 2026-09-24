@@ -384,4 +384,70 @@ test('final R5 text translates report fields and states while preserving provena
   for (const raw of ['"sources"', '"workStatus"', 'identity-checked', 'unreadable', 'unproven', 'personal-store']) assert(!text.includes(raw), raw);
   assert.strictEqual(JSON.stringify(r), before, 'text rendering must not change JSON representation');
 });
+test('focused R1 every dynamic text value escapes controls without changing JSON evidence', f => {
+  f.bind(f.id); const file = path.join(f.project, '.gsd', 'tasks', f.id, `${f.id}-PLAN.md`);
+  const tainted = 'texto\n\nEstado: FALSO\nDecisões pendentes:\x1b[2J'
+    + Array.from({ length: 32 }, (_, i) => String.fromCharCode(i)).join('')
+    + Array.from({ length: 33 }, (_, i) => String.fromCharCode(127 + i)).join('') + '\u2028\u2029';
+  assert.strictEqual(personal.saveCheckpoint({ ...f.options, id: f.id, intent: 'checkpoint', checkpoint: {
+    pending: [{ text: tainted, source: file }],
+  } }).status, 'ok');
+  const r = repeated(f);
+  assert.strictEqual(r.pendingDecisions[0].text, tainted);
+  const captured = { ...r.pendingDecisions[0], source: tainted, hash: tainted, capturedAt: tainted, validity: tainted };
+  r.id = tainted; r.observedAt = tainted; r.status = tainted; r.nextSafeStep = tainted;
+  r.sources.push({ name: tainted, state: tainted, source: tainted, hash: tainted });
+  r.artifacts.push({ kind: tainted, existence: tainted, integrity: tainted, source: tainted, hash: tainted, conflicts: tainted });
+  r.provenResults.push({ kind: tainted, at: tainted, mechanism: tainted, evidence: captured });
+  r.continuity.checkpoint[tainted] = [captured]; r.continuity.state = tainted; r.continuity.workStatus = tainted; r.continuity.activity = tainted;
+  r.acceptances.push(captured); r.uncertainties.push(tainted); r.uncovered.push(tainted);
+  r.claim = { state: tainted, classification: tainted }; r.controller = { coverage: tainted, reason: tainted, phase: tainted, globalCompletion: tainted };
+  const before = JSON.stringify(r); const output = diagnostic.renderRecovery(r);
+  assert(!/[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029]/.test(output));
+  assert(!output.includes('\nEstado: FALSO')); assert(output.includes('\\u000a')); assert(output.includes('\\u001b[2J'));
+  for (const escape of ['\\u007f', '\\u0085', '\\u009f', '\\u2028', '\\u2029']) assert(output.includes(escape));
+  assert.strictEqual(JSON.stringify(r), before); assert.strictEqual(JSON.parse(before).pendingDecisions[0].text, tainted);
+});
+test('focused R2 unobserved and incomplete phases never assert an empty decision list', f => {
+  const section = (r, heading) => diagnostic.renderRecovery(r).split(`\n${heading}:\n`)[1].split('\n\n')[0];
+  const unknown = r => {
+    for (const heading of ['Decisões pendentes', 'Aceites registrados', 'Resultado comprovado']) {
+      assert(section(r, heading).includes('Observação incompleta'), heading);
+      assert(!section(r, heading).includes('Nenhum registro'), heading);
+    }
+  };
+  unknown(diagnostic.createRecoveryReport(f.id, 'diagnostic'));
+  const bytes = fs.readFileSync(f.runFile); fs.unlinkSync(f.runFile); unknown(f.inspect()); fs.writeFileSync(f.runFile, '{bad'); unknown(f.inspect()); fs.writeFileSync(f.runFile, bytes);
+  f.bind(f.id); const storeFile = path.join(f.home, '.forge-personal', 'context.json'); const store = fs.readFileSync(storeFile);
+  fs.writeFileSync(storeFile, '{bad'); unknown(f.inspect()); fs.writeFileSync(storeFile, store);
+  const read = personal.readPersonalSnapshot;
+  try {
+    personal.readPersonalSnapshot = () => { throw new Error('injected'); }; unknown(f.inspect());
+    // Deterministic late-phase failure: already assigned continuity survives,
+    // but coverage must make the unfinished decision list explicitly unknown.
+    personal.readPersonalSnapshot = options => {
+      const snapshot = read(options);
+      snapshot.works[0].checkpoint.pending = [];
+      snapshot.works[0].checkpoint.pending.filter = () => { throw new Error('late phase'); };
+      return snapshot;
+    };
+    const late = f.inspect(); assert.strictEqual(late.coverage.personal, 'incomplete'); assert.strictEqual(late.continuity.bound, true); unknown(late);
+  } finally { personal.readPersonalSnapshot = read; }
+  const observed = repeated(f); assert.strictEqual(observed.coverage.personal, 'observed');
+  assert(section(observed, 'Decisões pendentes').includes('Nenhum registro nas fontes observadas.'));
+  assert(section(observed, 'Aceites registrados').includes('Nenhum registro nas fontes observadas.'));
+});
+test('focused R4 only known source-state pairs are translated; prose and paths stay intact', f => {
+  const r = diagnostic.createRecoveryReport(f.id);
+  const prose = ['Inspecionar C:/repo/claim: conteúdo: outro/estado', 'Controlador interrompido: publicação pode preceder a fase; não repetir efeitos pelo diagnóstico.',
+    'Reserva de escrita travada; exige inspeção e decisão na autoridade original.', 'run: missing; detalhe genérico / caminho'];
+  r.sources.push({ name: 'run', state: 'missing' }); r.uncertainties.push('run: missing', ...prose);
+  r.sources.push({ name: 'nome/desconhecido', state: 'missing' }); r.uncertainties.push('nome/desconhecido: missing');
+  const text = diagnostic.renderRecovery(r);
+  assert(text.includes('registro do trabalho: ausente'));
+  for (const line of [...prose, 'nome/desconhecido: missing']) assert(text.includes(line), line);
+  assert(!text.includes('C: / repo')); assert(!text.includes('Claim:'));
+  release(f, true); const record = f.readRun(); record.active = true; record.write_claim.released = null; f.writeRun(record);
+  const stuck = diagnostic.renderRecovery(f.inspect()); assert(stuck.includes('Reserva de escrita travada;')); assert(!stuck.includes('Claim:'));
+});
 console.log(`${passed} recovery diagnostic tests passed`);
