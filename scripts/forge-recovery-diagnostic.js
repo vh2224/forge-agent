@@ -44,14 +44,24 @@ function source(report, name, observation, uncertain = observation.state !== 'cu
   if (uncertain) report.uncertainties.push(`${name}: ${observation.state}`);
 }
 function safeRoot(project, target, aliases = []) {
-  try { recovery.assertSafePath(project, target, 'source'); return project; } catch { /* validated worktree below */ }
+  try { recovery.assertSafePath(project, target, 'source'); return project; } catch { /* validated aliases below */ }
+  // An ancestor of the project may have an OS alias (macOS /var -> /private/var).
+  // Find the same root in the target's spelling, then validate every descendant
+  // before reading. Realpath(target) alone would erase forbidden child symlinks.
+  for (let ancestor = path.resolve(target); ; ancestor = path.dirname(ancestor)) {
+    if (samePath(project, ancestor)) {
+      recovery.assertSafePath(ancestor, target, 'source');
+      return ancestor;
+    }
+    if (path.dirname(ancestor) === ancestor) break;
+  }
   for (const alias of aliases) {
     if (!object(alias) || !path.isAbsolute(alias.repo || '') || !path.isAbsolute(alias.path || '') || typeof alias.branch !== 'string') continue;
     try {
-      recovery.assertSafePath(alias.path, target, 'source');
-      recovery.assertSafePath(project, alias.repo, 'repo');
+      const root = safeRoot(alias.path, target);
+      safeRoot(project, alias.repo);
       if (!validateWorktreeIdentity(alias.repo, alias.path, alias.branch).ok) continue;
-      return alias.path;
+      return root;
     } catch { /* fail closed */ }
   }
   throw new Error('source-outside-project');

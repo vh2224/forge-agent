@@ -1,4 +1,4 @@
-## Unreleased
+## v4.36.0 - Recuperação guiada por trabalho
 
 - `forge-doctor --diagnose-recovery <id>` oferece diagnóstico somente leitura por
   trabalho, em texto pt-BR ou JSON: resultado comprovado, evidências, artefatos,

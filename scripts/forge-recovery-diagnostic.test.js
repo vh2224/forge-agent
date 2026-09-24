@@ -81,6 +81,10 @@ function release(f, dirty = false) {
   return { code, bundle: out.bundle && path.join(f.project, out.bundle) };
 }
 const hasSource = (r, name, state) => r.sources.some(s => s.name === name && s.state === state);
+function sameFile(a, b) {
+  try { return path.relative(fs.realpathSync(a), fs.realpathSync(b)) === ''; }
+  catch { return typeof a === 'string' && typeof b === 'string' && path.relative(a, b) === ''; }
+}
 
 test('unbound ID and isolated SUMMARY do not adopt or conclude; retry is read-only', f => {
   fs.writeFileSync(path.join(f.project, '.gsd', 'tasks', f.id, `${f.id}-SUMMARY.md`), '---\nstatus: DONE\n---');
@@ -123,7 +127,7 @@ test('bound decisions/acceptances survive and sources distinguish stale/missing/
   fs.appendFileSync(source, '\nchanged'); r = repeated(f); assert(hasSource(r, 'checkpoint/pending', 'stale'));
   const read = fs.readFileSync;
   try {
-    fs.readFileSync = function(file, ...args) { if (path.relative(file, source) === '') throw Object.assign(new Error('denied'), { code: 'EACCES' }); return read.call(this, file, ...args); };
+    fs.readFileSync = function(file, ...args) { if (sameFile(file, source)) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return read.call(this, file, ...args); };
     r = f.inspect(); assert(hasSource(r, 'checkpoint/pending', 'unreadable'));
   } finally { fs.readFileSync = read; }
   fs.unlinkSync(source); r = repeated(f); assert(hasSource(r, 'checkpoint/pending', 'missing'));
@@ -275,7 +279,7 @@ test('R4 undeclared publications are unread; later valid boundary is superseded'
   const boundaryFile = controller.boundaryFile(f.project, unit); fs.mkdirSync(path.dirname(boundaryFile), { recursive: true }); fs.writeFileSync(boundaryFile, JSON.stringify(boundary));
   const read = fs.readFileSync; let reads = 0;
   try {
-    fs.readFileSync = function(target, ...args) { if (path.relative(String(target), boundaryFile) === '') reads++; return read.call(this, target, ...args); };
+    fs.readFileSync = function(target, ...args) { if (sameFile(target, boundaryFile)) reads++; return read.call(this, target, ...args); };
     const r = f.inspect({ id: 'M005', controllerKey: key }); assert.strictEqual(reads, 0); assert(!r.sources.some(s => s.name.startsWith('controller-boundary')));
   } finally { fs.readFileSync = read; }
   fs.writeFileSync(file, JSON.stringify({ ...transaction, action: 'complete', boundary: { ...boundary, idempotency_key: key } }));
@@ -309,7 +313,7 @@ test('R7 key limit uses UTF-8/base64 bytes and I/O errors retain their category'
   for (const code of ['ENAMETOOLONG', 'ENOTDIR', 'ELOOP', 'EMFILE', 'EBUSY']) {
     const read = fs.readFileSync;
     try {
-      fs.readFileSync = function(target, ...args) { if (path.relative(String(target), f.runFile) === '') throw Object.assign(new Error('private'), { code }); return read.call(this, target, ...args); };
+      fs.readFileSync = function(target, ...args) { if (sameFile(target, f.runFile)) throw Object.assign(new Error('private'), { code }); return read.call(this, target, ...args); };
       assert(hasSource(f.inspect(), 'run', code === 'ENAMETOOLONG' ? 'invalid-name' : 'unreadable'));
     } finally { fs.readFileSync = read; }
   }
@@ -449,5 +453,18 @@ test('focused R4 only known source-state pairs are translated; prose and paths s
   assert(!text.includes('C: / repo')); assert(!text.includes('Claim:'));
   release(f, true); const record = f.readRun(); record.active = true; record.write_claim.released = null; f.writeRun(record);
   const stuck = diagnostic.renderRecovery(f.inspect()); assert(stuck.includes('Reserva de escrita travada;')); assert(!stuck.includes('Claim:'));
+});
+if (!process.env.FORGE_TEST_RECOVERY_ANCESTOR_ALIAS) test('OS ancestor aliases preserve diagnosis and child-symlink rejection across the suite', f => {
+  const realTemp = path.join(f.root, 'real-temp'); const aliasTemp = path.join(f.root, 'alias-temp');
+  fs.mkdirSync(realTemp);
+  try { fs.symlinkSync(realTemp, aliasTemp, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) { console.log(`SKIP ancestor alias: ${error.code}`); return; } throw error; }
+  const code = `require('os').tmpdir=()=>${JSON.stringify(aliasTemp)};require(${JSON.stringify(__filename)});`;
+  const out = spawnSync(process.execPath, ['-e', code], {
+    env: { ...f.env(), FORGE_TEST_RECOVERY_ANCESTOR_ALIAS: '1' }, encoding: 'utf8', windowsHide: true,
+  });
+  assert.strictEqual(out.status, 0, `${out.stdout}\n${out.stderr}`);
+  assert(out.stdout.includes('PASS symlink payload is rejected'));
+  assert(!out.stdout.includes('SKIP symlink'), 'child-symlink rejection must execute with supported ancestor aliases');
 });
 console.log(`${passed} recovery diagnostic tests passed`);
