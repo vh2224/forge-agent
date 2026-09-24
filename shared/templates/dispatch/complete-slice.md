@@ -5,6 +5,7 @@ auto_commit: {auto_commit}
 ## Task Summaries
 
 Read (first 35 lines each): {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/T*/T*-SUMMARY.md
+Read each complete sibling T*-DELIVERY.json; never infer criterion status from the SUMMARY excerpt.
 
 ## Slice Plan
 
@@ -28,6 +29,13 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/{M###}-SUMMARY.md
    If exit code != 0 and not skipped:"no-stack" → stop, return blocked with blocker_class: tooling_failure.
 4. Security scan — search changed files for risky patterns (eval, innerHTML, dangerouslySetInnerHTML, raw SQL concatenation, console.log near secrets, hardcoded credentials). If found, add ## ⚠ Security Flags to S##-SUMMARY.md. Not a blocker — document and continue.
 5. Run lint gate — if lint commands exist, run on changed files. Fix violations.
+5.5. Read {FORGE_SCRIPTS_DIR}/../shared/forge-delivery.md. Capture the actual slice gate/verifier
+   results in contemporaneous envelopes. Write S##-DELIVERY-INPUT.json with the exact slice-plan
+   fingerprint, explicit slice-owned bindings and every expected task DELIVERY, including missing
+   children. Run forge-delivery.js with `--owner-root "{WORKING_DIR}" --code-dir "<actual CODE_DIR from the isolation header, or WORKING_DIR in shared mode>"
+   --json` to write S##-DELIVERY.json, then `--markdown --table-limit 40
+   --detail-reference "./S##-DELIVERY.json"` and upsert `## Entrega por critério`. Preserve the
+   generated gap counts and full-detail pointer within the 120-line SUMMARY budget.
 6. **Git — this unit has NO merge step, under either value of auto_commit.** Integrating is the
    OPERATOR's act, never the loop's — no unit (slice or milestone) integrates; the loop delivers the
    run branch for the operator to merge. The prohibition is on INTEGRATING, not on one spelling:

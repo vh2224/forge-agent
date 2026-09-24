@@ -22,6 +22,21 @@ function tempRoot(label) { const root = fs.mkdtempSync(path.join(os.tmpdir(), `f
 function test(name, fn) { try { fn(); passed++; process.stdout.write(`ok - ${name}\n`); } catch (error) { process.stderr.write(`not ok - ${name}\n${error.stack}\n`); process.exitCode = 1; } }
 function skip(name, reason) { skipped++; process.stdout.write(`ok - ${name} # SKIP ${reason}\n`); }
 function templateNames(dir) { return fs.readdirSync(dir).filter((name) => name.endsWith('.md')).sort(); }
+function allFiles(root) {
+  if (!fs.existsSync(root)) return [];
+  const out = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) out.push(...allFiles(full));
+    else if (entry.isFile()) out.push(full);
+  }
+  return out;
+}
+function treeContains(root, pattern) {
+  return allFiles(root).some((file) => {
+    try { return pattern.test(fs.readFileSync(file, 'utf8')); } catch (_) { return false; }
+  });
+}
 function nativePowerShell() {
   for (const command of process.platform === 'win32' ? ['pwsh.exe', 'powershell.exe'] : ['pwsh', 'powershell']) {
     const result = spawnSync(command, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' });
@@ -58,6 +73,50 @@ test('core dry-run is deterministic and reports only selected adapter', () => {
   assert.strictEqual(left, right);
   assert.strictEqual(fs.existsSync(options.forgeHome), false);
   assert(!JSON.parse(left).plan.some((entry) => entry.destination.startsWith(options.claudeHome)));
+});
+
+test('temporary Claude and Codex installs carry delivery helper, contract and operational consumers', () => {
+  const root = tempRoot('delivery-projections');
+  const options = {
+    repo: ROOT, runtime: 'both', noModelProbe: true, skipCapabilityCheck: true,
+    forgeHome: path.join(root, 'forge'), claudeHome: path.join(root, 'claude'),
+    codexHome: path.join(root, 'codex'), projectRoot: path.join(root, 'project'),
+    userHome: root, env: { ...process.env, HOME: root, USERPROFILE: root },
+  };
+  fs.mkdirSync(options.projectRoot, { recursive: true });
+  const result = installer.install(options);
+  assert.strictEqual(result.ok, true);
+  assert(fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-delivery.js')));
+  assert(fs.existsSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md')));
+  const contract = fs.readFileSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md'), 'utf8');
+  assert.match(contract, /três|verificado/);
+  for (const [host, home] of [['Claude', options.claudeHome], ['Codex', options.codexHome]]) {
+    assert(treeContains(home, /forge-delivery\.js[\s\S]*DELIVERY\.json/), `${host} projection lacks operational delivery invocation`);
+    assert(treeContains(home, /expected_children|every expected (?:task|slice) DELIVERY/), `${host} projection lacks complete child delivery aggregation`);
+    assert(treeContains(home, /After review handling[\s\S]*DELIVERY-INPUT/), `${host} projection lacks post-review rematerialization`);
+  }
+});
+
+test('delivery references cover native, sidecar and headless task/slice/milestone sources', () => {
+  const taskSkill = fs.readFileSync(path.join(ROOT, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
+  assert.match(taskSkill, /orchestrator, as artifact owner[\s\S]*forge-delivery\.js/);
+  assert.match(taskSkill, /## Entrega por critério/);
+  assert.doesNotMatch(taskSkill, /## Must-Haves Verified\s*\n\s*- \[x\] item 1/);
+  assert.match(taskSkill, /After review handling[\s\S]*re-run the two `forge-delivery\.js` materializations/);
+  const executor = fs.readFileSync(path.join(ROOT, 'agents', 'forge-executor.md'), 'utf8');
+  assert.match(executor, /Capture delivery sources contemporaneously/);
+  assert.match(executor, /Materialize delivery/);
+  for (const file of ['shared/forge-completer-slice.md', 'shared/forge-completer-milestone.md']) {
+    const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    assert.match(source, /complete sibling[\s\S]*DELIVERY\.json/i);
+    assert.match(source, /forge-delivery\.js/);
+  }
+  for (const file of ['execute-task.md', 'complete-slice.md', 'complete-milestone.md']) {
+    const source = fs.readFileSync(path.join(TEMPLATE_SRC, file), 'utf8');
+    assert.match(source, /forge-delivery\.js/);
+    assert.match(source, /--owner-root/);
+    assert.match(source, /--code-dir/);
+  }
 });
 
 if (process.platform === 'win32') {

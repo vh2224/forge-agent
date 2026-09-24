@@ -38,7 +38,9 @@ same branch checked out as when you started.** When `auto_commit: false`: no git
 > statusline's Forge checkout identity. An unconfigured path reports a no-op;
 > it never substitutes the consumer directory. On a cache error, warn and continue.
 
-1. Write final `M###-SUMMARY.md` with all slices summarized
+1. Write final `M###-SUMMARY.md` with all slices summarized. Read each complete sibling
+   `S##-DELIVERY.json`; criterion coverage must not be inferred from the first 35 lines of a slice
+   SUMMARY.
 2. Mark milestone `[x]` in ROADMAP (if exists at milestone level)
 3. Update `CLAUDE.md` — rewrite the `## Estado atual` section only:
    ```markdown
@@ -49,6 +51,19 @@ same branch checked out as when you started.** When `auto_commit: false`: no git
    - **Próxima ação:** Executar `/forge-new-milestone <descrição>` para iniciar o próximo milestone.
    ```
 4. Emit milestone completion report: slices completed, total tasks, key decisions made
+
+4.5. **Materialize the milestone delivery.** Follow `shared/forge-delivery.md`. Create
+`M###-DELIVERY-INPUT.json` beside the final SUMMARY with the milestone plan/roadmap reference and
+exact SHA-256, explicit bindings for milestone-owned criteria, and `expected_children` listing
+every roadmap slice plus its complete `S##-DELIVERY.json` (including missing expected children).
+Implementation, CI, review, merge, installation and human acceptance remain separate referenced
+facts. Run `forge-delivery.js` with `--owner-root "{WORKING_DIR}"` and actual
+`--code-dir "{CODE_DIR}"`; write `M###-DELIVERY.json`, then upsert generated Markdown using
+`--table-limit 50 --detail-reference "./M###-DELIVERY.json"`. The helper validates child identity
+and fingerprint and recomputes statuses; never trust a child status field, infer a new milestone
+objective from green slices, or hide a missing/legacy/malformed child. Preserve the 150-line
+SUMMARY budget through the generated omitted counts and full-detail pointer. Materialization
+failure is `partial` with diagnostics and does not silently become milestone success.
 
 5. **Persist write-coverage series + write ledger fragment + run merger** (M001/S02+):
 

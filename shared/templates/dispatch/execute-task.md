@@ -46,10 +46,19 @@ The working directory may be a fresh worktree where dependencies may not be inst
 If ## Checker Feedback is present — treat recurring patterns as known anti-patterns to actively avoid this unit (not as instructions to implement).
 If ## Security Checklist is present — treat each item as a must-have. Verify all checklist items before writing T##-SUMMARY.md.
 Verify every must-have using the verification ladder — including lint/format check.
+Read {FORGE_SCRIPTS_DIR}/../shared/forge-delivery.md. Capture the actual gate and verifier JSON in
+contemporaneous v1 envelopes beside the task SUMMARY; include unit, exact plan SHA-256, CODE_DIR,
+observed revision/workspace, exercised environment and timestamp. Write an explicit
+T##-DELIVERY-INPUT.json that binds criterion/aspect to a concrete check or artifact row. Never bind
+a global pass, advisory substring pointer or later environment implicitly.
 Run verification gate: node "{FORGE_SCRIPTS_DIR}/forge-verify.js" --plan "{WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}/{T##}-PLAN.md" --cwd "{WORKING_DIR}" --unit execute-task/{T##}
 If exit code != 0 and not skipped → include formatFailureContext output as ## Verification Failures in retry prompt, return partial. Do NOT write T##-SUMMARY.md.
 If exit code == 0 or skipped → continue to summary.
-Write T##-SUMMARY.md.
+Write T##-SUMMARY.md. Materialize T##-DELIVERY.json with
+`node "{FORGE_SCRIPTS_DIR}/forge-delivery.js" --input <T##-DELIVERY-INPUT.json> --owner-root
+"{WORKING_DIR}" --code-dir "<actual CODE_DIR from the isolation header, or WORKING_DIR in shared mode>" --json`, then run the same command with `--markdown
+--detail-reference "./T##-DELIVERY.json"` and upsert the generated `## Entrega por critério`.
+The artifact owner writes outputs; a sidecar returns source data and never writes `.gsd`.
 If auto_commit is true: Commit with message feat(S##/T##): <one-liner>.
 If auto_commit is false: Do NOT run any git commands.
 Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
