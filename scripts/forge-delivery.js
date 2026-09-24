@@ -35,6 +35,12 @@ function fingerprint(value) { return sha256(JSON.stringify(canonical(value))); }
 function isObject(value) { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }
 function nonEmpty(value) { return typeof value === 'string' && value.trim().length > 0; }
 function normalizeSlashes(value) { return String(value).replace(/\\/g, '/'); }
+function normalizeArtifactPath(value) {
+  if (!nonEmpty(value) || path.isAbsolute(value) || /^[A-Za-z]:/.test(value)) return null;
+  const normalized = path.posix.normalize(normalizeSlashes(value).trim()).replace(/^\.\//, '');
+  if (!normalized || normalized === '..' || normalized.startsWith('../')) return null;
+  return normalized;
+}
 function unitKey(unit) {
   if (!isObject(unit) || !nonEmpty(unit.type) || !nonEmpty(unit.id)) return null;
   if (!['task', 'slice', 'milestone'].includes(unit.type)) return null;
@@ -105,7 +111,9 @@ function inventoryPlan(raw, planReference, unit) {
   }
   for (let index = 0; index < parsed.key_links.length; index++) {
     const item = parsed.key_links[index];
-    criteria.push(makeCriterion(unit, 'key_link', index, `${item.from} → ${item.to}: ${item.via}`, `${planReference}#must_haves.key_links[${index}]`, 'structural', ['declared-link']));
+    criteria.push(makeCriterion(unit, 'key_link', index, `${item.from} → ${item.to}: ${item.via}`, `${planReference}#must_haves.key_links[${index}]`, 'structural', ['declared-link'], {
+      link_from: item.from, link_to: item.to, link_via: item.via,
+    }));
   }
   if (criteria.length === 0) diagnostics.push('plan_inventory_empty');
   return { criteria, diagnostics, structured: true };
@@ -175,9 +183,22 @@ function verificationObservation(binding, envelope, sourcePath, criterion, expec
   if (envelope.schema_version !== SCHEMA_VERSION || envelope.kind !== 'verification' || !isObject(envelope.result)) reasons.push('verification_envelope_invalid');
   if (!['behavioral', 'structural'].includes(binding.coverage)) reasons.push('binding_coverage_invalid');
   if (criterion.type === 'functional' && binding.coverage !== 'behavioral') reasons.push('functional_requires_behavioral_evidence');
+  if (criterion.origin === 'key_link' && binding.coverage !== 'behavioral') reasons.push('key_link_requires_behavioral_evidence');
   const checks = envelope.result && envelope.result.checks;
   const index = binding.source.check_index;
   if (!Array.isArray(checks) || checks.length === 0) reasons.push(envelope.result && envelope.result.skipped ? `verification_skipped:${envelope.result.skipped}` : 'verification_checks_empty');
+  if (!envelope.result || typeof envelope.result.passed !== 'boolean') reasons.push('verification_aggregate_missing');
+  let checksSchemaValid = Array.isArray(checks) && checks.length > 0;
+  if (checksSchemaValid) {
+    checksSchemaValid = checks.every((entry) => isObject(entry) && nonEmpty(entry.command)
+      && checkExitCode(entry) !== undefined
+      && (entry.skipped === undefined || nonEmpty(entry.skipped)));
+    if (!checksSchemaValid) reasons.push('verification_checks_schema_invalid');
+  }
+  if (checksSchemaValid && typeof envelope.result.passed === 'boolean') {
+    const computedPassed = checks.every((entry) => checkExitCode(entry) === 0);
+    if (envelope.result.passed !== computedPassed) reasons.push('verification_aggregate_inconsistent');
+  }
   if (!Number.isInteger(index) || !Array.isArray(checks) || !isObject(checks[index])) reasons.push('verification_check_missing');
   const check = Array.isArray(checks) && isObject(checks[index]) ? checks[index] : null;
   if (check) {
@@ -203,13 +224,27 @@ function artifactObservation(binding, envelope, sourcePath, criterion, expected)
   const reasons = contextReasons(envelope, expected);
   if (envelope.schema_version !== SCHEMA_VERSION || envelope.kind !== 'artifact' || !isObject(envelope.result)) reasons.push('artifact_envelope_invalid');
   if (criterion.type !== 'structural' || binding.coverage !== 'structural') reasons.push('artifact_evidence_structural_only');
+  if (criterion.origin === 'key_link') reasons.push('key_link_requires_behavioral_evidence');
   if (!['exists', 'substantive', 'wired'].includes(property)) reasons.push('artifact_property_invalid');
   if (envelope.result && envelope.result.legacy) reasons.push('artifact_result_legacy');
   const rows = envelope.result && envelope.result.rows;
+  if (!Array.isArray(rows)) reasons.push('artifact_rows_invalid');
   if (!Number.isInteger(index) || !Array.isArray(rows) || !isObject(rows[index])) reasons.push('artifact_row_missing');
   const row = Array.isArray(rows) && isObject(rows[index]) ? rows[index] : null;
   if (row && ['exists', 'substantive', 'wired'].includes(property)) {
-    const approximate = row.approximate === true || (row.flags || []).some((flag) => flag && (flag.reason === 'approximate' || flag.level === 'approximate'));
+    const rowPath = normalizeArtifactPath(row.path);
+    const expectedPath = normalizeArtifactPath(criterion.artifact_path);
+    if (!rowPath) reasons.push('artifact_row_path_invalid');
+    if (criterion.origin === 'artifact' && (!expectedPath || rowPath !== expectedPath)) reasons.push('artifact_path_mismatch');
+    if (typeof row[property] !== 'boolean') reasons.push('artifact_row_property_invalid');
+    if (row.approximate !== undefined && typeof row.approximate !== 'boolean') reasons.push('artifact_approximate_invalid');
+    const flagsValid = row.flags === undefined || (Array.isArray(row.flags)
+      && row.flags.every((flag) => isObject(flag)
+        && (flag.reason === undefined || typeof flag.reason === 'string')
+        && (flag.level === undefined || typeof flag.level === 'string')));
+    if (!flagsValid) reasons.push('artifact_flags_invalid');
+    const flags = flagsValid && Array.isArray(row.flags) ? row.flags : [];
+    const approximate = row.approximate === true || flags.some((flag) => flag.reason === 'approximate' || flag.level === 'approximate');
     if (approximate) reasons.push('artifact_result_approximate');
     if (row[property] === false) { observation.negative = true; reasons.push(`artifact_${property}_failed`); }
     else if (row[property] !== true) reasons.push(`artifact_${property}_unknown`);
@@ -245,7 +280,12 @@ function applyBindings(input, criteria, context, diagnostics) {
     const criterion = byId.get(criterionIdValue);
     const aspect = nonEmpty(binding.aspect) ? binding.aspect : criterion.aspects[0];
     if (!criterion.aspects.includes(aspect)) { diagnostics.push(`binding_unknown_aspect:${index}`); continue; }
-    if (criterion.observations.length >= MAX_OBSERVATIONS) { diagnostics.push(`binding_observation_limit:${criterion.id}`); continue; }
+    if (criterion.observations.length >= MAX_OBSERVATIONS) {
+      diagnostics.push(`binding_observation_limit:${criterion.id}`);
+      criterion.truncated_aspects = criterion.truncated_aspects || [];
+      if (!criterion.truncated_aspects.includes(aspect)) criterion.truncated_aspects.push(aspect);
+      continue;
+    }
     if (binding.source.kind === 'advisory') {
       criterion.observations.push(advisoryObservation(binding, context.ownerRoot, criterion));
       continue;
@@ -265,7 +305,12 @@ function applyBindings(input, criteria, context, diagnostics) {
 
 function classifyCriterion(criterion) {
   const aspects = Array.isArray(criterion.aspects) && criterion.aspects.length ? criterion.aspects : ['default'];
-  const observations = Array.isArray(criterion.observations) ? criterion.observations : [];
+  const observations = Array.isArray(criterion.observations) ? [...criterion.observations] : [];
+  const truncatedAspects = Array.isArray(criterion.truncated_aspects) ? criterion.truncated_aspects : [];
+  for (const aspect of truncatedAspects.filter((item) => aspects.includes(item))) {
+    observations.push({ aspect, source: '<truncated>', coverage: null, positive: false, negative: false,
+      limitations: ['evidence_truncated'], reasons: ['evidence_truncated'] });
+  }
   let anyPositive = false;
   let fullyPositive = true;
   const pending = [];
@@ -284,7 +329,8 @@ function classifyCriterion(criterion) {
     evidence.push(...relevant.map((entry) => ({ ...entry })));
   }
   const status = fullyPositive ? 'verificado' : anyPositive ? 'parcialmente verificado' : 'não verificado';
-  return { ...criterion, status, evidence, pending: [...new Set(pending)], observations: undefined };
+  return { ...criterion, status, evidence, pending: [...new Set(pending)], observations: undefined,
+    truncated_aspects: truncatedAspects.length ? [...new Set(truncatedAspects)] : undefined };
 }
 
 function normalizeFacts(facts) {
@@ -468,8 +514,8 @@ function runCli(argv = process.argv.slice(2)) {
 }
 
 module.exports = {
-  SCHEMA_VERSION, MAX_FILE_BYTES, MAX_CRITERIA, MAX_BINDINGS, MAX_CHILDREN, MAX_DEPTH,
-  sha256, canonical, fingerprint, unitKey, resolveSafeFile, inventoryPlan, classifyCriterion,
+  SCHEMA_VERSION, MAX_FILE_BYTES, MAX_CRITERIA, MAX_BINDINGS, MAX_CHILDREN, MAX_DEPTH, MAX_OBSERVATIONS,
+  sha256, canonical, fingerprint, unitKey, normalizeArtifactPath, resolveSafeFile, inventoryPlan, classifyCriterion,
   buildDelivery, renderDeliveryMarkdown, escapeMarkdownCell, finalizeOutput,
 };
 

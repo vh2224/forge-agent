@@ -90,10 +90,21 @@ the author or make the observation trustworthy on their own.
   failures, timeouts, skips, an empty check list or invalid sources.
 
 `passed: true` with no concrete check proves nothing. Non-zero exit and timeout are
-failures. Structural verifier rows can prove only the exact declared property and
-cannot prove a functional truth. `legacy`, `approximate` and advisory
+failures. Every check needs a nonempty command identity and integer outcome, and the
+aggregate `passed` boolean must agree with the complete check set. A consistent mixed
+suite may have `passed: false` while one explicitly bound named check still proves its
+own criterion; a failing selected check remains negative evidence. Structural verifier
+rows must name the exact normalized artifact path and can prove only the exact declared
+property. Generic `wired` rows never prove a declared directed key link; that criterion
+requires an explicitly bound behavioral check. Structural rows cannot prove a functional
+truth. `legacy`, `approximate` and advisory
 `verification_evidence` pointers remain limitations. Conflicts are never resolved
 by file order, timestamps or automatic supersession.
+
+Malformed rows, property types, flags or flag entries produce stable invalid-source
+observations instead of aborting the projection. When the per-criterion observation cap
+is reached, every affected aspect receives an `evidence_truncated` limitation. Omitted
+evidence therefore cannot leave a criterion `verificado`, regardless of binding order.
 
 Parent units list expected children explicitly. The helper validates each child
 projection fingerprint and identity, then recomputes its criterion statuses from
@@ -128,6 +139,15 @@ the rendered SUMMARY section using its normal file-writing mechanism. Sidecar
 workers return source results and bindings to the orchestrator; they do not write
 `.gsd`. Re-run materialization after review only when review or a review fix adds a
 real source or fact. Do not infer merge, installation or human acceptance.
+
+Artifact-mode sidecars return content for exact unit-scoped paths; the sidecar
+publisher validates and writes them. The allowlist contains `<unit>-DELIVERY-INPUT.json`,
+`<unit>-DELIVERY.json`, `<unit>-VERIFY-ENVELOPE.json` and
+`<unit>-ARTIFACT-ENVELOPE.json` only for the selected task/slice/milestone identity.
+Input and output are required on a completed closing unit; envelopes are optional when
+that unit has no contemporaneous check. Foreign-unit names, traversal and malformed
+delivery JSON are rejected before publication. Execute-mode sidecars continue to return
+execution results for orchestrator materialization rather than writing `.gsd` directly.
 
 For long summaries, `--table-limit N` shows problem rows first, prints exact omitted
 counts by situation and points to the complete JSON. Pipes, newlines and Markdown

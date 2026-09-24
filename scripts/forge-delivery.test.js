@@ -54,10 +54,11 @@ function fixture(label = 'base', unit = { type: 'task', id: 'T01' }, planText = 
 }
 function criterionId(unit, kind, index) { return `${delivery.unitKey(unit)}:${kind}:${index}`; }
 function verificationEnvelope(fx, checks, extra = {}) {
+  const named = checks.map((check, index) => ({ command: `fixture-check-${index}`, ...check }));
   return {
     schema_version: 1, kind: 'verification', unit: fx.unit, plan_fingerprint: fx.planFingerprint,
     code_dir: fx.code, revision: 'abc123', environment: 'node-test', captured_at: '2026-09-24T12:00:00Z',
-    result: { passed: checks.every((check) => (check.exitCode ?? check.exit_code) === 0), checks }, ...extra,
+    result: { passed: named.every((check) => (check.exitCode ?? check.exit_code) === 0), checks: named }, ...extra,
   };
 }
 function artifactEnvelope(fx, rows, extra = {}) {
@@ -111,14 +112,14 @@ test('bindings cannot erase inventory and invalid additional selectors are diagn
   assert(output.diagnostics.includes('binding_unknown_criterion:0'));
 });
 
-test('complete explicit behavioral and structural coverage verifies every criterion', () => {
+test('complete explicit behavioral and exact structural coverage verifies every criterion', () => {
   const fx = fixture('complete');
   writeJson(path.join(fx.owner, 'evidence', 'verify.json'), verificationEnvelope(fx, [{ command: 'test one', exitCode: 0 }]));
   writeJson(path.join(fx.owner, 'evidence', 'artifact.json'), artifactEnvelope(fx, [{ path: 'scripts/result.js', exists: true, substantive: true, wired: true, flags: [] }]));
   const input = { ...fx.input, bindings: [
     bind('verification', 'evidence/verify.json', criterionId(fx.unit, 'truth', 0), { check_index: 0 }, 'behavioral'),
     bind('artifact', 'evidence/artifact.json', criterionId(fx.unit, 'artifact', 0), { row_index: 0, property: 'substantive' }, 'structural'),
-    bind('artifact', 'evidence/artifact.json', criterionId(fx.unit, 'key_link', 0), { row_index: 0, property: 'wired' }, 'structural'),
+    bind('verification', 'evidence/verify.json', criterionId(fx.unit, 'key_link', 0), { check_index: 0 }, 'behavioral'),
   ] };
   const output = build(fx, input);
   assert(output.criteria.every((item) => item.status === 'verificado'));
@@ -161,6 +162,37 @@ test('pass plus failure on one aspect is explicit conflict and partial', () => {
   ] });
   assert.strictEqual(byId(output, id).status, 'parcialmente verificado');
   assert(byId(output, id).pending.includes('evidence_conflict:default'));
+});
+
+test('named checks and whole-result consistency gate behavioral evidence', () => {
+  for (const [label, mutate, reason] of [
+    ['nameless', (source) => { delete source.result.checks[0].command; }, 'verification_checks_schema_invalid'],
+    ['aggregate-missing', (source) => { delete source.result.passed; }, 'verification_aggregate_missing'],
+    ['aggregate-nonboolean', (source) => { source.result.passed = 'yes'; }, 'verification_aggregate_missing'],
+    ['aggregate-contradictory', (source) => { source.result.passed = false; }, 'verification_aggregate_inconsistent'],
+  ]) {
+    const fx = fixture(`check-schema-${label}`); const source = verificationEnvelope(fx, [{ exitCode: 0 }]); mutate(source);
+    writeJson(path.join(fx.owner, 'verify.json'), source);
+    const id = criterionId(fx.unit, 'truth', 0);
+    const criterion = byId(build(fx, { ...fx.input, bindings: [bind('verification', 'verify.json', id, { check_index: 0 }, 'behavioral')] }), id);
+    assert.strictEqual(criterion.status, 'não verificado');
+    assert(criterion.pending.some((item) => item.includes(reason)), `${label}: ${criterion.pending.join(',')}`);
+  }
+});
+
+test('consistent mixed suite preserves explicitly selected named pass and fail', () => {
+  const fx = fixture('mixed-suite');
+  writeJson(path.join(fx.owner, 'verify.json'), verificationEnvelope(fx, [{ exitCode: 0 }, { exitCode: 3 }]));
+  const passId = criterionId(fx.unit, 'truth', 0); const failId = criterionId(fx.unit, 'additional', 'failure');
+  const output = build(fx, { ...fx.input,
+    additional_criteria: [{ id: 'failure', text: 'failing scenario', reference: 'acceptance#failure', type: 'functional' }],
+    bindings: [
+      bind('verification', 'verify.json', passId, { check_index: 0 }, 'behavioral'),
+      bind('verification', 'verify.json', failId, { check_index: 1 }, 'behavioral'),
+    ] });
+  assert.strictEqual(byId(output, passId).status, 'verificado');
+  assert.strictEqual(byId(output, failId).status, 'não verificado');
+  assert(byId(output, failId).pending.includes('negative_evidence:default'));
 });
 
 test('no-stack and disabled-by-pref with no checks are not verified', () => {
@@ -210,7 +242,7 @@ test('global test without binding and advisory substring pointer are not proof',
 
 test('artifact evidence is structural-only and approximate rows remain unverified', () => {
   const fx = fixture('artifact-limits');
-  writeJson(path.join(fx.owner, 'artifact.json'), artifactEnvelope(fx, [{ exists: true, substantive: true, wired: true, approximate: true, flags: [] }]));
+  writeJson(path.join(fx.owner, 'artifact.json'), artifactEnvelope(fx, [{ path: 'scripts/result.js', exists: true, substantive: true, wired: true, approximate: true, flags: [] }]));
   const truthId = criterionId(fx.unit, 'truth', 0);
   const artifactId = criterionId(fx.unit, 'artifact', 0);
   const output = build(fx, { ...fx.input, bindings: [
@@ -220,6 +252,65 @@ test('artifact evidence is structural-only and approximate rows remain unverifie
   assert.strictEqual(byId(output, truthId).status, 'não verificado');
   assert.strictEqual(byId(output, artifactId).status, 'não verificado');
   assert(byId(output, artifactId).pending.some((item) => item.includes('artifact_result_approximate')));
+});
+
+test('artifact evidence requires exact normalized artifact identity', () => {
+  const fx = fixture('artifact-identity'); const id = criterionId(fx.unit, 'artifact', 0);
+  writeJson(path.join(fx.owner, 'matched.json'), artifactEnvelope(fx, [{ path: './scripts/result.js', exists: true, substantive: true, wired: true, flags: [] }]));
+  writeJson(path.join(fx.owner, 'other.json'), artifactEnvelope(fx, [{ path: 'scripts/other.js', exists: true, substantive: true, wired: true, flags: [] }]));
+  const matched = byId(build(fx, { ...fx.input, bindings: [bind('artifact', 'matched.json', id, { row_index: 0, property: 'substantive' }, 'structural')] }), id);
+  assert.strictEqual(matched.status, 'verificado');
+  const other = byId(build(fx, { ...fx.input, bindings: [bind('artifact', 'other.json', id, { row_index: 0, property: 'substantive' }, 'structural')] }), id);
+  assert.strictEqual(other.status, 'não verificado');
+  assert(other.pending.some((item) => item.includes('artifact_path_mismatch')));
+});
+
+test('generic wired artifact row cannot prove a declared directed key link', () => {
+  const fx = fixture('directed-link'); const id = criterionId(fx.unit, 'key_link', 0);
+  writeJson(path.join(fx.owner, 'artifact.json'), artifactEnvelope(fx, [{ path: 'scripts/dependency.js', exists: true, substantive: true, wired: true, flags: [] }]));
+  writeJson(path.join(fx.owner, 'verify.json'), verificationEnvelope(fx, [{ command: 'assert result requires dependency', exitCode: 0 }]));
+  const generic = byId(build(fx, { ...fx.input, bindings: [bind('artifact', 'artifact.json', id, { row_index: 0, property: 'wired' }, 'structural')] }), id);
+  assert.strictEqual(generic.status, 'não verificado');
+  assert(generic.pending.some((item) => item.includes('key_link_requires_behavioral_evidence')));
+  const explicit = byId(build(fx, { ...fx.input, bindings: [bind('verification', 'verify.json', id, { check_index: 0 }, 'behavioral')] }), id);
+  assert.strictEqual(explicit.status, 'verificado');
+});
+
+test('malformed artifact rows and flags become stable invalid observations', () => {
+  const cases = [
+    ['flags-object', [{ path: 'scripts/result.js', substantive: true, flags: {} }], 'artifact_flags_invalid'],
+    ['flags-string', [{ path: 'scripts/result.js', substantive: true, flags: 'bad' }], 'artifact_flags_invalid'],
+    ['flags-null-entry', [{ path: 'scripts/result.js', substantive: true, flags: [null] }], 'artifact_flags_invalid'],
+    ['property-type', [{ path: 'scripts/result.js', substantive: 'yes', flags: [] }], 'artifact_row_property_invalid'],
+    ['row-path-type', [{ path: 42, substantive: true, flags: [] }], 'artifact_row_path_invalid'],
+    ['rows-object', { path: 'scripts/result.js' }, 'artifact_rows_invalid'],
+  ];
+  for (const [label, rows, reason] of cases) {
+    const fx = fixture(`malformed-artifact-${label}`); const id = criterionId(fx.unit, 'artifact', 0);
+    writeJson(path.join(fx.owner, 'artifact.json'), artifactEnvelope(fx, [], { result: { legacy: false, rows } }));
+    const criterion = byId(build(fx, { ...fx.input, bindings: [bind('artifact', 'artifact.json', id, { row_index: 0, property: 'substantive' }, 'structural')] }), id);
+    assert.strictEqual(criterion.status, 'não verificado');
+    assert(criterion.pending.some((item) => item.includes(reason)), `${label}: ${criterion.pending.join(',')}`);
+  }
+});
+
+test('observation truncation is criterion-level and cannot leave failures green', () => {
+  for (const order of ['failure-last', 'failure-first']) {
+    const fx = fixture(`truncation-${order}`); const id = criterionId(fx.unit, 'truth', 0);
+    const checks = Array.from({ length: delivery.MAX_OBSERVATIONS + 1 }, (_, index) => ({ exitCode: order === 'failure-last' ? (index === delivery.MAX_OBSERVATIONS ? 1 : 0) : (index === 0 ? 1 : 0) }));
+    writeJson(path.join(fx.owner, 'verify.json'), verificationEnvelope(fx, checks));
+    const bindings = checks.map((_, index) => bind('verification', 'verify.json', id, { check_index: index }, 'behavioral'));
+    const criterion = byId(build(fx, { ...fx.input, bindings }), id);
+    assert.notStrictEqual(criterion.status, 'verificado');
+    assert(criterion.pending.some((item) => item.includes('evidence_truncated')));
+  }
+  const fx = fixture('truncation-aspects'); const id = criterionId(fx.unit, 'additional', 'many');
+  const checks = Array.from({ length: delivery.MAX_OBSERVATIONS + 1 }, () => ({ exitCode: 0 }));
+  writeJson(path.join(fx.owner, 'verify.json'), verificationEnvelope(fx, checks));
+  const bindings = checks.map((_, index) => bind('verification', 'verify.json', id, { check_index: index }, 'behavioral', index < delivery.MAX_OBSERVATIONS ? 'a' : 'b'));
+  const criterion = byId(build(fx, { ...fx.input, additional_criteria: [{ id: 'many', text: 'many observations', reference: 'acceptance#many', type: 'functional', aspects: ['a', 'b'] }], bindings }), id);
+  assert.notStrictEqual(criterion.status, 'verificado');
+  assert(criterion.pending.some((item) => item === 'b:evidence_truncated'));
 });
 
 test('current environment is not substituted for missing historical context', () => {
