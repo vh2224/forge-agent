@@ -67,8 +67,8 @@ function repeated(f, extra) {
   assert.deepStrictEqual(inventory(f.root), before, 'diagnostic changed inventory/bytes');
   return result;
 }
-function release(f, dirty = false) {
-  const code = path.join(f.project, 'code'); fs.mkdirSync(code);
+function release(f, dirty = false, code = path.join(f.project, 'code')) {
+  fs.mkdirSync(code, { recursive: true });
   f.writeRun({ ...f.readRun(), active: true, last_heartbeat: 1 });
   claims.recordClaim(f.project, f.id, { at: 2, unit: 'execute-task/T01', source: 'manual', code_dir: code,
     paths: ['a.bin'], vcs_baseline: { vcs: 'git', id: 'baseline' } });
@@ -269,6 +269,27 @@ test('R2 Git worktree alias resolves owner before any .gsd/run read', f => {
   fs.mkdirSync(path.join(wt, '.gsd')); r = inspect(); assert.strictEqual(r.continuity.bound, true);
   const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-doctor.js'), '--diagnose-recovery', f.id, '--cwd', wt, '--json'], { env: f.env(), encoding: 'utf8', windowsHide: true });
   assert.strictEqual(cli.status, 1); assert.strictEqual(JSON.parse(cli.stdout).continuity.bound, true);
+});
+test('registered worktree behind a project child link remains valid only through its own root', f => {
+  const git = args => {
+    const out = spawnSync('git', args, { cwd: f.project, encoding: 'utf8', windowsHide: true });
+    assert.strictEqual(out.status, 0, out.stderr);
+  };
+  git(['init']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture']);
+  const external = path.join(f.root, 'external'); fs.mkdirSync(external);
+  const wt = path.join(external, 'wt'); const link = path.join(f.project, 'link');
+  git(['worktree', 'add', '-b', 'fixture-linked-worktree', wt]);
+  try { fs.symlinkSync(external, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) { console.log(`SKIP linked worktree: ${error.code}`); return; } throw error; }
+  const alias = path.join(link, 'wt');
+  f.writeRun({ ...f.readRun(), branch: 'fixture-linked-worktree', worktrees: [{ repo: f.project, path: alias }] });
+  release(f, true, alias);
+  assert.strictEqual(repeated(f).artifacts.find(a => a.kind === 'claim-bundle').integrity, 'verified');
+  const record = f.readRun();
+  f.writeRun({ ...record, branch: 'wrong-branch' });
+  assert(hasSource(repeated(f), 'claim-bundle', 'unsafe-path'));
+  f.writeRun({ ...record, worktrees: [] });
+  assert(hasSource(repeated(f), 'claim-bundle', 'unsafe-path'));
 });
 test('R4 undeclared publications are unread; later valid boundary is superseded', f => {
   f.work('M005', 'milestone'); const key = 'old-key'; const unit = { type: 'execute-task', id: 'T01', key: 'execute-task/T01' };

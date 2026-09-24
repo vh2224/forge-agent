@@ -50,8 +50,8 @@ function safeRoot(project, target, aliases = []) {
   // before reading. Realpath(target) alone would erase forbidden child symlinks.
   for (let ancestor = path.resolve(target); ; ancestor = path.dirname(ancestor)) {
     if (samePath(project, ancestor)) {
-      recovery.assertSafePath(ancestor, target, 'source');
-      return ancestor;
+      try { recovery.assertSafePath(ancestor, target, 'source'); return ancestor; }
+      catch { break; } // A linked descendant may belong to a validated worktree.
     }
     if (path.dirname(ancestor) === ancestor) break;
   }
