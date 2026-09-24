@@ -7,7 +7,7 @@
     {
       "source_id": "agents",
       "target": "agents",
-      "sha256": "b630ec49f74dee598860d8770ad58308fbf8cafb9291204879522c4857d2dcda"
+      "sha256": "7c07666d38a4256cd268615cccaac9c1d9d9dc25a24df86704daef455c83d981"
     },
     {
       "source_id": "commands",
@@ -17,12 +17,12 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "517802e3948f4b6d73d069614c348c14ef1304a13a2479cb41a8cc0e813172e9"
+      "sha256": "5483cddd5d66ddd876d7b714a0934f5e22a53e3b7503666f19902ece0e06d4d8"
     },
     {
       "source_id": "dispatch-templates",
       "target": "shared/templates/dispatch",
-      "sha256": "ba41c203e06fe72d84f593164b780b6ae30b35cadbcfa9d43c49c8f2e65e5029"
+      "sha256": "f67a814a9e18e6de082d7dd80b855541cd9a6a0394f590036883f03cfaa67b8f"
     },
     {
       "source_id": "hooks",
