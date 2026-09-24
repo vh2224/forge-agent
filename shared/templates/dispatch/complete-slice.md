@@ -30,7 +30,7 @@ Read M/{M###}-SUMMARY.md if present.
    --code-dir "<isolation CODE_DIR; WORKING_DIR if shared>" --json` into S##-DELIVERY.json;
    repeat with `--markdown --table-limit 40 --detail-reference "./S##-DELIVERY.json"`.
    Upsert `## Entrega por critério`; retain gap counts/detail pointer within 120 SUMMARY lines.
-6. **Never integrate** under either auto_commit. Deliver run branch to OPERATOR.
+6. **NO merge step; never integrate** under either auto_commit. Deliver run branch to OPERATOR.
    Forbidden git/equivalents:
    `merge` (any flavour), `rebase`, `cherry-pick`, `pull`, `push`, `checkout <branch>`, `switch`,
    `branch -d/-m`, `reset`, `worktree`.
