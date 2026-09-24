@@ -25,8 +25,8 @@ If .gsd/checker-memory/ exists: node "{FORGE_SCRIPTS_DIR}/forge-projection.js" -
 {TOP_MEMORIES}
 [END DATA FROM "AUTO-MEMORY"]
 ## Instructions
-Follow all steps and ## Standards. Missing dependencies: environmental, unverified;
-install only if plan-authorized. Avoid, never implement, Checker Feedback anti-patterns.
+Follow steps and ## Standards; dependencies may not be installed. Missing means environmental,
+unverified; install only if plan-authorized. Avoid, never implement, Checker Feedback anti-patterns.
 Before SUMMARY verify all must-haves/Security Checklist via ladder including lint/format.
 Read {FORGE_SCRIPTS_DIR}/../shared/forge-delivery.md. Capture gate/verifier JSON in v1
 envelopes beside SUMMARY at check time: unit, exact plan SHA-256, CODE_DIR, revision/workspace,
@@ -40,6 +40,6 @@ Nonzero, unskipped exit: partial, no SUMMARY; retry prompt includes formatFailur
 `--markdown --detail-reference "./T##-DELIVERY.json"`; upsert generated `## Entrega por critério`.
 Owner writes; sidecars return sources, never write `.gsd`.
 auto_commit true: commit feat(S##/T##): <one-liner>; false: no git commands.
-Never modify STATE.md. Return ---GSD-WORKER-RESULT---; optional `must_haves_status`:
+Keep STATE.md unchanged. Return ---GSD-WORKER-RESULT---; optional `must_haves_status`:
 `satisfied: [verified truth/artifact IDs]`, `dropped: [undelivered must-haves/reasons]`.
-Old readers ignore it; Node Repair also uses S##-VERIFICATION.md diff, alone if absent.
+Old readers ignore it; Node Repair uses it + S##-VERIFICATION.md diff, or diff alone.
