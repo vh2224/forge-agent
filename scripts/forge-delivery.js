@@ -328,6 +328,13 @@ function classifyCriterion(criterion) {
     if (limited) pending.push(...relevant.flatMap((entry) => entry.limitations || []).map((reason) => `${aspect}:${reason}`));
     evidence.push(...relevant.map((entry) => ({ ...entry })));
   }
+  const positiveRevisions = [...new Set(observations
+    .filter((entry) => entry && aspects.includes(entry.aspect) && entry.positive === true && nonEmpty(entry.revision))
+    .map((entry) => entry.revision.trim()))].sort();
+  if (positiveRevisions.length > 1) {
+    fullyPositive = false;
+    pending.push(`revision_mismatch:${positiveRevisions.join(',')}`);
+  }
   const status = fullyPositive ? 'verificado' : anyPositive ? 'parcialmente verificado' : 'não verificado';
   return { ...criterion, status, evidence, pending: [...new Set(pending)], observations: undefined,
     truncated_aspects: truncatedAspects.length ? [...new Set(truncatedAspects)] : undefined };

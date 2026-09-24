@@ -133,6 +133,34 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
 function validateArtifacts(value, allowed, required, maxPayloadBytes, rules) {
   return inspectArtifacts(value, allowed, required, maxPayloadBytes, rules).ok;
 }
+function executeDeliveryArtifacts(request, loc, result, root, cwd) {
+  if (result.status !== 'done') return [];
+  if (!loc.delivery || !request.planFile) fail('delivery-plan-required');
+  const planFile = fs.realpathSync(request.planFile);
+  const planReference = path.relative(root, planFile).replace(/\\/g, '/');
+  if (!planReference || path.isAbsolute(planReference) || planReference === '..' || planReference.startsWith('../')) {
+    fail('delivery-plan-outside-context');
+  }
+  const planText = fs.readFileSync(planFile, 'utf8');
+  const input = {
+    schema_version: 1,
+    unit: loc.rules[loc.delivery.input].unit,
+    plan: planReference,
+    plan_fingerprint: hash(planText),
+    bindings: [],
+    expected_children: [],
+  };
+  const output = require('./forge-delivery').buildDelivery(input, { ownerRoot: root, codeDir: cwd });
+  const artifacts = [
+    { path: loc.required[0], content: `---\nstatus: done\n---\n\n# ${request.taskId} Summary\n\n${result.summary}\n\n## Must haves\n\n${JSON.stringify(result.must_haves_status, null, 2)}\n` },
+    { path: loc.delivery.input, content: `${JSON.stringify(input, null, 2)}\n` },
+    { path: loc.delivery.output, content: `${JSON.stringify(output, null, 2)}\n` },
+  ];
+  const verdict = inspectArtifacts({ status: 'done', summary: result.summary, questions: [], artifacts },
+    loc.allowed, loc.required, Infinity, loc.rules);
+  if (!verdict.ok) fail('invalid-artifact-result', verdict.reason);
+  return artifacts;
+}
 function markChecked(content, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return content.replace(new RegExp(`^(\\s*[-*] \\[) ([\\]]\\s+(?:\\*\\*)?${escaped}(?=[:\\s*]))`, 'm'), '$1x$2');
@@ -257,7 +285,7 @@ async function runUnitSidecar(request) {
     if (transport.mode === 'execute') {
       result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: r.writableRoots });
-      artifacts = result.status === 'done' ? [{ path: loc.required[0], content: `---\nstatus: done\n---\n\n# ${r.taskId} Summary\n\n${result.summary}\n\n## Must haves\n\n${JSON.stringify(result.must_haves_status, null, 2)}\n` }] : [];
+      artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
     } else if (transport.mode === 'plan') {
       if (!r.promptFile) fail('prompt-file-required');
       result = await xllm.runPlan({ ...options, planContextFile: r.promptFile });
@@ -327,7 +355,7 @@ async function runUnitSidecar(request) {
     throw error;
   }
 }
-module.exports = { schema, locations, validateArtifacts, inspectArtifacts, inspectDeliveryContent, MAX_ARTIFACT_BYTES,
+module.exports = { schema, locations, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, runUnitSidecar };
 if (require.main === module) {
   Promise.resolve().then(() => {

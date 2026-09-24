@@ -220,6 +220,14 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
   const executeRequest = request(planDir, 'execute-task'); executeRequest.planFile = planFile;
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Execution fixture', must_haves_status: [], files_changed: [] });
   await unit.runUnitSidecar(executeRequest);
+  const executeLocations = unit.locations(executeRequest);
+  for (const required of executeLocations.required) assert.strictEqual(fs.existsSync(path.join(planDir, required)), true, required);
+  const deliveryInput = JSON.parse(fs.readFileSync(path.join(planDir, executeLocations.delivery.input), 'utf8'));
+  const deliveryOutput = JSON.parse(fs.readFileSync(path.join(planDir, executeLocations.delivery.output), 'utf8'));
+  assert.deepStrictEqual(deliveryInput.unit, { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' });
+  assert.deepStrictEqual(deliveryInput.bindings, []);
+  assert.strictEqual(deliveryOutput.generated_by, 'forge-delivery');
+  assert(deliveryOutput.criteria.every(criterion => criterion.status !== 'verificado'));
   assert.strictEqual(git(['rev-parse', 'HEAD']), startSha);
   assert(fs.readFileSync(path.join(planDir, '.gsd/milestones/M001/slices/S01/S01-PLAN.md'), 'utf8').includes('[x] T01'));
   const reviewOptions = { cwd: planDir, engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, timeoutSecs: 20, model: 'claude-sonnet-5' };

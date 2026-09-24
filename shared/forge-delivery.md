@@ -101,6 +101,12 @@ truth. `legacy`, `approximate` and advisory
 `verification_evidence` pointers remain limitations. Conflicts are never resolved
 by file order, timestamps or automatic supersession.
 
+Positive observations for one criterion must share one recorded revision. Distinct
+revisions add a stable `revision_mismatch:<sorted revisions>` criterion limitation and
+prevent `verificado`, while preserving every observation and source revision. Reordering
+bindings does not change this decision. Different criteria remain independent, and child
+aggregation recomputes the same rule instead of trusting a child status.
+
 Malformed rows, property types, flags or flag entries produce stable invalid-source
 observations instead of aborting the projection. When the per-criterion observation cap
 is reached, every affected aspect receives an `evidence_truncated` limitation. Omitted
@@ -146,8 +152,11 @@ publisher validates and writes them. The allowlist contains `<unit>-DELIVERY-INP
 `<unit>-ARTIFACT-ENVELOPE.json` only for the selected task/slice/milestone identity.
 Input and output are required on a completed closing unit; envelopes are optional when
 that unit has no contemporaneous check. Foreign-unit names, traversal and malformed
-delivery JSON are rejected before publication. Execute-mode sidecars continue to return
-execution results for orchestrator materialization rather than writing `.gsd` directly.
+delivery JSON are rejected before publication. After an execute-mode sidecar succeeds,
+the adapter builds a neutral input with no evidence bindings, runs the same delivery
+helper, validates SUMMARY, input and output against the exact unit rules, and publishes
+them durably. Worker `must_haves_status` values are not converted into positive delivery
+evidence; later contemporaneous envelopes and explicit bindings may enrich the projection.
 
 For long summaries, `--table-limit N` shows problem rows first, prints exact omitted
 counts by situation and points to the complete JSON. Pipes, newlines and Markdown

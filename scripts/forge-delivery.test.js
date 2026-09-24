@@ -137,6 +137,49 @@ test('required aspects produce partial status when only one has positive coverag
   assert(criterion.pending.includes('aspect_unverified:ui'));
 });
 
+test('revision compatibility is criterion-scoped, stable and recomputed for children', () => {
+  const childUnit = { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' };
+  const fx = fixture('revision-compatibility', childUnit);
+  const revA = verificationEnvelope(fx, [{ exitCode: 0 }, { exitCode: 0 }, { exitCode: 0 }]);
+  const revB = verificationEnvelope(fx, [{ exitCode: 0 }, { exitCode: 0 }]); revB.revision = 'rev-B';
+  revA.revision = 'rev-A';
+  writeJson(path.join(fx.owner, 'a.json'), revA); writeJson(path.join(fx.owner, 'b.json'), revB);
+  const ids = Object.fromEntries(['split', 'same', 'left', 'right'].map((id) => [id, criterionId(childUnit, 'additional', id)]));
+  const additional = [
+    { id: 'split', text: 'split revisions', reference: 'acceptance#split', type: 'functional', aspects: ['api', 'ui'] },
+    { id: 'same', text: 'same revision', reference: 'acceptance#same', type: 'functional', aspects: ['api', 'ui'] },
+    { id: 'left', text: 'left criterion', reference: 'acceptance#left', type: 'functional' },
+    { id: 'right', text: 'right criterion', reference: 'acceptance#right', type: 'functional' },
+  ];
+  const bindings = [
+    bind('verification', 'a.json', ids.split, { check_index: 0 }, 'behavioral', 'api'),
+    bind('verification', 'b.json', ids.split, { check_index: 0 }, 'behavioral', 'ui'),
+    bind('verification', 'a.json', ids.same, { check_index: 0 }, 'behavioral', 'api'),
+    bind('verification', 'a.json', ids.same, { check_index: 1 }, 'behavioral', 'ui'),
+    bind('verification', 'a.json', ids.left, { check_index: 2 }, 'behavioral'),
+    bind('verification', 'b.json', ids.right, { check_index: 1 }, 'behavioral'),
+  ];
+  const child = build(fx, { ...fx.input, additional_criteria: additional, bindings });
+  const split = byId(child, ids.split);
+  assert.strictEqual(split.status, 'parcialmente verificado');
+  assert(split.pending.includes('revision_mismatch:rev-A,rev-B'));
+  assert.strictEqual(byId(child, ids.same).status, 'verificado');
+  assert.strictEqual(byId(child, ids.left).status, 'verificado');
+  assert.strictEqual(byId(child, ids.right).status, 'verificado');
+  const reordered = build(fx, { ...fx.input, additional_criteria: additional, bindings: [...bindings].reverse() });
+  assert.deepStrictEqual(byId(reordered, ids.split).pending, split.pending);
+  assert.strictEqual(byId(reordered, ids.split).status, split.status);
+
+  writeJson(path.join(fx.owner, 'child.json'), child);
+  const parentUnit = { type: 'slice', id: 'S01', milestone: 'M001' };
+  write(path.join(fx.owner, 'parent.md'), plan('parent behavior'));
+  const parent = delivery.buildDelivery({ schema_version: 1, unit: parentUnit, plan: 'parent.md',
+    plan_fingerprint: delivery.sha256(plan('parent behavior')), bindings: [],
+    expected_children: [{ unit: childUnit, delivery: 'child.json' }] }, { ownerRoot: fx.owner, codeDir: fx.code });
+  assert.strictEqual(byId(parent, ids.split).status, 'parcialmente verificado');
+  assert(byId(parent, ids.split).pending.includes('revision_mismatch:rev-A,rev-B'));
+});
+
 test('negative-only, timeout and absent check never become success', () => {
   for (const [label, checks, index, reason] of [
     ['failure', [{ exitCode: 2 }], 0, 'negative_evidence:default'],
