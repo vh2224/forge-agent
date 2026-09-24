@@ -961,7 +961,7 @@ XLLM_ARGV=(node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute
 
 5.2. **Corroboration fallback — reachable from BOTH invocations above** (S06 review R8: this used to hang off the `status == "partial"` bullet alone, so the `status == "done"` path ran the same checker and never consumed `fallbacks`): after **either** invocation — the `status == "partial"` boundary or the `status == "done"` with unmet env-scope entries — if `PROMOTION.fallbacks` is non-empty, append one `sidecar_env_corroboration_fallback` line per entry (`unit:"task/{TASK_ID}"`) as defined in `shared/forge-dispatch.md § Sidecar dispatch state machine`, regardless of the promotion outcome.
 
-6. **Success — orchestrator assembles the artifacts (`done` state).** Codex NEVER writes `.gsd/**` and NEVER commits (locked — `git log` unchanged, no `.gsd/**` path in `node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --changes --cwd "${CODE_DIR:-.}" --since "$START_SHA"`). Read the JSON and **write `{TASK_ID}-SUMMARY.md`** + **build the `---GSD-WORKER-RESULT---` block** from `summary`, `must_haves_status`, `env_constraints` (promotion audit only) and VCS-derived `files_changed` from the result JSON (**authoritative**); `files_changed_declared` is an untrusted advisory cross-check only. Append synthesized advisory evidence from that command (tagged `source: codex-sidecar`) to `.gsd/forge/evidence-{TASK_ID}.jsonl` — a documented gap, advisory, never blocks; preserve the `.gsd/**` invariant. Executable mirror of `shared/forge-dispatch.md § Post-run change set + baseline (canonical — VCS-agnostic)`. The runtime-observed lines of the same artifact were already materialized by step **4.5** above — do **not** invoke the materializer a second time here. Emit the `dispatch` event (`engine=codex`) and **rejoin "Process result" below** exactly as if a Claude `forge-executor` returned — downstream verification (must_haves, verifier, file-audit, review dialético in Step 5.5) runs **byte-identical** on codex-authored code. **No plan-status marking here — deliberate, not an omission.** Branch C in `forge-auto`/`forge-next` marks `status: DONE` on `T##-PLAN.md` on the sidecar's behalf because the *Claude* path there does it (`agents/forge-executor.md` step 13) and slice-level consumers read it. A loose task has no such Claude behavior to mirror: this skill's own done-signal is the existence of `{TASK_ID}-SUMMARY.md` (see **Skip if** above), the Claude dispatch prompt never asks for a plan-status edit, and `forge-doctor` C9 already treats a sibling `*-SUMMARY.md` as equivalent to `status: DONE`. Marking only the sidecar path would invent a mechanism the Claude path does not have — the asymmetry that produced the original defect, inverted. First re-read the durable state (the poll loop crossed multiple Bash invocations — shell vars are gone):
+6. **Success — orchestrator assembles the artifacts (`done` state).** Codex NEVER writes `.gsd/**` and NEVER commits (locked — `git log` unchanged, no `.gsd/**` path in `node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --changes --cwd "${CODE_DIR:-.}" --since "$START_SHA"`). Read the JSON and **write `{TASK_ID}-SUMMARY.md`** + **build the `---GSD-WORKER-RESULT---` block** from `summary`, `must_haves_status`, `env_constraints` (promotion audit only) and VCS-derived `files_changed` from the result JSON (**authoritative**); `files_changed_declared` is an untrusted advisory cross-check only. Append synthesized advisory evidence from that command (tagged `source: codex-sidecar`) to `.gsd/forge/evidence-{TASK_ID}.jsonl` — a documented gap, advisory, never blocks; preserve the `.gsd/**` invariant. Then the orchestrator, as artifact owner, follows `shared/forge-delivery.md`: it captures the real re-verification/verifier results in contemporaneous envelopes, writes explicit criterion bindings to `{TASK_ID}-DELIVERY-INPUT.json`, runs `forge-delivery.js --owner-root "$WORKING_DIR" --code-dir "$CODE_DIR"` for JSON and Markdown, writes `{TASK_ID}-DELIVERY.json`, and upserts `## Entrega por critério` in the SUMMARY. The sidecar's status strings are inputs, never criterion proof; absent context and unbound checks stay unverified. Executable mirror of `shared/forge-dispatch.md § Post-run change set + baseline (canonical — VCS-agnostic)`. The runtime-observed lines of the same artifact were already materialized by step **4.5** above — do **not** invoke the materializer a second time here. Emit the `dispatch` event (`engine=codex`) and **rejoin "Process result" below** exactly as if a Claude `forge-executor` returned — downstream verification (must_haves, verifier, file-audit, review dialético in Step 5.5) runs **byte-identical** on codex-authored code. **No plan-status marking here — deliberate, not an omission.** Branch C in `forge-auto`/`forge-next` marks `status: DONE` on `T##-PLAN.md` on the sidecar's behalf because the *Claude* path there does it (`agents/forge-executor.md` step 13) and slice-level consumers read it. A loose task has no such Claude behavior to mirror: this skill's own done-signal is the existence of `{TASK_ID}-SUMMARY.md` (see **Skip if** above), the Claude dispatch prompt never asks for a plan-status edit, and `forge-doctor` C9 already treats a sibling `*-SUMMARY.md` as equivalent to `status: DONE`. Marking only the sidecar path would invent a mechanism the Claude path does not have — the asymmetry that produced the original defect, inverted. First re-read the durable state (the poll loop crossed multiple Bash invocations — shell vars are gone):
 ```bash
 START_SHA=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).start_sha" 2>/dev/null)
 CODE_DIR=$(node -pe "JSON.parse(require('fs').readFileSync('$XLLM_STATE','utf8')).code_dir" 2>/dev/null)
@@ -1204,9 +1204,13 @@ Write {TASK_ID}-SUMMARY.md to .gsd/tasks/{TASK_ID}/ with:
   ---
   ## What Was Done
   [Narrative summary of changes made]
-  ## Must-Haves Verified
-  - [x] item 1
-  - [x] item 2
+  ## Entrega por critério
+  [Generated by scripts/forge-delivery.js; never hand-author checked criteria]
+Read shared/forge-delivery.md. Capture the actual gate/verifier results in contemporaneous v1
+envelopes, create explicit criterion/aspect bindings, and materialize
+{TASK_ID}-DELIVERY.json plus the SUMMARY table with --owner-root WORKING_DIR and --code-dir
+CODE_DIR. Preserve missing, failed, skipped, approximate and conflicting evidence. Keep
+implementation, CI, review, merge, installation and human acceptance independent.
 If auto_commit is true: commit with message "feat({TASK_ID}): {one-liner description}".
 If auto_commit is false: do NOT run any git commands.
 Do NOT modify STATE.md. Return ---GSD-WORKER-RESULT---.
@@ -1414,6 +1418,11 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
 Dialectic review: {X resolved · Y conceded · Z open} — see [`{TASK_ID}-REVIEW.md`](./{TASK_ID}-REVIEW.md).
 ```
 Skip the pointer if no `{TASK_ID}-REVIEW.md` was written.
+
+After review handling, update `{TASK_ID}-DELIVERY-INPUT.json` only with review evidence/facts
+that were actually produced, then re-run the two `forge-delivery.js` materializations from
+`shared/forge-delivery.md`. Re-render `## Entrega por critério`; do not infer merge,
+installation or human acceptance, and do not turn review availability into criterion success.
 
 **Event log** — append the `review` line to `.gsd/forge/events.jsonl` (`shared/forge-review.md § Step 8`, with `"unit":"task/{TASK_ID}"`).
 

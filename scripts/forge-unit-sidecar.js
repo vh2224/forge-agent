@@ -29,6 +29,26 @@ function atomic(file, value) {
 }
 function json(file, value) { atomic(file, JSON.stringify(value, null, 2) + '\n'); }
 function fileHash(file) { return fs.existsSync(file) ? hash(fs.readFileSync(file)) : null; }
+function sameUnit(value, expected) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && value.type === expected.type && value.id === expected.id
+    && (value.milestone || null) === (expected.milestone || null)
+    && (value.slice || null) === (expected.slice || null);
+}
+function inspectDeliveryContent(content, rule) {
+  let value;
+  try { value = JSON.parse(content); } catch (_) { return false; }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.schema_version !== 1
+    || !sameUnit(value.unit, rule.unit)) return false;
+  if (rule.kind === 'input') return typeof value.plan === 'string' && typeof value.plan_fingerprint === 'string'
+    && Array.isArray(value.bindings) && Array.isArray(value.expected_children);
+  if (rule.kind === 'delivery') return value.generated_by === 'forge-delivery'
+    && typeof value.delivery_fingerprint === 'string' && Array.isArray(value.criteria) && Array.isArray(value.facts);
+  return value.kind === rule.kind && typeof value.plan_fingerprint === 'string'
+    && typeof value.code_dir === 'string' && typeof value.revision === 'string'
+    && typeof value.environment === 'string' && typeof value.captured_at === 'string'
+    && value.result && typeof value.result === 'object' && !Array.isArray(value.result);
+}
 function locations(request) {
   const m = request.milestoneId, s = request.sliceId, t = request.taskId;
   if (!/^(?:M\d+|M-\d{14}-[a-z0-9-]+)$/i.test(m || '')) fail('invalid-milestone');
@@ -39,7 +59,7 @@ function locations(request) {
   const unit = request.unitType;
   if ((/slice|plan-check|execute-task/.test(unit)) && !s) fail('invalid-slice');
   if (unit === 'execute-task' && !t) fail('invalid-task');
-  const required = {
+  const baseRequired = {
     'research-milestone': [`${milestone}/${m}-RESEARCH.md`],
     'research-slice': [`${slice}/${s}-RESEARCH.md`],
     'discuss-milestone': [`${milestone}/${m}-CONTEXT.md`],
@@ -51,9 +71,27 @@ function locations(request) {
     'plan-slice': [`${slice}/${s}-PLAN.md`],
     'execute-task': [`${slice}/tasks/${t}-SUMMARY.md`],
   }[unit];
-  if (!required) fail('unsupported-sidecar-unit');
+  if (!baseRequired) fail('unsupported-sidecar-unit');
+  const deliveryPrefix = unit === 'execute-task' ? `${slice}/tasks/${t}`
+    : unit === 'complete-slice' ? `${slice}/${s}`
+      : unit === 'complete-milestone' ? `${milestone}/${m}` : null;
+  const deliveryUnit = unit === 'execute-task' ? { type: 'task', id: t, milestone: m, slice: s }
+    : unit === 'complete-slice' ? { type: 'slice', id: s, milestone: m }
+      : unit === 'complete-milestone' ? { type: 'milestone', id: m } : null;
+  const delivery = deliveryPrefix ? {
+    input: `${deliveryPrefix}-DELIVERY-INPUT.json`, output: `${deliveryPrefix}-DELIVERY.json`,
+    verification: `${deliveryPrefix}-VERIFY-ENVELOPE.json`, artifact: `${deliveryPrefix}-ARTIFACT-ENVELOPE.json`,
+  } : null;
+  const required = delivery ? [...baseRequired, delivery.input, delivery.output] : baseRequired;
   const optional = unit.startsWith('research-') ? ['.gsd/CODING-STANDARDS.md'] : [];
-  return { required, allowed: [...required, ...optional], milestone, slice };
+  const deliveryOptional = delivery ? [delivery.verification, delivery.artifact] : [];
+  const rules = delivery ? {
+    [delivery.input]: { kind: 'input', unit: deliveryUnit },
+    [delivery.output]: { kind: 'delivery', unit: deliveryUnit },
+    [delivery.verification]: { kind: 'verification', unit: deliveryUnit },
+    [delivery.artifact]: { kind: 'artifact', unit: deliveryUnit },
+  } : {};
+  return { required, allowed: [...required, ...deliveryOptional, ...optional], rules, delivery, milestone, slice };
 }
 // Reject links even when they point back into the workspace: replacing a link is
 // not the same operation as publishing an artifact. Validate before mkdir/write.
@@ -68,7 +106,7 @@ function target(root, relative) {
   }
   return current;
 }
-function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity) {
+function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, rules = {}) {
   const bad = reason => ({ ok: false, reason });
   if (!value || typeof value !== 'object' || Array.isArray(value) || !['done', 'partial', 'blocked'].includes(value.status)
     || typeof value.summary !== 'string' || !value.summary.trim()
@@ -82,6 +120,7 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity) 
       || typeof artifact.path !== 'string' || typeof artifact.content !== 'string' || !artifact.content.trim()
       || Object.keys(artifact).some(k => !['path', 'content'].includes(k))) return bad('schema-invalid');
     if (!allowed.includes(artifact.path)) return bad('artifact-path-invalid');
+    if (rules[artifact.path] && !inspectDeliveryContent(artifact.content, rules[artifact.path])) return bad('delivery-artifact-invalid');
     if (seen.has(artifact.path)) return bad('artifact-duplicate');
     if (Buffer.byteLength(artifact.content) > MAX_ARTIFACT_BYTES) return bad('artifact-limit');
     seen.add(artifact.path);
@@ -91,8 +130,39 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity) 
   if (Buffer.byteLength(JSON.stringify(value)) > maxPayloadBytes) return bad('payload-limit');
   return { ok: true };
 }
-function validateArtifacts(value, allowed, required, maxPayloadBytes) {
-  return inspectArtifacts(value, allowed, required, maxPayloadBytes).ok;
+function validateArtifacts(value, allowed, required, maxPayloadBytes, rules) {
+  return inspectArtifacts(value, allowed, required, maxPayloadBytes, rules).ok;
+}
+function executeDeliveryArtifacts(request, loc, result, root, cwd) {
+  if (result.status !== 'done') return [];
+  if (!loc.delivery || !request.planFile) fail('delivery-plan-required');
+  const planFile = fs.realpathSync(request.planFile);
+  const planReference = path.relative(root, planFile).replace(/\\/g, '/');
+  if (!planReference || path.isAbsolute(planReference) || planReference === '..' || planReference.startsWith('../')) {
+    fail('delivery-plan-outside-context');
+  }
+  const planText = fs.readFileSync(planFile, 'utf8');
+  const input = {
+    schema_version: 1,
+    unit: loc.rules[loc.delivery.input].unit,
+    plan: planReference,
+    plan_fingerprint: hash(planText),
+    bindings: [],
+    expected_children: [],
+  };
+  const delivery = require('./forge-delivery');
+  const output = delivery.buildDelivery(input, { ownerRoot: root, codeDir: cwd });
+  const deliveryReference = `./${path.posix.basename(loc.delivery.output)}`;
+  const deliverySection = delivery.renderDeliveryMarkdown(output, { detailReference: deliveryReference });
+  const artifacts = [
+    { path: loc.required[0], content: `---\nstatus: done\n---\n\n# ${request.taskId} Summary\n\n${result.summary}\n\n## Must haves\n\n${JSON.stringify(result.must_haves_status, null, 2)}\n\n${deliverySection}` },
+    { path: loc.delivery.input, content: `${JSON.stringify(input, null, 2)}\n` },
+    { path: loc.delivery.output, content: `${JSON.stringify(output, null, 2)}\n` },
+  ];
+  const verdict = inspectArtifacts({ status: 'done', summary: result.summary, questions: [], artifacts },
+    loc.allowed, loc.required, Infinity, loc.rules);
+  if (!verdict.ok) fail('invalid-artifact-result', verdict.reason);
+  return artifacts;
 }
 function markChecked(content, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -218,7 +288,7 @@ async function runUnitSidecar(request) {
     if (transport.mode === 'execute') {
       result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: r.writableRoots });
-      artifacts = result.status === 'done' ? [{ path: loc.required[0], content: `---\nstatus: done\n---\n\n# ${r.taskId} Summary\n\n${result.summary}\n\n## Must haves\n\n${JSON.stringify(result.must_haves_status, null, 2)}\n` }] : [];
+      artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
     } else if (transport.mode === 'plan') {
       if (!r.promptFile) fail('prompt-file-required');
       result = await xllm.runPlan({ ...options, planContextFile: r.promptFile });
@@ -248,14 +318,14 @@ async function runUnitSidecar(request) {
       if (options.engine === 'claude') {
         const output = await invokeClaudeSidecar({ ...options, prompt: prompt
           + '\nFinish with the following envelope. Markers must be on their own lines. result_json must contain one complete JSON object (compact or multiline); escape newlines inside JSON strings. Do not wrap the JSON in Markdown fences.\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <complete JSON>\n---END-RESULT---',
-          readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit), onHeartbeat: heartbeat,
+          readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         result = output.candidate;
       } else {
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
-      const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit);
+      const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules);
       if (!verdict.ok) {
         const error = new Error('Invalid artifact result.');
         error.code = 'invalid-artifact-result';
@@ -288,7 +358,7 @@ async function runUnitSidecar(request) {
     throw error;
   }
 }
-module.exports = { schema, locations, validateArtifacts, inspectArtifacts, MAX_ARTIFACT_BYTES,
+module.exports = { schema, locations, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, runUnitSidecar };
 if (require.main === module) {
   Promise.resolve().then(() => {

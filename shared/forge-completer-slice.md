@@ -21,7 +21,8 @@ generation, not analysis. Budgets, enforced by you while writing:
 
 ## For complete-slice
 
-Given all `T##-SUMMARY.md` files from the slice:
+Given all `T##-SUMMARY.md` files from the slice, also read every complete sibling
+`T##-DELIVERY.json`. Do not derive criterion coverage from the first 35 lines of a SUMMARY.
 
 1. Write `S##-SUMMARY.md` — compress all task summaries:
    - YAML frontmatter: id, milestone, provides (up to 8), key_files (up to 10), key_decisions (up to 5), patterns_established
@@ -423,6 +424,26 @@ Given all `T##-SUMMARY.md` files from the slice:
       Append to `S##-SUMMARY.md`. This is documentation only — never a blocker.
 
 5. **Lint gate** — read `.gsd/CODING-STANDARDS.md` for lint/format commands. If commands exist, run them on the files changed in this slice. If lint fails, fix the violations before proceeding. If no lint commands are configured, skip this step.
+
+5.5. **Materialize the slice delivery after verification/review.** Read
+`shared/forge-delivery.md` from the checkout or Forge home. Write a contemporaneous v1 envelope
+for the actual step-3 gate result and retain the exact step-1.8 verifier result when available.
+Create `{S##}-DELIVERY-INPUT.json` beside the SUMMARY with:
+
+- the slice plan and its exact SHA-256;
+- explicit bindings for slice-owned criteria only;
+- `expected_children` listing every task in the slice and its complete `T##-DELIVERY.json`,
+  including expected children whose delivery is missing;
+- independent implementation, CI, review, merge, installation and human-acceptance facts.
+
+Run `forge-delivery.js --input ... --owner-root "{WORKING_DIR}" --code-dir "{CODE_DIR}" --json`
+and write `{S##}-DELIVERY.json`; then run `--markdown --table-limit 40
+--detail-reference "./{S##}-DELIVERY.json"` and upsert `## Entrega por critério` in
+`{S##}-SUMMARY.md`. The helper must read the complete child DELIVERY artifacts and recompute child
+states. Do not bind a child check to a new slice objective, infer success from green children, or
+drop missing/legacy/malformed children. If the 120-line budget requires truncation, retain the
+generated counts and detail reference; never hand-author a green replacement. A materialization
+failure is `partial` with its diagnostic, not an omitted section.
 
 6. **Git — `complete-slice` has NO merge step.** See `## Git boundary — complete-slice` below. Commit the slice artifacts on the branch you are already on when `auto_commit: true`; do nothing git-related when `auto_commit: false`. Then proceed to step 7.
 

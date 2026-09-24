@@ -66,8 +66,22 @@ function request(cwd, unitType, engine = 'claude') {
   write(r.promptFile, '# Selected unit\nHonor the operator constraints.');
   return r;
 }
-function payload(r) { return { status: 'done', summary: 'Fixture delivery', questions: [],
-  artifacts: unit.locations(r).required.map(p => ({ path: p, content: r.unitType === 'plan-milestone' ? '# Roadmap\n\n- [ ] **S01: Work**\n' : '# Valid artifact\n\nFixture evidence.\n' })) }; }
+function artifactContent(r, p, loc) {
+  const rule = loc.rules[p];
+  if (rule && rule.kind === 'input') return JSON.stringify({ schema_version: 1, unit: rule.unit,
+    plan: 'fixture-plan.md', plan_fingerprint: 'fixture-sha', bindings: [], expected_children: [] });
+  if (rule && rule.kind === 'delivery') return JSON.stringify({ schema_version: 1, generated_by: 'forge-delivery',
+    unit: rule.unit, delivery_fingerprint: 'fixture-delivery-sha', criteria: [], facts: [] });
+  if (rule) return JSON.stringify({ schema_version: 1, kind: rule.kind, unit: rule.unit,
+    plan_fingerprint: 'fixture-sha', code_dir: r.cwd, revision: 'abc123', environment: 'fixture',
+    captured_at: '2026-09-24T12:00:00Z', result: {} });
+  return r.unitType === 'plan-milestone' ? '# Roadmap\n\n- [ ] **S01: Work**\n' : '# Valid artifact\n\nFixture evidence.\n';
+}
+function payload(r, includeDeliveryEnvelopes = false) { const loc = unit.locations(r);
+  const paths = includeDeliveryEnvelopes && loc.delivery
+    ? [...loc.required, loc.delivery.verification, loc.delivery.artifact] : loc.required;
+  return { status: 'done', summary: 'Fixture delivery', questions: [],
+    artifacts: paths.map(p => ({ path: p, content: artifactContent(r, p, loc) })) }; }
 async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code, code); }
 
 (async () => {
@@ -109,6 +123,29 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert(!events.includes('worker-engine-fallback'));
     write(path.join(cwd, p.artifacts[0].path), 'another writer');
     await rejects(() => unit.runUnitSidecar(r), 'artifact-conflict');
+  }
+  // Delivery publication uses exact, unit-scoped paths for every closing unit.
+  // Exercise the real validator and durable materializer without a provider.
+  for (const type of ['execute-task', 'complete-slice', 'complete-milestone']) {
+    const dir = setup(), req = request(dir, type), loc = unit.locations(req), value = payload(req, true);
+    assert(loc.required.includes(loc.delivery.input));
+    assert(loc.required.includes(loc.delivery.output));
+    assert(loc.allowed.includes(loc.delivery.verification));
+    assert(loc.allowed.includes(loc.delivery.artifact));
+    assert.deepStrictEqual(Object.keys(loc.rules).sort(), Object.values(loc.delivery).sort());
+    assert.strictEqual(unit.inspectArtifacts(value, loc.allowed, loc.required, Infinity, loc.rules).ok, true);
+    const record = { result: value, artifacts: value.artifacts.map(artifact => ({ ...artifact, before: null })) };
+    assert.strictEqual(unit.materialize(req, record).status, 'done');
+    for (const artifact of value.artifacts) assert.strictEqual(fs.readFileSync(path.join(dir, artifact.path), 'utf8'), artifact.content);
+
+    const foreign = JSON.parse(JSON.stringify(value));
+    foreign.artifacts.find(artifact => artifact.path === loc.delivery.output).path = loc.delivery.output.replace(/(T01|S01|M001)-DELIVERY\.json$/, 'FOREIGN-DELIVERY.json');
+    assert.strictEqual(unit.inspectArtifacts(foreign, loc.allowed, loc.required, Infinity, loc.rules).reason, 'artifact-path-invalid');
+    const traversal = JSON.parse(JSON.stringify(value)); traversal.artifacts[0].path = '.gsd/../escape.json';
+    assert.strictEqual(unit.inspectArtifacts(traversal, loc.allowed, loc.required, Infinity, loc.rules).reason, 'artifact-path-invalid');
+    const malformed = JSON.parse(JSON.stringify(value));
+    malformed.artifacts.find(artifact => artifact.path === loc.delivery.input).content = '{bad';
+    assert.strictEqual(unit.inspectArtifacts(malformed, loc.allowed, loc.required, Infinity, loc.rules).reason, 'delivery-artifact-invalid');
   }
   const cwd = setup(), r = request(cwd, 'research-milestone');
   write(path.join(cwd, 'payload.json'), { status: 'partial', summary: 'Need input', artifacts: [], questions: ['Required decision?'] });
@@ -168,7 +205,7 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
   git(['init', '-q']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture']);
   const startSha = git(['rev-parse', 'HEAD']);
   const planRequest = request(planDir, 'plan-slice');
-  const planContent = '---\ncapability: readonly\nmust_haves:\n  truths: []\n  artifacts: []\n  key_links: []\nexpected_output: []\n---\n# Task\n\n## Standards\nFixture.\n';
+  const planContent = '---\ncapability: readonly\nmust_haves:\n  truths:\n    - "fixture execution stays observable"\n  artifacts: []\n  key_links: []\nexpected_output: []\n---\n# Task\n\n## Standards\nFixture.\n';
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Plan fixture',
     slice_plan: { filename: 'S01-PLAN.md', content: '# Slice\n\n- [ ] T01: Fixture\n' },
     task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: planContent }] });
@@ -183,6 +220,18 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
   const executeRequest = request(planDir, 'execute-task'); executeRequest.planFile = planFile;
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Execution fixture', must_haves_status: [], files_changed: [] });
   await unit.runUnitSidecar(executeRequest);
+  const executeLocations = unit.locations(executeRequest);
+  for (const required of executeLocations.required) assert.strictEqual(fs.existsSync(path.join(planDir, required)), true, required);
+  const deliveryInput = JSON.parse(fs.readFileSync(path.join(planDir, executeLocations.delivery.input), 'utf8'));
+  const deliveryOutput = JSON.parse(fs.readFileSync(path.join(planDir, executeLocations.delivery.output), 'utf8'));
+  const executeSummary = fs.readFileSync(path.join(planDir, executeLocations.required[0]), 'utf8');
+  assert.deepStrictEqual(deliveryInput.unit, { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' });
+  assert.deepStrictEqual(deliveryInput.bindings, []);
+  assert.strictEqual(deliveryOutput.generated_by, 'forge-delivery');
+  assert(deliveryOutput.criteria.length > 0);
+  assert(deliveryOutput.criteria.every(criterion => criterion.status !== 'verificado'));
+  assert(executeSummary.includes('## Entrega por critério'));
+  assert(executeSummary.includes(`./${path.posix.basename(executeLocations.delivery.output)}`));
   assert.strictEqual(git(['rev-parse', 'HEAD']), startSha);
   assert(fs.readFileSync(path.join(planDir, '.gsd/milestones/M001/slices/S01/S01-PLAN.md'), 'utf8').includes('[x] T01'));
   const reviewOptions = { cwd: planDir, engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, timeoutSecs: 20, model: 'claude-sonnet-5' };

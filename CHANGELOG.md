@@ -1,3 +1,15 @@
+## v4.37.0 - Entrega final por critério e evidência
+
+- Task, slice e milestone consolidam a entrega em um contrato comum, com inventário
+  dos critérios, evidências vinculadas, ambiente exercitado e limites explícitos.
+- O helper `forge-delivery` classifica cada critério como verificado, parcialmente
+  verificado ou não verificado. Ausência de checks, skips, conflitos e evidências
+  de revisões incompatíveis não são promovidos a sucesso.
+- Caminhos nativo, sidecar e headless usam a mesma projeção; o sidecar de task
+  publica SUMMARY, DELIVERY-INPUT e DELIVERY com validação de identidade e paths.
+- Implementação, CI, revisão, merge, instalação e aceite humano permanecem fatos
+  independentes. Testes locais e instalação temporária não afirmam uso em clientes reais.
+
 ## v4.36.0 - Recuperação guiada por trabalho
 
 - `forge-doctor --diagnose-recovery <id>` oferece diagnóstico somente leitura por
