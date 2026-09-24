@@ -852,8 +852,8 @@ function cliMain() {
       process.stdout.write(args.json ? `${JSON.stringify(result, null, 2)}\n` : diagnostic.renderRecovery(result));
       process.exitCode = result.status === 'ok' ? 0 : 1;
     } catch {
-      const failure = { id: args['diagnose-recovery'], status: 'partial', reason: 'internal-error' };
-      process.stdout.write(args.json ? `${JSON.stringify(failure)}\n` : 'Diagnóstico parcial: internal-error. Não foi possível concluir a observação.\n');
+      const failure = diagnostic.createRecoveryReport(args['diagnose-recovery'], 'diagnostic');
+      process.stdout.write(args.json ? `${JSON.stringify(failure)}\n` : diagnostic.renderRecovery(failure));
       process.exitCode = 1;
     }
     return;

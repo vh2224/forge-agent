@@ -231,13 +231,19 @@ function inspectController(project, id, key, report) {
   if (t.phase !== 'committed') report.uncertainties.push('Controller interrompido: publicação pode preceder a fase; não repetir efeitos pelo diagnóstico.');
 }
 
-function inspectRecovery(options = {}) {
-  if (!validId(options.id) || (options.controllerKey !== undefined && !validKey(options.controllerKey))) throw new TypeError('invalid-arguments');
-  const report = { id: options.id, observedAt: new Date().toISOString(), status: 'partial', sources: [], provenResults: [],
+function createRecoveryReport(id, failedPhase) {
+  const report = { id, observedAt: new Date().toISOString(), status: 'partial', sources: [], provenResults: [],
     uncertainties: [], artifacts: [], continuity: { state: 'unproven' }, pendingDecisions: [], acceptances: [],
     claim: { state: 'unknown' }, controller: { coverage: 'unavailable' },
     uncovered: ['sweep', 'sidecar-reset', 'other-journals'],
     nextSafeStep: 'Inspecionar as fontes indicadas e resolver pendências na autoridade original; qualquer ação futura exige revalidação e autorização. Esta observação não autoriza replay nem atestações.' };
+  if (failedPhase) source(report, failedPhase, { state: 'internal-error' });
+  return report;
+}
+
+function inspectRecovery(options = {}) {
+  if (!validId(options.id) || (options.controllerKey !== undefined && !validKey(options.controllerKey))) throw new TypeError('invalid-arguments');
+  const report = createRecoveryReport(options.id);
   let project;
   try {
     project = path.resolve(options.project || options.cwd || process.cwd());
@@ -268,21 +274,89 @@ function inspectRecovery(options = {}) {
     if (observed.state === 'current') report.artifacts.push({ kind: suffix.toLowerCase(), source: path.relative(project, file), hash: observed.hash, existence: 'observed', integrity: 'unverified' });
     if (suffix !== 'SUMMARY' || observed.state !== 'missing') source(report, suffix.toLowerCase(), observed);
   }
-  inspectPersonal(project, options.id, options, report);
-  inspectClaim(project, options.id, r, report, run.hash);
-  inspectController(project, options.id, options.controllerKey, report);
+  for (const [phase, inspect] of [
+    ['personal', () => inspectPersonal(project, options.id, options, report)],
+    ['claim', () => inspectClaim(project, options.id, r, report, run.hash)],
+    ['controller', () => inspectController(project, options.id, options.controllerKey, report)],
+  ]) {
+    try { inspect(); } catch { source(report, phase, { state: 'internal-error' }); }
+  }
   report.status = report.uncertainties.length ? 'partial' : 'ok';
   return report;
 }
 
+const TEXT_LABELS = {
+  ok: 'observações válidas', partial: 'parcial', current: 'atual', missing: 'ausente', corrupt: 'corrompido',
+  stale: 'desatualizado', unreadable: 'ilegível', 'unsafe-path': 'caminho inseguro', 'invalid-name': 'nome inválido',
+  invalid: 'inválido', 'schema-invalid': 'estrutura inválida', 'schema-unsupported': 'versão não suportada',
+  'internal-error': 'falha interna', 'snapshot-changed': 'evidência alterada durante a inspeção',
+  unproven: 'não comprovado', unknown: 'desconhecido', unavailable: 'não disponível', observed: 'observado',
+  verified: 'verificado', unverified: 'não verificado', 'identity-checked': 'somente identidade conferida',
+  'integrity-unverified': 'integridade não verificada', conflicts: 'conflitos', superseded: 'substituído por outra transação',
+  recorded: 'registrado', open: 'em aberto', pending: 'pendente', completed: 'concluído', active: 'ativo', inactive: 'inativo',
+  held: 'retida', released: 'liberada', absent: 'ausente', stuck: 'travada', unmeasured: 'não medido', skip: 'não aplicável',
+  personal: 'contexto pessoal', diagnostic: 'diagnóstico', run: 'registro do trabalho', 'run-identity': 'identidade do trabalho',
+  plan: 'plano', state: 'estado', summary: 'resumo', work: 'trabalho', 'personal-store': 'store pessoal',
+  'personal-sources': 'fontes pessoais', checkpoint: 'checkpoint', acceptances: 'aceites', nextAction: 'próxima ação',
+  lastResult: 'último resultado', handoff: 'passagem de contexto', 'needs-reconciliation': 'exige reconciliação',
+  'run-corrupt': 'registro do trabalho corrompido', 'run-unreadable': 'registro do trabalho ilegível',
+  claim: 'reserva de escrita', 'claim-release': 'liberação da reserva', 'claim-manifest': 'manifesto do bundle',
+  'claim-manifest-schema': 'estrutura do manifesto', 'claim-bundle': 'bundle da reserva', 'claim-preview': 'prévia do bundle',
+  'personal-checkpoint': 'resultado registrado no checkpoint', controller: 'controlador',
+  'controller-transaction': 'transação do controlador', 'controller-identity': 'identidade da transação',
+  'controller-result': 'resultado publicado', 'controller-boundary': 'marco publicado',
+  'controller-result-identity': 'identidade do resultado', 'controller-boundary-identity': 'identidade do marco',
+  'controller-result-schema': 'estrutura do resultado', 'controller-boundary-schema': 'estrutura do marco',
+  'controller-result-published': 'publicação do resultado observada', 'controller-boundary-published': 'publicação do marco observada',
+  'key-not-provided': 'chave não informada', 'standalone-task': 'task avulsa sem cobertura do controlador',
+  intent: 'intenção registrada', 'result-published': 'resultado publicado', 'event-published': 'evento publicado',
+  'boundary-pending': 'marco pendente', 'state-published': 'estado publicado', 'lease-release-pending': 'liberação da concessão pendente',
+  'lease-released': 'concessão liberada', 'boundary-ready': 'marco pronto', committed: 'transação confirmada',
+  explicit: 'explícito', manual: 'manual', 'ttl-expired': 'prazo expirado', sweep: 'limpeza',
+  'sidecar-reset': 'reinício do sidecar', 'other-journals': 'outros journals',
+};
+function textLabel(value) {
+  if (value == null) return 'não informado';
+  return String(value).split('/').map(part => TEXT_LABELS[part] || part).join(' / ');
+}
+function renderCapture(item) {
+  return `${item.text} — ${textLabel(item.validity)}; resolvido: ${item.resolved ? 'sim' : 'não'}`
+    + `\n    Fonte: ${item.source}; SHA-256: ${item.hash}; capturado em: ${item.capturedAt || 'não informado'}`;
+}
 function renderRecovery(report) {
-  const sections = [['Fontes e estado da evidência', report.sources], ['Resultado comprovado', report.provenResults],
-    ['Incertezas', report.uncertainties], ['Artefatos preservados', report.artifacts], ['Continuidade pessoal', report.continuity],
-    ['Decisões pendentes', report.pendingDecisions], ['Aceites registrados', report.acceptances], ['Claim', report.claim],
-    ['Controller', report.controller], ['Famílias não cobertas (unknown)', report.uncovered]];
-  return `Diagnóstico de recuperação: ${report.id}\nObservado em: ${report.observedAt}\nEstado: ${report.status} (não significa conclusão do trabalho)\n`
-    + sections.map(([label, value]) => `${label}: ${JSON.stringify(value, null, 2)}`).join('\n')
-    + `\nPróximo passo seguro: ${report.nextSafeStep}\n`;
+  const lines = [`Diagnóstico de recuperação: ${report.id}`, `Observado em: ${report.observedAt}`,
+    `Estado: ${textLabel(report.status)} (não significa conclusão do trabalho)`];
+  const section = (heading, entries) => {
+    lines.push(`\n${heading}:`, ...(entries.length ? entries.map(entry => `- ${entry}`) : ['- Nenhum registro.']));
+  };
+  section('Fontes e estado da evidência', report.sources.map(item => `${textLabel(item.name)}: ${textLabel(item.state)}`
+    + (item.source ? `\n    Fonte: ${item.source}` : '') + (item.hash ? `\n    SHA-256: ${item.hash}` : '')));
+  section('Resultado comprovado', report.provenResults.map(item => textLabel(item.kind)
+    + (item.evidence ? `: ${renderCapture(item.evidence)}` : '')
+    + (item.at != null ? `; instante registrado (ms): ${item.at}; mecanismo: ${textLabel(item.mechanism)}` : '')));
+  section('Incertezas', report.uncertainties.map(item => {
+    const split = item.indexOf(': ');
+    if (split < 0) return item;
+    const [state, ...detail] = item.slice(split + 2).split(';');
+    return `${textLabel(item.slice(0, split))}: ${[textLabel(state), ...detail].join(';')}`;
+  }));
+  section('Artefatos preservados', report.artifacts.map(item => `${textLabel(item.kind)}: ${textLabel(item.existence)}; integridade: ${textLabel(item.integrity)}`
+    + `\n    Fonte: ${item.source}` + (item.hash ? `; SHA-256: ${item.hash}` : '')
+    + (item.conflicts != null ? `; conflitos: ${item.conflicts}` : '')));
+  const continuity = report.continuity;
+  section('Continuidade pessoal', [`Registro: ${textLabel(continuity.state)}; vínculo pessoal: ${continuity.bound == null ? 'não comprovado' : continuity.bound ? 'sim' : 'não'}`,
+    `Situação do trabalho: ${textLabel(continuity.workStatus)}; atividade: ${textLabel(continuity.activity)}`,
+    ...Object.entries(continuity.checkpoint || {}).flatMap(([field, entries]) => entries.map(item => `${textLabel(field)}: ${renderCapture(item)}`))]);
+  section('Decisões pendentes', report.pendingDecisions.map(renderCapture));
+  section('Aceites registrados', report.acceptances.map(renderCapture));
+  section('Reserva de escrita', [`Estado: ${textLabel(report.claim.state)}`
+    + (report.claim.classification ? `; classificação: ${textLabel(report.claim.classification)}` : '')]);
+  const control = report.controller;
+  section('Controlador', [`Cobertura: ${textLabel(control.coverage)}` + (control.reason ? `; motivo: ${textLabel(control.reason)}` : ''),
+    ...(control.phase ? [`Fase: ${textLabel(control.phase)}; transação confirmada: ${control.transactionCommitted ? 'sim' : 'não'}; conclusão global: ${textLabel(control.globalCompletion)}`] : [])]);
+  section('Famílias não cobertas (resultado desconhecido)', report.uncovered.map(textLabel));
+  lines.push(`\nPróximo passo seguro: ${report.nextSafeStep}`);
+  return lines.join('\n') + '\n';
 }
 
-module.exports = { inspectRecovery, renderRecovery, validId, validKey };
+module.exports = { inspectRecovery, renderRecovery, createRecoveryReport, validId, validKey };

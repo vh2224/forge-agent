@@ -291,7 +291,16 @@ test('R6 unexpected CLI failure returns sanitized partial without stack/token', 
     const code = `require(${JSON.stringify(path.join(__dirname, 'forge-recovery-diagnostic.js'))}).inspectRecovery=()=>{throw new Error('PRIVATE-TOKEN')};process.argv=${JSON.stringify(argv)};require('module')._load(${JSON.stringify(doctor)},null,true);`;
     const out = spawnSync(process.execPath, ['-e', code], { env: f.env(), encoding: 'utf8', windowsHide: true });
     assert.strictEqual(out.status, 1, out.stderr); assert(!`${out.stdout}${out.stderr}`.includes('PRIVATE-TOKEN')); assert.strictEqual(out.stderr, '');
-    if (json) assert.strictEqual(JSON.parse(out.stdout).reason, 'internal-error'); else assert(out.stdout.includes('Diagnóstico parcial: internal-error'));
+    if (json) {
+      const report = JSON.parse(out.stdout);
+      assert.deepStrictEqual(Object.keys(report).sort(), Object.keys(diagnostic.createRecoveryReport(f.id)).sort());
+      assert(hasSource(report, 'diagnostic', 'internal-error')); assert(report.uncertainties.length);
+      assert(!Number.isNaN(Date.parse(report.observedAt))); assert(report.nextSafeStep);
+      for (const field of ['sources', 'uncertainties', 'provenResults', 'artifacts', 'pendingDecisions', 'acceptances', 'uncovered']) assert(Array.isArray(report[field]));
+    } else {
+      assert(out.stdout.includes('Estado: parcial')); assert(out.stdout.includes('falha interna'));
+      assert(out.stdout.includes('Próximo passo seguro:'));
+    }
   }
 });
 test('R7 key limit uses UTF-8/base64 bytes and I/O errors retain their category', f => {
@@ -325,5 +334,54 @@ test('R8 record/manifest changes during preview cannot verify the earlier artifa
     r = f.inspect(); assert(hasSource(r, 'claim-preview', 'snapshot-changed')); assert.strictEqual(r.artifacts.find(a => a.kind === 'claim-bundle').integrity, 'unverified');
   } finally { recovery.restore = restore; fs.writeFileSync(f.runFile, originalRun); fs.writeFileSync(manifestFile, originalManifest); }
   assert.strictEqual(repeated(f).artifacts.find(a => a.kind === 'claim-bundle').integrity, 'verified');
+});
+test('final R2 phase failures keep observed evidence and continue independent inspections', f => {
+  f.id = 'M005'; const work = f.work(f.id, 'milestone');
+  f.runFile = path.join(f.project, '.gsd', 'forge', 'runs', `${f.id}.json`);
+  release(f, true); f.bind(f.id);
+  personal.saveCheckpoint({ ...f.options, id: f.id, intent: 'checkpoint', checkpoint: {
+    acceptances: [{ text: 'Plano aceito', source: work.source, resolved: true }],
+    lastResult: [{ text: 'Resultado parcial válido', source: work.source }],
+  } });
+  fs.writeFileSync(path.join(work.dir, `${f.id}-SUMMARY.md`), 'Resumo preservado');
+  const key = 'isolated-phases'; const unit = { type: 'execute-task', id: 'T01', key: 'execute-task/T01' };
+  const publication = { protocol_version: controller.PROTOCOL_VERSION, idempotency_key: key, milestone: f.id, unit: unit.key, status: 'succeeded' };
+  const transactionFile = controller.transactionFile(f.project, key); fs.mkdirSync(path.dirname(transactionFile), { recursive: true });
+  fs.writeFileSync(transactionFile, JSON.stringify({ ...publication, unit, action: 'complete', phase: 'intent', result: publication, boundary: null }));
+  const resultFile = controller.resultFile(f.project, key); fs.mkdirSync(path.dirname(resultFile), { recursive: true }); fs.writeFileSync(resultFile, JSON.stringify(publication));
+  const cases = [
+    [personal, 'readPersonalSnapshot', 'personal'],
+    [require('./forge-claim-stuck'), 'classifyStuck', 'claim'],
+    [recovery, 'restore', 'claim'],
+    [controller, 'transactionFile', 'controller'],
+  ];
+  for (const [module, method, phase] of cases) {
+    const original = module[method];
+    try {
+      module[method] = () => { throw new Error('PRIVATE-TOKEN: unexpected failure'); };
+      const r = repeated(f, { controllerKey: key });
+      assert.strictEqual(r.status, 'partial'); assert(hasSource(r, phase, 'internal-error'));
+      assert(hasSource(r, 'run', 'current')); assert(r.artifacts.some(a => a.kind === 'summary'));
+      if (phase !== 'personal') { assert.strictEqual(r.acceptances[0].text, 'Plano aceito'); assert(r.provenResults.some(p => p.kind === 'personal-checkpoint')); }
+      if (method !== 'classifyStuck') assert(r.provenResults.some(p => p.kind === 'claim-release'));
+      if (phase !== 'controller') assert(r.provenResults.some(p => p.kind === 'controller-result-published'));
+      assert(!JSON.stringify(r).includes('PRIVATE-TOKEN')); assert(!diagnostic.renderRecovery(r).includes('PRIVATE-TOKEN'));
+    } finally { module[method] = original; }
+  }
+});
+test('final R5 text translates report fields and states while preserving provenance and JSON', f => {
+  const r = diagnostic.createRecoveryReport(f.id, 'personal');
+  const provenance = path.join(f.home, '.forge-personal', 'context.json');
+  r.sources.push({ name: 'personal-store', state: 'missing', source: provenance, hash: 'a'.repeat(64) });
+  r.sources.push({ name: 'claim-manifest', state: 'unreadable' }, { name: 'checkpoint/acceptances', state: 'stale' });
+  r.artifacts.push({ kind: 'controller-result', source: 'published.json', existence: 'observed', integrity: 'identity-checked' });
+  r.continuity = { state: 'recorded', bound: true, workStatus: 'pending', activity: 'inactive', checkpoint: {} };
+  r.acceptances = [{ text: 'Plano aprovado', source: provenance, hash: 'b'.repeat(64), capturedAt: r.observedAt, validity: 'current', resolved: true }];
+  r.provenResults.push({ kind: 'personal-checkpoint', evidence: { ...r.acceptances[0], text: 'Resultado parcial', resolved: false } });
+  const before = JSON.stringify(r); const text = diagnostic.renderRecovery(r);
+  for (const label of ['ausente', 'ilegível', 'desatualizado', 'somente identidade conferida', 'vínculo pessoal: sim', 'pendente', 'inativo', 'resultado registrado no checkpoint', 'resolvido: não', 'Plano aprovado', 'Próximo passo seguro:']) assert(text.includes(label), label);
+  assert(text.includes(provenance)); assert(text.includes('a'.repeat(64)));
+  for (const raw of ['"sources"', '"workStatus"', 'identity-checked', 'unreadable', 'unproven', 'personal-store']) assert(!text.includes(raw), raw);
+  assert.strictEqual(JSON.stringify(r), before, 'text rendering must not change JSON representation');
 });
 console.log(`${passed} recovery diagnostic tests passed`);
