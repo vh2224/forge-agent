@@ -5,6 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const installer = require('./forge-installer.js');
 const capabilities = require('./forge-capabilities.js');
 
@@ -78,6 +79,60 @@ test('runtime install omits tests and update backs up only known unchanged devel
     assert.strictEqual(fs.readFileSync(customized, 'utf8'), 'operator edits\n');
     assert.strictEqual(fs.readFileSync(unknown, 'utf8'), 'operator suite\n');
     assert(applied.plan.some(item => item.reason === 'development-file-customized' && item.destination === customized));
+  } finally { data.cleanup(); }
+});
+
+test('installed autonomy CLI runs from Forge home with owner-only project input', () => {
+  const data = fixture();
+  try {
+    installer.install({ ...data.options, runtime: 'both' });
+    const installedScripts = path.join(data.forgeHome, 'scripts');
+    const runtimeFiles = [
+      'forge-autonomy.js',
+      'forge-autonomy-sources.js',
+      'forge-delivery.js',
+      'forge-evidence-path.js',
+      'forge-git-process.js',
+      'forge-home.js',
+      'forge-ids.js',
+      'forge-ignore.js',
+      'forge-isolation.js',
+      'forge-lock.js',
+      'forge-model-alias.js',
+      'forge-must-haves.js',
+      'forge-prefs.js',
+      'forge-repos.js',
+      'forge-runs.js',
+      'forge-runtime.js',
+      'forge-vcs.js',
+      'forge-workspace.js',
+    ];
+    for (const file of runtimeFiles) {
+      assert(fs.existsSync(path.join(installedScripts, file)), `dependência da CLI de autonomia não instalada: ${file}`);
+    }
+    assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-autonomy.md')),
+      'documentação da CLI de autonomia não instalada');
+
+    const gsd = path.join(data.projectRoot, '.gsd');
+    fs.mkdirSync(gsd, { recursive: true });
+    fs.writeFileSync(path.join(gsd, 'PROJECT.md'), '# Projeto temporário\n');
+    const inputFile = path.join(data.projectRoot, 'autonomy-input.json');
+    fs.writeFileSync(inputFile, JSON.stringify({
+      schema_version: 1,
+      owner_root: '.',
+      target: { type: 'task', id: 'TASK-014' },
+      sources: { gates: [], events: [], results: [] },
+    }));
+
+    const run = spawnSync(process.execPath, [path.join(installedScripts, 'forge-autonomy.js'), '--input', inputFile, '--json'], {
+      cwd: data.projectRoot,
+      encoding: 'utf8',
+    });
+    assert.strictEqual(run.status, 0, `CLI instalada falhou:\n${run.stderr || run.stdout}`);
+    const report = JSON.parse(run.stdout);
+    assert.strictEqual(report.valid, true);
+    assert.deepStrictEqual(report.target, { id: 'TASK-014', scope: 'legacy', type: 'task' });
+    assert.deepStrictEqual(Object.keys(report.families), ['human_interventions', 'time', 'reviews', 'resumptions']);
   } finally { data.cleanup(); }
 });
 
