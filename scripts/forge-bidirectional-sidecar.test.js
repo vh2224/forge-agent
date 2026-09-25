@@ -177,9 +177,12 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     };
     const deferred = await unit.runUnitSidecar(req);
     assert.strictEqual(deferred.publication.status, 'deferred');
-    const sidecarEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
-      .trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(event => event.event === 'sidecar-unit');
-    assert(sidecarEvents.some(event => event.unit === `memory-extract/${identity.sourceUnitId}`));
+    const memoryEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line));
+    for (const eventName of ['sidecar-unit', 'dispatch']) {
+      assert(memoryEvents.some(event => event.event === eventName
+        && event.unit === `memory-extract/${identity.sourceUnitId}`));
+    }
     const memoryDir = path.join(dir, '.gsd', 'memory');
     assert.strictEqual(fs.existsSync(memoryDir), false);
     req.publicationSafe = true;

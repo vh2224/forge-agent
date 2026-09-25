@@ -464,7 +464,8 @@ async function runUnitSidecar(request) {
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before }), { flag: 'wx', mode: 0o600 });
   event('started');
   const dispatchEvent = require('./forge-dispatch-event').buildDispatchEvent({
-    unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`, milestone: r.milestoneId,
+    unit: `${r.unitType}/${r.unitType === 'memory-extract' ? loc.sourceUnit : r.taskId || r.sliceId || r.milestoneId}`,
+    milestone: r.milestoneId,
     slice: r.sliceId, dispatchId, model, engine: route.resolved_worker_engine,
     transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
   }, route, startedAt);
