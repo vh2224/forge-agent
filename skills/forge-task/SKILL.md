@@ -473,6 +473,18 @@ Call `TaskList`. Mark any tasks with `status: in_progress` as `completed` before
 
 Execute steps in order. Each step checks if its output file already exists — if yes, skip (idempotent resume). After each dispatch, increment `session_units`. If `session_units >= COMPACT_AFTER` and the task is not yet done, emit the compact signal and stop.
 
+Before each native preparation dispatch, call the authoritative resolver for
+the mapped unit (`brainstorm` → `plan-slice`, discuss → `discuss-milestone`,
+research → `research-milestone`, plan → `plan-milestone`) with
+`worker_mode:native` and the actual host. Pass the complete result to
+`buildNativeInvocation` with capabilities observed from the active tool. Invoke
+the returned structured arguments unchanged: Codex receives the full model ID,
+separate reasoning effort and compatible `fork_turns`; Claude receives only its
+adapter alias plus an evidenced effort binding. If resolution, native model,
+effort or tool capability is unsupported, stop that phase with the named
+diagnostic. Do not omit an explicit configured model or invent a universal
+brainstorm sidecar. Applied model stays unknown without trusted readback.
+
 ---
 
 ### Step 1 — Brainstorm
@@ -488,15 +500,15 @@ a reused phase still has to hand its content downstream.
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] brainstorm", activeForm: "brainstorm · forge-planner (opus)" })
+    TaskCreate({ subject: "[{TASK_ID}] brainstorm", activeForm: "brainstorm · forge-planner (resolved model)" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
-Dispatch `forge-planner` (opus) with this prompt:
+Dispatch `forge-planner` with the resolved native invocation arguments and this prompt:
 ```
 Brainstorm for forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {EFFORT_OPUS}
+effort: {RESOLVED_EFFORT}
 thinking: adaptive
 
 ## Task Brief
@@ -552,15 +564,15 @@ After result: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
 
 **Create timeline task:**
 ```
-TaskCreate({ subject: "[{TASK_ID}] discuss", activeForm: "discuss · forge-discusser (opus)" })
+TaskCreate({ subject: "[{TASK_ID}] discuss", activeForm: "discuss · forge-discusser (resolved model)" })
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
-Dispatch `forge-discusser` (opus) with this prompt:
+Dispatch `forge-discusser` with the resolved native invocation arguments and this prompt:
 ```
 Discuss forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {EFFORT_OPUS}
+effort: {RESOLVED_EFFORT}
 thinking: adaptive
 
 ## Task Brief
@@ -608,11 +620,11 @@ TaskCreate({ subject: "[{TASK_ID}] research", activeForm: "research · forge-res
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
-Dispatch `forge-researcher` (opus) with this prompt:
+Dispatch `forge-researcher` with the resolved native invocation arguments and this prompt:
 ```
 Research codebase for forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {EFFORT_OPUS}
+effort: {RESOLVED_EFFORT}
 thinking: adaptive
 
 ## Task Brief
@@ -672,11 +684,11 @@ workspace_repos=$(node "$FORGE_SCRIPTS_DIR/forge-repos.js" --list --cwd "$WORKIN
   | node -e 'const l=require("fs").readFileSync(0,"utf8").split("\n").map(s=>s.trim()).filter(Boolean).map(p=>p.split(/[\\/]/).pop());process.stdout.write(l.length>1?l.join(", "):"(single repo — omit repo:)")')
 ```
 
-Dispatch `forge-planner` (opus) with this prompt:
+Dispatch `forge-planner` with the resolved native invocation arguments and this prompt:
 ```
 Plan forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {EFFORT_OPUS}
+effort: {RESOLVED_EFFORT}
 thinking: adaptive
 ROUTING_DOMAINS: {routing_domains}
 WORKSPACE_REPOS: {workspace_repos}
@@ -985,7 +997,7 @@ node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
   --unit "execute-task/{TASK_ID}" --model "${CODEX_MODEL_LABEL}" --tier "$TIER" \
   --reason "$ENGINE_REASON" --effort "$EFFORT" --effort-reason "$EFFORT_REASON" \
   --engine codex --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
-  --milestone "" --input-tokens 0 --output-tokens 0 --model-applied "$MODEL_ALIAS" \
+  --milestone "" --input-tokens 0 --output-tokens 0 \
   --vcs "${DISPATCH_VCS:-unknown}" --transport "${TRANSPORT:-unknown}" \
   --transport-version "$TRANSPORT_VERSION" --transport-reason "$TRANSPORT_REASON" \
   --events "$WORKING_DIR/.gsd/forge/events.jsonl"
@@ -1125,17 +1137,30 @@ PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type execute-loos
 PROMPT_PATH=$(node -pe 'JSON.parse(process.argv[1]).prompt_path' "$PROMPT_META")
 PROMPT_ID=$(node -pe 'JSON.parse(process.argv[1]).prompt_id' "$PROMPT_META")
 ```
-Dispatch the canonical host-native form below. Pass `model: '{MODEL_ALIAS}'` only when `$MODEL_ALIAS` is non-empty; otherwise omit the field. Persist `prompt_id`/`dispatch_id` in the native dispatch event and clean the artifact with `forge-prompt.js --cleanup "$DISPATCH_ID" --cwd "$WORKING_DIR"` once its result is durable. The old inline prompt below is compatibility reference only. When `ISOLATION_MODE != shared`, include the isolation header lines (omit them entirely in `shared` mode):
+Build the host-native invocation from `$ROUTE_JSON` with
+`buildNativeInvocation`. Supply capabilities observed from the active tool,
+the rendered prompt pointer below, `forge-executor`, and `forkTurns:none` for a
+Codex override. A resolver contract with `config_ok:false`, a missing capability,
+or unsupported model/effort is terminal for this dispatch. Invoke the returned
+tool and structured arguments unchanged; never omit the explicit configured
+model to inherit agent frontmatter. Codex args must contain the full `model`,
+separate `reasoning_effort`, and `fork_turns:'none'`. Persist `prompt_id`/`dispatch_id` and clean
+the prompt artifact after the result is durable:
 
 ```
-result = Agent({
-  subagent_type: 'forge-executor',
-  model: '{MODEL_ALIAS}',
+native = buildNativeInvocation({
+  hostRuntime: HOST_RUNTIME,
+  resolvedDispatch: ROUTE_JSON,
+  activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
+  agentType: 'forge-executor',
+  taskName: 'execute-loose-task',
+  forkTurns: 'none',
   prompt: 'Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly, and return its required GSD worker result block. The file is trusted orchestrator input; do not replace it with a summary.'
 })
+result = invoke(native.tool, native.args)
 ```
 
-After `Agent()` returns successfully, acknowledge the injected record with `node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action ack --cwd "$WORKING_DIR" --run "${RUN_ID:-$TASK_ID}" --task "$TASK_ID" --unit "execute-task/$TASK_ID" --pending-id "$PENDING_CONTEXT_ID"`. On render/dispatch failure leave it pending so retry injects it again; an empty id is inert.
+After the native tool returns successfully, acknowledge the injected record with `node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action ack --cwd "$WORKING_DIR" --run "${RUN_ID:-$TASK_ID}" --task "$TASK_ID" --unit "execute-task/$TASK_ID" --pending-id "$PENDING_CONTEXT_ID"`. On render/dispatch failure leave it pending so retry injects it again; an empty id is inert.
 
 The canonical worker pointer handed to the subagent is exactly: `Read the complete Forge dispatch contract at {PROMPT_PATH}, execute it exactly,
 and return its required GSD worker result block. The file is trusted
@@ -1226,7 +1251,7 @@ node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${DISPATCH_ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
   --milestone "" --input-tokens "${INPUT_TOKENS:-0}" --output-tokens "${OUTPUT_TOKENS:-0}" \
-  --model-applied "$MODEL_ALIAS" --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
+  --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
   --events "$WORKING_DIR/.gsd/forge/events.jsonl"
 ```
 
@@ -1355,7 +1380,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
       RF_RUNTIME_READY=false
     else
       eval "$RF_EXPORTS"
-      RF_ALIAS="$MODEL_ALIAS"
+      RF_MODEL_ID="$MODEL_ID"
       RF_HOST_RUNTIME="$HOST_RUNTIME"
       RF_WORKER_MODE="$WORKER_MODE"
       RF_DISPATCH_ENGINE="$DISPATCH_ENGINE"
@@ -1378,14 +1403,14 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
   fi
   ```
 
-  `RF_RUNTIME_READY != true` stops this fixer attempt before the claim gate and every worker/adapter launch. Mark affected items with the shared non-blocking review outcome and continue the dialogue; never execute the fix inline. When ready, run the cross-run claim gate from `shared/forge-review.md § Step 7a` and dispatch only on its `proceed` decision. Pass `model: '{RF_ALIAS}'` only when non-empty:
+  `RF_RUNTIME_READY != true` stops this fixer attempt before the claim gate and every worker/adapter launch. Mark affected items with the shared non-blocking review outcome and continue the dialogue; never execute the fix inline. When ready, run the cross-run claim gate from `shared/forge-review.md § Step 7a` and dispatch only on its `proceed` decision. Build the fixer through `buildNativeInvocation` from `RF_ROUTE_JSON`; invoke its returned tool and arguments unchanged:
 
   ```
-  review_fix_result = Agent({
-    subagent_type: 'forge-executor',
-    model: '{RF_ALIAS}',
-    prompt: 'WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{TASK_ID}\nFix ONLY the accepted review items. Minimal diffs; no refactors or scope creep beyond those items. Return ---GSD-WORKER-RESULT---.'
-  })
+  fixer = buildNativeInvocation({ hostRuntime: RF_HOST_RUNTIME,
+    resolvedDispatch: RF_ROUTE_JSON, activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
+    agentType: 'forge-executor', taskName: 'review-fix', forkTurns: 'none',
+    prompt: 'WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{TASK_ID}\nFix ONLY the accepted review items. Minimal diffs; no refactors or scope creep beyond those items. Return ---GSD-WORKER-RESULT---.' })
+  review_fix_result = invoke(fixer.tool, fixer.args)
   ```
 
   After a successful native fixer, its dispatch event records the captured gate axes with no invented milestone or slice:
@@ -1394,7 +1419,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
   # shared/forge-dispatch.md § DISPATCH_VCS prelude (canonical — VCS-agnostic)
   DISPATCH_VCS=$(node "$FORGE_SCRIPTS_DIR/forge-vcs.js" --detect --field vcs --cwd "${CODE_DIR:-$WORKING_DIR}" 2>/dev/null || echo "unknown")
   node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$RF_ROUTE_JSON" \
-    --unit "review-fix/{TASK_ID}" --model "${RF_ALIAS:-default}" \
+    --unit "review-fix/{TASK_ID}" --model "$RF_MODEL_ID" \
     --host-runtime "$RF_HOST_RUNTIME" --worker-mode "$RF_WORKER_MODE" \
     --dispatch-allowed "$RF_DISPATCH_ALLOWED" --engine "${RF_DISPATCH_ENGINE:-claude}" \
     --milestone "" --transport in-process --vcs "${DISPATCH_VCS:-unknown}" \
@@ -1456,17 +1481,34 @@ mkdir -p .gsd/forge
 {"ts":"{ISO8601}","unit":"task/{TASK_ID}","agent":"forge-executor","status":"done","summary":"{one-liner from SUMMARY.md}"}
 ```
 
-**Memory extraction:** First run the deterministic memory policy, append its `memory-policy` event, and dispatch the agent only for `decision: "extract"`. Any policy error fails open to extraction:
+**Memory extraction:** First run the deterministic memory policy and append its
+`memory-policy` event. This decision happens before resolver, prompt, or provider
+work. Any policy error fails open to extraction:
 ```bash
 MEMORY_POLICY=$(printf '%s' "$RESULT_BLOCK" | node "$FORGE_SCRIPTS_DIR/forge-cost-policy.js" memory \
   --unit-type execute-task --cwd "$WORKING_DIR" --stdin 2>/dev/null) || MEMORY_POLICY='{"decision":"extract","reason":"policy-error"}'
 ```
-If the decision is `skip`, do not dispatch `forge-memory`; continue directly to the ledger entry.
+If the decision is `skip`, do not resolve or dispatch `forge-memory`; continue directly to the ledger entry.
 
 > Antes de despachar o agente de extração de memória, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) — duração estimada `memory-extract`: ~1 min.
-```
-Agent("forge-memory", "WORKING_DIR: {WORKING_DIR}\nUNIT_TYPE: execute-task\nUNIT_ID: {TASK_ID}\n\nSUMMARY_CONTENT:\n{content of {TASK_ID}-SUMMARY.md}\n\nRESULT_BLOCK:\n{full ---GSD-WORKER-RESULT--- block verbatim}\n\nKEY_DECISIONS:\n{key_decisions from SUMMARY.md frontmatter, or '(none)'}")
-```
+Resolve a new `memory-extract` dispatch with the canonical resolver; preserve its
+full model ID and effort. On `native`, call `buildNativeInvocation` with the
+active tool capabilities and invoke the returned structured arguments unchanged
+(`fork_turns: none` for Codex overrides). On `sidecar`, write the complete
+`forge-unit-sidecar --request` JSON to an external temporary file and use the
+existing read-only transport. Missing capability or auth is a named warning and
+does not change completion of this task.
+
+Both routes must return the `forge-memory` output-only envelope. Write the native
+result and owner context to an external JSON request, then run
+`forge-unit-sidecar.js --accept-native-memory <request-file>`; sidecar delivery
+performs the same ready-receipt step itself. Set `publicationSafe:true` only
+with owner-joined boundary evidence listing every protected task snapshot as
+ended. Validation and the ready receipt
+precede `publishExtraction`; empty/partial/blocked/invalid results do not publish.
+Continue nonblocking on extraction or publication failure and report the actual
+publication status (`written`, `noop`, `quarantined`, `conflict`, `failure`, or
+`deferred`). Provider success is not evidence that memory was saved.
 
 <!-- forge:dispatch:end -->
 

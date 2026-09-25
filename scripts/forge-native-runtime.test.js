@@ -8,6 +8,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const capabilities = require('./forge-capabilities.js');
+const { buildNativeInvocation } = require('./forge-native-invocation.js');
 
 const root = path.resolve(__dirname, '..');
 let passed = 0;
@@ -183,6 +184,84 @@ test('native Claude contracts remain represented in the capability catalog', () 
     const id = `agent-${path.basename(agent, '.md')}`;
     assert(byId.has(id), `${agent} must remain represented by the catalog`);
   }
+});
+
+test('native invocation binds the resolved model and effort to real host arguments', () => {
+  const route = (host, model, effort, alias = null) => ({
+    host_runtime: host,
+    resolved_worker_engine: host,
+    dispatch_engine: host,
+    worker_mode: 'native',
+    dispatch_allowed: true,
+    config_ok: true,
+    model_requested: model,
+    model_resolved: model,
+    model,
+    alias,
+    effort,
+  });
+  const codexCapabilities = {
+    available: true,
+    tool: 'spawn_agent',
+    source: 'runtime-test-active-tool',
+    models: ['gpt-6-luna', 'gpt-6-sol'],
+    reasoning_efforts: ['medium'],
+    fork_turns: ['none'],
+  };
+
+  for (const model of codexCapabilities.models) {
+    const invocation = buildNativeInvocation({
+      hostRuntime: 'codex',
+      resolvedDispatch: route('codex', model, 'medium'),
+      activeCapabilities: codexCapabilities,
+      agentType: 'forge-memory',
+      taskName: `memory-${model}`,
+      prompt: 'Extract the bounded memory envelope.',
+      forkTurns: 'none',
+    });
+    assert.strictEqual(invocation.ok, true, JSON.stringify(invocation));
+    assert.deepStrictEqual(
+      {
+        model: invocation.args.model,
+        reasoning_effort: invocation.args.reasoning_effort,
+        fork_turns: invocation.args.fork_turns,
+      },
+      { model, reasoning_effort: 'medium', fork_turns: 'none' },
+    );
+    assert.strictEqual(invocation.telemetry.model_observed, null);
+  }
+
+  const claude = buildNativeInvocation({
+    hostRuntime: 'claude',
+    resolvedDispatch: route('claude', 'claude-sonnet-5', 'medium', 'sonnet'),
+    activeCapabilities: {
+      available: true,
+      tool: 'Agent',
+      source: 'runtime-test-active-tool',
+      model_aliases: ['sonnet'],
+      effort_transports: ['agent-frontmatter'],
+      effort_bindings: [{
+        transport: 'agent-frontmatter', agent_type: 'forge-memory', effort: 'medium',
+        source: 'agents/forge-memory.md', observed: true,
+      }],
+    },
+    agentType: 'forge-memory',
+    prompt: 'Extract the bounded memory envelope.',
+    effortBinding: {
+      transport: 'agent-frontmatter',
+      effort: 'medium',
+      source: 'agents/forge-memory.md',
+    },
+  });
+  assert.strictEqual(claude.ok, true, JSON.stringify(claude));
+  assert.deepStrictEqual(claude.args, {
+    subagent_type: 'forge-memory',
+    prompt: 'Extract the bounded memory envelope.',
+    model: 'sonnet',
+  });
+  assert.strictEqual(claude.telemetry.effort_argument, null);
+  assert.strictEqual(claude.telemetry.effort_transport_value, 'medium');
+  assert.strictEqual(claude.telemetry.effort_transport, 'agent-frontmatter');
 });
 
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

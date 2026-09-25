@@ -2605,8 +2605,9 @@ function smokeModelAlias() {
       'require()d modelToAlias("claude-fable-5") -> {alias:"fable", mapped:true}', JSON.stringify(res));
   }
 
-  // Structural wiring — dispatch sites call the helper, pass model:$MODEL_ALIAS,
-  // record model_applied, and never reimplement the alias map inline.
+  // Structural wiring — the resolver remains the only alias owner while native
+  // dispatches use the full model through the capability-aware adapter. An
+  // alias is an argument translation, never evidence that the provider applied it.
   {
     const ROOT = path.join(__dirname, '..');
     const files = {
@@ -2616,18 +2617,24 @@ function smokeModelAlias() {
     };
 
     for (const [name, content] of Object.entries(files)) {
-      assert(content.includes('forge-model-alias.js'),
-        `${name} calls forge-model-alias.js`, 'not found');
-      assert(content.includes('model_applied') || content.includes('--model-applied'),
-        `${name} records model_applied`, 'not found');
+      const resolverToken = name === 'shared/forge-dispatch.md'
+        ? 'forge-dispatch-resolve.js'
+        : 'forge-model-alias.js';
+      assert(content.includes(resolverToken),
+        `${name} delegates model resolution`, `${resolverToken} not found`);
+      assert(content.includes('MODEL_APPLIED_JSON') || content.includes('model_applied'),
+        `${name} carries honest model application telemetry`, 'not found');
       assert(!/indexOf\(['"]fable['"]\)/.test(content),
         `${name} does not reimplement the alias map inline`, 'suspicious inline map reimplementation found');
     }
 
     for (const name of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
       const content = files[name];
-      assert(content.includes('model: $MODEL_ALIAS'),
-        `${name} passes model: $MODEL_ALIAS to Agent()`, 'not found');
+      assert(content.includes('buildNativeInvocation') && content.includes('full model ID') &&
+        content.includes('`reasoning_effort`') && content.includes("fork_turns:'none'"),
+      `${name} preserves full Codex model, effort and bounded fork through the native adapter`, 'contract not found');
+      assert(!content.includes('model: $MODEL_ALIAS'),
+        `${name} does not pass a Claude alias as the authoritative native model`, 'legacy alias invocation found');
       // Single-parse cutover (2026-08-23): MODEL_ALIAS arrives via the
       // --shell-exports eval; the mapping lives in SHELL_EXPORT_MAP.
       assert(content.includes('forge-dispatch-resolve.js" --shell-exports)"'),
@@ -2650,7 +2657,8 @@ function smokeModelAlias() {
     const buildAndParse = (modelAlias) => {
       const script = [
         `MODEL_ALIAS='${modelAlias}'`,
-        `MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')`,
+        `MODEL_OBSERVED_JSON=null`,
+        `MODEL_APPLIED_JSON="$MODEL_OBSERVED_JSON"`,
         `echo "{\\"ts\\":\\"2026-01-01T00:00:00Z\\",\\"event\\":\\"dispatch\\",\\"unit\\":\\"execute-task/T01\\",\\"model\\":\\"claude-sonnet-5\\",\\"input_tokens\\":1,\\"output_tokens\\":1,\\"tier\\":\\"standard\\",\\"reason\\":\\"default\\",\\"effort\\":\\"low\\",\\"effort_reason\\":\\"default\\",\\"model_applied\\":$MODEL_APPLIED_JSON}"`,
       ].join('\n');
       const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
@@ -2661,8 +2669,8 @@ function smokeModelAlias() {
 
     const withAlias = buildAndParse('sonnet');
     assert(!!withAlias.parsed, 'MODEL_APPLIED_JSON glue produces valid JSON when MODEL_ALIAS non-empty', withAlias.raw);
-    assert(withAlias.parsed && withAlias.parsed.model_applied === 'sonnet',
-      'model_applied === "sonnet" when MODEL_ALIAS="sonnet"', JSON.stringify(withAlias.parsed));
+    assert(withAlias.parsed && withAlias.parsed.model_applied === null,
+      'model_applied stays null without trusted provider readback even when MODEL_ALIAS is set', JSON.stringify(withAlias.parsed));
 
     const withoutAlias = buildAndParse('');
     assert(!!withoutAlias.parsed, 'MODEL_APPLIED_JSON glue produces valid JSON when MODEL_ALIAS empty', withoutAlias.raw);

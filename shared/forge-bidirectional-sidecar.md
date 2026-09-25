@@ -1,7 +1,7 @@
 # Bidirectional unit delivery
 
 This contract takes precedence over the historical Codex-only Branch C/D for
-**Claude sidecars**, and for artifact units on either engine. Native delivery
+**Claude sidecars**, artifact units, and memory extraction on either engine. Native delivery
 still uses the host's native agent tool. Neither model family nor a CLI's
 presence grants delivery: `forge-dispatch-resolve` and the sidecar entrypoint
 consult `forge-transport-capabilities.js` for the actual unit contract.
@@ -49,6 +49,12 @@ consult `forge-transport-capabilities.js` for the actual unit contract.
    parent is authorized to commit later. No account names, tokens, lease owner
    secrets or provider sessions belong in this request. For multi-repo execute,
    carry `writableRoots` from the existing CODE_DIR attribution contract.
+   For `memory-extract`, use `sourceUnitId` for the real completed unit (a loose
+   `T-...` task stays a task), include the source material and current owner-read
+   memory snapshot, and set `publicationSafe:true` only with a
+   `publicationBoundary` carrying `ownerJoined:true`, `checkedAt`, and every
+   overlapping protected snapshot in `state:"ended"`. The worker never supplies
+   identity, boundary evidence, or paths.
 6. Run `node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --request "$REQUEST_FILE"`
    using the host's background process facility. Poll the result and retain the
    process handle. Use the existing orphan detector with the published real
@@ -74,6 +80,14 @@ worker destinations; links, traversal, duplicate paths and concurrent edits
 are refused. STATE, leases, credentials and transaction records are never
 worker artifacts. Completers return documents; the parent retains close-out,
 verification, ledger, cleanup and authorized VCS operations.
+
+Memory uses the same versioned facts/events envelope for native and sidecar
+workers. The receipt persists the validated response before the owner calls
+`publishExtraction`; replay therefore republishes without another provider turn.
+When `publicationSafe` is absent or false, the ready response stays durable and
+publication reports `deferred`. Empty `done` reports `noop`; partial, blocked,
+invalid and transport failures publish nothing. `quarantined` is a refusal, not
+saved canonical memory. Provider success alone is not publication evidence.
 
 On `done`, use the materialized artifacts and return the normal
 `---GSD-WORKER-RESULT---` status/summary to post-unit housekeeping. On `partial`
@@ -160,7 +174,7 @@ do not authorize a host or preference change.
 
 Both Claude and Codex sidecars support research-milestone, research-slice,
 discuss-milestone, discuss-slice, plan-milestone, plan-slice, execute-task,
-complete-slice, complete-milestone and plan-check. Discussion remains
+complete-slice, complete-milestone, plan-check and memory-extract. Discussion remains
 noninteractive: required questions return partial to the parent. Research uses
 local file inspection; arbitrary research shell commands are unavailable in
 the Claude read-only profile.
@@ -168,10 +182,11 @@ the Claude read-only profile.
 Review challenger, advocate and rebuttal use `forge-xllm.js --mode
 challenge|defend|rebuttal --engine <resolved engine> --host-runtime <actual host>
 --sidecar-declared`, retaining their distinct review schemas and pairing.
-Cross-host `review-fix` and `memory-extract` have no unit delivery contract yet;
-the guard returns `unsupported-sidecar-unit` for these specific auxiliary
-operations. Follow the existing nonblocking review/memory failure policy;
-never impersonate the missing worker or switch engines silently.
+Cross-host `review-fix` has no unit delivery contract; the guard returns
+`unsupported-sidecar-unit`. Memory extraction is read-only inference followed
+by owner publication through the canonical fragment transaction. Missing auth,
+unsupported native model/effort, invalid output and publication failures remain
+nonblocking for the completed source unit and never switch engines silently.
 
 Install/synchronize the updated Forge sources on **both** hosts. Updating only
 the guard or copying one adapter leaves stale skills and incomplete delivery.

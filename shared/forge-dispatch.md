@@ -1279,11 +1279,18 @@ Applicability by `unit_type`:
 |-------------|----------------|--------------------------|
 | `execute-task` | **active** | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches `--mode execute` (Branch C) |
 | `plan-slice` | **active** (S03) | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches read-only `--mode plan` (Branch D) |
-| all others (`plan-milestone`, `discuss-*`, `research-*`, `complete-*`, `memory-extract`, …) | **never** — host-native mode | no |
+| `memory-extract` | resolved from `tier_models.light` | yes when the resolver selects a declared sidecar; native otherwise |
+| other preparation/closure units | resolved per unit | only when `forge-transport-capabilities.js` declares that exact unit; unsupported preparation routes refuse explicitly |
 
 `plan-milestone` is **never** covered by `workers:` (locked) — it stays on tier `max`/Fable regardless of prefs.
 
-The canonical Claude-source `native` path is **byte-identical** to the current loop after the new resolver gate: `WORKER_MODE == native` hands control to Tier Resolution and the host-native call. `WORKER_MODE == sidecar` selects one of two routable adapter modes: `execute-task` (Branch C — `--mode execute`, read-write) or `plan-slice` (Branch D — `--mode plan`, **read-only**). The two branches diverge on side effects: execute captures/resets `START_SHA` and forbids codex commits; plan writes nothing (codex only reasons and returns markdown), so there is **no dirty-tree guard, no `START_SHA`, no reset** — the orchestrator materializes the returned plan content into `.gsd/**` itself.
+The `native` path passes the resolver result through
+`forge-native-invocation.js`; the adapter validates the actual host tool and
+preserves model/effort arguments. `sidecar` consults the exact unit contract in
+`forge-transport-capabilities.js`. Execute and plan retain their established
+write/read-only behavior, artifact units return bounded content, and
+`memory-extract` is read-only inference followed by owner publication. Units
+without a declared transport refuse explicitly.
 
 #### Single-call resolver — `forge-routing.js` (ONE call per dispatch)
 
@@ -1301,7 +1308,9 @@ ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
 ```
 
 Inputs (all resolved before this call):
-- `$UNIT_TYPE` — `execute-task` | `plan-slice` (the only two routable types; all others are never captured — the resolver echoes `phase-not-routable` and returns the legacy chain).
+- `$UNIT_TYPE` — `execute-task` | `plan-slice` for domain-routing capture. Other
+  units still pass through the resolver using their tier model and exact native
+  or sidecar capability; they are not silently replaced.
 - `$TIER` — the tier already resolved by § Tier Resolution steps 1–3 (unit-type default + frontmatter `tier:` + `risk:high` escalation). Passing the *resolved* tier keeps this call the single point of model resolution.
 - `$DOMAIN` — the domain metadata extracted for this unit (see § Domain metadata below); absent → the resolver uses the `default` domain.
 - `$PLAN_TIER` / `$PLAN_WORKER` — the raw T##-PLAN frontmatter `tier:` / `worker:` values (execute-task only; empty otherwise). The resolver internalizes the precedence `frontmatter tier:/worker: > routing: > tier_models/workers legado` — the wiring does **not** re-implement it (M004 S02 pattern: describe/reference the resolver, never re-encode its logic in markdown).
@@ -2375,7 +2384,6 @@ fi
 if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
   printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
 fi
-[ -z "$MODEL_ALIAS" ] && echo "⚠ model \"$MODEL_ID\" sem alias — usando frontmatter do agente" >&2
 ```
 <!-- forge:dispatch:end -->
 
@@ -2384,8 +2392,9 @@ The canonical dispatch specification is not a source-manifest input, and none
 of its protected specification occurrences is inside the real marker pair.
 
 ```bash
-# When $MODEL_ALIAS is non-empty, pass model: $MODEL_ALIAS to Agent(); when empty,
-# call Agent() without a model: param (the warning above was already echoed).
+# Pass ROUTE_JSON and active tool capabilities to buildNativeInvocation. Invoke
+# its returned tool/args unchanged. Unsupported model/effort/fork/alias is a
+# named refusal; never omit an explicit model to inherit agent frontmatter.
 # $ROUTE_JSON.chain carries forward unmodified — consumed by the Failure Taxonomy via
 # `node "$FORGE_SCRIPTS_DIR/forge-routing.js" ... --next-after "$MODEL_ID"` on model_refusal/429/400
 # (walks the cross-engine chain → category fallback → ''), BEFORE any cross-tier escalation
@@ -2394,7 +2403,7 @@ of its protected specification occurrences is inside the real marker pair.
 
 # Extend the dispatch event (append after Token Telemetry builds dispatchEvent) with the resolver's
 # fields — additive, no existing field renamed/removed:
-echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"dispatch_id\":\"$ATTEMPT_DISPATCH_ID\",\"prompt_id\":\"$PROMPT_DISPATCH_ID\",\"attempt\":${attempt:-1},\"status\":\"done\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"host_runtime\":\"$HOST_RUNTIME\",\"worker_mode\":\"$WORKER_MODE\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"token_method\":\"heuristic-chars-4\",\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_APPLIED_JSON,\"engine\":\"$ENGINE\",\"domain\":\"$DOMAIN_USED\",\"route_source\":\"$ROUTE_SOURCE\",\"chain_len\":$CHAIN_LEN,\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"dispatch_id\":\"$ATTEMPT_DISPATCH_ID\",\"prompt_id\":\"$PROMPT_DISPATCH_ID\",\"attempt\":${attempt:-1},\"status\":\"done\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"host_runtime\":\"$HOST_RUNTIME\",\"worker_mode\":\"$WORKER_MODE\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"token_method\":\"heuristic-chars-4\",\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":null,\"engine\":\"$ENGINE\",\"domain\":\"$DOMAIN_USED\",\"route_source\":\"$ROUTE_SOURCE\",\"chain_len\":$CHAIN_LEN,\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
 ```
 
 `MODEL_ID` is always the resolver's `model` field — `chain[0].id`, the primary member (identical to
@@ -2414,7 +2423,9 @@ not one of `light | standard | heavy | max`, the resolver's internal `readTierCh
 > `claude-opus-5` accepts `disabled` only at effort `high` or below (Opus 4.7/4.8 accept it at any effort).
 > The resolver's `thinking_header` field already carries this — read it instead of re-deriving it.
 
-> **Alias resolution internals (unchanged):** `MODEL_ALIAS`/`model_applied` are still produced by `scripts/forge-model-alias.js`'s `modelToAlias()` — the resolver calls it internally (see `scripts/forge-dispatch-resolve.js`'s own `require('./forge-model-alias.js')`) instead of the SKILL.md shelling out to it directly. No inline alias map is ever reimplemented here or in the SKILL.md callers.
+> **Invocation adaptation:** `MODEL_ALIAS` is an adapter input only for Claude.
+> Codex receives `MODEL_ID`. Neither value proves provider application;
+> `model_applied` remains null unless a trusted runtime readback supplies it.
 
 ---
 
@@ -2910,9 +2921,17 @@ When `mode == parallel` and `BATCH.length > 1`:
 
 Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely.
 
-### Memory extraction as background
+### Memory extraction and safe publication
 
-After each `done` result, the orchestrator evaluates `forge-cost-policy.js memory` and emits a `memory-policy` event even when the decision is `skip`. `memory.extraction: disabled` always skips, `always` preserves extraction after every eligible unit, and `adaptive` extracts at completion boundaries or when an execute result contains a durable signal. Only an `extract` decision dispatches `forge-memory` with `run_in_background: true`; the orchestrator may continue without awaiting it, and later prompt renders observe the fragment once that background write completes.
+After each `done` result, the orchestrator evaluates `forge-cost-policy.js memory` and emits a `memory-policy` event even when the decision is `skip`. `memory.extraction: disabled` always skips, `always` preserves extraction after every eligible unit, and `adaptive` extracts at completion boundaries or when an execute result contains a durable signal. The decision runs before resolver, prompt, or provider work.
+
+Only `extract` resolves `memory-extract` and invokes the configured native or
+sidecar adapter. Inference may run in the background, but it returns an
+output-only envelope into an external ready receipt. The owner joins or defers
+that receipt until no protected snapshot overlaps, then calls the shared
+publisher before starting the next protected dispatch. Invalid/partial/blocked
+output and provider/publication failures are recorded and remain nonblocking.
+Provider success alone is never reported as saved memory.
 
 ### Prefs contract
 

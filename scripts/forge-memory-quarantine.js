@@ -32,6 +32,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const QUARANTINE_DIRNAME = 'quarantine';
 
@@ -97,6 +98,32 @@ function writeExclusive(dir, storageKey, stamp, data) {
   );
 }
 
+function stableQuarantinePath(dir, storageKey, extractionId) {
+  const identity = crypto.createHash('sha256')
+    .update(`${storageKey}\x00${extractionId}`)
+    .digest('hex')
+    .slice(0, 24);
+  return path.join(dir, `${storageKey}~extraction-${identity}.json`);
+}
+
+function writeReplaySafe(dir, storageKey, extractionId, data) {
+  const target = stableQuarantinePath(dir, storageKey, extractionId);
+  try {
+    fs.writeFileSync(target, data, { encoding: 'utf8', flag: 'wx' });
+    return { path: target, replayed: false };
+  } catch (error) {
+    if (!error || error.code !== 'EEXIST') throw error;
+  }
+
+  const existing = fs.readFileSync(target, 'utf8');
+  if (existing !== data) {
+    const error = new Error(`quarantine extraction identity conflict: ${extractionId}`);
+    error.code = 'MEMORY_QUARANTINE_CONFLICT';
+    throw error;
+  }
+  return { path: target, replayed: true };
+}
+
 // ── quarantineFragment ────────────────────────────────────────────────────────
 // Parks `fragment` whole. `info` carries the refusal context:
 //   { storageKey, unitId, milestoneId, container, reason, remedy }
@@ -117,24 +144,26 @@ function quarantineFragment(cwd, fragment, info) {
   const refusedAt = new Date();
 
   const record = {
-    refused_at: refusedAt.toISOString(),
+    refused_at: meta.extractedAt || refusedAt.toISOString(),
     storage_key: storageKey,
     unit_id: meta.unitId || fragment.unit_id || null,
     milestone_id: meta.milestoneId || null,
     container: meta.container || null,
     reason: meta.reason || null,
     remedy: meta.remedy || null,
+    extraction_id: meta.extractionId || null,
     // Exact payload handed to writeFragment — re-injectable verbatim.
     fragment,
   };
 
-  const target = writeExclusive(
-    dir,
-    storageKey,
-    compactStamp(refusedAt),
-    `${JSON.stringify(record, null, 2)}\n`
-  );
-  return { path: target };
+  const serialized = `${JSON.stringify(record, null, 2)}\n`;
+  if (meta.extractionId) {
+    return writeReplaySafe(dir, storageKey, meta.extractionId, serialized);
+  }
+  return {
+    path: writeExclusive(dir, storageKey, compactStamp(refusedAt), serialized),
+    replayed: false,
+  };
 }
 
 // ── listQuarantine ────────────────────────────────────────────────────────────
@@ -185,5 +214,12 @@ module.exports = {
   quarantineDir,
   quarantineFragment,
   listQuarantine,
-  _private: { compactStamp, resolveTargetPath, writeExclusive, MAX_COLLISION_SUFFIX },
+  _private: {
+    compactStamp,
+    resolveTargetPath,
+    writeExclusive,
+    stableQuarantinePath,
+    writeReplaySafe,
+    MAX_COLLISION_SUFFIX,
+  },
 };

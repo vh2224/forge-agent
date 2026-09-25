@@ -1,3 +1,16 @@
+## Não lançado - Roteamento fiel e publicação de memória
+
+- A extração de memória preserva modelo e esforço configurados e distingue
+  capacidade de transporte de seleção de modelo, sem substituir GPT por Claude.
+- Workers nativos e sidecars retornam dados estruturados; o dono publica os
+  fragmentos com validação, IDs atribuídos sob lock e replay idempotente.
+- As chamadas nativas distinguem IDs completos no Codex de aliases no Claude.
+  Argumento enviado não é confirmação do modelo aplicado pelo provedor.
+- Callers, projeções e testes cobrem memória e os encerramentos bidirecionais
+  existentes, mantendo explícitas as unidades sem contrato de sidecar.
+- A revisão cobre também replay de substituição/poda, IDs canônicos de unidades,
+  proveniência dos eventos e a seleção explícita do worker Codex.
+
 ## v4.37.0 - Entrega final por critério e evidência
 
 - Task, slice e milestone consolidam a entrega em um contrato comum, com inventário

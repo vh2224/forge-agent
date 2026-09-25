@@ -107,7 +107,7 @@ XLLM_ENGINE=$([ "$CHALLENGER" = "gemini" ] && echo agy || echo codex)
 **Prefs read here:**
 - `challenger` — whitelist `claude|codex|gemini`, default `claude`. `claude` (or any invalid value → whitelist fallback) runs the in-context `forge-reviewer`/`forge-advocate` agents unchanged. `codex` and `gemini` route the challenge (Step 2) and rebuttal (Step 4) through the `scripts/forge-xllm.js` adapter — `codex` = GPT via the `codex app-server` protocol (`--engine codex` — the adapter opens one app-server turn per invocation; the argv-based transport it used before was retired in M018 S05), `gemini` = Gemini via the Antigravity CLI `agy --print` (`--engine agy`).
 - `challengerModel` — default `null` (unset). When set, it is forwarded to the adapter as `--model {challenger_model}`; when `null`, `--model` is omitted and the CLI's default model is used. Only meaningful when `challenger != claude`. Codex takes model ids (e.g. `gpt-5.2-codex`); agy takes model **labels which may contain spaces** (e.g. `Gemini 3.1 Pro (High)` — see `agy models`), so the value is read to end-of-line (`#` starts a comment; surrounding quotes are stripped) and must always be expanded quoted (`--model "$CHALLENGER_MODEL"`).
-- `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Resolved to a dispatch alias via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id with no known alias resolves to an empty string; Step 3 then omits `model:` entirely (frontmatter governs) and echoes a warning — degradation is documented, not silent.
+- `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Resolved to a dispatch alias via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id unsupported by the active adapter is an explicit review-worker refusal; never omit the configured model to inherit frontmatter.
 - Prefs parsing (block capture, `[ \t]` class, EOF-safe boundaries) now lives entirely in `scripts/forge-prefs.js` (S01); Step 0 only extracts resolved knobs off `.prefs` and applies the whitelist/clamp fallbacks above. The CLI resolves values without defaulting them — the defaults here are the review gate's own concern.
 
 ### Resolução de pairing (`auto`) — uma vez, antes de tudo
@@ -576,7 +576,7 @@ and pass it in the prompt (`agents/forge-advocate.md § Persist as you go`): the
 verdict line as it settles it, so a cut costs at most one verdict instead of all of them. It is the
 advocate's **only** permitted write target.
 
-`ADVOCATE_ALIAS` was resolved in Step 0 from `advocate_model` (default `claude-fable-5`) via `scripts/forge-model-alias.js`. **The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literal sonnet/fable/opus/haiku is a violation detected post-hoc by `forge-review-audit.js`.** Pass `model:` only when the alias is non-empty:
+`ADVOCATE_ALIAS` was resolved in Step 0 from `advocate_model` (default `claude-fable-5`) via `scripts/forge-model-alias.js`. **The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literal sonnet/fable/opus/haiku is a violation detected post-hoc by `forge-review-audit.js`.** If the adapter cannot represent the configured model, record explicit worker unavailability before launch; never omit `model:`:
 
 ```
 if [ -n "$ADVOCATE_ALIAS" ]; then
@@ -587,13 +587,8 @@ Agent({ subagent_type: 'forge-advocate', model: '{ADVOCATE_ALIAS}',
 ```
 ```
 else
-  echo "⚠ advocate_model '$ADVOCATE_MODEL' sem alias — usando frontmatter"
-```
-```
-Agent({ subagent_type: 'forge-advocate',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nDEFENSE_FILE: {DEFENSE_FILE}\nOBJECTIONS:\n{OBJECTIONS}" })
-```
-```
+  echo "✗ advocate_model '$ADVOCATE_MODEL' sem alias suportado — review worker recusado" >&2
+  # Follow Agent unavailability below; no tool call is made.
 fi
 ```
 
@@ -942,7 +937,7 @@ else
     RF_RUNTIME_READY=false
   else
     eval "$RF_EXPORTS"
-    RF_ALIAS="$MODEL_ALIAS"
+    RF_ROUTE_JSON_SAVED="$RF_ROUTE_JSON"
     RF_HOST_RUNTIME="$HOST_RUNTIME"
     RF_WORKER_MODE="$WORKER_MODE"
     RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
@@ -963,8 +958,9 @@ fi
 and before any worker launch. Mark the conceded items with the established
 `**Correção:** falhou — deferida para triagem final` outcome and continue the
 non-blocking review path; do not invoke another worker, adapter, or fallback.
-The native fixer block below runs only when `RF_WORKER_MODE == native`, passes
-`model: '{RF_ALIAS}'` only when non-empty, and its emitted dispatch record uses
+The native fixer block below runs only when `RF_WORKER_MODE == native`, builds
+the invocation from `RF_ROUTE_JSON_SAVED` plus active host capabilities, invokes
+the returned tool/arguments unchanged, and its emitted dispatch record uses
 `host_runtime:"${RF_HOST_RUNTIME}"`, the final `worker_mode`, and the unquoted
 boolean `dispatch_allowed`. A future `sidecar` verdict must use the canonical
 sidecar state machine and explicit host/declaration flags rather than entering

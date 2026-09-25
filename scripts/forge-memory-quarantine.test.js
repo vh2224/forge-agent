@@ -449,6 +449,35 @@ test('R3: falha de leitura do diretório relança — só ENOENT vira lista vazi
   );
 });
 
+test('extraction identity makes grouped quarantine replay idempotent and conflict-visible', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-replay-'));
+  const fragment = { unit_id: 'T01', facts: [fact('MEM001', 'stable')], stats: [] };
+  const info = {
+    storageKey: 'M001__T01',
+    unitId: 'T01',
+    milestoneId: 'M001',
+    container: path.join(cwd, 'container.md'),
+    reason: 'grouped-member',
+    remedy: 'undo and regroup',
+    extractionId: 'extract-stable',
+    extractedAt: '2026-09-24T22:30:00.000Z',
+  };
+  const first = quarantine.quarantineFragment(cwd, fragment, info);
+  const replay = quarantine.quarantineFragment(cwd, fragment, info);
+  assert.strictEqual(first.replayed, false);
+  assert.strictEqual(replay.replayed, true);
+  assert.strictEqual(replay.path, first.path);
+  assert.strictEqual(quarantine.listQuarantine(cwd).length, 1);
+  assert.throws(
+    () => quarantine.quarantineFragment(cwd, {
+      ...fragment,
+      facts: [fact('MEM001', 'changed')],
+    }, info),
+    error => error && error.code === 'MEMORY_QUARANTINE_CONFLICT',
+  );
+  assert.strictEqual(quarantine.listQuarantine(cwd).length, 1);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failures.length) {
   for (const { name, error } of failures) {

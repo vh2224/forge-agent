@@ -19,6 +19,7 @@ const path = require('path');
 
 const projection = require('./forge-projection');
 const dashboard  = require('./forge-dashboard');
+const memory     = require('./forge-memory');
 
 // ── Harness ───────────────────────────────────────────────────────────────────
 let passed = 0;
@@ -204,6 +205,35 @@ test('dashboard.render honours the EOL it is handed, and defaults to LF', () => 
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────
+test('memory projection folds confirmation, promotion, supersede and prune independently', () => {
+  const tmp = mkTmp();
+  try {
+    memory.writeFragment(tmp, {
+      unit_id: 'T01',
+      facts: [
+        { mem_id: 'MEM001', category: 'pattern', text: 'confirmed and promoted', confidence_base: 0.9, created_at: '2026-09-24T00:00:00.000Z' },
+        { mem_id: 'MEM002', category: 'gotcha', text: 'superseded', confidence_base: 0.9, created_at: '2026-09-24T00:00:00.000Z' },
+        { mem_id: 'MEM003', category: 'gotcha', text: 'pruned', confidence_base: 0.9, created_at: '2026-09-24T00:00:00.000Z' },
+        { mem_id: 'MEM004', category: 'architecture', text: 'replacement', confidence_base: 0.9, created_at: '2026-09-24T00:00:00.000Z' },
+      ],
+      stats: [
+        { kind: 'seed', mem_id: 'MEM001', ts: '2026-09-24T00:00:00.000Z', confidence_base: 0.9, hits: 2 },
+        { kind: 'confirm', mem_id: 'MEM001', ts: '2026-09-24T00:00:01.000Z' },
+        { kind: 'promote', mem_id: 'MEM001', ts: '2026-09-24T00:00:02.000Z', threshold_met: true },
+        { kind: 'supersede', old_id: 'MEM002', new_id: 'MEM004', ts: '2026-09-24T00:00:03.000Z' },
+        { kind: 'prune', mem_id: 'MEM003', ts: '2026-09-24T00:00:04.000Z', reason: 'cap' },
+      ],
+    });
+    const entries = projection.projectMemoryEntries(tmp, { nowMs: Date.parse('2026-09-24T00:00:05.000Z') });
+    const promoted = entries.find(entry => entry.fact.mem_id === 'MEM001');
+    assert(promoted && promoted.hits === 3 && promoted.promoted === true,
+      'confirm and promote must survive projection');
+    assert(!entries.some(entry => entry.fact.mem_id === 'MEM002'), 'superseded fact must be hidden');
+    assert(!entries.some(entry => entry.fact.mem_id === 'MEM003'), 'pruned fact must be hidden');
+    assert(entries.some(entry => entry.fact.mem_id === 'MEM004'), 'replacement fact must remain visible');
+  } finally { rmrf(tmp); }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {
   for (const f of failures) console.log(`  FAIL: ${f.name} — ${f.error}`);

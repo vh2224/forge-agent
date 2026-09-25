@@ -82,9 +82,41 @@ function payload(r, includeDeliveryEnvelopes = false) { const loc = unit.locatio
     ? [...loc.required, loc.delivery.verification, loc.delivery.artifact] : loc.required;
   return { status: 'done', summary: 'Fixture delivery', questions: [],
     artifacts: paths.map(p => ({ path: p, content: artifactContent(r, p, loc) })) }; }
+function memoryPayload(text = 'The canonical publisher allocates memory IDs under the fragment lock.') {
+  return { schema_version: 1, status: 'done', summary: 'One durable fact', questions: [],
+    facts: [{ local_id: 'new1', category: 'architecture', text, confidence_base: 0.85 }], events: [] };
+}
+function memoryRequest(cwd, engine, sourceUnitId, milestoneId) {
+  if (engine === 'codex') write(path.join(cwd, '.gsd/forge-prefs.jsonc'), {
+    tier_models: { light: 'gpt-5.6-sol', standard: 'gpt-5.6-sol', heavy: 'gpt-5.6-sol', max: 'gpt-5.6-sol' },
+  });
+  const hostRuntime = engine === 'claude' ? 'codex' : 'claude';
+  const route = resolveDispatch({ cwd, unitType: 'memory-extract', hostRuntime,
+    workerEngine: engine, workerMode: 'sidecar', sidecarDeclared: true });
+  return { cwd, contextRoot: cwd, unitType: 'memory-extract', sourceUnitType: 'execute-task',
+    sourceUnitId, ...(milestoneId ? { milestoneId } : {}), route,
+    workflowId: `memory-workflow-${sequence}`, dispatchId: `memory-dispatch-${sequence}-${engine}-${sourceUnitId}`,
+    extractionId: `extract-${sequence}-${engine}-${sourceUnitId}`, sourceFingerprint: 'fixture-source-sha256',
+    summaryContent: 'Completed work summary', sourceResult: 'status: done', keyDecisions: [],
+    existingMemory: { facts: [], stats: [] },
+    resultFile: path.join(root, `memory-result-${sequence}-${engine}-${sourceUnitId}.json`),
+    constraints: { auto_commit: false, deploy: false }, publicationSafe: false,
+    publicationBoundary: { ownerJoined: false, checkedAt: '2026-09-24T12:00:00Z',
+      protectedSnapshots: [{ id: 'fixture-worker', state: 'active' }] } };
+}
 async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code, code); }
 
 (async () => {
+  const sourceRecord = { source_unit: 'T-20260924000000-source', extraction_id: 'source-extraction',
+    extracted_at: '2026-09-24T12:00:00Z', dispatch_id: 'source-dispatch', model: 'gpt-6-luna', effort: 'medium' };
+  const sourceA = unit.memorySourceContext({ summaryContent: 'summary A' }, sourceRecord);
+  const sourceB = unit.memorySourceContext({ summaryContent: 'summary B' }, sourceRecord);
+  assert.match(sourceA.source.sourceFingerprint, /^[0-9a-f]{64}$/);
+  assert.notStrictEqual(sourceA.source.sourceFingerprint, sourceB.source.sourceFingerprint);
+  for (const sourceUnitId of ['M-20260924223724-route', 'TASK-001']) {
+    assert.strictEqual(unit.locations({ unitType: 'memory-extract', sourceUnitId }).sourceUnit, sourceUnitId);
+  }
+
   for (const host of ['claude', 'codex']) for (const engine of ['claude', 'codex']) {
     for (const unitType of [...ARTIFACT_UNITS, 'plan-slice', 'execute-task', 'review-challenger', 'review-advocate', 'review-rebuttal']) {
       assert.strictEqual(evaluateDispatchGuard({ host_runtime: host, worker_engine: engine, unit_type: unitType }).dispatch_allowed, true);
@@ -123,6 +155,209 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert(!events.includes('worker-engine-fallback'));
     write(path.join(cwd, p.artifacts[0].path), 'another writer');
     await rejects(() => unit.runUnitSidecar(r), 'artifact-conflict');
+  }
+  // Memory uses the existing read-only transports but has a specialized owner
+  // publisher. Inference may finish early; the ready receipt defers canonical
+  // writes until the owner confirms the protected-snapshot boundary is clear.
+  for (const engine of ['claude', 'codex']) for (const identity of [
+    { sourceUnitId: 'T01', milestoneId: 'M001' },
+    { sourceUnitId: 'T-20260924010101-loose-memory' },
+  ]) {
+    const dir = setup(), req = memoryRequest(dir, engine, identity.sourceUnitId, identity.milestoneId);
+    const extraction = memoryPayload(`${engine}/${identity.sourceUnitId} is published only by the owner.`);
+    write(path.join(dir, 'payload.json'), extraction);
+    let codexCalls = 0;
+    xllm.invokeCodexAppServer = async options => {
+      codexCalls++;
+      assert.strictEqual(options.sandbox, 'read-only');
+      assert.strictEqual(options.model, req.route.model);
+      assert.strictEqual(options.effort, req.route.effort);
+      assert(!options.prompt.includes('publishExtraction('));
+      return { finalText: JSON.stringify(extraction) };
+    };
+    const deferred = await unit.runUnitSidecar(req);
+    assert.strictEqual(deferred.publication.status, 'deferred');
+    const sidecarEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(event => event.event === 'sidecar-unit');
+    assert(sidecarEvents.some(event => event.unit === `memory-extract/${identity.sourceUnitId}`));
+    const memoryDir = path.join(dir, '.gsd', 'memory');
+    assert.strictEqual(fs.existsSync(memoryDir), false);
+    req.publicationSafe = true;
+    // A boolean alone cannot bypass the owner boundary check.
+    const stillDeferred = await unit.runUnitSidecar(req);
+    assert.strictEqual(stillDeferred.publication.status, 'deferred');
+    req.publicationBoundary = { ownerJoined: true, checkedAt: '2026-09-24T12:01:00Z',
+      protectedSnapshots: [{ id: 'fixture-worker', state: 'ended' }] };
+    const written = await unit.runUnitSidecar(req);
+    assert.strictEqual(written.publication.status, 'written');
+    assert.strictEqual(fs.existsSync(memoryDir), true);
+    const replay = await unit.runUnitSidecar(req);
+    assert.strictEqual(replay.publication.status, 'noop');
+    assert.strictEqual(replay.publication.reason, 'replay');
+    if (engine === 'codex') assert.strictEqual(codexCalls, 1);
+    else assert.strictEqual(fs.readFileSync(path.join(dir, 'invocations.txt'), 'utf8'), 'spawn\n');
+    const receipt = fs.readFileSync(`${req.resultFile}.receipt.json`, 'utf8');
+    assert(!receipt.includes(token));
+    assert(!receipt.includes('contextRoot'));
+    await rejects(() => unit.runUnitSidecar({ ...req, summaryContent: 'unrelated request' }), 'dispatch-identity-conflict');
+  }
+
+  // Terminal memory shapes remain truthful: empty and partial publish nothing,
+  // while malformed output and authentication failure never reach the store.
+  {
+    const dir = setup(), emptyReq = memoryRequest(dir, 'codex', 'T-20260924030303-empty-memory');
+    const empty = { schema_version: 1, status: 'done', summary: 'No durable fact', questions: [], facts: [], events: [] };
+    xllm.invokeCodexAppServer = async () => ({ finalText: JSON.stringify(empty) });
+    emptyReq.publicationSafe = true;
+    emptyReq.publicationBoundary = { ownerJoined: true, checkedAt: '2026-09-24T12:03:00Z', protectedSnapshots: [] };
+    const emptyResult = await unit.runUnitSidecar(emptyReq);
+    assert.strictEqual(emptyResult.publication.status, 'noop');
+    assert.strictEqual(emptyResult.publication.reason, 'empty-extraction');
+    assert.strictEqual(fs.existsSync(path.join(dir, '.gsd', 'memory')), false);
+
+    const partialReq = memoryRequest(dir, 'codex', 'T-20260924030304-partial-memory');
+    const partialMemory = { schema_version: 1, status: 'partial', summary: 'Need context',
+      questions: ['Which invariant is durable?'], facts: [], events: [] };
+    xllm.invokeCodexAppServer = async () => ({ finalText: JSON.stringify(partialMemory) });
+    partialReq.publicationSafe = true;
+    partialReq.publicationBoundary = { ownerJoined: true, checkedAt: '2026-09-24T12:04:00Z', protectedSnapshots: [] };
+    const partialResult = await unit.runUnitSidecar(partialReq);
+    assert.strictEqual(partialResult.status, 'partial');
+    assert.strictEqual(partialResult.publication.status, 'noop');
+
+    const invalidReq = memoryRequest(dir, 'codex', 'T-20260924030305-invalid-memory');
+    xllm.invokeCodexAppServer = async () => ({ finalText: JSON.stringify({ ...empty, path: '.gsd/STATE.md' }) });
+    await rejects(() => unit.runUnitSidecar(invalidReq), 'MEMORY_EXTRACTION_INVALID');
+    const invalidReceipt = fs.readFileSync(`${invalidReq.resultFile}.receipt.json`, 'utf8');
+    assert(!invalidReceipt.includes('.gsd/STATE.md'));
+
+    const authDir = setup(), authReq = memoryRequest(authDir, 'claude', 'T-20260924030306-auth-memory');
+    write(path.join(authDir, 'payload.json'), { failure: 'auth' });
+    await rejects(() => unit.runUnitSidecar(authReq), 'claude-auth-failed');
+    assert(!fs.readFileSync(authReq.resultFile, 'utf8').includes(token));
+    assert.strictEqual(fs.existsSync(path.join(authDir, '.gsd', 'memory')), false);
+  }
+
+  // Native memory consumes the same envelope and durable owner acceptance path.
+  // A policy skip returns before the injected provider callback is reached.
+  {
+    const dir = setup();
+    write(path.join(dir, '.gsd/forge-prefs.jsonc'), {
+      tier_models: { light: 'gpt-6-luna', standard: 'gpt-6-luna', heavy: 'gpt-6-luna', max: 'gpt-6-luna' },
+      effort: { 'memory-extract': 'medium' },
+    });
+    const route = resolveDispatch({ cwd: dir, unitType: 'memory-extract', hostRuntime: 'codex',
+      workerEngine: 'native', workerMode: 'native' });
+    const base = { cwd: dir, contextRoot: dir, sourceUnitId: 'T-20260924020202-native-memory',
+      sourceUnitType: 'execute-task', workflowId: 'native-memory-workflow', dispatchId: 'native-memory-dispatch',
+      extractionId: 'native-memory-extraction', sourceFingerprint: 'native-source-sha256', route,
+      hostRuntime: 'codex', activeCapabilities: { available: true, tool: 'spawn_agent', source: 'fixture',
+        models: ['gpt-6-luna'], reasoning_efforts: ['medium'], fork_turns: ['none'] },
+      resultFile: path.join(root, 'native-memory-result.json'), publicationSafe: true,
+      publicationBoundary: { ownerJoined: true, checkedAt: '2026-09-24T12:02:00Z', protectedSnapshots: [] } };
+    let calls = 0;
+    const skipped = await unit.runNativeMemory({ ...base, policy: { decision: 'skip', reason: 'fixture-skip' } }, async () => { calls++; });
+    assert.strictEqual(skipped.status, 'skipped');
+    assert.strictEqual(skipped.provider_called, false);
+    assert.strictEqual(calls, 0);
+    const taskNames = [];
+    const delivered = await unit.runNativeMemory({ ...base, policy: { decision: 'extract' } }, async args => {
+      calls++;
+      assert.strictEqual(args.model, 'gpt-6-luna');
+      assert.strictEqual(args.reasoning_effort, 'medium');
+      assert.strictEqual(args.fork_turns, 'none');
+      assert.match(args.task_name, /^[a-z0-9_]+$/);
+      taskNames.push(args.task_name);
+      return memoryPayload('Native and sidecar results share the owner publication path.');
+    });
+    assert.strictEqual(delivered.status, 'done');
+    assert.strictEqual(delivered.publication.status, 'written');
+    assert.strictEqual(delivered.telemetry.model_observed, null);
+    assert.strictEqual(calls, 1);
+    const nativeReplay = await unit.runNativeMemory({ ...base, policy: { decision: 'extract' } }, async () => {
+      calls++;
+      throw new Error('provider must not run on ready replay');
+    });
+    assert.strictEqual(nativeReplay.publication.status, 'noop');
+    assert.strictEqual(nativeReplay.provider_called, false);
+    assert.strictEqual(nativeReplay.telemetry.model_resolved, 'gpt-6-luna');
+    assert.strictEqual(nativeReplay.telemetry.model_argument, 'gpt-6-luna');
+    assert.strictEqual(nativeReplay.telemetry.model_observed, null);
+    assert.strictEqual(calls, 1);
+    const secondDispatch = { ...base, dispatchId: 'native-memory-dispatch-2',
+      extractionId: 'native-memory-extraction-2', resultFile: path.join(root, 'native-memory-result-2.json'),
+      policy: { decision: 'extract' } };
+    const secondDelivered = await unit.runNativeMemory(secondDispatch, async args => {
+      calls++;
+      assert.match(args.task_name, /^[a-z0-9_]+$/);
+      taskNames.push(args.task_name);
+      return memoryPayload('A second dispatch keeps a distinct native task identity.');
+    });
+    assert.strictEqual(secondDelivered.status, 'done');
+    assert.strictEqual(secondDelivered.publication.status, 'written');
+    assert.notStrictEqual(taskNames[0], taskNames[1]);
+    assert.strictEqual(calls, 2);
+    const secondReplay = await unit.runNativeMemory(secondDispatch, async () => {
+      calls++;
+      throw new Error('provider must not run on second ready replay');
+    });
+    assert.strictEqual(secondReplay.publication.status, 'noop');
+    assert.strictEqual(secondReplay.provider_called, false);
+    assert.strictEqual(calls, 2);
+    const unsupported = await unit.runNativeMemory({ ...base, dispatchId: 'unsupported-native',
+      resultFile: path.join(root, 'unsupported-native-memory.json'),
+      activeCapabilities: { ...base.activeCapabilities, models: ['gpt-5.6-sol'] },
+      policy: { decision: 'extract' } }, async () => { calls++; });
+    assert.strictEqual(unsupported.reason_code, 'native-model-unsupported');
+    assert.strictEqual(unsupported.provider_called, false);
+    await assert.rejects(() => unit.runNativeMemory({ ...base, dispatchId: 'inside-target',
+      resultFile: path.join(dir, 'inside-result.json'), policy: { decision: 'extract' } },
+    async () => { calls++; }), /outside the workspace/);
+    assert.strictEqual(calls, 2);
+    const interrupted = { ...base, dispatchId: 'interrupted-native',
+      extractionId: 'interrupted-native', resultFile: path.join(root, 'interrupted-native-memory.json'),
+      policy: { decision: 'extract' } };
+    write(`${interrupted.resultFile}.receipt.json`, { phase: 'started',
+      fingerprint: unit.nativeMemoryFingerprint(interrupted), dispatch_id: interrupted.dispatchId });
+    const interruptedResult = await unit.runNativeMemory(interrupted, async () => { calls++; });
+    assert.strictEqual(interruptedResult.reason_code, 'native-memory-attempt-interrupted');
+    assert.strictEqual(interruptedResult.provider_called, false);
+    assert.strictEqual(calls, 2);
+  }
+  {
+    const dir = setup();
+    write(path.join(dir, '.gsd/forge-prefs.jsonc'), {
+      tier_models: { light: 'claude-sonnet-5', standard: 'claude-sonnet-5', heavy: 'claude-opus-5', max: 'claude-fable-5' },
+      effort: { 'memory-extract': 'medium' },
+    });
+    const route = resolveDispatch({ cwd: dir, unitType: 'memory-extract', hostRuntime: 'claude',
+      workerEngine: 'native', workerMode: 'native' });
+    let calls = 0;
+    const delivered = await unit.runNativeMemory({ cwd: dir, contextRoot: dir, route,
+      hostRuntime: 'claude', sourceUnitId: 'T-20260924040404-claude-native', sourceUnitType: 'execute-task',
+      workflowId: 'claude-native-workflow', dispatchId: 'claude-native-dispatch',
+      extractionId: 'claude-native-extraction', sourceFingerprint: 'claude-native-source',
+      activeCapabilities: { available: true, tool: 'Agent', source: 'fixture-active-tool',
+        model_aliases: ['sonnet'], effort_transports: ['prompt-header'] },
+      effortBinding: { transport: 'prompt-header', effort: 'medium', source: 'rendered-memory-prompt' },
+      resultFile: path.join(root, 'claude-native-memory-result.json'), policy: { decision: 'extract' },
+      publicationSafe: true, publicationBoundary: { ownerJoined: true,
+        checkedAt: '2026-09-24T12:05:00Z', protectedSnapshots: [] } }, async args => {
+      calls++;
+      assert.strictEqual(args.model, 'sonnet');
+      assert.strictEqual(args.subagent_type, 'forge-memory');
+      assert.match(args.prompt, /reasoning_effort:\s*medium/);
+      return memoryPayload('Claude native effort is bound in the rendered prompt contract.');
+    });
+    assert.strictEqual(delivered.status, 'done');
+    assert.strictEqual(delivered.publication.status, 'written');
+    assert.strictEqual(delivered.telemetry.model_resolved, 'claude-sonnet-5');
+    assert.strictEqual(delivered.telemetry.model_argument, 'sonnet');
+    assert.strictEqual(delivered.telemetry.model_observed, null);
+    assert.strictEqual(delivered.telemetry.effort_argument, null);
+    assert.strictEqual(delivered.telemetry.effort_transport, 'prompt-header');
+    assert.strictEqual(delivered.telemetry.effort_transport_value, 'medium');
+    assert.strictEqual(calls, 1);
   }
   // Delivery publication uses exact, unit-scoped paths for every closing unit.
   // Exercise the real validator and durable materializer without a provider.

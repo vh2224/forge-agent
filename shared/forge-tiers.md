@@ -56,22 +56,16 @@ The four tiers map to four model aliases. Operators can override the model for a
 > omit the `thinking:` line entirely), even if the phase prefs say `disabled`. The shared resolver
 > (`scripts/forge-dispatch-resolve.js` → `thinking_header`) is the single implementation of this rule.
 
-> **ID→alias map — the `Agent()` `model:` param only accepts aliases.** The `model` parameter of the
-> `Agent` tool accepts only the four short aliases (`haiku|sonnet|opus|fable`) — it does **not** accept a
-> full model ID string (e.g. `claude-opus-5`). The "Default Model ID" column above is the concrete
-> ID an operator writes into `tier_models.<tier>` in `forge-agent-prefs.jsonc`; before that ID reaches
-> `Agent()`, the orchestrator must translate it to its alias. This translation is a single canonical
-> map, implemented once in [`scripts/forge-model-alias.js`](../scripts/forge-model-alias.js)
-> (`modelToAlias(id)` — plain lowercase substring match, checked in order `fable → haiku → sonnet →
-> opus`; the `[1m]` context-window suffix needs no special-casing since substring search still finds
-> the base name). **This file and `shared/forge-dispatch.md` only describe and reference that helper —
-> neither reimplements the map as a second, driftable table.** Resolution rule: `Agent(model: <alias>)`
-> is dispatched with the alias, never the raw ID. When an operator sets `tier_models.<tier>` to an ID
-> the map does not recognize, `modelToAlias` returns `{ alias: null, mapped: false }`; the orchestrator
-> **omits** the `model:` param entirely in that case (degrading to the invoked agent's own frontmatter
-> `model:` default) and logs a warning — it never passes the unmapped ID straight through, since
-> `Agent()` would reject it. This same map is reused by S04 (advocate override) — see
-> [Cross-references](#cross-references).
+> **Host-native argument adaptation.** Resolution retains the configured full
+> model ID and effort. `scripts/forge-native-invocation.js` consumes that
+> authoritative result and active tool capabilities; it never selects a model.
+> Codex receives the full supported ID, separate `reasoning_effort`, and
+> `fork_turns:none` (or an explicitly supported positive history). Claude alone
+> receives the alias accepted by its native adapter and an explicit supported
+> effort binding. Unsupported model, effort, alias, fork mode, or tool is a
+> named refusal. The caller never omits an explicit override to fall back to
+> agent frontmatter. Requested, resolved, invocation argument, and observed
+> applied values remain separate; applied is unknown without trusted readback.
 
 ---
 
@@ -90,10 +84,11 @@ The four tiers map to four model aliases. Operators can override the model for a
 `readTierChain(tier, cwd)` returns `[{ id, alias, mapped }, ...]` — every member annotated with its
 `Agent()`-alias via the shared [`forge-model-alias.js`](../scripts/forge-model-alias.js) map (never
 reimplemented here or in `forge-dispatch.md`, matching the ID→alias pattern documented above).
-`nextAfter(chain, id)` returns the next **mapped** member after `id`, or `''` when the chain is
-exhausted — a member with no known alias (`mapped: false`) is skipped, not returned, and the
-orchestrator logs a `model_applied: null` warning for it (same degrade rule as the ID→alias map
-above: never pass an unmapped ID straight to `Agent()`).
+`nextAfter(chain, id)` returns the next authorized member after `id`, or `''`
+when the chain is exhausted. The active invocation adapter then validates that
+member against the actual host tool. A missing Claude alias cannot make a GPT
+member disappear before Codex capability validation, and a refusal cannot be
+reported as provider-applied.
 
 ### Two distinct ladders — do not conflate
 

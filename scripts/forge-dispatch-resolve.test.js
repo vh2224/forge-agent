@@ -234,14 +234,61 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
-  runCase('explicit workers.execute-task claude is not overridden by a GPT tier model', () => {
+  runCase('memory-extract preserves Luna plus medium effort on native and remote directions', () => {
+    const f = mkFixture({ prefsJsonc: '{"tier_models":{"light":"gpt-6-luna"},"effort":{"memory-extract":"medium"}}' });
+    const native = dispatch(f, { unitType: 'memory-extract', hostRuntime: 'codex' });
+    assertEqual(native.model, 'gpt-6-luna', 'native memory keeps the configured full model id');
+    assertEqual(native.effort, 'medium', 'native memory keeps configured medium effort');
+    assertEqual(native.effort_reason, 'prefs.effort:memory-extract', 'configured effort source is explicit');
+    assertEqual(native.worker_mode, 'native', 'Codex host uses its native memory worker');
+    assertEqual(native.dispatch_allowed, true, 'native memory capability is supported');
+    assertEqual(native.model_requested, 'gpt-6-luna', 'requested model is explicit');
+    assertEqual(native.model_resolved, 'gpt-6-luna', 'resolved model is explicit');
+    assertEqual(native.model_argument, null, 'resolver does not fabricate invocation arguments');
+    assertEqual(native.model_observed, null, 'resolver has no provider readback');
+
+    const remote = dispatch(f, { unitType: 'memory-extract', hostRuntime: 'claude' });
+    assertEqual(remote.model, 'gpt-6-luna', 'remote memory preserves the same configured model');
+    assertEqual(remote.effort, 'medium', 'remote memory preserves the same configured effort');
+    assertEqual(remote.worker_mode, 'sidecar', 'Claude host uses the declared Codex transport');
+    assertEqual(remote.dispatch_allowed, true, 'remote memory capability is supported');
+    cleanup(f);
+  });
+
+  runCase('unsupported sidecar unit is refused without changing model family', () => {
+    const f = mkFixture({ prefsJsonc: '{"tier_models":{"standard":"gpt-6-sol"}}' });
+    const r = dispatch(f, { unitType: 'unknown-preparation', hostRuntime: 'claude' });
+    assertEqual(r.model, 'gpt-6-sol', 'unsupported unit still preserves the configured GPT model');
+    assertEqual(r.dispatch_engine, 'codex', 'resolved family remains Codex');
+    assertEqual(r.dispatch_allowed, false, 'missing delivery capability refuses dispatch');
+    assertEqual(r.dispatch_reason_code, 'unsupported-sidecar-unit', 'refusal names the missing capability');
+    cleanup(f);
+  });
+
+  runCase('explicit worker/model family conflict preserves both inputs and refuses dispatch', () => {
     const f = mkFixture({ prefsJsonc: '{"workers":{"execute-task":"claude"},"tier_models":{"standard":"gpt-5.6-sol"}}' });
     const r = dispatch(f, { unitType: 'execute-task' });
     assertEqual(r.engine, 'claude', 'explicit worker engine wins');
     assertEqual(r.dispatch_engine, 'claude', 'explicit Claude worker never enters the sidecar');
-    assertEqual(r.model, 'claude-sonnet-5', 'model is applicable to the explicit Claude worker');
-    assertEqual(r.alias, 'sonnet', 'Agent receives the actual selected model alias');
-    assertEqual(r.engine_reason, 'workers.execute-task:claude|model-family-substituted', 'reason names both the pin and substitution');
+    assertEqual(r.model, 'gpt-5.6-sol', 'configured model is preserved without family substitution');
+    assertEqual(r.alias, null, 'no Claude alias is fabricated for the GPT model');
+    assertEqual(r.config_ok, false, 'contradictory explicit configuration is diagnosed');
+    assertEqual(r.config_conflicts[0].code, 'configured-engine-model-family-conflict', 'conflict has a stable code');
+    assertEqual(r.dispatch_allowed, false, 'contradictory configuration is refused before invocation');
+    assertEqual(r.dispatch_reason_code, 'engine-model-config-conflict', 'refusal has a stable reason');
+    cleanup(f);
+  });
+
+  runCase('explicit Codex worker with a GPT tier model resolves a native Codex dispatch', () => {
+    const f = mkFixture({ prefsJsonc: '{"workers":{"execute-task":"codex"},"tier_models":{"standard":"gpt-6-sol"}}' });
+    const r = dispatch(f, { unitType: 'execute-task', hostRuntime: 'codex' });
+    assertEqual(r.engine, 'codex', 'explicit Codex worker remains the selected engine');
+    assertEqual(r.model, 'gpt-6-sol', 'the configured GPT model is preserved');
+    assertEqual(r.dispatch_engine, 'codex', 'Codex worker token normalizes to Codex dispatch');
+    assertEqual(r.resolved_worker_engine, 'codex', 'runtime posture targets the Codex worker');
+    assertEqual(r.worker_mode, 'native', 'same-host Codex dispatch is native');
+    assertEqual(r.config_ok, true, 'matching worker and model have no configuration conflict');
+    assertEqual(r.dispatch_allowed, true, 'matching native Codex dispatch is allowed');
     cleanup(f);
   });
 
@@ -252,9 +299,22 @@ withHermeticHome((cliEnv) => {
     });
     const r = dispatch(f, { unitType: 'execute-task' });
     assertEqual(r.route_source, 'frontmatter', 'tier remains a frontmatter selection for reporting');
-    assertEqual(r.model, 'claude-sonnet-5', 'tier-only metadata cannot make the Claude worker consume GPT');
+    assertEqual(r.model, 'gpt-5.6-sol', 'tier model is preserved without provider substitution');
     assertEqual(r.engine, 'claude', 'explicit worker engine still wins');
     assertEqual(r.dispatch_engine, 'claude', 'no external writer is activated behind the isolation pin');
+    assertEqual(r.dispatch_allowed, false, 'the explicit contradiction is refused');
+    cleanup(f);
+  });
+
+  runCase('routing precedence supersedes an opposite legacy workers preference without conflict', () => {
+    const f = mkFixture({ prefsJsonc: '{"workers":{"execute-task":"claude"},"routing":{"default":{"executor":{"standard":["gpt-6-luna"]}}}}' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.route_source, 'routing', 'routing is the effective higher-precedence source');
+    assertEqual(r.model, 'gpt-6-luna', 'the routed model is preserved');
+    assertEqual(r.dispatch_engine, 'codex', 'effective engine follows the routed model');
+    assertEqual(r.config_ok, true, 'shadowed legacy worker preference is not an effective conflict');
+    assertEqual(r.config_conflicts.length, 0, 'no false conflict is reported');
+    assertEqual(r.dispatch_allowed, true, 'supported routed sidecar remains dispatchable');
     cleanup(f);
   });
 
@@ -328,7 +388,7 @@ withHermeticHome((cliEnv) => {
       `PLAN_TIER='${contract.frontmatter_tier || ''}'`,
       `PLAN_WORKER='${contract.plan_worker || ''}'`,
       `ROUTING_PRESENT='${contract.routing_present ? 'true' : 'false'}'`,
-      `MODEL_APPLIED_JSON='${contract.alias ? JSON.stringify(contract.alias) : 'null'}'`,
+      `MODEL_APPLIED_JSON='null'`,
       `unit_effort='${contract.effort}'`,
     ];
     assertEqual(lines.slice(0, preexistingLines.length).join('\n'), preexistingLines.join('\n'),
@@ -388,6 +448,13 @@ withHermeticHome((cliEnv) => {
     assertEqual(r.degraded, true, 'degraded contracts are marked as such');
     assertEqual(r.effort_reason, 'degraded:routing-runtime-error',
       'effort_reason names the crash, not unit-type:<x> — the unit type did not decide this effort');
+    assertEqual(r.effort, '', 'degraded resolver does not invent an effort');
+    assertEqual(r.model_requested, null, 'degraded resolver does not invent a requested model');
+    assertEqual(r.model_resolved, null, 'degraded resolver does not invent a resolved model');
+    assertEqual(r.model, '', 'legacy model slot remains explicitly unknown');
+    assertEqual(r.engine, '', 'degraded resolver does not choose a fallback engine');
+    assertEqual(r.config_ok, false, 'unknown configuration is fail-closed');
+    assertEqual(r.prefs_ok, false, 'preference state is not claimed healthy after resolver failure');
   });
 
   runCase('degraded contracts remain parseable and refuse delivery without fallback', () => {
@@ -398,7 +465,8 @@ withHermeticHome((cliEnv) => {
     const roundTrip = JSON.parse(JSON.stringify(degraded));
     assertEqual(roundTrip.degraded, true, 'degraded verdict survives a JSON round trip');
     assertEqual(roundTrip.host_runtime, 'codex', 'degraded verdict keeps the requested Codex host');
-    assertEqual(roundTrip.resolved_worker_engine, 'claude', 'degraded route still resolves the effective Claude worker');
+    assertEqual(roundTrip.resolved_worker_engine, '', 'degraded route selects no worker');
+    assertEqual(roundTrip.dispatch_engine, '', 'degraded route selects no dispatch engine');
     assertEqual(roundTrip.dispatch_allowed, false, 'degradation does not fail open over the enforcing leg');
     assertEqual(roundTrip.dispatch_reason_code, 'routing-runtime-error', 'degradation uses the guard reason');
     assertEqual(roundTrip.dispatch_posture, 'enforce', 'degradation keeps the frozen enforcing posture');
@@ -407,10 +475,10 @@ withHermeticHome((cliEnv) => {
       'degradation includes an actionable refusal hint', roundTrip.dispatch_hint);
   });
 
-  runCase('degraded contracts publish runtime exports for allowed and refused payloads', () => {
-    const allowed = degradedContract(['--unit-type', 'execute-task']);
-    const refused = degradedContract(['--unit-type', 'execute-task', '--host-runtime', 'unknown-host']);
-    for (const [label, contract] of [['allowed', allowed], ['refused', refused]]) {
+  runCase('all degraded contracts publish fail-closed runtime exports', () => {
+    const omittedHost = degradedContract(['--unit-type', 'execute-task']);
+    const namedHost = degradedContract(['--unit-type', 'execute-task', '--host-runtime', 'codex']);
+    for (const [label, contract] of [['omitted-host', omittedHost], ['named-host', namedHost]]) {
       const cli = spawnSync('node', [SCRIPT, '--shell-exports'], {
         encoding: 'utf8', env: cliEnv, input: JSON.stringify(contract),
       });
@@ -429,6 +497,7 @@ withHermeticHome((cliEnv) => {
       assertEqual(values.DISPATCH_DECISION, `'${contract.dispatch_decision}'`, `${label} export carries the decision`);
       assertEqual(values.RESOLVED_WORKER_ENGINE, `'${contract.resolved_worker_engine}'`, `${label} export carries resolved worker`);
       assertEqual(values.SIDECAR_DECLARED, `'${String(contract.sidecar_declared)}'`, `${label} export carries sidecar declaration`);
+      assertEqual(contract.dispatch_allowed, false, `${label} can never authorize dispatch`);
     }
   });
 
@@ -616,7 +685,8 @@ withHermeticHome((cliEnv) => {
     assertEqual(r.route_source, 'frontmatter', 'frontmatter still wins the source label');
     assertEqual(r.model, 'claude-opus-5', 'model comes from tier heavy, not from the token');
     assertEqual(r.alias, 'opus', 'alias is mapped — Agent() gets a real model:');
-    assertEqual(r.model_applied, 'opus', 'model_applied is the mapped alias');
+    assertEqual(r.model_applied, null, 'alias mapping is not provider readback');
+    assertEqual(r.model_observed, null, 'provider-applied model stays unknown before invocation');
     assertEqual(r.effort, 'high', 'heavy tier keeps high effort');
     assert(r.chain.length === 1 && r.chain[0].id === 'claude-opus-5',
       'chain carries the tier model, not the family token', JSON.stringify(r.chain));
@@ -758,7 +828,7 @@ withHermeticHome((cliEnv) => {
       route_source: 'tier_models',
       chain: [{ id: 'claude-sonnet-5', alias: 'sonnet', mapped: true, engine: 'claude' }],
       chain_len: 1, reason: 'unit-type:execute-task', effort: 'low', effort_reason: 'unit-type:execute-task',
-      model_applied: 'sonnet', engine_reason: 'default:claude', workers_engine: 'claude', workers_timeout: 1800,
+      model_applied: null, engine_reason: 'default:claude', workers_engine: 'claude', workers_timeout: 1800,
       codex_model: '', plan_worker: '', domain_input: 'default', frontmatter_tier: '', thinking_header: '',
       routing_present: false, dispatch_engine: 'claude', sidecar_model: '', prefs_ok: true, prefs_errors: [],
     };
