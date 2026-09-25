@@ -5792,7 +5792,7 @@ function smokePrefsCatalog() {
     ['review.rounds', 1],
     ['evidence.mode', 'lenient'],
     ['tier_models.standard', 'claude-sonnet-5'],
-    ['effort.execute-task', 'low'],
+    ['effort.execute-task', 'medium'],
     ['forge_isolation.file_locks', true],
     ['routing', {}],
   ];
@@ -6415,7 +6415,7 @@ function smokeSkillsCutover() {
     ['evidence.mode', 'lenient'],
     ['workers.execute-task', 'claude'],
     ['plan_gate.interactive', 'always'],
-    ['effort.execute-task', 'low'],
+    ['effort.execute-task', 'medium'],
     ['tier_models.standard', 'claude-sonnet-5'],
     ['auto_commit', true],
     ['repo_path', ''],
@@ -7068,7 +7068,7 @@ function smokeDispatchResolve() {
     assert(result.route_source === 'tier_models', '(a) parity: no routing: block -> route_source === tier_models', JSON.stringify(result));
     assert(result.model === 'claude-sonnet-5', '(a) parity: default standard-tier model === claude-sonnet-5 (canonical table)', JSON.stringify(result));
     assert(result.alias === 'sonnet', '(a) parity: alias === sonnet', JSON.stringify(result));
-    assert(result.effort === 'low', '(a) parity: default execute-task effort === low', JSON.stringify(result));
+    assert(result.effort === 'medium', '(a) parity: default execute-task effort === medium', JSON.stringify(result));
     assert(result.engine === 'claude', '(a) parity: default engine === claude', JSON.stringify(result));
     cleanup(dir);
   });

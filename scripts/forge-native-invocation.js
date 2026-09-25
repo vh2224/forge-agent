@@ -5,6 +5,10 @@
 // module does not choose a model and does not own a supported-model catalogue.
 // The caller supplies the active tool capabilities observed for this session.
 
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
 const { modelToAlias } = require('./forge-model-alias.js');
 
 function text(value) {
@@ -77,19 +81,70 @@ function baseTelemetry(dispatch, argument, effortArgument, capabilities) {
     effort_transport: null,
     effort_transport_value: null,
     effort_transport_source: null,
+    effort_binding_observed: null,
+    effort_binding_observed_source: null,
+    effort_binding_observed_fingerprint: null,
+    effort_applied: null,
+    effort_applied_source: null,
     capabilities_source: text(capabilities.source) || 'caller-supplied',
   };
 }
 
-function promptWithEffortHeader(prompt, effort, source) {
-  return [
-    '<!-- forge:native-effort',
-    `transport: prompt-header`,
-    `reasoning_effort: ${effort}`,
-    `source: ${source}`,
-    '-->',
-    prompt,
-  ].join('\n');
+function frontmatterScalar(frontmatter, key) {
+  const match = frontmatter.match(new RegExp(`^${key}\\s*:\\s*(.+?)\\s*$`, 'm'));
+  if (!match) return '';
+  const value = match[1].trim();
+  if ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))) return value.slice(1, -1);
+  return value;
+}
+
+function observeClaudeAgentBinding(options) {
+  const input = options || {};
+  const agentType = text(input.agentType || input.agent_type);
+  const agentPath = text(input.agentPath || input.agent_path);
+  const suppliedFingerprint = text(input.sourceFingerprint || input.source_fingerprint)
+    .replace(/^sha256:/i, '').toLowerCase();
+  if (!agentType || !agentPath || !/^[0-9a-f]{64}$/.test(suppliedFingerprint)) {
+    return refusal('claude', 'native-effort-binding-evidence-missing',
+      'Claude frontmatter observation requires agentType, agentPath and its SHA-256 fingerprint.');
+  }
+  let realPath;
+  let source;
+  try {
+    realPath = fs.realpathSync(agentPath);
+    const stat = fs.statSync(realPath);
+    if (!stat.isFile()) throw new Error('not-file');
+    source = fs.readFileSync(realPath, 'utf8');
+  } catch (_) {
+    return refusal('claude', 'native-effort-binding-source-unreadable',
+      'The supplied Claude agent definition could not be read as a regular file.');
+  }
+  const observedFingerprint = crypto.createHash('sha256').update(source).digest('hex');
+  if (observedFingerprint !== suppliedFingerprint) {
+    return refusal('claude', 'native-effort-binding-fingerprint-mismatch',
+      'The supplied Claude agent definition changed after its evidence fingerprint was captured.');
+  }
+  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) {
+    return refusal('claude', 'native-effort-binding-frontmatter-invalid',
+      'The supplied Claude agent definition has no bounded YAML frontmatter.');
+  }
+  const observedAgentType = frontmatterScalar(match[1], 'name');
+  const observedEffort = frontmatterScalar(match[1], 'effort');
+  if (observedAgentType !== agentType || !observedEffort) {
+    return refusal('claude', 'native-effort-binding-agent-mismatch',
+      `The observed agent frontmatter does not bind ${agentType} to an effort.`);
+  }
+  return {
+    ok: true,
+    transport: 'agent-frontmatter',
+    agent_type: observedAgentType,
+    effort: observedEffort,
+    source: realPath,
+    source_fingerprint: `sha256:${observedFingerprint}`,
+    observed: true,
+  };
 }
 
 function buildNativeInvocation(options) {
@@ -184,54 +239,43 @@ function buildNativeInvocation(options) {
     return refusal(host, 'native-model-unsupported',
       `The active Claude tool did not report support for alias ${alias}.`);
   }
-  const effortBinding = input.effortBinding || input.effort_binding;
-  const effortTransport = effortBinding && typeof effortBinding === 'object'
-    ? text(effortBinding.transport) : '';
-  const boundEffort = effortBinding && typeof effortBinding === 'object'
-    ? text(effortBinding.effort) : '';
-  const bindingSource = effortBinding && typeof effortBinding === 'object'
-    ? text(effortBinding.source) : '';
-  if (!effortTransport || !boundEffort || !bindingSource) {
+  const effortEvidence = input.effortBinding || input.effort_binding;
+  const effortTransport = effortEvidence && typeof effortEvidence === 'object'
+    ? text(effortEvidence.transport) : '';
+  if (!effortTransport) {
     return refusal(host, 'native-effort-binding-missing',
-      'Claude invocation requires caller-confirmed effort transport, value and source.');
+      'Claude invocation requires a read-only observation of its real agent definition.');
   }
-  if (/\r|\n/.test(bindingSource)) {
-    return refusal(host, 'native-effort-binding-invalid',
-      'Claude effort binding source must be a single-line identifier.');
+  if (effortTransport === 'prompt-header') {
+    return refusal(host, 'native-effort-prompt-header-not-api',
+      'Prompt text is not a Claude native reasoning-effort API or observed agent binding.');
   }
-  if (boundEffort !== effort) {
-    return refusal(host, 'native-effort-binding-mismatch',
-      `Claude effort binding ${boundEffort} does not match resolved effort ${effort}.`);
+  if (effortTransport !== 'agent-frontmatter') {
+    return refusal(host, 'native-effort-transport-unimplemented',
+      `Claude effort transport ${effortTransport} has no native adapter.`);
   }
   if (!stringSet(caps.effort_transports).has(effortTransport)) {
     return refusal(host, 'native-effort-transport-unsupported',
       `The active Claude tool did not report effort transport ${effortTransport}.`);
   }
-  let boundPrompt = prompt;
-  let transportSource = bindingSource;
-  if (effortTransport === 'prompt-header') {
-    boundPrompt = promptWithEffortHeader(prompt, boundEffort, bindingSource);
-  } else if (effortTransport === 'agent-frontmatter') {
-    const observedBinding = Array.isArray(caps.effort_bindings)
-      ? caps.effort_bindings.find((candidate) => candidate && typeof candidate === 'object' &&
-        candidate.observed === true && text(candidate.transport) === effortTransport &&
-        text(candidate.agent_type) === agentType && text(candidate.effort) === boundEffort &&
-        text(candidate.source) === bindingSource)
-      : null;
-    if (!observedBinding) {
-      return refusal(host, 'native-effort-binding-unverified',
-        `No observed ${agentType} frontmatter binding proves Claude effort ${boundEffort}.`);
-    }
-    transportSource = text(observedBinding.source);
-  } else {
-    return refusal(host, 'native-effort-transport-unimplemented',
-      `Claude effort transport ${effortTransport} has no argument adapter.`);
+  const observedBinding = observeClaudeAgentBinding({
+    agentType,
+    agentPath: effortEvidence.agentPath || effortEvidence.agent_path || effortEvidence.source,
+    sourceFingerprint: effortEvidence.sourceFingerprint || effortEvidence.source_fingerprint,
+  });
+  if (!observedBinding.ok) return observedBinding;
+  if (observedBinding.effort !== effort) {
+    return refusal(host, 'native-effort-binding-mismatch',
+      `Observed ${agentType} frontmatter effort ${observedBinding.effort} does not match resolved effort ${effort}.`);
   }
-  const args = { subagent_type: agentType, prompt: boundPrompt, model: alias };
+  const args = { subagent_type: agentType, prompt, model: alias };
   const telemetry = baseTelemetry(dispatch, alias, null, caps);
   telemetry.effort_transport = effortTransport;
-  telemetry.effort_transport_value = boundEffort;
-  telemetry.effort_transport_source = transportSource;
+  telemetry.effort_transport_value = observedBinding.effort;
+  telemetry.effort_transport_source = observedBinding.source;
+  telemetry.effort_binding_observed = observedBinding.effort;
+  telemetry.effort_binding_observed_source = observedBinding.source;
+  telemetry.effort_binding_observed_fingerprint = observedBinding.source_fingerprint;
   return {
     ok: true,
     host_runtime: host,
@@ -279,6 +323,7 @@ async function invokeNative(options, invoke) {
 
 module.exports = {
   validateActiveCapabilities,
+  observeClaudeAgentBinding,
   buildNativeInvocation,
   invokeNative,
   codexTaskName,

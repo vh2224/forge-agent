@@ -4,6 +4,7 @@
 // No real account/CLI is used. Only the account lookup and external providers
 // are substituted; controller, guard, resolver, artifacts and receipts are real.
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -22,7 +23,9 @@ const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
 const { ARTIFACT_UNITS } = require('./forge-transport-capabilities');
 const loop = require('./forge-long-workflow-adapter');
 const state = require('./forge-state');
+const memory = require('./forge-memory');
 const originalCodex = xllm.invokeCodexAppServer;
+const originalAuthorize = xllm.authorizeSidecar;
 const originalEnv = process.env.FORGE_XLLM_CLAUDE_BIN;
 const fixture = path.join(root, 'provider.js');
 fs.writeFileSync(fixture, `
@@ -183,6 +186,7 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
       assert(memoryEvents.some(event => event.event === eventName
         && event.unit === `memory-extract/${identity.sourceUnitId}`));
     }
+    assert(!memoryEvents.some(event => event.event === 'memory-publication'));
     const memoryDir = path.join(dir, '.gsd', 'memory');
     assert.strictEqual(fs.existsSync(memoryDir), false);
     req.publicationSafe = true;
@@ -194,9 +198,21 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     const written = await unit.runUnitSidecar(req);
     assert.strictEqual(written.publication.status, 'written');
     assert.strictEqual(fs.existsSync(memoryDir), true);
+    const publicationEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === req.dispatchId);
+    assert.strictEqual(publicationEvents.length, 1);
+    assert.strictEqual(publicationEvents[0].publication_status, 'written');
+    assert.strictEqual(publicationEvents[0].model_requested, req.route.model_requested);
+    assert.strictEqual(publicationEvents[0].model_resolved, req.route.model_resolved);
+    assert.strictEqual(publicationEvents[0].model_observed, null);
     const replay = await unit.runUnitSidecar(req);
     assert.strictEqual(replay.publication.status, 'noop');
     assert.strictEqual(replay.publication.reason, 'replay');
+    const replayedEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === req.dispatchId);
+    assert.strictEqual(replayedEvents.length, 1);
     if (engine === 'codex') assert.strictEqual(codexCalls, 1);
     else assert.strictEqual(fs.readFileSync(path.join(dir, 'invocations.txt'), 'utf8'), 'spawn\n');
     const receipt = fs.readFileSync(`${req.resultFile}.receipt.json`, 'utf8');
@@ -217,6 +233,11 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(emptyResult.publication.status, 'noop');
     assert.strictEqual(emptyResult.publication.reason, 'empty-extraction');
     assert.strictEqual(fs.existsSync(path.join(dir, '.gsd', 'memory')), false);
+    let terminalEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(event => event.event === 'memory-publication');
+    assert(terminalEvents.some(event => event.dispatch_id === emptyReq.dispatchId
+      && event.status === 'done' && event.publication_status === 'noop'
+      && event.publication_reason === 'empty-extraction'));
 
     const partialReq = memoryRequest(dir, 'codex', 'T-20260924030304-partial-memory');
     const partialMemory = { schema_version: 1, status: 'partial', summary: 'Need context',
@@ -227,6 +248,23 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     const partialResult = await unit.runUnitSidecar(partialReq);
     assert.strictEqual(partialResult.status, 'partial');
     assert.strictEqual(partialResult.publication.status, 'noop');
+    terminalEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(event => event.event === 'memory-publication');
+    assert(terminalEvents.some(event => event.dispatch_id === partialReq.dispatchId
+      && event.status === 'partial' && event.publication_reason === 'worker-partial'));
+
+    const blockedReq = memoryRequest(dir, 'codex', 'T-20260924030304-blocked-memory');
+    const blockedMemory = { schema_version: 1, status: 'blocked', summary: 'Required input is unavailable',
+      questions: ['Which source is authoritative?'], facts: [], events: [] };
+    xllm.invokeCodexAppServer = async () => ({ finalText: JSON.stringify(blockedMemory) });
+    blockedReq.publicationSafe = true;
+    blockedReq.publicationBoundary = { ownerJoined: true, checkedAt: '2026-09-24T12:04:10Z', protectedSnapshots: [] };
+    const blockedResult = await unit.runUnitSidecar(blockedReq);
+    assert.strictEqual(blockedResult.status, 'blocked');
+    terminalEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(event => event.event === 'memory-publication');
+    assert(terminalEvents.some(event => event.dispatch_id === blockedReq.dispatchId
+      && event.status === 'blocked' && event.publication_reason === 'worker-blocked'));
 
     const invalidReq = memoryRequest(dir, 'codex', 'T-20260924030305-invalid-memory');
     xllm.invokeCodexAppServer = async () => ({ finalText: JSON.stringify({ ...empty, path: '.gsd/STATE.md' }) });
@@ -239,6 +277,60 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     await rejects(() => unit.runUnitSidecar(authReq), 'claude-auth-failed');
     assert(!fs.readFileSync(authReq.resultFile, 'utf8').includes(token));
     assert.strictEqual(fs.existsSync(path.join(authDir, '.gsd', 'memory')), false);
+  }
+
+  // The real dispatch policy is consulted before either provider transport.
+  {
+    const dir = setup(), req = memoryRequest(dir, 'codex', 'T-20260924030307-policy-memory');
+    req.publicationSafe = true;
+    req.publicationBoundary = { ownerJoined: true, checkedAt: '2026-09-24T12:04:30Z', protectedSnapshots: [] };
+    let providerCalls = 0, policyCalls = 0;
+    xllm.invokeCodexAppServer = async () => { providerCalls++; return { finalText: JSON.stringify(memoryPayload()) }; };
+    xllm.authorizeSidecar = (mode, options) => {
+      policyCalls++;
+      assert.strictEqual(mode, 'memory');
+      return originalAuthorize(mode, { ...options, workspaceRoot: path.join(options.cwd, 'outside-spawn-root') });
+    };
+    await rejects(() => unit.runUnitSidecar(req), 'target-outside-workspace');
+    assert.strictEqual(policyCalls, 1);
+    assert.strictEqual(providerCalls, 0);
+    xllm.authorizeSidecar = originalAuthorize;
+  }
+
+  // Publication outcomes remain visible even though extraction itself completed.
+  {
+    const dir = setup(), req = memoryRequest(dir, 'codex', 'T-20260924030308-conflict-memory');
+    const conflictPayload = { schema_version: 1, status: 'done', summary: 'Conflicting reference', questions: [],
+      facts: [], events: [{ kind: 'hit', existing_id: 'MEM999' }] };
+    xllm.invokeCodexAppServer = async () => ({ finalText: JSON.stringify(conflictPayload) });
+    req.publicationSafe = true;
+    req.publicationBoundary = { ownerJoined: true, checkedAt: '2026-09-24T12:04:45Z', protectedSnapshots: [] };
+    const result = await unit.runUnitSidecar(req);
+    assert.strictEqual(result.status, 'done');
+    assert.strictEqual(result.publication.status, 'conflict');
+    const published = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .find(event => event.event === 'memory-publication' && event.dispatch_id === req.dispatchId);
+    assert.strictEqual(published.publication_status, 'conflict');
+    assert.strictEqual(published.publication_reason, 'memory-publication-conflict');
+    assert(!published.publication_reason.includes('MEM999'));
+    assert.strictEqual(published.model_observed, null);
+    assert(!JSON.stringify(published).includes(token));
+    memory.writeFragment(dir, { unit_id: req.sourceUnitId, facts: [{ mem_id: 'MEM999', category: 'gotcha',
+      text: 'An externally restored canonical target.', confidence_base: 0.9,
+      created_at: '2026-09-24T12:04:46Z', source_unit: `execute-task/${req.sourceUnitId}` }], stats: [] });
+    const recovered = await unit.runUnitSidecar(req);
+    assert.strictEqual(recovered.publication.status, 'written');
+    let transitions = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === req.dispatchId);
+    assert.deepStrictEqual(transitions.map(event => event.publication_status), ['conflict', 'written']);
+    const replay = await unit.runUnitSidecar(req);
+    assert.strictEqual(replay.publication.status, 'noop');
+    transitions = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === req.dispatchId);
+    assert.strictEqual(transitions.length, 2);
   }
 
   // Native memory consumes the same envelope and durable owner acceptance path.
@@ -277,6 +369,15 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(delivered.publication.status, 'written');
     assert.strictEqual(delivered.telemetry.model_observed, null);
     assert.strictEqual(calls, 1);
+    let nativePublicationEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === base.dispatchId);
+    assert.strictEqual(nativePublicationEvents.length, 1);
+    assert.strictEqual(nativePublicationEvents[0].publication_status, 'written');
+    assert.strictEqual(nativePublicationEvents[0].model_requested, 'gpt-6-luna');
+    assert.strictEqual(nativePublicationEvents[0].model_resolved, 'gpt-6-luna');
+    assert.strictEqual(nativePublicationEvents[0].model_argument, 'gpt-6-luna');
+    assert.strictEqual(nativePublicationEvents[0].model_observed, null);
     const nativeReplay = await unit.runNativeMemory({ ...base, policy: { decision: 'extract' } }, async () => {
       calls++;
       throw new Error('provider must not run on ready replay');
@@ -286,6 +387,14 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(nativeReplay.telemetry.model_resolved, 'gpt-6-luna');
     assert.strictEqual(nativeReplay.telemetry.model_argument, 'gpt-6-luna');
     assert.strictEqual(nativeReplay.telemetry.model_observed, null);
+    assert.strictEqual(calls, 1);
+    nativePublicationEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === base.dispatchId);
+    assert.strictEqual(nativePublicationEvents.length, 1);
+    await assert.rejects(() => unit.runNativeMemory({ ...base, dispatchId: 'lying-native',
+      resultFile: path.join(root, 'lying-native-memory.json'), model: 'gpt-5.6-sol',
+      policy: { decision: 'extract' } }, async () => { calls++; }), error => error.code === 'native-memory-route-mismatch');
     assert.strictEqual(calls, 1);
     const secondDispatch = { ...base, dispatchId: 'native-memory-dispatch-2',
       extractionId: 'native-memory-extraction-2', resultFile: path.join(root, 'native-memory-result-2.json'),
@@ -307,16 +416,52 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(secondReplay.publication.status, 'noop');
     assert.strictEqual(secondReplay.provider_called, false);
     assert.strictEqual(calls, 2);
+    for (const [suffix, rawResult, expectedStatus, expectedReason] of [
+      ['empty', { schema_version: 1, status: 'done', summary: 'Nothing durable', questions: [], facts: [], events: [] },
+        'done', 'empty-extraction'],
+      ['partial', { schema_version: 1, status: 'partial', summary: 'Need context',
+        questions: ['Which source is authoritative?'], facts: [], events: [] }, 'partial', 'worker-partial'],
+      ['blocked', { schema_version: 1, status: 'blocked', summary: 'Input unavailable',
+        questions: ['Provide the missing source?'], facts: [], events: [] }, 'blocked', 'worker-blocked'],
+    ]) {
+      const dispatchId = `native-${suffix}`;
+      const terminal = await unit.acceptNativeMemoryResult({ ...base, dispatchId, extractionId: dispatchId,
+        resultFile: path.join(root, `${dispatchId}.json`), rawResult,
+        invocationTelemetry: delivered.telemetry });
+      assert.strictEqual(terminal.status, expectedStatus);
+      const events = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+        .trim().split(/\r?\n/).map(line => JSON.parse(line));
+      assert(events.some(event => event.event === 'memory-publication' && event.dispatch_id === dispatchId
+        && event.status === expectedStatus && event.publication_status === 'noop'
+        && event.publication_reason === expectedReason));
+    }
     const unsupported = await unit.runNativeMemory({ ...base, dispatchId: 'unsupported-native',
       resultFile: path.join(root, 'unsupported-native-memory.json'),
       activeCapabilities: { ...base.activeCapabilities, models: ['gpt-5.6-sol'] },
       policy: { decision: 'extract' } }, async () => { calls++; });
     assert.strictEqual(unsupported.reason_code, 'native-model-unsupported');
     assert.strictEqual(unsupported.provider_called, false);
+    let nativeTerminalEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(event => event.event === 'memory-publication');
+    assert(nativeTerminalEvents.some(event => event.dispatch_id === 'unsupported-native'
+      && event.status === 'failure' && event.publication_status === 'noop'
+      && event.publication_reason === 'worker-error'));
+    const failedDispatch = { ...base, dispatchId: 'failed-native', extractionId: 'failed-native',
+      resultFile: path.join(root, 'failed-native-memory.json'), policy: { decision: 'extract' } };
+    const failedNative = await unit.runNativeMemory(failedDispatch, async () => {
+      calls++;
+      throw new Error('fixture provider failure');
+    });
+    assert.strictEqual(failedNative.reason_code, 'native-invocation-failed');
+    assert.strictEqual(failedNative.provider_called, true);
+    nativeTerminalEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line)).filter(event => event.event === 'memory-publication');
+    assert(nativeTerminalEvents.some(event => event.dispatch_id === failedDispatch.dispatchId
+      && event.status === 'failure' && event.publication_reason === 'worker-error'));
     await assert.rejects(() => unit.runNativeMemory({ ...base, dispatchId: 'inside-target',
       resultFile: path.join(dir, 'inside-result.json'), policy: { decision: 'extract' } },
     async () => { calls++; }), /outside the workspace/);
-    assert.strictEqual(calls, 2);
+    assert.strictEqual(calls, 3);
     const interrupted = { ...base, dispatchId: 'interrupted-native',
       extractionId: 'interrupted-native', resultFile: path.join(root, 'interrupted-native-memory.json'),
       policy: { decision: 'extract' } };
@@ -325,7 +470,7 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     const interruptedResult = await unit.runNativeMemory(interrupted, async () => { calls++; });
     assert.strictEqual(interruptedResult.reason_code, 'native-memory-attempt-interrupted');
     assert.strictEqual(interruptedResult.provider_called, false);
-    assert.strictEqual(calls, 2);
+    assert.strictEqual(calls, 3);
   }
   {
     const dir = setup();
@@ -335,21 +480,25 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     });
     const route = resolveDispatch({ cwd: dir, unitType: 'memory-extract', hostRuntime: 'claude',
       workerEngine: 'native', workerMode: 'native' });
+    const agentPath = path.join(dir, 'forge-memory-fixture.md');
+    write(agentPath, '---\nname: forge-memory\neffort: medium\n---\n\nRead-only fixture.\n');
+    const agentFingerprint = crypto.createHash('sha256').update(fs.readFileSync(agentPath, 'utf8')).digest('hex');
     let calls = 0;
     const delivered = await unit.runNativeMemory({ cwd: dir, contextRoot: dir, route,
       hostRuntime: 'claude', sourceUnitId: 'T-20260924040404-claude-native', sourceUnitType: 'execute-task',
       workflowId: 'claude-native-workflow', dispatchId: 'claude-native-dispatch',
       extractionId: 'claude-native-extraction', sourceFingerprint: 'claude-native-source',
       activeCapabilities: { available: true, tool: 'Agent', source: 'fixture-active-tool',
-        model_aliases: ['sonnet'], effort_transports: ['prompt-header'] },
-      effortBinding: { transport: 'prompt-header', effort: 'medium', source: 'rendered-memory-prompt' },
+        model_aliases: ['sonnet'], effort_transports: ['agent-frontmatter'] },
+      effortBinding: { transport: 'agent-frontmatter', agentPath,
+        sourceFingerprint: `sha256:${agentFingerprint}` },
       resultFile: path.join(root, 'claude-native-memory-result.json'), policy: { decision: 'extract' },
       publicationSafe: true, publicationBoundary: { ownerJoined: true,
         checkedAt: '2026-09-24T12:05:00Z', protectedSnapshots: [] } }, async args => {
       calls++;
       assert.strictEqual(args.model, 'sonnet');
       assert.strictEqual(args.subagent_type, 'forge-memory');
-      assert.match(args.prompt, /reasoning_effort:\s*medium/);
+      assert(!args.prompt.includes('reasoning_effort:'));
       return memoryPayload('Claude native effort is bound in the rendered prompt contract.');
     });
     assert.strictEqual(delivered.status, 'done');
@@ -358,8 +507,9 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(delivered.telemetry.model_argument, 'sonnet');
     assert.strictEqual(delivered.telemetry.model_observed, null);
     assert.strictEqual(delivered.telemetry.effort_argument, null);
-    assert.strictEqual(delivered.telemetry.effort_transport, 'prompt-header');
+    assert.strictEqual(delivered.telemetry.effort_transport, 'agent-frontmatter');
     assert.strictEqual(delivered.telemetry.effort_transport_value, 'medium');
+    assert.strictEqual(delivered.telemetry.effort_binding_observed, 'medium');
     assert.strictEqual(calls, 1);
   }
   // Delivery publication uses exact, unit-scoped paths for every closing unit.
@@ -506,7 +656,7 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
   assert.strictEqual(next.host_runtime, 'codex');
   console.log('Bidirectional contracts, artifact replay/conflicts, failure classification and Codex forge-auto progression passed (fixture providers only).');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
-  accounts.resolveLaunch = originalLookup; xllm.invokeCodexAppServer = originalCodex;
+  accounts.resolveLaunch = originalLookup; xllm.invokeCodexAppServer = originalCodex; xllm.authorizeSidecar = originalAuthorize;
   if (originalEnv === undefined) delete process.env.FORGE_XLLM_CLAUDE_BIN; else process.env.FORGE_XLLM_CLAUDE_BIN = originalEnv;
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
 });

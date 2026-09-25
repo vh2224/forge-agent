@@ -373,7 +373,7 @@ fi
 > HTTP 400 on an explicit `thinking: disabled` at any effort, and `claude-opus-5` returns HTTP 400
 > when `disabled` is paired with effort `xhigh`/`max` (Opus 4.7/4.8 accept it at any effort).
 
-`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) were set by the resolver above (§ Effort Resolution — unit-type default + frontmatter axis + risk-escalation sync + model-cap clamp). Inject `effort: {unit_effort}` and (for opus/fable phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
+`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) were set by the resolver above (§ Effort Resolution — unit-type default + frontmatter axis + risk-escalation sync + model-cap clamp). The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only the fingerprinted agent-frontmatter observation at the native adapter does.
 
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
@@ -937,6 +937,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
     hostRuntime: HOST_RUNTIME,
     resolvedDispatch: ROUTE_JSON,
     activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
+    effortBinding: CLAUDE_EFFORT_BINDING,
     agentType: 'forge-planner',
     forkTurns: 'none',
     prompt: <plan-slice template from shared/forge-dispatch.md>
@@ -1253,8 +1254,12 @@ refused resolver contract and unsupported model/effort/fork/tool capability stop
 before launch. Invoke the returned tool and structured arguments unchanged.
 Pass `forkTurns:'none'`; Codex receives the full model ID, separate
 `reasoning_effort`, and `fork_turns:'none'`;
-Claude aliases remain inside the Claude adapter. Never omit an explicit model
-to inherit agent frontmatter. Use a description that captures what is happening:
+Claude aliases remain inside the Claude adapter. Before every Claude native
+call, read the actual exposed `agents/<agent>.md` (repo or installed Forge copy),
+hash those same bytes with SHA-256, call `observeClaudeAgentBinding`, and pass
+the successful observation as `effortBinding`. Prompt text is not an effort API;
+a missing, stale, or mismatched binding is a named refusal. Never omit an
+explicit model to inherit agent frontmatter. Use a description that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
 - Examples:
   - `plan-slice S01: authentication foundation`
@@ -1476,10 +1481,13 @@ EXISTING_MEMORY:
 ```
 
 Use `buildNativeInvocation` plus the active native tool capabilities for a
-native route; invoke its structured arguments unchanged. Use
+native route, including the fresh Claude binding required by the common native
+contract; invoke its structured arguments unchanged. Use
 `forge-unit-sidecar --request` for a declared sidecar route. Native results go
 through an external JSON request to
-`forge-unit-sidecar --accept-native-memory`; both routes validate, persist a
+`forge-unit-sidecar --accept-native-memory`; include the exact
+`native.telemetry` object as `invocationTelemetry` in that request. Both routes
+validate, persist a
 ready receipt, and call the same owner publisher. Set `publicationSafe:true`
 only with `ownerJoined`, `checkedAt`, and every protected snapshot listed as
 ended. Unsupported model/effort, missing

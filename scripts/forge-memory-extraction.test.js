@@ -436,6 +436,38 @@ test('cap boundary keeps 50 active facts and emits deterministic prune events', 
   }
 });
 
+test('zero confidence survives seed folding and is pruned before 0.1 at cap 51', () => {
+  const cwd = tempDir();
+  try {
+    const facts = Array.from({ length: 51 }, (_, index) => canonicalFact(
+      `MEM${String(index + 1).padStart(3, '0')}`,
+      `Confidence fact ${index + 1}.`,
+    ));
+    facts[0].confidence_base = 0;
+    facts[1].confidence_base = 0.1;
+    memory.writeFragment(cwd, {
+      unit_id: 'T01', milestone_id: 'M001', facts,
+      stats: [
+        { kind: 'seed', mem_id: 'MEM001', ts: '2026-09-20T00:00:00.000Z', confidence_base: 0, hits: 0 },
+        { kind: 'seed', mem_id: 'MEM002', ts: '2026-09-20T00:00:00.000Z', confidence_base: 0.1, hits: 0 },
+      ],
+    });
+    const folded = extraction._private.publicationState(facts, [
+      { kind: 'seed', mem_id: 'MEM001', confidence_base: 0, hits: 0 },
+    ]);
+    assert.strictEqual(folded.get('MEM001').confidence, 0, 'seed confidence zero must not fall back');
+
+    const outcome = publish(cwd, result({ events: [{ kind: 'hit', existing_id: 'MEM051' }] }), context('cap-zero'));
+    assert.strictEqual(outcome.status, 'written');
+    const fragment = memory.readFragment(cwd, 'T01', { milestoneId: 'M001' });
+    const capPrunes = fragment.stats.filter(stat => stat.kind === 'prune' && stat.extraction_id === 'cap-zero');
+    assert.strictEqual(capPrunes.length, 1);
+    assert.strictEqual(capPrunes[0].mem_id, 'MEM001', '0 must rank below 0.1 for pruning');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('grouped refusal retains full payload/provenance and replay reuses one quarantine record', () => {
   const cwd = tempDir();
   try {
@@ -462,7 +494,7 @@ test('grouped refusal retains full payload/provenance and replay reuses one quar
     assert.strictEqual(record.extraction_id, 'grouped-replay');
     assert.strictEqual(record.fragment.facts[1].candidate_id, 'parked');
     assert.strictEqual(record.fragment.facts[1].source_fingerprint, 'sha256:source');
-    assert.strictEqual(record.container, container);
+    assert.strictEqual(record.container, fs.realpathSync(container));
     assert.ok(record.remedy);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });

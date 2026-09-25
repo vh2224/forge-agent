@@ -64,7 +64,10 @@ const EFFORT_DEFAULTS = {
   'discuss-slice': 'medium',
   'research-milestone': 'medium',
   'research-slice': 'medium',
-  'execute-task': 'low',
+  // forge-executor's real Claude agent frontmatter is medium. Keeping the
+  // implicit route aligned makes the default executable; explicit prefs,
+  // frontmatter and CLI overrides still win and mismatches refuse by name.
+  'execute-task': 'medium',
   'review-fix': 'medium',
   'complete-slice': 'low',
   'complete-milestone': 'low',

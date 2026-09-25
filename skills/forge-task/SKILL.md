@@ -480,7 +480,11 @@ research → `research-milestone`, plan → `plan-milestone`) with
 `buildNativeInvocation` with capabilities observed from the active tool. Invoke
 the returned structured arguments unchanged: Codex receives the full model ID,
 separate reasoning effort and compatible `fork_turns`; Claude receives only its
-adapter alias plus an evidenced effort binding. If resolution, native model,
+adapter alias plus an evidenced effort binding. Before a Claude call, read the
+actual exposed `agents/<agent>.md` (repo or installed Forge copy), compute the
+SHA-256 of those same bytes, call `observeClaudeAgentBinding`, and pass the
+successful observation as `effortBinding`. A prompt header is descriptive text,
+not an effort API. If resolution, native model,
 effort or tool capability is unsupported, stop that phase with the named
 diagnostic. Do not omit an explicit configured model or invent a universal
 brainstorm sidecar. Applied model stays unknown without trusted readback.
@@ -1152,6 +1156,7 @@ native = buildNativeInvocation({
   hostRuntime: HOST_RUNTIME,
   resolvedDispatch: ROUTE_JSON,
   activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
+  effortBinding: CLAUDE_EFFORT_BINDING,
   agentType: 'forge-executor',
   taskName: 'execute-loose-task',
   forkTurns: 'none',
@@ -1408,6 +1413,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
   ```
   fixer = buildNativeInvocation({ hostRuntime: RF_HOST_RUNTIME,
     resolvedDispatch: RF_ROUTE_JSON, activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
+    effortBinding: CLAUDE_EFFORT_BINDING,
     agentType: 'forge-executor', taskName: 'review-fix', forkTurns: 'none',
     prompt: 'WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{TASK_ID}\nFix ONLY the accepted review items. Minimal diffs; no refactors or scope creep beyond those items. Return ---GSD-WORKER-RESULT---.' })
   review_fix_result = invoke(fixer.tool, fixer.args)
@@ -1493,14 +1499,16 @@ If the decision is `skip`, do not resolve or dispatch `forge-memory`; continue d
 > Antes de despachar o agente de extração de memória, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) — duração estimada `memory-extract`: ~1 min.
 Resolve a new `memory-extract` dispatch with the canonical resolver; preserve its
 full model ID and effort. On `native`, call `buildNativeInvocation` with the
-active tool capabilities and invoke the returned structured arguments unchanged
+active tool capabilities and the fresh Claude binding required by the common
+native contract above, then invoke the returned structured arguments unchanged
 (`fork_turns: none` for Codex overrides). On `sidecar`, write the complete
 `forge-unit-sidecar --request` JSON to an external temporary file and use the
 existing read-only transport. Missing capability or auth is a named warning and
 does not change completion of this task.
 
 Both routes must return the `forge-memory` output-only envelope. Write the native
-result and owner context to an external JSON request, then run
+result, the exact `native.telemetry` object as `invocationTelemetry`, and owner
+context to an external JSON request, then run
 `forge-unit-sidecar.js --accept-native-memory <request-file>`; sidecar delivery
 performs the same ready-receipt step itself. Set `publicationSafe:true` only
 with owner-joined boundary evidence listing every protected task snapshot as

@@ -110,6 +110,16 @@ XLLM_ENGINE=$([ "$CHALLENGER" = "gemini" ] && echo agy || echo codex)
 - `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Resolved to a dispatch alias via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id unsupported by the active adapter is an explicit review-worker refusal; never omit the configured model to inherit frontmatter.
 - Prefs parsing (block capture, `[ \t]` class, EOF-safe boundaries) now lives entirely in `scripts/forge-prefs.js` (S01); Step 0 only extracts resolved knobs off `.prefs` and applies the whitelist/clamp fallbacks above. The CLI resolves values without defaulting them — the defaults here are the review gate's own concern.
 
+Every Claude `Agent(...)` example below is executed through the canonical native
+adapter, not as an unchecked literal call. The caller reads the actual exposed
+definition for `forge-reviewer`, `forge-advocate`, or `forge-executor`, hashes
+those same bytes, calls `observeClaudeAgentBinding`, and supplies the successful
+observation as `effortBinding` to `buildNativeInvocation`. The observed
+frontmatter effort must equal the resolver result. Prompt text never applies
+effort; a missing, stale, or mismatched binding is named worker unavailability
+at the relevant review stage. Preserve the adapter telemetry with the dispatch;
+observed binding remains distinct from provider-applied effort.
+
 ### Resolução de pairing (`auto`) — uma vez, antes de tudo
 
 `challenger`/`advocate` aceitam `claude | codex | gemini | auto` — **ambos os eixos, mesmo whitelist**. O advocate GPT/Gemini deixou de ser fase 2: `scripts/forge-xllm.js --mode defend` existe, então `advocate: auto` resolve para a família **do autor** em vez de degradar para Claude. A degradação antiga (`defend-mode-unavailable`) continua alcançável via `--defend-unavailable`, para adapters instalados sem o modo. Quando **qualquer** eixo é `auto`, o pairing é resolvido **por autoria do diff** via `scripts/forge-review-pairing.js` — **uma única vez**, e essa resolução acontece **ANTES** da regra `engine: workflow força agents` (precedência abaixo) e **ANTES** do branch `style: flags`. `auto` cru nunca é testado por nenhuma regra a jusante; só o valor **resolvido** (`RESOLVED_CHALLENGER`/`RESOLVED_ADVOCATE`) é consumido dali em diante.

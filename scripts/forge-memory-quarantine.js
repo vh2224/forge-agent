@@ -43,6 +43,53 @@ function quarantineDir(cwd) {
   return path.join(memoryDir(cwd), QUARANTINE_DIRNAME);
 }
 
+function isWithin(root, target) {
+  const relative = path.relative(root, target);
+  return relative === '' || (
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+// Resolve the workspace root first so a legitimate cwd alias (notably
+// /var -> /private/var on macOS) is compared real-to-real. Every existing
+// component below it is then resolved before mkdir/write: a pre-existing
+// .gsd, memory, or quarantine junction may be used only when it remains inside
+// that canonical workspace. This check deliberately precedes mkdirSync.
+function secureQuarantineDir(cwd, create) {
+  const workspace = path.resolve(cwd || process.cwd());
+  const realWorkspace = fs.realpathSync(workspace);
+  const components = ['.gsd', 'memory', QUARANTINE_DIRNAME];
+  let cursor = workspace;
+
+  for (let index = 0; index < components.length; index += 1) {
+    cursor = path.join(cursor, components[index]);
+    let stat;
+    try {
+      stat = fs.lstatSync(cursor);
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+      if (!create) throw error;
+      fs.mkdirSync(cursor);
+      stat = fs.lstatSync(cursor);
+    }
+    if (!stat.isDirectory() && !stat.isSymbolicLink()) {
+      const error = new Error(`memory quarantine component is not a directory: ${cursor}`);
+      error.code = 'MEMORY_QUARANTINE_PATH_UNSAFE';
+      throw error;
+    }
+    const realComponent = fs.realpathSync(cursor);
+    if (!isWithin(realWorkspace, realComponent)) {
+      const error = new Error(`memory quarantine path escapes workspace: ${cursor} -> ${realComponent}`);
+      error.code = 'MEMORY_QUARANTINE_PATH_ESCAPE';
+      throw error;
+    }
+  }
+
+  return fs.realpathSync(cursor);
+}
+
 // Compact UTC stamp: 20260818T2256013Z-shaped, sortable, no separators that
 // collide with the `~` delimiter or with path syntax.
 function compactStamp(date) {
@@ -138,8 +185,7 @@ function quarantineFragment(cwd, fragment, info) {
     throw new Error('quarantineFragment requires info.storageKey');
   }
 
-  const dir = quarantineDir(cwd);
-  fs.mkdirSync(dir, { recursive: true });
+  const dir = secureQuarantineDir(cwd, true);
 
   const refusedAt = new Date();
 
@@ -179,7 +225,13 @@ function quarantineFragment(cwd, fragment, info) {
 // content can never forge `path`/`unreadable`; a parsed value that is not a
 // plain object is itself reported as unreadable rather than propagated.
 function listQuarantine(cwd) {
-  const dir = quarantineDir(cwd);
+  let dir;
+  try {
+    dir = secureQuarantineDir(cwd, false);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return [];
+    throw error;
+  }
   let names;
   try {
     names = fs.readdirSync(dir, { withFileTypes: true })
@@ -220,6 +272,8 @@ module.exports = {
     writeExclusive,
     stableQuarantinePath,
     writeReplaySafe,
+    secureQuarantineDir,
+    isWithin,
     MAX_COLLISION_SUFFIX,
   },
 };

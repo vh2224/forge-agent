@@ -532,7 +532,7 @@ fi
 > HTTP 400 on an explicit `thinking: disabled` at any effort, and `claude-opus-5` returns HTTP 400
 > when `disabled` is paired with effort `xhigh`/`max` (Opus 4.7/4.8 accept it at any effort).
 
-`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are set by the resolver above. Inject `effort: {unit_effort}` and (for opus/fable phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
+`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are set by the resolver above. The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only the fingerprinted agent-frontmatter observation at the native adapter does.
 
 **Batch determination (step 1.6 — execute-task only):** When `unit_type == execute-task`, the dispatch is no longer strictly single-task. Invoke `scripts/forge-parallelism.js` to compute a **ready batch** — a set of tasks in the active slice whose `depends:[]` are satisfied AND whose `writes:[]` don't overlap with each other.
 
@@ -1312,8 +1312,12 @@ tool capabilities, agent type and prompt to `buildNativeInvocation`. Refuse when
 unsupported. Invoke the returned tool and structured arguments unchanged.
 Pass `forkTurns:'none'`; Codex receives the full model ID, separate
 `reasoning_effort`, and `fork_turns:'none'`;
-Claude aliases stay inside the Claude adapter. Never omit an explicit configured
-model to inherit agent frontmatter. Use a description with the same icon:
+Claude aliases stay inside the Claude adapter. Before every Claude native call,
+read the actual exposed `agents/<agent>.md` (repo or installed Forge copy), hash
+those same bytes with SHA-256, call `observeClaudeAgentBinding`, and pass the
+successful observation as `effortBinding`. Prompt text is not an effort API; a
+missing, stale, or mismatched binding is a named refusal. Never omit an explicit
+configured model to inherit agent frontmatter. Use a description with the same icon:
 - Format: `{icon} {unit_id} · {one-liner}`
 - Examples:
   - `⚙ S01 · authentication foundation`
@@ -1725,10 +1729,14 @@ EXISTING_MEMORY:
 ```
 
 Use `buildNativeInvocation` with active host capabilities for native delivery or
-`forge-unit-sidecar --request` for a declared sidecar. Preserve the resolved full
+`forge-unit-sidecar --request` for a declared sidecar. Native delivery includes
+the fresh Claude binding required by the common native contract and preserves
+the resolved full
 model ID and effort; unsupported capability is a named nonblocking failure.
 Native output is accepted through an external JSON request passed to
-`forge-unit-sidecar --accept-native-memory`; both routes validate and persist a
+`forge-unit-sidecar --accept-native-memory`; include the exact
+`native.telemetry` object as `invocationTelemetry` in that request. Both routes
+validate and persist a
 ready receipt before owner publication.
 
 Background inference uses `publicationSafe:false`, which returns `deferred` and

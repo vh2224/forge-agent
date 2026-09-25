@@ -100,6 +100,10 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
     const projected = fs.readFileSync(path.join(options.codexHome, 'skills', skill, 'SKILL.md'), 'utf8');
     assert.match(projected, /buildNativeInvocation/, `${skill} lacks the installed native adapter contract`);
+    assert.match(projected, /observeClaudeAgentBinding/, `${skill} lacks real Claude agent binding observation`);
+    assert.match(projected, /SHA-256/, `${skill} lacks stable Claude binding provenance`);
+    assert.match(projected, /Prompt text is not an effort API|prompt header is descriptive text,\s*not an effort API/i,
+      `${skill} incorrectly permits prompt text as Claude effort transport`);
     assert.match(projected, /`reasoning_effort`/, `${skill} lacks the installed Codex effort argument`);
     assert.match(projected, /(?:forkTurns|fork_turns):?'none'/, `${skill} lacks the installed bounded fork`);
     assert.match(projected, /Never omit[\s\S]{0,80}model[\s\S]{0,80}inherit agent frontmatter/i,

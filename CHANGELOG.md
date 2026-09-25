@@ -10,6 +10,11 @@
   existentes, mantendo explícitas as unidades sem contrato de sidecar.
 - A revisão cobre também replay de substituição/poda, IDs canônicos de unidades,
   proveniência dos eventos e a seleção explícita do worker Codex.
+- O esforço nativo Claude exige evidência da definição ativa do agente; cabeçalhos
+  de prompt não simulam configuração da API. O default não configurado do executor
+  passa a medium, alinhado ao agente, preservando overrides explícitos.
+- Publicação e recusa possuem telemetria própria, confiança zero permanece zero
+  e a quarentena rejeita links que redirecionem escritas para fora do projeto.
 
 ## v4.37.0 - Entrega final por critério e evidência
 

@@ -7,6 +7,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const capabilities = require('./forge-capabilities.js');
 const { buildNativeInvocation } = require('./forge-native-invocation.js');
 
@@ -231,6 +232,8 @@ test('native invocation binds the resolved model and effort to real host argumen
     assert.strictEqual(invocation.telemetry.model_observed, null);
   }
 
+  const executorAgent = path.join(root, 'agents', 'forge-executor.md');
+  const executorFingerprint = `sha256:${crypto.createHash('sha256').update(fs.readFileSync(executorAgent)).digest('hex')}`;
   const claude = buildNativeInvocation({
     hostRuntime: 'claude',
     resolvedDispatch: route('claude', 'claude-sonnet-5', 'medium', 'sonnet'),
@@ -240,28 +243,26 @@ test('native invocation binds the resolved model and effort to real host argumen
       source: 'runtime-test-active-tool',
       model_aliases: ['sonnet'],
       effort_transports: ['agent-frontmatter'],
-      effort_bindings: [{
-        transport: 'agent-frontmatter', agent_type: 'forge-memory', effort: 'medium',
-        source: 'agents/forge-memory.md', observed: true,
-      }],
     },
-    agentType: 'forge-memory',
+    agentType: 'forge-executor',
     prompt: 'Extract the bounded memory envelope.',
     effortBinding: {
       transport: 'agent-frontmatter',
-      effort: 'medium',
-      source: 'agents/forge-memory.md',
+      agentPath: executorAgent,
+      sourceFingerprint: executorFingerprint,
     },
   });
   assert.strictEqual(claude.ok, true, JSON.stringify(claude));
   assert.deepStrictEqual(claude.args, {
-    subagent_type: 'forge-memory',
+    subagent_type: 'forge-executor',
     prompt: 'Extract the bounded memory envelope.',
     model: 'sonnet',
   });
   assert.strictEqual(claude.telemetry.effort_argument, null);
   assert.strictEqual(claude.telemetry.effort_transport_value, 'medium');
   assert.strictEqual(claude.telemetry.effort_transport, 'agent-frontmatter');
+  assert.strictEqual(claude.telemetry.effort_binding_observed_fingerprint, executorFingerprint);
+  assert.strictEqual(claude.telemetry.effort_applied, null);
 });
 
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

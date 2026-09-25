@@ -2393,7 +2393,12 @@ of its protected specification occurrences is inside the real marker pair.
 
 ```bash
 # Pass ROUTE_JSON and active tool capabilities to buildNativeInvocation. Invoke
-# its returned tool/args unchanged. Unsupported model/effort/fork/alias is a
+# its returned tool/args unchanged. For Claude, first read the actual exposed
+# agents/<agent>.md (repo or installed Forge copy), hash those same bytes with
+# SHA-256, and pass { transport:'agent-frontmatter', agentPath,
+# sourceFingerprint } as effortBinding. buildNativeInvocation re-reads that
+# file, verifies agent name/hash/effort, and refuses a mismatch by name. Prompt
+# text is never an effort API. Unsupported model/effort/fork/alias/binding is a
 # named refusal; never omit an explicit model to inherit agent frontmatter.
 # $ROUTE_JSON.chain carries forward unmodified — consumed by the Failure Taxonomy via
 # `node "$FORGE_SCRIPTS_DIR/forge-routing.js" ... --next-after "$MODEL_ID"` on model_refusal/429/400
@@ -2424,14 +2429,20 @@ not one of `light | standard | heavy | max`, the resolver's internal `readTierCh
 > The resolver's `thinking_header` field already carries this — read it instead of re-deriving it.
 
 > **Invocation adaptation:** `MODEL_ALIAS` is an adapter input only for Claude.
-> Codex receives `MODEL_ID`. Neither value proves provider application;
-> `model_applied` remains null unless a trusted runtime readback supplies it.
+> Codex receives `MODEL_ID`. Claude effort is authorized only by a fresh,
+> fingerprinted observation of the actual agent frontmatter; an `effort:` line
+> in prompt text is descriptive data and cannot authorize a dispatch. Preserve
+> `native.telemetry` with the dispatch result. Memory callers pass that exact
+> object as `invocationTelemetry` to the native acceptance request so the ready
+> receipt records requested/resolved/argument/observed-binding axes. Neither an
+> argument nor an observed binding proves provider application: `model_applied`
+> and `effort_applied` remain null unless trusted runtime readback supplies them.
 
 ---
 
 ### Effort Resolution
 
-**Purpose:** Control-flow section that runs right after [Tier Resolution](#tier-resolution), before the `Agent()` call. It translates `unit_type + frontmatter hint + prefs + resolved model` into a concrete `effort` level injected into the worker prompt header (`effort: {unit_effort}`). Effort controls *reasoning intensity* (token spend per unit), orthogonal to the tier (which controls *which model* runs). A complex task wants both a heavier model **and** higher effort; the two axes are resolved independently but can be set coherently by the planner. Like Tier Resolution, this is pure Markdown rules + a `node -e` clamp — no new script.
+**Purpose:** Control-flow section that runs right after [Tier Resolution](#tier-resolution), before the native worker call. It translates `unit_type + frontmatter hint + prefs + resolved model` into a concrete effort requirement. Codex carries it through the native `reasoning_effort` argument. Claude can run only when the actual exposed agent frontmatter is observed with a matching effort and stable SHA-256 fingerprint; prompt text does not apply effort. Effort controls *reasoning intensity* (token spend per unit), orthogonal to the tier (which controls *which model* runs).
 
 > **Why a separate axis from tier:** tier picks the model; effort picks how hard that model thinks. Coupling them to one signal loses granularity (e.g. a `standard`-tier task that is logically intricate but cheap to run still benefits from `medium` over `low`). The planner emits `effort:` per task on its own judgement (see `agents/forge-planner.md § Effort & Tier Hints`).
 
@@ -2447,7 +2458,7 @@ After Tier Resolution has set `$MODEL_ID` (the clamp in step 4 depends on it) an
 
 #### Algorithm
 
-1. **Unit-type default.** `EFFORT = PREFS.effort[unit_type]` (the `EFFORT_MAP` built at Load Context from `.prefs.effort` — sourced off the one canonical `forge-prefs.js --resolved` object, see [§ Per-unit prefs resolution](#per-unit-prefs-resolution), never a per-file merge of `forge-agent-prefs.jsonc § Effort Settings`). Fall back to the built-in defaults (opus/planning phases = `medium`, sonnet/haiku phases = `low`) when the key is absent. `EFFORT_REASON = "unit-type:<unit_type>"`.
+1. **Unit-type default.** `EFFORT = PREFS.effort[unit_type]` (the `EFFORT_MAP` built at Load Context from `.prefs.effort` — sourced off the one canonical `forge-prefs.js --resolved` object, see [§ Per-unit prefs resolution](#per-unit-prefs-resolution), never a per-file merge of `forge-agent-prefs.jsonc § Effort Settings`). Fall back to the built-in defaults: planning/review phases and `execute-task` use `medium`; auxiliary phases retain their declared defaults. `execute-task: medium` matches the real `forge-executor` agent binding. Explicit prefs, plan frontmatter and CLI inputs still take precedence. `EFFORT_REASON = "unit-type:<unit_type>"`.
 2. **Dedicated frontmatter axis (`execute-task` only).** If `effort:` is present in the `T##-PLAN.md` frontmatter → `EFFORT = PLAN_EFFORT`, `EFFORT_REASON = "frontmatter-effort:<val>"`. This is the planner's per-task complexity judgement and wins over the unit-type default. Independent of `tier:` — a task may be `tier: standard` + `effort: medium` or `tier: heavy` + `effort: high` in any combination.
 3. **Risk escalation sync (`plan-slice` only).** When Tier Resolution escalated the slice to `max` (`REASON == "risk-escalation:high"`), the effort also jumps to `max`. A `risk:high` slice plan is the highest leverage-per-dollar spot for frontier reasoning.
 4. **Model capability clamp.** Clamp `EFFORT` down to the resolved model's ceiling. `claude-haiku*` and `claude-sonnet*` cap at `medium`; `claude-opus*` and `claude-fable*` allow the full scale up to `max`. When the clamp lowers the value, append `|clamped:model-cap` to `EFFORT_REASON`. This prevents HTTP 400s (a Sonnet dispatch never receives `high`+) and silently-wasted config. **Consequence:** to actually *run* a task at `high`/`xhigh`/`max`, the task must also be on a `heavy`/`max` tier (opus/fable) — set both `tier:` and `effort:` in the plan, or rely on the planner to set them coherently.
@@ -2487,7 +2498,7 @@ The `dispatch` event schema is extended additively with `effort` and `effort_rea
 
 #### Worked examples
 
-**A — routine execute-task (defaults).** `unit_type=execute-task`, no `effort:`/`tier:` → `tier=standard`, `model=claude-sonnet-5`, `EFFORT=low` (unit default), no clamp → `effort=low`, `effort_reason="unit-type:execute-task"`.
+**A — routine execute-task (defaults).** `unit_type=execute-task`, no `effort:`/`tier:` → `tier=standard`, `model=claude-sonnet-5`, `EFFORT=medium` (unit default, equal to the real `forge-executor` frontmatter), no clamp → `effort=medium`, `effort_reason="unit-type:execute-task"`.
 
 **B — complex execute-task (planner sets both axes).** Frontmatter `tier: heavy` + `effort: high` → `model=claude-opus-5`; effort `high` ≤ opus cap `max`, no clamp → `effort=high`, `effort_reason="frontmatter-effort:high"`.
 

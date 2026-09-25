@@ -14,6 +14,7 @@ const {
   runtimeFields,
   composeRuntimePosture,
   TIER_DEFAULTS,
+  EFFORT_DEFAULTS,
 } = require('./forge-dispatch-resolve.js');
 if (TIER_DEFAULTS['review-fix'] !== 'standard' || 'review-advocate' in TIER_DEFAULTS || 'review-challenger' in TIER_DEFAULTS) throw new Error('review-fix routing defaults invalid');
 if (resolveDispatch({ unitType: 'review-fix', cwd: process.cwd() }).effort !== 'medium') throw new Error('review-fix effort invalid');
@@ -99,14 +100,18 @@ function runCase(name, fn) {
 }
 
 withHermeticHome((cliEnv) => {
-  runCase('execute-task defaults: legacy standard chain and low effort', () => {
+  runCase('execute-task defaults: standard chain and observed executor effort', () => {
     const f = mkFixture({});
     const r = dispatch(f, { unitType: 'execute-task' });
     assertEqual(r.tier, 'standard', 'defaults tier standard');
     assertEqual(r.route_source, 'tier_models', 'defaults use legacy tier_models');
     assertEqual(r.model, 'claude-sonnet-5', 'defaults primary is canonical sonnet');
-    assertEqual(r.effort, 'low', 'defaults effort low');
+    assertEqual(r.effort, 'medium', 'defaults effort matches forge-executor frontmatter');
     assertEqual(r.effort_reason, 'unit-type:execute-task', 'defaults effort reason');
+    const executorSource = fs.readFileSync(path.join(__dirname, '..', 'agents', 'forge-executor.md'), 'utf8');
+    const executorEffort = (executorSource.match(/^effort:\s*(\S+)/m) || [])[1];
+    assertEqual(EFFORT_DEFAULTS['execute-task'], executorEffort,
+      'execute-task implicit effort matches the real native Claude agent binding');
     assertEqual(r.engine, 'claude', 'defaults engine claude');
     assertEqual(r.sidecar_model, '', 'claude route has empty sidecar model');
     assertEqual(r.host_runtime, 'claude', 'legacy omission keeps Claude host compatibility');
@@ -532,7 +537,7 @@ withHermeticHome((cliEnv) => {
     assertEqual(r.codex_model, 'gpt-fixture', 'legacy codex model is included');
     assertEqual(r.model, canonical.id, 'legacy resolver model equals canonical tier chain');
     assertEqual(r.alias, canonical.alias, 'legacy resolver alias equals canonical tier chain');
-    assertEqual(r.effort, 'low', 'legacy resolver effort is expected default');
+    assertEqual(r.effort, 'medium', 'legacy resolver effort is expected default');
     cleanup(f);
   });
 
@@ -644,23 +649,23 @@ withHermeticHome((cliEnv) => {
   // ternary made prefs.effort unreachable from the CLI, which is the only path
   // forge-auto/forge-next/forge-task use. The whole `effort` prefs block was inert.
   runCase('prefs.effort is honoured through the CLI, and --effort- overrides it', () => {
-    const f = mkFixture({ prefsJsonc: '{"effort":{"execute-task":"medium","plan-slice":"high"}}' });
+    const f = mkFixture({ prefsJsonc: '{"effort":{"execute-task":"low","plan-slice":"high"}}' });
 
-    // In-process, no effortMap at all: the pref wins over EFFORT_DEFAULTS ('low').
-    assertEqual(dispatch(f, { unitType: 'execute-task' }).effort, 'medium', 'pref beats EFFORT_DEFAULTS in-process');
+    // In-process, no effortMap at all: the pref wins over EFFORT_DEFAULTS ('medium').
+    assertEqual(dispatch(f, { unitType: 'execute-task' }).effort, 'low', 'pref beats EFFORT_DEFAULTS in-process');
 
     // The CLI seeds effortMap {} with no --effort- flag; the pref must still win.
     const bare = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--cwd', f.dir], { encoding: 'utf8', env: cliEnv });
     let parsed = null;
     try { parsed = JSON.parse(bare.stdout); } catch (error) { fail('bare CLI stdout is valid JSON', error.message); }
     assertEqual(bare.status, 0, 'bare CLI exits 0');
-    assert(parsed && parsed.effort === 'medium', 'bare CLI honours prefs.effort', bare.stdout);
+    assert(parsed && parsed.effort === 'low', 'bare CLI honours prefs.effort', bare.stdout);
 
     // An explicit flag still overrides the pref (its documented role).
-    const flagged = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--effort-execute-task', 'low', '--cwd', f.dir], { encoding: 'utf8', env: cliEnv });
+    const flagged = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--effort-execute-task', 'medium', '--cwd', f.dir], { encoding: 'utf8', env: cliEnv });
     let over = null;
     try { over = JSON.parse(flagged.stdout); } catch (error) { fail('flagged CLI stdout is valid JSON', error.message); }
-    assert(over && over.effort === 'low', '--effort- flag overrides prefs.effort', flagged.stdout);
+    assert(over && over.effort === 'medium', '--effort- flag overrides prefs.effort', flagged.stdout);
 
     // Merge, not replace: a flag for one unit must not erase the pref for another.
     assertEqual(dispatch(f, { unitType: 'plan-slice', effortMap: { 'execute-task': 'low' } }).effort, 'high', 'unrelated flag leaves other prefs intact');
@@ -827,7 +832,7 @@ withHermeticHome((cliEnv) => {
       engine: 'claude', model: 'claude-sonnet-5', alias: 'sonnet', tier: 'standard', domain: 'default',
       route_source: 'tier_models',
       chain: [{ id: 'claude-sonnet-5', alias: 'sonnet', mapped: true, engine: 'claude' }],
-      chain_len: 1, reason: 'unit-type:execute-task', effort: 'low', effort_reason: 'unit-type:execute-task',
+      chain_len: 1, reason: 'unit-type:execute-task', effort: 'medium', effort_reason: 'unit-type:execute-task',
       model_applied: null, engine_reason: 'default:claude', workers_engine: 'claude', workers_timeout: 1800,
       codex_model: '', plan_worker: '', domain_input: 'default', frontmatter_tier: '', thinking_header: '',
       routing_present: false, dispatch_engine: 'claude', sidecar_model: '', prefs_ok: true, prefs_errors: [],

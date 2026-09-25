@@ -270,7 +270,7 @@ function publicationState(facts, stats) {
     if (!fact.mem_id) continue;
     state.set(String(fact.mem_id), {
       fact,
-      confidence: Number(fact.confidence_base || fact.confidence || 0.5),
+      confidence: Number(fact.confidence_base ?? fact.confidence ?? 0.5),
       hits: 0,
       pruned: false,
       promoted: false,
@@ -281,7 +281,7 @@ function publicationState(facts, stats) {
     const entry = state.get(id);
     if (!entry) continue;
     if (stat.kind === 'seed') {
-      entry.confidence = Number(stat.confidence_base || stat.confidence || entry.confidence);
+      entry.confidence = Number(stat.confidence_base ?? stat.confidence ?? entry.confidence);
       entry.hits = Number(stat.hits || 0);
     } else if (stat.kind === 'hit' || stat.kind === 'confirm') {
       entry.hits += 1;

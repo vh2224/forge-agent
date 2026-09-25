@@ -478,6 +478,44 @@ test('extraction identity makes grouped quarantine replay idempotent and conflic
   assert.strictEqual(quarantine.listQuarantine(cwd).length, 1);
 });
 
+test('quarantine refuses a pre-existing junction that escapes the workspace before writing', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-escape-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-outside-'));
+  const memoryDir = memory.memoryDir(cwd);
+  fs.mkdirSync(memoryDir, { recursive: true });
+  const link = quarantine.quarantineDir(cwd);
+  fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+
+  assert.throws(
+    () => quarantine.quarantineFragment(
+      cwd,
+      { unit_id: 'T01', facts: [fact('MEM001', 'must stay inside')], stats: [] },
+      { storageKey: 'M001__T01', extractionId: 'escape-attempt' }
+    ),
+    error => error && error.code === 'MEMORY_QUARANTINE_PATH_ESCAPE',
+  );
+  assert.deepStrictEqual(fs.readdirSync(outside), [], 'refusal must leave the external target untouched');
+});
+
+test('quarantine accepts a canonical cwd reached through a root alias', () => {
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-real-'));
+  const alias = `${real}-alias`;
+  fs.mkdirSync(memory.memoryDir(real), { recursive: true });
+  try {
+    fs.symlinkSync(real, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if (process.platform === 'win32' && (error.code === 'EPERM' || error.code === 'EACCES')) return;
+    throw error;
+  }
+  const result = quarantine.quarantineFragment(
+    alias,
+    { unit_id: 'T01', facts: [fact('MEM001', 'alias-safe')], stats: [] },
+    { storageKey: 'M001__T01', extractionId: 'alias-safe' }
+  );
+  assert.ok(fs.existsSync(result.path));
+  assert.ok(quarantine._private.isWithin(fs.realpathSync(real), fs.realpathSync(result.path)));
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failures.length) {
   for (const { name, error } of failures) {

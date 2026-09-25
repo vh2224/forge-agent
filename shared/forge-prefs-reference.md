@@ -179,7 +179,7 @@ Default de effort (intensidade de raciocínio) por fase (unit_type). Eixo ortogo
 ### `effort.execute-task`
 
 - **Tipo:** string
-- **Default:** `"low"`
+- **Default:** `"medium"`
 - **Valores permitidos:** `low`, `medium`, `high`, `xhigh`, `max`
 - **Descrição:** Effort da fase execute-task (implementação). Override por task via effort: no frontmatter do T##-PLAN.md; clamp em medium quando o modelo resolvido é haiku/sonnet.
 

@@ -235,7 +235,7 @@ test('registry and every nested entry are deeply frozen with explicit exclusions
     assert(Object.isFrozen(entry), `${entry.id} is mutable`);
     assert.match(entry.id, /^[a-z0-9-]+$/);
     assert(guard.SCOPED_FILES.includes(entry.path), entry.path);
-    assert(['resolver', 'agent', 'adapter', 'emitter'].includes(entry.kind), entry.kind);
+    assert(['resolver', 'agent', 'adapter', 'emitter', 'native'].includes(entry.kind), entry.kind);
     assert(['operational', 'excluded'].includes(entry.classification), entry.classification);
     assert.match(entry.fingerprint, /^sha256:[a-f0-9]{64}$/);
     if (entry.classification === 'excluded') assert.notStrictEqual(entry.reason.trim(), '', entry.id);
@@ -249,8 +249,41 @@ test('real disk discovery equals the frozen registry in both directions', () => 
   assert.deepStrictEqual(report.missing, []);
   assert.deepStrictEqual(report.errors, []);
   const discoveredKinds = new Set(guard.discover(ROOT).candidates.map((item) => item.kind));
-  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'resolver']);
+  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'native', 'resolver']);
+  const nativeBuilders = guard.discover(ROOT).candidates.filter((item) =>
+    item.kind === 'native' && /buildNativeInvocation\s*\(/.test(item.evidence));
+  assert.strictEqual(nativeBuilders.length, 3, 'all structured native builder sites remain visible');
+  for (const item of nativeBuilders) {
+    const registered = guard.SOURCE_REGISTRY.find((entry) => guard.identity(entry) === guard.identity(item));
+    assert.strictEqual(registered && registered.classification, 'operational', `${item.path}:${item.line}`);
+  }
 });
+
+test('injecting a native invocation is reported as an unexpected candidate', () => withFixture((root) => {
+  const relative = 'shared/forge-review.md';
+  appendSeparated(root, relative, 'injected = buildNativeInvocation({ hostRuntime: HOST_RUNTIME })');
+  const report = guard.audit({ root });
+  assert.strictEqual(report.ok, false);
+  assert(report.unexpected.some((item) => item.kind === 'native' && item.evidence.startsWith('injected =')),
+    JSON.stringify(report.unexpected, null, 2));
+}));
+
+test('an operational native builder missing effort binding is structurally rejected', () => withFixture((root) => {
+  const relative = 'skills/forge-task/SKILL.md';
+  const source = read(relative, root);
+  const injected = [
+    'broken = buildNativeInvocation({',
+    '  hostRuntime: HOST_RUNTIME, resolvedDispatch: ROUTE_JSON, activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,',
+    "  agentType: 'forge-executor', prompt: 'fixture', forkTurns: 'none',",
+    '})',
+  ].join('\n');
+  write(relative, source.replace('<!-- forge:dispatch:end -->', `${injected}\n<!-- forge:dispatch:end -->`), root);
+  const item = discovered(root, (candidate) => candidate.kind === 'native' && candidate.evidence.startsWith('broken ='));
+  const registry = [...guard.SOURCE_REGISTRY, registerCandidate(item)];
+  const report = guard.audit({ root, registry });
+  assert.strictEqual(report.ok, false);
+  assert(report.errors.some((message) => /native builder lacks effortBinding/.test(message)), JSON.stringify(report, null, 2));
+}));
 
 test('injecting a resolver call is reported as an unexpected candidate', () => withFixture((root) => {
   const relative = 'shared/forge-review.md';

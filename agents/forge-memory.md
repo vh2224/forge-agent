@@ -33,9 +33,14 @@ Keep a candidate only when all answers are yes:
 1. Is it specific to this project?
 2. Is it non-obvious without prior debugging or investigation?
 3. Will it remain useful in future work?
-4. Is it a fact that became true, rather than a pending action?
+4. **Fact, not pending action?** Did it become true in the completed work?
 
 Reject secrets, credentials, temporary state, generic advice, one-off fix narration, TODOs, and facts already represented by `EXISTING_MEMORY`. Allowed categories are `gotcha`, `convention`, `architecture`, `pattern`, `environment`, and `preference`.
+
+### Worked examples (question 4)
+
+- **PASSES:** "The resolver now rejects a configured Claude worker paired with a GPT model." This is a verified behavior that became true and will constrain future dispatch work.
+- **REJECTED:** "Update the remaining dispatch callers." Pendência é item de trabalho, not a durable fact; leave it out of memory until completed and evidenced.
 
 For a near duplicate, emit a `hit` event for the existing canonical ID and do not repeat the fact. For a contradiction, emit a replacement candidate plus a `supersede` event. When the active set would exceed 50, emit `prune` for the lowest-scored existing entry. Emit `promote` only when the owner-provided state proves confidence at least 0.85, at least three hits, a category other than preference/environment, and durable text that is not a one-time fix.
 
