@@ -415,7 +415,7 @@ test('R2: conteúdo do arquivo não pode forjar path/unreadable', () => {
   const evil = path.join(dir, 'evil~20260818T000000Z.json');
   fs.writeFileSync(evil, JSON.stringify({ path: null, unreadable: true, reason: 'x' }));
   const [entry] = quarantine.listQuarantine(cwd);
-  assert.strictEqual(entry.path, evil, 'path é campo confiável — o arquivo não o define');
+  assert.strictEqual(entry.path, fs.realpathSync(evil), 'path é campo confiável e canônico — o arquivo não o define');
   assert.strictEqual(entry.unreadable, false, 'unreadable é campo confiável — o arquivo não o define');
 });
 

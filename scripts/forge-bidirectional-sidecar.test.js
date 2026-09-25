@@ -52,11 +52,19 @@ function setup() {
   write(path.join(cwd, m, 'slices/S01/S01-PLAN.md'), '# Plan\n\n- [ ] T01: Work\n');
   return cwd;
 }
-function request(cwd, unitType, engine = 'claude') {
+function request(cwd, unitType, engine = 'claude', codexModel = 'gpt-6-luna') {
   const host = engine === 'claude' ? 'codex' : 'claude';
   // Test Codex artifact delivery with a route produced from the configured tier.
   if (engine === 'codex') {
-    write(path.join(cwd, '.gsd/forge-prefs.jsonc'), { tier_models: { light: 'gpt-5.6-sol', standard: 'gpt-5.6-sol', heavy: 'gpt-5.6-sol', max: 'gpt-5.6-sol' } });
+    write(path.join(cwd, '.gsd/forge-prefs.jsonc'), {
+      tier_models: { light: codexModel, standard: codexModel, heavy: codexModel, max: codexModel },
+      effort: { [unitType]: 'medium' },
+    });
+  } else {
+    const prefsFile = path.join(cwd, '.gsd/forge-prefs.jsonc');
+    const prefs = JSON.parse(fs.readFileSync(prefsFile, 'utf8'));
+    prefs.effort = { ...(prefs.effort || {}), [unitType]: 'medium' };
+    write(prefsFile, prefs);
   }
   const route = resolveDispatch({ cwd, unitType, hostRuntime: host });
   const r = { cwd, contextRoot: cwd, unitType, milestoneId: 'M001',
@@ -91,8 +99,15 @@ function memoryPayload(text = 'The canonical publisher allocates memory IDs unde
 }
 function memoryRequest(cwd, engine, sourceUnitId, milestoneId) {
   if (engine === 'codex') write(path.join(cwd, '.gsd/forge-prefs.jsonc'), {
-    tier_models: { light: 'gpt-5.6-sol', standard: 'gpt-5.6-sol', heavy: 'gpt-5.6-sol', max: 'gpt-5.6-sol' },
+    tier_models: { light: 'gpt-6-luna', standard: 'gpt-6-luna', heavy: 'gpt-6-luna', max: 'gpt-6-luna' },
+    effort: { 'memory-extract': 'medium' },
   });
+  else {
+    const prefsFile = path.join(cwd, '.gsd/forge-prefs.jsonc');
+    const prefs = JSON.parse(fs.readFileSync(prefsFile, 'utf8'));
+    prefs.effort = { ...(prefs.effort || {}), 'memory-extract': 'medium' };
+    write(prefsFile, prefs);
+  }
   const hostRuntime = engine === 'claude' ? 'codex' : 'claude';
   const route = resolveDispatch({ cwd, unitType: 'memory-extract', hostRuntime,
     workerEngine: engine, workerMode: 'sidecar', sidecarDeclared: true });
@@ -128,6 +143,8 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
   }
   for (const engine of ['claude', 'codex']) for (const type of ARTIFACT_UNITS) {
     const cwd = setup(), r = request(cwd, type, engine), p = payload(r);
+    assert.strictEqual(r.route.effort, 'medium');
+    if (engine === 'codex') assert.strictEqual(r.route.model_resolved, 'gpt-6-luna');
     write(path.join(cwd, 'payload.json'), p);
     let codexCalls = 0;
     xllm.invokeCodexAppServer = async options => {
@@ -150,6 +167,7 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
       assert.strictEqual(fs.readFileSync(path.join(cwd, 'invocations.txt'), 'utf8'), 'spawn\n');
       const args = JSON.parse(fs.readFileSync(path.join(cwd, 'argv.json')));
       assert.strictEqual(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep');
+      assert.strictEqual(args[args.indexOf('--model') + 1], r.route.model_resolved);
       assert.strictEqual(args[args.indexOf('--effort') + 1], r.route.effort);
       assert(!JSON.stringify(args).includes(token));
     } else assert.strictEqual(codexCalls, 1);
@@ -158,6 +176,32 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert(!events.includes('worker-engine-fallback'));
     write(path.join(cwd, p.artifacts[0].path), 'another writer');
     await rejects(() => unit.runUnitSidecar(r), 'artifact-conflict');
+  }
+  for (const type of ['complete-slice', 'complete-milestone']) {
+    const cwd = setup(), r = request(cwd, type, 'codex', 'gpt-5.6-sol'), p = payload(r);
+    write(path.join(cwd, 'payload.json'), p);
+    let calls = 0;
+    xllm.invokeCodexAppServer = async options => {
+      calls++;
+      assert.strictEqual(options.model, 'gpt-5.6-sol');
+      assert.strictEqual(options.effort, 'medium');
+      assert.strictEqual(options.sandbox, 'read-only');
+      return { finalText: JSON.stringify(p) };
+    };
+    assert.strictEqual((await unit.runUnitSidecar(r)).status, 'done');
+    assert.strictEqual(calls, 1);
+  }
+  for (const [kind, makeRequest] of [
+    ['closure', dir => request(dir, 'complete-slice', 'codex')],
+    ['memory', dir => memoryRequest(dir, 'codex', 'T-20260924010101-route-mismatch', 'M001')],
+  ]) {
+    const cwd = setup(), r = makeRequest(cwd);
+    r.route = { ...r.route, sidecar_model: 'gpt-5.6-sol' };
+    let providerCalls = 0;
+    xllm.invokeCodexAppServer = async () => { providerCalls++; return { finalText: '{}' }; };
+    await assert.rejects(() => unit.runUnitSidecar(r), error => error.code === 'route-model-identity-mismatch', kind);
+    assert.strictEqual(providerCalls, 0, `${kind} mismatch reached the provider`);
+    assert.strictEqual(fs.existsSync(`${r.resultFile}.receipt.json`), false);
   }
   // Memory uses the existing read-only transports but has a specialized owner
   // publisher. Inference may finish early; the ready receipt defers canonical
@@ -378,7 +422,9 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(nativePublicationEvents[0].model_resolved, 'gpt-6-luna');
     assert.strictEqual(nativePublicationEvents[0].model_argument, 'gpt-6-luna');
     assert.strictEqual(nativePublicationEvents[0].model_observed, null);
-    const nativeReplay = await unit.runNativeMemory({ ...base, policy: { decision: 'extract' } }, async () => {
+    const nativeReplay = await unit.runNativeMemory({ ...base,
+      invocationTelemetry: { ...delivered.telemetry, model_argument: 'forged-replay-value' },
+      policy: { decision: 'extract' } }, async () => {
       calls++;
       throw new Error('provider must not run on ready replay');
     });
@@ -416,6 +462,26 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(secondReplay.publication.status, 'noop');
     assert.strictEqual(secondReplay.provider_called, false);
     assert.strictEqual(calls, 2);
+    for (const [suffix, invocationTelemetry, code] of [
+      ['missing-telemetry', undefined, 'native-memory-telemetry-invalid'],
+      ['incomplete-telemetry', { model_resolved: route.model_resolved, model_argument: route.model_resolved,
+        effort_resolved: route.effort }, 'native-memory-telemetry-invalid'],
+      ['divergent-telemetry', { ...delivered.telemetry, model_resolved: 'gpt-5.6-sol' },
+        'native-memory-telemetry-mismatch'],
+    ]) {
+      const dispatchId = `native-${suffix}`;
+      await assert.rejects(() => unit.acceptNativeMemoryResult({ ...base, dispatchId, extractionId: dispatchId,
+        resultFile: path.join(root, `${dispatchId}.json`), rawResult: memoryPayload(), invocationTelemetry }),
+      error => error.code === code);
+      const failedReceipt = JSON.parse(fs.readFileSync(path.join(root, `${dispatchId}.json.receipt.json`), 'utf8'));
+      assert.strictEqual(failedReceipt.phase, 'failed');
+      assert.strictEqual(failedReceipt.failure.reason_code, code);
+    }
+    const rejectedAcceptanceEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication'
+        && /^native-(?:missing|incomplete|divergent)-telemetry$/.test(event.dispatch_id));
+    assert.deepStrictEqual(rejectedAcceptanceEvents, [], 'invalid adapter telemetry cannot reach owner publication');
     for (const [suffix, rawResult, expectedStatus, expectedReason] of [
       ['empty', { schema_version: 1, status: 'done', summary: 'Nothing durable', questions: [], facts: [], events: [] },
         'done', 'empty-extraction'],
@@ -471,6 +537,44 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(interruptedResult.reason_code, 'native-memory-attempt-interrupted');
     assert.strictEqual(interruptedResult.provider_called, false);
     assert.strictEqual(calls, 3);
+
+    const failureDispatch = 'cli-binding-refusal';
+    const failureRequest = { ...base, dispatchId: failureDispatch, extractionId: failureDispatch,
+      resultFile: path.join(root, 'cli-binding-refusal.json'), publicationSafe: false,
+      publicationBoundary: { ownerJoined: false, checkedAt: '2026-09-24T12:09:00Z',
+        protectedSnapshots: [{ id: 'fixture-worker', state: 'active' }] },
+      nativeFailure: { status: 'failure', reason_code: 'native-effort-binding-mismatch',
+        provider_called: false, hint: `untrusted ${token}`,
+        telemetry: { ...delivered.telemetry, diagnostic: token } } };
+    const failureRequestFile = path.join(root, 'cli-binding-refusal-request.json');
+    write(failureRequestFile, failureRequest);
+    let failureCli = spawnSync(process.execPath,
+      [path.join(__dirname, 'forge-unit-sidecar.js'), '--accept-native-memory', failureRequestFile],
+      { cwd: dir, encoding: 'utf8' });
+    assert.strictEqual(failureCli.status, 0, failureCli.stderr);
+    let failureReceipt = fs.readFileSync(`${failureRequest.resultFile}.receipt.json`, 'utf8');
+    assert(!failureReceipt.includes(token));
+    assert.strictEqual(JSON.parse(failureReceipt).failure.reason_code, 'native-effort-binding-mismatch');
+    let failureEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === failureDispatch);
+    assert.strictEqual(failureEvents.length, 0, 'unsafe failure acceptance must not write the owner event');
+    failureRequest.publicationSafe = true;
+    failureRequest.publicationBoundary = { ownerJoined: true, checkedAt: '2026-09-24T12:10:00Z',
+      protectedSnapshots: [{ id: 'fixture-worker', state: 'ended' }] };
+    write(failureRequestFile, failureRequest);
+    failureCli = spawnSync(process.execPath,
+      [path.join(__dirname, 'forge-unit-sidecar.js'), '--accept-native-memory', failureRequestFile],
+      { cwd: dir, encoding: 'utf8' });
+    assert.strictEqual(failureCli.status, 0, failureCli.stderr);
+    failureReceipt = fs.readFileSync(`${failureRequest.resultFile}.receipt.json`, 'utf8');
+    assert(!failureReceipt.includes(token));
+    failureEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+      .trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === failureDispatch);
+    assert.strictEqual(failureEvents.length, 1);
+    assert.strictEqual(failureEvents[0].publication_reason, 'worker-error');
+    assert(!JSON.stringify(failureEvents[0]).includes(token));
   }
   {
     const dir = setup();

@@ -1490,7 +1490,24 @@ through an external JSON request to
 validate, persist a
 ready receipt, and call the same owner publisher. Set `publicationSafe:true`
 only with `ownerJoined`, `checkedAt`, and every protected snapshot listed as
-ended. Unsupported model/effort, missing
+ended.
+
+Native refusal and provider failure use that same acceptance command. Build the
+external request from owner-known `cwd`, `contextRoot`, `sourceUnitType`,
+`sourceUnitId`, optional `milestoneId`, `workflowId`, `dispatchId`,
+`extractionId`, `sourceFingerprint`, `route`, `hostRuntime`, `resultFile`,
+`publicationSafe`, and `publicationBoundary`. If `buildNativeInvocation` returns
+`ok:false`, do not call the provider; omit `rawResult` and set
+`nativeFailure:{reason_code:native.reason_code,provider_called:false,telemetry:native.telemetry||null}`.
+If the native provider throws or `invokeNative` returns `ok:false` after calling
+it, use the same request with `provider_called:true` and the adapter telemetry.
+Write no hint or provider diagnostic into the request. In both cases run
+`node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --accept-native-memory <request-file>`
+and use its JSON result as the durable failure outcome. This acceptance remains
+nonblocking for the completed source unit. A policy `skip` never enters this
+failure path because it performs no resolver, adapter, or provider work.
+
+Unsupported model/effort, missing
 auth, invalid/partial/blocked output, quarantine or publication failure warns
 and does not block the completed source unit. Report saved memory only from the
 publication outcome, never from provider success.

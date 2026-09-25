@@ -370,29 +370,116 @@ function nativeMemoryFingerprint(request) {
     resultFile: undefined, publicationSafe: undefined, publicationBoundary: undefined,
     waitForPublicationBoundary: undefined }));
 }
-function nativeMemoryIdentity(request) {
-  const r = request || {}, route = r.route || {}, telemetry = r.invocationTelemetry || {};
+function nativeMemoryRouteIdentity(request) {
+  const r = request || {}, route = r.route || {};
   const routeModel = route.model_resolved || route.model || null;
   const routeEffort = route.effort || null;
-  const model = telemetry.model_resolved || routeModel;
-  const effort = telemetry.effort_resolved || routeEffort;
-  const mismatch = (routeModel && model !== routeModel) || (routeEffort && effort !== routeEffort)
-    || (r.model !== undefined && r.model !== model) || (r.effort !== undefined && r.effort !== effort);
-  if (!model || !effort || mismatch) {
+  if (!routeModel || !routeEffort
+      || (r.model !== undefined && r.model !== routeModel)
+      || (r.effort !== undefined && r.effort !== routeEffort)) {
     fail('native-memory-route-mismatch', 'Native memory identity must match the authoritative resolved route and invocation telemetry.');
   }
-  return { model, effort };
+  return { model: routeModel, effort: routeEffort };
+}
+function nativeMemoryIdentity(request, durableTelemetry) {
+  const r = request || {}, route = r.route || {};
+  const identity = nativeMemoryRouteIdentity(r);
+  const telemetry = durableTelemetry === undefined ? r.invocationTelemetry : durableTelemetry;
+  const required = ['model_requested', 'model_resolved', 'model_argument', 'model_observed',
+    'model_observed_source', 'effort_requested', 'effort_resolved', 'effort_argument',
+    'effort_transport', 'effort_transport_value', 'effort_transport_source',
+    'effort_binding_observed', 'effort_binding_observed_source', 'effort_binding_observed_fingerprint',
+    'effort_applied', 'effort_applied_source', 'capabilities_source'];
+  if (!telemetry || typeof telemetry !== 'object' || Array.isArray(telemetry)
+      || required.some(key => !Object.prototype.hasOwnProperty.call(telemetry, key))
+      || Object.keys(telemetry).some(key => !required.includes(key))) {
+    fail('native-memory-telemetry-invalid', 'Native memory publication requires the complete adapter telemetry envelope.');
+  }
+  const host = route.host_runtime || r.hostRuntime;
+  const paired = (value, source) => (value === null && source === null)
+    || (typeof value === 'string' && value && typeof source === 'string' && source);
+  const commonMismatch = telemetry.model_requested !== (route.model_requested ?? null)
+    || telemetry.model_resolved !== identity.model
+    || telemetry.effort_resolved !== identity.effort
+    || telemetry.effort_requested !== identity.effort
+    || typeof telemetry.model_argument !== 'string' || !telemetry.model_argument
+    || typeof telemetry.capabilities_source !== 'string' || !telemetry.capabilities_source
+    || !paired(telemetry.model_observed, telemetry.model_observed_source)
+    || !paired(telemetry.effort_applied, telemetry.effort_applied_source)
+    || (telemetry.effort_applied !== null && telemetry.effort_applied !== identity.effort);
+  const codexMismatch = host === 'codex' && (telemetry.model_argument !== identity.model
+    || telemetry.effort_argument !== identity.effort
+    || telemetry.effort_transport !== 'native-argument'
+    || telemetry.effort_transport_value !== identity.effort
+    || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+    || telemetry.effort_binding_observed !== null
+    || telemetry.effort_binding_observed_source !== null
+    || telemetry.effort_binding_observed_fingerprint !== null);
+  const claudeMismatch = host === 'claude' && (telemetry.model_argument !== route.alias
+    || telemetry.effort_argument !== null
+    || telemetry.effort_transport !== 'agent-frontmatter'
+    || telemetry.effort_transport_value !== identity.effort
+    || telemetry.effort_binding_observed !== identity.effort
+    || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+    || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
+    || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
+    || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
+    || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint));
+  if (!['codex', 'claude'].includes(host) || commonMismatch || codexMismatch || claudeMismatch) {
+    fail('native-memory-telemetry-mismatch', 'Native memory telemetry must describe the exact resolved route and adapter transport.');
+  }
+  return identity;
+}
+function normalizedNativeFailure(request) {
+  const raw = request && request.nativeFailure;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+      || typeof raw.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(raw.reason_code)) {
+    fail('native-memory-failure-invalid', 'Native memory failure requires a bounded machine-readable reason_code.');
+  }
+  const telemetry = memoryTelemetry({ telemetry: raw.telemetry || null });
+  return {
+    status: 'failure', reason_code: raw.reason_code,
+    provider_called: raw.provider_called === true,
+    telemetry,
+    publication: { status: 'noop', reason: 'worker-error' },
+  };
+}
+function acceptNativeMemoryFailure(request, loc) {
+  const r = request || {};
+  nativeMemoryRouteIdentity(r);
+  const files = nativeReceiptFiles(r);
+  const fingerprint = nativeMemoryFingerprint(r);
+  const proposed = normalizedNativeFailure(r);
+  let failure = proposed;
+  if (fs.existsSync(files.receiptFile)) {
+    const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
+    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.phase !== 'failed' || !existing.failure) fail('dispatch-identity-conflict');
+    failure = existing.failure;
+  } else {
+    json(files.receiptFile, { phase: 'failed', fingerprint, dispatch_id: r.dispatchId, failure: proposed });
+  }
+  json(files.resultFile, failure);
+  appendNativeMemoryFailureEvent(r, loc, failure);
+  return failure;
 }
 async function acceptNativeMemoryResult(request) {
   const r = request || {}, loc = locations({ ...r, unitType: 'memory-extract' });
   if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
-  const identity = nativeMemoryIdentity(r);
+  if (r.nativeFailure !== undefined && r.rawResult !== undefined) {
+    fail('native-memory-failure-invalid', 'Native memory acceptance cannot contain both a result and a failure.');
+  }
+  if (r.nativeFailure !== undefined) return acceptNativeMemoryFailure(r, loc);
   const files = nativeReceiptFiles(r);
   const fingerprint = nativeMemoryFingerprint(r);
   const existing = fs.existsSync(files.receiptFile) ? JSON.parse(fs.readFileSync(files.receiptFile, 'utf8')) : null;
   if (existing) {
     if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
     if (existing.phase === 'ready') {
+      const replayIdentity = nativeMemoryIdentity(r, existing.telemetry);
+      if (existing.model !== replayIdentity.model || existing.effort !== replayIdentity.effort) {
+        fail('native-memory-telemetry-mismatch', 'The durable receipt identity does not match its adapter telemetry.');
+      }
       const replayed = await publishReadyRecord(r, existing);
       json(files.resultFile, replayed);
       return replayed;
@@ -404,6 +491,7 @@ async function acceptNativeMemoryResult(request) {
       dispatch_id: r.dispatchId }), { flag: 'wx', mode: 0o600 });
   }
   try {
+    const identity = nativeMemoryIdentity(r);
     const extraction = require('./forge-memory-extraction').validateExtractionResult(r.rawResult,
       { sourceUnit: loc.sourceUnit });
     const record = { phase: 'ready', kind: 'memory-extraction', fingerprint,
@@ -439,7 +527,7 @@ async function runNativeMemory(request, invoke) {
     return { status: 'skipped', reason: r.policy.reason || 'memory-policy-skip', provider_called: false };
   }
   const loc = locations({ ...r, unitType: 'memory-extract' });
-  nativeMemoryIdentity(r);
+  nativeMemoryRouteIdentity(r);
   const receiptFiles = nativeReceiptFiles(r);
   if (fs.existsSync(receiptFiles.receiptFile)) {
     try {
@@ -501,7 +589,15 @@ async function runUnitSidecar(request) {
   const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType });
   if (route.dispatch_allowed !== true || route.worker_mode !== 'sidecar' || !route.sidecar_declared
     || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
-  const model = route.resolved_worker_engine === 'codex' ? (route.sidecar_model || route.model) : route.model;
+  const authoritativeModel = route.model_resolved || route.model;
+  if (!authoritativeModel
+      || (route.model_resolved && route.model && route.model_resolved !== route.model)
+      || (route.resolved_worker_engine === 'codex' && route.sidecar_model
+        && route.sidecar_model !== authoritativeModel)) {
+    fail('route-model-identity-mismatch', 'The sidecar model must equal the authoritative resolved model.');
+  }
+  const model = route.resolved_worker_engine === 'codex'
+    ? (route.sidecar_model || authoritativeModel) : authoritativeModel;
   if (!model || !route.effort) fail('resolved-route-required');
   const family = require('./forge-model-alias').modelFamily(model);
   if ((family === 'gpt' ? 'codex' : family) !== route.resolved_worker_engine) {
@@ -711,5 +807,7 @@ if (require.main === module) {
     if (!['--request', '--accept-native-memory'].includes(process.argv[2]) || !process.argv[3]) fail('request-file-required');
     const request = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
     return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request);
+  }).then(result => {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
   }).catch(error => { process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });
 }

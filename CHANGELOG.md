@@ -15,6 +15,8 @@
   passa a medium, alinhado ao agente, preservando overrides explícitos.
 - Publicação e recusa possuem telemetria própria, confiança zero permanece zero
   e a quarentena rejeita links que redirecionem escritas para fora do projeto.
+- Aliases Claude e modelos de sidecar contraditórios são recusados antes da
+  chamada; a publicação nativa exige o registro coerente dos argumentos enviados.
 
 ## v4.37.0 - Entrega final por critério e evidência
 

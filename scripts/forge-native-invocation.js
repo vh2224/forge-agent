@@ -230,10 +230,16 @@ function buildNativeInvocation(options) {
     };
   }
 
-  const alias = text(dispatch.alias || modelToAlias(model).alias);
-  if (!alias) {
+  const canonicalAlias = modelToAlias(model);
+  const alias = text(canonicalAlias.alias);
+  if (!canonicalAlias.mapped || !alias) {
     return refusal(host, 'native-claude-alias-unmapped',
       `Resolved model ${model} has no Claude native-tool alias.`);
+  }
+  const suppliedAlias = text(dispatch.alias);
+  if (suppliedAlias && suppliedAlias !== alias) {
+    return refusal(host, 'native-claude-alias-mismatch',
+      `Resolved model ${model} maps to Claude alias ${alias}, not ${suppliedAlias}.`);
   }
   if (!stringSet(caps.model_aliases).has(alias)) {
     return refusal(host, 'native-model-unsupported',

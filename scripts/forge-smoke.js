@@ -7196,11 +7196,16 @@ function smokeDispatchResolve() {
     });
   }
 
-  // ── (i) degradedContract emits dispatch_engine === claude (contract stability on runtime-error path) ──
+  // ── (i) degradedContract selects no engine/model and refuses fail-closed ──
   {
     const dc = degradedContract(['--unit-type', 'execute-task']);
-    assert(dc.engine === 'claude', '(i) degradedContract engine === claude', JSON.stringify(dc));
-    assert(dc.dispatch_engine === 'claude', '(i) degradedContract dispatch_engine === claude (additive, explicit)', JSON.stringify(dc));
+    assert(dc.engine === '' && dc.dispatch_engine === '',
+      '(i) degradedContract leaves engine identity unresolved instead of inventing Claude', JSON.stringify(dc));
+    assert(dc.model === '' && dc.model_requested === null && dc.model_resolved === null,
+      '(i) degradedContract leaves model identity unresolved', JSON.stringify(dc));
+    assert(dc.config_ok === false && dc.dispatch_allowed === false
+      && dc.dispatch_reason_code === 'routing-runtime-error',
+    '(i) degradedContract refuses fail-closed with the named runtime error', JSON.stringify(dc));
   }
 
   // ── (j) doc-presence: the 3 SKILLs extract DISPATCH_ENGINE + gate branches on it, ──
@@ -17820,12 +17825,7 @@ function smokeHostWorkerParityAcceptance() {
       const launchEntries = sourceGuard.SOURCE_REGISTRY
         .filter((entry) => entry.path === relative && entry.kind === 'agent' && entry.classification === 'operational')
         .map((entry) => discoveredByIdentity.get(sourceGuard.identity(entry)))
-        .filter(Boolean)
-        .filter((candidate) => {
-          const line = candidate.evidence.trim();
-          return /^(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?Agent\(\{$/.test(line)
-            || /^Agent\(\{\s*subagent_type:/.test(line);
-        });
+        .filter(Boolean);
       if (gateLine <= 0 || launchEntries.length === 0
         || launchEntries.some((candidate) => candidate.line <= gateLine)) {
         projectedSkillProblems.push(`${relative}:dispatch-allowed-not-consumed-before-launch`);

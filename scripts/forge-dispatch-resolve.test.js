@@ -260,6 +260,37 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
+  runCase('GPT medium matrix preserves model and effort across three units and two hosts', () => {
+    const units = [
+      { unitType: 'memory-extract', tier: 'light' },
+      { unitType: 'complete-slice', tier: 'light' },
+      { unitType: 'complete-milestone', tier: 'light' },
+    ];
+    for (const model of ['gpt-6-luna', 'gpt-5.6-sol']) {
+      const prefsJsonc = JSON.stringify({
+        tier_models: { light: model },
+        effort: { 'memory-extract': 'medium', 'complete-slice': 'medium', 'complete-milestone': 'medium' },
+      });
+      const f = mkFixture({ prefsJsonc });
+      for (const unit of units) {
+        for (const hostRuntime of ['codex', 'claude']) {
+          const r = dispatch(f, { unitType: unit.unitType, hostRuntime });
+          assertEqual(r.tier, unit.tier, `${unit.unitType}/${hostRuntime} keeps its tier`);
+          assertEqual(r.model, model, `${unit.unitType}/${hostRuntime} keeps full GPT model`);
+          assertEqual(r.model_requested, model, `${unit.unitType}/${hostRuntime} requested model is explicit`);
+          assertEqual(r.model_resolved, model, `${unit.unitType}/${hostRuntime} resolved model is explicit`);
+          assertEqual(r.effort, 'medium', `${unit.unitType}/${hostRuntime} keeps medium effort`);
+          assertEqual(r.dispatch_engine, 'codex', `${unit.unitType}/${hostRuntime} keeps Codex transport`);
+          assertEqual(r.resolved_worker_engine, 'codex', `${unit.unitType}/${hostRuntime} keeps GPT worker family`);
+          assertEqual(r.worker_mode, hostRuntime === 'codex' ? 'native' : 'sidecar',
+            `${unit.unitType}/${hostRuntime} derives the correct host transport`);
+          assertEqual(r.dispatch_allowed, true, `${unit.unitType}/${hostRuntime} transport is supported`);
+        }
+      }
+      cleanup(f);
+    }
+  });
+
   runCase('unsupported sidecar unit is refused without changing model family', () => {
     const f = mkFixture({ prefsJsonc: '{"tier_models":{"standard":"gpt-6-sol"}}' });
     const r = dispatch(f, { unitType: 'unknown-preparation', hostRuntime: 'claude' });

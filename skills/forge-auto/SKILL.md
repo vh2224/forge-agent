@@ -1739,6 +1739,21 @@ Native output is accepted through an external JSON request passed to
 validate and persist a
 ready receipt before owner publication.
 
+Native refusal and provider failure use that same acceptance command. Build the
+external request from owner-known `cwd`, `contextRoot`, `sourceUnitType`,
+`sourceUnitId`, optional `milestoneId`, `workflowId`, `dispatchId`,
+`extractionId`, `sourceFingerprint`, `route`, `hostRuntime`, `resultFile`,
+`publicationSafe`, and `publicationBoundary`. If `buildNativeInvocation` returns
+`ok:false`, do not call the provider; omit `rawResult` and set
+`nativeFailure:{reason_code:native.reason_code,provider_called:false,telemetry:native.telemetry||null}`.
+If the native provider throws or `invokeNative` returns `ok:false` after calling
+it, use the same request with `provider_called:true` and the adapter telemetry.
+Write no hint or provider diagnostic into the request. In both cases run
+`node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --accept-native-memory <request-file>`
+and use its JSON result as the durable failure outcome. This acceptance remains
+nonblocking for the completed source unit. A policy `skip` never enters this
+failure path because it performs no resolver, adapter, or provider work.
+
 Background inference uses `publicationSafe:false`, which returns `deferred` and
 leaves the ready receipt replayable. Before any next protected dispatch, join
 the extraction and replay the identical request with `publicationSafe:true`

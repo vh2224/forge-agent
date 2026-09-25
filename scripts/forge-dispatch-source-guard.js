@@ -286,6 +286,12 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-native-ef3530569ac1","skills/forge-task/SKILL.md","native","operational","sha256:ef3530569ac1e0e2d3ad8a023861143210693ca0d9116587259e6f4ffcdab2ca","",""],
   ["skills-forge-task-skill-md-native-9fea978f6a6e","skills/forge-task/SKILL.md","native","operational","sha256:9fea978f6a6e0b5c20a0da4863c1e749f7f28b7c0ab639f599bf8f7577b85632","",""],
   ["skills-forge-task-skill-md-native-4ebc1f2a019d","skills/forge-task/SKILL.md","native","operational","sha256:4ebc1f2a019d611b90245286d49ffdcaba97d73a16248ac065482d5a6202d327","",""],
+  ["skills-forge-auto-skill-md-native-ad24933a9194","skills/forge-auto/SKILL.md","native","operational","sha256:ad24933a91949d11cba81affa2292c7d5d7cd380e6e2fac24631e55a5e8984c1","",""],
+  ["skills-forge-auto-skill-md-native-957c2ceb980c","skills/forge-auto/SKILL.md","native","operational","sha256:957c2ceb980c7d64165aa5d8368f113e6d99d453192da039336e5590f4280e71","",""],
+  ["skills-forge-next-skill-md-native-2fc56dac0488","skills/forge-next/SKILL.md","native","operational","sha256:2fc56dac048824b92f0b4438555c60cc4409785c903edcec52b25655ae181631","",""],
+  ["skills-forge-next-skill-md-native-fe9eda330691","skills/forge-next/SKILL.md","native","operational","sha256:fe9eda33069124043be5a8984504482f2c811a6e2562fbd09b6118899561774b","",""],
+  ["skills-forge-task-skill-md-native-fd1518c01769","skills/forge-task/SKILL.md","native","operational","sha256:fd1518c017690481652b4ec9709b3c7fe645c2c3ca010bcea1980afe30f78157","",""],
+  ["skills-forge-task-skill-md-native-1789a03a8db4","skills/forge-task/SKILL.md","native","operational","sha256:1789a03a8db4573f64785bcc722951f01beaa926bc768ac0889cd8298fa3dd6a","",""],
 ];
 
 const SOURCE_REGISTRY = deepFreeze(REGISTRY_ROWS.map((row) => ({

@@ -12,12 +12,13 @@ const {
   buildNativeInvocation,
   invokeNative,
 } = require('./forge-native-invocation.js');
+const { resolveDispatch } = require('./forge-dispatch-resolve.js');
 
 const codexCapabilities = Object.freeze({
   available: true,
   tool: 'spawn_agent',
   source: 'test-active-tool',
-  models: ['gpt-6-luna', 'gpt-6-sol'],
+  models: ['gpt-6-luna', 'gpt-5.6-sol', 'gpt-6-sol'],
   reasoning_efforts: ['low', 'medium', 'high'],
   fork_turns: ['none', '3'],
 });
@@ -61,23 +62,51 @@ async function main() {
   assert.strictEqual(validateActiveCapabilities('codex', codexCapabilities).ok, true);
   assert.strictEqual(validateActiveCapabilities('codex', null).reason_code, 'native-capabilities-missing');
 
-  for (const model of ['gpt-6-luna', 'gpt-6-sol']) {
-    const built = buildNativeInvocation({
-      hostRuntime: 'codex',
-      resolvedDispatch: dispatch(model, 'medium', 'codex'),
-      activeCapabilities: codexCapabilities,
-      taskName: `Memory-${model}/Dispatch-ABC`,
-      agentType: 'forge-memory',
-      prompt: 'Return the bounded memory extraction envelope.',
-    });
-    assert.strictEqual(built.ok, true, JSON.stringify(built));
-    assert.strictEqual(built.args.model, model);
-    assert.strictEqual(built.args.reasoning_effort, 'medium');
-    assert.strictEqual(built.args.fork_turns, 'none');
-    assert.strictEqual(built.args.task_name, `memory_${model.replace(/-/g, '_')}_dispatch_abc`);
-    assert.match(built.args.task_name, /^[a-z0-9_]+$/);
-    assert.strictEqual(built.telemetry.model_argument, model);
-    assert.strictEqual(built.telemetry.model_observed, null);
+  const mediumTransportUnits = [
+    { unitType: 'memory-extract', agentType: 'forge-memory' },
+    { unitType: 'complete-slice', agentType: 'forge-completer' },
+    { unitType: 'complete-milestone', agentType: 'forge-completer' },
+  ];
+  for (const model of ['gpt-6-luna', 'gpt-5.6-sol']) {
+    const routeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-native-route-'));
+    fs.mkdirSync(path.join(routeRoot, '.gsd', 'forge'), { recursive: true });
+    fs.writeFileSync(path.join(routeRoot, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({
+      tier_models: { light: model },
+      effort: { 'memory-extract': 'medium', 'complete-slice': 'medium', 'complete-milestone': 'medium' },
+    }));
+    try {
+      for (const unit of mediumTransportUnits) {
+        const taskName = `${unit.unitType}-${model}-dispatch`;
+        const nativeRoute = resolveDispatch({ cwd: routeRoot, unitType: unit.unitType, hostRuntime: 'codex' });
+        const built = buildNativeInvocation({
+          hostRuntime: 'codex', resolvedDispatch: nativeRoute,
+          activeCapabilities: codexCapabilities, taskName,
+          agentType: unit.agentType, prompt: `Run ${unit.unitType}.`,
+        });
+        assert.strictEqual(built.ok, true, `${unit.unitType}/${model}: ${JSON.stringify(built)}`);
+        assert.strictEqual(built.args.model, model);
+        assert.strictEqual(built.args.reasoning_effort, 'medium');
+        assert.strictEqual(built.args.fork_turns, 'none');
+        assert.match(built.args.task_name, /^[a-z0-9_]+$/);
+        assert.strictEqual(built.telemetry.model_resolved, model);
+        assert.strictEqual(built.telemetry.model_argument, model);
+        assert.strictEqual(built.telemetry.effort_resolved, 'medium');
+        assert.strictEqual(built.telemetry.effort_argument, 'medium');
+        assert.strictEqual(built.telemetry.model_observed, null);
+
+        const remoteRoute = resolveDispatch({ cwd: routeRoot, unitType: unit.unitType, hostRuntime: 'claude' });
+        assert.strictEqual(remoteRoute.worker_mode, 'sidecar');
+        const refusedNative = buildNativeInvocation({
+          hostRuntime: 'claude', resolvedDispatch: remoteRoute,
+          activeCapabilities: claudeCapabilities, taskName,
+          agentType: unit.agentType, prompt: `Run ${unit.unitType}.`,
+        });
+        assert.strictEqual(refusedNative.reason_code, 'native-route-identity-mismatch',
+          `${unit.unitType}/${model} must remain on the declared sidecar transport`);
+      }
+    } finally {
+      fs.rmSync(routeRoot, { recursive: true, force: true });
+    }
   }
 
   const unsupportedModel = buildNativeInvocation({
@@ -154,6 +183,23 @@ async function main() {
   assert.strictEqual(claude.telemetry.effort_binding_observed, 'medium');
   assert.strictEqual(claude.telemetry.effort_applied, null);
   assert.strictEqual(claude.telemetry.effort_binding_observed_fingerprint, compatibleAgent.fingerprint);
+
+  const aliasAbsent = buildNativeInvocation({
+    hostRuntime: 'claude',
+    resolvedDispatch: dispatch('claude-sonnet-5', 'medium', 'claude'),
+    activeCapabilities: claudeCapabilities,
+    agentType: 'forge-memory', prompt: 'memory', effortBinding,
+  });
+  assert.strictEqual(aliasAbsent.ok, true, JSON.stringify(aliasAbsent));
+  assert.strictEqual(aliasAbsent.args.model, 'sonnet', 'missing route alias is derived from the full model id');
+
+  const contradictoryAlias = buildNativeInvocation({
+    hostRuntime: 'claude',
+    resolvedDispatch: dispatch('claude-opus-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities,
+    agentType: 'forge-memory', prompt: 'memory', effortBinding,
+  });
+  assert.strictEqual(contradictoryAlias.reason_code, 'native-claude-alias-mismatch');
 
   let claudeCallbackArgs = null;
   const invokedClaude = await invokeNative({

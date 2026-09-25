@@ -1514,6 +1514,22 @@ performs the same ready-receipt step itself. Set `publicationSafe:true` only
 with owner-joined boundary evidence listing every protected task snapshot as
 ended. Validation and the ready receipt
 precede `publishExtraction`; empty/partial/blocked/invalid results do not publish.
+
+Native refusal and provider failure use that same acceptance command. Build the
+external request from owner-known `cwd`, `contextRoot`, `sourceUnitType`,
+`sourceUnitId`, optional `milestoneId`, `workflowId`, `dispatchId`,
+`extractionId`, `sourceFingerprint`, `route`, `hostRuntime`, `resultFile`,
+`publicationSafe`, and `publicationBoundary`. If `buildNativeInvocation` returns
+`ok:false`, do not call the provider; omit `rawResult` and set
+`nativeFailure:{reason_code:native.reason_code,provider_called:false,telemetry:native.telemetry||null}`.
+If the native provider throws or `invokeNative` returns `ok:false` after calling
+it, use the same request with `provider_called:true` and the adapter telemetry.
+Write no hint or provider diagnostic into the request. In both cases run
+`node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --accept-native-memory <request-file>`
+and use its JSON result as the durable failure outcome. This acceptance remains
+nonblocking for the completed source unit. A policy `skip` never enters this
+failure path because it performs no resolver, adapter, or provider work.
+
 Continue nonblocking on extraction or publication failure and report the actual
 publication status (`written`, `noop`, `quarantined`, `conflict`, `failure`, or
 `deferred`). Provider success is not evidence that memory was saved.
