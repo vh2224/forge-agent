@@ -532,7 +532,7 @@ fi
 > HTTP 400 on an explicit `thinking: disabled` at any effort, and `claude-opus-5` returns HTTP 400
 > when `disabled` is paired with effort `xhigh`/`max` (Opus 4.7/4.8 accept it at any effort).
 
-`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are set by the resolver above. Inject `effort: {unit_effort}` and (for opus/fable phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
+`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) are set by the resolver above. The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only the fingerprinted agent-frontmatter observation at the native adapter does.
 
 **Batch determination (step 1.6 — execute-task only):** When `unit_type == execute-task`, the dispatch is no longer strictly single-task. Invoke `scripts/forge-parallelism.js` to compute a **ready batch** — a set of tasks in the active slice whose `depends:[]` are satisfied AND whose `writes:[]` don't overlap with each other.
 
@@ -573,7 +573,7 @@ When `mode == "legacy"`, emit one line (the first time per slice — not every i
 
 ```bash
 declare -A BATCH_ROUTE_JSON BATCH_HOST_RUNTIME BATCH_WORKER_MODE BATCH_DISPATCH_ALLOWED
-declare -A BATCH_RESOLVED_WORKER BATCH_DISPATCH_ENGINE BATCH_ENGINE BATCH_MODEL_ID BATCH_MODEL_ALIAS
+declare -A BATCH_RESOLVED_WORKER BATCH_DISPATCH_ENGINE BATCH_ENGINE BATCH_MODEL_ID
 declare -A BATCH_TIER BATCH_REASON BATCH_DOMAIN_USED BATCH_ROUTE_SOURCE BATCH_CHAIN_LEN
 declare -A BATCH_EFFORT BATCH_EFFORT_REASON BATCH_UNIT_EFFORT
 for ENTRY in "${BATCH[@]}"; do
@@ -602,7 +602,6 @@ for ENTRY in "${BATCH[@]}"; do
   BATCH_DISPATCH_ENGINE["$ENTRY_ID"]="$DISPATCH_ENGINE"
   BATCH_ENGINE["$ENTRY_ID"]="$ENGINE"
   BATCH_MODEL_ID["$ENTRY_ID"]="$MODEL_ID"
-  BATCH_MODEL_ALIAS["$ENTRY_ID"]="$MODEL_ALIAS"
   BATCH_TIER["$ENTRY_ID"]="$TIER"
   BATCH_REASON["$ENTRY_ID"]="$REASON"
   BATCH_DOMAIN_USED["$ENTRY_ID"]="$DOMAIN_USED"
@@ -806,10 +805,10 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        printf '⚠ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
        # Advisory continues with the exact resolved host/mode/model fields.
      fi
-     RF_ALIAS="$MODEL_ALIAS"
+     RF_ROUTE_JSON_SAVED="$RF_ROUTE_JSON"
      RF_HOST_RUNTIME="$HOST_RUNTIME"; RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
      ```
-     Set `RF_UNIT_ID` to `{S##}` for Step 7a and `{M###}-triage` for Step 9. Only after this runtime gate, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here); dispatch the canonical `Agent()` form with `model: '{RF_ALIAS}'` only when non-empty, `WORKER_MODE == native`, and the claim-gate decision is `proceed`. A runtime refusal uses the auto stop boundary above; it is not the review gate's non-blocking worker-unavailability case.
+     Set `RF_UNIT_ID` to `{S##}` for Step 7a and `{M###}-triage` for Step 9. Only after this runtime gate, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here); build review-fix through `buildNativeInvocation` from the saved route and active capabilities, then invoke its returned tool/arguments unchanged only when `WORKER_MODE == native` and the claim-gate decision is `proceed`. A runtime refusal uses the auto stop boundary above; it is not the review gate's non-blocking worker-unavailability case.
    - **OPEN items → posture (Step 7b):** `ask_in_auto: defer` (default) marks each `**Decisão:** deferido → triagem no fim da milestone` and continues WITHOUT pausing — they are guaranteed to surface at the milestone-final triage gate below. `pause` (opt-in) asks per-slice via `AskUserQuestion`.
    - Append the `review` event to `events.jsonl` (Step 8).
 4. The gate **never blocks on a review-worker throw** — any `Agent()` throw is recorded and the loop proceeds to `complete-slice` regardless. An enforcing resolver refusal is different: it occurs before launch, invokes `dispatch_refusal_stop`, and terminates the auto loop without inline work.
@@ -1307,12 +1306,18 @@ INPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$worker_promp
 
 > Antes de despachar o worker principal, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) com a duração estimada para o `unit_type` sendo executado (consulte a tabela de duração na seção canônica).
 
-**Alias Resolution** — `Agent()`'s `model:` param only accepts `sonnet|opus|haiku|fable`, never a full model ID. `$MODEL_ALIAS` was already resolved by `forge-dispatch-resolve.js` (its `alias` field) in step 1.5 — just warn if it came back empty:
-```bash
-[ -z "$MODEL_ALIAS" ] && echo "⚠ model \"$MODEL_ID\" sem alias — usando frontmatter do agente" >&2
-```
-
-Then call `Agent(agent_name, worker_prompt, model: $MODEL_ALIAS)` when `$MODEL_ALIAS` is non-empty; when empty, call `Agent(agent_name, worker_prompt)` without a `model:` param (degrades to the agent's own frontmatter — the warning above was already echoed). Use a `description` with the same icon:
+**Native invocation adaptation** — pass `$ROUTE_JSON`, the active host, observed
+tool capabilities, agent type and prompt to `buildNativeInvocation`. Refuse when
+`config_ok`/`dispatch_allowed` is false or model/effort/fork capability is
+unsupported. Invoke the returned tool and structured arguments unchanged.
+Pass `forkTurns:'none'`; Codex receives the full model ID, separate
+`reasoning_effort`, and `fork_turns:'none'`;
+Claude aliases stay inside the Claude adapter. Before every Claude native call,
+read the actual exposed `agents/<agent>.md` (repo or installed Forge copy), hash
+those same bytes with SHA-256, call `observeClaudeAgentBinding`, and pass the
+successful observation as `effortBinding`. Prompt text is not an effort API; a
+missing, stale, or mismatched binding is a named refusal. Never omit an explicit
+configured model to inherit agent frontmatter. Use a description with the same icon:
 - Format: `{icon} {unit_id} · {one-liner}`
 - Examples:
   - `⚙ S01 · authentication foundation`
@@ -1335,7 +1340,7 @@ node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
   --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \
-  --output-tokens "$OUTPUT_TOKENS" --model-applied "$MODEL_ALIAS" \
+  --output-tokens "$OUTPUT_TOKENS" \
   --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
   --events .gsd/forge/events.jsonl
 ```
@@ -1412,15 +1417,21 @@ for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
 done
 ```
 
-**e) Dispatch ALL N native Agent() calls IN ONE RESPONSE MESSAGE** — this is the critical native-host semantic: multiple projected native tool-use blocks in a single assistant turn execute concurrently. Emit **all N canonical `Agent()` calls inside the same assistant message** (not sequential messages). In the Codex artifact these forms are `spawn_agent()`; the batch membership and per-task route maps are unchanged.
+**e) Dispatch ALL N native calls IN ONE RESPONSE MESSAGE** — first build one
+native invocation per task from its immutable route/capabilities. Multiple native
+tool-use blocks in a single assistant turn execute concurrently. Emit all returned
+tool/argument calls inside the same assistant message, preserving batch order.
 
 **⚠ CRITICAL — tool-call shape (read before dispatching):**
 
 The built-in description of the `Agent` tool suggests `run_in_background: true` for "genuinely independent work to do in parallel." **That guidance does NOT apply here.** In this flow we parallelize BUT we need the results back in the SAME turn to process them and drive the next loop iteration. Violating this has already caused a 3+ hour hang in production where 3 backgrounded executors completed but the orchestrator never picked up their results.
 
 - The parallel semantic in Claude Code is: **foreground multi-call = parallel-with-results.** Background is fire-and-forget (e.g., `forge-memory` step 6d) — you do not await it.
-- **Never pass these params** on the parallel executor dispatch: `run_in_background`, `isolation`, `model` override, or any field other than `subagent_type`, `description`, `prompt`.
-- The only Agent() call in this whole SKILL that legitimately takes `run_in_background: true` is the `forge-memory` dispatch in step 6d (single-task path) and its equivalent in step 4-P/j. Executors never.
+- Never add `run_in_background` or `isolation`; use only the fields returned by
+  `buildNativeInvocation` plus the host-supported description field. Model,
+  effort and fork arguments from the helper are required, not optional extras.
+- Memory inference may be backgrounded, but its owner publication is joined at
+  the protected-snapshot boundary in step 6d. Executors are never backgrounded.
 - UI tell: if after dispatching you see `⎿ Backgrounded agent` under any of the N calls, you've already broken the contract. See step (f) fail-fast below.
 
 Example shape (N=3), exact and minimal:
@@ -1428,9 +1439,9 @@ Example shape (N=3), exact and minimal:
 > Antes de despachar o batch paralelo de executors abaixo, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) — duração estimada para `execute-task`: ~1–5 min (varia conforme a complexidade da task).
 
 ```
-Agent({ subagent_type: "forge-executor", description: "⚡ T01 · <one-liner>", prompt: "<prompt_T01>" })
-Agent({ subagent_type: "forge-executor", description: "⚡ T02 · <one-liner>", prompt: "<prompt_T02>" })
-Agent({ subagent_type: "forge-executor", description: "⚡ T03 · <one-liner>", prompt: "<prompt_T03>" })
+invoke(NATIVE_INVOCATION_BY_TASK["T01"].tool, NATIVE_INVOCATION_BY_TASK["T01"].args)
+invoke(NATIVE_INVOCATION_BY_TASK["T02"].tool, NATIVE_INVOCATION_BY_TASK["T02"].args)
+invoke(NATIVE_INVOCATION_BY_TASK["T03"].tool, NATIVE_INVOCATION_BY_TASK["T03"].args)
 ```
 
 **f) Await all results — and fail fast if the shape is wrong.** Claude Code returns all N results together in the same turn when step (e) was done correctly. Collect them as `results = [{taskId: "T01", result: "..."}, ...]` preserving BATCH order.
@@ -1472,7 +1483,6 @@ for ENTRY_ID in "${NATIVE_BATCH_IDS[@]}"; do
     --effort "${BATCH_EFFORT[$ENTRY_ID]}" --effort-reason "${BATCH_EFFORT_REASON[$ENTRY_ID]}" \
     --engine "${BATCH_ENGINE[$ENTRY_ID]}" --domain "${BATCH_DOMAIN_USED[$ENTRY_ID]}" \
     --route-source "${BATCH_ROUTE_SOURCE[$ENTRY_ID]}" --chain-len "${BATCH_CHAIN_LEN[$ENTRY_ID]}" \
-    --model-applied "${BATCH_MODEL_ALIAS[$ENTRY_ID]}" \
     --slice "{S##}" --milestone "${RUN_ID:-{M###}}" \
     --input-tokens "${INPUT_TOKENS_BY_TASK[$ENTRY_ID]}" --output-tokens "${OUTPUT_TOKENS_CURRENT}" \
     --batch-size "${BATCH_LENGTH}" --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
@@ -1553,7 +1563,7 @@ Parse the `---GSD-WORKER-RESULT---` block:
 |-------|---------|---------------|
 | `context_overflow` | "context limit", "too long", "token" | Climb one tier up, then **re-resolve THROUGH routing** at the escalated tier (keeps the same `$DOMAIN`, so a `routing.<domain>.<phase>.<escalated-tier>` cell — or its `default` fallback — is honored on the retry): `ESCALATED_TIER=heavy` (`standard → heavy → max`); `ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$ESCALATED_TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR")`; `MODEL_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).chain[0].id)" "$ROUTE_JSON")`. If already `max` → stop loop, surface to user. Apply the thinking guard (Fable 5 + Opus 5) when escalating tiers. **This ladder is separate — it climbs tiers, it does NOT consume `chain[]` (the intra-tier chain, now cross-engine, walked via `--next-after`).** |
 | `scope_exceeded` | "out of scope", "too broad", "multiple tasks" | Stop loop. Tell user: "Task scope too broad — ask forge-planner to split T## into smaller tasks." |
-| `model_refusal` | "cannot", "I'm not able", "policy" | Walk the cross-engine chain first (SAME Layer 2, new resolver): `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR" --next-after "$MODEL_ID")`. If `$NEXT` non-empty → derive its normalized `NEXT_ENGINE`, run the next-member resolver/export/allowance block below, and re-dispatch by its resulting `WORKER_MODE` (`native` canonical form or loaded `sidecar`). Re-resolve `$MODEL_ALIAS` via `forge-model-alias.js`; members with no alias are skipped automatically by `--next-after`. If exhausted (`$NEXT` empty — chain + category fallback consumed) → stop loop, surface to user. **Does not escalate tier (never a 4th layer — MEM001).** |
+| `model_refusal` | "cannot", "I'm not able", "policy" | Walk the named cross-engine chain first (SAME Layer 2): `NEXT=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" --unit-type "$unit_type" --tier "$TIER" --domain "$DOMAIN" --frontmatter-tier "$PLAN_TIER" --frontmatter-worker "$PLAN_WORKER" --cwd "$WORKING_DIR" --next-after "$MODEL_ID")`. If `$NEXT` is non-empty, run it through the resolver and active host invocation adapter before re-dispatch; a missing Claude alias cannot discard a GPT member. If exhausted, stop and surface the refusal. **Does not escalate tier (never a 4th layer — MEM001).** |
 | `429` | "rate limit", "429", "quota" | Same cross-engine chain walk as `model_refusal` (`forge-routing.js ... --next-after "$MODEL_ID"`). Chain exhausted → stop loop, surface to user. This is a `status: blocked` classification (Layer 2) — distinct from a transient 429 raised as an `Agent()` exception, which the Retry Handler (Layer 1) already handles; do not double-recover the same failure across layers. |
 | `400` | "400", "bad request", "invalid" | Same cross-engine chain walk as `model_refusal` (`forge-routing.js ... --next-after "$MODEL_ID"`). Chain exhausted → stop loop, surface to user. |
 | `tooling_failure` | "command not found", "permission denied", "ENOENT" | Stop loop. Tell user: "Tooling error — check that required tools are installed and accessible." |
@@ -1679,7 +1689,9 @@ fi
 
 Where `key_decisions_json` is a JSON object `{ "unit_id": "$DECISIONS_UNIT_ID", "decisions": [...] }` built from the `key_decisions` field of the worker result. The global `.gsd/DECISIONS.md` is rebuilt from fragments during `complete-milestone` (forge-merger, S05). Do NOT write directly to `.gsd/DECISIONS.md` or any `M###-DECISIONS.md` file.
 
-**d) Memory extraction** — first decide whether an extraction is worth a model call; only then dispatch `forge-memory` **in the background** (`run_in_background: true`) so the orchestrator can immediately dispatch the next unit without waiting. Rationale: memory extraction averages 20–40s, runs on Haiku (cheap + fast), and only affects the *next* selective injection.
+**d) Memory extraction** — first decide whether extraction is worth a model call.
+Inference may run in the background, but owner publication must be joined at a
+safe boundary before the next protected dispatch begins.
 
 Run the deterministic policy before preparing the agent prompt. It must emit a `memory-policy` event whether it extracts or skips; malformed policy output or an execution error is **fail-open** (`extract`) so cost optimization never loses durable knowledge:
 ```bash
@@ -1696,7 +1708,7 @@ Determine which summary file was just written:
 - `complete-milestone` → `.gsd/milestones/{M###}/{M###}-SUMMARY.md`
 - other → use the result block only
 
-Call `forge-memory` agent with:
+Resolve `memory-extract` with the canonical resolver and prepare this input for the output-only `forge-memory` agent:
 ```
 WORKING_DIR: {WORKING_DIR}
 UNIT_TYPE: {unit_type}
@@ -1711,9 +1723,45 @@ RESULT_BLOCK:
 
 KEY_DECISIONS:
 {key_decisions field from result, or "(none)"}
+
+EXISTING_MEMORY:
+{owner-read current fragment/projection for this unit, or empty facts/stats}
 ```
 
-Pass `run_in_background: true` to the `Agent()` call. The orchestrator does NOT await this — it proceeds immediately to Step 6e. When the background agent finishes, AUTO-MEMORY.md is updated on disk and will be picked up by the next unit's selective injection filter. If the background agent fails silently, the loss is bounded to that one extraction — the next unit's extraction will still run and AUTO-MEMORY accumulates.
+Use `buildNativeInvocation` with active host capabilities for native delivery or
+`forge-unit-sidecar --request` for a declared sidecar. Native delivery includes
+the fresh Claude binding required by the common native contract and preserves
+the resolved full
+model ID and effort; unsupported capability is a named nonblocking failure.
+Native output is accepted through an external JSON request passed to
+`forge-unit-sidecar --accept-native-memory`; include the exact
+`native.telemetry` object as `invocationTelemetry` in that request. Both routes
+validate and persist a
+ready receipt before owner publication.
+
+Native refusal and provider failure use that same acceptance command. Build the
+external request from owner-known `cwd`, `contextRoot`, `sourceUnitType`,
+`sourceUnitId`, optional `milestoneId`, `workflowId`, `dispatchId`,
+`extractionId`, `sourceFingerprint`, `route`, `hostRuntime`, `resultFile`,
+`publicationSafe`, and `publicationBoundary`. If `buildNativeInvocation` returns
+`ok:false`, do not call the provider; omit `rawResult` and set
+`nativeFailure:{reason_code:native.reason_code,provider_called:false,telemetry:native.telemetry||null}`.
+If the native provider throws or `invokeNative` returns `ok:false` after calling
+it, use the same request with `provider_called:true` and the adapter telemetry.
+Write no hint or provider diagnostic into the request. In both cases run
+`node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --accept-native-memory <request-file>`
+and use its JSON result as the durable failure outcome. This acceptance remains
+nonblocking for the completed source unit. A policy `skip` never enters this
+failure path because it performs no resolver, adapter, or provider work.
+
+Background inference uses `publicationSafe:false`, which returns `deferred` and
+leaves the ready receipt replayable. Before any next protected dispatch, join
+the extraction and replay the identical request with `publicationSafe:true`
+plus `publicationBoundary.ownerJoined:true`, a fresh `checkedAt`, and every
+overlapping protected snapshot listed as `ended`. Do not start that dispatch while
+`publishExtraction` runs. Invalid/partial/blocked output, missing auth,
+quarantine and publication failure warn without changing source-unit completion.
+Only the publisher outcome can claim saved canonical memory.
 
 <!-- forge:dispatch:end -->
 

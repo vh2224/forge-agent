@@ -187,7 +187,7 @@
             "xhigh",
             "max"
           ],
-          "default": "low",
+          "default": "medium",
           "description": "Effort da fase execute-task (implementação). Override por task via effort: no frontmatter do T##-PLAN.md; clamp em medium quando o modelo resolvido é haiku/sonnet."
         },
         "complete-slice": {

@@ -415,7 +415,7 @@ test('R2: conteúdo do arquivo não pode forjar path/unreadable', () => {
   const evil = path.join(dir, 'evil~20260818T000000Z.json');
   fs.writeFileSync(evil, JSON.stringify({ path: null, unreadable: true, reason: 'x' }));
   const [entry] = quarantine.listQuarantine(cwd);
-  assert.strictEqual(entry.path, evil, 'path é campo confiável — o arquivo não o define');
+  assert.strictEqual(entry.path, fs.realpathSync(evil), 'path é campo confiável e canônico — o arquivo não o define');
   assert.strictEqual(entry.unreadable, false, 'unreadable é campo confiável — o arquivo não o define');
 });
 
@@ -447,6 +447,73 @@ test('R3: falha de leitura do diretório relança — só ENOENT vira lista vazi
     error => error && error.code !== 'ENOENT',
     'erro de leitura tem que subir, nunca virar lista vazia'
   );
+});
+
+test('extraction identity makes grouped quarantine replay idempotent and conflict-visible', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-replay-'));
+  const fragment = { unit_id: 'T01', facts: [fact('MEM001', 'stable')], stats: [] };
+  const info = {
+    storageKey: 'M001__T01',
+    unitId: 'T01',
+    milestoneId: 'M001',
+    container: path.join(cwd, 'container.md'),
+    reason: 'grouped-member',
+    remedy: 'undo and regroup',
+    extractionId: 'extract-stable',
+    extractedAt: '2026-09-24T22:30:00.000Z',
+  };
+  const first = quarantine.quarantineFragment(cwd, fragment, info);
+  const replay = quarantine.quarantineFragment(cwd, fragment, info);
+  assert.strictEqual(first.replayed, false);
+  assert.strictEqual(replay.replayed, true);
+  assert.strictEqual(replay.path, first.path);
+  assert.strictEqual(quarantine.listQuarantine(cwd).length, 1);
+  assert.throws(
+    () => quarantine.quarantineFragment(cwd, {
+      ...fragment,
+      facts: [fact('MEM001', 'changed')],
+    }, info),
+    error => error && error.code === 'MEMORY_QUARANTINE_CONFLICT',
+  );
+  assert.strictEqual(quarantine.listQuarantine(cwd).length, 1);
+});
+
+test('quarantine refuses a pre-existing junction that escapes the workspace before writing', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-escape-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-outside-'));
+  const memoryDir = memory.memoryDir(cwd);
+  fs.mkdirSync(memoryDir, { recursive: true });
+  const link = quarantine.quarantineDir(cwd);
+  fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+
+  assert.throws(
+    () => quarantine.quarantineFragment(
+      cwd,
+      { unit_id: 'T01', facts: [fact('MEM001', 'must stay inside')], stats: [] },
+      { storageKey: 'M001__T01', extractionId: 'escape-attempt' }
+    ),
+    error => error && error.code === 'MEMORY_QUARANTINE_PATH_ESCAPE',
+  );
+  assert.deepStrictEqual(fs.readdirSync(outside), [], 'refusal must leave the external target untouched');
+});
+
+test('quarantine accepts a canonical cwd reached through a root alias', () => {
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-quarantine-real-'));
+  const alias = `${real}-alias`;
+  fs.mkdirSync(memory.memoryDir(real), { recursive: true });
+  try {
+    fs.symlinkSync(real, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if (process.platform === 'win32' && (error.code === 'EPERM' || error.code === 'EACCES')) return;
+    throw error;
+  }
+  const result = quarantine.quarantineFragment(
+    alias,
+    { unit_id: 'T01', facts: [fact('MEM001', 'alias-safe')], stats: [] },
+    { storageKey: 'M001__T01', extractionId: 'alias-safe' }
+  );
+  assert.ok(fs.existsSync(result.path));
+  assert.ok(quarantine._private.isWithin(fs.realpathSync(real), fs.realpathSync(result.path)));
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

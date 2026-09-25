@@ -516,6 +516,77 @@ test('--hit refuses unusable stdin loudly (never a silent no-op)', () => withTem
   assert.strictEqual(wrongShape.status, 1, 'an envelope without entries[] is refused by name');
 }));
 
+test('same mem_id with different immutable content is a named conflict, never silent loss', () => withTemp(cwd => {
+  memory.writeFragment(cwd, {
+    unit_id: 'T01',
+    facts: [fact('MEM001', 'gotcha', 'original immutable fact', 'execute-task/T01')],
+    stats: [],
+  });
+  const before = fs.readFileSync(memory.fragmentPath(cwd, 'T01'));
+  assert.throws(
+    () => memory.writeFragment(cwd, {
+      unit_id: 'T01',
+      facts: [fact('MEM001', 'gotcha', 'different fact under stale ID', 'execute-task/T01')],
+      stats: [],
+    }),
+    error => error && error.code === 'MEMORY_FACT_CONFLICT',
+  );
+  assert(fs.readFileSync(memory.fragmentPath(cwd, 'T01')).equals(before));
+}));
+
+test('same-time supersedes use old/new references in event identity', () => withTemp(cwd => {
+  memory.writeFragment(cwd, {
+    unit_id: 'T01',
+    facts: [
+      fact('MEM001', 'gotcha', 'old one', 'execute-task/T01'),
+      fact('MEM002', 'gotcha', 'old two', 'execute-task/T01'),
+      fact('MEM003', 'pattern', 'new one', 'execute-task/T01'),
+      fact('MEM004', 'pattern', 'new two', 'execute-task/T01'),
+    ],
+    stats: [
+      { kind: 'supersede', old_id: 'MEM001', new_id: 'MEM003', ts: '2026-09-24T22:30:00.000Z' },
+      { kind: 'supersede', old_id: 'MEM002', new_id: 'MEM004', ts: '2026-09-24T22:30:00.000Z' },
+    ],
+  });
+  const fragment = memory.readFragment(cwd, 'T01');
+  assert.strictEqual(fragment.stats.length, 2);
+  assert.notStrictEqual(
+    memory._private.statHash(fragment.stats[0]),
+    memory._private.statHash(fragment.stats[1]),
+  );
+}));
+
+test('legacy event tuple ignores additive metadata while event_id owns new replay identity', () => withTemp(cwd => {
+  memory.writeFragment(cwd, {
+    unit_id: 'T01',
+    facts: [fact('MEM001', 'gotcha', 'event identity', 'execute-task/T01')],
+    stats: [{ kind: 'hit', mem_id: 'MEM001', ts: '2026-09-24T22:30:00.000Z', source: 'first' }],
+  });
+  memory.writeFragment(cwd, {
+    unit_id: 'T01',
+    facts: [fact('MEM001', 'gotcha', 'event identity', 'execute-task/T01')],
+    stats: [
+      { kind: 'hit', mem_id: 'MEM001', ts: '2026-09-24T22:30:00.000Z', source: 'later-metadata' },
+      { kind: 'hit', mem_id: 'MEM001', ts: '2026-09-24T22:30:00.000Z', event_id: 'extract:event:1' },
+      { kind: 'hit', mem_id: 'MEM001', ts: '2026-09-24T22:30:00.000Z', event_id: 'extract:event:1' },
+    ],
+  });
+  const stats = memory.readFragment(cwd, 'T01').stats;
+  assert.strictEqual(stats.length, 2, 'one legacy tuple and one explicit event identity survive');
+  assert.strictEqual(stats.filter(stat => stat.event_id === 'extract:event:1').length, 1);
+  assert.throws(
+    () => memory.writeFragment(cwd, {
+      unit_id: 'T01',
+      facts: [fact('MEM001', 'gotcha', 'event identity', 'execute-task/T01')],
+      stats: [{
+        kind: 'hit', mem_id: 'MEM001', ts: '2026-09-24T22:30:00.000Z',
+        event_id: 'extract:event:1', source: 'conflicting-content',
+      }],
+    }),
+    error => error && error.code === 'MEMORY_EVENT_CONFLICT',
+  );
+}));
+
 runTests().catch(error => {
   console.error(error.stack || error.message);
   process.exit(1);

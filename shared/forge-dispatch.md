@@ -1279,11 +1279,18 @@ Applicability by `unit_type`:
 |-------------|----------------|--------------------------|
 | `execute-task` | **active** | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches `--mode execute` (Branch C) |
 | `plan-slice` | **active** (S03) | yes — `WORKER_MODE == sidecar` plus the codex adapter selection reaches read-only `--mode plan` (Branch D) |
-| all others (`plan-milestone`, `discuss-*`, `research-*`, `complete-*`, `memory-extract`, …) | **never** — host-native mode | no |
+| `memory-extract` | resolved from `tier_models.light` | yes when the resolver selects a declared sidecar; native otherwise |
+| other preparation/closure units | resolved per unit | only when `forge-transport-capabilities.js` declares that exact unit; unsupported preparation routes refuse explicitly |
 
 `plan-milestone` is **never** covered by `workers:` (locked) — it stays on tier `max`/Fable regardless of prefs.
 
-The canonical Claude-source `native` path is **byte-identical** to the current loop after the new resolver gate: `WORKER_MODE == native` hands control to Tier Resolution and the host-native call. `WORKER_MODE == sidecar` selects one of two routable adapter modes: `execute-task` (Branch C — `--mode execute`, read-write) or `plan-slice` (Branch D — `--mode plan`, **read-only**). The two branches diverge on side effects: execute captures/resets `START_SHA` and forbids codex commits; plan writes nothing (codex only reasons and returns markdown), so there is **no dirty-tree guard, no `START_SHA`, no reset** — the orchestrator materializes the returned plan content into `.gsd/**` itself.
+The `native` path passes the resolver result through
+`forge-native-invocation.js`; the adapter validates the actual host tool and
+preserves model/effort arguments. `sidecar` consults the exact unit contract in
+`forge-transport-capabilities.js`. Execute and plan retain their established
+write/read-only behavior, artifact units return bounded content, and
+`memory-extract` is read-only inference followed by owner publication. Units
+without a declared transport refuse explicitly.
 
 #### Single-call resolver — `forge-routing.js` (ONE call per dispatch)
 
@@ -1301,7 +1308,9 @@ ROUTE_JSON=$(node "$FORGE_SCRIPTS_DIR/forge-routing.js" \
 ```
 
 Inputs (all resolved before this call):
-- `$UNIT_TYPE` — `execute-task` | `plan-slice` (the only two routable types; all others are never captured — the resolver echoes `phase-not-routable` and returns the legacy chain).
+- `$UNIT_TYPE` — `execute-task` | `plan-slice` for domain-routing capture. Other
+  units still pass through the resolver using their tier model and exact native
+  or sidecar capability; they are not silently replaced.
 - `$TIER` — the tier already resolved by § Tier Resolution steps 1–3 (unit-type default + frontmatter `tier:` + `risk:high` escalation). Passing the *resolved* tier keeps this call the single point of model resolution.
 - `$DOMAIN` — the domain metadata extracted for this unit (see § Domain metadata below); absent → the resolver uses the `default` domain.
 - `$PLAN_TIER` / `$PLAN_WORKER` — the raw T##-PLAN frontmatter `tier:` / `worker:` values (execute-task only; empty otherwise). The resolver internalizes the precedence `frontmatter tier:/worker: > routing: > tier_models/workers legado` — the wiring does **not** re-implement it (M004 S02 pattern: describe/reference the resolver, never re-encode its logic in markdown).
@@ -2375,7 +2384,6 @@ fi
 if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
   printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
 fi
-[ -z "$MODEL_ALIAS" ] && echo "⚠ model \"$MODEL_ID\" sem alias — usando frontmatter do agente" >&2
 ```
 <!-- forge:dispatch:end -->
 
@@ -2384,8 +2392,14 @@ The canonical dispatch specification is not a source-manifest input, and none
 of its protected specification occurrences is inside the real marker pair.
 
 ```bash
-# When $MODEL_ALIAS is non-empty, pass model: $MODEL_ALIAS to Agent(); when empty,
-# call Agent() without a model: param (the warning above was already echoed).
+# Pass ROUTE_JSON and active tool capabilities to buildNativeInvocation. Invoke
+# its returned tool/args unchanged. For Claude, first read the actual exposed
+# agents/<agent>.md (repo or installed Forge copy), hash those same bytes with
+# SHA-256, and pass { transport:'agent-frontmatter', agentPath,
+# sourceFingerprint } as effortBinding. buildNativeInvocation re-reads that
+# file, verifies agent name/hash/effort, and refuses a mismatch by name. Prompt
+# text is never an effort API. Unsupported model/effort/fork/alias/binding is a
+# named refusal; never omit an explicit model to inherit agent frontmatter.
 # $ROUTE_JSON.chain carries forward unmodified — consumed by the Failure Taxonomy via
 # `node "$FORGE_SCRIPTS_DIR/forge-routing.js" ... --next-after "$MODEL_ID"` on model_refusal/429/400
 # (walks the cross-engine chain → category fallback → ''), BEFORE any cross-tier escalation
@@ -2394,7 +2408,7 @@ of its protected specification occurrences is inside the real marker pair.
 
 # Extend the dispatch event (append after Token Telemetry builds dispatchEvent) with the resolver's
 # fields — additive, no existing field renamed/removed:
-echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"dispatch_id\":\"$ATTEMPT_DISPATCH_ID\",\"prompt_id\":\"$PROMPT_DISPATCH_ID\",\"attempt\":${attempt:-1},\"status\":\"done\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"host_runtime\":\"$HOST_RUNTIME\",\"worker_mode\":\"$WORKER_MODE\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"token_method\":\"heuristic-chars-4\",\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":$MODEL_APPLIED_JSON,\"engine\":\"$ENGINE\",\"domain\":\"$DOMAIN_USED\",\"route_source\":\"$ROUTE_SOURCE\",\"chain_len\":$CHAIN_LEN,\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
+echo "{\"ts\":\"$TS\",\"event\":\"dispatch\",\"dispatch_id\":\"$ATTEMPT_DISPATCH_ID\",\"prompt_id\":\"$PROMPT_DISPATCH_ID\",\"attempt\":${attempt:-1},\"status\":\"done\",\"unit\":\"$UNIT_TYPE/$UNIT_ID\",\"model\":\"$MODEL_ID\",\"host_runtime\":\"$HOST_RUNTIME\",\"worker_mode\":\"$WORKER_MODE\",\"dispatch_allowed\":${DISPATCH_ALLOWED},\"input_tokens\":$IN_TOK,\"output_tokens\":$OUT_TOK,\"token_method\":\"heuristic-chars-4\",\"tier\":\"$TIER\",\"reason\":\"$REASON\",\"effort\":\"$EFFORT\",\"effort_reason\":\"$EFFORT_REASON\",\"model_applied\":null,\"engine\":\"$ENGINE\",\"domain\":\"$DOMAIN_USED\",\"route_source\":\"$ROUTE_SOURCE\",\"chain_len\":$CHAIN_LEN,\"transport\":\"in-process\"}" >> .gsd/forge/events.jsonl
 ```
 
 `MODEL_ID` is always the resolver's `model` field — `chain[0].id`, the primary member (identical to
@@ -2414,13 +2428,21 @@ not one of `light | standard | heavy | max`, the resolver's internal `readTierCh
 > `claude-opus-5` accepts `disabled` only at effort `high` or below (Opus 4.7/4.8 accept it at any effort).
 > The resolver's `thinking_header` field already carries this — read it instead of re-deriving it.
 
-> **Alias resolution internals (unchanged):** `MODEL_ALIAS`/`model_applied` are still produced by `scripts/forge-model-alias.js`'s `modelToAlias()` — the resolver calls it internally (see `scripts/forge-dispatch-resolve.js`'s own `require('./forge-model-alias.js')`) instead of the SKILL.md shelling out to it directly. No inline alias map is ever reimplemented here or in the SKILL.md callers.
+> **Invocation adaptation:** `MODEL_ALIAS` is an adapter input only for Claude.
+> Codex receives `MODEL_ID`. Claude effort is authorized only by a fresh,
+> fingerprinted observation of the actual agent frontmatter; an `effort:` line
+> in prompt text is descriptive data and cannot authorize a dispatch. Preserve
+> `native.telemetry` with the dispatch result. Memory callers pass that exact
+> object as `invocationTelemetry` to the native acceptance request so the ready
+> receipt records requested/resolved/argument/observed-binding axes. Neither an
+> argument nor an observed binding proves provider application: `model_applied`
+> and `effort_applied` remain null unless trusted runtime readback supplies them.
 
 ---
 
 ### Effort Resolution
 
-**Purpose:** Control-flow section that runs right after [Tier Resolution](#tier-resolution), before the `Agent()` call. It translates `unit_type + frontmatter hint + prefs + resolved model` into a concrete `effort` level injected into the worker prompt header (`effort: {unit_effort}`). Effort controls *reasoning intensity* (token spend per unit), orthogonal to the tier (which controls *which model* runs). A complex task wants both a heavier model **and** higher effort; the two axes are resolved independently but can be set coherently by the planner. Like Tier Resolution, this is pure Markdown rules + a `node -e` clamp — no new script.
+**Purpose:** Control-flow section that runs right after [Tier Resolution](#tier-resolution), before the native worker call. It translates `unit_type + frontmatter hint + prefs + resolved model` into a concrete effort requirement. Codex carries it through the native `reasoning_effort` argument. Claude can run only when the actual exposed agent frontmatter is observed with a matching effort and stable SHA-256 fingerprint; prompt text does not apply effort. Effort controls *reasoning intensity* (token spend per unit), orthogonal to the tier (which controls *which model* runs).
 
 > **Why a separate axis from tier:** tier picks the model; effort picks how hard that model thinks. Coupling them to one signal loses granularity (e.g. a `standard`-tier task that is logically intricate but cheap to run still benefits from `medium` over `low`). The planner emits `effort:` per task on its own judgement (see `agents/forge-planner.md § Effort & Tier Hints`).
 
@@ -2436,7 +2458,7 @@ After Tier Resolution has set `$MODEL_ID` (the clamp in step 4 depends on it) an
 
 #### Algorithm
 
-1. **Unit-type default.** `EFFORT = PREFS.effort[unit_type]` (the `EFFORT_MAP` built at Load Context from `.prefs.effort` — sourced off the one canonical `forge-prefs.js --resolved` object, see [§ Per-unit prefs resolution](#per-unit-prefs-resolution), never a per-file merge of `forge-agent-prefs.jsonc § Effort Settings`). Fall back to the built-in defaults (opus/planning phases = `medium`, sonnet/haiku phases = `low`) when the key is absent. `EFFORT_REASON = "unit-type:<unit_type>"`.
+1. **Unit-type default.** `EFFORT = PREFS.effort[unit_type]` (the `EFFORT_MAP` built at Load Context from `.prefs.effort` — sourced off the one canonical `forge-prefs.js --resolved` object, see [§ Per-unit prefs resolution](#per-unit-prefs-resolution), never a per-file merge of `forge-agent-prefs.jsonc § Effort Settings`). Fall back to the built-in defaults: planning/review phases and `execute-task` use `medium`; auxiliary phases retain their declared defaults. `execute-task: medium` matches the real `forge-executor` agent binding. Explicit prefs, plan frontmatter and CLI inputs still take precedence. `EFFORT_REASON = "unit-type:<unit_type>"`.
 2. **Dedicated frontmatter axis (`execute-task` only).** If `effort:` is present in the `T##-PLAN.md` frontmatter → `EFFORT = PLAN_EFFORT`, `EFFORT_REASON = "frontmatter-effort:<val>"`. This is the planner's per-task complexity judgement and wins over the unit-type default. Independent of `tier:` — a task may be `tier: standard` + `effort: medium` or `tier: heavy` + `effort: high` in any combination.
 3. **Risk escalation sync (`plan-slice` only).** When Tier Resolution escalated the slice to `max` (`REASON == "risk-escalation:high"`), the effort also jumps to `max`. A `risk:high` slice plan is the highest leverage-per-dollar spot for frontier reasoning.
 4. **Model capability clamp.** Clamp `EFFORT` down to the resolved model's ceiling. `claude-haiku*` and `claude-sonnet*` cap at `medium`; `claude-opus*` and `claude-fable*` allow the full scale up to `max`. When the clamp lowers the value, append `|clamped:model-cap` to `EFFORT_REASON`. This prevents HTTP 400s (a Sonnet dispatch never receives `high`+) and silently-wasted config. **Consequence:** to actually *run* a task at `high`/`xhigh`/`max`, the task must also be on a `heavy`/`max` tier (opus/fable) — set both `tier:` and `effort:` in the plan, or rely on the planner to set them coherently.
@@ -2476,7 +2498,7 @@ The `dispatch` event schema is extended additively with `effort` and `effort_rea
 
 #### Worked examples
 
-**A — routine execute-task (defaults).** `unit_type=execute-task`, no `effort:`/`tier:` → `tier=standard`, `model=claude-sonnet-5`, `EFFORT=low` (unit default), no clamp → `effort=low`, `effort_reason="unit-type:execute-task"`.
+**A — routine execute-task (defaults).** `unit_type=execute-task`, no `effort:`/`tier:` → `tier=standard`, `model=claude-sonnet-5`, `EFFORT=medium` (unit default, equal to the real `forge-executor` frontmatter), no clamp → `effort=medium`, `effort_reason="unit-type:execute-task"`.
 
 **B — complex execute-task (planner sets both axes).** Frontmatter `tier: heavy` + `effort: high` → `model=claude-opus-5`; effort `high` ≤ opus cap `max`, no clamp → `effort=high`, `effort_reason="frontmatter-effort:high"`.
 
@@ -2910,9 +2932,17 @@ When `mode == parallel` and `BATCH.length > 1`:
 
 Readers that don't know about `batch_size` ignore it (additive by design). Sequential dispatches omit the field entirely.
 
-### Memory extraction as background
+### Memory extraction and safe publication
 
-After each `done` result, the orchestrator evaluates `forge-cost-policy.js memory` and emits a `memory-policy` event even when the decision is `skip`. `memory.extraction: disabled` always skips, `always` preserves extraction after every eligible unit, and `adaptive` extracts at completion boundaries or when an execute result contains a durable signal. Only an `extract` decision dispatches `forge-memory` with `run_in_background: true`; the orchestrator may continue without awaiting it, and later prompt renders observe the fragment once that background write completes.
+After each `done` result, the orchestrator evaluates `forge-cost-policy.js memory` and emits a `memory-policy` event even when the decision is `skip`. `memory.extraction: disabled` always skips, `always` preserves extraction after every eligible unit, and `adaptive` extracts at completion boundaries or when an execute result contains a durable signal. The decision runs before resolver, prompt, or provider work.
+
+Only `extract` resolves `memory-extract` and invokes the configured native or
+sidecar adapter. Inference may run in the background, but it returns an
+output-only envelope into an external ready receipt. The owner joins or defers
+that receipt until no protected snapshot overlaps, then calls the shared
+publisher before starting the next protected dispatch. Invalid/partial/blocked
+output and provider/publication failures are recorded and remain nonblocking.
+Provider success alone is never reported as saved memory.
 
 ### Prefs contract
 

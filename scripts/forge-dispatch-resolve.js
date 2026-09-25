@@ -31,7 +31,7 @@ function routingPresent(cwd) {
 }
 const { modelToAlias, modelFamily } = require('./forge-model-alias.js');
 const { readPrefsCached } = require('./forge-prefs.js');
-const { readTierChain, defaultTierModel } = require('./forge-tier-chain.js');
+const { readTierChain } = require('./forge-tier-chain.js');
 // Imported, not re-typed: forge-must-haves.js reads the same `domain:` key from
 // the same frontmatter, and a second copy of the strip rule is how the two
 // readers drift apart. Requires whitespace before the `#`, which is what
@@ -64,7 +64,10 @@ const EFFORT_DEFAULTS = {
   'discuss-slice': 'medium',
   'research-milestone': 'medium',
   'research-slice': 'medium',
-  'execute-task': 'low',
+  // forge-executor's real Claude agent frontmatter is medium. Keeping the
+  // implicit route aligned makes the default executable; explicit prefs,
+  // frontmatter and CLI overrides still win and mismatches refuse by name.
+  'execute-task': 'medium',
   'review-fix': 'medium',
   'complete-slice': 'low',
   'complete-milestone': 'low',
@@ -77,14 +80,29 @@ function text(value) {
   return value === null || value === undefined ? '' : String(value).trim();
 }
 
-function claudeExecutableChain(chain, tier) {
-  const source = Array.isArray(chain) ? chain : [];
-  const kept = source.filter((member) => member && member.engine === 'claude' && member.mapped === true);
-  if (kept.length > 0) return { chain: kept, substituted: kept.length !== source.length };
-  if (source.length === 0) return { chain: source, substituted: false };
-  const id = defaultTierModel(tier);
-  const mapped = modelToAlias(id);
-  return { chain: [{ id, alias: mapped.alias, mapped: mapped.mapped, engine: 'claude' }], substituted: true };
+// Explicit engine preferences and model routing are independent configuration
+// axes.  Preserve both inputs and diagnose a contradiction instead of changing
+// the model family to make the configuration look executable.
+function detectConfigConflicts(input) {
+  const value = input || {};
+  const configured = text(value.configuredEngine).toLowerCase();
+  const model = text(value.model);
+  if (!configured || !model) return [];
+  const configuredDispatch = configured === 'codex' || configured === 'gpt'
+    ? 'codex'
+    : configured === 'claude' ? 'claude' : dispatchEngineFor(configured);
+  const family = modelFamily(model);
+  if (!family) return [];
+  const modelDispatch = dispatchEngineFor(family);
+  if (configuredDispatch === modelDispatch) return [];
+  return [{
+    code: 'configured-engine-model-family-conflict',
+    source: text(value.source) || 'configuration',
+    configured_engine: configuredDispatch,
+    model,
+    model_family: family,
+    model_engine: modelDispatch,
+  }];
 }
 
 function firstFrontmatter(raw) {
@@ -175,7 +193,7 @@ function normalizeWorkers(prefs, unitType) {
 // `engine` or `chain[].engine` (readers depend on those staying family).
 function dispatchEngineFor(family) {
   const f = text(family).toLowerCase();
-  if (f === 'gpt') return 'codex';
+  if (f === 'gpt' || f === 'codex') return 'codex';
   if (f === 'gemini') return 'agy';
   return 'claude';
 }
@@ -342,29 +360,16 @@ function resolveDispatch(opts, environment) {
     frontmatterWorker: plan.worker || null,
     cwd,
   });
-  let chain = Array.isArray(route.chain) ? route.chain : [];
-  let nonRoutableSubstitution = false;
-  // Supported document units now have transport contracts on both engines;
-  // preserve their configured tier chain rather than filtering out GPT models.
-  if (!require('./forge-transport-capabilities').UNIT_MODES[unitType]) {
-    const executable = claudeExecutableChain(chain, tier);
-    chain = executable.chain;
-    nonRoutableSubstitution = executable.substituted;
-  }
+  // The routing result is authoritative. Delivery support is evaluated by the
+  // runtime guard after selection; a missing contract must never rewrite GPT
+  // to Claude (or the reverse).
+  const chain = Array.isArray(route.chain) ? route.chain : [];
   const prefsResult = readPrefsCached(cwd);
   const prefs = prefsResult && prefsResult.prefs ? prefsResult.prefs : {};
   const workers = normalizeWorkers(prefs, unitType);
   const workersExplicit = Boolean(prefs.workers && typeof prefs.workers === 'object'
     && Object.prototype.hasOwnProperty.call(prefs.workers, unitType));
   const routingBacked = route.source === 'routing' || /(?:^|; )routing-(?:hit|default)(?:;|$)/.test(route.reason || '');
-  const legacyTierRoute = route.source === 'tier_models'
-    || (route.source === 'frontmatter' && !plan.worker && !routingBacked);
-  let explicitClaudeSubstitution = false;
-  if (legacyTierRoute && workersExplicit && workers.workers_engine === 'claude') {
-    const executable = claudeExecutableChain(chain, tier);
-    chain = executable.chain;
-    explicitClaudeSubstitution = executable.substituted;
-  }
   const model = chain[0] && chain[0].id ? chain[0].id : '';
 
   let engine;
@@ -380,9 +385,7 @@ function resolveDispatch(opts, environment) {
     engineReason = `workers.${unitType}:${engine}`;
   } else if (workersExplicit) {
     engine = 'claude';
-    engineReason = explicitClaudeSubstitution
-      ? `workers.${unitType}:claude|model-family-substituted`
-      : `workers.${unitType}:claude`;
+    engineReason = `workers.${unitType}:claude`;
   } else if (!workersExplicit && chain[0] && chain[0].engine && chain[0].engine !== 'claude') {
     // tier_models is also allowed to carry a cross-provider model.  Treating
     // every non-routable phase as Claude here made a GPT-only tier catalogue
@@ -392,7 +395,7 @@ function resolveDispatch(opts, environment) {
     engineReason = `tier-model-family:${engine}`;
   } else {
     engine = 'claude';
-    engineReason = nonRoutableSubstitution ? 'non-routable-family-substituted:claude' : 'default:claude';
+    engineReason = 'default:claude';
   }
 
   // Merged, never either-or. The CLI ALWAYS supplies an effortMap object (parseArgs
@@ -403,8 +406,14 @@ function resolveDispatch(opts, environment) {
   // always falling through to EFFORT_DEFAULTS. Merging keeps the flag an override of
   // the pref (its documented role) while restoring the pref as the base.
   const effortMap = { ...(prefs.effort || {}), ...(o.effortMap && typeof o.effortMap === 'object' ? o.effortMap : {}) };
+  const optionEffort = Boolean(o.effortMap && typeof o.effortMap === 'object'
+    && Object.prototype.hasOwnProperty.call(o.effortMap, unitType));
+  const prefsEffort = Boolean(prefs.effort && typeof prefs.effort === 'object'
+    && Object.prototype.hasOwnProperty.call(prefs.effort, unitType));
   let effort = effortMap[unitType] !== undefined ? effortMap[unitType] : (EFFORT_DEFAULTS[unitType] || 'low');
-  let effortReason = `unit-type:${unitType}`;
+  let effortReason = optionEffort
+    ? `argument-effort:${unitType}`
+    : prefsEffort ? `prefs.effort:${unitType}` : `unit-type:${unitType}`;
   if (unitType === 'execute-task' && plan.effort) {
     effort = plan.effort;
     effortReason = `frontmatter-effort:${plan.effort}`;
@@ -436,6 +445,22 @@ function resolveDispatch(opts, environment) {
   // additive: legacy engine/dispatch_engine/chain retain their 3.1.4 meaning.
   const dispatchEngine = dispatchEngineFor(engine);
   const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine), unitType);
+  // A routing/frontmatter route outranks the legacy workers preference. Only
+  // compare the model with an engine preference that actually won precedence.
+  const configuredEngine = plan.worker || (!routingBacked && workersExplicit ? workers.workers_engine : '');
+  const configConflicts = detectConfigConflicts({
+    configuredEngine,
+    model,
+    source: plan.worker ? 'frontmatter.worker' : `workers.${unitType}`,
+  });
+  const resolvedRuntime = configConflicts.length === 0 ? runtime : {
+    ...runtime,
+    dispatch_allowed: false,
+    dispatch_reason_code: 'engine-model-config-conflict',
+    dispatch_hint: 'Configured engine and resolved model family conflict; correct the configuration before dispatch. No model was substituted.',
+    dispatch_posture: 'enforce',
+    dispatch_decision: 'refuse',
+  };
   return {
     engine,
     model,
@@ -448,7 +473,17 @@ function resolveDispatch(opts, environment) {
     reason,
     effort,
     effort_reason: effortReason,
-    model_applied: alias,
+    // Selection, invocation adaptation and provider readback are distinct
+    // stages. The resolver knows only the first two values below; an alias is
+    // not evidence that a provider applied a model.
+    model_requested: model,
+    model_resolved: model,
+    model_argument: null,
+    model_observed: null,
+    model_observed_source: null,
+    model_applied: null,
+    config_ok: configConflicts.length === 0,
+    config_conflicts: configConflicts,
     engine_reason: engineReason,
     workers_engine: workers.workers_engine,
     workers_timeout: workers.workers_timeout,
@@ -477,7 +512,7 @@ function resolveDispatch(opts, environment) {
     // prefs_ok; the CLI turns prefs_ok:false into a non-zero exit.
     prefs_ok: prefsResult ? prefsResult.ok !== false : true,
     prefs_errors: (prefsResult && prefsResult.errors) || [],
-    ...runtime,
+    ...resolvedRuntime,
   };
 }
 
@@ -512,40 +547,40 @@ function runCli(args, environment) {
 
 function degradedContract(args, environment) {
   const parsed = parseArgs(args || []);
-  const unitType = parsed.unitType;
-  const cwd = parsed.cwd || process.cwd();
-  const tier = TIER_DEFAULTS[unitType] || 'standard';
-  let chain = [];
-  try {
-    chain = readTierChain(tier, cwd).map((member) => ({
-      id: member.id, alias: member.alias, mapped: member.mapped, engine: modelFamily(member.id),
-    }));
-  } catch { /* minimal ordered contract below */ }
-  const model = chain[0] ? chain[0].id : '';
-  const alias = modelToAlias(model).alias;
-  const runtime = { ...runtimeFields(parsed, dispatchEngineFor('claude')),
-    dispatch_allowed: false, dispatch_reason_code: 'routing-runtime-error',
-    dispatch_hint: 'Repair the resolver error before dispatch. No fallback worker was selected.',
-    dispatch_posture: 'enforce', dispatch_decision: 'refuse' };
+  const hostRuntime = text(parsed.hostRuntime).toLowerCase();
+  const workerEngine = text(parsed.workerEngine).toLowerCase();
+  const workerMode = text(parsed.workerMode).toLowerCase();
   return {
-    engine: 'claude', model, alias, tier, domain: 'default', route_source: 'tier_models',
-    chain, chain_len: chain.length, reason: 'routing-runtime-error; tier_models',
+    engine: '', model: '', alias: null, tier: '', domain: '', route_source: 'degraded',
+    chain: [], chain_len: 0, reason: 'routing-runtime-error',
     // effort_reason used to claim `unit-type:<x>` here — but the unit type did
     // not decide this effort, the crash did. Name the real cause and mark the
     // whole contract degraded so consumers can tell it from a healthy resolve.
     degraded: true,
-    effort: 'low', effort_reason: 'degraded:routing-runtime-error',
-    model_applied: alias, engine_reason: 'default:claude', workers_engine: 'claude',
-    workers_timeout: 1800, codex_model: '', plan_worker: '',
-    domain_input: 'default', frontmatter_tier: '',
-    thinking_header: thinkingHeaderFor(model, 'low'),
-    // engine is hard-coded 'claude' here → dispatch_engine resolves to 'claude'.
-    // Emitted explicitly via the same helper for contract stability.
-    dispatch_engine: dispatchEngineFor('claude'),
-    sidecar_model: sidecarModelFor(dispatchEngineFor('claude'), chain, ''),
+    effort: '', effort_reason: 'degraded:routing-runtime-error',
+    model_requested: null, model_resolved: null, model_argument: null,
+    model_observed: null, model_observed_source: null, model_applied: null,
+    config_ok: false,
+    config_conflicts: [{ code: 'routing-runtime-error', source: 'resolver' }],
+    engine_reason: 'degraded:routing-runtime-error', workers_engine: '',
+    workers_timeout: 0, codex_model: '', plan_worker: '',
+    domain_input: '', frontmatter_tier: '', thinking_header: '',
+    dispatch_engine: '', sidecar_model: '',
     routing_present: false,
-    prefs_ok: true, prefs_errors: [],
-    ...runtime,
+    prefs_ok: false,
+    prefs_errors: [{ code: 'routing-runtime-error', message: 'Resolver failed before configuration could be established.' }],
+    runtime_protocol_version: '',
+    host_runtime: hostRuntime,
+    worker_engine: workerEngine,
+    worker_mode: workerMode,
+    resolved_worker_engine: '',
+    sidecar_declared: parsed.sidecarDeclared === true,
+    worker_reason_code: 'routing-runtime-error',
+    dispatch_allowed: false,
+    dispatch_reason_code: 'routing-runtime-error',
+    dispatch_hint: 'Repair the resolver error before dispatch. No model or worker was selected.',
+    dispatch_posture: 'enforce',
+    dispatch_decision: 'refuse',
   };
 }
 
@@ -583,7 +618,7 @@ const SHELL_EXPORT_MAP = [
   ['ROUTING_PRESENT', (r) => (r.routing_present ? 'true' : 'false')],
   // JSON-literal glue for the dispatch event line (string or null) — replaces
   // the bash `MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && ...)` derivation.
-  ['MODEL_APPLIED_JSON', (r) => (r.alias ? JSON.stringify(r.alias) : 'null')],
+  ['MODEL_APPLIED_JSON', (r) => (r.model_observed ? JSON.stringify(r.model_observed) : 'null')],
   ['unit_effort', (r) => r.effort],
   ['HOST_RUNTIME', (r) => r.host_runtime || ''],
   ['WORKER_ENGINE', (r) => r.worker_engine || ''],
@@ -605,13 +640,13 @@ function shellExports(route) {
   return SHELL_EXPORT_MAP.map(([name, pick]) => `${name}=${shellQuote(pick(route))}`).join('\n');
 }
 
-module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, composeRuntimePosture, claudeExecutableChain, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
+module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, composeRuntimePosture, detectConfigConflicts, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
 
 if (require.main === module) {
   // Exit 0 on success; exit 1 ONLY on a prefs loud-stop (M008-CONTEXT #2 — a
   // malformed prefs layer must halt the shell consumer rather than proceed on
-  // the claude/effort-default fallback). The last-resort catch below still
-  // emits the ordered contract and exits 0 for UNEXPECTED runtime errors.
+  // a default route). The last-resort catch below emits a fail-closed ordered
+  // contract and exits 2 for unexpected runtime errors.
   // --shell-exports: transform mode — reads a resolved contract JSON from
   // stdin and prints eval-safe shell assignments. No resolution happens here;
   // a malformed payload is a loud exit 2 (an eval of garbage must never run).
@@ -634,10 +669,10 @@ if (require.main === module) {
     // unit to the cheapest effort is exactly the failure mode the diagnosis
     // caught. stderr is free — the orchestrator surfaces it next to the JSON.
     process.stderr.write(JSON.stringify({
-      warning: 'forge-dispatch-resolve degraded to the fallback contract',
+      warning: 'forge-dispatch-resolve emitted a fail-closed degraded contract',
       error: (error && error.message) || String(error),
     }) + '\n');
     process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
-    process.exit(0);
+    process.exit(2);
   }
 }

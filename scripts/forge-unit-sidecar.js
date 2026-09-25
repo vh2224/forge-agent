@@ -12,11 +12,20 @@ const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
 const { capability } = require('./forge-transport-capabilities');
 const { renderPrompt } = require('./forge-prompt');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
+const memory = require('./forge-memory');
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
+const memorySchema = xllm.loadSchemaFile('memory-extraction.schema.json');
 const MAX_ARTIFACT_BYTES = 512 * 1024;
 // Leave room for the envelope and provider prose within the 1 MiB stream cap.
 const MAX_ARTIFACT_PAYLOAD_BYTES = 900 * 1024;
+const MEMORY_QUALITY_CONTRACT = [
+  'Keep only project-specific, non-obvious, durable facts that became true; reject pending work, secrets, generic advice and temporary state.',
+  'Use candidate-local IDs only. Never allocate MEM IDs or return paths, owner identity, timestamps, commands or publication metadata.',
+  'Preserve W1-W4 semantics: new facts, near-duplicate hit/confirm, supersede with a replacement candidate, and cap-50 prune.',
+  'Emit promote only when owner-provided state proves confidence >= 0.85, hits >= 3, an eligible category, and durable non-fix text.',
+  'Empty evidence returns done with empty facts/events. Partial, blocked or error returns no publishable facts/events.',
+].join('\n');
 
 function fail(code, hint) { const error = new Error(hint || code); error.code = code; throw error; }
 function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
@@ -51,6 +60,14 @@ function inspectDeliveryContent(content, rule) {
 }
 function locations(request) {
   const m = request.milestoneId, s = request.sliceId, t = request.taskId;
+  if (request.unitType === 'memory-extract') {
+    const sourceUnit = request.sourceUnitId || request.unitId || t || s || m;
+    if (!memory.validateUnitId(sourceUnit)) fail('invalid-memory-unit');
+    if (/^[ST]\d/i.test(sourceUnit) && !m) fail('memory-milestone-required');
+    if (m !== undefined && !memory.validateMilestoneId(m)) fail('invalid-milestone');
+    return { required: [], allowed: [], rules: {}, delivery: null, milestone: m ? `.gsd/milestones/${m}` : null,
+      slice: m && s ? `.gsd/milestones/${m}/slices/${s}` : null, sourceUnit };
+  }
   if (!/^(?:M\d+|M-\d{14}-[a-z0-9-]+)$/i.test(m || '')) fail('invalid-milestone');
   if (s !== undefined && !/^S\d+$/.test(s)) fail('invalid-slice');
   if (t !== undefined && !/^T\d+(?:\.\d+)?$/.test(t)) fail('invalid-task');
@@ -169,6 +186,7 @@ function markChecked(content, id) {
   return content.replace(new RegExp(`^(\\s*[-*] \\[) ([\\]]\\s+(?:\\*\\*)?${escaped}(?=[:\\s*]))`, 'm'), '$1x$2');
 }
 function materialize(request, record) {
+  if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
   if (record.result.status !== 'done') return record.result;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
   // Validate every target and conflict before publishing any file. Replay after
@@ -183,6 +201,388 @@ function materialize(request, record) {
   }
   return record.result;
 }
+function memorySourceContext(request, record) {
+  const sourcePayload = {
+    summaryContent: request.summaryContent || '', sourceResult: request.sourceResult || '',
+    keyDecisions: request.keyDecisions || [], existingMemory: request.existingMemory || { facts: [], stats: [] },
+  };
+  return {
+    unitId: record.source_unit,
+    ...(request.milestoneId ? { milestoneId: request.milestoneId } : {}),
+    extractionId: record.extraction_id,
+    extractedAt: record.extracted_at,
+    source: {
+      sourceUnit: `${request.sourceUnitType || 'unit'}/${record.source_unit}`,
+      sourceFingerprint: request.sourceFingerprint || hash(JSON.stringify(sourcePayload)),
+      dispatchId: record.dispatch_id,
+      model: record.model,
+      effort: record.effort,
+    },
+  };
+}
+function memoryPrompt(request, sourceUnit) {
+  const input = {
+    unit_type: request.sourceUnitType || 'unit', unit_id: sourceUnit,
+    milestone_id: request.milestoneId || null, summary_content: request.summaryContent || '',
+    result_block: request.sourceResult || '', key_decisions: request.keyDecisions || [],
+    existing_memory: request.existingMemory || { facts: [], stats: [] },
+  };
+  return 'Read-only memory extraction. Return exactly one JSON object matching the supplied schema. '
+    + 'Do not write files, run commands, choose paths, or return owner identity/publication metadata.\n'
+    + `CONTRACT:\n${MEMORY_QUALITY_CONTRACT}\nINPUT:\n${JSON.stringify(input)}\nSCHEMA:\n${JSON.stringify(memorySchema)}`;
+}
+function memoryBoundarySafe(request) {
+  const boundary = request.publicationBoundary;
+  const snapshots = boundary && Array.isArray(boundary.protectedSnapshots) ? boundary.protectedSnapshots : null;
+  return request.publicationSafe === true && boundary && boundary.ownerJoined === true
+    && typeof boundary.checkedAt === 'string' && Number.isFinite(Date.parse(boundary.checkedAt)) && snapshots
+    && snapshots.every(snapshot => snapshot && snapshot.state === 'ended' && typeof snapshot.id === 'string');
+}
+function telemetryScalar(value) {
+  if (value === null || value === undefined) return null;
+  if (!['string', 'number', 'boolean'].includes(typeof value)) return null;
+  const normalized = String(value).replace(/[\r\n\u0000]/g, ' ').trim();
+  return normalized ? normalized.slice(0, 256) : null;
+}
+function memoryTelemetry(record) {
+  const raw = record && record.telemetry && typeof record.telemetry === 'object' && !Array.isArray(record.telemetry)
+    ? record.telemetry : {};
+  const observed = telemetryScalar(raw.model_observed);
+  const observedSource = telemetryScalar(raw.model_observed_source);
+  const effortApplied = telemetryScalar(raw.effort_applied);
+  const effortAppliedSource = telemetryScalar(raw.effort_applied_source);
+  return {
+    model_requested: telemetryScalar(raw.model_requested),
+    model_resolved: telemetryScalar(raw.model_resolved || record.model),
+    model_argument: telemetryScalar(raw.model_argument),
+    model_observed: observed && observedSource ? observed : null,
+    model_observed_source: observed && observedSource ? observedSource : null,
+    effort_requested: telemetryScalar(raw.effort_requested),
+    effort_resolved: telemetryScalar(raw.effort_resolved || record.effort),
+    effort_argument: telemetryScalar(raw.effort_argument),
+    effort_binding_observed: telemetryScalar(raw.effort_binding_observed),
+    effort_binding_observed_source: telemetryScalar(raw.effort_binding_observed_source),
+    effort_applied: effortApplied && effortAppliedSource ? effortApplied : null,
+    effort_applied_source: effortApplied && effortAppliedSource ? effortAppliedSource : null,
+  };
+}
+function memoryPublicationReason(publication) {
+  const status = publication && publication.status;
+  const reason = telemetryScalar(publication && publication.reason);
+  if (!reason) return null;
+  if (status === 'conflict') return 'memory-publication-conflict';
+  if (status === 'quarantined') return reason === 'grouped-member' ? reason : 'memory-publication-quarantined';
+  if (status === 'noop' && /^(?:replay|empty|empty-extraction|result-(?:partial|blocked|error)|worker-(?:partial|blocked|error))$/.test(reason)) {
+    return reason;
+  }
+  return 'memory-publication-detail-redacted';
+}
+function appendMemoryPublicationEvent(request, record, result) {
+  if (!memoryBoundarySafe(request) || result.publication?.status === 'deferred') return null;
+  const root = fs.realpathSync(request.contextRoot || request.cwd);
+  const eventsFile = target(root, '.gsd/forge/events.jsonl');
+  const publicationStatus = telemetryScalar(result.publication?.status);
+  const publicationReason = memoryPublicationReason(result.publication);
+  const eventBase = `memory-publication:${hash(`${record.dispatch_id}\0${record.extraction_id}`).slice(0, 24)}`;
+  const eventId = `${eventBase}:${hash(`${publicationStatus}\0${publicationReason || ''}`).slice(0, 12)}`;
+  if (fs.existsSync(eventsFile)) {
+    const prior = fs.readFileSync(eventsFile, 'utf8').split(/\r?\n/).flatMap(line => {
+      if (!line.includes(eventBase)) return [];
+      try { const parsed = JSON.parse(line); return parsed.event === 'memory-publication' ? [parsed] : []; } catch { return []; }
+    });
+    if (prior.some(event => event.event_id === eventId)
+        || (publicationStatus === 'noop' && publicationReason === 'replay' && prior.length > 0)) return null;
+  }
+  const route = request.route || {};
+  const telemetry = memoryTelemetry(record);
+  const event = {
+    ts: request.publicationBoundary.checkedAt,
+    event: 'memory-publication', event_id: eventId,
+    workflow_id: telemetryScalar(request.workflowId), dispatch_id: telemetryScalar(record.dispatch_id),
+    extraction_id: telemetryScalar(record.extraction_id), unit: `memory-extract/${record.source_unit}`,
+    host_runtime: telemetryScalar(route.host_runtime || request.hostRuntime),
+    worker_engine: telemetryScalar(route.resolved_worker_engine),
+    worker_mode: telemetryScalar(route.worker_mode), status: telemetryScalar(result.status),
+    publication_status: publicationStatus,
+    publication_reason: publicationReason,
+    ...telemetry,
+  };
+  fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
+  fs.appendFileSync(eventsFile, JSON.stringify(event) + '\n');
+  return event;
+}
+async function publishReadyRecord(request, record) {
+  if (record.kind !== 'memory-extraction') return materialize(request, record);
+  const extraction = record.extraction;
+  if (extraction.status !== 'done') {
+    const result = { status: extraction.status, extraction,
+      ...(record.telemetry ? { telemetry: record.telemetry } : {}),
+      publication: { status: 'noop', reason: `worker-${extraction.status}` } };
+    appendMemoryPublicationEvent(request, record, result);
+    return result;
+  }
+  if (!extraction.facts.length && !extraction.events.length) {
+    const result = { status: 'done', extraction, ...(record.telemetry ? { telemetry: record.telemetry } : {}),
+      publication: { status: 'noop', reason: 'empty-extraction' } };
+    appendMemoryPublicationEvent(request, record, result);
+    return result;
+  }
+  // Auto may finish inference while another worker snapshot is protected. Keep
+  // the durable ready receipt and replay publication after the owner joins it.
+  if (!memoryBoundarySafe(request)) {
+    return { status: 'done', extraction, ...(record.telemetry ? { telemetry: record.telemetry } : {}),
+      publication: { status: 'deferred', reason: 'protected-boundary-not-confirmed' } };
+  }
+  if (typeof request.waitForPublicationBoundary === 'function') await request.waitForPublicationBoundary();
+  const { publishExtraction } = require('./forge-memory-extraction');
+  const publication = await publishExtraction({ cwd: request.contextRoot || request.cwd, extraction,
+    sourceContext: memorySourceContext(request, record) });
+  const result = { status: 'done', extraction, ...(record.telemetry ? { telemetry: record.telemetry } : {}), publication };
+  appendMemoryPublicationEvent(request, record, result);
+  return result;
+}
+function appendNativeMemoryFailureEvent(request, loc, failure) {
+  const route = request.route || {};
+  const record = {
+    dispatch_id: request.dispatchId,
+    extraction_id: request.extractionId || request.dispatchId,
+    source_unit: loc.sourceUnit,
+    model: route.model_resolved || route.model || null,
+    effort: route.effort || null,
+    telemetry: failure.telemetry || request.invocationTelemetry || null,
+  };
+  appendMemoryPublicationEvent(request, record, {
+    status: failure.status,
+    publication: { status: 'noop', reason: 'worker-error' },
+  });
+}
+function nativeReceiptFiles(request) {
+  const cwd = fs.realpathSync(request.cwd), root = fs.realpathSync(request.contextRoot || cwd);
+  const resultFile = xllm.validateResultFileTarget(request.resultFile, cwd);
+  xllm.validateResultFileTarget(resultFile, root);
+  const receiptFile = `${resultFile}.receipt.json`;
+  xllm.validateResultFileTarget(receiptFile, cwd);
+  xllm.validateResultFileTarget(receiptFile, root);
+  return { cwd, root, resultFile, receiptFile };
+}
+function nativeMemoryFingerprint(request) {
+  return hash(JSON.stringify({ ...request, unitType: 'memory-extract', rawResult: undefined, invocationTelemetry: undefined,
+    resultFile: undefined, publicationSafe: undefined, publicationBoundary: undefined,
+    waitForPublicationBoundary: undefined }));
+}
+function nativeMemoryRouteIdentity(request) {
+  const r = request || {}, route = r.route || {};
+  const routeModel = route.model_resolved || route.model || null;
+  const routeEffort = route.effort || null;
+  if (!routeModel || !routeEffort
+      || (r.model !== undefined && r.model !== routeModel)
+      || (r.effort !== undefined && r.effort !== routeEffort)) {
+    fail('native-memory-route-mismatch', 'Native memory identity must match the authoritative resolved route and invocation telemetry.');
+  }
+  return { model: routeModel, effort: routeEffort };
+}
+function nativeMemoryIdentity(request, durableTelemetry) {
+  const r = request || {}, route = r.route || {};
+  const identity = nativeMemoryRouteIdentity(r);
+  const telemetry = durableTelemetry === undefined ? r.invocationTelemetry : durableTelemetry;
+  const required = ['model_requested', 'model_resolved', 'model_argument', 'model_observed',
+    'model_observed_source', 'effort_requested', 'effort_resolved', 'effort_argument',
+    'effort_transport', 'effort_transport_value', 'effort_transport_source',
+    'effort_binding_observed', 'effort_binding_observed_source', 'effort_binding_observed_fingerprint',
+    'effort_applied', 'effort_applied_source', 'capabilities_source'];
+  if (!telemetry || typeof telemetry !== 'object' || Array.isArray(telemetry)
+      || required.some(key => !Object.prototype.hasOwnProperty.call(telemetry, key))
+      || Object.keys(telemetry).some(key => !required.includes(key))) {
+    fail('native-memory-telemetry-invalid', 'Native memory publication requires the complete adapter telemetry envelope.');
+  }
+  const host = route.host_runtime || r.hostRuntime;
+  const paired = (value, source) => (value === null && source === null)
+    || (typeof value === 'string' && value && typeof source === 'string' && source);
+  const commonMismatch = telemetry.model_requested !== (route.model_requested ?? null)
+    || telemetry.model_resolved !== identity.model
+    || telemetry.effort_resolved !== identity.effort
+    || telemetry.effort_requested !== identity.effort
+    || typeof telemetry.model_argument !== 'string' || !telemetry.model_argument
+    || typeof telemetry.capabilities_source !== 'string' || !telemetry.capabilities_source
+    || !paired(telemetry.model_observed, telemetry.model_observed_source)
+    || !paired(telemetry.effort_applied, telemetry.effort_applied_source)
+    || (telemetry.effort_applied !== null && telemetry.effort_applied !== identity.effort);
+  const codexMismatch = host === 'codex' && (telemetry.model_argument !== identity.model
+    || telemetry.effort_argument !== identity.effort
+    || telemetry.effort_transport !== 'native-argument'
+    || telemetry.effort_transport_value !== identity.effort
+    || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+    || telemetry.effort_binding_observed !== null
+    || telemetry.effort_binding_observed_source !== null
+    || telemetry.effort_binding_observed_fingerprint !== null);
+  const claudeMismatch = host === 'claude' && (telemetry.model_argument !== route.alias
+    || telemetry.effort_argument !== null
+    || telemetry.effort_transport !== 'agent-frontmatter'
+    || telemetry.effort_transport_value !== identity.effort
+    || telemetry.effort_binding_observed !== identity.effort
+    || typeof telemetry.effort_transport_source !== 'string' || !telemetry.effort_transport_source
+    || typeof telemetry.effort_binding_observed_source !== 'string' || !telemetry.effort_binding_observed_source
+    || telemetry.effort_binding_observed_source !== telemetry.effort_transport_source
+    || typeof telemetry.effort_binding_observed_fingerprint !== 'string'
+    || !/^sha256:[a-f0-9]{64}$/.test(telemetry.effort_binding_observed_fingerprint));
+  if (!['codex', 'claude'].includes(host) || commonMismatch || codexMismatch || claudeMismatch) {
+    fail('native-memory-telemetry-mismatch', 'Native memory telemetry must describe the exact resolved route and adapter transport.');
+  }
+  return identity;
+}
+function normalizedNativeFailure(request) {
+  const raw = request && request.nativeFailure;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+      || typeof raw.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(raw.reason_code)) {
+    fail('native-memory-failure-invalid', 'Native memory failure requires a bounded machine-readable reason_code.');
+  }
+  if (raw.provider_called === true) nativeMemoryIdentity(request, raw.telemetry);
+  const telemetry = memoryTelemetry({ telemetry: raw.telemetry || null });
+  return {
+    status: 'failure', reason_code: raw.reason_code,
+    provider_called: raw.provider_called === true,
+    telemetry,
+    publication: { status: 'noop', reason: 'worker-error' },
+  };
+}
+function acceptNativeMemoryFailure(request, loc) {
+  const r = request || {};
+  nativeMemoryRouteIdentity(r);
+  const files = nativeReceiptFiles(r);
+  const fingerprint = nativeMemoryFingerprint(r);
+  const proposed = normalizedNativeFailure(r);
+  let failure = proposed;
+  if (fs.existsSync(files.receiptFile)) {
+    const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
+    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.phase !== 'failed' || !existing.failure) fail('dispatch-identity-conflict');
+    failure = existing.failure;
+  } else {
+    json(files.receiptFile, { phase: 'failed', fingerprint, dispatch_id: r.dispatchId, failure: proposed });
+  }
+  json(files.resultFile, failure);
+  appendNativeMemoryFailureEvent(r, loc, failure);
+  return failure;
+}
+async function acceptNativeMemoryResult(request) {
+  const r = request || {}, loc = locations({ ...r, unitType: 'memory-extract' });
+  if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
+  if (r.nativeFailure !== undefined && r.rawResult !== undefined) {
+    fail('native-memory-failure-invalid', 'Native memory acceptance cannot contain both a result and a failure.');
+  }
+  if (r.nativeFailure !== undefined) return acceptNativeMemoryFailure(r, loc);
+  const files = nativeReceiptFiles(r);
+  const fingerprint = nativeMemoryFingerprint(r);
+  const existing = fs.existsSync(files.receiptFile) ? JSON.parse(fs.readFileSync(files.receiptFile, 'utf8')) : null;
+  if (existing) {
+    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.phase === 'ready') {
+      const replayIdentity = nativeMemoryIdentity(r, existing.telemetry);
+      if (existing.model !== replayIdentity.model || existing.effort !== replayIdentity.effort) {
+        fail('native-memory-telemetry-mismatch', 'The durable receipt identity does not match its adapter telemetry.');
+      }
+      const replayed = await publishReadyRecord(r, existing);
+      json(files.resultFile, replayed);
+      return replayed;
+    }
+    if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'native-memory-attempt-failed');
+    if (existing.phase !== 'started' || r.rawResult === undefined) fail('native-memory-attempt-interrupted');
+  } else {
+    fs.writeFileSync(files.receiptFile, JSON.stringify({ phase: 'started', fingerprint,
+      dispatch_id: r.dispatchId }), { flag: 'wx', mode: 0o600 });
+  }
+  try {
+    const identity = nativeMemoryIdentity(r);
+    const extraction = require('./forge-memory-extraction').validateExtractionResult(r.rawResult,
+      { sourceUnit: loc.sourceUnit });
+    const record = { phase: 'ready', kind: 'memory-extraction', fingerprint,
+      dispatch_id: r.dispatchId, extraction_id: r.extractionId || r.dispatchId,
+      extracted_at: r.extractedAt || new Date().toISOString(), source_unit: loc.sourceUnit,
+      model: identity.model, effort: identity.effort,
+      telemetry: r.invocationTelemetry || null, extraction, artifacts: [] };
+    json(files.receiptFile, record);
+    const delivered = await publishReadyRecord(r, record);
+    json(files.resultFile, delivered);
+    return delivered;
+  } catch (error) {
+    const failure = { status: 'failure', reason_code: error.code || 'memory-extraction-invalid' };
+    const current = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
+    if (current.phase !== 'ready') json(files.receiptFile, { phase: 'failed', fingerprint,
+      dispatch_id: r.dispatchId, failure });
+    json(files.resultFile, failure);
+    throw error;
+  }
+}
+function candidateFromNativeResult(result) {
+  const value = result && result.result !== undefined ? result.result : result;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    if (value.schema_version !== undefined) return value;
+    if (value.result_json && typeof value.result_json === 'object') return value.result_json;
+  }
+  const text = value && typeof value === 'object' ? (value.finalText || value.output || value.text) : value;
+  return typeof text === 'string' ? xllm.extractLastJsonBlock(text) : null;
+}
+async function runNativeMemory(request, invoke) {
+  const r = request || {};
+  if (r.policy && r.policy.decision !== 'extract') {
+    return { status: 'skipped', reason: r.policy.reason || 'memory-policy-skip', provider_called: false };
+  }
+  const loc = locations({ ...r, unitType: 'memory-extract' });
+  nativeMemoryRouteIdentity(r);
+  const receiptFiles = nativeReceiptFiles(r);
+  if (fs.existsSync(receiptFiles.receiptFile)) {
+    try {
+      const receipt = JSON.parse(fs.readFileSync(receiptFiles.receiptFile, 'utf8'));
+      if (receipt.phase !== 'ready') return { status: 'failure',
+        reason_code: receipt.failure?.reason_code || 'native-memory-attempt-interrupted',
+        provider_called: false, replayed: false };
+      const delivered = await acceptNativeMemoryResult({ ...r, unitType: 'memory-extract', rawResult: undefined });
+      return { status: 'done', ...delivered, provider_called: false, replayed: true };
+    } catch (error) {
+      return { status: 'failure', reason_code: error.code || 'native-memory-replay-failed', provider_called: false };
+    }
+  }
+  const nativeOptions = {
+    hostRuntime: r.hostRuntime || r.route?.host_runtime, resolvedDispatch: r.route,
+    activeCapabilities: r.activeCapabilities,
+    taskName: r.taskName || `memory_${loc.sourceUnit}_${r.dispatchId}`,
+    prompt: memoryPrompt(r, loc.sourceUnit), agentType: 'forge-memory', forkTurns: r.forkTurns || 'none',
+    effortBinding: r.effortBinding,
+    readback: r.readback,
+  };
+  const invocationApi = require('./forge-native-invocation');
+  const prepared = invocationApi.buildNativeInvocation(nativeOptions);
+  if (!prepared.ok) {
+    const failure = { status: 'failure', reason_code: prepared.reason_code,
+      hint: prepared.hint, provider_called: false, telemetry: prepared.telemetry };
+    appendNativeMemoryFailureEvent(r, loc, failure);
+    return failure;
+  }
+  const fingerprint = nativeMemoryFingerprint(r);
+  fs.writeFileSync(receiptFiles.receiptFile, JSON.stringify({ phase: 'started', fingerprint,
+    dispatch_id: r.dispatchId }), { flag: 'wx', mode: 0o600 });
+  let providerCalled = false;
+  const native = await invocationApi.invokeNative(nativeOptions, async (...args) => {
+    providerCalled = true;
+    return invoke(...args);
+  });
+  if (!native.ok) {
+    const failure = { status: 'failure', reason_code: native.reason_code,
+      hint: native.hint, provider_called: providerCalled, telemetry: native.telemetry };
+    json(receiptFiles.receiptFile, { phase: 'failed', fingerprint, dispatch_id: r.dispatchId, failure });
+    json(receiptFiles.resultFile, failure);
+    appendNativeMemoryFailureEvent(r, loc, failure);
+    return failure;
+  }
+  try {
+    const delivered = await acceptNativeMemoryResult({ ...r, unitType: 'memory-extract',
+      rawResult: candidateFromNativeResult(native), invocationTelemetry: native.telemetry });
+    return { status: 'done', ...delivered, telemetry: native.telemetry, provider_called: true };
+  } catch (error) {
+    return { status: 'failure', reason_code: error.code || 'memory-extraction-invalid',
+      provider_called: true, telemetry: native.telemetry };
+  }
+}
 async function runUnitSidecar(request) {
   const r = request || {}, route = r.route || {};
   const transport = capability(route.resolved_worker_engine, r.unitType);
@@ -190,7 +590,15 @@ async function runUnitSidecar(request) {
   const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType });
   if (route.dispatch_allowed !== true || route.worker_mode !== 'sidecar' || !route.sidecar_declared
     || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
-  const model = route.resolved_worker_engine === 'codex' ? (route.sidecar_model || route.model) : route.model;
+  const authoritativeModel = route.model_resolved || route.model;
+  if (!authoritativeModel
+      || (route.model_resolved && route.model && route.model_resolved !== route.model)
+      || (route.resolved_worker_engine === 'codex' && route.sidecar_model
+        && route.sidecar_model !== authoritativeModel)) {
+    fail('route-model-identity-mismatch', 'The sidecar model must equal the authoritative resolved model.');
+  }
+  const model = route.resolved_worker_engine === 'codex'
+    ? (route.sidecar_model || authoritativeModel) : authoritativeModel;
   if (!model || !route.effort) fail('resolved-route-required');
   const family = require('./forge-model-alias').modelFamily(model);
   if ((family === 'gpt' ? 'codex' : family) !== route.resolved_worker_engine) {
@@ -203,7 +611,8 @@ async function runUnitSidecar(request) {
   const loc = locations(r);
   const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
   if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
-  const fingerprint = hash(JSON.stringify({ ...r, resultFile: undefined }));
+  const fingerprint = hash(JSON.stringify({ ...r, resultFile: undefined, publicationSafe: undefined,
+    publicationBoundary: undefined, waitForPublicationBoundary: undefined }));
   const receiptFile = `${resultFile}.receipt.json`;
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
@@ -211,7 +620,8 @@ async function runUnitSidecar(request) {
   function event(status, reasonCode, detail) {
     fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
     fs.appendFileSync(eventsFile, JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
-      workflow_id: r.workflowId, dispatch_id: dispatchId, unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`,
+      workflow_id: r.workflowId, dispatch_id: dispatchId,
+      unit: `${r.unitType}/${r.unitType === 'memory-extract' ? loc.sourceUnit : r.taskId || r.sliceId || r.milestoneId}`,
       host_runtime: route.host_runtime, worker_engine: route.resolved_worker_engine,
       worker_mode: 'sidecar', model, tier: route.tier, effort: route.effort,
       status, ...(reasonCode ? { reason_code: reasonCode } : {}),
@@ -236,7 +646,7 @@ async function runUnitSidecar(request) {
     if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
     if (existing.phase === 'ready') {
       try {
-        const result = materialize(r, existing);
+        const result = await publishReadyRecord(r, existing);
         json(resultFile, result);
         return result;
       } catch (error) { recordFailure(error); throw error; }
@@ -269,7 +679,8 @@ async function runUnitSidecar(request) {
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before }), { flag: 'wx', mode: 0o600 });
   event('started');
   const dispatchEvent = require('./forge-dispatch-event').buildDispatchEvent({
-    unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`, milestone: r.milestoneId,
+    unit: `${r.unitType}/${r.unitType === 'memory-extract' ? loc.sourceUnit : r.taskId || r.sliceId || r.milestoneId}`,
+    milestone: r.milestoneId,
     slice: r.sliceId, dispatchId, model, engine: route.resolved_worker_engine,
     transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
   }, route, startedAt);
@@ -285,7 +696,29 @@ async function runUnitSidecar(request) {
     heartbeat_interval_ms: 15000, started_at: startedAt, updated_at: new Date().toISOString(), dispatch_id: dispatchId });
   try {
     let result, artifacts;
-    if (transport.mode === 'execute') {
+    if (transport.mode === 'memory') {
+      const prompt = memoryPrompt(r, loc.sourceUnit);
+      const validateMemory = value => {
+        try { require('./forge-memory-extraction').validateExtractionResult(value, { sourceUnit: loc.sourceUnit }); return true; }
+        catch { return false; }
+      };
+      xllm.authorizeSidecar('memory', options);
+      heartbeat(null);
+      if (options.engine === 'claude') {
+        const output = await invokeClaudeSidecar({ ...options, prompt: prompt
+          + '\nFinish with ---GSD-WORKER-RESULT---, status, result_json containing the complete JSON, and ---END-RESULT--- on separate lines.',
+          readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
+          heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
+        result = output.candidate;
+      } else {
+        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
+          sandbox: 'read-only', onHeartbeat: heartbeat });
+        result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
+      }
+      result = require('./forge-memory-extraction').validateExtractionResult(result, { sourceUnit: loc.sourceUnit });
+      xllm.assertUntrustedOutputBarrier(result);
+      artifacts = [];
+    } else if (transport.mode === 'execute') {
       result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: r.writableRoots });
       artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
@@ -343,26 +776,39 @@ async function runUnitSidecar(request) {
     if (result.status === 'done' && bookkeeping) {
       artifacts.push({ path: bookkeeping, content: markChecked(bookkeepingText, r.unitType === 'complete-slice' ? r.sliceId : r.taskId) });
     }
-    const record = { phase: 'ready', fingerprint, result: { ...result, dispatch_id: dispatchId,
-      workflow_id: r.workflowId, host_runtime: route.host_runtime, worker_engine: options.engine },
-      artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
+    const record = transport.mode === 'memory'
+      ? { phase: 'ready', kind: 'memory-extraction', fingerprint, dispatch_id: dispatchId,
+        extraction_id: r.extractionId || dispatchId, extracted_at: startedAt, source_unit: loc.sourceUnit,
+        model: route.model_resolved || route.model, effort: route.effort, extraction: result, artifacts: [],
+        telemetry: { model_requested: route.model_requested || route.model || null,
+          model_resolved: route.model_resolved || route.model || null, model_argument: model,
+          model_observed: null, model_observed_source: null,
+          effort_requested: route.effort || null, effort_resolved: route.effort || null,
+          effort_argument: route.effort || null, capabilities_source: 'sidecar-transport' } }
+      : { phase: 'ready', fingerprint, result: { ...result, dispatch_id: dispatchId,
+        workflow_id: r.workflowId, host_runtime: route.host_runtime, worker_engine: options.engine },
+        artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
     // Durable validated response BEFORE artifact publication: a crash anywhere
     // after here replays publication, without spending another provider turn.
     json(receiptFile, record);
-    result = materialize(r, record);
+    result = await publishReadyRecord(r, record);
     json(resultFile, result);
-    event(result.status);
+    if (transport.mode !== 'memory') event(result.status);
     return result;
   } catch (error) {
     recordFailure(error);
     throw error;
   }
 }
-module.exports = { schema, locations, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
-  MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, runUnitSidecar };
+module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
+  MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
+  publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory, runUnitSidecar };
 if (require.main === module) {
   Promise.resolve().then(() => {
-    if (process.argv[2] !== '--request' || !process.argv[3]) fail('request-file-required');
-    return runUnitSidecar(JSON.parse(fs.readFileSync(process.argv[3], 'utf8')));
+    if (!['--request', '--accept-native-memory'].includes(process.argv[2]) || !process.argv[3]) fail('request-file-required');
+    const request = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+    return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request);
+  }).then(result => {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
   }).catch(error => { process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });
 }

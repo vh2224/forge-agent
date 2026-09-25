@@ -185,7 +185,7 @@ The orchestrator routes each `execute-task` to a model (**tier**) and a reasonin
 
 ```yaml
 tier:   light | standard | heavy | max     # which model runs the task (optional; default standard)
-effort: low | medium | high | xhigh | max  # how hard it reasons (optional; default = unit-type default, low)
+effort: low | medium | high | xhigh | max  # how hard it reasons (optional; default = canonical resolver unit-type default)
 ```
 
 **Calibration — pick the pair that matches the task:**

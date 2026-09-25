@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge-agent.local/schemas/memory-extraction.schema.json",
+  "title": "Forge memory extraction result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "summary", "questions", "facts", "events"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "status": { "enum": ["done", "partial", "blocked", "error"] },
+    "summary": { "type": "string", "maxLength": 2000 },
+    "questions": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+    },
+    "facts": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "$ref": "#/$defs/fact" }
+    },
+    "events": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "$ref": "#/$defs/event" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] },
+      "then": { "properties": { "questions": { "maxItems": 0 } } }
+    },
+    {
+      "if": { "properties": { "status": { "not": { "const": "done" } } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "facts": { "maxItems": 0 },
+          "events": { "maxItems": 0 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "localId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    },
+    "memoryId": {
+      "type": "string",
+      "pattern": "^MEM[0-9]{3,}$"
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_id", "category", "text", "confidence_base"],
+      "properties": {
+        "local_id": { "$ref": "#/$defs/localId" },
+        "category": {
+          "enum": ["gotcha", "convention", "architecture", "pattern", "environment", "preference"]
+        },
+        "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "confidence_base": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["existing_id"],
+          "properties": { "existing_id": { "$ref": "#/$defs/memoryId" } }
+        },
+        {
+          "type": "object",
+          "required": ["local_id"],
+          "properties": { "local_id": { "$ref": "#/$defs/localId" } }
+        }
+      ]
+    },
+    "event": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "local_id"],
+          "properties": {
+            "kind": { "const": "seed" },
+            "local_id": { "$ref": "#/$defs/localId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["hit", "confirm"] },
+            "existing_id": { "$ref": "#/$defs/memoryId" },
+            "local_id": { "$ref": "#/$defs/localId" }
+          },
+          "allOf": [{ "$ref": "#/$defs/target" }]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "existing_id", "replacement_local_id"],
+          "properties": {
+            "kind": { "const": "supersede" },
+            "existing_id": { "$ref": "#/$defs/memoryId" },
+            "replacement_local_id": { "$ref": "#/$defs/localId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": { "const": "prune" },
+            "existing_id": { "$ref": "#/$defs/memoryId" },
+            "local_id": { "$ref": "#/$defs/localId" },
+            "reason": { "const": "cap" }
+          },
+          "allOf": [{ "$ref": "#/$defs/target" }]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "threshold_met"],
+          "properties": {
+            "kind": { "const": "promote" },
+            "existing_id": { "$ref": "#/$defs/memoryId" },
+            "local_id": { "$ref": "#/$defs/localId" },
+            "threshold_met": { "const": true }
+          },
+          "allOf": [{ "$ref": "#/$defs/target" }]
+        }
+      ]
+    }
+  }
+}

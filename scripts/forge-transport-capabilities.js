@@ -8,6 +8,7 @@ const ARTIFACT_UNITS = Object.freeze([
 ]);
 const UNIT_MODES = Object.freeze({
   ...Object.fromEntries(ARTIFACT_UNITS.map(unit => [unit, 'artifacts'])),
+  'memory-extract': 'memory',
   'plan-slice': 'plan', 'execute-task': 'execute',
   'review-challenger': 'challenge', 'review-advocate': 'defend',
   'review-rebuttal': 'rebuttal',

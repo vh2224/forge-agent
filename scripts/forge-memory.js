@@ -512,10 +512,28 @@ function factHash(f) {
 }
 
 // ── statHash ─────────────────────────────────────────────────────────────────
-// Stable SHA1 hash for a stat event's (kind, mem_id, ts) dedup tuple.
+// New publisher events carry event_id, which is their replay identity. Legacy
+// events retain the historical (kind, mem_id, ts) tuple so additive metadata
+// cannot manufacture duplicates. Supersede is the one legacy exception: its
+// documented identity lives in old_id/new_id rather than mem_id.
 function statHash(s) {
-  const raw = [s.kind || '', s.mem_id || '', s.ts || ''].join('\x00');
+  let raw;
+  if (s && s.event_id) {
+    raw = ['event_id', s.event_id].join('\x00');
+  } else if (s && s.kind === 'supersede') {
+    raw = [s.kind || '', s.old_id || '', s.new_id || '', s.ts || ''].join('\x00');
+  } else {
+    raw = [s && s.kind || '', s && s.mem_id || '', s && s.ts || ''].join('\x00');
+  }
   return crypto.createHash('sha1').update(raw).digest('hex');
+}
+
+function factContentHash(f) {
+  const raw = Object.keys(f || {})
+    .sort()
+    .map(key => `${key}\x00${String(f[key] === undefined || f[key] === null ? '' : f[key])}`)
+    .join('\x01');
+  return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
 // ── mergeFacts ────────────────────────────────────────────────────────────────
@@ -523,13 +541,20 @@ function statHash(s) {
 // Dedup by mem_id — existing fact fields are NEVER mutated.
 // New facts are appended; result sorted by created_at ASC then mem_id for stability.
 function mergeFacts(existing, incoming) {
-  const seen = new Set(existing.map(factHash));
+  const seen = new Map(existing.map(f => [factHash(f), f]));
   const merged = [...existing];
 
   for (const f of incoming) {
     const h = factHash(f);
-    if (h && !seen.has(h)) {
-      seen.add(h);
+    if (!h) continue;
+    if (seen.has(h)) {
+      if (factContentHash(seen.get(h)) !== factContentHash(f)) {
+        const error = new Error(`Conflicting immutable memory fact: ${h}`);
+        error.code = 'MEMORY_FACT_CONFLICT';
+        throw error;
+      }
+    } else {
+      seen.set(h, f);
       merged.push(f);
     }
   }
@@ -550,13 +575,18 @@ function mergeFacts(existing, incoming) {
 // Dedup by SHA1(kind, mem_id, ts) — re-writing the same event is a no-op.
 // Result sorted by ts ASC then by hash for stability.
 function mergeStats(existing, incoming) {
-  const seen = new Set(existing.map(statHash));
+  const seen = new Map(existing.map(stat => [statHash(stat), stat]));
   const merged = [...existing];
 
   for (const s of incoming) {
     const h = statHash(s);
+    if (seen.has(h) && s.event_id && factContentHash(seen.get(h)) !== factContentHash(s)) {
+      const error = new Error(`Conflicting memory event identity: ${s.event_id}`);
+      error.code = 'MEMORY_EVENT_CONFLICT';
+      throw error;
+    }
     if (!seen.has(h)) {
-      seen.add(h);
+      seen.set(h, s);
       merged.push(s);
     }
   }
@@ -566,6 +596,10 @@ function mergeStats(existing, incoming) {
     const tb = String(b.ts || '');
     if (ta < tb) return -1;
     if (ta > tb) return 1;
+    const order = { seed: 0, hit: 1, confirm: 1, promote: 2, prune: 3, supersede: 3 };
+    const oa = Object.prototype.hasOwnProperty.call(order, a.kind) ? order[a.kind] : 2;
+    const ob = Object.prototype.hasOwnProperty.call(order, b.kind) ? order[b.kind] : 2;
+    if (oa !== ob) return oa - ob;
     return statHash(a).localeCompare(statHash(b));
   });
 
@@ -736,26 +770,42 @@ function writeFragment(cwd, fragment, opts) {
     if (member) {
       const remedy = `forge-sweep-project --undo ${member.path} → editar → reagrupar`;
       const { quarantineFragment } = require('./forge-memory-quarantine');
-      const parked = quarantineFragment(cwd, fragment, {
+      let refusedFragment = fragment;
+      let transactionResult;
+      if (typeof opts.transaction === 'function') {
+        const current = parseFragment(readFragmentText(cwd, member));
+        const update = opts.transaction(current);
+        if (!update || typeof update !== 'object') {
+          throw new Error('memory transaction must return a fragment or { fragment, result }');
+        }
+        refusedFragment = update.fragment || update;
+        transactionResult = update.fragment ? update.result : undefined;
+      }
+      const parked = quarantineFragment(cwd, refusedFragment, {
         storageKey,
         unitId: fragment.unit_id,
         milestoneId: milestoneId || null,
         container: member.path,
         reason: 'grouped-member',
         remedy,
+        extractionId: opts.extractionId || null,
+        extractedAt: opts.extractedAt || null,
       });
       process.stderr.write(
         `[forge-memory] recusa: unidade ${storageKey} vive no container ${member.path} — `
         + `fato em quarentena: ${parked.path}. Remédio: ${remedy}\n`
       );
-      return {
+      const refusal = {
         path: parked.path,
         created: false,
         quarantined: true,
         reason: 'grouped-member',
         container: member.path,
         remedy,
+        replayed: parked.replayed === true,
       };
+      if (typeof opts.transaction === 'function') refusal.transaction_result = transactionResult;
+      return refusal;
     }
   }
 
@@ -774,6 +824,7 @@ function writeFragment(cwd, fragment, opts) {
     // Read and merge only after acquiring the transaction lock. This is what
     // prevents two background forge-memory agents from both merging stale data.
     let base;
+    let transactionResult;
     // Form B: capture the EOL of the fragment already on disk and re-emit it below.
     // A fragment authored on Windows stays CRLF; a new one is written LF.
     let eol = '\n';
@@ -785,13 +836,50 @@ function writeFragment(cwd, fragment, opts) {
       const incomingFacts = Array.isArray(fragment.facts) ? fragment.facts : [];
       const existingStats = Array.isArray(existing.stats) ? existing.stats : [];
       const incomingStats = Array.isArray(fragment.stats) ? fragment.stats : [];
-      const mergedFacts = mergeFacts(existingFacts, incomingFacts);
-      const mergedStats = mergeStats(existingStats, incomingStats);
-      base = { ...existing, ...fragment, facts: mergedFacts, stats: mergedStats };
+      if (typeof opts.transaction === 'function') {
+        const update = opts.transaction(existing);
+        if (!update || typeof update !== 'object') {
+          throw new Error('memory transaction must return a fragment or { fragment, result }');
+        }
+        const next = update.fragment || update;
+        const nextFacts = Array.isArray(next.facts) ? next.facts : [];
+        const nextStats = Array.isArray(next.stats) ? next.stats : [];
+        base = {
+          ...existing,
+          ...next,
+          facts: mergeFacts(existingFacts, nextFacts),
+          stats: mergeStats(existingStats, nextStats),
+        };
+        transactionResult = update.fragment ? update.result : undefined;
+      } else {
+        const mergedFacts = mergeFacts(existingFacts, incomingFacts);
+        const mergedStats = mergeStats(existingStats, incomingStats);
+        base = { ...existing, ...fragment, facts: mergedFacts, stats: mergedStats };
+      }
     } else {
-      const facts = Array.isArray(fragment.facts) ? mergeFacts([], fragment.facts) : [];
-      const stats = Array.isArray(fragment.stats) ? mergeStats([], fragment.stats) : [];
-      base = { ...fragment, facts, stats };
+      if (typeof opts.transaction === 'function') {
+        const update = opts.transaction({
+          unit_id: fragment.unit_id,
+          milestone_id: milestoneId || undefined,
+          facts: [],
+          stats: [],
+          body: '',
+        });
+        if (!update || typeof update !== 'object') {
+          throw new Error('memory transaction must return a fragment or { fragment, result }');
+        }
+        const next = update.fragment || update;
+        base = {
+          ...next,
+          facts: mergeFacts([], Array.isArray(next.facts) ? next.facts : []),
+          stats: mergeStats([], Array.isArray(next.stats) ? next.stats : []),
+        };
+        transactionResult = update.fragment ? update.result : undefined;
+      } else {
+        const facts = Array.isArray(fragment.facts) ? mergeFacts([], fragment.facts) : [];
+        const stats = Array.isArray(fragment.stats) ? mergeStats([], fragment.stats) : [];
+        base = { ...fragment, facts, stats };
+      }
     }
     if (milestoneId) base.milestone_id = milestoneId;
 
@@ -801,7 +889,9 @@ function writeFragment(cwd, fragment, opts) {
     const content = `---${eol}${frontmatter}${eol}---${eol}${body}`;
 
     if (fs.existsSync(fpath) && fs.readFileSync(fpath, 'utf8') === content) {
-      return { path: fpath, created: false };
+      const unchanged = { path: fpath, created: false };
+      if (typeof opts.transaction === 'function') unchanged.transaction_result = transactionResult;
+      return unchanged;
     }
 
     yamlSafe.writeAtomic(fpath, content, {
@@ -809,10 +899,26 @@ function writeFragment(cwd, fragment, opts) {
       runId: opts.runId || null,
       sessionId: opts.sessionId || null,
     });
-    return { path: fpath, created: true };
+    const committed = { path: fpath, created: true };
+    if (typeof opts.transaction === 'function') committed.transaction_result = transactionResult;
+    return committed;
   } finally {
     transactionLock.release();
   }
+}
+
+// For a loose fragment, runs a caller-provided read/validate/append calculation
+// while holding the same fragment mutex used by writeFragment. A grouped member
+// is immutable: its snapshot is passed to the callback without taking a loose
+// fragment lock, and the complete proposed payload is quarantined instead of
+// entering the canonical store. The callback returns either the complete next
+// fragment or { fragment, result }; existing facts remain immutable and
+// facts/stats remain append-only through the merge guards above.
+function transactFragment(cwd, fragment, opts, transaction) {
+  if (typeof transaction !== 'function') {
+    throw new Error('transactFragment requires a transaction callback');
+  }
+  return writeFragment(cwd, fragment, { ...(opts || {}), transaction });
 }
 
 // ── readFragment ──────────────────────────────────────────────────────────────
@@ -956,6 +1062,7 @@ module.exports = {
   parseFragment,
   serializeFrontmatter,
   writeFragment,
+  transactFragment,
   readFragment,
   readFragmentText,
   listFragments,
@@ -963,7 +1070,7 @@ module.exports = {
   validateMilestoneId,
   queryRelevant,
   ASK_ID_RE,
-  _private: { detectGroupedMember },
+  _private: { detectGroupedMember, factContentHash, statHash },
 };
 
 // ── cliMain ───────────────────────────────────────────────────────────────────

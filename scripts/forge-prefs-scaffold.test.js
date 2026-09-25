@@ -99,7 +99,7 @@ check('nested section can be activated with one knob left off', () => {
     else if (inside && /^\s*\/\/ ── /.test(line)) inside = false;
     nested.push(inside && scaffold.isOffMarker(line) ? scaffold.stripOffMarker(line) : line);
   }
-  const target = nested.findIndex((line) => /"execute-task": "low"/.test(line));
+  const target = nested.findIndex((line) => /"execute-task": "medium"/.test(line));
   assert(target !== -1);
   nested[target] = nested[target].replace(/^(\s*)/, '$1// ');
   const parsed = engine.parseJsonc(nested.join('\n'));

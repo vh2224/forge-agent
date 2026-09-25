@@ -81,7 +81,7 @@ const INVENTORY = [
   { key: 'effort.discuss-slice', type: 'string', default: 'medium', source: 'shared/forge-dispatch.md:1594 EFFORT_DEFAULTS' },
   { key: 'effort.research-milestone', type: 'string', default: 'medium', source: 'shared/forge-dispatch.md:1595 EFFORT_DEFAULTS' },
   { key: 'effort.research-slice', type: 'string', default: 'medium', source: 'shared/forge-dispatch.md:1595 EFFORT_DEFAULTS' },
-  { key: 'effort.execute-task', type: 'string', default: 'low', source: 'shared/forge-dispatch.md:1595 EFFORT_DEFAULTS' },
+  { key: 'effort.execute-task', type: 'string', default: 'medium', source: 'shared/forge-dispatch.md EFFORT_DEFAULTS' },
   { key: 'effort.complete-slice', type: 'string', default: 'low', source: 'shared/forge-dispatch.md:1596 EFFORT_DEFAULTS' },
   { key: 'effort.complete-milestone', type: 'string', default: 'low', source: 'shared/forge-dispatch.md:1596 EFFORT_DEFAULTS' },
   { key: 'effort.memory-extract', type: 'string', default: 'low', source: 'shared/forge-dispatch.md:1596 EFFORT_DEFAULTS' },
@@ -449,7 +449,7 @@ const WITNESSES = [
   ['tier_models.light', 'claude-haiku-4-5-20251001', 'scripts/forge-tier-chain.js:35'],
   ['tier_models.heavy', 'claude-opus-5', 'scripts/forge-tier-chain.js:37 (opus-5: no [1m] suffix)'],
   // effort defaults (shared/forge-dispatch.md EFFORT_DEFAULTS)
-  ['effort.execute-task', 'low', 'shared/forge-dispatch.md:1595'],
+  ['effort.execute-task', 'medium', 'shared/forge-dispatch.md'],
   ['effort.plan-slice', 'medium', 'shared/forge-dispatch.md:1594'],
   // exported reader constants (imported live below in addition to literals)
   ['context_monitor.warning_threshold', DEFAULT_THRESHOLDS.warning, 'scripts/forge-context-monitor.js:44 DEFAULT_THRESHOLDS.warning (imported)'],

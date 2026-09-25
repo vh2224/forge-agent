@@ -188,6 +188,32 @@ test('grouped envelopes preserve storage key, unit id, milestone id, and epoch',
   assert.strictEqual(entry.grouped, true);
 });
 
+test('transaction seam sees grouped state and quarantines the complete append payload', () => {
+  const { cwd } = fixture();
+  groupEntries(cwd, [{ unitId: 'S01', opts: { milestoneId: MILESTONE } }], '2026-Q6');
+  const captured = captureStderr(() => memory.transactFragment(
+    cwd,
+    { unit_id: 'S01', milestone_id: MILESTONE },
+    {
+      milestoneId: MILESTONE,
+      extractionId: 'grouped-transaction',
+      extractedAt: '2026-09-24T22:30:00.000Z',
+    },
+    current => ({
+      fragment: {
+        ...current,
+        facts: [...current.facts, fact('MEM099', 'transaction candidate')],
+      },
+      result: { observed: current.facts.length },
+    }),
+  ));
+  assert.strictEqual(captured.result.quarantined, true);
+  assert.strictEqual(captured.result.transaction_result.observed, 1);
+  const record = JSON.parse(fs.readFileSync(captured.result.path, 'utf8'));
+  assert.strictEqual(record.fragment.facts.length, 2);
+  assert.strictEqual(record.fragment.facts[1].mem_id, 'MEM099');
+});
+
 if (failed) {
   for (const failure of failures) console.error(`- ${failure.name}: ${failure.error.message}`);
   process.exitCode = 1;

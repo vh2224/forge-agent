@@ -47,6 +47,8 @@ test('runtime install omits tests and update backs up only known unchanged devel
     assert(fs.existsSync(path.join(scripts, 'forge-personal-context.js')));
     assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-personal-context.md')));
     assert(fs.existsSync(path.join(scripts, 'forge-entry-assessment.js')));
+    const nativeInvocationPath = path.join(scripts, 'forge-native-invocation.js');
+    assert(fs.existsSync(nativeInvocationPath));
     assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-intent-entry.md')));
     for (const home of [data.claudeHome, data.codexHome]) {
       const entry = fs.readFileSync(path.join(home, 'commands', 'forge-init.md'), 'utf8');
@@ -58,6 +60,52 @@ test('runtime install omits tests and update backs up only known unchanged devel
       const task = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
       assert(task.includes('forge-entry-assessment.js') && task.includes('REUSE_RESEARCH'));
     }
+    for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
+      const projected = fs.readFileSync(path.join(data.codexHome, 'skills', skill, 'SKILL.md'), 'utf8');
+      assert.match(projected, /buildNativeInvocation/, `${skill} lacks the installed native adapter contract`);
+      assert.match(projected, /observeClaudeAgentBinding/, `${skill} lacks real Claude agent binding observation`);
+      assert.match(projected, /SHA-256/, `${skill} lacks stable Claude binding provenance`);
+      assert.match(projected, /Prompt text is not an effort API|prompt header is descriptive text,\s*not an effort API/i,
+        `${skill} incorrectly permits prompt text as Claude effort transport`);
+      assert.match(projected, /`reasoning_effort`/, `${skill} lacks the installed effort argument`);
+      assert.match(projected, /(?:forkTurns|fork_turns):?'none'/, `${skill} lacks the installed bounded fork`);
+      assert.doesNotMatch(projected, /model:\s*\$MODEL_ALIAS|using frontmatter/i,
+        `${skill} retained the legacy native alias/default path`);
+    }
+    const installedSidecar = require(path.join(scripts, 'forge-unit-sidecar.js'));
+    const installedMemoryPrompt = installedSidecar.memoryPrompt({
+      sourceUnitType: 'execute-task', summaryContent: 'installed sidecar fixture',
+    }, 'T01');
+    assert.match(installedMemoryPrompt, /Read-only memory extraction/);
+    assert.match(installedMemoryPrompt, /installed sidecar fixture/);
+    assert.match(installedMemoryPrompt, /project-specific, non-obvious, durable facts/);
+    const { buildNativeInvocation } = require(nativeInvocationPath);
+    const invocation = buildNativeInvocation({
+      hostRuntime: 'codex',
+      resolvedDispatch: {
+        host_runtime: 'codex', resolved_worker_engine: 'codex', dispatch_engine: 'codex',
+        worker_mode: 'native', dispatch_allowed: true, config_ok: true,
+        model_requested: 'gpt-6-sol', model_resolved: 'gpt-6-sol',
+        model: 'gpt-6-sol', effort: 'medium',
+      },
+      activeCapabilities: {
+        available: true, tool: 'spawn_agent', source: 'installer-test-active-tool',
+        models: ['gpt-6-sol'], reasoning_efforts: ['medium'], fork_turns: ['none'],
+      },
+      agentType: 'forge-executor', taskName: 'execute-task-T01',
+      prompt: installedMemoryPrompt, forkTurns: 'none',
+    });
+    assert.strictEqual(invocation.ok, true, JSON.stringify(invocation));
+    assert.strictEqual(invocation.tool, 'spawn_agent');
+    assert.strictEqual(invocation.args.message, installedMemoryPrompt);
+    assert.deepStrictEqual(
+      {
+        model: invocation.args.model,
+        reasoning_effort: invocation.args.reasoning_effort,
+        fork_turns: invocation.args.fork_turns,
+      },
+      { model: 'gpt-6-sol', reasoning_effort: 'medium', fork_turns: 'none' },
+    );
     const projected = fs.readFileSync(path.join(data.projectRoot, 'AGENTS.md'), 'utf8');
     assert(projected.includes('--snapshot'));
     assert(projected.includes(require('./forge-instructions.js').renderEntryContract()));

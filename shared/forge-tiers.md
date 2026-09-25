@@ -56,22 +56,21 @@ The four tiers map to four model aliases. Operators can override the model for a
 > omit the `thinking:` line entirely), even if the phase prefs say `disabled`. The shared resolver
 > (`scripts/forge-dispatch-resolve.js` → `thinking_header`) is the single implementation of this rule.
 
-> **ID→alias map — the `Agent()` `model:` param only accepts aliases.** The `model` parameter of the
-> `Agent` tool accepts only the four short aliases (`haiku|sonnet|opus|fable`) — it does **not** accept a
-> full model ID string (e.g. `claude-opus-5`). The "Default Model ID" column above is the concrete
-> ID an operator writes into `tier_models.<tier>` in `forge-agent-prefs.jsonc`; before that ID reaches
-> `Agent()`, the orchestrator must translate it to its alias. This translation is a single canonical
-> map, implemented once in [`scripts/forge-model-alias.js`](../scripts/forge-model-alias.js)
-> (`modelToAlias(id)` — plain lowercase substring match, checked in order `fable → haiku → sonnet →
-> opus`; the `[1m]` context-window suffix needs no special-casing since substring search still finds
-> the base name). **This file and `shared/forge-dispatch.md` only describe and reference that helper —
-> neither reimplements the map as a second, driftable table.** Resolution rule: `Agent(model: <alias>)`
-> is dispatched with the alias, never the raw ID. When an operator sets `tier_models.<tier>` to an ID
-> the map does not recognize, `modelToAlias` returns `{ alias: null, mapped: false }`; the orchestrator
-> **omits** the `model:` param entirely in that case (degrading to the invoked agent's own frontmatter
-> `model:` default) and logs a warning — it never passes the unmapped ID straight through, since
-> `Agent()` would reject it. This same map is reused by S04 (advocate override) — see
-> [Cross-references](#cross-references).
+> **Host-native argument adaptation.** Resolution retains the configured full
+> model ID and effort. `scripts/forge-native-invocation.js` consumes that
+> authoritative result and active tool capabilities; it never selects a model.
+> Codex receives the full supported ID, separate `reasoning_effort`, and
+> `fork_turns:none` (or an explicitly supported positive history). Claude alone
+> receives the alias accepted by its native adapter only after the caller reads
+> the actual exposed agent definition, fingerprints those bytes, and supplies
+> its observed frontmatter effort as the binding. Prompt text is not an effort
+> API. Unsupported model, effort, alias, binding, fork mode, or tool is a
+> named refusal. The caller never omits an explicit override to fall back to
+> an unobserved default. Requested, resolved, invocation argument, observed
+> binding, and provider-applied values remain separate; applied is unknown
+> without trusted readback. Consequently, a native Claude route whose real
+> agent frontmatter differs from the resolved effort refuses explicitly. The
+> caller does not invent a same-family sidecar fallback to bypass that limit.
 
 ---
 
@@ -90,10 +89,11 @@ The four tiers map to four model aliases. Operators can override the model for a
 `readTierChain(tier, cwd)` returns `[{ id, alias, mapped }, ...]` — every member annotated with its
 `Agent()`-alias via the shared [`forge-model-alias.js`](../scripts/forge-model-alias.js) map (never
 reimplemented here or in `forge-dispatch.md`, matching the ID→alias pattern documented above).
-`nextAfter(chain, id)` returns the next **mapped** member after `id`, or `''` when the chain is
-exhausted — a member with no known alias (`mapped: false`) is skipped, not returned, and the
-orchestrator logs a `model_applied: null` warning for it (same degrade rule as the ID→alias map
-above: never pass an unmapped ID straight to `Agent()`).
+`nextAfter(chain, id)` returns the next authorized member after `id`, or `''`
+when the chain is exhausted. The active invocation adapter then validates that
+member against the actual host tool. A missing Claude alias cannot make a GPT
+member disappear before Codex capability validation, and a refusal cannot be
+reported as provider-applied.
 
 ### Two distinct ladders — do not conflate
 
@@ -102,7 +102,7 @@ failure classes and consuming different state:
 
 | Ladder | Triggered by | Consumes | Direction |
 |---|---|---|---|
-| **Intra-tier chain** (this section) | `model_refusal`, HTTP 429, HTTP 400 | `$TIER_CHAIN` via `forge-tier-chain.js --next-after` | Walks fallback members **within the same tier** — never changes tier |
+| **Intra-tier chain** (this section) | `model_refusal`, HTTP 429, HTTP 400 | resolved `chain[]` via `forge-routing.js --next-after` | Walks fallback members in the resolved cross-engine chain — never changes tier |
 | **Cross-tier escalation** (existing, unchanged) | `context_overflow` | The tier itself | Escalates `standard → heavy → max`; does not touch the chain |
 
 The intra-tier chain is consumed **before** any cross-tier escalation would apply — a `model_refusal`
@@ -159,7 +159,7 @@ Highest precedence first. The first matching rule wins.
 - [`skills/forge-auto/SKILL.md`](../skills/forge-auto/SKILL.md) — the main dispatch loop; reads resolved tier from `### Tier Resolution` before invoking `Agent()`.
 - [`skills/forge-next/SKILL.md`](../skills/forge-next/SKILL.md) — step-mode execution; same tier resolution path as forge-auto.
 - [`scripts/forge-tier-chain.js`](../scripts/forge-tier-chain.js) — reads `tier_models.<tier>` from the raw prefs cascade (scalar or list), exports `readTierChain(tier, cwd)` and `nextAfter(chain, id)`; sole implementation of the [Tier Chains — Scalar vs. List](#tier-chains--scalar-vs-list) parsing — never reimplemented in markdown.
-- Failure Taxonomy (Failure recovery skills, e.g. `skills/forge-auto/SKILL.md`) — consumes `$TIER_CHAIN` via `--next-after` for `model_refusal`/429/400 recovery; keeps `context_overflow`'s cross-tier `standard→heavy→max` escalation unchanged and separate.
+- Failure Taxonomy (Failure recovery skills, e.g. `skills/forge-auto/SKILL.md`) — consumes the resolved chain through `forge-routing.js --next-after` for `model_refusal`/429/400 recovery; keeps `context_overflow`'s cross-tier `standard→heavy→max` escalation unchanged and separate. `forge-tier-chain.js --next-after` is the legacy helper and must not drive current caller recovery because it cannot preserve cross-engine members.
 - **Domain-first routing (M007)** — [`scripts/forge-routing.js`](../scripts/forge-routing.js) implements an optional superset that routes by `<domain>.<phase>.<tier>` with cross-engine chains. Configured in [`forge-agent-prefs.jsonc § Routing Settings`](../forge-agent-prefs.jsonc). When `routing:` is not present, this file's tier resolution applies unchanged (100% backward-compatible).
 
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.

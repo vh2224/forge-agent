@@ -373,7 +373,7 @@ fi
 > HTTP 400 on an explicit `thinking: disabled` at any effort, and `claude-opus-5` returns HTTP 400
 > when `disabled` is paired with effort `xhigh`/`max` (Opus 4.7/4.8 accept it at any effort).
 
-`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) were set by the resolver above (§ Effort Resolution — unit-type default + frontmatter axis + risk-escalation sync + model-cap clamp). Inject `effort: {unit_effort}` and (for opus/fable phases) `thinking: {THINKING_OPUS}` into the worker prompt header.
+`unit_effort` (and `$EFFORT`/`$EFFORT_REASON` for the dispatch event) were set by the resolver above (§ Effort Resolution — unit-type default + frontmatter axis + risk-escalation sync + model-cap clamp). The prompt may carry `effort: {unit_effort}` as diagnostic metadata and, for opus/fable phases, `thinking: {THINKING_OPUS}`. That text never satisfies Claude's effort binding; only the fingerprinted agent-frontmatter observation at the native adapter does.
 
 **Risk radar gate (plan-slice only):** If `unit_type == plan-slice` and the slice is tagged `risk:high` in ROADMAP, check if `S##-RISK.md` already exists. If not:
 ```
@@ -510,7 +510,7 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
      if [ "$DISPATCH_DECISION" = "advisory" ] && [ -n "$DISPATCH_HINT" ]; then
        printf '⚠ %s: %s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
      fi
-     RF_ALIAS="$MODEL_ALIAS"; RF_HOST_RUNTIME="$HOST_RUNTIME"
+      RF_ROUTE_JSON_SAVED="$RF_ROUTE_JSON"; RF_HOST_RUNTIME="$HOST_RUNTIME"
      RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
      if [ "$RF_WORKER_MODE" = "sidecar" ]; then
        DISPATCH_REASON_CODE="unsupported-sidecar-unit"
@@ -519,7 +519,7 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
        exit 2
      fi
      ```
-     Only after this allowed native verdict, run the cross-run claim gate per that same shared section + `shared/forge-claim-gate.md` (`--unit "review-fix/{S##}"`, `--conceded` from the CONCEDED `path:line` items, and its decision table, never restated here). Dispatch the canonical `Agent()` fixer with `model: '{RF_ALIAS}'` only when non-empty. A resolver refusal ends this step invocation before worker creation; an actual review-worker throw remains advisory under the unavailability rule below.
+     Only after this allowed native verdict, run the cross-run claim gate per that same shared section + `shared/forge-claim-gate.md` (`--unit "review-fix/{S##}"`, `--conceded` from the CONCEDED `path:line` items, and its decision table, never restated here). Build review-fix through `buildNativeInvocation` from the saved route and active capabilities; invoke its returned tool/arguments unchanged. A resolver refusal ends this step invocation before worker creation; an actual review-worker throw remains advisory under the unavailability rule below.
    - **OPEN items (Step 7b, interactive):** each OPEN objection is put to the user via `AskUserQuestion` — `Manter abordagem` / `Refatorar agora` (dispatches a `review-fix` unit for the accepted items) / `Criar follow-up` (creates an item per `shared/forge-review.md § Item capture`, source `review/{S##}/{R#}`, plus the pointer line in `.gsd/KNOWLEDGE.md § Review follow-ups`) — and the decision is written back into `{S##}-REVIEW.md`.
    - Append the `review` event to `events.jsonl` (Step 8).
 4. The gate **never blocks on review-worker unavailability** — any `Agent()` throw is recorded and the step proceeds to `complete-slice` regardless. A runtime resolver refusal is an enforcing pre-dispatch boundary and returns control to the operator instead.
@@ -933,8 +933,13 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
 
   **d. Re-dispatch plan-slice** with an injected `## Revision Request` section:
   ```
-  Agent({
-    subagent_type: 'forge-planner',
+  revision = buildNativeInvocation({
+    hostRuntime: HOST_RUNTIME,
+    resolvedDispatch: ROUTE_JSON,
+    activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
+    effortBinding: CLAUDE_EFFORT_BINDING,
+    agentType: 'forge-planner',
+    forkTurns: 'none',
     prompt: <plan-slice template from shared/forge-dispatch.md>
       + "\n\n## Revision Request (round " + round + ")\n"
       + "The prior plan scored `fail` on these dimensions:\n"
@@ -943,6 +948,7 @@ echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"event\":\"plan_check\",\"mile
       + "Revise the slice plan to resolve these failures. Preserve all already-passing dimensions. "
       + "Do NOT reduce scope to hide failures — fix the root cause.\n"
   })
+  result = invoke(revision.tool, revision.args)
   ```
   If the planner returns `status: blocked`, stop immediately — surface the planner failure without entering the non-decreasing check.
 
@@ -1242,12 +1248,18 @@ INPUT_TOKENS=$(node "$FORGE_SCRIPTS_DIR/forge-tokens.js" --inline "$worker_promp
 
 > Antes de despachar o worker, exiba o **Spawn Liveness Banner** (ver `shared/forge-dispatch.md § Spawn Liveness Banner`) com a duração estimada para o `unit_type` sendo executado (consulte a tabela de duração na seção canônica).
 
-**Alias Resolution** — `Agent()`'s `model:` param only accepts `sonnet|opus|haiku|fable`, never a full model ID. `$MODEL_ALIAS` was already resolved by `forge-dispatch-resolve.js` (its `alias` field) in step 1.5 — just warn if it came back empty:
-```bash
-[ -z "$MODEL_ALIAS" ] && echo "⚠ model \"$MODEL_ID\" sem alias — usando frontmatter do agente" >&2
-```
-
-Then call `Agent(agent_name, worker_prompt, model: $MODEL_ALIAS)` when `$MODEL_ALIAS` is non-empty; when empty, call `Agent(agent_name, worker_prompt)` without a `model:` param (degrades to the agent's own frontmatter — the warning above was already echoed). Use a `description` that captures what is happening:
+**Native invocation adaptation** — pass `$ROUTE_JSON`, actual host, active tool
+capabilities, agent type and prompt to `buildNativeInvocation`. A degraded or
+refused resolver contract and unsupported model/effort/fork/tool capability stop
+before launch. Invoke the returned tool and structured arguments unchanged.
+Pass `forkTurns:'none'`; Codex receives the full model ID, separate
+`reasoning_effort`, and `fork_turns:'none'`;
+Claude aliases remain inside the Claude adapter. Before every Claude native
+call, read the actual exposed `agents/<agent>.md` (repo or installed Forge copy),
+hash those same bytes with SHA-256, call `observeClaudeAgentBinding`, and pass
+the successful observation as `effortBinding`. Prompt text is not an effort API;
+a missing, stale, or mismatched binding is a named refusal. Never omit an
+explicit model to inherit agent frontmatter. Use a description that captures what is happening:
 - Format: `{unit_type} {unit_id}: {one-liner describing the work}`
 - Examples:
   - `plan-slice S01: authentication foundation`
@@ -1269,7 +1281,7 @@ node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
   --effort "$EFFORT" --effort-reason "$EFFORT_REASON" --engine "${ENGINE:-claude}" \
   --domain "$DOMAIN_USED" --route-source "$ROUTE_SOURCE" --chain-len "$CHAIN_LEN" \
   --slice "{S##}" --milestone "${RUN_ID:-{M###}}" --input-tokens "$INPUT_TOKENS" \
-  --output-tokens "$OUTPUT_TOKENS" --model-applied "$MODEL_ALIAS" \
+  --output-tokens "$OUTPUT_TOKENS" \
   --vcs "${DISPATCH_VCS:-unknown}" --transport in-process \
   --events .gsd/forge/events.jsonl
 ```
@@ -1431,14 +1443,14 @@ fi
 
 Where `key_decisions_json` is a JSON object `{ "unit_id": "$DECISIONS_UNIT_ID", "decisions": [...] }` built from the `key_decisions` field of the worker result. The global `.gsd/DECISIONS.md` is rebuilt from fragments during `complete-milestone` (forge-merger, S05). Do NOT write directly to `.gsd/DECISIONS.md` or any `M###-DECISIONS.md` file.
 
-**d) Memory extraction** — use the zero-model policy before calling `forge-memory` (blocking when selected):
+**d) Memory extraction** — use the zero-model policy before any resolver or provider work (blocking when selected):
 
 ```bash
 MEMORY_POLICY=$(printf '%s' "$RESULT_BLOCK" | node "$FORGE_SCRIPTS_DIR/forge-cost-policy.js" memory \
   --unit-type "$unit_type" --cwd "$WORKING_DIR" --stdin 2>/dev/null) || MEMORY_POLICY='{"decision":"extract","reason":"policy-error"}'
 ```
 
-Append a `memory-policy` event for every decision. If `MEMORY_POLICY.decision != "extract"`, skip the agent and continue to d-reinject. The fallback is deliberately fail-open (`extract`) when the policy cannot run.
+Append a `memory-policy` event for every decision. If `MEMORY_POLICY.decision != "extract"`, skip resolver and agent and continue to d-reinject. The fallback is deliberately fail-open (`extract`) when the policy cannot run.
 
 Determine which summary file was just written:
 - `execute-task` → `.gsd/milestones/{M###}/slices/{S##}/tasks/{T##}-SUMMARY.md`
@@ -1448,7 +1460,7 @@ Determine which summary file was just written:
 - `complete-milestone` → `.gsd/milestones/{M###}/{M###}-SUMMARY.md`
 - other → use the result block only
 
-Call `forge-memory` agent with:
+Resolve `memory-extract` with the canonical resolver and prepare this input for the output-only `forge-memory` agent:
 ```
 WORKING_DIR: {WORKING_DIR}
 UNIT_TYPE: {unit_type}
@@ -1463,7 +1475,42 @@ RESULT_BLOCK:
 
 KEY_DECISIONS:
 {key_decisions field from result, or "(none)"}
+
+EXISTING_MEMORY:
+{owner-read current fragment/projection for this unit, or empty facts/stats}
 ```
+
+Use `buildNativeInvocation` plus the active native tool capabilities for a
+native route, including the fresh Claude binding required by the common native
+contract; invoke its structured arguments unchanged. Use
+`forge-unit-sidecar --request` for a declared sidecar route. Native results go
+through an external JSON request to
+`forge-unit-sidecar --accept-native-memory`; include the exact
+`native.telemetry` object as `invocationTelemetry` in that request. Both routes
+validate, persist a
+ready receipt, and call the same owner publisher. Set `publicationSafe:true`
+only with `ownerJoined`, `checkedAt`, and every protected snapshot listed as
+ended.
+
+Native refusal and provider failure use that same acceptance command. Build the
+external request from owner-known `cwd`, `contextRoot`, `sourceUnitType`,
+`sourceUnitId`, optional `milestoneId`, `workflowId`, `dispatchId`,
+`extractionId`, `sourceFingerprint`, `route`, `hostRuntime`, `resultFile`,
+`publicationSafe`, and `publicationBoundary`. If `buildNativeInvocation` returns
+`ok:false`, do not call the provider; omit `rawResult` and set
+`nativeFailure:{reason_code:native.reason_code,provider_called:false,telemetry:native.telemetry||null}`.
+If the native provider throws or `invokeNative` returns `ok:false` after calling
+it, use the same request with `provider_called:true` and the adapter telemetry.
+Write no hint or provider diagnostic into the request. In both cases run
+`node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --accept-native-memory <request-file>`
+and use its JSON result as the durable failure outcome. This acceptance remains
+nonblocking for the completed source unit. A policy `skip` never enters this
+failure path because it performs no resolver, adapter, or provider work.
+
+Unsupported model/effort, missing
+auth, invalid/partial/blocked output, quarantine or publication failure warns
+and does not block the completed source unit. Report saved memory only from the
+publication outcome, never from provider success.
 
 <!-- forge:dispatch:end -->
 

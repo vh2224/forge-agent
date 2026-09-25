@@ -2605,8 +2605,9 @@ function smokeModelAlias() {
       'require()d modelToAlias("claude-fable-5") -> {alias:"fable", mapped:true}', JSON.stringify(res));
   }
 
-  // Structural wiring — dispatch sites call the helper, pass model:$MODEL_ALIAS,
-  // record model_applied, and never reimplement the alias map inline.
+  // Structural wiring — the resolver remains the only alias owner while native
+  // dispatches use the full model through the capability-aware adapter. An
+  // alias is an argument translation, never evidence that the provider applied it.
   {
     const ROOT = path.join(__dirname, '..');
     const files = {
@@ -2616,18 +2617,24 @@ function smokeModelAlias() {
     };
 
     for (const [name, content] of Object.entries(files)) {
-      assert(content.includes('forge-model-alias.js'),
-        `${name} calls forge-model-alias.js`, 'not found');
-      assert(content.includes('model_applied') || content.includes('--model-applied'),
-        `${name} records model_applied`, 'not found');
+      const resolverToken = name === 'shared/forge-dispatch.md'
+        ? 'forge-dispatch-resolve.js'
+        : 'forge-model-alias.js';
+      assert(content.includes(resolverToken),
+        `${name} delegates model resolution`, `${resolverToken} not found`);
+      assert(content.includes('MODEL_APPLIED_JSON') || content.includes('model_applied'),
+        `${name} carries honest model application telemetry`, 'not found');
       assert(!/indexOf\(['"]fable['"]\)/.test(content),
         `${name} does not reimplement the alias map inline`, 'suspicious inline map reimplementation found');
     }
 
     for (const name of ['skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
       const content = files[name];
-      assert(content.includes('model: $MODEL_ALIAS'),
-        `${name} passes model: $MODEL_ALIAS to Agent()`, 'not found');
+      assert(content.includes('buildNativeInvocation') && content.includes('full model ID') &&
+        content.includes('`reasoning_effort`') && content.includes("fork_turns:'none'"),
+      `${name} preserves full Codex model, effort and bounded fork through the native adapter`, 'contract not found');
+      assert(!content.includes('model: $MODEL_ALIAS'),
+        `${name} does not pass a Claude alias as the authoritative native model`, 'legacy alias invocation found');
       // Single-parse cutover (2026-08-23): MODEL_ALIAS arrives via the
       // --shell-exports eval; the mapping lives in SHELL_EXPORT_MAP.
       assert(content.includes('forge-dispatch-resolve.js" --shell-exports)"'),
@@ -2650,7 +2657,8 @@ function smokeModelAlias() {
     const buildAndParse = (modelAlias) => {
       const script = [
         `MODEL_ALIAS='${modelAlias}'`,
-        `MODEL_APPLIED_JSON=$([ -n "$MODEL_ALIAS" ] && printf '"%s"' "$MODEL_ALIAS" || printf 'null')`,
+        `MODEL_OBSERVED_JSON=null`,
+        `MODEL_APPLIED_JSON="$MODEL_OBSERVED_JSON"`,
         `echo "{\\"ts\\":\\"2026-01-01T00:00:00Z\\",\\"event\\":\\"dispatch\\",\\"unit\\":\\"execute-task/T01\\",\\"model\\":\\"claude-sonnet-5\\",\\"input_tokens\\":1,\\"output_tokens\\":1,\\"tier\\":\\"standard\\",\\"reason\\":\\"default\\",\\"effort\\":\\"low\\",\\"effort_reason\\":\\"default\\",\\"model_applied\\":$MODEL_APPLIED_JSON}"`,
       ].join('\n');
       const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
@@ -2661,8 +2669,8 @@ function smokeModelAlias() {
 
     const withAlias = buildAndParse('sonnet');
     assert(!!withAlias.parsed, 'MODEL_APPLIED_JSON glue produces valid JSON when MODEL_ALIAS non-empty', withAlias.raw);
-    assert(withAlias.parsed && withAlias.parsed.model_applied === 'sonnet',
-      'model_applied === "sonnet" when MODEL_ALIAS="sonnet"', JSON.stringify(withAlias.parsed));
+    assert(withAlias.parsed && withAlias.parsed.model_applied === null,
+      'model_applied stays null without trusted provider readback even when MODEL_ALIAS is set', JSON.stringify(withAlias.parsed));
 
     const withoutAlias = buildAndParse('');
     assert(!!withoutAlias.parsed, 'MODEL_APPLIED_JSON glue produces valid JSON when MODEL_ALIAS empty', withoutAlias.raw);
@@ -5784,7 +5792,7 @@ function smokePrefsCatalog() {
     ['review.rounds', 1],
     ['evidence.mode', 'lenient'],
     ['tier_models.standard', 'claude-sonnet-5'],
-    ['effort.execute-task', 'low'],
+    ['effort.execute-task', 'medium'],
     ['forge_isolation.file_locks', true],
     ['routing', {}],
   ];
@@ -6407,7 +6415,7 @@ function smokeSkillsCutover() {
     ['evidence.mode', 'lenient'],
     ['workers.execute-task', 'claude'],
     ['plan_gate.interactive', 'always'],
-    ['effort.execute-task', 'low'],
+    ['effort.execute-task', 'medium'],
     ['tier_models.standard', 'claude-sonnet-5'],
     ['auto_commit', true],
     ['repo_path', ''],
@@ -7060,7 +7068,7 @@ function smokeDispatchResolve() {
     assert(result.route_source === 'tier_models', '(a) parity: no routing: block -> route_source === tier_models', JSON.stringify(result));
     assert(result.model === 'claude-sonnet-5', '(a) parity: default standard-tier model === claude-sonnet-5 (canonical table)', JSON.stringify(result));
     assert(result.alias === 'sonnet', '(a) parity: alias === sonnet', JSON.stringify(result));
-    assert(result.effort === 'low', '(a) parity: default execute-task effort === low', JSON.stringify(result));
+    assert(result.effort === 'medium', '(a) parity: default execute-task effort === medium', JSON.stringify(result));
     assert(result.engine === 'claude', '(a) parity: default engine === claude', JSON.stringify(result));
     cleanup(dir);
   });
@@ -7188,11 +7196,16 @@ function smokeDispatchResolve() {
     });
   }
 
-  // ── (i) degradedContract emits dispatch_engine === claude (contract stability on runtime-error path) ──
+  // ── (i) degradedContract selects no engine/model and refuses fail-closed ──
   {
     const dc = degradedContract(['--unit-type', 'execute-task']);
-    assert(dc.engine === 'claude', '(i) degradedContract engine === claude', JSON.stringify(dc));
-    assert(dc.dispatch_engine === 'claude', '(i) degradedContract dispatch_engine === claude (additive, explicit)', JSON.stringify(dc));
+    assert(dc.engine === '' && dc.dispatch_engine === '',
+      '(i) degradedContract leaves engine identity unresolved instead of inventing Claude', JSON.stringify(dc));
+    assert(dc.model === '' && dc.model_requested === null && dc.model_resolved === null,
+      '(i) degradedContract leaves model identity unresolved', JSON.stringify(dc));
+    assert(dc.config_ok === false && dc.dispatch_allowed === false
+      && dc.dispatch_reason_code === 'routing-runtime-error',
+    '(i) degradedContract refuses fail-closed with the named runtime error', JSON.stringify(dc));
   }
 
   // ── (j) doc-presence: the 3 SKILLs extract DISPATCH_ENGINE + gate branches on it, ──
@@ -17812,12 +17825,7 @@ function smokeHostWorkerParityAcceptance() {
       const launchEntries = sourceGuard.SOURCE_REGISTRY
         .filter((entry) => entry.path === relative && entry.kind === 'agent' && entry.classification === 'operational')
         .map((entry) => discoveredByIdentity.get(sourceGuard.identity(entry)))
-        .filter(Boolean)
-        .filter((candidate) => {
-          const line = candidate.evidence.trim();
-          return /^(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?Agent\(\{$/.test(line)
-            || /^Agent\(\{\s*subagent_type:/.test(line);
-        });
+        .filter(Boolean);
       if (gateLine <= 0 || launchEntries.length === 0
         || launchEntries.some((candidate) => candidate.line <= gateLine)) {
         projectedSkillProblems.push(`${relative}:dispatch-allowed-not-consumed-before-launch`);

@@ -450,6 +450,24 @@ try {
   const realClaude = claudeRenderer.render({ repo: root });
   assert(realCodex.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
   assert(realClaude.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
+  for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
+    const source = `skills/${skill}/SKILL.md`;
+    const artifact = realCodex.artifacts.find((item) => item.source === source);
+    assert(artifact, `Codex projection missing ${source}`);
+    const block = locateDispatchBlock(artifact.content);
+    assert(block, `Codex projection missing managed dispatch block in ${source}`);
+    const native = artifact.content.slice(block.start, block.end);
+    assert.match(native, /buildNativeInvocation/, `${source} must use the authoritative native adapter`);
+    assert.match(native, /active (?:host |tool )?capabilit/i, `${source} must receive active capabilities from its caller`);
+    assert.match(native, /full (?:model ID|`model`)/, `${source} must retain the full Codex model ID`);
+    assert.match(native, /`reasoning_effort`/, `${source} must retain the Codex effort argument`);
+    assert.match(native, /(?:forkTurns|fork_turns):?'none'/, `${source} must force a bounded Codex fork`);
+    assert.match(native, /Never omit[\s\S]{0,80}model[\s\S]{0,80}inherit agent frontmatter/i,
+      `${source} must forbid implicit model inheritance`);
+    assert.doesNotMatch(native, /Agent\s*\(/, `${source} retained a Claude invocation in the Codex seam`);
+    assert.doesNotMatch(native, /model:\s*\$MODEL_ALIAS|using frontmatter/i,
+      `${source} retained the legacy alias/default inheritance path`);
+  }
   for (const artifact of realClaude.artifacts.filter((item) => markdownSourceIds.has(item.source_id))) {
     const definition = realManifest.sources.find((source) => source.source_id === artifact.source_id);
     const raw = fs.readFileSync(path.join(root, artifact.source), 'utf8');

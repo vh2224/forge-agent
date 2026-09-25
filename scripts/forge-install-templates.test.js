@@ -87,6 +87,8 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   const result = installer.install(options);
   assert.strictEqual(result.ok, true);
   assert(fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-delivery.js')));
+  const nativeInvocationPath = path.join(options.forgeHome, 'scripts', 'forge-native-invocation.js');
+  assert(fs.existsSync(nativeInvocationPath));
   assert(fs.existsSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md')));
   const contract = fs.readFileSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md'), 'utf8');
   assert.match(contract, /três|verificado/);
@@ -95,6 +97,62 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
     assert(treeContains(home, /expected_children|every expected (?:task|slice) DELIVERY/), `${host} projection lacks complete child delivery aggregation`);
     assert(treeContains(home, /After review handling[\s\S]*DELIVERY-INPUT/), `${host} projection lacks post-review rematerialization`);
   }
+  for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
+    const projected = fs.readFileSync(path.join(options.codexHome, 'skills', skill, 'SKILL.md'), 'utf8');
+    assert.match(projected, /buildNativeInvocation/, `${skill} lacks the installed native adapter contract`);
+    assert.match(projected, /observeClaudeAgentBinding/, `${skill} lacks real Claude agent binding observation`);
+    assert.match(projected, /SHA-256/, `${skill} lacks stable Claude binding provenance`);
+    assert.match(projected, /Prompt text is not an effort API|prompt header is descriptive text,\s*not an effort API/i,
+      `${skill} incorrectly permits prompt text as Claude effort transport`);
+    assert.match(projected, /`reasoning_effort`/, `${skill} lacks the installed Codex effort argument`);
+    assert.match(projected, /(?:forkTurns|fork_turns):?'none'/, `${skill} lacks the installed bounded fork`);
+    assert.match(projected, /Never omit[\s\S]{0,80}model[\s\S]{0,80}inherit agent frontmatter/i,
+      `${skill} permits default model inheritance after install`);
+    assert.doesNotMatch(projected, /model:\s*\$MODEL_ALIAS|using frontmatter/i,
+      `${skill} retained the legacy native alias/default path after install`);
+  }
+
+  const installedSidecar = require(path.join(options.forgeHome, 'scripts', 'forge-unit-sidecar.js'));
+  const installedMemoryPrompt = installedSidecar.memoryPrompt({
+    sourceUnitType: 'execute-task', summaryContent: 'installed memory fixture',
+  }, 'T01');
+  assert.match(installedMemoryPrompt, /Read-only memory extraction/);
+  assert.match(installedMemoryPrompt, /installed memory fixture/);
+  assert.match(installedMemoryPrompt, /project-specific, non-obvious, durable facts/);
+  const { buildNativeInvocation } = require(nativeInvocationPath);
+  const resolvedDispatch = {
+    host_runtime: 'codex', resolved_worker_engine: 'codex', dispatch_engine: 'codex',
+    worker_mode: 'native', dispatch_allowed: true, config_ok: true,
+    model_requested: 'gpt-6-luna', model_resolved: 'gpt-6-luna',
+    model: 'gpt-6-luna', effort: 'medium',
+  };
+  const rejected = buildNativeInvocation({
+    hostRuntime: 'codex', resolvedDispatch,
+    activeCapabilities: {
+      available: true, tool: 'spawn_agent', source: 'install-test-active-tool',
+      models: ['gpt-6-sol'], reasoning_efforts: ['medium'], fork_turns: ['none'],
+    },
+    agentType: 'forge-memory', prompt: installedMemoryPrompt, forkTurns: 'none',
+  });
+  assert.strictEqual(rejected.reason_code, 'native-model-unsupported');
+  const accepted = buildNativeInvocation({
+    hostRuntime: 'codex', resolvedDispatch,
+    activeCapabilities: {
+      available: true, tool: 'spawn_agent', source: 'install-test-active-tool',
+      models: ['gpt-6-luna'], reasoning_efforts: ['medium'], fork_turns: ['none'],
+    },
+    agentType: 'forge-memory', prompt: installedMemoryPrompt, forkTurns: 'none',
+  });
+  assert.strictEqual(accepted.ok, true, JSON.stringify(accepted));
+  assert.strictEqual(accepted.args.message, installedMemoryPrompt);
+  assert.deepStrictEqual(
+    {
+      model: accepted.args.model,
+      reasoning_effort: accepted.args.reasoning_effort,
+      fork_turns: accepted.args.fork_turns,
+    },
+    { model: 'gpt-6-luna', reasoning_effort: 'medium', fork_turns: 'none' },
+  );
 });
 
 test('delivery references cover native, sidecar and headless task/slice/milestone sources', () => {
