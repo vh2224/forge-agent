@@ -436,6 +436,7 @@ function normalizedNativeFailure(request) {
       || typeof raw.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(raw.reason_code)) {
     fail('native-memory-failure-invalid', 'Native memory failure requires a bounded machine-readable reason_code.');
   }
+  if (raw.provider_called === true) nativeMemoryIdentity(request, raw.telemetry);
   const telemetry = memoryTelemetry({ telemetry: raw.telemetry || null });
   return {
     status: 'failure', reason_code: raw.reason_code,

@@ -538,15 +538,54 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(interruptedResult.provider_called, false);
     assert.strictEqual(calls, 3);
 
-    const failureDispatch = 'cli-binding-refusal';
+    const preProviderDispatch = 'cli-pre-provider-refusal';
+    const preProviderFile = path.join(root, `${preProviderDispatch}.json`);
+    const preProviderRequestFile = path.join(root, `${preProviderDispatch}-request.json`);
+    write(preProviderRequestFile, { ...base, dispatchId: preProviderDispatch, extractionId: preProviderDispatch,
+      resultFile: preProviderFile, publicationSafe: true,
+      publicationBoundary: { ownerJoined: true, checkedAt: '2026-09-24T12:07:00Z', protectedSnapshots: [] },
+      nativeFailure: { reason_code: 'native-model-unsupported', provider_called: false, telemetry: null } });
+    const preProviderCli = spawnSync(process.execPath,
+      [path.join(__dirname, 'forge-unit-sidecar.js'), '--accept-native-memory', preProviderRequestFile],
+      { cwd: dir, encoding: 'utf8' });
+    assert.strictEqual(preProviderCli.status, 0, preProviderCli.stderr);
+    const preProviderFailure = JSON.parse(fs.readFileSync(`${preProviderFile}.receipt.json`, 'utf8')).failure;
+    assert.strictEqual(preProviderFailure.provider_called, false);
+    assert.strictEqual(preProviderFailure.telemetry.model_argument, null);
+
+    for (const [suffix, telemetry] of [
+      ['null', null],
+      ['incomplete', { model_resolved: route.model_resolved, effort_resolved: route.effort }],
+    ]) {
+      const dispatchId = `cli-provider-failure-${suffix}`;
+      const rejectedFile = path.join(root, `${dispatchId}.json`);
+      const rejectedRequestFile = path.join(root, `${dispatchId}-request.json`);
+      write(rejectedRequestFile, { ...base, dispatchId, extractionId: dispatchId,
+        resultFile: rejectedFile, publicationSafe: true,
+        publicationBoundary: { ownerJoined: true, checkedAt: '2026-09-24T12:08:00Z', protectedSnapshots: [] },
+        nativeFailure: { reason_code: 'native-invocation-failed', provider_called: true, telemetry } });
+      const rejectedCli = spawnSync(process.execPath,
+        [path.join(__dirname, 'forge-unit-sidecar.js'), '--accept-native-memory', rejectedRequestFile],
+        { cwd: dir, encoding: 'utf8' });
+      assert.notStrictEqual(rejectedCli.status, 0);
+      assert.match(rejectedCli.stderr, /native-memory-telemetry-invalid/);
+      assert.strictEqual(fs.existsSync(`${rejectedFile}.receipt.json`), false);
+      const rejectedEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
+        .trim().split(/\r?\n/).map(line => JSON.parse(line))
+        .filter(event => event.event === 'memory-publication' && event.dispatch_id === dispatchId);
+      assert.deepStrictEqual(rejectedEvents, []);
+    }
+
+    const failureDispatch = 'cli-provider-failure';
     const failureRequest = { ...base, dispatchId: failureDispatch, extractionId: failureDispatch,
-      resultFile: path.join(root, 'cli-binding-refusal.json'), publicationSafe: false,
+      resultFile: path.join(root, 'cli-provider-failure.json'), publicationSafe: false,
       publicationBoundary: { ownerJoined: false, checkedAt: '2026-09-24T12:09:00Z',
         protectedSnapshots: [{ id: 'fixture-worker', state: 'active' }] },
-      nativeFailure: { status: 'failure', reason_code: 'native-effort-binding-mismatch',
-        provider_called: false, hint: `untrusted ${token}`,
+      nativeFailure: { status: 'failure', reason_code: 'native-invocation-failed',
+        provider_called: true, hint: `untrusted ${token}`,
         telemetry: { ...delivered.telemetry, diagnostic: token } } };
-    const failureRequestFile = path.join(root, 'cli-binding-refusal-request.json');
+    delete failureRequest.nativeFailure.telemetry.diagnostic;
+    const failureRequestFile = path.join(root, 'cli-provider-failure-request.json');
     write(failureRequestFile, failureRequest);
     let failureCli = spawnSync(process.execPath,
       [path.join(__dirname, 'forge-unit-sidecar.js'), '--accept-native-memory', failureRequestFile],
@@ -554,7 +593,10 @@ async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code
     assert.strictEqual(failureCli.status, 0, failureCli.stderr);
     let failureReceipt = fs.readFileSync(`${failureRequest.resultFile}.receipt.json`, 'utf8');
     assert(!failureReceipt.includes(token));
-    assert.strictEqual(JSON.parse(failureReceipt).failure.reason_code, 'native-effort-binding-mismatch');
+    const persistedFailure = JSON.parse(failureReceipt).failure;
+    assert.strictEqual(persistedFailure.reason_code, 'native-invocation-failed');
+    assert.strictEqual(persistedFailure.provider_called, true);
+    assert.strictEqual(persistedFailure.telemetry.model_argument, 'gpt-6-luna');
     let failureEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
       .trim().split(/\r?\n/).map(line => JSON.parse(line))
       .filter(event => event.event === 'memory-publication' && event.dispatch_id === failureDispatch);
