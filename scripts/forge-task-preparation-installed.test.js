@@ -97,6 +97,7 @@ function artifactEnvelope(prep, request) {
 
 function installedProjection(home, name) {
   const skill = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
+  assert(skill.includes('forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa'));
   const section = skill.slice(skill.indexOf('### Canonical preparation caller'), skill.indexOf('### Step 4.5'));
   const match = section.match(/hostRuntime:\s*["'](claude|codex)["']/);
   assert(match, `preparation host is absent from ${home}`);
@@ -119,6 +120,8 @@ async function main() {
   assert.equal(report.ok, true);
   const helperPath = path.join(forgeHome, 'scripts', 'forge-task-preparation.js');
   assert(fs.existsSync(helperPath));
+  assert(fs.existsSync(path.join(forgeHome, 'scripts', 'forge-sidecar-identity.js')));
+  assert(!fs.existsSync(path.join(forgeHome, 'scripts', 'forge-sidecar-identity.test.js')));
   assert(!fs.existsSync(path.join(forgeHome, 'scripts', path.basename(__filename))),
     'development integration suite must not be installed');
 
@@ -242,6 +245,10 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
       });
       assert.equal(result.status, 0, result.stderr || result.stdout);
       const output = JSON.parse(result.stdout.trim());
+      const identityLines = result.stderr.split(/\r?\n/).filter(line => line.startsWith('[forge-sidecar]'));
+      assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado']);
+      assert(identityLines.every(line => line.includes('fase=discuss') && line.includes('modelo_enviado=claude-sonnet-5')));
+      assert(!result.stderr.includes('cli-sidecar-sentinel'));
       assert.equal(output.action, 'complete', result.stdout);
       assert.equal(output.provider_called, true);
       assert.equal(output.route.model_resolved, 'claude-sonnet-5');

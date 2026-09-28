@@ -426,6 +426,7 @@ function cliArgs(fixture) {
     '--cwd', fixture.workspace,
     '--result-file', fixture.resultFile,
     '--dispatch-id', `fixture-${fixture.label}`,
+    '--model', 'claude-sonnet-5', '--effort', 'medium',
     '--timeout', '12',
     '--env-policy', 'minimal',
   ];
@@ -592,6 +593,13 @@ async function happyPath(root) {
     assert.strictEqual(run.stdout, '', 'top-level success stdout must remain byte-empty');
     assertFivePublicTokenChannels(run, terminal.text);
     assertMockEvidence(fixture, run, capture);
+    assert.strictEqual(capture.argv[capture.argv.indexOf('--model') + 1], 'claude-sonnet-5');
+    assert.strictEqual(capture.argv[capture.argv.indexOf('--effort') + 1], 'medium');
+    const identityLines = run.stderr.split(/\r?\n/).filter(line => line.startsWith('[forge-sidecar]'));
+    assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado']);
+    assert(identityLines.every(line => line.includes('modelo_enviado=claude-sonnet-5') && line.includes('esforco=medium')));
+    assert(identityLines[1].includes(`pid=${capture.pid}`));
+    assert(!run.stderr.includes(PLAN_SENTINEL) && !run.stderr.includes(fixture.accountName));
 
     assert.strictEqual(terminal.value.status, 'done');
     assert.strictEqual(terminal.value.summary, RESULT_SUMMARY);

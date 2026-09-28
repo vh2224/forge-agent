@@ -5,6 +5,8 @@ owned by `forge-task`. The executable owner is
 `scripts/forge-task-preparation.js`; the skill supplies phase inputs and invokes
 the host tool only when the caller returns a native action.
 
+Na rota sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: o argumento anunciado é o modelo enviado ao adaptador; o modelo aplicado pelo provedor permanece não confirmado.
+
 ## Identity has two axes
 
 Routing identity and artifact scope answer different questions and remain

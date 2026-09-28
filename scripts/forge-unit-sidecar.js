@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const xllm = require('./forge-xllm');
+const { createStderrAnnouncer } = require('./forge-sidecar-identity');
 const { invokeClaudeSidecar } = require('./forge-claude-sidecar');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
 const { capability } = require('./forge-transport-capabilities');
@@ -798,7 +799,7 @@ async function runNativeMemory(request, invoke) {
       provider_called: true, telemetry: native.telemetry };
   }
 }
-async function runUnitSidecar(request) {
+async function runUnitSidecarCore(request, runtime, identity) {
   const r = request || {}, route = r.route || {};
   const transport = capability(route.resolved_worker_engine, r.unitType, r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
@@ -825,6 +826,8 @@ async function runUnitSidecar(request) {
   xllm.validateResultFileTarget(resultFile, root);
   const loc = locations(r);
   const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
+  identity.dispatch_id = dispatchId;
+  identity.model_sent = model;
   if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
   const fingerprint = artifactFingerprint(r);
   const receiptFile = `${resultFile}.receipt.json`;
@@ -865,6 +868,7 @@ async function runUnitSidecar(request) {
   if (existing) {
     if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
     if (existing.phase === 'ready') {
+      runtime.announce?.('reaproveitado', { ...identity, provider_called: false });
       try {
         const result = await publishReadyRecord(r, existing);
         json(resultFile, result);
@@ -872,6 +876,7 @@ async function runUnitSidecar(request) {
       } catch (error) { recordFailure(error); throw error; }
     }
     if (existing.phase === 'failed') {
+      runtime.announce?.('reaproveitado', { ...identity, reason_code: existing.failure?.reason_code, provider_called: false });
       const error = new Error('Recorded sidecar attempt failed; no provider was relaunched.');
       error.code = existing.failure.reason_code;
       error.diagnostic = diagnostic(existing.failure.diagnostic?.reason, existing.failure.diagnostic);
@@ -907,16 +912,24 @@ async function runUnitSidecar(request) {
     transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
   }, route, startedAt);
   fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
+  let providerCalled = false;
+  const announce = (stage, fields) => {
+    if (stage === 'iniciado') providerCalled = true;
+    runtime.announce?.(stage, fields);
+  };
   const options = { cwd, contextRoot: root, engine: route.resolved_worker_engine,
     unitType: r.unitType,
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
     effort: route.effort, timeoutSecs: route.workers_timeout || 1800, resultFile, dispatchId,
     constraints: r.constraints || { auto_commit: false, deploy: false },
-    signal: r.signal,
+    signal: r.signal, announce, identity: { phase: identity.phase, unit: identity.unit, dispatch_id: dispatchId,
+      model_resolved: identity.model_resolved },
   };
-  let providerCalled = false;
   const heartbeat = pid => {
-    if (Number.isInteger(pid) && pid > 0) providerCalled = true;
+    if (Number.isInteger(pid) && pid > 0) {
+      providerCalled = true;
+      announce('iniciado', { ...identity, pid, provider_called: true });
+    }
     json(resultFile, { status: 'running', pid, adapter_pid: process.pid,
       heartbeat_interval_ms: 15000, started_at: startedAt, updated_at: new Date().toISOString(), dispatch_id: dispatchId });
   };
@@ -928,6 +941,7 @@ async function runUnitSidecar(request) {
         try { require('./forge-memory-extraction').validateExtractionResult(value, { sourceUnit: loc.sourceUnit }); return true; }
         catch { return false; }
       };
+      announce('solicitado', { ...identity, provider_called: false });
       xllm.authorizeSidecar('memory', options);
       heartbeat(null);
       if (options.engine === 'claude') {
@@ -973,6 +987,7 @@ async function runUnitSidecar(request) {
         + (Number.isFinite(payloadLimit) ? ` The entire serialized result JSON must fit in ${payloadLimit} UTF-8 bytes.` : '')
         + ' Return partial with questions if complete delivery cannot fit; never truncate an artifact.'
         + '\nReturn JSON matching: ' + JSON.stringify(schema);
+      announce('solicitado', { ...identity, provider_called: false });
       xllm.authorizeSidecar('artifacts', options);
       heartbeat(null);
       if (options.engine === 'claude') {
@@ -1033,7 +1048,30 @@ async function runUnitSidecar(request) {
     return result;
   } catch (error) {
     error.provider_called = providerCalled;
+    announce(providerCalled ? 'falhou' : 'recusado', { ...identity,
+      ...(providerCalled ? {} : { model_sent: '-', model_route: model }),
+      reason_code: error.code || xllm.classifyErrorClass(error.message), provider_called: providerCalled });
     recordFailure(error);
+    throw error;
+  }
+}
+async function runUnitSidecar(request, runtime = {}) {
+  const r = request || {}, route = r.route || {};
+  const identity = { phase: r.preparationIdentity?.phase, unit: `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
+    engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
+    model_sent: '-', model_route: route.sidecar_model || route.model_resolved || route.model,
+    model_resolved: route.model_resolved || route.model, effort: route.effort,
+    host: route.host_runtime, dispatch_id: r.dispatchId };
+  let terminal = false;
+  const scopedRuntime = { ...runtime, announce: (stage, fields) => {
+    if (terminal) return;
+    if (['recusado', 'falhou', 'reaproveitado'].includes(stage)) terminal = true;
+    runtime.announce?.(stage, fields);
+  } };
+  try { return await runUnitSidecarCore(r, scopedRuntime, identity); }
+  catch (error) {
+    scopedRuntime.announce('recusado', { ...identity, model_sent: '-', reason_code: error.code || 'sidecar-unit-failed',
+      provider_called: false });
     throw error;
   }
 }
@@ -1043,10 +1081,11 @@ module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, val
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt,
   failArtifactAttempt, acceptArtifactResult, runUnitSidecar };
 if (require.main === module) {
+  const announce = createStderrAnnouncer();
   Promise.resolve().then(() => {
     if (!['--request', '--accept-native-memory'].includes(process.argv[2]) || !process.argv[3]) fail('request-file-required');
     const request = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-    return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request);
+    return process.argv[2] === '--accept-native-memory' ? acceptNativeMemoryResult(request) : runUnitSidecar(request, { announce });
   }).then(result => {
     process.stdout.write(`${JSON.stringify(result)}\n`);
   }).catch(error => { process.stderr.write(`forge-unit-sidecar: ${error.code || 'sidecar-unit-failed'}\n`); process.exitCode = 1; });

@@ -101,7 +101,8 @@ const {
   parseSvnBaseline,
 } = require('./forge-surgical-reset.js');
 const dispatchPolicy = require('./forge-dispatch-policy.js');
-const { invokeClaudeSidecar } = require('./forge-claude-sidecar.js');
+const { invokeClaudeSidecar, claudeLaunchIdentity } = require('./forge-claude-sidecar.js');
+const { createStderrAnnouncer } = require('./forge-sidecar-identity.js');
 const vcs = require('./forge-vcs.js');
 const { classifyError, isTransient } = require('./forge-classify-error.js');
 const { countTokens, truncateAtSectionBoundary } = require('./forge-tokens.js');
@@ -155,6 +156,46 @@ function normalizeDispatchId(value, mode) {
     return id;
   }
   return `xllm-${mode}-${Date.now()}-${crypto.randomBytes(5).toString('hex')}`;
+}
+
+function sidecarIdentity(mode, opts, engine, dispatchId) {
+  const supplied = opts.identity || {};
+  const sent = engine === 'claude' ? claudeLaunchIdentity(opts) : { model_sent: opts.model, effort: opts.effort };
+  return { phase: supplied.phase || mode, unit: supplied.unit || mode, engine,
+    transport: engine === 'claude' ? 'claude-cli' : engine === 'agy' ? 'agy-cli' : 'app-server',
+    model_sent: sent.model_sent, model_resolved: supplied.model_resolved,
+    effort: engine === 'agy' ? null : sent.effort, host: opts.hostRuntime,
+    dispatch_id: supplied.dispatch_id || dispatchId || normalizeDispatchId(opts.dispatchId, mode) };
+}
+
+function identityStage(opts, stage, extra = {}) {
+  const context = opts._sidecarIdentity;
+  if (!context) return;
+  if (stage === 'iniciado' && (!Number.isInteger(extra.pid) || extra.pid <= 0)) return;
+  if (stage === 'solicitado') context.requested = true;
+  if (stage === 'iniciado') context.started = true;
+  if (typeof opts.announce === 'function') opts.announce(stage, { ...context.fields, ...extra,
+    provider_called: stage === 'iniciado' || context.started });
+}
+
+async function withSidecarIdentity(mode, opts, driver) {
+  const dispatchId = opts.identity?.dispatch_id || opts.dispatchId || normalizeDispatchId(null, mode);
+  const context = { requested: false, started: false, attempted: false, fields: null };
+  const runOpts = { ...opts, dispatchId, _sidecarIdentity: context };
+  try {
+    context.fields = sidecarIdentity(mode, runOpts, opts.engine || 'codex', dispatchId);
+    return await driver(runOpts);
+  }
+  catch (error) {
+    if (!context.fields) context.fields = { phase: opts.identity?.phase || mode, unit: opts.identity?.unit || mode,
+      engine: opts.engine || 'codex', transport: opts.engine === 'claude' ? 'claude-cli' : opts.engine === 'agy' ? 'agy-cli' : 'app-server',
+      model_sent: '-', effort: opts.effort, host: opts.hostRuntime, dispatch_id: dispatchId };
+    identityStage(runOpts, context.started ? 'falhou' : 'recusado', {
+      reason_code: error.code || classifyError(error.message) || 'sidecar-failed',
+      ...(context.started ? {} : { model_route: context.fields.model_sent, model_sent: '-' }),
+    });
+    throw error;
+  }
 }
 
 function readResultTelemetry(resultFile, dispatchId) {
@@ -1328,6 +1369,10 @@ function invokeAgy(opts) {
       env: buildSidecarEnv(envPolicy),
     });
 
+    if (!res.error && Number.isInteger(res.pid) && res.pid > 0 && opts._sidecarIdentity) {
+      identityStage(opts, 'iniciado', { pid: res.pid, retroactive: true });
+    }
+
     if (res.error) {
       throw new Error(`agy spawn failed: ${res.error.code || res.error.message}`);
     }
@@ -1755,18 +1800,22 @@ function readSidecarsEnvPolicy(baseDir) {
  * @returns {Promise<{objections: object[]}>}
  * @throws {Error} rejects on any failure — cause in message
  */
-async function runChallenge(opts) {
+async function runChallengeCore(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
   const engine = assertEngineSupportsMode('challenge', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.diffCmd) throw new Error('challenge mode requires --diff-cmd');
+  identityStage(opts, 'solicitado');
   authorizeSidecar('challenge', { ...opts, ...sidecarOptions, cwd, engine });
 
   const diffText = acquireDiff(opts.diffCmd, cwd);
   const prompt = buildChallengePrompt(diffText);
+  opts._sidecarIdentity.attempted = true;
   const rawContent = await invokeEngine(engine, {
     prompt, schema: challengeSchema, cwd, model: opts.model, effort: opts.effort, signal: opts.signal, timeoutSecs, envPolicy: opts.envPolicy || 'minimal',
+    onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
+    announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
     sandbox: CAPABILITY_SANDBOX_MODE.readonly,
   });
@@ -1803,12 +1852,13 @@ async function runChallenge(opts) {
  * @returns {Promise<{verdicts: object[]}>}
  * @throws {Error} rejects on any failure — cause in message
  */
-async function runDefend(opts) {
+async function runDefendCore(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
   const engine = assertEngineSupportsMode('defend', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.inputFile) throw new Error('defend mode requires --input <file>');
+  identityStage(opts, 'solicitado');
   authorizeSidecar('defend', { ...opts, ...sidecarOptions, cwd, engine });
 
   let inputText;
@@ -1823,12 +1873,15 @@ async function runDefend(opts) {
   }
 
   const prompt = buildDefendPrompt(inputText);
+  opts._sidecarIdentity.attempted = true;
   const rawContent = await invokeEngine(engine, {
     prompt,
     schema: verdictSchema(DEFEND_VERDICT_ENUM),
     cwd,
     model: opts.model,
     effort: opts.effort,
+    onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
+    announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
     envPolicy: opts.envPolicy || 'minimal',
@@ -1857,12 +1910,13 @@ async function runDefend(opts) {
  * @returns {Promise<{verdicts: object[]}>}
  * @throws {Error} rejects on any failure — cause in message
  */
-async function runRebuttal(opts) {
+async function runRebuttalCore(opts) {
   const cwd = opts.cwd || process.cwd();
   const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
   const engine = assertEngineSupportsMode('rebuttal', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.inputFile) throw new Error('rebuttal mode requires --input <file>');
+  identityStage(opts, 'solicitado');
   authorizeSidecar('rebuttal', { ...opts, ...sidecarOptions, cwd, engine });
 
   let inputText;
@@ -1873,12 +1927,15 @@ async function runRebuttal(opts) {
   }
 
   const prompt = buildRebuttalPrompt(inputText);
+  opts._sidecarIdentity.attempted = true;
   const rawContent = await invokeEngine(engine, {
     prompt,
     schema: verdictSchema(VERDICT_ENUM),
     cwd,
     model: opts.model,
     effort: opts.effort,
+    onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
+    announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
     envPolicy: opts.envPolicy || 'minimal',
@@ -1983,7 +2040,7 @@ function gitRead(gitArgs, cwd, what) {
  * @returns {Promise<object>} the normalized result object (also written to resultFile);
  *   includes `pre_dirty: [{path,hash}]` — the pre-dispatch dirty snapshot (AUDIT ONLY)
  */
-async function runExecute(opts) {
+async function runExecuteCore(opts) {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
   const engine = assertEngineSupportsMode('execute', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
@@ -1997,6 +2054,7 @@ async function runExecute(opts) {
 
   if (!opts.planFile) throw new Error('execute mode requires --plan <file>');
   if (!opts.resultFile) throw new Error('execute mode requires --result-file <path>');
+  identityStage(opts, 'solicitado');
   authorizeSidecar('execute', { ...opts, ...sidecarOptions, cwd, engine });
 
   // Validate the result channel before the first heartbeat write. This resolves the
@@ -2101,6 +2159,7 @@ async function runExecute(opts) {
   });
 
   const onHeartbeat = (pid) => {
+    identityStage(opts, 'iniciado', { pid });
     writeJsonAtomic(resultFile, {
       status: 'running',
       protocol_version: PROTOCOL_VERSION,
@@ -2122,6 +2181,7 @@ async function runExecute(opts) {
   let degradation;
   let outputTokens = 0;
 
+  opts._sidecarIdentity.attempted = true;
   if (engine === 'claude') {
     const claudeOutput = await invokeClaudeSidecar({
       prompt,
@@ -2326,7 +2386,7 @@ async function runExecute(opts) {
  * @param {number} [opts.timeoutSecs]
  * @returns {Promise<object>} the normalized result object (also written to resultFile)
  */
-async function runPlan(opts) {
+async function runPlanCore(opts) {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
   const engine = assertEngineSupportsMode('plan', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
@@ -2336,6 +2396,7 @@ async function runPlan(opts) {
 
   if (!opts.planContextFile) throw new Error('plan mode requires --plan-context <file>');
   if (!opts.resultFile) throw new Error('plan mode requires --result-file <path>');
+  identityStage(opts, 'solicitado');
   authorizeSidecar('plan', { ...opts, ...sidecarOptions, cwd, engine });
 
   const resultFile = validateResultFileTarget(opts.resultFile, cwd);
@@ -2374,6 +2435,7 @@ async function runPlan(opts) {
   });
 
   const onHeartbeat = (pid) => {
+    identityStage(opts, 'iniciado', { pid });
     writeJsonAtomic(resultFile, {
       status: 'running',
       protocol_version: PROTOCOL_VERSION,
@@ -2418,6 +2480,7 @@ async function runPlan(opts) {
     sandbox: CAPABILITY_SANDBOX_MODE.readonly,
     envPolicy: opts.envPolicy || 'minimal',
   };
+  opts._sidecarIdentity.attempted = true;
   const appServerOutput = engine === 'claude'
     ? { finalText: JSON.stringify(await invokeClaudeJson(planOptions, validatePlanResult)), transport: { kind: 'claude-cli', version: 'unknown' } }
     : await invokeCodexAppServer(planOptions);
@@ -2498,6 +2561,12 @@ async function runPlan(opts) {
   return result;
 }
 
+function runChallenge(opts) { return withSidecarIdentity('challenge', opts, runChallengeCore); }
+function runDefend(opts) { return withSidecarIdentity('defend', opts, runDefendCore); }
+function runRebuttal(opts) { return withSidecarIdentity('rebuttal', opts, runRebuttalCore); }
+function runExecute(opts) { return withSidecarIdentity('execute', opts, runExecuteCore); }
+function runPlan(opts) { return withSidecarIdentity('plan', opts, runPlanCore); }
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -2566,18 +2635,25 @@ function classifyErrorClass(msg) {
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 
 if (require.main === module) {
+  const announce = createStderrAnnouncer();
+  const cliRefusal = (known, code) => announce('recusado', { phase: known.mode, unit: known.mode,
+    engine: known.engine, transport: known.engine === 'claude' ? 'claude-cli' : known.engine === 'agy' ? 'agy-cli' : 'app-server',
+    model_sent: '-', model_route: known.model, effort: known.effort, host: known['host-runtime'],
+    dispatch_id: known['dispatch-id'] || 'cli', reason_code: code, provider_called: false });
   let args;
   try {
     args = parseArgs(process.argv.slice(2));
   } catch (error) {
     // A malformed flag is a usage error, not a stack trace: exit 2 with stdout
     // silent, exactly like every other boundary refusal below.
+    cliRefusal({}, error.code || 'invalid-arguments');
     process.stderr.write(`forge-xllm: ${error.message}\n`);
     process.exit(2);
   }
   const mode = args.mode;
 
   if (mode !== 'challenge' && mode !== 'defend' && mode !== 'rebuttal' && mode !== 'execute' && mode !== 'plan') {
+    cliRefusal(args, 'invalid-mode');
     process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--context-root <WORKING_DIR>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit] [--cwd <dir>]\n');
     process.exit(2);
   }
@@ -2590,18 +2666,21 @@ if (require.main === module) {
     hostRuntime = normalizeHostRuntime(args['host-runtime']);
     sidecarDeclared = normalizeSidecarDeclared(args['sidecar-declared']);
   } catch (error) {
+    cliRefusal(args, error.code || 'invalid-options');
     process.stderr.write(`forge-xllm: ${error.message}\n`);
     process.exit(2);
   }
 
   const flagEnvPolicy = args['env-policy'];
   if (flagEnvPolicy !== undefined && !ENV_POLICY_ENUM.includes(flagEnvPolicy)) {
+    cliRefusal(args, 'invalid-env-policy');
     process.stderr.write(`forge-xllm: unknown --env-policy "${flagEnvPolicy}" (expected minimal|inherit)\n`);
     process.exit(2);
   }
   const envPolicy = flagEnvPolicy || readSidecarsEnvPolicy(process.cwd()) || 'minimal';
 
   if ((mode === 'challenge' || mode === 'defend' || mode === 'rebuttal') && args['result-file'] !== undefined) {
+    cliRefusal(args, 'result-file-unsupported');
     process.stderr.write(`forge-xllm: --result-file is not supported in --mode ${mode}; challenge/defend/rebuttal write their JSON to stdout — --result-file is exclusive to execute/plan\n`);
     process.exit(2);
   }
@@ -2621,7 +2700,7 @@ if (require.main === module) {
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'plan');
 
-    runPlan({ planContextFile: args['plan-context'], resultFile, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, dispatchId })
+    runPlan({ planContextFile: args['plan-context'], resultFile, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, dispatchId, announce })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         // Best-effort marker only after the target independently passes the same
@@ -2661,10 +2740,10 @@ if (require.main === module) {
     if (args['writable-roots'] !== undefined || args['writable-roots-file'] !== undefined) {
       try { writableRoots = JSON.parse(args['writable-roots-file']
         ? fs.readFileSync(args['writable-roots-file'], 'utf8') : args['writable-roots']); }
-      catch (error) { process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
+      catch (error) { cliRefusal(args, 'invalid-writable-roots'); process.stderr.write(`forge-xllm: invalid --writable-roots JSON: ${error.message}\n`); process.exit(2); return; }
     }
 
-    runExecute({ planFile: args.plan, resultFile, cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'] })
+    runExecute({ planFile: args.plan, resultFile, cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, dispatchId, writableRoots, securityFile: args.security, contextFile: args['context-bundle'], announce })
       .then(() => process.exit(0)) // result-file is the ONLY channel — nothing on stdout
       .catch((e) => {
         let safeResultFile = null;
@@ -2710,11 +2789,11 @@ if (require.main === module) {
   const timeoutSecs = args.timeout ? Number(args.timeout) : DEFAULT_TIMEOUT_SECS;
   let pending;
   if (mode === 'challenge') {
-    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy });
+    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else if (mode === 'defend') {
-    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy });
+    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else {
-    pending = runRebuttal({ inputFile: args.input, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy });
+    pending = runRebuttal({ inputFile: args.input, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   }
   pending
     .then((result) => {

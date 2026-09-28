@@ -13,6 +13,7 @@ const nativeApi = require('./forge-native-invocation');
 const transportApi = require('./forge-transport-capabilities');
 const unit = require('./forge-unit-sidecar');
 const claudeSidecar = require('./forge-claude-sidecar');
+const { createStderrAnnouncer } = require('./forge-sidecar-identity');
 
 const REQUEST_SCHEMA_VERSION = 1;
 const MAX_INPUT_BYTES = 512 * 1024;
@@ -311,7 +312,7 @@ function validateRoute(route, contract, request) {
   return normalized;
 }
 
-async function startStandaloneTaskPreparation(rawRequest, deps = {}) {
+async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   let request;
   try { request = validateRequest(rawRequest); }
   catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
@@ -373,6 +374,32 @@ async function startStandaloneTaskPreparation(rawRequest, deps = {}) {
   return { ok: true, action: 'invoke-native', transport: 'native', status: 'ready',
     reason_code: invocation.reason_code, provider_called: false, route,
     invocation: { tool: invocation.tool, args: invocation.args, telemetry: invocation.telemetry } };
+}
+
+function preparationIdentity(request, route = {}) {
+  const contract = phaseContract(request?.phase);
+  return { phase: request?.phase, unit: `${contract?.unitType || '-'}/${request?.taskId || '-'}`,
+    engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
+    model_sent: route.sidecar_model || route.model_resolved || route.model,
+    model_route: route.sidecar_model || route.model_resolved || route.model,
+    model_resolved: route.model_resolved || route.model, effort: route.effort,
+    host: route.host_runtime || request?.hostRuntime, dispatch_id: request?.dispatchId };
+}
+
+async function startStandaloneTaskPreparation(rawRequest, deps = {}) {
+  const result = await startStandaloneTaskPreparationCore(rawRequest, deps);
+  if (typeof deps.announce === 'function') {
+    const route = result.route || {};
+    const sidecar = route.worker_mode === 'sidecar' || rawRequest?.workerMode === 'sidecar'
+      || rawRequest?.worker_mode === 'sidecar';
+    if (sidecar && result.replayed === true) deps.announce('reaproveitado', {
+      ...preparationIdentity(rawRequest, route), reason_code: result.ok ? undefined : result.reason_code,
+      provider_called: false });
+    else if (sidecar && !result.ok) deps.announce('recusado', {
+      ...preparationIdentity(rawRequest, route), model_sent: '-', reason_code: result.reason_code,
+      provider_called: false });
+  }
+  return result;
 }
 
 function expectedNativeTelemetry(request, route, prompt) {
@@ -491,7 +518,7 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
   if (started.action === 'invoke-sidecar') {
     if (!deps.invokeSidecar) {
       try {
-        const result = await unit.runUnitSidecar(started.delivery_request);
+        const result = await unit.runUnitSidecar(started.delivery_request, { announce: deps.announce });
         return completed('sidecar', started.route, { result, provider_called: true });
       } catch (error) {
         const providerCalled = error.provider_called === true;
@@ -504,7 +531,11 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
     }
     try {
       const replay = await unit.replayArtifactAttempt(started.delivery_request);
-      if (replay.replayed) return completed('sidecar', started.route, replay);
+      if (replay.replayed) {
+        deps.announce?.('reaproveitado', { ...preparationIdentity(request, started.route), provider_called: false });
+        return completed('sidecar', started.route, replay);
+      }
+      deps.announce?.('solicitado', { ...preparationIdentity(request, started.route), provider_called: false });
       const rawResult = await deps.invokeSidecar(started.delivery_request, started);
       const candidate = candidateFromPreparationResult(rawResult, started.delivery_request);
       const accepted = await unit.acceptArtifactResult(started.delivery_request, candidate,
@@ -541,7 +572,7 @@ function readJson(filename) {
   return JSON.parse(fs.readFileSync(filename, 'utf8'));
 }
 
-async function cli(argv) {
+async function cli(argv, deps = {}) {
   const [mode, requestFile, acceptanceFile] = argv;
   if (!['--start', '--request', '--accept-native'].includes(mode) || !requestFile
       || (mode === '--accept-native' && !acceptanceFile)) {
@@ -550,7 +581,7 @@ async function cli(argv) {
   const request = readJson(requestFile);
   return mode === '--accept-native'
     ? acceptStandaloneTaskPreparation(request, readJson(acceptanceFile))
-    : prepareStandaloneTask(request);
+    : prepareStandaloneTask(request, deps);
 }
 
 module.exports = {
@@ -562,7 +593,7 @@ module.exports = {
 };
 
 if (require.main === module) {
-  cli(process.argv.slice(2)).then(result => {
+  cli(process.argv.slice(2), { announce: createStderrAnnouncer() }).then(result => {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     if (!result.ok) process.exitCode = 1;
   }).catch(error => {

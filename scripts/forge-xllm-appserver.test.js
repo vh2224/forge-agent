@@ -10,6 +10,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const Module = require('module');
 const { spawnSync } = require('child_process');
 const {
   runExecute,
@@ -280,7 +281,12 @@ async function testHappyAndWire(mock, root) {
   const resultFile = path.join(root, 'happy-result.json');
   const plan = planFile(root);
   const model = 'gpt-test-model';
-  const result = await withMock(mock, 'conforming', capture, () => runExecute(executeOptions(repo, plan, resultFile, model)));
+  const identityLines = [];
+  const { createAnnouncer } = require('./forge-sidecar-identity');
+  const announce = createAnnouncer({ write: line => identityLines.push(line) });
+  const result = await withMock(mock, 'conforming', capture, () => runExecute({
+    ...executeOptions(repo, plan, resultFile, model), effort: 'high', hostRuntime: 'claude', announce,
+  }));
   assert(validateExecuteResult(result));
   assert.strictEqual(result.parse_path, 'output-schema');
   assert(!Object.prototype.hasOwnProperty.call(result, 'degradation'));
@@ -288,6 +294,10 @@ async function testHappyAndWire(mock, root) {
   const wire = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.strictEqual(wire.threadParams.model, model);
   assert.strictEqual(wire.turnParams.model, model);
+  assert.strictEqual(wire.turnParams.effort, 'high');
+  assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado']);
+  assert(identityLines[0].includes(`modelo_enviado=${wire.threadParams.model} esforco=${wire.turnParams.effort}`));
+  assert.match(identityLines[1], / pid=[1-9]\d* provider_called=true observado=nao-confirmado/);
   assert.strictEqual(wire.turnParams.outputSchema.type, 'object');
   assert.strictEqual(wire.turnParams.outputSchema.additionalProperties, false);
   assert.deepStrictEqual(wire.turnParams.outputSchema.required, ['status', 'summary', 'must_haves_status', 'files_changed']);
@@ -303,6 +313,35 @@ async function testHappyAndWire(mock, root) {
   // itself is pinned by the explicit-platform asserts further down.
   assert.deepStrictEqual(wire.turnParams.sandboxPolicy, buildAppServerSandboxPolicy('workspace-write'));
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(resultFile, 'utf8')), result);
+}
+
+async function testAdapterPreflightRefusal(root) {
+  const repo = fixtureRepo(root);
+  const identityLines = [];
+  const { createAnnouncer } = require('./forge-sidecar-identity');
+  const announce = createAnnouncer({ write: line => identityLines.push(line) });
+  const originalLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === './forge-appserver-client' && parent && parent.filename === path.join(__dirname, 'forge-xllm.js')) {
+      const error = new Error('adapter preflight fixture');
+      error.code = 'adapter-preflight-test';
+      throw error;
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    await expectReject(() => runExecute({
+      ...executeOptions(repo, planFile(root), path.join(root, 'preflight-result.json'), 'preflight-model'),
+      hostRuntime: 'claude', announce,
+    }), /adapter preflight fixture/);
+  } finally {
+    Module._load = originalLoad;
+  }
+  assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]),
+    ['solicitado', 'recusado'], 'adapter preflight has no confirmed provider PID');
+  assert(identityLines[1].includes('modelo_enviado=-'));
+  assert(identityLines[1].includes('modelo_rota=preflight-model'));
+  assert(identityLines[1].includes('causa=adapter-preflight-test provider_called=false'));
 }
 
 async function testMultiRepoWire(mock, root) {
@@ -998,6 +1037,7 @@ async function main() {
     testValidatorBoundary();
     testCommandOverride(mock);
     await testHappyAndWire(mock, root);
+    await testAdapterPreflightRefusal(root);
     await testContextHealthFlow(mock, root);
     await testMultiRepoWire(mock, root);
     await testDegradation(mock, root);
