@@ -7097,17 +7097,17 @@ function smokeDispatchResolve() {
 
   // ── (g) forge-task Step 4 template emits routing frontmatter hints ──
   // Text-anchor sliced to the Step 4 planner-template region only (between the
-  // "Write {TASK_ID}-PLAN.md" directive and the "Iron rule:" boundary) so the
+  // canonical done-artifact directive and the "Iron rule:" boundary) so the
   // assert is mutation-sensitive: generic occurrences of tier:/effort:/domain:
   // elsewhere in the file must NOT satisfy it.
   {
     const source = readRepoText(path.join(ROOT46, 'skills/forge-task/SKILL.md'));
-    const startAnchor = 'Write {TASK_ID}-PLAN.md';
+    const startAnchor = 'Return one `done` artifact at `.gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN.md`.';
     const endAnchor = 'Iron rule:';
     const startIdx = source.indexOf(startAnchor);
     const endIdx = source.indexOf(endAnchor, startIdx);
     assert(startIdx !== -1 && endIdx !== -1 && endIdx > startIdx,
-      '(g) forge-task Step 4 template region found (Write PLAN.md ... Iron rule:)',
+      '(g) forge-task Step 4 template region found (return PLAN artifact ... Iron rule:)',
       `startIdx=${startIdx} endIdx=${endIdx}`);
     const region = startIdx !== -1 && endIdx !== -1 ? source.slice(startIdx, endIdx) : '';
     assert(/`---`-fenced YAML\s*\nfrontmatter/.test(region),
