@@ -450,6 +450,27 @@ try {
   const realClaude = claudeRenderer.render({ repo: root });
   assert(realCodex.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
   assert(realClaude.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
+  const codexTask = realCodex.artifacts.find((item) => item.source === 'skills/forge-task/SKILL.md');
+  const claudeTask = realClaude.artifacts.find((item) => item.source === 'skills/forge-task/SKILL.md');
+  for (const [runtime, artifact] of [['codex', codexTask], ['claude', claudeTask]]) {
+    assert(artifact, `${runtime} projection missing forge-task`);
+    const preparation = artifact.content.slice(
+      artifact.content.indexOf('### Canonical preparation caller'),
+      artifact.content.indexOf('### Step 4.5'),
+    );
+    assert.match(preparation, /forge-task-preparation\.js/, `${runtime} projection lost the executable preparation caller`);
+    assert.match(preparation, new RegExp(`hostRuntime: ["']${runtime}["']`), `${runtime} preparation request carries the wrong host`);
+    for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
+      assert(preparation.includes(`phase:\"${phase}\"`), `${runtime} projection missing ${phase} caller`);
+    }
+    assert.doesNotMatch(preparation, /worker_mode:native|workerMode:\s*["']native["']/, `${runtime} projection forces native preparation`);
+    assert.match(preparation, /nativeFailure:\{reason_code,provider_called:false\}/,
+      `${runtime} projection lacks durable pre-provider native failure acceptance`);
+    assert.doesNotMatch(preparation, /effort:\s*\{RESOLVED_EFFORT\}|thinking:\s*adaptive/,
+      `${runtime} preparation prompt invents pre-resolution effort metadata`);
+    assert.match(preparation, /task complexity: light\|standard\|heavy\|max/,
+      `${runtime} preparation prompt omits the max task tier`);
+  }
   for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
     const source = `skills/${skill}/SKILL.md`;
     const artifact = realCodex.artifacts.find((item) => item.source === source);

@@ -42,6 +42,20 @@ try {
   assert(first.artifacts.some((item) => item.destination.endsWith(path.join('CLAUDE.md'))));
   assert(first.artifacts.every((item) => !item.content.includes('\r')));
   assert(first.artifacts.find((item) => item.source === 'CLAUDE.md').content.startsWith('<!-- forge-source:claude-instructions'));
+  const taskSkill = first.artifacts.find((item) => item.source === 'skills/forge-task/SKILL.md');
+  assert(taskSkill, 'Claude projection missing forge-task');
+  const preparation = taskSkill.content.slice(
+    taskSkill.content.indexOf('### Canonical preparation caller'),
+    taskSkill.content.indexOf('### Step 4.5'),
+  );
+  assert.match(preparation, /forge-task-preparation\.js/);
+  assert.match(preparation, /hostRuntime: ["']claude["']/);
+  for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
+    assert(preparation.includes(`phase:\"${phase}\"`), `Claude projection missing ${phase} caller`);
+  }
+  assert.doesNotMatch(preparation, /worker_mode:native|workerMode:\s*["']native["']/);
+  assert.match(preparation, /nativeFailure:\{reason_code,provider_called:false\}/);
+  assert.doesNotMatch(preparation, /effort:\s*\{RESOLVED_EFFORT\}|thinking:\s*adaptive/);
 
   // Frontmatter has to open the projected document. Claude Code reads `name`,
   // `description`, `model` and `allowed-tools` only when the fence is on line 1,

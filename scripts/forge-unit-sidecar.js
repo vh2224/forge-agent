@@ -13,12 +13,18 @@ const { capability } = require('./forge-transport-capabilities');
 const { renderPrompt } = require('./forge-prompt');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
 const memory = require('./forge-memory');
+const forgeIds = require('./forge-ids');
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
 const memorySchema = xllm.loadSchemaFile('memory-extraction.schema.json');
 const MAX_ARTIFACT_BYTES = 512 * 1024;
 // Leave room for the envelope and provider prose within the 1 MiB stream cap.
 const MAX_ARTIFACT_PAYLOAD_BYTES = 900 * 1024;
+const MAX_PREPARATION_SUMMARY_BYTES = 64 * 1024;
+const MAX_PREPARATION_QUESTIONS = 32;
+const MAX_PREPARATION_QUESTION_BYTES = 16 * 1024;
+const PREPARATION_SURFACE_MAX_ENTRIES = 2048;
+const PREPARATION_SURFACE_MAX_BYTES = 16 * 1024 * 1024;
 const MEMORY_QUALITY_CONTRACT = [
   'Keep only project-specific, non-obvious, durable facts that became true; reject pending work, secrets, generic advice and temporary state.',
   'Use candidate-local IDs only. Never allocate MEM IDs or return paths, owner identity, timestamps, commands or publication metadata.',
@@ -38,6 +44,53 @@ function atomic(file, value) {
 }
 function json(file, value) { atomic(file, JSON.stringify(value, null, 2) + '\n'); }
 function fileHash(file) { return fs.existsSync(file) ? hash(fs.readFileSync(file)) : null; }
+function fileState(file) {
+  if (!fs.existsSync(file)) return null;
+  const stat = fs.lstatSync(file);
+  return { hash: stat.isFile() ? fileHash(file) : null, size: stat.size,
+    mtime_ms: stat.mtimeMs, ctime_ms: stat.ctimeMs, type: stat.isFile() ? 'file' : stat.isSymbolicLink() ? 'link' : 'other' };
+}
+function preparationSurfaceSnapshot(request) {
+  const root = fs.realpathSync(request.contextRoot || request.cwd);
+  const gsd = path.join(root, '.gsd');
+  const taskBase = `.gsd/tasks/${request.taskId}/${request.taskId}`;
+  const fixed = ['.gsd/STATE.md', '.gsd/DECISIONS.md', '.gsd/AUTO-MEMORY.md',
+    '.gsd/PROJECT.md', '.gsd/CODING-STANDARDS.md', '.gsd/forge/events.jsonl',
+    ...['BRAINSTORM', 'CONTEXT', 'RESEARCH', 'PLAN'].map(suffix => `${taskBase}-${suffix}.md`)];
+  const selected = new Set(fixed);
+  let visited = 0;
+  // Preparation workers have no native sandbox. This bounded snapshot protects
+  // canonical Forge control files and preparation outputs; it does not claim to
+  // observe arbitrary source writes outside .gsd.
+  function discover(current, relative = '.gsd') {
+    if (!fs.existsSync(current)) return;
+    for (const name of fs.readdirSync(current).sort()) {
+      if (++visited > PREPARATION_SURFACE_MAX_ENTRIES) fail('preparation-surface-limit');
+      const absolute = path.join(current, name);
+      const rel = `${relative}/${name}`.replace(/\\/g, '/');
+      const stat = fs.lstatSync(absolute);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        if (relative === '.gsd' && !['milestones', 'tasks', 'forge'].includes(name)) continue;
+        if (relative === '.gsd/tasks' && name !== request.taskId) continue;
+        discover(absolute, rel);
+      } else if ((['.gsd/milestones', '.gsd/tasks'].includes(relative) && /\.md$/i.test(name))
+          || /-(?:ROADMAP|DECISIONS|BRAINSTORM|CONTEXT|RESEARCH|PLAN)\.md$/i.test(name)
+          || /(?:^|\/)events\.jsonl$/i.test(rel)) selected.add(rel);
+    }
+  }
+  discover(gsd);
+  let bytes = 0;
+  const files = {};
+  for (const relative of [...selected].sort()) {
+    const state = fileState(target(root, relative));
+    if (state?.type === 'file') {
+      bytes += state.size;
+      if (bytes > PREPARATION_SURFACE_MAX_BYTES) fail('preparation-surface-limit');
+    }
+    files[relative] = state;
+  }
+  return { version: 1, scope: 'forge-control-files', bytes, files };
+}
 function sameUnit(value, expected) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && value.type === expected.type && value.id === expected.id
@@ -45,6 +98,9 @@ function sameUnit(value, expected) {
     && (value.slice || null) === (expected.slice || null);
 }
 function inspectDeliveryContent(content, rule) {
+  if (rule.kind === 'standalone-preparation') {
+    return require('./forge-task-preparation').validatePhaseContent(rule.phase, rule.taskId, content);
+  }
   let value;
   try { value = JSON.parse(content); } catch (_) { return false; }
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.schema_version !== 1
@@ -60,6 +116,17 @@ function inspectDeliveryContent(content, rule) {
 }
 function locations(request) {
   const m = request.milestoneId, s = request.sliceId, t = request.taskId;
+  if (request.scope === 'standalone-task') {
+    if (m !== undefined || s !== undefined) fail('standalone-task-scope-invalid');
+    if (!forgeIds.isValid(t) || forgeIds.entityKind(t) !== 'task') fail('invalid-task');
+    const contract = require('./forge-task-preparation').phaseContract(request.phase);
+    if (!contract || request.unitType !== contract.unitType) fail('preparation-phase-unit-mismatch');
+    const task = `.gsd/tasks/${t}`;
+    const artifact = `${task}/${t}-${contract.suffix}.md`;
+    return { required: [artifact], allowed: [artifact],
+      rules: { [artifact]: { kind: 'standalone-preparation', phase: request.phase, taskId: t } }, delivery: null,
+      milestone: null, slice: null, task, preparation: true };
+  }
   if (request.unitType === 'memory-extract') {
     const sourceUnit = request.sourceUnitId || request.unitId || t || s || m;
     if (!memory.validateUnitId(sourceUnit)) fail('invalid-memory-unit');
@@ -123,7 +190,7 @@ function target(root, relative) {
   }
   return current;
 }
-function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, rules = {}) {
+function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, rules = {}, options = {}) {
   const bad = reason => ({ ok: false, reason });
   if (!value || typeof value !== 'object' || Array.isArray(value) || !['done', 'partial', 'blocked'].includes(value.status)
     || typeof value.summary !== 'string' || !value.summary.trim()
@@ -143,12 +210,18 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
     seen.add(artifact.path);
   }
   if (value.status === 'done' && value.questions.length) return bad('questions-on-done');
+  if (options.forbidArtifactsOnNonDone && value.status !== 'done' && value.artifacts.length) return bad('artifacts-on-non-done');
+  if (options.forbidArtifactsOnNonDone && (Buffer.byteLength(value.summary, 'utf8') > MAX_PREPARATION_SUMMARY_BYTES
+      || value.questions.length > MAX_PREPARATION_QUESTIONS
+      || value.questions.some(question => Buffer.byteLength(question, 'utf8') > MAX_PREPARATION_QUESTION_BYTES))) {
+    return bad('payload-limit');
+  }
   if (value.status === 'done' && !required.every(p => seen.has(p))) return bad('artifact-missing');
   if (Buffer.byteLength(JSON.stringify(value)) > maxPayloadBytes) return bad('payload-limit');
   return { ok: true };
 }
-function validateArtifacts(value, allowed, required, maxPayloadBytes, rules) {
-  return inspectArtifacts(value, allowed, required, maxPayloadBytes, rules).ok;
+function validateArtifacts(value, allowed, required, maxPayloadBytes, rules, options) {
+  return inspectArtifacts(value, allowed, required, maxPayloadBytes, rules, options).ok;
 }
 function executeDeliveryArtifacts(request, loc, result, root, cwd) {
   if (result.status !== 'done') return [];
@@ -200,6 +273,148 @@ function materialize(request, record) {
     if (fileHash(file) !== hash(item.content)) atomic(file, item.content);
   }
   return record.result;
+}
+
+function routeIdentity(route, unitType) {
+  const value = route || {};
+  return {
+    unit_type: value.unit_type || unitType || null,
+    model_requested: value.model_requested ?? null,
+    model_resolved: value.model_resolved || value.model || null,
+    resolved_worker_engine: value.resolved_worker_engine || null,
+    worker_mode: value.worker_mode || null,
+    effort: value.effort || null,
+    effort_reason: value.effort_reason || null,
+    dispatch_allowed: value.dispatch_allowed === true,
+  };
+}
+
+function artifactFingerprint(request) {
+  const copy = { ...request };
+  for (const key of ['rawResult', 'invocationTelemetry', 'providerCalled', 'resultFile',
+    'signal', 'publicationSafe', 'publicationBoundary', 'waitForPublicationBoundary']) delete copy[key];
+  return hash(JSON.stringify(copy));
+}
+
+function artifactAttemptFiles(request) {
+  const cwd = fs.realpathSync(request.cwd);
+  const root = fs.realpathSync(request.contextRoot || cwd);
+  const resultFile = xllm.validateResultFileTarget(request.resultFile, cwd);
+  xllm.validateResultFileTarget(resultFile, root);
+  const receiptFile = `${resultFile}.receipt.json`;
+  xllm.validateResultFileTarget(receiptFile, cwd);
+  xllm.validateResultFileTarget(receiptFile, root);
+  return { cwd, root, resultFile, receiptFile };
+}
+
+function beginArtifactAttempt(request) {
+  const loc = locations(request);
+  const files = artifactAttemptFiles(request);
+  const fingerprint = artifactFingerprint(request);
+  if (!request.dispatchId || !request.workflowId) fail('dispatch-identity-required');
+  if (fs.existsSync(files.receiptFile)) {
+    const record = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
+    if (record.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (record.phase === 'ready') return { state: 'ready', record, loc, files, fingerprint };
+    if (record.phase === 'failed') fail(record.failure?.reason_code || 'artifact-attempt-failed');
+    fail('sidecar-attempt-interrupted', 'The attempt is started without a durable result; inspect it before a new dispatch.');
+  }
+  const before = Object.fromEntries(loc.allowed.map(relative => [relative, fileHash(target(files.root, relative))]));
+  const beforeState = Object.fromEntries(loc.allowed.map(relative => [relative, fileState(target(files.root, relative))]));
+  const record = { phase: 'started', fingerprint, dispatch_id: request.dispatchId, before,
+    before_state: beforeState,
+    preparation_surface: request.scope === 'standalone-task' && request.route?.worker_mode === 'native'
+      ? preparationSurfaceSnapshot(request) : null,
+    request_fingerprint: request.preparationRequestFingerprint || null,
+    preparation_identity: request.preparationIdentity || null,
+    route: request.route, route_identity: routeIdentity(request.route, request.unitType), provider_called: false };
+  fs.writeFileSync(files.receiptFile, JSON.stringify(record, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+  return { state: 'started', record, loc, files, fingerprint };
+}
+
+async function replayArtifactAttempt(request) {
+  const attempt = beginArtifactAttempt(request);
+  if (attempt.state !== 'ready') return { replayed: false, attempt };
+  const result = await publishReadyRecord(request, attempt.record);
+  json(attempt.files.resultFile, result);
+  return { replayed: true, provider_called: false, result, record: attempt.record };
+}
+
+function failArtifactAttempt(request, reasonCode, detail, providerCalled = false) {
+  const files = artifactAttemptFiles(request);
+  const fingerprint = artifactFingerprint(request);
+  const current = fs.existsSync(files.receiptFile)
+    ? JSON.parse(fs.readFileSync(files.receiptFile, 'utf8')) : null;
+  if (current && current.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+  const failure = { status: 'failure', reason_code: reasonCode,
+    provider_called: providerCalled === true, diagnostic: diagnostic(detail || 'adapter-failed'),
+    recovery: 'operator-required' };
+  if (!current || current.phase !== 'ready') {
+    json(files.receiptFile, { ...(current || {}), phase: 'failed', fingerprint,
+      dispatch_id: request.dispatchId, route: request.route,
+      request_fingerprint: request.preparationRequestFingerprint || current?.request_fingerprint || null,
+      preparation_identity: request.preparationIdentity || current?.preparation_identity || null,
+      route_identity: routeIdentity(request.route, request.unitType), failure });
+  }
+  json(files.resultFile, failure);
+  return failure;
+}
+
+async function acceptArtifactResult(request, rawResult, metadata = {}) {
+  const loc = locations(request);
+  const files = artifactAttemptFiles(request);
+  const fingerprint = artifactFingerprint(request);
+  if (!fs.existsSync(files.receiptFile)) fail('artifact-attempt-not-started');
+  const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
+  if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+  if (existing.phase === 'ready') {
+    const result = await publishReadyRecord(request, existing);
+    json(files.resultFile, result);
+    return { result, record: existing, replayed: true, provider_called: false };
+  }
+  if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'artifact-attempt-failed');
+  if (existing.phase !== 'started') fail('sidecar-attempt-interrupted');
+  if (metadata.providerCalled !== true) fail('artifact-provider-call-unconfirmed');
+  // A native preparation worker has only a prompt-level read-only contract.
+  // Detect any canonical write before acceptance, even if its bytes happen to
+  // equal the returned artifact. Ready replay after owner publication remains
+  // valid because it takes the separate branch above.
+  for (const relative of loc.allowed) {
+    if (JSON.stringify(fileState(target(files.root, relative))) !== JSON.stringify(existing.before_state?.[relative] ?? null)) {
+      fail('artifact-direct-write-detected');
+    }
+  }
+  if (metadata.enforceReadOnlySurface === true
+      && JSON.stringify(preparationSurfaceSnapshot(request)) !== JSON.stringify(existing.preparation_surface)) {
+    fail('artifact-direct-write-detected');
+  }
+  if (/(?:token|secret|password|credential)\s*[:=]\s*[^\s"}]+/i.test(JSON.stringify(rawResult))) {
+    const error = new Error('Secret-like provider output refused.');
+    error.code = 'secret-output';
+    error.diagnostic = diagnostic('secret-output');
+    throw error;
+  }
+  const verdict = inspectArtifacts(rawResult, loc.allowed, loc.required,
+    metadata.maxPayloadBytes === undefined ? Infinity : metadata.maxPayloadBytes, loc.rules,
+    { forbidArtifactsOnNonDone: loc.preparation === true });
+  if (!verdict.ok) {
+    const error = new Error('Invalid artifact result.');
+    error.code = 'invalid-artifact-result';
+    error.diagnostic = diagnostic(verdict.reason);
+    throw error;
+  }
+  xllm.assertUntrustedOutputBarrier(rawResult);
+  const artifacts = rawResult.status === 'done' ? rawResult.artifacts : [];
+  const record = { phase: 'ready', fingerprint, dispatch_id: request.dispatchId,
+    request_fingerprint: request.preparationRequestFingerprint || null,
+    preparation_identity: request.preparationIdentity || existing.preparation_identity || null,
+    route: request.route, route_identity: routeIdentity(request.route, request.unitType),
+    provider_called: true, telemetry: metadata.telemetry || null, result: rawResult,
+    artifacts: artifacts.map(artifact => ({ ...artifact, before: existing.before[artifact.path] ?? null })) };
+  json(files.receiptFile, record);
+  const result = await publishReadyRecord(request, record);
+  json(files.resultFile, result);
+  return { result, record, replayed: false, provider_called: true };
 }
 function memorySourceContext(request, record) {
   const sourcePayload = {
@@ -585,7 +800,7 @@ async function runNativeMemory(request, invoke) {
 }
 async function runUnitSidecar(request) {
   const r = request || {}, route = r.route || {};
-  const transport = capability(route.resolved_worker_engine, r.unitType);
+  const transport = capability(route.resolved_worker_engine, r.unitType, r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
   const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType });
   if (route.dispatch_allowed !== true || route.worker_mode !== 'sidecar' || !route.sidecar_declared
@@ -611,20 +826,22 @@ async function runUnitSidecar(request) {
   const loc = locations(r);
   const dispatchId = xllm.normalizeDispatchId(r.dispatchId, 'unit');
   if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
-  const fingerprint = hash(JSON.stringify({ ...r, resultFile: undefined, publicationSafe: undefined,
-    publicationBoundary: undefined, waitForPublicationBoundary: undefined }));
+  const fingerprint = artifactFingerprint(r);
   const receiptFile = `${resultFile}.receipt.json`;
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
-  function event(status, reasonCode, detail) {
+  function event(status, reasonCode, detail, providerCalled = false) {
     fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
     fs.appendFileSync(eventsFile, JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
       workflow_id: r.workflowId, dispatch_id: dispatchId,
       unit: `${r.unitType}/${r.unitType === 'memory-extract' ? loc.sourceUnit : r.taskId || r.sliceId || r.milestoneId}`,
       host_runtime: route.host_runtime, worker_engine: route.resolved_worker_engine,
       worker_mode: 'sidecar', model, tier: route.tier, effort: route.effort,
-      status, ...(reasonCode ? { reason_code: reasonCode } : {}),
+      model_requested: route.model_requested ?? null,
+      model_resolved: route.model_resolved || route.model || null,
+      effort_reason: route.effort_reason || null,
+      status, provider_called: providerCalled === true, ...(reasonCode ? { reason_code: reasonCode } : {}),
       ...(detail ? { diagnostic: diagnostic(detail.reason, detail) } : {}) }) + '\n');
   }
   function recordFailure(error) {
@@ -632,14 +849,17 @@ async function runUnitSidecar(request) {
     const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     const detail = diagnostic(error.diagnostic?.reason || (code === 'untrusted-output-barrier'
       ? 'control-data-output' : record.phase === 'ready' ? 'publication-failed' : 'adapter-failed'), error.diagnostic);
+    if (record.phase === 'ready') error.stage = 'publication';
+    error.diagnostic = detail;
     const failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
+      provider_called: error.provider_called === true,
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
       recovery: record.phase === 'ready' ? 'replay-publication' : 'operator-required',
       failed_at: new Date().toISOString() };
     // Never overwrite the validated response if publication was interrupted.
     if (record.phase !== 'ready') json(receiptFile, { ...record, phase: 'failed', failure });
     json(resultFile, failure);
-    event('failed', code, detail);
+    event('failed', code, detail, failure.provider_called);
   }
   const existing = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
   if (existing) {
@@ -676,7 +896,9 @@ async function runUnitSidecar(request) {
   if (bookkeeping) before[bookkeeping] = hash(bookkeepingText);
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
-  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before }), { flag: 'wx', mode: 0o600 });
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before,
+    request_fingerprint: r.preparationRequestFingerprint || null,
+    preparation_identity: r.preparationIdentity || null }), { flag: 'wx', mode: 0o600 });
   event('started');
   const dispatchEvent = require('./forge-dispatch-event').buildDispatchEvent({
     unit: `${r.unitType}/${r.unitType === 'memory-extract' ? loc.sourceUnit : r.taskId || r.sliceId || r.milestoneId}`,
@@ -692,8 +914,12 @@ async function runUnitSidecar(request) {
     constraints: r.constraints || { auto_commit: false, deploy: false },
     signal: r.signal,
   };
-  const heartbeat = pid => json(resultFile, { status: 'running', pid, adapter_pid: process.pid,
-    heartbeat_interval_ms: 15000, started_at: startedAt, updated_at: new Date().toISOString(), dispatch_id: dispatchId });
+  let providerCalled = false;
+  const heartbeat = pid => {
+    if (Number.isInteger(pid) && pid > 0) providerCalled = true;
+    json(resultFile, { status: 'running', pid, adapter_pid: process.pid,
+      heartbeat_interval_ms: 15000, started_at: startedAt, updated_at: new Date().toISOString(), dispatch_id: dispatchId });
+  };
   try {
     let result, artifacts;
     if (transport.mode === 'memory') {
@@ -732,8 +958,9 @@ async function runUnitSidecar(request) {
       artifacts = [{ path: loc.required[0], content: result.slice_plan.content },
         ...result.task_plans.map(p => ({ path: `${loc.slice}/tasks/${p.id}-PLAN.md`, content: p.content }))];
     } else if (transport.mode === 'artifacts') {
-      const payloadLimit = options.engine === 'claude' ? MAX_ARTIFACT_PAYLOAD_BYTES : Infinity;
-      const base = r.promptFile ? fs.readFileSync(r.promptFile, 'utf8') : renderPrompt({
+      const payloadLimit = options.engine === 'claude' || loc.preparation ? MAX_ARTIFACT_PAYLOAD_BYTES : Infinity;
+      const base = typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
+        : r.promptFile ? fs.readFileSync(r.promptFile, 'utf8') : renderPrompt({
         unitType: r.unitType, cwd: root, milestoneId: r.milestoneId, sliceId: r.sliceId,
         description: r.description, unitEffort: route.effort, autoCommit: false,
       }).prompt;
@@ -751,21 +978,23 @@ async function runUnitSidecar(request) {
       if (options.engine === 'claude') {
         const output = await invokeClaudeSidecar({ ...options, prompt: prompt
           + '\nFinish with the following envelope. Markers must be on their own lines. result_json must contain one complete JSON object (compact or multiline); escape newlines inside JSON strings. Do not wrap the JSON in Markdown fences.\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <complete JSON>\n---END-RESULT---',
-          readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules), onHeartbeat: heartbeat,
+          readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules,
+            { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         result = output.candidate;
       } else {
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
-      const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules);
+      const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules,
+        { forbidArtifactsOnNonDone: loc.preparation === true });
       if (!verdict.ok) {
         const error = new Error('Invalid artifact result.');
         error.code = 'invalid-artifact-result';
         error.diagnostic = diagnostic(verdict.reason);
         throw error;
       }
-      if (r.unitType === 'plan-milestone' && result.status === 'done') {
+      if (!loc.preparation && r.unitType === 'plan-milestone' && result.status === 'done') {
         const roadmap = result.artifacts.find(a => a.path === loc.required[0]);
         const slices = require('./forge-status').parseRoadmap(roadmap.content).slices;
         if (!slices.length || new Set(slices.map(s => s.id)).size !== slices.length) fail('invalid-roadmap-result');
@@ -785,24 +1014,34 @@ async function runUnitSidecar(request) {
           model_observed: null, model_observed_source: null,
           effort_requested: route.effort || null, effort_resolved: route.effort || null,
           effort_argument: route.effort || null, capabilities_source: 'sidecar-transport' } }
-      : { phase: 'ready', fingerprint, result: { ...result, dispatch_id: dispatchId,
+      : { phase: 'ready', fingerprint, dispatch_id: dispatchId, result: { ...result, dispatch_id: dispatchId,
         workflow_id: r.workflowId, host_runtime: route.host_runtime, worker_engine: options.engine },
+        request_fingerprint: r.preparationRequestFingerprint || null,
+        preparation_identity: r.preparationIdentity || null,
+        route, route_identity: routeIdentity(route, r.unitType), provider_called: true,
+        telemetry: { model_requested: route.model_requested ?? null,
+          model_resolved: route.model_resolved || route.model || null,
+          model_observed: null, model_observed_source: null,
+          effort_resolved: route.effort || null, effort_reason: route.effort_reason || null },
         artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
     // Durable validated response BEFORE artifact publication: a crash anywhere
     // after here replays publication, without spending another provider turn.
     json(receiptFile, record);
     result = await publishReadyRecord(r, record);
     json(resultFile, result);
-    if (transport.mode !== 'memory') event(result.status);
+    if (transport.mode !== 'memory') event(result.status, null, null, true);
     return result;
   } catch (error) {
+    error.provider_called = providerCalled;
     recordFailure(error);
     throw error;
   }
 }
 module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
-  publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory, runUnitSidecar };
+  publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
+  routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt,
+  failArtifactAttempt, acceptArtifactResult, runUnitSidecar };
 if (require.main === module) {
   Promise.resolve().then(() => {
     if (!['--request', '--accept-native-memory'].includes(process.argv[2]) || !process.argv[3]) fail('request-file-required');

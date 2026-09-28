@@ -471,9 +471,30 @@ test('o bloco nomeia o resolvedor, o sidecar, o fallback nomeado e a proibição
     'worker-engine-fallback',
     'events.jsonl',
     'inline',
+    'dispatch_allowed:true',
+    'provider_called:false',
+    '.gsd/tasks/',
+    'receipt',
   ]) {
     assert(block.includes(needle), `o contrato não menciona ${needle}`);
   }
+});
+
+test('o contrato separa recusa local de rejeição do provedor e exige a cadeia real', () => {
+  const block = renderBlock();
+  for (const needle of [
+    'modelo',
+    'escolhido, worker, host, transporte',
+    'fonte atual',
+    'instalação efetivamente lida',
+    'argumentos do',
+    'caller. Para task solta',
+    'milestone fictício',
+  ]) assert(block.includes(needle), `diagnóstico incompleto: ${needle}`);
+  assert(
+    /anterior ao spawn[\s\S]+não é[\s\S]+rejeição do provedor/.test(block),
+    'recusa anterior ao spawn foi apresentada como rejeição do provedor',
+  );
 });
 
 test('o bloco não afirma nada sobre a config de routing DESTE projeto', () => {

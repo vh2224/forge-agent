@@ -155,6 +155,13 @@ const WRAPPER_DIR_READERS = Object.freeze([
     why: 'The specific caller-selected milestone id is joined before firstExisting enumerates; the controller never lists the .gsd/milestones wrapper root, so an epoch.md container cannot be consumed as a milestone directory.',
   },
   {
+    file: 'forge-unit-sidecar.js',
+    dirs: Object.freeze(['.gsd/milestones', '.gsd/tasks']),
+    evidence: 'forge-unit-sidecar.js preparationSurfaceSnapshot - bounded discovery lists both wrapper roots and includes every root-level Markdown file in the protected byte/metadata snapshot.',
+    verdict: 'learned',
+    why: 'The specific root-level .md filter treats grouped containers as protected opaque files, so native acceptance detects their modification without interpreting a container as one milestone or task.',
+  },
+  {
     file: 'forge-verifier.js',
     dirs: Object.freeze(['.gsd/milestones']),
     evidence: 'forge-verifier.js:922-935 — discoverTaskPlans uses fs.readdirSync(sliceDir/tasks), below a caller-selected milestone and slice.',

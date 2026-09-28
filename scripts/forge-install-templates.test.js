@@ -87,15 +87,23 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   const result = installer.install(options);
   assert.strictEqual(result.ok, true);
   assert(fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-delivery.js')));
+  assert(fs.existsSync(path.join(options.forgeHome, 'scripts', 'forge-task-preparation.js')));
   const nativeInvocationPath = path.join(options.forgeHome, 'scripts', 'forge-native-invocation.js');
   assert(fs.existsSync(nativeInvocationPath));
   assert(fs.existsSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md')));
+  assert(fs.existsSync(path.join(options.forgeHome, 'shared', 'forge-task-preparation.md')));
   const contract = fs.readFileSync(path.join(options.forgeHome, 'shared', 'forge-delivery.md'), 'utf8');
   assert.match(contract, /três|verificado/);
   for (const [host, home] of [['Claude', options.claudeHome], ['Codex', options.codexHome]]) {
     assert(treeContains(home, /forge-delivery\.js[\s\S]*DELIVERY\.json/), `${host} projection lacks operational delivery invocation`);
     assert(treeContains(home, /expected_children|every expected (?:task|slice) DELIVERY/), `${host} projection lacks complete child delivery aggregation`);
     assert(treeContains(home, /After review handling[\s\S]*DELIVERY-INPUT/), `${host} projection lacks post-review rematerialization`);
+    const task = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
+    const preparation = task.slice(task.indexOf('### Canonical preparation caller'), task.indexOf('### Step 4.5'));
+    assert.match(preparation, /forge-task-preparation\.js[\s\S]*--start/, `${host} projection lacks the preparation caller`);
+    assert.match(preparation, new RegExp(`hostRuntime: ["']${host.toLowerCase()}["']`), `${host} projection has the wrong runtime`);
+    assert.doesNotMatch(preparation, /worker_mode:native|workerMode:\s*["']native["']/,
+      `${host} projection forces preparation native`);
   }
   for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
     const projected = fs.readFileSync(path.join(options.codexHome, 'skills', skill, 'SKILL.md'), 'utf8');

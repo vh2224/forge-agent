@@ -471,23 +471,123 @@ Call `TaskList`. Mark any tasks with `status: in_progress` as `completed` before
 
 ## Dispatch loop
 
+<!-- forge:dispatch:start -->
+
 Execute steps in order. Each step checks if its output file already exists — if yes, skip (idempotent resume). After each dispatch, increment `session_units`. If `session_units >= COMPACT_AFTER` and the task is not yet done, emit the compact signal and stop.
 
-Before each native preparation dispatch, call the authoritative resolver for
-the mapped unit (`brainstorm` → `plan-slice`, discuss → `discuss-milestone`,
-research → `research-milestone`, plan → `plan-milestone`) with
-`worker_mode:native` and the actual host. Pass the complete result to
-`buildNativeInvocation` with capabilities observed from the active tool. Invoke
-the returned structured arguments unchanged: Codex receives the full model ID,
-separate reasoning effort and compatible `fork_turns`; Claude receives only its
-adapter alias plus an evidenced effort binding. Before a Claude call, read the
-actual exposed `agents/<agent>.md` (repo or installed Forge copy), compute the
-SHA-256 of those same bytes, call `observeClaudeAgentBinding`, and pass the
-successful observation as `effortBinding`. A prompt header is descriptive text,
-not an effort API. If resolution, native model,
-effort or tool capability is unsupported, stop that phase with the named
-diagnostic. Do not omit an explicit configured model or invent a universal
-brainstorm sidecar. Applied model stays unknown without trusted readback.
+### Canonical preparation caller
+
+All four preparation steps use `scripts/forge-task-preparation.js`; none calls a
+planner, discusser or researcher directly. Read
+`shared/forge-task-preparation.md` from `$FORGE_SHARED_DIR` before the first
+phase. The caller owns the closed phase mapping, invokes the authoritative
+resolver exactly once and consumes its native or sidecar transport. Never pass
+`worker_mode` by default, reconstruct a route, substitute a model, invent a
+milestone or execute the phase inline after a refusal.
+
+For each phase, serialize one request object to an external temporary JSON file
+using a JSON serializer — never shell interpolation. Supply:
+
+- `schemaVersion: 1`, `scope: "standalone-task"`, the step's `phase`, `taskId`,
+  `cwd`, `contextRoot`, `hostRuntime: "claude"`, `workflowId`, a fresh
+  `dispatchId`, `resultFile`, the complete prompt below, and operator
+  `constraints`;
+- capabilities observed from the active host tool. For native Claude, read the
+  actual exposed `agents/<agent>.md`, compute SHA-256 over those bytes, call
+  `observeClaudeAgentBinding`, and include the successful `effortBinding`;
+- prompt text is not an effort API. Preserve the resolver's effort only through
+  the native argument or the verified Claude agent-frontmatter binding;
+- on continuation only, the recorded explicit `answers`, prior `dispatchId` as
+  `continuation.from_dispatch_id`, and prior external result path as
+  `continuation.result_file`. Continuation always gets a new `dispatchId` and
+  a new `resultFile`.
+
+Use this named request-builder seam verbatim. Save the JavaScript block to an
+external temporary file, serialize the phase values above to
+`$PREPARATION_BINDINGS_FILE`, then run
+`node "$PREPARATION_REQUEST_BUILDER" "$PREPARATION_BINDINGS_FILE" "$PREPARATION_REQUEST_FILE"`.
+Do not add routing fields to the bindings.
+
+<!-- forge:task-preparation-request:start -->
+```js
+'use strict';
+const fs = require('fs');
+const [bindingsFile, requestFile] = process.argv.slice(2);
+if (!bindingsFile || !requestFile) throw new Error('preparation request builder requires bindings and output paths');
+const bindings = JSON.parse(fs.readFileSync(bindingsFile, 'utf8'));
+const required = ['phase', 'taskId', 'cwd', 'contextRoot', 'workflowId', 'dispatchId', 'resultFile', 'prompt'];
+for (const key of required) {
+  if (typeof bindings[key] !== 'string' || !bindings[key]) throw new Error(`invalid preparation binding: ${key}`);
+}
+if (!['brainstorm', 'discuss', 'research', 'plan'].includes(bindings.phase)) throw new Error('invalid preparation phase');
+const request = {
+  schema_version: 1,
+  scope: 'standalone-task',
+  phase: bindings.phase,
+  taskId: bindings.taskId,
+  cwd: bindings.cwd,
+  contextRoot: bindings.contextRoot,
+  hostRuntime: "claude",
+  workflowId: bindings.workflowId,
+  dispatchId: bindings.dispatchId,
+  resultFile: bindings.resultFile,
+  prompt: bindings.prompt,
+  constraints: bindings.constraints || { auto_commit: false, deploy: false },
+  inputs: bindings.inputs || {},
+  ...(bindings.activeCapabilities ? { activeCapabilities: bindings.activeCapabilities } : {}),
+  ...(bindings.effortBinding ? { effortBinding: bindings.effortBinding } : {}),
+  ...(bindings.continuation ? { continuation: bindings.continuation } : {}),
+};
+fs.writeFileSync(requestFile, JSON.stringify(request, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+```
+<!-- forge:task-preparation-request:end -->
+
+Start the phase with:
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-task-preparation.js" --start "$PREPARATION_REQUEST_FILE"
+```
+
+Parse stdout as JSON. `action:"complete"` is the terminal sidecar result.
+`action:"invoke-native"` is permission to invoke exactly
+`invocation.tool` with `invocation.args` unchanged; do not omit model/effort to
+inherit defaults. Serialize `{route, rawResult, invocationTelemetry,
+providerCalled:true}` to a separate acceptance JSON file, then run:
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-task-preparation.js" --accept-native \
+  "$PREPARATION_REQUEST_FILE" "$PREPARATION_ACCEPTANCE_FILE"
+```
+
+Every native outcome must cross that acceptance command so its `started`
+receipt becomes terminal. If the host tool or adapter refuses before a provider
+starts, serialize `{route,nativeFailure:{reason_code,provider_called:false}}`.
+If the accepted native tool call starts a provider and then throws or returns a
+failure, serialize
+`{route,nativeFailure:{reason_code,provider_called:true,telemetry}}`, using the
+exact `invocation.telemetry` shape and adding observed model/effort fields only
+when the host returned them. `reason_code` is a sanitized lower-kebab adapter
+code, never provider output. Set `provider_called:true` only from positive
+provider-start evidence returned by the host; submitting a tool request is not
+enough. A schema/tool refusal before that evidence, or an unknown refusal, uses
+false, meaning "not observed" rather than proof that no provider work occurred.
+Do not include `rawResult` for either failure. Run the same `--accept-native`
+command and stop with its durable refusal result.
+
+The native host tool exposes no per-call read-only sandbox. Its prompt is an
+output-only contract. The caller compares the recorded protected-target
+baseline with the state at acceptance and refuses observable changes. This does
+not prove that no restored write or write elsewhere occurred; do not describe
+it as an OS-enforced sandbox. Sidecars use their enforced read-only profile.
+
+Accept a phase only from terminal `action:"complete"` with `status:"done"` and
+the expected task artifact present. For `partial` or `blocked`, keep the
+timeline task in progress, surface `result.questions` through
+`shared/forge-interaction.md`, checkpoint the pending decision and stop. No
+answer may be inferred. Replaying the same dispatch may replay a ready receipt
+but may not call the provider; an answered continuation is a new dispatch.
+Every other action/refusal stops with its `reason_code`, diagnostic layer and
+`provider_called` value. `dispatch_allowed:true` alone is never delivery proof.
 
 ---
 
@@ -508,12 +608,10 @@ a reused phase still has to hand its content downstream.
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
-Dispatch `forge-planner` with the resolved native invocation arguments and this prompt:
+Use the canonical preparation caller with `phase:"brainstorm"` and this prompt:
 ```
 Brainstorm for forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {RESOLVED_EFFORT}
-thinking: adaptive
 
 ## Task Brief
 {content of {TASK_ID}-BRIEF.md}
@@ -528,8 +626,8 @@ thinking: adaptive
 {TOP_MEMORIES}
 
 ## Instructions
-Produce a lightweight brainstorm for this task. Write {TASK_ID}-BRAINSTORM.md to
-.gsd/tasks/{TASK_ID}/ with exactly these sections:
+Produce a lightweight brainstorm for this task. Return one `done` artifact at
+`.gsd/tasks/{TASK_ID}/{TASK_ID}-BRAINSTORM.md` with exactly these sections:
 
 # Brainstorm: {TASK_DESCRIPTION}
 **Date:** YYYY-MM-DD
@@ -553,10 +651,12 @@ Produce a lightweight brainstorm for this task. Write {TASK_ID}-BRAINSTORM.md to
 - [Specific questions the user must answer before planning]
 
 Keep it concise — this is a scoping aid, not a plan. Max 1 page.
-Return ---GSD-WORKER-RESULT---.
+Return only the preparation envelope requested by the canonical caller. Do not
+write files or return another path.
 ```
 
-After result: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
+After the caller returns terminal `done` and publishes the artifact:
+`TaskUpdate({ status: "completed" })`, `session_units += 1`.
 
 ---
 
@@ -572,12 +672,10 @@ TaskCreate({ subject: "[{TASK_ID}] discuss", activeForm: "discuss · forge-discu
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
-Dispatch `forge-discusser` with the resolved native invocation arguments and this prompt:
+Use the canonical preparation caller with `phase:"discuss"` and this prompt:
 ```
 Discuss forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {RESOLVED_EFFORT}
-thinking: adaptive
 
 ## Task Brief
 {content of {TASK_ID}-BRIEF.md}
@@ -593,18 +691,16 @@ thinking: adaptive
 
 ## Instructions
 Score clarity (scope/acceptance/tech/dependencies/risk). Ask about dimensions below 70.
-Write {TASK_ID}-CONTEXT.md to .gsd/tasks/{TASK_ID}/ with sections:
+Return one `done` artifact at
+`.gsd/tasks/{TASK_ID}/{TASK_ID}-CONTEXT.md` with sections:
   ## Decisions, ## Agent's Discretion, ## Open Questions, ## Out of Scope
-Append significant decisions to the **fragment store** via `forge-decisions.js --write` (stdin JSON) — do NOT write to `.gsd/DECISIONS.md` directly. Use:
-```bash
-FORGE_SCRIPTS_DIR=$([ -f scripts/forge-decisions.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
-printf '%s' "$key_decisions_json" | node "$FORGE_SCRIPTS_DIR/forge-decisions.js" --write --cwd "$WORKING_DIR"
-```
-Where `key_decisions_json` is `{ "unit_id": "{TASK_ID}", "decisions": [{when, scope, decision, choice, rationale, revisable}, ...] }`. The global `.gsd/DECISIONS.md` is rebuilt from fragments during `complete-milestone` (forge-merger).
-Return ---GSD-WORKER-RESULT---.
+Return `partial` with the unresolved questions and no artifacts when a human
+decision is required. Return only the preparation envelope requested by the
+canonical caller. Do not write files, decision fragments or another path.
 ```
 
-After result: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
+After the caller returns terminal `done` and publishes the artifact:
+`TaskUpdate({ status: "completed" })`, `session_units += 1`.
 
 ---
 
@@ -624,12 +720,10 @@ TaskCreate({ subject: "[{TASK_ID}] research", activeForm: "research · forge-res
 TaskUpdate({ taskId: <id>, status: "in_progress" })
 ```
 
-Dispatch `forge-researcher` with the resolved native invocation arguments and this prompt:
+Use the canonical preparation caller with `phase:"research"` and this prompt:
 ```
 Research codebase for forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {RESOLVED_EFFORT}
-thinking: adaptive
 
 ## Task Brief
 {content of {TASK_ID}-BRIEF.md}
@@ -644,8 +738,8 @@ thinking: adaptive
 {TOP_MEMORIES}
 
 ## Instructions
-Explore the codebase relevant to this task. Write {TASK_ID}-RESEARCH.md to
-.gsd/tasks/{TASK_ID}/ with:
+Explore the codebase relevant to this task. Return one `done` artifact at
+`.gsd/tasks/{TASK_ID}/{TASK_ID}-RESEARCH.md` with:
 - ## Summary: what exists today that's relevant
 - ## Don't Hand-Roll: libraries/patterns/components already in the codebase to reuse
 - ## Common Pitfalls: found in existing code or well-known for this stack
@@ -655,11 +749,14 @@ Explore the codebase relevant to this task. Write {TASK_ID}-RESEARCH.md to
 
 **Web research:** If the Task Brief references specific URLs — fetch them. Do up to 3 targeted
 web searches for pitfalls, breaking changes, or best practices relevant to named libraries/APIs.
-After writing RESEARCH.md, update .gsd/CODING-STANDARDS.md with any new findings.
-Return ---GSD-WORKER-RESULT---.
+Record proposed CODING-STANDARDS additions inside RESEARCH.md for the parent to
+apply separately; preparation publishes exactly one phase artifact. Return only
+the preparation envelope requested by the canonical caller. Do not write files
+or return another path.
 ```
 
-After result: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
+After the caller returns terminal `done` and publishes the artifact:
+`TaskUpdate({ status: "completed" })`, `session_units += 1`.
 
 ---
 
@@ -688,12 +785,10 @@ workspace_repos=$(node "$FORGE_SCRIPTS_DIR/forge-repos.js" --list --cwd "$WORKIN
   | node -e 'const l=require("fs").readFileSync(0,"utf8").split("\n").map(s=>s.trim()).filter(Boolean).map(p=>p.split(/[\\/]/).pop());process.stdout.write(l.length>1?l.join(", "):"(single repo — omit repo:)")')
 ```
 
-Dispatch `forge-planner` with the resolved native invocation arguments and this prompt:
+Use the canonical preparation caller with `phase:"plan"` and this prompt:
 ```
 Plan forge-task {TASK_ID}: {TASK_DESCRIPTION}
 WORKING_DIR: {WORKING_DIR}
-effort: {RESOLVED_EFFORT}
-thinking: adaptive
 ROUTING_DOMAINS: {routing_domains}
 WORKSPACE_REPOS: {workspace_repos}
 
@@ -719,8 +814,9 @@ WORKSPACE_REPOS: {workspace_repos}
 {TOP_MEMORIES}
 
 ## Instructions
-Write {TASK_ID}-PLAN.md to .gsd/tasks/{TASK_ID}/. Open the file with a `---`-fenced YAML
-frontmatter block carrying `tier:` (task complexity: light|standard|heavy), `effort:`
+Return one `done` artifact at `.gsd/tasks/{TASK_ID}/{TASK_ID}-PLAN.md`.
+Open its content with a `---`-fenced YAML
+frontmatter block carrying `tier:` (task complexity: light|standard|heavy|max), `effort:`
 (ordered scale low|medium|high|xhigh|max), `writes:` (an array of the file paths or globs
 this task will create or modify — literals or globs, `writes: []` for a docs-only task;
 emit it unconditionally, it is what lets a multi-repo workspace attribute this task to ONE
@@ -746,10 +842,12 @@ contract. After the frontmatter, include exactly these sections:
 
 Iron rule: this task MUST fit in ONE context window for the executor.
 If scope is too large, plan the most valuable subset and note what was deferred in ## Deferred.
-Return ---GSD-WORKER-RESULT---.
+Return only the preparation envelope requested by the canonical caller. Do not
+write files or return another path.
 ```
 
-After result: `TaskUpdate({ status: "completed" })`, `session_units += 1`.
+After the caller returns terminal `done` and publishes the artifact:
+`TaskUpdate({ status: "completed" })`, `session_units += 1`.
 
 ---
 
@@ -784,8 +882,6 @@ diagnostic. Do not dispatch while the gate is unresolved.
 ---
 
 ### Step 5 — Execute
-
-<!-- forge:dispatch:start -->
 
 **Skip if:** `.gsd/tasks/{TASK_ID}/{TASK_ID}-SUMMARY.md` already exists (task done).
 

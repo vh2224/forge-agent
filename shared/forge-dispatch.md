@@ -1150,6 +1150,40 @@ both directions, refusal-without-writing, anti-silence floor).
 
 ---
 
+### Standalone task preparation
+
+`forge-task` routes brainstorm, discuss, research and plan through the executable
+`scripts/forge-task-preparation.js` caller. The complete request, phase mapping,
+native acceptance, artifact allowlist, receipt/replay behavior and question
+continuation contract live in [`shared/forge-task-preparation.md`](forge-task-preparation.md).
+
+Preparation has two explicit axes. Its existing resolver unit preserves tier,
+model and effort preferences; `scope: standalone-task` plus the closed `phase`
+selects a task-local artifact contract. The caller invokes the resolver once
+with the actual host and does not force `worker_mode`. It consumes the returned
+native or sidecar transport without changing model, effort or engine and never
+invents a milestone to satisfy an artifact path.
+
+Both transports return the unit-artifacts envelope. Sidecars use the enforced
+read-only profile. Native host tools expose no per-call read-only sandbox, so
+their output-only contract is backed by parent detection of protected artifact
+changes; do not claim OS sandbox enforcement. The parent validates the exact
+task path, persists the ready receipt, detects conflicts and publishes
+atomically. `partial` and `blocked` preserve questions and publish no artifact.
+Continuation requires an explicit answer and a new dispatch identity; replay of
+a ready receipt never repeats provider work.
+
+**Refusal diagnosis.** Record the real caller arguments and distinguish route
+resolution, runtime authorization, native compatibility, phase/scope support,
+provider execution, envelope validation and publication. `dispatch_allowed:true`
+does not prove delivery. A refusal before spawn has `provider_called:false` and
+must not be blamed on authentication or the provider. Verify current source and
+the installed bytes actually loaded before recommending a host/model change,
+preference edit or reinstall. Read-only diagnosis does not authorize fallback,
+inline execution, a fabricated milestone or an empty artifact.
+
+---
+
 ### Worker Engine Routing
 
 **Purpose:** Control-flow section that runs **before** Tier Resolution and Effort Resolution on every routable worker dispatch. `forge-dispatch-resolve.js` returns a cross-model chain, the normalized runtime axes, and the composed dispatch verdict. Model family (`claude|gpt|gemini`) and dispatch engine (`claude|codex|agy`) remain distinct routing metadata, but the executable branch is selected by the normalized `WORKER_MODE` (`native|sidecar`) only after the resolver gate. The persisted `dispatch` event records the normalized engine actually used (`claude|codex|agy`) and the final runtime mode. A failed write-capable sidecar is surgically reset to its pre-dispatch snapshot, preserving pre-existing dirty files, before the chain advances or the named Claude fallback runs.
