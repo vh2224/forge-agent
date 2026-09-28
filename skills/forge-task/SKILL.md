@@ -4,6 +4,8 @@ description: "Task autonoma sem milestone — brainstorm, discuss, plan, execute
 allowed-tools: Read, Write, Edit, Bash, Agent, Skill, AskUserQuestion, TaskCreate, TaskUpdate, TaskList, TaskStop, SendMessage, WebSearch, WebFetch
 ---
 
+Na preparação de task solta e nos demais despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-sidecar]` do stderr.
+
 ## Personal lifecycle (all exits)
 
 Read `shared/forge-personal-context.md` from the repo or FORGE_HOME.

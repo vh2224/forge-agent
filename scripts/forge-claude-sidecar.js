@@ -169,6 +169,14 @@ function normalizeModel(value) {
   return value.trim();
 }
 
+function claudeLaunchIdentity({ model, effort } = {}) {
+  const modelSent = normalizeModel(model);
+  if (effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
+    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  }
+  return { model_sent: modelSent, effort: effort || null };
+}
+
 function normalizeMustHave(item) {
   const normalized = { item: item.item, status: item.status, note: item.note };
   if (Object.prototype.hasOwnProperty.call(item, 'scope')) normalized.scope = item.scope;
@@ -454,11 +462,9 @@ async function invokeClaudeSidecar(opts) {
   const prompt = options.prompt;
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
-  const model = normalizeModel(options.model);
-  const effort = options.effort;
-  if (effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
-  }
+  const launchIdentity = claudeLaunchIdentity(options);
+  const model = launchIdentity.model_sent;
+  const effort = launchIdentity.effort;
   let tempDir = null;
   let primaryError = null;
 
@@ -521,5 +527,6 @@ module.exports = {
   resolveClaudeCommand,
   deriveChildTimeoutMs,
   parseExecuteCandidate,
+  claudeLaunchIdentity,
   invokeClaudeSidecar,
 };

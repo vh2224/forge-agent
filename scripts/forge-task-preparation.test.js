@@ -121,6 +121,8 @@ async function main() {
     request.prompt = 'UNIQUE-PRODUCTION-SIDECAR-PROMPT';
     const partial = { status: 'partial', summary: 'Need a choice', questions: ['Choose the source'], artifacts: [] };
     const original = xllm.invokeCodexAppServer;
+    const identityLines = [];
+    const announce = require('./forge-sidecar-identity').createAnnouncer({ write: line => identityLines.push(line) });
     let calls = 0;
     xllm.invokeCodexAppServer = async options => {
       calls++;
@@ -130,9 +132,13 @@ async function main() {
       return { finalText: JSON.stringify(calls === 1 ? partial : envelope(request)) };
     };
     try {
-      const first = await prep.prepareStandaloneTask(request);
+      const first = await prep.prepareStandaloneTask(request, { announce });
       assert.equal(first.status, 'partial', JSON.stringify(first));
       assert.equal(first.provider_called, true);
+      assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado']);
+      assert(identityLines.every(line => line.includes('fase=discuss')));
+      assert(identityLines[1].includes('pid=43210'));
+      assert(!identityLines.join('').includes(request.prompt));
       const receipt = JSON.parse(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'));
       assert.equal(receipt.dispatch_id, request.dispatchId);
       assert.equal(receipt.provider_called, true);
@@ -450,13 +456,19 @@ async function main() {
 
   await test('production sidecar pre-spawn route refusal records provider_called false', async () => {
     const request = fixture({ phase: 'research', hostRuntime: 'codex', model: 'claude-sonnet-5' });
-    const result = await prep.prepareStandaloneTask(request, { resolveDispatch: options => {
+    const identityLines = [];
+    const announce = require('./forge-sidecar-identity').createAnnouncer({ write: line => identityLines.push(line) });
+    const result = await prep.prepareStandaloneTask(request, { announce, resolveDispatch: options => {
       const route = resolveDispatch(options);
       return { ...route, model: 'gpt-5.6-sol', model_requested: 'gpt-5.6-sol',
         model_resolved: 'gpt-5.6-sol', sidecar_model: 'gpt-5.6-sol' };
     } });
     assert.equal(result.reason_code, 'route-model-engine-mismatch');
     assert.equal(result.provider_called, false);
+    assert.equal(identityLines.length, 1);
+    assert.match(identityLines[0], /^\[forge-sidecar\] recusado fase=research /);
+    assert(identityLines[0].includes('modelo_enviado=-'));
+    assert(identityLines[0].includes('provider_called=false'));
     assert.equal(result.diagnostic.stage, 'transport');
     const receipt = JSON.parse(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'));
     assert.equal(receipt.failure.provider_called, false);
@@ -477,6 +489,8 @@ async function main() {
     const request = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
     const original = xllm.invokeCodexAppServer;
     let providerInvocations = 0;
+    const identityLines = [];
+    const announce = require('./forge-sidecar-identity').createAnnouncer({ write: line => identityLines.push(line) });
     xllm.invokeCodexAppServer = async options => {
       providerInvocations++;
       options.onHeartbeat(43211);
@@ -485,19 +499,26 @@ async function main() {
       throw error;
     };
     try {
-      const result = await prep.prepareStandaloneTask(request);
+      const result = await prep.prepareStandaloneTask(request, { announce });
       assert.equal(result.reason_code, 'provider-exit');
       assert.equal(result.provider_called, true);
+      assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado', 'falhou']);
+      assert(identityLines.every(line => line.includes('fase=research')));
+      assert(identityLines[2].includes('causa=provider-exit provider_called=true'));
       const receipt = JSON.parse(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'));
       assert.equal(receipt.failure.provider_called, true);
       const events = fs.readFileSync(path.join(request.contextRoot, '.gsd', 'forge', 'events.jsonl'), 'utf8')
         .trim().split(/\r?\n/).map(line => JSON.parse(line));
       assert.equal(events.filter(event => event.event === 'sidecar-unit').at(-1).provider_called, true);
       const receiptBytes = fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8');
-      const replay = await prep.prepareStandaloneTask(request);
+      const replayLines = [];
+      const replay = await prep.prepareStandaloneTask(request, { announce: require('./forge-sidecar-identity')
+        .createAnnouncer({ write: line => replayLines.push(line) }) });
       assert.equal(replay.replayed, true);
       assert.equal(replay.provider_called, false);
       assert.equal(replay.original_provider_called, true);
+      assert.equal(replayLines.length, 1);
+      assert.match(replayLines[0], /^\[forge-sidecar\] reaproveitado /);
       assert.equal(providerInvocations, 1);
       assert.equal(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'), receiptBytes);
     } finally { xllm.invokeCodexAppServer = original; }

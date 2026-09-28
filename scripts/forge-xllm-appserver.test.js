@@ -280,7 +280,12 @@ async function testHappyAndWire(mock, root) {
   const resultFile = path.join(root, 'happy-result.json');
   const plan = planFile(root);
   const model = 'gpt-test-model';
-  const result = await withMock(mock, 'conforming', capture, () => runExecute(executeOptions(repo, plan, resultFile, model)));
+  const identityLines = [];
+  const { createAnnouncer } = require('./forge-sidecar-identity');
+  const announce = createAnnouncer({ write: line => identityLines.push(line) });
+  const result = await withMock(mock, 'conforming', capture, () => runExecute({
+    ...executeOptions(repo, plan, resultFile, model), effort: 'high', hostRuntime: 'claude', announce,
+  }));
   assert(validateExecuteResult(result));
   assert.strictEqual(result.parse_path, 'output-schema');
   assert(!Object.prototype.hasOwnProperty.call(result, 'degradation'));
@@ -288,6 +293,10 @@ async function testHappyAndWire(mock, root) {
   const wire = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.strictEqual(wire.threadParams.model, model);
   assert.strictEqual(wire.turnParams.model, model);
+  assert.strictEqual(wire.turnParams.effort, 'high');
+  assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado']);
+  assert(identityLines[0].includes(`modelo_enviado=${wire.threadParams.model} esforco=${wire.turnParams.effort}`));
+  assert.match(identityLines[1], / pid=[1-9]\d* provider_called=true observado=nao-confirmado/);
   assert.strictEqual(wire.turnParams.outputSchema.type, 'object');
   assert.strictEqual(wire.turnParams.outputSchema.additionalProperties, false);
   assert.deepStrictEqual(wire.turnParams.outputSchema.required, ['status', 'summary', 'must_haves_status', 'files_changed']);

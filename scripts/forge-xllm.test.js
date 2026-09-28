@@ -200,6 +200,12 @@ try {
   const refusedMarker = JSON.parse(refusedMarkerText);
   assert.strictEqual(refusedMarker.status, 'adapter-failed');
   assert.strictEqual(refusedMarker.reason_code, 'invalid-runtime-contract', 'explicit false survives CLI and public run layers');
+  const refusalLines = refused.stderr.trim().split(/\r?\n/);
+  assert.match(refusalLines[0], /^\[forge-sidecar\] solicitado /);
+  assert.match(refusalLines[1], /^\[forge-sidecar\] recusado /);
+  assert.match(refusalLines[1], /provider_called=false observado=nao-confirmado$/);
+  assert(!refused.stderr.includes('[forge-sidecar] iniciado'));
+  assert.match(refusalLines[refusalLines.length - 1], /^forge-xllm: /);
   assert.ok(!`${refused.stdout}${refused.stderr}${refusedMarkerText}`.includes(secretSentinel),
     'failure channels contain no ambient token value');
 

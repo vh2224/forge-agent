@@ -1,5 +1,7 @@
 # Forge Review — Dialectic Confrontation
 
+Nos reviews externos, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`. Ao capturar o JSON do stdout com `$(...)`, preserve o stderr do adaptador e repasse literalmente as linhas `[forge-sidecar]` na conversa.
+
 > Host-aware review delivery: after resolving pairing, Claude reviewer/advocate
 > on a Codex host uses the existing external challenge/defend/rebuttal branch
 > with `XLLM_ENGINE=claude` (or `XLLM_ENGINE_ADVOCATE=claude`). Preserve the

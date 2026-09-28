@@ -1,5 +1,7 @@
 # Sidecar dispatch — executable Branch codex / Branch D (forge-next)
 
+Para anunciar a rota e repassar as linhas de stderr do adaptador, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`.
+
 > Bidirectional entry: for Claude sidecars and artifact units on either engine,
 > read `shared/forge-bidirectional-sidecar.md` first and use its unit adapter.
 > This supported branch takes precedence over the historical Codex-only

@@ -6,6 +6,14 @@ still uses the host's native agent tool. Neither model family nor a CLI's
 presence grants delivery: `forge-dispatch-resolve` and the sidecar entrypoint
 consult `forge-transport-capabilities.js` for the actual unit contract.
 
+## Identidade do sidecar exibida na conversa
+
+Antes de disparar um sidecar, anuncie fase/unidade, engine, modelo enviado, esforço e host da rota resolvida com o rótulo **solicitação do orquestrador — aguardando confirmação do adaptador**. Essa frase descreve a intenção do despacho.
+
+Depois, leia o stderr completo do processo, inclusive em `run_in_background` pela ferramenta de saída do host. Reproduza literalmente, na conversa, cada linha que começa com `[forge-sidecar]`, incluindo `recusado`, `falhou` e `reaproveitado`. Se nenhuma linha aparecer, diga que falta prova do adaptador. Preserve `observado=nao-confirmado` e diga **modelo enviado**; não afirme que o provedor aplicou o modelo.
+
+As linhas `[forge-sidecar]` registram identidade e estágio. A causa continua na linha `forge-xllm:` ou `forge-unit-sidecar:` e no result-file. Preserve ambos os canais. Nunca redirecione o stderr do comando de despacho para `/dev/null`. Se o stdout for capturado com `$(...)`, ainda leia e exponha as linhas de identidade do stderr.
+
 ## Entry and delivery
 
 1. Retain the unit selected by `forge-long-workflow-adapter`, its snapshot,

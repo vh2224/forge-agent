@@ -1,5 +1,7 @@
 ## Não lançado - Roteamento fiel e publicação de memória
 
+- O adaptador sidecar informa em stderr o modelo enviado, esforço, host e estágio do despacho; os fluxos do orquestrador expõem essa evidência sem alterar stdout, receipts ou result-file.
+
 - A preparação de task solta preserva modelo e esforço configurados nas quatro
   fases e consome o transporte nativo ou sidecar escolhido pelo resolvedor em
   ambos os hosts, sem forçar `native` nem criar milestone auxiliar.
