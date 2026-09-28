@@ -15,6 +15,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { countTokens } = require('./forge-tokens.js');
 const { resolveForgePaths } = require('./forge-home.js');
+const forgeIds = require('./forge-ids.js');
 
 const TEMPLATE_FILES = Object.freeze({
   'execute-task': 'execute-task.md',
@@ -56,7 +57,6 @@ const PLACEHOLDER_RE = /\{([A-Za-z][A-Za-z0-9_.#-]*)\}/g;
 const DISPATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MILESTONE_ID_RE = /^(?:M\d+|M-\d{14}-[a-z0-9][a-z0-9-]*)$/i;
 const SLICE_ID_RE = /^S\d+$/i;
-const TASK_ID_RE = /^(?:T\d+(?:\.\d+)?|TASK-\d+|T-\d{14}-[a-z0-9][a-z0-9-]*)$/i;
 const MAX_TEMPLATE_BYTES = 256 * 1024;
 const MAX_DATA_BYTES = 512 * 1024;
 const MAX_CONTEXT_TOKENS = 16000;
@@ -122,6 +122,14 @@ function validateDispatchId(dispatchId) {
 function validateId(value, regex, label) {
   if (typeof value !== 'string' || !regex.test(value)) {
     throw new Error(`Invalid ${label}: ${value == null ? '(missing)' : value}`);
+  }
+  return value;
+}
+
+function validateTaskId(value) {
+  const localTask = typeof value === 'string' && /^T\d+(?:\.\d+)?$/i.test(value);
+  if (!localTask && (typeof value !== 'string' || !forgeIds.isValid(value) || forgeIds.entityKind(value) !== 'task')) {
+    throw new Error(`Invalid task ID: ${value == null ? '(missing)' : value}`);
   }
   return value;
 }
@@ -494,12 +502,12 @@ function validateRenderOptions(rawOptions) {
   for (const idName of REQUIRED_IDS[options.unitType]) {
     if (idName === 'milestoneId') validateId(options.milestoneId, MILESTONE_ID_RE, 'milestone ID');
     if (idName === 'sliceId') validateId(options.sliceId, SLICE_ID_RE, 'slice ID');
-    if (idName === 'taskId') validateId(options.taskId, TASK_ID_RE, 'task ID');
+    if (idName === 'taskId') validateTaskId(options.taskId);
   }
 
   if (options.milestoneId != null) validateId(options.milestoneId, MILESTONE_ID_RE, 'milestone ID');
   if (options.sliceId != null) validateId(options.sliceId, SLICE_ID_RE, 'slice ID');
-  if (options.taskId != null) validateId(options.taskId, TASK_ID_RE, 'task ID');
+  if (options.taskId != null) validateTaskId(options.taskId);
 
   if ((options.unitType === 'plan-milestone' || options.unitType === 'execute-loose-task' || options.unitType.startsWith('research-')) && !options.description) {
     throw new Error(`description is required for ${options.unitType}`);

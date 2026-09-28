@@ -13,8 +13,15 @@ const UNIT_MODES = Object.freeze({
   'review-challenger': 'challenge', 'review-advocate': 'defend',
   'review-rebuttal': 'rebuttal',
 });
-function capability(engine, unitType) {
-  const mode = UNIT_MODES[unitType];
+function capability(engine, unitType, delivery = {}) {
+  let standalone = false;
+  if (delivery && delivery.scope === 'standalone-task') {
+    try {
+      const contract = require('./forge-task-preparation').phaseContract(delivery.phase);
+      standalone = !!contract && contract.unitType === unitType;
+    } catch { standalone = false; }
+  }
+  const mode = standalone ? 'artifacts' : UNIT_MODES[unitType];
   const supported = ['claude', 'codex'].includes(engine) && !!mode;
   return {
     supported, mode: supported ? mode : null,

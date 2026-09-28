@@ -236,13 +236,14 @@ try {
   assert(!expectedInterior.includes('--host-runtime claude'));
 
   // R2: both substitutions must be selected from disjoint spans in the original
-  // interior. The Agent replacement deliberately contains the exact host token;
-  // only the independently matched token from the canonical source may change.
-  const opaqueAgentInvocation = 'spawn_agent(/* --host-runtime claude */';
+  // interior. The Agent replacement deliberately contains both exact host forms;
+  // only independently matched tokens from the canonical source may change.
+  const opaqueAgentInvocation = "spawn_agent({ hostRuntime:'claude', note:'--host-runtime claude' },";
   const disjointSource = [
     DISPATCH_MARKER_START,
     'Agent({ disjoint: true })',
     'node forge-worker.js --host-runtime claude --mode execute',
+    "const request = { hostRuntime: 'claude' };",
     DISPATCH_MARKER_END,
     '',
   ].join('\n');
@@ -250,10 +251,13 @@ try {
     agentInvocation: opaqueAgentInvocation,
     hostRuntime: PRODUCTION_DISPATCH_DIALECT.hostRuntime,
   });
-  assert(disjointOutput.includes('spawn_agent(/* --host-runtime claude */{ disjoint: true })'));
+  assert(disjointOutput.includes(`${opaqueAgentInvocation}{ disjoint: true })`));
   assert(disjointOutput.includes('node forge-worker.js --host-runtime codex --mode execute'));
+  assert(disjointOutput.includes("const request = { hostRuntime: 'codex' };"));
   assert.strictEqual((disjointOutput.match(/--host-runtime claude/g) || []).length, 1, 'texto inserido foi rescaneado');
+  assert.strictEqual((disjointOutput.match(/hostRuntime:'claude'/g) || []).length, 1, 'host estruturado inserido foi rescaneado');
   assert.strictEqual((disjointOutput.match(/--host-runtime codex/g) || []).length, 1, 'token de origem não foi retargeted uma vez');
+  assert.strictEqual((disjointOutput.match(/hostRuntime: 'codex'/g) || []).length, 1, 'host estruturado de origem não foi retargeted uma vez');
 
   // No marker means byte identity and no option access. This is what keeps the
   // seam inert before canonical fenced sources are introduced in the next slice.
@@ -450,6 +454,27 @@ try {
   const realClaude = claudeRenderer.render({ repo: root });
   assert(realCodex.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
   assert(realClaude.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
+  const codexTask = realCodex.artifacts.find((item) => item.source === 'skills/forge-task/SKILL.md');
+  const claudeTask = realClaude.artifacts.find((item) => item.source === 'skills/forge-task/SKILL.md');
+  for (const [runtime, artifact] of [['codex', codexTask], ['claude', claudeTask]]) {
+    assert(artifact, `${runtime} projection missing forge-task`);
+    const preparation = artifact.content.slice(
+      artifact.content.indexOf('### Canonical preparation caller'),
+      artifact.content.indexOf('### Step 4.5'),
+    );
+    assert.match(preparation, /forge-task-preparation\.js/, `${runtime} projection lost the executable preparation caller`);
+    assert.match(preparation, new RegExp(`hostRuntime: ["']${runtime}["']`), `${runtime} preparation request carries the wrong host`);
+    for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
+      assert(preparation.includes(`phase:\"${phase}\"`), `${runtime} projection missing ${phase} caller`);
+    }
+    assert.doesNotMatch(preparation, /worker_mode:native|workerMode:\s*["']native["']/, `${runtime} projection forces native preparation`);
+    assert.match(preparation, /nativeFailure:\{reason_code,provider_called:false\}/,
+      `${runtime} projection lacks durable pre-provider native failure acceptance`);
+    assert.doesNotMatch(preparation, /effort:\s*\{RESOLVED_EFFORT\}|thinking:\s*adaptive/,
+      `${runtime} preparation prompt invents pre-resolution effort metadata`);
+    assert.match(preparation, /task complexity: light\|standard\|heavy\|max/,
+      `${runtime} preparation prompt omits the max task tier`);
+  }
   for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
     const source = `skills/${skill}/SKILL.md`;
     const artifact = realCodex.artifacts.find((item) => item.source === source);

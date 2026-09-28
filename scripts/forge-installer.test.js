@@ -49,7 +49,13 @@ test('runtime install omits tests and update backs up only known unchanged devel
     assert(fs.existsSync(path.join(scripts, 'forge-entry-assessment.js')));
     const nativeInvocationPath = path.join(scripts, 'forge-native-invocation.js');
     assert(fs.existsSync(nativeInvocationPath));
+    const taskPreparationPath = path.join(scripts, 'forge-task-preparation.js');
+    assert(fs.existsSync(taskPreparationPath));
+    const taskPreparation = require(taskPreparationPath);
+    for (const name of ['prepareStandaloneTask', 'startStandaloneTaskPreparation',
+      'acceptStandaloneTaskPreparation', 'PHASE_CONTRACTS']) assert(taskPreparation[name], name);
     assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-intent-entry.md')));
+    assert(fs.existsSync(path.join(data.forgeHome, 'shared', 'forge-task-preparation.md')));
     for (const home of [data.claudeHome, data.codexHome]) {
       const entry = fs.readFileSync(path.join(home, 'commands', 'forge-init.md'), 'utf8');
       assert(entry.includes('forge-personal-context.js') && entry.includes('--snapshot'));
@@ -59,6 +65,14 @@ test('runtime install omits tests and update backs up only known unchanged devel
       assert(boot.includes('shared/forge-intent-entry.md') && boot.includes('--assessment'));
       const task = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
       assert(task.includes('forge-entry-assessment.js') && task.includes('REUSE_RESEARCH'));
+      const runtime = home === data.claudeHome ? 'claude' : 'codex';
+      const preparation = task.slice(task.indexOf('### Canonical preparation caller'), task.indexOf('### Step 4.5'));
+      assert(preparation.includes('forge-task-preparation.js'));
+      assert(new RegExp(`hostRuntime: ["']${runtime}["']`).test(preparation), `${runtime} preparation host drift`);
+      for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) assert(preparation.includes(`phase:\"${phase}\"`));
+      assert(!/worker_mode:native|workerMode:\s*["']native["']/.test(preparation));
+      assert(preparation.includes('nativeFailure:{reason_code,provider_called:false}'));
+      assert(!/effort:\s*\{RESOLVED_EFFORT\}|thinking:\s*adaptive/.test(preparation));
     }
     for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
       const projected = fs.readFileSync(path.join(data.codexHome, 'skills', skill, 'SKILL.md'), 'utf8');
@@ -109,6 +123,9 @@ test('runtime install omits tests and update backs up only known unchanged devel
     const projected = fs.readFileSync(path.join(data.projectRoot, 'AGENTS.md'), 'utf8');
     assert(projected.includes('--snapshot'));
     assert(projected.includes(require('./forge-instructions.js').renderEntryContract()));
+    const installedContract = require(path.join(scripts, 'forge-instructions.js')).renderBlock();
+    assert(installedContract.includes('provider_called:false'), 'installed source lacks provider-call diagnostic');
+    assert(installedContract.includes('instalação efetivamente lida'), 'installed source lacks installation-source diagnostic');
     assert(fs.existsSync(path.join(scripts, 'fixtures', 'offline-ci', 'matrix.json')));
     const unchanged = path.join(scripts, 'forge-hook-stop.test.js');
     const customized = path.join(scripts, 'forge-installer.test.js');

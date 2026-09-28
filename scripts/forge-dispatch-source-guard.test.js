@@ -17,7 +17,7 @@ const ROOT = path.resolve(__dirname, '..');
 const RESOLVER_SCRIPT = path.join(__dirname, 'forge-dispatch-resolve.js');
 const MANIFEST_PATH = path.join(ROOT, 'forge-source-manifest.json');
 const GOLDEN_PATH = path.join(__dirname, 'fixtures', 'claude-renderer', 'claude-4.19.0.golden.json');
-const PRE_REPIN_SKILLS_SHA = '1690b19b495bc6ecc2e227acd2b6f5b71a242dbf55d04085560eff987b674a79';
+const PRE_REPIN_SKILLS_SHA = '940cc9f4348ffe52fc4b57e8d247431992dc81ab32eee9474d2149922edb1bf2';
 
 let passed = 0;
 let failed = 0;
@@ -235,7 +235,7 @@ test('registry and every nested entry are deeply frozen with explicit exclusions
     assert(Object.isFrozen(entry), `${entry.id} is mutable`);
     assert.match(entry.id, /^[a-z0-9-]+$/);
     assert(guard.SCOPED_FILES.includes(entry.path), entry.path);
-    assert(['resolver', 'agent', 'adapter', 'emitter', 'native'].includes(entry.kind), entry.kind);
+    assert(['resolver', 'agent', 'adapter', 'emitter', 'native', 'preparation'].includes(entry.kind), entry.kind);
     assert(['operational', 'excluded'].includes(entry.classification), entry.classification);
     assert.match(entry.fingerprint, /^sha256:[a-f0-9]{64}$/);
     if (entry.classification === 'excluded') assert.notStrictEqual(entry.reason.trim(), '', entry.id);
@@ -249,7 +249,7 @@ test('real disk discovery equals the frozen registry in both directions', () => 
   assert.deepStrictEqual(report.missing, []);
   assert.deepStrictEqual(report.errors, []);
   const discoveredKinds = new Set(guard.discover(ROOT).candidates.map((item) => item.kind));
-  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'native', 'resolver']);
+  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'native', 'preparation', 'resolver']);
   const nativeBuilders = guard.discover(ROOT).candidates.filter((item) =>
     item.kind === 'native' && /buildNativeInvocation\s*\(/.test(item.evidence));
   assert.strictEqual(nativeBuilders.length, 3, 'all structured native builder sites remain visible');
@@ -266,6 +266,29 @@ test('injecting a native invocation is reported as an unexpected candidate', () 
   assert.strictEqual(report.ok, false);
   assert(report.unexpected.some((item) => item.kind === 'native' && item.evidence.startsWith('injected =')),
     JSON.stringify(report.unexpected, null, 2));
+}));
+
+test('an unregistered standalone preparation caller is reported', () => withFixture((root) => {
+  const relative = 'skills/forge-task/SKILL.md';
+  appendSeparated(root, relative,
+    'node "$FORGE_SCRIPTS_DIR/forge-task-preparation.js" --start "$INJECTED_REQUEST"');
+  const report = guard.audit({ root });
+  assert.strictEqual(report.ok, false);
+  assert(report.unexpected.some((item) => item.kind === 'preparation'
+    && item.evidence.includes('$INJECTED_REQUEST')), JSON.stringify(report.unexpected, null, 2));
+}));
+
+test('a registered preparation caller without canonical argv is structurally rejected', () => withFixture((root) => {
+  const relative = 'skills/forge-task/SKILL.md';
+  const source = read(relative, root);
+  const injected = 'node "$FORGE_SCRIPTS_DIR/forge-task-preparation.js" --unsafe "$VALUE"';
+  write(relative, source.replace('<!-- forge:dispatch:end -->', `${injected}\n<!-- forge:dispatch:end -->`), root);
+  const item = discovered(root, (candidate) => candidate.kind === 'preparation'
+    && candidate.evidence.includes('--unsafe'));
+  const report = guard.audit({ root, registry: [...guard.SOURCE_REGISTRY, registerCandidate(item)] });
+  assert.strictEqual(report.ok, false);
+  assert(report.errors.some((message) => /lacks the canonical start or native-accept argv/.test(message)),
+    JSON.stringify(report, null, 2));
 }));
 
 test('an operational native builder missing effort binding is structurally rejected', () => withFixture((root) => {
@@ -349,6 +372,19 @@ const claudeReport = claudeRenderer.render({
 });
 const realDiscovery = guard.discover(ROOT);
 const realByIdentity = byIdentity(realDiscovery);
+
+test('the installed standalone preparation caller has both guarded entrypoints', () => {
+  const entries = guard.SOURCE_REGISTRY.filter((entry) => (
+    entry.path === 'skills/forge-task/SKILL.md'
+      && entry.kind === 'preparation'
+      && entry.classification === 'operational'
+  ));
+  assert.strictEqual(entries.length, 2, JSON.stringify(entries, null, 2));
+  const contexts = entries.map((entry) => realByIdentity.get(guard.identity(entry)).context);
+  assert(contexts.some((context) => /--start\s+"?\$PREPARATION_REQUEST_FILE"?/.test(context)));
+  assert(contexts.some((context) => /--accept-native\b/.test(context)
+    && context.includes('$PREPARATION_ACCEPTANCE_FILE')));
+});
 
 test('shared dispatch is absent from manifest surfaces and both renderer reports', () => {
   for (const source of manifest.sources) {

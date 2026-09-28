@@ -1,5 +1,14 @@
 ## Não lançado - Roteamento fiel e publicação de memória
 
+- A preparação de task solta preserva modelo e esforço configurados nas quatro
+  fases e consome o transporte nativo ou sidecar escolhido pelo resolvedor em
+  ambos os hosts, sem forçar `native` nem criar milestone auxiliar.
+- Brainstorm, CONTEXT, RESEARCH e PLAN usam um envelope somente leitura e a
+  mesma publicação pelo pai, com allowlist de paths da task, receipts, detecção
+  de conflito, replay idempotente e continuação explícita de perguntas parciais.
+- Diagnósticos separam resolução, autorização de runtime, compatibilidade
+  nativa, fase/escopo, provedor, validação e publicação. Fixtures temporárias
+  não alegam autenticação, instalação real nem conclusão do ticket de origem.
 - A extração de memória preserva modelo e esforço configurados e distingue
   capacidade de transporte de seleção de modelo, sem substituir GPT por Claude.
 - Workers nativos e sidecars retornam dados estruturados; o dono publica os

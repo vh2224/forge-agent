@@ -38,6 +38,7 @@ const TOKEN = Object.freeze({
   agent: /Agent\(/g,
   adapter: /forge-xllm\.js/g,
   native: /\b(?:buildNativeInvocation|invokeNative)\b/g,
+  preparation: /\bnode\b[^\n]*forge-task-preparation\.js/g,
 });
 
 function deepFreeze(value) {
@@ -280,7 +281,8 @@ const REGISTRY_ROWS = [
   ["skills-forge-next-skill-md-native-c9be01cfead5","skills/forge-next/SKILL.md","native","operational","sha256:c9be01cfead5e1375626871466412b83538ca1aa47d22ecb4ba0dfb31ebb6ae8","",""],
   ["skills-forge-next-skill-md-native-5c67f203f0c5","skills/forge-next/SKILL.md","native","operational","sha256:5c67f203f0c5bb7832c5aa256b9300c30913d2ca7f9d29134fd405cae1bb11d0","",""],
   ["skills-forge-next-skill-md-native-ab7be7780c09","skills/forge-next/SKILL.md","native","operational","sha256:ab7be7780c0988238768840ddeedba681e01ccafb0e0ea0aa950a97341a09df6","",""],
-  ["skills-forge-task-skill-md-native-a84e099a81f4","skills/forge-task/SKILL.md","native","excluded","sha256:a84e099a81f46e80276696a94bd80ed23fa98dbc174723310f5d8cf7d6b833aa","common native contract prose; registered invocation sites below carry the executable arguments",""],
+  ["skills-forge-task-skill-md-preparation-fcc98a6f2811","skills/forge-task/SKILL.md","preparation","operational","sha256:fcc98a6f28117b4c70293e5182cb84a31dcc2d381e92e6ec7cc907c2d6c9a06f","",""],
+  ["skills-forge-task-skill-md-preparation-d7e239eabfcc","skills/forge-task/SKILL.md","preparation","operational","sha256:d7e239eabfccb1d34319787b6fa80c907247d8b02d763b3257d823ca05f068d7","",""],
   ["skills-forge-task-skill-md-native-258cdfcadcfa","skills/forge-task/SKILL.md","native","operational","sha256:258cdfcadcfa403982ee7927684266c7520932e2c60b8128f198904674f812e3","",""],
   ["skills-forge-task-skill-md-native-11b44dddb544","skills/forge-task/SKILL.md","native","operational","sha256:11b44dddb5449fed8679480d430790a09764ad07c92d05f07880d65b79621eb4","",""],
   ["skills-forge-task-skill-md-native-ef3530569ac1","skills/forge-task/SKILL.md","native","operational","sha256:ef3530569ac1e0e2d3ad8a023861143210693ca0d9116587259e6f4ffcdab2ca","",""],
@@ -473,6 +475,7 @@ function discover(root) {
     if (AGENT_FILES.has(relative)) found.push(...tokenCandidates(relative, 'agent', lines));
     if (ADAPTER_FILES.has(relative)) found.push(...tokenCandidates(relative, 'adapter', lines));
     if (NATIVE_FILES.has(relative)) found.push(...tokenCandidates(relative, 'native', lines));
+    if (PROJECTED_SKILLS.includes(relative)) found.push(...tokenCandidates(relative, 'preparation', lines));
     found.push(...emitterCandidates(relative, lines));
   }
   found.sort((left, right) => (
@@ -531,6 +534,18 @@ function structuralErrors(entry, discovered, document) {
     }
     if (/invokeNative\s*\(/.test(discovered.evidence) && !/\.args\b|nativeOptions|invocation/.test(discovered.context)) {
       errors.push(`${location} native invocation does not consume a prepared structured invocation`);
+    }
+  }
+  if (entry.kind === 'preparation') {
+    if (!projected || !inside(document.markers.pair, discovered.line - 1)) {
+      errors.push(`${location} standalone preparation caller lies outside the projected dispatch markers`);
+    }
+    const starts = /--start\s+"?\$PREPARATION_REQUEST_FILE"?/.test(discovered.context);
+    const accepts = /--accept-native\b/.test(discovered.context)
+      && /\$PREPARATION_REQUEST_FILE/.test(discovered.context)
+      && /\$PREPARATION_ACCEPTANCE_FILE/.test(discovered.context);
+    if (!starts && !accepts) {
+      errors.push(`${location} standalone preparation caller lacks the canonical start or native-accept argv`);
     }
   }
   if (entry.kind === 'adapter') {
