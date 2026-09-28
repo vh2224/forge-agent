@@ -148,13 +148,14 @@ function rewriteDispatchDialect(text, options) {
   // preparation caller carries its host as structured request data, while the
   // older callers carry the CLI flag. Both are projected from the same Claude
   // canonical source. Replacements never rescan agentInvocation bytes.
-  const rewritten = interior
-    .replace(/Agent\(|--host-runtime claude/g, (match) => (
-      match === 'Agent(' ? agentInvocation : `--host-runtime ${runtimeInvocation}`
-    ))
-    .replace(/\bhostRuntime:\s*(["'])claude\1/g, (_match, quote) => (
-      `hostRuntime: ${quote}${runtimeInvocation}${quote}`
-    ));
+  const rewritten = interior.replace(
+    /Agent\(|--host-runtime claude|\bhostRuntime:\s*(["'])claude\1/g,
+    (match, quote) => {
+      if (match === 'Agent(') return agentInvocation;
+      if (match === '--host-runtime claude') return `--host-runtime ${runtimeInvocation}`;
+      return `hostRuntime: ${quote}${runtimeInvocation}${quote}`;
+    },
+  );
   return `${original.slice(0, block.start)}${rewritten}${original.slice(block.end)}`;
 }
 
