@@ -190,9 +190,9 @@ async function withSidecarIdentity(mode, opts, driver) {
     if (!context.fields) context.fields = { phase: opts.identity?.phase || mode, unit: opts.identity?.unit || mode,
       engine: opts.engine || 'codex', transport: opts.engine === 'claude' ? 'claude-cli' : opts.engine === 'agy' ? 'agy-cli' : 'app-server',
       model_sent: '-', effort: opts.effort, host: opts.hostRuntime, dispatch_id: dispatchId };
-    identityStage(runOpts, context.attempted ? 'falhou' : 'recusado', {
+    identityStage(runOpts, context.started ? 'falhou' : 'recusado', {
       reason_code: error.code || classifyError(error.message) || 'sidecar-failed',
-      ...(context.attempted ? {} : { model_route: context.fields.model_sent, model_sent: '-' }),
+      ...(context.started ? {} : { model_route: context.fields.model_sent, model_sent: '-' }),
     });
     throw error;
   }

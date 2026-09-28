@@ -10,6 +10,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const Module = require('module');
 const { spawnSync } = require('child_process');
 const {
   runExecute,
@@ -312,6 +313,35 @@ async function testHappyAndWire(mock, root) {
   // itself is pinned by the explicit-platform asserts further down.
   assert.deepStrictEqual(wire.turnParams.sandboxPolicy, buildAppServerSandboxPolicy('workspace-write'));
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(resultFile, 'utf8')), result);
+}
+
+async function testAdapterPreflightRefusal(root) {
+  const repo = fixtureRepo(root);
+  const identityLines = [];
+  const { createAnnouncer } = require('./forge-sidecar-identity');
+  const announce = createAnnouncer({ write: line => identityLines.push(line) });
+  const originalLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === './forge-appserver-client' && parent && parent.filename === path.join(__dirname, 'forge-xllm.js')) {
+      const error = new Error('adapter preflight fixture');
+      error.code = 'adapter-preflight-test';
+      throw error;
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    await expectReject(() => runExecute({
+      ...executeOptions(repo, planFile(root), path.join(root, 'preflight-result.json'), 'preflight-model'),
+      hostRuntime: 'claude', announce,
+    }), /adapter preflight fixture/);
+  } finally {
+    Module._load = originalLoad;
+  }
+  assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]),
+    ['solicitado', 'recusado'], 'adapter preflight has no confirmed provider PID');
+  assert(identityLines[1].includes('modelo_enviado=-'));
+  assert(identityLines[1].includes('modelo_rota=preflight-model'));
+  assert(identityLines[1].includes('causa=adapter-preflight-test provider_called=false'));
 }
 
 async function testMultiRepoWire(mock, root) {
@@ -1007,6 +1037,7 @@ async function main() {
     testValidatorBoundary();
     testCommandOverride(mock);
     await testHappyAndWire(mock, root);
+    await testAdapterPreflightRefusal(root);
     await testContextHealthFlow(mock, root);
     await testMultiRepoWire(mock, root);
     await testDegradation(mock, root);
