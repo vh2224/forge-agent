@@ -171,6 +171,7 @@ function sidecarIdentity(mode, opts, engine, dispatchId) {
 function identityStage(opts, stage, extra = {}) {
   const context = opts._sidecarIdentity;
   if (!context) return;
+  if (stage === 'iniciado' && (!Number.isInteger(extra.pid) || extra.pid <= 0)) return;
   if (stage === 'solicitado') context.requested = true;
   if (stage === 'iniciado') context.started = true;
   if (typeof opts.announce === 'function') opts.announce(stage, { ...context.fields, ...extra,
