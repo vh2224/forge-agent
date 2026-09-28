@@ -13169,6 +13169,22 @@ const DETACHED_NEEDLE = `invokeCodexDetached${'('}`;
 const RETIRED_PHRASE = `codex ${'ex'}ec`;
 const EXEC_ARG_TOKEN = `${'ex'}ec`;
 
+function reachableXllmBody(source, name) {
+  const declaration = new RegExp(`(?:^|\\n)(?:async )?function ${name}\\([^)]*\\) \\{`, 'm');
+  const match = declaration.exec(source);
+  if (!match) return '';
+  const start = match.index + match[0].length;
+  const next = /\n(?:async )?function \w+\(/g;
+  next.lastIndex = start;
+  const end = next.exec(source);
+  const body = source.slice(start, end ? end.index : source.length);
+  const core = `${name}Core`;
+  const directCall = new RegExp(`\\b${core}\\(`).test(body);
+  const delegated = new RegExp(`\\bwithSidecarIdentity\\([^;]*,\\s*${core}\\s*\\)`).test(body)
+    && /\bdriver\(runOpts\)/.test(reachableXllmBody(source, 'withSidecarIdentity'));
+  return (directCall || delegated) ? body + reachableXllmBody(source, core) : body;
+}
+
 function scanXllmContracts(source) {
   const count = (haystack, needle) => haystack.split(needle).length - 1;
   const between = (start, end) => {
@@ -13178,8 +13194,8 @@ function scanXllmContracts(source) {
     return to < 0 ? source.slice(from) : source.slice(from, to);
   };
   const exportsBlock = between('module.exports = {', '};');
-  const executeBody = between('async function runExecute(', '\nasync function ');
-  const planBody = between('async function runPlan(', '\nmodule.exports');
+  const executeBody = reachableXllmBody(source, 'runExecute');
+  const planBody = reachableXllmBody(source, 'runPlan');
   const lines = source.split('\n');
   // Top-level = coluna 0: um require fora de corpo de função carrega o cliente de
   // sessão em TODO consumidor do adapter, inclusive o caminho agy (IN-15).
@@ -13339,6 +13355,34 @@ async function smokeAppServerTransport() {
         'module.exports = { runExecute };',
         '',
       ].join('\n');
+      const disconnected = [
+        'async function withSidecarIdentity(mode, opts, driver) { return await driver(opts); }',
+        'async function runExecuteCore(o) { return extractLastJsonBlock(o); }',
+        'async function runPlanCore(o) { return invokeCodexAppServer(o); }',
+        'function runExecute(o) { return null; }',
+        'function runPlan(o) { return null; }',
+        'module.exports = { runExecute, runPlan };',
+      ].join('\n');
+      const unreachable = scanXllmContracts(disconnected);
+      assert(unreachable.executeExtractCallSites === 0 && unreachable.planAppServerCallSites === 0,
+        '(e) disconnected wrappers do not reach existing transport cores', JSON.stringify(unreachable));
+      const unusedDriver = disconnected.replace('return await driver(opts)', 'return null')
+        .replace('function runExecute(o) { return null; }',
+          "function runExecute(o) { return withSidecarIdentity('execute', o, runExecuteCore); }")
+        .replace('function runPlan(o) { return null; }',
+          "function runPlan(o) { return withSidecarIdentity('plan', o, runPlanCore); }");
+      const unused = scanXllmContracts(unusedDriver);
+      assert(unused.executeExtractCallSites === 0 && unused.planAppServerCallSites === 0,
+        '(e) helper without driver invocation leaves both transport cores unreachable', JSON.stringify(unused));
+      const connected = unusedDriver.replace('return null', 'return await driver(runOpts)');
+      const connectedScan = scanXllmContracts(connected);
+      assert(connectedScan.executeExtractCallSites === 1 && connectedScan.planAppServerCallSites === 1,
+        '(e) connected wrapper and driver reach both transport cores', JSON.stringify(connectedScan));
+      const regressedPlan = connected.replace('return invokeCodexAppServer(o)', `return ${DETACHED_NEEDLE}o)`);
+      const regressedScan = scanXllmContracts(regressedPlan);
+      assert(regressedScan.planDetachedCallSites === 1 && regressedScan.planAppServerCallSites === 0,
+        '(e) retired transport inside connected plan core is detected', JSON.stringify(regressedScan));
+
       const bitten = scanXllmContracts(stripped);
       assert(bitten.exportsExtractLastJsonBlock === 0 && bitten.executeExtractCallSites === 0,
         '(e) fonte sem extractLastJsonBlock: o scanner acusa (D9 morde)', JSON.stringify(bitten));
@@ -14104,16 +14148,27 @@ function smokeExecCallSitesRetired() {
     assert(exportedNames.has('invokeCodexAppServer'),
       '(d) controle positivo: invokeCodexAppServer ESTÁ em module.exports',
       JSON.stringify([...exportedNames].slice(0, 8)));
-    const planBody = between(xllm, 'async function runPlan(', '\nmodule.exports');
-    const engineBody = between(xllm, 'function invokeEngine(', '\nfunction ');
+    const planBody = reachableXllmBody(xllm, 'runPlan');
+    const engineBody = reachableXllmBody(xllm, 'invokeEngine');
     assert(count(planBody, 'invokeCodexAppServer(') >= 1,
       '(d) o caminho de plan alcança o app-server', `count=${count(planBody, 'invokeCodexAppServer(')}`);
     assert(count(engineBody, 'invokeCodexAppServer(') >= 1,
       '(d) o caminho de review (invokeEngine) alcança o app-server', `count=${count(engineBody, 'invokeCodexAppServer(')}`);
     for (const mode of ['runChallenge', 'runDefend', 'runRebuttal']) {
-      const body = between(xllm, `async function ${mode}(`, '\nasync function ');
+      const body = reachableXllmBody(xllm, mode);
       assert(count(body, 'invokeEngine(') >= 1,
         `(d) ${mode} chega ao transporte pelo invokeEngine`, `count=${count(body, 'invokeEngine(')}`);
+    }
+    const disconnectedReview = [
+      'async function withSidecarIdentity(mode, opts, driver) { return await driver(opts); }',
+      ...['Challenge', 'Defend', 'Rebuttal'].map((mode) =>
+        `async function run${mode}Core(o) { return invokeEngine(o); }`),
+      ...['Challenge', 'Defend', 'Rebuttal'].map((mode) =>
+        `function run${mode}(o) { return null; }`),
+    ].join('\n');
+    for (const mode of ['runChallenge', 'runDefend', 'runRebuttal']) {
+      assert(count(reachableXllmBody(disconnectedReview, mode), 'invokeEngine(') === 0,
+        `(d) ${mode} wrapper disconnected from core does not reach invokeEngine`);
     }
     // Mordida de (d): sobre uma fonte que RESSUSCITA os símbolos, cada contagem
     // acima tem de virar diferente de zero. Sem isto, os `=== 0` seriam compatíveis
