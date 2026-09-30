@@ -39,6 +39,10 @@ const TOKEN = Object.freeze({
   adapter: /forge-xllm\.js/g,
   native: /\b(?:buildNativeInvocation|invokeNative)\b/g,
   preparation: /\bnode\b[^\n]*forge-task-preparation\.js/g,
+  // A request-driven unit adapter call. Its host, engine, model, effort and
+  // sidecar declaration travel inside the validated resolver JSON the request
+  // embeds, so it is checked structurally on that data path, not on argv flags.
+  'unit-sidecar': /forge-unit-sidecar\.js"?\s+--request\b/g,
 });
 
 function deepFreeze(value) {
@@ -119,23 +123,23 @@ const REGISTRY_ROWS = [
   ["shared-forge-review-md-agent-401fdc21e032","shared/forge-review.md","agent","excluded","sha256:401fdc21e03200821b3ce39bb9398ea5ad80ef9fb06dc7b1eef9c5cda1121d1c","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-review-md-agent-c93590ac711d","shared/forge-review.md","agent","excluded","sha256:c93590ac711d7cefcaf4f62ead1a1ee92064b5f08988503adbf818b339e92f22","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-review-md-adapter-9a1f25449bb6","shared/forge-review.md","adapter","excluded","sha256:9a1f25449bb61a70d357cc4681ac041e8a93eb23feccd81040442b6b5eb2fb37","documentation or explanatory adapter reference; it launches no process",""],
-  ["shared-forge-review-md-adapter-4a0e979010fe","shared/forge-review.md","adapter","operational","sha256:4a0e979010fea54738b337b25a8192af3ba3130e0abb83ed0626586c184f52d8","",""],
-  ["shared-forge-review-md-adapter-83ceceda44cc","shared/forge-review.md","adapter","operational","sha256:83ceceda44ccc054e55aab6dc6f9321aa09b7815b133c3db0105369cb2837451","",""],
+  ["shared-forge-review-md-adapter-1663e7973eb4","shared/forge-review.md","adapter","operational","sha256:4a0e979010fea54738b337b25a8192af3ba3130e0abb83ed0626586c184f52d8","",""],
+  ["shared-forge-review-md-adapter-80b8ab328a33","shared/forge-review.md","adapter","operational","sha256:83ceceda44ccc054e55aab6dc6f9321aa09b7815b133c3db0105369cb2837451","",""],
   ["shared-forge-review-md-agent-ff26e0f4a183","shared/forge-review.md","agent","excluded","sha256:ff26e0f4a18392d14a7b578dcfcf1abd7cec382be9f81a920a79a682b2a526ba","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["shared-forge-review-md-adapter-0344a5848a50","shared/forge-review.md","adapter","operational","sha256:0344a5848a507bc9473de51a4c8125e7fcf3ab661c35a669295df94a48658a51","",""],
-  ["shared-forge-review-md-adapter-5b82b20d45b9","shared/forge-review.md","adapter","operational","sha256:5b82b20d45b99c06f187c855b781fd9627df1e04ea1f3a1c164129d224853a9d","",""],
+  ["shared-forge-review-md-adapter-d4bf88686631","shared/forge-review.md","adapter","operational","sha256:0344a5848a507bc9473de51a4c8125e7fcf3ab661c35a669295df94a48658a51","",""],
+  ["shared-forge-review-md-adapter-a047198b3041","shared/forge-review.md","adapter","operational","sha256:5b82b20d45b99c06f187c855b781fd9627df1e04ea1f3a1c164129d224853a9d","",""],
   ["shared-forge-review-md-agent-ece58c9ec69b","shared/forge-review.md","agent","excluded","sha256:ece58c9ec69b4194f7cf3949d1ee290f5ac00714f2967ecab504c89768864790","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["shared-forge-review-md-agent-2b6578d8ad94","shared/forge-review.md","agent","excluded","sha256:2b6578d8ad94a162a793dea5810b0781ed4d641633dc69fdf1975e7b20a1ca07","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-review-md-agent-b6c13c343eab","shared/forge-review.md","agent","excluded","sha256:b6c13c343eab55aba0d6e77573c4631ea72549b29863fb89ba0009dfb0f16cd2","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["shared-forge-review-md-adapter-f2f2ffeb20cd","shared/forge-review.md","adapter","operational","sha256:f2f2ffeb20cd17ae75392f0ea166c2679b6bf249844ed0474c73c499e4b1f7fd","",""],
-  ["shared-forge-review-md-adapter-b02e3430e7d4","shared/forge-review.md","adapter","operational","sha256:b02e3430e7d47454618ed0d8dc39cfb3e849822a2581d181847e1bd0f55d1569","",""],
+  ["shared-forge-review-md-adapter-ceff851a7b09","shared/forge-review.md","adapter","operational","sha256:f2f2ffeb20cd17ae75392f0ea166c2679b6bf249844ed0474c73c499e4b1f7fd","",""],
+  ["shared-forge-review-md-adapter-bc8da1622714","shared/forge-review.md","adapter","operational","sha256:b02e3430e7d47454618ed0d8dc39cfb3e849822a2581d181847e1bd0f55d1569","",""],
   ["shared-forge-review-md-agent-f0a86c73f06b","shared/forge-review.md","agent","excluded","sha256:f0a86c73f06b175b20466fa9e95383ac2c4e23e84f353fa2456afba805cb5ba9","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-review-md-resolver-1f207e8f04e5","shared/forge-review.md","resolver","operational","sha256:1f207e8f04e55aefbf5a7cd0497e3a8e55936972332ce58ea5ba905bb3981f6f","","canonical"],
   ["shared-forge-review-md-resolver-141a058b1c4c","shared/forge-review.md","resolver","excluded","sha256:141a058b1c4c83f811ee9e6849ce4b936135057186853374c0d5e21d28ac4a7d","shell-exports parser invocation; it consumes JSON and does not resolve a host",""],
   ["shared-forge-review-md-agent-e8b165a5f6a9","shared/forge-review.md","agent","excluded","sha256:e8b165a5f6a9bb00a1a80b9de1e7a2dd6284a5f765f1c1a1c9a8eba0883b4c69","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["shared-forge-review-md-agent-fbc054284fbd","shared/forge-review.md","agent","excluded","sha256:fbc054284fbd12f4ceb5127c48d529530ed87b83e69097497563e0936e1ec966","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["shared-forge-review-md-agent-e53e46229443","shared/forge-review.md","agent","excluded","sha256:e53e462294439b31b41e794141a6cac13e2afc33b730831070d4113c47a41313","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["shared-forge-review-md-agent-fcb53727d228","shared/forge-review.md","agent","excluded","sha256:fcb53727d228829febf5e501ed39d347c1618bf149bc7fbfa6699b4706497e58","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
+  ["shared-forge-review-md-agent-c7b7d2247db7","shared/forge-review.md","agent","excluded","sha256:38a414c5c096e366ca1fc3c48fb5a01dc28a3e5f093b1006ed35b69971b235f0","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
+  ["shared-forge-review-md-agent-18a6ec2b16f3","shared/forge-review.md","agent","excluded","sha256:fa9b06b3fc9693404b4dea15a917c88ed2b09b8fd5a64d3eb7b9cc16be617eba","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
+  ["shared-forge-review-md-unit-sidecar-e252a5be1573","shared/forge-review.md","unit-sidecar","operational","sha256:e252a5be1573a3f64ee0631a5ae11d614136283ab6dc865b719f3746776db4f0","",""],
+  ["shared-forge-review-md-agent-fcb53727d228","shared/forge-review.md","agent","excluded","sha256:13d3d76e4b0d67cb4b8c7814c945f8557aaf210b4a07cfa659b88e847f7e608e","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-review-md-adapter-beb38f7afb16","shared/forge-review.md","adapter","excluded","sha256:beb38f7afb16c557cc953914e75dafbc24940730dd32e4802e4e3ea9ba1e36dd","documentation or explanatory adapter reference; it launches no process",""],
   ["shared-forge-sidecar-auto-md-adapter-c873049ea75f","shared/forge-sidecar-auto.md","adapter","operational","sha256:c873049ea75f1d94731f4266ab360ae0027edde72b540f97f1e2c9aaac7720fa","",""],
   ["shared-forge-sidecar-auto-md-emitter-c606ed2eb90a","shared/forge-sidecar-auto.md","emitter","operational","sha256:c606ed2eb90a0c3db0b8b7e314ee6f66d01c8b929d475e08c9d25a93c0908e60","",""],
@@ -261,23 +265,22 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-resolver-c79ed7a7364a","skills/forge-task/SKILL.md","resolver","excluded","sha256:c79ed7a7364a92d690fdaeab36828be9913528a9049d36f6b1acb3dbfa6aea76","shell-exports parser invocation; it consumes JSON and does not resolve a host",""],
   ["skills-forge-task-skill-md-agent-48804cc9fe76","skills/forge-task/SKILL.md","agent","excluded","sha256:48804cc9fe7690dec103d5cd908181ab11374edaede3a2be0600009b495cf4e7","projected explanatory Agent prose; it is not a worker invocation",""],
   ["shared-forge-dispatch-md-emitter-5972d5f2650a","shared/forge-dispatch.md","emitter","operational","sha256:5972d5f2650ad64650174692f1ff1fddc65cbb1ff3b6429e89024d0e808e55e9","",""],
-  ["shared-forge-review-md-adapter-53110e3ee8ac","shared/forge-review.md","adapter","excluded","sha256:53110e3ee8ac528852bb3ab4cc522f9df37a546c6fc722e2e192fc8e10cec9c8","documentation or explanatory adapter reference; it launches no process",""],
-  ["shared-forge-review-md-agent-ac31666ee0f0","shared/forge-review.md","agent","excluded","sha256:ac31666ee0f093d16f14c86ea1d8a400dea90485fe175d66100324c34a8ea052","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
-  ["skills-forge-auto-skill-md-agent-0e48db89b5a8","skills/forge-auto/SKILL.md","agent","excluded","sha256:0e48db89b5a8adf14164cf3d4e9ca165d34b7a70e08629946a6f71d5e208a9ac","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["shared-forge-review-md-adapter-53110e3ee8ac","shared/forge-review.md","adapter","excluded","sha256:90d1c577748603c5cee501f3271f6460de4e09be7a9d475047ec957a7859bf37","documentation or explanatory adapter reference; it launches no process",""],
+  ["skills-forge-auto-skill-md-agent-0e48db89b5a8","skills/forge-auto/SKILL.md","agent","excluded","sha256:f1ce25fa23bb9b4481aef5045d23b3cc5e99c4fe3588c69872f51926cb017dc2","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-auto-skill-md-agent-c7457809597e","skills/forge-auto/SKILL.md","agent","excluded","sha256:c7457809597ea20f196218c3e7817bbc5e0803ba09eee56920903791e525ae6b","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-next-skill-md-agent-2da631948c7b","skills/forge-next/SKILL.md","agent","excluded","sha256:2da631948c7bd389109b75dc491cf988fd34826e09bf44719340cb8c60076b72","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-next-skill-md-agent-2da631948c7b","skills/forge-next/SKILL.md","agent","excluded","sha256:c9d480b6d199c41035eca01c6cc53cde2832efa3fe480a983bdb2d65431e29aa","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-next-skill-md-agent-714189ef38ba","skills/forge-next/SKILL.md","agent","excluded","sha256:714189ef38bac71b411bac8715dbf2f22c39f1b67912bd297047240b9ea9b58c","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-emitter-b09c83b3ef39","skills/forge-task/SKILL.md","emitter","operational","sha256:b09c83b3ef39c33873516c24988d417f74599dc199f8ff5fa4e4e07f53786e84","",""],
   ["shared-forge-dispatch-md-native-c2eebbe4b1ac","shared/forge-dispatch.md","native","operational","sha256:c2eebbe4b1ac10f3a933b0ea5bd99e66dbdc0a3a703b551df466f1e2dccb0c7c","",""],
   ["shared-forge-dispatch-md-native-6ecf0681f367","shared/forge-dispatch.md","native","operational","sha256:6ecf0681f367ba6780b4e121ed4e8151c4991d83c8293ee09aa49f9415ceffda","",""],
   ["shared-forge-dispatch-md-resolver-75b3b9f5c25e","shared/forge-dispatch.md","resolver","excluded","sha256:75b3b9f5c25e0c78831fbe2a33cec72828156ec7ff7ac3bece0235992a28502d","documentation or explanatory resolver reference; it launches no process",""],
-  ["shared-forge-review-md-agent-73aaf45fa8e2","shared/forge-review.md","agent","excluded","sha256:73aaf45fa8e2dc3ae5079d127567a3735e30ad20b2cee696494c21913d7c17a0","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
+  ["shared-forge-review-md-agent-73aaf45fa8e2","shared/forge-review.md","agent","excluded","sha256:48c17a8f79028cbf34e0e03391e656b15ab60de9d02cf7c80fc5d7a4fa1dee04","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-review-md-native-29a1e438ab99","shared/forge-review.md","native","operational","sha256:29a1e438ab99a0340a29a8039095293c5fe123921923990a968b13a81303f980","",""],
-  ["skills-forge-auto-skill-md-native-a14a5b83fd20","skills/forge-auto/SKILL.md","native","operational","sha256:a14a5b83fd201463bf79cc66ec12d2bb272b8aa74541d9a81a92cac3a6b10365","",""],
+  ["skills-forge-auto-skill-md-native-a14a5b83fd20","skills/forge-auto/SKILL.md","native","operational","sha256:f27c3f6316ce925c93869c23ea89a6bbdbc527918713de9a516253b326ab18f8","",""],
   ["skills-forge-auto-skill-md-native-b828001cdc0c","skills/forge-auto/SKILL.md","native","operational","sha256:b828001cdc0cf51d25500338211cd083675a013cf9a235910981cd5d682905eb","",""],
   ["skills-forge-auto-skill-md-native-4178fa137709","skills/forge-auto/SKILL.md","native","operational","sha256:4178fa1377097be5a20fb73da53c7a7668b9b6edd0a794fde5c9fd0a99a1701a","",""],
   ["skills-forge-auto-skill-md-native-836b4e540300","skills/forge-auto/SKILL.md","native","operational","sha256:836b4e540300458b09a912a91a41f71aa69557fa337f7fa7dc65ebbebf88067d","",""],
-  ["skills-forge-next-skill-md-native-b17d2c45484b","skills/forge-next/SKILL.md","native","operational","sha256:b17d2c45484b48c905605ac7112f4137f6d1215e70096a44faff6402badac041","",""],
+  ["skills-forge-next-skill-md-native-b17d2c45484b","skills/forge-next/SKILL.md","native","operational","sha256:c9e227dfa29659a78534d2ff01f7ef78c3f9dc7ad782b9c96d0725f414fba1a7","",""],
   ["skills-forge-next-skill-md-native-c9be01cfead5","skills/forge-next/SKILL.md","native","operational","sha256:c9be01cfead5e1375626871466412b83538ca1aa47d22ecb4ba0dfb31ebb6ae8","",""],
   ["skills-forge-next-skill-md-native-5c67f203f0c5","skills/forge-next/SKILL.md","native","operational","sha256:5c67f203f0c5bb7832c5aa256b9300c30913d2ca7f9d29134fd405cae1bb11d0","",""],
   ["skills-forge-next-skill-md-native-ab7be7780c09","skills/forge-next/SKILL.md","native","operational","sha256:ab7be7780c0988238768840ddeedba681e01ccafb0e0ea0aa950a97341a09df6","",""],
@@ -285,8 +288,8 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-preparation-d7e239eabfcc","skills/forge-task/SKILL.md","preparation","operational","sha256:d7e239eabfccb1d34319787b6fa80c907247d8b02d763b3257d823ca05f068d7","",""],
   ["skills-forge-task-skill-md-native-258cdfcadcfa","skills/forge-task/SKILL.md","native","operational","sha256:258cdfcadcfa403982ee7927684266c7520932e2c60b8128f198904674f812e3","",""],
   ["skills-forge-task-skill-md-native-11b44dddb544","skills/forge-task/SKILL.md","native","operational","sha256:11b44dddb5449fed8679480d430790a09764ad07c92d05f07880d65b79621eb4","",""],
-  ["skills-forge-task-skill-md-native-ef3530569ac1","skills/forge-task/SKILL.md","native","operational","sha256:ef3530569ac1e0e2d3ad8a023861143210693ca0d9116587259e6f4ffcdab2ca","",""],
-  ["skills-forge-task-skill-md-native-9fea978f6a6e","skills/forge-task/SKILL.md","native","operational","sha256:9fea978f6a6e0b5c20a0da4863c1e749f7f28b7c0ab639f599bf8f7577b85632","",""],
+  ["skills-forge-task-skill-md-native-ef3530569ac1","skills/forge-task/SKILL.md","native","operational","sha256:74e8e763a3c88084fe36dd785fc54c011c3afe717265b9fdaf7f9724de3a83ff","",""],
+  ["skills-forge-task-skill-md-native-9fea978f6a6e","skills/forge-task/SKILL.md","native","operational","sha256:65ec783f8b88c3fe8e15155b20cd19d9f8fd0c47fca5e708e3644f1650456950","",""],
   ["skills-forge-task-skill-md-native-4ebc1f2a019d","skills/forge-task/SKILL.md","native","operational","sha256:4ebc1f2a019d611b90245286d49ffdcaba97d73a16248ac065482d5a6202d327","",""],
   ["skills-forge-auto-skill-md-native-ad24933a9194","skills/forge-auto/SKILL.md","native","operational","sha256:ad24933a91949d11cba81affa2292c7d5d7cd380e6e2fac24631e55a5e8984c1","",""],
   ["skills-forge-auto-skill-md-native-957c2ceb980c","skills/forge-auto/SKILL.md","native","operational","sha256:957c2ceb980c7d64165aa5d8368f113e6d99d453192da039336e5590f4280e71","",""],
@@ -416,7 +419,32 @@ function nativeCallContext(lines, index) {
   return lines.slice(index, end + 1).join('\n');
 }
 
+// The whole fenced command block holding a line, or null when the line is prose.
+// Same fence semantics as scanRealMarkers (a closer repeats the opener's
+// character at least as many times), allowing Markdown's 0-3 space indent.
+function fencedBlock(lines, index) {
+  let fence = null;
+  for (let cursor = 0; cursor < lines.length; cursor += 1) {
+    const line = lines[cursor];
+    if (fence) {
+      if (new RegExp(`^ {0,3}${fence.char}{${fence.length},}[ \\t]*$`).test(line)) {
+        if (index > fence.start && index < cursor) return lines.slice(fence.start + 1, cursor).join('\n');
+        fence = null;
+      }
+      continue;
+    }
+    if (cursor >= index) return null;
+    const opening = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (opening) fence = { char: opening[1][0], length: opening[1].length, start: cursor };
+  }
+  return null;
+}
+
 function candidate(pathName, kind, lines, lineIndex, column) {
+  let context;
+  if (kind === 'native') context = nativeCallContext(lines, lineIndex);
+  else if (kind === 'unit-sidecar') context = fencedBlock(lines, lineIndex) || '';
+  else context = commandContext(lines, lineIndex);
   return {
     path: pathName,
     kind,
@@ -424,7 +452,7 @@ function candidate(pathName, kind, lines, lineIndex, column) {
     line: lineIndex + 1,
     column: column + 1,
     evidence: normalizedLine(lines[lineIndex]),
-    context: kind === 'native' ? nativeCallContext(lines, lineIndex) : commandContext(lines, lineIndex),
+    context,
   };
 }
 
@@ -475,6 +503,7 @@ function discover(root) {
     if (AGENT_FILES.has(relative)) found.push(...tokenCandidates(relative, 'agent', lines));
     if (ADAPTER_FILES.has(relative)) found.push(...tokenCandidates(relative, 'adapter', lines));
     if (NATIVE_FILES.has(relative)) found.push(...tokenCandidates(relative, 'native', lines));
+    if (ADAPTER_FILES.has(relative)) found.push(...tokenCandidates(relative, 'unit-sidecar', lines));
     if (PROJECTED_SKILLS.includes(relative)) found.push(...tokenCandidates(relative, 'preparation', lines));
     found.push(...emitterCandidates(relative, lines));
   }
@@ -554,6 +583,35 @@ function structuralErrors(entry, discovered, document) {
     }
     if (!/--sidecar-declared\b/.test(discovered.context)) {
       errors.push(`${location} sidecar adapter lacks --sidecar-declared`);
+    }
+  }
+  if (entry.kind === 'unit-sidecar') {
+    // Narrow data-path contract: the request is written in the same fenced
+    // block from the saved, already-validated resolver JSON (piped, parsed and
+    // embedded unchanged as `route`), for review-fix after the claim gate's
+    // proceed, and the adapter consumes exactly that request file.
+    const block = discovered.context;
+    if (!block) {
+      errors.push(`${location} unit-sidecar caller lies outside a fenced command block`);
+    } else {
+      const requirements = [
+        [/--request\s+"\$RF_REQUEST"/, 'the canonical --request "$RF_REQUEST" argument'],
+        [/printf\s+'%s'\s+"\$RF_ROUTE_JSON_SAVED"\s*\|/, 'the saved resolver JSON on its data path'],
+        [/\broute\s*=\s*JSON\.parse\(d\)/, 'the route parsed from that resolver JSON'],
+        [/[{,]route[,}]/, 'the parsed route embedded unchanged in the request'],
+        [/unitType:'review-fix'/, "unitType 'review-fix'"],
+        [/decision:'proceed'/, "the claim gate decision 'proceed'"],
+        [/claimPaths:/, 'the claim paths'],
+        [/resultFile:/, 'a result file'],
+        [/RF_REQUEST="\$RF_REQUEST_DIR\//, 'a request file inside the temporary request directory'],
+      ];
+      for (const [pattern, label] of requirements) {
+        if (!pattern.test(block)) errors.push(`${location} unit-sidecar caller lacks ${label}`);
+      }
+      // Re-typed runtime flags would bypass the resolver JSON the adapter checks.
+      if (/--host-runtime\b|--sidecar-declared\b|--worker-engine\b/.test(block)) {
+        errors.push(`${location} unit-sidecar caller re-types runtime flags instead of the resolver JSON`);
+      }
     }
   }
   if (entry.kind === 'emitter' && isCanonicalEmitter(discovered)) {

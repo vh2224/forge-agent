@@ -190,8 +190,29 @@ the Claude read-only profile.
 Review challenger, advocate and rebuttal use `forge-xllm.js --mode
 challenge|defend|rebuttal --engine <resolved engine> --host-runtime <actual host>
 --sidecar-declared`, retaining their distinct review schemas and pairing.
-Cross-host `review-fix` has no unit delivery contract; the guard returns
-`unsupported-sidecar-unit`. Memory extraction is read-only inference followed
+Sidecar `review-fix` is supported for engines claude and codex through the
+scoped `fix` contract (`UNIT_MODES['review-fix'] = 'fix'`, never an alias of
+execute): no plan, SUMMARY or checkbox exists. The request carries
+`reviewFix: {boundary: slice|task|milestone-triage, decision: "proceed", items,
+claimPaths}`, `cwd` (CODE_DIR), `contextRoot`, `writableRoots` (multi-repo
+attribution), a `resultFile` outside both roots and the operator's
+`constraints.auto_commit`. The adapter re-derives the claim and refuses a
+divergent one (`review-fix-claim-mismatch`), refuses claim targets that resolve
+through links or outside CODE_DIR, snapshots the REVIEW.md files and the
+surgical-reset state, then writes the `started` receipt and runs
+`forge-xllm.runFix` (the execute safety core). A failure after the snapshot is
+reset surgically (pre-dirty overlap → nothing reset, `operator-required`) and
+the items are deferred. Success writes a `ready` receipt (`kind: review-fix`,
+identity, verified-file hashes) **before** any commit or REVIEW.md write; the
+parent then commits only in git with `auto_commit:true` (exactly the verified
+paths, `Forge-Dispatch-Id` trailer, reconciliation checked against paths and
+hashes) and publishes per-R# lines idempotently. Replay of `ready` never calls a
+provider; a concurrent change of the verified files or of the REVIEW.md refuses
+publication (`review-fix-concurrent-change` / `review-fix-review-conflict`).
+**Limits:** the per-root sandbox is not a per-file fence — scope is guaranteed
+by pre-spawn checks plus post-run detection and surgical reset, not by
+preventing transient writes. agy (and any unknown engine) keeps
+`unsupported-sidecar-unit` before spawn. Memory extraction is read-only inference followed
 by owner publication through the canonical fragment transaction. Missing auth,
 unsupported native model/effort, invalid output and publication failures remain
 nonblocking for the completed source unit and never switch engines silently.

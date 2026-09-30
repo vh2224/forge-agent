@@ -1484,6 +1484,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
     else
       eval "$RF_EXPORTS"
       RF_MODEL_ID="$MODEL_ID"
+      RF_ROUTE_JSON_SAVED="$RF_ROUTE_JSON"
       RF_HOST_RUNTIME="$HOST_RUNTIME"
       RF_WORKER_MODE="$WORKER_MODE"
       RF_DISPATCH_ENGINE="$DISPATCH_ENGINE"
@@ -1491,9 +1492,9 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
       if [ "$RF_DISPATCH_ALLOWED" != "true" ]; then
         printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
         RF_RUNTIME_READY=false
-      elif [ "$RF_WORKER_MODE" != "native" ]; then
+      elif [ "$RF_WORKER_MODE" != "native" ] && { [ "$RF_WORKER_MODE" != "sidecar" ] || { [ "$RESOLVED_WORKER_ENGINE" != "claude" ] && [ "$RESOLVED_WORKER_ENGINE" != "codex" ]; }; }; then
         DISPATCH_REASON_CODE="unsupported-sidecar-unit"
-        DISPATCH_HINT="review-fix não possui adapter sidecar neste boundary; nenhum fixer foi lançado."
+        DISPATCH_HINT="review-fix sidecar existe só para as engines claude e codex (engine: ${RESOLVED_WORKER_ENGINE:-vazia}); nenhum fixer foi lançado."
         printf '✗ %s\n%s\n' "$DISPATCH_REASON_CODE" "$DISPATCH_HINT" >&2
         RF_RUNTIME_READY=false
       else
@@ -1506,7 +1507,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
   fi
   ```
 
-  `RF_RUNTIME_READY != true` stops this fixer attempt before the claim gate and every worker/adapter launch. Mark affected items with the shared non-blocking review outcome and continue the dialogue; never execute the fix inline. When ready, run the cross-run claim gate from `shared/forge-review.md § Step 7a` and dispatch only on its `proceed` decision. Build the fixer through `buildNativeInvocation` from `RF_ROUTE_JSON`; invoke its returned tool and arguments unchanged:
+  `RF_RUNTIME_READY != true` stops this fixer attempt before the claim gate and every worker/adapter launch. Mark affected items with the shared non-blocking review outcome and continue the dialogue; never execute the fix inline. When ready, run the cross-run claim gate from `shared/forge-review.md § Step 7a` and dispatch only on its `proceed` decision. With `RF_WORKER_MODE == sidecar` (engine claude|codex), run `shared/forge-review.md § Sidecar review-fix branch` with boundary `task` (`taskId: {TASK_ID}`, REVIEW in `.gsd/tasks/{TASK_ID}/`) from `RF_ROUTE_JSON_SAVED`; the adapter publishes the per-R# lines and a failure defers the items, without fallback to native or another engine. With `RF_WORKER_MODE == native`, build the fixer through `buildNativeInvocation` from `RF_ROUTE_JSON`; invoke its returned tool and arguments unchanged:
 
   ```
   fixer = buildNativeInvocation({ hostRuntime: RF_HOST_RUNTIME,

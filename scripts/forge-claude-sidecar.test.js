@@ -553,6 +553,148 @@ test('a declared model reaches argv, and a malformed launch option is refused', 
   assert.deepStrictEqual(tempPromptDirs(), []);
 });
 
+// Model-policy fixtures: `--version` answers first (the probe runs with the
+// minimal env, so the version is baked into each file), then a normal turn.
+function versionFixture(label, versionOutput, versionExit = 0) {
+  return writeFixture(`claude version ${label} fixture.js`, `
+'use strict';
+const args = process.argv.slice(2);
+if (args.includes('--version')) {
+  process.stdout.write(${JSON.stringify(versionOutput)});
+  process.exit(${versionExit});
+}
+const payload = { status: 'done', summary: 'policy fixture', must_haves_status: [], files_changed: [] };
+process.stdout.write(['---GSD-WORKER-RESULT---', 'status: done',
+  'result_json: ' + JSON.stringify(payload), '---END-RESULT---', ''].join('\\n'));
+`);
+}
+const VERSION_CURRENT = versionFixture('current', '2.1.284 (Claude Code)\n');
+const VERSION_OLD = versionFixture('old', '2.1.200 (Claude Code)\n');
+const VERSION_GARBAGE = versionFixture('garbage', 'no version here\n');
+const VERSION_FAILING = versionFixture('failing', '', 3);
+
+function countingProbe(calls) {
+  return (cmd, args, options) => {
+    calls.push({ cmd, args: args.slice(), shell: options.shell, env: { ...options.env } });
+    return childProcess.spawnSync(cmd, args, options);
+  };
+}
+
+const LEGACY_ARGV_TAIL = ['--no-session-persistence', '--disable-slash-commands',
+  '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+  '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
+  '--tools', 'Read,Glob,Grep,Edit,Write,Bash', '--permission-mode', 'acceptEdits', '-p'];
+
+test('Sonnet 5.5 sends the full id and exact effort after a satisfied version probe', async () => {
+  const records = [];
+  const probes = [];
+  const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+  const result = await adapter.invokeClaudeSidecar({
+    cwd: WORKSPACE, prompt: 'sonnet 5.5', timeoutMs: 15000, model: 'claude-sonnet-5-5', effort: 'high',
+    sourceEnv: sourceEnvFor(VERSION_CURRENT), probeRunner: countingProbe(probes),
+  });
+  assert.strictEqual(result.candidate.status, 'done');
+  assert.strictEqual(probes.length, 1, 'exactly one version probe');
+  assert.deepStrictEqual(probes[0].args, [VERSION_CURRENT, '--version'], 'probe uses the resolved command');
+  assert.strictEqual(probes[0].cmd, process.execPath);
+  assert.strictEqual(probes[0].shell, false);
+  assert.strictEqual(probes[0].env[TOKEN_ENV], undefined, 'the probe never receives the account token');
+  assert.strictEqual(probes[0].env.FORGE_ACCOUNT, undefined, 'the probe never receives the account name');
+  assert.strictEqual(records.length, 1, 'one turn spawn');
+  const args = records[0].args;
+  assert.strictEqual(args[args.indexOf('--model') + 1], 'claude-sonnet-5-5', 'full id, never an alias');
+  assert.strictEqual(args[args.indexOf('--effort') + 1], 'high');
+  ok(!args.some((arg) => /thinking|between/i.test(String(arg))), 'no thinking flag is invented');
+  assert.deepStrictEqual(result.telemetry, {
+    model_argument: 'claude-sonnet-5-5', effort_sent: 'high', effort_applied: null,
+    effort_applied_source: null, cli_version: '2.1.284', policy_diagnostics: [],
+  });
+  assert.deepStrictEqual(tempPromptDirs(), []);
+});
+
+test('a known older CLI refuses before the turn spawn', async () => {
+  const records = [];
+  const probes = [];
+  const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+  const error = await expectCode(adapter.invokeClaudeSidecar({
+    cwd: WORKSPACE, prompt: 'old cli', timeoutMs: 15000, model: 'claude-sonnet-5-5', effort: 'medium',
+    sourceEnv: sourceEnvFor(VERSION_OLD), probeRunner: countingProbe(probes),
+  }), adapter.CLAUDE_SIDECAR_REASON_CODES.CLI_VERSION_UNSUPPORTED);
+  assert.strictEqual(probes.length, 1);
+  assert.strictEqual(records.length, 0, 'the turn was never spawned');
+  assert.deepStrictEqual(error.policy, { cli_version: '2.1.200', min_version: '2.1.284', model: 'claude-sonnet-5-5' });
+  assert.deepStrictEqual(tempPromptDirs(), []);
+});
+
+test('an unverifiable version is diagnosed and the turn still runs', async () => {
+  for (const fixture of [VERSION_GARBAGE, VERSION_FAILING]) {
+    const records = [];
+    const probes = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    const result = await adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'unverified', timeoutMs: 15000, model: 'claude-sonnet-5-5', effort: 'max',
+      sourceEnv: sourceEnvFor(fixture), probeRunner: countingProbe(probes),
+    });
+    assert.strictEqual(result.candidate.status, 'done');
+    assert.strictEqual(probes.length, 1);
+    assert.strictEqual(records.length, 1);
+    assert.strictEqual(result.telemetry.cli_version, null);
+    assert.deepStrictEqual(result.telemetry.policy_diagnostics.map((item) => item.code), ['transport-version-unverified']);
+  }
+});
+
+test('models without a minimum version keep the exact argv and spawn count', async () => {
+  for (const model of ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5', 'claude-haiku-4-5-20251001']) {
+    const records = [];
+    const probes = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    const result = await adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'legacy', timeoutMs: 15000, model, effort: 'medium',
+      sourceEnv: sourceEnvFor(VERSION_OLD), probeRunner: countingProbe(probes),
+    });
+    assert.strictEqual(result.candidate.status, 'done');
+    assert.strictEqual(probes.length, 0, `${model} must not be probed`);
+    assert.strictEqual(records.length, 1);
+    const args = records[0].args;
+    assert.deepStrictEqual(args.slice(0, args.length - 1),
+      [VERSION_OLD, '--model', model, '--effort', 'medium', ...LEGACY_ARGV_TAIL]);
+    assert.strictEqual(result.telemetry.cli_version, null);
+  }
+});
+
+test('between_tools refuses before any probe or spawn', async () => {
+  const records = [];
+  const probes = [];
+  const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+  await expectCode(adapter.invokeClaudeSidecar({
+    cwd: WORKSPACE, prompt: 'between tools', timeoutMs: 15000, model: 'claude-sonnet-5-5', effort: 'low',
+    thinkingRequested: 'between_tools', sourceEnv: sourceEnvFor(VERSION_CURRENT), probeRunner: countingProbe(probes),
+  }), adapter.CLAUDE_SIDECAR_REASON_CODES.THINKING_TRANSPORT_UNSUPPORTED);
+  assert.strictEqual(probes.length, 0);
+  assert.strictEqual(records.length, 0);
+  assert.deepStrictEqual(tempPromptDirs(), []);
+});
+
+test('an effort the model policy does not document refuses before any probe or spawn', async () => {
+  const records = [];
+  const probes = [];
+  const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+  await expectCode(adapter.invokeClaudeSidecar({
+    cwd: WORKSPACE, prompt: 'sonnet 4.6 xhigh', timeoutMs: 15000, model: 'claude-sonnet-4-6', effort: 'xhigh',
+    sourceEnv: sourceEnvFor(VERSION_CURRENT), probeRunner: countingProbe(probes),
+  }), adapter.CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL);
+  assert.strictEqual(probes.length, 0);
+  assert.strictEqual(records.length, 0, 'the undocumented effort never reached argv');
+  assert.deepStrictEqual(tempPromptDirs(), []);
+  // A documented value for the same model keeps the exact launch.
+  const ok46 = await adapter.invokeClaudeSidecar({
+    cwd: WORKSPACE, prompt: 'sonnet 4.6 max', timeoutMs: 15000, model: 'claude-sonnet-4-6', effort: 'max',
+    sourceEnv: sourceEnvFor(VERSION_CURRENT), probeRunner: countingProbe(probes),
+  });
+  assert.strictEqual(ok46.candidate.status, 'done');
+  assert.strictEqual(records[0].args[records[0].args.indexOf('--effort') + 1], 'max');
+});
+
 async function main() {
   let passed = 0;
   const failures = [];

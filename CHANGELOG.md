@@ -1,3 +1,25 @@
+## Não lançado - review-fix sidecar, política de modelos e esforço de review
+
+- `review-fix` ganha entrega sidecar real (Claude CLI e Codex app-server) nas fronteiras slice, task
+  solta e triagem de milestone: contrato `fix` próprio (sem plano, SUMMARY ou checkbox), claim gate com
+  `proceed` obrigatório, realpath dos alvos, detecção pós-execução com reset cirúrgico, receipts com
+  replay sem novo turno e publicação/commit pelo pai (só git + `auto_commit`) verificados por hashes.
+  agy continua recusado com `unsupported-sidecar-unit`.
+- Nova política versionada `forge-model-policy.js`: Sonnet 5.5 com entrada própria (sem clamp,
+  thinking adaptive; `disabled` explícito e `between_tools` em transporte Claude são recusados antes do
+  dispatch). Sonnet 5 e 4.6 deixam o teto histórico `medium` e seguem a escala documentada; `xhigh` em
+  Sonnet 4.6 é recusado por nome. Haiku, Opus e Fable mantêm o comportamento anterior.
+- Esforço opt-in por leg de review (`review.challenge_effort`, `defense_effort`, `rebuttal_effort`) e
+  `effort.review-fix`; ausência das chaves mantém comandos e eventos idênticos.
+- Adaptador nativo Claude: envia o ID completo do modelo só quando as capabilities ativas o listam
+  (`model_ids`), senão mantém o alias com `alias-only`; a linha `thinking:` do frontmatter deixa de
+  recusar lançamentos (é herdada da sessão) e vira diagnóstico `native-thinking-declaration-inert`.
+- Source guard ganha o tipo `unit-sidecar`: o chamador `forge-unit-sidecar.js --request` do review-fix
+  é validado pelo caminho de dados do JSON do resolver, não por flags re-digitadas.
+- Telemetria separa esforço pedido, resolvido, enviado e aplicado (sempre desconhecido sem readback).
+  Fixtures sem inferência real (provedores falsos, diretórios temporários); ver
+  `docs/forge-routing-capabilities-20260930.md`.
+
 ## Não lançado - Roteamento fiel e publicação de memória
 
 - O adaptador sidecar informa em stderr o modelo enviado, esforço, host e estágio do despacho; os fluxos do orquestrador expõem essa evidência sem alterar stdout, receipts ou result-file.

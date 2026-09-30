@@ -10,6 +10,7 @@ const {
   validateActiveCapabilities,
   observeClaudeAgentBinding,
   buildNativeInvocation,
+  preflightNativeBinding,
   invokeNative,
 } = require('./forge-native-invocation.js');
 const { resolveDispatch } = require('./forge-dispatch-resolve.js');
@@ -339,6 +340,154 @@ async function main() {
   assert.strictEqual(failed.ok, false);
   assert.strictEqual(failed.reason_code, 'native-invocation-failed');
   assert(!JSON.stringify(failed).includes(secret), 'provider errors must not leak credentials');
+
+  // Model policy on the native Claude path. The alias `sonnet` for Sonnet 5.5 is
+  // recorded as alias-only; it never becomes an observed model version.
+  const policyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-agent-policy-'));
+  function policyAgent(name, lines) {
+    const filename = path.join(policyDir, `${name}.md`);
+    fs.writeFileSync(filename, `---\nname: forge-executor\n${lines.join('\n')}\n---\nfixture\n`);
+    return { transport: 'agent-frontmatter', agentPath: filename, sourceFingerprint: fingerprint(filename) };
+  }
+  const plainBinding = policyAgent('plain', ['model: claude-sonnet-5', 'effort: medium']);
+  const observedPlain = observeClaudeAgentBinding({ agentType: 'forge-executor', agentPath: plainBinding.agentPath,
+    sourceFingerprint: plainBinding.sourceFingerprint });
+  assert.strictEqual(observedPlain.thinking, null, 'absent frontmatter thinking is reported as null');
+  const adaptiveBinding = policyAgent('adaptive', ['model: claude-sonnet-5', 'thinking: adaptive', 'effort: medium']);
+  const observedAdaptive = observeClaudeAgentBinding({ agentType: 'forge-executor', agentPath: adaptiveBinding.agentPath,
+    sourceFingerprint: adaptiveBinding.sourceFingerprint });
+  assert.strictEqual(observedAdaptive.thinking, 'adaptive');
+  assert.strictEqual(observedAdaptive.source_fingerprint, adaptiveBinding.sourceFingerprint,
+    'thinking is read from the same fingerprinted bytes');
+
+  const sonnet55 = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-executor', prompt: 'fix', effortBinding: plainBinding,
+  });
+  assert.strictEqual(sonnet55.ok, true, JSON.stringify(sonnet55));
+  assert.strictEqual(sonnet55.args.model, 'sonnet');
+  assert.strictEqual(sonnet55.telemetry.model_version_proof, 'alias-only');
+  assert.deepStrictEqual(sonnet55.telemetry.policy_diagnostics.map((item) => item.code), ['native-alias-not-version-proof']);
+  assert.strictEqual(sonnet55.telemetry.model_observed, null, 'alias-only never fills the observed model');
+  assert.strictEqual(sonnet55.telemetry.effort_applied, null, 'alias-only never fills the applied effort');
+
+  // A frontmatter `thinking:` line is not a documented per-subagent control
+  // (subagents inherit thinking from the session): it never refuses a launch
+  // and is reported as an inert legacy declaration, outside the telemetry.
+  const disabledBinding = policyAgent('disabled', ['model: claude-sonnet-5', 'thinking: disabled', 'effort: medium']);
+  const inertDeclaration = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-executor', prompt: 'fix', effortBinding: disabledBinding,
+  });
+  assert.strictEqual(inertDeclaration.ok, true, JSON.stringify(inertDeclaration));
+  assert.notStrictEqual(inertDeclaration.reason_code, 'native-thinking-binding-incompatible');
+  assert.deepStrictEqual(inertDeclaration.diagnostics.map((item) => [item.code, item.declared, item.policy_code]),
+    [['native-thinking-declaration-inert', 'disabled', 'thinking-disabled-incompatible']]);
+  assert(!('thinking' in inertDeclaration.args), 'no thinking argument is invented for the native tool');
+  assert.deepStrictEqual(Object.keys(inertDeclaration.telemetry), Object.keys(sonnet55.telemetry),
+    'the declaration never enters the adapter telemetry envelope');
+  const adaptive55 = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-executor', prompt: 'fix', effortBinding: adaptiveBinding,
+  });
+  assert.strictEqual(adaptive55.ok, true);
+  assert(!('diagnostics' in adaptive55), 'a compatible declaration adds nothing');
+
+  // Explicit operator intent is different: the resolver refuses Sonnet 5.5 +
+  // thinking disabled before any native invocation, and the adapter honors it.
+  const intentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-native-intent-'));
+  fs.mkdirSync(path.join(intentRoot, '.gsd', 'forge'), { recursive: true });
+  fs.writeFileSync(path.join(intentRoot, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({
+    tier_models: { light: 'claude-sonnet-5-5', standard: 'claude-sonnet-5-5' },
+    effort: { 'memory-extract': 'medium' }, thinking: { sonnet_phases: 'disabled' },
+  }));
+  const intentRoute = resolveDispatch({ cwd: intentRoot, unitType: 'memory-extract', hostRuntime: 'claude' });
+  fs.rmSync(intentRoot, { recursive: true, force: true });
+  assert.strictEqual(intentRoute.model_resolved, 'claude-sonnet-5-5', 'the model is never substituted');
+  assert.strictEqual(intentRoute.dispatch_allowed, false);
+  assert.strictEqual(intentRoute.dispatch_reason_code, 'thinking-disabled-incompatible');
+  const intentRefused = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: intentRoute, activeCapabilities: claudeCapabilities,
+    agentType: 'forge-executor', prompt: 'fix', effortBinding: adaptiveBinding,
+  });
+  assert.strictEqual(intentRefused.reason_code, 'thinking-disabled-incompatible');
+  assert.strictEqual(intentRefused.args, null);
+
+  // Full model ids: sent unchanged only when the ACTIVE tool capabilities list
+  // them. The alias-only mark disappears on that path; the observed model stays
+  // unknown because an argument is not a provider readback.
+  const idCapabilities = { ...claudeCapabilities, model_ids: ['claude-sonnet-5-5', 'claude-sonnet-5'] };
+  const exact55 = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: idCapabilities, agentType: 'forge-executor', prompt: 'fix', effortBinding: plainBinding,
+  });
+  assert.strictEqual(exact55.ok, true, JSON.stringify(exact55));
+  assert.strictEqual(exact55.args.model, 'claude-sonnet-5-5');
+  assert.strictEqual(exact55.telemetry.model_argument, 'claude-sonnet-5-5');
+  assert.strictEqual(exact55.telemetry.model_observed, null);
+  assert(!('model_version_proof' in exact55.telemetry));
+  assert.deepStrictEqual(Object.keys(exact55.telemetry), Object.keys(claude.telemetry));
+  const unlistedId = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: { ...claudeCapabilities, model_ids: ['claude-sonnet-5'] }, agentType: 'forge-executor',
+    prompt: 'fix', effortBinding: plainBinding,
+  });
+  assert.strictEqual(unlistedId.args.model, 'sonnet', 'an unlisted id keeps the alias path');
+  assert.strictEqual(unlistedId.telemetry.model_version_proof, 'alias-only');
+  const noAliasId = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: { ...claudeCapabilities, model_aliases: [], model_ids: ['claude-sonnet-5-5'] },
+    agentType: 'forge-executor', prompt: 'fix', effortBinding: plainBinding,
+  });
+  assert.strictEqual(noAliasId.args.model, 'claude-sonnet-5-5', 'a listed id needs no alias support');
+  assert.strictEqual(buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: { ...claudeCapabilities, model_aliases: [] }, agentType: 'forge-executor',
+    prompt: 'fix', effortBinding: plainBinding,
+  }).reason_code, 'native-model-unsupported', 'no static default makes a model available');
+  assert.strictEqual(validateActiveCapabilities('claude', { ...claudeCapabilities, model_ids: 'claude-sonnet-5-5' }).reason_code,
+    'native-capabilities-invalid');
+
+  // effort_requested is the resolver's additive pre-clamp value when present.
+  const clampedRoute = { ...dispatch('claude-sonnet-5', 'medium', 'claude', 'sonnet'), effort_requested: 'high' };
+  assert.strictEqual(buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: clampedRoute, activeCapabilities: claudeCapabilities,
+    agentType: 'forge-executor', prompt: 'fix', effortBinding: plainBinding,
+  }).telemetry.effort_requested, 'high');
+  assert.strictEqual(claude.telemetry.effort_requested, 'medium', 'absent additive field keeps the legacy value');
+
+  // Existing models keep the exact previous envelope, including thinking: disabled.
+  const legacyDisabled = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-executor', prompt: 'fix', effortBinding: disabledBinding,
+  });
+  assert.strictEqual(legacyDisabled.ok, true, JSON.stringify(legacyDisabled));
+  assert(!('model_version_proof' in legacyDisabled.telemetry), 'legacy models gain no new telemetry key');
+  assert(!('policy_diagnostics' in legacyDisabled.telemetry), 'legacy models gain no new telemetry key');
+  assert.deepStrictEqual(Object.keys(legacyDisabled.telemetry), Object.keys(claude.telemetry));
+
+  const effortMismatch55 = buildNativeInvocation({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5-5', 'high', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-executor', prompt: 'fix', effortBinding: plainBinding,
+  });
+  assert.strictEqual(effortMismatch55.reason_code, 'native-effort-binding-mismatch', 'effort mismatch code unchanged');
+
+  // preflightNativeBinding: same verdict, no callback, no side effects.
+  const before = fs.readFileSync(plainBinding.agentPath, 'utf8');
+  const preflightOk = preflightNativeBinding({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5', 'medium', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-executor', effortBinding: plainBinding,
+  });
+  assert.strictEqual(preflightOk.ok, true, JSON.stringify(preflightOk));
+  assert.strictEqual(preflightOk.preflight, true);
+  assert.strictEqual(preflightOk.args, null, 'no launch arguments without a real prompt');
+  const preflightMismatch = preflightNativeBinding({
+    hostRuntime: 'claude', resolvedDispatch: dispatch('claude-sonnet-5', 'high', 'claude', 'sonnet'),
+    activeCapabilities: claudeCapabilities, agentType: 'forge-executor', effortBinding: plainBinding,
+  });
+  assert.strictEqual(preflightMismatch.reason_code, 'native-effort-binding-mismatch');
+  assert.strictEqual(fs.readFileSync(plainBinding.agentPath, 'utf8'), before, 'preflight never rewrites the binding');
+  fs.rmSync(policyDir, { recursive: true, force: true });
 
   process.stdout.write('forge-native-invocation: ok\n');
 }

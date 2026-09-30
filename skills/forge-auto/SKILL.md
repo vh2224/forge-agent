@@ -809,8 +809,14 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
      fi
      RF_ROUTE_JSON_SAVED="$RF_ROUTE_JSON"
      RF_HOST_RUNTIME="$HOST_RUNTIME"; RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
+     if [ "$RF_WORKER_MODE" = "sidecar" ] && [ "$RESOLVED_WORKER_ENGINE" != "claude" ] && [ "$RESOLVED_WORKER_ENGINE" != "codex" ]; then
+       DISPATCH_REASON_CODE="unsupported-sidecar-unit"
+       DISPATCH_HINT="review-fix sidecar existe só para as engines claude e codex (engine: ${RESOLVED_WORKER_ENGINE:-vazia}); nenhum fixer foi lançado."
+       dispatch_refusal_stop
+       exit 1
+     fi
      ```
-     Set `RF_UNIT_ID` to `{S##}` for Step 7a and `{M###}-triage` for Step 9. Only after this runtime gate, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here); build review-fix through `buildNativeInvocation` from the saved route and active capabilities, then invoke its returned tool/arguments unchanged only when `WORKER_MODE == native` and the claim-gate decision is `proceed`. A runtime refusal uses the auto stop boundary above; it is not the review gate's non-blocking worker-unavailability case.
+     Set `RF_UNIT_ID` to `{S##}` for Step 7a and `{M###}-triage` for Step 9. Only after this runtime gate, run the cross-run claim gate exactly as `shared/forge-review.md § Step 7a` prescribes (it in turn references `shared/forge-claim-gate.md § Step 1` for the `--conceded` claim derivation — the path derivation is not repeated here). With the claim-gate decision `proceed`: when `WORKER_MODE == sidecar` (engine claude|codex) run `shared/forge-review.md § Sidecar review-fix branch` from `RF_ROUTE_JSON_SAVED` (boundary `slice` or `milestone-triage`; the adapter publishes the per-R# lines, a failure defers the items without blocking and without fallback); when `WORKER_MODE == native` build review-fix through `buildNativeInvocation` from the saved route and active capabilities, invoke its returned tool/arguments unchanged and validate with `forge-review-fix.js --accept-native`. A runtime refusal uses the auto stop boundary above; it is not the review gate's non-blocking worker-unavailability case.
    - **OPEN items → posture (Step 7b):** `ask_in_auto: defer` (default) marks each `**Decisão:** deferido → triagem no fim da milestone` and continues WITHOUT pausing — they are guaranteed to surface at the milestone-final triage gate below. `pause` (opt-in) asks per-slice via `AskUserQuestion`.
    - Append the `review` event to `events.jsonl` (Step 8).
 4. The gate **never blocks on a review-worker throw** — any `Agent()` throw is recorded and the loop proceeds to `complete-slice` regardless. An enforcing resolver refusal is different: it occurs before launch, invokes `dispatch_refusal_stop`, and terminates the auto loop without inline work.

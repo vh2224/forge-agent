@@ -179,13 +179,13 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
     await test('installed projections drive both cross-host adapters for every phase and publish task artifacts', async () => {
       const scenarios = [
         { label: 'brainstorm-gpt', phase: 'brainstorm', taskId: 'T-20260928151522-brainstorm-gpt', projection: claudeProjection, model: 'gpt-5.6-sol', expectedEffort: 'high' },
-        { label: 'brainstorm-claude', phase: 'brainstorm', taskId: 'TASK-070', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'medium' },
+        { label: 'brainstorm-claude', phase: 'brainstorm', taskId: 'TASK-070', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'high' },
         { label: 'discuss-gpt', phase: 'discuss', taskId: 'T-20260928151523-discuss-gpt', projection: claudeProjection, model: 'gpt-5.6-sol', expectedEffort: 'high' },
-        { label: 'discuss-claude', phase: 'discuss', taskId: 'TASK-20260928-104227', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'medium' },
+        { label: 'discuss-claude', phase: 'discuss', taskId: 'TASK-20260928-104227', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'high' },
         { label: 'research-gpt', phase: 'research', taskId: 'TASK-071', projection: claudeProjection, model: 'gpt-5.6-sol', expectedEffort: 'high' },
-        { label: 'research-claude', phase: 'research', taskId: 'T-20260928151524-research-claude', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'medium' },
+        { label: 'research-claude', phase: 'research', taskId: 'T-20260928151524-research-claude', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'high' },
         { label: 'plan-gpt', phase: 'plan', taskId: 'T-20260928151525-plan-gpt', projection: claudeProjection, model: 'gpt-5.6-sol', expectedEffort: 'high' },
-        { label: 'plan-claude', phase: 'plan', taskId: 'T-20260928151526-plan-claude', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'medium' },
+        { label: 'plan-claude', phase: 'plan', taskId: 'T-20260928151526-plan-claude', projection: codexProjection, model: 'claude-sonnet-5', expectedEffort: 'high' },
       ];
       for (const scenario of scenarios) {
         const sentinel = `phase-sentinel-${scenario.label}`;
@@ -200,7 +200,9 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
         assert.equal(result.route.resolved_worker_engine, scenario.model.startsWith('claude-') ? 'claude' : 'codex');
         assert.equal(result.route.model_resolved, scenario.model);
         assert.equal(result.route.effort, scenario.expectedEffort);
-        if (scenario.model === 'claude-sonnet-5') assert.match(result.route.effort_reason, /clamped:model-cap/);
+        // Policy 2026-09-30.1: Sonnet 5 documents the full scale, so the phase
+        // effort reaches the adapter unclamped (no family regex cap).
+        if (scenario.model === 'claude-sonnet-5') assert.doesNotMatch(result.route.effort_reason, /clamped:model-cap/);
         assert.equal(result.route.worker_mode, 'sidecar');
         const artifact = path.join(request.cwd, prep.requiredArtifact(request).replace(/\//g, path.sep));
         assert.equal(fs.readFileSync(artifact, 'utf8'), phaseContent(scenario.phase, scenario.taskId));
@@ -252,8 +254,12 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
       assert.equal(output.action, 'complete', result.stdout);
       assert.equal(output.provider_called, true);
       assert.equal(output.route.model_resolved, 'claude-sonnet-5');
-      assert.equal(output.route.effort, 'medium');
+      // Policy 2026-09-30.1: the discuss phase effort (high) reaches Sonnet 5
+      // unclamped, both in the route and in the Claude CLI argv.
+      assert.equal(output.route.effort, 'high');
+      assert.doesNotMatch(output.route.effort_reason, /clamped:model-cap/);
       const observation = JSON.parse(fs.readFileSync(path.join(request.cwd, 'provider-observations.jsonl'), 'utf8').trim());
+      assert.equal(observation.effort, 'high');
       assert(observation.prompt.includes('cli-sidecar-sentinel'));
     });
 

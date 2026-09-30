@@ -42,7 +42,9 @@ next unit; replay is idempotent. The adapter never acquires another lease.
 | execute-task | Existing execution contract | Same execution safety tail |
 | complete-slice, complete-milestone, plan-check | Artifact transport | Artifact transport |
 | review challenger, advocate, rebuttal | xllm review contracts | xllm review contracts |
-| review-fix, memory-extract | Named unsupported auxiliary unit | Named unsupported auxiliary unit |
+| review-fix (engine claude/codex) | Scoped `fix` contract via app-server; parent publishes/commits | Scoped `fix` contract via Claude CLI; parent publishes/commits |
+| review-fix (engine agy/unknown) | `unsupported-sidecar-unit` before spawn | `unsupported-sidecar-unit` before spawn |
+| memory-extract | Named unsupported auxiliary unit | Named unsupported auxiliary unit |
 
 Claude → Claude and Codex → Codex retain native delivery. A declared same-host
 sidecar uses the same capability table. Interactive decisions stay with the

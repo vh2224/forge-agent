@@ -39,6 +39,7 @@ const { readTierChain } = require('./forge-tier-chain.js');
 const { stripInlineComment } = require('./forge-must-haves.js');
 const { resolveWorkerIdentity, resolveWorker, RuntimeContractError } = require('./forge-runtime.js');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard.js');
+const modelPolicy = require('./forge-model-policy.js');
 
 const TIER_DEFAULTS = {
   'memory-extract': 'light',
@@ -198,18 +199,50 @@ function dispatchEngineFor(family) {
   return 'claude';
 }
 
-// Thinking guard (single source — skills read the emitted thinking_header):
-// - claude-fable-5 returns HTTP 400 on an explicit `thinking: disabled` at ANY
-//   effort → always force adaptive.
-// - claude-opus-5 has thinking on by default and accepts `thinking: disabled`
-//   ONLY at effort `high` or below — pairing disabled with xhigh/max is a 400
-//   → force adaptive when the resolved effort is xhigh/max.
-// Empty string means "no override — honor the phase's thinking: pref".
+// Thinking guard (single source — skills read the emitted thinking_header).
+// The rules live in forge-model-policy.js: Fable always adaptive, Opus 5
+// adaptive at xhigh/max, Sonnet 5.5 adaptive (its documented default), and the
+// literal legacy prefixes for ids without an entry. Empty string means "no
+// override — honor the phase's thinking: pref". Kept as an exported wrapper.
 function thinkingHeaderFor(model, effort) {
-  const id = text(model);
-  if (id.startsWith('claude-fable-5')) return 'adaptive';
-  if (id.startsWith('claude-opus-5') && (effort === 'xhigh' || effort === 'max')) return 'adaptive';
-  return '';
+  return modelPolicy.thinkingHeader({ model: text(model), effort }).header;
+}
+
+function uniqueDiagnostics(list) {
+  const seen = new Set();
+  return list.filter((item) => {
+    const key = JSON.stringify(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// The phase thinking pref that applies to the resolved Claude model, read raw:
+// a value outside the pref enum (for example the API-only `between_tools`) is
+// operator intent that must be diagnosed, not dropped.
+function requestedThinking(prefs, model) {
+  const key = modelPolicy.thinkingPrefKey(model);
+  const thinking = prefs && prefs.thinking && typeof prefs.thinking === 'object' ? prefs.thinking : {};
+  if (!key || !Object.prototype.hasOwnProperty.call(thinking, key)) return null;
+  const value = text(thinking[key]).toLowerCase();
+  return value || null;
+}
+
+// Explicit incompatible thinking refuses before inference. Only Claude workers
+// consume the thinking pref; the transport is the CLI sidecar or the native tool.
+function thinkingRefusal(runtime, model, effort, thinkingRequested) {
+  if (!thinkingRequested || runtime.resolved_worker_engine !== 'claude') return null;
+  const transport = runtime.worker_mode === 'native' ? 'claude-native' : 'claude-cli';
+  const verdict = modelPolicy.evaluateThinking({ model, effort, mode: thinkingRequested, transport });
+  if (verdict.ok) return null;
+  return {
+    code: verdict.reason_code,
+    diagnostics: verdict.diagnostics,
+    hint: `Thinking ${thinkingRequested} solicitado para ${model || '(sem modelo)'} não pode ser entregue `
+      + `(worker ${runtime.resolved_worker_engine}/${runtime.worker_mode}, host ${runtime.host_runtime}, `
+      + `transporte ${transport}, camada model-policy). Ajuste thinking nas prefs; nenhum parâmetro foi prometido e nenhum modelo foi substituído.`,
+  };
 }
 
 // The sidecar needs the concrete routed Codex model, while legacy workers
@@ -430,11 +463,16 @@ function resolveDispatch(opts, environment) {
     effortReason += `|invalid-effort-defaulted:${effort || '(empty)'}`;
     effort = 'medium';
   }
-  const cap = /^claude-(haiku|sonnet)/.test(model) ? 'medium' : 'max';
-  if (EFFORT_RANK[effort] > EFFORT_RANK[cap]) {
-    effort = cap;
+  // The per-model cap is owned by forge-model-policy.js (versioned entries plus
+  // the literal legacy rule for ids without an entry). The model never changes.
+  const effortRequested = effort;
+  const effortPolicy = modelPolicy.applyEffortPolicy({ model, effort });
+  if (effortPolicy.clamped) {
+    effort = effortPolicy.effort;
     effortReason += '|clamped:model-cap';
   }
+  const headerPolicy = modelPolicy.thinkingHeader({ model, effort });
+  const thinkingRequested = requestedThinking(prefs, model);
 
   const alias = modelToAlias(model).alias;
   // modelFamily is the canonical family classifier; its invocation here keeps
@@ -453,14 +491,42 @@ function resolveDispatch(opts, environment) {
     model,
     source: plan.worker ? 'frontmatter.worker' : `workers.${unitType}`,
   });
-  const resolvedRuntime = configConflicts.length === 0 ? runtime : {
-    ...runtime,
-    dispatch_allowed: false,
-    dispatch_reason_code: 'engine-model-config-conflict',
-    dispatch_hint: 'Configured engine and resolved model family conflict; correct the configuration before dispatch. No model was substituted.',
-    dispatch_posture: 'enforce',
-    dispatch_decision: 'refuse',
-  };
+  // An effort the documented entry does not list (Sonnet 4.6 + xhigh) is
+  // refused before inference: neither clamped silently nor promised.
+  const effortVerdict = effortPolicy.unsupported && runtime.dispatch_allowed === true && configConflicts.length === 0
+    ? {
+      code: 'effort-unsupported-by-model',
+      diagnostics: [],
+      hint: `Effort ${effortRequested} (${effortReason}) não é documentado para ${model} `
+        + `(worker ${runtime.resolved_worker_engine}/${runtime.worker_mode}, host ${runtime.host_runtime}, camada model-policy). `
+        + 'Ajuste o effort configurado; nenhum valor foi rebaixado e nenhum modelo foi substituído.',
+    } : null;
+  const thinkingVerdict = effortVerdict || (runtime.dispatch_allowed === true && configConflicts.length === 0
+    ? thinkingRefusal(runtime, model, effort, thinkingRequested) : null);
+  const policyDiagnostics = uniqueDiagnostics([
+    ...effortPolicy.diagnostics, ...headerPolicy.diagnostics,
+    ...(thinkingVerdict ? thinkingVerdict.diagnostics : []),
+  ]);
+  let resolvedRuntime = runtime;
+  if (configConflicts.length !== 0) {
+    resolvedRuntime = {
+      ...runtime,
+      dispatch_allowed: false,
+      dispatch_reason_code: 'engine-model-config-conflict',
+      dispatch_hint: 'Configured engine and resolved model family conflict; correct the configuration before dispatch. No model was substituted.',
+      dispatch_posture: 'enforce',
+      dispatch_decision: 'refuse',
+    };
+  } else if (thinkingVerdict) {
+    resolvedRuntime = {
+      ...runtime,
+      dispatch_allowed: false,
+      dispatch_reason_code: thinkingVerdict.code,
+      dispatch_hint: thinkingVerdict.hint,
+      dispatch_posture: 'enforce',
+      dispatch_decision: 'refuse',
+    };
+  }
   return {
     engine,
     model,
@@ -495,7 +561,7 @@ function resolveDispatch(opts, environment) {
     // NOT the effective `domain`/domain_used above.
     domain_input: requestedDomain,
     frontmatter_tier: plan.tier,
-    thinking_header: thinkingHeaderFor(model, effort),
+    thinking_header: headerPolicy.header,
     // Additive: whether a parseable routing: block exists in the prefs cascade.
     // Consumed by the orchestrator's shadowing warning ("routing configured but
     // not applied") — previously a SECOND forge-routing.js --explain spawn per
@@ -512,6 +578,15 @@ function resolveDispatch(opts, environment) {
     // prefs_ok; the CLI turns prefs_ok:false into a non-zero exit.
     prefs_ok: prefsResult ? prefsResult.ok !== false : true,
     prefs_errors: (prefsResult && prefsResult.errors) || [],
+    // Additive model-policy surface. effort_requested is the value before the
+    // per-model clamp; thinking_requested is the raw phase pref (null when
+    // absent). Requested, effective and delivered values stay distinct: nothing
+    // here claims what a provider applied.
+    effort_requested: effortRequested,
+    policy_version: modelPolicy.POLICY_VERSION,
+    policy_entry: effortPolicy.entry,
+    policy_diagnostics: policyDiagnostics,
+    thinking_requested: thinkingRequested,
     ...resolvedRuntime,
   };
 }
@@ -569,6 +644,11 @@ function degradedContract(args, environment) {
     routing_present: false,
     prefs_ok: false,
     prefs_errors: [{ code: 'routing-runtime-error', message: 'Resolver failed before configuration could be established.' }],
+    effort_requested: null,
+    policy_version: modelPolicy.POLICY_VERSION,
+    policy_entry: null,
+    policy_diagnostics: [],
+    thinking_requested: null,
     runtime_protocol_version: '',
     host_runtime: hostRuntime,
     worker_engine: workerEngine,

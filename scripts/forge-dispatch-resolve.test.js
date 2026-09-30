@@ -136,13 +136,90 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
-  runCase('execute-task xhigh effort is clamped by sonnet', () => {
+  runCase('execute-task xhigh effort reaches documented sonnet 5 without the legacy clamp', () => {
+    // Policy 2026-09-30.1: Sonnet 5 documents the full effort scale; the old
+    // family regex clamp to medium no longer applies to it.
     const f = mkFixture({ plan: '---\neffort: xhigh\n---\n# task\n' });
     const r = dispatch(f, { unitType: 'execute-task' });
-    assertEqual(r.model, 'claude-sonnet-5', 'clamp fixture resolves sonnet');
-    assertEqual(r.effort, 'medium', 'xhigh effort clamps to medium');
-    assert(/frontmatter-effort:xhigh\|clamped:model-cap/.test(r.effort_reason), 'clamp reason is recorded', r.effort_reason);
+    assertEqual(r.model, 'claude-sonnet-5', 'fixture resolves sonnet');
+    assertEqual(r.effort, 'xhigh', 'xhigh is delivered as requested');
+    assertEqual(r.effort_reason, 'frontmatter-effort:xhigh', 'no clamp suffix');
+    assertEqual(r.effort_requested, 'xhigh', 'requested value recorded');
+    assertEqual(r.policy_entry, 'claude-sonnet-5', 'documented entry matched');
     cleanup(f);
+  });
+
+  runCase('haiku without a documented effort entry keeps the legacy medium clamp', () => {
+    const f = mkFixture({ plan: '---\neffort: high\n---\n# task\n',
+      prefsJsonc: '{"tier_models":{"standard":"claude-haiku-4-5-20251001"}}' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.model, 'claude-haiku-4-5-20251001', 'model never changes');
+    assertEqual(r.effort, 'medium', 'legacy cap preserved for haiku');
+    assert(/\|clamped:model-cap$/.test(r.effort_reason), 'clamp suffix recorded', r.effort_reason);
+    assert(r.policy_diagnostics.some(d => d.code === 'effort-clamped-by-policy'), 'clamp diagnostic', JSON.stringify(r.policy_diagnostics));
+    cleanup(f);
+  });
+
+  for (const effort of ['high', 'xhigh', 'max']) {
+    runCase(`sonnet 5.5 receives ${effort} unclamped with an adaptive header`, () => {
+      const f = mkFixture({ plan: `---\neffort: ${effort}\n---\n# task\n`,
+        prefsJsonc: '{"tier_models":{"standard":"claude-sonnet-5-5"}}' });
+      const r = dispatch(f, { unitType: 'execute-task' });
+      assertEqual(r.model, 'claude-sonnet-5-5', 'configured model preserved');
+      assertEqual(r.effort, effort, 'requested effort preserved');
+      assertEqual(r.effort_reason, `frontmatter-effort:${effort}`, 'no clamp suffix');
+      assertEqual(r.thinking_header, 'adaptive', 'documented default header');
+      assertEqual(r.policy_entry, 'claude-sonnet-5-5', 'own entry, never claude-sonnet-5');
+      assertEqual(r.thinking_requested, null, 'absent thinking pref stays null');
+      cleanup(f);
+    });
+  }
+
+  runCase('sonnet 5.5 with explicit thinking disabled refuses before dispatch', () => {
+    const f = mkFixture({ plan: '---\nworker: claude\n---\n# task\n',
+      prefsJsonc: '{"tier_models":{"standard":"claude-sonnet-5-5"},"thinking":{"sonnet_phases":"disabled"}}' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.model, 'claude-sonnet-5-5', 'model never changes');
+    assertEqual(r.thinking_requested, 'disabled', 'requested thinking recorded');
+    assertEqual(r.dispatch_allowed, false, 'explicit incompatible thinking refuses');
+    assertEqual(r.dispatch_reason_code, 'thinking-disabled-incompatible', 'named refusal');
+    assert(r.policy_diagnostics.some(d => d.code === 'thinking-disabled-incompatible'), 'diagnostic', JSON.stringify(r.policy_diagnostics));
+    cleanup(f);
+  });
+
+  runCase('between_tools on a Claude transport refuses with thinking-transport-unsupported', () => {
+    const f = mkFixture({ plan: '---\nworker: claude\neffort: low\n---\n# task\n',
+      prefsJsonc: '{"tier_models":{"standard":"claude-sonnet-5-5"},"thinking":{"sonnet_phases":"between_tools"}}' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.model, 'claude-sonnet-5-5', 'model never changes');
+    assertEqual(r.dispatch_allowed, false, 'no parameter is promised');
+    assertEqual(r.dispatch_reason_code, 'thinking-transport-unsupported', 'transport refusal');
+    assert(/model-policy/.test(r.dispatch_hint) && /claude-sonnet-5-5/.test(r.dispatch_hint), 'hint names layer and model', r.dispatch_hint);
+    cleanup(f);
+  });
+
+  runCase('sonnet 4.6 refuses an undocumented xhigh instead of clamping', () => {
+    const f = mkFixture({ plan: '---\nworker: claude\neffort: xhigh\n---\n# task\n',
+      prefsJsonc: '{"tier_models":{"standard":"claude-sonnet-4-6"}}' });
+    const r = dispatch(f, { unitType: 'execute-task' });
+    assertEqual(r.model, 'claude-sonnet-4-6', 'model never changes');
+    assertEqual(r.effort, 'xhigh', 'requested value preserved, not rebaixado');
+    assertEqual(r.dispatch_allowed, false, 'undocumented effort refuses');
+    assertEqual(r.dispatch_reason_code, 'effort-unsupported-by-model', 'named refusal');
+    cleanup(f);
+  });
+
+  runCase('review-fix effort pref is read; absence keeps the unit default', () => {
+    const present = mkFixture({ prefsJsonc: '{"effort":{"review-fix":"high"}}' });
+    const withPref = dispatch(present, { unitType: 'review-fix' });
+    assertEqual(withPref.effort, 'high', 'effort.review-fix honored');
+    assertEqual(withPref.effort_reason, 'prefs.effort:review-fix', 'pref reason');
+    cleanup(present);
+    const absent = mkFixture({});
+    const withoutPref = dispatch(absent, { unitType: 'review-fix' });
+    assertEqual(withoutPref.effort, 'medium', 'unit default medium');
+    assertEqual(withoutPref.effort_reason, 'unit-type:review-fix', 'default reason');
+    cleanup(absent);
   });
 
   runCase('inline YAML comments on tier/effort/tag do not defeat the override', () => {
@@ -729,13 +806,13 @@ withHermeticHome((cliEnv) => {
     cleanup(f);
   });
 
-  runCase('family-only worker: claude on a standard task clamps effort (the HTTP-400 hazard)', () => {
+  runCase('family-only worker: claude on a standard task keeps the documented sonnet 5 effort', () => {
     const f = mkFixture({ plan: '---\nworker: claude\neffort: high\n---\n# task\n' });
     const r = dispatch(f, { unitType: 'execute-task' });
     assertEqual(r.model, 'claude-sonnet-5', 'standard tier model, not the token');
     assertEqual(r.alias, 'sonnet', 'alias mapped');
-    assertEqual(r.effort, 'medium', 'effort clamped down by the sonnet cap');
-    assertEqual(r.effort_reason, 'frontmatter-effort:high|clamped:model-cap', 'clamp is recorded, never silent');
+    assertEqual(r.effort, 'high', 'documented effort is not clamped');
+    assertEqual(r.effort_reason, 'frontmatter-effort:high', 'no clamp suffix');
     cleanup(f);
   });
 

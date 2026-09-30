@@ -104,7 +104,7 @@
     },
     "effort": {
       "type": "object",
-      "description": "Default de effort (intensidade de raciocínio) por fase (unit_type). Eixo ortogonal ao tier: o tier escolhe QUAL modelo, o effort escolhe o quão fundo ele pensa. Escala ordenada: low < medium < high < xhigh < max. Sobreposto por effort: no frontmatter do T##-PLAN.md e clampado pela capacidade do modelo resolvido (haiku/sonnet limitam em medium).",
+      "description": "Default de effort (intensidade de raciocínio) por fase (unit_type). Eixo ortogonal ao tier: o tier escolhe QUAL modelo, o effort escolhe o quão fundo ele pensa. Escala ordenada: low < medium < high < xhigh < max. Sobreposto por effort: no frontmatter do T##-PLAN.md e clampado pela política versionada por modelo (scripts/forge-model-policy.js): claude-sonnet-5-5 e claude-sonnet-5 aceitam até max; claude-sonnet-4-6 documenta low/medium/high/max e recusa xhigh (effort-unsupported-by-model), nunca rebaixado em silêncio; claude-haiku-4-5 e ids sonnet/haiku sem entrada preservam o teto histórico medium. Effort é independente do modo de thinking (ver thinking). Pedido, resolvido e enviado são registrados separadamente; o valor aplicado pelo provedor permanece desconhecido sem readback.",
       "properties": {
         "plan-milestone": {
           "type": "string",
@@ -188,7 +188,18 @@
             "max"
           ],
           "default": "medium",
-          "description": "Effort da fase execute-task (implementação). Override por task via effort: no frontmatter do T##-PLAN.md; clamp em medium quando o modelo resolvido é haiku/sonnet."
+          "description": "Effort da fase execute-task (implementação). Override por task via effort: no frontmatter do T##-PLAN.md; clamp pela política por modelo (teto medium em haiku e ids sem entrada; claude-sonnet-5/5-5 sem clamp; xhigh recusado em claude-sonnet-4-6)."
+        },
+        "review-fix": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "description": "Effort opt-in do review-fix (fixer dos itens concedidos ou aceitos). Sem default no schema: ausente = medium via EFFORT_DEFAULTS do resolvedor (effort_reason unit-type:review-fix); presente = effort_reason prefs.effort:review-fix. Chega ao sidecar como route.effort (--effort no Claude CLI, effort nos params do app-server); no caminho nativo Claude o effort do frontmatter do forge-executor precisa ser igual, senão o fixer é recusado com native-effort-binding-mismatch."
         },
         "complete-slice": {
           "type": "string",
@@ -230,7 +241,7 @@
     },
     "thinking": {
       "type": "object",
-      "description": "Extended thinking por família de fase. adaptive = o modelo decide quanto pensar. Guard de thinking: quando o modelo resolvido é claude-fable-5 (qualquer effort) ou claude-opus-5 com effort xhigh/max, o orquestrador força adaptive — ambos retornam HTTP 400 com thinking disabled explícito nessas condições (Opus 5 aceita disabled só com effort high ou menor).",
+      "description": "Modo de extended thinking por família de fase, separado do effort. adaptive = o modelo decide quanto pensar. A política versionada (scripts/forge-model-policy.js) decide o thinking_header: claude-fable-5 sempre adaptive; claude-opus-5 força adaptive em effort xhigh/max (disabled só é aceito com effort high ou menor); claude-sonnet-5-5 só aceita adaptive — disabled explícito é recusado antes do dispatch (thinking-disabled-incompatible), nunca reescrito. between_tools existe na API do Sonnet 5.5 apenas com effort low/medium/high, mas não tem transporte documentado no Claude CLI nem no agente nativo e não é valor desta pref: configurado mesmo assim, o dispatch Claude é recusado com thinking-transport-unsupported.",
       "properties": {
         "opus_phases": {
           "type": "string",
@@ -248,7 +259,7 @@
             "disabled"
           ],
           "default": "disabled",
-          "description": "Thinking das fases que rodam em Sonnet (execute/complete). Sonnet não suporta extended thinking — manter disabled."
+          "description": "Thinking das fases que rodam em Sonnet ou Haiku (execute/complete). Os modelos legados aceitam disabled; com claude-sonnet-5-5 o valor disabled explícito é recusado antes do dispatch (thinking-disabled-incompatible) — use adaptive."
         }
       }
     },
@@ -835,7 +846,40 @@
         "advocate_model": {
           "type": "string",
           "default": "claude-fable-5",
-          "description": "Modelo do defender (forge-advocate), resolvido para alias via scripts/forge-model-alias.js e auditado por scripts/forge-review-audit.js. ID sem alias omite model:. Default literal — nunca null."
+          "description": "Modelo do defender (forge-advocate), resolvido para alias via scripts/forge-model-alias.js e auditado por scripts/forge-review-audit.js. ID completo quando aceito pelas capabilities ativas; alias apenas quando exigido pelo adaptador. Modelo sem representa\u00e7\u00e3o aceita recusa explicitamente, nunca omite model:. Default literal — nunca null."
+        },
+        "challenge_effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "description": "Effort opt-in do challenge (Step 2). Sem default: ausente preserva a chamada atual byte a byte, sem custo novo. Presente: leg externo (codex app-server ou Claude CLI) recebe --effort depois do clamp da política por modelo; leg nativo Claude exige binding de frontmatter igual, senão recusa com native-effort-binding-mismatch antes do lançamento; agy não tem transporte de effort e recusa com effort-transport-unsupported. Valor inválido recusa com review-effort-invalid. Resolvido por scripts/forge-review-effort.js; nenhuma recusa troca de worker."
+        },
+        "defense_effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "description": "Effort opt-in da defesa (Step 3). Mesmas regras de review.challenge_effort."
+        },
+        "rebuttal_effort": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "description": "Effort opt-in do rebuttal (Step 4), inclusive o reviewer retomado por SendMessage. Mesmas regras de review.challenge_effort."
         },
         "gate_timeout_ms": {
           "type": "integer",

@@ -148,8 +148,9 @@ function resolveRequireWorktree(cwd) {
 }
 
 // Detects whether an external write-engine (codex/gpt/gemini) is configured for
-// execute-task. Returns { detected, reason }. Three signals (generous, OR'd):
-//   (1) workers.execute-task == codex (the sidecar write path);
+// a writing unit. Returns { detected, reason }. Signals (generous, OR'd):
+//   (1) workers.execute-task == codex (the sidecar write path), or
+//       workers.review-fix == codex (the scoped review-fix sidecar also writes);
 //   (2) any routing.<domain>.executor.<tier|fallback> id whose modelFamily is
 //       gpt or gemini;
 //   (3) any tier_models member whose family is gpt or gemini. Even an explicit
@@ -170,6 +171,9 @@ function detectExternalWriteEngine(cwd) {
     const prefs = readPrefsCached(cwd).prefs;
     if (prefs.workers && String(prefs.workers['execute-task']).toLowerCase() === 'codex') {
       return { detected: true, reason: 'workers.execute-task:codex' };
+    }
+    if (prefs.workers && String(prefs.workers['review-fix']).toLowerCase() === 'codex') {
+      return { detected: true, reason: 'workers.review-fix:codex' };
     }
 
     if (prefs.tier_models && typeof prefs.tier_models === 'object') {

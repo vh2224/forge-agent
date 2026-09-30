@@ -275,5 +275,29 @@ test('every skill dispatch event is rendered by this one emitter', () => {
   assert.strictEqual(invocations, 6, `emitter call sites across the three skills: ${invocations}`);
 });
 
+test('model-policy telemetry is copied only when the route carries it', () => {
+  const base = {
+    host_runtime: 'codex', worker_mode: 'sidecar', resolved_worker_engine: 'claude',
+    dispatch_allowed: true, dispatch_reason_code: 'runtime-posture-observed',
+    dispatch_posture: 'observe', dispatch_decision: 'advisory', model: 'claude-sonnet-5-5', effort: 'high',
+  };
+  const legacy = emitter.buildDispatchEvent({ unit: 'review-fix/S01' }, base, '2026-09-30T00:00:00Z');
+  for (const key of ['effort_requested', 'policy_version', 'policy_diagnostics']) {
+    assert.strictEqual(key in legacy, false, `${key} must stay absent for a route without it`);
+  }
+  const withPolicy = emitter.buildDispatchEvent({ unit: 'review-fix/S01' }, {
+    ...base, effort_requested: 'high', policy_version: '2026-09-30.1',
+    policy_diagnostics: [{ code: 'effort-clamped-by-policy' }],
+  }, '2026-09-30T00:00:00Z');
+  assert.strictEqual(withPolicy.effort_requested, 'high');
+  assert.strictEqual(withPolicy.policy_version, '2026-09-30.1');
+  assert.deepStrictEqual(withPolicy.policy_diagnostics, [{ code: 'effort-clamped-by-policy' }]);
+  // Every pre-existing key keeps its value and position.
+  const legacyKeys = Object.keys(legacy);
+  assert.deepStrictEqual(Object.keys(withPolicy).filter((key) => legacyKeys.includes(key)), legacyKeys);
+  for (const key of legacyKeys) assert.deepStrictEqual(withPolicy[key], legacy[key], key);
+  assert.strictEqual('effort_applied' in withPolicy, false, 'the dispatch event never claims an applied effort');
+});
+
 process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
 process.exitCode = failed === 0 ? 0 : 1;

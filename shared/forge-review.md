@@ -92,8 +92,10 @@ let challenger=low(rv.challenger); if(!['claude','codex','gemini','auto'].includ
 let advocate=low(rv.advocate); if(!['claude','codex','gemini','auto'].includes(advocate))advocate='claude';
 let challengerModel=(typeof rv.challenger_model==='string'&&rv.challenger_model.trim())?rv.challenger_model.trim():null;
 let advocateModel=(typeof rv.advocate_model==='string'&&rv.advocate_model)?rv.advocate_model:'claude-fable-5';
-process.stdout.write(JSON.stringify({mode,style,trigger,adaptiveFlagsLines,adaptiveDialecticLines,rounds,askAuto,gateTimeoutMs,fixConceded,engine,challenger,advocate,challengerModel,advocateModel}));
-}catch(e){process.stdout.write('{\"mode\":\"enabled\",\"style\":\"dialectic\",\"trigger\":\"adaptive\",\"adaptiveFlagsLines\":40,\"adaptiveDialecticLines\":400,\"rounds\":1,\"askAuto\":\"defer\",\"gateTimeoutMs\":1800000,\"fixConceded\":true,\"engine\":\"agents\",\"challenger\":\"claude\",\"advocate\":\"claude\",\"challengerModel\":null,\"advocateModel\":\"claude-fable-5\"}')}})")
+const eff=v=>(v===undefined||v===null)?null:String(v).trim().toLowerCase();
+let challengeEffort=eff(rv.challenge_effort),defenseEffort=eff(rv.defense_effort),rebuttalEffort=eff(rv.rebuttal_effort);
+process.stdout.write(JSON.stringify({mode,style,trigger,adaptiveFlagsLines,adaptiveDialecticLines,rounds,askAuto,gateTimeoutMs,fixConceded,engine,challenger,advocate,challengerModel,advocateModel,challengeEffort,defenseEffort,rebuttalEffort}));
+}catch(e){process.stdout.write('{\"mode\":\"enabled\",\"style\":\"dialectic\",\"trigger\":\"adaptive\",\"adaptiveFlagsLines\":40,\"adaptiveDialecticLines\":400,\"rounds\":1,\"askAuto\":\"defer\",\"gateTimeoutMs\":1800000,\"fixConceded\":true,\"engine\":\"agents\",\"challenger\":\"claude\",\"advocate\":\"claude\",\"challengerModel\":null,\"advocateModel\":\"claude-fable-5\",\"challengeEffort\":null,\"defenseEffort\":null,\"rebuttalEffort\":null}')}})")
 
 CHALLENGER=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.challenger||'claude')}catch(e){process.stdout.write('claude')}})")
 CHALLENGER_MODEL=$(printf '%s' "$REVIEW_CFG" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=JSON.parse(d);process.stdout.write(c.challengerModel||'')}catch(e){process.stdout.write('')}})")
@@ -104,12 +106,38 @@ ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_
 XLLM_ENGINE=$([ "$CHALLENGER" = "gemini" ] && echo agy || echo codex)
 ```
 
+**Opt-in leg effort (`review.challenge_effort` / `defense_effort` / `rebuttal_effort`).**
+The public `forge-xllm.runChallenge/runDefend/runRebuttal` consumers load the corresponding
+leg preference before a provider turn. Precedence is explicit caller `effort` / CLI `--effort`,
+then the leg preference, then the historical call with no effort argument when absent.
+Invalid present values and unreadable preferences fail visibly before transport. All three
+external commands below rely on these consumers; there are no uninitialized `*_EFFORT_ARGV`
+variables or helper output to reinterpret. Explicit overrides must remain explicit.
+
+Native legs use `forge-review-effort.js --leg challenge|defense|rebuttal` with the actual
+resolved engine/model, transport and observed binding/capabilities for that leg. Inspect the
+helper exit code and `refusal` before launching: exit 3 is a named refusal, exit 2 is a
+configuration/tooling error, neither permits launch. An absent key preserves the legacy call.
+
+External legs (codex app-server, Claude CLI) receive `--effort <resolved>` after the model policy. A
+native Claude leg (reviewer/advocate, external→Claude fallback, rebuttal resumed with `SendMessage`,
+`engine: workflow`) uses `--transport claude-native --binding-json <agent observation>
+--capabilities-json <capabilities observed from the active tool>`: the frontmatter binding must be
+equal or the leg refuses with `native-effort-binding-mismatch` before launch. A native Codex leg uses
+`--transport codex-native --agent-type <agent> --capabilities-json …` (`reasoning_effort`). agy
+refuses with `effort-transport-unsupported`; an invalid value refuses with `review-effort-invalid`.
+**A refusal takes that stage's existing unavailability path, without retry** (it is not transient)
+and never swaps the worker. The helper only plans (`effort_planned`); record `sent` in
+`forge-review-emit.js --efforts-json` only for a leg that actually launched with that argument, and
+`applied` is always `null`. `trigger`, `rounds`, `ask_in_auto`, `fix_conceded` and pairing are
+untouched by these keys.
+
 `$CHALLENGER`, `$CHALLENGER_MODEL`, `$ADVOCATE_MODEL` and `$XLLM_ENGINE` are derived immediately after `$REVIEW_CFG` (same JSON-aware pattern as the `engine==workflow` precedence check below) so Steps 2/3/4's `[ -n "$CHALLENGER_MODEL" ]` / `[ -n "$ADVOCATE_ALIAS" ]` guards have a value to test — never left unassigned.
 
 **Prefs read here:**
 - `challenger` — whitelist `claude|codex|gemini`, default `claude`. `claude` (or any invalid value → whitelist fallback) runs the in-context `forge-reviewer`/`forge-advocate` agents unchanged. `codex` and `gemini` route the challenge (Step 2) and rebuttal (Step 4) through the `scripts/forge-xllm.js` adapter — `codex` = GPT via the `codex app-server` protocol (`--engine codex` — the adapter opens one app-server turn per invocation; the argv-based transport it used before was retired in M018 S05), `gemini` = Gemini via the Antigravity CLI `agy --print` (`--engine agy`).
 - `challengerModel` — default `null` (unset). When set, it is forwarded to the adapter as `--model {challenger_model}`; when `null`, `--model` is omitted and the CLI's default model is used. Only meaningful when `challenger != claude`. Codex takes model ids (e.g. `gpt-5.2-codex`); agy takes model **labels which may contain spaces** (e.g. `Gemini 3.1 Pro (High)` — see `agy models`), so the value is read to end-of-line (`#` starts a comment; surrounding quotes are stripped) and must always be expanded quoted (`--model "$CHALLENGER_MODEL"`).
-- `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Resolved to a dispatch alias via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id unsupported by the active adapter is an explicit review-worker refusal; never omit the configured model to inherit frontmatter.
+- `advocateModel` — default `'claude-fable-5'` (literal — not null; the advocate always runs on a resolved model). Overridden by `advocate_model: <x>` in the cascade. Its diagnostic alias is read via `ADVOCATE_ALIAS=$(node "$FORGE_SCRIPTS_DIR/forge-model-alias.js" --id "$ADVOCATE_MODEL")` — the single mapping source (`scripts/forge-model-alias.js`, never duplicated here). An id unsupported by the active adapter is an explicit review-worker refusal; never omit the configured model to inherit frontmatter.
 - Prefs parsing (block capture, `[ \t]` class, EOF-safe boundaries) now lives entirely in `scripts/forge-prefs.js` (S01); Step 0 only extracts resolved knobs off `.prefs` and applies the whitelist/clamp fallbacks above. The CLI resolves values without defaulting them — the defaults here are the review gate's own concern.
 
 Every Claude `Agent(...)` example below is executed through the canonical native
@@ -588,23 +616,18 @@ and pass it in the prompt (`agents/forge-advocate.md § Persist as you go`): the
 verdict line as it settles it, so a cut costs at most one verdict instead of all of them. It is the
 advocate's **only** permitted write target.
 
-`ADVOCATE_ALIAS` was resolved in Step 0 from `advocate_model` (default `claude-fable-5`) via `scripts/forge-model-alias.js`. **The `model:` of `forge-advocate`/`forge-reviewer` comes exclusively from resolved `$ADVOCATE_ALIAS`/`$CHALLENGER_MODEL`; literal sonnet/fable/opus/haiku is a violation detected post-hoc by `forge-review-audit.js`.** If the adapter cannot represent the configured model, record explicit worker unavailability before launch; never omit `model:`:
+`ADVOCATE_ALIAS` is a diagnostic mapping from Step 0, not proof that the active host
+requires aliases. Build the native call with `scripts/forge-native-invocation.js` using the
+resolved advocate route, active capabilities observed from the actual tool and the observed
+agent definition/fingerprint. Use the returned invocation arguments verbatim: a full model ID
+when active capabilities accept it, an alias only when that adapter requires it. Missing
+representation is an explicit worker-unavailability result before launch; never omit `model:`
+or inherit an unobserved default. The same rule applies to the reviewer.
 
-```
-if [ -n "$ADVOCATE_ALIAS" ]; then
-```
-```
-Agent({ subagent_type: 'forge-advocate', model: '{ADVOCATE_ALIAS}',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: complete-slice/{S##}\nDIFF_CMD: {DIFF_CMD}\nDEFENSE_FILE: {DEFENSE_FILE}\nOBJECTIONS:\n{OBJECTIONS}" })
-```
-```
-else
-  echo "✗ advocate_model '$ADVOCATE_MODEL' sem alias suportado — review worker recusado" >&2
-  # Follow Agent unavailability below; no tool call is made.
-fi
-```
-
-**Guard Fable 400 (documented):** when the resolved model is `claude-fable-5*`, `thinking` MUST be `adaptive` (never `disabled`) — Fable 5 returns HTTP 400 on an explicit `thinking: {type: 'disabled'}`. The `Agent()` call above never injects `thinking` itself, so this is guaranteed by `agents/forge-advocate.md`'s own frontmatter (`model: claude-fable-5` + `thinking: adaptive`, changed together in the same commit).
+The native preflight binds effort to the observed agent definition. A `thinking:` frontmatter
+line is inert: Claude subagents inherit session thinking. It neither guarantees adaptive
+thinking nor controls provider behavior. Explicit incompatible thinking intent is refused by
+the model/transport policy; retain legacy Opus/Fable policy without inventing a native binding.
 
 **Scope of the override:** this `model:` override only applies to the `engine: agents` dispatch path above (Step 3). Under `engine: workflow`, the advocate runs as `agentType: 'forge-advocate'` inside the workflow script (see `## Engine workflow` below) — the script does not accept a per-call `model:` override, so the agent's own frontmatter (now Fable 5 by default) governs there instead.
 
@@ -917,7 +940,7 @@ Omit any section with zero items — **exceto** o bloco de indisponibilidade do 
 
 **`Challenger` line:** `claude` → `**Challenger:** claude`. External challenger with `challengerModel` set → `**Challenger:** codex (gpt-5-x)` / `**Challenger:** gemini (Gemini 3.1 Pro (High))`; model unset → `**Challenger:** codex (default do CLI)` / `**Challenger:** gemini (default do CLI)`. When a challenge fell back from the external CLI to the agent (`review-challenger-fallback` / `{challenger}-exit-nonzero`), stamp `**Challenger:** claude (fallback de codex)` / `**Challenger:** claude (fallback de gemini)` to keep the artifact honest about what actually ran. When the in-context challenger itself could not run (`review-challenger-unavailable`), stamp `**Challenger:** claude — indisponível (review-challenger-unavailable)`; the artifact then carries the mandatory unavailability block and states no review was performed.
 
-**`Defender` line:** `ADVOCATE_ALIAS` non-empty → `**Defender:** {advocate_model} ({ADVOCATE_ALIAS})` (e.g. `**Defender:** claude-fable-5 (fable)`); `ADVOCATE_ALIAS` empty (id with no known alias) → `**Defender:** {advocate_model} (frontmatter — sem alias)`, matching the Step 3 warning. Advocate unavailable → `**Defender:** {advocate_model} — indisponível (review-advocate-unavailable)`, with the objections listed as `open` cruas and the reduced-adversariality caveat spelled out.
+**`Defender` line:** `ADVOCATE_ALIAS` non-empty → `**Defender:** {advocate_model} ({ADVOCATE_ALIAS})` (e.g. `**Defender:** claude-fable-5 (fable)`); `ADVOCATE_ALIAS` empty with a full ID accepted by active capabilities → `**Defender:** {advocate_model} (full-id argument; observed model unknown)`. Advocate unavailable → `**Defender:** {advocate_model} — indisponível (review-advocate-unavailable)`, with the objections listed as `open` cruas and the reduced-adversariality caveat spelled out.
 
 **`Pairing` line:** written verbatim as `$PAIRING_LINE` (assembled once in Step 0 — see "Regra de render da linha `**Pairing:**`" above). Format: `**Pairing:** <modo> — autor <engine> → challenger <família>`, with the ` (<policy>: <counts.claude> claude / <counts.codex> codex → autor <engine>)` suffix appended only when the resolution was mixed (`PAIR_POLICY` = `majority`|`tie-last`). Boundary-agnostic: identical for `S##-REVIEW.md` and `{TASK_ID}-REVIEW.md` — no per-boundary variant exists.
 
@@ -974,9 +997,11 @@ The native fixer block below runs only when `RF_WORKER_MODE == native`, builds
 the invocation from `RF_ROUTE_JSON_SAVED` plus active host capabilities, invokes
 the returned tool/arguments unchanged, and its emitted dispatch record uses
 `host_runtime:"${RF_HOST_RUNTIME}"`, the final `worker_mode`, and the unquoted
-boolean `dispatch_allowed`. A future `sidecar` verdict must use the canonical
-sidecar state machine and explicit host/declaration flags rather than entering
-the native block.
+boolean `dispatch_allowed`. When `RF_WORKER_MODE == sidecar` and
+`RESOLVED_WORKER_ENGINE` ∈ {claude, codex}, the fixer runs through the sidecar
+branch below (**§ Sidecar review-fix branch**: canonical sidecar state machine,
+never the native block). Any other engine keeps the named `unsupported-sidecar-unit`
+refusal from the resolver — agy has no review-fix contract.
 
 ### Cross-run claim gate (after the runtime gate, before the dispatch)
 
@@ -1014,11 +1039,55 @@ proceeds to `complete-slice` regardless, with the affected items marked as above
 
 ```
 Agent({ subagent_type: 'forge-executor',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{S##}\n{isolation header lines when ISOLATION_MODE != shared}\nFix ONLY the conceded review items listed below. Minimal diffs — no refactors, no scope creep beyond the listed items. Run the lint/format commands if configured. Commit with message: fix(review): {S##} conceded items\n\n## Conceded items\n{for each CONCEDED R#: R# — path:line — objeção: <claim> — ação: <suggested_fix (use advocate concession rationale when suggested_fix is absent, e.g. in agents engine)> — contexto: <defense.rationale>}\n\nReturn ---GSD-WORKER-RESULT--- with status and the commit SHA." })
+  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{S##}\n{isolation header lines when ISOLATION_MODE != shared}\nFix ONLY the conceded review items listed below. Minimal diffs — no refactors, no scope creep beyond the listed items. Run the lint/format commands if configured. Honor constraints.auto_commit: when true, commit only claimed fixes with message fix(review): {S##} conceded items; when false, leave changes uncommitted and return no commit SHA\n\n## Conceded items\n{for each CONCEDED R#: R# — path:line — objeção: <claim> — ação: <suggested_fix (use advocate concession rationale when suggested_fix is absent, e.g. in agents engine)> — contexto: <defense.rationale>}\n\nReturn ---GSD-WORKER-RESULT--- with status and the commit SHA." })
 ```
 
-- On success → update each conceded R# in `{S##}-REVIEW.md`: `**Correção:** aplicada — commit {sha}`.
-- On `Agent()` throw or `status != done` → update each: `**Correção:** falhou — deferida para triagem final`. These items join the OPEN items in the milestone-final triage (Step 9). **Never blocks** — the gate proceeds to `complete-slice` regardless.
+- On success → the parent validates the native result through `node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --accept-native "$RF_NATIVE_REQUEST"` (request: `cwd`, `contextRoot`, milestone/slice or task ids, `startSha` and `preDirty` captured before the launch with the canonical `forge-xllm.captureDirtySnapshot(CODE_DIR)` (including metadata hashes), `constraints.auto_commit`, `reviewFix: {boundary, decision: "proceed", items, claimPaths}` and `rawResult` = the worker block with `commit_sha` and one `items[{r,review_file?,outcome,note}]` entry per review-file/R# pair). It checks the SHA (exists, descends from `startSha`, still reachable from HEAD, touches only claimed files) and the complete post-turn delta against those dirty hashes for both commit policies. New outside-claim/protected writes are refused; unchanged preexisting dirty work is preserved, and missing snapshot is `review-fix-native-snapshot-missing`. It honors `auto_commit` (a native commit under `auto_commit:false` is unverified) and writes per-R# lines: `**Correção:** aplicada — commit {sha}` only for items reported `fixed` whose file is in the commit.
+- On `Agent()` throw, `status != done` or `review-fix-native-unverified` → update each: `**Correção:** falhou — deferida para triagem final`. These items join the OPEN items in the milestone-final triage (Step 9). **Never blocks** — the gate proceeds to `complete-slice` regardless.
+
+### Sidecar review-fix branch (`RF_WORKER_MODE == sidecar`, engine claude|codex)
+
+Runs only after the runtime gate allowed the route **and** the claim gate returned `proceed`. It
+reuses `RF_ROUTE_JSON_SAVED` (no second resolver call) and never falls back to native or to another
+engine.
+
+1. Build the request outside `WORKING_DIR`/`CODE_DIR` and run the adapter. The route is the saved
+   resolver JSON itself — host, engine, model, effort and the sidecar declaration travel inside it,
+   never as re-typed flags. `RF_BOUNDARY` is `slice`, `task` or `milestone-triage`; `RF_UNIT_ID` is
+   `{S##}`, `{TASK_ID}` or `{M###}-triage`; `$ITEMS_JSON` holds the conceded items (`r`,
+   `path`/`path_line`, `claim`, `action`, `context`, plus `review_file` per item at the triage
+   boundary); `$RF_CLAIM_PATHS_FILE` holds exactly the `paths` the claim gate returned with `proceed`;
+   `RF_AUTO_COMMIT` is the operator's `auto_commit`; `RF_WRITABLE_ROOTS_JSON` is set only for
+   multi-repo attribution. Run it in the background with the polling, heartbeat and orphan detection
+   of `shared/forge-bidirectional-sidecar.md § Execução em background` and relay every
+   `[forge-sidecar]` stderr line literally.
+
+```bash
+RF_REQUEST_DIR=$(mktemp -d)
+RF_REQUEST="$RF_REQUEST_DIR/review-fix-request.json"
+printf '%s' "$RF_ROUTE_JSON_SAVED" | RF_REQUEST="$RF_REQUEST" RF_RESULT_FILE="$RF_REQUEST_DIR/review-fix-result.json" \
+  RF_BOUNDARY="$RF_BOUNDARY" RF_UNIT_ID="$RF_UNIT_ID" RF_MILESTONE_ID="{M###}" RF_ITEMS_FILE="$ITEMS_JSON" \
+  RF_CLAIM_FILE="$RF_CLAIM_PATHS_FILE" RF_CODE_DIR="${CODE_DIR:-$WORKING_DIR}" RF_WORKING_DIR="$WORKING_DIR" \
+  RF_AUTO_COMMIT="$RF_AUTO_COMMIT" RF_WRITABLE_ROOTS="$RF_WRITABLE_ROOTS_JSON" RF_WORKFLOW_ID="${RUN_ID:-$RF_UNIT_ID}" \
+  RF_DISPATCH_ID="review-fix-$RF_UNIT_ID-$(date +%s)" node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const fs=require('fs'),e=process.env,route=JSON.parse(d),b=e.RF_BOUNDARY;const ids=b==='task'?{taskId:e.RF_UNIT_ID}:b==='slice'?{milestoneId:e.RF_MILESTONE_ID,sliceId:e.RF_UNIT_ID}:{milestoneId:e.RF_MILESTONE_ID};fs.writeFileSync(e.RF_REQUEST,JSON.stringify({unitType:'review-fix',...ids,cwd:e.RF_CODE_DIR,contextRoot:e.RF_WORKING_DIR,resultFile:e.RF_RESULT_FILE,route,workflowId:e.RF_WORKFLOW_ID,dispatchId:e.RF_DISPATCH_ID,constraints:{auto_commit:e.RF_AUTO_COMMIT==='true',deploy:false},...(e.RF_WRITABLE_ROOTS?{writableRoots:JSON.parse(e.RF_WRITABLE_ROOTS)}:{}),reviewFix:{boundary:b,decision:'proceed',items:JSON.parse(fs.readFileSync(e.RF_ITEMS_FILE,'utf8')),claimPaths:JSON.parse(fs.readFileSync(e.RF_CLAIM_FILE,'utf8'))}}))})"
+node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --request "$RF_REQUEST"
+RF_SIDECAR_EXIT=$?
+```
+
+   A replay re-runs the same `$RF_REQUEST` file (same dispatch id); it is never rebuilt.
+2. Read `resultFile`. The adapter already published the per-R# lines in the parent-derived
+   REVIEW.md (and, only with `auto_commit:true` in git, made exactly one parent commit of the
+   verified paths with `Forge-Dispatch-Id`). Nothing is rewritten here.
+3. Non-zero exit (`$RF_SIDECAR_EXIT`) or a failure result (`review-fix-result-invalid`, `review-fix-outside-claim`,
+   `review-fix-protected-metadata`, `review-fix-baseline-moved`, `review-fix-claim-mismatch`,
+   `review-fix-concurrent-change`, `review-fix-review-conflict`, `sidecar-attempt-interrupted`, …) →
+   the items stay/are marked `falhou — deferida para triagem final` and join Step 9. Never blocks the
+   slice, never relaunches: a `ready` receipt is replayed by re-running the same request (zero provider
+   turns); `failed` returns the recorded failure; `started` refuses with `sidecar-attempt-interrupted`.
+
+The same branch serves Step 7b (`Refatorar agora`) and Step 9 with boundary `milestone-triage`
+(`RF_UNIT_ID={M###}-triage`, one `review_file` per item) and the standalone task review with
+boundary `task`.
 - **No re-review.** The fix commit is NOT re-run through the reviewer (deliberate — prevents review ping-pong). The fix lands on the run branch `forge/{run}` and reaches the default branch only when the operator integrates that branch — there is no `complete-slice` merge; no unit of the loop integrates.
 
 ## Step 7b — Posture (handle OPEN items)
@@ -1137,7 +1206,7 @@ Shape written (documented for **readers of the log**, not for retyping — the e
 
 **`--author-engine` is required.** The emitter refuses (exit 2, nothing written) when it is absent or resolves to no known family, because the alternative is deriving `false` — "measured, no collapse" — from an author it could not identify. `author_engine` is also **recorded** in the row, not merely consumed: a reader that cannot see the author cannot recompute the flag, and cannot separate "the debaters agreed on a family that is not the author's" (the M134/S02 shape) from "everyone, including the author, is in one family" (the default shape). Both are `true`; the field is what tells them apart. On the explicit path the recorded value is the `claude` this spec assumes, not a measurement — the `auto` path is where it is derived from dispatch authorship.
 
-`conceded_fixed`, `engine`, `challenger` and `advocate` are additive fields (readers that ignore unknown fields stay compatible — same convention as `tier`/`reason` from M002). `engine` is either `"agents"` or `"workflow"` and is emitted by **both** engine paths. `conceded_fixed`: number of conceded items whose Step 7a fix landed. `challenger` is `"claude"`, `"codex"` or `"gemini"` — the challenger that actually ran the challenge (so an external→agent fallback records `"claude"`). `advocate` is the resolved `ADVOCATE_ALIAS` (e.g. `"fable"`) or JSON `null` when the id had no known alias (frontmatter governed instead) — same optional-field glue pattern as the rest of this event. `intra_family_withdrawn` is the count of items listed under **§ Adversarialidade reduzida** (`refuted+withdrawn` resolutions from the Step 5 truth table, **excluding** `open+withdrawn`) — always `0` when `intra_family_debate` is `false`.
+`conceded_fixed`, `engine`, `challenger` and `advocate` are additive fields (readers that ignore unknown fields stay compatible — same convention as `tier`/`reason` from M002). `engine` is either `"agents"` or `"workflow"` and is emitted by **both** engine paths. `conceded_fixed`: number of conceded items whose Step 7a fix landed. `challenger` is `"claude"`, `"codex"` or `"gemini"` — the challenger that actually ran the challenge (so an external→agent fallback records `"claude"`). `advocate` is the resolved `ADVOCATE_ALIAS` (e.g. `"fable"`) or JSON `null` when the id had no known alias (the native invocation can still carry the accepted full ID) — same optional-field glue pattern as the rest of this event. `intra_family_withdrawn` is the count of items listed under **§ Adversarialidade reduzida** (`refuted+withdrawn` resolutions from the Step 5 truth table, **excluding** `open+withdrawn`) — always `0` when `intra_family_debate` is `false`.
 
 **Agent unavailability (additive).** When a review `Agent()` stayed unavailable after the Retry Handler (see **§ Agent unavailability (review-agent-unavailable)**), append one extra line — it does **not** replace the `review` line above; both are emitted, and the Step 6 header is stamped honestly with what actually ran:
 

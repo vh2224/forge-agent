@@ -53,6 +53,7 @@
  *     [--resolved N] [--conceded N] [--open N] [--conceded-fixed N]
  *     [--intra-family-withdrawn N]
  *     [--unavailable-reason <enum> [--attempts N]]
+ *     [--efforts-json '<json>'|@<file>]
  *     [--json] [--dry-run]
  *
  * Exit: 0 wrote (or dry-ran); 2 invalid arguments. I/O errors propagate as a
@@ -256,6 +257,56 @@ function buildUnavailableEvent(opts) {
   };
 }
 
+// Optional per-leg effort telemetry (`--efforts-json`). Closed shape so a
+// retyped payload cannot drift: legs ⊆ challenge|defense|rebuttal|fix, each with
+// exactly requested/resolved/sent/applied/reason/diagnostics. `applied` is
+// always null — no transport reads back what a provider applied.
+const EFFORT_LEGS = ['challenge', 'defense', 'rebuttal', 'fix'];
+const EFFORT_FIELDS = ['requested', 'resolved', 'sent', 'applied', 'reason', 'diagnostics'];
+const EFFORT_VALUES = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function parseEfforts(raw, errors) {
+  let value;
+  try {
+    const text = String(raw);
+    value = JSON.parse(text.startsWith('@') ? fs.readFileSync(text.slice(1), 'utf8') : text);
+  } catch (error) {
+    errors.push(`--efforts-json must be JSON or @file (${(error && error.message) || error})`);
+    return null;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    errors.push('--efforts-json must be an object keyed by leg');
+    return null;
+  }
+  const out = {};
+  for (const [leg, entry] of Object.entries(value)) {
+    if (!EFFORT_LEGS.includes(leg)) { errors.push(`--efforts-json leg must be one of ${EFFORT_LEGS.join('|')} (got ${JSON.stringify(leg)})`); continue; }
+    const keys = entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.keys(entry) : null;
+    if (!keys || keys.length !== EFFORT_FIELDS.length || EFFORT_FIELDS.some((field) => !keys.includes(field))) {
+      errors.push(`--efforts-json.${leg} must have exactly ${EFFORT_FIELDS.join(', ')}`);
+      continue;
+    }
+    const nullableEffort = (field) => entry[field] === null || EFFORT_VALUES.includes(entry[field]);
+    if (!nullableEffort('requested') || !nullableEffort('resolved')) errors.push(`--efforts-json.${leg} requested/resolved must be an effort or null`);
+    if (entry.sent !== null && (typeof entry.sent !== 'string' || !/^(?:low|medium|high|xhigh|max|agent-frontmatter:(?:low|medium|high|xhigh|max))$/.test(entry.sent))) {
+      errors.push(`--efforts-json.${leg}.sent must be an effort, agent-frontmatter:<effort> or null`);
+    }
+    if (entry.applied !== null) errors.push(`--efforts-json.${leg}.applied must be null (no provider readback exists)`);
+    if (entry.reason !== null && (typeof entry.reason !== 'string' || entry.reason.length > 200 || /[\r\n]/.test(entry.reason))) {
+      errors.push(`--efforts-json.${leg}.reason must be a short single-line string or null`);
+    }
+    if (!Array.isArray(entry.diagnostics) || entry.diagnostics.some((item) => !item || typeof item !== 'object'
+        || typeof item.code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(item.code))) {
+      errors.push(`--efforts-json.${leg}.diagnostics must be a list of {code} objects`);
+    }
+    out[leg] = {
+      requested: entry.requested, resolved: entry.resolved, sent: entry.sent, applied: null,
+      reason: entry.reason, diagnostics: Array.isArray(entry.diagnostics) ? entry.diagnostics.map((item) => ({ code: item && item.code })) : [],
+    };
+  }
+  return out;
+}
+
 function eventsPathFor(cwd) {
   return path.join(cwd, '.gsd', 'forge', 'events.jsonl');
 }
@@ -292,6 +343,12 @@ function runCli(argv) {
 
   const built = buildReviewEvent(opts);
   const errors = built.errors.slice();
+  // Absent flag → the review row is byte-identical to the historical one.
+  if (flags['efforts-json'] !== undefined) {
+    const efforts = flags['efforts-json'] === true ? (errors.push('--efforts-json requires a value'), null)
+      : parseEfforts(flags['efforts-json'], errors);
+    if (efforts) built.event.efforts = efforts;
+  }
   const lines = [built.event];
 
   if (flags['unavailable-reason'] !== undefined) {
@@ -330,7 +387,7 @@ function runCli(argv) {
   return 0;
 }
 
-module.exports = { buildReviewEvent, buildUnavailableEvent, appendEvents, familyOf };
+module.exports = { buildReviewEvent, buildUnavailableEvent, appendEvents, familyOf, parseEfforts, runCli };
 
 if (require.main === module) {
   process.exit(runCli(process.argv.slice(2)));
