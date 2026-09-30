@@ -20,7 +20,7 @@
   Fixtures sem inferência real (provedores falsos, diretórios temporários); ver
   `docs/forge-routing-capabilities-20260930.md`.
 
-## Não lançado - Roteamento fiel e publicação de memória
+### Não lançado - Roteamento fiel e publicação de memória
 
 - O adaptador sidecar informa em stderr o modelo enviado, esforço, host e estágio do despacho; os fluxos do orquestrador expõem essa evidência sem alterar stdout, receipts ou result-file.
 

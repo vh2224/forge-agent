@@ -31,7 +31,9 @@ global, conta, autenticação ou instalação (`~/.forge-agent`, `~/.claude`) fo
   `transport-capability-before-spawn`, `providerCalled:false`. Trocar versões GPT não era a causa.
 - **Depois da mudança (fixture):** a mesma rota (host claude → engine codex) é permitida pelo
   resolver e pelo guard e entrega via `forge-unit-sidecar` com app-server falso; a inversa (host codex
-  → engine claude) entrega com CLI falso — `scripts/forge-bidirectional-sidecar.test.js`. A revalidação read-only no projeto real será registrada junto à verificação final, sem instalação.
+  → engine claude) entrega com CLI falso — `scripts/forge-bidirectional-sidecar.test.js`. A consulta read-only final em `C:/SVN/CMA/WDMA` confirmou a rota permitida na fonte
+  corrigida e a recusa antes do spawn na instalação preservada. Essa resolução não é prova de
+  execução de um provedor.
 
 ## Arquitetura
 
@@ -60,6 +62,10 @@ global, conta, autenticação ou instalação (`~/.forge-agent`, `~/.claude`) fo
 - `scripts/forge-review-effort.js`: esforço opt-in por leg (Codex app-server, Claude CLI, nativo
   Claude por binding observado, nativo Codex por `reasoning_effort` das capabilities observadas); só
   planeja. Os callers públicos xllm consomem as prefs por leg: override explícito > pref > ausência legada, sem aumento automático de custo. Valores inválidos, erros de prefs e thinking incompatível recusam antes do transporte. `effort_sent` é preenchido pelo chamador depois do lançamento.
+
+- Callers públicos de review leem prefs do `contextRoot` quando fornecido, mantendo o código em
+  `cwd`. Preflight incompatível emite `recusado`, camada nomeada e `provider_called:false`; o esforço
+  enviado fica desconhecido até o lançamento efetivo. O CLI encaminha `--context-root` nos três legs.
 
 ## Contratos afetados
 
@@ -94,8 +100,10 @@ de dados (JSON do resolver salvo → `route` do request), não por flags de argv
 - O sandbox por raiz não é cerca por arquivo: a garantia de escopo do review-fix é a checagem pré-spawn
   (claim, realpath) + detecção pós-execução e reset cirúrgico; escritas transitórias durante o turno não
   são prevenidas. Sobreposição com arquivo previamente sujo não reseta nada (`operator-required`).
-- Sem `auto_commit`, a aceitação nativa verifica a árvore de trabalho atual; arquivos já sujos no claim
-  não distinguem autoria.
+- A aceitação nativa exige hashes anteriores ao lançamento sob ambas as políticas de commit.
+  Escritas novas fora do claim, inclusive sem commit, impedem publicar sucesso; bytes previamente
+  sujos e inalterados não contam como correção. Alterações simultâneas de terceiros dentro do claim
+  continuam uma limitação de atribuição de autoria, não uma garantia do sandbox.
 
 ## Testes (offline)
 
@@ -111,4 +119,11 @@ de dados (JSON do resolver salvo → `route` do request), não por flags de argv
   `scripts/forge-review-effort.test.js` (inclui invariância de `forge-cost-policy`),
   `scripts/forge-native-invocation.test.js`, `scripts/forge-dispatch-source-guard.test.js`, além das
   suítes de resolver, claude-sidecar, dispatch-event, review-emit, prefs e instalação.
-- Resultado final das validações: pendente da integração e verificação final.
+- Gate offline final ambos os hosts/win32: 11/11 passaram. Validação completa final em andamento.
+- Smoke local bruto: 2878 assertions passaram, 2 falharam, 10 foram puladas por limites de Windows/
+  ausência de bash. As duas falhas foram reproduzidas nas mesmas seções da fonte base `223e6fa`:
+  `(k)` depende do tier global do operador (gpt-6.1-sol, enquanto a fixture espera Claude); o check do
+  schema instalado detecta drift no Codex CLI `0.159.2` (MCP UI, disabledPluginIds, descrições/enum de
+  erros e conteúdo de imagem). Não são provas de rejeição de modelo nem de inferência real. A fonte
+  de pin e as preferências globais permaneceram intactas; esta PR não corrige essas duas pendências
+  preexistentes. Os testes determinísticos de schema/transportes permanecem no runner canônico.

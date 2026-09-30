@@ -174,7 +174,10 @@ function identityStage(opts, stage, extra = {}) {
   if (stage === 'iniciado' && (!Number.isInteger(extra.pid) || extra.pid <= 0)) return;
   if (stage === 'solicitado') context.requested = true;
   if (stage === 'iniciado') context.started = true;
-  if (typeof opts.announce === 'function') opts.announce(stage, { ...context.fields, ...extra,
+  if (typeof opts.announce === 'function') opts.announce(stage, { ...context.fields,
+    ...(opts._reviewEffort ? { effort_requested: opts._reviewEffort.effort_requested,
+      effort_resolved: opts._reviewEffort.effort_resolved, effort_planned: opts._reviewEffort.effort_planned,
+      effort_sent: stage === 'iniciado' || context.started ? context.fields.effort : null, effort_applied: null } : {}), ...extra,
     provider_called: stage === 'iniciado' || context.started });
 }
 
@@ -185,8 +188,8 @@ function reviewCallOptions(mode, opts) {
   if (!leg) return opts;
   const engine = opts.engine || 'codex';
   const policy = require('./forge-model-policy');
-  const loaded = readPrefsCached(opts.cwd || process.cwd());
-  if (!loaded.ok) throw boundaryError('review-prefs-invalid', JSON.stringify(loaded.errors));
+  const loaded = readPrefsCached(opts.contextRoot || opts.cwd || process.cwd());
+  if (!loaded.ok) throw Object.assign(boundaryError('review-prefs-invalid', JSON.stringify(loaded.errors)), { layer: 'review-prefs' });
   const prefs = loaded.prefs;
   const key = require('./forge-review-effort').LEGS[leg];
   const review = { ...(prefs.review || {}) };
@@ -194,34 +197,40 @@ function reviewCallOptions(mode, opts) {
   const transport = { codex: 'app-server', claude: 'claude-cli', agy: 'agy-cli' }[engine];
   const planned = require('./forge-review-effort').resolveReviewEffort({ leg, engine, transport,
     model: opts.model, cwd: opts.cwd, prefs: { ...prefs, review } });
-  if (planned.refusal) throw boundaryError(planned.refusal.code, planned.refusal.hint);
+  if (planned.refusal) throw Object.assign(boundaryError(planned.refusal.code, planned.refusal.hint),
+    { layer: 'review-effort', reviewEffort: planned });
   const thinkingKey = policy.thinkingPrefKey(opts.model);
   const thinkingRequested = opts.thinkingRequested ?? (prefs.thinking && prefs.thinking[thinkingKey]);
   if (engine === 'claude') {
     const thinking = policy.evaluateThinking({ model: opts.model, effort: planned.effort_resolved,
       mode: thinkingRequested, transport });
-    if (!thinking.ok) throw boundaryError(thinking.reason_code, 'Review thinking cannot be delivered by this transport.');
+    if (!thinking.ok) throw Object.assign(boundaryError(thinking.reason_code, 'Review thinking cannot be delivered by this transport.'),
+      { layer: 'model-policy', reviewEffort: planned });
   }
-  return { ...opts, ...(planned.configured ? { effort: planned.effort_resolved } : {}),
+  return { ...opts, ...(planned.configured ? { effort: planned.effort_resolved, _reviewEffort: planned } : {}),
     ...(thinkingRequested ? { thinkingRequested } : {}) };
 }
 
 async function withSidecarIdentity(mode, opts, driver) {
-  opts = reviewCallOptions(mode, opts);
   const dispatchId = opts.identity?.dispatch_id || opts.dispatchId || normalizeDispatchId(null, mode);
   const context = { requested: false, started: false, attempted: false, fields: null };
   const runOpts = { ...opts, dispatchId, _sidecarIdentity: context };
   try {
+    Object.assign(runOpts, reviewCallOptions(mode, runOpts));
     context.fields = sidecarIdentity(mode, runOpts, opts.engine || 'codex', dispatchId);
     return await driver(runOpts);
   }
   catch (error) {
+    if (error.provider_called === undefined && !context.attempted && !context.started) error.provider_called = false;
     if (!context.fields) context.fields = { phase: opts.identity?.phase || mode, unit: opts.identity?.unit || mode,
       engine: opts.engine || 'codex', transport: opts.engine === 'claude' ? 'claude-cli' : opts.engine === 'agy' ? 'agy-cli' : 'app-server',
       model_sent: '-', effort: opts.effort, host: opts.hostRuntime, dispatch_id: dispatchId };
     identityStage(runOpts, context.started ? 'falhou' : 'recusado', {
       reason_code: error.code || classifyError(error.message) || 'sidecar-failed',
-      ...(context.started ? {} : { model_route: context.fields.model_sent, model_sent: '-' }),
+      ...(error.layer ? { layer: error.layer } : {}),
+      ...(error.reviewEffort ? { effort_requested: error.reviewEffort.effort_requested,
+        effort_resolved: error.reviewEffort.effort_resolved, effort_planned: error.reviewEffort.effort_planned } : {}),
+      ...(context.started ? {} : { model_route: opts.model || context.fields.model_sent, model_sent: '-' }),
     });
     throw error;
   }
@@ -2979,11 +2988,11 @@ if (require.main === module) {
   const timeoutSecs = args.timeout ? Number(args.timeout) : DEFAULT_TIMEOUT_SECS;
   let pending;
   if (mode === 'challenge') {
-    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else if (mode === 'defend') {
-    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else {
-    pending = runRebuttal({ inputFile: args.input, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runRebuttal({ inputFile: args.input, cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   }
   pending
     .then((result) => {

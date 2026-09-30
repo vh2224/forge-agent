@@ -180,17 +180,58 @@ async function testCallers() {
         assert.strictEqual(capture.turn.model, options.model);
         assert.strictEqual(capture.turn.effort, expected, `${leg}/${label}`);
       }
+      // Worktree execution reads review preferences from the artifact owner.
+      const owner = fixture({ [key]: preference });
+      const worktree = fixture({ [key]: 'ultra' });
+      const ownerAnnouncements = [];
+      await xllm[method]({ ...worktree, contextRoot: owner.cwd,
+        announce: (stage, fields) => ownerAnnouncements.push({ stage, ...fields }) });
+      assert.strictEqual(captures.at(-1).turn.effort, preference, `${leg}/owner prefs`);
+      const requested = ownerAnnouncements.find(item => item.stage === 'solicitado');
+      assert.strictEqual(requested.effort_planned, preference);
+      assert.strictEqual(requested.effort_sent, null, 'planned effort is not sent before launch');
+      const legacyAnnouncements = [];
+      await xllm[method]({ ...fixture({}), announce: (stage, fields) => legacyAnnouncements.push({ stage, ...fields }) });
+      assert(!legacyAnnouncements.some(item => Object.hasOwn(item, 'effort_planned')), 'absence retains legacy announcement shape');
+      async function refused(options, code, layer, effortRequested) {
+        const announcements = [];
+        await assert.rejects(() => xllm[method]({ ...options,
+          announce: (stage, fields) => announcements.push({ stage, ...fields }) }), error => {
+          assert.strictEqual(error.code, code);
+          assert.strictEqual(error.provider_called, false);
+          return true;
+        });
+        assert.strictEqual(announcements.length, 1);
+        assert.strictEqual(announcements[0].stage, 'recusado');
+        assert.strictEqual(announcements[0].reason_code, code);
+        assert.strictEqual(announcements[0].layer, layer);
+        assert.strictEqual(announcements[0].provider_called, false);
+        assert.strictEqual(announcements[0].model_sent, '-');
+        assert.strictEqual(announcements[0].model_route, options.model);
+        if (effortRequested !== undefined) assert.strictEqual(announcements[0].effort_requested, effortRequested);
+      }
       const before = captures.length;
-      await assert.rejects(() => xllm[method](fixture({ [key]: 'ultra' })), { code: 'review-effort-invalid' });
+      await refused(fixture({ [key]: 'ultra' }), 'review-effort-invalid', 'review-effort', 'ultra');
+      const invalidOwner = fixture({ [key]: 'ultra' });
+      const cliWorktree = fixture({});
+      const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-xllm.js'),
+        '--mode', leg === 'defense' ? 'defend' : leg, '--engine', 'codex', '--host-runtime', 'claude',
+        '--sidecar-declared', '--cwd', cliWorktree.cwd, '--context-root', invalidOwner.cwd,
+        '--model', 'gpt-6.1-sol', '--diff-cmd', 'git diff', '--input', cliWorktree.inputFile],
+      { encoding: 'utf8', windowsHide: true });
+      assert.strictEqual(cli.status, 2);
+      assert.match(cli.stderr, /review-effort-invalid/);
+      assert.match(cli.stderr, /recusado/);
+
       await assert.rejects(() => xllm[method]({ ...fixture({}), effort: 'ultra' }), { code: 'review-effort-invalid' });
       await assert.rejects(() => xllm[method]({ ...fixture({ [key]: 'high' }), engine: 'agy' }), { code: 'effort-transport-unsupported' });
       const badPrefs = fixture({});
       fs.writeFileSync(path.join(badPrefs.cwd, '.gsd/forge-prefs.jsonc'), '{broken');
-      await assert.rejects(() => xllm[method](badPrefs), { code: 'review-prefs-invalid' });
+      await refused(badPrefs, 'review-prefs-invalid', 'review-prefs');
       for (const thinking of ['disabled', 'between_tools']) {
-        await assert.rejects(() => xllm[method]({ ...fixture({ [key]: 'high' }, { thinking: { sonnet_phases: thinking } }),
-          engine: 'claude', model: 'claude-sonnet-5-5', hostRuntime: 'codex' }),
-        { code: thinking === 'disabled' ? 'thinking-disabled-incompatible' : 'thinking-transport-unsupported' });
+        await refused({ ...fixture({ [key]: 'high' }, { thinking: { sonnet_phases: thinking } }),
+          engine: 'claude', model: 'claude-sonnet-5-5', hostRuntime: 'codex' },
+          thinking === 'disabled' ? 'thinking-disabled-incompatible' : 'thinking-transport-unsupported', 'model-policy', 'high');
       }
       assert.strictEqual(captures.length, before, 'all refusals happen before transport');
     }

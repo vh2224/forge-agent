@@ -624,6 +624,21 @@ when active capabilities accept it, an alias only when that adapter requires it.
 representation is an explicit worker-unavailability result before launch; never omit `model:`
 or inherit an unobserved default. The same rule applies to the reviewer.
 
+Pass this prompt template verbatim as the canonical native invocation builder's `prompt`,
+substituting the current boundary values and rendered objections:
+
+```text
+WORKING_DIR: {WORKING_DIR}
+UNIT: complete-slice/{S##}
+DIFF_CMD: {DIFF_CMD}
+DEFENSE_FILE: {DEFENSE_FILE}
+OBJECTIONS:
+{OBJECTIONS}
+```
+
+For a standalone task, use its current unit identity and task-specific `DEFENSE_FILE`.
+Keep every field above when adapting the native tool arguments.
+
 The native preflight binds effort to the observed agent definition. A `thinking:` frontmatter
 line is inert: Claude subagents inherit session thinking. It neither guarantees adaptive
 thinking nor controls provider behavior. Explicit incompatible thinking intent is refused by
