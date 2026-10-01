@@ -604,17 +604,20 @@ function publishReviewFixRecord(request, record) {
     // The verified files must still hold the bytes the worker left at ready
     // time. Any concurrent edit (between the response and this publication or
     // a replay) is refused before any commit: other work is never committed.
-    // A reconciled commit is checked against the same hashes by commitVerified.
+    // Reconciliation uses the independently captured normalized Git blobs.
     const expected = record.verified_hashes || {};
     const current = verifiedHashes(files.cwd, result.verified_paths);
-    const committedAlready = reviewFix.reconcileCommit(files.cwd, result.start_sha, record.dispatch_id);
-    if (!committedAlready && JSON.stringify(current) !== JSON.stringify(expected)) {
+    if (JSON.stringify(current) !== JSON.stringify(expected)) {
       fail('review-fix-concurrent-change', 'Verified files changed after the worker result; nothing was committed or published.');
     }
     // REVIEW.md lines are written only after the commit is durable, so until
     // then every REVIEW.md must still be byte-identical to the pre-turn
     // snapshot. A review edited meanwhile refuses BEFORE any commit.
     reviewFix.assertReviewSnapshot({ root: files.root, resolveTarget: target, expectedHashes: record.review_snapshot });
+    if (request.constraints?.auto_commit === true && result.vcs !== 'svn' && !Array.isArray(result.repo_baselines)
+      && !record.verified_git_blobs) {
+      fail('review-fix-git-identity-missing', 'Legacy receipt has no pre-commit Git identity; nothing was committed or published.');
+    }
     if (!commit) {
       record.publication = { ...(record.publication || {}), commit: { state: 'intent', dispatch_id: record.dispatch_id } };
       json(files.receiptFile, record);
@@ -624,7 +627,7 @@ function publishReviewFixRecord(request, record) {
       : reviewFix.commitVerified({ cwd: files.cwd, vcs: result.vcs === 'svn' ? 'svn' : 'git',
         autoCommit: Boolean(request.constraints && request.constraints.auto_commit === true),
         paths: result.verified_paths, preDirty: result.pre_dirty, startSha: result.start_sha,
-        dispatchId: record.dispatch_id, unitId: reviewFix.unitIdFor(loc.reviewFix), expectedHashes: expected });
+        dispatchId: record.dispatch_id, unitId: reviewFix.unitIdFor(loc.reviewFix), expectedBlobs: record.verified_git_blobs });
     if (outcome.reason === 'reconciled-commit-mismatch') {
       fail('review-fix-concurrent-change', 'The commit carrying this dispatch id does not match the verified files; nothing was published.');
     }
@@ -1230,6 +1233,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
           cli_version: result.transport_telemetry ? result.transport_telemetry.cli_version : null,
           transport_diagnostics: result.transport_telemetry ? result.transport_telemetry.policy_diagnostics : [] },
         review_snapshot: fix.reviewSnapshot, verified_hashes: verifiedHashes(cwd, result.verified_paths),
+        ...(r.constraints?.auto_commit === true && result.vcs !== 'svn' && !Array.isArray(result.repo_baselines)
+          ? { verified_git_blobs: require('./forge-review-fix').verifiedGitBlobs(cwd, result.verified_paths) } : {}),
         result, artifacts: [], publication: { commit: null } }
       : transport.mode === 'memory'
       ? { phase: 'ready', kind: 'memory-extraction', fingerprint, dispatch_id: dispatchId,

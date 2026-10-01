@@ -19,6 +19,9 @@
 - Telemetria separa esforço pedido, resolvido, enviado e aplicado (sempre desconhecido sem readback).
   Fixtures sem inferência real (provedores falsos, diretórios temporários); ver
   `docs/forge-routing-capabilities-20260930.md`.
+- Revisão independente: replay distingue bytes da working tree e identidade normalizada pelo Git;
+  o prompt nativo entrega resultados por item e retornos partial/blocked não publicam sucesso.
+  Thinking explícito é validado também na revisão nativa e na API direta do adaptador Claude.
 
 ### Não lançado - Roteamento fiel e publicação de memória
 

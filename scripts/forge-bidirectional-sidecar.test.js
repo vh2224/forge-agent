@@ -413,6 +413,56 @@ async function reviewFixMatrix() {
       }
     }
 
+    // Normalized Git identities survive publication interrupted after commit.
+    // Both fixtures use real temporary Git configuration; providers stay fake.
+    for (const normalization of ['autocrlf', 'clean-filter']) {
+      const fx = fixture('codex');
+      if (normalization === 'autocrlf') g(fx.code, 'config', 'core.autocrlf', 'true');
+      else {
+        const cleaner = path.join(fx.base, 'clean.js');
+        write(cleaner, "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>process.stdout.write(s.replace(/WORK/g,'BLOB')));\n");
+        g(fx.code, 'config', 'filter.fixture.clean', `node "${cleaner.replace(/\\/g, '/')}"`);
+        g(fx.code, 'config', 'filter.fixture.required', 'true');
+        write(path.join(fx.code, '.gitattributes'), 'src/a.js filter=fixture\n');
+        g(fx.code, 'add', '.gitattributes');
+        g(fx.code, 'commit', '-qm', 'fixture filter');
+        fx.start = g(fx.code, 'rev-parse', 'HEAD');
+      }
+      const bytes = normalization === 'autocrlf' ? 'a fixed\r\n' : 'a fixed WORK\n';
+      const r = request(fx, 'claude', 'slice');
+      setControl({ ...OK, writes: { 'src/a.js': bytes } });
+      const before = spawns().length;
+      const delivered = await unit.runUnitSidecar(r);
+      const receiptFile = `${r.resultFile}.receipt.json`;
+      const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      assert.strictEqual(receipt.verified_git_blobs['src/a.js'], g(fx.code, 'rev-parse', 'HEAD:src/a.js'));
+      assert.notStrictEqual(receipt.verified_hashes['src/a.js'], crypto.createHash('sha256')
+        .update(spawnSync('git', ['-C', fx.code, 'show', 'HEAD:src/a.js']).stdout).digest('hex'));
+      const interrupted = { ...receipt, publication: { commit: { state: 'intent', dispatch_id: r.dispatchId } } };
+      write(path.join(fx.working, RF_SLICE_REVIEW), RF_REVIEW);
+      write(receiptFile, interrupted);
+      const replay = await unit.runUnitSidecar(r);
+      assert.strictEqual(replay.commit_sha, delivered.commit_sha);
+      assert.strictEqual(g(fx.code, 'rev-list', '--count', `${fx.start}..HEAD`), '1');
+      // Even after a matching commit, concurrent working-tree bytes refuse.
+      write(path.join(fx.working, RF_SLICE_REVIEW), RF_REVIEW);
+      write(receiptFile, interrupted);
+      write(path.join(fx.code, 'src/a.js'), 'another writer\n');
+      await rejects(() => unit.runUnitSidecar(r), 'review-fix-concurrent-change');
+      write(path.join(fx.code, 'src/a.js'), bytes);
+      // Trailer and paths alone are insufficient; normalized blobs must match.
+      write(receiptFile, { ...interrupted, verified_git_blobs: { 'src/a.js': 'f'.repeat(40) } });
+      await rejects(() => unit.runUnitSidecar(r), 'review-fix-concurrent-change');
+      const legacy = { ...interrupted }; delete legacy.verified_git_blobs;
+      write(receiptFile, legacy);
+      await rejects(() => unit.runUnitSidecar(r), 'review-fix-git-identity-missing');
+      write(receiptFile, interrupted);
+      const recovered = await unit.runUnitSidecar(r);
+      assert.strictEqual(recovered.commit_sha, delivered.commit_sha);
+      assert.strictEqual(g(fx.code, 'rev-list', '--count', `${fx.start}..HEAD`), '1', 'no second commit');
+      assert.strictEqual(spawns().length, before + 1, 'interrupted publication and every replay call zero providers');
+    }
+
     // Repeated R1 in two reviews remains distinct through both real sidecar adapters.
     for (const engine of ['codex', 'claude']) {
       const fx = fixture(engine);

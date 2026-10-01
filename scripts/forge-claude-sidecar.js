@@ -34,6 +34,9 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   CANCELLED: 'claude-cancelled',
   CLI_VERSION_UNSUPPORTED: 'claude-cli-version-unsupported',
   THINKING_TRANSPORT_UNSUPPORTED: 'thinking-transport-unsupported',
+  THINKING_DISABLED_INCOMPATIBLE: 'thinking-disabled-incompatible',
+  THINKING_ENABLED_INCOMPATIBLE: 'thinking-enabled-incompatible',
+  THINKING_MODE_UNKNOWN: 'thinking-mode-unknown',
   EFFORT_UNSUPPORTED_BY_MODEL: 'effort-unsupported-by-model',
 });
 
@@ -91,6 +94,9 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.CANCELLED]: 'The Claude worker was cancelled.',
     [CLAUDE_SIDECAR_REASON_CODES.CLI_VERSION_UNSUPPORTED]: 'The installed Claude CLI is older than the minimum version the model policy requires for this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_TRANSPORT_UNSUPPORTED]: 'The requested thinking mode has no documented Claude CLI argument. No worker was launched and no parameter was invented.',
+    [CLAUDE_SIDECAR_REASON_CODES.THINKING_DISABLED_INCOMPATIBLE]: 'Disabled thinking is incompatible with this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.THINKING_ENABLED_INCOMPATIBLE]: 'Enabled thinking is incompatible with this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.THINKING_MODE_UNKNOWN]: 'The requested thinking mode is not documented for this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL]: 'The requested effort is not documented for this model. No worker was launched and the effort was not lowered.',
   };
   const error = new Error(messages[code] || 'Claude sidecar failure.');
@@ -508,11 +514,17 @@ async function invokeClaudeSidecar(opts) {
   const launchIdentity = claudeLaunchIdentity(options);
   const model = launchIdentity.model_sent;
   const effort = launchIdentity.effort;
-  // Defense in depth behind the resolver: between_tools has no documented CLI
-  // argument, so it is refused rather than dropped or approximated.
-  if (typeof options.thinkingRequested === 'string'
-      && options.thinkingRequested.trim().toLowerCase() === 'between_tools') {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.THINKING_TRANSPORT_UNSUPPORTED);
+  // Direct adapter callers need the same full thinking policy as the resolver.
+  // Refuse before the version probe, prompt file or inference child exists.
+  const thinking = modelPolicy.evaluateThinking({ model, effort, transport: 'claude-cli',
+    mode: typeof options.thinkingRequested === 'string'
+      ? options.thinkingRequested.trim().toLowerCase() : options.thinkingRequested });
+  if (!thinking.ok) {
+    const refused = sidecarError(thinking.reason_code);
+    refused.provider_called = false;
+    refused.layer = 'model-policy';
+    refused.policy = thinking;
+    throw refused;
   }
   // Defense in depth for direct adapter callers (review legs through
   // forge-xllm): an effort a documented entry does not list is refused, never

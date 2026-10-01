@@ -3,7 +3,8 @@
 
 // Opt-in effort for the review legs (challenge, defense, rebuttal).
 //
-// Absent preference → exactly the legacy call: no argv, no preflight, no cost.
+// Absent effort preference → legacy effort delivery: no argv, no cost.
+// Explicit native Claude thinking preferences still pass the model-policy guard.
 // Present preference → one delivery plan, never a silent downgrade:
 //   - external leg on Codex (app-server) or the Claude CLI: the model policy
 //     clamps the value when the model is known and `--effort <v>` is returned
@@ -157,6 +158,21 @@ function resolveReviewEffort(input) {
   const review = prefs.review && typeof prefs.review === 'object' ? prefs.review : {};
   const key = LEGS[leg];
   const result = baseResult(leg);
+  const model = text(options.model);
+  // Operator preferences are independent of an opt-in review effort and of the
+  // inert thinking declaration in an agent's frontmatter. Validate them even
+  // when the leg keeps its legacy effort delivery (no binding read or launch).
+  if (transport === 'claude-native') {
+    const thinkingKey = modelPolicy.thinkingPrefKey(model);
+    const mode = prefs.thinking && prefs.thinking[thinkingKey];
+    const thinking = modelPolicy.evaluateThinking({ model, effort: review[key],
+      mode: typeof mode === 'string' ? mode.trim().toLowerCase() : mode, transport });
+    if (!thinking.ok) {
+      return refuse(result, thinking.reason_code,
+        `A preferência thinking.${thinkingKey} não é compatível com ${model} no leg nativo ${leg}; nada foi lançado.`,
+        thinking.diagnostics[0]);
+    }
+  }
   if (!Object.prototype.hasOwnProperty.call(review, key) || review[key] === null || review[key] === undefined) return result;
 
   const requested = text(review[key]).toLowerCase();
@@ -166,7 +182,6 @@ function resolveReviewEffort(input) {
       `review.${key} = ${JSON.stringify(review[key])} não é um esforço válido (low|medium|high|xhigh|max); o leg ${leg} não foi lançado.`,
       { requested: review[key] });
   }
-  const model = text(options.model);
   if (transport === 'agy-cli') {
     return refuse(configured, 'effort-transport-unsupported',
       `review.${key} = ${requested} não tem transporte no agy; o esforço não seria entregue. Remova a chave ou use outro challenger; nenhum worker foi trocado.`,

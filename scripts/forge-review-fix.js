@@ -511,8 +511,9 @@ function commitVerified(input) {
   const reconciled = reconcileCommit(value.cwd, value.startSha, value.dispatchId, runner);
   if (reconciled) {
     // A trailer is not proof by itself: the commit must touch exactly the
-    // verified paths with exactly the verified bytes.
-    if (value.expectedHashes && !commitMatches(value.cwd, value.startSha, reconciled, value.expectedHashes, runner)) {
+    // verified paths with the Git-normalized identity captured before commit.
+    // Legacy working-tree SHA256 receipts cannot prove this identity.
+    if (!value.expectedBlobs || !commitMatches(value.cwd, value.startSha, reconciled, value.expectedBlobs, runner)) {
       return { sha: null, reason: 'reconciled-commit-mismatch' };
     }
     return { sha: reconciled, reason: null, reconciled: true };
@@ -538,18 +539,27 @@ function commitFiles(cwd, from, to, runner) {
   return diff.ok ? diff.stdout.split('\0').filter(Boolean) : null;
 }
 
-// sha256 of a path's bytes at a commit; null when absent there.
-function blobHash(cwd, sha, relative, runner = spawnSync) {
-  const result = runner('git', ['-C', cwd, 'show', `${sha}:${relative}`], { shell: false, windowsHide: true,
-    maxBuffer: 64 * 1024 * 1024 });
-  return !result.error && result.status === 0 ? hash(result.stdout) : null;
+// Snapshot normalized Git blobs BEFORE committing. --path applies the same
+// attributes/clean filters as git add; raw working-tree hashes remain separate.
+function verifiedGitBlobs(cwd, paths, runner = spawnSync) {
+  const blobs = {};
+  for (const relative of sortedPaths(paths)) {
+    if (!fs.existsSync(path.join(cwd, relative))) { blobs[relative] = null; continue; }
+    const result = git(cwd, ['hash-object', `--path=${relative}`, '--', relative], runner);
+    if (!result.ok || !/^[0-9a-f]{40,64}$/.test(result.stdout.trim())) throw refusal('review-fix-git-identity-unreadable', relative);
+    blobs[relative] = result.stdout.trim();
+  }
+  return blobs;
 }
 
-function commitMatches(cwd, startSha, sha, expectedHashes, runner) {
+function commitMatches(cwd, startSha, sha, expectedBlobs, runner) {
   const files = commitFiles(cwd, startSha, sha, runner);
-  const expected = Object.keys(expectedHashes).sort();
+  const expected = Object.keys(expectedBlobs).sort();
   if (!files || JSON.stringify([...files].sort()) !== JSON.stringify(expected)) return false;
-  return expected.every(file => blobHash(cwd, sha, file, runner) === expectedHashes[file]);
+  return expected.every(file => {
+    const blob = git(cwd, ['rev-parse', '--verify', `${sha}:${file}`], runner);
+    return (blob.ok ? blob.stdout.trim() : null) === expectedBlobs[file];
+  });
 }
 
 function unitIdFor(boundaryInfo) {
@@ -598,7 +608,7 @@ function acceptNativeReviewFix(request, options) {
   const validStart = typeof r.startSha === 'string' && SHA_RE.test(r.startSha);
   const head = git(cwd, ['rev-parse', 'HEAD'], runner);
   const headSha = head.ok ? head.stdout.trim().toLowerCase() : '';
-  if (!STATUSES.includes(status) || !reportCheck.ok || !validStart || !headSha) reasonCode = 'review-fix-native-unverified';
+  if (status !== 'done' || !reportCheck.ok || !validStart || !headSha) reasonCode = 'review-fix-native-unverified';
   else if (!autoCommit) {
     // Without auto_commit the native fixer must not commit; its changes are
     // verified against the current working tree and stay uncommitted.
@@ -669,7 +679,7 @@ module.exports = {
   PROTOCOL_VERSION, BOUNDARIES, OUTCOMES, reviewFixSchema,
   reviewItemKey, correlateReviewItem, normalizeItems, normalizeRelativePath, deriveClaim, reviewFixIdentity, buildBrief, buildReviewFixPrompt,
   inspectReviewFixResult, validateReviewFixResult, verifyAgainstObserved, outcomeLine, setOutcomeInContent,
-  applyReviewOutcomes, assertReviewSnapshot, commitMessage, reconcileCommit, commitVerified, acceptNativeReviewFix, unitIdFor,
+  applyReviewOutcomes, assertReviewSnapshot, commitMessage, reconcileCommit, commitVerified, verifiedGitBlobs, acceptNativeReviewFix, unitIdFor,
   reviewFileFor,
 };
 

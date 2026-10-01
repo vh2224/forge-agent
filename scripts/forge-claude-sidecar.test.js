@@ -675,6 +675,53 @@ test('between_tools refuses before any probe or spawn', async () => {
   assert.deepStrictEqual(tempPromptDirs(), []);
 });
 
+test('direct Sonnet 5.5 thinking refusals happen before probes, prompt files and inference', async () => {
+  for (const [mode, code] of [['disabled', 'thinking-disabled-incompatible'],
+    ['enabled', 'thinking-enabled-incompatible'], ['ENABLED', 'thinking-enabled-incompatible'],
+    ['unknown', 'thinking-mode-unknown']]) {
+    const records = [];
+    const probes = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    let promptWrites = 0;
+    const mkdtemp = fs.mkdtempSync;
+    fs.mkdtempSync = (...args) => { promptWrites++; return mkdtemp(...args); };
+    try {
+      const error = await expectCode(adapter.invokeClaudeSidecar({
+        cwd: WORKSPACE, prompt: 'direct thinking', timeoutMs: 15000, model: 'claude-sonnet-5-5', effort: 'high',
+        thinkingRequested: mode, sourceEnv: sourceEnvFor(VERSION_CURRENT), probeRunner: countingProbe(probes),
+      }), code);
+      assert(Object.values(adapter.CLAUDE_SIDECAR_REASON_CODES).includes(error.code), 'named frozen reason code');
+      assert.strictEqual(error.provider_called, false);
+      assert.strictEqual(error.layer, 'model-policy');
+      assert.strictEqual(error.policy.reason_code, code);
+    } finally { fs.mkdtempSync = mkdtemp; }
+    assert.strictEqual(promptWrites, 0);
+    assert.strictEqual(probes.length, 0);
+    assert.strictEqual(records.length, 0);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+  }
+});
+
+test('direct Sonnet 5.5 adaptive thinking preserves exact medium/high/xhigh/max effort argv', async () => {
+  for (const effort of ['medium', 'high', 'xhigh', 'max']) {
+    const records = [];
+    const probes = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    const result = await adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'adaptive thinking', timeoutMs: 15000, model: 'claude-sonnet-5-5', effort,
+      thinkingRequested: 'adaptive', sourceEnv: sourceEnvFor(VERSION_CURRENT), probeRunner: countingProbe(probes),
+    });
+    assert.strictEqual(result.candidate.status, 'done');
+    assert.strictEqual(probes.length, 1);
+    assert.strictEqual(records.length, 1);
+    assert.deepStrictEqual(records[0].args.slice(0, -1),
+      [VERSION_CURRENT, '--model', 'claude-sonnet-5-5', '--effort', effort, ...LEGACY_ARGV_TAIL]);
+    assert.strictEqual(result.telemetry.effort_sent, effort);
+    assert.strictEqual(result.telemetry.effort_applied, null);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+  }
+});
+
 test('an effort the model policy does not document refuses before any probe or spawn', async () => {
   const records = [];
   const probes = [];

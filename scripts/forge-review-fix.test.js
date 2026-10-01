@@ -157,18 +157,18 @@ test('commitVerified: only git + auto_commit; refusals; exactly one commit with 
   git(dir, 'add', 'src/b.js');
   assert.strictEqual(rf.commitVerified({ ...base, autoCommit: true }).reason, 'foreign-staged-changes');
   git(dir, 'reset', '-q', '--', 'src/b.js');
-  const expectedHashes = { 'src/a.js': sha256(fs.readFileSync(path.join(dir, 'src', 'a.js'))) };
-  const done = rf.commitVerified({ ...base, autoCommit: true, expectedHashes });
+  const expectedBlobs = rf.verifiedGitBlobs(dir, base.paths);
+  const done = rf.commitVerified({ ...base, autoCommit: true, expectedBlobs });
   assert.match(done.sha, /^[0-9a-f]{40}$/);
   assert.strictEqual(git(dir, 'rev-list', '--count', `${start}..HEAD`), '1', 'exactly one commit');
   assert.deepStrictEqual(git(dir, 'show', '--name-only', '--format=', 'HEAD').split('\n'), ['src/a.js'], 'only verified paths');
   assert.match(git(dir, 'log', '-1', '--format=%B'), /Forge-Dispatch-Id: d-1/);
   assert.strictEqual(fs.readFileSync(path.join(dir, 'src', 'b.js'), 'utf8'), 'foreign\n', 'foreign work untouched');
   // Crash between commit and receipt: the replay reconciles instead of committing again.
-  const again = rf.commitVerified({ ...base, autoCommit: true, expectedHashes });
+  const again = rf.commitVerified({ ...base, autoCommit: true, expectedBlobs });
   assert.deepStrictEqual([again.sha, again.reconciled], [done.sha, true]);
   assert.strictEqual(git(dir, 'rev-list', '--count', `${start}..HEAD`), '1', 'no second commit');
-  const mismatch = rf.commitVerified({ ...base, autoCommit: true, expectedHashes: { 'src/a.js': 'f'.repeat(64) } });
+  const mismatch = rf.commitVerified({ ...base, autoCommit: true, expectedBlobs: { 'src/a.js': 'f'.repeat(40) } });
   assert.strictEqual(mismatch.reason, 'reconciled-commit-mismatch');
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -311,6 +311,84 @@ test('triage repeated R# is correlated by review file through prompt, result and
       [[first, 'fixed', true], [second, 'skipped', false]]);
 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('native non-done results defer real deltas under both commit policies', () => {
+  for (const status of ['partial', 'blocked']) for (const autoCommit of [false, true]) {
+    const dir = repo();
+    try {
+      const rel = '.gsd/milestones/M001/slices/S01/S01-REVIEW.md';
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), REVIEW);
+      const startSha = git(dir, 'rev-parse', 'HEAD');
+      const preDirty = require('./forge-xllm').captureDirtySnapshot(dir);
+      fs.writeFileSync(path.join(dir, 'src/a.js'), 'unfinished fix\n');
+      if (autoCommit) { git(dir, 'add', 'src/a.js'); git(dir, 'commit', '-qm', 'unfinished'); }
+      const request = { cwd: dir, contextRoot: dir, milestoneId: 'M001', sliceId: 'S01', startSha, preDirty,
+        constraints: { auto_commit: autoCommit },
+        reviewFix: { boundary: 'slice', decision: 'proceed', claimPaths: ['src/a.js'], items: [{ r: 'R1', path: 'src/a.js' }] },
+        rawResult: { status, commit_sha: autoCommit ? git(dir, 'rev-parse', 'HEAD') : null,
+          items: [{ r: 'R1', outcome: 'fixed', note: 'unfinished' }] } };
+      assert.throws(() => rf.acceptNativeReviewFix(request), error => {
+        assert.strictEqual(error.code, 'review-fix-native-unverified');
+        assert.strictEqual(error.result.status, 'failure');
+        assert.strictEqual(error.result.commit_sha, null);
+        assert.strictEqual(error.result.items[0].verified, false);
+        assert.strictEqual(error.result.items[0].commit_sha, null);
+        return true;
+      });
+      assert.match(fs.readFileSync(path.join(dir, rel), 'utf8'), /deferida/);
+      assert.doesNotMatch(fs.readFileSync(path.join(dir, rel), 'utf8'), /aplicada/);
+      assert.strictEqual(fs.readFileSync(path.join(dir, 'src/a.js'), 'utf8'), 'unfinished fix\n');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('Git identity snapshot includes deletion and legacy reconciliation fails closed', () => {
+  const dir = repo();
+  try {
+    const startSha = git(dir, 'rev-parse', 'HEAD');
+    fs.unlinkSync(path.join(dir, 'src/b.js'));
+    fs.writeFileSync(path.join(dir, 'src/a.js'), 'changed\n');
+    const input = { cwd: dir, paths: ['src/a.js', 'src/b.js'], startSha, dispatchId: 'delete-replay',
+      unitId: 'S01', preDirty: [], autoCommit: true };
+    const expectedBlobs = rf.verifiedGitBlobs(dir, input.paths);
+    assert.strictEqual(expectedBlobs['src/b.js'], null);
+    const committed = rf.commitVerified({ ...input, expectedBlobs });
+    assert(committed.sha);
+    const replay = rf.commitVerified({ ...input, expectedBlobs });
+    assert.strictEqual(replay.sha, committed.sha);
+    assert.strictEqual(replay.reconciled, true);
+    assert.strictEqual(rf.commitVerified(input).reason, 'reconciled-commit-mismatch');
+    assert.strictEqual(git(dir, 'rev-list', '--count', `${startSha}..HEAD`), '1');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('native prompts supply the complete result contract accepted for repeated review ids', () => {
+  for (const file of ['shared/forge-review.md', 'skills/forge-task/SKILL.md']) {
+    const source = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const prompt = source.split(/\r?\n/).find(line => line.includes('prompt:') && line.includes('Fix ONLY') && line.includes('review-fix/'));
+    assert(prompt, file);
+    for (const required of ['UNIT:', 'CLAIM_PATHS:', 'CONSTRAINTS:', 'status: done|partial|blocked', 'commit_sha:',
+      'items: [{r: R#, review_file:', 'outcome: fixed|failed|skipped', 'note:', 'exactly one items entry', 'repeated R#']) {
+      assert(prompt.includes(required), `${file}: ${required}`);
+    }
+  }
+  // Follow the actual shared prompt's declared fields, including repeated R#.
+  const dir = repo();
+  try {
+    const files = ['.gsd/milestones/M001/slices/S01/S01-REVIEW.md', '.gsd/milestones/M001/slices/S02/S02-REVIEW.md'];
+    const items = files.map((review_file, index) => ({ r: 'R1', review_file, path: index ? 'src/b.js' : 'src/a.js' }));
+    for (const file of files) { fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true }); fs.writeFileSync(path.join(dir, file), REVIEW); }
+    const startSha = git(dir, 'rev-parse', 'HEAD');
+    const preDirty = require('./forge-xllm').captureDirtySnapshot(dir);
+    fs.writeFileSync(path.join(dir, 'src/a.js'), 'fixed\n');
+    const accepted = rf.acceptNativeReviewFix({ cwd: dir, contextRoot: dir, milestoneId: 'M001', startSha, preDirty,
+      constraints: { auto_commit: false }, reviewFix: { boundary: 'milestone-triage', decision: 'proceed', items, claimPaths: ['src/a.js', 'src/b.js'] },
+      rawResult: { status: 'done', commit_sha: null, items: [{ r: 'R1', review_file: files[0], outcome: 'fixed', note: 'checked' },
+        { r: 'R1', review_file: files[1], outcome: 'skipped', note: 'unchanged' }] } });
+    assert.deepStrictEqual(accepted.items.map(item => item.verified), [true, false]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 process.stdout.write(`\nforge-review-fix: ${passed} passed, ${failed} failed\n`);

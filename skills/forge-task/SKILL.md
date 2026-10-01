@@ -1514,7 +1514,7 @@ TaskCreate({ subject: "[{TASK_ID}] review", activeForm: "review · forge-reviewe
     resolvedDispatch: RF_ROUTE_JSON, activeCapabilities: ACTIVE_NATIVE_CAPABILITIES,
     effortBinding: CLAUDE_EFFORT_BINDING,
     agentType: 'forge-executor', taskName: 'review-fix', forkTurns: 'none',
-    prompt: 'WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{TASK_ID}\nFix ONLY the accepted review items. Minimal diffs; no refactors or scope creep beyond those items. Return ---GSD-WORKER-RESULT---.' })
+    prompt: 'WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{TASK_ID}\nCLAIM_PATHS: {claimPaths}\nCONSTRAINTS: {constraints}\n{isolation header lines when ISOLATION_MODE != shared}\nFix ONLY the accepted review items listed below. Minimal diffs; no refactors or scope creep beyond those items. Run configured lint/format commands. Honor constraints.auto_commit: commit only claimed fixes when true; leave changes uncommitted when false.\n{accepted items including r, review_file when supplied, path:line, claim, action and rationale}\nReturn ---GSD-WORKER-RESULT--- with status: done|partial|blocked, commit_sha: <actual SHA when constraints.auto_commit=true and status=done; null otherwise>, and items: [{r: R#, review_file: <copy when supplied>, outcome: fixed|failed|skipped, note: <verification evidence>}]. Include exactly one items entry per listed review_file/R# pair; repeated R# in different review files are distinct. Report fixed only after verifying that item. Do not create task PLAN/SUMMARY or modify Forge metadata; this is a review-fix unit.' })
   review_fix_result = invoke(fixer.tool, fixer.args)
   ```
 

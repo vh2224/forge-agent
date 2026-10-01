@@ -111,6 +111,34 @@ test('native Codex host: reasoning_effort checked against observed capabilities'
   assert.strictEqual(unsupported.refusal.code, 'native-effort-unsupported');
 });
 
+test('native Claude review legs validate operator thinking with and without opt-in effort', () => {
+  const reviewer = agent('forge-reviewer-thinking', ['model: sonnet', 'thinking: disabled', 'effort: high']);
+  const original = fs.readFileSync(reviewer.agentPath);
+  for (const leg of ['challenge', 'defense', 'rebuttal']) {
+    for (const configured of [true, false]) {
+      const review = configured ? { [`${leg}_effort`]: 'high' } : {};
+      for (const [mode, code] of [['disabled', 'thinking-disabled-incompatible'],
+        ['enabled', 'thinking-enabled-incompatible'], ['between_tools', 'thinking-transport-unsupported'],
+        ['adaptive', null], [undefined, null]]) {
+        const out = resolveReviewEffort({ leg, engine: 'claude', transport: 'claude-native',
+          model: 'claude-sonnet-5-5', binding: reviewer, capabilities: CLAUDE_CAPS,
+          prefs: { review, ...(mode === undefined ? {} : { thinking: { sonnet_phases: mode } }) } });
+        assert.strictEqual(out.refusal && out.refusal.code, code, `${leg}/${configured}/${mode}`);
+        assert.deepStrictEqual(out.argv, []);
+        assert.strictEqual(out.effort_sent, null);
+        assert.strictEqual(out.effort_planned, !code && configured ? 'agent-frontmatter:high' : null);
+        if (code) assert(out.diagnostics.some(d => d.code === code && d.layer === 'model-policy'));
+        if (!configured) assert.strictEqual(out.configured, false, 'thinking never opts in to effort delivery');
+      }
+    }
+  }
+  assert.deepStrictEqual(fs.readFileSync(reviewer.agentPath), original, 'the agent binding is never rewritten');
+  const legacy = resolveReviewEffort({ leg: 'challenge', engine: 'claude', transport: 'claude-native',
+    model: 'claude-sonnet-5-5', prefs: { review: {}, thinking: { sonnet_phases: 'adaptive' } } });
+  assert.strictEqual(legacy.refusal, null, 'absent effort does not introduce a binding/capability preflight');
+  assert.deepStrictEqual([legacy.argv, legacy.effort_planned], [[], null]);
+});
+
 test('adaptive review decision, rounds, ask_in_auto and fix_conceded are identical with and without the keys', () => {
   const costPolicy = require('./forge-cost-policy.js');
   const entries = costPolicy.parseNumstat('12\t3\tsrc/a.js\n480\t20\tsrc/b.js\n');

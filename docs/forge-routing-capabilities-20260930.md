@@ -119,7 +119,9 @@ de dados (JSON do resolver salvo → `route` do request), não por flags de argv
   `scripts/forge-review-effort.test.js` (inclui invariância de `forge-cost-policy`),
   `scripts/forge-native-invocation.test.js`, `scripts/forge-dispatch-source-guard.test.js`, além das
   suítes de resolver, claude-sidecar, dispatch-event, review-emit, prefs e instalação.
-- Gate offline final ambos os hosts/win32: 11/11 passaram. Validação completa final em andamento.
+- Gate offline ambos os hosts/win32: 11/11 passaram. No head `4e361df`, o CI concluiu
+  14/14 checks verdes e as 266 suítes passaram em Linux, macOS e Windows. Esse resultado
+  precede as correções adicionais da revisão independente descritas abaixo.
 - Smoke local bruto: 2878 assertions passaram, 2 falharam, 10 foram puladas por limites de Windows/
   ausência de bash. As duas falhas foram reproduzidas nas mesmas seções da fonte base `223e6fa`:
   `(k)` depende do tier global do operador (gpt-6.1-sol, enquanto a fixture espera Claude); o check do
@@ -127,3 +129,38 @@ de dados (JSON do resolver salvo → `route` do request), não por flags de argv
   erros e conteúdo de imagem). Não são provas de rejeição de modelo nem de inferência real. A fonte
   de pin e as preferências globais permaneceram intactas; esta PR não corrige essas duas pendências
   preexistentes. Os testes determinísticos de schema/transportes permanecem no runner canônico.
+
+## Correções adicionais da revisão independente (R1–R5)
+
+A revisão do head `4e361df` encontrou cinco cenários que escapavam às fixtures anteriores:
+
+- **R1 — replay de commit:** o recibo comparava hashes dos bytes da working tree com blobs Git.
+  `core.autocrlf` e filtros clean podem produzir bytes diferentes para a mesma correção. A identidade
+  Git normalizada deve ser capturada antes do commit e persistida separadamente do hash da working
+  tree, que continua protegendo contra mudanças concorrentes. O trailer sozinho não comprova entrega.
+  Recibos antigos sem `verified_git_blobs` não autorizam commit/publicação sob `auto_commit:true`
+  em Git: `review-fix-git-identity-missing` mantém a recusa sem reconstruir evidência após o commit.
+- **R2 — contrato nativo:** o prompt pedia status/SHA, mas a aceitação exigia resultados por item.
+  O prompt deve entregar explicitamente `items` com uma entrada por par `review_file`/R#, incluindo
+  itens não corrigidos; a ausência dessa evidência continua sendo uma recusa do pai.
+- **R3 — retorno não terminal:** `partial`/`blocked` podiam publicar “aplicada” na aceitação nativa
+  sem commit. Somente `done` pode fornecer evidência de sucesso, sob ambas as políticas de commit.
+- **R4 — thinking na revisão nativa:** o helper de esforço montava uma rota sintética sem validar
+  `thinking.sonnet_phases`. A preferência explícita deve ser validada mesmo quando esforço está
+  ausente; a declaração inerte do frontmatter não substitui a preferência nem controla a sessão.
+- **R5 — API direta Claude:** o guard do adaptador só recusava `between_tools`. Todas as combinações
+  incompatíveis da política devem ser recusadas antes do probe de versão e do spawn de inferência.
+  Execute/fix canônicos e os consumidores externos de revisão já tinham proteção no resolvedor;
+  a correção fecha a defesa do boundary direto sem atribuir falha a esses callers protegidos.
+
+Os testes adicionais usam contas/processos falsos e repositórios Git temporários, incluindo
+normalização real de CRLF/filtros e publicação/replay. Nenhuma preferência, autenticação,
+instalação ou política de isolamento do operador é alterada para fazer esses cenários passarem.
+
+Validação desta rodada: 13 suítes focadas/de integração passaram, além das 11 suítes do gate offline
+para ambos os hosts/win32. A matriz bidirecional levou 60 s; os checks de integração, 18,70 s;
+o gate offline, 44,02 s. Não houve timeout. Uma execução direta da matriz herdou preferências
+globais e falhou antes dos novos casos; o runner canônico com HOME isolado passou, sem alterar
+as preferências para ocultar a falha. O revisor independente reconferiu R1–R5 com zero novos achados,
+incluindo a identidade CRLF/Git real, quatro combinações de retorno não terminal e recusas de thinking
+sem probe/spawn. A matriz completa e o smoke dos sistemas suportados são executados pelo CI do PR.
