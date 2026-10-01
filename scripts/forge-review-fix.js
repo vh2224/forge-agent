@@ -207,11 +207,11 @@ const reviewFixSchema = Object.freeze({
       type: 'array',
       items: {
         type: 'object',
-        required: ['r', 'outcome', 'note'],
+        required: ['r', 'review_file', 'outcome', 'note'],
         additionalProperties: false,
         properties: {
           r: { type: 'string' },
-          review_file: { type: 'string' },
+          review_file: { type: ['string', 'null'] },
           outcome: { type: 'string', enum: [...OUTCOMES] },
           note: { type: 'string' },
         },
@@ -260,7 +260,7 @@ function buildReviewFixPrompt(brief, options) {
     '{ "status": "done"|"partial"|"blocked", "summary": "<what you did>",',
     '  "items": [ { "r": "R1", "outcome": "fixed"|"failed"|"skipped", "note": "<evidence>" } ],',
     '  "files_changed": [ "<relative path>", ... ] }',
-    'Include exactly one items entry for every listed review_file + R# pair and no other ids. Copy review_file into the result when supplied; repeated R# in different reviews are distinct items.',
+    'Include exactly one items entry for every listed review_file + R# pair and no other ids. Always include review_file: copy its value when supplied, otherwise use null. Repeated R# in different reviews are distinct items.',
   ];
   if (outputChannel === 'worker-result-block') {
     lines.push(
@@ -291,7 +291,7 @@ function inspectReviewFixResult(obj, expectedIds) {
   for (const item of obj.items) {
     if (!item || typeof item !== 'object' || Array.isArray(item)
         || Object.keys(item).some(key => !['r', 'review_file', 'outcome', 'note'].includes(key))) return bad('schema-invalid');
-    if (typeof item.r !== 'string' || (item.review_file !== undefined && typeof item.review_file !== 'string')) return bad('item-unexpected');
+    if (typeof item.r !== 'string' || (item.review_file !== undefined && item.review_file !== null && typeof item.review_file !== 'string')) return bad('item-unexpected');
     const correlated = correlateReviewItem(item, expectedItems);
     if (!correlated) return bad('item-unexpected');
     const key = reviewItemKey(correlated);

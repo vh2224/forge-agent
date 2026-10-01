@@ -90,6 +90,27 @@ test('brief identity is stable and the prompt delimits items as untrusted data',
   assert.strictEqual(code(() => rf.buildBrief({ ...input, boundary: 'other' })), 'review-fix-boundary-invalid');
 });
 
+test('provider strict schema requires every property recursively; nullable review_file preserves correlation', () => {
+  function check(schema) {
+    if (schema.type === 'object') {
+      assert.strictEqual(schema.additionalProperties, false);
+      assert.deepStrictEqual([...schema.required].sort(), Object.keys(schema.properties).sort());
+      Object.values(schema.properties).forEach(check);
+    }
+    if (schema.type === 'array') check(schema.items);
+  }
+  check(rf.reviewFixSchema);
+  assert.deepStrictEqual(rf.reviewFixSchema.properties.items.items.properties.review_file.type, ['string', 'null']);
+  const result = { status: 'done', summary: 'fixed', files_changed: ['src/a.js'], items: [{ r: 'R1', review_file: null, outcome: 'fixed', note: '' }] };
+  assert.strictEqual(rf.validateReviewFixResult(result, ['R1']), true);
+  const repeated = [{ r: 'R1', review_file: '.gsd/review-a.md' }, { r: 'R1', review_file: '.gsd/review-b.md' }];
+  assert.strictEqual(rf.inspectReviewFixResult(result, repeated).reason, 'item-unexpected');
+  result.items = repeated.map(item => ({ ...item, outcome: 'fixed', note: '' }));
+  assert.strictEqual(rf.validateReviewFixResult(result, repeated), true);
+  result.items[0].review_file = 1;
+  assert.strictEqual(rf.validateReviewFixResult(result, repeated), false);
+});
+
 test('result validation: exact R# set, closed enum', () => {
   const ok = { status: 'done', summary: 's', files_changed: [], items: [{ r: 'R1', outcome: 'fixed', note: '' }, { r: 'R2', outcome: 'skipped', note: '' }] };
   assert.strictEqual(rf.validateReviewFixResult(ok, ['R1', 'R2']), true);
