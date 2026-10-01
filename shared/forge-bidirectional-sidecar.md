@@ -118,15 +118,77 @@ at compaction. The receipt is local workflow data, never a commit artifact.
 `claude-invalid-result` remains the public rejection code. The result file,
 failed receipt and `sidecar-unit` failure event additionally carry a versioned
 `diagnostic`: a closed `stage`/`reason` vocabulary and, when a child ran,
-`stdout_bytes`, `stderr_bytes`, `duration_ms` and `marker_count` when available.
+`stdout_bytes`, `stderr_bytes`, `duration_ms`, `marker_count` and `model_count`
+when available.
 These fields contain no output excerpts, parser exception text, artifact paths,
 account names or environment values. See `scripts/forge-sidecar-diagnostic.js`
 for the vocabulary. Do not log `classifyReturn().tail` or raw provider streams.
 No raw-output capture is implemented, even on failure; introducing one requires
 an explicit opt-in and private storage/retention contract, not a debug default.
 
-The JSON envelope requires standalone start/end markers, an explicit status,
-and one complete `result_json` object. Compact and multiline JSON are accepted;
+#### Claude CLI JSON transport and model identity
+
+The Claude sidecar runs `claude -p --output-format json` with inline invocation
+settings `{"disableAllHooks":true,"switchModelsOnFlag":false}` and
+`--setting-sources ''`, which excludes the user, project and local settings
+files. Managed policy settings are not one of those sources: they may still
+apply and are not bypassed. No settings file is changed.
+Account, environment allowlist, `shell:false`, tools, permissions, timeout,
+heartbeats, cleanup and the 1 MiB per-stream cap are unchanged. A Claude
+dispatch without `--model` is refused as `claude-model-required` before any
+version probe, prompt file or spawn: without a requested id nothing can be
+proved.
+
+Stdout must be exactly one CLI result object: `type: "result"`,
+`subtype: "success"`, `is_error: false`, a string `result` and a plain
+`modelUsage` object. Text around it, concatenated, duplicated or truncated JSON
+and duplicate member names are `json-invalid`; a run error (`is_error: true` or
+an error `subtype`) is `result-error`; any other shape is
+`result-envelope-invalid`. All are `claude-invalid-result` and never fall back
+to an earlier object. With JSON stdout, authentication is decided only by
+`api_error_status` 401/403 (`claude-auth-failed`); token counters are data. The
+text heuristic still applies to stderr and to non-JSON stdout.
+
+Order of checks: authentication, non-zero exit, raw credential in
+stdout/stderr, empty output, envelope, credential in any decoded string or
+property name of the object (Unicode escapes included), model identity, the
+worker-result block (unchanged framed parser and unit validator), credential in
+the decoded candidate. The decoded walk is iterative and bounded; exceeding the
+bound is refused (`payload-limit`).
+
+Identity is admitted only when `modelUsage` has exactly one well-formed key
+byte-identical to `--model`. Then `model_observed` is that id and
+`model_observed_source` is `claude-json-modelUsage`; `effort_applied` stays
+`null` because nothing reads it back. Otherwise the unit validator is never
+called:
+
+- `claude-model-substituted`: one valid key naming a clearly different model
+  while a full id was requested. The diagnostic (`stage: identity`) carries
+  `model_count` and that validated `model_observed`.
+- `claude-model-unverified`: absent, empty, malformed or several keys
+  (including an auxiliary Haiku), another date, a `[1m]` suffix, a requested
+  alias, or a neighbouring version of the same family. No equivalence is
+  inferred and no unproven id is persisted.
+
+`switchModelsOnFlag:false` only disables the classifier-driven model switch. A
+fallback for availability is not prevented by any setting; it is detected
+after the turn through `modelUsage`. Detection is therefore post-turn: a
+refused identity never reaches acceptance, a ready receipt, a commit or
+publication, but the worker may already have edited files. Nothing is reset or
+retried automatically and no other model or engine is tried. In review-fix the
+tree, including new files, is preserved with `recovery: operator-required`, the
+items are deferred and `error_class` is `terminal`; other units end in a
+`failed` receipt without artifacts. A write worker with Bash may also use an
+auxiliary model internally; that reports a second `modelUsage` key and is
+refused by design as unverified. This is not a universal pre-turn guarantee.
+
+The observation reaches the execute, fix and plan result-files, the
+challenge/defense/rebuttal JSON (engine `claude` only; codex and agy output is
+unchanged) and the ready receipts of artifacts, memory and fix, and survives
+their replay without a new provider turn.
+
+The worker-result block inside `result` requires standalone start/end markers,
+an explicit status, and one complete `result_json` object. Compact and multiline JSON are accepted;
 newlines within JSON strings must still be escaped. Literal markers inside
 artifact strings are data. The last framed block wins; a malformed final block
 never falls back to an earlier success. Missing end markers, partial JSON and
@@ -136,8 +198,9 @@ the full unit validator and output barrier before publication.
 Artifact delivery allows at most 32 artifacts and 512 KiB UTF-8 per content.
 Claude delivery additionally allows 900 KiB for the compact serialized result
 JSON; this transport-specific cap is not imposed on Codex. The Claude stream separately
-has a 1 MiB cap (including envelope/prose/pretty-print whitespace), for each of
-stdout and stderr. These are independent limits; `artifact-limit`,
+has a 1 MiB cap (including the CLI JSON object, its string escaping,
+prose and pretty-print whitespace), for each of stdout and stderr; a stream that
+escaping pushes over it fails as `output-limit`, never truncated. These are independent limits; `artifact-limit`,
 `payload-limit` and `output-limit` distinguish them. The prompt states the
 budgets. When rendering without `promptFile`, supply `description` for research
 and milestone planning; the renderer uses the resolved route's effort.
@@ -159,7 +222,8 @@ Recovery never spends another provider turn automatically:
 
 `partial`/`blocked` are actual worker outcomes, not parser failures. Preserve
 their questions and existing decision policy. Authentication, process exit,
-timeout and output limits retain their distinct public codes. A detected token
+timeout, output limits and the three `claude-model-*` identity codes retain
+their distinct public codes. A detected token
 in successful process output is rejected with `secret-output`; the token itself
 is never included in diagnostics. A parser rejection is not evidence of an
 authentication failure, truncation, or permission to fall back.

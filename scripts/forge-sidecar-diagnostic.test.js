@@ -27,9 +27,15 @@ const prefix = 'Read the complete task prompt from this UTF-8 file: ';
 const suffix = '. Follow it exactly and finish with its required worker-result block.';
 const prompt = fs.readFileSync(JSON.parse(instruction.slice(prefix.length, -suffix.length)), 'utf8');
 fs.writeFileSync('observed-prompt.txt', prompt);
-const output = fs.readFileSync('output.txt');
+const output = fs.readFileSync('output.txt', 'utf8');
 if (fs.existsSync('stderr.txt')) process.stderr.write(fs.readFileSync('stderr.txt'));
-process.stdout.write(output);
+// claude -p --output-format json: one result object; modelUsage names the
+// received --model unless a scenario supplies model-usage.json.
+const model = args[args.indexOf('--model') + 1];
+const modelUsage = fs.existsSync('model-usage.json')
+  ? JSON.parse(fs.readFileSync('model-usage.json', 'utf8')) : { [model]: { inputTokens: 1 } };
+process.stdout.write(fs.existsSync('raw-output') ? output : JSON.stringify({
+  type: 'result', subtype: 'success', is_error: false, result: output, modelUsage }));
 `);
 process.env.FORGE_XLLM_CLAUDE_BIN = provider;
 after(() => {
@@ -125,8 +131,22 @@ test('artifact diagnostics identify schema, paths, duplicates, missing artifacts
 });
 test('safe diagnostic is a closed vocabulary with numeric metadata only', () => {
   assert.deepEqual(diagnostic('private-sentinel', { stdout_bytes: 3, stderr_bytes: 'private-sentinel',
-    duration_ms: -1, tail: 'private-sentinel', marker_count: Infinity }),
+    duration_ms: -1, tail: 'private-sentinel', marker_count: Infinity, model_observed: 'claude-haiku-4-5' }),
   { version: 1, stage: 'adapter', reason: 'adapter-failed', stdout_bytes: 3 });
+});
+test('identity stage carries model_count and, only on substitution, the validated observed id', () => {
+  for (const reason of ['model-substituted', 'model-unverified', 'model-required']) {
+    assert.equal(diagnostic(reason).stage, 'identity');
+  }
+  for (const reason of ['result-error', 'result-envelope-invalid']) assert.equal(diagnostic(reason).stage, 'envelope');
+  assert.deepEqual(diagnostic('model-substituted', { model_count: 1, model_observed: 'claude-haiku-4-5-20251001' }),
+    { version: 1, stage: 'identity', reason: 'model-substituted', model_count: 1, model_observed: 'claude-haiku-4-5-20251001' });
+  for (const unsafe of ['private-sentinel, other', '../private-sentinel', '-flag', '', 42, 'x'.repeat(200)]) {
+    assert.deepEqual(diagnostic('model-substituted', { model_count: 1, model_observed: unsafe }),
+      { version: 1, stage: 'identity', reason: 'model-substituted', model_count: 1 });
+  }
+  assert.deepEqual(diagnostic('model-unverified', { model_count: 2, model_observed: 'claude-haiku-4-5' }),
+    { version: 1, stage: 'identity', reason: 'model-unverified', model_count: 2 });
 });
 test('real rendered research prompt, simulated provider, publication and replay use one invocation', async () => {
   const p = payload();
@@ -167,6 +187,41 @@ test('each rejection persists sanitized diagnostics in result, receipt and event
     const logs = JSON.stringify([failure, receipt, events]);
     for (const secret of [token, 'private-sentinel', r.cwd]) assert(!logs.includes(secret));
     assert(!fs.existsSync(path.join(r.cwd, requiredPath)));
+    await assert.rejects(unit.runUnitSidecar(r), e => e.code === code);
+    assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
+  }
+});
+test('identity and envelope refusals persist only closed metadata, publish nothing and replay without a provider', async () => {
+  const substitute = 'claude-haiku-4-5-20251001';
+  for (const [label, prepare, code, expected] of [
+    ['substituted', r => fs.writeFileSync(path.join(r.cwd, 'model-usage.json'), JSON.stringify({ [substitute]: {} })),
+      'claude-model-substituted', { stage: 'identity', reason: 'model-substituted', model_count: 1, model_observed: substitute }],
+    ['auxiliary second model', r => fs.writeFileSync(path.join(r.cwd, 'model-usage.json'),
+      JSON.stringify({ [r.route.model_resolved]: {}, [substitute]: {} })),
+    'claude-model-unverified', { stage: 'identity', reason: 'model-unverified', model_count: 2 }],
+    ['absent modelUsage', r => fs.writeFileSync(path.join(r.cwd, 'model-usage.json'), 'null'),
+      'claude-model-unverified', { stage: 'identity', reason: 'model-unverified', model_count: 0 }],
+    ['non-JSON stdout', r => fs.writeFileSync(path.join(r.cwd, 'raw-output'), ''),
+      'claude-invalid-result', { stage: 'json', reason: 'json-invalid' }],
+  ]) {
+    const r = request(block());
+    assert.notEqual(r.route.model_resolved, substitute, 'the substitute must differ from the route model');
+    prepare(r);
+    await assert.rejects(unit.runUnitSidecar(r), e => e.code === code, label);
+    const failure = readJson(r.resultFile);
+    const receipt = readJson(r.resultFile + '.receipt.json');
+    const events = fs.readFileSync(path.join(r.cwd, '.gsd/forge/events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    for (const [key, value] of Object.entries(expected)) assert.deepEqual(failure.diagnostic[key], value, `${label}: ${key}`);
+    if (!expected.model_observed) assert(!('model_observed' in failure.diagnostic), `${label}: unproven id persisted`);
+    assert.equal(failure.reason_code, code);
+    assert.equal(failure.error_class, 'terminal');
+    assert.equal(failure.recovery, 'operator-required');
+    assert.equal(receipt.phase, 'failed');
+    assert.deepEqual(receipt.failure.diagnostic, failure.diagnostic);
+    assert.deepEqual(events.at(-1).diagnostic, failure.diagnostic);
+    const logs = JSON.stringify([failure, receipt, events]);
+    for (const secret of [token, 'Research complete', '"usage"', 'inputTokens', r.cwd]) assert(!logs.includes(secret), `${label}: ${secret}`);
+    assert(!fs.existsSync(path.join(r.cwd, requiredPath)), `${label}: an artifact was published`);
     await assert.rejects(unit.runUnitSidecar(r), e => e.code === code);
     assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
   }

@@ -249,12 +249,20 @@ function deliveryRequest(request, route, prompt, contract = request.contract || 
   };
 }
 
+// Codex keeps a completed agent registered under its name, so every attempt
+// needs its own name. The dispatch digest is deterministic for replays and keeps
+// ids that normalize alike (A-B, A_B, A.B) distinct after codexTaskName.
+function nativeTaskName(request) {
+  const attempt = crypto.createHash('sha256').update(request.dispatchId, 'utf8').digest('hex').slice(0, 16);
+  return `preparation_${request.phase}_${request.taskId}_${attempt}`;
+}
+
 function nativeOptions(request, route, prompt, contract = request.contract || phaseContract(request.phase)) {
   return {
     hostRuntime: request.hostRuntime, resolvedDispatch: route,
     activeCapabilities: request.activeCapabilities,
     effortBinding: request.effortBinding, readback: request.readback,
-    taskName: `preparation_${request.phase}_${request.taskId}`,
+    taskName: nativeTaskName(request),
     agentType: contract.agentType, prompt, forkTurns: request.forkTurns || 'none',
   };
 }

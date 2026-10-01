@@ -6,6 +6,12 @@
 // resolved immediately before launch, its token is placed in one child-only env
 // slot, and no ambient provider credential is inherited. The worker's stdout is
 // private transport: it is bounded, classified, validated, and never echoed.
+//
+// Transport: `--output-format json`. Stdout is ONE result object; its `result`
+// string carries the worker-result block and its `modelUsage` keys are the only
+// accepted proof of which model answered. A result is admitted only when that
+// metadata names exactly the requested `--model`; anything else is refused
+// before the unit validator runs, so it never reaches acceptance or publication.
 
 'use strict';
 
@@ -14,7 +20,8 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { resolveLaunch, TOKEN_ENV } = require('./forge-accounts');
 const { parseJsonEnvelope } = require('./forge-worker-result');
-const { diagnostic } = require('./forge-sidecar-diagnostic');
+const { diagnostic, isSafeModelId } = require('./forge-sidecar-diagnostic');
+const { isMalformedId } = require('./forge-model-alias');
 const modelPolicy = require('./forge-model-policy');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
@@ -38,6 +45,9 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   THINKING_ENABLED_INCOMPATIBLE: 'thinking-enabled-incompatible',
   THINKING_MODE_UNKNOWN: 'thinking-mode-unknown',
   EFFORT_UNSUPPORTED_BY_MODEL: 'effort-unsupported-by-model',
+  MODEL_REQUIRED: 'claude-model-required',
+  MODEL_SUBSTITUTED: 'claude-model-substituted',
+  MODEL_UNVERIFIED: 'claude-model-unverified',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -75,6 +85,33 @@ const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // heartbeat_interval_ms, and the orphan reaper derives staleAfter from that
 // published value. A callback wired without a cadence still has to beat.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15000;
+// Inline invocation settings: `--setting-sources ''` excludes the user, project
+// and local settings files. Managed policy is not a setting source; it may still
+// apply and is never bypassed. No settings file is changed.
+// switchModelsOnFlag:false covers only the classifier-driven switch; an
+// availability fallback is detected afterwards through modelUsage, never
+// prevented here.
+const CLAUDE_INVOCATION_SETTINGS = '{"disableAllHooks":true,"switchModelsOnFlag":false}';
+const OBSERVED_MODEL_SOURCE = 'claude-json-modelUsage';
+const WORKER_RESULT_MARKER = '---GSD-WORKER-RESULT---';
+const AUTH_ERROR_STATUSES = new Set([401, 403]);
+const AUTH_TEXT_RE = /\b(?:401|403)\b|authentication[_ -]?(?:failed|error)|invalid[_ -]?(?:token|api[_ -]?key)|please (?:run )?\/login/i;
+// Bounds for the decoded secret walk. Exceeding either is undecidable and fails
+// closed; a legitimate result envelope is far below both.
+const MAX_DECODED_DEPTH = 128;
+const MAX_DECODED_NODES = 1000000;
+// A full Claude id (`claude-<family>-...`). Anything else is an alias whose
+// version the CLI chooses, so no modelUsage key can prove it.
+const FULL_CLAUDE_MODEL_RE = /^claude-[a-z0-9]/;
+const MODEL_TIER_RE = /(fable|haiku|sonnet|opus)/;
+
+// Fixed texts, exported so forge-xllm classifies them terminal by identity
+// rather than by keyword: a refused identity is never retried automatically.
+const CLAUDE_IDENTITY_MESSAGES = Object.freeze({
+  [CLAUDE_SIDECAR_REASON_CODES.MODEL_REQUIRED]: 'The Claude sidecar requires an explicit model whose identity it can verify. No worker was launched.',
+  [CLAUDE_SIDECAR_REASON_CODES.MODEL_SUBSTITUTED]: 'The Claude result reported a model other than the requested one. The result was not accepted.',
+  [CLAUDE_SIDECAR_REASON_CODES.MODEL_UNVERIFIED]: 'The Claude result did not prove the requested model. The result was not accepted.',
+});
 
 function sidecarError(code, reason, counts) {
   const messages = {
@@ -98,6 +135,7 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_ENABLED_INCOMPATIBLE]: 'Enabled thinking is incompatible with this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_MODE_UNKNOWN]: 'The requested thinking mode is not documented for this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL]: 'The requested effort is not documented for this model. No worker was launched and the effort was not lowered.',
+    ...CLAUDE_IDENTITY_MESSAGES,
   };
   const error = new Error(messages[code] || 'Claude sidecar failure.');
   error.code = code;
@@ -285,6 +323,131 @@ function parseExecuteCandidate(stdout, validateCandidate) {
   };
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function tryParseJson(text) {
+  try { return { ok: true, value: JSON.parse(text) }; } catch { return { ok: false }; }
+}
+
+// JSON.parse keeps the LAST of two equal member names, so a second `result` or
+// `modelUsage` would silently replace the first. Runs on text that already
+// parsed, so it only has to track strings and nesting.
+function hasDuplicateMemberNames(text) {
+  const stack = [];
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === '{') stack.push(new Set());
+    else if (char === '[') stack.push(null);
+    else if (char === '}' || char === ']') stack.pop();
+    else if (char === '"') {
+      let end = index + 1;
+      while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+      const members = stack[stack.length - 1];
+      if (members) {
+        let next = end + 1;
+        while (next < text.length && ' \t\n\r'.includes(text[next])) next++;
+        if (text[next] === ':') {
+          const name = JSON.parse(text.slice(index, end + 1));
+          if (members.has(name)) return true;
+          members.add(name);
+        }
+      }
+      index = end;
+    }
+  }
+  return false;
+}
+
+// Iterative walk over decoded strings AND property names, so a credential
+// hidden behind JSON Unicode escapes is found after decoding. Returns null
+// when the bounds are exceeded: undecidable, therefore refused.
+function decodedContains(value, needle) {
+  const stack = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (stack.length) {
+    const current = stack.pop();
+    nodes += 1;
+    if (nodes > MAX_DECODED_NODES || current.depth > MAX_DECODED_DEPTH) return null;
+    if (typeof current.value === 'string') {
+      if (current.value.includes(needle)) return true;
+      continue;
+    }
+    if (!current.value || typeof current.value !== 'object') continue;
+    for (const key of Object.keys(current.value)) {
+      if (key.includes(needle)) return true;
+      stack.push({ value: current.value[key], depth: current.depth + 1 });
+    }
+  }
+  return false;
+}
+
+function assertNoDecodedSecret(value, token) {
+  const found = decodedContains(value, token);
+  if (found === true) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'secret-output');
+  if (found === null) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'payload-limit');
+}
+
+/**
+ * Validate the one Claude CLI result object. Text around it, concatenated or
+ * truncated JSON and duplicate member names are `json-invalid`; a run error is
+ * `result-error`; any other shape is `result-envelope-invalid`. The worker text
+ * is extracted only from an object that passed every check.
+ */
+function classifyResultEnvelope(decoded, text) {
+  if (!decoded.ok || hasDuplicateMemberNames(text)) return { ok: false, reason: 'json-invalid' };
+  const envelope = decoded.value;
+  if (!isPlainObject(envelope) || envelope.type !== 'result') return { ok: false, reason: 'result-envelope-invalid' };
+  if (envelope.is_error === true || (typeof envelope.subtype === 'string' && envelope.subtype !== 'success')) {
+    return { ok: false, reason: 'result-error' };
+  }
+  if (envelope.is_error !== false || envelope.subtype !== 'success' || typeof envelope.result !== 'string') {
+    return { ok: false, reason: 'result-envelope-invalid' };
+  }
+  return { ok: true, envelope };
+}
+
+function modelStem(id) {
+  return id.toLowerCase().replace(/\[[^\]]*\]$/, '').replace(/-\d{8}$/, '');
+}
+
+function modelTier(id) {
+  const match = MODEL_TIER_RE.exec(id.toLowerCase());
+  return match ? match[1] : null;
+}
+
+/**
+ * Admit only exactly one well-formed modelUsage key byte-identical to the
+ * requested full id. No equivalence is inferred: another date, a `[1m]`
+ * suffix, an alias or a neighbouring version of the same family stays
+ * unverified, and an auxiliary second model makes the proof ambiguous. A
+ * clearly different model is a substitution and names only that validated id.
+ *
+ * @returns {string} the observed (= requested) model id
+ */
+function verifyModelIdentity(modelUsage, requested) {
+  const unverified = count => sidecarError(CLAUDE_SIDECAR_REASON_CODES.MODEL_UNVERIFIED,
+    'model-unverified', { model_count: count });
+  if (!isPlainObject(modelUsage)) throw unverified(0);
+  const keys = Object.keys(modelUsage);
+  if (keys.length !== 1) throw unverified(keys.length);
+  const observed = keys[0];
+  if (!isSafeModelId(observed) || isMalformedId(observed) || !isPlainObject(modelUsage[observed])) {
+    throw unverified(1);
+  }
+  if (!FULL_CLAUDE_MODEL_RE.test(requested)) throw unverified(1);
+  if (observed === requested) return observed;
+  const tier = modelTier(observed);
+  if (modelStem(observed) === modelStem(requested) || (tier !== null && tier === modelTier(requested))) {
+    throw unverified(1);
+  }
+  throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.MODEL_SUBSTITUTED, 'model-substituted',
+    { model_count: 1, model_observed: observed });
+}
+
 function mapSpawnError(error) {
   return error && error.code === 'ENOENT'
     ? sidecarError(CLAUDE_SIDECAR_REASON_CODES.COMMAND_NOT_FOUND)
@@ -295,7 +458,7 @@ function defaultTerminate(child) {
   try { child.kill('SIGKILL'); } catch { /* the owned process already exited */ }
 }
 
-function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat, heartbeatIntervalMs, validateCandidate, signal }) {
+function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat, heartbeatIntervalMs, validateCandidate, signal, requestedModel }) {
   if (signal && signal.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   const startedAt = Date.now();
   let child;
@@ -352,6 +515,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
           'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
           'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
           'claude-command-not-found': 'provider-unavailable', 'claude-spawn-failed': 'provider-unavailable',
+          'claude-model-substituted': 'model-substituted', 'claude-model-unverified': 'model-unverified',
         };
         value.diagnostic = diagnostic(value.diagnostic?.reason || reasons[value.code], {
           ...value.diagnostic, stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes,
@@ -413,7 +577,16 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       if (settled || terminalFailurePending) return;
       const stderr = Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
       const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
-      if ((code !== 0 || !stdout.includes('---GSD-WORKER-RESULT---')) && /\b(?:401|403)\b|authentication[_ -]?(?:failed|error)|invalid[_ -]?(?:token|api[_ -]?key)|please (?:run )?\/login/i.test(stderr + '\n' + stdout)) {
+      const trimmed = stdout.trim();
+      const decoded = trimmed ? tryParseJson(trimmed) : { ok: false };
+      // Precedence: auth, exit, raw secret, empty, envelope, decoded secret,
+      // identity, unit parser, candidate secret. A JSON stdout decides auth only
+      // by its structured status: token counters such as 401 are data there.
+      const structuredAuth = decoded.ok && isPlainObject(decoded.value)
+        && AUTH_ERROR_STATUSES.has(decoded.value.api_error_status);
+      const textAuth = (code !== 0 || !stdout.includes(WORKER_RESULT_MARKER))
+        && AUTH_TEXT_RE.test(decoded.ok ? stderr : `${stderr}\n${stdout}`);
+      if (structuredAuth || textAuth) {
         finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED));
         return;
       }
@@ -428,23 +601,27 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       // Captured stderr is intentionally never returned or interpolated into an
       // error. A provider that repeats its environment cannot leak through us.
       stderrChunks = [];
-      if (!stdout.trim()) {
+      if (!trimmed) {
         finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.EMPTY_OUTPUT));
         return;
       }
 
       let parsed;
+      let observedModel;
       try {
-        parsed = parseExecuteCandidate(stdout, validateCandidate);
-        if (JSON.stringify(parsed.candidate).includes(env[TOKEN_ENV])) {
-          throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'secret-output');
-        }
+        const envelope = classifyResultEnvelope(decoded, trimmed);
+        if (!envelope.ok) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, envelope.reason);
+        assertNoDecodedSecret(envelope.envelope, env[TOKEN_ENV]);
+        observedModel = verifyModelIdentity(envelope.envelope.modelUsage, requestedModel);
+        parsed = parseExecuteCandidate(envelope.envelope.result, validateCandidate);
+        assertNoDecodedSecret(parsed.candidate, env[TOKEN_ENV]);
       } catch (error) {
         finish(reject, error);
         return;
       }
       finish(resolve, {
         candidate: parsed.candidate,
+        observedModel,
         metadata: Object.freeze({
           pid: Number.isInteger(child.pid) ? child.pid : null,
           exit_code: code,
@@ -471,9 +648,11 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  * @param {string} opts.cwd workspace directory that owns the temporary file
  * @param {number} [opts.timeoutMs] parent deadline in milliseconds
  * @param {number} [opts.timeoutSecs] parent deadline in seconds
- * @param {string} [opts.model] model id forwarded to the CLI as `--model <id>`.
- *   Rejected when it is not a non-empty string or when it could be read as a
- *   flag, because it is interpolated into argv.
+ * @param {string} opts.model model id forwarded to the CLI as `--model <id>`.
+ *   Required: absence is `claude-model-required` before any spawn, because the
+ *   result is admitted only when modelUsage proves this exact id. Rejected when
+ *   it is not a non-empty string or when it could be read as a flag, because it
+ *   is interpolated into argv.
  * @param {(pid:number)=>void} [opts.onHeartbeat] called with the real Claude
  *   child pid at spawn and then on the cadence below until the turn settles.
  * @param {number} [opts.heartbeatIntervalMs] cadence for the callback above,
@@ -481,7 +660,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  *   Validated as a finite positive integer when present.
  * @param {NodeJS.ProcessEnv} [opts.sourceEnv] process env source (testable allowlist)
  * @param {(child:import('child_process').ChildProcess)=>void} [opts.terminateChild]
- * @returns {Promise<{candidate:object,metadata:object}>}
+ * @returns {Promise<{candidate:object,metadata:object,telemetry:object}>} telemetry
+ *   carries `model_observed` (the proven id) and `model_observed_source`
+ *   (`claude-json-modelUsage`); `effort_applied` stays null.
  */
 async function invokeClaudeSidecar(opts) {
   const options = opts && typeof opts === 'object' ? opts : {};
@@ -514,6 +695,14 @@ async function invokeClaudeSidecar(opts) {
   const launchIdentity = claudeLaunchIdentity(options);
   const model = launchIdentity.model_sent;
   const effort = launchIdentity.effort;
+  // Without a requested id there is nothing modelUsage could prove, so the
+  // turn would be unverifiable by construction. Refuse before any probe,
+  // prompt file or spawn.
+  if (!model) {
+    const refused = sidecarError(CLAUDE_SIDECAR_REASON_CODES.MODEL_REQUIRED, 'model-required');
+    refused.provider_called = false;
+    throw refused;
+  }
   // Direct adapter callers need the same full thinking policy as the resolver.
   // Refuse before the version probe, prompt file or inference child exists.
   const thinking = modelPolicy.evaluateThinking({ model, effort, transport: 'claude-cli',
@@ -550,12 +739,12 @@ async function invokeClaudeSidecar(opts) {
       throw refused;
     }
   }
-  // Adapter arguments, never provider observations: without readback the
-  // applied effort stays unknown (null).
-  const telemetry = Object.freeze({
+  // Adapter arguments plus the one provider observation this transport can
+  // prove (modelUsage). Without readback the applied effort stays unknown.
+  const telemetryBase = {
     model_argument: model, effort_sent: effort, effort_applied: null, effort_applied_source: null,
     cli_version: cliVersion, policy_diagnostics: policyDiagnostics,
-  });
+  };
   let tempDir = null;
   let primaryError = null;
 
@@ -577,16 +766,19 @@ async function invokeClaudeSidecar(opts) {
       ...(effort ? ['--effort', effort] : []),
       '--no-session-persistence', '--disable-slash-commands',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-      '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
+      '--setting-sources', '', '--settings', CLAUDE_INVOCATION_SETTINGS,
+      '--output-format', 'json',
       '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
       ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
       '-p', instruction];
     const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
-    const output = await runOwnedChild({
+    const { observedModel, ...output } = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
+      requestedModel: model,
     });
-    return { ...output, telemetry };
+    return { ...output, telemetry: Object.freeze({ ...telemetryBase,
+      model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE }) };
   } catch (error) {
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync
     // above throw native errors that already carry a `.code` (EACCES, ENOSPC,
@@ -610,6 +802,9 @@ async function invokeClaudeSidecar(opts) {
 
 module.exports = {
   CLAUDE_SIDECAR_REASON_CODES,
+  CLAUDE_IDENTITY_MESSAGES,
+  CLAUDE_INVOCATION_SETTINGS,
+  OBSERVED_MODEL_SOURCE,
   CLAUDE_SIDECAR_ENV_ALLOWLIST,
   MAX_CAPTURE_BYTES_PER_STREAM,
   MAX_PROMPT_INSTRUCTION_BYTES,
@@ -621,6 +816,8 @@ module.exports = {
   resolveClaudeCommand,
   deriveChildTimeoutMs,
   parseExecuteCandidate,
+  classifyResultEnvelope,
+  verifyModelIdentity,
   claudeLaunchIdentity,
   invokeClaudeSidecar,
 };

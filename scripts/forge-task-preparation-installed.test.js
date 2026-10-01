@@ -142,8 +142,11 @@ fs.appendFileSync(path.join(process.cwd(), 'provider-observations.jsonl'), JSON.
   tools: args[args.indexOf('--tools') + 1], prompt
 }) + '\\n');
 const payload = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'provider-payload.json'), 'utf8'));
-process.stdout.write(['---GSD-WORKER-RESULT---', 'status: ' + payload.status,
-  'result_json: ' + JSON.stringify(payload), '---END-RESULT---'].join('\\n'));
+// claude -p --output-format json: modelUsage names the received --model.
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+  result: ['---GSD-WORKER-RESULT---', 'status: ' + payload.status,
+    'result_json: ' + JSON.stringify(payload), '---END-RESULT---'].join('\\n'),
+  modelUsage: { [args[args.indexOf('--model') + 1]]: { inputTokens: 1 } } }));
 `);
   const accountPreload = path.join(root, 'fixture-account-preload.js');
   write(accountPreload, `'use strict';
@@ -230,6 +233,10 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
           assert.equal(observations[0].effort, scenario.expectedEffort);
           assert.equal(observations[0].tools, 'Read,Glob,Grep');
           assert(observations[0].prompt.includes(sentinel), 'caller prompt did not reach Claude adapter');
+          // The installed adapter admitted the result only because modelUsage
+          // proved the routed model; the ready receipt records that observation.
+          assert.equal(receipt.telemetry.model_observed, scenario.model);
+          assert.equal(receipt.telemetry.model_observed_source, 'claude-json-modelUsage');
         } else {
           assert(codexPrompts.at(-1).includes(sentinel), 'caller prompt did not reach Codex adapter');
         }

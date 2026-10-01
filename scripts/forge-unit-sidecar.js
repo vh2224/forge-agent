@@ -521,6 +521,15 @@ function telemetryScalar(value) {
   const normalized = String(value).replace(/[\r\n\u0000]/g, ' ').trim();
   return normalized ? normalized.slice(0, 256) : null;
 }
+// Copy a transport observation into a receipt only as a sanitized pair; an
+// unpaired or absent value stays unknown (null/null), never a guess.
+function observedModelTelemetry(telemetry) {
+  const raw = telemetry && typeof telemetry === 'object' && !Array.isArray(telemetry) ? telemetry : {};
+  const observed = telemetryScalar(raw.model_observed);
+  const source = telemetryScalar(raw.model_observed_source);
+  return { model_observed: observed && source ? observed : null,
+    model_observed_source: observed && source ? source : null };
+}
 function memoryTelemetry(record) {
   const raw = record && record.telemetry && typeof record.telemetry === 'object' && !Array.isArray(record.telemetry)
     ? record.telemetry : {};
@@ -1126,6 +1135,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
   };
   try {
     let result, artifacts;
+    // The adapter telemetry of a Claude turn: its model_observed is the id the
+    // result's modelUsage proved. Codex turns report none.
+    let transportTelemetry = null;
     if (transport.mode === 'memory') {
       const prompt = memoryPrompt(r, loc.sourceUnit);
       const validateMemory = value => {
@@ -1141,6 +1153,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         result = output.candidate;
+        transportTelemetry = output.telemetry || null;
       } else {
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
           sandbox: 'read-only', onHeartbeat: heartbeat });
@@ -1188,6 +1201,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
             { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         result = output.candidate;
+        transportTelemetry = output.telemetry || null;
       } else {
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
@@ -1215,6 +1229,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (result.status !== 'done') fail(`review-fix-worker-${result.status}`, 'The review-fix worker did not finish; items are deferred.');
       artifacts = [];
     } else fail('unsupported-sidecar-unit', 'Use forge-xllm review modes for this review contract.');
+    // execute, plan and fix carry it inside their adapter-assembled result-file;
+    // a worker-shaped artifact or memory result never supplies it.
+    if (['execute', 'plan', 'fix'].includes(transport.mode)) transportTelemetry = result.transport_telemetry || null;
+    const observedModel = observedModelTelemetry(transportTelemetry);
     if (result.status === 'done' && bookkeeping) {
       artifacts.push({ path: bookkeeping, content: markChecked(bookkeepingText, r.unitType === 'complete-slice' ? r.sliceId : r.taskId) });
     }
@@ -1225,7 +1243,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         provider_called: true,
         telemetry: { model_requested: route.model_requested ?? null,
           model_resolved: route.model_resolved || route.model || null, model_argument: model,
-          model_observed: null, model_observed_source: null, effort_reason: route.effort_reason || null,
+          ...observedModel, effort_reason: route.effort_reason || null,
           // Claude CLI: the argv value the adapter reported; app-server: the
           // `effort` turn param runFix passed. Both are adapter arguments.
           ...effortTelemetry(route, result.transport_telemetry ? result.transport_telemetry.effort_sent : options.effort),
@@ -1242,7 +1260,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         model: route.model_resolved || route.model, effort: route.effort, extraction: result, artifacts: [],
         telemetry: { model_requested: route.model_requested || route.model || null,
           model_resolved: route.model_resolved || route.model || null, model_argument: model,
-          model_observed: null, model_observed_source: null,
+          ...observedModel,
           effort_requested: route.effort || null, effort_resolved: route.effort || null,
           effort_argument: route.effort || null, capabilities_source: 'sidecar-transport' } }
       : { phase: 'ready', fingerprint, dispatch_id: dispatchId, result: { ...result, dispatch_id: dispatchId,
@@ -1252,7 +1270,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         route, route_identity: routeIdentity(route, r.unitType), provider_called: true,
         telemetry: { model_requested: route.model_requested ?? null,
           model_resolved: route.model_resolved || route.model || null,
-          model_observed: null, model_observed_source: null,
+          ...observedModel,
           effort_resolved: route.effort || null, effort_reason: route.effort_reason || null },
         artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
     // Durable validated response BEFORE artifact publication: a crash anywhere
@@ -1275,9 +1293,15 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {
       // Only an attempt that never reached a durable validated result is reset;
-      // a ready receipt keeps the worker's verified changes for replay.
-      const reset = resetReviewFixAttempt(r, fix);
-      const terminalSafetyFailure = ['review-fix-protected-metadata', 'review-fix-baseline-moved'].includes(error.code);
+      // a ready receipt keeps the worker's verified changes for replay. A refused
+      // Claude model identity is the exception: the tree (new files included) is
+      // left exactly as the worker left it for the operator, never reset.
+      const identityRefused = typeof error.code === 'string' && error.code.startsWith('claude-model-');
+      const reset = identityRefused
+        ? { verified: false, reason_code: 'identity-refused-preserved', restored: 0, removed: 0, overlap: [] }
+        : resetReviewFixAttempt(r, fix);
+      const terminalSafetyFailure = identityRefused
+        || ['review-fix-protected-metadata', 'review-fix-baseline-moved'].includes(error.code);
       const publicationError = publishReviewFixFailure(r, loc, fix.items, fix.reviewSnapshot);
       extra = { reset, items: fix.items.map(item => ({ r: item.r, ...(item.review_file ? { review_file: item.review_file } : {}), outcome: 'failed', verified: false, commit_sha: null })),
         ...(publicationError ? { publication_error: publicationError } : {}),

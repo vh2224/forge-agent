@@ -74,6 +74,45 @@ behavior. The patch does not enable a second, unvalidated protocol or perform a
 paid capability probe. It keeps the existing account, route and one-turn text
 transport, with strict local recovery of complete JSON.
 
+### Current decision (2026-10-01, Claude Code 2.1.286)
+
+The text transport above is superseded. The sidecar now runs
+`--output-format json` and treats stdout as one CLI result object; the
+worker-result block is read from its `result` string by the unchanged framed
+parser. The reason is model identity, not parsing: the text transport could not
+show which model answered, and a classifier switch or availability fallback
+could hand a different model's work to the unit validator. Only the result
+object's `modelUsage` carries that proof.
+
+- Admission requires exactly one well-formed `modelUsage` key byte-identical
+  to `--model`; then `model_observed` is that id with source
+  `claude-json-modelUsage`. A clearly different model is
+  `claude-model-substituted`; absent, multiple (an auxiliary Haiku included),
+  dated, `[1m]`, alias or neighbouring-version keys are
+  `claude-model-unverified`. A dispatch without `--model` is
+  `claude-model-required` with no spawn.
+- Invocation settings add `switchModelsOnFlag:false` beside
+  `disableAllHooks:true`, inline only, with `--setting-sources ''`, which
+  excludes the user, project and local settings files; managed policy may still
+  apply and is not bypassed, and no settings file is changed. That flag
+  covers the classifier-driven switch only; an availability fallback is still
+  possible and is caught after the turn by `modelUsage`. There is no pre-turn
+  guarantee, no automatic reset and no fallback to another model.
+- `effort_applied` remains unknown (`null`): the JSON result is not used as
+  effort readback.
+- Envelope errors, structured authentication (`api_error_status` 401/403),
+  decoded-secret scanning and the unchanged 1 MiB stream cap are described in
+  `shared/forge-bidirectional-sidecar.md § Claude CLI JSON transport and model
+  identity`.
+
+Official sources named for this decision: the Claude Code changelog entry for
+2.1.286 (<https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md>),
+headless/print-mode output formats (<https://code.claude.com/docs/en/headless>)
+and model configuration (<https://code.claude.com/docs/en/model-config>). They
+were not re-fetched while implementing this change (network disabled); the
+local fixtures prove the adapter's handling of the documented shape, not live
+provider behavior.
+
 ## Offline validation
 
 `scripts/forge-sidecar-diagnostic.test.js` exercises the real research prompt,

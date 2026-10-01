@@ -11,6 +11,8 @@ Nos reviews externos, siga `shared/forge-bidirectional-sidecar.md § Identidade 
 > that equate Claude with in-process delivery regardless of host. No pairing is
 > changed. See `shared/forge-bidirectional-sidecar.md` for the capability matrix.
 
+With `XLLM_ENGINE=claude` (and likewise `XLLM_ENGINE_ADVOCATE=claude` for defense and rebuttal) `--model` is **required**: the Claude sidecar accepts a review only when the CLI's `modelUsage` proves exactly that id. An empty model exits 2 with `claude-model-required` before any spawn; another or unprovable model exits 2 with `claude-model-substituted` or `claude-model-unverified`. These are adapter failures: never retry them with a different model or engine. On success the Claude leg's JSON additionally carries `transport_telemetry` (`model_observed`, `model_observed_source`); codex and agy output is unchanged.
+
 
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
 
