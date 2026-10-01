@@ -1,4 +1,4 @@
-## Não lançado - schema estrito de review-fix
+## 4.39.2 - schema estrito de review-fix
 
 - Structured output do Codex exige todas as propriedades em `required`, inclusive
   `review_file`. O campo passa a obrigatório e anulável no schema enviado; `null`
@@ -7,7 +7,7 @@
 - Reprodução real após 4.39.1 encontrou HTTP 400 `invalid_json_schema` antes da
   inferência. Teste recursivo agora verifica o contrato estrito do provedor.
 
-## Não lançado - review-fix sidecar, política de modelos e esforço de review
+## 4.39.1 - review-fix sidecar, política de modelos e esforço de review
 
 - `review-fix` ganha entrega sidecar real (Claude CLI e Codex app-server) nas fronteiras slice, task
   solta e triagem de milestone: contrato `fix` próprio (sem plano, SUMMARY ou checkbox), claim gate com
