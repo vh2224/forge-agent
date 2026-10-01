@@ -38,7 +38,14 @@ if (p.failure === 'auth') { process.stderr.write('401 invalid token'); process.e
 if (p.failure === 'process') { process.stderr.write(process.env[${JSON.stringify(accounts.TOKEN_ENV)}]); process.exit(9); }
 if (p.failure === 'invalid') { process.stdout.write('not a result'); process.exit(0); }
 if (p.failure === 'wait') { setInterval(() => {}, 1000); }
-else process.stdout.write(['---GSD-WORKER-RESULT---','status: '+p.status,'result_json: '+JSON.stringify(p),'---END-RESULT---'].join('\\n'));
+else {
+  // claude -p --output-format json: modelUsage names the received --model
+  // unless the payload file asks for another observed model.
+  const model = p.observedModel || args[args.indexOf('--model') + 1];
+  const block = ['---GSD-WORKER-RESULT---','status: '+p.status,'result_json: '+JSON.stringify(p),'---END-RESULT---'].join('\\n');
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: block,
+    usage: { input_tokens: 401 }, modelUsage: { [model]: { inputTokens: 401 } } }));
+}
 `);
 process.env.FORGE_XLLM_CLAUDE_BIN = fixture;
 let sequence = 0;
@@ -171,8 +178,13 @@ logSpawn({ engine: 'claude', argv: args, untrusted: prompt.includes('--- REVIEW 
 act(process.cwd());
 if (control.exit) process.exit(control.exit);
 const value = result();
-process.stdout.write(['---GSD-WORKER-RESULT---', 'status: ' + ((value && value.status) || 'done'),
-  'result_json: ' + JSON.stringify(value), '---END-RESULT---'].join('\n'));
+// claude -p --output-format json: modelUsage proves the received --model unless
+// the scenario reports another observed model.
+const observed = control.observedModel || args[args.indexOf('--model') + 1];
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+  result: ['---GSD-WORKER-RESULT---', 'status: ' + ((value && value.status) || 'done'),
+    'result_json: ' + JSON.stringify(value), '---END-RESULT---'].join('\n'),
+  modelUsage: { [observed]: { inputTokens: 1 } } }));
 `;
 const RF_FAKE_CODEX = String.raw`
 let pending = '';
@@ -358,9 +370,13 @@ async function reviewFixMatrix() {
         assert.deepStrictEqual([receipt.phase, receipt.kind, receipt.publication.commit.state], ['ready', 'review-fix', 'done']);
         assert.match(receipt.review_fix_identity, /^[0-9a-f]{64}$/);
         assert.deepStrictEqual(Object.keys(receipt.verified_hashes), ['src/a.js']);
+        // Claude proves its model through modelUsage; app-server reports none.
         assert.deepStrictEqual([receipt.telemetry.effort_requested, receipt.telemetry.effort_resolved,
-          receipt.telemetry.effort_sent, receipt.telemetry.effort_applied, receipt.telemetry.model_observed],
-        ['high', 'high', 'high', null, null]);
+          receipt.telemetry.effort_sent, receipt.telemetry.effort_applied, receipt.telemetry.model_observed,
+          receipt.telemetry.model_observed_source],
+        ['high', 'high', 'high', null, engine === 'claude' ? 'claude-sonnet-5' : null,
+          engine === 'claude' ? 'claude-json-modelUsage' : null]);
+        assert.deepStrictEqual(result.telemetry.model_observed, receipt.telemetry.model_observed);
         assert.strictEqual(receipt.telemetry.transport, engine === 'claude' ? 'claude-cli' : 'app-server');
         assert(!fs.readFileSync(receiptFile, 'utf8').includes(token));
         const fixEvents = events(fx).filter(item => item.event === 'sidecar-unit' && item.dispatch_id === r.dispatchId);
@@ -379,6 +395,8 @@ async function reviewFixMatrix() {
         const replay = await unit.runUnitSidecar(r);
         assert.strictEqual(spawns().length, before + 1, 'ready replay never calls a provider');
         assert.strictEqual(replay.commit_sha, result.commit_sha);
+        assert.deepStrictEqual([replay.telemetry.model_observed, replay.telemetry.model_observed_source],
+          [receipt.telemetry.model_observed, receipt.telemetry.model_observed_source], 'the observation survives replay');
         assert.strictEqual(g(fx.code, 'rev-list', '--count', `${fx.start}..HEAD`), '1');
         assert.deepStrictEqual(boundary === 'milestone-triage' ? [reviewText(fx, RF_SLICE_REVIEW), reviewText(fx, RF_S02_REVIEW)]
           : [reviewText(fx, boundary === 'task' ? RF_TASK_REVIEW : RF_SLICE_REVIEW)], reviewBytes);
@@ -610,6 +628,30 @@ async function reviewFixMatrix() {
     assert.deepStrictEqual([outcome.receipt.phase, outcome.failure.recovery], ['failed', 'operator-required']);
     assert(!g(outcome.fx.code, 'log', '--format=%B', `${outcome.fx.start}..HEAD`).includes('Forge-Dispatch-Id'), 'the parent never commits');
     expectReview(outcome.fx, 'slice', deferred('slice'), deferred('slice'));
+    // A refused Claude identity (another model, or one modelUsage cannot prove)
+    // is detected after the turn: no ready receipt, commit or success line, and
+    // NO reset — the edited and the new file stay byte-identical for the operator.
+    for (const [observedModel, code] of [['claude-opus-5', 'claude-model-substituted'],
+      ['claude-sonnet-5[1m]', 'claude-model-unverified']]) {
+      const writes = { 'src/a.js': 'a from another model\n', 'src/new.js': 'new file from another model\n' };
+      outcome = await failure('claude', { ...fixedA, writes, observedModel }, code);
+      assertDeferred(outcome);
+      assert.deepStrictEqual([outcome.failure.reset.verified, outcome.failure.reset.reason_code,
+        outcome.failure.recovery, outcome.failure.error_class],
+      [false, 'identity-refused-preserved', 'operator-required', 'terminal'], code);
+      assert.strictEqual(outcome.failure.diagnostic.stage, 'identity');
+      assert.strictEqual(outcome.failure.diagnostic.model_observed,
+        code === 'claude-model-substituted' ? 'claude-opus-5' : undefined);
+      for (const [rel, content] of Object.entries(writes)) {
+        assert.strictEqual(hashOf(path.join(outcome.fx.code, rel)),
+          crypto.createHash('sha256').update(content).digest('hex'), `${code}: ${rel} was not preserved`);
+      }
+      const porcelain = g(outcome.fx.code, 'status', '--porcelain').split(/\r?\n/).map(line => line.trim()).sort();
+      assert.deepStrictEqual(porcelain, ['?? src/new.js', 'M src/a.js'], `${code}: the worker tree was reset`);
+      const statuses = events(outcome.fx).filter(item => item.event === 'sidecar-unit').map(item => item.status);
+      assert.deepStrictEqual(statuses, ['started', 'failed'], 'no success event');
+      assert(!JSON.stringify(outcome.receipt).includes('a from another model'), 'worker output never reaches the receipt');
+    }
     // A partial worker never publishes a success line or a commit.
     outcome = await failure('claude', { ...fixedA, status: 'partial' }, 'review-fix-worker-partial');
     assertDeferred(outcome);
@@ -717,8 +759,13 @@ async function reviewFixMatrix() {
             write(path.join(fx.code, '.gsd/forge-prefs.jsonc'), { review: configured ? { [`${leg}_effort`]: 'high' } : {} });
             setControl(engine === 'codex' ? { mode: 'review', answer: JSON.stringify(output) } : { mode: 'review', raw: { status: 'done', output } });
             const before = spawns().length;
-            await run({ cwd: fx.code, engine, hostRuntime: host, sidecarDeclared: true, timeoutSecs: 20, model,
+            const reviewed = await run({ cwd: fx.code, engine, hostRuntime: host, sidecarDeclared: true, timeoutSecs: 20, model,
               ...extra });
+            // Claude legs carry the proven model; codex JSON keeps its exact shape.
+            if (engine === 'claude') {
+              assert.deepStrictEqual([reviewed.transport_telemetry.model_observed, reviewed.transport_telemetry.model_observed_source,
+                reviewed.transport_telemetry.effort_applied], [model, 'claude-json-modelUsage', null], leg);
+            } else assert.deepStrictEqual(Object.keys(reviewed), Object.keys(output), leg);
             const turn = spawns().slice(before);
             assert.strictEqual(turn.length, 1, `${engine}/${leg}`);
             if (engine === 'codex') {
@@ -800,6 +847,10 @@ async function reviewFixMatrix() {
     const receipt = JSON.parse(fs.readFileSync(r.resultFile + '.receipt.json'));
     if (receipt.artifacts[0].before !== null) write(path.join(cwd, p.artifacts[0].path), type === 'discuss-milestone' ? '# Decisions\n' : '# Roadmap\n\n- [ ] **S01: Work**\n');
     await unit.runUnitSidecar(r);
+    // The ready receipt keeps the observation through the replay above.
+    const readyTelemetry = JSON.parse(fs.readFileSync(r.resultFile + '.receipt.json')).telemetry;
+    assert.deepStrictEqual([readyTelemetry.model_observed, readyTelemetry.model_observed_source],
+      engine === 'claude' ? [r.route.model_resolved, 'claude-json-modelUsage'] : [null, null], type);
     if (engine === 'claude') {
       assert.strictEqual(fs.readFileSync(path.join(cwd, 'invocations.txt'), 'utf8'), 'spawn\n');
       const args = JSON.parse(fs.readFileSync(path.join(cwd, 'argv.json')));
@@ -886,10 +937,15 @@ async function reviewFixMatrix() {
     assert.strictEqual(publicationEvents[0].publication_status, 'written');
     assert.strictEqual(publicationEvents[0].model_requested, req.route.model_requested);
     assert.strictEqual(publicationEvents[0].model_resolved, req.route.model_resolved);
-    assert.strictEqual(publicationEvents[0].model_observed, null);
+    // Claude proves its model through modelUsage; the Codex app-server reports none.
+    const observedMemory = engine === 'claude' ? req.route.model_resolved : null;
+    assert.strictEqual(publicationEvents[0].model_observed, observedMemory);
+    assert.strictEqual(publicationEvents[0].model_observed_source, engine === 'claude' ? 'claude-json-modelUsage' : null);
     const replay = await unit.runUnitSidecar(req);
     assert.strictEqual(replay.publication.status, 'noop');
     assert.strictEqual(replay.publication.reason, 'replay');
+    assert.strictEqual(replay.telemetry.model_observed, observedMemory, 'the observation survives replay');
+    assert.strictEqual(JSON.parse(fs.readFileSync(`${req.resultFile}.receipt.json`, 'utf8')).telemetry.model_observed, observedMemory);
     const replayedEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8')
       .trim().split(/\r?\n/).map(line => JSON.parse(line))
       .filter(event => event.event === 'memory-publication' && event.dispatch_id === req.dispatchId);
@@ -1341,14 +1397,19 @@ async function reviewFixMatrix() {
   }
   const waitDir = setup(); write(path.join(waitDir, 'payload.json'), { failure: 'wait' });
   const abort = new AbortController();
-  const waiting = claude.invokeClaudeSidecar({ cwd: waitDir, prompt: 'Fixture', timeoutMs: 10000,
+  const waiting = claude.invokeClaudeSidecar({ cwd: waitDir, prompt: 'Fixture', timeoutMs: 10000, model: 'claude-sonnet-5',
     signal: abort.signal, terminateChild: xllm.terminateOwnedProcessTree });
   setTimeout(() => abort.abort(), 150);
   await rejects(() => waiting, 'claude-cancelled');
-  await rejects(() => claude.invokeClaudeSidecar({ cwd: waitDir, prompt: 'Fixture', timeoutMs: 5100,
+  await rejects(() => claude.invokeClaudeSidecar({ cwd: waitDir, prompt: 'Fixture', timeoutMs: 5100, model: 'claude-sonnet-5',
     terminateChild: xllm.terminateOwnedProcessTree }), 'claude-timeout');
-  await rejects(() => claude.invokeClaudeSidecar({ cwd: waitDir, prompt: 'Fixture', timeoutMs: 10000,
+  await rejects(() => claude.invokeClaudeSidecar({ cwd: waitDir, prompt: 'Fixture', timeoutMs: 10000, model: 'claude-sonnet-5',
     sourceEnv: { ...process.env, FORGE_XLLM_CLAUDE_BIN: path.join(root, 'missing.exe') } }), 'claude-command-not-found');
+  // Without a model there is nothing modelUsage could prove: refused, 0 spawns.
+  const spawnsBefore = fs.readFileSync(path.join(waitDir, 'invocations.txt'), 'utf8');
+  await rejects(() => claude.invokeClaudeSidecar({ cwd: waitDir, prompt: 'Fixture', timeoutMs: 10000,
+    terminateChild: xllm.terminateOwnedProcessTree }), 'claude-model-required');
+  assert.strictEqual(fs.readFileSync(path.join(waitDir, 'invocations.txt'), 'utf8'), spawnsBefore, 'no spawn without a model');
   const concurrentDir = setup(), concurrentRequest = request(concurrentDir, 'research-milestone');
   const concurrentAbort = new AbortController(); concurrentRequest.signal = concurrentAbort.signal;
   write(path.join(concurrentDir, 'payload.json'), { failure: 'wait' });
@@ -1383,6 +1444,12 @@ async function reviewFixMatrix() {
   await unit.runUnitSidecar(planRequest);
   const planFile = path.join(planDir, '.gsd/milestones/M001/slices/S01/tasks/T01-PLAN.md');
   assert.strictEqual(fs.readFileSync(planFile, 'utf8'), planContent);
+  // The plan result-file and its ready receipt carry the proven model.
+  const planResult = JSON.parse(fs.readFileSync(planRequest.resultFile, 'utf8'));
+  assert.deepStrictEqual([planResult.transport_telemetry.model_observed, planResult.transport_telemetry.model_observed_source],
+    [planRequest.route.model_resolved, 'claude-json-modelUsage']);
+  assert.strictEqual(JSON.parse(fs.readFileSync(`${planRequest.resultFile}.receipt.json`, 'utf8')).telemetry.model_observed,
+    planRequest.route.model_resolved);
   const badPlan = { ...planRequest, dispatchId: 'bad-plan', resultFile: path.join(root, 'bad-plan.json') };
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Invalid plan',
     slice_plan: { filename: 'S01-PLAN.md', content: '# Slice' },
@@ -1391,6 +1458,10 @@ async function reviewFixMatrix() {
   const executeRequest = request(planDir, 'execute-task'); executeRequest.planFile = planFile;
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Execution fixture', must_haves_status: [], files_changed: [] });
   await unit.runUnitSidecar(executeRequest);
+  const executeResult = JSON.parse(fs.readFileSync(executeRequest.resultFile, 'utf8'));
+  assert.strictEqual(executeResult.transport_telemetry.model_observed, executeRequest.route.model_resolved);
+  assert.strictEqual(JSON.parse(fs.readFileSync(`${executeRequest.resultFile}.receipt.json`, 'utf8')).telemetry.model_observed,
+    executeRequest.route.model_resolved);
   const executeLocations = unit.locations(executeRequest);
   for (const required of executeLocations.required) assert.strictEqual(fs.existsSync(path.join(planDir, required)), true, required);
   const deliveryInput = JSON.parse(fs.readFileSync(path.join(planDir, executeLocations.delivery.input), 'utf8'));
@@ -1411,12 +1482,21 @@ async function reviewFixMatrix() {
   git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture baseline']);
   write(path.join(planDir, 'tracked.txt'), 'after');
   write(path.join(planDir, 'payload.json'), { status: 'done', output: { objections: [] } });
-  await xllm.runChallenge({ ...reviewOptions, diffCmd: 'git diff' });
+  const challenged = await xllm.runChallenge({ ...reviewOptions, diffCmd: 'git diff' });
+  assert.strictEqual(challenged.transport_telemetry.model_observed, 'claude-sonnet-5');
   const inputFile = path.join(planDir, 'review.md'); write(inputFile, 'R1: fixture objection');
   for (const review of [xllm.runDefend, xllm.runRebuttal]) {
     write(path.join(planDir, 'payload.json'), { status: 'done', output: { verdicts: [] } });
-    await review({ ...reviewOptions, inputFile });
+    const reviewed = await review({ ...reviewOptions, inputFile });
+    assert.strictEqual(reviewed.transport_telemetry.model_observed, 'claude-sonnet-5');
   }
+  // A review leg answered by another model is refused before its JSON exists.
+  write(path.join(planDir, 'payload.json'), { status: 'done', output: { objections: [] }, observedModel: 'claude-opus-5' });
+  await rejects(() => xllm.runChallenge({ ...reviewOptions, diffCmd: 'git diff' }), 'claude-model-substituted');
+  // engine claude without --model never spawns the CLI.
+  const reviewSpawns = fs.readFileSync(path.join(planDir, 'invocations.txt'), 'utf8');
+  await rejects(() => xllm.runChallenge({ ...reviewOptions, model: undefined, diffCmd: 'git diff' }), 'claude-model-required');
+  assert.strictEqual(fs.readFileSync(path.join(planDir, 'invocations.txt'), 'utf8'), reviewSpawns);
 
   await reviewFixMatrix();
 

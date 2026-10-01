@@ -191,6 +191,86 @@ async function main() {
     assert.equal(resolverCalls, 1);
   });
 
+  await test('Codex native names are distinct per dispatch, stable per attempt and keep model/effort', async () => {
+    const nativeApi = require('./forge-native-invocation');
+    const base = fixture({ phase: 'research', hostRuntime: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+    base.activeCapabilities = codexCapabilities();
+    // Distinct dispatch ids whose sanitized text is identical.
+    const ids = ['attempt-Retry-1', 'attempt_retry_1', 'attempt.retry.1'];
+    assert.equal(new Set(ids.map(id => nativeApi.codexTaskName(id))).size, 1);
+    const requests = ids.map((dispatchId, index) => ({ ...base, dispatchId,
+      resultFile: path.join(path.dirname(base.resultFile), `attempt-${index}.json`) }));
+    // Codex keeps a completed agent registered and refuses a reused name before the provider.
+    function spawnRegistry() {
+      const names = new Set();
+      return name => {
+        if (names.has(name)) throw Object.assign(Error(`agent name already exists: ${name}`), { code: 'agent-name-exists' });
+        names.add(name);
+      };
+    }
+    const spawn = spawnRegistry();
+    const spawned = [];
+    for (const request of requests) {
+      const result = await prep.prepareStandaloneTask(request, { invokeNative: async args => {
+        spawn(args.task_name);
+        spawned.push(args);
+        return framed(envelope(request));
+      } });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.transport, 'native');
+      assert.equal(result.route.model_resolved, 'gpt-5.6-sol');
+      assert.equal(result.route.effort, 'high');
+    }
+    assert.equal(spawned.length, 3);
+    assert.equal(new Set(spawned.map(args => args.task_name)).size, 3);
+    const readable = `${nativeApi.codexTaskName(`preparation_research_${base.taskId}`)}_`;
+    const unnamed = args => { const rest = { ...args }; delete rest.task_name; return rest; };
+    for (const args of spawned) {
+      assert(args.task_name.startsWith(readable), args.task_name);
+      assert.match(args.task_name, /_[0-9a-f]{16}$/);
+      assert.deepEqual(unnamed(args), unnamed(spawned[0]));
+      assert.equal(args.model, 'gpt-5.6-sol');
+      assert.equal(args.reasoning_effort, 'high');
+      assert.equal(args.agent_type, 'forge-researcher');
+      assert.equal(args.fork_turns, 'none');
+    }
+
+    // The legacy phase/task name collides on the second dispatch through the same adapter.
+    const route = JSON.parse(fs.readFileSync(`${requests[0].resultFile}.receipt.json`, 'utf8')).route;
+    const legacySpawn = spawnRegistry();
+    const legacy = requests.slice(0, 2).map(request => nativeApi.buildNativeInvocation({
+      ...prep.nativeOptions(request, route, prep.buildPreparationPrompt(request)),
+      taskName: `preparation_${request.phase}_${request.taskId}` }).args.task_name);
+    assert.equal(legacy[0], legacy[1]);
+    legacySpawn(legacy[0]);
+    assert.throws(() => legacySpawn(legacy[1]), error => error.code === 'agent-name-exists');
+
+    // The same dispatch always derives the same name, including from a fresh copy.
+    for (const [index, request] of requests.entries()) {
+      for (const copy of [request, JSON.parse(JSON.stringify(request))]) {
+        const again = nativeApi.buildNativeInvocation(prep.nativeOptions(copy, route, prep.buildPreparationPrompt(copy)));
+        assert.equal(again.ok, true);
+        assert.equal(again.args.task_name, spawned[index].task_name);
+        assert.equal(again.args.model, 'gpt-5.6-sol');
+        assert.equal(again.args.reasoning_effort, 'high');
+      }
+    }
+
+    // Accepted replay of every dispatch spawns no agent and never re-resolves.
+    for (const request of requests) {
+      const replay = await prep.prepareStandaloneTask(request, {
+        resolveDispatch: () => { throw Error('ready replay must not resolve'); },
+        invokeNative: async () => { throw Error('ready replay must not spawn'); },
+      });
+      assert.equal(replay.replayed, true, JSON.stringify(replay));
+      assert.equal(replay.provider_called, false);
+      assert.equal(replay.route.model_resolved, 'gpt-5.6-sol');
+      assert.equal(replay.route.effort, 'high');
+    }
+    assert.equal(spawned.length, 3);
+    assert.equal(fs.readFileSync(artifactPath(base), 'utf8'), content('research', base.taskId));
+  });
+
   await test('Claude native uses observed frontmatter effort and the same acceptance boundary', async () => {
     const request = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'claude-sonnet-5' });
     const agent = path.join(path.dirname(request.resultFile), 'forge-discusser.md');

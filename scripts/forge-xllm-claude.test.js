@@ -31,6 +31,8 @@ const RESULT_MUST_HAVE = Object.freeze({
   reason: '',
 });
 const MOCK_OUTPUT = 'fixture-output.txt';
+const OPERATOR_FILE = 'operator-notes.txt';
+const SUBSTITUTE_MODEL = 'claude-opus-5';
 const PROTECTED_OUTPUT = path.join('.gsd', 'poison.txt');
 const AUTH_KEYS = Object.freeze([
   'ANTHROPIC_AUTH_TOKEN',
@@ -239,18 +241,31 @@ function mockClaudeMain(config) {
     mockFs.writeFileSync(protectedFile, 'temporary fixture poison\n', 'utf8');
   } else if (config.behavior === 'happy') {
     mockFs.writeFileSync(mockPath.join(process.cwd(), config.mockOutput), 'fixture output\n', 'utf8');
+  } else if (config.behavior === 'substituted') {
+    // A write worker that finished its edits on a model other than --model.
+    mockFs.writeFileSync(mockPath.join(process.cwd(), config.mockOutput), 'substituted output\n', 'utf8');
+    mockFs.appendFileSync(mockPath.join(process.cwd(), config.operatorFile), 'worker edit\n', 'utf8');
   } else {
     process.stderr.write('unknown fixture behavior\n');
     process.exit(92);
   }
 
-  process.stdout.write([
-    '---GSD-WORKER-RESULT---',
-    'status: done',
-    'result_json: ' + JSON.stringify(payload),
-    '---END-RESULT---',
-    '',
-  ].join('\n'));
+  // `claude -p --output-format json`: one result object. modelUsage names the
+  // received --model, except in the substitution scenario.
+  const requested = args[args.indexOf('--model') + 1];
+  const observed = config.behavior === 'substituted' ? config.substituteModel : requested;
+  process.stdout.write(JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false,
+    result: [
+      '---GSD-WORKER-RESULT---',
+      'status: done',
+      'result_json: ' + JSON.stringify(payload),
+      '---END-RESULT---',
+      '',
+    ].join('\n'),
+    usage: { input_tokens: 401, output_tokens: 403 },
+    modelUsage: { [observed]: { inputTokens: 401, outputTokens: 403 } },
+  }));
 }
 
 function writeMock(mockFile, fixture) {
@@ -262,6 +277,8 @@ function writeMock(mockFile, fixture) {
     resultSummary: RESULT_SUMMARY,
     resultMustHave: RESULT_MUST_HAVE,
     mockOutput: MOCK_OUTPUT,
+    operatorFile: OPERATOR_FILE,
+    substituteModel: SUBSTITUTE_MODEL,
     selectedEnvKeys: [
       ...AUTH_KEYS,
       'FORGE_ACCOUNTS_REGISTRY',
@@ -613,6 +630,13 @@ async function happyPath(root) {
     assert.strictEqual(terminal.value.parse_path, 'worker-result-block');
     assert.strictEqual(terminal.value.capability, 'workspace');
     assert.strictEqual(terminal.value.appserver.transport, 'claude-cli');
+    assert.strictEqual(capture.argv[capture.argv.indexOf('--output-format') + 1], 'json');
+    assert.strictEqual(terminal.value.transport_telemetry.model_observed, 'claude-sonnet-5',
+      'the execute result-file carries the model modelUsage proved');
+    assert.strictEqual(terminal.value.transport_telemetry.model_observed_source, 'claude-json-modelUsage');
+    assert.strictEqual(terminal.value.transport_telemetry.effort_applied, null);
+    assert(!terminal.text.includes('inputTokens') && !terminal.text.includes('"usage"'),
+      'provider usage metadata is never persisted');
     assert.ok(fs.existsSync(path.join(fixture.workspace, MOCK_OUTPUT)));
     assert.ok(!fs.readdirSync(fixture.workspace).some((name) => name.startsWith('.forge-claude-sidecar-')),
       'prompt transport directories must not survive success');
@@ -658,6 +682,47 @@ async function emptyOutputPath(root) {
     assert.strictEqual(terminal.value.status, 'adapter-failed');
     assert.strictEqual(terminal.value.reason_code, 'claude-empty-output');
     assert.ok(!fs.existsSync(path.join(fixture.workspace, MOCK_OUTPUT)));
+  } finally {
+    removeOwnedFixture(root, scenarioDir);
+  }
+}
+
+// A write worker whose modelUsage names another model: its edits stay on disk
+// for the operator (nothing is reset), HEAD never moves, and the result-file is
+// a terminal adapter failure with no worker payload.
+async function substitutedPath(root) {
+  const scenarioDir = fs.mkdtempSync(path.join(root, 'substituted-'));
+  const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+  try {
+    const fixture = createFixture(scenarioDir, 'substituted', 'substituted', 'configured');
+    const operatorFile = path.join(fixture.workspace, OPERATOR_FILE);
+    fs.writeFileSync(operatorFile, 'operator notes\n', 'utf8');
+    const headRef = path.join(fixture.workspace, '.git', 'refs', 'heads', 'main');
+    const headBefore = fs.readFileSync(headRef, 'utf8');
+    const run = await runCli(fixture);
+    const terminal = readTerminalResult(fixture);
+    const capture = readCapture(fixture);
+
+    assertCliContract(fixture, run);
+    assert.strictEqual(run.code, 2);
+    assertFivePublicTokenChannels(run, terminal.text);
+    assertMockEvidence(fixture, run, capture);
+    assert.strictEqual(terminal.value.status, 'adapter-failed');
+    assert.strictEqual(terminal.value.reason_code, 'claude-model-substituted');
+    assert.strictEqual(terminal.value.error_class, 'terminal');
+    assert.strictEqual(terminal.value.start_sha, fixture.baseline);
+    for (const key of ['summary', 'must_haves_status', 'files_changed', 'transport_telemetry']) {
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(terminal.value, key), false, `${key} must not be accepted`);
+    }
+    assert(!terminal.text.includes(RESULT_SUMMARY) && !terminal.text.includes('inputTokens'));
+    assert.strictEqual(sha256(fs.readFileSync(path.join(fixture.workspace, MOCK_OUTPUT))), sha256('substituted output\n'),
+      'the new file written by the worker is preserved');
+    assert.strictEqual(sha256(fs.readFileSync(operatorFile)), sha256('operator notes\nworker edit\n'),
+      'the edited file is preserved');
+    assert.strictEqual(fs.readFileSync(headRef, 'utf8'), headBefore, 'HEAD never moves');
+    const identityLines = run.stderr.split(/\r?\n/).filter(line => line.startsWith('[forge-sidecar]'));
+    assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado', 'falhou']);
+    assert(identityLines[2].includes('causa=claude-model-substituted'));
   } finally {
     removeOwnedFixture(root, scenarioDir);
   }
@@ -709,6 +774,7 @@ async function main() {
     ['empty isolated registry refuses before provider spawn', missingAccountPath],
     ['exit zero with empty stdout has the frozen empty-output code', emptyOutputPath],
     ['valid worker output still crosses the shared protected-change fence', protectedWritePath],
+    ['a substituted model is refused after the turn and preserves the worker tree', substitutedPath],
   ];
   let passed = 0;
   const failures = [];

@@ -1,3 +1,10 @@
+## Não lançado
+
+- Preparação nativa de task solta: o `task_name` do agente Codex agora inclui um digest sha256 do
+  `dispatchId` (`preparation_<fase>_<task>_<digest>`). Nova tentativa da mesma fase e task não colide
+  mais com o agente concluído e ainda registrado; o mesmo dispatch mantém o nome, e replay aceito
+  segue sem novo spawn. Modelo, esforço e demais argumentos do adaptador não mudam.
+
 ## 4.39.2 - schema estrito de review-fix
 
 - Structured output do Codex exige todas as propriedades em `required`, inclusive
@@ -31,6 +38,25 @@
 - Revisão independente: replay distingue bytes da working tree e identidade normalizada pelo Git;
   o prompt nativo entrega resultados por item e retornos partial/blocked não publicam sucesso.
   Thinking explícito é validado também na revisão nativa e na API direta do adaptador Claude.
+
+### Não lançado - Identidade do modelo no sidecar Claude (Claude Code 2.1.286)
+
+- O sidecar Claude passa a usar `--output-format json` e só admite um resultado quando `modelUsage`
+  contém exatamente uma chave igual byte a byte ao `--model`. Modelo diferente vira
+  `claude-model-substituted`; ausente, múltiplo (Haiku auxiliar incluso), outra data, `[1m]`, alias
+  ou versão vizinha da família viram `claude-model-unverified`, sem chamar o validador da unidade.
+  Engine claude sem `--model` recusa com `claude-model-required` antes de qualquer spawn.
+- `--settings` da invocação ganha `switchModelsOnFlag:false` (só o fallback por classificador); o
+  fallback por disponibilidade é detectado depois do turno, sem reset nem fallback automático.
+  `--setting-sources ''` exclui os arquivos de settings de usuário, projeto e local; a política
+  gerenciada (managed policy) ainda pode valer e não é contornada. Nenhum arquivo de settings é alterado.
+- Envelope JSON estrito (`json-invalid`, `result-error`, `result-envelope-invalid`), autenticação por
+  `api_error_status` 401/403, varredura de credencial em strings e nomes decodificados e limite de
+  1 MiB inalterado. Novo estágio `identity` no diagnóstico, com `model_count`.
+- `model_observed`/`model_observed_source` (`claude-json-modelUsage`) chegam aos result-files de
+  execute, fix e plan, ao JSON de challenge/defend/rebuttal (só engine claude) e aos recibos ready de
+  artifacts, memory e fix, e sobrevivem ao replay. `effort_applied` continua desconhecido. Review-fix
+  com identidade recusada preserva a árvore, com `recovery: operator-required`.
 
 ### Não lançado - Roteamento fiel e publicação de memória
 

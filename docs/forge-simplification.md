@@ -61,7 +61,9 @@ A seção 92 perde 156 linhas líquidas; os casos de CLI exclusivos foram
 preservados na suíte específica. Transporte e coleta de evidências continuam
 cobertos por integrações. A atualização do schema para Codex 0.155.0 foi
 [analisada separadamente](codex-schema-0.155.0.md), incluindo a política para
-a nova variante. O pin gerado cresce por refletir o protocolo, portanto esta
+a nova variante. A atualização seguinte, para 0.159.3, tem
+[nota própria](codex-schema-0.159.3.md) com os 26 caminhos de drift e os limites
+da verificação. O pin gerado cresce por refletir o protocolo, portanto esta
 etapa reduz código de testes, mas não o total de linhas do repositório.
 
 ## Quarta etapa: fixtures de instalação

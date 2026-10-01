@@ -27,7 +27,8 @@
  *   runDefend(opts)            → Promise<{ verdicts: [...] }>    (or rejects) — refuted|conceded|open
  *   runRebuttal(opts)          → Promise<{ verdicts: [...] }>    (or rejects) — maintained|withdrawn
  *   (the three above became async in M018 S05 when codex moved to the app-server
- *    transport: argument errors now arrive as a REJECTION, never a sync throw)
+ *    transport: argument errors now arrive as a REJECTION, never a sync throw;
+ *    engine claude alone adds `transport_telemetry` with the model it proved)
  *   runExecute(opts)           → Promise<result object>   (or rejects) — writes result-file
  *   extractLastJsonBlock(text) → object|array|null
  *   validateObjections(obj)    → boolean
@@ -101,7 +102,7 @@ const {
   parseSvnBaseline,
 } = require('./forge-surgical-reset.js');
 const dispatchPolicy = require('./forge-dispatch-policy.js');
-const { invokeClaudeSidecar, claudeLaunchIdentity } = require('./forge-claude-sidecar.js');
+const { invokeClaudeSidecar, claudeLaunchIdentity, CLAUDE_IDENTITY_MESSAGES } = require('./forge-claude-sidecar.js');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity.js');
 const vcs = require('./forge-vcs.js');
 const { classifyError, isTransient } = require('./forge-classify-error.js');
@@ -1524,9 +1525,14 @@ function invokeEngine(engine, opts) {
     throw new Error(`invokeEngine is the review router: sandbox must be '${CAPABILITY_SANDBOX_MODE.readonly}' (got ${JSON.stringify(opts.sandbox)})`);
   }
   if (engine === 'agy') return Promise.resolve(invokeAgy(opts));
+  // Claude also reports its transport telemetry (proven model) through the
+  // optional callback; the resolved value stays the same raw string.
   if (engine === 'claude') return invokeClaudeJson(opts, value => value && value.status === 'done'
     && (validateObjections(value.output) || validateVerdicts(value.output, DEFEND_VERDICT_ENUM)
-      || validateVerdicts(value.output, VERDICT_ENUM)), true).then(value => JSON.stringify(value.output));
+      || validateVerdicts(value.output, VERDICT_ENUM)), true).then(({ candidate, telemetry }) => {
+    if (typeof opts.onTransportTelemetry === 'function') opts.onTransportTelemetry(telemetry);
+    return JSON.stringify(candidate.output);
+  });
   return invokeCodexAppServer(opts).then((output) => {
     const raw = output.finalText || output.agentTexts;
     // Anti-silence floor: an empty turn is a FAILURE, never an empty review accepted
@@ -1541,12 +1547,23 @@ function invokeEngine(engine, opts) {
 
 // Transport envelope is distinct from each unit's validated result contract.
 // Review's status-less JSON lives under output; planning carries its own status.
+// Resolves {candidate, telemetry}: the telemetry carries the model modelUsage proved.
 async function invokeClaudeJson(opts, validateCandidate, review = false) {
   const prompt = opts.prompt + '\n\nReturn only this worker-result block:\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <single-line JSON>\n---END-RESULT---\n'
     + (review ? 'Use {"status":"done","output":<the requested review JSON>} as result_json.' : 'Use the requested result JSON as result_json.');
   const output = await invokeClaudeSidecar({ ...opts, prompt, readOnly: true,
     validateCandidate, terminateChild: terminateOwnedProcessTree });
-  return output.candidate;
+  return { candidate: output.candidate, telemetry: output.telemetry || null };
+}
+
+// Claude-only additions to the review legs. codex and agy receive neither the
+// callback nor the extra key, so their options and stdout JSON stay byte-identical.
+function claudeTelemetrySink(engine, sink) {
+  return engine === 'claude' ? { onTransportTelemetry: sink } : {};
+}
+
+function withClaudeTelemetry(engine, normalized, telemetry) {
+  return engine === 'claude' ? { ...normalized, transport_telemetry: telemetry } : normalized;
 }
 
 // ── Normalization ─────────────────────────────────────────────────────────────
@@ -1856,9 +1873,11 @@ async function runChallengeCore(opts) {
   const diffText = acquireDiff(opts.diffCmd, cwd);
   const prompt = buildChallengePrompt(diffText);
   opts._sidecarIdentity.attempted = true;
+  let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
     prompt, schema: challengeSchema, cwd, model: opts.model, effort: opts.effort, signal: opts.signal, timeoutSecs, envPolicy: opts.envPolicy || 'minimal',
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
+    ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
     sandbox: CAPABILITY_SANDBOX_MODE.readonly,
@@ -1869,7 +1888,7 @@ async function runChallengeCore(opts) {
   assertUntrustedOutputBarrier(parsed);
   if (!validateObjections(parsed)) throw new Error(`${engine} output failed objections validation`);
 
-  return normalizeChallenge(parsed);
+  return withClaudeTelemetry(engine, normalizeChallenge(parsed), transportTelemetry);
 }
 
 /**
@@ -1918,6 +1937,7 @@ async function runDefendCore(opts) {
 
   const prompt = buildDefendPrompt(inputText);
   opts._sidecarIdentity.attempted = true;
+  let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
     prompt,
     schema: verdictSchema(DEFEND_VERDICT_ENUM),
@@ -1925,6 +1945,7 @@ async function runDefendCore(opts) {
     model: opts.model,
     effort: opts.effort,
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
+    ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
@@ -1940,7 +1961,7 @@ async function runDefendCore(opts) {
     throw new Error(`${engine} output failed defense verdicts validation`);
   }
 
-  return normalizeDefense(parsed);
+  return withClaudeTelemetry(engine, normalizeDefense(parsed), transportTelemetry);
 }
 
 /**
@@ -1972,6 +1993,7 @@ async function runRebuttalCore(opts) {
 
   const prompt = buildRebuttalPrompt(inputText);
   opts._sidecarIdentity.attempted = true;
+  let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
     prompt,
     schema: verdictSchema(VERDICT_ENUM),
@@ -1979,6 +2001,7 @@ async function runRebuttalCore(opts) {
     model: opts.model,
     effort: opts.effort,
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
+    ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
@@ -1992,7 +2015,7 @@ async function runRebuttalCore(opts) {
   assertUntrustedOutputBarrier(parsed);
   if (!validateVerdicts(parsed)) throw new Error(`${engine} output failed verdicts validation`);
 
-  return normalizeRebuttal(parsed);
+  return withClaudeTelemetry(engine, normalizeRebuttal(parsed), transportTelemetry);
 }
 
 // ── Execute driver ──────────────────────────────────────────────────────────────
@@ -2159,6 +2182,9 @@ function executeContract(opts) {
         ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
         ...(cap.event ? { capability_event: cap.event } : {}),
         appserver: common.appserver,
+        // Claude only: the proven model rides here. A codex result never gets the
+        // key, so the frozen BASELINE_RESULT_KEYS set of that transport is unchanged.
+        ...(common.transportTelemetry ? { transport_telemetry: common.transportTelemetry } : {}),
         // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
         // no existing key changes name or shape, and validateExecuteResult does NOT
         // require this one (it validates the JSON the MODEL returns; this field is
@@ -2678,9 +2704,13 @@ async function runPlanCore(opts) {
     envPolicy: opts.envPolicy || 'minimal',
   };
   opts._sidecarIdentity.attempted = true;
-  const appServerOutput = engine === 'claude'
-    ? { finalText: JSON.stringify(await invokeClaudeJson(planOptions, validatePlanResult)), transport: { kind: 'claude-cli', version: 'unknown' } }
-    : await invokeCodexAppServer(planOptions);
+  let transportTelemetry = null;
+  let appServerOutput;
+  if (engine === 'claude') {
+    const claudeOutput = await invokeClaudeJson(planOptions, validatePlanResult);
+    transportTelemetry = claudeOutput.telemetry;
+    appServerOutput = { finalText: JSON.stringify(claudeOutput.candidate), transport: { kind: 'claude-cli', version: 'unknown' } };
+  } else appServerOutput = await invokeCodexAppServer(planOptions);
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   // Anti-silence floor: an empty turn is a FAILURE, never an empty plan accepted in
   // silence. `codex exec` enforced this as "codex -o file is empty"; the app-server
@@ -2752,6 +2782,8 @@ async function runPlanCore(opts) {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     token_method: 'heuristic-chars-4',
+    // Claude only, like execute/fix: the model its modelUsage proved.
+    ...(engine === 'claude' ? { transport_telemetry: transportTelemetry } : {}),
   };
 
   writeJsonAtomic(resultFile, result);
@@ -2828,6 +2860,9 @@ module.exports = {
  */
 function classifyErrorClass(msg) {
   if (/killed after exceeding timeout/i.test(msg || '')) return 'terminal';
+  // A refused Claude model identity is never auto-resumed: its fixed messages
+  // are matched exactly, before any keyword heuristic could see them.
+  if (Object.values(CLAUDE_IDENTITY_MESSAGES).includes(msg)) return 'terminal';
   return isTransient(classifyError(msg)) ? 'transient' : 'terminal';
 }
 
