@@ -235,7 +235,7 @@ test('registry and every nested entry are deeply frozen with explicit exclusions
     assert(Object.isFrozen(entry), `${entry.id} is mutable`);
     assert.match(entry.id, /^[a-z0-9-]+$/);
     assert(guard.SCOPED_FILES.includes(entry.path), entry.path);
-    assert(['resolver', 'agent', 'adapter', 'emitter', 'native', 'preparation'].includes(entry.kind), entry.kind);
+    assert(['resolver', 'agent', 'adapter', 'emitter', 'native', 'preparation', 'unit-sidecar'].includes(entry.kind), entry.kind);
     assert(['operational', 'excluded'].includes(entry.classification), entry.classification);
     assert.match(entry.fingerprint, /^sha256:[a-f0-9]{64}$/);
     if (entry.classification === 'excluded') assert.notStrictEqual(entry.reason.trim(), '', entry.id);
@@ -249,7 +249,7 @@ test('real disk discovery equals the frozen registry in both directions', () => 
   assert.deepStrictEqual(report.missing, []);
   assert.deepStrictEqual(report.errors, []);
   const discoveredKinds = new Set(guard.discover(ROOT).candidates.map((item) => item.kind));
-  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'native', 'preparation', 'resolver']);
+  assert.deepStrictEqual([...discoveredKinds].sort(), ['adapter', 'agent', 'emitter', 'native', 'preparation', 'resolver', 'unit-sidecar']);
   const nativeBuilders = guard.discover(ROOT).candidates.filter((item) =>
     item.kind === 'native' && /buildNativeInvocation\s*\(/.test(item.evidence));
   assert.strictEqual(nativeBuilders.length, 3, 'all structured native builder sites remain visible');
@@ -306,6 +306,52 @@ test('an operational native builder missing effort binding is structurally rejec
   const report = guard.audit({ root, registry });
   assert.strictEqual(report.ok, false);
   assert(report.errors.some((message) => /native builder lacks effortBinding/.test(message)), JSON.stringify(report, null, 2));
+}));
+
+test('the review-fix unit-sidecar caller is operational and consumes the saved resolver JSON', () => {
+  const entries = guard.SOURCE_REGISTRY.filter((entry) => entry.kind === 'unit-sidecar');
+  assert.deepStrictEqual(entries.map((entry) => [entry.path, entry.classification]),
+    [['shared/forge-review.md', 'operational']]);
+  const candidate = byIdentity(guard.discover(ROOT)).get(guard.identity(entries[0]));
+  assert(candidate, entries[0].id);
+  assert.match(candidate.evidence, /forge-unit-sidecar\.js" --request "\$RF_REQUEST"$/);
+  // The data path, not argv flags: the resolver JSON saved by the runtime gate
+  // is piped, parsed and embedded unchanged as the request route.
+  assert.match(candidate.context, /printf '%s' "\$RF_ROUTE_JSON_SAVED" \|/);
+  assert.match(candidate.context, /route=JSON\.parse\(d\)/);
+  assert.match(candidate.context, /,route,/);
+  assert.match(candidate.context, /decision:'proceed'/);
+  assert.doesNotMatch(candidate.context, /--host-runtime|--sidecar-declared/);
+  // The same saved variable is the one the runtime gate assigned from the resolver.
+  assert.match(read('shared/forge-review.md'), /RF_ROUTE_JSON_SAVED="\$RF_ROUTE_JSON"/);
+});
+
+test('a unit-sidecar caller that re-types flags or drops the resolver JSON is structurally rejected', () => withFixture((root) => {
+  const relative = 'shared/forge-review.md';
+  const source = read(relative, root);
+  const mutated = source
+    .replace(`printf '%s' "$RF_ROUTE_JSON_SAVED" | RF_REQUEST=`, 'RF_REQUEST=')
+    .replace('node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --request "$RF_REQUEST"',
+      'node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --request "$RF_REQUEST" --host-runtime claude --sidecar-declared');
+  assert.notStrictEqual(mutated, source, 'fixture mutation did not apply');
+  write(relative, mutated, root);
+  const item = discovered(root, (candidate) => candidate.kind === 'unit-sidecar' && candidate.evidence.includes('--sidecar-declared'));
+  const report = guard.audit({ root, registry: [...guard.SOURCE_REGISTRY, registerCandidate(item)] });
+  assert.strictEqual(report.ok, false);
+  assert(report.errors.some((message) => /lacks the saved resolver JSON on its data path/.test(message)), JSON.stringify(report.errors, null, 2));
+  assert(report.errors.some((message) => /re-types runtime flags/.test(message)), JSON.stringify(report.errors, null, 2));
+}));
+
+test('an unregistered or unfenced unit-sidecar caller is reported', () => withFixture((root) => {
+  const relative = 'skills/forge-next/SKILL.md';
+  appendSeparated(root, relative, 'Run `node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --request "$INJECTED_REQUEST"` inline.');
+  const report = guard.audit({ root });
+  assert.strictEqual(report.ok, false);
+  const item = report.unexpected.find((candidate) => candidate.kind === 'unit-sidecar' && candidate.evidence.includes('$INJECTED_REQUEST'));
+  assert(item, JSON.stringify(report.unexpected, null, 2));
+  const measured = discovered(root, (candidate) => candidate.kind === 'unit-sidecar' && candidate.evidence.includes('$INJECTED_REQUEST'));
+  const registered = guard.audit({ root, registry: [...guard.SOURCE_REGISTRY, registerCandidate(measured)] });
+  assert(registered.errors.some((message) => /outside a fenced command block/.test(message)), JSON.stringify(registered.errors, null, 2));
 }));
 
 test('injecting a resolver call is reported as an unexpected candidate', () => withFixture((root) => {

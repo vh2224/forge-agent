@@ -11,10 +11,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { resolveLaunch, TOKEN_ENV } = require('./forge-accounts');
 const { parseJsonEnvelope } = require('./forge-worker-result');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
+const modelPolicy = require('./forge-model-policy');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
@@ -31,6 +32,12 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   INVALID_OPTIONS: 'claude-invalid-options',
   AUTH_FAILED: 'claude-auth-failed',
   CANCELLED: 'claude-cancelled',
+  CLI_VERSION_UNSUPPORTED: 'claude-cli-version-unsupported',
+  THINKING_TRANSPORT_UNSUPPORTED: 'thinking-transport-unsupported',
+  THINKING_DISABLED_INCOMPATIBLE: 'thinking-disabled-incompatible',
+  THINKING_ENABLED_INCOMPATIBLE: 'thinking-enabled-incompatible',
+  THINKING_MODE_UNKNOWN: 'thinking-mode-unknown',
+  EFFORT_UNSUPPORTED_BY_MODEL: 'effort-unsupported-by-model',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -85,6 +92,12 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS]: 'The Claude sidecar received an invalid launch option.',
     [CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED]: 'Claude authentication failed. Repair the default account with forge-accounts before retrying.',
     [CLAUDE_SIDECAR_REASON_CODES.CANCELLED]: 'The Claude worker was cancelled.',
+    [CLAUDE_SIDECAR_REASON_CODES.CLI_VERSION_UNSUPPORTED]: 'The installed Claude CLI is older than the minimum version the model policy requires for this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.THINKING_TRANSPORT_UNSUPPORTED]: 'The requested thinking mode has no documented Claude CLI argument. No worker was launched and no parameter was invented.',
+    [CLAUDE_SIDECAR_REASON_CODES.THINKING_DISABLED_INCOMPATIBLE]: 'Disabled thinking is incompatible with this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.THINKING_ENABLED_INCOMPATIBLE]: 'Enabled thinking is incompatible with this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.THINKING_MODE_UNKNOWN]: 'The requested thinking mode is not documented for this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL]: 'The requested effort is not documented for this model. No worker was launched and the effort was not lowered.',
   };
   const error = new Error(messages[code] || 'Claude sidecar failure.');
   error.code = code;
@@ -118,6 +131,42 @@ function buildClaudeSidecarEnv(account, sourceEnv = process.env, platform = proc
   env.FORGE_ACCOUNT = account.name;
   env[TOKEN_ENV] = account.token;
   return env;
+}
+
+/** Environment for the version probe: the same allowlist, never an account. */
+function buildClaudeProbeEnv(sourceEnv = process.env, platform = process.platform) {
+  const keys = platform === 'win32'
+    ? [...CLAUDE_SIDECAR_ENV_ALLOWLIST, ...WINDOWS_ENV_ALLOWLIST]
+    : platform === 'linux'
+      ? [...CLAUDE_SIDECAR_ENV_ALLOWLIST, ...LINUX_ENV_ALLOWLIST]
+      : CLAUDE_SIDECAR_ENV_ALLOWLIST;
+  const env = {};
+  for (const key of keys) {
+    if (sourceEnv && sourceEnv[key] !== undefined) env[key] = sourceEnv[key];
+  }
+  return env;
+}
+
+const VERSION_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * `claude --version` through the same resolved command, shell:false, short
+ * timeout, minimal env. Returns the parsed x.y.z or null (probe failed or the
+ * output was not parseable). Output is parsed, never echoed.
+ */
+function probeClaudeVersion(cmd, prefixArgs, cwd, sourceEnv, runner = spawnSync) {
+  try {
+    const result = runner(cmd, [...prefixArgs, '--version'], {
+      cwd, shell: false, env: buildClaudeProbeEnv(sourceEnv, process.platform),
+      encoding: 'utf8', timeout: VERSION_PROBE_TIMEOUT_MS, windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024,
+    });
+    if (!result || result.error || result.status !== 0) return null;
+    const parsed = modelPolicy.parseVersion(String(result.stdout || ''));
+    return parsed ? parsed.join('.') : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Resolve an executable plus fixed prefix args without ever invoking a shell. */
@@ -465,6 +514,48 @@ async function invokeClaudeSidecar(opts) {
   const launchIdentity = claudeLaunchIdentity(options);
   const model = launchIdentity.model_sent;
   const effort = launchIdentity.effort;
+  // Direct adapter callers need the same full thinking policy as the resolver.
+  // Refuse before the version probe, prompt file or inference child exists.
+  const thinking = modelPolicy.evaluateThinking({ model, effort, transport: 'claude-cli',
+    mode: typeof options.thinkingRequested === 'string'
+      ? options.thinkingRequested.trim().toLowerCase() : options.thinkingRequested });
+  if (!thinking.ok) {
+    const refused = sidecarError(thinking.reason_code);
+    refused.provider_called = false;
+    refused.layer = 'model-policy';
+    refused.policy = thinking;
+    throw refused;
+  }
+  // Defense in depth for direct adapter callers (review legs through
+  // forge-xllm): an effort a documented entry does not list is refused, never
+  // sent or lowered. Clamping entries (legacy caps) keep the exact old argv.
+  if (model && effort && modelPolicy.applyEffortPolicy({ model, effort }).unsupported) {
+    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL);
+  }
+  // Only a policy entry that declares a minimum CLI version is probed; every
+  // other model keeps the exact previous argv and spawn count.
+  let cliVersion = null;
+  const policyDiagnostics = [];
+  const policy = model ? modelPolicy.transportSupport({ model, transport: 'claude-cli' }) : null;
+  if (policy && policy.min_version) {
+    const probeCommand = resolveClaudeCommand(sourceEnv);
+    const probed = probeClaudeVersion(probeCommand.cmd, probeCommand.prefixArgs, cwd, sourceEnv,
+      typeof options.probeRunner === 'function' ? options.probeRunner : spawnSync);
+    const verdict = modelPolicy.transportSupport({ model, transport: 'claude-cli', cliVersion: probed });
+    cliVersion = verdict.cli_version;
+    policyDiagnostics.push(...verdict.diagnostics.filter((item) => item.code === 'transport-version-unverified'));
+    if (!verdict.supported) {
+      const refused = sidecarError(CLAUDE_SIDECAR_REASON_CODES.CLI_VERSION_UNSUPPORTED);
+      refused.policy = { cli_version: cliVersion, min_version: verdict.min_version, model };
+      throw refused;
+    }
+  }
+  // Adapter arguments, never provider observations: without readback the
+  // applied effort stays unknown (null).
+  const telemetry = Object.freeze({
+    model_argument: model, effort_sent: effort, effort_applied: null, effort_applied_source: null,
+    cli_version: cliVersion, policy_diagnostics: policyDiagnostics,
+  });
   let tempDir = null;
   let primaryError = null;
 
@@ -491,10 +582,11 @@ async function invokeClaudeSidecar(opts) {
       ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
       '-p', instruction];
     const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
-    return await runOwnedChild({
+    const output = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
     });
+    return { ...output, telemetry };
   } catch (error) {
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync
     // above throw native errors that already carry a `.code` (EACCES, ENOSPC,
@@ -524,6 +616,8 @@ module.exports = {
   TIMEOUT_GRACE_MS,
   TEMP_DIR_PREFIX,
   buildClaudeSidecarEnv,
+  buildClaudeProbeEnv,
+  probeClaudeVersion,
   resolveClaudeCommand,
   deriveChildTimeoutMs,
   parseExecuteCandidate,

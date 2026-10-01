@@ -10,6 +10,10 @@ const UNIT_MODES = Object.freeze({
   ...Object.fromEntries(ARTIFACT_UNITS.map(unit => [unit, 'artifacts'])),
   'memory-extract': 'memory',
   'plan-slice': 'plan', 'execute-task': 'execute',
+  // Scoped writing contract (forge-xllm runFix + forge-review-fix), delivered and
+  // published by forge-unit-sidecar. Never an alias of execute: no plan, SUMMARY
+  // or checkbox exists for a review fix.
+  'review-fix': 'fix',
   'review-challenger': 'challenge', 'review-advocate': 'defend',
   'review-rebuttal': 'rebuttal',
 });

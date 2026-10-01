@@ -3,6 +3,14 @@
 Canonical reference for tier-based model routing in the Forge Agent system.
 Consumed by `### Tier Resolution` in `shared/forge-dispatch.md` and by `## Tier Settings` in `forge-agent-prefs.jsonc`.
 
+> **Effort and thinking are separate from the tier.** The tier picks the model; `effort` picks how deep
+> it reasons; `thinking` picks the thinking mode. The per-model effort ceiling and the thinking header
+> come from `scripts/forge-model-policy.js`: `claude-sonnet-5-5` (own entry, never matched by
+> `claude-sonnet-5`) and `claude-sonnet-5` accept low…max; `claude-sonnet-4-6` refuses `xhigh`;
+> Sonnet 5.5 only runs thinking `adaptive` (explicit `disabled` is refused; the API-only
+> `between_tools` has no Claude CLI/native transport and is refused). `review-fix` runs sidecar on
+> engines claude and codex (never agy) and reads `effort.review-fix` (absent → `medium`).
+
 ---
 
 ## Unit Type → Default Tier
@@ -60,8 +68,8 @@ The four tiers map to four model aliases. Operators can override the model for a
 > model ID and effort. `scripts/forge-native-invocation.js` consumes that
 > authoritative result and active tool capabilities; it never selects a model.
 > Codex receives the full supported ID, separate `reasoning_effort`, and
-> `fork_turns:none` (or an explicitly supported positive history). Claude alone
-> receives the alias accepted by its native adapter only after the caller reads
+> `fork_turns:none` (or an explicitly supported positive history). Claude receives the full ID when active capabilities accept it, or an alias
+> when the active adapter requires aliases, only after the caller reads
 > the actual exposed agent definition, fingerprints those bytes, and supplies
 > its observed frontmatter effort as the binding. Prompt text is not an effort
 > API. Unsupported model, effort, alias, binding, fork mode, or tool is a

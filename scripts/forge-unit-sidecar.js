@@ -115,8 +115,40 @@ function inspectDeliveryContent(content, rule) {
     && typeof value.environment === 'string' && typeof value.captured_at === 'string'
     && value.result && typeof value.result === 'object' && !Array.isArray(value.result);
 }
+const MILESTONE_ID_RE = /^(?:M\d+|M-\d{14}-[a-z0-9-]+)$/i;
+// Review-fix has three boundaries and publishes only outcome lines into the
+// REVIEW.md files the parent derives here; the worker never selects a path.
+function reviewFixLocations(request) {
+  const m = request.milestoneId, s = request.sliceId, t = request.taskId;
+  const boundary = request.reviewFix && typeof request.reviewFix === 'object' ? request.reviewFix.boundary : undefined;
+  const invalid = () => fail('review-fix-boundary-invalid',
+    'review-fix requires boundary slice (milestone + slice), task (standalone task id) or milestone-triage (milestone + per-item review_file).');
+  if (boundary === 'slice') {
+    if (!MILESTONE_ID_RE.test(m || '') || !/^S\d+$/.test(s || '') || t !== undefined) invalid();
+    const milestone = `.gsd/milestones/${m}`, slice = `${milestone}/slices/${s}`;
+    return { milestone, slice, reviewFix: { boundary, unitLabel: `review-fix/${s}`, reviewFiles: [`${slice}/${s}-REVIEW.md`] } };
+  }
+  if (boundary === 'task') {
+    if (m !== undefined || s !== undefined || !forgeIds.isValid(t) || forgeIds.entityKind(t) !== 'task') invalid();
+    return { milestone: null, slice: null, task: `.gsd/tasks/${t}`,
+      reviewFix: { boundary, unitLabel: `review-fix/${t}`, reviewFiles: [`.gsd/tasks/${t}/${t}-REVIEW.md`] } };
+  }
+  if (boundary === 'milestone-triage') {
+    if (!MILESTONE_ID_RE.test(m || '') || s !== undefined || t !== undefined) invalid();
+    const items = Array.isArray(request.reviewFix.items) ? request.reviewFix.items : [];
+    const owned = new RegExp(`^\\.gsd/milestones/${m}/slices/(S\\d+)/\\1-REVIEW\\.md$`);
+    const files = items.map(item => (item && typeof item.review_file === 'string' ? item.review_file.trim().replace(/\\/g, '/') : ''));
+    if (!files.length || files.some(file => !owned.test(file))) invalid();
+    return { milestone: `.gsd/milestones/${m}`, slice: null,
+      reviewFix: { boundary, unitLabel: `review-fix/${m}-triage`, reviewFiles: [...new Set(files)].sort() } };
+  }
+  return invalid();
+}
 function locations(request) {
   const m = request.milestoneId, s = request.sliceId, t = request.taskId;
+  if (request.unitType === 'review-fix') {
+    return { required: [], allowed: [], rules: {}, delivery: null, ...reviewFixLocations(request) };
+  }
   if (request.scope === 'standalone-task') {
     if (m !== undefined || s !== undefined) fail('standalone-task-scope-invalid');
     if (!forgeIds.isValid(t) || forgeIds.entityKind(t) !== 'task') fail('invalid-task');
@@ -287,7 +319,36 @@ function routeIdentity(route, unitType) {
     effort: value.effort || null,
     effort_reason: value.effort_reason || null,
     dispatch_allowed: value.dispatch_allowed === true,
+    ...effortTelemetry(value),
   };
+}
+
+// Additive effort/policy telemetry shared by receipts and sidecar-unit events.
+// Requested and resolved come from the route. `effort_sent` is filled only
+// with the argument an adapter actually passed to a launched transport (null
+// before the spawn and after a pre-spawn refusal): a planned value is never
+// reported as sent. Applied stays null because nothing reads it back.
+function effortTelemetry(route, sent = null) {
+  const value = route || {};
+  return {
+    effort_requested: value.effort_requested ?? value.effort ?? null,
+    effort_resolved: value.effort || null,
+    effort_sent: sent || null,
+    effort_applied: null,
+    policy_version: value.policy_version || null,
+    policy_diagnostics: Array.isArray(value.policy_diagnostics) ? value.policy_diagnostics : [],
+  };
+}
+
+function reviewFixUnitLabel(request) {
+  const r = request || {}, boundary = r.reviewFix && r.reviewFix.boundary;
+  if (boundary === 'milestone-triage') return `review-fix/${r.milestoneId || '-'}-triage`;
+  return `review-fix/${(boundary === 'task' ? r.taskId : r.sliceId) || r.taskId || r.sliceId || '-'}`;
+}
+
+function unitLabel(request, loc) {
+  if (loc && loc.reviewFix) return loc.reviewFix.unitLabel;
+  return `${request.unitType}/${request.unitType === 'memory-extract' ? loc.sourceUnit : request.taskId || request.sliceId || request.milestoneId}`;
 }
 
 function artifactFingerprint(request) {
@@ -527,7 +588,115 @@ function appendMemoryPublicationEvent(request, record, result) {
   fs.appendFileSync(eventsFile, JSON.stringify(event) + '\n');
   return event;
 }
+// Review-fix publication, parent-owned and replayable from a ready receipt:
+//   1. commit (only git + auto_commit) with a durable intent persisted first and
+//      trailer reconciliation, so a crash between commit and receipt never
+//      produces a second commit;
+//   2. per-R# outcome lines in the parent-derived REVIEW.md files (idempotent);
+//   3. the result-file payload. No provider is involved at any step.
+function publishReviewFixRecord(request, record) {
+  const reviewFix = require('./forge-review-fix');
+  const loc = locations(request);
+  const files = artifactAttemptFiles(request);
+  const result = record.result;
+  let commit = record.publication && record.publication.commit;
+  if (!commit || commit.state !== 'done') {
+    // The verified files must still hold the bytes the worker left at ready
+    // time. Any concurrent edit (between the response and this publication or
+    // a replay) is refused before any commit: other work is never committed.
+    // Reconciliation uses the independently captured normalized Git blobs.
+    const expected = record.verified_hashes || {};
+    const current = verifiedHashes(files.cwd, result.verified_paths);
+    if (JSON.stringify(current) !== JSON.stringify(expected)) {
+      fail('review-fix-concurrent-change', 'Verified files changed after the worker result; nothing was committed or published.');
+    }
+    // REVIEW.md lines are written only after the commit is durable, so until
+    // then every REVIEW.md must still be byte-identical to the pre-turn
+    // snapshot. A review edited meanwhile refuses BEFORE any commit.
+    reviewFix.assertReviewSnapshot({ root: files.root, resolveTarget: target, expectedHashes: record.review_snapshot });
+    if (request.constraints?.auto_commit === true && result.vcs !== 'svn' && !Array.isArray(result.repo_baselines)
+      && !record.verified_git_blobs) {
+      fail('review-fix-git-identity-missing', 'Legacy receipt has no pre-commit Git identity; nothing was committed or published.');
+    }
+    if (!commit) {
+      record.publication = { ...(record.publication || {}), commit: { state: 'intent', dispatch_id: record.dispatch_id } };
+      json(files.receiptFile, record);
+    }
+    const outcome = Array.isArray(result.repo_baselines)
+      ? { sha: null, reason: 'multi-repo-commit-not-owned' }
+      : reviewFix.commitVerified({ cwd: files.cwd, vcs: result.vcs === 'svn' ? 'svn' : 'git',
+        autoCommit: Boolean(request.constraints && request.constraints.auto_commit === true),
+        paths: result.verified_paths, preDirty: result.pre_dirty, startSha: result.start_sha,
+        dispatchId: record.dispatch_id, unitId: reviewFix.unitIdFor(loc.reviewFix), expectedBlobs: record.verified_git_blobs });
+    if (outcome.reason === 'reconciled-commit-mismatch') {
+      fail('review-fix-concurrent-change', 'The commit carrying this dispatch id does not match the verified files; nothing was published.');
+    }
+    commit = { state: 'done', sha: outcome.sha, reason: outcome.reason, ...(outcome.reconciled ? { reconciled: true } : {}) };
+    record.publication = { ...(record.publication || {}), commit };
+    json(files.receiptFile, record);
+  }
+  const requested = reviewFix.normalizeItems(request.reviewFix.items);
+  const items = result.items.map(item => ({ r: item.r, ...(item.review_file ? { review_file: item.review_file } : {}), outcome: item.outcome, verified: item.verified === true,
+    commit_sha: item.verified === true ? commit.sha : null }));
+  reviewFix.applyReviewOutcomes({ root: files.root, resolveTarget: target, expectedHashes: record.review_snapshot,
+    outcomes: items.map(item => ({
+    r: item.r,
+    reviewFile: reviewFix.reviewFileFor(loc.reviewFix, reviewFix.correlateReviewItem(item, requested)),
+    line: reviewFix.outcomeLine(loc.reviewFix.boundary, { verified: item.verified, commitSha: commit.sha, commitReason: commit.reason }),
+  })) });
+  return { status: result.status, contract: 'review-fix', boundary: loc.reviewFix.boundary, unit: loc.reviewFix.unitLabel,
+    items, files_changed: result.files_changed, commit_sha: commit.sha, commit_reason: commit.reason,
+    provider_called: true, dispatch_id: record.dispatch_id, telemetry: record.telemetry || null };
+}
+
+// sha256 per verified path (null when the fix deleted the file), sorted keys.
+function verifiedHashes(cwd, paths) {
+  const out = {};
+  for (const relative of [...new Set(paths || [])].sort()) {
+    try { out[relative] = hash(fs.readFileSync(path.join(cwd, relative))); }
+    catch { out[relative] = null; }
+  }
+  return out;
+}
+
+// Failed attempts: surgical reset of what the worker touched (never pre-existing
+// work), then every item is published as failed/deferred. Overlap with a
+// pre-dirty file resets nothing and requires the operator.
+function resetReviewFixAttempt(request, state) {
+  let reset;
+  try {
+    reset = require('./forge-surgical-reset').resetFailedAttempt(state.stateFile, {
+      mode: 'execute', failed: true, repoRoots: state.repoRoots, codeDir: state.cwd,
+    });
+  } catch (error) {
+    reset = { ok: false, reason_code: error.code || 'reset-failed' };
+  }
+  const detail = reset.reset || {};
+  return {
+    verified: reset.ok === true,
+    reason_code: reset.reason_code,
+    restored: Array.isArray(detail.restored) ? detail.restored.length : 0,
+    removed: Array.isArray(detail.removed) ? detail.removed.length : 0,
+    overlap: Array.isArray(detail.overlap) ? detail.overlap.map(entry => (typeof entry === 'string' ? entry : entry.path)) : [],
+  };
+}
+
+function publishReviewFixFailure(request, loc, items, snapshot) {
+  const reviewFix = require('./forge-review-fix');
+  const root = fs.realpathSync(request.contextRoot || request.cwd);
+  try {
+    reviewFix.applyReviewOutcomes({ root, resolveTarget: target, expectedHashes: snapshot, outcomes: items.map(item => ({
+      r: item.r, reviewFile: reviewFix.reviewFileFor(loc.reviewFix, item),
+      line: reviewFix.outcomeLine(loc.reviewFix.boundary, { verified: false }),
+    })) });
+    return null;
+  } catch (error) {
+    return error.code || 'review-fix-publication-failed';
+  }
+}
+
 async function publishReadyRecord(request, record) {
+  if (record.kind === 'review-fix') return publishReviewFixRecord(request, record);
   if (record.kind !== 'memory-extraction') return materialize(request, record);
   const extraction = record.extraction;
   if (extraction.status !== 'done') {
@@ -606,9 +775,14 @@ function nativeMemoryIdentity(request, durableTelemetry) {
     'effort_transport', 'effort_transport_value', 'effort_transport_source',
     'effort_binding_observed', 'effort_binding_observed_source', 'effort_binding_observed_fingerprint',
     'effort_applied', 'effort_applied_source', 'capabilities_source'];
+  // Model-policy marks emitted by the native adapter only for entries that
+  // declare them (Sonnet 5.5 alias-only); closed values, never observations.
+  const optional = ['model_version_proof', 'policy_diagnostics'];
   if (!telemetry || typeof telemetry !== 'object' || Array.isArray(telemetry)
       || required.some(key => !Object.prototype.hasOwnProperty.call(telemetry, key))
-      || Object.keys(telemetry).some(key => !required.includes(key))) {
+      || Object.keys(telemetry).some(key => !required.includes(key) && !optional.includes(key))
+      || (Object.prototype.hasOwnProperty.call(telemetry, 'model_version_proof') && telemetry.model_version_proof !== 'alias-only')
+      || (Object.prototype.hasOwnProperty.call(telemetry, 'policy_diagnostics') && !Array.isArray(telemetry.policy_diagnostics))) {
     fail('native-memory-telemetry-invalid', 'Native memory publication requires the complete adapter telemetry envelope.');
   }
   const host = route.host_runtime || r.hostRuntime;
@@ -617,7 +791,8 @@ function nativeMemoryIdentity(request, durableTelemetry) {
   const commonMismatch = telemetry.model_requested !== (route.model_requested ?? null)
     || telemetry.model_resolved !== identity.model
     || telemetry.effort_resolved !== identity.effort
-    || telemetry.effort_requested !== identity.effort
+    // The adapter reports the resolver's pre-clamp value when the route has it.
+    || telemetry.effort_requested !== (route.effort_requested || identity.effort)
     || typeof telemetry.model_argument !== 'string' || !telemetry.model_argument
     || typeof telemetry.capabilities_source !== 'string' || !telemetry.capabilities_source
     || !paired(telemetry.model_observed, telemetry.model_observed_source)
@@ -631,7 +806,10 @@ function nativeMemoryIdentity(request, durableTelemetry) {
     || telemetry.effort_binding_observed !== null
     || telemetry.effort_binding_observed_source !== null
     || telemetry.effort_binding_observed_fingerprint !== null);
-  const claudeMismatch = host === 'claude' && (telemetry.model_argument !== route.alias
+  // Claude: the alias, or the exact resolved id when the active tool listed it.
+  const claudeMismatch = host === 'claude' && ((telemetry.model_argument !== route.alias
+      && telemetry.model_argument !== identity.model)
+    || (telemetry.model_argument === identity.model && Object.prototype.hasOwnProperty.call(telemetry, 'model_version_proof'))
     || telemetry.effort_argument !== null
     || telemetry.effort_transport !== 'agent-frontmatter'
     || telemetry.effort_transport_value !== identity.effort
@@ -834,20 +1012,22 @@ async function runUnitSidecarCore(request, runtime, identity) {
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
-  function event(status, reasonCode, detail, providerCalled = false) {
+  const label = unitLabel(r, loc);
+  function event(status, reasonCode, detail, providerCalled = false, extra = null) {
     fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
     fs.appendFileSync(eventsFile, JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
       workflow_id: r.workflowId, dispatch_id: dispatchId,
-      unit: `${r.unitType}/${r.unitType === 'memory-extract' ? loc.sourceUnit : r.taskId || r.sliceId || r.milestoneId}`,
+      unit: label,
       host_runtime: route.host_runtime, worker_engine: route.resolved_worker_engine,
       worker_mode: 'sidecar', model, tier: route.tier, effort: route.effort,
       model_requested: route.model_requested ?? null,
       model_resolved: route.model_resolved || route.model || null,
       effort_reason: route.effort_reason || null,
       status, provider_called: providerCalled === true, ...(reasonCode ? { reason_code: reasonCode } : {}),
-      ...(detail ? { diagnostic: diagnostic(detail.reason, detail) } : {}) }) + '\n');
+      ...(detail ? { diagnostic: diagnostic(detail.reason, detail) } : {}),
+      ...effortTelemetry(route), ...(extra || {}) }) + '\n');
   }
-  function recordFailure(error) {
+  function recordFailure(error, extra = null) {
     const code = error.code || 'sidecar-unit-failed';
     const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     const detail = diagnostic(error.diagnostic?.reason || (code === 'untrusted-output-barrier'
@@ -858,11 +1038,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
       provider_called: error.provider_called === true,
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
       recovery: record.phase === 'ready' ? 'replay-publication' : 'operator-required',
-      failed_at: new Date().toISOString() };
+      failed_at: new Date().toISOString(), ...(record.phase === 'ready' ? {} : (extra || {})) };
     // Never overwrite the validated response if publication was interrupted.
     if (record.phase !== 'ready') json(receiptFile, { ...record, phase: 'failed', failure });
     json(resultFile, failure);
-    event('failed', code, detail, failure.provider_called);
+    event('failed', code, detail, failure.provider_called,
+      loc.reviewFix ? { boundary: loc.reviewFix.boundary, items_total: reviewFixItemsTotal(r) } : null);
   }
   const existing = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
   if (existing) {
@@ -899,14 +1080,21 @@ async function runUnitSidecarCore(request, runtime, identity) {
     : r.unitType === 'execute-task' ? `${loc.slice}/${r.sliceId}-PLAN.md` : null;
   const bookkeepingText = bookkeeping && fs.readFileSync(target(root, bookkeeping), 'utf8');
   if (bookkeeping) before[bookkeeping] = hash(bookkeepingText);
+  // Review-fix: boundary and claim are validated, then the surgical-reset state
+  // is captured, all BEFORE the started receipt. A refusal here leaves no
+  // receipt and never reaches a provider.
+  const fix = transport.mode === 'fix' ? prepareReviewFix(r, loc, { cwd, root, resultFile, route, dispatchId }) : null;
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before,
     request_fingerprint: r.preparationRequestFingerprint || null,
-    preparation_identity: r.preparationIdentity || null }), { flag: 'wx', mode: 0o600 });
-  event('started');
+    preparation_identity: r.preparationIdentity || null,
+    ...(fix ? { kind: 'review-fix', review_fix_identity: fix.brief.identity, reset_state_file: fix.stateFile,
+      route_identity: routeIdentity(route, r.unitType), review_snapshot: fix.reviewSnapshot } : {}) }),
+  { flag: 'wx', mode: 0o600 });
+  event('started', null, null, false, fix ? { boundary: loc.reviewFix.boundary, items_total: fix.items.length } : null);
   const dispatchEvent = require('./forge-dispatch-event').buildDispatchEvent({
-    unit: `${r.unitType}/${r.unitType === 'memory-extract' ? loc.sourceUnit : r.taskId || r.sliceId || r.milestoneId}`,
+    unit: label,
     milestone: r.milestoneId,
     slice: r.sliceId, dispatchId, model, engine: route.resolved_worker_engine,
     transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
@@ -924,6 +1112,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     constraints: r.constraints || { auto_commit: false, deploy: false },
     signal: r.signal, announce, identity: { phase: identity.phase, unit: identity.unit, dispatch_id: dispatchId,
       model_resolved: identity.model_resolved },
+    // Defense in depth behind the resolver refusal: the Claude CLI adapter
+    // refuses a thinking mode it has no documented argument for.
+    ...(route.thinking_requested ? { thinkingRequested: route.thinking_requested } : {}),
   };
   const heartbeat = pid => {
     if (Number.isInteger(pid) && pid > 0) {
@@ -1016,11 +1207,36 @@ async function runUnitSidecarCore(request, runtime, identity) {
       }
       xllm.assertUntrustedOutputBarrier(result);
       artifacts = result.status === 'done' ? result.artifacts : [];
+    } else if (transport.mode === 'fix') {
+      // Scoped writing turn through the shared execute safety core. The worker
+      // never commits; outside-claim, .gsd and a moved baseline are named failures.
+      result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
+      // A partial/blocked turn never publishes a success line or a commit.
+      if (result.status !== 'done') fail(`review-fix-worker-${result.status}`, 'The review-fix worker did not finish; items are deferred.');
+      artifacts = [];
     } else fail('unsupported-sidecar-unit', 'Use forge-xllm review modes for this review contract.');
     if (result.status === 'done' && bookkeeping) {
       artifacts.push({ path: bookkeeping, content: markChecked(bookkeepingText, r.unitType === 'complete-slice' ? r.sliceId : r.taskId) });
     }
-    const record = transport.mode === 'memory'
+    const record = transport.mode === 'fix'
+      ? { phase: 'ready', kind: 'review-fix', fingerprint, dispatch_id: dispatchId,
+        review_fix_identity: fix.brief.identity, reset_state_file: fix.stateFile,
+        boundary: loc.reviewFix.boundary, unit: label, route, route_identity: routeIdentity(route, r.unitType),
+        provider_called: true,
+        telemetry: { model_requested: route.model_requested ?? null,
+          model_resolved: route.model_resolved || route.model || null, model_argument: model,
+          model_observed: null, model_observed_source: null, effort_reason: route.effort_reason || null,
+          // Claude CLI: the argv value the adapter reported; app-server: the
+          // `effort` turn param runFix passed. Both are adapter arguments.
+          ...effortTelemetry(route, result.transport_telemetry ? result.transport_telemetry.effort_sent : options.effort),
+          transport: options.engine === 'claude' ? 'claude-cli' : 'app-server',
+          cli_version: result.transport_telemetry ? result.transport_telemetry.cli_version : null,
+          transport_diagnostics: result.transport_telemetry ? result.transport_telemetry.policy_diagnostics : [] },
+        review_snapshot: fix.reviewSnapshot, verified_hashes: verifiedHashes(cwd, result.verified_paths),
+        ...(r.constraints?.auto_commit === true && result.vcs !== 'svn' && !Array.isArray(result.repo_baselines)
+          ? { verified_git_blobs: require('./forge-review-fix').verifiedGitBlobs(cwd, result.verified_paths) } : {}),
+        result, artifacts: [], publication: { commit: null } }
+      : transport.mode === 'memory'
       ? { phase: 'ready', kind: 'memory-extraction', fingerprint, dispatch_id: dispatchId,
         extraction_id: r.extractionId || dispatchId, extracted_at: startedAt, source_unit: loc.sourceUnit,
         model: route.model_resolved || route.model, effort: route.effort, extraction: result, artifacts: [],
@@ -1044,20 +1260,101 @@ async function runUnitSidecarCore(request, runtime, identity) {
     json(receiptFile, record);
     result = await publishReadyRecord(r, record);
     json(resultFile, result);
-    if (transport.mode !== 'memory') event(result.status, null, null, true);
+    if (transport.mode !== 'memory') {
+      event(result.status, null, null, true, fix ? { boundary: loc.reviewFix.boundary, items_total: result.items.length,
+        items_fixed: result.items.filter(item => item.verified).length, commit_sha: result.commit_sha,
+        effort_sent: result.telemetry ? result.telemetry.effort_sent : null } : null);
+    }
     return result;
   } catch (error) {
     error.provider_called = providerCalled;
     announce(providerCalled ? 'falhou' : 'recusado', { ...identity,
       ...(providerCalled ? {} : { model_sent: '-', model_route: model }),
       reason_code: error.code || xllm.classifyErrorClass(error.message), provider_called: providerCalled });
-    recordFailure(error);
+    let extra = null;
+    const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
+    if (fix && phase !== 'ready') {
+      // Only an attempt that never reached a durable validated result is reset;
+      // a ready receipt keeps the worker's verified changes for replay.
+      const reset = resetReviewFixAttempt(r, fix);
+      const terminalSafetyFailure = ['review-fix-protected-metadata', 'review-fix-baseline-moved'].includes(error.code);
+      const publicationError = publishReviewFixFailure(r, loc, fix.items, fix.reviewSnapshot);
+      extra = { reset, items: fix.items.map(item => ({ r: item.r, ...(item.review_file ? { review_file: item.review_file } : {}), outcome: 'failed', verified: false, commit_sha: null })),
+        ...(publicationError ? { publication_error: publicationError } : {}),
+        ...(error.outside ? { outside_claim: { count: error.outside.length, paths: error.outside } } : {}),
+        recovery: reset.overlap.length || !reset.verified || terminalSafetyFailure ? 'operator-required' : 'items-deferred' };
+    }
+    recordFailure(error, extra);
     throw error;
   }
 }
+
+// Validate the review-fix request against the claim the parent can re-derive,
+// then capture the surgical-reset state beside the result channel.
+function prepareReviewFix(request, loc, context) {
+  const reviewFix = require('./forge-review-fix');
+  const spec = request.reviewFix;
+  const items = reviewFix.normalizeItems(spec.items);
+  const claim = reviewFix.deriveClaim(items);
+  const supplied = Array.isArray(spec.claimPaths) ? [...new Set(spec.claimPaths.map(String))].sort() : null;
+  // A pathless item keeps its canonical claim-gate refusal name.
+  if (!claim.eligible) fail(claim.cause || 'review-fix-claim-mismatch', `The accepted items cannot form a claim (${claim.detail}); no worker was launched.`);
+  if (!supplied || JSON.stringify([...new Set(claim.paths)].sort()) !== JSON.stringify(supplied)) {
+    fail('review-fix-claim-mismatch', 'The supplied claim differs from the claim derived from the accepted items; run the claim gate again.');
+  }
+  // The claim gate is mandatory for this contract: no legacy request exists
+  // without it, so an absent decision is refused exactly like a non-proceed one.
+  if (spec.decision !== 'proceed') {
+    fail('review-fix-claim-mismatch', 'The cross-run claim gate decision must be proceed before a review-fix worker starts.');
+  }
+  assertClaimTargetsPhysical(context.cwd, supplied);
+  const stateFile = xllm.validateResultFileTarget(`${context.resultFile}.reset-state.json`, context.cwd);
+  xllm.validateResultFileTarget(stateFile, context.root);
+  const writable = Array.isArray(request.writableRoots) ? request.writableRoots.map(root => fs.realpathSync(root)) : [];
+  const repoRoots = [context.cwd, ...writable];
+  require('./forge-surgical-reset').initState(stateFile, { cwd: context.cwd, attempt: context.dispatchId, repoRoots });
+  const brief = reviewFix.buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
+    items, claimPaths: supplied, route: context.route });
+  // REVIEW.md bytes before the provider turn: publication (and any replay)
+  // refuses to overwrite a review that changed meanwhile.
+  const reviewSnapshot = {};
+  for (const reviewFile of loc.reviewFix.reviewFiles) {
+    try { reviewSnapshot[reviewFile] = hash(fs.readFileSync(target(context.root, reviewFile))); }
+    catch { fail('review-fix-review-item-missing', `${reviewFile} is not readable; no worker was launched.`); }
+  }
+  return { items, brief, stateFile, repoRoots, cwd: context.cwd, reviewSnapshot };
+}
+
+// A lexically relative claim path can still resolve through a symlink or
+// junction outside CODE_DIR. Every existing component of each claimed file
+// (and the file itself) must resolve physically inside the root and must not
+// be a link. Missing trailing components are allowed (the fix may create a
+// file), but their nearest existing parent is checked. This is a pre-spawn
+// check only: transient writes during the turn are detected afterwards.
+function assertClaimTargetsPhysical(cwd, claimPaths) {
+  const root = fs.realpathSync(cwd);
+  const key = value => (process.platform === 'win32' ? value.toLowerCase() : value);
+  const inside = value => key(value) === key(root) || key(value).startsWith(key(root.endsWith(path.sep) ? root : root + path.sep));
+  for (const relative of claimPaths) {
+    let current = root;
+    for (const part of relative.split('/')) {
+      current = path.join(current, part);
+      let stat;
+      try { stat = fs.lstatSync(current); } catch { break; }
+      if (stat.isSymbolicLink() || !inside(fs.realpathSync(current))) {
+        fail('review-fix-claim-mismatch', `Claim path ${relative} resolves through a link or outside CODE_DIR; no worker was launched.`);
+      }
+    }
+  }
+}
+
+function reviewFixItemsTotal(request) {
+  return request.reviewFix && Array.isArray(request.reviewFix.items) ? request.reviewFix.items.length : 0;
+}
 async function runUnitSidecar(request, runtime = {}) {
   const r = request || {}, route = r.route || {};
-  const identity = { phase: r.preparationIdentity?.phase, unit: `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
+  const identity = { phase: r.preparationIdentity?.phase, unit: r.unitType === 'review-fix' ? reviewFixUnitLabel(r)
+    : `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
     engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
     model_sent: '-', model_route: route.sidecar_model || route.model_resolved || route.model,
     model_resolved: route.model_resolved || route.model, effort: route.effort,
@@ -1079,7 +1376,7 @@ module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, val
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt,
-  failArtifactAttempt, acceptArtifactResult, runUnitSidecar };
+  failArtifactAttempt, acceptArtifactResult, runUnitSidecar, reviewFixUnitLabel, effortTelemetry };
 if (require.main === module) {
   const announce = createStderrAnnouncer();
   Promise.resolve().then(() => {

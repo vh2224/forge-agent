@@ -209,4 +209,48 @@ assert.strictEqual(cliRow.intra_family_debate, true, 'CLI derives the flag too')
 const { audit } = require('./forge-review-audit.js');
 assert.ok(Array.isArray(audit(path.join(cliDir, '.gsd', 'forge', 'events.jsonl'), cliDir).drifts));
 
+// ── --efforts-json: optional, closed, never a claim of applied effort ───────
+// Absent flag → the row is byte-identical to the historical one.
+const effortsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-efforts-'));
+const rowArgs = ['--milestone', 'M134', '--slice', 'S02', '--author-engine', 'codex', '--challenger', 'claude',
+  '--advocate', 'opus', '--ts', '2026-09-30T00:00:00Z'];
+const eventsOf = (cwd) => path.join(cwd, '.gsd', 'forge', 'events.jsonl');
+const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-legacy-'));
+assert.strictEqual(run(['--cwd', legacyDir, ...rowArgs]).code, 0);
+const legacyBytes = fs.readFileSync(eventsOf(legacyDir), 'utf8');
+assert.deepStrictEqual(Object.keys(JSON.parse(legacyBytes)), CANONICAL_KEYS, 'no efforts key without the flag');
+const legacyAgainDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-legacy2-'));
+assert.strictEqual(run(['--cwd', legacyAgainDir, ...rowArgs]).code, 0);
+assert.strictEqual(fs.readFileSync(eventsOf(legacyAgainDir), 'utf8'), legacyBytes, 'absent flag keeps the row byte-identical');
+
+const efforts = {
+  challenge: { requested: 'high', resolved: 'high', sent: 'high', applied: null, reason: 'review.challenge_effort', diagnostics: [] },
+  defense: { requested: 'high', resolved: 'medium', sent: 'agent-frontmatter:medium', applied: null,
+    reason: 'review.defense_effort', diagnostics: [{ code: 'effort-clamped-by-policy' }] },
+  fix: { requested: 'medium', resolved: 'medium', sent: 'medium', applied: null, reason: 'unit-type:review-fix', diagnostics: [] },
+};
+assert.strictEqual(run(['--cwd', effortsDir, ...rowArgs, '--efforts-json', JSON.stringify(efforts)]).code, 0);
+const effortsRow = JSON.parse(fs.readFileSync(eventsOf(effortsDir), 'utf8').trim());
+assert.deepStrictEqual(Object.keys(effortsRow), [...CANONICAL_KEYS, 'efforts'], 'efforts is appended, never reorders');
+assert.deepStrictEqual(effortsRow.efforts, efforts);
+for (const key of CANONICAL_KEYS.filter((key) => key !== 'ts')) {
+  assert.deepStrictEqual(effortsRow[key], JSON.parse(legacyBytes)[key], `efforts leaves ${key} untouched`);
+}
+
+// Malformed payloads exit 2 and write nothing.
+const malformedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-review-emit-malformed-'));
+for (const payload of [
+  '{not json',
+  JSON.stringify({ judge: efforts.challenge }),
+  JSON.stringify({ challenge: { ...efforts.challenge, applied: 'high' } }),
+  JSON.stringify({ challenge: { ...efforts.challenge, extra: 1 } }),
+  JSON.stringify({ challenge: { requested: 'high' } }),
+  JSON.stringify({ challenge: { ...efforts.challenge, requested: 'ultra' } }),
+  JSON.stringify({ challenge: { ...efforts.challenge, diagnostics: ['free text'] } }),
+]) {
+  const refused = run(['--cwd', malformedDir, ...rowArgs, '--efforts-json', payload]);
+  assert.strictEqual(refused.code, 2, `malformed efforts must exit 2: ${payload}`);
+  assert.strictEqual(fs.existsSync(eventsOf(malformedDir)), false, `malformed efforts wrote a row: ${payload}`);
+}
+
 console.log('forge-review-emit tests passed');

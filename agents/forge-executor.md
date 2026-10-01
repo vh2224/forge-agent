@@ -2,10 +2,9 @@
 name: forge-executor
 description: GSD execution phase agent. Implements tasks — reads the plan, executes steps, verifies must-haves, commits, writes summary. Used for execute-task units. Balanced model for cost-effective implementation.
 model: claude-sonnet-5
-# medium, not low: this frontmatter is the effort that actually reaches the API —
-# the orchestrator's resolved effort travels only as prompt-header text (Agent()
-# has no effort param). medium is also sonnet's cap in the dispatch clamp, so
-# this aligns the real ceiling with the resolver's model-cap. Diagnóstico 2026-08-23.
+# medium remains the historical default. Native Claude effort is bound to the
+# observed agent definition; a prompt header does not transport it. Sonnet 5
+# supports higher explicit efforts through compatible adapters (model policy).
 effort: medium
 # 100, not 80: measured 2026-08-24 — a standard task with a byte-identity gate
 # (many small measurement commands) died at exactly turn 80 mid-verification,

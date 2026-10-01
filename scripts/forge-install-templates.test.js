@@ -120,6 +120,27 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
       `${skill} retained the legacy native alias/default path after install`);
   }
 
+  // Review-fix sidecar, model policy and review effort: the new helpers are part
+  // of the installed inventory, their tests are not, and every host projection
+  // carries the same executable review-fix sidecar branch.
+  for (const helper of ['forge-model-policy.js', 'forge-review-fix.js', 'forge-review-effort.js']) {
+    assert(fs.existsSync(path.join(options.forgeHome, 'scripts', helper)), `${helper} missing from the installed inventory`);
+    assert(!fs.existsSync(path.join(options.forgeHome, 'scripts', helper.replace(/\.js$/, '.test.js'))),
+      `${helper} test leaked into the installed inventory`);
+  }
+  const installedCapabilities = require(path.join(options.forgeHome, 'scripts', 'forge-transport-capabilities.js'));
+  assert.strictEqual(installedCapabilities.UNIT_MODES['review-fix'], 'fix');
+  for (const [host, home] of [['Claude', options.claudeHome], ['Codex', options.codexHome]]) {
+    for (const skill of ['forge-task', 'forge-auto', 'forge-next']) {
+      const projected = fs.readFileSync(path.join(home, 'skills', skill, 'SKILL.md'), 'utf8');
+      assert.match(projected, /review-fix sidecar/i, `${host}/${skill} lacks the review-fix sidecar branch`);
+      assert.match(projected, /RF_ROUTE_JSON_SAVED/, `${host}/${skill} review-fix branch does not reuse the saved route`);
+    }
+    const review = fs.readFileSync(path.join(options.forgeHome, 'shared', 'forge-review.md'), 'utf8');
+    assert.match(review, /forge-unit-sidecar\.js" --request/, `${host} install lacks the review-fix sidecar delivery`);
+    assert.match(review, /forge-review-fix\.js" --accept-native/, `${host} install lacks native review-fix acceptance`);
+  }
+
   const installedSidecar = require(path.join(options.forgeHome, 'scripts', 'forge-unit-sidecar.js'));
   const installedMemoryPrompt = installedSidecar.memoryPrompt({
     sourceUnitType: 'execute-task', summaryContent: 'installed memory fixture',

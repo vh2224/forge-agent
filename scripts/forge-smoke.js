@@ -7073,13 +7073,25 @@ function smokeDispatchResolve() {
     cleanup(dir);
   });
 
-  // ── (b) Effort clamp still fires through the resolver ──
+  // ── (b) Effort policy through the resolver (forge-model-policy 2026-09-30.1) ──
+  // Documented Sonnet 5 keeps xhigh; the legacy clamp still fires for haiku.
   withHermeticHome(() => {
     const dir = mkTmp('dispatch-resolve-clamp');
     const planPath = writePlan(dir, ['id: T01', 'slice: S01', 'effort: xhigh']);
     const result = resolveDispatch({ unitType: 'execute-task', planPath, cwd: dir });
+    assert(result.effort === 'xhigh' && !/clamped:model-cap/.test(result.effort_reason) && result.policy_entry === 'claude-sonnet-5',
+      '(b) policy: documented sonnet-5 + effort:xhigh -> effort=xhigh, no clamp',
+      JSON.stringify(result));
+    cleanup(dir);
+  });
+  withHermeticHome(() => {
+    const dir = mkTmp('dispatch-resolve-clamp-haiku');
+    fs.mkdirSync(path.join(dir, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gsd', 'forge-prefs.jsonc'), '{"tier_models":{"standard":"claude-haiku-4-5-20251001"}}');
+    const planPath = writePlan(dir, ['id: T01', 'slice: S01', 'effort: xhigh']);
+    const result = resolveDispatch({ unitType: 'execute-task', planPath, cwd: dir });
     assert(result.effort === 'medium' && /clamped:model-cap/.test(result.effort_reason),
-      '(b) clamp: sonnet-tier + effort:xhigh -> effort=medium, reason has clamped:model-cap',
+      '(b) clamp: legacy haiku + effort:xhigh -> effort=medium, reason has clamped:model-cap',
       JSON.stringify(result));
     cleanup(dir);
   });
@@ -13182,7 +13194,11 @@ function reachableXllmBody(source, name) {
   const directCall = new RegExp(`\\b${core}\\(`).test(body);
   const delegated = new RegExp(`\\bwithSidecarIdentity\\([^;]*,\\s*${core}\\s*\\)`).test(body)
     && /\bdriver\(runOpts\)/.test(reachableXllmBody(source, 'withSidecarIdentity'));
-  return (directCall || delegated) ? body + reachableXllmBody(source, core) : body;
+  // Execute and review-fix share one writing core through an injected contract;
+  // a direct call to it is reachability, exactly like a call to `${name}Core`.
+  const shared = name !== 'runWriteContractCore' && /\brunWriteContractCore\(/.test(body)
+    ? reachableXllmBody(source, 'runWriteContractCore') : '';
+  return (directCall || delegated) ? body + reachableXllmBody(source, core) : body + shared;
 }
 
 function scanXllmContracts(source) {
@@ -13378,6 +13394,12 @@ async function smokeAppServerTransport() {
       const connectedScan = scanXllmContracts(connected);
       assert(connectedScan.executeExtractCallSites === 1 && connectedScan.planAppServerCallSites === 1,
         '(e) connected wrapper and driver reach both transport cores', JSON.stringify(connectedScan));
+      const sharedCore = connected.replace('async function runExecuteCore(o) { return extractLastJsonBlock(o); }',
+        'async function runExecuteCore(o) { return runWriteContractCore(o, {}); }\n'
+        + 'async function runWriteContractCore(o, c) { return extractLastJsonBlock(o); }');
+      assert(scanXllmContracts(sharedCore).executeExtractCallSites === 1
+        && scanXllmContracts(sharedCore.replace('return runWriteContractCore(o, {})', 'return null')).executeExtractCallSites === 0,
+      '(e) the shared write core is reachable only through an actual call', JSON.stringify(scanXllmContracts(sharedCore)));
       const regressedPlan = connected.replace('return invokeCodexAppServer(o)', `return ${DETACHED_NEEDLE}o)`);
       const regressedScan = scanXllmContracts(regressedPlan);
       assert(regressedScan.planDetachedCallSites === 1 && regressedScan.planAppServerCallSites === 0,
@@ -15298,11 +15320,11 @@ function smokeInertRoutes() {
       '(1b) o token da família NUNCA aparece no slot de modelo (o defeito medido em M018/S02/T01)');
 
     const clamped = run('worker: claude\neffort: high\n');
-    assert(clamped.model === 'claude-sonnet-5' && clamped.effort === 'medium',
-      '(1c) numa task standard o clamp de effort volta a morder (era o HTTP 400 no Sonnet)',
+    assert(clamped.model === 'claude-sonnet-5' && clamped.effort === 'high',
+      '(1c) numa task standard o effort documentado do Sonnet 5 chega sem clamp (política 2026-09-30.1)',
       JSON.stringify({ model: clamped.model, effort: clamped.effort }));
-    assert(/clamped:model-cap/.test(clamped.effort_reason),
-      '(1c) o clamp é registrado, nunca silencioso', clamped.effort_reason);
+    assert(!/clamped:model-cap/.test(clamped.effort_reason) && clamped.policy_entry === 'claude-sonnet-5',
+      '(1c) a entrada documentada é registrada, sem sufixo de clamp', clamped.effort_reason);
 
     const codex = run('worker: codex\n');
     assert(codex.dispatch_engine === 'codex' && codex.model === 'gpt-5.6-luna' && codex.sidecar_model === 'gpt-5.6-luna',
@@ -17707,7 +17729,9 @@ function smokeHostWorkerParityAcceptance() {
     try {
       for (const value of ['0', '00', 'false', '', 'off']) {
         process.env.FORGE_RUNTIME_ENFORCE = value;
-        const attempted = materializeQuadrant(enforcingRow, 'review-fix');
+        // review-fix gained the scoped `fix` contract (claude/codex); a unit
+        // with no delivery contract keeps exercising the capability refusal.
+        const attempted = materializeQuadrant(enforcingRow, 'fixture-unit-without-contract');
         assert(attempted.allowed === false && attempted.posture === 'enforce'
           && attempted.reason === 'unsupported-sidecar-unit'
           && JSON.stringify(materializeQuadrant(enforcingRow)) === supportedBaseline,

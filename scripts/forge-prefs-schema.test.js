@@ -195,6 +195,18 @@ const INVENTORY = [
   { key: 'app.session_root_dir', type: 'string', default: '', source: 'app/Sources/ForgeKit/WorkspaceDefaults.swift § sessionRoot (empty ⇒ home)' },
 ];
 
+// Opt-in knobs WITHOUT a schema default. Their absence is the legacy behavior
+// (no argv, no cost, resolver default), so a schema default would ACTIVATE them
+// for every operator. They are inventoried here, must carry type + enum +
+// description, and must NOT carry `default`.
+const OPT_IN_WITHOUT_DEFAULT = [
+  { key: 'effort.review-fix', type: 'string', source: 'scripts/forge-dispatch-resolve.js EFFORT_DEFAULTS[review-fix] applies when absent' },
+  { key: 'review.challenge_effort', type: 'string', source: 'scripts/forge-review-effort.js resolveReviewEffort (absent → legacy call)' },
+  { key: 'review.defense_effort', type: 'string', source: 'scripts/forge-review-effort.js resolveReviewEffort (absent → legacy call)' },
+  { key: 'review.rebuttal_effort', type: 'string', source: 'scripts/forge-review-effort.js resolveReviewEffort (absent → legacy call)' },
+];
+const OPT_IN_KEYS = new Set(OPT_IN_WITHOUT_DEFAULT.map((entry) => entry.key));
+
 // legacyReadFile flattens exactly 2 levels (section.key) — nested level-3 keys
 // under forge_isolation.repos surface as forge_isolation.<key>. Map those
 // extraction artifacts back to their real schema paths.
@@ -253,7 +265,12 @@ function defaultsFromSchema(schema) {
   function walk(node) {
     if (isPlainObject(node.properties)) {
       const out = {};
-      for (const key of Object.keys(node.properties)) out[key] = walk(node.properties[key]);
+      for (const key of Object.keys(node.properties)) {
+        const value = walk(node.properties[key]);
+        // A knob without a default is ABSENT from the defaults document — the
+        // opt-in contract — never present as undefined.
+        if (value !== undefined) out[key] = value;
+      }
       return out;
     }
     return node.default;
@@ -362,7 +379,45 @@ check('mutation-proof: nesting-aware extraction loses evidence.mode when its lin
 // Union: curated ∪ generated scaffold (with legacy-flattening aliases applied).
 const inventoryKeys = new Set(INVENTORY.map((e) => e.key));
 const aliasedScaffoldKeys = scaffoldKeys.map((k) => KEY_ALIASES[k] || k);
-const allKeys = new Set([...inventoryKeys, ...aliasedScaffoldKeys]);
+const allKeys = new Set([...inventoryKeys, ...aliasedScaffoldKeys, ...OPT_IN_KEYS]);
+
+check('opt-in knobs have type + enum + description and NO default (no injected cost)', () => {
+  const bad = [];
+  for (const entry of OPT_IN_WITHOUT_DEFAULT) {
+    const hit = resolveKey(schema, entry.key);
+    if (!hit || hit.viaAdditional) { bad.push(`${entry.key}: unresolved`); continue; }
+    const node = hit.node;
+    if (Object.prototype.hasOwnProperty.call(node, 'default')) bad.push(`${entry.key}: carries a default`);
+    if (!deepEqual(node.type, entry.type)) bad.push(`${entry.key}: type ${JSON.stringify(node.type)}`);
+    if (!deepEqual(node.enum, ['low', 'medium', 'high', 'xhigh', 'max'])) bad.push(`${entry.key}: enum ${JSON.stringify(node.enum)}`);
+    if (typeof node.description !== 'string' || !node.description.trim()) bad.push(`${entry.key}: empty description`);
+    if (scaffoldKeys.includes(entry.key)) bad.push(`${entry.key}: projected as an activatable scaffold line`);
+  }
+  assert(bad.length === 0, bad.join('\n    '));
+});
+
+check('forge-prefs.js --resolved never injects the opt-in knobs', () => {
+  const os = require('os');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-prefs-optin-home-'));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-prefs-optin-cwd-'));
+  try {
+    fs.mkdirSync(path.join(cwd, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ review: { rounds: 1 }, effort: { 'execute-task': 'medium' } }));
+    const run = spawnSync(process.execPath, [path.join(__dirname, 'forge-prefs.js'), '--resolved', '--cwd', cwd], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, USERPROFILE: home, FORGE_HOME: home, CLAUDE_CONFIG_DIR: home, CODEX_HOME: home },
+    });
+    assert(run.status === 0, `--resolved failed: ${run.stderr}`);
+    const prefs = JSON.parse(run.stdout).prefs || {};
+    for (const key of OPT_IN_KEYS) {
+      const [section, leaf] = key.split('.');
+      assert(!(prefs[section] && Object.prototype.hasOwnProperty.call(prefs[section], leaf)), `${key} was injected by --resolved`);
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 // ── 3. Coverage diff — forward (inventory ⊆ schema) ─────────────────────────
 check('forward coverage: every inventoried knob resolves to a schema leaf with type + description + default', () => {
@@ -377,7 +432,7 @@ check('forward coverage: every inventoried knob resolves to a schema leaf with t
     if (typeof n.description !== 'string' || n.description.trim() === '') bad.push('empty description');
     const hasDefault = Object.prototype.hasOwnProperty.call(n, 'default');
     const hasChildren = isPlainObject(n.properties);
-    if (!hasDefault && !hasChildren) bad.push('no default');
+    if (!hasDefault && !hasChildren && !OPT_IN_KEYS.has(key)) bad.push('no default');
     if (bad.length) missing.push(`${key} (${bad.join(', ')})`);
   }
   assert(missing.length === 0, `inventory keys not covered by schema:\n    ${missing.join('\n    ')}`);

@@ -198,7 +198,7 @@ effort: low | medium | high | xhigh | max  # how hard it reasons (optional; defa
 | Complex | `heavy` | `high` | Cross-cutting changes, tricky concurrency/state, an algorithm with subtle correctness |
 | Very complex / high-stakes | `heavy` or `max` | `xhigh` or `max` | Architectural decisions encoded in code, security-critical paths, intricate migrations |
 
-**Hard rule — the effort clamp:** the orchestrator clamps effort down to what the resolved model supports. `light`/`standard` tiers (haiku/sonnet) **cap at `medium`** — an `effort: high`+ on a `standard` task is silently lowered to `medium`. So to actually *run* a task at `high`/`xhigh`/`max`, you **must also raise `tier` to `heavy`/`max`**. Set both together: `tier: heavy` + `effort: high`. Setting `effort: xhigh` alone on a `standard` task does nothing useful.
+**Hard rule — the per-model effort policy:** the orchestrator applies `scripts/forge-model-policy.js` to the resolved model. Documented Sonnet 5 / Sonnet 5.5 accept the full scale, so `effort: high`+ on a `standard` task is delivered as written; Sonnet 4.6 refuses `xhigh` by name (never lowered silently); haiku and models without a policy entry keep the historical `medium` cap (recorded as `|clamped:model-cap`). Pick the tier for the model you want and the effort for how deep it should think — they remain independent axes, and the resolved model is never changed by the effort.
 
 **Omit both fields** for the common case — a routine `standard` task at the unit-type default effort (`low`). Only add them when the task deviates from routine. Emit them on the same frontmatter block as `must_haves`/`depends`/`writes`.
 

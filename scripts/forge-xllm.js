@@ -174,8 +174,41 @@ function identityStage(opts, stage, extra = {}) {
   if (stage === 'iniciado' && (!Number.isInteger(extra.pid) || extra.pid <= 0)) return;
   if (stage === 'solicitado') context.requested = true;
   if (stage === 'iniciado') context.started = true;
-  if (typeof opts.announce === 'function') opts.announce(stage, { ...context.fields, ...extra,
+  if (typeof opts.announce === 'function') opts.announce(stage, { ...context.fields,
+    ...(opts._reviewEffort ? { effort_requested: opts._reviewEffort.effort_requested,
+      effort_resolved: opts._reviewEffort.effort_resolved, effort_planned: opts._reviewEffort.effort_planned,
+      effort_sent: stage === 'iniciado' || context.started ? context.fields.effort : null, effort_applied: null } : {}), ...extra,
     provider_called: stage === 'iniciado' || context.started });
+}
+
+// Resolve at the public consumer boundary, before identity or any provider turn.
+// Explicit caller values override a leg preference; absence preserves legacy.
+function reviewCallOptions(mode, opts) {
+  const leg = { challenge: 'challenge', defend: 'defense', rebuttal: 'rebuttal' }[mode];
+  if (!leg) return opts;
+  const engine = opts.engine || 'codex';
+  const policy = require('./forge-model-policy');
+  const loaded = readPrefsCached(opts.contextRoot || opts.cwd || process.cwd());
+  if (!loaded.ok) throw Object.assign(boundaryError('review-prefs-invalid', JSON.stringify(loaded.errors)), { layer: 'review-prefs' });
+  const prefs = loaded.prefs;
+  const key = require('./forge-review-effort').LEGS[leg];
+  const review = { ...(prefs.review || {}) };
+  if (opts.effort !== undefined && opts.effort !== null) review[key] = opts.effort;
+  const transport = { codex: 'app-server', claude: 'claude-cli', agy: 'agy-cli' }[engine];
+  const planned = require('./forge-review-effort').resolveReviewEffort({ leg, engine, transport,
+    model: opts.model, cwd: opts.cwd, prefs: { ...prefs, review } });
+  if (planned.refusal) throw Object.assign(boundaryError(planned.refusal.code, planned.refusal.hint),
+    { layer: 'review-effort', reviewEffort: planned });
+  const thinkingKey = policy.thinkingPrefKey(opts.model);
+  const thinkingRequested = opts.thinkingRequested ?? (prefs.thinking && prefs.thinking[thinkingKey]);
+  if (engine === 'claude') {
+    const thinking = policy.evaluateThinking({ model: opts.model, effort: planned.effort_resolved,
+      mode: thinkingRequested, transport });
+    if (!thinking.ok) throw Object.assign(boundaryError(thinking.reason_code, 'Review thinking cannot be delivered by this transport.'),
+      { layer: 'model-policy', reviewEffort: planned });
+  }
+  return { ...opts, ...(planned.configured ? { effort: planned.effort_resolved, _reviewEffort: planned } : {}),
+    ...(thinkingRequested ? { thinkingRequested } : {}) };
 }
 
 async function withSidecarIdentity(mode, opts, driver) {
@@ -183,16 +216,21 @@ async function withSidecarIdentity(mode, opts, driver) {
   const context = { requested: false, started: false, attempted: false, fields: null };
   const runOpts = { ...opts, dispatchId, _sidecarIdentity: context };
   try {
+    Object.assign(runOpts, reviewCallOptions(mode, runOpts));
     context.fields = sidecarIdentity(mode, runOpts, opts.engine || 'codex', dispatchId);
     return await driver(runOpts);
   }
   catch (error) {
+    if (error.provider_called === undefined && !context.attempted && !context.started) error.provider_called = false;
     if (!context.fields) context.fields = { phase: opts.identity?.phase || mode, unit: opts.identity?.unit || mode,
       engine: opts.engine || 'codex', transport: opts.engine === 'claude' ? 'claude-cli' : opts.engine === 'agy' ? 'agy-cli' : 'app-server',
       model_sent: '-', effort: opts.effort, host: opts.hostRuntime, dispatch_id: dispatchId };
     identityStage(runOpts, context.started ? 'falhou' : 'recusado', {
       reason_code: error.code || classifyError(error.message) || 'sidecar-failed',
-      ...(context.started ? {} : { model_route: context.fields.model_sent, model_sent: '-' }),
+      ...(error.layer ? { layer: error.layer } : {}),
+      ...(error.reviewEffort ? { effort_requested: error.reviewEffort.effort_requested,
+        effort_resolved: error.reviewEffort.effort_resolved, effort_planned: error.reviewEffort.effort_planned } : {}),
+      ...(context.started ? {} : { model_route: opts.model || context.fields.model_sent, model_sent: '-' }),
     });
     throw error;
   }
@@ -1433,11 +1471,16 @@ function normalizePublicSidecarOptions(opts) {
 }
 
 function assertEngineSupportsMode(mode, engine) {
-  if (!['execute', 'plan', 'challenge', 'defend', 'rebuttal'].includes(mode)) {
+  if (!['execute', 'fix', 'plan', 'challenge', 'defend', 'rebuttal'].includes(mode)) {
     throw boundaryError('unsupported-sidecar-mode', `No sidecar contract for mode ${mode}`);
   }
   if (!ENGINE_ENUM.includes(engine)) {
     throw new Error(`unknown --engine "${engine}" (expected codex|agy|claude)`);
+  }
+  // The review-fix writing contract exists only for Codex and Claude; agy is a
+  // named pre-spawn refusal, never a fallback to another engine.
+  if (engine === 'agy' && mode === 'fix') {
+    throw boundaryError('unsupported-sidecar-unit', '--engine agy has no review-fix sidecar contract; no worker was substituted');
   }
   if (engine === 'agy' && (mode === 'execute' || mode === 'plan')) {
     throw new Error(`--engine agy supports only review modes (not ${mode})`);
@@ -1745,10 +1788,11 @@ function terminateOwnedProcessTree(child, platform = process.platform, runner = 
  * named `reason_code` rather than degrading — a sidecar that may not run must not run.
  */
 function authorizeSidecar(mode, opts = {}) {
-  const readOnly = mode !== 'execute';
+  // Writing contracts: execute and the scoped review-fix. Every other mode is read-only.
+  const readOnly = mode !== 'execute' && mode !== 'fix';
   const workerEngine = opts.engine || 'codex';
   if (workerEngine !== 'agy') {
-    const unitType = opts.unitType || ({ execute: 'execute-task', plan: 'plan-slice',
+    const unitType = opts.unitType || ({ execute: 'execute-task', fix: 'review-fix', plan: 'plan-slice',
       challenge: 'review-challenger', defend: 'review-advocate', rebuttal: 'review-rebuttal' })[mode];
     const guard = require('./forge-dispatch-guard').evaluateDispatchGuard({
       host_runtime: opts.hostRuntime, worker_engine: workerEngine, worker_mode: 'sidecar', unit_type: unitType,
@@ -2041,8 +2085,162 @@ function gitRead(gitArgs, cwd, what) {
  *   includes `pre_dirty: [{path,hash}]` — the pre-dispatch dirty snapshot (AUDIT ONLY)
  */
 async function runExecuteCore(opts) {
+  return runWriteContractCore(opts, executeContract(opts));
+}
+
+/**
+ * Review-fix writing turn. Only reachable through forge-unit-sidecar (there is
+ * no public CLI mode): requires `opts.brief` from forge-review-fix and a
+ * result file; never reads a plan. Reuses the whole execute safety core.
+ */
+async function runFixCore(opts) {
+  return runWriteContractCore(opts, fixContract(opts));
+}
+
+// Execute-task contract: the plan file is the brief. Every value below is what
+// runExecuteCore used inline before the write core was shared, so the prompt,
+// argv/params and result-file keys of execute stay byte-identical.
+function executeContract(opts) {
+  let planText;
+  let cap;
+  return {
+    mode: 'execute',
+    preflight() {
+      if (!opts.planFile) throw new Error('execute mode requires --plan <file>');
+    },
+    load() {
+      try {
+        planText = fs.readFileSync(opts.planFile, 'utf8');
+      } catch (e) {
+        throw new Error(`failed to read --plan file: ${e.message}`);
+      }
+      if (!planText.trim()) throw new Error('--plan file is empty');
+
+      // T01 owns frontmatter parsing. Keep this require late so non-execute routes do
+      // not load the capability adapter, and downgrade unknown declarations visibly.
+      cap = require('./forge-must-haves').resolveCapability(planText);
+      if (cap.event) {
+        process.stderr.write(`forge-xllm: capability-unrecognized — declared "${String(cap.declared)}", downgraded to workspace\n`);
+      }
+      return cap.capability;
+    },
+    readsContextFiles: true,
+    buildPrompt(extras) {
+      return buildExecutePrompt(planText, { ...extras, capability: cap.capability });
+    },
+    schema: executeSchema,
+    validate: validateExecuteResult,
+    claudeOptions: null,
+    invalidClaudeMessage: 'Claude worker block failed execute-result validation',
+    noResultMessage: 'no parseable/valid execute result in app-server output',
+    assemble(parsed, common) {
+      return {
+        status: parsed.status,
+        protocol_version: PROTOCOL_VERSION,
+        summary: parsed.summary,
+        must_haves_status: parsed.must_haves_status,
+        files_changed: common.derived,
+        files_changed_declared: parsed.files_changed,
+        pre_dirty: common.preDirty,
+        ...common.multiRepo,
+        start_sha: common.startSha,
+        head_sha: common.headSha,
+        ...common.vcsField,
+        started_at: common.startedAt,
+        finished_at: common.finishedAt,
+        duration_secs: common.durationSecs,
+        dispatch_id: common.dispatchId,
+        input_tokens: common.inputTokens,
+        output_tokens: common.outputTokens,
+        token_method: 'heuristic-chars-4',
+        parse_path: common.parsePath,
+        ...(common.degradation ? { degradation: common.degradation } : {}),
+        capability: cap.capability,
+        ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
+        ...(cap.event ? { capability_event: cap.event } : {}),
+        appserver: common.appserver,
+        // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
+        // no existing key changes name or shape, and validateExecuteResult does NOT
+        // require this one (it validates the JSON the MODEL returns; this field is
+        // the adapter's own). A reader that ignores it sees a byte-identical result.
+        ...(common.runtimeEvidence ? { runtime_evidence: common.runtimeEvidence } : {}),
+      };
+    },
+  };
+}
+
+// Review-fix contract: no plan, SUMMARY or checkbox. The brief (accepted items,
+// claim, route identity) comes from forge-review-fix and the worker reports one
+// outcome per R#. Capability is fixed to workspace, network disabled.
+function fixContract(opts) {
+  const reviewFix = require('./forge-review-fix');
+  const brief = opts.brief;
+  return {
+    mode: 'fix',
+    preflight() {
+      if (!brief || !Array.isArray(brief.items) || !brief.items.length || !Array.isArray(brief.claim_paths)) {
+        throw boundaryError('review-fix-brief-required', 'fix mode requires a review-fix brief');
+      }
+    },
+    load() { return 'workspace'; },
+    readsContextFiles: false,
+    buildPrompt(extras) {
+      return reviewFix.buildReviewFixPrompt(brief, { outputChannel: extras.outputChannel, constraints: extras.constraints });
+    },
+    schema: reviewFix.reviewFixSchema,
+    validate: value => reviewFix.validateReviewFixResult(value, brief.items),
+    claudeOptions: {
+      validateCandidate: value => reviewFix.inspectReviewFixResult(value, brief.items),
+    },
+    invalidClaudeMessage: 'Claude worker block failed review-fix result validation',
+    invalidCode: 'review-fix-result-invalid',
+    noResultMessage: 'no parseable/valid review-fix result in app-server output',
+    protectedCode: 'review-fix-protected-metadata',
+    baselineMovedCode: 'review-fix-baseline-moved',
+    assemble(parsed, common) {
+      const verification = reviewFix.verifyAgainstObserved({ files_changed: common.derived, items: parsed.items },
+        brief.claim_paths, { items: brief.items, primaryLabel: common.primaryLabel });
+      return {
+        status: parsed.status,
+        protocol_version: PROTOCOL_VERSION,
+        contract: 'review-fix',
+        summary: parsed.summary,
+        items: verification.items.map(item => ({ ...item,
+          note: (parsed.items.find(entry => reviewFix.reviewItemKey(reviewFix.correlateReviewItem(entry, brief.items) || entry) === reviewFix.reviewItemKey(item)) || { note: '' }).note })),
+        files_changed: common.derived,
+        files_changed_declared: parsed.files_changed,
+        verified_paths: verification.verified_paths,
+        pre_dirty: common.preDirty,
+        ...common.multiRepo,
+        start_sha: common.startSha,
+        head_sha: common.headSha,
+        ...common.vcsField,
+        started_at: common.startedAt,
+        finished_at: common.finishedAt,
+        duration_secs: common.durationSecs,
+        dispatch_id: common.dispatchId,
+        input_tokens: common.inputTokens,
+        output_tokens: common.outputTokens,
+        token_method: 'heuristic-chars-4',
+        parse_path: common.parsePath,
+        ...(common.degradation ? { degradation: common.degradation } : {}),
+        appserver: common.appserver,
+        transport_telemetry: common.transportTelemetry,
+      };
+    },
+  };
+}
+
+/**
+ * Shared workspace-write core for execute and review-fix. Guards, result-file
+ * and context-root validation, git/svn checks, attempt snapshot, heartbeat,
+ * transport join, no-commit baseline check, untrusted-output barrier, derived
+ * files_changed and the protected-metadata refusal are common; the contract
+ * supplies only the brief, prompt, schema, validator and result assembly.
+ */
+async function runWriteContractCore(opts, contract) {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
-  const engine = assertEngineSupportsMode('execute', opts.engine || 'codex');
+  const engine = assertEngineSupportsMode(contract.mode, opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   const writableRoots = Array.isArray(opts.writableRoots) ? opts.writableRoots.map(root => path.resolve(root)) : [];
   const repoRoots = [cwd, ...writableRoots];
@@ -2050,12 +2248,12 @@ async function runExecuteCore(opts) {
   if (new Set(rootKeys).size !== repoRoots.length) throw new Error('execute repo roots must be unique');
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
   const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
-  const dispatchId = normalizeDispatchId(opts.dispatchId, 'execute');
+  const dispatchId = normalizeDispatchId(opts.dispatchId, contract.mode);
 
-  if (!opts.planFile) throw new Error('execute mode requires --plan <file>');
-  if (!opts.resultFile) throw new Error('execute mode requires --result-file <path>');
+  contract.preflight();
+  if (!opts.resultFile) throw new Error(`${contract.mode} mode requires --result-file <path>`);
   identityStage(opts, 'solicitado');
-  authorizeSidecar('execute', { ...opts, ...sidecarOptions, cwd, engine });
+  authorizeSidecar(contract.mode, { ...opts, ...sidecarOptions, cwd, engine });
 
   // Validate the result channel before the first heartbeat write. This resolves the
   // real parent and rejects symlink/junction tricks, including case-folded Windows
@@ -2071,21 +2269,7 @@ async function runExecuteCore(opts) {
     if (!fs.existsSync(path.join(contextRoot, '.gsd'))) throw new Error('context-root must contain .gsd');
   }
 
-  let planText;
-  try {
-    planText = fs.readFileSync(opts.planFile, 'utf8');
-  } catch (e) {
-    throw new Error(`failed to read --plan file: ${e.message}`);
-  }
-  if (!planText.trim()) throw new Error('--plan file is empty');
-
-  // T01 owns frontmatter parsing. Keep this require late so non-execute routes do
-  // not load the capability adapter, and downgrade unknown declarations visibly.
-  const cap = require('./forge-must-haves').resolveCapability(planText);
-  const sandbox = capabilityToSandboxMode(cap.capability);
-  if (cap.event) {
-    process.stderr.write(`forge-xllm: capability-unrecognized — declared "${String(cap.declared)}", downgraded to workspace\n`);
-  }
+  const sandbox = capabilityToSandboxMode(contract.load());
 
   // Guard: cwd must be a git work tree.
   // T01 M2 measured that app-server ACCEPTS a non-git cwd — but acceptance is not
@@ -2123,8 +2307,10 @@ async function runExecuteCore(opts) {
 
   let securityText = '';
   let contextText = '';
-  try { securityText = fs.readFileSync(opts.securityFile, 'utf8'); } catch { /* optional */ }
-  try { contextText = fs.readFileSync(opts.contextFile, 'utf8'); } catch { /* optional */ }
+  if (contract.readsContextFiles) {
+    try { securityText = fs.readFileSync(opts.securityFile, 'utf8'); } catch { /* optional */ }
+    try { contextText = fs.readFileSync(opts.contextFile, 'utf8'); } catch { /* optional */ }
+  }
   if (securityText.trim()) securityText = truncateAtSectionBoundary(securityText, SECURITY_BUDGET_CHARS, { mandatory: true, label: 'security-checklist' });
   else securityText = '';
   if (contextText.trim()) contextText = truncateAtSectionBoundary(contextText, CONTEXT_BUDGET_CHARS);
@@ -2134,10 +2320,9 @@ async function runExecuteCore(opts) {
   const startSha = attemptSnapshot.start_sha;
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const prompt = buildExecutePrompt(planText, {
+  const prompt = contract.buildPrompt({
     securityText,
     contextText,
-    capability: cap.capability,
     outputChannel: engine === 'claude' ? 'worker-result-block' : 'json-only',
     constraints: opts.constraints,
   });
@@ -2180,37 +2365,49 @@ async function runExecuteCore(opts) {
   let parsePath = 'output-schema';
   let degradation;
   let outputTokens = 0;
+  let transportTelemetry = null;
 
   opts._sidecarIdentity.attempted = true;
   if (engine === 'claude') {
-    const claudeOutput = await invokeClaudeSidecar({
-      prompt,
-      cwd,
-      model: opts.model,
-      effort: opts.effort,
-      readOnly: sandbox === 'read-only',
-      signal: opts.signal,
-      contextRoot,
-      writableRoots,
-      timeoutSecs,
-      onHeartbeat,
-      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
-      sourceEnv: process.env,
-      terminateChild: terminateOwnedProcessTree,
-    });
+    let claudeOutput;
+    try {
+      claudeOutput = await invokeClaudeSidecar({
+        prompt,
+        cwd,
+        model: opts.model,
+        effort: opts.effort,
+        readOnly: sandbox === 'read-only',
+        signal: opts.signal,
+        contextRoot,
+        writableRoots,
+        timeoutSecs,
+        onHeartbeat,
+        heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+        sourceEnv: process.env,
+        terminateChild: terminateOwnedProcessTree,
+        ...(opts.thinkingRequested ? { thinkingRequested: opts.thinkingRequested } : {}),
+        ...(contract.claudeOptions || {}),
+      });
+    } catch (error) {
+      // A contract with its own named invalid-result code reports it instead of
+      // the transport's generic one; execute keeps claude-invalid-result.
+      if (contract.invalidCode && error && error.code === 'claude-invalid-result') error.code = contract.invalidCode;
+      throw error;
+    }
     parsed = claudeOutput && claudeOutput.candidate;
+    transportTelemetry = claudeOutput && claudeOutput.telemetry ? claudeOutput.telemetry : null;
     // The T01 adapter validates the worker block while extracting it. Repeat the
-    // shared execute-payload gate here so no alternate/mocked adapter can bypass
-    // the contract at the transport join.
-    if (!validateExecuteResult(parsed)) {
-      throw boundaryError('claude-invalid-result', 'Claude worker block failed execute-result validation');
+    // shared contract gate here so no alternate/mocked adapter can bypass the
+    // contract at the transport join.
+    if (!contract.validate(parsed)) {
+      throw boundaryError(contract.invalidCode || 'claude-invalid-result', contract.invalidClaudeMessage);
     }
     parsePath = 'worker-result-block';
     outputTokens = countTokens(JSON.stringify(parsed));
   } else {
     appServerOutput = await invokeCodexAppServer({
       prompt,
-      schema: executeSchema,
+      schema: contract.schema,
       cwd,
       model: opts.model,
       effort: opts.effort,
@@ -2258,7 +2455,9 @@ async function runExecuteCore(opts) {
     } else current = gitRead('rev-parse HEAD', snapshot.code_dir, 'git rev-parse HEAD (post-run)');
     if (current !== snapshot.start_sha) {
       const prefix = snapshot.vcs === 'svn' ? 'svn-revision-moved' : 'no-commit invariant violated';
-      throw new Error(`${prefix}: codex moved baseline in ${snapshot.code_dir} (${snapshot.start_sha} -> ${current}); no update is allowed`);
+      const moved = new Error(`${prefix}: codex moved baseline in ${snapshot.code_dir} (${snapshot.start_sha} -> ${current}); no update is allowed`);
+      if (contract.baselineMovedCode) moved.code = contract.baselineMovedCode;
+      throw moved;
     }
     return { repo: snapshot.code_dir, start_sha: snapshot.start_sha, head_sha: current, vcs: snapshot.vcs };
   });
@@ -2270,18 +2469,22 @@ async function runExecuteCore(opts) {
   if (engine !== 'claude') {
     try {
       const primary = JSON.parse(appServerOutput.finalText);
-      if (validateExecuteResult(primary)) parsed = primary;
+      if (contract.validate(primary)) parsed = primary;
     } catch { /* outputSchema is a hint; the named fallback below remains required */ }
     if (parsed === null) {
       const fallback = extractLastJsonBlock(appServerOutput.agentTexts);
-      if (fallback !== null && validateExecuteResult(fallback)) {
+      if (fallback !== null && contract.validate(fallback)) {
         parsed = fallback;
         parsePath = 'extract-last-json-block';
         degradation = 'output-schema-not-honored';
         process.stderr.write('forge-xllm: outputSchema degraded — falling back to extractLastJsonBlock\n');
       }
     }
-    if (parsed === null) throw new Error('no parseable/valid execute result in app-server output');
+    if (parsed === null) {
+      const invalid = new Error(contract.noResultMessage);
+      if (contract.invalidCode) invalid.code = contract.invalidCode;
+      throw invalid;
+    }
   }
 
   // Applied after the transport join to whichever candidate was accepted. Both
@@ -2297,7 +2500,12 @@ async function runExecuteCore(opts) {
       .map(entry => repoRoots.length > 1 ? { ...entry, repo: labels[index] } : entry));
   // Protected metadata is outside the surgical reset set. A sidecar-owned `.gsd`
   // delta is therefore a hard terminal failure, never an advisory warning/success.
-  assertNoProtectedSidecarChanges(derived);
+  try {
+    assertNoProtectedSidecarChanges(derived);
+  } catch (error) {
+    if (contract.protectedCode) error.code = contract.protectedCode;
+    throw error;
+  }
   const finishedAt = new Date().toISOString();
 
   // Keep both transports inside the existing nested envelope. A seam that stops
@@ -2310,30 +2518,24 @@ async function runExecuteCore(opts) {
     : appServerOutput.diagnostics;
   const contextHealth = engine === 'claude' ? null : appServerOutput.contextHealth;
   const contextBoundary = engine === 'claude' ? null : appServerOutput.contextBoundary;
-  const result = {
-    status: parsed.status,
-    protocol_version: PROTOCOL_VERSION,
-    summary: parsed.summary,
-    must_haves_status: parsed.must_haves_status,
-    files_changed: derived,
-    files_changed_declared: parsed.files_changed,
-    pre_dirty: preDirty,
-    ...(repoRoots.length > 1 ? { pre_dirty_by_repo: preDirtyByRepo, repo_baselines: postBaselines } : {}),
-    start_sha: startSha,
-    head_sha: headSha,
-    ...(vcsName === 'svn' ? { vcs: 'svn' } : {}),
-    started_at: startedAt,
-    finished_at: finishedAt,
-    duration_secs: Math.round((Date.now() - startedMs) / 1000),
-    dispatch_id: dispatchId,
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    token_method: 'heuristic-chars-4',
-    parse_path: parsePath,
-    ...(degradation ? { degradation } : {}),
-    capability: cap.capability,
-    ...(cap.declared !== cap.capability ? { capability_declared: cap.declared } : {}),
-    ...(cap.event ? { capability_event: cap.event } : {}),
+  const result = contract.assemble(parsed, {
+    derived,
+    preDirty,
+    multiRepo: repoRoots.length > 1 ? { pre_dirty_by_repo: preDirtyByRepo, repo_baselines: postBaselines } : {},
+    primaryLabel: repoRoots.length > 1 ? labels[0] : undefined,
+    startSha,
+    headSha,
+    vcsField: vcsName === 'svn' ? { vcs: 'svn' } : {},
+    startedAt,
+    finishedAt,
+    durationSecs: Math.round((Date.now() - startedMs) / 1000),
+    dispatchId,
+    inputTokens,
+    outputTokens,
+    parsePath,
+    degradation,
+    transportTelemetry,
+    runtimeEvidence: appServerOutput && appServerOutput.evidence ? appServerOutput.evidence : null,
     appserver: {
       discarded_count: transportDiagnostics.discarded.count,
       discarded_kinds: transportDiagnostics.discarded.kinds,
@@ -2350,12 +2552,7 @@ async function runExecuteCore(opts) {
       context_health: contextHealth || { measurement: 'unknown', compaction_measurement: 'unknown', scope: 'sidecar-thread' },
       context_boundary: contextBoundary || { indicator: 'ctx ?', severity: 'none', additionalContext: '', checkpoint: false },
     },
-    // ADDITIVE, same mold as parse_path/degradation/capability/appserver above:
-    // no existing key changes name or shape, and validateExecuteResult does NOT
-    // require this one (it validates the JSON the MODEL returns; this field is
-    // the adapter's own). A reader that ignores it sees a byte-identical result.
-    ...(appServerOutput && appServerOutput.evidence ? { runtime_evidence: appServerOutput.evidence } : {}),
-  };
+  });
 
   writeJsonAtomic(resultFile, result);
   return result;
@@ -2565,6 +2762,7 @@ function runChallenge(opts) { return withSidecarIdentity('challenge', opts, runC
 function runDefend(opts) { return withSidecarIdentity('defend', opts, runDefendCore); }
 function runRebuttal(opts) { return withSidecarIdentity('rebuttal', opts, runRebuttalCore); }
 function runExecute(opts) { return withSidecarIdentity('execute', opts, runExecuteCore); }
+function runFix(opts) { return withSidecarIdentity('fix', opts, runFixCore); }
 function runPlan(opts) { return withSidecarIdentity('plan', opts, runPlanCore); }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
@@ -2577,6 +2775,7 @@ module.exports = {
   normalizeDefense,
   DEFEND_VERDICT_ENUM,
   runExecute,
+  runFix,
   runPlan,
   loadSchemaFile,
   challengeSchema,
@@ -2789,11 +2988,11 @@ if (require.main === module) {
   const timeoutSecs = args.timeout ? Number(args.timeout) : DEFAULT_TIMEOUT_SECS;
   let pending;
   if (mode === 'challenge') {
-    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else if (mode === 'defend') {
-    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runDefend({ inputFile: args.input, diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   } else {
-    pending = runRebuttal({ inputFile: args.input, cwd, engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
+    pending = runRebuttal({ inputFile: args.input, cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });
   }
   pending
     .then((result) => {

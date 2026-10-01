@@ -514,14 +514,14 @@ Imprima o veredicto ao operador e **siga**. O sinal é advisory: **nunca** bloqu
      fi
       RF_ROUTE_JSON_SAVED="$RF_ROUTE_JSON"; RF_HOST_RUNTIME="$HOST_RUNTIME"
      RF_WORKER_MODE="$WORKER_MODE"; RF_DISPATCH_ALLOWED="$DISPATCH_ALLOWED"
-     if [ "$RF_WORKER_MODE" = "sidecar" ]; then
+     if [ "$RF_WORKER_MODE" = "sidecar" ] && [ "$RESOLVED_WORKER_ENGINE" != "claude" ] && [ "$RESOLVED_WORKER_ENGINE" != "codex" ]; then
        DISPATCH_REASON_CODE="unsupported-sidecar-unit"
-       DISPATCH_HINT="review-fix não possui adapter sidecar neste boundary; ajuste host/worker e execute /forge-next novamente."
+       DISPATCH_HINT="review-fix sidecar existe só para as engines claude e codex (engine: ${RESOLVED_WORKER_ENGINE:-vazia}); ajuste host/worker e execute /forge-next novamente."
        dispatch_refusal_stop
        exit 2
      fi
      ```
-     Only after this allowed native verdict, run the cross-run claim gate per that same shared section + `shared/forge-claim-gate.md` (`--unit "review-fix/{S##}"`, `--conceded` from the CONCEDED `path:line` items, and its decision table, never restated here). Build review-fix through `buildNativeInvocation` from the saved route and active capabilities; invoke its returned tool/arguments unchanged. A resolver refusal ends this step invocation before worker creation; an actual review-worker throw remains advisory under the unavailability rule below.
+     Only after this allowed verdict, run the cross-run claim gate per that same shared section + `shared/forge-claim-gate.md` (`--unit "review-fix/{S##}"`, `--conceded` from the CONCEDED `path:line` items, and its decision table, never restated here). With `RF_WORKER_MODE == sidecar` (engine claude|codex) and decision `proceed`, run `shared/forge-review.md § Sidecar review-fix branch` (boundary `slice`, or `milestone-triage` for Step 9) from `RF_ROUTE_JSON_SAVED`; the adapter publishes the per-R# lines and a failure defers the items to Step 9. With `RF_WORKER_MODE == native`, build review-fix through `buildNativeInvocation` from the saved route and active capabilities; invoke its returned tool/arguments unchanged and validate the result with `forge-review-fix.js --accept-native`. A resolver refusal ends this step invocation before worker creation; an actual review-worker throw remains advisory under the unavailability rule below.
    - **OPEN items (Step 7b, interactive):** each OPEN objection is put to the user via `AskUserQuestion` — `Manter abordagem` / `Refatorar agora` (dispatches a `review-fix` unit for the accepted items) / `Criar follow-up` (creates an item per `shared/forge-review.md § Item capture`, source `review/{S##}/{R#}`, plus the pointer line in `.gsd/KNOWLEDGE.md § Review follow-ups`) — and the decision is written back into `{S##}-REVIEW.md`.
    - Append the `review` event to `events.jsonl` (Step 8).
 4. The gate **never blocks on review-worker unavailability** — any `Agent()` throw is recorded and the step proceeds to `complete-slice` regardless. A runtime resolver refusal is an enforcing pre-dispatch boundary and returns control to the operator instead.

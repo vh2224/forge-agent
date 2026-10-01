@@ -189,12 +189,19 @@ function buildDispatchEvent(args, route, now) {
   if (present(args.transportVersion)) event.transport_version = String(args.transportVersion);
   if (present(args.transportReason)) event.transport_reason = String(args.transportReason);
 
-  // Durable posture axes — always last, always present, additive for readers.
+  // Durable posture axes — always present, after every legacy field, additive for
+  // readers (only the optional model-policy keys below may follow them).
   event.resolved_worker_engine = resolvedWorkerEngine;
   event.leg = `${hostRuntime}→${resolvedWorkerEngine}`;
   event.dispatch_reason_code = dispatchReasonCode;
   event.dispatch_posture = dispatchPosture;
   event.dispatch_decision = dispatchDecision;
+  // Model-policy telemetry, copied from the resolver contract only when the
+  // route carries it: an older route (or a hand-built one) keeps the exact
+  // previous key set. Requested ≠ resolved ≠ applied; nothing here is readback.
+  if (present(route.effort_requested)) event.effort_requested = String(route.effort_requested);
+  if (present(route.policy_version)) event.policy_version = String(route.policy_version);
+  if (Array.isArray(route.policy_diagnostics)) event.policy_diagnostics = route.policy_diagnostics;
   return event;
 }
 

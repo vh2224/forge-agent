@@ -10,6 +10,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { modelToAlias } = require('./forge-model-alias.js');
+const modelPolicy = require('./forge-model-policy.js');
 
 function text(value) {
   return value === null || value === undefined ? '' : String(value).trim();
@@ -57,9 +58,10 @@ function validateActiveCapabilities(hostRuntime, activeCapabilities) {
         'Codex capabilities must list models, reasoning_efforts and fork_turns from the active tool.');
     }
   } else if (host === 'claude') {
-    if (!Array.isArray(caps.model_aliases) || !Array.isArray(caps.effort_transports)) {
+    if (!Array.isArray(caps.model_aliases) || !Array.isArray(caps.effort_transports)
+        || (caps.model_ids !== undefined && !Array.isArray(caps.model_ids))) {
       return refusal(host, 'native-capabilities-invalid',
-        'Claude capabilities must list model_aliases and effort_transports accepted by the active tool.');
+        'Claude capabilities must list model_aliases and effort_transports (and, optionally, model_ids) accepted by the active tool.');
     }
   } else {
     return refusal(host, 'native-host-unsupported', `Unsupported native host: ${host || '(missing)'}.`);
@@ -75,7 +77,9 @@ function baseTelemetry(dispatch, argument, effortArgument, capabilities) {
     model_argument: argument || null,
     model_observed: null,
     model_observed_source: null,
-    effort_requested: dispatch.effort || null,
+    // The resolver's additive pre-clamp value when present; routes without it
+    // keep the historical value (the resolved effort).
+    effort_requested: dispatch.effort_requested || dispatch.effort || null,
     effort_resolved: dispatch.effort || null,
     effort_argument: effortArgument || null,
     effort_transport: null,
@@ -141,6 +145,8 @@ function observeClaudeAgentBinding(options) {
     transport: 'agent-frontmatter',
     agent_type: observedAgentType,
     effort: observedEffort,
+    // Read from the same fingerprinted bytes; null when the agent declares none.
+    thinking: frontmatterScalar(match[1], 'thinking') || null,
     source: realPath,
     source_fingerprint: `sha256:${observedFingerprint}`,
     observed: true,
@@ -232,19 +238,26 @@ function buildNativeInvocation(options) {
 
   const canonicalAlias = modelToAlias(model);
   const alias = text(canonicalAlias.alias);
-  if (!canonicalAlias.mapped || !alias) {
+  // The Agent tool documents full model ids besides aliases, but availability
+  // is a property of the ACTIVE tool: only an id listed in the caller-observed
+  // `model_ids` is sent unchanged. Without that observation (alias-only
+  // schemas, older callers) the alias path and its explicit limitation remain.
+  // Nothing here is inferred from an installed CLI or a static default.
+  const exactId = stringSet(caps.model_ids).has(model);
+  const suppliedAlias = text(dispatch.alias);
+  if (!exactId && (!canonicalAlias.mapped || !alias)) {
     return refusal(host, 'native-claude-alias-unmapped',
       `Resolved model ${model} has no Claude native-tool alias.`);
   }
-  const suppliedAlias = text(dispatch.alias);
-  if (suppliedAlias && suppliedAlias !== alias) {
+  if (suppliedAlias && canonicalAlias.mapped && alias && suppliedAlias !== alias) {
     return refusal(host, 'native-claude-alias-mismatch',
       `Resolved model ${model} maps to Claude alias ${alias}, not ${suppliedAlias}.`);
   }
-  if (!stringSet(caps.model_aliases).has(alias)) {
+  if (!exactId && !stringSet(caps.model_aliases).has(alias)) {
     return refusal(host, 'native-model-unsupported',
       `The active Claude tool did not report support for alias ${alias}.`);
   }
+  const modelArgument = exactId ? model : alias;
   const effortEvidence = input.effortBinding || input.effort_binding;
   const effortTransport = effortEvidence && typeof effortEvidence === 'object'
     ? text(effortEvidence.transport) : '';
@@ -274,14 +287,37 @@ function buildNativeInvocation(options) {
     return refusal(host, 'native-effort-binding-mismatch',
       `Observed ${agentType} frontmatter effort ${observedBinding.effort} does not match resolved effort ${effort}.`);
   }
-  const args = { subagent_type: agentType, prompt, model: alias };
-  const telemetry = baseTelemetry(dispatch, alias, null, caps);
+  // A `thinking:` line in the agent frontmatter is NOT a documented subagent
+  // control: subagents inherit thinking from the session. It is therefore a
+  // legacy declaration, never a delivered binding, and cannot refuse a launch.
+  // When it contradicts the model policy (Sonnet 5.5 + disabled) the caller
+  // gets a separate diagnostic; explicit operator intent (the thinking pref)
+  // is refused earlier by the resolver through the same policy.
+  const diagnostics = [];
+  if (observedBinding.thinking) {
+    const thinking = modelPolicy.evaluateThinking({ model, effort, mode: observedBinding.thinking });
+    if (!thinking.ok) {
+      diagnostics.push({ code: 'native-thinking-declaration-inert', agent: agentType,
+        declared: observedBinding.thinking, model, policy_code: thinking.reason_code, layer: 'native-binding' });
+    }
+  }
+  const args = { subagent_type: agentType, prompt, model: modelArgument };
+  const telemetry = baseTelemetry(dispatch, modelArgument, null, caps);
   telemetry.effort_transport = effortTransport;
   telemetry.effort_transport_value = observedBinding.effort;
   telemetry.effort_transport_source = observedBinding.source;
   telemetry.effort_binding_observed = observedBinding.effort;
   telemetry.effort_binding_observed_source = observedBinding.source;
   telemetry.effort_binding_observed_fingerprint = observedBinding.source_fingerprint;
+  // An alias is not evidence of the executed model version. Only entries that
+  // declare it (Sonnet 5.5) gain these keys, and only on the alias path; every
+  // other model keeps the exact pre-existing telemetry envelope. A full-id
+  // argument is still an adapter argument, never a provider observation.
+  const native = modelPolicy.transportSupport({ model, transport: 'claude-native' });
+  if (!exactId && native.version_proof === 'alias-only') {
+    telemetry.model_version_proof = 'alias-only';
+    telemetry.policy_diagnostics = native.diagnostics.filter((item) => item.code === 'native-alias-not-version-proof');
+  }
   return {
     ok: true,
     host_runtime: host,
@@ -290,7 +326,20 @@ function buildNativeInvocation(options) {
     telemetry,
     reason_code: 'native-invocation-ready',
     hint: 'Invoke the active Claude tool with the structured arguments unchanged.',
+    ...(diagnostics.length ? { diagnostics } : {}),
   };
+}
+
+// Early diagnosis for callers that must refuse before any launch (review legs,
+// the review-fix runtime gate). Same verdict as buildNativeInvocation; no
+// callback exists here, so nothing can be invoked. A caller without the final
+// prompt yet gets a placeholder that only satisfies the shape check.
+function preflightNativeBinding(options) {
+  const input = options || {};
+  const supplied = input.prompt !== undefined ? input.prompt : input.message;
+  const hasPrompt = typeof supplied === 'string' && supplied.trim() !== '';
+  const verdict = buildNativeInvocation({ ...input, prompt: hasPrompt ? supplied : '(preflight)' });
+  return { ...verdict, args: hasPrompt ? verdict.args : null, preflight: true };
 }
 
 async function invokeNative(options, invoke) {
@@ -331,6 +380,7 @@ module.exports = {
   validateActiveCapabilities,
   observeClaudeAgentBinding,
   buildNativeInvocation,
+  preflightNativeBinding,
   invokeNative,
   codexTaskName,
 };
