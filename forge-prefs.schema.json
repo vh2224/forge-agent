@@ -558,8 +558,8 @@
         },
         "timeout": {
           "type": "integer",
-          "default": 1800,
-          "description": "Segundos — teto do sidecar codex antes do SIGKILL. Só se aplica quando o engine resolvido é codex; inválido/não-positivo cai em 1800."
+          "default": 300,
+          "description": "Segundos — prazo absoluto por tentativa de sidecar Claude/Codex (default 5min). Heartbeat não renova o prazo; erro explícito encerra antes. Inválido/não-positivo cai em 300. Valores explícitos continuam prevalecendo; timeout não prova recusa do provedor."
         },
         "codex_model": {
           "type": [

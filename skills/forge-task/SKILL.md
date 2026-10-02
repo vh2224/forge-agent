@@ -8,6 +8,12 @@ Na preparação de task solta e nos demais despachos sidecar, siga `shared/forge
 
 ## Personal lifecycle (all exits)
 
+For natural-language feedback during UAT, apply `shared/forge-direct-actions.md`
+before resuming this lifecycle. A known eligible correction is executed directly
+in the existing CODE_DIR, verified and recorded in UAT/SUMMARY or handoff with a
+personal checkpoint. Do not restart preparation or create another task for it.
+Explicit `/forge-task` commands retain their chosen lifecycle and flags.
+
 Read `shared/forge-personal-context.md` from the repo or FORGE_HOME.
 When `forge-context-boundary` returns personal_checkpoint.status other than ok,
 report partial continuity and preserve artifacts; do not silently claim resume persisted.

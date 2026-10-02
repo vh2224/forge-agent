@@ -31,6 +31,7 @@ function routingPresent(cwd) {
 }
 const { modelToAlias, modelFamily } = require('./forge-model-alias.js');
 const { readPrefsCached } = require('./forge-prefs.js');
+const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
 const { readTierChain } = require('./forge-tier-chain.js');
 // Imported, not re-typed: forge-must-haves.js reads the same `domain:` key from
 // the same frontmatter, and a second copy of the strip rule is how the two
@@ -182,7 +183,7 @@ function normalizeWorkers(prefs, unitType) {
   const timeout = Number(workers.timeout);
   return {
     workers_engine: workersEngine,
-    workers_timeout: Number.isInteger(timeout) && timeout > 0 ? timeout : 1800,
+    workers_timeout: Number.isInteger(timeout) && timeout > 0 ? timeout : DEFAULT_WORKER_TIMEOUT_SECS,
     codex_model: typeof workers.codex_model === 'string' ? workers.codex_model : '',
   };
 }

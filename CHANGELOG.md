@@ -1,5 +1,16 @@
 ## Não lançado
 
+- A entrada distingue ações diretas autorizadas de mudanças que precisam de task/milestone.
+  Correções conhecidas, localizadas e de baixo risco durante UAT podem ser feitas na sessão,
+  com verificação e registro no trabalho existente, checkpoint e novo reteste pendente.
+  Comandos Forge explícitos e unidades que já entraram no lifecycle conservam suas regras;
+  ação direta não é fallback depois de recusa de um despacho.
+- O prazo padrão por tentativa de sidecar Claude/Codex caiu de 1800 para 300 segundos.
+  Heartbeats não renovam o prazo; valores explicitamente configurados continuam prevalecendo.
+  Timeout é reportado como falha da tentativa, sem alegar recusa do provedor ou reiniciar
+  silenciosamente. Fixtures de timeout e entrega instalada verificam o transporte;
+  testes de prompts não garantem classificação de linguagem natural pelo host.
+
 - Preparação nativa de task solta: o `task_name` do agente Codex agora inclui um digest sha256 do
   `dispatchId` (`preparation_<fase>_<task>_<digest>`). Nova tentativa da mesma fase e task não colide
   mais com o agente concluído e ainda registrado; o mesmo dispatch mantém o nome, e replay aceito

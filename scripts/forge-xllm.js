@@ -108,11 +108,12 @@ const vcs = require('./forge-vcs.js');
 const { classifyError, isTransient } = require('./forge-classify-error.js');
 const { countTokens, truncateAtSectionBoundary } = require('./forge-tokens.js');
 const { deriveTransport } = require('./forge-transport.js');
+const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_SECS = 300;
-const DEFAULT_EXECUTE_TIMEOUT_SECS = 1800; // 30 min — execute default (workers.timeout override)
+const DEFAULT_EXECUTE_TIMEOUT_SECS = DEFAULT_WORKER_TIMEOUT_SECS;
 const HEARTBEAT_INTERVAL_MS = 15000; // re-write the running heartbeat every 15s
 // Execute prompt additions have independent budgets because their semantics differ.
 // Security is a mandatory contract and must fail closed when it cannot be delivered.

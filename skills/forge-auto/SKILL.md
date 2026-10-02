@@ -8,6 +8,12 @@ Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade
 
 ## Personal selection - before any operational load
 
+For natural-language UAT feedback, apply `shared/forge-direct-actions.md` before
+re-entering this loop. Eligible known corrections use the current code directory
+and work artifacts, with verification and a personal checkpoint; do not replay
+the milestone loop for the correction. Never edit concurrently with a live worker.
+An explicit `/forge-auto` command retains the lifecycle below.
+
 Read `shared/forge-personal-context.md` from the repo or FORGE_HOME before running
 the adapter or reading any run/state/handoff. When `forge-context-boundary` returns
 personal_checkpoint.status other than ok, report partial continuity and preserve

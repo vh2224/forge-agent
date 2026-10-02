@@ -224,12 +224,30 @@ try {
   // over them would claim an end-to-end proof this suite cannot give.
   const MANUAL_EXAMPLES = Object.freeze([
     'por que o login expira antes do tempo configurado?  → consulta: investiga e responde, sem run',
-    'corrige a mensagem de erro do login expirado         → mudança localizada: task, com evidência reutilizada',
+    'corrige o rótulo conhecido com contexto suficiente   → direta: verificar sem criar run ou despachar worker',
     'reestrutura a autenticação em três entregas          → milestone: entregas separáveis com dependências',
     'continua o que eu estava fazendo                     → retomada: snapshot pessoal decide, nunca descoberta',
     '/forge-task --skip-brainstorm ajustar rótulo         → comando explícito: roda como digitado',
+    'no UAT o rótulo ainda está errado, causa conhecida   → direta: corrigir, registrar e aguardar novo aceite',
+    'no UAT surgiu uma mudança na autorização de acesso   → preparação: risco elevado mesmo em um arquivo',
   ]);
-  assert.strictEqual(MANUAL_EXAMPLES.length, 5);
+  assert.strictEqual(MANUAL_EXAMPLES.length, 7);
+
+  // Distribution only: these checks are not an end-to-end host classifier test.
+  const directSpec = readRepo('shared/forge-direct-actions.md').replace(/\s+/g, ' ');
+  for (const phrase of ['before creating a run', 'never a fallback', 'personal checkpoint',
+    'pending until the user accepts', 'record or checkpoint publication fails']) {
+    assert(directSpec.includes(phrase), `direct action contract lost ${phrase}`);
+  }
+  assert(readRepo('commands/forge.md').includes('shared/forge-direct-actions.md'));
+  for (const name of ['forge-task', 'forge-next', 'forge-auto']) {
+    assert(readRepo(`skills/${name}/SKILL.md`).includes('shared/forge-direct-actions.md'));
+  }
+  for (const text of [instructions.renderEntryContract(), instructions.renderBlock()]) {
+    assert(text.includes('shared/forge-direct-actions.md'));
+    assert(text.includes('checkpoint pessoal'));
+    assert(text.includes('fallback'));
+  }
 
   console.log('PASS intent entry: producer/receiver contract executed, stale/foreign/corrupt refusals named, and one projector feeding both hosts');
 } finally {
