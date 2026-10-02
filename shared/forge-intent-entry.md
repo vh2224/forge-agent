@@ -27,6 +27,10 @@ the investigation it justifies — never from keyword matching or file counts:
 | `retomada` — continue my own work | The personal resume path in `shared/forge-personal-context.md`. |
 | `comando` — an explicit `/forge-*` command or flag | Exactly what was typed; the entry never rewrites it. |
 
+The `direta` path is available in any context, for a simple request or a detailed,
+implementation-ready request that satisfies its risk and verification criteria.
+UAT adds records in the existing work; it is not a condition for direct execution.
+
 With no request at all, invite the operator to describe the desired result and keep
 help and the command menu available. Ask when an important decision is missing;
 do not add a direct-versus-task question to every already-clear request.

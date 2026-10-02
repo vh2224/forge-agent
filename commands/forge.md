@@ -37,7 +37,8 @@ comando explícito, then:
   rewrites, expands or silently upgrades it.
 - **Consulta/diagnóstico** → investigate the related technical sources and answer.
   No run, no personal binding, no file change, no `-fast`.
-- **Ação direta / correção conhecida de UAT** → apply `shared/forge-direct-actions.md`
+- **Ação direta em qualquer contexto** (pedido simples ou suficientemente completo,
+  incluindo correção conhecida de UAT) → apply `shared/forge-direct-actions.md`
   before any run creation or worker resolution. Explain briefly, execute in the
   current session, and verify proportionately. Record UAT changes and pending
   retests in the existing work and checkpoint; no new task or repeated preparation.

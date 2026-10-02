@@ -4,6 +4,9 @@ This is the canonical boundary between ordinary host work and a Forge unit.
 Apply it before creating a run, selecting a worker, or invoking a task lifecycle.
 It applies to Claude and Codex, including feedback during task or milestone UAT.
 Explicit `/forge-*` commands keep their chosen lifecycle and flags.
+The direct path is available in any context; UAT adds continuity records, not an
+eligibility restriction. Assess both simple requests and detailed requests whose
+scope, intended behavior and verification are already fully specified.
 
 ## Choose the path before dispatch
 
@@ -11,16 +14,19 @@ Perform an already-authorized action directly in the current session when all
 of the following are established from the request and current technical evidence:
 
 - The result and affected paths are clear; no important human decision is pending.
-- The correction is localized, low risk, and has a clear, proportionate verification.
+- The implementation is bounded, low risk, and has a clear, proportionate verification.
 - The current context explains the cause and the intended change. Recheck the
   relevant source bytes before editing, especially after resume or compaction.
-- It does not expand product scope, introduce an architectural decision, or affect
+- It does not exceed the authorized scope, leave an architectural decision open, or affect
   security, permissions, data integrity, a migration, or another high-risk boundary.
 - Existing isolation and coordination requirements can be honored in the same
   code directory, without overlapping another writer or adopting another person's work.
 
-Examples include a known label correction and removal of explicitly identified
-temporary directories created by the session. For deletion, verify the absolute
+Examples include a known label correction, a fully specified low-risk change
+across several files, and removal of explicitly identified temporary directories
+created by the session. A detailed request removes uncertainty only where its
+requirements actually settle it; it does not remove an inherent high risk.
+For deletion, verify the absolute
 targets, their ownership and contents; protect against traversal and symlink escape.
 File count alone, a confidence score, imported consent, and an unanswered question
 never establish eligibility. Uncertainty about any required criterion keeps the

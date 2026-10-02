@@ -1,6 +1,8 @@
 ## Não lançado
 
 - A entrada distingue ações diretas autorizadas de mudanças que precisam de task/milestone.
+  Ações diretas valem em qualquer contexto, para pedidos simples ou suficientemente completos,
+  com análise de escopo, risco e verificação e nenhuma decisão importante em aberto.
   Correções conhecidas, localizadas e de baixo risco durante UAT podem ser feitas na sessão,
   com verificação e registro no trabalho existente, checkpoint e novo reteste pendente.
   Comandos Forge explícitos e unidades que já entraram no lifecycle conservam suas regras;
