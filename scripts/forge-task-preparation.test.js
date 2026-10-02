@@ -534,6 +534,64 @@ async function main() {
     assert.equal(fs.readFileSync(`${sidecar.resultFile}.receipt.json`, 'utf8'), receiptBytes);
   });
 
+  await test('timeout diagnostic reaches the preparation caller and failed replay without becoming provider refusal', async () => {
+    const request = fixture({ phase: 'plan', hostRuntime: 'codex', model: 'claude-sonnet-5' });
+    const original = unit.runUnitSidecar;
+    let calls = 0;
+    const detail = { version: 1, stage: 'transport', reason: 'provider-timeout',
+      stdout_bytes: 0, stderr_bytes: 192, duration_ms: 295186 };
+    unit.runUnitSidecar = async () => {
+      calls++;
+      const error = new Error('fixture-private-provider-message');
+      error.code = 'claude-timeout';
+      error.provider_called = true;
+      error.diagnostic = { ...detail, private_stream: 'fixture-private-provider-message' };
+      throw error;
+    };
+    try {
+      const result = await prep.prepareStandaloneTask(request);
+      assert.equal(result.reason_code, 'claude-timeout');
+      assert.equal(result.provider_called, true);
+      assert.deepStrictEqual(result.diagnostic, detail);
+      assert(!JSON.stringify(result).includes('fixture-private-provider-message'));
+      const replay = await prep.prepareStandaloneTask(request);
+      assert.equal(replay.provider_called, false);
+      assert.equal(replay.original_provider_called, true);
+      assert.deepStrictEqual(replay.original_diagnostic, { version: 1, stage: 'transport', reason: 'provider-timeout' });
+      assert.equal(calls, 1);
+      assert(!fs.existsSync(artifactPath(request)));
+    } finally { unit.runUnitSidecar = original; }
+  });
+
+  await test('injected sidecar preserves safe adapter diagnostics and explicit pre-spawn evidence', async () => {
+    const request = fixture({ phase: 'research', model: 'claude-sonnet-5' });
+    const result = await prep.prepareStandaloneTask(request, { invokeSidecar: async () => {
+      const error = new Error('fixture-private-adapter-message');
+      error.code = 'claude-model-required';
+      error.provider_called = false;
+      error.diagnostic = { version: 1, stage: 'identity', reason: 'model-required',
+        duration_ms: 0, private_stream: 'fixture-private-adapter-message' };
+      throw error;
+    } });
+    assert.equal(result.provider_called, false);
+    assert.deepStrictEqual(result.diagnostic, { version: 1, stage: 'identity', reason: 'model-required', duration_ms: 0 });
+    const receipt = JSON.parse(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'));
+    assert.equal(receipt.failure.provider_called, false);
+    assert(!JSON.stringify(result).includes('fixture-private-adapter-message'));
+  });
+
+  await test('unknown diagnostic metadata cannot forge a layer or expose provider text', async () => {
+    const request = fixture({ phase: 'research', model: 'claude-sonnet-5' });
+    const result = await prep.prepareStandaloneTask(request, { invokeSidecar: async () => {
+      const error = new Error('fixture-private-unknown-message');
+      error.code = 'sidecar-unit-failed';
+      error.diagnostic = { stage: 'fixture-private-unknown-message', reason: 'fixture-private-unknown-message' };
+      throw error;
+    } });
+    assert(!JSON.stringify(result).includes('fixture-private-unknown-message'));
+    assert.equal(result.diagnostic.stage, 'provider');
+  });
+
   await test('production sidecar pre-spawn route refusal records provider_called false', async () => {
     const request = fixture({ phase: 'research', hostRuntime: 'codex', model: 'claude-sonnet-5' });
     const identityLines = [];

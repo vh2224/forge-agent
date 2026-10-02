@@ -14,6 +14,7 @@ const transportApi = require('./forge-transport-capabilities');
 const unit = require('./forge-unit-sidecar');
 const claudeSidecar = require('./forge-claude-sidecar');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity');
+const { diagnostic: safeSidecarDiagnostic } = require('./forge-sidecar-diagnostic');
 
 const REQUEST_SCHEMA_VERSION = 1;
 const MAX_INPUT_BYTES = 512 * 1024;
@@ -271,10 +272,18 @@ function diagnostic(stage, reason) {
   return { version: 1, stage, reason };
 }
 
-function refused(stage, reasonCode, route, providerCalled = false) {
+function adapterDiagnostic(detail) {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return null;
+  const safe = safeSidecarDiagnostic(detail.reason, detail);
+  // Keep only the adapter's closed vocabulary and numeric metadata. An unknown
+  // reason must not smuggle provider text or an invented layer into the caller.
+  return safe.reason === detail.reason ? safe : null;
+}
+
+function refused(stage, reasonCode, route, providerCalled = false, detail) {
   return { ok: false, action: 'stop', status: 'failure', reason_code: reasonCode,
     provider_called: providerCalled === true, ...(route ? { route } : {}),
-    diagnostic: diagnostic(stage, `${stage}-refused`) };
+    diagnostic: adapterDiagnostic(detail) || diagnostic(stage, `${stage}-refused`) };
 }
 
 function adapterFailureStage(error, providerCalled) {
@@ -282,6 +291,8 @@ function adapterFailureStage(error, providerCalled) {
   if (error.code === 'dispatch-identity-conflict') return 'validation';
   if (error.code === 'artifact-conflict' || error.diagnostic?.reason === 'publication-failed') return 'publication';
   if (['invalid-artifact-result', 'untrusted-output-barrier', 'secret-output'].includes(error.code)) return 'validation';
+  const detail = adapterDiagnostic(error.diagnostic);
+  if (detail) return detail.stage;
   return providerCalled ? 'provider' : 'transport';
 }
 
@@ -297,10 +308,12 @@ function completed(transport, route, accepted) {
 
 function replayedFailure(receipt) {
   const failure = receipt.failure || {};
+  const originalDiagnostic = adapterDiagnostic(failure.diagnostic);
   return { ok: false, action: 'stop', status: 'failure',
     reason_code: failure.reason_code || 'artifact-attempt-failed',
     provider_called: false, original_provider_called: failure.provider_called === true,
     replayed: true, ...(receipt.route ? { route: receipt.route } : {}),
+    ...(originalDiagnostic ? { original_diagnostic: originalDiagnostic } : {}),
     diagnostic: diagnostic('replay', 'recorded-failure') };
 }
 
@@ -534,9 +547,10 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         try { unit.failArtifactAttempt(started.delivery_request, error.code || 'sidecar-unit-failed',
           error.diagnostic?.reason || (providerCalled ? 'provider-exit' : 'adapter-failed'), providerCalled); }
         catch { /* preserve the production adapter refusal */ }
-        return refused(stage, error.code || 'sidecar-unit-failed', started.route, providerCalled);
+        return refused(stage, error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
       }
     }
+    let providerCalled = false;
     try {
       const replay = await unit.replayArtifactAttempt(started.delivery_request);
       if (replay.replayed) {
@@ -544,6 +558,7 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         return completed('sidecar', started.route, replay);
       }
       deps.announce?.('solicitado', { ...preparationIdentity(request, started.route), provider_called: false });
+      providerCalled = true;
       const rawResult = await deps.invokeSidecar(started.delivery_request, started);
       const candidate = candidateFromPreparationResult(rawResult, started.delivery_request);
       const accepted = await unit.acceptArtifactResult(started.delivery_request, candidate,
@@ -554,10 +569,11 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
           maxPayloadBytes: unit.MAX_ARTIFACT_PAYLOAD_BYTES });
       return completed('sidecar', started.route, accepted);
     } catch (error) {
+      if (typeof error.provider_called === 'boolean') providerCalled = error.provider_called;
       try { unit.failArtifactAttempt(started.delivery_request, error.code || 'sidecar-unit-failed',
-        error.diagnostic?.reason || 'adapter-failed', true); } catch { /* preserve first refusal */ }
-      return refused(adapterFailureStage(error, true),
-        error.code || 'sidecar-unit-failed', started.route, true);
+        error.diagnostic?.reason || 'adapter-failed', providerCalled); } catch { /* preserve first refusal */ }
+      return refused(adapterFailureStage(error, providerCalled),
+        error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
     }
   }
   let providerCalled = false;
