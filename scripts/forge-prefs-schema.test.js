@@ -131,7 +131,7 @@ const INVENTORY = [
   // — workers —
   { key: 'workers.execute-task', type: 'string', default: 'claude', source: 'shared/forge-dispatch.md:1259 (whitelist claude|codex, default-safe claude)' },
   { key: 'workers.plan-slice', type: 'string', default: 'claude', source: 'shared/forge-dispatch.md:1260' },
-  { key: 'workers.timeout', type: 'integer', default: 1800, source: 'shared/forge-dispatch.md:1261 + :969 (invalid/non-positive → 1800); adapter-side null passthrough in scripts/forge-xllm.js readWorkersTimeout' },
+  { key: 'workers.timeout', type: 'integer', default: 300, source: 'scripts/forge-worker-timeout.js DEFAULT_WORKER_TIMEOUT_SECS; explicit adapter timeout takes precedence' },
   { key: 'workers.codex_model', type: ['string', 'null'], default: null, source: 'shared/forge-dispatch.md:1262 "unset (null) → Codex CLI default"' },
   // — routing (open domain map — leaf with additionalProperties: true) —
   { key: 'routing', type: 'object', default: {}, source: 'scripts/forge-routing.js readRoutingConfig (opt-in; absent block → legacy tier_models/workers)' },
@@ -514,7 +514,7 @@ const WITNESSES = [
   ['multi_run.refused_when_active_count', 2, "shared/forge-prefs-reference.md retained compatibility default"],
   ['multi_run.stale_cleanup_ms', 1800000, 'scripts/forge-runs.js:27 STALE_THRESHOLD_MS = 30 * 60 * 1000'],
   // sidecar + verify + ids + cleanup + compact
-  ['workers.timeout', 1800, 'shared/forge-dispatch.md:969 invalid → 1800'],
+  ['workers.timeout', 300, 'scripts/forge-worker-timeout.js default deadline'],
   ['verification.command_timeout_ms', 120000, 'scripts/forge-verify.js:62 DEFAULT_COMMAND_TIMEOUT_MS'],
   ['ids.format', 'timestamp', 'scripts/forge-ids.js readIdFormat fallback'],
   ['milestone_cleanup', 'keep', 'agents/forge-completer.md:461 — REAL default (template example shows archive)'],

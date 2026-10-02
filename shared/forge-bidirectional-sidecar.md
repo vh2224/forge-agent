@@ -8,6 +8,15 @@ consult `forge-transport-capabilities.js` for the actual unit contract.
 
 ## Identidade do sidecar exibida na conversa
 
+O timeout padrão é de 300 segundos (5min) por tentativa, vindo de
+`scripts/forge-worker-timeout.js` e `workers.timeout`. Um valor explicitamente
+configurado continua prevalecendo. O prazo é absoluto: heartbeat mostra que o
+processo está vivo e nunca renova o timer. Erro explícito encerra a tentativa assim
+que observado; ao vencer o prazo, exponha o reason de timeout e o resultado parcial,
+sem continuar narrando apenas "aguardando resposta". Timeout não prova recusa do
+provedor. Não reinicie silenciosamente uma tentativa temporizada; qualquer
+fallback permitido deve expor a falha e a nova tentativa antes de dispará-la.
+
 Antes de disparar um sidecar, anuncie fase/unidade, engine, modelo enviado, esforço e host da rota resolvida com o rótulo **solicitação do orquestrador — aguardando confirmação do adaptador**. Essa frase descreve a intenção do despacho.
 
 Depois, leia o stderr completo do processo, inclusive em `run_in_background` pela ferramenta de saída do host. Reproduza literalmente, na conversa, cada linha que começa com `[forge-sidecar]`, incluindo `recusado`, `falhou` e `reaproveitado`. Se nenhuma linha aparecer, diga que falta prova do adaptador. Preserve `observado=nao-confirmado` e diga **modelo enviado**; não afirme que o provedor aplicou o modelo.

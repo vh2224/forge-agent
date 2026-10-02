@@ -1434,13 +1434,13 @@ fi
 ```bash
 # Extract knobs off .prefs.<path>, applying the SAME default/clamp as the old inline snippet.
 WORKERS_ENGINE=$(printf '%s' "$PREFS_JSON" | UNIT_TYPE="$UNIT_TYPE" node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const w=JSON.parse(d).prefs.workers||{};let e=w[process.env.UNIT_TYPE||'execute-task'];e=(typeof e==='string')?e.toLowerCase():null;process.stdout.write((e==='claude'||e==='codex')?e:'claude')}catch(err){process.stdout.write('claude')}})")
-WORKERS_TIMEOUT=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const t=(JSON.parse(d).prefs.workers||{}).timeout;process.stdout.write(Number.isInteger(t)&&t>0?String(t):'1800')}catch(err){process.stdout.write('1800')}})")
+WORKERS_TIMEOUT=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const t=(JSON.parse(d).prefs.workers||{}).timeout;process.stdout.write(Number.isInteger(t)&&t>0?String(t):'300')}catch(err){process.stdout.write('300')}})")
 CODEX_MODEL=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=(JSON.parse(d).prefs.workers||{}).codex_model;process.stdout.write(c!=null&&c!==''?String(c):'')}catch(err){process.stdout.write('')}})")
 ```
 
 `sidecar_model` is an additive resolver-contract field; `$CODEX_MODEL` remains the legacy preference value, while the sidecar `--model` flag uses `$SIDECAR_MODEL`.
 
-**Equivalence with the old cascade (JSONC shape capture):** the JSONC parser exposes the per-unit-type engine as `.prefs.workers[<unit_type>]` (the `[A-Za-z0-9_.-]` key class covers hyphenated unit types such as `execute-task`); `timeout` as `.prefs.workers.timeout`; `codex_model` as `.prefs.workers.codex_model`. The resolver is safe with **no scaffold present**: absent a `workers:` block, `.prefs.workers` is `undefined`, so `WORKERS_ENGINE=claude`, `WORKERS_TIMEOUT=1800`, `CODEX_MODEL=""` (unset) — byte-identical defaults to the old snippet. The commented `workers:` scaffold in `forge-agent-prefs.jsonc § Workers Settings` ships in **S05**; the resolver does not depend on it (the CLI resolves absent keys to the same safe defaults).
+**JSONC shape:** the parser exposes the per-unit-type engine as `.prefs.workers[<unit_type>]`; `timeout` as `.prefs.workers.timeout`; `codex_model` as `.prefs.workers.codex_model`. Without a `workers:` block the defaults are `WORKERS_ENGINE=claude`, `WORKERS_TIMEOUT=300`, `CODEX_MODEL=""`. The canonical runtime default comes from `scripts/forge-worker-timeout.js`. Existing explicit timeout preferences take precedence over this default.
 
 #### Sidecar dispatch state machine (`WORKER_MODE == sidecar && UNIT_TYPE == execute-task`)
 
@@ -2091,7 +2091,7 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 |-----|------|-----------------------|-------------|
 | `workers.execute-task` | enum `claude \| codex` | `claude` | Engine for `execute-task` dispatch. `codex` routes to the sidecar; invalid → `claude` |
 | `workers.plan-slice` | enum `claude \| codex` | `claude` | Engine for `plan-slice` dispatch. `codex` routes to the sidecar `--mode plan` (read-only, Branch D); invalid → `claude` |
-| `workers.timeout` | int (seconds) | `1800` | Forwarded to the adapter as `--timeout`; non-positive/invalid → `1800` |
+| `workers.timeout` | int (seconds) | `300` | Absolute deadline per sidecar attempt, forwarded as `--timeout`; non-positive/invalid → `300` |
 | `workers.codex_model` | string (model id) | unset (`null`) | Legacy fallback for the sidecar `--model` when no routed Codex chain member leads; unset **and** no Codex chain → Codex CLI default. The flag itself is driven by `$SIDECAR_MODEL` (`sidecarModelFor`) |
 
 `plan-milestone` is intentionally **absent** from this table — it is never routed through `workers:` (locked; stays tier `max`/Fable). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.

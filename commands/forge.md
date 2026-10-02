@@ -30,13 +30,19 @@ Read `shared/forge-intent-entry.md` from the repository or FORGE_HOME — it is 
 canonical entry contract and this section only wires it.
 
 When the turn carries a request in natural language, classify it as
-consulta/diagnóstico, mudança nova, retomada pessoal or comando explícito, then:
+consulta/diagnóstico, ação direta, mudança com preparação, retomada pessoal or
+comando explícito, then:
 
 - **Comando explícito** (`/forge-*`, flags) runs as typed. The entry never
   rewrites, expands or silently upgrades it.
 - **Consulta/diagnóstico** → investigate the related technical sources and answer.
   No run, no personal binding, no file change, no `-fast`.
-- **Mudança nova** → investigate first, then recommend task or milestone in one
+- **Ação direta em qualquer contexto** (pedido simples ou suficientemente completo,
+  incluindo correção conhecida de UAT) → apply `shared/forge-direct-actions.md`
+  before any run creation or worker resolution. Explain briefly, execute in the
+  current session, and verify proportionately. Record UAT changes and pending
+  retests in the existing work and checkpoint; no new task or repeated preparation.
+- **Mudança com preparação** → investigate first, then recommend task or milestone in one
   sentence relating reach, dependencies, risk and verification. A cohesive result
   may be a task; separable deliverables with dependencies may justify a milestone.
   Size alone never decides.

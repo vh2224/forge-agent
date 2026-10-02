@@ -8,27 +8,32 @@ instructions projected into `CLAUDE.md`/`AGENTS.md`. Scripts resolve from the Fo
 repository or `${FORGE_HOME:-~/.forge-agent}/scripts`; the installed copy of this
 document lives under the same Forge home's `shared/`.
 
-This contract reduces repeated preparation. It never replaces the plan, the human
-authorization or the review, and it promises no general interpretation of natural
-language: what it guarantees is that a recommendation is accompanied by the
-evidence it was derived from, and that missing evidence degrades to normal
-preparation instead of to a guess.
+Apply `shared/forge-direct-actions.md` before entering a Forge lifecycle. It
+permits eligible direct actions and known UAT corrections with existing consent
+and proportionate verification. Work that enters a Forge lifecycle retains its
+plan, gates and review. This contract does not promise general interpretation of
+natural language; missing evidence retains normal preparation with a visible reason.
 
 ## Read the request before proposing a flow
 
-Classify the turn into exactly one of four intents, from the request itself and
+Classify the turn into exactly one of five intents, from the request itself and
 the investigation it justifies — never from keyword matching or file counts:
 
 | Intent | What it authorizes |
 |---|---|
 | `consulta` — explain, diagnose, compare, "why does X happen" | Investigation and an answer. No run, no binding, no file change. |
-| `mudanca` — a new change to the product | Recommending a task or a milestone, then the canonical lifecycle. |
+| `direta` — a clear, authorized, low-risk action or known UAT correction | Current-session execution and proportionate verification per `shared/forge-direct-actions.md`; no new run or dispatch. Record a UAT correction in its existing work. |
+| `mudanca` — a product change requiring preparation | Recommending a task or a milestone, then the canonical lifecycle. |
 | `retomada` — continue my own work | The personal resume path in `shared/forge-personal-context.md`. |
 | `comando` — an explicit `/forge-*` command or flag | Exactly what was typed; the entry never rewrites it. |
 
+The `direta` path is available in any context, for a simple request or a detailed,
+implementation-ready request that satisfies its risk and verification criteria.
+UAT adds records in the existing work; it is not a condition for direct execution.
+
 With no request at all, invite the operator to describe the desired result and keep
-help and the command menu available. Ambiguity between two intents is resolved by
-asking, not by choosing the more powerful one.
+help and the command menu available. Ask when an important decision is missing;
+do not add a direct-versus-task question to every already-clear request.
 
 ## Investigate, then explain the recommendation
 
@@ -107,10 +112,11 @@ absence of reuse is never silent. Sources and scope are revalidated at entry and
 again after a resume or a compaction, before any phase is skipped. Never create an
 empty or stub artifact to exploit a skip-if-exists check.
 
-## Downstream authority is unchanged
+## Authority after lifecycle entry
 
-Planning, the plan gate, the applicable security gate, isolation, claims, routed
-execution, verification, review and checkpoints remain canonical and are never
-shortened by an assessment. Forwarding to a milestone keeps its normal flow, and no
-fast mode is enabled implicitly. What reuse removes is repeated questioning — not a
-gate, not the plan, and not the operator's decision.
+For work classified as `mudanca` or an explicit Forge lifecycle command, planning,
+the plan gate, the applicable security gate, isolation, claims, routed execution,
+verification, review and checkpoints remain canonical and are never shortened by
+an assessment. Direct eligibility is decided before lifecycle entry, not from an
+assessment reuse result or a failed dispatch. Forwarding to a milestone keeps its
+normal flow, and no fast mode is enabled implicitly.

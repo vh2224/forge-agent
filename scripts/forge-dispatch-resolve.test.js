@@ -100,6 +100,18 @@ function runCase(name, fn) {
 }
 
 withHermeticHome((cliEnv) => {
+  runCase('sidecar timeout is five minutes unless explicitly configured', () => {
+    for (const timeout of [undefined, 0, -1, null, 'invalid', 120, 300, 1800]) {
+      const expected = Number.isInteger(timeout) && timeout > 0 ? timeout : 300;
+      const f = mkFixture({ prefsJsonc: JSON.stringify({ workers: { timeout } }) });
+      for (const unitType of ['execute-task', 'plan-milestone', 'review-fix']) {
+        const route = dispatch(f, { unitType, hostRuntime: 'codex' });
+        assertEqual(route.workers_timeout, expected, `${unitType} timeout ${String(timeout)}`);
+      }
+      cleanup(f);
+    }
+  });
+
   runCase('execute-task defaults: standard chain and observed executor effort', () => {
     const f = mkFixture({});
     const r = dispatch(f, { unitType: 'execute-task' });
@@ -941,7 +953,7 @@ withHermeticHome((cliEnv) => {
       route_source: 'tier_models',
       chain: [{ id: 'claude-sonnet-5', alias: 'sonnet', mapped: true, engine: 'claude' }],
       chain_len: 1, reason: 'unit-type:execute-task', effort: 'medium', effort_reason: 'unit-type:execute-task',
-      model_applied: null, engine_reason: 'default:claude', workers_engine: 'claude', workers_timeout: 1800,
+      model_applied: null, engine_reason: 'default:claude', workers_engine: 'claude', workers_timeout: 300,
       codex_model: '', plan_worker: '', domain_input: 'default', frontmatter_tier: '', thinking_header: '',
       routing_present: false, dispatch_engine: 'claude', sidecar_model: '', prefs_ok: true, prefs_errors: [],
     };

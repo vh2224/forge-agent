@@ -493,8 +493,8 @@ Eixo workers: qual ENGINE (claude nativo em contexto ou sidecar codex via script
 ### `workers.timeout`
 
 - **Tipo:** integer
-- **Default:** `1800`
-- **Descrição:** Segundos — teto do sidecar codex antes do SIGKILL. Só se aplica quando o engine resolvido é codex; inválido/não-positivo cai em 1800.
+- **Default:** `300`
+- **Descrição:** Segundos — prazo absoluto por tentativa de sidecar Claude/Codex (default 5min). Heartbeat não renova o prazo; erro explícito encerra antes. Inválido/não-positivo cai em 300. Valores explícitos continuam prevalecendo; timeout não prova recusa do provedor.
 
 ### `workers.codex_model`
 
