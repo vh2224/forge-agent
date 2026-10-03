@@ -151,10 +151,21 @@ drops keeps the claim honest: leaving the original union in place would block co
 this run has already decided not to touch.
 
 **`review-fix` (both call sites).** Pass `--conceded` with the conceded items as a JSON array of
-`{r, path, line}` — the `path:line` of each item, taken from the review artifact. The module strips
-the `:line` suffix (a claim is about files) and de-duplicates.
+`{r, path, line, verify_paths?}` — the primary `path:line` and explicit complementary
+verification files from each conceded item. `verify_paths` is an optional array
+(absence means no additional files), at most 256 literal relative paths per item
+and 1024 characters per path. The module strips only the primary `:line` suffix,
+reuses the review-fix lexical normalizer by lazy import, converts separators,
+sorts and de-duplicates the union. Direct CLI input has the same validation;
+malformed types, absolute/drive/UNC, traversal, controls, dot/empty segments,
+colon/globs, trailing dot/space aliases and protected `.gsd` fail closed before a writer. Physical links,
+junctions, escapes and unreadable components are checked by the shared guard in
+mandatory native preparation (`shared/forge-review.md`) and again at acceptance.
+Old claims/brief identities must be rederived and re-gated. Only conceded items
+grant paths; a worker's `files_changed` never expands the claim. Changing only a
+complementary file cannot verify the primary fix.
 
-An item that arrives **with no path** is a named branch, never a quiet degradation: the module
+An item that arrives **with no primary path**, even with `verify_paths`, is a named branch, never a quiet degradation: the module
 returns `refuse` with cause `pathless-conceded-item` and names the offending `R#`s. See D7 handling
 in **§ Step 3** and in `shared/forge-review.md § Step 7a`.
 

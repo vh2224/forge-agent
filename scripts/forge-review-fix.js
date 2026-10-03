@@ -57,18 +57,51 @@ function optionalText(value, field) {
 // Absolute paths, drive letters, traversal, empty or dot segments and control
 // characters are refused rather than normalized into something else.
 function normalizeRelativePath(raw, field) {
+  if (typeof raw !== 'string' || raw.length > 1024) throw refusal('review-fix-items-invalid', `${field} must be text of at most 1024 characters`);
   const value = String(raw).trim().replace(/\\/g, '/');
   if (!value || value.startsWith('/') || /^[A-Za-z]:/.test(value) || path.isAbsolute(value)) {
     throw refusal('review-fix-items-invalid', `${field} must be a relative path`);
   }
   const parts = value.split('/');
-  if (parts.some(part => !part || part === '.' || part === '..' || /[\x00-\x1f]/.test(part))) {
+  if (parts.some(part => !part || part === '.' || part === '..' || /[. ]$/.test(part) || /[:*?\x00-\x1f\x7f]/.test(part))) {
     throw refusal('review-fix-items-invalid', `${field} must not contain traversal or empty segments`);
   }
   if (parts[0].toLowerCase() === '.gsd') {
     throw refusal('review-fix-items-invalid', `${field} targets protected .gsd metadata`);
   }
   return parts.join('/');
+}
+
+function normalizeVerifyPaths(raw, field = 'verify_paths') {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_DECLARED_FILES) throw refusal('review-fix-items-invalid', `${field} must be a list of at most ${MAX_DECLARED_FILES}`);
+  return sortedPaths(raw.map(value => normalizeRelativePath(value, field)));
+}
+
+// Missing components are permitted only on ENOENT. Access failures never
+// authorize a writer; lstat checks the link itself, including Windows junctions.
+function assertClaimTargetsPhysical(cwd, claimPaths) {
+  fs.realpathSync(cwd);
+  const { realpathCanonical } = require('./forge-isolation');
+  const root = realpathCanonical(cwd);
+  for (const relative of claimPaths) {
+    let current = root;
+    for (const part of normalizeRelativePath(relative, 'claim path').split('/')) {
+      current = path.join(current, part);
+      let stat;
+      try { stat = fs.lstatSync(current); }
+      catch (error) {
+        if (error.code === 'ENOENT') break;
+        throw refusal('review-fix-claim-mismatch', 'Claim target is unreadable');
+      }
+      if (stat.isSymbolicLink()) throw refusal('review-fix-claim-mismatch', 'Claim target resolves through a link');
+      const real = fs.realpathSync.native(current);
+      const rel = path.relative(root, real);
+      if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+        throw refusal('review-fix-claim-mismatch', 'Claim target resolves through a link or outside CODE_DIR');
+      }
+    }
+  }
 }
 
 function splitPathLine(raw) {
@@ -137,6 +170,7 @@ function normalizeItems(raw) {
     return {
       r,
       path: file,
+      verify_paths: normalizeVerifyPaths(entry.verify_paths, `${r} verify_paths`),
       line,
       claim: optionalText(entry.claim ?? entry.issue, `${r} claim`),
       action: optionalText(entry.action ?? entry.suggested_fix ?? entry.fix, `${r} action`),
@@ -150,7 +184,7 @@ function normalizeItems(raw) {
 /** The claim implied by the items, through the canonical claim-gate derivation. */
 function deriveClaim(items) {
   const { deriveClaimFromConcededItems } = require('./forge-claim-gate');
-  return deriveClaimFromConcededItems(items.map(item => ({ r: item.r, path: item.path || '' })));
+  return deriveClaimFromConcededItems(items.map(item => ({ r: item.r, path: item.path || '', verify_paths: item.verify_paths })));
 }
 
 function sortedPaths(paths) {
@@ -226,7 +260,7 @@ function buildReviewFixPrompt(brief, options) {
   if (outputChannel !== 'json-only' && outputChannel !== 'worker-result-block') {
     throw new Error(`forge-review-fix: unknown output channel ${JSON.stringify(outputChannel)}`);
   }
-  const items = brief.items.map(item => ({ r: item.r, path: item.path, line: item.line,
+  const items = brief.items.map(item => ({ r: item.r, path: item.path, verify_paths: item.verify_paths || [], line: item.line,
     claim: item.claim, action: item.action, context: item.context, ...(item.review_file ? { review_file: item.review_file } : {}) }));
   const lines = [
     'You are a senior software engineer fixing review findings that the reviewer and the author',
@@ -440,6 +474,9 @@ function applyReviewOutcomes(input) {
     // Snapshot guard: the REVIEW.md must still be the one captured before the
     // provider turn, unless these exact lines are already published (replay).
     const expected = value.expectedHashes && value.expectedHashes[reviewFile];
+    if (expected && value.publicationHashes && hash(bytes) !== expected && hash(bytes) !== value.publicationHashes[reviewFile]) {
+      throw refusal('review-fix-review-conflict', `${reviewFile} changed during native publication; nothing was written`);
+    }
     if (expected && next !== content && hash(bytes) !== expected) {
       throw refusal('review-fix-review-conflict', `${reviewFile} changed after the review-fix started; nothing was written`);
     }
@@ -570,11 +607,116 @@ function reviewFileFor(boundaryInfo, item) {
   return boundaryInfo.boundary === 'milestone-triage' ? item.review_file : boundaryInfo.reviewFiles[0];
 }
 
-/**
- * Accept the native fixer (which commits itself, as before). The parent checks
- * the result block and the SHA — it exists, descends from start_sha and touches
- * only claimed files — then renders the same outcome lines.
- */
+// Bind native evidence to the exact preparation retained before the writer.
+function nativePreparationIdentity(preparation) {
+  return hash(JSON.stringify({ version: preparation.version, vcs: preparation.vcs, code_dir: preparation.code_dir,
+    context_root: preparation.context_root, brief_identity: preparation.brief.identity,
+    claim_paths: preparation.brief.claim_paths, review_snapshot: preparation.reviewSnapshot,
+    auto_commit: preparation.auto_commit,
+    start_sha: preparation.startSha || null, pre_dirty_hash: preparation.preDirty ? hash(JSON.stringify(preparation.preDirty)) : null,
+    snapshot_fingerprint: preparation.svnSnapshot?.coverage?.fingerprint || null,
+    baseline_fingerprint: preparation.svnSnapshot?.baseline?.fingerprint || null,
+    coverage_policy: preparation.svnSnapshot?.coverage?.policy || null,
+    ...(preparation.svnSnapshot?.coverage?.observation ? { observation: preparation.svnSnapshot.coverage.observation } : {}) }));
+}
+
+function assertNativePreparation(preparation, cwd, root, brief, reviewFiles, backend, autoCommit) {
+  if (!preparation || preparation.version !== 1 || preparation.vcs !== backend || preparation.code_dir !== cwd
+      || preparation.context_root !== root || preparation.auto_commit !== autoCommit || !preparation.brief || preparation.brief.identity !== brief.identity
+      || !preparation.reviewSnapshot || JSON.stringify(Object.keys(preparation.reviewSnapshot).sort()) !== JSON.stringify([...reviewFiles].sort())
+      || Object.values(preparation.reviewSnapshot).some(value => !/^[a-f0-9]{64}$/.test(value))
+      || preparation.identity !== nativePreparationIdentity(preparation)) throw refusal('review-fix-native-preparation-invalid');
+}
+
+function assertSvnMetadataCoverage(snapshot) {
+  if (snapshot.entries.some(entry => entry.kind === 'link' && require('./forge-vcs').isSvnProtectedMetadata(entry.path))) {
+    throw refusal('review-fix-protected-metadata', 'Protected metadata behind a link has no content coverage');
+  }
+  try {
+    require('./forge-xllm').assertNoProtectedSidecarChanges(snapshot.entries
+      .filter(entry => entry.kind === 'link').map(entry => ({ path: pathKey(entry.path) })));
+  } catch { throw refusal('review-fix-protected-metadata', 'Protected metadata behind a link has no content coverage'); }
+}
+
+function assertSvnClaimFileTypes(cwd, claimPaths, snapshot) {
+  for (const file of claimPaths) {
+    if (snapshot) {
+      const entry = snapshot.entries.find(value => pathKey(value.path) === pathKey(file));
+      if (entry && !['file', 'missing'].includes(entry.kind)) throw refusal('svn-review-scope-invalid', 'SVN claims require regular or missing files');
+    } else {
+      try { if (!fs.lstatSync(path.join(cwd, file)).isFile()) throw refusal('svn-review-scope-invalid', 'SVN claims require regular or missing files'); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+  }
+}
+
+function prepareNativeReviewFix(request) {
+  const r = request || {}, unit = require('./forge-unit-sidecar'), vcs = require('./forge-vcs');
+  const loc = unit.locations({ ...r, unitType: 'review-fix' });
+  const cwd = fs.realpathSync.native(r.cwd), root = fs.realpathSync.native(r.contextRoot || r.cwd);
+  const detected = require('./forge-ignore').detectVcs(cwd);
+  if (!['git', 'svn'].includes(r.vcs) || r.vcs !== detected) throw refusal('review-fix-vcs-mismatch');
+  if (r.codeDir && pathKey(fs.realpathSync.native(r.codeDir)) !== pathKey(cwd)) throw refusal('review-fix-code-dir-mismatch');
+  if (r.vcs === 'svn' && r.constraints?.auto_commit === true) throw refusal('review-fix-svn-auto-commit-unsupported');
+  const items = normalizeItems(r.reviewFix && r.reviewFix.items), claim = deriveClaim(items);
+  if (!claim.eligible) throw refusal(claim.cause || 'review-fix-claim-mismatch');
+  if (r.reviewFix.decision !== 'proceed' || !Array.isArray(r.reviewFix.claimPaths)
+      || JSON.stringify(sortedPaths(claim.paths)) !== JSON.stringify(sortedPaths(r.reviewFix.claimPaths))) throw refusal('review-fix-claim-mismatch');
+  assertClaimTargetsPhysical(cwd, claim.paths);
+  const brief = buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel,
+    items, claimPaths: claim.paths, route: r.route });
+  const reviewSnapshot = {}, reviewContents = {};
+  for (const reviewFile of loc.reviewFix.reviewFiles) {
+    try { const bytes = fs.readFileSync(unit.target(root, reviewFile)); reviewSnapshot[reviewFile] = hash(bytes); reviewContents[reviewFile] = bytes.toString('utf8'); }
+    catch { throw refusal('review-fix-review-item-missing'); }
+  }
+  const preparation = { version: 1, vcs: r.vcs, code_dir: cwd, context_root: root, brief, reviewSnapshot, reviewContents,
+    auto_commit: r.constraints?.auto_commit === true };
+  if (r.vcs === 'svn') {
+    const reviewObservation = vcs.deriveSvnReviewObservation(claim.paths);
+    assertSvnClaimFileTypes(cwd, claim.paths);
+    const snapshot = vcs.captureDirty(cwd, { vcs: 'svn', strict: true, reviewObservation });
+    if (snapshot.error === 'svn-protected-metadata-link') throw refusal('review-fix-protected-metadata');
+    if (!snapshot.ok || !vcs.validateSvnStrictSnapshot(snapshot)) {
+      const error = refusal('review-fix-native-snapshot-invalid', snapshot.error);
+      error.cause_code = snapshot.error || 'svn-snapshot-invalid';
+      error.diagnostic = snapshot.diagnostic;
+      throw error;
+    }
+    assertSvnMetadataCoverage(snapshot);
+    assertSvnClaimFileTypes(cwd, claim.paths, snapshot);
+    preparation.svnSnapshot = snapshot;
+  } else {
+    const baseline = vcs.baselineId(cwd, { vcs: 'git' });
+    if (!baseline.ok) throw refusal('review-fix-native-unverified');
+    preparation.startSha = baseline.id;
+    preparation.preDirty = require('./forge-xllm').captureDirtySnapshot(cwd);
+  }
+  // A REVIEW changed during capture invalidates the preparation too.
+  assertReviewSnapshot({ root, resolveTarget: unit.target, expectedHashes: reviewSnapshot });
+  preparation.identity = nativePreparationIdentity(preparation);
+  return preparation;
+}
+
+function observeNativeSvn(request, preparation, cwd) {
+  const vcs = require('./forge-vcs');
+  if (request.constraints?.auto_commit === true) throw refusal('review-fix-svn-auto-commit-unsupported');
+  if (request.rawResult?.commit_sha || request.rawResult?.sha) throw refusal('review-fix-svn-unexpected-sha');
+  if (!vcs.validateSvnStrictSnapshot(preparation.svnSnapshot) || preparation.svnSnapshot.coverage.code_dir !== cwd
+      || preparation.svnSnapshot.coverage.scope !== vcs.SVN_REVIEW_PROFILE
+      || JSON.stringify(preparation.svnSnapshot.coverage.observation) !== JSON.stringify(vcs.deriveSvnReviewObservation(preparation.brief.claim_paths))) {
+    throw refusal('review-fix-native-snapshot-invalid');
+  }
+  assertSvnMetadataCoverage(preparation.svnSnapshot);
+  const delta = vcs.postChanges(cwd, preparation.svnSnapshot, { vcs: 'svn', strict: true });
+  if (!delta.ok) throw refusal(delta.error === 'svn-baseline-moved' ? 'review-fix-baseline-moved'
+    : delta.error === 'svn-protected-metadata-link' ? 'review-fix-protected-metadata' : 'review-fix-native-snapshot-invalid', delta.error);
+  assertSvnClaimFileTypes(cwd, preparation.brief.claim_paths, delta.snapshot);
+  return delta;
+}
+
+// The parent accepts observed delivery and publishes correlated outcomes.
+// Git retains its commit policy; SVN requires strict local evidence and no SHA.
 function acceptNativeReviewFix(request, options) {
   const r = request || {};
   const opts = options || {};
@@ -583,12 +725,18 @@ function acceptNativeReviewFix(request, options) {
   const loc = unit.locations({ ...r, unitType: 'review-fix' });
   const items = normalizeItems(r.reviewFix && r.reviewFix.items);
   const claim = deriveClaim(items);
-  if (!claim.eligible) throw refusal('review-fix-claim-mismatch', claim.cause || 'claim-ineligible');
+  if (!claim.eligible) throw refusal(claim.cause || 'review-fix-claim-mismatch', 'claim-ineligible');
   if (JSON.stringify(sortedPaths(claim.paths)) !== JSON.stringify(sortedPaths(r.reviewFix.claimPaths))) {
     throw refusal('review-fix-claim-mismatch');
   }
-  const root = fs.realpathSync(r.contextRoot || r.cwd);
-  const cwd = fs.realpathSync(r.cwd);
+  const root = fs.realpathSync.native(r.contextRoot || r.cwd);
+  const cwd = fs.realpathSync.native(r.cwd);
+  const detected = require('./forge-ignore').detectVcs(cwd);
+  const backend = r.vcs || 'git';
+  if (backend !== detected || !['git', 'svn'].includes(backend)) throw refusal('review-fix-vcs-mismatch');
+  assertClaimTargetsPhysical(cwd, claim.paths);
+  const preparation = r.nativePreparation;
+  const expectedHashes = preparation ? preparation.reviewSnapshot : r.reviewSnapshot;
   if (!r.reviewFix || r.reviewFix.decision !== 'proceed') throw refusal('review-fix-claim-mismatch', 'claim gate decision must be proceed');
   const raw = r.rawResult || {};
   const status = raw.status;
@@ -605,40 +753,97 @@ function acceptNativeReviewFix(request, options) {
   let verifiedSha = null;
   let reasonCode = null;
   let changed = [];
-  const validStart = typeof r.startSha === 'string' && SHA_RE.test(r.startSha);
-  const head = git(cwd, ['rev-parse', 'HEAD'], runner);
-  const headSha = head.ok ? head.stdout.trim().toLowerCase() : '';
-  if (status !== 'done' || !reportCheck.ok || !validStart || !headSha) reasonCode = 'review-fix-native-unverified';
-  else if (!autoCommit) {
-    // Without auto_commit the native fixer must not commit; its changes are
-    // verified against the current working tree and stay uncommitted.
-    if (sha || headSha !== r.startSha.toLowerCase()) reasonCode = 'review-fix-native-unverified';
-    // Full post-turn delta is validated below for both commit policies.
-  } else if (status === 'done' || sha) {
-    const exists = SHA_RE.test(sha) && git(cwd, ['cat-file', '-e', `${sha}^{commit}`], runner).ok;
-    const descends = exists && git(cwd, ['merge-base', '--is-ancestor', r.startSha, sha], runner).ok && r.startSha !== sha;
-    // Current evidence: the fixer commit must still be reachable from HEAD.
-    const current = descends && git(cwd, ['merge-base', '--is-ancestor', sha, 'HEAD'], runner).ok;
-    const files = current ? commitFiles(cwd, r.startSha, sha, runner) : null;
-    if (!files || !files.length || files.some(file => !claimKeys.has(pathKey(file)))) reasonCode = 'review-fix-native-unverified';
-    else { verifiedSha = sha; changed = files; }
-  }
-  // A valid commit proves only committed paths; inspect uncommitted deltas too.
-  // Preserve unchanged preexisting work by its canonical pre-launch content hash.
-  if (!reasonCode) {
-    const preDirty = r.preDirty;
-    const validSnapshot = Array.isArray(preDirty) && preDirty.every(entry => entry && typeof entry.path === 'string'
-      && (entry.hash === null || typeof entry.hash === 'string'));
-    if (!validSnapshot) reasonCode = 'review-fix-native-snapshot-missing';
-    else {
+  let svnDelta = null;
+  let publishable = backend === 'git' && !preparation;
+  if (backend === 'svn') {
+    try {
+      const brief = buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel, items,
+        claimPaths: claim.paths, route: r.route });
+      if (autoCommit) throw refusal('review-fix-svn-auto-commit-unsupported');
+      if (preparation && !require('./forge-vcs').validateSvnStrictSnapshot(preparation.svnSnapshot)) throw refusal('review-fix-native-snapshot-invalid');
+      assertNativePreparation(preparation, cwd, root, brief, loc.reviewFix.reviewFiles, backend, autoCommit);
+      publishable = true;
+      svnDelta = observeNativeSvn(r, preparation, cwd);
+      const originalReviews = preparation.reviewContents || {};
+      // Exact parent publication is the sole permitted metadata delta on replay.
+      const replayPaths = new Set();
+      for (const reviewFile of loc.reviewFix.reviewFiles) {
+        const original = originalReviews[reviewFile];
+        if (typeof original !== 'string' || hash(original) !== expectedHashes[reviewFile]) continue;
+        let published = original;
+        for (const item of items.filter(item => reviewFileFor(loc.reviewFix, item) === reviewFile)) {
+          const verified = reported.get(reviewItemKey(item)) === 'fixed' && svnDelta.entries.some(entry => pathKey(entry.path) === pathKey(item.path));
+          published = setOutcomeInContent(published, item.r, outcomeLine(loc.reviewFix.boundary,
+            { verified, commitSha: null, commitReason: 'auto-commit-disabled' }));
+        }
+        const relative = path.relative(cwd, path.resolve(root, reviewFile)).replace(/\\/g, '/');
+        const prior = preparation.svnSnapshot.entries.find(entry => entry.path === pathKey(relative));
+        const current = svnDelta.snapshot.entries.find(entry => entry.path === pathKey(relative));
+        if (published !== original && prior && current && prior.hash === hash(original) && current.hash === hash(published)
+            && prior.kind === current.kind && prior.properties_hash === current.properties_hash
+            && JSON.stringify(prior.status) === JSON.stringify(current.status)) replayPaths.add(pathKey(relative));
+      }
+      changed = svnDelta.entries.filter(entry => !replayPaths.has(pathKey(entry.path))).map(entry => entry.path);
+      if (changed.some(file => require('./forge-vcs').isSvnProtectedMetadata(file))) reasonCode = 'review-fix-protected-metadata';
+      try { require('./forge-xllm').assertNoProtectedSidecarChanges(changed.map(file => ({ path: pathKey(file) }))); }
+      catch { reasonCode = 'review-fix-protected-metadata'; }
+      if (!reasonCode && changed.some(file => {
+        if (claimKeys.has(pathKey(file))) return false;
+        const entry = svnDelta.snapshot.entries.find(entry => entry.path === pathKey(file));
+        const structural = !preparation.svnSnapshot.entries.some(before => before.path === pathKey(file) && before.kind !== 'missing')
+          && entry?.kind === 'dir' && entry.properties_hash === hash('[]')
+          && ['normal', 'unversioned', 'added'].includes(entry.status.item) && entry.status.props === 'none'
+          && !entry.status.copied && !entry.status.scheduling?.copy_from_url
+          && claim.paths.some(claimed => pathKey(claimed).startsWith(pathKey(file) + '/'));
+        return !structural;
+      })) reasonCode = 'review-fix-outside-claim';
+      if (!reasonCode && (status !== 'done' || !reportCheck.ok)) reasonCode = 'review-fix-native-unverified';
+    } catch (error) { reasonCode = error.code || 'review-fix-native-unverified'; }
+  } else {
+    if (preparation) {
       try {
-        const observed = require('./forge-xllm').deriveFilesChanged(cwd, preDirty, r.startSha).map(entry => entry.path);
-        if (observed.some(file => !claimKeys.has(pathKey(file)))) {
-          changed = observed;
-          reasonCode = observed.some(file => file === '.gsd' || file.startsWith('.gsd/'))
-            ? 'review-fix-protected-metadata' : 'review-fix-outside-claim';
-        } else changed = autoCommit ? changed.filter(file => observed.includes(file)) : observed;
-      } catch { reasonCode = 'review-fix-native-unverified'; }
+        const brief = buildBrief({ boundary: loc.reviewFix.boundary, unitLabel: loc.reviewFix.unitLabel, items,
+          claimPaths: claim.paths, route: r.route });
+        assertNativePreparation(preparation, cwd, root, brief, loc.reviewFix.reviewFiles, backend, autoCommit);
+        publishable = true;
+      } catch (error) { reasonCode = error.code || 'review-fix-native-preparation-invalid'; }
+    }
+    const startSha = preparation ? preparation.startSha : r.startSha;
+    const validStart = typeof startSha === 'string' && SHA_RE.test(startSha);
+    const head = git(cwd, ['rev-parse', 'HEAD'], runner);
+    const headSha = head.ok ? head.stdout.trim().toLowerCase() : '';
+    if (!reasonCode && (status !== 'done' || !reportCheck.ok || !validStart || !headSha)) reasonCode = 'review-fix-native-unverified';
+    else if (!reasonCode && !autoCommit) {
+      // Without auto_commit the native fixer must not commit; its changes are
+      // verified against the current working tree and stay uncommitted.
+      if (sha || headSha !== startSha.toLowerCase()) reasonCode = 'review-fix-native-unverified';
+      // Full post-turn delta is validated below for both commit policies.
+    } else if (!reasonCode && (status === 'done' || sha)) {
+      const exists = SHA_RE.test(sha) && git(cwd, ['cat-file', '-e', `${sha}^{commit}`], runner).ok;
+      const descends = exists && git(cwd, ['merge-base', '--is-ancestor', startSha, sha], runner).ok && startSha !== sha;
+      // Current evidence: the fixer commit must still be reachable from HEAD.
+      const current = descends && git(cwd, ['merge-base', '--is-ancestor', sha, 'HEAD'], runner).ok;
+      const files = current ? commitFiles(cwd, startSha, sha, runner) : null;
+      if (!files || !files.length || files.some(file => !claimKeys.has(pathKey(file)))) reasonCode = 'review-fix-native-unverified';
+      else { verifiedSha = sha; changed = files; }
+    }
+    // A valid commit proves only committed paths; inspect uncommitted deltas too.
+    // Preserve unchanged preexisting work by its canonical pre-launch content hash.
+    if (!reasonCode) {
+      const preDirty = preparation ? preparation.preDirty : r.preDirty;
+      const validSnapshot = Array.isArray(preDirty) && preDirty.every(entry => entry && typeof entry.path === 'string'
+        && (entry.hash === null || typeof entry.hash === 'string'));
+      if (!validSnapshot) reasonCode = 'review-fix-native-snapshot-missing';
+      else {
+        try {
+          const observed = require('./forge-xllm').deriveFilesChanged(cwd, preDirty, startSha).map(entry => entry.path);
+          if (observed.some(file => !claimKeys.has(pathKey(file)))) {
+            changed = observed;
+            reasonCode = observed.some(file => file === '.gsd' || file.startsWith('.gsd/'))
+              ? 'review-fix-protected-metadata' : 'review-fix-outside-claim';
+          } else changed = autoCommit ? changed.filter(file => observed.includes(file)) : observed;
+        } catch { reasonCode = 'review-fix-native-unverified'; }
+      }
     }
   }
   const changedKeys = new Set(changed.map(file => pathKey(file)));
@@ -650,11 +855,41 @@ function acceptNativeReviewFix(request, options) {
       verified, commit_sha: verified ? verifiedSha : null };
   });
   const commitReason = verifiedSha ? null : (reasonCode || (!autoCommit ? 'auto-commit-disabled' : `worker-${status}`));
-  applyReviewOutcomes({ root, resolveTarget: unit.target, expectedHashes: r.reviewSnapshot, outcomes: outcomes.map(outcome => ({
-    r: outcome.r,
-    reviewFile: reviewFileFor(loc.reviewFix, correlateReviewItem(outcome, items)),
-    line: outcomeLine(loc.reviewFix.boundary, { verified: outcome.verified, commitSha: outcome.commit_sha, commitReason }),
-  })) });
+  const publicationHashes = {};
+  if (publishable) {
+    try {
+      if (preparation) {
+        preparation.reviewContents ||= {};
+        for (const reviewFile of loc.reviewFix.reviewFiles) {
+          let bytes;
+          try { bytes = fs.readFileSync(unit.target(root, reviewFile)); }
+          catch { throw refusal('review-fix-review-item-missing'); }
+          if (hash(bytes) === expectedHashes[reviewFile]) preparation.reviewContents[reviewFile] = bytes.toString('utf8');
+          let original = preparation.reviewContents[reviewFile];
+          if (typeof original !== 'string' || hash(original) !== expectedHashes[reviewFile]) throw refusal('review-fix-review-conflict');
+          let published = original;
+          for (const outcome of outcomes.filter(outcome => reviewFileFor(loc.reviewFix, correlateReviewItem(outcome, items)) === reviewFile)) {
+            published = setOutcomeInContent(published, outcome.r, outcomeLine(loc.reviewFix.boundary,
+              { verified: outcome.verified, commitSha: outcome.commit_sha, commitReason }));
+          }
+          publicationHashes[reviewFile] = hash(published);
+          if (hash(bytes) !== expectedHashes[reviewFile] && bytes.toString('utf8') !== published) throw refusal('review-fix-review-conflict');
+        }
+      } else assertReviewSnapshot({ root, resolveTarget: unit.target, expectedHashes });
+    }
+    catch (error) {
+      // A removed/replaced metadata tree cannot be a publication destination.
+      if (reasonCode === 'review-fix-protected-metadata' && error.code === 'review-fix-review-item-missing') publishable = false;
+      else throw error;
+    }
+  }
+  if (publishable) {
+    applyReviewOutcomes({ root, resolveTarget: unit.target, expectedHashes, ...(preparation ? { publicationHashes } : {}), outcomes: outcomes.map(outcome => ({
+      r: outcome.r,
+      reviewFile: reviewFileFor(loc.reviewFix, correlateReviewItem(outcome, items)),
+      line: outcomeLine(loc.reviewFix.boundary, { verified: outcome.verified, commitSha: outcome.commit_sha, commitReason }),
+    })) });
+  }
   const result = {
     status: reasonCode ? 'failure' : status,
     contract: 'review-fix',
@@ -665,6 +900,7 @@ function acceptNativeReviewFix(request, options) {
     files_changed: changed,
     commit_sha: verifiedSha,
     commit_reason: commitReason,
+    ...(svnDelta ? { observation: svnDelta.coverage.observation } : {}),
     ...(reasonCode ? { reason_code: reasonCode } : {}),
   };
   if (reasonCode) {
@@ -677,7 +913,8 @@ function acceptNativeReviewFix(request, options) {
 
 module.exports = {
   PROTOCOL_VERSION, BOUNDARIES, OUTCOMES, reviewFixSchema,
-  reviewItemKey, correlateReviewItem, normalizeItems, normalizeRelativePath, deriveClaim, reviewFixIdentity, buildBrief, buildReviewFixPrompt,
+  reviewItemKey, correlateReviewItem, normalizeItems, normalizeRelativePath, normalizeVerifyPaths, assertClaimTargetsPhysical,
+  prepareNativeReviewFix, deriveClaim, reviewFixIdentity, buildBrief, buildReviewFixPrompt,
   inspectReviewFixResult, validateReviewFixResult, verifyAgainstObserved, outcomeLine, setOutcomeInContent,
   applyReviewOutcomes, assertReviewSnapshot, commitMessage, reconcileCommit, commitVerified, verifiedGitBlobs, acceptNativeReviewFix, unitIdFor,
   reviewFileFor,
@@ -685,13 +922,15 @@ module.exports = {
 
 if (require.main === module) {
   try {
-    if (process.argv[2] !== '--accept-native' || !process.argv[3]) throw refusal('request-file-required');
+    if (!['--accept-native', '--prepare-native'].includes(process.argv[2]) || !process.argv[3]) throw refusal('request-file-required');
     const request = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-    const result = acceptNativeReviewFix(request);
+    const result = process.argv[2] === '--prepare-native' ? prepareNativeReviewFix(request) : acceptNativeReviewFix(request);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
     if (error.result) process.stdout.write(`${JSON.stringify(error.result)}\n`);
     process.stderr.write(`forge-review-fix: ${error.code || 'review-fix-failed'}\n`);
+    if (error.diagnostic) process.stderr.write(`${JSON.stringify({ layer: 'svn-preparation',
+      reason_code: error.code, cause_code: error.cause_code, provider_called: false, diagnostic: error.diagnostic })}\n`);
     process.exitCode = 1;
   }
 }

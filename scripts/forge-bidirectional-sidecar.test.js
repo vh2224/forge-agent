@@ -10,6 +10,12 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-bidirectional-'));
+// A test route must depend only on its fixture, never on an operator's live
+// routing table. An existing canonical file also prevents legacy-pref fallback.
+const savedForgeHome = process.env.FORGE_HOME;
+process.env.FORGE_HOME = path.join(root, 'forge-home');
+fs.mkdirSync(process.env.FORGE_HOME);
+fs.writeFileSync(path.join(process.env.FORGE_HOME, 'forge-agent-prefs.jsonc'), '{}\n');
 const accounts = require('./forge-accounts');
 const originalLookup = accounts.resolveLaunch;
 const token = 'fixture-only-never-a-real-account';
@@ -224,6 +230,18 @@ setInterval(() => {}, 1000);
 `;
 
 async function reviewFixMatrix() {
+  // The three executable caller mirrors must require the same preparation
+  // before construction, and retain evidence for the acceptance below.
+  for (const skill of ['forge-task', 'forge-next', 'forge-auto']) {
+    const caller = fs.readFileSync(path.join(__dirname, '..', 'skills', skill, 'SKILL.md'), 'utf8');
+    const branch = caller.match(/== native`(?:,)? first run[\s\S]*/);
+    assert(branch, `${skill}: explicit native branch`);
+    const native = branch[0];
+    assert(native.includes('forge-review-fix.js --prepare-native'), `${skill}: preparation required`);
+    assert(native.indexOf('--prepare-native') < native.indexOf('buildNativeInvocation'), `${skill}: prepare before build`);
+    assert(native.includes('nativePreparation') && native.includes('--accept-native'), `${skill}: retained evidence`);
+    assert(native.includes('verify_paths'), `${skill}: complementary paths retained`);
+  }
   const reviewFix = require('./forge-review-fix');
   const { resolveReviewEffort } = require('./forge-review-effort');
   const { buildNativeInvocation, preflightNativeBinding } = require('./forge-native-invocation');
@@ -516,6 +534,12 @@ async function reviewFixMatrix() {
         const route = resolveDispatch({ cwd: fx.working, unitType: 'review-fix', hostRuntime: host });
         assert.deepStrictEqual([route.worker_mode, route.resolved_worker_engine, route.model_resolved, route.effort, route.effort_reason],
           ['native', host, fx.model, 'medium', 'unit-type:review-fix']);
+        const nativeRequest = { cwd: fx.code, contextRoot: fx.working, vcs: 'git', route, ...idsFor(boundary),
+          constraints: { auto_commit: true },
+          reviewFix: { boundary, decision: 'proceed', items: items(boundary), claimPaths: ['src/a.js', 'src/b.js'] } };
+        const nativePreparation = reviewFix.prepareNativeReviewFix(nativeRequest);
+        assert.strictEqual(nativePreparation.startSha, fx.start);
+        assert.deepStrictEqual(nativePreparation.reviewSnapshot, snapshotFor(fx, boundary));
         const invocation = buildNativeInvocation({ hostRuntime: host, resolvedDispatch: route, activeCapabilities: nativeCaps[host],
           agentType: 'forge-executor', prompt: 'Fix R1 only.', effortBinding: executorBinding, taskName: 'review_fix', forkTurns: 'none' });
         assert.strictEqual(invocation.ok, true, JSON.stringify(invocation));
@@ -525,15 +549,11 @@ async function reviewFixMatrix() {
         } else {
           assert.deepStrictEqual([invocation.args.model, invocation.args.reasoning_effort], ['gpt-6-luna', 'medium']);
         }
-        const reviewSnapshot = snapshotFor(fx, boundary);
-        const preDirty = xllm.captureDirtySnapshot(fx.code);
         write(path.join(fx.code, 'src/a.js'), 'a fixed natively\n');
         g(fx.code, 'add', 'src/a.js');
         g(fx.code, 'commit', '-qm', 'fix(review): native');
         const sha = g(fx.code, 'rev-parse', 'HEAD');
-        const accepted = reviewFix.acceptNativeReviewFix({ cwd: fx.code, contextRoot: fx.working, ...idsFor(boundary),
-          startSha: fx.start, constraints: { auto_commit: true }, reviewSnapshot, preDirty,
-          reviewFix: { boundary, decision: 'proceed', items: items(boundary), claimPaths: ['src/a.js', 'src/b.js'] },
+        const accepted = reviewFix.acceptNativeReviewFix({ ...nativeRequest, nativePreparation,
           rawResult: { status: 'done', commit_sha: sha,
             items: [{ r: 'R1', outcome: 'fixed', note: '' }, { r: 'R2', outcome: 'fixed', note: 'claimed only' }] } });
         assert.deepStrictEqual(accepted.items.map(item => [item.r, item.outcome, item.verified, item.commit_sha]),
@@ -724,6 +744,23 @@ async function reviewFixMatrix() {
       'review-fix-items-invalid');
     await refused(r => ({ ...r, reviewFix: { ...r.reviewFix, items: [{ r: 'R1', claim: 'no path' }], claimPaths: [] } }),
       'pathless-conceded-item');
+    await refused(r => ({ ...r, reviewFix: { ...r.reviewFix, items: [{ r: 'R1', verify_paths: ['src/test.js'] }], claimPaths: ['src/test.js'] } }),
+      'pathless-conceded-item');
+    for (const invalid of ['../escape.js', '/absolute.js', 'C:/drive.js', '\\\\server\\share', '.gsd/STATE.md']) {
+      await refused(r => ({ ...r, reviewFix: { ...r.reviewFix, items: [{ r: 'R1', path: 'src/a.js', verify_paths: [invalid] }], claimPaths: ['src/a.js', invalid] } }),
+        'review-fix-items-invalid');
+    }
+    {
+      const fx = fixture('codex');
+      setControl({ ...OK, writes: { 'src/a.js': 'fixed\n', 'src/a.test.js': 'regression\n' },
+        items: [{ r: 'R1', outcome: 'fixed', note: 'primary and test' }] });
+      const acceptedItems = [{ r: 'R1', path: 'src/a.js', verify_paths: ['src/a.test.js'] }];
+      const result = await unit.runUnitSidecar(request(fx, 'claude', 'task', { constraints: { auto_commit: false },
+        reviewFix: { boundary: 'task', decision: 'proceed', items: acceptedItems, claimPaths: ['src/a.js', 'src/a.test.js'] } }));
+      assert.strictEqual(result.items[0].verified, true);
+      assert.deepStrictEqual(result.files_changed.map(entry => entry.path).sort(), ['src/a.js', 'src/a.test.js']);
+      assert.strictEqual(g(fx.code, 'rev-parse', 'HEAD'), fx.start);
+    }
     await refused(r => ({ ...r, sliceId: undefined }), 'review-fix-boundary-invalid');
     await refused(r => ({ ...r, sliceId: undefined, reviewFix: { ...r.reviewFix, boundary: 'milestone-triage',
       items: items('slice').map(item => ({ ...item, review_file: '.gsd/milestones/M002/slices/S01/S01-REVIEW.md' })) } }),
@@ -1523,5 +1560,6 @@ async function reviewFixMatrix() {
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
   accounts.resolveLaunch = originalLookup; xllm.invokeCodexAppServer = originalCodex; xllm.authorizeSidecar = originalAuthorize;
   if (originalEnv === undefined) delete process.env.FORGE_XLLM_CLAUDE_BIN; else process.env.FORGE_XLLM_CLAUDE_BIN = originalEnv;
+  if (savedForgeHome === undefined) delete process.env.FORGE_HOME; else process.env.FORGE_HOME = savedForgeHome;
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
 });

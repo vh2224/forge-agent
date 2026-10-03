@@ -62,23 +62,39 @@ function excluded(opts, p) {
 // ── SVN helpers (array args, locale-pinned, never shell) ────────────────────
 function svnRun(cwd, args, opts) {
   const configArgs = opts.configDir ? ['--config-dir', opts.configDir] : [];
-  return spawnSync('svn', ['--non-interactive', ...configArgs, ...args], {
+  const timeout = opts.checkBudget ? Math.min(15000, opts.checkBudget(`svn:${args[0]}`)) : undefined;
+  const result = (opts.runner || spawnSync)('svn', ['--non-interactive', ...configArgs, ...args], {
     cwd,
+    shell: false,
+    ...(timeout === undefined ? {} : { timeout }),
     encoding: 'buffer',
     maxBuffer: opts.maxBuffer == null ? DEFAULT_MAX_BUFFER : opts.maxBuffer,
     // Keep diagnostics locale-stable without forcing LC_CTYPE to ASCII.
     // `LC_ALL=C` makes SVN on Linux reject valid Unicode working-copy paths.
     env: { ...(opts.env ?? process.env), LC_MESSAGES: 'C' },
   });
+  if (opts.checkBudget) {
+    opts.checkBudget(`svn:${args[0]}`);
+    if (result.error?.code === 'ETIMEDOUT') throw new Error('svn-snapshot-timeout');
+  }
+  return result;
 }
 
 function svnversionRun(cwd, opts) {
-  return spawnSync('svnversion', [], {
+  const timeout = opts.checkBudget ? Math.min(15000, opts.checkBudget('svnversion')) : undefined;
+  const result = (opts.runner || spawnSync)('svnversion', [], {
     cwd,
+    shell: false,
+    ...(timeout === undefined ? {} : { timeout }),
     encoding: 'buffer',
     maxBuffer: opts.maxBuffer == null ? DEFAULT_MAX_BUFFER : opts.maxBuffer,
     env: { ...(opts.env ?? process.env), LC_MESSAGES: 'C' },
   });
+  if (opts.checkBudget) {
+    opts.checkBudget('svnversion');
+    if (result.error?.code === 'ETIMEDOUT') throw new Error('svn-snapshot-timeout');
+  }
+  return result;
 }
 
 function svnWcRootGuard(cwd) {
@@ -529,6 +545,528 @@ function gitRestoreAndRemove(cwd, baseline, target, opts) {
 }
 
 // ── SVN snapshot / post-run computation ─────────────────────────────────────
+const SVN_EVIDENCE_VERSION = 1;
+const SVN_SNAPSHOT_VERSION = 2;
+const SVN_REVIEW_PROFILE = 'native-review-source-containers-v1';
+const SVN_REVIEW_LIMITATION = 'Only the retained source containers, structural ancestors and physical .gsd were observed. Writes outside this scope are not observed; native tools have no per-call OS write sandbox. Claims authorize only their exact files.';
+const SVN_STRICT_POLICY = Object.freeze({ maxEntries: 500000, maxDepth: 128,
+  maxFileBytes: 512 * 1024 * 1024, maxTotalBytes: 8 * 1024 * 1024 * 1024 });
+
+function evidenceHash(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+// Only the machine-produced local SVN XML vocabulary is needed. Validate the
+// entire document before extracting fields; tolerant status parsing stays intact.
+function parseSvnEvidenceXml(xml, rootName) {
+  const source = Buffer.isBuffer(xml) ? xml.toString('utf8') : String(xml);
+  const document = { children: [], text: '' }, stack = [document];
+  const tokenRe = /<[^>]*>|[^<]+/g;
+  let position = 0, token;
+  const decode = text => {
+    if (/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/.test(text)) throw new Error('svn-evidence-xml-invalid');
+    for (const entity of text.matchAll(/&#(x[0-9a-fA-F]+|\d+);/g)) {
+      const value = entity[1].startsWith('x') ? Number.parseInt(entity[1].slice(1), 16) : Number(entity[1]);
+      if (![9, 10, 13].includes(value) && !(value >= 32 && value <= 0x10ffff
+          && !(value >= 0xd800 && value <= 0xdfff) && value !== 0xfffe && value !== 0xffff)) throw new Error('svn-evidence-xml-invalid');
+    }
+    return decodeXmlEntities(text);
+  };
+  while ((token = tokenRe.exec(source))) {
+    if (token.index !== position) throw new Error('svn-evidence-xml-invalid');
+    position = tokenRe.lastIndex;
+    const value = token[0];
+    if (/^<\?xml\s[^<>]*\?>$/.test(value) && document.children.length === 0 && stack.length === 1) continue;
+    if (!value.startsWith('<')) { stack[stack.length - 1].text += decode(value); continue; }
+    const close = /^<\/([\w-]+)\s*>$/.exec(value);
+    if (close) {
+      if (stack.length === 1 || stack.pop().name !== close[1]) throw new Error('svn-evidence-xml-invalid');
+      continue;
+    }
+    const open = /^<([\w-]+)((?:\s+[\w-]+\s*=\s*(?:"[^"<>]*"|'[^'<>]*'))*)\s*(\/?)>$/.exec(value);
+    if (!open || stack.length > 64) throw new Error('svn-evidence-xml-invalid');
+    const attrs = {};
+    for (const attr of open[2].matchAll(/([\w-]+)\s*=\s*(["'])([\s\S]*?)\2/g)) {
+      if (Object.hasOwn(attrs, attr[1])) throw new Error('svn-evidence-xml-invalid');
+      attrs[attr[1]] = decode(attr[3]);
+    }
+    const node = { name: open[1], attrs, children: [], text: '' };
+    stack[stack.length - 1].children.push(node);
+    if (!open[3]) stack.push(node);
+  }
+  if (position !== source.length || stack.length !== 1 || document.text.trim()
+      || document.children.length !== 1 || document.children[0].name !== rootName) throw new Error('svn-evidence-xml-invalid');
+  return document.children[0];
+}
+
+function evidenceChild(node, name, optional = false) {
+  const children = node.children.filter(child => child.name === name);
+  if (optional && children.length === 0) return null;
+  if (children.length !== 1) throw new Error('svn-evidence-field-missing');
+  return children[0];
+}
+
+function svnEvidencePath(cwd, raw) {
+  if (typeof raw !== 'string' || !raw || /[\x00-\x1f]/.test(raw)) throw new Error('svn-evidence-path-invalid');
+  const resolved = path.resolve(cwd, raw.replace(/\\/g, '/'));
+  const rel = path.relative(cwd, resolved).replace(/\\/g, '/');
+  if (rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) throw new Error('svn-evidence-path-escape');
+  return process.platform === 'win32' ? rel.toLowerCase() : rel;
+}
+
+// The scope is derived from authorization, never from worker-reported writes.
+// Structural ancestors are measured at depth empty, without listing siblings.
+function deriveSvnReviewObservation(claimPaths) {
+  if (!Array.isArray(claimPaths) || !claimPaths.length) throw new Error('svn-review-scope-invalid');
+  const normalize = require('./forge-review-fix').normalizeRelativePath;
+  const claims = [...new Set(claimPaths.map(value => {
+    const normalized = normalize(value);
+    if (!normalized || normalized.split('/').some(part => /^(node_modules|\.cache|cache|dist|build|coverage|\.next|\.nuxt|out|\.webpack|\.svn|\.git|\.gsd)$/i.test(part))) {
+      throw new Error('svn-review-scope-invalid');
+    }
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  }))].sort();
+  const containers = [...new Set(claims.map(file => path.posix.dirname(file)).filter(dir => dir !== '.'))].sort();
+  const trees = containers.filter(dir => !containers.some(other => other !== dir && dir.startsWith(other + '/')));
+  const roots = trees.map(relative => ({ path: relative, mode: 'tree' }));
+  for (const file of claims) if (!trees.some(dir => file.startsWith(dir + '/'))) roots.push({ path: file, mode: 'file' });
+  roots.push({ path: '.gsd', mode: 'tree' });
+  const ancestors = new Set(['']);
+  for (const { path: relative } of roots) {
+    let parent = path.posix.dirname(relative);
+    while (parent !== '.') { ancestors.add(parent); parent = path.posix.dirname(parent); }
+  }
+  for (const relative of ancestors) if (!roots.some(entry => entry.path === relative || relative.startsWith(entry.path + '/'))) {
+    roots.push({ path: relative, mode: 'structural' });
+  }
+  roots.sort((a, b) => a.path.localeCompare(b.path));
+  return { version: 1, profile: SVN_REVIEW_PROFILE, claim_paths: claims, roots,
+    outside_scope_limitation: SVN_REVIEW_LIMITATION };
+}
+
+function validateSvnReviewObservation(observation) {
+  try { return JSON.stringify(observation) === JSON.stringify(deriveSvnReviewObservation(observation.claim_paths)); }
+  catch { return false; }
+}
+
+function svnObservedPath(observation, relative) {
+  return observation.roots.some(entry => entry.path === relative || (entry.mode === 'tree' && relative.startsWith(entry.path + '/')));
+}
+
+function isSvnProtectedMetadata(relative) {
+  return String(relative).replace(/\\/g, '/').split('/').some(part => part.toLowerCase() === '.gsd');
+}
+
+// Probe explicit targets at depth empty first. Unversioned/missing containers
+// have no fabricated BASE/properties, while their physical content is measured.
+function svnScopedDocument(root, observation, command, opts) {
+  const rootName = command === 'proplist' ? 'properties' : command;
+  const document = { name: rootName, children: [], text: '' }, seen = new Map();
+  for (const scope of observation.roots) {
+    const target = svnPegSafe(scope.path || '.');
+    const shallow = svnRun(root, ['status', '--xml', '--verbose', '--no-ignore', '--ignore-externals', '--depth', 'empty', target], opts);
+    if (shallow.status !== 0) throw new Error('svn-status-failed');
+    const status = parseSvnEvidenceXml(shallow.stdout, 'status');
+    const exact = status.children.flatMap(node => node.children).find(node => node.name === 'entry'
+      && svnEvidencePath(root, node.attrs.path) === scope.path);
+    const item = exact ? evidenceChild(exact, 'wc-status').attrs.item : null;
+    if (command !== 'status' && (!item || ['unversioned', 'ignored', 'none'].includes(item))) continue;
+    const args = command === 'status'
+      ? ['status', '--xml', '--verbose', '--no-ignore', '--ignore-externals']
+      : command === 'info' ? ['info', '--xml'] : ['proplist', '--xml', '--verbose'];
+    const result = scope.mode !== 'tree' && command === 'status' ? shallow
+      : svnRun(root, [...args, '--depth', scope.mode === 'tree' ? 'infinity' : 'empty', target], opts);
+    if (result.status !== 0) throw new Error(`svn-${command}-failed`);
+    const parsed = parseSvnEvidenceXml(result.stdout, rootName);
+    const nodes = command === 'status' ? parsed.children.flatMap(node => {
+      if (!['target', 'changelist'].includes(node.name)) throw new Error('svn-status-invalid');
+      return node.children;
+    }) : parsed.children;
+    for (const node of nodes) {
+      const relative = svnEvidencePath(root, node.attrs.path);
+      if (!svnObservedPath(observation, relative)) throw new Error('svn-review-scope-escape');
+      const key = JSON.stringify(node);
+      if (seen.has(relative)) { if (seen.get(relative) !== key) throw new Error('svn-snapshot-unstable'); continue; }
+      seen.set(relative, key);
+      if (command === 'status') document.children.push({ name: 'target', attrs: { path: scope.path || '.' }, children: [node], text: '' });
+      else document.children.push(node);
+    }
+  }
+  return document;
+}
+
+function svnMaterialBaseline(cwd, opts = {}) {
+  try {
+    const root = fs.realpathSync.native(cwd);
+    const observation = opts.reviewObservation;
+    if (observation && !validateSvnReviewObservation(observation)) throw new Error('svn-review-scope-invalid');
+    let id, info, statusTree;
+    if (observation) {
+      info = svnScopedDocument(root, observation, 'info', opts);
+      statusTree = svnScopedDocument(root, observation, 'status', opts);
+    } else {
+      const version = svnversionRun(root, opts);
+      id = version.stdout && version.stdout.toString('utf8').trim();
+      if (version.status !== 0 || !/^\d+(?::\d+)?M?S?P?$/.test(id)) throw new Error('svn-baseline-invalid');
+      const range = id.replace(/[MSP]/g, '').split(':');
+      if (range.length === 2 && BigInt(range[0]) > BigInt(range[1])) throw new Error('svn-baseline-invalid');
+      const result = svnRun(root, ['info', '--xml', '--depth', 'infinity', svnPegSafe('.')], opts);
+      if (result.status !== 0) throw new Error('svn-info-failed');
+      info = parseSvnEvidenceXml(result.stdout, 'info');
+      const statusResult = svnRun(root, ['status', '--xml', '--verbose', '--ignore-externals', svnPegSafe('.')], opts);
+      if (statusResult.status !== 0) throw new Error('svn-status-failed');
+      statusTree = parseSvnEvidenceXml(statusResult.stdout, 'status');
+    }
+    const inventory = [], localNodes = [], seen = new Set();
+    const addedPaths = info.children.filter(node => evidenceChild(evidenceChild(node, 'wc-info'), 'schedule').text.trim() === 'add')
+      .map(node => svnEvidencePath(root, node.attrs.path));
+    const localStatus = new Map();
+    for (const target of statusTree.children) {
+      if (opts.checkBudget) opts.checkBudget('baseline:status');
+      if (!['target', 'changelist'].includes(target.name)) throw new Error('svn-status-invalid');
+      for (const node of target.children) {
+        if (node.name !== 'entry') throw new Error('svn-status-invalid');
+        const relative = svnEvidencePath(root, node.attrs.path);
+        if (localStatus.has(relative)) throw new Error('svn-status-invalid');
+        localStatus.set(relative, evidenceChild(node, 'wc-status').attrs);
+      }
+    }
+    for (const node of info.children) {
+      if (opts.checkBudget) opts.checkBudget('baseline:info');
+      if (node.name !== 'entry') throw new Error('svn-info-invalid');
+      const relative = svnEvidencePath(root, node.attrs.path);
+      let revision = node.attrs.revision;
+      const kind = node.attrs.kind;
+      const repository = evidenceChild(node, 'repository');
+      const wc = evidenceChild(node, 'wc-info');
+      const schedule = evidenceChild(wc, 'schedule').text.trim();
+      if (!['normal', 'add', 'delete', 'replace'].includes(schedule)) throw new Error('svn-info-invalid');
+      const state = localStatus.get(relative);
+      const added = addedPaths.some(ancestor => relative === ancestor || relative.startsWith(ancestor + '/'));
+      if (schedule === 'add' && state?.item !== 'added') throw new Error('svn-info-invalid');
+      const copyUrl = evidenceChild(wc, 'copy-from-url', true), copyRevision = evidenceChild(wc, 'copy-from-rev', true);
+      if (schedule !== 'normal' || added) localNodes.push({ path: relative, schedule,
+        copy_from_url: copyUrl ? copyUrl.text.trim() : null, copy_from_revision: copyRevision ? copyRevision.text.trim() : null });
+      if (schedule === 'replace') {
+        if (state?.item !== 'replaced' || !/^\d+$/.test(state.revision || '')) throw new Error('svn-info-invalid');
+        if (kind === 'dir') throw new Error('svn-replacement-base-unavailable');
+        revision = state.revision; // status retains the replaced node's local BASE revision.
+      }
+      const wcRoot = evidenceChild(wc, 'wcroot-abspath').text.trim();
+      const depth = evidenceChild(wc, 'depth', true);
+      const entry = { path: relative, revision, kind, url: evidenceChild(node, 'url').text.trim(),
+        repository_root: evidenceChild(repository, 'root').text.trim(), uuid: evidenceChild(repository, 'uuid').text.trim(),
+        wc_root: fs.realpathSync.native(wcRoot), depth: depth ? depth.text.trim() : null,
+        ...(observation ? { switched: state?.switched ?? null } : {}) };
+      if ((!added && !/^\d+$/.test(revision)) || !['file', 'dir'].includes(kind) || !entry.url || !entry.repository_root || !entry.uuid
+          || (kind === 'dir' && !['infinity', 'empty', 'files', 'immediates', 'exclude'].includes(entry.depth))
+          || seen.has(relative)) throw new Error('svn-info-invalid');
+      seen.add(relative); if (!added) inventory.push(entry);
+    }
+    inventory.sort((a, b) => a.path.localeCompare(b.path));
+    if (!seen.has('')) throw new Error('svn-info-root-missing');
+    const first = inventory.find(entry => entry.path === '');
+    if (!first) throw new Error('svn-info-root-missing');
+    if (inventory.some(entry => entry.wc_root !== first.wc_root || entry.uuid !== first.uuid || entry.repository_root !== first.repository_root)) throw new Error('svn-externals-unsupported');
+    let revisionRange;
+    if (observation) {
+      const revisions = inventory.map(entry => BigInt(entry.revision)).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+      revisionRange = String(revisions[0]) + (revisions[0] === revisions.at(-1) ? '' : ':' + revisions.at(-1));
+      id = null; // No global svnversion was called; XML URL/depth/switch state is the scoped evidence.
+    }
+    const material = { code_dir: root, svnversion: id === null ? null : id.replace('M', ''), inventory,
+      ...(observation ? { observation, revision_range: revisionRange } : {}) };
+    return { vcs: 'svn', ok: true, version: SVN_EVIDENCE_VERSION, ...material, observed_svnversion: id, local_nodes: localNodes,
+      fingerprint: evidenceHash(JSON.stringify(material)) };
+  } catch (error) { return { vcs: 'svn', ok: false, error: error.message }; }
+}
+
+function validateSvnMaterialBaseline(baseline) {
+  if (!baseline || baseline.vcs !== 'svn' || baseline.ok !== true || baseline.version !== SVN_EVIDENCE_VERSION
+      || typeof baseline.code_dir !== 'string' || (baseline.observation
+        ? baseline.svnversion !== null || baseline.observed_svnversion !== null || !/^\d+(?::\d+)?$/.test(baseline.revision_range || '')
+        : !/^\d+(?::\d+)?S?P?$/.test(baseline.svnversion || ''))
+      || !Array.isArray(baseline.inventory) || baseline.inventory.length === 0) return false;
+  const paths = new Set();
+  for (const entry of baseline.inventory) {
+    if (!entry || typeof entry.path !== 'string' || paths.has(entry.path) || !/^\d+$/.test(entry.revision || '')
+        || !['file', 'dir'].includes(entry.kind) || typeof entry.url !== 'string' || !entry.url
+        || typeof entry.repository_root !== 'string' || !entry.repository_root || typeof entry.uuid !== 'string' || !entry.uuid
+        || typeof entry.wc_root !== 'string' || !entry.wc_root
+        || (entry.kind === 'dir' && !['infinity', 'empty', 'files', 'immediates', 'exclude'].includes(entry.depth))) return false;
+    try { if (svnEvidencePath(baseline.code_dir, entry.path || '.') !== entry.path) return false; } catch { return false; }
+    paths.add(entry.path);
+  }
+  if (!paths.has('')) return false;
+  return baseline.fingerprint === evidenceHash(JSON.stringify({ code_dir: baseline.code_dir,
+    svnversion: baseline.svnversion, inventory: baseline.inventory,
+    ...(baseline.observation ? { observation: baseline.observation, revision_range: baseline.revision_range } : {}) }))
+    && (!baseline.observation || validateSvnReviewObservation(baseline.observation));
+}
+
+function svnStrictSnapshot(cwd, opts = {}) {
+  const now = opts.strictNow || (() => performance.now());
+  const started = now(), budgetMs = opts.strictTimeoutMs ?? 60000;
+  const diagnostic = { stage: 'policy', budget_ms: budgetMs, inventory_entries: 0,
+    inventory_bytes: 0, content_bytes_read: 0 };
+  const checkBudget = stage => {
+    diagnostic.stage = stage;
+    const remaining = budgetMs - (now() - started);
+    if (remaining <= 0) throw new Error('svn-snapshot-timeout');
+    return Math.max(1, Math.floor(remaining));
+  };
+  try {
+    if (!Number.isSafeInteger(budgetMs) || budgetMs < 1 || budgetMs > 60000) throw new Error('svn-snapshot-policy-invalid');
+    const root = fs.realpathSync.native(cwd), policy = { ...SVN_STRICT_POLICY, ...(opts.strictLimits || {}) };
+    if (Object.keys(policy).sort().join(',') !== Object.keys(SVN_STRICT_POLICY).sort().join(',')) throw new Error('svn-snapshot-policy-invalid');
+    for (const value of Object.values(policy)) if (!Number.isSafeInteger(value) || value < 1) throw new Error('svn-snapshot-policy-invalid');
+    if (typeof opts.exclude === 'function') throw new Error('svn-snapshot-exclusion-unsupported');
+    const observation = opts.reviewObservation;
+    if (observation && !validateSvnReviewObservation(observation)) throw new Error('svn-review-scope-invalid');
+    if (observation) require('./forge-review-fix').assertClaimTargetsPhysical(root, observation.claim_paths);
+    const shallow = new Set(observation ? observation.roots.filter(entry => entry.mode !== 'tree').map(entry => entry.path) : []);
+    // Reject a tree that cannot fit before reading content or spawning SVN.
+    // This is a read-only inventory of the same scope, never a cache workaround.
+    function inventory(relative, depth) {
+      checkBudget('inventory');
+      if (depth > policy.maxDepth || diagnostic.inventory_entries >= policy.maxEntries) throw new Error('svn-snapshot-limit');
+      const absolute = path.join(root, relative);
+      let stat;
+      try { stat = fs.lstatSync(absolute); }
+      catch (error) { if (observation && error.code === 'ENOENT') return; throw error; }
+      diagnostic.inventory_entries += 1;
+      if (stat.isSymbolicLink()) {
+        if (observation && isSvnProtectedMetadata(relative)) throw new Error('svn-protected-metadata-link');
+        return;
+      }
+      if (stat.isDirectory()) {
+        if (shallow.has(relative)) return;
+        for (const name of fs.readdirSync(absolute).sort()) {
+          if ((process.platform === 'win32' ? name.toLowerCase() : name) === '.svn') {
+            if (relative) throw new Error('svn-externals-unsupported');
+            continue;
+          }
+          inventory(relative ? `${relative}/${name}` : name, depth + 1);
+        }
+      } else {
+        if (!stat.isFile()) throw new Error('svn-snapshot-kind-unsupported');
+        diagnostic.inventory_bytes += stat.size;
+        if (stat.size > policy.maxFileBytes || diagnostic.inventory_bytes > policy.maxTotalBytes) throw new Error('svn-snapshot-limit');
+      }
+    }
+    if (observation) for (const scope of observation.roots) inventory(scope.path, 0);
+    else inventory('', 0);
+    opts = { ...opts, checkBudget };
+    const before = svnMaterialBaseline(root, opts);
+    if (!before.ok) throw new Error(before.error);
+    let statusTree, status;
+    if (observation) {
+      statusTree = svnScopedDocument(root, observation, 'status', opts);
+      status = { ok: true, entries: statusTree.children.flatMap(target => target.children).map(node => {
+        const attrs = evidenceChild(node, 'wc-status').attrs;
+        return { path: node.attrs.path, item: attrs.item, props: attrs.props };
+      }) };
+    } else {
+      const statusResult = svnRun(root, ['status', '--xml', '--no-ignore', '--ignore-externals', svnPegSafe('.')], opts);
+      if (statusResult.status !== 0) throw new Error('svn-status-failed');
+      statusTree = parseSvnEvidenceXml(statusResult.stdout, 'status');
+      status = parseSvnStatusXml(statusResult.stdout);
+    }
+    if (statusTree.children.some(node => node.name !== 'target' && node.name !== 'changelist')) throw new Error('svn-status-invalid');
+    if (!status.ok) throw new Error(status.error);
+    const statusNodes = statusTree.children.flatMap(target => {
+      if (target.children.some(node => node.name !== 'entry')) throw new Error('svn-status-invalid');
+      return target.children;
+    });
+    if (statusNodes.length !== status.entries.length) throw new Error('svn-status-invalid');
+    for (const node of statusNodes) evidenceChild(node, 'wc-status');
+    const statusMap = new Map(), schedulingMap = new Map(before.local_nodes.map(node => [node.path, node]));
+    for (const [index, entry] of status.entries.entries()) {
+      checkBudget('status');
+      const relative = svnEvidencePath(root, entry.path);
+      if (entry.item === 'external' || entry.item === 'incomplete' || entry.item === 'obstructed' || entry.item === 'conflicted'
+          || entry.props === 'conflicted' || mapSvnItem(entry.item, entry.props).failClosed) throw new Error('svn-status-unhandled');
+      if (statusMap.has(relative)) throw new Error('svn-status-invalid');
+      const node = statusNodes[index];
+      const attrs = evidenceChild(node, 'wc-status').attrs;
+      const scheduling = schedulingMap.get(relative);
+      statusMap.set(relative, { item: entry.item, props: entry.props, ...(attrs.copied ? { copied: attrs.copied } : {}),
+        ...(scheduling ? { scheduling } : {}) });
+    }
+    let propertyTree;
+    if (observation) propertyTree = svnScopedDocument(root, observation, 'proplist', opts);
+    else {
+      const propResult = svnRun(root, ['proplist', '--xml', '--verbose', '--depth', 'infinity', svnPegSafe('.')], opts);
+      if (propResult.status !== 0) throw new Error('svn-properties-failed');
+      propertyTree = parseSvnEvidenceXml(propResult.stdout, 'properties');
+    }
+    const properties = new Map();
+    for (const target of propertyTree.children) {
+      checkBudget('properties');
+      if (target.name !== 'target') throw new Error('svn-properties-invalid');
+      const relative = svnEvidencePath(root, target.attrs.path), values = [];
+      if (properties.has(relative)) throw new Error('svn-properties-invalid');
+      for (const property of target.children) {
+        if (property.name !== 'property' || !property.attrs.name || property.children.length
+            || (property.attrs.encoding && property.attrs.encoding !== 'base64')) throw new Error('svn-properties-invalid');
+        values.push([property.attrs.name, property.attrs.encoding || 'text', property.text]);
+      }
+      values.sort((a, b) => a[0].localeCompare(b[0]));
+      if (new Set(values.map(value => value[0])).size !== values.length) throw new Error('svn-properties-invalid');
+      properties.set(relative, evidenceHash(JSON.stringify(values)));
+    }
+    const entries = [], seen = new Set(), readBuffer = Buffer.allocUnsafe(1024 * 1024); let bytes = 0;
+    const emptyProperties = evidenceHash('[]');
+    const basePaths = new Set(before.inventory.map(entry => entry.path));
+    function localState(relative, missing = false) {
+      if (statusMap.has(relative)) return statusMap.get(relative);
+      if (!observation) return { item: 'normal', props: 'none' };
+      let parent = path.posix.dirname(relative);
+      while (parent !== '.') {
+        const state = statusMap.get(parent);
+        if (state && ['unversioned', 'ignored'].includes(state.item)) return { item: state.item, props: 'none', inherited_from: parent };
+        parent = path.posix.dirname(parent);
+      }
+      return { item: basePaths.has(relative) ? 'normal' : missing ? 'none' : 'unversioned', props: 'none' };
+    }
+    function visit(relative, depth) {
+      checkBudget('content');
+      if (depth > policy.maxDepth || entries.length >= policy.maxEntries) throw new Error('svn-snapshot-limit');
+      const absolute = path.join(root, relative);
+      let stat;
+      try { stat = fs.lstatSync(absolute); }
+      catch (error) {
+        if (!observation || error.code !== 'ENOENT') throw error;
+        const key = svnEvidencePath(root, relative);
+        seen.add(key);
+        entries.push({ path: key, kind: 'missing', hash: null, properties_hash: properties.get(key) || emptyProperties,
+          status: localState(key, true) });
+        return;
+      }
+      const linked = stat.isSymbolicLink();
+      // A link is local state, never authorization to inspect its destination.
+      // Keep dangling/external links opaque and compare their literal targets.
+      if (linked) {
+        const key = svnEvidencePath(root, relative || '.');
+        if (seen.has(key)) throw new Error('svn-snapshot-path-collision');
+        seen.add(key);
+        const linkTarget = fs.readlinkSync(absolute);
+        entries.push({ path: key, kind: 'link', hash: evidenceHash(linkTarget), link_target: linkTarget,
+          properties_hash: properties.get(key) || emptyProperties, status: localState(key) });
+        return;
+      }
+      const realRelative = path.relative(root, fs.realpathSync.native(absolute));
+      if (realRelative === '..' || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) throw new Error('svn-snapshot-escape');
+      const key = svnEvidencePath(root, relative || '.');
+      if (seen.has(key)) throw new Error('svn-snapshot-path-collision');
+      seen.add(key);
+      const state = { path: key, kind: stat.isDirectory() ? 'dir' : 'file', hash: null,
+        properties_hash: properties.get(key) || emptyProperties, status: localState(key) };
+      if (stat.isDirectory()) {
+        entries.push(state);
+        if (shallow.has(relative)) return;
+        for (const name of fs.readdirSync(absolute).sort()) {
+          if ((process.platform === 'win32' ? name.toLowerCase() : name) === '.svn') {
+            if (relative) throw new Error('svn-externals-unsupported');
+            continue;
+          }
+          visit(relative ? `${relative}/${name}` : name, depth + 1);
+        }
+      } else {
+        if (!stat.isFile()) throw new Error('svn-snapshot-kind-unsupported');
+        if (stat.size > policy.maxFileBytes || bytes + stat.size > policy.maxTotalBytes) throw new Error('svn-snapshot-limit');
+        const digest = crypto.createHash('sha256');
+        const fd = fs.openSync(absolute, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+        let readBytes = 0;
+        try {
+          while (true) {
+            checkBudget('content');
+            const count = fs.readSync(fd, readBuffer, 0, readBuffer.length, null);
+            if (!count) break;
+            readBytes += count; diagnostic.content_bytes_read += count;
+            if (readBytes > policy.maxFileBytes || bytes + readBytes > policy.maxTotalBytes) throw new Error('svn-snapshot-limit');
+            digest.update(readBuffer.subarray(0, count));
+          }
+          const current = fs.lstatSync(absolute), opened = fs.fstatSync(fd);
+          if (!current.isFile() || current.isSymbolicLink() || readBytes !== stat.size
+              || opened.size !== stat.size || current.size !== stat.size || current.mtimeMs !== stat.mtimeMs
+              || current.ino !== stat.ino || current.dev !== stat.dev) throw new Error('svn-snapshot-unstable');
+        } finally { fs.closeSync(fd); }
+        bytes += readBytes; state.hash = digest.digest('hex'); entries.push(state);
+      }
+    }
+    if (observation) for (const scope of observation.roots) visit(scope.path, 0);
+    else visit('', 0);
+    // Versioned paths absent on disk still carry their local properties/status.
+    for (const relative of new Set([...before.inventory.map(entry => entry.path), ...statusMap.keys(), ...properties.keys()])) {
+      checkBudget('missing-paths');
+      if (seen.has(relative)) continue;
+      if (entries.length >= policy.maxEntries) throw new Error('svn-snapshot-limit');
+      entries.push({ path: relative, kind: 'missing', hash: null, properties_hash: properties.get(relative) || emptyProperties,
+        status: localState(relative, true) });
+    }
+    entries.sort((a, b) => a.path.localeCompare(b.path));
+    const after = svnMaterialBaseline(root, opts);
+    if (!after.ok) throw new Error(after.error);
+    if (before.fingerprint !== after.fingerprint) throw new Error('svn-baseline-unstable');
+    checkBudget('finalize');
+    const coverage = { version: SVN_SNAPSHOT_VERSION, complete: true, scope: observation ? SVN_REVIEW_PROFILE : 'all-local-descendants', code_dir: root,
+      ...(observation ? { observation } : {}),
+      links: 'opaque-no-follow',
+      ignored: true, properties: true, administrative_exclusion: '.svn', policy, count: entries.length, bytes,
+      fingerprint: evidenceHash(JSON.stringify(entries)) };
+    return { vcs: 'svn', ok: true, entries, coverage, baseline: before };
+  } catch (error) { return { vcs: 'svn', ok: false, entries: [], error: error.message,
+    diagnostic: { ...diagnostic, elapsed_ms: Math.round(now() - started) } }; }
+}
+
+function validateSvnStrictSnapshot(snapshot) {
+  const coverage = snapshot && snapshot.coverage;
+  if (!coverage || snapshot.vcs !== 'svn' || snapshot.ok !== true || coverage.version !== SVN_SNAPSHOT_VERSION
+      || coverage.links !== 'opaque-no-follow'
+      || coverage.complete !== true || !['all-local-descendants', SVN_REVIEW_PROFILE].includes(coverage.scope) || coverage.ignored !== true
+      || coverage.properties !== true || coverage.administrative_exclusion !== '.svn'
+      || !Array.isArray(snapshot.entries) || coverage.count !== snapshot.entries.length
+      || !validateSvnMaterialBaseline(snapshot.baseline) || coverage.code_dir !== snapshot.baseline.code_dir) return false;
+  if (!coverage.policy || Object.keys(coverage.policy).sort().join(',') !== Object.keys(SVN_STRICT_POLICY).sort().join(',')
+      || Object.values(coverage.policy).some(value => !Number.isSafeInteger(value) || value < 1)
+      || !Number.isSafeInteger(coverage.bytes) || coverage.bytes < 0 || coverage.bytes > coverage.policy.maxTotalBytes
+      || coverage.count > coverage.policy.maxEntries) return false;
+  const seen = new Set();
+  if (coverage.scope === SVN_REVIEW_PROFILE && (!validateSvnReviewObservation(coverage.observation)
+      || JSON.stringify(coverage.observation) !== JSON.stringify(snapshot.baseline.observation))) return false;
+  for (const entry of snapshot.entries) {
+    if (!entry || typeof entry.path !== 'string' || !['dir', 'file', 'missing', 'link'].includes(entry.kind)
+        || (['file', 'link'].includes(entry.kind) ? !/^[a-f0-9]{64}$/.test(entry.hash) : entry.hash !== null)
+        || (entry.kind === 'link' && (typeof entry.link_target !== 'string' || entry.hash !== evidenceHash(entry.link_target)))
+        || !/^[a-f0-9]{64}$/.test(entry.properties_hash) || !entry.status
+        || typeof entry.status.item !== 'string' || typeof entry.status.props !== 'string' || seen.has(entry.path)) return false;
+    try { if (svnEvidencePath(coverage.code_dir, entry.path || '.') !== entry.path) return false; } catch { return false; }
+    if (coverage.scope === SVN_REVIEW_PROFILE && !svnObservedPath(coverage.observation, entry.path)) return false;
+    seen.add(entry.path);
+  }
+  return seen.has('') && (coverage.scope !== SVN_REVIEW_PROFILE || coverage.observation.roots.every(entry => seen.has(entry.path)))
+    && coverage.fingerprint === evidenceHash(JSON.stringify(snapshot.entries));
+}
+
+function svnStrictPostChanges(cwd, snapshot, opts) {
+  if (!validateSvnStrictSnapshot(snapshot)) return { vcs: 'svn', ok: false, entries: [], error: 'svn-snapshot-invalid' };
+  const after = svnStrictSnapshot(cwd, { ...opts, strictLimits: snapshot.coverage.policy,
+    ...(snapshot.coverage.scope === SVN_REVIEW_PROFILE ? { reviewObservation: snapshot.coverage.observation } : {}) });
+  if (!after.ok) return after;
+  if (after.coverage.code_dir !== snapshot.coverage.code_dir || after.baseline.fingerprint !== snapshot.baseline.fingerprint) {
+    return { vcs: 'svn', ok: false, entries: [], error: 'svn-baseline-moved' };
+  }
+  const previous = new Map(snapshot.entries.map(entry => [entry.path, entry]));
+  const current = new Map(after.entries.map(entry => [entry.path, entry]));
+  const entries = [];
+  for (const relative of [...new Set([...previous.keys(), ...current.keys()])].sort()) {
+    if (JSON.stringify(previous.get(relative)) !== JSON.stringify(current.get(relative))) entries.push({ path: relative,
+      status: !current.has(relative) ? 'D' : !previous.has(relative) ? 'A' : 'M' });
+  }
+  return { vcs: 'svn', ok: true, entries, coverage: after.coverage, baseline: after.baseline, snapshot: after };
+}
+
 function svnHashPath(cwd, relPath) {
   const abs = path.resolve(cwd, relPath);
   try {
@@ -810,6 +1348,7 @@ function listTracked(cwd, opts = {}) {
 function captureDirty(cwd, opts = {}) {
   const vcs = opts.vcs === undefined ? 'git' : opts.vcs;
   if (vcs === 'svn') {
+    if (opts.strict === true) return svnStrictSnapshot(cwd, opts);
     const result = svnCaptureDirty(cwd, opts);
     return result.ok ? { vcs, ok: true, entries: result.entries } : { vcs, ok: false, entries: [], error: result.error };
   }
@@ -821,6 +1360,7 @@ function captureDirty(cwd, opts = {}) {
 function postChanges(cwd, baseline, opts = {}) {
   const vcs = opts.vcs === undefined ? 'git' : opts.vcs;
   if (vcs === 'svn') {
+    if (opts.strict === true) return svnStrictPostChanges(cwd, baseline, opts);
     const result = svnPostChanges(cwd, baseline, opts);
     return result.ok ? { vcs, ok: true, entries: result.entries } : { vcs, ok: false, entries: [], error: result.error };
   }
@@ -915,6 +1455,8 @@ function workingStatus(cwd, opts = {}) {
 }
 
 module.exports = {
+  SVN_REVIEW_PROFILE, deriveSvnReviewObservation, validateSvnReviewObservation, isSvnProtectedMetadata,
+  SVN_STRICT_POLICY, svnMaterialBaseline, validateSvnMaterialBaseline, parseSvnEvidenceXml, validateSvnStrictSnapshot,
   detectVcs,
   baselineId,
   hashPath,

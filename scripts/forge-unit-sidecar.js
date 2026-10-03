@@ -1332,7 +1332,7 @@ function prepareReviewFix(request, loc, context) {
   if (spec.decision !== 'proceed') {
     fail('review-fix-claim-mismatch', 'The cross-run claim gate decision must be proceed before a review-fix worker starts.');
   }
-  assertClaimTargetsPhysical(context.cwd, supplied);
+  reviewFix.assertClaimTargetsPhysical(context.cwd, supplied);
   const stateFile = xllm.validateResultFileTarget(`${context.resultFile}.reset-state.json`, context.cwd);
   xllm.validateResultFileTarget(stateFile, context.root);
   const writable = Array.isArray(request.writableRoots) ? request.writableRoots.map(root => fs.realpathSync(root)) : [];
@@ -1348,29 +1348,6 @@ function prepareReviewFix(request, loc, context) {
     catch { fail('review-fix-review-item-missing', `${reviewFile} is not readable; no worker was launched.`); }
   }
   return { items, brief, stateFile, repoRoots, cwd: context.cwd, reviewSnapshot };
-}
-
-// A lexically relative claim path can still resolve through a symlink or
-// junction outside CODE_DIR. Every existing component of each claimed file
-// (and the file itself) must resolve physically inside the root and must not
-// be a link. Missing trailing components are allowed (the fix may create a
-// file), but their nearest existing parent is checked. This is a pre-spawn
-// check only: transient writes during the turn are detected afterwards.
-function assertClaimTargetsPhysical(cwd, claimPaths) {
-  const root = fs.realpathSync(cwd);
-  const key = value => (process.platform === 'win32' ? value.toLowerCase() : value);
-  const inside = value => key(value) === key(root) || key(value).startsWith(key(root.endsWith(path.sep) ? root : root + path.sep));
-  for (const relative of claimPaths) {
-    let current = root;
-    for (const part of relative.split('/')) {
-      current = path.join(current, part);
-      let stat;
-      try { stat = fs.lstatSync(current); } catch { break; }
-      if (stat.isSymbolicLink() || !inside(fs.realpathSync(current))) {
-        fail('review-fix-claim-mismatch', `Claim path ${relative} resolves through a link or outside CODE_DIR; no worker was launched.`);
-      }
-    }
-  }
 }
 
 function reviewFixItemsTotal(request) {

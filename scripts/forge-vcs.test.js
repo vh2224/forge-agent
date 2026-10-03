@@ -659,4 +659,315 @@ test('#104 E8 — conjuntos fechados cruzados nos dois sentidos', () => {
   for (const src of vcs.EOL_SOURCES) assert.ok(EOL_SEEN_SOURCES.has(src), `fonte declarada e nunca emitida: ${src}`);
 });
 
+function strictSvnFixture(check) {
+  const lab = svnLab.createLab('forge-vcs-strict-'); svnLab.initializeSvn(lab);
+  const svn = (...args) => {
+    const result = svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
+    assert.strictEqual(result.exit, 0, result.stderr); return result.stdout;
+  };
+  const write = (file, content) => { const absolute = path.join(lab.wc, file); fs.mkdirSync(path.dirname(absolute), { recursive: true }); fs.writeFileSync(absolute, content); };
+  let completed = false;
+  try { check({ lab, svn, write }); completed = true; }
+  finally { if (completed) svnLab.cleanupChildren(lab); else process.stderr.write(`Preserved failing strict SVN lab: ${lab.root}\n`); }
+}
+
+test('strict XML validates complete document, duplicate fields and malformed entities', () => {
+  assert.strictEqual(vcs.parseSvnEvidenceXml('<status/>', 'status').name, 'status');
+  for (const bad of ['', 'not XML', '<status><target></status>', '<status/><status/>', '<status>\u0026bad;</status>',
+    '<status a="1" a="2"/>', '<status><entry', '<!DOCTYPE status><status/>', '<status/></extra>']) {
+    assert.throws(() => vcs.parseSvnEvidenceXml(bad, 'status'), /svn-evidence-xml-invalid/);
+  }
+});
+
+test('strict SVN empty working copy has proven complete coverage; legacy calls keep their envelope', () => strictSvnFixture(({ lab }) => {
+  const strict = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true });
+  assert.strictEqual(strict.ok, true, strict.error); assert(vcs.validateSvnStrictSnapshot(strict));
+  assert.deepStrictEqual(strict.entries.map(entry => entry.path), ['']);
+  const legacy = vcs.captureDirty(lab.wc, { vcs: 'svn' });
+  assert.deepStrictEqual(legacy, { vcs: 'svn', ok: true, entries: [] });
+  assert.deepStrictEqual(vcs.postChanges(lab.wc, '0', { vcs: 'svn' }), { vcs: 'svn', ok: true, entries: [] });
+}));
+
+test('strict SVN covers ignored descendants and reports deletion from prior inventory', () => strictSvnFixture(({ lab, svn, write }) => {
+  svn('propset', 'svn:ignore', '.gsd', '.'); svn('commit', '-m', 'ignore fixture');
+  write('.gsd/deep/review.md', 'old\n'); write('empty/.keep', ''); fs.unlinkSync(path.join(lab.wc, 'empty/.keep'));
+  const snapshot = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true });
+  assert.strictEqual(snapshot.ok, true, snapshot.error);
+  assert(snapshot.entries.some(entry => entry.path === '.gsd/deep/review.md' && entry.hash));
+  assert(snapshot.entries.some(entry => entry.path === 'empty' && entry.kind === 'dir'));
+  const legacy = vcs.captureDirty(lab.wc, { vcs: 'svn' });
+  assert(!legacy.entries.some(entry => entry.path.replace(/\\/g, '/') === '.gsd/deep/review.md'));
+  fs.unlinkSync(path.join(lab.wc, '.gsd/deep/review.md'));
+  const delta = vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true });
+  assert.strictEqual(delta.ok, true, delta.error);
+  assert(delta.entries.some(entry => entry.path === '.gsd/deep/review.md' && entry.status === 'D'));
+}));
+
+test('SVN material baseline admits M, excludes last-changed diagnostics and detects per-path BASE with same range', () => strictSvnFixture(({ lab, svn, write }) => {
+  write('a.txt', 'a\n'); write('b.txt', 'b\n'); svn('add', 'a.txt', 'b.txt'); svn('commit', '-m', 'base'); svn('update');
+  const base = vcs.svnMaterialBaseline(lab.wc); assert(base.ok, base.error);
+  write('a.txt', 'local edit\n'); const modified = vcs.svnMaterialBaseline(lab.wc);
+  assert(modified.observed_svnversion.includes('M')); assert.strictEqual(modified.fingerprint, base.fingerprint);
+  svn('revert', 'a.txt'); write('a.txt', 'next a\n'); write('b.txt', 'next b\n'); svn('commit', '-m', 'next');
+  const first = vcs.svnMaterialBaseline(lab.wc); svn('update', '-r', '1', 'a.txt');
+  const second = vcs.svnMaterialBaseline(lab.wc);
+  assert.strictEqual(first.svnversion, second.svnversion); assert.notStrictEqual(first.fingerprint, second.fingerprint);
+  const runner = (binary, args, options) => {
+    const result = spawnSync(binary, args, options);
+    if (binary === 'svn' && args.includes('info')) result.stdout = Buffer.from(result.stdout.toString().replace(/<commit\s+revision="\d+"/g, '<commit revision="999"').replace(/<date>[^<]*<\/date>/g, '<date>changed diagnostic</date>'));
+    return result;
+  };
+  assert.strictEqual(vcs.svnMaterialBaseline(lab.wc, { runner }).fingerprint, second.fingerprint);
+}));
+
+test('SVN S/P are material; actual sparse checkout and switched URL change baseline', () => strictSvnFixture(({ lab, svn, write }) => {
+  write('src/a.txt', 'a\n'); svn('add', 'src'); svn('commit', '-m', 'source fixture'); svn('copy', 'src', 'branch'); svn('commit', '-m', 'branch fixture'); svn('update');
+  const original = vcs.svnMaterialBaseline(lab.wc); assert(original.ok, original.error);
+  svn('update', '--set-depth', 'empty', 'branch'); const partial = vcs.svnMaterialBaseline(lab.wc);
+  assert(partial.ok, partial.error); assert(partial.observed_svnversion.includes('P')); assert.notStrictEqual(partial.fingerprint, original.fingerprint);
+  svn('update', '--set-depth', 'infinity', 'branch');
+  const { pathToFileURL } = require('url'); svn('switch', '--ignore-ancestry', pathToFileURL(lab.repo).href + '/branch', 'src');
+  const switched = vcs.svnMaterialBaseline(lab.wc); assert(switched.ok, switched.error);
+  assert(switched.observed_svnversion.includes('S')); assert.notStrictEqual(switched.fingerprint, original.fingerprint);
+}));
+
+test('strict SVN reports file and directory property-only changes and dirty-to-BASE reversion', () => strictSvnFixture(({ lab, svn, write }) => {
+  write('src/a.txt', 'a\n'); svn('add', 'src'); svn('commit', '-m', 'source'); svn('update');
+  write('src/a.txt', 'dirty\n'); const before = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true }); assert(before.ok, before.error);
+  svn('revert', 'src/a.txt'); svn('propset', 'fixture:prop', 'directory value', 'src'); svn('propset', 'fixture:prop', 'file value', 'src/a.txt');
+  const after = vcs.postChanges(lab.wc, before, { vcs: 'svn', strict: true }); assert(after.ok, after.error);
+  assert.deepStrictEqual(after.entries.map(entry => entry.path), ['src', 'src/a.txt']);
+  const snapshot = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true });
+  svn('propset', 'fixture:prop', 'different value', 'src/a.txt');
+  const delta = vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true }); assert(delta.ok, delta.error);
+  assert.deepStrictEqual(delta.entries.map(entry => entry.path), ['src/a.txt']);
+}));
+
+test('strict SVN refuses truncated XML, absent BASE fields and unstable baseline capture', () => strictSvnFixture(({ lab }) => {
+  for (const command of ['info', 'status', 'proplist']) {
+    const runner = (binary, args, options) => {
+      const result = spawnSync(binary, args, options);
+      if (binary === 'svn' && args.includes(command)) result.stdout = Buffer.from(result.stdout.toString().slice(0, -12));
+      return result;
+    };
+    const result = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, runner });
+    assert.strictEqual(result.ok, false, command); assert.strictEqual(result.error, 'svn-evidence-xml-invalid');
+  }
+  const missingRevision = (binary, args, options) => {
+    const result = spawnSync(binary, args, options);
+    if (binary === 'svn' && args.includes('info')) result.stdout = Buffer.from(result.stdout.toString().replace(/revision="0"/, 'revision="invalid"'));
+    return result;
+  };
+  assert.strictEqual(vcs.svnMaterialBaseline(lab.wc, { runner: missingRevision }).ok, false);
+  let infoCalls = 0;
+  const unstable = (binary, args, options) => {
+    const result = spawnSync(binary, args, options);
+    if (binary === 'svn' && args.includes('info') && ++infoCalls === 2) result.stdout = Buffer.from(result.stdout.toString().replace(/revision="0"/, 'revision="1"'));
+    return result;
+  };
+  assert.strictEqual(vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, runner: unstable }).error, 'svn-baseline-unstable');
+}));
+
+test('strict SVN fails closed on count, bytes, depth and read/access failure; links are opaque', () => strictSvnFixture(({ lab, write }) => {
+  write('deep/next/a.txt', '1234');
+  for (const strictLimits of [{ maxEntries: 1 }, { maxFileBytes: 1 }, { maxTotalBytes: 1 }, { maxDepth: 1 }]) {
+    assert.strictEqual(vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, strictLimits }).error, 'svn-snapshot-limit');
+  }
+  fs.symlinkSync(lab.evidence, path.join(lab.wc, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+  const linked = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true }); assert(linked.ok, linked.error);
+  assert.strictEqual(linked.coverage.links, 'opaque-no-follow'); assert(vcs.validateSvnStrictSnapshot(linked));
+  assert.strictEqual(linked.entries.find(entry => entry.path === 'escape').kind, 'link');
+  fs.unlinkSync(path.join(lab.wc, 'escape'));
+  const original = fs.openSync;
+  try {
+    fs.openSync = (file, ...args) => { if (String(file).endsWith('a.txt')) { const error = new Error('fixture-read-denied'); error.code = 'EACCES'; throw error; } return original(file, ...args); };
+    const result = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true }); assert.strictEqual(result.ok, false); assert.strictEqual(result.error, 'fixture-read-denied');
+  } finally { fs.openSync = original; }
+}));
+
+test('strict SVN rejects oversized inventory before content reads or SVN commands', () => strictSvnFixture(({ lab, write }) => {
+  write('a.txt', '1234'); write('z/cache.bin', '5678');
+  const originalOpen = fs.openSync;
+  let commands = 0, opens = 0;
+  try {
+    fs.openSync = (...args) => { opens += 1; return originalOpen(...args); };
+    const result = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, strictLimits: { maxTotalBytes: 6 },
+      runner: () => { commands += 1; throw new Error('unexpected-command'); } });
+    assert.strictEqual(result.error, 'svn-snapshot-limit');
+    assert.strictEqual(result.diagnostic.stage, 'inventory');
+    assert.strictEqual(result.diagnostic.inventory_bytes, 8);
+    assert.strictEqual(result.diagnostic.content_bytes_read, 0);
+    assert.strictEqual(commands, 0); assert.strictEqual(opens, 0);
+    assert.deepStrictEqual(result.entries, []);
+  } finally { fs.openSync = originalOpen; }
+}));
+
+test('strict SVN inventory obeys total deadline without spawning SVN', () => strictSvnFixture(({ lab, write }) => {
+  write('a.txt', 'a');
+  let clock = 0, commands = 0;
+  const result = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, strictTimeoutMs: 5,
+    strictNow: () => (clock += 3), runner: () => { commands += 1; throw new Error('unexpected-command'); } });
+  assert.strictEqual(result.error, 'svn-snapshot-timeout');
+  assert.strictEqual(result.diagnostic.content_bytes_read, 0); assert.strictEqual(commands, 0);
+  assert(result.diagnostic.elapsed_ms >= 5);
+}));
+
+test('strict SVN bounds each command by remaining time and preserves timeout cause', () => strictSvnFixture(({ lab }) => {
+  let clock = 0;
+  const seen = [];
+  const runner = (binary, args, options) => {
+    seen.push(options.timeout);
+    clock += 7;
+    // Simulated time controls this test; actual SVN startup is not 20 ms on Windows.
+    return spawnSync(binary, args, { ...options, timeout: 10000 });
+  };
+  const result = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, strictTimeoutMs: 20,
+    strictNow: () => clock, runner });
+  assert.strictEqual(result.error, 'svn-snapshot-timeout');
+  assert.deepStrictEqual(seen, [20, 13, 6]);
+  const timeout = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true,
+    runner: (_binary, _args, options) => {
+      assert(options.timeout > 0 && options.timeout <= 15000);
+      return { status: null, error: { code: 'ETIMEDOUT' } };
+    } });
+  assert.strictEqual(timeout.error, 'svn-snapshot-timeout');
+  assert.strictEqual(timeout.diagnostic.stage, 'svnversion');
+}));
+
+test('strict SVN streams content, closes descriptors on deadline and retains complete evidence', () => strictSvnFixture(({ lab, write }) => {
+  write('a.txt', 'a'.repeat(2 * 1024 * 1024));
+  const originalRead = fs.readSync, originalClose = fs.closeSync;
+  let clock = 0, reads = 0, closes = 0;
+  try {
+    fs.readSync = (...args) => { reads += 1; clock += 10; return originalRead(...args); };
+    fs.closeSync = (...args) => { closes += 1; return originalClose(...args); };
+    const failed = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, strictTimeoutMs: 15, strictNow: () => clock,
+      runner: (binary, args, options) => spawnSync(binary, args, { ...options, timeout: 10000 }) });
+    assert.strictEqual(failed.error, 'svn-snapshot-timeout');
+    assert.strictEqual(reads, 2); assert.strictEqual(closes, 1);
+    assert.strictEqual(failed.diagnostic.content_bytes_read, 2 * 1024 * 1024);
+    assert.deepStrictEqual(failed.entries, []);
+  } finally { fs.readSync = originalRead; fs.closeSync = originalClose; }
+  const snapshot = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true });
+  assert(snapshot.ok, snapshot.error); assert(vcs.validateSvnStrictSnapshot(snapshot));
+  assert.strictEqual(snapshot.entries.find(entry => entry.path === 'a.txt').hash,
+    require('crypto').createHash('sha256').update('a'.repeat(2 * 1024 * 1024)).digest('hex'));
+}));
+
+test('strict SVN never reads link targets, preserves unchanged links and measures their add/change/remove', () => strictSvnFixture(({ lab, write }) => {
+  fs.writeFileSync(path.join(lab.evidence, 'external-secret.txt'), 'not covered');
+  write('regular/file.txt', 'covered through regular path');
+  const link = path.join(lab.wc, 'opaque');
+  fs.symlinkSync(lab.evidence, link, process.platform === 'win32' ? 'junction' : 'dir');
+  const originalRead = fs.readFileSync, originalDirectory = fs.readdirSync;
+  let snapshot;
+  try {
+    fs.readFileSync = (file, ...args) => { assert(!String(file).includes('external-secret'), 'external target must not be read'); return originalRead(file, ...args); };
+    fs.readdirSync = (file, ...args) => { assert.notStrictEqual(path.resolve(file), path.resolve(link), 'link must not be traversed'); return originalDirectory(file, ...args); };
+    snapshot = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true }); assert(snapshot.ok, snapshot.error);
+  } finally { fs.readFileSync = originalRead; fs.readdirSync = originalDirectory; }
+  assert(!snapshot.entries.some(entry => entry.path.startsWith('opaque/')));
+  assert(snapshot.entries.some(entry => entry.path === 'regular/file.txt' && entry.hash));
+  assert.deepStrictEqual(vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true }).entries, []);
+  fs.unlinkSync(link); fs.symlinkSync(path.join(lab.wc, 'regular'), link, process.platform === 'win32' ? 'junction' : 'dir');
+  const changed = vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true }); assert(changed.ok, changed.error);
+  assert.deepStrictEqual(changed.entries, [{ path: 'opaque', status: 'M' }]);
+  fs.unlinkSync(link);
+  const removed = vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true }); assert(removed.ok, removed.error);
+  assert.deepStrictEqual(removed.entries, [{ path: 'opaque', status: 'D' }]);
+  fs.symlinkSync(lab.evidence, path.join(lab.wc, 'new-link'), process.platform === 'win32' ? 'junction' : 'dir');
+  const created = vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true }); assert(created.ok, created.error);
+  assert(created.entries.some(entry => entry.path === 'new-link' && entry.status === 'A'));
+  fs.unlinkSync(path.join(lab.wc, 'new-link'));
+  const legacyCoverage = { ...snapshot, coverage: { ...snapshot.coverage } }; delete legacyCoverage.coverage.links;
+  assert.strictEqual(vcs.validateSvnStrictSnapshot(legacyCoverage), false);
+}));
+
+test('strict SVN rejects incomplete/legacy evidence and detects root/repository baseline movement', () => strictSvnFixture(({ lab, write, svn }) => {
+  const snapshot = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true }); assert(vcs.validateSvnStrictSnapshot(snapshot));
+  for (const invalid of [undefined, [], { ...snapshot, coverage: undefined }, { ...snapshot, coverage: { ...snapshot.coverage, complete: false } },
+    { ...snapshot, entries: [] }, { ...snapshot, baseline: {} }]) {
+    assert.strictEqual(vcs.postChanges(lab.wc, invalid, { vcs: 'svn', strict: true }).error, 'svn-snapshot-invalid');
+  }
+  write('a.txt', 'a'); svn('add', 'a.txt'); svn('commit', '-m', 'new revision'); svn('update');
+  assert.strictEqual(vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true }).error, 'svn-baseline-moved');
+}));
+
+
+test('R4 scheduling add copy and replacement preserves material BASE and records local delta', () => strictSvnFixture(({ lab, svn, write }) => {
+  write('source.txt', 'source'); write('replace.txt', 'original'); write('tree/child.txt', 'child'); svn('add', 'source.txt', 'replace.txt', 'tree'); svn('commit', '-m', 'base'); svn('update');
+  const base = vcs.svnMaterialBaseline(lab.wc); assert(base.ok, base.error);
+  write('operator.txt', 'operator'); svn('add', 'operator.txt');
+  const before = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true }); assert(before.ok, before.error);
+  assert.strictEqual(before.baseline.fingerprint, base.fingerprint);
+  write('new.txt', 'new'); svn('add', 'new.txt'); svn('copy', 'source.txt', 'copy.txt'); svn('copy', 'tree', 'tree-copy');
+  svn('delete', 'replace.txt'); write('replace.txt', 'replacement'); svn('add', 'replace.txt');
+  const after = vcs.postChanges(lab.wc, before, { vcs: 'svn', strict: true }); assert(after.ok, after.error);
+  assert.strictEqual(after.baseline.fingerprint, base.fingerprint);
+  assert.deepStrictEqual(after.entries.map(e => e.path), ['copy.txt', 'new.txt', 'replace.txt', 'tree-copy', 'tree-copy/child.txt']);
+}));
+
+test('bounded SVN observation is canonical, minimal, immutable and rejects unsafe source targets', () => {
+  const observation = vcs.deriveSvnReviewObservation(['src/deep/test.js', 'src/main.js', 'root.js', 'src/main.js']);
+  assert(vcs.validateSvnReviewObservation(observation));
+  assert.deepStrictEqual(observation.roots, [{ path: '', mode: 'structural' }, { path: '.gsd', mode: 'tree' },
+    { path: 'root.js', mode: 'file' }, { path: 'src', mode: 'tree' }]);
+  assert.deepStrictEqual(observation.claim_paths, ['root.js', 'src/deep/test.js', 'src/main.js']);
+  assert.match(observation.outside_scope_limitation, /outside this scope are not observed/);
+  for (const claims of [[], ['.'], ['../x'], ['C:/x'], ['\\\\host\\x'], ['.gsd/x'], ['node_modules/x'], ['src/.cache/x'], ['build/x']]) {
+    assert.throws(() => vcs.deriveSvnReviewObservation(claims));
+  }
+  for (const change of [value => value.roots.push({ path: '', mode: 'tree' }), value => value.version = 99,
+    value => value.outside_scope_limitation = 'all writes observed', value => value.claim_paths.push('other/file.js')]) {
+    const modified = JSON.parse(JSON.stringify(observation)); change(modified);
+    assert.strictEqual(vcs.validateSvnReviewObservation(modified), false);
+  }
+});
+
+test('bounded SVN measures properties, removed source and full ignored metadata with stable material BASE', () => strictSvnFixture(({ lab, svn, write }) => {
+  write('src/main.js', 'base'); write('src/operator.js', 'dirty'); svn('add', 'src'); svn('propset', 'svn:ignore', '.gsd', '.'); svn('commit', '-m', 'tiny base'); svn('update');
+  write('src/operator.js', 'local dirty'); write('.gsd/deep/ignored.md', 'protected'); write('unrelated/operator.js', 'outside observation');
+  const reviewObservation = vcs.deriveSvnReviewObservation(['src/main.js']);
+  const snapshot = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, reviewObservation });
+  assert(snapshot.ok, snapshot.error); assert(vcs.validateSvnStrictSnapshot(snapshot));
+  assert.strictEqual(snapshot.coverage.scope, vcs.SVN_REVIEW_PROFILE);
+  assert.strictEqual(snapshot.baseline.svnversion, null); assert.strictEqual(snapshot.baseline.observed_svnversion, null);
+  assert.match(snapshot.baseline.revision_range, /^\d+(?::\d+)?$/);
+  assert(!snapshot.entries.some(entry => entry.path.startsWith('unrelated')));
+  assert(snapshot.entries.some(entry => entry.path === '.gsd/deep/ignored.md' && entry.hash));
+  assert.strictEqual(snapshot.entries.find(entry => entry.path === '.gsd/deep/ignored.md').status.item, 'ignored');
+  const tampered = JSON.parse(JSON.stringify(snapshot)); tampered.baseline.observation.roots[0].mode = 'tree';
+  assert.strictEqual(vcs.validateSvnStrictSnapshot(tampered), false);
+  svn('propset', 'fixture:property', 'changed', 'src'); svn('revert', 'src/operator.js');
+  fs.unlinkSync(path.join(lab.wc, '.gsd/deep/ignored.md'));
+  const delta = vcs.postChanges(lab.wc, snapshot, { vcs: 'svn', strict: true });
+  assert(delta.ok, delta.error); assert.strictEqual(delta.baseline.fingerprint, snapshot.baseline.fingerprint);
+  for (const file of ['src', 'src/operator.js', '.gsd/deep/ignored.md']) assert(delta.entries.some(entry => entry.path === file));
+  assert.deepStrictEqual(delta.coverage.observation, reviewObservation);
+}));
+
+test('bounded SVN refuses unavailable coverage, malformed XML and linked source containers before content', () => strictSvnFixture(({ lab, write }) => {
+  write('src/main.js', 'base');
+  const reviewObservation = vcs.deriveSvnReviewObservation(['src/main.js']);
+  let commands = 0;
+  const runner = () => { commands += 1; return { status: 0, stdout: Buffer.from('<status>truncated') }; };
+  const invalid = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, reviewObservation: { ...reviewObservation, profile: 'unknown' }, runner });
+  assert.strictEqual(invalid.error, 'svn-review-scope-invalid'); assert.strictEqual(commands, 0);
+  const malformed = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, reviewObservation, runner });
+  assert.strictEqual(malformed.error, 'svn-evidence-xml-invalid'); assert.strictEqual(malformed.diagnostic.content_bytes_read, 0);
+  const original = fs.lstatSync;
+  try {
+    fs.lstatSync = (file, ...args) => {
+      if (String(file).endsWith(path.sep + 'src')) { const error = new Error('access denied'); error.code = 'EACCES'; throw error; }
+      return original(file, ...args);
+    };
+    const denied = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, reviewObservation });
+    assert.strictEqual(denied.ok, false); assert.strictEqual(denied.diagnostic.content_bytes_read, 0);
+  } finally { fs.lstatSync = original; }
+  fs.symlinkSync(lab.evidence, path.join(lab.wc, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  const linked = vcs.captureDirty(lab.wc, { vcs: 'svn', strict: true, reviewObservation: vcs.deriveSvnReviewObservation(['linked/file.js']), runner });
+  assert.strictEqual(linked.ok, false); assert.strictEqual(linked.diagnostic.content_bytes_read, 0);
+  fs.unlinkSync(path.join(lab.wc, 'linked'));
+}));
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);
