@@ -1029,7 +1029,7 @@ block of that spec's **§ Step 2** with `--source review-fix-paths`, `--unit "re
 `--conceded "@$ITEMS_JSON"`, `--cwd "$WORKING_DIR"`, and `--code-dir` only per its **§ B2**:
 
 ```bash
-ITEMS_JSON=$(mktemp)   # [{"r":"R1","path":"scripts/foo.js","line":42}, ...] — one entry per CONCEDED item
+ITEMS_JSON=$(mktemp)   # [{"r":"R1","path":"scripts/foo.js","line":42,"verify_paths":["scripts/foo.test.js"]}, ...]
 # ...then the canonical --claim-and-check invocation from shared/forge-claim-gate.md § Step 2.
 ```
 
@@ -1054,12 +1054,107 @@ them unclaimed:
 **Never blocks the slice.** A `refuse`/`block` here stops the `review-fix` dispatch only; the gate
 proceeds to `complete-slice` regardless, with the affected items marked as above.
 
-```
-Agent({ subagent_type: 'forge-executor',
-  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{S##}\n{isolation header lines when ISOLATION_MODE != shared}\nFix ONLY the conceded review items listed below. Minimal diffs — no refactors, no scope creep beyond the listed items. Run the lint/format commands if configured. Honor constraints.auto_commit: when true, commit only claimed fixes with message fix(review): {S##} conceded items; when false, leave changes uncommitted and return no commit SHA\nCLAIM_PATHS: {claimPaths}\nCONSTRAINTS: {constraints}\n\n## Conceded items\n{for each CONCEDED review_file/R# pair: review_file (when supplied), R# — path:line — objeção: <claim> — ação: <suggested_fix (use advocate concession rationale when suggested_fix is absent, e.g. in agents engine)> — contexto: <defense.rationale>}\n\nReturn ---GSD-WORKER-RESULT--- with status: done|partial|blocked, commit_sha: <actual SHA when constraints.auto_commit=true and status=done; null otherwise>, and items: [{r: R#, review_file: <copy when supplied>, outcome: fixed|failed|skipped, note: <verification evidence>}]. Include exactly one items entry per listed review_file/R# pair; repeated R# in different review files are distinct. Report fixed only after verifying that item. Do not create task PLAN/SUMMARY or modify Forge metadata; this is a review-fix unit." })
+### Mandatory native preparation (before build/invoke)
+
+After the runtime/isolation/claim gates return `proceed`, write the parent-owned
+`RF_NATIVE_REQUEST` outside CODE_DIR with `cwd: CODE_DIR`, `contextRoot: WORKING_DIR`,
+explicit `vcs` from `forge-vcs --detect`, the saved `route`, boundary task/slice/triage
+IDs, `constraints.auto_commit`, and `reviewFix: {boundary, decision: "proceed", items,
+claimPaths}`. Preserve each item's optional `verify_paths`. Run:
+
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --prepare-native "$RF_NATIVE_REQUEST" > "$RF_NATIVE_PREPARATION"
 ```
 
-- On success → the parent validates the native result through `node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --accept-native "$RF_NATIVE_REQUEST"` (request: `cwd`, `contextRoot`, milestone/slice or task ids, `startSha` and `preDirty` captured before the launch with the canonical `forge-xllm.captureDirtySnapshot(CODE_DIR)` (including metadata hashes), `constraints.auto_commit`, `reviewFix: {boundary, decision: "proceed", items, claimPaths}` and `rawResult` = the worker block with `commit_sha` and one `items[{r,review_file?,outcome,note}]` entry per review-file/R# pair). It checks the SHA (exists, descends from `startSha`, still reachable from HEAD, touches only claimed files) and the complete post-turn delta against those dirty hashes for both commit policies. New outside-claim/protected writes are refused; unchanged preexisting dirty work is preserved, and missing snapshot is `review-fix-native-snapshot-missing`. It honors `auto_commit` (a native commit under `auto_commit:false` is unverified) and writes per-R# lines: `**Correção:** aplicada — commit {sha}` only for items reported `fixed` whose file is in the commit.
+Stop this fixer attempt on nonzero exit or malformed JSON before calling
+`buildNativeInvocation` or the writer. The helper does not invoke a provider,
+grant a claim, commit or publish outcomes; the runtime, isolation, cross-run claim
+and model/effort binding gates remain mandatory. Retain the exact returned JSON
+as `nativePreparation` in the acceptance request; do not reconstruct its baseline,
+snapshot, brief identity or REVIEW hashes. Use its `brief.items` and
+`brief.claim_paths` in the worker prompt. The preparation binds CODE_DIR, context
+root, route/brief/claim and the REVIEW snapshot; any change requires preparation again.
+
+`verify_paths` is optional (absent means `[]`), at most 256 literal relative paths
+per item, each at most 1024 characters. Both primary and complementary paths use
+one normalizer: slash conversion, sorting and deduplication; absolute/drive/UNC,
+traversal, dot/empty or trailing dot/space segments, controls, colon/globs and protected `.gsd` are refused.
+The shared physical guard checks existing components with `lstat`, refuses
+symlinks/junctions/escapes/access errors, and permits only proven missing tails.
+A pathless item remains `pathless-conceded-item` even with complementary paths.
+Re-derive old claims/briefs and run the claim gate again; worker `files_changed`
+never grants paths, and a test-only change never proves a primary fix.
+
+For SVN, only `auto_commit:false` is supported; `auto_commit:true` returns
+`review-fix-svn-auto-commit-unsupported` before build/invoke and again at acceptance.
+Native SVN preparation uses a versioned bounded review-observation profile.
+Derive source containers from normalized primary/`verify_paths` claims, minimize
+overlaps and retain that scope in preparation identity. Root-level claims are
+individual file targets; they never authorize recursion from `.` or `CODE_DIR`.
+Include all physical `CODE_DIR/.gsd`, even when ignored, and retain the separate
+context-root REVIEW hash guard. Missing source containers keep explicit structural
+parent coverage and never cause a fallback to the whole working copy. Reject
+root-wide, malformed, escaping, linked and generated-directory source targets
+before content/provider invocation.
+
+SVN root identity uses `--depth empty`; recursive SVN commands and filesystem
+walks use only the explicit observed targets. Do not run global `svnversion`,
+recursive root status/info/proplist, or inspect unrelated source, dependencies
+or cache outside those targets. Observation covers content/type/existence,
+ignored source and metadata, local file/directory properties and status within
+the retained scope. It excludes administrative `.svn`, refuses externals/unknown
+coverage and invalid/truncated XML/read errors, and fails closed on limits
+(500000 entries, 128 levels, 512 MiB per file, 8 GiB total). Baseline identity
+records repository UUID/root, URL, BASE revision (not last-changed revision), kind,
+depth and physical working-copy identity for observed versioned paths. Baselines
+before/after capture must agree; local scheduling remains distinct from BASE
+identity. Old array/`dir` snapshots are incompatible with native preparation.
+Legacy strict captures and surgical reset retain their existing behavior.
+
+The retained coverage requires `links: "opaque-no-follow"`: `lstat`/`readlink` record
+link kind and literal-target hash without reading, resolving or traversing that
+target. An unchanged preexisting link remains preserved; new/changed/removed
+links are observed deltas and cannot be authorized by a claim (the physical
+claim guard still rejects all link components). External targets are not covered;
+internal targets reached through an ordinary path retain normal content hashes.
+Links anywhere in protected `.gsd` refuse native preparation with
+`review-fix-protected-metadata`, because metadata content behind them is not covered.
+Missing link-coverage fields or legacy snapshots fail closed. Acceptance refuses
+changed metadata links before any publication through them.
+Before any content read or SVN invocation, a read-only size/count/depth inventory
+checks the same physical scope against those limits. Oversized trees fail before
+hashing gigabytes. Strict capture has a separate total budget of at most 60 seconds;
+each SVN command is bounded by remaining time and at most 15 seconds. Hashing uses
+1 MiB chunks with deadline and stability checks, and closes descriptors on failure.
+An expired budget is `svn-snapshot-timeout`, with stage, inventory bytes/count,
+content bytes read and elapsed/budget milliseconds; no partial snapshot is valid.
+The prepare CLI preserves this sanitized diagnostic and its underlying cause in
+stderr, separately from `review-fix-native-snapshot-invalid`. A preparation timeout
+is a local capture failure before any provider call, not a model/provider timeout.
+These limits apply to preparation/observation, not `workers.timeout` or model effort.
+Do not move/remove caches, dependencies or build outputs, stop another process or
+watcher, increase limits, change scope, or repeat an identical preparation to force
+it through. Preserve the failed diagnostic and current environment. Continue only
+after a concrete caller correction has been checked offline. Never silently drop
+ignored files inside the retained scope or widen it to make capture succeed.
+Limits and scope travel unchanged into observation. Delta compares
+the union of prior/current entries, including removed unversioned/metadata paths,
+dirty-to-BASE reversions and property-only changes. Unchanged dirty work is preserved.
+
+Acceptance must expose the actual observation scope and its outside-scope limit.
+It verifies delivery inside that scope; it cannot prove absence of writes anywhere
+else in the checkout. Native host tools provide no per-call OS write sandbox.
+Claims continue to authorize exact files only, including outside the observation
+boundary: an observed container is evidence coverage, never a wider write grant.
+Demonstrations and regressions use tiny disposable SVN working copies. Never
+use a full product checkout to reproduce a capture-size or performance failure.
+
+```
+Agent({ subagent_type: 'forge-executor',
+  prompt: "WORKING_DIR: {WORKING_DIR}\nUNIT: review-fix/{S##}\n{isolation header lines when ISOLATION_MODE != shared}\nFix ONLY the conceded review items listed below. Minimal diffs — no refactors, no scope creep beyond the listed items. Run the lint/format commands if configured. Honor constraints.auto_commit: when true, commit only claimed fixes with message fix(review): {S##} conceded items; when false, leave changes uncommitted and return no commit SHA\nCLAIM_PATHS: {claimPaths}\nCONSTRAINTS: {constraints}\n\n## Conceded items\n{for each CONCEDED review_file/R# pair: review_file (when supplied), R# — path:line — verify_paths — objeção: <claim> — ação: <suggested_fix (use advocate concession rationale when suggested_fix is absent, e.g. in agents engine)> — contexto: <defense.rationale>}\n\nReturn ---GSD-WORKER-RESULT--- with status: done|partial|blocked, commit_sha: <actual SHA when constraints.auto_commit=true and status=done; null otherwise>, and items: [{r: R#, review_file: <copy when supplied>, outcome: fixed|failed|skipped, note: <verification evidence>}]. Include exactly one items entry per listed review_file/R# pair; repeated R# in different review files are distinct. Report fixed only after verifying that item. Do not create task PLAN/SUMMARY or modify Forge metadata; this is a review-fix unit." })
+```
+
+- On success → the parent adds the exact `nativePreparation` and `rawResult` (worker block, including `commit_sha` and one `items[{r,review_file?,outcome,note}]` per review-file/R# pair) to the same request and runs `node "$FORGE_SCRIPTS_DIR/forge-review-fix.js" --accept-native "$RF_NATIVE_REQUEST"`. Git retains its SHA/ancestry/reachability and dirty-content checks for both commit policies. SVN requires the strict preparation, refuses any SHA (`review-fix-svn-unexpected-sha`), baseline movement (`review-fix-baseline-moved`), missing/mismatched preparation (`review-fix-native-preparation-invalid`) or invalid/incomplete snapshot (`review-fix-native-snapshot-invalid`). Both repeat the physical guard; changed `.gsd` descendants receive `review-fix-protected-metadata` before generic `review-fix-outside-claim`. Only reported `fixed` with an observed primary-path change is verified. The parent alone publishes per-R# outcomes, guarded by the original REVIEW hashes (`review-fix-review-conflict`) and review_file/R# correlation. SVN verified fixes remain uncommitted.
 - On `Agent()` throw, `status != done` or `review-fix-native-unverified` → update each: `**Correção:** falhou — deferida para triagem final`. These items join the OPEN items in the milestone-final triage (Step 9). **Never blocks** — the gate proceeds to `complete-slice` regardless.
 
 ### Sidecar review-fix branch (`RF_WORKER_MODE == sidecar`, engine claude|codex)

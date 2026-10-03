@@ -2555,6 +2555,29 @@ console.log('\nG24: shared/forge-claim-gate.md documenta D8 literalmente (POSTUR
   });
 }
 
+test('verify_paths canonical derivation matches normalized brief and refuses malformed direct CLI input', () => {
+  const strictAssert = require('assert');
+  const rf = require('./forge-review-fix');
+  const input = [{ r: 'R1', path: 'src\\a.js:12', verify_paths: ['tests/b.js', 'tests\\a.js', 'tests/b.js'] }];
+  const direct = deriveClaimFromConcededItems(input);
+  strictAssert.deepStrictEqual(direct.paths, ['src/a.js', 'tests/a.js', 'tests/b.js']);
+  strictAssert.deepStrictEqual(direct, rf.deriveClaim(rf.normalizeItems(input)));
+  strictAssert.strictEqual(deriveClaimFromConcededItems([{ r: 'R1', verify_paths: ['test.js'] }]).cause, 'pathless-conceded-item');
+  for (const field of ['path', 'verify_paths']) for (const invalid of ['../x', '/x', 'C:/x', '\\\\server\\x', '.gsd/x', 'a*', 'a:b']) {
+    const items = [{ r: 'R1', path: 'src/a.js', [field]: field === 'path' ? invalid : [invalid] }];
+    strictAssert.throws(() => deriveClaimFromConcededItems(items), error => error.code === 'review-fix-items-invalid');
+    const cli = spawnSync(process.execPath, [MODULE, '--evaluate', '--run', 'M-own', '--unit', 'review-fix/T01',
+      '--cwd', os.tmpdir(), '--conceded', JSON.stringify(items)], { encoding: 'utf8' });
+    strictAssert.notStrictEqual(cli.status, 0, `${field}: ${invalid}`);
+  }
+  for (const verify_paths of [null, 'a.js', [1], Array(257).fill('a')]) {
+    strictAssert.throws(() => deriveClaimFromConcededItems([{ r: 'R1', path: 'src/a.js', verify_paths }]), error => error.code === 'review-fix-items-invalid');
+  }
+  const cli = spawnSync(process.execPath, [MODULE, '--evaluate', '--run', 'M-own', '--unit', 'review-fix/T01',
+    '--cwd', os.tmpdir(), '--conceded', JSON.stringify(input), '--json'], { encoding: 'utf8' });
+  strictAssert.strictEqual(cli.status, 0, cli.stderr);
+});
+
 // --- Summary ---
 cleanup();
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);

@@ -331,6 +331,7 @@ function deriveClaimFromPlan(cwd, planPath) {
  * `pathless` so the message can name them.
  */
 function deriveClaimFromConcededItems(items) {
+  const { normalizeRelativePath, normalizeVerifyPaths } = require('./forge-review-fix');
   const list = Array.isArray(items) ? items : [];
   const paths = [];
   const pathless = [];
@@ -338,6 +339,8 @@ function deriveClaimFromConcededItems(items) {
 
   for (const item of list) {
     const it = item || {};
+    const verificationPaths = normalizeVerifyPaths(it.verify_paths);
+    if (it.path !== undefined && it.path !== null && typeof it.path !== 'string') normalizeRelativePath(it.path, 'path');
     const raw = typeof it.path === 'string' ? it.path.trim() : '';
     const id = it.r || it.id || '(?)';
     if (raw === '') {
@@ -345,11 +348,12 @@ function deriveClaimFromConcededItems(items) {
       continue;
     }
     // Strip the `:line` (and `:line-line`) suffix: a claim is about FILES.
-    const stripped = raw.replace(/:\d+(?:-\d+)?$/, '');
-    if (stripped === '' || seen.has(stripped)) continue;
-    seen.add(stripped);
-    paths.push(stripped);
+    const stripped = normalizeRelativePath(raw.replace(/:\d+(?:-\d+)?$/, ''), 'path');
+    for (const candidate of [stripped, ...verificationPaths]) {
+      if (!seen.has(candidate)) { seen.add(candidate); paths.push(candidate); }
+    }
   }
+  paths.sort();
 
   if (pathless.length > 0) {
     return {
