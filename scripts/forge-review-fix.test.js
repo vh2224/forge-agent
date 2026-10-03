@@ -15,12 +15,19 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const rf = require('./forge-review-fix.js');
 
+const SKIP_SVN = Symbol('svn-toolchain-unavailable');
+let skipped = 0;
+let svnToolchainAvailable;
 let passed = 0;
 let failed = 0;
 
 function test(name, fn) {
   try {
-    fn();
+    if (fn() === SKIP_SVN) {
+      skipped += 1;
+      process.stdout.write(`  SKIP ${name}: svn and svnadmin are required\n`);
+      return;
+    }
     passed += 1;
     process.stdout.write(`  ✓ ${name}\n`);
   } catch (error) {
@@ -455,6 +462,8 @@ test('physical claim guard refuses real junctions and access errors, permits pro
 const svnLab = require('./forge-svn-lab');
 const vcs = require('./forge-vcs');
 function svnFixture(check) {
+  if (svnToolchainAvailable === undefined) svnToolchainAvailable = svnLab.hasSvnToolchain();
+  if (!svnToolchainAvailable) return SKIP_SVN;
   const lab = svnLab.createLab('forge-native-svn-'); svnLab.initializeSvn(lab);
   const command = (...args) => { const result = svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc }); assert.strictEqual(result.exit, 0, result.stderr); return result.stdout; };
   const write = (file, content) => { const target = path.join(lab.wc, file); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, content); };
@@ -824,5 +833,5 @@ for (const initiallyMissing of [true, false]) for (const withChild of [true, fal
   }));
 }
 
-process.stdout.write(`\nforge-review-fix: ${passed} passed, ${failed} failed\n`);
+process.stdout.write(`\nforge-review-fix: ${passed} passed, ${failed} failed, ${skipped} skipped\n`);
 if (failed) process.exitCode = 1;

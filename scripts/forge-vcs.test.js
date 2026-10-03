@@ -10,9 +10,16 @@ const ignore = require('./forge-ignore.js');
 const vcs = require('./forge-vcs.js');
 const svnLab = require('./forge-svn-lab.js');
 
+const SKIP_SVN = Symbol('svn-toolchain-unavailable');
+let skipped = 0;
+let svnToolchainAvailable;
 let passed = 0;
 function test(name, fn) {
-  fn();
+  if (fn() === SKIP_SVN) {
+    skipped += 1;
+    process.stdout.write(`  SKIP ${name}: svn and svnadmin are required\n`);
+    return;
+  }
   passed += 1;
   process.stdout.write(`  ✓ ${name}\n`);
 }
@@ -420,7 +427,7 @@ test('svnPegSafe escapes every target so a path containing @ is not read as a pe
 });
 
 test('SVN restore peg-escapes whitespace Unicode and @ while preserving dirty descendants', () => {
-  if (!svnLab.hasSvnToolchain()) return;
+  if (!svnLab.hasSvnToolchain()) return SKIP_SVN;
   const lab = svnLab.createLab('forge-vcs-svn-reset-');
   const svn = (args) => svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
   try {
@@ -452,7 +459,7 @@ test('SVN restore peg-escapes whitespace Unicode and @ while preserving dirty de
 });
 
 test('SVN failed revert returns no partial audit claim and caller can re-snapshot', () => {
-  if (!svnLab.hasSvnToolchain()) return;
+  if (!svnLab.hasSvnToolchain()) return SKIP_SVN;
   const lab = svnLab.createLab('forge-vcs-svn-resnapshot-');
   const svn = (args) => svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
   try {
@@ -660,6 +667,8 @@ test('#104 E8 — conjuntos fechados cruzados nos dois sentidos', () => {
 });
 
 function strictSvnFixture(check) {
+  if (svnToolchainAvailable === undefined) svnToolchainAvailable = svnLab.hasSvnToolchain();
+  if (!svnToolchainAvailable) return SKIP_SVN;
   const lab = svnLab.createLab('forge-vcs-strict-'); svnLab.initializeSvn(lab);
   const svn = (...args) => {
     const result = svnLab.run(['svn', '--non-interactive', '--config-dir', lab.config, ...args], { cwd: lab.wc });
@@ -970,4 +979,4 @@ test('bounded SVN refuses unavailable coverage, malformed XML and linked source 
   fs.unlinkSync(path.join(lab.wc, 'linked'));
 }));
 
-process.stdout.write(`\n${passed} passed, 0 failed\n`);
+process.stdout.write(`\n${passed} passed, 0 failed, ${skipped} skipped\n`);
