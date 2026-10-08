@@ -147,6 +147,11 @@ function reviewFixLocations(request) {
 }
 function locations(request) {
   const m = request.milestoneId, s = request.sliceId, t = request.taskId;
+  if (request.scope && request.scope !== 'standalone-task') fail('unsupported-sidecar-scope');
+  if (request.scope === 'standalone-task' && request.unitType === 'execute-task') {
+    return require('./forge-task-execution').locations(request);
+  }
+  if (!request.scope && request.phase !== undefined) fail('sidecar-phase-without-scope');
   if (request.unitType === 'review-fix') {
     return { required: [], allowed: [], rules: {}, delivery: null, ...reviewFixLocations(request) };
   }
@@ -706,6 +711,7 @@ function publishReviewFixFailure(request, loc, items, snapshot) {
 }
 
 async function publishReadyRecord(request, record) {
+  if (record.execution) require('./forge-task-execution').assertReplay(request, record);
   if (record.kind === 'review-fix') return publishReviewFixRecord(request, record);
   if (record.kind !== 'memory-extraction') return materialize(request, record);
   const extraction = record.extraction;
@@ -991,7 +997,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const r = request || {}, route = r.route || {};
   const transport = capability(route.resolved_worker_engine, r.unitType, r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
-  const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType });
+  const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType, scope: r.scope, phase: r.phase });
   if (route.dispatch_allowed !== true || route.worker_mode !== 'sidecar' || !route.sidecar_declared
     || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
   const authoritativeModel = route.model_resolved || route.model;
@@ -1041,27 +1047,39 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const code = error.code || 'sidecar-unit-failed';
     const record = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     const detail = diagnostic(error.diagnostic?.reason || (code === 'untrusted-output-barrier'
-      ? 'control-data-output' : record.phase === 'ready' ? 'publication-failed' : 'adapter-failed'), error.diagnostic);
-    if (record.phase === 'ready') error.stage = 'publication';
+      ? 'control-data-output' : ['ready', 'executed'].includes(record.phase) ? 'publication-failed' : 'adapter-failed'), error.diagnostic);
+    const replayable = ['ready', 'executed'].includes(record.phase);
+    if (replayable) error.stage = 'publication';
     error.diagnostic = detail;
     const failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
-      provider_called: error.provider_called === true,
+      provider_called: error.provider_called === true || record.provider_called === true,
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
-      recovery: record.phase === 'ready' ? 'replay-publication' : 'operator-required',
-      failed_at: new Date().toISOString(), ...(record.phase === 'ready' ? {} : (extra || {})) };
+      ...(record.execution ? { request_sha256: fingerprint, packaged_context: record.execution.packaged_context || null,
+        budgets: record.execution.budgets, layer: replayable ? 'publication' : 'writing-adapter',
+        model_sent: error.provider_called === true || record.provider_called === true ? model : null,
+        duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null } : {}),
+      recovery: replayable ? 'replay-publication' : 'operator-required',
+      failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})) };
     // Never overwrite the validated response if publication was interrupted.
-    if (record.phase !== 'ready') json(receiptFile, { ...record, phase: 'failed', failure });
+    if (!replayable) json(receiptFile, { ...record, phase: 'failed', failure });
     json(resultFile, failure);
     event('failed', code, detail, failure.provider_called,
       loc.reviewFix ? { boundary: loc.reviewFix.boundary, items_total: reviewFixItemsTotal(r) } : null);
   }
   const existing = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
+  function completeExecution(record) {
+    require('./forge-task-execution').assertReplay(r, record);
+    const artifacts = executeDeliveryArtifacts(r, loc, record.result, root, cwd);
+    const ready = { ...record, phase: 'ready', artifacts: artifacts.map(a => ({ ...a, before: record.before[a.path] ?? null })) };
+    json(receiptFile, ready);
+    return ready;
+  }
   if (existing) {
     if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
-    if (existing.phase === 'ready') {
+    if (existing.phase === 'ready' || existing.phase === 'executed') {
       runtime.announce?.('reaproveitado', { ...identity, provider_called: false });
       try {
-        const result = await publishReadyRecord(r, existing);
+        const result = await publishReadyRecord(r, existing.phase === 'executed' ? completeExecution(existing) : existing);
         json(resultFile, result);
         return result;
       } catch (error) { recordFailure(error); throw error; }
@@ -1087,16 +1105,23 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
   }
   const bookkeeping = r.unitType === 'complete-slice' ? `${loc.milestone}/${r.milestoneId}-ROADMAP.md`
-    : r.unitType === 'execute-task' ? `${loc.slice}/${r.sliceId}-PLAN.md` : null;
+    : r.unitType === 'execute-task' && !loc.execution ? `${loc.slice}/${r.sliceId}-PLAN.md` : null;
   const bookkeepingText = bookkeeping && fs.readFileSync(target(root, bookkeeping), 'utf8');
   if (bookkeeping) before[bookkeeping] = hash(bookkeepingText);
   // Review-fix: boundary and claim are validated, then the surgical-reset state
   // is captured, all BEFORE the started receipt. A refusal here leaves no
   // receipt and never reaches a provider.
   const fix = transport.mode === 'fix' ? prepareReviewFix(r, loc, { cwd, root, resultFile, route, dispatchId }) : null;
+  const executionApi = loc.execution ? require('./forge-task-execution') : null;
+  const execution = executionApi ? executionApi.prepare(r, root, cwd) : null;
+  const executionStateFile = execution ? xllm.validateResultFileTarget(`${resultFile}.reset-state.json`, cwd) : null;
+  if (execution) {
+    xllm.validateResultFileTarget(executionStateFile, root);
+  }
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
-  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before,
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
+    ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
     request_fingerprint: r.preparationRequestFingerprint || null,
     preparation_identity: r.preparationIdentity || null,
     ...(fix ? { kind: 'review-fix', review_fix_identity: fix.brief.identity, reset_state_file: fix.stateFile,
@@ -1135,6 +1160,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
       heartbeat_interval_ms: 15000, started_at: startedAt, updated_at: new Date().toISOString(), dispatch_id: dispatchId });
   };
   try {
+    // Only the process that acquired the exclusive receipt may capture/reset
+    // this attempt's durable baseline. A concurrent caller cannot overwrite it.
+    if (execution) require('./forge-surgical-reset').initState(executionStateFile, { cwd, attempt: dispatchId });
     let result, artifacts;
     // The adapter telemetry of a Claude turn: its model_observed is the id the
     // result's modelUsage proved. Codex turns report none.
@@ -1164,8 +1192,34 @@ async function runUnitSidecarCore(request, runtime, identity) {
       xllm.assertUntrustedOutputBarrier(result);
       artifacts = [];
     } else if (transport.mode === 'execute') {
+      const protectedBefore = execution ? executionApi.protectedSnapshot(root) : null;
+      const codeProtectedBefore = execution && cwd !== root ? executionApi.protectedSnapshot(cwd) : null;
       result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
-        contextFile: r.contextFile, writableRoots: r.writableRoots });
+        contextFile: r.contextFile, writableRoots: r.writableRoots,
+        ...(execution ? { executionContext: execution, onPackagedContext: packaged => {
+          const started = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+          json(receiptFile, { ...started, execution: { ...started.execution, packaged_context: packaged } });
+        } } : {}) });
+      if (execution) {
+        executionApi.assertProtected(root, protectedBefore);
+        if (codeProtectedBefore) executionApi.assertProtected(cwd, codeProtectedBefore);
+        const verifiedFiles = executionApi.verifyResult(cwd, execution, result);
+        // Persist the validated writing response before delivery rendering, which
+        // can itself fail. Replay never starts a second writer.
+        const executed = { phase: 'executed', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
+          route, route_identity: routeIdentity(route, r.unitType), provider_called: true,
+          reset_state_file: executionStateFile,
+          execution: { inputs: execution.inputs, budgets: execution.budgets, verified_files: verifiedFiles,
+            code_state: executionApi.replayState(cwd), packaged_context: result.appserver.packaged_context },
+          result: { ...result, dispatch_id: dispatchId, workflow_id: r.workflowId,
+            host_runtime: route.host_runtime, worker_engine: options.engine } };
+        json(receiptFile, executed);
+        const ready = completeExecution(executed);
+        result = await publishReadyRecord(r, ready);
+        json(resultFile, result);
+        event(result.status, null, null, true);
+        return result;
+      }
       artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
     } else if (transport.mode === 'plan') {
       if (!r.promptFile) fail('prompt-file-required');
@@ -1290,7 +1344,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     announce(providerCalled ? 'falhou' : 'recusado', { ...identity,
       ...(providerCalled ? {} : { model_sent: '-', model_route: model }),
       reason_code: error.code || xllm.classifyErrorClass(error.message), provider_called: providerCalled });
-    let extra = null;
+    let extra = execution ? { reset_state_file: executionStateFile,
+      possible_writes: providerCalled ? 'unknown' : false,
+      reconciliation_required: providerCalled } : null;
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {
       // Only an attempt that never reached a durable validated result is reset;

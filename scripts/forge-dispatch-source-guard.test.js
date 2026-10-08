@@ -44,7 +44,8 @@ function write(relative, content, root) {
 }
 
 function fixtureRoot() {
-  const fixtureParent = path.resolve(ROOT, 'scripts');
+  const fixtureParent = path.resolve(ROOT, 'Temp/codex/dispatch-source-guard');
+  fs.mkdirSync(fixtureParent, { recursive: true });
   const root = fs.mkdtempSync(path.join(fixtureParent, '.forge-dispatch-source-guard-'));
   assert(root.startsWith(`${fixtureParent}${path.sep}`), `unsafe fixture root: ${root}`);
   for (const relative of guard.SCOPED_FILES) write(relative, read(relative), root);
@@ -52,7 +53,7 @@ function fixtureRoot() {
 }
 
 function removeFixture(root) {
-  const fixtureParent = path.resolve(ROOT, 'scripts');
+  const fixtureParent = path.resolve(ROOT, 'Temp/codex/dispatch-source-guard');
   const resolved = path.resolve(root);
   assert(resolved.startsWith(`${fixtureParent}${path.sep}.forge-dispatch-source-guard-`), `unsafe cleanup: ${resolved}`);
   fs.rmSync(resolved, { recursive: true, force: true });
@@ -309,7 +310,7 @@ test('an operational native builder missing effort binding is structurally rejec
 }));
 
 test('the review-fix unit-sidecar caller is operational and consumes the saved resolver JSON', () => {
-  const entries = guard.SOURCE_REGISTRY.filter((entry) => entry.kind === 'unit-sidecar');
+  const entries = guard.SOURCE_REGISTRY.filter((entry) => entry.kind === 'unit-sidecar' && entry.path === 'shared/forge-review.md');
   assert.deepStrictEqual(entries.map((entry) => [entry.path, entry.classification]),
     [['shared/forge-review.md', 'operational']]);
   const candidate = byIdentity(guard.discover(ROOT)).get(guard.identity(entries[0]));
@@ -325,6 +326,26 @@ test('the review-fix unit-sidecar caller is operational and consumes the saved r
   // The same saved variable is the one the runtime gate assigned from the resolver.
   assert.match(read('shared/forge-review.md'), /RF_ROUTE_JSON_SAVED="\$RF_ROUTE_JSON"/);
 });
+
+test('standalone execution caller preserves the resolver, gates and constraints', () => withFixture(root => {
+  const relative = 'skills/forge-task/SKILL.md';
+  const entry = guard.SOURCE_REGISTRY.find(e => e.path === relative && e.kind === 'unit-sidecar');
+  assert.strictEqual(entry.classification, 'operational');
+  const candidate = byIdentity(guard.discover(ROOT)).get(guard.identity(entry));
+  assert.match(candidate.context, /EXEC_ROUTE_JSON_SAVED="\$ROUTE_JSON"/);
+  for (const [from, to, diagnostic] of [
+    ['route=JSON.parse(d)', 'route={}', 'route parsed'],
+    ['input.gates?.claim!=="proceed"', 'false', 'claim gate check'],
+    ['...input,', '', 'actual gates and constraints'],
+    ['phase:"execute"', 'phase:"plan"', 'standalone execution contract'],
+  ]) {
+    write(relative, read(relative).replace(from, to), root);
+    const item = discovered(root, c => c.path === relative && c.kind === 'unit-sidecar');
+    const registry = guard.SOURCE_REGISTRY.filter(e => e.id !== entry.id).concat(registerCandidate(item));
+    const report = guard.audit({ root, registry });
+    assert(report.errors.some(message => message.includes(diagnostic)), JSON.stringify(report));
+  }
+}));
 
 test('a unit-sidecar caller that re-types flags or drops the resolver JSON is structurally rejected', () => withFixture((root) => {
   const relative = 'shared/forge-review.md';

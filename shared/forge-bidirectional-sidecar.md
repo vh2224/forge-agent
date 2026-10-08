@@ -23,6 +23,75 @@ Depois, leia o stderr completo do processo, inclusive em `run_in_background` pel
 
 As linhas `[forge-sidecar]` registram identidade e estágio. A causa continua na linha `forge-xllm:` ou `forge-unit-sidecar:` e no result-file. Preserve ambos os canais. Nunca redirecione o stderr do comando de despacho para `/dev/null`. Se o stdout for capturado com `$(...)`, ainda leia e exponha as linhas de identidade do stderr.
 
+## Standalone task execution
+
+For an approved loose task, Step 5 uses the writing contract in
+`forge-task-execution.js`, not `forge-task-preparation.phaseContract`. There is
+no milestone, slice, controller lease or invented workflow snapshot. Retain the
+task's existing run identity, isolation, claims, constraints and checkpoint.
+Native execution and the historical Codex task adapter keep their own entrypoints.
+
+Resolve `execute-task` with `--scope standalone-task --phase execute`, the real
+plan and actual host. Preserve the entire route: explicit model/effort, timeout,
+chain and adapter identity. Capability checks validate scope/phase as well as unit.
+After the plan/security gates and a fresh claim-and-check result of `proceed`,
+write this request using structured JSON (placeholders describe actual bindings):
+
+```json
+{
+  "scope": "standalone-task", "phase": "execute", "unitType": "execute-task",
+  "taskId": "T-<existing-task-id>", "workflowId": "<existing-task-run-id>",
+  "dispatchId": "<unique-persisted-attempt-id>",
+  "route": "<full resolver object, not a string>",
+  "cwd": "<absolute resolved CODE_DIR>", "contextRoot": "<absolute WORKING_DIR>",
+  "planFile": "<WORKING_DIR>/.gsd/tasks/<ID>/<ID>-PLAN.md",
+  "resultFile": "<owned directory outside both roots>/<attempt>.json",
+  "gates": { "plan": "approved", "security": "not-applicable", "claim": "proceed" },
+  "constraints": { "auto_commit": false, "deploy": false }
+}
+```
+
+Bind gates and constraints to actual decisions; these example values grant no
+approval. A policy-authorized plan skip uses `plan: skipped` and
+`planSkipReason: interactive-off`. An approved PLAN-GATE is read without asking
+again; its fingerprint, when present, must still match. For security `passed`,
+retain the actual mandatory checklist in `<ID>-SECURITY.md`. Optional
+`contextFile` must be in this task directory; canonical BRAINSTORM, CONTEXT and
+RESEARCH are packed automatically. Additional operator constraints remain in
+the request and prompt. Never put credentials in the request.
+
+The canonical execute prompt includes the full plan, preparation evidence,
+security checklist, CODE_DIR and claimed writes. Only optional coding standards
+are bounded by `token_budget.coding_standards` (default 3000 estimated tokens),
+with a pointer to the full source. This is not a total-prompt budget. The result
+records the packaged prompt hash/bytes/token estimate and resolved budget.
+This contract accepts one Git or SVN CODE_DIR, including one outside the owner;
+multiple writable roots are explicitly refused. Absolute plan writes must belong
+to that resolved CODE_DIR. Do not rewrite a plan or substitute roots silently.
+
+Invoke `forge-unit-sidecar.js --request <request.json>`, retain the process handle,
+poll heartbeat and expose adapter diagnostics as described below. The worker
+cannot commit, push, deploy, release or write Forge metadata. The adapter captures
+a durable reset baseline/pre-dirty state, checks VCS-derived writes against the
+plan claims, and checks the owner's control-tree hashes before publication.
+It never resets possibly overlapping user work automatically.
+
+On done, publish `<ID>-SUMMARY.md`, `<ID>-DELIVERY-INPUT.json` and
+`<ID>-DELIVERY.json` only under `.gsd/tasks/<ID>/`. No milestone checkbox or plan
+status is invented. DELIVERY initially has unbound criteria, not fabricated
+verification. Rejoin Step 5 Process result, capture real verifier envelopes and
+bindings using `shared/forge-delivery.md`, then run the existing review gates.
+
+Receipts progress `started → executed → ready`. `executed` already contains the
+validated response and code/input fingerprints; delivery rendering or publication
+failures replay that response using the same request/receipt, without inference.
+Replay refuses changed inputs, code/baseline or conflicting artifacts. Partial
+responses publish no completion artifacts. A failed/interrupted writer remains
+blocked for that attempt: inspect its process, result and reset-state file,
+reconcile possible writes with the canonical surgical-reset safeguards before
+any new writer. A timeout alone does not establish provider failure. Preserve
+the evidence in the personal checkpoint and honor the user's recovery policy.
+
 ## Entry and delivery
 
 1. Retain the unit selected by `forge-long-workflow-adapter`, its snapshot,

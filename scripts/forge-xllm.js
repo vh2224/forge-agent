@@ -1669,7 +1669,19 @@ function computeAllPostChanges(cwd, startSha, vcsName = 'git') {
 function deriveFilesChanged(cwd, preDirty = [], startSha, vcsName = 'git') {
   const baseline = startSha || (vcsName === 'git' ? gitRead('rev-parse HEAD', cwd, 'git rev-parse HEAD') : startSha);
   const before = new Map(preDirty.map((entry) => [entry.path, entry.hash]));
-  return computeAllPostChanges(cwd, baseline, vcsName)
+  const changes = computeAllPostChanges(cwd, baseline, vcsName);
+  const seen = new Set(changes.map(entry => entry.path));
+  // Restoring tracked user edits to HEAD or deleting untracked user files makes
+  // them disappear from the final VCS diff. They still belong to the attempt's
+  // delta and must reach claim/protected-path checks, including deleted paths.
+  for (const entry of preDirty) {
+    if (seen.has(entry.path)) continue;
+    const current = vcs.hashPath(cwd, entry.path, { ...VCS_OPTS, vcs: vcsName });
+    if (!current.ok || current.hash !== entry.hash) {
+      changes.push({ status: current.ok && current.hash === null ? 'D' : 'M', path: entry.path });
+    }
+  }
+  return changes
     .filter((entry) => {
       if (!before.has(entry.path)) return true;
       const current = vcs.hashPath(cwd, entry.path, { ...VCS_OPTS, vcs: vcsName });
@@ -2127,6 +2139,8 @@ async function runFixCore(opts) {
 function executeContract(opts) {
   let planText;
   let cap;
+  const validate = value => validateExecuteResult(value) && (!opts.executionContext
+    || Object.keys(value).every(key => Object.hasOwn(executeSchema.properties, key)));
   return {
     mode: 'execute',
     preflight() {
@@ -2153,8 +2167,8 @@ function executeContract(opts) {
       return buildExecutePrompt(planText, { ...extras, capability: cap.capability });
     },
     schema: executeSchema,
-    validate: validateExecuteResult,
-    claudeOptions: null,
+    validate,
+    claudeOptions: opts.executionContext ? { validateCandidate: validate } : null,
     invalidClaudeMessage: 'Claude worker block failed execute-result validation',
     noResultMessage: 'no parseable/valid execute result in app-server output',
     assemble(parsed, common) {
@@ -2338,10 +2352,16 @@ async function runWriteContractCore(opts, contract) {
     try { securityText = fs.readFileSync(opts.securityFile, 'utf8'); } catch { /* optional */ }
     try { contextText = fs.readFileSync(opts.contextFile, 'utf8'); } catch { /* optional */ }
   }
-  if (securityText.trim()) securityText = truncateAtSectionBoundary(securityText, SECURITY_BUDGET_CHARS, { mandatory: true, label: 'security-checklist' });
-  else securityText = '';
-  if (contextText.trim()) contextText = truncateAtSectionBoundary(contextText, CONTEXT_BUDGET_CHARS);
-  else contextText = '';
+  if (opts.executionContext) {
+    // Canonical standalone packaging has already budgeted optional standards.
+    // Keep research, decisions and the security checklist complete.
+    securityText = opts.executionContext.securityText;
+    contextText = opts.executionContext.contextText;
+  }
+  if (!opts.executionContext && securityText.trim()) securityText = truncateAtSectionBoundary(securityText, SECURITY_BUDGET_CHARS, { mandatory: true, label: 'security-checklist' });
+  else if (!opts.executionContext) securityText = '';
+  if (!opts.executionContext && contextText.trim()) contextText = truncateAtSectionBoundary(contextText, CONTEXT_BUDGET_CHARS);
+  else if (!opts.executionContext) contextText = '';
 
   // Same attempt record as `pre_dirty` above — never a second, independent read.
   const startSha = attemptSnapshot.start_sha;
@@ -2354,6 +2374,13 @@ async function runWriteContractCore(opts, contract) {
     constraints: opts.constraints,
   });
   const inputTokens = countTokens(prompt);
+
+  // Persist the actual packaged request before transport, including on failure.
+  if (opts.executionContext && opts.onPackagedContext) opts.onPackagedContext({
+    sha256: require('crypto').createHash('sha256').update(prompt).digest('hex'),
+    bytes: Buffer.byteLength(prompt), input_tokens: inputTokens, token_method: 'heuristic-chars-4',
+    budgets: opts.executionContext.budgets,
+  });
 
   // Initial heartbeat — pid unknown until the child spawns.
   writeJsonAtomic(resultFile, {
@@ -2576,6 +2603,11 @@ async function runWriteContractCore(opts, contract) {
       // level breaks the additive-safety invariant, not just a test.
       transport: transport.kind,
       transport_version: transport.version,
+      ...(opts.executionContext ? { packaged_context: {
+        sha256: require('crypto').createHash('sha256').update(prompt).digest('hex'),
+        bytes: Buffer.byteLength(prompt), input_tokens: inputTokens, token_method: 'heuristic-chars-4',
+        budgets: opts.executionContext.budgets,
+      } } : {}),
       context_health: contextHealth || { measurement: 'unknown', compaction_measurement: 'unknown', scope: 'sidecar-thread' },
       context_boundary: contextBoundary || { indicator: 'ctx ?', severity: 'none', additionalContext: '', checkpoint: false },
     },

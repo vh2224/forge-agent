@@ -325,7 +325,7 @@ function runtimeFields(opts, dispatchEngine) {
 // canonical forge-runtime error into a different guard diagnostic.  Posture is
 // a total function of the runtime identity: no environment is consulted here or
 // in the guard, so the same leg yields the same verdict in every shell.
-function composeRuntimePosture(runtime, unitType) {
+function composeRuntimePosture(runtime, unitType, delivery = {}) {
   if (!runtime || runtime.dispatch_allowed !== true) {
     const reasonCode = runtime && runtime.dispatch_reason_code
       ? runtime.dispatch_reason_code
@@ -345,6 +345,8 @@ function composeRuntimePosture(runtime, unitType) {
     worker_engine: runtime.worker_engine,
     worker_mode: runtime.worker_mode,
     unit_type: unitType,
+    scope: delivery.scope,
+    phase: delivery.phase,
   });
   return {
     ...runtime,
@@ -483,7 +485,7 @@ function resolveDispatch(opts, environment) {
   // Resolve this after routing/model-family work. The result is deliberately
   // additive: legacy engine/dispatch_engine/chain retain their 3.1.4 meaning.
   const dispatchEngine = dispatchEngineFor(engine);
-  const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine), unitType);
+  const runtime = composeRuntimePosture(runtimeFields(o, dispatchEngine), unitType, o);
   // A routing/frontmatter route outranks the legacy workers preference. Only
   // compare the model with an engine preference that actually won precedence.
   const configuredEngine = plan.worker || (!routingBacked && workersExplicit ? workers.workers_engine : '');
@@ -604,6 +606,8 @@ function parseArgs(args) {
     else if (flag === '--roadmap' && value !== undefined) { parsed.roadmapPath = value; i += 1; }
     else if (flag === '--domain' && value !== undefined) { parsed.domain = value; i += 1; }
     else if (flag === '--cwd' && value !== undefined) { parsed.cwd = value; i += 1; }
+    else if (flag === '--scope' && value !== undefined) { parsed.scope = value; i += 1; }
+    else if (flag === '--phase' && value !== undefined) { parsed.phase = value; i += 1; }
     else if (flag === '--host-runtime' && value !== undefined) { parsed.hostRuntime = value; i += 1; }
     else if (flag === '--worker-engine' && value !== undefined) { parsed.workerEngine = value; i += 1; }
     else if (flag === '--worker-mode' && value !== undefined) { parsed.workerMode = value; i += 1; }
