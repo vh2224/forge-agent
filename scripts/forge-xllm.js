@@ -1669,7 +1669,19 @@ function computeAllPostChanges(cwd, startSha, vcsName = 'git') {
 function deriveFilesChanged(cwd, preDirty = [], startSha, vcsName = 'git') {
   const baseline = startSha || (vcsName === 'git' ? gitRead('rev-parse HEAD', cwd, 'git rev-parse HEAD') : startSha);
   const before = new Map(preDirty.map((entry) => [entry.path, entry.hash]));
-  return computeAllPostChanges(cwd, baseline, vcsName)
+  const changes = computeAllPostChanges(cwd, baseline, vcsName);
+  const seen = new Set(changes.map(entry => entry.path));
+  // Restoring tracked user edits to HEAD or deleting untracked user files makes
+  // them disappear from the final VCS diff. They still belong to the attempt's
+  // delta and must reach claim/protected-path checks, including deleted paths.
+  for (const entry of preDirty) {
+    if (seen.has(entry.path)) continue;
+    const current = vcs.hashPath(cwd, entry.path, { ...VCS_OPTS, vcs: vcsName });
+    if (!current.ok || current.hash !== entry.hash) {
+      changes.push({ status: current.ok && current.hash === null ? 'D' : 'M', path: entry.path });
+    }
+  }
+  return changes
     .filter((entry) => {
       if (!before.has(entry.path)) return true;
       const current = vcs.hashPath(cwd, entry.path, { ...VCS_OPTS, vcs: vcsName });

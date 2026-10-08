@@ -54,6 +54,7 @@ function deepFreeze(value) {
 // Each row is immutable evidence, not an expectation derived from the disk.
 // Fingerprints are populated from the measured canonical sources below.
 const REGISTRY_ROWS = [
+  ["skills-forge-task-skill-md-unit-sidecar-6c5e561240e7","skills/forge-task/SKILL.md","unit-sidecar","operational","sha256:6c5e561240e726729f39ffb282e20b5b69614171bd33768f9cb8aef575d0215a","",""],
   ["shared-forge-dispatch-md-agent-fe77b6a6f402","shared/forge-dispatch.md","agent","excluded","sha256:fe77b6a6f40224c2e1262832a54efc14e6b20d255398095162ecfbb7356b7fd6","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-dispatch-md-agent-bf5525b8fdba","shared/forge-dispatch.md","agent","excluded","sha256:bf5525b8fdba901c3f8c4976ac07f3847ce70615a3d66aefed573503be310846","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
   ["shared-forge-dispatch-md-agent-c5948d9c7b7a","shared/forge-dispatch.md","agent","excluded","sha256:c5948d9c7b7ae83b78b963c109d457970b85a81dea76068c49475fb67046735c","non-projected shared Agent prose or example; renderer ownership does not include this token",""],
@@ -247,13 +248,13 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-resolver-065fe8f6ffbd","skills/forge-task/SKILL.md","resolver","excluded","sha256:065fe8f6ffbd3a09dbba2368b4cb14f405c7e55f143cd09ebc3bb2337cffe120","documentation or explanatory resolver reference; it launches no process",""],
   ["skills-forge-task-skill-md-resolver-33f42b91e15b","skills/forge-task/SKILL.md","resolver","excluded","sha256:33f42b91e15bdcd55acd368cf3fe452c1af7e694818510e6facded080a07e993","documentation or explanatory resolver reference; it launches no process",""],
   ["skills-forge-task-skill-md-resolver-654f83c0ffe8","skills/forge-task/SKILL.md","resolver","excluded","sha256:654f83c0ffe83141738f84ee034e1901393372a34fd1e35dce0fb53ac90c739f","documentation or explanatory resolver reference; it launches no process",""],
-  ["skills-forge-task-skill-md-resolver-c8098b0236d9","skills/forge-task/SKILL.md","resolver","excluded","sha256:c8098b0236d941cf960571e826d1e56b016250cff3e3e64fcdccd4d3adf94405","filesystem path probe; it does not invoke the resolver",""],
-  ["skills-forge-task-skill-md-resolver-8da51052b803","skills/forge-task/SKILL.md","resolver","operational","sha256:8da51052b8033c3f020c2e3e4370e38b14233efca85155caf81c61a02149d5c5","","canonical"],
+  ["skills-forge-task-skill-md-resolver-8ee68adc837d","skills/forge-task/SKILL.md","resolver","excluded","sha256:8ee68adc837d0559016afcc99326f2b6bbc43be57b7ab0191044269e90860cdc","filesystem path probe; it does not invoke the resolver",""],
+  ["skills-forge-task-skill-md-resolver-e99aad37e56a","skills/forge-task/SKILL.md","resolver","operational","sha256:e99aad37e56acd95c6b7fa3d939bdf59ed8d0eb2165692781015b56453b6e81e","","canonical"],
   ["skills-forge-task-skill-md-resolver-b24e4ef1deb2","skills/forge-task/SKILL.md","resolver","excluded","sha256:b24e4ef1deb293bee833c37a08f5001c9b16aa32f54ab14d0fc35fcc5c378f17","diagnostic text naming the resolver; it launches no process",""],
   ["skills-forge-task-skill-md-resolver-72427970217c","skills/forge-task/SKILL.md","resolver","excluded","sha256:72427970217cf1c3e70cc6bec14ae84cd33f33cedff9844dbd81a92d2d435ddb","shell-exports parser invocation; it consumes JSON and does not resolve a host",""],
-  ["skills-forge-task-skill-md-resolver-7f0fb7952ab3","skills/forge-task/SKILL.md","resolver","excluded","sha256:7f0fb7952ab334924beb13a81c5ab490faeec4066975e4908d18ca9c214d494a","documentation or explanatory resolver reference; it launches no process",""],
-  ["skills-forge-task-skill-md-agent-ff5b9b8404e5","skills/forge-task/SKILL.md","agent","excluded","sha256:ff5b9b8404e5019cbd2f9607d2fbccd9361e9f78f941ddd849890c5d9af0bd39","projected explanatory Agent prose; it is not a worker invocation",""],
-  ["skills-forge-task-skill-md-agent-dd6f612dd16b","skills/forge-task/SKILL.md","agent","excluded","sha256:dd6f612dd16b4aea20f17138fd858a5cc63e94690272f32deb40c051b1229c84","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-task-skill-md-resolver-f8d6743f7555","skills/forge-task/SKILL.md","resolver","excluded","sha256:f8d6743f755505b45603ff00c759ef5a35fe69490d854699169232c0b53ea0a6","documentation or explanatory resolver reference; it launches no process",""],
+  ["skills-forge-task-skill-md-agent-554a5006e3d2","skills/forge-task/SKILL.md","agent","excluded","sha256:554a5006e3d23315763ec4e718c83f8337654809cece75b85e9419557c66062b","projected explanatory Agent prose; it is not a worker invocation",""],
+  ["skills-forge-task-skill-md-agent-37e1c7392bd9","skills/forge-task/SKILL.md","agent","excluded","sha256:37e1c7392bd9fbbe8366e9eb13288d512eaa312a74c4a455b0242c68c5d53b1c","projected explanatory Agent prose; it is not a worker invocation",""],
   ["skills-forge-task-skill-md-adapter-f3bfa7a9562d","skills/forge-task/SKILL.md","adapter","operational","sha256:f3bfa7a9562d44d045abaf98e8f602dfc58a7d6c3823c4fde9de3065f27b9cf2","",""],
   ["skills-forge-task-skill-md-emitter-c137e151cadc","skills/forge-task/SKILL.md","emitter","operational","sha256:c137e151cadcb34ecd68b5da767853d07b277698a68ea7d9675aff34aad4ef67","",""],
   ["skills-forge-task-skill-md-agent-86f259014c13","skills/forge-task/SKILL.md","agent","excluded","sha256:86f259014c1352f933303c36538b2a439b219b884d895a5116724273feba1c95","projected explanatory Agent prose; it is not a worker invocation",""],
@@ -595,7 +596,17 @@ function structuralErrors(entry, discovered, document) {
     if (!block) {
       errors.push(`${location} unit-sidecar caller lies outside a fenced command block`);
     } else {
-      const requirements = [
+      const requirements = entry.path === 'skills/forge-task/SKILL.md' ? [
+        [/--request\s+"\$EXEC_REQUEST"/, 'the canonical execution request argument'],
+        [/printf\s+'%s'\s+"\$EXEC_ROUTE_JSON_SAVED"\s*\|/, 'the saved resolver JSON on its data path'],
+        [/\broute\s*=\s*JSON\.parse\(d\)/, 'the route parsed from that resolver JSON'],
+        [/[{,]route[,}]/, 'the parsed route embedded unchanged in the request'],
+        [/scope:"standalone-task",phase:"execute",unitType:"execute-task"/, 'the standalone execution contract'],
+        [/input\.gates\?\.claim!=="proceed"/, 'the claim gate check'],
+        [/\.\.\.input,/, 'the actual gates and constraints'],
+        [/resultFile:/, 'a result file'],
+        [/EXEC_REQUEST="\$EXEC_REQUEST_DIR\//, 'a request file inside the temporary request directory'],
+      ] : [
         [/--request\s+"\$RF_REQUEST"/, 'the canonical --request "$RF_REQUEST" argument'],
         [/printf\s+'%s'\s+"\$RF_ROUTE_JSON_SAVED"\s*\|/, 'the saved resolver JSON on its data path'],
         [/\broute\s*=\s*JSON\.parse\(d\)/, 'the route parsed from that resolver JSON'],

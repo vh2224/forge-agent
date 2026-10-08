@@ -163,6 +163,19 @@ test('files_changed excludes intact pre-dirty files and reports only the sidecar
   assert(delta.some((entry) => entry.path === 'tracked.txt' && entry.status === 'M'));
 });
 
+test('files_changed includes pre-dirty paths that disappear from the final VCS diff', () => {
+  const { repo, startSha } = makeRepo();
+  const tracked = path.join(repo, 'tracked.txt'), original = fs.readFileSync(tracked);
+  fs.writeFileSync(tracked, 'user dirty\n');
+  fs.writeFileSync(path.join(repo, 'user-new.txt'), 'user new\n');
+  const before = captureDirtySnapshot(repo);
+  fs.writeFileSync(tracked, original);
+  fs.unlinkSync(path.join(repo, 'user-new.txt'));
+  assert.deepStrictEqual(deriveFilesChanged(repo, before, startSha), [
+    { status: 'M', path: 'tracked.txt' }, { status: 'D', path: 'user-new.txt' },
+  ]);
+});
+
 test('new .gsd delta is terminal while intact pre-existing .gsd dirt is ignored', () => {
   const { repo, startSha } = makeRepo();
   fs.mkdirSync(path.join(repo, '.gsd'));

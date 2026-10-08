@@ -58,8 +58,9 @@ function prepare(r, root, cwd) {
   if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
   if (r.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(r.gates?.security)) fail('execution-gates-required');
   if (!r.constraints || typeof r.constraints.auto_commit !== 'boolean' || r.constraints.deploy !== false) fail('execution-constraints-required');
-  const writes = parallel.parseTaskFrontmatter(planFile)?.writes;
-  if (!Array.isArray(writes)) fail('execution-writes-required');
+  const declared = require('./forge-claim-gate').deriveClaimFromPlan(root, planFile);
+  if (!declared.eligible && declared.detail !== 'declared-empty') fail('execution-writes-required');
+  const writes = declared.paths;
   const claims = writes.map(value => {
     if (typeof value !== 'string' || !value.trim() || value.replace(/\\/g, '/').split('/').includes('..') || /[\[\]{}!]/.test(value)) fail('execution-claim-invalid');
     const file = path.resolve(cwd, value);

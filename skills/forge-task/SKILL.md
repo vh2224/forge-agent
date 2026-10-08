@@ -1022,7 +1022,23 @@ fi
 ```
 **Never assign to `WORKTREE_DIR` here.** An empty `WORKTREE_DIR` is the "every repo failed" STOP signal of the Isolation rules — a sidecar refusal must never be mistaken for an isolation failure. The two `CODE_DIR=` lines above make the resolved value reach the bash consumers deterministically, without depending on model substitution: status `ok` → the attributed worktree; refusal with a non-empty `multi_repo_root` → the run root holding every worktree, so a genuinely multi-repo unit stops landing in whichever repo sorted first (`multi_repo_root` is empty in a single-repo workspace, which keeps the bootstrap value).
 
-**Branch Claude — sidecar (`WORKER_MODE == sidecar`, `RESOLVED_WORKER_ENGINE == claude`).** Follow `shared/forge-bidirectional-sidecar.md § Standalone task execution` after resolving CODE_DIR above. Preserve the approved plan, isolation and full route JSON. Run the existing security decision and `forge-claim-gate.js --claim-and-check --plan "$WORKING_DIR/$PLAN_PATH" --run "{TASK_ID}" --unit "execute-task/{TASK_ID}" --code-dir "$CODE_DIR" --cwd "$WORKING_DIR" --json`; only `proceed` dispatches. Build the structured request described there and invoke `forge-unit-sidecar.js --request "$REQUEST_FILE"` through the host background-process tool, retaining its process handle and receipt. This branch replaces both the historical Codex steps and native executor dispatch. On `done`, the adapter has published canonical task SUMMARY/DELIVERY; rejoin **Process result** for real verification and Step 5.5 review. Partial/blocked/failure retains the checkpoint and recovery evidence. Never fall through to another writer or restart preparation. Replay a validated receipt before considering any new inference.
+**Branch Claude — sidecar (`WORKER_MODE == sidecar`, `RESOLVED_WORKER_ENGINE == claude`).** Follow `shared/forge-bidirectional-sidecar.md § Standalone task execution` after resolving CODE_DIR above. Preserve the approved plan, isolation and full route JSON. Run the existing security decision and `forge-claim-gate.js --claim-and-check --plan "$WORKING_DIR/$PLAN_PATH" --run "{TASK_ID}" --unit "execute-task/{TASK_ID}" --code-dir "$CODE_DIR" --cwd "$WORKING_DIR" --json`; only `proceed` dispatches. Use the canonical block below through the host background-process tool, retaining its process handle and receipt. This branch replaces both the historical Codex steps and native executor dispatch. On `done`, the adapter has published canonical task SUMMARY/DELIVERY; rejoin **Process result** for real verification and Step 5.5 review. Partial/blocked/failure retains the checkpoint and recovery evidence. Never fall through to another writer or restart preparation. Replay a validated receipt before considering any new inference.
+
+Bind `EXEC_REQUEST_DIR` to an owned temporary directory outside both roots, `EXEC_INPUT_FILE` to structured JSON containing the actual task/workflow/dispatch IDs, CODE_DIR/owner/plan paths, gates and constraints described in the shared contract. Never derive gate decisions from this example. Preserve these bindings in the checkpoint. Create the request once; replay uses the same saved file.
+```bash
+EXEC_ROUTE_JSON_SAVED="$ROUTE_JSON"
+EXEC_REQUEST="$EXEC_REQUEST_DIR/request.json"
+printf '%s' "$EXEC_ROUTE_JSON_SAVED" | EXEC_REQUEST="$EXEC_REQUEST" EXEC_INPUT_FILE="$EXEC_INPUT_FILE" EXEC_REQUEST_DIR="$EXEC_REQUEST_DIR" node -e '
+const fs=require("fs"), path=require("path"); let d="";
+process.stdin.on("data",c=>d+=c).on("end",()=>{
+  const route=JSON.parse(d), input=JSON.parse(fs.readFileSync(process.env.EXEC_INPUT_FILE,"utf8"));
+  if(input.gates?.claim!=="proceed") throw new Error("execution-claim-gate-required");
+  const request={...input,scope:"standalone-task",phase:"execute",unitType:"execute-task",route,
+    resultFile:path.join(process.env.EXEC_REQUEST_DIR,"result.json")};
+  fs.writeFileSync(process.env.EXEC_REQUEST,JSON.stringify(request),{flag:"wx"});
+});' || exit 1
+node "$FORGE_SCRIPTS_DIR/forge-unit-sidecar.js" --request "$EXEC_REQUEST"
+```
 
 **Branch codex — sidecar (`$WORKER_MODE == sidecar`, adapter selected by `$RESOLVED_WORKER_ENGINE == codex`)** — executable mirror of `shared/forge-dispatch.md § Worker Engine Routing § Sidecar dispatch state machine`. Delivery entered this branch only through the allowed resolver verdict above (or the one-shot declared native transition below); model-family metadata cannot enter it. When this branch fires, the native machinery below (timeline task, guarded `Agent()` dispatch) is **replaced** by the detached adapter + polling; on a failure its verified reset may rejoin the native machinery only through the named fallback boundary. When `$WORKER_MODE == native`, skip this branch entirely and proceed with the canonical host-native dispatch below.
 

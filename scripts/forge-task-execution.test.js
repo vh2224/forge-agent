@@ -32,6 +32,7 @@ fs.writeFileSync(control.args, JSON.stringify(args));
 const instruction = args.find(a => a.startsWith('Read the complete task prompt'));
 fs.writeFileSync(control.prompt, fs.readFileSync(JSON.parse(instruction.match(/file: (".*")\\. Follow/)[1]), 'utf8'));
 for (const [file, content] of Object.entries(control.writes || {})) fs.writeFileSync(file, content);
+for (const file of control.deletes || []) fs.unlinkSync(file);
 if (control.failure) { process.stderr.write('simulated transport failure after writes'); process.exit(9); }
 const result = { status: control.status || 'done', summary: 'Fixture execution', must_haves_status: [], files_changed: [] };
 if (control.extraArtifact) result.artifacts = [{ path: '../outside.md', content: 'invalid' }];
@@ -137,6 +138,16 @@ async function main() {
   const overlap = require('./forge-surgical-reset').resetFromState(outside.r.resultFile + '.reset-state.json');
   assert.strictEqual(overlap.code, 3, 'pre-dirty overlap must abort reset');
   assert.strictEqual(fs.readFileSync(path.join(outside.cwd, 'src.js'), 'utf8'), 'after\n', 'abort resets nothing');
+  const restored = setup(); restored.control.writes[path.join(restored.cwd, 'dirty.txt')] = 'before\n'; write(restored.controlFile, restored.control);
+  await rejects(restored.r, 'execution-outside-claim');
+  assert(!fs.existsSync(path.join(restored.task, `${id}-SUMMARY.md`)), 'restoring pre-dirty to HEAD must not publish');
+  const deletedDirty = setup(); write(path.join(deletedDirty.cwd, 'user-new.txt'), 'user work');
+  deletedDirty.control.deletes = [path.join(deletedDirty.cwd, 'user-new.txt')]; write(deletedDirty.controlFile, deletedDirty.control);
+  await rejects(deletedDirty.r, 'execution-outside-claim');
+  const expectedOutput = setup();
+  write(expectedOutput.r.planFile, fs.readFileSync(expectedOutput.r.planFile, 'utf8').replace('expected_output: []', 'expected_output: [generated.js]'));
+  expectedOutput.control.writes[path.join(expectedOutput.cwd, 'generated.js')] = 'generated'; write(expectedOutput.controlFile, expectedOutput.control);
+  assert.strictEqual((await unit.runUnitSidecar(expectedOutput.r)).status, 'done');
   const protectedCase = setup(); protectedCase.control.writes[path.join(protectedCase.task, `${id}-RESEARCH.md`)] = 'tampered'; write(protectedCase.controlFile, protectedCase.control);
   await rejects(protectedCase.r, 'execution-protected-metadata');
   const noModel = setup(); noModel.r.route.model = null; noModel.r.route.model_resolved = null;
