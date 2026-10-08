@@ -28,7 +28,8 @@ function capability(engine, unitType, delivery = {}) {
     } catch { standalone = false; }
   }
   const mode = standalone ? 'artifacts' : UNIT_MODES[unitType];
-  const validScope = !delivery.scope || delivery.scope === 'standalone-task' && (standalone || standaloneExecute);
+  const validScope = (!delivery.scope && delivery.phase === undefined)
+    || delivery.scope === 'standalone-task' && (standalone || standaloneExecute);
   const supported = ['claude', 'codex'].includes(engine) && !!mode && validScope;
   return {
     supported, mode: supported ? mode : null,

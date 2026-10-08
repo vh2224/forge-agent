@@ -34,6 +34,7 @@ fs.writeFileSync(control.prompt, fs.readFileSync(JSON.parse(instruction.match(/f
 for (const [file, content] of Object.entries(control.writes || {})) fs.writeFileSync(file, content);
 if (control.failure) { process.stderr.write('simulated transport failure after writes'); process.exit(9); }
 const result = { status: control.status || 'done', summary: 'Fixture execution', must_haves_status: [], files_changed: [] };
+if (control.extraArtifact) result.artifacts = [{ path: '../outside.md', content: 'invalid' }];
 const model = args[args.indexOf('--model') + 1];
 process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
  result: ['---GSD-WORKER-RESULT---','status: '+result.status,'result_json: '+JSON.stringify(result),'---END-RESULT---'].join('\\n'),
@@ -46,7 +47,7 @@ function git(cwd, args) {
   const r = cp.spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
   assert.strictEqual(r.status, 0, r.stderr); return r.stdout.trim();
 }
-function setup() {
+function setup(vcsName = 'git') {
   const dir = path.join(root, String(++sequence)), cwd = path.join(dir, 'code'), owner = path.join(dir, 'owner');
   fs.mkdirSync(cwd, { recursive: true });
   const task = path.join(owner, '.gsd/tasks', id), planFile = path.join(task, `${id}-PLAN.md`);
@@ -57,8 +58,16 @@ function setup() {
   write(path.join(task, `${id}-SECURITY.md`), 'Mandatory security checklist');
   write(path.join(owner, '.gsd/CODING-STANDARDS.md'), 'standards '.repeat(1000));
   write(path.join(cwd, 'src.js'), 'before\n'); write(path.join(cwd, 'dirty.txt'), 'before\n');
-  git(cwd, ['init', '-q']); git(cwd, ['add', '.']);
-  git(cwd, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
+  if (vcsName === 'svn') {
+    const repository = path.join(dir, 'svn-repository');
+    function svn(cmd, args) { const out = cp.spawnSync(cmd, args, { cwd, encoding: 'utf8', windowsHide: true }); assert.strictEqual(out.status, 0, out.stderr); }
+    svn('svnadmin', ['create', repository]);
+    svn('svn', ['checkout', require('url').pathToFileURL(repository).href, '.']);
+    svn('svn', ['add', 'src.js', 'dirty.txt']); svn('svn', ['commit', '-m', 'fixture baseline']); svn('svn', ['update']);
+  } else {
+    git(cwd, ['init', '-q']); git(cwd, ['add', '.']);
+    git(cwd, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
+  }
   write(path.join(cwd, 'dirty.txt'), 'user dirty\n');
   const route = resolveDispatch({ cwd: owner, unitType: 'execute-task', scope: 'standalone-task', phase: 'execute', planPath: planFile, hostRuntime: 'codex', unitId: id });
   const r = { cwd, contextRoot: owner, scope: 'standalone-task', phase: 'execute', unitType: 'execute-task', taskId: id,
@@ -129,6 +138,8 @@ async function main() {
   await rejects(noGate.r, 'execution-plan-gate-required'); assert(!fs.existsSync(noGate.control.calls));
   const staleGate = setup(); write(path.join(staleGate.task, `${id}-PLAN-GATE.md`), 'status: approved\nplan_sha256: ' + '0'.repeat(64));
   await rejects(staleGate.r, 'execution-plan-gate-stale');
+  const artifact = setup(); artifact.control.extraArtifact = true; write(artifact.controlFile, artifact.control);
+  await rejects(artifact.r, 'claude-invalid-result');
   const pub = setup(), build = delivery.buildDelivery;
   delivery.buildDelivery = () => { throw Object.assign(new Error('simulated delivery failure'), { code: 'fixture-publication' }); };
   try { await rejects(pub.r, 'fixture-publication'); } finally { delivery.buildDelivery = build; }
@@ -165,6 +176,15 @@ async function main() {
   assert.strictEqual((await installedUnit.runUnitSidecar(installedCase.r)).status, 'done');
   await installedUnit.runUnitSidecar(installedCase.r);
   assert.strictEqual(fs.readFileSync(installedCase.control.calls, 'utf8'), 'spawn\n');
+  if (cp.spawnSync('svnadmin', ['--version', '--quiet'], { windowsHide: true }).status === 0) {
+    const svnCase = setup('svn');
+    const svnResult = await unit.runUnitSidecar(svnCase.r);
+    assert.strictEqual(svnResult.vcs, 'svn'); assert.strictEqual(svnResult.status, 'done');
+    assert.deepStrictEqual(svnResult.files_changed.map(x => x.path), ['src.js']);
+    await unit.runUnitSidecar(svnCase.r);
+    assert.strictEqual(fs.readFileSync(svnCase.control.calls, 'utf8'), 'spawn\n');
+    console.log('standalone execute: local SVN external CODE_DIR and replay passed');
+  } else console.log('standalone execute: SVN fixture skipped (svnadmin unavailable)');
   console.log('standalone execute: resolver, simulated Claude CLI, external CODE_DIR, guards, delivery and replay passed');
 }
 main().catch(e => { console.error(e); process.exitCode = 1; }).finally(() => {

@@ -2127,6 +2127,8 @@ async function runFixCore(opts) {
 function executeContract(opts) {
   let planText;
   let cap;
+  const validate = value => validateExecuteResult(value) && (!opts.executionContext
+    || Object.keys(value).every(key => Object.hasOwn(executeSchema.properties, key)));
   return {
     mode: 'execute',
     preflight() {
@@ -2153,8 +2155,8 @@ function executeContract(opts) {
       return buildExecutePrompt(planText, { ...extras, capability: cap.capability });
     },
     schema: executeSchema,
-    validate: validateExecuteResult,
-    claudeOptions: null,
+    validate,
+    claudeOptions: opts.executionContext ? { validateCandidate: validate } : null,
     invalidClaudeMessage: 'Claude worker block failed execute-result validation',
     noResultMessage: 'no parseable/valid execute result in app-server output',
     assemble(parsed, common) {
