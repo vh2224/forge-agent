@@ -65,7 +65,7 @@ function setup(vcsName = 'git') {
     svn('svn', ['checkout', require('url').pathToFileURL(repository).href, '.']);
     svn('svn', ['add', 'src.js', 'dirty.txt']); svn('svn', ['commit', '-m', 'fixture baseline']); svn('svn', ['update']);
   } else {
-    git(cwd, ['init', '-q']); git(cwd, ['add', '.']);
+    git(cwd, ['init', '-q']); git(cwd, ['config', 'core.autocrlf', 'false']); git(cwd, ['add', '.']);
     git(cwd, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
   }
   write(path.join(cwd, 'dirty.txt'), 'user dirty\n');
@@ -128,8 +128,15 @@ async function main() {
   assert.strictEqual(fs.readFileSync(path.join(failed.cwd, 'src.js'), 'utf8'), 'after\n');
   await assert.rejects(() => unit.runUnitSidecar(failed.r));
   assert.strictEqual(fs.readFileSync(failed.control.calls, 'utf8'), 'spawn\n');
+  const reset = require('./forge-surgical-reset').resetFromState(failure.reset_state_file);
+  assert.strictEqual(reset.code, 0, JSON.stringify(reset));
+  assert.strictEqual(fs.readFileSync(path.join(failed.cwd, 'src.js'), 'utf8'), 'before\n');
+  assert.strictEqual(fs.readFileSync(path.join(failed.cwd, 'dirty.txt'), 'utf8'), 'user dirty\n');
   const outside = setup(); outside.control.writes[path.join(outside.cwd, 'dirty.txt')] = 'invalid edit'; write(outside.controlFile, outside.control);
   await rejects(outside.r, 'execution-outside-claim');
+  const overlap = require('./forge-surgical-reset').resetFromState(outside.r.resultFile + '.reset-state.json');
+  assert.strictEqual(overlap.code, 3, 'pre-dirty overlap must abort reset');
+  assert.strictEqual(fs.readFileSync(path.join(outside.cwd, 'src.js'), 'utf8'), 'after\n', 'abort resets nothing');
   const protectedCase = setup(); protectedCase.control.writes[path.join(protectedCase.task, `${id}-RESEARCH.md`)] = 'tampered'; write(protectedCase.controlFile, protectedCase.control);
   await rejects(protectedCase.r, 'execution-protected-metadata');
   const noModel = setup(); noModel.r.route.model = null; noModel.r.route.model_resolved = null;
@@ -138,6 +145,11 @@ async function main() {
   await rejects(noGate.r, 'execution-plan-gate-required'); assert(!fs.existsSync(noGate.control.calls));
   const staleGate = setup(); write(path.join(staleGate.task, `${id}-PLAN-GATE.md`), 'status: approved\nplan_sha256: ' + '0'.repeat(64));
   await rejects(staleGate.r, 'execution-plan-gate-stale');
+  const linked = setup();
+  fs.mkdirSync(path.join(linked.dir, 'outside'));
+  fs.symlinkSync(path.join(linked.dir, 'outside'), path.join(linked.cwd, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  write(linked.r.planFile, fs.readFileSync(linked.r.planFile, 'utf8').replace(/src.js/g, 'linked/outside.js'));
+  await rejects(linked.r, 'execution-path-link'); assert(!fs.existsSync(linked.control.calls));
   const artifact = setup(); artifact.control.extraArtifact = true; write(artifact.controlFile, artifact.control);
   await rejects(artifact.r, 'claude-invalid-result');
   const pub = setup(), build = delivery.buildDelivery;
