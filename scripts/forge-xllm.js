@@ -2338,10 +2338,16 @@ async function runWriteContractCore(opts, contract) {
     try { securityText = fs.readFileSync(opts.securityFile, 'utf8'); } catch { /* optional */ }
     try { contextText = fs.readFileSync(opts.contextFile, 'utf8'); } catch { /* optional */ }
   }
-  if (securityText.trim()) securityText = truncateAtSectionBoundary(securityText, SECURITY_BUDGET_CHARS, { mandatory: true, label: 'security-checklist' });
-  else securityText = '';
-  if (contextText.trim()) contextText = truncateAtSectionBoundary(contextText, CONTEXT_BUDGET_CHARS);
-  else contextText = '';
+  if (opts.executionContext) {
+    // Canonical standalone packaging has already budgeted optional standards.
+    // Keep research, decisions and the security checklist complete.
+    securityText = opts.executionContext.securityText;
+    contextText = opts.executionContext.contextText;
+  }
+  if (!opts.executionContext && securityText.trim()) securityText = truncateAtSectionBoundary(securityText, SECURITY_BUDGET_CHARS, { mandatory: true, label: 'security-checklist' });
+  else if (!opts.executionContext) securityText = '';
+  if (!opts.executionContext && contextText.trim()) contextText = truncateAtSectionBoundary(contextText, CONTEXT_BUDGET_CHARS);
+  else if (!opts.executionContext) contextText = '';
 
   // Same attempt record as `pre_dirty` above — never a second, independent read.
   const startSha = attemptSnapshot.start_sha;
@@ -2354,6 +2360,13 @@ async function runWriteContractCore(opts, contract) {
     constraints: opts.constraints,
   });
   const inputTokens = countTokens(prompt);
+
+  // Persist the actual packaged request before transport, including on failure.
+  if (opts.executionContext && opts.onPackagedContext) opts.onPackagedContext({
+    sha256: require('crypto').createHash('sha256').update(prompt).digest('hex'),
+    bytes: Buffer.byteLength(prompt), input_tokens: inputTokens, token_method: 'heuristic-chars-4',
+    budgets: opts.executionContext.budgets,
+  });
 
   // Initial heartbeat — pid unknown until the child spawns.
   writeJsonAtomic(resultFile, {
@@ -2576,6 +2589,11 @@ async function runWriteContractCore(opts, contract) {
       // level breaks the additive-safety invariant, not just a test.
       transport: transport.kind,
       transport_version: transport.version,
+      ...(opts.executionContext ? { packaged_context: {
+        sha256: require('crypto').createHash('sha256').update(prompt).digest('hex'),
+        bytes: Buffer.byteLength(prompt), input_tokens: inputTokens, token_method: 'heuristic-chars-4',
+        budgets: opts.executionContext.budgets,
+      } } : {}),
       context_health: contextHealth || { measurement: 'unknown', compaction_measurement: 'unknown', scope: 'sidecar-thread' },
       context_boundary: contextBoundary || { indicator: 'ctx ?', severity: 'none', additionalContext: '', checkpoint: false },
     },

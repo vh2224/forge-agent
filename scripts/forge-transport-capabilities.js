@@ -19,14 +19,17 @@ const UNIT_MODES = Object.freeze({
 });
 function capability(engine, unitType, delivery = {}) {
   let standalone = false;
+  let standaloneExecute = false;
   if (delivery && delivery.scope === 'standalone-task') {
-    try {
+    if (unitType === 'execute-task' && delivery.phase === 'execute') standaloneExecute = true;
+    else try {
       const contract = require('./forge-task-preparation').phaseContract(delivery.phase);
       standalone = !!contract && contract.unitType === unitType;
     } catch { standalone = false; }
   }
   const mode = standalone ? 'artifacts' : UNIT_MODES[unitType];
-  const supported = ['claude', 'codex'].includes(engine) && !!mode;
+  const validScope = !delivery.scope || delivery.scope === 'standalone-task' && (standalone || standaloneExecute);
+  const supported = ['claude', 'codex'].includes(engine) && !!mode && validScope;
   return {
     supported, mode: supported ? mode : null,
     reason_code: supported ? 'transport-supported' : 'unsupported-sidecar-unit',

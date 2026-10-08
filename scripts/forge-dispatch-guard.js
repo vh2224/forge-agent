@@ -110,7 +110,7 @@ function evaluateDispatchGuard(input) {
   // Legacy identity-only callers can inspect posture. Actual dispatch callers
   // pass unit_type and receive the same capability decision as the transport.
   if (sidecar && (input.unit_type !== undefined || leg === 'codex→claude')) {
-    const transport = capability(identity.resolved_engine, input.unit_type);
+    const transport = capability(identity.resolved_engine, input.unit_type, input);
     if (!transport.supported) return {
       ...errorResult(transport.reason_code, transport.hint, identity),
       posture: 'enforce', decision: 'refuse',
