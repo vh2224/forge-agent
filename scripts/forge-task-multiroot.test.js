@@ -81,10 +81,11 @@ async function scenario(vcs, moduleDir = __dirname) {
     assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'call\n');
     fs.unlinkSync(decisions);
     const events = path.join(f.owner, '.gsd/forge/events.jsonl'), validEvents = fs.readFileSync(events);
+    const eventIdentity = fs.realpathSync.native(events);
     const read = fs.readFileSync;
     let raced = false;
     fs.readFileSync = function(file, ...args) {
-      if (!raced && file === events && new Error().stack.includes('appendOwnedEvent')) {
+      if (!raced && new Error().stack.includes('appendOwnedEvent') && typeof file === 'string' && fs.realpathSync.native(file) === eventIdentity) {
         raced = true; fs.appendFileSync(events, '{"event":"unsigned-race"}\n');
       }
       return read.call(this, file, ...args);
