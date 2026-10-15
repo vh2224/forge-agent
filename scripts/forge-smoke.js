@@ -8716,32 +8716,10 @@ function smokeSchemaExtraction() {
     const installedSchemas = path.join(tmp, 'schemas');
     fs.mkdirSync(installedScripts, { recursive: true });
     fs.mkdirSync(installedSchemas, { recursive: true });
-    function localRequires(file) {
-      const src = fs.readFileSync(path.join(SCRIPTS, file), 'utf8');
-      const out = new Set();
-      const re = /require\('\.\/([^']+)'\)/g;
-      let m;
-      while ((m = re.exec(src))) {
-        let dep = m[1];
-        if (!dep.endsWith('.js')) dep += '.js';
-        out.add(dep);
-      }
-      return out;
-    }
-    const neededScripts = new Set(['forge-xllm.js']);
-    const queue = ['forge-xllm.js'];
-    while (queue.length) {
-      const cur = queue.shift();
-      for (const dep of localRequires(cur)) {
-        if (!neededScripts.has(dep)) {
-          neededScripts.add(dep);
-          queue.push(dep);
-        }
-      }
-    }
-    for (const name of neededScripts) {
-      fs.copyFileSync(path.join(SCRIPTS, name), path.join(installedScripts, name));
-    }
+    // Mirror the installed runtime tree instead of parsing JavaScript with a
+    // require regex: comments and string examples are not dependencies. Node
+    // still resolves genuine imports and fails on missing runtime modules.
+    fs.cpSync(SCRIPTS, installedScripts, { recursive: true });
     fs.copyFileSync(challengePath, path.join(installedSchemas, 'challenge.schema.json'));
     fs.copyFileSync(verdictPath, path.join(installedSchemas, 'verdict.schema.json'));
     let installed;
@@ -8762,6 +8740,16 @@ function smokeSchemaExtraction() {
     assert(Boolean(installed && installed.PROTOCOL_VERSION === 2
       && /protocol_version:[ \t]*PROTOCOL_VERSION/.test(adapterSource)),
       '(e) adapter-produced result payloads carry protocol_version 2');
+
+    // A fresh process must still reject a genuinely missing direct dependency;
+    // the successful require above must not mask this through the module cache.
+    fs.unlinkSync(path.join(installedScripts, 'forge-classify-error.js'));
+    const missingDependency = spawnSync(process.execPath, ['-e',
+      'require(' + JSON.stringify(path.join(installedScripts, 'forge-xllm.js')) + ')'], { encoding: 'utf8' });
+    assert(missingDependency.status !== 0 && /MODULE_NOT_FOUND/.test(missingDependency.stderr)
+      && missingDependency.stderr.includes('forge-classify-error.js'),
+    '(d control) installed adapter refuses a missing genuine runtime dependency', missingDependency.stderr);
+
   } finally {
     cleanup(tmp);
   }
@@ -10563,9 +10551,9 @@ function smokeDoctorPlanRepo() {
 // They are part of the Section 76 acceptance record and should remain with it.
 // The workflow assertion deliberately reads the checked-in file used by CI.
 // This keeps the smoke contract coupled to the runner setup that guarantees svn.
-// The exact occurrence count prevents a prose-only mention from satisfying it.
+// Executable command checks prevent prose-only mentions from satisfying it.
 // The ordering check models the executable sequence, not merely document presence.
-// The Linux condition protects local macOS and Windows development environments.
+// Each installation is scoped to its runner; local development installs nothing.
 // The extracted decision test makes the enforced branch independently replayable.
 // Its collaborators are plain values, so no platform mutation is required.
 // A CI Linux runner with no binary is therefore a counted failure.
@@ -10585,23 +10573,29 @@ function smokeSvnFixture() {
   process.stdout.write('\n▸ Section 76: fixture SVN real + skip contado\n');
   const source = fs.readFileSync(__filename, 'utf8');
   const repoRoot = path.dirname(SCRIPTS);
-  const ci = fs.readFileSync(path.join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
-  // Case-insensitive count of the installation ACTION only (the `run:` line),
-  // excluding the `- name:` step label — a step's display name ("Install
-  // Subversion") is not itself an installation reference, and counting it
-  // would double-count the same single step. Case-insensitive so a
-  // `Subversion`/`SUBVERSION` variant in the install command itself is never
-  // silently missed by a literal-lowercase match.
-  const installLines = ci.split('\n').filter((l) => !/^\s*-\s*name\s*:/i.test(l));
-  const svnCount = installLines.join('\n').toLowerCase().split('subversion').length - 1;
-  const installIndex = ci.indexOf('Install Subversion');
-  const smokeIndex = ci.indexOf('Smoke suite');
-  const installStep = ci.slice(installIndex, smokeIndex);
-  assert(svnCount === 1, '(h) ci.yml contains exactly one subversion installation reference', `count=${svnCount}`);
-  assert(installIndex >= 0 && smokeIndex >= 0 && installIndex < smokeIndex,
-    '(h) Subversion installation precedes the smoke suite', JSON.stringify({ installIndex, smokeIndex }));
-  assert(/if:\s*runner\.os\s*==\s*'Linux'/.test(installStep),
-    '(h) Subversion installation is Linux-only', installStep);
+  const ci = readRepoText(path.join(repoRoot, '.github', 'workflows', 'ci.yml'));
+  // Match executable provisioning steps, scoped independently to each runner.
+  const steps = ci.match(/^      - name:[^\n]*(?:\n(?!      - name:)[^\n]*)*/gm) || [];
+  const suitesIndex = ci.indexOf('      - name: Run test suites');
+  const smokeIndex = ci.indexOf('      - name: Smoke suite');
+  for (const { platform, command } of [
+    { platform: 'Linux', command: /run:\s*sudo apt-get update && sudo apt-get install -y subversion/ },
+    { platform: 'macOS', command: /run:\s*brew install subversion/ },
+    { platform: 'Windows', command: /run:\s*\|\s*choco install svn --yes --no-progress/ },
+  ]) {
+    const matching = steps.filter(step => command.test(step));
+    assert(matching.length === 1, '(h) exactly one executable SVN install for ' + platform, 'count=' + matching.length);
+    const step = matching[0] || '';
+    assert(step.includes("if: runner.os == '" + platform + "'"),
+      '(h) SVN provisioning is scoped to ' + platform, step);
+    const installIndex = ci.indexOf(step);
+    assert(step && installIndex >= 0 && suitesIndex >= 0 && installIndex < suitesIndex && suitesIndex < smokeIndex,
+      '(h) ' + platform + ' SVN installation precedes tests and smoke', JSON.stringify({ installIndex, suitesIndex, smokeIndex }));
+  }
+  const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /svnadmin --version --quiet/.test(step));
+  assert(verifySteps.length === 1 && !/^\s*if:/m.test(verifySteps[0])
+    && ci.indexOf(verifySteps[0]) >= 0 && ci.indexOf(verifySteps[0]) < suitesIndex,
+    '(h) svn and svnadmin are verified before test suites', JSON.stringify(verifySteps));
 
   const decisionMatch = source.match(/function svnGateDecision\(env, platform, present\) \{[\s\S]*?\n\}/);
   assert(!!decisionMatch, '(h) svn gate decision can be extracted from source');
