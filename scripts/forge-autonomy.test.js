@@ -166,6 +166,18 @@ function growingFileIo(readLengths) {
   };
 }
 
+test('owner identities use native realpaths even when lexical temp paths differ', () => {
+  const f = fixture();
+  try {
+    gate(f);
+    const validated = require('./forge-autonomy-sources').validateManifest(f.input);
+    assert.strictEqual(validated.owner, fs.realpathSync.native(f.root));
+    assert.deepStrictEqual(validated.diagnostics, []);
+    const report = buildAutonomyReport(f.input);
+    assert.strictEqual(report.families.human_interventions.measures.registered_human_answers.value, 1);
+  } finally { f.cleanup(); }
+});
+
 test('four families remain present and unknown when no sources are supplied', () => {
   const f = fixture();
   try {

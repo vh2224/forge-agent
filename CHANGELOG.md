@@ -1548,7 +1548,7 @@ All 9 scripts auto-installed via existing `install.sh` / `install.ps1` globs —
 
 - feat: add CHANGELOG.md generation to release workflow (bfbba43)
 
-## Unreleased — contrato de execução multiroot
+## 4.40.4 — contrato de execução multiroot
 
 - Contrato v2 de raízes físicas Git/SVN com owner externo, plano completo, preflight de execução e claims atômicos por raiz.
 - Snapshots, deltas, reset comprovado, verificação e entrega por critério abrangem todos os checkouts; events deixa de ser exclusão de conteúdo.

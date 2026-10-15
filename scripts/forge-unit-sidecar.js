@@ -196,7 +196,9 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
   const bad = reason => ({ ok: false, reason });
   if (!value || typeof value !== 'object' || Array.isArray(value) || !['done', 'partial', 'blocked'].includes(value.status)
     || typeof value.summary !== 'string' || !value.summary.trim()
-    || !Array.isArray(value.questions) || !value.questions.every(q => typeof q === 'string' && q.trim())
+    || !Array.isArray(value.questions) || !value.questions.every(q => typeof q === 'string' ? q.trim() : q && typeof q === 'object' && !Array.isArray(q)
+      && typeof q.id === 'string' && q.id.trim() && typeof q.question === 'string' && q.question.trim()
+      && Object.keys(q).every(key => ['id', 'question'].includes(key)))
     || !Array.isArray(value.artifacts)
     || Object.keys(value).some(k => !['status', 'summary', 'questions', 'artifacts'].includes(k))) return bad('schema-invalid');
   if (value.artifacts.length > 32) return bad('artifact-limit');
@@ -215,7 +217,7 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
   if (options.forbidArtifactsOnNonDone && value.status !== 'done' && value.artifacts.length) return bad('artifacts-on-non-done');
   if (options.forbidArtifactsOnNonDone && (Buffer.byteLength(value.summary, 'utf8') > MAX_PREPARATION_SUMMARY_BYTES
       || value.questions.length > MAX_PREPARATION_QUESTIONS
-      || value.questions.some(question => Buffer.byteLength(question, 'utf8') > MAX_PREPARATION_QUESTION_BYTES))) {
+      || value.questions.some(question => Buffer.byteLength(typeof question === 'string' ? question : JSON.stringify(question), 'utf8') > MAX_PREPARATION_QUESTION_BYTES))) {
     return bad('payload-limit');
   }
   if (value.status === 'done' && !required.every(p => seen.has(p))) return bad('artifact-missing');
@@ -413,6 +415,7 @@ function beginArtifactAttempt(request) {
     before_state: beforeState,
     preparation_surface: request.scope === 'standalone-task' && request.route?.worker_mode === 'native'
       ? preparationSurfaceSnapshot(request) : null,
+    input_pending_questions: request.pending_questions || [],
     request_fingerprint: request.preparationRequestFingerprint || null,
     preparation_identity: request.preparationIdentity || null,
     route: request.route, route_identity: routeIdentity(request.route, request.unitType), provider_called: false };
@@ -536,6 +539,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   const pendingQuestions = require('./forge-interaction').mergePendingQuestions(request.pending_questions || [], rawResult.questions || []);
   const record = { phase: 'ready', fingerprint, dispatch_id: request.dispatchId,
     ...(planContract ? { plan_contract: planContract } : {}), pending_questions: pendingQuestions,
+    input_pending_questions: request.pending_questions || [],
     request_fingerprint: request.preparationRequestFingerprint || null,
     preparation_identity: request.preparationIdentity || existing.preparation_identity || null,
     route: request.route, route_identity: routeIdentity(request.route, request.unitType),
@@ -1245,6 +1249,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
     ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
+    input_pending_questions: r.pending_questions || [],
     request_fingerprint: r.preparationRequestFingerprint || null,
     preparation_identity: r.preparationIdentity || null,
     ...(fix ? { kind: 'review-fix', review_fix_identity: fix.brief.identity, reset_state_file: fix.stateFile,
@@ -1470,6 +1475,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           effort_argument: route.effort || null, capabilities_source: 'sidecar-transport' } }
       : { ...(loc.preparation ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : {}), phase: 'ready', fingerprint, dispatch_id: dispatchId, result: { ...result, dispatch_id: dispatchId,
         workflow_id: r.workflowId, host_runtime: route.host_runtime, worker_engine: options.engine },
+        input_pending_questions: r.pending_questions || [],
         request_fingerprint: r.preparationRequestFingerprint || null,
         preparation_identity: r.preparationIdentity || null,
         route, route_identity: routeIdentity(route, r.unitType), provider_called: true,

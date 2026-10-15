@@ -398,7 +398,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
       if (receipt.phase === 'failed') return replayedFailure(receipt);
       if (receipt.phase === 'ready') {
         const storedRoute = validateRoute(receipt.route, request.contract, request);
-        request.pending_questions = receipt.pending_questions || [];
+        request.pending_questions = receipt.input_pending_questions || [];
         const prompt = buildPreparationPrompt(request);
         const delivery = deliveryRequest(request, storedRoute, prompt);
         if (unit.artifactFingerprint(delivery) !== receipt.fingerprint) {

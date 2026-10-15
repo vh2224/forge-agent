@@ -58,7 +58,12 @@ function prepare(r, root, cwd) {
   if (r.writableRoots?.some(p => !extras.some(e => roots.key(e) === roots.key(fs.realpathSync.native(p))))) fail('execution-extra-root-undeclared');
   const planFile = path.join(root, loc.task, `${r.taskId}-PLAN.md`);
   physical(root, planFile);
-  if (!r.planFile || path.resolve(r.planFile) !== planFile) fail('execution-plan-path-mismatch');
+  if (!r.planFile) fail('execution-plan-path-mismatch');
+  const suppliedPlan = path.resolve(r.planFile);
+  // Canonicalize only the owner prefix; physical() rejects links inside it.
+  const suppliedOwner = path.resolve(path.dirname(suppliedPlan), '../../..');
+  if (roots.key(path.join(suppliedOwner, loc.task, r.taskId + '-PLAN.md')) !== roots.key(suppliedPlan)
+      || roots.key(fs.realpathSync.native(suppliedOwner)) !== roots.key(fs.realpathSync.native(root))) fail('execution-plan-path-mismatch');
   const plan = read(planFile);
   // Preserve the existing plan gate's off/skip policy, but require the caller to
   // carry that actual decision. An approved marker never causes a new question.
@@ -159,6 +164,9 @@ function protectedSnapshot(root) {
       return;
     }
     observed.push({ file, rel, stat });
+    result[rel] = fileDigest(file, stat);
+  }
+  function fileDigest(file, stat) {
     const digest = crypto.createHash('sha256');
     const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
     try {
@@ -174,7 +182,7 @@ function protectedSnapshot(root) {
       }
       sameStat(stat, fs.fstatSync(fd, { bigint: true }));
       sameStat(stat, statAt(file));
-      result[rel] = digest.digest('hex');
+      return digest.digest('hex');
     } finally { fs.closeSync(fd); }
   }
   const gsd = path.join(root, '.gsd');
@@ -194,7 +202,7 @@ function protectedSnapshot(root) {
       if (JSON.stringify(names) !== JSON.stringify(currentNames)) {
         fail('execution-protected-snapshot-unstable');
       }
-    }
+    } else if (fileDigest(file, current) !== result[rel]) fail('execution-protected-snapshot-unstable');
   }
   return result;
 }

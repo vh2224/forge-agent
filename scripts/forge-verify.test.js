@@ -344,6 +344,20 @@ test('v2 root verification executes every cwd and refuses one failing root or mi
   strict.strictEqual(fs.existsSync(require('path').join(f.b, '.gsd')), false); f.cleanup();
 });
 
+test('single-root legacy capture normalizes artifacts and still detects missing outputs', () => {
+  const strict = require('assert'), lab = require('./forge-code-roots.test'), f = lab.fixture();
+  const contract = { ...f.contract, code_roots: [f.contract.code_roots[0]] };
+  const planText = lab.plan(f.contract).replace(/^roots_schema:.*\n/m, '').replace(/beta::same.txt/g, 'same.txt').replace(/alpha::same.txt/g, 'same.txt');
+  const options = { unit: { type: 'task', id: 'T-legacy' }, commandsByRoot: { alpha: ['node -e "process.exit(0)"'] } };
+  try {
+    const captured = require('./forge-verify').captureRootDelivery(contract, planText, options);
+    strict.strictEqual(captured.passed, true);
+    strict(captured.artifacts[0].result.rows.every(row => row.path === 'alpha::same.txt'));
+    fs.unlinkSync(path.join(f.a, 'same.txt'));
+    strict.strictEqual(require('./forge-verify').captureRootDelivery(contract, planText, options).passed, false);
+  } finally { f.cleanup(); }
+});
+
 test('resource telemetry uses the caller sink without unsigned owner writes', () => {
   const strict = require('assert'), api = require('./forge-verify');
   const cwd = tmpRepo(), gsdDir = path.join(cwd, '.gsd'), events = path.join(gsdDir, 'forge/events.jsonl');

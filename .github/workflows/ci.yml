@@ -89,6 +89,23 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y subversion
 
+      - name: Install Subversion (macOS fixtures)
+        if: runner.os == 'macOS'
+        run: brew install subversion
+
+      - name: Install Subversion (Windows fixtures)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install svn --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'C:\Program Files\SlikSvn\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Verify Subversion fixture tools
+        run: |
+          svn --version --quiet
+          svnadmin --version --quiet
+
       - name: Run test suites
         # The baseline is what makes "CI is red" carry information again. Every
         # suite still runs and logs; only the exit code consults the known-failure

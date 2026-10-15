@@ -89,14 +89,14 @@ function resolveRoots(input, options = {}) {
   if (!nonEmpty(input.owner_root)) return { error: 'owner_root_missing' };
   const ownerCandidate = path.resolve(baseDir, input.owner_root);
   let ownerReal;
-  try { ownerReal = fs.realpathSync(ownerCandidate); } catch (_) { return { error: 'owner_root_unreadable' }; }
+  try { ownerReal = fs.realpathSync.native(ownerCandidate); } catch (_) { return { error: 'owner_root_unreadable' }; }
   let resolvedOwner;
   try { resolvedOwner = resolveOwner(ownerReal, { stopAt: ownerReal }); } catch (_) { return { error: 'owner_root_invalid' }; }
-  if (!resolvedOwner || !samePath(fs.realpathSync(resolvedOwner), ownerReal)) return { error: 'owner_root_not_project' };
+  if (!resolvedOwner || !samePath(fs.realpathSync.native(resolvedOwner), ownerReal)) return { error: 'owner_root_not_project' };
 
   const codeCandidate = nonEmpty(input.code_root) ? path.resolve(baseDir, input.code_root) : ownerReal;
   let codeReal;
-  try { codeReal = fs.realpathSync(codeCandidate); } catch (_) { return { error: 'code_root_unreadable' }; }
+  try { codeReal = fs.realpathSync.native(codeCandidate); } catch (_) { return { error: 'code_root_unreadable' }; }
   let branch = null;
   if (!samePath(ownerReal, codeReal)) {
     if (!nonEmpty(input.branch)) return { error: 'worktree_branch_missing' };
@@ -146,9 +146,9 @@ function validateManifest(input, options = {}) {
 
 function rootsStillValid(context) {
   try {
-    if (!samePath(fs.realpathSync(context.owner), context.owner) || !samePath(fs.realpathSync(context.code), context.code)) return false;
+    if (!samePath(fs.realpathSync.native(context.owner), context.owner) || !samePath(fs.realpathSync.native(context.code), context.code)) return false;
     const owner = resolveOwner(context.owner, { stopAt: context.owner });
-    if (!owner || !samePath(fs.realpathSync(owner), context.owner)) return false;
+    if (!owner || !samePath(fs.realpathSync.native(owner), context.owner)) return false;
   } catch (_) {
     return false;
   }
@@ -188,7 +188,7 @@ function readBoundedStableFile(file, maxBytes = MAX_FILE_BYTES, options = {}) {
     }
     after = io.fstatSync(descriptor);
     pathAfter = io.statSync(file);
-    realAfter = io.realpathSync(file);
+    realAfter = (io.realpathSync.native || io.realpathSync)(file);
   } catch (_) {
     return { error: 'source_unreadable' };
   } finally {
@@ -564,7 +564,7 @@ function readAutonomyManifest(file, options = {}) {
   const absolute = path.resolve(file);
   let real;
   try {
-    real = (options.io || fs).realpathSync(absolute);
+    real = ((options.io || fs).realpathSync.native || (options.io || fs).realpathSync)(absolute);
   } catch (_) {
     return { error: diagnostic('manifest_unreadable') };
   }

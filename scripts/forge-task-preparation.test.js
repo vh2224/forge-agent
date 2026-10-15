@@ -148,6 +148,9 @@ async function main() {
       const firstEvents = fs.readFileSync(path.join(request.contextRoot, '.gsd', 'forge', 'events.jsonl'), 'utf8')
         .trim().split(/\r?\n/).map(line => JSON.parse(line));
       assert.equal(firstEvents.filter(event => event.event === 'sidecar-unit').at(-1).provider_called, true);
+      const replay = await prep.startStandaloneTaskPreparation(request, { resolveDispatch() { throw Error('partial replay must not resolve'); } });
+      assert.equal(replay.replayed, true, JSON.stringify(replay));
+      assert.equal(calls, 1);
       const continuation = { ...request, prompt: 'UNIQUE-PRODUCTION-SIDECAR-PROMPT-CONTINUED',
         dispatchId: `${request.dispatchId}-continued`, resultFile: request.resultFile.replace('.json', '-continued.json'),
         continuation: { from_dispatch_id: request.dispatchId, result_file: request.resultFile,
@@ -337,6 +340,44 @@ async function main() {
         return envelope(request);
       } });
     assert.equal(second.ok, true, JSON.stringify(second));
+  });
+
+  await test('partial replay preserves input identity for native and injected transports', async () => {
+    for (const native of [false, true]) {
+      const request = fixture({ phase: 'discuss', ...(native ? { model: 'gpt-5.6-sol' } : {}) });
+      const partial = { status: 'partial', summary: 'Need decision', questions: [{ id: 'source', question: 'Which source?' }], artifacts: [] };
+      let calls = 0;
+      if (native) {
+        request.activeCapabilities = codexCapabilities();
+        const started = await prep.startStandaloneTaskPreparation(request);
+        const accepted = await prep.acceptStandaloneTaskPreparation(request, { route: started.route, rawResult: framed(partial),
+          invocationTelemetry: started.invocation.telemetry, providerCalled: true });
+        assert.equal(accepted.status, 'partial', JSON.stringify(accepted));
+      } else {
+        const accepted = await prep.prepareStandaloneTask(request, { invokeSidecar: async () => { calls++; return partial; } });
+        assert.equal(accepted.status, 'partial', JSON.stringify(accepted));
+      }
+      const options = { resolveDispatch() { throw Error('replay must not resolve'); }, invokeSidecar() { throw Error('replay must not invoke'); } };
+      const replay = await prep.startStandaloneTaskPreparation(request, options);
+      assert.equal(replay.replayed, true, JSON.stringify(replay));
+      assert.deepEqual(replay.result.questions, partial.questions);
+      assert.equal(calls, native ? 0 : 1);
+      const continuation = { ...request, dispatchId: request.dispatchId + '-answer', resultFile: request.resultFile.replace('.json', '-answer.json'),
+        continuation: { from_dispatch_id: request.dispatchId, result_file: request.resultFile, answers: [{ id: 'source', answer: 'Schema' }] } };
+      // A continuation has answered input questions plus a new output question.
+      const next = { status: 'partial', summary: 'Another decision', questions: [{ id: 'scope', question: 'Which scope?' }], artifacts: [] };
+      let accepted;
+      if (native) {
+        const started = await prep.startStandaloneTaskPreparation(continuation);
+        accepted = await prep.acceptStandaloneTaskPreparation(continuation, { route: started.route, rawResult: framed(next),
+          invocationTelemetry: started.invocation.telemetry, providerCalled: true });
+      } else accepted = await prep.prepareStandaloneTask(continuation, { invokeSidecar: async () => next });
+      assert.equal(accepted.status, 'partial', JSON.stringify(accepted));
+      fs.unlinkSync(request.resultFile); fs.unlinkSync(request.resultFile + '.receipt.json');
+      const replayNext = await prep.startStandaloneTaskPreparation(continuation, options);
+      assert.equal(replayNext.replayed, true, JSON.stringify(replayNext));
+      assert.deepEqual(replayNext.result.questions, next.questions);
+    }
   });
 
   await test('partial questions publish nothing and explicit continuation uses a new fingerprint and prompt', async () => {

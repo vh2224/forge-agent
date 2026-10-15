@@ -447,7 +447,12 @@ function buildDelivery(input, options = {}) {
   const inventory = inventoryPlan(planRaw, planReference, unit);
   diagnostics.push(...inventory.diagnostics);
   const criteria = inventory.criteria;
+  const checkedPlan = executionContract ? require('./forge-code-roots').validatePlan(planRaw, executionContract) : null;
   if (executionContract) for (const criterion of criteria) {
+    for (const field of ['artifact_path', 'link_from', 'link_to']) if (criterion[field]) {
+      const rootPaths = require('./forge-code-roots');
+      criterion[field] = rootPaths.qualified(rootPaths.resolvePath(executionContract, criterion[field], { legacy: checkedPlan.schema_version === 1 }));
+    }
     const paths = criterion.artifact_path ? [criterion.artifact_path]
       : criterion.link_from && criterion.link_to ? [criterion.link_from, criterion.link_to] : [];
     criterion.required_roots = paths.length ? [...new Set(paths.map(value => require('./forge-code-roots').resolvePath(executionContract, value).root_id))]

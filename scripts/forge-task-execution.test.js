@@ -178,6 +178,7 @@ function snapshotRegressions() {
     ['replace-during-read', ({ first, dir }) => { fs.renameSync(first, path.join(dir, 'saved')); write(first, 'initial'); }],
     ['delete-during-read', ({ first }) => fs.unlinkSync(first)],
     ['late-rewrite', ({ first }) => write(first, 'changed'), true],
+    ['late-rewrite-coarse-timestamps', ({ first }) => write(first, 'changed'), true],
     ['late-addition', ({ first }) => write(path.join(path.dirname(first), 'added.md'), 'new'), true],
     ['late-deletion', ({ first }) => fs.unlinkSync(first), true],
     ['late-directory-replacement', ({ first, dir }) => {
@@ -188,8 +189,13 @@ function snapshotRegressions() {
     const dir = owner(name), first = path.join(dir, '.gsd/a/first.md'), last = path.join(dir, '.gsd/z.md');
     write(first, 'initial'); write(last, 'last');
     const opened = new Map(), open = fs.openSync, close = fs.closeSync;
+    const lstat = fs.lstatSync, fstat = fs.fstatSync;
+    const coarse = stat => name === 'late-rewrite-coarse-timestamps'
+      ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { mtimeNs: 0n, ctimeNs: 0n }) : stat;
     let changed = false;
     withFs({
+      lstatSync(...args) { return coarse(lstat(...args)); },
+      fstatSync(...args) { return coarse(fstat(...args)); },
       openSync(...args) { const descriptor = open(...args); opened.set(descriptor, args[0]); return descriptor; },
       closeSync(descriptor) { try { return close(descriptor); } finally { opened.delete(descriptor); } },
       readSync(...args) {
@@ -249,6 +255,15 @@ async function main() {
     assert.throws(() => unit.locations({ scope: 'standalone-task', phase: 'execute', unitType: 'execute-task', taskId: id, ...change }));
   }
   assert.throws(() => unit.locations({ unitType: 'execute-task', taskId: id }), /invalid-milestone/);
+  const aliasFixture = setup(), alias = path.join(aliasFixture.dir, 'owner-alias');
+  fs.symlinkSync(aliasFixture.owner, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const aliasedPlan = path.join(alias, '.gsd/tasks', id, id + '-PLAN.md');
+  const preparedAlias = execution.prepare({ ...aliasFixture.r, planFile: aliasedPlan }, fs.realpathSync.native(aliasFixture.owner), aliasFixture.cwd);
+  assert(preparedAlias.plan_hash, 'owner aliases preserve plan identity');
+  assert.throws(() => execution.prepare({ ...aliasFixture.r, planFile: path.join(alias, 'elsewhere.md') }, aliasFixture.owner, aliasFixture.cwd), /execution-plan-path-mismatch/);
+  const taskAlias = path.join(aliasFixture.owner, '.gsd/tasks', id + '-alias');
+  fs.symlinkSync(aliasFixture.task, taskAlias, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => execution.prepare({ ...aliasFixture.r, planFile: path.join(taskAlias, id + '-PLAN.md') }, aliasFixture.owner, aliasFixture.cwd), /execution-plan-path-mismatch/);
   const f = setup();
   assert.strictEqual(f.r.route.model, 'claude-opus-5-5'); assert.strictEqual(f.r.route.effort, 'high');
   assert.strictEqual(f.r.route.resolved_worker_engine, 'claude');

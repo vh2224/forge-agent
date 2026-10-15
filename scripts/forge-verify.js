@@ -866,8 +866,7 @@ function captureRootDelivery(contract, planText, options = {}) {
   const parsed = require('./forge-must-haves').parseMustHaves(planText);
   const gate = runRootVerification(contract, { ...options, taskPlanVerify: parsePlanVerify(planText), planFingerprint: roots.digest(planText) });
   const artifacts = gate.roots.map(envelope => {
-    const entries = parsed.artifacts.filter(row => roots.resolvePath(contract, row.path).root_id === envelope.root_id)
-      .map(row => ({ ...row, path: roots.resolvePath(contract, row.path).path }));
+    const entries = checked.artifacts.filter(row => row.root_id === envelope.root_id);
     const result = require('./forge-verifier').verifyArtifact({ ...parsed, artifacts: entries, key_links: [] }, [], { cwd: envelope.code_dir });
     result.rows = result.rows.map(row => ({ ...row, path: `${envelope.root_id}::${row.path}` }));
     result.missing = checked.outputs.filter(row => row.root_id === envelope.root_id).filter(row => {
