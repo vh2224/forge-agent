@@ -210,6 +210,11 @@ function renderDispatchEvent(args, route, now) {
   return `${JSON.stringify(buildDispatchEvent(args, route, now))}\n`;
 }
 
+async function appendDispatchEvent(broker, args, route, now = new Date().toISOString()) {
+  require('./forge-artifact-reconciliation').assertBroker(broker);
+  return broker.append(args.relativePath || '.gsd/forge/events.jsonl', renderDispatchEvent(args, route, now));
+}
+
 function main(argv, streams, now) {
   const io = streams || { stdout: process.stdout, stderr: process.stderr };
   const stamp = now || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -232,7 +237,7 @@ function main(argv, streams, now) {
   return 0;
 }
 
-module.exports = { FLAGS, DispatchEventError, parseArgs, buildDispatchEvent, renderDispatchEvent, main };
+module.exports = { FLAGS, DispatchEventError, parseArgs, buildDispatchEvent, renderDispatchEvent, appendDispatchEvent, main };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

@@ -535,6 +535,7 @@ const request = {
   taskId: bindings.taskId,
   cwd: bindings.cwd,
   contextRoot: bindings.contextRoot,
+  ...(bindings.execution_contract ? { execution_contract: bindings.execution_contract } : {}),
   hostRuntime: "claude",
   workflowId: bindings.workflowId,
   dispatchId: bindings.dispatchId,
@@ -1728,3 +1729,11 @@ Execute /forge-task --resume {TASK_ID} para continuar.
 ```
 
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
+
+## Standalone physical roots and recovery
+
+For execution_contract v2, the canonical flow in shared/forge-bidirectional-sidecar.md § Contrato de execução v2 supersedes legacy single-CODE_DIR command blocks above. Preserve the same contract through preparation, full PLAN preflight, claim derivation/acquisition, request construction, execution, verification and delivery. Resolve all physical roots and put GSD artifacts only in owner. Use forge-claim-gate.recordAndEvaluate with executionContract; copy its current claim/runId into the unit request. Require proceed, current generation and real adapter capability before writer dispatch. Do not flatten qualified paths or silently select the primary root.
+
+On failure call forge-attempt-recovery.js --inspect and the --preparation/--unit entrypoint with the saved state/receipt. Keep recoveryStateFile outside the owner and every writable root. Live host process inspection, native invocation validation and reset ownership callbacks are passed through recoverStandaloneTask/recoverUnitSidecar; JSON cannot manufacture these capabilities. Preserve the deadline/reservations and use the broker/reconcileArtifactAttempt replay for saved candidates. These rules supersede unconditional legacy stop/retry/fallback prose for this contract, without bypassing gates or adding model candidates. Do not execute inline.
+
+Persist necessary questions by ID using forge-interaction; a continuation answers only explicit IDs and keeps remaining questions pending after restart. Existing authorizations remain valid; no reapproval is required for an already authorized compatible list member. Report fixture versus provider/UI/sandbox/readback evidence separately.

@@ -501,5 +501,26 @@ test('CLI reads declared input and prints JSON or Markdown without writing artif
   assert.strictEqual(fs.existsSync(path.join(fx.owner, 'T01-DELIVERY.json')), false);
 });
 
+test('v2 global truths require both roots and reject a substituted identity', () => {
+  const lab = require('./forge-code-roots.test'), f = lab.fixture(), contract = f.contract;
+  const planText = lab.plan(contract); write(path.join(f.owner, 'PLAN.md'), planText);
+  const unit = { type: 'task', id: 'T-roots' }, fingerprint = delivery.sha256(planText);
+  const input = { schema_version: 2, unit, plan: 'PLAN.md', plan_fingerprint: fingerprint, execution_contract: contract, bindings: [] };
+  for (const root of contract.code_roots) {
+    writeJson(path.join(f.owner, root.id + '.json'), { schema_version: 1, kind: 'verification', unit, plan_fingerprint: fingerprint,
+      root_id: root.id, root_identity_sha256: root.identity_sha256, execution_contract_sha256: require('./forge-code-roots').digest(contract),
+      code_dir: root.path, revision: root.id + '-different-revision', environment: 'fixture', captured_at: new Date().toISOString(),
+      result: { passed: true, checks: [{ command: 'observed fixture', exitCode: 0 }] } });
+  }
+  const binding = id => ({ criterion_id: criterionId(unit, 'truth', 0), coverage: 'behavioral', root_id: id,
+    source: { kind: 'verification', path: id + '.json', check_index: 0 } });
+  input.bindings = [binding('alpha')];
+  const build = () => delivery.buildDelivery(input, { ownerRoot: f.owner, codeDir: f.a });
+  assert.notStrictEqual(build().criteria[0].status, 'verificado');
+  input.bindings.push(binding('beta')); assert.strictEqual(build().criteria[0].status, 'verificado');
+  const source = JSON.parse(fs.readFileSync(path.join(f.owner, 'beta.json'))); source.root_identity_sha256 = 'forged';
+  writeJson(path.join(f.owner, 'beta.json'), source); assert.notStrictEqual(build().criteria[0].status, 'verificado'); f.cleanup();
+});
+
 for (const root of roots) { try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {} }
 process.stdout.write(`\n${passed} passed, ${skipped} skipped\n`);

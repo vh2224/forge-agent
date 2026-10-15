@@ -107,8 +107,8 @@ function sha(file) {
 }
 
 // ── Builders for the PURE core (no disk needed — that is the point) ────────
-const ABS_A = process.platform === 'win32' ? 'C:\\wt\\alpha' : '/wt/alpha';
-const ABS_B = process.platform === 'win32' ? 'C:\\wt\\beta' : '/wt/beta';
+const ABS_A = mktmp('physical-alpha');
+const ABS_B = mktmp('physical-beta');
 
 function writtenUnit(unit, files) {
   return { unit, owner: 'M-x', slice: 'S07', task: 'T01', files };
@@ -953,6 +953,30 @@ test('TODOS os achados históricos: o veredicto continua overlap e a razão NOME
 });
 
 // ── Suite close ────────────────────────────────────────────────────────────
+test('v2 audit reports only the root whose physical file overlaps', () => {
+  const strict = require('assert'), f = require('./forge-code-roots.test').fixture();
+  const claim = { schema_version: 2, execution_contract: f.contract, paths: ['beta::same.txt'] };
+  const result = require('./forge-claim-audit').compareClaimAudit({ code_dir: f.a, execution_contract: f.contract,
+    written: { units: [{ unit: 'execute-task/T-one', files: ['beta::same.txt'] }] },
+    claims: { claims: [{ run: 'T-other', claim, active: true }] }, declared: { byUnit: new Map() } });
+  strict.strictEqual(result.findings.length, 1, JSON.stringify(result));
+  f.cleanup();
+});
+test('v2 audit integration collects qualified deltas from every declared root', () => {
+  const strict = require('assert'), f = require('./forge-code-roots.test').fixture();
+  try {
+    const unit = 'execute-task/T-one', milestone = 'M-one';
+    const result = require('./forge-claim-audit').auditClaims({ cwd: f.owner, codeDir: f.a, milestone,
+      execution_contract: f.contract,
+      deltasByRoot: Object.fromEntries(f.contract.code_roots.map(root => [root.id,
+        { units: [{ unit, owner: milestone, files: ['same.txt'] }], skipped: [] }])),
+      collectors: { declared: () => ({ byUnit: new Map([[unit, ['alpha::same.txt', 'beta::same.txt']]]) }),
+        claims: () => ({ claims: [{ run: 'T-other', active: true, claim: {
+          schema_version: 2, execution_contract: f.contract, paths: ['beta::same.txt'] } }], sources: [], skipped: [], notes: [] }) } });
+    strict.strictEqual(result.findings.length, 1, JSON.stringify(result));
+    strict.deepStrictEqual(result.findings[0].paths, ['beta::same.txt \u00d7 beta::same.txt']);
+  } finally { f.cleanup(); }
+});
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

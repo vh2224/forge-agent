@@ -177,10 +177,14 @@ function inspectClaim(project, id, record, report, runHash) {
       source(report, 'claim-manifest-schema', { state: 'schema-invalid' }); return;
     }
     const aliases = Array.isArray(record.worktrees) ? record.worktrees.map(w => ({ ...w, branch: record.branch })) : [];
-    const codeDirectory = value.code_dir;
-    const codeRoot = safeRoot(project, codeDirectory, aliases);
+    const contract = value.claim?.schema_version === 2
+      ? require('./forge-code-roots').validateContract(value.claim.execution_contract, { owner: project, revalidate: true }) : null;
+    const legacyRoot = contract ? null : safeRoot(project, value.code_dir, aliases);
     for (const entry of value.entries) {
       if (!object(entry) || typeof entry.path !== 'string' || path.isAbsolute(entry.path)) throw new Error('entry-invalid');
+      const codeDirectory = contract ? contract.code_roots.find(root => root.id === entry.root_id)?.path : value.code_dir;
+      if (!codeDirectory) throw new Error('entry-root-invalid');
+      const codeRoot = contract ? codeDirectory : legacyRoot;
       recovery.assertSafePath(codeRoot, path.resolve(codeDirectory, entry.path), 'target');
       if (entry.present) {
         if (typeof entry.payload !== 'string') throw new Error('payload-invalid');
@@ -388,4 +392,12 @@ function renderRecovery(report) {
   return lines.join('\n') + '\n';
 }
 
-module.exports = { inspectRecovery, renderRecovery, createRecoveryReport, validId, validKey };
+function inspectAttemptRecovery(stateFile, receiptFile) {
+  const state = require('./forge-xllm-state').loadRecovery(stateFile);
+  const inspection = require('./forge-attempt-recovery').inspectReceipt(receiptFile);
+  return { unit: state.unit, phase: state.phase, started_at: state.started_at, deadline_at: state.deadline_at,
+    remaining_ms: Math.max(0, state.deadline_at - Date.now()),
+    pending_questions: state.pending_questions, attempts: state.attempts, selection: state.selection || null,
+    inspection: { ...inspection, receipt: undefined }, next_action: 'inspect-process-receipt-roots' };
+}
+module.exports = { inspectRecovery, renderRecovery, createRecoveryReport, validId, validKey, inspectAttemptRecovery };

@@ -44,4 +44,38 @@ function sync(text) {
   return { content: text + padding + block + eol };
 }
 
-module.exports = { START, END, contract, renderBlock, project, sync };
+function mergePendingQuestions(previous, questions) {
+  if (!Array.isArray(previous) || !Array.isArray(questions)) throw new Error('pending-questions-invalid');
+  const rows = new Map(previous.map(q => [q.id, { ...q }]));
+  for (const value of questions) {
+    const q = typeof value === 'string' ? { id: require('crypto').createHash('sha256').update(value).digest('hex').slice(0, 24), question: value } : value;
+    if (!q || typeof q.id !== 'string' || !q.id || typeof q.question !== 'string' || !q.question.trim()) throw new Error('pending-question-identity-required');
+    const old = rows.get(q.id);
+    if (old && old.question !== q.question) throw new Error('pending-question-identity-conflict');
+    if (!old) rows.set(q.id, { id: q.id, question: q.question, status: 'pending' });
+  }
+  return [...rows.values()];
+}
+function resolvePendingQuestions(questions, answers) {
+  if (!Array.isArray(answers) || !answers.length) throw new Error('pending-explicit-answers-required');
+  const rows = mergePendingQuestions(questions, []), seen = new Set();
+  for (const answer of answers) {
+    const question = rows.find(q => q.id === answer?.id);
+    if (!question || seen.has(answer.id) || typeof answer.answer !== 'string' || !answer.answer.trim()) throw new Error('pending-answer-id-required');
+    if (question.status === 'resolved' && question.answer !== answer.answer) throw new Error('pending-answer-conflict');
+    seen.add(answer.id); question.status = 'resolved'; question.answer = answer.answer;
+  }
+  return rows;
+}
+function persistQuestionState(file, identity, questions, answers = []) {
+  if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) throw new Error('pending-question-path-link');
+  const hash = require('./forge-code-roots').digest(identity);
+  const old = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { schema_version: 1, identity_sha256: hash, questions: [] };
+  if (old.schema_version !== 1 || old.identity_sha256 !== hash) throw new Error('pending-question-scope-mismatch');
+  let rows = mergePendingQuestions(old.questions, questions);
+  if (answers.length) rows = resolvePendingQuestions(rows, answers);
+  const next = { ...old, questions: rows };
+  require('./forge-surgical-reset').writeJsonAtomic(file, next);
+  return rows;
+}
+module.exports = { START, END, contract, renderBlock, project, sync, mergePendingQuestions, resolvePendingQuestions, persistQuestionState };

@@ -275,6 +275,19 @@ function posix(p) {
  */
 function collectWritten(cwd, opts) {
   const o = opts || {};
+  const contract = o.execution_contract || o.executionContract;
+  if (contract) {
+    const roots = require('./forge-code-roots');
+    const validated = roots.validateContract(contract, { revalidate: true });
+    const rows = validated.code_roots.map(root => {
+      const collected = collectWritten(cwd, { ...o, execution_contract: undefined, executionContract: undefined,
+        codeDir: root.path, delta: o.deltasByRoot?.[root.id] });
+      return { ...collected, units: collected.units.map(unit => ({ ...unit,
+        files: unit.files.map(file => roots.qualified(roots.resolvePath(validated, { root_id: root.id, path: file }))) })) };
+    });
+    return { vcs: 'multi', repo: validated.owner, units: rows.flatMap(row => row.units),
+      skipped: rows.flatMap(row => row.skipped), refs_examined: rows.reduce((sum, row) => sum + row.refs_examined, 0) };
+  }
   const repoRoot = o.codeDir || cwd;
   const delta = (o.delta) || writtenByUnit(repoRoot, o.deltaOptions || {});
   const units = [];
@@ -554,7 +567,7 @@ function compareClaimAudit(input) {
         scope = c.scope;
         note = c.note;
       } else {
-        const s = codeDirScope({ code_dir: codeDir }, { code_dir: (c.claim && c.claim.code_dir) || null });
+        const s = codeDirScope(i.execution_contract ? { schema_version: 2, execution_contract: i.execution_contract, paths: unit.files } : { code_dir: codeDir }, c.claim || {});
         scope = s.scope;
         note = s.note;
       }
@@ -570,7 +583,8 @@ function compareClaimAudit(input) {
 
       pairs_compared += 1;
 
-      const hit = claimsConflict({ paths: unit.files, code_dir: codeDir }, c.claim);
+      const hit = claimsConflict({ paths: unit.files, code_dir: codeDir,
+        ...(i.execution_contract ? { schema_version: 2, execution_contract: i.execution_contract } : {}) }, c.claim);
       if (!hit) continue;
       // S03 owns this set; a cause it grows without teaching this audit must be
       // loud, never silently read as "no conflict" by an `===` below.
@@ -700,6 +714,7 @@ function auditClaims(options) {
   );
 
   return compareClaimAudit({
+    execution_contract: o.execution_contract || o.executionContract,
     milestone: o.milestone || null,
     slice: o.slice || null,
     code_dir: codeDir,

@@ -33,3 +33,7 @@ All `AskUserQuestion` mentions and argument examples in Forge sources, including
 Forge enforces these instructions in its distributed prompts. Client tabs and a locked input field are not guaranteed, and prompt tests do not demonstrate client UI behavior.
 
 Installation probes `codex features list` locally with a bounded timeout before adding an absent supported default. Explicit user settings and ambiguous TOML remain untouched. Dry runs skip this probe (`questions-probe-dry-run`): capability and the prospective feature edit remain unresolved until apply; dry-run is not a guarantee of session tool availability.
+
+## Durable pending decisions
+
+Forge persists required questions as {id, question, status:'pending'} with stable IDs. forge-interaction.persistQuestionState binds the external state to the original unit/receipt; mergePendingQuestions preserves unanswered IDs across restart and handoff. Continuations provide explicit {id, answer} entries; partial answers resolve only their IDs. Missing, empty, foreign, duplicate or conflicting answers do not authorize dependent work. Legacy question strings acquire deterministic IDs; legacy answer strings require explicit ID migration. A caller's resolved live answer may issue an opaque recovery exception scoped to unit, roots, routes, purpose and expiration. Imported JSON consent is never that capability. These runtime states do not prove that a host displayed a visual card or tab.

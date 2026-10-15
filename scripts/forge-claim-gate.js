@@ -283,7 +283,7 @@ const POSTURES = ['defer', 'block'];
  * that was read and is honestly empty (`declared-empty`) — the same
  * never-collapse rule `readClaim` applies to `null` vs `{ paths: [] }`.
  */
-function deriveClaimFromPlan(cwd, planPath) {
+function deriveClaimFromPlan(cwd, planPath, executionContract) {
   const abs = path.resolve(cwd, planPath);
   let content;
   try {
@@ -294,6 +294,12 @@ function deriveClaimFromPlan(cwd, planPath) {
     throw new Error(`forge-claim-gate: plano ilegível ${abs} — ${e.message}`);
   }
 
+  if (executionContract) {
+    const roots = require('./forge-code-roots');
+    const contract = roots.validateContract(executionContract, { owner: cwd });
+    const validated = roots.validatePlan(content, contract);
+    return { eligible: true, paths: validated.writes, source: 'plan-writes', detail: null, cause: null, execution_contract: contract };
+  }
   const rel = path.relative(cwd, abs).split(path.sep).join('/');
   const d = declaredFor(cwd, { content, plan_path: rel });
 
@@ -1398,6 +1404,14 @@ function eligibilityOfPaths(paths) {
  * readyAlternatives, posture, prefsOpts, wait, emitEvent, onPoll, record }`.
  */
 function recordAndEvaluate(opts) {
+  if (opts?.executionContract || opts?.derived?.execution_contract) {
+    const handle = require('./forge-lock').acquireSync(opts.cwd, 'physical-root-claims', { allowStaleRecovery: false, retries: 1 });
+    try { return recordAndEvaluateCore({ ...opts, enforcement: 'enforcing', wait: false }); }
+    finally { handle.release(); }
+  }
+  return recordAndEvaluateCore(opts);
+}
+function recordAndEvaluateCore(opts) {
   const o = opts || {};
   const cwd = o.cwd || process.cwd();
   const runId = o.runId || null;
@@ -1442,6 +1456,7 @@ function recordAndEvaluate(opts) {
   }
 
   const claimInput = {
+    ...((o.executionContract || o.derived?.execution_contract) ? { schema_version: 2, execution_contract: o.executionContract || o.derived.execution_contract } : {}),
     unit,
     source: CLAIM_SOURCES.includes(o.source) ? o.source : 'manual',
     code_dir: typeof o.codeDir === 'string' ? o.codeDir : undefined,
@@ -1731,9 +1746,11 @@ function main(argv) {
 
   let result;
   try {
+    const executionContract = typeof args['execution-contract'] === 'string'
+      ? require('./forge-code-roots').validateContract(JSON.parse(fs.readFileSync(args['execution-contract'], 'utf8')), { owner: cwd }) : undefined;
     let derived;
     if (typeof args.plan === 'string') {
-      derived = deriveClaimFromPlan(cwd, args.plan);
+      derived = deriveClaimFromPlan(cwd, args.plan, executionContract);
     } else if (typeof args.conceded === 'string') {
       derived = deriveClaimFromConcededItems(parseConceded(args.conceded));
     } else {
@@ -1751,6 +1768,7 @@ function main(argv) {
     // `code_dir` is a GIVEN fact (contract #7): absent flag => null => scope
     // `unknown` => fail closed. Never derived from root/branch/isolation_mode.
     const claim = Object.assign(normalizeClaim({
+      ...(executionContract ? { schema_version: 2, execution_contract: executionContract } : {}),
       unit: typeof args.unit === 'string' ? args.unit : null,
       source,
       code_dir: typeof args['code-dir'] === 'string' ? args['code-dir'] : undefined,
@@ -1764,6 +1782,7 @@ function main(argv) {
       // `--claim-and-check` implies the event: a fence that records and decides
       // without leaving a trace is exactly the silence this milestone closes.
       result = recordAndEvaluate({
+        executionContract,
         cwd,
         runId: args.run,
         unit: typeof args.unit === 'string' ? args.unit : null,

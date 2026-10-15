@@ -52,14 +52,14 @@ function inside(root, target) {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 function rootRealpaths(roots) {
-  return roots.filter(nonEmpty).map((root) => fs.realpathSync(path.resolve(root)));
+  return roots.filter(nonEmpty).map((root) => fs.realpathSync.native(path.resolve(root)));
 }
 
 function resolveSafeFile(reference, roots, options = {}) {
   if (!nonEmpty(reference)) return { error: 'reference_missing' };
   const absolute = path.isAbsolute(reference) ? path.resolve(reference) : path.resolve(options.base || roots[0], reference);
   let real;
-  try { real = fs.realpathSync(absolute); } catch (error) { return { error: error.code === 'ENOENT' ? 'source_missing' : 'source_unreadable' }; }
+  try { real = fs.realpathSync.native(absolute); } catch (error) { return { error: error.code === 'ENOENT' ? 'source_missing' : 'source_unreadable' }; }
   if (!roots.some((root) => inside(root, real))) return { error: 'source_outside_roots' };
   let stat;
   try { stat = fs.statSync(real); } catch (_) { return { error: 'source_unreadable' }; }
@@ -153,7 +153,10 @@ function contextReasons(envelope, expected) {
   for (const field of ['code_dir', 'revision', 'environment', 'captured_at']) if (!nonEmpty(envelope[field])) reasons.push(`source_context_missing:${field}`);
   if (nonEmpty(envelope.code_dir)) {
     try {
-      if (fs.realpathSync(path.resolve(envelope.code_dir)) !== expected.codeDirReal) reasons.push('source_code_dir_mismatch');
+      const root = expected.executionContract?.code_roots.find(row => row.id === envelope.root_id);
+      if (expected.executionContract && (!root || envelope.root_identity_sha256 !== root.identity_sha256
+          || envelope.execution_contract_sha256 !== require('./forge-code-roots').digest(expected.executionContract))) reasons.push('source_root_identity_mismatch');
+      if (fs.realpathSync.native(path.resolve(envelope.code_dir)) !== (root ? root.path : expected.codeDirReal)) reasons.push('source_code_dir_mismatch');
     } catch (_) { reasons.push('source_code_dir_unavailable'); }
   }
   return reasons;
@@ -179,7 +182,9 @@ function verificationObservation(binding, envelope, sourcePath, criterion, expec
   const observation = observationBase(binding, `${sourcePath}#checks[${binding.source.check_index}]`, aspect);
   observation.environment = nonEmpty(envelope.environment) ? envelope.environment : null;
   observation.revision = nonEmpty(envelope.revision) ? envelope.revision : null;
+  if (expected.executionContract) observation.root_id = envelope.root_id;
   const reasons = contextReasons(envelope, expected);
+  if (expected.executionContract && criterion.artifact_path && require('./forge-code-roots').resolvePath(expected.executionContract, criterion.artifact_path).root_id !== envelope.root_id) reasons.push('criterion_root_mismatch');
   if (envelope.schema_version !== SCHEMA_VERSION || envelope.kind !== 'verification' || !isObject(envelope.result)) reasons.push('verification_envelope_invalid');
   if (!['behavioral', 'structural'].includes(binding.coverage)) reasons.push('binding_coverage_invalid');
   if (criterion.type === 'functional' && binding.coverage !== 'behavioral') reasons.push('functional_requires_behavioral_evidence');
@@ -221,7 +226,9 @@ function artifactObservation(binding, envelope, sourcePath, criterion, expected)
   const observation = observationBase(binding, `${sourcePath}#rows[${index}].${property}`, aspect);
   observation.environment = nonEmpty(envelope.environment) ? envelope.environment : null;
   observation.revision = nonEmpty(envelope.revision) ? envelope.revision : null;
+  if (expected.executionContract) observation.root_id = envelope.root_id;
   const reasons = contextReasons(envelope, expected);
+  if (expected.executionContract && criterion.artifact_path && require('./forge-code-roots').resolvePath(expected.executionContract, criterion.artifact_path).root_id !== envelope.root_id) reasons.push('criterion_root_mismatch');
   if (envelope.schema_version !== SCHEMA_VERSION || envelope.kind !== 'artifact' || !isObject(envelope.result)) reasons.push('artifact_envelope_invalid');
   if (criterion.type !== 'structural' || binding.coverage !== 'structural') reasons.push('artifact_evidence_structural_only');
   if (criterion.origin === 'key_link') reasons.push('key_link_requires_behavioral_evidence');
@@ -293,7 +300,9 @@ function applyBindings(input, criteria, context, diagnostics) {
     if (!['verification', 'artifact'].includes(binding.source.kind)) {
       criterion.observations.push(invalidObservation(binding, binding.source.path, aspect, 'binding_source_kind_invalid')); continue;
     }
-    const loaded = readJsonReference(binding.source.path, context.roots, cache, { base: context.ownerRoot });
+    const staged = context.sourceEnvelopes?.[binding.source.path];
+    const loaded = staged ? { value: staged, path: binding.source.path }
+      : readJsonReference(binding.source.path, context.roots, cache, { base: context.ownerRoot });
     if (loaded.error) { criterion.observations.push(invalidObservation(binding, binding.source.path, aspect, loaded.error)); continue; }
     if (!isObject(loaded.value)) { criterion.observations.push(invalidObservation(binding, loaded.path, aspect, 'source_schema_invalid')); continue; }
     const observation = binding.source.kind === 'verification'
@@ -318,22 +327,27 @@ function classifyCriterion(criterion) {
   for (const aspect of aspects) {
     const relevant = observations.filter((entry) => entry && entry.aspect === aspect);
     const positive = relevant.some((entry) => entry.positive === true);
+    const missingRoots = (criterion.required_roots || []).filter(root => !relevant.some(entry => entry.positive === true && entry.root_id === root));
     const negative = relevant.some((entry) => entry.negative === true);
     const limited = relevant.some((entry) => Array.isArray(entry.limitations) && entry.limitations.length > 0);
     anyPositive = anyPositive || positive;
-    fullyPositive = fullyPositive && positive && !negative && !limited;
+    fullyPositive = fullyPositive && positive && !negative && !limited && missingRoots.length === 0;
+    pending.push(...missingRoots.map(root => `root_unverified:${aspect}:${root}`));
     if (!positive) pending.push(`aspect_unverified:${aspect}`);
     if (negative && positive) pending.push(`evidence_conflict:${aspect}`);
     else if (negative) pending.push(`negative_evidence:${aspect}`);
     if (limited) pending.push(...relevant.flatMap((entry) => entry.limitations || []).map((reason) => `${aspect}:${reason}`));
     evidence.push(...relevant.map((entry) => ({ ...entry })));
   }
-  const positiveRevisions = [...new Set(observations
-    .filter((entry) => entry && aspects.includes(entry.aspect) && entry.positive === true && nonEmpty(entry.revision))
-    .map((entry) => entry.revision.trim()))].sort();
-  if (positiveRevisions.length > 1) {
+  const revisionGroups = new Map();
+  for (const entry of observations.filter(entry => entry && aspects.includes(entry.aspect) && entry.positive === true && nonEmpty(entry.revision))) {
+    const key = entry.root_id || 'legacy';
+    if (!revisionGroups.has(key)) revisionGroups.set(key, new Set());
+    revisionGroups.get(key).add(entry.revision.trim());
+  }
+  for (const revisions of revisionGroups.values()) if (revisions.size > 1) {
     fullyPositive = false;
-    pending.push(`revision_mismatch:${positiveRevisions.join(',')}`);
+    pending.push(`revision_mismatch:${[...revisions].sort().join(',')}`);
   }
   const status = fullyPositive ? 'verificado' : anyPositive ? 'parcialmente verificado' : 'não verificado';
   return { ...criterion, status, evidence, pending: [...new Set(pending)], observations: undefined,
@@ -411,12 +425,14 @@ function aggregateChildren(input, context, diagnostics) {
 }
 
 function buildDelivery(input, options = {}) {
-  if (!isObject(input) || input.schema_version !== SCHEMA_VERSION) throw new Error('input schema_version 1 is required');
+  if (!isObject(input) || ![1, 2].includes(input.schema_version)) throw new Error('input schema_version 1 or 2 is required');
   const unit = input.unit;
   if (!unitKey(unit)) throw new Error('input.unit must contain a valid type and id');
   if (!nonEmpty(options.ownerRoot) || !nonEmpty(options.codeDir)) throw new Error('ownerRoot and codeDir are required');
   const [ownerRootReal, codeDirReal] = rootRealpaths([options.ownerRoot, options.codeDir]);
-  const roots = [...new Set([ownerRootReal, codeDirReal])];
+  const executionContract = input.schema_version === 2 ? require('./forge-code-roots').validateContract(input.execution_contract, { owner: ownerRootReal, revalidate: true }) : null;
+  if (executionContract && executionContract.code_roots.find(r => r.id === executionContract.primary_root_id).path !== codeDirReal) throw new Error('delivery-primary-root-mismatch');
+  const roots = [...new Set([ownerRootReal, codeDirReal, ...(executionContract?.code_roots.map(r => r.path) || [])])];
   const planResolved = path.isAbsolute(String(input.plan || ''))
     ? { error: 'reference_not_relative' }
     : resolveSafeFile(input.plan, [ownerRootReal], { base: ownerRootReal });
@@ -431,10 +447,17 @@ function buildDelivery(input, options = {}) {
   const inventory = inventoryPlan(planRaw, planReference, unit);
   diagnostics.push(...inventory.diagnostics);
   const criteria = inventory.criteria;
+  if (executionContract) for (const criterion of criteria) {
+    const paths = criterion.artifact_path ? [criterion.artifact_path]
+      : criterion.link_from && criterion.link_to ? [criterion.link_from, criterion.link_to] : [];
+    criterion.required_roots = paths.length ? [...new Set(paths.map(value => require('./forge-code-roots').resolvePath(executionContract, value).root_id))]
+      : executionContract.code_roots.map(root => root.id);
+  }
   addAdditionalCriteria(criteria, input.additional_criteria, unit, diagnostics);
   if (criteria.length > MAX_CRITERIA) throw new Error(`criteria limit exceeded (${MAX_CRITERIA})`);
   const context = {
-    unit, ownerRoot: ownerRootReal, ownerRootReal, codeDirReal, roots,
+    unit, ownerRoot: ownerRootReal, ownerRootReal, codeDirReal, roots, executionContract,
+    sourceEnvelopes: options.sourceEnvelopes,
     planFingerprint: actualPlanFingerprint,
     inputPlanFingerprintValid: nonEmpty(input.plan_fingerprint) && input.plan_fingerprint === actualPlanFingerprint,
   };
@@ -446,6 +469,7 @@ function buildDelivery(input, options = {}) {
   const output = {
     schema_version: SCHEMA_VERSION,
     generated_by: 'forge-delivery',
+    ...(executionContract ? { execution_contract: executionContract } : {}),
     unit: canonical(unit),
     plan: { reference: planReference, fingerprint: actualPlanFingerprint, structured: inventory.structured },
     criteria: classified,

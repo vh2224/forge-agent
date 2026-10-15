@@ -30,7 +30,7 @@ const PHASE_CONTRACTS = Object.freeze({
     format: "Markdown with headings ## Summary, ## Don't Hand-Roll and ## Relevant Code." }),
   plan: Object.freeze({ unitType: 'plan-milestone', agentType: 'forge-planner', suffix: 'PLAN',
     instruction: 'Produce one standalone task implementation plan with observable must-haves. Do not create a roadmap.',
-    format: 'The canonical standalone PLAN: YAML frontmatter with tier, effort and writes (plus domain/repo only when applicable), followed by exactly ## Steps, ## Must-Haves, ## Standards and ## Files to Change.' }),
+    format: 'The canonical standalone PLAN: YAML frontmatter with tier, effort, depends, nonempty writes and expected_output, and structured must_haves containing truths, artifacts and key_links. Multi-root requires roots_schema: 2, primary_root_id, code_roots [{id,path,vcs}] and root_id::relative/path in every write/output/artifact/link. Follow with ## Steps, ## Must-Haves, ## Standards and ## Files to Change.' }),
 });
 
 function preparationError(code, stage) {
@@ -58,7 +58,7 @@ function validateContinuation(value) {
       || typeof value.from_dispatch_id !== 'string' || !value.from_dispatch_id.trim()
       || typeof value.result_file !== 'string' || !value.result_file.trim()
       || !Array.isArray(value.answers) || value.answers.length === 0
-      || !value.answers.every(answer => typeof answer === 'string' && answer.trim() && answer.length <= 4096)
+      || !value.answers.every(answer => answer && typeof answer.id === 'string' && typeof answer.answer === 'string' && answer.answer.trim() && answer.answer.length <= 4096)
       || Object.keys(value).some(key => !['from_dispatch_id', 'result_file', 'answers'].includes(key))) {
     throw preparationError('invalid-preparation-continuation', 'input');
   }
@@ -121,6 +121,14 @@ function validateRequest(raw) {
   if (request.continuation?.from_dispatch_id === request.dispatchId) {
     throw preparationError('preparation-continuation-dispatch-reused', 'input');
   }
+  if (request.execution_contract) {
+    const roots = require('./forge-code-roots');
+    const rawContract = request.execution_contract;
+    request.execution_contract = roots.validateContract(rawContract, { owner: request.contextRoot || request.cwd,
+      revalidate: rawContract.code_roots?.some(root => root.identity_sha256 !== undefined) });
+    const primary = request.execution_contract.code_roots.find(root => root.id === request.execution_contract.primary_root_id);
+    if (roots.key(roots.realDirectory(request.cwd)) !== roots.key(primary.path)) throw preparationError('execution-primary-root-mismatch', 'input');
+  }
   request.contract = contract;
   return request;
 }
@@ -143,10 +151,16 @@ function validateContinuationReceipt(request) {
   }
   const prior = receipt.result;
   if (!prior || !['partial', 'blocked'].includes(prior.status)
-      || !Array.isArray(prior.questions) || prior.questions.length === 0
-      || prior.questions.length !== request.continuation.answers.length) {
+      || !Array.isArray(prior.questions) || prior.questions.length === 0) {
     throw preparationError('preparation-continuation-not-pending', 'validation');
   }
+  const interaction = require('./forge-interaction');
+  const pending = receipt.pending_questions || interaction.mergePendingQuestions([], prior.questions);
+  const resolved = interaction.persistQuestionState(files.receiptFile + '.questions.json',
+    { ...expected, dispatch_id: receipt.dispatch_id, receipt_sha256: require('./forge-code-roots').digest(receipt) },
+    pending, request.continuation.answers);
+  if (resolved.some(q => q.status === 'pending')) throw preparationError('preparation-continuation-answers-incomplete', 'validation');
+  request.pending_questions = resolved;
 }
 
 function requiredArtifact(request, contract = request.contract || phaseContract(request.phase)) {
@@ -190,8 +204,13 @@ function validatePhaseContent(phase, taskId, content) {
   const scalar = key => [...frontmatter[1].matchAll(new RegExp(`^${key}:\\s*([^\\s#]+)(?:\\s+#.*)?$`, 'gmi'))]
     .map(match => match[1].toLowerCase());
   const tiers = scalar('tier'), efforts = scalar('effort');
-  const writes = /^writes:\s*\[\s*\]\s*$/mi.test(frontmatter[1])
-    || /^writes:\s*\r?\n\s+-\s+\S/mi.test(frontmatter[1]);
+  let writes = false;
+  try {
+    const parser = require('./forge-must-haves');
+    const fields = parser.parseExecutionFields(content), criteria = parser.parseMustHaves(content);
+    writes = parser.hasStructuredMustHaves(content) && Array.isArray(fields.depends)
+      && fields.writes?.length > 0 && fields.expected_output?.length > 0 && criteria.truths.length > 0;
+  } catch { return false; }
   const required = ['Steps', 'Must-Haves', 'Standards', 'Files to Change'];
   return tiers.length === 1 && ['light', 'standard', 'heavy', 'max'].includes(tiers[0])
     && efforts.length === 1 && ['low', 'medium', 'high', 'xhigh', 'max'].includes(efforts[0])
@@ -200,12 +219,13 @@ function validatePhaseContent(phase, taskId, content) {
 
 function preparationRequestFingerprint(request) {
   const copy = { ...request };
-  for (const key of ['contract', 'route', 'readback']) delete copy[key];
+  for (const key of ['contract', 'route', 'readback', 'ownerBroker', 'pending_questions']) delete copy[key];
   return crypto.createHash('sha256').update(JSON.stringify(copy)).digest('hex');
 }
 
 function buildPreparationPrompt(request, contract = request.contract || phaseContract(request.phase)) {
-  const input = JSON.stringify({ inputs: request.inputs || {}, continuation: request.continuation || null });
+  const input = JSON.stringify({ inputs: request.inputs || {}, continuation: request.continuation || null, pending_questions: request.pending_questions || [],
+    execution_contract: request.execution_contract || null });
   return [
     `Standalone task preparation (${request.phase}) for ${request.taskId}.`,
     contract.instruction,
@@ -242,12 +262,40 @@ function deliveryRequest(request, route, prompt, contract = request.contract || 
     hostRuntime: request.hostRuntime, workflowId: request.workflowId,
     dispatchId: request.dispatchId, resultFile: request.resultFile,
     constraints: request.constraints || { auto_commit: false, deploy: false },
-    inputs: request.inputs || {}, ...(request.continuation ? { continuation: request.continuation } : {}),
+    inputs: request.inputs || {}, pending_questions: request.pending_questions || [], ...(request.continuation ? { continuation: request.continuation } : {}),
     unitType: contract.unitType, route, prompt,
+    ...(request.recoveryStateFile ? { recoveryStateFile: request.recoveryStateFile } : {}),
+    ...(request.ownerBroker ? { ownerBroker: request.ownerBroker } : {}),
+    ...(request.execution_contract ? { execution_contract: request.execution_contract } : {}),
+    ...(request.executionRouting ? { executionRouting: request.executionRouting } : {}),
+    ...(request.activeCapabilities ? { activeCapabilities: request.activeCapabilities } : {}),
+    ...(request.effortBinding ? { effortBinding: request.effortBinding } : {}),
     preparationRequestFingerprint: preparationRequestFingerprint(request),
     preparationIdentity: { scope: request.scope, phase: request.phase,
       taskId: request.taskId, workflowId: request.workflowId },
   };
+}
+
+function preflightPlan(request, content) {
+  const roots = require('./forge-code-roots');
+  const contract = request.execution_contract ? roots.validateContract(request.execution_contract, { owner: request.contextRoot || request.cwd })
+    : roots.singleContract(request.contextRoot || request.cwd, request.cwd);
+  // The resolver reads exact plan bytes, not the planner's tier/permission. This
+  // temporary input is outside all writable roots and never published as a plan.
+  const candidateFile = `${request.resultFile}.preflight-${roots.digest(content)}.md`;
+  for (const root of [contract.owner, ...contract.code_roots.map(r => r.path)]) if (roots.within(root, candidateFile)) throw preparationError('preflight-path-in-worker-surface', 'validation');
+  if (!fs.existsSync(candidateFile)) fs.writeFileSync(candidateFile, content, { flag: 'wx', mode: 0o600 });
+  if (roots.digest(fs.readFileSync(candidateFile)) !== roots.digest(content)) throw preparationError('preflight-plan-raced', 'validation');
+  const route = resolver.resolveDispatch({ ...(request.executionRouting || {}), cwd: contract.owner, unitType: 'execute-task',
+    unitId: request.taskId, hostRuntime: request.hostRuntime || request.route?.host_runtime, planPath: candidateFile });
+  let native;
+  if (route.worker_mode === 'native') native = nativeApi.buildNativeInvocation({ hostRuntime: route.host_runtime, resolvedDispatch: route,
+    activeCapabilities: request.activeCapabilities, effortBinding: request.effortBinding, agentType: 'forge-executor',
+    taskName: `execute_${request.taskId}`, prompt: 'Validated standalone execution contract.', forkTurns: 'none' });
+  const capability = transportApi.executionCapability(route, contract, { nativeInvocation: native });
+  if (!capability.supported) throw preparationError(capability.reason_code, 'capability');
+  const validated = roots.validatePlan(content, contract, { capabilities: capability });
+  return { ...validated, route, capability };
 }
 
 // Codex keeps a completed agent registered under its name, so every attempt
@@ -282,7 +330,7 @@ function adapterDiagnostic(detail) {
 
 function refused(stage, reasonCode, route, providerCalled = false, detail) {
   return { ok: false, action: 'stop', status: 'failure', reason_code: reasonCode,
-    provider_called: providerCalled === true, ...(route ? { route } : {}),
+    provider_called: typeof providerCalled === 'boolean' ? providerCalled : 'unknown', ...(route ? { route } : {}),
     diagnostic: adapterDiagnostic(detail) || diagnostic(stage, `${stage}-refused`) };
 }
 
@@ -290,10 +338,10 @@ function adapterFailureStage(error, providerCalled) {
   if (error.stage) return error.stage;
   if (error.code === 'dispatch-identity-conflict') return 'validation';
   if (error.code === 'artifact-conflict' || error.diagnostic?.reason === 'publication-failed') return 'publication';
-  if (['invalid-artifact-result', 'untrusted-output-barrier', 'secret-output'].includes(error.code)) return 'validation';
+  if (['invalid-artifact-result', 'artifact-direct-write-detected', 'untrusted-output-barrier', 'secret-output'].includes(error.code)) return 'validation';
   const detail = adapterDiagnostic(error.diagnostic);
   if (detail) return detail.stage;
-  return providerCalled ? 'provider' : 'transport';
+  return providerCalled === true ? 'provider' : 'transport';
 }
 
 function completed(transport, route, accepted) {
@@ -350,6 +398,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
       if (receipt.phase === 'failed') return replayedFailure(receipt);
       if (receipt.phase === 'ready') {
         const storedRoute = validateRoute(receipt.route, request.contract, request);
+        request.pending_questions = receipt.pending_questions || [];
         const prompt = buildPreparationPrompt(request);
         const delivery = deliveryRequest(request, storedRoute, prompt);
         if (unit.artifactFingerprint(delivery) !== receipt.fingerprint) {
@@ -481,6 +530,8 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
   let request;
   try { request = validateRequest(rawRequest); }
   catch (error) { return refused(error.stage || 'input', error.code || 'invalid-preparation-request'); }
+  try { validateContinuationReceipt(request); }
+  catch (error) { return refused(error.stage || 'validation', error.code); }
   if (!acceptance || typeof acceptance !== 'object' || Array.isArray(acceptance)) {
     return refused('validation', 'native-preparation-acceptance-invalid');
   }
@@ -536,16 +587,17 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
   const started = await startStandaloneTaskPreparation(rawRequest, deps);
   if (!started.ok || started.action === 'complete' || started.action === 'invoke-native' && !deps.invokeNative) return started;
   const request = validateRequest(rawRequest);
+  validateContinuationReceipt(request);
   if (started.action === 'invoke-sidecar') {
     if (!deps.invokeSidecar) {
       try {
         const result = await unit.runUnitSidecar(started.delivery_request, { announce: deps.announce });
         return completed('sidecar', started.route, { result, provider_called: true });
       } catch (error) {
-        const providerCalled = error.provider_called === true;
+        const providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown';
         const stage = adapterFailureStage(error, providerCalled);
         try { unit.failArtifactAttempt(started.delivery_request, error.code || 'sidecar-unit-failed',
-          error.diagnostic?.reason || (providerCalled ? 'provider-exit' : 'adapter-failed'), providerCalled); }
+          error.diagnostic?.reason || (providerCalled === true ? 'provider-exit' : 'adapter-failed'), providerCalled); }
         catch { /* preserve the production adapter refusal */ }
         return refused(stage, error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
       }
@@ -595,6 +647,35 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
 function readJson(filename) {
   return JSON.parse(fs.readFileSync(filename, 'utf8'));
 }
+async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
+  const request = validateRequest(rawRequest);
+  const prompt = buildPreparationPrompt(request);
+  return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
+    unit: `${request.contract.unitType}/${request.taskId}`, executionContract: request.execution_contract,
+    validateCorrection: async () => {
+      validateRequest(request);
+      return { ok: true, evidence_reference: `preparation-preflight:${crypto.createHash('sha256').update(prompt).digest('hex')}` };
+    },
+    resolverOptions: resolverOptions(request, request.contract), resolveDispatch: deps.resolveDispatch,
+    validateInvocation: route => route.worker_mode === 'native'
+      ? nativeApi.buildNativeInvocation(nativeOptions(request, validateRoute(route, request.contract, request), prompt))
+      : { ok: transportApi.capability(route.resolved_worker_engine, request.contract.unitType, request).supported },
+    replay: async receipt => {
+      const delivery = deliveryRequest(request, receipt.route, prompt);
+      if (receipt.phase === 'failed' && receipt.saved_candidate) {
+        if (!recovery.reconciliation) throw preparationError('recovery-artifact-reconciliation-required', 'validation');
+        return unit.reconcileArtifactAttempt(delivery, recovery.reconciliation);
+      }
+      return unit.replayArtifactAttempt(delivery);
+    },
+    invoke: async (route, invocation, remainingMs) => {
+      const next = { ...request, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
+        resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
+      const bounded = { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) };
+      return prepareStandaloneTask(next, { ...deps, resolveDispatch: () => bounded });
+    },
+  });
+}
 
 async function cli(argv, deps = {}) {
   const [mode, requestFile, acceptanceFile] = argv;
@@ -611,9 +692,9 @@ async function cli(argv, deps = {}) {
 module.exports = {
   REQUEST_SCHEMA_VERSION, PHASE_CONTRACTS, phaseContract, validateRequest,
   requiredArtifact, validatePhaseContent, preparationRequestFingerprint,
-  buildPreparationPrompt, deliveryRequest, nativeOptions,
+  buildPreparationPrompt, deliveryRequest, nativeOptions, preflightPlan,
   candidateFromPreparationResult, startStandaloneTaskPreparation,
-  acceptStandaloneTaskPreparation, prepareStandaloneTask,
+  acceptStandaloneTaskPreparation, prepareStandaloneTask, recoverStandaloneTask,
 };
 
 if (require.main === module) {

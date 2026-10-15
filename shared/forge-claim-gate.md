@@ -708,3 +708,7 @@ extraído sob `conflicts/` na área de recuperação.
 - `skills/forge-auto/SKILL.md`, `skills/forge-next/SKILL.md` — the two orchestrator consumers
 - `forge-agent-prefs.jsonc § Parallelism Settings` — `parallelism.{cross_run_overlap, block_wait_ms,
   block_poll_ms, defer_cap}`
+
+## Claims físicos v2
+
+Passe executionContract a deriveClaimFromPlan e recordAndEvaluate. writes qualificados são agrupados pela identidade física do checkout; dois SVN com mesma URL são distintos, um alias não é raiz nova. recordAndEvaluate serializa a aquisição multiroot em um lock global, valida tudo antes de persistir e conserva cerca bloqueada inteira. O claim contém schema_version:2, execution_contract, root_baselines e generation. Empty/malformed/stale nunca autoriza execução mesmo sem contraparte. Release verifica todas as raízes; ausência de evidência e TTL não liberam alterações. Audit conserva root_id; recovery bundle registra root_id por entry e restaura apenas com CAS de ownership. Claims v1 sem identidade física resolvível ficam unknown, em escopo conservador.

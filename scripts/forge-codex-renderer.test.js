@@ -452,6 +452,12 @@ try {
 
   const realCodex = renderer.render({ repo: root, ...PRODUCTION_DISPATCH_DIALECT });
   const realClaude = claudeRenderer.render({ repo: root });
+  for (const projection of [realCodex, realClaude]) {
+    const task = projection.artifacts.find(item => item.source === 'skills/forge-task/SKILL.md');
+    for (const token of ['Standalone physical roots and recovery', 'execution_contract v2', 'recoveryStateFile', 'Persist necessary questions by ID']) {
+      assert(task.content.includes(token), 'projected task contract missing ' + token);
+    }
+  }
   assert(realCodex.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
   assert(realClaude.artifacts.every((artifact) => artifact.source !== 'shared/forge-dispatch.md'));
   const codexTask = realCodex.artifacts.find((item) => item.source === 'skills/forge-task/SKILL.md');

@@ -329,6 +329,38 @@ test('CLI rejects an invalid --mode loudly', () => {
 // ── Summary ─────────────────────────────────────────────────────────────────
 
 console.log('');
+test('v2 root verification executes every cwd and refuses one failing root or missing output', () => {
+  const strict = require('assert'), fixture = require('./forge-code-roots.test'), f = fixture.fixture();
+  const api = require('./forge-verify');
+  const base = { unit: { type: 'task', id: 'T-roots' }, commandsByRoot: { alpha: ['node -e "process.exit(0)"'], beta: ['node -e "process.exit(7)"'] } };
+  const failed = api.captureRootDelivery(f.contract, fixture.plan(f.contract), base);
+  strict.strictEqual(failed.passed, false); strict.strictEqual(failed.gate.roots[1].result.checks[0].exitCode, 7);
+  strict.deepStrictEqual(failed.gate.roots.map(row => row.code_dir), f.contract.code_roots.map(row => row.path));
+  base.commandsByRoot.beta = base.commandsByRoot.alpha;
+  strict.strictEqual(api.captureRootDelivery(f.contract, fixture.plan(f.contract), base).passed, true);
+  fs.unlinkSync(require('path').join(f.b, 'same.txt'));
+  const missing = api.captureRootDelivery(f.contract, fixture.plan(f.contract), base);
+  strict.strictEqual(missing.passed, false); strict.strictEqual(missing.artifacts[1].result.missing[0].path, 'beta::same.txt');
+  strict.strictEqual(fs.existsSync(require('path').join(f.b, '.gsd')), false); f.cleanup();
+});
+
+test('resource telemetry uses the caller sink without unsigned owner writes', () => {
+  const strict = require('assert'), api = require('./forge-verify');
+  const cwd = tmpRepo(), gsdDir = path.join(cwd, '.gsd'), events = path.join(gsdDir, 'forge/events.jsonl');
+  const lines = [];
+  const options = { cwd, gsdDir, preferenceCommands: ['node -e "process.exit(0)"'],
+    resourceEventSink: line => lines.push(line) };
+  try {
+    strict.strictEqual(api.runVerificationGate(options).passed, true);
+    strict.strictEqual(lines.length, 1);
+    strict.strictEqual(JSON.parse(lines[0]).kind, 'resource-clamp-skipped');
+    strict(lines[0].endsWith('\n'));
+    strict.strictEqual(fs.existsSync(events), false, 'caller alone owns publication of event bytes');
+    strict.strictEqual(api.runVerificationGate({ ...options, resourceEventSink() { throw new Error('sink-unavailable'); } }).passed, true);
+    strict.strictEqual(fs.existsSync(events), false, 'sink failure never falls back to an unsigned write');
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) {
   console.log('\nFailures:');

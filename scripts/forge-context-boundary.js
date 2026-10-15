@@ -61,13 +61,15 @@ function peek(cwd, identity, options) {
   if (!fs.existsSync(file)) return { pending: false, scope, additional_context: '' };
   const record = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!sameScope(record.scope, scope)) return { pending: false, scope, additional_context: '' };
-  return { pending: true, scope, pending_id: record.pending_id, additional_context: record.additional_context, pending_file: file };
+  return { pending: true, scope, pending_id: record.pending_id, additional_context: record.additional_context, pending_file: file,
+    pending_questions: (record.pending_questions || []).filter(q => q.status === 'pending') };
 }
 function acknowledge(cwd, identity, options, pendingId) {
   const scope = buildScope(identity, options);
   const files = pathsFor(cwd, scope, pendingId);
   if (!fs.existsSync(files.pending)) return { acknowledged: fs.existsSync(files.delivered), pending: false };
   const record = JSON.parse(fs.readFileSync(files.pending, 'utf8'));
+  if (record.pending_questions?.some(q => q.status === 'pending')) return { acknowledged: false, pending: true, reason_code: 'required-questions-unresolved' };
   if (!pendingId || record.pending_id !== pendingId || !sameScope(record.scope, scope)) return { acknowledged: false, pending: true };
   fs.mkdirSync(path.dirname(files.delivered), { recursive: true });
   fs.renameSync(files.pending, files.delivered);
@@ -125,7 +127,16 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) if (argv[i].startsWith('--')) args[argv[i].slice(2)] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true;
   return args;
 }
-module.exports = { acknowledge, buildScope, checkpointContent, checkpointPath, consume, peek, scopeKey, unitIdentity };
+function persistQuestions(cwd, identity, options, questions, answers = []) {
+  const scope = buildScope(identity, options), file = pathsFor(cwd, scope).pending;
+  const existing = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { version: 2, pending_id: crypto.randomUUID(), scope, additional_context: '' };
+  if (!sameScope(existing.scope, scope)) throw new Error('pending-question-scope-mismatch');
+  const interaction = require('./forge-interaction');
+  existing.pending_questions = interaction.mergePendingQuestions(existing.pending_questions || [], questions);
+  if (answers.length) existing.pending_questions = interaction.resolvePendingQuestions(existing.pending_questions, answers);
+  atomicJson(file, existing); return existing;
+}
+module.exports = { acknowledge, buildScope, checkpointContent, checkpointPath, consume, peek, scopeKey, unitIdentity, persistQuestions };
 if (require.main === module) {
   try {
     const args = parseArgs(process.argv.slice(2));

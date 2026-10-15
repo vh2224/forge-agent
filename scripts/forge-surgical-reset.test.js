@@ -50,5 +50,47 @@ try {
   const fenced = reset.resetFromState(fenceState);
   assert.strictEqual(fenced.code, 3); assert.strictEqual(fenced.result.abort, 'baseline-moved');
   assert.strictEqual(fs.existsSync(path.join(fenceA, 'must-survive.txt')), true, 'global preflight mutates zero roots');
+  for (const vcs of ['git', 'svn']) {
+    const f = require('./forge-code-roots.test').fixture(vcs), stateFile = path.join(f.dir, 'reset.json');
+    for (const dir of [f.a, f.b]) fs.writeFileSync(path.join(dir, 'prior.txt'), 'prior bytes');
+    reset.initState(stateFile, { cwd: f.a, attempt: 'two-roots', executionContract: f.contract });
+    for (const dir of [f.a, f.b]) fs.writeFileSync(path.join(dir, 'same.txt'), 'worker bytes');
+    fs.writeFileSync(path.join(f.b, 'foreign.txt'), 'foreign bytes');
+    const context = { failed: true, processStopped: true, verifyOwnership: row => row.path === 'same.txt' };
+    assert.strictEqual(reset.reconcileFailedAttempt(stateFile, context).reason_code, 'reset-unattributed-change');
+    assert.strictEqual(fs.readFileSync(path.join(f.a, 'same.txt'), 'utf8'), 'worker bytes', 'all-root preflight resets nothing');
+    assert.strictEqual(fs.readFileSync(path.join(f.b, 'foreign.txt'), 'utf8'), 'foreign bytes');
+    // A separate attempt snapshots existing foreign bytes before its worker.
+    // The refused attempt's baseline is never rewritten to fabricate ownership.
+    for (const dir of [f.a, f.b]) fs.writeFileSync(path.join(dir, 'same.txt'), 'before\n');
+    reset.initState(stateFile, { cwd: f.a, attempt: 'positive-two-roots', executionContract: f.contract });
+    for (const dir of [f.a, f.b]) fs.writeFileSync(path.join(dir, 'same.txt'), 'worker bytes');
+    const interrupted = reset.reconcileFailedAttempt(stateFile, { ...context, onProgress() { throw new Error('fixture-interruption'); } });
+    assert.deepStrictEqual(interrupted.roots, [{ root_id: 'alpha', reconciled: true }]);
+    assert.deepStrictEqual(interrupted.pending_roots, ['beta']);
+    assert.strictEqual(JSON.parse(fs.readFileSync(stateFile)).reconciliation.reason_code, 'fixture-interruption');
+    assert.strictEqual(fs.readFileSync(path.join(f.b, 'same.txt'), 'utf8'), 'worker bytes');
+    const result = reset.reconcileFailedAttempt(stateFile, context);
+    assert.strictEqual(result.ok, true, JSON.stringify(result));
+    assert.deepStrictEqual(result.roots.map(row => row.root_id), ['alpha', 'beta']);
+    assert.strictEqual(JSON.parse(fs.readFileSync(stateFile)).reconciliation.ok, true);
+    for (const dir of [f.a, f.b]) { assert.strictEqual(fs.readFileSync(path.join(dir, 'prior.txt'), 'utf8'), 'prior bytes'); assert.strictEqual(fs.readFileSync(path.join(dir, 'same.txt'), 'utf8'), 'before\n'); }
+    assert.strictEqual(fs.readFileSync(path.join(f.b, 'foreign.txt'), 'utf8'), 'foreign bytes');
+    f.cleanup();
+  }
+  {
+    const f = require('./forge-code-roots.test').fixture('svn'), stateFile = path.join(f.dir, 'properties-reset.json');
+    const command = require('./forge-code-roots.test').command;
+    fs.writeFileSync(path.join(f.b, 'same.txt'), 'operator dirty bytes');
+    reset.initState(stateFile, { cwd: f.a, attempt: 'property-divergence', executionContract: f.contract });
+    command('svn', ['propset', 'fixture-prop', 'worker value', 'same.txt'], f.b);
+    let ownership = 0;
+    const result = reset.reconcileFailedAttempt(stateFile, { failed: true, processStopped: true, verifyOwnership() { ownership++; return true; } });
+    assert.strictEqual(result.reason_code, 'reset-pre-dirty-changed', JSON.stringify(result));
+    assert.strictEqual(command('svn', ['propget', 'fixture-prop', 'same.txt'], f.b), 'worker value');
+    assert.strictEqual(ownership, 0, 'pre-dirty divergence refuses before any reset');
+    assert.strictEqual(fs.readFileSync(path.join(f.b, 'same.txt'), 'utf8'), 'operator dirty bytes');
+    f.cleanup();
+  }
   console.log('forge-surgical-reset boundary tests passed');
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
