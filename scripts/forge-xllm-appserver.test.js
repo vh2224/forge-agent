@@ -358,6 +358,10 @@ async function testMultiRepoWire(mock, root) {
   assert.strictEqual(result.pre_dirty_by_repo.length, 2, 'dirty snapshots cover both repository roots');
   assert(result.repo_baselines.some(entry => entry.repo === path.resolve(secondary)),
     'secondary root remains explicitly attributable in the result');
+  assert(!JSON.stringify(wire.turnParams.sandboxPolicy).includes('.gsd'), 'owner metadata is not an extra writable root');
+  assert.notStrictEqual(result.repo_baselines[0].repo, result.repo_baselines[1].repo);
+  assert.deepStrictEqual(result.pre_dirty_by_repo.map(row => row.repo).sort(),
+    [path.resolve(primary), path.resolve(secondary)].sort());
 }
 
 async function testDegradation(mock, root) {

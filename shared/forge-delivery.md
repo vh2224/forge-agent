@@ -161,3 +161,7 @@ evidence; later contemporaneous envelopes and explicit bindings may enrich the p
 For long summaries, `--table-limit N` shows problem rows first, prints exact omitted
 counts by situation and points to the complete JSON. Pipes, newlines and Markdown
 markup are escaped. The JSON remains the complete reconstructible detail.
+
+## Evidência de múltiplas raízes
+
+forge-verify.captureRootDelivery(execution_contract,planText,options) gera envelopes próprios de verification/artifact por root_id, identidade física, contract hash, cwd real, revisão/workspace, environment e captured_at contemporâneos. Os comandos rodam em cada checkout e expected_output é conferido em sua raiz. Input de delivery v2 conserva execution_contract e bindings com root_id; fonte estrangeira ou identidade alterada falha. Truth global requer binding explícito para cada raiz; artifact requer sua raiz e key_link as raízes de from/to. Um comando global, sucesso de outra raiz ou mero arquivo existente não cobre comportamento. CI/review/merge/install/aceite humano continuam fatos independentes.

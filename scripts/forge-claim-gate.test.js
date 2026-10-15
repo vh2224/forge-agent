@@ -2578,6 +2578,32 @@ test('verify_paths canonical derivation matches normalized brief and refuses mal
   strictAssert.strictEqual(cli.status, 0, cli.stderr);
 });
 
+test('multi-root plan derives qualified writes and physical claim lock refuses competing acquisition', () => {
+  const strict = require('assert'), f = require('./forge-code-roots.test').fixture();
+  const file = require('path').join(f.owner, 'plan.md');
+  require('fs').writeFileSync(file, require('./forge-code-roots.test').plan(f.contract));
+  const claim = require('./forge-claim-gate').deriveClaimFromPlan(f.owner, file, f.contract);
+  strict.deepStrictEqual(claim.paths.map(row => row.root_id), ['alpha', 'beta']);
+  require('fs').mkdirSync(require('path').join(f.owner, '.gsd'), { recursive: true });
+  const registry = require('./forge-runs'), id = 'T-20261015120000-atomic';
+  registry.add(f.owner, { id, kind: 'task', session_id: 'fixture-atomic', cwd: f.owner });
+  const options = { cwd: f.owner, runId: id, codeDir: f.a, executionContract: f.contract,
+    paths: claim.paths, derived: claim, source: 'plan-writes', unit: 'execute-task/' + id, emitEvent: false };
+  const lock = require('./forge-lock').acquireSync(f.owner, 'physical-root-claims', { retries: 1 });
+  try {
+    strict.throws(() => require('./forge-claim-gate').recordAndEvaluate(options));
+    strict.strictEqual(registry.get(f.owner, id).write_claim, null, 'no partial claim while acquisition is locked');
+  } finally { lock.release(); }
+  const malformed = { ...f.contract, code_roots: [f.contract.code_roots[0], { ...f.contract.code_roots[1], path: f.owner }] };
+  strict.throws(() => require('./forge-claim-gate').recordAndEvaluate({ ...options, executionContract: malformed }));
+  strict.strictEqual(registry.get(f.owner, id).write_claim, null, 'invalid second root acquires neither root');
+  const held = require('./forge-claim-gate').recordAndEvaluate(options);
+  strict.strictEqual(held.decision, 'proceed');
+  strict.strictEqual(registry.get(f.owner, id).write_claim.paths.length, 2);
+  require('fs').writeFileSync(file, require('./forge-code-roots.test').plan(f.contract).replace('depends: []', 'depends: invalid'));
+  strict.throws(() => require('./forge-claim-gate').deriveClaimFromPlan(f.owner, file, f.contract));
+  f.cleanup();
+});
 // --- Summary ---
 cleanup();
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);

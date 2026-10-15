@@ -128,6 +128,23 @@ const CLI_RELEASE_MECHANISMS = ['manual'];
  */
 function normalizeClaim(input) {
   const opts = input || {};
+  if (opts.schema_version !== undefined && ![1, 2].includes(opts.schema_version)) throw new Error('claim-schema-unsupported');
+  if (opts.schema_version === 2) {
+    const roots = require('./forge-code-roots');
+    const contract = roots.validateContract(opts.execution_contract);
+    if (!CLAIM_SOURCES.includes(opts.source)) throw new Error('claim-source-invalid');
+    if (!Array.isArray(opts.paths) || !opts.paths.length) throw new Error('execution-writes-required');
+    const paths = opts.paths.map(p => roots.wire(roots.resolvePath(contract, p)));
+    const baselines = {};
+    for (const root of contract.code_roots) {
+      const measured = require('./forge-claim-release').measureBaseline(root.path, { vcs: root.vcs });
+      if (!measured.ok) throw new Error(`claim-baseline-unavailable:${root.id}`);
+      baselines[root.id] = normalizeVcsBaseline(measured);
+    }
+    return { schema_version: 2, generation: require('crypto').randomUUID(), at: opts.at || Date.now(), unit: opts.unit || null,
+      source: opts.source, execution_contract: contract, code_dir: contract.code_roots.find(r => r.id === contract.primary_root_id).path,
+      paths, root_baselines: baselines, vcs_baseline: baselines[contract.primary_root_id], released: normalizeReleased(opts.released) };
+  }
   if (!CLAIM_SOURCES.includes(opts.source)) {
     throw new Error(
       `forge-write-claim: unknown source ${JSON.stringify(opts.source)} — ` +
@@ -297,6 +314,7 @@ function clearClaim(cwd, runId) {
 function claimIdentity(claim) {
   if (!claim) return null;
   return {
+    ...(claim.schema_version === 2 ? { generation: claim.generation, contract_sha256: require('./forge-code-roots').digest(claim.execution_contract) } : {}),
     at: typeof claim.at === 'number' ? claim.at : null,
     unit: claim.unit === undefined ? null : claim.unit,
     baseline_id: claim.vcs_baseline && typeof claim.vcs_baseline.id === 'string'
@@ -306,7 +324,8 @@ function claimIdentity(claim) {
 
 function sameIdentity(a, b) {
   if (a === null || b === null) return false;
-  return a.at === b.at && a.unit === b.unit && a.baseline_id === b.baseline_id;
+  return a.at === b.at && a.unit === b.unit && a.baseline_id === b.baseline_id
+    && a.generation === b.generation && a.contract_sha256 === b.contract_sha256;
 }
 
 function releaseClaim(cwd, runId, release, opts) {
@@ -408,6 +427,13 @@ function validateHeldClaim(claim) {
   if (!CLAIM_SOURCES.includes(claim.source)) throw new Error('claim-source-invalid');
   if (!(claim.code_dir === null || (typeof claim.code_dir === 'string' && claim.code_dir !== ''))) throw new Error('claim-code-dir-invalid');
   if (!Array.isArray(claim.paths)) throw new Error('claim-paths-invalid');
+  if (claim.schema_version !== undefined && ![1, 2].includes(claim.schema_version)) throw new Error('claim-schema-unsupported');
+  if (claim.schema_version === 2) {
+    if (!claim.generation) throw new Error('claim-generation-required');
+    for (const group of require('./forge-code-roots').claimGroups(claim)) {
+      if (!normalizeVcsBaseline(claim.root_baselines?.[group.id])) throw new Error('claim-root-baseline-required');
+    }
+  }
   normalizeVcsBaseline(claim.vcs_baseline);
   if (normalizeReleased(claim.released) !== null) throw new Error('claim-not-live');
   return claim;

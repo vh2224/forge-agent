@@ -305,7 +305,7 @@ function acquireClampForCommand(opts) {
       // resolver, no lease taken (mirrors forge-hook.js B1).
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: "intact:not-runner-command",
-      });
+      }, opts.resourceEventSink);
       return passthrough;
     }
   } catch {
@@ -353,7 +353,7 @@ function acquireClampForCommand(opts) {
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: "intact:enforcement-off",
-      });
+      }, opts.resourceEventSink);
       return passthrough;
     }
 
@@ -368,7 +368,7 @@ function acquireClampForCommand(opts) {
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: "intact:admission-refused-advisory",
-      });
+      }, opts.resourceEventSink);
       return passthrough;
     }
 
@@ -382,7 +382,7 @@ function acquireClampForCommand(opts) {
       }
       appendResourceEvent(opts.cwd, opts.gsdDir, "resource-clamp-skipped", {
         reason: `intact:${plan.reason}`,
-      });
+      }, opts.resourceEventSink);
       return passthrough;
     }
 
@@ -418,7 +418,7 @@ function acquireClampForCommand(opts) {
       runner: plan.runner,
       workers: contract.workers,
       ...(nodeOptionsReason ? { node_options_reason: nodeOptionsReason } : {}),
-    });
+    }, opts.resourceEventSink);
 
     return { command: rewrittenCommand, env: overlay, handle, resourcesMod };
   } catch {
@@ -437,8 +437,10 @@ function acquireClampForCommand(opts) {
  * in a repo that doesn't own the run). Silent-fail (MEM008) — event
  * logging never affects the gate's verdict.
  */
-function appendResourceEvent(cwd, gsdDirOpt, kind, payload) {
+function appendResourceEvent(cwd, gsdDirOpt, kind, payload, sink) {
   try {
+    const line = JSON.stringify({ ts: new Date().toISOString(), kind, ...payload }) + "\n";
+    if (typeof sink === "function") { sink(line); return; }
     const cwdAbs = resolve(cwd);
     const ownerGsd = gsdDirOpt ? resolve(gsdDirOpt) : null;
     const ownerRoot = ownerGsd ? dirname(ownerGsd) : resolveOwner(cwdAbs);
@@ -447,8 +449,7 @@ function appendResourceEvent(cwd, gsdDirOpt, kind, payload) {
                     : null;
     if (!eventsDir) return;
     mkdirSync(eventsDir, { recursive: true });
-    const line = JSON.stringify({ ts: new Date().toISOString(), kind, ...payload });
-    appendFileSync(join(eventsDir, "events.jsonl"), line + "\n", "utf-8");
+    appendFileSync(join(eventsDir, "events.jsonl"), line, "utf-8");
   } catch {
     /* MEM008 — silent-fail */
   }
@@ -545,6 +546,7 @@ function runVerificationGate(options) {
         timeoutMs,
         session: options.session,
         gsdDir: options.gsdDir,
+        resourceEventSink: options.resourceEventSink,
         requireResources: options.requireResources,
         requireCommandRewrite: options.requireCommandRewrite,
       });
@@ -578,6 +580,9 @@ function runVerificationGate(options) {
         cwd: options.cwd,  // --cwd is a spawnSync option, never shell-interpolated
         stdio: "pipe",
         encoding: "utf-8",
+        // cmd consumes a command string, not CRT-escaped argv. Backslash-escaped
+        // quotes turn node -e bodies into string literals and can hide failures.
+        windowsVerbatimArguments: process.platform === "win32",
         timeout: timeoutMs,
         env,
       });
@@ -838,7 +843,44 @@ function formatEvidenceYaml(entries) {
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 
-module.exports = { discoverCommands, runVerificationGate, formatFailureContext, isLikelyCommand, parsePlanVerify, buildVerificationEvidence, formatEvidenceYaml, resolveVerifyPolicy };
+function runRootVerification(contract, options = {}) {
+  const roots = require('./forge-code-roots');
+  const measured = roots.validateContract(contract, { revalidate: true });
+  const results = measured.code_roots.map(root => {
+    const snapshot = require('./forge-surgical-reset').captureAttemptSnapshot(root.path);
+    const result = runVerificationGate({ ...options, cwd: root.path, gsdDir: require('path').join(measured.owner, '.gsd'),
+      preferenceCommands: options.commandsByRoot?.[root.id] || options.preferenceCommands });
+    return { schema_version: 1, kind: 'verification', unit: options.unit, plan_fingerprint: options.planFingerprint,
+      root_id: root.id, root_identity_sha256: root.identity_sha256, execution_contract_sha256: roots.digest(measured),
+      code_dir: root.path, revision: snapshot.start_sha, workspace: snapshot.pre_dirty,
+      environment: options.environment || `${process.platform}/${process.version}`, captured_at: new Date().toISOString(), result };
+  });
+  roots.validateContract(measured, { revalidate: true });
+  return { schema_version: 2, passed: results.every(row => row.result.passed && !row.result.skipped && row.result.checks.length > 0),
+    execution_contract: measured, roots: results };
+}
+function captureRootDelivery(contract, planText, options = {}) {
+  const fs = require('fs');
+  const roots = require('./forge-code-roots');
+  const checked = roots.validatePlan(planText, contract);
+  const parsed = require('./forge-must-haves').parseMustHaves(planText);
+  const gate = runRootVerification(contract, { ...options, taskPlanVerify: parsePlanVerify(planText), planFingerprint: roots.digest(planText) });
+  const artifacts = gate.roots.map(envelope => {
+    const entries = checked.artifacts.filter(row => row.root_id === envelope.root_id);
+    const result = require('./forge-verifier').verifyArtifact({ ...parsed, artifacts: entries, key_links: [] }, [], { cwd: envelope.code_dir });
+    result.rows = result.rows.map(row => ({ ...row, path: `${envelope.root_id}::${row.path}` }));
+    result.missing = checked.outputs.filter(row => row.root_id === envelope.root_id).filter(row => {
+      const file = roots.resolvePath(contract, row).absolute;
+      return !fs.existsSync(file) || !fs.statSync(file).isFile();
+    }).map(row => ({ path: roots.qualified(row), reason: 'expected_output_missing' }));
+    result.passed = result.missing.length === 0 && result.rows.every(row => row.exists === true);
+    const observed = require('./forge-surgical-reset').captureAttemptSnapshot(envelope.code_dir);
+    return { ...envelope, kind: 'artifact', revision: observed.start_sha, workspace: observed.pre_dirty,
+      captured_at: new Date().toISOString(), result };
+  });
+  return { gate, artifacts, passed: gate.passed && artifacts.every(row => row.result.passed) };
+}
+module.exports = { discoverCommands, runVerificationGate, runRootVerification, captureRootDelivery, formatFailureContext, isLikelyCommand, parsePlanVerify, buildVerificationEvidence, formatEvidenceYaml, resolveVerifyPolicy };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

@@ -299,5 +299,28 @@ test('model-policy telemetry is copied only when the route carries it', () => {
   assert.strictEqual('effort_applied' in withPolicy, false, 'the dispatch event never claims an applied effort');
 });
 
-process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
-process.exitCode = failed === 0 ? 0 : 1;
+// Exercise the live caller capability, signature and owner snapshot together.
+(async () => {
+  const lab = require('./forge-code-roots.test').laboratory('dispatch-broker');
+  const owner = path.join(lab.dir, 'owner'); fs.mkdirSync(owner);
+  const api = require('./forge-artifact-reconciliation');
+  const broker = await api.startBroker({ owner, manifestFile: path.join(lab.dir, 'manifest.json'),
+    dispatchId: 'signed-dispatch', request_sha256: 'request' });
+  try {
+    const route = JSON.parse(resolveContract(owner, ['--host-runtime', 'codex', '--worker-engine', 'codex']));
+    const args = { unit: 'execute-task/T01' };
+    await emitter.appendDispatchEvent(broker, args, route);
+    assert(broker.verify().passed);
+    const written = JSON.parse(fs.readFileSync(path.join(owner, '.gsd/forge/events.jsonl'), 'utf8'));
+    assert.strictEqual(written.unit, args.unit);
+    assert.strictEqual(broker.proofs().length, 1);
+    await assert.rejects(emitter.appendDispatchEvent(JSON.parse(JSON.stringify(broker)), args, route), /caller-handle/);
+    assert.strictEqual(broker.proofs().length, 1);
+    passed++;
+    console.log('  PASS live dispatch emitter: signed append and forged handle refusal');
+  } finally { await broker.close(); }
+  lab.cleanup();
+})().catch(error => { failed++; console.error(error); }).finally(() => {
+  process.stdout.write(`\n${passed} passed, ${failed} failed\n`);
+  process.exitCode = failed === 0 ? 0 : 1;
+});

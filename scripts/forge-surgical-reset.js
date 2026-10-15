@@ -335,7 +335,10 @@ function captureAttemptSnapshot(cwd, options = {}) {
     const error = new Error(`baseline moved while capturing attempt (${before} -> ${after})`);
     error.code = 'snapshot-baseline-moved'; throw error;
   }
-  return { attempt_id: options.attemptId || null, start_sha: before, pre_dirty: preDirty, code_dir: path.resolve(cwd), vcs: vcsName };
+  const svnState = vcsName === 'svn' ? vcs.captureDirty(cwd, { maxBuffer: OPTS.maxBuffer, vcs: 'svn', strict: true }) : null;
+  if (svnState && !svnState.ok) throw new Error(svnState.error || 'svn-snapshot-unavailable');
+  return { attempt_id: options.attemptId || null, start_sha: before, pre_dirty: preDirty, code_dir: path.resolve(cwd), vcs: vcsName,
+    ...(svnState ? { svn_state: svnState } : {}) };
 }
 
 function currentBaseline(cwd, vcsName) {
@@ -370,7 +373,17 @@ function captureMultiAttemptSnapshot(repoRoots, options = {}) {
  * Capture START_SHA + the pre-dirty snapshot and write BOTH in ONE atomic write.
  * @returns {object} the written state
  */
-function initState(stateFile, { cwd, attempt, repoRoots }) {
+function initState(stateFile, { cwd, attempt, repoRoots, executionContract }) {
+  if (executionContract) {
+    const roots = require('./forge-code-roots');
+    const contract = roots.validateContract(executionContract, { revalidate: true });
+    const repos = contract.code_roots.length > 1 ? captureMultiAttemptSnapshot(contract.code_roots.map(r => r.path), { attemptId: attempt })
+      : [captureAttemptSnapshot(contract.code_roots[0].path, { attemptId: attempt })];
+    repos.forEach(repo => { repo.root_id = contract.code_roots.find(r => roots.key(r.path) === roots.key(repo.code_dir)).id; });
+    const primary = repos.find(r => r.root_id === contract.primary_root_id);
+    const state = { ...primary, schema_version: 2, execution_contract: contract, attempt, repos, reason: '', result_file: '', transient_retry_count: 0 };
+    writeJsonAtomic(stateFile, state); return state;
+  }
   if (Array.isArray(repoRoots) && repoRoots.length > 1) {
     const primary = path.resolve(cwd);
     const repos = captureMultiAttemptSnapshot(repoRoots, { attemptId: attempt });
@@ -446,6 +459,7 @@ function resetFailedAttempt(stateFile, context = {}) {
   const state = readState(stateFile);
   if (context.mode !== 'execute') return { ok: false, reason_code: 'reset-refused-read-only' };
   if (context.failed !== true) return { ok: false, reason_code: 'reset-refused-not-failed' };
+  if (state.schema_version === 2) return reconcileFailedAttempt(stateFile, context);
   if (!Array.isArray(context.repoRoots) || context.repoRoots.length !== 1) return { ok: false, reason_code: 'reset-refused-multirepo' };
   if (!context.codeDir || path.resolve(context.codeDir) !== path.resolve(state.code_dir) || path.resolve(context.codeDir) !== path.resolve(context.repoRoots[0])) {
     return { ok: false, reason_code: 'reset-refused-code-dir' };
@@ -454,6 +468,66 @@ function resetFailedAttempt(stateFile, context = {}) {
   if (reset.code === 3) return { ok: false, reason_code: reset.result.overlap && reset.result.overlap.length ? 'reset-overlap' : (reset.result.abort || 'reset-refused'), reset: reset.result };
   if (reset.code !== 0 || !reset.result.verified) return { ok: false, reason_code: 'reset-unverified', reset: reset.result };
   return { ok: true, reason_code: 'reset-verified', reset: reset.result };
+}
+
+// Authorship is supplied by a trusted caller's write journal, never inferred
+// from the fact that a file changed during a provider turn. JSON cannot carry
+// this capability. Every root is inspected before the first reset operation.
+function reconcileFailedAttempt(stateFile, context = {}) {
+  const state = readState(stateFile), roots = require('./forge-code-roots');
+  const completed = [];
+  const persist = result => {
+    updateState(stateFile, { reconciliation: { ...result, observed_at: new Date().toISOString() } });
+    return result;
+  };
+  try {
+    const contract = roots.validateContract(state.execution_contract, { revalidate: true });
+    if (context.failed !== true || context.processStopped !== true || typeof context.verifyOwnership !== 'function') throw new Error('reset-provenance-required');
+    const prepared = contract.code_roots.map(root => {
+      const before = state.repos.find(r => r.root_id === root.id);
+      if (!before || currentBaseline(root.path, root.vcs) !== before.start_sha) throw new Error('baseline-moved');
+      const current = captureAttemptSnapshot(root.path);
+      const initial = new Map(before.pre_dirty.map(row => [row.path, row.hash]));
+      const now = new Map(current.pre_dirty.map(row => [row.path, row.hash]));
+      for (const [file, value] of initial) if (now.get(file) !== value) throw new Error('reset-pre-dirty-changed');
+      if (root.vcs === 'svn') {
+        if (!vcs.validateSvnStrictSnapshot(before.svn_state)) throw new Error('svn-snapshot-required');
+        const previous = new Map(before.svn_state.entries.map(row => [row.path, row]));
+        const observed = new Map(current.svn_state.entries.map(row => [row.path, row]));
+        for (const file of new Set([...previous.keys(), ...observed.keys()])) {
+          if (JSON.stringify(previous.get(file)) === JSON.stringify(observed.get(file))) continue;
+          if (initial.has(file)) throw new Error('reset-pre-dirty-changed');
+          roots.resolvePath(contract, { root_id: root.id, path: file });
+          if (context.verifyOwnership({ attempt: state.attempt, root_id: root.id, path: file,
+            before: previous.get(file), after: observed.get(file), baseline: before.start_sha }) !== true) throw new Error('reset-unattributed-change');
+        }
+      }
+      const changed = current.pre_dirty.filter(row => !initial.has(row.path));
+      for (const row of changed) {
+        roots.resolvePath(contract, { root_id: root.id, path: row.path });
+        if (context.verifyOwnership({ attempt: state.attempt, root_id: root.id, path: row.path, hash: row.hash, baseline: before.start_sha }) !== true) throw new Error('reset-unattributed-change');
+      }
+      const post = computePostChanges(root.path, before.start_sha, root.vcs);
+      const target = computeResetTarget(post, before.pre_dirty, p => hashObject(root.path, p, root.vcs));
+      if (target.overlap.length) throw new Error('reset-overlap');
+      return { root, before, current, target };
+    });
+    for (const item of prepared) {
+      if (JSON.stringify(captureAttemptSnapshot(item.root.path)) !== JSON.stringify(item.current)) throw new Error('reset-race');
+      executeReset(item.root.path, item.before.start_sha, item.target, item.root.vcs);
+      const checked = verifyReset(item.root.path, item.before.start_sha, item.before.pre_dirty, item.root.vcs);
+      if (!checked.verified) throw new Error('reset-unverified');
+      if (item.root.vcs === 'svn' && JSON.stringify(captureAttemptSnapshot(item.root.path).svn_state.entries) !== JSON.stringify(item.before.svn_state.entries)) throw new Error('reset-unverified');
+      completed.push({ root_id: item.root.id, reconciled: true });
+      persist({ ok: false, reason_code: 'reset-in-progress', roots: completed,
+        pending_roots: prepared.filter(row => !completed.some(done => done.root_id === row.root.id)).map(row => row.root.id) });
+      context.onProgress?.({ roots: completed.map(row => ({ ...row })) });
+    }
+    return persist({ ok: true, reason_code: 'reset-verified', roots: completed, pending_roots: [] });
+  } catch (error) {
+    return persist({ ok: false, reason_code: error.code || error.message, roots: completed,
+      pending_roots: (state.repos || []).map(r => r.root_id).filter(id => !completed.some(r => r.root_id === id)) });
+  }
 }
 
 /** Initialize the durable read-only plan-sidecar state without shell-built JSON.
@@ -492,6 +566,7 @@ function resetFromState(stateFile) {
   // rather than decide a destructive question from a stale answer.
   trackedInstallCache.clear();
   const state = readState(stateFile);
+  if (state.schema_version === 2) return { code: 3, result: { ok: false, abort: 'reset-provenance-required' } };
   if (Array.isArray(state.repos) && state.repos.length > 1) return resetMultiFromState(state);
   const cwd = state.code_dir;
   const startSha = state.start_sha;
@@ -595,6 +670,7 @@ function resetFromState(stateFile) {
 }
 
 module.exports = {
+  reconcileFailedAttempt,
   isGsdPath,
   isInstallArtifactPath,
   parsePorcelainZ,

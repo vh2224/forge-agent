@@ -61,6 +61,7 @@ const CAPABILITY_ENUM = ['readonly', 'workspace', 'networked'];
 const NESTED_SIBLING_KEYS = [
   'expected_output', 'writes', 'depends',
   'capability', 'repo', 'domain', 'tier', 'effort', 'worker', 'tag',
+  'roots_schema', 'code_roots', 'primary_root_id',
 ];
 
 /**
@@ -629,7 +630,22 @@ function resolveCapability(planText) {
 
 // stripInlineComment is exported so the OTHER reader of the same frontmatter
 // keys (forge-dispatch-resolve.js) shares this rule instead of copying it.
-module.exports = { hasStructuredMustHaves, parseMustHaves, resolveCapability, stripInlineComment };
+// Execution declarations use the same frontmatter parser as must_haves. Missing
+// keys remain missing: a consumer must not turn an unread declaration into [].
+function parseExecutionFields(content) {
+  const fm = extractFrontmatter(content);
+  if (!fm) throw new Error('execution-plan-frontmatter-required');
+  const keys = [...fm.matchAll(/^([A-Za-z][\w-]*):/gm)].map(m => m[1]);
+  if (new Set(keys).size !== keys.length) throw new Error('execution-plan-duplicate-key');
+  const result = {};
+  for (const key of ['depends', 'writes', 'expected_output', 'code_roots']) {
+    if (keys.includes(key)) result[key] = parseArrayKey(fm, key);
+  }
+  for (const key of ['roots_schema', 'primary_root_id']) result[key] = extractTopLevelValue(fm, key);
+  return result;
+}
+
+module.exports = { hasStructuredMustHaves, parseMustHaves, parseExecutionFields, resolveCapability, stripInlineComment };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

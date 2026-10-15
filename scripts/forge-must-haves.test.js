@@ -1091,6 +1091,14 @@ expected_output: []`);
 // ─────────────────────────────────────────────────────────────
 // Cleanup and summary
 // ─────────────────────────────────────────────────────────────
+test('root-qualified artifacts and execution fields preserve all criteria', () => {
+  const strict = require('assert'), lab = require('./forge-code-roots.test'), f = lab.fixture();
+  const text = lab.plan(f.contract), parsed = require('./forge-must-haves').parseExecutionFields(text);
+  strict.deepStrictEqual(parsed.expected_output, ['alpha::same.txt', 'beta::same.txt']);
+  strict.strictEqual(parseMustHaves(text).artifacts[1].path, 'beta::same.txt');
+  strict.throws(() => require('./forge-code-roots').validatePlan(text.replace('  artifacts:', 'artifacts:'), f.contract));
+  f.cleanup();
+});
 try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}
 
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);

@@ -86,5 +86,13 @@ function runCli(args) {
 // State initialization remains owned by forge-surgical-reset.
 // This lets recovery safely ask for a candidate before any reset occurs.
 
-module.exports = { canonicalPath, legacyCandidates, resolvePath, parseArgs, runCli };
+function saveRecovery(file, state) {
+  require('./forge-attempt-recovery').validateState(state);
+  require('./forge-surgical-reset').writeJsonAtomic(file, state);
+  return state;
+}
+function loadRecovery(file) {
+  return require('./forge-attempt-recovery').validateState(JSON.parse(require('fs').readFileSync(file, 'utf8')));
+}
+module.exports = { canonicalPath, legacyCandidates, resolvePath, parseArgs, runCli, saveRecovery, loadRecovery };
 if (require.main === module) process.exit(runCli(process.argv.slice(2)));

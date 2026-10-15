@@ -720,6 +720,21 @@ test('R18e: precondition falha dentro da transição sem publicar patch', () => 
   assertEqual(called, true); assertEqual(reason, 'precondition-refused'); assertEqual(runs.get(wsDir, expected.id).active, true); assertEqual(runs.get(wsDir, expected.id).write_claim.released, null);
 });
 
+test('v2 acquisition validates every physical root before registry mutation', () => {
+  const strict = require('assert'), f = require('./forge-code-roots.test').fixture();
+  fs.mkdirSync(require('path').join(f.owner, '.gsd'));
+  runs.add(f.owner, { id: 'T-multi', kind: 'task', session_id: 'fixture' });
+  const input = { schema_version: 2, source: 'manual', execution_contract: f.contract,
+    paths: [{ root_id: 'alpha', path: 'same.txt' }, { root_id: 'beta', path: 'same.txt' }] };
+  strict.throws(() => recordClaim(f.owner, 'T-multi', { ...input, paths: [] }));
+  strict.throws(() => recordClaim(f.owner, 'T-multi', { ...input, execution_contract: { ...f.contract,
+    code_roots: [f.contract.code_roots[0], { id: 'beta', path: require('path').join(f.dir, 'missing') }] } }));
+  strict.strictEqual(runs.get(f.owner, 'T-multi').write_claim == null, true);
+  recordClaim(f.owner, 'T-multi', input);
+  const held = runs.get(f.owner, 'T-multi').write_claim;
+  strict.strictEqual(held.paths.length, 2); strict.deepStrictEqual(Object.keys(held.root_baselines), ['alpha', 'beta']);
+  f.cleanup();
+});
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

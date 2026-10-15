@@ -76,6 +76,7 @@ function mktmp() {
   tmps.push(d);
   return fs.realpathSync(d);
 }
+const ABS_A = mktmp(), ABS_B = mktmp();
 function cleanup() {
   for (const d of tmps) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -224,8 +225,8 @@ test('R2d: a álgebra de glob vem de pathsOverlap (prefixo de diretório casa)',
 // ── R3: D2 — different code_dir does not conflict, pair not counted ─────────
 test('R3: claims IDÊNTICOS em code_dir distintos -> pulado, pairs_compared === 0', () => {
   const r = record(compareClaims(collected([
-    { id: 'M-a', claim: claim(['src/a.ts'], '/code/one') },
-    { id: 'M-b', claim: claim(['src/a.ts'], '/code/two') },
+    { id: 'M-a', claim: claim(['src/a.ts'], ABS_A) },
+    { id: 'M-b', claim: claim(['src/a.ts'], ABS_B) },
   ])));
   assertEqual(r.pairs_compared, 0, 'par com code_dir distinto NÃO pode incrementar pairs_compared');
   assertEqual(r.conflicts.length, 0, 'code_dir distinto não é colisão (D2)');
@@ -235,17 +236,17 @@ test('R3: claims IDÊNTICOS em code_dir distintos -> pulado, pairs_compared === 
 });
 
 test('R3b: sameCodeDir devolve os três desfechos nomeados', () => {
-  assertEqual(sameCodeDir(claim(['a'], '/x'), claim(['a'], '/x')), 'same');
-  assertEqual(sameCodeDir(claim(['a'], '/x'), claim(['a'], '/y')), 'different');
-  assertEqual(sameCodeDir(claim(['a'], null), claim(['a'], '/y')), 'unknown');
-  assertEqual(sameCodeDir(claim(['a'], '/x'), claim(['a'], null)), 'unknown');
+  assertEqual(sameCodeDir(claim(['a'], ABS_A), claim(['a'], ABS_A)), 'same');
+  assertEqual(sameCodeDir(claim(['a'], ABS_A), claim(['a'], ABS_B)), 'different');
+  assertEqual(sameCodeDir(claim(['a'], null), claim(['a'], ABS_B)), 'unknown');
+  assertEqual(sameCodeDir(claim(['a'], ABS_A), claim(['a'], null)), 'unknown');
 });
 
 // ── R4: code-dir-unknown does NOT exclude ───────────────────────────────────
 test('R4: code_dir desconhecido -> par COMPARADO, incerteza em notes[]', () => {
   const r = record(compareClaims(collected([
     { id: 'M-a', claim: claim(['src/a.ts'], null) },
-    { id: 'M-b', claim: claim(['src/a.ts'], '/code/two') },
+    { id: 'M-b', claim: claim(['src/a.ts'], ABS_B) },
   ])));
   assertEqual(r.pairs_compared, 1, 'desconhecimento não exclui o par — excluir seria a polaridade que D1 proíbe');
   assert(r.notes.some((n) => n.reason === 'code-dir-unknown'), 'a incerteza deve ir para notes[] com razão nomeada');
@@ -320,7 +321,7 @@ test('R12a: symlink/junction para o MESMO diretório -> same (identidade real, n
 test('R12b: caminho absoluto irresolvível -> cai para léxico COM a degradação nomeada', () => {
   const gone = path.resolve(path.join(mktmp(), 'worktree-que-nao-existe'));
   const scope = codeDirScope(claim(['a'], gone), claim(['a'], gone));
-  assertEqual(scope.scope, 'same', 'léxico ainda decide — mas não em silêncio');
+  assertEqual(scope.scope, 'unknown', 'physical identity is required; lexical spelling grants no disjointness');
   assertEqual(scope.note, 'code-dir-unresolved', 'a degradação tem de ser nomeada, nunca silenciosa');
 
   const r = record(compareClaims(collected([
@@ -435,9 +436,9 @@ test('R6a: 3 runs no mesmo code_dir -> 3 pares percorridos', () => {
 
 test('R6b: contador não é fórmula — 3 runs com um par fora de escopo dá 2, não 3', () => {
   const r = record(compareClaims(collected([
-    { id: 'M-a', claim: claim(['a.js'], '/code/one') },
-    { id: 'M-b', claim: claim(['b.js'], '/code/one') },
-    { id: 'M-c', claim: claim(['c.js'], '/code/two') },
+    { id: 'M-a', claim: claim(['a.js'], ABS_A) },
+    { id: 'M-b', claim: claim(['b.js'], ABS_A) },
+    { id: 'M-c', claim: claim(['c.js'], ABS_B) },
   ])));
   // n*(n-1)/2 would say 3. The loop actually walked 1 pair (a×b); a×c and b×c
   // were skipped by D2.
@@ -661,6 +662,14 @@ test('format: a razão está na primeira linha e o censo na segunda, inclusive e
 });
 
 // ── Suite close ──────────────────────────────────────────────────────────
+test('v2 compares same relative path by physical checkout across legacy and root IDs', () => {
+  const strict = require('assert'), f = require('./forge-code-roots.test').fixture();
+  const c = id => ({ schema_version: 2, execution_contract: f.contract, paths: [{ root_id: id, path: 'same.txt' }] });
+  strict.strictEqual(require('./forge-claim-overlap').claimsConflict(c('alpha'), c('beta')), null);
+  strict(require('./forge-claim-overlap').claimsConflict(c('beta'), { code_dir: f.b, paths: ['same.txt'] }));
+  strict(require('./forge-claim-overlap').claimsConflict(c('beta'), { schema_version: 99, paths: [] }));
+  f.cleanup();
+});
 cleanup();
 
 console.log(`\n${passed} passed, ${failed} failed`);

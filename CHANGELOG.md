@@ -1547,3 +1547,10 @@ All 9 scripts auto-installed via existing `install.sh` / `install.ps1` globs —
 ### Features
 
 - feat: add CHANGELOG.md generation to release workflow (bfbba43)
+
+## 4.40.4 — contrato de execução multiroot
+
+- Contrato v2 de raízes físicas Git/SVN com owner externo, plano completo, preflight de execução e claims atômicos por raiz.
+- Snapshots, deltas, reset comprovado, verificação e entrega por critério abrangem todos os checkouts; events deixa de ser exclusão de conteúdo.
+- Broker IPC de append assinado, failed imutável e replay por receipt filho; recuperação com prazo compartilhado, telemetria factual, candidatos validados e perguntas duráveis por ID.
+- Compatibilidade single-root e migração explícita de absolutos; fixtures locais e projeção temporária dos dois hosts, sem inferir smoke de provider, UI ou contenção por arquivo.

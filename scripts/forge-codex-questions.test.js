@@ -58,4 +58,19 @@ for (const original of [
   assert.strictEqual(result.reason, 'questions-manual-merge');
   assert.strictEqual(result.conflict, true);
 }
+{
+  const lab = require('./forge-code-roots.test').laboratory('questions'), file = require('path').join(lab.dir,'questions.json');
+  const interaction = require('./forge-interaction'), identity = {unit:'T-one',receipt:'sha'};
+  const initial = interaction.persistQuestionState(file,identity,[{id:'roots',question:'Which roots?'},{id:'route',question:'Which route?'}]);
+  assert.strictEqual(initial.filter(q=>q.status==='pending').length,2);
+  interaction.persistQuestionState(file,identity,[],[{id:'roots',answer:'alpha,beta'}]);
+  delete require.cache[require.resolve('./forge-interaction')];
+  const restarted = require('./forge-interaction');
+  assert.strictEqual(restarted.persistQuestionState(file,identity,[]).find(q=>q.id==='route').status,'pending');
+  assert.throws(()=>restarted.persistQuestionState(file,{unit:'foreign'},[]), /scope-mismatch/);
+  assert.throws(()=>restarted.persistQuestionState(file,identity,[],[{id:'other',answer:'yes'}]), /answer-id/);
+  assert(restarted.persistQuestionState(file,identity,[],[{id:'route',answer:'native'}]).every(q=>q.status==='resolved'));
+  lab.cleanup();
+}
+
 console.log('forge-codex-questions tests passed (probe and conservative config cases)');

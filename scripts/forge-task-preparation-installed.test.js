@@ -38,7 +38,7 @@ function phaseContent(phase, taskId) {
   if (phase === 'brainstorm') return '# Brainstorm\n\n## Recommended Approach\n\nKeep one caller.\n\n## Alternatives Considered\n\nReuse the resolver.\n\n## Top Risks\n\nProjection drift.\n\n## Out of Scope\n\nReal providers.\n';
   if (phase === 'discuss') return '# Context\n\n## Decisions\n\nPreserve the configured route.\n\n## Open Questions\n\nNone.\n\n## Out of Scope\n\nChanging preferences.\n';
   if (phase === 'research') return "# Research\n\n## Summary\n\nThe installed path was exercised.\n\n## Don't Hand-Roll\n\nUse the resolver.\n\n## Relevant Code\n\nscripts/forge-task-preparation.js\n";
-  return `---\ntier: max\neffort: high\nwrites: []\n---\n\n# Plan\n\n## Steps\n\n1. Exercise the installed caller.\n\n## Must-Haves\n\n- Installed caller delivers the task artifact.\n\n## Standards\n\n- Preserve the resolved route.\n\n## Files to Change\n\n- None; this is a fixture.\n`;
+  return `---\ntier: max\neffort: high\ndepends: []\nwrites: [scripts/x.js]\nexpected_output: [scripts/x.js]\nmust_haves:\n  truths: [Observable output]\n  artifacts: []\n  key_links: []\n---\n\n# Plan\n\n## Steps\n\n1. Exercise the installed caller.\n\n## Must-Haves\n\n- Installed caller delivers the task artifact.\n\n## Standards\n\n- Preserve the resolved route.\n\n## Files to Change\n\n- None; this is a fixture.\n`;
 }
 
 function configuredPrefs(model, unitType) {
@@ -54,6 +54,9 @@ function configuredPrefs(model, unitType) {
 function workspace(label, model, unitType) {
   const cwd = path.join(root, `workspace-${label}`);
   fs.mkdirSync(cwd, { recursive: true });
+  const fixtureCommand = require('./forge-code-roots.test').command;
+  fixtureCommand('git', ['init', '-q'], cwd);
+  fixtureCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'], cwd);
   write(path.join(cwd, '.gsd', 'forge-prefs.jsonc'), configuredPrefs(model, unitType));
   return cwd;
 }
@@ -174,6 +177,13 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
   };
 
   try {
+    await test('temporary installation executes full physical two-SVN preparation, claim, execution and delivery', async () => {
+      await require('./forge-task-multiroot.test').scenario('svn', path.join(forgeHome, 'scripts'));
+      for (const name of ['forge-code-roots', 'forge-artifact-reconciliation', 'forge-attempt-recovery']) {
+        assert.deepStrictEqual(fs.readFileSync(path.join(forgeHome, 'scripts', name + '.js')),
+          fs.readFileSync(path.join(__dirname, name + '.js')), 'installed helper bytes: ' + name);
+      }
+    });
     const claudeProjection = installedProjection(claudeHome, 'claude');
     const codexProjection = installedProjection(codexHome, 'codex');
     assert.equal(claudeProjection.host, 'claude');
@@ -313,7 +323,7 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
         existingCwd: first.cwd, workflowId: first.workflowId,
         resultFile: path.join(path.dirname(first.resultFile), `${dispatchId}.result.json`),
         continuation: { from_dispatch_id: first.dispatchId, result_file: first.resultFile,
-          answers: ['The checked-in schema is authoritative.'] } });
+          answers: [{ id: priorReceipt.pending_questions[0].id, answer: 'The checked-in schema is authoritative.' }] } });
       write(path.join(resumed.cwd, 'provider-payload.json'), artifactEnvelope(prep, resumed));
       const completed = await prep.prepareStandaloneTask(resumed);
       assert.equal(completed.status, 'done', JSON.stringify(completed));

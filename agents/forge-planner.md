@@ -413,3 +413,7 @@ files_changed:
 List every file created or modified. The orchestrator uses `files_changed` to update STATE and dispatch the sub-tasks.
 
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
+
+## Planos com várias raízes de código
+
+Antes de emitir ready, use forge-code-roots.validatePlan e o preflightPlan de forge-task-preparation com a rota real de execute-task. O contrato execution_contract v2 contém owner externo, primary_root_id e code_roots físicos Git/SVN; IDs não são basenames nem URLs. Declare roots_schema: 2 e code_roots no PLAN, depends: [], writes, expected_output e must_haves com truths/artifacts/key_links no mesmo nível. Paths são root_id::relativo. Absolutos só migram por normalizeAbsolutePaths, sem alterar critérios, quando cada path pertence a exatamente uma raiz autorizada. Guarde hashes antes/depois e mapping. Schema incompleto, alias, nesting, traversal ou capability ausente recusam ready. dispatch_allowed isolado não prova execução.

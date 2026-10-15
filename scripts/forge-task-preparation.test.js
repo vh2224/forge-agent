@@ -38,6 +38,9 @@ function fixture(options = {}) {
   const contextRoot = path.join(caseRoot, 'owner');
   const results = path.join(caseRoot, 'results');
   fs.mkdirSync(cwd, { recursive: true });
+  const fixtureCommand = require('./forge-code-roots.test').command;
+  fixtureCommand('git', ['init', '-q'], cwd);
+  fixtureCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'], cwd);
   fs.mkdirSync(path.join(contextRoot, '.gsd'), { recursive: true });
   fs.mkdirSync(results, { recursive: true });
   const model = options.model || 'claude-sonnet-5';
@@ -67,7 +70,7 @@ function content(phase, taskId) {
   if (phase === 'brainstorm') return '# Brainstorm\n\n## Recommended Approach\n\nUse one caller.\n\n## Alternatives Considered\n\nKeep resolver.\n\n## Top Risks\n\nRoute drift.\n\n## Out of Scope\n\nReal providers.\n';
   if (phase === 'discuss') return '# Context\n\n## Decisions\n\nUse receipts.\n\n## Open Questions\n\nNone.\n\n## Out of Scope\n\nInstall.\n';
   if (phase === 'research') return "# Research\n\n## Summary\n\nMeasured internally.\n\n## Don't Hand-Roll\n\nReuse resolver.\n\n## Relevant Code\n\nscripts/.\n";
-  return `---\ntier: standard\neffort: medium\nwrites:\n  - scripts/x.js\n---\n\n# Plan\n\n## Steps\n\n1. Implement.\n\n## Must-Haves\n\n- The command passes.\n\n## Standards\n\n- Reuse existing helpers.\n\n## Files to Change\n\n- scripts/x.js — implementation.\n`;
+  return `---\ntier: standard\neffort: medium\ndepends: []\nexpected_output: [scripts/x.js]\nmust_haves:\n  truths: [Observable output]\n  artifacts: []\n  key_links: []\nwrites:\n  - scripts/x.js\n---\n\n# Plan\n\n## Steps\n\n1. Implement.\n\n## Must-Haves\n\n- The command passes.\n\n## Standards\n\n- Reuse existing helpers.\n\n## Files to Change\n\n- scripts/x.js — implementation.\n`;
 }
 
 function envelope(request, overrides = {}) {
@@ -145,10 +148,13 @@ async function main() {
       const firstEvents = fs.readFileSync(path.join(request.contextRoot, '.gsd', 'forge', 'events.jsonl'), 'utf8')
         .trim().split(/\r?\n/).map(line => JSON.parse(line));
       assert.equal(firstEvents.filter(event => event.event === 'sidecar-unit').at(-1).provider_called, true);
+      const replay = await prep.startStandaloneTaskPreparation(request, { resolveDispatch() { throw Error('partial replay must not resolve'); } });
+      assert.equal(replay.replayed, true, JSON.stringify(replay));
+      assert.equal(calls, 1);
       const continuation = { ...request, prompt: 'UNIQUE-PRODUCTION-SIDECAR-PROMPT-CONTINUED',
         dispatchId: `${request.dispatchId}-continued`, resultFile: request.resultFile.replace('.json', '-continued.json'),
         continuation: { from_dispatch_id: request.dispatchId, result_file: request.resultFile,
-          answers: ['Use the checked-in source.'] } };
+          answers: [{ id: require('./forge-interaction').mergePendingQuestions([], ['Choose the source'])[0].id, answer: 'Use the checked-in source.' }] } };
       const second = await prep.prepareStandaloneTask(continuation);
       assert.equal(second.ok, true, JSON.stringify(second));
       assert.equal(calls, 2);
@@ -300,6 +306,80 @@ async function main() {
     }
   });
 
+  await test('physical contract is validated before routing and included in the common prompt', async () => {
+    const f = require('./forge-code-roots.test').fixture();
+    try {
+      const request = { ...fixture(), cwd: f.a, contextRoot: f.owner, execution_contract: f.contract };
+      const validated = prep.validateRequest(request);
+      const prompt = prep.buildPreparationPrompt(validated);
+      assert(prompt.includes(JSON.stringify(f.contract)));
+      for (const execution_contract of [{ ...f.contract, schema_version: 99 }, { ...f.contract, owner: f.b },
+        { ...f.contract, code_roots: [] }, { ...f.contract, primary_root_id: 'beta' },
+        { ...f.contract, code_roots: f.contract.code_roots.map(root => ({ ...root, identity_sha256: 'foreign' })) }]) {
+        const result = await prep.startStandaloneTaskPreparation({ ...request, execution_contract }, {
+          resolveDispatch() { throw new Error('invalid contract reached routing'); } });
+        assert.equal(result.ok, false);
+        assert.equal(result.provider_called, false);
+        assert.notEqual(result.reason_code, 'preparation-resolution-failed');
+      }
+    } finally { f.cleanup(); }
+  });
+
+  await test('accumulated question texts and answers survive partial continuation and restart', async () => {
+    const request = fixture({ phase: 'discuss' });
+    const questions = ['First required decision?', 'Second required decision?'];
+    await prep.prepareStandaloneTask(request, { invokeSidecar: async () => ({ status: 'partial', summary: 'Decisions', questions, artifacts: [] }) });
+    const ids = require('./forge-interaction').mergePendingQuestions([], questions).map(row => row.id);
+    const resume = answers => ({ ...request, dispatchId: request.dispatchId + '-resume', resultFile: request.resultFile + '-resume.json',
+      continuation: { from_dispatch_id: request.dispatchId, result_file: request.resultFile, answers } });
+    const first = await prep.startStandaloneTaskPreparation(resume([{ id: ids[0], answer: 'First accepted answer' }]));
+    assert.equal(first.reason_code, 'preparation-continuation-answers-incomplete');
+    const second = await prep.prepareStandaloneTask(resume([{ id: ids[1], answer: 'Second accepted answer' }]), {
+      invokeSidecar: async delivery => {
+        for (const text of [...questions, ...ids, 'First accepted answer', 'Second accepted answer']) assert(delivery.prompt.includes(text));
+        return envelope(request);
+      } });
+    assert.equal(second.ok, true, JSON.stringify(second));
+  });
+
+  await test('partial replay preserves input identity for native and injected transports', async () => {
+    for (const native of [false, true]) {
+      const request = fixture({ phase: 'discuss', ...(native ? { model: 'gpt-5.6-sol' } : {}) });
+      const partial = { status: 'partial', summary: 'Need decision', questions: [{ id: 'source', question: 'Which source?' }], artifacts: [] };
+      let calls = 0;
+      if (native) {
+        request.activeCapabilities = codexCapabilities();
+        const started = await prep.startStandaloneTaskPreparation(request);
+        const accepted = await prep.acceptStandaloneTaskPreparation(request, { route: started.route, rawResult: framed(partial),
+          invocationTelemetry: started.invocation.telemetry, providerCalled: true });
+        assert.equal(accepted.status, 'partial', JSON.stringify(accepted));
+      } else {
+        const accepted = await prep.prepareStandaloneTask(request, { invokeSidecar: async () => { calls++; return partial; } });
+        assert.equal(accepted.status, 'partial', JSON.stringify(accepted));
+      }
+      const options = { resolveDispatch() { throw Error('replay must not resolve'); }, invokeSidecar() { throw Error('replay must not invoke'); } };
+      const replay = await prep.startStandaloneTaskPreparation(request, options);
+      assert.equal(replay.replayed, true, JSON.stringify(replay));
+      assert.deepEqual(replay.result.questions, partial.questions);
+      assert.equal(calls, native ? 0 : 1);
+      const continuation = { ...request, dispatchId: request.dispatchId + '-answer', resultFile: request.resultFile.replace('.json', '-answer.json'),
+        continuation: { from_dispatch_id: request.dispatchId, result_file: request.resultFile, answers: [{ id: 'source', answer: 'Schema' }] } };
+      // A continuation has answered input questions plus a new output question.
+      const next = { status: 'partial', summary: 'Another decision', questions: [{ id: 'scope', question: 'Which scope?' }], artifacts: [] };
+      let accepted;
+      if (native) {
+        const started = await prep.startStandaloneTaskPreparation(continuation);
+        accepted = await prep.acceptStandaloneTaskPreparation(continuation, { route: started.route, rawResult: framed(next),
+          invocationTelemetry: started.invocation.telemetry, providerCalled: true });
+      } else accepted = await prep.prepareStandaloneTask(continuation, { invokeSidecar: async () => next });
+      assert.equal(accepted.status, 'partial', JSON.stringify(accepted));
+      fs.unlinkSync(request.resultFile); fs.unlinkSync(request.resultFile + '.receipt.json');
+      const replayNext = await prep.startStandaloneTaskPreparation(continuation, options);
+      assert.equal(replayNext.replayed, true, JSON.stringify(replayNext));
+      assert.deepEqual(replayNext.result.questions, next.questions);
+    }
+  });
+
   await test('partial questions publish nothing and explicit continuation uses a new fingerprint and prompt', async () => {
     const request = fixture({ phase: 'discuss' });
     const partial = { status: 'partial', summary: 'Need a decision',
@@ -311,7 +391,7 @@ async function main() {
     const continuation = { ...request, dispatchId: `${request.dispatchId}-answer`,
       resultFile: request.resultFile.replace('.json', '-answer.json'),
       continuation: { from_dispatch_id: request.dispatchId, result_file: request.resultFile,
-        answers: ['The checked-in schema is authoritative.'] } };
+        answers: [{ id: require('./forge-interaction').mergePendingQuestions([], ['Which source is authoritative?'])[0].id, answer: 'The checked-in schema is authoritative.' }] } };
     let prompt = '';
     const resumed = await prep.prepareStandaloneTask(continuation, { invokeSidecar: async delivery => {
       prompt = delivery.prompt;
@@ -334,12 +414,12 @@ async function main() {
     function continuation(overrides = {}) {
       return { ...prior, dispatchId: `${prior.dispatchId}-${++sequence}`,
         resultFile: path.join(path.dirname(prior.resultFile), `continued-${sequence}.json`),
-        continuation: { from_dispatch_id: prior.dispatchId, result_file: prior.resultFile, answers: ['Answer'] },
+        continuation: { from_dispatch_id: prior.dispatchId, result_file: prior.resultFile, answers: [{ id: require('./forge-interaction').mergePendingQuestions([], ['One?'])[0].id, answer: 'Answer' }] },
         ...overrides };
     }
     const forged = [
       continuation({ continuation: { from_dispatch_id: 'missing',
-        result_file: path.join(path.dirname(prior.resultFile), 'missing.json'), answers: ['Answer'] } }),
+        result_file: path.join(path.dirname(prior.resultFile), 'missing.json'), answers: [{ id: require('./forge-interaction').mergePendingQuestions([], ['One?'])[0].id, answer: 'Answer' }] } }),
       continuation({ taskId: `T-20260928151522-wrong-${sequence}` }),
       continuation({ phase: 'research' }),
       continuation({ dispatchId: prior.dispatchId }),
@@ -354,7 +434,7 @@ async function main() {
     await prep.prepareStandaloneTask(completed, { invokeSidecar: async () => envelope(completed) });
     const afterDone = { ...completed, dispatchId: `${completed.dispatchId}-continued`,
       resultFile: completed.resultFile.replace('.json', '-continued.json'),
-      continuation: { from_dispatch_id: completed.dispatchId, result_file: completed.resultFile, answers: ['Answer'] } };
+      continuation: { from_dispatch_id: completed.dispatchId, result_file: completed.resultFile, answers: [{ id: require('./forge-interaction').mergePendingQuestions([], ['One?'])[0].id, answer: 'Answer' }] } };
     const refused = await prep.prepareStandaloneTask(afterDone, { invokeSidecar: async () => { calls++; return envelope(afterDone); } });
     assert.equal(refused.reason_code, 'preparation-continuation-not-pending');
     assert.equal(calls, 0);
@@ -684,9 +764,10 @@ async function main() {
     };
     try {
       const result = await prep.prepareStandaloneTask(conflict);
-      assert.equal(result.diagnostic.stage, 'publication');
+      assert.equal(result.reason_code, 'artifact-direct-write-detected');
+      assert.equal(result.diagnostic.stage, 'validation');
       assert.equal(result.provider_called, true);
-      assert.equal(JSON.parse(fs.readFileSync(`${conflict.resultFile}.receipt.json`, 'utf8')).phase, 'ready');
+      assert.equal(JSON.parse(fs.readFileSync(`${conflict.resultFile}.receipt.json`, 'utf8')).phase, 'failed');
     } finally { xllm.invokeCodexAppServer = original; }
   });
 

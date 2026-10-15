@@ -184,6 +184,13 @@ function posix(p) {
  * outcome-only view kept for callers that only branch on scope.
  */
 function codeDirScope(a, b) {
+  if (a?.schema_version !== undefined && a.schema_version !== 1 || b?.schema_version !== undefined && b.schema_version !== 1) {
+    try {
+      const roots = require('./forge-code-roots');
+      const aa = roots.claimGroups(a), bb = roots.claimGroups(b);
+      return { scope: aa.some(x => bb.some(y => x.identity_sha256 === y.identity_sha256)) ? 'same' : 'different', note: null };
+    } catch { return { scope: 'unknown', note: 'code-dir-unresolved' }; }
+  }
   const ka = classifyCodeDir(a && a.code_dir !== undefined ? a.code_dir : null);
   const kb = classifyCodeDir(b && b.code_dir !== undefined ? b.code_dir : null);
 
@@ -201,6 +208,7 @@ function codeDirScope(a, b) {
   const ra = realPathOf(ka.value);
   const rb = realPathOf(kb.value);
   const note = (ra.ok && rb.ok) ? null : 'code-dir-unresolved';
+  if (!ra.ok || !rb.ok) return { scope: 'unknown', note };
 
   let na = posix(ra.value);
   let nb = posix(rb.value);
@@ -244,6 +252,16 @@ function isUndeclared(claim) {
  * anywhere in this file; only `pathsOverlap` — the algebra — is reused.
  */
 function claimsConflict(claimA, claimB) {
+  if (claimA?.schema_version !== undefined && claimA.schema_version !== 1 || claimB?.schema_version !== undefined && claimB.schema_version !== 1) {
+    try {
+      const roots = require('./forge-code-roots'), matched = [];
+      for (const a of roots.claimGroups(claimA)) for (const b of roots.claimGroups(claimB)) {
+        if (a.identity_sha256 !== b.identity_sha256) continue;
+        for (const x of a.paths) for (const y of b.paths) if (pathsOverlap(x, y)) matched.push(`${a.id}::${x} × ${b.id}::${y}`);
+      }
+      return matched.length ? { cause: 'overlap', paths: matched } : null;
+    } catch (e) { return { cause: 'undeclared-writes', paths: [], detail: e.message }; }
+  }
   if (isUndeclared(claimA) || isUndeclared(claimB)) {
     return { cause: 'undeclared-writes', paths: [] };
   }

@@ -294,6 +294,18 @@ function reaches(claimPath, touchedPath, allowSuffix) {
  * negativa medida. Não decide nada: a decisão é de `classifyRelease`.
  */
 function probeClaim(claim, opts = {}) {
+  if (claim?.schema_version !== undefined && claim.schema_version !== 1) {
+    let groups;
+    try { groups = require('./forge-code-roots').claimGroups(claim); }
+    catch (e) { return { claim_present: true, explicit_release: false, baseline_advanced: null, paths_in_flight: null, ttl_expired: false, probe_error: e.message }; }
+    const facts = groups.map(g => ({ root_id: g.id, ...probeClaim({ ...claim, schema_version: 1, code_dir: g.path, paths: g.paths,
+      vcs_baseline: claim.root_baselines?.[g.id] }, { ...opts, codeDir: g.path, vcs: g.vcs }) }));
+    const all = key => facts.every(f => f[key] === true) ? true : facts.some(f => f[key] == null) ? null : false;
+    const any = key => facts.some(f => f[key] === true) ? true : facts.some(f => f[key] == null) ? null : false;
+    return { ...facts[0], roots: facts, baseline_advanced: all('baseline_advanced'), paths_in_flight: any('paths_in_flight'),
+      ttl_expired: false, dirty_paths: facts.flatMap(f => (f.dirty_paths || []).map(p => `${f.root_id}::${p}`)),
+      probe_error: facts.map(f => f.probe_error).filter(Boolean).join('; ') || null };
+  }
   const seam = opts.vcsSeam || vcsDefault;
   const now = typeof opts.now === 'number' ? opts.now : Date.now();
   const ttlMs = typeof opts.ttlMs === 'number' ? opts.ttlMs : DEFAULT_TTL_MS;

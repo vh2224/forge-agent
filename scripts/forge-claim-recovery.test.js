@@ -279,5 +279,22 @@ test("claim '.' captura dirty na raiz e escape malformado nunca libera", () => {
   }
 });
 
+test('v2 preserves root identity through bundle and conflict-safe restore', () => {
+  const f = require('./forge-code-roots.test').fixture(), id = 'T-root-recovery';
+  fs.mkdirSync(path.join(f.owner, '.gsd'));
+  runs.add(f.owner, { id, kind: 'task', session_id: 'fixture', active: true });
+  recordClaim(f.owner, id, { schema_version: 2, source: 'manual', execution_contract: f.contract, paths: ['alpha::same.txt', 'beta::same.txt'] });
+  fs.writeFileSync(path.join(f.a, 'same.txt'), 'alpha saved'); fs.writeFileSync(path.join(f.b, 'same.txt'), 'beta saved');
+  const opts = { confirmWorkspaceQuiescent: true, confirmOwnerStopped: true, findStuckClaims: () => ({ stuck: [{ id }] }), io: { fsyncDir: () => {} } };
+  const applied = recovery.apply(f.owner, id, opts); assert.strictEqual(applied.ok, true, JSON.stringify(applied));
+  const manifest = JSON.parse(fs.readFileSync(path.join(f.owner, applied.bundle, 'manifest.json')));
+  assert.deepStrictEqual(manifest.entries.map(row => row.root_id), ['alpha', 'beta']);
+  fs.unlinkSync(path.join(f.a, 'same.txt')); fs.writeFileSync(path.join(f.b, 'same.txt'), 'foreign bytes');
+  const restored = recovery.restore(f.owner, id, { apply: true, confirmWorkspaceQuiescent: true });
+  assert.strictEqual(restored.restored, true, JSON.stringify(restored));
+  assert.strictEqual(fs.readFileSync(path.join(f.a, 'same.txt'), 'utf8'), 'alpha saved');
+  assert.strictEqual(fs.readFileSync(path.join(f.b, 'same.txt'), 'utf8'), 'foreign bytes');
+  f.cleanup();
+});
 for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
 if (!process.exitCode) process.stdout.write(`\n${passed} passed, 0 failed\n`);

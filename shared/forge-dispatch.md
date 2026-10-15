@@ -3020,3 +3020,7 @@ capability, tools, sandbox, grants, credentials, prompt or transcript trigger
 `untrusted-output-barrier` and can never influence a subsequent dispatch.
 
 **Native questions:** Before conducting questions, read `shared/forge-interaction.md` (or `${FORGE_HOME:-~/.forge-agent}/shared/forge-interaction.md` in consumer projects). Apply its host adapter to every question example below and in loaded references; required unanswered decisions remain pending. Existing auto/headless deferment policies still apply.
+
+## Recuperação de entrega e contratos multiroot
+
+Para requests standalone com execution_contract v2, siga shared/forge-bidirectional-sidecar.md § Contrato de execução v2 e § Recuperação compartilhada. A rota permitida ainda precisa da capability real de execução/publicação. Empacote antes de medir: token_budget.coding_standards limita só padrões opcionais, mantendo referência ao arquivo completo. Registre reason_code, camada, provider_called factual (unknown sem evidência), hashes/tamanhos, budgets, modelo enviado/observado e receipt. Use forge-attempt-recovery persistido; processo/receipt são inspecionados antes de outra chamada. Serviço comprovado pode avançar na lista resolvida autorizada com adapter validado e preferência nativa; timeout sozinho não prova indisponibilidade. Correção concreta offline permite no máximo uma repetição corrigida, prazo compartilhado 60s. Nunca execute inline para contornar recusa.

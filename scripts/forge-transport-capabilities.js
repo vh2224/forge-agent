@@ -38,4 +38,17 @@ function capability(engine, unitType, delivery = {}) {
       : `No sidecar contract for ${engine}/${unitType || '(missing unit_type)'}. Update Forge or configure an explicitly supported route for this unit; no worker was substituted.`,
   };
 }
-module.exports = { ARTIFACT_UNITS, UNIT_MODES, capability };
+// Composed delivery proof, independent of the planner's dispatch permission.
+// Directory access is not preventive per-file containment; deltas are verified.
+function executionCapability(route, contract, options = {}) {
+  const engine = route?.resolved_worker_engine || route?.engine;
+  const supported = ['claude', 'codex'].includes(engine) && route?.dispatch_allowed === true
+    && ['native', 'sidecar'].includes(route.worker_mode) && contract?.schema_version === 2
+    && (route.worker_mode !== 'native' || options.nativeInvocation?.ok === true);
+  return { supported, reason_code: supported ? 'execution-contract-supported' : 'execution-route-incompatible',
+    engine: engine || null, host: route?.host_runtime || null, worker_mode: route?.worker_mode || null,
+    transport: route?.worker_mode === 'native' ? 'native' : engine === 'claude' ? 'claude-cli' : 'codex-appserver',
+    schema_version: 2, sandbox: 'directory-access-and-post-write-verification',
+    additional_roots: true, result: 2, replay: 2, delivery: 2, vcs: ['git', 'svn'] };
+}
+module.exports = { ARTIFACT_UNITS, UNIT_MODES, capability, executionCapability };

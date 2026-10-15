@@ -961,6 +961,16 @@ test('claim que escapa da raiz falha fechado e nunca libera', () => {
   }
 });
 
+test('v2 release probes every root and never uses TTL as proof', () => {
+  const strict = require('assert'), f = require('./forge-code-roots.test').fixture();
+  const claim = require('./forge-write-claim').normalizeClaim({ schema_version: 2, source: 'manual', execution_contract: f.contract,
+    paths: ['alpha::same.txt', 'beta::same.txt'], at: 1 });
+  require('fs').writeFileSync(require('path').join(f.b, 'same.txt'), 'in flight');
+  const observed = require('./forge-claim-release').probeClaim(claim, { now: Date.now() + 1e12 });
+  strict.strictEqual(observed.roots.length, 2); strict.strictEqual(observed.paths_in_flight, true);
+  strict.strictEqual(observed.ttl_expired, false); strict.strictEqual(observed.roots[1].root_id, 'beta');
+  f.cleanup();
+});
 cleanup();
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {

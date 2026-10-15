@@ -2285,6 +2285,12 @@ async function runWriteContractCore(opts, contract) {
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   const writableRoots = Array.isArray(opts.writableRoots) ? opts.writableRoots.map(root => path.resolve(root)) : [];
   const repoRoots = [cwd, ...writableRoots];
+  const executionContract = opts.executionContext?.execution_contract;
+  if (executionContract) require('./forge-code-roots').validateContract(executionContract, { revalidate: true });
+  const labels = repoRoots.map((root, i) => executionContract
+    ? executionContract.code_roots.find(r => require('./forge-code-roots').key(r.path) === require('./forge-code-roots').key(fs.realpathSync.native(root)))?.id
+    : (repoRoots.length === 1 ? 'primary' : `root${i + 1}`));
+  if (labels.some(label => !label) || new Set(labels).size !== labels.length) throw new Error('execute root identity mismatch');
   const rootKeys = repoRoots.map(root => process.platform === 'win32' ? root.toLowerCase() : root);
   if (new Set(rootKeys).size !== repoRoots.length) throw new Error('execute repo roots must be unique');
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
@@ -2306,7 +2312,7 @@ async function runWriteContractCore(opts, contract) {
     let stat;
     try { stat = fs.statSync(requested); } catch (error) { throw new Error(`context-root is not readable: ${error.message}`); }
     if (!stat.isDirectory()) throw new Error('context-root must be a directory');
-    contextRoot = fs.realpathSync(requested);
+    contextRoot = fs.realpathSync.native(requested);
     if (!fs.existsSync(path.join(contextRoot, '.gsd'))) throw new Error('context-root must contain .gsd');
   }
 
@@ -2545,13 +2551,10 @@ async function runWriteContractCore(opts, contract) {
   // transports are untrusted processes and cross this exact same barrier.
   assertUntrustedOutputBarrier(parsed);
 
-  const labels = repoRoots.map(root => path.basename(root));
-  if (repoRoots.length > 1 && new Set(labels.map(label => process.platform === 'win32' ? label.toLowerCase() : label)).size !== labels.length) {
-    throw new Error('multi-repo roots require unique basenames for result attribution');
-  }
   const derived = preDirtyAllByRepo.flatMap((snapshot, index) =>
     deriveFilesChanged(snapshot.repo, snapshot.entries, attemptSnapshots[index].start_sha, snapshot.vcs)
-      .map(entry => repoRoots.length > 1 ? { ...entry, repo: labels[index] } : entry));
+      .map(entry => executionContract ? { ...entry, root_id: labels[index], repo: labels[index] }
+        : repoRoots.length > 1 ? { ...entry, repo: labels[index] } : entry));
   // Protected metadata is outside the surgical reset set. A sidecar-owned `.gsd`
   // delta is therefore a hard terminal failure, never an advisory warning/success.
   try {
@@ -2607,6 +2610,7 @@ async function runWriteContractCore(opts, contract) {
         sha256: require('crypto').createHash('sha256').update(prompt).digest('hex'),
         bytes: Buffer.byteLength(prompt), input_tokens: inputTokens, token_method: 'heuristic-chars-4',
         budgets: opts.executionContext.budgets,
+        execution_contract: executionContract,
       } } : {}),
       context_health: contextHealth || { measurement: 'unknown', compaction_measurement: 'unknown', scope: 'sidecar-thread' },
       context_boundary: contextBoundary || { indicator: 'ctx ?', severity: 'none', additionalContext: '', checkpoint: false },

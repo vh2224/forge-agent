@@ -91,6 +91,19 @@ function inspect(cwd, runId, opts = {}) {
   if (!record || record.active !== true || !isHeld(record.write_claim)) return { ok: false, eligible: false, reason: 'claim-not-live' };
   const claim = record.write_claim;
   try { validateHeldClaim(claim); } catch (error) { return { ok: false, eligible: false, reason: error.message }; }
+  if (claim.schema_version === 2) {
+    try {
+      const groups = require('./forge-code-roots').claimGroups(claim), statusReader = opts.workingStatus || vcs.workingStatus;
+      const roots = groups.map(group => {
+        const status = statusReader(group.path, { vcs: group.vcs });
+        if (!status.ok) throw new Error(`vcs-status-failed:${group.id}:${status.error}`);
+        return { root_id: group.id, code_dir: group.path, scope: group.paths, vcs: group.vcs,
+          dirty: status.entries.filter(e => IN_FLIGHT_KINDS.includes(e.kind) && inScope(e.path.replace(/\\/g, '/'), group.paths)) };
+      });
+      return { ok: true, eligible: true, run_id: runId, record, claim, code_dir: claim.code_dir, roots,
+        dirty: roots.flatMap(root => root.dirty.map(entry => ({ ...entry, root_id: root.root_id, code_dir: root.code_dir }))), status_reader: statusReader };
+    } catch (error) { return { ok: false, eligible: false, reason: error.message }; }
+  }
   let scope;
   try { scope = normalizeScope(claim.paths); } catch (error) { return { ok: false, eligible: false, reason: error.message }; }
   if (typeof claim.code_dir !== 'string' || !path.isAbsolute(claim.code_dir)) return { ok: false, eligible: false, reason: 'code-dir-invalid' };
@@ -178,21 +191,22 @@ function createBundle(cwd, preview, now, name, io) {
     for (let i = 0; i < preview.dirty.length; i++) {
       const dirty = preview.dirty[i];
       const rel = dirty.path.replace(/\\/g, '/');
-      const abs = assertSafePath(preview.code_dir, path.resolve(preview.code_dir, rel), 'dirty');
+      const codeDir = dirty.code_dir || preview.code_dir;
+      const abs = assertSafePath(codeDir, path.resolve(codeDir, rel), 'dirty');
       let present = false; let hash = null; let payload = null;
       const existing = lstatOrAbsent(abs);
       if (existing !== null) {
         const st = existing;
         if (!st.isFile() || st.isSymbolicLink()) throw new Error(`dirty-path-unsafe:${rel}`);
-        const ancestry = ancestryIdentity(preview.code_dir, abs, 'dirty');
+        const ancestry = ancestryIdentity(codeDir, abs, 'dirty');
         const bytes = fs.readFileSync(abs);
-        if (ancestryIdentity(preview.code_dir, abs, 'dirty') !== ancestry) throw new Error(`dirty-ancestry-drift:${rel}`);
+        if (ancestryIdentity(codeDir, abs, 'dirty') !== ancestry) throw new Error(`dirty-ancestry-drift:${rel}`);
         present = true; hash = sha256(bytes); payload = `payload/${i}.bin`;
         durableWrite(path.join(payloadRoot, `${i}.bin`), bytes, io);
         const check = fs.readFileSync(path.join(payloadRoot, `${i}.bin`));
         if (sha256(check) !== hash) throw new Error(`bundle-verify-failed:${rel}`);
       }
-      entries.push({ path: rel, kind: dirty.kind, code: dirty.code, present, sha256: hash, payload });
+      entries.push({ path: rel, ...(dirty.root_id ? { root_id: dirty.root_id } : {}), kind: dirty.kind, code: dirty.code, present, sha256: hash, payload });
     }
     const manifest = { version: 1, run_id: preview.run_id, created_at: now, durability_strategy: durabilityStrategy(io), durability_limitations: durabilityLimitations(io), code_dir: preview.code_dir, claim_identity_sha256: sha256(Buffer.from(JSON.stringify(preview.claim))), claim: preview.claim, entries };
     const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
@@ -213,6 +227,12 @@ function createBundle(cwd, preview, now, name, io) {
 }
 
 function verifyDirtyUnchanged(preview, bundle) {
+  if (preview.roots) {
+    require('./forge-code-roots').claimGroups(preview.claim);
+    for (const root of preview.roots) verifyDirtyUnchanged({ ...preview, roots: undefined, code_dir: root.code_dir,
+      scope: root.scope, claim: { vcs_baseline: { vcs: root.vcs } } }, bundle ? { manifest: { entries: bundle.manifest.entries.filter(e => e.root_id === root.root_id) } } : null);
+    return;
+  }
   const current = preview.status_reader(preview.code_dir, { vcs: preview.claim.vcs_baseline && preview.claim.vcs_baseline.vcs });
   if (!current.ok) throw new Error(`vcs-status-failed:${current.error}`);
   const dirty = current.entries.filter((entry) => IN_FLIGHT_KINDS.includes(entry.kind)
@@ -348,12 +368,17 @@ function restore(cwd, runId, opts = {}) {
   let loaded;
   try { loaded = loadManifest(cwd, runId); } catch (error) { return { ok: false, restored: false, reason: error.message }; }
   const { root, manifest } = loaded;
+  let contract;
+  try { if (manifest.claim.schema_version === 2) contract = require('./forge-code-roots').validateContract(manifest.claim.execution_contract, { revalidate: true }); }
+  catch (error) { return { ok: false, restored: false, reason: error.message }; }
   if (typeof manifest.code_dir !== 'string' || !path.isAbsolute(manifest.code_dir)) return { ok: false, restored: false, reason: 'code-dir-invalid' };
   const actions = []; const conflicts = [];
   try {
     for (const entry of manifest.entries) {
       if (typeof entry.path !== 'string' || path.isAbsolute(entry.path) || entry.path.startsWith('../')) throw new Error('manifest-path-escape');
-      const target = assertSafePath(manifest.code_dir, path.resolve(manifest.code_dir, entry.path), 'manifest');
+      const codeDir = contract ? contract.code_roots.find(r => r.id === entry.root_id)?.path : manifest.code_dir;
+      if (!codeDir) throw new Error('manifest-root-unknown');
+      const target = assertSafePath(codeDir, path.resolve(codeDir, entry.path), 'manifest');
       if (!entry.present) {
         if (lstatOrAbsent(target) !== null) conflicts.push({ path: entry.path, presence: true });
         else actions.push({ path: entry.path, action: 'absence-confirmed' });
@@ -363,18 +388,18 @@ function restore(cwd, runId, opts = {}) {
       if (!inside(path.join(root, 'payload'), payloadPath)) throw new Error('payload-path-escape');
       const bytes = fs.readFileSync(payloadPath);
       if (sha256(bytes) !== entry.sha256) throw new Error(`payload-corrupt:${entry.path}`);
-      if (lstatOrAbsent(target) === null) actions.push({ path: entry.path, action: 'restore', target, bytes });
+      if (lstatOrAbsent(target) === null) actions.push({ path: entry.path, root_id: entry.root_id, codeDir, action: 'restore', target, bytes });
       else {
         const st = fs.lstatSync(target);
-        if (!st.isFile() || st.isSymbolicLink() || sha256(fs.readFileSync(target)) !== entry.sha256) conflicts.push({ path: entry.path, bytes });
+        if (!st.isFile() || st.isSymbolicLink() || sha256(fs.readFileSync(target)) !== entry.sha256) conflicts.push({ path: contract ? `${entry.root_id}/${entry.path}` : entry.path, bytes });
         else actions.push({ path: entry.path, action: 'already-restored' });
       }
     }
     const result = { ok: conflicts.length === 0, restored: false, apply_required: opts.apply !== true, actions: actions.map(({ path: p, action }) => ({ path: p, action })), conflicts: conflicts.map((c) => c.path), presence_conflicts: conflicts.filter(c => c.presence).map(c => c.path) };
     if (opts.apply !== true) return result;
     for (const action of actions) if (action.action === 'restore') {
-      assertSafePath(manifest.code_dir, path.dirname(action.target), 'restore');
-      writeExclusive(manifest.code_dir, action.target, action.bytes, 'restore');
+      assertSafePath(action.codeDir || manifest.code_dir, path.dirname(action.target), 'restore');
+      writeExclusive(action.codeDir || manifest.code_dir, action.target, action.bytes, 'restore');
     }
     for (const conflict of conflicts.filter(c => !c.presence)) {
       const out = path.resolve(root, 'conflicts', conflict.path);

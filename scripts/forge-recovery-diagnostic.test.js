@@ -488,4 +488,14 @@ if (!process.env.FORGE_TEST_RECOVERY_ANCESTOR_ALIAS) test('OS ancestor aliases p
   assert(out.stdout.includes('PASS symlink payload is rejected'));
   assert(!out.stdout.includes('SKIP symlink'), 'child-symlink rejection must execute with supported ancestor aliases');
 });
+test('attempt diagnostics expose unknown process and original shared deadline without mutation', f => {
+  const stateFile = path.join(f.root,'attempt.json'), receiptFile = path.join(f.root,'receipt.json');
+  const api = require('./forge-attempt-recovery');
+  const state = api.createRecovery({unit:'T-diagnostic',roots_sha256:'roots',clock:()=>1000}).snapshot();
+  fs.writeFileSync(stateFile,JSON.stringify(state)); fs.writeFileSync(receiptFile,JSON.stringify({phase:'failed',failure:{provider_called:'unknown'}}));
+  const before=fs.readFileSync(stateFile); const result=diagnostic.inspectAttemptRecovery(stateFile,receiptFile);
+  assert.strictEqual(result.inspection.process_stopped,false); assert.strictEqual(result.deadline_at,61000);
+  assert.deepStrictEqual(fs.readFileSync(stateFile),before);
+});
+
 console.log(`${passed} recovery diagnostic tests passed`);

@@ -303,3 +303,7 @@ If returning `status: blocked`, include a `blocker_class` field:
 blocker_class: context_overflow | scope_exceeded | model_refusal | tooling_failure | external_dependency | unknown
 blocker: <one-line description of what blocked>
 ```
+
+## Execução com contrato v2
+
+Leia shared/forge-bidirectional-sidecar.md, seção Contrato de execução v2. Preserve owner, raízes físicas, primary_root_id e claim generation da invocação. forge-task-execution.prepare valida plano completo, gates, claim não vazio e capabilities antes do writer; forge-unit-sidecar é o caminho de execução/publicação. Verifique delta independente, inputs e protected metadata em todas as raízes, incluindo conteúdo de events. Resultado deve identificar root_id em cada alteração. forge-verify.captureRootDelivery executa comandos em cada cwd e gera fontes próprias; binds de truth global precisam cobrir todas as raízes. Nunca atribua escrita pelo horário: reset exige callback confiável de autoria e processo encerrado. Root pendente mantém próximo writer bloqueado.

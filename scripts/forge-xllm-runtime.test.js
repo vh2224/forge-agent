@@ -201,6 +201,28 @@ test('failure telemetry preserves output tokens captured after the model respons
   });
 });
 
+test('every physical Git/SVN root detects omitted create/delete/rename and protected events drift', () => {
+  const lab = require('./forge-code-roots.test'), execution = require('./forge-task-execution'), reset = require('./forge-surgical-reset');
+  for (const vcs of ['git', 'svn']) {
+    const f = lab.fixture(vcs);
+    for (const root of f.contract.code_roots) {
+      const snapshot = reset.captureAttemptSnapshot(root.path); snapshot.root_id = root.id;
+      const prepared = { execution_contract: f.contract, claims: [{root_id:root.id,path:'.'}], snapshots: [snapshot] };
+      const old = path.join(root.path, 'same.txt'), renamed = path.join(root.path, 'renamed.txt');
+      fs.renameSync(old, renamed);
+      assert.throws(() => execution.verifyResult(f.a, prepared, { files_changed: [] }), /omitted-delta/);
+      assert.throws(() => execution.verifyResult(f.a, prepared, { files_changed: ['same.txt'] }), /result-root-required/);
+      const actual = execution.verifyResult(f.a, prepared, { files_changed: [{root_id:root.id,path:'same.txt'}, {root_id:root.id,path:'renamed.txt'}] });
+      assert.strictEqual(actual[root.id+'::same.txt'], null); assert(actual[root.id+'::renamed.txt']);
+      fs.renameSync(renamed, old);
+      const before = execution.protectedSnapshot(root.path), events = path.join(root.path, '.gsd/events.jsonl');
+      fs.mkdirSync(path.dirname(events), {recursive:true}); fs.writeFileSync(events,'unsigned append');
+      assert.throws(() => execution.assertProtected(root.path,before), /protected-metadata/);
+    }
+    f.cleanup();
+  }
+});
+
 if (!process.exitCode) {
   process.stdout.write(`\n${passed} passed, 0 failed${skipped ? `, ${skipped} skipped` : ''}\n`);
 }

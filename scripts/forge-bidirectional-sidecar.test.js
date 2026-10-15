@@ -1548,6 +1548,19 @@ async function reviewFixMatrix() {
   assert.strictEqual(selected.unit.type, 'research-milestone');
   write(path.join(flowDir, 'payload.json'), payload(flow));
   const delivered = await unit.runUnitSidecar(flow);
+  // The public recovery wrapper replays the durable ready receipt without
+  // resolving another destination or making a second inference.
+  const recoveryApi = require('./forge-attempt-recovery');
+  const stateFile = flow.resultFile + '.recovery.json';
+  recoveryApi.captureFailure({ stateFile, request: flow, unit: `${flow.unitType}/${flow.milestoneId}`, route: flow.route,
+    receiptFile: flow.resultFile + '.receipt.json', error: { code: 'publication-interrupted', provider_called: true } });
+  const callsBeforeReplay = fs.readFileSync(path.join(flowDir, 'invocations.txt'), 'utf8');
+  const recovered = await unit.recoverUnitSidecar(flow, { stateFile, receiptFile: flow.resultFile + '.receipt.json',
+    processProbe: () => 'stopped' }, { resolveDispatch() { throw new Error('replay must not resolve a route'); } });
+  assert.strictEqual(recovered.action, 'replay');
+  assert.strictEqual(recovered.provider_called, false);
+  assert.strictEqual(recovered.result.status, 'done');
+  assert.strictEqual(fs.readFileSync(path.join(flowDir, 'invocations.txt'), 'utf8'), callsBeforeReplay);
   const completion = loop.invoke('codex', 'auto', 'complete', { ...input, result: delivered }, selected.snapshot).result;
   assert.strictEqual(completion.action, 'continue', JSON.stringify(completion));
   const replay = loop.invoke('codex', 'auto', 'complete', { ...input, result: delivered }, selected.snapshot).result;

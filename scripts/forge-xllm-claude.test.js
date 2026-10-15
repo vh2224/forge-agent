@@ -446,6 +446,7 @@ function cliArgs(fixture) {
     '--model', 'claude-sonnet-5', '--effort', 'medium',
     '--timeout', '12',
     '--env-policy', 'minimal',
+    ...(fixture.writableRoots ? ['--writable-roots', JSON.stringify(fixture.writableRoots)] : []),
   ];
 }
 
@@ -601,6 +602,9 @@ async function happyPath(root) {
   const scenarioDir = fs.mkdtempSync(path.join(root, 'happy-'));
   try {
     const fixture = createFixture(scenarioDir, 'happy', 'happy', 'configured');
+    const extra = require('./forge-code-roots.test').laboratory('claude-extra');
+    const secondary = require('./forge-code-roots.test').checkout(path.join(extra.dir, 'second checkout'));
+    fixture.writableRoots = [secondary];
     const run = await runCli(fixture);
     const terminal = readTerminalResult(fixture);
     const capture = readCapture(fixture);
@@ -612,6 +616,8 @@ async function happyPath(root) {
     assertMockEvidence(fixture, run, capture);
     assert.strictEqual(capture.argv[capture.argv.indexOf('--model') + 1], 'claude-sonnet-5');
     assert.strictEqual(capture.argv[capture.argv.indexOf('--effort') + 1], 'medium');
+    assert.strictEqual(capture.argv[capture.argv.indexOf('--add-dir') + 1], path.resolve(secondary));
+    assert.strictEqual(terminal.value.repo_baselines.length, 2);
     const identityLines = run.stderr.split(/\r?\n/).filter(line => line.startsWith('[forge-sidecar]'));
     assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado']);
     assert(identityLines.every(line => line.includes('modelo_enviado=claude-sonnet-5') && line.includes('esforco=medium')));
@@ -621,7 +627,7 @@ async function happyPath(root) {
     assert.strictEqual(terminal.value.status, 'done');
     assert.strictEqual(terminal.value.summary, RESULT_SUMMARY);
     assert.deepStrictEqual(terminal.value.must_haves_status, [RESULT_MUST_HAVE]);
-    assert.deepStrictEqual(terminal.value.files_changed, [{ status: 'A', path: MOCK_OUTPUT }],
+    assert.deepStrictEqual(terminal.value.files_changed, [{ status: 'A', path: MOCK_OUTPUT, repo: 'root1' }],
       'changed files must be VCS-derived rather than trusted from the worker payload');
     assert.deepStrictEqual(terminal.value.files_changed_declared, ['model-declared-output.txt']);
     assert.deepStrictEqual(terminal.value.pre_dirty, []);
@@ -638,6 +644,7 @@ async function happyPath(root) {
     assert(!terminal.text.includes('inputTokens') && !terminal.text.includes('"usage"'),
       'provider usage metadata is never persisted');
     assert.ok(fs.existsSync(path.join(fixture.workspace, MOCK_OUTPUT)));
+    extra.cleanup();
     assert.ok(!fs.readdirSync(fixture.workspace).some((name) => name.startsWith('.forge-claude-sidecar-')),
       'prompt transport directories must not survive success');
   } finally {

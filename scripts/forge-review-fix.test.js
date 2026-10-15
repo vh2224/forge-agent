@@ -601,7 +601,8 @@ for (const scenario of ['preserved', 'created', 'changed', 'removed', 'metadata 
     if (scenario === 'metadata created') fs.symlinkSync(lab.evidence, path.join(lab.wc, '.gsd', 'new-link'), type);
     if (scenario === 'metadata root replaced') {
       const metadata = path.join(lab.wc, '.gsd');
-      const labRoot = fs.realpathSync(lab.wc), actual = path.resolve(metadata);
+      assert(!fs.lstatSync(metadata).isSymbolicLink(), 'delete target is not a symbolic link');
+      const labRoot = fs.realpathSync.native(lab.wc), actual = fs.realpathSync.native(metadata);
       assert(actual.startsWith(labRoot + path.sep), 'delete stays inside owned WC fixture');
       fs.rmSync(metadata, { recursive: true }); fs.symlinkSync(lab.evidence, metadata, type);
     }
