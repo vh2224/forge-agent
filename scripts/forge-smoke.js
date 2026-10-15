@@ -10600,9 +10600,10 @@ function smokeSvnFixture() {
   assert(windowsInstall.includes("$expectedVersion = '1.14.5'")
     && windowsInstall.includes('$actualVersion = & $toolPath --version --quiet')
     && windowsInstall.includes('if ($LASTEXITCODE -ne 0) { throw')
-    && windowsInstall.includes('if ($actualVersion -ne $expectedVersion)'),
+    && windowsInstall.includes("$expectedVersionPattern = '\\A' + [regex]::Escape($expectedVersion) + '(-SlikSvn)?\\z'")
+    && windowsInstall.includes('if ($actualVersion -isnot [string] -or $actualVersion -cnotmatch $expectedVersionPattern)'),
     '(h) pinned Windows SVN refuses failed or unexpected tool versions');
-  assert(windowsInstall.indexOf('if ($actualVersion -ne $expectedVersion)') < windowsInstall.indexOf('$svnBin | Out-File')
+  assert(windowsInstall.indexOf('if ($actualVersion -isnot [string] -or $actualVersion -cnotmatch $expectedVersionPattern)') < windowsInstall.indexOf('$svnBin | Out-File')
     && windowsInstall.includes('$env:PATH = "$svnBin;$env:PATH"')
     && windowsInstall.includes('-FilePath $env:GITHUB_PATH'),
     '(h) validated Windows SVN precedes PATH export');

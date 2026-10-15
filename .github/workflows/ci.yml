@@ -101,6 +101,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $svnBin = Join-Path $env:ProgramFiles 'SlikSvn\bin'
           $expectedVersion = '1.14.5'
+          $expectedVersionPattern = '\A' + [regex]::Escape($expectedVersion) + '(-SlikSvn)?\z'
           foreach ($tool in 'svn.exe', 'svnadmin.exe') {
             $toolPath = Join-Path $svnBin $tool
             if (-not (Test-Path -LiteralPath $toolPath -PathType Leaf)) {
@@ -108,7 +109,7 @@ jobs:
             }
             $actualVersion = & $toolPath --version --quiet
             if ($LASTEXITCODE -ne 0) { throw "Subversion fixture tool failed: $toolPath (exit $LASTEXITCODE)" }
-            if ($actualVersion -ne $expectedVersion) {
+            if ($actualVersion -isnot [string] -or $actualVersion -cnotmatch $expectedVersionPattern) {
               throw "Unexpected Subversion fixture version for ${tool}: expected $expectedVersion, got $actualVersion"
             }
           }
