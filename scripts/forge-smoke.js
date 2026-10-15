@@ -10581,7 +10581,7 @@ function smokeSvnFixture() {
   for (const { platform, command } of [
     { platform: 'Linux', command: /run:\s*sudo apt-get update && sudo apt-get install -y subversion/ },
     { platform: 'macOS', command: /run:\s*brew install subversion/ },
-    { platform: 'Windows', command: /run:\s*\|\s*choco install svn --yes --no-progress/ },
+    { platform: 'Windows', command: /run:\s*\|\s*choco install sliksvn --version=1\.14\.5 --yes --no-progress/ },
   ]) {
     const matching = steps.filter(step => command.test(step));
     assert(matching.length === 1, '(h) exactly one executable SVN install for ' + platform, 'count=' + matching.length);
@@ -10592,6 +10592,20 @@ function smokeSvnFixture() {
     assert(step && installIndex >= 0 && suitesIndex >= 0 && installIndex < suitesIndex && suitesIndex < smokeIndex,
       '(h) ' + platform + ' SVN installation precedes tests and smoke', JSON.stringify({ installIndex, suitesIndex, smokeIndex }));
   }
+  const windowsInstall = steps.find(step => /choco install sliksvn --version=1\.14\.5 --yes --no-progress/.test(step)) || '';
+  assert(windowsInstall.includes("Join-Path $env:ProgramFiles 'SlikSvn\\bin'")
+    && windowsInstall.includes("foreach ($tool in 'svn.exe', 'svnadmin.exe')")
+    && windowsInstall.includes('Test-Path -LiteralPath $toolPath -PathType Leaf'),
+    '(h) pinned Windows SVN validates both installed executables');
+  assert(windowsInstall.includes("$expectedVersion = '1.14.5'")
+    && windowsInstall.includes('$actualVersion = & $toolPath --version --quiet')
+    && windowsInstall.includes('if ($LASTEXITCODE -ne 0) { throw')
+    && windowsInstall.includes('if ($actualVersion -ne $expectedVersion)'),
+    '(h) pinned Windows SVN refuses failed or unexpected tool versions');
+  assert(windowsInstall.indexOf('if ($actualVersion -ne $expectedVersion)') < windowsInstall.indexOf('$svnBin | Out-File')
+    && windowsInstall.includes('$env:PATH = "$svnBin;$env:PATH"')
+    && windowsInstall.includes('-FilePath $env:GITHUB_PATH'),
+    '(h) validated Windows SVN precedes PATH export');
   const verifySteps = steps.filter(step => /svn --version --quiet/.test(step) && /svnadmin --version --quiet/.test(step));
   assert(verifySteps.length === 1 && !/^\s*if:/m.test(verifySteps[0])
     && ci.indexOf(verifySteps[0]) >= 0 && ci.indexOf(verifySteps[0]) < suitesIndex,

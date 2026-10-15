@@ -97,14 +97,22 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install svn --yes --no-progress
+          choco install sliksvn --version=1.14.5 --yes --no-progress
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $svnBin = 'C:\Program Files (x86)\Subversion\bin'
+          $svnBin = Join-Path $env:ProgramFiles 'SlikSvn\bin'
+          $expectedVersion = '1.14.5'
           foreach ($tool in 'svn.exe', 'svnadmin.exe') {
-            if (-not (Test-Path -LiteralPath (Join-Path $svnBin $tool) -PathType Leaf)) {
+            $toolPath = Join-Path $svnBin $tool
+            if (-not (Test-Path -LiteralPath $toolPath -PathType Leaf)) {
               throw "Missing Subversion fixture tool: $tool in $svnBin"
             }
+            $actualVersion = & $toolPath --version --quiet
+            if ($LASTEXITCODE -ne 0) { throw "Subversion fixture tool failed: $toolPath (exit $LASTEXITCODE)" }
+            if ($actualVersion -ne $expectedVersion) {
+              throw "Unexpected Subversion fixture version for ${tool}: expected $expectedVersion, got $actualVersion"
+            }
           }
+          $env:PATH = "$svnBin;$env:PATH"
           $svnBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Verify Subversion fixture tools
