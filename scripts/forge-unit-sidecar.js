@@ -8,7 +8,6 @@ const path = require('path');
 const crypto = require('crypto');
 const xllm = require('./forge-xllm');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity');
-const { invokeClaudeSidecar } = require('./forge-claude-sidecar');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
 const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
 const { capability } = require('./forge-transport-capabilities');
@@ -513,7 +512,7 @@ async function replayArtifactAttempt(request) {
   return { replayed: true, provider_called: false, result, record: attempt.record };
 }
 
-function failArtifactAttempt(request, reasonCode, detail, providerCalled = 'unknown') {
+function failArtifactAttempt(request, reasonCode, detail, providerCalled = 'unknown', finalEvidence) {
   const files = artifactAttemptFiles(request);
   const fingerprint = artifactFingerprint(request);
   const current = fs.existsSync(files.receiptFile)
@@ -522,17 +521,20 @@ function failArtifactAttempt(request, reasonCode, detail, providerCalled = 'unkn
   const failure = { status: 'failure', reason_code: reasonCode,
     provider_called: typeof providerCalled === 'boolean' ? providerCalled : 'unknown', diagnostic: diagnostic(detail || 'adapter-failed'),
     recovery: 'operator-required' };
+  const evidence = require('./forge-attempt-telemetry').sanitizeFinal(finalEvidence || current?.final_evidence);
+  failure.final_evidence = evidence;
   if (!current || current.phase !== 'ready') {
     json(files.receiptFile, { ...(current || {}), phase: 'failed', fingerprint,
       dispatch_id: request.dispatchId, route: request.route,
       request_fingerprint: request.preparationRequestFingerprint || current?.request_fingerprint || null,
       preparation_identity: request.preparationIdentity || current?.preparation_identity || null,
-      route_identity: routeIdentity(request.route, request.unitType), failure });
+      route_identity: routeIdentity(request.route, request.unitType), final_evidence: evidence, failure });
   }
   json(files.resultFile, failure);
   require('./forge-attempt-recovery').captureFailure({ stateFile: request.recoveryStateFile || `${files.resultFile}.recovery.json`,
     unit: `${request.unitType}/${request.taskId || request.sliceId || request.milestoneId}`, contract: request.execution_contract,
-    request, context: request.prompt, route: request.route, receiptFile: files.receiptFile,
+    request, finalEvidence: evidence, route: request.route, receiptFile: files.receiptFile,
+    durationMs: current?.started_at ? Date.now() - Date.parse(current.started_at) : evidence?.duration_ms,
     error: { code: reasonCode, provider_called: providerCalled, diagnostic: { reason: detail } }, layer: detail || 'unknown' });
   return failure;
 }
@@ -582,6 +584,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   }
   existing.saved_candidate = { sha256: hash(JSON.stringify(rawResult)), result: rawResult,
     plan_sha256: existing.broker_plan_sha256 || null };
+  if (metadata.finalEvidence) existing.final_evidence = require('./forge-attempt-telemetry').sanitizeFinal(metadata.finalEvidence);
   json(files.receiptFile, existing);
   // A native preparation worker has only a prompt-level read-only contract.
   // Detect any canonical write before acceptance, even if its bytes happen to
@@ -1250,9 +1253,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
     const replayable = ['ready', 'executed'].includes(record.phase);
     if (replayable) error.stage = 'publication';
     error.diagnostic = detail;
+    if (record.final_evidence) record.final_evidence = { ...record.final_evidence,
+      stage: error.provider_called === false ? 'prepared' : transportReturned ? 'returned' : 'invoked',
+      duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null,
+      provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown' };
     const failure = { status: 'adapter-failed', dispatch_id: dispatchId, reason_code: code,
       provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : record.provider_called === true ? true : 'unknown',
       error_class: xllm.classifyErrorClass(error.message), diagnostic: detail,
+      final_evidence: record.final_evidence || null,
+      layer: replayable ? 'publication' : 'transport-adapter',
+      duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null,
       ...(record.execution ? { request_sha256: fingerprint, packaged_context: record.execution.packaged_context || null,
         budgets: record.execution.budgets, layer: replayable ? 'publication' : 'writing-adapter',
         model_sent: error.provider_called === true || record.provider_called === true ? model : null,
@@ -1264,7 +1274,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     json(resultFile, failure);
     require('./forge-attempt-recovery').captureFailure({ stateFile: r.recoveryStateFile || `${resultFile}.recovery.json`,
       unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`, contract: r.execution_contract,
-      request: r, context: r.prompt, route, receiptFile, error: { ...error, provider_called: failure.provider_called },
+      request: r, finalEvidence: record.final_evidence, route, receiptFile, error: { ...error, provider_called: failure.provider_called },
       layer: failure.layer || detail.reason, packagedContext: record.execution?.packaged_context,
       budgets: record.execution?.budgets, durationMs: record.started_at ? Date.now() - Date.parse(record.started_at) : 0 });
     try { await event('failed', code, detail, failure.provider_called,
@@ -1360,12 +1370,19 @@ async function runUnitSidecarCore(request, runtime, identity) {
     json(receiptFile, saved);
   }
   let providerCalled = false;
+  let transportEntered = false;
+  let transportReturned = false;
   const announce = (stage, fields) => {
-    if (stage === 'iniciado') providerCalled = true;
     runtime.announce?.(stage, fields);
   };
   const options = { cwd, contextRoot: root, engine: route.resolved_worker_engine,
     unitType: r.unitType,
+    telemetryIdentity: r, telemetryRoute: route, budgets: execution?.budgets || r.budgets || {},
+    onPackagedContext: packaged => {
+      const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      json(receiptFile, { ...saved, final_evidence: packaged.final_evidence,
+        ...(saved.execution ? { execution: { ...saved.execution, packaged_context: packaged } } : {}) });
+    },
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
     effort: route.effort, timeoutSecs: route.workers_timeout || DEFAULT_WORKER_TIMEOUT_SECS, resultFile, dispatchId,
     constraints: r.constraints || { auto_commit: false, deploy: false },
@@ -1377,8 +1394,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   };
   const heartbeat = pid => {
     if (Number.isInteger(pid) && pid > 0) {
-      providerCalled = true;
-      announce('iniciado', { ...identity, pid, provider_called: true });
+      announce('iniciado', { ...identity, pid, provider_called: 'unknown' });
     }
     json(resultFile, { status: 'running', pid, adapter_pid: process.pid,
       heartbeat_interval_ms: 15000, started_at: startedAt, updated_at: new Date().toISOString(), dispatch_id: dispatchId });
@@ -1412,15 +1428,19 @@ async function runUnitSidecarCore(request, runtime, identity) {
       xllm.authorizeSidecar('memory', options);
       heartbeat(null);
       if (options.engine === 'claude') {
-        const output = await invokeClaudeSidecar({ ...options, prompt: prompt
+        transportEntered = true;
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt: prompt
           + '\nFinish with ---GSD-WORKER-RESULT---, status, result_json containing the complete JSON, and ---END-RESULT--- on separate lines.',
           readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
+        transportReturned = true;
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
+        transportEntered = true;
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
           sandbox: 'read-only', onHeartbeat: heartbeat });
+        transportReturned = true;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       result = require('./forge-memory-extraction').validateExtractionResult(result, { sourceUnit: loc.sourceUnit });
@@ -1430,12 +1450,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const protectedBefore = execution ? executionApi.protectedSnapshot(root) : null;
       const codeProtectedBefore = execution ? execution.execution_contract.code_roots.map(code => ({ root: code.path,
         before: executionApi.protectedSnapshot(code.path) })) : [];
+      transportEntered = true;
       result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots : r.writableRoots,
-        ...(execution ? { executionContext: execution, onPackagedContext: packaged => {
-          const started = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
-          json(receiptFile, { ...started, execution: { ...started.execution, packaged_context: packaged } });
-        } } : {}) });
+        ...(execution ? { executionContext: execution } : {}) });
+      transportReturned = true;
       if (execution) {
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
         else executionApi.assertProtected(root, protectedBefore);
@@ -1444,6 +1463,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
         // Persist the validated writing response before delivery rendering, which
         // can itself fail. Replay never starts a second writer.
         const executed = { phase: 'executed', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
+          final_evidence: (() => {
+            const evidence = JSON.parse(fs.readFileSync(receiptFile, 'utf8')).final_evidence;
+            return evidence ? { ...evidence, stage: 'returned', provider_called: true,
+              duration_ms: Date.now() - Date.parse(startedAt) } : null;
+          })(),
           route, route_identity: routeIdentity(route, r.unitType), provider_called: true,
           reset_state_file: executionStateFile,
           execution: { inputs: execution.inputs, budgets: execution.budgets, verified_files: verifiedFiles,
@@ -1462,7 +1486,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
       artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
     } else if (transport.mode === 'plan') {
       if (!r.promptFile) fail('prompt-file-required');
+      transportEntered = true;
       result = await xllm.runPlan({ ...options, planContextFile: r.promptFile });
+      transportReturned = true;
       const ids = result.task_plans.map(p => p.id);
       if (new Set(ids).size !== ids.length) fail('plan-task-ids-invalid');
       const listed = require('./forge-status').parsePlanTasks(result.slice_plan.content).map(t => t.id);
@@ -1494,15 +1520,19 @@ async function runUnitSidecarCore(request, runtime, identity) {
       xllm.authorizeSidecar('artifacts', options);
       heartbeat(null);
       if (options.engine === 'claude') {
-        const output = await invokeClaudeSidecar({ ...options, prompt: prompt
+        transportEntered = true;
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt: prompt
           + '\nFinish with the following envelope. Markers must be on their own lines. result_json must contain one complete JSON object (compact or multiline); escape newlines inside JSON strings. Do not wrap the JSON in Markdown fences.\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <complete JSON>\n---END-RESULT---',
           readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules,
             { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
+        transportReturned = true;
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
+        transportEntered = true;
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
+        transportReturned = true;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules,
@@ -1538,7 +1568,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     } else if (transport.mode === 'fix') {
       // Scoped writing turn through the shared execute safety core. The worker
       // never commits; outside-claim, .gsd and a moved baseline are named failures.
+      transportEntered = true;
       result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
+      transportReturned = true;
       // A partial/blocked turn never publishes a success line or a commit.
       if (result.status !== 'done') fail(`review-fix-worker-${result.status}`, 'The review-fix worker did not finish; items are deferred.');
       artifacts = [];
@@ -1588,6 +1620,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
           ...observedModel,
           effort_resolved: route.effort || null, effort_reason: route.effort_reason || null },
         artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
+    const finalEvidence = JSON.parse(fs.readFileSync(receiptFile, 'utf8')).final_evidence;
+    if (finalEvidence) record.final_evidence = { ...finalEvidence, stage: 'returned', provider_called: true,
+      duration_ms: Date.now() - Date.parse(startedAt), model_observed: observedModel.model_observed || null };
     // Durable validated response BEFORE artifact publication: a crash anywhere
     // after here replays publication, without spending another provider turn.
     json(receiptFile, record);
@@ -1600,6 +1635,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
     return result;
   } catch (error) {
+    // A heartbeat proves a local process, not provider acceptance. A timeout
+    // without adapter evidence stays unknown; an explicit pre-spawn refusal is false.
+    providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called
+      : transportReturned ? true : transportEntered ? 'unknown' : false;
     error.provider_called = providerCalled;
     announce(providerCalled ? 'falhou' : 'recusado', { ...identity,
       ...(providerCalled ? {} : { model_sent: '-', model_route: model }),

@@ -27,7 +27,14 @@ assert.equal(announce('iniciado', { ...base, pid: 10 }), false);
 assert.equal(announce('falhou', { ...base, reason_code: 'provider-exit', provider_called: true }), true);
 assert.equal(announce('recusado', base), false);
 assert.equal(lines.length, 3);
-assert(lines[1].includes(' pid=10 provider_called=true'));
+assert(lines[1].includes(' pid=10 provider_called=unknown'));
+assert(lines[2].includes('provider_called=true'));
+for (const provider_called of [true, false, 'unknown']) {
+  assert(formatIdentityLine('falhou', { ...base, provider_called }).includes(`provider_called=${provider_called}`));
+  assert(formatIdentityLine('iniciado', { ...base, pid: 10, provider_called }).includes(`provider_called=${provider_called}`));
+}
+assert(formatIdentityLine('falhou', base).includes('provider_called=unknown'));
+assert(formatIdentityLine('iniciado', { ...base, pid: 10 }).includes('provider_called=unknown'));
 
 const replay = createAnnouncer({ write: value => lines.push(value) });
 assert.equal(replay('reaproveitado', { ...base, dispatch_id: 'd-2' }), true);

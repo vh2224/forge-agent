@@ -129,13 +129,20 @@ function createRecovery(options) {
     },
     record(attempt) {
       if (!['caller', 'service', 'timeout', 'interrupted', 'unknown'].includes(attempt.failure_class)) fail('recovery-failure-class-invalid');
-      if (!attempt.reason_code || !attempt.layer || !attempt.request_sha256 || !attempt.context_sha256
-          || !Number.isFinite(attempt.request_bytes) || !Number.isFinite(attempt.context_bytes)
-          || !Number.isFinite(attempt.duration_ms) || !attempt.budgets || !attempt.route) fail('recovery-telemetry-required');
+      const measurementValid = (hash, bytes) => hash === null && bytes === null
+        || typeof hash === 'string' && hash.length > 0 && Number.isFinite(bytes) && bytes >= 0;
+      if (!attempt.reason_code || !attempt.layer || !measurementValid(attempt.request_sha256, attempt.request_bytes)
+          || !measurementValid(attempt.context_sha256, attempt.context_bytes)
+          || !(attempt.duration_ms === null || Number.isFinite(attempt.duration_ms)) || !attempt.budgets || !attempt.route) fail('recovery-telemetry-required');
+      const previous = state.attempts.at(-1);
       const entry = { ...attempt, diagnostic: safeDiagnostic(attempt.diagnostic), stderr: safeDiagnostic(attempt.stderr),
         provider_called: [true, false].includes(attempt.provider_called) ? attempt.provider_called : 'unknown',
         model_observed: attempt.model_observed || 'unknown', recorded_at: clock(), route_key: routeKey(attempt.route),
         timeout_cause: attempt.failure_class === 'timeout' ? 'indeterminate' : null };
+      entry.previous_attempt = previous ? { route_key: previous.route_key, recorded_at: previous.recorded_at,
+        request_sha256: previous.request_sha256, context_sha256: previous.context_sha256,
+        budgets: previous.budgets, context_measurement: previous.context_measurement || null } : null;
+      entry.reservation = state.reservations?.at(-1) || null;
       state.attempts.push(entry); state.phase = 'inspection'; return save();
     },
     async next(input) {
@@ -195,6 +202,8 @@ function createRecovery(options) {
       if (scope) exceptionFor(input.exception, state, clock());
       state.phase = 'ready'; save();
       return { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction,
+        correction: input.correction ? { offline_validated: true, request_sha256: input.correction.request_sha256,
+          evidence_reference: require('./forge-attempt-telemetry').code(input.correction.evidence_reference) } : null,
         remaining_ms: remaining(), sidecar_remaining_ms: remaining(),
         ...(scope ? { authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
           native_authorization_remaining_ms: Math.max(0, scope.expires_at - clock()) } : {}), provider_called: false };
@@ -203,6 +212,7 @@ function createRecovery(options) {
       if (decision.action !== 'invoke' || state.phase !== 'ready' || state.selection?.selected !== routeKey(decision.route)) fail('recovery-reservation-invalid');
       if (!remaining() && (decision.route.worker_mode !== 'native' || !(decision.authorization_expires_at > clock()))) fail('recovery-deadline-exhausted');
       const entry = { route_key: routeKey(decision.route), corrected: decision.corrected, request_sha256: requestHash,
+        correction: decision.correction || null,
         reserved_at: clock(), reason: decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
       state.reservations = [...(state.reservations || []), entry]; state.phase = 'reserved'; return save();
@@ -244,7 +254,14 @@ function inspectReceipt(file, options = {}) {
 function captureFailure(options) {
   const fs = require('fs'), stateApi = require('./forge-xllm-state');
   validateStateTarget(options.stateFile, options.request, options.contract);
-  const request = Buffer.from(JSON.stringify(options.request)), context = Buffer.from(options.context || '');
+  const telemetry = require('./forge-attempt-telemetry');
+  const observed = telemetry.sanitizeFinal(options.finalEvidence || options.packagedContext?.final_evidence) || telemetry.captureFinal({
+    identity: options.request, route: options.route, budgets: options.budgets });
+  // Legacy packaged measurements remain readable, but an absent callback is not
+  // evidence that a caller's intermediate prompt reached the adapter unchanged.
+  const context = options.packagedContext && !options.packagedContext.final_evidence
+    ? { sha256: options.packagedContext.sha256 ?? null, bytes: options.packagedContext.bytes ?? null,
+      method: 'legacy-packaged', diagnostic: null } : observed.context;
   const error = options.error || {}, code = error.code || error.reason_code || 'attempt-failed';
   const state = fs.existsSync(options.stateFile) ? stateApi.loadRecovery(options.stateFile) : undefined;
   const session = createRecovery({ unit: options.unit, roots_sha256: digest(options.contract || { cwd: options.request.cwd }),
@@ -257,13 +274,16 @@ function captureFailure(options) {
   const service = provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
   session.record({ failure_class: timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
     service_failure_proven: service, reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
-    request_sha256: digest(request), context_sha256: options.packagedContext?.sha256 || digest(context),
-    request_bytes: request.length, context_bytes: options.packagedContext?.bytes ?? context.length,
-    context_measurement: options.packagedContext ? 'packaged' : 'caller', budgets: options.budgets || {},
-    duration_ms: options.durationMs || 0, provider_called: provider, model_observed: options.modelObserved || 'unknown',
-    model_sent: provider === true ? options.route.model_resolved || options.route.model : 'unknown',
-    receipt: options.receiptFile, result: options.request.resultFile, diagnostic: error.diagnostic?.reason || error.message,
-    stderr: error.stderr, next_action: 'inspect-process-receipt-roots' });
+    request_sha256: observed.request.sha256, context_sha256: context.sha256,
+    request_bytes: observed.request.bytes, context_bytes: context.bytes,
+    context_measurement: context.method, measurement_diagnostic: context.diagnostic,
+    final_evidence: observed, budgets: telemetry.numericBudgets(options.budgets || observed.budgets),
+    duration_ms: options.durationMs ?? observed.duration_ms ?? null, provider_called: provider,
+    model_requested: observed.model_requested, model_observed: options.modelObserved || observed.model_observed || 'unknown',
+    model_sent: observed.model_sent || 'unknown',
+    receipt: options.receiptFile, result: options.request.resultFile,
+    diagnostic: telemetry.code(error.diagnostic?.reason, telemetry.code(code, 'attempt-failed')),
+    stderr: error.stderr ? '[omitted-provider-output]' : '', next_action: 'inspect-process-receipt-roots' });
   const questions = options.questions || (options.receiptFile && fs.existsSync(options.receiptFile)
     ? JSON.parse(fs.readFileSync(options.receiptFile, 'utf8')).pending_questions : null) || options.request.pending_questions;
   if (questions?.length) session.questions(questions);

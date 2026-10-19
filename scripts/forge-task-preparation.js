@@ -310,6 +310,7 @@ function nativeTaskName(request) {
 
 function nativeOptions(request, route, prompt, contract = request.contract || phaseContract(request.phase)) {
   return {
+    telemetryIdentity: request, telemetryRoute: route, budgets: request.budgets || {},
     hostRuntime: request.hostRuntime, resolvedDispatch: route,
     activeCapabilities: request.activeCapabilities,
     effortBinding: request.effortBinding, readback: request.readback,
@@ -361,7 +362,7 @@ function replayedFailure(receipt) {
   const originalDiagnostic = adapterDiagnostic(failure.diagnostic);
   return { ok: false, action: 'stop', status: 'failure',
     reason_code: failure.reason_code || 'artifact-attempt-failed',
-    provider_called: false, original_provider_called: failure.provider_called === true,
+    provider_called: false, original_provider_called: typeof failure.provider_called === 'boolean' ? failure.provider_called : 'unknown',
     replayed: true, ...(receipt.route ? { route: receipt.route } : {}),
     ...(originalDiagnostic ? { original_diagnostic: originalDiagnostic } : {}),
     diagnostic: diagnostic('replay', 'recorded-failure') };
@@ -559,7 +560,7 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
       const failure = acceptance.nativeFailure;
       if (!failure || typeof failure !== 'object' || Array.isArray(failure)
           || typeof failure.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(failure.reason_code)
-          || typeof failure.provider_called !== 'boolean') {
+          || ![true, false, 'unknown'].includes(failure.provider_called)) {
         throw preparationError('native-preparation-failure-invalid', 'native');
       }
       const files = unit.artifactAttemptFiles(delivery);
@@ -569,18 +570,18 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
         throw preparationError('dispatch-identity-conflict', 'validation');
       }
       if (receipt.phase !== 'started') throw preparationError('artifact-attempt-not-started', 'native');
-      if (failure.provider_called) validateNativeTelemetry(failure.telemetry,
+      if (failure.provider_called === true) validateNativeTelemetry(failure.telemetry,
         expectedNativeTelemetry(request, route, prompt));
       unit.failArtifactAttempt(delivery, failure.reason_code,
-        failure.provider_called ? 'provider-exit' : 'adapter-failed', failure.provider_called);
-      return refused(failure.provider_called ? 'provider' : 'native', failure.reason_code, route, failure.provider_called);
+        failure.provider_called === true ? 'provider-exit' : 'adapter-failed', failure.provider_called, failure.final_evidence);
+      return refused(failure.provider_called === true ? 'provider' : 'native', failure.reason_code, route, failure.provider_called);
     }
     telemetry = validateNativeTelemetry(acceptance.invocationTelemetry,
       expectedNativeTelemetry(request, route, prompt));
     if (acceptance.providerCalled !== true) throw preparationError('artifact-provider-call-unconfirmed', 'provider');
     const candidate = candidateFromPreparationResult(acceptance.rawResult, delivery);
     const accepted = await unit.acceptArtifactResult(delivery, candidate,
-      { telemetry, providerCalled: true, enforceReadOnlySurface: true,
+      { telemetry, finalEvidence: acceptance.finalEvidence, providerCalled: true, enforceReadOnlySurface: true,
         maxPayloadBytes: unit.MAX_ARTIFACT_PAYLOAD_BYTES });
     return completed('native', route, accepted);
   } catch (error) {
@@ -622,8 +623,9 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
       const reference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
       if (reference) persistAuthorization(started.delivery_request, reference);
       deps.announce?.('solicitado', { ...preparationIdentity(request, started.route), provider_called: false });
-      providerCalled = true;
+      providerCalled = 'unknown';
       const rawResult = await deps.invokeSidecar(started.delivery_request, started);
+      providerCalled = true;
       const candidate = candidateFromPreparationResult(rawResult, started.delivery_request);
       const accepted = await unit.acceptArtifactResult(started.delivery_request, candidate,
         { providerCalled: true, telemetry: { model_requested: started.route.model_requested ?? null,
@@ -640,20 +642,23 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
     }
   }
-  let providerCalled = false;
   const options = nativeOptions(request, started.route, buildPreparationPrompt(request));
-  const native = await nativeApi.invokeNative(options, async (...args) => {
-    providerCalled = true;
-    return deps.invokeNative(...args);
-  });
+  const nativeDelivery = deliveryRequest(request, started.route, buildPreparationPrompt(request));
+  options.onPackagedContext = packaged => {
+    const files = unit.artifactAttemptFiles(nativeDelivery);
+    const saved = readJson(files.receiptFile);
+    fs.writeFileSync(files.receiptFile, JSON.stringify({ ...saved, final_evidence: packaged.final_evidence }, null, 2) + '\n');
+  };
+  const native = await nativeApi.invokeNative(options, deps.invokeNative);
   if (!native.ok) {
     const code = native.reason_code || 'native-invocation-failed';
     const delivery = deliveryRequest(request, started.route, buildPreparationPrompt(request));
-    unit.failArtifactAttempt(delivery, code, providerCalled ? 'provider-exit' : 'adapter-failed', providerCalled);
-    return refused(providerCalled ? 'provider' : 'native', code, started.route, providerCalled);
+    unit.failArtifactAttempt(delivery, code, native.provider_called === true ? 'provider-exit' : 'adapter-failed',
+      native.provider_called, native.final_evidence);
+    return refused(native.provider_called === true ? 'provider' : 'native', code, started.route, native.provider_called);
   }
   return acceptStandaloneTaskPreparation(rawRequest, { route: started.route, rawResult: native.result,
-    invocationTelemetry: native.telemetry, providerCalled: true });
+    invocationTelemetry: native.telemetry, finalEvidence: native.final_evidence, providerCalled: true });
 }
 
 function readJson(filename) {
