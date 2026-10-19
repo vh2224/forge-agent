@@ -344,10 +344,10 @@ function preflightNativeBinding(options) {
 
 async function invokeNative(options, invoke) {
   const invocation = buildNativeInvocation(options);
-  if (!invocation.ok) return invocation;
+  if (!invocation.ok) return { ...invocation, provider_called: false };
   if (typeof invoke !== 'function') {
-    return refusal(invocation.host_runtime, 'native-tool-callback-missing',
-      'An injected native tool callback is required.');
+    return { ...refusal(invocation.host_runtime, 'native-tool-callback-missing',
+      'An injected native tool callback is required.'), provider_called: false };
   }
   try {
     const result = await invoke(invocation.args, invocation);
@@ -358,6 +358,7 @@ async function invokeNative(options, invoke) {
     const source = readback && typeof readback === 'object' ? text(readback.source) : '';
     return {
       ...invocation,
+      provider_called: true,
       result,
       telemetry: {
         ...invocation.telemetry,
@@ -371,6 +372,8 @@ async function invokeNative(options, invoke) {
       ok: false,
       result: null,
       reason_code: 'native-invocation-failed',
+      provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown',
+      diagnostic: { reason_code: error.code || 'native-tool-callback-failed', layer: 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
     };
   }

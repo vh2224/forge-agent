@@ -89,6 +89,50 @@ function codexCapabilities() {
 }
 
 async function main() {
+  await test('trusted caller authority survives restart and routes a timed-out standalone phase to the explicit native candidate', async () => {
+    const request = fixture({ phase: 'brainstorm' });
+    const prefs = path.join(request.contextRoot, '.gsd/forge-prefs.jsonc');
+    fs.writeFileSync(prefs, JSON.stringify({ tier_models: {
+      light: ['claude-sonnet-5', 'gpt-5.6-sol'], standard: ['claude-sonnet-5', 'gpt-5.6-sol'],
+      heavy: ['claude-sonnet-5', 'gpt-5.6-sol'], max: ['claude-sonnet-5', 'gpt-5.6-sol'] }, effort: { 'plan-slice': 'medium' } }));
+    const profile = path.join(path.dirname(request.cwd), 'profile');
+    fs.mkdirSync(path.join(profile, '.codex'), { recursive: true });
+    fs.writeFileSync(path.join(profile, '.codex/AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nFixture standing permission.\n<!-- user:forge-routing-continuity:end -->');
+    let now = Date.now();
+    const reference = 'conversation:caller-restart';
+    const authority = require('./forge-interaction').createRecoveryAuthorizationAdapter(observed => ({ ...observed,
+      received: true, answer: 'authorize', resolved_at: now }), { resolveProfile: () => profile, clock: () => now });
+    const failed = await prep.prepareStandaloneTask(request, { recoveryAuthorization: { adapter: authority, reference,
+      registration: { host: 'codex', section: 'user:forge-routing-continuity' } }, invokeSidecar: async () => {
+      throw Object.assign(Error('fixture timeout'), { code: 'claude-timeout', provider_called: true });
+    } });
+    assert.equal(failed.ok, false);
+    const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
+    assert.equal(JSON.parse(fs.readFileSync(receiptFile)).authorization_reference, reference);
+    const initial = JSON.parse(fs.readFileSync(stateFile));
+    assert.equal(initial.authorization_reference, reference);
+    now = initial.deadline_at + 1;
+    const restarted = require('./forge-recovery-authority').createRecoveryAuthority({ resolveProfile: () => profile, clock: () => now });
+    let calls = 0, optionsObserved;
+    request.activeCapabilities = codexCapabilities();
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile, clock: () => now }, {
+      processProbe: () => 'stopped', recoveryAuthorization: { adapter: restarted, reference },
+      resolveDispatch: options => { optionsObserved = options; return resolveDispatch(options); },
+      invokeNative: async args => { calls++; assert.equal(args.model, 'gpt-5.6-sol');
+        assert.equal(args.reasoning_effort, 'medium'); return framed(envelope(request)); },
+    });
+    assert.equal(recovered.route.worker_mode, 'native');
+    assert.equal(recovered.sidecar_remaining_ms, 0);
+    assert.equal(recovered.result.status, 'done');
+    assert.equal(calls, 1);
+    assert.equal(optionsObserved.scope, 'standalone-task'); assert.equal(optionsObserved.phase, 'brainstorm');
+    assert.equal(optionsObserved.unitType, 'plan-slice'); assert.equal(optionsObserved.unitId, request.taskId);
+    assert.equal(optionsObserved.cwd, request.contextRoot); assert.equal(optionsObserved.workerMode, undefined);
+    assert.equal(JSON.parse(fs.readFileSync(stateFile)).deadline_at, initial.deadline_at);
+    assert.equal(fs.readFileSync(artifactPath(request), 'utf8'), content(request.phase, request.taskId));
+    fs.writeFileSync(path.join(profile, '.codex/AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nChanged permission.\n<!-- user:forge-routing-continuity:end -->');
+    assert.throws(() => restarted.readStandingAuthorization(reference), /source-changed/);
+  });
   await test('four phases use the actual caller, configured Claude sidecar and exact task-local formats', async () => {
     for (const phase of Object.keys(prep.PHASE_CONTRACTS)) {
       const request = fixture({ phase, hostRuntime: 'codex', model: 'claude-sonnet-5' });

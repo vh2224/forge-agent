@@ -245,7 +245,9 @@ function buildPreparationPrompt(request, contract = request.contract || phaseCon
 }
 
 function resolverOptions(request, contract) {
-  const options = { cwd: request.contextRoot || request.cwd, unitType: contract.unitType, hostRuntime: request.hostRuntime };
+  const options = { cwd: request.contextRoot || request.cwd, unitType: contract.unitType, hostRuntime: request.hostRuntime,
+    scope: request.scope, phase: request.phase, unitId: request.taskId, taskId: request.taskId,
+    planPath: request.planFile, roadmapPath: request.roadmapFile };
   for (const [wire, camel] of [['worker_mode', 'workerMode'], ['worker_engine', 'workerEngine'],
     ['sidecar_declared', 'sidecarDeclared']]) {
     if (Object.prototype.hasOwnProperty.call(request, camel)) options[camel] = request[camel];
@@ -427,6 +429,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   }
   const prompt = buildPreparationPrompt(request);
   const delivery = deliveryRequest(request, route, prompt);
+  const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
   if (route.worker_mode === 'sidecar') {
     return { ok: true, action: 'invoke-sidecar', transport: 'sidecar', status: 'ready',
       reason_code: 'sidecar-invocation-ready', provider_called: false, route, delivery_request: delivery };
@@ -437,6 +440,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   try {
     const replay = await unit.replayArtifactAttempt(delivery);
     if (replay.replayed) return completed('native', route, replay);
+    if (authorizationReference) persistAuthorization(delivery, authorizationReference);
   } catch (error) {
     return refused(error.code === 'dispatch-identity-conflict' ? 'validation' : 'publication',
       error.code || 'preparation-attempt-failed', route, false);
@@ -444,6 +448,12 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   return { ok: true, action: 'invoke-native', transport: 'native', status: 'ready',
     reason_code: invocation.reason_code, provider_called: false, route,
     invocation: { tool: invocation.tool, args: invocation.args, telemetry: invocation.telemetry } };
+}
+function persistAuthorization(delivery, reference) {
+  const file = unit.artifactAttemptFiles(delivery).receiptFile;
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (record.fingerprint !== unit.artifactFingerprint(delivery)) throw preparationError('dispatch-identity-conflict', 'validation');
+  fs.writeFileSync(file, JSON.stringify({ ...record, authorization_reference: reference }, null, 2) + '\n');
 }
 
 function preparationIdentity(request, route = {}) {
@@ -591,7 +601,7 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
   if (started.action === 'invoke-sidecar') {
     if (!deps.invokeSidecar) {
       try {
-        const result = await unit.runUnitSidecar(started.delivery_request, { announce: deps.announce });
+        const result = await unit.runUnitSidecar(started.delivery_request, { announce: deps.announce, recoveryAuthorization: deps.recoveryAuthorization });
         return completed('sidecar', started.route, { result, provider_called: true });
       } catch (error) {
         const providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown';
@@ -609,6 +619,8 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         deps.announce?.('reaproveitado', { ...preparationIdentity(request, started.route), provider_called: false });
         return completed('sidecar', started.route, replay);
       }
+      const reference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
+      if (reference) persistAuthorization(started.delivery_request, reference);
       deps.announce?.('solicitado', { ...preparationIdentity(request, started.route), provider_called: false });
       providerCalled = true;
       const rawResult = await deps.invokeSidecar(started.delivery_request, started);
@@ -650,7 +662,10 @@ function readJson(filename) {
 async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
   const request = validateRequest(rawRequest);
   const prompt = buildPreparationPrompt(request);
-  return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
+  const receipt = JSON.parse(fs.readFileSync(recovery.receiptFile, 'utf8'));
+  const delivery = deliveryRequest(request, receipt.route, prompt);
+  return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request: delivery,
+    recoveryAuthorization: deps.recoveryAuthorization, processProbe: deps.processProbe,
     unit: `${request.contract.unitType}/${request.taskId}`, executionContract: request.execution_contract,
     validateCorrection: async () => {
       validateRequest(request);
@@ -659,7 +674,8 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
     resolverOptions: resolverOptions(request, request.contract), resolveDispatch: deps.resolveDispatch,
     validateInvocation: route => route.worker_mode === 'native'
       ? nativeApi.buildNativeInvocation(nativeOptions(request, validateRoute(route, request.contract, request), prompt))
-      : { ok: transportApi.capability(route.resolved_worker_engine, request.contract.unitType, request).supported },
+      : (() => { const cap = transportApi.capability(route.resolved_worker_engine, request.contract.unitType, request);
+        return { ok: cap.supported, reason_code: cap.reason_code }; })(),
     replay: async receipt => {
       const delivery = deliveryRequest(request, receipt.route, prompt);
       if (receipt.phase === 'failed' && receipt.saved_candidate) {

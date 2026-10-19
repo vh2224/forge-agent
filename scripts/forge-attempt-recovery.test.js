@@ -66,10 +66,11 @@ async function persistentRecovery(route) {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
   const lab = require('./forge-code-roots.test').laboratory('recovery-state');
   const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
-  const request = { cwd, unitType: 'execute-task', taskId: 'T-state', prompt: 'before', resultFile: path.join(lab.dir, 'result.json') };
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', route: { ...route, unit_type: 'research-milestone' }, prompt: 'before', resultFile: path.join(lab.dir, 'result.json') };
   const stateFile = path.join(lab.dir, 'state.json'), receiptFile = path.join(lab.dir, 'receipt.json');
-  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', failure: { provider_called: false } }));
-  const initial = api.captureFailure({ stateFile, receiptFile, request, unit: 'execute-task/T-state', route,
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', recovery_identity_sha256: require('./forge-code-roots').digest(api.requestIdentity(request)), failure: { provider_called: false } }));
+  const initial = api.captureFailure({ stateFile, receiptFile, request, unit: 'research-milestone/M001', route,
     error: { code: 'context-budget-exceeded', provider_called: false, stderr: 'token=secret' }, budgets: { coding_standards: 3000 } });
   assert.strictEqual(initial.attempts[0].failure_class, 'caller');
   assert.strictEqual(initial.attempts[0].model_sent, 'unknown');

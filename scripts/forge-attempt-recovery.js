@@ -29,6 +29,22 @@ function exceptionFor(handle, identity, now) {
 }
 function routeKey(route) { return digest({ host: route.host_runtime, worker: route.resolved_worker_engine,
   transport: route.worker_mode, model: route.model_resolved || route.model, effort: route.effort }); }
+function canonicalRequest(request) {
+  const phase = request.phase || ({ 'execute-task': 'execute', 'plan-check': 'plan-check' }[request.unitType])
+    || request.unitType?.split('-')[0];
+  return { ...request, scope: request.scope || (request.milestoneId ? 'milestone' : undefined), phase,
+    contextRoot: request.contextRoot || request.cwd };
+}
+// Only the embedding host can supply this object. JSON references are data;
+// registration and revalidation require executable methods on a trusted adapter.
+function bindRecoveryAuthorization(binding) {
+  if (!binding) return null;
+  if (typeof binding.adapter?.readStandingAuthorization !== 'function'
+      || typeof binding.adapter?.issueRecoveryException !== 'function' || !binding.reference) fail('recovery-trusted-authority-required');
+  if (binding.registration) binding.adapter.registerStandingAuthorization({ ...binding.registration, reference: binding.reference });
+  binding.adapter.readStandingAuthorization(binding.reference);
+  return binding.reference;
+}
 // Resolve in the caller. A JSON list, even one labelled approved, is not a
 // live resolver observation and cannot authorize a destination.
 function requestIdentity(request) {
@@ -38,7 +54,7 @@ function requestIdentity(request) {
       || request.scope === 'standalone-task' && (!request.taskId || request.milestoneId || request.sliceId)
       || request.scope === 'milestone' && !request.milestoneId
       || request.unitType === 'execute-task' && (!request.taskId || request.scope === 'milestone' && !request.sliceId)
-      || /-slice$/.test(request.unitType) && !request.sliceId) fail('recovery-request-identity-required');
+      || request.scope === 'milestone' && /-slice$/.test(request.unitType) && !request.sliceId) fail('recovery-request-identity-required');
   const canonical = file => {
     if (!path.isAbsolute(file)) fail('recovery-request-path-invalid');
     const resolved = fs.realpathSync(file);
@@ -67,7 +83,10 @@ function resolveCandidates(options, resolve = require('./forge-dispatch-resolve'
   const resolver = require('./forge-dispatch-resolve');
   const routes = resolved.chain.map(member => {
     const engine = resolver.dispatchEngineFor(member.engine);
-    const runtime = resolver.composeRuntimePosture(resolver.runtimeFields({ hostRuntime: resolved.host_runtime }, engine), identity.unit_type, options);
+    // The transport guard represents milestone units by unitType (legacy wire
+    // shape); retain scope in provenance, while adapting only its guard input.
+    const posture = identity.scope === 'milestone' ? { ...options, scope: undefined, phase: undefined } : options;
+    const runtime = resolver.composeRuntimePosture(resolver.runtimeFields({ hostRuntime: resolved.host_runtime }, engine), identity.unit_type, posture);
     return { ...resolved, ...runtime, unit_type: identity.unit_type, model: member.id, model_requested: member.id, model_resolved: member.id,
       sidecar_model: member.id, engine: member.engine, dispatch_engine: engine };
   });
@@ -89,6 +108,7 @@ function createRecovery(options) {
   const state = options.state ? JSON.parse(JSON.stringify(validateState(options.state))) : {
     schema_version: 1, unit: options.unit, roots_sha256: options.roots_sha256, purpose: options.purpose || 'sidecar-recovery',
     started_at: started, deadline_at: started + 60000, attempts: [], pending_questions: [], phase: 'inspection' };
+  if (options.authorizationReference) state.authorization_reference = options.authorizationReference;
   if (state.unit !== options.unit || state.roots_sha256 !== options.roots_sha256) fail('recovery-identity-mismatch');
   if (options.request) {
     const identity = requestIdentity(options.request), hash = digest(identity);
@@ -100,6 +120,7 @@ function createRecovery(options) {
   const remaining = () => Math.max(0, state.deadline_at - clock());
   return Object.freeze({
     snapshot: save, remaining,
+    authorization(reference) { state.authorization_reference = reference; return save(); },
     questions(questions) {
       state.pending_questions = require('./forge-interaction').mergePendingQuestions(state.pending_questions, questions); save();
     },
@@ -200,9 +221,24 @@ function inspectReceipt(file, options = {}) {
   // A live adapter may attest that its awaited child exited. Imported JSON is
   // never an attestation. A caller must supply the inspection implementation.
   if (typeof options.processProbe === 'function') stopped = options.processProbe(receipt) === 'stopped';
+  let writer = 'unknown';
+  if (options.request) {
+    const request = canonicalRequest(options.request);
+    try {
+      const identity = digest(requestIdentity(request));
+      const bound = receipt.recovery_identity_sha256 === identity
+        || receipt.fingerprint === require('./forge-unit-sidecar').artifactFingerprint(options.request);
+      const cap = require('./forge-transport-capabilities').capability(request.route.resolved_worker_engine,
+        request.unitType, request.scope === 'milestone' ? {} : request);
+      require('./forge-unit-sidecar').locations(request);
+      if (bound && cap.supported) writer = cap.mode === 'execute' || request.unitType === 'review-fix';
+      // A missing/stripped legacy execution field never makes an executor read-only.
+      if (request.unitType === 'execute-task' || receipt.execution || receipt.reset_state_file) writer = true;
+    } catch { writer = 'unknown'; }
+  }
   return { receipt_checked: true, process_stopped: stopped, receipt_sha256: digest(bytes),
     phase: receipt.phase, valid_saved_response: ['ready', 'executed'].includes(receipt.phase) || !!receipt.saved_candidate,
-    writer_possible: !!receipt.execution || !!receipt.reset_state_file,
+    writer_possible: writer,
     roots_reconciled: false, receipt };
 }
 function captureFailure(options) {
@@ -212,7 +248,9 @@ function captureFailure(options) {
   const error = options.error || {}, code = error.code || error.reason_code || 'attempt-failed';
   const state = fs.existsSync(options.stateFile) ? stateApi.loadRecovery(options.stateFile) : undefined;
   const session = createRecovery({ unit: options.unit, roots_sha256: digest(options.contract || { cwd: options.request.cwd }),
-    ...(options.request.scope && options.request.phase ? { request: options.request } : {}),
+    authorizationReference: options.receiptFile && fs.existsSync(options.receiptFile)
+      ? JSON.parse(fs.readFileSync(options.receiptFile, 'utf8')).authorization_reference : undefined,
+    ...(options.request.route ? { request: canonicalRequest(options.request) } : {}),
     state, persist: value => stateApi.saveRecovery(options.stateFile, value) });
   const provider = [true, false].includes(error.provider_called) ? error.provider_called : 'unknown';
   const timeout = /timeout|timed-out/.test(code);
@@ -226,7 +264,9 @@ function captureFailure(options) {
     model_sent: provider === true ? options.route.model_resolved || options.route.model : 'unknown',
     receipt: options.receiptFile, result: options.request.resultFile, diagnostic: error.diagnostic?.reason || error.message,
     stderr: error.stderr, next_action: 'inspect-process-receipt-roots' });
-  if (options.questions?.length) session.questions(options.questions);
+  const questions = options.questions || (options.receiptFile && fs.existsSync(options.receiptFile)
+    ? JSON.parse(fs.readFileSync(options.receiptFile, 'utf8')).pending_questions : null) || options.request.pending_questions;
+  if (questions?.length) session.questions(questions);
   return session.snapshot();
 }
 async function recoverAttempt(options) {
@@ -234,15 +274,16 @@ async function recoverAttempt(options) {
   validateStateTarget(options.stateFile, options.request, options.executionContract);
   const state = stateApi.loadRecovery(options.stateFile);
   const expectedRoots = digest(options.executionContract || { cwd: options.request.cwd });
-  const session = createRecovery({ unit: options.unit || `${options.request.unitType}/${options.request.taskId || options.request.sliceId || options.request.milestoneId}`,
+  const request = canonicalRequest(options.request);
+  const session = createRecovery({ unit: options.unit || `${request.unitType}/${request.taskId || request.sliceId || request.milestoneId}`,
     roots_sha256: expectedRoots, state,
-    ...(options.request.scope && options.request.phase ? { request: options.request } : {}),
+    ...(request.route ? { request } : {}),
     clock: options.clock, persist: value => stateApi.saveRecovery(options.stateFile, value) });
-  const inspection = inspectReceipt(options.receiptFile, { processProbe: options.processProbe });
+  const inspection = inspectReceipt(options.receiptFile, { processProbe: options.processProbe, request: options.request });
   if (inspection.process_stopped !== true) fail('recovery-process-receipt-inspection-required');
-  if (inspection.writer_possible && !inspection.valid_saved_response && options.reconcile) {
+  if (inspection.writer_possible !== false && !inspection.valid_saved_response && options.reconcile) {
     const reset = await options.reconcile(inspection.receipt);
-    const contract = options.executionContract || inspection.receipt.execution?.execution_contract;
+    const contract = options.executionContract || inspection.receipt.execution?.execution_contract || inspection.receipt.recovery_baseline?.execution_contract;
     const declared = contract && require('./forge-code-roots').validateContract(contract, { revalidate: true }).code_roots;
     inspection.roots_reconciled = reset?.ok === true && !reset.pending_roots?.length && Array.isArray(declared)
       && declared.every(root => reset.roots?.some(row => row.root_id === root.id && row.reconciled === true));
@@ -256,12 +297,29 @@ async function recoverAttempt(options) {
     correction = { request_sha256: digest(Buffer.from(JSON.stringify(options.request))),
       offline_validated: true, evidence_reference: observed.evidence_reference };
   }
+  const reference = inspection.receipt.authorization_reference || state.authorization_reference;
+  let exception = options.exception;
+  const binding = options.recoveryAuthorization;
+  if (binding && reference && binding.reference !== reference) fail('recovery-authorization-reference-mismatch');
+  const authorizedReference = binding ? bindRecoveryAuthorization(binding) : reference;
   const candidateSet = !inspection.valid_saved_response && !correction
     && !session.snapshot().pending_questions.some(q => q.status === 'pending')
-    && (state.attempts.at(-1)?.service_failure_proven === true || options.exception)
-    ? resolveCandidates(options.resolverOptions, options.resolveDispatch, options.request) : undefined;
+    && (state.attempts.at(-1)?.service_failure_proven === true || exception || binding)
+    ? resolveCandidates(options.resolverOptions, options.resolveDispatch, request) : undefined;
+  if (binding && candidateSet) {
+    const observed = candidateSets.get(candidateSet), saved = session.snapshot();
+    const authority = binding.adapter.readStandingAuthorization(authorizedReference);
+    const now = (options.clock || Date.now)();
+    exception = binding.adapter.issueRecoveryException(authorizedReference, { unit: saved.unit, roots_sha256: saved.roots_sha256,
+      purpose: saved.purpose, owner: request.contextRoot,
+      roots: options.executionContract?.code_roots.map(root => root.path) || [request.cwd],
+      request_identity_sha256: saved.request_identity_sha256, chain_sha256: observed.provenance.chain_sha256,
+      expires_at: Math.min(now + 3600000, authority.expires_at ?? Infinity),
+      routes: observed.routes.map(routeKey), gates_preserved: true });
+    session.authorization(authorizedReference);
+  }
   const decision = await session.next({ inspection, candidateSet, correction,
-    exception: options.exception, validateInvocation: options.validateInvocation });
+    exception, validateInvocation: options.validateInvocation });
   if (decision.action === 'replay') {
     if (typeof options.replay !== 'function') fail('recovery-replay-required');
     return { ...decision, result: await options.replay(inspection.receipt), inspection: { ...inspection, receipt: undefined } };
@@ -297,7 +355,7 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { createRecovery, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
+module.exports = { canonicalRequest, bindRecoveryAuthorization, createRecovery, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;
 });

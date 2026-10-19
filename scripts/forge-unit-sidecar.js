@@ -110,7 +110,7 @@ function reviewFixLocations(request) {
 }
 function locations(request) {
   const m = request.milestoneId, s = request.sliceId, t = request.taskId;
-  if (request.scope && request.scope !== 'standalone-task') fail('unsupported-sidecar-scope');
+  if (request.scope && !['standalone-task', 'milestone'].includes(request.scope)) fail('unsupported-sidecar-scope');
   if (request.scope === 'standalone-task' && request.unitType === 'execute-task') {
     return require('./forge-task-execution').locations(request);
   }
@@ -155,10 +155,10 @@ function locations(request) {
     'complete-slice': [`${slice}/${s}-SUMMARY.md`, `${slice}/${s}-UAT.md`],
     'complete-milestone': [`${milestone}/${m}-SUMMARY.md`],
     'plan-slice': [`${slice}/${s}-PLAN.md`],
-    'execute-task': [`${slice}/tasks/${t}-SUMMARY.md`],
+    'execute-task': [`${slice}/tasks/${t}/${t}-SUMMARY.md`],
   }[unit];
   if (!baseRequired) fail('unsupported-sidecar-unit');
-  const deliveryPrefix = unit === 'execute-task' ? `${slice}/tasks/${t}`
+  const deliveryPrefix = unit === 'execute-task' ? `${slice}/tasks/${t}/${t}`
     : unit === 'complete-slice' ? `${slice}/${s}`
       : unit === 'complete-milestone' ? `${milestone}/${m}` : null;
   const deliveryUnit = unit === 'execute-task' ? { type: 'task', id: t, milestone: m, slice: s }
@@ -178,6 +178,87 @@ function locations(request) {
     [delivery.artifact]: { kind: 'artifact', unit: deliveryUnit },
   } : {};
   return { required, allowed: [...required, ...deliveryOptional, ...optional], rules, delivery, milestone, slice };
+}
+function milestonePlanFile(request) {
+  const loc = locations(request), root = request.contextRoot || request.cwd;
+  const canonical = target(root, `${loc.slice}/tasks/${request.taskId}/${request.taskId}-PLAN.md`);
+  const legacy = target(root, `${loc.slice}/tasks/${request.taskId}-PLAN.md`);
+  if (fs.existsSync(canonical) && fs.existsSync(legacy)) fail('legacy-task-plan-conflict');
+  const selected = fs.existsSync(canonical) ? canonical : legacy;
+  if (!fs.existsSync(selected)) fail('execution-plan-required');
+  if (request.planFile && path.resolve(request.planFile) !== path.resolve(selected)) fail('execution-plan-path-mismatch');
+  return selected;
+}
+function validateRecoveryRequest(raw, options = {}) {
+  const request = require('./forge-attempt-recovery').canonicalRequest(raw);
+  const loc = locations(request);
+  const transport = capability(request.route?.resolved_worker_engine, request.unitType,
+    request.scope === 'milestone' ? {} : request);
+  if (!transport.supported) fail(transport.reason_code, transport.hint);
+  if (loc.preparation) require('./forge-task-preparation').validateRequest(request);
+  if (transport.mode === 'execute') {
+    if (loc.execution) {
+      const prepared = require('./forge-task-execution').prepare({ ...request, nativeInvocation: options.nativeInvocation }, request.contextRoot, request.cwd);
+      return { ...transport, contract: prepared.execution_contract, planFile: request.planFile };
+    } else {
+      const roots = require('./forge-code-roots');
+      const contract = request.execution_contract ? roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true })
+        : roots.singleContract(request.contextRoot, request.cwd);
+      const planFile = milestonePlanFile(request);
+      roots.validatePlan(fs.readFileSync(planFile, 'utf8'), contract);
+      const effective = require('./forge-transport-capabilities').executionCapability(request.route, contract, options);
+      if (!effective.supported) fail(effective.reason_code);
+      return { ...transport, contract, planFile };
+    }
+  }
+  if (request.cwd && request.resultFile) artifactAttemptFiles(request);
+  return transport;
+}
+function baselineDigest(state) {
+  const { reconciliation, ...baseline } = state;
+  return require('./forge-code-roots').digest(baseline);
+}
+function recoveryIdentity(request) {
+  try { return require('./forge-code-roots').digest(require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request))); }
+  catch { return null; }
+}
+function captureMilestoneBaseline(request, receipt) {
+  const roots = require('./forge-code-roots'), execution = require('./forge-task-execution');
+  const checked = validateRecoveryRequest(request), contract = checked.contract;
+  if (!contract || receipt.fingerprint !== artifactFingerprint(request) || receipt.dispatch_id !== request.dispatchId) fail('recovery-baseline-binding');
+  const stateFile = `${request.resultFile}.reset-state.json`;
+  require('./forge-attempt-recovery').validateStateTarget(stateFile, request, contract);
+  if (fs.existsSync(stateFile)) fail('recovery-baseline-already-exists');
+  const state = require('./forge-surgical-reset').initState(stateFile, { cwd: request.cwd,
+    attempt: request.dispatchId, executionContract: contract });
+  const input = { path: checked.planFile, sha256: roots.digest(fs.readFileSync(checked.planFile)) };
+  return { schema_version: 1, state_file: stateFile, state_sha256: baselineDigest(state),
+    execution_contract: contract, fingerprint: receipt.fingerprint, dispatch_id: receipt.dispatch_id, input,
+    protected_owner: execution.protectedSnapshot(contract.owner),
+    protected_roots: contract.code_roots.map(root => ({ root_id: root.id, path: root.path, snapshot: execution.protectedSnapshot(root.path) })) };
+}
+function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
+  const baseline = receipt.recovery_baseline, roots = require('./forge-code-roots');
+  if (!baseline || baseline.schema_version !== 1) fail('recovery-baseline-required');
+  const contract = roots.validateContract(baseline.execution_contract, { owner: request.contextRoot || request.cwd, revalidate: true });
+  if (request.execution_contract && roots.digest(contract) !== roots.digest(roots.validateContract(request.execution_contract, { revalidate: true }))) fail('recovery-baseline-contract-mismatch');
+  require('./forge-attempt-recovery').validateStateTarget(baseline.state_file, request, contract);
+  const state = require('./forge-surgical-reset').readState(baseline.state_file);
+  if (baseline.dispatch_id !== request.dispatchId || receipt.dispatch_id !== request.dispatchId
+      || baseline.fingerprint !== receipt.fingerprint || recoveryIdentity(request) !== receipt.recovery_identity_sha256
+      || baseline.state_sha256 !== baselineDigest(state) || state.attempt !== request.dispatchId
+      || roots.digest(state.execution_contract) !== roots.digest(contract)) fail('recovery-baseline-binding');
+  if (baseline.input.sha256 !== roots.digest(fs.readFileSync(baseline.input.path))) fail('recovery-baseline-input-changed');
+  const execution = require('./forge-task-execution');
+  execution.assertProtected(contract.owner, baseline.protected_owner);
+  if (baseline.protected_roots.length !== contract.code_roots.length) fail('recovery-baseline-roots-missing');
+  for (const root of contract.code_roots) {
+    const saved = baseline.protected_roots.find(row => row.root_id === root.id && row.path === root.path);
+    if (!saved) fail('recovery-baseline-roots-missing');
+    execution.assertProtected(root.path, saved.snapshot);
+  }
+  return require('./forge-surgical-reset').reconcileFailedAttempt(baseline.state_file,
+    { failed: true, processStopped: true, verifyOwnership: runtime.verifyOwnership });
 }
 // Reject links even when they point back into the workspace: replacing a link is
 // not the same operation as publishing an artifact. Validate before mkdir/write.
@@ -410,6 +491,7 @@ function beginArtifactAttempt(request) {
     broker.verify();
   }
   const record = { phase: 'started', fingerprint, dispatch_id: request.dispatchId, before,
+    recovery_identity_sha256: recoveryIdentity(request),
     ...(request.ownerBroker ? { broker_manifest_sha256: require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker).manifest_sha256,
       broker_plan_sha256: request.ownerBroker.manifest.plan_sha256 } : {}),
     before_state: beforeState,
@@ -1076,9 +1158,10 @@ async function runNativeMemory(request, invoke) {
 }
 async function runUnitSidecarCore(request, runtime, identity) {
   const r = request || {}, route = r.route || {};
-  const transport = capability(route.resolved_worker_engine, r.unitType, r);
+  const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
-  const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType, scope: r.scope, phase: r.phase });
+  const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType,
+    ...(r.scope === 'milestone' ? { scope: undefined, phase: undefined } : { scope: r.scope, phase: r.phase }) });
   if (route.dispatch_allowed !== true || route.worker_mode !== 'sidecar' || !route.sidecar_declared
     || !guard.dispatch_allowed) fail(guard.reason_code || 'route-refused', guard.hint);
   const authoritativeModel = route.model_resolved || route.model;
@@ -1114,10 +1197,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
   async function appendOwnedEvent(line, record) {
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
-    if (!record?.execution?.protected_owner) { fs.appendFileSync(eventsFile, line); return; }
+    const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
+    if (!protectedOwner) { fs.appendFileSync(eventsFile, line); return; }
     const executionApi = require('./forge-task-execution');
     return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
-      const expected = { ...record.execution.protected_owner };
+      const expected = { ...protectedOwner };
       const current = executionApi.protectedSnapshot(root);
       for (const item of record.artifacts || []) if (current[item.path] === hash(item.content)) {
         expected[item.path] = current[item.path];
@@ -1132,8 +1216,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (!fs.readFileSync(eventsFile).equals(appended)) fail('execution-owner-event-raced');
       executionApi.assertProtected(root, { ...expected, '.gsd/forge/events.jsonl': hash(appended) });
       // Advance only these exact caller bytes, never adopt a fresh owner snapshot.
-      record.execution.protected_owner = { ...record.execution.protected_owner,
-        '.gsd/forge/events.jsonl': hash(appended) };
+      const advanced = { ...protectedOwner, '.gsd/forge/events.jsonl': hash(appended) };
+      if (record.execution) record.execution.protected_owner = advanced;
+      else {
+        record.recovery_baseline.protected_owner = advanced;
+        for (const row of record.recovery_baseline.protected_roots) if (path.resolve(row.path) === path.resolve(root)) row.snapshot = advanced;
+      }
       json(receiptFile, record);
     });
   }
@@ -1226,8 +1314,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // a concurrently created plan is a conflict, not permission to overwrite it.
   if (transport.mode === 'plan') {
     const dir = target(root, `${loc.slice}/tasks`);
-    for (const name of fs.existsSync(dir) ? fs.readdirSync(dir).filter(name => /^T\d+-PLAN\.md$/.test(name)) : []) {
-      const p = `${loc.slice}/tasks/${name}`;
+    for (const name of fs.existsSync(dir) ? fs.readdirSync(dir).filter(name => /^T\d+(?:\.\d+)?$/.test(name)) : []) {
+      const p = `${loc.slice}/tasks/${name}/${name}-PLAN.md`;
       before[p] = fileHash(target(root, p));
     }
   }
@@ -1248,6 +1336,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const startedAt = new Date().toISOString();
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
+    recovery_identity_sha256: recoveryIdentity(r), route,
     ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
     input_pending_questions: r.pending_questions || [],
     request_fingerprint: r.preparationRequestFingerprint || null,
@@ -1297,8 +1386,18 @@ async function runUnitSidecarCore(request, runtime, identity) {
   try {
     // Only the process that acquired the exclusive receipt may capture/reset
     // this attempt's durable baseline. A concurrent caller cannot overwrite it.
-    if (execution) require('./forge-surgical-reset').initState(executionStateFile, { cwd, attempt: dispatchId,
-      executionContract: execution.execution_contract, repoRoots: [cwd, ...execution.writableRoots] });
+    // Milestone execution uses the execute adapter too. Its internal audit
+    // snapshot is not the caller's durable recovery authority.
+    if (transport.mode === 'execute') {
+      const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      const baseline = captureMilestoneBaseline(r, saved);
+      json(receiptFile, { ...saved, recovery_baseline: baseline });
+    }
+    const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(runtime.recoveryAuthorization);
+    if (authorizationReference) {
+      const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      json(receiptFile, { ...saved, authorization_reference: authorizationReference });
+    }
     let result, artifacts;
     // The adapter telemetry of a Claude turn: its model_observed is the id the
     // result's modelUsage proved. Codex turns report none.
@@ -1369,7 +1468,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const listed = require('./forge-status').parsePlanTasks(result.slice_plan.content).map(t => t.id);
       if (JSON.stringify([...listed].sort()) !== JSON.stringify([...ids].sort())) fail('plan-task-list-mismatch');
       artifacts = [{ path: loc.required[0], content: result.slice_plan.content },
-        ...result.task_plans.map(p => ({ path: `${loc.slice}/tasks/${p.id}-PLAN.md`, content: p.content }))];
+        ...result.task_plans.map(p => {
+          if (!/^T\d+(?:\.\d+)?$/.test(p.id)) fail('plan-task-ids-invalid');
+          const legacy = target(root, `${loc.slice}/tasks/${p.id}-PLAN.md`);
+          if (fs.existsSync(legacy)) fail('legacy-task-plan-conflict', 'Migrate the explicitly selected legacy plan before publishing a second source.');
+          return { path: `${loc.slice}/tasks/${p.id}/${p.id}-PLAN.md`, content: p.content };
+        })];
     } else if (transport.mode === 'artifacts') {
       const payloadLimit = options.engine === 'claude' || loc.preparation ? MAX_ARTIFACT_PAYLOAD_BYTES : Infinity;
       const base = typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
@@ -1473,7 +1577,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           ...observedModel,
           effort_requested: route.effort || null, effort_resolved: route.effort || null,
           effort_argument: route.effort || null, capabilities_source: 'sidecar-transport' } }
-      : { ...(loc.preparation ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : {}), phase: 'ready', fingerprint, dispatch_id: dispatchId, result: { ...result, dispatch_id: dispatchId,
+      : { ...JSON.parse(fs.readFileSync(receiptFile, 'utf8')), phase: 'ready', fingerprint, dispatch_id: dispatchId, result: { ...result, dispatch_id: dispatchId,
         workflow_id: r.workflowId, host_runtime: route.host_runtime, worker_engine: options.engine },
         input_pending_questions: r.pending_questions || [],
         request_fingerprint: r.preparationRequestFingerprint || null,
@@ -1589,21 +1693,45 @@ async function runUnitSidecar(request, runtime = {}) {
   }
 }
 async function recoverUnitSidecar(request, recovery, runtime = {}) {
-  return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request, executionContract: request.execution_contract,
-    validateCorrection: async () => {
-      const checked = require('./forge-task-execution').prepare(request, request.contextRoot || request.cwd, request.cwd);
-      return { ok: true, evidence_reference: `execution-preflight:${require('./forge-code-roots').digest(checked.inputs)}` };
+  const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
+  if (canonical.scope === 'standalone-task' && canonical.phase !== 'execute') {
+    return require('./forge-task-preparation').recoverStandaloneTask(request, recovery, runtime);
+  }
+  const resolverOptions = { cwd: canonical.contextRoot, unitType: canonical.unitType, scope: canonical.scope, phase: canonical.phase,
+    hostRuntime: canonical.route.host_runtime, milestoneId: canonical.milestoneId,
+    unitId: canonical.taskId || canonical.sliceId || canonical.milestoneId,
+    planPath: canonical.planFile, roadmapPath: canonical.roadmapFile };
+  const nativeTaskName = `recovery_${request.dispatchId}_${crypto.randomUUID()}`;
+  const nativeOptions = route => ({ hostRuntime: route.host_runtime, resolvedDispatch: route,
+    activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
+    prompt: request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : renderPrompt({
+      unitType: request.unitType, cwd: canonical.contextRoot, milestoneId: request.milestoneId, sliceId: request.sliceId,
+      taskId: request.taskId, unitEffort: route.effort, autoCommit: false }).prompt), forkTurns: 'none',
+    taskName: nativeTaskName,
+    agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' });
+  return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
+    recoveryAuthorization: runtime.recoveryAuthorization, processProbe: runtime.processProbe,
+    executionContract: request.execution_contract,
+    reconcile: receipt => {
+      if (canonical.scope === 'milestone' || receipt.recovery_baseline) return reconcileMilestoneAttempt(request, receipt, runtime);
+      if (!receipt.reset_state_file || !receipt.execution?.execution_contract) fail('recovery-baseline-required');
+      require('./forge-task-execution').assertReplay(request, receipt);
+      return require('./forge-surgical-reset').reconcileFailedAttempt(receipt.reset_state_file,
+        { failed: true, processStopped: true, verifyOwnership: runtime.verifyOwnership });
     },
-    resolverOptions: { cwd: request.contextRoot || request.cwd, unitType: request.unitType, hostRuntime: request.route.host_runtime,
-      planPath: request.planFile, unitId: request.taskId || request.sliceId || request.milestoneId },
+    validateCorrection: async () => {
+      const checked = validateRecoveryRequest(request);
+      return { ok: true, evidence_reference: `unit-preflight:${require('./forge-code-roots').digest({ request, mode: checked.mode })}` };
+    },
+    resolverOptions,
     resolveDispatch: runtime.resolveDispatch,
     validateInvocation: async route => {
-      if (route.worker_mode === 'native') return runtime.validateNativeInvocation
-        ? runtime.validateNativeInvocation(route, request) : { ok: false, reason_code: 'native-tool-unavailable' };
-      const cap = require('./forge-transport-capabilities').executionCapability(route, request.execution_contract);
-      if (!cap.supported) return { ok: false, reason_code: cap.reason_code };
-      require('./forge-task-execution').prepare({ ...request, route }, request.contextRoot || request.cwd, request.cwd);
-      return { ok: true };
+      const invocation = route.worker_mode === 'native'
+        ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
+      if (!invocation.ok) return invocation;
+      try { validateRecoveryRequest({ ...request, route }, { nativeInvocation: invocation }); }
+      catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
+      return invocation;
     },
     replay: receipt => {
       if (receipt.phase === 'failed' && receipt.saved_candidate) {
@@ -1613,17 +1741,20 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       return runUnitSidecar(request, runtime);
     },
     invoke: async (route, invocation, remainingMs) => {
-      const next = { ...request, recoveryStateFile: recovery.stateFile, route: { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) },
+      const next = { ...request, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
+        ? { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) } : route,
         dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
       if (route.worker_mode === 'native') {
         if (!runtime.invokeNative) return { action: 'invoke-native', request: next, invocation };
-        return runtime.invokeNative(next, invocation);
+        const native = await require('./forge-native-invocation').invokeNative(nativeOptions(route),
+          (args, binding) => runtime.invokeNative(next, { ...binding, args }));
+        return native;
       }
       return runUnitSidecar(next, runtime);
     },
   });
 }
-module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
+module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt,
