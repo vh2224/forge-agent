@@ -394,6 +394,30 @@ function testObservationDoesNotMutateOrRecoverLease() {
   });
 }
 
+function testRequestBoundReleaseAndSuccessor() {
+  sandbox(cwd => {
+    const unit = 'execute-task/request-bound';
+    const options = fixtureOptions(1, 'codex', { ownerToken: 'owner', requestId: 'r'.repeat(1500) });
+    const acquired = lease.acquire(cwd, unit, options);
+    assert.strictEqual(lease.acquire(cwd, unit, options).reason, 'already-acquired');
+    assert.strictEqual(lease.release(cwd, unit, 'owner', acquired.generation, { requestId: 'wrong' }).reason, 'owner-mismatch');
+    assert.strictEqual(disk(cwd, unit).request_id, options.requestId);
+    const child = childProcess.spawnSync(process.execPath, ['-e', `
+      const fs = require('fs'); const lock = require(process.argv[1]); const lease = require(process.argv[2]);
+      const cwd = process.argv[3], unit = process.argv[4];
+      const guard = lock.acquireSync(cwd, lease.mutexName(unit));
+      try { const file = lease.leaseFile(cwd, unit); const record = JSON.parse(fs.readFileSync(file));
+        record.request_id = 'successor-request'; fs.writeFileSync(file, JSON.stringify(record));
+      } finally { guard.release(); }
+    `, path.join(__dirname, 'forge-lock.js'), path.join(__dirname, 'forge-unit-lease.js'), cwd, unit], { encoding: 'utf8' });
+    assert.strictEqual(child.status, 0, child.stderr);
+    assert.strictEqual(lease.release(cwd, unit, 'owner', acquired.generation, { requestId: options.requestId }).reason, 'owner-mismatch');
+    assert.strictEqual(disk(cwd, unit).request_id, 'successor-request', 'the losing rollback retains the successor request');
+    assert.strictEqual(lease.release(cwd, unit, 'owner', acquired.generation, { requestId: 'successor-request' }).reason, 'released');
+    assert.strictEqual(lease.release(cwd, unit, 'owner', acquired.generation).reason, 'already-released', 'legacy four-argument API remains idempotent');
+  });
+}
+
 async function main() {
   console.log(`forge-unit-lease tests on ${process.platform}`);
   await test('persisted shape and sanitized observe', testPersistedShapeAndSanitizedObserve);
@@ -414,6 +438,7 @@ async function main() {
   await test('CLI returns machine-readable lifecycle results', testCliProducesMachineReadableResults);
   await test('legacy omission stays at the runtime input boundary', testLegacyOmissionUsesRuntimeBoundaryWithoutBackfill);
   await test('observation is passive even after expiry and grace', testObservationDoesNotMutateOrRecoverLease);
+  await test('request-bound rollback refuses a successor published by another process', testRequestBoundReleaseAndSuccessor);
   console.log('forge-unit-lease tests passed');
 }
 
