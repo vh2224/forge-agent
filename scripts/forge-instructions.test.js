@@ -611,6 +611,20 @@ test('--quiet AINDA imprime uma recusa por bloco malformado', () => {
 
 // ── Summary ─────────────────────────────────────────────────────────────────
 
+test('recovery contract sync preserves standing personal authorization bytes and is idempotent', () => {
+  const prefix = '<!-- user:forge-routing-continuity:start -->\r\nPERSONAL ACCEPTANCE Ω\r\n<!-- user:forge-routing-continuity:end -->\r\n';
+  const root = project({ 'AGENTS.md': prefix });
+  const file = path.join(root, 'AGENTS.md');
+  syncFile(file, { host: 'codex' });
+  const once = fs.readFileSync(file, 'utf8');
+  assert(once.startsWith(prefix), 'personal authorization bytes changed');
+  for (const term of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization', '60000ms', 'Standing permission never answers a functional question']) {
+    assert(once.includes(term), `missing ${term}`);
+  }
+  assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'second sync');
+  assertEqual(fs.readFileSync(file, 'utf8'), once, 'byte identity');
+});
+
 cleanup();
 
 console.log('');

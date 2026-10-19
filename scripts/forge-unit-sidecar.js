@@ -167,14 +167,20 @@ function locations(request) {
     input: `${deliveryPrefix}-DELIVERY-INPUT.json`, output: `${deliveryPrefix}-DELIVERY.json`,
     verification: `${deliveryPrefix}-VERIFY-ENVELOPE.json`, artifact: `${deliveryPrefix}-ARTIFACT-ENVELOPE.json`,
   } : null;
+  const rootSources = unit === 'execute-task' ? (request.execution_contract?.code_roots || []).flatMap(root => {
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(root.id)) fail('root-id-invalid');
+    return ['verification', 'artifact'].map(kind => ({ path: `${deliveryPrefix}-${kind.toUpperCase()}-${root.id}-ENVELOPE.json`, kind, root_id: root.id }));
+  }) : [];
+  if (delivery) delivery.rootSources = rootSources;
   const required = delivery ? [...baseRequired, delivery.input, delivery.output] : baseRequired;
   const optional = unit.startsWith('research-') ? ['.gsd/CODING-STANDARDS.md'] : [];
-  const deliveryOptional = delivery ? [delivery.verification, delivery.artifact] : [];
+  const deliveryOptional = delivery ? [delivery.verification, delivery.artifact, ...rootSources.map(row => row.path)] : [];
   const rules = delivery ? {
     [delivery.input]: { kind: 'input', unit: deliveryUnit },
     [delivery.output]: { kind: 'delivery', unit: deliveryUnit },
     [delivery.verification]: { kind: 'verification', unit: deliveryUnit },
     [delivery.artifact]: { kind: 'artifact', unit: deliveryUnit },
+    ...Object.fromEntries(rootSources.map(row => [row.path, { kind: row.kind, unit: deliveryUnit }])),
   } : {};
   return { required, allowed: [...required, ...deliveryOptional, ...optional], rules, delivery, milestone, slice };
 }
@@ -258,6 +264,14 @@ function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
   }
   return require('./forge-surgical-reset').reconcileFailedAttempt(baseline.state_file,
     { failed: true, processStopped: true, verifyOwnership: runtime.verifyOwnership });
+}
+function assertMilestoneDeliveryReplay(request, record) {
+  if (!record.milestone_delivery) return;
+  const saved = record.milestone_delivery, api = require('./forge-task-execution');
+  require('./forge-code-roots').validateContract(request.execution_contract, { revalidate: true });
+  if (hash(fs.readFileSync(request.planFile)) !== saved.plan_sha256) fail('execution-input-changed');
+  for (const entry of saved.protected_roots) api.assertProtected(entry.path, entry.snapshot);
+  if (JSON.stringify(api.replayState(request.cwd, request.execution_contract)) !== JSON.stringify(saved.code_state)) fail('execution-replay-baseline-changed');
 }
 // Reject links even when they point back into the workspace: replacing a link is
 // not the same operation as publishing an artifact. Validate before mkdir/write.
@@ -370,13 +384,15 @@ function materialize(request, record, publicationGuard) {
   if (record.result.status !== 'done') return record.result;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
   return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
-  if (record.execution) {
-    require('./forge-task-execution').assertReplay(request, record);
+  assertMilestoneDeliveryReplay(request, record);
+  if (record.execution || record.milestone_delivery) {
+    if (record.execution) require('./forge-task-execution').assertReplay(request, record);
     if (request.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(request.ownerBroker)
       .verify({ canonicalArtifacts: record.artifacts });
     else {
-      if (!record.execution.protected_owner) fail('execution-owner-baseline-required');
-      const expected = { ...record.execution.protected_owner };
+      const protectedOwner = (record.execution || record.milestone_delivery).protected_owner;
+      if (!protectedOwner) fail('execution-owner-baseline-required');
+      const expected = { ...protectedOwner };
       const current = require('./forge-task-execution').protectedSnapshot(root);
       for (const item of record.artifacts) if (current[item.path] === hash(item.content)) {
         expected[item.path] = current[item.path];
@@ -1160,6 +1176,7 @@ async function runNativeMemory(request, invoke) {
   }
 }
 async function runUnitSidecarCore(request, runtime, identity) {
+  let transportReturned = false;
   const r = request || {}, route = r.route || {};
   const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
@@ -1225,6 +1242,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         record.recovery_baseline.protected_owner = advanced;
         for (const row of record.recovery_baseline.protected_roots) if (path.resolve(row.path) === path.resolve(root)) row.snapshot = advanced;
       }
+      if (record.milestone_delivery) record.milestone_delivery.protected_owner = advanced;
       json(receiptFile, record);
     });
   }
@@ -1283,15 +1301,22 @@ async function runUnitSidecarCore(request, runtime, identity) {
   }
   const existing = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
   async function completeExecution(record) {
-    require('./forge-task-execution').assertReplay(r, record);
+    if (record.execution) require('./forge-task-execution').assertReplay(r, record);
+    else if (record.milestone_delivery) {
+      const api = require('./forge-task-execution');
+      const saved = record.milestone_delivery;
+      assertMilestoneDeliveryReplay(r, record);
+      api.assertProtected(root, saved.protected_owner);
+    }
     if (r.execution_contract && !record.delivery_capture) {
       const resourceEvents = [];
       const deliveryCapture = require('./forge-verify').captureRootDelivery(r.execution_contract,
-        fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, unit: { type: 'task', id: r.taskId },
+        fs.readFileSync(r.planFile, 'utf8'), { ...r.verification, unit: loc.rules[loc.delivery.input].unit,
           resourceEventSink: line => resourceEvents.push(line) });
       for (const line of resourceEvents) await appendOwnedEvent(line, record);
+      if (!deliveryCapture.passed) fail('execution-verification-failed');
       record = { ...record, delivery_capture: deliveryCapture };
-      require('./forge-task-execution').assertReplay(r, record);
+      if (record.execution) require('./forge-task-execution').assertReplay(r, record);
       json(receiptFile, record);
     }
     const artifacts = executeDeliveryArtifacts(r, loc, record.result, root, cwd, record.delivery_capture);
@@ -1371,7 +1396,6 @@ async function runUnitSidecarCore(request, runtime, identity) {
   }
   let providerCalled = false;
   let transportEntered = false;
-  let transportReturned = false;
   const announce = (stage, fields) => {
     runtime.announce?.(stage, fields);
   };
@@ -1474,6 +1498,36 @@ async function runUnitSidecarCore(request, runtime, identity) {
             protected_owner: executionApi.protectedSnapshot(root),
             execution_contract: execution.execution_contract,
             code_state: executionApi.replayState(cwd, execution.execution_contract), packaged_context: result.appserver.packaged_context },
+          result: { ...result, dispatch_id: dispatchId, workflow_id: r.workflowId,
+            host_runtime: route.host_runtime, worker_engine: options.engine } };
+        json(receiptFile, executed);
+        const ready = await completeExecution(executed);
+        result = await publishReadyRecord(r, ready);
+        json(resultFile, result);
+        await event(result.status, null, null, true);
+        return result;
+      }
+      if (r.execution_contract && result.status === 'done') {
+        const api = require('./forge-task-execution');
+        const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+        api.assertProtected(root, saved.recovery_baseline.protected_owner);
+        for (const entry of saved.recovery_baseline.protected_roots) api.assertProtected(entry.path, entry.snapshot);
+        const roots = require('./forge-code-roots');
+        const baseline = saved.recovery_baseline;
+        const state = require('./forge-surgical-reset').readState(baseline.state_file);
+        if (baseline.state_sha256 !== baselineDigest(state)) fail('recovery-baseline-binding');
+        if (baseline.input.sha256 !== roots.digest(fs.readFileSync(baseline.input.path))) fail('execution-input-changed');
+        const checked = roots.validatePlan(fs.readFileSync(r.planFile, 'utf8'), r.execution_contract);
+        const verifiedFiles = api.verifyResult(cwd, { execution_contract: r.execution_contract,
+          claims: checked.writes, snapshots: state.repos }, result);
+        // Save the validated response before checks/publication. A failing gate
+        // must replay delivery, never infer again or capture a new writer baseline.
+        const executed = { ...saved, phase: 'executed', provider_called: true,
+          milestone_delivery: { plan_sha256: hash(fs.readFileSync(r.planFile)),
+            verified_files: verifiedFiles,
+            protected_owner: api.protectedSnapshot(root),
+            protected_roots: saved.recovery_baseline.protected_roots,
+            code_state: api.replayState(cwd, r.execution_contract) },
           result: { ...result, dispatch_id: dispatchId, workflow_id: r.workflowId,
             host_runtime: route.host_runtime, worker_engine: options.engine } };
         json(receiptFile, executed);

@@ -34,6 +34,25 @@ Forge enforces these instructions in its distributed prompts. Client tabs and a 
 
 Installation probes `codex features list` locally with a bounded timeout before adding an absent supported default. Explicit user settings and ambiguous TOML remain untouched. Dry runs skip this probe (`questions-probe-dry-run`): capability and the prospective feature edit remain unresolved until apply; dry-run is not a guarantee of session tool availability.
 
-## Durable pending decisions
+## Standing recovery authorization
+
+The trusted host registers an already resolved conversation authorization through
+`forge-interaction.createRecoveryAuthorizationAdapter(attestAuthorization, dependencies)`
+and `registerStandingAuthorization({reference, host, source_host, section:'user:forge-routing-continuity'})`.
+The live callback attests the observed profile, personal source and conversation reference;
+prompt prose, imported JSON, `approved` flags and serialized handles cannot attest it.
+Omit `expires_at` for standing permission. The personal source is revalidated on every
+`readStandingAuthorization(reference)` and `issueRecoveryException(reference, scope)`;
+on restart create a new `forge-recovery-authority.createRecoveryAuthority` adapter.
+Persist only the reference in receipts, recovery state and evidence-backed checkpoints.
+The issued opaque capability binds unit/request identity, owner, physical roots, chain,
+routes, purpose and expiry. Its validity never renews the historical 60000ms sidecar budget.
+Existing standing permission covers operational timeout with indeterminate cause: inspect
+process/receipt first, reconcile every possible writer root, then select a valid untried
+candidate using the real unit adapter. Correct known caller defects offline first.
+Standing permission never answers a functional question: pending IDs and explicit answers
+remain separate. Model/effort, claims, isolation, gates and permitted host tools still apply.
+
+## Pending decision persistence
 
 Forge persists required questions as {id, question, status:'pending'} with stable IDs. forge-interaction.persistQuestionState binds the external state to the original unit/receipt; mergePendingQuestions preserves unanswered IDs across restart and handoff. Continuations provide explicit {id, answer} entries; partial answers resolve only their IDs. Missing, empty, foreign, duplicate or conflicting answers do not authorize dependent work. Legacy question strings acquire deterministic IDs; legacy answer strings require explicit ID migration. A caller's resolved live answer may issue an opaque recovery exception scoped to unit, roots, routes, purpose and expiration. Imported JSON consent is never that capability. These runtime states do not prove that a host displayed a visual card or tab.

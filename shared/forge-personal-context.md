@@ -60,6 +60,15 @@ do not erase the run or claim that personal resume was persisted.
 
 ## Durable handoff — every exit
 
+Recovery handoffs persist `authorization_reference` in their evidence source, not an
+opaque process-local capability or a copied personal instruction. After restart the
+trusted host revalidates that reference through `forge-recovery-authority` before
+issuing a unit-scoped exception (see `shared/forge-interaction.md`). A checkpoint
+is evidence and never consent. Keep functional question IDs, unanswered questions,
+prior acceptances, receipt and recovery-state references in the source artifact.
+`lastResult` and `nextAction` point to existing hashed evidence. An idle workflow,
+an empty verification gate or a simulated provider does not complete delivery/UAT.
+
 After writing authoritative continue/state/review/UAT evidence, prepare a JSON file
 inside that work's artifact directory using the host's file-writing tool (no shell
 interpolation of user text), then invoke:

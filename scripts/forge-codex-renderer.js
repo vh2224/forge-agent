@@ -230,6 +230,7 @@ function tomlMultiline(value) {
 function render(options = {}) {
   const root = roots(options); const manifest = manifestFor(root, options); const sources = codexSources(manifest); const artifacts = [];
   const add = (sourceId, source, destination, content, kind) => artifacts.push({ source_id: sourceId, source, destination, content: norm(content), newline: 'lf', kind });
+  // Reuse the canonical trusted-authority contract from forge-interaction; never mint consent here.
   const rewriteMarkdown = (content) => interaction.project(rewriteDispatchDialect(content, {
     agentInvocation: options.agentInvocation,
     hostRuntime: options.hostRuntime,
