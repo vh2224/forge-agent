@@ -23,6 +23,7 @@ function createAuthority(resolveLiveAnswer) {
 function exceptionFor(handle, identity, now) {
   const scope = exceptions.get(handle);
   if (!scope || scope.expires_at <= now || scope.unit !== identity.unit || scope.roots_sha256 !== identity.roots_sha256
+      || scope.request_identity_sha256 && scope.request_identity_sha256 !== identity.request_identity_sha256
       || scope.purpose !== identity.purpose || scope.gates_preserved !== true) fail('recovery-exception-invalid');
   return scope;
 }
@@ -30,17 +31,48 @@ function routeKey(route) { return digest({ host: route.host_runtime, worker: rou
   transport: route.worker_mode, model: route.model_resolved || route.model, effort: route.effort }); }
 // Resolve in the caller. A JSON list, even one labelled approved, is not a
 // live resolver observation and cannot authorize a destination.
-function resolveCandidates(options, resolve = require('./forge-dispatch-resolve').resolveDispatch) {
+function requestIdentity(request) {
+  const path = require('path'), fs = require('fs');
+  if (!request || !request.unitType || !['milestone', 'standalone-task'].includes(request.scope) || !request.phase
+      || !request.route?.host_runtime || !request.cwd || !request.contextRoot
+      || request.scope === 'standalone-task' && (!request.taskId || request.milestoneId || request.sliceId)
+      || request.scope === 'milestone' && !request.milestoneId
+      || request.unitType === 'execute-task' && (!request.taskId || request.scope === 'milestone' && !request.sliceId)
+      || /-slice$/.test(request.unitType) && !request.sliceId) fail('recovery-request-identity-required');
+  const canonical = file => {
+    if (!path.isAbsolute(file)) fail('recovery-request-path-invalid');
+    const resolved = fs.realpathSync(file);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const result = { unit_type: request.unitType, scope: request.scope, phase: request.phase,
+    milestone_id: request.milestoneId || null, slice_id: request.sliceId || null, task_id: request.taskId || null,
+    host: request.route.host_runtime, owner: canonical(request.contextRoot), cwd: canonical(request.cwd) };
+  for (const [key, field] of [['plan', 'planFile'], ['roadmap', 'roadmapFile']]) result[key] = request[field] ? canonical(request[field]) : null;
+  return result;
+}
+function resolveCandidates(options, resolve = require('./forge-dispatch-resolve').resolveDispatch, request) {
+  const identity = requestIdentity(request);
+  if (!options || options.unitType !== identity.unit_type || options.scope !== identity.scope || options.phase !== identity.phase
+      || options.hostRuntime !== identity.host || (options.milestoneId || null) !== identity.milestone_id
+      || options.unitId !== (identity.task_id || identity.slice_id || identity.milestone_id)
+      || (options.planPath || null) !== (request.planFile || null) || (options.roadmapPath || null) !== (request.roadmapFile || null)
+      // Preferences and preparation belong to the owner; execution belongs
+      // to request.cwd, which can be a distinct isolated worktree.
+      || require('path').resolve(options.cwd || '') !== require('path').resolve(request.contextRoot)) fail('recovery-resolver-identity-mismatch');
   const resolved = resolve(options);
-  if (!resolved || !Array.isArray(resolved.chain) || !resolved.chain.length) fail('recovery-resolved-list-required');
+  if (!resolved || !Array.isArray(resolved.chain) || !resolved.chain.length || resolved.prefs_ok === false) fail('recovery-resolved-list-required');
+  // The current resolver does not echo unit_type. Its explicit validated input
+  // supplies that identity; missing inputs never compare equal to undefined.
+  if (resolved.unit_type && resolved.unit_type !== identity.unit_type || resolved.host_runtime !== identity.host) fail('recovery-resolver-identity-mismatch');
   const resolver = require('./forge-dispatch-resolve');
   const routes = resolved.chain.map(member => {
     const engine = resolver.dispatchEngineFor(member.engine);
-    const runtime = resolver.composeRuntimePosture(resolver.runtimeFields({ hostRuntime: resolved.host_runtime }, engine), resolved.unit_type, options);
-    return { ...resolved, ...runtime, model: member.id, model_requested: member.id, model_resolved: member.id,
+    const runtime = resolver.composeRuntimePosture(resolver.runtimeFields({ hostRuntime: resolved.host_runtime }, engine), identity.unit_type, options);
+    return { ...resolved, ...runtime, unit_type: identity.unit_type, model: member.id, model_requested: member.id, model_resolved: member.id,
       sidecar_model: member.id, engine: member.engine, dispatch_engine: engine };
   });
-  const provenance = { unit_type: resolved.unit_type, host: resolved.host_runtime, tier: resolved.tier,
+  const provenance = { unit_type: identity.unit_type, host: resolved.host_runtime, tier: resolved.tier,
+    request_identity: identity, request_identity_sha256: digest(identity), chain_sha256: digest(resolved.chain),
     chain: resolved.chain, source: resolved.source || resolved.reason, sha256: digest({ options, chain: resolved.chain }) };
   const handle = Object.freeze({ id: crypto.randomUUID() });
   candidateSets.set(handle, JSON.parse(JSON.stringify({ routes, provenance }))); return handle;
@@ -58,6 +90,12 @@ function createRecovery(options) {
     schema_version: 1, unit: options.unit, roots_sha256: options.roots_sha256, purpose: options.purpose || 'sidecar-recovery',
     started_at: started, deadline_at: started + 60000, attempts: [], pending_questions: [], phase: 'inspection' };
   if (state.unit !== options.unit || state.roots_sha256 !== options.roots_sha256) fail('recovery-identity-mismatch');
+  if (options.request) {
+    const identity = requestIdentity(options.request), hash = digest(identity);
+    if (state.unit !== `${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}`) fail('recovery-identity-mismatch');
+    if (state.request_identity_sha256 && state.request_identity_sha256 !== hash) fail('recovery-identity-mismatch');
+    state.request_identity = identity; state.request_identity_sha256 = hash;
+  }
   const save = () => { options.persist?.(JSON.parse(JSON.stringify(state))); return JSON.parse(JSON.stringify(state)); };
   const remaining = () => Math.max(0, state.deadline_at - clock());
   return Object.freeze({
@@ -98,11 +136,13 @@ function createRecovery(options) {
         routes = [previous.route];
       } else if (previous.failure_class === 'service' && previous.service_failure_proven === true || scope) {
         const observed = candidateSets.get(input.candidateSet);
-        if (!observed || observed.provenance.unit_type !== previous.route.unit_type
+        if (!observed || !state.request_identity_sha256 || observed.provenance.request_identity_sha256 !== state.request_identity_sha256
+            || previous.route.unit_type && observed.provenance.unit_type !== previous.route.unit_type
             || observed.provenance.host !== previous.route.host_runtime) fail('recovery-candidate-provenance-required');
         provenance = observed.provenance;
         const original = state.attempts[0].route.chain;
         if (!Array.isArray(original) || !original.length) fail('recovery-original-list-required');
+        if (digest(original) !== provenance.chain_sha256 || scope?.chain_sha256 && scope.chain_sha256 !== provenance.chain_sha256) fail('recovery-candidate-list-changed');
         routes = observed.routes.filter(candidate => original.some(member => member.id === (candidate.model_resolved || candidate.model)
           && member.engine === candidate.engine)
           && ![...state.attempts, ...(state.reservations || [])].some(a => a.route_key === routeKey(candidate)));
@@ -115,6 +155,9 @@ function createRecovery(options) {
       let route, invocation;
       for (const candidate of routes) {
         if (!candidate.effort || !(candidate.model_resolved || candidate.model)) fail('recovery-explicit-route-required');
+        if (!remaining() && candidate.worker_mode !== 'native') {
+          rejected.push({ route_key: routeKey(candidate), reason_code: 'recovery-deadline-exhausted' }); continue;
+        }
         if (scope && !scope.routes.includes(routeKey(candidate))) continue;
         if (candidate.effort !== previous.route.effort || candidate.tier !== previous.route.tier) {
           rejected.push({ route_key: routeKey(candidate), reason_code: 'recovery-tier-effort-changed' }); continue;
@@ -127,13 +170,17 @@ function createRecovery(options) {
       }
       state.selection = { provenance: provenance || null, rejected, selected: route ? routeKey(route) : null }; save();
       if (!route) return { action: 'stop', reason_code: 'recovery-candidates-exhausted', rejected };
-      if (!remaining() && !scope) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
+      if (!remaining() && (!scope || route.worker_mode !== 'native')) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
+      if (scope) exceptionFor(input.exception, state, clock());
       state.phase = 'ready'; save();
-      return { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction, remaining_ms: scope ? Math.max(0, scope.expires_at - clock()) : remaining(),
-        ...(scope ? { authorization_reference: scope.reference } : {}), provider_called: false };
+      return { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction,
+        remaining_ms: remaining(), sidecar_remaining_ms: remaining(),
+        ...(scope ? { authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
+          native_authorization_remaining_ms: Math.max(0, scope.expires_at - clock()) } : {}), provider_called: false };
     },
     reserve(decision, requestHash) {
       if (decision.action !== 'invoke' || state.phase !== 'ready' || state.selection?.selected !== routeKey(decision.route)) fail('recovery-reservation-invalid');
+      if (!remaining() && (decision.route.worker_mode !== 'native' || !(decision.authorization_expires_at > clock()))) fail('recovery-deadline-exhausted');
       const entry = { route_key: routeKey(decision.route), corrected: decision.corrected, request_sha256: requestHash,
         reserved_at: clock(), reason: decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
@@ -165,6 +212,7 @@ function captureFailure(options) {
   const error = options.error || {}, code = error.code || error.reason_code || 'attempt-failed';
   const state = fs.existsSync(options.stateFile) ? stateApi.loadRecovery(options.stateFile) : undefined;
   const session = createRecovery({ unit: options.unit, roots_sha256: digest(options.contract || { cwd: options.request.cwd }),
+    ...(options.request.scope && options.request.phase ? { request: options.request } : {}),
     state, persist: value => stateApi.saveRecovery(options.stateFile, value) });
   const provider = [true, false].includes(error.provider_called) ? error.provider_called : 'unknown';
   const timeout = /timeout|timed-out/.test(code);
@@ -188,6 +236,7 @@ async function recoverAttempt(options) {
   const expectedRoots = digest(options.executionContract || { cwd: options.request.cwd });
   const session = createRecovery({ unit: options.unit || `${options.request.unitType}/${options.request.taskId || options.request.sliceId || options.request.milestoneId}`,
     roots_sha256: expectedRoots, state,
+    ...(options.request.scope && options.request.phase ? { request: options.request } : {}),
     clock: options.clock, persist: value => stateApi.saveRecovery(options.stateFile, value) });
   const inspection = inspectReceipt(options.receiptFile, { processProbe: options.processProbe });
   if (inspection.process_stopped !== true) fail('recovery-process-receipt-inspection-required');
@@ -210,7 +259,7 @@ async function recoverAttempt(options) {
   const candidateSet = !inspection.valid_saved_response && !correction
     && !session.snapshot().pending_questions.some(q => q.status === 'pending')
     && (state.attempts.at(-1)?.service_failure_proven === true || options.exception)
-    ? resolveCandidates(options.resolverOptions, options.resolveDispatch) : undefined;
+    ? resolveCandidates(options.resolverOptions, options.resolveDispatch, options.request) : undefined;
   const decision = await session.next({ inspection, candidateSet, correction,
     exception: options.exception, validateInvocation: options.validateInvocation });
   if (decision.action === 'replay') {
@@ -220,8 +269,9 @@ async function recoverAttempt(options) {
   if (decision.action !== 'invoke') return decision;
   session.reserve(decision, correction?.request_sha256 || state.attempts.at(-1).request_sha256);
   if (typeof options.invoke !== 'function') return { ...decision, action: 'invoke-native', inspection: { ...inspection, receipt: undefined } };
-  // Every new sidecar gets the shared remaining deadline; a native exception
-  // carries its explicit expiration. Never renew the original 300-second wait.
+  decision.remaining_ms = session.remaining(); decision.sidecar_remaining_ms = decision.remaining_ms;
+  // The invocation budget is always the historic sidecar budget. Native
+  // authorization validity is returned separately, never a fresh sidecar wait.
   return { ...decision, result: await options.invoke(decision.route, decision.invocation, decision.remaining_ms) };
 }
 function validateStateTarget(file, request, contract) {
@@ -247,7 +297,7 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { createRecovery, resolveCandidates, createAuthority, exceptionFor, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
+module.exports = { createRecovery, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;
 });

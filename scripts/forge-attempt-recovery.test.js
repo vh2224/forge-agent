@@ -3,7 +3,7 @@ const assert = require('assert');
 const api = require('./forge-attempt-recovery');
 async function main() {
   let now = 0, saved;
-  const identity = { unit: 'T-recovery', roots_sha256: 'roots', clock: () => now, persist: state => { saved = state; } };
+  const identity = { unit: 'execute-task/T-recovery', roots_sha256: 'roots', clock: () => now, persist: state => { saved = state; } };
   const route = { unit_type: 'execute-task', host_runtime: 'codex', resolved_worker_engine: 'claude', worker_mode: 'sidecar',
     model: 'claude-sonnet-5', model_resolved: 'claude-sonnet-5', effort: 'medium', tier: 'standard', dispatch_allowed: true };
   const attempt = { reason_code: 'quota', layer: 'provider', request_sha256: 'request', context_sha256: 'context',
@@ -12,20 +12,24 @@ async function main() {
   const inspection = { process_stopped: true, receipt_checked: true, writer_possible: false };
   const chain = [{ id: 'claude-sonnet-5', engine: 'claude' }, { id: 'gpt-incompatible', engine: 'gpt' }, { id: 'gpt-6-astra', engine: 'gpt' }, { id: 'claude-opus-4-8', engine: 'claude' }];
   route.chain = chain;
+  const request = { unitType: 'execute-task', scope: 'standalone-task', phase: 'execute', taskId: 'T-recovery',
+    cwd: __dirname, contextRoot: __dirname, route };
+  identity.request = request;
+  const resolverOptions = { unitType: request.unitType, scope: request.scope, phase: request.phase, unitId: request.taskId,
+    cwd: request.cwd, hostRuntime: 'codex' };
   const recovery = api.createRecovery(identity); recovery.record(attempt);
   assert.strictEqual(saved.attempts[0].provider_called, 'unknown');
   assert(!saved.attempts[0].diagnostic.includes('secret-value'));
-  const candidateSet = api.resolveCandidates({}, () => ({ ...route, chain, source: 'fixture-resolver' }));
+  const candidateSet = api.resolveCandidates(resolverOptions, () => ({ ...route, chain, source: 'fixture-resolver' }), request);
   const checked = [];
   const next = await recovery.next({ inspection, candidateSet, validateInvocation: async candidate => {
     checked.push(candidate.model); return { ok: candidate.model !== 'gpt-incompatible', reason_code: 'unsupported-model' };
   } });
   assert.strictEqual(next.route.model, 'gpt-6-astra');
   assert.deepStrictEqual(checked, ['gpt-incompatible', 'gpt-6-astra']);
-  const unapproved = api.resolveCandidates({}, () => ({ ...route, chain: [{ id: 'gpt-new-unapproved', engine: 'gpt' }] }));
-  const rejectedList = await recovery.next({ inspection, candidateSet: unapproved,
-    validateInvocation() { throw new Error('unapproved route must never reach adapter'); } });
-  assert.strictEqual(rejectedList.reason_code, 'recovery-candidates-exhausted');
+  const unapproved = api.resolveCandidates(resolverOptions, () => ({ ...route, chain: [{ id: 'gpt-new-unapproved', engine: 'gpt' }] }), request);
+  await assert.rejects(recovery.next({ inspection, candidateSet: unapproved,
+    validateInvocation() { throw new Error('unapproved route must never reach adapter'); } }), /candidate-list-changed/);
   assert(next.provenance.sha256); assert.strictEqual(next.rejected.length, 1);
   await assert.rejects(recovery.next({ inspection, candidateSet: {}, candidates: chain, validateInvocation: async () => ({ ok: true }) }), /provenance/);
   await assert.rejects(recovery.next({ inspection: { ...inspection, writer_possible: true }, candidateSet }), /reconciliation/);
@@ -55,6 +59,7 @@ async function main() {
   assert.throws(() => authority.issue('live-answer', { unit: identity.unit, roots_sha256: 'roots', routes: ['route'],
     purpose: 'sidecar-recovery', expires_at: now + 100, gates_preserved: false }, () => now), /not-authorized/);
   await persistentRecovery(route);
+  await canonicalProvenance();
   console.log('PASS recovery clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
 }
 async function persistentRecovery(route) {
@@ -108,4 +113,98 @@ async function persistentRecovery(route) {
   lab.cleanup();
   console.log('PASS persisted recovery: caller repair once, process proof, restart/CLI deadline, identity, external state and zero-inference replay');
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+async function canonicalProvenance() {
+  const fs = require('fs'), path = require('path'), os = require('os');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-resolver-'));
+  const savedEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'FORGE_HOME'].map(key => [key, process.env[key]]));
+  try {
+    for (const key of Object.keys(savedEnv)) process.env[key] = root;
+    fs.mkdirSync(path.join(root, '.gsd'));
+    const worktree = path.join(root, 'worktree');
+    fs.mkdirSync(path.join(worktree, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(worktree, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ tier_models: { standard: ['gpt-6-sol'] } }));
+    fs.writeFileSync(path.join(root, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ tier_models: {
+      standard: ['claude-sonnet-5', 'gpt-6-astra', 'claude-opus-4-8'] } }));
+    const resolverOptions = { cwd: root, unitType: 'research-slice', unitId: 'S01', milestoneId: 'M001',
+      scope: 'milestone', phase: 'research', hostRuntime: 'codex' };
+    const resolver = require('./forge-dispatch-resolve').resolveDispatch;
+    const route = resolver(resolverOptions);
+    assert.strictEqual(route.unit_type, undefined, 'real resolver omits unit_type: do not hide this with a stub');
+    const request = { cwd: worktree, contextRoot: root, route, unitType: 'research-slice', scope: 'milestone',
+      phase: 'research', milestoneId: 'M001', sliceId: 'S01' };
+    const identity = { unit: 'research-slice/S01', roots_sha256: 'roots', request, clock: () => 0 };
+    const candidates = api.resolveCandidates(resolverOptions, resolver, request);
+    assert.strictEqual(route.chain[0].id, 'claude-sonnet-5', 'owner preferences remain authoritative over worktree preferences');
+    assert.throws(() => api.resolveCandidates({ ...resolverOptions, cwd: worktree }, resolver, request), /identity-mismatch/);
+    assert.throws(() => api.resolveCandidates({}, resolver), /request-identity-required/);
+    for (const patch of [{ unitType: undefined }, { scope: undefined }, { phase: 'execute' }, { milestoneId: 'M002' }, { unitId: 'S02' }, { hostRuntime: 'claude' }]) {
+      assert.throws(() => api.resolveCandidates({ ...resolverOptions, ...patch }, resolver, request), /identity-mismatch/);
+    }
+    const session = api.createRecovery(identity);
+    session.record({ failure_class: 'timeout', reason_code: 'timeout', layer: 'provider', route, request_sha256: 'request',
+      context_sha256: 'context', request_bytes: 1, context_bytes: 1, duration_ms: 300000, budgets: {} });
+    const inspection = { receipt_checked: true, process_stopped: true, writer_possible: false };
+    const noAuthority = await session.next({ inspection });
+    assert.strictEqual(noAuthority.reason_code, 'timeout-cause-indeterminate');
+    const scope = { unit: identity.unit, roots_sha256: 'roots', purpose: 'sidecar-recovery', expires_at: 120000,
+      routes: route.chain.map(member => api.routeKey({ ...route, model_resolved: member.id, worker_mode: member.engine === 'gpt' ? 'native' : 'sidecar',
+        resolved_worker_engine: member.engine === 'gpt' ? 'codex' : 'claude' })), gates_preserved: true };
+    const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+    const exception = authority.issue('fixture', scope, () => 0);
+    const restarted = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(session.snapshot())), clock: () => 60001 });
+    const accepted = await restarted.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) });
+    assert.strictEqual(accepted.route.worker_mode, 'native');
+    assert.strictEqual(accepted.sidecar_remaining_ms, 0);
+    assert.strictEqual(accepted.remaining_ms, 0);
+    assert.strictEqual(accepted.native_authorization_remaining_ms, 59999);
+    assert.strictEqual(accepted.provenance.unit_type, request.unitType);
+    restarted.reserve(accepted, 'request');
+    const twice = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(restarted.snapshot())), clock: () => 60002 });
+    const stopped = await twice.next({ inspection, candidateSet: candidates, exception, validateInvocation() { throw new Error('sidecar beyond deadline'); } });
+    assert.strictEqual(stopped.action, 'stop');
+    assert(stopped.rejected.some(item => item.reason_code === 'recovery-deadline-exhausted'));
+    assert.strictEqual(twice.snapshot().deadline_at, 60000);
+    assert.strictEqual(twice.snapshot().reservations.length, 1);
+    fs.mkdirSync(path.join(root, '.codex'));
+    fs.writeFileSync(path.join(root, '.codex', 'AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nFixture authorization.\n<!-- user:forge-routing-continuity:end -->');
+    const reference = 'conversation:restart-fixture';
+    require('./forge-interaction').createRecoveryAuthorizationAdapter(observed => ({ ...observed, received: true,
+      answer: 'authorize', resolved_at: 0 }), { resolveProfile: () => root, clock: () => 0 })
+      .registerStandingAuthorization({ reference, host: 'codex', section: 'user:forge-routing-continuity', expires_at: 120000 });
+    const fixture = path.join(root, 'restart.json');
+    fs.writeFileSync(fixture, JSON.stringify({ state: session.snapshot(), request, resolverOptions, reference,
+      scope: { ...scope, owner: root, roots: [worktree], request_identity_sha256: require('./forge-code-roots').digest(api.requestIdentity(request)),
+        chain_sha256: require('./forge-code-roots').digest(route.chain) } }));
+    const child = require('child_process').spawnSync(process.execPath, [__filename, '--resume-recovery', fixture], { encoding: 'utf8', windowsHide: true });
+    assert.strictEqual(child.status, 0, child.stderr);
+    const result = JSON.parse(child.stdout);
+    assert.strictEqual(result.native.route.worker_mode, 'native');
+    assert.strictEqual(result.native.sidecar_remaining_ms, 0);
+    assert.strictEqual(result.afterReservation.action, 'stop');
+    assert(result.afterReservation.rejected.some(row => row.reason_code === 'recovery-deadline-exhausted'));
+    assert.strictEqual(result.state.deadline_at, session.snapshot().deadline_at);
+    assert.strictEqual(result.state.reservations.length, 1);
+    const foreign = api.createRecovery({ ...identity, state: undefined, request: undefined });
+    foreign.record(session.snapshot().attempts[0]);
+    await assert.rejects(foreign.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) }), /provenance/);
+    console.log('PASS real resolver identity, missing/foreign scope and IDs, native after deadline, sidecar refusal and durable reservations');
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+async function resumeRecovery() {
+  const fixture = JSON.parse(require('fs').readFileSync(process.argv[3], 'utf8'));
+  const store = require('./forge-recovery-authority').createRecoveryAuthority({ resolveProfile: () => fixture.request.contextRoot, clock: () => 60001 });
+  const exception = store.issueRecoveryException(fixture.reference, fixture.scope);
+  const session = api.createRecovery({ unit: fixture.state.unit, roots_sha256: fixture.state.roots_sha256,
+    request: fixture.request, state: fixture.state, clock: () => 60001 });
+  const candidateSet = api.resolveCandidates(fixture.resolverOptions, undefined, fixture.request);
+  const input = { inspection: { receipt_checked: true, process_stopped: true, writer_possible: false },
+    candidateSet, exception, validateInvocation: () => ({ ok: true }) };
+  const native = await session.next(input);
+  session.reserve(native, 'request');
+  const afterReservation = await session.next(input);
+  process.stdout.write(JSON.stringify({ native, afterReservation, state: session.snapshot() }));
+}
+(process.argv[2] === '--resume-recovery' ? resumeRecovery() : main()).catch(error => { console.error(error); process.exitCode = 1; });
