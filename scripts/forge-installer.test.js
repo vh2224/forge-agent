@@ -930,4 +930,196 @@ test('a clean update names nothing — the section is absent, not empty', () => 
   } finally { data.cleanup(); }
 });
 
+test('procedure runtime: both temporary hosts deliver closure, real callers and coherent overrides', () => {
+  const data = fixture();
+  const originalForgeHome = process.env.FORGE_HOME;
+  try {
+    const report = installer.install({ ...data.options, runtime: 'both' });
+    const source = data.options.repo;
+    const sourceLoader = require('./forge-procedure-context');
+    const installed = require(path.join(data.forgeHome, 'scripts/forge-procedure-context.js'));
+    const manifest = JSON.parse(fs.readFileSync(path.join(data.forgeHome, 'shared/forge-procedures.json'), 'utf8'));
+    assert(fs.existsSync(path.join(data.forgeHome, 'shared/schemas/procedures.schema.json')));
+    assert(fs.existsSync(path.join(data.forgeHome, 'schemas/procedures.schema.json')));
+    assert.equal(report.manifest.procedures.length, manifest.phases.length);
+    for (const phase of manifest.phases) {
+      const expected = sourceLoader.loadProcedureContext({ cwd: source, forgeHome: source, phase: phase.id });
+      const actual = installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: phase.id });
+      assert.equal(actual.scope, 'installed');
+      assert.equal(actual.content, expected.content, phase.id);
+      assert.equal(actual.composition_sha256, expected.composition_sha256, phase.id);
+      assert.deepEqual(actual.modules, expected.modules, phase.id);
+      assert.equal(report.manifest.procedures.find(row => row.phase === phase.id).composition_sha256, actual.composition_sha256);
+    }
+    process.env.FORGE_HOME = data.forgeHome;
+    // Run the loader argv extracted from each generated operational entry, with
+    // known host variables expanded as data. No shell or consumer JS evaluation.
+    for (const home of [data.codexHome, data.claudeHome]) {
+      for (const name of ['auto', 'next']) {
+        const skill = fs.readFileSync(path.join(home, 'skills', `forge-${name}`, 'SKILL.md'), 'utf8');
+        for (const phase of ['boot', 'personal-selection', 'pause', 'restart', 'handoff', 'memory-selection', 'recovery']) {
+          const line = new RegExp('^\\s*node (.+ --phase ' + phase + ' --cwd .+?) \\|\\|', 'm').exec(skill);
+          assert(line, `${name}/${phase}`);
+          const args = [...line[1].matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g)].map(match => (match[1] ?? match[2] ?? match[3])
+            .replace(/\$FORGE_SCRIPTS_DIR/g, path.join(data.forgeHome, 'scripts'))
+            .replace(/\$\(pwd\)|\$WORKING_DIR/g, data.projectRoot));
+          assert(!args.some(arg => arg.includes('$')), 'unexpected caller expansion');
+          const run = spawnSync(process.execPath, args, { cwd: data.projectRoot, encoding: 'utf8', windowsHide: true });
+          assert.equal(run.status, 0, run.stderr);
+          assert(JSON.parse(run.stdout).content.includes('<!-- forge-procedure:core -->'));
+        }
+      }
+      const entry = fs.readFileSync(path.join(data.projectRoot, home === data.codexHome ? 'AGENTS.md' : 'CLAUDE.md'), 'utf8');
+      assert(entry.includes('forge-procedure-context.js') && entry.includes('shared/forge-procedure-core.md'));
+    }
+    const prompt = require(path.join(data.forgeHome, 'scripts/forge-prompt.js'));
+    for (const unitType of ['discuss-milestone', 'discuss-slice', 'research-milestone', 'research-slice', 'plan-milestone', 'plan-slice', 'plan-check', 'execute-task', 'execute-loose-task', 'complete-slice', 'complete-milestone']) {
+      const rendered = prompt.renderPrompt({ cwd: data.projectRoot, forgeHome: data.forgeHome,
+        unitType, milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', description: 'synthetic offline installed fixture',
+        memoryMaxTokens: 0, standardsMaxTokens: 0, ledgerMaxTokens: 0, autoCommit: false });
+      assert(rendered.prompt.includes('<!-- forge-procedure:core -->'), unitType);
+      assert(rendered.procedure_context.modules.length >= 2, unitType);
+      for (const module of rendered.procedure_context.modules) {
+        const bytes = fs.readFileSync(path.join(data.forgeHome, module.path), 'utf8');
+        const effective = sourceLoader.canonicalProcedureBytes(Buffer.from(bytes)).toString('utf8');
+        assert(rendered.prompt.includes(effective), `${unitType}: missing effective ${module.id} bytes`);
+      }
+    }
+    const prep = require(path.join(data.forgeHome, 'scripts/forge-task-preparation.js'));
+    for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
+      const built = prep.buildPreparationPrompt({ phase, cwd: data.projectRoot, taskId: 'T-fixture', inputs: { brief: 'synthetic' } });
+      const context = installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: `task-${phase}` });
+      assert(built.includes(context.content), `${phase}: missing effective preparation content`);
+    }
+    // The installed review CLI crosses its real composition boundary while a
+    // trusted fixture adapter captures the transport input without a provider.
+    const reviewInput = path.join(data.root, 'review-input.txt');
+    const reviewCapture = path.join(data.root, 'review-capture.json');
+    const reviewPreload = path.join(data.root, 'review-adapter.cjs');
+    fs.writeFileSync(reviewInput, 'Synthetic installed review objection');
+    fs.writeFileSync(reviewPreload, `
+      const fs = require('fs');
+      require(${JSON.stringify(path.join(data.forgeHome, 'scripts/forge-claude-sidecar.js'))}).invokeClaudeSidecar = async options => {
+        fs.writeFileSync(${JSON.stringify(reviewCapture)}, JSON.stringify({ prompt: options.prompt, readOnly: options.readOnly }));
+        return { candidate: { status: 'done', output: { verdicts: [] } }, telemetry: {} };
+      };
+    `);
+    const review = spawnSync(process.execPath, ['--require', reviewPreload, path.join(data.forgeHome, 'scripts/forge-xllm.js'),
+      '--mode', 'defend', '--engine', 'claude', '--host-runtime', 'codex', '--sidecar-declared', '--model', 'claude-opus-5-5',
+      '--effort', 'medium', '--cwd', data.projectRoot, '--input', reviewInput], { cwd: data.projectRoot, encoding: 'utf8',
+      windowsHide: true, timeout: 20000, env: { ...process.env, HOME: data.root, USERPROFILE: data.root } });
+    assert.equal(review.status, 0, review.stderr);
+    const captured = JSON.parse(fs.readFileSync(reviewCapture, 'utf8'));
+    const reviewContext = installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: 'review-advocate' });
+    assert(captured.prompt.includes(reviewContext.content), 'installed review omitted canonical content');
+    assert.equal(captured.readOnly, true);
+    // A project manifest selects that entire root. Missing or stale modules may
+    // never be borrowed from a complete installation.
+    for (const relative of ['shared/forge-procedures.json', 'shared/schemas/procedures.schema.json', ...manifest.modules.map(module => module.path)]) {
+      const destination = path.join(data.projectRoot, relative);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(data.forgeHome, relative), destination);
+    }
+    const local = installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: 'distribution' });
+    assert.equal(local.scope, 'project');
+    const moduleFile = path.join(data.projectRoot, 'shared/forge-procedure-distribution.md');
+    const bytes = fs.readFileSync(moduleFile);
+    fs.unlinkSync(moduleFile);
+    assert.throws(() => installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: 'distribution' }), /procedure-file-unreadable/);
+    fs.writeFileSync(moduleFile, Buffer.concat([bytes, Buffer.from('tampered')]));
+    assert.throws(() => installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: 'distribution' }), /procedure-integrity-mismatch/);
+    fs.writeFileSync(moduleFile, '\uFEFF' + bytes.toString().replace(/\n/g, '\r\n'));
+    assert.equal(installed.loadProcedureContext({ cwd: data.projectRoot, forgeHome: data.forgeHome, phase: 'distribution' }).composition_sha256, local.composition_sha256);
+    const protectedFile = path.join(data.codexHome, 'skills/operator/SKILL.md');
+    fs.mkdirSync(path.dirname(protectedFile), { recursive: true });
+    fs.writeFileSync(protectedFile, '# Operator\r\n');
+    const before = fs.readFileSync(path.join(data.codexHome, 'skills/forge-auto/SKILL.md'));
+    const repeated = installer.install({ ...data.options, runtime: 'both', update: true });
+    assert.deepEqual(fs.readFileSync(path.join(data.codexHome, 'skills/forge-auto/SKILL.md')), before);
+    assert.equal(fs.readFileSync(protectedFile, 'utf8'), '# Operator\r\n');
+    assert.deepEqual(repeated.manifest.procedures, report.manifest.procedures);
+  } finally {
+    if (originalForgeHome === undefined) delete process.env.FORGE_HOME; else process.env.FORGE_HOME = originalForgeHome;
+    data.cleanup();
+  }
+});
+
+test('invalid source phase closure stops installation before any destination write', () => {
+  const data = fixture({ configurationOnly: true });
+  try {
+    const source = path.resolve(__dirname, '..');
+    fs.copyFileSync(path.join(source, 'forge-source-manifest.json'), path.join(data.options.repo, 'forge-source-manifest.json'));
+    fs.copyFileSync(path.join(source, 'shared/forge-procedures.json'), path.join(data.options.repo, 'shared/forge-procedures.json'));
+    assert.throws(() => installer.install({ ...data.options, runtime: 'both' }), /procedure-file-unreadable/);
+    for (const destination of [data.forgeHome, data.codexHome, data.claudeHome, data.projectRoot]) assert(!fs.existsSync(destination));
+  } finally { data.cleanup(); }
+});
+
+test('current source cannot downgrade its inventory and partial project override stops before writes', () => {
+  const legacy = fixture({ configurationOnly: true });
+  const partial = fixture();
+  try {
+    fs.copyFileSync(path.join(__dirname, '../shared/forge-procedures.json'), path.join(legacy.options.repo, 'shared/forge-procedures.json'));
+    assert.throws(() => installer.install({ ...legacy.options, runtime: 'both' }), /procedure-inventory-missing/);
+    fs.mkdirSync(path.join(partial.projectRoot, 'shared'), { recursive: true });
+    fs.copyFileSync(path.join(__dirname, '../shared/forge-procedures.json'), path.join(partial.projectRoot, 'shared/forge-procedures.json'));
+    assert.throws(() => installer.install({ ...partial.options, runtime: 'both' }), /procedure-file-unreadable/);
+    for (const data of [legacy, partial]) {
+      for (const destination of [data.forgeHome, data.codexHome, data.claudeHome]) assert(!fs.existsSync(destination));
+    }
+  } finally { legacy.cleanup(); partial.cleanup(); }
+});
+
+test('effective project override validates every phase and hash before installer or renderer writes; BOM manifest agrees', () => {
+  const data = fixture();
+  try {
+    const source = path.resolve(__dirname, '..');
+    const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json')));
+    fs.mkdirSync(path.join(data.projectRoot, 'shared'), { recursive: true });
+    const target = path.join(data.projectRoot, 'shared/forge-procedures.json');
+    fs.writeFileSync(target, '\ufeff' + JSON.stringify(manifest));
+    for (const module of manifest.modules.filter(row => ['core', 'distribution'].includes(row.id))) {
+      fs.copyFileSync(path.join(source, module.path), path.join(data.projectRoot, module.path));
+    }
+    const checks = [() => installer.install({ ...data.options, runtime: 'both', dryRun: false }),
+      ...['codex', 'claude'].map(host => () => require('./forge-' + host + '-renderer').render(data.options))];
+    for (const check of checks) {
+      assert.throws(check, /procedure-file-unreadable/);
+      for (const destination of [data.forgeHome, data.codexHome, data.claudeHome]) assert(!fs.existsSync(destination));
+    }
+    for (const module of manifest.modules) fs.copyFileSync(path.join(source, module.path), path.join(data.projectRoot, module.path));
+    fs.appendFileSync(path.join(data.projectRoot, manifest.modules.find(row => row.id === 'personal').path), 'tampered');
+    for (const check of checks) assert.throws(check, /procedure-integrity-mismatch/);
+    for (const module of manifest.modules) fs.copyFileSync(path.join(source, module.path), path.join(data.projectRoot, module.path));
+    fs.writeFileSync(target, JSON.stringify({ ...manifest, phases: manifest.phases.filter(row => row.id === 'distribution') }));
+    for (const check of checks) assert.throws(check, /procedure-phase-unmapped/);
+    fs.writeFileSync(target, '\ufeff' + JSON.stringify(manifest));
+    const report = installer.install({ ...data.options, runtime: 'both', dryRun: true });
+    assert(report.ok);
+    assert.strictEqual(report.manifest.procedures.length, manifest.phases.length);
+    for (const destination of [data.forgeHome, data.codexHome, data.claudeHome]) assert(!fs.existsSync(destination));
+  } finally { data.cleanup(); }
+});
+
+test('BOM-prefixed source manifest installs through the canonical byte loader', () => {
+  const data = fixture({ configurationOnly: true });
+  try {
+    const source = path.resolve(__dirname, '..');
+    const inventoryPath = path.join(data.options.repo, 'forge-source-manifest.json');
+    const inventory = JSON.parse(fs.readFileSync(inventoryPath));
+    const full = JSON.parse(fs.readFileSync(path.join(source, 'forge-source-manifest.json')));
+    inventory.sources.push(full.sources.find(row => row.source_id === 'procedures'));
+    fs.writeFileSync(inventoryPath, JSON.stringify(inventory));
+    const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json')));
+    for (const file of [...manifest.modules.map(row => row.path), 'shared/schemas/procedures.schema.json']) {
+      fs.mkdirSync(path.dirname(path.join(data.options.repo, file)), { recursive: true });
+      fs.copyFileSync(path.join(source, file), path.join(data.options.repo, file));
+    }
+    fs.writeFileSync(path.join(data.options.repo, 'shared/forge-procedures.json'), '\ufeff' + JSON.stringify(manifest));
+    const report = installer.install({ ...data.options, runtime: 'both', dryRun: true });
+    assert(report.ok); assert.strictEqual(report.manifest.procedures.length, manifest.phases.length);
+    for (const destination of [data.forgeHome, data.codexHome, data.claudeHome, data.projectRoot]) assert(!fs.existsSync(destination));
+  } finally { data.cleanup(); }
+});
+
 process.stdout.write(`\n${passed} passed, 0 failed\n`);

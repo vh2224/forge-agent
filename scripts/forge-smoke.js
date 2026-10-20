@@ -2277,6 +2277,20 @@ function runXllm(args, mockDir, cwd, extraEnv) {
   const env = mockDir
     ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js') }
     : { ...process.env, PATH: '' };
+  // Mock agy has no effort transport; isolate global prefs while retaining local negative fixtures.
+  if (cwd && args.includes('agy') && args.includes('--engine')) {
+    env.FORGE_HOME = path.join(cwd, 'fixture-forge-home');
+    fs.mkdirSync(env.FORGE_HOME, { recursive: true });
+    fs.writeFileSync(path.join(env.FORGE_HOME, 'forge-agent-prefs.jsonc'), '{}\n');
+    // The isolated Forge home must carry the same mandatory closure as an install.
+    const sourceRoot = path.dirname(SCRIPTS);
+    const { manifest } = require('./forge-procedure-context').loadManifest({ cwd: sourceRoot, forgeHome: sourceRoot });
+    for (const relative of ['shared/forge-procedures.json', ...manifest.modules.map(module => module.path)]) {
+      const target = path.join(env.FORGE_HOME, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(path.join(sourceRoot, relative), target);
+    }
+  }
   if (extraEnv) Object.assign(env, extraEnv);
   const r = spawnSync(process.execPath, [xllmPath, ...args], {
     encoding: 'utf8',
@@ -2462,7 +2476,7 @@ function smokeXllm() {
     const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir],
       null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
     assert(r.status !== 0, 'I: agy empty stdout (non-TTY dropout) exits non-zero', `status=${r.status}`);
-    assert(/empty stdout/.test(r.stderr), 'I: agy empty stdout cause is on stderr', `stderr=${r.stderr}`);
+    assert(/"reason_code":"agy-output-empty"/.test(r.stderr) && /"reason":"output-empty"/.test(r.stderr) && /"provider_called":null/.test(r.stderr), 'I: agy empty stdout cause is on stderr', `stderr=${r.stderr}`);
     cleanup(dir);
     cleanup(mockDir);
   }
@@ -2515,6 +2529,18 @@ function smokeXllm() {
       'L: agy normalized verdict has verdict=maintained and reason', `stdout=${r.stdout}`);
     cleanup(dir);
     cleanup(mockDir);
+  }
+
+  // Explicit unsupported effort still refuses before the mock provider can spawn.
+  {
+    const dir = mkTmp('xllm-agy-effort');
+    fs.writeFileSync(path.join(dir, '.gsd', 'forge-prefs.jsonc'),
+      JSON.stringify({ review: { challenge_effort: 'high' } }));
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir], null, dir);
+    assert(r.status !== 0 && /effort-transport-unsupported/.test(r.stderr)
+      && /"provider_called":false/.test(r.stderr),
+      'agy explicit unsupported effort refuses pre-spawn', `status=${r.status} stderr=${r.stderr}`);
+    cleanup(dir);
   }
 
   // Scenario M — unknown --engine value is rejected up front.
@@ -3463,34 +3489,26 @@ async function smokeSidecarContextParity() {
     assert(buildContextBundle({ cwd: empty }) === '', '69f: bundle assembler tolerates empty sources');
     cleanup(empty);
 
-    // 69g: memory limiting must actually cap entries. If firstMemoryEntries() matches the
-    // wrong delimiter (e.g. a markdown `###` heading that renderMemory never emits), the
-    // "starts.length <= limit" guard always passes and the whole fragments file leaks
-    // through uncapped — this fixture reproduces that regression class directly by writing
-    // real memory fragments (the only supported input to renderMemory) and re-reading
-    // through the real assembler.
+    // 69g: select relevance beyond the old first-ten position, then enforce caps.
     const memRoot = mkTmp('sidecar-context-memlimit');
     const memoryMod = require('./forge-memory.js');
-    const entryCount = 15;
     const facts = [];
-    for (let i = 1; i <= entryCount; i++) {
-      const id = `MEM${String(i).padStart(3, '0')}`;
-      facts.push({
-        mem_id: id,
-        category: 'pattern',
-        text: `Fixture entry number ${i} for context-bundle capping.`,
-        confidence_base: 0.9 - i * 0.01, // strictly descending -> deterministic rank order
-        created_at: '2026-07-01T00:00:00Z',
-        source_unit: 'execute-task/T01',
-      });
+    for (let i = 1; i <= 15; i++) {
+      facts.push({ mem_id: `MEM${String(i).padStart(3, '0')}`, category: 'pattern',
+        text: i === 11 ? 'quasar nebula relevant memory' : 'unrelated capping fixture',
+        confidence_base: 0.9 - i * 0.01, created_at: '2026-07-01T00:00:00Z', source_unit: 'execute-task/T01' });
     }
     memoryMod.writeFragment(memRoot, { unit_id: 'T01', facts, stats: [] });
-    const memBundle = buildContextBundle({ cwd: memRoot });
-    const cappedDelimiters = (memBundle.match(/^<!-- gsd-auto-memory /gm) || []).length;
-    assert(cappedDelimiters === 10,
-      `69g: memory section is capped at 10 entries (got ${cappedDelimiters})`, memBundle.slice(0, 400));
-    assert(memBundle.includes('MEM001') && !memBundle.includes('MEM011'),
-      '69g: capped bundle keeps the highest-ranked entries and drops entries past the limit', memBundle.slice(0, 400));
+    const selectionOptions = { cwd: memRoot, unitType: 'execute-task', query: 'quasar nebula', limit: 1, maxTokens: 180 };
+    const memBundle = buildContextBundle(selectionOptions);
+    assert(memBundle.includes('MEM011') && !memBundle.includes('MEM001'),
+      '69g: relevant memory after the tenth position reaches the bundle', memBundle);
+    assert((memBundle.match(/^- \[/gm) || []).length === 1 && memBundle.length <= 180 * 4,
+      '69g: selected entries respect cap and budget', memBundle);
+    assert(!buildContextBundle({ ...selectionOptions, query: '' }).includes('Project Memory')
+      && !buildContextBundle({ ...selectionOptions, query: 'no-match-term' }).includes('Project Memory')
+      && !buildContextBundle({ ...selectionOptions, maxTokens: 0 }).includes('Project Memory'),
+      '69g: no query, no match and explicit zero omit optional memory');
     cleanup(memRoot);
 
     const sourcePaths = ['shared/forge-dispatch.md', 'skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'];
@@ -5064,6 +5082,10 @@ function smokeRouting() {
     '      standard: [claude-sonnet-5]\n' +
     '      fallback: gpt-5-codex\n'
   );
+  const kPrefsPath = path.join(dirK, '.gsd', 'forge-prefs.jsonc');
+  const kPrefs = JSON.parse(fs.readFileSync(kPrefsPath, 'utf8'));
+  kPrefs.tier_models = { standard: 'claude-sonnet-5' };
+  fs.writeFileSync(kPrefsPath, JSON.stringify(kPrefs));
   const rK = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirK });
   assert(/fallback-invalid-substituted/.test(rK.reason), '(k) fallback gpt → reason fallback-invalid-substituted', rK.reason);
   assert(rK.fallback.id !== 'gpt-5-codex' && modelFamily(rK.fallback.id) === 'claude',
@@ -10087,12 +10109,20 @@ function smokeWindowsSandboxAndWorktreeDeps() {
   assert(['15850', '17179', '14367', '5824', 'assertNoProtectedSidecarChanges'].every((s) => gateComment.includes(s)),
     '70d: gate comment documents Windows issues and surviving defense');
 
-  const template = readRepoText(path.join(SCRIPTS, '..', 'shared', 'templates', 'dispatch', 'execute-task.md'));
+  const { renderPrompt } = require('./forge-prompt');
+  const { loadProcedureContext } = require('./forge-procedure-context');
+  const sourceRoot = path.resolve(SCRIPTS, '..');
+  const procedure = loadProcedureContext({ cwd: sourceRoot, phase: 'execute-task' });
+  const template = renderPrompt({ cwd: sourceRoot, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' }).prompt;
+  const loose = renderPrompt({ cwd: sourceRoot, unitType: 'execute-loose-task', taskId: 'T01', description: 'dependency fixture' }).prompt;
   const sentinel = 'dependencies may not be installed';
   const prompt = buildExecutePrompt('# T70\n');
   assert(template.split(sentinel).length - 1 === 1 && prompt.includes(sentinel)
     && prompt.includes('unknown') && prompt.indexOf(sentinel) < prompt.indexOf('Must-have scope classification:'),
-  '70e: dependency warning reaches template and sidecar prompt exactly once');
+  '70e: dependency warning reaches composed native and legacy sidecar prompts exactly once');
+  const composed = buildExecutePrompt('# T70\n', { procedure });
+  for (const native of [template, loose]) assert(native.includes('only when the\nplan explicitly authorizes it') && native.includes('unverified'), '70e: native retains authorized installation and environmental classification');
+  assert(composed.split(sentinel).length - 1 === 1 && composed.includes('do not install dependencies there') && composed.includes('unknown'), '70e: composed sidecar warning once with prohibition');
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-t70-'));
   const wt = path.join(root, 'worktree');
@@ -15556,7 +15586,7 @@ function smokeRoutingDomainsRendered() {
   const dir = mkTmp('routing-domains-rendered');
   const home = path.join(dir, 'home');
   const templateDir = path.join(dir, 'templates');
-  const options = unitType => ({ cwd: dir, unitType, milestoneId: 'M001', sliceId: 'S01', description: 'x', templateDir });
+  const options = unitType => ({ cwd: dir, unitType, milestoneId: 'M001', sliceId: 'S01', description: 'x', templateDir, forgeHome: repoRoot });
   const inspectRendered = prompt => {
     const reasons = [];
     // Horizontal whitespace ONLY ([^\S\r\n]), never \s — \s matches \n, so on a bare
@@ -15742,7 +15772,7 @@ function smokeLedgerSnapshotRendered() {
     // is under test, not a fixture-supplied override.
     const slice = renderPrompt({
       cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01',
-      templateDir, ledgerMaxTokens: maxTokens, memories: [],
+      templateDir, forgeHome: repoRoot, ledgerMaxTokens: maxTokens, memories: [],
     });
 
     assert(slice.prompt.includes('M-20260404000000-newest-dd'),
@@ -15768,7 +15798,7 @@ function smokeLedgerSnapshotRendered() {
 
     const task = renderPrompt({
       cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
-      templateDir, ledgerMaxTokens: maxTokens, memories: [],
+      templateDir, forgeHome: repoRoot, ledgerMaxTokens: maxTokens, memories: [],
     });
     for (const e of entries) {
       assert(!task.prompt.includes(e.id), `(d D1) rendered execute-task prompt does not contain fixture id ${e.id}`);
@@ -15831,7 +15861,7 @@ function smokeMemoryIndexCommandRendered() {
 
     // (b) rendered prompt — placeholders resolved, {WORKING_DIR} value quoted.
     const slice = renderPrompt({
-      cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01', templateDir, memories: [],
+      cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01', templateDir, forgeHome: repoRoot, memories: [],
     });
     const renderedLine = slice.prompt.split('\n').find(l => l.includes('forge-memory-index.js'));
     assert(!!renderedLine, '(b) rendered plan-slice prompt contains a forge-memory-index.js command line');
@@ -15849,7 +15879,7 @@ function smokeMemoryIndexCommandRendered() {
     assert(slice.prompt.includes('forge-memory-index.js'),
       '(c control) positive control — the predicate DOES see the command when it is actually injected (plan-slice)');
     const task = renderPrompt({
-      cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', templateDir, memories: [],
+      cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', templateDir, forgeHome: repoRoot, memories: [],
     });
     assert(!task.prompt.includes('forge-memory-index.js'),
       '(c) rendered execute-task prompt does not carry the memory-index command');
@@ -16666,16 +16696,16 @@ function smokeVerifyReverifyChildSideE2E() {
   // dir so callers can build CLI paths (`path.join(copyScriptsDir, ...)`)
   // that resolve `require()`s inside the copy, never the real tree. Some
   // scripts reach up to `../shared/**` (e.g. forge-xllm.js's
-  // `../shared/schemas/*.json`) — a symlink from the copy root back to the
-  // REAL `shared/` dir preserves that relative resolution read-only,
-  // without copying (or ever writing to) it.
+  // `../shared/schemas/*.json`) — physically copy `shared/` too so mandatory
+  // procedure validation resolves its corpus inside the copied runtime,
+  // preserving root containment without ever writing to the real tree.
   function withRewriteModuleDisabled(fn) {
     const copyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke110-repo-copy-'));
     const copyScriptsDir = path.join(copyRoot, 'scripts');
     try {
       fs.cpSync(SCRIPTS, copyScriptsDir, { recursive: true });
       fs.rmSync(path.join(copyScriptsDir, 'forge-command-rewrite.js'), { force: true });
-      fs.symlinkSync(path.join(SCRIPTS, '..', 'shared'), path.join(copyRoot, 'shared'), 'dir');
+      fs.cpSync(path.join(SCRIPTS, '..', 'shared'), path.join(copyRoot, 'shared'), { recursive: true });
       return fn(copyScriptsDir);
     } finally {
       try { fs.rmSync(copyRoot, { recursive: true, force: true }); } catch { /* best-effort */ }

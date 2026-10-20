@@ -260,16 +260,20 @@ async function main() {
     fs.writeFileSync(path.join(templates, 'execute-task.md'), '{CS_LINT}\n{CS_STRUCTURE}\n{CS_RULES}\n{description}');
     const sentinels = ['RESEARCH-SENTINEL', 'DECISIONS-SENTINEL', 'REQUIREMENTS-SENTINEL',
       'QUESTION-SENTINEL', 'SECURITY-CHECKLIST-SENTINEL'];
-    const rendered = promptApi.renderPrompt({ cwd: request.contextRoot, unitType: 'execute-task',
+    const rendered = promptApi.renderPrompt({ cwd: request.contextRoot, forgeHome: path.resolve(__dirname, '..'), unitType: 'execute-task',
       milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', templateDir: templates,
       description: sentinels.join('\n'), autoCommit: false, standardsMaxTokens: 128,
       standards: { CS_LINT: 'OPTIONAL-LINT '.repeat(500), CS_STRUCTURE: 'OPTIONAL-STRUCTURE '.repeat(500),
         CS_RULES: 'OPTIONAL-RULES '.repeat(500) } });
     assert(rendered.prompt.includes('.gsd/CODING-STANDARDS.md'));
-    assert(rendered.prompt.length < 1600);
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.contextRoot,
+      forgeHome: path.resolve(__dirname, '..'), phase: 'execute-task' });
+    assert(rendered.prompt.replace(procedure.content, '').length < 1600, 'only optional standards are bounded');
     let actual;
     const result = await native.invokeNative(nativeOptions(rendered.prompt), args => { actual = args.message; return 'ok'; });
     for (const sentinel of sentinels) assert(actual.includes(sentinel), sentinel);
+    assert(actual.includes(procedure.content), 'mandatory procedure remains byte-complete after native framing');
+    for (const id of ['core', 'verification', 'execution']) assert.equal(actual.split(`<!-- forge-procedure:${id} -->`).length - 1, 1);
     checkMeasurement(result.final_evidence.context, actual);
     const sanitized = api.sanitizeFinal({ ...result.final_evidence, prompt: secret, argv: [secret], stderr: secret,
       unit_type: 'execute-task', paths: { ...result.final_evidence.paths, unitType: secret, prompt: secret },

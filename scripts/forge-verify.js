@@ -507,6 +507,14 @@ function formatFailureContext(result) {
  * @returns {{ passed: boolean, checks: object[], discoverySource: string, skipped?: string, timestamp: number }}
  */
 function runVerificationGate(options) {
+  const { content, ...procedure_context } = require('./forge-procedure-context').loadProcedureContext({
+    cwd: options.cwd || process.cwd(), phase: 'verification',
+    forgeHome: process.env.FORGE_HOME || resolve(__dirname, '..'),
+  });
+  return { ...runVerificationCommands(options), procedure_context };
+}
+
+function runVerificationCommands(options) {
   const timestamp = Date.now();
   const { commands, source } = discoverCommands({
     preferenceCommands: options.preferenceCommands,
@@ -964,11 +972,15 @@ if (require.main === module) {
     // gate so an "off" run executes nothing at all, and a prefs timeout applies
     // when the CLI did not pass one.
     const policy = resolveVerifyPolicy({ cliMode, cliTimeoutMs: timeoutFromCli, gsdDir, cwd });
+    const { content: procedureContent, ...procedure_context } = require('./forge-procedure-context').loadProcedureContext({
+      cwd, phase: 'verification', forgeHome: process.env.FORGE_HOME || resolve(__dirname, '..'),
+    });
     const result = policy.mode === "off"
       ? {
           // Anti-silence: this is an operator choice, not a verified pass —
           // the executor surfaces it in the SUMMARY and the result block.
           passed: true,
+          procedure_context,
           checks: [],
           discoverySource: "policy-off",
           skipped: "disabled-by-pref",

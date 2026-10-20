@@ -10,6 +10,18 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+function stageProcedures(destination) {
+  const source = path.resolve(__dirname, '..');
+  const { loadManifest, loadAllProcedureContexts } = require('./forge-procedure-context');
+  const options = { cwd: source, forgeHome: source };
+  const { manifest } = loadManifest(options);
+  loadAllProcedureContexts(options);
+  for (const relative of ['shared/forge-procedures.json', ...manifest.modules.filter(item => item.status === 'ready').map(item => item.path)]) {
+    const target = path.join(destination, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(source, relative), target);
+  }
+}
 const { resolveReviewEffort } = require('./forge-review-effort.js');
 
 let passed = 0;
@@ -171,6 +183,8 @@ async function testCallers() {
   const original = client.startAppServerTurn;
   const previousHome = process.env.FORGE_HOME;
   process.env.FORGE_HOME = path.join(TMP, 'isolated-home');
+  stageProcedures(process.env.FORGE_HOME);
+  fs.writeFileSync(path.join(process.env.FORGE_HOME, 'forge-agent-prefs.jsonc'), '{}\n');
   let payload;
   const captures = [];
   client.startAppServerTurn = async options => {
@@ -226,13 +240,14 @@ async function testCallers() {
         await assert.rejects(() => xllm[method]({ ...options,
           announce: (stage, fields) => announcements.push({ stage, ...fields }) }), error => {
           assert.strictEqual(error.code, code);
+          assert.strictEqual(error.layer, layer, 'internal error retains the diagnostic layer');
           assert.strictEqual(error.provider_called, false);
           return true;
         });
         assert.strictEqual(announcements.length, 1);
         assert.strictEqual(announcements[0].stage, 'recusado');
         assert.strictEqual(announcements[0].reason_code, code);
-        assert.strictEqual(announcements[0].layer, layer);
+        assert(!Object.hasOwn(announcements[0], 'layer'), 'public review failure omits unsanitized internal layer');
         assert.strictEqual(announcements[0].provider_called, false);
         assert.strictEqual(announcements[0].model_sent, '-');
         assert.strictEqual(announcements[0].model_route, options.model);

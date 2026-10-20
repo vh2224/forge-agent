@@ -7,6 +7,14 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+function stageProcedures(destination) {
+  const source = path.resolve(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
+  fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
+  fs.copyFileSync(path.join(source, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
+  for (const module of manifest.modules.filter(item => item.status === 'ready')) fs.copyFileSync(path.join(source, module.path), path.join(destination, module.path));
+}
+
 const crypto = require('crypto');
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-task-preparation-')));
 const oldHome = process.env.HOME;
@@ -38,6 +46,7 @@ function fixture(options = {}) {
   const contextRoot = path.join(caseRoot, 'owner');
   const results = path.join(caseRoot, 'results');
   fs.mkdirSync(cwd, { recursive: true });
+  stageProcedures(cwd);
   const fixtureCommand = require('./forge-code-roots.test').command;
   fixtureCommand('git', ['init', '-q'], cwd);
   fixtureCommand('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'], cwd);
@@ -89,6 +98,28 @@ function codexCapabilities() {
 }
 
 async function main() {
+  await test('mandatory preparation procedures fail closed before either transport', async () => {
+    for (const failure of ['pending', 'missing', 'hash']) {
+      const request = fixture({ model: 'gpt-5.6-sol' });
+      request.activeCapabilities = codexCapabilities();
+      const manifestPath = path.join(request.cwd, 'shared/forge-procedures.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath));
+      const module = manifest.modules.find(item => item.id === 'task-preparation');
+      if (failure === 'pending') { module.status = 'pending'; fs.writeFileSync(manifestPath, JSON.stringify(manifest)); }
+      if (failure === 'missing') fs.unlinkSync(path.join(request.cwd, module.path));
+      if (failure === 'hash') fs.appendFileSync(path.join(request.cwd, module.path), '\nchanged');
+      let calls = 0;
+      const result = await prep.prepareStandaloneTask(request, {
+        invokeNative: async () => { calls++; throw Error('must not invoke'); },
+        invokeSidecar: async () => { calls++; throw Error('must not invoke'); },
+      });
+      assert.equal(result.ok, false, failure);
+      assert.equal(result.provider_called, false, failure);
+      assert.match(result.reason_code, /^procedure-/);
+      assert.equal(calls, 0);
+      assert(!fs.existsSync(artifactPath(request)));
+    }
+  });
   await test('caller repair compares equivalent requests and measures final native arguments before reserving', async () => {
     const request = fixture({ model: 'gpt-5.6-sol' });
     request.activeCapabilities = codexCapabilities();
@@ -170,6 +201,9 @@ async function main() {
         assert.equal(delivery.route.worker_mode, 'sidecar');
         assert.equal(delivery.route.unit_type, prep.PHASE_CONTRACTS[phase].unitType);
         assert(delivery.prompt.includes(phasePrompt));
+        const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'task-' + phase });
+        assert(delivery.prompt.includes(procedure.content));
+        for (const module of procedure.modules) assert.equal(delivery.prompt.split('<!-- forge-procedure:' + module.id + ' -->').length - 1, 1);
         return envelope(request);
       } });
       assert.equal(result.ok, true, JSON.stringify(result));
@@ -182,6 +216,27 @@ async function main() {
       assert.equal(receipt.route_identity.effort, 'medium');
       assert.equal(receipt.provider_called, true);
     }
+  });
+
+  await test('real preparation caller preserves all four task phases and verified procedure provenance', async () => {
+    const original = xllm.invokeCodexAppServer;
+    try {
+      for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
+        const request = fixture({ phase, hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+        const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: `task-${phase}` });
+        let calls = 0;
+        xllm.invokeCodexAppServer = async options => {
+          calls++;
+          for (const module of procedure.modules) assert.equal(options.prompt.split(`<!-- forge-procedure:${module.id} -->`).length - 1, 1);
+          assert(options.prompt.includes(procedure.content));
+          return { finalText: JSON.stringify({ status: 'partial', summary: 'Fixture reached provider', questions: [], artifacts: [] }) };
+        };
+        const result = await prep.prepareStandaloneTask(request);
+        assert.equal(result.status, 'partial', `${phase}: ${JSON.stringify(result)}`);
+        assert.equal(result.provider_called, true);
+        assert.equal(calls, 1);
+      }
+    } finally { xllm.invokeCodexAppServer = original; }
   });
 
   await test('production Codex sidecar receives the complete prompt and persists continuation dispatch identity', async () => {
@@ -248,6 +303,8 @@ async function main() {
     assert.equal(started.action, 'invoke-native', JSON.stringify(started));
     assert.equal(started.invocation.args.model, 'gpt-5.6-sol');
     assert.equal(started.invocation.args.reasoning_effort, 'medium');
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'task-brainstorm' });
+    assert(started.invocation.args.message.includes(procedure.content));
     const accepted = await prep.acceptStandaloneTaskPreparation(request, {
       route: started.route, rawResult: framed(envelope(request)),
       invocationTelemetry: started.invocation.telemetry, providerCalled: true,

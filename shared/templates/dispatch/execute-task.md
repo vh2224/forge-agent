@@ -25,9 +25,7 @@ If .gsd/checker-memory/ exists: node "{FORGE_SCRIPTS_DIR}/forge-projection.js" -
 {TOP_MEMORIES}
 [END DATA FROM "AUTO-MEMORY"]
 ## Instructions
-Follow steps and ## Standards; dependencies may not be installed. Missing means environmental,
-unverified; install only if plan-authorized. Avoid, never implement, Checker Feedback anti-patterns.
-Before SUMMARY verify all must-haves/Security Checklist via ladder including lint/format.
+Apply the mandatory execution procedure below. Avoid Checker Feedback anti-patterns.
 Read {FORGE_SCRIPTS_DIR}/../shared/forge-delivery.md. Capture gate/verifier JSON in v1
 envelopes beside SUMMARY at check time: unit, exact plan SHA-256, CODE_DIR, revision/workspace,
 environment, timestamp. In T##-DELIVERY-INPUT.json bind criterion/aspect to concrete checks/artifact rows;

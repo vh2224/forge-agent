@@ -375,6 +375,33 @@ test('resource telemetry uses the caller sink without unsigned owner writes', ()
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
+test('verification validates mandatory modules before commands and no-stack skips', () => {
+  const strict = require('assert'), api = require('./forge-verify');
+  const cwd = tmpRepo(); fs.mkdirSync(path.join(cwd, 'shared'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../shared/forge-procedures.json'), 'utf8'));
+  const module = manifest.modules.find(row => row.id === 'verification');
+  for (const row of manifest.modules.filter(row => row.status === 'ready')) fs.copyFileSync(path.join(__dirname, '..', row.path), path.join(cwd, row.path));
+  const file = path.join(cwd, 'shared/forge-procedures.json');
+  const options = { cwd, gsdDir: path.join(cwd, '.gsd'), preferenceCommands: ['node -e "process.exit(0)"'], resourceEventSink() {} };
+  try {
+    fs.writeFileSync(file, JSON.stringify(manifest));
+    const result = api.runVerificationGate(options);
+    strict.strictEqual(result.passed, true);
+    strict.deepStrictEqual(result.procedure_context.modules.map(row => row.id), ['core', 'verification']);
+    strict.strictEqual(result.procedure_context.modules[1].sha256, module.sha256);
+    strict.strictEqual(api.runVerificationGate({ ...options, preferenceCommands: [] }).skipped, 'no-stack');
+    for (const attack of ['pending', 'missing', 'hash']) {
+      const target = path.join(cwd, module.path), bytes = fs.readFileSync(target);
+      if (attack === 'pending') { const changed = structuredClone(manifest); changed.modules.find(row => row.id === 'verification').status = 'pending'; fs.writeFileSync(file, JSON.stringify(changed)); }
+      else if (attack === 'missing') fs.unlinkSync(target);
+      else fs.appendFileSync(target, '\ntampered');
+      strict.throws(() => api.runVerificationGate(options), /procedure/i);
+      strict.throws(() => api.runVerificationGate({ ...options, preferenceCommands: [] }), /procedure/i);
+      fs.writeFileSync(target, bytes); fs.writeFileSync(file, JSON.stringify(manifest));
+    }
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) {
   console.log('\nFailures:');

@@ -8,6 +8,18 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+function stageProcedures(destination) {
+  const source = path.resolve(__dirname, '..');
+  const { loadManifest, loadAllProcedureContexts } = require('./forge-procedure-context');
+  const options = { cwd: source, forgeHome: source };
+  const { manifest } = loadManifest(options);
+  loadAllProcedureContexts(options);
+  for (const relative of ['shared/forge-procedures.json', ...manifest.modules.filter(item => item.status === 'ready').map(item => item.path)]) {
+    const target = path.join(destination, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(source, relative), target);
+  }
+}
 const { spawnSync } = require('child_process');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-bidirectional-'));
 // A test route must depend only on its fixture, never on an operator's live
@@ -15,6 +27,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-bidirectional-'));
 const savedForgeHome = process.env.FORGE_HOME;
 process.env.FORGE_HOME = path.join(root, 'forge-home');
 fs.mkdirSync(process.env.FORGE_HOME);
+stageProcedures(process.env.FORGE_HOME);
 fs.writeFileSync(path.join(process.env.FORGE_HOME, 'forge-agent-prefs.jsonc'), '{}\n');
 const accounts = require('./forge-accounts');
 const originalLookup = accounts.resolveLaunch;
@@ -259,6 +272,7 @@ async function reviewFixMatrix() {
   for (const key of ['FORGE_XLLM_CLAUDE_BIN', 'FORGE_XLLM_CODEX_BIN', 'HOME', 'USERPROFILE', 'FORGE_HOME', 'CLAUDE_CONFIG_DIR']) saved[key] = process.env[key];
   Object.assign(process.env, { FORGE_XLLM_CLAUDE_BIN: fakeClaude, FORGE_XLLM_CODEX_BIN: fakeCodex, HOME: home,
     USERPROFILE: home, FORGE_HOME: path.join(home, '.forge-agent'), CLAUDE_CONFIG_DIR: path.join(home, '.claude') });
+  stageProcedures(process.env.FORGE_HOME);
   try {
     // Guard: only the fake binaries can be resolved by either transport.
     assert.deepStrictEqual(xllm.resolveCodexCommand(), { cmd: process.execPath, prefixArgs: [fakeCodex] });

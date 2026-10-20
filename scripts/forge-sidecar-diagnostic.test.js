@@ -16,6 +16,9 @@ const claude = require('./forge-claude-sidecar');
 const unit = require('./forge-unit-sidecar');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
+const { loadProcedureContext } = require('./forge-procedure-context');
+const sourceRoot = path.resolve(__dirname, '..');
+const procedure = loadProcedureContext({ cwd: sourceRoot, phase: 'research-milestone' });
 const oldBin = process.env.FORGE_XLLM_CLAUDE_BIN;
 const provider = path.join(root, 'provider.js');
 fs.writeFileSync(provider, `
@@ -66,6 +69,11 @@ let sequence = 0;
 function request(output) {
   const cwd = path.join(root, `workspace-${++sequence}`);
   fs.mkdirSync(path.join(cwd, '.gsd/milestones/M001'), { recursive: true });
+  // Stage the actual mandatory closure in the project fixture. Isolated HOME and
+  // an absent personal installation must not prevent reaching the adapter seam.
+  fs.mkdirSync(path.join(cwd, 'shared'));
+  fs.copyFileSync(path.join(sourceRoot, 'shared/forge-procedures.json'), path.join(cwd, 'shared/forge-procedures.json'));
+  for (const module of procedure.modules) fs.copyFileSync(path.join(sourceRoot, module.path), path.join(cwd, module.path));
   fs.writeFileSync(path.join(cwd, '.gsd/PROJECT.md'), '# Fixture project');
   fs.writeFileSync(path.join(cwd, '.gsd/milestones/M001/M001-CONTEXT.md'), '# Fixture context');
   fs.writeFileSync(path.join(cwd, '.gsd/forge-prefs.jsonc'), JSON.stringify({
@@ -134,6 +142,20 @@ test('safe diagnostic is a closed vocabulary with numeric metadata only', () => 
     duration_ms: -1, tail: 'private-sentinel', marker_count: Infinity, model_observed: 'claude-haiku-4-5' }),
   { version: 1, stage: 'adapter', reason: 'adapter-failed', stdout_bytes: 3 });
 });
+test('review failures preserve closed resolver/output causes without arbitrary messages', () => {
+  const { reviewFailureDiagnostic } = require('./forge-xllm');
+  for (const code of ['effort-transport-unsupported', 'effort-unsupported-by-model', 'review-effort-invalid']) {
+    const safe = reviewFailureDiagnostic({ code, provider_called: false, message: 'private-sentinel' });
+    assert.equal(safe.reason_code, code); assert.equal(safe.provider_called, false);
+    assert(!JSON.stringify(safe).includes('private-sentinel'));
+  }
+  const empty = reviewFailureDiagnostic({ code: 'agy-output-empty', diagnostic: diagnostic('output-empty', { stdout_bytes: 0 }) });
+  assert.equal(empty.reason_code, 'agy-output-empty'); assert.equal(empty.diagnostic.reason, 'output-empty');
+  assert.equal(empty.provider_called, null);
+  const unknown = reviewFailureDiagnostic({ code: 'private-sentinel', message: 'private-sentinel', diagnostic: { reason: 'private-sentinel', tail: 'private-sentinel' } });
+  assert.equal(unknown.reason_code, 'adapter-failed'); assert.equal(unknown.provider_called, null);
+  assert(!JSON.stringify(unknown).includes('private-sentinel'));
+});
 test('identity stage carries model_count and, only on substitution, the validated observed id', () => {
   for (const reason of ['model-substituted', 'model-unverified', 'model-required']) {
     assert.equal(diagnostic(reason).stage, 'identity');
@@ -155,6 +177,7 @@ test('real rendered research prompt, simulated provider, publication and replay 
   const result = await unit.runUnitSidecar(r);
   assert.equal(result.status, 'done');
   const prompt = fs.readFileSync(path.join(r.cwd, 'observed-prompt.txt'), 'utf8');
+  assert(prompt.includes(procedure.content), 'real research prompt retains the staged mandatory closure');
   for (const text of ['Research codebase', 'Sidecar delivery contract', requiredPath,
     '921600', '524288', 'compact or multiline', 'auto_commit', `effort: ${r.route.effort}`]) assert(prompt.includes(text), text);
   for (const artifact of p.artifacts) assert.equal(fs.readFileSync(path.join(r.cwd, artifact.path), 'utf8'), artifact.content);

@@ -21,14 +21,5 @@ Read if exists: {WORKING_DIR}/.gsd/CODING-STANDARDS.md
 {TOP_MEMORIES}
 [END DATA FROM "AUTO-MEMORY"]
 
-## Instructions
-Explore the codebase. Produce M###-RESEARCH.md with:
-- Summary
-- Don't Hand-Roll table (what libraries/patterns exist already)
-- Common Pitfalls found
-- Relevant Code sections
-- Asset Map — Reusable Code (functions, hooks, services to reuse)
-- Coding Conventions Detected (naming, structure, imports, error patterns)
-Update .gsd/CODING-STANDARDS.md with asset/convention findings.
-Read-only sidecar: return both artifacts for parent validation/publication.
-Return ---GSD-WORKER-RESULT---.
+## Phase Output
+Produce M###-RESEARCH.md and updated .gsd/CODING-STANDARDS.md.

@@ -15,6 +15,7 @@ const { renderPrompt } = require('./forge-prompt');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
 const memory = require('./forge-memory');
 const forgeIds = require('./forge-ids');
+const { MAX_FILE_BYTES: MAX_DELIVERY_BYTES } = require('./forge-delivery');
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
 const memorySchema = xllm.loadSchemaFile('memory-extraction.schema.json');
@@ -325,7 +326,8 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
     if (!allowed.includes(artifact.path)) return bad('artifact-path-invalid');
     if (rules[artifact.path] && !inspectDeliveryContent(artifact.content, rules[artifact.path])) return bad('delivery-artifact-invalid');
     if (seen.has(artifact.path)) return bad('artifact-duplicate');
-    if (Buffer.byteLength(artifact.content) > MAX_ARTIFACT_BYTES) return bad('artifact-limit');
+    const contentLimit = rules[artifact.path]?.kind === 'delivery' ? MAX_DELIVERY_BYTES : MAX_ARTIFACT_BYTES;
+    if (Buffer.byteLength(artifact.content) > contentLimit) return bad('artifact-limit');
     seen.add(artifact.path);
   }
   if (value.status === 'done' && value.questions.length) return bad('questions-on-done');
@@ -713,7 +715,9 @@ function memoryPrompt(request, sourceUnit) {
     result_block: request.sourceResult || '', key_decisions: request.keyDecisions || [],
     existing_memory: request.existingMemory || { facts: [], stats: [] },
   };
-  return 'Read-only memory extraction. Return exactly one JSON object matching the supplied schema. '
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd || process.cwd(),
+    phase: 'memory-extract', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+  return procedure.content + '\n\nRead-only memory extraction. Return exactly one JSON object matching the supplied schema. '
     + 'Do not write files, run commands, choose paths, or return owner identity/publication metadata.\n'
     + `CONTRACT:\n${MEMORY_QUALITY_CONTRACT}\nINPUT:\n${JSON.stringify(input)}\nSCHEMA:\n${JSON.stringify(memorySchema)}`;
 }
@@ -1395,6 +1399,33 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const fix = transport.mode === 'fix' ? prepareReviewFix(r, loc, { cwd, root, resultFile, route, dispatchId }) : null;
   const executionApi = loc.execution ? require('./forge-task-execution') : null;
   const execution = executionApi ? executionApi.prepare(r, root, cwd) : null;
+  let executeProcedure;
+  if (transport.mode === 'execute') {
+    executeProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd,
+      phase: r.scope === 'standalone-task' ? 'execute-loose-task' : 'execute-task',
+      forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    if (r.prompt || r.promptFile) require('./forge-prompt').composeProcedurePrompt(r.prompt
+      || fs.readFileSync(r.promptFile, 'utf8'), executeProcedure, r.procedure_context);
+    if (r.contextFile) require('./forge-prompt').separateProcedurePrompt(fs.readFileSync(r.contextFile, 'utf8'),
+      executeProcedure, r.procedure_context);
+  }
+  // Compose at the delivery boundary, using the physical code checkout.
+  // Explicit/file prompts carry no exemption from fresh corpus validation.
+  let deliveryPrompt;
+  if (['artifacts', 'plan'].includes(transport.mode)) {
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd, phase: r.scope === 'standalone-task' ? `task-${r.phase}` : r.unitType,
+      forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    if (transport.mode === 'plan' && !r.promptFile) fail('prompt-file-required');
+    const rendered = !(typeof r.prompt === 'string' && r.prompt.trim()) && !r.promptFile ? renderPrompt({
+      unitType: r.unitType, cwd: root, codeDir: cwd, milestoneId: r.milestoneId, sliceId: r.sliceId,
+      description: r.description, unitEffort: route.effort, autoCommit: false,
+    }) : null;
+    const base = transport.mode === 'plan' ? fs.readFileSync(r.promptFile, 'utf8')
+      : typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
+        : r.promptFile ? fs.readFileSync(r.promptFile, 'utf8') : rendered.prompt;
+    deliveryPrompt = require('./forge-prompt').composeProcedurePrompt(base, procedure,
+      rendered ? rendered.procedure_context : r.procedure_context);
+  }
   const executionStateFile = execution ? xllm.validateResultFileTarget(`${resultFile}.reset-state.json`, cwd) : null;
   if (execution) {
     xllm.validateResultFileTarget(executionStateFile, root);
@@ -1502,17 +1533,21 @@ async function runUnitSidecarCore(request, runtime, identity) {
       xllm.assertUntrustedOutputBarrier(result);
       artifacts = [];
     } else if (transport.mode === 'execute') {
+      const procedure = executeProcedure;
+      const { content: procedureText, ...procedure_context } = procedure;
+      if (r.prompt) require('./forge-prompt').composeProcedurePrompt(r.prompt, procedure, r.procedure_context);
       const protectedBefore = execution ? executionApi.protectedSnapshot(root) : null;
       const codeProtectedBefore = execution ? execution.execution_contract.code_roots.map(code => ({ root: code.path,
         before: executionApi.protectedSnapshot(code.path) })) : [];
       transportEntered = true;
-      result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
+      result = await xllm.runExecute({ ...options, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
           : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
             require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==
             require('./forge-code-roots').key(fs.realpathSync.native(cwd))).map(code => code.path) : r.writableRoots,
-        ...(execution ? { executionContext: execution } : r.execution_contract
-          ? { executionContext: { execution_contract: r.execution_contract, budgets: r.budgets || {} } } : {}) });
+        executionContext: execution || (r.execution_contract
+          ? { execution_contract: r.execution_contract, budgets: r.budgets || {} } : undefined),
+        procedureContext: { procedureText, procedure_context } });
       transportReturned = true;
       if (execution) {
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
@@ -1578,9 +1613,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
       artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
     } else if (transport.mode === 'plan') {
       if (!r.promptFile) fail('prompt-file-required');
-      transportEntered = true;
-      result = await xllm.runPlan({ ...options, planContextFile: r.promptFile });
-      transportReturned = true;
+      // runPlan consumes a file: pass only the validated composed snapshot,
+      // never reread the caller's mutable original after preflight.
+      const promptDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'forge-plan-procedure-'));
+      try {
+        const planContextFile = path.join(promptDir, 'context.md');
+        fs.writeFileSync(planContextFile, deliveryPrompt, { mode: 0o600 });
+        transportEntered = true;
+        result = await xllm.runPlan({ ...options, planContextFile });
+        transportReturned = true;
+      } finally { fs.rmSync(promptDir, { recursive: true, force: true }); }
       const ids = result.task_plans.map(p => p.id);
       if (new Set(ids).size !== ids.length) fail('plan-task-ids-invalid');
       const listed = require('./forge-status').parsePlanTasks(result.slice_plan.content).map(t => t.id);
@@ -1594,17 +1636,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
         })];
     } else if (transport.mode === 'artifacts') {
       const payloadLimit = options.engine === 'claude' || loc.preparation ? MAX_ARTIFACT_PAYLOAD_BYTES : Infinity;
-      const base = typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
-        : r.promptFile ? fs.readFileSync(r.promptFile, 'utf8') : renderPrompt({
-        unitType: r.unitType, cwd: root, milestoneId: r.milestoneId, sliceId: r.sliceId,
-        description: r.description, unitEffort: route.effort, autoCommit: false,
-      }).prompt;
-      const prompt = base + '\n\n## Sidecar delivery contract (overrides direct-write instructions above)\n'
+      const prompt = deliveryPrompt + '\n\n## Sidecar delivery contract (overrides direct-write instructions above)\n'
         + 'Read-only worker. Return artifact CONTENT, never write files, run commands, commit, tag, push, deploy, clean up, update STATE or acquire leases. The orchestrator owns these actions. '
         + 'Do not assume answers to human decisions. Return partial and questions when a decision is required. '
         + 'Operator constraints: ' + JSON.stringify(r.constraints || { auto_commit: false, deploy: false })
         + '\nRequired paths on done: ' + JSON.stringify(loc.required) + '\nOnly allowed artifact paths: ' + JSON.stringify(loc.allowed)
         + `\nLimits: at most 32 artifacts; each content at most ${MAX_ARTIFACT_BYTES} UTF-8 bytes.`
+        + (loc.delivery ? ` Contract-typed DELIVERY output at ${JSON.stringify(loc.delivery.output)} may instead contain at most ${MAX_DELIVERY_BYTES} UTF-8 bytes; all other artifact limits remain as stated.` : '')
         + (Number.isFinite(payloadLimit) ? ` The entire serialized result JSON must fit in ${payloadLimit} UTF-8 bytes.` : '')
         + ' Return partial with questions if complete delivery cannot fit; never truncate an artifact.'
         + '\nReturn JSON matching: ' + JSON.stringify(schema);
@@ -1824,6 +1862,14 @@ async function runUnitSidecar(request, runtime = {}) {
   }
 }
 async function recoverUnitSidecar(request, recovery, runtime = {}) {
+  // Mandatory obligations fail closed before process/receipt inspection.
+  const recoveryProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'recovery',
+    forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+  // Current authority can enrich a legacy original request without changing its
+  // historical caller hash. It still passes the normal held-claim/gate checks.
+  const authority = runtime.executionAuthority || {};
+  const executionRequest = { ...request, ...authority };
+  if (Object.keys(authority).some(key => !['execution_contract', 'claim', 'runId', 'gates'].includes(key))) fail('recovery-execution-authority-invalid');
   const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
   if (canonical.scope === 'standalone-task' && canonical.phase !== 'execute') {
     return require('./forge-task-preparation').recoverStandaloneTask(request, recovery, runtime);
@@ -1833,22 +1879,43 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     unitId: canonical.taskId || canonical.sliceId || canonical.milestoneId,
     planPath: canonical.planFile, roadmapPath: canonical.roadmapFile };
   const nativeTaskName = `recovery_${request.dispatchId}_${crypto.randomUUID()}`;
-  const nativeOptions = route => ({ hostRuntime: route.host_runtime, resolvedDispatch: route,
+  const nativeOptions = route => {
+    const rendered = !request.prompt && !request.promptFile ? renderPrompt({
+      unitType: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
+      cwd: canonical.contextRoot, codeDir: canonical.cwd, milestoneId: request.milestoneId, sliceId: request.sliceId,
+      taskId: request.taskId, unitEffort: route.effort, autoCommit: false }) : null;
+    let prompt = request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: canonical.cwd,
+      phase: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
+      forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    prompt = require('./forge-prompt').composeProcedurePrompt(prompt, procedure,
+      rendered ? rendered.procedure_context : request.procedure_context);
+    // The recovered worker receives recovery obligations too. Fresh loader
+    // segments are instructions; shared dependencies already present stay once.
+    const present = new Set(procedure.modules.map(module => module.id));
+    const additional = recoveryProcedure.content.split(/(?=<!-- forge-procedure:)/)
+      .filter(segment => segment.trim() && !present.has(/^<!-- forge-procedure:([^>]+) -->/.exec(segment)?.[1]));
+    prompt += '\n\n' + additional.join('');
+    return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
-    prompt: request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : renderPrompt({
-      unitType: request.unitType, cwd: canonical.contextRoot, milestoneId: request.milestoneId, sliceId: request.sliceId,
-      taskId: request.taskId, unitEffort: route.effort, autoCommit: false }).prompt), forkTurns: 'none',
+    prompt, forkTurns: 'none',
     taskName: nativeTaskName,
-    agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' });
+    agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };
+  };
   // A stale writer cannot reconcile or reserve another attempt under a new claim.
   if (canonical.scope === 'milestone' && canonical.phase === 'execute') {
-    if (!request.execution_contract) fail('execution-held-claim-required');
-    validateRecoveryRequest(request, { nativeInvocation: request.route.worker_mode === 'native'
+    if (!executionRequest.execution_contract) fail('execution-held-claim-required');
+    validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
       ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
   }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
     recoveryAuthorization: runtime.recoveryAuthorization, processProbe: runtime.processProbe,
-    executionContract: request.execution_contract,
+    executionContract: executionRequest.execution_contract, executionAuthority: authority,
+    externalNativeHandoff: !runtime.invokeNative,
+    inspectPreSpawn: runtime.inspectPreSpawn, inspectPreSpawnDelta: runtime.inspectPreSpawnDelta,
+    validateEnvironmentalCorrection: runtime.validateEnvironmentalCorrection,
+    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
+      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }),
     reconcile: receipt => {
       if (canonical.scope === 'milestone' || receipt.recovery_baseline) return reconcileMilestoneAttempt(request, receipt, runtime);
       if (!receipt.reset_state_file || !receipt.execution?.execution_contract) fail('recovery-baseline-required');
@@ -1860,13 +1927,13 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (request.route.worker_mode === 'native') {
         const invocation = require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route));
         if (!invocation.ok) return invocation;
-        validateRecoveryRequest(request, { nativeInvocation: invocation });
+        validateRecoveryRequest(executionRequest, { nativeInvocation: invocation });
         return { ok: true, evidence_reference: 'unit-preflight:native-arguments',
           final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
             context: invocation.args.prompt || invocation.args.message, identity: request, route: request.route,
             model: request.route.model, effort: request.route.effort, transport: 'native-tool' }) };
       }
-      validateRecoveryRequest(request);
+      validateRecoveryRequest(executionRequest);
       if (typeof runtime.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
       return runtime.validateCorrection(request);
     },
@@ -1876,7 +1943,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       const invocation = route.worker_mode === 'native'
         ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(route)) : { ok: true };
       if (!invocation.ok) return invocation;
-      try { validateRecoveryRequest({ ...request, route }, { nativeInvocation: invocation }); }
+      try { validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation }); }
       catch (error) { return { ok: false, reason_code: error.code || 'unit-contract-refused', provider_called: false }; }
       return invocation;
     },
@@ -1887,16 +1954,22 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       }
       return runUnitSidecar(request, runtime);
     },
-    invoke: async (route, invocation, remainingMs) => {
-      validateRecoveryRequest({ ...request, route }, { nativeInvocation: invocation });
-      const next = { ...request, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
+    invoke: async (route, invocation, remainingMs, assertReady, reservationHash) => {
+      validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation });
+      const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
         ? { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) } : route,
         dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
       if (route.worker_mode === 'native') {
-        if (!runtime.invokeNative) return { action: 'invoke-native', request: next, invocation };
+        if (!runtime.invokeNative) {
+          assertReady?.();
+          if (recovery.environmentalCorrection && !recovery.resumeReservation) return {
+            action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
+          return { action: 'invoke-native', request: next, invocation, ...(assertReady ? { assertReady } : {}) };
+        }
         const native = await require('./forge-native-invocation').invokeNative(nativeOptions(route),
           (args, binding) => {
-            validateRecoveryRequest({ ...request, route }, { nativeInvocation: binding });
+            assertReady?.();
+            validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: binding });
             return runtime.invokeNative(next, { ...binding, args });
           });
         return native;

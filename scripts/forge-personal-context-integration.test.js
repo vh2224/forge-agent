@@ -123,8 +123,13 @@ try {
   // Execute each skill's actual bootstrap/bind block against a fresh milestone.
   for (const [index, name] of ['forge-auto', 'forge-next'].entries()) {
     const skill = fs.readFileSync(path.join(__dirname, '..', 'skills', name, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
-    const firstBlock = skill.match(/```bash\n([\s\S]*?)```/)[1];
-    const block = firstBlock.slice(firstBlock.indexOf('# Route task IDs'));
+    const bootstrapBlocks = [...skill.matchAll(/```bash\n([\s\S]*?)```/g)].map(match => match[1])
+      .filter(block => block.includes('# Route task IDs') && block.includes('--create') && block.includes('--bind'));
+    assert.strictEqual(bootstrapBlocks.length, 1, `${name}: unique executable bootstrap block`);
+    const firstBlock = bootstrapBlocks[0];
+    const routeIndex = firstBlock.indexOf('# Route task IDs');
+    assert(routeIndex >= 0);
+    const block = firstBlock.slice(routeIndex);
     const id = `M00${index + 7}`;
     const bootstrap = command(process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe') : 'bash', ['-c', block], { env: { ...f.env(), RUN_KIND: 'milestone', STATUS: 'activate-new', RUN_ID: id,
       WORKING_DIR: f.project.replace(/\\/g, '/'), FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'), PERSONAL_ARG: id } });
@@ -143,6 +148,7 @@ try {
     assert(!personal.readPersonalSnapshot(f.options).works.some(w => w.id === failedId));
     if (name === 'forge-auto') {
       const update = skill.split('\n').find(line => line.includes('forge-runs.js" --update') && line.includes('SESSION_ID'));
+      assert(update && update.includes('exit 1'), 'registry update failure terminates dispatch');
       const missing = command(process.platform === 'win32' ? path.join(process.env.ProgramFiles || 'C:/Program Files', 'Git', 'bin', 'bash.exe') : 'bash', ['-c', update + '\necho UNREACHABLE'], {
         env: { ...f.env(), RUN_ID: 'M999', SESSION_ID: 'fixture', WORKING_DIR: f.project.replace(/\\/g, '/'),
           FORGE_SCRIPTS_DIR: __dirname.replace(/\\/g, '/'), ISOLATION_MODE: 'shared', WORKTREES_JSON: '[]', RUN_BRANCH: '' },

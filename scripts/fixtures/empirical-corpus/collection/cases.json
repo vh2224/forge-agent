@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "fictional": true,
+  "seed": "synthetic-collection-v1",
+  "seeds": [
+    {
+      "id": "seed-1",
+      "family": "exposed-1",
+      "outcome": "success",
+      "exposed": true
+    },
+    {
+      "id": "seed-2",
+      "family": "exposed-2",
+      "outcome": "return",
+      "exposed": true
+    },
+    {
+      "id": "seed-3",
+      "family": "exposed-3",
+      "outcome": "simple-control",
+      "exposed": true
+    },
+    {
+      "id": "seed-4",
+      "family": "exposed-4",
+      "outcome": "success",
+      "exposed": true
+    },
+    {
+      "id": "seed-5",
+      "family": "exposed-5",
+      "outcome": "success",
+      "exposed": true
+    },
+    {
+      "id": "seed-6",
+      "family": "exposed-6",
+      "outcome": "success",
+      "exposed": true
+    }
+  ],
+  "reserved": [
+    { "id": "unseen-1", "family": "new-1", "exposed": false },
+    { "id": "unseen-2", "family": "new-2", "exposed": false }
+  ],
+  "historical": {
+    "present_revision": "101",
+    "removed_revision": "102",
+    "declared_revision": "99",
+    "release": "fictional-1",
+    "installation_complete": "unknown"
+  }
+}

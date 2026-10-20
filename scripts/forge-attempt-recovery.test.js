@@ -43,6 +43,7 @@ async function main() {
   const timeout = api.createRecovery({ ...identity, state: undefined }); timeout.record({ ...attempt, failure_class: 'timeout' });
   assert.strictEqual((await timeout.next({ inspection })).reason_code, 'timeout-cause-indeterminate');
   await assert.rejects(timeout.next({ inspection, correction: { request_sha256: 'request', offline_validated: true, evidence_reference: 'check' } }), /correction-required/);
+  await assert.rejects(timeout.next({ inspection, correction: { kind: 'environment', failure_id: 'forged', request_sha256: 'request', offline_validated: true, evidence_reference: 'check' } }), /correction-required/);
   const corrected = await timeout.next({ inspection, correction: { request_sha256: 'new', offline_validated: true, evidence_reference: 'check' }, validateInvocation: async () => ({ ok: true }) });
   assert.strictEqual(corrected.route.model, route.model);
   timeout.record({ ...attempt, failure_class: 'timeout', corrected: true });
@@ -112,6 +113,8 @@ async function persistentRecovery(route) {
   assert.strictEqual(inspected.state.reservations.length, 1);
   assert.strictEqual((await api.recoverAttempt({ ...base, clock: () => initial.deadline_at + 1 })).reason_code, 'recovery-deadline-exhausted');
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', pid: process.pid, execution: {} }));
+  assert.strictEqual(api.inspectReceipt(receiptFile, { processProbe: () => 'stopped' }).process_stopped, false,
+    'a callback cannot override an observed live adapter PID');
   let reconciled = 0;
   await assert.rejects(api.recoverAttempt({ ...base, reconcile() { reconciled++; } }), /process-receipt-inspection-required/);
   assert.strictEqual(reconciled, 0, 'a live writer must block before reset');
@@ -121,6 +124,15 @@ async function persistentRecovery(route) {
   const replay = await api.recoverAttempt({ ...base, clock: () => initial.deadline_at + 1, processProbe: () => 'stopped',
     resolveDispatch() { throw new Error('saved response must not resolve candidates'); }, replay: async () => ({ status: 'done' }) });
   assert.strictEqual(replay.action, 'replay'); assert.strictEqual(replay.provider_called, false); assert.strictEqual(invoked, 1);
+  for (const receipt of [{ phase: 'ready', provider_called: true }, { phase: 'failed', saved_candidate: { sha256: 'fixture-candidate' } }]) {
+    fs.writeFileSync(receiptFile, JSON.stringify(receipt));
+    const saved = await api.recoverAttempt({ ...base, environmentalCorrection: true,
+      processProbe: () => 'stopped', clock: () => initial.deadline_at + 1,
+      inspectPreSpawn() { throw Error('saved response must replay before pre-spawn inspection'); },
+      resolveDispatch() { throw Error('saved response must not resolve candidates'); },
+      replay: async observed => { assert.deepStrictEqual(observed, receipt); return { status: 'done' }; } });
+    assert.strictEqual(saved.action, 'replay'); assert.strictEqual(saved.provider_called, false);
+  }
   assert.throws(() => api.validateState({ ...initial, deadline_at: initial.deadline_at + 1 }), /state-invalid/);
   lab.cleanup();
   console.log('PASS persisted recovery: caller repair once, process proof, restart/CLI deadline, identity, external state and zero-inference replay');

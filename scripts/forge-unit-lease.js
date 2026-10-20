@@ -259,6 +259,47 @@ function release(cwd, unitInput, ownerToken, generation, options) {
   });
 }
 
+// The parent must route its own scheduled heartbeat through this process-local
+// handle while protected snapshots are in use. Other processes remain subject
+// to ordinary ownership checks; this is coordination, not a global lock.
+const protectedWindows = new WeakMap();
+function assertProtectedWindow(handle, cwd, unit) {
+  const held = protectedWindows.get(handle);
+  if (!held || path.relative(held.cwd, fs.realpathSync.native(cwd)) !== '' || normalizeUnitKey(unit) !== held.unit || !held.check().ok) {
+    throw new Error('forge-unit-lease: protected-window-invalid');
+  }
+  return { generation: held.generation, deadline_at: held.deadline_at };
+}
+function openProtectedWindow(cwd, unitInput, ownerToken, generation, options = {}) {
+  const duration = options.durationMs;
+  if (!Number.isInteger(duration) || duration <= 0 || duration > 300000) throw new Error('forge-unit-lease: invalid protected duration');
+  const unit = normalizeUnitKey(unitInput), file = leaseFile(cwd, unit);
+  const token = opaque(ownerToken, 'owner_token', true), gen = opaque(generation, 'generation', true);
+  const opened = withGuard(cwd, unit, guard => {
+    const now = nowOf(options), deadline = now + duration;
+    const read = readLease(file);
+    if (!validRecord(read.record, unit) || !sameOwner(read.record, token, gen)) return result(false, 'owner-mismatch');
+    if (isExpired(read.record, now)) return result(false, 'expired-awaiting-grace');
+    const next = { ...read.record, heartbeat_at: now, expires_at: Math.max(read.record.expires_at, deadline) };
+    publish(file, next, options, guard);
+    return result(true, 'renewed', { generation: gen, deadline_at: deadline });
+  });
+  if (!opened.ok) return opened;
+  let closed = false;
+  const check = () => {
+    const time = nowOf(options), read = readLease(file);
+    if (closed || time >= opened.deadline_at || !validRecord(read.record, unit) || !sameOwner(read.record, token, gen)
+        || isExpired(read.record, time)) return result(false, 'owner-mismatch');
+    return result(true, 'lease-active', { generation: gen });
+  };
+  const handle = Object.freeze({ ...opened, check,
+    heartbeat: check,
+    close() { const checked = check(); closed = true; return checked; },
+  });
+  protectedWindows.set(handle, { cwd: fs.realpathSync.native(cwd), unit, generation: gen, deadline_at: opened.deadline_at, check });
+  return handle;
+}
+
 function recover(cwd, unitInput, options) {
   const unit = normalizeUnitKey(unitInput); const now = nowOf(options || {}); const file = leaseFile(cwd, unit);
   fs.mkdirSync(leasesDir(cwd), { recursive: true });
@@ -336,5 +377,5 @@ if (require.main === module) cliMain();
 module.exports = {
   PROTOCOL_VERSION, DEFAULT_TTL_MS, DEFAULT_GRACE_MS, REASON_CODES,
   normalizeUnitKey, leasesDir, leaseFile, mutexName, acquire, observe,
-  heartbeat, release, recover, publicLease, validRecord, readLease,
+  heartbeat, release, recover, publicLease, validRecord, readLease, openProtectedWindow, assertProtectedWindow,
 };

@@ -439,7 +439,40 @@ async function main() {
   await test('legacy omission stays at the runtime input boundary', testLegacyOmissionUsesRuntimeBoundaryWithoutBackfill);
   await test('observation is passive even after expiry and grace', testObservationDoesNotMutateOrRecoverLease);
   await test('request-bound rollback refuses a successor published by another process', testRequestBoundReleaseAndSuccessor);
+  await test('protected window is bounded, opaque, read-only and never revives an expired owner', testProtectedWindow);
   console.log('forge-unit-lease tests passed');
+}
+
+function testProtectedWindow() {
+  sandbox(cwd => {
+    let now = 10;
+    const unit = 'execute-task/window', held = lease.acquire(cwd, unit, fixtureOptions(now, 'codex', { ownerToken: 'held' }));
+    const open = () => lease.openProtectedWindow(cwd, unit, 'held', held.generation, { now: () => now, durationMs: 200 });
+    assert.strictEqual(lease.openProtectedWindow(cwd, unit, 'foreign', held.generation, { durationMs: 1 }).ok, false);
+    const window = open(), file = lease.leaseFile(cwd, unit), bytes = fs.readFileSync(file, 'utf8');
+    assert(window.ok);
+    assert.strictEqual(window.generation, held.generation);
+    for (now of [20, 100, 209]) { assert(window.heartbeat().ok); assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes); }
+    lease.assertProtectedWindow(window, cwd, unit);
+    assert.throws(() => lease.assertProtectedWindow(JSON.parse(JSON.stringify(window)), cwd, unit), /window-invalid/);
+    assert.throws(() => lease.assertProtectedWindow(window, cwd, 'foreign'), /window-invalid/);
+    now = 210;
+    assert.strictEqual(window.check().ok, false);
+    assert.strictEqual(window.close().ok, false);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes, 'expiry and close must never revive ownership');
+    assert.strictEqual(open().reason, 'expired-awaiting-grace');
+    for (const durationMs of [0, -1, Infinity, 300001]) assert.throws(() => lease.openProtectedWindow(cwd, unit, 'held', held.generation, { durationMs }), /duration/);
+    now = 236;
+    const replacement = lease.acquire(cwd, unit, fixtureOptions(now, 'claude', { ownerToken: 'replacement' }));
+    assert(replacement.ok);
+    assert.strictEqual(open().ok, false);
+    const next = lease.openProtectedWindow(cwd, unit, replacement.owner_token, replacement.generation, { now: () => now, durationMs: 50 });
+    try { throw Error('fixture failure'); } catch (_) { /* cleanup is mandatory even on failure */ } finally { next.close(); }
+    assert.throws(() => lease.assertProtectedWindow(next, cwd, unit), /window-invalid/);
+    const active = lease.openProtectedWindow(cwd, unit, replacement.owner_token, replacement.generation, { now: () => now, durationMs: 50 });
+    lease.release(cwd, unit, replacement.owner_token, replacement.generation);
+    assert.strictEqual(active.heartbeat().ok, false, 'release/replacement invalidates a live handle');
+  });
 }
 
 main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

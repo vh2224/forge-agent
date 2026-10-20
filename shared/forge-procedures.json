@@ -1,0 +1,917 @@
+{
+  "schema_version": 1,
+  "byte_policy": "utf8-no-bom-lf-v1",
+  "core": "core",
+  "modules": [
+    {
+      "id": "core",
+      "path": "shared/forge-procedure-core.md",
+      "sha256": "9c8a97fba438123de5f2f93d4e32ed9ff924a372e8501c1fd52cb4ce09361f3c",
+      "status": "ready",
+      "owner": "T01",
+      "dependencies": [],
+      "preconditions": [
+        "Trusted caller has resolved phase and physical project/install root"
+      ],
+      "postconditions": [
+        "Common scope, authority, gates and publication obligations included exactly once"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js"
+      ]
+    },
+    {
+      "id": "personal",
+      "path": "shared/forge-procedure-personal.md",
+      "sha256": "98e7e2556912634e90e4649727adccc673f771189944c1e959413eefd8bc9fea",
+      "status": "ready",
+      "owner": "T04",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Read-only personal snapshot and explicit own-work selection",
+        "Preserve accepted decisions and unresolved personal diagnostics"
+      ],
+      "postconditions": [
+        "Only the selected own unit advances; no colleague discovery or implicit binding"
+      ],
+      "tests": [
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "planning",
+      "path": "shared/forge-procedure-planning.md",
+      "sha256": "f2eb17357b97fd39a35bb4c1b7dca22c91f133ea317a5554ab94e60863cb621c",
+      "status": "ready",
+      "owner": "T02",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Matching scope, decisions and research are available",
+        "Required functional decisions have explicit answers before dependent planning"
+      ],
+      "postconditions": [
+        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+      ],
+      "tests": [
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "task-preparation",
+      "path": "shared/forge-procedure-task-preparation.md",
+      "sha256": "8ac860070ff00bb6cd4857f6875e7cca3382ae71fbf87872cd7d2aefd3878cbd",
+      "status": "ready",
+      "owner": "T03",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Standalone task identity and phase are validated by phaseContract",
+        "Required decisions remain pending by stable ID"
+      ],
+      "postconditions": [
+        "Only the selected task phase artifact is returned for owner publication"
+      ],
+      "tests": [
+        "scripts/forge-task-preparation.test.js"
+      ]
+    },
+    {
+      "id": "execution",
+      "path": "shared/forge-procedure-execution.md",
+      "sha256": "66a61fce0b7c071d29297dd6fa87358cc4eab2380815e72a4bccd7d6569aad98",
+      "status": "ready",
+      "owner": "T03",
+      "dependencies": [
+        "core",
+        "verification"
+      ],
+      "preconditions": [
+        "Complete plan, security and plan gates accepted",
+        "Physical roots, nonempty claims/generation, model and effort validated"
+      ],
+      "postconditions": [
+        "Every must-have verified in CODE_DIR; scoped output and criterion evidence returned"
+      ],
+      "tests": [
+        "scripts/forge-task-execution.test.js"
+      ]
+    },
+    {
+      "id": "verification",
+      "path": "shared/forge-procedure-verification.md",
+      "sha256": "cf0214f68d12d65d5af2075495cb8c1e15921122909b6acc68e230e076b8347a",
+      "status": "ready",
+      "owner": "T03",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Exact plan and actual code root identified",
+        "Concrete applicable checks resolved without inventing commands"
+      ],
+      "postconditions": [
+        "Outcomes, skips and declared-artifact evidence captured independently"
+      ],
+      "tests": [
+        "scripts/forge-verify.test.js"
+      ]
+    },
+    {
+      "id": "completion",
+      "path": "shared/forge-procedure-completion.md",
+      "sha256": "a47fbb61bcb8a3ad7014e08942e5ffca701a645b83f955a9acd9c2e4eb80c5f9",
+      "status": "ready",
+      "owner": "T02",
+      "dependencies": [
+        "core",
+        "verification"
+      ],
+      "preconditions": [
+        "Task/slice summaries, deliveries and review findings preserved",
+        "Verification and protected branch guard remain applicable"
+      ],
+      "postconditions": [
+        "Delivery facts, UAT gaps and canonical owner publication remain separate"
+      ],
+      "tests": [
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "memory",
+      "path": "shared/forge-procedure-memory.md",
+      "sha256": "6c04f67eef1fd2001df2e17d3f3ba4f66a93793f019486457a2a1af5b6db0eba",
+      "status": "ready",
+      "owner": "T04",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Eligible problem/plan query and unit identity kept separate",
+        "Canonical memory selector and explicit availability retained"
+      ],
+      "postconditions": [
+        "Extraction uses its own envelope; no inferred publication from provider success"
+      ],
+      "tests": [
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "recovery",
+      "path": "shared/forge-procedure-recovery.md",
+      "sha256": "4b9c122f669c647c9719423ffe8bdc5c4a156405d7e5c95dbf65deaecd4d2933",
+      "status": "ready",
+      "owner": "T04",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Inspect process and receipt before retry",
+        "Functional answers, live standing authority and historical budget preserved"
+      ],
+      "postconditions": [
+        "Replay valid saved output or reconcile every writer root before an untried valid route"
+      ],
+      "tests": [
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "review",
+      "path": "shared/forge-procedure-review.md",
+      "sha256": "ae657aceae8d212d254daf46d293308a7e5bc64152d7798f2a50ddc381c28030",
+      "status": "ready",
+      "owner": "T05",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Configured review models and scope resolved independently of execution tiers",
+        "Scoped correction claims and current findings retained"
+      ],
+      "postconditions": [
+        "Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback"
+      ],
+      "tests": [
+        "scripts/forge-xllm-review-cli.test.js"
+      ]
+    },
+    {
+      "id": "distribution",
+      "path": "shared/forge-procedure-distribution.md",
+      "sha256": "a3d6991a8f4771696c48fe0f55612a67d19ba9f6e2ab928fe9db28b1be5f8c02",
+      "status": "ready",
+      "owner": "T06",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Canonical source inventory and module digests validated",
+        "Both host renderers exercised only in temporary roots"
+      ],
+      "postconditions": [
+        "Installed content resolves the same core/modules with explicit availability and hashes"
+      ],
+      "tests": [
+        "scripts/forge-source-manifest.test.js",
+        "scripts/forge-installer.test.js",
+        "scripts/forge-codex-renderer.test.js",
+        "scripts/forge-claude-renderer.test.js"
+      ]
+    },
+    {
+      "id": "preparation",
+      "path": "shared/forge-procedure-preparation.md",
+      "sha256": "aeffaf044f47b8787fcf30812bb3a8efacbc349292ee4bff2b829537f4c7d728",
+      "status": "ready",
+      "owner": "T02",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
+      ],
+      "postconditions": [
+        "Scoped discuss/research artifacts returned for owner validation/publication"
+      ],
+      "tests": [
+        "scripts/forge-prompt.test.js"
+      ]
+    }
+  ],
+  "phases": [
+    {
+      "id": "boot",
+      "modules": [
+        "personal"
+      ],
+      "consumers": [
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Read-only personal snapshot and explicit own-work selection",
+        "Preserve accepted decisions and unresolved personal diagnostics"
+      ],
+      "postconditions": [
+        "Only the selected own unit advances; no colleague discovery or implicit binding"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "personal-selection",
+      "modules": [
+        "personal"
+      ],
+      "consumers": [
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Read-only personal snapshot and explicit own-work selection",
+        "Preserve accepted decisions and unresolved personal diagnostics"
+      ],
+      "postconditions": [
+        "Only the selected own unit advances; no colleague discovery or implicit binding"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "discuss-milestone",
+      "modules": [
+        "preparation"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
+      ],
+      "postconditions": [
+        "Scoped discuss/research artifacts returned for owner validation/publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "discuss-slice",
+      "modules": [
+        "preparation"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
+      ],
+      "postconditions": [
+        "Scoped discuss/research artifacts returned for owner validation/publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "research-milestone",
+      "modules": [
+        "preparation"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
+      ],
+      "postconditions": [
+        "Scoped discuss/research artifacts returned for owner validation/publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "research-slice",
+      "modules": [
+        "preparation"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
+      ],
+      "postconditions": [
+        "Scoped discuss/research artifacts returned for owner validation/publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "plan-milestone",
+      "modules": [
+        "planning"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching scope, decisions and research are available",
+        "Required functional decisions have explicit answers before dependent planning"
+      ],
+      "postconditions": [
+        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "plan-slice",
+      "modules": [
+        "planning"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching scope, decisions and research are available",
+        "Required functional decisions have explicit answers before dependent planning"
+      ],
+      "postconditions": [
+        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "plan-check",
+      "modules": [
+        "planning"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Matching scope, decisions and research are available",
+        "Required functional decisions have explicit answers before dependent planning"
+      ],
+      "postconditions": [
+        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "task-brainstorm",
+      "modules": [
+        "task-preparation"
+      ],
+      "consumers": [
+        "scripts/forge-task-preparation.js",
+        "skills/forge-task/SKILL.md"
+      ],
+      "owner": "T03",
+      "preconditions": [
+        "Standalone task identity and phase are validated by phaseContract",
+        "Required decisions remain pending by stable ID"
+      ],
+      "postconditions": [
+        "Only the selected task phase artifact is returned for owner publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-task-preparation.test.js"
+      ]
+    },
+    {
+      "id": "task-discuss",
+      "modules": [
+        "task-preparation"
+      ],
+      "consumers": [
+        "scripts/forge-task-preparation.js",
+        "skills/forge-task/SKILL.md"
+      ],
+      "owner": "T03",
+      "preconditions": [
+        "Standalone task identity and phase are validated by phaseContract",
+        "Required decisions remain pending by stable ID"
+      ],
+      "postconditions": [
+        "Only the selected task phase artifact is returned for owner publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-task-preparation.test.js"
+      ]
+    },
+    {
+      "id": "task-research",
+      "modules": [
+        "task-preparation"
+      ],
+      "consumers": [
+        "scripts/forge-task-preparation.js",
+        "skills/forge-task/SKILL.md"
+      ],
+      "owner": "T03",
+      "preconditions": [
+        "Standalone task identity and phase are validated by phaseContract",
+        "Required decisions remain pending by stable ID"
+      ],
+      "postconditions": [
+        "Only the selected task phase artifact is returned for owner publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-task-preparation.test.js"
+      ]
+    },
+    {
+      "id": "task-plan",
+      "modules": [
+        "task-preparation"
+      ],
+      "consumers": [
+        "scripts/forge-task-preparation.js",
+        "skills/forge-task/SKILL.md"
+      ],
+      "owner": "T03",
+      "preconditions": [
+        "Standalone task identity and phase are validated by phaseContract",
+        "Required decisions remain pending by stable ID"
+      ],
+      "postconditions": [
+        "Only the selected task phase artifact is returned for owner publication"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-task-preparation.test.js"
+      ]
+    },
+    {
+      "id": "execute-task",
+      "modules": [
+        "execution"
+      ],
+      "consumers": [
+        "scripts/forge-task-execution.js",
+        "scripts/forge-unit-sidecar.js",
+        "scripts/forge-prompt.js",
+        "scripts/forge-xllm.js"
+      ],
+      "owner": "T03",
+      "preconditions": [
+        "Complete plan, security and plan gates accepted",
+        "Physical roots, nonempty claims/generation, model and effort validated"
+      ],
+      "postconditions": [
+        "Every must-have verified in CODE_DIR; scoped output and criterion evidence returned"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-task-execution.test.js",
+        "scripts/forge-prompt.test.js",
+        "scripts/forge-unit-sidecar.test.js",
+        "scripts/forge-xllm.test.js",
+        "scripts/forge-context-delivery.test.js"
+      ]
+    },
+    {
+      "id": "execute-loose-task",
+      "modules": [
+        "execution"
+      ],
+      "consumers": [
+        "scripts/forge-task-execution.js",
+        "scripts/forge-unit-sidecar.js",
+        "scripts/forge-prompt.js",
+        "scripts/forge-xllm.js"
+      ],
+      "owner": "T03",
+      "preconditions": [
+        "Complete plan, security and plan gates accepted",
+        "Physical roots, nonempty claims/generation, model and effort validated"
+      ],
+      "postconditions": [
+        "Every must-have verified in CODE_DIR; scoped output and criterion evidence returned"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-task-execution.test.js",
+        "scripts/forge-prompt.test.js",
+        "scripts/forge-unit-sidecar.test.js",
+        "scripts/forge-xllm.test.js",
+        "scripts/forge-context-delivery.test.js"
+      ]
+    },
+    {
+      "id": "verification",
+      "modules": [
+        "verification"
+      ],
+      "consumers": [
+        "scripts/forge-verify.js",
+        "scripts/forge-verifier.js"
+      ],
+      "owner": "T03",
+      "preconditions": [
+        "Exact plan and actual code root identified",
+        "Concrete applicable checks resolved without inventing commands"
+      ],
+      "postconditions": [
+        "Outcomes, skips and declared-artifact evidence captured independently"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-verify.test.js",
+        "scripts/forge-verifier.test.js"
+      ]
+    },
+    {
+      "id": "complete-slice",
+      "modules": [
+        "completion"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Task/slice summaries, deliveries and review findings preserved",
+        "Verification and protected branch guard remain applicable"
+      ],
+      "postconditions": [
+        "Delivery facts, UAT gaps and canonical owner publication remain separate"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "complete-milestone",
+      "modules": [
+        "completion"
+      ],
+      "consumers": [
+        "scripts/forge-prompt.js",
+        "scripts/forge-unit-sidecar.js"
+      ],
+      "owner": "T02",
+      "preconditions": [
+        "Task/slice summaries, deliveries and review findings preserved",
+        "Verification and protected branch guard remain applicable"
+      ],
+      "postconditions": [
+        "Delivery facts, UAT gaps and canonical owner publication remain separate"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-prompt.test.js"
+      ]
+    },
+    {
+      "id": "memory-selection",
+      "modules": [
+        "memory"
+      ],
+      "consumers": [
+        "scripts/forge-memory-context.js",
+        "scripts/forge-unit-sidecar.js",
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Eligible problem/plan query and unit identity kept separate",
+        "Canonical memory selector and explicit availability retained"
+      ],
+      "postconditions": [
+        "Extraction uses its own envelope; no inferred publication from provider success"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "memory-extract",
+      "modules": [
+        "memory"
+      ],
+      "consumers": [
+        "scripts/forge-memory-context.js",
+        "scripts/forge-unit-sidecar.js",
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Eligible problem/plan query and unit identity kept separate",
+        "Canonical memory selector and explicit availability retained"
+      ],
+      "postconditions": [
+        "Extraction uses its own envelope; no inferred publication from provider success"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "recovery",
+      "modules": [
+        "recovery"
+      ],
+      "consumers": [
+        "scripts/forge-unit-sidecar.js",
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Inspect process and receipt before retry",
+        "Functional answers, live standing authority and historical budget preserved"
+      ],
+      "postconditions": [
+        "Replay valid saved output or reconcile every writer root before an untried valid route"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "pause",
+      "modules": [
+        "recovery"
+      ],
+      "consumers": [
+        "scripts/forge-unit-sidecar.js",
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Inspect process and receipt before retry",
+        "Functional answers, live standing authority and historical budget preserved"
+      ],
+      "postconditions": [
+        "Replay valid saved output or reconcile every writer root before an untried valid route"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "restart",
+      "modules": [
+        "recovery"
+      ],
+      "consumers": [
+        "scripts/forge-unit-sidecar.js",
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Inspect process and receipt before retry",
+        "Functional answers, live standing authority and historical budget preserved"
+      ],
+      "postconditions": [
+        "Replay valid saved output or reconcile every writer root before an untried valid route"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "handoff",
+      "modules": [
+        "recovery"
+      ],
+      "consumers": [
+        "scripts/forge-unit-sidecar.js",
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
+      ],
+      "owner": "T04",
+      "preconditions": [
+        "Inspect process and receipt before retry",
+        "Functional answers, live standing authority and historical budget preserved"
+      ],
+      "postconditions": [
+        "Replay valid saved output or reconcile every writer root before an untried valid route"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-procedure-callers.test.js"
+      ]
+    },
+    {
+      "id": "review-challenger",
+      "modules": [
+        "review"
+      ],
+      "consumers": [
+        "scripts/forge-xllm.js",
+        "shared/forge-review.md"
+      ],
+      "owner": "T05",
+      "preconditions": [
+        "Configured review models and scope resolved independently of execution tiers",
+        "Scoped correction claims and current findings retained"
+      ],
+      "postconditions": [
+        "Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-xllm-review-cli.test.js"
+      ]
+    },
+    {
+      "id": "review-advocate",
+      "modules": [
+        "review"
+      ],
+      "consumers": [
+        "scripts/forge-xllm.js",
+        "shared/forge-review.md"
+      ],
+      "owner": "T05",
+      "preconditions": [
+        "Configured review models and scope resolved independently of execution tiers",
+        "Scoped correction claims and current findings retained"
+      ],
+      "postconditions": [
+        "Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-xllm-review-cli.test.js"
+      ]
+    },
+    {
+      "id": "review-rebuttal",
+      "modules": [
+        "review"
+      ],
+      "consumers": [
+        "scripts/forge-xllm.js",
+        "shared/forge-review.md"
+      ],
+      "owner": "T05",
+      "preconditions": [
+        "Configured review models and scope resolved independently of execution tiers",
+        "Scoped correction claims and current findings retained"
+      ],
+      "postconditions": [
+        "Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-xllm-review-cli.test.js"
+      ]
+    },
+    {
+      "id": "review-fix",
+      "modules": [
+        "review"
+      ],
+      "consumers": [
+        "scripts/forge-xllm.js",
+        "shared/forge-review.md"
+      ],
+      "owner": "T05",
+      "preconditions": [
+        "Configured review models and scope resolved independently of execution tiers",
+        "Scoped correction claims and current findings retained"
+      ],
+      "postconditions": [
+        "Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback"
+      ],
+      "tests": [
+        "scripts/forge-procedure-context.test.js",
+        "scripts/forge-xllm-review-cli.test.js"
+      ]
+    },
+    {
+      "id": "distribution",
+      "modules": [
+        "distribution"
+      ],
+      "consumers": [
+        "scripts/forge-installer.js",
+        "scripts/forge-codex-renderer.js",
+        "scripts/forge-claude-renderer.js"
+      ],
+      "owner": "T06",
+      "preconditions": [
+        "Canonical source inventory and module digests validated",
+        "Both host renderers exercised only in temporary roots"
+      ],
+      "postconditions": [
+        "Installed content resolves the same core/modules with explicit availability and hashes"
+      ],
+      "tests": [
+        "scripts/forge-source-manifest.test.js",
+        "scripts/forge-installer.test.js",
+        "scripts/forge-codex-renderer.test.js",
+        "scripts/forge-claude-renderer.test.js"
+      ]
+    }
+  ]
+}

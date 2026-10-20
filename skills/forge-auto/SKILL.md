@@ -14,6 +14,17 @@ and work artifacts, with verification and a personal checkpoint; do not replay
 the milestone loop for the correction. Never edit concurrently with a live worker.
 An explicit `/forge-auto` command retains the lifecycle below.
 
+Before boot or reading personal/run state, load and read the mandatory composition.
+A loader failure blocks this phase before snapshot, selection or binding.
+The bootstrap block below resolves the script directory, loads `boot` and
+`personal-selection`, and only then resolves personal arguments.
+Use the emitted `content` as instructions (not only its hash). Before `--select`
+or explicit resume/bind, load `--phase personal-selection` with the same command
+and read its content; on failure stop without selecting/binding. Before any pause,
+restart or durable handoff, load/read `--phase pause`, `--phase restart` or
+`--phase handoff` respectively; failure blocks that action. On resumed sessions
+reload these compositions before dependent work; keep pending questions durable.
+
 Read `shared/forge-personal-context.md` from the repo or FORGE_HOME before running
 the adapter or reading any run/state/handoff. When `forge-context-boundary` returns
 personal_checkpoint.status other than ok, report partial continuity and preserve
@@ -32,6 +43,14 @@ remain concurrency guards, never personal selection inputs.
 All references below to STATE mean `.gsd/milestones/{RUN_ID}/{RUN_ID}-STATE.md`.
 RUN_ID is mandatory; historical empty-ID/legacy branches below are unreachable.
 After run/isolation registration, bind idempotently to capture validated worktree aliases.
+Before a durable handoff, run and read:
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase handoff --cwd "$WORKING_DIR" || exit 1
+```
+Before a pause, run and read:
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase pause --cwd "$WORKING_DIR" || exit 1
+```
 After every durable handoff (partial/blocked/pause/account/review/compact), and after
 advancing the next unit, saveCheckpoint per the shared contract before deactivation.
 On complete-milestone, explicitly reconcile pending/nextAction and capture resolved
@@ -39,10 +58,15 @@ lastResult from final state/SUMMARY; process inactivity alone is never completio
 
 ```bash
 FORGE_SCRIPTS_DIR=$([ -f scripts/forge-cli-helpers.js ] && echo scripts || echo "${FORGE_HOME:-$HOME/.forge-agent}/scripts")
+node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase boot --cwd "$(pwd)" || exit 1
+node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase personal-selection --cwd "$(pwd)" || exit 1
 PERSONAL_ARG="$ARGUMENTS"
 case "$PERSONAL_ARG" in next|step) PERSONAL_ARG="" ;; esac
 RESOLVE=$(node "$FORGE_SCRIPTS_DIR/forge-cli-helpers.js" --resolve-args --args "$PERSONAL_ARG" --cwd "$(pwd)") || exit 1
 STATUS=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).status)" "$RESOLVE")
+if [ "$STATUS" = "resume" ]; then
+  node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase restart --cwd "$(pwd)" || exit 1
+fi
 case "$STATUS" in resume|activate-new) ;; *) echo "$RESOLVE"; exit 1 ;; esac
 RUN_ID=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).run_id || '')" "$RESOLVE")
 RUN_KIND=$(node -e "process.stdout.write(JSON.parse(process.argv[1]).kind || '')" "$RESOLVE")
@@ -1134,12 +1158,16 @@ PENDING_CONTEXT=$(node "$FORGE_SCRIPTS_DIR/forge-context-boundary.js" --action p
 PENDING_CONTEXT_FILE=$(node -pe 'JSON.parse(process.argv[1]).pending_file || ""' "$PENDING_CONTEXT")
 PENDING_CONTEXT_ID=$(node -pe 'JSON.parse(process.argv[1]).pending_id || ""' "$PENDING_CONTEXT")
 DISPATCH_ID="${unit_type}-${MILESTONE_ID:-none}-${SLICE_ID:-none}-${TASK_ID:-none}-$(node -e "console.log(require('crypto').randomUUID())")"
+node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase memory-selection --cwd "$WORKING_DIR" || { echo "memory procedure unavailable" >&2; stop; }
+MEMORY_QUERY_META=$(node "$FORGE_SCRIPTS_DIR/forge-memory-query.js" --unit-type "$unit_type" --cwd "$WORKING_DIR" \
+  --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID") || { echo "optional memory query unavailable; continuing without a query" >&2; MEMORY_QUERY_META='{"status":"unavailable","query_file":null}'; }
+MEMORY_QUERY_FILE=$(node -pe 'JSON.parse(process.argv[1]).query_file || ""' "$MEMORY_QUERY_META")
 PROMPT_META=$(node "$FORGE_SCRIPTS_DIR/forge-prompt.js" --unit-type "$unit_type" --cwd "$WORKING_DIR" \
   --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID" \
   --dispatch-id "$DISPATCH_ID" --unit-effort "$unit_effort" --thinking "$THINKING_OPUS" \
   --auto-commit "$AUTO_COMMIT" --milestone-cleanup "$MILESTONE_CLEANUP" \
   --isolation-mode "$ISOLATION_MODE" --branch "$BRANCH" --code-dir "$WORKER_CWD" \
-  --memory-query "$unit_type $MILESTONE_ID $SLICE_ID $TASK_ID" \
+  --memory-query "" --memory-query-file "$MEMORY_QUERY_FILE" \
   --memory-max-tokens "${PREFS[token_budget][auto_memory]:-1200}" \
   --standards-max-tokens "${PREFS[token_budget][coding_standards]:-3000}" \
   --ledger-max-tokens "${PREFS[token_budget][ledger_snapshot]:-1500}" \
@@ -2043,48 +2071,12 @@ On resume: STATE has `phase: resume` → read `continue.md`, inline into worker 
 
 ## Authorized continuity per unit
 
-Canonical contract: shared/forge-bidirectional-sidecar.md; authority and questions:
-shared/forge-interaction.md. This replaces conflicting recovery prose for supported units.
-The host uses createRecoveryAuthorizationAdapter with a live attestation callback and
-registerStandingAuthorization({reference,host,source_host,section:'user:forge-routing-continuity'}).
-Imported JSON/prose never grants consent. First invocation passes
-recoveryAuthorization:{adapter,reference,registration}. Restart uses createRecoveryAuthority,
-revalidates the personal source and passes {adapter,reference}; no renewed consent question.
-Functional pending questions retain their IDs and block dependent work.
-
-Standalone preparation uses scripts/forge-task-preparation.js recoverStandaloneTask(request,
-{stateFile,receiptFile,clock,answers,correction},runtime). Milestone callers use
-scripts/forge-unit-sidecar.js recoverUnitSidecar(request,recovery,runtime).
-validateRecoveryRequest selects the actual phase contract, including research and plan.
-runtime supplies trusted processProbe, verifyOwnership, invokeNative, activeCapabilities
-and recoveryAuthorization. CLI JSON cannot fabricate callbacks. Keep scope/phase/IDs,
-physical owner/CODE_DIR, list, explicit model/tier/effort, gates, isolation,
-claims/generation and checkpoint. Do not force workerMode native. The native adapter
-requires a tool actually permitted by the host.
-
-Before execute-task spawn, runUnitSidecar/captureMilestoneBaseline persists authoritative
-baseline, guards and input hashes for every root. The xllm audit-only snapshot cannot
-replace it. Legacy receipt without execution/reset_state_file remains a possible writer
-under execute-task; absent contract is unknown. Missing/tampered baseline cannot be
-reconstructed after timeout. Active/unknown process or any pending root prevents another
-writer. After process termination proof, reconcileMilestoneAttempt requires trusted
-authorship; timestamps never prove ownership. Milestone delivery captures real checks
-and source envelopes per root, persists validated response before capture/publication
-and replays without inference. Changed plan/code/protected metadata refuses replay.
-
-Inspect process and receipt before another attempt. Valid saved response uses canonical
-single publication/replay. Timeout has undetermined cause; standing authority permits
-a valid untried candidate without another confirmation. Known caller defects require
-offline validated repair and at most one corrected retry at that destination.
-The cumulative historical budget for additional sidecars is 60000ms with durable
-reservations. A scoped native exception after expiry permits native, never another
-sidecar or renewed 300s wait. Timeout alone does not prove model unavailability.
-Keep preferences/gates; never execute inline to bypass refusal.
-
-Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
-observed model, effort, host/worker/transport, reason_code/layer, duration, receipt and
-next action. provider_called is factual or unknown; absent context is not zero.
-token_budget.coding_standards bounds optional standards only, with full-file reference;
-retain requirements/research/checklist. No credentials or full prompt in telemetry.
-Personal handoff retains authority reference, evidence, acceptance and questions.
-Synthetic provider tests do not establish real provider execution or human UAT.
+Before recovery, load and read the mandatory instructions:
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase recovery --cwd "$WORKING_DIR" || exit 1
+```
+Use `shared/forge-dispatch.md ? Authorized continuity per unit` for the actual
+adapter entrypoints and runtime callbacks. The loaded recovery procedure owns the
+checklist; personal and interaction contracts still own live authority and questions.
+Keep the existing unit/roots/claims, receipt, historical deadline and pending IDs.
+No inline fallback or preference rewrite is authorized by this composition.

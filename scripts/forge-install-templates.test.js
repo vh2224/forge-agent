@@ -96,7 +96,9 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   assert.match(contract, /três|verificado/);
   for (const [host, home] of [['Claude', options.claudeHome], ['Codex', options.codexHome]]) {
     assert(treeContains(home, /forge-delivery\.js[\s\S]*DELIVERY\.json/), `${host} projection lacks operational delivery invocation`);
-    assert(treeContains(home, /expected_children|every expected (?:task|slice) DELIVERY/), `${host} projection lacks complete child delivery aggregation`);
+    const completion = require(path.join(options.forgeHome, 'scripts/forge-prompt.js')).renderPrompt({ cwd: options.projectRoot, forgeHome: options.forgeHome, unitType: 'complete-slice', milestoneId: 'M001', sliceId: 'S01' });
+    assert.strictEqual(completion.procedure_context.root, fs.realpathSync(options.forgeHome));
+    assert.match(completion.prompt, /every expected child delivery/, `${host} installed composition lacks complete child aggregation`);
     assert(treeContains(home, /After review handling[\s\S]*DELIVERY-INPUT/), `${host} projection lacks post-review rematerialization`);
     const task = fs.readFileSync(path.join(home, 'skills', 'forge-task', 'SKILL.md'), 'utf8');
     const preparation = task.slice(task.indexOf('### Canonical preparation caller'), task.indexOf('### Step 4.5'));
@@ -142,9 +144,32 @@ test('temporary Claude and Codex installs carry delivery helper, contract and op
   }
 
   const installedSidecar = require(path.join(options.forgeHome, 'scripts', 'forge-unit-sidecar.js'));
-  const installedMemoryPrompt = installedSidecar.memoryPrompt({
-    sourceUnitType: 'execute-task', summaryContent: 'installed memory fixture',
-  }, 'T01');
+  const savedForgeHome = process.env.FORGE_HOME;
+  let installedMemoryPrompt;
+  try {
+    process.env.FORGE_HOME = options.forgeHome;
+    installedMemoryPrompt = installedSidecar.memoryPrompt({ cwd: options.projectRoot,
+      sourceUnitType: 'execute-task', summaryContent: 'installed memory fixture',
+    }, 'T01');
+    const installedLoader = require(path.join(options.forgeHome, 'scripts/forge-procedure-context.js'));
+    const installedRenderer = require(path.join(options.forgeHome, 'scripts/forge-prompt.js'));
+    for (const unitType of ['execute-task', 'complete-slice', 'complete-milestone']) {
+      const rendered = installedRenderer.renderPrompt({ cwd: options.projectRoot, forgeHome: options.forgeHome, unitType, milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' });
+      assert.strictEqual(rendered.procedure_context.root, fs.realpathSync(options.forgeHome));
+      for (const token of ['forge-delivery.js', '--owner-root', '--code-dir']) assert(rendered.prompt.includes(token), token);
+    }
+    assert.strictEqual(installedLoader.loadProcedureContext({ cwd: options.projectRoot, forgeHome: options.forgeHome, phase: 'memory-extract' }).root, fs.realpathSync(options.forgeHome));
+    for (const [relative, code] of [['shared/forge-procedures.json', 'procedure-manifest-missing'], ['shared/forge-procedure-memory.md', 'procedure-file-unreadable']]) {
+      const file = path.join(options.forgeHome, relative), bytes = fs.readFileSync(file);
+      fs.unlinkSync(file);
+      try {
+        assert.throws(() => installedSidecar.memoryPrompt({ cwd: options.projectRoot }, 'T01'), error => error.code === code);
+        assert.throws(() => installedLoader.loadProcedureContext({ cwd: options.projectRoot, forgeHome: options.forgeHome, phase: 'memory-extract' }), error => error.code === code);
+      } finally { fs.writeFileSync(file, bytes); }
+    }
+  } finally {
+    if (savedForgeHome === undefined) delete process.env.FORGE_HOME; else process.env.FORGE_HOME = savedForgeHome;
+  }
   assert.match(installedMemoryPrompt, /Read-only memory extraction/);
   assert.match(installedMemoryPrompt, /installed memory fixture/);
   assert.match(installedMemoryPrompt, /project-specific, non-obvious, durable facts/);
@@ -198,8 +223,8 @@ test('delivery references cover native, sidecar and headless task/slice/mileston
     assert.match(source, /complete sibling[\s\S]*DELIVERY\.json/i);
     assert.match(source, /forge-delivery\.js/);
   }
-  for (const file of ['execute-task.md', 'complete-slice.md', 'complete-milestone.md']) {
-    const source = fs.readFileSync(path.join(TEMPLATE_SRC, file), 'utf8');
+  for (const unitType of ['execute-task', 'complete-slice', 'complete-milestone']) {
+    const source = require('./forge-prompt').renderPrompt({ cwd: ROOT, unitType, milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' }).prompt;
     assert.match(source, /forge-delivery\.js/);
     assert.match(source, /--owner-root/);
     assert.match(source, /--code-dir/);

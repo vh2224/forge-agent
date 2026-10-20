@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "forge:empirical-evaluation:v1",
+  "title": "Bounded empirical evaluation input or descriptive report",
+  "oneOf": [
+    { "$ref": "#/$defs/input" },
+    { "$ref": "#/$defs/report" }
+  ],
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "label": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,160}$" },
+    "split": { "enum": ["historical-diagnostic", "adjustment", "reserved", "prospective"] },
+    "arm": { "enum": ["baseline", "memory", "procedure", "preparation", "review", "combined"] },
+    "dimensionName": {
+      "enum": ["functional", "tests", "uat", "canonical_autonomy", "exception", "interruptions", "interventions",
+        "human_effort", "duration", "package_bytes", "package_tokens", "provider_input_tokens", "provider_output_tokens", "cost"]
+    },
+    "source": {
+      "type": "object",
+      "required": ["id", "kind", "path", "sha256", "revision", "captured_at", "timezone", "synthetic"],
+      "properties": {
+        "id": { "$ref": "#/$defs/label" },
+        "kind": { "enum": ["baseline", "context-comparison", "procedure-evidence", "protocol", "outcome", "execution-start", "baseline-report", "context-report", "procedure-report"] },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/hash" },
+        "revision": { "$ref": "#/$defs/label" },
+        "captured_at": { "type": "string", "format": "date-time" },
+        "timezone": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "synthetic": { "type": "boolean" }
+      },
+      "description": "Caller-authorized root-relative path; stable bounded read and hash pin required. Imported roots and commands have no authority."
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["id", "arm", "protocol_source"],
+      "properties": {
+        "id": { "$ref": "#/$defs/label" },
+        "arm": { "$ref": "#/$defs/arm" },
+        "protocol_source": { "$ref": "#/$defs/label" }
+      }
+    },
+    "inputCase": {
+      "type": "object",
+      "required": ["id", "delivery_id", "candidate_id", "family_id", "split", "evidence_type", "synthetic", "baseline_source", "baseline_case_id", "outcome_source"],
+      "properties": {
+        "id": { "$ref": "#/$defs/label" },
+        "delivery_id": { "$ref": "#/$defs/label" },
+        "candidate_id": { "$ref": "#/$defs/label" },
+        "family_id": { "$ref": "#/$defs/label" },
+        "split": { "$ref": "#/$defs/split" },
+        "evidence_type": { "enum": ["historical", "prospective", "synthetic"] },
+        "synthetic": { "type": "boolean" },
+        "baseline_source": { "$ref": "#/$defs/label" },
+        "baseline_case_id": { "$ref": "#/$defs/label" },
+        "outcome_source": { "$ref": "#/$defs/label" },
+        "context_source": { "$ref": "#/$defs/label" },
+        "procedure_source": { "$ref": "#/$defs/label" },
+        "execution_start_source": { "$ref": "#/$defs/label", "description": "Required for eligibility; absence remains an explicit exclusion." }
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["schema_version", "kind", "sources", "candidates", "cases"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "empirical-evaluation-input" },
+        "sources": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/source" } },
+        "candidates": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/candidate" } },
+        "cases": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/inputCase" } }
+      }
+    },
+    "policy": {
+      "type": ["object", "null"],
+      "description": "Absent or malformed criteria remain reportable and ineligible; never inferred from outcomes.",
+      "properties": {
+        "id": { "$ref": "#/$defs/label" },
+        "arm": { "$ref": "#/$defs/arm" },
+        "hypothesis": { "type": "string" },
+        "primary_dimension": { "$ref": "#/$defs/dimensionName" },
+        "non_regression": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0 } },
+        "risk": { "type": "string" },
+        "review": { "type": "string" },
+        "rejection_criteria": { "type": "array", "items": { "type": "string" } },
+        "minimum_sample": {
+          "type": "object",
+          "properties": { "deliveries": { "type": "integer", "minimum": 1 }, "families": { "type": "integer", "minimum": 2 } }
+        },
+        "split_sha256": { "$ref": "#/$defs/hash" },
+        "declared_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      }
+    },
+    "executionStart": {
+      "type": "object",
+      "required": ["schema_version", "case_id", "started_at", "registration_sha256", "controls"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "case_id": { "$ref": "#/$defs/label" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "registration_sha256": { "$ref": "#/$defs/hash" },
+        "controls": { "type": "object" }
+      },
+      "description": "Source payload. Complete registration fingerprint and executed controls must match; freeze/policy/enrollment strictly precede start, which strictly precedes outcome. Hash identity is not authentication."
+    },
+    "isolatedComparison": {
+      "type": "object",
+      "required": ["arm", "case_id", "protocol_sha256", "outcome_sha256"],
+      "properties": {
+        "arm": { "enum": ["memory", "procedure", "preparation", "review"] },
+        "case_id": { "$ref": "#/$defs/label" },
+        "protocol_sha256": { "$ref": "#/$defs/hash" },
+        "outcome_sha256": { "$ref": "#/$defs/hash" }
+      },
+      "description": "Combined registration requires exactly one per isolated arm, validated by the evaluator against selected eligible cases, matching executed controls and actual comparator outputs; self-declared validity is ignored."
+    },
+    "dimension": {
+      "type": "object",
+      "required": ["value", "unit", "state", "method", "numerator", "denominator", "references", "limitations"],
+      "properties": {
+        "value": { "type": ["number", "boolean", "null"] },
+        "unit": { "type": "string" },
+        "state": { "enum": ["observed", "derived", "estimated", "unknown", "invalid", "conflict"] },
+        "method": { "type": "string" },
+        "numerator": { "type": ["number", "null"] },
+        "denominator": { "type": ["number", "null"] },
+        "references": { "type": "array" },
+        "limitations": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "required": ["functional", "tests", "uat", "canonical_autonomy", "exception", "interruptions", "interventions", "human_effort", "duration", "package_bytes", "package_tokens", "provider_input_tokens", "provider_output_tokens", "cost"],
+      "additionalProperties": { "$ref": "#/$defs/dimension" }
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["numerator", "denominator", "coverage", "method", "states", "deliveries", "limitations"],
+      "properties": {
+        "numerator": { "type": "integer", "minimum": 0 },
+        "denominator": { "type": "integer", "minimum": 0 },
+        "coverage": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "method": { "type": "string" },
+        "states": { "type": "object" },
+        "deliveries": { "type": "array", "items": { "$ref": "#/$defs/dimension" } },
+        "limitations": { "type": "array" }
+      }
+    },
+    "case": {
+      "type": "object",
+      "required": ["id", "delivery_id", "candidate_id", "family_id", "split", "synthetic", "eligible", "exclusions", "failed", "dimensions", "source_ids"],
+      "properties": {
+        "id": { "$ref": "#/$defs/label" },
+        "delivery_id": { "$ref": "#/$defs/label" },
+        "candidate_id": { "$ref": "#/$defs/label" },
+        "family_id": { "$ref": "#/$defs/label" },
+        "split": { "$ref": "#/$defs/split" },
+        "synthetic": { "type": "boolean" },
+        "eligible": { "type": "boolean" },
+        "failed": { "type": "boolean" },
+        "exclusions": { "type": "array", "items": { "type": "string" } },
+        "policy": { "type": ["object", "null"], "description": "Original selected policy fields; invalid values retained as diagnostic facts, never eligibility." },
+        "dimensions": { "$ref": "#/$defs/dimensions" },
+        "source_ids": { "type": "array", "items": { "$ref": "#/$defs/label" } }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["status", "apply_policy", "reason"],
+      "properties": {
+        "status": { "const": "preserve-defaults" },
+        "apply_policy": { "const": false },
+        "reason": { "enum": ["zero_eligible_prospective_cases", "prospective_validation_pending"] }
+      },
+      "description": "T04 owns recommendation policy. This report cannot apply or change defaults."
+    },
+    "report": {
+      "type": "object",
+      "required": ["schema_version", "kind", "comparative_ready", "functional_gain", "prospective_cases", "decision", "candidates", "cases", "populations", "technical_evidence", "provenance", "diagnostics", "limitations"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "const": "empirical-evaluation-report" },
+        "comparative_ready": { "const": false },
+        "functional_gain": { "type": "null" },
+        "prospective_cases": { "type": "integer", "minimum": 0 },
+        "decision": { "$ref": "#/$defs/recommendation" },
+        "candidates": { "type": "array" },
+        "cases": { "type": "array", "items": { "$ref": "#/$defs/case" } },
+        "populations": { "type": "object" },
+        "technical_evidence": { "type": "object" },
+        "provenance": { "type": "array", "items": { "type": "object", "required": ["id", "available"], "properties": { "id": { "$ref": "#/$defs/label" }, "available": { "type": "boolean" } } } },
+        "diagnostics": { "type": "array" },
+        "limitations": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

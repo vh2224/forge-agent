@@ -16,6 +16,85 @@ const crypto = require('crypto');
 const { countTokens } = require('./forge-tokens.js');
 const { resolveForgePaths } = require('./forge-home.js');
 const forgeIds = require('./forge-ids.js');
+const { selectMemoryContext } = require('./forge-memory-context.js');
+const { loadProcedureContext } = require('./forge-procedure-context.js');
+
+const PROCEDURE_UNITS = new Set([
+  'discuss-milestone', 'discuss-slice', 'research-milestone', 'research-slice',
+  'plan-milestone', 'plan-slice', 'plan-check', 'complete-slice', 'complete-milestone',
+  'execute-task', 'execute-loose-task',
+]);
+
+// A marker is never provenance. Only freshly loaded metadata plus the exact
+// canonical segment can authorize reuse of an already composed prompt.
+function composeProcedurePrompt(prompt, procedure, provenance) {
+  let text = String(prompt);
+  const artifact = /^---\r?\n([\s\S]*?)\r?\n---\r?\n\r?\n([\s\S]*)$/.exec(text);
+  if (artifact && /^procedure_context: /m.test(artifact[1])) {
+    try {
+      const metadata = JSON.parse(/^procedure_context: (.+)$/m.exec(artifact[1])[1]);
+      const fingerprint = JSON.parse(/^final_prompt_sha256: (.+)$/m.exec(artifact[1])[1]);
+      if (crypto.createHash('sha256').update(artifact[2]).digest('hex') !== fingerprint) throw new Error('artifact hash');
+      if (provenance && !require('node:util').isDeepStrictEqual(provenance, metadata)) throw new Error('artifact provenance');
+      provenance = metadata;
+      text = artifact[2];
+    } catch {
+      const error = new Error('Materialized procedure prompt has inconsistent metadata or body hash');
+      error.code = 'procedure-composition-inconsistent';
+      throw error;
+    }
+  }
+  const { content, ...metadata } = procedure;
+  const stack = [];
+  const dataRanges = [];
+  let dataStart;
+  let insideData = false;
+  let malformedData = false;
+  const procedurePosition = text.indexOf(content);
+  for (const match of text.matchAll(/^\[(?:(DATA FROM|END DATA FROM) ("[^"\r\n]+")[^\]\r\n]*|(END DATA))\]\r?$/gm)) {
+    if (match.index < procedurePosition && match[1] === 'DATA FROM') insideData = true;
+    if (match[1] === 'DATA FROM') {
+      if (!stack.length) dataStart = match.index;
+      stack.push(match[2]);
+    }
+    else if (match[3] ? stack.length === 0 || !stack.pop() : stack.pop() !== match[2]) malformedData = true;
+    if (!stack.length && dataStart !== undefined) {
+      dataRanges.push([dataStart, match.index + match[0].length]);
+      dataStart = undefined;
+    }
+    if (match.index < procedurePosition) insideData = stack.length > 0;
+  }
+  if (malformedData || stack.length) {
+    const error = new Error('Procedure prompt contains an unclosed or mismatched informational DATA envelope');
+    error.code = 'procedure-composition-inconsistent';
+    throw error;
+  }
+  // Only instruction lines outside DATA participate in composition provenance.
+  // Literal markers in quoted review input are informational content.
+  const markers = [...text.matchAll(/<!-- forge-procedure:([^>]+) -->/g)]
+    .filter(match => !dataRanges.some(([start, end]) => match.index >= start && match.index < end))
+    .map(match => match[1]);
+  if (markers.length === 0 && procedurePosition < 0) return `${text}\n\n${content}`;
+  const expected = procedure.modules.map(module => module.id);
+  if (!require('node:util').isDeepStrictEqual(provenance, metadata)
+      || text.split(content).length !== 2
+      || markers.length !== expected.length
+      || insideData
+      || expected.some(id => markers.filter(marker => marker === id).length !== 1)) {
+    const error = new Error('Procedure composition does not match freshly loaded provenance and canonical bytes');
+    error.code = 'procedure-composition-inconsistent';
+    throw error;
+  }
+  return text;
+}
+
+function separateProcedurePrompt(text, procedure, provenance) {
+  if (!String(text).includes('<!-- forge-procedure:')) {
+    composeProcedurePrompt(text, procedure, provenance);
+    return String(text);
+  }
+  return composeProcedurePrompt(text, procedure, provenance).replace(procedure.content, '');
+}
 
 const TEMPLATE_FILES = Object.freeze({
   'execute-task': 'execute-task.md',
@@ -364,7 +443,8 @@ function loadStandards(cwd, standardsPath) {
   return extractStandards(fs.readFileSync(safeTarget, 'utf8'));
 }
 
-function formatMemoryResult(result, maxTokens) {
+function formatMemoryResult(result, maxTokens, limit = 12) {
+  if (maxTokens < 2 || limit === 0) return '';
   if (result == null) return '(none)';
   const pointer = { source: MEMORY_FRAGMENT_POINTER };
   if (typeof result === 'string') return truncateContext(validateText(result.trim(), 'memories') || '(none)', maxTokens, pointer);
@@ -377,7 +457,7 @@ function formatMemoryResult(result, maxTokens) {
         ? result.memories
         : [];
   if (values.length === 0) return '(none)';
-  const lines = values.map(item => {
+  const lines = values.slice(0, limit).map(item => {
     if (typeof item === 'string') return item;
     if (item && typeof item === 'object') return item.fact || item.text || item.content || JSON.stringify(item);
     return String(item);
@@ -386,8 +466,6 @@ function formatMemoryResult(result, maxTokens) {
 }
 
 function resolveMemories(options) {
-  if (options.memories != null) return formatMemoryResult(options.memories, options.memoryMaxTokens);
-
   const query = {
     cwd: options.cwd,
     unitType: options.unitType,
@@ -395,30 +473,29 @@ function resolveMemories(options) {
     milestoneId: options.milestoneId,
     sliceId: options.sliceId,
     taskId: options.taskId,
+    phase: options.unitType.startsWith('execute-') ? 'execute' : undefined,
     limit: options.memoryLimit,
     maxTokens: options.memoryMaxTokens,
-    query: options.memoryQuery || [
-      options.unitType,
-      options.milestoneId,
-      options.sliceId,
-      options.taskId,
-      options.description,
-    ].filter(Boolean).join(' '),
+    query: options.memoryQuery ?? options.description ?? '',
   };
-
-  if (typeof options.memoryProvider === 'function') {
-    return formatMemoryResult(options.memoryProvider(query), query.maxTokens);
+  // Keep legacy providers/overrides as bounded data; canonical lookup uses the
+  // same optional policy as the bundle, exactly once and only from this checkout.
+  if (options.memories != null || typeof options.memoryProvider === 'function') {
+    let markdown = '';
+    let status = query.limit === 0 || query.maxTokens === 0 ? 'disabled' : 'selected';
+    try {
+      if (query.limit > 0 && query.maxTokens >= 2) {
+        markdown = formatMemoryResult(options.memories ?? options.memoryProvider(query), query.maxTokens, query.limit);
+      }
+    } catch { status = 'optional-error'; }
+    if (options.onMemorySelection) options.onMemorySelection({ status, source: { provider: options.memories != null ? 'direct' : 'override' },
+      unit_type: query.unitType, limit: query.limit, max_tokens: query.maxTokens,
+      emitted_bytes: Buffer.byteLength(markdown, 'utf8'), selected: [] });
+    return markdown;
   }
-
-  // Only load the selector coupled to this renderer. Requiring a project-local
-  // `scripts/forge-memory.js` would execute arbitrary workspace JavaScript in
-  // the orchestrator process merely because a file had a matching name.
-  const api = require('./forge-memory.js');
-  if (typeof api.queryRelevant === 'function') {
-    return formatMemoryResult(api.queryRelevant(query), query.maxTokens);
-  }
-
-  return '(none)';
+  const { markdown, ...selection } = selectMemoryContext(query);
+  if (options.onMemorySelection) options.onMemorySelection(selection);
+  return markdown;
 }
 
 /**
@@ -444,6 +521,7 @@ function formatLedgerResult(result, maxTokens) {
 }
 
 function resolveLedger(options) {
+  if (options.ledgerMaxTokens === 0) return '';
   if (options.ledger != null) return formatLedgerResult(options.ledger, options.ledgerMaxTokens);
 
   const query = {
@@ -517,14 +595,15 @@ function validateRenderOptions(rawOptions) {
   options.thinking = validateText(options.thinking || 'adaptive', 'thinking', 128);
   options.planCheckMode = validateText(options.planCheckMode || 'advisory', 'plan_check_mode', 128);
   options.mustHavesCheckResults = validateText(options.mustHavesCheckResults || '(not run)', 'must_haves_check_results');
-  options.memoryLimit = boundedInteger(options.memoryLimit, 12, 1, 50, 'memory_limit');
-  options.memoryMaxTokens = boundedInteger(options.memoryMaxTokens, 1200, 2, MAX_CONTEXT_TOKENS, 'memory_max_tokens');
-  options.standardsMaxTokens = boundedInteger(options.standardsMaxTokens, 3000, 3, MAX_CONTEXT_TOKENS, 'standards_max_tokens');
+  options.memoryLimit = boundedInteger(options.memoryLimit, 12, 0, 50, 'memory_limit');
+  options.memoryMaxTokens = boundedInteger(options.memoryMaxTokens, 1200, 0, MAX_CONTEXT_TOKENS, 'memory_max_tokens');
+  if (options.onMemorySelection !== undefined && typeof options.onMemorySelection !== 'function') throw new Error('Invalid memory selection callback');
+  options.standardsMaxTokens = boundedInteger(options.standardsMaxTokens, 3000, 0, MAX_CONTEXT_TOKENS, 'standards_max_tokens');
   // The ledger snapshot budget default lives HERE, as a literal (S02 B2). The
   // skill lines that read `${PREFS[token_budget][ledger_snapshot]:-1500}` are
   // model-interpreted best effort; prefs-absent is this repo's real state, so
   // the renderer must resolve 1500 on its own with nothing configured anywhere.
-  options.ledgerMaxTokens = boundedInteger(options.ledgerMaxTokens, 1500, 2, MAX_CONTEXT_TOKENS, 'ledger_max_tokens');
+  options.ledgerMaxTokens = boundedInteger(options.ledgerMaxTokens, 1500, 0, MAX_CONTEXT_TOKENS, 'ledger_max_tokens');
   options.milestoneCleanup = validateText(options.milestoneCleanup || 'keep', 'milestone_cleanup', 128);
   if (!['keep', 'archive', 'delete'].includes(options.milestoneCleanup)) {
     throw new Error(`Invalid milestone_cleanup: ${options.milestoneCleanup}`);
@@ -675,9 +754,22 @@ function renderTemplate(template, values, source = '(inline)') {
 function renderPrompt(rawOptions) {
   const options = validateRenderOptions(rawOptions || {});
   const template = resolveTemplate(options.unitType, options);
+  // Fail closed before optional selection or prompt publication. The owner cwd
+  // still owns data/artifacts; isolated source procedures belong to CODE_DIR.
+  const procedure = PROCEDURE_UNITS.has(options.unitType) ? loadProcedureContext({
+    cwd: options.codeDir || options.cwd, forgeHome: options.forgeHome,
+    userHome: options.homeDir, env: options.env, phase: options.unitType,
+  }) : null;
   const values = buildValues(options, template.content);
+  // Resolve variables only in the template, preserving canonical module bytes.
   const basePrompt = renderTemplate(template.content, values, template.path);
-  const prompt = appendPendingContext(applyIsolationHeader(basePrompt, options), options);
+  const pendingPrompt = appendPendingContext(applyIsolationHeader(basePrompt, options), options);
+  const resolvedPrompt = options.unitType.startsWith('complete-')
+    ? `${pendingPrompt}\n## Procedure path bindings\nResolve procedure path variables using these literal values:\nWORKING_DIR: ${values.WORKING_DIR}\nFORGE_SCRIPTS_DIR: ${values.FORGE_SCRIPTS_DIR}\n`
+    : pendingPrompt;
+  // Validate DATA boundaries after every substitution and pending insertion,
+  // before materialization or native file-reading delivery can publish anything.
+  const prompt = procedure ? composeProcedurePrompt(resolvedPrompt, procedure, options.procedure_context) : resolvedPrompt;
   const templateSha256 = crypto.createHash('sha256').update(template.content).digest('hex');
   return {
     prompt,
@@ -686,6 +778,8 @@ function renderPrompt(rawOptions) {
     template_source: template.path,
     template_scope: template.scope,
     template_sha256: templateSha256,
+    ...(procedure ? { procedure_context: (({ content, ...metadata }) => metadata)(procedure) } : {}),
+    final_prompt_sha256: crypto.createHash('sha256').update(prompt).digest('hex'),
     unit_type: options.unitType,
     unit_id: options.taskId || options.sliceId || options.milestoneId,
     cwd: options.cwd,
@@ -735,6 +829,10 @@ function materializePrompt(rawOptions) {
     `token_method: ${yamlString(rendered.token_method)}`,
     `template_source: ${yamlString(rendered.template_source)}`,
     `template_sha256: ${yamlString(rendered.template_sha256)}`,
+    ...(rendered.procedure_context ? [
+      `procedure_context: ${JSON.stringify(rendered.procedure_context)}`,
+    ] : []),
+    `final_prompt_sha256: ${yamlString(rendered.final_prompt_sha256)}`,
     '---',
     '',
     rendered.prompt,
@@ -856,12 +954,12 @@ function cliOptions(args) {
     templateDir: args['template-dir'] || base.templateDir || base.template_dir,
     mustHavesCheckResults: base.mustHavesCheckResults || base.must_haves_check_results,
     memories: base.memories,
-    memoryQuery: args['memory-query'] || base.memoryQuery || base.memory_query,
-    memoryLimit: args['memory-limit'] || base.memoryLimit || base.memory_limit,
-    memoryMaxTokens: args['memory-max-tokens'] || base.memoryMaxTokens || base.memory_max_tokens,
-    standardsMaxTokens: args['standards-max-tokens'] || base.standardsMaxTokens || base.standards_max_tokens,
+    memoryQuery: args['memory-query'] ?? base.memoryQuery ?? base.memory_query,
+    memoryLimit: args['memory-limit'] ?? base.memoryLimit ?? base.memory_limit,
+    memoryMaxTokens: args['memory-max-tokens'] ?? base.memoryMaxTokens ?? base.memory_max_tokens,
+    standardsMaxTokens: args['standards-max-tokens'] ?? base.standardsMaxTokens ?? base.standards_max_tokens,
     ledger: args.ledger != null ? args.ledger : base.ledger,
-    ledgerMaxTokens: args['ledger-max-tokens'] || base.ledgerMaxTokens || base.ledger_max_tokens,
+    ledgerMaxTokens: args['ledger-max-tokens'] ?? base.ledgerMaxTokens ?? base.ledger_max_tokens,
     routingDomains: args['routing-domains'] || base.routingDomains || base.routing_domains,
     workspaceRepos: args['workspace-repos'] || base.workspaceRepos || base.workspace_repos,
     pendingContextFile: args['pending-context-file'] || base.pendingContextFile || base.pending_context_file,
@@ -939,6 +1037,8 @@ function cliMain(argv) {
 }
 
 module.exports = {
+  composeProcedurePrompt,
+  separateProcedurePrompt,
   TEMPLATE_FILES,
   candidateTemplateRoots,
   resolveTemplate,

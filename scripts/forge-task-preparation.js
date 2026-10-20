@@ -224,9 +224,13 @@ function preparationRequestFingerprint(request) {
 }
 
 function buildPreparationPrompt(request, contract = request.contract || phaseContract(request.phase)) {
+  const procedure = require('./forge-procedure-context').loadProcedureContext({
+    cwd: request.cwd, phase: `task-${request.phase}`,
+    forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..'),
+  });
   const input = JSON.stringify({ inputs: request.inputs || {}, continuation: request.continuation || null, pending_questions: request.pending_questions || [],
     execution_contract: request.execution_contract || null });
-  return [
+  const prompt = [
     `Standalone task preparation (${request.phase}) for ${request.taskId}.`,
     contract.instruction,
     `Required artifact format: ${contract.format}`,
@@ -242,6 +246,7 @@ function buildPreparationPrompt(request, contract = request.contract || phaseCon
     'result_json: <complete JSON envelope>',
     '---END-RESULT---',
   ].filter(Boolean).join('\n\n');
+  return require('./forge-prompt').composeProcedurePrompt(prompt, procedure, request.procedure_context);
 }
 
 function resolverOptions(request, contract) {
@@ -257,6 +262,11 @@ function resolverOptions(request, contract) {
 }
 
 function deliveryRequest(request, route, prompt, contract = request.contract || phaseContract(request.phase)) {
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd,
+    phase: `task-${request.phase}`, forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+  const { content: procedureText, ...procedure_context } = procedure;
+  // Validate the builder's exact module bytes against the current physical corpus.
+  prompt = require('./forge-prompt').composeProcedurePrompt(prompt, procedure, procedure_context);
   return {
     schema_version: REQUEST_SCHEMA_VERSION,
     scope: 'standalone-task', phase: request.phase, taskId: request.taskId,
@@ -265,7 +275,7 @@ function deliveryRequest(request, route, prompt, contract = request.contract || 
     dispatchId: request.dispatchId, resultFile: request.resultFile,
     constraints: request.constraints || { auto_commit: false, deploy: false },
     inputs: request.inputs || {}, pending_questions: request.pending_questions || [], ...(request.continuation ? { continuation: request.continuation } : {}),
-    unitType: contract.unitType, route, prompt,
+    unitType: contract.unitType, route, prompt, procedure_context,
     ...(request.recoveryStateFile ? { recoveryStateFile: request.recoveryStateFile } : {}),
     ...(request.ownerBroker ? { ownerBroker: request.ownerBroker } : {}),
     ...(request.execution_contract ? { execution_contract: request.execution_contract } : {}),
@@ -428,7 +438,9 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   } catch (error) {
     return refused(error.stage || 'resolution', error.code || 'preparation-resolution-failed', route);
   }
-  const prompt = buildPreparationPrompt(request);
+  let prompt;
+  try { prompt = buildPreparationPrompt(request); }
+  catch (error) { return refused('procedure', error.code || 'procedure-context-invalid', route, false); }
   const delivery = deliveryRequest(request, route, prompt);
   const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
   if (route.worker_mode === 'sidecar') {

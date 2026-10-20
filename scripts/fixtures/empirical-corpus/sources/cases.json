@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "repository": "https://example.invalid/repository",
+  "subtree": "https://example.invalid/repository/project",
+  "info": "<?xml version=\"1.0\"?><info><entry kind=\"dir\" revision=\"2\"><url>https://example.invalid/repository/project</url><repository><root>https://example.invalid/repository</root><uuid>synthetic</uuid></repository></entry></info>",
+  "log": "<?xml version=\"1.0\"?><log><logentry revision=\"2\"><author>fixture</author><date>2026-01-01T12:00:00Z</date><paths><path action=\"D\">/project/history/removed.txt</path></paths><msg>synthetic deletion</msg></logentry></log>",
+  "list": "<?xml version=\"1.0\"?><lists><list path=\"synthetic\"><entry kind=\"file\"><name>before.txt</name></entry></list></lists>",
+  "content": "Synthetic prior revision.\n",
+  "valid_requests": [
+    { "operation": "info" },
+    { "operation": "cat", "revision": "1", "peg": "1" },
+    { "operation": "log", "revision": "2", "peg": "2" },
+    { "operation": "list", "revision": "2", "peg": "2" }
+  ],
+  "mutations": [
+    "update", "cleanup", "revert", "propset", "propdel", "commit",
+    "checkout", "add", "delete", "mkdir", "move", "copy", "switch",
+    "merge", "import", "export", "relocate", "upgrade", "lock", "unlock",
+    "build", "execute"
+  ],
+  "bad_paths": [
+    "../secret", "/absolute", "C:/absolute", "file:stream", "a/../b",
+    "a\\b", "a//b", "a/./b", "NUL", "a.", "a ", "--config-dir",
+    "a%40HEAD", "a%2fb", "a?b", "a#b"
+  ],
+  "literal_paths": ["history@v1/notes@owner@@.txt", "history@v1/notes@1", "history@v1/notes@HEAD", "history@v1/notes@"],
+  "bad_urls": [
+    "https://user:password@example.invalid/repository",
+    "https://example.invalid/repository/../foreign",
+    "https://example.invalid/repository/%2e%2e/foreign",
+    "https://example.invalid/repository/%2fescape",
+    "https://example.invalid/repository/%252e%252e/escape",
+    "https://example.invalid/repository/%5croot",
+    "https://example.invalid/repository?options=1",
+    "https://example.invalid/repository#fragment",
+    "https://user%40name@example.invalid/repository",
+    "https://example.invalid/repository/%2e/escape",
+    "https://example.invalid/repository/%40/%2e%2e/escape",
+    "https://example.invalid/repository/name%3fquery",
+    "https://example.invalid/repository/name%23fragment",
+    "file://remote.example/repository",
+    "svn+ssh://example.invalid/repository"
+  ],
+  "bad_revisions": ["HEAD", "BASE", "1:HEAD", "1:", "-1", "1 --config-dir", "1;echo", "01", "1.2", "999999999999999999999"]
+}

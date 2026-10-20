@@ -986,6 +986,14 @@ function aggregateMustHaves(plans) {
  * @returns {object}  Result object for formatVerificationMd and JSON stdout
  */
 function runSliceVerification(opts) {
+  const { content, ...procedure_context } = require('./forge-procedure-context').loadProcedureContext({
+    cwd: opts.codeDir || opts.cwd || process.cwd(), phase: 'verification',
+    forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..'),
+  });
+  return { ...runSliceArtifactVerification(opts), procedure_context };
+}
+
+function runSliceArtifactVerification(opts) {
   const start = process.hrtime.bigint();
 
   const sliceDir = path.join(opts.cwd, '.gsd', 'milestones', opts.milestone, 'slices', opts.slice);
@@ -1310,6 +1318,14 @@ function writeVerificationMd(sliceDir, sliceId, md) {
 // Legacy plans (no structured must_haves) pass through untouched — the same
 // posture every other consumer of the schema takes.
 function runTaskArtifactCheck(opts) {
+  const { content, ...procedure_context } = require('./forge-procedure-context').loadProcedureContext({
+    cwd: opts.codeDir || opts.cwd || process.cwd(), phase: 'verification',
+    forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..'),
+  });
+  return { ...runTaskArtifacts(opts), procedure_context };
+}
+
+function runTaskArtifacts(opts) {
   const cwd = opts.codeDir || opts.cwd || process.cwd();
   const raw = fs.readFileSync(opts.taskPlan, 'utf8');
   const { hasStructuredMustHaves, parseMustHaves } = require('./forge-must-haves.js');
@@ -1343,6 +1359,7 @@ function runTaskArtifactCheck(opts) {
     passed: missing.length === 0,
     missing,
     advisory_flags: advisory,
+    rows: rowsResult.rows,
     checked: { artifacts: (parsed.artifacts || []).length, expected: expected.length },
   };
 }

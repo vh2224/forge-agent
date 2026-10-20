@@ -9,6 +9,7 @@ const questions = require('./forge-codex-questions');
 const path = require('path');
 const { resolveForgePaths } = require('./forge-home');
 const sourceManifest = require('./forge-source-manifest');
+const { loadAllProcedureContexts } = require('./forge-procedure-context');
 const ownership = require('./forge-projection-ownership');
 const PROVENANCE = require('./forge-projection-provenance');
 const selfProjection = require('./forge-projection-self');
@@ -229,6 +230,16 @@ function tomlMultiline(value) {
 }
 function render(options = {}) {
   const root = roots(options); const manifest = manifestFor(root, options); const sources = codexSources(manifest); const artifacts = [];
+  // Legacy inventories without procedures remain valid. A current source cannot
+  // silently downgrade itself by removing the mandatory surface declaration.
+  const declaresProcedures = manifest.sources.some(source => source.source_id === 'procedures');
+  if (!declaresProcedures && fs.existsSync(path.join(root.repo, 'shared/forge-procedures.json'))) {
+    throw new Error('procedure-inventory-missing: current source requires the procedures surface');
+  }
+  const sourceProcedures = declaresProcedures ? loadAllProcedureContexts({ cwd: root.repo, forgeHome: root.repo }) : [];
+  const procedureContext = declaresProcedures
+    ? loadAllProcedureContexts({ cwd: root.projectRoot, forgeHome: root.repo,
+      requiredPhases: sourceProcedures.map(procedure => procedure.phase) }).find(context => context.phase === 'distribution') : null;
   const add = (sourceId, source, destination, content, kind) => artifacts.push({ source_id: sourceId, source, destination, content: norm(content), newline: 'lf', kind });
   // Reuse the canonical trusted-authority contract from forge-interaction; never mint consent here.
   const rewriteMarkdown = (content) => interaction.project(rewriteDispatchDialect(content, {
@@ -268,7 +279,7 @@ function render(options = {}) {
   const capabilities = { version: VERSION, runtime: RUNTIME, generated: true, surfaces: manifest.sources.map((source) => ({ source_id: source.source_id, status: source.conditional && source.conditional.codex ? source.conditional.codex.status : 'common' })) };
   add('codex-capabilities', 'forge-codex-capabilities.json', path.join(root.forgeHome, 'adapters', 'codex', 'capabilities.json'), `${JSON.stringify(capabilities, null, 2)}\n`, 'capabilities');
   artifacts.sort((a, b) => a.destination.localeCompare(b.destination));
-  return { runtime: RUNTIME, version: VERSION, repo: root.repo, forge_home: root.forgeHome, codex_home: root.codexHome, project_root: root.projectRoot, artifacts };
+  return { runtime: RUNTIME, version: VERSION, repo: root.repo, forge_home: root.forgeHome, codex_home: root.codexHome, project_root: root.projectRoot, procedure_context: procedureContext, artifacts };
 }
 function write(options = {}) {
   const report = render(options);

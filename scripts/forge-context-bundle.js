@@ -15,7 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { renderMemory } = require('./forge-projection.js');
+const { selectMemoryContext } = require('./forge-memory-context.js');
 
 /**
  * Extract a level-two markdown section, including its heading, up to the next level-two
@@ -42,29 +42,15 @@ function readFileOrEmpty(file) {
 }
 
 /**
- * Limit rendered memory to its first N entries. renderMemory already ranks entries, and
- * each entry begins with an HTML delimiter comment (`<!-- gsd-auto-memory ... -->`), not a
- * markdown heading — preserving the preamble (title + blockquote lines) before the first
- * entry is useful.
- */
-function firstMemoryEntries(markdown, limit) {
-  if (typeof markdown !== 'string' || !markdown.trim()) return '';
-  if (markdown.includes('_No memory entries yet._')) return '';
-  const starts = [...markdown.matchAll(/^<!-- gsd-auto-memory /gm)].map((match) => match.index);
-  if (starts.length <= limit) return markdown.trim();
-  return markdown.slice(0, starts[limit]).trim();
-}
-
-/**
  * Build the three informational sections in canonical order. Missing sources are normal:
  * this is intentionally best-effort so absent context never blocks a sidecar dispatch.
  *
  * @param {{cwd?: string, sliceContext?: string}} opts
  * @returns {string}
  */
-function buildContextBundle(opts) {
+function buildContextBundleResult(opts) {
   opts = opts || {};
-  const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
+  const cwd = path.resolve(opts.owner || opts.cwd || process.cwd());
   const sections = [];
 
   const standards = readFileOrEmpty(path.join(cwd, '.gsd', 'CODING-STANDARDS.md'));
@@ -76,26 +62,29 @@ function buildContextBundle(opts) {
     if (decisions) sections.push(decisions.replace(/^## Decisions/m, '## Slice Decisions'));
   }
 
-  try {
-    const memory = firstMemoryEntries(renderMemory(cwd), 10);
-    if (memory) sections.push(`## Project Memory\n\n${memory}`);
-  } catch {
-    // Projection is optional context; it must never prevent dispatch.
-  }
+  const memory = selectMemoryContext({ ...opts, cwd, limit: opts.limit !== undefined ? opts.limit : opts.memoryLimit !== undefined ? opts.memoryLimit : 10, maxTokens: opts.maxTokens !== undefined ? opts.maxTokens : opts.memoryMaxTokens !== undefined ? opts.memoryMaxTokens : 2000 });
+  if (memory.markdown) sections.push(memory.markdown);
+  const { markdown, ...selection } = memory;
+  return { markdown: sections.join('\n\n'), selection };
+}
 
-  return sections.join('\n\n');
+function buildContextBundle(opts) {
+  return buildContextBundleResult(opts).markdown;
 }
 
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith('--')) args[argv[i].slice(2)] = argv[++i];
+    const known = ['cwd', 'owner', 'slice-context', 'out', 'query', 'query-file', 'description', 'unit-type', 'phase', 'unit-id', 'milestone-id', 'slice-id', 'task-id', 'limit', 'max-tokens', 'selection-report'];
+    if (!argv[i].startsWith('--') || !known.includes(argv[i].slice(2)) || i + 1 >= argv.length) throw new Error('Invalid bundle arguments');
+    args[argv[i].slice(2)] = argv[++i];
   }
   return args;
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  let args;
+  try { args = parseArgs(process.argv.slice(2)); } catch { process.stderr.write('forge-context-bundle: invalid arguments\n'); process.exitCode = 2; return; }
   if (!args.out) {
     process.stderr.write('forge-context-bundle: --out <file> is required\n');
     process.exitCode = 2;
@@ -104,13 +93,20 @@ function main() {
   try {
     const out = path.resolve(args.out);
     fs.mkdirSync(path.dirname(out), { recursive: true });
-    fs.writeFileSync(out, buildContextBundle({ cwd: args.cwd, sliceContext: args['slice-context'] }), 'utf8');
+    if (args.query !== undefined && args['query-file'] !== undefined) throw new Error('Ambiguous query');
+    const query = args['query-file'] ? fs.readFileSync(path.resolve(args['query-file']), 'utf8') : args.query;
+    const result = buildContextBundleResult({ cwd: args.cwd, owner: args.owner, sliceContext: args['slice-context'],
+      query, description: args.description, unitType: args['unit-type'], phase: args.phase,
+      unitId: args['unit-id'], milestoneId: args['milestone-id'], sliceId: args['slice-id'], taskId: args['task-id'],
+      limit: args.limit, maxTokens: args['max-tokens'] });
+    fs.writeFileSync(out, result.markdown, 'utf8');
+    if (args['selection-report']) fs.writeFileSync(path.resolve(args['selection-report']), JSON.stringify(result.selection, null, 2) + '\n', 'utf8');
   } catch (error) {
-    process.stderr.write(`forge-context-bundle: ${error.message}\n`);
+    process.stderr.write('forge-context-bundle: invalid input or unreadable source\n');
     process.exitCode = 2;
   }
 }
 
-module.exports = { buildContextBundle, extractSection };
+module.exports = { buildContextBundle, buildContextBundleResult, extractSection };
 
 if (require.main === module) main();

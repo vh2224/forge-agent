@@ -7,14 +7,27 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+function stageProcedures(home) {
+  const source = path.resolve(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
+  for (const relative of ['shared/forge-procedures.json', ...manifest.modules.map(module => module.path)]) {
+    const target = path.join(home, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(source, relative), target);
+  }
+}
 // Set isolation before loading modules which may cache preference sources.
 if (!['--isolated', '--restart-fixture', '--milestone-restart'].includes(process.argv[2])) {
   const bootstrap = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-home-')));
   try {
-    const run = spawnSync(process.execPath, [__filename, '--isolated'], { encoding: 'utf8', timeout: 120000,
+    stageProcedures(path.join(bootstrap, 'forge'));
+    // Bound the aggregate separately from each delegated child's 120s deadline.
+    // This cap includes integration scenarios and need not fit all child maxima.
+    const run = spawnSync(process.execPath, [__filename, '--isolated'], { encoding: 'utf8', timeout: 600000,
       env: { ...process.env, HOME: bootstrap, USERPROFILE: bootstrap, CODEX_HOME: path.join(bootstrap, '.codex'),
         CLAUDE_CONFIG_DIR: path.join(bootstrap, '.claude'), FORGE_HOME: path.join(bootstrap, 'forge') } });
     process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
+    if (run.error) process.stderr.write(`workflow harness: ${run.error.code || 'spawn-error'}; signal=${run.signal || 'none'}\n`);
     process.exitCode = run.status === 0 ? 0 : 1;
   } finally { fs.rmSync(bootstrap, { recursive: true, force: true }); }
 } else {
@@ -119,10 +132,20 @@ async function main() {
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
     CLAUDE_CONFIG_DIR: path.join(home, '.claude'), FORGE_HOME: path.join(root, 'forge-home') };
   try {
+    stageProcedures(env.FORGE_HOME);
+    const loader = require('./forge-procedure-context');
+    const loaded = loader.loadProcedureContext({ cwd: root, forgeHome: env.FORGE_HOME, phase: 'recovery' });
+    assert.equal(loaded.root, fs.realpathSync(env.FORGE_HOME));
+    assert(loaded.content.includes('60000ms'));
     const roots = require('./forge-code-roots.test');
     for (const file of ['shared/forge-dispatch.md', 'shared/forge-bidirectional-sidecar.md',
       'skills/forge-task/SKILL.md', 'skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
       const contract = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+      if (file.includes('forge-auto/') || file.includes('forge-next/')) {
+        assert.match(contract, /forge-procedure-context\.js[\s\S]{0,150}--phase recovery/);
+        assert.match(contract, /shared\/forge-dispatch\.md/);
+        continue;
+      }
       for (const token of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization',
         'createRecoveryAuthority', 'recoverStandaloneTask', 'recoverUnitSidecar', 'captureMilestoneBaseline',
         'reconcileMilestoneAttempt', '60000ms', 'shared/forge-interaction.md']) assert(contract.includes(token), `${file}: ${token}`);
@@ -297,10 +320,18 @@ async function main() {
 
     // Reuse focused suites without copying their unit-level cases. Their child
     // process exit is mandatory and their named output remains in gate evidence.
-    for (const suite of ['forge-task-preparation.test.js', 'forge-unit-sidecar.test.js',
-      'forge-attempt-recovery.test.js', 'forge-unit-controller.test.js']) {
-      process.stdout.write(child([path.join(__dirname, suite)], env));
-      console.log(`PASS delegated contract suite ${suite}`);
+    for (const [suite, ...selectors] of [
+      ['forge-task-preparation.test.js'],
+      ['forge-unit-sidecar.test.js', '--recovery-contracts'],
+      ['forge-unit-sidecar.test.js', '--pre-spawn-sidecar'],
+      ['forge-unit-sidecar.test.js', '--pre-spawn-native'],
+      ['forge-attempt-recovery.test.js'],
+      ['forge-unit-controller.test.js'],
+    ]) {
+      // Delegated source suites explicitly materialize source-root provenance.
+      // Keep that root consistent instead of mixing it with this workflow's install fixture.
+      process.stdout.write(child([path.join(__dirname, suite), ...selectors], { ...env, FORGE_HOME: path.resolve(__dirname, '..') }));
+      console.log(`PASS delegated contract suite ${[suite, ...selectors].join(' ')}`);
     }
     assert.equal(typeof controller.begin, 'function'); assert.equal(typeof controller.resume, 'function');
     console.log('PASS R3/R5/R6/R7: focused caller/receipt/root/telemetry/controller/lease negatives above; no real provider or UAT');

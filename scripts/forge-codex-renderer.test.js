@@ -546,5 +546,34 @@ try {
   const again = renderer.render({ repo: root, ...PRODUCTION_DISPATCH_DIALECT,
     codexHome: codex, projectRoot: project, forgeHome: forge });
   assert.deepStrictEqual(repeat.artifacts, again.artifacts, 'recovery projection is deterministic');
+  assert(repeat.procedure_context.content.includes('<!-- forge-procedure:distribution -->'));
+  assert(repeat.procedure_context.content.includes('<!-- forge-procedure:core -->'));
+  const procedureRepo = fixtureRepository('procedure-closure', 'Fixture dispatch\n').repo;
+  const procedures = JSON.parse(fs.readFileSync(path.join(root, 'shared/forge-procedures.json'), 'utf8'));
+  for (const file of ['shared/forge-procedures.json', 'shared/schemas/procedures.schema.json', ...procedures.modules.map(module => module.path)]) {
+    fs.mkdirSync(path.dirname(path.join(procedureRepo, file)), { recursive: true });
+    fs.copyFileSync(path.join(root, file), path.join(procedureRepo, file));
+  }
+  const procedureManifest = fixtureManifest();
+  procedureManifest.sources.push(realManifest.sources.find(source => source.source_id === 'procedures'));
+  const procedureProject = path.join(temp, 'partial-procedure-project');
+  const procedureOptions = { repo: procedureRepo, manifest: procedureManifest, ...PRODUCTION_DISPATCH_DIALECT,
+    projectRoot: procedureProject, codexHome: path.join(temp, 'invalid-procedure-host'), forgeHome: path.join(temp, 'invalid-procedure-forge') };
+  const procedureFile = path.join(procedureRepo, 'shared/forge-procedures.json');
+  const procedureBytes = fs.readFileSync(procedureFile);
+  fs.unlinkSync(procedureFile);
+  assert.throws(() => renderer.write(procedureOptions), /procedure-manifest-missing/);
+  fs.writeFileSync(procedureFile, procedureBytes);
+  const distributionFile = path.join(procedureRepo, 'shared/forge-procedure-distribution.md');
+  const distributionBytes = fs.readFileSync(distributionFile);
+  fs.unlinkSync(distributionFile);
+  assert.throws(() => renderer.write(procedureOptions), /procedure-file-unreadable/);
+  fs.writeFileSync(distributionFile, distributionBytes);
+  assert.throws(() => renderer.write({ ...procedureOptions, manifest: fixtureManifest() }), /procedure-inventory-missing/);
+  fs.mkdirSync(path.join(procedureProject, 'shared'), { recursive: true });
+  fs.writeFileSync(path.join(procedureProject, 'shared/forge-procedures.json'), procedureBytes);
+  assert.throws(() => renderer.write(procedureOptions), /procedure-file-unreadable/);
+  assert(!fs.existsSync(procedureOptions.codexHome), 'invalid closure wrote host artifacts');
+  assert(!fs.existsSync(path.join(procedureProject, 'AGENTS.md')));
   console.log('forge-codex-renderer tests passed');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

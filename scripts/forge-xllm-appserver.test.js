@@ -78,7 +78,8 @@ function captureState() {
   if (capture) fs.writeFileSync(capture, JSON.stringify({ threadParams, turnParams, turnStarts }, null, 2));
 }
 function result(model) {
-  return { status: 'done', summary: model || 'mock result', must_haves_status: [], files_changed: [] };
+  return { status: 'done', summary: model || 'mock result', must_haves_status: [], files_changed: [],
+    ...(scenario === 'extra-property' ? { legacy_extra: 'fixture' } : {}) };
 }
 function answer(model) {
   if (scenario === 'narrated') {
@@ -282,16 +283,36 @@ async function testHappyAndWire(mock, root) {
   const plan = planFile(root);
   const model = 'gpt-test-model';
   const identityLines = [];
+  let packaged;
   const { createAnnouncer } = require('./forge-sidecar-identity');
   const announce = createAnnouncer({ write: line => identityLines.push(line) });
+  const owner = path.join(root, 'composed-owner'); fs.mkdirSync(owner);
+  const templates = path.join(owner, 'templates'); fs.mkdirSync(templates);
+  fs.writeFileSync(path.join(templates, 'execute-task.md'), '{description}');
+  const artifact = require('./forge-prompt').materializePrompt({ cwd: owner, codeDir: repo, forgeHome: path.resolve(__dirname, '..'),
+    templateDir: templates, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', dispatchId: 'doublepass',
+    description: '## Optional context\n' + 'x'.repeat(17000), autoCommit: false, memoryMaxTokens: 0, ledgerMaxTokens: 0, standardsMaxTokens: 0 });
   const result = await withMock(mock, 'conforming', capture, () => runExecute({
     ...executeOptions(repo, plan, resultFile, model), effort: 'high', hostRuntime: 'claude', announce,
+    contextRoot: owner, contextFile: artifact.prompt_path,
+    budgets: { coding_standards: 0, auto_memory: 0, ledger: 0 }, onPackagedContext: value => { packaged = value; },
   }));
   assert(validateExecuteResult(result));
   assert.strictEqual(result.parse_path, 'output-schema');
   assert(!Object.prototype.hasOwnProperty.call(result, 'degradation'));
   assert.strictEqual(result.summary, model, 'read-back must come from the mock response');
   const wire = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  const prompt = wire.turnParams.input[0].text;
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: repo, phase: 'execute-task', forgeHome: path.resolve(__dirname, '..') });
+  assert(prompt.includes(procedure.content));
+  assert(!prompt.includes('x'.repeat(16001)), 'legacy context remains bounded after stripping the materialized procedure');
+  for (const id of ['core', 'verification', 'execution']) assert.strictEqual(prompt.split(`<!-- forge-procedure:${id} -->`).length - 1, 1);
+  assert.strictEqual(packaged.sha256, require('./forge-attempt-telemetry').measure(prompt).sha256);
+  assert.strictEqual(packaged.bytes, Buffer.byteLength(prompt));
+  const finalRequest = { threadParams: wire.threadParams, turnParams: wire.turnParams };
+  assert.strictEqual(packaged.final_evidence.request.sha256, require('./forge-attempt-telemetry').measure(finalRequest, 'local-capture', true).sha256);
+  assert.strictEqual(packaged.final_evidence.model_observed, null, 'local emitter supplies no provider observation');
+  assert.deepStrictEqual(result.appserver.procedure_context.modules, procedure.modules);
   assert.strictEqual(wire.threadParams.model, model);
   assert.strictEqual(wire.turnParams.model, model);
   assert.strictEqual(wire.turnParams.effort, 'high');
@@ -313,6 +334,39 @@ async function testHappyAndWire(mock, root) {
   // itself is pinned by the explicit-platform asserts further down.
   assert.deepStrictEqual(wire.turnParams.sandboxPolicy, buildAppServerSandboxPolicy('workspace-write'));
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(resultFile, 'utf8')), result);
+}
+
+async function testProcedureDoesNotPrepareContext(mock, root) {
+  const repo = fixtureRepo(root);
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: repo, phase: 'execute-task', forgeHome: path.resolve(__dirname, '..') });
+  const { content: procedureText, ...procedure_context } = procedure;
+  const procedureContext = { procedureText, procedure_context };
+  const contextFile = path.join(root, 'legacy-optional.md');
+  const securityFile = path.join(root, 'legacy-security.md');
+  fs.writeFileSync(contextFile, '## Optional context\n' + 'q'.repeat(17000));
+  fs.writeFileSync(securityFile, '# Required security\nretain this checklist');
+  const capture = path.join(root, 'legacy-procedure-capture.json');
+  const options = { ...executeOptions(repo, planFile(root), path.join(root, 'legacy-procedure-result.json'), 'legacy-procedure'),
+    procedureContext, contextFile, securityFile };
+  await withMock(mock, 'extra-property', capture, () => runExecute(options));
+  const prompt = JSON.parse(fs.readFileSync(capture, 'utf8')).turnParams.input[0].text;
+  assert(prompt.includes(procedureText));
+  assert(prompt.includes('retain this checklist'));
+  assert(!prompt.includes('q'.repeat(16001)), 'procedural metadata must not bypass legacy optional-context truncation');
+  await expectReject(() => withMock(mock, 'extra-property', path.join(root, 'strict-procedure-capture.json'),
+    () => runExecute({ ...options, executionContext: {}, resultFile: path.join(root, 'strict-procedure-result.json') })), /no parseable\/valid execute result/);
+  fs.writeFileSync(securityFile, 's'.repeat(24001));
+  const refusedCapture = path.join(root, 'oversized-security-capture.json');
+  await expectReject(() => withMock(mock, 'conforming', refusedCapture,
+    () => runExecute({ ...options, resultFile: path.join(root, 'oversized-security-result.json') })), /mandatory section security-checklist/);
+  assert(!fs.existsSync(refusedCapture), 'oversized mandatory security refuses before transport');
+  for (const invalid of [{ ...procedureContext, procedureText: '<!-- forge-procedure:core -->' },
+    { ...procedureContext, procedure_context: { ...procedure_context, phase: 'foreign' } }]) {
+    const invalidCapture = path.join(root, 'invalid-procedure-capture.json');
+    await expectReject(() => withMock(mock, 'conforming', invalidCapture,
+      () => runExecute({ ...options, procedureContext: invalid, resultFile: path.join(root, 'invalid-procedure-result.json') })), /composition/);
+    assert(!fs.existsSync(invalidCapture), 'separate procedural content/provenance must validate before transport');
+  }
 }
 
 async function testAdapterPreflightRefusal(root) {
@@ -1041,6 +1095,7 @@ async function main() {
     testValidatorBoundary();
     testCommandOverride(mock);
     await testHappyAndWire(mock, root);
+    await testProcedureDoesNotPrepareContext(mock, root);
     await testAdapterPreflightRefusal(root);
     await testContextHealthFlow(mock, root);
     await testMultiRepoWire(mock, root);
