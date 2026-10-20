@@ -150,6 +150,22 @@ async function recoveryContracts() {
       route: { ...route, resolved_worker_engine: 'codex', worker_engine: 'codex', worker_mode: 'native',
         model: 'gpt-5.6-sol', model_resolved: 'gpt-5.6-sol', config_ok: true,
         chain: [{ id: 'gpt-5.6-sol', engine: 'gpt' }] } };
+    const replayable = { ...readonly, route, dispatchId: 'saved-replay', resultFile: path.join(lab.dir, 'saved.json') };
+    sidecar.beginArtifactAttempt(replayable);
+    const candidate = { status: 'partial', summary: 'Saved fixture response', questions: [], artifacts: [] };
+    await sidecar.acceptArtifactResult(replayable, candidate, { providerCalled: true });
+    const replayReceipt = replayable.resultFile + '.receipt.json', replayState = replayable.resultFile + '.recovery.json';
+    recovery.captureFailure({ stateFile: replayState, receiptFile: replayReceipt, request: replayable,
+      unit: 'research-milestone/M001', route: replayable.route, error: { code: 'publication-interrupted' } });
+    const replayOptions = { stateFile: replayState, receiptFile: replayReceipt, environmentalCorrection: true };
+    const replayRuntime = { processProbe: () => 'stopped',
+      inspectPreSpawn() { throw Error('saved response must not use pre-spawn repair'); } };
+    assert.strictEqual((await sidecar.recoverUnitSidecar(replayable, replayOptions, replayRuntime)).action, 'replay');
+    const savedReceipt = JSON.parse(fs.readFileSync(replayReceipt));
+    fs.writeFileSync(replayReceipt, JSON.stringify({ ...savedReceipt, phase: 'failed', saved_candidate: {
+      result: candidate, sha256: roots.digest(JSON.stringify(candidate)) } }));
+    await assert.rejects(sidecar.recoverUnitSidecar(replayable, replayOptions, replayRuntime), /artifact-reconciliation-required/,
+      'saved candidates take canonical reconciliation, never pre-spawn repair');
     sidecar.beginArtifactAttempt(readonly);
     sidecar.failArtifactAttempt(readonly, 'context-budget-exceeded', 'adapter-failed', false);
     const executeApi = require('./forge-task-execution'), prepare = executeApi.prepare;
@@ -170,4 +186,145 @@ async function recoveryContracts() {
     console.log('PASS milestone baseline before provider, stripped legacy receipt, live/unknown writer, two-root trusted reset, tampering and canonical plan publication');
   } finally { xllm.runExecute = runExecute; xllm.runPlan = runPlan; lab.cleanup(); }
 }
-recoveryContracts().catch(error => { console.error(error); process.exitCode = 1; });
+async function preSpawnRecoveryContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto');
+  const fixtures = require('./forge-code-roots.test'), roots = require('./forge-code-roots');
+  const recovery = require('./forge-attempt-recovery'), reset = require('./forge-surgical-reset');
+  const lease = require('./forge-unit-lease'), runs = require('./forge-runs');
+  const lab = fixtures.fixture();
+  const contract = roots.validateContract({ ...lab.contract, code_roots: [lab.contract.code_roots[0]] });
+  const route = { unit_type: 'execute-task', host_runtime: 'codex', resolved_worker_engine: 'claude', worker_engine: 'claude',
+    worker_mode: 'sidecar', model: 'claude-sonnet-5', model_resolved: 'claude-sonnet-5', effort: 'medium', tier: 'standard',
+    dispatch_allowed: true, config_ok: true,
+    chain: [{ id: 'claude-sonnet-5', engine: 'claude' }, { id: 'gpt-6.1-sol', engine: 'gpt' }] };
+  const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
+  fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+  const planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+  fs.writeFileSync(planFile, fixtures.plan(contract));
+  fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** fixture\n');
+  const request = { unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+    cwd: lab.a, contextRoot: lab.owner, route, workflowId: 'fixture', dispatchId: 'before-spawn',
+    resultFile: path.join(lab.dir, 'pre-spawn.json'), planFile, prompt: 'Offline fixture only.' };
+  const claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: contract,
+    paths: [{ root_id: 'alpha', path: 'same.txt' }] };
+  const executionAuthority = { execution_contract: contract, claim, runId: 'pre-spawn-run',
+    gates: { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' } };
+  runs.add(lab.owner, { id: executionAuthority.runId, kind: 'milestone', session_id: 'fixture', write_claim: claim });
+  const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
+  const baselineFile = path.join(lab.dir, 'original-predispatch.json');
+  fs.writeFileSync(baselineFile, JSON.stringify(reset.captureAttemptSnapshot(lab.a)));
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', dispatch_id: request.dispatchId,
+    fingerprint: sidecar.artifactFingerprint(request), recovery_identity_sha256: roots.digest(recovery.requestIdentity(recovery.canonicalRequest(request))),
+    failure: { reason_code: 'execution-protected-snapshot-unstable', provider_called: false } }));
+  const initial = recovery.captureFailure({ stateFile, receiptFile, request, unit: 'execute-task/T01', route,
+    error: { code: 'execution-protected-snapshot-unstable', provider_called: false }, layer: 'protected-snapshot' });
+  const now = initial.deadline_at + 1;
+  const receiptBytes = fs.readFileSync(receiptFile), baselineBytes = fs.readFileSync(baselineFile), stateBytes = fs.readFileSync(stateFile);
+  const held = lease.acquire(lab.owner, initial.unit, { hostRuntime: 'codex', ownerToken: 'fixture-owner', ttlMs: 300000 });
+  let window = lease.openProtectedWindow(lab.owner, initial.unit, held.owner_token, held.generation, { durationMs: 300000 });
+  let calls = 0, stageCalls = 0, deltaCalls = 0;
+  const authority = recovery.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: new Date().toISOString() }));
+  const runtime = {
+    executionAuthority, activeCapabilities: { available: true, tool: 'spawn_agent', source: 'fixture', models: ['gpt-6.1-sol'], reasoning_efforts: ['medium'], fork_turns: ['none'] },
+    processProbe: () => 'stopped',
+    inspectPreSpawn: async challenge => { stageCalls++; return { binding_sha256: roots.digest(challenge), stage: 'before-provider-spawn', process: 'stopped',
+      process_reference: 'fixture:awaited-adapter-exit', stage_reference: 'fixture:observed-stack-before-spawn',
+      baseline: { path: baselineFile, sha256: roots.digest(baselineBytes), provenance_reference: 'fixture:captured-before-failure' } }; },
+    inspectPreSpawnDelta: async challenge => { deltaCalls++; return { binding_sha256: roots.digest(challenge),
+      classification: 'no-failed-worker-writes', evidence_reference: 'fixture:independent-all-root-journal' }; },
+    validateEnvironmentalCorrection: async challenge => ({ binding_sha256: roots.digest(challenge), ok: true,
+      repair: 'bounded-held-lease-window', lease_window: window, evidence_reference: 'fixture:lease-test',
+      offline_check: { command: 'node scripts/forge-unit-lease.test.js', passed: true, exit_code: 0 } }),
+    resolveDispatch: () => ({ ...route, chain: route.chain, source: 'fixture-resolver' }),
+    recoveryAuthorization: { reference: 'fixture:standing', adapter: {
+      readStandingAuthorization: () => ({ expires_at: now + 100000 }),
+      issueRecoveryException: (reference, scope) => authority.issue(reference, scope, () => now) } },
+    invokeNative: async (next, binding) => { calls++; assert.strictEqual(next.route.model, 'gpt-6.1-sol');
+      assert.strictEqual(binding.args.model, 'gpt-6.1-sol'); return { fixture_only: true, provider_contact: false }; },
+  };
+  const options = { stateFile, receiptFile, environmentalCorrection: true, clock: () => now };
+  const invoke = (patch = {}, input = request, recoveryPatch = {}) => sidecar.recoverUnitSidecar(input, { ...options, ...recoveryPatch }, { ...runtime, ...patch });
+  const restore = () => { fs.writeFileSync(stateFile, stateBytes); fs.writeFileSync(receiptFile, receiptBytes); fs.writeFileSync(baselineFile, baselineBytes); };
+  const rejected = async (patch, expected, input) => { restore(); await assert.rejects(invoke(patch, input), expected); assert.strictEqual(calls, 0); };
+  try {
+    await rejected({ inspectPreSpawn: undefined }, /inspector-required/);
+    await rejected({ processProbe: () => 'alive' }, /process-receipt-inspection/);
+    await rejected({ inspectPreSpawn: async () => ({ stage: 'before-provider-spawn', process: 'stopped', approved: true }) }, /unproved/);
+    await rejected({ inspectPreSpawn: async c => ({ ...await runtime.inspectPreSpawn(c), stage: 'unknown' }) }, /unproved/);
+    await rejected({ executionAuthority: { ...executionAuthority, claim: { ...claim, generation: 'foreign' } } }, /claim-generation-stale/);
+    await rejected({ executionAuthority: { ...executionAuthority, execution_contract: lab.contract } }, /claim|root|writes/);
+    await rejected({ inspectPreSpawn: async c => { c.roots[0].path = lab.b; return runtime.inspectPreSpawn(c); } }, /unproved/);
+    await rejected({ inspectPreSpawn: async c => { fs.writeFileSync(receiptFile, '{}'); return runtime.inspectPreSpawn(c); } }, /inspection-changed/);
+    await rejected({ inspectPreSpawn: async c => { fs.writeFileSync(stateFile, '{}'); return runtime.inspectPreSpawn(c); } }, /inspection-changed/);
+    await rejected({ inspectPreSpawn: async c => ({ ...await runtime.inspectPreSpawn(c), baseline: { path: baselineFile, sha256: 'forged', provenance_reference: 'forged' } }) }, /baseline-binding/);
+    await rejected({ inspectPreSpawnDelta: undefined }, /drift-unproved/);
+    await rejected({ inspectPreSpawnDelta: async () => ({ independentChanges: true }) }, /drift-unproved/);
+    await rejected({ validateEnvironmentalCorrection: async c => ({ ...await runtime.validateEnvironmentalCorrection(c), lease_window: JSON.parse(JSON.stringify(window)) }) }, /window-invalid/);
+    await rejected({ validateEnvironmentalCorrection: async c => ({ ...await runtime.validateEnvironmentalCorrection(c), offline_check: { passed: true, exit_code: 0 } }) }, /repair-unproved/);
+    await rejected({ validateEnvironmentalCorrection: async c => { fs.writeFileSync(path.join(lab.a, 'same.txt'), 'concurrent\n'); return runtime.validateEnvironmentalCorrection(c); } }, /inspection-changed/);
+    fs.writeFileSync(path.join(lab.a, 'same.txt'), 'before\n');
+    await rejected({ validateEnvironmentalCorrection: async c => { fs.writeFileSync(path.join(lab.owner, '.gsd/unrelated'), 'foreign'); return runtime.validateEnvironmentalCorrection(c); } }, /protected/);
+    fs.unlinkSync(path.join(lab.owner, '.gsd/unrelated'));
+    await rejected({}, /pre-spawn-binding/, { ...request, dispatchId: 'foreign' });
+    for (const saved of [{ phase: 'ready' }, { phase: 'failed', saved_candidate: { sha256: 'fixture' } }]) {
+      restore(); fs.writeFileSync(receiptFile, JSON.stringify({ ...JSON.parse(receiptBytes), ...saved }));
+      await assert.rejects(invoke({ inspectPreSpawn() { throw Error('replay must skip repair inspection'); } }), /identity-mismatch/,
+        'legacy root migration applies only to proved pre-spawn repair, not unvalidated saved-response authority');
+    }
+    restore();
+    const wrongFailure = JSON.parse(receiptBytes); wrongFailure.failure.reason_code = 'invalid-payload';
+    fs.writeFileSync(receiptFile, JSON.stringify(wrongFailure));
+    await assert.rejects(invoke(), /pre-spawn-binding/);
+    restore();
+    const changed = JSON.parse(receiptBytes); changed.pid = process.pid; fs.writeFileSync(receiptFile, JSON.stringify(changed));
+    await assert.rejects(invoke(), /process-receipt-inspection/);
+    restore();
+    const pending = JSON.parse(stateBytes); pending.pending_questions = [{ id: 'human', question: 'Functional decision?', status: 'pending' }]; fs.writeFileSync(stateFile, JSON.stringify(pending));
+    assert.strictEqual((await invoke()).action, 'pending-questions'); assert.strictEqual(calls, 0);
+    restore();
+    // Prove later HEAD/untracked/deleted/renamed deltas are presented explicitly.
+    fs.writeFileSync(path.join(lab.a, 'repair.txt'), 'independent repair\n');
+    fixtures.command('git', ['add', 'repair.txt'], lab.a); fixtures.command('git', ['commit', '-qm', 'independent fixture repair'], lab.a);
+    fs.writeFileSync(path.join(lab.a, 'untracked.txt'), 'independent\n');
+    fs.renameSync(path.join(lab.a, 'same.txt'), path.join(lab.a, 'renamed.txt'));
+    let driftSeen = false;
+    const handed = await invoke({ invokeNative: undefined, inspectPreSpawnDelta: async c => { driftSeen = c.vcs_drift
+      && c.before.start_sha !== c.current.start_sha && c.current.pre_dirty.length >= 3 && c.claimed[0].sha256 === null;
+      return runtime.inspectPreSpawnDelta(c); } });
+    assert(driftSeen, 'all-root VCS delta and explicit missing claimed path reach independent inspector');
+    assert.strictEqual(handed.result.action, 'reattest-native-handoff');
+    assert.strictEqual(handed.result.invocation, undefined, 'pending reservation has no executable native arguments');
+    assert.strictEqual(handed.action, 'reattest-native-handoff');
+    assert.deepStrictEqual(Object.keys(handed).sort(), ['action', 'provider_called', 'reservation_sha256', 'result']);
+    assert.deepStrictEqual(Object.keys(handed.result).sort(), ['action', 'provider_called', 'reservation_sha256']);
+    assert(!JSON.stringify(handed).includes('invocation'), 'no nesting of the phase-one response exposes executable arguments');
+    const resumeReservation = { sha256: handed.result.reservation_sha256 };
+    await assert.rejects(invoke({ invokeNative: undefined }, request, { resumeReservation: { sha256: 'foreign' } }), /reservation-invalid/);
+    await assert.rejects(invoke({ invokeNative: undefined, inspectPreSpawn: undefined }, request, { resumeReservation }), /inspector-required/);
+    await assert.rejects(invoke({ invokeNative: undefined, activeCapabilities: { ...runtime.activeCapabilities, models: ['foreign'] } }, request, { resumeReservation }), /model|adapter|capability/);
+    await assert.rejects(invoke({ invokeNative: undefined, resolveDispatch: () => ({ ...route, effort: 'high' }) }, request, { resumeReservation }), /provenance|route/);
+    window.close();
+    window = lease.openProtectedWindow(lab.owner, initial.unit, held.owner_token, held.generation, { durationMs: 300000 });
+    const ready = await invoke({ invokeNative: undefined }, request, { resumeReservation });
+    assert.strictEqual(ready.result.action, 'invoke-native');
+    ready.result.assertReady();
+    assert.strictEqual(JSON.parse(fs.readFileSync(stateFile)).reservations.length, 1);
+    await assert.rejects(invoke({ invokeNative: undefined }, request, { resumeReservation }), /reservation-invalid/);
+    fs.writeFileSync(path.join(lab.a, 'untracked.txt'), 'changed after handoff\n');
+    assert.throws(() => ready.result.assertReady(), /inspection-changed/);
+    await assert.rejects(invoke(), /retry-exhausted/);
+    restore();
+    const recovered = await invoke();
+    assert.strictEqual(calls, 1); assert(recovered.corrected);
+    assert.strictEqual(recovered.sidecar_remaining_ms, 0);
+    assert.strictEqual(recovered.result.result.provider_contact, false);
+    const saved = JSON.parse(fs.readFileSync(stateFile));
+    assert.strictEqual(saved.started_at, initial.started_at); assert.strictEqual(saved.deadline_at, initial.deadline_at);
+    assert.strictEqual(saved.roots_sha256, initial.roots_sha256, 'legacy single-cwd identity is retained');
+    assert.strictEqual(saved.reservations[0].correction.kind, 'environment');
+    assert.deepStrictEqual(fs.readFileSync(receiptFile), receiptBytes); assert.deepStrictEqual(fs.readFileSync(baselineFile), baselineBytes);
+    assert(stageCalls > 5 && deltaCalls > 5);
+    console.log('PASS pre-spawn trusted inspection, immutable challenge, full root delta, native after original deadline, pending questions, handoff guard and one correction across restart');
+  } finally { window.close(); lab.cleanup(); }
+}
+recoveryContracts().then(preSpawnRecoveryContracts).catch(error => { console.error(error); process.exitCode = 1; });

@@ -429,3 +429,102 @@ token_budget.coding_standards bounds optional standards only, with full-file ref
 retain requirements/research/checklist. No credentials or full prompt in telemetry.
 Personal handoff retains authority reference, evidence, acceptance and questions.
 Synthetic provider tests do not establish real provider execution or human UAT.
+
+### Pre-spawn protected-snapshot repair
+
+`recoverUnitSidecar(originalRequest, {stateFile,receiptFile,
+environmentalCorrection:true}, runtime)` has a narrow executable-host path for
+`execution-protected-snapshot-unstable` before provider spawn. The original
+request, failed receipt and predispatch baseline are preserved. No historical
+protected snapshot is invented. Legacy `provider_called:false` by itself still
+means a possible writer. The CLI cannot supply this authority.
+
+For an old request missing current execution fields, pass only
+`runtime.executionAuthority:{execution_contract,claim,runId,gates}`. The normal
+plan/security/claim and physical-root checks apply. The original caller hash
+remains unchanged. A single physical cwd may retain its historical `{cwd}` roots
+hash; a multi-root/foreign identity never gains that compatibility.
+
+The host must have independently awaited the actual adapter's completion and
+observed the before-spawn code stage. A missing PID, absent transport evidence,
+JSON process flags or a source diagnosis alone prove neither fact. Supply:
+
+- `processProbe(receipt)` returning `stopped` only after that independent check;
+  a known live receipt PID cannot be overridden.
+- `inspectPreSpawn(challenge)` returning `binding_sha256:digest(challenge)`,
+  `stage:'before-provider-spawn'`, `process:'stopped'`, `process_reference`,
+  `stage_reference` and `baseline:{path,sha256,provenance_reference}`. This live
+  host callback attests the baseline's independently observed original
+  provenance; a newly generated snapshot with an asserted date is invalid.
+- `inspectPreSpawnDelta(challenge)` for every physical root, returning the exact
+  binding hash, `classification:'no-failed-worker-writes'` and an evidence
+  reference. Inspect the original baseline, current HEAD/revision and hashed
+  dirty/untracked/deleted/renamed paths, plus explicit current claimed-file
+  hashes. Later independent repair commits must be attributed individually;
+  a blanket `independentChanges:true` is not accepted. VCS snapshots are not a
+  full ignored-file census: concrete ignored claimed paths are captured, but
+  their original provenance still needs independent proof. Directory/glob,
+  symlink and oversized claims are refused. Unprovable attribution must refuse.
+- `validateEnvironmentalCorrection(challenge)` returning the exact binding,
+  `ok:true`, `repair:'bounded-held-lease-window'`, an evidence reference,
+  `offline_check:{command,passed:true,exit_code:0}` and the already open live
+  `lease_window` described below. The host runs the actual offline repair check;
+  command strings are evidence data and are never executed by recovery.
+
+Callbacks receive detached challenges. Receipt, state, request, baseline, claim,
+physical identities, all root observations and contemporary protected snapshots
+are rechecked after awaits and before reservation/handoff. Baseline/inspection
+hashes bind observations but cannot authenticate an untrusted host. Trust must
+be reattested after restart. Saved candidates still use canonical replay;
+pending functional questions still block. The single corrected reservation is
+bound to the original receipt/request/failure across destinations. Standing
+authorization may select a compatible untried native candidate after the old
+60000ms deadline, preserving model/tier/effort and the original clock.
+
+Before *each* protected phase, pause the parent's ordinary lease heartbeat,
+then call `forge-unit-lease.openProtectedWindow(owner, unit, heldToken,
+heldGeneration, {durationMs})`. It atomically requires unexpired matching
+ownership and renews that same generation once, before snapshots. Duration is
+an integer in `1..300000` milliseconds. During the window route the parent's
+scheduled heartbeat through `window.heartbeat()`; it validates ownership and
+time read-only. Pass that opaque handle to the environmental validator.
+`assertProtectedWindow` rejects JSON copies, foreign units/owners, closed,
+expired or replaced handles. Always `try/finally { window.close(); }`, including
+throws. Close is read-only and never revives expiry. Resume ordinary maintenance
+only while ownership remains live; otherwise use canonical recovery. Other
+processes must coordinate their own writes. No protected path is excluded.
+
+When the native tool is callable through `runtime.invokeNative`, recovery
+rechecks immediately before that callback. Tools available only to the parent
+need two phases. Without this callback the first call returns
+`result:{action:'reattest-native-handoff',reservation_sha256}` with no native
+arguments. Persist that sanitized reservation reference, close the window, and
+perform fresh process/baseline/root/claim/authorization attestation in the next
+process with a newly opened window. Call the same API and original request with
+`resumeReservation:{sha256:reservation_sha256}` alongside
+`environmentalCorrection:true`. It validates and consumes that exact pending
+reservation once, creates no new reservation and returns
+`result:{action:'invoke-native',request,invocation}`. Serialized data restores
+neither inspection nor lease authority. Wrong references, consumption replay,
+changed route/provenance and missing fresh callbacks refuse.
+
+The parent must immediately dispatch the exact validated invocation through its
+permitted native tool and save the consumption proof and actual tool response
+separately. The process-local `assertReady()` is an additional immediate guard
+when retained; JSON does not preserve it. There is no atomic transaction between
+a Node return and a later external tool call, and no claim of exactly-once tool
+execution. Crash or uncertainty after consumption requires process/receipt/write
+inspection; it never authorizes silent reconsumption. Measure preflight duration
+and choose a sufficient bounded window without rewriting the historical budget.
+### Saved-response boundary for legacy root identities
+
+Recovery checks for a saved response before requesting pre-spawn repair proof.
+A ready response uses normal replay; a failed saved candidate uses canonical
+artifact reconciliation. Neither path can become a new inference through
+`environmentalCorrection`. Their normal request, receipt and root validations
+remain mandatory. In particular, a legacy `{cwd}` recovery identity cannot use
+a newly introduced execution contract merely because a response is saved:
+that transition still refuses with `recovery-identity-mismatch`. The narrow
+single-root compatibility described for independently proved pre-spawn repair
+does not migrate saved-response authority. Such a saved legacy response needs
+its own compatible validated replay path; this repair does not provide one.
