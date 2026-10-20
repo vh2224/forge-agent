@@ -299,6 +299,10 @@ const REGISTRY_ROWS = [
   ["skills-forge-task-skill-md-native-fd1518c01769","skills/forge-task/SKILL.md","native","operational","sha256:fd1518c017690481652b4ec9709b3c7fe645c2c3ca010bcea1980afe30f78157","",""],
   ["skills-forge-task-skill-md-native-1789a03a8db4","skills/forge-task/SKILL.md","native","operational","sha256:1789a03a8db4573f64785bcc722951f01beaa926bc768ac0889cd8298fa3dd6a","",""],
   ["shared-forge-review-md-native-c1f31a626717","shared/forge-review.md","native","excluded","sha256:c1f31a6267172b1980e6c51c6ac96b8c07a1f0dfdddbae56238e056f06a7b46d","documentation reference describing the preparation stop boundary; it invokes no native worker",""],
+  ["shared-forge-dispatch-md-native-8b52de8c8e73","shared/forge-dispatch.md","native","excluded","sha256:8b52de8c8e73ef4250f8cc0318446e8532e7e07e1697e8b10c272848780f6f64","documentation lists trusted runtime callbacks; it invokes no native worker",""],
+  ["skills-forge-auto-------md-native-8b52de8c8e73","skills/forge-auto/SKILL.md","native","excluded","sha256:8b52de8c8e73ef4250f8cc0318446e8532e7e07e1697e8b10c272848780f6f64","documentation lists trusted runtime callbacks; it invokes no native worker",""],
+  ["skills-forge-next-------md-native-8b52de8c8e73","skills/forge-next/SKILL.md","native","excluded","sha256:8b52de8c8e73ef4250f8cc0318446e8532e7e07e1697e8b10c272848780f6f64","documentation lists trusted runtime callbacks; it invokes no native worker",""],
+  ["skills-forge-task-------md-native-8b52de8c8e73","skills/forge-task/SKILL.md","native","excluded","sha256:8b52de8c8e73ef4250f8cc0318446e8532e7e07e1697e8b10c272848780f6f64","documentation lists trusted runtime callbacks; it invokes no native worker",""],
 ];
 
 const SOURCE_REGISTRY = deepFreeze(REGISTRY_ROWS.map((row) => ({

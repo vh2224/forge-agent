@@ -78,6 +78,22 @@ const timeout = () => Object.assign(Error(`timeout token=${secret}`), {
   code: 'claude-timeout', stderr: `Authorization: Bearer ${secret}`, diagnostic: { reason: `token=${secret}` } });
 
 async function main() {
+  await test('paths never cross capture or sanitization; hashes survive idempotent redaction', () => {
+    const identity = { unitType: 'execute-task', scope: 'milestone', phase: 'execute',
+      dispatchId: 'safe-id', cwd: lab, contextRoot: path.join(lab, 'owner'),
+      planFile: path.join(lab, 'plan'), promptFile: secret, resultFile: secret };
+    const raw = api.captureFinal({ identity, context: secret, request: { cwd: lab, prompt: secret } });
+    assert.deepEqual(raw.paths, {});
+    assert(!JSON.stringify(raw).includes(lab));
+    assert(!JSON.stringify(raw).includes(secret));
+    const safe = api.sanitizeFinal({ ...raw, paths: identity, prompt: secret, argv: [secret] });
+    assert.deepEqual(safe.paths, {});
+    assert(!JSON.stringify(safe).includes(lab));
+    assert(!JSON.stringify(safe).includes(secret));
+    checkMeasurement(safe.context, secret);
+    checkMeasurement(safe.request, { cwd: lab, prompt: secret }, true);
+    assert.deepEqual(api.sanitizeFinal(safe), safe);
+  });
   await test('unknown, real zero, UTF-8 prompt files and unreadable files are distinct', () => {
     const missing = api.captureFinal();
     assert.equal(missing.context.status, 'unknown');
@@ -115,7 +131,8 @@ async function main() {
     assert.equal(result.final_evidence.host, 'codex');
     assert.equal(result.final_evidence.worker, 'codex');
     assert.equal(result.final_evidence.transport, 'native-tool');
-    assert.equal(result.final_evidence.paths.planFile, options.telemetryIdentity.planFile);
+    assert.deepEqual(result.final_evidence.paths, {});
+    assert(!JSON.stringify(result.final_evidence).includes(lab));
     assert.equal(result.final_evidence.stage, 'invoked');
     assert(Number.isFinite(result.final_evidence.duration_ms));
     assert(!JSON.stringify(result.final_evidence).includes(text));

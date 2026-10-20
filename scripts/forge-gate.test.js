@@ -13,6 +13,7 @@
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const gate = require('./forge-gate.js');
@@ -52,6 +53,23 @@ function assertEq(actual, expected, msg) {
   const a = JSON.stringify(actual);
   const e = JSON.stringify(expected);
   if (a !== e) throw new Error(`${msg || 'mismatch'}\n     expected: ${e}\n     actual:   ${a}`);
+}
+
+function withGateEntropy(suffixes, fn) {
+  const randomBytes = crypto.randomBytes;
+  const clock = Date.now;
+  let calls = 0;
+  try {
+    Date.now = () => Date.UTC(2026, 9, 20, 2, 52, 32);
+    crypto.randomBytes = size => {
+      assertEq(size, 2, 'gate suffix bytes');
+      return Buffer.from(suffixes[Math.min(calls++, suffixes.length - 1)], 'hex');
+    };
+    fn(() => calls);
+  } finally {
+    crypto.randomBytes = randomBytes;
+    Date.now = clock;
+  }
 }
 
 const SPEC = {
@@ -116,6 +134,113 @@ test('two gates opened back-to-back get distinct ids', (cwd) => {
   const a = gate.openGate(cwd, SPEC);
   const b = gate.openGate(cwd, SPEC);
   assert(a.id !== b.id, `collision: ${a.id}`);
+});
+
+test('generated collisions preserve pending and answered mailboxes before retrying', (cwd) => {
+  withGateEntropy(['aaaa', 'bbbb', 'aaaa', 'bbbb', 'cccc'], () => {
+    const a = gate.openGate(cwd, SPEC);
+    const b = gate.openGate(cwd, SPEC);
+    gate.answerGate(cwd, b.id, 'treat');
+    const original = [a, b].map(g => fs.readFileSync(gate.gateFile(cwd, g.id), 'utf8'));
+    const c = gate.openGate(cwd, { ...SPEC, question: 'another question' });
+    assert(c.id.endsWith('-cccc'), 'retry must reach the unused candidate');
+    assertEq([a, b].map(g => fs.readFileSync(gate.gateFile(cwd, g.id), 'utf8')), original, 'existing bytes preserved');
+    assertEq(gate.listPending(cwd).map(g => g.id), [a.id, c.id], 'pending identities survive collisions');
+    assertEq(fs.readdirSync(gate.gatesDir(cwd)).length, 3, 'no creation debris');
+  });
+});
+
+test('repeated entropy collisions fail after a bounded number of attempts', (cwd) => {
+  withGateEntropy(['aaaa'], calls => {
+    const a = gate.openGate(cwd, SPEC);
+    const original = fs.readFileSync(gate.gateFile(cwd, a.id), 'utf8');
+    let error;
+    try { gate.openGate(cwd, SPEC); } catch (caught) { error = caught; }
+    assertEq(error && error.code, 'gate-id-collision-limit', 'bounded failure');
+    assertEq(calls(), 33, 'one initial gate plus 32 creation attempts');
+    assertEq(fs.readFileSync(gate.gateFile(cwd, a.id), 'utf8'), original, 'original gate unchanged');
+    assertEq(fs.readdirSync(gate.gatesDir(cwd)), [`${a.id}.json`], 'failed attempts cleaned up');
+  });
+});
+
+test('explicit duplicate ids refuse without resetting pending or answered gates', (cwd) => {
+  for (const answered of [false, true]) {
+    const id = `G-20261020025232-${answered ? 'bbbb' : 'aaaa'}`;
+    gate.openGate(cwd, { ...SPEC, id });
+    if (answered) gate.answerGate(cwd, id, 'treat');
+    const original = fs.readFileSync(gate.gateFile(cwd, id), 'utf8');
+    let error;
+    try { gate.openGate(cwd, { ...SPEC, id, question: 'replacement' }); } catch (caught) { error = caught; }
+    assertEq(error && error.code, 'EEXIST', 'explicit id collision');
+    assertEq(fs.readFileSync(gate.gateFile(cwd, id), 'utf8'), original, 'explicit duplicate preserved');
+  }
+  assertEq(fs.readdirSync(gate.gatesDir(cwd)).length, 2, 'no duplicate creation debris');
+});
+
+test('failed temporary writes and publication leave no partial gate or creation debris', (cwd) => {
+  const originalGate = gate.openGate(cwd, SPEC);
+  const original = fs.readFileSync(gate.gateFile(cwd, originalGate.id), 'utf8');
+  for (const operation of ['write', 'link']) {
+    const write = fs.writeFileSync, link = fs.linkSync;
+    let attempts = 0, error;
+    try {
+      if (operation === 'write') fs.writeFileSync = (file, ...args) => {
+        if (String(file).includes('.create-')) {
+          attempts++;
+          write(file, '{partial', 'utf8');
+          throw Object.assign(new Error('fixture write failure'), { code: 'EIO' });
+        }
+        return write(file, ...args);
+      };
+      else fs.linkSync = () => {
+        attempts++;
+        throw Object.assign(new Error('fixture publication failure'), { code: 'EACCES' });
+      };
+      try { gate.openGate(cwd, SPEC); } catch (caught) { error = caught; }
+    } finally { fs.writeFileSync = write; fs.linkSync = link; }
+    assertEq(error && error.code, operation === 'write' ? 'EIO' : 'EACCES', 'original IO failure retained');
+    assertEq(attempts, 1, 'non-collision IO failure must not retry');
+    assertEq(fs.readdirSync(gate.gatesDir(cwd)), [`${originalGate.id}.json`], 'temporary and unpublished gate cleaned');
+    assertEq(fs.readFileSync(gate.gateFile(cwd, originalGate.id), 'utf8'), original, 'existing mailbox unchanged');
+  }
+});
+
+test('concurrent creators sharing an id publish complete distinct mailboxes', (cwd) => {
+  const worker = function () {
+    const fs = require('fs'), path = require('path'), crypto = require('crypto');
+    const [cwd, engine, index] = process.argv.slice(1);
+    const gate = require(engine), link = fs.linkSync;
+    let calls = 0, publications = 0;
+    Date.now = () => Date.UTC(2026, 9, 20, 2, 52, 32);
+    crypto.randomBytes = () => Buffer.from(calls++ === 0 ? 'aaaa' : index === '0' ? 'bbbb' : 'cccc', 'hex');
+    fs.linkSync = (source, target) => {
+      // Both processes reach their first publication before either may win.
+      if (publications++ === 0) {
+        fs.writeFileSync(path.join(cwd, `ready-${index}`), 'ready');
+        const deadline = performance.now() + 5000;
+        while (!fs.existsSync(path.join(cwd, `ready-${index === '0' ? '1' : '0'}`))) {
+          if (performance.now() > deadline) throw new Error('fixture barrier timeout');
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        }
+      }
+      return link(source, target);
+    };
+    const result = gate.openGate(cwd, { question: `question-${index}`, options: ['yes', 'no'], notify: false });
+    console.log(JSON.stringify({ id: result.id, question: result.question }));
+  };
+  const coordinator = `
+    const {spawn}=require('child_process');
+    const children=[0,1].map(index=>spawn(process.execPath,['-e',${JSON.stringify(`(${worker.toString()})()`)},process.argv[1],process.argv[2],String(index)],{stdio:['ignore','pipe','pipe'],windowsHide:true}));
+    for(const child of children){child.stdout.pipe(process.stdout);child.stderr.pipe(process.stderr);child.on('exit',code=>{if(code!==0)process.exitCode=1;});}
+  `;
+  const run = spawnSync(process.execPath, ['-e', coordinator, cwd, ENGINE], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+  assertEq(run.status, 0, `concurrent creators: ${run.stderr}`);
+  const rows = run.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assertEq(new Set(rows.map(g => g.id)).size, 2, 'both creators retain a distinct id');
+  const listed = gate.listPending(cwd);
+  assertEq(listed.length, 2, 'both complete mailboxes visible');
+  assertEq(listed.map(g => g.question).sort(), ['question-0', 'question-1'], 'both questions preserved');
+  assertEq(fs.readdirSync(gate.gatesDir(cwd)).length, 2, 'concurrent temporary files cleaned');
 });
 
 // ── 2. Answer ────────────────────────────────────────────────────────────────

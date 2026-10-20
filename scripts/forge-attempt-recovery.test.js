@@ -127,7 +127,7 @@ async function persistentRecovery(route) {
 }
 async function canonicalProvenance() {
   const fs = require('fs'), path = require('path'), os = require('os');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-resolver-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-resolver-')));
   const savedEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'FORGE_HOME'].map(key => [key, process.env[key]]));
   try {
     for (const key of Object.keys(savedEnv)) process.env[key] = root;
@@ -144,6 +144,11 @@ async function canonicalProvenance() {
     assert.strictEqual(route.unit_type, undefined, 'real resolver omits unit_type: do not hide this with a stub');
     const request = { cwd: worktree, contextRoot: root, route, unitType: 'research-slice', scope: 'milestone',
       phase: 'research', milestoneId: 'M001', sliceId: 'S01' };
+    assert.throws(() => api.requestIdentity({ ...request, route: { ...route, host_runtime: undefined } }),
+      /recovery-request-identity-required/);
+    const privateIdentity = api.requestIdentity(request);
+    assert.strictEqual(privateIdentity.owner, process.platform === 'win32' ? fs.realpathSync(root).toLowerCase() : fs.realpathSync(root));
+    assert.strictEqual(privateIdentity.cwd, process.platform === 'win32' ? fs.realpathSync(worktree).toLowerCase() : fs.realpathSync(worktree));
     const identity = { unit: 'research-slice/S01', roots_sha256: 'roots', request, clock: () => 0 };
     const candidates = api.resolveCandidates(resolverOptions, resolver, request);
     assert.strictEqual(route.chain[0].id, 'claude-sonnet-5', 'owner preferences remain authoritative over worktree preferences');

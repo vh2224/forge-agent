@@ -3,7 +3,6 @@
 const fs = require('fs');
 const { digest } = require('./forge-code-roots');
 const { isSafeModelId } = require('./forge-sidecar-diagnostic');
-const PATH_KEYS = ['cwd', 'contextRoot', 'planFile', 'promptFile', 'securityFile', 'contextFile', 'resultFile'];
 const safeModel = value => isSafeModelId(value) ? value : null;
 
 // No prompt, argv, arbitrary error text or provider output crosses this boundary.
@@ -41,8 +40,8 @@ function captureFinal(options = {}) {
     context, request: measure(options.request, 'adapter-arguments', true),
     unit_type: code(identity.unitType), scope: code(identity.scope), phase: code(identity.phase),
     dispatch_id: code(identity.dispatchId),
-    paths: Object.fromEntries(PATH_KEYS
-      .filter(key => typeof identity[key] === 'string').map(key => [key, identity[key]])),
+    // Private recovery identity is validated separately; telemetry never retains paths.
+    paths: {},
     model_requested: safeModel(route.model_requested), model_sent: safeModel(options.model), model_observed: null,
     effort: code(options.effort || route.effort), host: code(route.host_runtime),
     worker: code(route.resolved_worker_engine), transport: code(options.transport || route.worker_mode),
@@ -56,8 +55,7 @@ function sanitizeFinal(value) {
       source: code(item.source), diagnostic: code(item.diagnostic) }
     : { ...measure(undefined, code(item?.source, 'adapter-final')), diagnostic: code(item?.diagnostic, 'measurement-not-observed') };
   const safe = captureFinal({ identity: { unitType: value.unit_type, scope: value.scope, phase: value.phase,
-    dispatchId: value.dispatch_id, ...Object.fromEntries(PATH_KEYS.filter(key => typeof value.paths?.[key] === 'string')
-      .map(key => [key, value.paths[key]])) }, route: { model_requested: value.model_requested,
+    dispatchId: value.dispatch_id }, route: { model_requested: value.model_requested,
     host_runtime: value.host, resolved_worker_engine: value.worker }, model: value.model_sent,
     effort: value.effort, transport: value.transport, budgets: value.budgets, stage: value.stage });
   return { ...safe, captured_at: typeof value.captured_at === 'string' && !Number.isNaN(Date.parse(value.captured_at))
