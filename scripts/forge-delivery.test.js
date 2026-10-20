@@ -429,6 +429,109 @@ test('child aggregation preserves missing children, same text and parent criteri
   assert(output.diagnostics.some((item) => item.startsWith('child_source_missing:')));
 });
 
+test('nested task to slice to milestone preserves identity, evidence and recomputed statuses', () => {
+  const taskUnit = { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' };
+  const sliceUnit = { type: 'slice', id: 'S01', milestone: 'M001' };
+  const milestoneUnit = { type: 'milestone', id: 'M001' };
+  const fx = fixture('nested-closure', taskUnit);
+  writeJson(path.join(fx.owner, 'verify.json'), verificationEnvelope(fx, [{ exitCode: 0 }]));
+  const partialId = criterionId(taskUnit, 'additional', 'partial');
+  const task = build(fx, { ...fx.input,
+    additional_criteria: [{ id: 'partial', text: 'two aspects', reference: 'acceptance#partial', type: 'functional', aspects: ['api', 'ui'] }],
+    bindings: [bind('verification', 'verify.json', criterionId(taskUnit, 'truth', 0), { check_index: 0 }, 'behavioral'),
+      bind('verification', 'verify.json', partialId, { check_index: 0 }, 'behavioral', 'api')],
+  });
+  writeJson(path.join(fx.owner, 'task.json'), task);
+  const aggregate = (unit, childUnit, file) => build(fx, { ...fx.input, unit,
+    expected_children: [{ unit: childUnit, delivery: file }] });
+  const slice = aggregate(sliceUnit, taskUnit, 'task.json');
+  assert.strictEqual(slice.criteria.length, 7);
+  // Supplied statuses/pending are never evidence, including at the second level.
+  const altered = JSON.parse(JSON.stringify(slice));
+  altered.criteria.forEach(item => { item.status = 'verificado'; item.pending = []; });
+  writeJson(path.join(fx.owner, 'slice.json'), delivery.finalizeOutput(altered));
+  const milestone = aggregate(milestoneUnit, sliceUnit, 'slice.json');
+  assert.strictEqual(milestone.criteria.length, 10, JSON.stringify(milestone.diagnostics));
+  assert.deepStrictEqual(milestone.diagnostics, []);
+  assert.strictEqual(milestone.depth, 2);
+  assert.deepStrictEqual(milestone.lineage, [taskUnit, sliceUnit, milestoneUnit].map(delivery.unitKey).sort());
+  for (const original of task.criteria) {
+    const inherited = byId(milestone, original.id);
+    assert.deepStrictEqual(inherited.unit, original.unit);
+    assert.deepStrictEqual(inherited.evidence, original.evidence);
+    assert.deepStrictEqual(inherited.pending, original.pending);
+    assert.strictEqual(inherited.status, original.status);
+  }
+  assert.strictEqual(byId(milestone, criterionId(taskUnit, 'truth', 0)).status, 'verificado');
+  assert.strictEqual(byId(milestone, partialId).status, 'parcialmente verificado');
+  assert.strictEqual(byId(milestone, criterionId(taskUnit, 'artifact', 0)).status, 'n\u00e3o verificado');
+});
+
+test('child hierarchy and criterion identity reject foreign ownership even with forged lineage', () => {
+  const taskUnit = { type: 'task', id: 'T01', milestone: 'M001', slice: 'S01' };
+  const sliceUnit = { type: 'slice', id: 'S01', milestone: 'M001' };
+  const milestoneUnit = { type: 'milestone', id: 'M001' };
+  const fx = fixture('nested-ownership', taskUnit);
+  const task = build(fx);
+  writeJson(path.join(fx.owner, 'task.json'), task);
+  const slice = build(fx, { ...fx.input, unit: sliceUnit, expected_children: [{ unit: taskUnit, delivery: 'task.json' }] });
+  const cases = [
+    ['foreign milestone criterion', child => { child.criteria[3].unit.milestone = 'M999'; }],
+    ['foreign slice criterion', child => { child.criteria[3].unit.slice = 'S99'; }],
+    ['foreign task identity', child => { child.criteria[3].unit.id = 'T99'; }],
+    ['mismatched criterion ID', child => { child.criteria[3].id = criterionId(taskUnit, 'truth', 99); }],
+    ['missing criterion unit', child => { delete child.criteria[3].unit; }],
+    ['missing task lineage', child => { child.lineage = [delivery.unitKey(sliceUnit)]; }],
+    ['missing child lineage', child => { child.lineage = [delivery.unitKey(taskUnit)]; }],
+    ['foreign milestone with matching ID and lineage', child => {
+      const item = child.criteria[3]; item.unit.milestone = 'M999';
+      item.id = criterionId(item.unit, item.origin, item.index); child.lineage.push(delivery.unitKey(item.unit));
+    }],
+    ['foreign slice with matching ID and lineage', child => {
+      const item = child.criteria[3]; item.unit.slice = 'S99';
+      item.id = criterionId(item.unit, item.origin, item.index); child.lineage.push(delivery.unitKey(item.unit));
+    }],
+  ];
+  for (const [label, mutate] of cases) {
+    const child = JSON.parse(JSON.stringify(slice)); mutate(child);
+    writeJson(path.join(fx.owner, 'slice.json'), delivery.finalizeOutput(child));
+    const output = build(fx, { ...fx.input, unit: milestoneUnit,
+      expected_children: [{ unit: sliceUnit, delivery: 'slice.json' }] });
+    assert.strictEqual(output.criteria.length, 3, label);
+    assert(output.diagnostics.some(item => item.startsWith('child_')), label);
+  }
+  for (const foreign of [{ ...taskUnit, milestone: 'M999' }, { ...taskUnit, slice: 'S99' }, { ...sliceUnit, milestone: 'M999' }]) {
+    const child = build(fx, { ...fx.input, unit: foreign });
+    writeJson(path.join(fx.owner, 'foreign.json'), child);
+    const parentUnit = foreign.type === 'slice' ? milestoneUnit : sliceUnit;
+    const output = build(fx, { ...fx.input, unit: parentUnit, expected_children: [{ unit: foreign, delivery: 'foreign.json' }] });
+    assert.strictEqual(output.criteria.length, 3, JSON.stringify(foreign));
+    assert(output.diagnostics.some(item => item.startsWith('child_unit_hierarchy_invalid:')));
+  }
+  for (const [label, mutate] of [
+    ['foreign task with matching ID and lineage', child => {
+      const item = child.criteria[0]; item.unit.id = 'T99';
+      item.id = criterionId(item.unit, item.origin, item.index); child.lineage.push(delivery.unitKey(item.unit));
+    }],
+    ['direct criterion unit mismatch', child => { child.criteria[0].unit.id = 'T99'; }],
+    ['direct criterion origin mismatch', child => { child.criteria[0].origin = 'artifact'; }],
+    ['direct criterion index mismatch', child => { child.criteria[0].index = 99; }],
+    ['direct criterion unit missing', child => { delete child.criteria[0].unit; }],
+    ['direct child lineage missing', child => { child.lineage = []; }],
+  ]) {
+    const child = JSON.parse(JSON.stringify(task)); mutate(child);
+    writeJson(path.join(fx.owner, 'direct.json'), delivery.finalizeOutput(child));
+    const output = build(fx, { ...fx.input, unit: sliceUnit,
+      expected_children: [{ unit: taskUnit, delivery: 'direct.json' }] });
+    assert.strictEqual(output.criteria.length, 3, label);
+    assert(output.diagnostics.some(item => item.startsWith('child_')), label);
+  }
+  const tampered = JSON.parse(JSON.stringify(slice)); tampered.criteria[3].text = 'tampered';
+  writeJson(path.join(fx.owner, 'slice.json'), tampered);
+  const output = build(fx, { ...fx.input, unit: milestoneUnit, expected_children: [{ unit: sliceUnit, delivery: 'slice.json' }] });
+  assert(output.diagnostics.some(item => item.startsWith('child_fingerprint_invalid:')));
+});
+
 test('parent recomputes child status instead of trusting supplied JSON status', () => {
   const root = tempRoot('child-status'); const owner = path.join(root, 'owner'); const code = path.join(root, 'code'); fs.mkdirSync(owner, { recursive: true }); fs.mkdirSync(code, { recursive: true });
   const parentUnit = { type: 'slice', id: 'S01' }; const childUnit = { type: 'task', id: 'T01', slice: 'S01' };

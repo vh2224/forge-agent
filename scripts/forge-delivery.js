@@ -47,6 +47,15 @@ function unitKey(unit) {
   return [unit.milestone, unit.slice, unit.type, unit.id].filter(nonEmpty).join('/');
 }
 function sameUnit(left, right) { return unitKey(left) !== null && unitKey(left) === unitKey(right); }
+function isDescendantUnit(unit, ancestor) {
+  if (!unitKey(unit) || !unitKey(ancestor)) return false;
+  if (ancestor.type === 'milestone') {
+    return ['slice', 'task'].includes(unit.type) && unit.milestone === ancestor.id
+      && (unit.type !== 'task' || nonEmpty(unit.slice));
+  }
+  return ancestor.type === 'slice' && unit.type === 'task'
+    && unit.slice === ancestor.id && unit.milestone === ancestor.milestone;
+}
 function inside(root, target) {
   const relative = path.relative(root, target);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
@@ -376,10 +385,17 @@ function validateChildDelivery(child, expectedUnit, parentUnit) {
   if (!Array.isArray(child.criteria) || child.criteria.length > MAX_CRITERIA) return { error: 'child_criteria_invalid' };
   if (!Number.isInteger(child.depth) || child.depth < 0 || child.depth >= MAX_DEPTH) return { error: 'child_depth_invalid' };
   if (!Array.isArray(child.lineage) || child.lineage.includes(unitKey(parentUnit))) return { error: 'child_cycle' };
+  if (!isDescendantUnit(expectedUnit, parentUnit)) return { error: 'child_unit_hierarchy_invalid' };
   const childKey = unitKey(expectedUnit);
+  if (!child.lineage.includes(childKey)) return { error: 'child_lineage_invalid' };
   const criteria = [];
   for (const item of child.criteria) {
-    if (!isObject(item) || !nonEmpty(item.id) || !item.id.startsWith(`${childKey}:`) || !nonEmpty(item.text)
+    if (!isObject(item) || !unitKey(item.unit)
+      || !(sameUnit(item.unit, expectedUnit) || isDescendantUnit(item.unit, expectedUnit))
+      || !child.lineage.includes(unitKey(item.unit))
+      || !['truth', 'artifact', 'key_link', 'additional'].includes(item.origin)
+      || (item.origin === 'additional' ? !nonEmpty(item.index) : !Number.isInteger(item.index) || item.index < 0)
+      || item.id !== criterionId(item.unit, item.origin, item.index) || !nonEmpty(item.text)
       || !nonEmpty(item.reference) || !['functional', 'structural'].includes(item.type)
       || !Array.isArray(item.aspects) || item.aspects.length === 0 || !Array.isArray(item.evidence)
       || item.evidence.some((entry) => !isObject(entry) || !nonEmpty(entry.aspect)
