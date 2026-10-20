@@ -21,8 +21,9 @@
   "bad_paths": [
     "../secret", "/absolute", "C:/absolute", "file:stream", "a/../b",
     "a\\b", "a//b", "a/./b", "NUL", "a.", "a ", "--config-dir",
-    "file@HEAD", "a%2fb", "a?b", "a#b"
+    "a%40HEAD", "a%2fb", "a?b", "a#b"
   ],
+  "literal_paths": ["history@v1/notes@owner@@.txt", "history@v1/notes@1", "history@v1/notes@HEAD", "history@v1/notes@"],
   "bad_urls": [
     "https://user:password@example.invalid/repository",
     "https://example.invalid/repository/../foreign",
@@ -31,6 +32,12 @@
     "https://example.invalid/repository/%252e%252e/escape",
     "https://example.invalid/repository/%5croot",
     "https://example.invalid/repository?options=1",
+    "https://example.invalid/repository#fragment",
+    "https://user%40name@example.invalid/repository",
+    "https://example.invalid/repository/%2e/escape",
+    "https://example.invalid/repository/%40/%2e%2e/escape",
+    "https://example.invalid/repository/name%3fquery",
+    "https://example.invalid/repository/name%23fragment",
     "file://remote.example/repository",
     "svn+ssh://example.invalid/repository"
   ],

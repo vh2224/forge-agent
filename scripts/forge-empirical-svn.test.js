@@ -17,7 +17,8 @@ const evidence = path.join(owner, '.gsd', 'milestones', milestone, 'evidence');
 fs.mkdirSync(evidence, { recursive: true }); fs.mkdirSync(origin);
 const manifest = { schema_version: 1, sources: [
   { id: 'file', root: 'fixture', path: 'history/removed.txt', type: 'svn', format: 'raw' },
-  { id: 'parent', root: 'fixture', path: 'history', type: 'svn', format: 'raw' }
+  { id: 'parent', root: 'fixture', path: 'history', type: 'svn', format: 'raw' },
+  ...cases.literal_paths.map((literal, index) => ({ id: `literal${index}`, root: 'fixture', path: literal, type: 'svn', format: 'raw' }))
 ] };
 let assertions = 0; let calls = 0; let serial = 0;
 function equal(actual, expected) { assertions++; assert.deepStrictEqual(actual, expected); }
@@ -41,6 +42,8 @@ const cat = { operation: 'cat', revision: '1', peg: '1' };
 try {
   for (const url of cases.bad_urls) reject(() => canonicalUrl(url));
   equal(canonicalUrl(cases.repository), cases.repository);
+  equal(canonicalUrl(`${cases.subtree}/history%40v1/notes%40owner%40%40.txt`),
+    `${cases.subtree}/history%40v1/notes%40owner%40%40.txt`);
   const handle = identified(); const before = calls;
   for (const operation of cases.mutations) {
     reject(() => buildReadRequest(handle, 'file', { operation, revision: '1', peg: '1' }));
@@ -60,6 +63,15 @@ try {
   equal(read(session({}, { subtree: `${cases.repository}/wrong` }), { operation: 'info' }).reason, 'svn_identity_mismatch');
   const built = buildReadRequest(handle, 'file', cat);
   equal(built.argv.at(-1), `${cases.subtree}/history/removed.txt@1`); equal(built.argv.slice(3, 5), ['-r', '1']);
+  for (const [index, literal] of cases.literal_paths.entries()) {
+    const literalRequest = buildReadRequest(handle, `literal${index}`, { ...cat, peg: '2' });
+    equal(literalRequest.argv.at(-1), `${cases.subtree}/${literal.split('/').map(encodeURIComponent).join('/')}@2`);
+    equal(literalRequest.argv.at(-1).split('@').length, 2);
+    equal(literalRequest.argv.slice(3, 5), ['-r', '1']);
+    equal(read(handle, cat, `literal${index}`).status, 'observed');
+    reject(() => buildReadRequest(handle, `literal${index}`, { ...cat, peg: 'HEAD' }));
+    reject(() => buildReadRequest(handle, `literal${index}`, { ...cat, peg: '1@2' }));
+  }
   const captured = read(handle, cat); equal(captured.status, 'observed'); equal(captured.metadata.peg, '1');
   equal(captured.metadata.revision, '1'); equal(captured.metadata.sha256, sha256(Buffer.from(cases.content)));
   equal(captured.metadata.argv.at(-1), '<SOURCE>'); equal(captured.metadata.result.exit, 0);
@@ -101,6 +113,10 @@ try {
     fs.mkdirSync(path.join(seed, 'history'), { recursive: true });
     fs.writeFileSync(path.join(seed, 'history', 'removed.txt'), cases.content);
     fs.writeFileSync(path.join(seed, 'history', 'retained.txt'), 'retained fixture');
+    for (const literal of cases.literal_paths) {
+      fs.mkdirSync(path.dirname(path.join(seed, literal)), { recursive: true });
+      fs.writeFileSync(path.join(seed, literal), `literal r1: ${literal}\n`);
+    }
     const repoUrl = pathToFileURL(repo).href;
     function setup(bin, args) {
       const result = spawnSync(bin, args, { cwd: temp, shell: false, windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 });
@@ -110,6 +126,7 @@ try {
     setup('svn', ['import', seed, repoUrl, '-m', 'synthetic r1', '--non-interactive', '--no-auth-cache']);
     setup('svn', ['checkout', repoUrl, wc, '--non-interactive', '--no-auth-cache']);
     setup('svn', ['delete', path.join(wc, 'history', 'removed.txt')]);
+    fs.writeFileSync(path.join(wc, cases.literal_paths[0]), 'changed in r2\n');
     setup('svn', ['commit', wc, '-m', 'synthetic r2', '--non-interactive', '--no-auth-cache']);
     const real = identified({ capability: 'workspace', runner: (bin, args, options) => {
       assertions++; assert(args.at(-1) === '.' || args.at(-1).startsWith(`${repoUrl}/`));
@@ -122,10 +139,18 @@ try {
     equal(deletion.metadata.removal_cause, 'unknown');
     equal(read(real, { operation: 'cat', revision: '2', peg: '2' }).reason, 'svn_command_failed');
     equal(read(real, { operation: 'list', revision: '2', peg: '2' }, 'parent').status, 'observed');
+    for (const [index, literal] of cases.literal_paths.entries()) {
+      const captured = read(real, { operation: 'cat', revision: '1', peg: '2' }, `literal${index}`);
+      equal(captured.status, 'observed'); equal(captured.metadata.revision, '1'); equal(captured.metadata.peg, '2');
+      const expected = Buffer.from(`literal r1: ${literal}\n`);
+      equal(fs.readFileSync(captured.metadata.snapshot), expected); equal(captured.metadata.sha256, sha256(expected));
+    }
+    const latest = read(real, { operation: 'cat', revision: '2', peg: '2' }, 'literal0');
+    equal(latest.status, 'observed'); equal(fs.readFileSync(latest.metadata.snapshot, 'utf8'), 'changed in r2\n');
     const status = spawnSync('svn', ['status', wc], { cwd: temp, shell: false, windowsHide: true, timeout: 5000, maxBuffer: 4096 });
     equal(status.status, 0); equal(status.stdout.length, 0);
     equal(fs.existsSync(path.join(wc, 'history', 'removed.txt')), false);
-    integration = 'passed:file-repository-r1-r2';
+    integration = 'passed:file-repository-r1-r2; literal-at paths and numeric operative/peg bytes';
   }
   console.log(`empirical-svn: ${assertions} assertions passed; mock calls ${calls}; integration ${integration}; no network`);
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

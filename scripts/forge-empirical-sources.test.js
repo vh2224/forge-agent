@@ -34,6 +34,17 @@ try {
   equal(result.metadata.semantic_fingerprint, fingerprint({ value: 1 }));
   equal(fs.readFileSync(result.metadata.snapshot, 'utf8'), '{"value":1}\n');
   equal(result.autonomy.compatible, true);
+  for (const literal of cases.literal_paths) {
+    fs.mkdirSync(path.dirname(path.join(origin, literal)), { recursive: true });
+    const bytes = Buffer.from(`literal source: ${literal}\n`);
+    fs.writeFileSync(path.join(origin, literal), bytes);
+    const input = structuredClone(manifest); input.sources[0].path = literal; input.sources[0].format = 'raw';
+    const captured = read(session({}, input));
+    equal(captured.status, 'observed'); equal(captured.metadata.path, literal);
+    equal(captured.metadata.sha256, sha256(bytes));
+    equal(fs.readFileSync(captured.metadata.snapshot), bytes);
+    equal(fs.readFileSync(path.join(origin, literal)), bytes);
+  }
   equal(readLocalSource(session(), 'before', path.basename(result.metadata.snapshot)).reason, 'snapshot_exists');
   const corpus = structuredClone(contract.cases[0].corpus);
   Object.assign(corpus.references[0], { path: result.metadata.snapshot, bytes: result.metadata.bytes,

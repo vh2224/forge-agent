@@ -21,7 +21,7 @@ function closed(value, keys) {
       Object.keys(value).some((key) => !keys.includes(key))) fail('unknown_fields');
 }
 function relativePath(value) {
-  if (typeof value !== 'string' || value.length > 500 || !value || /[\\:%@?#<>"|*\x00-\x1f\x7f]/.test(value) ||
+  if (typeof value !== 'string' || value.length > 500 || !value || /[\\:%?#<>"|*\x00-\x1f\x7f]/.test(value) ||
       value.split('/').some((part) => !part || part === '.' || part === '..' || /[. ]$/.test(part) ||
         /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) || part.startsWith('-'))) fail('path_invalid');
   return value;

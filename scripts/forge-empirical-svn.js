@@ -16,7 +16,7 @@ function canonicalUrl(raw) {
   try { url = new URL(raw); decoded = decodeURIComponent(raw); } catch (_) { fail('svn_url_invalid'); }
   if (!['https:', 'file:'].includes(url.protocol) || url.username || url.password ||
       (url.protocol === 'file:' && url.hostname) || /[\\?#%\x00-\x1f\x7f]/.test(decoded) ||
-      /%2f|%5c|%40|%3a/i.test(raw) || decoded.split('/').some((part) => part === '..' || part === '.') ||
+      /%2f|%5c|%3a/i.test(raw) || decoded.split('/').some((part) => part === '..' || part === '.') ||
       url.href !== raw || url.pathname.includes('//')) fail('svn_url_invalid');
   return raw.replace(/\/$/, '');
 }
@@ -47,6 +47,7 @@ function buildReadRequest(handle, id, request) {
     argv.push('-r', revision);
     if (request.operation === 'log') argv.push('--xml', '--verbose', '--limit', String(context.limits.entries));
     if (request.operation === 'list') argv.push('--xml', '--depth', 'immediates');
+    // Source paths are literal data: encode every @ before appending the separately validated peg.
     const target = canonicalUrl(`${subtree}/${source.path.split('/').map(encodeURIComponent).join('/')}`);
     if (!withinUrl(subtree, target)) fail('svn_target_foreign');
     argv.push('--', `${target}@${request.peg}`);
