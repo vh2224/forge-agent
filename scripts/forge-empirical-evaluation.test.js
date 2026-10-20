@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { buildEmpiricalEvaluation, renderEmpiricalEvaluation, readEvaluationSource, DIMENSIONS, LIMITS } = require('./forge-empirical-evaluation');
+const { buildEmpiricalEvaluation, buildEmpiricalPreflight, renderEmpiricalEvaluation, readEvaluationSource, DIMENSIONS, LIMITS } = require('./forge-empirical-evaluation');
 const { buildEmpiricalBaseline } = require('./forge-empirical-baseline');
 const { createProcedureFixture, buildProcedureEvidence } = require('./forge-procedure-evidence');
 const { buildContextComparison } = require('./forge-context-comparison');
@@ -99,6 +99,28 @@ function setup(rows = fixtures.cases, synthetic = true) {
     report: () => { refresh(); return buildEmpiricalEvaluation(input, { roots: [area] }); } };
 }
 const firstTwo = fixtures.cases.slice(0, 2);
+// Preflight evidence is independent of outcomes. publish never repairs hashes,
+// controls or chronology, so adversarial mutations remain observable.
+function preflightSetup(rows = firstTwo, synthetic = false) {
+  const s = setup(rows, synthetic);
+  for (const row of s.baseline.cases) row.baseline_controls = clone(s.controls);
+  s.refresh();
+  const input = clone(s.input); input.kind = 'empirical-preflight-input';
+  input.sources = input.sources.filter(ref => ref.kind !== 'outcome');
+  for (const row of input.cases) delete row.outcome_source;
+  const publish = () => {
+    for (const [id, kind, data] of [['protocol', 'protocol', s.protocol], ['baseline', 'baseline', s.baseline],
+      ...Object.entries(s.starts).map(([id, data]) => [`start-${id}`, 'execution-start', data])]) {
+      Object.assign(input.sources.find(ref => ref.id === id), writeSource(s.area, id, kind, data, synthetic));
+    }
+  };
+  const bind = () => {
+    s.policy.split_sha256 = fingerprint(s.split);
+    for (const row of s.protocol.registrations) row.policy_sha256 = fingerprint(s.policy);
+    for (const [id, start] of Object.entries(s.starts)) start.registration_sha256 = fingerprint(s.protocol.registrations.find(row => row.case_id === id) || {});
+  };
+  return { ...s, input, publish, bind, preflight: () => buildEmpiricalPreflight(input, { roots: [s.area] }) };
+}
 // All records remain temporary adversarial metadata, including false synthetic
 // flags. Exercise positive validation without claiming real provider execution.
 function combinedSetup() {
@@ -161,6 +183,194 @@ function combinedSetup() {
   return { ...s, protocols, refresh, report: () => { refresh(); return buildEmpiricalEvaluation(s.input, { roots: [s.area] }); } };
 }
 try {
+  test('preflight validates independent baseline and enrollment without an outcome or final eligibility', () => {
+    const s = preflightSetup();
+    // No outcome file is even available to the preflight.
+    for (const name of fs.readdirSync(s.area).filter(name => name.startsWith('outcome-'))) fs.unlinkSync(path.join(s.area, name));
+    const result = s.preflight();
+    assert.equal(result.kind, 'empirical-preflight-report'); assert.deepEqual(result.diagnostics, []);
+    for (const row of result.cases) {
+      assert.deepEqual(row.exclusions, []); assert(row.enrollment_valid); assert(row.controls_available);
+      assert(row.baseline_controls_available); assert(row.prospective_enrollment);
+      assert.equal(row.classification, 'awaiting-outcome'); assert.equal(row.outcome, null);
+      assert(row.outcome_pending); assert.equal(row.eligible, false);
+    }
+    assert.equal(result.eligible, false); assert.equal(result.comparative_ready, false);
+    assert.equal(result.functional_gain, null); assert.equal(result.decision.apply_policy, false);
+    assert.equal(result.authorization.granted, false);
+    for (const candidate of [s.input, { ...s.input, kind: 'empirical-evaluation-input' }]) {
+      assert.throws(() => buildEmpiricalEvaluation(candidate, { roots: [s.area] }));
+    }
+    const mixed = clone(s.input); mixed.cases[0].outcome_source = 'invented';
+    assert.throws(() => buildEmpiricalPreflight(mixed, { roots: [s.area] }), /preflight_outcome_not_allowed/);
+    const sources = clone(s.input); sources.sources.push({ id: 'outcome', kind: 'outcome' });
+    assert.throws(() => buildEmpiricalPreflight(sources, { roots: [s.area] }), /preflight_outcome_not_allowed/);
+  });
+  test('preflight and posterior share strict chronology policy split and registration reason codes', () => {
+    const id = firstTwo[0].id;
+    const cases = [
+      ['registration_missing_or_not_prior', s => { s.protocol.registrations[0].enrolled_at = s.policy.updated_at; }],
+      ['execution_chronology_unproven', s => { s.protocol.registrations[0].enrolled_at = s.starts[id].started_at; }],
+      ['execution_chronology_unproven', s => { s.protocol.registrations[0].enrolled_at = '2026-01-03T00:00:00Z'; }],
+      ['execution_chronology_unproven', s => { s.policy.declared_at = '2026-01-01T02:00:00Z'; }],
+      ['registration_missing_or_not_prior', s => { s.policy.updated_at = s.protocol.registrations[0].enrolled_at; }],
+      ['registration_missing_or_not_prior', s => { s.split.frozen_at = s.protocol.registrations[0].enrolled_at; }],
+      ['execution_chronology_unproven', s => { s.starts[id].started_at = '2026-02-30T00:00:00Z'; }],
+      ['execution_chronology_unproven', s => { s.starts[id].started_at = '2026-01-02T24:00:00Z'; }],
+      ['execution_start_unbound', s => { s.starts[id].case_id = 'foreign'; }],
+      ['policy_missing:hypothesis', s => { delete s.policy.hypothesis; }],
+      ['split_unbound_or_not_prior', s => { s.split.reserved.push(s.split.reserved[0]); }],
+      ['family_split_mismatch', s => { s.split.reserved = []; }],
+      ['registration_missing_or_not_prior', s => { s.protocol.registrations.push(clone(s.protocol.registrations[0])); }],
+      ['registration_missing_or_not_prior', s => { s.protocol.registrations[0].acceptance_sha256 = 'bad'; }],
+      ['original_input_unbound', s => { s.protocol.registrations[0].original_input_sha256 = sha256('foreign'); }]
+    ];
+    for (const [reason, mutate] of cases) {
+      const s = preflightSetup(); mutate(s); s.bind(); s.publish();
+      const preflight = s.preflight().cases.find(row => row.id === id);
+      assert(preflight.exclusions.includes(reason), `${reason}: ${preflight.exclusions}`);
+      assert.equal(preflight.prospective_enrollment, false); assert.equal(preflight.classification, 'observational');
+      const posterior = { ...clone(s.input), kind: 'empirical-evaluation-input' };
+      for (const item of posterior.cases) {
+        item.outcome_source = `outcome-${item.id}`;
+        posterior.sources.push(writeSource(s.area, item.outcome_source, 'outcome', s.outcomes[item.id], false));
+      }
+      assert(buildEmpiricalEvaluation(posterior, { roots: [s.area] }).cases.find(row => row.id === id).exclusions.includes(reason), reason);
+    }
+    for (const mutate of [s => { s.starts[id].registration_sha256 = sha256('foreign'); },
+      s => { s.protocol.registrations[0].policy_sha256 = sha256('foreign'); },
+      s => { s.policy.split_sha256 = sha256('foreign'); }]) {
+      const s = preflightSetup(); mutate(s); s.publish();
+      assert.equal(s.preflight().cases.find(row => row.id === id).prospective_enrollment, false);
+    }
+    const good = preflightSetup(); good.policy.updated_at = '2026-01-01T02:00:00+01:00'; good.bind(); good.publish();
+    assert(good.preflight().cases.every(row => row.prospective_enrollment), 'equal instants declared/updated are allowed');
+  });
+  test('preflight requires exactly thirteen typed controls and binds each registered started and baseline axis', () => {
+    const id = firstTwo[0].id;
+    for (const field of Object.keys(preflightSetup().controls)) {
+      for (const target of ['registration', 'start', 'baseline']) {
+        for (const operation of ['missing', 'changed', 'invalid']) {
+          const s = preflightSetup();
+          const controls = target === 'registration' ? s.protocol.registrations[0].controls
+            : target === 'start' ? s.starts[id].controls : s.baseline.cases[0].baseline_controls;
+          if (operation === 'missing') delete controls[field];
+          else controls[field] = operation === 'invalid' ? (field === 'budgets' ? { context: -1 } : 4)
+            : field === 'budgets' ? { context: 1 } : field.endsWith('_sha256') ? sha256('foreign') : 'foreign';
+          s.bind(); s.publish(); const row = s.preflight().cases.find(row => row.id === id);
+          assert(!row.prospective_enrollment, `${target}/${field}/${operation}`);
+          assert(row.exclusions.includes(target === 'baseline' ? 'non_equivalent_controls' : 'executed_controls_unbound'), `${target}/${field}/${operation}: ${row.exclusions}`);
+        }
+      }
+    }
+    const extra = preflightSetup(); extra.starts[id].controls.extra = 'unrecognized'; extra.publish();
+    assert(!extra.preflight().cases[0].controls_available);
+    for (const [arm, axis] of Object.entries({ memory: 'memory_sha256', procedure: 'procedure_sha256', preparation: 'preparation', review: 'review' })) {
+      const s = preflightSetup(); s.policy.arm = s.input.candidates[0].arm = arm;
+      for (const registration of s.protocol.registrations) registration.controls[axis] = axis.endsWith('_sha256') ? sha256('treatment') : 'changed';
+      for (const start of Object.values(s.starts)) start.controls[axis] = axis.endsWith('_sha256') ? sha256('treatment') : 'changed';
+      s.bind(); s.publish(); assert(s.preflight().cases.every(row => row.prospective_enrollment), arm);
+      s.baseline.cases[0].baseline_controls.model = 'foreign'; s.publish();
+      assert(!s.preflight().cases[0].prospective_enrollment, `${arm} cannot alter an untreated model`);
+    }
+  });
+  test('preflight keeps missing ambiguous replay synthetic and contaminated baseline cases observational', () => {
+    const mutations = [
+      ['baseline_controls_unavailable', s => { delete s.baseline.cases[0].baseline_controls; }],
+      ['baseline_controls_unbound', s => { s.baseline.cases.push(clone(s.baseline.cases[0])); }],
+      ['baseline_case_unbound', s => { s.baseline.cases[0].delivery_id = 'foreign'; }],
+      ['registration_missing_or_not_prior', s => { s.protocol.registrations.push(clone(s.protocol.registrations[0])); }],
+      ['synthetic_not_real_sample', s => { s.input.cases[0].synthetic = true; }],
+      ['synthetic_not_real_sample', s => { s.baseline.synthetic = true; }]
+    ];
+    for (const [reason, mutate] of mutations) {
+      const s = preflightSetup(); mutate(s); s.publish(); const row = s.preflight().cases.find(row => row.id === firstTwo[0].id);
+      assert(row.exclusions.includes(reason), `${reason}: ${row.exclusions}`); assert.equal(row.classification, 'observational');
+    }
+    const missing = preflightSetup(); missing.input.sources = missing.input.sources.filter(ref => ref.id !== 'baseline');
+    assert(missing.preflight().cases.every(row => row.exclusions.includes('source_unavailable:baseline')));
+    const replay = preflightSetup(); const data = buildEmpiricalBaseline(replay.baseline, { roots: [replay.area], synthetic: false });
+    Object.assign(replay.input.sources.find(ref => ref.id === 'baseline'), writeSource(replay.area, 'baseline', 'baseline-report', data, false));
+    assert(replay.preflight().cases.every(row => row.exclusions.includes('historical_report_replay_only') && !row.baseline_controls_available));
+    const synthetic = preflightSetup(firstTwo, true); assert(synthetic.preflight().cases.every(row => !row.prospective_enrollment));
+    const contamination = preflightSetup(); contamination.input.cases[1].family_id = contamination.input.cases[0].family_id;
+    contamination.input.cases[1].split = 'adjustment';
+    assert(contamination.preflight().cases.every(row => row.exclusions.includes('family_split_contamination')));
+    const historical = preflightSetup(); historical.input.cases[0].split = historical.protocol.registrations[0].split = 'historical-diagnostic';
+    historical.input.cases[0].evidence_type = 'historical'; historical.bind(); historical.publish();
+    assert(historical.preflight().cases[0].exclusions.includes('historical_diagnostic_only'));
+    const adjustment = preflightSetup(); adjustment.input.cases[0].split = adjustment.protocol.registrations[0].split = 'adjustment';
+    adjustment.split.adjustment.push(adjustment.input.cases[0].family_id); adjustment.split.reserved.shift(); adjustment.bind(); adjustment.publish();
+    assert.deepEqual(adjustment.preflight().cases[0].exclusions, []);
+    assert.equal(adjustment.preflight().cases[0].classification, 'observational'); assert.equal(adjustment.preflight().cases[0].split, 'adjustment');
+  });
+  test('preflight retains bounded hash-pinned trusted roots and sanitized source diagnostics', () => {
+    for (const change of [ref => { ref.sha256 = sha256('changed'); }, ref => { ref.path = '../escape.json'; },
+      ref => { ref.path = 'source.json:stream'; }, ref => { ref.path = 'missing.json'; },
+      ref => { ref.captured_at = '2026-02-30T00:00:00Z'; }, ref => { ref.revision = ''; }]) {
+      const s = preflightSetup(); change(s.input.sources.find(ref => ref.id === 'baseline')); const report = s.preflight();
+      assert(report.diagnostics.length); assert(report.cases.every(row => !row.prospective_enrollment));
+      assert(!JSON.stringify(report.diagnostics).includes(s.area));
+    }
+    const changed = preflightSetup(); fs.appendFileSync(path.join(changed.area, 'baseline.json'), ' ');
+    assert.equal(changed.preflight().diagnostics[0].code, 'source_hash_changed');
+    const foreign = preflightSetup(); const stranger = preflightSetup(); foreign.input.roots = [foreign.area];
+    const callerRoot = path.join(root, `empty-authorized-${sequence++}`); fs.mkdirSync(callerRoot);
+    assert(buildEmpiricalPreflight(foreign.input, { roots: [callerRoot] }).cases.every(row => !row.prospective_enrollment));
+    const linked = preflightSetup(); const link = path.join(linked.area, 'linked');
+    fs.symlinkSync(stranger.area, link, process.platform === 'win32' ? 'junction' : 'dir');
+    linked.input.sources.find(ref => ref.id === 'baseline').path = 'linked/baseline.json';
+    assert(linked.preflight().diagnostics.length);
+    const oversized = preflightSetup(); fs.writeFileSync(path.join(oversized.area, 'baseline.json'), Buffer.alloc(LIMITS.file_bytes + 1));
+    assert(oversized.preflight().diagnostics.length);
+    const caps = preflightSetup();
+    for (const [key, limit] of [['sources', LIMITS.sources], ['cases', LIMITS.cases], ['candidates', LIMITS.candidates]]) {
+      assert.throws(() => buildEmpiricalPreflight({ ...caps.input, [key]: Array(limit + 1).fill(caps.input[key][0]) }, { roots: [caps.area] }), /evaluation_input_invalid/);
+    }
+    assert.throws(() => buildEmpiricalPreflight({ ...caps.input, extra: 'x'.repeat(LIMITS.file_bytes) }, { roots: [caps.area] }), /evaluation_input_invalid/);
+    const total = preflightSetup(); const ref = total.input.sources.find(row => row.id === 'baseline');
+    const padded = JSON.parse(fs.readFileSync(path.join(total.area, ref.path))); padded.padding = 'x'.repeat(970000);
+    total.input.sources = [total.input.sources[0], ...Array.from({ length: 10 }, (_, i) => writeSource(total.area, `large-${i}`, 'baseline', padded, false)), ...total.input.sources.filter(row => row.kind === 'execution-start')];
+    const report = total.preflight(); assert(report.diagnostics.some(row => row.code === 'total_bytes_exceeded'));
+    assert(report.cases.every(row => !row.prospective_enrollment));
+  });
+  test('preflight API and CLI are read-only JSON with incompatible options and input IO rejected', () => {
+    const s = preflightSetup(); s.input.approved = true; s.input.command = 'PRIVATE_COMMAND_SENTINEL';
+    const file = path.join(s.area, 'preflight.json'); const bytes = Buffer.from(JSON.stringify(s.input)); fs.writeFileSync(file, bytes);
+    fs.writeFileSync(path.join(s.area, 'prefs.yaml'), 'unchanged'); fs.mkdirSync(path.join(s.area, '.gsd'));
+    fs.writeFileSync(path.join(s.area, '.gsd', 'STATE.md'), 'unchanged');
+    const snapshot = () => Object.fromEntries(fs.readdirSync(s.area, { recursive: true }).sort().filter(name => fs.statSync(path.join(s.area, name)).isFile())
+      .map(name => [name, sha256(fs.readFileSync(path.join(s.area, name)))]));
+    const before = snapshot(); const original = JSON.stringify(s.input);
+    const api = s.preflight(); assert.equal(JSON.stringify(s.input), original);
+    const args = [path.join(__dirname, 'forge-empirical-evaluation.js'), '--preflight', '--input', file, '--sha256', sha256(bytes), '--root', s.area];
+    const cli = spawnSync(process.execPath, args, { encoding: 'utf8' }); assert.equal(cli.status, 0, cli.stderr);
+    assert.deepEqual(JSON.parse(cli.stdout), api); assert(!cli.stdout.includes('PRIVATE_')); assert.deepEqual(snapshot(), before);
+    for (const invalidArgs of [[...args, '--markdown'], [...args, '--preflight'], args.slice(0, -2),
+      args.map(value => value === sha256(bytes) ? sha256('foreign') : value), args.map(value => value === file ? path.join(s.area, 'missing.json') : value)]) {
+      const invalid = spawnSync(process.execPath, invalidArgs, { encoding: 'utf8' }); assert.equal(invalid.status, 2);
+      assert(!invalid.stderr.includes(s.area)); assert(!invalid.stderr.includes('PRIVATE_')); assert.equal(invalid.stdout, '');
+    }
+    fs.appendFileSync(path.join(s.area, 'baseline.json'), ' ');
+    const invalid = spawnSync(process.execPath, args, { encoding: 'utf8' }); assert.equal(invalid.status, 2);
+    assert(JSON.parse(invalid.stdout).diagnostics.some(row => row.code === 'source_hash_changed'));
+    assert(!invalid.stderr.includes(s.area));
+  });
+  test('preflight enrollment awaiting outcome becomes posterior evidence only after a bound later outcome', () => {
+    const s = preflightSetup(); const preflight = s.preflight(); const posterior = clone(s.input); posterior.kind = 'empirical-evaluation-input';
+    for (const item of posterior.cases) {
+      item.outcome_source = `outcome-${item.id}`;
+      posterior.sources.push(writeSource(s.area, item.outcome_source, 'outcome', s.outcomes[item.id], false));
+    }
+    const report = buildEmpiricalEvaluation(posterior, { roots: [s.area] });
+    assert.deepEqual(report.cases.map(row => row.exclusions), preflight.cases.map(row => row.exclusions));
+    assert(report.cases.every(row => row.eligible)); assert(preflight.cases.every(row => !row.eligible));
+    assert.equal(report.prospective_cases, 2); assert.equal(report.comparative_ready, false);
+    const id = firstTwo[0].id; s.outcomes[id].occurred_at = s.starts[id].started_at;
+    Object.assign(posterior.sources.find(ref => ref.id === `outcome-${id}`), writeSource(s.area, `outcome-${id}`, 'outcome', s.outcomes[id], false));
+    assert(buildEmpiricalEvaluation(posterior, { roots: [s.area] }).cases[0].exclusions.includes('execution_chronology_unproven'));
+    assert(s.preflight().cases[0].prospective_enrollment, 'preflight cannot prove a later outcome');
+  });
   test('R6 isolated technical comparators bind every executed control, not just internal comparability', () => {
     for (const arm of ['memory', 'procedure']) {
       const positive = combinedSetup().report();
