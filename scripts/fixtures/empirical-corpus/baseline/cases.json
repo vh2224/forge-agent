@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "description": "Fictional measurements only; fixture IDs identify concrete synthetic checks.",
+  "cases": [
+    {
+      "id": "functional-with-exception",
+      "delivery_id": "delivery-one",
+      "conditions": ["synthetic", "controlled-v1"],
+      "observations": [
+        { "id": "functional-check", "kind": "functional", "check_id": "behavior-1", "value": true },
+        { "id": "canonical-route", "kind": "canonical_autonomy", "check_id": "route-1", "value": false },
+        { "id": "recovery", "kind": "exception", "check_id": "recovery-1", "value": true },
+        { "id": "test-run", "kind": "tests", "passed": false,
+          "checks": [{ "id": "check-pass", "exit_code": 0 }, { "id": "check-fail", "exit_code": 1 }] },
+        { "id": "pause", "kind": "interruptions", "value": 1 },
+        { "id": "human", "kind": "interventions", "value": 2 },
+        { "id": "work", "kind": "human_effort", "measurement": "active-work", "unit": "ms", "value": 700 }
+      ]
+    },
+    {
+      "id": "zero-observed-cost",
+      "delivery_id": "delivery-two",
+      "conditions": ["synthetic", "controlled-v1"],
+      "observations": [
+        { "id": "acceptance", "kind": "uat", "check_id": "human-acceptance-2", "value": true },
+        { "id": "provider-usage", "kind": "provider_usage", "usage_id": "usage-2",
+          "provider": "fictional", "model": "fictional-model", "input_tokens": 0, "output_tokens": 0,
+          "price": { "source": "synthetic-price-v1", "model": "fictional-model", "currency": "USD",
+            "unit": "per-token", "input": 0.001, "output": 0.002 } }
+      ]
+    },
+    {
+      "id": "incomplete",
+      "delivery_id": "delivery-three",
+      "conditions": ["synthetic", "incomplete-evidence"],
+      "summary": "Recovery and completion are recorded, with no UAT or provider usage observation.",
+      "observations": []
+    }
+  ]
+}

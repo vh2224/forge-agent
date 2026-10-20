@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:forge:empirical-baseline:v1",
+  "title": "Descriptive empirical baseline v1",
+  "description": "Output contract. Caller roots, availability attestations and split authority are API arguments, never imported consent. captured_at records collection only. generated_at is excluded from semantic digest.",
+  "type": "object",
+  "required": ["schema_version", "synthetic", "cases", "coverage", "limitations", "template_baseline", "digest", "generated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "synthetic": { "type": "boolean" },
+    "digest": { "$ref": "#/$defs/hash" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "limitations": { "$ref": "#/$defs/strings" },
+    "template_baseline": { "type": ["object", "null"], "description": "Separate template estimate with exact inventory, physical measurement/runtime roots, resolved configuration, runtime hashes, conditions and semantic digest; never provider usage." },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["numerator", "denominator", "unit", "states"],
+        "properties": {
+          "numerator": { "type": "integer", "minimum": 0 },
+          "denominator": { "type": "integer", "minimum": 0 },
+          "unit": { "const": "deliveries_with_usable_measure" },
+          "states": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "cases": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["id", "delivery_id", "dimensions", "telemetry", "input", "canonical", "documents", "provenance", "conditions", "diagnostics"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "delivery_id": { "$ref": "#/$defs/id" },
+          "dimensions": {
+            "type": "object",
+            "required": ["functional", "tests", "uat", "canonical_autonomy", "exception", "interruptions", "interventions", "human_effort", "duration", "package_bytes", "package_tokens", "provider_input_tokens", "provider_output_tokens", "cost"],
+            "additionalProperties": { "$ref": "#/$defs/metric" }
+          },
+          "telemetry": { "type": ["object", "null"], "description": "Sanitized final package metadata: UTF-8 bytes/hash, request fingerprint, requested/sent/observed models, host, worker, transport, effort and numeric budgets. No raw context, request, path or response." },
+          "input": { "type": ["object", "null"], "description": "T03 permitted-view hashes and split exposure identity, validated using caller-owned prework availability and split." },
+          "canonical": { "type": "object", "description": "Unmodified canonical autonomy metrics and attribution diagnostics. Human response latency does not measure active effort." },
+          "documents": { "type": "array", "items": { "type": "object" }, "description": "Hash/pointer/origin of noncanonical documents, including foreign-cwd gates; no raw content or fabricated canonical event." },
+          "provenance": { "type": "array", "items": { "type": "object", "required": ["id", "sha256", "origin", "bytes", "component", "revision", "captured_at"] } },
+          "conditions": { "$ref": "#/$defs/strings" },
+          "diagnostics": { "type": "array", "items": { "type": "object", "required": ["code"] } }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "id": { "type": "string", "pattern": "^[a-zA-Z0-9_.:-]{1,160}$" },
+    "strings": { "type": "array", "items": { "type": "string" } },
+    "metric": {
+      "type": "object",
+      "required": ["value", "unit", "state", "method", "references", "confidence", "numerator", "denominator", "conditions", "limitations"],
+      "additionalProperties": false,
+      "properties": {
+        "value": { "type": ["number", "boolean", "null"] },
+        "unit": { "type": "string" },
+        "state": { "enum": ["observed", "derived", "estimated", "unknown", "invalid", "conflict"] },
+        "method": { "type": "string" },
+        "references": { "type": "array", "items": { "type": "object", "required": ["sha256"], "properties": { "sha256": { "$ref": "#/$defs/hash" } } } },
+        "confidence": { "enum": ["direct", "method-limited", "unavailable"] },
+        "numerator": { "type": ["number", "null"], "minimum": 0 },
+        "denominator": { "type": ["number", "null"], "minimum": 0 },
+        "conditions": { "$ref": "#/$defs/strings" },
+        "limitations": { "$ref": "#/$defs/strings" },
+        "coverage": { "type": "string" }
+      },
+      "allOf": [{ "if": { "properties": { "state": { "enum": ["unknown", "invalid", "conflict"] } } }, "then": { "properties": { "value": { "type": "null" } } } }]
+    }
+  }
+}
