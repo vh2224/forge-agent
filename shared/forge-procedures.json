@@ -205,8 +205,8 @@
     {
       "id": "distribution",
       "path": "shared/forge-procedure-distribution.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "a3d6991a8f4771696c48fe0f55612a67d19ba9f6e2ab928fe9db28b1be5f8c02",
+      "status": "ready",
       "owner": "T06",
       "dependencies": [
         "core"
@@ -219,7 +219,10 @@
         "Installed content resolves the same core/modules with explicit availability and hashes"
       ],
       "tests": [
-        "scripts/forge-source-manifest.test.js"
+        "scripts/forge-source-manifest.test.js",
+        "scripts/forge-installer.test.js",
+        "scripts/forge-codex-renderer.test.js",
+        "scripts/forge-claude-renderer.test.js"
       ]
     },
     {
@@ -891,9 +894,9 @@
         "distribution"
       ],
       "consumers": [
-        "scripts/forge-source-manifest.js",
+        "scripts/forge-installer.js",
         "scripts/forge-codex-renderer.js",
-        "scripts/forge-instructions.js"
+        "scripts/forge-claude-renderer.js"
       ],
       "owner": "T06",
       "preconditions": [
@@ -904,8 +907,10 @@
         "Installed content resolves the same core/modules with explicit availability and hashes"
       ],
       "tests": [
-        "scripts/forge-procedure-context.test.js",
-        "scripts/forge-source-manifest.test.js"
+        "scripts/forge-source-manifest.test.js",
+        "scripts/forge-installer.test.js",
+        "scripts/forge-codex-renderer.test.js",
+        "scripts/forge-claude-renderer.test.js"
       ]
     }
   ]

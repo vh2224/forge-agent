@@ -625,6 +625,16 @@ test('recovery contract sync preserves standing personal authorization bytes and
   assertEqual(fs.readFileSync(file, 'utf8'), once, 'byte identity');
 });
 
+test('both generated boot entries require effective core composition before phase dispatch', () => {
+  const root = project({ 'CLAUDE.md': '# Claude\r\n', 'AGENTS.md': '# Codex\r\n' });
+  for (const [file, host] of [['CLAUDE.md', 'claude'], ['AGENTS.md', 'codex']]) {
+    syncFile(path.join(root, file), { host });
+    const content = read(root, file);
+    for (const term of ['forge-procedure-context.js', '--phase boot', 'shared/forge-procedure-core.md',
+      'conteúdo', 'antes do despacho']) assert(content.includes(term), `${host}: missing ${term}`);
+  }
+});
+
 cleanup();
 
 console.log('');

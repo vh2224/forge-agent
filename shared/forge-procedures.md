@@ -39,7 +39,7 @@ update its canonical digest and exercise the actual consumers before marking rea
 | review-advocate | core + review | scripts/forge-xllm.js, shared/forge-review.md | T05; ready | Configured review models and scope resolved independently of execution tiers; Scoped correction claims and current findings retained | Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback | scripts/forge-procedure-context.test.js, scripts/forge-xllm-review-cli.test.js |
 | review-rebuttal | core + review | scripts/forge-xllm.js, shared/forge-review.md | T05; ready | Configured review models and scope resolved independently of execution tiers; Scoped correction claims and current findings retained | Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback | scripts/forge-procedure-context.test.js, scripts/forge-xllm-review-cli.test.js |
 | review-fix | core + review | scripts/forge-xllm.js, shared/forge-review.md | T05; ready | Configured review models and scope resolved independently of execution tiers; Scoped correction claims and current findings retained | Sanitized diagnostic and actual verdict/correction outcomes preserved without invented fallback | scripts/forge-procedure-context.test.js, scripts/forge-xllm-review-cli.test.js |
-| distribution | core + distribution | scripts/forge-source-manifest.js, scripts/forge-codex-renderer.js, scripts/forge-instructions.js | T06; pending | Canonical source inventory and module digests validated; Both host renderers exercised only in temporary roots | Installed content resolves the same core/modules with explicit availability and hashes | scripts/forge-procedure-context.test.js, scripts/forge-source-manifest.test.js |
+| distribution | core + distribution | scripts/forge-installer.js, scripts/forge-codex-renderer.js, scripts/forge-claude-renderer.js | T06; ready | Canonical source inventory and module digests validated; Both host renderers exercised only in temporary roots | Installed content resolves the same core/modules with explicit availability and hashes | scripts/forge-source-manifest.test.js, scripts/forge-installer.test.js, scripts/forge-codex-renderer.test.js, scripts/forge-claude-renderer.test.js |
 
 ## Bytes and integrity
 
@@ -125,3 +125,15 @@ The memory-extract prompt loads core + memory before its quality contract/input.
 Recovery loads core + recovery before inspection and rebuilds the real native
 binding for every authority recheck, including correction and resumed reservation.
 These reads do not create bindings or authorize functional pending decisions.
+
+## Distribution inventory and installed closure
+
+The procedures source surface inventories loader, schema, manifest and every module.
+Its host status is unavailable for direct projection: canonical runtime bytes are
+copied through installer-managed scripts/shared/schemas, without Markdown markers.
+This is distinct from runtime availability. The installation manifest records each
+verified phase composition and module digest. Installer validates all phases before
+any writes; both renderers consume distribution before creating their projections.
+Generated entry instructions require effective content and canonical builders.
+Temporary installed tests execute real auto/next loader argv and installed builders;
+no personal install, network, provider or human acceptance is implied.

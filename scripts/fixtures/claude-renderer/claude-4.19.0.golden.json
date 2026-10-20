@@ -17,12 +17,12 @@
     {
       "source_id": "skills",
       "target": "skills",
-      "sha256": "03f23215146c30a9cae41e56a802586dde640b382aef5c6e6d632a8cc29c9179"
+      "sha256": "8e4b972f7b0b4dea8f3b18032aad89e881bfbfefdaaa718d8790fef64cd229bf"
     },
     {
       "source_id": "dispatch-templates",
       "target": "shared/templates/dispatch",
-      "sha256": "c0c0869211bf40d1bae6eff28826acbfcd678bcde8da89222d6177b4ded97669"
+      "sha256": "b2fd5bfa883a92ba865d98b3c9c2f74d6000d39f7c28b285c9b1afbf8f93538f"
     },
     {
       "source_id": "hooks",

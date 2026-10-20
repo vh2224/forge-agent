@@ -147,6 +147,16 @@ function renderBlock(options = {}) {
 // authorization.
 function renderEntryContract() {
   return [
+    '## Forge — procedimentos obrigatórios por fase',
+    '',
+    'Antes de cada fase, carregue core e módulos transitivos com forge-procedure-context.js.',
+    'No boot: `node "<FORGE_SCRIPTS_DIR>/forge-procedure-context.js" --phase boot --cwd "<projeto físico>"`.',
+    'Nas demais fases use --phase <fase> no mesmo loader.',
+    'O manifesto shared/forge-procedures.json e shared/forge-procedure-core.md pertencem à mesma raiz.',
+    'Consuma o campo content retornado; a referência ao path não substitui o conteúdo obrigatório.',
+    'Os builders canônicos compõem esse conteúdo antes do despacho, fora dos budgets opcionais.',
+    'Falha de integridade, módulo ausente ou override parcial bloqueia a fase sem fallback de raiz.',
+    '',
     '## Forge — entrada por intenção (obrigatório)',
     '',
     'Antes de recomendar fluxo, leia o pedido e classifique a intenção: consulta/diagnóstico,',

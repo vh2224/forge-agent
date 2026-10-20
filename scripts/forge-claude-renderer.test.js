@@ -23,6 +23,11 @@ function fixtureRepo() {
     fs.cpSync(path.join(repo, directory), path.join(root, directory), { recursive: true });
   }
   fs.copyFileSync(path.join(repo, 'forge-source-manifest.json'), path.join(root, 'forge-source-manifest.json'));
+  const procedures = JSON.parse(fs.readFileSync(path.join(repo, 'shared/forge-procedures.json'), 'utf8'));
+  for (const file of ['shared/forge-procedures.json', 'shared/schemas/procedures.schema.json', ...procedures.modules.map(module => module.path)]) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.copyFileSync(path.join(repo, file), path.join(root, file));
+  }
   return root;
 }
 function manifestFor(root) { return JSON.parse(fs.readFileSync(path.join(root, 'forge-source-manifest.json'), 'utf8')); }
@@ -38,6 +43,30 @@ try {
   const first = renderer.render({ repo: root, projectRoot: root, claudeHome: path.join(root, 'Claude Home Ω'), forgeHome: path.join(root, 'Forge Home Ω') });
   const second = renderer.render({ repo: root, projectRoot: root, claudeHome: path.join(root, 'Claude Home Ω'), forgeHome: path.join(root, 'Forge Home Ω') });
   assert.deepStrictEqual(first.artifacts, second.artifacts);
+  assert(first.procedure_context.content.includes('<!-- forge-procedure:distribution -->'));
+  assert(first.procedure_context.content.includes('<!-- forge-procedure:core -->'));
+  assert(first.artifacts.find(item => item.source === 'skills/forge-auto/SKILL.md').content.includes('forge-procedure-context.js'));
+  const invalidRoot = fixtureRepo();
+  const invalidProject = temp('partial-project');
+  const invalidOptions = { repo: invalidRoot, projectRoot: invalidProject, claudeHome: path.join(invalidProject, 'host'), forgeHome: path.join(invalidProject, 'forge') };
+  const procedureFile = path.join(invalidRoot, 'shared/forge-procedures.json');
+  const procedureBytes = fs.readFileSync(procedureFile);
+  fs.unlinkSync(procedureFile);
+  assert.throws(() => renderer.write(invalidOptions), /procedure-manifest-missing/);
+  fs.writeFileSync(procedureFile, procedureBytes);
+  const distributionFile = path.join(invalidRoot, 'shared/forge-procedure-distribution.md');
+  const distributionBytes = fs.readFileSync(distributionFile);
+  fs.unlinkSync(distributionFile);
+  assert.throws(() => renderer.write(invalidOptions), /procedure-file-unreadable/);
+  fs.writeFileSync(distributionFile, distributionBytes);
+  const removedSurface = manifestFor(invalidRoot);
+  removedSurface.sources = removedSurface.sources.filter(source => source.source_id !== 'procedures');
+  assert.throws(() => renderer.write({ ...invalidOptions, manifest: removedSurface }), /procedure-inventory-missing/);
+  fs.mkdirSync(path.join(invalidProject, 'shared'));
+  fs.writeFileSync(path.join(invalidProject, 'shared/forge-procedures.json'), procedureBytes);
+  assert.throws(() => renderer.write(invalidOptions), /procedure-file-unreadable/);
+  assert(!fs.existsSync(invalidOptions.claudeHome), 'invalid closure wrote host artifacts');
+  assert(!fs.existsSync(path.join(invalidProject, 'CLAUDE.md')));
   assert(first.artifacts.some((item) => item.destination.endsWith(path.join('Claude Home Ω', 'agents', 'forge-executor.md'))));
   assert(first.artifacts.some((item) => item.destination.endsWith(path.join('CLAUDE.md'))));
   assert(first.artifacts.every((item) => !item.content.includes('\r')));

@@ -12,6 +12,7 @@ const { resolveForgePaths } = require('./forge-home');
 const { detect: detectCapabilities } = require('./forge-capabilities');
 const { generate: generateProjections } = require('./forge-generate');
 const { VERSION } = require('./forge-version');
+const { loadProcedureContext, validateProcedureManifest } = require('./forge-procedure-context');
 
 const RUNTIMES = Object.freeze(['claude', 'codex', 'both']);
 const MANAGED_CORE = Object.freeze([
@@ -356,6 +357,16 @@ function install(input = {}) {
   const runtime = options.runtime || 'claude';
   if (!RUNTIMES.includes(runtime)) throw new Error(`runtime inválido: ${JSON.stringify(runtime)} (use claude, codex ou both)`);
   const repo = path.resolve(options.repo || path.resolve(__dirname, '..'));
+  // Validate the complete phase closure before backups, runtime copying or host
+  // projection. Never merge a partial source inventory with installed modules.
+  const sourceInventory = require('./forge-source-manifest').load(repo);
+  const declaresProcedures = sourceInventory.sources.some(source => source.source_id === 'procedures');
+  if (!declaresProcedures && fs.existsSync(path.join(repo, 'shared/forge-procedures.json'))) {
+    throw new Error('procedure-inventory-missing: current source requires the procedures surface');
+  }
+  const procedures = declaresProcedures
+    ? validateProcedureManifest(JSON.parse(fs.readFileSync(path.join(repo, 'shared/forge-procedures.json'), 'utf8')))
+      .phases.map(phase => loadProcedureContext({ cwd: repo, forgeHome: repo, phase: phase.id })) : [];
   const paths = resolveForgePaths({
     cwd: repo,
     forgeHome: options.forgeHome,
@@ -367,6 +378,8 @@ function install(input = {}) {
   });
   const plan = [];
   const selected = selectedRuntimes(runtime);
+  const projectRoot = path.resolve(options.projectRoot || options.cwd || process.cwd());
+  if (declaresProcedures) loadProcedureContext({ cwd: projectRoot, forgeHome: repo, phase: 'distribution' });
   const capabilities = capabilityReport(repo, runtime, options);
   if (capabilities && !capabilities.ok && !options.dryRun) {
     const failures = capabilities.required_failures.join(', ');
@@ -374,7 +387,6 @@ function install(input = {}) {
   }
   const backupName = backupId(options);
   const backupRoot = path.join(paths.forgeHome, 'backups', backupName);
-  const projectRoot = path.resolve(options.projectRoot || options.cwd || process.cwd());
   const coreFiles = [];
   for (const item of MANAGED_CORE) {
     const source = path.join(repo, item);
@@ -495,6 +507,11 @@ function install(input = {}) {
     } else if (synced.content !== current) {
       writeText(file, synced.content, plan, options);
     }
+    if (declaresProcedures) {
+      const instructions = require('./forge-instructions').syncFile(file, { host, dryRun: options.dryRun, create: false });
+      if (instructions.outcome !== 'unchanged') plan.push({ op: instructions.outcome === 'skipped' ? 'skip' : 'write',
+        destination: file, reason: `instructions:${instructions.reason}`, ...(options.dryRun ? { dry_run: true } : {}) });
+    }
   }
   const existingManifest = priorManifest;
   const adapterManifest = { ...(existingManifest.adapters || {}) };
@@ -549,6 +566,7 @@ function install(input = {}) {
     project_root: projectRoot,
     ...(sourceProvenance ? { source_remote: sourceProvenance } : { source_repo: repo }),
     core: coreFiles.concat(['VERSION', 'forge-agent-prefs.jsonc']).sort(),
+    procedures: procedures.map(({ content, ...metadata }) => metadata),
     adapters: adapterManifest,
     ownership: ownershipRecord,
   };
