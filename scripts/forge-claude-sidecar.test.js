@@ -325,11 +325,19 @@ test('argv adds JSON output and invocation-only settings; everything else keeps 
   for (const readOnly of [false, true]) {
     const records = [];
     const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    let captured;
     await adapter.invokeClaudeSidecar({
       cwd: WORKSPACE, prompt: 'argv', timeoutMs: 15000, model: FIXTURE_MODEL, readOnly,
+      onPackagedContext: value => { captured = value.final_evidence; },
       sourceEnv: sourceEnvFor(HAPPY_FIXTURE),
     });
     const args = records[0].args;
+    assert.strictEqual(captured.request.sha256, crypto.createHash('sha256')
+      .update(JSON.stringify({ cmd: records[0].cmd, args })).digest('hex'));
+    assert.strictEqual(captured.context.sha256, crypto.createHash('sha256').update('argv').digest('hex'));
+    assert.strictEqual(captured.transport, 'claude-cli');
+    ok(!JSON.stringify(captured).includes(FIXTURE_TOKEN), 'credential reached evidence');
+    ok(!JSON.stringify(captured).includes('Read the complete task prompt'), 'instruction reached evidence');
     const tools = readOnly ? ['--tools', 'Read,Glob,Grep', '--allowedTools', 'Read,Glob,Grep']
       : ['--tools', 'Read,Glob,Grep,Edit,Write,Bash', '--permission-mode', 'acceptEdits'];
     assert.deepStrictEqual(args.slice(0, -1), [HAPPY_FIXTURE, '--model', FIXTURE_MODEL,

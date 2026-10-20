@@ -500,6 +500,14 @@ async function main() {
   assert.strictEqual(unknown.provider_called, 'unknown');
   assert.deepStrictEqual(unknown.diagnostic, { reason_code: 'host-timeout', layer: 'native-tool' });
   assert(!JSON.stringify(unknown).includes('secret fixture'));
+  for (const rejection of [null, undefined, 'secret rejection', 42, false]) {
+    const failed = await invokeNative(options, () => Promise.reject(rejection));
+    assert.strictEqual(failed.ok, false);
+    assert.strictEqual(failed.reason_code, 'native-invocation-failed');
+    assert.strictEqual(failed.provider_called, 'unknown');
+    assert.strictEqual(failed.final_evidence.stage, 'invoked');
+    assert(!JSON.stringify(failed).includes('secret rejection'));
+  }
   process.stdout.write('forge-native-invocation: ok\n');
 }
 

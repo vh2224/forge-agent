@@ -89,6 +89,27 @@ function codexCapabilities() {
 }
 
 async function main() {
+  await test('caller repair compares equivalent requests and measures final native arguments before reserving', async () => {
+    const request = fixture({ model: 'gpt-5.6-sol' });
+    request.activeCapabilities = codexCapabilities();
+    request.prompt = 'before repair';
+    const failed = await prep.prepareStandaloneTask(request, { invokeNative: async () => {
+      throw Object.assign(Error('fixture caller error'), { code: 'context-budget-exceeded', provider_called: false });
+    } });
+    assert.equal(failed.ok, false);
+    const recovery = { receiptFile: request.resultFile + '.receipt.json', stateFile: request.resultFile + '.recovery.json', correction: true };
+    let calls = 0;
+    const deps = { processProbe: () => 'stopped', invokeNative: async () => { calls++; return framed(envelope(request)); } };
+    await assert.rejects(() => prep.recoverStandaloneTask(Object.fromEntries(Object.entries(request).reverse()), recovery, deps), /correction-required/);
+    request.prompt = 'after offline repair';
+    const recovered = await prep.recoverStandaloneTask(request, recovery, deps);
+    assert.equal(recovered.corrected, true);
+    assert.equal(recovered.result.status, 'done');
+    assert.equal(calls, 1);
+    const state = JSON.parse(fs.readFileSync(recovery.stateFile));
+    assert.equal(state.reservations.length, 1);
+    assert.equal(state.reservations[0].correction.evidence_reference, 'preparation-preflight:native-arguments');
+  });
   await test('trusted caller authority survives restart and routes a timed-out standalone phase to the explicit native candidate', async () => {
     const request = fixture({ phase: 'brainstorm' });
     const prefs = path.join(request.contextRoot, '.gsd/forge-prefs.jsonc');

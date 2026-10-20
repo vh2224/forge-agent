@@ -376,6 +376,7 @@ async function invokeNative(options, invoke) {
       },
     };
   } catch (error) {
+    error = error && typeof error === 'object' ? error : {};
     return {
       ...invocation,
       ok: false,

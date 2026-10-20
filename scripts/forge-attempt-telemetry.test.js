@@ -17,7 +17,12 @@ process.env.USERPROFILE = home;
 const claude = require('./forge-claude-sidecar');
 const originalClaude = claude.invokeClaudeSidecar;
 let claudeStub = () => { throw Error('unexpected fixture invocation'); };
-claude.invokeClaudeSidecar = options => claudeStub(options);
+const fixtureClaudeRequest = options => ({ cmd: 'fixture-claude', args: ['--model', options.model, '--effort', options.effort] });
+claude.invokeClaudeSidecar = options => {
+  // Simulate the adapter's final boundary; real argv is exercised in its suite.
+  api.observeFinal(options, fixtureClaudeRequest(options), options.prompt, 'claude-cli');
+  return claudeStub(options);
+};
 const appserver = require('./forge-appserver-client');
 const originalTurn = appserver.startAppServerTurn;
 const api = require('./forge-attempt-telemetry');
@@ -140,7 +145,7 @@ async function main() {
     assert(observed.prompt.endsWith(suffix));
     assert(observed.prompt.includes(context));
     checkMeasurement(packaged.final_evidence.context, observed.prompt);
-    checkMeasurement(packaged.final_evidence.request, observed, true);
+    checkMeasurement(packaged.final_evidence.request, fixtureClaudeRequest(observed), true);
     assert.equal(packaged.budgets.coding_standards, 128);
     assert.equal(packaged.final_evidence.provider_called, 'unknown');
   });

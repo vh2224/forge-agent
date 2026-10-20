@@ -674,7 +674,16 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
     unit: `${request.contract.unitType}/${request.taskId}`, executionContract: request.execution_contract,
     validateCorrection: async () => {
       validateRequest(request);
-      return { ok: true, evidence_reference: `preparation-preflight:${crypto.createHash('sha256').update(prompt).digest('hex')}` };
+      if (receipt.route.worker_mode === 'native') {
+        const invocation = nativeApi.buildNativeInvocation(nativeOptions(request, validateRoute(receipt.route, request.contract, request), prompt));
+        if (!invocation.ok) return invocation;
+        return { ok: true, evidence_reference: 'preparation-preflight:native-arguments',
+          final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
+            context: invocation.args.prompt || invocation.args.message, identity: delivery, route: receipt.route,
+            model: receipt.route.model, effort: receipt.route.effort, transport: 'native-tool' }) };
+      }
+      if (typeof deps.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
+      return deps.validateCorrection(delivery, prompt);
     },
     resolverOptions: resolverOptions(request, request.contract), resolveDispatch: deps.resolveDispatch,
     validateInvocation: route => route.worker_mode === 'native'

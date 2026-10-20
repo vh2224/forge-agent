@@ -1564,9 +1564,6 @@ async function invokeClaudeJson(opts, validateCandidate, review = false) {
 }
 
 function invokeClaudeTransport(options) {
-  // All Claude-specific framing has been appended by this boundary. Retain
-  // metadata before awaiting the adapter so rejection cannot erase it.
-  require('./forge-attempt-telemetry').observeFinal(options, options, options.prompt, 'claude-cli');
   return invokeClaudeSidecar(options);
 }
 
@@ -2374,8 +2371,8 @@ async function runWriteContractCore(opts, contract) {
   if (opts.executionContext) {
     // Canonical standalone packaging has already budgeted optional standards.
     // Keep research, decisions and the security checklist complete.
-    securityText = opts.executionContext.securityText;
-    contextText = opts.executionContext.contextText;
+    securityText = opts.executionContext.securityText ?? securityText;
+    contextText = opts.executionContext.contextText ?? contextText;
   }
   if (!opts.executionContext && securityText.trim()) securityText = truncateAtSectionBoundary(securityText, SECURITY_BUDGET_CHARS, { mandatory: true, label: 'security-checklist' });
   else if (!opts.executionContext) securityText = '';

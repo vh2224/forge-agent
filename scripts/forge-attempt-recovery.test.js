@@ -71,6 +71,7 @@ async function persistentRecovery(route) {
   const stateFile = path.join(lab.dir, 'state.json'), receiptFile = path.join(lab.dir, 'receipt.json');
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', recovery_identity_sha256: require('./forge-code-roots').digest(api.requestIdentity(request)), failure: { provider_called: false } }));
   const initial = api.captureFailure({ stateFile, receiptFile, request, unit: 'research-milestone/M001', route,
+    finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
     error: { code: 'context-budget-exceeded', provider_called: false, stderr: 'token=secret' }, budgets: { coding_standards: 3000 } });
   assert.strictEqual(initial.attempts[0].failure_class, 'caller');
   assert.strictEqual(initial.attempts[0].model_sent, 'unknown');
@@ -80,10 +81,19 @@ async function persistentRecovery(route) {
   await assert.rejects(api.recoverAttempt({ ...base, request: { ...request, taskId: 'foreign' } }), /identity-mismatch/);
   assert.throws(() => api.captureFailure({ stateFile: path.join(cwd, 'state.json'), request, unit: 'x', route }), /result.*(?:root|inside|outside)|inside.*root/i);
   await assert.rejects(api.recoverAttempt({ ...base, correction: { offline_validated: true } }), /offline-validator-required/);
+  for (const same of [request, Object.fromEntries(Object.entries(request).reverse())]) {
+    await assert.rejects(api.recoverAttempt({ ...base, request: same, correction: true,
+      validateCorrection: async () => { throw Error('unchanged input must fail before packaging'); } }), /correction-required/);
+  }
   let invoked = 0;
+  await assert.rejects(api.recoverAttempt({ ...base, request: { ...request, irrelevant: true }, correction: true,
+    validateCorrection: async () => ({ ok: true, final_evidence: initial.attempts[0].final_evidence }) }), /correction-required/);
   const corrected = { ...request, prompt: 'after offline repair' };
+  await assert.rejects(api.recoverAttempt({ ...base, request: corrected, correction: true,
+    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:unmeasured' }) }), /final-packaging-required/);
   const retried = await api.recoverAttempt({ ...base, request: corrected, correction: true,
-    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:offline-check' }),
+    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:offline-check',
+      final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model, '--prompt', corrected.prompt] }, context: corrected.prompt }) }),
     invoke: async (selected, _invocation, remaining) => {
       invoked++; assert.strictEqual(selected.model, route.model); assert(remaining > 0 && remaining <= 60000); return { status: 'done' };
     } });
@@ -92,7 +102,8 @@ async function persistentRecovery(route) {
   // Reloaded state retains the reservation even if the host stopped before it
   // could record the next result, and cannot send a second corrected request.
   await assert.rejects(api.recoverAttempt({ ...base, request: { ...request, prompt: 'second repair' }, correction: true,
-    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:offline-check' }) }), /retry-exhausted/);
+    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:offline-check',
+      final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { repaired: 2 }, context: 'second repair' }) }) }), /retry-exhausted/);
   const child = require('child_process').spawnSync(process.execPath,
     [path.join(__dirname, 'forge-attempt-recovery.js'), '--inspect', stateFile, receiptFile], { encoding: 'utf8', windowsHide: true });
   assert.strictEqual(child.status, 0, child.stderr);

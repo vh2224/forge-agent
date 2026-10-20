@@ -210,7 +210,28 @@ function validateRecoveryRequest(raw, options = {}) {
       const contract = request.execution_contract ? roots.validateContract(request.execution_contract, { owner: request.contextRoot, revalidate: true })
         : roots.singleContract(request.contextRoot, request.cwd);
       const planFile = milestonePlanFile(request);
-      roots.validatePlan(fs.readFileSync(planFile, 'utf8'), contract);
+      const plan = fs.readFileSync(planFile, 'utf8');
+      const checked = roots.validatePlan(plan, contract);
+      if (request.execution_contract) {
+        const claim = request.claim;
+        if (!claim || claim.schema_version !== 2 || claim.released || !claim.generation) fail('execution-held-claim-required');
+        const held = request.runId && require('./forge-runs').get(request.contextRoot, request.runId);
+        if (!held || held.active !== true || held.write_claim?.released
+            || held.write_claim?.generation !== claim.generation
+            || roots.digest(held.write_claim) !== roots.digest(claim)) fail('execution-claim-generation-stale');
+        roots.claimGroups(claim);
+        if (roots.digest(claim.execution_contract) !== roots.digest(contract)
+            || checked.writes.some(p => !claim.paths.some(c => roots.covers(c, p)))) fail('execution-held-claim-mismatch');
+        const gateFile = planFile.replace(/-PLAN\.md$/, '-PLAN-GATE.md');
+        const gate = fs.existsSync(gateFile) ? fs.readFileSync(gateFile, 'utf8') : '';
+        if (!/^status:\s*approved\s*$/m.test(gate)
+            && !(request.gates?.plan === 'skipped' && request.gates?.planSkipReason === 'interactive-off')) fail('execution-plan-gate-required');
+        const approvedHash = gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1];
+        if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
+        if (request.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(request.gates?.security)) fail('execution-gates-required');
+        if (request.gates.security === 'passed'
+            && (!request.securityFile || !fs.readFileSync(request.securityFile, 'utf8').trim())) fail('execution-security-required');
+      }
       const effective = require('./forge-transport-capabilities').executionCapability(request.route, contract, options);
       if (!effective.supported) fail(effective.reason_code);
       return { ...transport, contract, planFile };
@@ -1476,8 +1497,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
         before: executionApi.protectedSnapshot(code.path) })) : [];
       transportEntered = true;
       result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
-        contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots : r.writableRoots,
-        ...(execution ? { executionContext: execution } : {}) });
+        contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
+          : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
+            require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==
+            require('./forge-code-roots').key(fs.realpathSync.native(cwd))).map(code => code.path) : r.writableRoots,
+        ...(execution ? { executionContext: execution } : r.execution_contract
+          ? { executionContext: { execution_contract: r.execution_contract, budgets: r.budgets || {} } } : {}) });
       transportReturned = true;
       if (execution) {
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
@@ -1523,6 +1548,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
         // Save the validated response before checks/publication. A failing gate
         // must replay delivery, never infer again or capture a new writer baseline.
         const executed = { ...saved, phase: 'executed', provider_called: true,
+          final_evidence: saved.final_evidence ? { ...saved.final_evidence, stage: 'returned', provider_called: true,
+            duration_ms: Date.now() - Date.parse(startedAt),
+            model_observed: result.transport_telemetry?.model_observed || result.appserver?.transport_telemetry?.model_observed || null } : null,
           milestone_delivery: { plan_sha256: hash(fs.readFileSync(r.planFile)),
             verified_files: verifiedFiles,
             protected_owner: api.protectedSnapshot(root),
@@ -1699,7 +1727,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       reason_code: error.code || xllm.classifyErrorClass(error.message), provider_called: providerCalled });
     let extra = execution ? { reset_state_file: executionStateFile,
       possible_writes: providerCalled ? 'unknown' : false,
-      reconciliation_required: providerCalled } : null;
+      reconciliation_required: providerCalled !== false } : null;
     const phase = fix ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')).phase : null;
     if (fix && phase !== 'ready') {
       // Only an attempt that never reached a durable validated result is reset;
@@ -1802,6 +1830,12 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       taskId: request.taskId, unitEffort: route.effort, autoCommit: false }).prompt), forkTurns: 'none',
     taskName: nativeTaskName,
     agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' });
+  // A stale writer cannot reconcile or reserve another attempt under a new claim.
+  if (canonical.scope === 'milestone' && canonical.phase === 'execute') {
+    if (!request.execution_contract) fail('execution-held-claim-required');
+    validateRecoveryRequest(request, { nativeInvocation: request.route.worker_mode === 'native'
+      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined });
+  }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
     recoveryAuthorization: runtime.recoveryAuthorization, processProbe: runtime.processProbe,
     executionContract: request.execution_contract,
@@ -1813,8 +1847,18 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
         { failed: true, processStopped: true, verifyOwnership: runtime.verifyOwnership });
     },
     validateCorrection: async () => {
-      const checked = validateRecoveryRequest(request);
-      return { ok: true, evidence_reference: `unit-preflight:${require('./forge-code-roots').digest({ request, mode: checked.mode })}` };
+      if (request.route.worker_mode === 'native') {
+        const invocation = require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route));
+        if (!invocation.ok) return invocation;
+        validateRecoveryRequest(request, { nativeInvocation: invocation });
+        return { ok: true, evidence_reference: 'unit-preflight:native-arguments',
+          final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
+            context: invocation.args.prompt || invocation.args.message, identity: request, route: request.route,
+            model: request.route.model, effort: request.route.effort, transport: 'native-tool' }) };
+      }
+      validateRecoveryRequest(request);
+      if (typeof runtime.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
+      return runtime.validateCorrection(request);
     },
     resolverOptions,
     resolveDispatch: runtime.resolveDispatch,
@@ -1834,13 +1878,17 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       return runUnitSidecar(request, runtime);
     },
     invoke: async (route, invocation, remainingMs) => {
+      validateRecoveryRequest({ ...request, route }, { nativeInvocation: invocation });
       const next = { ...request, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
         ? { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) } : route,
         dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
       if (route.worker_mode === 'native') {
         if (!runtime.invokeNative) return { action: 'invoke-native', request: next, invocation };
         const native = await require('./forge-native-invocation').invokeNative(nativeOptions(route),
-          (args, binding) => runtime.invokeNative(next, { ...binding, args }));
+          (args, binding) => {
+            validateRecoveryRequest({ ...request, route }, { nativeInvocation: binding });
+            return runtime.invokeNative(next, { ...binding, args });
+          });
         return native;
       }
       return runUnitSidecar(next, runtime);

@@ -162,12 +162,16 @@ function validateRecord(record, kind, key, options) {
 }
 function lookupRecord(cwd, kind, key, options) {
   let found = null;
-  for (const file of recordPaths(cwd, kind, key)) {
+  const paths = recordPaths(cwd, kind, key);
+  let legacyAnchor = null;
+  for (const file of paths) {
     const record = readRecordJson(file);
     if (!record) continue;
     validateRecord(record, kind, key, options);
-    if (found && stableStringify(found) !== stableStringify(record)) throw new ControllerError('record-conflict', `registros novo/legado divergem em ${kind}`);
-    found = record;
+    if (found && stableStringify(found) !== stableStringify(record)) {
+      if (!legacyAnchor || legacyAnchor !== sha(record)) throw new ControllerError('record-conflict', `registros novo/legado divergem em ${kind}`);
+    } else if (!found) found = record;
+    if (file === paths[0]) legacyAnchor = JSON.parse(fs.readFileSync(file, 'utf8')).storage_legacy_checksum || null;
   }
   return found;
 }
@@ -175,7 +179,12 @@ function saveRecord(cwd, kind, key, record, options) {
   lookupRecord(cwd, kind, key); // refuse collisions before replacing any record
   const paths = recordPaths(cwd, kind, key);
   const existing = paths.filter(file => fs.existsSync(file));
-  for (const file of existing.length ? existing : [paths[0]]) writeAtomic(file, record, false, options);
+  // With two accepted copies publish only the modern one atomically. Bind the
+  // untouched legacy bytes so interruption never creates ambiguous authority,
+  // while unrelated legacy changes still fail closed on the next read.
+  if (existing.length === 2) {
+    writeAtomic(paths[0], record, false, { ...options, legacyRecordChecksum: sha(readRecordJson(paths[1])) });
+  } else writeAtomic(existing[0] || paths[0], record, false, options);
 }
 function discoverRecords(cwd, kind) {
   const dir = kind === 'transaction' ? transactionDir(cwd) : resultDir(cwd);
@@ -233,7 +242,8 @@ function preflightPaths(cwd, key, unit, milestone) {
 function writeAtomic(file, value, raw, options) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temporary = path.join(path.dirname(file), `.atomic-${crypto.randomUUID()}.tmp`);
-  const content = raw ? String(value) : `${JSON.stringify({ ...value, storage_checksum: sha(value) }, null, 2)}\n`;
+  const stored = { ...value, ...(options?.legacyRecordChecksum ? { storage_legacy_checksum: options.legacyRecordChecksum } : {}) };
+  const content = raw ? String(value) : `${JSON.stringify({ ...stored, storage_checksum: sha(stored) }, null, 2)}\n`;
   let created = false; let failure;
   try {
     fail(options, 'before-write');
@@ -279,6 +289,7 @@ function readRecordJson(file) {
       const checksum = record.storage_checksum; delete record.storage_checksum;
       if (checksum !== sha(record)) throw new ControllerError('record-conflict', `checksum divergente: ${file}`);
     }
+    delete record.storage_legacy_checksum;
     return record;
   }
   catch (error) {

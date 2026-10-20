@@ -194,7 +194,14 @@ async function main() {
       assert.equal(batch.mode, 'parallel'); assert.deepEqual(batch.batch.map(task => task.id), ['T01', 'T02']);
       const originalExecute = xllm.runExecute;
       try {
+        const claim = { schema_version: 2, generation: require('crypto').randomUUID(), execution_contract: lab.contract,
+          paths: [{ root_id: 'alpha', path: 'same.txt' }, { root_id: 'beta', path: 'same.txt' }] };
+        const runId = 'workflow-run';
+        require('./forge-runs').add(lab.owner, { id: runId, kind: 'milestone', session_id: 'fixture', write_claim: claim });
+        const executionAuthority = { claim, runId,
+          gates: { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' } };
         const interrupted = { ...planning, phase: 'execute', unitType: 'execute-task', taskId: 'T01',
+          ...executionAuthority,
           planFile: tasks[0].planPath, execution_contract: lab.contract, dispatchId: 'milestone-timeout',
           resultFile: path.join(lab.dir, 'interrupted.json'), prompt: 'Synthetic timeout only' };
         xllm.runExecute = async () => {
@@ -219,6 +226,7 @@ async function main() {
           return { status: 'done', summary: 'Synthetic milestone writer', files_changed: ['alpha::same.txt'], must_haves_status: [] };
         };
         const execution = { ...planning, phase: 'execute', unitType: 'execute-task', taskId: 'T01',
+          ...executionAuthority,
           planFile: tasks[0].planPath, execution_contract: lab.contract, dispatchId: 'milestone-success',
           resultFile: path.join(lab.dir, 'execution.json'), prompt: 'Synthetic only',
           verification: { preferenceCommands: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'] } };

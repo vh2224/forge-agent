@@ -50,6 +50,12 @@ async function recoveryContracts() {
   request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
   fs.writeFileSync(request.planFile, fixtures.plan(lab.contract));
   fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+  const runs = require('./forge-runs');
+  request.runId = 'fixture-run';
+  request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
+    paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+  request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+  runs.add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
   let calls = 0;
   try {
     fs.writeFileSync(path.join(lab.a, 'preexisting.txt'), 'foreign baseline\n');
@@ -94,6 +100,28 @@ async function recoveryContracts() {
     assert.strictEqual(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'before\n');
     assert.strictEqual(fs.readFileSync(path.join(lab.b, 'same.txt'), 'utf8'), 'before\n');
     assert.strictEqual(fs.readFileSync(path.join(lab.a, 'preexisting.txt'), 'utf8'), 'foreign baseline\n');
+    let nativeCalls = 0;
+    await assert.rejects(sidecar.recoverUnitSidecar({ ...request, execution_contract: undefined },
+      { stateFile, receiptFile: request.resultFile + '.receipt.json', correction: true },
+      { processProbe: () => 'stopped', invokeNative() { nativeCalls++; } }), /held-claim-required/);
+    for (const patch of [{ active: false }, { write_claim: { ...request.claim, released: true } },
+      { write_claim: { ...request.claim, generation: 'replacement' } }]) {
+      runs.update(lab.owner, request.runId, patch);
+      await assert.rejects(sidecar.recoverUnitSidecar({ ...request, prompt: 'repaired packaging' },
+        { stateFile, receiptFile: request.resultFile + '.receipt.json', correction: true },
+        { processProbe: () => 'stopped', invokeNative() { nativeCalls++; } }), /claim-generation-stale/);
+      runs.update(lab.owner, request.runId, { active: true, write_claim: request.claim });
+    }
+    assert.strictEqual(nativeCalls, 0, 'released/replaced/inactive live authority never reaches another writer');
+    for (const [patch, error] of [
+      [{ claim: { ...request.claim, released: true } }, /held-claim-required/],
+      [{ gates: { ...request.gates, claim: 'blocked' } }, /gates-required/],
+      [{ gates: { ...request.gates, plan: 'approved', planSkipReason: undefined } }, /plan-gate-required/],
+    ]) assert.throws(() => sidecar.validateRecoveryRequest({ ...request, ...patch }), error);
+    const narrower = { ...request.claim, paths: [{ root_id: 'alpha', path: 'same.txt' }] };
+    runs.update(lab.owner, request.runId, { write_claim: narrower });
+    assert.throws(() => sidecar.validateRecoveryRequest({ ...request, claim: narrower }), /held-claim-mismatch/);
+    runs.update(lab.owner, request.runId, { write_claim: request.claim });
     const changed = structuredClone(receipt); changed.recovery_baseline.state_sha256 = 'forged';
     assert.throws(() => sidecar.reconcileMilestoneAttempt(request, changed, { verifyOwnership: () => true }), /baseline-binding/);
     assert.strictEqual(sidecar.milestonePlanFile(request), request.planFile);

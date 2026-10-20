@@ -327,6 +327,30 @@ function testLegacyLookupAndConflicts() {
   } finally { cleanup(fixture.cwd); }
 }
 
+function testInterruptedDualRecordPublication() {
+  const fixture = setup();
+  try {
+    const key = 'interrupted-dual-record';
+    assert.throws(() => controller.begin(fixture.cwd, request(fixture, { idempotency_key: key }),
+      { prefsReader, failpoint: name => name === 'after-intent' }), /failpoint/);
+    const modern = controller.transactionFile(fixture.cwd, key);
+    const legacy = legacyFile(fixture.cwd, 'transaction', key);
+    fs.copyFileSync(modern, legacy);
+    const oldBytes = fs.readFileSync(legacy);
+    const generation = controller.readJson(modern).lease_generation;
+    assert.throws(() => controller.resume(fixture.cwd, { idempotency_key: key, owner_token: 'owner-a', generation },
+      { prefsReader, failpoint: name => name === 'after-rename' }), /failpoint/);
+    assert.deepStrictEqual(fs.readFileSync(legacy), oldBytes, 'only modern is published');
+    assert.strictEqual(controller.readJson(modern).idempotency_key, key, 'interrupted publication remains readable');
+    assert.strictEqual(controller.resume(fixture.cwd, { idempotency_key: key, owner_token: 'owner-a', generation },
+      { prefsReader }).recovered, 1);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 0);
+    const foreign = JSON.parse(oldBytes); foreign.host_runtime = 'foreign'; delete foreign.storage_checksum;
+    fs.writeFileSync(legacy, JSON.stringify(foreign));
+    assert.throws(() => controller.readJson(modern), /record-conflict/);
+  } finally { cleanup(fixture.cwd); }
+}
+
 function testChecksumsAndAddressCollisions() {
   const fixture = setup();
   try {
@@ -495,6 +519,7 @@ function main() {
   test('Claude/Codex logical projection is neutral', testProviderProjectionIsNeutral);
   test('bounded names reproduce 213/261 and oversized legacy destinations', testBoundedNamesAndLongKeys);
   test('legacy lookup, discovery, result/boundary handoff and divergence refusal', testLegacyLookupAndConflicts);
+  test('interrupted modern/legacy publication resumes with one authority', testInterruptedDualRecordPublication);
   test('checksums and identity collisions fail closed', testChecksumsAndAddressCollisions);
   test('public path helpers preserve observation without authorizing partial replay', testObservationalPathCompatibility);
   test('first persistence rollback and durable replay before/after rename', testFirstPersistenceRollbackAndDurableReplay);

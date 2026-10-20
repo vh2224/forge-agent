@@ -5,6 +5,10 @@ const { digest } = require('./forge-code-roots');
 const exceptions = new WeakMap();
 const candidateSets = new WeakMap();
 function fail(code) { throw Object.assign(new Error(code), { code }); }
+function callerRequestHash(request) {
+  return digest(JSON.stringify(request, (_key, value) => value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value));
+}
 function safeDiagnostic(value) {
   return String(value || '').replace(/(?:bearer\s+|(?:token|secret|password|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, '[redacted]').slice(0, 4096);
 }
@@ -274,7 +278,7 @@ function captureFailure(options) {
   const service = provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
   session.record({ failure_class: timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
     service_failure_proven: service, reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
-    request_sha256: observed.request.sha256, context_sha256: context.sha256,
+    request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
     request_bytes: observed.request.bytes, context_bytes: context.bytes,
     context_measurement: context.method, measurement_diagnostic: context.diagnostic,
     final_evidence: observed, budgets: telemetry.numericBudgets(options.budgets || observed.budgets),
@@ -312,9 +316,17 @@ async function recoverAttempt(options) {
   let correction;
   if (options.correction) {
     if (typeof options.validateCorrection !== 'function' || !options.request) fail('recovery-offline-validator-required');
+    const previous = state.attempts.at(-1);
+    // Final adapter arguments and caller inputs are different representations.
+    // Compare inputs only with inputs; random thread ids/temp paths cannot
+    // turn an unchanged caller request into an offline repair.
+    if (!previous?.caller_request_sha256 || previous.caller_request_sha256 === callerRequestHash(options.request)) fail('recovery-correction-required');
     const observed = await options.validateCorrection(options.request);
     if (observed?.ok !== true) fail(observed?.reason_code || 'recovery-offline-validation-failed');
-    correction = { request_sha256: digest(Buffer.from(JSON.stringify(options.request))),
+    const finalEvidence = require('./forge-attempt-telemetry').sanitizeFinal(observed.final_evidence);
+    if (!finalEvidence || finalEvidence.request.status !== 'observed' || finalEvidence.context.status !== 'observed') fail('recovery-final-packaging-required');
+    if (finalEvidence.request.sha256 === previous.request_sha256) fail('recovery-correction-required');
+    correction = { request_sha256: finalEvidence.request.sha256,
       offline_validated: true, evidence_reference: observed.evidence_reference };
   }
   const reference = inspection.receipt.authorization_reference || state.authorization_reference;
