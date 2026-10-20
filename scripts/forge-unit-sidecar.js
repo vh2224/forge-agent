@@ -1395,6 +1395,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const fix = transport.mode === 'fix' ? prepareReviewFix(r, loc, { cwd, root, resultFile, route, dispatchId }) : null;
   const executionApi = loc.execution ? require('./forge-task-execution') : null;
   const execution = executionApi ? executionApi.prepare(r, root, cwd) : null;
+  let executeProcedure;
+  if (transport.mode === 'execute') {
+    executeProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd,
+      phase: r.scope === 'standalone-task' ? 'execute-loose-task' : 'execute-task',
+      forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    if (r.prompt || r.promptFile) require('./forge-prompt').composeProcedurePrompt(r.prompt
+      || fs.readFileSync(r.promptFile, 'utf8'), executeProcedure, r.procedure_context);
+    if (r.contextFile) require('./forge-prompt').separateProcedurePrompt(fs.readFileSync(r.contextFile, 'utf8'),
+      executeProcedure, r.procedure_context);
+  }
   const executionStateFile = execution ? xllm.validateResultFileTarget(`${resultFile}.reset-state.json`, cwd) : null;
   if (execution) {
     xllm.validateResultFileTarget(executionStateFile, root);
@@ -1502,17 +1512,21 @@ async function runUnitSidecarCore(request, runtime, identity) {
       xllm.assertUntrustedOutputBarrier(result);
       artifacts = [];
     } else if (transport.mode === 'execute') {
+      const procedure = executeProcedure;
+      const { content: procedureText, ...procedure_context } = procedure;
+      if (r.prompt) require('./forge-prompt').composeProcedurePrompt(r.prompt, procedure, r.procedure_context);
       const protectedBefore = execution ? executionApi.protectedSnapshot(root) : null;
       const codeProtectedBefore = execution ? execution.execution_contract.code_roots.map(code => ({ root: code.path,
         before: executionApi.protectedSnapshot(code.path) })) : [];
       transportEntered = true;
-      result = await xllm.runExecute({ ...options, planFile: r.planFile, securityFile: r.securityFile,
+      result = await xllm.runExecute({ ...options, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
           : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
             require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==
             require('./forge-code-roots').key(fs.realpathSync.native(cwd))).map(code => code.path) : r.writableRoots,
-        ...(execution ? { executionContext: execution } : r.execution_contract
-          ? { executionContext: { execution_contract: r.execution_contract, budgets: r.budgets || {} } } : {}) });
+        executionContext: execution || (r.execution_contract
+          ? { execution_contract: r.execution_contract, budgets: r.budgets || {} } : undefined),
+        procedureContext: { procedureText, procedure_context } });
       transportReturned = true;
       if (execution) {
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
@@ -1838,13 +1852,25 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     unitId: canonical.taskId || canonical.sliceId || canonical.milestoneId,
     planPath: canonical.planFile, roadmapPath: canonical.roadmapFile };
   const nativeTaskName = `recovery_${request.dispatchId}_${crypto.randomUUID()}`;
-  const nativeOptions = route => ({ hostRuntime: route.host_runtime, resolvedDispatch: route,
+  const nativeOptions = route => {
+    const rendered = !request.prompt && !request.promptFile ? renderPrompt({
+      unitType: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
+      cwd: canonical.contextRoot, codeDir: canonical.cwd, milestoneId: request.milestoneId, sliceId: request.sliceId,
+      taskId: request.taskId, unitEffort: route.effort, autoCommit: false }) : null;
+    let prompt = request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
+    if (canonical.phase === 'execute') {
+      const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: canonical.cwd,
+        phase: canonical.scope === 'standalone-task' ? 'execute-loose-task' : 'execute-task',
+        forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+      prompt = require('./forge-prompt').composeProcedurePrompt(prompt, procedure,
+        rendered ? rendered.procedure_context : request.procedure_context);
+    }
+    return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
-    prompt: request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : renderPrompt({
-      unitType: request.unitType, cwd: canonical.contextRoot, milestoneId: request.milestoneId, sliceId: request.sliceId,
-      taskId: request.taskId, unitEffort: route.effort, autoCommit: false }).prompt), forkTurns: 'none',
+    prompt, forkTurns: 'none',
     taskName: nativeTaskName,
-    agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' });
+    agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };
+  };
   // A stale writer cannot reconcile or reserve another attempt under a new claim.
   if (canonical.scope === 'milestone' && canonical.phase === 'execute') {
     if (!executionRequest.execution_contract) fail('execution-held-claim-required');

@@ -65,8 +65,18 @@ async function recoveryContracts() {
     assert.strictEqual(recovery.inspectReceipt(legacyFile, { request }).writer_possible, true);
     assert.strictEqual(recovery.inspectReceipt(legacyFile).writer_possible, 'unknown');
     assert.throws(() => sidecar.reconcileMilestoneAttempt(request, JSON.parse(fs.readFileSync(legacyFile))), /baseline-required/);
-    xllm.runExecute = async () => {
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: lab.a, phase: 'execute-task', forgeHome: path.resolve(__dirname, '..') });
+    for (const prompt of ['<!-- forge-procedure:core -->', '[DATA FROM "CUSTOM"]\nopen']) {
+      const invalid = { ...request, prompt, dispatchId: 'invalid-composition', resultFile: path.join(lab.dir, 'invalid-composition.json') };
+      await assert.rejects(sidecar.runUnitSidecar(invalid), /composition|DATA envelope/);
+      assert(!fs.existsSync(invalid.resultFile + '.receipt.json'), 'invalid composition precedes receipt and provider');
+    }
+    xllm.runExecute = async options => {
       calls++;
+      assert.strictEqual(options.scope, 'milestone');
+      assert.strictEqual(options.cwd, lab.a);
+      assert.strictEqual(options.procedureContext.procedureText, procedure.content);
+      assert.deepStrictEqual(options.procedureContext.procedure_context.modules.map(row => row.id), ['core', 'verification', 'execution']);
       const receipt = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json'));
       assert(receipt.recovery_baseline, 'durable caller baseline must precede provider');
       assert.strictEqual(receipt.recovery_baseline.protected_roots.length, 2);
@@ -100,6 +110,48 @@ async function recoveryContracts() {
     assert.strictEqual(fs.readFileSync(path.join(lab.a, 'same.txt'), 'utf8'), 'before\n');
     assert.strictEqual(fs.readFileSync(path.join(lab.b, 'same.txt'), 'utf8'), 'before\n');
     assert.strictEqual(fs.readFileSync(path.join(lab.a, 'preexisting.txt'), 'utf8'), 'foreign baseline\n');
+    // A procedural segment must not manufacture a prepared execution context:
+    // xllm uses its presence to select historical budgeting/schema semantics.
+    xllm.runExecute = async options => {
+      assert.strictEqual(options.executionContext, undefined);
+      assert.strictEqual(options.procedureContext.procedureText, procedure.content);
+      assert.deepStrictEqual(options.procedureContext.procedure_context.modules, procedure.modules);
+      throw Error('legacy context boundary inspected');
+    };
+    const originalPlan = fs.readFileSync(request.planFile);
+    try {
+      fs.writeFileSync(request.planFile, fixtures.plan(roots.singleContract(lab.owner, lab.a)));
+      await assert.rejects(sidecar.runUnitSidecar({ ...request, execution_contract: undefined,
+        dispatchId: 'legacy-context', resultFile: path.join(lab.dir, 'legacy-context.json') }), /legacy context boundary inspected/);
+    } finally { fs.writeFileSync(request.planFile, originalPlan); }
+    // Exercise the actual nativeOptions closure with the recovery controller
+    // substituted at its boundary. This exercises composition/the adapter;
+    // recovery authority and end-to-end recovery are not exercised here.
+    const recoverAttempt = recovery.recoverAttempt;
+    const nativeRoute = { ...route, worker_mode: 'native', host_runtime: 'codex', resolved_worker_engine: 'codex', worker_engine: 'codex',
+      model: 'gpt-6-sol', model_resolved: 'gpt-6-sol', config_ok: true };
+    const capabilities = { available: true, tool: 'spawn_agent', source: 'fixture', models: ['gpt-6-sol'], reasoning_efforts: ['medium'], fork_turns: ['none'] };
+    const customFile = path.join(lab.dir, 'custom-prompt.md');
+    fs.writeFileSync(customFile, 'Custom recovery prompt');
+    const artifact = require('./forge-prompt').materializePrompt({ cwd: lab.owner, codeDir: lab.a, forgeHome: path.resolve(__dirname, '..'),
+      unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', dispatchId: 'recovery-doublepass', autoCommit: false });
+    const recoverCustom = patch => sidecar.recoverUnitSidecar({ ...request, prompt: undefined, ...patch }, {}, { activeCapabilities: capabilities });
+    try {
+      recovery.recoverAttempt = async options => options.validateInvocation(nativeRoute);
+      for (const patch of [{ prompt: 'Custom recovery prompt' }, { promptFile: customFile }, { promptFile: artifact.prompt_path }]) {
+        const invocation = await recoverCustom(patch);
+        assert.strictEqual(invocation.ok, true, JSON.stringify(invocation));
+        assert(invocation.args.message.includes(procedure.content));
+        for (const id of ['core', 'verification', 'execution']) assert.strictEqual(invocation.args.message.split(`<!-- forge-procedure:${id} -->`).length - 1, 1);
+      }
+      const { content, ...metadata } = procedure;
+      for (const prompt of ['<!-- forge-procedure:core -->', '[DATA FROM "CUSTOM"]\nopen',
+        '[DATA FROM "CUSTOM"]\n' + content + '\n[END DATA]', '[DATA FROM "A"]\nvalue\n[END DATA FROM "B"]']) {
+        await assert.rejects(recoverCustom({ prompt, procedure_context: metadata }), /composition|DATA envelope/);
+        fs.writeFileSync(customFile, prompt);
+        await assert.rejects(recoverCustom({ promptFile: customFile, procedure_context: metadata }), /composition|DATA envelope/);
+      }
+    } finally { recovery.recoverAttempt = recoverAttempt; }
     let nativeCalls = 0;
     await assert.rejects(sidecar.recoverUnitSidecar({ ...request, execution_contract: undefined },
       { stateFile, receiptFile: request.resultFile + '.receipt.json', correction: true },

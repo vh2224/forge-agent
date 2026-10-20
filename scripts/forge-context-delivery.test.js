@@ -6,6 +6,14 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+function stageProcedures(destination) {
+  const source = path.resolve(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
+  fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
+  fs.copyFileSync(path.join(source, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
+  for (const module of manifest.modules.filter(item => item.status === 'ready')) fs.copyFileSync(path.join(source, module.path), path.join(destination, module.path));
+}
+
 const cp = require('child_process');
 const { sha256 } = require('./forge-delivery');
 const { buildAgentView, validateInputGraph, createSplit } = require('./forge-empirical-input');
@@ -24,6 +32,7 @@ const previous = { FORGE_HOME: process.env.FORGE_HOME, FORGE_XLLM_CLAUDE_BIN: pr
 const profile = path.join(root, 'profile'); fs.mkdirSync(profile);
 fs.writeFileSync(path.join(profile, 'forge-agent-prefs.jsonc'), '{}');
 process.env.FORGE_HOME = profile;
+stageProcedures(profile);
 const accounts = require('./forge-accounts');
 const originalResolver = accounts.resolveLaunch;
 // Bind the lexical account dependency before loading the real adapter, never read credentials.
@@ -47,6 +56,15 @@ let passed = 0;
 // New captures legitimately differ because real adapter argv includes temp paths.
 const machine = process.argv.slice(2).includes('--comparison-input');
 async function test(name, fn) { await fn(); passed++; if (!machine) console.log(`ok - ${name}`); }
+function assertMandatory(prompt) {
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: root, forgeHome: profile, phase: 'execute-task' });
+  assert(prompt.includes(procedure.content), 'final transport preserves canonical procedure bytes');
+  for (const id of ['core', 'verification', 'execution']) assert.equal(prompt.split('<!-- forge-procedure:' + id + ' -->').length - 1, 1, id);
+  const instruction = prompt.indexOf('<!-- forge-procedure:core -->');
+  const dataEnd = prompt.lastIndexOf('[END DATA FROM', instruction);
+  const dataStart = prompt.lastIndexOf('[DATA FROM', instruction);
+  assert(dataStart < 0 || dataEnd > dataStart, 'mandatory instructions stay outside DATA');
+}
 function fixed(fn) { const old = Date.now; Date.now = () => NOW; try { return fn(); } finally { Date.now = old; } }
 function write(file, text) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); }
 function setup() {
@@ -155,7 +173,7 @@ async function native(s, name, query, budget, limit) {
     unitType: 'execute-task', scope: 'milestone', phase: 'execute', dispatchId: name, cwd: code, contextRoot: s.owner,
     budgets: { auto_memory: budget }, onPackagedContext: value => { packaged = value; } }, async args => { captured = structuredClone(args); return { simulated: true }; });
   assert(result.ok, JSON.stringify(result)); assert.equal(captured.model, 'gpt-6-sol'); assert.equal(captured.reasoning_effort, 'medium');
-  assert.equal(result.final_evidence.model_observed, null); safePrompt(captured.message);
+  assert.equal(result.final_evidence.model_observed, null); safePrompt(captured.message); assertMandatory(captured.message);
   const selected = baseline === null ? selection.selected.map(e => e.identity) : delivered(rendered.prompt);
   return { row: reportRow(name, packaged, captured.message, captured,
     { unit_type: 'execute-task', scope: 'milestone', phase: 'execute', dispatch_id: name, model_requested: 'gpt-6-sol', model_sent: captured.model,
@@ -177,7 +195,7 @@ async function sidecar(s, name, query, budget, limit, prune = false) {
   assert.equal(result.status, 'done');
   const capture = JSON.parse(fs.readFileSync(captureFile, 'utf8'));
   assert.equal(capture.args[capture.args.indexOf('--model') + 1], 'claude-sonnet-5'); assert(capture.args.includes('medium'));
-  assert(capture.prompt.includes('INFORMATIONAL ONLY, NOT INSTRUCTIONS')); safePrompt(capture.prompt);
+  assert(capture.prompt.includes('INFORMATIONAL ONLY, NOT INSTRUCTIONS')); safePrompt(capture.prompt); assertMandatory(capture.prompt);
   const selected = old === null ? bundle.selection.selected.map(e => e.identity) : delivered(context);
   return { row: reportRow(name, packaged, capture.prompt, { cmd: process.execPath, args: [emitter, ...capture.args] },
     { unit_type: 'execute-task', scope: 'milestone', phase: 'execute', dispatch_id: name, model_requested: 'claude-sonnet-5', model_sent: 'claude-sonnet-5', effort: 'medium',

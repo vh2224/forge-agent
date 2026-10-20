@@ -63,8 +63,8 @@
     {
       "id": "task-preparation",
       "path": "shared/forge-procedure-task-preparation.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "8ac860070ff00bb6cd4857f6875e7cca3382ae71fbf87872cd7d2aefd3878cbd",
+      "status": "ready",
       "owner": "T03",
       "dependencies": [
         "core"
@@ -83,11 +83,12 @@
     {
       "id": "execution",
       "path": "shared/forge-procedure-execution.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "66a61fce0b7c071d29297dd6fa87358cc4eab2380815e72a4bccd7d6569aad98",
+      "status": "ready",
       "owner": "T03",
       "dependencies": [
-        "core"
+        "core",
+        "verification"
       ],
       "preconditions": [
         "Complete plan, security and plan gates accepted",
@@ -103,9 +104,9 @@
     {
       "id": "verification",
       "path": "shared/forge-procedure-verification.md",
-      "sha256": null,
-      "status": "pending",
-      "owner": "T02",
+      "sha256": "4df43a595cd61b3c49c21c7c3c9e9b15192bae60153229840cfeeb5d613d6f8d",
+      "status": "ready",
+      "owner": "T03",
       "dependencies": [
         "core"
       ],
@@ -127,7 +128,8 @@
       "status": "ready",
       "owner": "T02",
       "dependencies": [
-        "core"
+        "core",
+        "verification"
       ],
       "preconditions": [
         "Task/slice summaries, deliveries and review findings preserved",
@@ -536,7 +538,8 @@
       "consumers": [
         "scripts/forge-task-execution.js",
         "scripts/forge-unit-sidecar.js",
-        "scripts/forge-prompt.js"
+        "scripts/forge-prompt.js",
+        "scripts/forge-xllm.js"
       ],
       "owner": "T03",
       "preconditions": [
@@ -548,7 +551,11 @@
       ],
       "tests": [
         "scripts/forge-procedure-context.test.js",
-        "scripts/forge-task-execution.test.js"
+        "scripts/forge-task-execution.test.js",
+        "scripts/forge-prompt.test.js",
+        "scripts/forge-unit-sidecar.test.js",
+        "scripts/forge-xllm.test.js",
+        "scripts/forge-context-delivery.test.js"
       ]
     },
     {
@@ -559,7 +566,8 @@
       "consumers": [
         "scripts/forge-task-execution.js",
         "scripts/forge-unit-sidecar.js",
-        "scripts/forge-prompt.js"
+        "scripts/forge-prompt.js",
+        "scripts/forge-xllm.js"
       ],
       "owner": "T03",
       "preconditions": [
@@ -571,7 +579,11 @@
       ],
       "tests": [
         "scripts/forge-procedure-context.test.js",
-        "scripts/forge-task-execution.test.js"
+        "scripts/forge-task-execution.test.js",
+        "scripts/forge-prompt.test.js",
+        "scripts/forge-unit-sidecar.test.js",
+        "scripts/forge-xllm.test.js",
+        "scripts/forge-context-delivery.test.js"
       ]
     },
     {
@@ -583,7 +595,7 @@
         "scripts/forge-verify.js",
         "scripts/forge-verifier.js"
       ],
-      "owner": "T02",
+      "owner": "T03",
       "preconditions": [
         "Exact plan and actual code root identified",
         "Concrete applicable checks resolved without inventing commands"
@@ -593,7 +605,8 @@
       ],
       "tests": [
         "scripts/forge-procedure-context.test.js",
-        "scripts/forge-verify.test.js"
+        "scripts/forge-verify.test.js",
+        "scripts/forge-verifier.test.js"
       ]
     },
     {

@@ -8,6 +8,14 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+function stageProcedures(destination) {
+  const source = path.resolve(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
+  fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
+  fs.copyFileSync(path.join(source, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
+  for (const module of manifest.modules.filter(item => item.status === 'ready')) fs.copyFileSync(path.join(source, module.path), path.join(destination, module.path));
+}
+
 const { spawnSync } = require('child_process');
 const installer = require('./forge-installer');
 
@@ -121,6 +129,8 @@ async function main() {
     skipCapabilityCheck: true, env: { ...process.env, HOME: root, USERPROFILE: root },
   });
   assert.equal(report.ok, true);
+  // Fixture staging: host distribution is owned separately.
+  stageProcedures(forgeHome);
   const helperPath = path.join(forgeHome, 'scripts', 'forge-task-preparation.js');
   assert(fs.existsSync(helperPath));
   assert(fs.existsSync(path.join(forgeHome, 'scripts', 'forge-sidecar-identity.js')));
@@ -178,7 +188,10 @@ accounts.resolveLaunch = () => ({ name: 'fixture-account', token: 'fixture-token
 
   try {
     await test('temporary installation executes full physical two-SVN preparation, claim, execution and delivery', async () => {
-      await require('./forge-task-multiroot.test').scenario('svn', path.join(forgeHome, 'scripts'));
+      const fixtures = require('./forge-code-roots.test'), originalFixture = fixtures.fixture;
+      fixtures.fixture = (...args) => { const fixture = originalFixture(...args); stageProcedures(path.join(fixture.dir, 'home')); return fixture; };
+      try { await require('./forge-task-multiroot.test').scenario('svn', path.join(forgeHome, 'scripts')); }
+      finally { fixtures.fixture = originalFixture; }
       for (const name of ['forge-code-roots', 'forge-artifact-reconciliation', 'forge-attempt-recovery']) {
         assert.deepStrictEqual(fs.readFileSync(path.join(forgeHome, 'scripts', name + '.js')),
           fs.readFileSync(path.join(__dirname, name + '.js')), 'installed helper bytes: ' + name);

@@ -93,6 +93,9 @@ function prepare(r, root, cwd) {
         || r.plan_contract.contract_sha256 !== validated.contract_sha256
         || r.plan_contract.capabilities_sha256 !== roots.digest(capability))) fail('execution-preflight-stale');
   }
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd,
+    phase: 'execute-loose-task', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+  const { content: procedureText, ...procedure_context } = procedure;
   const context = [];
   const inputs = { [planFile]: hash(plan), ...(gate ? { [gateFile]: hash(gate) } : {}) };
   for (const suffix of ['BRAINSTORM', 'CONTEXT', 'RESEARCH']) {
@@ -101,7 +104,8 @@ function prepare(r, root, cwd) {
   }
   if (r.contextFile) {
     const file = physical(path.join(root, loc.task), path.resolve(r.contextFile));
-    const text = read(file); inputs[file] = hash(text); context.push(text);
+    const text = read(file); inputs[file] = hash(text);
+    context.push(require('./forge-prompt').separateProcedurePrompt(text, procedure, r.procedure_context));
   }
   const securityFile = path.join(root, loc.task, `${r.taskId}-SECURITY.md`);
   if (r.securityFile && path.resolve(r.securityFile) !== securityFile) fail('execution-security-path-mismatch');
@@ -120,11 +124,13 @@ function prepare(r, root, cwd) {
     context.push(`Full coding standards: ${standardsFile}`);
   }
   context.unshift(`CODE_DIR: ${cwd}\nARTIFACT_OWNER: ${root}\nExecution contract: ${JSON.stringify(contract)}\nClaimed paths (only writes allowed): ${JSON.stringify(claims)}`);
+  if (r.prompt) require('./forge-prompt').composeProcedurePrompt(r.prompt, procedure, r.procedure_context);
   const snapshotApi = require('./forge-surgical-reset');
   const ordered = [primary, ...contract.code_roots.filter(entry => entry.id !== primary.id)];
   const snapshots = (ordered.length > 1 ? snapshotApi.captureMultiAttemptSnapshot(ordered.map(entry => entry.path), { attemptId: r.dispatchId })
     : [snapshotApi.captureAttemptSnapshot(cwd, { attemptId: r.dispatchId })]).map((snapshot, i) => ({ ...snapshot, root_id: ordered[i].id }));
   return { claims, execution_contract: contract, writableRoots: extras, snapshots, inputs, contextText: context.join('\n\n'), securityText,
+    procedureText, procedure_context,
     budgets: { coding_standards: standardsTokens }, plan_hash: hash(plan) };
 }
 

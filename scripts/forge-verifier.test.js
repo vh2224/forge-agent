@@ -843,6 +843,32 @@ test('task boundary: a legacy plan passes through untouched', () => {
 });
 
 // ── Cleanup and summary ───────────────────────────────────────────────────────
+test('artifact entrypoints validate modules before reading even a legacy plan', () => {
+  const strict = require('assert'), api = require('./forge-verifier');
+  const dir = taskFixture('---\nid: T01\n---\n# legacy\n', {});
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../shared/forge-procedures.json'), 'utf8'));
+  const module = manifest.modules.find(row => row.id === 'verification');
+  fs.mkdirSync(path.join(dir, 'shared'));
+  for (const row of manifest.modules.filter(row => row.status === 'ready')) fs.copyFileSync(path.join(__dirname, '..', row.path), path.join(dir, row.path));
+  const file = path.join(dir, 'shared/forge-procedures.json'); fs.writeFileSync(file, JSON.stringify(manifest));
+  try {
+    const result = runTaskArtifactCheck({ taskPlan: path.join(dir, 'T01-PLAN.md'), cwd: dir });
+    strict.strictEqual(result.legacy, true);
+    strict.deepStrictEqual(result.procedure_context.modules.map(row => row.id), ['core', 'verification']);
+    for (const attack of ['missing', 'hash', 'pending']) {
+      const target = path.join(dir, module.path), bytes = fs.readFileSync(target);
+      if (attack === 'missing') fs.unlinkSync(target);
+      else if (attack === 'hash') fs.appendFileSync(target, '\ntampered');
+      else { const changed = structuredClone(manifest); changed.modules.find(row => row.id === 'verification').status = 'pending'; fs.writeFileSync(file, JSON.stringify(changed)); }
+      strict.throws(() => runTaskArtifactCheck({ taskPlan: path.join(dir, 'absent-plan.md'), cwd: dir }), /procedure/i);
+      const cli = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'forge-verifier.js'), '--cwd', dir, '--slice', 'S01', '--milestone', 'M001'], { encoding: 'utf8', windowsHide: true });
+      strict.strictEqual(cli.status, 2);
+      strict.match(cli.stderr, /procedure/i);
+      strict.strictEqual(fs.existsSync(path.join(dir, '.gsd')), false, 'slice output is not published after failed module validation');
+      fs.writeFileSync(target, bytes); fs.writeFileSync(file, JSON.stringify(manifest));
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}
 
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);

@@ -19,11 +19,69 @@ const forgeIds = require('./forge-ids.js');
 const { selectMemoryContext } = require('./forge-memory-context.js');
 const { loadProcedureContext } = require('./forge-procedure-context.js');
 
-// Execution entrypoints are integrated separately by T03.
 const PROCEDURE_UNITS = new Set([
   'discuss-milestone', 'discuss-slice', 'research-milestone', 'research-slice',
   'plan-milestone', 'plan-slice', 'plan-check', 'complete-slice', 'complete-milestone',
+  'execute-task', 'execute-loose-task',
 ]);
+
+// A marker is never provenance. Only freshly loaded metadata plus the exact
+// canonical segment can authorize reuse of an already composed prompt.
+function composeProcedurePrompt(prompt, procedure, provenance) {
+  let text = String(prompt);
+  const artifact = /^---\r?\n([\s\S]*?)\r?\n---\r?\n\r?\n([\s\S]*)$/.exec(text);
+  if (artifact && /^procedure_context: /m.test(artifact[1])) {
+    try {
+      const metadata = JSON.parse(/^procedure_context: (.+)$/m.exec(artifact[1])[1]);
+      const fingerprint = JSON.parse(/^final_prompt_sha256: (.+)$/m.exec(artifact[1])[1]);
+      if (crypto.createHash('sha256').update(artifact[2]).digest('hex') !== fingerprint) throw new Error('artifact hash');
+      if (provenance && !require('node:util').isDeepStrictEqual(provenance, metadata)) throw new Error('artifact provenance');
+      provenance = metadata;
+      text = artifact[2];
+    } catch {
+      const error = new Error('Materialized procedure prompt has inconsistent metadata or body hash');
+      error.code = 'procedure-composition-inconsistent';
+      throw error;
+    }
+  }
+  const { content, ...metadata } = procedure;
+  const stack = [];
+  let insideData = false;
+  let malformedData = false;
+  const procedurePosition = text.indexOf(content);
+  for (const match of text.matchAll(/^\[(?:(DATA FROM|END DATA FROM) ("[^"\r\n]+")[^\]\r\n]*|(END DATA))\]\r?$/gm)) {
+    if (match.index < procedurePosition && match[1] === 'DATA FROM') insideData = true;
+    if (match[1] === 'DATA FROM') stack.push(match[2]);
+    else if (match[3] ? stack.length === 0 || !stack.pop() : stack.pop() !== match[2]) malformedData = true;
+    if (match.index < procedurePosition) insideData = stack.length > 0;
+  }
+  if (malformedData || stack.length) {
+    const error = new Error('Procedure prompt contains an unclosed or mismatched informational DATA envelope');
+    error.code = 'procedure-composition-inconsistent';
+    throw error;
+  }
+  const markers = [...text.matchAll(/<!-- forge-procedure:([^>]+) -->/g)].map(match => match[1]);
+  if (markers.length === 0) return `${text}\n\n${content}`;
+  const expected = procedure.modules.map(module => module.id);
+  if (!require('node:util').isDeepStrictEqual(provenance, metadata)
+      || text.split(content).length !== 2
+      || markers.length !== expected.length
+      || insideData
+      || expected.some(id => markers.filter(marker => marker === id).length !== 1)) {
+    const error = new Error('Procedure composition does not match freshly loaded provenance and canonical bytes');
+    error.code = 'procedure-composition-inconsistent';
+    throw error;
+  }
+  return text;
+}
+
+function separateProcedurePrompt(text, procedure, provenance) {
+  if (!String(text).includes('<!-- forge-procedure:')) {
+    composeProcedurePrompt(text, procedure, provenance);
+    return String(text);
+  }
+  return composeProcedurePrompt(text, procedure, provenance).replace(procedure.content, '');
+}
 
 const TEMPLATE_FILES = Object.freeze({
   'execute-task': 'execute-task.md',
@@ -690,7 +748,7 @@ function renderPrompt(rawOptions) {
     userHome: options.homeDir, env: options.env, phase: options.unitType,
   }) : null;
   const values = buildValues(options, template.content);
-  const body = procedure ? `${template.content}\n\n${procedure.content}` : template.content;
+  const body = procedure ? composeProcedurePrompt(template.content, procedure, options.procedure_context) : template.content;
   const basePrompt = renderTemplate(body, values, template.path);
   const prompt = appendPendingContext(applyIsolationHeader(basePrompt, options), options);
   const templateSha256 = crypto.createHash('sha256').update(template.content).digest('hex');
@@ -960,6 +1018,8 @@ function cliMain(argv) {
 }
 
 module.exports = {
+  composeProcedurePrompt,
+  separateProcedurePrompt,
   TEMPLATE_FILES,
   candidateTemplateRoots,
   resolveTemplate,

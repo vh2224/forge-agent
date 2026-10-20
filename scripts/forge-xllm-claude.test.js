@@ -582,6 +582,9 @@ function assertMockEvidence(fixture, run, capture) {
   assert.strictEqual(capture.fixture_error, null);
   assert.ok(capture.prompt_contents.includes(fixture.planText), 'prompt file must contain the complete plan verbatim');
   assert.ok(capture.prompt_contents.includes(PLAN_SENTINEL));
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: fixture.workspace, phase: 'execute-task', forgeHome: path.resolve(__dirname, '..') });
+  assert(capture.prompt_contents.includes(procedure.content), 'real CLI file contains byte-complete canonical instructions');
+  for (const id of ['core', 'verification', 'execution']) assert.strictEqual(capture.prompt_contents.split(`<!-- forge-procedure:${id} -->`).length - 1, 1);
   assert.ok(Buffer.byteLength(capture.argv.join('\0'), 'utf8') < Buffer.byteLength(capture.prompt_contents, 'utf8'),
     'mock argv must carry only a bounded file instruction');
   assertTokenAbsent('mock child argv', capture.argv.join('\0'));

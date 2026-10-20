@@ -5,6 +5,14 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+function stageProcedures(destination) {
+  const source = path.resolve(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
+  fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
+  fs.copyFileSync(path.join(source, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
+  for (const module of manifest.modules.filter(item => item.status === 'ready')) fs.copyFileSync(path.join(source, module.path), path.join(destination, module.path));
+}
+
 const cp = require('child_process');
 const crypto = require('crypto');
 const base = path.join(require('os').tmpdir(), 'forge-standalone-execute-labs');
@@ -18,6 +26,7 @@ process.env.GIT_CEILING_DIRECTORIES = root;
 function write(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value)); }
 process.env.FORGE_HOME = path.join(root, 'home');
 write(path.join(process.env.FORGE_HOME, 'forge-agent-prefs.jsonc'), {});
+stageProcedures(process.env.FORGE_HOME);
 const accounts = require('./forge-accounts');
 const originalLookup = accounts.resolveLaunch;
 accounts.resolveLaunch = () => ({ name: 'fixture', token: 'fixture-only' });
@@ -311,6 +320,11 @@ async function main() {
   assert(output.criteria.every(c => c.status !== 'verificado'), 'no fabricated verification');
   const args = JSON.parse(fs.readFileSync(f.control.args));
   const prompt = fs.readFileSync(f.control.prompt, 'utf8');
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: f.cwd,
+    forgeHome: process.env.FORGE_HOME, phase: 'execute-loose-task' });
+  assert(prompt.includes(procedure.content));
+  assert.deepStrictEqual(result.appserver.procedure_context.modules, procedure.modules);
+  for (const module of procedure.modules) assert.strictEqual(prompt.split('<!-- forge-procedure:' + module.id + ' -->').length - 1, 1);
   assert(prompt.includes('RESEARCH_END')); assert(prompt.includes('Mandatory security checklist'));
   assert(prompt.includes('auto_commit')); assert(prompt.includes('deploy')); assert(prompt.includes(f.cwd));
   assert.strictEqual(args[args.indexOf('--model') + 1], 'claude-opus-5-5');
@@ -319,6 +333,19 @@ async function main() {
   assert.strictEqual(result.appserver.packaged_context.budgets.coding_standards, 32);
   await unit.runUnitSidecar(f.r);
   assert.strictEqual(fs.readFileSync(f.control.calls, 'utf8'), 'spawn\n');
+  for (const failure of ['pending', 'missing', 'hash']) {
+    const q = setup();
+    stageProcedures(q.cwd);
+    const manifestPath = path.join(q.cwd, 'shared/forge-procedures.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath));
+    const module = manifest.modules.find(item => item.id === 'execution');
+    if (failure === 'pending') { module.status = 'pending'; write(manifestPath, manifest); }
+    if (failure === 'missing') fs.unlinkSync(path.join(q.cwd, module.path));
+    if (failure === 'hash') fs.appendFileSync(path.join(q.cwd, module.path), '\nchanged');
+    assert.throws(() => execution.prepare(q.r, q.owner, q.cwd), error => /^procedure-/.test(error.code));
+    assert(!fs.existsSync(q.control.calls));
+    assert(!fs.existsSync(q.r.resultFile + '.receipt.json'));
+  }
   write(path.join(f.cwd, 'src.js'), 'later change');
   await rejects(f.r, 'execution-replay-code-changed');
   assert.strictEqual(fs.readFileSync(f.control.calls, 'utf8'), 'spawn\n');
@@ -400,6 +427,7 @@ async function main() {
     userHome: installedRoot, noModelProbe: true, skipCapabilityCheck: true,
     env: { ...process.env, HOME: installedRoot, USERPROFILE: installedRoot } });
   assert.strictEqual(report.ok, true);
+  stageProcedures(forgeHome);
   const installedSkill = fs.readFileSync(path.join(codexHome, 'skills/forge-task/SKILL.md'), 'utf8');
   assert(installedSkill.includes('--scope standalone-task --phase execute'));
   assert(installedSkill.includes('**Branch Claude — sidecar'));
