@@ -1,0 +1,280 @@
+{
+  "schema_version": 1,
+  "corpus": {
+    "schema_version": 1,
+    "catalog_id": "fictional-contract",
+    "captured_at": "2026-01-01T12:00:00Z",
+    "references": [
+      {
+        "id": "before",
+        "role": "prework",
+        "region": "prework",
+        "origin": "fictional-project",
+        "lineage": [
+          "synthetic-source"
+        ],
+        "state": "observed",
+        "path": "snapshots/before.json",
+        "bytes": 10,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "1",
+        "peg": "1",
+        "captured_at": "2026-01-01T12:00:00Z",
+        "temporal_source": "synthetic clock"
+      },
+      {
+        "id": "criteria",
+        "role": "grader/criteria",
+        "region": "grader",
+        "origin": "fictional-project",
+        "lineage": [
+          "synthetic-source"
+        ],
+        "state": "observed",
+        "path": "snapshots/criteria.json",
+        "bytes": 10,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "1",
+        "peg": "1",
+        "captured_at": "2026-01-01T12:00:00Z",
+        "temporal_source": "synthetic clock"
+      },
+      {
+        "id": "expected",
+        "role": "grader/expected",
+        "region": "grader",
+        "origin": "fictional-project",
+        "lineage": [
+          "synthetic-source"
+        ],
+        "state": "observed",
+        "path": "snapshots/expected.json",
+        "bytes": 10,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "1",
+        "peg": "1",
+        "captured_at": "2026-01-01T12:00:00Z",
+        "temporal_source": "synthetic clock"
+      },
+      {
+        "id": "final",
+        "role": "grader/final-code",
+        "region": "grader",
+        "origin": "fictional-project",
+        "lineage": [
+          "synthetic-source"
+        ],
+        "state": "observed",
+        "path": "snapshots/final.json",
+        "bytes": 10,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": "1",
+        "peg": "1",
+        "captured_at": "2026-01-01T12:00:00Z",
+        "temporal_source": "synthetic clock"
+      }
+    ],
+    "candidates": [
+      {
+        "origin": "fictional-project",
+        "unit": {
+          "type": "task",
+          "id": "T-20260101120000-fictional-change"
+        },
+        "delivery_key": "change-one",
+        "family_key": "change-one",
+        "version": "v1",
+        "reopened": false,
+        "selection": "included",
+        "reasons": [
+          "synthetic evidence"
+        ],
+        "stratum": {
+          "value": "control",
+          "refs": [
+            "before"
+          ]
+        },
+        "type": {
+          "value": "simple",
+          "refs": [
+            "criteria"
+          ]
+        },
+        "refs": [
+          "before",
+          "criteria",
+          "expected",
+          "final"
+        ],
+        "claims": [],
+        "metrics": {
+          "functional": {
+            "state": "observed",
+            "value": true,
+            "refs": [
+              "expected"
+            ],
+            "limitations": []
+          },
+          "operational": {
+            "state": "observed",
+            "value": "exception",
+            "refs": [
+              "final"
+            ],
+            "limitations": []
+          },
+          "cost": {
+            "state": "unknown",
+            "value": null,
+            "refs": [],
+            "limitations": [
+              "not collected"
+            ]
+          },
+          "uat": {
+            "state": "unknown",
+            "value": null,
+            "refs": [],
+            "limitations": [
+              "not collected"
+            ]
+          }
+        },
+        "coverage": {
+          "state": "complete",
+          "limitations": []
+        },
+        "limitations": [],
+        "result": {
+          "passed": true,
+          "checks": [
+            {
+              "name": "functional",
+              "passed": true
+            }
+          ]
+        },
+        "delivery_id": "delivery:07f44cbf0e18929a8510c63583f8793d97cb0bd0328cf481f526ff9d2ff3e4e8",
+        "case_id": "case:07f44cbf0e18929a8510c63583f8793d97cb0bd0328cf481f526ff9d2ff3e4e8",
+        "family_id": "family:92b5e996c8d5c8e52c7ee99163ecddb1bb88a87e093f9636efb44c1ba88e86aa"
+      }
+    ],
+    "exposure_registry": [],
+    "split_policy": {
+      "unit": "family",
+      "seed": "synthetic-v1",
+      "reserved_families": []
+    },
+    "limits": {
+      "files": 100,
+      "file_bytes": 2097152,
+      "total_bytes": 33554432,
+      "subprocesses": 64
+    }
+  },
+  "seed_families": [
+    "seed-one",
+    "seed-two",
+    "seed-three",
+    "seed-four",
+    "seed-five",
+    "seed-six"
+  ],
+  "new_families": [
+    "novel-seven",
+    "novel-eight"
+  ],
+  "blobs": [
+    {
+      "id": "before",
+      "path": "prework/request.txt",
+      "role": "prework",
+      "kind": "prework",
+      "text": "LEGIT_INPUT: explain the solution configuration without changing the result contract.",
+      "dependencies": [
+        "memory",
+        "procedure",
+        "ledger"
+      ]
+    },
+    {
+      "id": "memory",
+      "path": "prework/memory.txt",
+      "role": "prework",
+      "kind": "memory",
+      "text": "LEGIT_MEMORY: existing configuration uses explicit keys.",
+      "dependencies": [
+        "source"
+      ]
+    },
+    {
+      "id": "procedure",
+      "path": "prework/procedure.txt",
+      "role": "prework",
+      "kind": "procedure",
+      "text": "LEGIT_PROCEDURE: inspect the supplied input before editing.",
+      "dependencies": [
+        "source"
+      ]
+    },
+    {
+      "id": "ledger",
+      "path": "prework/ledger.txt",
+      "role": "prework",
+      "kind": "ledger",
+      "text": "LEGIT_LEDGER: prior attempt remains pending.",
+      "dependencies": []
+    },
+    {
+      "id": "source",
+      "path": "prework/source.txt",
+      "role": "prework",
+      "kind": "prework",
+      "text": "LEGIT_SOURCE: alpha = true;",
+      "dependencies": []
+    },
+    {
+      "id": "criteria",
+      "path": "grader/CRITERIA_PATH_SENTINEL.txt",
+      "role": "grader/criteria",
+      "text": "PRIVATE_CRITERIA_SENTINEL"
+    },
+    {
+      "id": "expected",
+      "path": "grader/EXPECTED_PATH_SENTINEL.txt",
+      "role": "grader/expected",
+      "text": "PRIVATE_EXPECTED_SENTINEL"
+    },
+    {
+      "id": "final",
+      "path": "grader/FINAL_PATH_SENTINEL.txt",
+      "role": "grader/final-code",
+      "text": "PRIVATE_FINAL_SENTINEL"
+    },
+    {
+      "id": "reserved",
+      "path": "reserved/RESERVED_PATH_SENTINEL.txt",
+      "role": "reserved",
+      "text": "PRIVATE_RESERVED_SENTINEL"
+    }
+  ],
+  "attacks": [
+    {
+      "name": "two-hop-solution",
+      "node": "source",
+      "dependency": "final"
+    },
+    {
+      "name": "path-only-solution",
+      "node": "memory",
+      "text": "See grader/FINAL_PATH_SENTINEL.txt"
+    },
+    {
+      "name": "procedure-to-final",
+      "node": "procedure",
+      "dependency": "final"
+    }
+  ]
+}
