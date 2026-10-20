@@ -16,6 +16,13 @@ Check observable behavior with the strongest applicable verification tier.
 Preserve exit codes, failures, timeouts, discovery source and command durations.
 A disabled-by-pref or no-stack skip ran zero commands and must remain explicit.
 Missing tools or environmental limits remain unverified; do not report tests passed.
+The working directory may be a fresh worktree where dependencies may not be installed.
+A missing module/package (`Cannot find module`, `Cannot find package`,
+`ModuleNotFoundError` or `command not found`) is environmental and leaves the
+related check unverified. Native workers may install dependencies only when the
+plan explicitly authorizes it. Sidecar sandbox prohibitions take precedence:
+do not install dependencies there; report the affected item as `"status": "unknown"`
+and preserve the literal error in its `note`.
 Declared-artifact existence is an independent enforcing check. Substantive/wired
 heuristics remain advisory according to the existing verifier contract.
 Legacy schema remains visible rather than becoming fabricated structured evidence.

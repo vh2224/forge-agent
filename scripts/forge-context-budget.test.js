@@ -8,7 +8,24 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { countTokens } = require('./forge-tokens.js');
-const { TEMPLATE_FILES, renderPrompt } = require('./forge-prompt.js');
+const { TEMPLATE_FILES, renderPrompt, separateProcedurePrompt } = require('./forge-prompt.js');
+
+const { loadProcedureContext } = require('./forge-procedure-context');
+const MANDATORY_TOKEN_CEILINGS = Object.freeze({
+  'execute-task': 2000, 'execute-loose-task': 2000,
+  'plan-slice': 1300, 'plan-check': 1300, 'plan-milestone': 1300,
+  'complete-slice': 2150, 'complete-milestone': 2150,
+  'discuss-milestone': 1300, 'discuss-slice': 1300,
+  'research-milestone': 1300, 'research-slice': 1300,
+});
+function optionalTokens(rendered, phase) {
+  const procedure = loadProcedureContext({ cwd: root, phase });
+  const optional = separateProcedurePrompt(rendered.prompt, procedure, rendered.procedure_context);
+  assert(rendered.prompt.includes(procedure.content), `${phase}: canonical mandatory bytes`);
+  assert(countTokens(procedure.content) <= MANDATORY_TOKEN_CEILINGS[phase], `${phase}: mandatory ${countTokens(procedure.content)} tokens`);
+  assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt));
+  return countTokens(optional);
+}
 
 const root = path.resolve(__dirname, '..');
 const templateDir = path.join(root, 'shared', 'templates', 'dispatch');
@@ -98,12 +115,12 @@ test(`aggregate static templates stay below ${MAX_STATIC_TEMPLATE_TOTAL_TOKENS} 
   assert.ok(total <= MAX_STATIC_TEMPLATE_TOTAL_TOKENS, `aggregate template budget is ${total} tokens`);
 });
 
-test(`baseline rendered prompts stay below ${MAX_BASELINE_RENDERED_TOKENS} heuristic tokens`, () => {
+test(`baseline optional prompts stay below ${MAX_BASELINE_RENDERED_TOKENS} heuristic tokens`, () => {
   for (const unitType of Object.keys(TEMPLATE_FILES)) {
     const rendered = renderPrompt(baseOptions(unitType));
     assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt));
     assert.ok(
-      rendered.input_tokens <= MAX_BASELINE_RENDERED_TOKENS,
+      optionalTokens(rendered, unitType) <= MAX_BASELINE_RENDERED_TOKENS,
       `${unitType}: ${rendered.input_tokens} tokens`,
     );
   }
@@ -121,7 +138,7 @@ test(`plan-slice with an oversized ledger stays below ${MAX_BASELINE_RENDERED_TO
   const rendered = renderPrompt({ ...baseOptions('plan-slice'), ledger: oversized });
   assert.strictEqual(rendered.input_tokens, countTokens(rendered.prompt));
   assert.ok(
-    rendered.input_tokens <= MAX_BASELINE_RENDERED_TOKENS + MAX_LEDGER_SNAPSHOT_TOKENS,
+    optionalTokens(rendered, 'plan-slice') <= MAX_BASELINE_RENDERED_TOKENS + MAX_LEDGER_SNAPSHOT_TOKENS,
     `plan-slice with oversized ledger: ${rendered.input_tokens} tokens`,
   );
   assert.ok(

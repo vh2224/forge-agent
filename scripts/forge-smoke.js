@@ -2476,7 +2476,7 @@ function smokeXllm() {
     const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir],
       null, dir, { FORGE_XLLM_AGY_BIN: mockPath });
     assert(r.status !== 0, 'I: agy empty stdout (non-TTY dropout) exits non-zero', `status=${r.status}`);
-    assert(/empty stdout/.test(r.stderr), 'I: agy empty stdout cause is on stderr', `stderr=${r.stderr}`);
+    assert(/"reason_code":"agy-output-empty"/.test(r.stderr) && /"reason":"output-empty"/.test(r.stderr) && /"provider_called":null/.test(r.stderr), 'I: agy empty stdout cause is on stderr', `stderr=${r.stderr}`);
     cleanup(dir);
     cleanup(mockDir);
   }
@@ -2538,7 +2538,7 @@ function smokeXllm() {
       JSON.stringify({ review: { challenge_effort: 'high' } }));
     const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir], null, dir);
     assert(r.status !== 0 && /effort-transport-unsupported/.test(r.stderr)
-      && /provider_called=false/.test(r.stderr),
+      && /"provider_called":false/.test(r.stderr),
       'agy explicit unsupported effort refuses pre-spawn', `status=${r.status} stderr=${r.stderr}`);
     cleanup(dir);
   }
@@ -10109,12 +10109,20 @@ function smokeWindowsSandboxAndWorktreeDeps() {
   assert(['15850', '17179', '14367', '5824', 'assertNoProtectedSidecarChanges'].every((s) => gateComment.includes(s)),
     '70d: gate comment documents Windows issues and surviving defense');
 
-  const template = readRepoText(path.join(SCRIPTS, '..', 'shared', 'templates', 'dispatch', 'execute-task.md'));
+  const { renderPrompt } = require('./forge-prompt');
+  const { loadProcedureContext } = require('./forge-procedure-context');
+  const sourceRoot = path.resolve(SCRIPTS, '..');
+  const procedure = loadProcedureContext({ cwd: sourceRoot, phase: 'execute-task' });
+  const template = renderPrompt({ cwd: sourceRoot, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01' }).prompt;
+  const loose = renderPrompt({ cwd: sourceRoot, unitType: 'execute-loose-task', taskId: 'T01', description: 'dependency fixture' }).prompt;
   const sentinel = 'dependencies may not be installed';
   const prompt = buildExecutePrompt('# T70\n');
   assert(template.split(sentinel).length - 1 === 1 && prompt.includes(sentinel)
     && prompt.includes('unknown') && prompt.indexOf(sentinel) < prompt.indexOf('Must-have scope classification:'),
-  '70e: dependency warning reaches template and sidecar prompt exactly once');
+  '70e: dependency warning reaches composed native and legacy sidecar prompts exactly once');
+  const composed = buildExecutePrompt('# T70\n', { procedure });
+  for (const native of [template, loose]) assert(native.includes('only when the\nplan explicitly authorizes it') && native.includes('unverified'), '70e: native retains authorized installation and environmental classification');
+  assert(composed.split(sentinel).length - 1 === 1 && composed.includes('do not install dependencies there') && composed.includes('unknown'), '70e: composed sidecar warning once with prohibition');
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-smoke-t70-'));
   const wt = path.join(root, 'worktree');

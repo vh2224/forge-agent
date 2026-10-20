@@ -104,7 +104,7 @@
     {
       "id": "verification",
       "path": "shared/forge-procedure-verification.md",
-      "sha256": "4df43a595cd61b3c49c21c7c3c9e9b15192bae60153229840cfeeb5d613d6f8d",
+      "sha256": "cf0214f68d12d65d5af2075495cb8c1e15921122909b6acc68e230e076b8347a",
       "status": "ready",
       "owner": "T03",
       "dependencies": [

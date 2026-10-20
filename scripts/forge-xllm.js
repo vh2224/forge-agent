@@ -223,7 +223,20 @@ function reviewFailureDiagnostic(error = {}) {
   const knownCodes = [...Object.values(CLAUDE_SIDECAR_REASON_CODES),
     'procedure-manifest-missing', 'procedure-manifest-invalid', 'procedure-file-unreadable',
     'procedure-module-pending', 'procedure-integrity-mismatch', 'procedure-phase-unmapped',
-    'review-prefs-invalid', 'review-effort-invalid'];
+    'review-prefs-invalid', 'review-effort-invalid', 'effort-transport-unsupported',
+    'effort-unsupported-by-model', 'native-effort-binding-missing', 'invalid-native-invocation-input',
+    'native-capabilities-missing', 'native-tool-unavailable', 'native-capabilities-invalid',
+    'native-host-unsupported', 'native-model-unsupported', 'native-effort-unsupported',
+    'native-fork-turns-invalid', 'native-fork-turns-unsupported', 'native-task-name-invalid',
+    'native-route-identity-mismatch', 'native-engine-mismatch', 'invalid-resolved-dispatch',
+    'resolved-dispatch-refused', 'native-claude-alias-unmapped', 'native-claude-alias-mismatch',
+    'native-effort-binding-evidence-missing', 'native-effort-binding-source-unreadable',
+    'native-effort-binding-fingerprint-mismatch', 'native-effort-binding-frontmatter-invalid',
+    'native-effort-binding-agent-mismatch', 'native-effort-prompt-header-not-api',
+    'native-effort-transport-unimplemented', 'native-effort-transport-unsupported',
+    'native-effort-binding-mismatch', 'thinking-transport-unsupported', 'thinking-mode-undocumented',
+    'thinking-disabled-incompatible', 'thinking-enabled-incompatible', 'thinking-between-tools-incompatible',
+    'thinking-mode-unknown', 'agy-output-empty'];
   return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
@@ -737,11 +750,13 @@ function buildExecutePrompt(planText, extras) {
       '     blocker — report your findings in the JSON result instead of writing them out.',
     ] : []),
     '',
+    ...(extras && extras.procedure ? [] : [
     'The working directory may be a fresh worktree where dependencies may not be installed.',
     'A missing module/package error (`Cannot find module`, `Cannot find package`, `ModuleNotFoundError`,',
     'or `command not found`) is environmental, never evidence that a must-have was validated.',
     'Network access is disabled, so do not install dependencies; report the affected item as',
     '`"status": "unknown"` and include the literal error in its `note`.',
+    ]),
     '',
     'Must-have scope classification:',
     ' Items that structurally cannot be completed because doing so would violate the HARD',
@@ -1468,7 +1483,8 @@ function invokeAgy(opts) {
 
     const content = res.stdout;
     if (!content || !content.trim()) {
-      throw new Error('agy print mode produced empty stdout (known non-TTY dropout — treat as unavailable)');
+      throw Object.assign(new Error('agy-output-empty'), { code: 'agy-output-empty',
+        diagnostic: diagnostic('output-empty', { stdout_bytes: 0 }) });
     }
 
     return content;
