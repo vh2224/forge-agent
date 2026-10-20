@@ -14,7 +14,7 @@ if (process.argv[2] === '--resume') {
   const scope = require('./forge-attempt-recovery').exceptionFor(handle, fixture.scope, 70001);
   process.stdout.write(JSON.stringify({ reference: scope.reference, unit: scope.unit }));
 } else {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-authority-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-authority-')));
   try {
     const api = require('./forge-recovery-authority');
     const interaction = require('./forge-interaction');

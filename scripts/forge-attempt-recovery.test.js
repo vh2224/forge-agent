@@ -127,7 +127,7 @@ async function persistentRecovery(route) {
 }
 async function canonicalProvenance() {
   const fs = require('fs'), path = require('path'), os = require('os');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-resolver-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-resolver-')));
   const savedEnv = Object.fromEntries(['HOME', 'USERPROFILE', 'FORGE_HOME'].map(key => [key, process.env[key]]));
   try {
     for (const key of Object.keys(savedEnv)) process.env[key] = root;

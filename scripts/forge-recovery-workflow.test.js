@@ -9,7 +9,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 // Set isolation before loading modules which may cache preference sources.
 if (!['--isolated', '--restart-fixture', '--milestone-restart'].includes(process.argv[2])) {
-  const bootstrap = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-home-'));
+  const bootstrap = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-home-')));
   try {
     const run = spawnSync(process.execPath, [__filename, '--isolated'], { encoding: 'utf8', timeout: 120000,
       env: { ...process.env, HOME: bootstrap, USERPROFILE: bootstrap, CODEX_HOME: path.join(bootstrap, '.codex'),
@@ -114,7 +114,7 @@ async function main() {
     write(process.argv[3] + '.proof', JSON.stringify({ pid: process.pid, calls, roots: reset.roots.map(row => row.root_id) }));
     return;
   }
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-workflow-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-workflow-')));
   const home = path.join(root, 'home'); fs.mkdirSync(home);
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
     CLAUDE_CONFIG_DIR: path.join(home, '.claude'), FORGE_HOME: path.join(root, 'forge-home') };
