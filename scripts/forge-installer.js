@@ -12,7 +12,7 @@ const { resolveForgePaths } = require('./forge-home');
 const { detect: detectCapabilities } = require('./forge-capabilities');
 const { generate: generateProjections } = require('./forge-generate');
 const { VERSION } = require('./forge-version');
-const { loadProcedureContext, validateProcedureManifest } = require('./forge-procedure-context');
+const { loadAllProcedureContexts } = require('./forge-procedure-context');
 
 const RUNTIMES = Object.freeze(['claude', 'codex', 'both']);
 const MANAGED_CORE = Object.freeze([
@@ -365,8 +365,7 @@ function install(input = {}) {
     throw new Error('procedure-inventory-missing: current source requires the procedures surface');
   }
   const procedures = declaresProcedures
-    ? validateProcedureManifest(JSON.parse(fs.readFileSync(path.join(repo, 'shared/forge-procedures.json'), 'utf8')))
-      .phases.map(phase => loadProcedureContext({ cwd: repo, forgeHome: repo, phase: phase.id })) : [];
+    ? loadAllProcedureContexts({ cwd: repo, forgeHome: repo }) : [];
   const paths = resolveForgePaths({
     cwd: repo,
     forgeHome: options.forgeHome,
@@ -379,7 +378,8 @@ function install(input = {}) {
   const plan = [];
   const selected = selectedRuntimes(runtime);
   const projectRoot = path.resolve(options.projectRoot || options.cwd || process.cwd());
-  if (declaresProcedures) loadProcedureContext({ cwd: projectRoot, forgeHome: repo, phase: 'distribution' });
+  if (declaresProcedures) loadAllProcedureContexts({ cwd: projectRoot, forgeHome: repo,
+    requiredPhases: procedures.map(procedure => procedure.phase) });
   const capabilities = capabilityReport(repo, runtime, options);
   if (capabilities && !capabilities.ok && !options.dryRun) {
     const failures = capabilities.required_failures.join(', ');

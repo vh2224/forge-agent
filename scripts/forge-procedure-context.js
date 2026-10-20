@@ -131,6 +131,13 @@ function loadManifest(options) {
   return { ...resolved, manifest, manifest_sha256: sha256(bytes) };
 }
 
+/** Validate the entire effective phase closure before any projection writes. */
+function loadAllProcedureContexts(options = {}) {
+  const loaded = loadManifest(options);
+  const phases = new Set([...loaded.manifest.phases.map(phase => phase.id), ...(options.requiredPhases || [])]);
+  return [...phases].map(phase => loadProcedureContext({ ...options, phase }));
+}
+
 /** Compose every mandatory dependency once. Optional budgets never enter this path. */
 function loadProcedureContext(options = {}) {
   const loaded = loadManifest(options);
@@ -161,7 +168,7 @@ function loadProcedureContext(options = {}) {
 }
 
 module.exports = { MANIFEST_PATH, BYTE_POLICY, MAX_FILE_BYTES, canonicalProcedureBytes,
-  validateProcedureManifest, resolveProcedureRoot, loadProcedureContext };
+  validateProcedureManifest, resolveProcedureRoot, loadManifest, loadProcedureContext, loadAllProcedureContexts };
 
 if (require.main === module) {
   try {

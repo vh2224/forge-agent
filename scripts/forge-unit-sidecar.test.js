@@ -144,6 +144,25 @@ async function recoveryContracts() {
         assert(invocation.args.message.includes(procedure.content));
         for (const id of ['core', 'verification', 'execution']) assert.strictEqual(invocation.args.message.split(`<!-- forge-procedure:${id} -->`).length - 1, 1);
       }
+      for (const unitType of ['complete-slice', 'complete-milestone']) {
+        const completion = require('./forge-prompt').renderPrompt({ cwd: lab.owner, codeDir: lab.a,
+          forgeHome: path.resolve(__dirname, '..'), unitType, milestoneId: 'M001', sliceId: 'S01', autoCommit: false });
+        const expected = require('./forge-procedure-context').loadProcedureContext({ cwd: lab.a, phase: unitType,
+          forgeHome: require('path').resolve(__dirname, '..') });
+        // The actual recovery nativeOptions closure and real native adapter are
+        // exercised; only the recovery controller is replaced at its boundary.
+        const invocation = await recoverCustom({ unitType, phase: 'complete', prompt: completion.prompt,
+          procedure_context: completion.procedure_context });
+        assert.strictEqual(invocation.ok, true, JSON.stringify(invocation));
+        assert(invocation.args.message.includes(expected.content));
+        assert(invocation.args.message.includes('FORGE_SCRIPTS_DIR: '));
+        for (const id of ['core', 'verification', 'completion', 'recovery']) {
+          assert.strictEqual(invocation.args.message.split(`<!-- forge-procedure:${id} -->`).length - 1, 1);
+        }
+        const bad = completion.prompt.replace('Never integrate;', 'Always integrate;');
+        await assert.rejects(recoverCustom({ unitType, phase: 'complete', prompt: bad,
+          procedure_context: completion.procedure_context }), /composition/);
+      }
       const { content, ...metadata } = procedure;
       for (const prompt of ['<!-- forge-procedure:core -->', '[DATA FROM "CUSTOM"]\nopen',
         '[DATA FROM "CUSTOM"]\n' + content + '\n[END DATA]', '[DATA FROM "A"]\nvalue\n[END DATA FROM "B"]']) {

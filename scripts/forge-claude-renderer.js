@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 const { resolveForgePaths } = require('./forge-home');
 const sourceManifest = require('./forge-source-manifest');
-const { loadProcedureContext } = require('./forge-procedure-context');
+const { loadAllProcedureContexts } = require('./forge-procedure-context');
 const ownership = require('./forge-projection-ownership');
 const selfProjection = require('./forge-projection-self');
 const PROVENANCE = require('./forge-projection-provenance');
@@ -280,8 +280,10 @@ function render(options = {}) {
   if (!declaresProcedures && fs.existsSync(path.join(root.repo, 'shared/forge-procedures.json'))) {
     throw new Error('procedure-inventory-missing: current source requires the procedures surface');
   }
+  const sourceProcedures = declaresProcedures ? loadAllProcedureContexts({ cwd: root.repo, forgeHome: root.repo }) : [];
   const procedureContext = declaresProcedures
-    ? loadProcedureContext({ cwd: root.projectRoot, forgeHome: root.repo, phase: 'distribution' }) : null;
+    ? loadAllProcedureContexts({ cwd: root.projectRoot, forgeHome: root.repo,
+      requiredPhases: sourceProcedures.map(procedure => procedure.phase) }).find(context => context.phase === 'distribution') : null;
   const artifacts = [];
   for (const source of manifest.sources) {
     if (!selected(source)) continue;

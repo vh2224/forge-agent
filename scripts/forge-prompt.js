@@ -46,13 +46,22 @@ function composeProcedurePrompt(prompt, procedure, provenance) {
   }
   const { content, ...metadata } = procedure;
   const stack = [];
+  const dataRanges = [];
+  let dataStart;
   let insideData = false;
   let malformedData = false;
   const procedurePosition = text.indexOf(content);
   for (const match of text.matchAll(/^\[(?:(DATA FROM|END DATA FROM) ("[^"\r\n]+")[^\]\r\n]*|(END DATA))\]\r?$/gm)) {
     if (match.index < procedurePosition && match[1] === 'DATA FROM') insideData = true;
-    if (match[1] === 'DATA FROM') stack.push(match[2]);
+    if (match[1] === 'DATA FROM') {
+      if (!stack.length) dataStart = match.index;
+      stack.push(match[2]);
+    }
     else if (match[3] ? stack.length === 0 || !stack.pop() : stack.pop() !== match[2]) malformedData = true;
+    if (!stack.length && dataStart !== undefined) {
+      dataRanges.push([dataStart, match.index + match[0].length]);
+      dataStart = undefined;
+    }
     if (match.index < procedurePosition) insideData = stack.length > 0;
   }
   if (malformedData || stack.length) {
@@ -60,8 +69,12 @@ function composeProcedurePrompt(prompt, procedure, provenance) {
     error.code = 'procedure-composition-inconsistent';
     throw error;
   }
-  const markers = [...text.matchAll(/<!-- forge-procedure:([^>]+) -->/g)].map(match => match[1]);
-  if (markers.length === 0) return `${text}\n\n${content}`;
+  // Only instruction lines outside DATA participate in composition provenance.
+  // Literal markers in quoted review input are informational content.
+  const markers = [...text.matchAll(/<!-- forge-procedure:([^>]+) -->/g)]
+    .filter(match => !dataRanges.some(([start, end]) => match.index >= start && match.index < end))
+    .map(match => match[1]);
+  if (markers.length === 0 && procedurePosition < 0) return `${text}\n\n${content}`;
   const expected = procedure.modules.map(module => module.id);
   if (!require('node:util').isDeepStrictEqual(provenance, metadata)
       || text.split(content).length !== 2
@@ -748,9 +761,15 @@ function renderPrompt(rawOptions) {
     userHome: options.homeDir, env: options.env, phase: options.unitType,
   }) : null;
   const values = buildValues(options, template.content);
-  const body = procedure ? composeProcedurePrompt(template.content, procedure, options.procedure_context) : template.content;
-  const basePrompt = renderTemplate(body, values, template.path);
-  const prompt = appendPendingContext(applyIsolationHeader(basePrompt, options), options);
+  // Resolve variables only in the template, preserving canonical module bytes.
+  const basePrompt = renderTemplate(template.content, values, template.path);
+  const pendingPrompt = appendPendingContext(applyIsolationHeader(basePrompt, options), options);
+  const resolvedPrompt = options.unitType.startsWith('complete-')
+    ? `${pendingPrompt}\n## Procedure path bindings\nResolve procedure path variables using these literal values:\nWORKING_DIR: ${values.WORKING_DIR}\nFORGE_SCRIPTS_DIR: ${values.FORGE_SCRIPTS_DIR}\n`
+    : pendingPrompt;
+  // Validate DATA boundaries after every substitution and pending insertion,
+  // before materialization or native file-reading delivery can publish anything.
+  const prompt = procedure ? composeProcedurePrompt(resolvedPrompt, procedure, options.procedure_context) : resolvedPrompt;
   const templateSha256 = crypto.createHash('sha256').update(template.content).digest('hex');
   return {
     prompt,

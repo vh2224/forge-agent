@@ -2282,6 +2282,14 @@ function runXllm(args, mockDir, cwd, extraEnv) {
     env.FORGE_HOME = path.join(cwd, 'fixture-forge-home');
     fs.mkdirSync(env.FORGE_HOME, { recursive: true });
     fs.writeFileSync(path.join(env.FORGE_HOME, 'forge-agent-prefs.jsonc'), '{}\n');
+    // The isolated Forge home must carry the same mandatory closure as an install.
+    const sourceRoot = path.dirname(SCRIPTS);
+    const { manifest } = require('./forge-procedure-context').loadManifest({ cwd: sourceRoot, forgeHome: sourceRoot });
+    for (const relative of ['shared/forge-procedures.json', ...manifest.modules.map(module => module.path)]) {
+      const target = path.join(env.FORGE_HOME, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(path.join(sourceRoot, relative), target);
+    }
   }
   if (extraEnv) Object.assign(env, extraEnv);
   const r = spawnSync(process.execPath, [xllmPath, ...args], {
@@ -15570,7 +15578,7 @@ function smokeRoutingDomainsRendered() {
   const dir = mkTmp('routing-domains-rendered');
   const home = path.join(dir, 'home');
   const templateDir = path.join(dir, 'templates');
-  const options = unitType => ({ cwd: dir, unitType, milestoneId: 'M001', sliceId: 'S01', description: 'x', templateDir });
+  const options = unitType => ({ cwd: dir, unitType, milestoneId: 'M001', sliceId: 'S01', description: 'x', templateDir, forgeHome: repoRoot });
   const inspectRendered = prompt => {
     const reasons = [];
     // Horizontal whitespace ONLY ([^\S\r\n]), never \s — \s matches \n, so on a bare
@@ -15756,7 +15764,7 @@ function smokeLedgerSnapshotRendered() {
     // is under test, not a fixture-supplied override.
     const slice = renderPrompt({
       cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01',
-      templateDir, ledgerMaxTokens: maxTokens, memories: [],
+      templateDir, forgeHome: repoRoot, ledgerMaxTokens: maxTokens, memories: [],
     });
 
     assert(slice.prompt.includes('M-20260404000000-newest-dd'),
@@ -15782,7 +15790,7 @@ function smokeLedgerSnapshotRendered() {
 
     const task = renderPrompt({
       cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
-      templateDir, ledgerMaxTokens: maxTokens, memories: [],
+      templateDir, forgeHome: repoRoot, ledgerMaxTokens: maxTokens, memories: [],
     });
     for (const e of entries) {
       assert(!task.prompt.includes(e.id), `(d D1) rendered execute-task prompt does not contain fixture id ${e.id}`);
@@ -15845,7 +15853,7 @@ function smokeMemoryIndexCommandRendered() {
 
     // (b) rendered prompt — placeholders resolved, {WORKING_DIR} value quoted.
     const slice = renderPrompt({
-      cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01', templateDir, memories: [],
+      cwd: dir, unitType: 'plan-slice', milestoneId: 'M001', sliceId: 'S01', templateDir, forgeHome: repoRoot, memories: [],
     });
     const renderedLine = slice.prompt.split('\n').find(l => l.includes('forge-memory-index.js'));
     assert(!!renderedLine, '(b) rendered plan-slice prompt contains a forge-memory-index.js command line');
@@ -15863,7 +15871,7 @@ function smokeMemoryIndexCommandRendered() {
     assert(slice.prompt.includes('forge-memory-index.js'),
       '(c control) positive control — the predicate DOES see the command when it is actually injected (plan-slice)');
     const task = renderPrompt({
-      cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', templateDir, memories: [],
+      cwd: dir, unitType: 'execute-task', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01', templateDir, forgeHome: repoRoot, memories: [],
     });
     assert(!task.prompt.includes('forge-memory-index.js'),
       '(c) rendered execute-task prompt does not carry the memory-index command');
