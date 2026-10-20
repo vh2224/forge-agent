@@ -713,7 +713,9 @@ function memoryPrompt(request, sourceUnit) {
     result_block: request.sourceResult || '', key_decisions: request.keyDecisions || [],
     existing_memory: request.existingMemory || { facts: [], stats: [] },
   };
-  return 'Read-only memory extraction. Return exactly one JSON object matching the supplied schema. '
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd || process.cwd(),
+    phase: 'memory-extract', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+  return procedure.content + '\n\nRead-only memory extraction. Return exactly one JSON object matching the supplied schema. '
     + 'Do not write files, run commands, choose paths, or return owner identity/publication metadata.\n'
     + `CONTRACT:\n${MEMORY_QUALITY_CONTRACT}\nINPUT:\n${JSON.stringify(input)}\nSCHEMA:\n${JSON.stringify(memorySchema)}`;
 }
@@ -1838,6 +1840,9 @@ async function runUnitSidecar(request, runtime = {}) {
   }
 }
 async function recoverUnitSidecar(request, recovery, runtime = {}) {
+  // Mandatory obligations fail closed before process/receipt inspection.
+  const recoveryProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'recovery',
+    forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
   // Current authority can enrich a legacy original request without changing its
   // historical caller hash. It still passes the normal held-claim/gate checks.
   const authority = runtime.executionAuthority || {};
@@ -1858,13 +1863,17 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       cwd: canonical.contextRoot, codeDir: canonical.cwd, milestoneId: request.milestoneId, sliceId: request.sliceId,
       taskId: request.taskId, unitEffort: route.effort, autoCommit: false }) : null;
     let prompt = request.prompt || (request.promptFile ? fs.readFileSync(request.promptFile, 'utf8') : rendered.prompt);
-    if (canonical.phase === 'execute') {
-      const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: canonical.cwd,
-        phase: canonical.scope === 'standalone-task' ? 'execute-loose-task' : 'execute-task',
-        forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
-      prompt = require('./forge-prompt').composeProcedurePrompt(prompt, procedure,
-        rendered ? rendered.procedure_context : request.procedure_context);
-    }
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: canonical.cwd,
+      phase: canonical.scope === 'standalone-task' && canonical.phase === 'execute' ? 'execute-loose-task' : request.unitType,
+      forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    prompt = require('./forge-prompt').composeProcedurePrompt(prompt, procedure,
+      rendered ? rendered.procedure_context : request.procedure_context);
+    // The recovered worker receives recovery obligations too. Fresh loader
+    // segments are instructions; shared dependencies already present stay once.
+    const present = new Set(procedure.modules.map(module => module.id));
+    const additional = recoveryProcedure.content.split(/(?=<!-- forge-procedure:)/)
+      .filter(segment => segment.trim() && !present.has(/^<!-- forge-procedure:([^>]+) -->/.exec(segment)?.[1]));
+    prompt += '\n\n' + additional.join('');
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
     prompt, forkTurns: 'none',
@@ -1883,7 +1892,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     externalNativeHandoff: !runtime.invokeNative,
     inspectPreSpawn: runtime.inspectPreSpawn, inspectPreSpawnDelta: runtime.inspectPreSpawnDelta,
     validateEnvironmentalCorrection: runtime.validateEnvironmentalCorrection,
-    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest),
+    validateExecutionAuthority: () => validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
+      ? require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route)) : undefined }),
     reconcile: receipt => {
       if (canonical.scope === 'milestone' || receipt.recovery_baseline) return reconcileMilestoneAttempt(request, receipt, runtime);
       if (!receipt.reset_state_file || !receipt.execution?.execution_contract) fail('recovery-baseline-required');
@@ -1895,13 +1905,13 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (request.route.worker_mode === 'native') {
         const invocation = require('./forge-native-invocation').buildNativeInvocation(nativeOptions(request.route));
         if (!invocation.ok) return invocation;
-        validateRecoveryRequest(request, { nativeInvocation: invocation });
+        validateRecoveryRequest(executionRequest, { nativeInvocation: invocation });
         return { ok: true, evidence_reference: 'unit-preflight:native-arguments',
           final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
             context: invocation.args.prompt || invocation.args.message, identity: request, route: request.route,
             model: request.route.model, effort: request.route.effort, transport: 'native-tool' }) };
       }
-      validateRecoveryRequest(request);
+      validateRecoveryRequest(executionRequest);
       if (typeof runtime.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
       return runtime.validateCorrection(request);
     },

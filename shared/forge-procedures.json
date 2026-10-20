@@ -23,8 +23,8 @@
     {
       "id": "personal",
       "path": "shared/forge-procedure-personal.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "98e7e2556912634e90e4649727adccc673f771189944c1e959413eefd8bc9fea",
+      "status": "ready",
       "owner": "T04",
       "dependencies": [
         "core"
@@ -145,8 +145,8 @@
     {
       "id": "memory",
       "path": "shared/forge-procedure-memory.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "6c04f67eef1fd2001df2e17d3f3ba4f66a93793f019486457a2a1af5b6db0eba",
+      "status": "ready",
       "owner": "T04",
       "dependencies": [
         "core"
@@ -165,8 +165,8 @@
     {
       "id": "recovery",
       "path": "shared/forge-procedure-recovery.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "4b9c122f669c647c9719423ffe8bdc5c4a156405d7e5c95dbf65deaecd4d2933",
+      "status": "ready",
       "owner": "T04",
       "dependencies": [
         "core"
@@ -707,9 +707,10 @@
         "recovery"
       ],
       "consumers": [
-        "scripts/forge-attempt-recovery.js",
         "scripts/forge-unit-sidecar.js",
-        "skills/forge-pause/SKILL.md"
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
       ],
       "owner": "T04",
       "preconditions": [
@@ -730,9 +731,10 @@
         "recovery"
       ],
       "consumers": [
-        "scripts/forge-attempt-recovery.js",
         "scripts/forge-unit-sidecar.js",
-        "skills/forge-pause/SKILL.md"
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
       ],
       "owner": "T04",
       "preconditions": [
@@ -753,9 +755,10 @@
         "recovery"
       ],
       "consumers": [
-        "scripts/forge-attempt-recovery.js",
         "scripts/forge-unit-sidecar.js",
-        "skills/forge-pause/SKILL.md"
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
       ],
       "owner": "T04",
       "preconditions": [
@@ -776,9 +779,10 @@
         "recovery"
       ],
       "consumers": [
-        "scripts/forge-attempt-recovery.js",
         "scripts/forge-unit-sidecar.js",
-        "skills/forge-pause/SKILL.md"
+        "skills/forge-auto/SKILL.md",
+        "skills/forge-next/SKILL.md",
+        "shared/forge-dispatch.md"
       ],
       "owner": "T04",
       "preconditions": [

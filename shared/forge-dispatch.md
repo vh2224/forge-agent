@@ -1574,7 +1574,7 @@ node "$FORGE_SCRIPTS_DIR/forge-xllm.js" "${XLLM_ARGS[@]}"
 # ↑ dispatched with the Bash tool's run_in_background: true
 ```
 
-Native composition uses the same real problem file with `forge-prompt.js --memory-query-file "$PLAN_PATH" --memory-limit "$MEMORY_LIMIT" --memory-max-tokens "$MEMORY_MAX_TOKENS"` and the actual unit IDs. Pass the resolved per-unit budget explicitly on both routes; only an unresolved prompt CLI uses its documented 1200 default. API callers may observe sanitized selection through `onMemorySelection`; the callback receives no query, markdown or absolute owner path. Select once per route: do not append the bundle memory again to a native prompt that already rendered `{TOP_MEMORIES}`. Direct overrides/providers remain bounded informational data. Memory failure is optional; required plan/decisions/security and gates remain independent mandatory inputs, outside this memory budget. `coding_standards` bounds optional standards, not the complete package.
+Auto/next first call `forge-memory-query.js --unit-type "$unit_type" --cwd "$WORKING_DIR" --milestone "$MILESTONE_ID" --slice "$SLICE_ID" --task "$TASK_ID"`. The resolver uses the unit's eligible predecessor file, never SUMMARY or IDs-only text. Missing/invalid query input is explicitly unavailable optional context: diagnose it and render with `--memory-query ""`, no query-file fallback. Load/read `--phase memory-selection` through forge-procedure-context first; mandatory procedure failure blocks independently of this optional query. Native composition uses the same real problem file with `forge-prompt.js --memory-query-file "$PLAN_PATH" --memory-limit "$MEMORY_LIMIT" --memory-max-tokens "$MEMORY_MAX_TOKENS"` and the actual unit IDs. Pass the resolved per-unit budget explicitly on both routes; only an unresolved prompt CLI uses its documented 1200 default. API callers may observe sanitized selection through `onMemorySelection`; the callback receives no query, markdown or absolute owner path. Select once per route: do not append the bundle memory again to a native prompt that already rendered `{TOP_MEMORIES}`. Direct overrides/providers remain bounded informational data. Memory failure is optional; required plan/decisions/security and gates remain independent mandatory inputs, outside this memory budget. `coding_standards` bounds optional standards, not the complete package.
 
 **5. Poll the result-file (`polling` state).** Read `$RESULT_FILE` periodically. The adapter atomically re-writes a heartbeat containing `{status, protocol_version, pid, adapter_pid, heartbeat_interval_ms, dispatch_id, input_tokens, started_at, updated_at}` while running:
 
@@ -3035,7 +3035,17 @@ capability, tools, sandbox, grants, credentials, prompt or transcript trigger
 
 ## Recuperação de entrega e contratos multiroot
 
-Use the per-unit recovery contract below for standalone and milestone requests. Timeout remains undetermined; trusted standing authorization permits a valid untried candidate.
+Before process/receipt inspection, load and read mandatory core + recovery:
+```bash
+node "$FORGE_SCRIPTS_DIR/forge-procedure-context.js" --phase recovery --cwd "$WORKING_DIR" || exit 1
+```
+For pause, restart and handoff use the corresponding phase before that action.
+The source checklist is `shared/forge-procedure-recovery.md`; the executable
+controller and publication adapters below remain authoritative for runtime state.
+Boot and personal selection load `boot`/`personal-selection` before argument
+resolution; missing or invalid personal content blocks before snapshot/binding.
+Recovery native prompts validate the actual phase composition (including materialized
+prompt provenance), then include fresh recovery instructions with common modules once.
 
 ## Authorized continuity per unit
 
