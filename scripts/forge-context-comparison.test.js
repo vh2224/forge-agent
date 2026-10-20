@@ -28,6 +28,67 @@ function fixture() {
   return { schema_version: 1, cases: [{ case_id: 'after-tenth', variants }] };
 }
 try {
+  test('R1 raw budget and flag matrix rejects absent/invalid controls symmetrically', () => {
+    for (const value of [undefined, null, [], 'raw', 1, { auto_memory: '2000' }, { auto_memory: -1 },
+      { auto_memory: NaN }, { auto_memory: Infinity }, { invalidKey: 1 }, { nested: { bad: null } }]) {
+      for (const side of ['evidence', 'capture', 'both']) {
+        const input = fixture();
+        for (const row of input.cases[0].variants) {
+          if (side !== 'capture') row.final_evidence.budgets = value;
+          if (side !== 'evidence') row.capture.identity.budgets = value;
+        }
+        assert.equal(buildContextComparison(input).cases[0].comparable, false);
+      }
+    }
+    for (const flags of [undefined, null, {}, 'flag', ['ok', 'bad flag'], ['ok', 'ok'], [null]]) {
+      const input = fixture(); for (const row of input.cases[0].variants) row.conditions.flags = flags;
+      assert.equal(buildContextComparison(input).cases[0].comparable, false);
+    }
+    const empty = fixture();
+    for (const row of empty.cases[0].variants) {
+      row.final_evidence.budgets = {}; row.capture.identity.budgets = {}; row.conditions.flags = [];
+    }
+    assert.equal(buildContextComparison(empty).cases[0].comparable, true);
+    for (const row of empty.cases[0].variants) row.controls = { budget_policy: { auto_memory: 0 } };
+    assert.equal(buildContextComparison(empty).cases[0].comparable, false);
+  });
+  test('R1 resolved budget policy binds arbitrary nested keys on both boundaries', () => {
+    const input = fixture();
+    for (const row of input.cases[0].variants) {
+      row.controls = { budget_policy: { custom: { optional: 0 }, other: 2 } };
+      row.final_evidence.budgets = { other: 2, custom: { optional: 0 } };
+      row.capture.identity.budgets = { custom: { optional: 0 }, other: 2 };
+    }
+    assert.equal(buildContextComparison(input).cases[0].comparable, true);
+    delete input.cases[0].variants[0].capture.identity.budgets.custom;
+    assert.equal(buildContextComparison(input).cases[0].comparable, false);
+  });
+  test('R2 all raw ID arrays reject invalid, duplicate and incoherent observations', () => {
+    for (const field of ['selected', 'delivered', 'capture', 'omitted']) {
+      for (const values of [null, undefined, {}, ['PRIVATE RAW'], ['T01/MEM012', 'T01/MEM012'], ['T01/MEM012', 4]]) {
+        const input = fixture(), row = input.cases[0].variants[1];
+        if (field === 'selected') row.selected_ids = values;
+        if (field === 'delivered') row.delivery.delivered_ids = values;
+        if (field === 'capture') row.capture.delivered_ids = values;
+        if (field === 'omitted') row.delivery.omitted = Array.isArray(values) ? values.map(id => ({ id, reason: 'budget' })) : values;
+        const report = buildContextComparison(input);
+        assert.equal(report.cases[0].comparable, false);
+        assert(!JSON.stringify(report).includes('PRIVATE RAW'));
+      }
+    }
+    for (const omitted of [[{ id: 'T01/MEM999', reason: 'budget' }], [{ id: 'T01/MEM012', reason: 'budget' }],
+      [{ id: 'T01/MEM013', reason: 'PRIVATE RAW' }]]) {
+      const input = fixture(); input.cases[0].variants[1].delivery.omitted = omitted;
+      assert.equal(buildContextComparison(input).cases[0].comparable, false);
+    }
+  });
+  test('R3 null delivery renders unknown while explicit empty renders observed none', () => {
+    const input = fixture(); input.cases[0].variants[1].delivery.delivered_ids = null;
+    const report = buildContextComparison(input);
+    assert.equal(report.cases[0].variants[1].delivered_ids, null);
+    assert.match(renderContextComparison(report), /\| unknown \|/);
+    assert.match(renderContextComparison(report), /none \(observed empty\)/);
+  });
   test('final S01 capture binds UTF8 context and separate JSON request', () => {
     const report = buildContextComparison(fixture()), item = report.cases[0];
     assert(item.comparable); assert.equal(item.variants[1].binding, 'matched');

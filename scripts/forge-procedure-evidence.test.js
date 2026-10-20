@@ -10,6 +10,27 @@ let passed = 0;
 function test(name, fn) { fn(); passed++; console.log(`PASS ${name}`); }
 const fixture = evidence.createProcedureFixture();
 const copy = value => JSON.parse(JSON.stringify(value));
+test('current correction sources remain separate from immutable S03 historical findings', () => {
+  const report = evidence.buildProcedureEvidence(fixture.after, fixture.after, { synthetic: true });
+  const original = report.provenance.public_controls.find(row => row.slice === 'S03');
+  assert.equal(original.path, 'scripts/fixtures/empirical-corpus/historical/s03-context-comparison.test.js.snapshot');
+  assert.equal(original.sha256, 'a753b3bd990370a071e400950c8941469b2ef221df48286f97227861cb334690');
+  assert(report.findings.filter(row => ['R1', 'R2', 'R3'].includes(row.id)).every(row => row.status === 'open-S05'));
+  assert.deepEqual(report.current_contract.fixes, ['R1', 'R2', 'R3']);
+  assert.deepEqual(report.current_contract.source_paths, ['scripts/forge-context-comparison.js', 'scripts/forge-procedure-evidence.js']);
+  assert.match(report.current_contract.status, /regression evidence required separately/);
+  assert.equal(report.provenance.historical_baseline_eligible, false);
+  assert.match(evidence.renderProcedureEvidence(report), /Current contract/);
+});
+test('wrapper preserves raw ID coherence and duplicate omission rejection before comparator', () => {
+  for (const omitted of [[{ id: 'T01/MEM001', reason: 'budget' }],
+    [{ id: 'T01/MEM001', reason: 'budget' }, { id: 'T01/MEM001', reason: 'budget' }]]) {
+    const row = copy(fixture.after); row.delivery.omitted = omitted;
+    const report = evidence.buildProcedureEvidence(row, fixture.after);
+    assert.equal(report.comparable, false); assert.equal(report.comparison, null);
+    assert(report.limitations.some(reason => reason.includes('R2-')));
+  }
+});
 test('final real renderer/native package is measured without authentic historical baseline', () => {
   const report = evidence.buildProcedureEvidence(fixture.before, fixture.after, { synthetic: true });
   assert.equal(report.comparable, false); assert.equal(report.comparative_ready, false);

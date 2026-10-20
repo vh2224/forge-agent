@@ -5,10 +5,46 @@
 // Input is data: no command, path, approval or provider claim is executed/trusted.
 const fs = require('fs');
 const { sanitizeFinal, numericBudgets } = require('./forge-attempt-telemetry');
+const { fingerprint } = require('./forge-delivery');
 const label = value => typeof value === 'string' && /^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,79}$/.test(value) ? value : null;
 const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null;
 const ids = value => [...new Set(Array.isArray(value) ? value.filter(id => typeof id === 'string'
   && /^[A-Za-z0-9_-]{1,80}\/MEM[0-9]{3,8}$/.test(id)) : [])].sort();
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const validIds = value => Array.isArray(value) && value.every(id => typeof id === 'string'
+  && /^[A-Za-z0-9_-]{1,80}\/MEM[0-9]{3,8}$/.test(id)) && new Set(value).size === value.length;
+const validBudgets = value => object(value) && Object.entries(value).every(([key, item]) => /^[a-z_]{1,60}$/.test(key)
+  && (typeof item === 'number' ? Number.isFinite(item) && item >= 0 : validBudgets(item)));
+const budgetKey = value => fingerprint(numericBudgets(value));
+// Validate original observations before sanitizeFinal can discard malformed data.
+// Without an explicit policy, the observed evidence/capture key sets are the
+// available contract. No universal set of budget names is assumed.
+function validateContextControls(row) {
+  const failures = [];
+  const evidence = row?.final_evidence?.budgets, capture = row?.capture?.identity?.budgets;
+  if (!validBudgets(evidence) || !validBudgets(capture)) failures.push('R1-budget-control-unobserved-or-invalid');
+  else if (budgetKey(evidence) !== budgetKey(capture)) failures.push('budgets-unbound');
+  if (row?.controls && Object.hasOwn(row.controls, 'budget_policy')) {
+    const policy = row.controls.budget_policy;
+    if (!validBudgets(policy) || !Object.keys(policy).length || budgetKey(policy) !== budgetKey(evidence)
+      || budgetKey(policy) !== budgetKey(capture)) failures.push('R1-budget-policy-unbound');
+  }
+  const flags = row?.conditions?.flags;
+  if (!Array.isArray(flags) || flags.some(flag => !label(flag)) || new Set(flags).size !== flags.length) failures.push('R1-flags-control-unobserved-or-invalid');
+  for (const [name, values] of [['selection', row?.selected_ids], ['delivery', row?.delivery?.delivered_ids], ['capture', row?.capture?.delivered_ids]]) {
+    if (!validIds(values)) failures.push(`R2-${name}-ids-unobserved-or-invalid`);
+  }
+  const omitted = row?.delivery?.omitted;
+  if (!Array.isArray(omitted) || omitted.some(item => !object(item) || !validIds([item.id]) || !label(item.reason))
+      || !validIds(omitted.map(item => item.id))) failures.push('R2-omitted-ids-unobserved-or-invalid');
+  if (!failures.some(reason => reason.startsWith('R2-'))) {
+    const selected = row.selected_ids, delivered = row.delivery.delivered_ids;
+    if (delivered.some(id => !selected.includes(id)) || row.capture.delivered_ids.some(id => !selected.includes(id))
+      || omitted.some(item => !selected.includes(item.id) || delivered.includes(item.id))
+      || selected.some(id => !delivered.includes(id) && !omitted.some(item => item.id === id))) failures.push('R2-selection-delivery-omission-incoherent');
+  }
+  return failures;
+}
 const identityFields = ['unit_type', 'scope', 'phase', 'dispatch_id', 'model_requested', 'model_sent', 'effort', 'host', 'worker', 'transport'];
 function measurement(value) {
   return value?.status === 'observed' && Number.isInteger(value.bytes) && value.bytes >= 0 && hash(value.sha256)
@@ -16,7 +52,8 @@ function measurement(value) {
     : { status: 'unknown', bytes: null, sha256: null, method: null };
 }
 function variant(row) {
-  const evidence = sanitizeFinal(row.final_evidence), capture = row.capture || {}, limitations = [];
+  const limitations = validateContextControls(row);
+  const evidence = sanitizeFinal(row.final_evidence), capture = row.capture || {};
   const context = measurement(evidence?.context), request = measurement(evidence?.request);
   const capturedContext = measurement(capture.context), capturedRequest = measurement(capture.request);
   for (const [name, observed, captured] of [['context', context, capturedContext], ['request', request, capturedRequest]]) {
@@ -28,7 +65,7 @@ function variant(row) {
     if (!identity[key] || identity[key] !== label(capture.identity?.[key])) limitations.push(`identity-${key}-unbound`);
   }
   const budgets = numericBudgets(evidence?.budgets);
-  if (JSON.stringify(budgets) !== JSON.stringify(numericBudgets(capture.identity?.budgets))) limitations.push('budgets-unbound');
+  if (fingerprint(budgets) !== fingerprint(numericBudgets(capture.identity?.budgets))) limitations.push('budgets-unbound');
   const selected = ids(row.selected_ids), delivered = ids(row.delivery?.delivered_ids);
   if (!Array.isArray(row.selected_ids)) limitations.push('selection-unavailable');
   if (!Array.isArray(row.delivery?.delivered_ids) || !Array.isArray(capture.delivered_ids)) limitations.push('delivery-unavailable');
@@ -49,8 +86,8 @@ function variant(row) {
   return { variant: label(row.variant), availability: ['present', 'missing', 'unknown'].includes(row.availability) ? row.availability : 'unknown',
     execution_kind: row.execution_kind === 'transport-simulation' ? 'transport-simulation' : 'unknown',
     external_provider_called: 'unknown', functional_gain: null, identity, budgets, conditions,
-    context, request, estimate, selected_ids: Array.isArray(row.selected_ids) ? selected : null,
-    delivered_ids: Array.isArray(row.delivery?.delivered_ids) ? delivered : null, omitted_ids: Array.isArray(row.selected_ids) ? omitted : null,
+    context, request, estimate, selected_ids: validIds(row.selected_ids) ? selected : null,
+    delivered_ids: validIds(row.delivery?.delivered_ids) ? delivered : null, omitted_ids: validIds(row.selected_ids) ? omitted : null,
     binding: limitations.length ? 'unknown' : 'matched', limitations: limitations.sort() };
 }
 function buildContextComparison(input) {
@@ -60,8 +97,8 @@ function buildContextComparison(input) {
     const variants = item.variants.map(variant).sort((a, b) => String(a.variant).localeCompare(String(b.variant)));
     if (variants.some(row => !row.variant) || variants[0].variant === variants[1].variant) throw Error('comparison-variant-invalid');
     const [before, after] = [variants.find(row => row.variant === 'baseline'), variants.find(row => row.variant === 'current')];
-    const equal = before && after && JSON.stringify({ ...before.conditions, budgets: before.budgets,
-      identity: Object.fromEntries(identityFields.filter(key => key !== 'dispatch_id').map(key => [key, before.identity[key]])) }) === JSON.stringify({ ...after.conditions,
+    const equal = before && after && fingerprint({ ...before.conditions, budgets: before.budgets,
+      identity: Object.fromEntries(identityFields.filter(key => key !== 'dispatch_id').map(key => [key, before.identity[key]])) }) === fingerprint({ ...after.conditions,
       budgets: after.budgets, identity: Object.fromEntries(identityFields.filter(key => key !== 'dispatch_id').map(key => [key, after.identity[key]])) });
     const comparable = Boolean(equal && variants.every(row => row.binding === 'matched'));
     return { case_id: item.case_id, variants, comparable, difference: {
@@ -76,10 +113,10 @@ function buildContextComparison(input) {
 function renderContextComparison(report) {
   const lines = ['# Technical context comparison', '', 'Transport simulations; external calls and functional gain remain unknown.', '',
     '| Case | Variant | Binding | Context bytes | Estimate (chars/4) | Delivered IDs |', '| --- | --- | --- | --- | --- | --- |'];
-  for (const item of report.cases) for (const row of item.variants) lines.push(`| ${item.case_id} | ${row.variant} | ${row.binding} | ${row.context.bytes ?? 'unknown'} | ${row.estimate.value ?? 'unknown'} | ${(row.delivered_ids || []).join(', ') || 'none'} |`);
+  for (const item of report.cases) for (const row of item.variants) lines.push(`| ${item.case_id} | ${row.variant} | ${row.binding} | ${row.context.bytes ?? 'unknown'} | ${row.estimate.value ?? 'unknown'} | ${row.delivered_ids === null ? 'unknown' : row.delivered_ids.join(', ') || 'none (observed empty)'} |`);
   return lines.join('\n') + '\n';
 }
-module.exports = { buildContextComparison, renderContextComparison };
+module.exports = { buildContextComparison, renderContextComparison, validateContextControls };
 if (require.main === module) {
   try {
     const args = process.argv.slice(2);

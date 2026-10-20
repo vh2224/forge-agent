@@ -9,7 +9,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { sha256, fingerprint } = require('./forge-delivery');
 const { captureFinal, measure } = require('./forge-attempt-telemetry');
-const { buildContextComparison } = require('./forge-context-comparison');
+const { buildContextComparison, renderContextComparison, validateContextControls } = require('./forge-context-comparison');
 const { renderPrompt } = require('./forge-prompt');
 const { buildNativeInvocation } = require('./forge-native-invocation');
 const { childEnv } = require('./run-tests');
@@ -38,7 +38,7 @@ function validBudgets(value) {
 // Inspect original shapes before S03 normalization (R1/R2). Null is unavailable,
 // whereas an explicitly observed empty array/object remains a real observation.
 function validateComparisonControls(row) {
-  const failures = [];
+  const failures = validateContextControls(row);
   const policy = row?.controls?.budget_policy;
   const budgets = row?.final_evidence?.budgets, captured = row?.capture?.identity?.budgets;
   if (!validBudgets(policy) || !Object.keys(policy).length || !validBudgets(budgets) || !validBudgets(captured)
@@ -129,11 +129,14 @@ function buildProcedureEvidence(before, after, options = {}) {
     before: packageMetadata(before), after: packageMetadata(after), comparable,
     difference: comparable ? comparison.cases[0].difference : { context_bytes: null, estimated_tokens: null, changed: 'unknown' },
     comparison, findings: findings(options.regressions),
+    current_contract: { fixes: ['R1', 'R2', 'R3'], status: 'implemented; regression evidence required separately',
+      source_paths: ['scripts/forge-context-comparison.js', 'scripts/forge-procedure-evidence.js'],
+      historical_findings: 'open-S05 records describe the historical revision, not current regression results' },
     closure_guard: { status: 'pending-owner-closure', snapshot: 'immediately before S04 completer', verify: 'immediately after, same owner/run/CODE_DIR',
       historical_S03_guard: 'inconclusive; not reclassified' },
     limitations: [...new Set([...failures, 'synthetic-controls-are-not-historical-baseline', 'no-provider-execution-proof',
       'no-UAT-or-effectiveness-proof', 'zero-prospective-enrollments', 'freeze-future-protocol-before-outcomes',
-      'S03-R1-R3-remain-open', 'text-reduction-alone-is-not-success'])].sort() };
+      'S03-R1-R3-historical-findings-preserved', 'text-reduction-alone-is-not-success'])].sort() };
 }
 
 function renderProcedureEvidence(report) {
@@ -146,6 +149,9 @@ function renderProcedureEvidence(report) {
   for (const key of ['context', 'request']) lines.push(`| ${key} bytes | ${report.before[key].bytes ?? 'unknown'} | ${report.after[key].bytes ?? 'unknown'} |`);
   lines.push(`| Delivered memory | ${memory(report.before.delivered_ids)} | ${memory(report.after.delivered_ids)} |`, '', '## Findings', '');
   for (const finding of report.findings) lines.push(`- ${finding.id}: ${finding.status}; ${finding.file}. ${finding.cause || finding.limitation}. ${finding.required_test || finding.check?.command || 'Regression not observed'}.`);
+  lines.push('', '## Current contract', '', `${report.current_contract.status}. ${report.current_contract.historical_findings}.`);
+  for (const source of report.current_contract.source_paths) lines.push(`- Source reference (not verification evidence): ${source}`);
+  if (report.comparison) lines.push('', renderContextComparison(report.comparison));
   lines.push('', '## Closure guard', '', 'Owner snapshot immediately before completer; verify immediately after with the same run and CODE_DIR. Pending future closure.',
     'The historical S03 guard remains inconclusive.', '', '## Limitations', '');
   for (const limitation of report.limitations) lines.push(`- ${limitation}`);
