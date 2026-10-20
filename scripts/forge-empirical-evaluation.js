@@ -157,8 +157,24 @@ function describeCase(item, candidate, sources, reports) {
   const measured = reports.get(item.baseline_source)?.cases?.find(row => row.id === item.baseline_case_id);
   if (!measured || measured.delivery_id !== item.delivery_id) reasons.push('baseline_case_unbound');
   if (measured?.diagnostics?.length) reasons.push('baseline_source_diagnostic');
-  if (candidate.arm === 'memory' && !reports.get(item.context_source)?.cases?.find(row => row.case_id === item.id)?.comparable) reasons.push('context_control_unavailable');
-  if (candidate.arm === 'procedure' && !reports.get(item.procedure_source)?.comparable) reasons.push('procedure_control_unavailable');
+  if (['memory', 'procedure'].includes(candidate.arm)) {
+    const comparator = candidate.arm === 'memory'
+      ? reports.get(item.context_source)?.cases?.find(row => row.case_id === item.id)
+      : reports.get(item.procedure_source)?.comparison?.cases?.[0];
+    // Internal comparability does not bind a technical experiment to this
+    // outcome. Match both variants to their respective executed controls.
+    const bound = comparator?.comparable && ['baseline', 'current'].every(variant => {
+      const row = comparator.variants?.find(item => item.variant === variant);
+      const controls = variant === 'baseline' ? result?.baseline_controls : result?.controls;
+      return validControls(controls) && row?.conditions?.input_sha256 === controls.input_sha256
+        && row.conditions.template_sha256 === controls.template_sha256
+        && ['model_requested', 'model_sent'].every(key => row.identity?.[key] === controls.model)
+        && ['effort', 'host', 'transport'].every(key => row.identity?.[key] === controls[key])
+        && fingerprint(row.budgets) === fingerprint(controls.budgets);
+    });
+    if (!bound || candidate.arm === 'procedure' && !reports.get(item.procedure_source)?.comparable)
+      reasons.push(`${candidate.arm === 'memory' ? 'context' : 'procedure'}_control_unavailable`);
+  }
   if (item.context_source && !['context-comparison', 'context-report'].includes(sources.get(item.context_source)?.ref.kind)) reasons.push('context_source_kind_mismatch');
   if (item.procedure_source && !['procedure-evidence', 'procedure-report'].includes(sources.get(item.procedure_source)?.ref.kind)) reasons.push('procedure_source_kind_mismatch');
   return { id: item.id, delivery_id: item.delivery_id, candidate_id: candidate.id, arm: candidate.arm,

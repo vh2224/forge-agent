@@ -1409,6 +1409,23 @@ async function runUnitSidecarCore(request, runtime, identity) {
     if (r.contextFile) require('./forge-prompt').separateProcedurePrompt(fs.readFileSync(r.contextFile, 'utf8'),
       executeProcedure, r.procedure_context);
   }
+  // Compose at the delivery boundary, using the physical code checkout.
+  // Explicit/file prompts carry no exemption from fresh corpus validation.
+  let deliveryPrompt;
+  if (['artifacts', 'plan'].includes(transport.mode)) {
+    const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd, phase: r.scope === 'standalone-task' ? `task-${r.phase}` : r.unitType,
+      forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+    if (transport.mode === 'plan' && !r.promptFile) fail('prompt-file-required');
+    const rendered = !(typeof r.prompt === 'string' && r.prompt.trim()) && !r.promptFile ? renderPrompt({
+      unitType: r.unitType, cwd: root, codeDir: cwd, milestoneId: r.milestoneId, sliceId: r.sliceId,
+      description: r.description, unitEffort: route.effort, autoCommit: false,
+    }) : null;
+    const base = transport.mode === 'plan' ? fs.readFileSync(r.promptFile, 'utf8')
+      : typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
+        : r.promptFile ? fs.readFileSync(r.promptFile, 'utf8') : rendered.prompt;
+    deliveryPrompt = require('./forge-prompt').composeProcedurePrompt(base, procedure,
+      rendered ? rendered.procedure_context : r.procedure_context);
+  }
   const executionStateFile = execution ? xllm.validateResultFileTarget(`${resultFile}.reset-state.json`, cwd) : null;
   if (execution) {
     xllm.validateResultFileTarget(executionStateFile, root);
@@ -1596,9 +1613,16 @@ async function runUnitSidecarCore(request, runtime, identity) {
       artifacts = executeDeliveryArtifacts(r, loc, result, root, cwd);
     } else if (transport.mode === 'plan') {
       if (!r.promptFile) fail('prompt-file-required');
-      transportEntered = true;
-      result = await xllm.runPlan({ ...options, planContextFile: r.promptFile });
-      transportReturned = true;
+      // runPlan consumes a file: pass only the validated composed snapshot,
+      // never reread the caller's mutable original after preflight.
+      const promptDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'forge-plan-procedure-'));
+      try {
+        const planContextFile = path.join(promptDir, 'context.md');
+        fs.writeFileSync(planContextFile, deliveryPrompt, { mode: 0o600 });
+        transportEntered = true;
+        result = await xllm.runPlan({ ...options, planContextFile });
+        transportReturned = true;
+      } finally { fs.rmSync(promptDir, { recursive: true, force: true }); }
       const ids = result.task_plans.map(p => p.id);
       if (new Set(ids).size !== ids.length) fail('plan-task-ids-invalid');
       const listed = require('./forge-status').parsePlanTasks(result.slice_plan.content).map(t => t.id);
@@ -1612,12 +1636,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         })];
     } else if (transport.mode === 'artifacts') {
       const payloadLimit = options.engine === 'claude' || loc.preparation ? MAX_ARTIFACT_PAYLOAD_BYTES : Infinity;
-      const base = typeof r.prompt === 'string' && r.prompt.trim() ? r.prompt
-        : r.promptFile ? fs.readFileSync(r.promptFile, 'utf8') : renderPrompt({
-        unitType: r.unitType, cwd: root, milestoneId: r.milestoneId, sliceId: r.sliceId,
-        description: r.description, unitEffort: route.effort, autoCommit: false,
-      }).prompt;
-      const prompt = base + '\n\n## Sidecar delivery contract (overrides direct-write instructions above)\n'
+      const prompt = deliveryPrompt + '\n\n## Sidecar delivery contract (overrides direct-write instructions above)\n'
         + 'Read-only worker. Return artifact CONTENT, never write files, run commands, commit, tag, push, deploy, clean up, update STATE or acquire leases. The orchestrator owns these actions. '
         + 'Do not assume answers to human decisions. Return partial and questions when a decision is required. '
         + 'Operator constraints: ' + JSON.stringify(r.constraints || { auto_commit: false, deploy: false })

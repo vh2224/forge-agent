@@ -2,6 +2,18 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+function stageProcedures(destination) {
+  const source = path.resolve(__dirname, '..');
+  const { loadManifest, loadAllProcedureContexts } = require('./forge-procedure-context');
+  const options = { cwd: source, forgeHome: source };
+  const { manifest } = loadManifest(options);
+  loadAllProcedureContexts(options);
+  for (const relative of ['shared/forge-procedures.json', ...manifest.modules.filter(item => item.status === 'ready').map(item => item.path)]) {
+    const target = path.join(destination, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(source, relative), target);
+  }
+}
 const accounts = require('./forge-accounts');
 const originalLookup = accounts.resolveLaunch;
 accounts.resolveLaunch = () => ({ name: 'fixture', token: 'fixture-only' });
@@ -26,6 +38,7 @@ async function scenario(vcs, moduleDir = __dirname) {
   try {
     process.env.FORGE_HOME = path.join(f.dir, 'home');
     write(path.join(process.env.FORGE_HOME, 'forge-agent-prefs.jsonc'), {});
+    stageProcedures(process.env.FORGE_HOME);
     write(path.join(f.owner, '.gsd/forge-prefs.jsonc'), { tier_models: { standard: ['claude-sonnet-5'] }, effort: { 'execute-task': 'medium' } });
     const plan = lab.plan(f.contract).replace('id: T-roots', `id: ${id}`).replace('## Description\nChange both files.\n', '');
     const request = { schema_version: 1, scope: 'standalone-task', phase: 'plan', taskId: id, cwd: f.a, contextRoot: f.owner,

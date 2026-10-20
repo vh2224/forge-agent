@@ -82,7 +82,7 @@ async function recoveryContracts() {
     xllm.runExecute = async options => {
       calls++;
       assert.strictEqual(options.scope, 'milestone');
-      assert.strictEqual(options.cwd, lab.a);
+      assert.strictEqual(options.cwd, fs.realpathSync(lab.a));
       assert.strictEqual(options.procedureContext.procedureText, procedure.content);
       assert.deepStrictEqual(options.procedureContext.procedure_context.modules.map(row => row.id), ['core', 'verification', 'execution']);
       const receipt = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json'));
@@ -210,6 +210,65 @@ async function recoveryContracts() {
     fs.copyFileSync(legacy, request.planFile);
     assert.throws(() => sidecar.milestonePlanFile(request), /legacy-task-plan-conflict/);
     fs.unlinkSync(legacy);
+
+    // R8: valid owner corpus cannot shadow the physical code corpus.
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../shared/forge-procedures.json')));
+    for (const folder of [lab.a, lab.owner]) {
+      fs.mkdirSync(path.join(folder, 'shared'), { recursive: true });
+      fs.writeFileSync(path.join(folder, 'shared/forge-procedures.json'), JSON.stringify(manifest));
+      for (const module of manifest.modules.filter(row => row.status === 'ready'))
+        fs.copyFileSync(path.join(__dirname, '..', module.path), path.join(folder, module.path));
+    }
+    const originalClaude = xllm.invokeClaudeTransport;
+    let entered = 0, sent;
+    try {
+      xllm.invokeClaudeTransport = async options => {
+        entered++; sent = options.prompt;
+        return { candidate: { status: 'partial', summary: 'synthetic', questions: [], artifacts: [] } };
+      };
+      xllm.runPlan = async options => {
+        entered++; sent = fs.readFileSync(options.planContextFile, 'utf8');
+        return { status: 'partial', task_plans: [], slice_plan: { content: '# Fixture' } };
+      };
+      let attempt = 0;
+      for (const input of ['prompt', 'promptFile', 'planContextFile', 'rendered']) {
+        const phase = input === 'planContextFile' ? 'plan-slice' : 'research-milestone';
+        const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: lab.a, phase });
+        const modulePath = path.join(lab.a, procedure.modules[procedure.modules.length - 1].path);
+        const bytes = fs.readFileSync(modulePath);
+        for (const change of ['missing', 'changed-hash', 'tampered-body', 'tampered-materialized', 'plain', 'composed', 'materialized']) {
+          if (input === 'rendered' && ['tampered-body', 'tampered-materialized', 'composed', 'materialized'].includes(change)) continue;
+          const id = 'procedure-boundary-' + attempt++;
+          let body = ['composed', 'tampered-body', 'tampered-materialized', 'materialized'].includes(change) ? 'fixture\n' + procedure.content : 'fixture';
+          const { content, ...metadata } = procedure;
+          if (['materialized', 'tampered-materialized'].includes(change)) body = '---\nprocedure_context: ' + JSON.stringify(metadata)
+            + '\nfinal_prompt_sha256: ' + JSON.stringify(crypto.createHash('sha256').update(body).digest('hex')) + '\n---\n\n' + body;
+          if (['tampered-body', 'tampered-materialized'].includes(change)) body = body.replace('Forge mandatory procedure core', 'TAMPERED core');
+          const file = path.join(lab.dir, id + '.md'); fs.writeFileSync(file, body);
+          const probe = { ...request, unitType: phase, phase: 'research', taskId: undefined, description: 'Synthetic research fixture',
+            sliceId: phase === 'plan-slice' ? 'S01' : undefined, execution_contract: undefined,
+            prompt: input === 'prompt' ? body : undefined, promptFile: ['promptFile', 'planContextFile'].includes(input) ? file : undefined,
+            procedure_context: ['composed', 'tampered-body'].includes(change) ? metadata : undefined,
+            dispatchId: id, resultFile: path.join(lab.dir, id + '.json') };
+          const previous = entered;
+          try {
+            if (change === 'missing') fs.unlinkSync(modulePath);
+            if (change === 'changed-hash') fs.appendFileSync(modulePath, '\ntampered');
+            if (['missing', 'changed-hash', 'tampered-body', 'tampered-materialized'].includes(change)) {
+              await assert.rejects(sidecar.runUnitSidecar(probe), error => /^procedure-/.test(error.code), input + '/' + change);
+              assert.strictEqual(entered, previous, 'invalid corpus/body stops before transport');
+            } else {
+              await sidecar.runUnitSidecar(probe);
+              assert.strictEqual(entered, previous + 1);
+              assert(sent.includes(procedure.content));
+              for (const module of procedure.modules) assert.strictEqual(sent.split(`<!-- forge-procedure:${module.id} -->`).length - 1, 1);
+              assert(!sent.startsWith('---'), 'materialized metadata removed');
+            }
+          } finally { fs.writeFileSync(modulePath, bytes); }
+        }
+      }
+      console.log('R8 artifact/plan boundary: physical corpus, missing/hash/body failures and fresh single composition passed');
+    } finally { xllm.invokeClaudeTransport = originalClaude; xllm.runPlan = runPlan; }
 
     // Plan publication creates the exact source consumed by discovery/execution.
     const planning = { ...request, unitType: 'plan-slice', phase: 'plan', taskId: undefined, execution_contract: undefined,

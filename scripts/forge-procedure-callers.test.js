@@ -11,7 +11,7 @@ const { renderMemory } = require('./forge-projection');
 const { loadProcedureContext } = require('./forge-procedure-context');
 const sidecar = require('./forge-unit-sidecar');
 const boundary = require('./forge-context-boundary');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-callers-'));
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-callers-')));
 const milestone = 'M-20261019212315-evolucao-empirica-forge';
 const base = `.gsd/milestones/${milestone}`;
 const sliceBase = `${base}/slices/S01`;
@@ -110,7 +110,7 @@ try {
     });
     test(`${name}: execute extracted resolver and renderer argv, discriminate T99/MEM013 and durable boundary`, () => {
       const resolved = json(argv(extract(skill, 'MEMORY_QUERY_META'), values));
-      assert.equal(resolved.query_file, path.join(root, plan));
+      assert.equal(resolved.query_file, fs.realpathSync(path.join(root, plan)));
       const identity = boundary.unitIdentity(path.join(root, plan), 'execute-task/T100', null, { milestone, slice: 'S01', task: 'T100' });
       const scope = boundary.buildScope(identity, { run: milestone });
       const pending = path.join(root, '.gsd/forge/context/pending', boundary.scopeKey(scope) + '.json');

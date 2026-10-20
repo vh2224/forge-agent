@@ -161,6 +161,34 @@ function combinedSetup() {
   return { ...s, protocols, refresh, report: () => { refresh(); return buildEmpiricalEvaluation(s.input, { roots: [s.area] }); } };
 }
 try {
+  test('R6 isolated technical comparators bind every executed control, not just internal comparability', () => {
+    for (const arm of ['memory', 'procedure']) {
+      const positive = combinedSetup().report();
+      assert(positive.cases.find(row => row.arm === arm).eligible);
+      for (const key of ['input_sha256', 'template_sha256', 'model_requested', 'model_sent', 'effort', 'host', 'transport', 'budgets']) {
+        const s = combinedSetup();
+        const ref = s.input.sources.find(row => row.id === `technical-${arm}`);
+        const data = JSON.parse(fs.readFileSync(path.join(s.area, ref.path)));
+        const variants = arm === 'memory' ? data.cases[0].variants : [data.before, data.after];
+        for (const row of variants) {
+          const value = key.endsWith('sha256') ? sha256('unrelated') : key === 'budgets' ? { context: 1 } : 'unrelated';
+          if (key.endsWith('sha256')) {
+            row.conditions[key] = value;
+            if (key === 'template_sha256') row.package.template_sha256 = value;
+          } else {
+            row.final_evidence[key] = clone(value); row.capture.identity[key] = clone(value);
+            if (key === 'budgets') row.controls.budget_policy = clone(value);
+          }
+        }
+        assert(arm === 'memory' ? buildContextComparison(data).cases[0].comparable
+          : buildProcedureEvidence(data.before, data.after).comparable, `internally comparable ${arm}/${key}`);
+        Object.assign(ref, writeSource(s.area, ref.id, ref.kind, data, false));
+        const report = s.report();
+        assert(!report.cases.find(row => row.arm === arm).eligible, `${arm}/${key} must be excluded`);
+        assert(!report.cases.find(row => row.arm === 'combined').eligible, 'combined cannot inherit invalid isolated evidence');
+      }
+    }
+  });
   test('R2 execution starts bind registration and controls with strict prospective chronology', () => {
     const id = firstTwo[0].id;
     const negative = [s => { delete s.input.cases[0].execution_start_source; },

@@ -225,7 +225,7 @@ test('concurrent creators sharing an id publish complete distinct mailboxes', (c
       }
       return link(source, target);
     };
-    const result = gate.openGate(cwd, { question: `question-${index}`, options: ['yes', 'no'], notify: false });
+    const result = gate.openGate(cwd, { question: `question-${index}`, options: ['yes', 'no'], notify: false, timeout_ms: 0 });
     console.log(JSON.stringify({ id: result.id, question: result.question }));
   };
   const coordinator = `

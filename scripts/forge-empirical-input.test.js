@@ -93,7 +93,7 @@ try {
     };
     try {
       const channel = (kind) => agent.files.filter((f) => f.kind === kind).map((f) => f.text).join('\n');
-      const base = { cwd: agent.root, templateDir, unitType: 'execute-task', milestoneId: 'M001',
+      const base = { cwd: agent.root, codeDir: path.resolve(__dirname, '..'), templateDir, unitType: 'execute-task', milestoneId: 'M001',
         sliceId: 'S01', taskId: 'T01', autoCommit: false,
         description: `${channel('prework')}\n${channel('procedure')}` };
       let memories = 0; let ledgers = 0;

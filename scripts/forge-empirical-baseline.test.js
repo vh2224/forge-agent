@@ -282,6 +282,53 @@ try {
     assert.throws(() => renderBaseline(s.report(), { public: true }), (e) => e.code === 'public_export_requires_synthetic');
   });
 
+  test('procedure corpus is explicit, validated, fingerprinted and drift checked', () => {
+    const templateRoot = path.join(__dirname, '..', 'shared', 'templates', 'dispatch');
+    const procedureRoot = directory('procedure-source');
+    const sourceRoot = path.resolve(__dirname, '..');
+    const manifestPath = path.join(procedureRoot, 'shared/forge-procedures.json');
+    const originalManifest = fs.readFileSync(path.join(sourceRoot, 'shared/forge-procedures.json'));
+    const manifest = JSON.parse(originalManifest);
+    for (const relative of ['shared/forge-procedures.json', ...manifest.modules.filter(row => row.status === 'ready').map(row => row.path)]) {
+      const target = path.join(procedureRoot, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(path.join(sourceRoot, relative), target);
+    }
+    const measurementRoot = directory('procedure-measurement');
+    const options = { templateRoot, procedureRoot, measurementRoot };
+    const first = measureTemplateBaseline(options);
+    assert.strictEqual(first.conditions.procedure_source.root, procedureRoot);
+    assert.strictEqual(first.conditions.procedure_source.inventory.length, 1 + manifest.modules.filter(row => row.status === 'ready').length);
+    assert(first.conditions.procedure_source.inventory.every(row => /^[a-f0-9]{64}$/.test(row.sha256)));
+    assert.strictEqual(first.totals.unit_types, Object.keys(TEMPLATE_FILES).length);
+    const module = manifest.modules.find(row => row.status === 'ready');
+    const staged = path.join(measurementRoot, module.path);
+    const stagedBytes = fs.readFileSync(staged);
+    fs.appendFileSync(staged, '\ntampered');
+    assert.throws(() => measureTemplateBaseline(options), e => e.code === 'measurement_procedure_drift');
+    fs.writeFileSync(staged, stagedBytes);
+    const original = fs.readFileSync(path.join(procedureRoot, module.path));
+    fs.appendFileSync(path.join(procedureRoot, module.path), '\ntampered');
+    assert.throws(() => measureTemplateBaseline(options), e => e.code === 'procedure-integrity-mismatch');
+    fs.writeFileSync(path.join(procedureRoot, module.path), original);
+    assert.throws(() => measureTemplateBaseline({ ...options, onRead: () => {
+      fs.appendFileSync(manifestPath, ' ');
+    } }), e => e.code === 'measurement_procedure_drift');
+    fs.writeFileSync(manifestPath, originalManifest);
+    // Valid semantic metadata changes affect provenance even when prompt tokens agree.
+    manifest.modules[0].tests.push('synthetic-metadata-change');
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    fs.unlinkSync(path.join(measurementRoot, 'shared/forge-procedures.json'));
+    const changed = measureTemplateBaseline(options);
+    assert.notStrictEqual(changed.digest, first.digest);
+    assert.notStrictEqual(changed.conditions.procedure_source.manifest_sha256, first.conditions.procedure_source.manifest_sha256);
+    fs.writeFileSync(manifestPath, '{}');
+    assert.throws(() => measureTemplateBaseline(options), e => e.code === 'procedure-manifest-invalid');
+    fs.unlinkSync(manifestPath);
+    // A real installation may exist, but is never an alternate source here.
+    assert.throws(() => measureTemplateBaseline(options), e => e.code === 'procedure-manifest-missing');
+  });
+
   test('template replay from different source path lengths uses one physical tree and no global event reads', () => {
     const templates = path.join(__dirname, '..', 'shared', 'templates', 'dispatch');
     const short = directory('a'); const long = directory('source-with-much-longer-physical-path');
@@ -291,21 +338,21 @@ try {
     const sentinel = path.join(sentinelRoot, '.gsd', 'forge', 'events.jsonl');
     fs.writeFileSync(sentinel, '{"event":"dispatch","input_tokens":999999999,"PRIVATE_GLOBAL_SENTINEL":true}\n');
     const opened = []; const before = fs.readFileSync(sentinel);
-    const first = measureTemplateBaseline({ templateRoot: short, measurementRoot: measurement, onRead: (p) => opened.push(p) });
-    const second = measureTemplateBaseline({ templateRoot: long, measurementRoot: measurement, onRead: (p) => opened.push(p) });
+    const first = measureTemplateBaseline({ procedureRoot: path.resolve(__dirname, '..'), templateRoot: short, measurementRoot: measurement, onRead: (p) => opened.push(p) });
+    const second = measureTemplateBaseline({ procedureRoot: path.resolve(__dirname, '..'), templateRoot: long, measurementRoot: measurement, onRead: (p) => opened.push(p) });
     assert.strictEqual(first.digest, second.digest); assert.deepStrictEqual(first.by_unit_type, second.by_unit_type);
     assert.strictEqual(first.inventory.length, Object.keys(TEMPLATE_FILES).length);
     assert.strictEqual(first.conditions.configuration.inputs, 'deterministic');
     assert(opened.some((p) => p.endsWith('execute-task.md'))); assert(!opened.includes(sentinel));
     assert(!opened.some((p) => /events\.jsonl$/.test(p))); assert.deepStrictEqual(fs.readFileSync(sentinel), before);
-    const different = measureTemplateBaseline({ templateRoot: short, measurementRoot: directory('different-path-for-measurement') });
+    const different = measureTemplateBaseline({ procedureRoot: path.resolve(__dirname, '..'), templateRoot: short, measurementRoot: directory('different-path-for-measurement') });
     assert.notStrictEqual(first.conditions.measurement_root, different.conditions.measurement_root);
     assert.notStrictEqual(first.digest, different.digest);
     assert(first.limitations.includes('not_os_sandbox')); assert(!JSON.stringify(first).includes('PRIVATE_GLOBAL_SENTINEL'));
     fs.unlinkSync(path.join(short, Object.values(TEMPLATE_FILES)[0]));
-    assert.throws(() => measureTemplateBaseline({ templateRoot: short, measurementRoot: measurement }));
+    assert.throws(() => measureTemplateBaseline({ procedureRoot: path.resolve(__dirname, '..'), templateRoot: short, measurementRoot: measurement }));
     fs.writeFileSync(path.join(measurement, 'unowned-event.json'), '{}');
-    assert.throws(() => measureTemplateBaseline({ templateRoot: long, measurementRoot: measurement }), (e) => e.code === 'measurement_tree_not_owned');
+    assert.throws(() => measureTemplateBaseline({ procedureRoot: path.resolve(__dirname, '..'), templateRoot: long, measurementRoot: measurement }), (e) => e.code === 'measurement_tree_not_owned');
   });
   process.stdout.write(`\n${passed} passed, 0 failed\n`);
 } finally {

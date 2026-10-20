@@ -262,6 +262,11 @@ function resolverOptions(request, contract) {
 }
 
 function deliveryRequest(request, route, prompt, contract = request.contract || phaseContract(request.phase)) {
+  const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd,
+    phase: `task-${request.phase}`, forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+  const { content: procedureText, ...procedure_context } = procedure;
+  // Validate the builder's exact module bytes against the current physical corpus.
+  prompt = require('./forge-prompt').composeProcedurePrompt(prompt, procedure, procedure_context);
   return {
     schema_version: REQUEST_SCHEMA_VERSION,
     scope: 'standalone-task', phase: request.phase, taskId: request.taskId,
@@ -270,7 +275,7 @@ function deliveryRequest(request, route, prompt, contract = request.contract || 
     dispatchId: request.dispatchId, resultFile: request.resultFile,
     constraints: request.constraints || { auto_commit: false, deploy: false },
     inputs: request.inputs || {}, pending_questions: request.pending_questions || [], ...(request.continuation ? { continuation: request.continuation } : {}),
-    unitType: contract.unitType, route, prompt,
+    unitType: contract.unitType, route, prompt, procedure_context,
     ...(request.recoveryStateFile ? { recoveryStateFile: request.recoveryStateFile } : {}),
     ...(request.ownerBroker ? { ownerBroker: request.ownerBroker } : {}),
     ...(request.execution_contract ? { execution_contract: request.execution_contract } : {}),

@@ -218,6 +218,27 @@ async function main() {
     }
   });
 
+  await test('real preparation caller preserves all four task phases and verified procedure provenance', async () => {
+    const original = xllm.invokeCodexAppServer;
+    try {
+      for (const phase of ['brainstorm', 'discuss', 'research', 'plan']) {
+        const request = fixture({ phase, hostRuntime: 'claude', model: 'gpt-5.6-sol' });
+        const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: `task-${phase}` });
+        let calls = 0;
+        xllm.invokeCodexAppServer = async options => {
+          calls++;
+          for (const module of procedure.modules) assert.equal(options.prompt.split(`<!-- forge-procedure:${module.id} -->`).length - 1, 1);
+          assert(options.prompt.includes(procedure.content));
+          return { finalText: JSON.stringify({ status: 'partial', summary: 'Fixture reached provider', questions: [], artifacts: [] }) };
+        };
+        const result = await prep.prepareStandaloneTask(request);
+        assert.equal(result.status, 'partial', `${phase}: ${JSON.stringify(result)}`);
+        assert.equal(result.provider_called, true);
+        assert.equal(calls, 1);
+      }
+    } finally { xllm.invokeCodexAppServer = original; }
+  });
+
   await test('production Codex sidecar receives the complete prompt and persists continuation dispatch identity', async () => {
     const request = fixture({ phase: 'discuss', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
     request.prompt = 'UNIQUE-PRODUCTION-SIDECAR-PROMPT';

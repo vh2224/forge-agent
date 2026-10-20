@@ -12,6 +12,7 @@ const { sha256, fingerprint, resolveSafeFile } = require('./forge-delivery');
 const { sanitizeFinal, measure } = require('./forge-attempt-telemetry');
 const { countTokens } = require('./forge-tokens');
 const { TEMPLATE_FILES } = require('./forge-prompt');
+const { MANIFEST_PATH, canonicalProcedureBytes, loadManifest, loadAllProcedureContexts } = require('./forge-procedure-context');
 const { buildAgentView } = require('./forge-empirical-input');
 const { checkedPath, fail } = require('./forge-empirical-sources');
 
@@ -270,8 +271,27 @@ function measureTemplateBaseline(options) {
     if (read.error) fail(read.error);
     return { unit, name, bytes: read.buffer.length, sha256: sha256(read.buffer), buffer: read.buffer };
   });
+  // Custom template exports may supply a separate canonical procedure root.
+  // Pin both resolver roots: an absent local manifest must never consult HOME.
+  const procedureRoot = checkedPath(options.procedureRoot || path.resolve(source, '../../..'));
+  if (procedureRoot === root) fail('measurement_root_invalid');
+  const procedureOptions = { cwd: procedureRoot, forgeHome: procedureRoot };
+  const loaded = loadManifest(procedureOptions);
+  loadAllProcedureContexts(procedureOptions);
+  const procedures = [MANIFEST_PATH, ...loaded.manifest.modules.filter(item => item.status === 'ready').map(item => item.path)].map(name => {
+    const file = checkedPath(path.join(procedureRoot, name));
+    const read = readBoundedStableFile(file, MAX_FILE_BYTES, { expectedReal: file });
+    if (read.error) fail(read.error);
+    const buffer = canonicalProcedureBytes(read.buffer);
+    const hash = sha256(buffer);
+    const expected = name === MANIFEST_PATH ? loaded.manifest_sha256 : loaded.manifest.modules.find(item => item.path === name).sha256;
+    if (hash !== expected) fail('measurement_procedure_drift');
+    return { name, bytes: buffer.length, sha256: hash, buffer, source_sha256: sha256(read.buffer) };
+  });
   const destination = path.join(root, 'shared', 'templates', 'dispatch');
-  const allowed = new Set(inventory.map((f) => path.join(destination, f.name)));
+  const outputs = [...inventory.map(row => ({ ...row, target: path.join(destination, row.name), drift: 'measurement_template_drift' })),
+    ...procedures.map(row => ({ ...row, target: path.join(root, row.name), drift: 'measurement_procedure_drift' }))];
+  const allowed = new Set(outputs.map(row => row.target));
   const visit = (dir) => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const file = checkedPath(path.join(dir, entry.name));
     if (entry.isDirectory()) visit(file);
@@ -279,10 +299,10 @@ function measureTemplateBaseline(options) {
   } };
   visit(root);
   fs.mkdirSync(destination, { recursive: true });
-  for (const row of inventory) {
-    const file = path.join(destination, row.name);
-    if (fs.existsSync(file)) { if (sha256(fs.readFileSync(file)) !== row.sha256) fail('measurement_template_drift'); }
-    else fs.writeFileSync(file, row.buffer, { flag: 'wx' });
+  for (const row of outputs) {
+    fs.mkdirSync(path.dirname(row.target), { recursive: true });
+    if (fs.existsSync(row.target)) { if (sha256(fs.readFileSync(row.target)) !== row.sha256) fail(row.drift); }
+    else fs.writeFileSync(row.target, row.buffer, { flag: 'wx' });
   }
   const child = spawnSync(process.execPath, ['-e', TEMPLATE_CHILD], { cwd: root, shell: false, windowsHide: true,
     input: JSON.stringify({ root, runtime: __dirname }), encoding: 'utf8', timeout: 30000, maxBuffer: 2 * MAX_FILE_BYTES });
@@ -291,11 +311,18 @@ function measureTemplateBaseline(options) {
   if (result.errors.length || Object.keys(result.by_unit_type).length !== inventory.length ||
       result.telemetry?.has_telemetry) fail('template_inventory_incomplete');
   if (options.onRead) opened.forEach(options.onRead);
-  for (const row of inventory) if (sha256(fs.readFileSync(path.join(destination, row.name))) !== row.sha256) fail('measurement_template_drift');
+  for (const row of outputs) if (sha256(fs.readFileSync(row.target)) !== row.sha256) fail(row.drift);
+  for (const row of procedures) {
+    const file = checkedPath(path.join(procedureRoot, row.name));
+    const read = readBoundedStableFile(file, MAX_FILE_BYTES, { expectedReal: file });
+    if (read.error || sha256(read.buffer) !== row.source_sha256) fail('measurement_procedure_drift');
+  }
   const runtime = [...new Set(opened.filter((file) => file.startsWith(__dirname + path.sep)))].sort()
     .map((file) => ({ file: path.relative(__dirname, file).replace(/\\/g, '/'), sha256: sha256(fs.readFileSync(file)) }));
   const conditions = { policy: 'closed-tree-runtime-js-v1', measurement_root: root, runtime_root: __dirname,
     node: process.version, platform: process.platform, arch: process.arch, runtime,
+    procedure_source: { root: procedureRoot, scope: loaded.scope, manifest_sha256: loaded.manifest_sha256,
+      inventory: procedures.map(({ buffer, source_sha256, ...row }) => row) },
     configuration: { external_data: 'unavailable-by-read-policy', inputs: result.inputs,
       memory_tokens: 1200, standards_tokens: 3000, ledger_tokens: 1500, auto_commit: false,
       script_dir: __dirname, templates: 'complete-project-local-inventory' } };
