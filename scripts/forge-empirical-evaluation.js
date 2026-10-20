@@ -7,6 +7,7 @@ const path = require('path');
 const { buildEmpiricalBaseline } = require('./forge-empirical-baseline');
 const { buildContextComparison } = require('./forge-context-comparison');
 const { buildProcedureEvidence } = require('./forge-procedure-evidence');
+const { evaluateCandidatePolicies } = require('./forge-empirical-policy');
 const { sha256, fingerprint, resolveSafeFile } = require('./forge-delivery');
 const { readBoundedStableFile } = require('./forge-autonomy-sources');
 const { checkedPath, relativePath, fail } = require('./forge-empirical-sources');
@@ -258,7 +259,7 @@ function buildEmpiricalEvaluation(input, options = {}) {
         && new Set(eligible.map(row => row.family_id)).size >= Math.max(2, policy.minimum_sample.families)),
       dimensions_by_split: Object.fromEntries(SPLITS.map(split => [split, summarizeDimensions(rows.filter(row => row.split === split))])) };
   }).sort((a, b) => a.id.localeCompare(b.id));
-  return { schema_version: 1, kind: 'empirical-evaluation-report', comparative_ready: false, functional_gain: null,
+  const report = { schema_version: 1, kind: 'empirical-evaluation-report', comparative_ready: false, functional_gain: null,
     prospective_cases: new Set(prospective.map(row => row.delivery_id)).size,
     decision: { status: 'preserve-defaults', apply_policy: false, reason: prospective.length ? 'prospective_validation_pending' : 'zero_eligible_prospective_cases' },
     candidates: candidateReports, cases, populations: Object.fromEntries(Object.entries(populations).map(([key, rows]) => [key, {
@@ -270,7 +271,11 @@ function buildEmpiricalEvaluation(input, options = {}) {
       'two_reserved_families_are_only_an_eligibility_floor', 'no_effectiveness_installation_UAT_or_provider_proof',
       'reserved_agent_view_remains_closed', 'canonical_manifests_require_separately_bound_sources',
       'nested_input_or_autonomy_manifests_fail_closed_without_dropping_selected_cases',
-      'historical_report_replays_are_diagnostic_only', 'recommendation_policy_reserved_for_T04'] };
+      'historical_report_replays_are_diagnostic_only', 'recommendations_do_not_apply_policy'] };
+  // Only the trusted API caller supplies current policy context. Imported
+  // candidates, protocols and outcome claims cannot supply prefs or authority.
+  report.recommendations = evaluateCandidatePolicies(report, options.policyContext);
+  return report;
 }
 
 function renderEmpiricalEvaluation(report) {
@@ -291,6 +296,13 @@ function renderEmpiricalEvaluation(report) {
     '| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   for (const source of report.provenance) lines.push(`| ${['id', 'kind', 'path', 'sha256', 'revision', 'captured_at', 'timezone', 'synthetic', 'available'].map(key => escape(source[key] ?? 'unknown')).join(' | ')} |`);
   for (const candidate of report.candidates) lines.push('', `- ${escape(candidate.id)} policy: ${escape(JSON.stringify(candidate.policy))}; sample_floor_met=${candidate.sample_floor_met}.`);
+  if (report.recommendations) {
+    lines.push('', '## Read-only recommendations', '',
+      `Configured policies: ${escape(JSON.stringify(report.recommendations.configured))}.`,
+      'apply_policy: false; authorization.granted: false.');
+    for (const candidate of report.recommendations.candidates) lines.push(
+      `- ${escape(candidate.id)} (${escape(candidate.arm)}): ${escape(candidate.recommendation)}; reasons=${escape(candidate.reasons.join(', ') || 'eligible for future validation only')}; ${escape(candidate.limitations.join(', '))}.`);
+  }
   for (const row of report.cases) lines.push(`- ${escape(row.id)} registration: ${escape(JSON.stringify(row.registration))}; observed controls: ${escape(JSON.stringify(row.outcome))}.`);
   lines.push('', '## Limitations', '', ...report.limitations.map(value => `- ${value}`));
   return lines.join('\n') + '\n';

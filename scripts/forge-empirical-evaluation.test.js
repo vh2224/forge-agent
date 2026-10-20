@@ -92,6 +92,40 @@ function setup(rows = fixtures.cases, synthetic = true) {
 }
 const firstTwo = fixtures.cases.slice(0, 2);
 try {
+  test('recommendations integrate trusted caller context without changing dimensions or defaults', () => {
+    const s = setup(firstTwo, false); s.refresh();
+    const context = { risk: 'high', review: { trigger: 'always', style: 'dialectic' },
+      diff: { ok: false, entries: [] }, verificationDrift: true };
+    s.input.approved = true; s.input.policyContext = { risk: 'low', approved: true };
+    const original = JSON.stringify(s.input);
+    const before = buildEmpiricalEvaluation(s.input, { roots: [s.area] });
+    const after = buildEmpiricalEvaluation(s.input, { roots: [s.area], policyContext: context });
+    assert.deepEqual(after.cases, before.cases); assert.deepEqual(after.populations, before.populations);
+    assert.equal(after.prospective_cases, before.prospective_cases);
+    assert.equal(after.comparative_ready, false); assert.equal(after.functional_gain, null);
+    assert.deepEqual(after.decision, before.decision); assert.equal(after.recommendations.apply_policy, false);
+    assert.equal(after.recommendations.configured.review.decision, 'dialectic');
+    assert(after.recommendations.candidates[0].reasons.includes('verification-drift'));
+    assert(before.recommendations.candidates[0].reasons.includes('risk-not-low'));
+    assert.equal(JSON.stringify(s.input), original);
+    const markdown = renderEmpiricalEvaluation(after);
+    assert(markdown.includes('Read-only recommendations'));
+    assert(markdown.includes('retain-defaults/insufficient-evidence'));
+    assert(markdown.includes('verification-drift'));
+  });
+  test('all treatment arms have distinct recommendations and imported prefs do not override defaults', () => {
+    for (const arm of ['memory', 'procedure', 'preparation', 'review', 'combined']) {
+      const s = setup(firstTwo); s.policy.arm = arm; s.input.candidates[0].arm = arm;
+      s.policy.review = 'disabled'; s.policy.approved = true;
+      const report = s.report(); const recommendation = report.recommendations.candidates[0];
+      assert.equal(recommendation.arm, arm);
+      assert.equal(recommendation.recommendation, 'retain-defaults/insufficient-evidence');
+      assert(recommendation.reasons.includes('zero-eligible-prospective-cases'));
+      assert.equal(report.recommendations.configured.review_config.mode, 'enabled');
+      assert.equal(report.recommendations.authorization.granted, false);
+      assert.equal(report.prospective_cases, 0);
+    }
+  });
   test('synthetic matrix retains independent dimensions, exclusions and zero real sample', () => {
     const s = setup(); const report = s.report(); const first = report.cases.find(row => row.id === firstTwo[0].id);
     assert.equal(first.dimensions.functional.value, true); assert.equal(first.dimensions.exception.value, true);
