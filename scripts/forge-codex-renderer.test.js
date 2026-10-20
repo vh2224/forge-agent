@@ -532,5 +532,19 @@ try {
   assert(fs.readFileSync(conflictConfig, 'utf8').includes('features = {}'));
   assert(!fs.readFileSync(conflictConfig, 'utf8').includes('default_mode_request_user_input'));
 
+  // The actual generated consumers must distribute the host authority seam.
+  for (const kind of ['instructions', 'agent', 'command', 'skill', 'dispatch']) {
+    for (const item of realCodex.artifacts.filter(row => row.kind === kind)) {
+      for (const rule of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization',
+        'readStandingAuthorization(reference)', '60000ms', 'Standing permission never answers a functional question']) {
+        assert(item.content.includes(rule), `${item.source}: missing recovery rule ${rule}`);
+      }
+    }
+  }
+  const repeat = renderer.render({ repo: root, ...PRODUCTION_DISPATCH_DIALECT,
+    codexHome: codex, projectRoot: project, forgeHome: forge });
+  const again = renderer.render({ repo: root, ...PRODUCTION_DISPATCH_DIALECT,
+    codexHome: codex, projectRoot: project, forgeHome: forge });
+  assert.deepStrictEqual(repeat.artifacts, again.artifacts, 'recovery projection is deterministic');
   console.log('forge-codex-renderer tests passed');
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

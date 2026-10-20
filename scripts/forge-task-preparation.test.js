@@ -8,7 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-task-preparation-'));
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-task-preparation-')));
 const oldHome = process.env.HOME;
 const oldUserProfile = process.env.USERPROFILE;
 const isolatedHome = path.join(root, 'home');
@@ -89,6 +89,71 @@ function codexCapabilities() {
 }
 
 async function main() {
+  await test('caller repair compares equivalent requests and measures final native arguments before reserving', async () => {
+    const request = fixture({ model: 'gpt-5.6-sol' });
+    request.activeCapabilities = codexCapabilities();
+    request.prompt = 'before repair';
+    const failed = await prep.prepareStandaloneTask(request, { invokeNative: async () => {
+      throw Object.assign(Error('fixture caller error'), { code: 'context-budget-exceeded', provider_called: false });
+    } });
+    assert.equal(failed.ok, false);
+    const recovery = { receiptFile: request.resultFile + '.receipt.json', stateFile: request.resultFile + '.recovery.json', correction: true };
+    let calls = 0;
+    const deps = { processProbe: () => 'stopped', invokeNative: async () => { calls++; return framed(envelope(request)); } };
+    await assert.rejects(() => prep.recoverStandaloneTask(Object.fromEntries(Object.entries(request).reverse()), recovery, deps), /correction-required/);
+    request.prompt = 'after offline repair';
+    const recovered = await prep.recoverStandaloneTask(request, recovery, deps);
+    assert.equal(recovered.corrected, true);
+    assert.equal(recovered.result.status, 'done');
+    assert.equal(calls, 1);
+    const state = JSON.parse(fs.readFileSync(recovery.stateFile));
+    assert.equal(state.reservations.length, 1);
+    assert.equal(state.reservations[0].correction.evidence_reference, 'preparation-preflight:native-arguments');
+  });
+  await test('trusted caller authority survives restart and routes a timed-out standalone phase to the explicit native candidate', async () => {
+    const request = fixture({ phase: 'brainstorm' });
+    const prefs = path.join(request.contextRoot, '.gsd/forge-prefs.jsonc');
+    fs.writeFileSync(prefs, JSON.stringify({ tier_models: {
+      light: ['claude-sonnet-5', 'gpt-5.6-sol'], standard: ['claude-sonnet-5', 'gpt-5.6-sol'],
+      heavy: ['claude-sonnet-5', 'gpt-5.6-sol'], max: ['claude-sonnet-5', 'gpt-5.6-sol'] }, effort: { 'plan-slice': 'medium' } }));
+    const profile = path.join(path.dirname(request.cwd), 'profile');
+    fs.mkdirSync(path.join(profile, '.codex'), { recursive: true });
+    fs.writeFileSync(path.join(profile, '.codex/AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nFixture standing permission.\n<!-- user:forge-routing-continuity:end -->');
+    let now = Date.now();
+    const reference = 'conversation:caller-restart';
+    const authority = require('./forge-interaction').createRecoveryAuthorizationAdapter(observed => ({ ...observed,
+      received: true, answer: 'authorize', resolved_at: now }), { resolveProfile: () => profile, clock: () => now });
+    const failed = await prep.prepareStandaloneTask(request, { recoveryAuthorization: { adapter: authority, reference,
+      registration: { host: 'codex', section: 'user:forge-routing-continuity' } }, invokeSidecar: async () => {
+      throw Object.assign(Error('fixture timeout'), { code: 'claude-timeout', provider_called: true });
+    } });
+    assert.equal(failed.ok, false);
+    const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
+    assert.equal(JSON.parse(fs.readFileSync(receiptFile)).authorization_reference, reference);
+    const initial = JSON.parse(fs.readFileSync(stateFile));
+    assert.equal(initial.authorization_reference, reference);
+    now = initial.deadline_at + 1;
+    const restarted = require('./forge-recovery-authority').createRecoveryAuthority({ resolveProfile: () => profile, clock: () => now });
+    let calls = 0, optionsObserved;
+    request.activeCapabilities = codexCapabilities();
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile, clock: () => now }, {
+      processProbe: () => 'stopped', recoveryAuthorization: { adapter: restarted, reference },
+      resolveDispatch: options => { optionsObserved = options; return resolveDispatch(options); },
+      invokeNative: async args => { calls++; assert.equal(args.model, 'gpt-5.6-sol');
+        assert.equal(args.reasoning_effort, 'medium'); return framed(envelope(request)); },
+    });
+    assert.equal(recovered.route.worker_mode, 'native');
+    assert.equal(recovered.sidecar_remaining_ms, 0);
+    assert.equal(recovered.result.status, 'done');
+    assert.equal(calls, 1);
+    assert.equal(optionsObserved.scope, 'standalone-task'); assert.equal(optionsObserved.phase, 'brainstorm');
+    assert.equal(optionsObserved.unitType, 'plan-slice'); assert.equal(optionsObserved.unitId, request.taskId);
+    assert.equal(optionsObserved.cwd, request.contextRoot); assert.equal(optionsObserved.workerMode, undefined);
+    assert.equal(JSON.parse(fs.readFileSync(stateFile)).deadline_at, initial.deadline_at);
+    assert.equal(fs.readFileSync(artifactPath(request), 'utf8'), content(request.phase, request.taskId));
+    fs.writeFileSync(path.join(profile, '.codex/AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nChanged permission.\n<!-- user:forge-routing-continuity:end -->');
+    assert.throws(() => restarted.readStandingAuthorization(reference), /source-changed/);
+  });
   await test('four phases use the actual caller, configured Claude sidecar and exact task-local formats', async () => {
     for (const phase of Object.keys(prep.PHASE_CONTRACTS)) {
       const request = fixture({ phase, hostRuntime: 'codex', model: 'claude-sonnet-5' });
@@ -580,7 +645,7 @@ async function main() {
     }
   });
 
-  await test('provider failures remain distinct from preflight refusal and record provider_called', async () => {
+  await test('unproven invocation failures remain unknown, preflight is false and explicit provider evidence is true', async () => {
     const preflight = fixture({ phase: 'brainstorm', model: 'gpt-5.6-sol' });
     preflight.activeCapabilities = { ...codexCapabilities(), models: [] };
     const refused = await prep.prepareStandaloneTask(preflight, { invokeNative: async () => { throw Error('not called'); } });
@@ -591,9 +656,19 @@ async function main() {
     provider.activeCapabilities = codexCapabilities();
     const failed = await prep.prepareStandaloneTask(provider, { invokeNative: async () => { throw Error('fixture secret'); } });
     assert.equal(failed.reason_code, 'native-invocation-failed');
-    assert.equal(failed.provider_called, true);
+    assert.equal(failed.provider_called, 'unknown');
     const durable = fs.readFileSync(`${provider.resultFile}.receipt.json`, 'utf8');
     assert(!durable.includes('fixture secret'));
+
+    const confirmed = fixture({ phase: 'brainstorm', model: 'gpt-5.6-sol' });
+    confirmed.activeCapabilities = codexCapabilities();
+    const observed = await prep.prepareStandaloneTask(confirmed, { invokeNative: async () => {
+      const error = Error('fixture confirmed provider failure');
+      error.provider_called = true;
+      throw error;
+    } });
+    assert.equal(observed.provider_called, true);
+    assert.equal(JSON.parse(fs.readFileSync(`${confirmed.resultFile}.receipt.json`, 'utf8')).failure.provider_called, true);
 
     const sidecar = fixture({ phase: 'research', model: 'claude-sonnet-5' });
     let sidecarCalls = 0;
@@ -601,7 +676,7 @@ async function main() {
       sidecarCalls++;
       throw Error('fixture injected provider failure');
     } });
-    assert.equal(first.provider_called, true);
+    assert.equal(first.provider_called, 'unknown');
     const receiptBytes = fs.readFileSync(`${sidecar.resultFile}.receipt.json`, 'utf8');
     const replay = await prep.prepareStandaloneTask(sidecar, { invokeSidecar: async () => {
       sidecarCalls++;
@@ -609,7 +684,7 @@ async function main() {
     } });
     assert.equal(replay.replayed, true);
     assert.equal(replay.provider_called, false);
-    assert.equal(replay.original_provider_called, true);
+    assert.equal(replay.original_provider_called, 'unknown');
     assert.equal(sidecarCalls, 1);
     assert.equal(fs.readFileSync(`${sidecar.resultFile}.receipt.json`, 'utf8'), receiptBytes);
   });
@@ -669,7 +744,8 @@ async function main() {
       throw error;
     } });
     assert(!JSON.stringify(result).includes('fixture-private-unknown-message'));
-    assert.equal(result.diagnostic.stage, 'provider');
+    assert.equal(result.provider_called, 'unknown');
+    assert.equal(result.diagnostic.stage, 'transport');
   });
 
   await test('production sidecar pre-spawn route refusal records provider_called false', async () => {
@@ -703,7 +779,7 @@ async function main() {
     assert.equal(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'), receiptBytes);
   });
 
-  await test('production sidecar post-spawn failure records provider_called true in result, receipt and event', async () => {
+  await test('production sidecar heartbeat without adapter evidence stays unknown in result, receipt, event and replay', async () => {
     const request = fixture({ phase: 'research', hostRuntime: 'claude', model: 'gpt-5.6-sol' });
     const original = xllm.invokeCodexAppServer;
     let providerInvocations = 0;
@@ -719,22 +795,22 @@ async function main() {
     try {
       const result = await prep.prepareStandaloneTask(request, { announce });
       assert.equal(result.reason_code, 'provider-exit');
-      assert.equal(result.provider_called, true);
+      assert.equal(result.provider_called, 'unknown');
       assert.deepStrictEqual(identityLines.map(line => line.match(/^\[forge-sidecar\] (\w+)/)[1]), ['solicitado', 'iniciado', 'falhou']);
       assert(identityLines.every(line => line.includes('fase=research')));
-      assert(identityLines[2].includes('causa=provider-exit provider_called=true'));
+      assert(identityLines[2].includes('causa=provider-exit provider_called=unknown'));
       const receipt = JSON.parse(fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8'));
-      assert.equal(receipt.failure.provider_called, true);
+      assert.equal(receipt.failure.provider_called, 'unknown');
       const events = fs.readFileSync(path.join(request.contextRoot, '.gsd', 'forge', 'events.jsonl'), 'utf8')
         .trim().split(/\r?\n/).map(line => JSON.parse(line));
-      assert.equal(events.filter(event => event.event === 'sidecar-unit').at(-1).provider_called, true);
+      assert.equal(events.filter(event => event.event === 'sidecar-unit').at(-1).provider_called, 'unknown');
       const receiptBytes = fs.readFileSync(`${request.resultFile}.receipt.json`, 'utf8');
       const replayLines = [];
       const replay = await prep.prepareStandaloneTask(request, { announce: require('./forge-sidecar-identity')
         .createAnnouncer({ write: line => replayLines.push(line) }) });
       assert.equal(replay.replayed, true);
       assert.equal(replay.provider_called, false);
-      assert.equal(replay.original_provider_called, true);
+      assert.equal(replay.original_provider_called, 'unknown');
       assert.equal(replayLines.length, 1);
       assert.match(replayLines[0], /^\[forge-sidecar\] reaproveitado /);
       assert.equal(providerInvocations, 1);

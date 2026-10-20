@@ -126,21 +126,176 @@ function eventsFile(cwd, milestone) {
     ? path.join(cwd, '.gsd', 'milestones', milestone, `${milestone}-events.jsonl`)
     : path.join(rootDir(cwd), 'events.jsonl');
 }
-function transactionFile(cwd, key) { return path.join(transactionDir(cwd), `${encode(key)}.json`); }
-function resultFile(cwd, key) { return path.join(resultDir(cwd), `${encode(key)}.json`); }
-function boundaryFile(cwd, unit) { return path.join(boundaryDir(cwd), `${encode(forgeLease.normalizeUnitKey(unit))}.json`); }
+function transactionFile(cwd, key) { return preferredRecordFile(cwd, 'transaction', key); }
+function resultFile(cwd, key) { return preferredRecordFile(cwd, 'result', key); }
+function boundaryFile(cwd, unit) { return preferredRecordFile(cwd, 'boundary', forgeLease.normalizeUnitKey(unit)); }
 
-function writeAtomic(file, value, raw) {
+function recordPaths(cwd, kind, key) {
+  const dir = kind === 'transaction' ? transactionDir(cwd) : kind === 'result' ? resultDir(cwd) : boundaryDir(cwd);
+  const file = path.join(dir, `${kind}-v1-${sha(key)}.json`);
+  const legacy = `${encode(key)}.json`;
+  return [file, ...(legacy.length <= 255 ? [path.join(path.dirname(file), legacy)] : [])];
+}
+function preferredRecordFile(cwd, kind, key) {
+  const paths = recordPaths(cwd, kind, key);
+  // Path selection must not read publications: diagnostic callers may locate
+  // a path before deciding whether that publication is in their scope.
+  return paths.find(file => fs.existsSync(file)) || paths[0];
+}
+function validateRecord(record, kind, key, options) {
+  const identity = kind === 'boundary' ? record.unit : record.idempotency_key;
+  if (identity !== key) throw new ControllerError('record-conflict', `identidade divergente em ${kind}`);
+  if (kind === 'transaction' && !(options && options.identityOnly)) {
+    let unitKey;
+    try { unitKey = forgeLease.normalizeUnitKey(record.unit); } catch { /* reported as record-conflict below */ }
+    if (!unitKey || record.unit.key !== unitKey ||
+        !record.before || !record.after || sha(record.before.state) !== record.before.state_checksum ||
+        sha(record.after.state) !== record.after.state_checksum ||
+        !record.event || record.event.idempotency_key !== key || record.event.unit !== record.unit.key ||
+        record.event.milestone !== record.milestone ||
+        (record.result && (record.result.idempotency_key !== key || record.result.unit !== record.unit.key || record.result.milestone !== record.milestone)) ||
+        (record.boundary && (sha(record.result) !== record.boundary.result_checksum || sha(record.event) !== record.boundary.event_checksum))) {
+      throw new ControllerError('record-conflict', 'checksum/identidade da transação inválido');
+    }
+  }
+  return record;
+}
+function lookupRecord(cwd, kind, key, options) {
+  let found = null;
+  const paths = recordPaths(cwd, kind, key);
+  let legacyAnchor = null;
+  for (const file of paths) {
+    const record = readRecordJson(file);
+    if (!record) continue;
+    validateRecord(record, kind, key, options);
+    if (found && stableStringify(found) !== stableStringify(record)) {
+      if (!legacyAnchor || legacyAnchor !== sha(record)) throw new ControllerError('record-conflict', `registros novo/legado divergem em ${kind}`);
+    } else if (!found) found = record;
+    if (file === paths[0]) legacyAnchor = JSON.parse(fs.readFileSync(file, 'utf8')).storage_legacy_checksum || null;
+  }
+  return found;
+}
+function saveRecord(cwd, kind, key, record, options) {
+  lookupRecord(cwd, kind, key); // refuse collisions before replacing any record
+  const paths = recordPaths(cwd, kind, key);
+  const existing = paths.filter(file => fs.existsSync(file));
+  // With two accepted copies publish only the modern one atomically. Bind the
+  // untouched legacy bytes so interruption never creates ambiguous authority,
+  // while unrelated legacy changes still fail closed on the next read.
+  if (existing.length === 2) {
+    writeAtomic(paths[0], record, false, { ...options, legacyRecordChecksum: sha(readRecordJson(paths[1])) });
+  } else writeAtomic(existing[0] || paths[0], record, false, options);
+}
+function discoverRecords(cwd, kind) {
+  const dir = kind === 'transaction' ? transactionDir(cwd) : resultDir(cwd);
+  if (!fs.existsSync(dir)) return [];
+  const records = new Map();
+  for (const name of fs.readdirSync(dir).filter(item => item.endsWith('.json')).sort()) {
+    const record = readJson(path.join(dir, name));
+    if (!record || typeof record.idempotency_key !== 'string' ||
+        !recordPaths(cwd, kind, record.idempotency_key).includes(path.join(dir, name))) throw new ControllerError('record-conflict', `endereço/identidade inválido: ${name}`);
+    records.set(record.idempotency_key, lookupRecord(cwd, kind, record.idempotency_key));
+  }
+  return [...records.values()];
+}
+
+// Exercise the actual filesystem, rather than assuming MAX_PATH applies to all
+// Windows runtimes. Probes are exclusive, empty and removed before acquisition.
+function preflightPaths(cwd, key, unit, milestone) {
+  const leaseFile = forgeLease.leaseFile(cwd, unit);
+  const lockDir = path.join(cwd, '.gsd', '.locks');
+  // Probe an equally deep private directory, never a reserved mutex name.
+  const mutexProbeDir = path.join(lockDir, `.probe-${crypto.randomUUID()}${'x'.repeat(16)}`);
+  const files = [transactionFile(cwd, key), resultFile(cwd, key), boundaryFile(cwd, unit),
+    leaseFile, path.join(path.dirname(leaseFile), `.${path.basename(leaseFile)}.${process.pid}.${crypto.randomUUID()}.tmp`),
+    eventsFile(cwd, milestone), path.join(mutexProbeDir, `metadata.json.${process.pid}.${crypto.randomUUID()}.tmp`)];
+  for (const file of files) {
+    if (path.resolve(file).split(/[\\/]/).some(component => (process.platform === 'win32' ? component.length : Buffer.byteLength(component)) > 255)) {
+      throw new ControllerError('path-component-limit', 'componente do caminho excede o limite suportado');
+    }
+    const probe = path.join(path.dirname(file), `.probe-${crypto.randomUUID()}${'x'.repeat(Math.max(0, path.basename(file).length - 43))}`);
+    let created = false; let directoryCreated = false; let failure;
+    try {
+      if (path.dirname(file) === mutexProbeDir) {
+        fs.mkdirSync(lockDir, { recursive: true });
+        fs.mkdirSync(mutexProbeDir); directoryCreated = true;
+      } else fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(probe, '', { flag: 'wx' });
+      created = true;
+    } catch (error) {
+      failure = new ControllerError(error.code === 'ENAMETOOLONG' || error.code === 'ENOENT' ? 'path-total-unsupported' : 'path-capability-unknown',
+        'viabilidade do caminho não estabelecida antes da lease', { cause: error.code, path: file });
+      throw failure;
+    } finally {
+      try {
+        if (created) fs.unlinkSync(probe);
+        if (directoryCreated) fs.rmdirSync(mutexProbeDir);
+      } catch (error) {
+        const diagnostic = { code: error.code, path: probe };
+        if (failure) failure.cleanup = diagnostic;
+        else throw new ControllerError('temporary-cleanup-failed', 'cleanup do probe próprio falhou', diagnostic);
+      }
+    }
+  }
+}
+
+function writeAtomic(file, value, raw, options) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
-  const content = raw ? String(value) : `${JSON.stringify(value, null, 2)}\n`;
-  fs.writeFileSync(temporary, content, 'utf8');
-  fs.renameSync(temporary, file);
+  const temporary = path.join(path.dirname(file), `.atomic-${crypto.randomUUID()}.tmp`);
+  const stored = { ...value, ...(options?.legacyRecordChecksum ? { storage_legacy_checksum: options.legacyRecordChecksum } : {}) };
+  const content = raw ? String(value) : `${JSON.stringify({ ...stored, storage_checksum: sha(stored) }, null, 2)}\n`;
+  let created = false; let failure;
+  try {
+    fail(options, 'before-write');
+    const descriptor = fs.openSync(temporary, 'wx'); created = true;
+    try { fs.writeFileSync(descriptor, content, 'utf8'); } finally { fs.closeSync(descriptor); }
+    fail(options, 'after-write-before-rename');
+    fs.renameSync(temporary, file); created = false;
+    fail(options, 'after-rename');
+  } catch (error) { failure = error; throw error; }
+  finally {
+    if (created) {
+      try { fs.unlinkSync(temporary); }
+      catch (error) {
+        const diagnostic = { code: error.code, path: temporary };
+        if (failure) failure.cleanup = diagnostic;
+        else throw new ControllerError('temporary-cleanup-failed', 'cleanup do temporário próprio falhou', diagnostic);
+      }
+    }
+  }
 }
 function readJson(file) {
+  const record = readRecordJson(file);
+  if (!record) return null;
+  const dir = path.dirname(path.resolve(file));
+  const kind = { transactions: 'transaction', results: 'result', boundaries: 'boundary' }[path.basename(dir)];
+  if (kind && path.basename(path.dirname(dir)) === 'forge' && path.basename(path.dirname(path.dirname(dir))) === '.gsd') {
+    const cwd = path.resolve(dir, '../../..');
+    const key = kind === 'boundary' ? record.unit : record.idempotency_key;
+    if (typeof key !== 'string' || !recordPaths(cwd, kind, key).includes(path.resolve(file))) {
+      throw new ControllerError('record-conflict', 'endereço/identidade do registro inválido');
+    }
+    // Observers can inspect incomplete records, but never divergent copies.
+    return lookupRecord(cwd, kind, key, { identityOnly: true });
+  }
+  return record;
+}
+function readRecordJson(file) {
   if (!fs.existsSync(file)) return null;
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (error) { throw new ControllerError('invalid-request', `registro JSON inválido: ${file}`, { cause: error.message }); }
+  try {
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('registro deve ser objeto');
+    if (own(record, 'storage_checksum')) {
+      const checksum = record.storage_checksum; delete record.storage_checksum;
+      if (checksum !== sha(record)) throw new ControllerError('record-conflict', `checksum divergente: ${file}`);
+    }
+    delete record.storage_legacy_checksum;
+    return record;
+  }
+  catch (error) {
+    if (error instanceof ControllerError) throw error;
+    throw new ControllerError('invalid-request', `registro JSON inválido: ${file}`, { cause: error.message });
+  }
 }
 function withMutex(cwd, name, fn) {
   const handle = forgeLock.acquireSync(cwd, name, { retries: 80, ttlMs: 10_000 });
@@ -281,10 +436,7 @@ function transactionKey(input, action, unit) {
   return opaque(explicit, 'idempotency_key', false) || sha(`${action}\u0000${unit.key}\u0000${input.milestone || ''}\u0000${input.request_id || ''}`);
 }
 function pendingTransactions(cwd) {
-  const dir = transactionDir(cwd);
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter(name => name.endsWith('.json')).sort().map(name => readJson(path.join(dir, name)))
-    .filter(record => record && record.phase !== 'committed');
+  return discoverRecords(cwd, 'transaction').filter(record => record.phase !== 'committed');
 }
 function assertLease(cwd, unit, ownerToken, generation) {
   const token = opaque(ownerToken, 'owner_token', true);
@@ -396,24 +548,23 @@ function makeTransaction(cwd, input, action, unit, key, ownerToken, generation, 
   };
 }
 
-function saveTransaction(cwd, transaction, now) {
+function saveTransaction(cwd, transaction, now, options) {
   transaction.updated_at = iso(now);
-  writeAtomic(transactionFile(cwd, transaction.idempotency_key), transaction);
+  saveRecord(cwd, 'transaction', transaction.idempotency_key, transaction, options);
 }
 function setPhase(cwd, transaction, phase, options) {
   transaction.phase = phase;
-  saveTransaction(cwd, transaction, nowOf(options));
+  saveTransaction(cwd, transaction, nowOf(options), options);
   fail(options, `after-${phase}`);
 }
 function publishResult(cwd, record) {
   if (!record) return;
-  const file = resultFile(cwd, record.idempotency_key);
   withMutex(cwd, `unit-controller-result-${sha(record.idempotency_key).slice(0, 32)}`, () => {
-    const existing = readJson(file);
+    const existing = lookupRecord(cwd, 'result', record.idempotency_key);
     if (existing && stableStringify(existing) !== stableStringify(record)) {
       throw new ControllerError('invalid-request', 'idempotency_key já aponta para resultado diferente');
     }
-    if (!existing) writeAtomic(file, record);
+    if (!existing) saveRecord(cwd, 'result', record.idempotency_key, record);
   });
 }
 function readEvents(file) {
@@ -444,13 +595,12 @@ function publishEvent(cwd, milestone, event) {
 }
 function publishBoundary(cwd, boundary) {
   if (!boundary) return;
-  const file = boundaryFile(cwd, boundary.unit);
   withMutex(cwd, `unit-controller-boundary-${sha(boundary.unit).slice(0, 32)}`, () => {
-    const current = readJson(file);
+    const current = lookupRecord(cwd, 'boundary', boundary.unit);
     if (current && current.idempotency_key !== boundary.idempotency_key && current.handoff_ready !== true) {
       throw new ControllerError('transaction-pending', `boundary anterior ainda não está pronta para ${boundary.unit}`);
     }
-    writeAtomic(file, boundary);
+    saveRecord(cwd, 'boundary', boundary.unit, boundary);
   });
 }
 function publishState(cwd, transaction) {
@@ -464,7 +614,7 @@ function publishState(cwd, transaction) {
 function runTransaction(cwd, transaction, ownerToken, generation, options) {
   const phases = new Set(PHASES);
   if (!phases.has(transaction.phase)) throw new ControllerError('invalid-request', `fase de transação desconhecida: ${transaction.phase}`);
-  if (transaction.phase === 'committed') return { ok: true, reason: 'already-committed', transaction: publicTransaction(transaction) };
+  if (transaction.phase === 'committed') return { ok: true, reason: 'already-committed', transaction: publicTransaction(transaction, cwd) };
   // Every phase that can still publish result/event/boundary/STATE is guarded
   // by the exact lease generation.  A recovered or missing lease must never
   // be treated as implicit authorization to finish an old transaction.
@@ -517,9 +667,9 @@ function runTransaction(cwd, transaction, ownerToken, generation, options) {
     setPhase(cwd, transaction, 'boundary-ready', options);
   }
   if (transaction.phase === 'boundary-ready') setPhase(cwd, transaction, 'committed', options);
-  return { ok: true, reason: 'transition-committed', transaction: publicTransaction(transaction) };
+  return { ok: true, reason: 'transition-committed', transaction: publicTransaction(transaction, cwd) };
 }
-function publicTransaction(transaction) {
+function publicTransaction(transaction, cwd) {
   return {
     protocol_version: transaction.protocol_version,
     idempotency_key: transaction.idempotency_key,
@@ -528,14 +678,17 @@ function publicTransaction(transaction) {
     milestone: transaction.milestone,
     host_runtime: transaction.host_runtime,
     phase: transaction.phase,
-    result_ref: transaction.result ? path.basename(resultFile('', transaction.idempotency_key)) : null,
+    result_ref: transaction.result ? path.basename(resultFile(cwd, transaction.idempotency_key)) : null,
     boundary: transaction.boundary ? clone(transaction.boundary) : null,
   };
 }
 
 function begin(cwd, request, options) {
+  resolvePrefs(cwd, options); // reject preferences before even creating a mutex
+  return withMutex(cwd, 'unit-controller-transactions', () => beginInside(cwd, request, options));
+}
+function beginInside(cwd, request, options) {
   const input = object(request, 'request');
-  resolvePrefs(cwd, options); // loud-stop before selection, lease, or transaction files
   const selection = input.unit ? { ok: true, milestone: input.milestone, unit: unitFromRequest(input), slice: input.slice || null }
     : select(cwd, input, options);
   if (!selection.ok) return selection;
@@ -543,10 +696,14 @@ function begin(cwd, request, options) {
   const ownerToken = opaque(input.owner_token === undefined ? input.ownerToken : input.owner_token, 'owner_token', true);
   const hostRuntime = forgeRuntime.normalizeHostRuntime(input.host_runtime === undefined ? input.hostRuntime : input.host_runtime);
   const key = transactionKey(input, 'begin', unit);
-  const existing = readJson(transactionFile(cwd, key));
+  const existing = lookupRecord(cwd, 'transaction', key);
+  if (existing && (existing.unit.key !== unit.key || existing.milestone !== input.milestone || existing.action !== 'begin')) {
+    throw new ControllerError('record-conflict', 'idempotency_key pertence a outra operação');
+  }
   if (existing) return runTransaction(cwd, existing, ownerToken, input.generation, options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de novo begin');
+  preflightPaths(cwd, key, unit.key, input.milestone);
   const acquired = forgeLease.acquire(cwd, unit.key, {
     ownerToken,
     requestId: key,
@@ -557,8 +714,33 @@ function begin(cwd, request, options) {
     now: options && options.now,
   });
   if (!acquired.ok) throw new ControllerError(acquired.reason === 'lease-active' ? 'lease-active' : 'lease-required', `acquire negado: ${acquired.reason}`);
-  const transaction = makeTransaction(cwd, input, 'begin', unit, key, ownerToken, acquired.generation, hostRuntime, nowOf(options));
-  saveTransaction(cwd, transaction, nowOf(options));
+  let transaction;
+  try {
+    fail(options, 'before-make-transaction');
+    transaction = makeTransaction(cwd, input, 'begin', unit, key, ownerToken, acquired.generation, hostRuntime, nowOf(options));
+    saveTransaction(cwd, transaction, nowOf(options), options);
+  } catch (error) {
+    let durable;
+    try {
+      durable = lookupRecord(cwd, 'transaction', key) || lookupRecord(cwd, 'result', key);
+    } catch (inspectionError) {
+      error.reconciliation = { required: true, reason: 'durability-ambiguous', cause: inspectionError.message };
+      throw error;
+    }
+    if (durable || acquired.reason !== 'acquired') {
+      error.reconciliation = { required: true, reason: durable ? 'durable-record' : 'reused-lease' };
+    } else {
+      try {
+        fail(options, 'before-rollback-release');
+        const released = forgeLease.release(cwd, unit.key, ownerToken, acquired.generation, { requestId: key });
+        error.rollback = released;
+        if (!released.ok) error.reconciliation = { required: true, reason: released.reason };
+      } catch (releaseError) {
+        error.reconciliation = { required: true, reason: 'rollback-failed', cause: releaseError.message };
+      }
+    }
+    throw error;
+  }
   fail(options, 'after-intent');
   const output = runTransaction(cwd, transaction, ownerToken, acquired.generation, options);
   output.owner_token = ownerToken;
@@ -567,22 +749,29 @@ function begin(cwd, request, options) {
 }
 
 function transition(cwd, request, options) {
-  const input = object(request, 'request');
   resolvePrefs(cwd, options);
+  const input = object(request, 'request');
+  if (assertAction(input.action) === 'begin') return begin(cwd, input, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => transitionInside(cwd, request, options));
+}
+function transitionInside(cwd, request, options) {
+  const input = object(request, 'request');
   const action = assertAction(input.action);
-  if (action === 'begin') return begin(cwd, input, options);
   const unit = unitFromRequest(input);
   const ownerToken = opaque(input.owner_token === undefined ? input.ownerToken : input.owner_token, 'owner_token', true);
   const generation = opaque(input.generation, 'generation', true);
   const hostRuntime = forgeRuntime.normalizeHostRuntime(input.host_runtime === undefined ? input.hostRuntime : input.host_runtime);
   const key = transactionKey(input, action, unit);
-  const existing = readJson(transactionFile(cwd, key));
+  const existing = lookupRecord(cwd, 'transaction', key);
+  if (existing && (existing.unit.key !== unit.key || existing.milestone !== input.milestone || existing.action !== action)) {
+    throw new ControllerError('record-conflict', 'idempotency_key pertence a outra operação');
+  }
   if (existing) return runTransaction(cwd, existing, ownerToken, generation, options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de nova transição');
   assertLease(cwd, unit.key, ownerToken, generation);
   const transaction = makeTransaction(cwd, input, action, unit, key, ownerToken, generation, hostRuntime, nowOf(options));
-  saveTransaction(cwd, transaction, nowOf(options));
+  saveTransaction(cwd, transaction, nowOf(options), options);
   fail(options, 'after-intent');
   return runTransaction(cwd, transaction, ownerToken, generation, options);
 }
@@ -593,10 +782,13 @@ function failUnit(cwd, request, options) { return transition(cwd, { ...request, 
 function expireSafe(cwd, request, options) { return transition(cwd, { ...request, action: 'expired-safe' }, options); }
 
 function resume(cwd, request, options) {
-  const input = request || {};
   resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => resumeInside(cwd, request, options));
+}
+function resumeInside(cwd, request, options) {
+  const input = request || {};
   const records = input.idempotency_key
-    ? [readJson(transactionFile(cwd, input.idempotency_key))].filter(Boolean)
+    ? [lookupRecord(cwd, 'transaction', input.idempotency_key)].filter(Boolean)
     : pendingTransactions(cwd);
   const results = [];
   for (const record of records) {
@@ -614,10 +806,16 @@ function handoff(cwd, request, options) {
   const nextHost = forgeRuntime.normalizeHostRuntime(input.next_host_runtime === undefined ? input.nextHostRuntime : input.next_host_runtime);
   const pending = pendingTransactions(cwd);
   if (pending.length) throw new ControllerError('transaction-pending', 'handoff negado enquanto há transação incompleta');
-  const boundary = readJson(boundaryFile(cwd, unit.key));
+  const boundary = lookupRecord(cwd, 'boundary', unit.key);
   if (!boundary) throw new ControllerError('boundary-missing', `boundary ausente para ${unit.key}`);
   if (!BOUNDARY_KINDS.includes(boundary.kind) || boundary.handoff_ready !== true || !boundary.committed_at) {
     throw new ControllerError('boundary-not-transferable', `boundary não transferível: ${boundary.kind || 'unknown'}`);
+  }
+  const result = lookupRecord(cwd, 'result', boundary.idempotency_key);
+  const event = readEvents(eventsFile(cwd, boundary.milestone)).find(item => item.idempotency_key === boundary.idempotency_key);
+  const eventContent = event && { ...event }; if (eventContent) delete eventContent.sequence;
+  if (!result || sha(result) !== boundary.result_checksum || !eventContent || sha(eventContent) !== boundary.event_checksum) {
+    throw new ControllerError('record-conflict', 'checksum de resultado/evento da boundary divergente');
   }
   const observation = forgeLease.observe(cwd, unit.key, options || {});
   if (observation.lease) throw new ControllerError('lease-active', 'handoff exige zero lease, inclusive expirado não recuperado');
@@ -647,9 +845,8 @@ function projectLogicalHistory(cwd, milestone) {
     delete copy.ts;
     return copy;
   });
-  const results = fs.existsSync(resultDir(cwd)) ? fs.readdirSync(resultDir(cwd)).filter(name => name.endsWith('.json')).sort()
-    .map(name => readJson(path.join(resultDir(cwd), name))).filter(item => item.milestone === milestone)
-    .map(item => { const copy = { ...item }; delete copy.committed_at; return copy; }) : [];
+  const results = discoverRecords(cwd, 'result').filter(item => item.milestone === milestone)
+    .map(item => { const copy = { ...item }; delete copy.committed_at; return copy; });
   return { state: logicalState(state), events, results };
 }
 
@@ -696,5 +893,6 @@ module.exports = {
   pendingTransactions, projectLogicalHistory, logicalState, resolvePrefs,
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
+  lookupRecord, preflightPaths,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },
 };

@@ -1087,6 +1087,7 @@ function collectRuntimeEvidence(items, notifications, unit) {
  * @returns {Promise<{finalText:string,agentTexts:string,diagnostics:object}>}
  */
 function invokeCodexAppServer(opts) {
+  const telemetryApi = require('./forge-attempt-telemetry');
   // Lazy by contract: agy and every non-execute path must never load the app-server
   // client. Keeping this require here also lets a missing optional client fail only
   // for the transport that needs it.
@@ -1137,6 +1138,10 @@ function invokeCodexAppServer(opts) {
   const threadParams = { approvalPolicy: 'never', ephemeral: true };
   if (model) threadParams.model = model;
 
+  // Context is already final here. The request is measured when the client
+  // supplies the real thread id, immediately before it sends turn/start.
+  telemetryApi.observeFinal(opts, undefined, prompt, 'app-server');
+
   return startAppServerTurn({
     cmd,
     args: prefixArgs,
@@ -1153,6 +1158,7 @@ function invokeCodexAppServer(opts) {
       };
       if (model) params.model = model;
       if (opts.effort) params.effort = opts.effort;
+      telemetryApi.observeFinal(opts, { threadParams, turnParams: params }, prompt, 'app-server');
       return params;
     },
     onSpawn,
@@ -1552,9 +1558,13 @@ function invokeEngine(engine, opts) {
 async function invokeClaudeJson(opts, validateCandidate, review = false) {
   const prompt = opts.prompt + '\n\nReturn only this worker-result block:\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <single-line JSON>\n---END-RESULT---\n'
     + (review ? 'Use {"status":"done","output":<the requested review JSON>} as result_json.' : 'Use the requested result JSON as result_json.');
-  const output = await invokeClaudeSidecar({ ...opts, prompt, readOnly: true,
+  const output = await invokeClaudeTransport({ ...opts, prompt, readOnly: true,
     validateCandidate, terminateChild: terminateOwnedProcessTree });
   return { candidate: output.candidate, telemetry: output.telemetry || null };
+}
+
+function invokeClaudeTransport(options) {
+  return invokeClaudeSidecar(options);
 }
 
 // Claude-only additions to the review legs. codex and agy receive neither the
@@ -2361,8 +2371,8 @@ async function runWriteContractCore(opts, contract) {
   if (opts.executionContext) {
     // Canonical standalone packaging has already budgeted optional standards.
     // Keep research, decisions and the security checklist complete.
-    securityText = opts.executionContext.securityText;
-    contextText = opts.executionContext.contextText;
+    securityText = opts.executionContext.securityText ?? securityText;
+    contextText = opts.executionContext.contextText ?? contextText;
   }
   if (!opts.executionContext && securityText.trim()) securityText = truncateAtSectionBoundary(securityText, SECURITY_BUDGET_CHARS, { mandatory: true, label: 'security-checklist' });
   else if (!opts.executionContext) securityText = '';
@@ -2382,11 +2392,7 @@ async function runWriteContractCore(opts, contract) {
   const inputTokens = countTokens(prompt);
 
   // Persist the actual packaged request before transport, including on failure.
-  if (opts.executionContext && opts.onPackagedContext) opts.onPackagedContext({
-    sha256: require('crypto').createHash('sha256').update(prompt).digest('hex'),
-    bytes: Buffer.byteLength(prompt), input_tokens: inputTokens, token_method: 'heuristic-chars-4',
-    budgets: opts.executionContext.budgets,
-  });
+  // Final capture belongs to the adapter, after transport-specific framing.
 
   // Initial heartbeat — pid unknown until the child spawns.
   writeJsonAtomic(resultFile, {
@@ -2431,7 +2437,9 @@ async function runWriteContractCore(opts, contract) {
   if (engine === 'claude') {
     let claudeOutput;
     try {
-      claudeOutput = await invokeClaudeSidecar({
+      claudeOutput = await invokeClaudeTransport({
+        onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
+        telemetryRoute: opts.telemetryRoute, budgets: opts.executionContext?.budgets || opts.budgets,
         prompt,
         cwd,
         model: opts.model,
@@ -2466,6 +2474,8 @@ async function runWriteContractCore(opts, contract) {
     outputTokens = countTokens(JSON.stringify(parsed));
   } else {
     appServerOutput = await invokeCodexAppServer({
+      onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
+      telemetryRoute: opts.telemetryRoute, budgets: opts.executionContext?.budgets || opts.budgets,
       prompt,
       schema: contract.schema,
       cwd,
@@ -2729,6 +2739,8 @@ async function runPlanCore(opts) {
   // transport off this result file, so omitting it would make every plan-slice
   // dispatch report `no-transport-field` forever.
   const planOptions = {
+    onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
+    telemetryRoute: opts.telemetryRoute, budgets: opts.budgets,
     prompt,
     schema: planSchema,
     cwd,
@@ -2875,6 +2887,7 @@ module.exports = {
   buildAppServerSandboxPolicy,
   capabilityToSandboxMode,
   invokeCodexAppServer,
+  invokeClaudeTransport,
   collectRuntimeEvidence,
   readTurnStatus,
   assertSafeForCmdShell,

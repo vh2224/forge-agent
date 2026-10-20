@@ -255,6 +255,255 @@ function testProviderProjectionIsNeutral() {
   assert.deepStrictEqual(run('claude'), run('codex'));
 }
 
+function legacyFile(cwd, kind, key) {
+  const dir = kind === 'transaction' ? controller.transactionDir(cwd) : kind === 'result' ? controller.resultDir(cwd) : controller.boundaryDir(cwd);
+  return path.join(dir, `${Buffer.from(key).toString('base64url')}.json`);
+}
+
+function testBoundedNamesAndLongKeys() {
+  for (const key of ['k'.repeat(156), 'k'.repeat(900), '測'.repeat(500)]) {
+    const fixture = setup();
+    try {
+      const oldName = path.basename(legacyFile(fixture.cwd, 'transaction', key));
+      if (key.length === 156) {
+        assert.strictEqual(oldName.length, 213);
+        assert.strictEqual(`.${oldName}.12345.${'u'.repeat(36)}.tmp`.length, 261);
+      } else assert(oldName.length > 255);
+      const unit = `execute-task/${'u'.repeat(700)}`;
+      let captured;
+      assert.throws(() => controller.begin(fixture.cwd, request(fixture, { unit, idempotency_key: key }), {
+        prefsReader, failpoint: name => { if (name === 'after-intent') { captured = lease.readLease(lease.leaseFile(fixture.cwd, unit)).record; return true; } return false; },
+      }), /failpoint/);
+      const record = controller.readJson(controller.transactionFile(fixture.cwd, key));
+      assert.strictEqual(record.idempotency_key, key);
+      assert.strictEqual(record.unit.key, unit);
+      assert.strictEqual(controller.resume(fixture.cwd, { owner_token: captured.owner_token, generation: captured.generation }, { prefsReader }).recovered, 1);
+      controller.complete(fixture.cwd, request(fixture, { unit, idempotency_key: `${key}-done`, generation: captured.generation, result: { output: { sentinel: key } } }), { prefsReader });
+      const result = controller.lookupRecord(fixture.cwd, 'result', `${key}-done`);
+      assert.strictEqual(result.output.sentinel, key);
+      assert.strictEqual(controller.handoff(fixture.cwd, { unit, next_host_runtime: 'codex' }, { prefsReader }).ok, true);
+      for (const dir of [controller.transactionDir(fixture.cwd), controller.resultDir(fixture.cwd), controller.boundaryDir(fixture.cwd), lease.leasesDir(fixture.cwd), path.join(fixture.cwd, '.gsd', '.locks')]) {
+        for (const name of fs.readdirSync(dir)) { assert(name.length < 160, name); assert(!name.endsWith('.tmp')); }
+      }
+      assert.strictEqual(controller.resume(fixture.cwd, { idempotency_key: `${key}-done` }, { prefsReader }).results[0].reason, 'already-committed');
+      assert.strictEqual(controller.readEvents(controller.eventsFile(fixture.cwd, fixture.milestone)).length, 2);
+    } finally { cleanup(fixture.cwd); }
+  }
+}
+
+function testLegacyLookupAndConflicts() {
+  const fixture = setup();
+  try {
+    const key = 'old-request'; let generation;
+    assert.throws(() => controller.begin(fixture.cwd, request(fixture, { idempotency_key: key }), { prefsReader, failpoint: name => name === 'after-intent' }), /failpoint/);
+    generation = controller.readJson(controller.transactionFile(fixture.cwd, key)).lease_generation;
+    const modern = controller.transactionFile(fixture.cwd, key); const legacy = legacyFile(fixture.cwd, 'transaction', key);
+    const record = controller.readJson(modern); fs.writeFileSync(legacy, JSON.stringify(record)); fs.unlinkSync(modern);
+    assert.strictEqual(controller.transactionFile(fixture.cwd, key), legacy, 'public path/readJson callers resolve legacy records');
+    assert.strictEqual(controller.readJson(controller.transactionFile(fixture.cwd, key)).idempotency_key, key);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 1);
+    controller.resume(fixture.cwd, { idempotency_key: key, owner_token: 'owner-a', generation }, { prefsReader });
+    assert.strictEqual(fs.existsSync(modern), false, 'legacy is not destructively migrated');
+    const done = controller.complete(fixture.cwd, request(fixture, { generation, idempotency_key: 'old-complete' }), { prefsReader });
+    for (const [kind, identity, file] of [
+      ['result', 'old-complete', controller.resultFile(fixture.cwd, 'old-complete')],
+      ['boundary', request(fixture).unit, controller.boundaryFile(fixture.cwd, request(fixture).unit)],
+    ]) {
+      const previous = controller.readJson(file);
+      fs.writeFileSync(legacyFile(fixture.cwd, kind, identity), JSON.stringify(previous)); fs.unlinkSync(file);
+    }
+    assert.strictEqual(controller.handoff(fixture.cwd, { unit: request(fixture).unit, next_host_runtime: 'codex' }, { prefsReader }).ok, true);
+    assert.strictEqual(controller.projectLogicalHistory(fixture.cwd, fixture.milestone).results.length, 1);
+    fs.writeFileSync(modern, fs.readFileSync(legacy));
+    assert.strictEqual(controller.resume(fixture.cwd, { idempotency_key: key }, { prefsReader }).recovered, 1);
+    const altered = controller.readJson(legacy); altered.host_runtime = 'codex'; fs.writeFileSync(legacy, JSON.stringify(altered));
+    const before = fs.readFileSync(modern);
+    assert.throws(() => controller.resume(fixture.cwd, { idempotency_key: key }, { prefsReader }), /record-conflict/);
+    assert.deepStrictEqual(fs.readFileSync(modern), before);
+    assert.throws(() => controller.pendingTransactions(fixture.cwd), /record-conflict/);
+    assert.throws(() => controller.readJson(controller.transactionFile(fixture.cwd, key)), /record-conflict/, 'direct readers refuse divergent records too');
+    assert.strictEqual(controller.readEvents(controller.eventsFile(fixture.cwd, fixture.milestone)).length, 2);
+    assert.strictEqual(done.ok, true);
+  } finally { cleanup(fixture.cwd); }
+}
+
+function testInterruptedDualRecordPublication() {
+  const fixture = setup();
+  try {
+    const key = 'interrupted-dual-record';
+    assert.throws(() => controller.begin(fixture.cwd, request(fixture, { idempotency_key: key }),
+      { prefsReader, failpoint: name => name === 'after-intent' }), /failpoint/);
+    const modern = controller.transactionFile(fixture.cwd, key);
+    const legacy = legacyFile(fixture.cwd, 'transaction', key);
+    fs.copyFileSync(modern, legacy);
+    const oldBytes = fs.readFileSync(legacy);
+    const generation = controller.readJson(modern).lease_generation;
+    assert.throws(() => controller.resume(fixture.cwd, { idempotency_key: key, owner_token: 'owner-a', generation },
+      { prefsReader, failpoint: name => name === 'after-rename' }), /failpoint/);
+    assert.deepStrictEqual(fs.readFileSync(legacy), oldBytes, 'only modern is published');
+    assert.strictEqual(controller.readJson(modern).idempotency_key, key, 'interrupted publication remains readable');
+    assert.strictEqual(controller.resume(fixture.cwd, { idempotency_key: key, owner_token: 'owner-a', generation },
+      { prefsReader }).recovered, 1);
+    assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 0);
+    const foreign = JSON.parse(oldBytes); foreign.host_runtime = 'foreign'; delete foreign.storage_checksum;
+    fs.writeFileSync(legacy, JSON.stringify(foreign));
+    assert.throws(() => controller.readJson(modern), /record-conflict/);
+  } finally { cleanup(fixture.cwd); }
+}
+
+function testChecksumsAndAddressCollisions() {
+  const fixture = setup();
+  try {
+    const first = controller.begin(fixture.cwd, request(fixture, { idempotency_key: 'identity' }), { prefsReader });
+    assert.throws(() => controller.begin(fixture.cwd, request(fixture, { unit: 'execute-task/T99', idempotency_key: 'identity' }), { prefsReader }), /record-conflict/);
+    const file = controller.transactionFile(fixture.cwd, 'identity');
+    const bytes = fs.readFileSync(file); const forged = JSON.parse(bytes); forged.action = 'complete'; fs.writeFileSync(file, JSON.stringify(forged));
+    assert.throws(() => controller.resume(fixture.cwd, { idempotency_key: 'identity' }, { prefsReader }), /checksum/);
+    fs.writeFileSync(file, bytes);
+    const foreign = controller.readJson(file); foreign.idempotency_key = 'foreign'; fs.writeFileSync(file, JSON.stringify(foreign));
+    assert.throws(() => controller.resume(fixture.cwd, { idempotency_key: 'identity' }, { prefsReader }), /record-conflict/);
+    assert.strictEqual(lease.observe(fixture.cwd, request(fixture).unit).lease.generation, first.generation);
+  } finally { cleanup(fixture.cwd); }
+}
+
+function testObservationalPathCompatibility() {
+  const fixture = setup();
+  try {
+    const key = 'observed-partial';
+    const modern = controller.transactionFile(fixture.cwd, key);
+    const legacy = legacyFile(fixture.cwd, 'transaction', key);
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    const observation = { idempotency_key: key, phase: 'intent', unit: { key: request(fixture).unit } };
+    fs.writeFileSync(legacy, JSON.stringify(observation));
+    assert.strictEqual(controller.transactionFile(fixture.cwd, key), legacy);
+    assert.deepStrictEqual(controller.readJson(controller.transactionFile(fixture.cwd, key)), observation);
+    assert.throws(() => controller.resume(fixture.cwd, { idempotency_key: key }, { prefsReader }), /record-conflict/, 'observation never authorizes replay');
+    fs.writeFileSync(modern, JSON.stringify({ ...observation, phase: 'committed' }));
+    assert.throws(() => controller.readJson(controller.transactionFile(fixture.cwd, key)), /record-conflict/);
+  } finally { cleanup(fixture.cwd); }
+}
+
+function testFirstPersistenceRollbackAndDurableReplay() {
+  for (const point of ['before-make-transaction', 'before-write', 'after-write-before-rename', 'after-rename', 'after-result-published']) {
+    const fixture = setup();
+    try {
+      let error;
+      try { controller.begin(fixture.cwd, request(fixture, { idempotency_key: 'fault' }), { prefsReader, failpoint: name => name === point }); } catch (caught) { error = caught; }
+      assert(error, point);
+      const durable = ['after-rename', 'after-result-published'].includes(point);
+      const held = lease.readLease(lease.leaseFile(fixture.cwd, request(fixture).unit)).record;
+      assert.strictEqual(!!held, durable, point);
+      assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, durable ? 1 : 0);
+      assert(!fs.readdirSync(controller.transactionDir(fixture.cwd)).some(name => name.endsWith('.tmp')));
+      if (durable) controller.resume(fixture.cwd, { owner_token: held.owner_token, generation: held.generation }, { prefsReader });
+      else assert.strictEqual(error.rollback.reason, 'released');
+      const repeated = controller.begin(fixture.cwd, request(fixture, { idempotency_key: 'fault', generation: held && held.generation }), { prefsReader });
+      assert.strictEqual(repeated.ok, true);
+      assert.strictEqual(controller.readEvents(controller.eventsFile(fixture.cwd, fixture.milestone)).length, 1);
+    } finally { cleanup(fixture.cwd); }
+  }
+}
+
+function testRollbackPreservesReusedChangedAndAmbiguousLeases() {
+  for (const scenario of ['reused', 'request', 'generation', 'owner', 'ambiguous', 'release-fails']) {
+    const fixture = setup();
+    try {
+      const unit = request(fixture).unit;
+      if (scenario === 'reused') lease.acquire(fixture.cwd, unit, { ownerToken: 'owner-a', requestId: 'fault', hostRuntime: 'claude' });
+      let original; let caught;
+      try {
+        controller.begin(fixture.cwd, request(fixture, { idempotency_key: 'fault' }), { prefsReader, failpoint: name => {
+          if (name === 'before-make-transaction') {
+            original = lease.readLease(lease.leaseFile(fixture.cwd, unit)).record;
+            if (['request', 'generation', 'owner'].includes(scenario)) {
+              const child = spawnSync(process.execPath, ['-e', `
+                const fs = require('fs'); const lease = require(process.argv[4]); const lock = require(process.argv[5]);
+                const handle = lock.acquireSync(process.argv[1], lease.mutexName(process.argv[2]), { allowStaleRecovery: false });
+                try {
+                  const file = lease.leaseFile(process.argv[1], process.argv[2]); const next = JSON.parse(fs.readFileSync(file, 'utf8'));
+                  next[process.argv[3] === 'request' ? 'request_id' : process.argv[3] === 'owner' ? 'owner_token' : 'generation'] = 'successor';
+                  fs.writeFileSync(file, JSON.stringify(next));
+                } finally { handle.release(); }
+              `, fixture.cwd, unit, scenario, path.join(__dirname, 'forge-unit-lease.js'), path.join(__dirname, 'forge-lock.js')], { encoding: 'utf8', timeout: 5000 });
+              assert.strictEqual(child.status, 0, child.stderr);
+            }
+            if (scenario === 'ambiguous') fs.writeFileSync(controller.transactionFile(fixture.cwd, 'fault'), '{');
+            if (scenario !== 'release-fails') return true;
+          }
+          return scenario === 'release-fails' && ['before-write', 'before-rollback-release'].includes(name);
+        } });
+      } catch (error) { caught = error; }
+      assert(caught && caught.reconciliation && caught.reconciliation.required, scenario);
+      const held = lease.readLease(lease.leaseFile(fixture.cwd, unit)).record;
+      assert(held, scenario);
+      assert.strictEqual(held[scenario === 'request' ? 'request_id' : scenario === 'owner' ? 'owner_token' : 'generation'],
+        ['request', 'generation', 'owner'].includes(scenario) ? 'successor' : original.generation);
+    } finally { cleanup(fixture.cwd); }
+  }
+}
+
+function testFilesystemPersistenceFailures() {
+  for (const operation of ['partial-write', 'rename']) {
+    const fixture = setup();
+    const write = fs.writeFileSync; const rename = fs.renameSync;
+    try {
+      fs.writeFileSync = (file, content, ...args) => {
+        if (operation === 'partial-write' && typeof file === 'number') {
+          write(file, String(content).slice(0, 12));
+          throw Object.assign(new Error('fixture partial write'), { code: 'EIO' });
+        }
+        return write(file, content, ...args);
+      };
+      fs.renameSync = (source, target) => {
+        if (operation === 'rename' && path.basename(source).startsWith('.atomic-')) throw Object.assign(new Error('fixture rename'), { code: 'EIO' });
+        return rename(source, target);
+      };
+      assert.throws(() => controller.begin(fixture.cwd, request(fixture, { idempotency_key: 'filesystem-fault' }), { prefsReader }), error => error.code === 'EIO' && error.rollback.reason === 'released');
+      assert.strictEqual(lease.observe(fixture.cwd, request(fixture).unit).lease, null);
+      assert.strictEqual(controller.pendingTransactions(fixture.cwd).length, 0);
+      assert(!fs.readdirSync(controller.transactionDir(fixture.cwd)).some(name => name.endsWith('.tmp')));
+      fs.writeFileSync = write; fs.renameSync = rename;
+      assert.strictEqual(controller.begin(fixture.cwd, request(fixture, { idempotency_key: 'filesystem-fault' }), { prefsReader }).ok, true);
+      assert.strictEqual(controller.readEvents(controller.eventsFile(fixture.cwd, fixture.milestone)).length, 1);
+    } finally { fs.writeFileSync = write; fs.renameSync = rename; cleanup(fixture.cwd); }
+  }
+}
+
+function testOwnTemporaryCleanupAndPathDiagnostics() {
+  const fixture = setup();
+  try {
+    const file = controller.transactionFile(fixture.cwd, 'cleanup');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const foreign = path.join(path.dirname(file), '.atomic-foreign.tmp'); fs.writeFileSync(foreign, 'preserve');
+    const unlink = fs.unlinkSync;
+    try {
+      fs.unlinkSync = target => { if (String(target).includes('.atomic-') && target !== foreign) throw Object.assign(new Error('fixture denied'), { code: 'EACCES' }); return unlink(target); };
+      assert.throws(() => controller.writeAtomic(file, { value: 1 }, false, { failpoint: name => name === 'after-write-before-rename' }), error => error.cleanup && error.cleanup.code === 'EACCES');
+    } finally { fs.unlinkSync = unlink; }
+    assert.strictEqual(fs.readFileSync(foreign, 'utf8'), 'preserve');
+    assert.throws(() => controller.preflightPaths(fixture.cwd, 'x', 'execute-task/T01', 'm'.repeat(256)), error => error.code === 'path-component-limit');
+    const mkdir = fs.mkdirSync;
+    try {
+      fs.mkdirSync = () => { throw Object.assign(new Error('fixture total'), { code: 'ENAMETOOLONG' }); };
+      assert.throws(() => controller.preflightPaths(fixture.cwd, 'x', 'execute-task/T01', fixture.milestone), error => error.code === 'path-total-unsupported');
+    } finally { fs.mkdirSync = mkdir; }
+    const write = fs.writeFileSync; const acquire = lease.acquire; let acquired = false;
+    try {
+      fs.writeFileSync = (file, ...args) => {
+        if (typeof file === 'string' && path.basename(file).startsWith('.probe-')) throw Object.assign(new Error('fixture path unsupported'), { code: 'ENAMETOOLONG' });
+        return write(file, ...args);
+      };
+      lease.acquire = (...args) => { acquired = true; return acquire(...args); };
+      assert.throws(() => controller.begin(fixture.cwd, request(fixture, { idempotency_key: 'bad-total-path' }), { prefsReader }), error => error.code === 'path-total-unsupported');
+      assert.strictEqual(acquired, false, 'observed path failure precedes lease acquisition');
+    } finally { fs.writeFileSync = write; lease.acquire = acquire; }
+    const deep = path.join(fixture.cwd, ...Array(8).fill('long-directory-name'.repeat(3)));
+    controller.preflightPaths(deep, 'x', 'execute-task/T01', fixture.milestone);
+    assert.strictEqual(lease.observe(fixture.cwd, 'execute-task/T01').lease, null);
+    console.log(`path diagnostics: component and observed total failure distinct; actual >260 preflight supported on ${process.platform}`);
+  } finally { cleanup(fixture.cwd); }
+}
+
 function main() {
   console.log(`forge-unit-controller tests on ${process.platform}`);
   test('pure deterministic selection', testPureSelection);
@@ -268,6 +517,15 @@ function main() {
   test('single result and event publication', testResultAndEventAreSinglePublication);
   test('legacy fixture remains readable', testLegacyFixtureRemainsReadable);
   test('Claude/Codex logical projection is neutral', testProviderProjectionIsNeutral);
+  test('bounded names reproduce 213/261 and oversized legacy destinations', testBoundedNamesAndLongKeys);
+  test('legacy lookup, discovery, result/boundary handoff and divergence refusal', testLegacyLookupAndConflicts);
+  test('interrupted modern/legacy publication resumes with one authority', testInterruptedDualRecordPublication);
+  test('checksums and identity collisions fail closed', testChecksumsAndAddressCollisions);
+  test('public path helpers preserve observation without authorizing partial replay', testObservationalPathCompatibility);
+  test('first persistence rollback and durable replay before/after rename', testFirstPersistenceRollbackAndDurableReplay);
+  test('rollback preserves reused, changed and ambiguous leases', testRollbackPreservesReusedChangedAndAmbiguousLeases);
+  test('partial filesystem write and failed rename leave no lease or own temporary', testFilesystemPersistenceFailures);
+  test('own temporary cleanup and distinct path capability diagnostics', testOwnTemporaryCleanupAndPathDiagnostics);
   console.log('forge-unit-controller tests passed');
 }
 main();

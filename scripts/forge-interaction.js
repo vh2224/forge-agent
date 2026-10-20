@@ -78,4 +78,10 @@ function persistQuestionState(file, identity, questions, answers = []) {
   require('./forge-surgical-reset').writeJsonAtomic(file, next);
   return rows;
 }
-module.exports = { START, END, contract, renderBlock, project, sync, mergePendingQuestions, resolvePendingQuestions, persistQuestionState };
+// This factory is an embedding boundary for a live host adapter. Imported
+// consent/flags are never callbacks and never resolve functional questions.
+function createRecoveryAuthorizationAdapter(attestAuthorization, dependencies = {}) {
+  if (typeof attestAuthorization !== 'function') throw new Error('recovery-host-attestation-required');
+  return require('./forge-recovery-authority').createRecoveryAuthority({ ...dependencies, attestAuthorization });
+}
+module.exports = { START, END, contract, renderBlock, project, sync, mergePendingQuestions, resolvePendingQuestions, persistQuestionState, createRecoveryAuthorizationAdapter };

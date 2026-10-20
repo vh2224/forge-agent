@@ -245,7 +245,9 @@ function buildPreparationPrompt(request, contract = request.contract || phaseCon
 }
 
 function resolverOptions(request, contract) {
-  const options = { cwd: request.contextRoot || request.cwd, unitType: contract.unitType, hostRuntime: request.hostRuntime };
+  const options = { cwd: request.contextRoot || request.cwd, unitType: contract.unitType, hostRuntime: request.hostRuntime,
+    scope: request.scope, phase: request.phase, unitId: request.taskId, taskId: request.taskId,
+    planPath: request.planFile, roadmapPath: request.roadmapFile };
   for (const [wire, camel] of [['worker_mode', 'workerMode'], ['worker_engine', 'workerEngine'],
     ['sidecar_declared', 'sidecarDeclared']]) {
     if (Object.prototype.hasOwnProperty.call(request, camel)) options[camel] = request[camel];
@@ -308,6 +310,7 @@ function nativeTaskName(request) {
 
 function nativeOptions(request, route, prompt, contract = request.contract || phaseContract(request.phase)) {
   return {
+    telemetryIdentity: request, telemetryRoute: route, budgets: request.budgets || {},
     hostRuntime: request.hostRuntime, resolvedDispatch: route,
     activeCapabilities: request.activeCapabilities,
     effortBinding: request.effortBinding, readback: request.readback,
@@ -359,7 +362,7 @@ function replayedFailure(receipt) {
   const originalDiagnostic = adapterDiagnostic(failure.diagnostic);
   return { ok: false, action: 'stop', status: 'failure',
     reason_code: failure.reason_code || 'artifact-attempt-failed',
-    provider_called: false, original_provider_called: failure.provider_called === true,
+    provider_called: false, original_provider_called: typeof failure.provider_called === 'boolean' ? failure.provider_called : 'unknown',
     replayed: true, ...(receipt.route ? { route: receipt.route } : {}),
     ...(originalDiagnostic ? { original_diagnostic: originalDiagnostic } : {}),
     diagnostic: diagnostic('replay', 'recorded-failure') };
@@ -427,6 +430,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   }
   const prompt = buildPreparationPrompt(request);
   const delivery = deliveryRequest(request, route, prompt);
+  const authorizationReference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
   if (route.worker_mode === 'sidecar') {
     return { ok: true, action: 'invoke-sidecar', transport: 'sidecar', status: 'ready',
       reason_code: 'sidecar-invocation-ready', provider_called: false, route, delivery_request: delivery };
@@ -437,6 +441,7 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   try {
     const replay = await unit.replayArtifactAttempt(delivery);
     if (replay.replayed) return completed('native', route, replay);
+    if (authorizationReference) persistAuthorization(delivery, authorizationReference);
   } catch (error) {
     return refused(error.code === 'dispatch-identity-conflict' ? 'validation' : 'publication',
       error.code || 'preparation-attempt-failed', route, false);
@@ -444,6 +449,12 @@ async function startStandaloneTaskPreparationCore(rawRequest, deps = {}) {
   return { ok: true, action: 'invoke-native', transport: 'native', status: 'ready',
     reason_code: invocation.reason_code, provider_called: false, route,
     invocation: { tool: invocation.tool, args: invocation.args, telemetry: invocation.telemetry } };
+}
+function persistAuthorization(delivery, reference) {
+  const file = unit.artifactAttemptFiles(delivery).receiptFile;
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (record.fingerprint !== unit.artifactFingerprint(delivery)) throw preparationError('dispatch-identity-conflict', 'validation');
+  fs.writeFileSync(file, JSON.stringify({ ...record, authorization_reference: reference }, null, 2) + '\n');
 }
 
 function preparationIdentity(request, route = {}) {
@@ -549,7 +560,7 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
       const failure = acceptance.nativeFailure;
       if (!failure || typeof failure !== 'object' || Array.isArray(failure)
           || typeof failure.reason_code !== 'string' || !/^[a-z0-9-]{1,80}$/.test(failure.reason_code)
-          || typeof failure.provider_called !== 'boolean') {
+          || ![true, false, 'unknown'].includes(failure.provider_called)) {
         throw preparationError('native-preparation-failure-invalid', 'native');
       }
       const files = unit.artifactAttemptFiles(delivery);
@@ -559,18 +570,18 @@ async function acceptStandaloneTaskPreparation(rawRequest, acceptance) {
         throw preparationError('dispatch-identity-conflict', 'validation');
       }
       if (receipt.phase !== 'started') throw preparationError('artifact-attempt-not-started', 'native');
-      if (failure.provider_called) validateNativeTelemetry(failure.telemetry,
+      if (failure.provider_called === true) validateNativeTelemetry(failure.telemetry,
         expectedNativeTelemetry(request, route, prompt));
       unit.failArtifactAttempt(delivery, failure.reason_code,
-        failure.provider_called ? 'provider-exit' : 'adapter-failed', failure.provider_called);
-      return refused(failure.provider_called ? 'provider' : 'native', failure.reason_code, route, failure.provider_called);
+        failure.provider_called === true ? 'provider-exit' : 'adapter-failed', failure.provider_called, failure.final_evidence);
+      return refused(failure.provider_called === true ? 'provider' : 'native', failure.reason_code, route, failure.provider_called);
     }
     telemetry = validateNativeTelemetry(acceptance.invocationTelemetry,
       expectedNativeTelemetry(request, route, prompt));
     if (acceptance.providerCalled !== true) throw preparationError('artifact-provider-call-unconfirmed', 'provider');
     const candidate = candidateFromPreparationResult(acceptance.rawResult, delivery);
     const accepted = await unit.acceptArtifactResult(delivery, candidate,
-      { telemetry, providerCalled: true, enforceReadOnlySurface: true,
+      { telemetry, finalEvidence: acceptance.finalEvidence, providerCalled: true, enforceReadOnlySurface: true,
         maxPayloadBytes: unit.MAX_ARTIFACT_PAYLOAD_BYTES });
     return completed('native', route, accepted);
   } catch (error) {
@@ -591,7 +602,7 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
   if (started.action === 'invoke-sidecar') {
     if (!deps.invokeSidecar) {
       try {
-        const result = await unit.runUnitSidecar(started.delivery_request, { announce: deps.announce });
+        const result = await unit.runUnitSidecar(started.delivery_request, { announce: deps.announce, recoveryAuthorization: deps.recoveryAuthorization });
         return completed('sidecar', started.route, { result, provider_called: true });
       } catch (error) {
         const providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown';
@@ -609,9 +620,12 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         deps.announce?.('reaproveitado', { ...preparationIdentity(request, started.route), provider_called: false });
         return completed('sidecar', started.route, replay);
       }
+      const reference = require('./forge-attempt-recovery').bindRecoveryAuthorization(deps.recoveryAuthorization);
+      if (reference) persistAuthorization(started.delivery_request, reference);
       deps.announce?.('solicitado', { ...preparationIdentity(request, started.route), provider_called: false });
-      providerCalled = true;
+      providerCalled = 'unknown';
       const rawResult = await deps.invokeSidecar(started.delivery_request, started);
+      providerCalled = true;
       const candidate = candidateFromPreparationResult(rawResult, started.delivery_request);
       const accepted = await unit.acceptArtifactResult(started.delivery_request, candidate,
         { providerCalled: true, telemetry: { model_requested: started.route.model_requested ?? null,
@@ -628,20 +642,23 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
     }
   }
-  let providerCalled = false;
   const options = nativeOptions(request, started.route, buildPreparationPrompt(request));
-  const native = await nativeApi.invokeNative(options, async (...args) => {
-    providerCalled = true;
-    return deps.invokeNative(...args);
-  });
+  const nativeDelivery = deliveryRequest(request, started.route, buildPreparationPrompt(request));
+  options.onPackagedContext = packaged => {
+    const files = unit.artifactAttemptFiles(nativeDelivery);
+    const saved = readJson(files.receiptFile);
+    fs.writeFileSync(files.receiptFile, JSON.stringify({ ...saved, final_evidence: packaged.final_evidence }, null, 2) + '\n');
+  };
+  const native = await nativeApi.invokeNative(options, deps.invokeNative);
   if (!native.ok) {
     const code = native.reason_code || 'native-invocation-failed';
     const delivery = deliveryRequest(request, started.route, buildPreparationPrompt(request));
-    unit.failArtifactAttempt(delivery, code, providerCalled ? 'provider-exit' : 'adapter-failed', providerCalled);
-    return refused(providerCalled ? 'provider' : 'native', code, started.route, providerCalled);
+    unit.failArtifactAttempt(delivery, code, native.provider_called === true ? 'provider-exit' : 'adapter-failed',
+      native.provider_called, native.final_evidence);
+    return refused(native.provider_called === true ? 'provider' : 'native', code, started.route, native.provider_called);
   }
   return acceptStandaloneTaskPreparation(rawRequest, { route: started.route, rawResult: native.result,
-    invocationTelemetry: native.telemetry, providerCalled: true });
+    invocationTelemetry: native.telemetry, finalEvidence: native.final_evidence, providerCalled: true });
 }
 
 function readJson(filename) {
@@ -650,16 +667,29 @@ function readJson(filename) {
 async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
   const request = validateRequest(rawRequest);
   const prompt = buildPreparationPrompt(request);
-  return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
+  const receipt = JSON.parse(fs.readFileSync(recovery.receiptFile, 'utf8'));
+  const delivery = deliveryRequest(request, receipt.route, prompt);
+  return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request: delivery,
+    recoveryAuthorization: deps.recoveryAuthorization, processProbe: deps.processProbe,
     unit: `${request.contract.unitType}/${request.taskId}`, executionContract: request.execution_contract,
     validateCorrection: async () => {
       validateRequest(request);
-      return { ok: true, evidence_reference: `preparation-preflight:${crypto.createHash('sha256').update(prompt).digest('hex')}` };
+      if (receipt.route.worker_mode === 'native') {
+        const invocation = nativeApi.buildNativeInvocation(nativeOptions(request, validateRoute(receipt.route, request.contract, request), prompt));
+        if (!invocation.ok) return invocation;
+        return { ok: true, evidence_reference: 'preparation-preflight:native-arguments',
+          final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
+            context: invocation.args.prompt || invocation.args.message, identity: delivery, route: receipt.route,
+            model: receipt.route.model, effort: receipt.route.effort, transport: 'native-tool' }) };
+      }
+      if (typeof deps.validateCorrection !== 'function') return { ok: false, reason_code: 'recovery-final-packaging-required' };
+      return deps.validateCorrection(delivery, prompt);
     },
     resolverOptions: resolverOptions(request, request.contract), resolveDispatch: deps.resolveDispatch,
     validateInvocation: route => route.worker_mode === 'native'
       ? nativeApi.buildNativeInvocation(nativeOptions(request, validateRoute(route, request.contract, request), prompt))
-      : { ok: transportApi.capability(route.resolved_worker_engine, request.contract.unitType, request).supported },
+      : (() => { const cap = transportApi.capability(route.resolved_worker_engine, request.contract.unitType, request);
+        return { ok: cap.supported, reason_code: cap.reason_code }; })(),
     replay: async receipt => {
       const delivery = deliveryRequest(request, receipt.route, prompt);
       if (receipt.phase === 'failed' && receipt.saved_candidate) {

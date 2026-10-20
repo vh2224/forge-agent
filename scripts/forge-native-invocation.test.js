@@ -489,6 +489,25 @@ async function main() {
   assert.strictEqual(fs.readFileSync(plainBinding.agentPath, 'utf8'), before, 'preflight never rewrites the binding');
   fs.rmSync(policyDir, { recursive: true, force: true });
 
+  const options = { hostRuntime: 'codex', resolvedDispatch: dispatch('gpt-6-luna', 'medium', 'codex'),
+    activeCapabilities: codexCapabilities, agentType: 'forge-worker', prompt: 'Fixture only.', forkTurns: 'none' };
+  assert.strictEqual((await invokeNative(options)).provider_called, false);
+  let refusedCalls = 0;
+  const unsupported = await invokeNative({ ...options, activeCapabilities: { ...codexCapabilities, models: [] } },
+    () => { refusedCalls++; });
+  assert.strictEqual(unsupported.provider_called, false); assert.strictEqual(refusedCalls, 0);
+  const unknown = await invokeNative(options, () => { throw Object.assign(Error('secret fixture'), { code: 'host-timeout' }); });
+  assert.strictEqual(unknown.provider_called, 'unknown');
+  assert.deepStrictEqual(unknown.diagnostic, { reason_code: 'host-timeout', layer: 'native-tool' });
+  assert(!JSON.stringify(unknown).includes('secret fixture'));
+  for (const rejection of [null, undefined, 'secret rejection', 42, false]) {
+    const failed = await invokeNative(options, () => Promise.reject(rejection));
+    assert.strictEqual(failed.ok, false);
+    assert.strictEqual(failed.reason_code, 'native-invocation-failed');
+    assert.strictEqual(failed.provider_called, 'unknown');
+    assert.strictEqual(failed.final_evidence.stage, 'invoked');
+    assert(!JSON.stringify(failed).includes('secret rejection'));
+  }
   process.stdout.write('forge-native-invocation: ok\n');
 }
 

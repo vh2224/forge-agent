@@ -771,6 +771,10 @@ async function invokeClaudeSidecar(opts) {
       '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
       ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
       '-p', instruction];
+    // Observe the actual CLI packaging, after instruction/argv construction.
+    // Account credentials exist only in env and never enter this measurement.
+    require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
+      fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
     const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
     const { observedModel, ...output } = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,

@@ -343,12 +343,19 @@ function preflightNativeBinding(options) {
 }
 
 async function invokeNative(options, invoke) {
+  const started = Date.now();
+  const telemetryApi = require('./forge-attempt-telemetry');
   const invocation = buildNativeInvocation(options);
-  if (!invocation.ok) return invocation;
+  if (!invocation.ok) return { ...invocation, provider_called: false,
+    final_evidence: telemetryApi.captureFinal({ identity: options, route: options.resolvedDispatch }) };
   if (typeof invoke !== 'function') {
-    return refusal(invocation.host_runtime, 'native-tool-callback-missing',
-      'An injected native tool callback is required.');
+    return { ...refusal(invocation.host_runtime, 'native-tool-callback-missing',
+      'An injected native tool callback is required.'), provider_called: false,
+      final_evidence: telemetryApi.captureFinal({ identity: options, route: options.resolvedDispatch }) };
   }
+  const evidence = telemetryApi.observeFinal({ ...options, model: invocation.telemetry.model_argument,
+    effort: invocation.telemetry.effort_resolved }, invocation.args,
+    invocation.args.prompt || invocation.args.message, 'native-tool');
   try {
     const result = await invoke(invocation.args, invocation);
     const readback = typeof options.readback === 'function'
@@ -358,7 +365,10 @@ async function invokeNative(options, invoke) {
     const source = readback && typeof readback === 'object' ? text(readback.source) : '';
     return {
       ...invocation,
+      provider_called: true,
       result,
+      final_evidence: { ...evidence, stage: 'returned', provider_called: true, duration_ms: Date.now() - started,
+        model_observed: observed && source ? telemetryApi.code(observed) : null },
       telemetry: {
         ...invocation.telemetry,
         model_observed: observed && source ? observed : null,
@@ -366,11 +376,16 @@ async function invokeNative(options, invoke) {
       },
     };
   } catch (error) {
+    error = error && typeof error === 'object' ? error : {};
     return {
       ...invocation,
       ok: false,
       result: null,
-      reason_code: 'native-invocation-failed',
+      reason_code: telemetryApi.code(error.code, 'native-invocation-failed'),
+      final_evidence: { ...evidence, stage: 'invoked', duration_ms: Date.now() - started,
+        provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown' },
+      provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown',
+      diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
     };
   }

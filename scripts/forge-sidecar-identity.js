@@ -28,7 +28,9 @@ function formatIdentityLine(stage, fields = {}) {
   if (Number.isInteger(fields.pid) && fields.pid > 0) optional.push(['pid', clean(fields.pid)]);
   if (fields.retroactive === true) optional.push(['retroativo', 'sim']);
   if (fields.reason_code !== undefined) optional.push(['causa', clean(fields.reason_code)]);
-  const provider = stage === 'iniciado' || fields.provider_called === true ? 'true' : 'false';
+  // A local pid proves process creation only. Keep remote call evidence separate.
+  const provider = typeof fields.provider_called === 'boolean' ? String(fields.provider_called)
+    : ['solicitado', 'recusado', 'reaproveitado'].includes(stage) && fields.provider_called === undefined ? 'false' : 'unknown';
   const render = () => `[forge-sidecar] ${stage} fase=${values.fase} unidade=${values.unidade} engine=${values.engine}`
     + ` transporte=${values.transporte} modelo_enviado=${values.modelo_enviado}`
     + optional.map(([key, value]) => ['modelo_resolvido', 'modelo_rota'].includes(key) ? ` ${key}=${value}` : '').join('')

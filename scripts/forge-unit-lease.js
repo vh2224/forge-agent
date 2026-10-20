@@ -35,7 +35,7 @@ function positive(value, fallback, label) {
 }
 function opaque(value, label, required) {
   if ((value === undefined || value === null || value === '') && !required) return null;
-  if (typeof value !== 'string' || value.trim() === '' || value.length > 1024 || value.includes('\u0000')) {
+  if (typeof value !== 'string' || value.trim() === '' || value.length > (label === 'request_id' ? 2048 : 1024) || value.includes('\u0000')) {
     throw new Error(`forge-unit-lease: ${label} inválido`);
   }
   return value;
@@ -245,12 +245,13 @@ function heartbeat(cwd, unitInput, ownerToken, generation, options) {
   });
 }
 
-function release(cwd, unitInput, ownerToken, generation) {
+function release(cwd, unitInput, ownerToken, generation, options) {
   const unit = normalizeUnitKey(unitInput); const token = opaque(ownerToken, 'owner_token', true); const gen = opaque(generation, 'generation', true); const file = leaseFile(cwd, unit);
   return withGuard(cwd, unit, () => {
     const read = readLease(file);
     if (!read.record) return result(true, 'already-released');
     if (!validRecord(read.record, unit) || !sameOwner(read.record, token, gen)) return result(false, 'owner-mismatch');
+    if (options && own(options, 'requestId') && read.record.request_id !== options.requestId) return result(false, 'owner-mismatch');
     const saved = quarantine(file, `released-${gen}`);
     if (!saved) return result(false, 'contended-recovery');
     removeQuarantine(saved); clearTemporaryFiles(file);

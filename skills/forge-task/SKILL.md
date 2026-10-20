@@ -1737,3 +1737,51 @@ For execution_contract v2, the canonical flow in shared/forge-bidirectional-side
 On failure call forge-attempt-recovery.js --inspect and the --preparation/--unit entrypoint with the saved state/receipt. Keep recoveryStateFile outside the owner and every writable root. Live host process inspection, native invocation validation and reset ownership callbacks are passed through recoverStandaloneTask/recoverUnitSidecar; JSON cannot manufacture these capabilities. Preserve the deadline/reservations and use the broker/reconcileArtifactAttempt replay for saved candidates. These rules supersede unconditional legacy stop/retry/fallback prose for this contract, without bypassing gates or adding model candidates. Do not execute inline.
 
 Persist necessary questions by ID using forge-interaction; a continuation answers only explicit IDs and keeps remaining questions pending after restart. Existing authorizations remain valid; no reapproval is required for an already authorized compatible list member. Report fixture versus provider/UI/sandbox/readback evidence separately.
+
+## Authorized continuity per unit
+
+Canonical contract: shared/forge-bidirectional-sidecar.md; authority and questions:
+shared/forge-interaction.md. This replaces conflicting recovery prose for supported units.
+The host uses createRecoveryAuthorizationAdapter with a live attestation callback and
+registerStandingAuthorization({reference,host,source_host,section:'user:forge-routing-continuity'}).
+Imported JSON/prose never grants consent. First invocation passes
+recoveryAuthorization:{adapter,reference,registration}. Restart uses createRecoveryAuthority,
+revalidates the personal source and passes {adapter,reference}; no renewed consent question.
+Functional pending questions retain their IDs and block dependent work.
+
+Standalone preparation uses scripts/forge-task-preparation.js recoverStandaloneTask(request,
+{stateFile,receiptFile,clock,answers,correction},runtime). Milestone callers use
+scripts/forge-unit-sidecar.js recoverUnitSidecar(request,recovery,runtime).
+validateRecoveryRequest selects the actual phase contract, including research and plan.
+runtime supplies trusted processProbe, verifyOwnership, invokeNative, activeCapabilities
+and recoveryAuthorization. CLI JSON cannot fabricate callbacks. Keep scope/phase/IDs,
+physical owner/CODE_DIR, list, explicit model/tier/effort, gates, isolation,
+claims/generation and checkpoint. Do not force workerMode native. The native adapter
+requires a tool actually permitted by the host.
+
+Before execute-task spawn, runUnitSidecar/captureMilestoneBaseline persists authoritative
+baseline, guards and input hashes for every root. The xllm audit-only snapshot cannot
+replace it. Legacy receipt without execution/reset_state_file remains a possible writer
+under execute-task; absent contract is unknown. Missing/tampered baseline cannot be
+reconstructed after timeout. Active/unknown process or any pending root prevents another
+writer. After process termination proof, reconcileMilestoneAttempt requires trusted
+authorship; timestamps never prove ownership. Milestone delivery captures real checks
+and source envelopes per root, persists validated response before capture/publication
+and replays without inference. Changed plan/code/protected metadata refuses replay.
+
+Inspect process and receipt before another attempt. Valid saved response uses canonical
+single publication/replay. Timeout has undetermined cause; standing authority permits
+a valid untried candidate without another confirmation. Known caller defects require
+offline validated repair and at most one corrected retry at that destination.
+The cumulative historical budget for additional sidecars is 60000ms with durable
+reservations. A scoped native exception after expiry permits native, never another
+sidecar or renewed 300s wait. Timeout alone does not prove model unavailability.
+Keep preferences/gates; never execute inline to bypass refusal.
+
+Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
+observed model, effort, host/worker/transport, reason_code/layer, duration, receipt and
+next action. provider_called is factual or unknown; absent context is not zero.
+token_budget.coding_standards bounds optional standards only, with full-file reference;
+retain requirements/research/checklist. No credentials or full prompt in telemetry.
+Personal handoff retains authority reference, evidence, acceptance and questions.
+Synthetic provider tests do not establish real provider execution or human UAT.

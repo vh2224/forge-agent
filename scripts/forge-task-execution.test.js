@@ -248,6 +248,38 @@ function snapshotRegressions() {
   console.log('protected snapshot: >64 MiB file, 72 MiB aggregate, bounded reads, mutations, races, descriptor cleanup, links/types and 20000-entry limit passed');
 }
 async function main() {
+  // Production milestone -> xllm -> Claude adapter contract, with only inference
+  // substituted by the local process fixture above.
+  const multi = setup(), second = path.join(multi.dir, 'second');
+  fs.mkdirSync(second);
+  git(second, ['init', '-q']);
+  for (const cwd of [multi.cwd, second]) {
+    write(path.join(cwd, 'same.txt'), 'before\n');
+    git(cwd, ['add', 'same.txt']);
+    git(cwd, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'multi baseline']);
+  }
+  const contract = require('./forge-code-roots').validateContract({ schema_version: 2, owner: multi.owner,
+    primary_root_id: 'alpha', code_roots: [{ id: 'alpha', path: multi.cwd }, { id: 'beta', path: second }] });
+  const planFile = path.join(multi.owner, '.gsd/milestones/M001/slices/S01/tasks/T01/T01-PLAN.md');
+  write(planFile, require('./forge-code-roots.test').plan(contract));
+  write(path.join(path.dirname(path.dirname(path.dirname(planFile))), 'S01-PLAN.md'), '# Slice fixture\n');
+  const claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: contract,
+    paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+  require('./forge-runs').add(multi.owner, { id: 'multi-run', kind: 'milestone', session_id: 'fixture', write_claim: claim });
+  const request = { ...multi.r, scope: 'milestone', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+    runId: 'multi-run', claim, execution_contract: contract, planFile,
+    gates: { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' },
+    verification: { preferenceCommands: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'] } };
+  multi.control.writes = { [path.join(multi.cwd, 'same.txt')]: 'alpha after\n', [path.join(second, 'same.txt')]: 'beta after\n' };
+  write(multi.controlFile, multi.control);
+  const multiResult = await unit.runUnitSidecar(request);
+  assert.deepStrictEqual(multiResult.files_changed.map(row => row.root_id).sort(), ['alpha', 'beta']);
+  const multiReceipt = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json'));
+  assert.strictEqual(multiReceipt.final_evidence.stage, 'returned');
+  assert.strictEqual(multiReceipt.final_evidence.provider_called, true);
+  assert(Number.isFinite(multiReceipt.final_evidence.duration_ms));
+  assert.strictEqual(multiReceipt.final_evidence.model_observed, 'claude-opus-5-5');
+  assert.strictEqual(fs.readFileSync(multi.control.calls, 'utf8'), 'spawn\n');
   snapshotRegressions();
   assert(capability('claude', 'execute-task', { scope: 'standalone-task', phase: 'execute' }).supported);
   assert(!capability('claude', 'execute-task', { scope: 'standalone-task', phase: 'plan' }).supported);

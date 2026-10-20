@@ -608,7 +608,8 @@ async function reviewFixMatrix() {
     outcome = await failure('codex', { ...fixedA, exit: 3 }, /app-server exited/);
     assertDeferred(outcome);
     assert.strictEqual(outcome.failure.reason_code, 'sidecar-unit-failed');
-    assert.strictEqual(outcome.failure.provider_called, true);
+    // A local app-server exit without a returned turn proves no provider acceptance.
+    assert.strictEqual(outcome.failure.provider_called, 'unknown');
     for (const engine of ['claude', 'codex']) {
       outcome = await failure(engine, engine === 'claude'
         ? { ...fixedA, raw: { status: 'done', summary: 'missing R2', items: [{ r: 'R1', outcome: 'fixed', note: '' }], files_changed: [] } }
@@ -1045,6 +1046,11 @@ async function reviewFixMatrix() {
     await rejects(() => unit.runUnitSidecar(invalidReq), 'MEMORY_EXTRACTION_INVALID');
     const invalidReceipt = fs.readFileSync(`${invalidReq.resultFile}.receipt.json`, 'utf8');
     assert(!invalidReceipt.includes('.gsd/STATE.md'));
+    const invalidFailure = JSON.parse(invalidReceipt).failure;
+    assert.strictEqual(invalidFailure.reason_code, 'MEMORY_EXTRACTION_INVALID');
+    assert.strictEqual(invalidFailure.recovery, 'unavailable');
+    assert.strictEqual(invalidFailure.recovery_reason_code, 'recovery-request-identity-required');
+    assert.strictEqual(fs.existsSync(invalidReq.resultFile + '.recovery.json'), false);
 
     const authDir = setup(), authReq = memoryRequest(authDir, 'claude', 'T-20260924030306-auth-memory');
     write(path.join(authDir, 'payload.json'), { failure: 'auth' });
@@ -1396,7 +1402,8 @@ async function reviewFixMatrix() {
     assert(loc.required.includes(loc.delivery.output));
     assert(loc.allowed.includes(loc.delivery.verification));
     assert(loc.allowed.includes(loc.delivery.artifact));
-    assert.deepStrictEqual(Object.keys(loc.rules).sort(), Object.values(loc.delivery).sort());
+    assert.deepStrictEqual(Object.keys(loc.rules).sort(), Object.values(loc.delivery)
+      .flatMap(value => Array.isArray(value) ? value.map(row => row.path) : [value]).sort());
     assert.strictEqual(unit.inspectArtifacts(value, loc.allowed, loc.required, Infinity, loc.rules).ok, true);
     const record = { result: value, artifacts: value.artifacts.map(artifact => ({ ...artifact, before: null })) };
     assert.strictEqual(unit.materialize(req, record).status, 'done');
@@ -1474,12 +1481,12 @@ async function reviewFixMatrix() {
   git(['init', '-q']); git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture']);
   const startSha = git(['rev-parse', 'HEAD']);
   const planRequest = request(planDir, 'plan-slice');
-  const planContent = '---\ncapability: readonly\nmust_haves:\n  truths:\n    - "fixture execution stays observable"\n  artifacts: []\n  key_links: []\nexpected_output: []\n---\n# Task\n\n## Standards\nFixture.\n';
+  const planContent = '---\ncapability: readonly\ndepends: []\nwrites: [fixture-output.txt]\nmust_haves:\n  truths:\n    - "fixture execution stays observable"\n  artifacts: []\n  key_links: []\nexpected_output: [fixture-output.txt]\n---\n# Task\n\n## Standards\nFixture.\n';
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Plan fixture',
     slice_plan: { filename: 'S01-PLAN.md', content: '# Slice\n\n- [ ] T01: Fixture\n' },
     task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: planContent }] });
   await unit.runUnitSidecar(planRequest);
-  const planFile = path.join(planDir, '.gsd/milestones/M001/slices/S01/tasks/T01-PLAN.md');
+  const planFile = path.join(planDir, '.gsd/milestones/M001/slices/S01/tasks/T01/T01-PLAN.md');
   assert.strictEqual(fs.readFileSync(planFile, 'utf8'), planContent);
   // The plan result-file and its ready receipt carry the proven model.
   const planResult = JSON.parse(fs.readFileSync(planRequest.resultFile, 'utf8'));
@@ -1492,6 +1499,7 @@ async function reviewFixMatrix() {
     slice_plan: { filename: 'S01-PLAN.md', content: '# Slice' },
     task_plans: [{ id: 'T01', filename: 'T01-PLAN.md', content: '# No must haves' }] });
   await assert.rejects(() => unit.runUnitSidecar(badPlan), /must_haves/);
+  write(path.join(planDir, 'fixture-output.txt'), 'Existing output verified by the readonly fixture.');
   const executeRequest = request(planDir, 'execute-task'); executeRequest.planFile = planFile;
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Execution fixture', must_haves_status: [], files_changed: [] });
   await unit.runUnitSidecar(executeRequest);
@@ -1555,8 +1563,8 @@ async function reviewFixMatrix() {
   recoveryApi.captureFailure({ stateFile, request: flow, unit: `${flow.unitType}/${flow.milestoneId}`, route: flow.route,
     receiptFile: flow.resultFile + '.receipt.json', error: { code: 'publication-interrupted', provider_called: true } });
   const callsBeforeReplay = fs.readFileSync(path.join(flowDir, 'invocations.txt'), 'utf8');
-  const recovered = await unit.recoverUnitSidecar(flow, { stateFile, receiptFile: flow.resultFile + '.receipt.json',
-    processProbe: () => 'stopped' }, { resolveDispatch() { throw new Error('replay must not resolve a route'); } });
+  const recovered = await unit.recoverUnitSidecar(flow, { stateFile, receiptFile: flow.resultFile + '.receipt.json' },
+    { processProbe: () => 'stopped', resolveDispatch() { throw new Error('replay must not resolve a route'); } });
   assert.strictEqual(recovered.action, 'replay');
   assert.strictEqual(recovered.provider_called, false);
   assert.strictEqual(recovered.result.status, 'done');

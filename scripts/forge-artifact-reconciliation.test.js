@@ -12,7 +12,7 @@ async function main() {
   fs.mkdirSync(path.dirname(events), { recursive: true }); fs.writeFileSync(events, prefix);
   const request = { scope: 'standalone-task', phase: 'brainstorm', unitType: 'plan-slice',
     taskId: 'T-20261015172849-broker', cwd: code, contextRoot: owner, dispatchId: 'broker-attempt', workflowId: 'broker-workflow',
-    resultFile: path.join(lab.dir, 'result.json'), route: { worker_mode: 'native' } };
+    resultFile: path.join(lab.dir, 'result.json'), route: { worker_mode: 'native', host_runtime: 'codex' } };
   const fingerprint = unit.artifactFingerprint(request);
   const broker = await api.startBroker({ owner, manifestFile: path.join(lab.dir, 'manifest.json'),
     dispatchId: request.dispatchId, request_sha256: fingerprint, plan_sha256: require('./forge-code-roots').digest('original plan') });

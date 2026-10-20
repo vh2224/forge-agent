@@ -69,6 +69,7 @@ const DEFAULT_TIMEOUT_MS  = 30 * 60 * 1000;  // 30min — a human check-in windo
 const DEFAULT_POLL_MS     = 500;
 const RESOLVED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const NOTIFY_TIMEOUT_MS   = 5000;
+const MAX_CREATE_ATTEMPTS = 32;
 
 // ── Paths ────────────────────────────────────────────────────────────────────
 function gatesDir(cwd) {
@@ -87,7 +88,7 @@ function gateFile(cwd, id) {
 
 // ── ID ───────────────────────────────────────────────────────────────────────
 // G-<YYYYMMDDHHMMSS>-<rand4>. Timestamp-first so gates sort by creation, and a
-// random suffix so two gates opened in the same second cannot collide.
+// random suffix to reduce collisions; exclusive publication resolves duplicates.
 function makeGateId(now) {
   const d = now instanceof Date ? now : new Date();
   const p = (n, w = 2) => String(n).padStart(w, '0');
@@ -105,6 +106,20 @@ function writeGateFile(cwd, gate) {
   fs.writeFileSync(tmp, `${JSON.stringify(gate, null, 2)}\n`, 'utf8');
   fs.renameSync(tmp, target);
   return target;
+}
+
+// Publish a complete file without replacing any existing mailbox. A hard link
+// is atomic and fails with EEXIST even when another process wins the same ID.
+function createGateFile(cwd, gate) {
+  const dir = ensureGatesDir(cwd);
+  const temporaryDir = fs.mkdtempSync(path.join(dir, '.create-'));
+  const temporary = path.join(temporaryDir, 'gate.json');
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(gate, null, 2)}\n`, 'utf8');
+    fs.linkSync(temporary, gateFile(cwd, gate.id));
+  } finally {
+    fs.rmSync(temporaryDir, { recursive: true, force: true });
+  }
 }
 
 function readGateFile(cwd, id) {
@@ -185,7 +200,18 @@ function openGate(cwd, spec) {
     expires_at: timeoutMs ? now + timeoutMs : null,
   };
 
-  writeGateFile(cwd, gate);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      createGateFile(cwd, gate);
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST' || spec.id) throw error;
+      if (attempt + 1 >= MAX_CREATE_ATTEMPTS) {
+        throw Object.assign(new Error('gate-id-collision-limit'), { code: 'gate-id-collision-limit' });
+      }
+      gate.id = makeGateId(new Date(now));
+    }
+  }
   if (spec.notify !== false) notify(gate);
   return gate;
 }
