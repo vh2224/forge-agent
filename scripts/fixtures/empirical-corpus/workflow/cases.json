@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "seed": "workflow-fictional-v1",
+  "cases": [
+    {
+      "id": "seed-a",
+      "stratum": "success",
+      "exposed": true
+    },
+    {
+      "id": "seed-b",
+      "stratum": "return",
+      "exposed": true
+    },
+    {
+      "id": "seed-c",
+      "stratum": "simple-control",
+      "exposed": true
+    },
+    {
+      "id": "seed-d",
+      "stratum": "success",
+      "exposed": true
+    },
+    {
+      "id": "seed-e",
+      "stratum": "success",
+      "exposed": true
+    },
+    {
+      "id": "seed-f",
+      "stratum": "success",
+      "exposed": true
+    },
+    {
+      "id": "reserved-a",
+      "stratum": "unknown",
+      "exposed": false
+    },
+    {
+      "id": "reserved-b",
+      "stratum": "unknown",
+      "exposed": false
+    }
+  ],
+  "violations": [
+    "snapshot_changed",
+    "capture_reference_changed",
+    "reserved_family_exposed",
+    "comparative_readiness_failed",
+    "reference_not_prework",
+    "private_file_tracked",
+    "private_content_exposed",
+    "audit_command_failed"
+  ]
+}
