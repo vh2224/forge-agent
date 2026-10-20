@@ -28,6 +28,24 @@ function fixture() {
   return { schema_version: 1, cases: [{ case_id: 'after-tenth', variants }] };
 }
 try {
+  test('R3 unsupported own special budget keys fail closed at every depth and boundary', () => {
+    for (const key of ['__proto__', 'constructor', 'prototype']) for (const nested of [false, true]) {
+      for (const side of ['evidence', 'capture', 'both', 'policy']) {
+        const input = fixture();
+        for (const row of input.cases[0].variants) {
+          const raw = value => JSON.parse(nested ? `{"nested":{"${key}":${value}}}` : `{"${key}":${value}}`);
+          if (side === 'policy') row.controls = { budget_policy: raw(1) };
+          else {
+            if (side !== 'capture') row.final_evidence.budgets = raw(1);
+            if (side !== 'evidence') row.capture.identity.budgets = raw(2);
+          }
+        }
+        const result = buildContextComparison(input).cases[0];
+        assert.equal(result.comparable, false, `${key}/${nested}/${side}`);
+        assert(result.variants.every(row => row.limitations.some(reason => reason.startsWith('R1-budget-'))));
+      }
+    }
+  });
   test('R1 raw budget and flag matrix rejects absent/invalid controls symmetrically', () => {
     for (const value of [undefined, null, [], 'raw', 1, { auto_memory: '2000' }, { auto_memory: -1 },
       { auto_memory: NaN }, { auto_memory: Infinity }, { invalidKey: 1 }, { nested: { bad: null } }]) {
@@ -155,6 +173,14 @@ try {
     const run = (...args) => cp.spawnSync(process.execPath, [__filename.replace('.test.js', '.js'), '--input', file, ...args], { encoding: 'utf8' });
     const a = run(), b = run(); assert.equal(a.status, 0); assert.equal(a.stdout, b.stdout); assert.equal(a.stderr, '');
     assert.match(run('--markdown').stdout, /Technical context comparison/);
+    const special = fixture();
+    for (const row of special.cases[0].variants) {
+      row.final_evidence.budgets = JSON.parse('{"__proto__":1}');
+      row.capture.identity.budgets = JSON.parse('{"__proto__":2}');
+    }
+    fs.writeFileSync(file, JSON.stringify(special));
+    const rejected = run(); assert.equal(rejected.status, 0);
+    assert.equal(JSON.parse(rejected.stdout).cases[0].comparable, false);
     fs.writeFileSync(file, 'RAW_PRIVATE_INVALID'); const bad = run(); assert.equal(bad.status, 2);
     assert.equal(bad.stdout, ''); assert(!bad.stderr.includes(root)); assert(!bad.stderr.includes('RAW_PRIVATE'));
   });

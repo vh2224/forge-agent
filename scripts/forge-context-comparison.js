@@ -14,6 +14,7 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const validIds = value => Array.isArray(value) && value.every(id => typeof id === 'string'
   && /^[A-Za-z0-9_-]{1,80}\/MEM[0-9]{3,8}$/.test(id)) && new Set(value).size === value.length;
 const validBudgets = value => object(value) && Object.entries(value).every(([key, item]) => /^[a-z_]{1,60}$/.test(key)
+  && !['__proto__', 'constructor', 'prototype'].includes(key)
   && (typeof item === 'number' ? Number.isFinite(item) && item >= 0 : validBudgets(item)));
 const budgetKey = value => fingerprint(numericBudgets(value));
 // Validate original observations before sanitizeFinal can discard malformed data.

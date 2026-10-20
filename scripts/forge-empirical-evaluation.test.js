@@ -64,34 +64,175 @@ function setup(rows = fixtures.cases, synthetic = true) {
     split_sha256: fingerprint(split), declared_at: '2026-01-01T01:00:00Z', updated_at: '2026-01-01T01:00:00Z' };
   const protocol = { schema_version: 1, candidate: policy, split, registrations: rows.map(row => ({ case_id: row.id,
     family_id: row.family_id, split: row.split, policy_sha256: fingerprint(policy), original_input_sha256: controls.input_sha256,
-    acceptance_sha256: sha256('acceptance'), enrolled_at: '2026-01-02T00:00:00Z', controls: clone(controls) })) };
+    acceptance_sha256: sha256('acceptance'), enrolled_at: fixtures.execution_chronology.enrolled_at, controls: clone(controls) })) };
   const baseline = { schema_version: 1, cases: rows.map(row => {
     const ref = writeSource(area, `observations-${row.id}`, 'observations', { schema_version: 1, case_id: row.id, observations: row.observations }, synthetic);
     return { id: row.id, delivery_id: `delivery-${row.id}`, conditions: ['fixture'], sources: [{ ...ref, format: 'observations', origin: 'synthetic' }] };
   }) };
   const sources = [writeSource(area, 'protocol', 'protocol', protocol, synthetic), writeSource(area, 'baseline', 'baseline', baseline, synthetic)];
-  const outcomes = {};
+  const outcomes = {}; const starts = {};
   for (const row of rows) {
-    outcomes[row.id] = { schema_version: 1, case_id: row.id, occurred_at: '2026-01-03T00:00:00Z', status: 'completed',
+    outcomes[row.id] = { schema_version: 1, case_id: row.id, occurred_at: fixtures.execution_chronology.occurred_at, status: 'completed',
       controls: clone(controls), baseline_controls: clone(controls), repetition: 1 };
     sources.push(writeSource(area, `outcome-${row.id}`, 'outcome', outcomes[row.id], synthetic));
+    starts[row.id] = { schema_version: 1, case_id: row.id, started_at: fixtures.execution_chronology.started_at,
+      registration_sha256: fingerprint(protocol.registrations.find(item => item.case_id === row.id)), controls: clone(controls) };
+    sources.push(writeSource(area, `start-${row.id}`, 'execution-start', starts[row.id], synthetic));
   }
   const input = { schema_version: 1, kind: 'empirical-evaluation-input', sources,
     candidates: [{ id: policy.id, arm: policy.arm, protocol_source: 'protocol' }], cases: rows.map(row => ({
       id: row.id, delivery_id: `delivery-${row.id}`, candidate_id: policy.id, family_id: row.family_id, split: row.split,
       evidence_type: synthetic ? 'synthetic' : row.split === 'historical-diagnostic' ? 'historical' : 'prospective', synthetic,
-      baseline_source: 'baseline', baseline_case_id: row.id, outcome_source: `outcome-${row.id}` })) };
+      baseline_source: 'baseline', baseline_case_id: row.id, outcome_source: `outcome-${row.id}`, execution_start_source: `start-${row.id}` })) };
   const refresh = () => {
     protocol.candidate = policy; for (const row of protocol.registrations || []) row.policy_sha256 = fingerprint(policy);
     Object.assign(sources.find(ref => ref.id === 'protocol'), writeSource(area, 'protocol', 'protocol', protocol, synthetic));
     Object.assign(sources.find(ref => ref.id === 'baseline'), writeSource(area, 'baseline', 'baseline', baseline, synthetic));
     for (const [id, outcome] of Object.entries(outcomes)) Object.assign(sources.find(ref => ref.id === `outcome-${id}`), writeSource(area, `outcome-${id}`, 'outcome', outcome, synthetic));
+    for (const [id, start] of Object.entries(starts)) {
+      start.registration_sha256 = fingerprint(protocol.registrations?.find(row => row.case_id === id) || {});
+      start.controls = clone(outcomes[id].controls || {});
+      Object.assign(sources.find(ref => ref.id === `start-${id}`), writeSource(area, `start-${id}`, 'execution-start', start, synthetic));
+    }
   };
-  return { area, input, controls, split, policy, protocol, baseline, outcomes, refresh,
+  return { area, input, controls, split, policy, protocol, baseline, outcomes, starts, refresh,
     report: () => { refresh(); return buildEmpiricalEvaluation(input, { roots: [area] }); } };
 }
 const firstTwo = fixtures.cases.slice(0, 2);
+// All records remain temporary adversarial metadata, including false synthetic
+// flags. Exercise positive validation without claiming real provider execution.
+function combinedSetup() {
+  const arms = ['memory', 'procedure', 'preparation', 'review', 'combined'];
+  const rows = arms.map(arm => ({ ...clone(firstTwo[0]), id: `isolated-${arm}` }));
+  const s = setup(rows, false); s.input.candidates = [];
+  const axes = { memory: 'memory_sha256', procedure: 'procedure_sha256', preparation: 'preparation', review: 'review' };
+  const treatments = { memory_sha256: sha256('new-memory'), procedure_sha256: sha256('new-procedure'), preparation: 'reduced', review: 'expanded' };
+  const fixture = createProcedureFixture();
+  const protocols = {};
+  for (const arm of arms) {
+    const id = `isolated-${arm}`; const item = s.input.cases.find(row => row.id === id);
+    const controls = { ...clone(s.controls), ...(arm === 'combined' ? treatments : { [axes[arm]]: treatments[axes[arm]] }) };
+    const policy = { ...clone(s.policy), id: arm, arm };
+    const registration = { ...clone(s.protocol.registrations.find(row => row.case_id === id)), controls,
+      policy_sha256: fingerprint(policy), enrolled_at: arm === 'combined' ? '2026-01-04T00:00:00Z' : '2026-01-02T00:00:00Z' };
+    protocols[arm] = { schema_version: 1, candidate: policy, split: clone(s.split), registrations: [registration] };
+    s.input.candidates.push({ id: arm, arm, protocol_source: `protocol-${arm}` }); item.candidate_id = arm;
+    s.outcomes[id].controls = clone(controls);
+    if (arm === 'combined') {
+      s.outcomes[id].occurred_at = '2026-01-05T00:00:00Z'; s.starts[id].started_at = '2026-01-04T01:00:00Z';
+    }
+    if (['memory', 'procedure'].includes(arm)) {
+      const variants = ['baseline', 'current'].map(variant => {
+        const row = { ...clone(fixture.after), variant };
+        Object.assign(row.conditions, { input_sha256: controls.input_sha256, template_sha256: controls.template_sha256 });
+        row.package.template_sha256 = controls.template_sha256;
+        for (const identity of [row.final_evidence, row.capture.identity]) Object.assign(identity, {
+          model_requested: controls.model, model_sent: controls.model, effort: controls.effort, host: controls.host,
+          transport: controls.transport, budgets: clone(controls.budgets) });
+        row.controls.budget_policy = clone(controls.budgets);
+        if (arm === 'memory' && variant === 'current') row.selected_ids = row.delivery.delivered_ids = row.capture.delivered_ids = ['T01/MEM001'];
+        return row;
+      });
+      const kind = arm === 'memory' ? 'context-comparison' : 'procedure-evidence';
+      const data = arm === 'memory' ? { schema_version: 1, cases: [{ case_id: id, variants }] }
+        : { schema_version: 1, before: variants[0], after: variants[1] };
+      item[arm === 'memory' ? 'context_source' : 'procedure_source'] = `technical-${arm}`;
+      s.input.sources.push(writeSource(s.area, `technical-${arm}`, kind, data, false));
+    }
+  }
+  const refresh = () => {
+    s.refresh();
+    for (const arm of arms.filter(arm => arm !== 'combined')) {
+      const ref = writeSource(s.area, `protocol-${arm}`, 'protocol', protocols[arm], false);
+      const prior = s.input.sources.find(row => row.id === ref.id); if (prior) Object.assign(prior, ref); else s.input.sources.push(ref);
+    }
+    const combined = protocols.combined.registrations[0];
+    if (!combined.isolated_comparisons) combined.isolated_comparisons = arms.filter(arm => arm !== 'combined').map(arm => ({
+      arm, case_id: `isolated-${arm}`, protocol_sha256: s.input.sources.find(row => row.id === `protocol-${arm}`).sha256,
+      outcome_sha256: s.input.sources.find(row => row.id === `outcome-isolated-${arm}`).sha256 }));
+    for (const arm of arms) {
+      const ref = writeSource(s.area, `protocol-${arm}`, 'protocol', protocols[arm], false);
+      const prior = s.input.sources.find(row => row.id === ref.id); if (prior) Object.assign(prior, ref); else s.input.sources.push(ref);
+      const id = `isolated-${arm}`;
+      const start = { ...s.starts[id], registration_sha256: fingerprint(protocols[arm].registrations[0]), controls: s.outcomes[id].controls };
+      Object.assign(s.input.sources.find(row => row.id === `start-${id}`), writeSource(s.area, `start-${id}`, 'execution-start', start, false));
+    }
+  };
+  return { ...s, protocols, refresh, report: () => { refresh(); return buildEmpiricalEvaluation(s.input, { roots: [s.area] }); } };
+}
 try {
+  test('R2 execution starts bind registration and controls with strict prospective chronology', () => {
+    const id = firstTwo[0].id;
+    const negative = [s => { delete s.input.cases[0].execution_start_source; },
+      s => { s.starts[id].started_at = '2025-12-31T00:00:00Z'; },
+      s => { s.starts[id].started_at = s.protocol.registrations[0].enrolled_at; },
+      s => { s.starts[id].started_at = s.outcomes[id].occurred_at; },
+      s => { s.starts[id].started_at = '2026-01-04T00:00:00Z'; },
+      s => { s.starts[id].started_at = 'invalid'; }, s => { s.starts[id].case_id = 'foreign'; },
+      s => { s.policy.declared_at = '2026-01-02T02:00:00Z'; },
+      s => { s.policy.updated_at = s.starts[id].started_at; },
+      s => { s.split.frozen_at = s.starts[id].started_at; s.policy.split_sha256 = fingerprint(s.split); },
+      s => { s.protocol.registrations.push(clone(s.protocol.registrations[0])); }];
+    for (const mutate of negative) {
+      const s = setup(firstTwo, false); mutate(s); const report = s.report();
+      assert(!report.cases.find(row => row.id === id).eligible);
+      assert(report.prospective_cases < 2);
+    }
+    const s = setup(firstTwo, false); s.refresh();
+    for (const change of [{ registration_sha256: sha256('foreign') }, { controls: { ...s.controls, model: 'foreign' } }]) {
+      const ref = s.input.sources.find(row => row.id === `start-${id}`);
+      Object.assign(ref, writeSource(s.area, ref.id, 'execution-start', { ...s.starts[id], ...change }, false));
+      assert(buildEmpiricalEvaluation(s.input, { roots: [s.area] }).cases.find(row => row.id === id).exclusions.includes('execution_start_unbound'));
+    }
+    assert(s.report().cases.every(row => row.eligible));
+  });
+  test('R1 combined requires validated isolated comparisons, protocol pins and executed controls', () => {
+    const good = combinedSetup(); const report = good.report();
+    assert(report.cases.every(row => row.eligible), JSON.stringify(report.cases.map(row => [row.id, row.exclusions])));
+    assert.equal(report.technical_evidence['technical-memory'].cases[0].comparable, true);
+    assert.equal(report.technical_evidence['technical-procedure'].comparable, true);
+    for (const ref of good.protocols.combined.registrations[0].isolated_comparisons) assertContract(ref, schema.$defs.isolatedComparison);
+    for (const mutate of [s => { s.protocols.combined.registrations[0].isolated_comparisons = []; },
+      s => { s.protocols.combined.registrations[0].isolated_comparisons[0].case_id = 'missing'; },
+      s => { s.protocols.combined.registrations[0].isolated_comparisons[0].protocol_sha256 = sha256('foreign'); },
+      s => { s.protocols.combined.registrations[0].isolated_comparisons[0].outcome_sha256 = sha256('foreign'); },
+      s => { s.protocols.combined.registrations[0].isolated_comparisons[1] = clone(s.protocols.combined.registrations[0].isolated_comparisons[0]); },
+      s => { s.input.cases.find(row => row.candidate_id === 'memory').synthetic = true; },
+      s => { s.outcomes['isolated-memory'].status = 'failed'; },
+      s => { s.outcomes['isolated-memory'].controls.model = 'foreign'; },
+      s => { s.outcomes['isolated-memory'].baseline_controls.budgets.context++; },
+      s => { s.outcomes['isolated-combined'].controls.memory_sha256 = s.controls.memory_sha256; },
+      s => { s.outcomes['isolated-memory'].occurred_at = '2026-01-04T00:00:00Z'; },
+      s => { delete s.input.cases.find(row => row.candidate_id === 'procedure').procedure_source; }]) {
+      const s = combinedSetup(); s.refresh(); mutate(s);
+      assert(s.report().cases.find(row => row.arm === 'combined').exclusions.includes('combined_isolation_unproven'));
+    }
+    // A comparator can be internally valid yet refer to another executed input.
+    const s = combinedSetup(); s.refresh(); const ref = s.input.sources.find(row => row.id === 'technical-memory');
+    const data = JSON.parse(fs.readFileSync(path.join(s.area, ref.path)));
+    for (const row of data.cases[0].variants) row.conditions.input_sha256 = sha256('unrelated');
+    assert(buildContextComparison(data).cases[0].comparable);
+    Object.assign(ref, writeSource(s.area, ref.id, ref.kind, data, false));
+    assert(s.report().cases.find(row => row.arm === 'combined').exclusions.includes('combined_isolation_unproven'));
+    good.refresh(); const file = path.join(good.area, 'cli.json'); const bytes = Buffer.from(JSON.stringify(good.input)); fs.writeFileSync(file, bytes);
+    const cli = spawnSync(process.execPath, [path.join(__dirname, 'forge-empirical-evaluation.js'), '--input', file,
+      '--sha256', sha256(bytes), '--root', good.area], { encoding: 'utf8' });
+    assert.equal(cli.status, 0, cli.stderr); assert(JSON.parse(cli.stdout).cases.find(row => row.arm === 'combined').eligible);
+    for (const mutate of [input => { delete input.cases.find(row => row.candidate_id === 'combined').execution_start_source; },
+      input => { delete input.cases.find(row => row.candidate_id === 'memory').context_source; }]) {
+      const input = clone(good.input); mutate(input); const bytes = Buffer.from(JSON.stringify(input)); fs.writeFileSync(file, bytes);
+      const rejected = spawnSync(process.execPath, [path.join(__dirname, 'forge-empirical-evaluation.js'), '--input', file,
+        '--sha256', sha256(bytes), '--root', good.area], { encoding: 'utf8' });
+      assert.equal(rejected.status, 0, rejected.stderr);
+      assert.equal(JSON.parse(rejected.stdout).cases.find(row => row.arm === 'combined').eligible, false);
+    }
+    const declarations = combinedSetup(); declarations.refresh();
+    declarations.protocols.combined.registrations[0].isolated_comparisons = ['memory', 'procedure', 'preparation', 'review']
+      .map(arm => ({ arm, case_id: `invented-${arm}`, valid: true, comparable: true }));
+    assert(declarations.report().cases.find(row => row.arm === 'combined').exclusions.includes('combined_isolation_unproven'));
+    const malformed = combinedSetup(); malformed.refresh(); delete malformed.outcomes['isolated-combined'].controls;
+    assert.equal(malformed.report().cases.find(row => row.arm === 'combined').eligible, false);
+  });
   test('recommendations integrate trusted caller context without changing dimensions or defaults', () => {
     const s = setup(firstTwo, false); s.refresh();
     const context = { risk: 'high', review: { trigger: 'always', style: 'dialectic' },
@@ -184,7 +325,7 @@ try {
     const s = setup(firstTwo, false); s.policy.arm = 'combined'; s.input.candidates[0].arm = 'combined';
     assert(s.report().cases.every(row => row.exclusions.includes('combined_isolation_unproven')));
     for (const outcome of Object.values(s.outcomes)) outcome.isolated_components = ['memory', 'procedure', 'preparation', 'review'];
-    assert(s.report().cases.every(row => row.eligible));
+    assert(s.report().cases.every(row => row.exclusions.includes('combined_isolation_unproven')));
   });
   test('failures remain visible and split contamination never becomes tuning', () => {
     const s = setup(firstTwo, false); s.outcomes[firstTwo[0].id].status = 'failed';
@@ -262,6 +403,7 @@ try {
     s.protocol.registrations[0].outcome = 'PRIVATE_OUTCOME_SENTINEL';
     const report = s.report(); assert(!JSON.stringify(report).includes('PRIVATE_'));
     assertContract(s.input, schema.$defs.input); assertContract(report, schema.$defs.report);
+    for (const start of Object.values(s.starts)) assertContract(start, schema.$defs.executionStart);
     assert.throws(() => buildEmpiricalEvaluation({ ...s.input, sources: Array(LIMITS.sources + 1).fill({}) }, { roots: [s.area] }));
     assert.equal(schema.$defs.dimension.properties.state.enum.includes('estimated'), true);
     for (const key of ['input', 'report', 'source', 'policy', 'dimension', 'case', 'recommendation']) assert(schema.$defs[key], key);

@@ -20,7 +20,7 @@
       "required": ["id", "kind", "path", "sha256", "revision", "captured_at", "timezone", "synthetic"],
       "properties": {
         "id": { "$ref": "#/$defs/label" },
-        "kind": { "enum": ["baseline", "context-comparison", "procedure-evidence", "protocol", "outcome", "baseline-report", "context-report", "procedure-report"] },
+        "kind": { "enum": ["baseline", "context-comparison", "procedure-evidence", "protocol", "outcome", "execution-start", "baseline-report", "context-report", "procedure-report"] },
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "#/$defs/hash" },
         "revision": { "$ref": "#/$defs/label" },
@@ -54,7 +54,8 @@
         "baseline_case_id": { "$ref": "#/$defs/label" },
         "outcome_source": { "$ref": "#/$defs/label" },
         "context_source": { "$ref": "#/$defs/label" },
-        "procedure_source": { "$ref": "#/$defs/label" }
+        "procedure_source": { "$ref": "#/$defs/label" },
+        "execution_start_source": { "$ref": "#/$defs/label", "description": "Required for eligibility; absence remains an explicit exclusion." }
       }
     },
     "input": {
@@ -88,6 +89,29 @@
         "declared_at": { "type": "string" },
         "updated_at": { "type": "string" }
       }
+    },
+    "executionStart": {
+      "type": "object",
+      "required": ["schema_version", "case_id", "started_at", "registration_sha256", "controls"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "case_id": { "$ref": "#/$defs/label" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "registration_sha256": { "$ref": "#/$defs/hash" },
+        "controls": { "type": "object" }
+      },
+      "description": "Source payload. Complete registration fingerprint and executed controls must match; freeze/policy/enrollment strictly precede start, which strictly precedes outcome. Hash identity is not authentication."
+    },
+    "isolatedComparison": {
+      "type": "object",
+      "required": ["arm", "case_id", "protocol_sha256", "outcome_sha256"],
+      "properties": {
+        "arm": { "enum": ["memory", "procedure", "preparation", "review"] },
+        "case_id": { "$ref": "#/$defs/label" },
+        "protocol_sha256": { "$ref": "#/$defs/hash" },
+        "outcome_sha256": { "$ref": "#/$defs/hash" }
+      },
+      "description": "Combined registration requires exactly one per isolated arm, validated by the evaluator against selected eligible cases, matching executed controls and actual comparator outputs; self-declared validity is ignored."
     },
     "dimension": {
       "type": "object",

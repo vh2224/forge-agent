@@ -49,6 +49,7 @@ Supported raw source kinds reuse existing APIs:
 | procedure-evidence | S04 `{schema_version:1,before,after}` passed to `buildProcedureEvidence` |
 | protocol | Predeclared candidate, frozen split, registrations |
 | outcome | Executed controls, case identity, timestamp, completed/failed status, optional repetition |
+| execution-start | Case identity, `started_at`, `registration_sha256`, and executed `controls` |
 
 The baseline's nested observation references also need revision, capture time,
 hash and explicit origin/format. Raw `input` or `autonomy` manifests are refused
@@ -77,16 +78,38 @@ limits, risk, review, rejection criteria and minimum deliveries/families.
 It also records declaration/update times and the frozen split's canonical hash.
 Each registration binds case/family/split, policy hash, original input hash,
 acceptance hash, enrollment time and actual controls.
-Split freeze and policy update must precede enrollment; all precede outcome.
-Missing criteria and post-outcome changes remain visible exclusions.
+Split freeze and policy update must precede enrollment. Each case identifies an
+`execution_start_source` whose hash-pinned `execution-start` document binds the
+case, the canonical fingerprint of its complete registration, and controls equal
+to the outcome's executed controls. Exactly one registration must match the case.
+Freeze, policy declaration/update and enrollment must strictly precede that start;
+start must strictly precede outcome completion. Declaration cannot follow update.
+Missing starts, equal timestamps, reversed chronology and mismatched bindings are
+explicit exclusions, never inferred prospective evidence. Legacy captures without
+start evidence remain readable and excluded; historical snapshots are not repaired.
 
 Controls record version, component/input/template SHA-256, model, effort,
 host, transport, preparation, review, resolved numeric budgets, memory SHA-256
 and procedure SHA-256. Outcome controls must match registered controls.
 Baseline controls must match every axis except the declared treatment axis.
-Combined requires explicit isolated memory/procedure/preparation/review controls.
+Combined requires `isolated_comparisons` in its registration: exactly four entries
+with `arm`, `case_id`, `protocol_sha256` and `outcome_sha256`, one per isolated
+memory/procedure/preparation/review arm. These reference selected cases evaluated
+by this same evaluator, not supplied validity flags or component names. Each must
+be eligible after identity and split checks, nonsynthetic, successful, from the
+same family and split, with the same frozen split hash, acceptance hash and full
+baseline controls. Its isolated outcome must finish before combined enrollment.
+Each isolated treatment must equal the combined treatment and differ from baseline;
+all other control axes remain subject to the isolated-arm checks. Protocol/outcome
+pins must match the actually read sources. Memory/procedure comparator outputs must
+also bind their baseline/current input/template hashes, model, effort, host,
+transport and budgets to the isolated executed controls. Missing, replay-only,
+unrelated or internally invalid comparisons yield `combined_isolation_unproven`.
 Memory and procedure additionally require their existing technical comparator.
 These metadata checks are not proof that an untrusted producer ran the case.
+The context comparator explicitly rejects own budget keys `__proto__`,
+`constructor` and `prototype` at every depth, including a declared budget policy.
+They cannot normalize into an accepted empty observation or matched binding.
 Optional repetition numbers are reported; missing repetitions are not invented.
 No causal variability estimate is inferred from a few repeated package rows.
 

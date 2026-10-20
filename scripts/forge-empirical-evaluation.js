@@ -112,9 +112,11 @@ function describeCase(item, candidate, sources, reports) {
   const policy = protocol?.data?.candidate;
   const split = protocol?.data?.split;
   const result = outcome?.data;
-  const registration = Array.isArray(protocol?.data?.registrations) ? protocol.data.registrations.find(row => row.case_id === item.id) : null;
+  const registrations = Array.isArray(protocol?.data?.registrations) ? protocol.data.registrations.filter(row => row.case_id === item.id) : [];
+  const registration = registrations.length === 1 ? registrations[0] : null;
+  const start = sources.get(item.execution_start_source);
   const sourceIds = [candidate.protocol_source, item.outcome_source, item.baseline_source,
-    item.context_source, item.procedure_source].filter(Boolean);
+    item.context_source, item.procedure_source, item.execution_start_source].filter(Boolean);
   for (const id of sourceIds) if (!sources.get(id)?.data) reasons.push(`source_unavailable:${id}`);
   if (protocol?.ref.kind !== 'protocol' || outcome?.ref.kind !== 'outcome' || !['baseline', 'baseline-report'].includes(baseline?.ref.kind)) reasons.push('source_kind_mismatch');
   if (sourceIds.some(id => reports.get(id)?.replay_only)) reasons.push('historical_report_replay_only');
@@ -135,6 +137,16 @@ function describeCase(item, candidate, sources, reports) {
       || registration.policy_sha256 !== fingerprint(policy || {}) || !HASH.test(registration.original_input_sha256 || '')
       || !HASH.test(registration.acceptance_sha256 || '') || !before(registration.enrolled_at, result?.occurred_at)
       || !before(policy?.updated_at, registration.enrolled_at) || !before(split?.frozen_at, registration.enrolled_at)) reasons.push('registration_missing_or_not_prior');
+  if (start?.ref.kind !== 'execution-start' || !object(start?.data) || start.data.case_id !== item.id
+      || start.data.registration_sha256 !== fingerprint(registration || {})
+      || !validControls(start.data.controls) || fingerprint(start.data.controls) !== fingerprint(result?.controls || {})) reasons.push('execution_start_unbound');
+  if (!before(start?.data?.started_at, result?.occurred_at)
+      || !before(registration?.enrolled_at, start?.data?.started_at)
+      || !before(split?.frozen_at, start?.data?.started_at)
+      || !before(policy?.declared_at, start?.data?.started_at)
+      || !before(policy?.updated_at, start?.data?.started_at)
+      || !time(policy?.declared_at) || !time(policy?.updated_at)
+      || Date.parse(policy.declared_at) > Date.parse(policy.updated_at)) reasons.push('execution_chronology_unproven');
   if (!validControls(registration?.controls) || !validControls(result?.controls)
       || fingerprint(registration?.controls || {}) !== fingerprint(result?.controls || {})) reasons.push('executed_controls_unbound');
   if (registration?.original_input_sha256 !== result?.controls?.input_sha256) reasons.push('original_input_unbound');
@@ -142,8 +154,6 @@ function describeCase(item, candidate, sources, reports) {
     preparation: ['preparation'], review: ['review'], combined: ['memory_sha256', 'procedure_sha256', 'preparation', 'review'] }[candidate.arm];
   if (!validControls(result?.baseline_controls) || !validControls(result?.controls)
       || CONTROL_FIELDS.filter(key => !changed.includes(key)).some(key => fingerprint(result.baseline_controls[key]) !== fingerprint(result.controls[key]))) reasons.push('non_equivalent_controls');
-  if (candidate.arm === 'combined' && (!Array.isArray(result?.isolated_components)
-      || !['memory', 'procedure', 'preparation', 'review'].every(key => result.isolated_components.includes(key)))) reasons.push('combined_isolation_unproven');
   const measured = reports.get(item.baseline_source)?.cases?.find(row => row.id === item.baseline_case_id);
   if (!measured || measured.delivery_id !== item.delivery_id) reasons.push('baseline_case_unbound');
   if (measured?.diagnostics?.length) reasons.push('baseline_source_diagnostic');
@@ -155,7 +165,9 @@ function describeCase(item, candidate, sources, reports) {
     family_id: item.family_id, split: item.split, evidence_type: item.evidence_type, synthetic,
     eligible: reasons.length === 0, exclusions: [...new Set(reasons)].sort(), failed: result?.status === 'failed',
     policy: policyView(policy), registration: project(registration, ['case_id', 'family_id', 'split', 'policy_sha256',
-      'original_input_sha256', 'acceptance_sha256', 'enrolled_at']), outcome: result ? { occurred_at: time(result.occurred_at) ? result.occurred_at : null,
+      'original_input_sha256', 'acceptance_sha256', 'enrolled_at', 'isolated_comparisons']), execution_start: start?.data ? {
+      started_at: time(start.data.started_at) ? start.data.started_at : null, registration_sha256: HASH.test(start.data.registration_sha256 || '') ? start.data.registration_sha256 : null
+    } : null, outcome: result ? { occurred_at: time(result.occurred_at) ? result.occurred_at : null,
       status: ['completed', 'failed'].includes(result.status) ? result.status : null, controls: validControls(result.controls) ? result.controls : null,
       baseline_controls: validControls(result.baseline_controls) ? result.baseline_controls : null,
       repetition: Number.isSafeInteger(result.repetition) && result.repetition >= 0 ? result.repetition : null } : null,
@@ -211,7 +223,7 @@ function buildEmpiricalEvaluation(input, options = {}) {
       } else if (ref.kind === 'context-comparison') reports.set(ref.id, buildContextComparison(source.data));
       else if (ref.kind === 'procedure-evidence') reports.set(ref.id, buildProcedureEvidence(source.data.before, source.data.after, { synthetic: ref.synthetic }));
       else if (['baseline-report', 'context-report', 'procedure-report'].includes(ref.kind)) reports.set(ref.id, readReportReplay(ref.kind, source.data));
-      else if (!['protocol', 'outcome'].includes(ref.kind)) fail('source_kind_invalid');
+      else if (!['protocol', 'outcome', 'execution-start'].includes(ref.kind)) fail('source_kind_invalid');
     } catch (error) {
       source.data = null;
       diagnostics.push({ source_id: ref.id, code: label(error.code) ? error.code : 'source_invalid' });
@@ -227,7 +239,7 @@ function buildEmpiricalEvaluation(input, options = {}) {
     if (!object(item) || !['id', 'delivery_id', 'candidate_id', 'family_id', 'baseline_source', 'baseline_case_id', 'outcome_source'].every(key => label(item[key]))
         || !SPLITS.includes(item.split) || !['historical', 'prospective', 'synthetic'].includes(item.evidence_type)
         || typeof item.synthetic !== 'boolean' || !candidates.has(item.candidate_id)
-        || ['context_source', 'procedure_source'].some(key => item[key] !== undefined && !label(item[key]))
+        || ['context_source', 'procedure_source', 'execution_start_source'].some(key => item[key] !== undefined && !label(item[key]))
         || (item.evidence_type === 'synthetic' && !item.synthetic)
         || (item.split === 'prospective' && item.evidence_type === 'historical')) fail('case_metadata_invalid');
     const prior = unique.get(item.id);
@@ -245,6 +257,41 @@ function buildEmpiricalEvaluation(input, options = {}) {
   for (const row of cases) if (cases.some(other => other.family_id === row.family_id && other.split !== row.split
       && !(new Set([other.split, row.split]).size === 2 && ['reserved', 'prospective'].includes(other.split) && ['reserved', 'prospective'].includes(row.split)))) {
     row.eligible = false; row.exclusions.push('family_split_contamination');
+  }
+  // Resolve only fully evaluated isolated cases after identity/split checks.
+  // Imported component names or a claimed valid/comparable flag are no evidence.
+  const axes = { memory: 'memory_sha256', procedure: 'procedure_sha256', preparation: 'preparation', review: 'review' };
+  for (const row of cases.filter(item => item.arm === 'combined')) {
+    const refs = row.registration?.isolated_comparisons;
+    const proven = row.eligible && Array.isArray(refs) && refs.length === 4 && Object.entries(axes).every(([arm, axis]) => {
+      const matches = refs.filter(ref => object(ref) && ref.arm === arm);
+      if (matches.length !== 1) return false;
+      const ref = matches[0]; const isolated = cases.find(item => item.id === ref.case_id);
+      const selected = unique.get(ref.case_id); const candidate = candidates.get(isolated?.candidate_id);
+      if (!isolated?.eligible || isolated.arm !== arm || isolated.synthetic || isolated.failed
+          || isolated.family_id !== row.family_id || isolated.split !== row.split
+          || ref.protocol_sha256 !== sources.get(candidate?.protocol_source)?.ref.sha256
+          || ref.outcome_sha256 !== sources.get(selected?.outcome_source)?.ref.sha256
+          || !HASH.test(ref.protocol_sha256 || '') || !HASH.test(ref.outcome_sha256 || '')
+          || !before(isolated.outcome?.occurred_at, row.registration?.enrolled_at)
+          || isolated.policy?.split_sha256 !== row.policy?.split_sha256
+          || isolated.registration?.acceptance_sha256 !== row.registration?.acceptance_sha256
+          || fingerprint(isolated.outcome?.baseline_controls) !== fingerprint(row.outcome?.baseline_controls)
+          || fingerprint(isolated.outcome?.controls?.[axis]) !== fingerprint(row.outcome?.controls?.[axis])
+          || fingerprint(row.outcome?.controls?.[axis]) === fingerprint(row.outcome?.baseline_controls?.[axis])) return false;
+      // Tie the actual comparator variants to the executed input and controls.
+      const technical = arm === 'memory' ? reports.get(selected.context_source)?.cases?.find(item => item.case_id === isolated.id)
+        : arm === 'procedure' ? reports.get(selected.procedure_source)?.comparison?.cases?.[0] : null;
+      if (!['memory', 'procedure'].includes(arm)) return true;
+      return technical?.comparable === true && ['baseline', 'current'].every(variant => {
+        const observed = technical.variants.find(item => item.variant === variant);
+        const controls = isolated.outcome[variant === 'baseline' ? 'baseline_controls' : 'controls'];
+        return observed && ['input_sha256', 'template_sha256'].every(key => observed.conditions[key] === controls[key])
+          && ['effort', 'host', 'transport'].every(key => observed.identity[key] === controls[key])
+          && observed.identity.model_sent === controls.model && fingerprint(observed.budgets) === fingerprint(controls.budgets);
+      });
+    });
+    if (!proven) { row.eligible = false; row.exclusions.push('combined_isolation_unproven'); }
   }
   const populations = Object.fromEntries(SPLITS.map(split => [split, cases.filter(row => row.split === split)]));
   const real = cases.filter(row => !row.synthetic);
