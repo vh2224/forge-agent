@@ -676,6 +676,114 @@ test('appends pending context inside the artifact while rejecting paths outside 
   assert.throws(() => renderPrompt({ ...baseOptions(cwd, 'execute-task'), pendingContextFile: outside }), /must stay inside/);
 });
 
+
+test('canonical memory selection matches bundle once with owner separate from code and hostile query as data', () => {
+  const cwd = tempWorkspace('selection-owner');
+  const codeDir = tempWorkspace('selection-code');
+  const description = 'quasar memory "quoted"\n$(touch NEVER_EXECUTE) & echo private';
+  require('./forge-memory.js').writeFragment(cwd, { unit_id: 'T01', facts: [{
+    mem_id: 'MEM011', category: 'pattern', text: 'quasar memory context', confidence_base: 0.9,
+    created_at: '2026-07-01T00:00:00Z', source_unit: 'execute-task/T01',
+  }], stats: [] });
+  let calls = 0; let observed;
+  const options = { ...baseOptions(cwd, 'execute-task'), memories: undefined, description, memoryLimit: 3,
+    memoryMaxTokens: 180, isolationMode: 'worktree', branch: 'fixture', codeDir,
+    onMemorySelection: value => { calls++; observed = value; } };
+  const native = renderPrompt(options);
+  const bundle = require('./forge-context-bundle.js').buildContextBundleResult({ owner: cwd, cwd: codeDir,
+    query: description, unitType: 'execute-task', limit: 3, maxTokens: 180 });
+  assert.strictEqual(calls, 1);
+  assert.deepStrictEqual(observed.selected, bundle.selection.selected);
+  assert.strictEqual(observed.unit_type, 'execute-task');
+  assert.strictEqual((native.prompt.match(/\[T01\/MEM011\]/g) || []).length, 1);
+  assert(native.prompt.includes('[END DATA FROM "AUTO-MEMORY"]'));
+  assert(!JSON.stringify(observed).includes(description));
+  assert(!JSON.stringify(observed).includes(cwd));
+  assert(!Object.hasOwn(observed, 'markdown'));
+  assert(!fs.existsSync(path.join(cwd, 'NEVER_EXECUTE')));
+});
+
+test('zero and minimum budgets disable providers and direct data without pruning mandatory template', () => {
+  const cwd = tempWorkspace('zero-budget');
+  for (const setting of [{ memoryLimit: 0 }, { memoryMaxTokens: 0 }, { memoryMaxTokens: 1 }]) {
+    let calls = 0;
+    const rendered = renderPrompt({ ...baseOptions(cwd, 'execute-task'), ...setting, memories: undefined,
+      memoryProvider: () => { calls++; throw Error('must not run'); } });
+    assert.strictEqual(calls, 0);
+    assert(rendered.prompt.includes('Security Checklist'));
+    assert(rendered.prompt.includes('Follow steps'));
+    const direct = renderPrompt({ ...baseOptions(cwd, 'execute-task'), ...setting, memories: 'DROP-ME' });
+    assert(!direct.prompt.includes('DROP-ME'));
+  }
+  let calls = 0;
+  const rendered = renderPrompt({ ...baseOptions(cwd, 'execute-task'), memories: undefined,
+    memoryProvider: () => { calls++; throw Error('optional'); } });
+  assert.strictEqual(calls, 1);
+  assert(rendered.prompt.includes('Security Checklist'));
+  const templateDir = path.join(cwd, 'broken-template'); fs.mkdirSync(templateDir);
+  fs.writeFileSync(path.join(templateDir, 'execute-task.md'), 'WORKING_DIR: {WORKING_DIR}\n{TOP_MEMORIES}\n{UNKNOWN_REQUIRED}\n');
+  assert.throws(() => renderPrompt({ ...baseOptions(cwd, 'execute-task'), memories: undefined, templateDir,
+    memoryProvider: () => { throw Error('optional'); } }), /UNKNOWN_REQUIRED/);
+  const limited = renderPrompt({ ...baseOptions(cwd, 'execute-task'), memoryLimit: 1, memories: ['KEEP-FIRST', 'DROP-SECOND'] });
+  assert(limited.prompt.includes('KEEP-FIRST') && !limited.prompt.includes('DROP-SECOND'));
+});
+
+test('CLI preserves numeric zero aliases and reads multiline query files without shell evaluation', () => {
+  const cwd = tempWorkspace('cli-zero');
+  const queryFile = path.join(cwd, 'query.txt');
+  fs.writeFileSync(queryFile, 'quasar "quote"\n$(touch NEVER_EXECUTE)');
+  for (const base of [{ memoryLimit: 0 }, { memory_limit: 0 }, { memoryMaxTokens: 0 }, { memory_max_tokens: 1 }]) {
+    const cli = spawnSync(process.execPath, [SCRIPT, '--cwd', cwd, '--unit-type', 'execute-task',
+      '--milestone', 'M001', '--slice', 'S01', '--task', 'T01', '--memory-query-file', queryFile,
+      '--vars-json', JSON.stringify({ ...base, memories: 'DROP-ME' }), '--print-prompt'], { encoding: 'utf8' });
+    assert.strictEqual(cli.status, 0, cli.stderr);
+    assert(!cli.stdout.includes('DROP-ME'));
+  }
+});
+
+test('four actual bundle caller argv forward resolved budgets and real problem file safely', () => {
+  const cwd = tempWorkspace('callers-owner');
+  const planFile = path.join(cwd, 'problem.txt');
+  fs.writeFileSync(planFile, 'quasar "quoted"\n$(touch NEVER_EXECUTE) & echo private');
+  const sources = ['shared/forge-dispatch.md', 'shared/forge-sidecar-auto.md', 'shared/forge-sidecar-next.md', 'skills/forge-task/SKILL.md'];
+  for (const relative of sources) {
+    const source = fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
+    const extraction = source.match(/node -e "(let d='';process.stdin[^\n]+auto_memory \?\? 2000[^\n]+)"\)/);
+    assert(extraction, relative + ' resolves the existing per-unit prefs');
+    for (const budget of [0, 1, 77, undefined]) {
+      const resolved = spawnSync(process.execPath, ['-e', extraction[1]], { input: JSON.stringify({ prefs: { token_budget: { auto_memory: budget } } }), encoding: 'utf8' });
+      assert.strictEqual(resolved.status, 0, resolved.stderr);
+      assert.strictEqual(resolved.stdout, String(budget ?? 2000));
+    }
+    const match = source.match(/node "\$FORGE_SCRIPTS_DIR\/forge-context-bundle\.js" ([\s\S]*?)--out "\$CTX_BUNDLE"/);
+    assert(match, relative);
+    const command = match[0].replace(/\\\r?\n\s*/g, ' ');
+    const tokens = command.match(/"[^"]*"|\S+/g).slice(2).map(token => token.replace(/^"|"$/g, ''));
+    const out = path.join(cwd, 'bundle.md'); const report = path.join(cwd, 'selection.json');
+    const replacements = { '$WORKING_DIR': cwd, '$PLAN_PATH': planFile, '$MEMORY_LIMIT': '2', '$MEMORY_MAX_TOKENS': '0',
+      '$MEMORY_SELECTION': report, '$CTX_BUNDLE': out };
+    const argv = tokens.map(token => replacements[token] ?? token.replaceAll('$WORKING_DIR', cwd));
+    const value = flag => argv[argv.indexOf(flag) + 1];
+    assert.strictEqual(value('--owner'), cwd); assert.strictEqual(value('--cwd'), cwd);
+    assert.strictEqual(value('--query-file'), planFile); assert.strictEqual(value('--phase'), 'execute');
+    assert.strictEqual(value('--limit'), '2'); assert.strictEqual(value('--max-tokens'), '0');
+    const loose = relative.startsWith('skills/');
+    assert.strictEqual(value('--unit-type'), loose ? 'execute-loose-task' : 'execute-task');
+    assert.strictEqual(value('--unit-id'), loose ? '{TASK_ID}' : '{T##}');
+    assert.strictEqual(value('--task-id'), loose ? '{TASK_ID}' : '{T##}');
+    assert.strictEqual(argv.includes('--milestone-id'), !loose);
+    assert.strictEqual(argv.includes('--slice-id'), !loose);
+    assert(/--cwd "(?:\$CODE_DIR|\$\{CODE_DIR:-\.\})"/.test(source));
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'forge-context-bundle.js'), ...argv], { encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, relative + result.stderr);
+    const selection = JSON.parse(fs.readFileSync(report, 'utf8'));
+    assert.strictEqual(selection.status, 'disabled');
+    assert(!JSON.stringify(selection).includes('NEVER_EXECUTE'));
+    assert(!JSON.stringify(selection).includes(cwd));
+    assert(!fs.existsSync(path.join(cwd, 'NEVER_EXECUTE')));
+  }
+});
+
 process.on('exit', () => {
   for (const root of tempRoots) {
     try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) { /* best effort */ }

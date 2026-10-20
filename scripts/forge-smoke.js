@@ -2277,6 +2277,12 @@ function runXllm(args, mockDir, cwd, extraEnv) {
   const env = mockDir
     ? { ...process.env, PATH: mockDir + path.delimiter + process.env.PATH, FORGE_XLLM_CODEX_BIN: path.join(mockDir, 'codex-mock.js') }
     : { ...process.env, PATH: '' };
+  // Mock agy has no effort transport; isolate global prefs while retaining local negative fixtures.
+  if (cwd && args.includes('agy') && args.includes('--engine')) {
+    env.FORGE_HOME = path.join(cwd, 'fixture-forge-home');
+    fs.mkdirSync(env.FORGE_HOME, { recursive: true });
+    fs.writeFileSync(path.join(env.FORGE_HOME, 'forge-agent-prefs.jsonc'), '{}\n');
+  }
   if (extraEnv) Object.assign(env, extraEnv);
   const r = spawnSync(process.execPath, [xllmPath, ...args], {
     encoding: 'utf8',
@@ -2515,6 +2521,18 @@ function smokeXllm() {
       'L: agy normalized verdict has verdict=maintained and reason', `stdout=${r.stdout}`);
     cleanup(dir);
     cleanup(mockDir);
+  }
+
+  // Explicit unsupported effort still refuses before the mock provider can spawn.
+  {
+    const dir = mkTmp('xllm-agy-effort');
+    fs.writeFileSync(path.join(dir, '.gsd', 'forge-prefs.jsonc'),
+      JSON.stringify({ review: { challenge_effort: 'high' } }));
+    const r = runXllm(['--mode', 'challenge', '--engine', 'agy', '--diff-cmd', 'echo diff', '--cwd', dir], null, dir);
+    assert(r.status !== 0 && /effort-transport-unsupported/.test(r.stderr)
+      && /provider_called=false/.test(r.stderr),
+      'agy explicit unsupported effort refuses pre-spawn', `status=${r.status} stderr=${r.stderr}`);
+    cleanup(dir);
   }
 
   // Scenario M — unknown --engine value is rejected up front.
@@ -3463,34 +3481,26 @@ async function smokeSidecarContextParity() {
     assert(buildContextBundle({ cwd: empty }) === '', '69f: bundle assembler tolerates empty sources');
     cleanup(empty);
 
-    // 69g: memory limiting must actually cap entries. If firstMemoryEntries() matches the
-    // wrong delimiter (e.g. a markdown `###` heading that renderMemory never emits), the
-    // "starts.length <= limit" guard always passes and the whole fragments file leaks
-    // through uncapped — this fixture reproduces that regression class directly by writing
-    // real memory fragments (the only supported input to renderMemory) and re-reading
-    // through the real assembler.
+    // 69g: select relevance beyond the old first-ten position, then enforce caps.
     const memRoot = mkTmp('sidecar-context-memlimit');
     const memoryMod = require('./forge-memory.js');
-    const entryCount = 15;
     const facts = [];
-    for (let i = 1; i <= entryCount; i++) {
-      const id = `MEM${String(i).padStart(3, '0')}`;
-      facts.push({
-        mem_id: id,
-        category: 'pattern',
-        text: `Fixture entry number ${i} for context-bundle capping.`,
-        confidence_base: 0.9 - i * 0.01, // strictly descending -> deterministic rank order
-        created_at: '2026-07-01T00:00:00Z',
-        source_unit: 'execute-task/T01',
-      });
+    for (let i = 1; i <= 15; i++) {
+      facts.push({ mem_id: `MEM${String(i).padStart(3, '0')}`, category: 'pattern',
+        text: i === 11 ? 'quasar nebula relevant memory' : 'unrelated capping fixture',
+        confidence_base: 0.9 - i * 0.01, created_at: '2026-07-01T00:00:00Z', source_unit: 'execute-task/T01' });
     }
     memoryMod.writeFragment(memRoot, { unit_id: 'T01', facts, stats: [] });
-    const memBundle = buildContextBundle({ cwd: memRoot });
-    const cappedDelimiters = (memBundle.match(/^<!-- gsd-auto-memory /gm) || []).length;
-    assert(cappedDelimiters === 10,
-      `69g: memory section is capped at 10 entries (got ${cappedDelimiters})`, memBundle.slice(0, 400));
-    assert(memBundle.includes('MEM001') && !memBundle.includes('MEM011'),
-      '69g: capped bundle keeps the highest-ranked entries and drops entries past the limit', memBundle.slice(0, 400));
+    const selectionOptions = { cwd: memRoot, unitType: 'execute-task', query: 'quasar nebula', limit: 1, maxTokens: 180 };
+    const memBundle = buildContextBundle(selectionOptions);
+    assert(memBundle.includes('MEM011') && !memBundle.includes('MEM001'),
+      '69g: relevant memory after the tenth position reaches the bundle', memBundle);
+    assert((memBundle.match(/^- \[/gm) || []).length === 1 && memBundle.length <= 180 * 4,
+      '69g: selected entries respect cap and budget', memBundle);
+    assert(!buildContextBundle({ ...selectionOptions, query: '' }).includes('Project Memory')
+      && !buildContextBundle({ ...selectionOptions, query: 'no-match-term' }).includes('Project Memory')
+      && !buildContextBundle({ ...selectionOptions, maxTokens: 0 }).includes('Project Memory'),
+      '69g: no query, no match and explicit zero omit optional memory');
     cleanup(memRoot);
 
     const sourcePaths = ['shared/forge-dispatch.md', 'skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md', 'skills/forge-task/SKILL.md'];
@@ -5064,6 +5074,10 @@ function smokeRouting() {
     '      standard: [claude-sonnet-5]\n' +
     '      fallback: gpt-5-codex\n'
   );
+  const kPrefsPath = path.join(dirK, '.gsd', 'forge-prefs.jsonc');
+  const kPrefs = JSON.parse(fs.readFileSync(kPrefsPath, 'utf8'));
+  kPrefs.tier_models = { standard: 'claude-sonnet-5' };
+  fs.writeFileSync(kPrefsPath, JSON.stringify(kPrefs));
   const rK = resolveRoute({ unitType: 'execute-task', tier: 'standard', domain: 'backend', cwd: dirK });
   assert(/fallback-invalid-substituted/.test(rK.reason), '(k) fallback gpt → reason fallback-invalid-substituted', rK.reason);
   assert(rK.fallback.id !== 'gpt-5-codex' && modelFamily(rK.fallback.id) === 'claude',

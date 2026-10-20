@@ -1072,7 +1072,17 @@ node "$FORGE_SCRIPTS_DIR/forge-surgical-reset.js" --state-update \
 # Canonical context-parity semantics: shared/forge-dispatch.md § Branch C; Security is a must-have, the bundle informational, and missing files are tolerated.
 SECURITY_FILE="${PLAN_PATH%-PLAN.md}-SECURITY.md"
 CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
-node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" --out "$CTX_BUNDLE"
+# PLAN_PATH is the persisted real problem/description; never evaluate its text.
+MEMORY_MAX_TOKENS=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(String(JSON.parse(d).prefs?.token_budget?.auto_memory ?? 2000)))")
+MEMORY_LIMIT="${MEMORY_LIMIT-10}"
+MEMORY_SELECTION="${CTX_BUNDLE%.md}-selection.json"
+node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" --owner "$WORKING_DIR" \
+  --query-file "$PLAN_PATH" --unit-type "execute-loose-task" --phase execute \
+  --unit-id "{TASK_ID}" --task-id "{TASK_ID}" \
+  --limit "$MEMORY_LIMIT" --max-tokens "$MEMORY_MAX_TOKENS" \
+  --selection-report "$MEMORY_SELECTION" --out "$CTX_BUNDLE"
+# Owner retains this sanitized report with this unit's measurement context (no global log).
+# CODE_DIR remains the transport cwd below; the bundle reads owner artifacts only.
 # Credential-boundary assertion: the only runtime value admitted to argv is the public enum.
 # SIDECAR_DECLARED is consumed as the resolver's recorded boolean; false is refused, never re-coerced.
 case "$HOST_RUNTIME" in claude|codex) ;; *) echo "✗ invalid-host-runtime: expected claude|codex" >&2; exit 2 ;; esac

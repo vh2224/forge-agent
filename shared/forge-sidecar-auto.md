@@ -91,8 +91,18 @@ When `REASON` is `sidecar-cap-exceeded` or one of the two `CODE_DIR` refusals (`
   ```bash
   SECURITY_FILE="${PLAN_PATH%-PLAN.md}-SECURITY.md"
   CTX_BUNDLE=$(mktemp -t forge-ctx-bundle.XXXXXX.md)
-  node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" \
-    --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" --out "$CTX_BUNDLE"
+  # PLAN_PATH is the persisted real problem/description; never evaluate its text.
+  MEMORY_MAX_TOKENS=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(String(JSON.parse(d).prefs?.token_budget?.auto_memory ?? 2000)))")
+  MEMORY_LIMIT="${MEMORY_LIMIT-10}"
+  MEMORY_SELECTION="${CTX_BUNDLE%.md}-selection.json"
+  node "$FORGE_SCRIPTS_DIR/forge-context-bundle.js" --cwd "$WORKING_DIR" --owner "$WORKING_DIR" \
+    --query-file "$PLAN_PATH" --unit-type "execute-task" --phase execute \
+    --unit-id "{T##}" --milestone-id "{M###}" --slice-id "{S##}" --task-id "{T##}" \
+    --slice-context "$WORKING_DIR/.gsd/milestones/{M###}/slices/{S##}/{S##}-CONTEXT.md" \
+    --limit "$MEMORY_LIMIT" --max-tokens "$MEMORY_MAX_TOKENS" \
+    --selection-report "$MEMORY_SELECTION" --out "$CTX_BUNDLE"
+  # Owner retains this sanitized report with this unit's measurement context (no global log).
+  # CODE_DIR remains the transport cwd below; the bundle reads owner artifacts only.
   node "$FORGE_SCRIPTS_DIR/forge-xllm.js" --mode execute \
     --host-runtime "$HOST_RUNTIME" --sidecar-declared \
     --plan "$PLAN_PATH" --result-file "$RESULT_FILE" --cwd "$CODE_DIR" --context-root "$WORKING_DIR" \
