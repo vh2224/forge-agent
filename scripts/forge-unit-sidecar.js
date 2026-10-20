@@ -1311,11 +1311,21 @@ async function runUnitSidecarCore(request, runtime, identity) {
     // Never overwrite the validated response if publication was interrupted.
     if (!replayable) json(receiptFile, { ...record, phase: 'failed', failure });
     json(resultFile, failure);
-    require('./forge-attempt-recovery').captureFailure({ stateFile: r.recoveryStateFile || `${resultFile}.recovery.json`,
-      unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`, contract: r.execution_contract,
-      request: r, finalEvidence: record.final_evidence, route, receiptFile, error: { ...error, provider_called: failure.provider_called },
-      layer: failure.layer || detail.reason, packagedContext: record.execution?.packaged_context,
-      budgets: record.execution?.budgets, durationMs: record.started_at ? Date.now() - Date.parse(record.started_at) : 0 });
+    try {
+      require('./forge-attempt-recovery').captureFailure({ stateFile: r.recoveryStateFile || `${resultFile}.recovery.json`,
+        unit: `${r.unitType}/${r.taskId || r.sliceId || r.milestoneId}`, contract: r.execution_contract,
+        request: r, finalEvidence: record.final_evidence, route, receiptFile, error: { ...error, provider_called: failure.provider_called },
+        layer: failure.layer || detail.reason, packagedContext: record.execution?.packaged_context,
+        budgets: record.execution?.budgets, durationMs: record.started_at ? Date.now() - Date.parse(record.started_at) : 0 });
+    } catch (captureError) {
+      // Strict recovery validation can refuse contracts such as memory-extract.
+      // Preserve the original adapter error and expose the secondary refusal;
+      // no recovery state or authorization is fabricated for an invalid identity.
+      failure.recovery = 'unavailable';
+      failure.recovery_reason_code = require('./forge-attempt-telemetry').code(captureError.code, 'recovery-capture-failed');
+      if (!replayable) json(receiptFile, { ...record, phase: 'failed', failure });
+      json(resultFile, failure);
+    }
     try { await event('failed', code, detail, failure.provider_called,
       loc.reviewFix ? { boundary: loc.reviewFix.boundary, items_total: reviewFixItemsTotal(r) } : null); }
     catch { /* Unproved owner drift cannot be adopted just to log a failure. */ }
