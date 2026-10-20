@@ -16696,16 +16696,16 @@ function smokeVerifyReverifyChildSideE2E() {
   // dir so callers can build CLI paths (`path.join(copyScriptsDir, ...)`)
   // that resolve `require()`s inside the copy, never the real tree. Some
   // scripts reach up to `../shared/**` (e.g. forge-xllm.js's
-  // `../shared/schemas/*.json`) — a symlink from the copy root back to the
-  // REAL `shared/` dir preserves that relative resolution read-only,
-  // without copying (or ever writing to) it.
+  // `../shared/schemas/*.json`) — physically copy `shared/` too so mandatory
+  // procedure validation resolves its corpus inside the copied runtime,
+  // preserving root containment without ever writing to the real tree.
   function withRewriteModuleDisabled(fn) {
     const copyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'smoke110-repo-copy-'));
     const copyScriptsDir = path.join(copyRoot, 'scripts');
     try {
       fs.cpSync(SCRIPTS, copyScriptsDir, { recursive: true });
       fs.rmSync(path.join(copyScriptsDir, 'forge-command-rewrite.js'), { force: true });
-      fs.symlinkSync(path.join(SCRIPTS, '..', 'shared'), path.join(copyRoot, 'shared'), 'dir');
+      fs.cpSync(path.join(SCRIPTS, '..', 'shared'), path.join(copyRoot, 'shared'), { recursive: true });
       return fn(copyScriptsDir);
     } finally {
       try { fs.rmSync(copyRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
