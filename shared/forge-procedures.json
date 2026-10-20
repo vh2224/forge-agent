@@ -185,8 +185,8 @@
     {
       "id": "review",
       "path": "shared/forge-procedure-review.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "ae657aceae8d212d254daf46d293308a7e5bc64152d7798f2a50ddc381c28030",
+      "status": "ready",
       "owner": "T05",
       "dependencies": [
         "core"

@@ -1,5 +1,18 @@
 # Forge Review — Dialectic Confrontation
 
+Mandatory composition: load `core` + `review` through
+`forge-procedure-context.loadProcedureContext` for `review-challenger`,
+`review-advocate`, `review-rebuttal` and `review-fix` before dispatch. The canonical
+shared obligations live in `shared/forge-procedure-review.md`; this compatibility
+entry retains the detailed boundary protocol and result schemas below.
+The real external xllm drivers compose these modules before transport; correction
+does so in its existing preflight/build contract, preserving claims and gates.
+An adapter failure keeps stdout empty and exits nonzero, while stderr preserves
+the closed reason_code and re-sanitized diagnostic. Missing observed model/provider
+remain unknown. Review pairing is independent of execution tier chains: if no
+configured candidate is available, preserve explicit failure/handoff and do not
+silently import that chain. A module never authorizes model/engine replacement.
+
 Nos reviews externos, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`. Ao capturar o JSON do stdout com `$(...)`, preserve o stderr do adaptador e repasse literalmente as linhas `[forge-sidecar]` na conversa.
 
 > Host-aware review delivery: after resolving pairing, Claude reviewer/advocate

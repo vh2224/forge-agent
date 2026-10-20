@@ -16,6 +16,9 @@ const claude = require('./forge-claude-sidecar');
 const unit = require('./forge-unit-sidecar');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
+const { loadProcedureContext } = require('./forge-procedure-context');
+const sourceRoot = path.resolve(__dirname, '..');
+const procedure = loadProcedureContext({ cwd: sourceRoot, phase: 'research-milestone' });
 const oldBin = process.env.FORGE_XLLM_CLAUDE_BIN;
 const provider = path.join(root, 'provider.js');
 fs.writeFileSync(provider, `
@@ -66,6 +69,11 @@ let sequence = 0;
 function request(output) {
   const cwd = path.join(root, `workspace-${++sequence}`);
   fs.mkdirSync(path.join(cwd, '.gsd/milestones/M001'), { recursive: true });
+  // Stage the actual mandatory closure in the project fixture. Isolated HOME and
+  // an absent personal installation must not prevent reaching the adapter seam.
+  fs.mkdirSync(path.join(cwd, 'shared'));
+  fs.copyFileSync(path.join(sourceRoot, 'shared/forge-procedures.json'), path.join(cwd, 'shared/forge-procedures.json'));
+  for (const module of procedure.modules) fs.copyFileSync(path.join(sourceRoot, module.path), path.join(cwd, module.path));
   fs.writeFileSync(path.join(cwd, '.gsd/PROJECT.md'), '# Fixture project');
   fs.writeFileSync(path.join(cwd, '.gsd/milestones/M001/M001-CONTEXT.md'), '# Fixture context');
   fs.writeFileSync(path.join(cwd, '.gsd/forge-prefs.jsonc'), JSON.stringify({
@@ -155,6 +163,7 @@ test('real rendered research prompt, simulated provider, publication and replay 
   const result = await unit.runUnitSidecar(r);
   assert.equal(result.status, 'done');
   const prompt = fs.readFileSync(path.join(r.cwd, 'observed-prompt.txt'), 'utf8');
+  assert(prompt.includes(procedure.content), 'real research prompt retains the staged mandatory closure');
   for (const text of ['Research codebase', 'Sidecar delivery contract', requiredPath,
     '921600', '524288', 'compact or multiline', 'auto_commit', `effort: ${r.route.effort}`]) assert(prompt.includes(text), text);
   for (const artifact of p.artifacts) assert.equal(fs.readFileSync(path.join(r.cwd, artifact.path), 'utf8'), artifact.content);

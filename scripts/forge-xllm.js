@@ -102,7 +102,10 @@ const {
   parseSvnBaseline,
 } = require('./forge-surgical-reset.js');
 const dispatchPolicy = require('./forge-dispatch-policy.js');
-const { invokeClaudeSidecar, claudeLaunchIdentity, CLAUDE_IDENTITY_MESSAGES } = require('./forge-claude-sidecar.js');
+const { invokeClaudeSidecar, claudeLaunchIdentity, CLAUDE_IDENTITY_MESSAGES, CLAUDE_SIDECAR_REASON_CODES } = require('./forge-claude-sidecar.js');
+const { diagnostic } = require('./forge-sidecar-diagnostic');
+const { loadProcedureContext } = require('./forge-procedure-context');
+const { composeProcedurePrompt } = require('./forge-prompt');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity.js');
 const vcs = require('./forge-vcs.js');
 const { classifyError, isTransient } = require('./forge-classify-error.js');
@@ -180,7 +183,7 @@ function identityStage(opts, stage, extra = {}) {
     ...(opts._reviewEffort ? { effort_requested: opts._reviewEffort.effort_requested,
       effort_resolved: opts._reviewEffort.effort_resolved, effort_planned: opts._reviewEffort.effort_planned,
       effort_sent: stage === 'iniciado' || context.started ? context.fields.effort : null, effort_applied: null } : {}), ...extra,
-    provider_called: stage === 'iniciado' || context.started });
+    provider_called: Object.hasOwn(extra, 'provider_called') ? extra.provider_called : stage === 'iniciado' || context.started });
 }
 
 // Resolve at the public consumer boundary, before identity or any provider turn.
@@ -213,6 +216,27 @@ function reviewCallOptions(mode, opts) {
     ...(thinkingRequested ? { thinkingRequested } : {}) };
 }
 
+// Only adapter vocabulary and re-sanitized diagnostic fields cross the CLI.
+// A local process/elapsed duration does not establish a remote provider call.
+function reviewFailureDiagnostic(error = {}) {
+  const safeDiagnostic = diagnostic(error.diagnostic?.reason, error.diagnostic);
+  const knownCodes = [...Object.values(CLAUDE_SIDECAR_REASON_CODES),
+    'procedure-manifest-missing', 'procedure-manifest-invalid', 'procedure-file-unreadable',
+    'procedure-module-pending', 'procedure-integrity-mismatch', 'procedure-phase-unmapped',
+    'review-prefs-invalid', 'review-effort-invalid'];
+  return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
+    diagnostic: safeDiagnostic,
+    provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
+    model_observed: safeDiagnostic.model_observed || null };
+}
+
+function loadReviewProcedure(mode, opts) {
+  const phase = { challenge: 'review-challenger', defend: 'review-advocate',
+    rebuttal: 'review-rebuttal', fix: 'review-fix' }[mode];
+  return loadProcedureContext({ phase, cwd: opts.cwd || process.cwd(),
+    forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
+}
+
 async function withSidecarIdentity(mode, opts, driver) {
   const dispatchId = opts.identity?.dispatch_id || opts.dispatchId || normalizeDispatchId(null, mode);
   const context = { requested: false, started: false, attempted: false, fields: null };
@@ -227,9 +251,11 @@ async function withSidecarIdentity(mode, opts, driver) {
     if (!context.fields) context.fields = { phase: opts.identity?.phase || mode, unit: opts.identity?.unit || mode,
       engine: opts.engine || 'codex', transport: opts.engine === 'claude' ? 'claude-cli' : opts.engine === 'agy' ? 'agy-cli' : 'app-server',
       model_sent: '-', effort: opts.effort, host: opts.hostRuntime, dispatch_id: dispatchId };
+    const reviewFailure = ['challenge', 'defend', 'rebuttal', 'fix'].includes(mode) ? reviewFailureDiagnostic(error) : null;
     identityStage(runOpts, context.started ? 'falhou' : 'recusado', {
-      reason_code: error.code || classifyError(error.message) || 'sidecar-failed',
-      ...(error.layer ? { layer: error.layer } : {}),
+      reason_code: reviewFailure ? reviewFailure.reason_code : error.code || classifyError(error.message) || 'sidecar-failed',
+      ...(reviewFailure ? { provider_called: reviewFailure.provider_called } : {}),
+      ...(!reviewFailure && error.layer ? { layer: error.layer } : {}),
       ...(error.reviewEffort ? { effort_requested: error.reviewEffort.effort_requested,
         effort_resolved: error.reviewEffort.effort_resolved, effort_planned: error.reviewEffort.effort_planned } : {}),
       ...(context.started ? {} : { model_route: opts.model || context.fields.model_sent, model_sent: '-' }),
@@ -1898,7 +1924,8 @@ async function runChallengeCore(opts) {
   authorizeSidecar('challenge', { ...opts, ...sidecarOptions, cwd, engine });
 
   const diffText = acquireDiff(opts.diffCmd, cwd);
-  const prompt = buildChallengePrompt(diffText);
+  const procedure = loadReviewProcedure('challenge', opts);
+  const prompt = composeProcedurePrompt(buildChallengePrompt(diffText), procedure);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -1962,7 +1989,8 @@ async function runDefendCore(opts) {
     inputText = `${inputText}\n\n--- DIFF UNDER REVIEW START ---\n${acquireDiff(opts.diffCmd, cwd)}\n--- DIFF UNDER REVIEW END ---`;
   }
 
-  const prompt = buildDefendPrompt(inputText);
+  const procedure = loadReviewProcedure('defend', opts);
+  const prompt = composeProcedurePrompt(buildDefendPrompt(inputText), procedure);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2018,7 +2046,8 @@ async function runRebuttalCore(opts) {
     throw new Error(`failed to read --input file: ${e.message}`);
   }
 
-  const prompt = buildRebuttalPrompt(inputText);
+  const procedure = loadReviewProcedure('rebuttal', opts);
+  const prompt = composeProcedurePrompt(buildRebuttalPrompt(inputText), procedure);
   opts._sidecarIdentity.attempted = true;
   let transportTelemetry = null;
   const rawContent = await invokeEngine(engine, {
@@ -2261,9 +2290,11 @@ function executeContract(opts) {
 function fixContract(opts) {
   const reviewFix = require('./forge-review-fix');
   const brief = opts.brief;
+  let procedure;
   return {
     mode: 'fix',
     preflight() {
+      procedure = loadReviewProcedure('fix', opts);
       if (!brief || !Array.isArray(brief.items) || !brief.items.length || !Array.isArray(brief.claim_paths)) {
         throw boundaryError('review-fix-brief-required', 'fix mode requires a review-fix brief');
       }
@@ -2271,7 +2302,7 @@ function fixContract(opts) {
     load() { return 'workspace'; },
     readsContextFiles: false,
     buildPrompt(extras) {
-      return reviewFix.buildReviewFixPrompt(brief, { outputChannel: extras.outputChannel, constraints: extras.constraints });
+      return composeProcedurePrompt(reviewFix.buildReviewFixPrompt(brief, { outputChannel: extras.outputChannel, constraints: extras.constraints }), procedure);
     },
     schema: reviewFix.reviewFixSchema,
     validate: value => reviewFix.validateReviewFixResult(value, brief.items),
@@ -2894,6 +2925,8 @@ module.exports = {
   DEFEND_VERDICT_ENUM,
   runExecute,
   runFix,
+  fixContract,
+  reviewFailureDiagnostic,
   runPlan,
   loadSchemaFile,
   challengeSchema,
@@ -3122,7 +3155,14 @@ if (require.main === module) {
       process.exit(0);
     })
     .catch((e) => {
-      process.stderr.write(`forge-xllm: ${e.message}\n`);
+      // Preserve useful fixed local errors for existing CLI consumers without
+      // echoing a parser/provider message, path, stack, stderr or unknown code.
+      const localMessages = ['challenge mode requires --diff-cmd', 'defend mode requires --input <file>',
+        'rebuttal mode requires --input <file>', 'codex app-server produced no agent message (empty output)',
+        ...ENGINE_ENUM.map(value => `${value} output failed defense verdicts validation`)];
+      const failure = reviewFailureDiagnostic(e);
+      if (localMessages.includes(e.message)) failure.message = e.message;
+      process.stderr.write(`forge-xllm: ${JSON.stringify(failure)}\n`);
       process.exit(2);
     });
 }
