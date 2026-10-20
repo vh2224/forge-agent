@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "kind": "public-historical-control",
+  "slice": "S03",
+  "original_path": "scripts/forge-context-comparison.test.js",
+  "snapshot_path": "scripts/fixtures/empirical-corpus/historical/s03-context-comparison.test.js.snapshot",
+  "sha256": "a753b3bd990370a071e400950c8941469b2ef221df48286f97227861cb334690",
+  "source_revision": "b0c2e5bd72bbc760e1ad3285160ac495fa607dc8",
+  "source_commit_date": "2026-10-20T02:25:35-03:00",
+  "source_observed_at": "2026-10-20T05:48:54.831Z",
+  "origin": {
+    "type": "public-checkout",
+    "observation": "S03-CLOSE-AUDIT.json; matching original_path, source_revision and sha256",
+    "revision_verification": "Parent read-only git log -1 --format=%H %cI -- scripts/forge-context-comparison.test.js; diff from source_revision empty"
+  },
+  "migration_observed_at": "2026-10-20T12:30:41.999Z",
+  "migration_source": "current-public-checkout-bytes-matching-original-digest",
+  "classification": "historical-control-not-new-or-reserved",
+  "executable": false
+}

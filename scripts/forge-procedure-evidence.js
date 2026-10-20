@@ -20,7 +20,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const LABEL = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,79}$/;
 const PUBLIC_CONTROLS = Object.freeze([
   { path: 'scripts/fixtures/empirical-corpus/baseline/cases.json', sha256: '12aedd45c5dcc0c00f1278aa9d4cba3b281d51bd0a167695974df733cf4fa2d7', slice: 'S02' },
-  { path: 'scripts/forge-context-comparison.test.js', sha256: 'a753b3bd990370a071e400950c8941469b2ef221df48286f97227861cb334690', slice: 'S03' },
+  { path: 'scripts/fixtures/empirical-corpus/historical/s03-context-comparison.test.js.snapshot', sha256: 'a753b3bd990370a071e400950c8941469b2ef221df48286f97227861cb334690', slice: 'S03' },
 ]);
 const REGRESSIONS = Object.freeze([
   { id: 'R4', file: 'forge-unit-sidecar.test.js', marker: 'native-initial R4 authority/correction/resume:' },
