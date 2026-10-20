@@ -129,7 +129,9 @@ function createSplit(corpus, options) {
     if (digest !== fingerprint(body) || previous.schema_version !== 1 || previous.frozen !== true) fail('freeze_invalid');
     if (previous.freeze_id !== options.freezeId && previous.reserved.some((id) => !exposure.includes(id))) fail('new_freeze_requires_exposure');
   }
-  const priorAdjustment = previous && previous.freeze_id !== options.freezeId ? previous.adjustment : [];
+  const priorAdjustment = previous ? (previous.freeze_id !== options.freezeId
+    ? [...new Set([...(previous.excluded_families || []), ...previous.adjustment])].sort()
+    : previous.excluded_families || []) : [];
   const eligible = families.filter((id) => !exposure.includes(id) && !priorAdjustment.includes(id));
   eligible.sort((a, b) => fingerprint({ seed: corpus.split_policy.seed, family: a }).localeCompare(
     fingerprint({ seed: corpus.split_policy.seed, family: b })));
@@ -140,6 +142,7 @@ function createSplit(corpus, options) {
     membership: corpus.candidates.map((c) => ({ case_id: c.case_id, version: c.version, family_id: c.family_id }))
       .sort((a, b) => `${a.case_id}/${a.version}`.localeCompare(`${b.case_id}/${b.version}`)),
     exposure_registry: structuredClone(corpus.exposure_registry).sort((a, b) => fingerprint(a).localeCompare(fingerprint(b))),
+    ...(priorAdjustment.length ? { excluded_families: priorAdjustment } : {}),
     reserved, adjustment: families.filter((id) => !reserved.includes(id)) };
   split.digest = fingerprint(split);
   if (previous?.freeze_id === options.freezeId && previous.digest !== split.digest) fail('split_frozen');

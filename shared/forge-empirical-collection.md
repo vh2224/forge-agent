@@ -17,8 +17,9 @@ No parsing of prose into successful delivery, installation or human acceptance o
 Each capture has `id`, `root`, `path`, `type`, `format` and usually `ref_id`.
 IDs use ASCII letters, numbers, underscore or hyphen, at most 64 characters.
 Paths are relative to the caller-supplied root and cannot contain traversal or flags.
-The T02 path contract also rejects literal @ characters, including versioned directory
-names; report this limitation rather than encode or bypass the validated reader.
+Literal @ characters are supported, including versioned directories and repeated @.
+Supply the unencoded relative path: the SVN reader percent-encodes each segment,
+then appends the separately validated numeric peg revision.
 `type` is local or svn; `format` is raw, json or jsonl.
 SVN captures add `request` with operation info, log, list or cat.
 Except for local info, requests require numeric string `revision` and `peg`.
@@ -93,3 +94,34 @@ Compare historical components with authorized git show reads without checkout ch
 Record exact revisions, argv, hashes, timestamps with timezone and source limitations privately.
 Owner records before/after readonly checkout checks and concrete gaps for final delivery.
 Synthetic tests only prove the pipeline; they cannot satisfy real historical truths.
+
+## Replay, freeze and publication checks
+
+Collection replay compares freshly validated readiness, counts, gaps and capture
+identities with the persisted result, then rechecks the stored snapshot and document
+hashes. Altering a derived result does not create a valid replay.
+
+Each baseline row identifies the canonical case/version pair; multiple versions
+remain distinct while coverage denominators still count deliveries. Coverage lookups
+use that same pair. A split records earlier adjustment exclusions when advancing to
+a new freeze, and reuses them when regenerating its own persisted record.
+
+Freeze inventory includes the transitive modules actually executing validation and
+measurement, plus the schema and templates. Run the freeze/verify script from the
+same physical code root passed as code-dir, including when using an isolated worktree.
+A different executing root or changed dependency refuses verification. Regenerate a
+new freeze after reviewed code changes; earlier freezes remain immutable.
+
+Verbose SVN logs may include sibling paths from the same commit. Both changed and
+copy-from paths must stay inside the caller-authorized subtree; mixed commits are
+rejected before capture. A log gap does not authorize widening that subtree.
+JSON documents each consume one record from the same cumulative session budget used
+by JSONL records. An autonomy compatibility limit does not discard the documentary
+snapshot, and never increases the canonical autonomy cap.
+
+Publication audit scans working bytes, diffs and each exact index blob with bounded
+readonly Git queries, including NUL-containing and attribute-marked binary content.
+It records the index mode, object ID, byte count and SHA-256, then rechecks index
+identity and blob hashes before returning. Reviewed synthetic working bytes exempt
+only an identical reviewed index blob from the generic sensitive-content finding;
+private-content matches always fail.

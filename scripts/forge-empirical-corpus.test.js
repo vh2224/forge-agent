@@ -27,6 +27,10 @@ check(complete.agent_input_refs.join() === 'before', 'grader solution excluded')
 check(base.candidates[0].metrics.cost.value === null && base.candidates[0].metrics.uat.value === null, 'missing metrics stay null');
 const two = validateCorpus(matrix.cases.find((c) => c.name === 'two-revisions-one-delivery').corpus);
 check(two.counts.candidates === 2 && two.counts.deliveries === 1 && two.counts.versions === 2 && two.counts.revisions === 2, 'version dedupe');
+const versions = matrix.cases.find((c) => c.name === 'two-revisions-one-delivery').corpus;
+const reopenedVersion = versions.candidates.find((c) => c.version === 'v2');
+check(reopenedVersion.refs.includes('revision-two') && !reopenedVersion.refs.includes('final'), 'v2 binds revision two final code');
+check(reopenedVersion.metrics.operational.refs.includes('revision-two'), 'v2 operational metric binds revision two');
 const distinct = validateCorpus(matrix.cases.find((c) => c.name === 'different-deliveries-identical-bytes').corpus);
 check(distinct.counts.deliveries === 2, 'identical hashes do not merge deliveries');
 const candidate = base.candidates[0];

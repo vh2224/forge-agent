@@ -93,6 +93,17 @@ try {
   }
   equal(read(session({ limits: { references: 2 } }, jsonl)).autonomy.reason, 'autonomy_reference_limit');
   equal(read(session({ limits: { records: 2 } }, jsonl)).autonomy.reason, 'autonomy_record_limit');
+  source('{"a":1}');
+  const oneJson = session({ limits: { records: 1 } });
+  equal(read(oneJson).autonomy.compatible, true);
+  equal(read(oneJson).autonomy.reason, 'autonomy_record_limit');
+  const mixedManifest = structuredClone(manifest); mixedManifest.sources.push({ ...mixedManifest.sources[0], id: 'lines', format: 'jsonl' });
+  const mixed = session({ limits: { records: 1 } }, mixedManifest);
+  equal(read(mixed).autonomy.compatible, true);
+  equal(readLocalSource(mixed, 'lines', 'mixed-lines.jsonl').autonomy.reason, 'autonomy_record_limit');
+  const reverse = session({ limits: { records: 1 } }, mixedManifest);
+  equal(readLocalSource(reverse, 'lines', 'reverse-lines.jsonl').autonomy.compatible, true);
+  equal(read(reverse).autonomy.reason, 'autonomy_record_limit');
   source(`${JSON.stringify('x'.repeat(MAX_FILE_BYTES))}\n`);
   equal(read(session({}, jsonl)).autonomy.reason, 'indivisible_over_autonomy_cap');
   source('{"a":1}\ninvalid\n'); equal(read(session({}, jsonl)).autonomy.reason, 'jsonl_malformed');

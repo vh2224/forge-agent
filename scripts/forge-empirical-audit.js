@@ -32,17 +32,26 @@ function auditPublication(manifest, trusted) {
     if (total > LIMITS.totalBytes) fail('audit_budget_exceeded');
     return result.buffer;
   };
-  const git = (cwd, args, allowed = [0]) => {
+  const git = (cwd, args, allowed = [0], binary = false) => {
     const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
     for (const key of Object.keys(env)) if (/^GIT_(?:DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|CONFIG.*|.*PATHSPECS)$/i.test(key)) delete env[key];
     // check-ignore accepts concrete names and rejects literal pathspec magic.
     const run = (trusted.runner || spawnSync)('git', [...(args[0] === 'check-ignore' ? [] : ['--literal-pathspecs']), ...args], { cwd, shell: false, windowsHide: true,
-      encoding: 'utf8', timeout: LIMITS.commandMs, maxBuffer: LIMITS.fileBytes,
+      encoding: binary ? null : 'utf8', timeout: LIMITS.commandMs, maxBuffer: LIMITS.fileBytes,
       env });
-    if (run.error || run.signal || !allowed.includes(run.status) || typeof run.stdout !== 'string') fail('audit_command_failed');
+    if (run.error || run.signal || !allowed.includes(run.status) || (binary ? !Buffer.isBuffer(run.stdout) : typeof run.stdout !== 'string')) fail('audit_command_failed');
     total += Buffer.byteLength(run.stdout);
     if (total > LIMITS.totalBytes) fail('audit_budget_exceeded');
     return run;
+  };
+  const indexEntry = (name) => {
+    const listing = git(code, ['ls-files', '--stage', '-z', '--', name]).stdout;
+    const rows = listing.split('\0').filter(Boolean);
+    if (rows.length > 1) fail('audit_index_unmerged');
+    if (!rows.length) return null;
+    const match = /^(\d{6}) ([a-f0-9]{40,64}) 0\t([\s\S]+)$/.exec(rows[0]);
+    if (!match || match[3] !== name) fail('audit_index_invalid');
+    return { mode: match[1], oid: match[2] };
   };
   const reviews = manifest.reviewed_synthetic || [];
   if (!Array.isArray(reviews) || reviews.length > manifest.public_paths.length) fail('audit_review_invalid');
@@ -92,11 +101,25 @@ function auditPublication(manifest, trusted) {
       ['-c', 'core.quotePath=true', 'diff', '--no-ext-diff', '--no-textconv', ...args, '--', name]).stdout);
     inspect(bytes.toString('utf8'), index, tracked ? 'tracked' : 'declared_untracked', Boolean(review));
     diffs.forEach((diff, i) => inspect(diff, index, i ? 'staged_diff' : 'working_diff'));
-    publicRows.push({ index, sha256: sha256(bytes), bytes: bytes.length, tracked, diff_sha256: fingerprint(diffs) });
+    const staged = indexEntry(name);
+    if (staged) {
+      const sizeText = git(code, ['cat-file', '-s', staged.oid]).stdout.trim();
+      if (!/^(?:0|[1-9]\d*)$/.test(sizeText) || Number(sizeText) > LIMITS.fileBytes) fail('audit_index_blob_too_large');
+      const blob = git(code, ['cat-file', 'blob', staged.oid], [0], true).stdout;
+      if (blob.length !== Number(sizeText)) fail('audit_index_changed');
+      staged.sha256 = sha256(blob); staged.bytes = blob.length;
+      inspect(blob.toString('utf8'), index, 'index_blob', Boolean(review && review.sha256 === staged.sha256));
+    }
+    publicRows.push({ index, staged, sha256: sha256(bytes), bytes: bytes.length, tracked, diff_sha256: fingerprint(diffs) });
   }
   // Detect changes while scanning, without modifying the audited workspace.
   for (const [index, name] of manifest.private_paths.entries()) if (sha256(read(owner, name)) !== privateRows[index].sha256) fail('audit_source_changed');
   for (const [index, name] of manifest.public_paths.entries()) if (sha256(read(code, name)) !== publicRows[index].sha256) fail('audit_source_changed');
+  for (const [index, name] of manifest.public_paths.entries()) {
+    const current = indexEntry(name); const staged = publicRows[index].staged;
+    if (fingerprint(current) !== fingerprint(staged && { mode: staged.mode, oid: staged.oid })) fail('audit_index_changed');
+    if (staged && sha256(git(code, ['cat-file', 'blob', staged.oid], [0], true).stdout) !== staged.sha256) fail('audit_index_changed');
+  }
   const body = { schema_version: 1, passed: !findings.length, scope: 'explicit-manifest-only',
     manifest_digest: fingerprint(manifest), public: publicRows, private: privateRows, findings, reviewed_findings: reviewedFindings,
     limitations: ['bounded_scan_not_universal_secret_detection', 'undeclared_paths_not_audited',

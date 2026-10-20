@@ -62,6 +62,17 @@ function packageObservation(context) {
 }
 
 try {
+  test('canonical case versions retain distinct rows and delivery denominator', () => {
+    const s = setup([{ kind: 'tests', id: 'check', passed: true, checks: [{ id: 't', exit_code: 0 }] }], 'canonical');
+    s.c.case_id = 'canonical'; s.c.version = 'v1'; s.c.id = 'version:one'; s.c.delivery_id = 'delivery:one';
+    const second = { ...s.c, id: 'version:two', version: 'v2', sources: [source(s.area, 'canonical', [{ kind: 'tests', id: 'check', passed: false, checks: [{ id: 't', exit_code: 1 }] }])] };
+    s.input.cases.push({ ...second, sources: s.c.sources });
+    assert.equal(s.report().cases.length, 2, 'identical evidence does not collapse distinct versions');
+    s.input.cases[1] = second; const report = s.report();
+    assert.equal(report.cases.length, 2); assert.equal(report.coverage.tests.denominator, 1);
+    assert.equal(report.cases[0].dimensions.tests.value, 1); assert.equal(report.cases[1].dimensions.tests.value, 0);
+    assert(report.cases.every((r) => r.diagnostics.length === 0));
+  });
   test('independent dimensions, partial checks, denominators and observed zero cost', () => {
     const area = directory('matrix');
     const cases = fixture.cases.map((c) => ({ id: c.id, delivery_id: c.delivery_id, conditions: c.conditions,

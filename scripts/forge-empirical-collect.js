@@ -144,6 +144,12 @@ function collectCorpus(input, trusted) {
     checkedPath(runPath);
     const previous = readPrivate(path.join(runPath, 'collection.json'));
     if (previous.identity !== identity) fail('replay_identity_mismatch');
+    const captureIdentity = (rows) => rows.map((c) => ({ id: c.id, ref_id: c.ref_id, status: c.status, reason: c.reason,
+      ...(c.metadata ? { metadata: Object.fromEntries(['sha256', 'bytes', 'origin', 'path', 'repository', 'subtree', 'revision', 'peg', 'temporal_source', 'argv', 'semantic_fingerprint']
+        .filter((key) => c.metadata[key] !== undefined).map((key) => [key, c.metadata[key]])) } : {}) }));
+    if (previous.ready !== (checked.ready && gaps.length === 0) || fingerprint(previous.counts) !== fingerprint(checked.counts) ||
+        fingerprint(previous.gaps) !== fingerprint(gaps) || fingerprint(captureIdentity(previous.captures)) !== fingerprint(captureIdentity(captures)))
+      fail('replay_derived_changed');
     for (const row of previous.captures.filter((c) => c.status === 'observed')) {
       const expected = path.resolve(base, row.metadata.snapshot);
       if (path.relative(base, expected).startsWith('..')) fail('replay_path_invalid');
@@ -152,6 +158,12 @@ function collectCorpus(input, trusted) {
       if (bytes.error || sha256(bytes.buffer) !== row.metadata.sha256) fail('replay_snapshot_changed');
     }
     for (const name of ['selection', 'catalog', 'provenance']) if (fingerprint(readPrivate(path.join(runPath, `${name}.json`))) !== previous.documents[name]) fail('replay_document_changed');
+    const storedCatalog = readPrivate(path.join(runPath, 'catalog.json'));
+    for (const row of previous.captures.filter((c) => c.status === 'observed' && c.ref_id)) {
+      const ref = storedCatalog.references.find((r) => r.id === row.ref_id);
+      if (!ref || ref.state !== 'observed' || ref.path !== row.metadata.snapshot ||
+          ref.sha256 !== row.metadata.sha256 || ref.bytes !== row.metadata.bytes) fail('replay_capture_changed');
+    }
     return { ...previous, replay: true, private_root: runPath };
   }
   directory(trusted, runName);

@@ -59,7 +59,7 @@ function observationsFor(c, roots, diagnostics) {
       if (ref.format === 'document') { documents.push({ ...reference, pointer: '/', canonical: false }); continue; }
       if (ref.format !== 'observations') fail('source_format_invalid');
       const source = JSON.parse(bytes.toString('utf8'));
-      if (source.schema_version !== 1 || source.case_id !== c.id || !Array.isArray(source.observations) ||
+      if (source.schema_version !== 1 || source.case_id !== (c.case_id || c.id) || !Array.isArray(source.observations) ||
           source.observations.length > 1000) fail('observation_source_invalid');
       if (source.observations.some((o) => !o || !safe(o.id) || !safe(o.kind))) fail('observation_identity_invalid');
       source.observations.forEach((observation, index) => {

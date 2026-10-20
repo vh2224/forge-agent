@@ -40,6 +40,8 @@ function relativeFile(root, file) {
 // The collection's persisted document digests are rechecked before using any classification.
 function prepareFreeze(options) {
   const root = evidenceRoot(options); const code = checkedPath(options.codeDir);
+  if (code !== checkedPath(path.resolve(__dirname, '..'))) fail('freeze_code_root_mismatch');
+  for (const row of RUNTIME_COMPONENTS) if (sha256(readFile(code, row.path)) !== row.sha256) fail('freeze_drift');
   if (!['diagnostic', 'comparative'].includes(options.mode) || !/^[A-Za-z0-9_-]{1,64}$/.test(options.revision || '')) fail('freeze_options_invalid');
   const inventory = [];
   const capture = (region, name) => {
@@ -79,7 +81,7 @@ function prepareFreeze(options) {
   const observationRefs = options.observationRefs || [];
   if (!Array.isArray(observationRefs) || observationRefs.some((id) => !catalog.references.some((r) => r.id === id))) fail('observation_refs_invalid');
   const adjustments = catalog.candidates.filter((c) => split.adjustment.includes(c.family_id));
-  const baselineInput = { schema_version: 1, cases: adjustments.map((c) => ({ id: c.case_id, delivery_id: c.delivery_id,
+  const baselineInput = { schema_version: 1, cases: adjustments.map((c) => ({ id: `version:${fingerprint({ case_id: c.case_id, version: c.version })}`, case_id: c.case_id, version: c.version, delivery_id: c.delivery_id,
     sources: c.refs.map((id) => catalog.references.find((r) => r.id === id)).filter((r) => r.state === 'observed').map((r) =>
       ({ id: r.id, path: r.path, sha256: r.sha256, origin: 'captured-corpus', format: observationRefs.includes(r.id) ? 'observations' : 'document' })) })) };
   const baseline = buildEmpiricalBaseline(baselineInput, { roots: [root], synthetic: options.synthetic === true });
@@ -96,12 +98,12 @@ function prepareFreeze(options) {
   if (adjustments.filter((c) => c.selection === 'included').some((c) => !views.some((v) => v.case_id === c.case_id && v.version === c.version))) gaps.push('agent_input_unverified');
   const protocol = capture('evidence', relativeFile(root, options.protocol));
   if (!protocol.toString('utf8').trim()) fail('protocol_empty');
-  const components = [...new Set([...COMPONENTS, ...(options.components || [])])].sort();
+  const components = [...new Set([...COMPONENTS, ...RUNTIME_COMPONENTS.map((row) => row.path), ...(options.components || [])])].sort();
   for (const name of components) capture('code', name);
   const coverage = { schema_version: 1, dimensions: baseline.coverage, cases: catalog.candidates.map((c) => ({
-    case_id: c.case_id, family_id: c.family_id, selection: c.selection, stratum: c.stratum,
+    case_id: c.case_id, version: c.version, family_id: c.family_id, selection: c.selection, stratum: c.stratum,
     phases: PHASES.map((phase) => {
-      const metric = baseline.cases.find((row) => row.id === c.case_id)?.dimensions[
+      const metric = baseline.cases.find((row) => row.id === `version:${fingerprint({ case_id: c.case_id, version: c.version })}`)?.dimensions[
         { verification_review: 'tests', recovery: 'exception' }[phase]];
       const sources = metric?.references || [];
       return { phase, state: sources.length ? metric.state : 'unknown', sources,
@@ -109,7 +111,7 @@ function prepareFreeze(options) {
     }),
     sources: c.refs, limitations: c.coverage.limitations })) };
   // A document may inform later design; it is not reconstructed prework or an outcome.
-  const conditions = { node: process.version, platform: process.platform, arch: process.arch,
+  const conditions = { runtime_root: code, runtime: RUNTIME_COMPONENTS, node: process.version, platform: process.platform, arch: process.arch,
     baseline_method: 'explicit-documents-or-observations', input_provenance: 'caller-reviewed-digest-bound',
     configuration: 'documentary-baseline-no-external-preferences', templates: 'hashed-inventory-not-token-or-provider-measurement',
     protocol_sha256: sha256(protocol), synthetic: options.synthetic === true };
@@ -175,6 +177,20 @@ function cli(argv) {
     protocol: args['--protocol'], revision: args['--revision'], mode: args['--mode'], freezeFile: args['--freeze-file'] };
   return args['--verify'] ? verifyFreeze(options) : freezeCorpus(options);
 }
+
+// Bind the transitive modules actually loaded by this runtime, not another checkout.
+const runtimeModules = new Set();
+function collectRuntimeModules(loaded) {
+  if (runtimeModules.has(loaded.filename)) return;
+  const relative = path.relative(path.resolve(__dirname, '..'), loaded.filename);
+  if (path.isAbsolute(relative) || relative.startsWith('..')) fail('freeze_runtime_foreign');
+  runtimeModules.add(loaded.filename);
+  loaded.children.forEach(collectRuntimeModules);
+}
+collectRuntimeModules(module);
+const RUNTIME_COMPONENTS = [...runtimeModules].sort().map((file) => ({
+  path: path.relative(path.resolve(__dirname, '..'), file).split(path.sep).join('/'),
+  sha256: sha256(fs.readFileSync(file)) }));
 
 module.exports = { freezeCorpus, verifyFreeze, prepareFreeze, cli };
 if (require.main === module) {

@@ -259,6 +259,25 @@ try {
     rejects(() => createSplit(s.corpus, { freezeId: 'freeze-one', reservedCount: 0, previous }), 'split_frozen');
     rejects(() => createSplit(s.corpus, { freezeId: 'freeze-two', reservedCount: 2, previous }), 'reserved_insufficient');
   });
+  test('new freeze persists unexposed adjustment exclusions and regenerates itself', () => {
+    const s = setup(); s.corpus.candidates = s.corpus.candidates.slice(0, 4); s.corpus.exposure_registry = [];
+    const previous = createSplit(s.corpus, { freezeId: 'unexposed-v1', reservedCount: 1 });
+    for (const id of previous.reserved) s.corpus.exposure_registry.push({ family_id: id, refs: [], purpose: 'evaluated', captured_at: s.corpus.captured_at });
+    const fresh = structuredClone(s.corpus.candidates[0]);
+    fresh.unit.id = 'T-20260101120000-new-2'; fresh.delivery_key = 'new-2'; fresh.family_key = 'new-2';
+    Object.assign(fresh, require('./forge-empirical-corpus').caseIdentity(fresh));
+    fresh.refs = fresh.refs.map((id, i) => {
+      const ref = { ...s.corpus.references.find((r) => r.id === id), id: `fresh-${i}`, path: `reserved/fresh-${i}.txt` };
+      s.corpus.references.push(ref); return ref.id;
+    });
+    s.corpus.candidates.push(fresh);
+    const next = createSplit(s.corpus, { freezeId: 'unexposed-v2', reservedCount: 1, previous });
+    check(next.excluded_families.length === previous.adjustment.length, 'exclusion provenance persisted');
+    check(next.reserved[0] === fresh.family_id, 'only fresh enrollment reserved');
+    check(createSplit(s.corpus, { freezeId: next.freeze_id, reservedCount: 1, previous: next }).digest === next.digest, 'own freeze replay retains exclusions');
+    s.trusted.split = next; build(s);
+    check(true, 'input graph accepts regenerated new split');
+  });
   test('reserved cases and their prework references never enter tuning package', () => {
     const s = setup(); const reserved = s.corpus.candidates.find((c) => s.trusted.split.reserved.includes(c.family_id));
     s.manifest.case_id = reserved.case_id;

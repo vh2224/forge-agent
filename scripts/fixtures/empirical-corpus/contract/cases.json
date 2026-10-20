@@ -1490,7 +1490,7 @@
               "before",
               "criteria",
               "expected",
-              "final"
+              "revision-two"
             ],
             "claims": [],
             "metrics": {
@@ -1506,7 +1506,7 @@
                 "state": "observed",
                 "value": "exception",
                 "refs": [
-                  "final"
+                  "revision-two"
                 ],
                 "limitations": []
               },

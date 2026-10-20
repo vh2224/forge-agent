@@ -148,7 +148,8 @@ function autonomyParts(buffer, format, sourceHash, context) {
   if (context.references >= context.limits.references) return limitation('autonomy_reference_limit');
   if (format === 'json') {
     try { JSON.parse(buffer.toString('utf8')); } catch (_) { return limitation('json_malformed'); }
-    context.references++;
+    if (context.records >= context.limits.records) return limitation('autonomy_record_limit');
+    context.records++; context.references++;
     return { compatible: true, parts: [{ buffer, source_sha256: sourceHash, start_record: 0, records: 1 }] };
   }
   if (!Buffer.from(buffer.toString('utf8')).equals(buffer)) return limitation('jsonl_encoding_invalid');

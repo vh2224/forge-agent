@@ -78,6 +78,15 @@ try {
   equal(fs.readFileSync(captured.metadata.snapshot, 'utf8'), cases.content);
   equal(read(handle, { operation: 'log', revision: '2', peg: '2' }, 'parent').metadata.removal_cause, 'unknown');
   equal(read(handle, { operation: 'list', revision: '2', peg: '2' }, 'parent').metadata.entries, 1);
+  for (const foreign of ['/foreign/private.txt', '/project-sibling/private.txt']) {
+    const mixedLog = cases.log.replace('</paths>', `<path action="M">${foreign}</path></paths>`);
+    const scoped = identified({ runner: (bin, args, opts) => args[0] === 'info' ? mockRunner(bin, args, opts) : { status: 0, stdout: Buffer.from(mixedLog), stderr: Buffer.alloc(0) } });
+    const rejected = readHistoricalSource(scoped, 'parent', { operation: 'log', revision: '2', peg: '2' }, `foreign-${serial++}.xml`);
+    equal(rejected.reason, 'svn_log_path_foreign'); equal(rejected.metadata, undefined);
+  }
+  const copyLog = cases.log.replace('action="D"', 'action="A" copyfrom-path="/foreign/private.txt" copyfrom-rev="1"');
+  const copyScoped = identified({ runner: (bin, args, opts) => args[0] === 'info' ? mockRunner(bin, args, opts) : { status: 0, stdout: Buffer.from(copyLog), stderr: Buffer.alloc(0) } });
+  equal(read(copyScoped, { operation: 'log', revision: '2', peg: '2' }, 'parent').reason, 'svn_log_path_foreign');
   let response = { status: 0, stdout: Buffer.from(cases.info), stderr: Buffer.alloc(0) };
   const custom = identified({ runner: () => { calls++; return response; } });
   response = { status: 1, stdout: Buffer.from('partial'), stderr: Buffer.from('password=SECRET private/path') };
@@ -147,10 +156,30 @@ try {
     }
     const latest = read(real, { operation: 'cat', revision: '2', peg: '2' }, 'literal0');
     equal(latest.status, 'observed'); equal(fs.readFileSync(latest.metadata.snapshot, 'utf8'), 'changed in r2\n');
+    // SVN returns whole-commit changed paths even for a narrow URL log target.
+    fs.writeFileSync(path.join(wc, 'history', 'retained.txt'), 'scoped r3');
+    fs.writeFileSync(path.join(wc, cases.literal_paths[0]), 'foreign r3');
+    setup('svn', ['commit', wc, '-m', 'mixed scope r3', '--non-interactive', '--no-auth-cache']);
+    const narrowManifest = { schema_version: 1, sources: [
+      { id: 'scoped', root: 'fixture', path: 'retained.txt', type: 'svn', format: 'raw' },
+      { id: 'copied', root: 'fixture', path: 'copied.txt', type: 'svn', format: 'raw' }] };
+    const narrow = validateSourceManifest(narrowManifest, { owner, milestone, capability: 'offline', roots: [
+      { id: 'fixture', path: path.join(wc, 'history'), repository: repoUrl, subtree: `${repoUrl}/history` }] });
+    equal(narrow.valid, true);
+    equal(readHistoricalSource(narrow.session, 'scoped', { operation: 'info' }, 'narrow-info.xml').status, 'observed');
+    const mixedReal = readHistoricalSource(narrow.session, 'scoped', { operation: 'log', revision: '3', peg: '3' }, 'narrow-mixed.xml');
+    equal(mixedReal.reason, 'svn_log_path_foreign'); equal(fs.existsSync(path.join(evidence, 'narrow-mixed.xml')), false);
+    fs.writeFileSync(path.join(wc, 'history', 'retained.txt'), 'scoped r4');
+    setup('svn', ['commit', wc, '-m', 'pure scope r4', '--non-interactive', '--no-auth-cache']);
+    equal(readHistoricalSource(narrow.session, 'scoped', { operation: 'log', revision: '4', peg: '4' }, 'narrow-pure.xml').status, 'observed');
+    setup('svn', ['copy', `${repoUrl}/${cases.literal_paths[0].split('/').map(encodeURIComponent).join('/')}@4`, path.join(wc, 'history', 'copied.txt')]);
+    setup('svn', ['commit', wc, '-m', 'foreign copy provenance r5', '--non-interactive', '--no-auth-cache']);
+    const copiedReal = readHistoricalSource(narrow.session, 'copied', { operation: 'log', revision: '5', peg: '5' }, 'narrow-copy.xml');
+    equal(copiedReal.reason, 'svn_log_path_foreign'); equal(fs.existsSync(path.join(evidence, 'narrow-copy.xml')), false);
     const status = spawnSync('svn', ['status', wc], { cwd: temp, shell: false, windowsHide: true, timeout: 5000, maxBuffer: 4096 });
     equal(status.status, 0); equal(status.stdout.length, 0);
     equal(fs.existsSync(path.join(wc, 'history', 'removed.txt')), false);
-    integration = 'passed:file-repository-r1-r2; literal-at paths and numeric operative/peg bytes';
+    integration = 'passed:file-repository-r1-r5; literal-at operative/peg bytes; mixed-scope and foreign-copy log rejected before capture';
   }
   console.log(`empirical-svn: ${assertions} assertions passed; mock calls ${calls}; integration ${integration}; no network`);
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

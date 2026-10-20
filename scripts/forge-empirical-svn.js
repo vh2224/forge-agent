@@ -80,6 +80,20 @@ function inspectOutput(buffer, request, built, context) {
     const lower = Math.min(Number(request.revision), Number(request.endRevision || request.revision));
     const upper = Math.max(Number(request.revision), Number(request.endRevision || request.revision));
     if (parsed.revisions.some((entry) => entry.rev < lower || entry.rev > upper)) fail('svn_revision_foreign');
+    // SVN verbose logs contain all changed paths of each matching commit.
+    // Reject mixed commits before any snapshot captures sibling metadata.
+    const repositoryPath = decodeURIComponent(new URL(built.repository).pathname).replace(/\/$/, '');
+    const subtreePath = decodeURIComponent(new URL(built.subtree).pathname);
+    const scope = subtreePath.slice(repositoryPath.length).replace(/\/$/, '') || '/';
+    const within = (value) => typeof value === 'string' && value.startsWith('/') &&
+      !/[\\\x00-\x1f]/.test(value) && !value.split('/').some((p) => p === '.' || p === '..') &&
+      (scope === '/' || value === scope || value.startsWith(scope + '/'));
+    for (const entry of entries) {
+      for (const row of child(entry, 'paths').children) {
+        if (row.name !== 'path' || !within(row.text) ||
+            (row.attrs['copyfrom-path'] !== undefined && !within(row.attrs['copyfrom-path']))) fail('svn_log_path_foreign');
+      }
+    }
     return { entries: entries.length, removal_cause: 'unknown' };
   }
   const entries = child(document, 'list').children.filter((entry) => entry.name === 'entry');

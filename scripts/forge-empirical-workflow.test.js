@@ -80,6 +80,42 @@ try {
   check(freezeCorpus(complete).comparative_ready, 'full synthetic pipeline init collect view baseline freeze');
   check(verifyFreeze({ ...options, freezeFile: path.join(evidence, 'freeze-comparative-v1', 'freeze.json') }).passed, 'comparative replay revalidates graphs and metrics');
   check(freezeCorpus({ ...options, revision: 'diagnostic-v2' }).baseline_digest === diagnostic.baseline_digest, 'second generation retains semantic digest');
+  const multi = structuredClone(manifest);
+  const version2 = structuredClone(multi.catalog.candidates[0]); version2.version = 'v2'; version2.reopened = true;
+  const ref2 = { ...multi.catalog.references.find((r) => r.id === version2.refs[3]), id: 'revision-two' };
+  multi.catalog.references.push(ref2); version2.refs[3] = ref2.id; multi.catalog.candidates.push(version2);
+  fs.writeFileSync(path.join(source, 'revision-two.txt'), 'Synthetic version two final code.');
+  multi.captures.push({ ...captures[3], id: ref2.id, ref_id: ref2.id, path: 'revision-two.txt' });
+  const multiCollection = collectCorpus(multi, trusted);
+  const multiOptions = { ...options, collection: path.join(multiCollection.private_root, 'collection.json'), revision: 'multiversion' };
+  const multiFreeze = freezeCorpus(multiOptions);
+  const multiBaseline = json(path.join(evidence, 'freeze-multiversion/baseline/BASELINE.json'));
+  const multiCoverage = json(path.join(evidence, 'freeze-multiversion/coverage-map.json'));
+  check(multiBaseline.cases.length === selected.split.adjustment.length + 1 && new Set(multiBaseline.cases.map((r) => r.id)).size === multiBaseline.cases.length, 'multiversion freeze preserves distinct baseline rows');
+  check(multiBaseline.coverage.tests.denominator === selected.split.adjustment.length, 'multiversion denominator remains deliveries');
+  check(multiCoverage.cases.filter((r) => r.case_id === version2.case_id).map((r) => r.version).sort().join() === 'v1,v2', 'coverage retains both versions');
+  check(verifyFreeze({ ...multiOptions, freezeFile: path.join(evidence, 'freeze-multiversion/freeze.json') }).baseline_digest === multiFreeze.baseline_digest, 'multiversion freeze regenerates');
+  const runtimeCopy = path.join(root, 'runtime-copy'); fs.mkdirSync(runtimeCopy);
+  for (const row of json(freezeFile).inventory.filter((r) => r.region === 'code')) {
+    const target = path.join(runtimeCopy, row.path); fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(codeDir, row.path), target);
+  }
+  const childFreeze = (op, opts) => {
+    const child = spawnSync(process.execPath, ['-e', `try { console.log(JSON.stringify(require('./scripts/forge-empirical-freeze')[${JSON.stringify(op)}](${JSON.stringify(opts)}))); } catch (e) { console.log(JSON.stringify({ error: e.code })); }`],
+      { cwd: runtimeCopy, encoding: 'utf8', shell: false, windowsHide: true, timeout: 15000 });
+    assert.equal(child.status, 0, child.stderr); return JSON.parse(child.stdout);
+  };
+  const copiedOptions = { ...options, codeDir: runtimeCopy, revision: 'runtime-copy' };
+  check(childFreeze('freezeCorpus', copiedOptions).passed, 'valid independent runtime/worktree freezes with its own code root');
+  const copiedVerify = { ...copiedOptions, freezeFile: path.join(evidence, 'freeze-runtime-copy/freeze.json') };
+  check(childFreeze('verifyFreeze', copiedVerify).passed, 'valid worktree runtime verifies');
+  rejects(() => verifyFreeze(copiedVerify), 'freeze_code_root_mismatch');
+  for (const dependency of ['forge-empirical-corpus.js', 'forge-delivery.js', 'forge-autonomy-sources.js']) {
+    const file = path.join(runtimeCopy, 'scripts', dependency); const originalCode = fs.readFileSync(file);
+    fs.appendFileSync(file, '\n// Synthetic dependency drift without output changes.\n');
+    check(childFreeze('verifyFreeze', copiedVerify).error === 'freeze_drift', `${dependency} drift refused by default inventory`);
+    fs.writeFileSync(file, originalCode);
+  }
   const leak = structuredClone(inputs); leak[0].graph.nodes[0].dependencies = ['leak'];
   leak[0].graph.nodes.push({ id: 'leak', ref_id: observed.candidates[0].refs[2], kind: 'memory', dependencies: [] });
   rejects(() => freezeCorpus({ ...complete, revision: 'leak', inputs: leak }), 'reference_not_prework');
@@ -128,6 +164,27 @@ try {
   fs.writeFileSync(path.join(publicCode, 'public.js'), original); git(publicCode, ['add', 'public.js']);
   fs.writeFileSync(path.join(publicCode, 'public.js'), cleanPublic);
   check(auditPublication(auditManifest, auditTrusted).findings.some((f) => f.surface === 'staged_diff'), 'staged-only leak remains visible behind clean working copy');
+  for (const binary of ['nul', 'attributes']) {
+    fs.writeFileSync(path.join(publicCode, '.gitattributes'), binary === 'attributes' ? 'public.js binary\n' : '');
+    const stagedBytes = Buffer.concat([Buffer.from(binary === 'nul' ? '\0' : ''), original]);
+    fs.writeFileSync(path.join(publicCode, 'public.js'), stagedBytes); git(publicCode, ['add', 'public.js']);
+    fs.writeFileSync(path.join(publicCode, 'public.js'), cleanPublic);
+    const result = auditPublication(auditManifest, auditTrusted);
+    check(!result.passed && result.findings.some((f) => f.surface === 'index_blob' && f.code === 'private_content_exposed'), `${binary} index blob scanned behind clean worktree`);
+    check(result.public[0].staged.sha256 === sha256(stagedBytes), 'exact staged bytes retain identity');
+  }
+  rejects(() => auditPublication(auditManifest, { ...auditTrusted, runner: (bin, args, opts) => {
+    const result = spawnSync(bin, args, opts);
+    if (args.includes('cat-file') && args.includes('-s')) result.stdout = String(2 * 1024 * 1024 + 1);
+    return result;
+  } }), 'audit_index_blob_too_large');
+  let indexQueries = 0;
+  rejects(() => auditPublication(auditManifest, { ...auditTrusted, runner: (bin, args, opts) => {
+    const result = spawnSync(bin, args, opts);
+    if (args.includes('--stage') && ++indexQueries === 2) result.stdout = '';
+    return result;
+  } }), 'audit_index_changed');
+  fs.writeFileSync(path.join(publicCode, '.gitattributes'), '');
   git(publicCode, ['add', 'public.js']);
   fs.writeFileSync(path.join(publicCode, 'public.js'), ['api', '_key', ' = ', 'fictional-sensitive-value-12345'].join(''));
   check(auditPublication(auditManifest, auditTrusted).findings.some((f) => f.code === 'sensitive_public_content'), 'credential marker refused without echo');
@@ -137,7 +194,8 @@ try {
   git(publicCode, ['add', 'public.js']);
   git(publicCode, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'reviewed synthetic marker']);
   const reviewed = auditPublication(reviewedManifest, auditTrusted);
-  check(reviewed.passed && reviewed.reviewed_findings.length === 1, 'exact caller-reviewed synthetic bytes retain visible reviewed finding');
+  check(reviewed.passed && reviewed.reviewed_findings.length === 2 &&
+    reviewed.reviewed_findings.some((f) => f.surface === 'index_blob'), 'exact caller-reviewed synthetic bytes retain visible reviewed finding');
   fs.appendFileSync(path.join(publicCode, 'public.js'), '\nchanged');
   rejects(() => auditPublication(reviewedManifest, auditTrusted), 'audit_review_changed');
   fs.writeFileSync(path.join(publicCode, 'public.js'), reviewedBytes);

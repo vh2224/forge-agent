@@ -69,6 +69,13 @@ try {
   check(provenance[0].claims.declared_version.state === 'observed' && provenance[0].claims.installation_complete.state === 'unknown', 'contemporaneous declaration does not imply installation');
   const again = collectCorpus(manifest, trusted);
   check(again.replay && again.identity === first.identity, 'identical replay reuses immutable published snapshots');
+  const replayFile = path.join(first.private_root, 'collection.json'); const replayBytes = fs.readFileSync(replayFile);
+  const redirected = JSON.parse(replayBytes);
+  const alternate = 'same-bytes-other-snapshot.txt';
+  fs.copyFileSync(path.join(evidence, redirected.captures[0].metadata.snapshot), path.join(evidence, alternate));
+  redirected.captures[0].metadata.snapshot = alternate; fs.writeFileSync(replayFile, JSON.stringify(redirected));
+  rejects(() => collectCorpus(manifest, trusted), 'replay_capture_changed');
+  fs.writeFileSync(replayFile, replayBytes);
   fs.appendFileSync(path.join(source, 'r0-0.txt'), 'changed');
   const changed = collectCorpus(manifest, trusted);
   check(changed.identity !== first.identity && !changed.replay, 'source change creates new capture');
@@ -78,6 +85,15 @@ try {
   const partialCatalog = JSON.parse(fs.readFileSync(path.join(partial.private_root, 'catalog.json')));
   check(!partial.ready && partialCatalog.candidates[1].selection === 'insufficient' && partialCatalog.candidates[0].selection === 'included', 'missing source preserves others and makes gap explicit');
   check(partialCatalog.candidates[1].claims[0].state === 'unknown', 'failed source cannot leave imported observed declaration');
+  const partialFile = path.join(partial.private_root, 'collection.json');
+  const partialBytes = fs.readFileSync(partialFile);
+  for (const mutate of [(r) => { r.ready = true; }, (r) => { r.counts.deliveries++; },
+    (r) => { r.gaps.push('invented'); }, (r) => { r.captures[0].ref_id = 'foreign'; },
+    (r) => { r.captures[0].metadata.bytes++; }]) {
+    const altered = JSON.parse(partialBytes); mutate(altered); fs.writeFileSync(partialFile, JSON.stringify(altered));
+    rejects(() => collectCorpus(manifest, trusted), 'replay_derived_changed');
+    fs.writeFileSync(partialFile, partialBytes);
+  }
   const duplicate = structuredClone(manifest); duplicate.catalog.candidates.push({ ...duplicate.catalog.candidates[0], version: 'reopened-v2', reopened: true });
   const deduped = collectCorpus(duplicate, trusted);
   check(deduped.counts.candidates === 9 && deduped.counts.deliveries === 8, 'reopening does not inflate delivery count');
