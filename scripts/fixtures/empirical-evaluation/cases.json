@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "purpose": "Contract fixtures only; never empirical effectiveness evidence",
+  "cases": [
+    {
+      "id": "functional-with-exception",
+      "family_id": "family-a",
+      "split": "prospective",
+      "observations": [
+        { "id": "functional-1", "kind": "functional", "value": true, "check_id": "behavior-1" },
+        { "id": "exception-1", "kind": "exception", "value": true, "check_id": "exception-check" },
+        { "id": "autonomy-1", "kind": "canonical_autonomy", "value": false, "check_id": "autonomy-check" },
+        { "id": "checks-1", "kind": "tests", "passed": false, "checks": [
+          { "id": "check-pass", "exit_code": 0 },
+          { "id": "check-fail", "exit_code": 1 }
+        ] },
+        { "id": "effort-1", "kind": "human_effort", "measurement": "active-work", "unit": "ms", "value": 700 },
+        { "id": "intervention-1", "kind": "interventions", "value": 2 },
+        { "id": "interruption-1", "kind": "interruptions", "value": 1 }
+      ]
+    },
+    {
+      "id": "unknown-is-not-zero",
+      "family_id": "family-b",
+      "split": "prospective",
+      "observations": []
+    },
+    {
+      "id": "historical-diagnostic",
+      "family_id": "family-history",
+      "split": "historical-diagnostic",
+      "observations": [
+        { "id": "historical-functional", "kind": "functional", "value": false, "check_id": "historical-check" }
+      ]
+    },
+    {
+      "id": "adjustment-only",
+      "family_id": "family-adjustment",
+      "split": "adjustment",
+      "observations": []
+    },
+    {
+      "id": "reserved-only",
+      "family_id": "family-reserved",
+      "split": "reserved",
+      "observations": []
+    }
+  ]
+}
