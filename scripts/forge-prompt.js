@@ -17,6 +17,13 @@ const { countTokens } = require('./forge-tokens.js');
 const { resolveForgePaths } = require('./forge-home.js');
 const forgeIds = require('./forge-ids.js');
 const { selectMemoryContext } = require('./forge-memory-context.js');
+const { loadProcedureContext } = require('./forge-procedure-context.js');
+
+// Execution entrypoints are integrated separately by T03.
+const PROCEDURE_UNITS = new Set([
+  'discuss-milestone', 'discuss-slice', 'research-milestone', 'research-slice',
+  'plan-milestone', 'plan-slice', 'plan-check', 'complete-slice', 'complete-milestone',
+]);
 
 const TEMPLATE_FILES = Object.freeze({
   'execute-task': 'execute-task.md',
@@ -443,6 +450,7 @@ function formatLedgerResult(result, maxTokens) {
 }
 
 function resolveLedger(options) {
+  if (options.ledgerMaxTokens === 0) return '';
   if (options.ledger != null) return formatLedgerResult(options.ledger, options.ledgerMaxTokens);
 
   const query = {
@@ -519,12 +527,12 @@ function validateRenderOptions(rawOptions) {
   options.memoryLimit = boundedInteger(options.memoryLimit, 12, 0, 50, 'memory_limit');
   options.memoryMaxTokens = boundedInteger(options.memoryMaxTokens, 1200, 0, MAX_CONTEXT_TOKENS, 'memory_max_tokens');
   if (options.onMemorySelection !== undefined && typeof options.onMemorySelection !== 'function') throw new Error('Invalid memory selection callback');
-  options.standardsMaxTokens = boundedInteger(options.standardsMaxTokens, 3000, 3, MAX_CONTEXT_TOKENS, 'standards_max_tokens');
+  options.standardsMaxTokens = boundedInteger(options.standardsMaxTokens, 3000, 0, MAX_CONTEXT_TOKENS, 'standards_max_tokens');
   // The ledger snapshot budget default lives HERE, as a literal (S02 B2). The
   // skill lines that read `${PREFS[token_budget][ledger_snapshot]:-1500}` are
   // model-interpreted best effort; prefs-absent is this repo's real state, so
   // the renderer must resolve 1500 on its own with nothing configured anywhere.
-  options.ledgerMaxTokens = boundedInteger(options.ledgerMaxTokens, 1500, 2, MAX_CONTEXT_TOKENS, 'ledger_max_tokens');
+  options.ledgerMaxTokens = boundedInteger(options.ledgerMaxTokens, 1500, 0, MAX_CONTEXT_TOKENS, 'ledger_max_tokens');
   options.milestoneCleanup = validateText(options.milestoneCleanup || 'keep', 'milestone_cleanup', 128);
   if (!['keep', 'archive', 'delete'].includes(options.milestoneCleanup)) {
     throw new Error(`Invalid milestone_cleanup: ${options.milestoneCleanup}`);
@@ -675,8 +683,15 @@ function renderTemplate(template, values, source = '(inline)') {
 function renderPrompt(rawOptions) {
   const options = validateRenderOptions(rawOptions || {});
   const template = resolveTemplate(options.unitType, options);
+  // Fail closed before optional selection or prompt publication. The owner cwd
+  // still owns data/artifacts; isolated source procedures belong to CODE_DIR.
+  const procedure = PROCEDURE_UNITS.has(options.unitType) ? loadProcedureContext({
+    cwd: options.codeDir || options.cwd, forgeHome: options.forgeHome,
+    userHome: options.homeDir, env: options.env, phase: options.unitType,
+  }) : null;
   const values = buildValues(options, template.content);
-  const basePrompt = renderTemplate(template.content, values, template.path);
+  const body = procedure ? `${template.content}\n\n${procedure.content}` : template.content;
+  const basePrompt = renderTemplate(body, values, template.path);
   const prompt = appendPendingContext(applyIsolationHeader(basePrompt, options), options);
   const templateSha256 = crypto.createHash('sha256').update(template.content).digest('hex');
   return {
@@ -686,6 +701,8 @@ function renderPrompt(rawOptions) {
     template_source: template.path,
     template_scope: template.scope,
     template_sha256: templateSha256,
+    ...(procedure ? { procedure_context: (({ content, ...metadata }) => metadata)(procedure) } : {}),
+    final_prompt_sha256: crypto.createHash('sha256').update(prompt).digest('hex'),
     unit_type: options.unitType,
     unit_id: options.taskId || options.sliceId || options.milestoneId,
     cwd: options.cwd,
@@ -735,6 +752,10 @@ function materializePrompt(rawOptions) {
     `token_method: ${yamlString(rendered.token_method)}`,
     `template_source: ${yamlString(rendered.template_source)}`,
     `template_sha256: ${yamlString(rendered.template_sha256)}`,
+    ...(rendered.procedure_context ? [
+      `procedure_context: ${JSON.stringify(rendered.procedure_context)}`,
+    ] : []),
+    `final_prompt_sha256: ${yamlString(rendered.final_prompt_sha256)}`,
     '---',
     '',
     rendered.prompt,
@@ -859,9 +880,9 @@ function cliOptions(args) {
     memoryQuery: args['memory-query'] ?? base.memoryQuery ?? base.memory_query,
     memoryLimit: args['memory-limit'] ?? base.memoryLimit ?? base.memory_limit,
     memoryMaxTokens: args['memory-max-tokens'] ?? base.memoryMaxTokens ?? base.memory_max_tokens,
-    standardsMaxTokens: args['standards-max-tokens'] || base.standardsMaxTokens || base.standards_max_tokens,
+    standardsMaxTokens: args['standards-max-tokens'] ?? base.standardsMaxTokens ?? base.standards_max_tokens,
     ledger: args.ledger != null ? args.ledger : base.ledger,
-    ledgerMaxTokens: args['ledger-max-tokens'] || base.ledgerMaxTokens || base.ledger_max_tokens,
+    ledgerMaxTokens: args['ledger-max-tokens'] ?? base.ledgerMaxTokens ?? base.ledger_max_tokens,
     routingDomains: args['routing-domains'] || base.routingDomains || base.routing_domains,
     workspaceRepos: args['workspace-repos'] || base.workspaceRepos || base.workspace_repos,
     pendingContextFile: args['pending-context-file'] || base.pendingContextFile || base.pending_context_file,

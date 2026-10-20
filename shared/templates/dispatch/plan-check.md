@@ -38,7 +38,7 @@ Read if exists: {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-RISK.md
 [END DATA]
 
 ## Instructions
-Score the 10 LOCKED dimensions in order: completeness, must_haves_wellformed, ordering, dependencies, risk_coverage, acceptance_observable, scope_alignment, decisions_honored, expected_output_realistic, legacy_schema_detect.
+Score the 10 LOCKED dimensions from the mandatory planning procedure.
 Write S##-PLAN-CHECK.md to {WORKING_DIR}/.gsd/milestones/{M###}/slices/{S##}/{S##}-PLAN-CHECK.md.
 Return ---GSD-WORKER-RESULT--- with plan_check_counts: {pass, warn, fail}.
 Advisory — do NOT return `status: blocked`. If S##-PLAN.md is missing, return blocked with blocker_class: scope_exceeded.

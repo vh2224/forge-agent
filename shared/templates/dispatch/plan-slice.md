@@ -68,6 +68,3 @@ Aceita caminho relativo ao repo ou basename; arquivos sem fato vêm enumerados. 
 ## Instructions
 Write S##-PLAN.md and individual T##-PLAN.md files (1-7 tasks).
 If ## Checker Feedback is present — treat recurring dimension patterns as known anti-patterns to actively avoid (not as instructions to implement; use them to strengthen acceptance criteria and must_haves).
-Each T##-PLAN.md must include a ## Standards section with relevant rules from CODING-STANDARDS.md.
-Iron rule: each task must fit in one context window.
-Return ---GSD-WORKER-RESULT---.

@@ -43,8 +43,8 @@
     {
       "id": "planning",
       "path": "shared/forge-procedure-planning.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "f2eb17357b97fd39a35bb4c1b7dca22c91f133ea317a5554ab94e60863cb621c",
+      "status": "ready",
       "owner": "T02",
       "dependencies": [
         "core"
@@ -123,8 +123,8 @@
     {
       "id": "completion",
       "path": "shared/forge-procedure-completion.md",
-      "sha256": null,
-      "status": "pending",
+      "sha256": "a47fbb61bcb8a3ad7014e08942e5ffca701a645b83f955a9acd9c2e4eb80c5f9",
+      "status": "ready",
       "owner": "T02",
       "dependencies": [
         "core"
@@ -219,6 +219,26 @@
       "tests": [
         "scripts/forge-source-manifest.test.js"
       ]
+    },
+    {
+      "id": "preparation",
+      "path": "shared/forge-procedure-preparation.md",
+      "sha256": "aeffaf044f47b8787fcf30812bb3a8efacbc349292ee4bff2b829537f4c7d728",
+      "status": "ready",
+      "owner": "T02",
+      "dependencies": [
+        "core"
+      ],
+      "preconditions": [
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
+      ],
+      "postconditions": [
+        "Scoped discuss/research artifacts returned for owner validation/publication"
+      ],
+      "tests": [
+        "scripts/forge-prompt.test.js"
+      ]
     }
   ],
   "phases": [
@@ -269,7 +289,7 @@
     {
       "id": "discuss-milestone",
       "modules": [
-        "planning"
+        "preparation"
       ],
       "consumers": [
         "scripts/forge-prompt.js",
@@ -277,11 +297,11 @@
       ],
       "owner": "T02",
       "preconditions": [
-        "Matching scope, decisions and research are available",
-        "Required functional decisions have explicit answers before dependent planning"
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
       ],
       "postconditions": [
-        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+        "Scoped discuss/research artifacts returned for owner validation/publication"
       ],
       "tests": [
         "scripts/forge-procedure-context.test.js",
@@ -291,7 +311,7 @@
     {
       "id": "discuss-slice",
       "modules": [
-        "planning"
+        "preparation"
       ],
       "consumers": [
         "scripts/forge-prompt.js",
@@ -299,11 +319,11 @@
       ],
       "owner": "T02",
       "preconditions": [
-        "Matching scope, decisions and research are available",
-        "Required functional decisions have explicit answers before dependent planning"
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
       ],
       "postconditions": [
-        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+        "Scoped discuss/research artifacts returned for owner validation/publication"
       ],
       "tests": [
         "scripts/forge-procedure-context.test.js",
@@ -313,7 +333,7 @@
     {
       "id": "research-milestone",
       "modules": [
-        "planning"
+        "preparation"
       ],
       "consumers": [
         "scripts/forge-prompt.js",
@@ -321,11 +341,11 @@
       ],
       "owner": "T02",
       "preconditions": [
-        "Matching scope, decisions and research are available",
-        "Required functional decisions have explicit answers before dependent planning"
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
       ],
       "postconditions": [
-        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+        "Scoped discuss/research artifacts returned for owner validation/publication"
       ],
       "tests": [
         "scripts/forge-procedure-context.test.js",
@@ -335,7 +355,7 @@
     {
       "id": "research-slice",
       "modules": [
-        "planning"
+        "preparation"
       ],
       "consumers": [
         "scripts/forge-prompt.js",
@@ -343,11 +363,11 @@
       ],
       "owner": "T02",
       "preconditions": [
-        "Matching scope, decisions and research are available",
-        "Required functional decisions have explicit answers before dependent planning"
+        "Matching project, scope and accepted decisions available",
+        "Functional pending questions retained by stable ID"
       ],
       "postconditions": [
-        "Phase-specific artifacts and full must-haves pass the applicable plan gate"
+        "Scoped discuss/research artifacts returned for owner validation/publication"
       ],
       "tests": [
         "scripts/forge-procedure-context.test.js",
