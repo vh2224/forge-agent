@@ -1,4 +1,12 @@
 'use strict';
+// A selector runs exactly one recovery scenario; no arguments retain full coverage.
+const scenarioSelectors = ['--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native'];
+const scenarioArgs = process.argv.slice(2);
+if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
+  console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
+  process.exit(1);
+}
+const selectedScenario = scenarioArgs[0];
 const assert = require('assert');
 const { inspectArtifacts, schema } = require('./forge-unit-sidecar');
 const result = questions => ({ status: 'partial', summary: 'Decision needed', questions, artifacts: [] });
@@ -470,4 +478,9 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
     console.log('PASS ' + (nativeInitial ? 'native-initial R4 authority/correction/resume: ' : '') + 'pre-spawn trusted inspection, immutable challenge, full root delta, native after original deadline, pending questions, handoff guard and one correction across restart');
   } finally { window.close(); lab.cleanup(); }
 }
-recoveryContracts().then(() => preSpawnRecoveryContracts()).then(() => preSpawnRecoveryContracts(true)).catch(error => { console.error(error); process.exitCode = 1; });
+async function runScenarios() {
+  if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
+  if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
+  if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
+}
+runScenarios().catch(error => { console.error(error); process.exitCode = 1; });

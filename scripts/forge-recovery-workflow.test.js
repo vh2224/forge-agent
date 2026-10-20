@@ -21,8 +21,8 @@ if (!['--isolated', '--restart-fixture', '--milestone-restart'].includes(process
   const bootstrap = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-home-')));
   try {
     stageProcedures(path.join(bootstrap, 'forge'));
-    // Bound the aggregate separately: four delegated suites each retain their
-    // own 120s deadline, in addition to this workflow's integration scenarios.
+    // Bound the aggregate separately from each delegated child's 120s deadline.
+    // This cap includes integration scenarios and need not fit all child maxima.
     const run = spawnSync(process.execPath, [__filename, '--isolated'], { encoding: 'utf8', timeout: 600000,
       env: { ...process.env, HOME: bootstrap, USERPROFILE: bootstrap, CODEX_HOME: path.join(bootstrap, '.codex'),
         CLAUDE_CONFIG_DIR: path.join(bootstrap, '.claude'), FORGE_HOME: path.join(bootstrap, 'forge') } });
@@ -320,12 +320,18 @@ async function main() {
 
     // Reuse focused suites without copying their unit-level cases. Their child
     // process exit is mandatory and their named output remains in gate evidence.
-    for (const suite of ['forge-task-preparation.test.js', 'forge-unit-sidecar.test.js',
-      'forge-attempt-recovery.test.js', 'forge-unit-controller.test.js']) {
+    for (const [suite, ...selectors] of [
+      ['forge-task-preparation.test.js'],
+      ['forge-unit-sidecar.test.js', '--recovery-contracts'],
+      ['forge-unit-sidecar.test.js', '--pre-spawn-sidecar'],
+      ['forge-unit-sidecar.test.js', '--pre-spawn-native'],
+      ['forge-attempt-recovery.test.js'],
+      ['forge-unit-controller.test.js'],
+    ]) {
       // Delegated source suites explicitly materialize source-root provenance.
       // Keep that root consistent instead of mixing it with this workflow's install fixture.
-      process.stdout.write(child([path.join(__dirname, suite)], { ...env, FORGE_HOME: path.resolve(__dirname, '..') }));
-      console.log(`PASS delegated contract suite ${suite}`);
+      process.stdout.write(child([path.join(__dirname, suite), ...selectors], { ...env, FORGE_HOME: path.resolve(__dirname, '..') }));
+      console.log(`PASS delegated contract suite ${[suite, ...selectors].join(' ')}`);
     }
     assert.equal(typeof controller.begin, 'function'); assert.equal(typeof controller.resume, 'function');
     console.log('PASS R3/R5/R6/R7: focused caller/receipt/root/telemetry/controller/lease negatives above; no real provider or UAT');
