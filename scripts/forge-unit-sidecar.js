@@ -15,6 +15,7 @@ const { renderPrompt } = require('./forge-prompt');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
 const memory = require('./forge-memory');
 const forgeIds = require('./forge-ids');
+const { MAX_FILE_BYTES: MAX_DELIVERY_BYTES } = require('./forge-delivery');
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
 const memorySchema = xllm.loadSchemaFile('memory-extraction.schema.json');
@@ -325,7 +326,8 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
     if (!allowed.includes(artifact.path)) return bad('artifact-path-invalid');
     if (rules[artifact.path] && !inspectDeliveryContent(artifact.content, rules[artifact.path])) return bad('delivery-artifact-invalid');
     if (seen.has(artifact.path)) return bad('artifact-duplicate');
-    if (Buffer.byteLength(artifact.content) > MAX_ARTIFACT_BYTES) return bad('artifact-limit');
+    const contentLimit = rules[artifact.path]?.kind === 'delivery' ? MAX_DELIVERY_BYTES : MAX_ARTIFACT_BYTES;
+    if (Buffer.byteLength(artifact.content) > contentLimit) return bad('artifact-limit');
     seen.add(artifact.path);
   }
   if (value.status === 'done' && value.questions.length) return bad('questions-on-done');
@@ -1621,6 +1623,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         + 'Operator constraints: ' + JSON.stringify(r.constraints || { auto_commit: false, deploy: false })
         + '\nRequired paths on done: ' + JSON.stringify(loc.required) + '\nOnly allowed artifact paths: ' + JSON.stringify(loc.allowed)
         + `\nLimits: at most 32 artifacts; each content at most ${MAX_ARTIFACT_BYTES} UTF-8 bytes.`
+        + (loc.delivery ? ` Contract-typed DELIVERY output at ${JSON.stringify(loc.delivery.output)} may instead contain at most ${MAX_DELIVERY_BYTES} UTF-8 bytes; all other artifact limits remain as stated.` : '')
         + (Number.isFinite(payloadLimit) ? ` The entire serialized result JSON must fit in ${payloadLimit} UTF-8 bytes.` : '')
         + ' Return partial with questions if complete delivery cannot fit; never truncate an artifact.'
         + '\nReturn JSON matching: ' + JSON.stringify(schema);

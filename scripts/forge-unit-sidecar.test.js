@@ -478,7 +478,79 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
     console.log('PASS ' + (nativeInitial ? 'native-initial R4 authority/correction/resume: ' : '') + 'pre-spawn trusted inspection, immutable challenge, full root delta, native after original deadline, pending questions, handoff guard and one correction across restart');
   } finally { window.close(); lab.cleanup(); }
 }
+async function deliveryPublicationLimits() {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const delivery = require('./forge-delivery');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-sidecar-delivery-size-'));
+  try {
+    const owner = path.join(root, 'owner'), code = path.join(root, 'code');
+    fs.mkdirSync(owner); fs.mkdirSync(code);
+    const request = { unitType: 'complete-milestone', milestoneId: 'M001', cwd: code, contextRoot: owner,
+      workflowId: 'size-fixture', dispatchId: 'size-fixture', resultFile: path.join(root, 'result.json') };
+    const loc = sidecar.locations(request), unit = { type: 'milestone', id: 'M001' };
+    const plan = '# Milestone acceptance\n';
+    fs.writeFileSync(path.join(owner, 'plan.md'), plan);
+    // Build real canonical output rather than inflating an unvalidated JSON stub.
+    const input = { schema_version: 1, unit, plan: 'plan.md', plan_fingerprint: delivery.sha256(plan),
+      bindings: [], expected_children: [], additional_criteria: Array.from({ length: 425 }, (_, i) => ({
+        id: `criterion-${i}`, text: `Observable acceptance ${i}: ${'evidence '.repeat(100)}`,
+        reference: `acceptance#${i}`, type: 'functional',
+      })) };
+    const output = delivery.buildDelivery(input, { ownerRoot: owner, codeDir: code });
+    assert.strictEqual(output.criteria.length, 425);
+    const content = JSON.stringify(output, null, 2) + '\n';
+    assert(Buffer.byteLength(content) > sidecar.MAX_ARTIFACT_BYTES);
+    assert(Buffer.byteLength(content) < delivery.MAX_FILE_BYTES);
+    const payload = { status: 'done', summary: 'Complete inventory', questions: [], artifacts: [
+      { path: loc.required[0], content: '# Summary\n' },
+      { path: loc.delivery.input, content: JSON.stringify(input) },
+      { path: loc.delivery.output, content },
+    ] };
+    const inspectPayload = (value, max = Infinity) => sidecar.inspectArtifacts(value, loc.allowed, loc.required, max, loc.rules);
+    const bytes = Buffer.byteLength(JSON.stringify(payload));
+    sidecar.beginArtifactAttempt(request);
+    await assert.rejects(sidecar.acceptArtifactResult(request, payload, { providerCalled: true, maxPayloadBytes: bytes - 1 }),
+      error => error.code === 'invalid-artifact-result' && error.message === 'payload-limit');
+    assert(!fs.existsSync(path.join(owner, loc.delivery.output)), 'total cap refuses publication');
+    await sidecar.acceptArtifactResult(request, payload, { providerCalled: true, maxPayloadBytes: bytes });
+    assert.strictEqual(fs.readFileSync(path.join(owner, loc.delivery.output), 'utf8'), content);
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(owner, loc.delivery.output))).criteria.length, 425);
+    assert.strictEqual(JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json')).phase, 'ready');
+    const replace = (artifactPath, artifactContent) => ({ ...payload, artifacts: payload.artifacts.map(row =>
+      row.path === artifactPath ? { ...row, content: artifactContent } : row) });
+    const oversized = 'x'.repeat(sidecar.MAX_ARTIFACT_BYTES + 1);
+    assert.strictEqual(inspectPayload(replace(loc.required[0], oversized)).reason, 'artifact-limit');
+    assert.strictEqual(inspectPayload(replace(loc.required[0], content)).reason, 'artifact-limit', 'JSON cannot spoof a generic path');
+    assert.strictEqual(inspectPayload(replace(loc.delivery.input, JSON.stringify({ ...input, padding: oversized }))).reason, 'artifact-limit');
+    assert.strictEqual(inspectPayload(replace(loc.delivery.input, content)).reason, 'delivery-artifact-invalid');
+    for (const kind of ['verification', 'artifact']) {
+      const envelope = { schema_version: 1, unit, kind: kind === 'verification' ? kind : 'artifact', plan_fingerprint: input.plan_fingerprint,
+        code_dir: code, revision: 'fixture', environment: 'node', captured_at: '2026-10-20T00:00:00Z', result: {}, padding: oversized };
+      const value = { ...payload, artifacts: [...payload.artifacts, { path: loc.delivery[kind], content: JSON.stringify(envelope) }] };
+      assert.strictEqual(inspectPayload(value).reason, 'artifact-limit');
+    }
+    // Valid JSON whitespace exercises the exact UTF-8 byte boundary without changing the contract.
+    const atCap = content + ' '.repeat(delivery.MAX_FILE_BYTES - Buffer.byteLength(content));
+    assert(inspectPayload(replace(loc.delivery.output, atCap)).ok);
+    assert.strictEqual(inspectPayload(replace(loc.delivery.output, atCap + ' ')).reason, 'artifact-limit');
+    for (const invalid of ['{', JSON.stringify({ ...output, generated_by: 'spoof' }),
+      JSON.stringify({ ...output, schema_version: 2 }), JSON.stringify({ ...output, criteria: {} }),
+      JSON.stringify({ ...output, unit: { type: 'milestone', id: 'M999' } })]) {
+      assert.strictEqual(inspectPayload(replace(loc.delivery.output, invalid)).reason, 'delivery-artifact-invalid');
+    }
+    const wrongPath = { ...payload, artifacts: payload.artifacts.map(row => row.path === loc.delivery.output
+      ? { ...row, path: '.gsd/milestones/M999/M999-DELIVERY.json' } : row) };
+    assert.strictEqual(inspectPayload(wrongPath).reason, 'artifact-path-invalid');
+    assert.strictEqual(inspectPayload({ ...payload, artifacts: [...payload.artifacts, payload.artifacts[2]] }).reason, 'artifact-duplicate');
+    assert.strictEqual(inspectPayload({ ...payload, artifacts: Array(33).fill(payload.artifacts[2]) }).reason, 'artifact-limit');
+    assert(inspectPayload(payload, bytes).ok);
+    assert.strictEqual(inspectPayload(payload, bytes - 1).reason, 'payload-limit');
+    assert.strictEqual(inspectPayload(payload, sidecar.MAX_ARTIFACT_PAYLOAD_BYTES).reason, 'payload-limit');
+    console.log(`PASS complete-milestone publication: 425 canonical criteria, ${Buffer.byteLength(content)} DELIVERY bytes; generic/input/envelope, reader cap, spoof/schema/path/count/duplicate and total payload limits`);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
 async function runScenarios() {
+  await deliveryPublicationLimits();
   if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
   if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
   if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
