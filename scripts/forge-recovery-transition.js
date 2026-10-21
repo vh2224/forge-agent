@@ -244,4 +244,58 @@ async function prepare(options, state, inspection) {
   return { handle, reference, resolution, disposed: candidate.present };
 }
 
-module.exports = { TYPES, createTransitionAdapter, observeHistory, rootObservations, destinationKey, prepare, assertLive };
+// Writer observations are live capabilities, deliberately separate from repair
+// transitions. Serialized adapters/handles and PID-only claims grant nothing.
+const writerAdapters = new WeakMap(), writerHandles = new WeakMap();
+function createWriterObservationAdapter(attestWriter) {
+  if (typeof attestWriter !== 'function') fail('writer-observation-adapter-required');
+  const adapter = Object.freeze({ id: crypto.randomUUID() });
+  writerAdapters.set(adapter, attestWriter); return adapter;
+}
+async function observeStoppedWriter(adapter, options) {
+  const attest = writerAdapters.get(adapter);
+  if (!attest) fail('writer-observation-adapter-required');
+  if (typeof options.processProbe !== 'function' || typeof options.assertUnchanged !== 'function') fail('writer-observation-live-probe-required');
+  const receipt = JSON.parse(fs.readFileSync(options.receiptFile));
+  const receiptHash = hashFile(options.receiptFile);
+  const challenge = { schema_version: 1, nonce: crypto.randomUUID(), dispatch_id: receipt.dispatch_id,
+    fingerprint: receipt.fingerprint, receipt_sha256: receiptHash,
+    execution_identity_sha256: receipt.recovery_identity_sha256,
+    roots_sha256: digest(options.contract), route: receipt.route };
+  const previous = options.previous ? writerHandles.get(options.previous) : null;
+  if (options.previous && !previous) fail('writer-observation-handle-invalid');
+  if (previous && ['dispatch_id', 'fingerprint', 'execution_identity_sha256', 'roots_sha256']
+    .some(key => previous.challenge[key] !== challenge[key])) fail('writer-observation-attempt-changed');
+  let writerIdentity = previous?.writerIdentity();
+  const assertUnchanged = () => {
+    if (hashFile(options.receiptFile) !== receiptHash) fail('writer-observation-receipt-changed');
+    const inspected = require('./forge-attempt-recovery').inspectReceipt(options.receiptFile, { request: options.request, processProbe: options.processProbe });
+    if (inspected.process_stopped !== true) fail('writer-observation-not-stopped');
+    options.assertUnchanged();
+  };
+  const refresh = async () => {
+    assertUnchanged();
+    const observed = await attest(clone(challenge));
+    assertUnchanged();
+    if (observed?.status !== 'stopped' || observed.binding_sha256 !== digest(challenge)
+      || typeof observed.writer_identity !== 'string' || !observed.writer_identity.trim()
+      || typeof observed.evidence_reference !== 'string' || !observed.evidence_reference.trim()
+      || observed.dispatch_id !== challenge.dispatch_id || observed.fingerprint !== challenge.fingerprint
+      || observed.receipt_sha256 !== challenge.receipt_sha256
+      || observed.execution_identity_sha256 !== challenge.execution_identity_sha256
+      || observed.roots_sha256 !== challenge.roots_sha256
+      || (writerIdentity && writerIdentity !== observed.writer_identity)) fail('writer-observation-unproved');
+    writerIdentity = observed.writer_identity;
+  };
+  await refresh();
+  const handle = Object.freeze({ id: crypto.randomUUID() });
+  writerHandles.set(handle, { assertUnchanged, refresh, challenge, writerIdentity: () => writerIdentity });
+  return handle;
+}
+function assertWriterObservation(handle) {
+  const live = writerHandles.get(handle);
+  if (!live) fail('writer-observation-handle-invalid');
+  live.assertUnchanged(); return live;
+}
+
+module.exports = { createWriterObservationAdapter, observeStoppedWriter, assertWriterObservation, TYPES, createTransitionAdapter, observeHistory, rootObservations, destinationKey, prepare, assertLive };

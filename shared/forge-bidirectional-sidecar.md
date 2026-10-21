@@ -573,3 +573,69 @@ e reatesta o mesmo registro antes de expor argumentos e `assertReady` para o pon
 Nunca renovar o prazo histórico de 60000ms. Depois dele, somente exceção nativa viva,
 destino ainda não tentado e modelo/tier/esforço/ferramenta realmente suportados permitem execução.
 História insuficiente conserva a recusa; implementar este mecanismo não desbloqueia receipts históricos.
+
+
+## Standalone native execution and durable writer results
+
+`runUnitSidecar(request, runtime)` accepts standalone `execute-task` with an
+explicit native route, nonempty held v2 claim and `request.nativeInvocation`.
+The latter is a declaration: the adapter rebuilds it from
+`runtime.activeCapabilities` and the resolved model/effort. Runtime callbacks
+cannot be imported through request JSON. The same started/executed/ready,
+independent delta, inputs, protected metadata, delivery and publication lifecycle
+applies. Recovery with a callable native tool enters this full lifecycle too.
+`assertMilestoneContext`, recovery transitions and authenticated owner-event
+appends retain their existing checks.
+
+The optional `request.nativePromptFile` is outside owner and every code root.
+It stores the complete canonical prompt with exclusive creation and full hash;
+the native message carries its path and SHA-256. Links, path substitution and
+byte changes are refused. Full context and transport hashes are separate.
+`onPackagedContext` and `announce` are awaited before the final authority check;
+the check repeats immediately before the host callback, after invocation and
+after readback. Capabilities, exact arguments, request, held claim, gates,
+inputs, original baseline and protected metadata must still match. This is a
+process-local boundary, not an atomic guarantee about a remote provider. An async
+mandatory guard is awaited and followed by synchronous binding checks; recovery
+rechecks live process/receipt, reservation and authorization at these boundaries.
+
+Native execution seals verification before its first writer. Host supplements
+belong in `runtime.verification`, with only `preferenceCommands`,
+`commandsByRoot` and positive integer `commandTimeoutMs`. Unknown roots/keys,
+invalid commands and replacement/removal/reordering of explicit command lists
+refuse. Plan commands retain priority, followed by root preferences, general
+preferences and discovery; valid supplements append. A root without commands
+refuses. The versioned receipt seal contains root commands and origins, timeout
+and origin, plan hash, execution identity and digest. Delivery envelopes bind
+the seal digest. Executed/ready replay reuses it and rejects changed supplied
+policy. A legacy native receipt needs a complete saved capture; absent provenance
+is not synthesized. Existing sidecar execution without declared verification
+retains its historical discovery path.
+
+`runtime.savedNativeResult` describes only `{resultFile, sha256, dispatchId,
+fingerprint}` for a failed or started attempt. It grants no authority, including
+when an old descriptor also contains `processStopped`. Parsing may strip a BOM;
+hashing always covers the original physical bytes. The original baseline,
+strict result schema, inputs, delta, held claims and protected metadata must
+validate before recovery can reconcile or choose another writer.
+
+The trusted host creates a live handle with
+`forge-recovery-transition.createWriterObservationAdapter(attestWriter)` and
+passes it as `runtime.writerObservationAdapter`, plus `runtime.processProbe`.
+The asynchronous callback must independently observe the same writer and return
+`status: 'stopped'`, a nonempty `writer_identity`, `evidence_reference`,
+`binding_sha256` of the complete challenge and its exact `dispatch_id`,
+`fingerprint`, `receipt_sha256`, `execution_identity_sha256` and `roots_sha256`.
+The adapter checks before and after awaits. `inspectReceipt` running/unknown
+observations veto acceptance. PID, boolean, serialized handle and callback that
+simply echoes caller assertions are not evidence of a stopped writer. Restart
+requires a new host adapter and fresh independent attestation. Valid saved
+responses replay without inference/reset and preserve the historical failure,
+final evidence, fingerprint, baseline, identity and recovery deadline.
+
+The portable matrix in `forge-native-execution.test.js` uses public execution,
+recovery, invocation and CLI entrypoints. Its shared factory lives in
+`fixtures/forge-native-execution.js`; it does not read personal report paths or
+patch production module loading. Inference/host observation are synthetic;
+controlled child Node process, filesystem/VCS and link checks are local evidence.
+A passing fixture is neither a real provider execution nor human UAT.

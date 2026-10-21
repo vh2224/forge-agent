@@ -447,6 +447,11 @@ async function recoverAttempt(options) {
   const state = stateApi.loadRecovery(options.stateFile);
   let expectedRoots = digest(options.executionContract || { cwd: options.request.cwd });
   const inspection = inspectReceipt(options.receiptFile, { processProbe: options.processProbe, request: options.request });
+  const savedWriter = typeof options.inspectSavedResult === 'function' ? await options.inspectSavedResult() : null;
+  if (savedWriter) {
+    transitions.assertWriterObservation(savedWriter);
+    inspection.valid_saved_response = true;
+  }
   if (inspection.process_stopped !== true) fail('recovery-process-receipt-inspection-required');
   if (options.transitions && state.pending_questions.some(row => row.status === 'pending') && !options.answers?.length)
     return { action: 'pending-questions', questions: state.pending_questions };
@@ -537,6 +542,7 @@ async function recoverAttempt(options) {
   const decision = options.resumeReservation
     ? await session.resumeReservation({ ...nextInput, reservation_sha256: options.resumeReservation.sha256 })
     : await session.next(nextInput);
+  if (decision.action === 'replay' && savedWriter) await transitions.assertWriterObservation(savedWriter).refresh();
   if (decision.action === 'replay') {
     if (typeof options.replay !== 'function') fail('recovery-replay-required');
     return { ...decision, result: await options.replay(inspection.receipt), inspection: { ...inspection, receipt: undefined } };
@@ -560,9 +566,21 @@ async function recoverAttempt(options) {
   // The invocation budget is always the historic sidecar budget. Native
   // authorization validity is returned separately, never a fresh sidecar wait.
   preSpawn?.assertUnchanged();
-  const assertReady = transitionGuard ? Object.assign(() => transitionGuard.withLock(() => {}), {
-    appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line),
-  }) : preSpawn?.assertUnchanged;
+  const reservedStateHash = digest(require('fs').readFileSync(options.stateFile));
+  const reservedRequestHash = callerRequestHash(options.request);
+  const assertAuthority = () => {
+    const live = inspectReceipt(options.receiptFile, { processProbe: options.processProbe, request: options.request });
+    if (callerRequestHash(options.request) !== reservedRequestHash
+        || live.process_stopped !== true || live.receipt_sha256 !== inspection.receipt_sha256
+        || digest(require('fs').readFileSync(options.stateFile)) !== reservedStateHash) fail('recovery-process-receipt-inspection-changed');
+    if (binding) binding.adapter.readStandingAuthorization(authorizedReference);
+    if (exception) exceptionFor(exception, session.snapshot(), (options.clock || Date.now)());
+  };
+  const assertReady = Object.assign(() => {
+    assertAuthority();
+    if (transitionGuard) transitionGuard.withLock(() => {});
+    else preSpawn?.assertUnchanged();
+  }, { assertAuthority, ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
   const invoke = () => options.invoke(decision.route, decision.invocation, decision.remaining_ms,
     assertReady, decision.reservation_sha256);
   // The adapter repeats assertReady at the actual native callback. Do not hold

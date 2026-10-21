@@ -5,91 +5,13 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-function stageProcedures(destination) {
-  const source = path.resolve(__dirname, '..');
-  const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
-  fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
-  fs.copyFileSync(path.join(source, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
-  for (const module of manifest.modules.filter(item => item.status === 'ready')) fs.copyFileSync(path.join(source, module.path), path.join(destination, module.path));
-}
-
-const cp = require('child_process');
-const crypto = require('crypto');
-const base = path.join(require('os').tmpdir(), 'forge-standalone-execute-labs');
-fs.mkdirSync(base, { recursive: true });
-const root = fs.mkdtempSync(path.join(base, 'test-'));
-const fixtureMarker = crypto.randomBytes(16).toString('hex');
-fs.writeFileSync(path.join(root, '.fixture-owner'), fixtureMarker);
-const saved = { ...process.env };
-process.env.TEMP = root; process.env.TMP = root; process.env.TMPDIR = root;
-process.env.GIT_CEILING_DIRECTORIES = root;
-function write(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value)); }
-process.env.FORGE_HOME = path.join(root, 'home');
-write(path.join(process.env.FORGE_HOME, 'forge-agent-prefs.jsonc'), {});
-stageProcedures(process.env.FORGE_HOME);
-const accounts = require('./forge-accounts');
-const originalLookup = accounts.resolveLaunch;
-accounts.resolveLaunch = () => ({ name: 'fixture', token: 'fixture-only' });
-const unit = require('./forge-unit-sidecar');
-const execution = require('./forge-task-execution');
-const delivery = require('./forge-delivery');
+const cp = require('child_process'), crypto = require('crypto');
+const { createFixtureHarness } = require('./fixtures/forge-native-execution');
+const harness = createFixtureHarness();
+const { root, base, fixtureMarker, saved, accounts, originalLookup, provider, setup, stageProcedures, write, git, id } = harness;
+const unit = require('./forge-unit-sidecar'), execution = require('./forge-task-execution'), delivery = require('./forge-delivery');
 const { capability } = require('./forge-transport-capabilities');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
-const provider = path.join(root, 'provider.js');
-write(provider, `
-const fs = require('fs'), path = require('path');
-const args = process.argv.slice(2), control = JSON.parse(fs.readFileSync(path.join(process.cwd(), '../control.json')));
-fs.appendFileSync(control.calls, 'spawn\\n');
-fs.writeFileSync(control.args, JSON.stringify(args));
-const instruction = args.find(a => a.startsWith('Read the complete task prompt'));
-fs.writeFileSync(control.prompt, fs.readFileSync(JSON.parse(instruction.match(/file: (".*")\\. Follow/)[1]), 'utf8'));
-for (const [file, content] of Object.entries(control.writes || {})) fs.writeFileSync(file, content);
-for (const file of control.deletes || []) fs.unlinkSync(file);
-if (control.failure) { process.stderr.write('simulated transport failure after writes'); process.exit(9); }
-const result = { status: control.status || 'done', summary: 'Fixture execution', must_haves_status: [], files_changed: [] };
-if (control.extraArtifact) result.artifacts = [{ path: '../outside.md', content: 'invalid' }];
-const model = args[args.indexOf('--model') + 1];
-process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
- result: ['---GSD-WORKER-RESULT---','status: '+result.status,'result_json: '+JSON.stringify(result),'---END-RESULT---'].join('\\n'),
- modelUsage: { [model]: { inputTokens: 123 } } }));
-`);
-process.env.FORGE_XLLM_CLAUDE_BIN = provider;
-let sequence = 0;
-const id = 'T-20261008120000-fixture';
-function git(cwd, args) {
-  const r = cp.spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
-  assert.strictEqual(r.status, 0, r.stderr); return r.stdout.trim();
-}
-function setup(vcsName = 'git') {
-  const dir = path.join(root, String(++sequence)), cwd = path.join(dir, 'code'), owner = path.join(dir, 'owner');
-  fs.mkdirSync(cwd, { recursive: true });
-  const task = path.join(owner, '.gsd/tasks', id), planFile = path.join(task, `${id}-PLAN.md`);
-  write(path.join(owner, '.gsd/forge-prefs.jsonc'), { routing: { frontend: { executor: { heavy: ['claude-opus-5-5', 'gpt-6.1-sol'] } } }, effort: { 'execute-task': 'high' }, token_budget: { coding_standards: 32 } });
-  write(planFile, `---\ntier: heavy\ndomain: frontend\ncapability: workspace\ndepends: []\nwrites:\n  - 'src.js'\nmust_haves:\n  truths:\n    - "fixture stays observable"\n  artifacts: []\n  key_links: []\nexpected_output: [src.js]\n---\n# Task\nImplement fixture.\n`);
-  write(path.join(task, `${id}-PLAN-GATE.md`), '---\nstatus: approved\n---\n');
-  write(path.join(task, `${id}-RESEARCH.md`), 'Research retained\n' + 'evidence '.repeat(2400) + '\nRESEARCH_END');
-  write(path.join(task, `${id}-SECURITY.md`), 'Mandatory security checklist');
-  write(path.join(owner, '.gsd/CODING-STANDARDS.md'), 'standards '.repeat(1000));
-  write(path.join(cwd, 'src.js'), 'before\n'); write(path.join(cwd, 'dirty.txt'), 'before\n');
-  if (vcsName === 'svn') {
-    const repository = path.join(dir, 'svn-repository');
-    function svn(cmd, args) { const out = cp.spawnSync(cmd, args, { cwd, encoding: 'utf8', windowsHide: true }); assert.strictEqual(out.status, 0, out.stderr); }
-    svn('svnadmin', ['create', repository]);
-    svn('svn', ['checkout', require('url').pathToFileURL(repository).href, '.']);
-    svn('svn', ['add', 'src.js', 'dirty.txt']); svn('svn', ['commit', '-m', 'fixture baseline']); svn('svn', ['update']);
-  } else {
-    git(cwd, ['init', '-q']); git(cwd, ['config', 'core.autocrlf', 'false']); git(cwd, ['add', '.']);
-    git(cwd, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
-  }
-  write(path.join(cwd, 'dirty.txt'), 'user dirty\n');
-  const route = resolveDispatch({ cwd: owner, unitType: 'execute-task', scope: 'standalone-task', phase: 'execute', planPath: planFile, hostRuntime: 'codex', unitId: id });
-  const r = { cwd, contextRoot: owner, scope: 'standalone-task', phase: 'execute', unitType: 'execute-task', taskId: id,
-    planFile, route, workflowId: id, dispatchId: `attempt-${sequence}`, resultFile: path.join(dir, 'result.json'),
-    gates: { plan: 'approved', security: 'passed', claim: 'proceed' }, constraints: { auto_commit: false, deploy: false } };
-  const control = { calls: path.join(dir, 'calls.txt'), args: path.join(dir, 'args.json'), prompt: path.join(dir, 'prompt.txt'), writes: { [path.join(cwd, 'src.js')]: 'after\n' } };
-  const controlFile = path.join(dir, 'control.json'); write(controlFile, control);
-  return { r, task, dir, control, controlFile, owner, cwd };
-}
 async function rejects(r, code) { await assert.rejects(() => unit.runUnitSidecar(r), e => { assert.strictEqual(e.code, code, e.stack); return true; }); }
 function withFs(overrides, run) {
   const originals = Object.fromEntries(Object.keys(overrides).map(key => [key, fs[key]]));
@@ -275,7 +197,8 @@ async function main() {
   const claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: contract,
     paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
   require('./forge-runs').add(multi.owner, { id: 'multi-run', kind: 'milestone', session_id: 'fixture', write_claim: claim });
-  const request = { ...multi.r, scope: 'milestone', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+  const milestoneRoute = resolveDispatch({ cwd: multi.owner, unitType: 'execute-task', milestoneId: 'M001', unitId: 'T01', planPath: planFile, hostRuntime: 'codex' });
+  const request = { ...multi.r, route: milestoneRoute, scope: 'milestone', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
     runId: 'multi-run', claim, execution_contract: contract, planFile,
     gates: { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' },
     verification: { preferenceCommands: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'] } };
@@ -287,7 +210,7 @@ async function main() {
   assert.strictEqual(multiReceipt.final_evidence.stage, 'returned');
   assert.strictEqual(multiReceipt.final_evidence.provider_called, true);
   assert(Number.isFinite(multiReceipt.final_evidence.duration_ms));
-  assert.strictEqual(multiReceipt.final_evidence.model_observed, 'claude-opus-5-5');
+  assert.strictEqual(multiReceipt.final_evidence.model_observed, milestoneRoute.model_resolved);
   assert.strictEqual(fs.readFileSync(multi.control.calls, 'utf8'), 'spawn\n');
   snapshotRegressions();
   assert(capability('claude', 'execute-task', { scope: 'standalone-task', phase: 'execute' }).supported);
@@ -457,7 +380,7 @@ main().then(() => { completed = true; }).catch(e => { console.error(e); process.
   // Preserve failures for diagnosis; cleanup only this physical, owned fixture.
   if (!completed) { console.error(`Preserved failed fixture: ${root}`); return; }
   assert(!fs.lstatSync(root).isSymbolicLink());
-  assert.strictEqual(path.dirname(fs.realpathSync(root)), fs.realpathSync(base));
+  assert.strictEqual(path.dirname(fs.realpathSync.native(root)), fs.realpathSync.native(base));
   assert.strictEqual(fs.readFileSync(path.join(root, '.fixture-owner'), 'utf8'), fixtureMarker);
   fs.rmSync(root, { recursive: true, force: true });
 });

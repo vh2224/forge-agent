@@ -353,14 +353,44 @@ async function invokeNative(options, invoke) {
       'An injected native tool callback is required.'), provider_called: false,
       final_evidence: telemetryApi.captureFinal({ identity: options, route: options.resolvedDispatch }) };
   }
-  const evidence = telemetryApi.observeFinal({ ...options, model: invocation.telemetry.model_argument,
+  let packagedCallback;
+  const evidence = telemetryApi.observeFinal({ ...options, onPackagedContext: value => { packagedCallback = options.onPackagedContext?.(value); }, model: invocation.telemetry.model_argument,
     effort: invocation.telemetry.effort_resolved }, invocation.args,
     invocation.args.prompt || invocation.args.message, 'native-tool');
+  let invoked = false;
+  const initial = JSON.stringify(invocation);
+  const assertBoundary = stage => {
+    const current = buildNativeInvocation(options);
+    if (!current.ok || JSON.stringify(current) !== initial || JSON.stringify(invocation) !== initial) {
+      throw Object.assign(new Error('native-binding-changed'), { code: 'native-binding-changed' });
+    }
+    return current;
+  };
+  const assertGuard = async stage => {
+    const current = assertBoundary(stage);
+    await options.assertInvocation?.(stage, current);
+  };
   try {
+    await packagedCallback;
+    await assertGuard('packaged');
+    assertBoundary('packaged');
+    if (options.beforeInvoke) await options.beforeInvoke(invocation);
+    await assertGuard('before-invoke');
+    assertBoundary('before-invoke');
+    invoked = true;
     const result = await invoke(invocation.args, invocation);
+    await assertGuard('after-invoke');
+    assertBoundary('after-invoke');
     const readback = typeof options.readback === 'function'
       ? await options.readback(result, invocation)
       : null;
+    await assertGuard('after-readback');
+    assertBoundary('after-readback');
+    if (readback != null && (typeof readback !== 'object' || Array.isArray(readback)
+        || readback.model !== undefined && typeof readback.model !== 'string'
+        || readback.source !== undefined && typeof readback.source !== 'string')) {
+      throw Object.assign(new Error('native-readback-invalid'), { code: 'native-readback-invalid' });
+    }
     const observed = readback && typeof readback === 'object' ? text(readback.model) : '';
     const source = readback && typeof readback === 'object' ? text(readback.source) : '';
     return {
@@ -383,8 +413,8 @@ async function invokeNative(options, invoke) {
       result: null,
       reason_code: telemetryApi.code(error.code, 'native-invocation-failed'),
       final_evidence: { ...evidence, stage: 'invoked', duration_ms: Date.now() - started,
-        provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown' },
-      provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown',
+        provider_called: invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false },
+      provider_called: invoked ? (typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown') : false,
       diagnostic: { reason_code: telemetryApi.code(error.code, 'native-tool-callback-failed'), layer: 'native-tool' },
       hint: 'The native tool callback failed; inspect the host diagnostic channel.',
     };
