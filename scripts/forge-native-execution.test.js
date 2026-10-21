@@ -73,6 +73,7 @@ async function savedFixture(phase = 'failed') {
 async function main() {
   if (process.argv.includes('--review-r1')) return reviewReadinessCases();
   if (process.argv.includes('--review-r2')) return reviewVerificationCases();
+  if (process.argv.includes('--review-r3')) return reviewOwnerSnapshotCases();
   console.log(JSON.stringify({ label: 'matrix-applicability', fresh_native: 'No earlier writer/process or recovery authorization exists; claims/gates/caps/binding still checked.', recovered_native: 'Proven service failure permits next routed candidate without a recovery exception; live standing authorization is covered separately by attempt-recovery tests.', provider: 'synthetic', child_process: 'local retained handle', human_uat: 'not exercised' }));
   if (!process.argv.some(arg => ['--saved', '--extra', '--recovery'].includes(arg))) {
   const positive = nativeFixture();
@@ -201,6 +202,7 @@ async function main() {
 }
 async function extraCases() {
   await reviewVerificationCases();
+  await reviewOwnerSnapshotCases();
   for (const [name, mutate] of Object.entries({
     'missing-plan-gate': f => { fs.unlinkSync(f.r.planFile.replace('-PLAN.md', '-PLAN-GATE.md')); },
     'missing-security-gate': f => { f.r.gates.security = undefined; },
@@ -335,6 +337,56 @@ async function reviewVerificationCases() {
     verify.assertExecutionVerification(receipt(f).verification_seal, f.r.execution_contract,
       fs.readFileSync(f.r.planFile, 'utf8'), receipt(f).verification_seal.identity);
     assert.strictEqual(receipt(f).phase, 'executed'); label(`runtime-root-keeps-failing-request-${rootSpecific ? 'root' : 'general'}`);
+  }
+}
+async function reviewOwnerSnapshotCases() {
+  const execution = require('./forge-task-execution');
+  for (const sameOwner of [false, true]) {
+    for (const kind of ['owned', 'changed', 'added', 'removed', 'external-event', 'external-metadata', 'input', 'code-metadata']) {
+      const f = nativeFixture();
+      if (sameOwner) {
+        write(path.join(f.owner, 'src.js'), 'before\n');
+        harness.git(f.owner, ['init', '-q']);
+        harness.git(f.owner, ['config', 'core.autocrlf', 'false']);
+        harness.git(f.owner, ['add', 'src.js']);
+        harness.git(f.owner, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'baseline']);
+        const contract = roots.validateContract({ schema_version: 2, owner: f.owner, primary_root_id: 'app', code_roots: [{ id: 'app', path: f.owner }] });
+        write(f.r.planFile, fs.readFileSync(f.r.planFile, 'utf8').replaceAll(f.cwd.replace(/\\/g, '/'), f.owner.replace(/\\/g, '/')));
+        f.r.cwd = f.owner; f.r.execution_contract = contract; f.r.claim.execution_contract = contract;
+        require('./forge-runs').update(f.owner, f.r.runId, { write_claim: f.r.claim });
+      }
+      await assert.rejects(() => unit.runUnitSidecar(f.r, { activeCapabilities: f.caps,
+        invokeNative() { throw Object.assign(new Error('fixture failure before code writes'), { code: 'fixture-failure' }); } }), /fixture-failure/);
+      const file = f.r.resultFile + '.receipt.json', bytes = fs.readFileSync(file), row = receipt(f);
+      const stateBytes = fs.readFileSync(row.recovery_baseline.state_file);
+      const recoveryFile = f.r.resultFile + '.recovery.json', recoveryBytes = fs.readFileSync(recoveryFile);
+      const original = JSON.stringify(row);
+      assert.notStrictEqual(row.execution.protected_owner['.gsd/forge/events.jsonl'], row.recovery_baseline.protected_owner['.gsd/forge/events.jsonl']);
+      const metadata = path.join(f.owner, '.gsd/CODING-STANDARDS.md');
+      if (kind === 'changed') fs.appendFileSync(metadata, 'changed');
+      if (kind === 'added' || kind === 'external-metadata') write(path.join(f.owner, '.gsd/external.txt'), 'external');
+      if (kind === 'removed') fs.unlinkSync(metadata);
+      if (['changed', 'added', 'removed'].includes(kind)) row.execution.protected_owner = execution.protectedSnapshot(f.owner);
+      if (kind === 'external-event') fs.appendFileSync(path.join(f.owner, '.gsd/forge/events.jsonl'), '{}\n');
+      if (kind === 'input') fs.appendFileSync(f.r.planFile, '\nchanged');
+      if (kind === 'code-metadata') write(path.join(f.r.cwd, '.gsd/external-code.txt'), 'external');
+      let ownershipChecks = 0;
+      const reconcile = () => unit.reconcileMilestoneAttempt(f.r, row, { verifyOwnership: () => { ownershipChecks++; return false; } });
+      if (kind === 'owned') {
+        assert.strictEqual(reconcile().ok, true);
+        const { reconciliation, ...baseline } = JSON.parse(fs.readFileSync(row.recovery_baseline.state_file));
+        assert.strictEqual(reconciliation.ok, true);
+        assert.deepStrictEqual(baseline, JSON.parse(stateBytes));
+      }
+      else assert.throws(reconcile, ['changed', 'added', 'removed'].includes(kind) ? /recovery-owner-snapshot-mismatch/
+        : kind === 'input' ? /recovery-baseline-input-changed/ : /execution-protected-metadata/);
+      assert.strictEqual(ownershipChecks, 0);
+      assert(fs.readFileSync(file).equals(bytes));
+      if (kind !== 'owned') assert(fs.readFileSync(row.recovery_baseline.state_file).equals(stateBytes));
+      assert(fs.readFileSync(recoveryFile).equals(recoveryBytes));
+      if (!['changed', 'added', 'removed'].includes(kind)) assert.strictEqual(JSON.stringify(row), original);
+      label(`reconcile-owner-snapshot-${sameOwner ? 'same-root' : 'separate-root'}-${kind}`, { receipt_unchanged: true, baseline_unchanged: true, recovery_clock_unchanged: true });
+    }
   }
 }
 async function recoveryCases() {

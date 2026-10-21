@@ -278,6 +278,9 @@ function reconcileMilestoneAttempt(request, receipt, runtime = {}) {
   if (baseline.input.sha256 !== roots.digest(fs.readFileSync(baseline.input.path))) fail('recovery-baseline-input-changed');
   const execution = require('./forge-task-execution');
   const protectedOwner = receipt.execution?.protected_owner || baseline.protected_owner;
+  // Only the core-owned event hash may advance from the original baseline.
+  const withoutEvent = snapshot => Object.entries(snapshot).filter(([key]) => key !== '.gsd/forge/events.jsonl').sort();
+  if (roots.digest(withoutEvent(protectedOwner)) !== roots.digest(withoutEvent(baseline.protected_owner))) fail('recovery-owner-snapshot-mismatch');
   execution.assertProtected(contract.owner, protectedOwner);
   if (baseline.protected_roots.length !== contract.code_roots.length) fail('recovery-baseline-roots-missing');
   for (const root of contract.code_roots) {
