@@ -2,10 +2,10 @@
 
 Load this mandatory procedure before the corresponding action.
 Keep scope, phase, unit IDs, owner and physical CODE_DIR roots unchanged.
-Keep primary_root_id, claim generation, gates and explicit model/tier/effort.
+Keep primary_root_id, claim generation, gates and original explicit model/tier/effort immutable in history.
 Never execute inline to bypass a refused route.
 Inspect the real process and durable receipt before considering another attempt.
-A valid saved response uses canonical replay/publication without a provider call.
+A replay-eligible saved response uses canonical replay/publication without a provider call.
 Check result identity, input fingerprints and protected metadata before replay.
 An active or unknown process prevents another writer.
 A possibly writing worker requires reconciliation of every possible writer root.
@@ -36,3 +36,32 @@ Rendering/dispatch failure never acknowledges the pending record.
 Only the owner cleans up after durable processing and publishes checkpoints.
 Pause/handoff persist roots, authority reference, evidence, acceptance and questions.
 Restart reloads that state and procedures before dependent work resumes.
+
+Only resolver-context-omission may record a separate effective route with derived tier/effort.
+The live forge-recovery-transition adapter must authenticate independently retained historical
+resolver inputs, source hashes, all present/absent preference layers, overrides and roadmap.
+Reproduce the original heavy/high observation, fill only omitted milestone/unit/roadmap
+context from the original request, and derive high-risk max/max with the canonical resolver.
+Current reruns, adjacent recomputable hashes and imported approved/authorized flags are no history proof.
+Policy, source, preference, override, identity or root drift remains refused; insufficient history refuses.
+This restricted exception does not change common packaging correction's destination rule.
+New milestone dispatches require matching resolver context before the provider; standalone invents no milestone.
+
+Candidate presence, schema validity and replay eligibility are distinct observations.
+saved-candidate-unreplayable permits disposition only when a live trusted host independently
+attests that required original provenance was absent. Removed/corrupt signatures or manifests
+are never original absence. Replay-eligible candidates always replay, including after restart.
+Disposition preserves original receipt/candidate bytes; it never publishes, deletes, signs
+retrospectively or accepts that candidate, nor changes the failed receipt into success.
+Both transitions reconcile owner protected metadata and every possible writer root, even readonly preparation.
+Preserve attributable current host changes byte for byte; unknown/foreign/concurrent deltas block.
+Use existing path containment, exclusive immutable external records and owner publication lock;
+recheck process, receipt, roots, claims, source bindings and authority before reservation/invocation.
+Persist transition references append-only, never live handles or private authority data.
+Restart must reattest history/roots through live callbacks and revalidate standing personal authority.
+Previously resolved answers retain their IDs and exact text; the live host reattests their independent
+answer source on restart. Persisted resolved flags alone never answer a functional question.
+Reject transplanted transition records even when an adjacent hash was recomputed.
+Retain pending IDs, attempts, reservations, destination exclusions and original 60000ms clocks.
+Changing effort/tier never re-enables an already attempted destination. After expiry, only
+an untried native candidate with a live exception and real compatible invocation may start.

@@ -173,3 +173,41 @@ O caller passa execution_contract v2 completo em todas as fases. preflightPlan m
 Perguntas são objetos com id estável e question. Continuation carrega answers: [{id, answer}], from_dispatch_id e result_file originais; respostas parciais persistem em .questions.json externo, vinculadas ao receipt original. Strings antigas de pergunta ganham ID determinístico; respostas antigas sem ID devem ser reenviadas com os IDs exibidos, nunca adivinhadas. Pending impede publicação done e novas ações dependentes. Para falhas, use forge-attempt-recovery.js --preparation recovery-request.json conforme shared/forge-bidirectional-sidecar.md; não recomece preparação nem invente novo consentimento.
 
 Transport question entries accept legacy strings or strict `{id, question}` objects (no extra fields). Preparation retains the existing limits: 32 questions, 16 KiB UTF-8 per entry (the full serialized object, including ID), 64 KiB summary and the aggregate payload bound. Receipts keep original `input_pending_questions` separate from accumulated `pending_questions`, so replay preserves the request fingerprint.
+# Candidatos salvos e recuperação atestada
+
+`recoverStandaloneTask(request, recovery, deps)` aceita o handle vivo
+`deps.transitionAdapter` criado por `forge-recovery-transition.createTransitionAdapter`.
+`recovery.transitions: [{type: 'saved-candidate-unreplayable', reference}]` solicita
+disposição do candidato exato. O caller deve fornecer a autorização canônica viva,
+prova de processo encerrado e callbacks que atestem história e todas as raízes.
+Nas transições, `deps.activeCapabilities` informa a ferramenta observada agora;
+capacidades do pedido histórico não substituem essa observação. A validação e
+a nova tentativa usam essas capacidades sem alterar o pedido/receipt original.
+`resolver-context-omission` é exclusivo de milestone: brainstorm/plan standalone
+conservam seus scope/phase e nunca fabricam milestone para permitir recuperação.
+
+Presença de candidato, validade do schema e elegibilidade para replay são propriedades
+distintas, observadas por `forge-artifact-reconciliation.inspectCandidate` sem escrever.
+Candidato com assinatura/manifesto originais válidos segue replay canônico sem inferência,
+inclusive em novo processo. Candidato sem broker só admite disposição se o host atestar
+por evidência independente a ausência original da proveniência exigida. Apenas não
+encontrar um arquivo agora é insuficiente; assinatura/manifesto removidos ou adulterados recusam.
+Disposição mantém receipt/candidato originais byte a byte, sem publicação, assinatura
+retrospectiva, aprovação de conteúdo ou alteração da tentativa falha.
+
+Os callbacks vivos, contrato do desafio e registro imutável externo estão descritos em
+`shared/forge-bidirectional-sidecar.md`, seção Transições restritas de recuperação.
+JSON imported/approved/authorized e hashes adjacentes não concedem autoridade.
+Após restart, reatestar história/roots e fonte pessoal da autorização permanente.
+Mesmo preparação nominalmente readonly reconcilia owner, eventos e todas as raízes
+de código possíveis. Escritas legítimas atribuídas do host permanecem intactas;
+processo ativo/desconhecido ou escrita desconhecida/estrangeira/concorrente bloqueia.
+
+Conservar identidade física/lógica, claims/generation e gates quando aplicáveis,
+perguntas pendentes, histórico, reservas, exclusões e started_at/deadline_at originais.
+Handoff nativo externo devolve `reattest-native-handoff` e hash de reserva; antes de
+chamar a ferramenta, retomar com `resumeReservation.sha256` e callbacks/autoridade vivos,
+validar a invocação real e executar `assertReady` imediatamente no ponto de chamada.
+O prazo cumulativo de 60000ms nunca reinicia. Após expirar, nenhum sidecar inicia;
+somente destino nativo não tentado com exceção viva e capacidades reais é elegível.
+O registro não substitui evidência histórica ausente nem libera automaticamente um caso real.

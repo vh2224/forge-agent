@@ -166,6 +166,21 @@ try {
     assert(match); const loaded = json(argv(match[1], values));
     assert(loaded.content.includes('<!-- forge-procedure:recovery -->'));
     assert(loaded.content.includes('receipt')); assert(loaded.content.includes('60000'));
+    for (const term of ['resolver-context-omission', 'saved-candidate-unreplayable', 'heavy/high', 'max/max',
+      'independently retained', 'Removed/corrupt', 'every possible writer root', 'Restart must reattest']) assert(loaded.content.includes(term), term);
+  });
+  test('stale recovery module hash refuses the public recovery entrypoint before inspection/provider', () => {
+    const file = path.join(root, 'shared/forge-procedure-recovery.md'), before = fs.readFileSync(file);
+    fs.appendFileSync(file, '\nUnbound procedure change.\n');
+    try {
+      assert.throws(() => loadProcedureContext({ cwd: root, phase: 'recovery' }), /integrity-mismatch/);
+      const script = `let calls=0;require(${JSON.stringify(require.resolve('./forge-unit-sidecar'))}).recoverUnitSidecar({cwd:process.argv[1]}, {}, {
+        processProbe(){calls++;return 'stopped';},invokeNative(){calls++;throw Error('provider forbidden');}
+      }).then(()=>process.exitCode=1).catch(e=>process.stdout.write(JSON.stringify({code:e.code,calls})));`;
+      const result = json(['-e', script, root]);
+      assert.match(result.code, /integrity-mismatch/); assert.equal(result.calls, 0);
+    } finally { fs.writeFileSync(file, before); }
+    assert(loadProcedureContext({ cwd: root, phase: 'recovery' }).content.includes('saved-candidate-unreplayable'));
   });
   test('real renderer diagnoses empty and unknown optional memory without a substitute', () => {
     const render = require('./forge-prompt').renderPrompt;

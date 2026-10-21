@@ -32,6 +32,12 @@ console.log('stable-ID and legacy questions: strict schema, UTF-8 bytes, count, 
 
 // Recovery must use the delivery contract of the actual unit, not execute's.
 const sidecar = require('./forge-unit-sidecar');
+function resolveContext(request) {
+  request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,
+    milestoneId: request.milestoneId, unitId: request.taskId || request.sliceId || request.milestoneId,
+    planPath: request.planFile, roadmapPath: request.roadmapFile, hostRuntime: 'codex' });
+  return request;
+}
 assert.strictEqual(typeof sidecar.validateRecoveryRequest, 'function');
 const research = { unitType: 'research-milestone', milestoneId: 'M001', route: {
   resolved_worker_engine: 'claude', worker_mode: 'sidecar', dispatch_allowed: true } };
@@ -58,6 +64,9 @@ async function recoveryContracts() {
   request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
   fs.writeFileSync(request.planFile, fixtures.plan(lab.contract));
   fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+  fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+    ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
+  resolveContext(request);
   const runs = require('./forge-runs');
   request.runId = 'fixture-run';
   request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
@@ -92,6 +101,12 @@ async function recoveryContracts() {
       fs.writeFileSync(path.join(lab.b, 'same.txt'), 'worker b\n');
       throw Object.assign(Error('timeout fixture'), { code: 'claude-timeout' });
     };
+    for (const incomplete of [route, { ...request.route, resolution_context: { ...request.route.resolution_context, unit_id: 'T99' } }]) {
+      const missingContext = { ...request, route: incomplete, dispatchId: 'missing-context', resultFile: path.join(lab.dir, 'missing-context.json') };
+      await assert.rejects(sidecar.runUnitSidecar(missingContext), /milestone-resolver-context-required/);
+      assert.strictEqual(calls, 0, 'milestone context refusal precedes provider');
+      assert(!fs.existsSync(missingContext.resultFile + '.receipt.json'));
+    }
     const refused = { ...request, dispatchId: 'blocked-baseline', resultFile: path.join(lab.dir, 'blocked.json') };
     fs.writeFileSync(refused.resultFile + '.reset-state.json', '{}');
     await assert.rejects(sidecar.runUnitSidecar(refused), /baseline-already-exists/);
@@ -129,8 +144,8 @@ async function recoveryContracts() {
     const originalPlan = fs.readFileSync(request.planFile);
     try {
       fs.writeFileSync(request.planFile, fixtures.plan(roots.singleContract(lab.owner, lab.a)));
-      await assert.rejects(sidecar.runUnitSidecar({ ...request, execution_contract: undefined,
-        dispatchId: 'legacy-context', resultFile: path.join(lab.dir, 'legacy-context.json') }), /legacy context boundary inspected/);
+      await assert.rejects(sidecar.runUnitSidecar(resolveContext({ ...request, execution_contract: undefined,
+        dispatchId: 'legacy-context', resultFile: path.join(lab.dir, 'legacy-context.json') })), /legacy context boundary inspected/);
     } finally { fs.writeFileSync(request.planFile, originalPlan); }
     // Exercise the actual nativeOptions closure with the recovery controller
     // substituted at its boundary. This exercises composition/the adapter;
@@ -186,9 +201,11 @@ async function recoveryContracts() {
     for (const patch of [{ active: false }, { write_claim: { ...request.claim, released: true } },
       { write_claim: { ...request.claim, generation: 'replacement' } }]) {
       runs.update(lab.owner, request.runId, patch);
-      await assert.rejects(sidecar.recoverUnitSidecar({ ...request, prompt: 'repaired packaging' },
-        { stateFile, receiptFile: request.resultFile + '.receipt.json', correction: true },
-        { processProbe: () => 'stopped', invokeNative() { nativeCalls++; } }), /claim-generation-stale/);
+      for (const mode of [{ correction: true }, { transitions: [{ type: 'resolver-context-omission', reference: 'fixture:claim-negative' }] }]) {
+        await assert.rejects(sidecar.recoverUnitSidecar({ ...request, prompt: 'repaired packaging' },
+          { stateFile, receiptFile: request.resultFile + '.receipt.json', ...mode },
+          { processProbe: () => 'stopped', invokeNative() { nativeCalls++; } }), /claim-generation-stale/);
+      }
       runs.update(lab.owner, request.runId, { active: true, write_claim: request.claim });
     }
     assert.strictEqual(nativeCalls, 0, 'released/replaced/inactive live authority never reaches another writer');
@@ -251,6 +268,7 @@ async function recoveryContracts() {
             procedure_context: ['composed', 'tampered-body'].includes(change) ? metadata : undefined,
             dispatchId: id, resultFile: path.join(lab.dir, id + '.json') };
           const previous = entered;
+          resolveContext(probe);
           try {
             if (change === 'missing') fs.unlinkSync(modulePath);
             if (change === 'changed-hash') fs.appendFileSync(modulePath, '\ntampered');
@@ -275,7 +293,7 @@ async function recoveryContracts() {
       promptFile: request.planFile, dispatchId: 'plan', resultFile: path.join(lab.dir, 'p.json') };
     xllm.runPlan = async () => ({ status: 'done', slice_plan: { content: '# Slice\n- [ ] **T02** — fixture\n' },
       task_plans: [{ id: 'T02', content: fixtures.plan(lab.contract) }] });
-    await sidecar.runUnitSidecar(planning);
+    await sidecar.runUnitSidecar(resolveContext(planning));
     const canonicalPlan = path.join(base, 'tasks/T02/T02-PLAN.md');
     assert(fs.existsSync(canonicalPlan));
     assert(!fs.existsSync(path.join(base, 'tasks/T02-PLAN.md')));
@@ -609,9 +627,20 @@ async function deliveryPublicationLimits() {
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 async function runScenarios() {
-  await deliveryPublicationLimits();
-  if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
-  if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
-  if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
+  const fs = require('fs'), path = require('path'), os = require('os');
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-')), previous = {};
+  for (const key of ['HOME', 'USERPROFILE', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'FORGE_HOME']) previous[key] = process.env[key];
+  process.env.HOME = process.env.USERPROFILE = profile;
+  process.env.CODEX_HOME = path.join(profile, '.codex'); process.env.CLAUDE_CONFIG_DIR = path.join(profile, '.claude');
+  process.env.FORGE_HOME = path.resolve(__dirname, '..');
+  try {
+    await deliveryPublicationLimits();
+    if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
+    if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
+    if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
 }
 runScenarios().catch(error => { console.error(error); process.exitCode = 1; });

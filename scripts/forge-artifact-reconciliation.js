@@ -167,20 +167,36 @@ function assertBroker(value) { if (!live.has(value)) fail('broker-caller-handle-
 
 // Append-only reconciliation receipt. Original failure and saved candidate are
 // immutable; publication uses the canonical materializer with its target CAS.
-async function reconcile(options) {
+function inspectCandidate(options) {
   const originalBytes = bytes(options.receiptFile);
   if (!originalBytes) fail('reconciliation-receipt-missing');
   const original = JSON.parse(originalBytes);
-  if (original.phase !== 'failed' || !original.saved_candidate) fail('reconciliation-saved-response-required');
+  const responseAnchorBytes = bytes(`${options.receiptFile}.response-anchor.json`);
+  const observation = { present: !!original.saved_candidate, schema_valid: false, replay_eligible: false,
+    receipt_sha256: digest(originalBytes), candidate_sha256: original.saved_candidate ? digest(original.saved_candidate) : null,
+    anchor_sha256: responseAnchorBytes ? digest(responseAnchorBytes) : null,
+    provenance: original.broker_manifest_sha256 || responseAnchorBytes ? 'present-or-damaged' : 'absence-unproved' };
+  if (original.phase !== 'failed' || !original.saved_candidate) return { ...observation, reason_code: 'reconciliation-saved-response-required' };
+  const responseHash = digest(original.saved_candidate.result);
+  if (original.saved_candidate.sha256 !== responseHash) return { ...observation, reason_code: 'reconciliation-response-changed' };
+  const request = options.request;
+  if (request) {
+    const unit = require('./forge-unit-sidecar'), loc = unit.locations(request);
+    observation.schema_valid = unit.inspectArtifacts(original.saved_candidate.result, loc.allowed, loc.required, Infinity,
+      loc.rules, { forbidArtifactsOnNonDone: loc.preparation === true }).ok;
+  } else observation.schema_valid = !!original.saved_candidate.result && typeof original.saved_candidate.result === 'object';
+  if (!observation.schema_valid) return { ...observation, reason_code: 'reconciliation-candidate-schema-invalid' };
+  try { assertCandidateProvenance(options, original, responseHash, responseAnchorBytes); }
+  catch (error) { return { ...observation, reason_code: error.code || 'reconciliation-response-anchor-invalid' }; }
+  return { ...observation, replay_eligible: true, provenance: 'signed', reason_code: null };
+}
+function assertCandidateProvenance(options, original, responseHash, responseAnchorBytes) {
   const anchor = options.trust;
   if (!anchor || anchor.manifest_sha256 !== digest(options.manifest)
       || original.broker_manifest_sha256 !== anchor.manifest_sha256
       || anchor.request_sha256 !== original.fingerprint || options.manifest.request_sha256 !== original.fingerprint) fail('reconciliation-request-mismatch');
-  const responseHash = digest(original.saved_candidate.result);
-  if (original.saved_candidate.sha256 !== responseHash) fail('reconciliation-response-changed');
   // The receipt and its adjacent hash are untrusted together. Require the
   // broker's independently signed, single-response binding from before refusal.
-  const responseAnchorBytes = bytes(`${options.receiptFile}.response-anchor.json`);
   if (!responseAnchorBytes) fail('reconciliation-response-anchor-required');
   const { signature, ...responseAnchor } = JSON.parse(responseAnchorBytes);
   if (responseAnchor.kind !== 'saved-response' || responseAnchor.manifest_sha256 !== anchor.manifest_sha256
@@ -190,6 +206,12 @@ async function reconcile(options) {
       || !signature || !crypto.verify(null, Buffer.from(JSON.stringify(responseAnchor)), options.manifest.public_key,
         Buffer.from(signature, 'base64'))) fail('reconciliation-response-anchor-invalid');
   if (original.saved_candidate.plan_sha256 !== (options.manifest.plan_sha256 || null)) fail('reconciliation-plan-mismatch');
+}
+async function reconcile(options) {
+  const inspected = inspectCandidate(options);
+  if (!inspected.replay_eligible) fail(inspected.reason_code);
+  const originalBytes = bytes(options.receiptFile), original = JSON.parse(originalBytes), anchor = options.trust;
+  if (digest(originalBytes) !== inspected.receipt_sha256) fail('reconciliation-receipt-raced');
   const guard = lock(options.manifest);
   try {
   const publicationOptions = { ...anchor, canonicalArtifacts: original.saved_candidate.result.artifacts || [] };
@@ -212,7 +234,7 @@ async function reconcile(options) {
   } finally { guard.release(); }
 }
 
-module.exports = { startBroker, assertBroker, verifyProof, verifySurface, reconcile, safeTarget, lock, withOwnerLock };
+module.exports = { startBroker, assertBroker, verifyProof, verifySurface, inspectCandidate, reconcile, safeTarget, lock, withOwnerLock };
 if (require.main === module && process.argv[2] === '--broker' && process.send) {
   let manifest, privateKey, responseAnchor; const tails = {};
   process.on('message', message => {

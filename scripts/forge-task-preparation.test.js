@@ -924,6 +924,24 @@ async function main() {
     const calledReceipt = JSON.parse(fs.readFileSync(`${called.resultFile}.receipt.json`, 'utf8'));
     assert.equal(calledReceipt.failure.provider_called, true);
   });
+  await test('standalone recovery disposes only independently attested original absence and exposes no executable first handoff', async () => {
+    const h = require('./forge-recovery-transition.test');
+    const f = await h.candidateFixture(true, false);
+    try {
+      await assert.rejects(h.recoverPublic(f, {}, { transitionAdapter: h.adapter(f, { attestHistory: challenge => ({
+        binding_sha256: require('./forge-code-roots').digest(challenge), history: f.history,
+        history_sha256: require('./forge-code-roots').digest(f.history), evidence_reference: 'current-json',
+        provenance_reference: 'no-original-observation', original_provenance: 'unknown' }) }) }), /original-absence-unproved/);
+      const result = await h.recoverPublic(f);
+      assert.equal(result.action, 'reattest-native-handoff'); assert.equal(result.provider_called, false);
+      assert.equal(result.invocation, undefined); assert.equal(result.result?.invocation, undefined);
+      const state = h.assertHistoryPreserved(f);
+      assert.equal(state.reservations.length, 1); assert.equal(state.transitions.length, 1);
+      assert(!fs.existsSync(path.join(f.owner, prep.requiredArtifact(f.raw))));
+      assert.equal(JSON.parse(fs.readFileSync(f.receiptFile)).phase, 'failed');
+      assert.equal(f.request.milestoneId, undefined);
+    } finally { f.cleanup(); }
+  });
 }
 
 main().finally(() => {
