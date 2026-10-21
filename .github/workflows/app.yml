@@ -7,9 +7,6 @@ on:
       - '.github/workflows/app.yml'
   push:
     branches: [master]
-    paths:
-      - 'app/**'
-      - '.github/workflows/app.yml'
 
 permissions:
   contents: read

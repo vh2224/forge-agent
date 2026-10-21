@@ -57,9 +57,9 @@ Matrix rendering supports `${{ matrix.KEY }}` substitution, requiring unique nam
 The returned source record carries candidate, policy digest, blob identity and
 expanded semantic rows. `policyDigest()` hashes the versioned policy value, including
 its local inventory; T03 binds it to the freshly generated receipt.
-The source-pinned Release baseline still has the historical single `release` job;
-T04 must update its blob pins and mappings when installing coordinator/publisher.
-Pins do not assert that the historical workflow already enforces this new barrier.
+The source-pinned Release has the fixed `coordinator` and `publisher` jobs.
+Their distinct names and explicit permission mappings are bound to the blob pins.
+Release is source policy only and is never an awaited remote gate.
 
 ## Required remote matrix
 
@@ -116,7 +116,7 @@ name, numeric execution ID and native/alias kind for downstream reporting.
 
 ## Preserved local gates and evolution
 
-The policy enumerates version --check, clean/stable tree and HEAD, six HOSTS ×
+The policy enumerates version --check, clean/stable tree and HEAD, six HOSTS Ãƒâ€”
 PLATFORMS cells and the actual suites from `forge-offline-ci.MATRIX`, three
 regenerations, package/checksum and concrete securityAudit. T03 validates full local
 report schema independently; this remote evaluator does not treat report.ok as proof.
@@ -132,3 +132,99 @@ Tests use fake Git/remote facts and read-only real Git blob checks. They establi
 local decision behavior, not live GitHub CI, branch protections, merge, installation
 or human acceptance. A trusted runner remains an assumption. Same-UID compromise
 and atomicity against external publication writers are outside this module's proof.
+
+
+## Installed master route and operations
+
+Release starts only from `push` on `refs/heads/master`.
+Tag creation alone does not schedule Release; no tag-selected workflow is trusted.
+Existing exact-SHA tags and releases still pass through the complete master barrier.
+Version selection remains `forge-release-version.js --check --github-output`.
+No conventional-commit, semver, declared version or changelog policy changes here.
+The original Breaking Changes, Features, Bug Fixes and Other Changes order remains.
+Notes use commit subjects without shell evaluation and are saved under runner.temp.
+
+Both jobs have a fixed master checkout, fetch-depth 0 and persist-credentials false.
+Only fixed checkout/setup-node actions and inline builtin/Git context checks run first.
+The bootstrap checks repository numeric ID/full_name against the trusted runner,
+fork false, push/master, nondeleted event, complete equal after/SHA/workflow SHA,
+and the exact master workflow_ref before loading any candidate source script.
+Git then verifies ancestry under the observed remote master.
+The candidate output is always the original complete event SHA.
+A second checkout selects that exact SHA, followed by a HEAD equality check.
+Advancing master never silently swaps the candidate.
+This depends on trusted master workflow/runner context, not self-authentication by
+arbitrary tag YAML. Remote branch protections have not been observed by this work.
+
+The bounded event payload is copied with exclusive creation into RUNNER_TEMP.
+Helper commands set GITHUB_EVENT_PATH explicitly with a fixed shell assignment.
+No runner GITHUB_ENV or step env override of reserved GITHUB_* is assumed.
+The copy supports the publisher's real containment/stable-read requirements.
+GITHUB_OUTPUT must also physically reside under RUNNER_TEMP, as on hosted runners.
+An unsupported runner layout fails closed and needs deliberate integration review.
+
+Coordinator has contents:read/actions:read; publisher needs coordinator and has
+contents:write/actions:read. That permission is job-wide, including actions that
+can access github.token even without a visible GH_TOKEN environment variable.
+persist-credentials:false prevents stored checkout credentials, not job privilege.
+The authenticated GET-only wait is a separate coordinator step with GH_TOKEN.
+Its collector shares an explicit 30 minute deadline and never waits for Release.
+A subsequent prepare has empty GH_TOKEN/GITHUB_TOKEN and rejects other secret env.
+It generates local gate/report/receipt together with scrubbed child environments.
+The publisher independently resolves notes and runs its own token-free prepare.
+No report, receipt, nonce or artifact is transferred from coordinator to publisher.
+Only the final apply receives explicit GH_TOKEN in the publisher.
+This is credential propagation discipline; it is not a privilege sandbox.
+
+## Receipt, retry and residual races
+
+Prepare binds the physical checkout, policy/source digests, complete candidate SHA,
+report/notes/package bytes, repository/workflow identity and current run/attempt/job.
+The unique fixed job key plus current authenticated run/attempt is the job identity.
+Receipt TTL is ten minutes after generation; each job timeout is 45 minutes.
+Apply receives only that prepare step's state/nonce outputs, never an imported report.
+It validates identity, containment, unchanged clean HEAD, source bytes and expiry,
+claims the receipt once exclusively and rechecks current gates around each effect.
+Apply never regenerates offline evidence or mints a replacement receipt.
+An old report, expired/cross-job receipt or double apply cannot authorize effects.
+A retry needs fresh preparation; it cannot renew the old receipt or switch SHA.
+The nonce is continuity evidence, not an authenticated signature against same-UID
+code capable of inventing runner context or modifying files under the same account.
+
+Existing tags are inspected/peeled against the exact candidate and never moved.
+Existing releases require matching tag/repository identity and the entire barrier.
+A missing tag uses explicit full-SHA ref creation; release uses verify-tag/readback.
+Conflicts require exact readback; neither target_commitish nor --verify-tag alone
+proves an existing tag's commit. No force, deletion or rollback masks divergence.
+After partial effects, preserve state/consumption and sanitized failure diagnostics.
+Separate HTTP operations leave an external writer race; publication is not atomic
+without independently enforced server protection. This work does not prove one.
+
+Release concurrency group remains release with cancel-in-progress:false.
+It avoids cancellation of active publication; pending runs may still be replaced.
+It is not durable FIFO and cannot promise that every push publishes.
+Timeout, missing evidence and partial reruns all block rather than count as pass.
+Remote aliases never replace the native CI cells or native macos-26 app execution.
+The app is now scheduled for every master push; only push.paths was removed.
+PR filters, app job/name/runner, cache, Swift build and real PTY command remain.
+This conservative coverage can increase cost/latency; no efficiency gain is claimed.
+
+## Evidence levels and future slices
+
+The workflow harness reads real YAML, rejects unsupported step forms, executes its
+inline bootstrap/HEAD/changelog bodies and dispatches its real helper entrypoints
+through controlled argv and productive prepare/apply with fake transport/effects.
+Its temporary Git index/object tree checks final blob bytes without changing the
+real checkout/index. It does not publish or exercise a remote GitHub runner.
+Full-schema fixtures cover six local cells, eleven suites and three regenerations.
+Local simulated selectors are distinct from native Windows/macOS jobs.
+CI baseline semantics remain no new failures and no stale known-failure entries.
+A clean committed full local gate is run by the owner; a dirty worktree is pending,
+never an allowDirty pass. Suite discovery remains dynamic through run-tests --list.
+Implementation, local simulation, remote CI, independent review, merge, installation
+and human UAT are independent facts. Remote CI/review/UAT remain pending unless
+separate concrete evidence establishes each one; local positives cannot infer them.
+S04 may narrow coverage only with proven dependencies, negative fixtures and joint
+policy/mapping/pin updates. Unknown paths remain conservative until then.
+S08 preserves current semver/changelog contracts; this route does not redesign them.
+S09 consumes explicit evidence/acceptance and may not turn a simulated pass into UAT.

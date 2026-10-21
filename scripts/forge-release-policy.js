@@ -39,16 +39,19 @@ const POLICY = {
     },
     app: {
       filename: 'app.yml', path: '.github/workflows/app.yml',
-      blob_oid: 'd7d9b8f929799b9d64aa83a2559146570407e2d5',
-      blob_sha256: '1d1493e9a5f0e8925c64eed6d8f039ae48d6a70ac146b39f459f378d0b3ccb97',
+      blob_oid: '6ad7bb5f3af423c74452afe659aae35db9785fd4',
+      blob_sha256: 'cb12bc265ca1e21335f2be3b20961cab8bb878aefe1cde6053a9fef1e55c33e5',
       jobs: [{ key: 'app', kind: 'native', needs: [], name: 'Swift app and PTY regressions', runner: 'macos-26', matrix: null }],
     },
     release: {
       filename: 'release.yml', path: '.github/workflows/release.yml',
-      blob_oid: '7005516a35662e5b0b30cb33cc63afef5d795fa6',
-      blob_sha256: '66400e716b3acf4dd232cef21910b493ea31b612c07c0417966dfe85e84f655d',
-      // Release is source-pinned but never waits for itself. S02/T04 changes this topology.
-      jobs: [{ key: 'release', kind: 'publisher', needs: [], runner: 'ubuntu-latest', matrix: null }],
+      blob_oid: '315d89bad9b4ef2965d3a2f3e969fd83005e61d2',
+      blob_sha256: 'c19b795426f6d0cec090630f90f1c3aa45d3bc83d573aab92cac332e0f3017a3',
+      // Release is source-pinned but never waits for itself; job identity binds receipts.
+      jobs: [
+        { key: 'coordinator', kind: 'coordinator', name: 'Release coordinator', needs: [], runner: 'ubuntu-latest', matrix: null, permissions: { contents: 'read', actions: 'read' } },
+        { key: 'publisher', kind: 'publisher', name: 'Release publisher', needs: ['coordinator'], runner: 'ubuntu-latest', matrix: null, permissions: { contents: 'write', actions: 'read' } },
+      ],
     },
   },
   local: {
