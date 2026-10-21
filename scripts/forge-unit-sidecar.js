@@ -1202,7 +1202,13 @@ async function runNativeMemory(request, invoke) {
 }
 async function runUnitSidecarCore(request, runtime, identity) {
   let transportReturned = false;
+  let recoveryReady = runtime.assertRecoveryReady;
+  const enterTransport = () => {
+    recoveryReady?.();
+    recoveryReady = null;
+  };
   const r = request || {}, route = r.route || {};
+  if (!fs.existsSync(`${r.resultFile}.receipt.json`)) require('./forge-dispatch-resolve').assertMilestoneContext(r);
   const transport = capability(route.resolved_worker_engine, r.unitType, r.scope === 'milestone' ? {} : r);
   if (!transport.supported) fail(transport.reason_code, transport.hint);
   const guard = evaluateDispatchGuard({ ...route, unit_type: r.unitType,
@@ -1240,6 +1246,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   const eventsFile = target(root, '.gsd/forge/events.jsonl');
   const label = unitLabel(r, loc);
   async function appendOwnedEvent(line, record) {
+    if (recoveryReady?.appendOwnerEvent) return recoveryReady.appendOwnerEvent(line);
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
@@ -1272,7 +1279,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     });
   }
   async function event(status, reasonCode, detail, providerCalled = false, extra = null) {
-    fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
+    if (!recoveryReady?.appendOwnerEvent) fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
     const line = JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
       workflow_id: r.workflowId, dispatch_id: dispatchId,
       unit: label,
@@ -1449,6 +1456,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
   }, route, startedAt);
   if (r.ownerBroker) await require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).append('.gsd/forge/events.jsonl', JSON.stringify(dispatchEvent) + '\n');
+  else if (recoveryReady?.appendOwnerEvent) recoveryReady.appendOwnerEvent(JSON.stringify(dispatchEvent) + '\n');
   else fs.appendFileSync(eventsFile, JSON.stringify(dispatchEvent) + '\n');
   if (loc.preparation) {
     const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
@@ -1514,6 +1522,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       xllm.authorizeSidecar('memory', options);
       heartbeat(null);
       if (options.engine === 'claude') {
+        enterTransport();
         transportEntered = true;
         const output = await xllm.invokeClaudeTransport({ ...options, prompt: prompt
           + '\nFinish with ---GSD-WORKER-RESULT---, status, result_json containing the complete JSON, and ---END-RESULT--- on separate lines.',
@@ -1523,6 +1532,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
+        enterTransport();
         transportEntered = true;
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
           sandbox: 'read-only', onHeartbeat: heartbeat });
@@ -1539,6 +1549,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const protectedBefore = execution ? executionApi.protectedSnapshot(root) : null;
       const codeProtectedBefore = execution ? execution.execution_contract.code_roots.map(code => ({ root: code.path,
         before: executionApi.protectedSnapshot(code.path) })) : [];
+      enterTransport();
       transportEntered = true;
       result = await xllm.runExecute({ ...options, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
@@ -1619,6 +1630,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       try {
         const planContextFile = path.join(promptDir, 'context.md');
         fs.writeFileSync(planContextFile, deliveryPrompt, { mode: 0o600 });
+        enterTransport();
         transportEntered = true;
         result = await xllm.runPlan({ ...options, planContextFile });
         transportReturned = true;
@@ -1650,6 +1662,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       xllm.authorizeSidecar('artifacts', options);
       heartbeat(null);
       if (options.engine === 'claude') {
+        enterTransport();
         transportEntered = true;
         const output = await xllm.invokeClaudeTransport({ ...options, prompt: prompt
           + '\nFinish with the following envelope. Markers must be on their own lines. result_json must contain one complete JSON object (compact or multiline); escape newlines inside JSON strings. Do not wrap the JSON in Markdown fences.\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <complete JSON>\n---END-RESULT---',
@@ -1660,6 +1673,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
+        enterTransport();
         transportEntered = true;
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
         transportReturned = true;
@@ -1698,6 +1712,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     } else if (transport.mode === 'fix') {
       // Scoped writing turn through the shared execute safety core. The worker
       // never commits; outside-claim, .gsd and a moved baseline are named failures.
+      enterTransport();
       transportEntered = true;
       result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
       transportReturned = true;
@@ -1910,6 +1925,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   }
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request,
     recoveryAuthorization: runtime.recoveryAuthorization, processProbe: runtime.processProbe,
+    transitionAdapter: runtime.transitionAdapter,
     executionContract: executionRequest.execution_contract, executionAuthority: authority,
     externalNativeHandoff: !runtime.invokeNative,
     inspectPreSpawn: runtime.inspectPreSpawn, inspectPreSpawnDelta: runtime.inspectPreSpawnDelta,
@@ -1962,7 +1978,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       if (route.worker_mode === 'native') {
         if (!runtime.invokeNative) {
           assertReady?.();
-          if (recovery.environmentalCorrection && !recovery.resumeReservation) return {
+          if ((recovery.environmentalCorrection || recovery.transitions) && !recovery.resumeReservation) return {
             action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
           return { action: 'invoke-native', request: next, invocation, ...(assertReady ? { assertReady } : {}) };
         }
@@ -1974,7 +1990,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
           });
         return native;
       }
-      return runUnitSidecar(next, runtime);
+      return runUnitSidecar(next, { ...runtime, ...(assertReady?.appendOwnerEvent ? { assertRecoveryReady: assertReady } : {}) });
     },
   });
 }
