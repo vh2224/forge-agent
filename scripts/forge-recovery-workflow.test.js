@@ -17,7 +17,7 @@ function stageProcedures(home) {
   }
 }
 // Set isolation before loading modules which may cache preference sources.
-if (!['--isolated', '--restart-fixture', '--milestone-restart'].includes(process.argv[2])) {
+if (!['--isolated', '--restart-fixture', '--milestone-restart', '--transition-only', '--transition-restart'].includes(process.argv[2])) {
   const bootstrap = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-home-')));
   try {
     stageProcedures(path.join(bootstrap, 'forge'));
@@ -52,6 +52,12 @@ function authority(profile, now, register) {
   return { adapter, reference, ...(register ? { registration: { host: 'codex', section: 'user:forge-routing-continuity' } } : {}) };
 }
 function write(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value); }
+function resolveMilestone(request) {
+  request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,
+    milestoneId: request.milestoneId, unitId: request.taskId || request.sliceId || request.milestoneId,
+    planPath: request.planFile, roadmapPath: request.roadmapFile, hostRuntime: 'codex' });
+  return request;
+}
 function child(args, env) {
   const run = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000, env });
   assert.equal(run.status, 0, `${args.join(' ')}\n${run.stdout}\n${run.stderr}\n${run.error || ''}`);
@@ -97,7 +103,165 @@ async function restart(file) {
   fs.writeFileSync(file + '.result.json', JSON.stringify({ pid: process.pid, calls, receipt: accepted, published,
     deadline_at: initial.deadline_at, sidecar_remaining_ms: result.sidecar_remaining_ms }));
 }
+async function transitionRestart(file) {
+  const h = require('./forge-recovery-transition.test');
+  const f = JSON.parse(fs.readFileSync(file)); f.binding = h.authority(f);
+  f.originalReceipt = Buffer.from(f.originalReceipt); if (f.originalEvents) f.originalEvents = Buffer.from(f.originalEvents);
+  let calls = 0;
+  const runtime = { invokeNative: async (requestOrArgs, invocation) => {
+    calls++;
+    const args = f.standalone ? requestOrArgs : invocation.args;
+    assert.equal(args.model, f.expectedModel); assert.equal(args.reasoning_effort, f.expectedEffort);
+    assert.equal(args.fork_turns, 'none');
+    return f.standalone ? `---GSD-WORKER-RESULT---\nstatus: partial\nresult_json: ${JSON.stringify({
+      status: 'partial', summary: 'Synthetic new attempt, no publication.', questions: [], artifacts: [] })}\n---END-RESULT---` : { fixture: true };
+  } };
+  if (f.questionEvidence) {
+    const evidence = f.questionEvidence; delete f.questionEvidence;
+    await assert.rejects(h.recoverPublic(f, { resumeReservation: { sha256: f.reservation } }, runtime), /question-history-unproved/);
+    assert.equal(calls, 0); f.questionEvidence = evidence;
+  }
+  const result = await h.recoverPublic(f, f.reservation ? { resumeReservation: { sha256: f.reservation } } : {}, runtime);
+  if (f.signed) {
+    assert.equal(result.action, 'replay'); assert.equal(result.result.provider_called, false); assert.equal(calls, 0);
+    assert(fs.existsSync(path.join(f.request.contextRoot, unit.locations(f.request).required[0])));
+  } else {
+    assert.equal(result.action, 'invoke'); assert.equal(calls, 1); assert.equal(result.sidecar_remaining_ms, 0);
+    assert(!fs.existsSync(path.join(f.request.contextRoot, unit.locations(f.request).required[0])), 'disposition cannot publish the old candidate');
+    const saved = h.assertHistoryPreserved(f);
+    assert.equal(saved.reservations.length, 1); assert.equal(saved.transitions.length, 1);
+    if (f.questionEvidence) assert.deepEqual(saved.pending_questions, f.questionEvidence);
+    const next = await h.recoverPublic(f, {}, runtime);
+    assert.equal(next.action, 'stop'); assert.equal(next.reason_code, 'recovery-candidates-exhausted'); assert.equal(calls, 1);
+    h.assertHistoryPreserved(f);
+  }
+  assert.deepEqual(fs.readFileSync(f.receiptFile), f.originalReceipt);
+  write(file + '.proof', JSON.stringify({ pid: process.pid, calls, action: result.action }));
+}
+async function transitionWorkflow() {
+  const h = require('./forge-recovery-transition.test'), transition = require('./forge-recovery-transition');
+  // Both public APIs distinguish a schema-valid saved response from signed replay.
+  for (const standalone of [true, false]) for (const signed of [true, false]) {
+    const f = await h.candidateFixture(standalone, signed);
+    try {
+      f.signed = signed; f.expectedModel = 'gpt-5.6-sol'; f.expectedEffort = standalone ? 'high' : 'medium';
+      const inspected = require('./forge-artifact-reconciliation').inspectCandidate({ ...f.reconciliation, receiptFile: f.receiptFile, request: f.request });
+      assert.equal(inspected.present, true); assert.equal(inspected.schema_valid, true); assert.equal(inspected.replay_eligible, signed);
+      let calls = 0;
+      if (signed) {
+        const anchorFile = f.receiptFile + '.response-anchor.json', anchor = fs.readFileSync(anchorFile);
+        fs.unlinkSync(anchorFile);
+        await assert.rejects(h.recoverPublic(f), /historical-binding|original-absence/);
+        fs.writeFileSync(anchorFile, anchor);
+        const originalManifest = f.reconciliation.manifest;
+        f.reconciliation.manifest = { ...originalManifest, dispatch_id: 'forged' };
+        await assert.rejects(h.recoverPublic(f), /original-absence/);
+        f.reconciliation.manifest = originalManifest;
+        const replayed = await h.recoverPublic(f, {}, { transitionAdapter: h.adapter(f, { attestHistory() { throw Error('signed replay cannot request disposition'); } }),
+          invokeNative() { calls++; throw Error('replay cannot infer'); } });
+        assert.equal(replayed.action, 'replay'); assert.equal(calls, 0);
+      } else {
+        for (const processState of ['alive', 'unknown']) await assert.rejects(h.recoverPublic(f, {}, { processProbe: () => processState }), /process-receipt-inspection/);
+        for (const fake of [{ approved: true }, JSON.parse(JSON.stringify(h.adapter(f)))])
+          await assert.rejects(h.recoverPublic(f, {}, { transitionAdapter: fake }), /live-adapter/);
+        const heldHistory = f.history;
+        f.history = { ...f.history, roots: f.history.roots.slice(1) };
+        await assert.rejects(h.recoverPublic(f), /root-coverage/); f.history = heldHistory;
+        await assert.rejects(h.recoverPublic(f, {}, { transitionAdapter: h.adapter(f, { attestRoot: challenge => ({
+          binding_sha256: require('./forge-code-roots').digest(challenge), evidence_reference: 'unknown-writer', classification: 'unknown' }) }) }), /root-attribution/);
+        const changed = JSON.parse(f.originalReceipt); changed.saved_candidate.result.summary = 'Forged candidate';
+        changed.saved_candidate.sha256 = require('./forge-code-roots').digest(changed.saved_candidate.result);
+        write(f.receiptFile, JSON.stringify(changed));
+        await assert.rejects(h.recoverPublic(f), /historical-binding/); fs.writeFileSync(f.receiptFile, f.originalReceipt);
+        const malformed = JSON.parse(f.originalReceipt); malformed.saved_candidate.result.status = 'unrecognized';
+        malformed.saved_candidate.sha256 = require('./forge-code-roots').digest(malformed.saved_candidate.result);
+        write(f.receiptFile, JSON.stringify(malformed));
+        assert.equal(require('./forge-artifact-reconciliation').inspectCandidate({ receiptFile: f.receiptFile, request: f.request }).schema_valid, false);
+        await assert.rejects(h.recoverPublic(f), /historical-binding/); fs.writeFileSync(f.receiptFile, f.originalReceipt);
+        const originalRequest = standalone ? f.raw.inputs.brief : f.request.prompt;
+        if (standalone) f.raw.inputs.brief += ' altered'; else f.request.prompt += ' altered';
+        await assert.rejects(h.recoverPublic(f), /mismatch|binding/);
+        if (standalone) f.raw.inputs.brief = originalRequest; else f.request.prompt = originalRequest;
+        const target = path.join(f.b, '.gsd/foreign.json');
+        write(target, '{}');
+        await assert.rejects(h.recoverPublic(f, {}, { transitionAdapter: h.adapter(f, { attestRoot: challenge => ({
+          binding_sha256: require('./forge-code-roots').digest(challenge), evidence_reference: 'no-trusted-attribution', classification: 'unchanged' }) }) }), /root-attribution/);
+        fs.unlinkSync(target);
+        await assert.rejects(h.recoverPublic(f, {}, { transitionAdapter: h.adapter(f, { attestRoot: challenge => {
+          fs.appendFileSync(f.events, '{"concurrent":true}\n');
+          return { binding_sha256: require('./forge-code-roots').digest(challenge), evidence_reference: 'raced', classification: 'unchanged' };
+        } }) }), /inspection-changed/); fs.writeFileSync(f.events, f.originalEvents);
+        for (const [capabilityChange, reason] of [[{ models: [] }, 'native-model-unsupported'],
+          [{ available: false }, 'native-tool-unavailable'], [{ reasoning_efforts: [] }, 'native-effort-unsupported'],
+          [null, 'native-capabilities-missing']]) {
+          const incompatible = await h.recoverPublic(f, {}, { activeCapabilities: capabilityChange && { ...h.capabilities, ...capabilityChange },
+            invokeNative() { calls++; throw Error('incompatible native must not invoke'); } });
+          assert.equal(incompatible.action, 'stop'); assert.equal(calls, 0);
+          assert(incompatible.rejected.some(row => row.reason_code === 'recovery-deadline-exhausted'), 'expired untried sidecar remains refused');
+          assert(incompatible.rejected.some(row => row.reason_code === reason), 'current native capability refusal is explicit');
+        }
+        const authorizationSource = path.join(f.profile, '.codex/AGENTS.md'), authorizationBytes = fs.readFileSync(authorizationSource);
+        fs.writeFileSync(authorizationSource, authorizationBytes.toString().replace('Fixture authorization.', 'Revoked after original attempt.'));
+        await assert.rejects(h.recoverPublic(f), /source-changed/); fs.writeFileSync(authorizationSource, authorizationBytes);
+        const first = await h.recoverPublic(f);
+        assert.equal(first.action, 'reattest-native-handoff'); assert.equal(first.provider_called, false);
+        assert.equal(first.invocation, undefined); f.reservation = first.reservation_sha256;
+        const state = h.assertHistoryPreserved(f);
+        const record = JSON.parse(fs.readFileSync(state.transitions[0].path));
+        assert.equal(record.disposition, 'unreplayable-original-provenance-absent');
+        assert.equal(record.original_candidate_sha256, inspected.candidate_sha256);
+        assert.deepEqual(record.reconciliation.map(row => row.root_id), ['owner', 'alpha', 'beta']);
+        assert.equal(JSON.parse(fs.readFileSync(f.receiptFile)).phase, 'failed');
+        assert(!fs.existsSync(f.receiptFile + '.response-anchor.json'));
+        const forged = { ...record, request_identity_sha256: 'foreign-unit' };
+        const bytes = Buffer.from(JSON.stringify(forged) + '\n'), sha = require('./forge-code-roots').digest(bytes);
+        const foreign = `${f.stateFile}.transition-${sha}.json`; write(foreign, bytes);
+        const mutated = structuredClone(state); mutated.transitions[0] = { ...state.transitions[0], path: foreign, sha256: sha };
+        require('./forge-xllm-state').saveRecovery(f.stateFile, mutated);
+        await assert.rejects(h.recoverPublic(f), /record-binding/);
+        require('./forge-xllm-state').saveRecovery(f.stateFile, state); fs.unlinkSync(foreign);
+      }
+      const saved = path.join(f.dir, 'public-transition-restart.json');
+      write(saved, JSON.stringify({ ...f, binding: undefined, cleanup: undefined, originalReceipt: [...f.originalReceipt],
+        originalEvents: [...f.originalEvents] }));
+      child([__filename, '--transition-restart', saved], process.env);
+      const proof = JSON.parse(fs.readFileSync(saved + '.proof')); assert.notEqual(proof.pid, process.pid); assert.equal(proof.calls, signed ? 0 : 1);
+      console.log(`PASS public ${standalone ? 'standalone' : 'milestone'} ${signed ? 'signed replay, zero inference' : 'disposition, no publication, native handoff'} across OS restart`);
+    } finally { f.cleanup(); }
+  }
+  const f = h.setup({ questions: [{ id: 'functional-choice', question: 'Which fixture branch?' }] });
+  try {
+    f.originalReceipt = fs.readFileSync(f.receiptFile); f.expectedModel = 'gpt-6-astra'; f.expectedEffort = 'max';
+    const pending = await h.recoverPublic(f);
+    assert.equal(pending.action, 'pending-questions'); assert.equal(pending.questions[0].id, 'functional-choice');
+    assert.equal(require('./forge-xllm-state').loadRecovery(f.stateFile).transitions, undefined);
+    await assert.rejects(h.recoverPublic(f, { answers: [{ id: 'foreign', answer: 'ignored' }] }), /pending-answer-id/);
+    const result = await h.recoverPublic(f, { answers: [{ id: 'functional-choice', answer: 'explicit fixture answer' }] });
+    f.questionEvidence = require('./forge-xllm-state').loadRecovery(f.stateFile).pending_questions;
+    assert.equal(result.action, 'reattest-native-handoff'); f.reservation = result.reservation_sha256;
+    let refusedCalls = 0;
+    for (const [transitionAdapter, reason] of [[{ approved: true }, /live-adapter/],
+      [h.adapter(f, { attestHistory: () => ({ approved: true }) }), /history-unproved/]]) {
+      await assert.rejects(h.recoverPublic(f, { resumeReservation: { sha256: f.reservation } }, {
+        transitionAdapter, invokeNative() { refusedCalls++; throw Error('forged context evidence cannot invoke'); },
+      }), reason);
+    }
+    assert.equal(refusedCalls, 0);
+    h.assertHistoryPreserved(f);
+    const saved = path.join(f.dir, 'context-transition-restart.json');
+    write(saved, JSON.stringify({ ...f, binding: undefined, cleanup: undefined, originalReceipt: [...f.originalReceipt] }));
+    child([__filename, '--transition-restart', saved], process.env);
+    const state = h.assertHistoryPreserved(f), record = JSON.parse(fs.readFileSync(state.transitions[0].path));
+    assert.equal(record.resolution.original.tier, 'heavy'); assert.equal(record.resolution.original.effort, 'high');
+    assert.equal(record.resolution.effective.tier, 'max'); assert.equal(record.resolution.effective.effort, 'max');
+    assert.equal(state.attempts[0].timeout_cause, 'indeterminate');
+    assert.notEqual(transition.destinationKey(f.request.route), state.reservations[0].destination_key);
+    console.log('PASS public milestone context omission: heavy/high retained, max/max native after expiry, fresh authority at OS restart');
+  } finally { f.cleanup(); }
+}
 async function main() {
+  if (process.argv[2] === '--transition-restart') return transitionRestart(process.argv[3]);
+  if (process.argv[2] === '--transition-only') return transitionWorkflow();
   if (process.argv[2] === '--restart-fixture') return restart(process.argv[3]);
   if (process.argv[2] === '--milestone-restart') {
     const request = JSON.parse(fs.readFileSync(process.argv[3]));
@@ -127,6 +291,7 @@ async function main() {
     write(process.argv[3] + '.proof', JSON.stringify({ pid: process.pid, calls, roots: reset.roots.map(row => row.root_id) }));
     return;
   }
+  await transitionWorkflow();
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-workflow-')));
   const home = path.join(root, 'home'); fs.mkdirSync(home);
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
@@ -206,7 +371,7 @@ async function main() {
           .replace('id: T-roots', `id: ${id}`)
           .replaceAll(`  - '${index ? 'alpha' : 'beta'}::same.txt'\n`, '')
           .replace(`    - path: '${index ? 'alpha' : 'beta'}::same.txt'\n      provides: 'Result'\n      min_lines: 1\n`, '') })) });
-      await unit.runUnitSidecar(planning);
+      await unit.runUnitSidecar(resolveMilestone(planning));
       const tasks = require('./forge-parallelism').discoverTasks(slice);
       assert.deepEqual(tasks.map(task => task.id), ['T01', 'T02']);
       for (const task of tasks) {
@@ -234,7 +399,7 @@ async function main() {
           write(path.join(lab.b, 'same.txt'), 'Interrupted beta\n');
           throw Object.assign(Error('milestone timeout fixture'), { code: 'claude-timeout' });
         };
-        await assert.rejects(unit.runUnitSidecar(interrupted), /milestone timeout fixture/);
+        await assert.rejects(unit.runUnitSidecar(resolveMilestone(interrupted)), /milestone timeout fixture/);
         const restartFile = path.join(lab.dir, 'milestone-restart.json'); write(restartFile, JSON.stringify(interrupted));
         child([__filename, '--milestone-restart', restartFile], env);
         const resetProof = JSON.parse(fs.readFileSync(restartFile + '.proof'));
@@ -255,7 +420,7 @@ async function main() {
           verification: { preferenceCommands: ['node -e "require(\'fs\').accessSync(\'same.txt\')"'] } };
         const gateReady = path.join(lab.dir, 'gate-ready');
         execution.verification.preferenceCommands = [`node -e "require('fs').accessSync('${gateReady.replace(/\\/g, '/')}')"`];
-        await assert.rejects(unit.runUnitSidecar(execution), /execution-verification-failed/);
+        await assert.rejects(unit.runUnitSidecar(resolveMilestone(execution)), /execution-verification-failed/);
         const receiptFile = execution.resultFile + '.receipt.json';
         const savedResponse = JSON.parse(fs.readFileSync(receiptFile));
         assert.equal(savedResponse.phase, 'executed');

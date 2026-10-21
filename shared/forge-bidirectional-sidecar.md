@@ -528,3 +528,48 @@ that transition still refuses with `recovery-identity-mismatch`. The narrow
 single-root compatibility described for independently proved pre-spawn repair
 does not migrate saved-response authority. Such a saved legacy response needs
 its own compatible validated replay path; this repair does not provide one.
+# Transições restritas de recuperação
+
+`forge-recovery-transition.createTransitionAdapter({attestHistory, attestRoot})` pertence
+ao host confiável. `recoverUnitSidecar(request, recovery, runtime)` recebe esse handle vivo
+em `runtime.transitionAdapter`; `recoverStandaloneTask` recebe-o nas dependências.
+`recovery.transitions` contém somente `{type, reference}`: `resolver-context-omission`
+e/ou `saved-candidate-unreplayable`. JSON e referências persistidas são dados, nunca autoridade.
+O adapter existente de autorização permanente continua obrigatório e é revalidado.
+
+O host guarda uma observação independente antes da tentativa. `observeHistory` produz
+dados para esse armazenamento, sem autenticar o passado. O callback `attestHistory`
+recebe um desafio com hashes do pedido/identidade, estado, roots/claim, receipt/candidato,
+relógios e superfícies atuais; devolve `binding_sha256`, `history`, `history_sha256`,
+`evidence_reference` e `provenance_reference`. Disposição exige também
+`original_provenance: 'absent'` comprovado pelo armazenamento independente.
+Quando perguntas históricas já foram respondidas, o host atesta também
+`question_state_sha256` e `question_evidence_reference` a partir das respostas
+explícitas observadas. A retomada conserva IDs/texto; JSON com `resolved` não basta.
+`attestRoot` recebe cada snapshot histórico/atual, vinculado ao desafio e à história;
+devolve seu `binding_sha256`, `evidence_reference` e classificação `unchanged` ou
+`attributed-host-only`, com atribuição realmente verificada pelo host. Tempo não prova autoria.
+Owner e todas as raízes físicas são obrigatórios, inclusive em preparação readonly.
+
+O resolver emite `resolution_context`, `resolution_options` e `resolution_sources`.
+Somente a omissão de milestone/unidade/roadmap demonstrada por fontes históricas
+autenticadas pode produzir rota efetiva separada; heavy/high permanece no histórico,
+max/max deriva da escalada high-risk canônica. Fontes executáveis, camadas presentes
+e ausentes de preferências e overrides devem corresponder; ausência de prova recusa.
+Antes de novo despacho milestone o contexto resolvido deve corresponder ao pedido.
+Task solta nunca recebe milestone inferida. Correção comum mantém destino e guards anteriores.
+
+`inspectCandidate` separa presença, schema e replay elegível, sem publicação. Candidato
+assinado elegível segue replay sem inferência. Disposição somente registra ausência
+original atestada: não apaga bytes, não publica, não aprova nem fabrica assinatura.
+Proveniência removida ou adulterada não autoriza disposição. O registro versionado
+externo tem criação exclusiva e hash, e entra no estado por referência append-only.
+Seu hash não é autoridade: cada restart exige novos callbacks vivos e autorização vigente.
+Receipt, pedido, tentativas, reservas, pending IDs, claim/generation e clocks são preservados.
+Rechecar todos os vínculos sob lock antes de persistir/reservar/invocar; preservar deltas
+legítimos do host, bloquear desconhecidos/estrangeiros/concorrentes. Handoff nativo externo
+retorna primeiro `reattest-native-handoff`; a retomada usa `resumeReservation.sha256`
+e reatesta o mesmo registro antes de expor argumentos e `assertReady` para o ponto de chamada.
+Nunca renovar o prazo histórico de 60000ms. Depois dele, somente exceção nativa viva,
+destino ainda não tentado e modelo/tier/esforço/ferramenta realmente suportados permitem execução.
+História insuficiente conserva a recusa; implementar este mecanismo não desbloqueia receipts históricos.

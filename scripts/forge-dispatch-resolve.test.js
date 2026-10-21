@@ -100,6 +100,31 @@ function runCase(name, fn) {
 }
 
 withHermeticHome((cliEnv) => {
+  runCase('milestone context is explicit, source-bound and checked before dispatch', () => {
+    const strict = require('node:assert/strict');
+    const api = require('./forge-dispatch-resolve');
+    const f = mkFixture({ roadmap: '# Roadmap\n- S01 risk: high\n', prefsJsonc: JSON.stringify({ effort: { 'plan-slice': 'high' } }) });
+    try {
+      const omitted = resolveDispatch({ cwd: f.dir, unitType: 'plan-slice', hostRuntime: 'codex' });
+      const request = { cwd: f.dir, contextRoot: f.dir, unitType: 'plan-slice', scope: 'milestone',
+        milestoneId: 'M001', sliceId: 'S01', roadmapFile: f.roadmapPath, route: omitted };
+      strict.throws(() => api.assertMilestoneContext(request), /milestone-resolver-context-required/);
+      const full = dispatch(f, { unitType: 'plan-slice', hostRuntime: 'codex', milestoneId: 'M001', unitId: 'S01',
+        platform: 'test-only', privatePayload: 'SECRET-SENTINEL' });
+      api.assertMilestoneContext({ ...request, route: full });
+      assertEqual(omitted.tier, 'heavy', 'omitted context retains observed heavy');
+      assertEqual(omitted.effort, 'high', 'omitted context retains observed high');
+      assertEqual(full.tier, 'max', 'complete context derives risk tier max');
+      assertEqual(full.effort, 'max', 'complete context derives risk effort max');
+      assert(!JSON.stringify(full.resolution_options).includes('SECRET-SENTINEL'), 'only consumed resolver options enter evidence');
+      assert(full.resolution_sources.some(row => row.sha256 === null), 'absent preference layers remain explicit sources');
+      const original = fs.readFileSync(f.roadmapPath); fs.appendFileSync(f.roadmapPath, '\nchanged source\n');
+      strict.throws(() => api.assertMilestoneContext({ ...request, route: full }), /milestone-resolver-context-required/);
+      fs.writeFileSync(f.roadmapPath, original);
+      api.assertMilestoneContext({ ...request, scope: 'standalone-task', milestoneId: undefined, route: omitted });
+      assertEqual(omitted.resolution_context.milestone_id, null, 'standalone never invents milestone context');
+    } finally { cleanup(f); }
+  });
   runCase('sidecar timeout is five minutes unless explicitly configured', () => {
     for (const timeout of [undefined, 0, -1, null, 'invalid', 120, 300, 1800]) {
       const expected = Number.isInteger(timeout) && timeout > 0 ? timeout : 300;
