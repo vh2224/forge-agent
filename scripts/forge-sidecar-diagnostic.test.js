@@ -87,6 +87,65 @@ function request(output) {
     constraints: { auto_commit: false, deploy: false } };
 }
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+function assertSafeFailureRecords(failure, receipt, events, route, secrets, privatePaths) {
+  // Compare the retained resolver observation before allowing its exact path
+  // fields. Other route fields (including policy diagnostics) get no exemption.
+  assert.deepEqual(receipt.route, route);
+  function inspect(value, field) {
+    if (typeof value === 'string') {
+      for (const secret of secrets) assert(!value.includes(secret), `${field}: provider content leaked`);
+      const authorityPath = /^receipt\.route\.(?:resolution_context\.(?:owner|roadmap|plan)|resolution_options\.(?:cwd|planPath|roadmapPath)|resolution_sources\.\d+\.(?:path|physical_path))$/.test(field);
+      if (!authorityPath) for (const privatePath of privatePaths) {
+        assert(!value.includes(privatePath), `${field}: private path leaked`);
+      }
+    } else if (value && typeof value === 'object') {
+      for (const [key, entry] of Object.entries(value)) {
+        inspect(key, `${field}.[decoded-key]`);
+        inspect(JSON.stringify(key), `${field}.[key]`);
+        inspect(entry, `${field}.${key}`);
+      }
+    }
+  }
+  inspect(failure, 'failure');
+  inspect(receipt, 'receipt');
+  inspect(events, 'events');
+}
+
+test('failure record assertions decode strings and reject Windows/POSIX diagnostic leaks', () => {
+  for (const privatePath of ['C:\\Users\\fixture\\workspace', '/tmp/fixture/workspace']) {
+    const route = { resolution_context: { owner: privatePath, roadmap: `${privatePath}/ROADMAP.md` },
+      resolution_options: { cwd: privatePath }, resolution_sources: [{ path: privatePath, physical_path: privatePath }] };
+    const clean = { failure: { diagnostic: { reason: 'adapter-failed' } },
+      receipt: { route, failure: { diagnostic: { reason: 'adapter-failed' } } },
+      events: [{ diagnostic: { reason: 'adapter-failed' } }] };
+    const check = records => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+      route, [token], [privatePath]);
+    check(clean);
+    for (const surface of ['failure', 'receipt', 'events', 'route-diagnostic']) {
+      for (const leaked of [privatePath, token]) {
+        const records = JSON.parse(JSON.stringify(clean));
+        const target = surface === 'failure' ? records.failure.diagnostic
+          : surface === 'receipt' ? records.receipt.failure.diagnostic
+            : surface === 'events' ? records.events[0].diagnostic : records.receipt.route;
+        target.tail = { nested: [leaked] };
+        const expectedRoute = surface === 'route-diagnostic' ? records.receipt.route : route;
+        assert.throws(() => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+          expectedRoute, [token], [privatePath]), /(?:private path|provider content) leaked/,
+        `${surface} must reject decoded leakage`);
+        target.tail = { [leaked]: true };
+        assert.throws(() => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+          expectedRoute, [token], [privatePath]), /(?:private path|provider content) leaked/,
+        `${surface} must reject decoded key leakage`);
+      }
+    }
+    // Even authenticated provenance cannot retain provider content or secrets.
+    const secretRoute = { ...route, resolution_options: { cwd: token } };
+    const records = JSON.parse(JSON.stringify(clean));
+    records.receipt.route = secretRoute;
+    assert.throws(() => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+      secretRoute, [token], [privatePath]), /provider content leaked/);
+  }
+});
 
 test('compact/multiline JSON carries Markdown, literal markers, Unicode and CRLF intact', () => {
   for (const pretty of [true, false]) {
@@ -207,8 +266,8 @@ test('each rejection persists sanitized diagnostics in result, receipt and event
     assert(Number.isSafeInteger(failure.diagnostic.duration_ms));
     assert.deepEqual(receipt.failure.diagnostic, failure.diagnostic);
     assert.deepEqual(events.at(-1).diagnostic, failure.diagnostic);
-    const logs = JSON.stringify([failure, receipt, events]);
-    for (const secret of [token, 'private-sentinel', r.cwd]) assert(!logs.includes(secret));
+    assertSafeFailureRecords(failure, receipt, events, r.route,
+      [token, 'private-sentinel'], [r.cwd, fs.realpathSync.native(r.cwd)]);
     assert(!fs.existsSync(path.join(r.cwd, requiredPath)));
     await assert.rejects(unit.runUnitSidecar(r), e => e.code === code);
     assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
@@ -242,8 +301,8 @@ test('identity and envelope refusals persist only closed metadata, publish nothi
     assert.equal(receipt.phase, 'failed');
     assert.deepEqual(receipt.failure.diagnostic, failure.diagnostic);
     assert.deepEqual(events.at(-1).diagnostic, failure.diagnostic);
-    const logs = JSON.stringify([failure, receipt, events]);
-    for (const secret of [token, 'Research complete', '"usage"', 'inputTokens', r.cwd]) assert(!logs.includes(secret), `${label}: ${secret}`);
+    assertSafeFailureRecords(failure, receipt, events, r.route,
+      [token, 'Research complete', '"usage"', 'inputTokens'], [r.cwd, fs.realpathSync.native(r.cwd)]);
     assert(!fs.existsSync(path.join(r.cwd, requiredPath)), `${label}: an artifact was published`);
     await assert.rejects(unit.runUnitSidecar(r), e => e.code === code);
     assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
