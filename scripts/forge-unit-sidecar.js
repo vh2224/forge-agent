@@ -406,7 +406,7 @@ function markChecked(content, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return content.replace(new RegExp(`^(\\s*[-*] \\[) ([\\]]\\s+(?:\\*\\*)?${escaped}(?=[:\\s*]))`, 'm'), '$1x$2');
 }
-function materialize(request, record, publicationGuard) {
+function materialize(request, record, publicationGuard, publicationLock) {
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
   if (record.result.status !== 'done') return record.result;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
@@ -444,7 +444,7 @@ function materialize(request, record, publicationGuard) {
     if (current !== hash(item.content)) atomic(file, item.content);
   }
   return record.result;
-  });
+  }, publicationLock);
 }
 
 function routeIdentity(route, unitType) {
@@ -593,7 +593,7 @@ async function acceptArtifactResult(request, rawResult, metadata = {}) {
     return accepted;
   } finally { guard.release(); }
 }
-async function acceptArtifactResultCore(request, rawResult, metadata = {}, publicationGuard) {
+async function acceptArtifactResultCore(request, rawResult, metadata = {}, publicationLock) {
   const loc = locations(request);
   const files = artifactAttemptFiles(request);
   const fingerprint = artifactFingerprint(request);
@@ -602,7 +602,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
   if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
   if (existing.phase === 'ready') {
     if (request.ownerBroker) request.ownerBroker.verify({ canonicalArtifacts: existing.artifacts || [] });
-    const result = await publishReadyRecord(request, existing, publicationGuard);
+    const result = await publishReadyRecord(request, existing, undefined, publicationLock);
     json(files.resultFile, result);
     return { result, record: existing, replayed: true, provider_called: false };
   }
@@ -675,7 +675,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
     provider_called: true, telemetry: metadata.telemetry || null, result: rawResult,
     artifacts: artifacts.map(artifact => ({ ...artifact, before: existing.before[artifact.path] ?? null })) };
   json(files.receiptFile, record);
-  const result = await publishReadyRecord(request, record, publicationGuard);
+  const result = await publishReadyRecord(request, record, undefined, publicationLock);
   json(files.resultFile, result);
   return { result, record, replayed: false, provider_called: true };
 }
@@ -690,7 +690,7 @@ async function reconcileArtifactAttempt(request, options) {
       if (!checked.ok) fail('invalid-artifact-result');
       if (request.phase === 'plan' && result.status === 'done') require('./forge-task-preparation').preflightPlan(request, result.artifacts[0].content);
       const record = { result, artifacts: result.artifacts.map(a => ({ ...a, before: child.before[a.path] ?? null })) };
-      await publishReadyRecord(request, record, publicationGuard);
+      await publishReadyRecord(request, record, undefined, publicationGuard);
       json(files.resultFile, result);
     } });
 }
@@ -922,10 +922,10 @@ function publishReviewFixFailure(request, loc, items, snapshot) {
   }
 }
 
-async function publishReadyRecord(request, record, publicationGuard) {
+async function publishReadyRecord(request, record, publicationGuard, publicationLock) {
   if (record.execution) require('./forge-task-execution').assertReplay(request, record);
   if (record.kind === 'review-fix') return publishReviewFixRecord(request, record);
-  if (record.kind !== 'memory-extraction') return materialize(request, record, publicationGuard);
+  if (record.kind !== 'memory-extraction') return materialize(request, record, publicationGuard, publicationLock);
   const extraction = record.extraction;
   if (extraction.status !== 'done') {
     const result = { status: extraction.status, extraction,

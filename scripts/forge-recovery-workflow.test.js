@@ -428,7 +428,11 @@ async function main() {
         assert.equal(savedResponse.delivery_capture, undefined, 'failed checks must be rerun, not cached as successful capture');
         const planBytes = fs.readFileSync(execution.planFile);
         fs.appendFileSync(execution.planFile, '\nChanged input\n');
-        await assert.rejects(unit.runUnitSidecar(execution), /execution-input-changed/);
+        await assert.rejects(unit.runUnitSidecar(execution), error =>
+          error.code === 'verification-provenance-insufficient' && error.provider_called === false);
+        assert.deepEqual(JSON.parse(fs.readFileSync(receiptFile)), savedResponse, 'changed sealed plan preserves the saved response receipt');
+        assert.equal(executionCalls, 1, 'changed sealed plan cannot infer again');
+        assert.equal(fs.existsSync(path.join(slice, 'tasks/T01/T01-SUMMARY.md')), false, 'changed sealed plan cannot publish');
         fs.writeFileSync(execution.planFile, planBytes);
         write(path.join(lab.b, 'same.txt'), 'Foreign root drift\n');
         await assert.rejects(unit.runUnitSidecar(execution), /execution-replay-baseline-changed/);

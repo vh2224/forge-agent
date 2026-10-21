@@ -81,7 +81,7 @@ function request(output) {
   }));
   fs.writeFileSync(path.join(cwd, 'output.txt'), output);
   return { cwd, unitType: 'research-milestone', milestoneId: 'M001', description: 'Fixture research',
-    route: resolveDispatch({ cwd, unitType: 'research-milestone', hostRuntime: 'codex' }),
+    route: resolveDispatch({ cwd, unitType: 'research-milestone', hostRuntime: 'codex', milestoneId: 'M001', unitId: 'M001' }),
     workflowId: `workflow-${sequence}`, dispatchId: `dispatch-${sequence}`,
     resultFile: path.join(root, `result-${sequence}.json`),
     constraints: { auto_commit: false, deploy: false } };
@@ -271,6 +271,7 @@ test('interrupted publication preserves validated receipt and resumes without an
   // difference on every host: production canonicalizes cwd before publication.
   const alias = path.join(root, `workspace-alias-${sequence}`);
   fs.symlinkSync(r.cwd, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  r.contextRoot = r.cwd;
   r.cwd = alias;
   const interruptedTarget = path.join(fs.realpathSync(r.cwd), optionalPath);
   const originalRename = fs.renameSync;

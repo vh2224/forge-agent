@@ -318,6 +318,19 @@ async function reviewReadinessCases() {
   }
 }
 async function reviewVerificationCases() {
+  const declaredBindings = nativeFixture();
+  const planText = fs.readFileSync(declaredBindings.r.planFile, 'utf8');
+  const bindings = [{ root_id: 'app', criterion: { kind: 'truth', index: 0 }, coverage: 'behavioral', source: { kind: 'verification', check_index: 0 } }];
+  const declared = { ...declaredBindings.r.verification, bindings };
+  const policyWithBindings = verify.normalizeExecutionVerification(declaredBindings.r.execution_contract, planText, declared);
+  const commandPolicy = verify.normalizeExecutionVerification(declaredBindings.r.execution_contract, planText, declaredBindings.r.verification);
+  assert.deepStrictEqual(policyWithBindings, commandPolicy, 'delivery bindings do not alter command policy');
+  assert.deepStrictEqual(declared.bindings, bindings, 'request delivery bindings are preserved');
+  for (const value of [[], bindings]) {
+    await refuse(declaredBindings, { ...declaredBindings.runtime, verification: { bindings: value } }, /verification-options-invalid/);
+  }
+  assert.throws(() => verify.normalizeExecutionVerification(declaredBindings.r.execution_contract, planText, { ...declared, bindings: {} }), /verification-bindings-invalid/);
+  label('declared-delivery-bindings-preserved-runtime-refused');
   const required = 'node -e "process.exit(7)"', passing = 'node -e "process.exit(0)"';
   for (const rootSpecific of [false, true]) {
     const f = nativeFixture();
