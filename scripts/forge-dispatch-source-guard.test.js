@@ -5,6 +5,7 @@
 const assert = require('assert');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -228,6 +229,82 @@ function surfaceHashes(report, golden) {
 }
 
 process.stdout.write('forge-dispatch-source-guard acceptance\n');
+
+test('public resolver CLI drains backpressured stdout/stderr on success and loud failures', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-resolver-stdout-'));
+  try {
+    fs.mkdirSync(path.join(root, '.gsd'));
+    // Synthetic stream pressure, not a provider or OS pipe observation. Windows
+    // pipes can be synchronous, so delay completion explicitly on every platform.
+    const preload = path.join(root, 'backpressure.cjs');
+    fs.writeFileSync(preload, `(${function installBackpressure() {
+      const fs = require('fs');
+      const { Writable } = require('stream');
+      for (const [name, fd] of [['stdout', 1], ['stderr', 2]]) {
+        const output = new Writable({ highWaterMark: 1, write(chunk, encoding, done) {
+          fs.appendFileSync(process.env.FORGE_TEST_CAPTURE + '.' + name, chunk);
+          const head = Math.min(32, chunk.length);
+          fs.writeSync(fd, chunk.subarray(0, head));
+          setTimeout(() => {
+            fs.writeSync(fd, chunk.subarray(head));
+            done();
+          }, 10);
+        } });
+        Object.defineProperty(process, name, { value: output });
+      }
+    }.toString()})();\n`);
+    const route = { model: 'x'.repeat(100000), effort: 'high' };
+    const cases = [
+      { name: 'success', args: ['--unit-type', 'execute-task', '--json'], status: 0 },
+      { name: 'shell', args: ['--shell-exports'], input: JSON.stringify(route), status: 0 },
+      { name: 'malformed-shell', args: ['--shell-exports'], input: '{nope', status: 2 },
+      // A directory as a plan exercises the real source-integrity error path.
+      { name: 'runtime-failure', args: ['--unit-type', 'execute-task', '--plan', root], status: 2 },
+      { name: 'prefs-failure', args: ['--unit-type', 'execute-task', '--json'], status: 1 },
+    ];
+    for (const item of cases) {
+      if (item.name === 'prefs-failure') write('.gsd/forge-prefs.jsonc', '{malformed', root);
+      const prefix = path.join(root, item.name);
+      for (const stream of ['stdout', 'stderr']) fs.writeFileSync(prefix + '.' + stream, '');
+      const child = spawnSync(process.execPath, [
+        '--require', preload, RESOLVER_SCRIPT, ...item.args, '--cwd', root,
+      ], {
+        cwd: root,
+        env: cleanRuntimeEnvironment({ HOME: root, USERPROFILE: root, FORGE_TEST_CAPTURE: prefix }),
+        input: item.input || '',
+        encoding: 'utf8',
+        timeout: 10000,
+      });
+      assert.strictEqual(child.error, undefined, child.error && child.error.message);
+      assert.strictEqual(child.signal, null, item.name);
+      assert.strictEqual(child.status, item.status, `${item.name}: ${child.stderr}`);
+      for (const stream of ['stdout', 'stderr']) {
+        const expected = fs.readFileSync(prefix + '.' + stream, 'utf8');
+        assert.strictEqual(child[stream], expected, `${item.name}: truncated ${stream}`);
+      }
+      if (item.name === 'shell') {
+        // Exact equality also rejects accidental fallthrough into resolution.
+        assert.strictEqual(child.stdout, dispatchResolver.shellExports(route) + '\n');
+        assert.strictEqual(child.stderr, '');
+      } else if (item.name === 'malformed-shell') {
+        assert.strictEqual(child.stdout, '');
+        assert.match(JSON.parse(child.stderr).error, /--shell-exports: unparseable stdin payload/);
+      } else {
+        const payload = JSON.parse(child.stdout);
+        if (item.name === 'runtime-failure') {
+          assert.strictEqual(payload.degraded, true);
+          assert.strictEqual(payload.dispatch_allowed, false);
+          assert.match(JSON.parse(child.stderr).error, /resolver-source-not-regular/);
+        } else {
+          assert.strictEqual(payload.prefs_ok, item.status === 0);
+          assert.strictEqual(child.stderr, '');
+        }
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('registry and every nested entry are deeply frozen with explicit exclusions', () => {
   assert(Object.isFrozen(guard.SOURCE_REGISTRY));

@@ -799,25 +799,27 @@ if (require.main === module) {
     try {
       const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
       process.stdout.write(shellExports(payload) + '\n');
-      process.exit(0);
+      process.exitCode = 0;
     } catch (error) {
       process.stderr.write(JSON.stringify({ error: `--shell-exports: unparseable stdin payload (${(error && error.message) || error})` }) + '\n');
-      process.exit(2);
+      process.exitCode = 2;
     }
-  }
-  try {
-    const result = runCli(process.argv.slice(2), process.env);
-    process.exit(result && result.prefs_ok === false ? 1 : 0);
-  } catch (error) {
-    // The contract on stdout stays parseable for the shell consumer, but the
-    // degradation itself must be loud: a crash that silently re-routes every
-    // unit to the cheapest effort is exactly the failure mode the diagnosis
-    // caught. stderr is free — the orchestrator surfaces it next to the JSON.
-    process.stderr.write(JSON.stringify({
-      warning: 'forge-dispatch-resolve emitted a fail-closed degraded contract',
-      error: (error && error.message) || String(error),
-    }) + '\n');
-    process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
-    process.exit(2);
+  } else {
+    // Let pending stdout/stderr writes drain before Node exits naturally.
+    try {
+      const result = runCli(process.argv.slice(2), process.env);
+      process.exitCode = result && result.prefs_ok === false ? 1 : 0;
+    } catch (error) {
+      // The contract on stdout stays parseable for the shell consumer, but the
+      // degradation itself must be loud: a crash that silently re-routes every
+      // unit to the cheapest effort is exactly the failure mode the diagnosis
+      // caught. stderr is free — the orchestrator surfaces it next to the JSON.
+      process.stderr.write(JSON.stringify({
+        warning: 'forge-dispatch-resolve emitted a fail-closed degraded contract',
+        error: (error && error.message) || String(error),
+      }) + '\n');
+      process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
+      process.exitCode = 2;
+    }
   }
 }
