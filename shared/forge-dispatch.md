@@ -760,6 +760,8 @@ Wrap every `Agent()` dispatch call in a try/catch. On throw, run this handler. O
 
 #### Algorithm
 
+An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API `effortMap`) wins over preferences, plan frontmatter and automatic risk effort. Empty maps and keys for other units do not override the selected unit. It sets `effort_reason` to `argument-effort:<unit-type>` and is retained as `effort_argument` (null when absent); `effort_requested` remains the validated pre-policy value for compatibility. Model and tier selection are unchanged. Replay preserves the original arguments through `resolution_options`.
+
 1. Catch the thrown exception; capture its `.message` (or string representation) into a local variable `errorMsg`. Do NOT log or store `errorMsg` beyond this scope.
 2. Shell out via `Bash`:
    ```
@@ -927,6 +929,8 @@ There are two identities on the Claude artifact path:
 - `dispatch_id` — globally unique per actual model call. Claude retries derive a unique attempt ID from the random prompt ID; sidecars use a UUID persisted in the durable state and result file.
 
 #### Algorithm
+
+An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API `effortMap`) wins over preferences, plan frontmatter and automatic risk effort. Empty maps and keys for other units do not override the selected unit. It sets `effort_reason` to `argument-effort:<unit-type>` and is retained as `effort_argument` (null when absent); `effort_requested` remains the validated pre-policy value for compatibility. Model and tier selection are unchanged. Replay preserves the original arguments through `resolution_options`.
 
 1. After full placeholder substitution and before dispatch: `input_tokens = countTokens(renderedPromptArtifact)`.
 2. If `input_tokens > 0.8 * 200000` (160 000 — conservative context-window fraction, hardcoded for all Claude models as of 2026-04): emit a warning entry to the orchestrator log. Do NOT block dispatch — this is informational only.
@@ -2153,6 +2157,8 @@ Before every `Agent()` dispatch, after Retry Handler setup but before Token Tele
 
 #### Algorithm
 
+An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API `effortMap`) wins over preferences, plan frontmatter and automatic risk effort. Empty maps and keys for other units do not override the selected unit. It sets `effort_reason` to `argument-effort:<unit-type>` and is retained as `effort_argument` (null when absent); `effort_requested` remains the validated pre-policy value for compatibility. Model and tier selection are unchanged. Replay preserves the original arguments through `resolution_options`.
+
 1. **Look up unit-type default.** Given `unit_type` (e.g. `execute-task`), find its row in the [Unit Type → Default Tier](forge-tiers.md#unit-type--default-tier) table. Assign `tier = defaultTier`.
 2. **Parse T##-PLAN frontmatter when `unit_type == execute-task`.** If the unit is `execute-task`, read the first YAML frontmatter block from the task plan file and extract `tier:` and `tag:` values:
    ```bash
@@ -2504,16 +2510,18 @@ After Tier Resolution has set `$MODEL_ID` (the clamp in step 4 depends on it) an
 
 #### Algorithm
 
+An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API `effortMap`) wins over preferences, plan frontmatter and automatic risk effort. Empty maps and keys for other units do not override the selected unit. It sets `effort_reason` to `argument-effort:<unit-type>` and is retained as `effort_argument` (null when absent); `effort_requested` remains the validated pre-policy value for compatibility. Model and tier selection are unchanged. Replay preserves the original arguments through `resolution_options`.
+
 1. **Unit-type default.** `EFFORT = PREFS.effort[unit_type]` (the `EFFORT_MAP` built at Load Context from `.prefs.effort` — sourced off the one canonical `forge-prefs.js --resolved` object, see [§ Per-unit prefs resolution](#per-unit-prefs-resolution), never a per-file merge of `forge-agent-prefs.jsonc § Effort Settings`). Fall back to the built-in defaults: planning/review phases and `execute-task` use `medium`; auxiliary phases retain their declared defaults. `execute-task: medium` matches the real `forge-executor` agent binding. Explicit prefs, plan frontmatter and CLI inputs still take precedence. `EFFORT_REASON = "unit-type:<unit_type>"`.
-2. **Dedicated frontmatter axis (`execute-task` only).** If `effort:` is present in the `T##-PLAN.md` frontmatter → `EFFORT = PLAN_EFFORT`, `EFFORT_REASON = "frontmatter-effort:<val>"`. This is the planner's per-task complexity judgement and wins over the unit-type default. Independent of `tier:` — a task may be `tier: standard` + `effort: medium` or `tier: heavy` + `effort: high` in any combination.
-3. **Risk escalation sync (`plan-slice` only).** When Tier Resolution escalated the slice to `max` (`REASON == "risk-escalation:high"`), the effort also jumps to `max`. A `risk:high` slice plan is the highest leverage-per-dollar spot for frontier reasoning.
+2. **Dedicated frontmatter axis (`execute-task` only).** If no explicit argument exists for this unit and `effort:` is present in the `T##-PLAN.md` frontmatter → `EFFORT = PLAN_EFFORT`, `EFFORT_REASON = "frontmatter-effort:<val>"`. This is the planner's per-task complexity judgement and wins over the unit-type default. Independent of `tier:` — a task may be `tier: standard` + `effort: medium` or `tier: heavy` + `effort: high` in any combination.
+3. **Risk escalation sync (`plan-slice` only).** Without an explicit effort argument for this unit, when Tier Resolution escalated the slice to `max` (`REASON == "risk-escalation:high"`), the effort also jumps to `max`. A `risk:high` slice plan is the highest leverage-per-dollar spot for frontier reasoning.
 4. **Model capability policy.** The ceiling, the `thinking_header` and the transport limits come from the versioned `scripts/forge-model-policy.js` (`policy_version`, `policy_entry`, `policy_diagnostics` in the resolver JSON; `effort_requested` keeps the pre-policy value). Documented entries: `claude-sonnet-5-5` and `claude-sonnet-5` accept the full scale up to `max`; `claude-sonnet-4-6` documents low/medium/high/max and an `xhigh` request is refused before dispatch (`effort-unsupported-by-model`), never lowered silently. `claude-sonnet-5-5` emits `thinking_header: adaptive`; an explicit `thinking.sonnet_phases: disabled` refuses (`thinking-disabled-incompatible`) and `between_tools` on any Claude transport refuses (`thinking-transport-unsupported`). Legacy entries (`claude-haiku-4-5`, `claude-opus-5`, `claude-fable-5`) and ids without an entry keep the historical rule: `claude-haiku*`/`claude-sonnet*` without an entry cap at `medium`, `claude-opus*`/`claude-fable*` allow `max`, plus `model-policy-unknown` for ids without an entry. When the clamp lowers the value, append `|clamped:model-cap` to `EFFORT_REASON` (diagnostic `effort-clamped-by-policy`). The model is never changed. Requested, resolved and sent are distinct; the applied effort stays unknown without provider readback. Native Claude legs are checked before launch with `preflightNativeBinding`: the frontmatter effort binding must equal the resolved effort; the full model id is sent only when the active tool capabilities list it in `model_ids` (otherwise the alias path, recorded as `model_version_proof: alias-only` for Sonnet 5.5); a frontmatter `thinking:` line is not a per-subagent control (thinking is inherited from the session), so it never refuses a launch and only yields the `native-thinking-declaration-inert` diagnostic when it contradicts the policy — explicit operator intent is the thinking pref, refused by the resolver.
 
 #### Frontmatter field
 
 | Field | Type | Accepted Values | Effect |
 |-------|------|-----------------|--------|
-| `effort:` | enum | `low \| medium \| high \| xhigh \| max` | Per-task reasoning intensity (execute-task only). Wins over the unit-type default; clamped down to the resolved model's ceiling. Independent of `tier:`. |
+| `effort:` | enum | `low \| medium \| high \| xhigh \| max` | Per-task reasoning intensity (execute-task only). Wins over the unit-type default unless an explicit argument is supplied; clamped down to the resolved model's ceiling. Independent of `tier:`. |
 
 #### Event log extension
 

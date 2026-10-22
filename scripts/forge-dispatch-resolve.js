@@ -507,11 +507,11 @@ function resolveDispatch(opts, environment) {
   let effortReason = optionEffort
     ? `argument-effort:${unitType}`
     : prefsEffort ? `prefs.effort:${unitType}` : `unit-type:${unitType}`;
-  if (unitType === 'execute-task' && plan.effort) {
+  if (!optionEffort && unitType === 'execute-task' && plan.effort) {
     effort = plan.effort;
     effortReason = `frontmatter-effort:${plan.effort}`;
   }
-  if (unitType === 'plan-slice' && reason === 'risk-escalation:high') {
+  if (!optionEffort && unitType === 'plan-slice' && reason === 'risk-escalation:high') {
     effort = 'max';
     effortReason = 'risk-escalation:high';
   }
@@ -642,6 +642,7 @@ function resolveDispatch(opts, environment) {
     // per-model clamp; thinking_requested is the raw phase pref (null when
     // absent). Requested, effective and delivered values stay distinct: nothing
     // here claims what a provider applied.
+    effort_argument: optionEffort ? o.effortMap[unitType] : null,
     effort_requested: effortRequested,
     policy_version: modelPolicy.POLICY_VERSION,
     policy_entry: effortPolicy.entry,
@@ -709,6 +710,7 @@ function degradedContract(args, environment) {
     routing_present: false,
     prefs_ok: false,
     prefs_errors: [{ code: 'routing-runtime-error', message: 'Resolver failed before configuration could be established.' }],
+    effort_argument: null,
     effort_requested: null,
     policy_version: modelPolicy.POLICY_VERSION,
     policy_entry: null,
