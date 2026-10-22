@@ -322,31 +322,7 @@ function verdictSchema(allowed) {
 // Output schema HINT for execute mode (codex#15451/#4181 — a hint, not a contract;
 // the real gate is validateExecuteResult below). additionalProperties:false at EVERY
 // level (M004 UAT lesson — OpenAI returns 400 otherwise).
-const executeSchema = {
-  type: 'object',
-  required: ['status', 'summary', 'must_haves_status', 'files_changed'],
-  additionalProperties: false,
-  properties: {
-    status: { type: 'string', enum: EXEC_STATUS_ENUM },
-    summary: { type: 'string' },
-    must_haves_status: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['item', 'status', 'note', 'scope', 'reason'],
-        additionalProperties: false,
-        properties: {
-          item: { type: 'string' },
-          status: { type: 'string', enum: MH_STATUS_ENUM },
-          note: { type: 'string' },
-          scope: { type: 'string', enum: MH_SCOPE_ENUM },
-          reason: { type: 'string', enum: [...ENV_REASON_ENUM, ''] },
-        },
-      },
-    },
-    files_changed: { type: 'array', items: { type: 'string' } },
-  },
-};
+const executeSchema = require('./forge-worker-result-contract').contract('execute').schema;
 
 // Output schema HINT for plan mode (same caveat as executeSchema — a hint, not a
 // contract; the real gate is validatePlanResult + the in-sidecar must_haves check
@@ -1608,15 +1584,15 @@ function invokeEngine(engine, opts) {
 // Review's status-less JSON lives under output; planning carries its own status.
 // Resolves {candidate, telemetry}: the telemetry carries the model modelUsage proved.
 async function invokeClaudeJson(opts, validateCandidate, review = false) {
-  const prompt = opts.prompt + '\n\nReturn only this worker-result block:\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <single-line JSON>\n---END-RESULT---\n'
-    + (review ? 'Use {"status":"done","output":<the requested review JSON>} as result_json.' : 'Use the requested result JSON as result_json.');
-  const output = await invokeClaudeTransport({ ...opts, prompt, readOnly: true,
-    validateCandidate, terminateChild: terminateOwnedProcessTree });
+  const resultSchema = review ? {type:'object',additionalProperties:false,required:['status','output'],properties:{status:{type:'string',enum:['done']},output:opts.schema}} : opts.schema;
+  const output = await invokeClaudeTransport({ ...opts, prompt:opts.prompt, readOnly:true,
+    resultProfile:review?'review':'plan', resultSchema, validateCandidate, terminateChild:terminateOwnedProcessTree });
   return { candidate: output.candidate, telemetry: output.telemetry || null };
 }
 
 function invokeClaudeTransport(options) {
-  return invokeClaudeSidecar(options);
+  const onProgress = options.onProgress || (require.main === module ? snapshot => process.stderr.write(require('./forge-sidecar-calibration').progressLine(snapshot)) : undefined);
+  return invokeClaudeSidecar({...options,onProgress});
 }
 
 // Claude-only additions to the review legs. codex and agy receive neither the
@@ -1625,8 +1601,18 @@ function claudeTelemetrySink(engine, sink) {
   return engine === 'claude' ? { onTransportTelemetry: sink } : {};
 }
 
-function withClaudeTelemetry(engine, normalized, telemetry) {
-  return engine === 'claude' ? { ...normalized, transport_telemetry: telemetry } : normalized;
+async function withClaudeTelemetry(engine, normalized, telemetry) {
+  if (engine !== 'claude') return normalized;
+  // This point follows the review schema, semantic gates and output barrier.
+  // The adapter proposal remains in the returned result for publication/replay.
+  if (telemetry?.calibration_proposal) {
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+    const outcome = await require('./forge-sidecar-calibration').commitAccepted(telemetry.calibration_proposal, {
+      fingerprint, receipt: 'validated-review:' + telemetry.calibration_proposal.attempt_sha256,
+    });
+    telemetry = { ...telemetry, calibration_commit: outcome };
+  }
+  return { ...normalized, transport_telemetry: telemetry };
 }
 
 // ── Normalization ─────────────────────────────────────────────────────────────
@@ -2481,7 +2467,7 @@ async function runWriteContractCore(opts, contract) {
   const prompt = contract.buildPrompt({
     securityText,
     contextText,
-    outputChannel: engine === 'claude' ? 'worker-result-block' : 'json-only',
+    outputChannel: 'json-only',
     constraints: opts.constraints,
   });
   const inputTokens = countTokens(prompt);
@@ -2533,9 +2519,14 @@ async function runWriteContractCore(opts, contract) {
     let claudeOutput;
     try {
       claudeOutput = await invokeClaudeTransport({
-        onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
+        onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions, calibrationOptions: opts.calibrationOptions,
+    onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
         telemetryRoute: opts.telemetryRoute, budgets: opts.executionContext?.budgets || opts.budgets,
         prompt,
+        resultProfile: contract.mode === 'fix' ? 'fix' : 'execute',
+        resultSchema: contract.schema,
+        calibrationPhase: contract.mode === 'fix' ? 'fix' : 'execute',
+        onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions,
         cwd,
         model: opts.model,
         effort: opts.effort,
@@ -2559,17 +2550,18 @@ async function runWriteContractCore(opts, contract) {
     }
     parsed = claudeOutput && claudeOutput.candidate;
     transportTelemetry = claudeOutput && claudeOutput.telemetry ? claudeOutput.telemetry : null;
-    // The T01 adapter validates the worker block while extracting it. Repeat the
+    // The adapter validates structured_output before returning it. Repeat the
     // shared contract gate here so no alternate/mocked adapter can bypass the
     // contract at the transport join.
     if (!contract.validate(parsed)) {
       throw boundaryError(contract.invalidCode || 'claude-invalid-result', contract.invalidClaudeMessage);
     }
-    parsePath = 'worker-result-block';
+    parsePath = 'structured-output';
     outputTokens = countTokens(JSON.stringify(parsed));
   } else {
     appServerOutput = await invokeCodexAppServer({
-      onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
+      onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions,
+    onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
       telemetryRoute: opts.telemetryRoute, budgets: opts.executionContext?.budgets || opts.budgets,
       prompt,
       schema: contract.schema,
@@ -2835,6 +2827,7 @@ async function runPlanCore(opts) {
   // transport off this result file, so omitting it would make every plan-slice
   // dispatch report `no-transport-field` forever.
   const planOptions = {
+    onProgress: opts.onProgress, calibrationOptions: opts.calibrationOptions,
     onPackagedContext: opts.onPackagedContext, telemetryIdentity: opts.telemetryIdentity,
     telemetryRoute: opts.telemetryRoute, budgets: opts.budgets,
     prompt,
@@ -3095,14 +3088,14 @@ if (require.main === module) {
               status: 'adapter-failed',
               protocol_version: PROTOCOL_VERSION,
               ...readResultTelemetry(safeResultFile, dispatchId),
-              reason: e.message,
-              ...(e && e.code ? { reason_code: String(e.code) } : {}),
-              error_class: classifyErrorClass(e.message),
+              ...(engine === 'claude' && e.diagnostic ? { reason: reviewFailureDiagnostic(e).diagnostic.reason, reason_code: reviewFailureDiagnostic(e).reason_code,
+                error_class: classifyErrorClass(e.message), diagnostic: reviewFailureDiagnostic(e).diagnostic } : { reason: e.message,
+                ...(e && e.code ? { reason_code: String(e.code) } : {}), error_class: classifyErrorClass(e.message) }),
               failed_at: new Date().toISOString(),
             });
           } catch { /* best-effort — never mask the real error */ }
         }
-        process.stderr.write(`forge-xllm: ${e.message}\n`);
+        process.stderr.write(engine === 'claude' ? JSON.stringify(reviewFailureDiagnostic(e)) + '\n' : `forge-xllm: ${e.message}\n`);
         process.exit(2);
       });
     return;
@@ -3146,15 +3139,15 @@ if (require.main === module) {
               status: 'adapter-failed',
               protocol_version: PROTOCOL_VERSION,
               ...readResultTelemetry(safeResultFile, dispatchId),
-              reason: e.message,
-              ...(e && e.code ? { reason_code: String(e.code) } : {}),
-              error_class: classifyErrorClass(e.message),
+              ...(engine === 'claude' && e.diagnostic ? { reason: reviewFailureDiagnostic(e).diagnostic.reason, reason_code: reviewFailureDiagnostic(e).reason_code,
+                error_class: classifyErrorClass(e.message), diagnostic: reviewFailureDiagnostic(e).diagnostic } : { reason: e.message,
+                ...(e && e.code ? { reason_code: String(e.code) } : {}), error_class: classifyErrorClass(e.message) }),
               ...(startSha ? { start_sha: startSha } : {}),
               failed_at: new Date().toISOString(),
             });
           } catch { /* best-effort — never mask the real error */ }
         }
-        process.stderr.write(`forge-xllm: ${e.message}\n`);
+        process.stderr.write(engine === 'claude' ? JSON.stringify(reviewFailureDiagnostic(e)) + '\n' : `forge-xllm: ${e.message}\n`);
         process.exit(2);
       });
     return;

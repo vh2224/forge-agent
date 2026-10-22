@@ -769,7 +769,7 @@ async function main() {
       const replay = await prep.prepareStandaloneTask(request);
       assert.equal(replay.provider_called, false);
       assert.equal(replay.original_provider_called, true);
-      assert.deepStrictEqual(replay.original_diagnostic, { version: 1, stage: 'transport', reason: 'provider-timeout' });
+      assert.deepStrictEqual(replay.original_diagnostic, detail);
       assert.equal(calls, 1);
       assert(!fs.existsSync(artifactPath(request)));
     } finally { unit.runUnitSidecar = original; }

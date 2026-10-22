@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// forge-claude-sidecar.test.js — private-process and credential-boundary tests.
+// forge-claude-sidecar.test.js â€” private-process and credential-boundary tests.
 //
 // Every account and provider process in this file is a fixture. The adapter is
 // loaded with a stubbed forge-accounts export before each scenario, so neither
@@ -17,7 +17,7 @@ const childProcess = require('child_process');
 const ADAPTER_PATH = require.resolve('./forge-claude-sidecar');
 const ACCOUNTS_PATH = require.resolve('./forge-accounts');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-claude-sidecar-test-'));
-const WORKSPACE = path.join(ROOT, 'workspace with spaces Ω');
+const WORKSPACE = path.join(ROOT, 'workspace with spaces Î©');
 const MISSING_REGISTRY = path.join(ROOT, 'registry-does-not-exist.json');
 const PREVIOUS_REGISTRY = process.env.FORGE_ACCOUNTS_REGISTRY;
 process.env.FORGE_ACCOUNTS_REGISTRY = MISSING_REGISTRY;
@@ -59,8 +59,9 @@ function requestedModel() {
   const index = argv.indexOf('--model');
   return index >= 0 ? argv[index + 1] : 'fixture-model-absent';
 }
+function structured(text) {try {const marker=text.lastIndexOf('result_json: ');return JSON.parse(text.slice(marker+13,text.indexOf('---END-RESULT---',marker)).trim());}catch{return undefined;}}
 function envelope(text) {
-  return JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text,
+  return JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text, structured_output:structured(text),
     usage: { input_tokens: 401, output_tokens: 403 },
     modelUsage: { [requestedModel()]: { inputTokens: 401, outputTokens: 403 } } });
 }
@@ -77,7 +78,7 @@ const expectedToken = ${JSON.stringify(FIXTURE_TOKEN)};
 const args = process.argv.slice(2);
 const instruction = args[args.indexOf('-p') + 1] || '';
 const prefix = 'Read the complete task prompt from this UTF-8 file: ';
-const suffix = '. Follow it exactly and finish with its required worker-result block.';
+const suffix = '. Follow it exactly and return the required structured_output JSON.';
 const promptPath = JSON.parse(instruction.slice(prefix.length, instruction.length - suffix.length));
 const prompt = fs.readFileSync(promptPath, 'utf8');
 const tokenSafe = process.env[tokenKey] === expectedToken
@@ -113,6 +114,7 @@ const INVALID_FIXTURE = writeFixture('claude invalid fixture.js', `
 'use strict';
 ${ENVELOPE_PRELUDE}
 const payload = { status: 'partial', summary: 'mismatch', must_haves_status: [], files_changed: [] };
+payload.status='complete';
 process.stdout.write(envelope(['---GSD-WORKER-RESULT---', 'status: done',
   'result_json: ' + JSON.stringify(payload), '---END-RESULT---', ''].join('\\n')));
 `);
@@ -156,7 +158,7 @@ ${ENVELOPE_PRELUDE}
 const control = JSON.parse(fs.readFileSync(${JSON.stringify(CONTROL_FILE)}, 'utf8'));
 if (typeof control.raw === 'string') process.stdout.write(control.raw);
 else {
-  const value = { type: 'result', subtype: 'success', is_error: false, result: control.result,
+  const value = { type: 'result', subtype: 'success', is_error: false, result: control.result, structured_output: structured(control.result),
     usage: { input_tokens: 401, output_tokens: 403 },
     modelUsage: { [requestedModel()]: { inputTokens: 401, outputTokens: 403 } }, ...(control.overrides || {}) };
   for (const key of control.remove || []) delete value[key];
@@ -279,7 +281,7 @@ test('missing default account rejects before prompt creation or spawn', async ()
   assert.deepStrictEqual(tempPromptDirs(), []);
 });
 
-test('happy path uses file transport, child-only token env, and the last marker', async () => {
+test('happy path uses file transport, child-only token env, and structured output', async () => {
   const calls = [];
   const records = [];
   const adapter = loadAdapter({
@@ -287,7 +289,7 @@ test('happy path uses file transport, child-only token env, and the last marker'
     spawnImpl: recordingSpawn(records),
   });
   const prompt = `large-prompt-sentinel:${'abc123\n'.repeat(12000)}`;
-  const digest = crypto.createHash('sha256').update(prompt).digest('hex');
+  const digest = crypto.createHash('sha256').update(prompt + '\n\n' + require('./forge-worker-result-contract').contract().instruction('claude-cli')).digest('hex');
   const result = await adapter.invokeClaudeSidecar({
     cwd: WORKSPACE, prompt, timeoutMs: 15000, model: FIXTURE_MODEL, sourceEnv: sourceEnvFor(HAPPY_FIXTURE),
   });
@@ -310,7 +312,7 @@ test('happy path uses file transport, child-only token env, and the last marker'
   assert.strictEqual(result.candidate.status, 'done');
   assert.strictEqual(result.candidate.summary, `prompt-sha256:${digest}`);
   assert.deepStrictEqual(result.candidate.files_changed, ['fixture-output.txt']);
-  assert.strictEqual(result.metadata.marker_count, 2);
+  assert.strictEqual(result.metadata.marker_count, 0);
   assert.strictEqual(result.metadata.exit_code, 0);
   ok(result.metadata.stdout_bytes <= adapter.MAX_CAPTURE_BYTES_PER_STREAM, 'stdout was not bounded');
   assert.strictEqual(result.telemetry.model_observed, FIXTURE_MODEL);
@@ -334,7 +336,7 @@ test('argv adds JSON output and invocation-only settings; everything else keeps 
     const args = records[0].args;
     assert.strictEqual(captured.request.sha256, crypto.createHash('sha256')
       .update(JSON.stringify({ cmd: records[0].cmd, args })).digest('hex'));
-    assert.strictEqual(captured.context.sha256, crypto.createHash('sha256').update('argv').digest('hex'));
+    assert.strictEqual(captured.context.sha256, crypto.createHash('sha256').update('argv' + '\n\n' + require('./forge-worker-result-contract').contract().instruction('claude-cli')).digest('hex'));
     assert.strictEqual(captured.transport, 'claude-cli');
     ok(!JSON.stringify(captured).includes(FIXTURE_TOKEN), 'credential reached evidence');
     ok(!JSON.stringify(captured).includes('Read the complete task prompt'), 'instruction reached evidence');
@@ -344,7 +346,7 @@ test('argv adds JSON output and invocation-only settings; everything else keeps 
       '--no-session-persistence', '--disable-slash-commands',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--setting-sources', '', '--settings', '{"disableAllHooks":true,"switchModelsOnFlag":false}',
-      '--output-format', 'json', ...tools, '-p']);
+      '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--json-schema', JSON.stringify(require('./forge-worker-result-contract').contract().schema), ...tools, '-p']);
     assert.deepStrictEqual(JSON.parse(args[args.indexOf('--settings') + 1]),
       { disableAllHooks: true, switchModelsOnFlag: false });
     assert.strictEqual(args.filter((arg) => arg === '--settings').length, 1,
@@ -391,7 +393,7 @@ test('non-zero exit rejects once without returning child stdout, stderr, or toke
   try {
     error = await expectCode(adapter.invokeClaudeSidecar({
       cwd: WORKSPACE, prompt: 'nonzero', timeoutMs: 10000, model: FIXTURE_MODEL, sourceEnv: sourceEnvFor(NONZERO_FIXTURE),
-    }), adapter.CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO);
+    }), adapter.CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
   } finally {
     process.stdout.write = originalStdoutWrite;
     process.stderr.write = originalStderrWrite;
@@ -492,7 +494,7 @@ test('cleanup failure never masks the primary adapter error', async () => {
     await expectCode(adapter.invokeClaudeSidecar({
       cwd: WORKSPACE, prompt: 'primary wins', timeoutMs: 10000, model: FIXTURE_MODEL,
       sourceEnv: sourceEnvFor(NONZERO_FIXTURE),
-    }), adapter.CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO);
+    }), adapter.CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
   } finally {
     fs.rmSync = originalRmSync;
     for (const name of tempPromptDirs()) {
@@ -517,14 +519,14 @@ test('execute candidate validator requires complete payload fields and matching 
   }
 });
 
-// ── JSON envelope, identity, auth and secret matrices (control fixture) ──────
+// â”€â”€ JSON envelope, identity, auth and secret matrices (control fixture) â”€â”€â”€â”€â”€â”€
 const CONTROL_MODEL = 'claude-opus-5';
 const ESCAPED_TOKEN = FIXTURE_TOKEN.replace('f', '\\u0066');
 function okBlock(summary = 'control fixture') {
   return resultBlock('done', { status: 'done', summary, must_haves_status: [], files_changed: [] });
 }
 function controlEnvelope(fields = {}) {
-  return { type: 'result', subtype: 'success', is_error: false, result: okBlock(),
+  return { type: 'result', subtype: 'success', is_error: false, result: okBlock(), structured_output: {status:'done',summary:'control fixture',must_haves_status:[],files_changed:[]},
     usage: { input_tokens: 401, output_tokens: 403 },
     modelUsage: { [CONTROL_MODEL]: { inputTokens: 401, outputTokens: 403 } }, ...fields };
 }
@@ -561,7 +563,7 @@ test('modelUsage naming only the requested model yields the inner parser candida
   ok(!run.error, run.error && run.error.code);
   assert.deepStrictEqual(run.result.candidate, run.adapter.parseExecuteCandidate(okBlock()).candidate,
     'the JSON transport must not alter the unit parser candidate');
-  assert.deepStrictEqual(run.result.telemetry, {
+  assert.deepStrictEqual(Object.fromEntries(Object.entries(run.result.telemetry).filter(([k])=>!['observation','calibration_proposal'].includes(k))), {
     model_argument: CONTROL_MODEL, model_observed: CONTROL_MODEL, model_observed_source: 'claude-json-modelUsage',
     effort_sent: null, effort_applied: null, effort_applied_source: null, cli_version: null, policy_diagnostics: [],
   });
@@ -613,13 +615,13 @@ test('wrapper matrix: every invalid envelope is claude-invalid-result with a clo
     ['error subtype', { overrides: { subtype: 'error_max_turns' } }, 'result-error'],
     ['is_error true', { overrides: { is_error: true } }, 'result-error'],
     ['is_error absent', { remove: ['is_error'] }, 'result-envelope-invalid'],
-    ['result absent', { remove: ['result'] }, 'result-envelope-invalid'],
-    ['result not a string', { overrides: { result: { status: 'done' } } }, 'result-envelope-invalid'],
+    ['structured output absent', { remove: ['structured_output'] }, 'result-envelope-invalid'],
+    ['structured output wrong shape', { overrides: { structured_output: { status: 'complete' } } }, 'schema-invalid'],
     ['leading text', { raw: `Here is the result: ${base}` }, 'json-invalid'],
     ['trailing text', { raw: `${base}\nDone.` }, 'json-invalid'],
     ['truncated', { raw: base.slice(0, -9) }, 'json-invalid'],
-    ['duplicated object', { raw: `${base}\n${base}` }, 'json-invalid'],
-    ['earlier success then failure', { raw: `${earlier}\n${failure}` }, 'json-invalid'],
+    ['duplicated object', { raw: `${base}\n${base}` }, 'duplicate-terminal'],
+    ['earlier success then failure', { raw: `${earlier}\n${failure}` }, 'duplicate-terminal'],
     ['duplicate result member', { raw: base.replace('{', `{"result":${JSON.stringify(okBlock('earlier success'))},`) }, 'json-invalid'],
     ['duplicate modelUsage member', { raw: base.replace('{', '{"modelUsage":{"claude-sonnet-5":{}},') }, 'json-invalid'],
   ];
@@ -637,8 +639,8 @@ test('structured auth uses api_error_status 401/403 only; counters and JSON text
     ['401 status', { overrides: { is_error: true, api_error_status: 401, result: 'Failed to authenticate' }, exit: 1 }, 'claude-auth-failed'],
     ['403 status on exit zero', { overrides: { is_error: true, api_error_status: 403, result: 'Forbidden' } }, 'claude-auth-failed'],
     ['401 text inside JSON error', { overrides: { is_error: true, result: 'API Error: 401 authentication_error' }, exit: 1 }, 'claude-exit-nonzero'],
-    ['401 counters without a block', { overrides: { result: 'no worker block, 401 403' } }, 'claude-invalid-result'],
-    ['non-JSON stderr login prompt', { raw: 'not json', stderr: 'Please run /login', exit: 1 }, 'claude-auth-failed'],
+    ['401 counters without structured output', { remove:['structured_output'], overrides: { result: 'no worker block, 401 403' } }, 'claude-invalid-result'],
+    ['non-JSON stderr login prompt', { raw: 'not json', stderr: 'Please run /login', exit: 1 }, 'claude-exit-nonzero'],
   ]) {
     const run = await runControl(control);
     ok(run.error, `${label}: was admitted`);
@@ -656,7 +658,7 @@ test('raw and Unicode-escaped tokens in values, names, modelUsage keys and the c
     ['escaped value', { raw: plantEscaped(controlEnvelope({ note: FIXTURE_TOKEN })) }],
     ['escaped property name', { raw: plantEscaped(controlEnvelope({ extra: { [FIXTURE_TOKEN]: 1 } })) }],
     ['escaped modelUsage key', { raw: plantEscaped(controlEnvelope({ modelUsage: { [FIXTURE_TOKEN]: {} } })) }],
-    ['escaped candidate', { result: okBlock(FIXTURE_TOKEN).replace(FIXTURE_TOKEN, ESCAPED_TOKEN) }],
+    ['escaped candidate', { raw:plantEscaped(controlEnvelope({structured_output:{status:'done',summary:FIXTURE_TOKEN,must_haves_status:[],files_changed:[]}})) }],
   ];
   for (const [label, control] of cases) {
     if (label !== 'raw value') {
@@ -728,7 +730,7 @@ test('the heartbeat interval is cleared on a failing exit path too', async () =>
     cwd: WORKSPACE, prompt: 'nonzero', timeoutMs: 10000, heartbeatIntervalMs: 20, model: FIXTURE_MODEL,
     onHeartbeat: (pid) => { beats.push(pid); },
     sourceEnv: sourceEnvFor(NONZERO_FIXTURE),
-  }), adapter.CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO);
+  }), adapter.CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT);
   const settledCount = beats.length;
   ok(settledCount >= 1, 'the spawn beat must publish the pid before failure');
   await new Promise((resolve) => setTimeout(resolve, 120));
@@ -859,7 +861,7 @@ function countingProbe(calls) {
 const LEGACY_ARGV_TAIL = ['--no-session-persistence', '--disable-slash-commands',
   '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
   '--setting-sources', '', '--settings', '{"disableAllHooks":true,"switchModelsOnFlag":false}',
-  '--output-format', 'json',
+  '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--json-schema', JSON.stringify(require('./forge-worker-result-contract').contract('execute').schema),
   '--tools', 'Read,Glob,Grep,Edit,Write,Bash', '--permission-mode', 'acceptEdits', '-p'];
 
 test('Sonnet 5.5 sends the full id and exact effort after a satisfied version probe', async () => {
@@ -882,7 +884,7 @@ test('Sonnet 5.5 sends the full id and exact effort after a satisfied version pr
   assert.strictEqual(args[args.indexOf('--model') + 1], 'claude-sonnet-5-5', 'full id, never an alias');
   assert.strictEqual(args[args.indexOf('--effort') + 1], 'high');
   ok(!args.some((arg) => /thinking|between/i.test(String(arg))), 'no thinking flag is invented');
-  assert.deepStrictEqual(result.telemetry, {
+  assert.deepStrictEqual(Object.fromEntries(Object.entries(result.telemetry).filter(([k])=>!['observation','calibration_proposal'].includes(k))), {
     model_argument: 'claude-sonnet-5-5', model_observed: 'claude-sonnet-5-5',
     model_observed_source: 'claude-json-modelUsage', effort_sent: 'high', effort_applied: null,
     effort_applied_source: null, cli_version: '2.1.284', policy_diagnostics: [],
@@ -1018,6 +1020,79 @@ test('an effort the model policy does not document refuses before any probe or s
   });
   assert.strictEqual(ok46.candidate.status, 'done');
   assert.strictEqual(records[0].args[records[0].args.indexOf('--effort') + 1], 'max');
+});
+
+test('progress milestones are closed, observer failures are ignored, and structured fatal events fail fast', async () => {
+  const streamFixture = writeFixture('claude stream progress fixture.js', `
+${ENVELOPE_PRELUDE}
+process.stdout.write(JSON.stringify({type:'stream_event',event:{type:'message_start',message:{id:'private-session-id',role:'assistant'}}})+'\\n');
+setTimeout(()=>process.stdout.write(envelope('unused')+'\\n'),25);
+`);
+  // Use a complete contract candidate instead of the legacy fixture helper.
+  fs.writeFileSync(streamFixture, fs.readFileSync(streamFixture, 'utf8').replace("envelope('unused')",
+    "envelope(" + JSON.stringify(okBlock()) + ")"));
+  const snapshots = [];
+  const adapter = loadAdapter();
+  const result = await adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'progress', model: FIXTURE_MODEL,
+    timeoutMs: 15000, sourceEnv: sourceEnvFor(streamFixture), onProgress(snapshot) {
+      snapshots.push(snapshot);
+      if (snapshots.length === 1) throw Error('observer failure');
+      return Promise.reject(Error('async observer failure'));
+    } });
+  assert.equal(result.candidate.status, 'done');
+  assert.equal(snapshots[0].phase, 'local-start');
+  assert(snapshots.some(value => value.phase === 'remote-activity'));
+  assert(snapshots.some(value => value.phase === 'terminal'));
+  assert.equal(snapshots.at(-1).phase, 'closed');
+  assert.equal(snapshots.at(-1).process_exit_observed, true);
+  assert(!JSON.stringify(snapshots).includes('private-session-id'));
+  assert(!JSON.stringify(snapshots).includes('control fixture'));
+  const fatal = await runControl({ raw: JSON.stringify({ type: 'error', error: { type: 'overloaded_error' } }) + '\n', hang: true });
+  assert.equal(fatal.error.diagnostic.reason, 'result-error');
+  assert.equal(fatal.terminations, 1);
+  assert.equal(fatal.error.diagnostic.observation.process_exit_observed, false);
+  assert(fatal.error.diagnostic.observation.elapsed_ms < 5000, 'structured failure does not wait for hard timeout');
+});
+
+test('throwing semantic validator retains its validation reason and observation', async () => {
+  const run = await runControl({}, { validateCandidate() { throw Error('private-validator-path'); } });
+  assert.equal(run.error.code, 'claude-invalid-result');
+  assert.equal(run.error.diagnostic.reason, 'validator-failed');
+  assert.equal(run.error.diagnostic.observation.process_exit_observed, true);
+  assert(!JSON.stringify(run.error).includes('private-validator-path'));
+});
+
+test('unreadable calibration is visible in progress and returned telemetry', async () => {
+  const calibration = require('./forge-sidecar-calibration');
+  const calibrationOptions = { userHome: path.join(ROOT, 'corrupt-calibration-home') };
+  fs.mkdirSync(calibration.directory(calibrationOptions), { recursive: true });
+  fs.writeFileSync(path.join(calibration.directory(calibrationOptions), 'calibration.json'), 'private-invalid-json');
+  const progress = [];
+  const run = await runControl({}, { calibrationOptions, onProgress: value => progress.push(value) });
+  assert.equal(run.result.telemetry.observation.calibration.diagnostic, 'calibration-unavailable');
+  assert(progress.every(value => value.calibration.diagnostic === 'calibration-unavailable'));
+  assert(!JSON.stringify(run.result.telemetry).includes('private-invalid-json'));
+});
+
+test('persisted calibrated silence aborts locally without treating kill promise as observed exit', async () => {
+  const calibration = require('./forge-sidecar-calibration');
+  const calibrationOptions = { userHome: path.join(ROOT, 'calibration-home') };
+  const id = { model: FIXTURE_MODEL, effort: 'medium', phase: 'execute' };
+  for (let i = 0; i < 5; i++) assert(calibration.commit(calibration.propose(id,
+    { initial_sample_ms: 100, gap_sample_ms: null }), { receipt: 'fixture', fingerprint: 'fixture' }, calibrationOptions).committed);
+  const silentFixture = writeFixture('claude silent fixture.js', 'setInterval(()=>{},1000);');
+  let now = 0, kills = 0;
+  const adapter = loadAdapter();
+  const error = await expectCode(adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'silence', model: FIXTURE_MODEL,
+    timeoutMs: 15000, calibrationOptions, monotonicClock: () => now,
+    sourceEnv: sourceEnvFor(silentFixture), onHeartbeat() { now = 120001; },
+    terminateChild(child) { kills++; child.kill('SIGKILL'); return Promise.reject(Error('termination unconfirmed')); },
+  }), 'claude-anomalous-silence');
+  assert.equal(kills, 1);
+  assert.equal(error.diagnostic.observation.silence.cause, 'indeterminate');
+  assert.equal(error.diagnostic.observation.silence.threshold_ms, 120000);
+  assert.equal(error.diagnostic.observation.process_exit_observed, false);
+  assert.deepEqual(tempPromptDirs(), []);
 });
 
 async function main() {

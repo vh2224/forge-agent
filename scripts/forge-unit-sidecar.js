@@ -563,11 +563,12 @@ function failArtifactAttempt(request, reasonCode, detail, providerCalled = 'unkn
     ? JSON.parse(fs.readFileSync(files.receiptFile, 'utf8')) : null;
   if (current && current.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
   const failure = { status: 'failure', reason_code: reasonCode,
-    provider_called: typeof providerCalled === 'boolean' ? providerCalled : 'unknown', diagnostic: diagnostic(detail || 'adapter-failed'),
+    provider_called: typeof providerCalled === 'boolean' ? providerCalled : 'unknown', diagnostic: diagnostic(typeof detail === 'string' ? detail : detail?.reason || 'adapter-failed', detail && typeof detail === 'object' ? detail : {}),
     recovery: 'operator-required' };
   const evidence = require('./forge-attempt-telemetry').sanitizeFinal(finalEvidence || current?.final_evidence);
   failure.final_evidence = evidence;
-  if (!current || current.phase !== 'ready') {
+  if (current && ['ready','executed'].includes(current.phase)) return fs.existsSync(files.resultFile) ? JSON.parse(fs.readFileSync(files.resultFile,'utf8')) : current.result;
+  if (!current || !['ready','executed'].includes(current.phase)) {
     json(files.receiptFile, { ...(current || {}), phase: 'failed', fingerprint,
       dispatch_id: request.dispatchId, route: request.route,
       request_fingerprint: request.preparationRequestFingerprint || current?.request_fingerprint || null,
@@ -579,7 +580,7 @@ function failArtifactAttempt(request, reasonCode, detail, providerCalled = 'unkn
     unit: `${request.unitType}/${request.taskId || request.sliceId || request.milestoneId}`, contract: request.execution_contract,
     request, finalEvidence: evidence, route: request.route, receiptFile: files.receiptFile,
     durationMs: current?.started_at ? Date.now() - Date.parse(current.started_at) : evidence?.duration_ms,
-    error: { code: reasonCode, provider_called: providerCalled, diagnostic: { reason: detail } }, layer: detail || 'unknown' });
+    error: { code: reasonCode, provider_called: providerCalled, diagnostic: failure.diagnostic }, layer: failure.diagnostic.stage });
   return failure;
 }
 
@@ -674,6 +675,7 @@ async function acceptArtifactResultCore(request, rawResult, metadata = {}, publi
     route: request.route, route_identity: routeIdentity(request.route, request.unitType),
     provider_called: true, telemetry: metadata.telemetry || null, result: rawResult,
     artifacts: artifacts.map(artifact => ({ ...artifact, before: existing.before[artifact.path] ?? null })) };
+  if (metadata.telemetry?.calibration_proposal) record.calibration_proposal = metadata.telemetry.calibration_proposal;
   json(files.receiptFile, record);
   const result = await publishReadyRecord(request, record, undefined, publicationLock);
   json(files.resultFile, result);
@@ -768,6 +770,7 @@ function memoryTelemetry(record) {
     effort_binding_observed_source: telemetryScalar(raw.effort_binding_observed_source),
     effort_applied: effortApplied && effortAppliedSource ? effortApplied : null,
     effort_applied_source: effortApplied && effortAppliedSource ? effortAppliedSource : null,
+    ...(raw.observation ? { observation: require('./forge-sidecar-diagnostic').observation(raw.observation) } : {}),
   };
 }
 function memoryPublicationReason(publication) {
@@ -923,6 +926,21 @@ function publishReviewFixFailure(request, loc, items, snapshot) {
 }
 
 async function publishReadyRecord(request, record, publicationGuard, publicationLock) {
+  let result = await publishReadyRecordCore(request, record, publicationGuard, publicationLock);
+  if (record.telemetry?.observation) result = { ...result, transport_telemetry: {
+    ...result.transport_telemetry,
+    observation: require('./forge-sidecar-calibration').observation(record.telemetry.observation),
+  } };
+  if (record.calibration_proposal && result.status === 'done'
+      && !['deferred', 'quarantined', 'conflict'].includes(result.publication?.status)) {
+    const outcome = await require('./forge-sidecar-calibration').commitAccepted(record.calibration_proposal, {
+      fingerprint: record.fingerprint, receipt: artifactAttemptFiles(request).receiptFile,
+    });
+    result = { ...result, transport_telemetry: { ...result.transport_telemetry, calibration_commit: outcome } };
+  }
+  return result;
+}
+async function publishReadyRecordCore(request, record, publicationGuard, publicationLock) {
   if (record.execution) require('./forge-task-execution').assertReplay(request, record);
   if (record.kind === 'review-fix') return publishReviewFixRecord(request, record);
   if (record.kind !== 'memory-extraction') return materialize(request, record, publicationGuard, publicationLock);
@@ -1775,6 +1793,15 @@ async function runUnitSidecarCore(request, runtime, identity) {
   };
   const options = { enterTransport: () => { enterTransport(); transportEntered = true; }, cwd, contextRoot: root, engine: route.resolved_worker_engine,
     unitType: r.unitType,
+    calibrationOptions: runtime.calibrationOptions,
+    onProgress: snapshot => {
+      const safe = require('./forge-sidecar-calibration').observation(snapshot);
+      const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+      if (saved.phase === 'started') json(receiptFile, { ...saved,
+        telemetry: { ...saved.telemetry, observation: safe } });
+      if (runtime.onProgress) return runtime.onProgress(safe);
+      if (require.main === module) process.stderr.write(require('./forge-sidecar-calibration').progressLine(safe));
+    },
     telemetryIdentity: r, telemetryRoute: route, budgets: execution?.budgets || r.budgets || {},
     onPackagedContext: packaged => {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
@@ -1829,8 +1856,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (options.engine === 'claude') {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeClaudeTransport({ ...options, prompt: prompt
-          + '\nFinish with ---GSD-WORKER-RESULT---, status, result_json containing the complete JSON, and ---END-RESULT--- on separate lines.',
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:'memory', resultSchema:memorySchema, calibrationPhase:'memory',
           readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
@@ -1864,6 +1890,12 @@ async function runUnitSidecarCore(request, runtime, identity) {
           ? { execution_contract: r.execution_contract, budgets: r.budgets || {} } : undefined),
         procedureContext: { procedureText, procedure_context } });
       transportReturned = true;
+      transportTelemetry = result.transport_telemetry || null;
+      const trustedTransportRecord = transportTelemetry ? {
+        telemetry: { ...observedModelTelemetry(transportTelemetry),
+          observation: require('./forge-sidecar-diagnostic').observation(transportTelemetry.observation) },
+        ...(transportTelemetry.calibration_proposal ? { calibration_proposal: transportTelemetry.calibration_proposal } : {}),
+      } : {};
       if (execution) {
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
         else executionApi.assertProtected(root, protectedBefore);
@@ -1879,6 +1911,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           })(),
           route, route_identity: routeIdentity(route, r.unitType), provider_called: true,
           reset_state_file: executionStateFile,
+          ...trustedTransportRecord,
           execution: { inputs: execution.inputs, budgets: execution.budgets, verified_files: verifiedFiles,
             protected_owner: executionApi.protectedSnapshot(root),
             execution_contract: execution.execution_contract,
@@ -1907,7 +1940,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           claims: checked.writes, snapshots: state.repos }, result);
         // Save the validated response before checks/publication. A failing gate
         // must replay delivery, never infer again or capture a new writer baseline.
-        const executed = { ...saved, phase: 'executed', provider_called: true,
+        const executed = { ...saved, phase: 'executed', provider_called: true, ...trustedTransportRecord,
           final_evidence: saved.final_evidence ? { ...saved.final_evidence, stage: 'returned', provider_called: true,
             duration_ms: Date.now() - Date.parse(startedAt),
             model_observed: result.transport_telemetry?.model_observed || result.appserver?.transport_telemetry?.model_observed || null } : null,
@@ -1968,8 +2001,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (options.engine === 'claude') {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeClaudeTransport({ ...options, prompt: prompt
-          + '\nFinish with the following envelope. Markers must be on their own lines. result_json must contain one complete JSON object (compact or multiline); escape newlines inside JSON strings. Do not wrap the JSON in Markdown fences.\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <complete JSON>\n---END-RESULT---',
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:loc.preparation?'preparation':'artifacts', resultSchema:schema, calibrationPhase:r.phase || 'artifacts',
           readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules,
             { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
@@ -2069,6 +2101,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
           ...observedModel,
           effort_resolved: route.effort || null, effort_reason: route.effort_reason || null },
         artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
+    if (transportTelemetry) record.telemetry = {...record.telemetry, observation: transportTelemetry.observation ? require('./forge-sidecar-calibration').observation(transportTelemetry.observation) : null};
+    if (transportTelemetry?.calibration_proposal) record.calibration_proposal = transportTelemetry.calibration_proposal;
     const finalEvidence = JSON.parse(fs.readFileSync(receiptFile, 'utf8')).final_evidence;
     if (finalEvidence) record.final_evidence = { ...finalEvidence, stage: 'returned', provider_called: true,
       duration_ms: Date.now() - Date.parse(startedAt), model_observed: observedModel.model_observed || null };

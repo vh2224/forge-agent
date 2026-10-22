@@ -182,7 +182,7 @@ function mockClaudeMain(config) {
     }
     const instruction = args[promptIndex + 1];
     const prefix = 'Read the complete task prompt from this UTF-8 file: ';
-    const suffix = '. Follow it exactly and finish with its required worker-result block.';
+    const suffix = '. Follow it exactly and return the required structured_output JSON.';
     if (!instruction.startsWith(prefix) || !instruction.endsWith(suffix)) {
       throw new Error('unexpected prompt-file instruction');
     }
@@ -255,7 +255,7 @@ function mockClaudeMain(config) {
   const requested = args[args.indexOf('--model') + 1];
   const observed = config.behavior === 'substituted' ? config.substituteModel : requested;
   process.stdout.write(JSON.stringify({
-    type: 'result', subtype: 'success', is_error: false,
+    type: 'result', subtype: 'success', is_error: false, structured_output: payload,
     result: [
       '---GSD-WORKER-RESULT---',
       'status: done',
@@ -636,10 +636,10 @@ async function happyPath(root) {
     assert.deepStrictEqual(terminal.value.pre_dirty, []);
     assert.strictEqual(terminal.value.start_sha, fixture.baseline);
     assert.strictEqual(terminal.value.head_sha, fixture.baseline);
-    assert.strictEqual(terminal.value.parse_path, 'worker-result-block');
+    assert.strictEqual(terminal.value.parse_path, 'structured-output');
     assert.strictEqual(terminal.value.capability, 'workspace');
     assert.strictEqual(terminal.value.appserver.transport, 'claude-cli');
-    assert.strictEqual(capture.argv[capture.argv.indexOf('--output-format') + 1], 'json');
+    assert.strictEqual(capture.argv[capture.argv.indexOf('--output-format') + 1], 'stream-json');
     assert.strictEqual(terminal.value.transport_telemetry.model_observed, 'claude-sonnet-5',
       'the execute result-file carries the model modelUsage proved');
     assert.strictEqual(terminal.value.transport_telemetry.model_observed_source, 'claude-json-modelUsage');
@@ -776,6 +776,37 @@ async function protectedWritePath(root) {
   }
 }
 
+async function reviewCalibrationRetry() {
+  // This review-only fixture replaces transport and persistence, while retaining
+  // the public caller's procedure, schema and result-publication boundaries.
+  const adapter = require('./forge-claude-sidecar');
+  const calibration = require('./forge-sidecar-calibration');
+  const originalInvoke = adapter.invokeClaudeSidecar, originalCommit = calibration.commit;
+  const modulePath = require.resolve('./forge-xllm');
+  const cached = require.cache[modulePath];
+  let turns = 0, commits = 0;
+  const proposal = calibration.propose({ model: 'claude-opus-5-5', effort: 'medium', phase: 'review' }, { initial_sample_ms: 1 });
+  adapter.invokeClaudeSidecar = async () => {
+    turns++;
+    return { candidate: { status: 'done', output: { objections: [] } }, telemetry: { calibration_proposal: proposal } };
+  };
+  calibration.commit = () => { commits++; return { committed: false, diagnostic: 'calibration-busy' }; };
+  delete require.cache[modulePath];
+  try {
+    const result = await require('./forge-xllm').runChallenge({ cwd: PROJECT_ROOT, diffCmd: 'node --version',
+      engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, model: 'claude-opus-5-5', effort: 'medium' });
+    assert.equal(turns, 1);
+    assert.equal(commits, 3);
+    assert.deepEqual(result.transport_telemetry.calibration_commit, {
+      committed: false, attempts: 3, diagnostic: 'calibration-busy', retry_pending: true,
+    });
+    assert.deepEqual(result.transport_telemetry.calibration_proposal, proposal);
+  } finally {
+    adapter.invokeClaudeSidecar = originalInvoke; calibration.commit = originalCommit;
+    delete require.cache[modulePath]; if (cached) require.cache[modulePath] = cached;
+  }
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(PROJECT_ROOT, '.forge-xllm-claude-test-'));
   assertPathInside(PROJECT_ROOT, root, 'suite fixture root');
@@ -785,6 +816,7 @@ async function main() {
     ['exit zero with empty stdout has the frozen empty-output code', emptyOutputPath],
     ['valid worker output still crosses the shared protected-change fence', protectedWritePath],
     ['a substituted model is refused after the turn and preserves the worker tree', substitutedPath],
+    ['accepted review exposes bounded calibration retry without another inference', reviewCalibrationRetry],
   ];
   let passed = 0;
   const failures = [];
