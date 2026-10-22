@@ -3,96 +3,208 @@ name: Release
 on:
   push:
     branches: [master]
-    tags:
-      - 'v*'
 
-permissions:
-  contents: write
+permissions: {}
 
-# Serialize runs so near-simultaneous pushes (e.g. a batch of merges) don't
-# race on the same computed version. Queue, don't cancel; pushes without a
-# release-worthy conventional commit pass validation but skip publication.
+# Active publication is not cancelled; pending runs can still be replaced.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
+  coordinator:
+    name: Release coordinator
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Trusted master checkout
+        uses: actions/checkout@v4
         with:
+          ref: refs/heads/master
           fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - name: Fetch tags
-        run: git fetch --tags --force
-
+      - name: Validate trusted origin
+        id: origin
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+          const e = process.env;
+          const reject = () => { throw new Error('origin-unverified'); };
+          const stat = fs.lstatSync(e.GITHUB_EVENT_PATH);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4194304) reject();
+          const event = JSON.parse(fs.readFileSync(e.GITHUB_EVENT_PATH, 'utf8'));
+          const sha = e.GITHUB_SHA;
+          if (!/^[a-f0-9]{40}$/.test(sha) || /^0+$/.test(sha) ||
+              !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(e.GITHUB_REPOSITORY) ||
+              !/^[1-9][0-9]*$/.test(e.GITHUB_REPOSITORY_ID) ||
+              event.repository.id !== Number(e.GITHUB_REPOSITORY_ID) ||
+              event.repository.full_name !== e.GITHUB_REPOSITORY || event.repository.fork !== false ||
+              e.GITHUB_EVENT_NAME !== 'push' || e.GITHUB_REF !== 'refs/heads/master' ||
+              event.ref !== e.GITHUB_REF || event.deleted !== false || event.after !== sha ||
+              e.GITHUB_WORKFLOW_SHA !== sha ||
+              e.GITHUB_WORKFLOW_REF !== `${e.GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/master`) reject();
+          const git = args => execFileSync('git', args, { encoding: 'utf8', timeout: 30000, maxBuffer: 4194304 }).trim();
+          git(['merge-base', '--is-ancestor', sha, 'refs/remotes/origin/master']);
+          const copied = path.join(e.RUNNER_TEMP, 'release-event.json');
+          fs.writeFileSync(copied, JSON.stringify(event), { flag: 'wx', mode: 0o600 });
+          fs.appendFileSync(e.GITHUB_OUTPUT, `candidate_sha=${sha}\n`);
+          NODE
+      - name: Exact candidate checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.origin.outputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm candidate HEAD
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { execFileSync } = require('child_process');
+          const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', timeout: 30000 }).trim();
+          if (head !== process.env.GITHUB_SHA) throw new Error('candidate-head-mismatch');
+          NODE
+      - name: Wait for complete CI and app (30 minute deadline)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-github.js wait --sha "$GITHUB_SHA"
       - name: Resolve version
         id: version
         run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT"
-
-      - name: Run deterministic offline release gate
-        run: node scripts/forge-release-gate.js --report "${{ runner.temp }}/forge-release-report.json"
-
       - name: Generate changelog
-        if: steps.version.outputs.skip != 'true'
-        id: changelog
-        run: |
-          RANGE="${{ steps.version.outputs.range }}"
-          COMMITS=$(git log "$RANGE" --pretty=format:"%H %s" 2>/dev/null || git log --pretty=format:"%H %s")
-
-          BREAKING=""; FEATURES=""; FIXES=""; OTHER=""
-
-          while IFS= read -r line; do
-            HASH=$(echo "$line" | cut -c1-7)
-            MSG=$(echo "$line" | cut -d' ' -f2-)
-            if echo "$MSG" | grep -qiE '^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE'; then
-              BREAKING="${BREAKING}- ${MSG} (${HASH})\n"
-            elif echo "$MSG" | grep -qE '^feat(\(.+\))?:'; then
-              FEATURES="${FEATURES}- ${MSG} (${HASH})\n"
-            elif echo "$MSG" | grep -qE '^fix(\(.+\))?:'; then
-              FIXES="${FIXES}- ${MSG} (${HASH})\n"
-            else
-              OTHER="${OTHER}- ${MSG} (${HASH})\n"
-            fi
-          done <<< "$COMMITS"
-
-          {
-            if [ -n "$BREAKING" ]; then echo "### Breaking Changes"; echo ""; echo -e "$BREAKING"; fi
-            if [ -n "$FEATURES" ]; then echo "### Features"; echo ""; echo -e "$FEATURES"; fi
-            if [ -n "$FIXES"    ]; then echo "### Bug Fixes"; echo ""; echo -e "$FIXES"; fi
-            if [ -n "$OTHER"    ]; then echo "### Other Changes"; echo ""; echo -e "$OTHER"; fi
-          } > /tmp/changelog.md
-
-      - name: Create release
-        if: steps.version.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_RANGE: ${{ steps.version.outputs.range }}
+        shell: bash
         run: |
-          NEW_TAG="${{ steps.version.outputs.new_tag }}"
-          # Idempotent: if the release already exists (e.g. a tag-push re-trigger,
-          # or a re-run), skip instead of failing with HTTP 422.
-          if gh release view "$NEW_TAG" >/dev/null 2>&1; then
-            echo "Release $NEW_TAG already exists -- skipping."
-            exit 0
-          fi
-          # If tag doesn't exist yet (auto-bump case), gh release create will create it.
-          # If tag already exists (manual tag case), --verify-tag ensures we use it as-is.
-          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
-            gh release create "$NEW_TAG" \
-              --title "$NEW_TAG" \
-              --notes-file /tmp/changelog.md \
-              --verify-tag
-          else
-            # Pin the tag to the exact commit that triggered this run -- NOT wherever
-            # master happens to point now (which races when pushes land back-to-back).
-            gh release create "$NEW_TAG" \
-              --title "$NEW_TAG" \
-              --notes-file /tmp/changelog.md \
-              --target "$GITHUB_SHA"
-          fi
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+          const range = process.env.RELEASE_RANGE;
+          let commits;
+          try { commits = execFileSync('git', ['log', range, '--pretty=format:%H %s'], { encoding: 'utf8' }); }
+          catch (_) { commits = execFileSync('git', ['log', '--pretty=format:%H %s'], { encoding: 'utf8' }); }
+          const sections = { 'Breaking Changes': [], Features: [], 'Bug Fixes': [], 'Other Changes': [] };
+          for (const line of commits.split('\n').filter(Boolean)) {
+            const hash = line.slice(0, 7); const message = line.slice(line.indexOf(' ') + 1);
+            const category = /^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE/i.test(message) ? 'Breaking Changes' :
+              /^feat(\(.+\))?:/.test(message) ? 'Features' : /^fix(\(.+\))?:/.test(message) ? 'Bug Fixes' : 'Other Changes';
+            sections[category].push(`- ${message} (${hash})`);
+          }
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-notes.md'),
+            Object.entries(sections).filter(([, rows]) => rows.length).map(([title, rows]) => `### ${title}\n\n${rows.join('\n')}\n`).join('\n'));
+          NODE
+      - name: Fresh token-free prepare (10 minute receipt TTL)
+        id: prepare
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-publish.js prepare --sha "$GITHUB_SHA" --notes "$RUNNER_TEMP/release-notes.md" --github-output "$GITHUB_OUTPUT"
+
+  publisher:
+    name: Release publisher
+    needs: coordinator
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Trusted master checkout
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/master
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate trusted origin
+        id: origin
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+          const e = process.env;
+          const reject = () => { throw new Error('origin-unverified'); };
+          const stat = fs.lstatSync(e.GITHUB_EVENT_PATH);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4194304) reject();
+          const event = JSON.parse(fs.readFileSync(e.GITHUB_EVENT_PATH, 'utf8'));
+          const sha = e.GITHUB_SHA;
+          if (!/^[a-f0-9]{40}$/.test(sha) || /^0+$/.test(sha) ||
+              !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(e.GITHUB_REPOSITORY) ||
+              !/^[1-9][0-9]*$/.test(e.GITHUB_REPOSITORY_ID) ||
+              event.repository.id !== Number(e.GITHUB_REPOSITORY_ID) ||
+              event.repository.full_name !== e.GITHUB_REPOSITORY || event.repository.fork !== false ||
+              e.GITHUB_EVENT_NAME !== 'push' || e.GITHUB_REF !== 'refs/heads/master' ||
+              event.ref !== e.GITHUB_REF || event.deleted !== false || event.after !== sha ||
+              e.GITHUB_WORKFLOW_SHA !== sha ||
+              e.GITHUB_WORKFLOW_REF !== `${e.GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/master`) reject();
+          const git = args => execFileSync('git', args, { encoding: 'utf8', timeout: 30000, maxBuffer: 4194304 }).trim();
+          git(['merge-base', '--is-ancestor', sha, 'refs/remotes/origin/master']);
+          const copied = path.join(e.RUNNER_TEMP, 'release-event.json');
+          fs.writeFileSync(copied, JSON.stringify(event), { flag: 'wx', mode: 0o600 });
+          fs.appendFileSync(e.GITHUB_OUTPUT, `candidate_sha=${sha}\n`);
+          NODE
+      - name: Exact candidate checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.origin.outputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm candidate HEAD
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { execFileSync } = require('child_process');
+          const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', timeout: 30000 }).trim();
+          if (head !== process.env.GITHUB_SHA) throw new Error('candidate-head-mismatch');
+          NODE
+      - name: Resolve version
+        id: version
+        run: node scripts/forge-release-version.js --check --github-output "$GITHUB_OUTPUT"
+      - name: Generate changelog
+        env:
+          RELEASE_RANGE: ${{ steps.version.outputs.range }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+          const range = process.env.RELEASE_RANGE;
+          let commits;
+          try { commits = execFileSync('git', ['log', range, '--pretty=format:%H %s'], { encoding: 'utf8' }); }
+          catch (_) { commits = execFileSync('git', ['log', '--pretty=format:%H %s'], { encoding: 'utf8' }); }
+          const sections = { 'Breaking Changes': [], Features: [], 'Bug Fixes': [], 'Other Changes': [] };
+          for (const line of commits.split('\n').filter(Boolean)) {
+            const hash = line.slice(0, 7); const message = line.slice(line.indexOf(' ') + 1);
+            const category = /^[a-z]+(\(.+\))?!:|BREAKING[ -]CHANGE/i.test(message) ? 'Breaking Changes' :
+              /^feat(\(.+\))?:/.test(message) ? 'Features' : /^fix(\(.+\))?:/.test(message) ? 'Bug Fixes' : 'Other Changes';
+            sections[category].push(`- ${message} (${hash})`);
+          }
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-notes.md'),
+            Object.entries(sections).filter(([, rows]) => rows.length).map(([title, rows]) => `### ${title}\n\n${rows.join('\n')}\n`).join('\n'));
+          NODE
+      - name: Fresh token-free prepare (10 minute receipt TTL)
+        id: prepare
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-publish.js prepare --sha "$GITHUB_SHA" --notes "$RUNNER_TEMP/release-notes.md" --github-output "$GITHUB_OUTPUT"
+      - name: Apply current publisher receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_STATE: ${{ steps.prepare.outputs.state }}
+          RELEASE_NONCE: ${{ steps.prepare.outputs.nonce }}
+        run: GITHUB_EVENT_PATH="$RUNNER_TEMP/release-event.json" node scripts/forge-release-publish.js apply --state "$RELEASE_STATE" --nonce "$RELEASE_NONCE"
