@@ -20,7 +20,7 @@ const REASONS = Object.freeze({
   'provider-exit': 'transport', 'authentication-failed': 'transport',
   'provider-timeout': 'transport', 'provider-cancelled': 'transport',
   'provider-unavailable': 'transport', 'publication-failed': 'publication',
-  'adapter-failed': 'adapter',
+  'adapter-failed': 'adapter', 'anomalous-silence': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
 });
 const COUNTS = ['stdout_bytes', 'stderr_bytes', 'duration_ms', 'marker_count', 'model_count'];
 // One token, no list separators, no path or shell characters; an optional
@@ -40,6 +40,47 @@ function diagnostic(reason, counts = {}) {
   if (safeReason === 'model-substituted' && isSafeModelId(counts.model_observed)) {
     value.model_observed = counts.model_observed;
   }
+  if (counts.observation) value.observation = observation(counts.observation);
   return value;
 }
-module.exports = { diagnostic, isSafeModelId };
+function observation(input = {}) {
+  const out = { version: 1 };
+  const counters = ['elapsed_ms', 'transport_ms', 'verification_ms', 'stdout_bytes', 'stderr_bytes',
+    'event_count', 'remote_event_count', 'first_remote_ms', 'last_remote_ms', 'initial_sample_ms',
+    'gap_sample_ms', 'remote_silence_ms', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'];
+  for (const key of counters) out[key] = Number.isSafeInteger(input[key]) && input[key] >= 0 ? input[key] : null;
+  out.phase = ['local-start', 'remote-activity', 'terminal', 'closed', 'failed'].includes(input.phase)
+    ? input.phase : 'local-start';
+  out.cost_usd = Number.isFinite(input.cost_usd) && input.cost_usd >= 0 ? input.cost_usd : null;
+  out.cost_source = out.cost_usd === null ? null : 'cli-estimate-usd';
+  out.remote_source = out.remote_event_count > 0 ? 'cli-reported-protocol' : null;
+  out.usage_source = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens']
+    .some(key => out[key] !== null) ? 'cli-reported-usage' : null;
+  out.gap_suspended = input.gap_suspended === true;
+  out.process_exit_observed = input.process_exit_observed === true;
+  out.denials = Object.fromEntries(['read', 'write', 'shell', 'other'].map(key => [key,
+    Number.isSafeInteger(input.denials?.[key]) && input.denials[key] >= 0 ? input.denials[key] : null]));
+  if (isSafeModelId(input.model_observed)) {
+    out.model_observed = input.model_observed;
+    out.model_source = 'claude-json-modelUsage';
+  }
+  if (input.calibration) out.calibration = {
+    diagnostic: input.calibration.diagnostic === 'calibration-unavailable' ? 'calibration-unavailable' : null,
+    initial: ['uncalibrated', 'calibrating', 'calibrated'].includes(input.calibration.initial) ? input.calibration.initial : 'uncalibrated',
+    gap: ['uncalibrated', 'calibrating', 'calibrated'].includes(input.calibration.gap) ? input.calibration.gap : 'uncalibrated',
+  };
+  const silence = input.silence;
+  if (silence?.cause === 'indeterminate' && ['initial', 'gap'].includes(silence.dimension)
+      && silence.policy === 'claude-silence-v1' && silence.source === 'persisted-calibration'
+      && Number.isSafeInteger(silence.window_ms) && Number.isSafeInteger(silence.threshold_ms)
+      && silence.threshold_ms >= 120000 && silence.window_ms > silence.threshold_ms) {
+    out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
+      threshold_ms: silence.threshold_ms, policy: 'claude-silence-v1',
+      source: 'persisted-calibration', cause: 'indeterminate' };
+  }
+  return out;
+}
+function progressLine(value) {
+  return '[forge-sidecar-progress] ' + JSON.stringify(observation(value)) + '\n';
+}
+module.exports = { diagnostic, isSafeModelId, observation, progressLine };

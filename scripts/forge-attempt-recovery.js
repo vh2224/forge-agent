@@ -1,6 +1,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { digest } = require('./forge-code-roots');
 const exceptions = new WeakMap();
 const candidateSets = new WeakMap();
@@ -124,10 +126,20 @@ function createRecovery(options) {
     if (state.request_identity_sha256 && state.request_identity_sha256 !== hash) fail('recovery-identity-mismatch');
     state.request_identity = identity; state.request_identity_sha256 = hash;
   }
-  const save = () => { options.persist?.(JSON.parse(JSON.stringify(state))); return JSON.parse(JSON.stringify(state)); };
-  const remaining = () => Math.max(0, state.deadline_at - clock());
+  const remaining = () => {
+    state.clock_high_water = Math.max(state.clock_high_water ?? state.started_at, clock());
+    state.budget_remaining_ms = Math.min(state.budget_remaining_ms ?? 60000,
+      Math.max(0, state.deadline_at - state.clock_high_water));
+    return state.budget_remaining_ms;
+  };
+  const save = () => {
+    remaining();
+    options.persist?.(JSON.parse(JSON.stringify(state)));
+    return JSON.parse(JSON.stringify(state));
+  };
   return Object.freeze({
     snapshot: save, remaining,
+    inspect: () => JSON.parse(JSON.stringify(state)),
     transition(handle) {
       const row = transitions.assertLive(handle).reference;
       if (!(state.transitions || []).some(previous => digest(previous) === digest(row))) state.transitions = [...(state.transitions || []), row];
@@ -141,7 +153,7 @@ function createRecovery(options) {
       state.pending_questions = require('./forge-interaction').resolvePendingQuestions(state.pending_questions, answers); save();
     },
     record(attempt) {
-      if (!['caller', 'service', 'timeout', 'interrupted', 'unknown'].includes(attempt.failure_class)) fail('recovery-failure-class-invalid');
+      if (!['caller', 'service', 'timeout', 'silence', 'interrupted', 'unknown'].includes(attempt.failure_class)) fail('recovery-failure-class-invalid');
       const measurementValid = (hash, bytes) => hash === null && bytes === null
         || typeof hash === 'string' && hash.length > 0 && Number.isFinite(bytes) && bytes >= 0;
       if (!attempt.reason_code || !attempt.layer || !measurementValid(attempt.request_sha256, attempt.request_bytes)
@@ -151,10 +163,11 @@ function createRecovery(options) {
       const entry = { ...attempt, diagnostic: safeDiagnostic(attempt.diagnostic), stderr: safeDiagnostic(attempt.stderr),
         provider_called: [true, false].includes(attempt.provider_called) ? attempt.provider_called : 'unknown',
         model_observed: attempt.model_observed || 'unknown', recorded_at: clock(), route_key: routeKey(attempt.route),
-        timeout_cause: attempt.failure_class === 'timeout' ? 'indeterminate' : null };
+        timeout_cause: ['timeout', 'silence'].includes(attempt.failure_class) ? 'indeterminate' : null };
       entry.previous_attempt = previous ? { route_key: previous.route_key, recorded_at: previous.recorded_at,
         request_sha256: previous.request_sha256, context_sha256: previous.context_sha256,
         budgets: previous.budgets, context_measurement: previous.context_measurement || null } : null;
+      entry.observation = attempt.observation ? require('./forge-sidecar-diagnostic').observation(attempt.observation) : null;
       entry.reservation = state.reservations?.at(-1) || null;
       state.attempts.push(entry); state.phase = 'inspection'; return save();
     },
@@ -163,17 +176,29 @@ function createRecovery(options) {
       if (!input.inspection || input.inspection.process_stopped !== true || input.inspection.receipt_checked !== true) fail('recovery-process-receipt-inspection-required');
       if (input.inspection.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection.writer_possible !== false && input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
+      const pendingReservation = state.reservations?.at(-1);
+      if (pendingReservation?.reason === 'anomalous-silence-same-target'
+        && !state.attempts.some(a => a.reservation && digest(a.reservation) === digest(pendingReservation))) {
+        return { action: 'stop', reason_code: 'recovery-reservation-pending' };
+      }
       let scope;
       if (input.exception) scope = exceptionFor(input.exception, state, clock());
       if (!remaining() && !scope) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
       const previous = state.attempts.at(-1);
       if (!previous) fail('recovery-previous-attempt-required');
       let routes, provenance;
+      const silenceRetry = previous.failure_class === 'silence'
+        && previous.observation?.silence?.cause === 'indeterminate' && scope
+        && !(state.reservations || []).some(r => r.reason === 'anomalous-silence-same-target');
       const transition = input.transition ? transitions.assertLive(input.transition) : null;
       const environmentRepair = environmentalRepairs.has(input.correction);
       if (environmentRepair && (state.reservations || []).some(a => a.correction?.kind === 'environment'
           && a.correction.failure_id === input.correction.failure_id)) fail('recovery-corrected-retry-exhausted');
-      if (!environmentRepair && !transition && (previous.failure_class === 'caller' || previous.failure_class === 'timeout' && input.correction)) {
+      if (silenceRetry) {
+        if (remaining() <= 5000) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
+        routes = [previous.route];
+      }
+      else if (!environmentRepair && !transition && (previous.failure_class === 'caller' || previous.failure_class === 'timeout' && input.correction)) {
         const correction = input.correction;
         if (!correction || correction.offline_validated !== true || !correction.evidence_reference
             || correction.request_sha256 === previous.request_sha256 || !correction.request_sha256) fail('recovery-correction-required');
@@ -227,7 +252,7 @@ function createRecovery(options) {
         correction: input.correction ? { offline_validated: true, request_sha256: input.correction.request_sha256,
           ...(environmentRepair ? { kind: 'environment', failure_id: input.correction.failure_id } : {}),
           evidence_reference: require('./forge-attempt-telemetry').code(input.correction.evidence_reference) } : null,
-        remaining_ms: remaining(), sidecar_remaining_ms: remaining(),
+        remaining_ms: silenceRetry ? Math.min(30000, remaining()) : remaining(), sidecar_remaining_ms: remaining(), silence_retry: !!silenceRetry,
         ...(scope ? { authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
           native_authorization_remaining_ms: Math.max(0, scope.expires_at - clock()) } : {}), provider_called: false };
     },
@@ -266,7 +291,7 @@ function createRecovery(options) {
         ...(decision.transition_reference ? { transition_reference: decision.transition_reference } : {}),
         correction: decision.correction || null,
         ...(handoffPending ? { handoff_pending: true } : {}),
-        reserved_at: clock(), reason: decision.corrected ? 'offline-correction' : 'resolved-next-destination',
+        reserved_at: clock(), reason: decision.silence_retry ? 'anomalous-silence-same-target' : decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
       state.reservations = [...(state.reservations || []), entry]; state.phase = 'reserved'; return save();
     },
@@ -326,10 +351,12 @@ function captureFailure(options) {
     ...(options.request.route ? { request: canonicalRequest(options.request) } : {}),
     state, persist: value => stateApi.saveRecovery(options.stateFile, value) });
   const provider = [true, false].includes(error.provider_called) ? error.provider_called : 'unknown';
+  const silence = code === 'claude-anomalous-silence'
+    && require('./forge-sidecar-diagnostic').observation(error.diagnostic?.observation).silence?.cause === 'indeterminate';
   const timeout = /timeout|timed-out/.test(code);
   const service = provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
-  session.record({ failure_class: timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
-    service_failure_proven: service, reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
+  session.record({ failure_class: silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
+    observation: error.diagnostic?.observation, service_failure_proven: service, reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
     request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
     request_bytes: observed.request.bytes, context_bytes: context.bytes,
     context_measurement: context.method, measurement_diagnostic: context.diagnostic,
@@ -444,7 +471,9 @@ async function inspectPreSpawn(options, state, inspection) {
 async function recoverAttempt(options) {
   const stateApi = require('./forge-xllm-state');
   validateStateTarget(options.stateFile, options.request, options.executionContract);
-  const state = stateApi.loadRecovery(options.stateFile);
+  const stateBytes = fs.readFileSync(options.stateFile);
+  const state = validateState(JSON.parse(stateBytes.toString('utf8')));
+  let expectedStateHash = digest(stateBytes);
   let expectedRoots = digest(options.executionContract || { cwd: options.request.cwd });
   const inspection = inspectReceipt(options.receiptFile, { processProbe: options.processProbe, request: options.request });
   const savedWriter = typeof options.inspectSavedResult === 'function' ? await options.inspectSavedResult() : null;
@@ -473,7 +502,40 @@ async function recoverAttempt(options) {
     clock: options.clock, persist: value => {
       preSpawn?.assertUnchanged();
       transitionGuard?.assertUnchanged();
-      stateApi.saveRecovery(options.stateFile, value); preSpawn?.acceptPersist(value); transitionGuard?.acceptPersist(value);
+      const lockApi = require('./forge-lock');
+      // A private transport mutex must not change guarded owner/code metadata.
+      const lockRoot = path.join(require('os').tmpdir(), 'forge-recovery-' + digest(path.resolve(options.stateFile)));
+      fs.mkdirSync(path.join(lockRoot, '.gsd'), { recursive: true });
+      let guard = lockApi.tryAcquireSync(lockRoot, 'state', { allowStaleRecovery: false });
+      if (!guard) {
+        const observed = lockApi.status(lockRoot, 'state').metadata;
+        // TTL alone never proves a paused writer dead. Revalidate the exact
+        // owner/generation and OS process before canonical stale-marker recovery.
+        // Unknown/missing metadata or process access errors remain busy.
+        if (!observed?.owner_token || !observed.generation
+            || !Number.isSafeInteger(observed.holder_pid) || observed.holder_pid <= 0) fail('recovery-state-busy');
+        let stoppedOwner = false;
+        guard = lockApi.tryAcquireSync(lockRoot, 'state', { now: () => {
+          const status = lockApi.status(lockRoot, 'state');
+          // The canonical acquisition calls the clock again to create the
+          // successor after successfully claiming/removing the stale marker.
+          if (!status.held && stoppedOwner) return Date.now();
+          const current = status.metadata;
+          if (current?.owner_token !== observed.owner_token || current?.generation !== observed.generation
+              || current?.holder_pid !== observed.holder_pid) fail('recovery-state-busy');
+          try { process.kill(observed.holder_pid, 0); }
+          catch (error) { if (error.code === 'ESRCH') { stoppedOwner = true; return Date.now(); } }
+          fail('recovery-state-busy');
+        } });
+      }
+      if (!guard) fail('recovery-state-busy');
+      try {
+        if (digest(fs.readFileSync(options.stateFile)) !== expectedStateHash) fail('recovery-state-raced');
+        if (!lockApi.assertOwned(guard)) fail('recovery-state-lock-lost');
+        stateApi.saveRecovery(options.stateFile, value);
+        expectedStateHash = digest(fs.readFileSync(options.stateFile));
+      } finally { guard.release(); }
+      preSpawn?.acceptPersist(value); transitionGuard?.acceptPersist(value);
     } });
   if (transitionGuard) { session.transition(transition.handle); inspection.roots_reconciled = true; }
   if (preSpawn) inspection.roots_reconciled = true;
@@ -562,7 +624,9 @@ async function recoverAttempt(options) {
     action: 'reattest-native-handoff', reservation_sha256: decision.reservation_sha256, provider_called: false };
   if (typeof options.invoke !== 'function') return { ...decision, action: 'invoke-native',
     ...((preSpawn || transitionGuard) ? { assertReady: transitionGuard ? () => transitionGuard.withLock(() => {}) : preSpawn.assertUnchanged } : {}), inspection: { ...inspection, receipt: undefined } };
-  decision.remaining_ms = session.remaining(); decision.sidecar_remaining_ms = decision.remaining_ms;
+  decision.sidecar_remaining_ms = session.remaining();
+  decision.remaining_ms = decision.silence_retry ? Math.min(30000, decision.sidecar_remaining_ms) : decision.sidecar_remaining_ms;
+  if (decision.route.worker_mode !== 'native' && decision.remaining_ms <= 5000) fail('recovery-deadline-exhausted');
   // The invocation budget is always the historic sidecar budget. Native
   // authorization validity is returned separately, never a fresh sidecar wait.
   preSpawn?.assertUnchanged();
@@ -574,7 +638,7 @@ async function recoverAttempt(options) {
         || live.process_stopped !== true || live.receipt_sha256 !== inspection.receipt_sha256
         || digest(require('fs').readFileSync(options.stateFile)) !== reservedStateHash) fail('recovery-process-receipt-inspection-changed');
     if (binding) binding.adapter.readStandingAuthorization(authorizedReference);
-    if (exception) exceptionFor(exception, session.snapshot(), (options.clock || Date.now)());
+    if (exception) exceptionFor(exception, session.inspect(), (options.clock || Date.now)());
   };
   const assertReady = Object.assign(() => {
     assertAuthority();
@@ -609,7 +673,7 @@ async function cli(argv) {
   if (argv[0] === '--inspect' && argv[1] && argv[2]) {
     const state = require('./forge-xllm-state').loadRecovery(argv[1]);
     const inspected = inspectReceipt(argv[2]);
-    return { state, remaining_ms: Math.max(0, state.deadline_at - Date.now()), inspection: { ...inspected, receipt: undefined } };
+    return { state, remaining_ms: Math.min(state.budget_remaining_ms ?? 60000, Math.max(0, state.deadline_at - Math.max(state.clock_high_water ?? state.started_at, Date.now()))), inspection: { ...inspected, receipt: undefined } };
   }
   if (['--preparation', '--unit'].includes(argv[0]) && argv[1]) {
     const input = JSON.parse(fs.readFileSync(argv[1], 'utf8'));

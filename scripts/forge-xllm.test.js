@@ -202,7 +202,11 @@ try {
   const claudeExecute = runCli(['--mode', 'execute', '--engine', 'claude']);
   assert.strictEqual(claudeExecute.status, 2);
   assert.strictEqual(claudeExecute.stdout, '');
-  assert.match(claudeExecute.stderr, /execute mode requires --plan/, 'Claude passes the engine guard into execute');
+  const missingPlanFailure = JSON.parse(claudeExecute.stderr.trim().split('\n').at(-1));
+  assert.strictEqual(missingPlanFailure.reason_code, 'adapter-failed');
+  assert.strictEqual(missingPlanFailure.provider_called, false);
+  assert(!claudeExecute.stderr.includes('[object Object]'));
+  assert(!claudeExecute.stderr.includes('Error:'));
 
   const missingPlan = path.join(root, 'missing-plan.md');
   const declaredResult = path.join(root, 'declared-result.json');

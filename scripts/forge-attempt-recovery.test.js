@@ -65,9 +65,46 @@ async function main() {
   assert.throws(() => api.exceptionFor(handle, { ...identity, purpose: 'sidecar-recovery' }, now + 1001), /exception-invalid/);
   assert.throws(() => authority.issue('live-answer', { unit: identity.unit, roots_sha256: 'roots', routes: ['route'],
     purpose: 'sidecar-recovery', expires_at: now + 100, gates_preserved: false }, () => now), /not-authorized/);
+  await silenceRecovery(identity, route, attempt, inspection, candidateSet);
   await persistentRecovery(route);
   await canonicalProvenance();
   console.log('PASS recovery clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
+}
+async function silenceRecovery(identity, route, attempt, inspection, candidateSet) {
+  let now = 0, saved;
+  const options = { ...identity, state: undefined, clock: () => now, persist: value => { saved = value; } };
+  const silence = { dimension: 'initial', window_ms: 120001, threshold_ms: 120000,
+    policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+  const session = api.createRecovery(options);
+  session.record({ ...attempt, failure_class: 'silence', service_failure_proven: false, observation: { silence } });
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const alternate = { ...route, model: 'gpt-6-astra', model_resolved: 'gpt-6-astra',
+    resolved_worker_engine: 'codex', worker_mode: 'native' };
+  const exception = authority.issue('fixture:silence', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 120000, routes: [api.routeKey(route), api.routeKey(alternate)], gates_preserved: true }, () => now);
+  const input = { inspection, exception, candidateSet, validateInvocation: async () => ({ ok: true }) };
+  now = 1000;
+  const retry = await session.next(input);
+  assert.equal(retry.route.model, route.model); assert.equal(retry.silence_retry, true);
+  assert.equal(retry.remaining_ms, 30000);
+  session.reserve(retry, attempt.request_sha256);
+  const restart = api.createRecovery({ ...options, state: saved });
+  const pending = await restart.next({ ...input, validateInvocation() { throw Error('pending retry cannot validate another writer'); } });
+  assert.equal(pending.reason_code, 'recovery-reservation-pending');
+  assert.equal(restart.snapshot().reservations.length, 1);
+  assert.equal(restart.snapshot().reservations[0].request_sha256, attempt.request_sha256);
+  restart.record({ ...attempt, failure_class: 'silence', service_failure_proven: false, observation: { silence } });
+  const following = await restart.next(input);
+  assert.equal(following.route.model, 'gpt-6-astra', 'only one unchanged same-target retry is available');
+  assert.equal(following.silence_retry, false);
+  now = 59000; const expired = api.createRecovery({ ...options, state: saved });
+  expired.snapshot(); now = 100;
+  assert.equal(expired.remaining(), 1000, 'clock rollback cannot renew historical recovery time');
+  const late = api.createRecovery({ ...options, state: undefined, clock: () => 0 });
+  late.record({ ...attempt, failure_class: 'silence', observation: { silence } });
+  const almostSpent = api.createRecovery({ ...options, state: late.snapshot(), clock: () => 55000 });
+  assert.equal((await almostSpent.next(input)).reason_code, 'recovery-deadline-exhausted');
+  console.log('PASS anomalous silence: trusted threshold, one durable same-target reservation, restart exclusion, fallback and nonrenewing clock');
 }
 async function persistentRecovery(route) {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
@@ -96,12 +133,66 @@ async function persistentRecovery(route) {
   await assert.rejects(api.recoverAttempt({ ...base, request: { ...request, irrelevant: true }, correction: true,
     validateCorrection: async () => ({ ok: true, final_evidence: initial.attempts[0].final_evidence }) }), /correction-required/);
   const corrected = { ...request, prompt: 'after offline repair' };
+  let advancing = initial.started_at + 1;
+  const guardException = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }))
+    .issue('fixture:guard', { unit: initial.unit, roots_sha256: initial.roots_sha256, purpose: initial.purpose,
+      routes: [api.routeKey(request.route)], expires_at: advancing + 120000, gates_preserved: true }, () => advancing);
   await assert.rejects(api.recoverAttempt({ ...base, request: corrected, correction: true,
     validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:unmeasured' }) }), /final-packaging-required/);
-  const retried = await api.recoverAttempt({ ...base, request: corrected, correction: true,
+  // A killed short-mutex holder must not permanently strand recovery state.
+  // Exercise the real lock in a separate process; no fabricated "dead" PID.
+  const locks = require('./forge-lock'), { spawn } = require('child_process');
+  const mutexState = path.join(lab.dir, 'mutex-state.json');
+  const mutexRoot = path.join(require('os').tmpdir(), 'forge-recovery-' + require('./forge-code-roots').digest(path.resolve(mutexState)));
+  fs.mkdirSync(path.join(mutexRoot, '.gsd'), { recursive: true });
+  const recoverMutex = () => api.recoverAttempt({ ...base, stateFile: mutexState, request: corrected, correction: true,
+    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:mutex',
+      final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { prompt: corrected.prompt }, context: corrected.prompt }) }) });
+  try {
+    for (const expired of [false, true]) {
+      fs.writeFileSync(mutexState, JSON.stringify(initial));
+      const child = spawn(process.execPath, ['-e', `
+        const lock = require(process.argv[1]);
+        const handle = lock.tryAcquireSync(process.argv[2], 'state', {
+          now: () => Date.now() - (process.argv[3] === 'true' ? 60000 : 0)
+        });
+        process.send({ token: handle.ownerToken, generation: handle.generation });
+        setInterval(() => {}, 1000);
+      `, require.resolve('./forge-lock'), mutexRoot, String(expired)], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+      let old;
+      try {
+        old = await new Promise((resolve, reject) => {
+          child.once('message', resolve); child.once('error', reject);
+          child.once('exit', () => reject(Error('lock fixture exited before acquiring')));
+        });
+        await assert.rejects(recoverMutex(), /recovery-state-busy/, 'live owner stays protected even after TTL');
+        assert.equal(locks.status(mutexRoot, 'state').metadata.generation, old.generation);
+      } finally {
+        const exited = new Promise(resolve => child.once('exit', resolve));
+        child.kill('SIGKILL'); await exited;
+      }
+      if (!expired) {
+        await assert.rejects(recoverMutex(), /recovery-state-busy/, 'non-expired dead owner remains protected');
+        assert.equal(locks.releaseSync(mutexRoot, 'state', old.token, old.generation), true);
+      } else {
+        const recovered = await recoverMutex();
+        assert.equal(recovered.action, 'invoke-native');
+        assert.equal(stateApi.loadRecovery(mutexState).reservations.length, 1);
+        const successor = locks.tryAcquireSync(mutexRoot, 'state');
+        assert(successor);
+        assert.notEqual(successor.generation, old.generation);
+        assert.equal(locks.releaseSync(mutexRoot, 'state', old.token, old.generation), false);
+        assert(locks.assertOwned(successor), 'old release cannot remove successor');
+        successor.release();
+      }
+    }
+    console.log('PASS recovery mutex: killed expired owner recovered, active/non-expired owners and successor generation protected');
+  } finally { fs.rmSync(mutexRoot, { recursive: true, force: true }); }
+  const retried = await api.recoverAttempt({ ...base, request: corrected, correction: true, exception: guardException, clock: () => ++advancing,
     validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:offline-check',
       final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model, '--prompt', corrected.prompt] }, context: corrected.prompt }) }),
-    invoke: async (selected, _invocation, remaining) => {
+    invoke: async (selected, _invocation, remaining, assertReady) => {
+      assertReady(); assertReady();
       invoked++; assert.strictEqual(selected.model, route.model); assert(remaining > 0 && remaining <= 60000); return { status: 'done' };
     } });
   assert.strictEqual(retried.corrected, true); assert.strictEqual(invoked, 1);
@@ -110,7 +201,10 @@ async function persistentRecovery(route) {
   // could record the next result, and cannot send a second corrected request.
   await assert.rejects(api.recoverAttempt({ ...base, request: { ...request, prompt: 'second repair' }, correction: true,
     validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:offline-check',
-      final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { repaired: 2 }, context: 'second repair' }) }) }), /retry-exhausted/);
+      final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { repaired: 2 }, context: 'second repair' }) }),
+    invoke() { throw Error('restart must not open a second writer'); } }), /retry-exhausted/);
+  assert.strictEqual(stateApi.loadRecovery(stateFile).reservations.length, 1);
+  assert.strictEqual(invoked, 1);
   const child = require('child_process').spawnSync(process.execPath,
     [path.join(__dirname, 'forge-attempt-recovery.js'), '--inspect', stateFile, receiptFile], { encoding: 'utf8', windowsHide: true });
   assert.strictEqual(child.status, 0, child.stderr);
@@ -118,6 +212,36 @@ async function persistentRecovery(route) {
   assert.strictEqual(inspected.state.deadline_at, initial.deadline_at);
   assert.strictEqual(inspected.state.reservations.length, 1);
   assert.strictEqual((await api.recoverAttempt({ ...base, clock: () => initial.deadline_at + 1 })).reason_code, 'recovery-deadline-exhausted');
+  const raceState = path.join(lab.dir, 'racing-state.json');
+  const readFile = fs.readFileSync;
+  const concurrentState = { ...initial, phase: 'concurrent-reservation', reservations: [{ id: 'other-writer' }] };
+  fs.writeFileSync(raceState, JSON.stringify(initial));
+  let injected = false;
+  fs.readFileSync = (file, ...args) => {
+    const bytes = readFile(file, ...args);
+    if (file === raceState && !injected) {
+      injected = true; fs.writeFileSync(raceState, JSON.stringify(concurrentState));
+    }
+    return bytes;
+  };
+  try {
+    await assert.rejects(api.recoverAttempt({ ...base, stateFile: raceState, request: corrected, correction: true,
+      validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:race',
+        final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { prompt: corrected.prompt }, context: corrected.prompt }) }) }), /state-raced/);
+    assert.equal(JSON.parse(readFile(raceState)).phase, 'concurrent-reservation');
+  } finally { fs.readFileSync = readFile; }
+  fs.writeFileSync(raceState, JSON.stringify(initial));
+  let raceWriters = 0;
+  const racing = () => api.recoverAttempt({ ...base, stateFile: raceState, request: corrected, correction: true,
+    validateCorrection: async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      return { ok: true, evidence_reference: 'fixture:offline-check',
+        final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--prompt', corrected.prompt] }, context: corrected.prompt }) };
+    }, invoke: async () => { raceWriters++; return { status: 'done' }; } });
+  const raced = await Promise.allSettled([racing(), racing()]);
+  assert.equal(raceWriters, 1, 'concurrent callbacks cannot reserve two writers');
+  assert.equal(stateApi.loadRecovery(raceState).reservations.length, 1);
+  assert.equal(raced.filter(row => row.status === 'rejected' && /state-raced|state-busy/.test(row.reason.code)).length, 1);
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', pid: process.pid, execution: {} }));
   assert.strictEqual(api.inspectReceipt(receiptFile, { processProbe: () => 'stopped' }).process_stopped, false,
     'a callback cannot override an observed live adapter PID');
