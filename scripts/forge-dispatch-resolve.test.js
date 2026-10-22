@@ -100,6 +100,60 @@ function runCase(name, fn) {
 }
 
 withHermeticHome((cliEnv) => {
+  runCase('explicit effort wins over task plan through API, CLI and replay', () => {
+    const f = mkFixture({ plan: '---\ntier: heavy\neffort: xhigh\n---\n# task\n' });
+    try {
+      for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+        const r = dispatch(f, { unitType: 'execute-task', effortMap: { 'execute-task': effort } });
+        assertEqual(r.effort, effort, `explicit ${effort} wins over plan`);
+        assertEqual(r.effort_requested, effort, `pre-policy value retains ${effort}`);
+        assertEqual(r.effort_argument, effort, `original argument retains ${effort}`);
+        assertEqual(r.effort_reason, 'argument-effort:execute-task', 'argument provenance');
+        assertEqual(resolveDispatch(r.resolution_options).effort, effort, 'replay retains explicit effort');
+      }
+      for (const effortMap of [undefined, {}, { 'plan-slice': 'low' }]) {
+        const r = dispatch(f, { unitType: 'execute-task', effortMap });
+        assertEqual(r.effort, 'xhigh', 'no matching argument preserves per-task effort');
+        assertEqual(r.effort_argument, null, 'absent argument is explicit null');
+      }
+      const cli = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--plan', f.planPath,
+        '--effort-execute-task', 'low', '--cwd', f.dir], { encoding: 'utf8', env: cliEnv });
+      assertEqual(cli.status, 0, 'conflicting plan CLI succeeds');
+      assertEqual(JSON.parse(cli.stdout).effort, 'low', 'CLI preserves explicit low over xhigh plan');
+    } finally { cleanup(f); }
+  });
+  runCase('explicit effort survives risk escalation without changing the model tier', () => {
+    const f = mkFixture({ roadmap: '# Roadmap\n- S01 risk: high\n' });
+    try {
+      const options = { unitType: 'plan-slice', milestoneId: 'M001', unitId: 'S01' };
+      const baseline = dispatch(f, options);
+      const explicit = dispatch(f, { ...options, effortMap: { 'plan-slice': 'low' } });
+      assertEqual(baseline.effort, 'max', 'automatic risk effort remains without override');
+      assertEqual(explicit.effort, 'low', 'explicit low survives risk effort escalation');
+      assertEqual(explicit.tier, baseline.tier, 'effort override does not change tier');
+      assertEqual(explicit.model, baseline.model, 'effort override does not change model');
+      assertEqual(explicit.effort_reason, 'argument-effort:plan-slice', 'risk override provenance');
+    } finally { cleanup(f); }
+  });
+  runCase('explicit effort preserves model capability clamps and refusals', () => {
+    for (const model of ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6']) {
+      const f = mkFixture({ plan: '---\neffort: low\n---\n# task\n',
+        prefsJsonc: JSON.stringify({ tier_models: { standard: model } }) });
+      try {
+        const r = dispatch(f, { unitType: 'execute-task', effortMap: { 'execute-task': 'xhigh' } });
+        assertEqual(r.model, model, 'explicit effort never changes the model');
+        assertEqual(r.effort_argument, 'xhigh', 'raw argument survives policy');
+        assertEqual(r.effort_requested, 'xhigh', 'pre-policy request survives policy');
+        if (model.startsWith('claude-haiku')) {
+          assertEqual(r.effort, 'medium', 'legacy model ceiling still applies');
+          assertEqual(r.effort_reason, 'argument-effort:execute-task|clamped:model-cap', 'argument and clamp provenance');
+        } else {
+          assertEqual(r.dispatch_allowed, false, 'unsupported explicit effort is refused');
+          assertEqual(r.dispatch_reason_code, 'effort-unsupported-by-model', 'model capability refusal preserved');
+        }
+      } finally { cleanup(f); }
+    }
+  });
   runCase('milestone context is explicit, source-bound and checked before dispatch', () => {
     const strict = require('node:assert/strict');
     const api = require('./forge-dispatch-resolve');
