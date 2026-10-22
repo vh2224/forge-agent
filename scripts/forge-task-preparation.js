@@ -678,16 +678,20 @@ function readJson(filename) {
 }
 async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
   const request = validateRequest(rawRequest);
+  const invocationRequest = { ...request, activeCapabilities: recovery.transitions
+    ? deps.activeCapabilities : deps.activeCapabilities ?? request.activeCapabilities };
   const prompt = buildPreparationPrompt(request);
   const receipt = JSON.parse(fs.readFileSync(recovery.receiptFile, 'utf8'));
   const delivery = deliveryRequest(request, receipt.route, prompt);
   return require('./forge-attempt-recovery').recoverAttempt({ ...recovery, request: delivery,
     recoveryAuthorization: deps.recoveryAuthorization, processProbe: deps.processProbe,
+    transitionAdapter: deps.transitionAdapter,
+    externalNativeHandoff: !deps.invokeNative,
     unit: `${request.contract.unitType}/${request.taskId}`, executionContract: request.execution_contract,
     validateCorrection: async () => {
       validateRequest(request);
       if (receipt.route.worker_mode === 'native') {
-        const invocation = nativeApi.buildNativeInvocation(nativeOptions(request, validateRoute(receipt.route, request.contract, request), prompt));
+        const invocation = nativeApi.buildNativeInvocation(nativeOptions(invocationRequest, validateRoute(receipt.route, request.contract, request), prompt));
         if (!invocation.ok) return invocation;
         return { ok: true, evidence_reference: 'preparation-preflight:native-arguments',
           final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: invocation.args,
@@ -699,7 +703,7 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
     },
     resolverOptions: resolverOptions(request, request.contract), resolveDispatch: deps.resolveDispatch,
     validateInvocation: route => route.worker_mode === 'native'
-      ? nativeApi.buildNativeInvocation(nativeOptions(request, validateRoute(route, request.contract, request), prompt))
+      ? nativeApi.buildNativeInvocation(nativeOptions(invocationRequest, validateRoute(route, request.contract, request), prompt))
       : (() => { const cap = transportApi.capability(route.resolved_worker_engine, request.contract.unitType, request);
         return { ok: cap.supported, reason_code: cap.reason_code }; })(),
     replay: async receipt => {
@@ -710,11 +714,16 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       }
       return unit.replayArtifactAttempt(delivery);
     },
-    invoke: async (route, invocation, remainingMs) => {
-      const next = { ...request, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
+    invoke: async (route, invocation, remainingMs, assertReady, reservationHash) => {
+      assertReady?.();
+      if (route.worker_mode === 'native' && !deps.invokeNative && recovery.transitions && !recovery.resumeReservation)
+        return { action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
+      const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
         resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
       const bounded = { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) };
-      return prepareStandaloneTask(next, { ...deps, resolveDispatch: () => bounded });
+      const result = await prepareStandaloneTask(next, { ...deps, resolveDispatch: () => bounded,
+        ...(deps.invokeNative ? { invokeNative: (args, binding) => { assertReady?.(); return deps.invokeNative(args, binding); } } : {}) });
+      return { ...result, ...(assertReady && result.action === 'invoke-native' ? { assertReady } : {}) };
     },
   });
 }

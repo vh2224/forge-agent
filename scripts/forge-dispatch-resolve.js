@@ -41,6 +41,63 @@ const { stripInlineComment } = require('./forge-must-haves.js');
 const { resolveWorkerIdentity, resolveWorker, RuntimeContractError } = require('./forge-runtime.js');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard.js');
 const modelPolicy = require('./forge-model-policy.js');
+const { digest } = require('./forge-code-roots');
+
+// Observations, not authority. A recovery host must authenticate an independently
+// retained historical observation before comparing these bytes with the present.
+function resolutionInputs(options, identity = options) {
+  const cwd = path.resolve(options.cwd || process.cwd());
+  const files = new Set();
+  // Conservative source closure: include runtime modules, including optional
+  // resolution dependencies. Do not parse require() from comments or fixtures.
+  for (const name of fs.readdirSync(__dirname)) {
+    if (/\.(js|json)$/.test(name) && !name.endsWith('.test.js')) files.add(path.join(__dirname, name));
+  }
+  for (const layer of require('./forge-prefs').preferenceLayerDescriptors(cwd)) {
+    for (const file of [...layer.jsoncCandidates, ...layer.mdFiles, ...layer.legacyMdFiles, layer.legacyJsoncPath].filter(Boolean)) files.add(path.resolve(file));
+  }
+  for (const file of [options.planPath, options.roadmapPath, identity.planPath, identity.roadmapPath,
+    defaultRoadmapPath(identity.milestoneId, cwd)].filter(Boolean)) files.add(path.resolve(file));
+  return [...files].sort().map(file => {
+    try {
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('resolver-source-not-regular');
+      return { path: file, physical_path: fs.realpathSync.native(file), sha256: digest(fs.readFileSync(file)) };
+    } catch (error) { if (error.code === 'ENOENT') return { path: file, physical_path: null, sha256: null }; throw error; }
+  });
+}
+function resolutionContext(options) {
+  return { unit_type: options.unitType || null, milestone_id: options.milestoneId || null,
+    unit_id: options.unitId || null, owner: path.resolve(options.cwd || process.cwd()),
+    plan: options.planPath ? path.resolve(options.planPath) : null,
+    roadmap: options.roadmapPath ? path.resolve(options.roadmapPath) : defaultRoadmapPath(options.milestoneId, options.cwd || process.cwd()) };
+}
+function resolutionOptions(options) {
+  // Persist only inputs consumed by this resolver. Platform is deliberately
+  // irrelevant to routing; unknown caller fields may contain private data.
+  const keys = ['unitType', 'cwd', 'planPath', 'roadmapPath', 'milestoneId', 'unitId', 'domain', 'effortMap',
+    'hostRuntime', 'host_runtime', 'workerEngine', 'worker_engine', 'workerMode', 'worker_mode',
+    'sidecarDeclared', 'sidecar_declared', 'sidecar', 'scope', 'phase'];
+  return JSON.parse(JSON.stringify(Object.fromEntries(keys.filter(key => options[key] !== undefined).map(key => [key, options[key]]))));
+}
+function resolutionPolicy(route) {
+  return Object.fromEntries(['tier', 'domain', 'chain', 'reason', 'effort', 'effort_reason', 'model', 'engine', 'host_runtime',
+    'worker_mode', 'resolved_worker_engine', 'policy_version', 'prefs_ok'].map(key => [key, route[key] ?? null]));
+}
+function assertMilestoneContext(request) {
+  if (!request.milestoneId || request.scope === 'standalone-task') return;
+  const route = request.route, context = route?.resolution_context;
+  const options = route?.resolution_options;
+  const expected = resolutionContext({ unitType: request.unitType, milestoneId: request.milestoneId,
+    unitId: request.taskId || request.sliceId || request.milestoneId, cwd: request.contextRoot || request.cwd,
+    planPath: request.planFile, roadmapPath: request.roadmapFile });
+  const refuse = () => { throw Object.assign(new Error('milestone-resolver-context-required'), { code: 'milestone-resolver-context-required', provider_called: false }); };
+  if (!context || !options || digest(context) !== digest(expected) || digest(resolutionContext(options)) !== digest(expected)) refuse();
+  const actual = resolveDispatch(options);
+  if (digest(actual.resolution_sources) !== digest(route.resolution_sources)
+      || actual.tier !== route.tier || actual.effort !== route.effort || digest(actual.chain) !== digest(route.chain)
+      || !actual.chain.some(member => member.id === (route.model_resolved || route.model))) refuse();
+}
 
 const TIER_DEFAULTS = {
   'memory-extract': 'light',
@@ -590,6 +647,9 @@ function resolveDispatch(opts, environment) {
     policy_entry: effortPolicy.entry,
     policy_diagnostics: policyDiagnostics,
     thinking_requested: thinkingRequested,
+    resolution_context: resolutionContext(o),
+    resolution_options: resolutionOptions(o),
+    resolution_sources: resolutionInputs(o),
     ...resolvedRuntime,
   };
 }
@@ -725,7 +785,7 @@ function shellExports(route) {
   return SHELL_EXPORT_MAP.map(([name, pick]) => `${name}=${shellQuote(pick(route))}`).join('\n');
 }
 
-module.exports = { resolveDispatch, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, composeRuntimePosture, detectConfigConflicts, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
+module.exports = { resolveDispatch, resolutionInputs, resolutionContext, resolutionPolicy, assertMilestoneContext, parseArgs, runCli, degradedContract, dispatchEngineFor, sidecarModelFor, thinkingHeaderFor, runtimeFields, composeRuntimePosture, detectConfigConflicts, shellExports, TIER_DEFAULTS, EFFORT_DEFAULTS };
 
 if (require.main === module) {
   // Exit 0 on success; exit 1 ONLY on a prefs loud-stop (M008-CONTEXT #2 — a
@@ -739,25 +799,27 @@ if (require.main === module) {
     try {
       const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
       process.stdout.write(shellExports(payload) + '\n');
-      process.exit(0);
+      process.exitCode = 0;
     } catch (error) {
       process.stderr.write(JSON.stringify({ error: `--shell-exports: unparseable stdin payload (${(error && error.message) || error})` }) + '\n');
-      process.exit(2);
+      process.exitCode = 2;
     }
-  }
-  try {
-    const result = runCli(process.argv.slice(2), process.env);
-    process.exit(result && result.prefs_ok === false ? 1 : 0);
-  } catch (error) {
-    // The contract on stdout stays parseable for the shell consumer, but the
-    // degradation itself must be loud: a crash that silently re-routes every
-    // unit to the cheapest effort is exactly the failure mode the diagnosis
-    // caught. stderr is free — the orchestrator surfaces it next to the JSON.
-    process.stderr.write(JSON.stringify({
-      warning: 'forge-dispatch-resolve emitted a fail-closed degraded contract',
-      error: (error && error.message) || String(error),
-    }) + '\n');
-    process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
-    process.exit(2);
+  } else {
+    // Let pending stdout/stderr writes drain before Node exits naturally.
+    try {
+      const result = runCli(process.argv.slice(2), process.env);
+      process.exitCode = result && result.prefs_ok === false ? 1 : 0;
+    } catch (error) {
+      // The contract on stdout stays parseable for the shell consumer, but the
+      // degradation itself must be loud: a crash that silently re-routes every
+      // unit to the cheapest effort is exactly the failure mode the diagnosis
+      // caught. stderr is free — the orchestrator surfaces it next to the JSON.
+      process.stderr.write(JSON.stringify({
+        warning: 'forge-dispatch-resolve emitted a fail-closed degraded contract',
+        error: (error && error.message) || String(error),
+      }) + '\n');
+      process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
+      process.exitCode = 2;
+    }
   }
 }

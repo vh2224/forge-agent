@@ -851,14 +851,104 @@ function formatEvidenceYaml(entries) {
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 
+// A verification policy is fixed before a writer starts. Runtime options may
+// extend explicit command lists, never remove or replace their prefix.
+function normalizeExecutionVerification(contract, planText, declared = {}, runtime = {}, identity = {}) {
+  const roots = require('./forge-code-roots');
+  const measured = roots.validateContract(contract, { revalidate: true });
+  const fail = code => { throw Object.assign(new Error(code), { code, provider_called: false }); };
+  const allowed = ['preferenceCommands', 'commandsByRoot', 'commandTimeoutMs'];
+  const validate = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !allowed.includes(k))) fail('verification-options-invalid');
+    const commands = list => {
+      if (!Array.isArray(list) || list.some(c => typeof c !== 'string' || !c.trim() || sanitizeCommand(c) === null)) fail('verification-commands-invalid');
+    };
+    if (value.preferenceCommands !== undefined) commands(value.preferenceCommands);
+    if (value.commandsByRoot !== undefined) {
+      if (!value.commandsByRoot || typeof value.commandsByRoot !== 'object' || Array.isArray(value.commandsByRoot)) fail('verification-roots-invalid');
+      for (const [id, list] of Object.entries(value.commandsByRoot)) {
+        if (!measured.code_roots.some(r => r.id === id)) fail('verification-root-unknown');
+        commands(list);
+      }
+    }
+    if (value.commandTimeoutMs !== undefined && (!Number.isSafeInteger(value.commandTimeoutMs) || value.commandTimeoutMs <= 0)) fail('verification-timeout-invalid');
+  };
+  // Delivery evidence is declared by the request, separately from command policy.
+  // Runtime supplements cannot supply or replace these bindings.
+  if (!declared || typeof declared !== 'object' || Array.isArray(declared)) fail('verification-options-invalid');
+  const { bindings, ...declaredCommands } = declared;
+  if (bindings !== undefined && !Array.isArray(bindings)) fail('verification-bindings-invalid');
+  validate(declaredCommands); validate(runtime);
+  const extend = (base, extra) => {
+    if (extra === undefined) return base;
+    if (base && (extra.length < base.length || base.some((c, i) => extra[i] !== c))) fail('verification-command-replacement');
+    return extra;
+  };
+  const preferences = extend(declared.preferenceCommands, runtime.preferenceCommands);
+  const byRoot = { ...declared.commandsByRoot };
+  for (const [id, list] of Object.entries(runtime.commandsByRoot || {})) byRoot[id] = extend(byRoot[id] ?? preferences, list);
+  if (declared.commandTimeoutMs !== undefined && runtime.commandTimeoutMs !== undefined
+      && declared.commandTimeoutMs !== runtime.commandTimeoutMs) fail('verification-timeout-replacement');
+  const timeout = declared.commandTimeoutMs ?? runtime.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const rows = measured.code_roots.map(root => {
+    const explicit = byRoot[root.id] || preferences;
+    const explicitSources = (explicit || []).map(command => {
+      const contains = list => list?.some(value => value.trim() === command.trim());
+      if (byRoot[root.id]) {
+        if (contains(declared.commandsByRoot?.[root.id])) return 'request.commandsByRoot';
+        if (!declared.commandsByRoot?.[root.id]) {
+          if (contains(declared.preferenceCommands)) return 'request.preferenceCommands';
+          if (contains(runtime.preferenceCommands)) return 'runtime.preferenceCommands';
+        }
+        return 'runtime.commandsByRoot';
+      }
+      return contains(declared.preferenceCommands) ? 'request.preferenceCommands' : 'runtime.preferenceCommands';
+    });
+    const discovered = discoverCommands({ cwd: root.path, gsdDir: join(measured.owner, '.gsd'),
+      taskPlanVerify: parsePlanVerify(planText), preferenceCommands: explicit });
+    let commands = discovered.commands;
+    let origins = commands.map(() => discovered.source);
+    if (discovered.source === 'task-plan' && explicit) {
+      const extra = explicit.filter(c => !commands.includes(c));
+      commands = [...commands, ...extra]; origins = [...origins, ...extra.map(() => 'preference')];
+    }
+    if (!commands.length) fail('verification-root-unverified');
+    const configurationSources = commands.map((command, index) => {
+      if (origins[index] === 'preference') {
+        const source = explicitSources[explicit.findIndex(value => value.trim() === command.trim())];
+        origins[index] = source.endsWith('.commandsByRoot') ? 'root-preference' : 'preference';
+        return source;
+      }
+      return origins[index];
+    });
+    return { root_id: root.id, commands, origins, configuration_sources: configurationSources };
+  });
+  const policy = { schema_version: 1, execution_contract_sha256: roots.digest(measured), plan_sha256: roots.digest(planText),
+    identity, roots: rows, command_timeout_ms: timeout,
+    timeout_origin: declared.commandTimeoutMs !== undefined ? 'request' : runtime.commandTimeoutMs !== undefined ? 'runtime' : 'default' };
+  return { ...policy, sha256: roots.digest(policy) };
+}
+function assertExecutionVerification(seal, contract, planText, identity) {
+  const roots = require('./forge-code-roots');
+  const { sha256, ...policy } = seal || {};
+  if (policy.schema_version !== 1 || sha256 !== roots.digest(policy)
+    || policy.execution_contract_sha256 !== roots.digest(roots.validateContract(contract, { revalidate: true }))
+    || policy.plan_sha256 !== roots.digest(planText) || roots.digest(policy.identity) !== roots.digest(identity)) {
+    throw Object.assign(new Error('verification-provenance-insufficient'), { code: 'verification-provenance-insufficient', provider_called: false });
+  }
+  return seal;
+}
 function runRootVerification(contract, options = {}) {
   const roots = require('./forge-code-roots');
   const measured = roots.validateContract(contract, { revalidate: true });
   const results = measured.code_roots.map(root => {
+    const sealed = options.verificationSeal?.roots.find(row => row.root_id === root.id);
     const snapshot = require('./forge-surgical-reset').captureAttemptSnapshot(root.path);
     const result = runVerificationGate({ ...options, cwd: root.path, gsdDir: require('path').join(measured.owner, '.gsd'),
-      preferenceCommands: options.commandsByRoot?.[root.id] || options.preferenceCommands });
+      preferenceCommands: sealed?.commands || options.commandsByRoot?.[root.id] || options.preferenceCommands,
+      ...(sealed ? { taskPlanVerify: null, commandTimeoutMs: options.verificationSeal.command_timeout_ms } : {}) });
     return { schema_version: 1, kind: 'verification', unit: options.unit, plan_fingerprint: options.planFingerprint,
+      ...(options.verificationSeal ? { verification_policy_sha256: options.verificationSeal.sha256 } : {}),
       root_id: root.id, root_identity_sha256: root.identity_sha256, execution_contract_sha256: roots.digest(measured),
       code_dir: root.path, revision: snapshot.start_sha, workspace: snapshot.pre_dirty,
       environment: options.environment || `${process.platform}/${process.version}`, captured_at: new Date().toISOString(), result };
@@ -870,6 +960,7 @@ function runRootVerification(contract, options = {}) {
 function captureRootDelivery(contract, planText, options = {}) {
   const fs = require('fs');
   const roots = require('./forge-code-roots');
+  if (options.verificationSeal) assertExecutionVerification(options.verificationSeal, contract, planText, options.verificationIdentity);
   const checked = roots.validatePlan(planText, contract);
   const parsed = require('./forge-must-haves').parseMustHaves(planText);
   const gate = runRootVerification(contract, { ...options, taskPlanVerify: parsePlanVerify(planText), planFingerprint: roots.digest(planText) });
@@ -886,9 +977,9 @@ function captureRootDelivery(contract, planText, options = {}) {
     return { ...envelope, kind: 'artifact', revision: observed.start_sha, workspace: observed.pre_dirty,
       captured_at: new Date().toISOString(), result };
   });
-  return { gate, artifacts, passed: gate.passed && artifacts.every(row => row.result.passed) };
+  return { ...(options.verificationSeal ? { verification_policy_sha256: options.verificationSeal.sha256 } : {}), gate, artifacts, passed: gate.passed && artifacts.every(row => row.result.passed) };
 }
-module.exports = { discoverCommands, runVerificationGate, runRootVerification, captureRootDelivery, formatFailureContext, isLikelyCommand, parsePlanVerify, buildVerificationEvidence, formatEvidenceYaml, resolveVerifyPolicy };
+module.exports = { normalizeExecutionVerification, assertExecutionVerification, discoverCommands, runVerificationGate, runRootVerification, captureRootDelivery, formatFailureContext, isLikelyCommand, parsePlanVerify, buildVerificationEvidence, formatEvidenceYaml, resolveVerifyPolicy };
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────────
 

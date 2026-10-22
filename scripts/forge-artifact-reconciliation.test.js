@@ -39,6 +39,14 @@ async function main() {
     assert(JSON.parse(original).saved_candidate);
     await broker.close(); // Existing proofs remain valid with no live signer.
     const options = { manifest, proofs, trust };
+    const inspect = () => api.inspectCandidate({ ...options, receiptFile: request.resultFile + '.receipt.json', request: withoutLiveBroker });
+    const signed = inspect();
+    assert.strictEqual(signed.present, true); assert.strictEqual(signed.schema_valid, true);
+    assert.strictEqual(signed.replay_eligible, true); assert.strictEqual(signed.provenance, 'signed');
+    const untrusted = api.inspectCandidate({ receiptFile: request.resultFile + '.receipt.json', request: withoutLiveBroker });
+    assert.strictEqual(untrusted.schema_valid, true); assert.strictEqual(untrusted.replay_eligible, false);
+    assert.strictEqual(untrusted.provenance, 'present-or-damaged');
+    assert.deepStrictEqual(fs.readFileSync(request.resultFile + '.receipt.json'), original, 'classification is read-only');
     const rename = fs.renameSync;
     let interrupted = false;
     fs.renameSync = (from, to) => {
@@ -84,6 +92,8 @@ async function main() {
     fs.writeFileSync(anchorFile, JSON.stringify(forgedAnchor));
     await assert.rejects(unit.reconcileArtifactAttempt(request, options), /response-anchor-invalid/);
     fs.unlinkSync(anchorFile);
+    assert.strictEqual(inspect().provenance, 'present-or-damaged', 'removed signature is never original absence');
+    assert.strictEqual(inspect().replay_eligible, false);
     await assert.rejects(unit.reconcileArtifactAttempt(request, options), /response-anchor-required/);
     fs.writeFileSync(anchorFile, validAnchor);
     fs.writeFileSync(receiptFile, original);
@@ -147,6 +157,11 @@ async function main() {
     assert.throws(() => unit.materialize(request, record), /execution-protected-metadata/);
     assert(!fs.existsSync(path.join(executionLab.owner, artifact.path)));
     fs.unlinkSync(drift);
+    const foreignGuard = api.lock({ owner: executionLab.b });
+    try {
+      assert.throws(() => unit.materialize(request, record, undefined, foreignGuard), /reconciliation-lock-handle-required/);
+      assert(!fs.existsSync(path.join(executionLab.owner, artifact.path)));
+    } finally { foreignGuard.release(); }
     // The baseline includes the pre-existing control directory in this fixture.
     unit.materialize(request, record);
     unit.materialize(request, record);

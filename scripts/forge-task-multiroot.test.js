@@ -87,8 +87,10 @@ async function scenario(vcs, moduleDir = __dirname) {
     // The verification command, rather than the worker, mutates protected
     // owner state after the writing response has already been accepted.
     const decisions = path.join(f.owner, '.gsd/DECISIONS.md'), once = path.join(f.dir, 'verification-once');
-    const driftCommand = 'node -e ' + JSON.stringify(`const fs=require('fs');if(!fs.existsSync(${JSON.stringify(once)})){fs.writeFileSync(${JSON.stringify(once)},'once');fs.writeFileSync(${JSON.stringify(decisions)},'unproved verification drift');}`);
-    execute.verification.commandsByRoot['x-alpha'] = [command + ' && ' + driftCommand];
+    const driftScript = path.join(f.dir, 'verification-drift.js');
+    write(driftScript, `const fs=require('fs');if(!fs.existsSync(${JSON.stringify(once)})){fs.writeFileSync(${JSON.stringify(once)},'once');fs.writeFileSync(${JSON.stringify(decisions)},'unproved verification drift');}`);
+    const driftCommand = 'node ' + JSON.stringify(driftScript);
+    execute.verification.commandsByRoot['x-alpha'] = [command, driftCommand];
     await assert.rejects(unit.runUnitSidecar(execute), /execution-protected-metadata/);
     assert.strictEqual(fs.existsSync(path.join(f.owner, `${task}-SUMMARY.md`)), false, 'verification drift blocks publication');
     assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'call\n');

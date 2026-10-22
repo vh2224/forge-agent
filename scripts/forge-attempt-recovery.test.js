@@ -15,9 +15,15 @@ async function main() {
   const request = { unitType: 'execute-task', scope: 'standalone-task', phase: 'execute', taskId: 'T-recovery',
     cwd: __dirname, contextRoot: __dirname, route };
   identity.request = request;
+  const transitions = require('./forge-recovery-transition');
+  assert.strictEqual(transitions.destinationKey(route), transitions.destinationKey({ ...route, tier: 'max', effort: 'max', worker_mode: 'native' }),
+    'changing tier, effort or transport cannot re-enable the same host/worker/model destination');
+  assert.notStrictEqual(transitions.destinationKey(route), transitions.destinationKey({ ...route, model: 'gpt-6-astra', model_resolved: 'gpt-6-astra' }));
   const resolverOptions = { unitType: request.unitType, scope: request.scope, phase: request.phase, unitId: request.taskId,
     cwd: request.cwd, hostRuntime: 'codex' };
   const recovery = api.createRecovery(identity); recovery.record(attempt);
+  assert.throws(() => recovery.transition({ approved: true, schema_version: 1, sha256: 'recomputed', types: ['resolver-context-omission'] }), /live-handle/);
+  assert.deepStrictEqual(recovery.snapshot().attempts, saved.attempts);
   assert.strictEqual(saved.attempts[0].provider_called, 'unknown');
   assert(!saved.attempts[0].diagnostic.includes('secret-value'));
   const candidateSet = api.resolveCandidates(resolverOptions, () => ({ ...route, chain, source: 'fixture-resolver' }), request);

@@ -57,7 +57,7 @@ function resolveContract(cwd, extraArgs) {
     encoding: 'utf8',
     env: { ...process.env },
   });
-  assert.strictEqual(child.status, 0, child.stderr);
+  assert.strictEqual(child.status, 0, child.error ? `${child.error.code}: ${child.error.message}` : child.stderr);
   return child.stdout.trim();
 }
 
@@ -208,9 +208,11 @@ test('a resolver contract carries all three verdict axes for every routable leg'
 test('the emitter appends to the log and creates its directory', () => withTempDir((dir) => {
   const target = path.join(dir, 'nested', 'forge', 'events.jsonl');
   const contract = resolveContract(dir, ['--host-runtime', 'claude']);
+  const routeFile = path.join(dir, 'route.json');
+  fs.writeFileSync(routeFile, contract);
   for (const unit of ['execute-task/T01', 'execute-task/T02']) {
-    const child = runEmitter(['--route-json', contract, '--unit', unit, '--events', target]);
-    assert.strictEqual(child.status, 0, child.stderr);
+    const child = runEmitter(['--route-json-file', routeFile, '--unit', unit, '--events', target]);
+    assert.strictEqual(child.status, 0, child.error ? `${child.error.code}: ${child.error.message}` : child.stderr);
     assert.strictEqual(child.stdout, '', 'the line goes to the log, not stdout');
   }
   const lines = fs.readFileSync(target, 'utf8').trim().split('\n');
@@ -225,11 +227,13 @@ test('cross-host and native delivery retain distinct mode and leg in events.json
   const refusedContract = resolveContract(dir, ['--host-runtime', 'codex', '--worker-engine', 'claude']);
   const routineContract = resolveContract(dir, ['--host-runtime', 'codex', '--worker-engine', 'codex']);
 
+  const routeFile = path.join(dir, 'route.json');
   for (const [unit, contract] of [['execute-task/T01', refusedContract], ['execute-task/T02', routineContract]]) {
-    const child = runEmitter(['--route-json', contract, '--unit', unit,
+    fs.writeFileSync(routeFile, contract);
+    const child = runEmitter(['--route-json-file', routeFile, '--unit', unit,
       '--slice', 'S01', '--milestone', 'M001', '--transport', 'in-process',
       '--vcs', 'git', '--events', target]);
-    assert.strictEqual(child.status, 0, child.stderr);
+    assert.strictEqual(child.status, 0, child.error ? `${child.error.code}: ${child.error.message}` : child.stderr);
   }
 
   const written = fs.readFileSync(target, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
