@@ -53,16 +53,16 @@ const args = process.argv.slice(2);
 fs.appendFileSync('invocations.txt', 'spawn\\n');
 fs.writeFileSync('argv.json', JSON.stringify(args));
 const p = JSON.parse(fs.readFileSync('payload.json','utf8'));
-if (p.failure === 'auth') { process.stderr.write('401 invalid token'); process.exit(1); }
+if (p.failure === 'auth') { process.stdout.write(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,api_error_status:401})); process.exit(1); }
 if (p.failure === 'process') { process.stderr.write(process.env[${JSON.stringify(accounts.TOKEN_ENV)}]); process.exit(9); }
 if (p.failure === 'invalid') { process.stdout.write('not a result'); process.exit(0); }
 if (p.failure === 'wait') { setInterval(() => {}, 1000); }
 else {
-  // claude -p --output-format json: modelUsage names the received --model
+  // claude -p --output-format stream-json: modelUsage names the received --model
   // unless the payload file asks for another observed model.
   const model = p.observedModel || args[args.indexOf('--model') + 1];
   const block = ['---GSD-WORKER-RESULT---','status: '+p.status,'result_json: '+JSON.stringify(p),'---END-RESULT---'].join('\\n');
-  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: block,
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: p, result: block,
     usage: { input_tokens: 401 }, modelUsage: { [model]: { inputTokens: 401 } } }));
 }
 `);
@@ -152,7 +152,7 @@ function memoryRequest(cwd, engine, sourceUnitId, milestoneId) {
     publicationBoundary: { ownerJoined: false, checkedAt: '2026-09-24T12:00:00Z',
       protectedSnapshots: [{ id: 'fixture-worker', state: 'active' }] } };
 }
-async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code, code); }
+async function rejects(fn, code) { await assert.rejects(fn, e => { assert.strictEqual(e.code, code); return true; }, code); }
 
 // ── review-fix vertical delivery matrix ──────────────────────────────────────
 // Real resolver, guard, unit adapter, shared write core, surgical reset,
@@ -186,7 +186,7 @@ function act(cwd) {
 }
 function result() {
   if (control.raw !== undefined) return control.raw;
-  return { status: control.status || 'done', summary: 'fixture review fix', items: control.items || [],
+  return { status: control.status || 'done', summary: 'fixture review fix', items: (control.items || []).map(item => ({ review_file: null, ...item })),
     files_changed: Object.keys(control.writes || {}) };
 }
 `;
@@ -201,10 +201,10 @@ logSpawn({ engine: 'claude', argv: args, untrusted: prompt.includes('--- REVIEW 
 act(process.cwd());
 if (control.exit) process.exit(control.exit);
 const value = result();
-// claude -p --output-format json: modelUsage proves the received --model unless
+// claude -p --output-format stream-json: modelUsage proves the received --model unless
 // the scenario reports another observed model.
 const observed = control.observedModel || args[args.indexOf('--model') + 1];
-process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: value,
   result: ['---GSD-WORKER-RESULT---', 'status: ' + ((value && value.status) || 'done'),
     'result_json: ' + JSON.stringify(value), '---END-RESULT---'].join('\n'),
   modelUsage: { [observed]: { inputTokens: 1 } } }));
@@ -1461,7 +1461,8 @@ async function reviewFixMatrix() {
   fs.symlinkSync(outside, path.join(cwd, '.gsd/link'), 'junction');
   assert.throws(() => unit.target(cwd, '.gsd/link/STATE.md'), e => e.code === 'artifact-link-refused');
 
-  for (const [failure, code] of [['auth', 'claude-auth-failed'], ['invalid', 'claude-invalid-result'], ['process', 'claude-exit-nonzero']]) {
+  // Echoing the token is refused as invalid output before exit classification.
+  for (const [failure, code] of [['auth', 'claude-auth-failed'], ['invalid', 'claude-invalid-result'], ['process', 'claude-invalid-result']]) {
     const dir = setup(), req = request(dir, 'research-milestone');
     write(path.join(dir, 'payload.json'), { failure });
     await rejects(() => unit.runUnitSidecar(req), code);

@@ -264,7 +264,7 @@ async function withSidecarIdentity(mode, opts, driver) {
     if (!context.fields) context.fields = { phase: opts.identity?.phase || mode, unit: opts.identity?.unit || mode,
       engine: opts.engine || 'codex', transport: opts.engine === 'claude' ? 'claude-cli' : opts.engine === 'agy' ? 'agy-cli' : 'app-server',
       model_sent: '-', effort: opts.effort, host: opts.hostRuntime, dispatch_id: dispatchId };
-    const reviewFailure = ['challenge', 'defend', 'rebuttal', 'fix'].includes(mode) ? reviewFailureDiagnostic(error) : null;
+    const reviewFailure = (opts.engine === 'claude' || ['challenge', 'defend', 'rebuttal', 'fix'].includes(mode)) ? reviewFailureDiagnostic(error) : null;
     identityStage(runOpts, context.started ? 'falhou' : 'recusado', {
       reason_code: reviewFailure ? reviewFailure.reason_code : error.code || classifyError(error.message) || 'sidecar-failed',
       ...(reviewFailure ? { provider_called: reviewFailure.provider_called } : {}),
@@ -2951,6 +2951,7 @@ module.exports = {
   runPlan,
   loadSchemaFile,
   challengeSchema,
+  planSchema,
   verdictSchema,
   PROTOCOL_VERSION,
   MH_SCOPE_ENUM,

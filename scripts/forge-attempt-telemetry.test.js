@@ -20,6 +20,8 @@ let claudeStub = () => { throw Error('unexpected fixture invocation'); };
 const fixtureClaudeRequest = options => ({ cmd: 'fixture-claude', args: ['--model', options.model, '--effort', options.effort] });
 claude.invokeClaudeSidecar = options => {
   // Simulate the adapter's final boundary; real argv is exercised in its suite.
+  const resultContract = require('./forge-worker-result-contract').contract(options.resultProfile || 'execute', options.resultSchema || options.schema);
+  options = { ...options, prompt: options.prompt + '\n\n' + resultContract.instruction('claude-cli') };
   api.observeFinal(options, fixtureClaudeRequest(options), options.prompt, 'claude-cli');
   return claudeStub(options);
 };
@@ -147,7 +149,7 @@ async function main() {
   await test('Claude plan promptFile includes final framing at exactly 23297 bytes on timeout', async () => {
     const request = fixture();
     const file = path.join(request.contextRoot, 'plan-context.txt');
-    const suffix = '\n\nReturn only this worker-result block:\n---GSD-WORKER-RESULT---\nstatus: <done|partial|blocked>\nresult_json: <single-line JSON>\n---END-RESULT---\nUse the requested result JSON as result_json.';
+    const suffix = '\n\n' + require('./forge-worker-result-contract').contract('plan', xllm.planSchema).instruction('claude-cli');
     const prefix = 'Pesquisa 🧪 requisitos e decisões.';
     const context = prefix + 'x'.repeat(23297 - Buffer.byteLength(xllm.buildPlanPrompt(prefix) + suffix));
     fs.writeFileSync(file, context);

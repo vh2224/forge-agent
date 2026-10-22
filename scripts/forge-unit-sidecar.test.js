@@ -560,7 +560,7 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
 async function deliveryPublicationLimits() {
   const fs = require('fs'), os = require('os'), path = require('path');
   const delivery = require('./forge-delivery');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-sidecar-delivery-size-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-sidecar-delivery-size-')));
   try {
     const owner = path.join(root, 'owner'), code = path.join(root, 'code');
     fs.mkdirSync(owner); fs.mkdirSync(code);
@@ -655,7 +655,7 @@ async function deliveryPublicationLimits() {
 }
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-')), previous = {};
+  const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
   for (const key of ['HOME', 'USERPROFILE', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'FORGE_HOME']) previous[key] = process.env[key];
   process.env.HOME = process.env.USERPROFILE = profile;
   process.env.CODEX_HOME = path.join(profile, '.codex'); process.env.CLAUDE_CONFIG_DIR = path.join(profile, '.claude');

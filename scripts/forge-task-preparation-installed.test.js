@@ -147,7 +147,7 @@ const path = require('path');
 const args = process.argv.slice(2);
 const instruction = args[args.indexOf('-p') + 1];
 const prefix = 'Read the complete task prompt from this UTF-8 file: ';
-const suffix = '. Follow it exactly and finish with its required worker-result block.';
+const suffix = '. Follow it exactly and return the required structured_output JSON.';
 const promptFile = JSON.parse(instruction.slice(prefix.length, -suffix.length));
 const prompt = fs.readFileSync(promptFile, 'utf8');
 fs.appendFileSync(path.join(process.cwd(), 'provider-observations.jsonl'), JSON.stringify({
@@ -156,7 +156,7 @@ fs.appendFileSync(path.join(process.cwd(), 'provider-observations.jsonl'), JSON.
 }) + '\\n');
 const payload = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'provider-payload.json'), 'utf8'));
 // claude -p --output-format json: modelUsage names the received --model.
-process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: payload,
   result: ['---GSD-WORKER-RESULT---', 'status: ' + payload.status,
     'result_json: ' + JSON.stringify(payload), '---END-RESULT---'].join('\\n'),
   modelUsage: { [args[args.indexOf('--model') + 1]]: { inputTokens: 1 } } }));

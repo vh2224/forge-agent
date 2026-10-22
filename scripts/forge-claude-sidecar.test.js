@@ -16,7 +16,7 @@ const childProcess = require('child_process');
 
 const ADAPTER_PATH = require.resolve('./forge-claude-sidecar');
 const ACCOUNTS_PATH = require.resolve('./forge-accounts');
-const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-claude-sidecar-test-'));
+const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-claude-sidecar-test-')));
 const WORKSPACE = path.join(ROOT, 'workspace with spaces Î©');
 const MISSING_REGISTRY = path.join(ROOT, 'registry-does-not-exist.json');
 const PREVIOUS_REGISTRY = process.env.FORGE_ACCOUNTS_REGISTRY;
