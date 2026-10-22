@@ -760,8 +760,6 @@ Wrap every `Agent()` dispatch call in a try/catch. On throw, run this handler. O
 
 #### Algorithm
 
-An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API `effortMap`) wins over preferences, plan frontmatter and automatic risk effort. Empty maps and keys for other units do not override the selected unit. It sets `effort_reason` to `argument-effort:<unit-type>` and is retained as `effort_argument` (null when absent); `effort_requested` remains the validated pre-policy value for compatibility. Model and tier selection are unchanged. Replay preserves the original arguments through `resolution_options`.
-
 1. Catch the thrown exception; capture its `.message` (or string representation) into a local variable `errorMsg`. Do NOT log or store `errorMsg` beyond this scope.
 2. Shell out via `Bash`:
    ```
@@ -929,8 +927,6 @@ There are two identities on the Claude artifact path:
 - `dispatch_id` — globally unique per actual model call. Claude retries derive a unique attempt ID from the random prompt ID; sidecars use a UUID persisted in the durable state and result file.
 
 #### Algorithm
-
-An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API `effortMap`) wins over preferences, plan frontmatter and automatic risk effort. Empty maps and keys for other units do not override the selected unit. It sets `effort_reason` to `argument-effort:<unit-type>` and is retained as `effort_argument` (null when absent); `effort_requested` remains the validated pre-policy value for compatibility. Model and tier selection are unchanged. Replay preserves the original arguments through `resolution_options`.
 
 1. After full placeholder substitution and before dispatch: `input_tokens = countTokens(renderedPromptArtifact)`.
 2. If `input_tokens > 0.8 * 200000` (160 000 — conservative context-window fraction, hardcoded for all Claude models as of 2026-04): emit a warning entry to the orchestrator log. Do NOT block dispatch — this is informational only.
@@ -2156,8 +2152,6 @@ fi
 Before every `Agent()` dispatch, after Retry Handler setup but before Token Telemetry's `input_tokens` computation (so the final dispatch event has `tier`, `reason`, and token counts in one line). Tier resolution is read-only — it never mutates STATE.md or any file.
 
 #### Algorithm
-
-An explicit `--effort-<unit-type>` CLI argument (or the matching own key in API `effortMap`) wins over preferences, plan frontmatter and automatic risk effort. Empty maps and keys for other units do not override the selected unit. It sets `effort_reason` to `argument-effort:<unit-type>` and is retained as `effort_argument` (null when absent); `effort_requested` remains the validated pre-policy value for compatibility. Model and tier selection are unchanged. Replay preserves the original arguments through `resolution_options`.
 
 1. **Look up unit-type default.** Given `unit_type` (e.g. `execute-task`), find its row in the [Unit Type → Default Tier](forge-tiers.md#unit-type--default-tier) table. Assign `tier = defaultTier`.
 2. **Parse T##-PLAN frontmatter when `unit_type == execute-task`.** If the unit is `execute-task`, read the first YAML frontmatter block from the task plan file and extract `tier:` and `tag:` values:
