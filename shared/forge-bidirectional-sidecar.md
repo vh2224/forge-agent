@@ -252,6 +252,63 @@ observer (CLI: one bounded JSON line on stderr). Observer exceptions are ignored
 The same projection survives success, failure, receipts and replay. Requesting
 termination or receiving a kill-promise rejection is never process-exit evidence.
 
+#### Prova local de vida e detector de loop
+
+Enquanto uma tool está em execução (`gap_suspended`), o watchdog do sidecar
+Claude decide com uma prova local fechada em dois eixos, sem texto do provedor:
+`capability` (`available` | `unavailable`: a plataforma conseguiu medir?) e
+`proof` (`positive` | `negative` | `none`). A forma booleana da S01
+(`available`/`proven`) continua aceita e é mapeada para `capability` e
+`positive`/`none`. Forma inválida vira `unavailable`/`none`, nunca exceção no tick.
+
+`forge-sidecar-local-proof.js` compõe a prova a partir do PID do filho, da CPU
+da árvore de processos e de uma impressão de metadados do sistema de arquivos.
+PID morto produz `available`/`negative`. PID vivo com delta de CPU de pelo menos
+50 ms, ou com mudança de arquivo, produz `positive`. Sem CPU mensurável
+(win32 hoje, ou sem provedor), a capability é `unavailable`. A amostragem roda a
+cada 15 s num timer próprio, com uma amostra inicial. O tick do watchdog só lê o
+cache. Uma prova `positive` vale 30 s (duas cadências) e depois degrada para
+`none`. `negative` não expira.
+
+As raízes medidas são o `cwd` e as `writableRoots` (nenhuma em `readOnly`).
+Ficam fora da impressão `.git/`, `.gsd/forge/` de cada raiz e os prefixos de
+`localProofIgnore`. O owner (`forge-unit-sidecar.js`) passa o result file e o
+receipt da unidade, o que cobre também `.reset-state.json`. A escrita do próprio
+canal de resultado nunca conta como progresso.
+
+Regras de silêncio de tool (base `deadMs` 240000, extensão 420000):
+
+- Prova `positive`: a tool continua viva até 660000 ms de silêncio. Depois disso
+  morre com `tool-extension-exhausted`.
+- Prova indisponível (`unavailable`/`none`: win32 sem CPU, ou sem provedor):
+  **não mata aos 240000**. Fica `slow-suspect`/`proof-unavailable` e morre aos
+  660000 com `tool-proof-unavailable-expired` (`dead-silence`), não no teto do
+  tier. São as decisões do operador de 2026-10-23.
+- PID morto (`negative`): morre aos 240000 com `tool-proof-negative`.
+- Linux/macOS com medição disponível e sem prova (`available`/`none`): morrem aos
+  240000 com `tool-unproven`.
+
+O detector de loop conta impressões SHA-256 de chamadas de tool. Cinco chamadas
+idênticas sem escrita entre elas produzem a transição `slow-suspect` com reason
+`no-progress`, e uma escrita observada zera a contagem. O loop **não mata**:
+silêncio e teto continuam sendo os únicos motivos de kill. A transição carrega só
+`progress: {repeats, fingerprint_sha256}`, com 16 hex.
+
+O owner registra essa transição em `.gsd/forge/events.jsonl` pelo próprio canal
+(`appendOwnedEvent`: broker, `recoveryReady` ou owner protegido). O worker nunca
+escreve esse arquivo. A linha tem campos fechados:
+`{ts, event: "sidecar-no-progress", workflow_id, dispatch_id, unit,
+worker_engine, model, repeats, fingerprint_sha256}`. `repeats` é inteiro, e
+`fingerprint_sha256` só aparece quando casa `^[0-9a-f]{16}$`. Nenhum nome de tool,
+argumento, prompt ou caminho entra no evento. O diagnóstico de um loop usa só a
+contagem e o hash: não registre argumentos de tool para investigar. O registro
+ocorre uma vez por episódio. `no-progress` repetido sem saída intermediária não
+duplica a linha. Uma transição que sai de `slow-suspect`/`no-progress` reabre o
+episódio. Os appends são serializados, relêem o receipt dentro da fila e são
+aguardados antes do evento terminal da unidade. Falha no append é best-effort e
+não altera o status da unidade. Os review legs Claude recebem o mesmo
+`onLiveness`, mas ainda não têm evento de owner.
+
 #### Personal calibration and anomalous silence
 
 `forge-sidecar-calibration.js` resolves the user home independently of account

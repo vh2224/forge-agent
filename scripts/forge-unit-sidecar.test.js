@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -653,6 +653,122 @@ async function deliveryPublicationLimits() {
     console.log(`PASS complete-milestone publication: 425 canonical criteria, ${Buffer.byteLength(content)} DELIVERY bytes; generic/input/envelope, reader cap, spoof/schema/path/count/duplicate and total payload limits`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
+// The owner turns a worker no-progress transition into one closed
+// sidecar-no-progress line per episode, through its own event channel.
+async function noProgressEventContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto');
+  const fixtures = require('./forge-code-roots.test'), xllm = require('./forge-xllm'), runs = require('./forge-runs');
+  const runExecute = xllm.runExecute;
+  const SENTINEL = 'T05_PRIVATE_TOOL_ARGUMENT_SENTINEL_4e7a';
+  const FINGERPRINT = 'a1b2c3d4e5f60718';
+  const EVENT_KEYS = ['dispatch_id', 'event', 'fingerprint_sha256', 'model', 'repeats', 'ts', 'unit', 'worker_engine', 'workflow_id'];
+  const loop = (fingerprint = FINGERPRINT) => ({ from: 'working', to: 'slow-suspect', at_ms: 1000, reason: 'no-progress',
+    detail: SENTINEL, progress: { repeats: 5, fingerprint_sha256: fingerprint, command: `echo ${SENTINEL}` } });
+  const repeated = { ...loop(), from: 'slow-suspect' };
+  const toolUnproven = { from: 'slow-suspect', to: 'slow-suspect', at_ms: 2000, reason: 'tool-unproven' };
+  const proofUnavailable = { from: 'slow-suspect', to: 'slow-suspect', at_ms: 3000, reason: 'proof-unavailable' };
+  const working = { from: 'slow-suspect', to: 'working', at_ms: 1500, reason: null };
+  const route = { host_runtime: 'codex', worker_engine: 'claude', resolved_worker_engine: 'claude', worker_mode: 'sidecar', sidecar_declared: true,
+    dispatch_reason_code: 'sidecar-declared', dispatch_posture: 'cross-engine', dispatch_decision: 'allow',
+    dispatch_allowed: true, model: 'claude-sonnet-5', model_resolved: 'claude-sonnet-5', effort: 'medium', tier: 'standard',
+    chain: [{ id: 'claude-sonnet-5', engine: 'claude' }] };
+  // One temporary owner + two code roots per case: each case is a fresh unit.
+  async function runCase(id, transitions, hooks = {}) {
+    const lab = fixtures.fixture();
+    try {
+      const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+        cwd: lab.a, contextRoot: lab.owner, execution_contract: lab.contract, route,
+        workflowId: 'no-progress-fixture', dispatchId: id, resultFile: path.join(lab.dir, `${id}.json`), prompt: 'Fixture only.',
+        verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+      const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
+      fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+      request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+      fs.writeFileSync(request.planFile, fixtures.plan(lab.contract));
+      fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+      fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+        ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
+      resolveContext(request);
+      request.runId = `no-progress-${id}`;
+      request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
+        paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+      request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+      runs.add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+      let seen = null;
+      xllm.runExecute = async options => {
+        seen = options;
+        hooks.beforeTransitions?.(lab);
+        for (const transition of transitions) {
+          options.onLiveness(transition);
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        await hooks.afterTransitions?.(lab);
+        fs.writeFileSync(path.join(lab.a, 'same.txt'), 'worker alpha\n');
+        fs.writeFileSync(path.join(lab.b, 'same.txt'), 'worker beta\n');
+        return { status: 'done', summary: 'Synthetic loop fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] };
+      };
+      const result = await sidecar.runUnitSidecar(request);
+      const eventsText = fs.readFileSync(path.join(lab.owner, '.gsd/forge/events.jsonl'), 'utf8');
+      const events = eventsText.split('\n').filter(Boolean).map(line => JSON.parse(line));
+      return { result, seen, eventsText, events, loops: events.filter(row => row.event === 'sidecar-no-progress'),
+        unitEvents: events.filter(row => row.event === 'sidecar-unit'), request };
+    } finally { xllm.runExecute = runExecute; lab.cleanup(); }
+  }
+  const base = await runCase('baseline', []);
+  assert.strictEqual(base.result.status, 'done', JSON.stringify(base.result));
+  assert.strictEqual(base.loops.length, 0);
+  const terminalStatus = base.unitEvents[base.unitEvents.length - 1].status;
+
+  // (a) two consecutive no-progress transitions are one episode; other reasons add nothing.
+  const once = await runCase('episode-once', [loop(), repeated, toolUnproven, proofUnavailable]);
+  assert.strictEqual(once.result.status, base.result.status);
+  assert.strictEqual(once.loops.length, 1, once.eventsText);
+  const line = once.loops[0];
+  assert.deepStrictEqual(Object.keys(line).sort(), EVENT_KEYS);
+  assert.strictEqual(line.repeats, 5);
+  assert.strictEqual(line.fingerprint_sha256, FINGERPRINT);
+  assert.strictEqual(line.dispatch_id, 'episode-once');
+  assert.strictEqual(line.workflow_id, 'no-progress-fixture');
+  assert.strictEqual(line.worker_engine, 'claude');
+  assert.strictEqual(line.model, 'claude-sonnet-5');
+  assert.strictEqual(line.unit, once.unitEvents[0].unit);
+  assert(!once.eventsText.includes(SENTINEL), 'no tool argument, detail or prompt text reaches events.jsonl');
+  assert(!JSON.stringify(line).includes(SENTINEL));
+  // Ordered before the terminal owner event of the unit.
+  const indexOf = row => once.events.indexOf(row);
+  assert(indexOf(line) > indexOf(once.unitEvents[0]) && indexOf(line) < indexOf(once.unitEvents[once.unitEvents.length - 1]));
+  assert.strictEqual(once.unitEvents[once.unitEvents.length - 1].status, terminalStatus);
+  // The owner's result/receipt channel is excluded from local proof.
+  const resultFile = once.seen.resultFile;
+  assert.strictEqual(path.basename(resultFile), 'episode-once.json');
+  assert(once.seen.localProofIgnore.includes(resultFile), JSON.stringify(once.seen.localProofIgnore));
+  assert(once.seen.localProofIgnore.includes(`${resultFile}.receipt.json`), JSON.stringify(once.seen.localProofIgnore));
+  assert.strictEqual(typeof once.seen.onLiveness, 'function');
+
+  // (b) leaving the episode reopens it; an invalid fingerprint is omitted, never echoed.
+  const twice = await runCase('episode-reopened', [loop(), working, loop(`NOT-HEX ${SENTINEL}`)]);
+  assert.strictEqual(twice.result.status, base.result.status);
+  assert.strictEqual(twice.loops.length, 2, twice.eventsText);
+  assert.strictEqual(twice.loops[0].fingerprint_sha256, FINGERPRINT);
+  assert.deepStrictEqual(Object.keys(twice.loops[1]).sort(), EVENT_KEYS.filter(key => key !== 'fingerprint_sha256'));
+  assert(!twice.eventsText.includes(SENTINEL));
+
+  // Other reasons never open an episode.
+  const none = await runCase('other-reasons', [toolUnproven, proofUnavailable,
+    { from: 'working', to: 'slow-suspect', at_ms: 4000, reason: 'silence' }]);
+  assert.strictEqual(none.result.status, base.result.status);
+  assert.strictEqual(none.loops.length, 0, none.eventsText);
+
+  // (c) a failed append is best-effort: the unit result is unchanged.
+  const foreign = lab => path.join(lab.owner, '.gsd/foreign-during-loop.json');
+  const failed = await runCase('append-fails', [loop()], {
+    beforeTransitions: lab => fs.writeFileSync(foreign(lab), '{}'),
+    afterTransitions: async lab => { await new Promise(resolve => setTimeout(resolve, 20)); fs.unlinkSync(foreign(lab)); },
+  });
+  assert.strictEqual(failed.result.status, base.result.status, JSON.stringify(failed.result));
+  assert.strictEqual(failed.loops.length, 0, 'a refused owner append writes nothing');
+  assert.strictEqual(failed.unitEvents[failed.unitEvents.length - 1].status, terminalStatus);
+  console.log('PASS sidecar-no-progress: one closed owner event per episode, reopened after exit, other reasons ignored, best-effort append, result/receipt excluded from local proof');
+}
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
   const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
@@ -665,6 +781,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
+    if (!selectedScenario || selectedScenario === '--no-progress-event') await noProgressEventContracts();
   } finally {
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(profile, { recursive: true, force: true });

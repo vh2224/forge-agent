@@ -1513,7 +1513,53 @@ async function runUnitSidecarCore(request, runtime, identity) {
       json(receiptFile, record);
     });
   }
+  // Liveness events (sidecar-no-progress) share the owner's single event channel.
+  // Appends are serialized and settled before any later owner event or receipt
+  // transition, so events.jsonl keeps its order and no receipt write races.
+  let livenessQueue = Promise.resolve();
+  let noProgressOpen = false;
+  // Exact events.jsonl hash advance made by liveness appends through the
+  // protected-owner channel: {from: hash before the first, to: hash after the last}.
+  let livenessEventAdvance = null;
+  const ownedEventsHash = record => (record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner)?.['.gsd/forge/events.jsonl'];
+  async function appendNoProgress(transition) {
+    const repeats = transition?.progress?.repeats;
+    const fingerprintSha = transition?.progress?.fingerprint_sha256;
+    // Closed allowlist built field by field: only a count and a 16-hex hash.
+    const line = JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-no-progress',
+      workflow_id: r.workflowId, dispatch_id: dispatchId, unit: label,
+      worker_engine: route.resolved_worker_engine, model,
+      repeats: Number.isSafeInteger(repeats) && repeats > 0 ? repeats : null,
+      ...(typeof fingerprintSha === 'string' && /^[0-9a-f]{16}$/.test(fingerprintSha) ? { fingerprint_sha256: fingerprintSha } : {}) }) + '\n';
+    if (!recoveryReady?.appendOwnerEvent && !r.ownerBroker) fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
+    // Reread inside the queue: onProgress/onPackagedContext rewrite the receipt.
+    const record = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
+    const before = ownedEventsHash(record);
+    await appendOwnedEvent(line, record);
+    const after = ownedEventsHash(record);
+    if (before && after && before !== after) livenessEventAdvance = { from: livenessEventAdvance?.from || before, to: after };
+  }
+  function onLiveness(transition) {
+    if (transition?.to === 'slow-suspect' && transition.reason === 'no-progress') {
+      if (!noProgressOpen) {
+        noProgressOpen = true;
+        livenessQueue = livenessQueue.then(() => appendNoProgress(transition)).catch(() => { /* best-effort */ });
+      }
+    } else if (noProgressOpen && transition?.from === 'slow-suspect') noProgressOpen = false;
+    if (typeof runtime.onLiveness === 'function') {
+      try { runtime.onLiveness(transition); } catch { /* observer errors never affect the unit */ }
+    }
+  }
+  // The owner's protected snapshot taken before transport predates liveness
+  // appends; advance only the exact bytes this unit appended, never adopt a
+  // fresh snapshot.
+  const advanceLivenessEvents = snapshot => {
+    if (livenessEventAdvance && snapshot?.['.gsd/forge/events.jsonl'] === livenessEventAdvance.from) {
+      snapshot['.gsd/forge/events.jsonl'] = livenessEventAdvance.to;
+    }
+  };
   async function event(status, reasonCode, detail, providerCalled = false, extra = null) {
+    await livenessQueue;
     if (!recoveryReady?.appendOwnerEvent) fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
     const line = JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
       workflow_id: r.workflowId, dispatch_id: dispatchId,
@@ -1802,6 +1848,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (runtime.onProgress) return runtime.onProgress(safe);
       if (require.main === module) process.stderr.write(require('./forge-sidecar-calibration').progressLine(safe));
     },
+    // Owner-side liveness: the no-progress event goes through appendOwnedEvent;
+    // the unit's own result/receipt channel never counts as local progress
+    // (prefix match also covers .reset-state.json and .recovery.json).
+    onLiveness, localProofIgnore: [resultFile, receiptFile],
     telemetryIdentity: r, telemetryRoute: route, budgets: execution?.budgets || r.budgets || {},
     onPackagedContext: packaged => {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
@@ -1860,6 +1910,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
+        await livenessQueue;
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
@@ -1868,6 +1919,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
           sandbox: 'read-only', onHeartbeat: heartbeat });
         transportReturned = true;
+        await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       result = require('./forge-memory-extraction').validateExtractionResult(result, { sourceUnit: loc.sourceUnit });
@@ -1890,6 +1942,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           ? { execution_contract: r.execution_contract, budgets: r.budgets || {} } : undefined),
         procedureContext: { procedureText, procedure_context } });
       transportReturned = true;
+      await livenessQueue;
       transportTelemetry = result.transport_telemetry || null;
       const trustedTransportRecord = transportTelemetry ? {
         telemetry: { ...observedModelTelemetry(transportTelemetry),
@@ -1897,6 +1950,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
         ...(transportTelemetry.calibration_proposal ? { calibration_proposal: transportTelemetry.calibration_proposal } : {}),
       } : {};
       if (execution) {
+        advanceLivenessEvents(protectedBefore);
+        for (const code of codeProtectedBefore) if (fs.realpathSync(code.root) === root) advanceLivenessEvents(code.before);
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
         else executionApi.assertProtected(root, protectedBefore);
         for (const code of codeProtectedBefore) executionApi.assertProtected(code.root, code.before);
@@ -1971,6 +2026,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         transportEntered = true;
         result = await xllm.runPlan({ ...options, planContextFile });
         transportReturned = true;
+        await livenessQueue;
       } finally { fs.rmSync(promptDir, { recursive: true, force: true }); }
       const ids = result.task_plans.map(p => p.id);
       if (new Set(ids).size !== ids.length) fail('plan-task-ids-invalid');
@@ -2006,6 +2062,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
             { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
+        await livenessQueue;
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
@@ -2013,6 +2070,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         transportEntered = true;
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
         transportReturned = true;
+        await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules,
@@ -2052,6 +2110,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       transportEntered = true;
       result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
       transportReturned = true;
+      await livenessQueue;
       // A partial/blocked turn never publishes a success line or a commit.
       if (result.status !== 'done') fail(`review-fix-worker-${result.status}`, 'The review-fix worker did not finish; items are deferred.');
       artifacts = [];
@@ -2118,6 +2177,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
     return result;
   } catch (error) {
+    // A transport failure can leave a queued liveness append: settle it before
+    // the failed receipt and the terminal event are written.
+    await livenessQueue;
     // A heartbeat proves a local process, not provider acceptance. A timeout
     // without adapter evidence stays unknown; an explicit pre-spawn refusal is false.
     providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called

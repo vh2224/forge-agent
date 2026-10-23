@@ -1601,6 +1601,12 @@ function claudeTelemetrySink(engine, sink) {
   return engine === 'claude' ? { onTransportTelemetry: sink } : {};
 }
 
+// Claude-only liveness observer for the review legs, same posture as the sink:
+// codex/agy never receive the key. No owner event exists on this path yet.
+function claudeLiveness(engine, onLiveness) {
+  return engine === 'claude' && typeof onLiveness === 'function' ? { onLiveness } : {};
+}
+
 async function withClaudeTelemetry(engine, normalized, telemetry) {
   if (engine !== 'claude') return normalized;
   // This point follows the review schema, semantic gates and output barrier.
@@ -1940,6 +1946,7 @@ async function runChallengeCore(opts) {
     prompt, schema: challengeSchema, cwd, model: opts.model, effort: opts.effort, signal: opts.signal, timeoutSecs, envPolicy: opts.envPolicy || 'minimal',
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
     ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
+    ...claudeLiveness(engine, opts.onLiveness),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
     sandbox: CAPABILITY_SANDBOX_MODE.readonly,
@@ -2009,6 +2016,7 @@ async function runDefendCore(opts) {
     effort: opts.effort,
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
     ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
+    ...claudeLiveness(engine, opts.onLiveness),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
@@ -2066,6 +2074,7 @@ async function runRebuttalCore(opts) {
     effort: opts.effort,
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
     ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
+    ...claudeLiveness(engine, opts.onLiveness),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
@@ -2540,6 +2549,9 @@ async function runWriteContractCore(opts, contract) {
         sourceEnv: process.env,
         terminateChild: terminateOwnedProcessTree,
         ...(opts.thinkingRequested ? { thinkingRequested: opts.thinkingRequested } : {}),
+        // Owner liveness observer and the owner's result/receipt prefixes the
+        // local proof must ignore. Claude branch only: the app-server call never gets them.
+        onLiveness: opts.onLiveness, localProofIgnore: opts.localProofIgnore,
         ...(contract.claudeOptions || {}),
       });
     } catch (error) {
@@ -2845,7 +2857,9 @@ async function runPlanCore(opts) {
   let transportTelemetry = null;
   let appServerOutput;
   if (engine === 'claude') {
-    const claudeOutput = await invokeClaudeJson(planOptions, validatePlanResult);
+    // Claude-only keys: planOptions also feeds the app-server branch unchanged.
+    const claudeOutput = await invokeClaudeJson({ ...planOptions, onLiveness: opts.onLiveness,
+      localProofIgnore: opts.localProofIgnore }, validatePlanResult);
     transportTelemetry = claudeOutput.telemetry;
     appServerOutput = { finalText: JSON.stringify(claudeOutput.candidate), transport: { kind: 'claude-cli', version: 'unknown' } };
   } else appServerOutput = await invokeCodexAppServer(planOptions);
