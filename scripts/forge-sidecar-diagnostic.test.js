@@ -497,3 +497,11 @@ test('interrupted publication preserves validated receipt and resumes without an
   assert.equal(readJson(r.resultFile + '.receipt.json').phase, 'ready');
   assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
 });
+
+test('budget-exceeded-while-active is a closed transport diagnostic, not adapter-failed', () => {
+  const value = diagnostic('budget-exceeded-while-active', { duration_ms: 12 });
+  assert.equal(value.stage, 'transport');
+  assert.equal(value.reason, 'budget-exceeded-while-active');
+  assert.equal(value.duration_ms, 12);
+  assert.equal(diagnostic('not-a-reason').reason, 'adapter-failed');
+});

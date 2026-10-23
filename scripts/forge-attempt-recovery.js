@@ -153,7 +153,7 @@ function createRecovery(options) {
       state.pending_questions = require('./forge-interaction').resolvePendingQuestions(state.pending_questions, answers); save();
     },
     record(attempt) {
-      if (!['caller', 'service', 'timeout', 'silence', 'interrupted', 'unknown'].includes(attempt.failure_class)) fail('recovery-failure-class-invalid');
+      if (!['caller', 'service', 'timeout', 'silence', 'active-budget', 'interrupted', 'unknown'].includes(attempt.failure_class)) fail('recovery-failure-class-invalid');
       const measurementValid = (hash, bytes) => hash === null && bytes === null
         || typeof hash === 'string' && hash.length > 0 && Number.isFinite(bytes) && bytes >= 0;
       if (!attempt.reason_code || !attempt.layer || !measurementValid(attempt.request_sha256, attempt.request_bytes)
@@ -181,6 +181,10 @@ function createRecovery(options) {
         && !state.attempts.some(a => a.reservation && digest(a.reservation) === digest(pendingReservation))) {
         return { action: 'stop', reason_code: 'recovery-reservation-pending' };
       }
+      // S05 replaces this stop with the single same-session resume; budget
+      // exhaustion with a live stream is not a destination failure, so neither
+      // a standing exception nor the deadline selects another candidate.
+      if (state.attempts.at(-1)?.failure_class === 'active-budget') return { action: 'stop', reason_code: 'budget-exceeded-resume-required' };
       let scope;
       if (input.exception) scope = exceptionFor(input.exception, state, clock());
       if (!remaining() && !scope) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
@@ -351,11 +355,14 @@ function captureFailure(options) {
     ...(options.request.route ? { request: canonicalRequest(options.request) } : {}),
     state, persist: value => stateApi.saveRecovery(options.stateFile, value) });
   const provider = [true, false].includes(error.provider_called) ? error.provider_called : 'unknown';
+  // Evaluated first: a live stream at the safety ceiling is neither a timeout
+  // nor a destination failure.
+  const activeBudget = code === 'budget-exceeded-while-active';
   const silence = code === 'claude-anomalous-silence'
     && require('./forge-sidecar-diagnostic').observation(error.diagnostic?.observation).silence?.cause === 'indeterminate';
   const timeout = /timeout|timed-out/.test(code);
-  const service = provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
-  session.record({ failure_class: silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
+  const service = !activeBudget && provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
+  session.record({ failure_class: activeBudget ? 'active-budget' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
     observation: error.diagnostic?.observation, service_failure_proven: service, reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
     request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
     request_bytes: observed.request.bytes, context_bytes: context.bytes,

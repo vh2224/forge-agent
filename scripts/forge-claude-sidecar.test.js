@@ -228,6 +228,13 @@ test('reason codes are frozen and expose every named failure contract', () => {
   ]);
 });
 
+test('budget-exceeded-while-active is a frozen reason code', () => {
+  const adapter = loadAdapter();
+  const code = adapter.CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED;
+  assert.strictEqual(code, 'budget-exceeded-while-active');
+  ok(Object.values(adapter.CLAUDE_SIDECAR_REASON_CODES).includes(code), 'member of the frozen reason-code set');
+});
+
 test('Claude env is allowlist-built and replaces every ambient credential', () => {
   const adapter = loadAdapter();
   const source = sourceEnvFor(HAPPY_FIXTURE);
@@ -454,6 +461,23 @@ test('timeout terminates exactly once and discards an already-complete stdout bl
   assert.strictEqual(records.length, 1);
   assert.strictEqual(terminations, 1);
   assert.deepStrictEqual(tempPromptDirs(), []);
+});
+
+test('a ceiling reached while still starting stays claude-timeout with termination null', async () => {
+  const fixture = writeFixture('claude silent starting fixture.js', `
+'use strict';
+setInterval(() => {}, 1000);
+`);
+  const adapter = loadAdapter();
+  const error = await expectCode(adapter.invokeClaudeSidecar({
+    cwd: WORKSPACE, prompt: 'starting ceiling', model: FIXTURE_MODEL,
+    timeoutMs: adapter.TIMEOUT_GRACE_MS + 80, sourceEnv: sourceEnvFor(fixture),
+    terminateChild(child) { child.kill('SIGKILL'); },
+  }), adapter.CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
+  assert.strictEqual(error.liveness.version, 1);
+  assert.strictEqual(error.liveness.termination, null);
+  assert.strictEqual(error.liveness.state, 'starting');
+  assert.strictEqual(error.diagnostic.reason, 'provider-timeout');
 });
 
 test('stdout capture limit terminates a runaway child with a stable code', async () => {
@@ -1250,14 +1274,21 @@ test('liveness: silence after N events passes slow-suspect (120000) before dead-
   assert.strictEqual(run.terminations, 1);
 });
 
-test('liveness: an active stream reaching the injected ceiling is claude-timeout budget-exceeded-while-active', async () => {
+test('liveness: an active stream reaching the injected ceiling is budget-exceeded-while-active', async () => {
   // timeoutMs 60000 gives a 55000 ms child ceiling. On the accelerated clock the
   // watchdog reaches it in ~0.2 s real; the real setTimeout backstop (55 s) does not fire.
   const fixture = activeStreamFixture('claude endless stream fixture.js', null);
   const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }), { timeoutMs: 60000 });
   ok(run.error, 'expected rejection');
-  assert.strictEqual(run.error.code, 'claude-timeout');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
   assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.diagnostic.reason, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.diagnostic.stage, 'transport');
+  assert.strictEqual(run.error.message, 'The Claude worker was still active when it reached its safety ceiling.');
+  ok(!/timeout/i.test(run.error.message), 'the message never says timeout');
+  // Terminal: Layer-1 must not relaunch the same model from scratch (S05 resumes).
+  assert.strictEqual(require('./forge-xllm').classifyErrorClass(run.error.message), 'terminal');
+  assert.strictEqual(run.error.liveness.version, 1);
   assert.strictEqual(run.error.liveness.state, 'working');
   assert.strictEqual(run.error.diagnostic.observation.silence, undefined);
   ok(run.realMs < 4000, 'the injected ceiling, not the real backstop, terminated the turn');
@@ -1481,7 +1512,7 @@ test('liveness/tool: a ceiling below 660000 classifies with the current proof (p
   const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
     { localProofFactory: fake.factory, timeoutMs: 205000 });
   ok(run.error, 'expected the ceiling');
-  assert.strictEqual(run.error.code, 'claude-timeout');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
   assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
   assert.strictEqual(run.error.liveness.state, 'working');
   assert.strictEqual(run.error.liveness.reason, 'local-proof');
@@ -1504,7 +1535,7 @@ test('liveness/tool: ceiling and tool deadline crossed in one tick keep budget-e
   };
   const run = await runLive(fixture, clock, { localProofFactory: fake.factory, timeoutMs: 245000 });
   ok(run.error, 'expected the ceiling');
-  assert.strictEqual(run.error.code, 'claude-timeout');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
   assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
   assert.strictEqual(run.error.liveness.state, 'slow-suspect');
 });

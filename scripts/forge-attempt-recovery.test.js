@@ -67,6 +67,8 @@ async function main() {
     purpose: 'sidecar-recovery', expires_at: now + 100, gates_preserved: false }, () => now), /not-authorized/);
   await silenceRecovery(identity, route, attempt, inspection, candidateSet);
   await persistentRecovery(route);
+  await classificationTable(route);
+  await activeBudgetRecovery(identity, route, attempt, inspection, candidateSet);
   await canonicalProvenance();
   console.log('PASS recovery clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
 }
@@ -105,6 +107,79 @@ async function silenceRecovery(identity, route, attempt, inspection, candidateSe
   const almostSpent = api.createRecovery({ ...options, state: late.snapshot(), clock: () => 55000 });
   assert.equal((await almostSpent.next(input)).reason_code, 'recovery-deadline-exhausted');
   console.log('PASS anomalous silence: trusted threshold, one durable same-target reservation, restart exclusion, fallback and nonrenewing clock');
+}
+// The whole captureFailure classification table: a live stream at the safety
+// ceiling (budget-exceeded-while-active) is never a timeout nor a destination failure.
+async function classificationTable(route) {
+  const fs = require('fs'), path = require('path');
+  const lab = require('./forge-code-roots.test').laboratory('recovery-classification');
+  const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', route: { ...route, unit_type: 'research-milestone' }, prompt: 'before', resultFile: path.join(lab.dir, 'result.json') };
+  const silence = { dimension: 'initial', window_ms: 120001, threshold_ms: 120000,
+    policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+  const cases = [
+    ['claude-timeout', 'unknown', null, 'timeout'],
+    ['codex-timeout', true, null, 'timeout'],
+    ['claude-anomalous-silence', 'unknown', { version: 1, silence }, 'silence'],
+    ['budget-exceeded-while-active', true, null, 'active-budget'],
+    ['budget-exceeded-while-active', false, null, 'active-budget'],
+    ['budget-exceeded-while-active', 'unknown', null, 'active-budget'],
+    ['quota', true, null, 'service'],
+    ['rate-limit', true, null, 'service'],
+    ['context-budget-exceeded', false, null, 'caller'],
+    ['claude-exit-nonzero', 'unknown', null, 'unknown'],
+  ];
+  cases.forEach(([code, provider, observation, expected], index) => {
+    const stateFile = path.join(lab.dir, `state-${index}.json`);
+    const error = { code, ...(provider === 'unknown' ? {} : { provider_called: provider }),
+      ...(observation ? { diagnostic: { reason: 'anomalous-silence', observation } } : {}) };
+    const captured = api.captureFailure({ stateFile, request, unit: 'research-milestone/M001', route,
+      finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+      error, budgets: { coding_standards: 3000 } }).attempts.at(-1);
+    assert.strictEqual(captured.failure_class, expected, `${code} (provider ${provider}) -> ${expected}`);
+    assert.strictEqual(captured.provider_called, provider);
+    assert.strictEqual(captured.reason_code, code);
+    if (expected === 'active-budget') {
+      assert.strictEqual(captured.timeout_cause, null);
+      assert.strictEqual(captured.service_failure_proven, false);
+    }
+    if (expected === 'timeout' || expected === 'silence') assert.strictEqual(captured.timeout_cause, 'indeterminate');
+  });
+  console.log('PASS classification table: timeout, silence, active-budget, service, caller and unknown');
+}
+// next() after an active-budget attempt stops with a named reason (S05 resume),
+// after the existing inspection/replay/reconciliation checks and before the
+// deadline stop or any candidate selection, even with a standing exception.
+async function activeBudgetRecovery(identity, route, attempt, inspection, candidateSet) {
+  let now = 0, saved;
+  const options = { ...identity, state: undefined, clock: () => now, persist: value => { saved = value; } };
+  const session = api.createRecovery(options);
+  session.record({ ...attempt, reason_code: 'budget-exceeded-while-active', failure_class: 'active-budget',
+    service_failure_proven: false, provider_called: true });
+  assert.strictEqual(saved.attempts.at(-1).timeout_cause, null);
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const alternate = { ...route, model: 'gpt-6-astra', model_resolved: 'gpt-6-astra', resolved_worker_engine: 'codex', worker_mode: 'native' };
+  const exception = authority.issue('fixture:active-budget', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 120000, routes: [api.routeKey(route), api.routeKey(alternate)], gates_preserved: true }, () => now);
+  const never = () => { throw Error('active-budget must never validate a candidate'); };
+  const input = { inspection, exception, candidateSet, validateInvocation: never };
+  await assert.rejects(session.next({ ...input, inspection: undefined }), /process-receipt-inspection-required/);
+  await assert.rejects(session.next({ ...input, inspection: { ...inspection, writer_possible: true } }), /writer-reconciliation-required/);
+  assert.strictEqual((await session.next({ ...input, inspection: { ...inspection, valid_saved_response: true } })).action, 'replay');
+  now = 1000;
+  for (const variant of [input, { inspection, candidateSet, validateInvocation: never }]) {
+    const stopped = await session.next(variant);
+    assert.deepStrictEqual(stopped, { action: 'stop', reason_code: 'budget-exceeded-resume-required' });
+  }
+  now = 60001;
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-required' },
+    'the named stop precedes the deadline stop');
+  assert.strictEqual(saved.selection, undefined, 'no candidate selection was persisted');
+  assert.deepStrictEqual(saved.reservations || [], [], 'no reservation was created');
+  session.questions(['Pending choice']);
+  assert.strictEqual((await session.next(input)).action, 'pending-questions', 'pending questions still come first');
+  console.log('PASS active-budget: named stop after inspection/reconciliation, before deadline and standing exception');
 }
 async function persistentRecovery(route) {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');

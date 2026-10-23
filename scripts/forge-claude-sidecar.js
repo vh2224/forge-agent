@@ -35,6 +35,7 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   COMMAND_NOT_FOUND: 'claude-command-not-found',
   EXIT_NONZERO: 'claude-exit-nonzero',
   TIMEOUT: 'claude-timeout',
+  BUDGET_EXCEEDED: 'budget-exceeded-while-active',
   SILENCE: 'claude-anomalous-silence',
   EMPTY_OUTPUT: 'claude-empty-output',
   INVALID_RESULT: 'claude-invalid-result',
@@ -133,6 +134,7 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.COMMAND_NOT_FOUND]: 'The Claude executable could not be started.',
     [CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO]: 'The Claude process exited unsuccessfully.',
     [CLAUDE_SIDECAR_REASON_CODES.TIMEOUT]: 'The Claude process exceeded its child deadline.',
+    [CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED]: 'The Claude worker was still active when it reached its safety ceiling.',
     [CLAUDE_SIDECAR_REASON_CODES.EMPTY_OUTPUT]: 'The Claude process returned empty output.',
     [CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT]: 'The Claude process returned an invalid worker result.',
     [CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED]: 'The Claude process could not be spawned.',
@@ -622,7 +624,8 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       failed = true;
       const reasons = { 'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
         'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
-        'claude-output-limit': 'output-limit', 'claude-anomalous-silence': 'anomalous-silence' };
+        'claude-output-limit': 'output-limit', 'claude-anomalous-silence': 'anomalous-silence',
+        'budget-exceeded-while-active': 'budget-exceeded-while-active' };
       const observed = snapshot();
       error.diagnostic = diagnostic(error.diagnostic?.reason || reasons[error.code] || 'adapter-failed', {
         ...error.diagnostic, observation: observed, stdout_bytes: observed.stdout_bytes,
@@ -661,10 +664,14 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       // active, not dead, when the ceiling arrives.
       const { state, reason, termination } = decision
         || liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
-      const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
-      error.liveness = { version: 1,
-        termination: decision ? termination : liveness.classifyTermination({ cause: 'ceiling', state }),
-        state, reason };
+      const kind = decision ? termination : liveness.classifyTermination({ cause: 'ceiling', state });
+      // A live stream at the ceiling is not a timeout of the destination: it has
+      // its own reason code (S03 decision 8). A ceiling reached while still
+      // starting (termination null) remains claude-timeout.
+      const error = kind === 'budget-exceeded-while-active'
+        ? sidecarError(CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED, 'budget-exceeded-while-active')
+        : sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
+      error.liveness = { version: 1, termination: kind, state, reason };
       return error;
     }
     timer = setTimeout(() => { if (!settled) terminate(ceilingError()); }, timeoutMs);
@@ -759,7 +766,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  * @param {string} opts.cwd workspace directory that owns the temporary file
  * @param {number} [opts.timeoutMs] parent deadline in milliseconds. This is the
  *   safety ceiling only (the child gets it minus TIMEOUT_GRACE_MS); reaching it
- *   rejects with `claude-timeout` plus `error.liveness.termination`. Start and
+ *   with an active stream rejects with `budget-exceeded-while-active` (diagnostic
+ *   reason of the same name); reaching it while still starting rejects with
+ *   `claude-timeout`. Both carry `error.liveness.termination`. Start and
  *   silence kills are decided by forge-sidecar-liveness (locked defaults
  *   60000/120000/240000 ms, even without calibration) and reject with
  *   `claude-anomalous-silence` plus `error.liveness.termination`

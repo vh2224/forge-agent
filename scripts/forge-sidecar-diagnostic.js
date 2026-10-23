@@ -22,7 +22,8 @@ const REASONS = Object.freeze({
   'provider-exit': 'transport', 'authentication-failed': 'transport',
   'provider-timeout': 'transport', 'provider-cancelled': 'transport',
   'provider-unavailable': 'transport', 'publication-failed': 'publication',
-  'adapter-failed': 'adapter', 'anomalous-silence': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
+  'adapter-failed': 'adapter', 'anomalous-silence': 'transport',
+  'budget-exceeded-while-active': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
 });
 const COUNTS = ['stdout_bytes', 'stderr_bytes', 'duration_ms', 'marker_count', 'model_count'];
 // One token, no list separators, no path or shell characters; an optional
