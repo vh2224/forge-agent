@@ -854,6 +854,11 @@ async function reviewLegsLiveness(root) {
   const cached = require.cache[modulePath];
   const inputFile = path.join(root, 'review-liveness-input.txt');
   fs.writeFileSync(inputFile, 'fixture review input\n', 'utf8');
+  const planContextFile = path.join(root, 'plan-liveness-context.md');
+  fs.writeFileSync(planContextFile, '# Plan context fixture\n', 'utf8');
+  // The plan result channel must live outside the workspace (PROJECT_ROOT).
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xllm-plan-liveness-'));
+  const ignore = [path.join(outside, 'plan-liveness.json'), path.join(outside, 'plan-liveness.json.receipt.json')];
   let captured = null;
   adapter.invokeClaudeSidecar = async (options) => {
     captured = options;
@@ -865,19 +870,24 @@ async function reviewLegsLiveness(root) {
     const onLiveness = () => {};
     const base = { cwd: PROJECT_ROOT, engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true,
       model: 'claude-opus-5-5', effort: 'medium' };
-    const legs = [['runChallenge', { diffCmd: 'node --version' }], ['runDefend', { inputFile }], ['runRebuttal', { inputFile }]];
+    const legs = [['runChallenge', { diffCmd: 'node --version' }], ['runDefend', { inputFile }], ['runRebuttal', { inputFile }],
+      ['runPlan', { planContextFile, resultFile: ignore[0], dispatchId: 'plan-liveness', localProofIgnore: ignore }]];
     for (const [leg, extra] of legs) {
       for (const supplied of [true, false]) {
         captured = null;
         await assert.rejects(xllm[leg]({ ...base, ...extra, ...(supplied ? { onLiveness } : {}) }), /fixture stop/);
         assert.ok(captured, `${leg} reached the Claude adapter`);
+        if (leg === 'runPlan') assert.deepStrictEqual(captured.localProofIgnore, ignore, 'plan forwards localProofIgnore');
         if (supplied) assert.strictEqual(captured.onLiveness, onLiveness, `${leg} forwards onLiveness`);
+        // The plan forwards the caller's value as-is (undefined when absent).
+        else if (leg === 'runPlan') assert.strictEqual(captured.onLiveness, undefined);
         else assert.strictEqual(Object.prototype.hasOwnProperty.call(captured, 'onLiveness'), false, `${leg} adds no key when absent`);
       }
     }
   } finally {
     adapter.invokeClaudeSidecar = originalInvoke;
     delete require.cache[modulePath]; if (cached) require.cache[modulePath] = cached;
+    fs.rmSync(outside, { recursive: true, force: true });
   }
 }
 
@@ -971,7 +981,7 @@ async function main() {
     ['a substituted model is refused after the turn and preserves the worker tree', substitutedPath],
     ['accepted review exposes bounded calibration retry without another inference', reviewCalibrationRetry],
     ['execute forwards onLiveness and localProofIgnore to the Claude adapter (no-progress observed)', livenessPassThroughPath],
-    ['Claude review legs forward onLiveness only when supplied', reviewLegsLiveness],
+    ['Claude review legs and plan forward onLiveness (plan also localProofIgnore)', reviewLegsLiveness],
   ];
   let passed = 0;
   const failures = [];
