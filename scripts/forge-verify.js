@@ -873,7 +873,12 @@ function normalizeExecutionVerification(contract, planText, declared = {}, runti
     }
     if (value.commandTimeoutMs !== undefined && (!Number.isSafeInteger(value.commandTimeoutMs) || value.commandTimeoutMs <= 0)) fail('verification-timeout-invalid');
   };
-  validate(declared); validate(runtime);
+  // Delivery evidence is declared by the request, separately from command policy.
+  // Runtime supplements cannot supply or replace these bindings.
+  if (!declared || typeof declared !== 'object' || Array.isArray(declared)) fail('verification-options-invalid');
+  const { bindings, ...declaredCommands } = declared;
+  if (bindings !== undefined && !Array.isArray(bindings)) fail('verification-bindings-invalid');
+  validate(declaredCommands); validate(runtime);
   const extend = (base, extra) => {
     if (extra === undefined) return base;
     if (base && (extra.length < base.length || base.some((c, i) => extra[i] !== c))) fail('verification-command-replacement');

@@ -43,7 +43,7 @@ function fixture() {
     adapter.invokeClaudeSidecar = async options => {
       fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ prompt: options.prompt,
         model: options.model, effort: options.effort, readOnly: options.readOnly,
-        sandbox: options.sandbox }));
+        sandbox: options.sandbox, resultProfile: options.resultProfile, resultSchema: options.resultSchema }));
       const scenario = process.env.FIXTURE_SCENARIO;
       if (scenario !== 'success') {
         if (scenario === 'after-start') options.onHeartbeat(12345);
@@ -115,7 +115,9 @@ async function main() {
         const procedure = loadProcedureContext({ phase, cwd: f.cwd });
         assert(sent.prompt.includes(procedure.content));
         for (const id of ['core', 'review']) assert.strictEqual(sent.prompt.split(`<!-- forge-procedure:${id} -->`).length - 1, 1);
-        assert(sent.prompt.includes('---GSD-WORKER-RESULT---'), 'final transport framing retained');
+        assert.strictEqual(sent.resultProfile, 'review');
+        assert.strictEqual(sent.resultSchema.properties.status.enum[0], 'done');
+        assert(sent.resultSchema.properties.output);
         assert.strictEqual(sent.model, model); assert.strictEqual(sent.effort, 'medium');
         assert.strictEqual(sent.readOnly, true); assert.strictEqual(sent.sandbox, 'read-only');
       }

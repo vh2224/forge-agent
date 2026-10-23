@@ -53,16 +53,16 @@ const args = process.argv.slice(2);
 fs.appendFileSync('invocations.txt', 'spawn\\n');
 fs.writeFileSync('argv.json', JSON.stringify(args));
 const p = JSON.parse(fs.readFileSync('payload.json','utf8'));
-if (p.failure === 'auth') { process.stderr.write('401 invalid token'); process.exit(1); }
+if (p.failure === 'auth') { process.stdout.write(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,api_error_status:401})); process.exit(1); }
 if (p.failure === 'process') { process.stderr.write(process.env[${JSON.stringify(accounts.TOKEN_ENV)}]); process.exit(9); }
 if (p.failure === 'invalid') { process.stdout.write('not a result'); process.exit(0); }
 if (p.failure === 'wait') { setInterval(() => {}, 1000); }
 else {
-  // claude -p --output-format json: modelUsage names the received --model
+  // claude -p --output-format stream-json: modelUsage names the received --model
   // unless the payload file asks for another observed model.
   const model = p.observedModel || args[args.indexOf('--model') + 1];
   const block = ['---GSD-WORKER-RESULT---','status: '+p.status,'result_json: '+JSON.stringify(p),'---END-RESULT---'].join('\\n');
-  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: block,
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: p, result: block,
     usage: { input_tokens: 401 }, modelUsage: { [model]: { inputTokens: 401 } } }));
 }
 `);
@@ -92,7 +92,10 @@ function request(cwd, unitType, engine = 'claude', codexModel = 'gpt-6-luna') {
     prefs.effort = { ...(prefs.effort || {}), [unitType]: 'medium' };
     write(prefsFile, prefs);
   }
-  const route = resolveDispatch({ cwd, unitType, hostRuntime: host });
+  const sliceId = /slice|plan-check|execute-task/.test(unitType) ? 'S01' : undefined;
+  const taskId = unitType === 'execute-task' ? 'T01' : undefined;
+  const route = resolveDispatch({ cwd, unitType, hostRuntime: host, milestoneId: 'M001',
+    unitId: taskId || sliceId || 'M001' });
   const r = { cwd, contextRoot: cwd, unitType, milestoneId: 'M001',
     route,
     workflowId: `workflow-${sequence}`, dispatchId: `dispatch-${sequence}-${unitType}`,
@@ -136,7 +139,8 @@ function memoryRequest(cwd, engine, sourceUnitId, milestoneId) {
   }
   const hostRuntime = engine === 'claude' ? 'codex' : 'claude';
   const route = resolveDispatch({ cwd, unitType: 'memory-extract', hostRuntime,
-    workerEngine: engine, workerMode: 'sidecar', sidecarDeclared: true });
+    workerEngine: engine, workerMode: 'sidecar', sidecarDeclared: true,
+    ...(milestoneId ? { milestoneId, unitId: milestoneId } : {}) });
   return { cwd, contextRoot: cwd, unitType: 'memory-extract', sourceUnitType: 'execute-task',
     sourceUnitId, ...(milestoneId ? { milestoneId } : {}), route,
     workflowId: `memory-workflow-${sequence}`, dispatchId: `memory-dispatch-${sequence}-${engine}-${sourceUnitId}`,
@@ -148,7 +152,7 @@ function memoryRequest(cwd, engine, sourceUnitId, milestoneId) {
     publicationBoundary: { ownerJoined: false, checkedAt: '2026-09-24T12:00:00Z',
       protectedSnapshots: [{ id: 'fixture-worker', state: 'active' }] } };
 }
-async function rejects(fn, code) { await assert.rejects(fn, e => e.code === code, code); }
+async function rejects(fn, code) { await assert.rejects(fn, e => { assert.strictEqual(e.code, code); return true; }, code); }
 
 // ── review-fix vertical delivery matrix ──────────────────────────────────────
 // Real resolver, guard, unit adapter, shared write core, surgical reset,
@@ -182,7 +186,7 @@ function act(cwd) {
 }
 function result() {
   if (control.raw !== undefined) return control.raw;
-  return { status: control.status || 'done', summary: 'fixture review fix', items: control.items || [],
+  return { status: control.status || 'done', summary: 'fixture review fix', items: (control.items || []).map(item => ({ review_file: null, ...item })),
     files_changed: Object.keys(control.writes || {}) };
 }
 `;
@@ -197,10 +201,10 @@ logSpawn({ engine: 'claude', argv: args, untrusted: prompt.includes('--- REVIEW 
 act(process.cwd());
 if (control.exit) process.exit(control.exit);
 const value = result();
-// claude -p --output-format json: modelUsage proves the received --model unless
+// claude -p --output-format stream-json: modelUsage proves the received --model unless
 // the scenario reports another observed model.
 const observed = control.observedModel || args[args.indexOf('--model') + 1];
-process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: value,
   result: ['---GSD-WORKER-RESULT---', 'status: ' + ((value && value.status) || 'done'),
     'result_json: ' + JSON.stringify(value), '---END-RESULT---'].join('\n'),
   modelUsage: { [observed]: { inputTokens: 1 } } }));
@@ -327,7 +331,8 @@ async function reviewFixMatrix() {
     }
     function request(fx, host, boundary, extra = {}) {
       return { cwd: fx.code, contextRoot: fx.working, unitType: 'review-fix', ...idsFor(boundary),
-        route: resolveDispatch({ cwd: fx.working, unitType: 'review-fix', hostRuntime: host }),
+        route: resolveDispatch({ cwd: fx.working, unitType: 'review-fix', hostRuntime: host,
+          ...idsFor(boundary), unitId: boundary === 'slice' ? 'S01' : boundary === 'task' ? RF_TASK_ID : 'M001' }),
         workflowId: `rf-workflow-${seq}`, dispatchId: `rf-dispatch-${seq}`, resultFile: path.join(fx.base, 'result.json'),
         constraints: { auto_commit: true, deploy: false },
         reviewFix: { boundary, decision: 'proceed', items: items(boundary), claimPaths: ['src/a.js', 'src/b.js'] }, ...extra };
@@ -545,7 +550,8 @@ async function reviewFixMatrix() {
     for (const host of ['claude', 'codex']) {
       for (const boundary of ['slice', 'task', 'milestone-triage']) {
         const fx = fixture(host);
-        const route = resolveDispatch({ cwd: fx.working, unitType: 'review-fix', hostRuntime: host });
+        const route = resolveDispatch({ cwd: fx.working, unitType: 'review-fix', hostRuntime: host,
+          ...idsFor(boundary), unitId: boundary === 'slice' ? 'S01' : boundary === 'task' ? RF_TASK_ID : 'M001' });
         assert.deepStrictEqual([route.worker_mode, route.resolved_worker_engine, route.model_resolved, route.effort, route.effort_reason],
           ['native', host, fx.model, 'medium', 'unit-type:review-fix']);
         const nativeRequest = { cwd: fx.code, contextRoot: fx.working, vcs: 'git', route, ...idsFor(boundary),
@@ -776,8 +782,10 @@ async function reviewFixMatrix() {
       assert.deepStrictEqual(result.files_changed.map(entry => entry.path).sort(), ['src/a.js', 'src/a.test.js']);
       assert.strictEqual(g(fx.code, 'rev-parse', 'HEAD'), fx.start);
     }
-    await refused(r => ({ ...r, sliceId: undefined }), 'review-fix-boundary-invalid');
-    await refused(r => ({ ...r, sliceId: undefined, reviewFix: { ...r.reviewFix, boundary: 'milestone-triage',
+    const withoutSlice = r => ({ ...r, sliceId: undefined,
+      route: resolveDispatch({ ...r.route.resolution_options, unitId: r.milestoneId }) });
+    await refused(withoutSlice, 'review-fix-boundary-invalid');
+    await refused(r => ({ ...withoutSlice(r), reviewFix: { ...r.reviewFix, boundary: 'milestone-triage',
       items: items('slice').map(item => ({ ...item, review_file: '.gsd/milestones/M002/slices/S01/S01-REVIEW.md' })) } }),
     'review-fix-boundary-invalid');
     await refused(r => ({ ...r, route: { ...r.route, resolved_worker_engine: 'agy' } }), 'unsupported-sidecar-unit');
@@ -842,6 +850,15 @@ async function reviewFixMatrix() {
 }
 
 (async () => {
+  for (const foreign of [false, true]) {
+    const invalidContext = request(setup(), 'research-milestone');
+    if (foreign) invalidContext.route.resolution_context.milestone_id = 'M999';
+    else delete invalidContext.route.resolution_context;
+    await assert.rejects(() => unit.runUnitSidecar(invalidContext), error =>
+      error.code === 'milestone-resolver-context-required' && error.provider_called === false);
+    assert(!fs.existsSync(path.join(invalidContext.cwd, 'invocations.txt')));
+  }
+  console.log('PASS absent and foreign milestone resolver context refuse before transport');
   const sourceRecord = { source_unit: 'T-20260924000000-source', extraction_id: 'source-extraction',
     extracted_at: '2026-09-24T12:00:00Z', dispatch_id: 'source-dispatch', model: 'gpt-6-luna', effort: 'medium' };
   const sourceA = unit.memorySourceContext({ summaryContent: 'summary A' }, sourceRecord);
@@ -1444,7 +1461,8 @@ async function reviewFixMatrix() {
   fs.symlinkSync(outside, path.join(cwd, '.gsd/link'), 'junction');
   assert.throws(() => unit.target(cwd, '.gsd/link/STATE.md'), e => e.code === 'artifact-link-refused');
 
-  for (const [failure, code] of [['auth', 'claude-auth-failed'], ['invalid', 'claude-invalid-result'], ['process', 'claude-exit-nonzero']]) {
+  // Echoing the token is refused as invalid output before exit classification.
+  for (const [failure, code] of [['auth', 'claude-auth-failed'], ['invalid', 'claude-invalid-result'], ['process', 'claude-invalid-result']]) {
     const dir = setup(), req = request(dir, 'research-milestone');
     write(path.join(dir, 'payload.json'), { failure });
     await rejects(() => unit.runUnitSidecar(req), code);
@@ -1515,6 +1533,7 @@ async function reviewFixMatrix() {
   await assert.rejects(() => unit.runUnitSidecar(badPlan), /must_haves/);
   write(path.join(planDir, 'fixture-output.txt'), 'Existing output verified by the readonly fixture.');
   const executeRequest = request(planDir, 'execute-task'); executeRequest.planFile = planFile;
+  executeRequest.route = resolveDispatch({ ...executeRequest.route.resolution_options, planPath: planFile });
   write(path.join(planDir, 'payload.json'), { status: 'done', summary: 'Execution fixture', must_haves_status: [], files_changed: [] });
   await unit.runUnitSidecar(executeRequest);
   const executeResult = JSON.parse(fs.readFileSync(executeRequest.resultFile, 'utf8'));

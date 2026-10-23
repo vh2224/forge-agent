@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 function stageProcedures(home) {
   const source = path.resolve(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
@@ -16,20 +16,109 @@ function stageProcedures(home) {
     fs.copyFileSync(path.join(source, relative), target);
   }
 }
-// Set isolation before loading modules which may cache preference sources.
-if (!['--isolated', '--restart-fixture', '--milestone-restart', '--transition-only', '--transition-restart'].includes(process.argv[2])) {
-  const bootstrap = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-home-')));
+function fixtureGitPath() {
+  const original = process.env.PATH || '';
+  if (process.platform !== 'win32') return original;
   try {
-    stageProcedures(path.join(bootstrap, 'forge'));
-    // Bound the aggregate separately from each delegated child's 120s deadline.
-    // This cap includes integration scenarios and need not fit all child maxima.
-    const run = spawnSync(process.execPath, [__filename, '--isolated'], { encoding: 'utf8', timeout: 600000,
-      env: { ...process.env, HOME: bootstrap, USERPROFILE: bootstrap, CODEX_HOME: path.join(bootstrap, '.codex'),
-        CLAUDE_CONFIG_DIR: path.join(bootstrap, '.claude'), FORGE_HOME: path.join(bootstrap, 'forge') } });
-    process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
-    if (run.error) process.stderr.write(`workflow harness: ${run.error.code || 'spawn-error'}; signal=${run.signal || 'none'}\n`);
-    process.exitCode = run.status === 0 ? 0 : 1;
-  } finally { fs.rmSync(bootstrap, { recursive: true, force: true }); }
+    const git = require('./forge-capabilities').resolveExecutable('git');
+    if (!git) return original;
+    const probe = (file, args) => {
+      const result = spawnSync(file, args, { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+      if (result.status !== 0) throw Error('fixture-git-probe-failed');
+      return result.stdout.trim();
+    };
+    const execPath = fs.realpathSync(probe(git, ['--exec-path']));
+    const candidate = fs.realpathSync(path.resolve(execPath, '..', '..', 'bin', 'git.exe'));
+    const installation = fs.realpathSync(path.resolve(path.dirname(git), '..'));
+    const relative = path.relative(installation, candidate);
+    if (path.isAbsolute(relative) || relative.startsWith('..')) return original;
+    const version = probe(git, ['--version']);
+    if (probe(candidate, ['--version']) !== version
+      || fs.realpathSync(probe(candidate, ['--exec-path'])) !== execPath) return original;
+    console.log(`Fixture Git: ${version}; same installation and exec-path; direct executable ${candidate}`);
+    return path.dirname(candidate) + path.delimiter + original;
+  } catch { return original; }
+}
+// Fixtures mutate process.env, so parallel groups use independent OS processes.
+async function runGroups(transitionOnly) {
+  const started = performance.now(), source = path.resolve(__dirname, '..');
+  const gitPath = fixtureGitPath();
+  const groups = ['standalone-signed', 'standalone-unsigned', 'milestone-signed', 'milestone-unsigned', 'context']
+    .map(name => ({ name, args: [__filename, '--transition-case', name], timeout: 300000 }));
+  if (!transitionOnly) groups.push(
+    { name: 'integration', args: [__filename, '--integration-only'], timeout: 300000 },
+    ...[
+      ['forge-task-preparation.test.js'],
+      ['forge-unit-sidecar.test.js', '--delivery-publication-limits'],
+      ['forge-unit-sidecar.test.js', '--recovery-contracts'],
+      ['forge-unit-sidecar.test.js', '--pre-spawn-sidecar'],
+      ['forge-unit-sidecar.test.js', '--pre-spawn-native'],
+      ['forge-attempt-recovery.test.js'],
+      ['forge-unit-controller.test.js'],
+    ].map(([suite, ...selectors]) => ({ name: [suite, ...selectors].join(' '),
+      args: [path.join(__dirname, suite), ...selectors], timeout: 120000, delegated: true })));
+  // Start the slow independent groups first to keep the three-worker tail short.
+  const order = ['standalone-unsigned', 'milestone-unsigned', 'context',
+    'forge-unit-sidecar.test.js --pre-spawn-sidecar', 'forge-task-preparation.test.js',
+    'forge-unit-sidecar.test.js --pre-spawn-native', 'forge-unit-sidecar.test.js --recovery-contracts',
+    'integration', 'forge-unit-controller.test.js', 'standalone-signed', 'milestone-signed',
+    'forge-attempt-recovery.test.js', 'forge-unit-sidecar.test.js --delivery-publication-limits'];
+  groups.sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+  const profiles = [], results = [];
+  let next = 0;
+  async function worker() {
+    while (next < groups.length) {
+      const group = groups[next++];
+      const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-workflow-home-')));
+      profiles.push(profile);
+      const forgeHome = path.join(profile, 'forge');
+      stageProcedures(forgeHome);
+      const env = { ...process.env, HOME: profile, USERPROFILE: profile, CODEX_HOME: path.join(profile, '.codex'),
+        CLAUDE_CONFIG_DIR: path.join(profile, '.claude'), FORGE_HOME: group.delegated ? source : forgeHome };
+      const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') || 'PATH';
+      env[pathKey] = gitPath;
+      const began = performance.now();
+      const result = await new Promise(resolve => {
+        const proc = spawn(process.execPath, group.args, { env, windowsHide: true,
+          detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '', stderr = '', error = null, cleanup = null;
+        const timer = setTimeout(() => {
+          error = 'group-timeout';
+          cleanup = require('./forge-resources-bench').killTreeAsync(proc);
+        }, group.timeout);
+        proc.stdout.on('data', bytes => { stdout += bytes.toString(); });
+        proc.stderr.on('data', bytes => { stderr += bytes.toString(); });
+        proc.on('error', value => { error = value.code || 'spawn-error'; });
+        proc.on('close', async (code, signal) => {
+          clearTimeout(timer);
+          const cleanupResult = cleanup ? await cleanup : null;
+          if (cleanupResult && !cleanupResult.ok) group.cleanupUnproved = true;
+          resolve({ group: group.name, code, signal, error, duration_ms: Math.round(performance.now() - began), stdout, stderr });
+        });
+        console.log(`START workflow group ${group.name}; pid=${proc.pid}`);
+      });
+      process.stdout.write(result.stdout);
+      process.stderr.write(result.stderr);
+      if (group.cleanupUnproved) profiles.splice(profiles.indexOf(profile), 1);
+      const { stdout, stderr, ...summary } = result;
+      results.push(summary);
+      console.log(`END workflow group ${JSON.stringify(summary)}`);
+    }
+  }
+  const workers = await Promise.allSettled(Array.from({ length: 3 }, () => worker()));
+  try {
+    for (const worker of workers) if (worker.status === 'rejected') console.error(worker.reason);
+    assert.equal(results.length, groups.length, 'every original fixture group must run');
+    assert(results.every(result => result.code === 0 && !result.error), 'workflow group failed');
+    console.log(`PASS workflow groups ${results.length}/${groups.length}; duration_ms=${Math.round(performance.now() - started)}`);
+  } finally {
+    // Cleanup follows every child close; no worker can still use these profiles.
+    for (const profile of profiles) fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 });
+  }
+}
+// Set isolation before loading modules which may cache preference sources.
+if (!['--isolated', '--restart-fixture', '--milestone-restart', '--transition-case', '--integration-only', '--transition-restart'].includes(process.argv[2])) {
+  runGroups(process.argv[2] === '--transition-only').catch(error => { console.error(error); process.exitCode = 1; });
 } else {
 const prep = require('./forge-task-preparation');
 const interaction = require('./forge-interaction');
@@ -68,10 +157,10 @@ async function restart(file) {
   const { request, profile } = saved;
   const stateFile = request.resultFile + '.recovery.json', receiptFile = request.resultFile + '.receipt.json';
   const initial = JSON.parse(fs.readFileSync(stateFile));
-  const now = initial.deadline_at + 1;
+  let now = initial.deadline_at + 1;
   request.activeCapabilities = capabilities;
   let calls = 0;
-  const result = await prep.recoverStandaloneTask(request, { stateFile, receiptFile, clock: () => now }, {
+  const result = await prep.recoverStandaloneTask(request, { stateFile, receiptFile, clock: () => ++now }, {
     processProbe: () => 'stopped', recoveryAuthorization: authority(profile, now),
     invokeNative: async args => {
       calls++;
@@ -138,10 +227,11 @@ async function transitionRestart(file) {
   assert.deepEqual(fs.readFileSync(f.receiptFile), f.originalReceipt);
   write(file + '.proof', JSON.stringify({ pid: process.pid, calls, action: result.action }));
 }
-async function transitionWorkflow() {
+async function transitionWorkflow(selected) {
   const h = require('./forge-recovery-transition.test'), transition = require('./forge-recovery-transition');
   // Both public APIs distinguish a schema-valid saved response from signed replay.
   for (const standalone of [true, false]) for (const signed of [true, false]) {
+    if (selected && selected !== `${standalone ? 'standalone' : 'milestone'}-${signed ? 'signed' : 'unsigned'}`) continue;
     const f = await h.candidateFixture(standalone, signed);
     try {
       f.signed = signed; f.expectedModel = 'gpt-5.6-sol'; f.expectedEffort = standalone ? 'high' : 'medium';
@@ -229,6 +319,7 @@ async function transitionWorkflow() {
       console.log(`PASS public ${standalone ? 'standalone' : 'milestone'} ${signed ? 'signed replay, zero inference' : 'disposition, no publication, native handoff'} across OS restart`);
     } finally { f.cleanup(); }
   }
+  if (selected && selected !== 'context') return;
   const f = h.setup({ questions: [{ id: 'functional-choice', question: 'Which fixture branch?' }] });
   try {
     f.originalReceipt = fs.readFileSync(f.receiptFile); f.expectedModel = 'gpt-6-astra'; f.expectedEffort = 'max';
@@ -291,7 +382,7 @@ async function main() {
     write(process.argv[3] + '.proof', JSON.stringify({ pid: process.pid, calls, roots: reset.roots.map(row => row.root_id) }));
     return;
   }
-  await transitionWorkflow();
+  if (process.argv[2] === '--transition-case') return transitionWorkflow(process.argv[3]);
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-recovery-workflow-')));
   const home = path.join(root, 'home'); fs.mkdirSync(home);
   const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex'),
@@ -428,7 +519,11 @@ async function main() {
         assert.equal(savedResponse.delivery_capture, undefined, 'failed checks must be rerun, not cached as successful capture');
         const planBytes = fs.readFileSync(execution.planFile);
         fs.appendFileSync(execution.planFile, '\nChanged input\n');
-        await assert.rejects(unit.runUnitSidecar(execution), /execution-input-changed/);
+        await assert.rejects(unit.runUnitSidecar(execution), error =>
+          error.code === 'verification-provenance-insufficient' && error.provider_called === false);
+        assert.deepEqual(JSON.parse(fs.readFileSync(receiptFile)), savedResponse, 'changed sealed plan preserves the saved response receipt');
+        assert.equal(executionCalls, 1, 'changed sealed plan cannot infer again');
+        assert.equal(fs.existsSync(path.join(slice, 'tasks/T01/T01-SUMMARY.md')), false, 'changed sealed plan cannot publish');
         fs.writeFileSync(execution.planFile, planBytes);
         write(path.join(lab.b, 'same.txt'), 'Foreign root drift\n');
         await assert.rejects(unit.runUnitSidecar(execution), /execution-replay-baseline-changed/);
@@ -483,21 +578,6 @@ async function main() {
       console.log('PASS R2/R6/R8: real plan publisher -> nested T01/T02 -> independent DAG batch -> controller begin/long-key complete/handoff/resume -> canonical summary/next T02/status');
     } finally { xllm.runPlan = originalPlan; lab.cleanup(); }
 
-    // Reuse focused suites without copying their unit-level cases. Their child
-    // process exit is mandatory and their named output remains in gate evidence.
-    for (const [suite, ...selectors] of [
-      ['forge-task-preparation.test.js'],
-      ['forge-unit-sidecar.test.js', '--recovery-contracts'],
-      ['forge-unit-sidecar.test.js', '--pre-spawn-sidecar'],
-      ['forge-unit-sidecar.test.js', '--pre-spawn-native'],
-      ['forge-attempt-recovery.test.js'],
-      ['forge-unit-controller.test.js'],
-    ]) {
-      // Delegated source suites explicitly materialize source-root provenance.
-      // Keep that root consistent instead of mixing it with this workflow's install fixture.
-      process.stdout.write(child([path.join(__dirname, suite), ...selectors], { ...env, FORGE_HOME: path.resolve(__dirname, '..') }));
-      console.log(`PASS delegated contract suite ${[suite, ...selectors].join(' ')}`);
-    }
     assert.equal(typeof controller.begin, 'function'); assert.equal(typeof controller.resume, 'function');
     console.log('PASS R3/R5/R6/R7: focused caller/receipt/root/telemetry/controller/lease negatives above; no real provider or UAT');
   } finally { fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 }); }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// forge-claude-sidecar.js — account-backed Claude execute-process adapter.
+// forge-claude-sidecar.js â€” account-backed Claude execute-process adapter.
 //
 // This module deliberately owns the one credential exception that the generic
 // sidecar environment must not learn about. The default Forge account is
@@ -23,12 +23,17 @@ const { parseJsonEnvelope } = require('./forge-worker-result');
 const { diagnostic, isSafeModelId } = require('./forge-sidecar-diagnostic');
 const { isMalformedId } = require('./forge-model-alias');
 const modelPolicy = require('./forge-model-policy');
+const workerContract = require('./forge-worker-result-contract');
+const streamProtocol = require('./forge-claude-stream');
+const calibrationApi = require('./forge-sidecar-calibration');
+const { observation } = calibrationApi;
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
   COMMAND_NOT_FOUND: 'claude-command-not-found',
   EXIT_NONZERO: 'claude-exit-nonzero',
   TIMEOUT: 'claude-timeout',
+  SILENCE: 'claude-anomalous-silence',
   EMPTY_OUTPUT: 'claude-empty-output',
   INVALID_RESULT: 'claude-invalid-result',
   SPAWN_FAILED: 'claude-spawn-failed',
@@ -458,182 +463,138 @@ function defaultTerminate(child) {
   try { child.kill('SIGKILL'); } catch { /* the owned process already exited */ }
 }
 
-function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat, heartbeatIntervalMs, validateCandidate, signal, requestedModel }) {
-  if (signal && signal.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
-  const startedAt = Date.now();
+function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat,
+  heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration }) {
+  if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   let child;
   try {
-    child = spawn(cmd, args, {
-      cwd,
-      shell: false,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      detached: process.platform !== 'win32',
-    });
-  } catch (error) {
-    return Promise.reject(mapSpawnError(error));
-  }
+    child = spawn(cmd, args, { cwd, shell: false, env, stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true, detached: process.platform !== 'win32' });
+  } catch (error) { return Promise.reject(mapSpawnError(error)); }
 
   return new Promise((resolve, reject) => {
-    let settled = false;
-    let terminationAttempted = false;
-    let terminalFailurePending = false;
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let stdoutChunks = [];
-    let stderrChunks = [];
-    const cancel = () => terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
-    if (signal) signal.addEventListener('abort', cancel, { once: true });
-    process.once('SIGINT', cancel);
-    process.once('SIGTERM', cancel);
-
-    const timer = setTimeout(() => {
-      terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT));
-    }, timeoutMs);
-
-    // The reaper in shared/forge-dispatch.md derives staleAfter from the
-    // published cadence and kills on the second consecutive stale-alive, so a
-    // healthy turn that only beats once at spawn is reaped at ~60-90s. The
-    // beats carry the real child pid and nothing else — never argv, output, or
-    // any environment value.
-    const beatPid = Number.isInteger(child.pid) ? child.pid : null;
-    let heartbeatTimer = null;
-    function beat() {
-      try { onHeartbeat(beatPid); } catch { /* heartbeat is best-effort */ }
+    let settled = false, terminationAttempted = false, closed = false, failed = false;
+    let watchdog, heartbeatTimer, progressTimer, timer, silence = null, transportEnd = null;
+    let reportedRemote = false, reportedTerminal = false;
+    const reducer = streamProtocol.createReducer({ secret: env[TOKEN_ENV], clock, onRemote: () => {
+      if (!reportedRemote) { reportedRemote = true; emit(); }
+    }, onEvent: () => {
+      if (!reportedTerminal && reducer.snapshot().phase === 'terminal') { reportedTerminal = true; emit(); }
+    } });
+    const snapshot = () => {
+      const current = reducer.snapshot();
+      return observation({ ...current, process_exit_observed: closed,
+        phase: failed ? 'failed' : closed ? 'closed' : current.phase,
+        transport_ms: transportEnd ?? current.transport_ms,
+        verification_ms: transportEnd === null ? null : Math.max(0, current.elapsed_ms - transportEnd),
+        calibration: { diagnostic: calibration.diagnostic, initial: calibration.initial.state, gap: calibration.gap.state },
+        ...(silence ? { silence } : {}) });
+    };
+    function bestEffort(callback, value) {
+      try { Promise.resolve(callback?.(value)).catch(() => {}); } catch { /* observer only */ }
     }
-    if (typeof onHeartbeat === 'function' && beatPid) {
-      beat();
-      heartbeatTimer = setInterval(beat, heartbeatIntervalMs);
-    }
-
-    function finish(handler, value) {
+    function emit() { bestEffort(onProgress, snapshot()); }
+    function beat() { bestEffort(onHeartbeat, Number.isSafeInteger(child.pid) ? child.pid : null); }
+    function finish(error, value) {
       if (settled) return;
-      if (handler === reject) {
-        const reasons = {
-          'claude-empty-output': 'output-empty', 'claude-output-limit': 'output-limit',
-          'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
-          'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
-          'claude-command-not-found': 'provider-unavailable', 'claude-spawn-failed': 'provider-unavailable',
-          'claude-model-substituted': 'model-substituted', 'claude-model-unverified': 'model-unverified',
-        };
-        value.diagnostic = diagnostic(value.diagnostic?.reason || reasons[value.code], {
-          ...value.diagnostic, stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes,
-          duration_ms: Math.max(0, Date.now() - startedAt),
-        });
-      }
       settled = true;
       clearTimeout(timer);
-      // Every settle path — resolve, close-nonzero, spawn error, timeout,
-      // output limit — funnels through here, so the interval cannot outlive
-      // the turn and keep the adapter's event loop alive.
-      if (heartbeatTimer) clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
-      if (signal) signal.removeEventListener('abort', cancel);
+      clearInterval(watchdog);
+      clearInterval(heartbeatTimer);
+      clearInterval(progressTimer);
+      signal?.removeEventListener('abort', cancel);
       process.removeListener('SIGINT', cancel);
       process.removeListener('SIGTERM', cancel);
-      handler(value);
+      if (!error) { reducer.dispose(); resolve(value); return; }
+      failed = true;
+      const reasons = { 'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
+        'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
+        'claude-output-limit': 'output-limit', 'claude-anomalous-silence': 'anomalous-silence' };
+      const observed = snapshot();
+      error.diagnostic = diagnostic(error.diagnostic?.reason || reasons[error.code] || 'adapter-failed', {
+        ...error.diagnostic, observation: observed, stdout_bytes: observed.stdout_bytes,
+        stderr_bytes: observed.stderr_bytes, duration_ms: observed.elapsed_ms,
+      });
+      error.diagnostic.observation = observed;
+      emit();
+      reducer.dispose();
+      reject(error);
     }
-
-    function terminateOnce(error) {
-      if (settled || terminalFailurePending) return;
-      terminalFailurePending = true;
-      stdoutChunks = [];
-      stderrChunks = [];
+    function terminate(error) {
+      if (settled) return;
       if (!terminationAttempted) {
         terminationAttempted = true;
-        try { terminateChild(child); } catch { /* stable primary error wins */ }
+        // A requested kill, including its fulfilled promise, never proves exit.
+        try { Promise.resolve(terminateChild(child)).catch(() => {}); } catch { /* still unobserved */ }
       }
-      finish(reject, error);
+      finish(error);
     }
-
-    function capture(stream, chunk) {
-      if (settled || terminalFailurePending) return;
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-      if (stream === 'stdout') {
-        stdoutBytes += buffer.length;
-        if (stdoutBytes > MAX_CAPTURE_BYTES_PER_STREAM) {
-          terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT));
-          return;
-        }
-        stdoutChunks.push(buffer);
-      } else {
-        stderrBytes += buffer.length;
-        if (stderrBytes > MAX_CAPTURE_BYTES_PER_STREAM) {
-          terminateOnce(sidecarError(CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT));
-          return;
-        }
-        stderrChunks.push(buffer);
-      }
+    function protocolError(error) {
+      const reason = error.reason || 'result-envelope-invalid';
+      const code = reason === 'output-limit' ? CLAUDE_SIDECAR_REASON_CODES.OUTPUT_LIMIT
+        : reason === 'authentication-failed' ? CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED
+        : reason === 'output-empty' ? CLAUDE_SIDECAR_REASON_CODES.EMPTY_OUTPUT
+        : CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT;
+      terminate(sidecarError(code, reason));
     }
-
-    if (child.stdout) child.stdout.on('data', (chunk) => capture('stdout', chunk));
-    if (child.stderr) child.stderr.on('data', (chunk) => capture('stderr', chunk));
-
-    child.once('error', (error) => {
-      finish(reject, mapSpawnError(error));
+    const cancel = () => terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
+    signal?.addEventListener('abort', cancel, { once: true });
+    process.once('SIGINT', cancel);
+    process.once('SIGTERM', cancel);
+    timer = setTimeout(() => terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT)), timeoutMs);
+    beat();
+    emit();
+    if (onHeartbeat) heartbeatTimer = setInterval(beat, heartbeatIntervalMs);
+    if (onProgress) progressTimer = setInterval(emit, 15000);
+    watchdog = setInterval(() => {
+      if (settled) return;
+      silence = calibrationApi.silence(calibration, reducer.snapshot());
+      if (silence) terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence'));
+    }, 1000);
+    child.stdout?.on('data', chunk => {
+      if (!settled) try { reducer.push(chunk); } catch (error) { protocolError(error); }
     });
-    child.once('close', (code, signal) => {
-      if (settled || terminalFailurePending) return;
-      const stderr = Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
-      const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
-      const trimmed = stdout.trim();
-      const decoded = trimmed ? tryParseJson(trimmed) : { ok: false };
-      // Precedence: auth, exit, raw secret, empty, envelope, decoded secret,
-      // identity, unit parser, candidate secret. A JSON stdout decides auth only
-      // by its structured status: token counters such as 401 are data there.
-      const structuredAuth = decoded.ok && isPlainObject(decoded.value)
-        && AUTH_ERROR_STATUSES.has(decoded.value.api_error_status);
-      const textAuth = (code !== 0 || !stdout.includes(WORKER_RESULT_MARKER))
-        && AUTH_TEXT_RE.test(decoded.ok ? stderr : `${stderr}\n${stdout}`);
-      if (structuredAuth || textAuth) {
-        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.AUTH_FAILED));
+    child.stderr?.on('data', chunk => {
+      if (!settled) try { reducer.stderr(chunk); } catch (error) { protocolError(error); }
+    });
+    child.once('error', error => finish(mapSpawnError(error)));
+    child.once('close', (code, exitSignal) => {
+      closed = true;
+      if (settled) return;
+      transportEnd = reducer.snapshot().elapsed_ms;
+      let terminal;
+      try { terminal = reducer.end(); }
+      catch (error) {
+        if (code !== 0 && error.reason !== 'authentication-failed') {
+          finish(sidecarError(CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO));
+        } else protocolError(error);
         return;
       }
-      if (code !== 0) {
-        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO));
-        return;
-      }
-      if (stdout.includes(env[TOKEN_ENV]) || stderr.includes(env[TOKEN_ENV])) {
-        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'secret-output'));
-        return;
-      }
-      // Captured stderr is intentionally never returned or interpolated into an
-      // error. A provider that repeats its environment cannot leak through us.
-      stderrChunks = [];
-      if (!trimmed) {
-        finish(reject, sidecarError(CLAUDE_SIDECAR_REASON_CODES.EMPTY_OUTPUT));
-        return;
-      }
-
-      let parsed;
-      let observedModel;
+      if (code !== 0) { finish(sidecarError(CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO)); return; }
       try {
-        const envelope = classifyResultEnvelope(decoded, trimmed);
-        if (!envelope.ok) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, envelope.reason);
-        assertNoDecodedSecret(envelope.envelope, env[TOKEN_ENV]);
-        observedModel = verifyModelIdentity(envelope.envelope.modelUsage, requestedModel);
-        parsed = parseExecuteCandidate(envelope.envelope.result, validateCandidate);
-        assertNoDecodedSecret(parsed.candidate, env[TOKEN_ENV]);
+        const observedModel = verifyModelIdentity(terminal.modelUsage, requestedModel);
+        const candidate = terminal.structured_output;
+        const checked = resultContract.validate(candidate);
+        if (!checked.ok) throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, checked.reason);
+        if (validateCandidate) {
+          let verdict;
+          try { verdict = validateCandidate(candidate); }
+          catch { throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, 'validator-failed'); }
+          if (verdict !== true && verdict?.ok !== true) {
+            throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT, verdict?.reason || 'validator-failed');
+          }
+        }
+        const observed = observation({ ...snapshot(), model_observed: observedModel });
+        bestEffort(onProgress, observed);
+        finish(null, { candidate, observedModel, metadata: Object.freeze({
+          pid: Number.isSafeInteger(child.pid) ? child.pid : null, exit_code: code, signal: exitSignal || null,
+          duration_ms: observed.elapsed_ms, stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
+          marker_count: 0, command: path.basename(cmd), argv_count: args.length, observation: observed,
+        }) });
       } catch (error) {
-        finish(reject, error);
-        return;
+        if (error.reason) protocolError(error);
+        else finish(error);
       }
-      finish(resolve, {
-        candidate: parsed.candidate,
-        observedModel,
-        metadata: Object.freeze({
-          pid: Number.isInteger(child.pid) ? child.pid : null,
-          exit_code: code,
-          signal: signal || null,
-          duration_ms: Math.max(0, Date.now() - startedAt),
-          stdout_bytes: stdoutBytes,
-          stderr_bytes: stderrBytes,
-          marker_count: parsed.classification.marker_count,
-          command: path.basename(cmd),
-          argv_count: args.length,
-        }),
-      });
     });
   });
 }
@@ -689,7 +650,9 @@ async function invokeClaudeSidecar(opts) {
   if (typeof options.prompt !== 'string' || !options.prompt.trim()) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.MISSING_PROMPT);
   }
-  const prompt = options.prompt;
+  const resultContract = workerContract.contract(options.resultProfile || 'execute', options.resultSchema || options.schema);
+  const prompt = options.prompt + '\n\n' + resultContract.instruction('claude-cli');
+  const phase = options.calibrationPhase || (['memory','review','fix','plan'].includes(options.resultProfile) ? options.resultProfile : options.resultProfile === 'preparation' ? 'artifacts' : 'execute');
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
   const launchIdentity = claudeLaunchIdentity(options);
@@ -754,7 +717,7 @@ async function invokeClaudeSidecar(opts) {
     fs.writeFileSync(promptFile, prompt, { encoding: 'utf8', mode: 0o600 });
 
     const instruction = 'Read the complete task prompt from this UTF-8 file: '
-      + `${JSON.stringify(promptFile)}. Follow it exactly and finish with its required worker-result block.`;
+      + `${JSON.stringify(promptFile)}. Follow it exactly and return the required structured_output JSON.`;
     if (Buffer.byteLength(instruction, 'utf8') > MAX_PROMPT_INSTRUCTION_BYTES) {
       throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
     }
@@ -767,7 +730,8 @@ async function invokeClaudeSidecar(opts) {
       '--no-session-persistence', '--disable-slash-commands',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--setting-sources', '', '--settings', CLAUDE_INVOCATION_SETTINGS,
-      '--output-format', 'json',
+      '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+      '--json-schema', JSON.stringify(resultContract.schema),
       '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
       ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
       '-p', instruction];
@@ -779,10 +743,13 @@ async function invokeClaudeSidecar(opts) {
     const { observedModel, ...output } = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
-      requestedModel: model,
+      requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
+      calibration: calibrationApi.read({model,effort:effort || 'medium',phase},options.calibrationOptions),
     });
+    const proposal = calibrationApi.propose({model,effort:effort || 'medium',phase},output.metadata.observation,options.calibrationOptions);
     return { ...output, telemetry: Object.freeze({ ...telemetryBase,
-      model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE }) };
+      model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE, observation: output.metadata.observation,
+      calibration_proposal: proposal }) };
   } catch (error) {
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync
     // above throw native errors that already carry a `.code` (EACCES, ENOSPC,

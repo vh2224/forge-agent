@@ -146,12 +146,12 @@ write(emitter, `const fs=require('fs');const args=process.argv.slice(2);
 if(args.includes('--version')){process.stdout.write('2.1.0');process.exit(0);}
 const instruction=args[args.indexOf('-p')+1];
 const prefix='Read the complete task prompt from this UTF-8 file: ';
-const suffix='. Follow it exactly and finish with its required worker-result block.';
+const suffix='. Follow it exactly and return the required structured_output JSON.';
 const file=JSON.parse(instruction.slice(prefix.length,instruction.length-suffix.length));
 fs.writeFileSync(${JSON.stringify(captureFile)},JSON.stringify({args,prompt:fs.readFileSync(file,'utf8')}));
 const result={status:'done',summary:'Local transport simulation',must_haves_status:[],files_changed:[]};
 const block=['---GSD-WORKER-RESULT---','status: done','result_json: '+JSON.stringify(result),'---END-RESULT---'].join('\\n');
-process.stdout.write(JSON.stringify({type:'result',subtype:'success',is_error:false,result:block,
+process.stdout.write(JSON.stringify({type:'result',subtype:'success',is_error:false,structured_output:result,result:block,
 modelUsage:{[args[args.indexOf('--model')+1]]:{inputTokens:123}}}));`);
 process.env.FORGE_XLLM_CLAUDE_BIN = emitter;
 // Git is used only by the existing real xllm safety contract, inside this disposable fixture.

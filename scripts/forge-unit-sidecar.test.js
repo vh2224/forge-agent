@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -508,6 +508,8 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
     fs.writeFileSync(path.join(lab.a, 'untracked.txt'), 'changed after handoff\n');
     assert.throws(() => ready.result.assertReady(), /inspection-changed/);
     await assert.rejects(invoke(), /retry-exhausted/);
+    assert.strictEqual(calls, 0, 'a reserved handoff cannot open another writer');
+    assert.strictEqual(JSON.parse(fs.readFileSync(stateFile)).reservations.length, 1);
     restore();
     const recovered = await invoke();
     assert.strictEqual(calls, 1); assert(recovered.corrected);
@@ -558,7 +560,7 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
 async function deliveryPublicationLimits() {
   const fs = require('fs'), os = require('os'), path = require('path');
   const delivery = require('./forge-delivery');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-sidecar-delivery-size-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-sidecar-delivery-size-')));
   try {
     const owner = path.join(root, 'owner'), code = path.join(root, 'code');
     fs.mkdirSync(owner); fs.mkdirSync(code);
@@ -589,7 +591,32 @@ async function deliveryPublicationLimits() {
     await assert.rejects(sidecar.acceptArtifactResult(request, payload, { providerCalled: true, maxPayloadBytes: bytes - 1 }),
       error => error.code === 'invalid-artifact-result' && error.message === 'payload-limit');
     assert(!fs.existsSync(path.join(owner, loc.delivery.output)), 'total cap refuses publication');
-    await sidecar.acceptArtifactResult(request, payload, { providerCalled: true, maxPayloadBytes: bytes });
+    const calibration = require('./forge-sidecar-calibration');
+    const calibrationIdentity = { model: 'claude-fixture', effort: 'high', phase: 'artifacts' };
+    const proposal = calibration.propose(calibrationIdentity, { initial_sample_ms: 100, gap_sample_ms: 200 });
+    const commit = calibration.commit;
+    let commitCalls = 0, accepted;
+    calibration.commit = () => { commitCalls++; return { committed: false, diagnostic: 'calibration-busy' }; };
+    try {
+      accepted = await sidecar.acceptArtifactResult(request, payload, { providerCalled: true, maxPayloadBytes: bytes,
+        telemetry: { calibration_proposal: proposal, observation: { phase: 'closed', input_tokens: 42, raw: 'private-text' } } });
+    } finally { calibration.commit = commit; }
+    assert.equal(accepted.result.transport_telemetry.observation.input_tokens, 42);
+    assert(!JSON.stringify(accepted.result.transport_telemetry.observation).includes('private-text'));
+    assert.equal(accepted.result.transport_telemetry.calibration_commit.diagnostic, 'calibration-busy');
+    assert.equal(commitCalls, 3, 'accepted proposals get bounded automatic persistence retries');
+    assert.equal(JSON.parse(fs.readFileSync(request.resultFile)).transport_telemetry.observation.input_tokens, 42);
+    const firstReceipt = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json'));
+    assert.deepEqual(firstReceipt.calibration_proposal, proposal, 'trusted proposal is durable before replay');
+    assert.equal(calibration.read(calibrationIdentity).initial.count, 0);
+    const replay = await sidecar.acceptArtifactResult(request, payload, { providerCalled: true,
+      telemetry: { calibration_proposal: calibration.propose(calibrationIdentity, { initial_sample_ms: 999, gap_sample_ms: 999 }) } });
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.result.transport_telemetry.observation.input_tokens, 42);
+    assert.equal(replay.result.transport_telemetry.calibration_commit.committed, true);
+    assert.equal(calibration.read(calibrationIdentity).initial.count, 1, 'same persisted proposal cannot learn twice');
+    assert.deepEqual(JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json')).calibration_proposal, proposal);
+    assert.equal(inspectPayload({ ...payload, calibration_proposal: proposal }).reason, 'schema-invalid');
     assert.strictEqual(fs.readFileSync(path.join(owner, loc.delivery.output), 'utf8'), content);
     assert.strictEqual(JSON.parse(fs.readFileSync(path.join(owner, loc.delivery.output))).criteria.length, 425);
     assert.strictEqual(JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json')).phase, 'ready');
@@ -628,13 +655,13 @@ async function deliveryPublicationLimits() {
 }
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-')), previous = {};
+  const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
   for (const key of ['HOME', 'USERPROFILE', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'FORGE_HOME']) previous[key] = process.env[key];
   process.env.HOME = process.env.USERPROFILE = profile;
   process.env.CODEX_HOME = path.join(profile, '.codex'); process.env.CLAUDE_CONFIG_DIR = path.join(profile, '.claude');
   process.env.FORGE_HOME = path.resolve(__dirname, '..');
   try {
-    await deliveryPublicationLimits();
+    if (!selectedScenario || selectedScenario === '--delivery-publication-limits') await deliveryPublicationLimits();
     if (!selectedScenario || selectedScenario === '--recovery-contracts') await recoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);

@@ -36,6 +36,13 @@ const WRAPPER_DIR_READERS = Object.freeze([
     why: 'collectPlanFiles only descends through directory entries and reads loose PLAN files; it does not parse an epoch.md container.',
   },
   {
+    file: 'forge-dispatch-resolve.js',
+    dirs: Object.freeze(['.gsd/milestones', '.gsd/tasks']),
+    evidence: 'forge-dispatch-resolve.js:53-55: resolutionInputs enumerates __dirname and filters runtime .js/.json sources; plan and roadmap paths are caller-selected, not enumerated.',
+    verdict: 'safe-by-construction',
+    why: 'The specific __dirname target and runtime source extension filter never enumerate milestone or task wrapper directories; selected plan and roadmap files are fingerprinted directly.',
+  },
+  {
     file: 'forge-distill.js',
     dirs: Object.freeze(['.gsd/milestones']),
     evidence: 'forge-distill.js:35,48-50 — checkEligibility and sourceFiles both join .gsd/milestones/<milestoneId> from a caller-supplied milestoneId, and the only fs.readdirSync call is on path.join(root, \'slices\'), filtered to /^S\\d+$/ directory entries.',

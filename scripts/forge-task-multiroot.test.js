@@ -60,7 +60,7 @@ async function scenario(vcs, moduleDir = __dirname) {
     write(provider, `const fs=require('fs'); const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(calls)},'call\\n');
       for(const dir of ${JSON.stringify([f.a, f.b])}) fs.writeFileSync(require('path').join(dir,'same.txt'),'after\\n');
       const result={status:'done',summary:'Both checkouts updated',must_haves_status:[],files_changed:[]};
-      process.stdout.write(JSON.stringify({type:'result',subtype:'success',is_error:false,modelUsage:{'claude-sonnet-5':{inputTokens:1}},
+      process.stdout.write(JSON.stringify({type:'result',subtype:'success',is_error:false,structured_output:result,modelUsage:{'claude-sonnet-5':{inputTokens:1}},
       result:['---GSD-WORKER-RESULT---','status: done','result_json: '+JSON.stringify(result),'---END-RESULT---'].join('\\n')}));`);
     process.env.FORGE_XLLM_CLAUDE_BIN = provider;
     accounts.resolveLaunch = () => ({ name: 'fixture', token: 'fixture-only' });
@@ -87,8 +87,10 @@ async function scenario(vcs, moduleDir = __dirname) {
     // The verification command, rather than the worker, mutates protected
     // owner state after the writing response has already been accepted.
     const decisions = path.join(f.owner, '.gsd/DECISIONS.md'), once = path.join(f.dir, 'verification-once');
-    const driftCommand = 'node -e ' + JSON.stringify(`const fs=require('fs');if(!fs.existsSync(${JSON.stringify(once)})){fs.writeFileSync(${JSON.stringify(once)},'once');fs.writeFileSync(${JSON.stringify(decisions)},'unproved verification drift');}`);
-    execute.verification.commandsByRoot['x-alpha'] = [command + ' && ' + driftCommand];
+    const driftScript = path.join(f.dir, 'verification-drift.js');
+    write(driftScript, `const fs=require('fs');if(!fs.existsSync(${JSON.stringify(once)})){fs.writeFileSync(${JSON.stringify(once)},'once');fs.writeFileSync(${JSON.stringify(decisions)},'unproved verification drift');}`);
+    const driftCommand = 'node ' + JSON.stringify(driftScript);
+    execute.verification.commandsByRoot['x-alpha'] = [command, driftCommand];
     await assert.rejects(unit.runUnitSidecar(execute), /execution-protected-metadata/);
     assert.strictEqual(fs.existsSync(path.join(f.owner, `${task}-SUMMARY.md`)), false, 'verification drift blocks publication');
     assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'call\n');

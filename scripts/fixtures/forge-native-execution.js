@@ -41,7 +41,7 @@ if (control.failure) { process.stderr.write('simulated transport failure after w
 const result = { status: control.status || 'done', summary: 'Fixture execution', must_haves_status: [], files_changed: [] };
 if (control.extraArtifact) result.artifacts = [{ path: '../outside.md', content: 'invalid' }];
 const model = args[args.indexOf('--model') + 1];
-process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false,
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: result,
  result: ['---GSD-WORKER-RESULT---','status: '+result.status,'result_json: '+JSON.stringify(result),'---END-RESULT---'].join('\\n'),
  modelUsage: { [model]: { inputTokens: 123 } } }));
 `);

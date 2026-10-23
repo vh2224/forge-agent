@@ -14,10 +14,33 @@ const token = 'fixture-secret-never-log';
 accounts.resolveLaunch = () => ({ name: 'fixture', token });
 const claude = require('./forge-claude-sidecar');
 const unit = require('./forge-unit-sidecar');
-const { diagnostic } = require('./forge-sidecar-diagnostic');
+const { diagnostic, observation } = require('./forge-sidecar-diagnostic');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
 const { loadProcedureContext } = require('./forge-procedure-context');
 const sourceRoot = path.resolve(__dirname, '..');
+test('calibration read outcome survives shared observation and failure projection without open fields', () => {
+  const calibration = { diagnostic: 'calibration-unavailable', initial: 'calibrating', gap: 'calibrated' };
+  const input = { calibration: { ...calibration, raw: token }, raw: token };
+  assert.deepEqual(observation(input).calibration, calibration);
+  assert.deepEqual(diagnostic('provider-exit', { observation: input }).observation.calibration, calibration);
+  assert.deepEqual(observation(observation(input)), observation(input));
+  assert.deepEqual(observation({ calibration: { diagnostic: token, initial: token, gap: token } }).calibration,
+    { diagnostic: null, initial: 'uncalibrated', gap: 'uncalibrated' });
+  assert(!JSON.stringify(observation(input)).includes(token));
+});
+test('observation records CLI sources and keeps unknown usage distinct from zero', () => {
+  const unknown = observation({ stdout_bytes: 12, remote_event_count: 0, raw: token });
+  assert.equal(unknown.remote_source, null);
+  assert.equal(unknown.input_tokens, null);
+  assert.equal(unknown.usage_source, null);
+  const observed = observation({ remote_event_count: 1, input_tokens: 0, output_tokens: -1, cost_usd: 0 });
+  assert.equal(observed.remote_source, 'cli-reported-protocol');
+  assert.equal(observed.usage_source, 'cli-reported-usage');
+  assert.equal(observed.input_tokens, 0);
+  assert.equal(observed.output_tokens, null);
+  assert.equal(observed.cost_source, 'cli-estimate-usd');
+  assert(!JSON.stringify(unknown).includes(token));
+});
 const procedure = loadProcedureContext({ cwd: sourceRoot, phase: 'research-milestone' });
 const oldBin = process.env.FORGE_XLLM_CLAUDE_BIN;
 const provider = path.join(root, 'provider.js');
@@ -27,18 +50,20 @@ fs.appendFileSync('calls.txt', 'call\\n');
 const args = process.argv.slice(2);
 const instruction = args[args.indexOf('-p') + 1];
 const prefix = 'Read the complete task prompt from this UTF-8 file: ';
-const suffix = '. Follow it exactly and finish with its required worker-result block.';
+const suffix = '. Follow it exactly and return the required structured_output JSON.';
 const prompt = fs.readFileSync(JSON.parse(instruction.slice(prefix.length, -suffix.length)), 'utf8');
 fs.writeFileSync('observed-prompt.txt', prompt);
 const output = fs.readFileSync('output.txt', 'utf8');
 if (fs.existsSync('stderr.txt')) process.stderr.write(fs.readFileSync('stderr.txt'));
 // claude -p --output-format json: one result object; modelUsage names the
 // received --model unless a scenario supplies model-usage.json.
+let structured;
+try { structured = JSON.parse(output.slice(output.lastIndexOf('result_json: ') + 13, output.lastIndexOf('---END-RESULT---')).trim()); } catch {}
 const model = args[args.indexOf('--model') + 1];
 const modelUsage = fs.existsSync('model-usage.json')
   ? JSON.parse(fs.readFileSync('model-usage.json', 'utf8')) : { [model]: { inputTokens: 1 } };
 process.stdout.write(fs.existsSync('raw-output') ? output : JSON.stringify({
-  type: 'result', subtype: 'success', is_error: false, result: output, modelUsage }));
+  type: 'result', subtype: 'success', is_error: false, result: output, structured_output: structured, modelUsage }));
 `);
 process.env.FORGE_XLLM_CLAUDE_BIN = provider;
 after(() => {
@@ -81,12 +106,126 @@ function request(output) {
   }));
   fs.writeFileSync(path.join(cwd, 'output.txt'), output);
   return { cwd, unitType: 'research-milestone', milestoneId: 'M001', description: 'Fixture research',
-    route: resolveDispatch({ cwd, unitType: 'research-milestone', hostRuntime: 'codex' }),
+    route: resolveDispatch({ cwd, unitType: 'research-milestone', hostRuntime: 'codex', milestoneId: 'M001', unitId: 'M001' }),
     workflowId: `workflow-${sequence}`, dispatchId: `dispatch-${sequence}`,
     resultFile: path.join(root, `result-${sequence}.json`),
     constraints: { auto_commit: false, deploy: false } };
 }
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+test('calibration-unavailable survives adapter failure, persisted receipt and zero-provider replay', async () => {
+  const calibration = require('./forge-sidecar-calibration');
+  const options = { userHome: path.join(root, 'corrupt-calibration') };
+  fs.mkdirSync(calibration.directory(options), { recursive: true });
+  fs.writeFileSync(path.join(calibration.directory(options), 'calibration.json'), 'private-invalid-json');
+  const originalRead = calibration.read;
+  calibration.read = id => originalRead(id, options);
+  try {
+    const r = request('invalid provider envelope');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(unit.runUnitSidecar(r), error => {
+        assert.equal(error.diagnostic.observation.calibration.diagnostic, 'calibration-unavailable');
+        return true;
+      });
+      const failure = readJson(r.resultFile), receipt = readJson(r.resultFile + '.receipt.json');
+      assert.deepEqual(failure.diagnostic.observation.calibration,
+        { diagnostic: 'calibration-unavailable', initial: 'uncalibrated', gap: 'uncalibrated' });
+      assert.deepEqual(receipt.failure.diagnostic, failure.diagnostic);
+      assert(!JSON.stringify({ failure, receipt }).includes('private-invalid-json'));
+    }
+    assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
+  } finally { calibration.read = originalRead; }
+});
+test('execution receipt and replay retain closed calibration telemetry', async () => {
+  const r = request(block());
+  Object.assign(r, { unitType: 'execute-task', sliceId: 'S01', taskId: 'T01' });
+  const taskDir = path.join(r.cwd, '.gsd/milestones/M001/slices/S01/tasks/T01');
+  fs.mkdirSync(taskDir, { recursive: true });
+  fs.writeFileSync(path.join(taskDir, '../..', 'S01-PLAN.md'), '# Fixture slice\n');
+  r.planFile = path.join(taskDir, 'T01-PLAN.md');
+  fs.writeFileSync(r.planFile, '---\nid: T01\ntier: standard\nworker: claude\neffort: medium\n---\nFixture plan');
+  r.route = resolveDispatch({ cwd: r.cwd, unitType: r.unitType, hostRuntime: 'codex',
+    milestoneId: r.milestoneId, sliceId: r.sliceId, unitId: r.taskId, planPath: r.planFile });
+  // Load the execution closure into the isolated fixture; no checkout or git writes.
+  const procedure = loadProcedureContext({ cwd: sourceRoot, phase: 'execute-task' });
+  for (const module of procedure.modules) fs.copyFileSync(path.join(sourceRoot, module.path), path.join(r.cwd, module.path));
+  const safe = { diagnostic: 'calibration-unavailable', initial: 'uncalibrated', gap: 'calibrated' };
+  // Resume exactly at the persisted execution boundary: the same shared
+  // projection constructs trustedTransportRecord after the adapter returns.
+  const receiptFile = r.resultFile + '.receipt.json';
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'executed',
+    fingerprint: unit.artifactFingerprint(r), dispatch_id: r.dispatchId, before: {},
+    telemetry: { observation: observation({ calibration: { ...safe, raw: 'private-calibration' } }) },
+    result: { status: 'partial', summary: 'Stopped fixture', questions: [], files_changed: [] } }));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const replay = await unit.runUnitSidecar(r);
+    const receipt = readJson(receiptFile);
+    assert.equal(receipt.phase, 'ready');
+    assert.deepEqual(receipt.telemetry.observation.calibration, safe);
+    assert(!JSON.stringify(receipt).includes('private-calibration'));
+    assert.deepEqual(replay.transport_telemetry.observation.calibration, safe);
+    assert.deepEqual(readJson(r.resultFile).transport_telemetry.observation.calibration, safe);
+    assert(!fs.existsSync(path.join(r.cwd, 'calls.txt')), 'execution replay never calls the provider');
+  }
+});
+function assertSafeFailureRecords(failure, receipt, events, route, secrets, privatePaths) {
+  // Compare the retained resolver observation before allowing its exact path
+  // fields. Other route fields (including policy diagnostics) get no exemption.
+  assert.deepEqual(receipt.route, route);
+  function inspect(value, field) {
+    if (typeof value === 'string') {
+      for (const secret of secrets) assert(!value.includes(secret), `${field}: provider content leaked`);
+      const authorityPath = /^receipt\.route\.(?:resolution_context\.(?:owner|roadmap|plan)|resolution_options\.(?:cwd|planPath|roadmapPath)|resolution_sources\.\d+\.(?:path|physical_path))$/.test(field);
+      if (!authorityPath) for (const privatePath of privatePaths) {
+        assert(!value.includes(privatePath), `${field}: private path leaked`);
+      }
+    } else if (value && typeof value === 'object') {
+      for (const [key, entry] of Object.entries(value)) {
+        inspect(key, `${field}.[decoded-key]`);
+        inspect(JSON.stringify(key), `${field}.[key]`);
+        inspect(entry, `${field}.${key}`);
+      }
+    }
+  }
+  inspect(failure, 'failure');
+  inspect(receipt, 'receipt');
+  inspect(events, 'events');
+}
+
+test('failure record assertions decode strings and reject Windows/POSIX diagnostic leaks', () => {
+  for (const privatePath of ['C:\\Users\\fixture\\workspace', '/tmp/fixture/workspace']) {
+    const route = { resolution_context: { owner: privatePath, roadmap: `${privatePath}/ROADMAP.md` },
+      resolution_options: { cwd: privatePath }, resolution_sources: [{ path: privatePath, physical_path: privatePath }] };
+    const clean = { failure: { diagnostic: { reason: 'adapter-failed' } },
+      receipt: { route, failure: { diagnostic: { reason: 'adapter-failed' } } },
+      events: [{ diagnostic: { reason: 'adapter-failed' } }] };
+    const check = records => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+      route, [token], [privatePath]);
+    check(clean);
+    for (const surface of ['failure', 'receipt', 'events', 'route-diagnostic']) {
+      for (const leaked of [privatePath, token]) {
+        const records = JSON.parse(JSON.stringify(clean));
+        const target = surface === 'failure' ? records.failure.diagnostic
+          : surface === 'receipt' ? records.receipt.failure.diagnostic
+            : surface === 'events' ? records.events[0].diagnostic : records.receipt.route;
+        target.tail = { nested: [leaked] };
+        const expectedRoute = surface === 'route-diagnostic' ? records.receipt.route : route;
+        assert.throws(() => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+          expectedRoute, [token], [privatePath]), /(?:private path|provider content) leaked/,
+        `${surface} must reject decoded leakage`);
+        target.tail = { [leaked]: true };
+        assert.throws(() => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+          expectedRoute, [token], [privatePath]), /(?:private path|provider content) leaked/,
+        `${surface} must reject decoded key leakage`);
+      }
+    }
+    // Even authenticated provenance cannot retain provider content or secrets.
+    const secretRoute = { ...route, resolution_options: { cwd: token } };
+    const records = JSON.parse(JSON.stringify(clean));
+    records.receipt.route = secretRoute;
+    assert.throws(() => assertSafeFailureRecords(records.failure, records.receipt, records.events,
+      secretRoute, [token], [privatePath]), /provider content leaked/);
+  }
+});
 
 test('compact/multiline JSON carries Markdown, literal markers, Unicode and CRLF intact', () => {
   for (const pretty of [true, false]) {
@@ -179,7 +318,7 @@ test('real rendered research prompt, simulated provider, publication and replay 
   const prompt = fs.readFileSync(path.join(r.cwd, 'observed-prompt.txt'), 'utf8');
   assert(prompt.includes(procedure.content), 'real research prompt retains the staged mandatory closure');
   for (const text of ['Research codebase', 'Sidecar delivery contract', requiredPath,
-    '921600', '524288', 'compact or multiline', 'auto_commit', `effort: ${r.route.effort}`]) assert(prompt.includes(text), text);
+    '921600', '524288', 'structured_output', 'auto_commit', `effort: ${r.route.effort}`]) assert(prompt.includes(text), text);
   for (const artifact of p.artifacts) assert.equal(fs.readFileSync(path.join(r.cwd, artifact.path), 'utf8'), artifact.content);
   fs.unlinkSync(path.join(r.cwd, requiredPath));
   await unit.runUnitSidecar(r);
@@ -188,8 +327,8 @@ test('real rendered research prompt, simulated provider, publication and replay 
 });
 test('each rejection persists sanitized diagnostics in result, receipt and event; replay never calls provider', async () => {
   for (const [output, reason] of [
-    ['private-sentinel', 'marker-missing'],
-    [block().replace('status: done', 'status: partial'), 'status-mismatch'],
+    ['private-sentinel', 'result-envelope-invalid'],
+    [block({ ...payload(), status: 'complete' }), 'schema-invalid'],
     [block({ ...payload(), artifacts: [] }), 'artifact-missing'],
     [block({ ...payload(), artifacts: [{ path: '../private-sentinel', content: 'x' }] }), 'artifact-path-invalid'],
     [block({ ...payload(), summary: token }), 'secret-output'],
@@ -207,8 +346,8 @@ test('each rejection persists sanitized diagnostics in result, receipt and event
     assert(Number.isSafeInteger(failure.diagnostic.duration_ms));
     assert.deepEqual(receipt.failure.diagnostic, failure.diagnostic);
     assert.deepEqual(events.at(-1).diagnostic, failure.diagnostic);
-    const logs = JSON.stringify([failure, receipt, events]);
-    for (const secret of [token, 'private-sentinel', r.cwd]) assert(!logs.includes(secret));
+    assertSafeFailureRecords(failure, receipt, events, r.route,
+      [token, 'private-sentinel'], [r.cwd, fs.realpathSync.native(r.cwd)]);
     assert(!fs.existsSync(path.join(r.cwd, requiredPath)));
     await assert.rejects(unit.runUnitSidecar(r), e => e.code === code);
     assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
@@ -242,8 +381,8 @@ test('identity and envelope refusals persist only closed metadata, publish nothi
     assert.equal(receipt.phase, 'failed');
     assert.deepEqual(receipt.failure.diagnostic, failure.diagnostic);
     assert.deepEqual(events.at(-1).diagnostic, failure.diagnostic);
-    const logs = JSON.stringify([failure, receipt, events]);
-    for (const secret of [token, 'Research complete', '"usage"', 'inputTokens', r.cwd]) assert(!logs.includes(secret), `${label}: ${secret}`);
+    assertSafeFailureRecords(failure, receipt, events, r.route,
+      [token, 'Research complete', '"usage"', 'inputTokens'], [r.cwd, fs.realpathSync.native(r.cwd)]);
     assert(!fs.existsSync(path.join(r.cwd, requiredPath)), `${label}: an artifact was published`);
     await assert.rejects(unit.runUnitSidecar(r), e => e.code === code);
     assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
@@ -257,7 +396,7 @@ test('stderr token on successful exit is refused without persisting output', asy
 });
 test('partial/blocked worker outcomes are preserved and not classified as adapter failures', async () => {
   for (const status of ['partial', 'blocked']) {
-    const r = request(block({ ...payload(), status, questions: ['Human decision needed'] }));
+    const r = request(block({ ...payload(), status, artifacts: [], questions: ['Human decision needed'] }));
     assert.equal((await unit.runUnitSidecar(r)).status, status);
     assert(!fs.existsSync(path.join(r.cwd, requiredPath)));
     assert.equal(readJson(r.resultFile + '.receipt.json').phase, 'ready');
@@ -271,6 +410,7 @@ test('interrupted publication preserves validated receipt and resumes without an
   // difference on every host: production canonicalizes cwd before publication.
   const alias = path.join(root, `workspace-alias-${sequence}`);
   fs.symlinkSync(r.cwd, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  r.contextRoot = r.cwd;
   r.cwd = alias;
   const interruptedTarget = path.join(fs.realpathSync(r.cwd), optionalPath);
   const originalRename = fs.renameSync;

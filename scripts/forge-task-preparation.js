@@ -239,12 +239,7 @@ function buildPreparationPrompt(request, contract = request.contract || phaseCon
     `[BEGIN PREPARATION INPUT]\n${input}\n[END PREPARATION INPUT]`,
     'Operate read-only with respect to canonical project artifacts. Return content in the envelope; do not write files, run commits, change preferences, select a milestone or perform deployment.',
     `The only artifact path allowed on done is ${requiredArtifact(request, contract)}.`,
-    'Return exactly one envelope object with keys status, summary, questions and artifacts. done requires that one artifact and no questions. partial or blocked requires zero artifacts and preserves every unanswered question.',
-    'When returning text through a native host, finish with markers on separate lines:',
-    '---GSD-WORKER-RESULT---',
-    'status: <done|partial|blocked>',
-    'result_json: <complete JSON envelope>',
-    '---END-RESULT---',
+    require('./forge-worker-result-contract').contract('preparation').instruction('json'),
   ].filter(Boolean).join('\n\n');
   return require('./forge-prompt').composeProcedurePrompt(prompt, procedure, request.procedure_context);
 }
@@ -325,7 +320,9 @@ function nativeOptions(request, route, prompt, contract = request.contract || ph
     activeCapabilities: request.activeCapabilities,
     effortBinding: request.effortBinding, readback: request.readback,
     taskName: nativeTaskName(request),
-    agentType: contract.agentType, prompt, forkTurns: request.forkTurns || 'none',
+    agentType: contract.agentType,
+    prompt: prompt + '\n\n' + require('./forge-worker-result-contract').contract('preparation').instruction('native'),
+    forkTurns: request.forkTurns || 'none',
   };
 }
 
@@ -529,13 +526,19 @@ function validateNativeTelemetry(actual, expected) {
 
 function candidateFromPreparationResult(raw, delivery) {
   const loc = unit.locations(delivery);
-  const validate = value => unit.inspectArtifacts(value, loc.allowed, loc.required, Infinity, loc.rules,
-    { forbidArtifactsOnNonDone: true });
+  const validate = value => {
+    const artifacts = unit.inspectArtifacts(value, loc.allowed, loc.required, Infinity, loc.rules, { forbidArtifactsOnNonDone: true });
+    if (!artifacts.ok) throw preparationError(artifacts.reason, 'validation');
+    const checked = require('./forge-worker-result-contract').contract('preparation').validate(value);
+    if (!checked.ok) throw preparationError(checked.reason, 'validation');
+    return true;
+  };
+  const accepted = value => { validate(value); return value; };
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    if (['done', 'partial', 'blocked'].includes(raw.status) && Array.isArray(raw.artifacts)) return raw;
+    if (['done', 'partial', 'blocked'].includes(raw.status) && Array.isArray(raw.artifacts)) return accepted(raw);
     if (raw.result_json && typeof raw.result_json === 'object') {
       if (raw.status && raw.status !== raw.result_json.status) throw preparationError('native-result-status-mismatch', 'validation');
-      return raw.result_json;
+      return accepted(raw.result_json);
     }
     if (raw.result !== undefined) return candidateFromPreparationResult(raw.result, delivery);
   }
@@ -620,7 +623,7 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
         const providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called : 'unknown';
         const stage = adapterFailureStage(error, providerCalled);
         try { unit.failArtifactAttempt(started.delivery_request, error.code || 'sidecar-unit-failed',
-          error.diagnostic?.reason || (providerCalled === true ? 'provider-exit' : 'adapter-failed'), providerCalled); }
+          error.diagnostic || (providerCalled === true ? 'provider-exit' : 'adapter-failed'), providerCalled); }
         catch { /* preserve the production adapter refusal */ }
         return refused(stage, error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
       }
@@ -649,7 +652,7 @@ async function prepareStandaloneTask(rawRequest, deps = {}) {
     } catch (error) {
       if (typeof error.provider_called === 'boolean') providerCalled = error.provider_called;
       try { unit.failArtifactAttempt(started.delivery_request, error.code || 'sidecar-unit-failed',
-        error.diagnostic?.reason || 'adapter-failed', providerCalled); } catch { /* preserve first refusal */ }
+        error.diagnostic || 'adapter-failed', providerCalled); } catch { /* preserve first refusal */ }
       return refused(adapterFailureStage(error, providerCalled),
         error.code || 'sidecar-unit-failed', started.route, providerCalled, error.diagnostic);
     }

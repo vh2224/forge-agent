@@ -507,11 +507,11 @@ function resolveDispatch(opts, environment) {
   let effortReason = optionEffort
     ? `argument-effort:${unitType}`
     : prefsEffort ? `prefs.effort:${unitType}` : `unit-type:${unitType}`;
-  if (unitType === 'execute-task' && plan.effort) {
+  if (!optionEffort && unitType === 'execute-task' && plan.effort) {
     effort = plan.effort;
     effortReason = `frontmatter-effort:${plan.effort}`;
   }
-  if (unitType === 'plan-slice' && reason === 'risk-escalation:high') {
+  if (!optionEffort && unitType === 'plan-slice' && reason === 'risk-escalation:high') {
     effort = 'max';
     effortReason = 'risk-escalation:high';
   }
@@ -642,6 +642,7 @@ function resolveDispatch(opts, environment) {
     // per-model clamp; thinking_requested is the raw phase pref (null when
     // absent). Requested, effective and delivered values stay distinct: nothing
     // here claims what a provider applied.
+    effort_argument: optionEffort ? o.effortMap[unitType] : null,
     effort_requested: effortRequested,
     policy_version: modelPolicy.POLICY_VERSION,
     policy_entry: effortPolicy.entry,
@@ -709,6 +710,7 @@ function degradedContract(args, environment) {
     routing_present: false,
     prefs_ok: false,
     prefs_errors: [{ code: 'routing-runtime-error', message: 'Resolver failed before configuration could be established.' }],
+    effort_argument: null,
     effort_requested: null,
     policy_version: modelPolicy.POLICY_VERSION,
     policy_entry: null,
@@ -799,25 +801,27 @@ if (require.main === module) {
     try {
       const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
       process.stdout.write(shellExports(payload) + '\n');
-      process.exit(0);
+      process.exitCode = 0;
     } catch (error) {
       process.stderr.write(JSON.stringify({ error: `--shell-exports: unparseable stdin payload (${(error && error.message) || error})` }) + '\n');
-      process.exit(2);
+      process.exitCode = 2;
     }
-  }
-  try {
-    const result = runCli(process.argv.slice(2), process.env);
-    process.exit(result && result.prefs_ok === false ? 1 : 0);
-  } catch (error) {
-    // The contract on stdout stays parseable for the shell consumer, but the
-    // degradation itself must be loud: a crash that silently re-routes every
-    // unit to the cheapest effort is exactly the failure mode the diagnosis
-    // caught. stderr is free — the orchestrator surfaces it next to the JSON.
-    process.stderr.write(JSON.stringify({
-      warning: 'forge-dispatch-resolve emitted a fail-closed degraded contract',
-      error: (error && error.message) || String(error),
-    }) + '\n');
-    process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
-    process.exit(2);
+  } else {
+    // Let pending stdout/stderr writes drain before Node exits naturally.
+    try {
+      const result = runCli(process.argv.slice(2), process.env);
+      process.exitCode = result && result.prefs_ok === false ? 1 : 0;
+    } catch (error) {
+      // The contract on stdout stays parseable for the shell consumer, but the
+      // degradation itself must be loud: a crash that silently re-routes every
+      // unit to the cheapest effort is exactly the failure mode the diagnosis
+      // caught. stderr is free — the orchestrator surfaces it next to the JSON.
+      process.stderr.write(JSON.stringify({
+        warning: 'forge-dispatch-resolve emitted a fail-closed degraded contract',
+        error: (error && error.message) || String(error),
+      }) + '\n');
+      process.stdout.write(JSON.stringify(degradedContract(process.argv.slice(2), process.env)) + '\n');
+      process.exitCode = 2;
+    }
   }
 }

@@ -10,12 +10,13 @@ function command(bin, args, cwd) {
   assert.strictEqual(result.status, 0, `${bin} ${args.join(' ')}: ${result.stderr || result.error}`); return result.stdout.trim();
 }
 function laboratory(label) {
-  const base = path.join(os.tmpdir(), 'codex', 'T-20261015172849-corrigir-contrato-multi', 'labs');
-  fs.mkdirSync(base, { recursive: true });
-  const dir = fs.mkdtempSync(path.join(base, label + '-'));
+  const tempBase = path.join(os.tmpdir(), 'codex', 'T-20261015172849-corrigir-contrato-multi', 'labs');
+  fs.mkdirSync(tempBase, { recursive: true });
+  const base = fs.realpathSync.native(tempBase);
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(base, label + '-')));
   fs.writeFileSync(path.join(dir, '.owner'), label);
   return { dir, cleanup() {
-    const physical = fs.realpathSync(dir), parent = fs.realpathSync(base);
+    const physical = fs.realpathSync.native(dir), parent = fs.realpathSync.native(base);
     assert(roots.within(parent, physical) && roots.key(physical) !== roots.key(parent));
     assert.strictEqual(fs.readFileSync(path.join(physical, '.owner'), 'utf8'), label);
     fs.rmSync(physical, { recursive: true });

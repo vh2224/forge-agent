@@ -157,6 +157,11 @@ async function main() {
     assert.throws(() => unit.materialize(request, record), /execution-protected-metadata/);
     assert(!fs.existsSync(path.join(executionLab.owner, artifact.path)));
     fs.unlinkSync(drift);
+    const foreignGuard = api.lock({ owner: executionLab.b });
+    try {
+      assert.throws(() => unit.materialize(request, record, undefined, foreignGuard), /reconciliation-lock-handle-required/);
+      assert(!fs.existsSync(path.join(executionLab.owner, artifact.path)));
+    } finally { foreignGuard.release(); }
     // The baseline includes the pre-existing control directory in this fixture.
     unit.materialize(request, record);
     unit.materialize(request, record);
