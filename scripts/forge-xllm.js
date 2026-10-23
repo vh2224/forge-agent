@@ -2660,13 +2660,15 @@ async function runWriteContractCore(opts, contract) {
   // transports are untrusted processes and cross this exact same barrier.
   assertUntrustedOutputBarrier(parsed);
 
-  const derived = preDirtyAllByRepo.flatMap((snapshot, index) =>
+  let derived = preDirtyAllByRepo.flatMap((snapshot, index) =>
     deriveFilesChanged(snapshot.repo, snapshot.entries, attemptSnapshots[index].start_sha, snapshot.vcs)
       .map(entry => executionContract ? { ...entry, root_id: labels[index], repo: labels[index] }
         : repoRoots.length > 1 ? { ...entry, repo: labels[index] } : entry));
   // Protected metadata is outside the surgical reset set. A sidecar-owned `.gsd`
   // delta is therefore a hard terminal failure, never an advisory warning/success.
   try {
+    // The caller may remove only changes it can prove it authored (exact owner event appends).
+    if (typeof opts.reconcileProtectedChanges === 'function') derived = await opts.reconcileProtectedChanges(derived);
     assertNoProtectedSidecarChanges(derived);
   } catch (error) {
     if (contract.protectedCode) error.code = contract.protectedCode;

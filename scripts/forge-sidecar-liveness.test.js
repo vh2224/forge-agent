@@ -458,6 +458,31 @@ test('tracker reports working to tool-extended and proof-unavailable transitions
   }
 });
 
+test('ceiling and tool deadline crossed together return a consistent active decision (R7)', () => {
+  const snapshot = active(240001, { gap_suspended: true, elapsed_ms: 240001, first_remote_ms: 0 });
+  const result = evaluate(snapshot, { localProof: { capability: 'available', proof: 'none' } }, DEFAULTS, 240000);
+  assert.equal(result.kill, true);
+  assert.equal(result.cause, 'ceiling');
+  assert.equal(result.state, 'slow-suspect');
+  assert.equal(result.termination, 'budget-exceeded-while-active');
+});
+
+test('no-progress episode is reported from and to a slow-suspect state (R8)', () => {
+  const tracker = createTracker();
+  const snapshot = active(130000, { gap_suspended: true });
+  const unavailable = { localProof: undefined };
+  const looping = { localProof: undefined, progress: { no_progress: true, repeats: 5, fingerprint: 'a'.repeat(64) } };
+  assert.equal(tracker.evaluate(snapshot, unavailable).result.reason, 'proof-unavailable');
+  const entry = tracker.evaluate(snapshot, looping);
+  assert.deepEqual(entry.transition, { from: 'slow-suspect', to: 'slow-suspect', at_ms: snapshot.elapsed_ms,
+    reason: 'no-progress' });
+  assert.equal(tracker.evaluate(snapshot, looping).transition, null);
+  const exit = tracker.evaluate(snapshot, unavailable);
+  assert.deepEqual(exit.transition, { from: 'slow-suspect', to: 'slow-suspect', at_ms: snapshot.elapsed_ms,
+    reason: 'proof-unavailable' });
+  assert.equal(tracker.evaluate(snapshot, looping).transition.reason, 'no-progress');
+});
+
 function main() {
   let failures = 0;
   for (const { name, run } of tests) {

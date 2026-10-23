@@ -1489,6 +1489,26 @@ test('liveness/tool: a ceiling below 660000 classifies with the current proof (p
   assertPrivate(run);
 });
 
+test('liveness/tool: ceiling and tool deadline crossed in one tick keep budget-exceeded-while-active (R7)', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude tool both boundaries fixture.js', { inputs: [privateInput()], result: false });
+  // One clock jump beyond both the 240000 ms ceiling and the 240000 ms tool deadline.
+  const t0 = performance.now();
+  let pivot = null;
+  const clock = {
+    now() {
+      const real = performance.now();
+      return pivot === null ? real - t0 : (real - t0) + (real - pivot > 400 ? 241000 : 0);
+    },
+    accelerate() { if (pivot === null) pivot = performance.now(); },
+  };
+  const run = await runLive(fixture, clock, { localProofFactory: fake.factory, timeoutMs: 245000 });
+  ok(run.error, 'expected the ceiling');
+  assert.strictEqual(run.error.code, 'claude-timeout');
+  assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.state, 'slow-suspect');
+});
+
 test('liveness/tool: five identical tool calls without a write report no-progress once and never kill', async () => {
   const fake = fakeProof({ capability: 'available', proof: 'none' });
   const fixture = toolFixture('claude tool loop fixture.js', { inputs: Array(5).fill(privateInput()) });

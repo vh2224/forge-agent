@@ -192,29 +192,48 @@ async function fsFingerprint(roots, ignore = {}, platform = process.platform, li
 
   const result = { count: 0, bytes: 0, mtime_max: 0, truncated: false };
   const stack = validRoots.map(dir => ({ dir, depth: 0 }));
-  while (stack.length && !result.truncated) {
+  const STAT_BATCH = 32;
+  // The entry budget stops everything; depth truncation only skips that subtree.
+  let budgetExhausted = false;
+  while (stack.length && !budgetExhausted) {
     const { dir, depth } = stack.pop();
-    const entries = await settle(() => fsp.readdir(dir, { withFileTypes: true }));
-    if (!entries) continue;
-    const candidates = [];
-    for (const entry of entries) {
-      if (entry.isDirectory() && dirNames.has(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      if (!ignored(normalize(full))) candidates.push(full);
-    }
-    const stats = await Promise.all(candidates.map(full => settle(() => fsp.lstat(full))));
-    for (let index = 0; index < candidates.length; index++) {
-      const stat = stats[index];
-      if (!stat) continue; // vanished between readdir and lstat
-      if (result.count >= limits.MAX_ENTRIES) { result.truncated = true; break; }
-      result.count++;
-      if (stat.isDirectory()) {
-        if (depth + 1 < limits.MAX_DEPTH) stack.push({ dir: candidates[index], depth: depth + 1 });
-        else result.truncated = true;
-        continue;
+    const handle = await settle(() => fsp.opendir(dir));
+    if (!handle) continue;
+    try {
+      let pending = [];
+      const flush = async () => {
+        const stats = await Promise.all(pending.map(full => settle(() => fsp.lstat(full))));
+        for (let index = 0; index < pending.length; index++) {
+          const stat = stats[index];
+          if (!stat) continue; // vanished between readdir and lstat
+          result.count++;
+          if (stat.isDirectory()) {
+            if (depth + 1 < limits.MAX_DEPTH) stack.push({ dir: pending[index], depth: depth + 1 });
+            else result.truncated = true;
+            continue;
+          }
+          result.bytes += stat.size;
+          if (stat.mtimeMs > result.mtime_max) result.mtime_max = stat.mtimeMs;
+        }
+        pending = [];
+      };
+      for (;;) {
+        const entry = await settle(() => handle.read());
+        if (!entry) break;
+        if (entry.isDirectory() && dirNames.has(entry.name)) continue;
+        const full = path.join(dir, entry.name);
+        if (ignored(normalize(full))) continue;
+        if (result.count + pending.length >= limits.MAX_ENTRIES) {
+          // A candidate exists beyond the budget: settle in-flight stats, never schedule it.
+          await flush();
+          if (result.count >= limits.MAX_ENTRIES) { result.truncated = true; budgetExhausted = true; break; }
+        }
+        pending.push(full);
+        if (pending.length >= Math.min(STAT_BATCH, limits.MAX_ENTRIES - result.count)) await flush();
       }
-      result.bytes += stat.size;
-      if (stat.mtimeMs > result.mtime_max) result.mtime_max = stat.mtimeMs;
+      if (!budgetExhausted) await flush();
+    } finally {
+      await settle(() => handle.close());
     }
   }
   return result;

@@ -1485,7 +1485,23 @@ async function runUnitSidecarCore(request, runtime, identity) {
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-    if (!protectedOwner) { fs.appendFileSync(eventsFile, line); return; }
+    if (!protectedOwner) {
+      const key = '.gsd/forge/events.jsonl';
+      const surface = record?.preparation_surface;
+      const previous = surface && typeof surface[key] === 'string' && fs.existsSync(eventsFile)
+        ? fs.readFileSync(eventsFile) : null;
+      fs.appendFileSync(eventsFile, line);
+      // Standalone preparation has no owner broker: advance the surface by exactly
+      // these authenticated bytes (same-tick, no await) so unrelated writes stay detectable.
+      if (previous && hash(previous) === surface[key]) {
+        const appended = Buffer.concat([previous, Buffer.from(line)]);
+        if (fs.readFileSync(eventsFile).equals(appended)) {
+          record.preparation_surface = { ...surface, [key]: hash(appended) };
+          json(receiptFile, record);
+        }
+      }
+      return;
+    }
     const executionApi = require('./forge-task-execution');
     return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
       const expected = { ...protectedOwner };
@@ -1933,7 +1949,20 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const codeProtectedBefore = execution ? execution.execution_contract.code_roots.map(code => ({ root: code.path,
         before: executionApi.protectedSnapshot(code.path) })) : [];
       if (!nativeExecution) { enterTransport(); transportEntered = true; }
-      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution, options, procedure) : await xllm.runExecute({ ...options, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
+      // Shared write-contract validation runs inside runExecute, before this unit
+      // can advance its snapshots: hand it the exact authenticated owner append.
+      const eventsBeforeTransport = fileHash(eventsFile);
+      const reconcileProtectedChanges = async changes => {
+        await livenessQueue;
+        const key = '.gsd/forge/events.jsonl';
+        const contract = execution?.execution_contract || r.execution_contract;
+        if (!contract || !livenessEventAdvance || eventsBeforeTransport !== livenessEventAdvance.from
+            || fileHash(eventsFile) !== livenessEventAdvance.to) return changes;
+        const ownerIds = new Set(contract.code_roots
+          .filter(code => fs.realpathSync(code.path) === root).map(code => code.id));
+        return changes.filter(entry => !(entry.path === key && ownerIds.has(entry.root_id)));
+      };
+      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution, options, procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
           : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
             require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==

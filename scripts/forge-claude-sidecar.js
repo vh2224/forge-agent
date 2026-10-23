@@ -654,13 +654,16 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     signal?.addEventListener('abort', cancel, { once: true });
     process.once('SIGINT', cancel);
     process.once('SIGTERM', cancel);
-    function ceilingError() {
-      // Classify with the state that held without the ceiling (backstop path).
-      // Same current proof/progress as the watchdog: a tool whose proof still
-      // allows its extension is active, not dead, when the ceiling arrives.
-      const { state, reason } = liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
+    function ceilingError(decision) {
+      // The watchdog passes the decision that already won; the backstop path
+      // classifies with the state that held without the ceiling, using the same
+      // current proof/progress, so a tool whose proof allows its extension is
+      // active, not dead, when the ceiling arrives.
+      const { state, reason, termination } = decision
+        || liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
       const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
-      error.liveness = { version: 1, termination: liveness.classifyTermination({ cause: 'ceiling', state }),
+      error.liveness = { version: 1,
+        termination: decision ? termination : liveness.classifyTermination({ cause: 'ceiling', state }),
         state, reason };
       return error;
     }
@@ -695,7 +698,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
             : { capability: result.proof_capability, proof: result.proof } };
         terminate(error);
       } else if (result.cause === 'ceiling') {
-        terminate(ceilingError());
+        terminate(ceilingError(result));
       }
     }, livenessIntervalMs);
     child.stdout?.on('data', chunk => {

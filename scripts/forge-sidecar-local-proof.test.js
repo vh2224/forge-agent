@@ -315,6 +315,34 @@ test('real fs: depth and entry limits report truncated honestly; missing roots a
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test('real fs: entry budget bounds lstat work (R4)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-local-proof-'));
+  const original = fs.promises.lstat;
+  try {
+    for (let index = 0; index < 100; index++) fs.writeFileSync(path.join(root, `f${index}`), 'x');
+    let calls = 0;
+    fs.promises.lstat = (...args) => { calls++; return original.apply(fs.promises, args); };
+    const capped = await fsFingerprint([root], {}, process.platform, { ...LIMITS, MAX_ENTRIES: 3 });
+    fs.promises.lstat = original;
+    assert.deepEqual([capped.count, capped.truncated], [3, true]);
+    assert.ok(calls <= 1 + 3, `lstat calls bounded by budget, got ${calls}`);
+  } finally { fs.promises.lstat = original; fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('real fs: depth truncation skips only its subtree (R5)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-local-proof-'));
+  try {
+    let dir = path.join(root, 'zdeep');
+    fs.mkdirSync(dir);
+    for (let level = 0; level < LIMITS.MAX_DEPTH + 2; level++) { dir = path.join(dir, `d${level}`); fs.mkdirSync(dir); }
+    fs.mkdirSync(path.join(root, 'src'));
+    fs.writeFileSync(path.join(root, 'src', 'a.txt'), 'abcd');
+    const print = await fsFingerprint([root]);
+    assert.equal(print.truncated, true);
+    assert.equal(print.bytes, 4);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 // ---------------------------------------------------------------- real child
 
 function spawnChild(source) {

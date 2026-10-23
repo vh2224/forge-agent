@@ -166,9 +166,10 @@ function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
   if (!toolDiedFirst && Number.isSafeInteger(ceilingMs) && ceilingMs > 0 && elapsed !== null && elapsed >= ceilingMs) {
     result.kill = true;
     result.cause = 'ceiling';
-    result.termination = classifyTermination({ ...result,
-      state: snapshot?.gap_suspended === true && first !== null && result.state === 'dead'
-        ? 'slow-suspect' : result.state });
+    // A tool deadline crossed in the same tick is subsumed by the ceiling: the
+    // reported state and termination agree (active child over budget).
+    if (snapshot?.gap_suspended === true && first !== null && result.state === 'dead') result.state = 'slow-suspect';
+    result.termination = classifyTermination(result);
     result.extension_ms = null;
     result.window_ms = elapsed;
     result.threshold_ms = ceilingMs;
@@ -181,12 +182,17 @@ function evaluate(snapshot, inputs = {}, policy = DEFAULTS, ceilingMs = null) {
 function createTracker(policy = DEFAULTS, ceilingMs = null) {
   const limits = normalizePolicy(policy);
   let previous = null;
+  let previousLoop = false;
   return {
     evaluate(snapshot, inputs = {}) {
       const result = evaluate(snapshot, inputs, limits, ceilingMs);
-      const transition = previous === result.state ? null
+      // The no-progress episode is tracked independently of the state: it can
+      // begin or end while the state stays slow-suspect.
+      const loop = result.reason === 'no-progress';
+      const transition = previous === result.state && previousLoop === loop ? null
         : { from: previous, to: result.state, at_ms: milliseconds(snapshot?.elapsed_ms), reason: result.reason };
       previous = result.state;
+      previousLoop = loop;
       return { result, transition };
     },
   };

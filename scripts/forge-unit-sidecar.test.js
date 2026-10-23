@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -769,6 +769,120 @@ async function noProgressEventContracts() {
   assert.strictEqual(failed.unitEvents[failed.unitEvents.length - 1].status, terminalStatus);
   console.log('PASS sidecar-no-progress: one closed owner event per episode, reopened after exit, other reasons ignored, best-effort append, result/receipt excluded from local proof');
 }
+// R1/R2: the owner's authenticated no-progress append is reconciled into the
+// preparation surface (no broker) and into the shared write-contract validation
+// (owner == code root, events.jsonl tracked), while unrelated edits still fail.
+async function ownerEventReconcileContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto'), os = require('os');
+  const fixtures = require('./forge-code-roots.test'), runs = require('./forge-runs'), roots = require('./forge-code-roots');
+  const FINGERPRINT = 'a1b2c3d4e5f60718';
+  const loop = { from: 'working', to: 'slow-suspect', at_ms: 1000, reason: 'no-progress',
+    progress: { repeats: 5, fingerprint_sha256: FINGERPRINT } };
+  const moduleKeys = () => Object.keys(require.cache).filter(key => /forge-(xllm|unit-sidecar|claude-sidecar|task-preparation)\.js$/.test(key));
+  const saved = moduleKeys().map(key => [key, require.cache[key]]);
+  for (const [key] of saved) delete require.cache[key];
+  const claude = require('./forge-claude-sidecar');
+  const realInvoke = claude.invokeClaudeSidecar;
+  let adapter = null;
+  claude.invokeClaudeSidecar = options => adapter(options);
+  const fresh = require('./forge-unit-sidecar');
+  const prep = require('./forge-task-preparation');
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const route = { host_runtime: 'codex', worker_engine: 'claude', resolved_worker_engine: 'claude', worker_mode: 'sidecar', sidecar_declared: true,
+    dispatch_reason_code: 'sidecar-declared', dispatch_posture: 'cross-engine', dispatch_decision: 'allow',
+    dispatch_allowed: true, model: 'claude-sonnet-5', model_resolved: 'claude-sonnet-5', effort: 'medium', tier: 'standard',
+    chain: [{ id: 'claude-sonnet-5', engine: 'claude' }] };
+  try {
+    // R2 - complete sidecar -> runExecute -> adapter path with owner == code root.
+    async function runOwnerCase(id, extraWorkerWrite) {
+      const lab = fixtures.fixture();
+      try {
+        const contract = roots.validateContract({ schema_version: 2, owner: lab.a, primary_root_id: 'alpha',
+          code_roots: [{ id: 'alpha', path: lab.a }, { id: 'beta', path: lab.b }] });
+        fs.mkdirSync(path.join(lab.a, '.gsd/forge'), { recursive: true });
+        fs.writeFileSync(path.join(lab.a, '.gsd/forge/events.jsonl'), '{"event":"seed"}\n');
+        fixtures.command('git', ['add', '-f', '.gsd/forge/events.jsonl'], lab.a);
+        fixtures.command('git', ['commit', '-qm', 'track events'], lab.a);
+        const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+          cwd: lab.a, contextRoot: lab.a, execution_contract: contract, route,
+          workflowId: 'owner-event-fixture', dispatchId: id, resultFile: path.join(lab.dir, id + '.json'), prompt: 'Fixture only.',
+          verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+        const base = path.join(lab.a, '.gsd/milestones/M001/slices/S01');
+        fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+        request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+        fs.writeFileSync(request.planFile, fixtures.plan(contract));
+        fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+        fs.writeFileSync(path.join(lab.a, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+          ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
+        request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: lab.a, unitType: request.unitType,
+          milestoneId: 'M001', unitId: 'T01', planPath: request.planFile, hostRuntime: 'codex' });
+        request.runId = 'owner-event-' + id;
+        request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: contract,
+          paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+        request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+        runs.add(lab.a, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+        adapter = async options => {
+          options.onLiveness(loop);
+          await sleep(40);
+          fs.writeFileSync(path.join(lab.a, 'same.txt'), 'worker alpha\n');
+          fs.writeFileSync(path.join(lab.b, 'same.txt'), 'worker beta\n');
+          if (extraWorkerWrite) fs.appendFileSync(path.join(lab.a, '.gsd/forge/events.jsonl'), '{"event":"forged"}\n');
+          return { candidate: { status: 'done', summary: 'Synthetic loop fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] }, telemetry: null };
+        };
+        let outcome;
+        try { outcome = { result: await fresh.runUnitSidecar(request) }; } catch (error) { outcome = { error }; }
+        outcome.events = fs.readFileSync(path.join(lab.a, '.gsd/forge/events.jsonl'), 'utf8');
+        return outcome;
+      } finally { lab.cleanup(); }
+    }
+    const ok = await runOwnerCase('owner-event-ok', false);
+    assert(!ok.error, ok.error && ok.error.stack);
+    assert.strictEqual(ok.result.status, 'done', JSON.stringify(ok.result));
+    assert.strictEqual(ok.events.split('\n').filter(line => line.includes('"sidecar-no-progress"')).length, 1, ok.events);
+    const forged = await runOwnerCase('owner-event-forged', true);
+    assert(forged.error || forged.result.status !== 'done', 'an arbitrary events.jsonl edit is still rejected');
+
+    // R1 - standalone preparation without an owner broker publishes after no-progress.
+    const stage = destination => {
+      const source = path.resolve(__dirname, '..');
+      const manifest = JSON.parse(fs.readFileSync(path.join(source, 'shared/forge-procedures.json'), 'utf8'));
+      fs.mkdirSync(path.join(destination, 'shared'), { recursive: true });
+      fs.copyFileSync(path.join(source, 'shared/forge-procedures.json'), path.join(destination, 'shared/forge-procedures.json'));
+      for (const module of manifest.modules.filter(item => item.status === 'ready')) fs.copyFileSync(path.join(source, module.path), path.join(destination, module.path));
+    };
+    const caseRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-owner-event-prep-')));
+    try {
+      const cwd = path.join(caseRoot, 'code'), contextRoot = path.join(caseRoot, 'owner'), results = path.join(caseRoot, 'results');
+      fs.mkdirSync(cwd, { recursive: true }); stage(cwd);
+      fixtures.command('git', ['init', '-q'], cwd);
+      fixtures.command('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'], cwd);
+      fs.mkdirSync(path.join(contextRoot, '.gsd'), { recursive: true }); fs.mkdirSync(results);
+      fs.writeFileSync(path.join(contextRoot, '.gsd/forge-prefs.jsonc'), JSON.stringify({
+        tier_models: { light: 'claude-sonnet-5', standard: 'claude-sonnet-5', heavy: 'claude-sonnet-5', max: 'claude-sonnet-5' },
+        effort: { 'plan-slice': 'medium', 'discuss-milestone': 'medium', 'research-milestone': 'medium', 'plan-milestone': 'medium' } }));
+      const request = { schema_version: 1, scope: 'standalone-task', phase: 'research', taskId: 'T-20261023000000-ownerevent',
+        cwd, contextRoot, hostRuntime: 'codex', workflowId: 'prep-owner-event', dispatchId: 'prep-owner-event',
+        resultFile: path.join(results, 'result.json'), constraints: { auto_commit: false, deploy: false }, inputs: { brief: 'Fixture' } };
+      const body = "# Research\n\n## Summary\n\nMeasured internally.\n\n## Don't Hand-Roll\n\nReuse resolver.\n\n## Relevant Code\n\nscripts/.\n";
+      adapter = async options => {
+        options.onLiveness(loop);
+        await sleep(40);
+        return { candidate: { status: 'done', summary: 'research complete', questions: [],
+          artifacts: [{ path: prep.requiredArtifact(request), content: body }] }, telemetry: null };
+      };
+      const outcome = await prep.prepareStandaloneTask(request);
+      assert.strictEqual(outcome.ok, true, JSON.stringify(outcome));
+      const events = fs.readFileSync(path.join(contextRoot, '.gsd/forge/events.jsonl'), 'utf8');
+      assert.strictEqual(events.split('\n').filter(line => line.includes('"sidecar-no-progress"')).length, 1, events);
+      assert(fs.existsSync(path.join(contextRoot, prep.requiredArtifact(request))));
+    } finally { fs.rmSync(caseRoot, { recursive: true, force: true }); }
+    console.log('PASS owner-event reconcile: preparation without broker publishes after no-progress; owner==code-root real transport succeeds; forged events edit still rejected');
+  } finally {
+    claude.invokeClaudeSidecar = realInvoke;
+    for (const key of moduleKeys()) delete require.cache[key];
+    for (const [key, entry] of saved) require.cache[key] = entry;
+  }
+}
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
   const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
@@ -782,6 +896,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--pre-spawn-sidecar') await preSpawnRecoveryContracts();
     if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
     if (!selectedScenario || selectedScenario === '--no-progress-event') await noProgressEventContracts();
+    if (!selectedScenario || selectedScenario === '--owner-event-reconcile') await ownerEventReconcileContracts();
   } finally {
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(profile, { recursive: true, force: true });
