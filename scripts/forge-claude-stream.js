@@ -1,11 +1,34 @@
 ﻿'use strict';
 
 const { TextDecoder } = require('util');
+const crypto = require('crypto');
 const LIMITS = Object.freeze({ line: 1048576, stdout: 16777216, stderr: 1048576, events: 100000,
   depth: 128, nodes: 100000, blocks: 32, reconstruction: 1048576 });
 
 function failure(reason) {
   throw Object.assign(new Error('Claude stream refused.'), { reason });
+}
+
+// Only traverse JSON values: the public helper first serializes/parses its input.
+function canonical(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+function toolFingerprint(name, input) {
+  if (typeof name !== 'string' || !name.trim() || !input || typeof input !== 'object' || Array.isArray(input)) return null;
+  try {
+    const text = JSON.stringify(input);
+    if (!text || Buffer.byteLength(text) > LIMITS.reconstruction) return null;
+    const value = JSON.parse(text);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    inspect(text, value, '');
+    delete value.description;
+    return crypto.createHash('sha256').update(name + '\0' + canonical(value)).digest('hex');
+  } catch { return null; }
 }
 
 // JSON.parse alone silently accepts duplicate (including escaped) property names.
@@ -58,12 +81,13 @@ function createReducer(options = {}) {
   };
   let pending = Buffer.alloc(0), terminal = null, message = null;
   const blocks = new Map(), seenMessages = new Set();
+  const seenTools = new Set(), reportedTools = new Set(), toolsInFlight = new Set();
   let reconstruction = 0, suspended = false, toolMessage = false;
   let first = null, last = null, maxGap = null, remote = 0, events = 0, stdout = 0, stderr = 0;
   const usage = { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, cost_usd: null };
   let denials = { read: null, write: null, shell: null, other: null };
   let secret = options.secret || '';
-  let onRemote = options.onRemote, onEvent = options.onEvent;
+  let onRemote = options.onRemote, onEvent = options.onEvent, onToolCall = options.onToolCall;
   options = null;
   let disposed = false, finalSnapshot = null;
   const secretBytes = Buffer.from(secret), rawTails = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
@@ -101,8 +125,38 @@ function createReducer(options = {}) {
       inspect(block.text, nested, secret);
     } catch (error) {
       if (error.reason) throw error;
-      if (final) failure('json-invalid');
+      // Incomplete/invalid tool JSON is never fingerprinted, even at closure.
+      if (final) return;
     }
+  }
+
+  function validToolId(id) {
+    return typeof id === 'string' && id.trim().length > 0 && Buffer.byteLength(id) <= 256;
+  }
+
+  function trackTool(id) {
+    if (!validToolId(id)) return false;
+    if (!seenTools.has(id)) {
+      if (seenTools.size >= LIMITS.events || toolsInFlight.size >= LIMITS.blocks) failure('output-limit');
+      seenTools.add(id);
+      toolsInFlight.add(id);
+    }
+    return true;
+  }
+
+  function reportTool(id, name, input) {
+    if (!trackTool(id) || reportedTools.has(id)) return;
+    const fingerprint = toolFingerprint(name, input);
+    if (!fingerprint) return;
+    reportedTools.add(id);
+    try { onToolCall?.({ fingerprint }); } catch { /* Observers cannot fail the stream. */ }
+  }
+
+  function closeTool(block) {
+    inspectTool(block, true);
+    let input;
+    try { input = JSON.parse(block.text); } catch { return; }
+    reportTool(block.id, block.name, input);
   }
 
   function startMessage(value) {
@@ -133,11 +187,18 @@ function createReducer(options = {}) {
     const e = value.type === 'stream_event' ? value.event : value;
     const owned = message && (!e?.message_id || e.message_id === message);
     if (e?.type === 'message_start') startMessage(e.message);
-    else if (value.type === 'assistant') startMessage(value.message);
-    else if (e?.type === 'content_block_start' && owned && Number.isSafeInteger(e.index) && e.index >= 0) {
+    else if (value.type === 'assistant') {
+      startMessage(value.message);
+      if (value.message?.role === 'assistant' && Array.isArray(value.message.content)) {
+        for (const block of value.message.content) {
+          if (block?.type === 'tool_use') reportTool(block.id, block.name, block.input);
+        }
+      }
+    } else if (e?.type === 'content_block_start' && owned && Number.isSafeInteger(e.index) && e.index >= 0) {
       if (blocks.has(e.index) || blocks.size >= LIMITS.blocks) failure('output-limit');
       const tool = e.content_block?.type === 'tool_use';
-      blocks.set(e.index, { text: '', tool });
+      blocks.set(e.index, { text: '', tool, id: e.content_block?.id, name: e.content_block?.name });
+      if (tool) trackTool(e.content_block.id);
       if (tool) { suspended = true; toolMessage = true; }
     } else if (e?.type === 'content_block_delta' && owned && blocks.has(e.index)) {
       const block = blocks.get(e.index), delta = e.delta;
@@ -153,16 +214,32 @@ function createReducer(options = {}) {
       }
     } else if (e?.type === 'content_block_stop' && owned && blocks.has(e.index)) {
       const block = blocks.get(e.index);
-      if (block.tool) inspectTool(block, true);
+      if (block.tool) closeTool(block);
       reconstruction -= Buffer.byteLength(block.text);
       blocks.delete(e.index);
     } else if (e?.type === 'message_delta' && owned) {
       eligible(!toolMessage);
     } else if (e?.type === 'message_stop' && owned) {
-      for (const block of blocks.values()) if (block.tool) inspectTool(block, true);
+      for (const block of blocks.values()) if (block.tool) closeTool(block);
       message = null;
       blocks.clear();
       reconstruction = 0;
+    }
+    // Documented assumption, not a CLI capture: Agent SDK streaming output and
+    // Python SDK UserMessage/ToolResultBlock (https://platform.claude.com/docs/en/agent-sdk/streaming-output,
+    // https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py).
+    // Unrecognized shapes retain the S01 fallback at the next eligible remote event.
+    if (value.type === 'user' && value.parent_tool_use_id == null && Array.isArray(value.message?.content)) {
+      let removed = false;
+      for (const block of value.message.content) {
+        if (block?.type === 'tool_result' && validToolId(block.tool_use_id)) {
+          removed = toolsInFlight.delete(block.tool_use_id) || removed;
+        }
+      }
+      if (removed && toolsInFlight.size === 0 && suspended) {
+        suspended = false;
+        last = elapsed();
+      }
     }
     if (value.type === 'result') {
       if (value.subtype !== 'success' || value.is_error !== false || !Object.hasOwn(value, 'structured_output')) {
@@ -242,7 +319,10 @@ function createReducer(options = {}) {
       for (const block of blocks.values()) block.text = '';
       blocks.clear();
       seenMessages.clear();
-      terminal = message = onRemote = onEvent = null;
+      seenTools.clear();
+      reportedTools.clear();
+      toolsInFlight.clear();
+      terminal = message = onRemote = onEvent = onToolCall = null;
       reconstruction = 0;
     },
     snapshot() {
@@ -252,10 +332,10 @@ function createReducer(options = {}) {
         transport_ms: time, verification_ms: null, stdout_bytes: stdout, stderr_bytes: stderr,
         event_count: events, remote_event_count: remote, first_remote_ms: first, last_remote_ms: last,
         initial_sample_ms: first, gap_sample_ms: remote >= 2 ? maxGap : null,
-        remote_silence_ms: last === null ? null : time - last, gap_suspended: suspended,
+        remote_silence_ms: last === null ? null : time - last, gap_suspended: suspended, tools_in_flight: toolsInFlight.size,
         ...usage, denials: { ...denials }, process_exit_observed: false };
     },
   };
 }
 
-module.exports = { createReducer, LIMITS };
+module.exports = { createReducer, toolFingerprint, LIMITS };
