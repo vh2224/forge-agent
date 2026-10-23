@@ -8,12 +8,19 @@ consult `forge-transport-capabilities.js` for the actual unit contract.
 
 ## Identidade do sidecar exibida na conversa
 
-O timeout padrão é de 300 segundos (5min) por tentativa, vindo de
-`scripts/forge-worker-timeout.js` e `workers.timeout`. Um valor explicitamente
-configurado continua prevalecendo. O prazo é absoluto: heartbeat mostra que o
-processo está vivo e nunca renova o timer. Erro explícito encerra a tentativa assim
-que observado; ao vencer o prazo, exponha o reason de timeout e o resultado parcial,
-sem continuar narrando apenas "aguardando resposta". Timeout não prova recusa do
+A liveness é a autoridade primária de kill: o worker que fica sem sinal além do
+limiar (60/120/240 s) é encerrado como falha de vida. Acima dela existe só um teto
+de segurança por tentativa, resolvido por
+`scripts/forge-worker-timeout.js resolveWorkerCeiling` com fonte rastreável
+(`workers_timeout_source`): sem `workers.timeout`, vale o teto do tier da rota
+(light/standard/heavy/max = 900/1800/3600/5400 s, fonte `tier-default`); um valor
+explícito 1..86400 sobrescreve (`explicit`); o legado 300 é ignorado com aviso
+(`legacy-300-ignored`) e vale o teto do tier. Heartbeat não renova o teto. Erro
+explícito encerra a tentativa assim que observado. O teto alcançado com o stream
+ainda ativo encerra com `reason_code: budget-exceeded-while-active` (classe
+`active-budget`, não é falha do destino e não avança a cadeia); alcançado ainda em
+partida, continua `claude-timeout`. Em qualquer caso, exponha o reason e o
+resultado parcial, sem continuar narrando apenas "aguardando resposta". Timeout não prova recusa do
 provedor. Não reinicie silenciosamente uma tentativa temporizada; qualquer
 fallback permitido deve expor a falha e a nova tentativa antes de dispará-la.
 
@@ -532,7 +539,11 @@ Before *each* protected phase, pause the parent's ordinary lease heartbeat,
 then call `forge-unit-lease.openProtectedWindow(owner, unit, heldToken,
 heldGeneration, {durationMs})`. It atomically requires unexpired matching
 ownership and renews that same generation once, before snapshots. Duration is
-an integer in `1..300000` milliseconds. During the window route the parent's
+an integer in `1..MAX_PROTECTED_WINDOW_MS` (5460000, the largest tier ceiling
+plus 60s, from `scripts/forge-worker-timeout.js`). Size it with
+`protectedWindowMs(ceilingMs)`; when it returns `covers: false` (an explicit
+ceiling above 5400s) do not open a single window — refuse it or split the phase
+into windows; the duration is never silently truncated. During the window route the parent's
 scheduled heartbeat through `window.heartbeat()`; it validates ownership and
 time read-only. Pass that opaque handle to the environmental validator.
 `assertProtectedWindow` rejects JSON copies, foreign units/owners, closed,
