@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('assert');
 const api = require('./forge-attempt-recovery');
+const { ceilingFromRoute } = require('./forge-worker-timeout');
 async function main() {
   let now = 0, saved;
   const identity = { unit: 'execute-task/T-recovery', roots_sha256: 'roots', clock: () => now, persist: state => { saved = state; } };
@@ -22,6 +23,7 @@ async function main() {
   const resolverOptions = { unitType: request.unitType, scope: request.scope, phase: request.phase, unitId: request.taskId,
     cwd: request.cwd, hostRuntime: 'codex' };
   const recovery = api.createRecovery(identity); recovery.record(attempt);
+  assert.strictEqual(saved.schema_version, 2, 'every limit below runs against the v2 state');
   assert.throws(() => recovery.transition({ approved: true, schema_version: 1, sha256: 'recomputed', types: ['resolver-context-omission'] }), /live-handle/);
   assert.deepStrictEqual(recovery.snapshot().attempts, saved.attempts);
   assert.strictEqual(saved.attempts[0].provider_called, 'unknown');
@@ -45,7 +47,13 @@ async function main() {
   recovery.answer([{ id: questions[1].id, answer: 'native' }]);
   now = 60001;
   const resumed = api.createRecovery({ ...identity, state: saved });
-  assert.strictEqual((await resumed.next({ inspection })).reason_code, 'recovery-deadline-exhausted');
+  // Migrated (was recovery-deadline-exhausted): elapsed time alone never stops
+  // recovery; candidate provenance and the finite list still decide.
+  await assert.rejects(resumed.next({ inspection }), /candidate-provenance-required/);
+  const late = await resumed.next({ inspection, candidateSet, validateInvocation: async candidate => ({ ok: candidate.model !== 'gpt-incompatible' }) });
+  assert.strictEqual(late.action, 'invoke'); assert.strictEqual(late.route.model, 'gpt-6-astra');
+  assert.strictEqual(late.route.worker_mode, 'native'); assert.strictEqual(late.sidecar_ceiling, null, 'native routes carry no sidecar ceiling');
+  for (const key of ['remaining_ms', 'sidecar_remaining_ms']) assert(!(key in late), key);
   const timeout = api.createRecovery({ ...identity, state: undefined }); timeout.record({ ...attempt, failure_class: 'timeout' });
   assert.strictEqual((await timeout.next({ inspection })).reason_code, 'timeout-cause-indeterminate');
   await assert.rejects(timeout.next({ inspection, correction: { request_sha256: 'request', offline_validated: true, evidence_reference: 'check' } }), /correction-required/);
@@ -70,7 +78,9 @@ async function main() {
   await classificationTable(route);
   await activeBudgetRecovery(identity, route, attempt, inspection, candidateSet);
   await canonicalProvenance();
-  console.log('PASS recovery clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
+  stateSchema(identity, attempt);
+  await migratedLimits(identity, route, attempt, inspection, candidateSet);
+  console.log('PASS recovery without cumulative clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
 }
 async function silenceRecovery(identity, route, attempt, inspection, candidateSet) {
   let now = 0, saved;
@@ -88,7 +98,9 @@ async function silenceRecovery(identity, route, attempt, inspection, candidateSe
   now = 1000;
   const retry = await session.next(input);
   assert.equal(retry.route.model, route.model); assert.equal(retry.silence_retry, true);
-  assert.equal(retry.remaining_ms, 30000);
+  // Migrated (was remaining_ms 30000): the silence retry receives the tier ceiling.
+  assert.deepStrictEqual(retry.sidecar_ceiling, ceilingFromRoute(route)); assert.strictEqual(retry.sidecar_ceiling.seconds, 1800);
+  assert(!('remaining_ms' in retry) && !('sidecar_remaining_ms' in retry));
   session.reserve(retry, attempt.request_sha256);
   const restart = api.createRecovery({ ...options, state: saved });
   const pending = await restart.next({ ...input, validateInvocation() { throw Error('pending retry cannot validate another writer'); } });
@@ -99,14 +111,23 @@ async function silenceRecovery(identity, route, attempt, inspection, candidateSe
   const following = await restart.next(input);
   assert.equal(following.route.model, 'gpt-6-astra', 'only one unchanged same-target retry is available');
   assert.equal(following.silence_retry, false);
+  // Migrated (was clock rollback / remaining() 1000): v2 has no clock to renew.
   now = 59000; const expired = api.createRecovery({ ...options, state: saved });
-  expired.snapshot(); now = 100;
-  assert.equal(expired.remaining(), 1000, 'clock rollback cannot renew historical recovery time');
+  assert.strictEqual(expired.remaining, undefined);
+  for (const key of ['deadline_at', 'budget_remaining_ms', 'clock_high_water']) assert(!(key in expired.snapshot()), key);
+  // Migrated (was 55000 -> recovery-deadline-exhausted): a late silence retry
+  // still runs once, with the full tier ceiling and an explicit source honoured.
+  const explicitRoute = { ...route, workers_timeout: 2400, workers_timeout_source: 'explicit' };
   const late = api.createRecovery({ ...options, state: undefined, clock: () => 0 });
-  late.record({ ...attempt, failure_class: 'silence', observation: { silence } });
+  late.record({ ...attempt, route: explicitRoute, failure_class: 'silence', observation: { silence } });
   const almostSpent = api.createRecovery({ ...options, state: late.snapshot(), clock: () => 55000 });
-  assert.equal((await almostSpent.next(input)).reason_code, 'recovery-deadline-exhausted');
-  console.log('PASS anomalous silence: trusted threshold, one durable same-target reservation, restart exclusion, fallback and nonrenewing clock');
+  const lateRetry = await almostSpent.next({ ...input, exception: authority.issue('fixture:late', { unit: identity.unit,
+    roots_sha256: identity.roots_sha256, purpose: 'sidecar-recovery', expires_at: 120000,
+    routes: [api.routeKey(explicitRoute)], gates_preserved: true }, () => 55000) });
+  assert.strictEqual(lateRetry.silence_retry, true);
+  assert.deepStrictEqual(lateRetry.sidecar_ceiling, ceilingFromRoute(explicitRoute));
+  assert.strictEqual(lateRetry.sidecar_ceiling.seconds, 2400); assert.strictEqual(lateRetry.sidecar_ceiling.source, 'explicit');
+  console.log('PASS anomalous silence: trusted threshold, one durable same-target reservation, restart exclusion, fallback and tier ceiling');
 }
 // The whole captureFailure classification table: a live stream at the safety
 // ceiling (budget-exceeded-while-active) is never a timeout nor a destination failure.
@@ -174,12 +195,12 @@ async function activeBudgetRecovery(identity, route, attempt, inspection, candid
   }
   now = 60001;
   assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-required' },
-    'the named stop precedes the deadline stop');
+    'the named stop holds regardless of elapsed time');
   assert.strictEqual(saved.selection, undefined, 'no candidate selection was persisted');
   assert.deepStrictEqual(saved.reservations || [], [], 'no reservation was created');
   session.questions(['Pending choice']);
   assert.strictEqual((await session.next(input)).action, 'pending-questions', 'pending questions still come first');
-  console.log('PASS active-budget: named stop after inspection/reconciliation, before deadline and standing exception');
+  console.log('PASS active-budget: named stop after inspection/reconciliation, before standing exception and any selection');
 }
 async function persistentRecovery(route) {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
@@ -268,7 +289,7 @@ async function persistentRecovery(route) {
       final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model, '--prompt', corrected.prompt] }, context: corrected.prompt }) }),
     invoke: async (selected, _invocation, remaining, assertReady) => {
       assertReady(); assertReady();
-      invoked++; assert.strictEqual(selected.model, route.model); assert(remaining > 0 && remaining <= 60000); return { status: 'done' };
+      invoked++; assert.strictEqual(selected.model, route.model); assert.deepStrictEqual(remaining, ceilingFromRoute(selected)); return { status: 'done' };
     } });
   assert.strictEqual(retried.corrected, true); assert.strictEqual(invoked, 1);
   assert.strictEqual(stateApi.loadRecovery(stateFile).reservations.length, 1);
@@ -284,9 +305,14 @@ async function persistentRecovery(route) {
     [path.join(__dirname, 'forge-attempt-recovery.js'), '--inspect', stateFile, receiptFile], { encoding: 'utf8', windowsHide: true });
   assert.strictEqual(child.status, 0, child.stderr);
   const inspected = JSON.parse(child.stdout);
-  assert.strictEqual(inspected.state.deadline_at, initial.deadline_at);
+  // Migrated (was deadline_at equality): --inspect reports schema and budget, no remaining_ms.
+  assert.strictEqual(inspected.schema_version, 2); assert.strictEqual(inspected.budget, 'tier-ceiling');
+  assert(!('remaining_ms' in inspected) && !('deadline_at' in inspected.state));
   assert.strictEqual(inspected.state.reservations.length, 1);
-  assert.strictEqual((await api.recoverAttempt({ ...base, clock: () => initial.deadline_at + 1 })).reason_code, 'recovery-deadline-exhausted');
+  // Migrated (was deadline_at + 1 -> recovery-deadline-exhausted): late recovery
+  // is still bounded by the caller-correction requirement, not by time.
+  await assert.rejects(api.recoverAttempt({ ...base, clock: () => initial.started_at + 60001 }), /correction-required/);
+  await migratedRecovery({ base, initial, lab, corrected });
   const raceState = path.join(lab.dir, 'racing-state.json');
   const readFile = fs.readFileSync;
   const concurrentState = { ...initial, phase: 'concurrent-reservation', reservations: [{ id: 'other-writer' }] };
@@ -326,21 +352,112 @@ async function persistentRecovery(route) {
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed' }));
   await assert.rejects(api.recoverAttempt(base), /process-receipt-inspection-required/);
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'ready', provider_called: true }));
-  const replay = await api.recoverAttempt({ ...base, clock: () => initial.deadline_at + 1, processProbe: () => 'stopped',
+  const replay = await api.recoverAttempt({ ...base, clock: () => initial.started_at + 60001, processProbe: () => 'stopped',
     resolveDispatch() { throw new Error('saved response must not resolve candidates'); }, replay: async () => ({ status: 'done' }) });
   assert.strictEqual(replay.action, 'replay'); assert.strictEqual(replay.provider_called, false); assert.strictEqual(invoked, 1);
   for (const receipt of [{ phase: 'ready', provider_called: true }, { phase: 'failed', saved_candidate: { sha256: 'fixture-candidate' } }]) {
     fs.writeFileSync(receiptFile, JSON.stringify(receipt));
     const saved = await api.recoverAttempt({ ...base, environmentalCorrection: true,
-      processProbe: () => 'stopped', clock: () => initial.deadline_at + 1,
+      processProbe: () => 'stopped', clock: () => initial.started_at + 60001,
       inspectPreSpawn() { throw Error('saved response must replay before pre-spawn inspection'); },
       resolveDispatch() { throw Error('saved response must not resolve candidates'); },
       replay: async observed => { assert.deepStrictEqual(observed, receipt); return { status: 'done' }; } });
     assert.strictEqual(saved.action, 'replay'); assert.strictEqual(saved.provider_called, false);
   }
-  assert.throws(() => api.validateState({ ...initial, deadline_at: initial.deadline_at + 1 }), /state-invalid/);
+  assert.throws(() => api.validateState({ ...initial, deadline_at: initial.started_at + 60000 }), /state-invalid/, 'v2 cannot carry the clock');
   lab.cleanup();
-  console.log('PASS persisted recovery: caller repair once, process proof, restart/CLI deadline, identity, external state and zero-inference replay');
+  console.log('PASS persisted recovery: caller repair once, process proof, restart/CLI schema, identity, external state and zero-inference replay');
+}
+function legacyV1(state, overrides = {}) {
+  const { budget, migrated_from: _origin, ...rest } = JSON.parse(JSON.stringify(state));
+  assert.strictEqual(budget, 'tier-ceiling');
+  return { ...rest, schema_version: 1, deadline_at: rest.started_at + 60000,
+    budget_remaining_ms: 0, clock_high_water: rest.started_at + 60000, ...overrides };
+}
+// Schema v2, explicit pure migration from v1 and refusal of corrupted/clocked states.
+function stateSchema(identity, attempt) {
+  const fresh = api.createRecovery({ ...identity, clock: () => 5, persist: undefined });
+  fresh.record(attempt);
+  const v2 = fresh.snapshot();
+  assert.strictEqual(v2.schema_version, 2); assert.strictEqual(v2.budget, 'tier-ceiling'); assert.strictEqual(v2.started_at, 5);
+  for (const key of ['deadline_at', 'budget_remaining_ms', 'clock_high_water', 'migrated_from']) assert(!(key in v2), key);
+  assert.strictEqual(fresh.state_migration, null);
+  const v1 = legacyV1({ ...v2, reservations: [{ route_key: 'r', corrected: false }], pending_questions: [{ id: 'q', question: 'Q', status: 'pending' }],
+    transitions: [{ id: 't' }], selection: { selected: 'r' } }, { budget_remaining_ms: 21000, clock_high_water: 39000 });
+  const frozen = JSON.stringify(v1);
+  assert.strictEqual(api.validateState(v1), v1, 'a valid v1 remains readable');
+  const migrated = api.migrateState(v1, 1234);
+  assert.strictEqual(JSON.stringify(v1), frozen, 'migrateState never mutates its input');
+  assert.strictEqual(migrated.schema_version, 2); assert.strictEqual(migrated.budget, 'tier-ceiling');
+  assert.strictEqual(migrated.started_at, v1.started_at); assert.strictEqual(migrated.deadline_at, v1.deadline_at);
+  assert.deepStrictEqual(migrated.migrated_from, { schema_version: 1, migrated_at: 1234, reason: 'recovery-budget-tier-ceiling',
+    budget_remaining_ms: 21000, clock_high_water: 39000 });
+  assert(!('budget_remaining_ms' in migrated) && !('clock_high_water' in migrated));
+  for (const key of ['attempts', 'reservations', 'pending_questions', 'transitions', 'selection', 'request_identity',
+    'request_identity_sha256', 'unit', 'roots_sha256', 'purpose', 'phase']) assert.deepStrictEqual(migrated[key], v1[key], key);
+  assert.deepStrictEqual(api.migrateState(migrated, 9999), migrated, 'v2 -> same content (idempotent)');
+  assert.deepStrictEqual(api.migrateState(v2), v2);
+  const restarted = api.createRecovery({ ...identity, state: v1, clock: () => 777 });
+  assert.deepStrictEqual(restarted.state_migration, { from: 1, to: 2 });
+  assert.strictEqual(restarted.snapshot().migrated_from.migrated_at, 777);
+  for (const invalid of [legacyV1(v2, { deadline_at: v2.started_at + 59999 }), legacyV1(v2, { deadline_at: undefined }),
+    { ...v2, deadline_at: v2.started_at + 60000 }, { ...v2, budget_remaining_ms: 1 }, { ...v2, clock_high_water: 1 },
+    { ...migrated, budget_remaining_ms: 1 }, { ...migrated, migrated_from: { ...migrated.migrated_from, schema_version: 2 } },
+    { ...migrated, deadline_at: migrated.deadline_at + 1 }, { ...v2, budget: undefined }, { ...v2, schema_version: 3 }]) {
+    assert.throws(() => api.validateState(invalid), /recovery-state-invalid/);
+    assert.throws(() => api.createRecovery({ ...identity, state: invalid }), /recovery-state-invalid/);
+  }
+  console.log('PASS recovery state v2: no cumulative clock, explicit pure v1 migration, idempotence and named refusal');
+}
+// Every preserved limit still holds on a v1 state that expired long ago and is migrated.
+async function migratedLimits(identity, route, attempt, inspection, candidateSet) {
+  let saved;
+  const silence = { dimension: 'initial', window_ms: 120001, threshold_ms: 120000,
+    policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+  const base = api.createRecovery({ ...identity, clock: () => 0, persist: value => { saved = value; } });
+  base.record({ ...attempt, failure_class: 'silence', service_failure_proven: false, observation: { silence } });
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const exception = authority.issue('fixture:migrated', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 10 * 60000, routes: [api.routeKey(route)], gates_preserved: true }, () => 0);
+  const retry = await base.next({ inspection, exception, candidateSet, validateInvocation: async () => ({ ok: true }) });
+  base.reserve(retry, attempt.request_sha256);
+  const now = 5 * 60000; // five minutes after a 60-second v1 deadline
+  const session = api.createRecovery({ ...identity, state: legacyV1(saved), clock: () => now, persist: value => { saved = value; } });
+  const input = { inspection, exception, candidateSet, validateInvocation() { throw Error('limits must stop before any adapter'); } };
+  await assert.rejects(session.next({ ...input, inspection: undefined }), /process-receipt-inspection-required/);
+  await assert.rejects(session.next({ ...input, inspection: { ...inspection, writer_possible: true } }), /writer-reconciliation-required/);
+  assert.strictEqual((await session.next(input)).reason_code, 'recovery-reservation-pending');
+  session.snapshot();
+  assert.strictEqual(saved.schema_version, 2); assert.strictEqual(saved.migrated_from.schema_version, 1);
+  assert.throws(() => api.exceptionFor(exception, saved, 10 * 60000), /exception-invalid/, 'expired exception refused');
+  console.log('PASS migrated v1 state: inspection, reconciliation, pending reservation and exception expiry still enforced');
+}
+// recoverAttempt on an expired v1 file: no deadline stop, explicit persisted migration.
+async function migratedRecovery({ base, initial, lab, corrected }) {
+  const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
+  const stateFile = path.join(lab.dir, 'legacy-v1-state.json');
+  const v1 = legacyV1(initial); fs.writeFileSync(stateFile, JSON.stringify(v1));
+  assert.strictEqual(stateApi.loadRecovery(stateFile).schema_version, 1, 'loadRecovery stays read-only');
+  const inspectOnly = require('child_process').spawnSync(process.execPath,
+    [path.join(__dirname, 'forge-attempt-recovery.js'), '--inspect', stateFile, base.receiptFile], { encoding: 'utf8', windowsHide: true });
+  assert.strictEqual(inspectOnly.status, 0, inspectOnly.stderr);
+  assert.strictEqual(JSON.parse(inspectOnly.stdout).schema_version, 1);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), v1, '--inspect never rewrites the file');
+  let ceiling;
+  const result = await api.recoverAttempt({ ...base, stateFile, request: corrected, correction: true,
+    clock: () => v1.deadline_at + 3600000,
+    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:migration',
+      final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { prompt: corrected.prompt, v: 1 }, context: corrected.prompt }) }),
+    invoke: async (_selected, _invocation, observed, assertReady) => { assertReady(); ceiling = observed; return { status: 'done' }; } });
+  assert.strictEqual(result.action, 'invoke');
+  assert.deepStrictEqual(result.state_migration, { from: 1, to: 2 });
+  assert.deepStrictEqual(ceiling, ceilingFromRoute(result.route));
+  const after = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.strictEqual(after.schema_version, 2); assert.strictEqual(after.migrated_from.schema_version, 1);
+  assert.strictEqual(after.started_at, v1.started_at); assert.strictEqual(after.deadline_at, v1.deadline_at);
+  assert.deepStrictEqual(after.attempts, v1.attempts); assert.deepStrictEqual(after.pending_questions, v1.pending_questions);
+  assert.strictEqual(after.reservations.length, 1);
+  console.log('PASS expired v1 file: recoverAttempt migrates explicitly, persists v2 and invokes with the tier ceiling');
 }
 async function canonicalProvenance() {
   const fs = require('fs'), path = require('path'), os = require('os');
@@ -388,17 +505,32 @@ async function canonicalProvenance() {
     const restarted = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(session.snapshot())), clock: () => 60001 });
     const accepted = await restarted.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) });
     assert.strictEqual(accepted.route.worker_mode, 'native');
-    assert.strictEqual(accepted.sidecar_remaining_ms, 0);
-    assert.strictEqual(accepted.remaining_ms, 0);
+    assert.strictEqual(accepted.sidecar_ceiling, null, 'native routes carry no sidecar ceiling');
+    assert(!('remaining_ms' in accepted) && !('sidecar_remaining_ms' in accepted));
     assert.strictEqual(accepted.native_authorization_remaining_ms, 59999);
     assert.strictEqual(accepted.provenance.unit_type, request.unitType);
     restarted.reserve(accepted, 'request');
     const twice = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(restarted.snapshot())), clock: () => 60002 });
-    const stopped = await twice.next({ inspection, candidateSet: candidates, exception, validateInvocation() { throw new Error('sidecar beyond deadline'); } });
-    assert.strictEqual(stopped.action, 'stop');
-    assert(stopped.rejected.some(item => item.reason_code === 'recovery-deadline-exhausted'));
-    assert.strictEqual(twice.snapshot().deadline_at, 60000);
+    // Migrated (was sidecar rejected with recovery-deadline-exhausted): an untried
+    // sidecar candidate may start with the tier ceiling; adapter refusal still
+    // falls through, and the finite list ends in recovery-candidates-exhausted.
+    const refused = await twice.next({ inspection, candidateSet: candidates, exception, validateInvocation() { throw new Error('adapter refused'); } });
+    assert.strictEqual(refused.reason_code, 'recovery-candidates-exhausted');
+    assert(refused.rejected.length && refused.rejected.every(item => item.reason_code === 'recovery-adapter-refused'));
+    const sidecar = await twice.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) });
+    assert.strictEqual(sidecar.route.worker_mode, 'sidecar');
+    assert.deepStrictEqual(sidecar.sidecar_ceiling, ceilingFromRoute(sidecar.route));
+    assert.strictEqual(twice.snapshot().deadline_at, undefined);
     assert.strictEqual(twice.snapshot().reservations.length, 1);
+    let tries = 0, exhausted;
+    const draining = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(twice.snapshot())), clock: () => 60003 });
+    for (; tries < 10; tries++) {
+      const decision = await draining.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) });
+      if (decision.action !== 'invoke') { exhausted = decision; break; }
+      draining.reserve(decision, 'request');
+    }
+    assert.strictEqual(exhausted?.reason_code, 'recovery-candidates-exhausted', 'a failure sequence terminates without a clock');
+    assert(tries < route.chain.length, 'each destination is tried at most once');
     fs.mkdirSync(path.join(root, '.codex'));
     fs.writeFileSync(path.join(root, '.codex', 'AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nFixture authorization.\n<!-- user:forge-routing-continuity:end -->');
     const reference = 'conversation:restart-fixture';
@@ -413,15 +545,17 @@ async function canonicalProvenance() {
     assert.strictEqual(child.status, 0, child.stderr);
     const result = JSON.parse(child.stdout);
     assert.strictEqual(result.native.route.worker_mode, 'native');
-    assert.strictEqual(result.native.sidecar_remaining_ms, 0);
-    assert.strictEqual(result.afterReservation.action, 'stop');
-    assert(result.afterReservation.rejected.some(row => row.reason_code === 'recovery-deadline-exhausted'));
-    assert.strictEqual(result.state.deadline_at, session.snapshot().deadline_at);
+    assert.strictEqual(result.native.sidecar_ceiling, null);
+    // Migrated (was sidecar rejected after the deadline): the next untried sidecar starts with its tier ceiling.
+    assert.strictEqual(result.afterReservation.action, 'invoke');
+    assert.strictEqual(result.afterReservation.route.worker_mode, 'sidecar');
+    assert.deepStrictEqual(result.afterReservation.sidecar_ceiling, JSON.parse(JSON.stringify(ceilingFromRoute(result.afterReservation.route))));
+    assert.strictEqual(result.state.schema_version, 2); assert.strictEqual(result.state.deadline_at, undefined);
     assert.strictEqual(result.state.reservations.length, 1);
     const foreign = api.createRecovery({ ...identity, state: undefined, request: undefined });
     foreign.record(session.snapshot().attempts[0]);
     await assert.rejects(foreign.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) }), /provenance/);
-    console.log('PASS real resolver identity, missing/foreign scope and IDs, native after deadline, sidecar refusal and durable reservations');
+    console.log('PASS real resolver identity, missing/foreign scope and IDs, native first, sidecar with tier ceiling, finite candidates and durable reservations');
   } finally {
     for (const [key, value] of Object.entries(savedEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(root, { recursive: true, force: true });

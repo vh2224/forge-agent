@@ -2404,10 +2404,13 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       }
       return runUnitSidecar(request, runtime);
     },
-    invoke: async (route, invocation, remainingMs, assertReady, reservationHash) => {
+    // The third argument is the decision's sidecar_ceiling; the route ceiling is
+    // recomputed here from the single source instead of trusting the argument.
+    invoke: async (route, invocation, _ceiling, assertReady, reservationHash) => {
       validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation });
-      const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
-        ? { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) } : route,
+      const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
+      const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
+        ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
         dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
       if (route.worker_mode === 'native') {
         if (!runtime.invokeNative) {

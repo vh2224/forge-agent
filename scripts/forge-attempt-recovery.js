@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { digest } = require('./forge-code-roots');
+const { ceilingFromRoute } = require('./forge-worker-timeout');
 const exceptions = new WeakMap();
 const candidateSets = new WeakMap();
 const environmentalRepairs = new WeakSet();
@@ -106,18 +107,54 @@ function resolveCandidates(options, resolve = require('./forge-dispatch-resolve'
   const handle = Object.freeze({ id: crypto.randomUUID() });
   candidateSets.set(handle, JSON.parse(JSON.stringify({ routes, provenance }))); return handle;
 }
+// Schema v2 has no cumulative recovery clock. Termination is bounded by the
+// finite candidate list, excluded destinations, one corrected retry per
+// destination, one silence retry and the canonical exception expiry.
+const RECOVERY_BUDGET = 'tier-ceiling';
+const MIGRATION_REASON = 'recovery-budget-tier-ceiling';
+const LEGACY_V1_WINDOW_MS = 60000;
+function legacyWindowIntact(state) {
+  // Integrity rule of the frozen v1 format only; never consulted for decisions.
+  return Number.isFinite(state.deadline_at) && state.deadline_at - state.started_at === LEGACY_V1_WINDOW_MS;
+}
 function validateState(state) {
-  if (!state || state.schema_version !== 1 || !state.unit || !Number.isFinite(state.started_at)
-      || !Number.isFinite(state.deadline_at) || state.deadline_at - state.started_at !== 60000
+  if (!state || !state.unit || !Number.isFinite(state.started_at)
       || !Array.isArray(state.attempts) || !Array.isArray(state.pending_questions)) fail('recovery-state-invalid');
+  if (state.schema_version === 1) {
+    if (!legacyWindowIntact(state)) fail('recovery-state-invalid');
+    return state;
+  }
+  if (state.schema_version !== 2 || state.budget !== RECOVERY_BUDGET
+      || Object.hasOwn(state, 'budget_remaining_ms') || Object.hasOwn(state, 'clock_high_water')) fail('recovery-state-invalid');
+  if (!Object.hasOwn(state, 'migrated_from')) {
+    // A fresh v2 must never carry the clock back in.
+    if (Object.hasOwn(state, 'deadline_at')) fail('recovery-state-invalid');
+    return state;
+  }
+  const origin = state.migrated_from;
+  if (!origin || typeof origin !== 'object' || origin.schema_version !== 1 || origin.reason !== MIGRATION_REASON
+      || !Number.isFinite(origin.migrated_at) || !legacyWindowIntact(state)) fail('recovery-state-invalid');
   return state;
+}
+// Pure: v1 -> new v2 object (deadline_at kept as inert history, clock snapshot
+// moved to migrated_from); v2 -> a clone of itself. The input is never mutated.
+function migrateState(state, migratedAt = Date.now()) {
+  const copy = JSON.parse(JSON.stringify(validateState(state)));
+  if (copy.schema_version === 2) return copy;
+  if (!Number.isFinite(migratedAt)) fail('recovery-state-invalid');
+  const { budget_remaining_ms: remainingMs, clock_high_water: highWater, ...rest } = copy;
+  return validateState({ ...rest, schema_version: 2, budget: RECOVERY_BUDGET,
+    migrated_from: { schema_version: 1, migrated_at: migratedAt, reason: MIGRATION_REASON,
+      budget_remaining_ms: remainingMs ?? null, clock_high_water: highWater ?? null } });
 }
 function createRecovery(options) {
   const clock = options.clock || Date.now;
   const started = clock();
-  const state = options.state ? JSON.parse(JSON.stringify(validateState(options.state))) : {
-    schema_version: 1, unit: options.unit, roots_sha256: options.roots_sha256, purpose: options.purpose || 'sidecar-recovery',
-    started_at: started, deadline_at: started + 60000, attempts: [], pending_questions: [], phase: 'inspection' };
+  const migration = options.state && validateState(options.state).schema_version === 1 ? Object.freeze({ from: 1, to: 2 }) : null;
+  // Migration happens only here; it is persisted by the next save(), never by readers.
+  const state = options.state ? migrateState(options.state, started) : {
+    schema_version: 2, budget: RECOVERY_BUDGET, unit: options.unit, roots_sha256: options.roots_sha256,
+    purpose: options.purpose || 'sidecar-recovery', started_at: started, attempts: [], pending_questions: [], phase: 'inspection' };
   if (options.authorizationReference) state.authorization_reference = options.authorizationReference;
   if (state.unit !== options.unit || state.roots_sha256 !== options.roots_sha256) fail('recovery-identity-mismatch');
   if (options.request) {
@@ -126,19 +163,13 @@ function createRecovery(options) {
     if (state.request_identity_sha256 && state.request_identity_sha256 !== hash) fail('recovery-identity-mismatch');
     state.request_identity = identity; state.request_identity_sha256 = hash;
   }
-  const remaining = () => {
-    state.clock_high_water = Math.max(state.clock_high_water ?? state.started_at, clock());
-    state.budget_remaining_ms = Math.min(state.budget_remaining_ms ?? 60000,
-      Math.max(0, state.deadline_at - state.clock_high_water));
-    return state.budget_remaining_ms;
-  };
   const save = () => {
-    remaining();
     options.persist?.(JSON.parse(JSON.stringify(state)));
     return JSON.parse(JSON.stringify(state));
   };
+  const sidecarCeiling = route => route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
   return Object.freeze({
-    snapshot: save, remaining,
+    snapshot: save, state_migration: migration,
     inspect: () => JSON.parse(JSON.stringify(state)),
     transition(handle) {
       const row = transitions.assertLive(handle).reference;
@@ -183,11 +214,10 @@ function createRecovery(options) {
       }
       // S05 replaces this stop with the single same-session resume; budget
       // exhaustion with a live stream is not a destination failure, so neither
-      // a standing exception nor the deadline selects another candidate.
+      // a standing exception nor another candidate is selected.
       if (state.attempts.at(-1)?.failure_class === 'active-budget') return { action: 'stop', reason_code: 'budget-exceeded-resume-required' };
       let scope;
       if (input.exception) scope = exceptionFor(input.exception, state, clock());
-      if (!remaining() && !scope) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
       const previous = state.attempts.at(-1);
       if (!previous) fail('recovery-previous-attempt-required');
       let routes, provenance;
@@ -198,10 +228,7 @@ function createRecovery(options) {
       const environmentRepair = environmentalRepairs.has(input.correction);
       if (environmentRepair && (state.reservations || []).some(a => a.correction?.kind === 'environment'
           && a.correction.failure_id === input.correction.failure_id)) fail('recovery-corrected-retry-exhausted');
-      if (silenceRetry) {
-        if (remaining() <= 5000) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
-        routes = [previous.route];
-      }
+      if (silenceRetry) routes = [previous.route];
       else if (!environmentRepair && !transition && (previous.failure_class === 'caller' || previous.failure_class === 'timeout' && input.correction)) {
         const correction = input.correction;
         if (!correction || correction.offline_validated !== true || !correction.evidence_reference
@@ -232,9 +259,6 @@ function createRecovery(options) {
       let route, invocation;
       for (const candidate of routes) {
         if (!candidate.effort || !(candidate.model_resolved || candidate.model)) fail('recovery-explicit-route-required');
-        if (!remaining() && candidate.worker_mode !== 'native') {
-          rejected.push({ route_key: routeKey(candidate), reason_code: 'recovery-deadline-exhausted' }); continue;
-        }
         if (scope && !scope.routes.includes(routeKey(candidate))) continue;
         const policy = transition?.resolution?.effective || previous.route;
         if (candidate.effort !== policy.effort || candidate.tier !== policy.tier) {
@@ -248,7 +272,6 @@ function createRecovery(options) {
       }
       state.selection = { provenance: provenance || null, rejected, selected: route ? routeKey(route) : null }; save();
       if (!route) return { action: 'stop', reason_code: 'recovery-candidates-exhausted', rejected };
-      if (!remaining() && (!scope || route.worker_mode !== 'native')) return { action: 'stop', reason_code: 'recovery-deadline-exhausted' };
       if (scope) exceptionFor(input.exception, state, clock());
       state.phase = 'ready'; save();
       return { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction,
@@ -256,7 +279,8 @@ function createRecovery(options) {
         correction: input.correction ? { offline_validated: true, request_sha256: input.correction.request_sha256,
           ...(environmentRepair ? { kind: 'environment', failure_id: input.correction.failure_id } : {}),
           evidence_reference: require('./forge-attempt-telemetry').code(input.correction.evidence_reference) } : null,
-        remaining_ms: silenceRetry ? Math.min(30000, remaining()) : remaining(), sidecar_remaining_ms: remaining(), silence_retry: !!silenceRetry,
+        // The silence retry receives the same tier ceiling as any other attempt.
+        sidecar_ceiling: sidecarCeiling(route), silence_retry: !!silenceRetry,
         ...(scope ? { authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
           native_authorization_remaining_ms: Math.max(0, scope.expires_at - clock()) } : {}), provider_called: false };
     },
@@ -283,13 +307,12 @@ function createRecovery(options) {
       exceptionFor(input.exception, state, clock());
       saved.handoff_pending = false; saved.handed_off_at = clock(); state.phase = 'external-handoff'; save();
       return { action: 'invoke', route, invocation, corrected: true, correction: saved.correction,
-        provenance: saved.provenance, remaining_ms: remaining(), sidecar_remaining_ms: remaining(),
+        provenance: saved.provenance, sidecar_ceiling: sidecarCeiling(route),
         authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
         provider_called: false, reservation_sha256: input.reservation_sha256 };
     },
     reserve(decision, requestHash, handoffPending = false) {
       if (decision.action !== 'invoke' || state.phase !== 'ready' || state.selection?.selected !== routeKey(decision.route)) fail('recovery-reservation-invalid');
-      if (!remaining() && (decision.route.worker_mode !== 'native' || !(decision.authorization_expires_at > clock()))) fail('recovery-deadline-exhausted');
       const entry = { route_key: routeKey(decision.route), corrected: decision.corrected, request_sha256: requestHash,
         destination_key: transitions.destinationKey(decision.route),
         ...(decision.transition_reference ? { transition_reference: decision.transition_reference } : {}),
@@ -377,7 +400,9 @@ function captureFailure(options) {
   const questions = options.questions || (options.receiptFile && fs.existsSync(options.receiptFile)
     ? JSON.parse(fs.readFileSync(options.receiptFile, 'utf8')).pending_questions : null) || options.request.pending_questions;
   if (questions?.length) session.questions(questions);
-  return session.snapshot();
+  const snapshot = session.snapshot();
+  // Returned copy only; the persisted state never carries this marker.
+  return session.state_migration ? { ...snapshot, state_migration: session.state_migration } : snapshot;
 }
 // This path is intentionally unavailable through JSON/CLI. The embedding host
 // must independently observe the awaited adapter process and its staging, not
@@ -544,6 +569,10 @@ async function recoverAttempt(options) {
       } finally { guard.release(); }
       preSpawn?.acceptPersist(value); transitionGuard?.acceptPersist(value);
     } });
+  // Persist a v1 -> v2 migration now, under the same guarded persist, so the
+  // reservation hash read later (reservedStateHash) is always post-migration.
+  if (session.state_migration) session.snapshot();
+  const tag = value => session.state_migration ? { ...value, state_migration: session.state_migration } : value;
   if (transitionGuard) { session.transition(transition.handle); inspection.roots_reconciled = true; }
   if (preSpawn) inspection.roots_reconciled = true;
   if (!preSpawn && !transitionGuard && inspection.writer_possible !== false && !inspection.valid_saved_response && options.reconcile) {
@@ -614,9 +643,9 @@ async function recoverAttempt(options) {
   if (decision.action === 'replay' && savedWriter) await transitions.assertWriterObservation(savedWriter).refresh();
   if (decision.action === 'replay') {
     if (typeof options.replay !== 'function') fail('recovery-replay-required');
-    return { ...decision, result: await options.replay(inspection.receipt), inspection: { ...inspection, receipt: undefined } };
+    return tag({ ...decision, result: await options.replay(inspection.receipt), inspection: { ...inspection, receipt: undefined } });
   }
-  if (decision.action !== 'invoke') return decision;
+  if (decision.action !== 'invoke') return tag(decision);
   // session persistence changes the recovery file itself; validate the original
   // bytes immediately before reservation, then bind the newly saved state too.
   preSpawn?.assertUnchanged();
@@ -627,15 +656,13 @@ async function recoverAttempt(options) {
     decision.reservation_sha256 = digest(saved.reservations.at(-1));
   }
   if (typeof options.invoke !== 'function' && (preSpawn || transitionGuard) && options.externalNativeHandoff === true
-      && !options.resumeReservation && decision.route.worker_mode === 'native') return {
-    action: 'reattest-native-handoff', reservation_sha256: decision.reservation_sha256, provider_called: false };
-  if (typeof options.invoke !== 'function') return { ...decision, action: 'invoke-native',
-    ...((preSpawn || transitionGuard) ? { assertReady: transitionGuard ? () => transitionGuard.withLock(() => {}) : preSpawn.assertUnchanged } : {}), inspection: { ...inspection, receipt: undefined } };
-  decision.sidecar_remaining_ms = session.remaining();
-  decision.remaining_ms = decision.silence_retry ? Math.min(30000, decision.sidecar_remaining_ms) : decision.sidecar_remaining_ms;
-  if (decision.route.worker_mode !== 'native' && decision.remaining_ms <= 5000) fail('recovery-deadline-exhausted');
-  // The invocation budget is always the historic sidecar budget. Native
-  // authorization validity is returned separately, never a fresh sidecar wait.
+      && !options.resumeReservation && decision.route.worker_mode === 'native') return tag({
+    action: 'reattest-native-handoff', reservation_sha256: decision.reservation_sha256, provider_called: false });
+  if (typeof options.invoke !== 'function') return tag({ ...decision, action: 'invoke-native',
+    ...((preSpawn || transitionGuard) ? { assertReady: transitionGuard ? () => transitionGuard.withLock(() => {}) : preSpawn.assertUnchanged } : {}), inspection: { ...inspection, receipt: undefined } });
+  // The invocation budget is the tier safety ceiling (ceilingFromRoute) for a
+  // sidecar route, never a remainder of a cumulative clock. Native authorization
+  // validity is returned separately, never as a sidecar wait.
   preSpawn?.assertUnchanged();
   const reservedStateHash = digest(require('fs').readFileSync(options.stateFile));
   const reservedRequestHash = callerRequestHash(options.request);
@@ -652,7 +679,7 @@ async function recoverAttempt(options) {
     if (transitionGuard) transitionGuard.withLock(() => {});
     else preSpawn?.assertUnchanged();
   }, { assertAuthority, ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
-  const invoke = () => options.invoke(decision.route, decision.invocation, decision.remaining_ms,
+  const invoke = () => options.invoke(decision.route, decision.invocation, decision.sidecar_ceiling,
     assertReady, decision.reservation_sha256);
   // The adapter repeats assertReady at the actual native callback. Do not hold
   // the publication mutex while awaiting a provider or its publication.
@@ -661,11 +688,11 @@ async function recoverAttempt(options) {
   // Phase one exposes only a durable reservation, never executable arguments.
   // The next phase must rebuild and validate them under fresh live authority.
   if ((preSpawn || transitionGuard) && options.externalNativeHandoff === true && !options.resumeReservation
-      && decision.route.worker_mode === 'native') return {
+      && decision.route.worker_mode === 'native') return tag({
     action: 'reattest-native-handoff', reservation_sha256: decision.reservation_sha256,
     provider_called: false, result,
-  };
-  return { ...decision, result };
+  });
+  return tag({ ...decision, result });
 }
 function validateStateTarget(file, request, contract) {
   const validate = require('./forge-xllm').validateResultFileTarget;
@@ -680,7 +707,8 @@ async function cli(argv) {
   if (argv[0] === '--inspect' && argv[1] && argv[2]) {
     const state = require('./forge-xllm-state').loadRecovery(argv[1]);
     const inspected = inspectReceipt(argv[2]);
-    return { state, remaining_ms: Math.min(state.budget_remaining_ms ?? 60000, Math.max(0, state.deadline_at - Math.max(state.clock_high_water ?? state.started_at, Date.now()))), inspection: { ...inspected, receipt: undefined } };
+    // Read-only: a v1 file is reported as-is, never migrated here.
+    return { state, schema_version: state.schema_version, budget: RECOVERY_BUDGET, inspection: { ...inspected, receipt: undefined } };
   }
   if (['--preparation', '--unit'].includes(argv[0]) && argv[1]) {
     const input = JSON.parse(fs.readFileSync(argv[1], 'utf8'));
@@ -690,7 +718,7 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, createRecovery, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
+module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, createRecovery, migrateState, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;
 });

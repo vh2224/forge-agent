@@ -15,6 +15,7 @@ const unit = require('./forge-unit-sidecar');
 const claudeSidecar = require('./forge-claude-sidecar');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity');
 const { diagnostic: safeSidecarDiagnostic } = require('./forge-sidecar-diagnostic');
+const { ceilingFromRoute } = require('./forge-worker-timeout');
 
 const REQUEST_SCHEMA_VERSION = 1;
 const MAX_INPUT_BYTES = 512 * 1024;
@@ -717,13 +718,15 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       }
       return unit.replayArtifactAttempt(delivery);
     },
-    invoke: async (route, invocation, remainingMs, assertReady, reservationHash) => {
+    invoke: async (route, invocation, _ceiling, assertReady, reservationHash) => {
       assertReady?.();
       if (route.worker_mode === 'native' && !deps.invokeNative && recovery.transitions && !recovery.resumeReservation)
         return { action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
       const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
         resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
-      const bounded = { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) };
+      // Tier safety ceiling from the single source; no cumulative-clock remainder.
+      const ceiling = ceilingFromRoute(route);
+      const bounded = { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source };
       const result = await prepareStandaloneTask(next, { ...deps, resolveDispatch: () => bounded,
         ...(deps.invokeNative ? { invokeNative: (args, binding) => { assertReady?.(); return deps.invokeNative(args, binding); } } : {}) });
       return { ...result, ...(assertReady && result.action === 'invoke-native' ? { assertReady } : {}) };
