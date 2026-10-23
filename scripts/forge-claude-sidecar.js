@@ -27,6 +27,7 @@ const workerContract = require('./forge-worker-result-contract');
 const streamProtocol = require('./forge-claude-stream');
 const calibrationApi = require('./forge-sidecar-calibration');
 const { observation } = calibrationApi;
+const liveness = require('./forge-sidecar-liveness');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
@@ -90,6 +91,7 @@ const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // heartbeat_interval_ms, and the orphan reaper derives staleAfter from that
 // published value. A callback wired without a cadence still has to beat.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15000;
+const DEFAULT_LIVENESS_INTERVAL_MS = 1000;
 // Inline invocation settings: `--setting-sources ''` excludes the user, project
 // and local settings files. Managed policy is not a setting source; it may still
 // apply and is never bypassed. No settings file is changed.
@@ -248,6 +250,38 @@ function normalizeHeartbeatIntervalMs(value) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
   }
   return value;
+}
+
+/** Watchdog cadence (internal; tests inject a short one). Same validation as
+ * the heartbeat: a present value is never coerced into a tight loop. */
+function normalizeLivenessIntervalMs(value) {
+  if (value === undefined || value === null) return DEFAULT_LIVENESS_INTERVAL_MS;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  }
+  return value;
+}
+
+/**
+ * Liveness policy for one turn. The locked defaults apply without calibration;
+ * an override (tests) and a calibrated v1 gap can only tighten them. The v1
+ * gap threshold is clamped into [suspectMs, deadMs]; the v1 initial threshold
+ * (always >= 120000) never tightens the 60000 start limit, so it is ignored.
+ */
+function livenessPolicyFor(calibration, override) {
+  const D = liveness.DEFAULTS;
+  const limits = liveness.normalizePolicy(override && typeof override === 'object' ? override : undefined);
+  const gap = calibration?.gap;
+  if (gap?.calibrated === true && Number.isSafeInteger(gap.threshold_ms)) {
+    limits.deadMs = Math.min(limits.deadMs, Math.min(D.deadMs, Math.max(D.suspectMs, gap.threshold_ms)));
+  }
+  return liveness.normalizePolicy(limits);
+}
+
+/** Per-dimension provenance: only a limit below its locked default is calibrated. */
+function livenessSource(dimension, thresholdMs) {
+  const locked = dimension === 'initial' ? liveness.DEFAULTS.startMs : liveness.DEFAULTS.deadMs;
+  return thresholdMs < locked ? liveness.SOURCE_CALIBRATED : liveness.SOURCE_DEFAULT;
 }
 
 /** The model id is interpolated into argv, so an absent one is legal but a
@@ -464,7 +498,8 @@ function defaultTerminate(child) {
 }
 
 function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat,
-  heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration }) {
+  heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration,
+  onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy }) {
   if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   let child;
   try {
@@ -476,6 +511,11 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     let settled = false, terminationAttempted = false, closed = false, failed = false;
     let watchdog, heartbeatTimer, progressTimer, timer, silence = null, transportEnd = null;
     let reportedRemote = false, reportedTerminal = false;
+    // Liveness is the primary kill authority (start/silence); timeoutMs is only
+    // the safety ceiling, enforced by the tracker on the injected clock and by
+    // the real setTimeout backstop below.
+    const policy = livenessPolicyFor(calibration, livenessPolicy);
+    const tracker = liveness.createTracker(policy, timeoutMs);
     const reducer = streamProtocol.createReducer({ secret: env[TOKEN_ENV], clock, onRemote: () => {
       if (!reportedRemote) { reportedRemote = true; emit(); }
     }, onEvent: () => {
@@ -541,16 +581,34 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     signal?.addEventListener('abort', cancel, { once: true });
     process.once('SIGINT', cancel);
     process.once('SIGTERM', cancel);
-    timer = setTimeout(() => terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT)), timeoutMs);
+    function ceilingError() {
+      // Classify with the state that held without the ceiling (backstop path).
+      const { state, reason } = liveness.evaluate(reducer.snapshot(), {}, policy, null);
+      const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
+      error.liveness = { version: 1, termination: liveness.classifyTermination({ cause: 'ceiling', state }),
+        state, reason };
+      return error;
+    }
+    timer = setTimeout(() => { if (!settled) terminate(ceilingError()); }, timeoutMs);
     beat();
     emit();
     if (onHeartbeat) heartbeatTimer = setInterval(beat, heartbeatIntervalMs);
     if (onProgress) progressTimer = setInterval(emit, 15000);
     watchdog = setInterval(() => {
       if (settled) return;
-      silence = calibrationApi.silence(calibration, reducer.snapshot());
-      if (silence) terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence'));
-    }, 1000);
+      const { result, transition } = tracker.evaluate(reducer.snapshot(), {});
+      if (transition && onLiveness) bestEffort(onLiveness, transition);
+      if (!result.kill) return;
+      if (result.cause === 'liveness') {
+        silence = { dimension: result.dimension, window_ms: result.window_ms, threshold_ms: result.threshold_ms,
+          policy: liveness.POLICY, source: livenessSource(result.dimension, result.threshold_ms), cause: 'indeterminate' };
+        const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence');
+        error.liveness = { version: 1, termination: result.termination, state: 'dead', reason: result.reason };
+        terminate(error);
+      } else if (result.cause === 'ceiling') {
+        terminate(ceilingError());
+      }
+    }, livenessIntervalMs);
     child.stdout?.on('data', chunk => {
       if (!settled) try { reducer.push(chunk); } catch (error) { protocolError(error); }
     });
@@ -607,8 +665,20 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  *   Required and non-empty: a vacuous instruction still spawns the real CLI and
  *   spends subscription quota, so absence is a named failure (S03 review R5).
  * @param {string} opts.cwd workspace directory that owns the temporary file
- * @param {number} [opts.timeoutMs] parent deadline in milliseconds
- * @param {number} [opts.timeoutSecs] parent deadline in seconds
+ * @param {number} [opts.timeoutMs] parent deadline in milliseconds. This is the
+ *   safety ceiling only (the child gets it minus TIMEOUT_GRACE_MS); reaching it
+ *   rejects with `claude-timeout` plus `error.liveness.termination`. Start and
+ *   silence kills are decided by forge-sidecar-liveness (locked defaults
+ *   60000/120000/240000 ms, even without calibration) and reject with
+ *   `claude-anomalous-silence` plus `error.liveness.termination`
+ *   (`dead-start` | `dead-silence`).
+ * @param {number} [opts.timeoutSecs] parent deadline in seconds (same ceiling)
+ * @param {(transition:{from:?string,to:string,at_ms:?number,reason:?string})=>void} [opts.onLiveness]
+ *   best-effort observer of liveness state transitions; non-functions are ignored.
+ * @param {number} [opts.livenessIntervalMs] watchdog cadence (default 1000);
+ *   validated as a positive integer when present.
+ * @param {{startMs?:number,suspectMs?:number,deadMs?:number}} [opts.livenessPolicy]
+ *   override that can only tighten the locked liveness defaults.
  * @param {string} opts.model model id forwarded to the CLI as `--model <id>`.
  *   Required: absence is `claude-model-required` before any spawn, because the
  *   result is admitted only when modelUsage proves this exact id. Rejected when
@@ -655,6 +725,8 @@ async function invokeClaudeSidecar(opts) {
   const phase = options.calibrationPhase || (['memory','review','fix','plan'].includes(options.resultProfile) ? options.resultProfile : options.resultProfile === 'preparation' ? 'artifacts' : 'execute');
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
+  const livenessIntervalMs = normalizeLivenessIntervalMs(options.livenessIntervalMs);
+  const onLiveness = typeof options.onLiveness === 'function' ? options.onLiveness : null;
   const launchIdentity = claudeLaunchIdentity(options);
   const model = launchIdentity.model_sent;
   const effort = launchIdentity.effort;
@@ -745,6 +817,7 @@ async function invokeClaudeSidecar(opts) {
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
       requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
       calibration: calibrationApi.read({model,effort:effort || 'medium',phase},options.calibrationOptions),
+      onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
     });
     const proposal = calibrationApi.propose({model,effort:effort || 'medium',phase},output.metadata.observation,options.calibrationOptions);
     return { ...output, telemetry: Object.freeze({ ...telemetryBase,

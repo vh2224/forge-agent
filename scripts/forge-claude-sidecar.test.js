@@ -1074,7 +1074,12 @@ test('unreadable calibration is visible in progress and returned telemetry', asy
   assert(!JSON.stringify(run.result.telemetry).includes('private-invalid-json'));
 });
 
-test('persisted calibrated silence aborts locally without treating kill promise as observed exit', async () => {
+// Migrated in S01/T03: liveness is now the primary kill authority. A persisted
+// v1 initial calibration (>= 120000) never tightens the locked 60000 start
+// limit, so the same silent child now dies as dead-start at the locked default.
+// The ceiling is also enforced on the injected clock now, so timeoutMs is
+// widened (15000 -> 3600000) to keep the start limit, not the ceiling, in play.
+test('persisted calibrated silence aborts locally (now dead-start at the locked 60000 default) without treating kill promise as observed exit', async () => {
   const calibration = require('./forge-sidecar-calibration');
   const calibrationOptions = { userHome: path.join(ROOT, 'calibration-home') };
   const id = { model: FIXTURE_MODEL, effort: 'medium', phase: 'execute' };
@@ -1084,15 +1089,213 @@ test('persisted calibrated silence aborts locally without treating kill promise 
   let now = 0, kills = 0;
   const adapter = loadAdapter();
   const error = await expectCode(adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'silence', model: FIXTURE_MODEL,
-    timeoutMs: 15000, calibrationOptions, monotonicClock: () => now,
+    timeoutMs: 3600000, calibrationOptions, monotonicClock: () => now, livenessIntervalMs: 25,
     sourceEnv: sourceEnvFor(silentFixture), onHeartbeat() { now = 120001; },
     terminateChild(child) { kills++; child.kill('SIGKILL'); return Promise.reject(Error('termination unconfirmed')); },
   }), 'claude-anomalous-silence');
   assert.equal(kills, 1);
   assert.equal(error.diagnostic.observation.silence.cause, 'indeterminate');
-  assert.equal(error.diagnostic.observation.silence.threshold_ms, 120000);
+  assert.equal(error.diagnostic.observation.silence.dimension, 'initial');
+  assert.equal(error.diagnostic.observation.silence.threshold_ms, 60000);
+  assert.equal(error.diagnostic.observation.silence.source, 'locked-default');
+  assert.equal(error.liveness.termination, 'dead-start');
   assert.equal(error.diagnostic.observation.process_exit_observed, false);
   assert.deepEqual(tempPromptDirs(), []);
+});
+
+// ── Liveness watchdog (S01/T03) — accelerated injected clock, no long real waits ──
+// The watchdog consults forge-sidecar-liveness on every livenessIntervalMs tick
+// using the injected monotonicClock. `fromFirstRemote` keeps real time until the
+// first remote event so a slow child start on a loaded CI host cannot be read
+// as an accelerated dead-start; the dead-start test accelerates from spawn.
+function acceleratedClock(factor, { fromFirstRemote = false } = {}) {
+  const t0 = performance.now();
+  let pivotReal = fromFirstRemote ? null : t0, pivotValue = 0;
+  return {
+    now() {
+      const real = performance.now();
+      return pivotReal === null ? real - t0 : pivotValue + (real - pivotReal) * factor;
+    },
+    accelerate() {
+      if (pivotReal !== null) return;
+      const real = performance.now();
+      pivotValue = real - t0;
+      pivotReal = real;
+    },
+  };
+}
+
+const STREAM_PRELUDE = `
+'use strict';
+${ENVELOPE_PRELUDE}
+const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const delta = () => out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0,
+  delta: { type: 'text_delta', text: 'x' } } });
+out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-live', role: 'assistant' } } });
+out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+`;
+
+// Streams a text_delta every ~30 ms; after finishAfterMs real ms (if given)
+// closes the message and writes a valid result envelope.
+function activeStreamFixture(name, finishAfterMs) {
+  return writeFixture(name, `${STREAM_PRELUDE}
+const stopAt = ${finishAfterMs === null ? 'null' : `Date.now() + ${finishAfterMs}`};
+const tick = setInterval(() => {
+  delta();
+  if (stopAt !== null && Date.now() >= stopAt) {
+    clearInterval(tick);
+    out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+    out({ type: 'stream_event', event: { type: 'message_stop' } });
+    process.stdout.write(envelope(${JSON.stringify(okBlock('liveness active'))}) + '\\n');
+  }
+}, 30);
+`);
+}
+
+// Emits N=3 remote events (message_start + two text deltas) and then stays silent.
+const SILENT_AFTER_EVENTS_FIXTURE = writeFixture('claude silent after events fixture.js', `${STREAM_PRELUDE}
+delta();
+delta();
+setInterval(() => {}, 1000);
+`);
+const SILENT_FROM_START_FIXTURE = writeFixture('claude silent from start fixture.js', 'setInterval(() => {}, 1000);');
+
+async function runLive(fixture, clock, options = {}) {
+  const children = [];
+  const transitions = [];
+  let terminations = 0, result = null, error = null;
+  const adapter = loadAdapter({ spawnImpl: (cmd, args, spawnOptions) => {
+    const child = REAL_SPAWN(cmd, args, spawnOptions);
+    children.push(child);
+    return child;
+  } });
+  const started = performance.now();
+  try {
+    result = await adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'liveness', model: FIXTURE_MODEL, timeoutMs: 3600000,
+      sourceEnv: sourceEnvFor(fixture), monotonicClock: clock.now, livenessIntervalMs: 25,
+      onProgress(snapshot) { if (snapshot.phase !== 'local-start') clock.accelerate(); },
+      onLiveness(transition) { transitions.push(transition); },
+      terminateChild(child) { terminations++; child.kill('SIGKILL'); },
+      ...options,
+    });
+  } catch (caught) { error = caught; }
+  finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) try { child.kill('SIGKILL'); } catch { /* gone */ }
+    }
+  }
+  const realMs = performance.now() - started;
+  assert.strictEqual(children.length, 1, 'exactly one turn spawn');
+  assert.deepStrictEqual(tempPromptDirs(), []);
+  ok(realMs < 5000, `liveness test waited ${Math.round(realMs)} real ms`);
+  return { result, error, transitions, terminations, realMs };
+}
+
+function gapCalibration(label, gapSampleMs) {
+  const calibration = require('./forge-sidecar-calibration');
+  const calibrationOptions = { userHome: path.join(ROOT, `calibration-gap-${label}`) };
+  const id = { model: FIXTURE_MODEL, effort: 'medium', phase: 'execute' };
+  for (let i = 0; i < 5; i++) {
+    assert(calibration.commit(calibration.propose(id, { initial_sample_ms: null, gap_sample_ms: gapSampleMs }),
+      { receipt: 'fixture', fingerprint: 'fixture' }, calibrationOptions).committed);
+  }
+  const record = calibration.read(id, calibrationOptions);
+  assert.strictEqual(record.gap.calibrated, true);
+  return { calibrationOptions, threshold: record.gap.threshold_ms };
+}
+
+test('liveness: an active stream survives past 300000 injected ms under a 3600000 ceiling', async () => {
+  const fixture = activeStreamFixture('claude active stream fixture.js', 1200);
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }));
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  ok(run.result.metadata.observation.elapsed_ms > 300000,
+    `elapsed ${run.result.metadata.observation.elapsed_ms} must exceed 300000 injected ms`);
+  assert.strictEqual(run.terminations, 0);
+  ok(!run.transitions.some(t => t.to === 'dead'), 'an active stream never reached dead');
+});
+
+test('liveness: no remote event dies once as dead-start at the locked 60000 default', async () => {
+  const run = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300));
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-start');
+  assert.strictEqual(run.error.liveness.state, 'dead');
+  const silence = run.error.diagnostic.observation.silence;
+  assert.strictEqual(silence.dimension, 'initial');
+  assert.strictEqual(silence.threshold_ms, 60000);
+  assert.strictEqual(silence.source, 'locked-default');
+  assert.strictEqual(silence.policy, 'forge-liveness-v1');
+  assert.strictEqual(silence.cause, 'indeterminate');
+  assert.strictEqual(run.terminations, 1);
+  assert.deepStrictEqual(run.transitions.map(t => t.to), ['starting', 'dead']);
+});
+
+test('liveness: silence after N events passes slow-suspect (120000) before dead-silence (240000)', async () => {
+  const run = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }));
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  const silence = run.error.diagnostic.observation.silence;
+  assert.strictEqual(silence.dimension, 'gap');
+  assert.strictEqual(silence.threshold_ms, 240000);
+  assert.strictEqual(silence.source, 'locked-default');
+  ok(silence.window_ms > 240000);
+  const suspect = run.transitions.findIndex(t => t.from === 'working' && t.to === 'slow-suspect');
+  const dead = run.transitions.findIndex(t => t.from === 'slow-suspect' && t.to === 'dead');
+  ok(suspect >= 0, `slow-suspect transition missing: ${JSON.stringify(run.transitions)}`);
+  ok(dead > suspect, `dead must follow slow-suspect: ${JSON.stringify(run.transitions)}`);
+  ok(run.transitions[suspect].at_ms > 120000 && run.transitions[suspect].at_ms < run.transitions[dead].at_ms);
+  assert.strictEqual(run.terminations, 1);
+});
+
+test('liveness: an active stream reaching the injected ceiling is claude-timeout budget-exceeded-while-active', async () => {
+  // timeoutMs 60000 gives a 55000 ms child ceiling. On the accelerated clock the
+  // watchdog reaches it in ~0.2 s real; the real setTimeout backstop (55 s) does not fire.
+  const fixture = activeStreamFixture('claude endless stream fixture.js', null);
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }), { timeoutMs: 60000 });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-timeout');
+  assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.state, 'working');
+  assert.strictEqual(run.error.diagnostic.observation.silence, undefined);
+  ok(run.realMs < 4000, 'the injected ceiling, not the real backstop, terminated the turn');
+  assert.strictEqual(run.terminations, 1);
+});
+
+test('liveness: a calibrated v1 gap only tightens the dead limit and never exceeds 240000', async () => {
+  const loose = gapCalibration('loose', 100000);
+  ok(loose.threshold > 240000, `v1 threshold ${loose.threshold} must exceed the locked default`);
+  const capped = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }),
+    { calibrationOptions: loose.calibrationOptions });
+  assert.strictEqual(capped.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(capped.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(capped.error.diagnostic.observation.silence.threshold_ms, 240000);
+  assert.strictEqual(capped.error.diagnostic.observation.silence.source, 'locked-default');
+
+  const tight = gapCalibration('tight', 100);
+  assert.strictEqual(tight.threshold, 120000);
+  const tightened = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }),
+    { calibrationOptions: tight.calibrationOptions });
+  assert.strictEqual(tightened.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(tightened.error.liveness.termination, 'dead-silence');
+  const silence = tightened.error.diagnostic.observation.silence;
+  assert.strictEqual(silence.threshold_ms, 120000);
+  assert.strictEqual(silence.source, 'persisted-calibration');
+  ok(silence.window_ms > 120000 && silence.window_ms < 240000, `window ${silence.window_ms}`);
+});
+
+test('liveness: an invalid livenessIntervalMs is refused before any spawn', async () => {
+  for (const value of [0, -1, 1.5, '25']) {
+    const records = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    await expectCode(adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'interval', model: FIXTURE_MODEL,
+      timeoutMs: 15000, livenessIntervalMs: value, sourceEnv: sourceEnvFor(HAPPY_FIXTURE) }),
+    adapter.CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+    assert.strictEqual(records.length, 0);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+  }
 });
 
 async function main() {
