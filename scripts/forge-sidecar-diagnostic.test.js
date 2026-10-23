@@ -18,6 +18,68 @@ const { diagnostic, observation } = require('./forge-sidecar-diagnostic');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
 const { loadProcedureContext } = require('./forge-procedure-context');
 const sourceRoot = path.resolve(__dirname, '..');
+test('observation silence preserves the v1 snapshot and serialized bytes', () => {
+  for (const dimension of ['initial', 'gap']) {
+    for (const threshold of [120000, 300000, Number.MAX_SAFE_INTEGER - 1]) {
+      const snapshot = { dimension, window_ms: threshold + 1, threshold_ms: threshold,
+        policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+      const result = observation({ silence: { ...snapshot, raw: token } });
+      assert.deepEqual(result.silence, snapshot);
+      assert.equal(JSON.stringify(result), JSON.stringify({ ...observation(), silence: snapshot }));
+      assert.deepEqual(observation(result), result);
+    }
+  }
+  assert(!Object.hasOwn(observation({ silence: { dimension: 'gap', window_ms: 120000,
+    threshold_ms: 119999, policy: 'claude-silence-v1', source: 'persisted-calibration',
+    cause: 'indeterminate' } }), 'silence'));
+});
+
+test('observation silence accepts liveness defaults and tightened thresholds for both sources', () => {
+  for (const source of ['locked-default', 'persisted-calibration']) {
+    for (const [dimension, threshold_ms, window_ms] of [
+      ['initial', 60000, 60001], ['gap', 240000, 241000], ['initial', 1, 2], ['gap', 1, 2],
+    ]) {
+      const silence = { dimension, window_ms, threshold_ms, policy: 'forge-liveness-v1',
+        source, cause: 'indeterminate' };
+      const result = observation({ silence: { ...silence, raw: token } });
+      assert.deepEqual(result, { ...observation(), silence });
+      assert.deepEqual(Object.keys(result.silence), ['dimension', 'window_ms', 'threshold_ms', 'policy', 'source', 'cause']);
+      assert.deepEqual(observation(result), result);
+      assert.deepEqual(diagnostic('anomalous-silence', { observation: result }).observation, result);
+    }
+  }
+});
+
+test('observation silence rejects unknown vocabulary, invalid numbers and thresholds above dimension ceilings', () => {
+  const valid = { dimension: 'gap', window_ms: 400000, threshold_ms: 240000,
+    policy: 'forge-liveness-v1', source: 'locked-default', cause: 'indeterminate' };
+  for (const change of [
+    { threshold_ms: 300000 }, { threshold_ms: 240001 },
+    { dimension: 'initial', threshold_ms: 60001 },
+    { policy: 'forge-liveness-v2' }, { policy: 'claude-silence-v2' },
+    { source: 'invented' }, { cause: 'timeout' }, { cause: null }, { dimension: 'other' },
+    { threshold_ms: 0 }, { threshold_ms: -1 }, { threshold_ms: 1.5 },
+    { threshold_ms: '1' }, { threshold_ms: NaN }, { threshold_ms: Infinity },
+    { threshold_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { window_ms: 240000 }, { window_ms: 239999 }, { window_ms: '400000' },
+    { window_ms: NaN }, { window_ms: Infinity }, { window_ms: 400000.5 },
+    { window_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { policy: 'claude-silence-v1' },
+  ]) {
+    assert.deepEqual(observation({ silence: { ...valid, ...change } }), observation(), JSON.stringify(change));
+  }
+});
+
+test('observation silence adds no keys to an observation without silence', () => {
+  assert.deepEqual(Object.keys(observation({ raw: token })), [
+    'version', 'elapsed_ms', 'transport_ms', 'verification_ms', 'stdout_bytes', 'stderr_bytes',
+    'event_count', 'remote_event_count', 'first_remote_ms', 'last_remote_ms', 'initial_sample_ms',
+    'gap_sample_ms', 'remote_silence_ms', 'input_tokens', 'output_tokens', 'cache_read_tokens',
+    'cache_write_tokens', 'phase', 'cost_usd', 'cost_source', 'remote_source', 'usage_source',
+    'gap_suspended', 'process_exit_observed', 'denials',
+  ]);
+});
+
 test('calibration read outcome survives shared observation and failure projection without open fields', () => {
   const calibration = { diagnostic: 'calibration-unavailable', initial: 'calibrating', gap: 'calibrated' };
   const input = { calibration: { ...calibration, raw: token }, raw: token };

@@ -1,5 +1,7 @@
 'use strict';
 
+const liveness = require('./forge-sidecar-liveness');
+
 // Closed vocabulary only. Never persist provider text, paths, JSON parser
 // messages, validator exceptions, environment, or classifyReturn().tail.
 const REASONS = Object.freeze({
@@ -77,6 +79,16 @@ function observation(input = {}) {
     out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
       threshold_ms: silence.threshold_ms, policy: 'claude-silence-v1',
       source: 'persisted-calibration', cause: 'indeterminate' };
+  } else if (silence?.cause === 'indeterminate' && ['initial', 'gap'].includes(silence.dimension)
+      && silence.policy === liveness.POLICY
+      && [liveness.SOURCE_DEFAULT, liveness.SOURCE_CALIBRATED].includes(silence.source)
+      && Number.isSafeInteger(silence.window_ms) && Number.isSafeInteger(silence.threshold_ms)
+      && silence.threshold_ms >= 1
+      && silence.threshold_ms <= (silence.dimension === 'initial' ? liveness.DEFAULTS.startMs : liveness.DEFAULTS.deadMs)
+      && silence.window_ms > silence.threshold_ms) {
+    out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
+      threshold_ms: silence.threshold_ms, policy: silence.policy,
+      source: silence.source, cause: 'indeterminate' };
   }
   return out;
 }
