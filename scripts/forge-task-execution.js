@@ -5,11 +5,45 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
 const ids = require('./forge-ids');
 const parallel = require('./forge-parallelism');
 const roots = require('./forge-code-roots');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
+const autoPlanGate = new AsyncLocalStorage();
+function autoGateScope(r) {
+  locations(r);
+  const owner = fs.realpathSync(r.contextRoot || r.cwd);
+  const plan = path.join(owner, '.gsd/tasks', r.taskId, `${r.taskId}-PLAN.md`);
+  physical(owner, plan);
+  const reference = r.gates?.authorizationReference;
+  if (typeof reference !== 'string' || !reference.trim() || !r.workflowId || !r.dispatchId) fail('execution-auto-gate-binding-required');
+  return Object.freeze({ taskId: r.taskId, workflowId: r.workflowId, dispatchId: r.dispatchId,
+    host: r.route?.host_runtime, owner, codeDir: fs.realpathSync(r.cwd), planSha256: hash(read(plan)), reference });
+}
+function autoGateAllowed(r) {
+  const live = autoPlanGate.getStore();
+  if (!live?.active || r.gates?.plan !== 'skipped' || r.gates?.planSkipReason !== 'auto-defer') return false;
+  const scope = autoGateScope(r);
+  if (JSON.stringify(scope) !== JSON.stringify(live.scope)) fail('execution-auto-gate-binding-mismatch');
+  const observed = live.attest(scope);
+  if (observed?.authorized !== true || observed.mode !== 'auto' || observed.reference !== scope.reference) fail('execution-auto-gate-not-attested');
+  return true;
+}
+// Host-only seam: imported JSON cannot supply this live callback or its async
+// scope. The host attests an observed authorization, never a prompt assertion.
+// A new invocation/restart must re-attest; no human approval marker is written.
+async function withAutoPlanGate(request, attest, action) {
+  if (typeof attest !== 'function' || typeof action !== 'function') fail('execution-auto-gate-host-required');
+  const live = { scope: autoGateScope(request), attest, active: true };
+  return autoPlanGate.run(live, async () => {
+    try {
+      if (!autoGateAllowed(request)) fail('execution-auto-gate-required');
+      return await action();
+    } finally { live.active = false; }
+  });
+}
 
 function locations(r) {
   if (r.scope !== 'standalone-task' || r.phase !== 'execute' || r.unitType !== 'execute-task') fail('execution-phase-unit-mismatch');
@@ -71,7 +105,8 @@ function prepare(r, root, cwd) {
   physical(root, gateFile);
   const gate = fs.existsSync(gateFile) ? read(gateFile) : '';
   if (!/^status:\s*approved\s*$/m.test(gate)
-      && !(r.gates?.plan === 'skipped' && r.gates?.planSkipReason === 'interactive-off')) fail('execution-plan-gate-required');
+      && !(r.gates?.plan === 'skipped' && r.gates?.planSkipReason === 'interactive-off')
+      && !autoGateAllowed(r)) fail('execution-plan-gate-required');
   const approvedHash = gate.match(/^plan_sha256:\s*([a-f0-9]{64})\s*$/m)?.[1];
   if (approvedHash && approvedHash !== hash(plan)) fail('execution-plan-gate-stale');
   if (r.gates?.claim !== 'proceed' || !['passed', 'not-applicable'].includes(r.gates?.security)) fail('execution-gates-required');
@@ -272,4 +307,4 @@ function replayState(cwd, contract) {
   const state = require('./forge-surgical-reset').captureAttemptSnapshot(cwd);
   return { start_sha: state.start_sha, pre_dirty: state.pre_dirty, vcs: state.vcs };
 }
-module.exports = { locations, prepare, protectedSnapshot, assertProtected, verifyResult, assertReplay, replayState };
+module.exports = { locations, prepare, protectedSnapshot, assertProtected, verifyResult, assertReplay, replayState, withAutoPlanGate };

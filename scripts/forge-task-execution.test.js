@@ -179,6 +179,38 @@ function snapshotRegressions() {
   console.log('protected snapshot: >64 MiB file, 72 MiB aggregate, bounded reads, mutations, races, descriptor cleanup, links/types and 20000-entry limit passed');
 }
 async function main() {
+  const automatic = setup();
+  const marker = path.join(automatic.task, `${id}-PLAN-GATE.md`);
+  fs.unlinkSync(marker);
+  automatic.r.gates = { ...automatic.r.gates, plan: 'skipped', planSkipReason: 'auto-defer', authorizationReference: 'conversation:fixture-auto' };
+  const attest = scope => ({ authorized: true, mode: 'auto', reference: scope.reference });
+  // Imported flags/references and serialized callback-shaped data grant nothing.
+  await rejects(JSON.parse(JSON.stringify(automatic.r)), 'execution-plan-gate-required');
+  await assert.rejects(() => execution.withAutoPlanGate(automatic.r, {}, () => {}), /execution-auto-gate-host-required/);
+  await assert.rejects(() => execution.withAutoPlanGate(automatic.r, () => ({ authorized: true, mode: 'interactive', reference: 'conversation:fixture-auto' }), () => {}), /execution-auto-gate-not-attested/);
+  await execution.withAutoPlanGate(automatic.r, attest, async () => {
+    await rejects({ ...automatic.r, dispatchId: 'foreign-attempt' }, 'execution-auto-gate-binding-mismatch');
+    const originalPlan = fs.readFileSync(automatic.r.planFile, 'utf8');
+    fs.appendFileSync(automatic.r.planFile, '\nChanged after authorization.\n');
+    await rejects(automatic.r, 'execution-auto-gate-binding-mismatch');
+    fs.writeFileSync(automatic.r.planFile, originalPlan);
+  });
+  let stillAuthorized = true;
+  await execution.withAutoPlanGate(automatic.r, scope => ({ ...attest(scope), authorized: stillAuthorized }), async () => {
+    stillAuthorized = false;
+    await rejects(automatic.r, 'execution-auto-gate-not-attested');
+  });
+  let detached;
+  await execution.withAutoPlanGate(automatic.r, attest, async () => {
+    detached = new Promise((resolve, reject) => setTimeout(() => rejects(automatic.r, 'execution-plan-gate-required').then(resolve, reject), 0));
+  });
+  await detached;
+  assert(!fs.existsSync(automatic.control.calls), 'gate refusals must precede provider');
+  const autoResult = await execution.withAutoPlanGate(automatic.r, attest, () => unit.runUnitSidecar(automatic.r));
+  assert.strictEqual(autoResult.status, 'done');
+  assert(!fs.existsSync(marker), 'auto mode must not manufacture human approval');
+  assert.strictEqual(fs.readFileSync(automatic.control.calls, 'utf8'), 'spawn\n');
+  console.log('standalone execute: live auto gate, binding, revocation and closed async scope passed');
   // Production milestone -> xllm -> Claude adapter contract, with only inference
   // substituted by the local process fixture above.
   const multi = setup(), second = path.join(multi.dir, 'second');
