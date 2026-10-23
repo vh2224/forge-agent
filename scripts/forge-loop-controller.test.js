@@ -32,6 +32,16 @@ function input(cwd, owner = 'owner-neutral', key = 'loop-neutral-1') {
 }
 
 try {
+  {
+    const f = require('./forge-loop-failure.test').fixture();
+    try {
+      const held = require('./forge-unit-lease');
+      assert(held.release(f.cwd, f.selected.unit.key, f.input.owner_token, f.begin.generation).ok);
+      const repeated = loop.advance(f.selected.snapshot, 'next', { ...f.input, host_runtime: f.host });
+      assert.strictEqual(repeated.reason_code, 'lease-owner-mismatch');
+      assert.strictEqual(repeated.snapshot.step_count, 1);
+    } finally { require('./forge-loop-failure.test').cleanup(f); }
+  }
   let cases = 0;
   for (const platform of vectors.platforms) for (const host of vectors.hosts) {
     cases += 1;

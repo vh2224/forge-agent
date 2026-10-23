@@ -196,7 +196,9 @@ function milestonePlanFile(request) {
   return selected;
 }
 function validateRecoveryRequest(raw, options = {}) {
-  const request = require('./forge-attempt-recovery').canonicalRequest(raw);
+  const attempt = require('./forge-attempt-recovery');
+  const request = attempt.canonicalRequest(raw.linked_begin_key && !raw.linkedEntryBinding ? attempt.bindLinkedRequest(raw, options.linkedEntryOptions) : raw);
+  if (request.linked_begin_key) attempt.requestIdentity(request);
   const loc = locations(request);
   const transport = capability(request.route?.resolved_worker_engine, request.unitType,
     request.scope === 'milestone' ? {} : request);
@@ -492,6 +494,10 @@ function unitLabel(request, loc) {
 
 function artifactFingerprint(request) {
   const copy = { ...request };
+  if (request.linked_begin_key) {
+    copy.linked_entry_identity = require('./forge-attempt-recovery').requestIdentity(require('./forge-attempt-recovery').canonicalRequest(request)).linked_entry;
+    delete copy.linkedEntryBinding;
+  }
   for (const key of ['rawResult', 'invocationTelemetry', 'providerCalled', 'resultFile',
     'signal', 'publicationSafe', 'publicationBoundary', 'waitForPublicationBoundary', 'ownerBroker']) delete copy[key];
   return hash(JSON.stringify(copy));
@@ -2192,7 +2198,8 @@ function reviewFixItemsTotal(request) {
   return request.reviewFix && Array.isArray(request.reviewFix.items) ? request.reviewFix.items.length : 0;
 }
 async function runUnitSidecar(request, runtime = {}) {
-  const r = request || {}, route = r.route || {};
+  const r = request?.linked_begin_key ? require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions) : request || {};
+  const route = r.route || {};
   const identity = { phase: r.preparationIdentity?.phase, unit: r.unitType === 'review-fix' ? reviewFixUnitLabel(r)
     : `${r.unitType || '-'}/${r.taskId || r.sliceId || r.milestoneId || r.sourceUnit || '-'}`,
     engine: route.resolved_worker_engine, transport: route.resolved_worker_engine === 'claude' ? 'claude-cli' : 'app-server',
@@ -2215,6 +2222,7 @@ async function runUnitSidecar(request, runtime = {}) {
   }
 }
 async function recoverUnitSidecar(request, recovery, runtime = {}) {
+  if (request.linked_begin_key) request = require('./forge-attempt-recovery').bindLinkedRequest(request, runtime.linkedEntryOptions);
   // Mandatory obligations fail closed before process/receipt inspection.
   const recoveryProcedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd, phase: 'recovery',
     forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });

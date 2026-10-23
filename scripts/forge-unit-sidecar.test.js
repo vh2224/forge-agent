@@ -32,6 +32,15 @@ console.log('stable-ID and legacy questions: strict schema, UTF-8 bytes, count, 
 
 // Recovery must use the delivery contract of the actual unit, not execute's.
 const sidecar = require('./forge-unit-sidecar');
+{
+  const fixtures = require('./forge-loop-failure.test'), f = fixtures.fixture();
+  try {
+    const consumed = fixtures.consume(f), entered = fixtures.invoke(f, 'reenter', consumed.snapshot, fixtures.entryInput(f, consumed));
+    const linked = { ...f.request, route: { ...f.request.route, resolved_worker_engine: 'claude' }, linked_begin_key: entered.controller_result.details.transaction.idempotency_key };
+    assert.throws(() => sidecar.validateRecoveryRequest({ ...linked, linkedEntryBinding: {}, approved: true }), /binding|required/);
+    assert.strictEqual(sidecar.validateRecoveryRequest(linked, { linkedEntryOptions: { ...fixtures.liveOptions(f), ownerToken: f.input.owner_token } }).mode, 'plan');
+  } finally { fixtures.cleanup(f); }
+}
 function resolveContext(request) {
   request.route = require('./forge-dispatch-resolve').resolveDispatch({ cwd: request.contextRoot, unitType: request.unitType,
     milestoneId: request.milestoneId, unitId: request.taskId || request.sliceId || request.milestoneId,

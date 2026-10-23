@@ -7,6 +7,7 @@ const { digest } = require('./forge-code-roots');
 const exceptions = new WeakMap();
 const candidateSets = new WeakMap();
 const environmentalRepairs = new WeakSet();
+const linkedEntries = new WeakMap();
 const transitions = require('./forge-recovery-transition');
 function fail(code) { throw Object.assign(new Error(code), { code }); }
 function callerRequestHash(request) {
@@ -72,7 +73,30 @@ function requestIdentity(request) {
     milestone_id: request.milestoneId || null, slice_id: request.sliceId || null, task_id: request.taskId || null,
     host: request.route.host_runtime, owner: canonical(request.contextRoot), cwd: canonical(request.cwd) };
   for (const [key, field] of [['plan', 'planFile'], ['roadmap', 'roadmapFile']]) result[key] = request[field] ? canonical(request[field]) : null;
+  if (request.linked_begin_key) {
+    const entry = linkedEntries.get(request.linkedEntryBinding);
+    if (!entry || entry.begin_key !== request.linked_begin_key || entry.unit !== `${request.unitType}/${request.taskId || request.sliceId || request.milestoneId}`
+      || entry.owner !== canonical(request.contextRoot) || entry.host_runtime !== request.route.host_runtime
+      || entry.milestone !== request.milestoneId) fail('linked-entry-binding-required');
+    result.linked_entry = { entry_id: entry.entry_id, entry_digest: entry.entry_digest, classification: 'new-unit' };
+  }
   return result;
+}
+function bindLinkedRequest(request, options) {
+  if (!request.linked_begin_key) return request;
+  const entry = require('./forge-unit-controller').validateLinkedEntry(request.contextRoot || request.cwd, request.linked_begin_key, options);
+  const begin = require('./forge-unit-controller').lookupRecord(request.contextRoot || request.cwd, 'transaction', request.linked_begin_key);
+  const canonical = file => { const real = fs.realpathSync.native(file); return process.platform === 'win32' ? real.toLowerCase() : real; };
+  if (!entry.roots.some(root => canonical(root.path) === canonical(request.cwd))) fail('linked-entry-roots-mismatch');
+  if (request.execution_contract && request.execution_contract.code_roots.some(root => !entry.roots.some(bound => bound.root_id === root.id
+    && canonical(bound.path) === canonical(root.path)))) fail('linked-entry-roots-mismatch');
+  const handle = Object.freeze({});
+  const owner = fs.realpathSync(request.contextRoot || request.cwd);
+  linkedEntries.set(handle, { ...entry, owner: process.platform === 'win32' ? owner.toLowerCase() : owner,
+    host_runtime: begin.host_runtime, milestone: begin.milestone });
+  const bound = { ...request, linkedEntryBinding: handle };
+  requestIdentity(canonicalRequest(bound));
+  return bound;
 }
 function resolveCandidates(options, resolve = require('./forge-dispatch-resolve').resolveDispatch, request) {
   const identity = requestIdentity(request);
@@ -683,7 +707,7 @@ async function cli(argv) {
   }
   fail('usage: forge-attempt-recovery.js --inspect <state.json> <receipt.json> | --preparation <request.json>');
 }
-module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, createRecovery, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
+module.exports = { canonicalRequest, callerRequestHash, bindRecoveryAuthorization, bindLinkedRequest, createRecovery, resolveCandidates, createAuthority, exceptionFor, requestIdentity, validateState, validateStateTarget, routeKey, safeDiagnostic, inspectReceipt, captureFailure, recoverAttempt, cli };
 if (require.main === module) cli(process.argv.slice(2)).then(value => process.stdout.write(JSON.stringify(value) + '\n')).catch(error => {
   process.stderr.write(JSON.stringify({ reason_code: error.code || 'recovery-command-failed' }) + '\n'); process.exitCode = 2;
 });

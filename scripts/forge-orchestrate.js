@@ -12,7 +12,7 @@ const forgeController = require('./forge-unit-controller.js');
 const forgeRuntime = require('./forge-runtime.js');
 
 const PROTOCOL_VERSION = '1.0.0';
-const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete']);
+const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'consume-failure', 'reenter']);
 const OUTCOMES = Object.freeze(['needs_input', 'completed', 'blocked', 'no_work', 'failed']);
 const REASON_CODES = Object.freeze([
   'initialized', 'already-initialized', 'status-ready', 'selected', 'unit-selected',
@@ -54,6 +54,30 @@ function stable(value) {
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
 }
 function checksum(value) { return crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex'); }
+function validatePending(inputValue, decision, options = {}) {
+  const input = normalizeInput(inputValue), binding = decision?.details?.transaction;
+  if (!binding) return { ok: false, reason: 'unit-identity-mismatch' };
+  const begun = forgeController.lookupRecord(input.cwd, 'transaction', binding.idempotency_key);
+  if (!begun || begun.action !== 'begin' || begun.phase !== 'committed'
+    || own(binding, 'begin_checksum') && checksum(begun) !== binding.begin_checksum
+    || begun.unit.key !== decision.unit?.key || begun.milestone !== input.milestone || begun.host_runtime !== input.host_runtime
+    || begun.owner_digest !== `sha256:${crypto.createHash('sha256').update(input.owner_token.normalize('NFC').trim()).digest('hex')}`) return { ok: false, reason: 'unit-identity-mismatch' };
+  if (forgeController.pendingTransactions(input.cwd).length) return { ok: false, reason: 'transaction-pending' };
+  const leaseApi = forgeController.dependencies.forgeLease;
+  const held = leaseApi.readLease(leaseApi.leaseFile(input.cwd, begun.unit.key));
+  if (!leaseApi.validRecord(held.record, begun.unit.key) || held.record.owner_token !== input.owner_token
+    || held.record.generation !== begun.lease_generation) return { ok: false, reason: 'lease-owner-mismatch' };
+  const consumed = forgeController.failureProjection(input.cwd, input.milestone).some(item => item.begin.idempotency_key === begun.idempotency_key);
+  if (consumed) return { ok: false, reason: 'failure-deferred' };
+  const boundary = forgeController.lookupRecord(input.cwd, 'boundary', begun.unit.key);
+  if (boundary?.kind === 'needs-input') return { ok: false, reason: 'pending-questions' };
+  if (begun.linked_entry) forgeController.validateLinkedEntry(input.cwd, begun.idempotency_key, { ...options, ownerToken: input.owner_token });
+  if (typeof options.inspectAttempt === 'function') {
+    const context = options.inspectAttempt({ cwd: input.cwd, begin: begun, references: {} });
+    if (context?.pending_questions?.some(item => item.status === 'pending')) return { ok: false, reason: 'pending-questions' };
+  }
+  return { ok: true };
+}
 function unit(value) {
   if (!value) return null;
   if (typeof value === 'string') {
@@ -69,14 +93,14 @@ function base(operation, outcome, reason, input) {
 // A delivery receipt does not release a lease by itself. Commit through the
 // same controller transaction that began the selected unit, then acknowledge it
 // to the loop. Replaying a stale loop snapshot uses the same completion key.
-function complete(inputValue) {
+function complete(inputValue, options) {
   const input = normalizeInput(inputValue);
   const selected = unit(inputValue.unit);
   const key = inputValue.begin_key;
   if (!selected || !key || !inputValue.result || inputValue.result.status !== 'done') {
     return base('complete', 'blocked', 'unit-result-required', input);
   }
-  const begun = forgeController.readJson(forgeController.transactionFile(input.cwd, key));
+  const begun = forgeController.lookupRecord(input.cwd, 'transaction', key);
   if (!begun || begun.unit.key !== selected.key || begun.milestone !== input.milestone
     || begun.host_runtime !== input.host_runtime || begun.action !== 'begin') {
     return base('complete', 'blocked', 'unit-identity-mismatch', input);
@@ -87,7 +111,7 @@ function complete(inputValue) {
       owner_token: input.owner_token, generation: begun.lease_generation,
       idempotency_key: `${key}:complete`,
       result: { status: 'succeeded', output: inputValue.result },
-    }, { prefsReader: input.prefsReader });
+    }, { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) });
     const output = base('complete', 'completed', committed.reason, input);
     output.unit = selected; output.boundary = committed.transaction.boundary;
     return output;
@@ -185,20 +209,19 @@ function status(inputValue) {
 }
 function next(inputValue, options) {
   const input = normalizeInput(inputValue);
+  // Older embedding tests supplied an executable preference reader together
+  // with their inventory. JSON callers cannot create this trusted fixture seam.
+  options = { ...(options || {}) };
+  if (!options.inventoryReader && input.prefsReader && input.inventory) options.inventoryReader = () => input.inventory;
   if (!input.milestone) throw error('invalid-request', 'milestone é obrigatório para next');
   if (input.response !== undefined && !input.boundary) {
     const result = base('next', 'blocked', 'needs-input-boundary', input);
     return result;
   }
   if (input.response !== undefined && input.boundary) return resumeResponse(input, options);
-  if (input.inventory && input.inventory.milestone_complete === true) {
-    const result = base('next', 'no_work', 'no-next-unit', input);
-    result.state = publicState(forgeState.read(input.cwd, input.milestone));
-    return result;
-  }
   let selection;
   try {
-    selection = forgeController.select(input.cwd, { milestone: input.milestone, inventory: input.inventory || undefined }, { prefsReader: input.prefsReader });
+    selection = forgeController.select(input.cwd, { milestone: input.milestone }, { ...options, ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) });
   } catch (cause) {
     if (cause && cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const code = cause.code || 'failed';
@@ -206,14 +229,15 @@ function next(inputValue, options) {
     return result;
   }
   if (!selection.ok) {
-    const result = base('next', 'no_work', selection.reason || 'no-next-unit', input);
+    const result = base('next', selection.done === true ? 'no_work' : 'blocked', selection.reason || 'no-next-unit', input);
+    result.details = { blocked: selection.blocked || [] };
     result.state = publicState(forgeState.read(input.cwd, input.milestone));
     return result;
   }
   const selectedUnit = unit(selection.unit);
   const legacyKey = `forge-orchestrate-next:${input.milestone}:${selectedUnit.key}`;
   let key = input.idempotency_key || (selection.slice ? `${legacyKey}:${selection.slice}` : legacyKey);
-  const txOptions = { ...(options || {}), prefsReader: input.prefsReader };
+  const txOptions = { ...(options || {}), ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) };
   try {
     if (!input.idempotency_key && selection.slice) {
       // Resume pre-slice keys only when their durable state proves the same scope.
@@ -221,7 +245,7 @@ function next(inputValue, options) {
       if (prior && prior.action === 'begin' && prior.milestone === input.milestone
         && prior.unit.key === selectedUnit.key && prior.after.state.active_slice === selection.slice) key = legacyKey;
     }
-    const request = { milestone: input.milestone, unit: selectedUnit, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session, idempotency_key: key,
+    const request = { milestone: input.milestone, unit: selectedUnit, slice: selection.slice, host_runtime: input.host_runtime, owner_token: input.owner_token, session: input.session, idempotency_key: key,
       state_patch: { active_slice: selection.slice || '—' } };
     // Recovery is explicit and uses the durable S02 transaction record. It is
     // harmless when no transaction exists and makes crash retry deterministic.
@@ -245,7 +269,10 @@ function next(inputValue, options) {
     result.state = publicState(forgeState.read(input.cwd, input.milestone));
     result.events = [{ event: 'unit-began', action: 'begin', unit: selectedUnit.key, milestone: input.milestone, reason_code: 'selected' }];
     if (paused && paused.transaction && paused.transaction.boundary) result.boundary = paused.transaction.boundary;
-    result.details = { transaction: begun.transaction ? { idempotency_key: begun.transaction.idempotency_key, phase: begun.transaction.phase } : null, selection_reason: selection.reason };
+    const durableBegin = forgeController.lookupRecord(input.cwd, 'transaction', key);
+    result.details = { transaction: begun.transaction ? { idempotency_key: key, phase: begun.transaction.phase,
+      begin_checksum: checksum(durableBegin), generation: durableBegin.lease_generation, owner_digest: durableBegin.owner_digest,
+      host_runtime: durableBegin.host_runtime, milestone: durableBegin.milestone, unit: durableBegin.unit.key } : null, selection_reason: selection.reason };
     return result;
   } catch (cause) {
     if (cause && cause.code === 'CONTROLLER_FAILPOINT') throw cause;
@@ -328,11 +355,28 @@ function handoff(inputValue) {
     return result;
   }
 }
+function linkedOperation(operation, inputValue, options) {
+  const input = normalizeInput(inputValue);
+  try {
+    const result = operation === 'consume-failure' ? forgeController.consumeFailure(input.cwd, { ...inputValue, ...input }, options)
+      : forgeController.reenter(input.cwd, { ...inputValue, ...input }, options);
+    const output = base(operation, operation === 'reenter' ? 'completed' : 'failed', result.reason, input);
+    output.unit = unit(result.transaction.unit); output.boundary = result.transaction.boundary;
+    output.details = result;
+    output.details.transaction = { ...result.transaction,
+      begin_checksum: operation === 'reenter' ? checksum(forgeController.lookupRecord(input.cwd, 'transaction', result.transaction.idempotency_key)) : undefined };
+    return output;
+  } catch (cause) {
+    if (cause.code === 'CONTROLLER_FAILPOINT') throw cause;
+    return base(operation, 'blocked', cause.code || 'linked-operation-refused', input);
+  }
+}
 function run(operation, input, options) {
   if (!OPERATIONS.includes(operation)) throw error('invalid-request', `operation inválida: ${operation}`);
   if (operation === 'init') return init(input);
   if (operation === 'status') return status(input);
-  if (operation === 'complete') return complete(input);
+  if (operation === 'complete') return complete(input, options);
+  if (operation === 'consume-failure' || operation === 'reenter') return linkedOperation(operation, input, options);
   return next(input, options);
 }
 function parseArgs(argv) {
@@ -349,8 +393,9 @@ function parseArgs(argv) {
 function main(argv = process.argv.slice(2), output = process.stdout.write.bind(process.stdout), errorOutput = process.stderr.write.bind(process.stderr)) {
   try {
     const args = parseArgs(argv);
-    const operation = args.init ? 'init' : args.status ? 'status' : args.next ? 'next' : null;
-    if (!operation) throw error('invalid-request', 'use --init, --status ou --next');
+    if (args.help) { output('Usage: forge-orchestrate --init|--status|--next|--complete|--consume-failure|--reenter --json JSON\n'); return 0; }
+    const operation = OPERATIONS.find(name => args[name]);
+    if (!operation) throw error('invalid-request', 'use --init, --status, --next, --complete, --consume-failure ou --reenter');
     const payload = args.json ? JSON.parse(args.json) : {};
     if (args.cwd) payload.cwd = args.cwd;
     if (args.milestone) payload.milestone = args.milestone;
@@ -363,4 +408,4 @@ function main(argv = process.argv.slice(2), output = process.stdout.write.bind(p
   }
 }
 if (require.main === module) process.exitCode = main();
-module.exports = { PROTOCOL_VERSION, OPERATIONS, OUTCOMES, REASON_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum };
+module.exports = { PROTOCOL_VERSION, OPERATIONS, OUTCOMES, REASON_CODES, normalizeInput, normalizeHost, init, status, next, handoff, run, parseArgs, main, checksum, validatePending };

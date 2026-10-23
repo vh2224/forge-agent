@@ -553,7 +553,7 @@ async function main() {
         fs.unlinkSync(path.join(slice, 'tasks/T01/T01-SUMMARY.md'));
         write(path.join(slice, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** First\n- [ ] **T02** Second\n');
       } finally { xllm.runExecute = originalExecute; }
-      write(path.join(base, `${milestoneId}-ROADMAP.md`), '# Roadmap\n- [ ] **S01: Workflow**\n');
+      write(path.join(base, `${milestoneId}-ROADMAP.md`), '# Roadmap\n- [ ] **S01: Workflow** `depends:[]`\n');
       const state = require('./forge-state');
       state.write(lab.owner, { milestone: milestoneId, kind: 'milestone', phase: 'execute-task', active_slice: 'S01', active_task: 'T01', next_action: 'execute', auto_mode: 'on' });
       const prefsReader = () => ({ ok: true, prefs: { skip_discuss: true, skip_research: true, skip_slice_research: true } });

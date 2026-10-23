@@ -298,8 +298,8 @@ function readRecordJson(file) {
   }
 }
 function withMutex(cwd, name, fn) {
-  const handle = forgeLock.acquireSync(cwd, name, { retries: 80, ttlMs: 10_000 });
-  try { return fn(); } finally { handle.release(); }
+  const handle = forgeLock.acquireProcessSync(cwd, name, { retries: 80, ttlMs: 10_000 });
+  try { return fn(handle); } finally { handle.release(); }
 }
 
 function resolvePrefs(cwd, options) {
@@ -347,13 +347,22 @@ function selectNextUnit(input) {
   const activeSlice = inventory.active_slice || current.active_slice;
   const pending = slices.filter(item => !item.checked);
   const ordered = [...pending.filter(item => item.id === activeSlice), ...pending.filter(item => item.id !== activeSlice)];
+  const blocked = [];
   for (const slice of ordered) {
+    const reasons = [];
+    if (inventory.dependency_validation === true) {
+      if (slice.dependency_status !== 'valid') reasons.push(`dependencies-${slice.dependency_status || 'missing'}`, ...(slice.dependency_errors || []));
+      for (const id of slice.dependencies || []) if (!slices.find(other => other.id === id && other.checked)) reasons.push(`dependency-pending:${id}`);
+    }
+    if ((inventory.deferred_slices || []).includes(slice.id)) reasons.push('failure-deferred');
+    if (reasons.length) { blocked.push({ slice: slice.id, reasons }); continue; }
     if (!slice.plan_exists) return selected('plan-slice', slice.id, milestone, current, slice.id);
     if (!slice.research_exists && !skipSliceResearch) return selected('research-slice', slice.id, milestone, current, slice.id);
     const task = (slice.tasks || []).find(item => !item.checked);
     if (task) return selected('execute-task', task.id, milestone, current, slice.id);
     if (!slice.summary_exists) return selected('complete-slice', slice.id, milestone, current, slice.id);
   }
+  if (pending.length) return { ok: false, reason: 'units-blocked', done: false, milestone, blocked };
   if (!inventory.milestone_complete) return selected('complete-milestone', milestone, milestone, current);
   return { ok: false, reason: 'no-next-unit', done: true, milestone };
 }
@@ -398,6 +407,7 @@ function discoverInventory(cwd, milestone, current) {
     research_exists: !!firstExisting(milestoneDir, name => name.endsWith('-RESEARCH.md')),
     active_slice: current.active_slice && current.active_slice !== '—' ? current.active_slice : null,
     slices,
+    dependency_validation: true,
     milestone_complete: roadmapComplete && !!firstExisting(milestoneDir, name => name.endsWith('-SUMMARY.md')),
   };
 }
@@ -410,7 +420,8 @@ function select(cwd, request, options) {
   const id_kind = forgeIds.entityKind(milestone) || 'milestone';
   const current = forgeState.read(cwd, milestone);
   if (!current) throw new ControllerError('invalid-request', `STATE ausente para ${milestone}`);
-  const inventory = input.inventory || discoverInventory(cwd, milestone, current);
+  const inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current);
+  inventory.deferred_slices = failureProjection(cwd, milestone).filter(item => !item.entry).map(item => item.slice).filter(Boolean);
   return { ...selectNextUnit({ state: current, inventory, prefs: prefsResult.prefs }), id_kind };
 }
 
@@ -700,6 +711,7 @@ function beginInside(cwd, request, options) {
   if (existing && (existing.unit.key !== unit.key || existing.milestone !== input.milestone || existing.action !== 'begin')) {
     throw new ControllerError('record-conflict', 'idempotency_key pertence a outra operação');
   }
+  assertUnitAvailable(cwd, input.milestone, unit, input.slice, options);
   if (existing) return runTransaction(cwd, existing, ownerToken, input.generation, options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de novo begin');
@@ -792,6 +804,7 @@ function resumeInside(cwd, request, options) {
     : pendingTransactions(cwd);
   const results = [];
   for (const record of records) {
+    if (record.terminal_failure || record.linked_entry) throw new ControllerError('linked-operation-required', 'replay exige operação vinculada e adapters vivos');
     const ownerToken = input.owner_token === undefined ? input.ownerToken : input.owner_token;
     const generation = input.generation || record.lease_generation;
     results.push(runTransaction(cwd, record, ownerToken, generation, options));
@@ -850,6 +863,308 @@ function projectLogicalHistory(cwd, milestone) {
   return { state: logicalState(state), events, results };
 }
 
+// Failure consumption is a new terminal transaction. The old begin, receipt,
+// candidate and recovery clock are immutable inputs, never patched history.
+function verifiedFailure(cwd, transaction) {
+  if (!transaction.terminal_failure || transaction.phase !== 'committed') return null;
+  const begin = lookupRecord(cwd, 'transaction', transaction.terminal_failure.begin_key);
+  const result = lookupRecord(cwd, 'result', transaction.idempotency_key);
+  const event = readEvents(eventsFile(cwd, transaction.milestone)).find(item => item.idempotency_key === transaction.idempotency_key);
+  const content = event && { ...event }; if (content) delete content.sequence;
+  if (!begin || sha(begin) !== transaction.terminal_failure.begin_checksum || !result || sha(result) !== sha(transaction.result)
+    || !content || sha(content) !== sha(transaction.event) || result.status !== 'failed') {
+    throw new ControllerError('record-conflict', 'vínculo de falha consumida divergente');
+  }
+  return { transaction, begin, result, slice: transaction.terminal_failure.slice };
+}
+function failureProjection(cwd, milestone) {
+  const records = discoverRecords(cwd, 'transaction');
+  const failures = records.filter(item => item.milestone === milestone && item.terminal_failure && item.phase === 'committed')
+    .map(item => verifiedFailure(cwd, item));
+  for (const failure of failures) {
+    const entries = records.filter(item => item.action === 'begin' && item.phase === 'committed'
+      && item.linked_entry && item.linked_entry.failure_key === failure.transaction.idempotency_key);
+    for (const entry of entries) {
+      if (entry.linked_entry.failure_checksum !== sha(failure.transaction)) throw new ControllerError('record-conflict', 'entrada aponta para falha divergente');
+    }
+    failure.entry = entries.length ? entries[entries.length - 1] : null;
+  }
+  return failures;
+}
+function assertUnitAvailable(cwd, milestone, unit, slice, options, linked = {}) {
+  if (pendingTransactions(cwd).some(item => item.idempotency_key !== linked.transactionKey && (item.terminal_failure || item.linked_entry))) throw new ControllerError('transaction-pending', 'transação vinculada incompleta impede begin');
+  const failures = failureProjection(cwd, milestone).filter(item => item.transaction.idempotency_key !== linked.failureKey);
+  if (failures.some(item => item.begin.unit.key === unit.key)) throw new ControllerError('failure-deferred', 'unidade exige reentrada vinculada autorizada');
+  const current = forgeState.read(cwd, milestone);
+  if (!current) return;
+  const inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current);
+  const candidate = inventory.slices?.find(item => item.id === (slice || (/slice$/.test(unit.type) ? unit.id : null))
+    || !slice && unit.type === 'execute-task' && item.tasks?.some(task => task.id === unit.id));
+  if (failures.some(item => item.begin.unit.key === unit.key || !item.entry && item.slice && item.slice === (slice || candidate?.id))) {
+    throw new ControllerError('failure-deferred', 'unidade exige reentrada vinculada autorizada');
+  }
+  if (inventory.dependency_validation && candidate && (candidate.dependency_status !== 'valid'
+    || candidate.dependencies.some(id => !inventory.slices.some(other => other.id === id && other.checked)))) {
+    throw new ControllerError('dependencies-blocked', 'dependências da unidade não verificadas');
+  }
+}
+function terminalIdentity(cwd, input) {
+  const begin = lookupRecord(cwd, 'transaction', opaque(input.begin_key, 'begin_key', true));
+  const unit = unitFromRequest(input);
+  const host = forgeRuntime.normalizeHostRuntime(input.host_runtime);
+  if (!begin || begin.action !== 'begin' || begin.phase !== 'committed' || begin.unit.key !== unit.key
+    || begin.milestone !== input.milestone || begin.host_runtime !== host || begin.owner_digest !== ownerDigest(input.owner_token)
+    || input.slice && input.slice !== begin.after.state.active_slice
+    || input.generation && input.generation !== begin.lease_generation
+    || own(input, 'begin_checksum') && input.begin_checksum !== undefined && input.begin_checksum !== sha(begin)) {
+    throw new ControllerError('unit-identity-mismatch', 'snapshot e begin durável divergentes');
+  }
+  return begin;
+}
+function physicalRoots(roots) {
+  if (!Array.isArray(roots) || !roots.length) throw new ControllerError('roots-unverified', 'raízes da tentativa ausentes');
+  const ids = new Set();
+  return roots.map(root => {
+    if (!root || typeof root.root_id !== 'string' || ids.has(root.root_id)) throw new ControllerError('roots-unverified', 'root_id inválido');
+    ids.add(root.root_id);
+    const real = fs.realpathSync.native(root.path), stat = fs.statSync(real, { bigint: true });
+    if (!stat.isDirectory()) throw new ControllerError('roots-unverified', 'raiz não é diretório');
+    return { root_id: root.root_id, path: real, dev: String(stat.dev), ino: String(stat.ino) };
+  }).sort((a, b) => a.root_id.localeCompare(b.root_id));
+}
+function inspectFailure(cwd, begin, failure, options) {
+  if (!options || typeof options.inspectAttempt !== 'function' || typeof options.processProbe !== 'function') {
+    throw new ControllerError('failure-inspector-required', 'inspeção viva do host obrigatória');
+  }
+  const context = options.inspectAttempt({ cwd, begin: clone(begin), references: clone(failure || {}) });
+  if (!context || typeof context.receipt_path !== 'string' || !context.request) throw new ControllerError('attempt-evidence-missing', 'receipt/pedido original ausente');
+  const recovery = require('./forge-attempt-recovery.js');
+  const identity = recovery.requestIdentity(recovery.canonicalRequest(context.request));
+  if (`${identity.unit_type}/${identity.task_id || identity.slice_id || identity.milestone_id}` !== begin.unit.key
+    || identity.milestone_id !== begin.milestone || identity.host !== begin.host_runtime
+    || identity.slice_id && begin.after.state.active_slice !== identity.slice_id) {
+    throw new ControllerError('attempt-identity-mismatch', 'pedido original não corresponde ao begin');
+  }
+  const inspection = recovery.inspectReceipt(context.receipt_path, { request: context.request, processProbe: options.processProbe });
+  if (inspection.receipt.recovery_identity_sha256 && inspection.receipt.recovery_identity_sha256 !== require('./forge-code-roots').digest(identity)
+    || inspection.receipt.fingerprint && inspection.receipt.fingerprint !== require('./forge-unit-sidecar').artifactFingerprint(context.request)) {
+    throw new ControllerError('attempt-identity-mismatch', 'receipt não corresponde ao pedido original');
+  }
+  if (!inspection.receipt_checked || inspection.process_stopped !== true) throw new ControllerError('process-not-stopped', 'processo ativo ou desconhecido');
+  if (inspection.valid_saved_response || inspection.receipt?.saved_candidate) {
+    if (typeof options.replaySavedResponse === 'function') options.replaySavedResponse({ context, inspection });
+    throw new ControllerError('saved-response-replay-required', 'resposta salva exige validação/publicação pelo contrato original');
+  }
+  if (!['failed', 'abandoned'].includes(inspection.phase) || typeof inspection.receipt.failure?.reason_code !== 'string'
+    || !inspection.receipt.failure.reason_code.trim()) {
+    throw new ControllerError('terminal-failure-required', 'receipt sem evidência de falha terminal');
+  }
+  const roots = physicalRoots(context.roots);
+  const requiredPaths = [cwd, context.request.cwd, context.request.contextRoot, context.request.execution_contract?.owner,
+    ...(context.request.execution_contract?.code_roots || []).map(root => root.path)].filter(Boolean);
+  if (requiredPaths.some(rootPath => !roots.some(root => root.path === fs.realpathSync.native(rootPath)))) {
+    throw new ControllerError('roots-unverified', 'manifesto omite raiz física da tentativa');
+  }
+  if (inspection.writer_possible !== false) {
+    if (typeof options.reconcileRoots !== 'function') throw new ControllerError('roots-unreconciled', 'writer possível exige reconciliação de todas as raízes');
+    for (const root of roots) {
+      const proof = options.reconcileRoots({ cwd, root, context, inspection, begin: clone(begin) });
+      if (!proof || proof.process_stopped !== true || proof.reconciled !== true || proof.root_id !== root.root_id) {
+        throw new ControllerError('roots-unreconciled', `raiz pendente: ${root.root_id}`);
+      }
+    }
+  }
+  const questions = context.pending_questions || [];
+  if (!Array.isArray(questions) || questions.some(item => !item.id || !['pending', 'resolved'].includes(item.status))) throw new ControllerError('questions-invalid', 'pendências sem identidade');
+  return { receipt_sha256: inspection.receipt_sha256, roots, pending_questions: clone(questions),
+    historical_reason: inspection.receipt.failure.reason_code,
+    provenance_gaps: context.provenance_gaps || [], process_stopped: true, roots_reconciled: true };
+}
+function assertNoSuccessor(cwd, begin, terminalKey) {
+  const events = readEvents(eventsFile(cwd, begin.milestone));
+  const index = events.findIndex(item => item.idempotency_key === begin.idempotency_key);
+  if (index < 0) throw new ControllerError('begin-event-missing', 'begin sem evento durável');
+  if (events.slice(index + 1).some(item => item.action === 'begin' && item.idempotency_key !== begin.idempotency_key)) {
+    throw new ControllerError('successor-conflict', 'unidade já possui begin sucessor');
+  }
+  if (events.slice(index + 1).some(item => item.unit === begin.unit.key && item.idempotency_key !== terminalKey
+    && ['complete', 'fail', 'pause', 'expired-safe', 'persist-result'].includes(item.action))
+    || discoverRecords(cwd, 'transaction').some(item => item.unit.key === begin.unit.key && item.milestone === begin.milestone
+      && item.lease_generation === begin.lease_generation && item.idempotency_key !== terminalKey
+      && ['complete', 'fail', 'pause', 'expired-safe', 'persist-result'].includes(item.action))) {
+    throw new ControllerError('terminal-conflict', 'unidade já possui transição terminal');
+  }
+  if (pendingTransactions(cwd).some(item => item.idempotency_key !== terminalKey)) throw new ControllerError('transaction-pending', 'transação pendente impede consumo');
+}
+function terminalReplay(cwd, transaction) {
+  verifiedFailure(cwd, transaction);
+  return { ok: true, reason: 'failure-consumed', transaction: publicTransaction(transaction, cwd),
+    failure_key: transaction.idempotency_key, failure_checksum: sha(transaction),
+    pending_questions: clone(transaction.terminal_failure.safety.pending_questions) };
+}
+function runTerminal(cwd, transaction, begin, input, options, guard) {
+  if (transaction.phase === 'committed') return terminalReplay(cwd, transaction);
+  const check = () => {
+    forgeLease.assertTerminalGuard(guard, cwd, begin.unit.key);
+    assertNoSuccessor(cwd, begin, transaction.idempotency_key);
+    const lease = forgeLease.inspectTerminal(guard, cwd, begin.unit.key, input.owner_token, begin.lease_generation);
+    if (!lease.ok) throw new ControllerError('lease-owner-mismatch', lease.reason);
+    const live = inspectFailure(cwd, begin, input.failure, options);
+    if (live.receipt_sha256 !== transaction.terminal_failure.safety.receipt_sha256 || sha(live.roots) !== sha(transaction.terminal_failure.safety.roots)
+      || sha(live.pending_questions) !== sha(transaction.terminal_failure.safety.pending_questions)) throw new ControllerError('attempt-evidence-changed', 'evidência mudou durante o consumo');
+    return lease;
+  };
+  check();
+  if (transaction.phase === 'intent') { check(); publishResult(cwd, transaction.result); setPhase(cwd, transaction, 'result-published', options); }
+  if (transaction.phase === 'result-published') { check(); publishEvent(cwd, transaction.milestone, transaction.event); setPhase(cwd, transaction, 'event-published', options); }
+  if (transaction.phase === 'event-published') { check(); publishBoundary(cwd, transaction.boundary); setPhase(cwd, transaction, 'boundary-pending', options); }
+  if (transaction.phase === 'boundary-pending') {
+    check();
+    const current = logicalState(forgeState.read(cwd, begin.milestone));
+    for (const key of Object.keys(transaction.after.state_patch)) {
+      if (!Object.prototype.hasOwnProperty.call(transaction.after.state, key)) continue;
+      if (stableStringify(current[key]) !== stableStringify(transaction.before.state[key])
+        && stableStringify(current[key]) !== stableStringify(transaction.after.state[key])) throw new ControllerError('state-successor-conflict', 'STATE mudou nos campos da transação');
+    }
+    publishState(cwd, transaction); setPhase(cwd, transaction, 'state-published', options);
+  }
+  if (transaction.phase === 'state-published') { check(); setPhase(cwd, transaction, 'lease-release-pending', options); }
+  if (transaction.phase === 'lease-release-pending') {
+    check();
+    const released = forgeLease.releaseTerminal(guard, cwd, begin.unit.key, input.owner_token, begin.lease_generation);
+    if (!released.ok) throw new ControllerError('lease-owner-mismatch', released.reason);
+    setPhase(cwd, transaction, 'lease-released', options);
+  }
+  if (transaction.phase === 'lease-released') {
+    check(); transaction.boundary.handoff_ready = true; transaction.boundary.committed_at = iso(nowOf(options));
+    publishBoundary(cwd, transaction.boundary); setPhase(cwd, transaction, 'boundary-ready', options);
+  }
+  if (transaction.phase === 'boundary-ready') { check(); setPhase(cwd, transaction, 'committed', options); }
+  return terminalReplay(cwd, transaction);
+}
+function consumeFailure(cwd, request, options = {}) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => {
+    const input = object(request, 'request'), begin = terminalIdentity(cwd, input);
+    const key = `consume-failure:${sha({ begin: begin.idempotency_key, checksum: sha(begin) })}`;
+    let transaction = lookupRecord(cwd, 'transaction', key);
+    if (transaction && transaction.phase === 'committed') return terminalReplay(cwd, transaction);
+    const output = forgeLease.withTerminalGuard(cwd, begin.unit.key, guard => {
+      assertNoSuccessor(cwd, begin, key);
+      const lease = forgeLease.inspectTerminal(guard, cwd, begin.unit.key, input.owner_token, begin.lease_generation);
+      if (!lease.ok) throw new ControllerError('lease-owner-mismatch', lease.reason);
+      if (!transaction) {
+        const safety = inspectFailure(cwd, begin, input.failure, options);
+        transaction = makeTransaction(cwd, { milestone: begin.milestone, result: { status: 'failed', reason_code: safety.historical_reason,
+          output: { historical_reason: safety.historical_reason, provenance_gaps: safety.provenance_gaps, pending_questions: safety.pending_questions } },
+          state_patch: { phase: 'blocked', active_task: '—', owner: null } }, 'fail', begin.unit, key, input.owner_token, begin.lease_generation, begin.host_runtime, nowOf(options));
+        transaction.terminal_failure = { begin_key: begin.idempotency_key, begin_checksum: sha(begin), slice: begin.after.state.active_slice === '—' ? null : begin.after.state.active_slice,
+          lease_at_intent: lease.present ? 'matching-present' : 'proven-absent', safety };
+        saveTransaction(cwd, transaction, nowOf(options), options); fail(options, 'after-intent');
+      }
+      return runTerminal(cwd, transaction, begin, input, options, guard);
+    });
+    if (!output.ok) throw new ControllerError(output.reason, 'guard terminal indisponível');
+    return output;
+  });
+}
+
+function entryScope(cwd, input, failure, options) {
+  if (typeof options.captureEntryBaseline !== 'function' || !options.entryAuthority || typeof options.entryAuthority.issue !== 'function') {
+    throw new ControllerError('entry-authority-required', 'baseline e autorização viva da nova unidade obrigatórias');
+  }
+  const baseline = options.captureEntryBaseline({ cwd, failure: clone(failure), entry: clone(input.entry) });
+  if (!baseline || !/^[a-f0-9]{64}$/.test(baseline.sha256 || '')) throw new ControllerError('entry-baseline-invalid', 'baseline atual inválida');
+  const roots = physicalRoots(baseline.roots);
+  if (sha(roots) !== sha(failure.terminal_failure.safety.roots)) throw new ControllerError('entry-roots-mismatch', 'raízes físicas da entrada divergentes');
+  const identity = { entry_id: opaque(input.entry?.entry_id, 'entry_id', true), failure_key: failure.idempotency_key,
+    failure_checksum: sha(failure), begin_checksum: failure.terminal_failure.begin_checksum, baseline_sha256: baseline.sha256,
+    roots, owner_digest: ownerDigest(input.owner_token), host_runtime: forgeRuntime.normalizeHostRuntime(input.host_runtime), classification: 'new-unit' };
+  const digest = sha(identity), rootsDigest = sha(roots), now = nowOf(options);
+  const scope = { unit: failure.unit.key, roots_sha256: rootsDigest, routes: [identity.host_runtime], purpose: 'linked-unit-entry',
+    request_identity_sha256: digest, owner_digest: identity.owner_digest, gates_preserved: true, expires_at: now + 60000 };
+  const capability = options.entryAuthority.issue(input.entry.authorization_ref, scope, () => now);
+  const valid = require('./forge-attempt-recovery.js').exceptionFor(capability,
+    { unit: failure.unit.key, roots_sha256: rootsDigest, request_identity_sha256: digest, purpose: 'linked-unit-entry' }, now);
+  if (!valid || valid.purpose !== 'linked-unit-entry' || valid.owner_digest !== identity.owner_digest || !valid.routes.includes(identity.host_runtime)) {
+    throw new ControllerError('entry-authorization-invalid', 'autorização da nova unidade recusada');
+  }
+  return { ...identity, authorization_ref: input.entry.authorization_ref, entry_digest: digest };
+}
+function reenter(cwd, request, options = {}) {
+  resolvePrefs(cwd, options);
+  return withMutex(cwd, 'unit-controller-transactions', () => {
+    const input = object(request, 'request'), failure = lookupRecord(cwd, 'transaction', input.entry?.failure_key);
+    const verified = failure && verifiedFailure(cwd, failure);
+    if (!verified || input.entry.failure_checksum !== sha(failure) || failure.unit.key !== unitFromRequest(input).key || failure.milestone !== input.milestone
+      || failure.owner_digest !== ownerDigest(input.owner_token)
+      || failure.host_runtime !== forgeRuntime.normalizeHostRuntime(input.host_runtime)) throw new ControllerError('entry-failure-mismatch', 'falha consumida não corresponde à entrada');
+    if (failure.terminal_failure.safety.pending_questions.some(item => item.status === 'pending')) throw new ControllerError('pending-questions', 'decisão funcional pendente');
+    const linked = entryScope(cwd, input, failure, options), key = `linked-entry:${sha(linked.entry_id)}`;
+    let existing = lookupRecord(cwd, 'transaction', key);
+    if (existing && sha(existing.linked_entry) !== sha(linked)) throw new ControllerError('entry-conflict', 'entry_id reutilizado com conteúdo divergente');
+    if (pendingTransactions(cwd).some(item => item.idempotency_key !== key)) throw new ControllerError('transaction-pending', 'transação pendente impede reentrada');
+    assertUnitAvailable(cwd, input.milestone, failure.unit, failure.terminal_failure.slice, options,
+      { failureKey: failure.idempotency_key, transactionKey: key });
+    if (existing?.phase === 'committed') {
+      assertLease(cwd, existing.unit.key, input.owner_token, existing.lease_generation);
+      return { ok: true, reason: 'entry-ready', transaction: publicTransaction(existing, cwd), linked_entry: clone(linked) };
+    }
+    if (!existing) {
+      if (failureProjection(cwd, input.milestone).some(item => item.transaction.idempotency_key === failure.idempotency_key && item.entry)) throw new ControllerError('entry-conflict', 'falha já possui entrada');
+      const concurrent = discoverRecords(cwd, 'transaction').some(item => item.milestone === input.milestone && item.action === 'begin'
+        && item.idempotency_key !== failure.terminal_failure.begin_key && forgeLease.observe(cwd, item.unit.key).lease);
+      if (concurrent) throw new ControllerError('lease-active', 'outra unidade operacional permanece ativa');
+      const observation = forgeLease.observe(cwd, failure.unit.key);
+      if (!observation.ok || observation.lease) throw new ControllerError('lease-active', 'reentrada exige lease ausente e íntegra');
+      const acquired = forgeLease.acquire(cwd, failure.unit.key, { ownerToken: input.owner_token, hostRuntime: linked.host_runtime, requestId: key, now: options.now });
+      if (!acquired.ok) throw new ControllerError('lease-active', 'lease concorrente');
+      try {
+        existing = makeTransaction(cwd, { milestone: failure.milestone, state_patch: { active_slice: failure.terminal_failure.slice || '—' } },
+          'begin', failure.unit, key, input.owner_token, acquired.generation, linked.host_runtime, nowOf(options));
+        existing.linked_entry = linked; saveTransaction(cwd, existing, nowOf(options), options);
+      } catch (error) {
+        let durable;
+        try { durable = lookupRecord(cwd, 'transaction', key); }
+        catch (inspectionError) {
+          error.reconciliation = { required: true, reason: 'durability-ambiguous', cause: inspectionError.message };
+          throw error;
+        }
+        if (durable || acquired.reason !== 'acquired') {
+          error.reconciliation = { required: true, reason: durable ? 'durable-record' : 'reused-lease' };
+        } else {
+          try {
+            error.rollback = forgeLease.release(cwd, failure.unit.key, input.owner_token, acquired.generation, { requestId: key });
+            if (!error.rollback.ok) error.reconciliation = { required: true, reason: error.rollback.reason };
+          } catch (releaseError) {
+            error.reconciliation = { required: true, reason: 'rollback-failed', cause: releaseError.message };
+          }
+        }
+        throw error;
+      }
+      fail(options, 'after-intent');
+    }
+    const result = runTransaction(cwd, existing, input.owner_token, existing.lease_generation, options);
+    return { ...result, reason: 'entry-ready', linked_entry: clone(linked) };
+  });
+}
+
+// Revalidation at the real sidecar boundary, including restart, uses live host
+// adapters again. A linked JSON record is a locator, never a capability.
+function validateLinkedEntry(cwd, key, options = {}) {
+  const begin = lookupRecord(cwd, 'transaction', key);
+  if (!begin?.linked_entry || begin.action !== 'begin' || begin.phase !== 'committed') throw new ControllerError('entry-invalid', 'begin vinculado ausente');
+  const linked = begin.linked_entry;
+  const failure = lookupRecord(cwd, 'transaction', linked.failure_key);
+  verifiedFailure(cwd, failure);
+  const ownerToken = options.ownerToken;
+  const live = entryScope(cwd, { owner_token: ownerToken, host_runtime: linked.host_runtime,
+    entry: { entry_id: linked.entry_id, authorization_ref: linked.authorization_ref } }, failure, options);
+  if (sha(live) !== sha(linked)) throw new ControllerError('entry-conflict', 'entrada mudou desde autorização');
+  assertLease(cwd, begin.unit.key, ownerToken, begin.lease_generation);
+  return { entry_digest: linked.entry_digest, entry_id: linked.entry_id, begin_key: key, unit: begin.unit.key, roots: linked.roots, classification: 'new-unit' };
+}
+
 function parseArgs(argv) {
   const args = {};
   for (let index = 0; index < argv.length; index++) {
@@ -894,5 +1209,6 @@ module.exports = {
   transactionDir, resultDir, boundaryDir, eventsFile, transactionFile,
   resultFile, boundaryFile, readEvents, readJson, writeAtomic,
   lookupRecord, preflightPaths,
+  consumeFailure, reenter, failureProjection, validateLinkedEntry,
   dependencies: { forgeState, forgeRuns, forgePrefs, forgeRuntime, forgeIds, forgeLease },
 };

@@ -186,6 +186,19 @@ async function testLiveInitializingWriterIsNeverAutomaticallyRecovered() {
 }
 async function main() {
   console.log(`forge-lock tests on ${process.platform}`);
+  const processRoot = temporary();
+  try {
+    const held = lock.acquireProcessSync(processRoot, 'process-owner', { ttlMs: 1 });
+    const bytes = fs.readFileSync(lock.metaPath(held.lockDir));
+    assert.throws(() => lock.acquireProcessSync(processRoot, 'process-owner', { retries: 1, now: () => Date.now() + 86400000 }), error => error.code === 'LOCK_BUSY');
+    const originalKill = process.kill;
+    try {
+      process.kill = () => { throw Object.assign(Error('inaccessible'), { code: 'EPERM' }); };
+      assert.throws(() => lock.acquireProcessSync(processRoot, 'process-owner', { retries: 1 }), error => error.code === 'LOCK_BUSY');
+    } finally { process.kill = originalKill; }
+    assert.deepStrictEqual(fs.readFileSync(lock.metaPath(held.lockDir)), bytes);
+    assert(held.release().ok);
+  } finally { remove(processRoot); }
   testOwnerScopedRenewalAndRelease();
   testStaleRecoveryAndABA();
   testCrashBeforeMetadataIsRecoverable();

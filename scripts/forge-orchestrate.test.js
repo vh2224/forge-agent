@@ -129,7 +129,9 @@ try {
   const codex = setup();
   const left = orchestrate.next(nextInput(claude, 'claude'));
   const right = orchestrate.next(nextInput(codex, 'codex'));
-  assert.deepStrictEqual(left, right);
+  const neutral = value => ({ ...value, details: { ...value.details, transaction: { ...value.details.transaction,
+    generation: '<generation>', begin_checksum: '<begin-checksum>', host_runtime: '<host>' } } });
+  assert.deepStrictEqual(neutral(left), neutral(right));
   assert.strictEqual(left.outcome, 'completed');
   assert.strictEqual(left.unit.key, 'execute-task/T01');
   assert.strictEqual(left.events[0].event, 'unit-began');

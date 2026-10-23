@@ -63,12 +63,39 @@ function parseRoadmap(text) {
     const sliceRe = /^- \[( |x)\]\s+\*\*(S\d+):\s*(.+)\*\*(?:.*?`risk:(\w+)`)?[^\n]*$/gm;
     let m;
     while ((m = sliceRe.exec(text)) !== null) {
+      const declarations = m[0].match(/depends:/g) || [];
+      const declaration = m[0].match(/`depends:\[([^\]]*)\]`/);
+      const dependencies = declaration && declaration[1].trim() ? declaration[1].split(',').map(value => value.trim()) : [];
+      const errors = [];
+      if (declarations.length > 1) errors.push('duplicate-declaration');
+      if (declarations.length && (!declaration || dependencies.some(value => !/^S\d+$/.test(value)))) errors.push('malformed-declaration');
+      if (new Set(dependencies).size !== dependencies.length) errors.push('duplicate-dependency');
       slices.push({
         checked: m[1] === 'x',
         id: m[2],
         title: (m[3] || '').trim(),
         risk: m[4] || null,
+        dependencies,
+        dependency_status: !declarations.length ? 'missing' : errors.length ? 'invalid' : 'valid',
+        dependency_errors: errors,
       });
+    }
+    const byId = new Map(slices.map(slice => [slice.id, slice]));
+    for (const slice of slices) {
+      if (slices.filter(other => other.id === slice.id).length !== 1) slice.dependency_errors.push('duplicate-slice-id');
+      for (const id of slice.dependencies) {
+        if (id === slice.id) slice.dependency_errors.push('self-dependency');
+        else if (!byId.has(id)) slice.dependency_errors.push(`unknown-dependency:${id}`);
+      }
+      const visits = new Set();
+      function reaches(id) {
+        if (id === slice.id) return true;
+        if (visits.has(id)) return false;
+        visits.add(id);
+        return (byId.get(id)?.dependencies || []).some(reaches);
+      }
+      if (slice.dependencies.some(reaches)) slice.dependency_errors.push('dependency-cycle');
+      if (slice.dependency_errors.length) slice.dependency_status = 'invalid';
     }
 
     let title = null;

@@ -2,6 +2,16 @@
 const assert = require('assert');
 const api = require('./forge-attempt-recovery');
 async function main() {
+  const linkedFixtures = require('./forge-loop-failure.test'), linkedFixture = linkedFixtures.fixture();
+  try {
+    const consumed = linkedFixtures.consume(linkedFixture);
+    const entered = linkedFixtures.invoke(linkedFixture, 'reenter', consumed.snapshot, linkedFixtures.entryInput(linkedFixture, consumed));
+    const linkedRequest = { ...linkedFixture.request, linked_begin_key: entered.controller_result.details.transaction.idempotency_key };
+    assert.throws(() => api.requestIdentity({ ...linkedRequest, linkedEntryBinding: {}, approved: true }), /binding|required/);
+    const bound = api.bindLinkedRequest(linkedRequest, { ...linkedFixtures.liveOptions(linkedFixture), ownerToken: linkedFixture.input.owner_token });
+    assert.strictEqual(api.requestIdentity(bound).linked_entry.entry_id, 'fixture-entry-1');
+    assert.throws(() => api.requestIdentity(JSON.parse(JSON.stringify(bound))), /binding|required/);
+  } finally { linkedFixtures.cleanup(linkedFixture); }
   let now = 0, saved;
   const identity = { unit: 'execute-task/T-recovery', roots_sha256: 'roots', clock: () => now, persist: state => { saved = state; } };
   const route = { unit_type: 'execute-task', host_runtime: 'codex', resolved_worker_engine: 'claude', worker_mode: 'sidecar',

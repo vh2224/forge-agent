@@ -54,6 +54,24 @@ function stealIfStale(lockDir, ttlMs, now) {
   return true;
 }
 
+// Short process mutexes have a different recovery rule from age-based locks.
+// ESRCH is the only automatic death proof; an initializing, reused or inaccessible
+// PID remains busy. Claim the exact owner's marker before moving its directory.
+function recoverDeadProcess(lockDir) {
+  const meta = readMetadata(lockDir);
+  if (!meta || !Number.isSafeInteger(meta.holder_pid) || meta.holder_pid <= 0
+      || !/^[A-Za-z0-9._-]{1,160}$/.test(meta.owner_token || '') || !meta.generation) return false;
+  try { process.kill(meta.holder_pid, 0); return false; }
+  catch (error) { if (error.code !== 'ESRCH') return false; }
+  if (!sameOwner(readMetadata(lockDir), { ownerToken: meta.owner_token, generation: meta.generation })) return false;
+  const marker = markerPath(lockDir, meta.owner_token);
+  try { fs.renameSync(marker, `${marker}.dead-${process.pid}-${crypto.randomUUID()}`); }
+  catch { return false; }
+  // A failed claimant leaves evidence and fails closed; no age-based fallback.
+  if (!sameOwner(readMetadata(lockDir), { ownerToken: meta.owner_token, generation: meta.generation })) return false;
+  return !!quarantine(lockDir, 'dead-process');
+}
+
 function makeHandle(cwd, name, lockDir, metadata) {
   const handle = { lockDir, metadata, ownerToken: metadata.owner_token, generation: metadata.generation };
   handle.release = () => releaseHandle(handle);
@@ -93,7 +111,10 @@ function tryAcquireSync(cwd, name, opts) {
   try { ensureLocksDir(cwd); } catch (error) { if (error.code === 'ENOGSD') return null; throw error; }
   const dir = lockPath(cwd, name);
   try { return create(cwd, name, { ...opts, ttlMs }); }
-  catch (error) { if (error.code !== 'EEXIST') throw error; if (opts.allowStaleRecovery !== false && stealIfStale(dir, ttlMs, nowOf(opts))) { try { return create(cwd, name, { ...opts, ttlMs }); } catch { } } return null; }
+  catch (error) { if (error.code !== 'EEXIST') throw error; if (opts.processOwnerOnly ? recoverDeadProcess(dir) : opts.allowStaleRecovery !== false && stealIfStale(dir, ttlMs, nowOf(opts))) { try { return create(cwd, name, { ...opts, ttlMs }); } catch { } } return null; }
+}
+function acquireProcessSync(cwd, name, opts = {}) {
+  return acquireSync(cwd, name, { ...opts, allowStaleRecovery: false, processOwnerOnly: true, holderPid: process.pid });
 }
 // Synchronous consumers (the state/run registries predate promises) still need
 // the same owner-scoped mutex. Atomics.wait is available in Node on every host
@@ -200,4 +221,4 @@ function recoverIncompleteLock(cwd, name, opts = {}) {
 function parseArgs(argv) { const out = {}; for (let i = 0; i < argv.length; i++) if (argv[i].startsWith('--')) { const k = argv[i].slice(2), n = argv[i + 1]; out[k] = n && !n.startsWith('--') ? (i++, n) : true; } return out; }
 async function cliMain() { const args = parseArgs(process.argv.slice(2)), cwd = args.cwd || process.cwd(); try { if (args.acquire || args['try-acquire']) { const fn = args.acquire ? acquire : tryAcquireSync; const h = await fn(cwd, args.acquire || args['try-acquire'], { ttlMs: args.ttl && Number(args.ttl), holderRunId: args.holder, retries: args.retries && Number(args.retries) }); if (!h) { process.stderr.write('busy\n'); process.exitCode = 1; return; } process.stdout.write(JSON.stringify({ lockDir: h.lockDir, metadata: h.metadata }) + '\n'); } else if (args.release) { const ok = releaseSync(cwd, args.release, args.token, args.generation); process.stdout.write(ok ? 'released\n' : 'not held (token obrigatório)\n'); process.exitCode = ok ? 0 : 1; } else if (args.status) process.stdout.write(JSON.stringify(status(cwd, args.status), null, 2) + '\n'); else { process.stderr.write('forge-lock: comando inválido\n'); process.exitCode = 2; } } catch (e) { process.stderr.write(`forge-lock error: ${e.message}\n`); process.exitCode = 1; } }
 if (require.main === module) cliMain();
-module.exports = { acquire, acquireSync, tryAcquireSync, releaseSync, releaseHandle, renewHandle, assertOwned, status, recoverIncompleteLock, locksDir, lockPath, metaPath, stealIfStale, DEFAULT_TTL_MS };
+module.exports = { acquire, acquireSync, acquireProcessSync, tryAcquireSync, releaseSync, releaseHandle, renewHandle, assertOwned, status, recoverIncompleteLock, locksDir, lockPath, metaPath, stealIfStale, DEFAULT_TTL_MS };
