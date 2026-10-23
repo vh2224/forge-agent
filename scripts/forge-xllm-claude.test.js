@@ -867,7 +867,7 @@ async function reviewLegsLiveness(root) {
   delete require.cache[modulePath];
   try {
     const xllm = require('./forge-xllm');
-    const onLiveness = () => {};
+    const onLiveness = (transition) => transition;
     const base = { cwd: PROJECT_ROOT, engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true,
       model: 'claude-opus-5-5', effort: 'medium' };
     const legs = [['runChallenge', { diffCmd: 'node --version' }], ['runDefend', { inputFile }], ['runRebuttal', { inputFile }],
