@@ -1298,6 +1298,305 @@ test('liveness: an invalid livenessIntervalMs is refused before any spawn', asyn
   }
 });
 
+// ── Tool liveness (S02/T04) — local proof, extension and loop detector ──
+// Proofs are injected through the internal localProofFactory seam, so every
+// three-state branch (win32 unavailable, dead pid, Linux without proof) runs on
+// every platform. Tool arguments carry a sentinel that must never surface.
+const TOOL_ARG_SENTINEL = 'forge-t04-private-tool-argument-sentinel';
+
+// Emits one tool_use cycle per entry of `inputs` (stream block + assistant
+// message), optionally a tool_result per cycle, then either hangs (tool still in
+// flight) or finishes with a text message and a valid result envelope.
+//   holdMs: real ms to keep the LAST tool in flight before its tool_result
+//   result: false keeps the last tool in flight forever (no tool_result/result)
+//   pauseAfter/sentinelFile: after cycle N, wait, touch a file, wait again
+function toolFixture(name, { inputs, gapMs = 15, holdMs = 0, result = true, pauseAfter = null, sentinelFile = null }) {
+  return writeFixture(name, `
+'use strict';
+const fs = require('fs');
+${ENVELOPE_PRELUDE}
+const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const inputs = ${JSON.stringify(inputs)};
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function toolUse(index, input) {
+  const id = 'toolu_t04_' + index, message = 'msg-tool-' + index;
+  out({ type: 'stream_event', event: { type: 'message_start', message: { id: message, role: 'assistant' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_start', index: 0,
+    content_block: { type: 'tool_use', id, name: 'Bash', input: {} } } });
+  out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0,
+    delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } } });
+  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  out({ type: 'assistant', message: { id: message, role: 'assistant',
+    content: [{ type: 'tool_use', id, name: 'Bash', input }] } });
+  return id;
+}
+function toolResult(id) {
+  out({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id,
+    content: 'fixture-tool-output' }] }, parent_tool_use_id: null, session_id: 'fixture-session' });
+}
+(async () => {
+  for (let index = 0; index < inputs.length; index++) {
+    const id = toolUse(index, inputs[index]);
+    const last = index === inputs.length - 1;
+    if (last && ${result === false}) { setInterval(() => {}, 1000); return; }
+    await sleep(last ? ${holdMs} : ${gapMs});
+    toolResult(id);
+    if (${pauseAfter === null ? -1 : pauseAfter} === index + 1) {
+      await sleep(150);
+      fs.writeFileSync(${JSON.stringify(sentinelFile)}, 'written');
+      await sleep(300);
+    }
+  }
+  await sleep(250);
+  out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-final', role: 'assistant' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  out({ type: 'stream_event', event: { type: 'message_stop' } });
+  process.stdout.write(envelope(${JSON.stringify(okBlock('tool liveness'))}) + '\\n');
+})();
+`);
+}
+
+function privateInput(extra = {}) {
+  return { command: `echo ${TOOL_ARG_SENTINEL}`, description: 'volatile description', ...extra };
+}
+
+// Programmable fake provider: current() returns the injected proof; sample()
+// is counted; onWrite is exposed so a test can simulate a filesystem delta.
+function fakeProof(initial, { writeWhen } = {}) {
+  const state = { proof: initial, samples: 0, currents: 0, stops: 0, options: null, wrote: false };
+  state.factory = (options) => {
+    state.options = options;
+    return {
+      sample() {
+        state.samples++;
+        if (writeWhen && !state.wrote && writeWhen()) { state.wrote = true; options.onWrite(); }
+        return Promise.resolve();
+      },
+      current() { state.currents++; return state.proof; },
+      stop() { state.stops++; },
+    };
+  };
+  return state;
+}
+
+function assertToolKill(run, reason, { extension = null } = {}) {
+  ok(run.error, `expected a ${reason} kill`);
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(run.error.liveness.state, 'dead');
+  assert.strictEqual(run.error.liveness.reason, reason);
+  assert.strictEqual(run.error.liveness.extension_ms, extension);
+  assert.strictEqual(run.error.liveness.version, 1);
+  const silence = run.error.diagnostic.observation.silence;
+  ok(silence, 'observation.silence must be accepted by the diagnostic allowlist');
+  assert.strictEqual(silence.dimension, 'gap');
+  assert.strictEqual(silence.threshold_ms, 240000);
+  assert.strictEqual(silence.policy, 'forge-liveness-v1');
+  assert.strictEqual(silence.source, 'locked-default');
+  ok(silence.window_ms > silence.threshold_ms, `window ${silence.window_ms}`);
+  assert.strictEqual(run.terminations, 1);
+  assertPrivate(run);
+  return silence;
+}
+
+function assertPrivate(run) {
+  for (const [label, value] of [['transitions', run.transitions], ['error.liveness', run.error?.liveness],
+    ['observation', run.error?.diagnostic?.observation ?? run.result?.metadata?.observation]]) {
+    ok(!JSON.stringify(value ?? null).includes(TOOL_ARG_SENTINEL), `${label} leaked tool argument text`);
+  }
+}
+
+test('liveness/tool: positive local proof survives past 240000 injected ms and is accepted', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const fixture = toolFixture('claude tool positive fixture.js', { inputs: [privateInput()], holdMs: 1100 });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  assert.strictEqual(run.terminations, 0);
+  ok(run.transitions.some(t => t.to === 'slow-suspect' && t.reason === 'tool-extended' && t.at_ms > 240000),
+    `tool-extended past 240000 expected: ${JSON.stringify(run.transitions)}`);
+  ok(!run.transitions.some(t => t.to === 'dead'));
+  assertPrivate(run);
+});
+
+test('liveness/tool: Linux/macOS without proof (available/none) dies at 240000 as tool-unproven', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude tool unproven fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  const silence = assertToolKill(run, 'tool-unproven');
+  ok(silence.window_ms < 660000, `killed at ${silence.window_ms}, not after the extension`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'none' });
+});
+
+test('liveness/tool: a dead child pid (available/negative) dies at 240000 as tool-proof-negative', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'negative' });
+  const fixture = toolFixture('claude tool negative fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  const silence = assertToolKill(run, 'tool-proof-negative');
+  ok(silence.window_ms < 660000, `killed at ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'negative' });
+});
+
+test('liveness/tool: Windows without CPU (unavailable/none) stays slow-suspect past 240000 and dies at 660001, not at the ceiling', async () => {
+  const fake = fakeProof({ capability: 'unavailable', proof: 'none' });
+  const fixture = toolFixture('claude tool unavailable fixture.js', { inputs: [privateInput()], result: false });
+  // timeoutMs 905000 gives a 900000 ms child ceiling, above the 660000 tool maximum.
+  const run = await runLive(fixture, acceleratedClock(400, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, timeoutMs: 905000 });
+  const silence = assertToolKill(run, 'tool-proof-unavailable-expired', { extension: 420000 });
+  assert.notStrictEqual(run.error.code, 'claude-timeout');
+  assert.notStrictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  ok(silence.window_ms > 660000, `window ${silence.window_ms}`);
+  const suspect = run.transitions.find(t => t.to === 'slow-suspect');
+  ok(suspect && suspect.reason === 'proof-unavailable' && suspect.at_ms > 120000 && suspect.at_ms <= 240001,
+    `slow-suspect/proof-unavailable expected: ${JSON.stringify(run.transitions)}`);
+  const dead = run.transitions.find(t => t.to === 'dead');
+  ok(dead && dead.at_ms > 660000 && dead.at_ms < 900000, `dead at ${dead && dead.at_ms}`);
+  // Alive and slow-suspect at 240001: no transition between suspect and dead.
+  assert.strictEqual(run.transitions.indexOf(dead), run.transitions.indexOf(suspect) + 1);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'unavailable', proof: 'none' });
+  ok(run.realMs < 4000, `real ${Math.round(run.realMs)} ms`);
+});
+
+test('liveness/tool: persistent positive proof dies after 660000 as tool-extension-exhausted', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const fixture = toolFixture('claude tool exhausted fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(400, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, timeoutMs: 905000 });
+  const silence = assertToolKill(run, 'tool-extension-exhausted', { extension: 420000 });
+  ok(silence.window_ms > 660000, `window ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'positive' });
+});
+
+test('liveness/tool: a ceiling below 660000 classifies with the current proof (positive tool stays working)', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const fixture = toolFixture('claude tool ceiling fixture.js', { inputs: [privateInput()], result: false });
+  // timeoutMs 205000 gives a 200000 ms child ceiling: the tool is in its
+  // local-proof window (120000..240000), so it is active, never dead.
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, timeoutMs: 205000 });
+  ok(run.error, 'expected the ceiling');
+  assert.strictEqual(run.error.code, 'claude-timeout');
+  assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.state, 'working');
+  assert.strictEqual(run.error.liveness.reason, 'local-proof');
+  assert.strictEqual(run.terminations, 1);
+  assertPrivate(run);
+});
+
+test('liveness/tool: five identical tool calls without a write report no-progress once and never kill', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude tool loop fixture.js', { inputs: Array(5).fill(privateInput()) });
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  assert.strictEqual(run.terminations, 0);
+  const loops = run.transitions.filter(t => t.reason === 'no-progress');
+  assert.strictEqual(loops.length, 1, JSON.stringify(run.transitions));
+  assert.strictEqual(loops[0].to, 'slow-suspect');
+  assert.strictEqual(loops[0].progress.repeats, 5);
+  ok(/^[0-9a-f]{16}$/.test(loops[0].progress.fingerprint_sha256), loops[0].progress.fingerprint_sha256);
+  assert.deepStrictEqual(Object.keys(loops[0].progress).sort(), ['fingerprint_sha256', 'repeats']);
+  assertPrivate(run);
+});
+
+test('liveness/tool: distinct tool calls, or a write between identical ones, report no no-progress', async () => {
+  const distinct = await runLive(toolFixture('claude tool distinct fixture.js',
+    { inputs: [0, 1, 2, 3, 4].map(n => privateInput({ step: n })) }),
+  acceleratedClock(1, { fromFirstRemote: true }), { localProofFactory: fakeProof({ capability: 'available', proof: 'none' }).factory });
+  assert.strictEqual(distinct.error, null, distinct.error && distinct.error.code);
+  ok(!distinct.transitions.some(t => t.reason === 'no-progress'), JSON.stringify(distinct.transitions));
+
+  const marker = path.join(WORKSPACE, 'claude-t04-write-marker.txt');
+  try { fs.rmSync(marker, { force: true }); } catch { /* absent */ }
+  const fake = fakeProof({ capability: 'available', proof: 'none' }, { writeWhen: () => fs.existsSync(marker) });
+  const written = await runLive(toolFixture('claude tool write fixture.js',
+    { inputs: Array(5).fill(privateInput()), pauseAfter: 3, sentinelFile: marker }),
+  acceleratedClock(1, { fromFirstRemote: true }), { localProofFactory: fake.factory, localProofIntervalMs: 20 });
+  fs.rmSync(marker, { force: true });
+  assert.strictEqual(written.error, null, written.error && written.error.code);
+  ok(fake.wrote, 'the fake provider observed the write between the 3rd and 4th call');
+  ok(!written.transitions.some(t => t.reason === 'no-progress'), JSON.stringify(written.transitions));
+});
+
+test('liveness/tool: the provider gets pid/roots/ignore, samples off the watchdog tick and stops at finish', async () => {
+  const extra = path.join(ROOT, 'writable extra root');
+  fs.mkdirSync(extra, { recursive: true });
+  const fast = fakeProof({ capability: 'unavailable', proof: 'none' });
+  const ignored = path.join(ROOT, 'result.json');
+  const run = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: fast.factory, localProofIntervalMs: 20,
+    writableRoots: [extra, WORKSPACE], localProofIgnore: [ignored, 7, ignored] });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  ok(Number.isSafeInteger(fast.options.pid) && fast.options.pid > 0, 'real child pid');
+  assert.deepStrictEqual(fast.options.roots, [path.resolve(WORKSPACE), path.resolve(extra)]);
+  assert.deepStrictEqual(fast.options.ignore, { prefixes: [path.resolve(ignored)] });
+  assert.strictEqual(typeof fast.options.onWrite, 'function');
+  ok(fast.samples > 1, `samples ${fast.samples}`);
+  assert.strictEqual(fast.stops, 1);
+  const settledSamples = fast.samples;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.strictEqual(fast.samples, settledSamples, 'sampling stops after finish');
+
+  // A long cadence leaves only the initial sample even though the 25 ms
+  // watchdog ticked many times: the tick reads current(), it never samples.
+  const slow = fakeProof({ capability: 'unavailable', proof: 'none' });
+  const readOnly = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: slow.factory, localProofIntervalMs: 600000, readOnly: true, writableRoots: [extra] });
+  assert.strictEqual(readOnly.error, null, readOnly.error && readOnly.error.code);
+  assert.strictEqual(slow.samples, 1);
+  ok(slow.currents > 1, `current() reads ${slow.currents}`);
+  assert.deepStrictEqual(slow.options.roots, []);
+});
+
+test('liveness/tool: an invalid localProofFactory or localProofIntervalMs is refused before any spawn', async () => {
+  for (const extra of [{ localProofFactory: 'createLocalProof' }, { localProofIntervalMs: 0 },
+    { localProofIntervalMs: 1.5 }, { localProofIntervalMs: '20' }]) {
+    const records = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    await expectCode(adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'proof options', model: FIXTURE_MODEL,
+      timeoutMs: 15000, sourceEnv: sourceEnvFor(HAPPY_FIXTURE), ...extra }),
+    adapter.CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+    assert.strictEqual(records.length, 0);
+  }
+});
+
+test('liveness/tool: a throwing or malformed provider reads as unavailable and never breaks the run', async () => {
+  const run = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: () => ({ sample() { throw new Error('boom'); }, current() { return { capability: 'bogus' }; },
+      stop() { throw new Error('boom'); } }), localProofIntervalMs: 20 });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const thrown = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: () => { throw new Error('cannot start'); } });
+  assert.strictEqual(thrown.error, null, thrown.error && thrown.error.code);
+});
+
+test('liveness/tool: the real provider on a read-only turn scans no filesystem root and the result is accepted', async () => {
+  const fsp = fs.promises;
+  const original = { readdir: fsp.readdir, lstat: fsp.lstat };
+  const touched = [];
+  const inside = value => typeof value === 'string' && path.resolve(value).startsWith(path.resolve(ROOT));
+  fsp.readdir = function (target, ...rest) { if (inside(target)) touched.push(target); return original.readdir.call(this, target, ...rest); };
+  fsp.lstat = function (target, ...rest) { if (inside(target)) touched.push(target); return original.lstat.call(this, target, ...rest); };
+  let run;
+  try {
+    run = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }),
+      { readOnly: true, localProofIntervalMs: 20 });
+  } finally {
+    fsp.readdir = original.readdir;
+    fsp.lstat = original.lstat;
+  }
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  assert.deepStrictEqual(touched, []);
+});
+
 async function main() {
   let passed = 0;
   const failures = [];

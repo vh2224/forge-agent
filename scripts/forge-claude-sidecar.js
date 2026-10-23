@@ -28,6 +28,7 @@ const streamProtocol = require('./forge-claude-stream');
 const calibrationApi = require('./forge-sidecar-calibration');
 const { observation } = calibrationApi;
 const liveness = require('./forge-sidecar-liveness');
+const { createLocalProof } = require('./forge-sidecar-local-proof');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
@@ -92,6 +93,12 @@ const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // published value. A callback wired without a cadence still has to beat.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15000;
 const DEFAULT_LIVENESS_INTERVAL_MS = 1000;
+// Local-proof sampling cadence. Sampling is asynchronous and cached; the 1 s
+// watchdog tick only reads the cache and never performs I/O itself.
+const DEFAULT_LOCAL_PROOF_INTERVAL_MS = 15000;
+// Stand-in when no child pid exists (or the provider cannot be built): the
+// platform measured nothing, which is `unavailable`, never a positive proof.
+const UNAVAILABLE_LOCAL_PROOF = Object.freeze({ capability: 'unavailable', proof: 'none' });
 // Inline invocation settings: `--setting-sources ''` excludes the user, project
 // and local settings files. Managed policy is not a setting source; it may still
 // apply and is never bypassed. No settings file is changed.
@@ -244,22 +251,58 @@ function deriveChildTimeoutMs(parentMs) {
 
 /** Absence keeps the fallback cadence; a present value is validated, never
  * coerced. 0/NaN/negative reach setInterval as a tight loop. */
-function normalizeHeartbeatIntervalMs(value) {
-  if (value === undefined || value === null) return DEFAULT_HEARTBEAT_INTERVAL_MS;
+function normalizeIntervalMs(value, fallback) {
+  if (value === undefined || value === null) return fallback;
   if (!Number.isInteger(value) || value <= 0) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
   }
   return value;
 }
 
+function normalizeHeartbeatIntervalMs(value) {
+  return normalizeIntervalMs(value, DEFAULT_HEARTBEAT_INTERVAL_MS);
+}
+
 /** Watchdog cadence (internal; tests inject a short one). Same validation as
  * the heartbeat: a present value is never coerced into a tight loop. */
 function normalizeLivenessIntervalMs(value) {
-  if (value === undefined || value === null) return DEFAULT_LIVENESS_INTERVAL_MS;
-  if (!Number.isInteger(value) || value <= 0) {
-    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  return normalizeIntervalMs(value, DEFAULT_LIVENESS_INTERVAL_MS);
+}
+
+/** Local-proof sampling cadence (internal seam; tests inject a short one). */
+function normalizeLocalProofIntervalMs(value) {
+  return normalizeIntervalMs(value, DEFAULT_LOCAL_PROOF_INTERVAL_MS);
+}
+
+/**
+ * Roots whose filesystem delta counts as local proof and as a new write: the
+ * workspace plus the declared writable roots, exactly what the CLI may write.
+ * A read-only unit has none; only the child's CPU can prove life there.
+ */
+function localProofRoots(cwd, options) {
+  if (options.readOnly) return [];
+  const extra = Array.isArray(options.writableRoots)
+    ? options.writableRoots.filter(root => typeof root === 'string' && root).map(root => path.resolve(root))
+    : [];
+  return [...new Set([cwd, ...extra])];
+}
+
+/** Extra ignored prefixes (Forge result/receipt files); the provider itself
+ * always ignores `.git/` and `<root>/.gsd/forge/`. Non-arrays mean none. */
+function localProofIgnorePrefixes(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.filter(item => typeof item === 'string' && item).map(item => path.resolve(item)))]
+    : [];
+}
+
+/** Only {capability, proof}; an invalid provider answer reads as unavailable
+ * instead of throwing inside the watchdog tick. */
+function currentLocalProof(provider) {
+  try {
+    return liveness.normalizeLocalProof(provider.current());
+  } catch {
+    return { ...UNAVAILABLE_LOCAL_PROOF };
   }
-  return value;
 }
 
 /**
@@ -499,7 +542,9 @@ function defaultTerminate(child) {
 
 function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat,
   heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration,
-  onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy }) {
+  onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy,
+  proofRoots = [], localProofIgnore = [], localProofFactory = null,
+  localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS }) {
   if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   let child;
   try {
@@ -509,18 +554,44 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
 
   return new Promise((resolve, reject) => {
     let settled = false, terminationAttempted = false, closed = false, failed = false;
-    let watchdog, heartbeatTimer, progressTimer, timer, silence = null, transportEnd = null;
+    let watchdog, heartbeatTimer, progressTimer, proofTimer, timer, silence = null, transportEnd = null;
     let reportedRemote = false, reportedTerminal = false;
     // Liveness is the primary kill authority (start/silence); timeoutMs is only
     // the safety ceiling, enforced by the tracker on the injected clock and by
     // the real setTimeout backstop below.
     const policy = livenessPolicyFor(calibration, livenessPolicy);
     const tracker = liveness.createTracker(policy, timeoutMs);
+    // Loop detector: tool-call fingerprints (hashes only) since the last write.
+    const progress = liveness.createProgressTracker();
     const reducer = streamProtocol.createReducer({ secret: env[TOKEN_ENV], clock, onRemote: () => {
       if (!reportedRemote) { reportedRemote = true; emit(); }
     }, onEvent: () => {
       if (!reportedTerminal && reducer.snapshot().phase === 'terminal') { reportedTerminal = true; emit(); }
+    }, onToolCall: ({ fingerprint }) => {
+      try { progress.toolCall(fingerprint); } catch { /* observer only */ }
     } });
+    // Local proof of life: sampled asynchronously into a cache, never inside the
+    // watchdog tick. Without a child pid there is nothing to measure.
+    let proof = { current: () => UNAVAILABLE_LOCAL_PROOF, sample: () => Promise.resolve(), stop() {} };
+    if (Number.isSafeInteger(child.pid)) {
+      try {
+        const provider = (localProofFactory || createLocalProof)({ pid: child.pid, roots: proofRoots,
+          ignore: { prefixes: localProofIgnore }, clock, intervalMs: localProofIntervalMs,
+          onWrite: () => { try { progress.write(); } catch { /* observer only */ } } });
+        if (provider && typeof provider.current === 'function' && typeof provider.sample === 'function') {
+          proof = provider;
+        }
+      } catch { /* a provider that cannot start leaves the proof unavailable */ }
+    }
+    function sampleProof() {
+      try { Promise.resolve(proof.sample()).catch(() => {}); } catch { /* best-effort sampling */ }
+    }
+    function livenessInputs() {
+      const current = currentLocalProof(proof);
+      let state;
+      try { state = progress.state(); } catch { state = undefined; }
+      return { localProof: { capability: current.capability, proof: current.proof }, progress: state };
+    }
     const snapshot = () => {
       const current = reducer.snapshot();
       return observation({ ...current, process_exit_observed: closed,
@@ -542,6 +613,8 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       clearInterval(watchdog);
       clearInterval(heartbeatTimer);
       clearInterval(progressTimer);
+      clearInterval(proofTimer);
+      try { proof.stop?.(); } catch { /* best-effort */ }
       signal?.removeEventListener('abort', cancel);
       process.removeListener('SIGINT', cancel);
       process.removeListener('SIGTERM', cancel);
@@ -583,7 +656,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     process.once('SIGTERM', cancel);
     function ceilingError() {
       // Classify with the state that held without the ceiling (backstop path).
-      const { state, reason } = liveness.evaluate(reducer.snapshot(), {}, policy, null);
+      // Same current proof/progress as the watchdog: a tool whose proof still
+      // allows its extension is active, not dead, when the ceiling arrives.
+      const { state, reason } = liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
       const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
       error.liveness = { version: 1, termination: liveness.classifyTermination({ cause: 'ceiling', state }),
         state, reason };
@@ -594,16 +669,30 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     emit();
     if (onHeartbeat) heartbeatTimer = setInterval(beat, heartbeatIntervalMs);
     if (onProgress) progressTimer = setInterval(emit, 15000);
+    proofTimer = setInterval(sampleProof, localProofIntervalMs);
+    proofTimer.unref?.();
+    sampleProof();
     watchdog = setInterval(() => {
       if (settled) return;
-      const { result, transition } = tracker.evaluate(reducer.snapshot(), {});
-      if (transition && onLiveness) bestEffort(onLiveness, transition);
+      // Synchronous: reads the cached proof and the progress state, no I/O.
+      const inputs = livenessInputs();
+      const { result, transition } = tracker.evaluate(reducer.snapshot(), inputs);
+      if (transition && onLiveness) {
+        const loop = transition.to === 'slow-suspect' && transition.reason === 'no-progress'
+          && typeof inputs.progress?.fingerprint === 'string';
+        bestEffort(onLiveness, loop ? { ...transition, progress: { repeats: inputs.progress.repeats,
+          fingerprint_sha256: inputs.progress.fingerprint.slice(0, 16) } } : transition);
+      }
       if (!result.kill) return;
       if (result.cause === 'liveness') {
+        // Every tool kill carries threshold_ms = deadMs, so observation() accepts it.
         silence = { dimension: result.dimension, window_ms: result.window_ms, threshold_ms: result.threshold_ms,
           policy: liveness.POLICY, source: livenessSource(result.dimension, result.threshold_ms), cause: 'indeterminate' };
         const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence');
-        error.liveness = { version: 1, termination: result.termination, state: 'dead', reason: result.reason };
+        error.liveness = { version: 1, termination: result.termination, state: 'dead', reason: result.reason,
+          extension_ms: result.extension_ms ?? null,
+          proof: result.proof_capability === undefined ? null
+            : { capability: result.proof_capability, proof: result.proof } };
         terminate(error);
       } else if (result.cause === 'ceiling') {
         terminate(ceilingError());
@@ -677,8 +766,26 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  *   best-effort observer of liveness state transitions; non-functions are ignored.
  * @param {number} [opts.livenessIntervalMs] watchdog cadence (default 1000);
  *   validated as a positive integer when present.
- * @param {{startMs?:number,suspectMs?:number,deadMs?:number}} [opts.livenessPolicy]
+ * @param {{startMs?:number,suspectMs?:number,deadMs?:number,toolExtensionMs?:number}} [opts.livenessPolicy]
  *   override that can only tighten the locked liveness defaults.
+ * @param {string[]} [opts.localProofIgnore] absolute path prefixes (Forge
+ *   result/receipt files) whose writes never count as local proof or progress;
+ *   the provider always ignores `.git/` and `<root>/.gsd/forge/`. A non-array
+ *   is treated as empty.
+ *
+ * Tool waits (a tool_use in flight) depend on the child's local proof of life,
+ * sampled every 15000 ms into a cache that the 1 s watchdog only reads. Positive
+ * proof (pid alive plus CPU or filesystem delta in cwd/writableRoots) and
+ * unavailable proof (the platform cannot measure CPU, e.g. win32; it stays
+ * slow-suspect) tolerate at most 660000 ms of silence (deadMs 240000 +
+ * toolExtensionMs 420000). No proof where the capability exists, or a dead pid,
+ * dies at 240000 ms. Tool kills reject with `claude-anomalous-silence` and
+ * `error.liveness.{termination:'dead-silence', reason, extension_ms, proof}`.
+ * Five identical tool calls without a new write report one `slow-suspect`
+ * transition with reason `no-progress` and `progress:{repeats, fingerprint_sha256}`
+ * (16 hex) through onLiveness; it never kills. Internal test seams, not public
+ * API: `localProofFactory` replaces createLocalProof and `localProofIntervalMs`
+ * replaces the 15000 ms sampling cadence (validated as a positive integer).
  * @param {string} opts.model model id forwarded to the CLI as `--model <id>`.
  *   Required: absence is `claude-model-required` before any spawn, because the
  *   result is admitted only when modelUsage proves this exact id. Rejected when
@@ -727,6 +834,14 @@ async function invokeClaudeSidecar(opts) {
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
   const livenessIntervalMs = normalizeLivenessIntervalMs(options.livenessIntervalMs);
   const onLiveness = typeof options.onLiveness === 'function' ? options.onLiveness : null;
+  if (options.localProofFactory !== undefined && options.localProofFactory !== null
+    && typeof options.localProofFactory !== 'function') {
+    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  }
+  const localProofFactory = options.localProofFactory || null;
+  const localProofIntervalMs = normalizeLocalProofIntervalMs(options.localProofIntervalMs);
+  const proofRoots = localProofRoots(cwd, options);
+  const localProofIgnore = localProofIgnorePrefixes(options.localProofIgnore);
   const launchIdentity = claudeLaunchIdentity(options);
   const model = launchIdentity.model_sent;
   const effort = launchIdentity.effort;
@@ -818,6 +933,7 @@ async function invokeClaudeSidecar(opts) {
       requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
       calibration: calibrationApi.read({model,effort:effort || 'medium',phase},options.calibrationOptions),
       onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
+      proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs,
     });
     const proposal = calibrationApi.propose({model,effort:effort || 'medium',phase},output.metadata.observation,options.calibrationOptions);
     return { ...output, telemetry: Object.freeze({ ...telemetryBase,
