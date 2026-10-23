@@ -36,15 +36,20 @@
  *   validateExecuteResult(obj) → boolean
  *   deriveFilesChanged(cwd)    → [{status, path}]  (git READ-ONLY)
  *   readWorkersTimeout(dir)    → number|null       (prefs cascade)
+ *   readWorkersTimeoutRaw(dir) → any|null          (raw pref, validated by resolveWorkerCeiling)
  *   readSidecarsEnvPolicy(dir) → string|null       (prefs cascade)
  *   buildSidecarEnv(policy)    → object            (minimal/inherit sidecar env)
  *
  * CLI usage:
- *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode defend --input <objections> [--diff-cmd "git diff"] [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> --context-root <WORKING_DIR> [--engine codex|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
- *   node scripts/forge-xllm.js --mode plan --plan-context <file> --result-file <path> --cwd <repo> [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
+ *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode defend --input <objections> [--diff-cmd "git diff"] [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> --context-root <WORKING_DIR> [--engine codex|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit]
+ *   node scripts/forge-xllm.js --mode plan --plan-context <file> --result-file <path> --cwd <repo> [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit]
+ *
+ *   Timeout = safety ceiling (seconds): --timeout > workers.timeout pref > tier ceiling, always
+ *   through resolveWorkerCeiling. --tier is optional (absent/unknown → standard). A legacy 300
+ *   (flag or pref) is ignored in favour of the tier ceiling with a stderr warning.
  *
  * Exit contract: 0 on success. For challenge/defend/rebuttal the normalized JSON goes to stdout
  * (nothing else on stdout). For execute the result-file is the ONLY result channel —
@@ -111,12 +116,14 @@ const vcs = require('./forge-vcs.js');
 const { classifyError, isTransient } = require('./forge-classify-error.js');
 const { countTokens, truncateAtSectionBoundary } = require('./forge-tokens.js');
 const { deriveTransport } = require('./forge-transport.js');
-const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
+const { resolveWorkerCeiling } = require('./forge-worker-timeout');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_TIMEOUT_SECS = 300;
-const DEFAULT_EXECUTE_TIMEOUT_SECS = DEFAULT_WORKER_TIMEOUT_SECS;
+// No fixed deadline: an absent opts.timeoutSecs resolves to the tier safety ceiling.
+function ceilingSecs(opts) {
+  return opts.timeoutSecs || resolveWorkerCeiling({ tier: opts.tier }).seconds;
+}
 const HEARTBEAT_INTERVAL_MS = 15000; // re-write the running heartbeat every 15s
 // Execute prompt additions have independent budgets because their semantics differ.
 // Security is a mandatory contract and must fail closed when it cannot be delivered.
@@ -1778,6 +1785,23 @@ function readWorkersTimeout(baseDir) {
   return Number.isInteger(timeout) && timeout > 0 ? timeout : null;
 }
 
+/** Raw workers.timeout pref (or null); validation and legacy-300 handling live in resolveWorkerCeiling. */
+function readWorkersTimeoutRaw(baseDir) {
+  const workers = readPrefsCached(baseDir).prefs.workers;
+  const value = workers && workers.timeout;
+  return value === undefined || value === null ? null : value;
+}
+
+/** CLI ceiling: --timeout > workers.timeout pref > tier ceiling, warning on stderr. */
+function cliCeiling(args, baseDir = process.cwd()) {
+  const flag = args.timeout !== undefined && args.timeout !== true ? Number(args.timeout) : null;
+  const explicit = flag !== null ? flag : readWorkersTimeoutRaw(baseDir);
+  const tier = typeof args.tier === 'string' ? args.tier : undefined;
+  const resolved = resolveWorkerCeiling({ tier, explicit });
+  if (resolved.warning) process.stderr.write(`forge-xllm: aviso: ${resolved.warning.code}: ${resolved.warning.message}\n`);
+  return resolved.seconds;
+}
+
 /**
  * Is this env key credential-bearing for a THIRD-PARTY sidecar process?
  *
@@ -1930,7 +1954,7 @@ function readSidecarsEnvPolicy(baseDir) {
  */
 async function runChallengeCore(opts) {
   const cwd = opts.cwd || process.cwd();
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const engine = assertEngineSupportsMode('challenge', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.diffCmd) throw new Error('challenge mode requires --diff-cmd');
@@ -1986,7 +2010,7 @@ async function runChallengeCore(opts) {
  */
 async function runDefendCore(opts) {
   const cwd = opts.cwd || process.cwd();
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const engine = assertEngineSupportsMode('defend', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.inputFile) throw new Error('defend mode requires --input <file>');
@@ -2048,7 +2072,7 @@ async function runDefendCore(opts) {
  */
 async function runRebuttalCore(opts) {
   const cwd = opts.cwd || process.cwd();
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const engine = assertEngineSupportsMode('rebuttal', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.inputFile) throw new Error('rebuttal mode requires --input <file>');
@@ -2393,7 +2417,7 @@ async function runWriteContractCore(opts, contract) {
   const rootKeys = repoRoots.map(root => process.platform === 'win32' ? root.toLowerCase() : root);
   if (new Set(rootKeys).size !== repoRoots.length) throw new Error('execute repo roots must be unique');
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const dispatchId = normalizeDispatchId(opts.dispatchId, contract.mode);
 
   contract.preflight();
@@ -2763,7 +2787,7 @@ async function runPlanCore(opts) {
   const engine = assertEngineSupportsMode('plan', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const dispatchId = normalizeDispatchId(opts.dispatchId, 'plan');
 
   if (!opts.planContextFile) throw new Error('plan mode requires --plan-context <file>');
@@ -2984,6 +3008,8 @@ module.exports = {
   validateResultFileTarget,
   readResultTelemetry,
   readWorkersTimeout,
+  readWorkersTimeoutRaw,
+  cliCeiling,
   readSidecarsEnvPolicy,
   resolveCodexCommand,
   buildSidecarEnv,
@@ -3046,7 +3072,7 @@ if (require.main === module) {
 
   if (mode !== 'challenge' && mode !== 'defend' && mode !== 'rebuttal' && mode !== 'execute' && mode !== 'plan') {
     cliRefusal(args, 'invalid-mode');
-    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--context-root <WORKING_DIR>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit] [--cwd <dir>]\n');
+    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--context-root <WORKING_DIR>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]\n');
     process.exit(2);
   }
 
@@ -3082,13 +3108,9 @@ if (require.main === module) {
   const effort = typeof args.effort === 'string' ? args.effort : undefined;
 
   if (mode === 'plan') {
-    // Timeout precedence: --timeout flag > workers.timeout pref > default. Prefs read
+    // Ceiling precedence: --timeout > workers.timeout pref > tier ceiling. Prefs read
     // from the ADAPTER invocation dir (where .gsd/ lives), not --cwd (CODE_DIR).
-    const flagTimeout = args.timeout ? Number(args.timeout) : null;
-    const timeoutSecs =
-      (flagTimeout && flagTimeout > 0 ? flagTimeout : null)
-      || readWorkersTimeout(process.cwd())
-      || DEFAULT_EXECUTE_TIMEOUT_SECS;
+    const timeoutSecs = cliCeiling(args);
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'plan');
 
@@ -3119,13 +3141,9 @@ if (require.main === module) {
   }
 
   if (mode === 'execute') {
-    // Timeout precedence: --timeout flag > workers.timeout pref > default.
+    // Ceiling precedence: --timeout > workers.timeout pref > tier ceiling.
     // Prefs are read from the ADAPTER invocation dir (where .gsd/ lives), not --cwd.
-    const flagTimeout = args.timeout ? Number(args.timeout) : null;
-    const timeoutSecs =
-      (flagTimeout && flagTimeout > 0 ? flagTimeout : null)
-      || readWorkersTimeout(process.cwd())
-      || DEFAULT_EXECUTE_TIMEOUT_SECS;
+    const timeoutSecs = cliCeiling(args);
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'execute');
     let writableRoots = [];
@@ -3178,7 +3196,7 @@ if (require.main === module) {
   // guard above already rejected it before any spawn). A try/catch left here would
   // catch nothing and let every failure escape as an unhandled rejection — exit 0
   // with empty stdout, which is the silent-success shape this adapter exists to deny.
-  const timeoutSecs = args.timeout ? Number(args.timeout) : DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = cliCeiling(args);
   let pending;
   if (mode === 'challenge') {
     pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });

@@ -2,7 +2,8 @@
 
 const assert = require('assert/strict');
 const { TIER_CEILING_MS } = require('./forge-sidecar-liveness');
-const { DEFAULT_WORKER_TIMEOUT_SECS, LEGACY_WORKER_TIMEOUT_SECS, MAX_EXPLICIT_TIMEOUT_SECS, CEILING_SOURCES,
+const timeoutModule = require('./forge-worker-timeout');
+const { LEGACY_WORKER_TIMEOUT_SECS, MAX_EXPLICIT_TIMEOUT_SECS, CEILING_SOURCES,
   PROTECTED_WINDOW_GRACE_MS, MAX_PROTECTED_WINDOW_MS, resolveWorkerCeiling, ceilingFromRoute,
   protectedWindowMs } = require('./forge-worker-timeout');
 
@@ -11,9 +12,14 @@ const test = (name, run) => tests.push({ name, run });
 const KEYS = ['ms', 'seconds', 'source', 'tier', 'tier_fallback', 'warning'];
 const TIERS = { light: 900, standard: 1800, heavy: 3600, max: 5400 };
 
+test('the legacy 300 default is no longer exported (S03/T04)', () => {
+  assert.deepEqual(Object.keys(timeoutModule).sort(), ['CEILING_SOURCES', 'LEGACY_WORKER_TIMEOUT_SECS',
+    'MAX_EXPLICIT_TIMEOUT_SECS', 'MAX_PROTECTED_WINDOW_MS', 'PROTECTED_WINDOW_GRACE_MS', 'ceilingFromRoute',
+    'protectedWindowMs', 'resolveWorkerCeiling']);
+});
+
 test('constants are derived from the single liveness tier table', () => {
   assert.equal(LEGACY_WORKER_TIMEOUT_SECS, 300);
-  assert.equal(DEFAULT_WORKER_TIMEOUT_SECS, 300);
   assert.equal(MAX_EXPLICIT_TIMEOUT_SECS, 86400);
   assert.equal(PROTECTED_WINDOW_GRACE_MS, 60000);
   assert.equal(MAX_PROTECTED_WINDOW_MS, 5460000);

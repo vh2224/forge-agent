@@ -8,9 +8,6 @@
 
 const { TIER_CEILING_MS, ceilingForTier } = require('./forge-sidecar-liveness');
 
-// legacy — removed in S03/T04 after consumers migrate
-const DEFAULT_WORKER_TIMEOUT_SECS = 300;
-
 // Detection marker for the inherited default (present in real operator prefs).
 // It is NOT a deadline: an explicit 300 is ignored in favour of the tier ceiling.
 const LEGACY_WORKER_TIMEOUT_SECS = 300;
@@ -77,7 +74,6 @@ function protectedWindowMs(ceilingMs) {
 }
 
 module.exports = {
-  DEFAULT_WORKER_TIMEOUT_SECS,
   LEGACY_WORKER_TIMEOUT_SECS,
   MAX_EXPLICIT_TIMEOUT_SECS,
   CEILING_SOURCES,

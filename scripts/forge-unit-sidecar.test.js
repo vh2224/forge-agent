@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -883,6 +883,49 @@ async function ownerEventReconcileContracts() {
     for (const [key, entry] of saved) require.cache[key] = entry;
   }
 }
+// The transport receives the safety ceiling resolved from the route, never a fixed 300.
+async function ceilingRouteContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto');
+  const fixtures = require('./forge-code-roots.test'), xllm = require('./forge-xllm'), runs = require('./forge-runs');
+  const runExecute = xllm.runExecute;
+  async function timeoutFor(id, shape) {
+    const lab = fixtures.fixture();
+    try {
+      const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+        cwd: lab.a, contextRoot: lab.owner, execution_contract: lab.contract, workflowId: 'ceiling-fixture', dispatchId: id,
+        resultFile: path.join(lab.dir, `${id}.json`), prompt: 'Fixture only.', verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+      const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
+      fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+      request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+      fs.writeFileSync(request.planFile, fixtures.plan(lab.contract).replace('tier: standard', `tier: ${shape.tier || 'standard'}`));
+      fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+      fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+        ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
+      resolveContext(request);
+      const route = { ...request.route };
+      delete route.workers_timeout; delete route.workers_timeout_source; delete route.workers_timeout_warning;
+      request.route = { ...route, ...shape };
+      request.runId = `ceiling-${id}`;
+      request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
+        paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+      request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+      runs.add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+      let seen = null;
+      xllm.runExecute = async options => {
+        seen = options.timeoutSecs;
+        fs.writeFileSync(path.join(lab.a, 'same.txt'), 'worker alpha\n');
+        fs.writeFileSync(path.join(lab.b, 'same.txt'), 'worker beta\n');
+        return { status: 'done', summary: 'Ceiling fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] };
+      };
+      await sidecar.runUnitSidecar(request);
+      return seen;
+    } finally { xllm.runExecute = runExecute; lab.cleanup(); }
+  }
+  assert.strictEqual(await timeoutFor('standard-no-source', { tier: 'standard' }), 1800);
+  assert.strictEqual(await timeoutFor('explicit-42', { workers_timeout: 42, workers_timeout_source: 'explicit' }), 42);
+  assert.strictEqual(await timeoutFor('legacy-heavy-300', { tier: 'heavy', workers_timeout: 300 }), 3600);
+  console.log('PASS ceiling route: transport timeoutSecs = ceilingFromRoute (standard 1800, explicit 42, legacy heavy 300 → 3600)');
+}
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
   const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
@@ -897,6 +940,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--pre-spawn-native') await preSpawnRecoveryContracts(true);
     if (!selectedScenario || selectedScenario === '--no-progress-event') await noProgressEventContracts();
     if (!selectedScenario || selectedScenario === '--owner-event-reconcile') await ownerEventReconcileContracts();
+    if (!selectedScenario || selectedScenario === '--ceiling-route') await ceilingRouteContracts();
   } finally {
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(profile, { recursive: true, force: true });

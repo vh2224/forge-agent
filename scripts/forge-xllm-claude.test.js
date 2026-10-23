@@ -970,6 +970,76 @@ async function livenessPassThroughPath(root) {
   }
 }
 
+// Ceiling driver: captures the timeoutSecs each Claude leg hands to the adapter.
+function ceilingDriverMain() {
+  'use strict';
+  const driverFs = require('fs');
+  const driverPath = require('path');
+  const [scriptsDir, configFile] = process.argv.slice(2);
+  const config = JSON.parse(driverFs.readFileSync(configFile, 'utf8'));
+  const adapter = require(driverPath.join(scriptsDir, 'forge-claude-sidecar.js'));
+  const seen = [];
+  adapter.invokeClaudeSidecar = async (options) => {
+    seen.push(options.timeoutSecs);
+    throw Object.assign(new Error('fixture stop after ceiling capture'), { code: 'fixture-stop' });
+  };
+  const xllm = require(driverPath.join(scriptsDir, 'forge-xllm.js'));
+  const base = { engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, model: 'claude-sonnet-5',
+    effort: 'medium', envPolicy: 'minimal' };
+  const legs = [
+    () => xllm.runExecute({ ...base, planFile: config.planFile, resultFile: config.resultFile, cwd: config.cwd, dispatchId: 'ceiling-exec' }),
+    () => xllm.runExecute({ ...base, tier: 'heavy', planFile: config.planFile, resultFile: config.resultFile, cwd: config.cwd, dispatchId: 'ceiling-exec-heavy' }),
+    () => xllm.runPlan({ ...base, planContextFile: config.planContextFile, resultFile: config.planResultFile, cwd: config.cwd, dispatchId: 'ceiling-plan' }),
+  ];
+  (async () => {
+    const errors = [];
+    for (const leg of legs) { try { await leg(); } catch (error) { errors.push(error.code || error.message); } }
+    driverFs.writeFileSync(config.outFile, JSON.stringify({ seen, errors }));
+  })();
+}
+
+async function ceilingDefaultPath(root) {
+  const scenarioDir = fs.mkdtempSync(path.join(root, 'ceiling-'));
+  try {
+    const fixture = createFixture(scenarioDir, 'ceiling', 'success', 'configured');
+    const driverFile = path.join(scenarioDir, 'ceiling-driver.js');
+    fs.writeFileSync(driverFile, `'use strict';
+(${ceilingDriverMain.toString()})();
+`, 'utf8');
+    const planContextFile = path.join(scenarioDir, 'plan-context.md');
+    fs.writeFileSync(planContextFile, '# Plan context fixture\n', 'utf8');
+    const configFile = path.join(scenarioDir, 'ceiling-config.json');
+    const outFile = path.join(scenarioDir, 'ceiling-out.json');
+    writeJson(configFile, { planFile: fixture.planFile, resultFile: fixture.resultFile, cwd: fixture.workspace,
+      planContextFile, planResultFile: path.join(scenarioDir, 'plan-result.json'), outFile });
+    const run = await runDriver(fixture, driverFile, configFile);
+    assert.ok(fs.existsSync(outFile), `driver wrote no outcome (exit ${run.code}): ${run.stderr.slice(0, 800)}`);
+    const outcome = JSON.parse(fs.readFileSync(outFile, 'utf8'));
+    // runExecute/runPlan without timeoutSecs: the tier ceiling (standard 1800, heavy 3600), never 300.
+    assert.deepStrictEqual(outcome.seen, [1800, 3600, 1800], JSON.stringify(outcome));
+
+    // CLI: a legacy workers.timeout 300 pref is ignored with a visible stderr warning.
+    fs.mkdirSync(path.join(scenarioDir, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(scenarioDir, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ workers: { timeout: 300 } }), 'utf8');
+    const args = cliArgs(fixture);
+    args.splice(args.indexOf('--timeout'), 2);
+    const cli = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [CLI_PATH, ...args, '--tier', 'light'], {
+        cwd: fixture.scenarioDir, env: fixture.env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const stderr = [];
+      child.stderr.on('data', (chunk) => stderr.push(chunk));
+      child.stdout.resume();
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* exited */ } reject(new Error('ceiling CLI timed out')); }, 25000);
+      child.once('error', (error) => { clearTimeout(timer); reject(error); });
+      child.once('close', (code) => { clearTimeout(timer); resolve({ code, stderr: Buffer.concat(stderr).toString('utf8') }); });
+      child.stdin.end(CLI_STDIN);
+    });
+    assert.match(cli.stderr, /forge-xllm: aviso: legacy-300-ignored: .*light \(900s\)/, cli.stderr.slice(0, 1200));
+  } finally {
+    removeOwnedFixture(root, scenarioDir);
+  }
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(PROJECT_ROOT, '.forge-xllm-claude-test-'));
   assertPathInside(PROJECT_ROOT, root, 'suite fixture root');
@@ -982,6 +1052,7 @@ async function main() {
     ['accepted review exposes bounded calibration retry without another inference', reviewCalibrationRetry],
     ['execute forwards onLiveness and localProofIgnore to the Claude adapter (no-progress observed)', livenessPassThroughPath],
     ['Claude review legs and plan forward onLiveness (plan also localProofIgnore)', reviewLegsLiveness],
+    ['plan/execute default to the tier ceiling and the CLI warns on a legacy 300 pref', ceilingDefaultPath],
   ];
   let passed = 0;
   const failures = [];

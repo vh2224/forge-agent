@@ -56,7 +56,15 @@ const p = JSON.parse(fs.readFileSync('payload.json','utf8'));
 if (p.failure === 'auth') { process.stdout.write(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,api_error_status:401})); process.exit(1); }
 if (p.failure === 'process') { process.stderr.write(process.env[${JSON.stringify(accounts.TOKEN_ENV)}]); process.exit(9); }
 if (p.failure === 'invalid') { process.stdout.write('not a result'); process.exit(0); }
-if (p.failure === 'wait') { setInterval(() => {}, 1000); }
+if (p.failure === 'stream') {
+  // Active stream-json that never ends: one remote event at once, then a delta every ~200 ms.
+  fs.writeFileSync('pid.txt', String(process.pid));
+  const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+  out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-stream', role: 'assistant' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+  setInterval(() => out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } }), 200);
+}
+else if (p.failure === 'wait') { setInterval(() => {}, 1000); }
 else {
   // claude -p --output-format stream-json: modelUsage names the received --model
   // unless the payload file asks for another observed model.
@@ -1470,6 +1478,34 @@ async function reviewFixMatrix() {
     assert(!output.includes(token));
     await rejects(() => unit.runUnitSidecar(req), code);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'invocations.txt'), 'utf8'), 'spawn\n');
+  }
+  // An active stream cut by a reduced explicit ceiling (workers.timeout 7 → child 2000 ms)
+  // is budget-exceeded-while-active in the receipt, result file, event log and recovery state.
+  {
+    const dir = setup(), prefsFile = path.join(dir, '.gsd/forge-prefs.jsonc');
+    write(prefsFile, { ...JSON.parse(fs.readFileSync(prefsFile, 'utf8')), workers: { timeout: 7 } });
+    const req = request(dir, 'research-milestone');
+    assert.deepStrictEqual([req.route.workers_timeout, req.route.workers_timeout_source], [7, 'explicit']);
+    write(path.join(dir, 'payload.json'), { failure: 'stream' });
+    const started = Date.now();
+    await rejects(() => unit.runUnitSidecar(req), 'budget-exceeded-while-active');
+    assert(Date.now() - started < 10000, `ceiling fixture took ${Date.now() - started} ms`);
+    const receipt = JSON.parse(fs.readFileSync(req.resultFile + '.receipt.json', 'utf8'));
+    assert.strictEqual(receipt.failure.reason_code, 'budget-exceeded-while-active', JSON.stringify(receipt.failure));
+    assert.strictEqual(JSON.parse(fs.readFileSync(req.resultFile, 'utf8')).reason_code, 'budget-exceeded-while-active');
+    const unitEvents = fs.readFileSync(path.join(dir, '.gsd/forge/events.jsonl'), 'utf8').split('\n').filter(Boolean)
+      .map(line => JSON.parse(line)).filter(row => row.event === 'sidecar-unit');
+    const last = unitEvents[unitEvents.length - 1];
+    assert.deepStrictEqual([last.status, last.reason_code], ['failed', 'budget-exceeded-while-active'], JSON.stringify(last));
+    const recoveryFile = req.resultFile + '.recovery.json';
+    assert(fs.existsSync(recoveryFile), 'research-milestone accepts recovery capture');
+    assert.strictEqual(JSON.parse(fs.readFileSync(recoveryFile, 'utf8')).attempts.at(-1).failure_class, 'active-budget');
+    const pid = Number(fs.readFileSync(path.join(dir, 'pid.txt'), 'utf8'));
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i++) {
+      try { process.kill(pid, 0); await new Promise(resolve => setTimeout(resolve, 100)); } catch { alive = false; }
+    }
+    assert.strictEqual(alive, false, 'the streaming child must not survive the ceiling');
   }
   const waitDir = setup(); write(path.join(waitDir, 'payload.json'), { failure: 'wait' });
   const abort = new AbortController();

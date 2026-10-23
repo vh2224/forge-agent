@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const xllm = require('./forge-xllm');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
-const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
+const { ceilingFromRoute } = require('./forge-worker-timeout');
 const { capability } = require('./forge-transport-capabilities');
 const { renderPrompt } = require('./forge-prompt');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
@@ -1876,7 +1876,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       return runtime.onPackagedContext?.(packaged);
     },
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
-    effort: route.effort, timeoutSecs: route.workers_timeout || DEFAULT_WORKER_TIMEOUT_SECS, resultFile, dispatchId,
+    effort: route.effort, timeoutSecs: ceilingFromRoute(route).seconds, resultFile, dispatchId,
     constraints: r.constraints || { auto_commit: false, deploy: false },
     signal: r.signal, announce, identity: { phase: identity.phase, unit: identity.unit, dispatch_id: dispatchId,
       model_resolved: identity.model_resolved },
