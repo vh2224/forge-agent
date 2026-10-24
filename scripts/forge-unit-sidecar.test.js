@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -958,6 +958,259 @@ async function ceilingRouteContracts() {
   assert.strictEqual(r1, 1800); assert.notStrictEqual(r1, 59.999); assert.notStrictEqual(r1, 21);
   console.log('PASS recovery ceiling: recoverUnitSidecar transport timeoutSecs = tier ceiling (standard 1800, heavy 3600, explicit 1234, R1 59.999 → 1800)');
 }
+// S05/T05: per-unit Claude session opt-in through the real chain
+// runUnitSidecar -> forge-xllm -> invokeClaudeSidecar -> fake CLI
+// (FORGE_XLLM_CLAUDE_BIN), with HOME/USERPROFILE under the temporary profile.
+// The adapter is only wrapped to inject its documented test seams (clock,
+// liveness interval, sessionRemover); argv, receipt and recovery are real.
+async function claudeSessionContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto'), os = require('os');
+  const fixtures = require('./forge-code-roots.test'), runs = require('./forge-runs');
+  const session = require('./forge-claude-session');
+  const accounts = require('./forge-accounts');
+  const moduleKeys = () => Object.keys(require.cache).filter(key => /forge-(xllm|unit-sidecar|claude-sidecar|task-preparation)\.js$/.test(key));
+  const saved = moduleKeys().map(key => [key, require.cache[key]]);
+  for (const [key] of saved) delete require.cache[key];
+  const realResolve = accounts.resolveLaunch;
+  // Fictitious account: never a real token; the adapter binds resolveLaunch at load.
+  accounts.resolveLaunch = () => ({ name: 'fixture-session-account', token: 'fixture-token-not-a-secret' });
+  const claude = require('./forge-claude-sidecar');
+  accounts.resolveLaunch = realResolve;
+  const realInvoke = claude.invokeClaudeSidecar;
+  let seam = () => ({});
+  const handed = [];
+  claude.invokeClaudeSidecar = options => { handed.push(options); return realInvoke({ ...options, ...seam(options) }); };
+  const fresh = require('./forge-unit-sidecar');
+  const previousBin = process.env.FORGE_XLLM_CLAUDE_BIN;
+  const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-session-')));
+  // Fake CLI: answers --version, records argv beside itself, materializes the
+  // transcript in the measured layout and confirms the id in system/init.
+  const writeCli = (mode, structured) => {
+    const file = path.join(work, `fake-claude-${mode}.js`);
+    fs.writeFileSync(file, [
+      "'use strict';",
+      "const fs = require('fs'), path = require('path');",
+      'const args = process.argv.slice(2);',
+      "if (args.includes('--version')) { process.stdout.write('2.1.310 (Claude Code)\\n'); process.exit(0); }",
+      `fs.appendFileSync(path.join(__dirname, 'argv-${mode}.jsonl'), JSON.stringify(args) + '\\n');`,
+      "const at = args.indexOf('--session-id'), resumeAt = args.indexOf('--resume');",
+      'const sid = at >= 0 ? args[at + 1] : resumeAt >= 0 ? args[resumeAt + 1] : null;',
+      'if (sid) {',
+      "  const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;",
+      `  const { projectKey } = require(${JSON.stringify(require.resolve('./forge-claude-session'))});`,
+      "  const dir = path.join(home, '.claude', 'projects', projectKey(process.cwd()));",
+      '  fs.mkdirSync(dir, { recursive: true });',
+      "  fs.appendFileSync(path.join(dir, sid + '.jsonl'), '{\"type\":\"fixture\"}\\n');",
+      '}',
+      "const out = value => process.stdout.write(JSON.stringify(value) + '\\n');",
+      "const delta = () => out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } });",
+      "out({ type: 'system', subtype: 'init', session_id: sid });",
+      "out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-session', role: 'assistant' } } });",
+      "out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });",
+      'delta();',
+      `const mode = ${JSON.stringify(mode)};`,
+      "if (mode === 'endless') setInterval(delta, 30);",
+      'else {',
+      "  if (mode === 'execute') {",
+      "    fs.writeFileSync(path.join(process.cwd(), 'same.txt'), 'worker alpha\\n');",
+      "    for (let i = 0; i < args.length; i++) if (args[i] === '--add-dir') fs.writeFileSync(path.join(args[i + 1], 'same.txt'), 'worker beta\\n');",
+      '  }',
+      "  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });",
+      "  out({ type: 'stream_event', event: { type: 'message_stop' } });",
+      "  const model = args[args.indexOf('--model') + 1];",
+      `  out({ type: 'result', subtype: 'success', is_error: false, result: 'fixture', structured_output: ${JSON.stringify(structured)},`,
+      '    usage: { input_tokens: 11, output_tokens: 13 }, modelUsage: { [model]: { inputTokens: 11, outputTokens: 13 } } });',
+      '}',
+      '',
+    ].join('\n'));
+    return file;
+  };
+  const argvOf = mode => fs.readFileSync(path.join(work, `argv-${mode}.jsonl`), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const sessionIdOf = args => { const at = args.indexOf('--session-id'); return at >= 0 ? args[at + 1] : null; };
+  const transcriptOf = id => {
+    const projects = path.join(home, '.claude', 'projects');
+    for (const key of fs.existsSync(projects) ? fs.readdirSync(projects) : []) {
+      const file = path.join(projects, key, `${id}.jsonl`);
+      if (fs.existsSync(file)) return file;
+    }
+    return null;
+  };
+  const executeCli = writeCli('execute', { status: 'done', summary: 'Session fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] });
+  const endlessCli = writeCli('endless', null);
+  async function executeCase(id, cli, extra = {}) {
+    const lab = fixtures.fixture();
+    process.env.FORGE_XLLM_CLAUDE_BIN = cli;
+    const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+      cwd: lab.a, contextRoot: lab.owner, execution_contract: lab.contract,
+      workflowId: 'claude-session-fixture', dispatchId: id, resultFile: path.join(lab.dir, `${id}.json`), prompt: 'Fixture only.',
+      verification: { preferenceCommands: ['node -e "process.exit(0)"'] }, ...extra };
+    const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
+    fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+    request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+    fs.writeFileSync(request.planFile, fixtures.plan(lab.contract));
+    fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+    fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+      ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
+    resolveContext(request);
+    // Explicit 60 s ceiling: the accelerated seam clock reaches it in ~0.2 s real.
+    request.route = { ...request.route, workers_timeout: 60, workers_timeout_source: 'explicit' };
+    delete request.route.workers_timeout_warning;
+    request.runId = `claude-session-${id}`;
+    request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
+      paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+    request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+    runs.add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+    let outcome;
+    try { outcome = { result: await fresh.runUnitSidecar(request) }; } catch (error) { outcome = { error }; }
+    const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    outcome.receiptText = read(`${request.resultFile}.receipt.json`);
+    outcome.resultText = read(request.resultFile);
+    outcome.recoveryText = read(`${request.resultFile}.recovery.json`);
+    outcome.eventsText = read(path.join(lab.owner, '.gsd/forge/events.jsonl'));
+    outcome.lab = lab;
+    return outcome;
+  }
+  const sha = id => crypto.createHash('sha256').update(id, 'utf8').digest('hex');
+  const noRawId = (outcome, id) => {
+    for (const [channel, text] of [['receipt', outcome.receiptText], ['result', outcome.resultText], ['events', outcome.eventsText]]) {
+      assert(text.length > 0, `${channel} written`);
+      assert(!text.includes(id), `raw session id absent from ${channel}`);
+    }
+  };
+  try {
+    // (a) execute-task: --session-id <uuid>, receipt with session_sha256 only, transcript removed.
+    const ok = await executeCase('session-execute', executeCli);
+    try {
+      assert(!ok.error, ok.error && ok.error.stack);
+      assert.strictEqual(ok.result.status, 'done', JSON.stringify(ok.result));
+      assert.deepStrictEqual(handed[handed.length - 1].session, { persist: true }, 'execute unit opts in');
+      const args = argvOf('execute').pop();
+      const id = sessionIdOf(args);
+      assert(session.SESSION_ID_PATTERN.test(id), JSON.stringify(args));
+      assert(!args.includes('--no-session-persistence'));
+      assert.strictEqual(JSON.parse(ok.receiptText).session_sha256, sha(id));
+      noRawId(ok, id);
+      assert.strictEqual(transcriptOf(id), null, 'session removed after success');
+      assert(!ok.eventsText.includes('claude-session-cleanup-failed'));
+    } finally { ok.lab.cleanup(); }
+
+    // Resume request on an eligible unit: the adapter receives {resume: ref}
+    // (never persist) and the new receipt is born chained (resumed_from) with
+    // the digest only. The ref's cwd differs, so the adapter refuses pre-spawn.
+    const resumeRef = session.createSessionRef({ id: session.newSessionId(), accountName: 'fixture-session-account',
+      configDir: path.join(home, '.claude'), cwd: work });
+    const resumedFrom = { receipt_sha256: 'c'.repeat(64), dispatch_id: 'session-active-budget' };
+    const resumed = await executeCase('session-resume-request', executeCli, { claudeResume: resumeRef, resumedFrom });
+    try {
+      assert.deepStrictEqual(handed[handed.length - 1].session, { resume: resumeRef }, 'resume forwarded instead of persist');
+      assert.strictEqual(resumed.error && resumed.error.code, 'claude-resume-config-mismatch', resumed.error && resumed.error.stack);
+      const receipt = JSON.parse(resumed.receiptText);
+      assert.deepStrictEqual(receipt.resumed_from, resumedFrom);
+      assert.strictEqual(receipt.session_sha256, sha(resumeRef.id));
+      noRawId(resumed, resumeRef.id);
+    } finally { resumed.lab.cleanup(); }
+
+    // (c) active ceiling: the error keeps the ref; .recovery.json holds it, receipt only the digest.
+    seam = options => {
+      const t0 = performance.now();
+      let pivot = null;
+      return { monotonicClock: () => { const now = performance.now(); return pivot === null ? now - t0 : (pivot - t0) + (now - pivot) * 300; },
+        livenessIntervalMs: 25,
+        onProgress: snapshot => { if (pivot === null && snapshot.phase !== 'local-start') pivot = performance.now(); return options.onProgress?.(snapshot); } };
+    };
+    const active = await executeCase('session-active-budget', endlessCli);
+    seam = () => ({});
+    try {
+      assert(active.error, 'expected the active-ceiling failure');
+      assert.strictEqual(active.error.code, 'budget-exceeded-while-active', active.error.stack);
+      const id = sessionIdOf(argvOf('endless').pop());
+      assert(session.SESSION_ID_PATTERN.test(id));
+      const state = JSON.parse(active.recoveryText);
+      assert.strictEqual(state.attempts.at(-1).session.id, id, 'recovery state keeps the ref of the argv uuid');
+      assert(transcriptOf(id), 'session preserved for the single resume');
+      assert.strictEqual(JSON.parse(active.receiptText).session_sha256, sha(id));
+      noRawId(active, id);
+      fs.rmSync(transcriptOf(id), { force: true });
+    } finally { active.lab.cleanup(); }
+
+    // (d) failed removal: one closed owner event, counts and digest only.
+    seam = () => ({ sessionRemover: () => ({ ok: false, removed: [], refused: [{ path: 'projects/k/x.jsonl', reason: 'symlink' }],
+      errors: [{ path: 'session-env/x', code: 'EPERM' }, { path: 'file-history/x', code: 'EBUSY' }] }) });
+    const failed = await executeCase('session-cleanup-failed', executeCli);
+    seam = () => ({});
+    try {
+      assert(!failed.error, failed.error && failed.error.stack);
+      assert.strictEqual(failed.result.status, 'done', 'a failed removal never fails a valid result');
+      const id = sessionIdOf(argvOf('execute').pop());
+      const lines = failed.eventsText.split('\n').filter(Boolean).map(line => JSON.parse(line))
+        .filter(row => row.event === 'claude-session-cleanup-failed');
+      assert.strictEqual(lines.length, 1, failed.eventsText);
+      assert.deepStrictEqual(Object.keys(lines[0]).sort(), ['dispatch_id', 'errors', 'event', 'refused', 'session_sha256', 'ts', 'unit', 'workflow_id']);
+      assert.strictEqual(lines[0].dispatch_id, 'session-cleanup-failed');
+      assert.strictEqual(lines[0].session_sha256, sha(id));
+      assert.strictEqual(lines[0].refused, 1);
+      assert.strictEqual(lines[0].errors, 2);
+      assert(!failed.eventsText.includes('projects/k'), 'no path in the event');
+      noRawId(failed, id);
+      const transcript = transcriptOf(id);
+      if (transcript) fs.rmSync(transcript, { force: true });
+    } finally { failed.lab.cleanup(); }
+
+    // (e) a malformed resume ref is a named refusal before any receipt or adapter call.
+    const before = handed.length;
+    const refused = await executeCase('session-resume-invalid', executeCli, { claudeResume: { version: 1 },
+      resumedFrom: { receipt_sha256: 'a'.repeat(64), dispatch_id: 'previous' } });
+    try {
+      assert.strictEqual(refused.error && refused.error.code, 'claude-session-invalid', refused.error && refused.error.stack);
+      assert.strictEqual(refused.receiptText, '', 'no receipt before transport');
+      assert.strictEqual(handed.length, before, 'no adapter call');
+    } finally { refused.lab.cleanup(); }
+
+    // (b) ineligible unit (research-milestone, artifacts transport): legacy argv,
+    // no session option; a resume ref there is refused before any receipt.
+    const researchCase = async (id, extra = {}) => {
+      const lab = fixtures.fixture();
+      try {
+        const request = { unitType: 'research-milestone', scope: 'milestone', milestoneId: 'M001', cwd: lab.a, contextRoot: lab.owner,
+          workflowId: 'claude-session-research', dispatchId: id, resultFile: path.join(lab.dir, `${id}.json`), prompt: 'Fixture only.', ...extra };
+        fs.mkdirSync(path.join(lab.owner, '.gsd/milestones/M001'), { recursive: true });
+        fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+          ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'research-milestone': 'medium' } }));
+        resolveContext(request);
+        const required = fresh.locations(request).required;
+        process.env.FORGE_XLLM_CLAUDE_BIN = writeCli(`research-${id}`, { status: 'done', summary: 'Research fixture', questions: [],
+          artifacts: required.map(p => ({ path: p, content: "# Research\n\n## Summary\n\nMeasured internally.\n\n## Don't Hand-Roll\n\nReuse resolver.\n\n## Relevant Code\n\nscripts/.\n" })) });
+        let outcome;
+        try { outcome = { result: await fresh.runUnitSidecar(request) }; } catch (error) { outcome = { error }; }
+        outcome.receiptExists = fs.existsSync(`${request.resultFile}.receipt.json`);
+        return outcome;
+      } finally { lab.cleanup(); }
+    };
+    const legacyBefore = handed.length;
+    const research = await researchCase('session-research');
+    assert(handed.length > legacyBefore, research.error && research.error.stack);
+    assert.strictEqual(handed[handed.length - 1].session, undefined, 'research never opts in');
+    const researchArgs = argvOf('research-session-research').pop();
+    assert(researchArgs.includes('--no-session-persistence'), JSON.stringify(researchArgs));
+    assert(!researchArgs.includes('--session-id') && !researchArgs.includes('--resume'));
+    const ref = session.createSessionRef({ id: session.newSessionId(), accountName: 'fixture-session-account',
+      configDir: path.join(home, '.claude'), cwd: work });
+    const ineligibleBefore = handed.length;
+    const ineligible = await researchCase('session-research-resume', { claudeResume: ref,
+      resumedFrom: { receipt_sha256: 'b'.repeat(64), dispatch_id: 'previous' } });
+    assert.strictEqual(ineligible.error && ineligible.error.code, 'claude-invalid-options', ineligible.error && ineligible.error.stack);
+    assert.strictEqual(ineligible.receiptExists, false, 'refused before the receipt');
+    assert.strictEqual(handed.length, ineligibleBefore, 'refused before transport');
+    console.log('PASS claude session opt-in: execute persists (--session-id, receipt session_sha256, removed), resume request forwards {resume} with a chained receipt (resumed_from), active ceiling keeps the ref in .recovery.json only, failed removal emits claude-session-cleanup-failed, raw id absent from receipt/result/events, malformed resume refused before transport; research keeps the legacy argv and refuses a resume ref (claude-invalid-options)');
+  } finally {
+    if (previousBin === undefined) delete process.env.FORGE_XLLM_CLAUDE_BIN; else process.env.FORGE_XLLM_CLAUDE_BIN = previousBin;
+    claude.invokeClaudeSidecar = realInvoke;
+    for (const key of moduleKeys()) delete require.cache[key];
+    for (const [key, entry] of saved) require.cache[key] = entry;
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
   const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
@@ -973,6 +1226,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--no-progress-event') await noProgressEventContracts();
     if (!selectedScenario || selectedScenario === '--owner-event-reconcile') await ownerEventReconcileContracts();
     if (!selectedScenario || selectedScenario === '--ceiling-route') await ceilingRouteContracts();
+    if (!selectedScenario || selectedScenario === '--claude-session') await claudeSessionContracts();
   } finally {
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(profile, { recursive: true, force: true });

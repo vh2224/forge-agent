@@ -1593,7 +1593,9 @@ function invokeEngine(engine, opts) {
 async function invokeClaudeJson(opts, validateCandidate, review = false) {
   const resultSchema = review ? {type:'object',additionalProperties:false,required:['status','output'],properties:{status:{type:'string',enum:['done']},output:opts.schema}} : opts.schema;
   const output = await invokeClaudeTransport({ ...opts, prompt:opts.prompt, readOnly:true,
-    resultProfile:review?'review':'plan', resultSchema, validateCandidate, terminateChild:terminateOwnedProcessTree });
+    resultProfile:review?'review':'plan', resultSchema, validateCandidate, terminateChild:terminateOwnedProcessTree,
+    // A review leg never persists or resumes a Claude session (S05).
+    ...(review ? { session: undefined } : {}) });
   return { candidate: output.candidate, telemetry: output.telemetry || null };
 }
 
@@ -2576,6 +2578,9 @@ async function runWriteContractCore(opts, contract) {
         // Owner liveness observer and the owner's result/receipt prefixes the
         // local proof must ignore. Claude branch only: the app-server call never gets them.
         onLiveness: opts.onLiveness, localProofIgnore: opts.localProofIgnore,
+        // Session persistence/resume (S05) is opted in by the unit owner
+        // (forge-unit-sidecar), never by a direct CLI call and never for fix.
+        ...(contract.mode !== 'fix' && opts.claudeSession ? { session: opts.claudeSession } : {}),
         ...(contract.claudeOptions || {}),
       });
     } catch (error) {
@@ -2884,8 +2889,10 @@ async function runPlanCore(opts) {
   let appServerOutput;
   if (engine === 'claude') {
     // Claude-only keys: planOptions also feeds the app-server branch unchanged.
+    // The plan unit's session opt-in comes only from its owner (S05); review
+    // legs never call runPlanCore and never receive `session`.
     const claudeOutput = await invokeClaudeJson({ ...planOptions, onLiveness: opts.onLiveness,
-      localProofIgnore: opts.localProofIgnore }, validatePlanResult);
+      localProofIgnore: opts.localProofIgnore, ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
     transportTelemetry = claudeOutput.telemetry;
     appServerOutput = { finalText: JSON.stringify(claudeOutput.candidate), transport: { kind: 'claude-cli', version: 'unknown' } };
   } else appServerOutput = await invokeCodexAppServer(planOptions);

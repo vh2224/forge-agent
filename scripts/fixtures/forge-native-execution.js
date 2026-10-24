@@ -41,6 +41,9 @@ if (control.failure) { process.stderr.write('simulated transport failure after w
 const result = { status: control.status || 'done', summary: 'Fixture execution', must_haves_status: [], files_changed: [] };
 if (control.extraArtifact) result.artifacts = [{ path: '../outside.md', content: 'invalid' }];
 const model = args[args.indexOf('--model') + 1];
+// Like the real CLI (S05/T01 measurement): system/init confirms a persisted --session-id.
+const sessionAt = args.indexOf('--session-id');
+if (sessionAt >= 0) process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: args[sessionAt + 1] }) + '\\n');
 process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: result,
  result: ['---GSD-WORKER-RESULT---','status: '+result.status,'result_json: '+JSON.stringify(result),'---END-RESULT---'].join('\\n'),
  modelUsage: { [model]: { inputTokens: 123 } } }));

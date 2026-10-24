@@ -69,7 +69,10 @@ else {
   // claude -p --output-format stream-json: modelUsage names the received --model
   // unless the payload file asks for another observed model.
   const model = p.observedModel || args[args.indexOf('--model') + 1];
-  const block = ['---GSD-WORKER-RESULT---','status: '+p.status,'result_json: '+JSON.stringify(p),'---END-RESULT---'].join('\\n');
+  // Like the real CLI (S05/T01 measurement): system/init confirms a persisted --session-id.
+  const sessionAt = args.indexOf('--session-id');
+  if (sessionAt >= 0) process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: args[sessionAt + 1] }) + '\\n');
+  const block =['---GSD-WORKER-RESULT---','status: '+p.status,'result_json: '+JSON.stringify(p),'---END-RESULT---'].join('\\n');
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: p, result: block,
     usage: { input_tokens: 401 }, modelUsage: { [model]: { inputTokens: 401 } } }));
 }

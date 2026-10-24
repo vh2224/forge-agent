@@ -60,6 +60,8 @@ async function scenario(vcs, moduleDir = __dirname) {
     write(provider, `const fs=require('fs'); const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(calls)},'call\\n');
       for(const dir of ${JSON.stringify([f.a, f.b])}) fs.writeFileSync(require('path').join(dir,'same.txt'),'after\\n');
       const result={status:'done',summary:'Both checkouts updated',must_haves_status:[],files_changed:[]};
+      const sessionAt=args.indexOf('--session-id'); // like the real CLI: system/init confirms a persisted session (S05)
+      if(sessionAt>=0) process.stdout.write(JSON.stringify({type:'system',subtype:'init',session_id:args[sessionAt+1]})+'\\n');
       process.stdout.write(JSON.stringify({type:'result',subtype:'success',is_error:false,structured_output:result,modelUsage:{'claude-sonnet-5':{inputTokens:1}},
       result:['---GSD-WORKER-RESULT---','status: done','result_json: '+JSON.stringify(result),'---END-RESULT---'].join('\\n')}));`);
     process.env.FORGE_XLLM_CLAUDE_BIN = provider;
