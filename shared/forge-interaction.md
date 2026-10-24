@@ -46,7 +46,7 @@ Omit `expires_at` for standing permission. The personal source is revalidated on
 on restart create a new `forge-recovery-authority.createRecoveryAuthority` adapter.
 Persist only the reference in receipts, recovery state and evidence-backed checkpoints.
 The issued opaque capability binds unit/request identity, owner, physical roots, chain,
-routes, purpose and expiry. Its validity never renews the historical 60000ms sidecar budget.
+routes, purpose and expiry. Each recovery sidecar gets the tier safety ceiling, not a remainder.
 Existing standing permission covers operational timeout with indeterminate cause: inspect
 process/receipt first, reconcile every possible writer root, then select a valid untried
 candidate using the real unit adapter. Correct known caller defects offline first.

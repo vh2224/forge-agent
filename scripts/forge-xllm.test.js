@@ -25,7 +25,19 @@ const {
 
 const SCRIPT = path.join(__dirname, 'forge-xllm.js');
 
-function runCli(args, env = process.env) {
+// Hermetic HOME: the CLI resolves prefs from the operator's home (workers.timeout, legacy-300-ignored
+// warning). The suite must not depend on them, so every CLI call sees an empty temporary home.
+const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xllm-home-'));
+process.on('exit', () => { try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch {} });
+const hermeticEnv = {
+  ...process.env,
+  HOME: isolatedHome,
+  USERPROFILE: isolatedHome,
+  FORGE_HOME: path.join(isolatedHome, '.forge-agent'),
+  CLAUDE_CONFIG_DIR: path.join(isolatedHome, '.claude'),
+};
+
+function runCli(args, env = hermeticEnv) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
     env,
@@ -223,7 +235,7 @@ try {
   const refused = runCli([
     '--mode', 'execute', '--engine', 'codex', '--host-runtime', 'codex', '--sidecar-declared', 'false',
     '--plan', missingPlan, '--result-file', refusedResult, '--cwd', workspace, '--env-policy', 'minimal',
-  ], { ...process.env, ANTHROPIC_AUTH_TOKEN: secretSentinel });
+  ], { ...hermeticEnv, ANTHROPIC_AUTH_TOKEN: secretSentinel });
   assert.strictEqual(refused.status, 2);
   assert.strictEqual(refused.stdout, '', 'execute failure never publishes to stdout');
   const refusedMarkerText = fs.readFileSync(refusedResult, 'utf8');
@@ -299,3 +311,73 @@ try {
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
+
+// S05/T05: the unit owner's `claudeSession` reaches the Claude adapter as
+// `session` only for execute and plan. fix, review legs and direct calls
+// without the option keep the legacy argv (no `session` key at all).
+async function claudeSessionForwarding() {
+  const { spawnSync: gitSpawn } = require('child_process');
+  const adapterPath = require.resolve('./forge-claude-sidecar.js');
+  const xllmPath = require.resolve('./forge-xllm.js');
+  const adapter = require(adapterPath);
+  const realInvoke = adapter.invokeClaudeSidecar;
+  const cachedXllm = require.cache[xllmPath];
+  const seen = [];
+  adapter.invokeClaudeSidecar = async (options) => {
+    seen.push({ profile: options.resultProfile, hasSession: Object.hasOwn(options, 'session') && options.session !== undefined,
+      session: options.session });
+    throw Object.assign(new Error('fixture stop after session capture'), { code: 'fixture-stop' });
+  };
+  delete require.cache[xllmPath];
+  const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xllm-session-'));
+  try {
+    const fresh = require(xllmPath);
+    const workspace = path.join(lab, 'workspace');
+    fs.mkdirSync(workspace);
+    for (const args of [['init', '-q'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture']]) {
+      assert.strictEqual(gitSpawn('git', args, { cwd: workspace, shell: false, windowsHide: true }).status, 0);
+    }
+    const planFile = path.join(lab, 'T01-PLAN.md');
+    fs.writeFileSync(planFile, '---\nwrites:\n  - "fixture-output.txt"\ntier: standard\n---\n\n# Session forwarding fixture\n');
+    const planContextFile = path.join(lab, 'plan-context.md');
+    fs.writeFileSync(planContextFile, '# Plan context fixture\n');
+    const base = { engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, model: 'claude-sonnet-5',
+      effort: 'medium', envPolicy: 'minimal', cwd: workspace };
+    const persist = { persist: true };
+    const legs = [
+      ['execute', () => fresh.runExecute({ ...base, planFile, resultFile: path.join(lab, 'exec.json'), dispatchId: 'session-exec', claudeSession: persist })],
+      ['execute-legacy', () => fresh.runExecute({ ...base, planFile, resultFile: path.join(lab, 'exec-legacy.json'), dispatchId: 'session-exec-legacy' })],
+      ['plan', () => fresh.runPlan({ ...base, planContextFile, resultFile: path.join(lab, 'plan.json'), dispatchId: 'session-plan', claudeSession: persist })],
+      ['plan-legacy', () => fresh.runPlan({ ...base, planContextFile, resultFile: path.join(lab, 'plan-legacy.json'), dispatchId: 'session-plan-legacy' })],
+      ['fix', () => fresh.runFix({ ...base, brief: { items: [{ r: 'R1' }], claim_paths: ['fixture-output.txt'] },
+        resultFile: path.join(lab, 'fix.json'), dispatchId: 'session-fix', claudeSession: persist })],
+      ['review', () => fresh.runChallenge({ ...base, diffCmd: 'node --version', claudeSession: persist })],
+      ['defend', () => fresh.runDefend({ ...base, inputFile: planContextFile, claudeSession: persist })],
+    ];
+    const outcomes = {};
+    for (const [name, leg] of legs) {
+      const before = seen.length;
+      try { await leg(); outcomes[name] = 'resolved'; } catch (error) { outcomes[name] = error.code || error.message; }
+      outcomes[name] = { outcome: outcomes[name], call: seen.length > before ? seen[seen.length - 1] : null };
+    }
+    for (const name of Object.keys(outcomes)) {
+      assert.ok(outcomes[name].call, `${name} reached the Claude adapter: ${JSON.stringify(outcomes[name].outcome)}`);
+    }
+    assert.deepStrictEqual(outcomes.execute.call.session, persist, 'execute forwards claudeSession as session');
+    assert.strictEqual(outcomes.execute.call.profile, 'execute');
+    assert.deepStrictEqual(outcomes.plan.call.session, persist, 'plan forwards claudeSession as session');
+    assert.strictEqual(outcomes.plan.call.profile, 'plan');
+    for (const name of ['execute-legacy', 'plan-legacy', 'fix', 'review', 'defend']) {
+      assert.strictEqual(outcomes[name].call.hasSession, false, `${name} never receives session`);
+    }
+    assert.strictEqual(outcomes.fix.call.profile, 'fix');
+    assert.strictEqual(outcomes.review.call.profile, 'review');
+    console.log('forge-xllm session forwarding passed (execute/plan forward claudeSession; fix, review and direct calls stay legacy)');
+  } finally {
+    adapter.invokeClaudeSidecar = realInvoke;
+    delete require.cache[xllmPath];
+    if (cachedXllm) require.cache[xllmPath] = cachedXllm;
+    fs.rmSync(lab, { recursive: true, force: true });
+  }
+}
+claudeSessionForwarding().catch((error) => { console.error(error); process.exitCode = 1; });

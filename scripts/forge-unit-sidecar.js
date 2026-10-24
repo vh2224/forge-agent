@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const xllm = require('./forge-xllm');
 const { createStderrAnnouncer } = require('./forge-sidecar-identity');
 const { evaluateDispatchGuard } = require('./forge-dispatch-guard');
-const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
+const { ceilingFromRoute } = require('./forge-worker-timeout');
 const { capability } = require('./forge-transport-capabilities');
 const { renderPrompt } = require('./forge-prompt');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
@@ -1474,6 +1474,32 @@ async function runUnitSidecarCore(request, runtime, identity) {
   identity.dispatch_id = dispatchId;
   identity.model_sent = model;
   if (!r.dispatchId || !r.workflowId) fail('dispatch-identity-required');
+  // S05: Claude session persistence is opted in per unit, only here, because
+  // this owner holds the receipt and the recovery state that can resume and
+  // clean a preserved session. Only plan/execute units qualify.
+  const claudeSessions = require('./forge-claude-session');
+  // Resolved once, with the same inference recovery uses (plan-milestone has no explicit phase).
+  const sessionPhase = require('./forge-attempt-recovery').canonicalRequest(r).phase;
+  const sessionEligible = route.resolved_worker_engine === 'claude' && route.worker_mode === 'sidecar' && !nativeExecution
+    && (transport.mode === 'execute' || transport.mode === 'plan' || (transport.mode === 'artifacts' && sessionPhase === 'plan'));
+  let claudeSession = null, resumedFrom = null, resumeSessionSha = null;
+  if (r.claudeResume != null || r.resumedFrom != null) {
+    if (!sessionEligible) fail('claude-invalid-options', 'Only a Claude sidecar plan/execute unit can resume a session.');
+    if (!claudeSessions.validateSessionRef(r.claudeResume).ok) fail('claude-session-invalid');
+    const from = r.resumedFrom;
+    if (!from || typeof from !== 'object' || typeof from.receipt_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(from.receipt_sha256)
+        || typeof from.dispatch_id !== 'string' || !from.dispatch_id) fail('claude-invalid-options', 'A session resume requires resumedFrom {receipt_sha256, dispatch_id}.');
+    resumedFrom = { receipt_sha256: from.receipt_sha256, dispatch_id: from.dispatch_id };
+    claudeSession = { resume: r.claudeResume };
+    resumeSessionSha = claudeSessions.sessionDigest(r.claudeResume.id);
+  } else if (sessionEligible) claudeSession = { persist: true };
+  // Receipts and events carry only session_sha256, never the raw id.
+  const sessionShaOf = (telemetry, error) => {
+    const reported = telemetry?.session?.session_sha256;
+    if (typeof reported === 'string' && /^[0-9a-f]{64}$/.test(reported)) return reported;
+    try { if (error?.session?.id) return claudeSessions.sessionDigest(error.session.id); } catch { /* invalid ref: no digest */ }
+    return resumeSessionSha;
+  };
   const fingerprint = artifactFingerprint(r);
   const receiptFile = `${resultFile}.receipt.json`;
   xllm.validateResultFileTarget(receiptFile, cwd);
@@ -1485,7 +1511,23 @@ async function runUnitSidecarCore(request, runtime, identity) {
     if (r.ownerBroker) return require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker)
       .append('.gsd/forge/events.jsonl', line);
     const protectedOwner = record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner;
-    if (!protectedOwner) { fs.appendFileSync(eventsFile, line); return; }
+    if (!protectedOwner) {
+      const key = '.gsd/forge/events.jsonl';
+      const surface = record?.preparation_surface;
+      const previous = surface && typeof surface[key] === 'string' && fs.existsSync(eventsFile)
+        ? fs.readFileSync(eventsFile) : null;
+      fs.appendFileSync(eventsFile, line);
+      // Standalone preparation has no owner broker: advance the surface by exactly
+      // these authenticated bytes (same-tick, no await) so unrelated writes stay detectable.
+      if (previous && hash(previous) === surface[key]) {
+        const appended = Buffer.concat([previous, Buffer.from(line)]);
+        if (fs.readFileSync(eventsFile).equals(appended)) {
+          record.preparation_surface = { ...surface, [key]: hash(appended) };
+          json(receiptFile, record);
+        }
+      }
+      return;
+    }
     const executionApi = require('./forge-task-execution');
     return require('./forge-artifact-reconciliation').withOwnerLock(root, () => {
       const expected = { ...protectedOwner };
@@ -1513,7 +1555,69 @@ async function runUnitSidecarCore(request, runtime, identity) {
       json(receiptFile, record);
     });
   }
+  // Liveness events (sidecar-no-progress) share the owner's single event channel.
+  // Appends are serialized and settled before any later owner event or receipt
+  // transition, so events.jsonl keeps its order and no receipt write races.
+  let livenessQueue = Promise.resolve();
+  let noProgressOpen = false;
+  // Exact events.jsonl hash advance made by liveness appends through the
+  // protected-owner channel: {from: hash before the first, to: hash after the last}.
+  let livenessEventAdvance = null;
+  const ownedEventsHash = record => (record?.execution?.protected_owner || record?.recovery_baseline?.protected_owner)?.['.gsd/forge/events.jsonl'];
+  async function appendNoProgress(transition) {
+    const repeats = transition?.progress?.repeats;
+    const fingerprintSha = transition?.progress?.fingerprint_sha256;
+    // Closed allowlist built field by field: only a count and a 16-hex hash.
+    const line = JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-no-progress',
+      workflow_id: r.workflowId, dispatch_id: dispatchId, unit: label,
+      worker_engine: route.resolved_worker_engine, model,
+      repeats: Number.isSafeInteger(repeats) && repeats > 0 ? repeats : null,
+      ...(typeof fingerprintSha === 'string' && /^[0-9a-f]{16}$/.test(fingerprintSha) ? { fingerprint_sha256: fingerprintSha } : {}) }) + '\n';
+    if (!recoveryReady?.appendOwnerEvent && !r.ownerBroker) fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
+    // Reread inside the queue: onProgress/onPackagedContext rewrite the receipt.
+    const record = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
+    const before = ownedEventsHash(record);
+    await appendOwnedEvent(line, record);
+    const after = ownedEventsHash(record);
+    if (before && after && before !== after) livenessEventAdvance = { from: livenessEventAdvance?.from || before, to: after };
+  }
+  function onLiveness(transition) {
+    if (transition?.to === 'slow-suspect' && transition.reason === 'no-progress') {
+      if (!noProgressOpen) {
+        noProgressOpen = true;
+        livenessQueue = livenessQueue.then(() => appendNoProgress(transition)).catch(() => { /* best-effort */ });
+      }
+    } else if (noProgressOpen && transition?.from === 'slow-suspect') noProgressOpen = false;
+    if (typeof runtime.onLiveness === 'function') {
+      try { runtime.onLiveness(transition); } catch { /* observer errors never affect the unit */ }
+    }
+  }
+  // The owner's protected snapshot taken before transport predates liveness
+  // appends; advance only the exact bytes this unit appended, never adopt a
+  // fresh snapshot.
+  const advanceLivenessEvents = snapshot => {
+    if (livenessEventAdvance && snapshot?.['.gsd/forge/events.jsonl'] === livenessEventAdvance.from) {
+      snapshot['.gsd/forge/events.jsonl'] = livenessEventAdvance.to;
+    }
+  };
+  // A failed Claude session removal is never silent: one closed owner event
+  // with counts and the digest only (no raw id, no paths). Best-effort, like
+  // the liveness events: it never turns a published result into a failure.
+  async function sessionCleanupEvent(cleanup, sessionSha) {
+    if (!cleanup || cleanup.ok !== false) return;
+    await livenessQueue;
+    const count = list => Array.isArray(list) ? list.length : 0;
+    const line = JSON.stringify({ ts: new Date().toISOString(), event: 'claude-session-cleanup-failed',
+      workflow_id: r.workflowId, dispatch_id: dispatchId, unit: label, session_sha256: sessionSha || null,
+      refused: count(cleanup.refused), errors: count(cleanup.errors) }) + '\n';
+    try {
+      if (!recoveryReady?.appendOwnerEvent && !r.ownerBroker) fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
+      const record = fs.existsSync(receiptFile) ? JSON.parse(fs.readFileSync(receiptFile, 'utf8')) : null;
+      await appendOwnedEvent(line, record);
+    } catch { /* best-effort: the cleanup report stays in the transport telemetry/result */ }
+  }
   async function event(status, reasonCode, detail, providerCalled = false, extra = null) {
+    await livenessQueue;
     if (!recoveryReady?.appendOwnerEvent) fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
     const line = JSON.stringify({ ts: new Date().toISOString(), event: 'sidecar-unit',
       workflow_id: r.workflowId, dispatch_id: dispatchId,
@@ -1554,6 +1658,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
         duration_ms: record.started_at ? Date.now() - Date.parse(record.started_at) : null } : {}),
       recovery: replayable ? 'replay-publication' : 'operator-required',
       failed_at: new Date().toISOString(), ...(replayable ? {} : (extra || {})) };
+    const failedSessionSha = sessionShaOf(null, error);
+    if (failedSessionSha) record.session_sha256 = failedSessionSha;
     // Never overwrite the validated response if publication was interrupted.
     if (!replayable) json(receiptFile, { ...record, phase: 'failed', failure });
     json(resultFile, failure);
@@ -1572,6 +1678,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (!replayable) json(receiptFile, { ...record, phase: 'failed', failure });
       json(resultFile, failure);
     }
+    await sessionCleanupEvent(error.session_cleanup, failedSessionSha);
     try { await event('failed', code, detail, failure.provider_called,
       loc.reviewFix ? { boundary: loc.reviewFix.boundary, items_total: reviewFixItemsTotal(r) } : null); }
     catch { /* Unproved owner drift cannot be adopted just to log a failure. */ }
@@ -1763,6 +1870,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // Exclusive creation arbitrates concurrent invocations of the same attempt.
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'started', fingerprint, dispatch_id: dispatchId, before, started_at: startedAt,
     recovery_identity_sha256: recoveryIdentity(r), route, ...(verificationSeal ? { verification_seal: verificationSeal } : {}),
+    ...(resumedFrom ? { resumed_from: resumedFrom, session_sha256: resumeSessionSha } : {}),
     ...(execution ? { execution: { inputs: execution.inputs, budgets: execution.budgets }, reset_state_file: executionStateFile } : {}),
     input_pending_questions: r.pending_questions || [],
     request_fingerprint: r.preparationRequestFingerprint || null,
@@ -1802,6 +1910,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (runtime.onProgress) return runtime.onProgress(safe);
       if (require.main === module) process.stderr.write(require('./forge-sidecar-calibration').progressLine(safe));
     },
+    // Owner-side liveness: the no-progress event goes through appendOwnedEvent;
+    // the unit's own result/receipt channel never counts as local progress
+    // (prefix match also covers .reset-state.json and .recovery.json).
+    onLiveness, localProofIgnore: [resultFile, receiptFile],
     telemetryIdentity: r, telemetryRoute: route, budgets: execution?.budgets || r.budgets || {},
     onPackagedContext: packaged => {
       const saved = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
@@ -1810,13 +1922,14 @@ async function runUnitSidecarCore(request, runtime, identity) {
       return runtime.onPackagedContext?.(packaged);
     },
     hostRuntime: route.host_runtime, sidecarDeclared: true, model,
-    effort: route.effort, timeoutSecs: route.workers_timeout || DEFAULT_WORKER_TIMEOUT_SECS, resultFile, dispatchId,
+    effort: route.effort, timeoutSecs: ceilingFromRoute(route).seconds, resultFile, dispatchId,
     constraints: r.constraints || { auto_commit: false, deploy: false },
     signal: r.signal, announce, identity: { phase: identity.phase, unit: identity.unit, dispatch_id: dispatchId,
       model_resolved: identity.model_resolved },
     // Defense in depth behind the resolver refusal: the Claude CLI adapter
     // refuses a thinking mode it has no documented argument for.
     ...(route.thinking_requested ? { thinkingRequested: route.thinking_requested } : {}),
+    ...(claudeSession ? { claudeSession } : {}),
   };
   const heartbeat = pid => {
     if (Number.isInteger(pid) && pid > 0) {
@@ -1860,6 +1973,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
           readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
+        await livenessQueue;
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
@@ -1868,6 +1982,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
           sandbox: 'read-only', onHeartbeat: heartbeat });
         transportReturned = true;
+        await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       result = require('./forge-memory-extraction').validateExtractionResult(result, { sourceUnit: loc.sourceUnit });
@@ -1881,7 +1996,20 @@ async function runUnitSidecarCore(request, runtime, identity) {
       const codeProtectedBefore = execution ? execution.execution_contract.code_roots.map(code => ({ root: code.path,
         before: executionApi.protectedSnapshot(code.path) })) : [];
       if (!nativeExecution) { enterTransport(); transportEntered = true; }
-      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution, options, procedure) : await xllm.runExecute({ ...options, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
+      // Shared write-contract validation runs inside runExecute, before this unit
+      // can advance its snapshots: hand it the exact authenticated owner append.
+      const eventsBeforeTransport = fileHash(eventsFile);
+      const reconcileProtectedChanges = async changes => {
+        await livenessQueue;
+        const key = '.gsd/forge/events.jsonl';
+        const contract = execution?.execution_contract || r.execution_contract;
+        if (!contract || !livenessEventAdvance || eventsBeforeTransport !== livenessEventAdvance.from
+            || fileHash(eventsFile) !== livenessEventAdvance.to) return changes;
+        const ownerIds = new Set(contract.code_roots
+          .filter(code => fs.realpathSync(code.path) === root).map(code => code.id));
+        return changes.filter(entry => !(entry.path === key && ownerIds.has(entry.root_id)));
+      };
+      result = nativeExecution ? await runNativeExecutionTransport(r, runtime, execution, options, procedure) : await xllm.runExecute({ ...options, reconcileProtectedChanges, scope: r.scope, planFile: r.planFile, securityFile: r.securityFile,
         contextFile: r.contextFile, writableRoots: execution ? execution.writableRoots
           : r.execution_contract ? r.execution_contract.code_roots.filter(code =>
             require('./forge-code-roots').key(fs.realpathSync.native(code.path)) !==
@@ -1890,13 +2018,17 @@ async function runUnitSidecarCore(request, runtime, identity) {
           ? { execution_contract: r.execution_contract, budgets: r.budgets || {} } : undefined),
         procedureContext: { procedureText, procedure_context } });
       transportReturned = true;
+      await livenessQueue;
       transportTelemetry = result.transport_telemetry || null;
       const trustedTransportRecord = transportTelemetry ? {
         telemetry: { ...observedModelTelemetry(transportTelemetry),
           observation: require('./forge-sidecar-diagnostic').observation(transportTelemetry.observation) },
         ...(transportTelemetry.calibration_proposal ? { calibration_proposal: transportTelemetry.calibration_proposal } : {}),
+        ...(sessionShaOf(transportTelemetry) ? { session_sha256: sessionShaOf(transportTelemetry) } : {}),
       } : {};
       if (execution) {
+        advanceLivenessEvents(protectedBefore);
+        for (const code of codeProtectedBefore) if (fs.realpathSync(code.root) === root) advanceLivenessEvents(code.before);
         if (r.ownerBroker) require('./forge-artifact-reconciliation').assertBroker(r.ownerBroker).verify();
         else executionApi.assertProtected(root, protectedBefore);
         for (const code of codeProtectedBefore) executionApi.assertProtected(code.root, code.before);
@@ -1922,6 +2054,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         const ready = await completeExecution(executed);
         result = await publishReadyRecord(r, ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
         json(resultFile, result);
+        await sessionCleanupEvent(transportTelemetry?.session?.cleanup, sessionShaOf(transportTelemetry));
         await event(result.status, null, null, true);
         return result;
       }
@@ -1955,6 +2088,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         const ready = await completeExecution(executed);
         result = await publishReadyRecord(r, ready, () => { assertNativePublication(ready); options.assertNativePublication?.(); });
         json(resultFile, result);
+        await sessionCleanupEvent(transportTelemetry?.session?.cleanup, sessionShaOf(transportTelemetry));
         await event(result.status, null, null, true);
         return result;
       }
@@ -1971,6 +2105,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         transportEntered = true;
         result = await xllm.runPlan({ ...options, planContextFile });
         transportReturned = true;
+        await livenessQueue;
       } finally { fs.rmSync(promptDir, { recursive: true, force: true }); }
       const ids = result.task_plans.map(p => p.id);
       if (new Set(ids).size !== ids.length) fail('plan-task-ids-invalid');
@@ -2001,11 +2136,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (options.engine === 'claude') {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:loc.preparation?'preparation':'artifacts', resultSchema:schema, calibrationPhase:r.phase || 'artifacts',
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:loc.preparation?'preparation':'artifacts', resultSchema:schema, calibrationPhase:sessionPhase === 'plan' ? 'plan' : r.phase || 'artifacts',
+          ...(options.claudeSession ? { session: options.claudeSession } : {}),
           readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules,
             { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
+        await livenessQueue;
         result = output.candidate;
         transportTelemetry = output.telemetry || null;
       } else {
@@ -2013,6 +2150,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         transportEntered = true;
         const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema, sandbox: 'read-only', onHeartbeat: heartbeat });
         transportReturned = true;
+        await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules,
@@ -2052,6 +2190,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       transportEntered = true;
       result = await xllm.runFix({ ...options, brief: fix.brief, writableRoots: r.writableRoots });
       transportReturned = true;
+      await livenessQueue;
       // A partial/blocked turn never publishes a success line or a commit.
       if (result.status !== 'done') fail(`review-fix-worker-${result.status}`, 'The review-fix worker did not finish; items are deferred.');
       artifacts = [];
@@ -2103,6 +2242,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         artifacts: artifacts.map(a => ({ ...a, before: before[a.path] ?? null })) };
     if (transportTelemetry) record.telemetry = {...record.telemetry, observation: transportTelemetry.observation ? require('./forge-sidecar-calibration').observation(transportTelemetry.observation) : null};
     if (transportTelemetry?.calibration_proposal) record.calibration_proposal = transportTelemetry.calibration_proposal;
+    if (sessionShaOf(transportTelemetry)) record.session_sha256 = sessionShaOf(transportTelemetry);
     const finalEvidence = JSON.parse(fs.readFileSync(receiptFile, 'utf8')).final_evidence;
     if (finalEvidence) record.final_evidence = { ...finalEvidence, stage: 'returned', provider_called: true,
       duration_ms: Date.now() - Date.parse(startedAt), model_observed: observedModel.model_observed || null };
@@ -2111,6 +2251,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
     json(receiptFile, record);
     result = await publishReadyRecord(r, record);
     json(resultFile, result);
+    await sessionCleanupEvent(transportTelemetry?.session?.cleanup, sessionShaOf(transportTelemetry));
     if (transport.mode !== 'memory') {
       await event(result.status, null, null, true, fix ? { boundary: loc.reviewFix.boundary, items_total: result.items.length,
         items_fixed: result.items.filter(item => item.verified).length, commit_sha: result.commit_sha,
@@ -2118,6 +2259,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     }
     return result;
   } catch (error) {
+    // A transport failure can leave a queued liveness append: settle it before
+    // the failed receipt and the terminal event are written.
+    await livenessQueue;
     // A heartbeat proves a local process, not provider acceptance. A timeout
     // without adapter evidence stays unknown; an explicit pre-spawn refusal is false.
     providerCalled = typeof error.provider_called === 'boolean' ? error.provider_called
@@ -2313,11 +2457,18 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
       }
       return runUnitSidecar(request, runtime);
     },
-    invoke: async (route, invocation, remainingMs, assertReady, reservationHash) => {
+    // The third argument is the decision's sidecar_ceiling; the route ceiling is
+    // recomputed here from the single source instead of trusting the argument.
+    // The sixth argument is the recovery's single same-session resume (S05): only
+    // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
+    invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
+      if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
       validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation });
-      const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
-        ? { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) } : route,
-        dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
+      const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
+      const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
+        ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
+        dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
+        ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       if (route.worker_mode === 'native') {
         if (!runtime.invokeNative) {
           assertReady?.();

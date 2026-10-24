@@ -54,7 +54,7 @@ function setup({ questions = [] } = {}) {
   f.initial = stateApi.loadRecovery(f.stateFile);
   f.history = transition.observeHistory({ request: f.request, state: f.initial, receiptFile: f.receiptFile,
     contract: f.contract, resolverOptions: f.originalOptions });
-  f.now = f.initial.deadline_at + 1;
+  f.now = f.initial.started_at + 60001; // past the former 60000 ms window; v2 has no deadline_at
   f.binding = authority(f, true); recovery.bindRecoveryAuthorization(f.binding); delete f.binding.registration;
   const cleanup = f.cleanup;
   f.cleanup = () => { for (const [key, value] of Object.entries(oldEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } cleanup(); };
@@ -77,8 +77,8 @@ function options(f, overrides = {}) {
     resolverOptions: { ...f.originalOptions, milestoneId: 'M901', unitId: 'S01', roadmapPath: f.roadmap, scope: 'milestone', phase: 'plan' },
     validateInvocation: route => require('./forge-native-invocation').buildNativeInvocation({ hostRuntime: 'codex', resolvedDispatch: route,
       activeCapabilities: capabilities, prompt: 'Fixture only.', forkTurns: 'none', taskName: 'transition_fixture', agentType: 'forge-planner' }),
-    invoke: async (route, invocation, remaining, assertReady) => { assertReady(); f.calls++;
-      assert.equal(remaining, 0); assert.equal(route.effort, 'max'); assert.equal(invocation.args.reasoning_effort, 'max'); return { fixture: true }; },
+    invoke: async (route, invocation, ceiling, assertReady) => { assertReady(); f.calls++;
+      assert.equal(ceiling, null); /* native route: no sidecar tier ceiling, no remaining clock */ assert.equal(route.effort, 'max'); assert.equal(invocation.args.reasoning_effort, 'max'); return { fixture: true }; },
     ...overrides };
 }
 async function candidateFixture(standalone = true, signed = false) {
@@ -120,7 +120,7 @@ async function candidateFixture(standalone = true, signed = false) {
   } finally { if (broker) await broker.close(); }
   f.initial = stateApi.loadRecovery(f.stateFile);
   f.history = transition.observeHistory({ request: f.request, state: f.initial, receiptFile: f.receiptFile, contract: f.contract });
-  f.now = f.initial.deadline_at + 1; f.binding = authority(f);
+  f.now = f.initial.started_at + 60001; f.binding = authority(f); // past the former 60000 ms window
   f.transitions = [{ type: 'saved-candidate-unreplayable', reference: 'fixture:original-provenance-absent' }];
   f.originalReceipt = fs.readFileSync(f.receiptFile); f.originalEvents = fs.readFileSync(f.events);
   return f;
@@ -184,12 +184,50 @@ async function sidecarBoundary() {
     } finally { fs.appendFileSync = append; xllm.invokeClaudeTransport = transport; f.cleanup(); }
   }
 }
+// A transition binding observed under a v1 state stays valid after the explicit
+// v1 -> v2 migration (deadline_at preserved as inert history); a tampered legacy
+// deadline is still refused, so the comparison stays strict.
+async function legacyBinding() {
+  const f = setup();
+  try {
+    const fresh = JSON.parse(fs.readFileSync(f.stateFile, 'utf8'));
+    const { budget, ...rest } = fresh;
+    assert.equal(budget, 'tier-ceiling');
+    const legacy = { ...rest, schema_version: 1, deadline_at: fresh.started_at + 60000 };
+    stateApi.saveRecovery(f.stateFile, legacy);
+    f.initial = stateApi.loadRecovery(f.stateFile); assert.equal(f.initial.schema_version, 1);
+    f.history = transition.observeHistory({ request: f.request, state: f.initial, receiptFile: f.receiptFile,
+      contract: f.contract, resolverOptions: f.originalOptions });
+    assert.equal(f.history.deadline_at, legacy.deadline_at);
+    assert(f.now > legacy.deadline_at, 'legacy window already expired on the fixture clock');
+    const originalReceipt = fs.readFileSync(f.receiptFile), observed = f.history;
+    for (const forged of [{ ...observed, deadline_at: observed.deadline_at + 1 }, { ...observed, deadline_at: undefined }]) {
+      f.history = forged;
+      await assert.rejects(recovery.recoverAttempt(options(f)), /transition-historical-binding/);
+      assert.equal(f.calls, 0);
+    }
+    f.history = observed;
+    const result = await recovery.recoverAttempt(options(f));
+    assert.equal(result.action, 'invoke'); assert.equal(f.calls, 1); assert.equal(result.sidecar_ceiling, null);
+    assert.deepEqual(result.state_migration, { from: 1, to: 2 });
+    const final = stateApi.loadRecovery(f.stateFile);
+    assert.equal(final.schema_version, 2); assert.equal(final.budget, 'tier-ceiling');
+    assert.equal(final.migrated_from.schema_version, 1);
+    assert.equal(final.started_at, legacy.started_at); assert.equal(final.deadline_at, legacy.deadline_at);
+    assert.deepEqual(final.attempts, legacy.attempts); assert.deepEqual(final.pending_questions, legacy.pending_questions);
+    assert.equal(final.transitions.length, 1); assert.deepEqual(fs.readFileSync(f.receiptFile), originalReceipt);
+    console.log('PASS transition binding observed under v1 stays valid after v1->v2 migration; forged legacy deadlines refused');
+  } finally { f.cleanup(); }
+}
 async function main() {
   await sidecarBoundary();
+  await legacyBinding();
   const f = setup();
   try {
     const originalReceipt = fs.readFileSync(f.receiptFile), initial = structuredClone(f.initial);
     assert.equal(f.request.route.tier, 'heavy'); assert.equal(f.request.route.effort, 'high');
+    // Fresh v2: neither the state nor the observed history carries a deadline.
+    assert.equal(initial.schema_version, 2); assert(!Object.hasOwn(initial, 'deadline_at')); assert.equal(f.history.deadline_at, undefined);
     const inspect = () => recovery.inspectReceipt(f.receiptFile, { processProbe: () => 'stopped', request: f.request });
     for (const fake of [{ approved: true }, JSON.parse(JSON.stringify(adapter(f)))])
       await assert.rejects(transition.prepare(options(f, { transitionAdapter: fake }), initial, inspect()), /live-adapter/);
@@ -204,7 +242,9 @@ async function main() {
       if (before) fs.writeFileSync(file, before); else fs.unlinkSync(file);
     }
     for (const change of [h => { h.resolution.sources[0].sha256 = 'changed-policy'; }, h => { h.resolution.options.effortMap = { 'plan-slice': 'max' }; },
-      h => { h.request_identity_sha256 = 'foreign'; }, h => { h.roots_sha256 = 'foreign'; }, h => { h.roots.pop(); }]) {
+      h => { h.request_identity_sha256 = 'foreign'; }, h => { h.roots_sha256 = 'foreign'; }, h => { h.roots.pop(); },
+      // Absence on the v2 side is never satisfied by a history that invents a deadline.
+      h => { h.deadline_at = h.started_at + 60000; }, h => { h.deadline_at = null; }]) {
       const saved = f.history; f.history = structuredClone(saved); change(f.history);
       await assert.rejects(transition.prepare(options(f), initial, inspect()), /drift|mismatch|binding|coverage/); f.history = saved;
     }
@@ -218,9 +258,11 @@ async function main() {
     const again = await transition.prepare(options(f), initial, inspect()); assert.deepEqual(again.reference, prepared.reference);
     fs.appendFileSync(event, '{"concurrent":true}\n'); assert.throws(() => transition.assertLive(prepared.handle), /changed/); fs.writeFileSync(event, eventBytes);
     const result = await recovery.recoverAttempt(options(f));
-    assert.equal(result.route.model, 'gpt-6-astra'); assert.equal(result.route.tier, 'max'); assert.equal(result.sidecar_remaining_ms, 0); assert.equal(f.calls, 1);
+    assert.equal(result.route.model, 'gpt-6-astra'); assert.equal(result.route.tier, 'max'); assert.equal(result.sidecar_ceiling, null);
+    assert(!Object.hasOwn(result, 'sidecar_remaining_ms') && !Object.hasOwn(result, 'remaining_ms')); assert.equal(f.calls, 1);
     const final = stateApi.loadRecovery(f.stateFile);
     assert.deepEqual(final.attempts, initial.attempts); assert.equal(final.started_at, initial.started_at); assert.equal(final.deadline_at, initial.deadline_at);
+    assert.equal(final.schema_version, 2); assert.equal(final.budget, 'tier-ceiling'); assert(!Object.hasOwn(final, 'deadline_at'));
     assert.deepEqual(fs.readFileSync(f.receiptFile), originalReceipt); assert.deepEqual(fs.readFileSync(event), eventBytes);
     assert.equal(final.transitions.length, 1); assert.equal(final.reservations[0].destination_key, transition.destinationKey(result.route));
     assert.equal(final.attempts[0].provider_called, 'unknown'); assert.equal(final.attempts[0].timeout_cause, 'indeterminate');

@@ -6,7 +6,7 @@
     {
       "id": "core",
       "path": "shared/forge-procedure-core.md",
-      "sha256": "9c8a97fba438123de5f2f93d4e32ed9ff924a372e8501c1fd52cb4ce09361f3c",
+      "sha256": "b52fa877593f03e4afc9c40a6021769d643ab27d3883add7176f7ab02a598ed5",
       "status": "ready",
       "owner": "T01",
       "dependencies": [],
@@ -165,7 +165,7 @@
     {
       "id": "recovery",
       "path": "shared/forge-procedure-recovery.md",
-      "sha256": "1eada455689ac7ebe11eb6ded8505f741f9d7200c2f88fcda70264f3fd1ea222",
+      "sha256": "6b460f345b83cc9c988336419ebec7bacb21a841d1b9997b04530b428dceb032",
       "status": "ready",
       "owner": "T04",
       "dependencies": [
@@ -173,7 +173,7 @@
       ],
       "preconditions": [
         "Inspect process and receipt before retry",
-        "Functional answers, live standing authority and historical budget preserved"
+        "Functional answers, live standing authority and full tier safety ceiling per recovery sidecar preserved"
       ],
       "postconditions": [
         "Replay valid saved output or reconcile every writer root before an untried valid route"
@@ -718,7 +718,7 @@
       "owner": "T04",
       "preconditions": [
         "Inspect process and receipt before retry",
-        "Functional answers, live standing authority and historical budget preserved"
+        "Functional answers, live standing authority and full tier safety ceiling per recovery sidecar preserved"
       ],
       "postconditions": [
         "Replay valid saved output or reconcile every writer root before an untried valid route"
@@ -742,7 +742,7 @@
       "owner": "T04",
       "preconditions": [
         "Inspect process and receipt before retry",
-        "Functional answers, live standing authority and historical budget preserved"
+        "Functional answers, live standing authority and full tier safety ceiling per recovery sidecar preserved"
       ],
       "postconditions": [
         "Replay valid saved output or reconcile every writer root before an untried valid route"
@@ -766,7 +766,7 @@
       "owner": "T04",
       "preconditions": [
         "Inspect process and receipt before retry",
-        "Functional answers, live standing authority and historical budget preserved"
+        "Functional answers, live standing authority and full tier safety ceiling per recovery sidecar preserved"
       ],
       "postconditions": [
         "Replay valid saved output or reconcile every writer root before an untried valid route"
@@ -790,7 +790,7 @@
       "owner": "T04",
       "preconditions": [
         "Inspect process and receipt before retry",
-        "Functional answers, live standing authority and historical budget preserved"
+        "Functional answers, live standing authority and full tier safety ceiling per recovery sidecar preserved"
       ],
       "postconditions": [
         "Replay valid saved output or reconcile every writer root before an untried valid route"

@@ -29,8 +29,8 @@ It does not grant authority, choose a model, bypass a gate or replace a caller.
 - Correct a known caller defect offline; never resend invalid input to a new model.
 - Timeout has indeterminate cause without causal evidence; it is not unavailability.
 - Use the trusted standing authorization adapter for a valid untried candidate.
-- Keep the historical 60000ms cumulative sidecar recovery budget across restart.
-- Do not invent another model list, renew the clock or bypass a refusal inline.
+- Give each recovery sidecar the full tier safety ceiling, never an inherited remainder.
+- Do not invent another model list or bypass a refusal inline.
 - Record sanitized actual attempt evidence and unknown observations truthfully.
 
 ## Gates, verification and owner publication

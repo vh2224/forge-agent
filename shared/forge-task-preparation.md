@@ -204,10 +204,12 @@ de código possíveis. Escritas legítimas atribuídas do host permanecem intact
 processo ativo/desconhecido ou escrita desconhecida/estrangeira/concorrente bloqueia.
 
 Conservar identidade física/lógica, claims/generation e gates quando aplicáveis,
-perguntas pendentes, histórico, reservas, exclusões e started_at/deadline_at originais.
+perguntas pendentes, histórico, reservas, exclusões e started_at original (deadline_at v1 é histórico inerte).
 Handoff nativo externo devolve `reattest-native-handoff` e hash de reserva; antes de
 chamar a ferramenta, retomar com `resumeReservation.sha256` e callbacks/autoridade vivos,
 validar a invocação real e executar `assertReady` imediatamente no ponto de chamada.
-O prazo cumulativo de 60000ms nunca reinicia. Após expirar, nenhum sidecar inicia;
-somente destino nativo não tentado com exceção viva e capacidades reais é elegível.
+O estado de recovery v2 não tem prazo cumulativo; um v1 é migrado de forma explícita.
+Cada sidecar de recuperação recebe o tier safety ceiling (ceilingFromRoute), nunca um restante.
+Só destino não tentado, com autoridade viva e capacidades reais, é elegível; a ausência de
+prazo não autoriza fallback nem execução inline. O término vem da lista finita de candidatos.
 O registro não substitui evidência histórica ausente nem libera automaticamente um caso real.

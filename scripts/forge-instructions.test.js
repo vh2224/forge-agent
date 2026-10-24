@@ -618,7 +618,8 @@ test('recovery contract sync preserves standing personal authorization bytes and
   syncFile(file, { host: 'codex' });
   const once = fs.readFileSync(file, 'utf8');
   assert(once.startsWith(prefix), 'personal authorization bytes changed');
-  for (const term of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization', '60000ms', 'Standing permission never answers a functional question']) {
+  assert(!once.includes('60000ms'), 'projected recovery contract carries no cumulative 60000ms clock');
+  for (const term of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization', 'tier safety ceiling', 'Standing permission never answers a functional question']) {
     assert(once.includes(term), `missing ${term}`);
   }
   assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'second sync');

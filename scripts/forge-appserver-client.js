@@ -10,6 +10,10 @@
 
 const { spawn, spawnSync } = require('child_process');
 const { StringDecoder } = require('string_decoder');
+const liveness = require('./forge-sidecar-liveness');
+const { createNotificationReducer } = require('./forge-appserver-liveness');
+const { createLocalProof } = require('./forge-sidecar-local-proof');
+const { diagnostic, observation } = require('./forge-sidecar-diagnostic');
 
 const STDERR_TAIL_BYTES = 4096;
 const DISCARDED_SAMPLE_LIMIT = 5;
@@ -61,6 +65,43 @@ const INTERRUPT_OUTCOMES = Object.freeze({
   UNSENT: 'unsent',
   SKIPPED_NO_TURN_ID: 'skipped:no-turn-id',
 });
+
+// Liveness (S07): the neutral tracker of forge-sidecar-liveness is the PRIMARY kill
+// authority of a turn (start 60s, silence 120/240s); `timeoutMs` is only the ceiling.
+// String codes exist only on these two errors, which never carry `rpcError`, so they
+// cannot be confused with the numeric JSON-RPC `code` of the RPC error path. Neither
+// message may contain `terminated`/`timeout`/`network`: forge-classify-error reads
+// those as transient and would retry a dead turn in place. A ceiling reached while
+// still `starting` keeps the load-bearing `timeout after Ns` with no code at all.
+const APPSERVER_LIVENESS_CODES = Object.freeze({
+  SILENCE: 'appserver-anomalous-silence',
+  BUDGET_EXCEEDED: 'budget-exceeded-while-active',
+});
+// Watchdog cadence. Overridable via `livenessIntervalMs` (test seam, like
+// interruptGraceMs); production never passes it.
+const LIVENESS_INTERVAL_MS = 1000;
+// Local proof cadence (S07/T03): same default as runOwnedChild. The proof samples
+// asynchronously into a cache; the watchdog tick only reads `current()`.
+const LOCAL_PROOF_INTERVAL_MS = 15000;
+// Host heartbeat (S07/T04): same cadence as forge-claude-sidecar's DEFAULT_PROGRESS_INTERVAL_MS
+// (a local constant avoids loading the Claude adapter here; the test compares both).
+// Distinct from forge-xllm's 15000 ms pid/orphan heartbeat, which is another channel.
+const DEFAULT_PROGRESS_INTERVAL_MS = 30000;
+// No pid, or a provider that cannot start: never a fabricated proof (S02 rule:
+// unavailable/none allows the bounded tool extension up to 660000 ms).
+const UNAVAILABLE_LOCAL_PROOF = Object.freeze({ capability: 'unavailable', proof: 'none' });
+
+/** Only {capability, proof}; an invalid provider answer reads as unavailable
+ * instead of throwing inside the watchdog tick (same shape as the Claude adapter). */
+function currentLocalProof(provider) {
+  try {
+    return liveness.normalizeLocalProof(provider.current());
+  } catch {
+    return { ...UNAVAILABLE_LOCAL_PROOF };
+  }
+}
+
+const isStringArray = value => Array.isArray(value) && value.every(item => typeof item === 'string' && item);
 
 // Pitfall 7: the app-server wire dialect is JSONL but does not use a jsonrpc
 // member. Removing it here is intentional, rather than relying on callers to
@@ -172,6 +213,18 @@ function startAppServerTurn(options) {
     retentionLimits,
     onEvent,
     onSpawn,
+    clock,
+    livenessIntervalMs,
+    livenessPolicy,
+    onLiveness,
+    // Local proof and loop detector (S07/T03), named exactly like runOwnedChild.
+    proofRoots = [],
+    localProofIgnore = [],
+    localProofFactory,
+    localProofIntervalMs,
+    // Progress channel (S07/T04): snapshots carrying the versioned `liveness` block.
+    onProgress,
+    progressIntervalMs,
   } = opts;
   if (!cmd || typeof cmd !== 'string') {
     return Promise.reject(sessionError('cmd is required'));
@@ -205,11 +258,65 @@ function startAppServerTurn(options) {
       limits[key] = value;
     }
   }
+  // Liveness seams, validated like interruptGraceMs: only WHEN SUPPLIED, before any
+  // spawn. `livenessPolicy` can only tighten the locked defaults (normalizePolicy
+  // ignores anything above them); a malformed one is a caller error, not a no-op.
+  if (clock !== undefined && typeof clock !== 'function') {
+    return Promise.reject(sessionError('clock must be a function'));
+  }
+  if (livenessIntervalMs !== undefined && (!Number.isFinite(livenessIntervalMs) || livenessIntervalMs <= 0)) {
+    return Promise.reject(sessionError('livenessIntervalMs must be a positive number'));
+  }
+  if (onLiveness !== undefined && typeof onLiveness !== 'function') {
+    return Promise.reject(sessionError('onLiveness must be a function'));
+  }
+  if (livenessPolicy !== undefined) {
+    if (!livenessPolicy || typeof livenessPolicy !== 'object' || Array.isArray(livenessPolicy)) {
+      return Promise.reject(sessionError('livenessPolicy must be an object'));
+    }
+    for (const [key, value] of Object.entries(livenessPolicy)) {
+      if (!Object.prototype.hasOwnProperty.call(liveness.DEFAULTS, key)) {
+        return Promise.reject(sessionError(`unknown livenessPolicy key: ${key}`));
+      }
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        return Promise.reject(sessionError(`livenessPolicy.${key} must be a positive integer`));
+      }
+    }
+  }
+  if (!isStringArray(proofRoots)) {
+    return Promise.reject(sessionError('proofRoots must be an array of non-empty strings'));
+  }
+  if (!isStringArray(localProofIgnore)) {
+    return Promise.reject(sessionError('localProofIgnore must be an array of non-empty strings'));
+  }
+  if (localProofFactory !== undefined && localProofFactory !== null && typeof localProofFactory !== 'function') {
+    return Promise.reject(sessionError('localProofFactory must be a function'));
+  }
+  if (localProofIntervalMs !== undefined && (!Number.isFinite(localProofIntervalMs) || localProofIntervalMs <= 0)) {
+    return Promise.reject(sessionError('localProofIntervalMs must be a positive number'));
+  }
+  if (onProgress !== undefined && typeof onProgress !== 'function') {
+    return Promise.reject(sessionError('onProgress must be a function'));
+  }
+  if (progressIntervalMs !== undefined && (!Number.isFinite(progressIntervalMs) || progressIntervalMs <= 0)) {
+    return Promise.reject(sessionError('progressIntervalMs must be a positive number'));
+  }
+  const progressMs = progressIntervalMs === undefined ? DEFAULT_PROGRESS_INTERVAL_MS : progressIntervalMs;
+  const proofIntervalMs = localProofIntervalMs === undefined ? LOCAL_PROOF_INTERVAL_MS : localProofIntervalMs;
+  const policy = liveness.normalizePolicy(livenessPolicy);
+  const watchdogMs = livenessIntervalMs === undefined ? LIVENESS_INTERVAL_MS : livenessIntervalMs;
+  // The tracker only enforces an integer ceiling; rounding up never kills earlier
+  // than the backstop setTimeout below.
+  const ceilingMs = Math.ceil(timeoutMs);
 
   return new Promise((resolve, reject) => {
     let child;
     let settled = false;
     let timer = null;
+    let watchdog = null;
+    let proofTimer = null;
+    let progressTimer = null;
+    let failedTerminal = false;
     let stdoutBuffer = '';
     let stderrTail = '';
     let nextId = 1;
@@ -311,12 +418,88 @@ function startAppServerTurn(options) {
       };
     };
 
+    // Liveness state. The reducer is created here, at spawn, so `elapsed_ms` counts
+    // from the spawn exactly like the backstop timer does. The clock is floored to
+    // integer ms: observation() only accepts safe integers, and a fractional
+    // performance.now() would null every counter and drop the `silence` block.
+    const baseClock = typeof clock === 'function' ? clock : () => performance.now();
+    const reducerClock = () => Math.floor(baseClock());
+    // Loop detector: tool-item fingerprints (hashes only) since the last local write.
+    // Only the proof's onWrite resets it: an item/completed (fileChange included) is
+    // the provider's report, not a local filesystem delta, so it never counts.
+    const progress = liveness.createProgressTracker();
+    const reducer = createNotificationReducer({ clock: reducerClock, onToolCall: ({ fingerprint }) => {
+      try { progress.toolCall(fingerprint); } catch { /* observer only */ }
+    } });
+    const tracker = liveness.createTracker(policy, ceilingMs);
+    // Local proof of life over the app-server pid (decision 5). Replaced after the
+    // spawn when a pid exists; sampled asynchronously, read synchronously.
+    let proof = { current: () => UNAVAILABLE_LOCAL_PROOF, sample: () => Promise.resolve(), stop() {} };
+    const sampleProof = () => {
+      try { Promise.resolve(proof.sample()).catch(() => {}); } catch { /* best-effort sampling */ }
+    };
+    const livenessInputs = () => {
+      const current = currentLocalProof(proof);
+      let state;
+      try { state = progress.state(); } catch { state = undefined; }
+      return { localProof: { capability: current.capability, proof: current.proof }, progress: state };
+    };
+    // Last published state (same shape as the S06 `liveness` block).
+    let livenessView = { version: 1, state: 'starting', since_ms: 0, reason: null };
+    const observe = (extra) => ({ ...reducer.snapshot(), ...extra });
+    // Set only when the turn is finally settled, so a termination never shows in a
+    // periodic snapshot taken while the interrupt grace is still running.
+    let livenessTermination = null;
+    // Every progress snapshot is observation() with the S06 `liveness` block: the
+    // closed state/reason vocabulary and counters only, never fingerprints or text.
+    const snapshot = () => {
+      const current = reducer.snapshot();
+      return observation({ ...current, phase: failedTerminal ? 'failed' : current.phase,
+        liveness: livenessTermination ? { ...livenessView, termination: livenessTermination } : livenessView });
+    };
+    const emit = () => {
+      if (!onProgress) return;
+      try { Promise.resolve(onProgress(snapshot())).catch(() => {}); } catch { /* observer only */ }
+    };
+    // Evaluates current evidence, notifies onLiveness and republishes the view.
+    // Shared by the watchdog tick and the success path so the final snapshot never
+    // lags behind the last remote event (S06 R1).
+    const refreshLiveness = () => {
+      const inputs = livenessInputs();
+      const decision = tracker.evaluate(reducer.snapshot(), inputs);
+      const { transition } = decision;
+      let published = false;
+      if (transition) {
+        if (!(transition.from === null && transition.to === 'starting')) {
+          livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
+            reason: transition.reason ?? null };
+          published = true;
+        }
+        // A loop carries only the repeat count and a 16-hex fingerprint prefix, as in
+        // runOwnedChild: never the command, arguments or any item text.
+        const loop = transition.to === 'slow-suspect' && transition.reason === 'no-progress'
+          && typeof inputs.progress?.fingerprint === 'string';
+        const event = loop ? { ...transition, progress: { repeats: inputs.progress.repeats,
+          fingerprint_sha256: inputs.progress.fingerprint.slice(0, 16) } } : transition;
+        // Best-effort observer: it never controls the session.
+        try { Promise.resolve(onLiveness && onLiveness(event)).catch(() => {}); } catch { /* observer only */ }
+      }
+      return { result: decision.result, published };
+    };
+
     const cleanup = () => {
       if (opts.signal) opts.signal.removeEventListener('abort', cancel);
       process.removeListener('SIGINT', cancel);
       process.removeListener('SIGTERM', cancel);
       if (timer) clearTimeout(timer);
       timer = null;
+      if (watchdog) clearInterval(watchdog);
+      watchdog = null;
+      if (proofTimer) clearInterval(proofTimer);
+      proofTimer = null;
+      if (progressTimer) clearInterval(progressTimer);
+      progressTimer = null;
+      try { if (typeof proof.stop === 'function') proof.stop(); } catch { /* best-effort */ }
       if (child && child.stdin) {
         try { child.stdin.end(); } catch { /* stream closed concurrently */ }
       }
@@ -324,6 +507,8 @@ function startAppServerTurn(options) {
     const settle = (fn, value, stopChild) => {
       if (settled) return;
       settled = true;
+      if (fn === reject) failedTerminal = true;
+      emit();
       cleanup();
       if (stopChild) killProcessTree(child);
       fn(value);
@@ -395,6 +580,8 @@ function startAppServerTurn(options) {
         return;
       }
       if (message.method) {
+        // Liveness first: the reducer decides what is remote; it never throws.
+        reducer.push(message);
         keep(notifications, message, 'notifications');
         if (message.method === 'item/completed') keep(items, message.params == null ? message : message.params, 'items');
         // First non-empty source wins, and which one won is recorded rather than
@@ -460,6 +647,29 @@ function startAppServerTurn(options) {
     // the pid is only visible here. Called exactly once, wrapped like onEvent — an
     // observer that throws does not get to take the session down with it.
     try { if (typeof onSpawn === 'function') onSpawn(child.pid); } catch { /* observer cannot control session */ }
+    // The tools the app-server runs are its descendants or write into the writable
+    // roots, so the S02 provider measures them through this pid. Without a pid, or
+    // with a provider that throws or answers malformed, the proof stays unavailable.
+    if (Number.isSafeInteger(child.pid)) {
+      try {
+        const provider = (localProofFactory || createLocalProof)({ pid: child.pid, roots: proofRoots.slice(),
+          ignore: { prefixes: localProofIgnore.slice() }, clock: reducerClock, intervalMs: proofIntervalMs,
+          onWrite: () => { try { progress.write(); } catch { /* observer only */ } } });
+        if (provider && typeof provider.current === 'function' && typeof provider.sample === 'function') {
+          proof = provider;
+        }
+      } catch { /* a provider that cannot start leaves the proof unavailable */ }
+      proofTimer = setInterval(sampleProof, proofIntervalMs);
+      if (typeof proofTimer.unref === 'function') proofTimer.unref();
+      sampleProof();
+    }
+    // Initial snapshot (starting/0), then the periodic heartbeat. Transitions are
+    // published immediately by the watchdog, the final one by settle().
+    emit();
+    if (onProgress) {
+      progressTimer = setInterval(emit, progressMs);
+      if (typeof progressTimer.unref === 'function') progressTimer.unref();
+    }
     child.on('error', error => fail(`spawn failed: ${error.code || error.message}`, null, true));
     child.stdin.on('error', () => { /* close/error is diagnosed by request or child exit */ });
     // Decode across chunk boundaries: a multibyte character split between two reads
@@ -499,24 +709,35 @@ function startAppServerTurn(options) {
         fail(`app-server exited ${signal ? `by signal ${signal}` : `with code ${code}`}`, null, false);
       }
     });
-    timer = setTimeout(() => {
+    const secondsOf = ms => Number((ms / 1000).toFixed(3));
+    /**
+     * The ONE kill path of a turn: backstop timer, liveness kill and the tracker's
+     * ceiling all go through here. `buildError()` returns {message, details} and is
+     * evaluated synchronously at the kill moment; the standard interrupt/census
+     * fields are added once the interrupt outcome is known.
+     */
+    const terminateTurn = (buildError) => {
+      if (settled || timedOut) return;
       // Set FIRST, before anything that can await: every guard below reads it, and a
       // notification processed while this handler is suspended must already see it.
       timedOut = true;
-      const seconds = Number((timeoutMs / 1000).toFixed(3));
-      // This string is load-bearing. classifyErrorClass forces `terminal` only for the
-      // agy message; this one reaches classifyError, which returns {kind:'unknown',
-      // retry:false} => terminal. A different string can be read as `transient` and get
-      // a hung turn retried in place. Do not reword it.
-      const finish = (outcome) => fail(`timeout after ${seconds}s`, {
-        timeoutMs,
-        interrupt: outcome,
-        turnId: turnId || null,
-        turnIdSource: turnIdSource || null,
-        turnCompletions: completionCensus(),
-        retention,
-        discarded,
-      }, true);
+      if (watchdog) { clearInterval(watchdog); watchdog = null; }
+      // Only the final snapshot may carry the termination; stop the periodic ones.
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+      const built = buildError();
+      const finish = (outcome) => {
+        if (liveness.TERMINATIONS.includes(built.termination)) livenessTermination = built.termination;
+        fail(built.message, {
+          ...built.details,
+          timeoutMs,
+          interrupt: outcome,
+          turnId: turnId || null,
+          turnIdSource: turnIdSource || null,
+          turnCompletions: completionCensus(),
+          retention,
+          discarded,
+        }, true);
+      };
 
       // Both params are required by TurnInterruptParams, so with no turn observed there
       // is nothing well-formed to send. The kill still happens — the skip is recorded,
@@ -540,7 +761,78 @@ function startAppServerTurn(options) {
         if (graceTimer) clearTimeout(graceTimer);
         finish(outcome);
       });
-    }, timeoutMs);
+    };
+    // Ceiling. The watchdog passes the decision that already won; the backstop
+    // classifies with the state that held WITHOUT the ceiling (same as the Claude
+    // adapter). A live stream at the ceiling is `budget-exceeded-while-active`; a
+    // ceiling reached while still `starting` keeps the load-bearing message, no code.
+    const ceilingError = (decision) => {
+      const view = decision || liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
+      const kind = decision ? decision.termination
+        : liveness.classifyTermination({ cause: 'ceiling', state: view.state });
+      const active = kind === APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED;
+      if (livenessView.state !== view.state) {
+        livenessView = { version: 1, state: view.state, since_ms: livenessView.since_ms, reason: view.reason ?? null };
+      }
+      const seconds = secondsOf(timeoutMs);
+      return {
+        termination: kind || null,
+        // `timeout after Ns` is load-bearing. classifyErrorClass forces `terminal` only
+        // for the agy message; this one reaches classifyError, which returns
+        // {kind:'unknown', retry:false} => terminal. A different string can be read as
+        // `transient` and get a hung turn retried in place. Do not reword it.
+        message: active ? `budget exceeded while active after ${seconds}s` : `timeout after ${seconds}s`,
+        details: {
+          ...(active ? { code: APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED } : {}),
+          liveness: { version: 1, termination: kind || null, state: view.state, reason: view.reason ?? null },
+          diagnostic: diagnostic(active ? 'budget-exceeded-while-active' : 'provider-timeout', {
+            observation: observe({ liveness: kind ? { ...livenessView, termination: kind } : livenessView }),
+          }),
+        },
+      };
+    };
+    // Liveness kill (dead-start / dead-silence). The `silence` block follows the
+    // Claude adapter so observation() keeps it and recovery can read
+    // `cause: 'indeterminate'` (every tool kill carries threshold_ms = deadMs).
+    const silenceError = (result) => {
+      const silence = { dimension: result.dimension, window_ms: result.window_ms, threshold_ms: result.threshold_ms,
+        policy: liveness.POLICY, source: policy.source, cause: 'indeterminate' };
+      if (livenessView.state !== 'dead') {
+        livenessView = { version: 1, state: 'dead', since_ms: reducer.snapshot().elapsed_ms, reason: result.reason ?? null };
+      }
+      return {
+        termination: result.termination,
+        message: `anomalous silence (${result.termination}) after ${secondsOf(result.window_ms)}s`,
+        details: {
+          code: APPSERVER_LIVENESS_CODES.SILENCE,
+          liveness: { version: 1, termination: result.termination, state: 'dead', reason: result.reason ?? null,
+            extension_ms: result.extension_ms ?? null,
+            proof: result.proof_capability === undefined ? null
+              : { capability: result.proof_capability, proof: result.proof } },
+          diagnostic: diagnostic('anomalous-silence', {
+            observation: observe({ silence, liveness: { ...livenessView, termination: result.termination } }),
+          }),
+        },
+      };
+    };
+    // Backstop: the real-time ceiling, independent of the injected clock.
+    timer = setTimeout(() => terminateTurn(() => ceilingError()), timeoutMs);
+    // Primary authority: the neutral tracker over the reducer snapshot plus the
+    // cached local proof and the loop detector state (synchronous, no I/O).
+    watchdog = setInterval(() => {
+      // A matched completion is about to settle on the 5ms poll; never kill it. Only once
+      // the startup RPCs have resolved: with turn/start still unanswered settlement is
+      // not imminent, and skipping here would disable the silence deadline.
+      if (settled || timedOut || (matchedCompletion() && pending.size === 0)) return;
+      let refreshed;
+      try { refreshed = refreshLiveness(); } catch { return; }
+      const { result, published } = refreshed;
+      if (published) emit();
+      if (!result.kill) return;
+      if (result.cause === 'liveness') terminateTurn(() => silenceError(result));
+      else if (result.cause === 'ceiling') terminateTurn(() => ceilingError(result));
+    }, watchdogMs);
+    if (typeof watchdog.unref === 'function') watchdog.unref();
 
     (async () => {
       try {
@@ -548,7 +840,10 @@ function startAppServerTurn(options) {
         if (!send({ method: 'initialized', params: {} })) throw sessionError('could not send initialized');
         const threadStartResult = await request('thread/start', threadParams);
         threadId = threadStartResult && threadStartResult.thread ? threadStartResult.thread.id : undefined;
-        const turnResult = await request('turn/start', resolveTurnParams(turnParams, threadId));
+        const resolvedTurnParams = resolveTurnParams(turnParams, threadId);
+        // From here on, non-lifecycle notifications are remote evidence (decision 2).
+        reducer.turnSent();
+        const turnResult = await request('turn/start', resolvedTurnParams);
         // Second source. Only fills the gap left by turn/started, so a server that
         // notified first keeps its attribution instead of having it overwritten.
         if (!turnId && turnResult && turnResult.turn && turnResult.turn.id) {
@@ -578,6 +873,8 @@ function startAppServerTurn(options) {
         // success. Measured during T01: with BOTH this guard and the watcher guard
         // removed, the interrupt-then-completed scenario resolves instead of rejecting.
         if (timedOut) return;
+        // Republish the view before the terminal snapshot (S06 R1).
+        try { refreshLiveness(); } catch { /* observer only */ }
         // The turn ENDED — that is all the notification proves. Whether it ended the
         // way we asked is `status`, and only `completed` is success (S02 R15): the
         // schema admits `interrupted`, `failed` and `inProgress` on this same
@@ -636,6 +933,10 @@ module.exports = {
   // decoration.
   INTERRUPT_OUTCOMES,
   INTERRUPT_GRACE_MS,
+  APPSERVER_LIVENESS_CODES,
+  LIVENESS_INTERVAL_MS,
+  LOCAL_PROOF_INTERVAL_MS,
+  DEFAULT_PROGRESS_INTERVAL_MS,
   // Same reason as INTERRUPT_OUTCOMES: tests bind to the constant, never the literal.
   RETENTION_LIMITS,
   TURN_STATUS_SUCCESS,

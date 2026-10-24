@@ -155,6 +155,9 @@ fs.appendFileSync(path.join(process.cwd(), 'provider-observations.jsonl'), JSON.
   tools: args[args.indexOf('--tools') + 1], prompt
 }) + '\\n');
 const payload = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'provider-payload.json'), 'utf8'));
+// Like the real CLI (S05/T01 measurement): system/init confirms a persisted --session-id.
+const sessionAt = args.indexOf('--session-id');
+if (sessionAt >= 0) process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: args[sessionAt + 1] }) + '\\n');
 // claude -p --output-format json: modelUsage names the received --model.
 process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: payload,
   result: ['---GSD-WORKER-RESULT---', 'status: ' + payload.status,

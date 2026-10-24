@@ -488,14 +488,33 @@ if (!process.env.FORGE_TEST_RECOVERY_ANCESTOR_ALIAS) test('OS ancestor aliases p
   assert(out.stdout.includes('PASS symlink payload is rejected'));
   assert(!out.stdout.includes('SKIP symlink'), 'child-symlink rejection must execute with supported ancestor aliases');
 });
-test('attempt diagnostics expose unknown process and original shared deadline without mutation', f => {
+test('attempt diagnostics expose unknown process and v2 tier-ceiling budget without clock or mutation', f => {
   const stateFile = path.join(f.root,'attempt.json'), receiptFile = path.join(f.root,'receipt.json');
   const api = require('./forge-attempt-recovery');
   const state = api.createRecovery({unit:'T-diagnostic',roots_sha256:'roots',clock:()=>1000}).snapshot();
   fs.writeFileSync(stateFile,JSON.stringify(state)); fs.writeFileSync(receiptFile,JSON.stringify({phase:'failed',failure:{provider_called:'unknown'}}));
   const before=fs.readFileSync(stateFile); const result=diagnostic.inspectAttemptRecovery(stateFile,receiptFile);
-  assert.strictEqual(result.inspection.process_stopped,false); assert.strictEqual(result.deadline_at,61000);
+  assert.strictEqual(result.inspection.process_stopped,false);
+  assert.strictEqual(result.schema_version,2); assert.strictEqual(result.budget,'tier-ceiling'); assert.strictEqual(result.started_at,1000);
+  assert(!Object.hasOwn(result,'deadline_at')); assert(!Object.hasOwn(result,'remaining_ms')); assert(!Object.hasOwn(result,'migrated_from'));
+  assert(!JSON.stringify(result).includes('NaN'));
   assert.deepStrictEqual(fs.readFileSync(stateFile),before);
+});
+test('attempt diagnostics show a legacy v1 deadline only as inert history without remaining time or mutation', f => {
+  const stateFile = path.join(f.root,'attempt-v1.json'), receiptFile = path.join(f.root,'receipt-v1.json');
+  const legacy = {schema_version:1,unit:'T-diagnostic',roots_sha256:'roots',purpose:'sidecar-attempt-recovery',
+    started_at:1000,deadline_at:61000,attempts:[],pending_questions:[]};
+  fs.writeFileSync(stateFile,JSON.stringify(legacy)); fs.writeFileSync(receiptFile,JSON.stringify({phase:'failed',failure:{provider_called:'unknown'}}));
+  const before=fs.readFileSync(stateFile); const result=diagnostic.inspectAttemptRecovery(stateFile,receiptFile);
+  assert.strictEqual(result.schema_version,1); assert.strictEqual(result.budget,'tier-ceiling');
+  assert.strictEqual(result.started_at,1000); assert.strictEqual(result.deadline_at,61000);
+  assert(!Object.hasOwn(result,'remaining_ms')); assert.strictEqual(result.next_action,'inspect-process-receipt-roots');
+  assert.deepStrictEqual(fs.readFileSync(stateFile),before);
+  const migrated = require('./forge-attempt-recovery').migrateState(legacy);
+  fs.writeFileSync(stateFile,JSON.stringify(migrated));
+  const shown=diagnostic.inspectAttemptRecovery(stateFile,receiptFile);
+  assert.strictEqual(shown.schema_version,2); assert.strictEqual(shown.deadline_at,61000);
+  assert.strictEqual(shown.migrated_from.schema_version,1); assert(!Object.hasOwn(shown,'remaining_ms'));
 });
 
 console.log(`${passed} recovery diagnostic tests passed`);

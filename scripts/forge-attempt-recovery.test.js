@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('assert');
 const api = require('./forge-attempt-recovery');
+const { ceilingFromRoute } = require('./forge-worker-timeout');
 async function main() {
   let now = 0, saved;
   const identity = { unit: 'execute-task/T-recovery', roots_sha256: 'roots', clock: () => now, persist: state => { saved = state; } };
@@ -22,6 +23,7 @@ async function main() {
   const resolverOptions = { unitType: request.unitType, scope: request.scope, phase: request.phase, unitId: request.taskId,
     cwd: request.cwd, hostRuntime: 'codex' };
   const recovery = api.createRecovery(identity); recovery.record(attempt);
+  assert.strictEqual(saved.schema_version, 2, 'every limit below runs against the v2 state');
   assert.throws(() => recovery.transition({ approved: true, schema_version: 1, sha256: 'recomputed', types: ['resolver-context-omission'] }), /live-handle/);
   assert.deepStrictEqual(recovery.snapshot().attempts, saved.attempts);
   assert.strictEqual(saved.attempts[0].provider_called, 'unknown');
@@ -45,7 +47,13 @@ async function main() {
   recovery.answer([{ id: questions[1].id, answer: 'native' }]);
   now = 60001;
   const resumed = api.createRecovery({ ...identity, state: saved });
-  assert.strictEqual((await resumed.next({ inspection })).reason_code, 'recovery-deadline-exhausted');
+  // Migrated (was recovery-deadline-exhausted): elapsed time alone never stops
+  // recovery; candidate provenance and the finite list still decide.
+  await assert.rejects(resumed.next({ inspection }), /candidate-provenance-required/);
+  const late = await resumed.next({ inspection, candidateSet, validateInvocation: async candidate => ({ ok: candidate.model !== 'gpt-incompatible' }) });
+  assert.strictEqual(late.action, 'invoke'); assert.strictEqual(late.route.model, 'gpt-6-astra');
+  assert.strictEqual(late.route.worker_mode, 'native'); assert.strictEqual(late.sidecar_ceiling, null, 'native routes carry no sidecar ceiling');
+  for (const key of ['remaining_ms', 'sidecar_remaining_ms']) assert(!(key in late), key);
   const timeout = api.createRecovery({ ...identity, state: undefined }); timeout.record({ ...attempt, failure_class: 'timeout' });
   assert.strictEqual((await timeout.next({ inspection })).reason_code, 'timeout-cause-indeterminate');
   await assert.rejects(timeout.next({ inspection, correction: { request_sha256: 'request', offline_validated: true, evidence_reference: 'check' } }), /correction-required/);
@@ -66,9 +74,15 @@ async function main() {
   assert.throws(() => authority.issue('live-answer', { unit: identity.unit, roots_sha256: 'roots', routes: ['route'],
     purpose: 'sidecar-recovery', expires_at: now + 100, gates_preserved: false }, () => now), /not-authorized/);
   await silenceRecovery(identity, route, attempt, inspection, candidateSet);
-  await persistentRecovery(route);
+  await persistentRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
+  await classificationTable(route);
+  await activeBudgetRecovery(identity, route, attempt, inspection, candidateSet);
+  await sessionResumeRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
+  await codexAppServerRecovery(identity, route, attempt, inspection, candidateSet);
   await canonicalProvenance();
-  console.log('PASS recovery clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
+  stateSchema(identity, attempt);
+  await migratedLimits(identity, route, attempt, inspection, candidateSet);
+  console.log('PASS recovery without cumulative clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
 }
 async function silenceRecovery(identity, route, attempt, inspection, candidateSet) {
   let now = 0, saved;
@@ -86,7 +100,9 @@ async function silenceRecovery(identity, route, attempt, inspection, candidateSe
   now = 1000;
   const retry = await session.next(input);
   assert.equal(retry.route.model, route.model); assert.equal(retry.silence_retry, true);
-  assert.equal(retry.remaining_ms, 30000);
+  // Migrated (was remaining_ms 30000): the silence retry receives the tier ceiling.
+  assert.deepStrictEqual(retry.sidecar_ceiling, ceilingFromRoute(route)); assert.strictEqual(retry.sidecar_ceiling.seconds, 1800);
+  assert(!('remaining_ms' in retry) && !('sidecar_remaining_ms' in retry));
   session.reserve(retry, attempt.request_sha256);
   const restart = api.createRecovery({ ...options, state: saved });
   const pending = await restart.next({ ...input, validateInvocation() { throw Error('pending retry cannot validate another writer'); } });
@@ -97,14 +113,303 @@ async function silenceRecovery(identity, route, attempt, inspection, candidateSe
   const following = await restart.next(input);
   assert.equal(following.route.model, 'gpt-6-astra', 'only one unchanged same-target retry is available');
   assert.equal(following.silence_retry, false);
+  // Migrated (was clock rollback / remaining() 1000): v2 has no clock to renew.
   now = 59000; const expired = api.createRecovery({ ...options, state: saved });
-  expired.snapshot(); now = 100;
-  assert.equal(expired.remaining(), 1000, 'clock rollback cannot renew historical recovery time');
+  assert.strictEqual(expired.remaining, undefined);
+  for (const key of ['deadline_at', 'budget_remaining_ms', 'clock_high_water']) assert(!(key in expired.snapshot()), key);
+  // Migrated (was 55000 -> recovery-deadline-exhausted): a late silence retry
+  // still runs once, with the full tier ceiling and an explicit source honoured.
+  const explicitRoute = { ...route, workers_timeout: 2400, workers_timeout_source: 'explicit' };
   const late = api.createRecovery({ ...options, state: undefined, clock: () => 0 });
-  late.record({ ...attempt, failure_class: 'silence', observation: { silence } });
+  late.record({ ...attempt, route: explicitRoute, failure_class: 'silence', observation: { silence } });
   const almostSpent = api.createRecovery({ ...options, state: late.snapshot(), clock: () => 55000 });
-  assert.equal((await almostSpent.next(input)).reason_code, 'recovery-deadline-exhausted');
-  console.log('PASS anomalous silence: trusted threshold, one durable same-target reservation, restart exclusion, fallback and nonrenewing clock');
+  const lateRetry = await almostSpent.next({ ...input, exception: authority.issue('fixture:late', { unit: identity.unit,
+    roots_sha256: identity.roots_sha256, purpose: 'sidecar-recovery', expires_at: 120000,
+    routes: [api.routeKey(explicitRoute)], gates_preserved: true }, () => 55000) });
+  assert.strictEqual(lateRetry.silence_retry, true);
+  assert.deepStrictEqual(lateRetry.sidecar_ceiling, ceilingFromRoute(explicitRoute));
+  assert.strictEqual(lateRetry.sidecar_ceiling.seconds, 2400); assert.strictEqual(lateRetry.sidecar_ceiling.source, 'explicit');
+  console.log('PASS anomalous silence: trusted threshold, one durable same-target reservation, restart exclusion, fallback and tier ceiling');
+}
+// The whole captureFailure classification table: a live stream at the safety
+// ceiling (budget-exceeded-while-active) is never a timeout nor a destination failure.
+async function classificationTable(route) {
+  const fs = require('fs'), path = require('path');
+  const lab = require('./forge-code-roots.test').laboratory('recovery-classification');
+  const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', route: { ...route, unit_type: 'research-milestone' }, prompt: 'before', resultFile: path.join(lab.dir, 'result.json') };
+  const silence = { dimension: 'initial', window_ms: 120001, threshold_ms: 120000,
+    policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+  const cases = [
+    ['claude-timeout', 'unknown', null, 'timeout'],
+    ['codex-timeout', true, null, 'timeout'],
+    ['claude-anomalous-silence', 'unknown', { version: 1, silence }, 'silence'],
+    ['budget-exceeded-while-active', true, null, 'active-budget'],
+    ['budget-exceeded-while-active', false, null, 'active-budget'],
+    ['budget-exceeded-while-active', 'unknown', null, 'active-budget'],
+    ['quota', true, null, 'service'],
+    ['rate-limit', true, null, 'service'],
+    ['context-budget-exceeded', false, null, 'caller'],
+    ['claude-exit-nonzero', 'unknown', null, 'unknown'],
+  ];
+  cases.forEach(([code, provider, observation, expected], index) => {
+    const stateFile = path.join(lab.dir, `state-${index}.json`);
+    const error = { code, ...(provider === 'unknown' ? {} : { provider_called: provider }),
+      ...(observation ? { diagnostic: { reason: 'anomalous-silence', observation } } : {}) };
+    const captured = api.captureFailure({ stateFile, request, unit: 'research-milestone/M001', route,
+      finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+      error, budgets: { coding_standards: 3000 } }).attempts.at(-1);
+    assert.strictEqual(captured.failure_class, expected, `${code} (provider ${provider}) -> ${expected}`);
+    assert.strictEqual(captured.provider_called, provider);
+    assert.strictEqual(captured.reason_code, code);
+    if (expected === 'active-budget') {
+      assert.strictEqual(captured.timeout_cause, null);
+      assert.strictEqual(captured.service_failure_proven, false);
+    }
+    if (expected === 'timeout' || expected === 'silence') assert.strictEqual(captured.timeout_cause, 'indeterminate');
+  });
+  console.log('PASS classification table: timeout, silence, active-budget, service, caller and unknown');
+}
+// Migrated from the S03 named stop: after the existing pending-question,
+// inspection, replay and reconciliation checks, active-budget either resumes
+// the same session once (same route, no exception, no candidate selection) or
+// stops with a named refusal. silence/timeout (dead) never resume.
+async function activeBudgetRecovery(identity, route, attempt, inspection, candidateSet) {
+  const sessions = require('./forge-claude-session'), path = require('path'), os = require('os');
+  // Fixture ref only: no test here removes anything, and the profile path is fictitious.
+  const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null,
+    configDir: path.join(os.tmpdir(), 'forge-fixture-claude-profile', '.claude'), cwd: __dirname, now: 0 });
+  let now = 0, saved;
+  const options = { ...identity, state: undefined, clock: () => now, persist: value => { saved = value; } };
+  const budget = { ...attempt, reason_code: 'budget-exceeded-while-active', failure_class: 'active-budget',
+    service_failure_proven: false, provider_called: true };
+  const session = api.createRecovery(options);
+  session.record({ ...budget, session: ref });
+  assert.strictEqual(saved.attempts.at(-1).timeout_cause, null);
+  assert.deepStrictEqual(saved.attempts.at(-1).session, JSON.parse(JSON.stringify(ref)), 'the ref is kept as a plain clone');
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const alternate = { ...route, model: 'gpt-6-astra', model_resolved: 'gpt-6-astra', resolved_worker_engine: 'codex', worker_mode: 'native' };
+  const exception = authority.issue('fixture:active-budget', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 120000, routes: [api.routeKey(route), api.routeKey(alternate)], gates_preserved: true }, () => now);
+  const receipted = { ...inspection, receipt_sha256: 'receipt-before', receipt: { dispatch_id: 'dispatch-before' } };
+  const validated = [];
+  const validateInvocation = async candidate => { validated.push(api.routeKey(candidate)); return { ok: true, adapter: 'fixture' }; };
+  const input = { inspection: receipted, exception, candidateSet, validateInvocation };
+  await assert.rejects(session.next({ ...input, inspection: undefined }), /process-receipt-inspection-required/);
+  await assert.rejects(session.next({ ...input, inspection: { ...receipted, writer_possible: true } }), /writer-reconciliation-required/,
+    'without reconciliation there is no resume');
+  assert.strictEqual((await session.next({ ...input, inspection: { ...receipted, valid_saved_response: true } })).action, 'replay');
+  assert.deepStrictEqual(validated, [], 'no adapter validation before inspection/replay/reconciliation');
+  assert.strictEqual(saved.selection, undefined);
+  for (const [variant, at] of [[input, 1000], [{ inspection: receipted, validateInvocation }, 2000],
+    [{ ...input, inspection: { ...receipted, writer_possible: true, roots_reconciled: true } }, 60001]]) {
+    now = at;
+    const decision = await session.next(variant);
+    assert.strictEqual(decision.action, 'invoke');
+    assert.strictEqual(api.routeKey(decision.route), api.routeKey(route), 'same tier/effort/model route');
+    assert.strictEqual(decision.resume.session.id, ref.id);
+    assert.strictEqual(decision.resume.session_sha256, sessions.sessionDigest(ref.id));
+    assert.deepStrictEqual(decision.resume.resumed_from, { receipt_sha256: 'receipt-before', dispatch_id: 'dispatch-before' });
+    assert.deepStrictEqual(decision.sidecar_ceiling, JSON.parse(JSON.stringify(ceilingFromRoute(route))));
+    assert.strictEqual(decision.sidecar_ceiling.seconds, ceilingFromRoute(route).seconds);
+    assert.strictEqual(decision.corrected, false); assert.strictEqual(decision.provider_called, false);
+    for (const key of ['authorization_reference', 'authorization_expires_at', 'native_authorization_remaining_ms']) assert(!(key in decision), key);
+    assert.deepStrictEqual(saved.selection, { provenance: null, rejected: [], selected: api.routeKey(route) });
+  }
+  assert(validated.every(key => key === api.routeKey(route)), 'the alternate candidate is never validated');
+  assert.doesNotThrow(() => api.exceptionFor(exception, saved, now), 'the standing exception is not consumed');
+  assert.deepStrictEqual(await session.next({ inspection: receipted,
+    validateInvocation: async () => ({ ok: false, reason_code: 'claude-resume-config-mismatch' }) }),
+  { action: 'stop', reason_code: 'budget-exceeded-resume-refused', refusal: 'claude-resume-config-mismatch' });
+  const resume = await session.next(input);
+  session.reserve(resume, 'request');
+  const reservation = saved.reservations.at(-1);
+  assert.strictEqual(reservation.reason, 'same-session-resume');
+  assert.strictEqual(reservation.session_sha256, sessions.sessionDigest(ref.id));
+  assert(!JSON.stringify(saved.reservations).includes(ref.id) && !JSON.stringify(saved.selection).includes(ref.id), 'reservations carry only the digest');
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'recovery-reservation-pending' },
+    'a reserved resume with no recorded outcome may still be running: pending, never exhausted');
+  session.record({ ...budget, session: null });
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' });
+  session.record({ ...budget, session: ref });
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' }, 'at most one resume per unit');
+  session.questions(['Pending choice']);
+  assert.strictEqual((await session.next(input)).action, 'pending-questions', 'pending questions still come first');
+  const bare = api.createRecovery({ ...identity, state: undefined, clock: () => 0, persist: undefined });
+  bare.record(budget);
+  assert.deepStrictEqual(await bare.next({ inspection: receipted, validateInvocation }), { action: 'stop', reason_code: 'budget-exceeded-resume-unavailable' });
+  assert.throws(() => bare.record({ ...attempt, failure_class: 'timeout', session: ref }), /recovery-session-class-invalid/);
+  assert.throws(() => bare.record({ ...budget, session: { ...ref, id: 'not-a-uuid' } }), /recovery-session-invalid/);
+  const silence = { dimension: 'initial', window_ms: 120001, threshold_ms: 120000,
+    policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+  for (const dead of [{ ...attempt, failure_class: 'silence', service_failure_proven: false, observation: { silence } },
+    { ...attempt, failure_class: 'timeout', service_failure_proven: false }]) {
+    const chained = api.createRecovery({ ...identity, state: undefined, clock: () => 0, persist: undefined });
+    chained.record({ ...budget, session: ref }); chained.record(dead);
+    for (const variant of [{ inspection: receipted, validateInvocation }, input]) {
+      const decision = await chained.next(variant);
+      assert(!('resume' in decision), dead.failure_class + ' is never resumed');
+    }
+  }
+  const legacy = bare.snapshot();
+  assert(!('session' in legacy.attempts[0]), 'an attempt without a ref keeps the old shape');
+  assert.strictEqual(api.validateState(legacy), legacy, 'v2 without session remains valid');
+  const v1 = legacyV1(legacy);
+  assert.strictEqual(api.validateState(v1), v1, 'v1 without session remains valid');
+  console.log('PASS active-budget: single same-session resume after inspection/reconciliation, exhausted/unavailable/refused stops, dead never resumed');
+}
+// recoverAttempt end-to-end on disk: ref captured, resume handed to invoke as
+// the 6th argument, then the exhausted stop removes the session.
+// S07: the codex app-server liveness kill gets the Claude semantics. An indeterminate
+// silence is class 'silence' with a single same-target retry; a live stream at the
+// ceiling is 'active-budget', and without a Claude session it stops as unavailable.
+async function codexAppServerRecovery(identity, route, attempt, inspection, candidateSet) {
+  const fs = require('fs'), path = require('path');
+  const liveness = require('./forge-sidecar-liveness'), { digest } = require('./forge-code-roots');
+  const lab = require('./forge-code-roots.test').laboratory('recovery-codex-appserver');
+  const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
+  const codexRoute = { ...route, resolved_worker_engine: 'codex', model: 'gpt-6-codex', model_resolved: 'gpt-6-codex',
+    worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' };
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', route: { ...codexRoute, unit_type: 'research-milestone' }, prompt: 'codex', resultFile: path.join(lab.dir, 'result.json') };
+  const receiptFile = path.join(lab.dir, 'receipt.json');
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', dispatch_id: 'dispatch-codex',
+    recovery_identity_sha256: digest(api.requestIdentity(request)), failure: { provider_called: true } }));
+  const capture = (stateFile, error) => api.captureFailure({ stateFile, receiptFile, request, unit: 'research-milestone/M001',
+    route: codexRoute, finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', codexRoute.model] }, context: request.prompt }),
+    error, budgets: { coding_standards: 3000 } });
+  // Same block shape forge-appserver-client's silenceError puts in the diagnostic.
+  const silence = { dimension: 'gap', window_ms: 240001, threshold_ms: liveness.DEFAULTS.deadMs,
+    policy: liveness.POLICY, source: liveness.SOURCE_DEFAULT, cause: 'indeterminate' };
+  const silenceError = { code: 'appserver-anomalous-silence', provider_called: true,
+    diagnostic: { reason: 'anomalous-silence', observation: { version: 1, silence } } };
+  const dead = capture(path.join(lab.dir, 'silence.json'), silenceError).attempts.at(-1);
+  assert.strictEqual(dead.failure_class, 'silence', 'codex anomalous silence has the Claude class');
+  assert.strictEqual(dead.timeout_cause, 'indeterminate');
+  assert.deepStrictEqual(dead.observation.silence, silence);
+  assert.strictEqual(dead.session, undefined);
+  const unproven = capture(path.join(lab.dir, 'silence-unproven.json'), { ...silenceError, diagnostic: undefined }).attempts.at(-1);
+  assert.strictEqual(unproven.failure_class, 'unknown', 'without the indeterminate silence block it is not silence');
+  // The single same-target retry applies to the codex row exactly as to Claude's.
+  let now = 0, saved;
+  const options = { ...identity, state: undefined, clock: () => now, persist: value => { saved = value; } };
+  const row = { ...attempt, route: codexRoute, reason_code: dead.reason_code, failure_class: dead.failure_class,
+    service_failure_proven: false, observation: dead.observation };
+  const session = api.createRecovery(options);
+  session.record(row);
+  const alternate = { ...codexRoute, model: 'gpt-6-astra', model_resolved: 'gpt-6-astra', worker_mode: 'native' };
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const exception = authority.issue('fixture:codex-silence', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 120000, routes: [api.routeKey(codexRoute), api.routeKey(alternate)], gates_preserved: true }, () => now);
+  const input = { inspection, exception, candidateSet, validateInvocation: async () => ({ ok: true }) };
+  const retry = await session.next(input);
+  assert.strictEqual(retry.action, 'invoke');
+  assert.strictEqual(retry.silence_retry, true);
+  assert.strictEqual(retry.route.model, codexRoute.model, 'the first silence retry stays on the same codex target');
+  session.reserve(retry, attempt.request_sha256);
+  const restart = api.createRecovery({ ...options, state: saved });
+  restart.record(row);
+  const following = await restart.next(input);
+  assert.notStrictEqual(following.silence_retry, true, 'at most one same-target silence retry for codex');
+  assert.notStrictEqual(following.route?.model, codexRoute.model, 'no second invocation of the silent codex target');
+  // Active budget without a session ref (codex never has one): stop, no candidate, no resume.
+  const budgetFile = path.join(lab.dir, 'budget.json');
+  const budget = capture(budgetFile, { code: 'budget-exceeded-while-active', provider_called: true }).attempts.at(-1);
+  assert.strictEqual(budget.failure_class, 'active-budget');
+  assert.strictEqual(budget.session ?? null, null);
+  const stopped = await api.recoverAttempt({ stateFile: budgetFile, receiptFile, request, clock: () => Date.now(), processProbe: () => 'stopped',
+    resolveDispatch() { throw Error('codex active budget must not resolve candidates'); },
+    validateInvocation: async () => { throw Error('codex active budget must not validate a resume'); },
+    invoke() { throw Error('codex active budget must not invoke'); } });
+  assert.strictEqual(stopped.action, 'stop');
+  assert.strictEqual(stopped.reason_code, 'budget-exceeded-resume-unavailable');
+  assert(!('resume' in stopped) && !('route' in stopped), 'no resume and no candidate advance');
+  console.log('PASS codex app-server: silence class with one same-target retry; active budget without session stops as resume-unavailable');
+}
+
+async function sessionResumeRecovery(route) {
+  const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
+  const sessions = require('./forge-claude-session'), { digest } = require('./forge-code-roots');
+  const lab = require('./forge-code-roots.test').laboratory('recovery-resume');
+  const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', route: { ...route, unit_type: 'research-milestone' }, prompt: 'resume', resultFile: path.join(lab.dir, 'result.json') };
+  const stateFile = path.join(lab.dir, 'state.json'), receiptFile = path.join(lab.dir, 'receipt.json');
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', dispatch_id: 'dispatch-1',
+    recovery_identity_sha256: digest(api.requestIdentity(request)), failure: { provider_called: true } }));
+  const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null, configDir: path.join(lab.dir, 'profile', '.claude'), cwd });
+  const capture = (session, file = stateFile) => api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
+    finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+    error: { code: 'budget-exceeded-while-active', provider_called: true, session }, budgets: { coding_standards: 3000 } });
+  assert.strictEqual(capture({ ...ref, id: 'not-a-uuid' }, path.join(lab.dir, 'invalid.json')).attempts[0].session, null, 'invalid ref discarded, never thrown');
+  const first = capture(ref);
+  assert.deepStrictEqual(first.attempts[0].session, JSON.parse(JSON.stringify(ref)));
+  const removed = [];
+  const base = { stateFile, receiptFile, request, clock: () => first.started_at + 1, processProbe: () => 'stopped',
+    resolveDispatch() { throw Error('resume must not resolve candidates'); }, validateInvocation: async () => ({ ok: true }),
+    sessionRemover: value => { removed.push(value.id); return { ok: true, removed: [], refused: [], errors: [] }; } };
+  let args;
+  const resumed = await api.recoverAttempt({ ...base, invoke: async (...observed) => { args = observed; observed[3](); return { status: 'failed' }; } });
+  assert.strictEqual(resumed.action, 'invoke');
+  assert(!JSON.stringify(resumed).includes(ref.id) && !('session' in resumed.resume), 'the public response never carries the session ref');
+  assert.deepStrictEqual(Object.keys(resumed.resume).sort(), ['resumed_from', 'session_sha256']);
+  assert.strictEqual(args.length, 6, 'invoke receives resume as the 6th positional argument');
+  assert.strictEqual(args[5].session.id, ref.id);
+  assert.deepStrictEqual(args[5].resumed_from, { receipt_sha256: digest(fs.readFileSync(receiptFile)), dispatch_id: 'dispatch-1' });
+  assert.deepStrictEqual(args[2], JSON.parse(JSON.stringify(ceilingFromRoute(route))));
+  assert.deepStrictEqual(removed, [], 'no removal before the resume');
+  const persisted = stateApi.loadRecovery(stateFile);
+  assert.strictEqual(persisted.reservations.at(-1).reason, 'same-session-resume');
+  assert.strictEqual(persisted.reservations.at(-1).session_sha256, sessions.sessionDigest(ref.id));
+  assert(!JSON.stringify({ ...persisted, attempts: persisted.attempts.map(({ session: _s, ...row }) => row) }).includes(ref.id),
+    'the raw id lives only in attempts[].session');
+  const inFlight = await api.recoverAttempt({ ...base, invoke() { throw Error('no second resume while the first has no outcome'); } });
+  assert.strictEqual(inFlight.reason_code, 'recovery-reservation-pending');
+  assert.strictEqual(inFlight.session_cleanup, undefined, 'no session cleanup for a pending resume');
+  assert.deepStrictEqual(removed, []);
+  capture(undefined);
+  const exhausted = await api.recoverAttempt({ ...base, invoke() { throw Error('a second resume must never be invoked'); } });
+  assert.strictEqual(exhausted.reason_code, 'budget-exceeded-resume-exhausted');
+  assert.deepStrictEqual(exhausted.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+  assert.deepStrictEqual(removed, [ref.id], 'each distinct ref is removed once');
+  const failing = await api.recoverAttempt({ ...base, sessionRemover: () => ({ ok: false, refused: [{ path: 'x', reason: 'symlink' }] }) });
+  assert.deepStrictEqual(failing.session_cleanup, { ok: false, removed_count: 0, refused_count: 1 });
+  const real = await api.recoverAttempt({ ...base, sessionRemover: undefined });
+  assert.deepStrictEqual(real.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 }, 'absent targets are idempotent');
+  // R3/R4: a resume refused before spawn is a terminal session outcome.
+  for (const code of ['claude-resume-account-mismatch', 'claude-resume-config-mismatch']) {
+    const file = path.join(lab.dir, `refused-${code}.json`), gone = [];
+    capture(ref, file);
+    const opts = { ...base, stateFile: file, sessionRemover: value => { gone.push(value.id); return { ok: true }; } };
+    const refused = await api.recoverAttempt({ ...opts, invoke: async () => { throw Object.assign(Error(code), { code, provider_called: false }); } });
+    assert.strictEqual(refused.reason_code, 'budget-exceeded-resume-refused');
+    assert.strictEqual(refused.refusal, code);
+    assert.deepStrictEqual(refused.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+    assert.deepStrictEqual(gone, [ref.id]);
+    assert(!JSON.stringify(refused).includes(ref.id));
+    // The refusal was also captured as a caller failure: the next recovery cleans instead of demanding a correction.
+    api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
+      finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+      error: { code, provider_called: false }, budgets: { coding_standards: 3000 } });
+    const later = await api.recoverAttempt({ ...opts, invoke() { throw Error('terminal: nothing to invoke'); } });
+    assert.strictEqual(later.reason_code, 'budget-exceeded-resume-refused');
+    assert.deepStrictEqual(later.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+    assert.deepStrictEqual(gone, [ref.id, ref.id]);
+  }
+  // R5: a session whose owned process termination was unconfirmed is removed by recovery.
+  {
+    const file = path.join(lab.dir, 'deferred.json'), gone = [];
+    api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
+      finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+      error: { code: 'claude-timeout', provider_called: true, session: ref, session_cleanup: { ok: false, pending: true } }, budgets: { coding_standards: 3000 } });
+    assert.deepStrictEqual(stateApi.loadRecovery(file).attempts[0].session, JSON.parse(JSON.stringify(ref)));
+    const out = await api.recoverAttempt({ ...base, stateFile: file, sessionRemover: value => { gone.push(value.id); return { ok: true }; } });
+    assert.deepStrictEqual(out.deferred_session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+    assert.deepStrictEqual(gone, [ref.id]);
+  }
+  lab.cleanup();
+  console.log('PASS recoverAttempt resume: ref captured, 6th invoke argument, digest-only reservation and session removal on exhausted stop');
 }
 async function persistentRecovery(route) {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
@@ -193,7 +498,7 @@ async function persistentRecovery(route) {
       final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model, '--prompt', corrected.prompt] }, context: corrected.prompt }) }),
     invoke: async (selected, _invocation, remaining, assertReady) => {
       assertReady(); assertReady();
-      invoked++; assert.strictEqual(selected.model, route.model); assert(remaining > 0 && remaining <= 60000); return { status: 'done' };
+      invoked++; assert.strictEqual(selected.model, route.model); assert.deepStrictEqual(remaining, ceilingFromRoute(selected)); return { status: 'done' };
     } });
   assert.strictEqual(retried.corrected, true); assert.strictEqual(invoked, 1);
   assert.strictEqual(stateApi.loadRecovery(stateFile).reservations.length, 1);
@@ -209,9 +514,14 @@ async function persistentRecovery(route) {
     [path.join(__dirname, 'forge-attempt-recovery.js'), '--inspect', stateFile, receiptFile], { encoding: 'utf8', windowsHide: true });
   assert.strictEqual(child.status, 0, child.stderr);
   const inspected = JSON.parse(child.stdout);
-  assert.strictEqual(inspected.state.deadline_at, initial.deadline_at);
+  // Migrated (was deadline_at equality): --inspect reports schema and budget, no remaining_ms.
+  assert.strictEqual(inspected.schema_version, 2); assert.strictEqual(inspected.budget, 'tier-ceiling');
+  assert(!('remaining_ms' in inspected) && !('deadline_at' in inspected.state));
   assert.strictEqual(inspected.state.reservations.length, 1);
-  assert.strictEqual((await api.recoverAttempt({ ...base, clock: () => initial.deadline_at + 1 })).reason_code, 'recovery-deadline-exhausted');
+  // Migrated (was deadline_at + 1 -> recovery-deadline-exhausted): late recovery
+  // is still bounded by the caller-correction requirement, not by time.
+  await assert.rejects(api.recoverAttempt({ ...base, clock: () => initial.started_at + 60001 }), /correction-required/);
+  await migratedRecovery({ base, initial, lab, corrected });
   const raceState = path.join(lab.dir, 'racing-state.json');
   const readFile = fs.readFileSync;
   const concurrentState = { ...initial, phase: 'concurrent-reservation', reservations: [{ id: 'other-writer' }] };
@@ -251,21 +561,114 @@ async function persistentRecovery(route) {
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed' }));
   await assert.rejects(api.recoverAttempt(base), /process-receipt-inspection-required/);
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'ready', provider_called: true }));
-  const replay = await api.recoverAttempt({ ...base, clock: () => initial.deadline_at + 1, processProbe: () => 'stopped',
+  const replay = await api.recoverAttempt({ ...base, clock: () => initial.started_at + 60001, processProbe: () => 'stopped',
     resolveDispatch() { throw new Error('saved response must not resolve candidates'); }, replay: async () => ({ status: 'done' }) });
   assert.strictEqual(replay.action, 'replay'); assert.strictEqual(replay.provider_called, false); assert.strictEqual(invoked, 1);
   for (const receipt of [{ phase: 'ready', provider_called: true }, { phase: 'failed', saved_candidate: { sha256: 'fixture-candidate' } }]) {
     fs.writeFileSync(receiptFile, JSON.stringify(receipt));
     const saved = await api.recoverAttempt({ ...base, environmentalCorrection: true,
-      processProbe: () => 'stopped', clock: () => initial.deadline_at + 1,
+      processProbe: () => 'stopped', clock: () => initial.started_at + 60001,
       inspectPreSpawn() { throw Error('saved response must replay before pre-spawn inspection'); },
       resolveDispatch() { throw Error('saved response must not resolve candidates'); },
       replay: async observed => { assert.deepStrictEqual(observed, receipt); return { status: 'done' }; } });
     assert.strictEqual(saved.action, 'replay'); assert.strictEqual(saved.provider_called, false);
   }
-  assert.throws(() => api.validateState({ ...initial, deadline_at: initial.deadline_at + 1 }), /state-invalid/);
+  assert.throws(() => api.validateState({ ...initial, deadline_at: initial.started_at + 60000 }), /state-invalid/, 'v2 cannot carry the clock');
   lab.cleanup();
-  console.log('PASS persisted recovery: caller repair once, process proof, restart/CLI deadline, identity, external state and zero-inference replay');
+  console.log('PASS persisted recovery: caller repair once, process proof, restart/CLI schema, identity, external state and zero-inference replay');
+}
+function legacyV1(state, overrides = {}) {
+  const { budget, migrated_from: _origin, ...rest } = JSON.parse(JSON.stringify(state));
+  assert.strictEqual(budget, 'tier-ceiling');
+  return { ...rest, schema_version: 1, deadline_at: rest.started_at + 60000,
+    budget_remaining_ms: 0, clock_high_water: rest.started_at + 60000, ...overrides };
+}
+// Schema v2, explicit pure migration from v1 and refusal of corrupted/clocked states.
+function stateSchema(identity, attempt) {
+  const fresh = api.createRecovery({ ...identity, clock: () => 5, persist: undefined });
+  fresh.record(attempt);
+  const v2 = fresh.snapshot();
+  assert.strictEqual(v2.schema_version, 2); assert.strictEqual(v2.budget, 'tier-ceiling'); assert.strictEqual(v2.started_at, 5);
+  for (const key of ['deadline_at', 'budget_remaining_ms', 'clock_high_water', 'migrated_from']) assert(!(key in v2), key);
+  assert.strictEqual(fresh.state_migration, null);
+  const v1 = legacyV1({ ...v2, reservations: [{ route_key: 'r', corrected: false }], pending_questions: [{ id: 'q', question: 'Q', status: 'pending' }],
+    transitions: [{ id: 't' }], selection: { selected: 'r' } }, { budget_remaining_ms: 21000, clock_high_water: 39000 });
+  const frozen = JSON.stringify(v1);
+  assert.strictEqual(api.validateState(v1), v1, 'a valid v1 remains readable');
+  const migrated = api.migrateState(v1, 1234);
+  assert.strictEqual(JSON.stringify(v1), frozen, 'migrateState never mutates its input');
+  assert.strictEqual(migrated.schema_version, 2); assert.strictEqual(migrated.budget, 'tier-ceiling');
+  assert.strictEqual(migrated.started_at, v1.started_at); assert.strictEqual(migrated.deadline_at, v1.deadline_at);
+  assert.deepStrictEqual(migrated.migrated_from, { schema_version: 1, migrated_at: 1234, reason: 'recovery-budget-tier-ceiling',
+    budget_remaining_ms: 21000, clock_high_water: 39000 });
+  assert(!('budget_remaining_ms' in migrated) && !('clock_high_water' in migrated));
+  for (const key of ['attempts', 'reservations', 'pending_questions', 'transitions', 'selection', 'request_identity',
+    'request_identity_sha256', 'unit', 'roots_sha256', 'purpose', 'phase']) assert.deepStrictEqual(migrated[key], v1[key], key);
+  assert.deepStrictEqual(api.migrateState(migrated, 9999), migrated, 'v2 -> same content (idempotent)');
+  assert.deepStrictEqual(api.migrateState(v2), v2);
+  const restarted = api.createRecovery({ ...identity, state: v1, clock: () => 777 });
+  assert.deepStrictEqual(restarted.state_migration, { from: 1, to: 2 });
+  assert.strictEqual(restarted.snapshot().migrated_from.migrated_at, 777);
+  for (const invalid of [legacyV1(v2, { deadline_at: v2.started_at + 59999 }), legacyV1(v2, { deadline_at: undefined }),
+    { ...v2, deadline_at: v2.started_at + 60000 }, { ...v2, budget_remaining_ms: 1 }, { ...v2, clock_high_water: 1 },
+    { ...migrated, budget_remaining_ms: 1 }, { ...migrated, migrated_from: { ...migrated.migrated_from, schema_version: 2 } },
+    { ...migrated, deadline_at: migrated.deadline_at + 1 }, { ...v2, budget: undefined }, { ...v2, schema_version: 3 }]) {
+    assert.throws(() => api.validateState(invalid), /recovery-state-invalid/);
+    assert.throws(() => api.createRecovery({ ...identity, state: invalid }), /recovery-state-invalid/);
+  }
+  console.log('PASS recovery state v2: no cumulative clock, explicit pure v1 migration, idempotence and named refusal');
+}
+// Every preserved limit still holds on a v1 state that expired long ago and is migrated.
+async function migratedLimits(identity, route, attempt, inspection, candidateSet) {
+  let saved;
+  const silence = { dimension: 'initial', window_ms: 120001, threshold_ms: 120000,
+    policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+  const base = api.createRecovery({ ...identity, clock: () => 0, persist: value => { saved = value; } });
+  base.record({ ...attempt, failure_class: 'silence', service_failure_proven: false, observation: { silence } });
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const exception = authority.issue('fixture:migrated', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 10 * 60000, routes: [api.routeKey(route)], gates_preserved: true }, () => 0);
+  const retry = await base.next({ inspection, exception, candidateSet, validateInvocation: async () => ({ ok: true }) });
+  base.reserve(retry, attempt.request_sha256);
+  const now = 5 * 60000; // five minutes after a 60-second v1 deadline
+  const session = api.createRecovery({ ...identity, state: legacyV1(saved), clock: () => now, persist: value => { saved = value; } });
+  const input = { inspection, exception, candidateSet, validateInvocation() { throw Error('limits must stop before any adapter'); } };
+  await assert.rejects(session.next({ ...input, inspection: undefined }), /process-receipt-inspection-required/);
+  await assert.rejects(session.next({ ...input, inspection: { ...inspection, writer_possible: true } }), /writer-reconciliation-required/);
+  assert.strictEqual((await session.next(input)).reason_code, 'recovery-reservation-pending');
+  session.snapshot();
+  assert.strictEqual(saved.schema_version, 2); assert.strictEqual(saved.migrated_from.schema_version, 1);
+  assert.throws(() => api.exceptionFor(exception, saved, 10 * 60000), /exception-invalid/, 'expired exception refused');
+  console.log('PASS migrated v1 state: inspection, reconciliation, pending reservation and exception expiry still enforced');
+}
+// recoverAttempt on an expired v1 file: no deadline stop, explicit persisted migration.
+async function migratedRecovery({ base, initial, lab, corrected }) {
+  const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
+  const stateFile = path.join(lab.dir, 'legacy-v1-state.json');
+  const v1 = legacyV1(initial); fs.writeFileSync(stateFile, JSON.stringify(v1));
+  assert.strictEqual(stateApi.loadRecovery(stateFile).schema_version, 1, 'loadRecovery stays read-only');
+  const inspectOnly = require('child_process').spawnSync(process.execPath,
+    [path.join(__dirname, 'forge-attempt-recovery.js'), '--inspect', stateFile, base.receiptFile], { encoding: 'utf8', windowsHide: true });
+  assert.strictEqual(inspectOnly.status, 0, inspectOnly.stderr);
+  assert.strictEqual(JSON.parse(inspectOnly.stdout).schema_version, 1);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')), v1, '--inspect never rewrites the file');
+  let ceiling;
+  const result = await api.recoverAttempt({ ...base, stateFile, request: corrected, correction: true,
+    clock: () => v1.deadline_at + 3600000,
+    validateCorrection: async () => ({ ok: true, evidence_reference: 'fixture:migration',
+      final_evidence: require('./forge-attempt-telemetry').captureFinal({ request: { prompt: corrected.prompt, v: 1 }, context: corrected.prompt }) }),
+    invoke: async (_selected, _invocation, observed, assertReady) => { assertReady(); ceiling = observed; return { status: 'done' }; } });
+  assert.strictEqual(result.action, 'invoke');
+  assert.deepStrictEqual(result.state_migration, { from: 1, to: 2 });
+  assert.deepStrictEqual(ceiling, ceilingFromRoute(result.route));
+  assert.strictEqual(ceiling.seconds, 3600, 'a historical integer remainder never becomes the transport timeout');
+  assert.strictEqual(ceiling.ms, 3600000);
+  const after = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.strictEqual(after.schema_version, 2); assert.strictEqual(after.migrated_from.schema_version, 1);
+  assert.strictEqual(after.started_at, v1.started_at); assert.strictEqual(after.deadline_at, v1.deadline_at);
+  assert.deepStrictEqual(after.attempts, v1.attempts); assert.deepStrictEqual(after.pending_questions, v1.pending_questions);
+  assert.strictEqual(after.reservations.length, 1);
+  console.log('PASS expired v1 file: recoverAttempt migrates explicitly, persists v2 and invokes with the tier ceiling');
 }
 async function canonicalProvenance() {
   const fs = require('fs'), path = require('path'), os = require('os');
@@ -313,17 +716,32 @@ async function canonicalProvenance() {
     const restarted = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(session.snapshot())), clock: () => 60001 });
     const accepted = await restarted.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) });
     assert.strictEqual(accepted.route.worker_mode, 'native');
-    assert.strictEqual(accepted.sidecar_remaining_ms, 0);
-    assert.strictEqual(accepted.remaining_ms, 0);
+    assert.strictEqual(accepted.sidecar_ceiling, null, 'native routes carry no sidecar ceiling');
+    assert(!('remaining_ms' in accepted) && !('sidecar_remaining_ms' in accepted));
     assert.strictEqual(accepted.native_authorization_remaining_ms, 59999);
     assert.strictEqual(accepted.provenance.unit_type, request.unitType);
     restarted.reserve(accepted, 'request');
     const twice = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(restarted.snapshot())), clock: () => 60002 });
-    const stopped = await twice.next({ inspection, candidateSet: candidates, exception, validateInvocation() { throw new Error('sidecar beyond deadline'); } });
-    assert.strictEqual(stopped.action, 'stop');
-    assert(stopped.rejected.some(item => item.reason_code === 'recovery-deadline-exhausted'));
-    assert.strictEqual(twice.snapshot().deadline_at, 60000);
+    // Migrated (was sidecar rejected with recovery-deadline-exhausted): an untried
+    // sidecar candidate may start with the tier ceiling; adapter refusal still
+    // falls through, and the finite list ends in recovery-candidates-exhausted.
+    const refused = await twice.next({ inspection, candidateSet: candidates, exception, validateInvocation() { throw new Error('adapter refused'); } });
+    assert.strictEqual(refused.reason_code, 'recovery-candidates-exhausted');
+    assert(refused.rejected.length && refused.rejected.every(item => item.reason_code === 'recovery-adapter-refused'));
+    const sidecar = await twice.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) });
+    assert.strictEqual(sidecar.route.worker_mode, 'sidecar');
+    assert.deepStrictEqual(sidecar.sidecar_ceiling, ceilingFromRoute(sidecar.route));
+    assert.strictEqual(twice.snapshot().deadline_at, undefined);
     assert.strictEqual(twice.snapshot().reservations.length, 1);
+    let tries = 0, exhausted;
+    const draining = api.createRecovery({ ...identity, state: JSON.parse(JSON.stringify(twice.snapshot())), clock: () => 60003 });
+    for (; tries < 10; tries++) {
+      const decision = await draining.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) });
+      if (decision.action !== 'invoke') { exhausted = decision; break; }
+      draining.reserve(decision, 'request');
+    }
+    assert.strictEqual(exhausted?.reason_code, 'recovery-candidates-exhausted', 'a failure sequence terminates without a clock');
+    assert(tries < route.chain.length, 'each destination is tried at most once');
     fs.mkdirSync(path.join(root, '.codex'));
     fs.writeFileSync(path.join(root, '.codex', 'AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nFixture authorization.\n<!-- user:forge-routing-continuity:end -->');
     const reference = 'conversation:restart-fixture';
@@ -338,15 +756,17 @@ async function canonicalProvenance() {
     assert.strictEqual(child.status, 0, child.stderr);
     const result = JSON.parse(child.stdout);
     assert.strictEqual(result.native.route.worker_mode, 'native');
-    assert.strictEqual(result.native.sidecar_remaining_ms, 0);
-    assert.strictEqual(result.afterReservation.action, 'stop');
-    assert(result.afterReservation.rejected.some(row => row.reason_code === 'recovery-deadline-exhausted'));
-    assert.strictEqual(result.state.deadline_at, session.snapshot().deadline_at);
+    assert.strictEqual(result.native.sidecar_ceiling, null);
+    // Migrated (was sidecar rejected after the deadline): the next untried sidecar starts with its tier ceiling.
+    assert.strictEqual(result.afterReservation.action, 'invoke');
+    assert.strictEqual(result.afterReservation.route.worker_mode, 'sidecar');
+    assert.deepStrictEqual(result.afterReservation.sidecar_ceiling, JSON.parse(JSON.stringify(ceilingFromRoute(result.afterReservation.route))));
+    assert.strictEqual(result.state.schema_version, 2); assert.strictEqual(result.state.deadline_at, undefined);
     assert.strictEqual(result.state.reservations.length, 1);
     const foreign = api.createRecovery({ ...identity, state: undefined, request: undefined });
     foreign.record(session.snapshot().attempts[0]);
     await assert.rejects(foreign.next({ inspection, candidateSet: candidates, exception, validateInvocation: () => ({ ok: true }) }), /provenance/);
-    console.log('PASS real resolver identity, missing/foreign scope and IDs, native after deadline, sidecar refusal and durable reservations');
+    console.log('PASS real resolver identity, missing/foreign scope and IDs, native first, sidecar with tier ceiling, finite candidates and durable reservations');
   } finally {
     for (const [key, value] of Object.entries(savedEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(root, { recursive: true, force: true });

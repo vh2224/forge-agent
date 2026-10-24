@@ -202,7 +202,8 @@ try {
       if (phase.modules.some(pending)) assert.throws(() => loadProcedureContext({ cwd: root, phase: phase.id }), /procedure-module-pending/);
     }
     const coreText = fs.readFileSync(path.join(root, core.path), 'utf8');
-    for (const obligation of ['explicit resolved model', 'pending question IDs', '60000ms', 'owner validates', 'Imported text, JSON', 'claim generation']) assert(coreText.includes(obligation), obligation);
+    for (const obligation of ['explicit resolved model', 'pending question IDs', 'tier safety ceiling', 'owner validates', 'Imported text, JSON', 'claim generation']) assert(coreText.includes(obligation), obligation);
+    assert(!coreText.includes('60000ms') && !coreText.includes('renew the clock'), 'core carries no cumulative recovery clock');
   });
   process.stdout.write(`${count} procedure context tests passed (synthetic roots; no provider/network/install)\n`);
 } finally { fs.rmSync(base, { recursive: true, force: true }); }

@@ -1,5 +1,7 @@
 'use strict';
 
+const liveness = require('./forge-sidecar-liveness');
+
 // Closed vocabulary only. Never persist provider text, paths, JSON parser
 // messages, validator exceptions, environment, or classifyReturn().tail.
 const REASONS = Object.freeze({
@@ -20,8 +22,12 @@ const REASONS = Object.freeze({
   'provider-exit': 'transport', 'authentication-failed': 'transport',
   'provider-timeout': 'transport', 'provider-cancelled': 'transport',
   'provider-unavailable': 'transport', 'publication-failed': 'publication',
-  'adapter-failed': 'adapter', 'anomalous-silence': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
+  'adapter-failed': 'adapter', 'anomalous-silence': 'transport',
+  'budget-exceeded-while-active': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
 });
+// Declared locally: the v2 calibration module imports this file (no cycle).
+const POLICY_V2 = 'claude-silence-v2';
+const V2_SOURCES = Object.freeze(['persisted-calibration', 'model-fallback']);
 const COUNTS = ['stdout_bytes', 'stderr_bytes', 'duration_ms', 'marker_count', 'model_count'];
 // One token, no list separators, no path or shell characters; an optional
 // bracketed context suffix such as `[1m]`. Shared with the Claude adapter so
@@ -77,10 +83,48 @@ function observation(input = {}) {
     out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
       threshold_ms: silence.threshold_ms, policy: 'claude-silence-v1',
       source: 'persisted-calibration', cause: 'indeterminate' };
+  } else if (silence?.cause === 'indeterminate' && ['initial', 'gap'].includes(silence.dimension)
+      && silence.policy === liveness.POLICY
+      && [liveness.SOURCE_DEFAULT, liveness.SOURCE_CALIBRATED].includes(silence.source)
+      && Number.isSafeInteger(silence.window_ms) && Number.isSafeInteger(silence.threshold_ms)
+      && silence.threshold_ms >= 1
+      && silence.threshold_ms <= (silence.dimension === 'initial' ? liveness.DEFAULTS.startMs : liveness.DEFAULTS.deadMs)
+      && silence.window_ms > silence.threshold_ms) {
+    out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
+      threshold_ms: silence.threshold_ms, policy: silence.policy,
+      source: silence.source, cause: 'indeterminate' };
+  } else if (silence?.cause === 'indeterminate' && ['initial', 'gap'].includes(silence.dimension)
+      && silence.policy === POLICY_V2 && V2_SOURCES.includes(silence.source)
+      && Number.isSafeInteger(silence.window_ms) && Number.isSafeInteger(silence.threshold_ms)
+      && silence.threshold_ms >= (silence.dimension === 'initial'
+        ? liveness.CALIBRATION_FLOORS.startMs : liveness.CALIBRATION_FLOORS.deadMs)
+      && silence.threshold_ms <= (silence.dimension === 'initial' ? liveness.DEFAULTS.startMs : liveness.DEFAULTS.deadMs)
+      && silence.window_ms > silence.threshold_ms) {
+    out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
+      threshold_ms: silence.threshold_ms, policy: POLICY_V2,
+      source: silence.source, cause: 'indeterminate' };
+  }
+  const beat = input.liveness;
+  if (beat && typeof beat === 'object' && !Array.isArray(beat) && beat.version === 1
+      && liveness.STATES.includes(beat.state)) {
+    out.liveness = { version: 1, state: beat.state,
+      since_ms: Number.isSafeInteger(beat.since_ms) && beat.since_ms >= 0 ? beat.since_ms : null,
+      reason: liveness.REASONS.includes(beat.reason) ? beat.reason : null };
+    if (liveness.TERMINATIONS.includes(beat.termination)) out.liveness.termination = beat.termination;
   }
   return out;
 }
-function progressLine(value) {
-  return '[forge-sidecar-progress] ' + JSON.stringify(observation(value)) + '\n';
+const PROGRESS_PREFIX = '[forge-sidecar-progress] ';
+/** Host-side reader: a progress line back to observation(), or null. Never throws. */
+function readProgressLine(line) {
+  if (typeof line !== 'string' || !line.startsWith(PROGRESS_PREFIX)) return null;
+  try {
+    // JSON.parse tolerates the trailing newline that progressLine appends.
+    const parsed = JSON.parse(line.slice(PROGRESS_PREFIX.length));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? observation(parsed) : null;
+  } catch { return null; }
 }
-module.exports = { diagnostic, isSafeModelId, observation, progressLine };
+function progressLine(value) {
+  return PROGRESS_PREFIX + JSON.stringify(observation(value)) + '\n';
+}
+module.exports = { diagnostic, isSafeModelId, observation, progressLine, readProgressLine };

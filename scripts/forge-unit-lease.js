@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const mutex = require('./forge-lock.js');
 const { normalizeHostRuntime } = require('./forge-runtime.js');
+const { MAX_PROTECTED_WINDOW_MS } = require('./forge-worker-timeout.js');
 
 const PROTOCOL_VERSION = '1.0.0';
 const DEFAULT_TTL_MS = 30_000;
@@ -272,7 +273,11 @@ function assertProtectedWindow(handle, cwd, unit) {
 }
 function openProtectedWindow(cwd, unitInput, ownerToken, generation, options = {}) {
   const duration = options.durationMs;
-  if (!Number.isInteger(duration) || duration <= 0 || duration > 300000) throw new Error('forge-unit-lease: invalid protected duration');
+  // The bound follows the largest tier safety ceiling plus grace (forge-worker-timeout.js),
+  // so the owner window can cover the whole execute phase instead of a 5 min cap.
+  // Cost: an owner that dies inside the window holds the lease until its deadline
+  // (up to ~91 min on tier max); the exit stays explicit: forge-unit-lease --recover.
+  if (!Number.isInteger(duration) || duration <= 0 || duration > MAX_PROTECTED_WINDOW_MS) throw new Error('forge-unit-lease: invalid protected duration');
   const unit = normalizeUnitKey(unitInput), file = leaseFile(cwd, unit);
   const token = opaque(ownerToken, 'owner_token', true), gen = opaque(generation, 'generation', true);
   const opened = withGuard(cwd, unit, guard => {

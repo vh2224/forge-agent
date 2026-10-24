@@ -31,7 +31,7 @@ function routingPresent(cwd) {
 }
 const { modelToAlias, modelFamily } = require('./forge-model-alias.js');
 const { readPrefsCached } = require('./forge-prefs.js');
-const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
+const { resolveWorkerCeiling } = require('./forge-worker-timeout');
 const { readTierChain } = require('./forge-tier-chain.js');
 // Imported, not re-typed: forge-must-haves.js reads the same `domain:` key from
 // the same frontmatter, and a second copy of the strip rule is how the two
@@ -232,15 +232,21 @@ function hasHighRisk(roadmapPath, unitId) {
   }
 }
 
-function normalizeWorkers(prefs, unitType) {
+// workers_timeout is the per-attempt safety ceiling: the tier ceiling unless an
+// explicit workers.timeout overrides it (the inherited 300 is ignored with a
+// warning). `tier` is the final resolved tier (frontmatter, docs tag, risk).
+function normalizeWorkers(prefs, unitType, tier) {
   const workers = prefs && prefs.workers && typeof prefs.workers === 'object' ? prefs.workers : {};
   // Canonical WORKERS_ENGINE lowercases before the codex/claude comparison.
   const requested = text(workers[unitType]).toLowerCase();
   const workersEngine = requested === 'codex' || requested === 'claude' ? requested : 'claude';
-  const timeout = Number(workers.timeout);
+  const ceiling = resolveWorkerCeiling({ tier, explicit: workers.timeout });
   return {
     workers_engine: workersEngine,
-    workers_timeout: Number.isInteger(timeout) && timeout > 0 ? timeout : DEFAULT_WORKER_TIMEOUT_SECS,
+    workers_timeout: ceiling.seconds,
+    workers_timeout_source: ceiling.source,
+    workers_timeout_warning: ceiling.warning
+      ? { code: ceiling.warning.code, message: ceiling.warning.message } : null,
     codex_model: typeof workers.codex_model === 'string' ? workers.codex_model : '',
   };
 }
@@ -459,7 +465,7 @@ function resolveDispatch(opts, environment) {
   const chain = Array.isArray(route.chain) ? route.chain : [];
   const prefsResult = readPrefsCached(cwd);
   const prefs = prefsResult && prefsResult.prefs ? prefsResult.prefs : {};
-  const workers = normalizeWorkers(prefs, unitType);
+  const workers = normalizeWorkers(prefs, unitType, tier);
   const workersExplicit = Boolean(prefs.workers && typeof prefs.workers === 'object'
     && Object.prototype.hasOwnProperty.call(prefs.workers, unitType));
   const routingBacked = route.source === 'routing' || /(?:^|; )routing-(?:hit|default)(?:;|$)/.test(route.reason || '');
@@ -652,6 +658,10 @@ function resolveDispatch(opts, environment) {
     resolution_options: resolutionOptions(o),
     resolution_sources: resolutionInputs(o),
     ...resolvedRuntime,
+    // Additive, appended last so the established key order never shifts:
+    // where the safety ceiling came from and any legacy/invalid-pref warning.
+    workers_timeout_source: workers.workers_timeout_source,
+    workers_timeout_warning: workers.workers_timeout_warning,
   };
 }
 
@@ -683,7 +693,18 @@ function runCli(args, environment) {
   const parsed = parseArgs(args || []);
   const result = resolveDispatch(parsed, environment);
   process.stdout.write(JSON.stringify(result) + '\n');
+  writeTimeoutWarning(result);
   return result;
+}
+
+// One human-readable stderr line when the safety ceiling carries a warning.
+// Silent-fail: a stderr failure never changes stdout or the exit code.
+function writeTimeoutWarning(result) {
+  const warning = result && result.workers_timeout_warning;
+  if (!warning) return;
+  try {
+    process.stderr.write(`[forge-dispatch-resolve] aviso: ${warning.code}: ${warning.message}\n`);
+  } catch { /* advisory only */ }
 }
 
 function degradedContract(args, environment) {
@@ -728,6 +749,8 @@ function degradedContract(args, environment) {
     dispatch_hint: 'Repair the resolver error before dispatch. No model or worker was selected.',
     dispatch_posture: 'enforce',
     dispatch_decision: 'refuse',
+    workers_timeout_source: null,
+    workers_timeout_warning: null,
   };
 }
 
@@ -777,6 +800,8 @@ const SHELL_EXPORT_MAP = [
   ['DISPATCH_DECISION', (r) => r.dispatch_decision || ''],
   ['RESOLVED_WORKER_ENGINE', (r) => r.resolved_worker_engine || ''],
   ['SIDECAR_DECLARED', (r) => (r.sidecar_declared === true ? 'true' : 'false')],
+  ['WORKERS_TIMEOUT_SOURCE', (r) => r.workers_timeout_source || ''],
+  ['WORKERS_TIMEOUT_WARNING', (r) => (r.workers_timeout_warning && r.workers_timeout_warning.message) || ''],
 ];
 
 function shellQuote(value) {

@@ -232,6 +232,9 @@ async function main() {
     assert.equal(before.attempts[0].context_bytes, null);
     assert.equal(before.attempts[0].request_bytes, null);
     assert.equal(before.attempts[0].model_sent, 'unknown');
+    // Recovery state v2: no cumulative clock is snapshotted with the telemetry.
+    assert.equal(before.schema_version, 2); assert.equal(before.budget, 'tier-ceiling');
+    for (const key of ['deadline_at', 'budget_remaining_ms', 'clock_high_water']) assert(!(key in before), key);
     const session = recovery.createRecovery({ unit: before.unit, roots_sha256: before.roots_sha256, state: before });
     const corrected = api.captureFinal({ context: 'corrected', request: { prompt: 'corrected' },
       budgets: { coding_standards: 64 }, route: delivered.route });
