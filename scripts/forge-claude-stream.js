@@ -2,6 +2,7 @@
 
 const { TextDecoder } = require('util');
 const crypto = require('crypto');
+const { SESSION_ID_PATTERN } = require('./forge-claude-session');
 const LIMITS = Object.freeze({ line: 1048576, stdout: 16777216, stderr: 1048576, events: 100000,
   depth: 128, nodes: 100000, blocks: 32, reconstruction: 1048576 });
 
@@ -90,6 +91,8 @@ function createReducer(options = {}) {
   let onRemote = options.onRemote, onEvent = options.onEvent, onToolCall = options.onToolCall;
   options = null;
   let disposed = false, finalSnapshot = null;
+  // Validated id from the first system/init only; never part of snapshot()/observation().
+  let sessionId = null;
   const secretBytes = Buffer.from(secret), rawTails = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
 
   function raw(buffer, stream) {
@@ -183,6 +186,10 @@ function createReducer(options = {}) {
     if (value.type === 'error' || value.type === 'result'
         && (value.is_error === true || value.subtype && value.subtype !== 'success')) {
       failure([401, 403].includes(value.api_error_status) ? 'authentication-failed' : 'result-error');
+    }
+    if (value.type === 'system' && value.subtype === 'init' && sessionId === null
+        && typeof value.session_id === 'string' && SESSION_ID_PATTERN.test(value.session_id)) {
+      sessionId = value.session_id;
     }
     const e = value.type === 'stream_event' ? value.event : value;
     const owned = message && (!e?.message_id || e.message_id === message);
@@ -324,6 +331,10 @@ function createReducer(options = {}) {
       toolsInFlight.clear();
       terminal = message = onRemote = onEvent = onToolCall = null;
       reconstruction = 0;
+    },
+    // The id survives dispose() like finalSnapshot: it is a confirmation value, not stream content.
+    sessionId() {
+      return sessionId;
     },
     snapshot() {
       if (disposed) return { ...finalSnapshot, denials: { ...finalSnapshot.denials } };

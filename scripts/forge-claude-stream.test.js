@@ -319,3 +319,36 @@ assert.throws(() => reducer.push(toolResult('secret-scan', { text: 'private-toke
 });
 assert.equal(reducer.snapshot().tools_in_flight, 1, 'secret inspection precedes result handling');
 console.log('PASS Claude stream tool results: parallel tools, guarded documented shape, S01 fallback, bounded ids and unchanged remote samples');
+// S05/T02: session_id is captured only from a validated system/init and never reaches snapshot().
+{
+  const sid = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+  const other = 'f1e2d3c4-b5a6-4978-a8b9-c0d1e2f3a4b5';
+  const baselineKeys = Object.keys(createReducer().snapshot()).sort();
+  reducer = createReducer();
+  assert.equal(reducer.sessionId(), null, 'no init yet');
+  reducer.push(frame({ type: 'system', subtype: 'init', session_id: sid }));
+  assert.equal(reducer.sessionId(), sid, 'valid init id captured');
+  reducer.push(frame({ type: 'system', subtype: 'init', session_id: other }));
+  assert.equal(reducer.sessionId(), sid, 'first init wins');
+  assert.deepEqual(Object.keys(reducer.snapshot()).sort(), baselineKeys, 'snapshot keys unchanged');
+  assert(!JSON.stringify(reducer.snapshot()).includes(sid), 'snapshot never carries the id');
+  reducer.push(frame(terminal)); reducer.end(); reducer.dispose();
+  assert.equal(reducer.sessionId(), sid, 'id survives dispose like finalSnapshot');
+  assert(!JSON.stringify(reducer.snapshot()).includes(sid));
+  for (const bad of [sid.toUpperCase(), sid + ' ', '--' + sid.slice(2), 'not-a-uuid', 42, null]) {
+    reducer = createReducer();
+    reducer.push(frame({ type: 'system', subtype: 'init', session_id: bad }));
+    assert.equal(reducer.sessionId(), null, 'invalid init id rejected: ' + String(bad));
+  }
+  for (const value of [{ type: 'system', subtype: 'status', session_id: sid },
+    { type: 'assistant', session_id: sid, message: { id: 'm', role: 'assistant', content: [] } },
+    { type: 'user', session_id: sid, message: { content: [] } }]) {
+    reducer = createReducer();
+    reducer.push(frame(value));
+    assert.equal(reducer.sessionId(), null, 'id outside system/init ignored: ' + value.type);
+  }
+  reducer = createReducer();
+  reducer.push(frame({ type: 'system', subtype: 'init' }));
+  assert.equal(reducer.sessionId(), null, 'init without id');
+}
+console.log('PASS Claude stream session_id: validated system/init capture, first wins, ignored elsewhere, absent from snapshot');

@@ -29,6 +29,7 @@ const calibrationApi = require('./forge-sidecar-calibration');
 const { observation } = calibrationApi;
 const liveness = require('./forge-sidecar-liveness');
 const { createLocalProof } = require('./forge-sidecar-local-proof');
+const claudeSession = require('./forge-claude-session');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
@@ -56,6 +57,7 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   MODEL_REQUIRED: 'claude-model-required',
   MODEL_SUBSTITUTED: 'claude-model-substituted',
   MODEL_UNVERIFIED: 'claude-model-unverified',
+  SESSION_MISMATCH: 'claude-session-mismatch',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -150,6 +152,7 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_DISABLED_INCOMPATIBLE]: 'Disabled thinking is incompatible with this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_ENABLED_INCOMPATIBLE]: 'Enabled thinking is incompatible with this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_MODE_UNKNOWN]: 'The requested thinking mode is not documented for this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH]: 'The Claude stream reported a session other than the one Forge started. The result was not accepted.',
     [CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL]: 'The requested effort is not documented for this model. No worker was launched and the effort was not lowered.',
     ...CLAUDE_IDENTITY_MESSAGES,
   };
@@ -622,6 +625,8 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       process.removeListener('SIGTERM', cancel);
       if (!error) { reducer.dispose(); resolve(value); return; }
       failed = true;
+      // Confirmation value only (S05): read through the accessor, never reparsed from stdout.
+      if (reducer.sessionId() !== null && error && typeof error === 'object') error.observedSessionId = reducer.sessionId();
       const reasons = { 'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
         'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
         'claude-output-limit': 'output-limit', 'claude-anomalous-silence': 'anomalous-silence',
@@ -743,7 +748,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         }
         const observed = observation({ ...snapshot(), model_observed: observedModel });
         bestEffort(onProgress, observed);
-        finish(null, { candidate, observedModel, metadata: Object.freeze({
+        finish(null, { candidate, observedModel, observedSessionId: reducer.sessionId(), metadata: Object.freeze({
           pid: Number.isSafeInteger(child.pid) ? child.pid : null, exit_code: code, signal: exitSignal || null,
           duration_ms: observed.elapsed_ms, stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
           marker_count: 0, command: path.basename(cmd), argv_count: args.length, observation: observed,
@@ -754,6 +759,43 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       }
     });
   });
+}
+
+function invalidLaunchOption() {
+  const refused = sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  refused.provider_called = false;
+  return refused;
+}
+
+// `session` is absent (legacy argv) or exactly `{ persist: true }` for a plan or
+// execute phase. `{ resume }` belongs to the resume mode and is refused here
+// until that mode exists; every other shape is refused as well.
+function sessionPersistRequested(session, phase) {
+  if (session === undefined || session === null) return false;
+  if (typeof session !== 'object' || Array.isArray(session)) throw invalidLaunchOption();
+  const keys = Object.keys(session);
+  if (keys.length !== 1 || keys[0] !== 'persist' || session.persist !== true) throw invalidLaunchOption();
+  if (!claudeSession.isEligible({ phase })) throw invalidLaunchOption();
+  return true;
+}
+
+// Runs the remover and reduces its report to {ok:true} or {ok:false, refused,
+// errors}. Paths are config-dir relative; the raw id is masked so only the
+// recovery ref ever carries it. Never throws.
+function sessionCleanupReport(remover, ref) {
+  const mask = (value) => typeof value === 'string' ? value.split(ref.id).join('<session>') : value;
+  const entries = (list) => (Array.isArray(list) ? list : []).map((item) => Object.freeze(
+    Object.fromEntries(Object.entries(item && typeof item === 'object' ? item : {})
+      .filter(([key]) => ['path', 'reason', 'code'].includes(key))
+      .map(([key, value]) => [key, mask(value)]))));
+  let report;
+  try { report = remover(ref); }
+  catch (error) {
+    report = { ok: false, refused: [], errors: [{ path: '.', code: typeof error?.code === 'string' ? error.code : 'remover-failed' }] };
+  }
+  if (report && report.ok === true) return Object.freeze({ ok: true });
+  return Object.freeze({ ok: false, refused: Object.freeze(entries(report?.refused)),
+    errors: Object.freeze(entries(report?.errors)) });
 }
 
 /**
@@ -810,6 +852,18 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  *   Validated as a finite positive integer when present.
  * @param {NodeJS.ProcessEnv} [opts.sourceEnv] process env source (testable allowlist)
  * @param {(child:import('child_process').ChildProcess)=>void} [opts.terminateChild]
+ * @param {{persist:true}} [opts.session] opt-in session persistence, accepted only
+ *   for the plan/execute phases (else `claude-invalid-options` before any probe,
+ *   temp file or spawn). The argv swaps `--no-session-persistence` for
+ *   `--session-id <uuid>` (Forge-generated, strict v4); the stream's
+ *   system/init must confirm the same id or the attempt fails with
+ *   `claude-session-mismatch`. The session is removed after every outcome
+ *   except `budget-exceeded-while-active` under the confirmed id, which keeps it
+ *   and sets `error.session` (frozen ref, no token). Success reports
+ *   `telemetry.session = {persisted, session_sha256, cleanup}`; a failed removal
+ *   after a failure is `error.session_cleanup`. Without `session` the argv is the
+ *   legacy one. Internal test seam, not public API: `sessionRemover` replaces
+ *   removeSession (validated as a function).
  * @returns {Promise<{candidate:object,metadata:object,telemetry:object}>} telemetry
  *   carries `model_observed` (the proven id) and `model_observed_source`
  *   (`claude-json-modelUsage`); `effort_applied` stays null.
@@ -851,6 +905,31 @@ async function invokeClaudeSidecar(opts) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
   }
   const localProofFactory = options.localProofFactory || null;
+  // S05 opt-in persistence. Validated before the version probe, temp file or
+  // spawn: an ineligible phase or unknown mode is refused, never downgraded.
+  const persistSession = sessionPersistRequested(options.session, phase);
+  if (options.sessionRemover !== undefined && options.sessionRemover !== null
+    && typeof options.sessionRemover !== 'function') {
+    throw invalidLaunchOption();
+  }
+  const sessionRemover = options.sessionRemover || claudeSession.removeSession;
+  // The child env is built here (it was built right before spawn) so the
+  // session config dir is derived from the env the CLI actually receives.
+  const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
+  let sessionId = null, sessionRef = null;
+  if (persistSession) {
+    try {
+      sessionId = claudeSession.assertSessionId(claudeSession.newSessionId());
+      sessionRef = claudeSession.createSessionRef({ id: sessionId, accountName: account.name,
+        configDir: claudeSession.configDir(env, process.platform), cwd });
+    } catch { throw invalidLaunchOption(); }
+  }
+  let sessionCleaned = false;
+  const cleanupSession = () => {
+    if (!sessionRef || sessionCleaned) return null;
+    sessionCleaned = true;
+    return sessionCleanupReport(sessionRemover, sessionRef);
+  };
   const localProofIntervalMs = normalizeLocalProofIntervalMs(options.localProofIntervalMs);
   const proofRoots = localProofRoots(cwd, options);
   const localProofIgnore = localProofIgnorePrefixes(options.localProofIgnore);
@@ -926,7 +1005,7 @@ async function invokeClaudeSidecar(opts) {
       ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
       ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
       ...(effort ? ['--effort', effort] : []),
-      '--no-session-persistence', '--disable-slash-commands',
+      ...(persistSession ? ['--session-id', sessionId] : ['--no-session-persistence']), '--disable-slash-commands',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
       '--setting-sources', '', '--settings', CLAUDE_INVOCATION_SETTINGS,
       '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
@@ -938,8 +1017,7 @@ async function invokeClaudeSidecar(opts) {
     // Account credentials exist only in env and never enter this measurement.
     require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
       fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
-    const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
-    const { observedModel, ...output } = await runOwnedChild({
+    const { observedModel, observedSessionId, ...output } = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
       requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
@@ -947,11 +1025,20 @@ async function invokeClaudeSidecar(opts) {
       onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
       proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs,
     });
+    // The stream only confirms the Forge-generated id; it never replaces it.
+    if (persistSession && observedSessionId !== sessionId) {
+      throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH);
+    }
     const proposal = calibrationApi.propose({model,effort:effort || 'medium',phase},output.metadata.observation,options.calibrationOptions);
+    // A failed removal is reported, never turned into a failure of a valid result.
+    const session = persistSession ? Object.freeze({ persisted: true,
+      session_sha256: claudeSession.sessionDigest(sessionId), cleanup: cleanupSession() }) : null;
     return { ...output, telemetry: Object.freeze({ ...telemetryBase,
       model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE, observation: output.metadata.observation,
-      calibration_proposal: proposal }) };
+      calibration_proposal: proposal, ...(session ? { session } : {}) }) };
   } catch (error) {
+    const observedSessionId = error && typeof error === 'object' ? error.observedSessionId : undefined;
+    if (error && typeof error === 'object') delete error.observedSessionId;
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync
     // above throw native errors that already carry a `.code` (EACCES, ENOSPC,
     // ENOTDIR) and used to escape unwrapped, with a code outside the contract
@@ -960,6 +1047,17 @@ async function invokeClaudeSidecar(opts) {
     primaryError = error && typeof error.code === 'string'
       && CLAUDE_SIDECAR_REASON_CODE_SET.has(error.code)
       ? error : sidecarError(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
+    if (sessionRef) {
+      // Only an active stream that hit the safety ceiling under the confirmed
+      // id keeps its session, for the single same-session resume (S05).
+      if (primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED && observedSessionId === sessionId) {
+        sessionCleaned = true;
+        primaryError.session = sessionRef;
+      } else {
+        const cleanup = cleanupSession();
+        if (cleanup && !cleanup.ok) primaryError.session_cleanup = cleanup;
+      }
+    }
     throw primaryError;
   } finally {
     if (tempDir) {

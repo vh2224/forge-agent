@@ -1648,6 +1648,252 @@ test('liveness/tool: the real provider on a read-only turn scans no filesystem r
   assert.deepStrictEqual(touched, []);
 });
 
+// ── Session persistence (S05/T02) — fake CLI writes the measured layout under a temporary profile ──
+// The fake honours --session-id: it writes <home>/.claude/projects/<projectKey(cwd)>/<id>.jsonl
+// (layout measured in S05/T01) and confirms the id in system/init. Modes:
+// ok (valid result), wrong (init reports another uuid), endless (active stream), silent.
+const SESSION_MODULE = require('./forge-claude-session');
+const OTHER_SESSION_ID = 'f1e2d3c4-b5a6-4978-a8b9-c0d1e2f3a4b5';
+function sessionFixture(mode) {
+  return writeFixture(`claude session ${mode} fixture.js`, `
+'use strict';
+const fs = require('fs');
+const path = require('path');
+${ENVELOPE_PRELUDE}
+const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const delta = () => out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0,
+  delta: { type: 'text_delta', text: 'x' } } });
+const args = process.argv.slice(2);
+const at = args.indexOf('--session-id');
+const sid = at >= 0 ? args[at + 1] : null;
+if (sid) {
+  const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;
+  const { projectKey } = require(${JSON.stringify(require.resolve('./forge-claude-session'))});
+  const dir = path.join(home, '.claude', 'projects', projectKey(process.cwd()));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, sid + '.jsonl'), '{"type":"fixture"}\\n');
+}
+out({ type: 'system', subtype: 'init', session_id: ${JSON.stringify(mode)} === 'wrong' ? ${JSON.stringify(OTHER_SESSION_ID)} : sid });
+out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-session', role: 'assistant' } } });
+out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+delta();
+const mode = ${JSON.stringify(mode)};
+if (mode === 'ok' || mode === 'wrong') {
+  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  out({ type: 'stream_event', event: { type: 'message_stop' } });
+  process.stdout.write(envelope(${JSON.stringify(okBlock('session fixture'))}) + '\\n');
+} else if (mode === 'endless') {
+  setInterval(delta, 30);
+} else {
+  delta();
+  setInterval(() => {}, 1000);
+}
+`);
+}
+const SESSION_OK_FIXTURE = sessionFixture('ok');
+const SESSION_WRONG_FIXTURE = sessionFixture('wrong');
+const SESSION_ENDLESS_FIXTURE = sessionFixture('endless');
+const SESSION_SILENT_FIXTURE = sessionFixture('silent');
+
+let sessionHomeCounter = 0;
+function sessionHome() {
+  const home = path.join(ROOT, `session-home-${++sessionHomeCounter}`);
+  fs.mkdirSync(home, { recursive: true });
+  return home;
+}
+function sessionFile(home, id) {
+  return path.join(home, '.claude', 'projects', SESSION_MODULE.projectKey(WORKSPACE), `${id}.jsonl`);
+}
+function argvSessionId(args) {
+  const at = args.indexOf('--session-id');
+  return at >= 0 ? args[at + 1] : null;
+}
+
+async function runSession(fixture, options = {}, clock = null) {
+  const home = sessionHome();
+  const records = [];
+  const children = [];
+  let terminations = 0, result = null, error = null;
+  const adapter = loadAdapter({ spawnImpl: (cmd, args, spawnOptions) => {
+    records.push({ args: args.slice() });
+    const child = REAL_SPAWN(cmd, args, spawnOptions);
+    children.push(child);
+    return child;
+  } });
+  const live = clock || acceleratedClock(1, { fromFirstRemote: true });
+  try {
+    result = await adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'session', model: FIXTURE_MODEL, timeoutMs: 3600000,
+      sourceEnv: { ...sourceEnvFor(fixture), HOME: home, USERPROFILE: home },
+      monotonicClock: live.now, livenessIntervalMs: 25,
+      onProgress(snapshot) { if (snapshot.phase !== 'local-start') live.accelerate(); },
+      terminateChild(child) { terminations++; child.kill('SIGKILL'); },
+      ...options,
+    });
+  } catch (caught) { error = caught; }
+  finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) try { child.kill('SIGKILL'); } catch { /* gone */ }
+    }
+  }
+  assert.deepStrictEqual(tempPromptDirs(), []);
+  const id = records.length ? argvSessionId(records[0].args) : null;
+  return { home, records, result, error, terminations, id, file: id ? sessionFile(home, id) : null };
+}
+
+test('session: without the option the argv keeps --no-session-persistence and no --session-id', async () => {
+  const run = await runSession(SESSION_OK_FIXTURE);
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  ok(run.records[0].args.includes('--no-session-persistence'));
+  assert.strictEqual(run.id, null);
+  assert.strictEqual(run.result.telemetry.session, undefined);
+  assert.strictEqual(fs.existsSync(path.join(run.home, '.claude')), false, 'nothing persisted without opt-in');
+});
+
+test('session: persist in execute and plan swaps only the persistence flag for --session-id <uuid>', async () => {
+  const legacy = await runSession(SESSION_OK_FIXTURE);
+  for (const resultProfile of ['execute', 'plan']) {
+    const run = await runSession(SESSION_OK_FIXTURE, { session: { persist: true }, resultProfile });
+    const args = run.records[0].args;
+    ok(SESSION_MODULE.SESSION_ID_PATTERN.test(run.id), `uuid in argv for ${resultProfile}`);
+    ok(!args.includes('--no-session-persistence'), `flag absent for ${resultProfile}`);
+    assert.strictEqual(args.filter((arg) => arg === '--session-id').length, 1);
+    if (resultProfile === 'execute') {
+      const at = legacy.records[0].args.indexOf('--no-session-persistence');
+      const expected = [...legacy.records[0].args.slice(0, at), '--session-id', run.id,
+        ...legacy.records[0].args.slice(at + 1)];
+      assert.deepStrictEqual(args.slice(0, -1), expected.slice(0, -1), 'every other position unchanged');
+    } else {
+      // The plan contract rejects the execute-shaped fixture output; argv is what is under test.
+      ok(!run.error || run.error.code !== 'claude-invalid-options', 'plan is eligible');
+    }
+    assert.strictEqual(fs.existsSync(run.file), false, `session removed for ${resultProfile}`);
+  }
+});
+
+test('session: persist outside plan/execute or with an unknown shape is refused before any spawn or temp file', async () => {
+  const cases = [
+    { session: { persist: true }, resultProfile: 'memory' },
+    { session: { persist: true }, resultProfile: 'review' },
+    { session: { persist: true }, resultProfile: 'fix' },
+    { session: { persist: true }, resultProfile: 'preparation' },
+    { session: { persist: true }, resultProfile: 'artifacts', calibrationPhase: 'research' },
+    { session: { persist: false } },
+    { session: { persist: true, extra: 1 } },
+    { session: { resume: { id: OTHER_SESSION_ID } } },
+    { session: 'persist' },
+    { session: { persist: true }, sessionRemover: 'not-a-function' },
+  ];
+  for (const extra of cases) {
+    const home = sessionHome();
+    const records = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    const error = await expectCode(adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'session', model: FIXTURE_MODEL, timeoutMs: 15000,
+      sourceEnv: { ...sourceEnvFor(SESSION_OK_FIXTURE), HOME: home, USERPROFILE: home }, ...extra,
+    }), 'claude-invalid-options');
+    assert.strictEqual(error.provider_called, false, JSON.stringify(extra));
+    assert.strictEqual(records.length, 0, `no spawn for ${JSON.stringify(extra)}`);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude')), false);
+  }
+});
+
+test('session: success removes the persisted transcript and reports a digest-only telemetry block', async () => {
+  let existedBeforeCleanup = null;
+  let seenRef = null;
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { persist: true },
+    sessionRemover(ref) {
+      seenRef = ref;
+      existedBeforeCleanup = fs.existsSync(sessionFile(ref.config_dir.slice(0, -'.claude'.length - 1), ref.id));
+      return SESSION_MODULE.removeSession(ref);
+    } });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  assert.strictEqual(existedBeforeCleanup, true, 'the fake CLI wrote the measured layout');
+  assert.strictEqual(fs.existsSync(run.file), false, 'transcript removed after success');
+  assert.strictEqual(seenRef.id, run.id);
+  assert.strictEqual(seenRef.account_name, FIXTURE_ACCOUNT.name);
+  assert.strictEqual(seenRef.config_dir, path.join(run.home, '.claude'), 'config dir comes from the child env');
+  assert.deepStrictEqual(run.result.telemetry.session, { persisted: true,
+    session_sha256: SESSION_MODULE.sessionDigest(run.id), cleanup: { ok: true } });
+  ok(Object.isFrozen(run.result.telemetry.session));
+  ok(!JSON.stringify(run.result.telemetry).includes(run.id), 'raw id never reaches telemetry');
+  ok(!JSON.stringify(run.result.metadata).includes(run.id), 'raw id never reaches metadata');
+});
+
+test('session: a different id in system/init is claude-session-mismatch and the session is removed', async () => {
+  const run = await runSession(SESSION_WRONG_FIXTURE, { session: { persist: true } });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-session-mismatch');
+  ok(require('./forge-claude-sidecar').CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH === 'claude-session-mismatch');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(run.error.observedSessionId, undefined);
+  assert.strictEqual(fs.existsSync(run.file), false);
+  ok(!run.error.message.includes(run.id) && !run.error.message.includes(OTHER_SESSION_ID), 'message carries no id');
+});
+
+test('session: budget-exceeded-while-active keeps the session and returns a frozen token-free ref', async () => {
+  const run = await runSession(SESSION_ENDLESS_FIXTURE, { session: { persist: true }, timeoutMs: 60000 },
+    acceleratedClock(300, { fromFirstRemote: true }));
+  try {
+    ok(run.error, 'expected rejection');
+    assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+    assert.strictEqual(run.error.session.id, run.id);
+    assert.strictEqual(run.error.session.account_name, FIXTURE_ACCOUNT.name);
+    assert.strictEqual(run.error.session.config_dir, path.join(run.home, '.claude'));
+    assert.strictEqual(run.error.session.cwd, WORKSPACE);
+    ok(Object.isFrozen(run.error.session));
+    assert.deepStrictEqual(Object.keys(run.error.session).sort(),
+      ['account_name', 'config_dir', 'created_at', 'cwd', 'id', 'version']);
+    ok(!JSON.stringify(run.error.session).includes(FIXTURE_TOKEN), 'no token in the ref');
+    assert.strictEqual(SESSION_MODULE.validateSessionRef(run.error.session).ok, true);
+    assert.strictEqual(run.error.session_cleanup, undefined);
+    assert.strictEqual(run.error.observedSessionId, undefined);
+    assert.strictEqual(fs.existsSync(run.file), true, 'session preserved for the resume');
+  } finally {
+    if (run.error && run.error.session) SESSION_MODULE.removeSession(run.error.session);
+  }
+  assert.strictEqual(fs.existsSync(run.file), false);
+});
+
+test('session: dead-silence removes the session and never attaches a ref', async () => {
+  const run = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true } },
+    acceleratedClock(200, { fromFirstRemote: true }));
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(run.error.session_cleanup, undefined);
+  assert.strictEqual(fs.existsSync(run.file), false);
+});
+
+test('session: a failed removal never masks a valid result or the primary failure code', async () => {
+  const failing = (ref) => ({ ok: false, removed: [],
+    refused: [{ path: `projects/key/${ref.id}.jsonl`, reason: 'symlink' }],
+    errors: [{ path: `session-env/${ref.id}`, code: 'EPERM' }] });
+  const success = await runSession(SESSION_OK_FIXTURE, { session: { persist: true }, sessionRemover: failing });
+  try {
+    assert.strictEqual(success.error, null, success.error && success.error.code);
+    assert.strictEqual(success.result.candidate.status, 'done');
+    const cleanup = success.result.telemetry.session.cleanup;
+    assert.strictEqual(cleanup.ok, false);
+    assert.deepStrictEqual(cleanup.refused, [{ path: 'projects/key/<session>.jsonl', reason: 'symlink' }]);
+    assert.deepStrictEqual(cleanup.errors, [{ path: 'session-env/<session>', code: 'EPERM' }]);
+    ok(!JSON.stringify(success.result.telemetry).includes(success.id), 'raw id masked in the cleanup report');
+  } finally { fs.rmSync(path.join(success.home, '.claude'), { recursive: true, force: true }); }
+
+  const thrown = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true },
+    sessionRemover() { throw Object.assign(new Error('boom'), { code: 'EBUSY' }); } },
+  acceleratedClock(200, { fromFirstRemote: true }));
+  try {
+    ok(thrown.error, 'expected rejection');
+    assert.strictEqual(thrown.error.code, 'claude-anomalous-silence', 'primary code kept');
+    assert.deepStrictEqual(thrown.error.session_cleanup, { ok: false, refused: [],
+      errors: [{ path: '.', code: 'EBUSY' }] });
+    assert.strictEqual(thrown.error.session, undefined);
+  } finally { fs.rmSync(path.join(thrown.home, '.claude'), { recursive: true, force: true }); }
+});
+
 async function main() {
   let passed = 0;
   const failures = [];
