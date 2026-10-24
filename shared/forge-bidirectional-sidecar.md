@@ -376,6 +376,63 @@ claude) publicam o bloco no stderr, mas o evento durável `sidecar-no-progress`
 nesse caminho não é gravado, porque o CLI de review não tem canal de owner. É um
 achado para a triagem final da S09.
 
+#### App-server liveness adapter
+
+O transporte Codex app-server (`startAppServerTurn` em `scripts/forge-appserver-client.js`)
+usa a mesma liveness neutra da S01 como autoridade primária do kill. O módulo puro
+`scripts/forge-appserver-liveness.js` reduz as notificações JSON-RPC a um snapshot no
+contrato de entrada de `liveness.evaluate`; o cliente só acrescenta o watchdog. O
+bloco `liveness` exposto ao host é o mesmo da S06 (`observation()`, `progressLine`,
+`readProgressLine`), com a mesma cadência de 30000 ms e emissão na transição. O agy
+não é alterado.
+
+- **Evento remoto (suposição conservadora, sem probe ao vivo):** conta como remoto
+  qualquer notificação do servidor depois do envio de `turn/start`, exceto o conjunto
+  fechado `LOCAL_LIFECYCLE` (`thread/started`, `turn/started` e `item/started`/
+  `item/completed` de item `userMessage`). Respostas JSON-RPC (`initialize`,
+  `thread/start`, `turn/start`) não contam. O pin do app-server não lista métodos de
+  notificação, então a forma é frágil: um falso "remoto" só adia `dead-start` para
+  `dead-silence` (240 s) e nunca mata um turno vivo.
+- **Tool aberta:** `item/started` sem o `item/completed` de mesmo `item.id`, apenas
+  para `TOOL_ITEM_TYPES` (`commandExecution`, `fileChange`, `mcpToolCall`,
+  `dynamicToolCall`, `collabAgentToolCall`, `webSearch`, `imageView`, `sleep`,
+  `imageGeneration`). `agentMessage`, `reasoning`, `plan` e tipos desconhecidos não
+  suspendem a contagem de silêncio. A extensão e o detector de loop seguem a S02; o
+  detector só reporta.
+- **Fingerprint:** `toolFingerprint('appserver:' + item.type, campos fechados por tipo)`
+  de `forge-claude-stream.js`, com dedupe por `item.id`. Só o hash sai do módulo.
+- **Prova local por plataforma:** `createLocalProof` da S02 com `pid` do filho
+  app-server e `roots = [cwd, ...writableRoots]`. Em linux/darwin vale CPU da árvore
+  mais delta de fs. Em win32 não há CPU: só delta de fs pode dar `positive`; sem delta
+  a prova fica `unavailable`, o turno vira `slow-suspect/proof-unavailable` aos 120 s e
+  morre em 660000 ms (`tool-proof-unavailable-expired`). Sem pid ou com provider
+  falho a regra é a mesma. Limite: a CPU do app-server ocioso pode ficar abaixo de
+  `MIN_CPU_DELTA_MS` e dar `negative` durante uma tool remota (`webSearch`,
+  `mcpToolCall`), que então morre aos 240 s.
+- **Kill:** sempre pelo caminho existente, `turn/interrupt` seguido do grace e só então
+  a morte do processo.
+- **Códigos (`APPSERVER_LIVENESS_CODES`):** kill por liveness (`dead-start`/
+  `dead-silence`) usa `code: 'appserver-anomalous-silence'` e mensagem
+  `anomalous silence (<termination>) after Ns`, sem `terminated`/`timeout`/`network`
+  para não ser lida como transitória. O teto com stream vivo usa
+  `budget-exceeded-while-active`. O teto ainda em `starting` não tem código e preserva
+  a mensagem load-bearing `timeout after Ns`. Os erros levam `interrupt`, `turnId`,
+  `liveness` e `diagnostic`.
+- **Recovery:** `appserver-anomalous-silence` com `observation.silence.cause ===
+  'indeterminate'` é classe `silence`, como `claude-anomalous-silence`;
+  `budget-exceeded-while-active` é `active-budget`. O codex não tem resume de sessão
+  (o resume da S05 é só Claude), então `next()` para com
+  `budget-exceeded-resume-unavailable`. É limite declarado, não lacuna.
+- **Contexto sob censo protegido:** com `opts.executionContext` presente,
+  `invokeCodexAppServer` calcula o health de contexto em memória (`persist: false`; o
+  thread é `ephemeral` e o estado nunca é relido), sem gravar
+  `.gsd/forge/context/codex/` no owner, o que antes derrubava a publicação com
+  `execution-protected-metadata`. `context_health`/`context_boundary` não mudam. Sem
+  `executionContext` a persistência atual é mantida.
+- **Follow-ups (fora desta correção):** a escrita do hook PreCompact em
+  `auto-mode.json` e a renovação do lease em `.gsd/forge/leases` pertencem ao
+  controlador/host, não ao transporte codex, e seguem como follow-up nomeado.
+
 #### Personal calibration and anomalous silence
 
 `forge-sidecar-calibration.js` resolves the user home independently of account
