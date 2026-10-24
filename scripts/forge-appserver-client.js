@@ -13,7 +13,7 @@ const { StringDecoder } = require('string_decoder');
 const liveness = require('./forge-sidecar-liveness');
 const { createNotificationReducer } = require('./forge-appserver-liveness');
 const { createLocalProof } = require('./forge-sidecar-local-proof');
-const { diagnostic } = require('./forge-sidecar-diagnostic');
+const { diagnostic, observation } = require('./forge-sidecar-diagnostic');
 
 const STDERR_TAIL_BYTES = 4096;
 const DISCARDED_SAMPLE_LIMIT = 5;
@@ -83,6 +83,10 @@ const LIVENESS_INTERVAL_MS = 1000;
 // Local proof cadence (S07/T03): same default as runOwnedChild. The proof samples
 // asynchronously into a cache; the watchdog tick only reads `current()`.
 const LOCAL_PROOF_INTERVAL_MS = 15000;
+// Host heartbeat (S07/T04): same cadence as forge-claude-sidecar's DEFAULT_PROGRESS_INTERVAL_MS
+// (a local constant avoids loading the Claude adapter here; the test compares both).
+// Distinct from forge-xllm's 15000 ms pid/orphan heartbeat, which is another channel.
+const DEFAULT_PROGRESS_INTERVAL_MS = 30000;
 // No pid, or a provider that cannot start: never a fabricated proof (S02 rule:
 // unavailable/none allows the bounded tool extension up to 660000 ms).
 const UNAVAILABLE_LOCAL_PROOF = Object.freeze({ capability: 'unavailable', proof: 'none' });
@@ -218,6 +222,9 @@ function startAppServerTurn(options) {
     localProofIgnore = [],
     localProofFactory,
     localProofIntervalMs,
+    // Progress channel (S07/T04): snapshots carrying the versioned `liveness` block.
+    onProgress,
+    progressIntervalMs,
   } = opts;
   if (!cmd || typeof cmd !== 'string') {
     return Promise.reject(sessionError('cmd is required'));
@@ -288,6 +295,13 @@ function startAppServerTurn(options) {
   if (localProofIntervalMs !== undefined && (!Number.isFinite(localProofIntervalMs) || localProofIntervalMs <= 0)) {
     return Promise.reject(sessionError('localProofIntervalMs must be a positive number'));
   }
+  if (onProgress !== undefined && typeof onProgress !== 'function') {
+    return Promise.reject(sessionError('onProgress must be a function'));
+  }
+  if (progressIntervalMs !== undefined && (!Number.isFinite(progressIntervalMs) || progressIntervalMs <= 0)) {
+    return Promise.reject(sessionError('progressIntervalMs must be a positive number'));
+  }
+  const progressMs = progressIntervalMs === undefined ? DEFAULT_PROGRESS_INTERVAL_MS : progressIntervalMs;
   const proofIntervalMs = localProofIntervalMs === undefined ? LOCAL_PROOF_INTERVAL_MS : localProofIntervalMs;
   const policy = liveness.normalizePolicy(livenessPolicy);
   const watchdogMs = livenessIntervalMs === undefined ? LIVENESS_INTERVAL_MS : livenessIntervalMs;
@@ -301,6 +315,8 @@ function startAppServerTurn(options) {
     let timer = null;
     let watchdog = null;
     let proofTimer = null;
+    let progressTimer = null;
+    let failedTerminal = false;
     let stdoutBuffer = '';
     let stderrTail = '';
     let nextId = 1;
@@ -431,6 +447,45 @@ function startAppServerTurn(options) {
     // Last published state (same shape as the S06 `liveness` block).
     let livenessView = { version: 1, state: 'starting', since_ms: 0, reason: null };
     const observe = (extra) => ({ ...reducer.snapshot(), ...extra });
+    // Set only when the turn is finally settled, so a termination never shows in a
+    // periodic snapshot taken while the interrupt grace is still running.
+    let livenessTermination = null;
+    // Every progress snapshot is observation() with the S06 `liveness` block: the
+    // closed state/reason vocabulary and counters only, never fingerprints or text.
+    const snapshot = () => {
+      const current = reducer.snapshot();
+      return observation({ ...current, phase: failedTerminal ? 'failed' : current.phase,
+        liveness: livenessTermination ? { ...livenessView, termination: livenessTermination } : livenessView });
+    };
+    const emit = () => {
+      if (!onProgress) return;
+      try { Promise.resolve(onProgress(snapshot())).catch(() => {}); } catch { /* observer only */ }
+    };
+    // Evaluates current evidence, notifies onLiveness and republishes the view.
+    // Shared by the watchdog tick and the success path so the final snapshot never
+    // lags behind the last remote event (S06 R1).
+    const refreshLiveness = () => {
+      const inputs = livenessInputs();
+      const decision = tracker.evaluate(reducer.snapshot(), inputs);
+      const { transition } = decision;
+      let published = false;
+      if (transition) {
+        if (!(transition.from === null && transition.to === 'starting')) {
+          livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
+            reason: transition.reason ?? null };
+          published = true;
+        }
+        // A loop carries only the repeat count and a 16-hex fingerprint prefix, as in
+        // runOwnedChild: never the command, arguments or any item text.
+        const loop = transition.to === 'slow-suspect' && transition.reason === 'no-progress'
+          && typeof inputs.progress?.fingerprint === 'string';
+        const event = loop ? { ...transition, progress: { repeats: inputs.progress.repeats,
+          fingerprint_sha256: inputs.progress.fingerprint.slice(0, 16) } } : transition;
+        // Best-effort observer: it never controls the session.
+        try { Promise.resolve(onLiveness && onLiveness(event)).catch(() => {}); } catch { /* observer only */ }
+      }
+      return { result: decision.result, published };
+    };
 
     const cleanup = () => {
       if (opts.signal) opts.signal.removeEventListener('abort', cancel);
@@ -442,6 +497,8 @@ function startAppServerTurn(options) {
       watchdog = null;
       if (proofTimer) clearInterval(proofTimer);
       proofTimer = null;
+      if (progressTimer) clearInterval(progressTimer);
+      progressTimer = null;
       try { if (typeof proof.stop === 'function') proof.stop(); } catch { /* best-effort */ }
       if (child && child.stdin) {
         try { child.stdin.end(); } catch { /* stream closed concurrently */ }
@@ -450,6 +507,8 @@ function startAppServerTurn(options) {
     const settle = (fn, value, stopChild) => {
       if (settled) return;
       settled = true;
+      if (fn === reject) failedTerminal = true;
+      emit();
       cleanup();
       if (stopChild) killProcessTree(child);
       fn(value);
@@ -604,6 +663,13 @@ function startAppServerTurn(options) {
       if (typeof proofTimer.unref === 'function') proofTimer.unref();
       sampleProof();
     }
+    // Initial snapshot (starting/0), then the periodic heartbeat. Transitions are
+    // published immediately by the watchdog, the final one by settle().
+    emit();
+    if (onProgress) {
+      progressTimer = setInterval(emit, progressMs);
+      if (typeof progressTimer.unref === 'function') progressTimer.unref();
+    }
     child.on('error', error => fail(`spawn failed: ${error.code || error.message}`, null, true));
     child.stdin.on('error', () => { /* close/error is diagnosed by request or child exit */ });
     // Decode across chunk boundaries: a multibyte character split between two reads
@@ -656,17 +722,22 @@ function startAppServerTurn(options) {
       // notification processed while this handler is suspended must already see it.
       timedOut = true;
       if (watchdog) { clearInterval(watchdog); watchdog = null; }
+      // Only the final snapshot may carry the termination; stop the periodic ones.
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
       const built = buildError();
-      const finish = (outcome) => fail(built.message, {
-        ...built.details,
-        timeoutMs,
-        interrupt: outcome,
-        turnId: turnId || null,
-        turnIdSource: turnIdSource || null,
-        turnCompletions: completionCensus(),
-        retention,
-        discarded,
-      }, true);
+      const finish = (outcome) => {
+        if (liveness.TERMINATIONS.includes(built.termination)) livenessTermination = built.termination;
+        fail(built.message, {
+          ...built.details,
+          timeoutMs,
+          interrupt: outcome,
+          turnId: turnId || null,
+          turnIdSource: turnIdSource || null,
+          turnCompletions: completionCensus(),
+          retention,
+          discarded,
+        }, true);
+      };
 
       // Both params are required by TurnInterruptParams, so with no turn observed there
       // is nothing well-formed to send. The kill still happens — the skip is recorded,
@@ -705,6 +776,7 @@ function startAppServerTurn(options) {
       }
       const seconds = secondsOf(timeoutMs);
       return {
+        termination: kind || null,
         // `timeout after Ns` is load-bearing. classifyErrorClass forces `terminal` only
         // for the agy message; this one reaches classifyError, which returns
         // {kind:'unknown', retry:false} => terminal. A different string can be read as
@@ -729,6 +801,7 @@ function startAppServerTurn(options) {
         livenessView = { version: 1, state: 'dead', since_ms: reducer.snapshot().elapsed_ms, reason: result.reason ?? null };
       }
       return {
+        termination: result.termination,
         message: `anomalous silence (${result.termination}) after ${secondsOf(result.window_ms)}s`,
         details: {
           code: APPSERVER_LIVENESS_CODES.SILENCE,
@@ -749,27 +822,10 @@ function startAppServerTurn(options) {
     watchdog = setInterval(() => {
       // A matched completion is about to settle on the 5ms poll; never kill it.
       if (settled || timedOut || matchedCompletion()) return;
-      let decision;
-      let inputs;
-      try {
-        inputs = livenessInputs();
-        decision = tracker.evaluate(reducer.snapshot(), inputs);
-      } catch { return; }
-      const { result, transition } = decision;
-      if (transition) {
-        if (!(transition.from === null && transition.to === 'starting')) {
-          livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
-            reason: transition.reason ?? null };
-        }
-        // A loop carries only the repeat count and a 16-hex fingerprint prefix, as in
-        // runOwnedChild: never the command, arguments or any item text.
-        const loop = transition.to === 'slow-suspect' && transition.reason === 'no-progress'
-          && typeof inputs.progress?.fingerprint === 'string';
-        const event = loop ? { ...transition, progress: { repeats: inputs.progress.repeats,
-          fingerprint_sha256: inputs.progress.fingerprint.slice(0, 16) } } : transition;
-        // Best-effort observer: it never controls the session.
-        try { Promise.resolve(onLiveness && onLiveness(event)).catch(() => {}); } catch { /* observer only */ }
-      }
+      let refreshed;
+      try { refreshed = refreshLiveness(); } catch { return; }
+      const { result, published } = refreshed;
+      if (published) emit();
       if (!result.kill) return;
       if (result.cause === 'liveness') terminateTurn(() => silenceError(result));
       else if (result.cause === 'ceiling') terminateTurn(() => ceilingError(result));
@@ -815,6 +871,8 @@ function startAppServerTurn(options) {
         // success. Measured during T01: with BOTH this guard and the watcher guard
         // removed, the interrupt-then-completed scenario resolves instead of rejecting.
         if (timedOut) return;
+        // Republish the view before the terminal snapshot (S06 R1).
+        try { refreshLiveness(); } catch { /* observer only */ }
         // The turn ENDED — that is all the notification proves. Whether it ended the
         // way we asked is `status`, and only `completed` is success (S02 R15): the
         // schema admits `interrupted`, `failed` and `inProgress` on this same
@@ -876,6 +934,7 @@ module.exports = {
   APPSERVER_LIVENESS_CODES,
   LIVENESS_INTERVAL_MS,
   LOCAL_PROOF_INTERVAL_MS,
+  DEFAULT_PROGRESS_INTERVAL_MS,
   // Same reason as INTERRUPT_OUTCOMES: tests bind to the constant, never the literal.
   RETENTION_LIMITS,
   TURN_STATUS_SUCCESS,
