@@ -392,13 +392,21 @@ function discoverInventory(cwd, milestone, current) {
     };
   });
   const roadmapComplete = slices.length > 0 && slices.every(item => item.checked);
+  // M###-SUMMARY.md is cumulative (each complete-slice appends to it), so it
+  // proves nothing about the milestone close. Only complete-milestone writes
+  // the ledger fragment; the global LEDGER.md heading covers older closes.
+  const ledgerFragment = path.join(cwd, '.gsd', 'ledger', `${milestone}.md`);
+  const ledgerGlobal = path.join(cwd, '.gsd', 'LEDGER.md');
+  const ledgerHeading = new RegExp(`^## ${milestone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm');
+  const milestoneClosed = fs.existsSync(ledgerFragment)
+    || (fs.existsSync(ledgerGlobal) && ledgerHeading.test(fs.readFileSync(ledgerGlobal, 'utf8')));
   return {
     roadmap_exists: !!roadmapFile,
     context_exists: !!firstExisting(milestoneDir, name => name.endsWith('-CONTEXT.md')),
     research_exists: !!firstExisting(milestoneDir, name => name.endsWith('-RESEARCH.md')),
     active_slice: current.active_slice && current.active_slice !== '—' ? current.active_slice : null,
     slices,
-    milestone_complete: roadmapComplete && !!firstExisting(milestoneDir, name => name.endsWith('-SUMMARY.md')),
+    milestone_complete: roadmapComplete && milestoneClosed,
   };
 }
 function select(cwd, request, options) {
