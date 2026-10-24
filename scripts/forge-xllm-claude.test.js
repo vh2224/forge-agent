@@ -891,6 +891,45 @@ async function reviewLegsLiveness(root) {
   }
 }
 
+async function reviewLegsLivenessProgress(root) {
+  // CLI review leg (engine claude): the default progress writer emits the liveness block on
+  // stderr and a host reads it with readProgressLine. The Claude adapter is replaced at its
+  // boundary by a preload; everything from the CLI down to progressLine is production code.
+  const { readProgressLine } = require('./forge-sidecar-diagnostic');
+  const SENTINEL = 'S06_T04_REVIEW_SENTINEL_5b2e';
+  const scenarioDir = fs.mkdtempSync(path.join(root, 'review-progress-'));
+  try {
+    const preload = path.join(scenarioDir, 'preload.js');
+    fs.writeFileSync(preload, `'use strict';
+const adapter = require(${JSON.stringify(path.join(__dirname, 'forge-claude-sidecar.js'))});
+adapter.invokeClaudeSidecar = async (options) => {
+  options.onProgress({ elapsed_ms: 120025, phase: 'remote-activity',
+    liveness: { version: 1, state: 'slow-suspect', since_ms: 120025, reason: 'no-progress', note: ${JSON.stringify(SENTINEL)} } });
+  throw Object.assign(new Error('fixture stop after progress'), { code: 'fixture-stop' });
+};
+`, 'utf8');
+    const run = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['-r', preload, CLI_PATH, '--mode', 'challenge', '--engine', 'claude',
+        '--host-runtime', 'codex', '--sidecar-declared', '--diff-cmd', 'node --version', '--cwd', PROJECT_ROOT,
+        '--model', 'claude-opus-5-5', '--effort', 'medium', '--timeout', '12', '--env-policy', 'minimal'], {
+        cwd: scenarioDir, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const stderr = [];
+      child.stderr.on('data', (chunk) => stderr.push(chunk));
+      child.stdout.resume();
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* exited */ } reject(new Error('review progress CLI timed out')); }, 20000);
+      child.once('error', (error) => { clearTimeout(timer); reject(error); });
+      child.once('close', () => { clearTimeout(timer); resolve(Buffer.concat(stderr).toString('utf8')); });
+    });
+    const lines = run.split(/\r?\n/).filter((line) => line.startsWith('[forge-sidecar-progress]'));
+    assert.strictEqual(lines.length, 1, run.slice(0, 1200));
+    assert.deepStrictEqual(readProgressLine(lines[0]).liveness,
+      { version: 1, state: 'slow-suspect', since_ms: 120025, reason: 'no-progress' });
+    assert.ok(!run.includes(SENTINEL), 'no extra field reaches the progress line');
+  } finally {
+    removeOwnedFixture(root, scenarioDir);
+  }
+}
+
 // In-process runExecute driver, run in a child with the isolated fixture env.
 // It wraps (and delegates to) the real invokeClaudeSidecar before forge-xllm
 // loads, only to observe the received options and to inject the adapter's
@@ -1052,6 +1091,7 @@ async function main() {
     ['accepted review exposes bounded calibration retry without another inference', reviewCalibrationRetry],
     ['execute forwards onLiveness and localProofIgnore to the Claude adapter (no-progress observed)', livenessPassThroughPath],
     ['Claude review legs and plan forward onLiveness (plan also localProofIgnore)', reviewLegsLiveness],
+    ['Claude review legs publish the liveness block in the host progress line (no-progress)', reviewLegsLivenessProgress],
     ['plan/execute default to the tier ceiling and the CLI warns on a legacy 300 pref', ceilingDefaultPath],
   ];
   let passed = 0;

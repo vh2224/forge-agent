@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -776,6 +776,81 @@ async function noProgressEventContracts() {
   assert.strictEqual(failed.unitEvents[failed.unitEvents.length - 1].status, terminalStatus);
   console.log('PASS sidecar-no-progress: one closed owner event per episode, reopened after exit, other reasons ignored, best-effort append, result/receipt excluded from local proof');
 }
+// S06/T04: the owner forwards the worker's liveness block to the host (runtime.onProgress)
+// and records the last state in the started-phase receipt; no block means the old payload.
+async function livenessHeartbeatContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto');
+  const fixtures = require('./forge-code-roots.test'), xllm = require('./forge-xllm'), runs = require('./forge-runs');
+  const runExecute = xllm.runExecute;
+  const SENTINEL = 'S06_T04_LIVENESS_SENTINEL_9c1d';
+  const route = { host_runtime: 'codex', worker_engine: 'claude', resolved_worker_engine: 'claude', worker_mode: 'sidecar', sidecar_declared: true,
+    dispatch_reason_code: 'sidecar-declared', dispatch_posture: 'cross-engine', dispatch_decision: 'allow',
+    dispatch_allowed: true, model: 'claude-sonnet-5', model_resolved: 'claude-sonnet-5', effort: 'medium', tier: 'standard',
+    chain: [{ id: 'claude-sonnet-5', engine: 'claude' }] };
+  const beat = (state, since_ms, extra = {}) => ({ version: 1, state, since_ms, reason: state === 'slow-suspect' ? 'silence' : null, ...extra });
+  async function runCase(id, snapshots) {
+    const lab = fixtures.fixture();
+    try {
+      const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+        cwd: lab.a, contextRoot: lab.owner, execution_contract: lab.contract, route,
+        workflowId: 'liveness-fixture', dispatchId: id, resultFile: path.join(lab.dir, `${id}.json`), prompt: 'Fixture only.',
+        verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+      const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
+      fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+      request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+      fs.writeFileSync(request.planFile, fixtures.plan(lab.contract));
+      fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+      fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+        ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
+      resolveContext(request);
+      request.runId = `liveness-${id}`;
+      request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
+        paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+      request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+      runs.add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+      const hostSeen = [], receipts = [];
+      xllm.runExecute = async options => {
+        const receiptFile = `${options.resultFile}.receipt.json`;
+        for (const snapshot of snapshots) {
+          options.onProgress({ elapsed_ms: 10, ...snapshot });
+          receipts.push(JSON.parse(fs.readFileSync(receiptFile, 'utf8')).telemetry?.observation);
+        }
+        fs.writeFileSync(path.join(lab.a, 'same.txt'), 'worker alpha\n');
+        fs.writeFileSync(path.join(lab.b, 'same.txt'), 'worker beta\n');
+        return { status: 'done', summary: 'Synthetic liveness fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] };
+      };
+      const result = await sidecar.runUnitSidecar(request, { onProgress: safe => { hostSeen.push(safe); } });
+      const eventsText = fs.readFileSync(path.join(lab.owner, '.gsd/forge/events.jsonl'), 'utf8');
+      return { result, hostSeen, receipts, eventsText };
+    } finally { xllm.runExecute = runExecute; lab.cleanup(); }
+  }
+  const states = [['starting', 0], ['working', 5000], ['slow-suspect', 120000]];
+  const withBlock = await runCase('heartbeat', states.map(([state, since]) => ({ liveness: beat(state, since) })));
+  assert.strictEqual(withBlock.result.status, 'done', JSON.stringify(withBlock.result));
+  assert.deepStrictEqual(withBlock.hostSeen.map(row => row.liveness.state), ['starting', 'working', 'slow-suspect']);
+  assert.deepStrictEqual(withBlock.hostSeen.map(row => row.liveness.since_ms), [0, 5000, 120000]);
+  assert.deepStrictEqual(withBlock.hostSeen[2].liveness, { version: 1, state: 'slow-suspect', since_ms: 120000, reason: 'silence' });
+  withBlock.receipts.forEach((row, index) => assert.deepStrictEqual(row.liveness, withBlock.hostSeen[index].liveness));
+  assert.deepStrictEqual(withBlock.receipts[2].liveness, withBlock.hostSeen[2].liveness, 'receipt reflects the last emitted state');
+
+  const without = await runCase('no-block', [{}, { phase: 'remote-activity' }]);
+  assert.strictEqual(without.result.status, 'done', JSON.stringify(without.result));
+  assert.strictEqual(without.hostSeen.length, 2);
+  for (const row of [...without.hostSeen, ...without.receipts]) assert(!('liveness' in row), JSON.stringify(row));
+
+  const leaky = await runCase('sentinel', [{ liveness: { ...beat('working', 1), note: SENTINEL, session_id: SENTINEL } }]);
+  assert.strictEqual(leaky.result.status, 'done', JSON.stringify(leaky.result));
+  assert.deepStrictEqual(leaky.hostSeen[0].liveness, beat('working', 1));
+  // Closed key set: only the four documented fields survive normalization.
+  assert.deepStrictEqual(Object.keys(leaky.hostSeen[0].liveness).sort(), ['reason', 'since_ms', 'state', 'version']);
+  assert.strictEqual(leaky.hostSeen.length, 1);
+  assert.strictEqual(leaky.receipts.length, 1);
+  assert.deepStrictEqual(leaky.receipts[0].liveness, leaky.hostSeen[0].liveness);
+  assert(!JSON.stringify(leaky.hostSeen).includes(SENTINEL));
+  assert(!JSON.stringify(leaky.receipts).includes(SENTINEL));
+  assert(!leaky.eventsText.includes(SENTINEL));
+  console.log('PASS liveness-heartbeat: host receives starting/working/slow-suspect, receipt reflects the last state, no-block payload unchanged, extra fields never leak');
+}
 // R1/R2: the owner's authenticated no-progress append is reconciled into the
 // preparation surface (no broker) and into the shared write-contract validation
 // (owner == code root, events.jsonl tracked), while unrelated edits still fail.
@@ -1477,6 +1552,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--ceiling-route') await ceilingRouteContracts();
     if (!selectedScenario || selectedScenario === '--claude-session') await claudeSessionContracts();
     if (!selectedScenario || selectedScenario === '--claude-resume') await claudeResumeContracts();
+    if (!selectedScenario || selectedScenario === '--liveness-heartbeat') await livenessHeartbeatContracts();
   } finally {
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(profile, { recursive: true, force: true });
