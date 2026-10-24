@@ -25,7 +25,19 @@ const {
 
 const SCRIPT = path.join(__dirname, 'forge-xllm.js');
 
-function runCli(args, env = process.env) {
+// Hermetic HOME: the CLI resolves prefs from the operator's home (workers.timeout, legacy-300-ignored
+// warning). The suite must not depend on them, so every CLI call sees an empty temporary home.
+const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xllm-home-'));
+process.on('exit', () => { try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch {} });
+const hermeticEnv = {
+  ...process.env,
+  HOME: isolatedHome,
+  USERPROFILE: isolatedHome,
+  FORGE_HOME: path.join(isolatedHome, '.forge-agent'),
+  CLAUDE_CONFIG_DIR: path.join(isolatedHome, '.claude'),
+};
+
+function runCli(args, env = hermeticEnv) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
     env,
@@ -223,7 +235,7 @@ try {
   const refused = runCli([
     '--mode', 'execute', '--engine', 'codex', '--host-runtime', 'codex', '--sidecar-declared', 'false',
     '--plan', missingPlan, '--result-file', refusedResult, '--cwd', workspace, '--env-policy', 'minimal',
-  ], { ...process.env, ANTHROPIC_AUTH_TOKEN: secretSentinel });
+  ], { ...hermeticEnv, ANTHROPIC_AUTH_TOKEN: secretSentinel });
   assert.strictEqual(refused.status, 2);
   assert.strictEqual(refused.stdout, '', 'execute failure never publishes to stdout');
   const refusedMarkerText = fs.readFileSync(refusedResult, 'utf8');
