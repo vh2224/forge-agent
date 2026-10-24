@@ -26,6 +26,7 @@ const modelPolicy = require('./forge-model-policy');
 const workerContract = require('./forge-worker-result-contract');
 const streamProtocol = require('./forge-claude-stream');
 const calibrationApi = require('./forge-sidecar-calibration');
+const calibrationV2 = require('./forge-sidecar-calibration-v2');
 const { observation } = calibrationApi;
 const liveness = require('./forge-sidecar-liveness');
 const { createLocalProof } = require('./forge-sidecar-local-proof');
@@ -333,20 +334,61 @@ function currentLocalProof(provider) {
   }
 }
 
+const V2_SOURCES = Object.freeze(['persisted-calibration', 'model-fallback']);
+const V2_LIMIT_KEYS = Object.freeze({ initial: 'startMs', gap: 'deadMs' });
+
+/** A resolved v2 dimension (exact or model fallback) carries its own clamped threshold. */
+function v2Threshold(calibration, dimension) {
+  const d = calibration?.v2?.[dimension];
+  return d && Number.isSafeInteger(d.threshold_ms) && V2_SOURCES.includes(d.source) ? d : null;
+}
+
 /**
- * Liveness policy for one turn. The locked defaults apply without calibration;
- * an override (tests) and a calibrated v1 gap can only tighten them. The v1
- * gap threshold is clamped into [suspectMs, deadMs]; the v1 initial threshold
- * (always >= 120000) never tightens the 60000 start limit, so it is ignored.
+ * Liveness policy for one turn, chosen per dimension without mixing values:
+ * v2 exact > v2 model-fallback > v1 gap (S01 rule, deadMs only) > locked default.
+ * The v1 initial threshold (always >= 120000) never tightens the 60000 start
+ * limit, so it is ignored. An override (tests) can only tighten. Returns the
+ * limits and, per dimension, the v2 provenance when v2 set the effective limit.
  */
 function livenessPolicyFor(calibration, override) {
   const D = liveness.DEFAULTS;
   const limits = liveness.normalizePolicy(override && typeof override === 'object' ? override : undefined);
-  const gap = calibration?.gap;
-  if (gap?.calibrated === true && Number.isSafeInteger(gap.threshold_ms)) {
+  const provenance = { initial: null, gap: null };
+  for (const dimension of ['initial', 'gap']) {
+    const v2 = v2Threshold(calibration, dimension), key = V2_LIMIT_KEYS[dimension];
+    if (v2 && v2.threshold_ms <= limits[key]) {
+      limits[key] = v2.threshold_ms;
+      provenance[dimension] = { threshold_ms: v2.threshold_ms, source: v2.source };
+    }
+  }
+  const gap = calibration?.v1?.gap;
+  if (!v2Threshold(calibration, 'gap') && gap?.calibrated === true && Number.isSafeInteger(gap.threshold_ms)) {
     limits.deadMs = Math.min(limits.deadMs, Math.min(D.deadMs, Math.max(D.suspectMs, gap.threshold_ms)));
   }
-  return liveness.normalizePolicy(limits);
+  return { limits: liveness.normalizePolicy(limits), provenance };
+}
+
+/** Closed calibration block: the state of the effective source per dimension. */
+function calibrationView(calibration) {
+  const v1 = calibration?.v1, v2 = calibration?.v2;
+  const state = dimension => v2Threshold(calibration, dimension) ? v2[dimension].state
+    : v1?.[dimension]?.state !== 'uncalibrated' || !v2 ? v1?.[dimension]?.state : v2[dimension].state;
+  const v1Effective = !v2Threshold(calibration, 'initial') || !v2Threshold(calibration, 'gap');
+  return { diagnostic: v2?.diagnostic || (v1Effective && v1?.diagnostic) || null,
+    initial: state('initial'), gap: state('gap') };
+}
+
+/** v1 and v2 sources for one identity; the v1 store is only read. */
+function readCalibration(input, options) {
+  return { v1: calibrationApi.read(input, options), v2: calibrationV2.resolve(input, options),
+    // Best-effort censored lower bound; its outcome never reaches the caller.
+    censor(dimension, windowMs) {
+      try {
+        const proposal = calibrationV2.proposeCensored(input, { dimension, window_ms: windowMs });
+        calibrationV2.commit(proposal, { fingerprint: proposal.key,
+          receipt: `liveness-termination:${proposal.attempt_sha256}` }, options);
+      } catch { /* a censored sample is advisory */ }
+    } };
 }
 
 /** Per-dimension provenance: only a limit below its locked default is calibrated. */
@@ -590,7 +632,18 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     // Liveness is the primary kill authority (start/silence); timeoutMs is only
     // the safety ceiling, enforced by the tracker on the injected clock and by
     // the real setTimeout backstop below.
-    const policy = livenessPolicyFor(calibration, livenessPolicy);
+    const { limits: policy, provenance } = livenessPolicyFor(calibration, livenessPolicy);
+    const calibrationBlock = calibrationView(calibration);
+    // A stream cut by liveness or by the ceiling only proves a lower bound. A gap
+    // suspended by a tool is an extension by proof, not real silence: no sample.
+    function recordCensored(termination, current) {
+      try {
+        if (current.gap_suspended === true || typeof calibration?.censor !== 'function') return;
+        if (termination === 'dead-start') calibration.censor('initial', current.elapsed_ms);
+        else if ((termination === 'dead-silence' || termination === 'budget-exceeded-while-active')
+          && current.first_remote_ms !== null) calibration.censor('gap', current.remote_silence_ms);
+      } catch { /* never alters the termination */ }
+    }
     const tracker = liveness.createTracker(policy, timeoutMs);
     // Loop detector: tool-call fingerprints (hashes only) since the last write.
     const progress = liveness.createProgressTracker();
@@ -633,7 +686,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         phase: failed ? 'failed' : closed ? 'closed' : current.phase,
         transport_ms: transportEnd ?? current.transport_ms,
         verification_ms: transportEnd === null ? null : Math.max(0, current.elapsed_ms - transportEnd),
-        calibration: { diagnostic: calibration.diagnostic, initial: calibration.initial.state, gap: calibration.gap.state },
+        calibration: calibrationBlock,
         ...(silence ? { silence } : {}),
         liveness: livenessTermination ? { ...livenessView, termination: livenessTermination } : livenessView });
     };
@@ -717,7 +770,10 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         livenessView = { version: 1, state, since_ms: livenessView.since_ms, reason: reason ?? null };
       }
       // The final snapshot keeps the active state; a ceiling is not death.
-      if (liveness.TERMINATIONS.includes(kind)) livenessTermination = kind;
+      if (liveness.TERMINATIONS.includes(kind)) {
+        livenessTermination = kind;
+        recordCensored(kind, reducer.snapshot());
+      }
       return error;
     }
     timer = setTimeout(() => { if (!settled) terminate(ceilingError()); }, timeoutMs);
@@ -757,8 +813,12 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       if (!result.kill) return;
       if (result.cause === 'liveness') {
         // Every tool kill carries threshold_ms = deadMs, so observation() accepts it.
+        const v2 = provenance[result.dimension];
         silence = { dimension: result.dimension, window_ms: result.window_ms, threshold_ms: result.threshold_ms,
-          policy: liveness.POLICY, source: livenessSource(result.dimension, result.threshold_ms), cause: 'indeterminate' };
+          ...(v2 && v2.threshold_ms === result.threshold_ms
+            ? { policy: calibrationV2.POLICY, source: v2.source }
+            : { policy: liveness.POLICY, source: livenessSource(result.dimension, result.threshold_ms) }),
+          cause: 'indeterminate' };
         const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence');
         if (livenessView.state !== 'dead') {
           livenessView = { version: 1, state: 'dead', since_ms: transition?.at_ms ?? null, reason: result.reason ?? null };
@@ -768,7 +828,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
           extension_ms: result.extension_ms ?? null,
           proof: result.proof_capability === undefined ? null
             : { capability: result.proof_capability, proof: result.proof } };
+        const current = reducer.snapshot();
         terminate(error);
+        recordCensored(result.termination, current);
       } else if (result.cause === 'ceiling') {
         terminate(ceilingError(result));
       }
@@ -1156,7 +1218,7 @@ async function invokeClaudeSidecar(opts) {
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
       requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
-      calibration: calibrationApi.read({model,effort:effort || 'medium',phase},options.calibrationOptions),
+      calibration: readCalibration({ model, effort: effort || 'medium', phase }, options.calibrationOptions),
       onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
       proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs, progressIntervalMs,
     });
@@ -1164,7 +1226,8 @@ async function invokeClaudeSidecar(opts) {
     if (sessionRef && observedSessionId !== sessionId) {
       throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH);
     }
-    const proposal = calibrationApi.propose({model,effort:effort || 'medium',phase},output.metadata.observation,options.calibrationOptions);
+    // Accepted attempts propose v2 samples; commitAccepted dispatches by version.
+    const proposal = calibrationV2.propose({ model, effort: effort || 'medium', phase }, output.metadata.observation);
     // A failed removal is reported, never turned into a failure of a valid result.
     const session = sessionRef ? Object.freeze({ [resumeRef ? 'resumed' : 'persisted']: true,
       session_sha256: claudeSession.sessionDigest(sessionId), cleanup: cleanupSession() }) : null;

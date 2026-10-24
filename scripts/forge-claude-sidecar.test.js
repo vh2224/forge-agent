@@ -169,6 +169,11 @@ if (control.hang) setInterval(() => {}, 1000);
 else if (control.exit) process.exitCode = control.exit;
 `);
 
+// Liveness kills now record censored v2 samples: without an explicit
+// calibrationOptions every scenario reads and writes an isolated fixture home,
+// never the developer's personal calibration store.
+const DEFAULT_CALIBRATION_OPTIONS = Object.freeze({ userHome: path.join(ROOT, 'default-calibration-home') });
+
 function loadAdapter({ resolver, spawnImpl } = {}) {
   const originalResolver = accounts.resolveLaunch;
   const originalSpawn = childProcess.spawn;
@@ -176,7 +181,10 @@ function loadAdapter({ resolver, spawnImpl } = {}) {
   childProcess.spawn = spawnImpl || REAL_SPAWN;
   delete require.cache[ADAPTER_PATH];
   try {
-    return require(ADAPTER_PATH);
+    const adapter = require(ADAPTER_PATH);
+    return { ...adapter, invokeClaudeSidecar: options => adapter.invokeClaudeSidecar(
+      options && typeof options === 'object' && options.calibrationOptions === undefined
+        ? { ...options, calibrationOptions: DEFAULT_CALIBRATION_OPTIONS } : options) };
   } finally {
     accounts.resolveLaunch = originalResolver;
     childProcess.spawn = originalSpawn;
@@ -2248,6 +2256,178 @@ test('resume: a transcript missing on disk fails in the CLI and removes nothing 
   assert.strictEqual(removals.length, 1, 'removal still runs after the failed resume');
   assert.strictEqual(fs.existsSync(sibling), true, 'another session transcript untouched');
   assert.strictEqual(fs.existsSync(siblingEnv), true, 'another session-env untouched');
+});
+
+// ── Calibration v2 wiring (S08/T03) — per-dimension precedence, v2 proposal, censored samples ──
+const calibrationV2 = require('./forge-sidecar-calibration-v2');
+const EXECUTE_IDENTITY = Object.freeze({ model: FIXTURE_MODEL, effort: 'medium', phase: 'execute' });
+const FIXTURE_BINDING = Object.freeze({ receipt: 'fixture', fingerprint: 'fixture' });
+
+function v2Home(label) {
+  return { userHome: path.join(ROOT, `calibration-v2-${label}`) };
+}
+
+function seedV2(options, identity, { initial = null, gap = null, count = 5 } = {}) {
+  for (let i = 0; i < count; i++) {
+    const outcome = calibrationV2.commit(calibrationV2.propose(identity,
+      { initial_sample_ms: initial, gap_sample_ms: gap }), FIXTURE_BINDING, options);
+    assert.strictEqual(outcome.committed, true, JSON.stringify(outcome));
+  }
+}
+
+function seedV1Gap(options, gapSampleMs) {
+  const calibration = require('./forge-sidecar-calibration');
+  for (let i = 0; i < 5; i++) {
+    assert(calibration.commit(calibration.propose(EXECUTE_IDENTITY, { initial_sample_ms: null, gap_sample_ms: gapSampleMs }),
+      FIXTURE_BINDING, options).committed);
+  }
+}
+
+function v2File(options) {
+  return path.join(calibrationV2.directory(options), calibrationV2.FILE);
+}
+
+const silentAfterEvents = options => runLive(SILENT_AFTER_EVENTS_FIXTURE,
+  acceleratedClock(200, { fromFirstRemote: true }), options);
+
+test('calibration v2: a calibrated gap (5 x 50000) passes slow-suspect at 120000 and dies at 215000 as claude-silence-v2', async () => {
+  const options = v2Home('gap');
+  seedV2(options, EXECUTE_IDENTITY, { gap: 50000 });
+  const run = await silentAfterEvents({ calibrationOptions: options });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  const observed = run.error.diagnostic.observation;
+  const { window_ms: windowMs, ...silence } = observed.silence;
+  assert.deepStrictEqual(silence, { dimension: 'gap', threshold_ms: 215000, policy: 'claude-silence-v2',
+    source: 'persisted-calibration', cause: 'indeterminate' });
+  ok(windowMs > 215000 && windowMs < 240000, `window ${windowMs}`);
+  const suspect = run.transitions.find(t => t.from === 'working' && t.to === 'slow-suspect');
+  const dead = run.transitions.find(t => t.from === 'slow-suspect' && t.to === 'dead');
+  ok(suspect && dead, `transitions ${JSON.stringify(run.transitions)}`);
+  ok(suspect.at_ms > 120000 && suspect.at_ms < 215000 && dead.at_ms > 215000, JSON.stringify(run.transitions));
+  // Closed block: the effective gap source is calibrated v2, the start stays uncalibrated.
+  assert.deepStrictEqual(observed.calibration, { diagnostic: null, initial: 'uncalibrated', gap: 'calibrated' });
+  // The kill leaves a censored lower bound; the frozen samples never change and the threshold never loosens past the default.
+  const stored = calibrationV2.read(EXECUTE_IDENTITY, options).gap;
+  assert.strictEqual(stored.count, 5);
+  assert.strictEqual(stored.censored.count, 1);
+  ok(stored.censored.max_ms > 215000, `censored ${stored.censored.max_ms}`);
+  ok(stored.threshold_ms >= 215000 && stored.threshold_ms <= 240000, `threshold ${stored.threshold_ms}`);
+  // No new observation key compared with an uncalibrated run of the same fixture.
+  const plain = await silentAfterEvents({ calibrationOptions: v2Home('gap-plain') });
+  assert.deepStrictEqual(Object.keys(observed).sort(), Object.keys(plain.error.diagnostic.observation).sort());
+  assert.deepStrictEqual(Object.keys(observed.calibration), ['diagnostic', 'initial', 'gap']);
+});
+
+test('calibration v2: a calibrated initial (5 x 2000) kills a silent start at 30000; uncalibrated stays 60000 forge-liveness-v1', async () => {
+  const options = v2Home('initial');
+  seedV2(options, EXECUTE_IDENTITY, { initial: 2000 });
+  const run = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300), { calibrationOptions: options });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-start');
+  const { window_ms: windowMs, ...silence } = run.error.diagnostic.observation.silence;
+  assert.deepStrictEqual(silence, { dimension: 'initial', threshold_ms: 30000, policy: 'claude-silence-v2',
+    source: 'persisted-calibration', cause: 'indeterminate' });
+  ok(windowMs > 30000 && windowMs < 60000, `window ${windowMs}`);
+  assert.strictEqual(run.error.diagnostic.observation.calibration.initial, 'calibrated');
+  assert.strictEqual(calibrationV2.read(EXECUTE_IDENTITY, options).initial.censored.count, 1);
+
+  const plainOptions = v2Home('initial-plain');
+  const plain = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300), { calibrationOptions: plainOptions });
+  assert.strictEqual(plain.error.liveness.termination, 'dead-start');
+  const plainSilence = plain.error.diagnostic.observation.silence;
+  assert.strictEqual(plainSilence.threshold_ms, 60000);
+  assert.strictEqual(plainSilence.policy, 'forge-liveness-v1');
+  assert.strictEqual(plainSilence.source, 'locked-default');
+  // A censored start alone never calibrates.
+  assert.strictEqual(calibrationV2.read(EXECUTE_IDENTITY, plainOptions).initial.state, 'uncalibrated');
+});
+
+test('calibration v2: exact v2 beats v1 without mixing, v1 alone keeps S01, and the model fallback is reported', async () => {
+  const both = v2Home('both');
+  seedV1Gap(both, 100); // v1 alone would tighten to 120000
+  seedV2(both, EXECUTE_IDENTITY, { gap: 50000 });
+  const v2Wins = (await silentAfterEvents({ calibrationOptions: both })).error.diagnostic.observation.silence;
+  assert.strictEqual(v2Wins.threshold_ms, 215000);
+  assert.strictEqual(v2Wins.policy, 'claude-silence-v2');
+  assert.strictEqual(v2Wins.source, 'persisted-calibration');
+
+  const v1Only = v2Home('v1-only');
+  seedV1Gap(v1Only, 100);
+  const s01 = (await silentAfterEvents({ calibrationOptions: v1Only })).error.diagnostic.observation.silence;
+  assert.strictEqual(s01.threshold_ms, 120000);
+  assert.strictEqual(s01.policy, 'forge-liveness-v1');
+  assert.strictEqual(s01.source, 'persisted-calibration');
+
+  const fallback = v2Home('fallback');
+  seedV2(fallback, { ...EXECUTE_IDENTITY, phase: 'plan' }, { gap: 50000 });
+  seedV2(fallback, { ...EXECUTE_IDENTITY, phase: 'review', effort: 'high' }, { gap: 50000 });
+  assert.strictEqual(calibrationV2.resolve(EXECUTE_IDENTITY, fallback).gap.source, 'model-fallback');
+  const run = await silentAfterEvents({ calibrationOptions: fallback });
+  const viaModel = run.error.diagnostic.observation.silence;
+  assert.strictEqual(viaModel.threshold_ms, 215000);
+  assert.strictEqual(viaModel.policy, 'claude-silence-v2');
+  assert.strictEqual(viaModel.source, 'model-fallback');
+  assert.strictEqual(run.error.diagnostic.observation.calibration.gap, 'calibrated');
+});
+
+test('calibration v2: an accepted attempt proposes version 2 and commitAccepted writes only calibration-v2.json', async () => {
+  const calibration = require('./forge-sidecar-calibration');
+  const options = v2Home('accepted');
+  seedV1Gap(options, 100);
+  const v1File = path.join(calibration.directory(options), 'calibration.json');
+  const v1Bytes = fs.readFileSync(v1File);
+  const v1Mtime = fs.statSync(v1File).mtimeMs;
+  const run = await runLive(activeStreamFixture('claude v2 accepted fixture.js', 150),
+    acceleratedClock(1, { fromFirstRemote: true }), { calibrationOptions: options });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const proposal = run.result.telemetry.calibration_proposal;
+  assert.strictEqual(proposal.version, 2);
+  assert.strictEqual(proposal.source, 'accepted-claude-stream-v2');
+  assert.deepStrictEqual(proposal.identity, calibrationV2.identity(EXECUTE_IDENTITY));
+  ok(proposal.initial_ms !== null || proposal.gap_ms !== null, 'the accepted stream carried a sample');
+  assert.strictEqual(fs.existsSync(v2File(options)), false, 'the adapter itself never commits an accepted sample');
+  const outcome = await calibration.commitAccepted(proposal, FIXTURE_BINDING, options);
+  assert.strictEqual(outcome.committed, true, JSON.stringify(outcome));
+  const stored = calibrationV2.read(EXECUTE_IDENTITY, options);
+  ok(stored.initial.count + stored.gap.count >= 1, 'the v2 store holds the accepted sample');
+  assert.deepStrictEqual(fs.readFileSync(v1File), v1Bytes, 'calibration.json bytes untouched');
+  assert.strictEqual(fs.statSync(v1File).mtimeMs, v1Mtime);
+});
+
+test('calibration v2: the censored recorder is best-effort; a corrupted v2 store leaves the error identical', async () => {
+  const healthy = v2Home('censored-healthy');
+  const reference = await silentAfterEvents({ calibrationOptions: healthy });
+  assert.strictEqual(calibrationV2.read(EXECUTE_IDENTITY, healthy).gap.censored.count, 1);
+
+  const corrupt = v2Home('censored-corrupt');
+  fs.mkdirSync(calibrationV2.directory(corrupt), { recursive: true });
+  fs.writeFileSync(v2File(corrupt), 'private-invalid-v2-json');
+  const run = await silentAfterEvents({ calibrationOptions: corrupt });
+  ok(run.error, 'expected rejection');
+  for (const key of ['code', 'reason_code', 'message']) assert.deepStrictEqual(run.error[key], reference.error[key], key);
+  assert.deepStrictEqual(run.error.liveness, reference.error.liveness);
+  assert.strictEqual(run.error.diagnostic.reason, reference.error.diagnostic.reason);
+  const { window_ms: corruptWindow, ...silence } = run.error.diagnostic.observation.silence;
+  const { window_ms: referenceWindow, ...expected } = reference.error.diagnostic.observation.silence;
+  ok(corruptWindow > 240000 && referenceWindow > 240000);
+  assert.deepStrictEqual(silence, expected);
+  assert.strictEqual(silence.policy, 'forge-liveness-v1');
+  assert.strictEqual(run.error.diagnostic.observation.calibration.diagnostic, 'calibration-unavailable');
+  assert.strictEqual(fs.readFileSync(v2File(corrupt), 'utf8'), 'private-invalid-v2-json', 'corrupt store left as is');
+  ok(!JSON.stringify(run.error.diagnostic).includes('private-invalid-v2-json'));
+});
+
+test('calibration v2: a tool kill (gap suspended) records no censored sample', async () => {
+  const options = v2Home('tool');
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude v2 tool kill fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, calibrationOptions: options });
+  assertToolKill(run, 'tool-unproven');
+  assert.strictEqual(fs.existsSync(v2File(options)), false, 'no censored sample for a suspended gap');
 });
 
 async function main() {
