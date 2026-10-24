@@ -9,6 +9,7 @@ const { validateSessionRef, sessionDigest, removeSession } = require('./forge-cl
 // A preserved Claude session (S05) is resumed at most once per unit; these stops
 // are terminal for the session, so recoverAttempt removes its artifacts.
 const RESUME_RESERVATION = 'same-session-resume';
+const RESUME_PRE_SPAWN_REFUSALS = Object.freeze(['claude-resume-account-mismatch', 'claude-resume-config-mismatch', 'claude-session-invalid']);
 const SESSION_TERMINAL_STOPS = Object.freeze(['budget-exceeded-resume-exhausted', 'budget-exceeded-resume-refused']);
 function validSessionRef(ref) { return !!ref && validateSessionRef(ref).ok === true; }
 const exceptions = new WeakMap();
@@ -198,7 +199,7 @@ function createRecovery(options) {
           || !(attempt.duration_ms === null || Number.isFinite(attempt.duration_ms)) || !attempt.budgets || !attempt.route) fail('recovery-telemetry-required');
       // The raw session ref lives only in attempts[].session of the owner's
       // recovery state, and only for a live stream at the tier ceiling.
-      if (attempt.session !== undefined && attempt.failure_class !== 'active-budget') fail('recovery-session-class-invalid');
+      if (attempt.session !== undefined && attempt.failure_class !== 'active-budget' && attempt.session_cleanup_pending !== true) fail('recovery-session-class-invalid');
       if (attempt.session !== undefined && attempt.session !== null && !validSessionRef(attempt.session)) fail('recovery-session-invalid');
       const previous = state.attempts.at(-1);
       const entry = { ...attempt, diagnostic: safeDiagnostic(attempt.diagnostic), stderr: safeDiagnostic(attempt.stderr),
@@ -219,7 +220,9 @@ function createRecovery(options) {
       if (input.inspection.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection.writer_possible !== false && input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
       const pendingReservation = state.reservations?.at(-1);
-      if (pendingReservation?.reason === 'anomalous-silence-same-target'
+      // An unmatched reservation has no recorded outcome: its invocation may still
+      // be running, so neither exhaustion nor session cleanup can be concluded.
+      if ((pendingReservation?.reason === 'anomalous-silence-same-target' || pendingReservation?.reason === RESUME_RESERVATION)
         && !state.attempts.some(a => a.reservation && digest(a.reservation) === digest(pendingReservation))) {
         return { action: 'stop', reason_code: 'recovery-reservation-pending' };
       }
@@ -228,6 +231,10 @@ function createRecovery(options) {
       // candidate is selected; the previous route (tier/effort/model) is reused.
       // Only active-budget reaches here, so silence/timeout (dead) never resume.
       const last = state.attempts.at(-1);
+      // A resume refused before spawn (account/config/session mismatch) is a
+      // terminal session outcome, not a caller defect to correct and retry.
+      if (last?.failure_class === 'caller' && last.reservation?.reason === RESUME_RESERVATION
+        && RESUME_PRE_SPAWN_REFUSALS.includes(last.reason_code)) return { action: 'stop', reason_code: 'budget-exceeded-resume-refused', refusal: last.reason_code };
       if (last?.failure_class === 'active-budget') {
         if ((state.reservations || []).some(r => r.reason === RESUME_RESERVATION)) return { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' };
         if (!validSessionRef(last.session)) return { action: 'stop', reason_code: 'budget-exceeded-resume-unavailable' };
@@ -347,7 +354,7 @@ function createRecovery(options) {
         ...(decision.transition_reference ? { transition_reference: decision.transition_reference } : {}),
         correction: decision.correction || null,
         ...(handoffPending ? { handoff_pending: true } : {}),
-        ...(decision.resume ? { session_sha256: sessionDigest(decision.resume.session?.id) } : {}),
+        ...(decision.resume ? { session_sha256: decision.resume.session_sha256 } : {}),
         reserved_at: clock(), reason: decision.resume ? RESUME_RESERVATION : decision.silence_retry ? 'anomalous-silence-same-target'
           : decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
@@ -404,7 +411,8 @@ function captureFailure(options) {
   const error = options.error || {}, code = error.code || error.reason_code || 'attempt-failed';
   // Never throws: an invalid ref is discarded, so the resume is refused as unavailable.
   let sessionRef = null;
-  if (code === 'budget-exceeded-while-active' && error.session) {
+  const cleanupPending = error.session_cleanup?.pending === true;
+  if ((code === 'budget-exceeded-while-active' || cleanupPending) && error.session) {
     try { sessionRef = validSessionRef(error.session) ? error.session : null; } catch { sessionRef = null; }
   }
   const state = fs.existsSync(options.stateFile) ? stateApi.loadRecovery(options.stateFile) : undefined;
@@ -422,7 +430,8 @@ function captureFailure(options) {
   const timeout = /timeout|timed-out/.test(code);
   const service = !activeBudget && provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
   session.record({ failure_class: activeBudget ? 'active-budget' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
-    observation: error.diagnostic?.observation, service_failure_proven: service, ...(activeBudget ? { session: sessionRef } : {}), reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
+    observation: error.diagnostic?.observation, service_failure_proven: service, ...(activeBudget || cleanupPending && sessionRef ? { session: sessionRef } : {}),
+    ...(cleanupPending && sessionRef ? { session_cleanup_pending: true } : {}), reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
     request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
     request_bytes: observed.request.bytes, context_bytes: context.bytes,
     context_measurement: context.method, measurement_diagnostic: context.diagnostic,
@@ -608,7 +617,12 @@ async function recoverAttempt(options) {
   // Persist a v1 -> v2 migration now, under the same guarded persist, so the
   // reservation hash read later (reservedStateHash) is always post-migration.
   if (session.state_migration) session.snapshot();
-  const tag = value => session.state_migration ? { ...value, state_migration: session.state_migration } : value;
+  // A failed attempt whose owned process was not observed stopped deferred its
+  // session removal here; the receipt/process inspection above now confirms it.
+  const deferred = state.attempts.filter(row => row.session_cleanup_pending === true);
+  const deferredCleanup = deferred.length ? cleanupSessions(deferred, options.sessionRemover || removeSession) : null;
+  const tagMigration = value => session.state_migration ? { ...value, state_migration: session.state_migration } : value;
+  const tag = value => tagMigration(deferredCleanup ? { ...value, deferred_session_cleanup: deferredCleanup } : value);
   if (transitionGuard) { session.transition(transition.handle); inspection.roots_reconciled = true; }
   if (preSpawn) inspection.roots_reconciled = true;
   if (!preSpawn && !transitionGuard && inspection.writer_possible !== false && !inspection.valid_saved_response && options.reconcile) {
@@ -675,9 +689,16 @@ async function recoverAttempt(options) {
   preSpawn?.assertUnchanged();
   const nextInput = { inspection, candidateSet, correction, exception, transition: transition?.handle,
     validateInvocation: options.validateInvocation };
-  const decision = options.resumeReservation
+  const internalDecision = options.resumeReservation
     ? await session.resumeReservation({ ...nextInput, reservation_sha256: options.resumeReservation.sha256 })
     : await session.next(nextInput);
+  // The raw session ref stays inside this function and the invoke callback; the
+  // returned decision (and the CLI output) carries only its digest and metadata.
+  const resumeSession = internalDecision.resume?.session;
+  const decision = internalDecision.resume
+    ? { ...internalDecision, resume: { session_sha256: internalDecision.resume.session_sha256,
+      resumed_from: internalDecision.resume.resumed_from } }
+    : internalDecision;
   if (decision.action === 'replay' && savedWriter) await transitions.assertWriterObservation(savedWriter).refresh();
   if (decision.action === 'replay') {
     if (typeof options.replay !== 'function') fail('recovery-replay-required');
@@ -721,11 +742,22 @@ async function recoverAttempt(options) {
     else preSpawn?.assertUnchanged();
   }, { assertAuthority, ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
   const invoke = () => options.invoke(decision.route, decision.invocation, decision.sidecar_ceiling,
-    assertReady, decision.reservation_sha256, decision.resume);
+    assertReady, decision.reservation_sha256,
+    decision.resume ? { ...decision.resume, session: resumeSession } : undefined);
   // The adapter repeats assertReady at the actual native callback. Do not hold
   // the publication mutex while awaiting a provider or its publication.
   transitionGuard?.withLock(() => {});
-  const result = await invoke();
+  let result;
+  try { result = await invoke(); }
+  catch (error) {
+    // The previous process is confirmed stopped and a resume refused before spawn
+    // started nothing: the preserved session is orphaned, so remove it canonically.
+    if (decision.resume && error?.provider_called === false && RESUME_PRE_SPAWN_REFUSALS.includes(error.code)) {
+      return tag({ action: 'stop', reason_code: 'budget-exceeded-resume-refused', refusal: error.code, provider_called: false,
+        session_cleanup: cleanupSessions(session.inspect().attempts, options.sessionRemover || removeSession) });
+    }
+    throw error;
+  }
   // Phase one exposes only a durable reservation, never executable arguments.
   // The next phase must rebuild and validate them under fresh live authority.
   if ((preSpawn || transitionGuard) && options.externalNativeHandoff === true && !options.resumeReservation

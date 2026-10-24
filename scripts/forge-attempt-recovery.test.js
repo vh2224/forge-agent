@@ -227,7 +227,8 @@ async function activeBudgetRecovery(identity, route, attempt, inspection, candid
   assert.strictEqual(reservation.reason, 'same-session-resume');
   assert.strictEqual(reservation.session_sha256, sessions.sessionDigest(ref.id));
   assert(!JSON.stringify(saved.reservations).includes(ref.id) && !JSON.stringify(saved.selection).includes(ref.id), 'reservations carry only the digest');
-  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' });
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'recovery-reservation-pending' },
+    'a reserved resume with no recorded outcome may still be running: pending, never exhausted');
   session.record({ ...budget, session: null });
   assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' });
   session.record({ ...budget, session: ref });
@@ -283,6 +284,8 @@ async function sessionResumeRecovery(route) {
   let args;
   const resumed = await api.recoverAttempt({ ...base, invoke: async (...observed) => { args = observed; observed[3](); return { status: 'failed' }; } });
   assert.strictEqual(resumed.action, 'invoke');
+  assert(!JSON.stringify(resumed).includes(ref.id) && !('session' in resumed.resume), 'the public response never carries the session ref');
+  assert.deepStrictEqual(Object.keys(resumed.resume).sort(), ['resumed_from', 'session_sha256']);
   assert.strictEqual(args.length, 6, 'invoke receives resume as the 6th positional argument');
   assert.strictEqual(args[5].session.id, ref.id);
   assert.deepStrictEqual(args[5].resumed_from, { receipt_sha256: digest(fs.readFileSync(receiptFile)), dispatch_id: 'dispatch-1' });
@@ -293,6 +296,10 @@ async function sessionResumeRecovery(route) {
   assert.strictEqual(persisted.reservations.at(-1).session_sha256, sessions.sessionDigest(ref.id));
   assert(!JSON.stringify({ ...persisted, attempts: persisted.attempts.map(({ session: _s, ...row }) => row) }).includes(ref.id),
     'the raw id lives only in attempts[].session');
+  const inFlight = await api.recoverAttempt({ ...base, invoke() { throw Error('no second resume while the first has no outcome'); } });
+  assert.strictEqual(inFlight.reason_code, 'recovery-reservation-pending');
+  assert.strictEqual(inFlight.session_cleanup, undefined, 'no session cleanup for a pending resume');
+  assert.deepStrictEqual(removed, []);
   capture(undefined);
   const exhausted = await api.recoverAttempt({ ...base, invoke() { throw Error('a second resume must never be invoked'); } });
   assert.strictEqual(exhausted.reason_code, 'budget-exceeded-resume-exhausted');
@@ -302,6 +309,37 @@ async function sessionResumeRecovery(route) {
   assert.deepStrictEqual(failing.session_cleanup, { ok: false, removed_count: 0, refused_count: 1 });
   const real = await api.recoverAttempt({ ...base, sessionRemover: undefined });
   assert.deepStrictEqual(real.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 }, 'absent targets are idempotent');
+  // R3/R4: a resume refused before spawn is a terminal session outcome.
+  for (const code of ['claude-resume-account-mismatch', 'claude-resume-config-mismatch']) {
+    const file = path.join(lab.dir, `refused-${code}.json`), gone = [];
+    capture(ref, file);
+    const opts = { ...base, stateFile: file, sessionRemover: value => { gone.push(value.id); return { ok: true }; } };
+    const refused = await api.recoverAttempt({ ...opts, invoke: async () => { throw Object.assign(Error(code), { code, provider_called: false }); } });
+    assert.strictEqual(refused.reason_code, 'budget-exceeded-resume-refused');
+    assert.strictEqual(refused.refusal, code);
+    assert.deepStrictEqual(refused.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+    assert.deepStrictEqual(gone, [ref.id]);
+    assert(!JSON.stringify(refused).includes(ref.id));
+    // The refusal was also captured as a caller failure: the next recovery cleans instead of demanding a correction.
+    api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
+      finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+      error: { code, provider_called: false }, budgets: { coding_standards: 3000 } });
+    const later = await api.recoverAttempt({ ...opts, invoke() { throw Error('terminal: nothing to invoke'); } });
+    assert.strictEqual(later.reason_code, 'budget-exceeded-resume-refused');
+    assert.deepStrictEqual(later.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+    assert.deepStrictEqual(gone, [ref.id, ref.id]);
+  }
+  // R5: a session whose owned process termination was unconfirmed is removed by recovery.
+  {
+    const file = path.join(lab.dir, 'deferred.json'), gone = [];
+    api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
+      finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+      error: { code: 'claude-timeout', provider_called: true, session: ref, session_cleanup: { ok: false, pending: true } }, budgets: { coding_standards: 3000 } });
+    assert.deepStrictEqual(stateApi.loadRecovery(file).attempts[0].session, JSON.parse(JSON.stringify(ref)));
+    const out = await api.recoverAttempt({ ...base, stateFile: file, sessionRemover: value => { gone.push(value.id); return { ok: true }; } });
+    assert.deepStrictEqual(out.deferred_session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+    assert.deepStrictEqual(gone, [ref.id]);
+  }
   lab.cleanup();
   console.log('PASS recoverAttempt resume: ref captured, 6th invoke argument, digest-only reservation and session removal on exhausted stop');
 }

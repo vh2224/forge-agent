@@ -1478,8 +1478,10 @@ async function runUnitSidecarCore(request, runtime, identity) {
   // this owner holds the receipt and the recovery state that can resume and
   // clean a preserved session. Only plan/execute units qualify.
   const claudeSessions = require('./forge-claude-session');
+  // Resolved once, with the same inference recovery uses (plan-milestone has no explicit phase).
+  const sessionPhase = require('./forge-attempt-recovery').canonicalRequest(r).phase;
   const sessionEligible = route.resolved_worker_engine === 'claude' && route.worker_mode === 'sidecar' && !nativeExecution
-    && (transport.mode === 'execute' || transport.mode === 'plan' || (transport.mode === 'artifacts' && r.phase === 'plan'));
+    && (transport.mode === 'execute' || transport.mode === 'plan' || (transport.mode === 'artifacts' && sessionPhase === 'plan'));
   let claudeSession = null, resumedFrom = null, resumeSessionSha = null;
   if (r.claudeResume != null || r.resumedFrom != null) {
     if (!sessionEligible) fail('claude-invalid-options', 'Only a Claude sidecar plan/execute unit can resume a session.');
@@ -2134,7 +2136,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (options.engine === 'claude') {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:loc.preparation?'preparation':'artifacts', resultSchema:schema, calibrationPhase:r.phase || 'artifacts',
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:loc.preparation?'preparation':'artifacts', resultSchema:schema, calibrationPhase:sessionPhase === 'plan' ? 'plan' : r.phase || 'artifacts',
           ...(options.claudeSession ? { session: options.claudeSession } : {}),
           readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules,
             { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,

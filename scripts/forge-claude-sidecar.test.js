@@ -1878,6 +1878,32 @@ test('session: dead-silence removes the session and never attaches a ref', async
   assert.strictEqual(fs.existsSync(run.file), false);
 });
 
+test('session: cleanup waits for the observed child exit; an unconfirmed termination defers it to recovery', async () => {
+  let exitedBeforeRemoval = null, child = null;
+  const slow = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true },
+    terminateChild(owned) { child = owned; setTimeout(() => { try { owned.kill('SIGKILL'); } catch { /* gone */ } }, 300); },
+    sessionRemover(ref) { exitedBeforeRemoval = child.exitCode !== null || child.signalCode !== null; return SESSION_MODULE.removeSession(ref); } },
+  acceleratedClock(200, { fromFirstRemote: true }));
+  ok(slow.error, 'expected rejection');
+  assert.strictEqual(slow.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(exitedBeforeRemoval, true, 'the session is removed only after the child closed');
+  assert.strictEqual(slow.error.awaitExit, undefined, 'the internal exit probe never leaks');
+  assert.strictEqual(fs.existsSync(slow.file), false);
+
+  let removals = 0;
+  const stuck = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true }, terminationWaitMs: 100,
+    terminateChild() { /* the kill is requested but never takes effect */ },
+    sessionRemover() { removals++; return { ok: true }; } },
+  acceleratedClock(200, { fromFirstRemote: true }));
+  ok(stuck.error, 'expected rejection');
+  assert.strictEqual(stuck.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(removals, 0, 'no removal while termination is unconfirmed');
+  assert.strictEqual(stuck.error.session_cleanup.pending, true);
+  assert.strictEqual(stuck.error.session_cleanup.ok, false);
+  assert.strictEqual(stuck.error.session.id, stuck.id, 'the ref is handed to recovery for the deferred removal');
+  fs.rmSync(path.join(stuck.home, '.claude'), { recursive: true, force: true });
+});
+
 test('session: a failed removal never masks a valid result or the primary failure code', async () => {
   const failing = (ref) => ({ ok: false, removed: [],
     refused: [{ path: `projects/key/${ref.id}.jsonl`, reason: 'symlink' }],

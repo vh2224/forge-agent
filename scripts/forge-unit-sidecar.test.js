@@ -1176,7 +1176,7 @@ async function claudeSessionContracts() {
           workflowId: 'claude-session-research', dispatchId: id, resultFile: path.join(lab.dir, `${id}.json`), prompt: 'Fixture only.', ...extra };
         fs.mkdirSync(path.join(lab.owner, '.gsd/milestones/M001'), { recursive: true });
         fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
-          ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'research-milestone': 'medium' } }));
+          ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'research-milestone': 'medium', 'plan-milestone': 'medium' } }));
         resolveContext(request);
         const required = fresh.locations(request).required;
         process.env.FORGE_XLLM_CLAUDE_BIN = writeCli(`research-${id}`, { status: 'done', summary: 'Research fixture', questions: [],
@@ -1194,6 +1194,15 @@ async function claudeSessionContracts() {
     const researchArgs = argvOf('research-session-research').pop();
     assert(researchArgs.includes('--no-session-persistence'), JSON.stringify(researchArgs));
     assert(!researchArgs.includes('--session-id') && !researchArgs.includes('--resume'));
+    // plan-milestone carries no explicit phase: the canonical phase is inferred once,
+    // so it still opts in to persistence and calibrates as 'plan'.
+    const planBefore = handed.length;
+    const planned = await researchCase('session-plan-milestone', { unitType: 'plan-milestone' });
+    assert(handed.length > planBefore, planned.error && planned.error.stack);
+    assert.deepStrictEqual(handed[handed.length - 1].session, { persist: true }, 'plan-milestone without phase opts in');
+    assert.strictEqual(handed[handed.length - 1].calibrationPhase, 'plan');
+    const planArgs = argvOf('research-session-plan-milestone').pop();
+    assert(planArgs.includes('--session-id') && !planArgs.includes('--no-session-persistence'), JSON.stringify(planArgs));
     const ref = session.createSessionRef({ id: session.newSessionId(), accountName: 'fixture-session-account',
       configDir: path.join(home, '.claude'), cwd: work });
     const ineligibleBefore = handed.length;

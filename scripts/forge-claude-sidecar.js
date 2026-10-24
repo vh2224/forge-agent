@@ -555,6 +555,7 @@ function mapSpawnError(error) {
     : sidecarError(CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED);
 }
 
+const TERMINATION_WAIT_MS = 5000;
 function defaultTerminate(child) {
   try { child.kill('SIGKILL'); } catch { /* the owned process already exited */ }
 }
@@ -572,7 +573,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   } catch (error) { return Promise.reject(mapSpawnError(error)); }
 
   return new Promise((resolve, reject) => {
-    let settled = false, terminationAttempted = false, closed = false, failed = false;
+    let settled = false, terminationAttempted = false, closed = false, failed = false, spawnFailed = false;
+    let resolveExit;
+    const exited = new Promise(done => { resolveExit = done; });
     let watchdog, heartbeatTimer, progressTimer, proofTimer, timer, silence = null, transportEnd = null;
     let reportedRemote = false, reportedTerminal = false;
     // Liveness is the primary kill authority (start/silence); timeoutMs is only
@@ -639,6 +642,11 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       process.removeListener('SIGTERM', cancel);
       if (!error) { reducer.dispose(); resolve(value); return; }
       failed = true;
+      // Only the 'close' event (or a spawn that never produced a process) proves
+      // the child is gone; a requested kill never does. Hidden from serialization.
+      Object.defineProperty(error, 'awaitExit', { configurable: true, enumerable: false,
+        value: waitMs => closed || spawnFailed ? Promise.resolve(true) : Promise.race([exited,
+          new Promise(done => { const t = setTimeout(() => done(false), waitMs); t.unref?.(); })]) });
       // Confirmation value only (S05): read through the accessor, never reparsed from stdout.
       if (reducer.sessionId() !== null && error && typeof error === 'object') error.observedSessionId = reducer.sessionId();
       const reasons = { 'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
@@ -733,9 +741,13 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     child.stderr?.on('data', chunk => {
       if (!settled) try { reducer.stderr(chunk); } catch (error) { protocolError(error); }
     });
-    child.once('error', error => finish(mapSpawnError(error)));
+    child.once('error', error => {
+      if (!Number.isSafeInteger(child.pid)) spawnFailed = true;
+      finish(mapSpawnError(error));
+    });
     child.once('close', (code, exitSignal) => {
       closed = true;
+      resolveExit(true);
       if (settled) return;
       transportEnd = reducer.snapshot().elapsed_ms;
       let terminal;
@@ -1114,6 +1126,8 @@ async function invokeClaudeSidecar(opts) {
   } catch (error) {
     const observedSessionId = error && typeof error === 'object' ? error.observedSessionId : undefined;
     if (error && typeof error === 'object') delete error.observedSessionId;
+    const awaitExit = error && typeof error === 'object' ? error.awaitExit : undefined;
+    if (error && typeof error === 'object') delete error.awaitExit;
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync
     // above throw native errors that already carry a `.code` (EACCES, ENOSPC,
     // ENOTDIR) and used to escape unwrapped, with a code outside the contract
@@ -1130,6 +1144,15 @@ async function invokeClaudeSidecar(opts) {
         && observedSessionId === sessionId) {
         sessionCleaned = true;
         primaryError.session = sessionRef;
+      } else if (typeof awaitExit === 'function'
+        && await awaitExit(Number.isSafeInteger(options.terminationWaitMs) && options.terminationWaitMs >= 0
+          ? options.terminationWaitMs : TERMINATION_WAIT_MS) !== true) {
+        // The owned CLI may still be writing: removing now could be undone by it.
+        // Defer to recovery, which removes the session once the process is stopped.
+        sessionCleaned = true;
+        primaryError.session = sessionRef;
+        primaryError.session_cleanup = Object.freeze({ ok: false, pending: true,
+          refused: Object.freeze([]), errors: Object.freeze([]) });
       } else {
         const cleanup = cleanupSession();
         if (cleanup && !cleanup.ok) primaryError.session_cleanup = cleanup;
