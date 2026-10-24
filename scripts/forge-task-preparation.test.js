@@ -241,6 +241,75 @@ async function main() {
     assert.equal(saved.migrated_from.schema_version, 1);
     assert.equal(saved.started_at, legacyStarted); assert.equal(saved.deadline_at, legacyStarted + 60000, 'inert historical deadline_at preserved');
   });
+  // S05/T06: a standalone plan preparation stopped at the tier ceiling with a
+  // live stream resumes its own session once, on the same route and full ceiling.
+  async function activeBudgetPreparation(phase, withRef) {
+    const request = fixture({ phase, hostRuntime: 'codex', model: 'claude-sonnet-5' });
+    const failed = await prep.prepareStandaloneTask(request, { invokeSidecar: async () => {
+      throw Object.assign(Error('fixture ceiling'), { code: 'budget-exceeded-while-active', provider_called: true });
+    } });
+    assert.equal(failed.ok, false);
+    const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
+    const sessions = require('./forge-claude-session');
+    const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null,
+      configDir: path.join(path.dirname(request.cwd), 'lab-claude'), cwd: request.cwd });
+    // The production core records the ref from error.session; the injected
+    // transport cannot, so the saved attempt is completed with the same shape.
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const last = state.attempts.at(-1);
+    assert.equal(last.failure_class, 'active-budget');
+    last.session = withRef ? JSON.parse(JSON.stringify(ref)) : null;
+    fs.writeFileSync(stateFile, JSON.stringify(state));
+    return { request, receiptFile, stateFile, ref, route: last.route };
+  }
+  await test('standalone plan recovery after active-budget hands the transport claudeResume and the tier ceiling of the previous route', async () => {
+    const { request, receiptFile, stateFile, ref, route } = await activeBudgetPreparation('plan', true);
+    const receiptSha = crypto.createHash('sha256').update(fs.readFileSync(receiptFile)).digest('hex');
+    const { ceilingFromRoute } = require('./forge-worker-timeout');
+    let resolverCalls = 0, delivered = 0, handed;
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile }, {
+      processProbe: () => 'stopped',
+      resolveDispatch: () => { resolverCalls++; throw new Error('the resume never re-resolves a candidate'); },
+      invokeSidecar: async delivery => { delivered++; handed = delivery; return envelope(request); },
+    });
+    assert.equal(recovered.result && recovered.result.status, 'done', JSON.stringify(recovered));
+    assert.equal(delivered, 1);
+    assert.equal(resolverCalls, 0);
+    assert.deepEqual(handed.claudeResume, JSON.parse(JSON.stringify(ref)));
+    assert.equal(handed.resumedFrom.receipt_sha256, receiptSha);
+    assert.equal(handed.resumedFrom.dispatch_id, request.dispatchId);
+    assert.equal(handed.route.resolved_worker_engine, 'claude');
+    assert.equal(handed.route.model_resolved || handed.route.model, route.model_resolved || route.model);
+    assert.equal(handed.route.workers_timeout, ceilingFromRoute(route).seconds);
+    assert.equal(handed.route.workers_timeout_source, ceilingFromRoute(route).source);
+    assert.notEqual(handed.dispatchId, request.dispatchId);
+    const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const reservation = saved.reservations.at(-1);
+    assert.equal(reservation.reason, 'same-session-resume');
+    assert(!JSON.stringify(saved.reservations).includes(ref.id), 'reservations carry only the digest');
+  });
+  await test('standalone research recovery after active-budget without a ref stops as resume-unavailable without a spawn', async () => {
+    const { request, receiptFile, stateFile } = await activeBudgetPreparation('research', false);
+    let delivered = 0;
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile }, {
+      processProbe: () => 'stopped', invokeSidecar: async () => { delivered++; return envelope(request); } });
+    assert.equal(recovered.action, 'stop', JSON.stringify(recovered));
+    assert.equal(recovered.reason_code, 'budget-exceeded-resume-unavailable');
+    assert.equal(delivered, 0);
+  });
+  await test('a resume on an ineligible phase or a malformed resumedFrom is refused before any transport', async () => {
+    const sessions = require('./forge-claude-session');
+    const base = fixture({ phase: 'research', hostRuntime: 'codex' });
+    const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null, configDir: base.cwd, cwd: base.cwd });
+    const from = { receipt_sha256: 'a'.repeat(64), dispatch_id: 'dispatch-x' };
+    assert.throws(() => prep.validateRequest({ ...base, claudeResume: ref, resumedFrom: from }), error => error.code === 'recovery-resume-phase-ineligible');
+    const plan = { ...base, phase: 'plan' };
+    assert.equal(prep.validateRequest({ ...plan, claudeResume: ref, resumedFrom: from }).claudeResume, ref);
+    assert.throws(() => prep.validateRequest({ ...plan, claudeResume: { ...ref, id: 'not-a-uuid' }, resumedFrom: from }), error => error.code === 'claude-session-invalid');
+    for (const bad of [undefined, { receipt_sha256: 'x', dispatch_id: 'd' }, { ...from, extra: 1 }, { ...from, dispatch_id: '' }]) {
+      assert.throws(() => prep.validateRequest({ ...plan, claudeResume: ref, resumedFrom: bad }), error => error.code === 'invalid-preparation-resume');
+    }
+  });
   await test('standalone native recovery route carries no synthetic workers_timeout', async () => {
     const request = fixture({ model: 'gpt-5.6-sol' });
     request.activeCapabilities = codexCapabilities();

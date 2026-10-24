@@ -130,8 +130,26 @@ function validateRequest(raw) {
     const primary = request.execution_contract.code_roots.find(root => root.id === request.execution_contract.primary_root_id);
     if (roots.key(roots.realDirectory(request.cwd)) !== roots.key(primary.path)) throw preparationError('execution-primary-root-mismatch', 'input');
   }
+  validateResume(request);
   request.contract = contract;
   return request;
+}
+
+// S05: a recovered plan preparation may resume its preserved Claude session once.
+// Both fields travel together; the unit sidecar revalidates them before spawning.
+function validateResume(request) {
+  if (request.claudeResume === undefined && request.resumedFrom === undefined) return;
+  if (request.phase !== 'plan') throw preparationError('recovery-resume-phase-ineligible', 'input');
+  if (!require('./forge-claude-session').validateSessionRef(request.claudeResume).ok) {
+    throw preparationError('claude-session-invalid', 'input');
+  }
+  const from = request.resumedFrom;
+  if (!from || typeof from !== 'object' || Array.isArray(from)
+      || Object.keys(from).some(key => !['receipt_sha256', 'dispatch_id'].includes(key))
+      || typeof from.receipt_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(from.receipt_sha256)
+      || !(from.dispatch_id === null || (typeof from.dispatch_id === 'string' && from.dispatch_id))) {
+    throw preparationError('invalid-preparation-resume', 'input');
+  }
 }
 
 function pathRelative(root, candidate) {
@@ -278,6 +296,7 @@ function deliveryRequest(request, route, prompt, contract = request.contract || 
     ...(request.executionRouting ? { executionRouting: request.executionRouting } : {}),
     ...(request.activeCapabilities ? { activeCapabilities: request.activeCapabilities } : {}),
     ...(request.effortBinding ? { effortBinding: request.effortBinding } : {}),
+    ...(request.claudeResume !== undefined ? { claudeResume: request.claudeResume, resumedFrom: request.resumedFrom } : {}),
     preparationRequestFingerprint: preparationRequestFingerprint(request),
     preparationIdentity: { scope: request.scope, phase: request.phase,
       taskId: request.taskId, workflowId: request.workflowId },
@@ -718,12 +737,20 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       }
       return unit.replayArtifactAttempt(delivery);
     },
-    invoke: async (route, invocation, _ceiling, assertReady, reservationHash) => {
+    // Sixth argument: the single same-session resume (S05), plan phase on a Claude sidecar only.
+    invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
+      if (resume != null) {
+        if (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude') {
+          throw preparationError('recovery-resume-route-invalid', 'validation');
+        }
+        if (request.phase !== 'plan') throw preparationError('recovery-resume-phase-ineligible', 'validation');
+      }
       assertReady?.();
       if (route.worker_mode === 'native' && !deps.invokeNative && recovery.transitions && !recovery.resumeReservation)
         return { action: 'reattest-native-handoff', reservation_sha256: reservationHash, provider_called: false };
       const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
-        resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
+        resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
+        ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       // Tier safety ceiling from the single source; no cumulative-clock remainder.
       // Only a sidecar route carries a worker ceiling; a native route passes unchanged.
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;

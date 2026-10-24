@@ -2457,12 +2457,16 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     },
     // The third argument is the decision's sidecar_ceiling; the route ceiling is
     // recomputed here from the single source instead of trusting the argument.
-    invoke: async (route, invocation, _ceiling, assertReady, reservationHash) => {
+    // The sixth argument is the recovery's single same-session resume (S05): only
+    // a Claude sidecar route may carry it; runUnitSidecarCore revalidates the ref.
+    invoke: async (route, invocation, _ceiling, assertReady, reservationHash, resume) => {
+      if (resume != null && (route.worker_mode !== 'sidecar' || route.resolved_worker_engine !== 'claude')) fail('recovery-resume-route-invalid');
       validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation });
       const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
       const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: ceiling
         ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route,
-        dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
+        dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json`,
+        ...(resume != null ? { claudeResume: resume.session, resumedFrom: resume.resumed_from } : {}) };
       if (route.worker_mode === 'native') {
         if (!runtime.invokeNative) {
           assertReady?.();

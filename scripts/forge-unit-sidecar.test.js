@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -1211,6 +1211,228 @@ async function claudeSessionContracts() {
     fs.rmSync(work, { recursive: true, force: true });
   }
 }
+// S05/T06: end-to-end same-session resume through the real recovery adapter:
+// runUnitSidecar (start, --session-id) -> active ceiling -> captureFailure with
+// the ref -> recoverUnitSidecar -> real reconcile -> --resume on the fake CLI.
+// Only the documented adapter seams (clock, liveness interval) are injected; the
+// reconcile marker wraps the real forge-surgical-reset.reconcileFailedAttempt.
+async function claudeResumeContracts() {
+  const fs = require('fs'), path = require('path'), crypto = require('crypto'), os = require('os');
+  const fixtures = require('./forge-code-roots.test'), runs = require('./forge-runs');
+  const session = require('./forge-claude-session'), accounts = require('./forge-accounts');
+  const surgical = require('./forge-surgical-reset');
+  const moduleKeys = () => Object.keys(require.cache).filter(key => /forge-(xllm|unit-sidecar|claude-sidecar|task-preparation)\.js$/.test(key));
+  const saved = moduleKeys().map(key => [key, require.cache[key]]);
+  for (const [key] of saved) delete require.cache[key];
+  const realResolve = accounts.resolveLaunch;
+  // Fictitious account: never a real token; the adapter binds resolveLaunch at load.
+  accounts.resolveLaunch = () => ({ name: 'fixture-resume-account', token: 'fixture-token-not-a-secret' });
+  const claude = require('./forge-claude-sidecar');
+  accounts.resolveLaunch = realResolve;
+  const realInvoke = claude.invokeClaudeSidecar;
+  let seam = () => ({});
+  claude.invokeClaudeSidecar = options => realInvoke({ ...options, ...seam(options) });
+  const fresh = require('./forge-unit-sidecar');
+  const realReconcile = surgical.reconcileFailedAttempt;
+  const previousBin = process.env.FORGE_XLLM_CLAUDE_BIN;
+  const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-resume-')));
+  const orderFile = path.join(work, 'order.jsonl'), argvFile = path.join(work, 'argv.jsonl');
+  surgical.reconcileFailedAttempt = (...args) => { fs.appendFileSync(orderFile, '"reconcile"\n'); return realReconcile(...args); };
+  // Fake CLI modes: start (--session-id, endless stream), resume-ok, resume-endless
+  // (--resume requires the preserved transcript), silent (N events then silence).
+  const writeCli = mode => {
+    const file = path.join(work, `fake-claude-${mode}.js`);
+    fs.writeFileSync(file, [
+      "'use strict';",
+      "const fs = require('fs'), path = require('path');",
+      'const args = process.argv.slice(2);',
+      "if (args.includes('--version')) { process.stdout.write('2.1.310 (Claude Code)\\n'); process.exit(0); }",
+      `fs.appendFileSync(${JSON.stringify(argvFile)}, JSON.stringify(args) + '\\n');`,
+      "const at = args.indexOf('--session-id'), resumeAt = args.indexOf('--resume');",
+      'const sid = at >= 0 ? args[at + 1] : resumeAt >= 0 ? args[resumeAt + 1] : null;',
+      "const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;",
+      `const { projectKey } = require(${JSON.stringify(require.resolve('./forge-claude-session'))});`,
+      "const dir = path.join(home, '.claude', 'projects', projectKey(process.cwd()));",
+      "const transcript = sid && path.join(dir, sid + '.jsonl');",
+      'if (resumeAt >= 0) {',
+      `  fs.appendFileSync(${JSON.stringify(orderFile)}, '"resume"\\n');`,
+      "  if (!fs.existsSync(transcript)) { process.stderr.write('No conversation found\\n'); process.exit(1); }",
+      '}',
+      "if (sid) { fs.mkdirSync(dir, { recursive: true }); fs.appendFileSync(transcript, JSON.stringify({ type: 'fixture' }) + '\\n'); }",
+      "const out = value => process.stdout.write(JSON.stringify(value) + '\\n');",
+      "const delta = () => out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } });",
+      "out({ type: 'system', subtype: 'init', session_id: sid });",
+      "out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-resume', role: 'assistant' } } });",
+      "out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });",
+      'delta();',
+      `const mode = ${JSON.stringify(mode)};`,
+      "if (mode === 'start' || mode === 'resume-endless') setInterval(delta, 30);",
+      "else if (mode === 'silent') { delta(); setInterval(() => {}, 1000); }",
+      'else {',
+      "  fs.writeFileSync(path.join(process.cwd(), 'same.txt'), 'worker alpha\\n');",
+      "  for (let i = 0; i < args.length; i++) if (args[i] === '--add-dir') fs.writeFileSync(path.join(args[i + 1], 'same.txt'), 'worker beta\\n');",
+      "  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });",
+      "  out({ type: 'stream_event', event: { type: 'message_stop' } });",
+      "  const model = args[args.indexOf('--model') + 1];",
+      "  out({ type: 'result', subtype: 'success', is_error: false, result: 'fixture', structured_output: { status: 'done', summary: 'Resumed fixture',",
+      "    files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] },",
+      '    usage: { input_tokens: 11, output_tokens: 13 }, modelUsage: { [model]: { inputTokens: 11, outputTokens: 13 } } });',
+      '}',
+      '',
+    ].join('\n'));
+    return file;
+  };
+  const cli = Object.fromEntries(['start', 'resume-ok', 'resume-endless', 'silent'].map(mode => [mode, writeCli(mode)]));
+  const lines = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+  const reset = () => { fs.rmSync(orderFile, { force: true }); fs.rmSync(argvFile, { force: true }); };
+  // Accelerated model clock (S03 mechanism): real time until the first remote
+  // progress, then x300, so the 60 s explicit ceiling or the 240 s dead-silence
+  // threshold is reached in under a second of real time.
+  const accelerated = options => {
+    const t0 = performance.now();
+    let pivot = null;
+    return { monotonicClock: () => { const now = performance.now(); return pivot === null ? now - t0 : (pivot - t0) + (now - pivot) * 300; },
+      livenessIntervalMs: 25,
+      onProgress: snapshot => { if (pivot === null && snapshot.phase !== 'local-start') pivot = performance.now(); return options.onProgress?.(snapshot); } };
+  };
+  function unitRequest(id, timeoutSecs) {
+    const lab = fixtures.fixture();
+    const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+      cwd: lab.a, contextRoot: lab.owner, execution_contract: lab.contract,
+      workflowId: 'claude-resume-fixture', dispatchId: id, resultFile: path.join(lab.dir, `${id}.json`), prompt: 'Fixture only.',
+      verification: { preferenceCommands: ['node -e "process.exit(0)"'] } };
+    const base = path.join(lab.owner, '.gsd/milestones/M001/slices/S01');
+    fs.mkdirSync(path.join(base, 'tasks/T01'), { recursive: true });
+    request.planFile = path.join(base, 'tasks/T01/T01-PLAN.md');
+    fs.writeFileSync(request.planFile, fixtures.plan(lab.contract));
+    fs.writeFileSync(path.join(base, 'S01-PLAN.md'), '# Slice\n- [ ] **T01** — fixture\n');
+    fs.writeFileSync(path.join(lab.owner, '.gsd/forge-prefs.jsonc'), JSON.stringify({ tier_models: Object.fromEntries(
+      ['light', 'standard', 'heavy', 'max'].map(tier => [tier, ['claude-sonnet-5']])), effort: { 'plan-slice': 'medium' } }));
+    resolveContext(request);
+    request.route = { ...request.route, workers_timeout: timeoutSecs, workers_timeout_source: 'explicit' };
+    delete request.route.workers_timeout_warning;
+    request.runId = `claude-resume-${id}`;
+    request.claim = { schema_version: 2, generation: crypto.randomUUID(), execution_contract: lab.contract,
+      paths: ['alpha', 'beta'].map(root_id => ({ root_id, path: 'same.txt' })) };
+    request.gates = { plan: 'skipped', planSkipReason: 'interactive-off', claim: 'proceed', security: 'not-applicable' };
+    runs.add(lab.owner, { id: request.runId, kind: 'milestone', session_id: 'fixture', write_claim: request.claim });
+    return { lab, request, recovery: { stateFile: `${request.resultFile}.recovery.json`, receiptFile: `${request.resultFile}.receipt.json` } };
+  }
+  // Trusted authorship callback of the fixture: the start wrote nothing, so the
+  // real reset reconciles every declared root without attributing a change.
+  const runtime = { processProbe: () => 'stopped', verifyOwnership: () => true };
+  const attempt = async fn => { try { return { value: await fn() }; } catch (error) { return { error }; } };
+  // Starts the unit and returns the preserved session ref read from .recovery.json.
+  async function startActive(id) {
+    reset();
+    const unit = unitRequest(id, 60);
+    process.env.FORGE_XLLM_CLAUDE_BIN = cli.start;
+    seam = accelerated;
+    const started = await attempt(() => fresh.runUnitSidecar(unit.request));
+    seam = () => ({});
+    assert.strictEqual(started.error && started.error.code, 'budget-exceeded-while-active', started.error ? started.error.stack : 'no failure');
+    const state = JSON.parse(fs.readFileSync(unit.recovery.stateFile, 'utf8'));
+    const ref = state.attempts.at(-1).session;
+    assert(session.validateSessionRef(ref).ok, 'the recovery state keeps a valid ref');
+    unit.ref = ref;
+    unit.receiptBytes = fs.readFileSync(unit.recovery.receiptFile);
+    return unit;
+  }
+  const targetsAbsent = ref => session.sessionTargets({ configDir: ref.config_dir, cwd: ref.cwd, id: ref.id })
+    .every(target => !fs.existsSync(target.path));
+  const resumedFiles = unit => fs.readdirSync(unit.lab.dir).filter(name => name.startsWith(`${path.basename(unit.request.resultFile)}.recovery-`));
+  try {
+    // 1. Full cycle: start -> active ceiling -> recovery -> reconcile -> --resume -> success.
+    const main = await startActive('resume-main');
+    try {
+      const [startArgs] = lines(argvFile);
+      const id = startArgs[startArgs.indexOf('--session-id') + 1];
+      assert(session.SESSION_ID_PATTERN.test(id) && id === main.ref.id, 'start argv carries the Forge uuid');
+      assert(!startArgs.includes('--no-session-persistence') && !startArgs.includes('--resume'));
+      assert(!targetsAbsent(main.ref), 'transcript preserved for the single resume');
+      process.env.FORGE_XLLM_CLAUDE_BIN = cli['resume-ok'];
+      const recovered = await attempt(() => fresh.recoverUnitSidecar(main.request, main.recovery, runtime));
+      assert(!recovered.error, recovered.error && recovered.error.stack);
+      assert.strictEqual(recovered.value.action, 'invoke');
+      assert.strictEqual(recovered.value.result && recovered.value.result.status, 'done', JSON.stringify(recovered.value.result));
+      assert.strictEqual(recovered.value.sidecar_ceiling.seconds, 60, 'resume keeps the route ceiling');
+      const argv = lines(argvFile);
+      assert.strictEqual(argv.length, 2, JSON.stringify(argv));
+      const resumeArgs = argv[1];
+      assert.strictEqual(resumeArgs[resumeArgs.indexOf('--resume') + 1], id);
+      for (const flag of ['--session-id', '--no-session-persistence', '--fork-session']) assert(!resumeArgs.includes(flag), `resume argv without ${flag}`);
+      const order = lines(orderFile);
+      assert(order.includes('reconcile') && order.includes('resume'), JSON.stringify(order));
+      assert(order.indexOf('reconcile') < order.indexOf('resume'), `reconcile before the resume spawn: ${JSON.stringify(order)}`);
+      const resumedReceipts = resumedFiles(main).filter(name => name.endsWith('.json.receipt.json'));
+      assert.strictEqual(resumedReceipts.length, 1, JSON.stringify(resumedFiles(main)));
+      const resumedReceipt = JSON.parse(fs.readFileSync(path.join(main.lab.dir, resumedReceipts[0]), 'utf8'));
+      assert.strictEqual(resumedReceipt.resumed_from.receipt_sha256, crypto.createHash('sha256').update(main.receiptBytes).digest('hex'));
+      assert.strictEqual(resumedReceipt.resumed_from.dispatch_id, main.request.dispatchId);
+      assert.strictEqual(resumedReceipt.session_sha256, session.sessionDigest(id));
+      const events = path.join(main.lab.owner, '.gsd/forge/events.jsonl');
+      const channels = [main.recovery.receiptFile, main.request.resultFile, events,
+        ...resumedFiles(main).filter(name => !name.endsWith('.recovery.json')).map(name => path.join(main.lab.dir, name))];
+      for (const file of channels) if (fs.existsSync(file)) assert(!fs.readFileSync(file, 'utf8').includes(id), `raw id absent from ${path.basename(file)}`);
+      assert(targetsAbsent(main.ref), 'the four session targets are gone after the resume');
+    } finally { main.lab.cleanup(); }
+    console.log('PASS claude resume: start --session-id -> active ceiling -> recoverUnitSidecar -> reconcile before --resume (no --session-id/legacy flag) -> chained receipt (resumed_from sha of the previous receipt, session_sha256) -> done; raw id absent; four targets removed');
+
+    // 2. Exhausted: the resume hits the ceiling again; the next recovery stops without a third spawn.
+    const exhausted = await startActive('resume-exhausted');
+    try {
+      process.env.FORGE_XLLM_CLAUDE_BIN = cli['resume-endless'];
+      seam = accelerated;
+      const second = await attempt(() => fresh.recoverUnitSidecar(exhausted.request, exhausted.recovery, runtime));
+      seam = () => ({});
+      assert.strictEqual(second.error && second.error.code, 'budget-exceeded-while-active', second.error ? second.error.stack : JSON.stringify(second.value));
+      assert.strictEqual(lines(argvFile).length, 2);
+      // The next recovery inspects the latest attempt: the resume's own receipt/dispatch.
+      const resumedReceipt = resumedFiles(exhausted).find(name => name.endsWith('.json.receipt.json'));
+      const resumedResult = path.join(exhausted.lab.dir, resumedReceipt.slice(0, -'.receipt.json'.length));
+      const resumedDispatch = JSON.parse(fs.readFileSync(path.join(exhausted.lab.dir, resumedReceipt), 'utf8')).dispatch_id;
+      const third = await attempt(() => fresh.recoverUnitSidecar({ ...exhausted.request, dispatchId: resumedDispatch, resultFile: resumedResult },
+        { stateFile: exhausted.recovery.stateFile, receiptFile: `${resumedResult}.receipt.json` }, runtime));
+      assert(!third.error, third.error && third.error.stack);
+      assert.strictEqual(third.value.action, 'stop', JSON.stringify(third.value));
+      assert.strictEqual(third.value.reason_code, 'budget-exceeded-resume-exhausted');
+      assert.strictEqual(lines(argvFile).length, 2, 'no third spawn');
+      assert(targetsAbsent(exhausted.ref), 'session removed');
+    } finally { exhausted.lab.cleanup(); }
+    console.log('PASS claude resume exhausted: a second active ceiling stops with budget-exceeded-resume-exhausted, no third spawn, session removed');
+
+    // 3. Dead silence at the start: never resumed; the adapter already removed the session.
+    reset();
+    const dead = unitRequest('resume-dead', 3600);
+    try {
+      process.env.FORGE_XLLM_CLAUDE_BIN = cli.silent;
+      seam = accelerated;
+      const started = await attempt(() => fresh.runUnitSidecar(dead.request));
+      seam = () => ({});
+      assert.strictEqual(started.error && started.error.code, 'claude-anomalous-silence', started.error ? started.error.stack : 'no failure');
+      const [startArgs] = lines(argvFile);
+      const id = startArgs[startArgs.indexOf('--session-id') + 1];
+      const ref = { config_dir: path.join(home, '.claude'), cwd: dead.request.cwd, id };
+      assert(targetsAbsent(ref), 'dead session removed by the adapter');
+      const state = JSON.parse(fs.readFileSync(dead.recovery.stateFile, 'utf8'));
+      assert.strictEqual(state.attempts.at(-1).session, undefined, 'no ref recorded for silence');
+      process.env.FORGE_XLLM_CLAUDE_BIN = cli['resume-ok'];
+      const recovered = await attempt(() => fresh.recoverUnitSidecar(dead.request, dead.recovery, runtime));
+      assert.strictEqual(lines(argvFile).filter(args => args.includes('--resume')).length, 0,
+        `dead never resumed: ${JSON.stringify(recovered.value || (recovered.error && recovered.error.code))}`);
+      console.log(`PASS claude resume dead: dead-silence start never produces a --resume spawn (recovery outcome: ${recovered.error ? recovered.error.code : recovered.value.action || recovered.value.status}); session removed`);
+    } finally { dead.lab.cleanup(); }
+  } finally {
+    seam = () => ({});
+    surgical.reconcileFailedAttempt = realReconcile;
+    if (previousBin === undefined) delete process.env.FORGE_XLLM_CLAUDE_BIN; else process.env.FORGE_XLLM_CLAUDE_BIN = previousBin;
+    claude.invokeClaudeSidecar = realInvoke;
+    for (const key of moduleKeys()) delete require.cache[key];
+    for (const [key, entry] of saved) require.cache[key] = entry;
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
   const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
@@ -1227,6 +1449,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--owner-event-reconcile') await ownerEventReconcileContracts();
     if (!selectedScenario || selectedScenario === '--ceiling-route') await ceilingRouteContracts();
     if (!selectedScenario || selectedScenario === '--claude-session') await claudeSessionContracts();
+    if (!selectedScenario || selectedScenario === '--claude-resume') await claudeResumeContracts();
   } finally {
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(profile, { recursive: true, force: true });
