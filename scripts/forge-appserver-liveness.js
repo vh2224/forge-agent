@@ -9,7 +9,8 @@ const { toolFingerprint } = require('./forge-claude-stream');
 
 const TOOL_ITEM_TYPES = Object.freeze(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall',
   'collabAgentToolCall', 'webSearch', 'imageView', 'sleep', 'imageGeneration']);
-const LOCAL_LIFECYCLE_METHODS = Object.freeze(['thread/started', 'turn/started']);
+const LOCAL_LIFECYCLE_METHODS = Object.freeze(['thread/started', 'turn/started', 'thread/status/changed',
+  'mcpServer/startupStatus/updated']);
 // Notifications the local app-server emits without the provider having answered.
 const LOCAL_LIFECYCLE = Object.freeze({ methods: LOCAL_LIFECYCLE_METHODS, itemTypes: Object.freeze(['userMessage']) });
 const DEFAULT_MAX_OPEN_ITEMS = 256;

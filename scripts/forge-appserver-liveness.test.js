@@ -121,4 +121,16 @@ function fresh(extra = {}) {
   assert.strictEqual(big.snapshot().tools_in_flight, 256, 'default cap is 256');
 }
 
+// local status/startup notifications are not provider activity
+{
+  const r = fresh();
+  r.turnSent();
+  t += 100;
+  r.push({ method: 'thread/status/changed', params: { status: { type: 'active' } } });
+  r.push({ method: 'mcpServer/startupStatus/updated', params: {} });
+  const snap = r.snapshot();
+  assert.strictEqual(snap.remote_event_count, 0);
+  assert.strictEqual(snap.phase, 'local-start');
+}
+
 console.log('forge-appserver-liveness: ok');

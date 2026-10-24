@@ -179,6 +179,13 @@ process.stdin.on('data', chunk => {
         setTimeout(() => { send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } }); }, 15);
         continue;
       }
+      // S07 R1. A matching completion arrives but the turn/start response is withheld:
+      // settlement is not imminent, so the silence watchdog must still fire.
+      if (mode === 'completed-unanswered') {
+        send({ method: 'turn/started', params: { turn: { id: 'turn-1' } } });
+        send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
+        continue;
+      }
       // S07. turn/started is local lifecycle: only what follows it is remote evidence.
       if (LIVENESS_MODES.includes(mode)) {
         send({ id: message.id, result: { turn: { id: 'turn-1' } } });
@@ -897,6 +904,20 @@ async function testDeadStart(mock, dir) {
   await waitForDeath(await readPidFileWhenWritten(pidFile, 'mock must record its pid'), 'dead-start must kill the app-server');
 }
 
+// R1: matching completion with the turn/start response withheld still dies by silence.
+async function testCompletionWithUnansweredStart(mock, dir) {
+  const accelerated = acceleratedClock(150);
+  const error = await timed('completed-unanswered', () => rejectionOf(startAppServerTurn({
+    cmd: process.execPath, args: [mock], cwd: dir, timeoutMs: 3600000, livenessIntervalMs: 10,
+    interruptGraceMs: 1000,
+    env: { ...process.env, FORGE_APPSERVER_MOCK_MODE: 'completed-unanswered' },
+    clock: accelerated.clock,
+    onEvent: message => { if (message.method === 'turn/started') accelerated.accelerate(); },
+  })));
+  assert.strictEqual(error.code, APPSERVER_LIVENESS_CODES.SILENCE);
+  assert.strictEqual(error.liveness.state, 'dead');
+}
+
 // N remote events, then silence: slow-suspect at >= 120000, dead-silence past 240000.
 async function testDeadSilence(mock, dir) {
   const accelerated = acceleratedClock(1000);
@@ -1392,6 +1413,7 @@ async function main() {
     await testLivenessOptionValidation();
     await testActiveStreamOutlivesSilenceWindows(mock, dir);
     await testDeadStart(mock, dir);
+    await testCompletionWithUnansweredStart(mock, dir);
     await testDeadSilence(mock, dir);
     await testBudgetExceededWhileActive(mock, dir);
     await testLocalProofOptionValidation();

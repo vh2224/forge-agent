@@ -820,8 +820,10 @@ function startAppServerTurn(options) {
     // Primary authority: the neutral tracker over the reducer snapshot plus the
     // cached local proof and the loop detector state (synchronous, no I/O).
     watchdog = setInterval(() => {
-      // A matched completion is about to settle on the 5ms poll; never kill it.
-      if (settled || timedOut || matchedCompletion()) return;
+      // A matched completion is about to settle on the 5ms poll; never kill it. Only once
+      // the startup RPCs have resolved: with turn/start still unanswered settlement is
+      // not imminent, and skipping here would disable the silence deadline.
+      if (settled || timedOut || (matchedCompletion() && pending.size === 0)) return;
       let refreshed;
       try { refreshed = refreshLiveness(); } catch { return; }
       const { result, published } = refreshed;
