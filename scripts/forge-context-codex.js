@@ -35,35 +35,43 @@ function extractFormalTelemetry(notification) {
 
 function observe(options) {
   const { cwd, session_id: sessionId, notification } = options;
-  const files = pathsFor(cwd, sessionId);
-  const previous = readJson(files.state) || { compaction_measurement: 'unknown', seen_cycles: [], checkpoints: [] };
+  const persist = options.persist !== false;
+  // persist:false accumulates in the caller-owned options.state object: no read, no write.
+  const files = persist ? pathsFor(cwd, sessionId) : null;
+  const current = persist
+    ? (readJson(files.state) || { compaction_measurement: 'unknown', seen_cycles: [], checkpoints: [] })
+    : (options.state || { compaction_measurement: 'unknown', seen_cycles: [], checkpoints: [] });
   const telemetry = extractFormalTelemetry(notification);
   const params = notification && notification.params && typeof notification.params === 'object' ? notification.params : {};
   const item = params.item && typeof params.item === 'object' ? params.item : null;
   if (options.baseline === true) {
-    previous.compaction_measurement = 'known'; previous.compaction_count = previous.compaction_count || 0;
+    current.compaction_measurement = 'known'; current.compaction_count = current.compaction_count || 0;
   }
   if (notification && (notification.method === 'item/started' || notification.method === 'item/completed')
       && item && item.type === 'contextCompaction' && typeof item.id === 'string'
-      && previous.compaction_measurement === 'known' && !previous.seen_cycles.includes(item.id)) {
-    previous.seen_cycles.push(item.id); previous.compaction_count += 1;
+      && current.compaction_measurement === 'known' && !current.seen_cycles.includes(item.id)) {
+    current.seen_cycles.push(item.id); current.compaction_count += 1;
   }
-  previous.epoch = String(previous.compaction_count || 0);
+  current.epoch = String(current.compaction_count || 0);
   const snapshot = createContextSnapshot({ host_runtime: 'codex', source: 'codex-app-server', session_id: sessionId,
-    epoch: previous.epoch, capability: telemetry.capability, used_percentage: telemetry.used_percentage,
-    compaction_measurement: previous.compaction_measurement, compaction_count: previous.compaction_count }, options.now);
+    epoch: current.epoch, capability: telemetry.capability, used_percentage: telemetry.used_percentage,
+    compaction_measurement: current.compaction_measurement, compaction_count: current.compaction_count }, options.now);
   snapshot.scope = 'sidecar-thread';
   snapshot.epoch_source = 'forge-local-compaction-count';
-  try { atomicJson(files.state, previous); atomicJson(files.snapshot, snapshot); } catch { /* MEM008 */ }
+  if (persist) {
+    try { atomicJson(files.state, current); atomicJson(files.snapshot, snapshot); } catch { /* MEM008 */ }
+  }
   return snapshot;
 }
 
 function observeSession(options) {
   const thread = options.threadStartResult && options.threadStartResult.thread;
   if (!thread || typeof thread.id !== 'string' || !thread.id) return null;
-  let snapshot = observe({ cwd: options.cwd, session_id: thread.id, baseline: true, now: options.now });
+  const persist = options.persist !== false;
+  const state = persist ? undefined : { compaction_measurement: 'unknown', seen_cycles: [], checkpoints: [] };
+  let snapshot = observe({ cwd: options.cwd, session_id: thread.id, baseline: true, now: options.now, persist, state });
   for (const notification of options.notifications || []) {
-    snapshot = observe({ cwd: options.cwd, session_id: thread.id, notification, now: options.now });
+    snapshot = observe({ cwd: options.cwd, session_id: thread.id, notification, now: options.now, persist, state });
   }
   return snapshot;
 }

@@ -1239,7 +1239,9 @@ function invokeCodexAppServer(opts) {
       try {
         const { observeSession, consumeBoundary } = require('./forge-context-codex');
         contextHealth = observeSession({ cwd: opts.contextRoot, threadStartResult: session.threadStartResult,
-          notifications: session.contextNotifications || [] });
+          notifications: session.contextNotifications || [],
+          // Under a protected owner census (runExecute passes persistContext:false) nothing may be written in the owner tree.
+          persist: opts.persistContext !== false });
         if (contextHealth) contextBoundary = consumeBoundary({ cwd: opts.contextRoot, snapshot: contextHealth });
       } catch { /* context health is best-effort and never controls the turn */ }
     }
@@ -2684,6 +2686,8 @@ async function runWriteContractCore(opts, contract) {
       evidenceUnit: dispatchId,
       writableRoots,
       contextRoot,
+      // T06: a protected owner census (executionContext) keeps context health in memory.
+      persistContext: !opts.executionContext,
       // S07: the same owner liveness observer and ignore prefixes as the Claude branch.
       onLiveness: opts.onLiveness,
       localProofIgnore: opts.localProofIgnore,

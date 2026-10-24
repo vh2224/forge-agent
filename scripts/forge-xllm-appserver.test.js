@@ -174,6 +174,27 @@ async function testContextHealthFlow(mock, root) {
   assert(fs.existsSync(path.join(forgeDir, 'context', 'codex', 'thread-fixed.json')), 'real transport persists its sidecar-thread snapshot');
 }
 
+// S07/T06: under a protected owner census (executionContext present) the transport
+// must keep context health in memory; writing .gsd/forge/context/codex/* inside the
+// owner tree used to fail publication with execution-protected-metadata.
+async function testContextHealthInMemoryUnderProtectedCensus(mock, root) {
+  const { protectedSnapshot } = require('./forge-task-execution');
+  const repo = fixtureRepo(root);
+  const owner = path.join(root, 'protected-owner');
+  fs.mkdirSync(path.join(owner, '.gsd', 'forge'), { recursive: true });
+  const before = protectedSnapshot(owner);
+  const options = executeOptions(repo, planFile(root), path.join(root, 'protected-census-result.json'), 'census-model');
+  options.contextRoot = owner;
+  options.executionContext = {};
+  const result = await withMock(mock, 'conforming', path.join(root, 'protected-census-capture.json'),
+    () => runExecute(options));
+  assert(!fs.existsSync(path.join(owner, '.gsd', 'forge', 'context')), 'no context dir created inside the protected owner');
+  assert.deepStrictEqual(protectedSnapshot(owner), before, 'protected census is unchanged by the transport');
+  assert.strictEqual(result.appserver.context_health.compaction_measurement, 'known');
+  assert.strictEqual(result.appserver.context_health.compaction_count, 1);
+  assert.strictEqual(result.appserver.context_boundary.indicator, 'ctx ? compact x1');
+}
+
 /**
  * TASK-022 — a SECOND mock, added ALONGSIDE the one above, never replacing it.
  *
@@ -1227,6 +1248,7 @@ async function main() {
     await testProcedureDoesNotPrepareContext(mock, root);
     await testAdapterPreflightRefusal(root);
     await testContextHealthFlow(mock, root);
+    await testContextHealthInMemoryUnderProtectedCensus(mock, root);
     await testMultiRepoWire(mock, root);
     await testDegradation(mock, root);
     await testHeartbeat(mock, root);
