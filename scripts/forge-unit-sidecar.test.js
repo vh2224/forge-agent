@@ -1423,6 +1423,24 @@ async function claudeResumeContracts() {
         `dead never resumed: ${JSON.stringify(recovered.value || (recovered.error && recovered.error.code))}`);
       console.log(`PASS claude resume dead: dead-silence start never produces a --resume spawn (recovery outcome: ${recovered.error ? recovered.error.code : recovered.value.action || recovered.value.status}); session removed`);
     } finally { dead.lab.cleanup(); }
+
+    // 4. The adapter refuses a resume on any route other than a Claude sidecar,
+    // before validation, receipt or spawn (controller substituted at its boundary).
+    reset();
+    const routed = unitRequest('resume-route', 60);
+    const recoveryApi = require('./forge-attempt-recovery'), realRecover = recoveryApi.recoverAttempt;
+    try {
+      const resume = { session: session.createSessionRef({ id: session.newSessionId(), accountName: 'fixture-resume-account',
+        configDir: path.join(home, '.claude'), cwd: routed.request.cwd }), resumed_from: { receipt_sha256: 'd'.repeat(64), dispatch_id: 'resume-route' } };
+      for (const route of [{ ...routed.request.route, resolved_worker_engine: 'codex' }, { ...routed.request.route, worker_mode: 'native' }]) {
+        recoveryApi.recoverAttempt = async options => options.invoke(route, { ok: true }, null, undefined, 'fixture-reservation', resume);
+        const refused = await attempt(() => fresh.recoverUnitSidecar(routed.request, routed.recovery, runtime));
+        assert.strictEqual(refused.error && refused.error.code, 'recovery-resume-route-invalid', refused.error ? refused.error.stack : 'accepted');
+      }
+      assert.strictEqual(lines(argvFile).length, 0, 'no spawn');
+      assert.strictEqual(fs.existsSync(routed.recovery.receiptFile), false, 'no receipt');
+    } finally { recoveryApi.recoverAttempt = realRecover; routed.lab.cleanup(); }
+    console.log('PASS claude resume route: a resume on a codex or native route is refused (recovery-resume-route-invalid) before receipt or spawn');
   } finally {
     seam = () => ({});
     surgical.reconcileFailedAttempt = realReconcile;

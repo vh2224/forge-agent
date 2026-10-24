@@ -297,7 +297,7 @@ async function main() {
     assert.equal(recovered.reason_code, 'budget-exceeded-resume-unavailable');
     assert.equal(delivered, 0);
   });
-  await test('a resume on an ineligible phase or a malformed resumedFrom is refused before any transport', async () => {
+  await test('a resume on an ineligible phase or route, or with a malformed resumedFrom, is refused before any transport', async () => {
     const sessions = require('./forge-claude-session');
     const base = fixture({ phase: 'research', hostRuntime: 'codex' });
     const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null, configDir: base.cwd, cwd: base.cwd });
@@ -309,6 +309,26 @@ async function main() {
     for (const bad of [undefined, { receipt_sha256: 'x', dispatch_id: 'd' }, { ...from, extra: 1 }, { ...from, dispatch_id: '' }]) {
       assert.throws(() => prep.validateRequest({ ...plan, claudeResume: ref, resumedFrom: bad }), error => error.code === 'invalid-preparation-resume');
     }
+    // The recovery adapter itself: non-Claude/native route or non-plan phase is a named refusal before any transport.
+    const recoveryApi = require('./forge-attempt-recovery'), realRecover = recoveryApi.recoverAttempt;
+    const failedPlan = fixture({ phase: 'plan', hostRuntime: 'codex', model: 'claude-sonnet-5' });
+    await prep.prepareStandaloneTask(failedPlan, { invokeSidecar: async () => {
+      throw Object.assign(Error('fixture ceiling'), { code: 'budget-exceeded-while-active', provider_called: true }); } });
+    const receipt = JSON.parse(fs.readFileSync(failedPlan.resultFile + '.receipt.json', 'utf8'));
+    const resume = { session: ref, resumed_from: from };
+    let delivered = 0;
+    try {
+      for (const [request, route, code] of [
+        [failedPlan, { ...receipt.route, resolved_worker_engine: 'codex' }, 'recovery-resume-route-invalid'],
+        [failedPlan, { ...receipt.route, worker_mode: 'native' }, 'recovery-resume-route-invalid'],
+        [{ ...failedPlan, phase: 'research' }, receipt.route, 'recovery-resume-phase-ineligible']]) {
+        recoveryApi.recoverAttempt = async options => options.invoke(route, { ok: true }, null, undefined, 'fixture-reservation', resume);
+        await assert.rejects(() => prep.recoverStandaloneTask(request, { receiptFile: failedPlan.resultFile + '.receipt.json',
+          stateFile: failedPlan.resultFile + '.recovery.json' }, { invokeSidecar: async () => { delivered++; return envelope(request); } }),
+        error => error.code === code);
+      }
+    } finally { recoveryApi.recoverAttempt = realRecover; }
+    assert.equal(delivered, 0);
   });
   await test('standalone native recovery route carries no synthetic workers_timeout', async () => {
     const request = fixture({ model: 'gpt-5.6-sol' });
