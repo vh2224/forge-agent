@@ -731,7 +731,7 @@ when retained; JSON does not preserve it. There is no atomic transaction between
 a Node return and a later external tool call, and no claim of exactly-once tool
 execution. Crash or uncertainty after consumption requires process/receipt/write
 inspection; it never authorizes silent reconsumption. Measure preflight duration
-and choose a sufficient bounded window without rewriting the historical budget.
+and choose a sufficient bounded window without a cumulative recovery clock; each sidecar keeps its full tier safety ceiling.
 ### Saved-response boundary for legacy root identities
 
 Recovery checks for a saved response before requesting pre-spawn repair proof.
