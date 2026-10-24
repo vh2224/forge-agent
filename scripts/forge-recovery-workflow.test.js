@@ -157,7 +157,8 @@ async function restart(file) {
   const { request, profile } = saved;
   const stateFile = request.resultFile + '.recovery.json', receiptFile = request.resultFile + '.receipt.json';
   const initial = JSON.parse(fs.readFileSync(stateFile));
-  let now = initial.deadline_at + 1;
+  assert.equal(initial.schema_version, 2); assert(!Object.hasOwn(initial, 'deadline_at'));
+  let now = initial.started_at + 60001; // past the former 60000 ms window; v2 has no deadline_at
   request.activeCapabilities = capabilities;
   let calls = 0;
   const result = await prep.recoverStandaloneTask(request, { stateFile, receiptFile, clock: () => ++now }, {
@@ -169,9 +170,10 @@ async function restart(file) {
       return `---GSD-WORKER-RESULT---\nstatus: done\nresult_json: ${JSON.stringify(envelope(request))}\n---END-RESULT---`;
     },
   });
-  assert.equal(result.result.status, 'done'); assert.equal(result.sidecar_remaining_ms, 0);
+  assert.equal(result.result.status, 'done'); assert.equal(result.sidecar_ceiling, null); assert(!Object.hasOwn(result, 'sidecar_remaining_ms'));
   assert.equal(calls, 1); assert.equal(result.route.worker_mode, 'native');
-  assert.equal(JSON.parse(fs.readFileSync(stateFile)).deadline_at, initial.deadline_at);
+  const persisted = JSON.parse(fs.readFileSync(stateFile));
+  assert.equal(persisted.started_at, initial.started_at); assert.equal(persisted.budget, 'tier-ceiling'); assert(!Object.hasOwn(persisted, 'deadline_at'));
   const published = path.join(request.contextRoot, prep.requiredArtifact(request));
   const bytes = fs.readFileSync(published), stat = fs.statSync(published);
   const acceptedRequest = { ...request, recoveryStateFile: stateFile };
@@ -190,7 +192,7 @@ async function restart(file) {
   assert.equal(replay.replayed, true, JSON.stringify(replay)); assert.equal(replay.provider_called, false);
   assert.deepEqual(fs.readFileSync(published), bytes); assert.equal(fs.statSync(published).mtimeMs, stat.mtimeMs);
   fs.writeFileSync(file + '.result.json', JSON.stringify({ pid: process.pid, calls, receipt: accepted, published,
-    deadline_at: initial.deadline_at, sidecar_remaining_ms: result.sidecar_remaining_ms }));
+    started_at: initial.started_at, sidecar_ceiling: result.sidecar_ceiling, worker_mode: result.route.worker_mode }));
 }
 async function transitionRestart(file) {
   const h = require('./forge-recovery-transition.test');
@@ -215,14 +217,55 @@ async function transitionRestart(file) {
     assert.equal(result.action, 'replay'); assert.equal(result.result.provider_called, false); assert.equal(calls, 0);
     assert(fs.existsSync(path.join(f.request.contextRoot, unit.locations(f.request).required[0])));
   } else {
-    assert.equal(result.action, 'invoke'); assert.equal(calls, 1); assert.equal(result.sidecar_remaining_ms, 0);
+    assert.equal(result.action, 'invoke'); assert.equal(calls, 1); assert.equal(result.sidecar_ceiling, null); assert(!Object.hasOwn(result, 'sidecar_remaining_ms'));
     assert(!fs.existsSync(path.join(f.request.contextRoot, unit.locations(f.request).required[0])), 'disposition cannot publish the old candidate');
     const saved = h.assertHistoryPreserved(f);
     assert.equal(saved.reservations.length, 1); assert.equal(saved.transitions.length, 1);
     if (f.questionEvidence) assert.deepEqual(saved.pending_questions, f.questionEvidence);
-    const next = await h.recoverPublic(f, {}, runtime);
-    assert.equal(next.action, 'stop'); assert.equal(next.reason_code, 'recovery-candidates-exhausted'); assert.equal(calls, 1);
-    h.assertHistoryPreserved(f);
+    // v2 (no cumulative clock): once the native destination is tried, each untried
+    // sidecar of the finite chain is still eligible with the tier ceiling; the
+    // recovery terminates with recovery-candidates-exhausted, never by a clock.
+    const transport = xllm.invokeClaudeTransport, outcomes = [];
+    let sidecarCalls = 0;
+    const timeout = () => Object.assign(Error('fixture sidecar timeout'), { code: 'claude-timeout', provider_called: 'unknown' });
+    xllm.invokeClaudeTransport = async args => { sidecarCalls++; outcomes.push({ transport: true, timeoutSecs: args?.timeoutSecs, model: args?.model }); throw timeout(); };
+    try {
+      for (let step = 0; step < 4; step++) {
+        let next;
+        try { next = await h.recoverPublic(f, {}, { ...runtime, invokeSidecar: async () => { sidecarCalls++; throw timeout(); } }); }
+        catch (error) { next = { action: 'error', reason_code: error.code || error.message }; }
+        outcomes.push({ action: next.action, reason_code: next.reason_code, mode: next.route?.worker_mode, model: next.route?.model,
+          ceiling: next.sidecar_ceiling ?? null, sidecarCalls });
+        if (next.action === 'stop') break;
+      }
+    } finally { xllm.invokeClaudeTransport = transport; }
+    const ceilings = require('./forge-worker-timeout');
+    assert.equal(calls, 1, 'native destination is not retried');
+    assert.equal(outcomes.at(-1).action, 'stop'); assert.equal(outcomes.at(-1).reason_code, 'recovery-candidates-exhausted');
+    assert(!outcomes.some(row => row.reason_code === 'recovery-deadline-exhausted'), JSON.stringify(outcomes));
+    if (f.standalone) {
+      const [invoked] = outcomes;
+      assert.equal(sidecarCalls, 1, JSON.stringify(outcomes));
+      assert.equal(invoked.action, 'invoke'); assert.equal(invoked.mode, 'sidecar'); assert.equal(invoked.model, 'claude-opus-5');
+      assert.deepEqual(invoked.ceiling, ceilings.resolveWorkerCeiling({ tier: invoked.ceiling.tier }));
+    } else if (f.candidate) {
+      // Milestone adapter: the transport itself receives the tier ceiling (standard
+      // tier in this fixture), never a remainder of the former 60000 ms window.
+      const sent = outcomes.find(row => row.transport);
+      assert.equal(sidecarCalls, 1, JSON.stringify(outcomes));
+      assert.equal(sent.model, 'claude-opus-5'); assert.equal(sent.timeoutSecs, ceilings.resolveWorkerCeiling({ tier: 'standard' }).seconds);
+      assert.equal(outcomes.find(row => row.action).action, 'error');
+    } else {
+      // Context fixture: the selected untried sidecar is reached (no clock refusal) but
+      // the plan-slice request has no prompt file, so the adapter refuses before transport.
+      assert.equal(sidecarCalls, 0, JSON.stringify(outcomes));
+      assert.equal(outcomes[0].action, 'error'); assert.equal(outcomes[0].reason_code, 'prompt-file-required');
+    }
+    // A new sidecar attempt may only append owner events; the original history stays intact.
+    const heldEvents = f.originalEvents, grownEvents = f.events && fs.existsSync(f.events) ? fs.readFileSync(f.events) : null;
+    if (heldEvents) assert(grownEvents.subarray(0, heldEvents.length).equals(heldEvents), 'owner events are append-only');
+    if (heldEvents) f.originalEvents = grownEvents;
+    h.assertHistoryPreserved(f); f.originalEvents = heldEvents;
   }
   assert.deepEqual(fs.readFileSync(f.receiptFile), f.originalReceipt);
   write(file + '.proof', JSON.stringify({ pid: process.pid, calls, action: result.action }));
@@ -281,15 +324,30 @@ async function transitionWorkflow(selected) {
           fs.appendFileSync(f.events, '{"concurrent":true}\n');
           return { binding_sha256: require('./forge-code-roots').digest(challenge), evidence_reference: 'raced', classification: 'unchanged' };
         } }) }), /inspection-changed/); fs.writeFileSync(f.events, f.originalEvents);
+        // v2 (no cumulative clock): past the former 60000 ms window an untried sidecar
+        // is eligible with the tier ceiling while the incompatible native stays refused.
+        // Each case consumes a destination, so it runs on its own fresh fixture.
         for (const [capabilityChange, reason] of [[{ models: [] }, 'native-model-unsupported'],
           [{ available: false }, 'native-tool-unavailable'], [{ reasoning_efforts: [] }, 'native-effort-unsupported'],
           [null, 'native-capabilities-missing']]) {
-          const incompatible = await h.recoverPublic(f, {}, { activeCapabilities: capabilityChange && { ...h.capabilities, ...capabilityChange },
-            invokeNative() { calls++; throw Error('incompatible native must not invoke'); } });
-          assert.equal(incompatible.action, 'stop'); assert.equal(calls, 0);
-          assert(incompatible.rejected.some(row => row.reason_code === 'recovery-deadline-exhausted'), 'expired untried sidecar remains refused');
-          assert(incompatible.rejected.some(row => row.reason_code === reason), 'current native capability refusal is explicit');
+          const g = await h.candidateFixture(standalone, false);
+          const transport = xllm.invokeClaudeTransport;
+          let sidecarCalls = 0, nativeCalls = 0;
+          try {
+            assert(g.now > g.initial.started_at + 60000 && !Object.hasOwn(g.initial, 'deadline_at'));
+            xllm.invokeClaudeTransport = async () => { sidecarCalls++; return { candidate: g.candidate }; };
+            const incompatible = await h.recoverPublic(g, {}, { activeCapabilities: capabilityChange && { ...h.capabilities, ...capabilityChange },
+              invokeNative() { nativeCalls++; throw Error('incompatible native must not invoke'); },
+              invokeSidecar: async () => { sidecarCalls++; throw Object.assign(Error('fixture sidecar stop'), { code: 'claude-timeout' }); } });
+            assert.equal(incompatible.action, 'invoke'); assert.equal(nativeCalls, 0); assert.equal(sidecarCalls, 1);
+            assert.equal(incompatible.route.worker_mode, 'sidecar', 'untried sidecar is eligible past the former window');
+            assert.deepEqual(incompatible.sidecar_ceiling, require('./forge-worker-timeout').ceilingFromRoute(incompatible.route));
+            assert(!Object.hasOwn(incompatible, 'sidecar_remaining_ms'));
+            assert(!incompatible.rejected?.some(row => row.reason_code === 'recovery-deadline-exhausted'), 'no cumulative-clock refusal in v2');
+            assert(incompatible.rejected?.some(row => row.reason_code === reason), 'current native capability refusal is explicit');
+          } finally { xllm.invokeClaudeTransport = transport; g.cleanup(); }
         }
+        assert.equal(calls, 0);
         const authorizationSource = path.join(f.profile, '.codex/AGENTS.md'), authorizationBytes = fs.readFileSync(authorizationSource);
         fs.writeFileSync(authorizationSource, authorizationBytes.toString().replace('Fixture authorization.', 'Revoked after original attempt.'));
         await assert.rejects(h.recoverPublic(f), /source-changed/); fs.writeFileSync(authorizationSource, authorizationBytes);
@@ -423,7 +481,7 @@ async function main() {
     const saved = path.join(root, 'restart.json'); write(saved, JSON.stringify({ request, profile: home }));
     child([__filename, '--restart-fixture', saved], env);
     const proof = JSON.parse(fs.readFileSync(saved + '.result.json'));
-    assert.notEqual(proof.pid, process.pid); assert.equal(proof.calls, 1); assert.equal(proof.sidecar_remaining_ms, 0);
+    assert.notEqual(proof.pid, process.pid); assert.equal(proof.calls, 1); assert.equal(proof.sidecar_ceiling, null); assert.equal(proof.worker_mode, 'native');
     console.log('PASS R1/R2/R4: caller -> attested authority -> unknown timeout -> new process -> native after deadline -> one publication/replay');
 
     const f = require('./forge-personal-context.test').fixture();
