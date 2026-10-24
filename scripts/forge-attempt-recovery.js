@@ -5,6 +5,12 @@ const fs = require('fs');
 const path = require('path');
 const { digest } = require('./forge-code-roots');
 const { ceilingFromRoute } = require('./forge-worker-timeout');
+const { validateSessionRef, sessionDigest, removeSession } = require('./forge-claude-session');
+// A preserved Claude session (S05) is resumed at most once per unit; these stops
+// are terminal for the session, so recoverAttempt removes its artifacts.
+const RESUME_RESERVATION = 'same-session-resume';
+const SESSION_TERMINAL_STOPS = Object.freeze(['budget-exceeded-resume-exhausted', 'budget-exceeded-resume-refused']);
+function validSessionRef(ref) { return !!ref && validateSessionRef(ref).ok === true; }
 const exceptions = new WeakMap();
 const candidateSets = new WeakMap();
 const environmentalRepairs = new WeakSet();
@@ -190,11 +196,16 @@ function createRecovery(options) {
       if (!attempt.reason_code || !attempt.layer || !measurementValid(attempt.request_sha256, attempt.request_bytes)
           || !measurementValid(attempt.context_sha256, attempt.context_bytes)
           || !(attempt.duration_ms === null || Number.isFinite(attempt.duration_ms)) || !attempt.budgets || !attempt.route) fail('recovery-telemetry-required');
+      // The raw session ref lives only in attempts[].session of the owner's
+      // recovery state, and only for a live stream at the tier ceiling.
+      if (attempt.session !== undefined && attempt.failure_class !== 'active-budget') fail('recovery-session-class-invalid');
+      if (attempt.session !== undefined && attempt.session !== null && !validSessionRef(attempt.session)) fail('recovery-session-invalid');
       const previous = state.attempts.at(-1);
       const entry = { ...attempt, diagnostic: safeDiagnostic(attempt.diagnostic), stderr: safeDiagnostic(attempt.stderr),
         provider_called: [true, false].includes(attempt.provider_called) ? attempt.provider_called : 'unknown',
         model_observed: attempt.model_observed || 'unknown', recorded_at: clock(), route_key: routeKey(attempt.route),
         timeout_cause: ['timeout', 'silence'].includes(attempt.failure_class) ? 'indeterminate' : null };
+      if (attempt.session !== undefined) entry.session = attempt.session ? JSON.parse(JSON.stringify(attempt.session)) : null;
       entry.previous_attempt = previous ? { route_key: previous.route_key, recorded_at: previous.recorded_at,
         request_sha256: previous.request_sha256, context_sha256: previous.context_sha256,
         budgets: previous.budgets, context_measurement: previous.context_measurement || null } : null;
@@ -212,10 +223,28 @@ function createRecovery(options) {
         && !state.attempts.some(a => a.reservation && digest(a.reservation) === digest(pendingReservation))) {
         return { action: 'stop', reason_code: 'recovery-reservation-pending' };
       }
-      // S05 replaces this stop with the single same-session resume; budget
-      // exhaustion with a live stream is not a destination failure, so neither
-      // a standing exception nor another candidate is selected.
-      if (state.attempts.at(-1)?.failure_class === 'active-budget') return { action: 'stop', reason_code: 'budget-exceeded-resume-required' };
+      // Single same-session resume (S05). Budget exhaustion with a live stream is
+      // not a destination failure: no standing exception is consumed and no other
+      // candidate is selected; the previous route (tier/effort/model) is reused.
+      // Only active-budget reaches here, so silence/timeout (dead) never resume.
+      const last = state.attempts.at(-1);
+      if (last?.failure_class === 'active-budget') {
+        if ((state.reservations || []).some(r => r.reason === RESUME_RESERVATION)) return { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' };
+        if (!validSessionRef(last.session)) return { action: 'stop', reason_code: 'budget-exceeded-resume-unavailable' };
+        const resumeRoute = last.route;
+        if (!resumeRoute?.effort || !(resumeRoute.model_resolved || resumeRoute.model)) fail('recovery-explicit-route-required');
+        if (typeof input.validateInvocation !== 'function') fail('recovery-adapter-required');
+        let verdict;
+        try { verdict = await input.validateInvocation(resumeRoute); }
+        catch (error) { verdict = { ok: false, reason_code: error.code || 'recovery-adapter-refused' }; }
+        if (verdict?.ok !== true || resumeRoute.dispatch_allowed === false) return { action: 'stop', reason_code: 'budget-exceeded-resume-refused',
+          refusal: verdict?.ok === true ? resumeRoute.dispatch_reason_code || 'recovery-dispatch-not-allowed' : verdict?.reason_code || 'recovery-adapter-refused' };
+        state.selection = { provenance: null, rejected: [], selected: routeKey(resumeRoute) }; state.phase = 'ready'; save();
+        return { action: 'invoke', route: resumeRoute, invocation: verdict, provenance: null, rejected: [],
+          resume: { session: JSON.parse(JSON.stringify(last.session)), session_sha256: sessionDigest(last.session.id),
+            resumed_from: { receipt_sha256: input.inspection.receipt_sha256 ?? null, dispatch_id: input.inspection.receipt?.dispatch_id ?? null } },
+          sidecar_ceiling: sidecarCeiling(resumeRoute), silence_retry: false, corrected: false, correction: null, provider_called: false };
+      }
       let scope;
       if (input.exception) scope = exceptionFor(input.exception, state, clock());
       const previous = state.attempts.at(-1);
@@ -318,7 +347,9 @@ function createRecovery(options) {
         ...(decision.transition_reference ? { transition_reference: decision.transition_reference } : {}),
         correction: decision.correction || null,
         ...(handoffPending ? { handoff_pending: true } : {}),
-        reserved_at: clock(), reason: decision.silence_retry ? 'anomalous-silence-same-target' : decision.corrected ? 'offline-correction' : 'resolved-next-destination',
+        ...(decision.resume ? { session_sha256: sessionDigest(decision.resume.session?.id) } : {}),
+        reserved_at: clock(), reason: decision.resume ? RESUME_RESERVATION : decision.silence_retry ? 'anomalous-silence-same-target'
+          : decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
       state.reservations = [...(state.reservations || []), entry]; state.phase = 'reserved'; return save();
     },
@@ -371,6 +402,11 @@ function captureFailure(options) {
     ? { sha256: options.packagedContext.sha256 ?? null, bytes: options.packagedContext.bytes ?? null,
       method: 'legacy-packaged', diagnostic: null } : observed.context;
   const error = options.error || {}, code = error.code || error.reason_code || 'attempt-failed';
+  // Never throws: an invalid ref is discarded, so the resume is refused as unavailable.
+  let sessionRef = null;
+  if (code === 'budget-exceeded-while-active' && error.session) {
+    try { sessionRef = validSessionRef(error.session) ? error.session : null; } catch { sessionRef = null; }
+  }
   const state = fs.existsSync(options.stateFile) ? stateApi.loadRecovery(options.stateFile) : undefined;
   const session = createRecovery({ unit: options.unit, roots_sha256: digest(options.contract || { cwd: options.request.cwd }),
     authorizationReference: options.receiptFile && fs.existsSync(options.receiptFile)
@@ -386,7 +422,7 @@ function captureFailure(options) {
   const timeout = /timeout|timed-out/.test(code);
   const service = !activeBudget && provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);
   session.record({ failure_class: activeBudget ? 'active-budget' : silence ? 'silence' : timeout ? 'timeout' : service ? 'service' : provider === false ? 'caller' : 'unknown',
-    observation: error.diagnostic?.observation, service_failure_proven: service, reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
+    observation: error.diagnostic?.observation, service_failure_proven: service, ...(activeBudget ? { session: sessionRef } : {}), reason_code: code, layer: options.layer || error.stage || 'unknown', route: options.route,
     request_sha256: observed.request.sha256, caller_request_sha256: callerRequestHash(options.request), context_sha256: context.sha256,
     request_bytes: observed.request.bytes, context_bytes: context.bytes,
     context_measurement: context.method, measurement_diagnostic: context.diagnostic,
@@ -619,6 +655,8 @@ async function recoverAttempt(options) {
   const authorizedReference = binding ? bindRecoveryAuthorization(binding) : reference;
   const candidateSet = !inspection.valid_saved_response && (!correction || preSpawn)
     && !session.snapshot().pending_questions.some(q => q.status === 'pending')
+    // active-budget resumes the same route: no candidate list, no exception issued.
+    && state.attempts.at(-1)?.failure_class !== 'active-budget'
     && (state.attempts.at(-1)?.service_failure_proven === true || exception || binding)
     ? resolveCandidates(transition?.resolution ? { ...transition.resolution.options, scope: request.scope, phase: request.phase }
       : options.resolverOptions, transitionGuard ? undefined : options.resolveDispatch, request) : undefined;
@@ -644,6 +682,9 @@ async function recoverAttempt(options) {
   if (decision.action === 'replay') {
     if (typeof options.replay !== 'function') fail('recovery-replay-required');
     return tag({ ...decision, result: await options.replay(inspection.receipt), inspection: { ...inspection, receipt: undefined } });
+  }
+  if (decision.action === 'stop' && SESSION_TERMINAL_STOPS.includes(decision.reason_code)) {
+    return tag({ ...decision, session_cleanup: cleanupSessions(session.inspect().attempts, options.sessionRemover || removeSession) });
   }
   if (decision.action !== 'invoke') return tag(decision);
   // session persistence changes the recovery file itself; validate the original
@@ -680,7 +721,7 @@ async function recoverAttempt(options) {
     else preSpawn?.assertUnchanged();
   }, { assertAuthority, ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
   const invoke = () => options.invoke(decision.route, decision.invocation, decision.sidecar_ceiling,
-    assertReady, decision.reservation_sha256);
+    assertReady, decision.reservation_sha256, decision.resume);
   // The adapter repeats assertReady at the actual native callback. Do not hold
   // the publication mutex while awaiting a provider or its publication.
   transitionGuard?.withLock(() => {});
@@ -693,6 +734,19 @@ async function recoverAttempt(options) {
     provider_called: false, result,
   });
   return tag({ ...decision, result });
+}
+// Removes every distinct session recorded in the attempts. Idempotent (absent
+// targets are ok); reports counts only, never the raw session id.
+function cleanupSessions(attempts, remover) {
+  const refs = new Map();
+  for (const row of attempts) if (validSessionRef(row.session)) refs.set(digest(row.session), row.session);
+  let removed = 0, refused = 0;
+  for (const ref of refs.values()) {
+    let report;
+    try { report = remover(JSON.parse(JSON.stringify(ref))); } catch { report = null; }
+    if (report?.ok === true) removed++; else refused++;
+  }
+  return { ok: refused === 0, removed_count: removed, refused_count: refused };
 }
 function validateStateTarget(file, request, contract) {
   const validate = require('./forge-xllm').validateResultFileTarget;

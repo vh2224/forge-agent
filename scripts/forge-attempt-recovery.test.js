@@ -77,6 +77,7 @@ async function main() {
   await persistentRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
   await classificationTable(route);
   await activeBudgetRecovery(identity, route, attempt, inspection, candidateSet);
+  await sessionResumeRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
   await canonicalProvenance();
   stateSchema(identity, attempt);
   await migratedLimits(identity, route, attempt, inspection, candidateSet);
@@ -169,38 +170,140 @@ async function classificationTable(route) {
   });
   console.log('PASS classification table: timeout, silence, active-budget, service, caller and unknown');
 }
-// next() after an active-budget attempt stops with a named reason (S05 resume),
-// after the existing inspection/replay/reconciliation checks and before the
-// deadline stop or any candidate selection, even with a standing exception.
+// Migrated from the S03 named stop: after the existing pending-question,
+// inspection, replay and reconciliation checks, active-budget either resumes
+// the same session once (same route, no exception, no candidate selection) or
+// stops with a named refusal. silence/timeout (dead) never resume.
 async function activeBudgetRecovery(identity, route, attempt, inspection, candidateSet) {
+  const sessions = require('./forge-claude-session'), path = require('path'), os = require('os');
+  // Fixture ref only: no test here removes anything, and the profile path is fictitious.
+  const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null,
+    configDir: path.join(os.tmpdir(), 'forge-fixture-claude-profile', '.claude'), cwd: __dirname, now: 0 });
   let now = 0, saved;
   const options = { ...identity, state: undefined, clock: () => now, persist: value => { saved = value; } };
+  const budget = { ...attempt, reason_code: 'budget-exceeded-while-active', failure_class: 'active-budget',
+    service_failure_proven: false, provider_called: true };
   const session = api.createRecovery(options);
-  session.record({ ...attempt, reason_code: 'budget-exceeded-while-active', failure_class: 'active-budget',
-    service_failure_proven: false, provider_called: true });
+  session.record({ ...budget, session: ref });
   assert.strictEqual(saved.attempts.at(-1).timeout_cause, null);
+  assert.deepStrictEqual(saved.attempts.at(-1).session, JSON.parse(JSON.stringify(ref)), 'the ref is kept as a plain clone');
   const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
   const alternate = { ...route, model: 'gpt-6-astra', model_resolved: 'gpt-6-astra', resolved_worker_engine: 'codex', worker_mode: 'native' };
   const exception = authority.issue('fixture:active-budget', { unit: identity.unit, roots_sha256: identity.roots_sha256,
     purpose: 'sidecar-recovery', expires_at: 120000, routes: [api.routeKey(route), api.routeKey(alternate)], gates_preserved: true }, () => now);
-  const never = () => { throw Error('active-budget must never validate a candidate'); };
-  const input = { inspection, exception, candidateSet, validateInvocation: never };
+  const receipted = { ...inspection, receipt_sha256: 'receipt-before', receipt: { dispatch_id: 'dispatch-before' } };
+  const validated = [];
+  const validateInvocation = async candidate => { validated.push(api.routeKey(candidate)); return { ok: true, adapter: 'fixture' }; };
+  const input = { inspection: receipted, exception, candidateSet, validateInvocation };
   await assert.rejects(session.next({ ...input, inspection: undefined }), /process-receipt-inspection-required/);
-  await assert.rejects(session.next({ ...input, inspection: { ...inspection, writer_possible: true } }), /writer-reconciliation-required/);
-  assert.strictEqual((await session.next({ ...input, inspection: { ...inspection, valid_saved_response: true } })).action, 'replay');
-  now = 1000;
-  for (const variant of [input, { inspection, candidateSet, validateInvocation: never }]) {
-    const stopped = await session.next(variant);
-    assert.deepStrictEqual(stopped, { action: 'stop', reason_code: 'budget-exceeded-resume-required' });
+  await assert.rejects(session.next({ ...input, inspection: { ...receipted, writer_possible: true } }), /writer-reconciliation-required/,
+    'without reconciliation there is no resume');
+  assert.strictEqual((await session.next({ ...input, inspection: { ...receipted, valid_saved_response: true } })).action, 'replay');
+  assert.deepStrictEqual(validated, [], 'no adapter validation before inspection/replay/reconciliation');
+  assert.strictEqual(saved.selection, undefined);
+  for (const [variant, at] of [[input, 1000], [{ inspection: receipted, validateInvocation }, 2000],
+    [{ ...input, inspection: { ...receipted, writer_possible: true, roots_reconciled: true } }, 60001]]) {
+    now = at;
+    const decision = await session.next(variant);
+    assert.strictEqual(decision.action, 'invoke');
+    assert.strictEqual(api.routeKey(decision.route), api.routeKey(route), 'same tier/effort/model route');
+    assert.strictEqual(decision.resume.session.id, ref.id);
+    assert.strictEqual(decision.resume.session_sha256, sessions.sessionDigest(ref.id));
+    assert.deepStrictEqual(decision.resume.resumed_from, { receipt_sha256: 'receipt-before', dispatch_id: 'dispatch-before' });
+    assert.deepStrictEqual(decision.sidecar_ceiling, JSON.parse(JSON.stringify(ceilingFromRoute(route))));
+    assert.strictEqual(decision.sidecar_ceiling.seconds, ceilingFromRoute(route).seconds);
+    assert.strictEqual(decision.corrected, false); assert.strictEqual(decision.provider_called, false);
+    for (const key of ['authorization_reference', 'authorization_expires_at', 'native_authorization_remaining_ms']) assert(!(key in decision), key);
+    assert.deepStrictEqual(saved.selection, { provenance: null, rejected: [], selected: api.routeKey(route) });
   }
-  now = 60001;
-  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-required' },
-    'the named stop holds regardless of elapsed time');
-  assert.strictEqual(saved.selection, undefined, 'no candidate selection was persisted');
-  assert.deepStrictEqual(saved.reservations || [], [], 'no reservation was created');
+  assert(validated.every(key => key === api.routeKey(route)), 'the alternate candidate is never validated');
+  assert.doesNotThrow(() => api.exceptionFor(exception, saved, now), 'the standing exception is not consumed');
+  assert.deepStrictEqual(await session.next({ inspection: receipted,
+    validateInvocation: async () => ({ ok: false, reason_code: 'claude-resume-config-mismatch' }) }),
+  { action: 'stop', reason_code: 'budget-exceeded-resume-refused', refusal: 'claude-resume-config-mismatch' });
+  const resume = await session.next(input);
+  session.reserve(resume, 'request');
+  const reservation = saved.reservations.at(-1);
+  assert.strictEqual(reservation.reason, 'same-session-resume');
+  assert.strictEqual(reservation.session_sha256, sessions.sessionDigest(ref.id));
+  assert(!JSON.stringify(saved.reservations).includes(ref.id) && !JSON.stringify(saved.selection).includes(ref.id), 'reservations carry only the digest');
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' });
+  session.record({ ...budget, session: null });
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' });
+  session.record({ ...budget, session: ref });
+  assert.deepStrictEqual(await session.next(input), { action: 'stop', reason_code: 'budget-exceeded-resume-exhausted' }, 'at most one resume per unit');
   session.questions(['Pending choice']);
   assert.strictEqual((await session.next(input)).action, 'pending-questions', 'pending questions still come first');
-  console.log('PASS active-budget: named stop after inspection/reconciliation, before standing exception and any selection');
+  const bare = api.createRecovery({ ...identity, state: undefined, clock: () => 0, persist: undefined });
+  bare.record(budget);
+  assert.deepStrictEqual(await bare.next({ inspection: receipted, validateInvocation }), { action: 'stop', reason_code: 'budget-exceeded-resume-unavailable' });
+  assert.throws(() => bare.record({ ...attempt, failure_class: 'timeout', session: ref }), /recovery-session-class-invalid/);
+  assert.throws(() => bare.record({ ...budget, session: { ...ref, id: 'not-a-uuid' } }), /recovery-session-invalid/);
+  const silence = { dimension: 'initial', window_ms: 120001, threshold_ms: 120000,
+    policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+  for (const dead of [{ ...attempt, failure_class: 'silence', service_failure_proven: false, observation: { silence } },
+    { ...attempt, failure_class: 'timeout', service_failure_proven: false }]) {
+    const chained = api.createRecovery({ ...identity, state: undefined, clock: () => 0, persist: undefined });
+    chained.record({ ...budget, session: ref }); chained.record(dead);
+    for (const variant of [{ inspection: receipted, validateInvocation }, input]) {
+      const decision = await chained.next(variant);
+      assert(!('resume' in decision), dead.failure_class + ' is never resumed');
+    }
+  }
+  const legacy = bare.snapshot();
+  assert(!('session' in legacy.attempts[0]), 'an attempt without a ref keeps the old shape');
+  assert.strictEqual(api.validateState(legacy), legacy, 'v2 without session remains valid');
+  const v1 = legacyV1(legacy);
+  assert.strictEqual(api.validateState(v1), v1, 'v1 without session remains valid');
+  console.log('PASS active-budget: single same-session resume after inspection/reconciliation, exhausted/unavailable/refused stops, dead never resumed');
+}
+// recoverAttempt end-to-end on disk: ref captured, resume handed to invoke as
+// the 6th argument, then the exhausted stop removes the session.
+async function sessionResumeRecovery(route) {
+  const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
+  const sessions = require('./forge-claude-session'), { digest } = require('./forge-code-roots');
+  const lab = require('./forge-code-roots.test').laboratory('recovery-resume');
+  const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', route: { ...route, unit_type: 'research-milestone' }, prompt: 'resume', resultFile: path.join(lab.dir, 'result.json') };
+  const stateFile = path.join(lab.dir, 'state.json'), receiptFile = path.join(lab.dir, 'receipt.json');
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', dispatch_id: 'dispatch-1',
+    recovery_identity_sha256: digest(api.requestIdentity(request)), failure: { provider_called: true } }));
+  const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null, configDir: path.join(lab.dir, 'profile', '.claude'), cwd });
+  const capture = (session, file = stateFile) => api.captureFailure({ stateFile: file, receiptFile, request, unit: 'research-milestone/M001', route,
+    finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', route.model] }, context: request.prompt }),
+    error: { code: 'budget-exceeded-while-active', provider_called: true, session }, budgets: { coding_standards: 3000 } });
+  assert.strictEqual(capture({ ...ref, id: 'not-a-uuid' }, path.join(lab.dir, 'invalid.json')).attempts[0].session, null, 'invalid ref discarded, never thrown');
+  const first = capture(ref);
+  assert.deepStrictEqual(first.attempts[0].session, JSON.parse(JSON.stringify(ref)));
+  const removed = [];
+  const base = { stateFile, receiptFile, request, clock: () => first.started_at + 1, processProbe: () => 'stopped',
+    resolveDispatch() { throw Error('resume must not resolve candidates'); }, validateInvocation: async () => ({ ok: true }),
+    sessionRemover: value => { removed.push(value.id); return { ok: true, removed: [], refused: [], errors: [] }; } };
+  let args;
+  const resumed = await api.recoverAttempt({ ...base, invoke: async (...observed) => { args = observed; observed[3](); return { status: 'failed' }; } });
+  assert.strictEqual(resumed.action, 'invoke');
+  assert.strictEqual(args.length, 6, 'invoke receives resume as the 6th positional argument');
+  assert.strictEqual(args[5].session.id, ref.id);
+  assert.deepStrictEqual(args[5].resumed_from, { receipt_sha256: digest(fs.readFileSync(receiptFile)), dispatch_id: 'dispatch-1' });
+  assert.deepStrictEqual(args[2], JSON.parse(JSON.stringify(ceilingFromRoute(route))));
+  assert.deepStrictEqual(removed, [], 'no removal before the resume');
+  const persisted = stateApi.loadRecovery(stateFile);
+  assert.strictEqual(persisted.reservations.at(-1).reason, 'same-session-resume');
+  assert.strictEqual(persisted.reservations.at(-1).session_sha256, sessions.sessionDigest(ref.id));
+  assert(!JSON.stringify({ ...persisted, attempts: persisted.attempts.map(({ session: _s, ...row }) => row) }).includes(ref.id),
+    'the raw id lives only in attempts[].session');
+  capture(undefined);
+  const exhausted = await api.recoverAttempt({ ...base, invoke() { throw Error('a second resume must never be invoked'); } });
+  assert.strictEqual(exhausted.reason_code, 'budget-exceeded-resume-exhausted');
+  assert.deepStrictEqual(exhausted.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 });
+  assert.deepStrictEqual(removed, [ref.id], 'each distinct ref is removed once');
+  const failing = await api.recoverAttempt({ ...base, sessionRemover: () => ({ ok: false, refused: [{ path: 'x', reason: 'symlink' }] }) });
+  assert.deepStrictEqual(failing.session_cleanup, { ok: false, removed_count: 0, refused_count: 1 });
+  const real = await api.recoverAttempt({ ...base, sessionRemover: undefined });
+  assert.deepStrictEqual(real.session_cleanup, { ok: true, removed_count: 1, refused_count: 0 }, 'absent targets are idempotent');
+  lab.cleanup();
+  console.log('PASS recoverAttempt resume: ref captured, 6th invoke argument, digest-only reservation and session removal on exhausted stop');
 }
 async function persistentRecovery(route) {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
