@@ -10,6 +10,10 @@ const PROOF_VALUES = Object.freeze(['positive', 'negative', 'none']);
 const TIER_CEILING_MS = Object.freeze({ light: 900000, standard: 1800000, heavy: 3600000, max: 5400000 });
 const STATES = Object.freeze(['starting', 'working', 'slow-suspect', 'dead']);
 const TERMINATIONS = Object.freeze(['dead-start', 'dead-silence', 'budget-exceeded-while-active']);
+// Closed vocabulary of every non-null `reason` evaluate() can produce.
+const REASONS = Object.freeze(['silence', 'local-proof', 'tool-extended', 'tool-unproven',
+  'tool-proof-negative', 'proof-unavailable', 'tool-extension-exhausted',
+  'tool-proof-unavailable-expired', 'no-progress']);
 
 function ceilingForTier(tier) {
   return typeof tier === 'string' && Object.hasOwn(TIER_CEILING_MS, tier) ? TIER_CEILING_MS[tier] : null;
@@ -199,5 +203,5 @@ function createTracker(policy = DEFAULTS, ceilingMs = null) {
 }
 
 module.exports = { POLICY, SOURCE_DEFAULT, SOURCE_CALIBRATED, DEFAULTS, TIER_CEILING_MS,
-  STATES, TERMINATIONS, LOOP_REPEATS, PROOF_CAPABILITIES, PROOF_VALUES, ceilingForTier,
+  STATES, TERMINATIONS, REASONS, LOOP_REPEATS, PROOF_CAPABILITIES, PROOF_VALUES, ceilingForTier,
   normalizePolicy, normalizeLocalProof, createProgressTracker, evaluate, classifyTermination, createTracker };

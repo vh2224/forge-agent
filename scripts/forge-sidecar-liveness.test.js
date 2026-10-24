@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert/strict');
-const { POLICY, SOURCE_DEFAULT, SOURCE_CALIBRATED, DEFAULTS, TIER_CEILING_MS, STATES, TERMINATIONS,
+const { POLICY, SOURCE_DEFAULT, SOURCE_CALIBRATED, DEFAULTS, TIER_CEILING_MS, STATES, TERMINATIONS, REASONS,
   LOOP_REPEATS, PROOF_CAPABILITIES, PROOF_VALUES, normalizeLocalProof, createProgressTracker,
   evaluate, classifyTermination, ceilingForTier, normalizePolicy, createTracker } = require('./forge-sidecar-liveness');
 const { observation } = require('./forge-sidecar-diagnostic');
@@ -481,6 +481,35 @@ test('no-progress episode is reported from and to a slow-suspect state (R8)', ()
   assert.deepEqual(exit.transition, { from: 'slow-suspect', to: 'slow-suspect', at_ms: snapshot.elapsed_ms,
     reason: 'proof-unavailable' });
   assert.equal(tracker.evaluate(snapshot, looping).transition.reason, 'no-progress');
+});
+
+test('REASONS is the closed vocabulary and covers every reason evaluate() produces', () => {
+  assert.deepEqual([...REASONS], ['silence', 'local-proof', 'tool-extended', 'tool-unproven',
+    'tool-proof-negative', 'proof-unavailable', 'tool-extension-exhausted',
+    'tool-proof-unavailable-expired', 'no-progress']);
+  assert(Object.isFrozen(REASONS));
+  const proofs = [];
+  for (const capability of PROOF_CAPABILITIES) for (const proof of PROOF_VALUES) proofs.push({ capability, proof });
+  const snapshots = [];
+  for (const elapsed of [0, 59999, 60001, 500000]) {
+    snapshots.push({ elapsed_ms: elapsed, first_remote_ms: null, remote_silence_ms: null, gap_suspended: false });
+  }
+  for (const silence of [0, 100000, 121000, 130000, 241000, 250000, 700000]) {
+    for (const suspended of [false, true]) snapshots.push(active(silence, { gap_suspended: suspended }));
+  }
+  const seen = new Set();
+  for (const snapshot of snapshots) {
+    for (const localProof of [undefined, ...proofs]) {
+      for (const no_progress of [false, true]) {
+        for (const ceiling of [null, 1000000]) {
+          const { reason } = evaluate(snapshot, { localProof, progress: { no_progress } }, DEFAULTS, ceiling);
+          if (reason !== null) { assert(REASONS.includes(reason), String(reason)); seen.add(reason); }
+        }
+      }
+    }
+  }
+  // Every vocabulary entry is actually reachable, so the list has no dead words.
+  assert.deepEqual([...seen].sort(), [...REASONS].sort());
 });
 
 function main() {

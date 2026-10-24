@@ -91,9 +91,27 @@ function observation(input = {}) {
       threshold_ms: silence.threshold_ms, policy: silence.policy,
       source: silence.source, cause: 'indeterminate' };
   }
+  const beat = input.liveness;
+  if (beat && typeof beat === 'object' && !Array.isArray(beat) && beat.version === 1
+      && liveness.STATES.includes(beat.state)) {
+    out.liveness = { version: 1, state: beat.state,
+      since_ms: Number.isSafeInteger(beat.since_ms) && beat.since_ms >= 0 ? beat.since_ms : null,
+      reason: liveness.REASONS.includes(beat.reason) ? beat.reason : null };
+    if (liveness.TERMINATIONS.includes(beat.termination)) out.liveness.termination = beat.termination;
+  }
   return out;
 }
-function progressLine(value) {
-  return '[forge-sidecar-progress] ' + JSON.stringify(observation(value)) + '\n';
+const PROGRESS_PREFIX = '[forge-sidecar-progress] ';
+/** Host-side reader: a progress line back to observation(), or null. Never throws. */
+function readProgressLine(line) {
+  if (typeof line !== 'string' || !line.startsWith(PROGRESS_PREFIX)) return null;
+  try {
+    // JSON.parse tolerates the trailing newline that progressLine appends.
+    const parsed = JSON.parse(line.slice(PROGRESS_PREFIX.length));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? observation(parsed) : null;
+  } catch { return null; }
 }
-module.exports = { diagnostic, isSafeModelId, observation, progressLine };
+function progressLine(value) {
+  return PROGRESS_PREFIX + JSON.stringify(observation(value)) + '\n';
+}
+module.exports = { diagnostic, isSafeModelId, observation, progressLine, readProgressLine };

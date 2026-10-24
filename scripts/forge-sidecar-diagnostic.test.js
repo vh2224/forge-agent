@@ -14,7 +14,7 @@ const token = 'fixture-secret-never-log';
 accounts.resolveLaunch = () => ({ name: 'fixture', token });
 const claude = require('./forge-claude-sidecar');
 const unit = require('./forge-unit-sidecar');
-const { diagnostic, observation } = require('./forge-sidecar-diagnostic');
+const { diagnostic, observation, progressLine, readProgressLine } = require('./forge-sidecar-diagnostic');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
 const { loadProcedureContext } = require('./forge-procedure-context');
 const sourceRoot = path.resolve(__dirname, '..');
@@ -504,4 +504,51 @@ test('budget-exceeded-while-active is a closed transport diagnostic, not adapter
   assert.equal(value.reason, 'budget-exceeded-while-active');
   assert.equal(value.duration_ms, 12);
   assert.equal(diagnostic('not-a-reason').reason, 'adapter-failed');
+});
+
+const beat = { version: 1, state: 'slow-suspect', since_ms: 120025, reason: 'silence' };
+
+test('observation liveness block is preserved when valid, with optional closed termination', () => {
+  assert.deepEqual(observation({ liveness: beat }).liveness, beat);
+  for (const termination of ['dead-start', 'dead-silence', 'budget-exceeded-while-active']) {
+    const dead = { ...beat, state: 'dead', termination };
+    assert.deepEqual(observation({ liveness: dead }).liveness, dead);
+  }
+  assert(!('termination' in observation({ liveness: beat }).liveness));
+  assert.deepEqual(observation(observation({ liveness: beat })).liveness, beat);
+});
+
+test('observation liveness block omits invalid input and keeps absent output byte-identical', () => {
+  const base = { elapsed_ms: 5, event_count: 2, raw: token };
+  const baseline = JSON.stringify(observation(base));
+  for (const bad of [undefined, null, 'slow-suspect', 7, [beat], { ...beat, state: 'sleeping' },
+    { ...beat, version: 2 }, { ...beat, version: '1' }, { state: 'working' }]) {
+    const result = observation({ ...base, liveness: bad });
+    assert(!('liveness' in result), JSON.stringify(bad));
+    assert.equal(JSON.stringify(result), baseline);
+  }
+  assert.deepEqual(Object.keys(observation({ ...base, liveness: beat })).slice(0, -1), Object.keys(observation(base)));
+});
+
+test('observation liveness block coerces fields and never leaks extras', () => {
+  const sentinel = 'sentinel-secret-/path/prompt';
+  const result = observation({ liveness: { ...beat, reason: sentinel, since_ms: -1, termination: sentinel,
+    fingerprint: sentinel, detail: sentinel, text: sentinel } }).liveness;
+  assert.deepEqual(result, { version: 1, state: 'slow-suspect', since_ms: null, reason: null });
+  assert.equal(observation({ liveness: { ...beat, since_ms: 1.5 } }).liveness.since_ms, null);
+  assert.equal(observation({ liveness: { ...beat, since_ms: '3' } }).liveness.since_ms, null);
+  assert(!JSON.stringify(observation({ liveness: { ...beat, fingerprint: sentinel, detail: sentinel } })).includes(sentinel));
+});
+
+test('readProgressLine round-trips progressLine and never throws', () => {
+  for (const input of [{ elapsed_ms: 9 }, { elapsed_ms: 9, liveness: beat },
+    { liveness: { ...beat, state: 'dead', termination: 'dead-silence' } }]) {
+    assert.deepEqual(readProgressLine(progressLine(input)), observation(input));
+  }
+  assert.deepEqual(readProgressLine('[forge-sidecar-progress] ' + JSON.stringify({ liveness: beat })).liveness, beat);
+  for (const bad of ['', 'plain text', '[forge-sidecar-progress]{}', '[forge-sidecar-progress] {nope',
+    '[forge-sidecar-progress] []', '[forge-sidecar-progress] null', '[forge-sidecar-progress] 5',
+    undefined, null, 7, {}, ['x']]) {
+    assert.equal(readProgressLine(bad), null, String(bad));
+  }
 });
