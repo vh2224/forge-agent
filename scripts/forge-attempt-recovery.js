@@ -10,6 +10,7 @@ const { validateSessionRef, sessionDigest, removeSession } = require('./forge-cl
 // are terminal for the session, so recoverAttempt removes its artifacts.
 const RESUME_RESERVATION = 'same-session-resume';
 const RESUME_PRE_SPAWN_REFUSALS = Object.freeze(['claude-resume-account-mismatch', 'claude-resume-config-mismatch', 'claude-session-invalid']);
+const SILENCE_CODES = Object.freeze(['claude-anomalous-silence', 'appserver-anomalous-silence']);
 const SESSION_TERMINAL_STOPS = Object.freeze(['budget-exceeded-resume-exhausted', 'budget-exceeded-resume-refused']);
 function validSessionRef(ref) { return !!ref && validateSessionRef(ref).ok === true; }
 const exceptions = new WeakMap();
@@ -425,7 +426,9 @@ function captureFailure(options) {
   // Evaluated first: a live stream at the safety ceiling is neither a timeout
   // nor a destination failure.
   const activeBudget = code === 'budget-exceeded-while-active';
-  const silence = code === 'claude-anomalous-silence'
+  // The codex app-server liveness kill (S07) carries the same indeterminate
+  // silence block as the Claude adapter: same class, same single same-target retry.
+  const silence = SILENCE_CODES.includes(code)
     && require('./forge-sidecar-diagnostic').observation(error.diagnostic?.observation).silence?.cause === 'indeterminate';
   const timeout = /timeout|timed-out/.test(code);
   const service = !activeBudget && provider === true && /quota|rate-limit|model-unavailable|service-unavailable/.test(code);

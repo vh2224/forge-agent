@@ -223,6 +223,15 @@ function reviewCallOptions(mode, opts) {
     ...(thinkingRequested ? { thinkingRequested } : {}) };
 }
 
+// The app-server liveness codes (S07) come from the client itself, never a copied
+// literal. The client stays lazily loaded: if it was never required, no error in
+// this process can carry one of its codes, so the list is legitimately empty.
+function appServerLivenessCodes() {
+  const loaded = require.cache[require.resolve('./forge-appserver-client')];
+  return loaded && loaded.exports && loaded.exports.APPSERVER_LIVENESS_CODES
+    ? Object.values(loaded.exports.APPSERVER_LIVENESS_CODES) : [];
+}
+
 // Only adapter vocabulary and re-sanitized diagnostic fields cross the CLI.
 // A local process/elapsed duration does not establish a remote provider call.
 function reviewFailureDiagnostic(error = {}) {
@@ -243,7 +252,7 @@ function reviewFailureDiagnostic(error = {}) {
     'native-effort-transport-unimplemented', 'native-effort-transport-unsupported',
     'native-effort-binding-mismatch', 'thinking-transport-unsupported', 'thinking-mode-undocumented',
     'thinking-disabled-incompatible', 'thinking-enabled-incompatible', 'thinking-between-tools-incompatible',
-    'thinking-mode-unknown', 'agy-output-empty'];
+    'thinking-mode-unknown', 'agy-output-empty', ...appServerLivenessCodes()];
   return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
@@ -1118,6 +1127,17 @@ function collectRuntimeEvidence(items, notifications, unit) {
  *   passes it. Validated as a finite positive integer when present (S05 review R2) —
  *   a negative reaches setInterval as a tight loop, and 0/NaN both used to slip
  *   through the `||` fallback as "absent" or as the same tight loop.
+ * @param {(snapshot:object)=>void} [opts.onProgress] owner heartbeat channel (S07):
+ *   the client's liveness snapshot. Absent on a CLI run, it defaults to the same
+ *   stderr progressLine the Claude path writes; stdout stays the result channel.
+ * @param {(transition:object)=>void} [opts.onLiveness] owner liveness observer, same
+ *   name and contract as the Claude adapter's.
+ * @param {string[]} [opts.localProofIgnore] owner result/receipt prefixes the local
+ *   proof must ignore; resolved here (the client copies them as given).
+ * @param {Function} [opts.monotonicClock] test-only; becomes the client's `clock`.
+ * @param {object} [opts.livenessPolicy] test-only; can only tighten the defaults.
+ * @param {number} [opts.livenessIntervalMs] test-only watchdog cadence.
+ * @param {number} [opts.progressIntervalMs] test-only snapshot cadence.
  * @returns {Promise<{finalText:string,agentTexts:string,diagnostics:object}>}
  */
 function invokeCodexAppServer(opts) {
@@ -1125,11 +1145,15 @@ function invokeCodexAppServer(opts) {
   // Lazy by contract: agy and every non-execute path must never load the app-server
   // client. Keeping this require here also lets a missing optional client fail only
   // for the transport that needs it.
-  const { startAppServerTurn } = require('./forge-appserver-client');
+  const { startAppServerTurn, APPSERVER_LIVENESS_CODES } = require('./forge-appserver-client');
   const {
     prompt, schema, cwd, model, timeoutSecs, onHeartbeat, sandbox,
     envPolicy = 'minimal', heartbeatIntervalMs, writableRoots = [],
   } = opts;
+  // Same default as invokeClaudeTransport: a CLI review/plan/execute leg with no
+  // owner still beats on stderr, never on stdout (the result channel).
+  const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress
+    : (require.main === module ? snapshot => process.stderr.write(require('./forge-sidecar-calibration').progressLine(snapshot)) : undefined);
   const { cmd, prefixArgs } = resolveCodexCommand();
   // S05 review R2. `heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS` conflated three
   // different bad values with absence: 0 and NaN fell back silently (so a test
@@ -1197,6 +1221,16 @@ function invokeCodexAppServer(opts) {
     },
     onSpawn,
     signal: opts.signal,
+    // S07 liveness: the owner observers, the local proof roots/ignores, and the
+    // test-only seams (production passes none of the last four, like heartbeatIntervalMs).
+    ...(onProgress ? { onProgress } : {}),
+    ...(typeof opts.onLiveness === 'function' ? { onLiveness: opts.onLiveness } : {}),
+    proofRoots: appServerProofRoots(cwd, sandbox, writableRoots),
+    localProofIgnore: appServerProofIgnore(opts.localProofIgnore),
+    ...(opts.monotonicClock !== undefined ? { clock: opts.monotonicClock } : {}),
+    ...(opts.livenessPolicy !== undefined ? { livenessPolicy: opts.livenessPolicy } : {}),
+    ...(opts.livenessIntervalMs !== undefined ? { livenessIntervalMs: opts.livenessIntervalMs } : {}),
+    ...(opts.progressIntervalMs !== undefined ? { progressIntervalMs: opts.progressIntervalMs } : {}),
   }).then((session) => {
     stopHeartbeat();
     let contextHealth = null;
@@ -1247,13 +1281,44 @@ function invokeCodexAppServer(opts) {
     // `terminal` and the orchestrator's transient retry (M013) dies silently. The
     // `codex exec` path already did exactly this at its own close handler; the
     // app-server transport must not lose the signal on the way in.
-    const tail = error && typeof error.stderrTail === 'string' ? error.stderrTail.trim() : '';
+    // A liveness kill (S07) is the client's own verdict with a fixed message; the
+    // stderr tail would make it unstable and could smuggle a transient keyword in.
+    const livenessKill = Boolean(error) && Object.values(APPSERVER_LIVENESS_CODES).includes(error.code);
+    const tail = !livenessKill && error && typeof error.stderrTail === 'string' ? error.stderrTail.trim() : '';
     if (tail) {
       const snippet = tail.slice(-MAX_STDERR_SNIPPET);
       if (!String(error.message || '').includes(snippet)) error.message = `${error.message}: ${snippet}`;
     }
     throw error;
   });
+}
+
+/**
+ * Roots whose filesystem delta counts as local proof for an app-server turn: the
+ * workspace plus the declared writable roots, resolved, deduplicated and existing.
+ * A read-only turn has none, exactly like localProofRoots in the Claude adapter.
+ */
+function appServerProofRoots(cwd, sandbox, writableRoots) {
+  if (sandbox === CAPABILITY_SANDBOX_MODE.readonly) return [];
+  const extra = Array.isArray(writableRoots) ? writableRoots : [];
+  const roots = [cwd, ...extra].filter(root => typeof root === 'string' && root).map(root => path.resolve(root));
+  return [...new Set(roots)].filter(root => fs.existsSync(root));
+}
+
+/** Test-only liveness seams forwarded by runExecute; production passes none. */
+function appServerTestSeams(opts) {
+  const seams = {};
+  for (const key of ['monotonicClock', 'livenessPolicy', 'livenessIntervalMs', 'progressIntervalMs']) {
+    if (opts[key] !== undefined) seams[key] = opts[key];
+  }
+  return seams;
+}
+
+/** Owner ignore prefixes, resolved like localProofIgnorePrefixes (Claude adapter). */
+function appServerProofIgnore(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.filter(item => typeof item === 'string' && item).map(item => path.resolve(item)))]
+    : [];
 }
 
 // ── Agy (Antigravity CLI / Gemini) invocation ────────────────────────────────
@@ -2576,7 +2641,7 @@ async function runWriteContractCore(opts, contract) {
         terminateChild: terminateOwnedProcessTree,
         ...(opts.thinkingRequested ? { thinkingRequested: opts.thinkingRequested } : {}),
         // Owner liveness observer and the owner's result/receipt prefixes the
-        // local proof must ignore. Claude branch only: the app-server call never gets them.
+        // local proof must ignore. The codex branch below passes the same pair (S07).
         onLiveness: opts.onLiveness, localProofIgnore: opts.localProofIgnore,
         // Session persistence/resume (S05) is opted in by the unit owner
         // (forge-unit-sidecar), never by a direct CLI call and never for fix.
@@ -2619,6 +2684,10 @@ async function runWriteContractCore(opts, contract) {
       evidenceUnit: dispatchId,
       writableRoots,
       contextRoot,
+      // S07: the same owner liveness observer and ignore prefixes as the Claude branch.
+      onLiveness: opts.onLiveness,
+      localProofIgnore: opts.localProofIgnore,
+      ...appServerTestSeams(opts),
     });
     const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
     outputTokens = countTokens(rawContent);
@@ -2895,7 +2964,10 @@ async function runPlanCore(opts) {
       localProofIgnore: opts.localProofIgnore, ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
     transportTelemetry = claudeOutput.telemetry;
     appServerOutput = { finalText: JSON.stringify(claudeOutput.candidate), transport: { kind: 'claude-cli', version: 'unknown' } };
-  } else appServerOutput = await invokeCodexAppServer(planOptions);
+  } else {
+    appServerOutput = await invokeCodexAppServer({ ...planOptions, onLiveness: opts.onLiveness,
+      localProofIgnore: opts.localProofIgnore });
+  }
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   // Anti-silence floor: an empty turn is a FAILURE, never an empty plan accepted in
   // silence. `codex exec` enforced this as "codex -o file is empty"; the app-server
@@ -3054,6 +3126,9 @@ function classifyErrorClass(msg) {
   // A refused Claude model identity is never auto-resumed: its fixed messages
   // are matched exactly, before any keyword heuristic could see them.
   if (Object.values(CLAUDE_IDENTITY_MESSAGES).includes(msg)) return 'terminal';
+  // App-server liveness kills (S07) are terminal by construction: anchored on the
+  // client's fixed messages, before any keyword heuristic could see them.
+  if (/^forge-appserver-client: (anomalous silence \([a-z-]+\)|budget exceeded while active) after \d+(?:\.\d+)?s$/.test(msg || '')) return 'terminal';
   return isTransient(classifyError(msg)) ? 'transient' : 'terminal';
 }
 

@@ -78,6 +78,7 @@ async function main() {
   await classificationTable(route);
   await activeBudgetRecovery(identity, route, attempt, inspection, candidateSet);
   await sessionResumeRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
+  await codexAppServerRecovery(identity, route, attempt, inspection, candidateSet);
   await canonicalProvenance();
   stateSchema(identity, attempt);
   await migratedLimits(identity, route, attempt, inspection, candidateSet);
@@ -260,6 +261,73 @@ async function activeBudgetRecovery(identity, route, attempt, inspection, candid
 }
 // recoverAttempt end-to-end on disk: ref captured, resume handed to invoke as
 // the 6th argument, then the exhausted stop removes the session.
+// S07: the codex app-server liveness kill gets the Claude semantics. An indeterminate
+// silence is class 'silence' with a single same-target retry; a live stream at the
+// ceiling is 'active-budget', and without a Claude session it stops as unavailable.
+async function codexAppServerRecovery(identity, route, attempt, inspection, candidateSet) {
+  const fs = require('fs'), path = require('path');
+  const liveness = require('./forge-sidecar-liveness'), { digest } = require('./forge-code-roots');
+  const lab = require('./forge-code-roots.test').laboratory('recovery-codex-appserver');
+  const cwd = path.join(lab.dir, 'code'); fs.mkdirSync(cwd);
+  const codexRoute = { ...route, resolved_worker_engine: 'codex', model: 'gpt-6-codex', model_resolved: 'gpt-6-codex',
+    worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' };
+  const request = { cwd, contextRoot: cwd, scope: 'milestone', phase: 'research', unitType: 'research-milestone',
+    milestoneId: 'M001', route: { ...codexRoute, unit_type: 'research-milestone' }, prompt: 'codex', resultFile: path.join(lab.dir, 'result.json') };
+  const receiptFile = path.join(lab.dir, 'receipt.json');
+  fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', dispatch_id: 'dispatch-codex',
+    recovery_identity_sha256: digest(api.requestIdentity(request)), failure: { provider_called: true } }));
+  const capture = (stateFile, error) => api.captureFailure({ stateFile, receiptFile, request, unit: 'research-milestone/M001',
+    route: codexRoute, finalEvidence: require('./forge-attempt-telemetry').captureFinal({ request: { argv: ['--model', codexRoute.model] }, context: request.prompt }),
+    error, budgets: { coding_standards: 3000 } });
+  // Same block shape forge-appserver-client's silenceError puts in the diagnostic.
+  const silence = { dimension: 'gap', window_ms: 240001, threshold_ms: liveness.DEFAULTS.deadMs,
+    policy: liveness.POLICY, source: liveness.SOURCE_DEFAULT, cause: 'indeterminate' };
+  const silenceError = { code: 'appserver-anomalous-silence', provider_called: true,
+    diagnostic: { reason: 'anomalous-silence', observation: { version: 1, silence } } };
+  const dead = capture(path.join(lab.dir, 'silence.json'), silenceError).attempts.at(-1);
+  assert.strictEqual(dead.failure_class, 'silence', 'codex anomalous silence has the Claude class');
+  assert.strictEqual(dead.timeout_cause, 'indeterminate');
+  assert.deepStrictEqual(dead.observation.silence, silence);
+  assert.strictEqual(dead.session, undefined);
+  const unproven = capture(path.join(lab.dir, 'silence-unproven.json'), { ...silenceError, diagnostic: undefined }).attempts.at(-1);
+  assert.strictEqual(unproven.failure_class, 'unknown', 'without the indeterminate silence block it is not silence');
+  // The single same-target retry applies to the codex row exactly as to Claude's.
+  let now = 0, saved;
+  const options = { ...identity, state: undefined, clock: () => now, persist: value => { saved = value; } };
+  const row = { ...attempt, route: codexRoute, reason_code: dead.reason_code, failure_class: dead.failure_class,
+    service_failure_proven: false, observation: dead.observation };
+  const session = api.createRecovery(options);
+  session.record(row);
+  const alternate = { ...codexRoute, model: 'gpt-6-astra', model_resolved: 'gpt-6-astra', worker_mode: 'native' };
+  const authority = api.createAuthority(reference => ({ reference, status: 'resolved', answer: 'authorize', resolved_at: 'fixture' }));
+  const exception = authority.issue('fixture:codex-silence', { unit: identity.unit, roots_sha256: identity.roots_sha256,
+    purpose: 'sidecar-recovery', expires_at: 120000, routes: [api.routeKey(codexRoute), api.routeKey(alternate)], gates_preserved: true }, () => now);
+  const input = { inspection, exception, candidateSet, validateInvocation: async () => ({ ok: true }) };
+  const retry = await session.next(input);
+  assert.strictEqual(retry.action, 'invoke');
+  assert.strictEqual(retry.silence_retry, true);
+  assert.strictEqual(retry.route.model, codexRoute.model, 'the first silence retry stays on the same codex target');
+  session.reserve(retry, attempt.request_sha256);
+  const restart = api.createRecovery({ ...options, state: saved });
+  restart.record(row);
+  const following = await restart.next(input);
+  assert.notStrictEqual(following.silence_retry, true, 'at most one same-target silence retry for codex');
+  assert.notStrictEqual(following.route?.model, codexRoute.model, 'no second invocation of the silent codex target');
+  // Active budget without a session ref (codex never has one): stop, no candidate, no resume.
+  const budgetFile = path.join(lab.dir, 'budget.json');
+  const budget = capture(budgetFile, { code: 'budget-exceeded-while-active', provider_called: true }).attempts.at(-1);
+  assert.strictEqual(budget.failure_class, 'active-budget');
+  assert.strictEqual(budget.session ?? null, null);
+  const stopped = await api.recoverAttempt({ stateFile: budgetFile, receiptFile, request, clock: () => Date.now(), processProbe: () => 'stopped',
+    resolveDispatch() { throw Error('codex active budget must not resolve candidates'); },
+    validateInvocation: async () => { throw Error('codex active budget must not validate a resume'); },
+    invoke() { throw Error('codex active budget must not invoke'); } });
+  assert.strictEqual(stopped.action, 'stop');
+  assert.strictEqual(stopped.reason_code, 'budget-exceeded-resume-unavailable');
+  assert(!('resume' in stopped) && !('route' in stopped), 'no resume and no candidate advance');
+  console.log('PASS codex app-server: silence class with one same-target retry; active budget without session stops as resume-unavailable');
+}
+
 async function sessionResumeRecovery(route) {
   const fs = require('fs'), path = require('path'), stateApi = require('./forge-xllm-state');
   const sessions = require('./forge-claude-session'), { digest } = require('./forge-code-roots');
