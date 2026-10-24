@@ -228,8 +228,23 @@ test('removeSession refuses a target whose parent links outside the config dir',
   const ref = session.createSessionRef({ id: VALID, configDir: base, cwd });
   const result = session.removeSession(ref);
   assert.strictEqual(result.ok, false);
-  assert.deepStrictEqual(result.refused, [{ path: path.join('file-history', VALID), reason: 'outside-config-dir' }]);
+  assert.deepStrictEqual(result.refused, [{ path: path.join('file-history', VALID), reason: 'parent-symlink' }]);
   assert.ok(fs.existsSync(path.join(outside, VALID, 'precious')), 'destination intact');
+});
+
+test('removeSession refuses a parent link whose destination stays inside the config dir', () => {
+  const { base, home } = profile();
+  const cwd = path.join(home, 'proj');
+  const realProject = path.join(base, 'projects', 'other-real');
+  fs.mkdirSync(path.join(realProject, VALID), { recursive: true });
+  fs.writeFileSync(path.join(realProject, `${VALID}.jsonl`), '{}');
+  if (!tryLink(realProject, path.join(base, 'projects', session.projectKey(cwd)))) return;
+  const ref = session.createSessionRef({ id: VALID, configDir: base, cwd });
+  const result = session.removeSession(ref);
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.refused.some((r) => r.reason === 'parent-symlink'));
+  assert.ok(fs.existsSync(path.join(realProject, VALID)), 'session dir intact');
+  assert.ok(fs.existsSync(path.join(realProject, `${VALID}.jsonl`)), 'transcript intact');
 });
 
 test('removeSession refuses type mismatches and collects I/O errors without stopping', () => {

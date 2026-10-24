@@ -129,9 +129,11 @@ function errorCode(error) {
 }
 
 /**
- * Remove the closed set of session targets. Never follows symlinks/junctions,
- * never leaves realpath(configDir), never reads content. Returned paths are
- * relative to the config dir.
+ * Remove the closed set of session targets. Refuses (never removes) any target
+ * that is a symlink/junction or whose parent component below configDir is one,
+ * even when the destination stays inside configDir; never leaves
+ * realpath(configDir), never reads content. Returned paths are relative to the
+ * config dir.
  */
 function removeSession(ref, { fs = nodeFs } = {}) {
   const verdict = validateSessionRef(ref);
@@ -148,9 +150,33 @@ function removeSession(ref, { fs = nodeFs } = {}) {
   }
   const relative = (target) => path.relative(ref.config_dir, target) || '.';
 
+  // Returns 'link' when a parent component below config_dir is a symlink/junction,
+  // 'error' when it cannot be inspected, otherwise null (including absent parents).
+  function parentProblem(targetPath, rel) {
+    const parts = path.relative(ref.config_dir, path.dirname(targetPath)).split(path.sep).filter(Boolean);
+    let current = ref.config_dir;
+    for (const part of parts) {
+      current = path.join(current, part);
+      try {
+        if (fs.lstatSync(current).isSymbolicLink()) return 'link';
+      } catch (error) {
+        if (errorCode(error) === 'ENOENT') return null;
+        result.errors.push({ path: rel, code: errorCode(error) });
+        return 'error';
+      }
+    }
+    return null;
+  }
+
   // Returns true when the target existed (whatever the outcome), false on ENOENT.
   function removeTarget(target) {
     const rel = relative(target.path);
+    const problem = parentProblem(target.path, rel);
+    if (problem === 'link') {
+      result.refused.push({ path: rel, reason: 'parent-symlink' });
+      return true;
+    }
+    if (problem === 'error') return true;
     let stat;
     try {
       stat = fs.lstatSync(target.path);
@@ -200,7 +226,9 @@ function removeSession(ref, { fs = nodeFs } = {}) {
     const computed = path.dirname(targets[0].path);
     let entries = [];
     try {
-      entries = fs.readdirSync(projects, { withFileTypes: true });
+      if (parentProblem(path.join(projects, 'x'), relative(projects)) === null) {
+        entries = fs.readdirSync(projects, { withFileTypes: true });
+      }
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') result.errors.push({ path: relative(projects), code: errorCode(error) });
     }
