@@ -118,7 +118,17 @@ function testCumulativeSummaryDoesNotCloseMilestone() {
     assert.strictEqual(pick().unit.type, 'complete-milestone', 'a heading for another id does not close this milestone');
     fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'LEDGER.md'), `# Ledger\n\n## ${fixture.milestone}\n`);
     assert.strictEqual(pick().done, true, 'legacy global LEDGER heading proves the close');
+    fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'LEDGER.md'), `# Ledger\n\n## ${fixture.milestone} — Título antigo\n`);
+    assert.strictEqual(pick().done, true, 'pre-fragment "## <id> — <title>" heading proves the close');
     fs.rmSync(path.join(fixture.cwd, '.gsd', 'LEDGER.md'));
+    const events = path.join(dir, `${fixture.milestone}-events.jsonl`);
+    const transition = outcome => JSON.stringify({ event: 'unit-transition', action: 'complete', outcome,
+      unit: `complete-milestone/${fixture.milestone}`, milestone: fixture.milestone }) + '\n';
+    fs.writeFileSync(events, 'not json\n' + transition('failed'));
+    assert.strictEqual(pick().unit.type, 'complete-milestone', 'a failed close transition is not a close');
+    fs.appendFileSync(events, transition('succeeded'));
+    assert.strictEqual(pick().done, true, 'committed complete-milestone transition proves the close without a ledger write');
+    fs.rmSync(events);
     fs.mkdirSync(path.join(fixture.cwd, '.gsd', 'ledger'), { recursive: true });
     fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'ledger', `${fixture.milestone}.md`), 'closed\n');
     assert.strictEqual(pick().done, true, 'ledger fragment written by complete-milestone proves the close');
