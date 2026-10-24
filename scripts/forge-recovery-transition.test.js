@@ -54,7 +54,7 @@ function setup({ questions = [] } = {}) {
   f.initial = stateApi.loadRecovery(f.stateFile);
   f.history = transition.observeHistory({ request: f.request, state: f.initial, receiptFile: f.receiptFile,
     contract: f.contract, resolverOptions: f.originalOptions });
-  f.now = f.initial.deadline_at + 1;
+  f.now = f.initial.started_at + 60001; // past the former 60000 ms window; v2 has no deadline_at
   f.binding = authority(f, true); recovery.bindRecoveryAuthorization(f.binding); delete f.binding.registration;
   const cleanup = f.cleanup;
   f.cleanup = () => { for (const [key, value] of Object.entries(oldEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } cleanup(); };
@@ -120,7 +120,7 @@ async function candidateFixture(standalone = true, signed = false) {
   } finally { if (broker) await broker.close(); }
   f.initial = stateApi.loadRecovery(f.stateFile);
   f.history = transition.observeHistory({ request: f.request, state: f.initial, receiptFile: f.receiptFile, contract: f.contract });
-  f.now = f.initial.deadline_at + 1; f.binding = authority(f);
+  f.now = f.initial.started_at + 60001; f.binding = authority(f); // past the former 60000 ms window
   f.transitions = [{ type: 'saved-candidate-unreplayable', reference: 'fixture:original-provenance-absent' }];
   f.originalReceipt = fs.readFileSync(f.receiptFile); f.originalEvents = fs.readFileSync(f.events);
   return f;

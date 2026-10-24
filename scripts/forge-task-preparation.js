@@ -725,8 +725,9 @@ async function recoverStandaloneTask(rawRequest, recovery, deps = {}) {
       const next = { ...invocationRequest, recoveryStateFile: recovery.stateFile, dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`,
         resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
       // Tier safety ceiling from the single source; no cumulative-clock remainder.
-      const ceiling = ceilingFromRoute(route);
-      const bounded = { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source };
+      // Only a sidecar route carries a worker ceiling; a native route passes unchanged.
+      const ceiling = route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
+      const bounded = ceiling ? { ...route, workers_timeout: ceiling.seconds, workers_timeout_source: ceiling.source } : route;
       const result = await prepareStandaloneTask(next, { ...deps, resolveDispatch: () => bounded,
         ...(deps.invokeNative ? { invokeNative: (args, binding) => { assertReady?.(); return deps.invokeNative(args, binding); } } : {}) });
       return { ...result, ...(assertReady && result.action === 'invoke-native' ? { assertReady } : {}) };

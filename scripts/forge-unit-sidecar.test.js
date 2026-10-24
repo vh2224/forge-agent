@@ -404,7 +404,10 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
     failure: { reason_code: 'execution-protected-snapshot-unstable', provider_called: false } }));
   const initial = recovery.captureFailure({ stateFile, receiptFile, request, unit: 'execute-task/T01', route, contract: nativeInitial ? contract : undefined,
     error: { code: 'execution-protected-snapshot-unstable', provider_called: false }, layer: 'protected-snapshot' });
-  const now = initial.deadline_at + 1;
+  // v2 state has no cumulative clock: run past the old 60000 ms window to prove
+  // recovery is not stopped by elapsed time (the former deadline_at + 1).
+  assert.strictEqual(initial.schema_version, 2); assert.strictEqual(initial.deadline_at, undefined);
+  const now = initial.started_at + 60001;
   const receiptBytes = fs.readFileSync(receiptFile), baselineBytes = fs.readFileSync(baselineFile), stateBytes = fs.readFileSync(stateFile);
   const held = lease.acquire(lab.owner, initial.unit, { hostRuntime: 'codex', ownerToken: 'fixture-owner', ttlMs: 300000 });
   let window = lease.openProtectedWindow(lab.owner, initial.unit, held.owner_token, held.generation, { durationMs: 300000 });
@@ -513,10 +516,12 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
     restore();
     const recovered = await invoke();
     assert.strictEqual(calls, 1); assert(recovered.corrected);
-    assert.strictEqual(recovered.sidecar_remaining_ms, 0);
+    assert.strictEqual(recovered.sidecar_ceiling, null, 'native recovery route carries no sidecar ceiling');
+    assert.strictEqual(recovered.remaining_ms, undefined); assert.strictEqual(recovered.sidecar_remaining_ms, undefined);
     assert.strictEqual(recovered.result.result.provider_contact, false);
     const saved = JSON.parse(fs.readFileSync(stateFile));
-    assert.strictEqual(saved.started_at, initial.started_at); assert.strictEqual(saved.deadline_at, initial.deadline_at);
+    assert.strictEqual(saved.started_at, initial.started_at); assert.strictEqual(saved.schema_version, 2);
+    assert.strictEqual(saved.budget, 'tier-ceiling'); assert.strictEqual(saved.deadline_at, undefined, 'no clock is written back');
     assert.strictEqual(saved.roots_sha256, initial.roots_sha256, 'original root identity is retained');
     assert.strictEqual(saved.reservations[0].correction.kind, 'environment');
     assert.deepStrictEqual(fs.readFileSync(receiptFile), receiptBytes); assert.deepStrictEqual(fs.readFileSync(baselineFile), baselineBytes);
@@ -551,7 +556,9 @@ async function preSpawnRecoveryContracts(nativeInitial = false) {
         return { fixture_only: true, provider_contact: false };
       } });
       assert.strictEqual(correctedCalls, 1); assert.strictEqual(corrected.corrected, true);
-      assert.strictEqual(JSON.parse(fs.readFileSync(correctionState)).deadline_at, correction.deadline_at);
+      const correctionSaved = JSON.parse(fs.readFileSync(correctionState));
+      assert.strictEqual(correctionSaved.started_at, correction.started_at); assert.strictEqual(correctionSaved.budget, 'tier-ceiling');
+      assert.strictEqual(correctionSaved.deadline_at, undefined, 'corrected retry writes no cumulative clock');
     }
     assert(stageCalls > 5 && deltaCalls > 5);
     console.log('PASS ' + (nativeInitial ? 'native-initial R4 authority/correction/resume: ' : '') + 'pre-spawn trusted inspection, immutable challenge, full root delta, native after original deadline, pending questions, handoff guard and one correction across restart');
@@ -888,7 +895,7 @@ async function ceilingRouteContracts() {
   const fs = require('fs'), path = require('path'), crypto = require('crypto');
   const fixtures = require('./forge-code-roots.test'), xllm = require('./forge-xllm'), runs = require('./forge-runs');
   const runExecute = xllm.runExecute;
-  async function timeoutFor(id, shape) {
+  async function timeoutFor(id, shape, viaRecovery = false) {
     const lab = fixtures.fixture();
     try {
       const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
@@ -917,7 +924,22 @@ async function ceilingRouteContracts() {
         fs.writeFileSync(path.join(lab.b, 'same.txt'), 'worker beta\n');
         return { status: 'done', summary: 'Ceiling fixture', files_changed: ['alpha::same.txt', 'beta::same.txt'], must_haves_status: [] };
       };
-      await sidecar.runUnitSidecar(request);
+      if (!viaRecovery) await sidecar.runUnitSidecar(request);
+      else {
+        // Substitute only the recovery controller at its boundary: the real
+        // recoverUnitSidecar.invoke adapter receives the inherited route and a
+        // bogus third argument (a stale clock remainder) that must be ignored.
+        const recovery = require('./forge-attempt-recovery'), recoverAttempt = recovery.recoverAttempt;
+        let handed = null;
+        const transportExecute = xllm.runExecute;
+        xllm.runExecute = async options => { handed = options; return transportExecute(options); };
+        recovery.recoverAttempt = async options => options.invoke(request.route, { ok: true }, 21, undefined, 'fixture-reservation');
+        try {
+          await sidecar.recoverUnitSidecar(request, { stateFile: request.resultFile + '.recovery.json',
+            receiptFile: request.resultFile + '.receipt.json' }, {});
+        } finally { recovery.recoverAttempt = recoverAttempt; }
+        assert(handed, 'recovery reached the sidecar transport');
+      }
       return seen;
     } finally { xllm.runExecute = runExecute; lab.cleanup(); }
   }
@@ -925,6 +947,16 @@ async function ceilingRouteContracts() {
   assert.strictEqual(await timeoutFor('explicit-42', { workers_timeout: 42, workers_timeout_source: 'explicit' }), 42);
   assert.strictEqual(await timeoutFor('legacy-heavy-300', { tier: 'heavy', workers_timeout: 300 }), 3600);
   console.log('PASS ceiling route: transport timeoutSecs = ceilingFromRoute (standard 1800, explicit 42, legacy heavy 300 → 3600)');
+  // Recovery adapter: the recovered sidecar gets the full tier ceiling, never a
+  // remainder of the former cumulative 60000 ms clock.
+  assert.strictEqual(await timeoutFor('recovery-standard', { tier: 'standard' }, true), 1800);
+  assert.strictEqual(await timeoutFor('recovery-heavy', { tier: 'heavy' }, true), 3600);
+  assert.strictEqual(await timeoutFor('recovery-explicit', { workers_timeout: 1234, workers_timeout_source: 'explicit' }, true), 1234);
+  // R1 (S03-REVIEW): an inherited fractional tier-default value is invalid and
+  // resolves to the tier ceiling, never 59.999 nor the stale remainder.
+  const r1 = await timeoutFor('recovery-r1-fractional', { tier: 'standard', workers_timeout: 59.999, workers_timeout_source: 'tier-default' }, true);
+  assert.strictEqual(r1, 1800); assert.notStrictEqual(r1, 59.999); assert.notStrictEqual(r1, 21);
+  console.log('PASS recovery ceiling: recoverUnitSidecar transport timeoutSecs = tier ceiling (standard 1800, heavy 3600, explicit 1234, R1 59.999 → 1800)');
 }
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
