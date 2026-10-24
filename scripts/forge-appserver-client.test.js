@@ -11,8 +11,8 @@ const { spawnSync } = require('child_process');
 const {
   startAppServerTurn, encodeMessage, decodeLine, INTERRUPT_OUTCOMES, INTERRUPT_GRACE_MS,
   RETENTION_LIMITS, TURN_STATUS_SUCCESS, STDERR_TAIL_BYTES, tailBytes,
-  isContextNotification, APPSERVER_LIVENESS_CODES, LIVENESS_INTERVAL_MS,
-} = require('./forge-appserver-client');
+  isContextNotification, APPSERVER_LIVENESS_CODES, LIVENESS_INTERVAL_MS, LOCAL_PROOF_INTERVAL_MS,
+} =require('./forge-appserver-client');
 const { classifyError, isTransient } = require('./forge-classify-error');
 const { observation } = require('./forge-sidecar-diagnostic');
 
@@ -55,7 +55,10 @@ if (grandchildPidFile) {
 let initialized = false;
 let sawInboundReply = false;
 // S07 liveness modes: an acknowledged interrupt stops the stream, like a real server.
-const LIVENESS_MODES = ['active-stream', 'silent-after-started', 'silent-after-events'];
+const LIVENESS_MODES = ['active-stream', 'silent-after-started', 'silent-after-events', 'tool-open', 'tool-loop'];
+// S07/T03: tool items carry a sentinel command so leaks into liveness are detectable.
+const TOOL_SENTINEL = 'FORGE_T03_PRIVATE_COMMAND_SENTINEL';
+const toolItem = (id, command) => ({ id, type: 'commandExecution', command, cwd: '/private/tool/cwd' });
 let streamStopped = false;
 const delta = () => ({ method: 'item/agentMessage/delta', params: { itemId: 'msg-1', delta: 'x' } });
 // The SERVER stamps what it received, so ordering is proved by the peer's own record
@@ -182,6 +185,32 @@ process.stdin.on('data', chunk => {
         if (mode === 'silent-after-events') {
           const count = Number(process.env.FORGE_APPSERVER_MOCK_EVENTS || 3);
           for (let i = 0; i < count; i += 1) send(delta());
+        }
+        // A commandExecution that starts (remote evidence) and never completes; the
+        // optional hold completes the tool and the turn after that many real ms.
+        if (mode === 'tool-open') {
+          send({ method: 'item/started', params: { item: toolItem('cmd-1', 'echo ' + TOOL_SENTINEL) } });
+          const hold = Number(process.env.FORGE_APPSERVER_MOCK_TOOL_HOLD_MS || 0);
+          if (hold > 0) {
+            setTimeout(() => {
+              if (streamStopped) return;
+              send({ method: 'item/completed', params: { item: toolItem('cmd-1', 'echo ' + TOOL_SENTINEL) } });
+              send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
+            }, hold);
+          }
+        }
+        // Five tool calls with distinct ids; identical {command, cwd} unless DISTINCT.
+        // Each completes (a provider report, not a local write), then the turn ends.
+        if (mode === 'tool-loop') {
+          const distinct = process.env.FORGE_APPSERVER_MOCK_LOOP_DISTINCT === '1';
+          for (let i = 0; i < 5; i += 1) {
+            const item = toolItem('loop-' + i, 'echo ' + TOOL_SENTINEL + (distinct ? ' ' + i : ''));
+            send({ method: 'item/started', params: { item } });
+            send({ method: 'item/completed', params: { item } });
+          }
+          setTimeout(() => {
+            send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
+          }, Number(process.env.FORGE_APPSERVER_MOCK_LOOP_HOLD_MS || 300));
         }
         if (mode === 'active-stream') {
           const total = Number(process.env.FORGE_APPSERVER_MOCK_ACTIVE_MS || 1000);
@@ -923,6 +952,222 @@ async function testBudgetExceededWhileActive(mock, dir) {
   await waitForDeath(await readPidFileWhenWritten(pidFile, 'mock must record its pid'), 'the ceiling must kill the app-server');
 }
 
+// ── S07/T03: local proof over the app-server pid and the loop detector ──────
+// Same literal as the mock's TOOL_SENTINEL: it must never reach onLiveness/errors.
+const TOOL_SENTINEL = 'FORGE_T03_PRIVATE_COMMAND_SENTINEL';
+const isToolStarted = message => message.method === 'item/started'
+  && message.params && message.params.item && message.params.item.type === 'commandExecution';
+
+// Programmable fake provider (pattern of forge-claude-sidecar.test.js): current()
+// returns the injected proof, sample()/stop() are counted, and the options the
+// client passed (pid, roots, ignore, onWrite) are kept for assertions.
+function fakeProof(initial) {
+  const state = { proof: initial, samples: 0, stops: 0, options: null };
+  state.factory = (options) => {
+    state.options = options;
+    return {
+      sample() { state.samples += 1; return Promise.resolve(); },
+      current() { return state.proof; },
+      stop() { state.stops += 1; },
+    };
+  };
+  return state;
+}
+
+function assertNoSentinel(label, value) {
+  assert(!JSON.stringify(value === undefined ? null : value).includes(TOOL_SENTINEL), `${label} leaked tool command text`);
+}
+
+// One open commandExecution on an accelerated clock (from the tool's item/started).
+async function runOpenTool(mock, dir, { label, factor, factory, timeoutMs, holdMs, pidFile }) {
+  const accelerated = acceleratedClock(factor);
+  const transitions = [];
+  let spawnedPid = null;
+  const env = { ...process.env, FORGE_APPSERVER_MOCK_MODE: 'tool-open' };
+  if (holdMs) env.FORGE_APPSERVER_MOCK_TOOL_HOLD_MS = String(holdMs);
+  if (pidFile) env.FORGE_APPSERVER_PID_FILE = pidFile;
+  const started = Date.now();
+  let result = null;
+  let error = null;
+  try {
+    result = await startAppServerTurn({
+      cmd: process.execPath, args: [mock], cwd: dir, timeoutMs, livenessIntervalMs: 10, interruptGraceMs: 1000,
+      env, clock: accelerated.clock, localProofFactory: factory, localProofIntervalMs: 50,
+      proofRoots: [dir], localProofIgnore: [path.join(dir, 'ignored')],
+      onSpawn: pid => { spawnedPid = pid; },
+      onEvent: message => { if (isToolStarted(message)) accelerated.accelerate(); },
+      onLiveness: transition => transitions.push(transition),
+    });
+  } catch (caught) { error = caught; }
+  const realMs = Date.now() - started;
+  assert(realMs < REAL_BUDGET_MS, `${label} must take < ${REAL_BUDGET_MS}ms real, took ${realMs}ms`);
+  assertNoSentinel(`${label} transitions`, transitions);
+  if (error) {
+    assertNoSentinel(`${label} error.liveness`, error.liveness);
+    assertNoSentinel(`${label} error.diagnostic`, error.diagnostic);
+    assert(!String(error.message).includes(TOOL_SENTINEL), `${label} error message leaked tool text`);
+  }
+  return { result, error, transitions, spawnedPid };
+}
+
+function assertToolKill(error, reason, extension) {
+  assert(error, `expected a ${reason} kill`);
+  assert.match(error.message, /^forge-appserver-client: anomalous silence \(dead-silence\) after \d+(\.\d+)?s$/);
+  assert.strictEqual(error.code, APPSERVER_LIVENESS_CODES.SILENCE);
+  assert.strictEqual(error.liveness.termination, 'dead-silence');
+  assert.strictEqual(error.liveness.state, 'dead');
+  assert.strictEqual(error.liveness.reason, reason);
+  assert.strictEqual(error.liveness.extension_ms, extension);
+  const silence = error.diagnostic.observation.silence;
+  assert(silence, 'observation() must keep the silence block');
+  assert.strictEqual(silence.dimension, 'gap');
+  assert.strictEqual(silence.threshold_ms, 240000);
+  assert.strictEqual(silence.cause, 'indeterminate');
+  assert(outcomeValues.includes(error.interrupt) && error.interrupt !== INTERRUPT_OUTCOMES.SKIPPED_NO_TURN_ID);
+  return silence;
+}
+
+async function testLocalProofOptionValidation() {
+  const base = { cmd: process.execPath, args: ['never-spawned'] };
+  const cases = [
+    [{ proofRoots: 'x' }, /proofRoots must be an array of non-empty strings/],
+    [{ proofRoots: [''] }, /proofRoots must be an array of non-empty strings/],
+    [{ localProofIgnore: [5] }, /localProofIgnore must be an array of non-empty strings/],
+    [{ localProofFactory: 'x' }, /localProofFactory must be a function/],
+    [{ localProofIntervalMs: 0 }, /localProofIntervalMs must be a positive number/],
+    [{ localProofIntervalMs: Number.NaN }, /localProofIntervalMs must be a positive number/],
+  ];
+  for (const [extra, pattern] of cases) {
+    const spawned = [];
+    await expectReject(() => startAppServerTurn({ ...base, ...extra, onSpawn: pid => spawned.push(pid) }),
+      error => assert.match(error.message, pattern));
+    assert.deepStrictEqual(spawned, [], 'invalid local proof options must reject before the spawn');
+  }
+  assert.strictEqual(LOCAL_PROOF_INTERVAL_MS, 15000);
+}
+
+// Windows without CPU (and any provider without proof): unavailable/none survives
+// 240000 as slow-suspect/proof-unavailable and dies only after 660000.
+async function testOpenToolProofUnavailable(mock, dir) {
+  const fake = fakeProof({ capability: 'unavailable', proof: 'none' });
+  const pidFile = path.join(dir, 'tool-unavailable.pid');
+  const run = await runOpenTool(mock, dir, { label: 'tool-unavailable', factor: 400, factory: fake.factory,
+    timeoutMs: 905000, pidFile });
+  const silence = assertToolKill(run.error, 'tool-proof-unavailable-expired', 420000);
+  assert(silence.window_ms > 660000, `dies after 660000, window ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'unavailable', proof: 'none' });
+  const suspect = run.transitions.find(t => t.to === 'slow-suspect');
+  assert(suspect && suspect.reason === 'proof-unavailable' && suspect.at_ms > 120000 && suspect.at_ms <= 240001,
+    `slow-suspect/proof-unavailable expected: ${JSON.stringify(run.transitions)}`);
+  const dead = run.transitions.find(t => t.to === 'dead');
+  assert(dead && dead.at_ms > 660000, `dead after 660000, got ${dead && dead.at_ms}`);
+  // Alive past 240000: nothing between slow-suspect and dead.
+  assert.strictEqual(run.transitions.indexOf(dead), run.transitions.indexOf(suspect) + 1);
+  // The provider received the app-server pid, roots, ignore prefixes and cadence,
+  // was sampled and was stopped on cleanup.
+  assert.strictEqual(fake.options.pid, run.spawnedPid);
+  assert.deepStrictEqual(fake.options.roots, [dir]);
+  assert.deepStrictEqual(fake.options.ignore, { prefixes: [path.join(dir, 'ignored')] });
+  assert.strictEqual(fake.options.intervalMs, 50);
+  assert.strictEqual(typeof fake.options.onWrite, 'function');
+  assert.strictEqual(typeof fake.options.clock, 'function');
+  assert(fake.samples >= 1, 'the proof is sampled');
+  assert.strictEqual(fake.stops, 1, 'cleanup stops the proof exactly once');
+  await waitForDeath(await readPidFileWhenWritten(pidFile, 'mock must record its pid'), 'the tool kill must kill the app-server');
+}
+
+// Positive proof: working (local-proof) up to 240000, then slow-suspect/tool-extended,
+// never killed before 660000; the tool completes and the turn succeeds.
+async function testOpenToolProofPositive(mock, dir) {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const run = await runOpenTool(mock, dir, { label: 'tool-positive', factor: 400, factory: fake.factory,
+    timeoutMs: 905000, holdMs: 1100 });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.result.turnStatus, TURN_STATUS_SUCCESS);
+  const extended = run.transitions.find(t => t.to === 'slow-suspect');
+  assert(extended && extended.reason === 'tool-extended' && extended.at_ms > 240000,
+    `slow-suspect/tool-extended past 240000 expected: ${JSON.stringify(run.transitions)}`);
+  // Before 240000 the state held at working (the local proof keeps it out of suspect).
+  const before = run.transitions.slice(0, run.transitions.indexOf(extended));
+  assert(before.length > 0 && before[before.length - 1].to === 'working', JSON.stringify(run.transitions));
+  assert(!run.transitions.some(t => t.to === 'slow-suspect' && t.at_ms <= 240000));
+  assert(!run.transitions.some(t => t.to === 'dead'), 'positive proof is never killed before 660000');
+  assert.strictEqual(fake.stops, 1);
+}
+
+// Negative proof (the measured pid is gone): ordinary 240000 deadline.
+async function testOpenToolProofNegative(mock, dir) {
+  const fake = fakeProof({ capability: 'available', proof: 'negative' });
+  const run = await runOpenTool(mock, dir, { label: 'tool-negative', factor: 400, factory: fake.factory,
+    timeoutMs: 905000 });
+  const silence = assertToolKill(run.error, 'tool-proof-negative', null);
+  assert(silence.window_ms > 240000 && silence.window_ms < 660000, `dies at ~240000, window ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'negative' });
+}
+
+// A provider that throws or answers malformed never fabricates proof: unavailable.
+async function testBrokenProviderIsUnavailable(mock, dir) {
+  const factories = [
+    ['throws', () => { throw new Error('provider exploded'); }],
+    ['invalid', () => ({ current: () => ({ capability: 'bogus' }), sample: () => Promise.resolve() })],
+    ['not-a-provider', () => 42],
+  ];
+  for (const [label, factory] of factories) {
+    // A reduced ceiling past 240000 ends the turn cheaply as an active budget overrun.
+    const run = await runOpenTool(mock, dir, { label: `tool-${label}`, factor: 400, factory, timeoutMs: 300000 });
+    assert(run.error, `${label}: expected the ceiling`);
+    assert.strictEqual(run.error.code, APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED, `${label}: ${run.error.message}`);
+    const suspect = run.transitions.find(t => t.to === 'slow-suspect');
+    assert(suspect && suspect.reason === 'proof-unavailable', `${label}: ${JSON.stringify(run.transitions)}`);
+    assert(!run.transitions.some(t => t.to === 'dead'), `${label}: unavailable survives 240000`);
+  }
+}
+
+// Five identical tool calls without a write: slow-suspect/no-progress, no kill, the
+// turn still completes. Distinct calls, or a write in between, never flag a loop.
+async function runToolLoop(mock, dir, { distinct = false, writeAfter = null } = {}) {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const transitions = [];
+  let started = 0;
+  const env = { ...process.env, FORGE_APPSERVER_MOCK_MODE: 'tool-loop' };
+  if (distinct) env.FORGE_APPSERVER_MOCK_LOOP_DISTINCT = '1';
+  const result = await timed('tool-loop', () => startAppServerTurn({
+    cmd: process.execPath, args: [mock], cwd: dir, timeoutMs: 3600000, livenessIntervalMs: 10,
+    env, localProofFactory: fake.factory,
+    onEvent: message => {
+      if (!isToolStarted(message)) return;
+      started += 1;
+      // A local write (proof onWrite) resets the detector; item/completed never does.
+      if (writeAfter !== null && started === writeAfter) fake.options.onWrite();
+    },
+    onLiveness: transition => transitions.push(transition),
+  }));
+  assert.strictEqual(started, 5);
+  assertNoSentinel('tool-loop transitions', transitions);
+  return { result, transitions };
+}
+
+async function testToolLoopDetector(mock, dir) {
+  const looped = await runToolLoop(mock, dir);
+  assert.strictEqual(looped.result.turnStatus, TURN_STATUS_SUCCESS, 'a loop is advisory: no kill');
+  const loop = looped.transitions.find(t => t.to === 'slow-suspect' && t.reason === 'no-progress');
+  assert(loop, `slow-suspect/no-progress expected: ${JSON.stringify(looped.transitions)}`);
+  assert.strictEqual(loop.progress.repeats, 5);
+  assert.match(loop.progress.fingerprint_sha256, /^[0-9a-f]{16}$/);
+  assert.deepStrictEqual(Object.keys(loop.progress).sort(), ['fingerprint_sha256', 'repeats']);
+  assert(!looped.transitions.some(t => t.to === 'dead'));
+
+  const distinct = await runToolLoop(mock, dir, { distinct: true });
+  assert.strictEqual(distinct.result.turnStatus, TURN_STATUS_SUCCESS);
+  assert(!distinct.transitions.some(t => t.reason === 'no-progress'),
+    `distinct commands are not a loop: ${JSON.stringify(distinct.transitions)}`);
+
+  const written = await runToolLoop(mock, dir, { writeAfter: 4 });
+  assert.strictEqual(written.result.turnStatus, TURN_STATUS_SUCCESS);
+  assert(!written.transitions.some(t => t.reason === 'no-progress'),
+    `a write resets the count: ${JSON.stringify(written.transitions)}`);
+}
+
 // Best-effort hard kill of one pid, by both routes killProcessTree itself uses: the
 // negative-pid group signal (catches a detached grandchild) and the direct signal
 // (catches a process that is not a group leader). Either or both may legitimately
@@ -997,6 +1242,12 @@ async function main() {
     await testDeadStart(mock, dir);
     await testDeadSilence(mock, dir);
     await testBudgetExceededWhileActive(mock, dir);
+    await testLocalProofOptionValidation();
+    await testOpenToolProofUnavailable(mock, dir);
+    await testOpenToolProofPositive(mock, dir);
+    await testOpenToolProofNegative(mock, dir);
+    await testBrokenProviderIsUnavailable(mock, dir);
+    await testToolLoopDetector(mock, dir);
     process.stdout.write('forge-appserver-client.test.js: ok\n');
   } finally {
     // Runs whether the try block above threw or not, so a broken kill path still

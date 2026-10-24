@@ -12,6 +12,7 @@ const { spawn, spawnSync } = require('child_process');
 const { StringDecoder } = require('string_decoder');
 const liveness = require('./forge-sidecar-liveness');
 const { createNotificationReducer } = require('./forge-appserver-liveness');
+const { createLocalProof } = require('./forge-sidecar-local-proof');
 const { diagnostic } = require('./forge-sidecar-diagnostic');
 
 const STDERR_TAIL_BYTES = 4096;
@@ -79,6 +80,24 @@ const APPSERVER_LIVENESS_CODES = Object.freeze({
 // Watchdog cadence. Overridable via `livenessIntervalMs` (test seam, like
 // interruptGraceMs); production never passes it.
 const LIVENESS_INTERVAL_MS = 1000;
+// Local proof cadence (S07/T03): same default as runOwnedChild. The proof samples
+// asynchronously into a cache; the watchdog tick only reads `current()`.
+const LOCAL_PROOF_INTERVAL_MS = 15000;
+// No pid, or a provider that cannot start: never a fabricated proof (S02 rule:
+// unavailable/none allows the bounded tool extension up to 660000 ms).
+const UNAVAILABLE_LOCAL_PROOF = Object.freeze({ capability: 'unavailable', proof: 'none' });
+
+/** Only {capability, proof}; an invalid provider answer reads as unavailable
+ * instead of throwing inside the watchdog tick (same shape as the Claude adapter). */
+function currentLocalProof(provider) {
+  try {
+    return liveness.normalizeLocalProof(provider.current());
+  } catch {
+    return { ...UNAVAILABLE_LOCAL_PROOF };
+  }
+}
+
+const isStringArray = value => Array.isArray(value) && value.every(item => typeof item === 'string' && item);
 
 // Pitfall 7: the app-server wire dialect is JSONL but does not use a jsonrpc
 // member. Removing it here is intentional, rather than relying on callers to
@@ -194,6 +213,11 @@ function startAppServerTurn(options) {
     livenessIntervalMs,
     livenessPolicy,
     onLiveness,
+    // Local proof and loop detector (S07/T03), named exactly like runOwnedChild.
+    proofRoots = [],
+    localProofIgnore = [],
+    localProofFactory,
+    localProofIntervalMs,
   } = opts;
   if (!cmd || typeof cmd !== 'string') {
     return Promise.reject(sessionError('cmd is required'));
@@ -252,6 +276,19 @@ function startAppServerTurn(options) {
       }
     }
   }
+  if (!isStringArray(proofRoots)) {
+    return Promise.reject(sessionError('proofRoots must be an array of non-empty strings'));
+  }
+  if (!isStringArray(localProofIgnore)) {
+    return Promise.reject(sessionError('localProofIgnore must be an array of non-empty strings'));
+  }
+  if (localProofFactory !== undefined && localProofFactory !== null && typeof localProofFactory !== 'function') {
+    return Promise.reject(sessionError('localProofFactory must be a function'));
+  }
+  if (localProofIntervalMs !== undefined && (!Number.isFinite(localProofIntervalMs) || localProofIntervalMs <= 0)) {
+    return Promise.reject(sessionError('localProofIntervalMs must be a positive number'));
+  }
+  const proofIntervalMs = localProofIntervalMs === undefined ? LOCAL_PROOF_INTERVAL_MS : localProofIntervalMs;
   const policy = liveness.normalizePolicy(livenessPolicy);
   const watchdogMs = livenessIntervalMs === undefined ? LIVENESS_INTERVAL_MS : livenessIntervalMs;
   // The tracker only enforces an integer ceiling; rounding up never kills earlier
@@ -263,6 +300,7 @@ function startAppServerTurn(options) {
     let settled = false;
     let timer = null;
     let watchdog = null;
+    let proofTimer = null;
     let stdoutBuffer = '';
     let stderrTail = '';
     let nextId = 1;
@@ -369,8 +407,27 @@ function startAppServerTurn(options) {
     // integer ms: observation() only accepts safe integers, and a fractional
     // performance.now() would null every counter and drop the `silence` block.
     const baseClock = typeof clock === 'function' ? clock : () => performance.now();
-    const reducer = createNotificationReducer({ clock: () => Math.floor(baseClock()) });
+    const reducerClock = () => Math.floor(baseClock());
+    // Loop detector: tool-item fingerprints (hashes only) since the last local write.
+    // Only the proof's onWrite resets it: an item/completed (fileChange included) is
+    // the provider's report, not a local filesystem delta, so it never counts.
+    const progress = liveness.createProgressTracker();
+    const reducer = createNotificationReducer({ clock: reducerClock, onToolCall: ({ fingerprint }) => {
+      try { progress.toolCall(fingerprint); } catch { /* observer only */ }
+    } });
     const tracker = liveness.createTracker(policy, ceilingMs);
+    // Local proof of life over the app-server pid (decision 5). Replaced after the
+    // spawn when a pid exists; sampled asynchronously, read synchronously.
+    let proof = { current: () => UNAVAILABLE_LOCAL_PROOF, sample: () => Promise.resolve(), stop() {} };
+    const sampleProof = () => {
+      try { Promise.resolve(proof.sample()).catch(() => {}); } catch { /* best-effort sampling */ }
+    };
+    const livenessInputs = () => {
+      const current = currentLocalProof(proof);
+      let state;
+      try { state = progress.state(); } catch { state = undefined; }
+      return { localProof: { capability: current.capability, proof: current.proof }, progress: state };
+    };
     // Last published state (same shape as the S06 `liveness` block).
     let livenessView = { version: 1, state: 'starting', since_ms: 0, reason: null };
     const observe = (extra) => ({ ...reducer.snapshot(), ...extra });
@@ -383,6 +440,9 @@ function startAppServerTurn(options) {
       timer = null;
       if (watchdog) clearInterval(watchdog);
       watchdog = null;
+      if (proofTimer) clearInterval(proofTimer);
+      proofTimer = null;
+      try { if (typeof proof.stop === 'function') proof.stop(); } catch { /* best-effort */ }
       if (child && child.stdin) {
         try { child.stdin.end(); } catch { /* stream closed concurrently */ }
       }
@@ -528,6 +588,22 @@ function startAppServerTurn(options) {
     // the pid is only visible here. Called exactly once, wrapped like onEvent — an
     // observer that throws does not get to take the session down with it.
     try { if (typeof onSpawn === 'function') onSpawn(child.pid); } catch { /* observer cannot control session */ }
+    // The tools the app-server runs are its descendants or write into the writable
+    // roots, so the S02 provider measures them through this pid. Without a pid, or
+    // with a provider that throws or answers malformed, the proof stays unavailable.
+    if (Number.isSafeInteger(child.pid)) {
+      try {
+        const provider = (localProofFactory || createLocalProof)({ pid: child.pid, roots: proofRoots.slice(),
+          ignore: { prefixes: localProofIgnore.slice() }, clock: reducerClock, intervalMs: proofIntervalMs,
+          onWrite: () => { try { progress.write(); } catch { /* observer only */ } } });
+        if (provider && typeof provider.current === 'function' && typeof provider.sample === 'function') {
+          proof = provider;
+        }
+      } catch { /* a provider that cannot start leaves the proof unavailable */ }
+      proofTimer = setInterval(sampleProof, proofIntervalMs);
+      if (typeof proofTimer.unref === 'function') proofTimer.unref();
+      sampleProof();
+    }
     child.on('error', error => fail(`spawn failed: ${error.code || error.message}`, null, true));
     child.stdin.on('error', () => { /* close/error is diagnosed by request or child exit */ });
     // Decode across chunk boundaries: a multibyte character split between two reads
@@ -620,7 +696,7 @@ function startAppServerTurn(options) {
     // adapter). A live stream at the ceiling is `budget-exceeded-while-active`; a
     // ceiling reached while still `starting` keeps the load-bearing message, no code.
     const ceilingError = (decision) => {
-      const view = decision || liveness.evaluate(reducer.snapshot(), {}, policy, null);
+      const view = decision || liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
       const kind = decision ? decision.termination
         : liveness.classifyTermination({ cause: 'ceiling', state: view.state });
       const active = kind === APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED;
@@ -668,22 +744,31 @@ function startAppServerTurn(options) {
     };
     // Backstop: the real-time ceiling, independent of the injected clock.
     timer = setTimeout(() => terminateTurn(() => ceilingError()), timeoutMs);
-    // Primary authority: the neutral tracker over the reducer snapshot. Inputs are
-    // `{}` here (local proof and loop detector belong to T03): an undefined proof is
-    // `unavailable/none`, the S01/S02 behaviour.
+    // Primary authority: the neutral tracker over the reducer snapshot plus the
+    // cached local proof and the loop detector state (synchronous, no I/O).
     watchdog = setInterval(() => {
       // A matched completion is about to settle on the 5ms poll; never kill it.
       if (settled || timedOut || matchedCompletion()) return;
       let decision;
-      try { decision = tracker.evaluate(reducer.snapshot(), {}); } catch { return; }
+      let inputs;
+      try {
+        inputs = livenessInputs();
+        decision = tracker.evaluate(reducer.snapshot(), inputs);
+      } catch { return; }
       const { result, transition } = decision;
       if (transition) {
         if (!(transition.from === null && transition.to === 'starting')) {
           livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
             reason: transition.reason ?? null };
         }
+        // A loop carries only the repeat count and a 16-hex fingerprint prefix, as in
+        // runOwnedChild: never the command, arguments or any item text.
+        const loop = transition.to === 'slow-suspect' && transition.reason === 'no-progress'
+          && typeof inputs.progress?.fingerprint === 'string';
+        const event = loop ? { ...transition, progress: { repeats: inputs.progress.repeats,
+          fingerprint_sha256: inputs.progress.fingerprint.slice(0, 16) } } : transition;
         // Best-effort observer: it never controls the session.
-        try { Promise.resolve(onLiveness && onLiveness(transition)).catch(() => {}); } catch { /* observer only */ }
+        try { Promise.resolve(onLiveness && onLiveness(event)).catch(() => {}); } catch { /* observer only */ }
       }
       if (!result.kill) return;
       if (result.cause === 'liveness') terminateTurn(() => silenceError(result));
@@ -790,6 +875,7 @@ module.exports = {
   INTERRUPT_GRACE_MS,
   APPSERVER_LIVENESS_CODES,
   LIVENESS_INTERVAL_MS,
+  LOCAL_PROOF_INTERVAL_MS,
   // Same reason as INTERRUPT_OUTCOMES: tests bind to the constant, never the literal.
   RETENTION_LIMITS,
   TURN_STATUS_SUCCESS,
