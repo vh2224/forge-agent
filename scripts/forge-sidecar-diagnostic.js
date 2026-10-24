@@ -25,6 +25,9 @@ const REASONS = Object.freeze({
   'adapter-failed': 'adapter', 'anomalous-silence': 'transport',
   'budget-exceeded-while-active': 'transport', 'duplicate-terminal':'envelope', 'event-after-terminal':'envelope',
 });
+// Declared locally: the v2 calibration module imports this file (no cycle).
+const POLICY_V2 = 'claude-silence-v2';
+const V2_SOURCES = Object.freeze(['persisted-calibration', 'model-fallback']);
 const COUNTS = ['stdout_bytes', 'stderr_bytes', 'duration_ms', 'marker_count', 'model_count'];
 // One token, no list separators, no path or shell characters; an optional
 // bracketed context suffix such as `[1m]`. Shared with the Claude adapter so
@@ -89,6 +92,16 @@ function observation(input = {}) {
       && silence.window_ms > silence.threshold_ms) {
     out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
       threshold_ms: silence.threshold_ms, policy: silence.policy,
+      source: silence.source, cause: 'indeterminate' };
+  } else if (silence?.cause === 'indeterminate' && ['initial', 'gap'].includes(silence.dimension)
+      && silence.policy === POLICY_V2 && V2_SOURCES.includes(silence.source)
+      && Number.isSafeInteger(silence.window_ms) && Number.isSafeInteger(silence.threshold_ms)
+      && silence.threshold_ms >= (silence.dimension === 'initial'
+        ? liveness.CALIBRATION_FLOORS.startMs : liveness.CALIBRATION_FLOORS.deadMs)
+      && silence.threshold_ms <= (silence.dimension === 'initial' ? liveness.DEFAULTS.startMs : liveness.DEFAULTS.deadMs)
+      && silence.window_ms > silence.threshold_ms) {
+    out.silence = { dimension: silence.dimension, window_ms: silence.window_ms,
+      threshold_ms: silence.threshold_ms, policy: POLICY_V2,
       source: silence.source, cause: 'indeterminate' };
   }
   const beat = input.liveness;

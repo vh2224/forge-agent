@@ -552,3 +552,33 @@ test('readProgressLine round-trips progressLine and never throws', () => {
     assert.equal(readProgressLine(bad), null, String(bad));
   }
 });
+
+test('observation silence accepts claude-silence-v2 only inside [floor, default]', () => {
+  const v2 = (dimension, threshold, extra = {}) => ({ dimension, window_ms: threshold + 1, threshold_ms: threshold,
+    policy: 'claude-silence-v2', source: 'persisted-calibration', cause: 'indeterminate', ...extra });
+  for (const [dimension, limits] of [['initial', [30000, 45000, 60000]], ['gap', [120000, 215000, 240000]]]) {
+    for (const threshold of limits) for (const source of ['persisted-calibration', 'model-fallback']) {
+      const snapshot = v2(dimension, threshold, { source });
+      const result = observation({ silence: { ...snapshot, raw: token } });
+      assert.deepEqual(result.silence, snapshot);
+      assert.deepEqual(readProgressLine(progressLine({ silence: snapshot })).silence, snapshot);
+    }
+  }
+  const refused = [v2('gap', 240001), v2('gap', 119999), v2('initial', 29999), v2('initial', 60001),
+    v2('gap', 215000, { source: 'locked-default' }), v2('gap', 215000, { cause: 'measured' }),
+    v2('gap', 215000, { window_ms: 215000 }), v2('gap', 215000, { window_ms: 1000 }),
+    v2('gap', 215000.5), v2('gap', 215000, { dimension: 'other' })];
+  for (const bad of refused) assert(!('silence' in observation({ silence: bad })), JSON.stringify(bad));
+});
+
+test('observation v2 branch does not change v1 or liveness-v1 projections', () => {
+  const v1 = { dimension: 'gap', window_ms: 130001, threshold_ms: 130000, policy: 'claude-silence-v1',
+    source: 'persisted-calibration', cause: 'indeterminate' };
+  assert.deepEqual(observation({ silence: v1 }).silence, v1);
+  const live = { dimension: 'gap', window_ms: 100001, threshold_ms: 100000, policy: 'forge-liveness-v1',
+    source: 'persisted-calibration', cause: 'indeterminate' };
+  const liveOut = observation({ silence: live }).silence;
+  assert.equal(liveOut.policy, live.policy);
+  assert.deepEqual(Object.keys(observation({ calibration: { initial: 'calibrated', gap: 'calibrated' } }).calibration),
+    ['diagnostic', 'initial', 'gap']);
+});

@@ -469,6 +469,44 @@ deadline, prevents a second silence retry across restart or clock regression.
 After that one retry, ordinary authorized untried routing applies. No provider
 probe, preference rewrite or second learning call is introduced.
 
+##### Calibration v2 (`claude-silence-v2`)
+
+The v1 policy above stays a readable legacy: its store is untouched and nothing
+from it is promoted. Policy `claude-silence-v2` lives in a separate store,
+`calibration-v2.json`, beside `calibration.json` (same directory, same lock,
+same `safePath`, 1 MiB and 256-key limits). It is a separate file because the
+v1 reader validates every record against the fixed v1 identity; a v2 record in
+that file would make the v1 reader refuse the whole store.
+
+v2 only tightens the locked defaults. It calibrates `startMs` (dimension
+`initial`) and `deadMs` (dimension `gap`); the final threshold is always inside
+[floor, default]: `startMs` 30000..60000 and `deadMs` 120000..240000
+(`CALIBRATION_FLOORS` and `DEFAULTS` in the liveness module). Formula, with clamp:
+`raw = 4 * max(samples) + 15000`, `lower = censored.max_ms + 15000` (0 without
+censored data), `threshold_ms = min(default, max(floor, raw, lower))`.
+
+A dimension is calibrated with 5 uncensored samples from distinct evidence; the
+uncensored samples freeze at 5. Censored samples (an open gap from a cut
+stream) count only as a lower bound: they never calibrate alone and never raise
+the threshold above the default. Their origins are `dead-start`, `dead-silence`
+and an active ceiling hit, always without a suspended gap (a tool kill is a
+proven extension, not silence). Up to 32 evidence entries are kept; replay of the
+same attempt is not counted twice, and a full list is a no-op. Censored
+samples may still be added after the freeze and can only raise the threshold up
+to the default.
+
+When the exact model/effort/phase dimension is not calibrated, a model fallback
+aggregates v2 records of the same transport/protocol/model across efforts and
+phases, requiring at least 10 deduplicated samples from at least 2 distinct
+phases; the source is `model-fallback`. Precedence per dimension, never mixing
+values: exact v2, then v2 model fallback, then the v1 gap rule, then the locked
+default. The v1 `initial` stays ignored.
+
+`observation().silence` accepts `policy: claude-silence-v2` with source
+`persisted-calibration` or `model-fallback`, `cause: indeterminate`, a threshold
+inside [floor, default] and a window greater than the threshold; any other v2
+snapshot is dropped, and v1 and liveness-v1 projections are unchanged.
+
 A failed receipt preserves the sanitized cause; a ready receipt replays canonical
 publication with no inference and without overwriting unrelated edits. An
 interrupted started receipt requires process evidence and reconciliation.
