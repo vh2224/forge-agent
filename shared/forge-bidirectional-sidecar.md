@@ -24,6 +24,19 @@ resultado parcial, sem continuar narrando apenas "aguardando resposta". Timeout 
 provedor. Não reinicie silenciosamente uma tentativa temporizada; qualquer
 fallback permitido deve expor a falha e a nova tentativa antes de dispará-la.
 
+A persistência de sessão do Claude é opt-in: só plan/execute, pelo dono da unidade via
+`runUnitSidecar`, recebem `--session-id` (UUID gerado pelo Forge); as demais fases
+mantêm `--no-session-persistence`. Com o teto `budget-exceeded-while-active`, a recovery
+faz no máximo um `--resume` da mesma sessão, depois da inspeção e da reconciliação das
+escritas (o worker é avisado de que o workspace voltou ao baseline); o receipt novo leva
+`resumed_from` e só `session_sha256`. Sem sessão: `budget-exceeded-resume-unavailable`;
+segundo teto: `budget-exceeded-resume-exhausted`. Ao concluir, o Forge remove a sessão
+(`scripts/forge-claude-session.js`): alvos exatos sob `<home>/.claude`
+(`projects/<key>/<id>.jsonl`, `projects/<key>/<id>/`, `session-env/<id>/`,
+`file-history/<id>/`), sem seguir symlink; falha vira o evento
+`claude-session-cleanup-failed`. Limitação: se o processo pai morrer, a sessão fica órfã
+até a próxima recovery da unidade; a varredura periódica fica para a S09.
+
 Antes de disparar um sidecar, anuncie fase/unidade, engine, modelo enviado, esforço e host da rota resolvida com o rótulo **solicitação do orquestrador — aguardando confirmação do adaptador**. Essa frase descreve a intenção do despacho.
 
 Depois, leia o stderr completo do processo, inclusive em `run_in_background` pela ferramenta de saída do host. Reproduza literalmente, na conversa, cada linha que começa com `[forge-sidecar]`, incluindo `recusado`, `falhou` e `reaproveitado`. Se nenhuma linha aparecer, diga que falta prova do adaptador. Preserve `observado=nao-confirmado` e diga **modelo enviado**; não afirme que o provedor aplicou o modelo.
