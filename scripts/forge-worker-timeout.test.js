@@ -137,6 +137,16 @@ test('protectedWindowMs covers every tier ceiling and refuses to silently cover 
   assert.deepEqual({ ...protectedWindowMs(7200000) }, { duration_ms: 5460000, covers: false });
 });
 
+test('ceilingFromRoute ignores a historical integer remainder written over a tier-default source', () => {
+  const r = ceilingFromRoute({ tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
+  assert.strictEqual(r.seconds, 3600);
+  assert.strictEqual(r.ms, 3600000);
+  assert.strictEqual(r.source, 'tier-default');
+  const l = ceilingFromRoute({ tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'legacy-300-ignored' });
+  assert.strictEqual(l.seconds, 3600);
+  assert.strictEqual(ceilingFromRoute({ tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'explicit' }).seconds, 21);
+});
+
 let failed = 0;
 for (const { name, run } of tests) {
   try {

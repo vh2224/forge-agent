@@ -74,7 +74,7 @@ async function main() {
   assert.throws(() => authority.issue('live-answer', { unit: identity.unit, roots_sha256: 'roots', routes: ['route'],
     purpose: 'sidecar-recovery', expires_at: now + 100, gates_preserved: false }, () => now), /not-authorized/);
   await silenceRecovery(identity, route, attempt, inspection, candidateSet);
-  await persistentRecovery(route);
+  await persistentRecovery({ ...route, worker_mode: 'sidecar', tier: 'heavy', workers_timeout: 21, workers_timeout_source: 'tier-default' });
   await classificationTable(route);
   await activeBudgetRecovery(identity, route, attempt, inspection, candidateSet);
   await canonicalProvenance();
@@ -452,6 +452,8 @@ async function migratedRecovery({ base, initial, lab, corrected }) {
   assert.strictEqual(result.action, 'invoke');
   assert.deepStrictEqual(result.state_migration, { from: 1, to: 2 });
   assert.deepStrictEqual(ceiling, ceilingFromRoute(result.route));
+  assert.strictEqual(ceiling.seconds, 3600, 'a historical integer remainder never becomes the transport timeout');
+  assert.strictEqual(ceiling.ms, 3600000);
   const after = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   assert.strictEqual(after.schema_version, 2); assert.strictEqual(after.migrated_from.schema_version, 1);
   assert.strictEqual(after.started_at, v1.started_at); assert.strictEqual(after.deadline_at, v1.deadline_at);

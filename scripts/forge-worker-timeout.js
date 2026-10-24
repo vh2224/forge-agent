@@ -58,6 +58,13 @@ function ceilingFromRoute(route) {
   const r = route && typeof route === 'object' ? route : {};
   const value = r.workers_timeout;
   if (CEILING_SOURCES.includes(r.workers_timeout_source) && isValidExplicit(value)) {
+    // Non-explicit sources always equal the tier ceiling; a different value is a historical
+    // cumulative-clock remainder written over the source, never a real setting.
+    if (r.workers_timeout_source !== 'explicit') {
+      const tierResolved = resolveWorkerCeiling({ tier: r.tier,
+        explicit: r.workers_timeout_source === 'legacy-300-ignored' ? LEGACY_WORKER_TIMEOUT_SECS : undefined });
+      if (value !== tierResolved.seconds) return tierResolved;
+    }
     const tierFallback = ceilingForTier(r.tier) === null;
     return ceiling(value, r.workers_timeout_source, tierFallback ? FALLBACK_TIER : r.tier, tierFallback,
       r.workers_timeout_warning && typeof r.workers_timeout_warning === 'object'
