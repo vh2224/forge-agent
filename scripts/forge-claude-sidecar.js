@@ -58,6 +58,9 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   MODEL_SUBSTITUTED: 'claude-model-substituted',
   MODEL_UNVERIFIED: 'claude-model-unverified',
   SESSION_MISMATCH: 'claude-session-mismatch',
+  SESSION_INVALID: 'claude-session-invalid',
+  RESUME_ACCOUNT_MISMATCH: 'claude-resume-account-mismatch',
+  RESUME_CONFIG_MISMATCH: 'claude-resume-config-mismatch',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -89,6 +92,14 @@ const ENVIRONMENT_REASON_VALUES = new Set([
 
 const MAX_CAPTURE_BYTES_PER_STREAM = 1024 * 1024;
 const MAX_PROMPT_INSTRUCTION_BYTES = 4096;
+// The only -p text of a same-session resume (S05). The reconciliation that runs
+// before a resume restores every root to the attempt baseline, so the resumed
+// session remembers edits that may no longer exist on disk.
+const CLAUDE_RESUME_INSTRUCTION = 'The previous turn of this same task reached its safety ceiling while it was still '
+  + 'active and was stopped. Before this resume, Forge reconciled the workspace to the baseline of the attempt, so edits '
+  + 'made earlier in this session may have been reverted. Re-read every file before relying on any earlier edit; the '
+  + 'temporary task prompt file no longer exists, so rely on the task as you already read it in this session. Continue '
+  + 'the same task and return the required structured_output JSON.';
 const TIMEOUT_GRACE_MS = 5000;
 const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // Only a fallback: forge-xllm always passes the cadence it publishes as
@@ -153,6 +164,9 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_ENABLED_INCOMPATIBLE]: 'Enabled thinking is incompatible with this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_MODE_UNKNOWN]: 'The requested thinking mode is not documented for this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH]: 'The Claude stream reported a session other than the one Forge started. The result was not accepted.',
+    [CLAUDE_SIDECAR_REASON_CODES.SESSION_INVALID]: 'The Claude session reference is invalid. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.RESUME_ACCOUNT_MISMATCH]: 'The default Claude account differs from the account that started the session. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.RESUME_CONFIG_MISMATCH]: 'The Claude config dir or workspace differs from the one that started the session. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL]: 'The requested effort is not documented for this model. No worker was launched and the effort was not lowered.',
     ...CLAUDE_IDENTITY_MESSAGES,
   };
@@ -761,22 +775,56 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   });
 }
 
-function invalidLaunchOption() {
-  const refused = sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+function preSpawnRefusal(code) {
+  const refused = sidecarError(code);
   refused.provider_called = false;
   return refused;
 }
 
-// `session` is absent (legacy argv) or exactly `{ persist: true }` for a plan or
-// execute phase. `{ resume }` belongs to the resume mode and is refused here
-// until that mode exists; every other shape is refused as well.
-function sessionPersistRequested(session, phase) {
-  if (session === undefined || session === null) return false;
+function invalidLaunchOption() {
+  return preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+}
+
+// `session` is absent (legacy argv), exactly `{ persist: true }` or exactly
+// `{ resume: ref }`, both only for a plan or execute phase. A resume ref is
+// validated first (`claude-session-invalid`), then the phase; every other shape
+// is `claude-invalid-options`. All of them refuse before any temp file or spawn.
+function sessionMode(session, phase) {
+  if (session === undefined || session === null) return { mode: 'none', ref: null };
   if (typeof session !== 'object' || Array.isArray(session)) throw invalidLaunchOption();
   const keys = Object.keys(session);
-  if (keys.length !== 1 || keys[0] !== 'persist' || session.persist !== true) throw invalidLaunchOption();
+  if (keys.length !== 1) throw invalidLaunchOption();
+  if (keys[0] === 'resume') {
+    const ref = session.resume;
+    if (!claudeSession.validateSessionRef(ref).ok) {
+      throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.SESSION_INVALID);
+    }
+    try { claudeSession.assertSessionId(ref.id); }
+    catch { throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.SESSION_INVALID); }
+    if (!claudeSession.isEligible({ phase })) throw invalidLaunchOption();
+    return { mode: 'resume', ref };
+  }
+  if (keys[0] !== 'persist' || session.persist !== true) throw invalidLaunchOption();
   if (!claudeSession.isEligible({ phase })) throw invalidLaunchOption();
-  return true;
+  return { mode: 'persist', ref: null };
+}
+
+// One argv for every mode: start, persisted start and resume differ only in
+// `sessionTokens` and the `-p` instruction, so a resume keeps every other
+// position (model, effort, add-dir, schema, tools, permissions, settings).
+function buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction }) {
+  return [...prefixArgs, ...(model ? ['--model', model] : []),
+    ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
+    ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
+    ...(effort ? ['--effort', effort] : []),
+    ...sessionTokens, '--disable-slash-commands',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    '--setting-sources', '', '--settings', CLAUDE_INVOCATION_SETTINGS,
+    '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+    '--json-schema', JSON.stringify(resultContract.schema),
+    '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
+    ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
+    '-p', instruction];
 }
 
 // Runs the remover and reduces its report to {ok:true} or {ok:false, refused,
@@ -805,6 +853,7 @@ function sessionCleanupReport(remover, ref) {
  * @param {string} opts.prompt complete task prompt, transported only by file.
  *   Required and non-empty: a vacuous instruction still spawns the real CLI and
  *   spends subscription quota, so absence is a named failure (S03 review R5).
+ *   Not required (and ignored) in resume mode, whose instruction is fixed.
  * @param {string} opts.cwd workspace directory that owns the temporary file
  * @param {number} [opts.timeoutMs] parent deadline in milliseconds. This is the
  *   safety ceiling only (the child gets it minus TIMEOUT_GRACE_MS); reaching it
@@ -864,6 +913,23 @@ function sessionCleanupReport(remover, ref) {
  *   after a failure is `error.session_cleanup`. Without `session` the argv is the
  *   legacy one. Internal test seam, not public API: `sessionRemover` replaces
  *   removeSession (validated as a function).
+ * @param {{resume:object}} [opts.session] resume mode: `claude -p --resume <id>`
+ *   for a ref preserved by a `budget-exceeded-while-active` attempt. Before any
+ *   temp file or spawn, and always with `provider_called:false`: an invalid ref
+ *   (validateSessionRef/assertSessionId) is `claude-session-invalid`; an
+ *   ineligible phase is `claude-invalid-options`; a default account whose name
+ *   differs from `ref.account_name` is `claude-resume-account-mismatch`; a
+ *   child-env config dir or resolved cwd differing from the ref is
+ *   `claude-resume-config-mismatch`. None of these refusals (nor the later
+ *   model/thinking/effort/version refusals) removes the session: the recovery
+ *   stop owns that cleanup. The argv equals the start argv except for
+ *   `--resume <id>` in place of the persistence tokens (never `--session-id`,
+ *   `--no-session-persistence` or `--fork-session`) and the fixed
+ *   CLAUDE_RESUME_INSTRUCTION as `-p` (no prompt file; telemetry measures the
+ *   instruction). Once the attempt starts, the session is removed after every
+ *   outcome (at most one resume) and a failure never carries `error.session`;
+ *   a different system/init id is `claude-session-mismatch`. Success reports
+ *   `telemetry.session = {resumed:true, session_sha256, cleanup}`.
  * @returns {Promise<{candidate:object,metadata:object,telemetry:object}>} telemetry
  *   carries `model_observed` (the proven id) and `model_observed_source`
  *   (`claude-json-modelUsage`); `effort_applied` stays null.
@@ -887,15 +953,21 @@ async function invokeClaudeSidecar(opts) {
   const terminateChild = typeof options.terminateChild === 'function'
     ? options.terminateChild : defaultTerminate;
   const childTimeoutMs = deriveChildTimeoutMs(parentTimeoutMs(options));
+  const phase = options.calibrationPhase || (['memory','review','fix','plan'].includes(options.resultProfile) ? options.resultProfile : options.resultProfile === 'preparation' ? 'artifacts' : 'execute');
+  // S05 session mode (none | persist | resume). Validated before the version
+  // probe, temp file or spawn: an ineligible phase or unknown mode is refused,
+  // never downgraded; an invalid resume ref never reaches argv.
+  const { mode: sessionModeName, ref: resumeRef } = sessionMode(options.session, phase);
+  const persistSession = sessionModeName === 'persist';
   // A missing prompt used to become '' and still spawn the real CLI with a
   // vacuous instruction, spending subscription quota to produce an invalid
-  // result (S03 review R5). Refuse before any temp file or child exists.
-  if (typeof options.prompt !== 'string' || !options.prompt.trim()) {
+  // result (S03 review R5). Refuse before any temp file or child exists. A
+  // resume sends only the fixed CLAUDE_RESUME_INSTRUCTION.
+  if (!resumeRef && (typeof options.prompt !== 'string' || !options.prompt.trim())) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.MISSING_PROMPT);
   }
   const resultContract = workerContract.contract(options.resultProfile || 'execute', options.resultSchema || options.schema);
-  const prompt = options.prompt + '\n\n' + resultContract.instruction('claude-cli');
-  const phase = options.calibrationPhase || (['memory','review','fix','plan'].includes(options.resultProfile) ? options.resultProfile : options.resultProfile === 'preparation' ? 'artifacts' : 'execute');
+  const prompt = resumeRef ? null : options.prompt + '\n\n' + resultContract.instruction('claude-cli');
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
   const livenessIntervalMs = normalizeLivenessIntervalMs(options.livenessIntervalMs);
@@ -905,9 +977,6 @@ async function invokeClaudeSidecar(opts) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
   }
   const localProofFactory = options.localProofFactory || null;
-  // S05 opt-in persistence. Validated before the version probe, temp file or
-  // spawn: an ineligible phase or unknown mode is refused, never downgraded.
-  const persistSession = sessionPersistRequested(options.session, phase);
   if (options.sessionRemover !== undefined && options.sessionRemover !== null
     && typeof options.sessionRemover !== 'function') {
     throw invalidLaunchOption();
@@ -923,6 +992,17 @@ async function invokeClaudeSidecar(opts) {
       sessionRef = claudeSession.createSessionRef({ id: sessionId, accountName: account.name,
         configDir: claudeSession.configDir(env, process.platform), cwd });
     } catch { throw invalidLaunchOption(); }
+  } else if (resumeRef) {
+    // Same account (by name: the config dir does not change per account), same
+    // child-env config dir and same cwd as the session start, or no spawn.
+    if (account.name !== resumeRef.account_name) {
+      throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.RESUME_ACCOUNT_MISMATCH);
+    }
+    if (claudeSession.configDir(env, process.platform) !== resumeRef.config_dir || cwd !== resumeRef.cwd) {
+      throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.RESUME_CONFIG_MISMATCH);
+    }
+    sessionId = resumeRef.id;
+    sessionRef = resumeRef;
   }
   let sessionCleaned = false;
   const cleanupSession = () => {
@@ -990,33 +1070,28 @@ async function invokeClaudeSidecar(opts) {
   let primaryError = null;
 
   try {
-    tempDir = fs.mkdtempSync(path.join(cwd, TEMP_DIR_PREFIX));
-    const promptFile = path.join(tempDir, 'prompt.txt');
-    fs.writeFileSync(promptFile, prompt, { encoding: 'utf8', mode: 0o600 });
-
-    const instruction = 'Read the complete task prompt from this UTF-8 file: '
-      + `${JSON.stringify(promptFile)}. Follow it exactly and return the required structured_output JSON.`;
+    let instruction = CLAUDE_RESUME_INSTRUCTION;
+    let promptFile = null;
+    if (!resumeRef) {
+      tempDir = fs.mkdtempSync(path.join(cwd, TEMP_DIR_PREFIX));
+      promptFile = path.join(tempDir, 'prompt.txt');
+      fs.writeFileSync(promptFile, prompt, { encoding: 'utf8', mode: 0o600 });
+      instruction = 'Read the complete task prompt from this UTF-8 file: '
+        + `${JSON.stringify(promptFile)}. Follow it exactly and return the required structured_output JSON.`;
+    }
     if (Buffer.byteLength(instruction, 'utf8') > MAX_PROMPT_INSTRUCTION_BYTES) {
       throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
     }
 
     const { cmd, prefixArgs } = resolveClaudeCommand(sourceEnv);
-    const args = [...prefixArgs, ...(model ? ['--model', model] : []),
-      ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
-      ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
-      ...(effort ? ['--effort', effort] : []),
-      ...(persistSession ? ['--session-id', sessionId] : ['--no-session-persistence']), '--disable-slash-commands',
-      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-      '--setting-sources', '', '--settings', CLAUDE_INVOCATION_SETTINGS,
-      '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-      '--json-schema', JSON.stringify(resultContract.schema),
-      '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
-      ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
-      '-p', instruction];
+    const sessionTokens = resumeRef ? ['--resume', sessionId]
+      : persistSession ? ['--session-id', sessionId] : ['--no-session-persistence'];
+    const args = buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction });
     // Observe the actual CLI packaging, after instruction/argv construction.
     // Account credentials exist only in env and never enter this measurement.
+    // A resume has no prompt file: its packaged context is the fixed instruction.
     require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
-      fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
+      resumeRef ? instruction : fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
     const { observedModel, observedSessionId, ...output } = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
@@ -1026,12 +1101,12 @@ async function invokeClaudeSidecar(opts) {
       proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs,
     });
     // The stream only confirms the Forge-generated id; it never replaces it.
-    if (persistSession && observedSessionId !== sessionId) {
+    if (sessionRef && observedSessionId !== sessionId) {
       throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH);
     }
     const proposal = calibrationApi.propose({model,effort:effort || 'medium',phase},output.metadata.observation,options.calibrationOptions);
     // A failed removal is reported, never turned into a failure of a valid result.
-    const session = persistSession ? Object.freeze({ persisted: true,
+    const session = sessionRef ? Object.freeze({ [resumeRef ? 'resumed' : 'persisted']: true,
       session_sha256: claudeSession.sessionDigest(sessionId), cleanup: cleanupSession() }) : null;
     return { ...output, telemetry: Object.freeze({ ...telemetryBase,
       model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE, observation: output.metadata.observation,
@@ -1049,8 +1124,10 @@ async function invokeClaudeSidecar(opts) {
       ? error : sidecarError(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
     if (sessionRef) {
       // Only an active stream that hit the safety ceiling under the confirmed
-      // id keeps its session, for the single same-session resume (S05).
-      if (primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED && observedSessionId === sessionId) {
+      // id keeps its session, for the single same-session resume (S05). A
+      // resume never keeps it: at most one resume per unit.
+      if (!resumeRef && primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED
+        && observedSessionId === sessionId) {
         sessionCleaned = true;
         primaryError.session = sessionRef;
       } else {
@@ -1078,6 +1155,7 @@ module.exports = {
   CLAUDE_SIDECAR_ENV_ALLOWLIST,
   MAX_CAPTURE_BYTES_PER_STREAM,
   MAX_PROMPT_INSTRUCTION_BYTES,
+  CLAUDE_RESUME_INSTRUCTION,
   TIMEOUT_GRACE_MS,
   TEMP_DIR_PREFIX,
   buildClaudeSidecarEnv,

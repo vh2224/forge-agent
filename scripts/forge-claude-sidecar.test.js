@@ -1665,13 +1665,24 @@ const delta = () => out({ type: 'stream_event', event: { type: 'content_block_de
   delta: { type: 'text_delta', text: 'x' } } });
 const args = process.argv.slice(2);
 const at = args.indexOf('--session-id');
-const sid = at >= 0 ? args[at + 1] : null;
+const resumeAt = args.indexOf('--resume');
+const sid = at >= 0 ? args[at + 1] : resumeAt >= 0 ? args[resumeAt + 1] : null;
 if (sid) {
   const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;
   const { projectKey } = require(${JSON.stringify(require.resolve('./forge-claude-session'))});
   const dir = path.join(home, '.claude', 'projects', projectKey(process.cwd()));
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, sid + '.jsonl'), '{"type":"fixture"}\\n');
+  const file = path.join(dir, sid + '.jsonl');
+  if (resumeAt >= 0) {
+    // Like the real CLI: --resume needs the transcript in the measured layout.
+    if (!fs.existsSync(file)) {
+      process.stderr.write('No conversation found with session ID: ' + sid + '\\n');
+      process.exit(1);
+    }
+    fs.appendFileSync(file, '{"type":"fixture-resume"}\\n');
+  } else {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, '{"type":"fixture"}\\n');
+  }
 }
 out({ type: 'system', subtype: 'init', session_id: ${JSON.stringify(mode)} === 'wrong' ? ${JSON.stringify(OTHER_SESSION_ID)} : sid });
 out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-session', role: 'assistant' } } });
@@ -1706,11 +1717,11 @@ function sessionFile(home, id) {
 }
 function argvSessionId(args) {
   const at = args.indexOf('--session-id');
-  return at >= 0 ? args[at + 1] : null;
+  const resumeAt = args.indexOf('--resume');
+  return at >= 0 ? args[at + 1] : resumeAt >= 0 ? args[resumeAt + 1] : null;
 }
 
-async function runSession(fixture, options = {}, clock = null) {
-  const home = sessionHome();
+async function runSession(fixture, options = {}, clock = null, home = sessionHome()) {
   const records = [];
   const children = [];
   let terminations = 0, result = null, error = null;
@@ -1780,7 +1791,7 @@ test('session: persist outside plan/execute or with an unknown shape is refused 
     { session: { persist: true }, resultProfile: 'artifacts', calibrationPhase: 'research' },
     { session: { persist: false } },
     { session: { persist: true, extra: 1 } },
-    { session: { resume: { id: OTHER_SESSION_ID } } },
+    { session: { resume: null, persist: true } },
     { session: 'persist' },
     { session: { persist: true }, sessionRemover: 'not-a-function' },
   ];
@@ -1892,6 +1903,175 @@ test('session: a failed removal never masks a valid result or the primary failur
       errors: [{ path: '.', code: 'EBUSY' }] });
     assert.strictEqual(thrown.error.session, undefined);
   } finally { fs.rmSync(path.join(thrown.home, '.claude'), { recursive: true, force: true }); }
+});
+
+// ---- S05/T03: resume of the preserved session ----
+const RESUME_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+function resumeRef(home, overrides = {}) {
+  return SESSION_MODULE.createSessionRef({ id: RESUME_ID, accountName: FIXTURE_ACCOUNT.name,
+    configDir: path.join(home, '.claude'), cwd: WORKSPACE, ...overrides });
+}
+function seedTranscript(home, id = RESUME_ID) {
+  const file = sessionFile(home, id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{"type":"fixture"}\n');
+  return file;
+}
+function countingRemover(calls) {
+  return (ref) => { calls.push(ref); return SESSION_MODULE.removeSession(ref); };
+}
+function withoutSession(args) {
+  const out = args.slice(0, -1); // drop the -p value
+  for (const flag of ['--session-id', '--resume']) {
+    const at = out.indexOf(flag);
+    if (at >= 0) out.splice(at, 2);
+  }
+  return out;
+}
+
+test('resume: CLAUDE_RESUME_INSTRUCTION is exported, English, warns about the baseline and fits the byte limit', () => {
+  const adapter = loadAdapter();
+  const text = adapter.CLAUDE_RESUME_INSTRUCTION;
+  assert.strictEqual(typeof text, 'string');
+  ok(Buffer.byteLength(text, 'utf8') <= adapter.MAX_PROMPT_INSTRUCTION_BYTES, 'fits the instruction limit');
+  ok(/baseline/i.test(text), 'mentions the baseline');
+  ok(/re-?read/i.test(text), 'asks to re-read files');
+  ok(text.includes('structured_output'), 'asks for the structured output');
+  ok(/safety ceiling/i.test(text) && /reverted/i.test(text) && /same task/i.test(text));
+  ok(/^[\x20-\x7e]+$/.test(text), 'plain ASCII English text');
+  const codes = adapter.CLAUDE_SIDECAR_REASON_CODES;
+  assert.strictEqual(codes.RESUME_ACCOUNT_MISMATCH, 'claude-resume-account-mismatch');
+  assert.strictEqual(codes.RESUME_CONFIG_MISMATCH, 'claude-resume-config-mismatch');
+  assert.strictEqual(codes.SESSION_INVALID, 'claude-session-invalid');
+  ok(Object.isFrozen(codes));
+});
+
+test('resume: argv equals the start argv except --resume <id> and the fixed -p instruction', async () => {
+  const start = await runSession(SESSION_OK_FIXTURE, { session: { persist: true } });
+  assert.strictEqual(start.error, null, start.error && start.error.code);
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const contexts = [];
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { resume: resumeRef(home) }, prompt: undefined,
+    onPackagedContext(context) { contexts.push(context); } }, null, home);
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const args = run.records[0].args;
+  const at = args.indexOf('--resume');
+  ok(at >= 0, '--resume present');
+  assert.strictEqual(args[at + 1], RESUME_ID);
+  for (const flag of ['--session-id', '--no-session-persistence', '--fork-session']) {
+    ok(!args.includes(flag), `${flag} absent on resume`);
+  }
+  assert.strictEqual(args[args.length - 2], '-p');
+  assert.strictEqual(args[args.length - 1], require('./forge-claude-sidecar').CLAUDE_RESUME_INSTRUCTION);
+  assert.deepStrictEqual(withoutSession(args), withoutSession(start.records[0].args),
+    'model/effort/add-dir/schema/tools/permissions/settings/output keep their positions');
+  assert.strictEqual(contexts.length, 1);
+  assert.strictEqual(contexts[0].input_tokens,
+    Math.ceil(require('./forge-claude-sidecar').CLAUDE_RESUME_INSTRUCTION.length / 4), 'telemetry measures the instruction');
+  assert.strictEqual(fs.existsSync(file), false, 'session removed after the resume');
+});
+
+test('resume: invalid ref, other account, other config dir, other cwd and ineligible phase refuse before any spawn', async () => {
+  const home = sessionHome();
+  const otherHome = sessionHome();
+  const valid = resumeRef(home);
+  const cases = [
+    { code: 'claude-session-invalid', session: { resume: { ...valid, id: '--x' } } },
+    { code: 'claude-session-invalid', session: { resume: { ...valid, id: RESUME_ID.toUpperCase() } } },
+    { code: 'claude-session-invalid', session: { resume: { ...valid, extra: 1 } } },
+    { code: 'claude-session-invalid', session: { resume: { id: RESUME_ID } } },
+    { code: 'claude-session-invalid', session: { resume: 'not-a-ref' } },
+    { code: 'claude-resume-account-mismatch', session: { resume: valid },
+      resolver: () => ({ name: 'other', token: 't' }) },
+    { code: 'claude-resume-config-mismatch', session: { resume: valid }, home: otherHome },
+    { code: 'claude-resume-config-mismatch', session: { resume: resumeRef(home, { cwd: path.join(ROOT, 'other-cwd') }) } },
+    { code: 'claude-invalid-options', session: { resume: valid }, resultProfile: 'review' },
+    { code: 'claude-invalid-options', session: { resume: valid }, resultProfile: 'memory' },
+  ];
+  for (const { code, resolver, home: childHome = home, ...extra } of cases) {
+    const file = seedTranscript(home);
+    const records = [];
+    const removals = [];
+    const adapter = loadAdapter({ resolver, spawnImpl: recordingSpawn(records) });
+    const error = await expectCode(adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, model: FIXTURE_MODEL, timeoutMs: 15000, sessionRemover: countingRemover(removals),
+      sourceEnv: { ...sourceEnvFor(SESSION_OK_FIXTURE), HOME: childHome, USERPROFILE: childHome }, ...extra,
+    }), code);
+    const label = `${code} ${JSON.stringify(extra).slice(0, 120)}`;
+    assert.strictEqual(error.provider_called, false, label);
+    assert.strictEqual(records.length, 0, `no spawn for ${label}`);
+    assert.strictEqual(removals.length, 0, `refusal never removes the session for ${label}`);
+    assert.strictEqual(fs.existsSync(file), true, `transcript kept for ${label}`);
+    assert.strictEqual(error.session, undefined);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+    ok(!error.message.includes(RESUME_ID), 'message carries no id');
+  }
+  SESSION_MODULE.removeSession(valid);
+});
+
+test('resume: success removes the session and reports resumed telemetry with the digest only', async () => {
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const removals = [];
+  let linesBeforeCleanup = null;
+  const ref = resumeRef(home);
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { resume: ref },
+    sessionRemover(seen) {
+      linesBeforeCleanup = fs.readFileSync(file, 'utf8').trim().split('\n').length;
+      return countingRemover(removals)(seen);
+    } }, null, home);
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  assert.strictEqual(linesBeforeCleanup, 2, 'the fake CLI appended to the existing transcript');
+  assert.strictEqual(removals.length, 1);
+  assert.strictEqual(removals[0], ref);
+  assert.strictEqual(fs.existsSync(file), false);
+  assert.deepStrictEqual(run.result.telemetry.session, { resumed: true,
+    session_sha256: SESSION_MODULE.sessionDigest(RESUME_ID), cleanup: { ok: true } });
+  ok(Object.isFrozen(run.result.telemetry.session));
+  ok(!JSON.stringify(run.result.telemetry).includes(RESUME_ID), 'raw id never reaches telemetry');
+});
+
+test('resume: a new active ceiling is budget-exceeded-while-active without error.session and removes the session', async () => {
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const removals = [];
+  const run = await runSession(SESSION_ENDLESS_FIXTURE, { session: { resume: resumeRef(home) }, timeoutMs: 60000,
+    sessionRemover: countingRemover(removals) }, acceleratedClock(300, { fromFirstRemote: true }), home);
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.session, undefined, 'at most one resume: no ref to resume again');
+  assert.strictEqual(run.error.session_cleanup, undefined);
+  assert.strictEqual(run.error.observedSessionId, undefined);
+  assert.strictEqual(removals.length, 1);
+  assert.strictEqual(fs.existsSync(file), false);
+});
+
+test('resume: a different id in system/init is claude-session-mismatch and the session is removed', async () => {
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const run = await runSession(SESSION_WRONG_FIXTURE, { session: { resume: resumeRef(home) } }, null, home);
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-session-mismatch');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(fs.existsSync(file), false);
+});
+
+test('resume: a transcript missing on disk fails in the CLI and removes nothing outside the targets', async () => {
+  const home = sessionHome();
+  const sibling = seedTranscript(home, OTHER_SESSION_ID);
+  const siblingEnv = path.join(home, '.claude', 'session-env', OTHER_SESSION_ID);
+  fs.mkdirSync(siblingEnv, { recursive: true });
+  const removals = [];
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { resume: resumeRef(home) },
+    sessionRemover: countingRemover(removals) }, null, home);
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-exit-nonzero');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(run.error.session_cleanup, undefined, 'removing absent targets is not a cleanup failure');
+  assert.strictEqual(removals.length, 1, 'removal still runs after the failed resume');
+  assert.strictEqual(fs.existsSync(sibling), true, 'another session transcript untouched');
+  assert.strictEqual(fs.existsSync(siblingEnv), true, 'another session-env untouched');
 });
 
 async function main() {
