@@ -165,7 +165,8 @@ try {
     const match = /^node (.+ --phase recovery --cwd .+?) \|\|/m.exec(dispatch);
     assert(match); const loaded = json(argv(match[1], values));
     assert(loaded.content.includes('<!-- forge-procedure:recovery -->'));
-    assert(loaded.content.includes('receipt')); assert(loaded.content.includes('60000'));
+    assert(loaded.content.includes('receipt')); assert(loaded.content.includes('tier safety ceiling'));
+    assert(loaded.content.includes('ceilingFromRoute') && !loaded.content.includes('60000ms'), 'recovery uses the tier ceiling, no cumulative clock');
     for (const term of ['resolver-context-omission', 'saved-candidate-unreplayable', 'heavy/high', 'max/max',
       'independently retained', 'Removed/corrupt', 'every possible writer root', 'Restart must reattest']) assert(loaded.content.includes(term), term);
   });

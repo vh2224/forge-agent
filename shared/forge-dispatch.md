@@ -3091,9 +3091,12 @@ Inspect process and receipt before another attempt. Valid saved response uses ca
 single publication/replay. Timeout has undetermined cause; standing authority permits
 a valid untried candidate without another confirmation. Known caller defects require
 offline validated repair and at most one corrected retry at that destination.
-The cumulative historical budget for additional sidecars is 60000ms with durable
-reservations. A scoped native exception after expiry permits native, never another
-sidecar or renewed 300s wait. Timeout alone does not prove model unavailability.
+Each additional recovery sidecar receives the full tier safety ceiling from
+ceilingFromRoute (scripts/forge-worker-timeout.js), never an inherited remainder.
+Recovery state v2 has no cumulative clock; a v1 state is migrated explicitly.
+Termination comes from the finite candidate list, destination exclusions, durable
+reservations, one silence retry and canonical exception expiry; a native candidate
+still needs a live scoped exception. Timeout alone does not prove model unavailability.
 Keep preferences/gates; never execute inline to bypass refusal.
 
 Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/

@@ -536,9 +536,10 @@ try {
   for (const kind of ['instructions', 'agent', 'command', 'skill', 'dispatch']) {
     for (const item of realCodex.artifacts.filter(row => row.kind === kind)) {
       for (const rule of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization',
-        'readStandingAuthorization(reference)', '60000ms', 'Standing permission never answers a functional question']) {
+        'readStandingAuthorization(reference)', 'tier safety ceiling', 'Standing permission never answers a functional question']) {
         assert(item.content.includes(rule), `${item.source}: missing recovery rule ${rule}`);
       }
+      assert(!item.content.includes('60000ms'), `${item.source}: stale cumulative 60000ms clock`);
     }
   }
   const repeat = renderer.render({ repo: root, ...PRODUCTION_DISPATCH_DIALECT,

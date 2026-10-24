@@ -450,7 +450,7 @@ async function main() {
     const loader = require('./forge-procedure-context');
     const loaded = loader.loadProcedureContext({ cwd: root, forgeHome: env.FORGE_HOME, phase: 'recovery' });
     assert.equal(loaded.root, fs.realpathSync(env.FORGE_HOME));
-    assert(loaded.content.includes('60000ms'));
+    assert(loaded.content.includes('tier safety ceiling') && !loaded.content.includes('60000ms'));
     const roots = require('./forge-code-roots.test');
     for (const file of ['shared/forge-dispatch.md', 'shared/forge-bidirectional-sidecar.md',
       'skills/forge-task/SKILL.md', 'skills/forge-auto/SKILL.md', 'skills/forge-next/SKILL.md']) {
@@ -462,7 +462,8 @@ async function main() {
       }
       for (const token of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization',
         'createRecoveryAuthority', 'recoverStandaloneTask', 'recoverUnitSidecar', 'captureMilestoneBaseline',
-        'reconcileMilestoneAttempt', '60000ms', 'shared/forge-interaction.md']) assert(contract.includes(token), `${file}: ${token}`);
+        'reconcileMilestoneAttempt', 'tier safety ceiling', 'ceilingFromRoute', 'shared/forge-interaction.md']) assert(contract.includes(token), `${file}: ${token}`);
+      for (const stale of ['60000ms', 'renewed 300s']) assert(!contract.includes(stale), `${file}: stale ${stale}`);
     }
     console.log('PASS canonical caller contracts share authority, phase adapter, caller baseline and historical budget references');
     const cwd = path.join(root, 'code'), owner = path.join(root, 'owner'); fs.mkdirSync(cwd);

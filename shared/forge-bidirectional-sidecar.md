@@ -345,10 +345,10 @@ reconciles every possible writer root. A live canonical recovery capability may
 reserve at most one unchanged same-destination silence retry. Reservation is
 persisted with compare-and-swap under a short lock before invocation; pending
 reservation blocks every other writer across restart. Callbacks run outside the
-lock and the adapter rereads state before reserving. Retry time is bounded by
-30 seconds and the historical cumulative 60-second recovery budget, including
-inspection; at most 5 seconds remaining refuses another sidecar. Persisted clock
-high-water and remaining budget prevent restart or clock regression renewal.
+lock and the adapter rereads state before reserving. The single retry receives
+the tier safety ceiling from ceilingFromRoute, like any recovery sidecar; there is
+no cumulative recovery clock and no remainder. The durable reservation, not a
+deadline, prevents a second silence retry across restart or clock regression.
 After that one retry, ordinary authorized untried routing applies. No provider
 probe, preference rewrite or second learning call is introduced.
 
@@ -471,9 +471,12 @@ Inspect process and receipt before another attempt. Valid saved response uses ca
 single publication/replay. Timeout has undetermined cause; standing authority permits
 a valid untried candidate without another confirmation. Known caller defects require
 offline validated repair and at most one corrected retry at that destination.
-The cumulative historical budget for additional sidecars is 60000ms with durable
-reservations. A scoped native exception after expiry permits native, never another
-sidecar or renewed 300s wait. Timeout alone does not prove model unavailability.
+Each additional recovery sidecar receives the full tier safety ceiling from
+ceilingFromRoute (scripts/forge-worker-timeout.js), never an inherited remainder.
+Recovery state v2 has no cumulative clock; a v1 state is migrated explicitly.
+Termination comes from the finite candidate list, destination exclusions, durable
+reservations, one silence retry and canonical exception expiry; a native candidate
+still needs a live scoped exception. Timeout alone does not prove model unavailability.
 Keep preferences/gates; never execute inline to bypass refusal.
 
 Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
@@ -532,8 +535,8 @@ hashes bind observations but cannot authenticate an untrusted host. Trust must
 be reattested after restart. Saved candidates still use canonical replay;
 pending functional questions still block. The single corrected reservation is
 bound to the original receipt/request/failure across destinations. Standing
-authorization may select a compatible untried native candidate after the old
-60000ms deadline, preserving model/tier/effort and the original clock.
+authorization may select a compatible untried candidate (native or a sidecar
+with the tier safety ceiling), preserving model/tier/effort and started_at.
 
 Before *each* protected phase, pause the parent's ordinary lease heartbeat,
 then call `forge-unit-lease.openProtectedWindow(owner, unit, heldToken,
@@ -628,8 +631,8 @@ Rechecar todos os vínculos sob lock antes de persistir/reservar/invocar; preser
 legítimos do host, bloquear desconhecidos/estrangeiros/concorrentes. Handoff nativo externo
 retorna primeiro `reattest-native-handoff`; a retomada usa `resumeReservation.sha256`
 e reatesta o mesmo registro antes de expor argumentos e `assertReady` para o ponto de chamada.
-Nunca renovar o prazo histórico de 60000ms. Depois dele, somente exceção nativa viva,
-destino ainda não tentado e modelo/tier/esforço/ferramenta realmente suportados permitem execução.
+Não há relógio cumulativo: cada sidecar de recuperação recebe o tier safety ceiling (ceilingFromRoute).
+Só destino ainda não tentado, autoridade viva e modelo/tier/esforço/ferramenta realmente suportados permitem execução.
 História insuficiente conserva a recusa; implementar este mecanismo não desbloqueia receipts históricos.
 
 
