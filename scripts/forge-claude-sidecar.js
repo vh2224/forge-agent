@@ -713,6 +713,9 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         ? sidecarError(CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED, 'budget-exceeded-while-active')
         : sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
       error.liveness = { version: 1, termination: kind, state, reason };
+      if (livenessView.state !== state) {
+        livenessView = { version: 1, state, since_ms: livenessView.since_ms, reason: reason ?? null };
+      }
       // The final snapshot keeps the active state; a ceiling is not death.
       if (liveness.TERMINATIONS.includes(kind)) livenessTermination = kind;
       return error;
@@ -725,8 +728,10 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     proofTimer = setInterval(sampleProof, localProofIntervalMs);
     proofTimer.unref?.();
     sampleProof();
-    watchdog = setInterval(() => {
-      if (settled) return;
+    // Evaluates current evidence, notifies onLiveness and republishes the view.
+    // Shared by the watchdog tick and the terminal paths so the final snapshot
+    // never lags behind the last remote event.
+    function refreshLiveness() {
       // Synchronous: reads the cached proof and the progress state, no I/O.
       const inputs = livenessInputs();
       const { result, transition } = tracker.evaluate(reducer.snapshot(), inputs);
@@ -741,8 +746,14 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       if (transition && !(transition.from === null && transition.to === 'starting')) {
         livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
           reason: transition.reason ?? null };
-        emit();
+        return { result, transition, published: true };
       }
+      return { result, transition, published: false };
+    }
+    watchdog = setInterval(() => {
+      if (settled) return;
+      const { result, transition, published } = refreshLiveness();
+      if (published) emit();
       if (!result.kill) return;
       if (result.cause === 'liveness') {
         // Every tool kill carries threshold_ms = deadMs, so observation() accepts it.
@@ -777,6 +788,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       resolveExit(true);
       if (settled) return;
       transportEnd = reducer.snapshot().elapsed_ms;
+      try { refreshLiveness(); } catch { /* the view stays at its last published state */ }
       let terminal;
       try { terminal = reducer.end(); }
       catch (error) {

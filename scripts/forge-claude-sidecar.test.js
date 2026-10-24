@@ -1245,6 +1245,19 @@ test('liveness: an active stream survives past 300000 injected ms under a 360000
   ok(!run.transitions.some(t => t.to === 'dead'), 'an active stream never reached dead');
 });
 
+test('liveness: completion before the first watchdog tick publishes the current state, not starting', async () => {
+  const fixture = activeStreamFixture('claude fast finish fixture.js', 60);
+  const clock = { now: () => performance.now(), accelerate() {} };
+  const snapshots = [];
+  const run = await runLive(fixture, clock, { livenessIntervalMs: 1000, onSnapshot: snap => snapshots.push(snap) });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  const finalObservation = run.result.metadata.observation;
+  ok(finalObservation.remote_event_count >= 1, 'remote events were observed');
+  assert.notStrictEqual(finalObservation.liveness.state, 'starting');
+  assert.strictEqual(finalObservation.liveness.state, 'working');
+  assert.notStrictEqual(snapshots[snapshots.length - 1].liveness.state, 'starting');
+});
+
 test('liveness: no remote event dies once as dead-start at the locked 60000 default', async () => {
   const run = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300));
   ok(run.error, 'expected rejection');
