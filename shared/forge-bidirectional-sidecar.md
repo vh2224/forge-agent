@@ -329,6 +329,53 @@ aguardados antes do evento terminal da unidade. Falha no append é best-effort e
 não altera o status da unidade. Os review legs Claude recebem o mesmo
 `onLiveness`, mas ainda não têm evento de owner.
 
+#### Liveness heartbeat on the progress channel
+
+O host (codex ou claude) lê o estado de liveness do worker Claude pelo canal de
+progresso existente: o callback `onProgress` em processo e a linha
+`[forge-sidecar-progress] {json}` no stderr do CLI. O dado vem no bloco aditivo
+`liveness` de `observation()` (`forge-sidecar-diagnostic.js`):
+
+`"liveness": {"version": 1, "state": "slow-suspect", "since_ms": 120025, "reason": "silence"}`
+
+- `version`: fixo em `1`. Outra versão faz o consumidor ignorar o bloco.
+- `state`: vocabulário fechado `starting | working | slow-suspect | dead`
+  (`liveness.STATES`). Valor fora do conjunto omite o bloco inteiro.
+- `since_ms`: `elapsed_ms` da transição que levou ao estado atual
+  (`transition.at_ms`); vale `0` na partida.
+- `reason`: `null` ou um item de `liveness.REASONS` (`silence`, `local-proof`,
+  `tool-extended`, `tool-unproven`, `tool-proof-negative`, `proof-unavailable`,
+  `tool-extension-exhausted`, `tool-proof-unavailable-expired`, `no-progress`).
+  Razão desconhecida vira `null`, nunca texto livre.
+- `termination`: opcional e **só no snapshot final** de uma tentativa encerrada
+  pelo watchdog (`dead-start`, `dead-silence`, `budget-exceeded-while-active`).
+  Kill por liveness termina em `state: "dead"`. Kill pelo teto com stream vivo
+  mantém o estado (`working`/`slow-suspect`) e usa
+  `budget-exceeded-while-active`: teto ativo não é morte.
+
+O bloco não carrega impressão digital, argumentos de tool, prompt, caminho nem ID
+de sessão; o `fingerprint_sha256` continua exclusivo do evento
+`sidecar-no-progress`.
+
+Cadência: emissão periódica a cada 30000 ms (`DEFAULT_PROGRESS_INTERVAL_MS`, seam
+interno `progressIntervalMs`, recusado antes do spawn quando inválido) e emissão
+imediata em cada transição do tracker, depois de `onLiveness`. A transição
+`null -> starting` não gera emissão extra. O `heartbeat_interval_ms` de 15000 do
+result-file (orphan detection) permanece inalterado e é outro canal.
+
+Leitura pelo host: `readProgressLine(line)` aceita uma linha
+`[forge-sidecar-progress] {json}` e devolve `observation(parsed)`, ou `null` para
+linha sem prefixo ou JSON inválido; nunca lança. O owner normaliza o snapshot com
+`observation()` e o propaga a `receipt.telemetry.observation`, a
+`runtime.onProgress` e ao stderr. A ausência do bloco significa payload antigo:
+os consumidores estritos aceitam os dois formatos e a saída sem bloco é
+byte-idêntica à anterior.
+
+Limitação conhecida: os review legs (`challenge/defend/rebuttal` com engine
+claude) publicam o bloco no stderr, mas o evento durável `sidecar-no-progress`
+nesse caminho não é gravado, porque o CLI de review não tem canal de owner. É um
+achado para a triagem final da S09.
+
 #### Personal calibration and anomalous silence
 
 `forge-sidecar-calibration.js` resolves the user home independently of account
