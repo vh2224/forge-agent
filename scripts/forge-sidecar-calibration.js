@@ -179,7 +179,10 @@ const { observation, progressLine } = require('./forge-sidecar-diagnostic');
 async function commitAccepted(proposal, binding, options) {
   let outcome;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    outcome = module.exports.commit(proposal, binding, options);
+    // Version 2 proposals use their own store; v1 receipts keep the v1 path.
+    outcome = proposal?.version === 2
+      ? require('./forge-sidecar-calibration-v2').commit(proposal, binding, options)
+      : module.exports.commit(proposal, binding, options);
     const safe = { committed: outcome.committed === true, attempts: attempt,
       diagnostic: ['calibration-busy', 'calibration-unavailable', 'calibration-binding-invalid'].includes(outcome.diagnostic)
         ? outcome.diagnostic : null, retry_pending: outcome.committed !== true };
@@ -188,4 +191,5 @@ async function commitAccepted(proposal, binding, options) {
   }
 }
 
-module.exports = { POLICY, identity, directory, read, propose, commit, commitAccepted, observation, progressLine, silence };
+module.exports = { POLICY, identity, directory, read, propose, commit, commitAccepted, observation, progressLine, silence,
+  safePath, hash, exactKeys, sample };

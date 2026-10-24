@@ -4,6 +4,8 @@ const POLICY = 'forge-liveness-v1';
 const SOURCE_DEFAULT = 'locked-default';
 const SOURCE_CALIBRATED = 'persisted-calibration';
 const DEFAULTS = Object.freeze({ startMs: 60000, suspectMs: 120000, deadMs: 240000, toolExtensionMs: 420000 });
+// Lower bounds the claude-silence-v2 calibration may reach; defaults stay the upper bounds.
+const CALIBRATION_FLOORS = Object.freeze({ startMs: 30000, deadMs: 120000 });
 const LOOP_REPEATS = 5;
 const PROOF_CAPABILITIES = Object.freeze(['available', 'unavailable']);
 const PROOF_VALUES = Object.freeze(['positive', 'negative', 'none']);
@@ -202,6 +204,6 @@ function createTracker(policy = DEFAULTS, ceilingMs = null) {
   };
 }
 
-module.exports = { POLICY, SOURCE_DEFAULT, SOURCE_CALIBRATED, DEFAULTS, TIER_CEILING_MS,
+module.exports = { POLICY, SOURCE_DEFAULT, SOURCE_CALIBRATED, DEFAULTS, CALIBRATION_FLOORS, TIER_CEILING_MS,
   STATES, TERMINATIONS, REASONS, LOOP_REPEATS, PROOF_CAPABILITIES, PROOF_VALUES, ceilingForTier,
   normalizePolicy, normalizeLocalProof, createProgressTracker, evaluate, classifyTermination, createTracker };
