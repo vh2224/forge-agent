@@ -10,6 +10,9 @@
 
 const { spawn, spawnSync } = require('child_process');
 const { StringDecoder } = require('string_decoder');
+const liveness = require('./forge-sidecar-liveness');
+const { createNotificationReducer } = require('./forge-appserver-liveness');
+const { diagnostic } = require('./forge-sidecar-diagnostic');
 
 const STDERR_TAIL_BYTES = 4096;
 const DISCARDED_SAMPLE_LIMIT = 5;
@@ -61,6 +64,21 @@ const INTERRUPT_OUTCOMES = Object.freeze({
   UNSENT: 'unsent',
   SKIPPED_NO_TURN_ID: 'skipped:no-turn-id',
 });
+
+// Liveness (S07): the neutral tracker of forge-sidecar-liveness is the PRIMARY kill
+// authority of a turn (start 60s, silence 120/240s); `timeoutMs` is only the ceiling.
+// String codes exist only on these two errors, which never carry `rpcError`, so they
+// cannot be confused with the numeric JSON-RPC `code` of the RPC error path. Neither
+// message may contain `terminated`/`timeout`/`network`: forge-classify-error reads
+// those as transient and would retry a dead turn in place. A ceiling reached while
+// still `starting` keeps the load-bearing `timeout after Ns` with no code at all.
+const APPSERVER_LIVENESS_CODES = Object.freeze({
+  SILENCE: 'appserver-anomalous-silence',
+  BUDGET_EXCEEDED: 'budget-exceeded-while-active',
+});
+// Watchdog cadence. Overridable via `livenessIntervalMs` (test seam, like
+// interruptGraceMs); production never passes it.
+const LIVENESS_INTERVAL_MS = 1000;
 
 // Pitfall 7: the app-server wire dialect is JSONL but does not use a jsonrpc
 // member. Removing it here is intentional, rather than relying on callers to
@@ -172,6 +190,10 @@ function startAppServerTurn(options) {
     retentionLimits,
     onEvent,
     onSpawn,
+    clock,
+    livenessIntervalMs,
+    livenessPolicy,
+    onLiveness,
   } = opts;
   if (!cmd || typeof cmd !== 'string') {
     return Promise.reject(sessionError('cmd is required'));
@@ -205,11 +227,42 @@ function startAppServerTurn(options) {
       limits[key] = value;
     }
   }
+  // Liveness seams, validated like interruptGraceMs: only WHEN SUPPLIED, before any
+  // spawn. `livenessPolicy` can only tighten the locked defaults (normalizePolicy
+  // ignores anything above them); a malformed one is a caller error, not a no-op.
+  if (clock !== undefined && typeof clock !== 'function') {
+    return Promise.reject(sessionError('clock must be a function'));
+  }
+  if (livenessIntervalMs !== undefined && (!Number.isFinite(livenessIntervalMs) || livenessIntervalMs <= 0)) {
+    return Promise.reject(sessionError('livenessIntervalMs must be a positive number'));
+  }
+  if (onLiveness !== undefined && typeof onLiveness !== 'function') {
+    return Promise.reject(sessionError('onLiveness must be a function'));
+  }
+  if (livenessPolicy !== undefined) {
+    if (!livenessPolicy || typeof livenessPolicy !== 'object' || Array.isArray(livenessPolicy)) {
+      return Promise.reject(sessionError('livenessPolicy must be an object'));
+    }
+    for (const [key, value] of Object.entries(livenessPolicy)) {
+      if (!Object.prototype.hasOwnProperty.call(liveness.DEFAULTS, key)) {
+        return Promise.reject(sessionError(`unknown livenessPolicy key: ${key}`));
+      }
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        return Promise.reject(sessionError(`livenessPolicy.${key} must be a positive integer`));
+      }
+    }
+  }
+  const policy = liveness.normalizePolicy(livenessPolicy);
+  const watchdogMs = livenessIntervalMs === undefined ? LIVENESS_INTERVAL_MS : livenessIntervalMs;
+  // The tracker only enforces an integer ceiling; rounding up never kills earlier
+  // than the backstop setTimeout below.
+  const ceilingMs = Math.ceil(timeoutMs);
 
   return new Promise((resolve, reject) => {
     let child;
     let settled = false;
     let timer = null;
+    let watchdog = null;
     let stdoutBuffer = '';
     let stderrTail = '';
     let nextId = 1;
@@ -311,12 +364,25 @@ function startAppServerTurn(options) {
       };
     };
 
+    // Liveness state. The reducer is created here, at spawn, so `elapsed_ms` counts
+    // from the spawn exactly like the backstop timer does. The clock is floored to
+    // integer ms: observation() only accepts safe integers, and a fractional
+    // performance.now() would null every counter and drop the `silence` block.
+    const baseClock = typeof clock === 'function' ? clock : () => performance.now();
+    const reducer = createNotificationReducer({ clock: () => Math.floor(baseClock()) });
+    const tracker = liveness.createTracker(policy, ceilingMs);
+    // Last published state (same shape as the S06 `liveness` block).
+    let livenessView = { version: 1, state: 'starting', since_ms: 0, reason: null };
+    const observe = (extra) => ({ ...reducer.snapshot(), ...extra });
+
     const cleanup = () => {
       if (opts.signal) opts.signal.removeEventListener('abort', cancel);
       process.removeListener('SIGINT', cancel);
       process.removeListener('SIGTERM', cancel);
       if (timer) clearTimeout(timer);
       timer = null;
+      if (watchdog) clearInterval(watchdog);
+      watchdog = null;
       if (child && child.stdin) {
         try { child.stdin.end(); } catch { /* stream closed concurrently */ }
       }
@@ -395,6 +461,8 @@ function startAppServerTurn(options) {
         return;
       }
       if (message.method) {
+        // Liveness first: the reducer decides what is remote; it never throws.
+        reducer.push(message);
         keep(notifications, message, 'notifications');
         if (message.method === 'item/completed') keep(items, message.params == null ? message : message.params, 'items');
         // First non-empty source wins, and which one won is recorded rather than
@@ -499,16 +567,22 @@ function startAppServerTurn(options) {
         fail(`app-server exited ${signal ? `by signal ${signal}` : `with code ${code}`}`, null, false);
       }
     });
-    timer = setTimeout(() => {
+    const secondsOf = ms => Number((ms / 1000).toFixed(3));
+    /**
+     * The ONE kill path of a turn: backstop timer, liveness kill and the tracker's
+     * ceiling all go through here. `buildError()` returns {message, details} and is
+     * evaluated synchronously at the kill moment; the standard interrupt/census
+     * fields are added once the interrupt outcome is known.
+     */
+    const terminateTurn = (buildError) => {
+      if (settled || timedOut) return;
       // Set FIRST, before anything that can await: every guard below reads it, and a
       // notification processed while this handler is suspended must already see it.
       timedOut = true;
-      const seconds = Number((timeoutMs / 1000).toFixed(3));
-      // This string is load-bearing. classifyErrorClass forces `terminal` only for the
-      // agy message; this one reaches classifyError, which returns {kind:'unknown',
-      // retry:false} => terminal. A different string can be read as `transient` and get
-      // a hung turn retried in place. Do not reword it.
-      const finish = (outcome) => fail(`timeout after ${seconds}s`, {
+      if (watchdog) { clearInterval(watchdog); watchdog = null; }
+      const built = buildError();
+      const finish = (outcome) => fail(built.message, {
+        ...built.details,
         timeoutMs,
         interrupt: outcome,
         turnId: turnId || null,
@@ -540,7 +614,82 @@ function startAppServerTurn(options) {
         if (graceTimer) clearTimeout(graceTimer);
         finish(outcome);
       });
-    }, timeoutMs);
+    };
+    // Ceiling. The watchdog passes the decision that already won; the backstop
+    // classifies with the state that held WITHOUT the ceiling (same as the Claude
+    // adapter). A live stream at the ceiling is `budget-exceeded-while-active`; a
+    // ceiling reached while still `starting` keeps the load-bearing message, no code.
+    const ceilingError = (decision) => {
+      const view = decision || liveness.evaluate(reducer.snapshot(), {}, policy, null);
+      const kind = decision ? decision.termination
+        : liveness.classifyTermination({ cause: 'ceiling', state: view.state });
+      const active = kind === APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED;
+      if (livenessView.state !== view.state) {
+        livenessView = { version: 1, state: view.state, since_ms: livenessView.since_ms, reason: view.reason ?? null };
+      }
+      const seconds = secondsOf(timeoutMs);
+      return {
+        // `timeout after Ns` is load-bearing. classifyErrorClass forces `terminal` only
+        // for the agy message; this one reaches classifyError, which returns
+        // {kind:'unknown', retry:false} => terminal. A different string can be read as
+        // `transient` and get a hung turn retried in place. Do not reword it.
+        message: active ? `budget exceeded while active after ${seconds}s` : `timeout after ${seconds}s`,
+        details: {
+          ...(active ? { code: APPSERVER_LIVENESS_CODES.BUDGET_EXCEEDED } : {}),
+          liveness: { version: 1, termination: kind || null, state: view.state, reason: view.reason ?? null },
+          diagnostic: diagnostic(active ? 'budget-exceeded-while-active' : 'provider-timeout', {
+            observation: observe({ liveness: kind ? { ...livenessView, termination: kind } : livenessView }),
+          }),
+        },
+      };
+    };
+    // Liveness kill (dead-start / dead-silence). The `silence` block follows the
+    // Claude adapter so observation() keeps it and recovery can read
+    // `cause: 'indeterminate'` (every tool kill carries threshold_ms = deadMs).
+    const silenceError = (result) => {
+      const silence = { dimension: result.dimension, window_ms: result.window_ms, threshold_ms: result.threshold_ms,
+        policy: liveness.POLICY, source: policy.source, cause: 'indeterminate' };
+      if (livenessView.state !== 'dead') {
+        livenessView = { version: 1, state: 'dead', since_ms: reducer.snapshot().elapsed_ms, reason: result.reason ?? null };
+      }
+      return {
+        message: `anomalous silence (${result.termination}) after ${secondsOf(result.window_ms)}s`,
+        details: {
+          code: APPSERVER_LIVENESS_CODES.SILENCE,
+          liveness: { version: 1, termination: result.termination, state: 'dead', reason: result.reason ?? null,
+            extension_ms: result.extension_ms ?? null,
+            proof: result.proof_capability === undefined ? null
+              : { capability: result.proof_capability, proof: result.proof } },
+          diagnostic: diagnostic('anomalous-silence', {
+            observation: observe({ silence, liveness: { ...livenessView, termination: result.termination } }),
+          }),
+        },
+      };
+    };
+    // Backstop: the real-time ceiling, independent of the injected clock.
+    timer = setTimeout(() => terminateTurn(() => ceilingError()), timeoutMs);
+    // Primary authority: the neutral tracker over the reducer snapshot. Inputs are
+    // `{}` here (local proof and loop detector belong to T03): an undefined proof is
+    // `unavailable/none`, the S01/S02 behaviour.
+    watchdog = setInterval(() => {
+      // A matched completion is about to settle on the 5ms poll; never kill it.
+      if (settled || timedOut || matchedCompletion()) return;
+      let decision;
+      try { decision = tracker.evaluate(reducer.snapshot(), {}); } catch { return; }
+      const { result, transition } = decision;
+      if (transition) {
+        if (!(transition.from === null && transition.to === 'starting')) {
+          livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
+            reason: transition.reason ?? null };
+        }
+        // Best-effort observer: it never controls the session.
+        try { Promise.resolve(onLiveness && onLiveness(transition)).catch(() => {}); } catch { /* observer only */ }
+      }
+      if (!result.kill) return;
+      if (result.cause === 'liveness') terminateTurn(() => silenceError(result));
+      else if (result.cause === 'ceiling') terminateTurn(() => ceilingError(result));
+    }, watchdogMs);
+    if (typeof watchdog.unref === 'function') watchdog.unref();
 
     (async () => {
       try {
@@ -548,7 +697,10 @@ function startAppServerTurn(options) {
         if (!send({ method: 'initialized', params: {} })) throw sessionError('could not send initialized');
         const threadStartResult = await request('thread/start', threadParams);
         threadId = threadStartResult && threadStartResult.thread ? threadStartResult.thread.id : undefined;
-        const turnResult = await request('turn/start', resolveTurnParams(turnParams, threadId));
+        const resolvedTurnParams = resolveTurnParams(turnParams, threadId);
+        // From here on, non-lifecycle notifications are remote evidence (decision 2).
+        reducer.turnSent();
+        const turnResult = await request('turn/start', resolvedTurnParams);
         // Second source. Only fills the gap left by turn/started, so a server that
         // notified first keeps its attribution instead of having it overwritten.
         if (!turnId && turnResult && turnResult.turn && turnResult.turn.id) {
@@ -636,6 +788,8 @@ module.exports = {
   // decoration.
   INTERRUPT_OUTCOMES,
   INTERRUPT_GRACE_MS,
+  APPSERVER_LIVENESS_CODES,
+  LIVENESS_INTERVAL_MS,
   // Same reason as INTERRUPT_OUTCOMES: tests bind to the constant, never the literal.
   RETENTION_LIMITS,
   TURN_STATUS_SUCCESS,
