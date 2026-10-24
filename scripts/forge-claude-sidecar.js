@@ -107,6 +107,10 @@ const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // published value. A callback wired without a cadence still has to beat.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15000;
 const DEFAULT_LIVENESS_INTERVAL_MS = 1000;
+// Progress snapshot cadence (onProgress). Independent of the result-file
+// heartbeat above: transitions are emitted immediately, so a 30 s periodic
+// snapshot is enough for the host to see the current liveness state.
+const DEFAULT_PROGRESS_INTERVAL_MS = 30000;
 // Local-proof sampling cadence. Sampling is asynchronous and cached; the 1 s
 // watchdog tick only reads the cache and never performs I/O itself.
 const DEFAULT_LOCAL_PROOF_INTERVAL_MS = 15000;
@@ -286,6 +290,11 @@ function normalizeHeartbeatIntervalMs(value) {
  * the heartbeat: a present value is never coerced into a tight loop. */
 function normalizeLivenessIntervalMs(value) {
   return normalizeIntervalMs(value, DEFAULT_LIVENESS_INTERVAL_MS);
+}
+
+/** Progress snapshot cadence (internal seam; tests inject a short one). */
+function normalizeProgressIntervalMs(value) {
+  return normalizeIntervalMs(value, DEFAULT_PROGRESS_INTERVAL_MS);
 }
 
 /** Local-proof sampling cadence (internal seam; tests inject a short one). */
@@ -564,7 +573,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration,
   onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy,
   proofRoots = [], localProofIgnore = [], localProofFactory = null,
-  localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS }) {
+  localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS }) {
   if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   let child;
   try {
@@ -585,6 +594,10 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     const tracker = liveness.createTracker(policy, timeoutMs);
     // Loop detector: tool-call fingerprints (hashes only) since the last write.
     const progress = liveness.createProgressTracker();
+    // Versioned liveness block published in every progress snapshot (S06). It
+    // carries only the closed state/reason vocabulary, never fingerprints or text.
+    let livenessView = { version: 1, state: 'starting', since_ms: 0, reason: null };
+    let livenessTermination = null;
     const reducer = streamProtocol.createReducer({ secret: env[TOKEN_ENV], clock, onRemote: () => {
       if (!reportedRemote) { reportedRemote = true; emit(); }
     }, onEvent: () => {
@@ -621,7 +634,8 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         transport_ms: transportEnd ?? current.transport_ms,
         verification_ms: transportEnd === null ? null : Math.max(0, current.elapsed_ms - transportEnd),
         calibration: { diagnostic: calibration.diagnostic, initial: calibration.initial.state, gap: calibration.gap.state },
-        ...(silence ? { silence } : {}) });
+        ...(silence ? { silence } : {}),
+        liveness: livenessTermination ? { ...livenessView, termination: livenessTermination } : livenessView });
     };
     function bestEffort(callback, value) {
       try { Promise.resolve(callback?.(value)).catch(() => {}); } catch { /* observer only */ }
@@ -699,13 +713,15 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         ? sidecarError(CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED, 'budget-exceeded-while-active')
         : sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
       error.liveness = { version: 1, termination: kind, state, reason };
+      // The final snapshot keeps the active state; a ceiling is not death.
+      if (liveness.TERMINATIONS.includes(kind)) livenessTermination = kind;
       return error;
     }
     timer = setTimeout(() => { if (!settled) terminate(ceilingError()); }, timeoutMs);
     beat();
     emit();
     if (onHeartbeat) heartbeatTimer = setInterval(beat, heartbeatIntervalMs);
-    if (onProgress) progressTimer = setInterval(emit, 15000);
+    if (onProgress) progressTimer = setInterval(emit, progressIntervalMs);
     proofTimer = setInterval(sampleProof, localProofIntervalMs);
     proofTimer.unref?.();
     sampleProof();
@@ -720,12 +736,23 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         bestEffort(onLiveness, loop ? { ...transition, progress: { repeats: inputs.progress.repeats,
           fingerprint_sha256: inputs.progress.fingerprint.slice(0, 16) } } : transition);
       }
+      // The initial snapshot already carries starting/0; every other transition
+      // is published immediately, after onLiveness.
+      if (transition && !(transition.from === null && transition.to === 'starting')) {
+        livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
+          reason: transition.reason ?? null };
+        emit();
+      }
       if (!result.kill) return;
       if (result.cause === 'liveness') {
         // Every tool kill carries threshold_ms = deadMs, so observation() accepts it.
         silence = { dimension: result.dimension, window_ms: result.window_ms, threshold_ms: result.threshold_ms,
           policy: liveness.POLICY, source: livenessSource(result.dimension, result.threshold_ms), cause: 'indeterminate' };
         const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence');
+        if (livenessView.state !== 'dead') {
+          livenessView = { version: 1, state: 'dead', since_ms: transition?.at_ms ?? null, reason: result.reason ?? null };
+        }
+        livenessTermination = result.termination;
         error.liveness = { version: 1, termination: result.termination, state: 'dead', reason: result.reason,
           extension_ms: result.extension_ms ?? null,
           proof: result.proof_capability === undefined ? null
@@ -901,6 +928,12 @@ function sessionCleanupReport(remover, ref) {
  * (16 hex) through onLiveness; it never kills. Internal test seams, not public
  * API: `localProofFactory` replaces createLocalProof and `localProofIntervalMs`
  * replaces the 15000 ms sampling cadence (validated as a positive integer).
+ * Every onProgress snapshot carries observation().liveness
+ * `{version:1, state, since_ms, reason}` (plus `termination` on the final
+ * snapshot of a watchdog kill). Snapshots are emitted every 30000 ms
+ * (DEFAULT_PROGRESS_INTERVAL_MS) and immediately on each liveness transition.
+ * Internal test seam, not public API: `progressIntervalMs` replaces that
+ * cadence; an invalid value is refused before any spawn with provider_called:false.
  * @param {string} opts.model model id forwarded to the CLI as `--model <id>`.
  *   Required: absence is `claude-model-required` before any spawn, because the
  *   result is admitted only when modelUsage proves this exact id. Rejected when
@@ -983,6 +1016,9 @@ async function invokeClaudeSidecar(opts) {
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
   const livenessIntervalMs = normalizeLivenessIntervalMs(options.livenessIntervalMs);
+  let progressIntervalMs;
+  try { progressIntervalMs = normalizeProgressIntervalMs(options.progressIntervalMs); }
+  catch { throw invalidLaunchOption(); }
   const onLiveness = typeof options.onLiveness === 'function' ? options.onLiveness : null;
   if (options.localProofFactory !== undefined && options.localProofFactory !== null
     && typeof options.localProofFactory !== 'function') {
@@ -1110,7 +1146,7 @@ async function invokeClaudeSidecar(opts) {
       requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
       calibration: calibrationApi.read({model,effort:effort || 'medium',phase},options.calibrationOptions),
       onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
-      proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs,
+      proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs, progressIntervalMs,
     });
     // The stream only confirms the Forge-generated id; it never replaces it.
     if (sessionRef && observedSessionId !== sessionId) {
@@ -1181,6 +1217,7 @@ module.exports = {
   CLAUDE_RESUME_INSTRUCTION,
   TIMEOUT_GRACE_MS,
   TEMP_DIR_PREFIX,
+  DEFAULT_PROGRESS_INTERVAL_MS,
   buildClaudeSidecarEnv,
   buildClaudeProbeEnv,
   probeClaudeVersion,

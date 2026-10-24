@@ -1185,6 +1185,8 @@ setInterval(() => {}, 1000);
 const SILENT_FROM_START_FIXTURE = writeFixture('claude silent from start fixture.js', 'setInterval(() => {}, 1000);');
 
 async function runLive(fixture, clock, options = {}) {
+  // onSnapshot observes every progress snapshot without replacing the clock pivot.
+  const { onSnapshot, ...invokeOptions } = options;
   const children = [];
   const transitions = [];
   let terminations = 0, result = null, error = null;
@@ -1198,10 +1200,13 @@ async function runLive(fixture, clock, options = {}) {
     result = await adapter.invokeClaudeSidecar({
       cwd: WORKSPACE, prompt: 'liveness', model: FIXTURE_MODEL, timeoutMs: 3600000,
       sourceEnv: sourceEnvFor(fixture), monotonicClock: clock.now, livenessIntervalMs: 25,
-      onProgress(snapshot) { if (snapshot.phase !== 'local-start') clock.accelerate(); },
+      onProgress(snapshot) {
+        if (snapshot.phase !== 'local-start') clock.accelerate();
+        if (onSnapshot) onSnapshot(snapshot);
+      },
       onLiveness(transition) { transitions.push(transition); },
       terminateChild(child) { terminations++; child.kill('SIGKILL'); },
-      ...options,
+      ...invokeOptions,
     });
   } catch (caught) { error = caught; }
   finally {
@@ -1646,6 +1651,138 @@ test('liveness/tool: the real provider on a read-only turn scans no filesystem r
   assert.strictEqual(run.error, null, run.error && run.error.code);
   assert.strictEqual(run.result.candidate.status, 'done');
   assert.deepStrictEqual(touched, []);
+});
+
+// ── Liveness heartbeat (S06/T02) — the liveness block rides every progress snapshot ──
+const { progressLine, readProgressLine } = require('./forge-sidecar-diagnostic');
+
+function heartbeatCollector() {
+  const snapshots = [];
+  return { snapshots, onSnapshot(snapshot) { snapshots.push(snapshot); } };
+}
+
+// The host (codex) reads the worker's stderr line by line: serialize every
+// snapshot exactly as the CLI does and read it back through the host reader.
+function hostRead(snapshots) {
+  return snapshots.map(snapshot => {
+    const read = readProgressLine(progressLine(snapshot));
+    ok(read, 'the host reader must accept every progress line');
+    return read;
+  });
+}
+
+function distinctStates(blocks) {
+  const states = [];
+  for (const block of blocks) if (states.at(-1) !== block.state) states.push(block.state);
+  return states;
+}
+
+test('liveness/heartbeat: DEFAULT_PROGRESS_INTERVAL_MS is 30000 and an invalid progressIntervalMs is refused before any spawn', async () => {
+  const adapter = loadAdapter();
+  assert.strictEqual(adapter.DEFAULT_PROGRESS_INTERVAL_MS, 30000);
+  for (const value of [0, -1, 1.5, NaN, '10']) {
+    const records = [];
+    const refusing = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    const error = await expectCode(refusing.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'interval', model: FIXTURE_MODEL,
+      timeoutMs: 15000, progressIntervalMs: value, sourceEnv: sourceEnvFor(HAPPY_FIXTURE) }),
+    refusing.CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+    assert.strictEqual(error.provider_called, false, String(value));
+    assert.strictEqual(records.length, 0);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+  }
+});
+
+test('liveness/heartbeat: host-worker contract reads starting -> working -> slow-suspect -> dead through readProgressLine', async () => {
+  const collector = heartbeatCollector();
+  const run = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }),
+    { onSnapshot: collector.onSnapshot });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  ok(blocks.every(block => block && block.version === 1), 'every snapshot carries the liveness block');
+  assert.deepStrictEqual(blocks[0], { version: 1, state: 'starting', since_ms: 0, reason: null });
+  assert.deepStrictEqual(distinctStates(blocks), ['starting', 'working', 'slow-suspect', 'dead']);
+  for (const transition of run.transitions) {
+    if (transition.from === null && transition.to === 'starting') continue;
+    ok(blocks.some(block => block.state === transition.to && block.since_ms === transition.at_ms),
+      `no snapshot published transition ${JSON.stringify(transition)}`);
+  }
+  const last = blocks.at(-1);
+  assert.strictEqual(last.state, 'dead');
+  assert.strictEqual(last.termination, 'dead-silence');
+  assert.deepStrictEqual(run.error.diagnostic.observation.liveness, last);
+  ok(blocks.slice(0, -1).every(block => block.termination === undefined), 'termination only on the final snapshot');
+});
+
+test('liveness/heartbeat: a silent start ends with the final block {dead, dead-start}', async () => {
+  const collector = heartbeatCollector();
+  const run = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300), { onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error.liveness.termination, 'dead-start');
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  assert.deepStrictEqual(distinctStates(blocks), ['starting', 'dead']);
+  const last = blocks.at(-1);
+  assert.strictEqual(last.state, 'dead');
+  assert.strictEqual(last.termination, 'dead-start');
+  assert.deepStrictEqual(run.error.diagnostic.observation.liveness, last);
+});
+
+test('liveness/heartbeat: an active stream at the injected ceiling ends budget-exceeded-while-active, never dead', async () => {
+  const collector = heartbeatCollector();
+  const fixture = activeStreamFixture('claude heartbeat endless stream fixture.js', null);
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { timeoutMs: 60000, onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  ok(!blocks.some(block => block.state === 'dead'), 'an active ceiling is never published as dead');
+  const last = blocks.at(-1);
+  assert.strictEqual(last.termination, 'budget-exceeded-while-active');
+  ok(['working', 'slow-suspect'].includes(last.state), last.state);
+  assert.deepStrictEqual(run.error.diagnostic.observation.liveness, last);
+});
+
+test('liveness/heartbeat: five identical tool calls publish reason no-progress without fingerprint or argument text', async () => {
+  const collector = heartbeatCollector();
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude heartbeat tool loop fixture.js', { inputs: Array(5).fill(privateInput()) });
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  const loop = run.transitions.find(t => t.reason === 'no-progress');
+  ok(loop, JSON.stringify(run.transitions));
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  ok(blocks.some(block => block.state === 'slow-suspect' && block.reason === 'no-progress'),
+    `no heartbeat carried no-progress: ${JSON.stringify(blocks)}`);
+  const serialized = JSON.stringify(collector.snapshots);
+  ok(!serialized.includes(loop.progress.fingerprint_sha256), 'the fingerprint prefix leaked into a snapshot');
+  ok(!/[0-9a-f]{16}/.test(serialized), 'a 16/64-hex fingerprint leaked into a snapshot');
+  ok(!serialized.includes(TOOL_ARG_SENTINEL), 'tool argument text leaked into a snapshot');
+  ok(!serialized.includes('fingerprint'), 'no fingerprint field in a heartbeat');
+});
+
+test('liveness/heartbeat: an injected short cadence emits periodic snapshots between transitions', async () => {
+  const collector = heartbeatCollector();
+  const fixture = activeStreamFixture('claude heartbeat cadence fixture.js', 500);
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }),
+    { progressIntervalMs: 20, onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  // Fixed milestones: local-start, first remote and terminal (plus the closing snapshot).
+  ok(collector.snapshots.length > run.transitions.length + 3 + 5,
+    `${collector.snapshots.length} snapshots for ${run.transitions.length} transitions`);
+  const working = collector.snapshots.filter(snapshot => snapshot.liveness?.state === 'working');
+  ok(working.length >= 5, `periodic snapshots while working: ${working.length}`);
+});
+
+test('liveness/heartbeat: success metadata carries the working block without termination', async () => {
+  const collector = heartbeatCollector();
+  const fixture = activeStreamFixture('claude heartbeat success fixture.js', 300);
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }), { onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const block = run.result.metadata.observation.liveness;
+  ok(block, 'metadata.observation.liveness is present');
+  assert.strictEqual(block.state, 'working');
+  ok(!('termination' in block), 'no termination on success');
+  assert.deepStrictEqual(run.result.telemetry.observation.liveness, block);
+  assert.deepStrictEqual(collector.snapshots.at(-1).liveness, block);
 });
 
 // ── Session persistence (S05/T02) — fake CLI writes the measured layout under a temporary profile ──
