@@ -2003,7 +2003,7 @@ Triggers (`reason` value):
 
 #### Engine Fallback Discipline
 
-**CRITICAL.** Engine fallback is **per-dispatch and evidence-based**: it only happens AFTER the real dispatch for THAT unit actually failed with a documented condition (adapter `exit 2`, timeout, invalid result after validation). The orchestrator NEVER pre-emptively deviates from the resolver's configured route based on a failure observed in ANOTHER unit or on suspicion — same family as "executar inline nunca é fallback aceitável" (`skills/forge-auto/SKILL.md:182`, "Running un-isolated ... is NOT an acceptable fallback").
+**CRITICAL.** Engine fallback is **per-dispatch and evidence-based**: it only happens AFTER the real dispatch for THAT unit actually failed with a documented condition (adapter `exit 2`, timeout, invalid result after validation). The orchestrator NEVER pre-emptively deviates from the resolver's configured route based on a failure observed in ANOTHER unit or on suspicion. Separately authorized Forge maintenance follows `shared/forge-direct-actions.md`; it records host execution rather than pretending to complete this dispatch and preserves configured file isolation.
 
 Event reason strings come from a **closed enum**, documented here and nowhere else (mirrors reference this section, never replicate the list):
 
@@ -3097,7 +3097,9 @@ Recovery state v2 has no cumulative clock; a v1 state is migrated explicitly.
 Termination comes from the finite candidate list, destination exclusions, durable
 reservations, one silence retry and canonical exception expiry; a native candidate
 still needs a live scoped exception. Timeout alone does not prove model unavailability.
-Keep preferences/gates; never execute inline to bypass refusal.
+Keep preferences/gates; never silently replace a refused route. Separately authorized
+Forge maintenance follows `shared/forge-direct-actions.md`, preserving the original
+reservation, reconciled roots, claims and independent review. Record the actual executor.
 
 Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
 observed model, effort, host/worker/transport, reason_code/layer, duration, receipt and

@@ -30,7 +30,12 @@ It does not grant authority, choose a model, bypass a gate or replace a caller.
 - Timeout has indeterminate cause without causal evidence; it is not unavailability.
 - Use the trusted standing authorization adapter for a valid untried candidate.
 - Give each recovery sidecar the full tier safety ceiling, never an inherited remainder.
-- Do not invent another model list or bypass a refusal inline.
+- Do not invent another model list or silently replace a refused route.
+- Eligible direct actions and explicitly authorized Forge maintenance follow
+  shared/forge-direct-actions.md. Maintenance preserves preparation, file isolation,
+  claims, writer reconciliation, verification and independent review. Record the
+  actual host executor separately; never fabricate a worker receipt or consume its
+  reservation. A failed dispatch alone does not authorize maintenance execution.
 - Record sanitized actual attempt evidence and unknown observations truthfully.
 
 ## Gates, verification and owner publication
