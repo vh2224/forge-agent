@@ -1,0 +1,10 @@
+Synthetic local invocation
+node: v22.23.3
+Running 2 test suites sequentially...
+
+PASS local-a.test.js (0.10s)
+PASS local-b.test.js (0.20s)
+
+All 2 suites passed in 0.30s.
+Synthetic cleanup
+End of synthetic local invocation

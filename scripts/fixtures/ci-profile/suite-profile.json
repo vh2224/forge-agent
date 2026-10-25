@@ -1,0 +1,94 @@
+{
+  "schema": "forge-suite-profile/v1",
+  "started_at": "2026-10-21T10:00:00Z",
+  "finished_at": "2026-10-21T10:00:01Z",
+  "elapsed_ms": 200,
+  "condition": {
+    "platform": "linux",
+    "arch": "x64",
+    "node_version": "v22.23.3",
+    "os_release": "synthetic",
+    "cpus": {
+      "count": 1,
+      "model": "synthetic CPU"
+    },
+    "ci": {
+      "provider": "github-actions",
+      "run_id": null,
+      "run_attempt": null,
+      "job": "test",
+      "workflow": null,
+      "event_name": "pull_request",
+      "ref": null,
+      "sha": null,
+      "repository": null,
+      "runner_os": null,
+      "runner_arch": null,
+      "runner_environment": null,
+      "image_os": "ubuntu24",
+      "image_version": "20261001.1"
+    },
+    "queue": {
+      "state": "unavailable",
+      "reason": "not-observable-inside-runner"
+    },
+    "cache": {
+      "state": "unknown",
+      "reason": "runner-does-not-observe-actions-cache"
+    },
+    "unavailable": {
+      "ci.run_id": "absent",
+      "ci.run_attempt": "absent",
+      "ci.workflow": "absent",
+      "ci.ref": "absent",
+      "ci.sha": "absent",
+      "ci.repository": "absent",
+      "ci.runner_os": "absent",
+      "ci.runner_arch": "absent",
+      "ci.runner_environment": "absent"
+    }
+  },
+  "selection": {
+    "discovered": 2,
+    "selected": 2,
+    "universe_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "shard": null,
+  "mode": {
+    "baseline": false,
+    "fail_fast": false,
+    "match": false,
+    "changed": false,
+    "isolation": "isolated-home"
+  },
+  "suites": [
+    {
+      "id": "structured-pass.test.js",
+      "ordinal": 1,
+      "status": "pass",
+      "elapsed_ms": 120,
+      "exit_code": 0,
+      "signal": null,
+      "error_code": null
+    },
+    {
+      "id": "structured-fail.test.js",
+      "ordinal": 2,
+      "status": "fail",
+      "elapsed_ms": 80,
+      "exit_code": 1,
+      "signal": null,
+      "error_code": null
+    }
+  ],
+  "totals": {
+    "executed": 2,
+    "passed": 1,
+    "failed": 1,
+    "not_run": 0
+  },
+  "verdict": {
+    "exit_code": 1,
+    "baseline": null
+  }
+}
