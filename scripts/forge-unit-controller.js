@@ -734,10 +734,25 @@ function beginInside(cwd, request, options) {
   const hostRuntime = forgeRuntime.normalizeHostRuntime(input.host_runtime === undefined ? input.hostRuntime : input.host_runtime);
   const key = transactionKey(input, 'begin', unit);
   const existing = lookupRecord(cwd, 'transaction', key);
-  if (existing && (existing.unit.key !== unit.key || existing.milestone !== input.milestone || existing.action !== 'begin')) {
+  const suppliedPatch = input.state_patch || input.statePatch || {};
+  const hasPatchedSlice = own(suppliedPatch, 'active_slice');
+  if (unit.type === 'execute-task' && hasPatchedSlice
+    && (typeof suppliedPatch.active_slice !== 'string' || !suppliedPatch.active_slice.trim() || suppliedPatch.active_slice === '—')) {
+    throw new ControllerError('unit-identity-mismatch', 'slice da task ausente no patch');
+  }
+  const declaredSlice = input.slice || (hasPatchedSlice ? suppliedPatch.active_slice : null);
+  const effectiveSlice = existing ? existing.after.state.active_slice : hasPatchedSlice ? suppliedPatch.active_slice
+    : forgeState.read(cwd, input.milestone)?.active_slice;
+  if (existing && (existing.unit.key !== unit.key || existing.milestone !== input.milestone || existing.action !== 'begin'
+    || declaredSlice && declaredSlice !== existing.after.state.active_slice)) {
     throw new ControllerError('record-conflict', 'idempotency_key pertence a outra operação');
   }
-  assertUnitAvailable(cwd, input.milestone, unit, input.slice, options);
+  if (input.slice && input.slice !== effectiveSlice
+    || input.slice && suppliedPatch.active_slice && input.slice !== suppliedPatch.active_slice) {
+    throw new ControllerError('unit-identity-mismatch', 'slice declarada diverge do estado da unidade');
+  }
+  const availabilitySlice = unit.type === 'execute-task' ? (effectiveSlice === '—' ? null : effectiveSlice) : input.slice;
+  assertUnitAvailable(cwd, input.milestone, unit, availabilitySlice, options);
   if (existing) return runTransaction(cwd, existing, ownerToken, input.generation, options);
   const otherPending = pendingTransactions(cwd);
   if (otherPending.length) throw new ControllerError('transaction-pending', 'recovery obrigatório antes de novo begin');
@@ -920,13 +935,19 @@ function failureProjection(cwd, milestone) {
 function assertUnitAvailable(cwd, milestone, unit, slice, options, linked = {}) {
   if (pendingTransactions(cwd).some(item => item.idempotency_key !== linked.transactionKey && (item.terminal_failure || item.linked_entry))) throw new ControllerError('transaction-pending', 'transação vinculada incompleta impede begin');
   const failures = failureProjection(cwd, milestone).filter(item => item.transaction.idempotency_key !== linked.failureKey);
-  if (failures.some(item => item.begin.unit.key === unit.key)) throw new ControllerError('failure-deferred', 'unidade exige reentrada vinculada autorizada');
   const current = forgeState.read(cwd, milestone);
-  if (!current) return;
-  const inventory = options && typeof options.inventoryReader === 'function' ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current);
-  const candidate = inventory.slices?.find(item => item.id === (slice || (/slice$/.test(unit.type) ? unit.id : null))
-    || !slice && unit.type === 'execute-task' && item.tasks?.some(task => task.id === unit.id));
-  if (failures.some(item => item.begin.unit.key === unit.key || !item.entry && item.slice && item.slice === (slice || candidate?.id))) {
+  const inventory = !current ? {} : options && typeof options.inventoryReader === 'function'
+    ? options.inventoryReader(cwd, milestone, current) : discoverInventory(cwd, milestone, current);
+  const candidates = inventory.slices?.filter(item => item.id === (slice || (/slice$/.test(unit.type) ? unit.id : null))
+    || !slice && unit.type === 'execute-task' && item.tasks?.some(task => task.id === unit.id)) || [];
+  const candidate = candidates.length === 1 ? candidates[0] : null;
+  const targetSlice = slice || (/slice$/.test(unit.type) ? unit.id : null);
+  const knownTaskScope = candidate && candidate.id === targetSlice && candidate.tasks?.some(task => task.id === unit.id);
+  // Task IDs repeat in each slice. Unknown scope remains fail-closed; a known
+  // independent slice must not inherit another slice's same-named task failure.
+  const sameUnit = item => item.begin.unit.key === unit.key && (unit.type !== 'execute-task'
+    || !targetSlice || !knownTaskScope || !item.slice || item.slice === targetSlice);
+  if (failures.some(item => sameUnit(item) || !item.entry && item.slice && item.slice === targetSlice)) {
     throw new ControllerError('failure-deferred', 'unidade exige reentrada vinculada autorizada');
   }
   if (inventory.dependency_validation && candidate && (candidate.dependency_status !== 'valid'

@@ -15,7 +15,7 @@ const lease = require('./forge-unit-lease');
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const prefsReader = () => ({ ok: true, prefs: { workflow: { skip_discuss: true, skip_research: true } } });
 
-function fixture(host = 'codex', mode = 'auto') {
+function fixture(host = 'codex', mode = 'auto', executeTask = false) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-failure-Ω-'));
   const milestone = 'M-20261023000000-failure';
   const dir = path.join(cwd, '.gsd', 'milestones', milestone);
@@ -23,14 +23,21 @@ function fixture(host = 'codex', mode = 'auto') {
   state.write(cwd, { milestone, kind: 'milestone', phase: 'idle', active_slice: 'S03', active_task: '—', auto_mode: 'on' });
   const roadmapFile = path.join(dir, `${milestone}-ROADMAP.md`);
   fs.writeFileSync(roadmapFile, '# Roadmap\n- [x] **S01: First** `depends:[]`\n- [x] **S02: Second** `depends:[]`\n- [ ] **S03: Failed** `depends:[S01,S02]`\n- [ ] **S04: Independent** `depends:[S01,S02]`\n- [ ] **S05: Dependent** `depends:[S03]`\n');
+  if (executeTask) {
+    for (const slice of ['S03', 'S04']) {
+      const sliceDir = path.join(dir, 'slices', slice);
+      fs.mkdirSync(sliceDir, { recursive: true });
+      fs.writeFileSync(path.join(sliceDir, `${slice}-PLAN.md`), '# Plan\n- [ ] **T01: Work**\n');
+    }
+  }
   const input = { cwd, milestone, workflow_id: 'failure-fixture', owner_token: 'fixture-owner', max_steps: 4 };
   const options = { prefsReader };
   const selected = adapter.invoke(host, mode, 'next', input, null, options).result;
   assert.strictEqual(selected.outcome, 'dispatch_required', JSON.stringify(selected));
-  assert.strictEqual(selected.unit.key, 'plan-slice/S03');
+  assert.strictEqual(selected.unit.key, executeTask ? 'execute-task/T01' : 'plan-slice/S03');
   const begin = selected.controller_result.details.transaction;
-  const request = { cwd, contextRoot: cwd, milestoneId: milestone, sliceId: 'S03', scope: 'milestone', phase: 'plan',
-    unitType: 'plan-slice', roadmapFile, route: { host_runtime: host, resolved_worker_engine: host } };
+  const request = { cwd, contextRoot: cwd, milestoneId: milestone, sliceId: 'S03', taskId: executeTask ? 'T01' : undefined, scope: 'milestone', phase: executeTask ? 'execute' : 'plan',
+    unitType: executeTask ? 'execute-task' : 'plan-slice', roadmapFile, route: { host_runtime: host, resolved_worker_engine: host } };
   const receiptFile = path.join(cwd, 'old-receipt.json');
   const recoveryFile = path.join(cwd, 'old-recovery.json');
   fs.writeFileSync(receiptFile, JSON.stringify({ phase: 'failed', recovery_identity_sha256: require('./forge-code-roots').digest(recovery.requestIdentity(request)),
@@ -71,6 +78,69 @@ function worker(f, operation) {
 }
 
 async function main() {
+  test('consumed T01 failure is scoped to its slice, preserving original recovery gate', () => {
+    for (const host of ['codex', 'claude']) {
+      const f = fixture(host, 'auto', true);
+      try {
+        const consumed = consume(f), before = history(f);
+        assert.strictEqual(consumed.reason_code, 'failure-consumed');
+        assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01', slice: 'S03',
+          host_runtime: host, idempotency_key: 'same-slice' }, liveOptions(f)), error => error.code === 'failure-deferred');
+        assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01',
+          host_runtime: host, idempotency_key: 'ambiguous-slice' }, liveOptions(f)), error => error.code === 'failure-deferred');
+        assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T02', slice: 'S03',
+          host_runtime: host, idempotency_key: 'unresolved-slice' }, liveOptions(f)), error => error.code === 'failure-deferred');
+        for (const patch of [undefined, { active_slice: 'S03' }]) {
+          assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01', slice: 'S04',
+            state_patch: patch, host_runtime: host, idempotency_key: 'scope-mismatch' }, liveOptions(f)),
+          error => error.code === 'unit-identity-mismatch');
+          assert.strictEqual(lease.observe(f.cwd, 'execute-task/T01').lease, null);
+        }
+        assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01', slice: 'S99',
+          state_patch: { active_slice: 'S99' }, host_runtime: host, idempotency_key: 'unknown-slice' }, liveOptions(f)),
+        error => error.code === 'failure-deferred');
+        assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01', slice: 'S04',
+          state_patch: { active_slice: 'S04' }, host_runtime: host, idempotency_key: 'unknown-task' },
+        liveOptions(f, { inventoryReader: () => ({ slices: [{ id: 'S04', tasks: [{ id: 'T02' }] }] }) })),
+        error => error.code === 'failure-deferred');
+        const next = invoke(f, 'next', consumed.snapshot);
+        assert.strictEqual(next.reason_code, 'unit-ready');
+        assert.strictEqual(next.controller_result.state.active_slice, 'S04');
+        assert.strictEqual(next.unit.key, 'execute-task/T01');
+        for (const value of [null, '', ' ', '—', false, 0]) {
+          assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01',
+            state_patch: { active_slice: value }, host_runtime: host, idempotency_key: 'invalid-scope' }, liveOptions(f)),
+          error => error.code === 'unit-identity-mismatch');
+          assert.strictEqual(controller.lookupRecord(f.cwd, 'transaction', 'invalid-scope'), null);
+        }
+        assert.deepStrictEqual(history(f), before);
+        assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01', slice: 'S03',
+          state_patch: { active_slice: 'S03' }, host_runtime: host,
+          idempotency_key: next.controller_result.details.transaction.idempotency_key }, liveOptions(f)),
+        error => error.code === 'record-conflict');
+        const replay = invoke(f, 'next', consumed.snapshot);
+        assert.strictEqual(replay.controller_result.details.transaction.idempotency_key,
+          next.controller_result.details.transaction.idempotency_key);
+        assert.deepStrictEqual(history(f), before);
+      } finally { cleanup(f); }
+    }
+  });
+  test('linked recovered task failure does not poison another slice with the same task ID', () => {
+    const f = fixture('codex', 'auto', true);
+    try {
+      const consumed = consume(f), entered = invoke(f, 'reenter', consumed.snapshot, entryInput(f, consumed));
+      assert.strictEqual(entered.reason_code, 'entry-ready');
+      const completed = invoke(f, 'complete', entered.snapshot, { result: { status: 'done' } });
+      assert.strictEqual(completed.reason_code, 'transition-committed');
+      const before = history(f);
+      assert.throws(() => controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01', slice: 'S03',
+        host_runtime: f.host, idempotency_key: 'same-linked' }, liveOptions(f)), error => error.code === 'failure-deferred');
+      const independent = controller.begin(f.cwd, { ...f.input, unit: 'execute-task/T01', slice: 'S04',
+        state_patch: { active_slice: 'S04' }, host_runtime: f.host, idempotency_key: 'independent-linked' }, liveOptions(f));
+      assert.strictEqual(independent.ok, true);
+      assert.deepStrictEqual(history(f), before);
+    } finally { cleanup(f); }
+  });
   test('R1: only evidenced terminal failures can be consumed', () => {
     for (const variant of ['started', 'failed-without-reason', 'completed', 'terminal-intent']) {
       const f = fixture();
