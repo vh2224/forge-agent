@@ -15,6 +15,7 @@ const REASONS = Object.freeze({
   'status-mismatch': 'validation', 'schema-invalid': 'validation',
   'validator-failed': 'validation', 'artifact-path-invalid': 'validation',
   'artifact-duplicate': 'validation', 'artifact-missing': 'validation',
+  'delivery-artifact-invalid': 'validation',
   'artifact-limit': 'validation', 'payload-limit': 'validation',
   'questions-on-done': 'validation', 'artifacts-on-non-done': 'validation',
   'artifact-direct-write-detected': 'publication', 'secret-output': 'security',

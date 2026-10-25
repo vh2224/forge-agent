@@ -338,6 +338,18 @@ test('artifact diagnostics identify schema, paths, duplicates, missing artifacts
   // The Claude stream budget must not silently restrict the Codex transport.
   assert.equal(unit.validateArtifacts({ ...payload(), summary: 'x'.repeat(unit.MAX_ARTIFACT_PAYLOAD_BYTES) }, allowed, required), true);
 });
+test('typed delivery rejection preserves its closed reason without artifact content', () => {
+  const artifactPath = 'S03-DELIVERY.json';
+  const value = { status: 'done', summary: 'Completed', questions: [],
+    artifacts: [{ path: artifactPath, content: JSON.stringify({ private: token }) }] };
+  const verdict = unit.inspectArtifacts(value, [artifactPath], [artifactPath], Infinity,
+    { [artifactPath]: { kind: 'delivery', unit: { type: 'slice', id: 'S03' } } });
+  assert.deepEqual(verdict, { ok: false, reason: 'delivery-artifact-invalid' });
+  const safe = diagnostic(verdict.reason, { stdout_bytes: 42, content: value.artifacts[0].content });
+  assert.deepEqual(safe, { version: 1, stage: 'validation', reason: 'delivery-artifact-invalid', stdout_bytes: 42 });
+  assert.deepEqual(diagnostic(safe.reason, safe), safe);
+  assert(!JSON.stringify(safe).includes(token));
+});
 test('safe diagnostic is a closed vocabulary with numeric metadata only', () => {
   assert.deepEqual(diagnostic('private-sentinel', { stdout_bytes: 3, stderr_bytes: 'private-sentinel',
     duration_ms: -1, tail: 'private-sentinel', marker_count: Infinity, model_observed: 'claude-haiku-4-5' }),
