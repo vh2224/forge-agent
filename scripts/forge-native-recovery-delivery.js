@@ -9,6 +9,47 @@ const requestIdentity=request=>{
   const recovery=api('forge-attempt-recovery');
   return recovery.requestIdentity(recovery.canonicalRequest(request));
 };
+const leaseRenewals=new WeakMap();
+// Trusted host capability: imported receipts never authorize metadata changes.
+// The original lease preimage must match the immutable prewrite snapshot.
+function createLeaseRenewalReconciliation({savedManifestFile,originalLeaseBytes,ownerToken,generation,
+  attestStoppedWriter,assertAuthority}={}) {
+  if(!Buffer.isBuffer(originalLeaseBytes)||typeof attestStoppedWriter!=='function'||typeof assertAuthority!=='function')fail('lease-renewal-live-authority-required');
+  const bytes=fs.readFileSync(savedManifestFile),manifest=JSON.parse(bytes),r=manifest.request;
+  if(path.resolve(savedManifestFile)!==path.resolve(r.resultFile+'.manifest.json'))fail('lease-renewal-manifest-path');
+  const lease=api('forge-unit-lease'),roots=api('forge-code-roots'),execution=api('forge-task-execution');
+  const unit=r.unitType+'/'+r.taskId,file=lease.leaseFile(r.contextRoot,unit),relative=path.relative(r.contextRoot,file).replace(/\\/g,'/');
+  if(hash(originalLeaseBytes)!==manifest.prepared.protected_owner[relative])fail('lease-renewal-original-hash');
+  const original=JSON.parse(originalLeaseBytes),currentBytes=fs.readFileSync(file),current=JSON.parse(currentBytes);
+  if(!lease.validRecord(original,unit)||!lease.validRecord(current,unit)
+    ||!ownerToken||!generation||original.owner_token!==ownerToken||current.owner_token!==ownerToken
+    ||original.generation!==generation||current.generation!==generation)fail('lease-renewal-owner-mismatch');
+  const nonClock=value=>Object.fromEntries(Object.entries(value).filter(([key])=>!['heartbeat_at','expires_at'].includes(key)));
+  if(roots.digest(nonClock(original))!==roots.digest(nonClock(current))
+    ||current.heartbeat_at<original.heartbeat_at||current.expires_at<original.expires_at
+    ||current.heartbeat_at>Date.now())fail('lease-renewal-fields-invalid');
+  const expected={...manifest.prepared.protected_owner,[relative]:hash(currentBytes)};
+  const check=publishing=>{
+    assertAuthority();if(attestStoppedWriter()!==true)fail('lease-renewal-writer-not-stopped');
+    if(hash(fs.readFileSync(savedManifestFile))!==hash(bytes)||hash(fs.readFileSync(file))!==hash(currentBytes))fail('lease-renewal-evidence-changed');
+    if(lease.observe(r.contextRoot,unit).reason!=='lease-active')fail('lease-renewal-not-active');
+    if(!publishing&&roots.digest(Object.entries(execution.protectedSnapshot(r.contextRoot)).sort())!==roots.digest(Object.entries(expected).sort()))fail('lease-renewal-unproved-metadata');
+  };
+  check(false);
+  const handle=Object.freeze({}),evidence={kind:'trusted-parent-lease-renewal',manifest_sha256:hash(bytes),
+    path:relative,original_sha256:hash(originalLeaseBytes),renewed_sha256:hash(currentBytes),
+    allowed_fields:['heartbeat_at','expires_at'],writer_stopped:true};
+  leaseRenewals.set(handle,{manifest_digest:roots.digest(manifest),check,evidence,manifest,relative,renewed_hash:hash(currentBytes)});return handle;
+}
+function reconcileLeaseRenewalSurface(handle,record,expected) {
+  const renewal=leaseRenewals.get(handle),roots=api('forge-code-roots');
+  if(!renewal||record.kind!=='native-execute-task'||record.manifest_sha256!==renewal.evidence.manifest_sha256
+    ||record.dispatch_id!==renewal.manifest.request.dispatchId
+    ||roots.digest(record.lease_reconciliation)!==roots.digest(renewal.evidence)
+    ||roots.digest(record.milestone_delivery?.protected_owner)!==roots.digest(renewal.manifest.prepared.protected_owner)
+    ||expected[renewal.relative]!==renewal.evidence.original_sha256)fail('lease-renewal-publication-binding');
+  renewal.check(true);return {...expected,[renewal.relative]:renewal.renewed_hash};
+}
 
 const string = { type: 'string' };
 const object = properties => ({ type: 'object', additionalProperties: false,
@@ -93,7 +134,7 @@ function criterionBindings(result,capture,unitKey,{inventory,contract}={}){
 }
 // Caller supplies the exact saved output of its single canonical resolver call,
 // already-held claim/gates, and real native binding. Never resolves or changes route.
-function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt}={}){
+function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linkedEntryOptions,savedManifest,persistDeliveryReceipt,leaseRenewal}={}){
   if(typeof assertBoundary!=='function'||typeof assertAuthority!=='function')fail('live-controller-boundary-required');
   const r=structuredClone(request);
   delete r.linkedEntryBinding;
@@ -101,6 +142,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   if(!nativeInvocation?.ok)fail('native-binding-required');
   assertBoundary();
   const side=api('forge-unit-sidecar'),execution=api('forge-task-execution'),roots=api('forge-code-roots'),verify=api('forge-verify');
+  const renewal=leaseRenewal===undefined?null:leaseRenewals.get(leaseRenewal);
+  if(leaseRenewal!==undefined&&(!renewal||!savedManifest||renewal.manifest_digest!==roots.digest(savedManifest)))fail('lease-renewal-capability-required');
   side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
   requestIdentity(r);
   const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
@@ -117,7 +160,8 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
     assertAuthority();assertBoundary();side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
     if(hash(fs.readFileSync(r.planFile))!==planHash||hash(fs.readFileSync(r.contextFile))!==contextHash)fail('milestone-input-changed');
     if(inputs.some(row=>hash(fs.readFileSync(row.file))!==row.sha256))fail('milestone-input-changed');
-    if (!publishing) execution.assertProtected(r.contextRoot,prepared.protected_owner);
+    if(renewal)renewal.check(publishing);
+    else if (!publishing) execution.assertProtected(r.contextRoot,prepared.protected_owner);
     for(const root of prepared.protected_roots)execution.assertProtected(root.path,root.snapshot);
   }
   let verified=null;
@@ -149,6 +193,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       guard();
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
       persist({kind:'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
+        ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
         route:r.route,manifest_sha256:hash(fs.readFileSync(manifestFile)),result,
         code_state:execution.replayState(r.cwd,r.execution_contract)});
@@ -181,11 +226,12 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       }
       const artifacts=verified.artifacts.map(a=>({...a,before:fs.existsSync(path.join(r.contextRoot,a.path))?hash(fs.readFileSync(path.join(r.contextRoot,a.path))):null}));
       const record={kind:'native-execute-task',phase:'ready',dispatch_id:r.dispatchId,result,artifacts,route:r.route,response_sha256:hash(JSON.stringify(result)),
+        ...(renewal?{lease_reconciliation:renewal.evidence}:{}),
         fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),
         milestone_delivery:{plan_sha256:planHash,protected_owner:prepared.protected_owner,protected_roots:prepared.protected_roots,code_state:execution.replayState(r.cwd,r.execution_contract)}};
       persist(record);
-      side.materialize(verified.publicationRequest,record,()=>guard(true));
+      side.materialize(verified.publicationRequest,record,()=>guard(true),undefined,renewal?{leaseRenewal}:undefined);
       for(const artifact of artifacts)if(fs.readFileSync(path.join(r.contextRoot,artifact.path),'utf8')!==artifact.content)fail('publication-readback-mismatch');
       return record;
     },
@@ -201,7 +247,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
           ||!side.validateArtifacts({status:'done',summary:record.result.summary,questions:[],artifacts:record.artifacts.map(({path,content})=>({path,content}))},
             loc.allowed,loc.required,Infinity,loc.rules))fail('milestone-ready-receipt-invalid');
       execution.verifyResult(r.cwd,prepared,record.result);
-      side.materialize(r,record,()=>guard(true));
+      side.materialize(r,record,()=>guard(true),undefined,renewal?{leaseRenewal}:undefined);
       return record;
     },
   };
@@ -274,4 +320,4 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const verified=session.verify(record.result),published=session.publish(record.result);
   return {action:'replay',provider_called:false,result:{verified,published}};
 }
-module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt};
+module.exports={prepare,replay,requireExplicitVerify,criterionBindings,resultContract,packagePrompt,createLeaseRenewalReconciliation,reconcileLeaseRenewalSurface};

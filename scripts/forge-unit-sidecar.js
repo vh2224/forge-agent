@@ -466,7 +466,7 @@ function markChecked(content, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return content.replace(new RegExp(`^(\\s*[-*] \\[) ([\\]]\\s+(?:\\*\\*)?${escaped}(?=[:\\s*]))`, 'm'), '$1x$2');
 }
-function materialize(request, record, publicationGuard, publicationLock) {
+function materialize(request, record, publicationGuard, publicationLock, options = {}) {
   if (record.kind === 'memory-extraction') fail('memory-publication-required', 'Use publishReadyRecord for memory extraction receipts.');
   if (record.result.status !== 'done') return record.result;
   const root = fs.realpathSync(request.contextRoot || request.cwd);
@@ -480,13 +480,15 @@ function materialize(request, record, publicationGuard, publicationLock) {
     else {
       const protectedOwner = (record.execution || record.milestone_delivery).protected_owner;
       if (!protectedOwner) fail('execution-owner-baseline-required');
-      const expected = { ...protectedOwner };
+      let expected = { ...protectedOwner };
       const current = require('./forge-task-execution').protectedSnapshot(root);
       for (const item of record.artifacts) if (current[item.path] === hash(item.content)) {
         expected[item.path] = current[item.path];
         let dir = path.posix.dirname(item.path);
         while (dir !== '.') { if (current[dir + '/'] === 'directory') expected[dir + '/'] = 'directory'; dir = path.posix.dirname(dir); }
       }
+      if(options.leaseRenewal!==undefined)expected=require('./forge-native-recovery-delivery')
+        .reconcileLeaseRenewalSurface(options.leaseRenewal,record,expected);
       require('./forge-task-execution').assertProtected(root, expected);
     }
   }

@@ -77,6 +77,7 @@ async function fixture() {
   return f;
 }
 async function main(){
+  await protectedLeaseRenewal();
   await implicitOrdinaryIdentity();
   await durableReplay();
   await guardedHandoff();
@@ -120,6 +121,44 @@ async function main(){
     assert.equal(delivery.resultContract.validate(extra).ok,false);
     console.log('PASS public ordinary restart: exact payload, two claimed roots, one callback, canonical verified publication and immutable history');
     console.log('PASS milestone evidence: missing, duplicate, foreign, wrong-root, fabricated and unmet criteria refuse; standalone schema unchanged');
+  }finally{f.cleanup();}
+}
+async function protectedLeaseRenewal() {
+  const f=await fixture(),lease=require('./forge-unit-lease');
+  try {
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime),request=handoff.result.request;
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
+      activeCapabilities:capabilities,prompt:'Lease renewal fixture',forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    const options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,persistDeliveryReceipt:()=>{}};
+    const originalSession=delivery.prepare(options);originalSession.start();
+    const savedManifest=originalSession.manifest(),savedManifestFile=request.resultFile+'.manifest.json',manifestBytes=fs.readFileSync(savedManifestFile);
+    const leaseFile=lease.leaseFile(f.owner,'execute-task/T01'),originalLeaseBytes=fs.readFileSync(leaseFile),record=JSON.parse(originalLeaseBytes);
+    for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+    assert(lease.heartbeat(f.owner,record.unit,record.owner_token,record.generation,{ttlMs:600000}).ok);
+    const renewed=fs.readFileSync(leaseFile);
+    assert.throws(()=>delivery.prepare({...options,savedManifest}).start(),/execution-protected-metadata/);
+    const capOptions={savedManifestFile,originalLeaseBytes,ownerToken:record.owner_token,generation:record.generation,
+      attestStoppedWriter:()=>true,assertAuthority:f.assertBoundary};
+    const create=changes=>delivery.createLeaseRenewalReconciliation({...capOptions,...changes});
+    assert.throws(()=>create({originalLeaseBytes:Buffer.from('{}')}),/original-hash/);
+    assert.throws(()=>create({ownerToken:'foreign'}),/owner-mismatch/);
+    assert.throws(()=>create({generation:'foreign'}),/owner-mismatch/);
+    assert.throws(()=>create({attestStoppedWriter:()=>false}),/writer-not-stopped/);
+    assert.throws(()=>create({assertAuthority:null}),/live-authority/);
+    const bad={...JSON.parse(renewed),session:'foreign'};write(leaseFile,JSON.stringify(bad));
+    assert.throws(()=>create({assertAuthority:()=>{}}),/fields-invalid/);fs.writeFileSync(leaseFile,renewed);
+    const foreign=path.join(f.owner,'.gsd/foreign-proof.txt');write(foreign,'foreign');
+    assert.throws(()=>create(),/unproved-metadata/);fs.unlinkSync(foreign);
+    const leaseRenewal=create();
+    assert.throws(()=>delivery.prepare({...options,savedManifest,leaseRenewal:JSON.parse(JSON.stringify(leaseRenewal))}),/capability-required/);
+    const resumed=delivery.prepare({...options,savedManifest,leaseRenewal});resumed.start();
+    const changed={...JSON.parse(renewed),expires_at:Date.now()-1};write(leaseFile,JSON.stringify(changed));
+    assert.throws(()=>resumed.returned(f.result()));fs.writeFileSync(leaseFile,renewed);
+    resumed.returned(f.result());resumed.verify(f.result());const published=resumed.publish(f.result());
+    assert.equal(published.lease_reconciliation.original_sha256,crypto.createHash('sha256').update(originalLeaseBytes).digest('hex'));
+    assert.deepEqual(fs.readFileSync(savedManifestFile),manifestBytes);assert.deepEqual(fs.readFileSync(leaseFile),renewed);
+    assert(!JSON.stringify(published.lease_reconciliation).includes(record.owner_token));
+    console.log('PASS trusted lease renewal: exact original preimage, immutable manifest, stopped writer and live authority; foreign fields/metadata/handles and drift refuse');
   }finally{f.cleanup();}
 }
 async function implicitOrdinaryIdentity() {
@@ -227,5 +266,5 @@ async function guardedHandoff() {
     console.log('PASS retained handoff: final request, research and unclaimed drift refuse before callback; partial and duplicate invocation never publish');
   } finally { f.cleanup(); }
 }
-module.exports={fixture,main};
+module.exports={fixture,main,protectedLeaseRenewal};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});
