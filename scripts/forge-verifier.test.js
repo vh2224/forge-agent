@@ -869,6 +869,53 @@ test('artifact entrypoints validate modules before reading even a legacy plan', 
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+test('null-return detector distinguishes empty implementations from real fallbacks', () => {
+  const check = source => require('./forge-verifier')._private.checkSubstantive(source, source.split('\n').length, { path: 'fixture.js' });
+  const nullFlags = source => (check(source).flags || []).filter(flag => flag.regex_name === 'return_null_function');
+  for (const source of [
+    'function f() {\n return null;\n}',
+    'const f = function () { /* return out; */\n return null;\n};',
+    'const f = () => {\n "use strict"; /* comment */\n return null\n};',
+    'function outer(x) { const value = x + 1; function inner() {\n return null;\n} return value; }',
+    'const obj = { method() {\n return null;\n} };',
+    'const g = function* () {\n return null;\n};',
+    'function f() {\n "first"\n "second"\n return null;\n}',
+    'const text = `raw ${(() => {\n return null;\n})()}`;',
+    'const ratio = {} / function actual() {\n return null;\n} / 2;',
+  ]) assertEq(nullFlags(source).length, 1, source);
+  for (const source of [
+    'function f(x) {\n if (!x) return null;\n return x.value;\n}',
+    'function f(x) {\n if (x) { return x.value; }\n return null;\n}',
+    'function f() {\n const out = build();\n return null;\n}',
+    '// function f() {\n// return null;\n// }',
+    'const text = "function f() { return null; }";',
+    'const text = `function f() {\n return null;\n}`;',
+    'const pattern = /function f\\(\\) { return null; }/;',
+    'function real() { return 1; }\n/function fake() { return null; }/.test("text");',
+    'if (ok) { doWork(); }\n/function fake() { return null; }/.test("text");',
+    'class A {}\n/function fake() { return null; }/.test("text");',
+    'const n = 1\nfunction real() { return 1; }\n/function fake() { return null; }/.test("text");',
+    'function inline() { return null; }',
+    'function f() {\n return\n null;\n}',
+  ]) assertEq(nullFlags(source).length, 0, source);
+  const result = nullFlags('function real() { return 42; }\nfunction stub() {\n return null;\n}');
+  assertEq(result.length, 1);
+  assertEq(result[0].line_number, 3);
+  assertEq(result[0].matched_text, 'return null;');
+  assertEq(result[0].path, 'fixture.js');
+});
+
+test('null-return lexical handling preserves detector configuration and line counts', () => {
+  const check = (source, options = {}) => require('./forge-verifier')._private.checkSubstantive(source, source.split('\n').length, { path: 'fixture.js', ...options });
+  const source = 'function f() {\n /* } fake brace */\n "directive with }";\n return null;\n}';
+  assertEq(check(source).flags[0].line_number, 4);
+  assert(check(source, { stub_patterns: [] }).pass);
+  assertEq(check(source, { min_lines: 100, stub_patterns: [] }).flags[0].reason, 'below_min_lines');
+  const custom = check('function real() { return 42; }\nCUSTOM_STUB', { stub_patterns: ['CUSTOM_STUB'] });
+  assertEq(custom.flags[0].regex_name, 'custom_stub_0');
+  assert(!check(source, { stub_patterns: ['CUSTOM_STUB'] }).pass);
+});
+
 try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch (_) {}
 
 console.log(`\n=== Result: ${passed} passed, ${failed} failed ===`);
