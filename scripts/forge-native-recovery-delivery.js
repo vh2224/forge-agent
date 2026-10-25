@@ -4,6 +4,11 @@ const fs=require('fs'),path=require('path'),crypto=require('crypto');
 const api = name => require('./' + name);
 const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
 const fail=c=>{throw Object.assign(new Error(c),{code:c});};
+// Match sidecar validation defaults without rewriting durable request/manifest bytes.
+const requestIdentity=request=>{
+  const recovery=api('forge-attempt-recovery');
+  return recovery.requestIdentity(recovery.canonicalRequest(request));
+};
 
 const string = { type: 'string' };
 const object = properties => ({ type: 'object', additionalProperties: false,
@@ -97,6 +102,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
   assertBoundary();
   const side=api('forge-unit-sidecar'),execution=api('forge-task-execution'),roots=api('forge-code-roots'),verify=api('forge-verify');
   side.validateRecoveryRequest(r,{nativeInvocation,linkedEntryOptions});
+  requestIdentity(r);
   const plan=fs.readFileSync(r.planFile,'utf8'),context=fs.readFileSync(r.contextFile);
   requireExplicitVerify(plan);
   const checked=roots.validatePlan(plan,r.execution_contract);
@@ -143,7 +149,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       guard();
       if(!resultContract.validate(result).ok)fail('native-result-invalid');
       persist({kind:'milestone-native-continuation',phase:'executed',dispatch_id:r.dispatchId,
-        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(api('forge-attempt-recovery').requestIdentity(r)),
+        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
         route:r.route,manifest_sha256:hash(fs.readFileSync(manifestFile)),result,
         code_state:execution.replayState(r.cwd,r.execution_contract)});
     },
@@ -175,7 +181,7 @@ function prepare({request,nativeInvocation,assertBoundary,assertAuthority,linked
       }
       const artifacts=verified.artifacts.map(a=>({...a,before:fs.existsSync(path.join(r.contextRoot,a.path))?hash(fs.readFileSync(path.join(r.contextRoot,a.path))):null}));
       const record={kind:'native-execute-task',phase:'ready',dispatch_id:r.dispatchId,result,artifacts,route:r.route,response_sha256:hash(JSON.stringify(result)),
-        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(api('forge-attempt-recovery').requestIdentity(r)),
+        fingerprint:side.artifactFingerprint(r),recovery_identity_sha256:roots.digest(requestIdentity(r)),
         manifest_sha256:hash(fs.readFileSync(manifestFile)),
         milestone_delivery:{plan_sha256:planHash,protected_owner:prepared.protected_owner,protected_roots:prepared.protected_roots,code_state:execution.replayState(r.cwd,r.execution_contract)}};
       persist(record);
@@ -214,7 +220,7 @@ async function replay({request,recovery,runtime,nativeOptions}) {
   const reservation=state.reservations.at(-1);
   if(roots.digest(reservation)!==recovery.resumeReservation?.sha256
       || state.continuation.reservation_sha256!==recovery.resumeReservation.sha256
-      || state.request_identity_sha256!==roots.digest(recoveryApi.requestIdentity(request))
+      || state.request_identity_sha256!==roots.digest(requestIdentity(request))
       || state.pending_questions.some(q=>q.status==='pending'))fail('milestone-replay-state-binding');
   const expected=request.resultFile+'.recovery-'+recovery.resumeReservation.sha256+'.json';
   if(binding.manifest_file!==expected+'.manifest.json'||binding.receipt_file!==expected+'.receipt.json')fail('milestone-replay-path-binding');
@@ -231,7 +237,7 @@ async function replay({request,recovery,runtime,nativeOptions}) {
     dispatchId:request.dispatchId+'-recovery-'+recovery.resumeReservation.sha256,resultFile:expected};
   if(roots.digest(r)!==roots.digest(expectedRequest)||record.manifest_sha256!==binding.manifest_sha256
       || record.dispatch_id!==r.dispatchId||record.fingerprint!==api('forge-unit-sidecar').artifactFingerprint(r)
-      || record.recovery_identity_sha256!==roots.digest(recoveryApi.requestIdentity(r))
+      || record.recovery_identity_sha256!==roots.digest(requestIdentity(r))
       || !resultContract.validate(record.result).ok||!['executed','ready'].includes(record.phase))fail('milestone-replay-receipt-binding');
   const invocation=api('forge-native-invocation').buildNativeInvocation(nativeOptions(r.route));
   if(!invocation.ok||roots.digest(invocation)!==state.continuation.invocation_sha256)fail('milestone-replay-invocation-binding');

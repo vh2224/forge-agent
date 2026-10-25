@@ -77,6 +77,7 @@ async function fixture() {
   return f;
 }
 async function main(){
+  await implicitOrdinaryIdentity();
   await durableReplay();
   await guardedHandoff();
   const f=await fixture();
@@ -120,6 +121,42 @@ async function main(){
     console.log('PASS public ordinary restart: exact payload, two claimed roots, one callback, canonical verified publication and immutable history');
     console.log('PASS milestone evidence: missing, duplicate, foreign, wrong-root, fabricated and unmet criteria refuse; standalone schema unchanged');
   }finally{f.cleanup();}
+}
+async function implicitOrdinaryIdentity() {
+  const f=await fixture();
+  try {
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime);
+    const request={...handoff.result.request};delete request.scope;delete request.phase;
+    const original=JSON.stringify(request),receipts=[];
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',
+      resolvedDispatch:request.route,activeCapabilities:capabilities,prompt:'Fixture ordinary execution',
+      forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    const options={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+      persistDeliveryReceipt:receipt=>receipts.push(receipt)};
+    const session=delivery.prepare(options);session.start();
+    const manifest=session.manifest(),manifestFile=request.resultFile+'.manifest.json',before=fs.readFileSync(manifestFile);
+    for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+    const result=f.result();session.returned(result);
+    const resumed=delivery.prepare({...options,savedManifest:manifest});resumed.start();
+    resumed.verify(result);const published=resumed.publish(result);
+    assert.equal(published.phase,'ready');assert.equal(receipts.length,2);
+    assert.equal(published.recovery_identity_sha256,roots.digest(recovery.requestIdentity(recovery.canonicalRequest(request))));
+    assert.equal(JSON.stringify(request),original);assert.deepEqual(fs.readFileSync(manifestFile),before);
+    assert(!Object.hasOwn(manifest.request,'scope'));assert(!Object.hasOwn(manifest.request,'phase'));
+    console.log('PASS implicit ordinary identity: returned and saved-manifest publication retain original request bytes');
+  } finally { f.cleanup(); }
+  const invalid=await fixture();
+  try {
+    const handoff=await side.recoverUnitSidecar(invalid.request,invalid.recovery,invalid.runtime);
+    const request={...handoff.result.request,scope:'invalid-scope'};
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',
+      resolvedDispatch:request.route,activeCapabilities:capabilities,prompt:'Invalid identity fixture',
+      forkTurns:'none',taskName:'fixture',agentType:'forge-executor'});
+    assert.throws(()=>delivery.prepare({request,nativeInvocation,assertBoundary:invalid.assertBoundary,
+      assertAuthority:invalid.assertBoundary,persistDeliveryReceipt:()=>{throw Error('unexpected receipt');}}));
+    assert(!fs.existsSync(request.resultFile+'.manifest.json'));
+    console.log('PASS invalid explicit identity refuses before manifest or receipt');
+  } finally { invalid.cleanup(); }
 }
 async function durableReplay() {
   for(const stage of ['returned','publication']) {
