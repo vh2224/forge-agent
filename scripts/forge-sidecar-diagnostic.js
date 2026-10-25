@@ -5,6 +5,12 @@ const liveness = require('./forge-sidecar-liveness');
 // Closed vocabulary only. Never persist provider text, paths, JSON parser
 // messages, validator exceptions, environment, or classifyReturn().tail.
 const REASONS = Object.freeze({
+  ...Object.fromEntries(Object.entries({
+    input: ['json', 'object', 'schema', 'unit', 'plan', 'plan-fingerprint', 'bindings', 'expected-children'],
+    delivery: ['json', 'object', 'schema', 'unit', 'generated-by', 'delivery-fingerprint', 'criteria', 'facts'],
+    verification: ['json', 'object', 'schema', 'unit', 'kind', 'plan-fingerprint', 'code-dir', 'revision', 'environment', 'captured-at', 'result'],
+    'standalone-preparation': ['content'],
+  }).flatMap(([category, conditions]) => conditions.map(condition => [`typed-${category}-${condition}`, 'validation']))),
   'output-empty': 'envelope', 'marker-missing': 'envelope',
   'end-marker-missing': 'envelope', 'status-missing': 'envelope',
   'status-invalid': 'envelope', 'result-json-missing': 'envelope',

@@ -110,6 +110,30 @@ function inspectDeliveryContent(content, rule) {
     && typeof value.environment === 'string' && typeof value.captured_at === 'string'
     && value.result && typeof value.result === 'object' && !Array.isArray(value.result);
 }
+// Called only after the existing validator rejects; never changes acceptance.
+// Closed categories and field names keep provider content out of diagnostics.
+function deliveryFailureReason(content, rule) {
+  const category = ['input', 'delivery', 'standalone-preparation'].includes(rule.kind)
+    ? rule.kind : 'verification';
+  const reason = condition => `typed-${category}-${condition}`;
+  if (category === 'standalone-preparation') return reason('content');
+  let value;
+  try { value = JSON.parse(content); } catch { return reason('json'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return reason('object');
+  if (!(category === 'input' ? [1, 2] : [1]).includes(value.schema_version)) return reason('schema');
+  if (!sameUnit(value.unit, rule.unit)) return reason('unit');
+  if (category === 'delivery' && value.generated_by !== 'forge-delivery') return reason('generated-by');
+  if (category === 'verification' && value.kind !== rule.kind) return reason('kind');
+  const strings = category === 'input' ? ['plan', 'plan_fingerprint']
+    : category === 'delivery' ? ['delivery_fingerprint']
+      : ['plan_fingerprint', 'code_dir', 'revision', 'environment', 'captured_at'];
+  for (const field of strings) if (typeof value[field] !== 'string') return reason(field.replaceAll('_', '-'));
+  const arrays = category === 'input' ? ['bindings', 'expected_children']
+    : category === 'delivery' ? ['criteria', 'facts'] : [];
+  for (const field of arrays) if (!Array.isArray(value[field])) return reason(field.replaceAll('_', '-'));
+  if (category === 'verification') return reason('result');
+  return 'delivery-artifact-invalid';
+}
 const MILESTONE_ID_RE = /^(?:M\d+|M-\d{14}-[a-z0-9-]+)$/i;
 // Review-fix has three boundaries and publishes only outcome lines into the
 // REVIEW.md files the parent derives here; the worker never selects a path.
@@ -361,7 +385,10 @@ function inspectArtifacts(value, allowed, required, maxPayloadBytes = Infinity, 
       || typeof artifact.path !== 'string' || typeof artifact.content !== 'string' || !artifact.content.trim()
       || Object.keys(artifact).some(k => !['path', 'content'].includes(k))) return bad('schema-invalid');
     if (!allowed.includes(artifact.path)) return bad('artifact-path-invalid');
-    if (rules[artifact.path] && !inspectDeliveryContent(artifact.content, rules[artifact.path])) return bad('delivery-artifact-invalid');
+    if (rules[artifact.path] && !inspectDeliveryContent(artifact.content, rules[artifact.path])) {
+      return bad(options.detailedDeliveryDiagnostic
+        ? deliveryFailureReason(artifact.content, rules[artifact.path]) : 'delivery-artifact-invalid');
+    }
     if (seen.has(artifact.path)) return bad('artifact-duplicate');
     const contentLimit = rules[artifact.path]?.kind === 'delivery' ? MAX_DELIVERY_BYTES : MAX_ARTIFACT_BYTES;
     if (Buffer.byteLength(artifact.content) > contentLimit) return bad('artifact-limit');
@@ -2267,7 +2294,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:loc.preparation?'preparation':'artifacts', resultSchema:schema, calibrationPhase:sessionPhase === 'plan' ? 'plan' : r.phase || 'artifacts',
           ...(options.claudeSession ? { session: options.claudeSession } : {}),
           readOnly: true, validateCandidate: value => inspectArtifacts(value, loc.allowed, loc.required, payloadLimit, loc.rules,
-            { forbidArtifactsOnNonDone: loc.preparation === true }), onHeartbeat: heartbeat,
+            { forbidArtifactsOnNonDone: loc.preparation === true, detailedDeliveryDiagnostic: true }), onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
         await livenessQueue;
@@ -2282,7 +2309,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
       const verdict = inspectArtifacts(result, loc.allowed, loc.required, payloadLimit, loc.rules,
-        { forbidArtifactsOnNonDone: loc.preparation === true });
+        { forbidArtifactsOnNonDone: loc.preparation === true, detailedDeliveryDiagnostic: true });
       if (!verdict.ok) {
         const error = new Error('Invalid artifact result.');
         error.code = 'invalid-artifact-result';
