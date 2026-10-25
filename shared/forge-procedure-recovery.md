@@ -3,7 +3,10 @@
 Load this mandatory procedure before the corresponding action.
 Keep scope, phase, unit IDs, owner and physical CODE_DIR roots unchanged.
 Keep primary_root_id, claim generation, gates and original explicit model/tier/effort immutable in history.
-Never execute inline to bypass a refused route.
+Never silently replace a refused route with host execution. Explicitly authorized
+Forge maintenance follows shared/forge-direct-actions.md, preserves the original
+reservation/history and requires reconciled roots, claims, gates and independent
+review. Record actual host edits separately; maintenance does not complete recovery.
 Inspect the real process and durable receipt before considering another attempt.
 A replay-eligible saved response uses canonical replay/publication without a provider call.
 Check result identity, input fingerprints and protected metadata before replay.

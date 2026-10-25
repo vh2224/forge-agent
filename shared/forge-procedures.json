@@ -6,7 +6,7 @@
     {
       "id": "core",
       "path": "shared/forge-procedure-core.md",
-      "sha256": "b52fa877593f03e4afc9c40a6021769d643ab27d3883add7176f7ab02a598ed5",
+      "sha256": "80854d0df7837fb869f5befa55df3a857827691585a69a740e3f34ac92677baf",
       "status": "ready",
       "owner": "T01",
       "dependencies": [],
@@ -165,7 +165,7 @@
     {
       "id": "recovery",
       "path": "shared/forge-procedure-recovery.md",
-      "sha256": "6b460f345b83cc9c988336419ebec7bacb21a841d1b9997b04530b428dceb032",
+      "sha256": "47e906cd647767f8dec63df6a065d8faa99b14fafaf4924e00b41b0e23944d22",
       "status": "ready",
       "owner": "T04",
       "dependencies": [

@@ -632,7 +632,9 @@ Recovery state v2 has no cumulative clock; a v1 state is migrated explicitly.
 Termination comes from the finite candidate list, destination exclusions, durable
 reservations, one silence retry and canonical exception expiry; a native candidate
 still needs a live scoped exception. Timeout alone does not prove model unavailability.
-Keep preferences/gates; never execute inline to bypass refusal.
+Keep preferences/gates; never silently replace a refused route. Separately authorized
+Forge maintenance follows `shared/forge-direct-actions.md`, preserving the original
+reservation, reconciled roots, claims and independent review. Record the actual executor.
 
 Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
 observed model, effort, host/worker/transport, reason_code/layer, duration, receipt and

@@ -8,6 +8,12 @@ Na preparação de task solta e nos demais despachos sidecar, siga `shared/forge
 
 ## Personal lifecycle (all exits)
 
+Apply `shared/forge-direct-actions.md` to eligible direct actions and explicitly
+authorized Forge maintenance. Refusal/stop paths below stop that dispatch, not
+separately authorized maintenance. Keep original routes/reservations, reconciled
+roots, claims, gates and independent review; record the actual executor. A refusal
+or standing routing permission alone does not authorize host execution.
+
 For natural-language feedback during UAT, apply `shared/forge-direct-actions.md`
 before resuming this lifecycle. A known eligible correction is executed directly
 in the existing CODE_DIR, verified and recorded in UAT/SUMMARY or handoff with a
@@ -1789,7 +1795,9 @@ Recovery state v2 has no cumulative clock; a v1 state is migrated explicitly.
 Termination comes from the finite candidate list, destination exclusions, durable
 reservations, one silence retry and canonical exception expiry; a native candidate
 still needs a live scoped exception. Timeout alone does not prove model unavailability.
-Keep preferences/gates; never execute inline to bypass refusal.
+Keep preferences/gates; never silently replace a refused route. Separately authorized
+Forge maintenance follows `shared/forge-direct-actions.md`, preserving the original
+reservation, reconciled roots, claims and independent review. Record the actual executor.
 
 Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
 observed model, effort, host/worker/transport, reason_code/layer, duration, receipt and

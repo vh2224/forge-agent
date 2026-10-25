@@ -375,7 +375,7 @@ Modeled on **Fallback agents** above. One event type, two triggers discriminated
 
 > **REGRA CRÍTICA:** o orquestrador NUNCA produz veredito de review no lugar de um agente indisponível — nem defesa, nem réplica, nem julgamento de objeção alheia. A única ação permitida é registrar a indisponibilidade e escalar ao humano (interativo) ou deferir à triagem final (auto).
 
-Rationale: o orquestrador é o **autor** do dispatch (e, no loop, do próprio código sob review). Arbitrar no lugar do agente ausente destrói exatamente a independência que a review dialética existe para garantir — mesma família de "executar inline nunca é fallback aceitável".
+Rationale: o orquestrador é o **autor** do dispatch (e, no loop, do próprio código sob review). Arbitrar no lugar do agente ausente destrói a independência da review dialética. A manutenção direta autorizada em `shared/forge-direct-actions.md` permite implementar o reparo, mas não substituir seu revisor independente.
 
 **4. Política por modo.**
 

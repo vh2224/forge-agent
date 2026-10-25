@@ -236,7 +236,7 @@ try {
 
   // Distribution only: these checks are not an end-to-end host classifier test.
   const directSpec = readRepo('shared/forge-direct-actions.md').replace(/\s+/g, ' ');
-  for (const phrase of ['before creating a run', 'available in any context', 'never a fallback', 'personal checkpoint',
+  for (const phrase of ['before creating a run', 'available in any context', 'Authorized Forge maintenance', 'personal checkpoint',
     'pending until the user accepts', 'record or checkpoint publication fails']) {
     assert(directSpec.includes(phrase), `direct action contract lost ${phrase}`);
   }
@@ -249,6 +249,30 @@ try {
     assert(text.includes('checkpoint pessoal'));
     assert(text.includes('fallback'));
   }
+
+  // Maintenance is a distinct, authorized host path, not a claimed worker result.
+  // Check shipped obligations and actual loader output, not an enforcement claim.
+  for (const phrase of ['explicitly authorized repair', 'independent review',
+    'Active/unknown writers', 'unanswered functional decisions',
+    'never claim the host matched or completed that route',
+    'consume a reserved invocation', 'forge a no-spawn attestation',
+    'canonical recovery/publication', 'not automatic runtime enforcement']) {
+    assert(directSpec.includes(phrase), `maintenance contract lost ${phrase}`);
+  }
+  const procedures = require('./forge-procedure-context');
+  for (const phase of ['execute-task', 'recovery', 'restart']) {
+    const loaded = procedures.loadProcedureContext({ cwd: REPO, phase });
+    assert(loaded.content.includes('explicitly authorized Forge maintenance'), phase);
+    assert(loaded.content.includes('actual host executor'), phase);
+    assert(!loaded.content.includes('Never execute inline to bypass'), phase);
+  }
+  for (const name of ['forge-task', 'forge-next', 'forge-auto']) {
+    const skill = readRepo(`skills/${name}/SKILL.md`);
+    assert(skill.includes('standing routing permission alone') || skill.includes('permission alone authorizes host execution'), name);
+    assert(!skill.includes('NEVER execute the unit inline in the main context'), name);
+  }
+  assert(!instructions.renderBlock().includes('Nunca execute a unidade inline'));
+  assert(readRepo('shared/forge-review.md').includes('não substituir seu revisor independente'));
 
   console.log('PASS intent entry: producer/receiver contract executed, stale/foreign/corrupt refusals named, and one projector feeding both hosts');
 } finally {

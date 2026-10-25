@@ -1,5 +1,12 @@
 ## Não lançado
 
+- Execução direta deixa de ter uma proibição absoluta para unidades Forge: reparos
+  explicitamente autorizados do próprio Forge podem ser feitos pela sessão atual,
+  preservando preparação, isolamento de arquivos, claims, reconciliação de writers,
+  testes e revisão independente. O executor real é registrado separadamente da rota
+  histórica; manutenção não fabrica receipts, consome reservas ou conclui recuperação.
+  Recusa e autorização de fallback entre modelos, isoladamente, não autorizam essa troca.
+
 - A entrada distingue ações diretas autorizadas de mudanças que precisam de task/milestone.
   Ações diretas valem em qualquer contexto, para pedidos simples ou suficientemente completos,
   com análise de escopo, risco e verificação e nenhuma decisão importante em aberto.
