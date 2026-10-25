@@ -222,6 +222,8 @@ JSONL é não confiável; malformed/truncado vira `output-invalid`, timeout vira
 `claude-timeout`/`codex-timeout`, orphan vira `claude-orphan`/`codex-orphan` e
 `needs_input` nunca é promovido a sucesso.
 
+`claude-timeout` é o teto de segurança do tier (não um prazo curto de 300s): só vale quando o teto estoura ou o worker nem partiu; silêncio ou morte detectados pela vigilância de liveness têm razão própria e carregam `error.liveness.termination`.
+
 Retries respeitam o controller e o boundary persistido. Timeout/orphan são
 terminais; não reinicie o mesmo processo por fora do Forge. Falha transitória
 só repete até o cap configurado e depois avança a cadeia/fallback documentado.

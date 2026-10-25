@@ -36,15 +36,20 @@
  *   validateExecuteResult(obj) → boolean
  *   deriveFilesChanged(cwd)    → [{status, path}]  (git READ-ONLY)
  *   readWorkersTimeout(dir)    → number|null       (prefs cascade)
+ *   readWorkersTimeoutRaw(dir) → any|null          (raw pref, validated by resolveWorkerCeiling)
  *   readSidecarsEnvPolicy(dir) → string|null       (prefs cascade)
  *   buildSidecarEnv(policy)    → object            (minimal/inherit sidecar env)
  *
  * CLI usage:
- *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode defend --input <objections> [--diff-cmd "git diff"] [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout 300] [--env-policy minimal|inherit] [--cwd <dir>]
- *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> --context-root <WORKING_DIR> [--engine codex|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
- *   node scripts/forge-xllm.js --mode plan --plan-context <file> --result-file <path> --cwd <repo> [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit]
+ *   node scripts/forge-xllm.js --mode challenge --diff-cmd "git diff" [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode defend --input <objections> [--diff-cmd "git diff"] [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode rebuttal --input <file> [--engine codex|agy] [--host-runtime claude|codex] [--sidecar-declared [false]] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]
+ *   node scripts/forge-xllm.js --mode execute --plan <T##-PLAN.md> --result-file <path> --cwd <repo> --context-root <WORKING_DIR> [--engine codex|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit]
+ *   node scripts/forge-xllm.js --mode plan --plan-context <file> --result-file <path> --cwd <repo> [--host-runtime claude|codex] [--sidecar-declared [false]] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit]
+ *
+ *   Timeout = safety ceiling (seconds): --timeout > workers.timeout pref > tier ceiling, always
+ *   through resolveWorkerCeiling. --tier is optional (absent/unknown → standard). A legacy 300
+ *   (flag or pref) is ignored in favour of the tier ceiling with a stderr warning.
  *
  * Exit contract: 0 on success. For challenge/defend/rebuttal the normalized JSON goes to stdout
  * (nothing else on stdout). For execute the result-file is the ONLY result channel —
@@ -111,12 +116,14 @@ const vcs = require('./forge-vcs.js');
 const { classifyError, isTransient } = require('./forge-classify-error.js');
 const { countTokens, truncateAtSectionBoundary } = require('./forge-tokens.js');
 const { deriveTransport } = require('./forge-transport.js');
-const { DEFAULT_WORKER_TIMEOUT_SECS } = require('./forge-worker-timeout');
+const { resolveWorkerCeiling } = require('./forge-worker-timeout');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_TIMEOUT_SECS = 300;
-const DEFAULT_EXECUTE_TIMEOUT_SECS = DEFAULT_WORKER_TIMEOUT_SECS;
+// No fixed deadline: an absent opts.timeoutSecs resolves to the tier safety ceiling.
+function ceilingSecs(opts) {
+  return opts.timeoutSecs || resolveWorkerCeiling({ tier: opts.tier }).seconds;
+}
 const HEARTBEAT_INTERVAL_MS = 15000; // re-write the running heartbeat every 15s
 // Execute prompt additions have independent budgets because their semantics differ.
 // Security is a mandatory contract and must fail closed when it cannot be delivered.
@@ -216,6 +223,15 @@ function reviewCallOptions(mode, opts) {
     ...(thinkingRequested ? { thinkingRequested } : {}) };
 }
 
+// The app-server liveness codes (S07) come from the client itself, never a copied
+// literal. The client stays lazily loaded: if it was never required, no error in
+// this process can carry one of its codes, so the list is legitimately empty.
+function appServerLivenessCodes() {
+  const loaded = require.cache[require.resolve('./forge-appserver-client')];
+  return loaded && loaded.exports && loaded.exports.APPSERVER_LIVENESS_CODES
+    ? Object.values(loaded.exports.APPSERVER_LIVENESS_CODES) : [];
+}
+
 // Only adapter vocabulary and re-sanitized diagnostic fields cross the CLI.
 // A local process/elapsed duration does not establish a remote provider call.
 function reviewFailureDiagnostic(error = {}) {
@@ -236,7 +252,7 @@ function reviewFailureDiagnostic(error = {}) {
     'native-effort-transport-unimplemented', 'native-effort-transport-unsupported',
     'native-effort-binding-mismatch', 'thinking-transport-unsupported', 'thinking-mode-undocumented',
     'thinking-disabled-incompatible', 'thinking-enabled-incompatible', 'thinking-between-tools-incompatible',
-    'thinking-mode-unknown', 'agy-output-empty'];
+    'thinking-mode-unknown', 'agy-output-empty', ...appServerLivenessCodes()];
   return { reason_code: knownCodes.includes(error.code) ? error.code : 'adapter-failed',
     diagnostic: safeDiagnostic,
     provider_called: typeof error.provider_called === 'boolean' ? error.provider_called : null,
@@ -1111,6 +1127,17 @@ function collectRuntimeEvidence(items, notifications, unit) {
  *   passes it. Validated as a finite positive integer when present (S05 review R2) —
  *   a negative reaches setInterval as a tight loop, and 0/NaN both used to slip
  *   through the `||` fallback as "absent" or as the same tight loop.
+ * @param {(snapshot:object)=>void} [opts.onProgress] owner heartbeat channel (S07):
+ *   the client's liveness snapshot. Absent on a CLI run, it defaults to the same
+ *   stderr progressLine the Claude path writes; stdout stays the result channel.
+ * @param {(transition:object)=>void} [opts.onLiveness] owner liveness observer, same
+ *   name and contract as the Claude adapter's.
+ * @param {string[]} [opts.localProofIgnore] owner result/receipt prefixes the local
+ *   proof must ignore; resolved here (the client copies them as given).
+ * @param {Function} [opts.monotonicClock] test-only; becomes the client's `clock`.
+ * @param {object} [opts.livenessPolicy] test-only; can only tighten the defaults.
+ * @param {number} [opts.livenessIntervalMs] test-only watchdog cadence.
+ * @param {number} [opts.progressIntervalMs] test-only snapshot cadence.
  * @returns {Promise<{finalText:string,agentTexts:string,diagnostics:object}>}
  */
 function invokeCodexAppServer(opts) {
@@ -1118,11 +1145,15 @@ function invokeCodexAppServer(opts) {
   // Lazy by contract: agy and every non-execute path must never load the app-server
   // client. Keeping this require here also lets a missing optional client fail only
   // for the transport that needs it.
-  const { startAppServerTurn } = require('./forge-appserver-client');
+  const { startAppServerTurn, APPSERVER_LIVENESS_CODES } = require('./forge-appserver-client');
   const {
     prompt, schema, cwd, model, timeoutSecs, onHeartbeat, sandbox,
     envPolicy = 'minimal', heartbeatIntervalMs, writableRoots = [],
   } = opts;
+  // Same default as invokeClaudeTransport: a CLI review/plan/execute leg with no
+  // owner still beats on stderr, never on stdout (the result channel).
+  const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress
+    : (require.main === module ? snapshot => process.stderr.write(require('./forge-sidecar-calibration').progressLine(snapshot)) : undefined);
   const { cmd, prefixArgs } = resolveCodexCommand();
   // S05 review R2. `heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS` conflated three
   // different bad values with absence: 0 and NaN fell back silently (so a test
@@ -1190,6 +1221,16 @@ function invokeCodexAppServer(opts) {
     },
     onSpawn,
     signal: opts.signal,
+    // S07 liveness: the owner observers, the local proof roots/ignores, and the
+    // test-only seams (production passes none of the last four, like heartbeatIntervalMs).
+    ...(onProgress ? { onProgress } : {}),
+    ...(typeof opts.onLiveness === 'function' ? { onLiveness: opts.onLiveness } : {}),
+    proofRoots: appServerProofRoots(cwd, sandbox, writableRoots),
+    localProofIgnore: appServerProofIgnore(opts.localProofIgnore),
+    ...(opts.monotonicClock !== undefined ? { clock: opts.monotonicClock } : {}),
+    ...(opts.livenessPolicy !== undefined ? { livenessPolicy: opts.livenessPolicy } : {}),
+    ...(opts.livenessIntervalMs !== undefined ? { livenessIntervalMs: opts.livenessIntervalMs } : {}),
+    ...(opts.progressIntervalMs !== undefined ? { progressIntervalMs: opts.progressIntervalMs } : {}),
   }).then((session) => {
     stopHeartbeat();
     let contextHealth = null;
@@ -1198,7 +1239,9 @@ function invokeCodexAppServer(opts) {
       try {
         const { observeSession, consumeBoundary } = require('./forge-context-codex');
         contextHealth = observeSession({ cwd: opts.contextRoot, threadStartResult: session.threadStartResult,
-          notifications: session.contextNotifications || [] });
+          notifications: session.contextNotifications || [],
+          // Under a protected owner census (runExecute passes persistContext:false) nothing may be written in the owner tree.
+          persist: opts.persistContext !== false });
         if (contextHealth) contextBoundary = consumeBoundary({ cwd: opts.contextRoot, snapshot: contextHealth });
       } catch { /* context health is best-effort and never controls the turn */ }
     }
@@ -1240,13 +1283,44 @@ function invokeCodexAppServer(opts) {
     // `terminal` and the orchestrator's transient retry (M013) dies silently. The
     // `codex exec` path already did exactly this at its own close handler; the
     // app-server transport must not lose the signal on the way in.
-    const tail = error && typeof error.stderrTail === 'string' ? error.stderrTail.trim() : '';
+    // A liveness kill (S07) is the client's own verdict with a fixed message; the
+    // stderr tail would make it unstable and could smuggle a transient keyword in.
+    const livenessKill = Boolean(error) && Object.values(APPSERVER_LIVENESS_CODES).includes(error.code);
+    const tail = !livenessKill && error && typeof error.stderrTail === 'string' ? error.stderrTail.trim() : '';
     if (tail) {
       const snippet = tail.slice(-MAX_STDERR_SNIPPET);
       if (!String(error.message || '').includes(snippet)) error.message = `${error.message}: ${snippet}`;
     }
     throw error;
   });
+}
+
+/**
+ * Roots whose filesystem delta counts as local proof for an app-server turn: the
+ * workspace plus the declared writable roots, resolved, deduplicated and existing.
+ * A read-only turn has none, exactly like localProofRoots in the Claude adapter.
+ */
+function appServerProofRoots(cwd, sandbox, writableRoots) {
+  if (sandbox === CAPABILITY_SANDBOX_MODE.readonly) return [];
+  const extra = Array.isArray(writableRoots) ? writableRoots : [];
+  const roots = [cwd, ...extra].filter(root => typeof root === 'string' && root).map(root => path.resolve(root));
+  return [...new Set(roots)].filter(root => fs.existsSync(root));
+}
+
+/** Test-only liveness seams forwarded by runExecute; production passes none. */
+function appServerTestSeams(opts) {
+  const seams = {};
+  for (const key of ['monotonicClock', 'livenessPolicy', 'livenessIntervalMs', 'progressIntervalMs']) {
+    if (opts[key] !== undefined) seams[key] = opts[key];
+  }
+  return seams;
+}
+
+/** Owner ignore prefixes, resolved like localProofIgnorePrefixes (Claude adapter). */
+function appServerProofIgnore(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.filter(item => typeof item === 'string' && item).map(item => path.resolve(item)))]
+    : [];
 }
 
 // ── Agy (Antigravity CLI / Gemini) invocation ────────────────────────────────
@@ -1586,7 +1660,9 @@ function invokeEngine(engine, opts) {
 async function invokeClaudeJson(opts, validateCandidate, review = false) {
   const resultSchema = review ? {type:'object',additionalProperties:false,required:['status','output'],properties:{status:{type:'string',enum:['done']},output:opts.schema}} : opts.schema;
   const output = await invokeClaudeTransport({ ...opts, prompt:opts.prompt, readOnly:true,
-    resultProfile:review?'review':'plan', resultSchema, validateCandidate, terminateChild:terminateOwnedProcessTree });
+    resultProfile:review?'review':'plan', resultSchema, validateCandidate, terminateChild:terminateOwnedProcessTree,
+    // A review leg never persists or resumes a Claude session (S05).
+    ...(review ? { session: undefined } : {}) });
   return { candidate: output.candidate, telemetry: output.telemetry || null };
 }
 
@@ -1599,6 +1675,12 @@ function invokeClaudeTransport(options) {
 // callback nor the extra key, so their options and stdout JSON stay byte-identical.
 function claudeTelemetrySink(engine, sink) {
   return engine === 'claude' ? { onTransportTelemetry: sink } : {};
+}
+
+// Claude-only liveness observer for the review legs, same posture as the sink:
+// codex/agy never receive the key. No owner event exists on this path yet.
+function claudeLiveness(engine, onLiveness) {
+  return engine === 'claude' && typeof onLiveness === 'function' ? { onLiveness } : {};
 }
 
 async function withClaudeTelemetry(engine, normalized, telemetry) {
@@ -1772,6 +1854,23 @@ function readWorkersTimeout(baseDir) {
   return Number.isInteger(timeout) && timeout > 0 ? timeout : null;
 }
 
+/** Raw workers.timeout pref (or null); validation and legacy-300 handling live in resolveWorkerCeiling. */
+function readWorkersTimeoutRaw(baseDir) {
+  const workers = readPrefsCached(baseDir).prefs.workers;
+  const value = workers && workers.timeout;
+  return value === undefined || value === null ? null : value;
+}
+
+/** CLI ceiling: --timeout > workers.timeout pref > tier ceiling, warning on stderr. */
+function cliCeiling(args, baseDir = process.cwd()) {
+  const flag = args.timeout !== undefined && args.timeout !== true ? Number(args.timeout) : null;
+  const explicit = flag !== null ? flag : readWorkersTimeoutRaw(baseDir);
+  const tier = typeof args.tier === 'string' ? args.tier : undefined;
+  const resolved = resolveWorkerCeiling({ tier, explicit });
+  if (resolved.warning) process.stderr.write(`forge-xllm: aviso: ${resolved.warning.code}: ${resolved.warning.message}\n`);
+  return resolved.seconds;
+}
+
 /**
  * Is this env key credential-bearing for a THIRD-PARTY sidecar process?
  *
@@ -1924,7 +2023,7 @@ function readSidecarsEnvPolicy(baseDir) {
  */
 async function runChallengeCore(opts) {
   const cwd = opts.cwd || process.cwd();
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const engine = assertEngineSupportsMode('challenge', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.diffCmd) throw new Error('challenge mode requires --diff-cmd');
@@ -1940,6 +2039,7 @@ async function runChallengeCore(opts) {
     prompt, schema: challengeSchema, cwd, model: opts.model, effort: opts.effort, signal: opts.signal, timeoutSecs, envPolicy: opts.envPolicy || 'minimal',
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
     ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
+    ...claudeLiveness(engine, opts.onLiveness),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     // Closed-enum value, never a fresh string (S05 Notes 6 / S04 R7).
     sandbox: CAPABILITY_SANDBOX_MODE.readonly,
@@ -1979,7 +2079,7 @@ async function runChallengeCore(opts) {
  */
 async function runDefendCore(opts) {
   const cwd = opts.cwd || process.cwd();
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const engine = assertEngineSupportsMode('defend', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.inputFile) throw new Error('defend mode requires --input <file>');
@@ -2009,6 +2109,7 @@ async function runDefendCore(opts) {
     effort: opts.effort,
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
     ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
+    ...claudeLiveness(engine, opts.onLiveness),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
@@ -2040,7 +2141,7 @@ async function runDefendCore(opts) {
  */
 async function runRebuttalCore(opts) {
   const cwd = opts.cwd || process.cwd();
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const engine = assertEngineSupportsMode('rebuttal', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   if (!opts.inputFile) throw new Error('rebuttal mode requires --input <file>');
@@ -2066,6 +2167,7 @@ async function runRebuttalCore(opts) {
     effort: opts.effort,
     onHeartbeat: pid => identityStage(opts, 'iniciado', { pid }),
     ...claudeTelemetrySink(engine, telemetry => { transportTelemetry = telemetry; }),
+    ...claudeLiveness(engine, opts.onLiveness),
     announce: opts.announce, identity: opts.identity, _sidecarIdentity: opts._sidecarIdentity,
     signal: opts.signal,
     timeoutSecs,
@@ -2384,7 +2486,7 @@ async function runWriteContractCore(opts, contract) {
   const rootKeys = repoRoots.map(root => process.platform === 'win32' ? root.toLowerCase() : root);
   if (new Set(rootKeys).size !== repoRoots.length) throw new Error('execute repo roots must be unique');
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const dispatchId = normalizeDispatchId(opts.dispatchId, contract.mode);
 
   contract.preflight();
@@ -2540,6 +2642,12 @@ async function runWriteContractCore(opts, contract) {
         sourceEnv: process.env,
         terminateChild: terminateOwnedProcessTree,
         ...(opts.thinkingRequested ? { thinkingRequested: opts.thinkingRequested } : {}),
+        // Owner liveness observer and the owner's result/receipt prefixes the
+        // local proof must ignore. The codex branch below passes the same pair (S07).
+        onLiveness: opts.onLiveness, localProofIgnore: opts.localProofIgnore,
+        // Session persistence/resume (S05) is opted in by the unit owner
+        // (forge-unit-sidecar), never by a direct CLI call and never for fix.
+        ...(contract.mode !== 'fix' && opts.claudeSession ? { session: opts.claudeSession } : {}),
         ...(contract.claudeOptions || {}),
       });
     } catch (error) {
@@ -2578,6 +2686,12 @@ async function runWriteContractCore(opts, contract) {
       evidenceUnit: dispatchId,
       writableRoots,
       contextRoot,
+      // T06: a protected owner census (executionContext) keeps context health in memory.
+      persistContext: !opts.executionContext,
+      // S07: the same owner liveness observer and ignore prefixes as the Claude branch.
+      onLiveness: opts.onLiveness,
+      localProofIgnore: opts.localProofIgnore,
+      ...appServerTestSeams(opts),
     });
     const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
     outputTokens = countTokens(rawContent);
@@ -2648,13 +2762,15 @@ async function runWriteContractCore(opts, contract) {
   // transports are untrusted processes and cross this exact same barrier.
   assertUntrustedOutputBarrier(parsed);
 
-  const derived = preDirtyAllByRepo.flatMap((snapshot, index) =>
+  let derived = preDirtyAllByRepo.flatMap((snapshot, index) =>
     deriveFilesChanged(snapshot.repo, snapshot.entries, attemptSnapshots[index].start_sha, snapshot.vcs)
       .map(entry => executionContract ? { ...entry, root_id: labels[index], repo: labels[index] }
         : repoRoots.length > 1 ? { ...entry, repo: labels[index] } : entry));
   // Protected metadata is outside the surgical reset set. A sidecar-owned `.gsd`
   // delta is therefore a hard terminal failure, never an advisory warning/success.
   try {
+    // The caller may remove only changes it can prove it authored (exact owner event appends).
+    if (typeof opts.reconcileProtectedChanges === 'function') derived = await opts.reconcileProtectedChanges(derived);
     assertNoProtectedSidecarChanges(derived);
   } catch (error) {
     if (contract.protectedCode) error.code = contract.protectedCode;
@@ -2749,7 +2865,7 @@ async function runPlanCore(opts) {
   const engine = assertEngineSupportsMode('plan', opts.engine || 'codex');
   const sidecarOptions = normalizePublicSidecarOptions(opts);
   const vcsName = vcs.detectVcs(cwd) === 'svn' ? 'svn' : 'git';
-  const timeoutSecs = opts.timeoutSecs || DEFAULT_EXECUTE_TIMEOUT_SECS;
+  const timeoutSecs = ceilingSecs(opts);
   const dispatchId = normalizeDispatchId(opts.dispatchId, 'plan');
 
   if (!opts.planContextFile) throw new Error('plan mode requires --plan-context <file>');
@@ -2845,10 +2961,17 @@ async function runPlanCore(opts) {
   let transportTelemetry = null;
   let appServerOutput;
   if (engine === 'claude') {
-    const claudeOutput = await invokeClaudeJson(planOptions, validatePlanResult);
+    // Claude-only keys: planOptions also feeds the app-server branch unchanged.
+    // The plan unit's session opt-in comes only from its owner (S05); review
+    // legs never call runPlanCore and never receive `session`.
+    const claudeOutput = await invokeClaudeJson({ ...planOptions, onLiveness: opts.onLiveness,
+      localProofIgnore: opts.localProofIgnore, ...(opts.claudeSession ? { session: opts.claudeSession } : {}) }, validatePlanResult);
     transportTelemetry = claudeOutput.telemetry;
     appServerOutput = { finalText: JSON.stringify(claudeOutput.candidate), transport: { kind: 'claude-cli', version: 'unknown' } };
-  } else appServerOutput = await invokeCodexAppServer(planOptions);
+  } else {
+    appServerOutput = await invokeCodexAppServer({ ...planOptions, onLiveness: opts.onLiveness,
+      localProofIgnore: opts.localProofIgnore });
+  }
   const rawContent = appServerOutput.finalText || appServerOutput.agentTexts;
   // Anti-silence floor: an empty turn is a FAILURE, never an empty plan accepted in
   // silence. `codex exec` enforced this as "codex -o file is empty"; the app-server
@@ -2968,6 +3091,8 @@ module.exports = {
   validateResultFileTarget,
   readResultTelemetry,
   readWorkersTimeout,
+  readWorkersTimeoutRaw,
+  cliCeiling,
   readSidecarsEnvPolicy,
   resolveCodexCommand,
   buildSidecarEnv,
@@ -3005,6 +3130,9 @@ function classifyErrorClass(msg) {
   // A refused Claude model identity is never auto-resumed: its fixed messages
   // are matched exactly, before any keyword heuristic could see them.
   if (Object.values(CLAUDE_IDENTITY_MESSAGES).includes(msg)) return 'terminal';
+  // App-server liveness kills (S07) are terminal by construction: anchored on the
+  // client's fixed messages, before any keyword heuristic could see them.
+  if (/^forge-appserver-client: (anomalous silence \([a-z-]+\)|budget exceeded while active) after \d+(?:\.\d+)?s$/.test(msg || '')) return 'terminal';
   return isTransient(classifyError(msg)) ? 'transient' : 'terminal';
 }
 
@@ -3030,7 +3158,7 @@ if (require.main === module) {
 
   if (mode !== 'challenge' && mode !== 'defend' && mode !== 'rebuttal' && mode !== 'execute' && mode !== 'plan') {
     cliRefusal(args, 'invalid-mode');
-    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--context-root <WORKING_DIR>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--env-policy minimal|inherit] [--cwd <dir>]\n');
+    process.stderr.write('Usage: forge-xllm.js --mode challenge|defend|rebuttal|execute|plan [--engine codex|agy|claude] [--host-runtime claude|codex] [--sidecar-declared [false]] [--diff-cmd <cmd>] [--input <file>] [--plan <file>] [--security <file>] [--context-bundle <file>] [--plan-context <file>] [--result-file <path>] [--context-root <WORKING_DIR>] [--dispatch-id <id>] [--model <id>] [--timeout <secs>] [--tier light|standard|heavy|max] [--env-policy minimal|inherit] [--cwd <dir>]\n');
     process.exit(2);
   }
 
@@ -3066,13 +3194,9 @@ if (require.main === module) {
   const effort = typeof args.effort === 'string' ? args.effort : undefined;
 
   if (mode === 'plan') {
-    // Timeout precedence: --timeout flag > workers.timeout pref > default. Prefs read
+    // Ceiling precedence: --timeout > workers.timeout pref > tier ceiling. Prefs read
     // from the ADAPTER invocation dir (where .gsd/ lives), not --cwd (CODE_DIR).
-    const flagTimeout = args.timeout ? Number(args.timeout) : null;
-    const timeoutSecs =
-      (flagTimeout && flagTimeout > 0 ? flagTimeout : null)
-      || readWorkersTimeout(process.cwd())
-      || DEFAULT_EXECUTE_TIMEOUT_SECS;
+    const timeoutSecs = cliCeiling(args);
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'plan');
 
@@ -3103,13 +3227,9 @@ if (require.main === module) {
   }
 
   if (mode === 'execute') {
-    // Timeout precedence: --timeout flag > workers.timeout pref > default.
+    // Ceiling precedence: --timeout > workers.timeout pref > tier ceiling.
     // Prefs are read from the ADAPTER invocation dir (where .gsd/ lives), not --cwd.
-    const flagTimeout = args.timeout ? Number(args.timeout) : null;
-    const timeoutSecs =
-      (flagTimeout && flagTimeout > 0 ? flagTimeout : null)
-      || readWorkersTimeout(process.cwd())
-      || DEFAULT_EXECUTE_TIMEOUT_SECS;
+    const timeoutSecs = cliCeiling(args);
     const resultFile = typeof args['result-file'] === 'string' ? args['result-file'] : null;
     const dispatchId = normalizeDispatchId(args['dispatch-id'], 'execute');
     let writableRoots = [];
@@ -3162,7 +3282,7 @@ if (require.main === module) {
   // guard above already rejected it before any spawn). A try/catch left here would
   // catch nothing and let every failure escape as an unhandled rejection — exit 0
   // with empty stdout, which is the silent-success shape this adapter exists to deny.
-  const timeoutSecs = args.timeout ? Number(args.timeout) : DEFAULT_TIMEOUT_SECS;
+  const timeoutSecs = cliCeiling(args);
   let pending;
   if (mode === 'challenge') {
     pending = runChallenge({ diffCmd: args['diff-cmd'], cwd, contextRoot: args['context-root'], engine, hostRuntime, sidecarDeclared, model, effort, timeoutSecs, envPolicy, announce, dispatchId: args['dispatch-id'] });

@@ -8,14 +8,34 @@ consult `forge-transport-capabilities.js` for the actual unit contract.
 
 ## Identidade do sidecar exibida na conversa
 
-O timeout padrão é de 300 segundos (5min) por tentativa, vindo de
-`scripts/forge-worker-timeout.js` e `workers.timeout`. Um valor explicitamente
-configurado continua prevalecendo. O prazo é absoluto: heartbeat mostra que o
-processo está vivo e nunca renova o timer. Erro explícito encerra a tentativa assim
-que observado; ao vencer o prazo, exponha o reason de timeout e o resultado parcial,
-sem continuar narrando apenas "aguardando resposta". Timeout não prova recusa do
+A liveness é a autoridade primária de kill: o worker que fica sem sinal além do
+limiar (60/120/240 s) é encerrado como falha de vida. Acima dela existe só um teto
+de segurança por tentativa, resolvido por
+`scripts/forge-worker-timeout.js resolveWorkerCeiling` com fonte rastreável
+(`workers_timeout_source`): sem `workers.timeout`, vale o teto do tier da rota
+(light/standard/heavy/max = 900/1800/3600/5400 s, fonte `tier-default`); um valor
+explícito 1..86400 sobrescreve (`explicit`); o legado 300 é ignorado com aviso
+(`legacy-300-ignored`) e vale o teto do tier. Heartbeat não renova o teto. Erro
+explícito encerra a tentativa assim que observado. O teto alcançado com o stream
+ainda ativo encerra com `reason_code: budget-exceeded-while-active` (classe
+`active-budget`, não é falha do destino e não avança a cadeia); alcançado ainda em
+partida, continua `claude-timeout`. Em qualquer caso, exponha o reason e o
+resultado parcial, sem continuar narrando apenas "aguardando resposta". Timeout não prova recusa do
 provedor. Não reinicie silenciosamente uma tentativa temporizada; qualquer
 fallback permitido deve expor a falha e a nova tentativa antes de dispará-la.
+
+A persistência de sessão do Claude é opt-in: só plan/execute, pelo dono da unidade via
+`runUnitSidecar`, recebem `--session-id` (UUID gerado pelo Forge); as demais fases
+mantêm `--no-session-persistence`. Com o teto `budget-exceeded-while-active`, a recovery
+faz no máximo um `--resume` da mesma sessão, depois da inspeção e da reconciliação das
+escritas (o worker é avisado de que o workspace voltou ao baseline); o receipt novo leva
+`resumed_from` e só `session_sha256`. Sem sessão: `budget-exceeded-resume-unavailable`;
+segundo teto: `budget-exceeded-resume-exhausted`. Ao concluir, o Forge remove a sessão
+(`scripts/forge-claude-session.js`): alvos exatos sob `<home>/.claude`
+(`projects/<key>/<id>.jsonl`, `projects/<key>/<id>/`, `session-env/<id>/`,
+`file-history/<id>/`), sem seguir symlink; falha vira o evento
+`claude-session-cleanup-failed`. Limitação: se o processo pai morrer, a sessão fica órfã
+até a próxima recovery da unidade; a varredura periódica fica para a S09.
 
 Antes de disparar um sidecar, anuncie fase/unidade, engine, modelo enviado, esforço e host da rota resolvida com o rótulo **solicitação do orquestrador — aguardando confirmação do adaptador**. Essa frase descreve a intenção do despacho.
 
@@ -252,6 +272,167 @@ observer (CLI: one bounded JSON line on stderr). Observer exceptions are ignored
 The same projection survives success, failure, receipts and replay. Requesting
 termination or receiving a kill-promise rejection is never process-exit evidence.
 
+#### Prova local de vida e detector de loop
+
+Enquanto uma tool está em execução (`gap_suspended`), o watchdog do sidecar
+Claude decide com uma prova local fechada em dois eixos, sem texto do provedor:
+`capability` (`available` | `unavailable`: a plataforma conseguiu medir?) e
+`proof` (`positive` | `negative` | `none`). A forma booleana da S01
+(`available`/`proven`) continua aceita e é mapeada para `capability` e
+`positive`/`none`. Forma inválida vira `unavailable`/`none`, nunca exceção no tick.
+
+`forge-sidecar-local-proof.js` compõe a prova a partir do PID do filho, da CPU
+da árvore de processos e de uma impressão de metadados do sistema de arquivos.
+PID morto produz `available`/`negative`. PID vivo com delta de CPU de pelo menos
+50 ms, ou com mudança de arquivo, produz `positive`. Sem CPU mensurável
+(win32 hoje, ou sem provedor), a capability é `unavailable`. A amostragem roda a
+cada 15 s num timer próprio, com uma amostra inicial. O tick do watchdog só lê o
+cache. Uma prova `positive` vale 30 s (duas cadências) e depois degrada para
+`none`. `negative` não expira.
+
+As raízes medidas são o `cwd` e as `writableRoots` (nenhuma em `readOnly`).
+Ficam fora da impressão `.git/`, `.gsd/forge/` de cada raiz e os prefixos de
+`localProofIgnore`. O owner (`forge-unit-sidecar.js`) passa o result file e o
+receipt da unidade, o que cobre também `.reset-state.json`. A escrita do próprio
+canal de resultado nunca conta como progresso.
+
+Regras de silêncio de tool (base `deadMs` 240000, extensão 420000):
+
+- Prova `positive`: a tool continua viva até 660000 ms de silêncio. Depois disso
+  morre com `tool-extension-exhausted`.
+- Prova indisponível (`unavailable`/`none`: win32 sem CPU, ou sem provedor):
+  **não mata aos 240000**. Fica `slow-suspect`/`proof-unavailable` e morre aos
+  660000 com `tool-proof-unavailable-expired` (`dead-silence`), não no teto do
+  tier. São as decisões do operador de 2026-10-23.
+- PID morto (`negative`): morre aos 240000 com `tool-proof-negative`.
+- Linux/macOS com medição disponível e sem prova (`available`/`none`): morrem aos
+  240000 com `tool-unproven`.
+
+O detector de loop conta impressões SHA-256 de chamadas de tool. Cinco chamadas
+idênticas sem escrita entre elas produzem a transição `slow-suspect` com reason
+`no-progress`, e uma escrita observada zera a contagem. O loop **não mata**:
+silêncio e teto continuam sendo os únicos motivos de kill. A transição carrega só
+`progress: {repeats, fingerprint_sha256}`, com 16 hex.
+
+O owner registra essa transição em `.gsd/forge/events.jsonl` pelo próprio canal
+(`appendOwnedEvent`: broker, `recoveryReady` ou owner protegido). O worker nunca
+escreve esse arquivo. A linha tem campos fechados:
+`{ts, event: "sidecar-no-progress", workflow_id, dispatch_id, unit,
+worker_engine, model, repeats, fingerprint_sha256}`. `repeats` é inteiro, e
+`fingerprint_sha256` só aparece quando casa `^[0-9a-f]{16}$`. Nenhum nome de tool,
+argumento, prompt ou caminho entra no evento. O diagnóstico de um loop usa só a
+contagem e o hash: não registre argumentos de tool para investigar. O registro
+ocorre uma vez por episódio. `no-progress` repetido sem saída intermediária não
+duplica a linha. Uma transição que sai de `slow-suspect`/`no-progress` reabre o
+episódio. Os appends são serializados, relêem o receipt dentro da fila e são
+aguardados antes do evento terminal da unidade. Falha no append é best-effort e
+não altera o status da unidade. Os review legs Claude recebem o mesmo
+`onLiveness`, mas ainda não têm evento de owner.
+
+#### Liveness heartbeat on the progress channel
+
+O host (codex ou claude) lê o estado de liveness do worker Claude pelo canal de
+progresso existente: o callback `onProgress` em processo e a linha
+`[forge-sidecar-progress] {json}` no stderr do CLI. O dado vem no bloco aditivo
+`liveness` de `observation()` (`forge-sidecar-diagnostic.js`):
+
+`"liveness": {"version": 1, "state": "slow-suspect", "since_ms": 120025, "reason": "silence"}`
+
+- `version`: fixo em `1`. Outra versão faz o consumidor ignorar o bloco.
+- `state`: vocabulário fechado `starting | working | slow-suspect | dead`
+  (`liveness.STATES`). Valor fora do conjunto omite o bloco inteiro.
+- `since_ms`: `elapsed_ms` da transição que levou ao estado atual
+  (`transition.at_ms`); vale `0` na partida.
+- `reason`: `null` ou um item de `liveness.REASONS` (`silence`, `local-proof`,
+  `tool-extended`, `tool-unproven`, `tool-proof-negative`, `proof-unavailable`,
+  `tool-extension-exhausted`, `tool-proof-unavailable-expired`, `no-progress`).
+  Razão desconhecida vira `null`, nunca texto livre.
+- `termination`: opcional e **só no snapshot final** de uma tentativa encerrada
+  pelo watchdog (`dead-start`, `dead-silence`, `budget-exceeded-while-active`).
+  Kill por liveness termina em `state: "dead"`. Kill pelo teto com stream vivo
+  mantém o estado (`working`/`slow-suspect`) e usa
+  `budget-exceeded-while-active`: teto ativo não é morte.
+
+O bloco não carrega impressão digital, argumentos de tool, prompt, caminho nem ID
+de sessão; o `fingerprint_sha256` continua exclusivo do evento
+`sidecar-no-progress`.
+
+Cadência: emissão periódica a cada 30000 ms (`DEFAULT_PROGRESS_INTERVAL_MS`, seam
+interno `progressIntervalMs`, recusado antes do spawn quando inválido) e emissão
+imediata em cada transição do tracker, depois de `onLiveness`. A transição
+`null -> starting` não gera emissão extra. O `heartbeat_interval_ms` de 15000 do
+result-file (orphan detection) permanece inalterado e é outro canal.
+
+Leitura pelo host: `readProgressLine(line)` aceita uma linha
+`[forge-sidecar-progress] {json}` e devolve `observation(parsed)`, ou `null` para
+linha sem prefixo ou JSON inválido; nunca lança. O owner normaliza o snapshot com
+`observation()` e o propaga a `receipt.telemetry.observation`, a
+`runtime.onProgress` e ao stderr. A ausência do bloco significa payload antigo:
+os consumidores estritos aceitam os dois formatos e a saída sem bloco é
+byte-idêntica à anterior.
+
+Limitação conhecida: os review legs (`challenge/defend/rebuttal` com engine
+claude) publicam o bloco no stderr, mas o evento durável `sidecar-no-progress`
+nesse caminho não é gravado, porque o CLI de review não tem canal de owner. É um
+achado para a triagem final da S09.
+
+#### App-server liveness adapter
+
+O transporte Codex app-server (`startAppServerTurn` em `scripts/forge-appserver-client.js`)
+usa a mesma liveness neutra da S01 como autoridade primária do kill. O módulo puro
+`scripts/forge-appserver-liveness.js` reduz as notificações JSON-RPC a um snapshot no
+contrato de entrada de `liveness.evaluate`; o cliente só acrescenta o watchdog. O
+bloco `liveness` exposto ao host é o mesmo da S06 (`observation()`, `progressLine`,
+`readProgressLine`), com a mesma cadência de 30000 ms e emissão na transição. O agy
+não é alterado.
+
+- **Evento remoto (suposição conservadora, sem probe ao vivo):** conta como remoto
+  qualquer notificação do servidor depois do envio de `turn/start`, exceto o conjunto
+  fechado `LOCAL_LIFECYCLE` (`thread/started`, `turn/started` e `item/started`/
+  `item/completed` de item `userMessage`). Respostas JSON-RPC (`initialize`,
+  `thread/start`, `turn/start`) não contam. O pin do app-server não lista métodos de
+  notificação, então a forma é frágil: um falso "remoto" só adia `dead-start` para
+  `dead-silence` (240 s) e nunca mata um turno vivo.
+- **Tool aberta:** `item/started` sem o `item/completed` de mesmo `item.id`, apenas
+  para `TOOL_ITEM_TYPES` (`commandExecution`, `fileChange`, `mcpToolCall`,
+  `dynamicToolCall`, `collabAgentToolCall`, `webSearch`, `imageView`, `sleep`,
+  `imageGeneration`). `agentMessage`, `reasoning`, `plan` e tipos desconhecidos não
+  suspendem a contagem de silêncio. A extensão e o detector de loop seguem a S02; o
+  detector só reporta.
+- **Fingerprint:** `toolFingerprint('appserver:' + item.type, campos fechados por tipo)`
+  de `forge-claude-stream.js`, com dedupe por `item.id`. Só o hash sai do módulo.
+- **Prova local por plataforma:** `createLocalProof` da S02 com `pid` do filho
+  app-server e `roots = [cwd, ...writableRoots]`. Em linux/darwin vale CPU da árvore
+  mais delta de fs. Em win32 não há CPU: só delta de fs pode dar `positive`; sem delta
+  a prova fica `unavailable`, o turno vira `slow-suspect/proof-unavailable` aos 120 s e
+  morre em 660000 ms (`tool-proof-unavailable-expired`). Sem pid ou com provider
+  falho a regra é a mesma. Limite: a CPU do app-server ocioso pode ficar abaixo de
+  `MIN_CPU_DELTA_MS` e dar `negative` durante uma tool remota (`webSearch`,
+  `mcpToolCall`), que então morre aos 240 s.
+- **Kill:** sempre pelo caminho existente, `turn/interrupt` seguido do grace e só então
+  a morte do processo.
+- **Códigos (`APPSERVER_LIVENESS_CODES`):** kill por liveness (`dead-start`/
+  `dead-silence`) usa `code: 'appserver-anomalous-silence'` e mensagem
+  `anomalous silence (<termination>) after Ns`, sem `terminated`/`timeout`/`network`
+  para não ser lida como transitória. O teto com stream vivo usa
+  `budget-exceeded-while-active`. O teto ainda em `starting` não tem código e preserva
+  a mensagem load-bearing `timeout after Ns`. Os erros levam `interrupt`, `turnId`,
+  `liveness` e `diagnostic`.
+- **Recovery:** `appserver-anomalous-silence` com `observation.silence.cause ===
+  'indeterminate'` é classe `silence`, como `claude-anomalous-silence`;
+  `budget-exceeded-while-active` é `active-budget`. O codex não tem resume de sessão
+  (o resume da S05 é só Claude), então `next()` para com
+  `budget-exceeded-resume-unavailable`. É limite declarado, não lacuna.
+- **Contexto sob censo protegido:** com `opts.executionContext` presente,
+  `invokeCodexAppServer` calcula o health de contexto em memória (`persist: false`; o
+  thread é `ephemeral` e o estado nunca é relido), sem gravar
+  `.gsd/forge/context/codex/` no owner, o que antes derrubava a publicação com
+  `execution-protected-metadata`. `context_health`/`context_boundary` não mudam. Sem
+  `executionContext` a persistência atual é mantida.
+- **Follow-ups (fora desta correção):** a escrita do hook PreCompact em
+  `auto-mode.json` e a renovação do lease em `.gsd/forge/leases` pertencem ao
+  controlador/host, não ao transporte codex, e seguem como follow-up nomeado.
+
 #### Personal calibration and anomalous silence
 
 `forge-sidecar-calibration.js` resolves the user home independently of account
@@ -281,12 +462,50 @@ reconciles every possible writer root. A live canonical recovery capability may
 reserve at most one unchanged same-destination silence retry. Reservation is
 persisted with compare-and-swap under a short lock before invocation; pending
 reservation blocks every other writer across restart. Callbacks run outside the
-lock and the adapter rereads state before reserving. Retry time is bounded by
-30 seconds and the historical cumulative 60-second recovery budget, including
-inspection; at most 5 seconds remaining refuses another sidecar. Persisted clock
-high-water and remaining budget prevent restart or clock regression renewal.
+lock and the adapter rereads state before reserving. The single retry receives
+the tier safety ceiling from ceilingFromRoute, like any recovery sidecar; there is
+no cumulative recovery clock and no remainder. The durable reservation, not a
+deadline, prevents a second silence retry across restart or clock regression.
 After that one retry, ordinary authorized untried routing applies. No provider
 probe, preference rewrite or second learning call is introduced.
+
+##### Calibration v2 (`claude-silence-v2`)
+
+The v1 policy above stays a readable legacy: its store is untouched and nothing
+from it is promoted. Policy `claude-silence-v2` lives in a separate store,
+`calibration-v2.json`, beside `calibration.json` (same directory, same lock,
+same `safePath`, 1 MiB and 256-key limits). It is a separate file because the
+v1 reader validates every record against the fixed v1 identity; a v2 record in
+that file would make the v1 reader refuse the whole store.
+
+v2 only tightens the locked defaults. It calibrates `startMs` (dimension
+`initial`) and `deadMs` (dimension `gap`); the final threshold is always inside
+[floor, default]: `startMs` 30000..60000 and `deadMs` 120000..240000
+(`CALIBRATION_FLOORS` and `DEFAULTS` in the liveness module). Formula, with clamp:
+`raw = 4 * max(samples) + 15000`, `lower = censored.max_ms + 15000` (0 without
+censored data), `threshold_ms = min(default, max(floor, raw, lower))`.
+
+A dimension is calibrated with 5 uncensored samples from distinct evidence; the
+uncensored samples freeze at 5. Censored samples (an open gap from a cut
+stream) count only as a lower bound: they never calibrate alone and never raise
+the threshold above the default. Their origins are `dead-start`, `dead-silence`
+and an active ceiling hit, always without a suspended gap (a tool kill is a
+proven extension, not silence). Up to 32 evidence entries are kept; replay of the
+same attempt is not counted twice, and a full list is a no-op. Censored
+samples may still be added after the freeze and can only raise the threshold up
+to the default.
+
+When the exact model/effort/phase dimension is not calibrated, a model fallback
+aggregates v2 records of the same transport/protocol/model across efforts and
+phases, requiring at least 10 deduplicated samples from at least 2 distinct
+phases; the source is `model-fallback`. Precedence per dimension, never mixing
+values: exact v2, then v2 model fallback, then the v1 gap rule, then the locked
+default. The v1 `initial` stays ignored.
+
+`observation().silence` accepts `policy: claude-silence-v2` with source
+`persisted-calibration` or `model-fallback`, `cause: indeterminate`, a threshold
+inside [floor, default] and a window greater than the threshold; any other v2
+snapshot is dropped, and v1 and liveness-v1 projections are unchanged.
 
 A failed receipt preserves the sanitized cause; a ready receipt replays canonical
 publication with no inference and without overwriting unrelated edits. An
@@ -407,10 +626,15 @@ Inspect process and receipt before another attempt. Valid saved response uses ca
 single publication/replay. Timeout has undetermined cause; standing authority permits
 a valid untried candidate without another confirmation. Known caller defects require
 offline validated repair and at most one corrected retry at that destination.
-The cumulative historical budget for additional sidecars is 60000ms with durable
-reservations. A scoped native exception after expiry permits native, never another
-sidecar or renewed 300s wait. Timeout alone does not prove model unavailability.
-Keep preferences/gates; never execute inline to bypass refusal.
+Each additional recovery sidecar receives the full tier safety ceiling from
+ceilingFromRoute (scripts/forge-worker-timeout.js), never an inherited remainder.
+Recovery state v2 has no cumulative clock; a v1 state is migrated explicitly.
+Termination comes from the finite candidate list, destination exclusions, durable
+reservations, one silence retry and canonical exception expiry; a native candidate
+still needs a live scoped exception. Timeout alone does not prove model unavailability.
+Keep preferences/gates; never silently replace a refused route. Separately authorized
+Forge maintenance follows `shared/forge-direct-actions.md`, preserving the original
+reservation, reconciled roots, claims and independent review. Record the actual executor.
 
 Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
 observed model, effort, host/worker/transport, reason_code/layer, duration, receipt and
@@ -468,14 +692,18 @@ hashes bind observations but cannot authenticate an untrusted host. Trust must
 be reattested after restart. Saved candidates still use canonical replay;
 pending functional questions still block. The single corrected reservation is
 bound to the original receipt/request/failure across destinations. Standing
-authorization may select a compatible untried native candidate after the old
-60000ms deadline, preserving model/tier/effort and the original clock.
+authorization may select a compatible untried candidate (native or a sidecar
+with the tier safety ceiling), preserving model/tier/effort and started_at.
 
 Before *each* protected phase, pause the parent's ordinary lease heartbeat,
 then call `forge-unit-lease.openProtectedWindow(owner, unit, heldToken,
 heldGeneration, {durationMs})`. It atomically requires unexpired matching
 ownership and renews that same generation once, before snapshots. Duration is
-an integer in `1..300000` milliseconds. During the window route the parent's
+an integer in `1..MAX_PROTECTED_WINDOW_MS` (5460000, the largest tier ceiling
+plus 60s, from `scripts/forge-worker-timeout.js`). Size it with
+`protectedWindowMs(ceilingMs)`; when it returns `covers: false` (an explicit
+ceiling above 5400s) do not open a single window — refuse it or split the phase
+into windows; the duration is never silently truncated. During the window route the parent's
 scheduled heartbeat through `window.heartbeat()`; it validates ownership and
 time read-only. Pass that opaque handle to the environmental validator.
 `assertProtectedWindow` rejects JSON copies, foreign units/owners, closed,
@@ -505,7 +733,7 @@ when retained; JSON does not preserve it. There is no atomic transaction between
 a Node return and a later external tool call, and no claim of exactly-once tool
 execution. Crash or uncertainty after consumption requires process/receipt/write
 inspection; it never authorizes silent reconsumption. Measure preflight duration
-and choose a sufficient bounded window without rewriting the historical budget.
+and choose a sufficient bounded window without a cumulative recovery clock; each sidecar keeps its full tier safety ceiling.
 ### Saved-response boundary for legacy root identities
 
 Recovery checks for a saved response before requesting pre-spawn repair proof.
@@ -560,8 +788,8 @@ Rechecar todos os vínculos sob lock antes de persistir/reservar/invocar; preser
 legítimos do host, bloquear desconhecidos/estrangeiros/concorrentes. Handoff nativo externo
 retorna primeiro `reattest-native-handoff`; a retomada usa `resumeReservation.sha256`
 e reatesta o mesmo registro antes de expor argumentos e `assertReady` para o ponto de chamada.
-Nunca renovar o prazo histórico de 60000ms. Depois dele, somente exceção nativa viva,
-destino ainda não tentado e modelo/tier/esforço/ferramenta realmente suportados permitem execução.
+Não há relógio cumulativo: cada sidecar de recuperação recebe o tier safety ceiling (ceilingFromRoute).
+Só destino ainda não tentado, autoridade viva e modelo/tier/esforço/ferramenta realmente suportados permitem execução.
 História insuficiente conserva a recusa; implementar este mecanismo não desbloqueia receipts históricos.
 
 

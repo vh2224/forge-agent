@@ -1394,7 +1394,7 @@ else
 fi
 ```
 
-When `route_source ∈ {routing, frontmatter}` this legacy block is skipped entirely: `ENGINE = chain[0].engine`, `ENGINE_REASON = "route:$ROUTE_SOURCE:${chain[0].engine}"`. `$WORKERS_ENGINE`, `$WORKERS_TIMEOUT` and `$CODEX_MODEL` are derived by the reader below (the pref value for the *current* `unit_type`). `$PLAN_PATH` is the absolute path to the `T##-PLAN.md`; `$UNIT_TYPE` and `$CODE_DIR` come from the isolation/dispatch header.
+When `route_source ∈ {routing, frontmatter}` this legacy block is skipped entirely: `ENGINE = chain[0].engine`, `ENGINE_REASON = "route:$ROUTE_SOURCE:${chain[0].engine}"`. `$WORKERS_ENGINE` and `$CODEX_MODEL` are derived by the reader below (the pref value for the *current* `unit_type`); `$WORKERS_TIMEOUT` always comes from the resolver's `--shell-exports` (tier safety ceiling). `$PLAN_PATH` is the absolute path to the `T##-PLAN.md`; `$UNIT_TYPE` and `$CODE_DIR` come from the isolation/dispatch header.
 
 #### Shadowing warning (risk #3 mitigation)
 
@@ -1434,13 +1434,17 @@ fi
 ```bash
 # Extract knobs off .prefs.<path>, applying the SAME default/clamp as the old inline snippet.
 WORKERS_ENGINE=$(printf '%s' "$PREFS_JSON" | UNIT_TYPE="$UNIT_TYPE" node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const w=JSON.parse(d).prefs.workers||{};let e=w[process.env.UNIT_TYPE||'execute-task'];e=(typeof e==='string')?e.toLowerCase():null;process.stdout.write((e==='claude'||e==='codex')?e:'claude')}catch(err){process.stdout.write('claude')}})")
-WORKERS_TIMEOUT=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const t=(JSON.parse(d).prefs.workers||{}).timeout;process.stdout.write(Number.isInteger(t)&&t>0?String(t):'300')}catch(err){process.stdout.write('300')}})")
+# WORKERS_TIMEOUT is NOT defaulted here. The canonical value is the resolver's
+# workers_timeout (tier safety ceiling, with WORKERS_TIMEOUT_SOURCE/WORKERS_TIMEOUT_WARNING),
+# exported by the dispatch resolver's --shell-exports. This reader only surfaces an
+# explicit pref value (empty when absent) for diagnostics; it has no numeric default.
+WORKERS_TIMEOUT_PREF=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const t=(JSON.parse(d).prefs.workers||{}).timeout;process.stdout.write(Number.isInteger(t)&&t>0?String(t):'')}catch(err){process.stdout.write('')}})")
 CODEX_MODEL=$(printf '%s' "$PREFS_JSON" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const c=(JSON.parse(d).prefs.workers||{}).codex_model;process.stdout.write(c!=null&&c!==''?String(c):'')}catch(err){process.stdout.write('')}})")
 ```
 
 `sidecar_model` is an additive resolver-contract field; `$CODEX_MODEL` remains the legacy preference value, while the sidecar `--model` flag uses `$SIDECAR_MODEL`.
 
-**JSONC shape:** the parser exposes the per-unit-type engine as `.prefs.workers[<unit_type>]`; `timeout` as `.prefs.workers.timeout`; `codex_model` as `.prefs.workers.codex_model`. Without a `workers:` block the defaults are `WORKERS_ENGINE=claude`, `WORKERS_TIMEOUT=300`, `CODEX_MODEL=""`. The canonical runtime default comes from `scripts/forge-worker-timeout.js`. Existing explicit timeout preferences take precedence over this default.
+**JSONC shape:** the parser exposes the per-unit-type engine as `.prefs.workers[<unit_type>]`; `timeout` as `.prefs.workers.timeout`; `codex_model` as `.prefs.workers.codex_model`. Without a `workers:` block the defaults are `WORKERS_ENGINE=claude`, `CODEX_MODEL=""`. `WORKERS_TIMEOUT` is always the resolver's `workers_timeout` (the dispatch resolver's `--shell-exports`), i.e. the **safety ceiling** computed by `scripts/forge-worker-timeout.js resolveWorkerCeiling`: absent/null → the route tier's ceiling (light/standard/heavy/max = 900/1800/3600/5400 s, `WORKERS_TIMEOUT_SOURCE=tier-default`); an explicit 1..86400 overrides the tier (`explicit`); the legacy value `300` is ignored with a warning and the tier ceiling applies (`legacy-300-ignored`, message in `WORKERS_TIMEOUT_WARNING`); an invalid value falls back to the tier ceiling with a warning. Liveness (60/120/240 s without a signal) is the primary kill authority; the ceiling only acts on a worker that is still alive.
 
 #### Sidecar dispatch state machine (`WORKER_MODE == sidecar && UNIT_TYPE == execute-task`)
 
@@ -1624,7 +1628,7 @@ try {
 }
 ```
 
-Probe contract (explicit): `process.kill(adapter_pid, 0)` returning without throwing, **or** throwing `EPERM`, means **alive**; `ESRCH` means **dead**; any other error is **inconclusive → treat as alive**. On doubt the orchestrator never kills — the adapter's own `--timeout` (process-group SIGKILL) is the backstop for a genuinely-hung process, and killing a live worker mid-task is the more expensive mistake.
+Probe contract (explicit): `process.kill(adapter_pid, 0)` returning without throwing, **or** throwing `EPERM`, means **alive**; `ESRCH` means **dead**; any other error is **inconclusive → treat as alive**. On doubt the orchestrator never kills — the adapter's own `--timeout` — the per-tier **safety ceiling** (`$WORKERS_TIMEOUT` from the resolver), enforced by process-group SIGKILL — is the backstop for a genuinely-hung process, and killing a live worker mid-task is the more expensive mistake.
 
 **Decision table (token → poll-loop action).**
 
@@ -1943,15 +1947,18 @@ Triggers (`reason` value):
 | `reason` | Cause | Applies to |
 |----------|-------|------------|
 | `codex-exit-nonzero` | adapter exit `!= 0` (binary absent, auth, quota — cause on stderr; **plan: also `must_haves` invalid in-sidecar → exit 2**). With `error_class: transient` this trigger routes through **§ Layer-1 transient retry** first — the row here fires only after that retry loop is exhausted (or `error_class: terminal`). | both |
-| `codex-timeout` | adapter hit its `--timeout` backstop. **Always `error_class: terminal`** (LOCKED — forced regardless of message content) → skips § Layer-1 entirely, fires this trigger directly. | both |
+| `codex-timeout` | adapter hit its `--timeout` safety ceiling (per-tier `$WORKERS_TIMEOUT` from the resolver; see § Engines sem liveness — only agy still receives it as an absolute deadline; the codex app-server has start/silence liveness since S07 and the ceiling is its safety cap). **Always `error_class: terminal`** (LOCKED — forced regardless of message content) → skips § Layer-1 entirely, fires this trigger directly. | both |
 | `codex-invalid-json` | result-file present but unparseable / schema-invalid. Routes through § Layer-1 first when a readable `error_class: transient` is present; otherwise fires directly (unparseable JSON has no `error_class` to read → defaults `terminal`). | both |
 | `codex-orphan` | heartbeat `updated_at` stale beyond the dynamic threshold (`max(heartbeat_interval_ms × 4, 30s)`, per Branch C step 5's canonical orphan detection) **and** the liveness probe/grace expired (probe → dead, or a second consecutive `stale-alive`) → killed. **Always terminal** (an orphaned/hung process is never retried in place) → skips § Layer-1, fires this trigger directly. | both |
+| `budget-exceeded-while-active` | the Claude sidecar reached its per-tier safety ceiling while the stream was still active (liveness healthy). Class `active-budget`, **`error_class: terminal`**; it is **not** a destination failure (`service_failure_proven: false`), so the chain does **not** advance — not even under standing permission. After the mandatory process/receipt inspection and write reconciliation, `next()` allows exactly one same-session resume (Claude sidecar only, plan/execute only, session opted in by the unit owner): a new receipt carries `resumed_from`, and the worker is told the workspace returned to baseline. A second ceiling hit stops with `budget-exceeded-resume-exhausted`; no persisted session stops with `budget-exceeded-resume-unavailable`; a `dead`/silence failure is never resumed. A recovery after a failed resume must inspect the resume's own receipt/dispatch (the last attempt), not the original one, or reconciliation fails with `execution-protected-metadata`. Ceiling reached while still `starting` remains `claude-timeout`. | both (Claude sidecar) |
 | `surgical-reset-overlap` | `forge-surgical-reset.js --reset` exit 3 — a pre-dirty path's current hash diverged from its snapshot hash (the sidecar ALSO wrote a pre-existing dirty file); **NOTHING was reset**, not even the non-overlapped paths | execute-task only (Branch C) |
 | `verified-reset-failed` | `forge-surgical-reset.js --reset` exit 2 — post-reset verification found a leftover change that isn't an intact pre-dirty path | execute-task only (Branch C) |
 | `sidecar-state-init-failed` | `forge-surgical-reset.js --state-init` precondition failure (e.g. no supported VCS at `--cwd`, permission denied) — no reset needed, nothing was captured; a SVN working copy is **not** a cause since M017 because `--state-init` works there | both |
 | `sidecar-multirepo-unsupported` | the unit spans multiple repos but has no valid explicit primary, or contains an unattributable path. A declared precondition refused before state capture; a fully attributed unit with valid `repo:` is supported | both |
 | `sidecar-code-dir-undeclared` | multi-repo workspace and the plan declares zero attributable paths (`writes:`/`expected_output:`/`## Files to Change` all empty or unmatched) — a planner gap, correctable, deliberately a distinct signal from the row above | both |
 | `codex-exit-nonzero` (`.gsd/**` variant) | a **new** delta under `.gsd/**` in the sidecar's post-run diff — `assertNoProtectedSidecarChanges` throws `"codex touched protected .gsd/**: <paths>"` (adapter exit 2). This is **terminal, never advisory**: Materialization is orchestrator-only (`codex never touches .gsd/**`, see Branch D result schema note below) and the sidecar is not exempt on Branch C either. A path that was already dirty under `.gsd/**` **before** dispatch is exempt (pre-dirty snapshot, Branch C step 1) — only new sidecar-owned `.gsd/**` writes trip this. The violated paths are named in `reason` for human triage. | execute-task only (Branch C) |
+
+**Engines sem liveness.** The ceiling resolver is engine-agnostic. The Claude sidecar and the codex app-server (S07) emit liveness, so the tier ceiling is only their safety cap and a silent or dead worker is cut earlier by the liveness verdict. agy turns (definitive — agy stays outside liveness scope) receive the tier ceiling as an **absolute deadline** (e.g. 30 min on `standard`) instead of 5 min. An operator who wants a shorter deadline sets an explicit `workers.timeout` other than `300` (e.g. `301`), which applies to every engine.
 
 `dirty-tree-guard` **no longer exists as a fallback trigger** (SUPERSEDED — DECISION 39, see S01-CONTEXT.md): the pre-dirty snapshot (Branch C step 1) replaced the pre-dispatch refusal, so there is no longer a "sidecar never launched because the tree was dirty" case.
 
@@ -1996,7 +2003,7 @@ Triggers (`reason` value):
 
 #### Engine Fallback Discipline
 
-**CRITICAL.** Engine fallback is **per-dispatch and evidence-based**: it only happens AFTER the real dispatch for THAT unit actually failed with a documented condition (adapter `exit 2`, timeout, invalid result after validation). The orchestrator NEVER pre-emptively deviates from the resolver's configured route based on a failure observed in ANOTHER unit or on suspicion — same family as "executar inline nunca é fallback aceitável" (`skills/forge-auto/SKILL.md:182`, "Running un-isolated ... is NOT an acceptable fallback").
+**CRITICAL.** Engine fallback is **per-dispatch and evidence-based**: it only happens AFTER the real dispatch for THAT unit actually failed with a documented condition (adapter `exit 2`, timeout, invalid result after validation). The orchestrator NEVER pre-emptively deviates from the resolver's configured route based on a failure observed in ANOTHER unit or on suspicion. Separately authorized Forge maintenance follows `shared/forge-direct-actions.md`; it records host execution rather than pretending to complete this dispatch and preserves configured file isolation.
 
 Event reason strings come from a **closed enum**, documented here and nowhere else (mirrors reference this section, never replicate the list):
 
@@ -2103,7 +2110,7 @@ Materialization is **orchestrator-only** — codex never touches `.gsd/**`. Afte
 |-----|------|-----------------------|-------------|
 | `workers.execute-task` | enum `claude \| codex` | `claude` | Engine for `execute-task` dispatch. `codex` routes to the sidecar; invalid → `claude` |
 | `workers.plan-slice` | enum `claude \| codex` | `claude` | Engine for `plan-slice` dispatch. `codex` routes to the sidecar `--mode plan` (read-only, Branch D); invalid → `claude` |
-| `workers.timeout` | int (seconds) | `300` | Absolute deadline per sidecar attempt, forwarded as `--timeout`; non-positive/invalid → `300` |
+| `workers.timeout` | int (seconds) \| null | `null` (→ tier ceiling) | **Safety ceiling** per sidecar attempt, forwarded as `--timeout` via the resolver's `$WORKERS_TIMEOUT`. Absent/null → route tier ceiling (light/standard/heavy/max = 900/1800/3600/5400 s); explicit 1..86400 overrides; legacy `300` ignored with warning `legacy-300-ignored`; invalid → tier ceiling with warning. Source: `scripts/forge-worker-timeout.js resolveWorkerCeiling` (`WORKERS_TIMEOUT_SOURCE`). Liveness is the primary kill authority; reaching the ceiling with a live stream ends as `budget-exceeded-while-active` |
 | `workers.codex_model` | string (model id) | unset (`null`) | Legacy fallback for the sidecar `--model` when no routed Codex chain member leads; unset **and** no Codex chain → Codex CLI default. The flag itself is driven by `$SIDECAR_MODEL` (`sidecarModelFor`) |
 
 `plan-milestone` is intentionally **absent** from this table — it is never routed through `workers:` (locked; stays tier `max`/Fable). The scaffold that documents these keys (commented) ships in `forge-agent-prefs.jsonc § Workers Settings` (S05); the reader operates with the safe defaults above without it.
@@ -3084,10 +3091,15 @@ Inspect process and receipt before another attempt. Valid saved response uses ca
 single publication/replay. Timeout has undetermined cause; standing authority permits
 a valid untried candidate without another confirmation. Known caller defects require
 offline validated repair and at most one corrected retry at that destination.
-The cumulative historical budget for additional sidecars is 60000ms with durable
-reservations. A scoped native exception after expiry permits native, never another
-sidecar or renewed 300s wait. Timeout alone does not prove model unavailability.
-Keep preferences/gates; never execute inline to bypass refusal.
+Each additional recovery sidecar receives the full tier safety ceiling from
+ceilingFromRoute (scripts/forge-worker-timeout.js), never an inherited remainder.
+Recovery state v2 has no cumulative clock; a v1 state is migrated explicitly.
+Termination comes from the finite candidate list, destination exclusions, durable
+reservations, one silence retry and canonical exception expiry; a native candidate
+still needs a live scoped exception. Timeout alone does not prove model unavailability.
+Keep preferences/gates; never silently replace a refused route. Separately authorized
+Forge maintenance follows `shared/forge-direct-actions.md`, preserving the original
+reservation, reconciled roots, claims and independent review. Record the actual executor.
 
 Measure final packaged UTF-8 request/context bytes and hashes, budgets, requested/sent/
 observed model, effort, host/worker/transport, reason_code/layer, duration, receipt and

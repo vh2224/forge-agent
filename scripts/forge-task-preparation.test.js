@@ -163,7 +163,9 @@ async function main() {
     assert.equal(JSON.parse(fs.readFileSync(receiptFile)).authorization_reference, reference);
     const initial = JSON.parse(fs.readFileSync(stateFile));
     assert.equal(initial.authorization_reference, reference);
-    now = initial.deadline_at + 1;
+    // v2 has no cumulative clock: recover past the former 60000 ms window (old deadline_at + 1).
+    assert.equal(initial.schema_version, 2); assert.equal(initial.deadline_at, undefined);
+    now = initial.started_at + 60001;
     const restarted = require('./forge-recovery-authority').createRecoveryAuthority({ resolveProfile: () => profile, clock: () => now });
     let calls = 0, optionsObserved;
     request.activeCapabilities = codexCapabilities();
@@ -174,16 +176,182 @@ async function main() {
         assert.equal(args.reasoning_effort, 'medium'); return framed(envelope(request)); },
     });
     assert.equal(recovered.route.worker_mode, 'native');
-    assert.equal(recovered.sidecar_remaining_ms, 0);
+    assert.equal(recovered.sidecar_ceiling, null, 'native candidate carries no sidecar ceiling');
+    assert.equal(recovered.sidecar_remaining_ms, undefined); assert.equal(recovered.remaining_ms, undefined);
     assert.equal(recovered.result.status, 'done');
     assert.equal(calls, 1);
     assert.equal(optionsObserved.scope, 'standalone-task'); assert.equal(optionsObserved.phase, 'brainstorm');
     assert.equal(optionsObserved.unitType, 'plan-slice'); assert.equal(optionsObserved.unitId, request.taskId);
     assert.equal(optionsObserved.cwd, request.contextRoot); assert.equal(optionsObserved.workerMode, undefined);
-    assert.equal(JSON.parse(fs.readFileSync(stateFile)).deadline_at, initial.deadline_at);
+    const savedState = JSON.parse(fs.readFileSync(stateFile));
+    assert.equal(savedState.started_at, initial.started_at); assert.equal(savedState.budget, 'tier-ceiling');
+    assert.equal(savedState.deadline_at, undefined, 'recovery writes no cumulative clock');
     assert.equal(fs.readFileSync(artifactPath(request), 'utf8'), content(request.phase, request.taskId));
     fs.writeFileSync(path.join(profile, '.codex/AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nChanged permission.\n<!-- user:forge-routing-continuity:end -->');
     assert.throws(() => restarted.readStandingAuthorization(reference), /source-changed/);
+  });
+  await test('research recovery from a migrated v1 state with ~21s left on the old clock gives the sidecar the full tier ceiling', async () => {
+    const request = fixture({ phase: 'research', hostRuntime: 'codex', model: 'claude-sonnet-5' });
+    request.prompt = 'UNIQUE-research-recovery-instructions';
+    // Two sidecar destinations: the timed-out one and an untried one, so recovery
+    // reaches a second sidecar instead of exhausting the chain.
+    const prefsFile = path.join(request.contextRoot, '.gsd/forge-prefs.jsonc');
+    const prefs = JSON.parse(fs.readFileSync(prefsFile, 'utf8'));
+    fs.writeFileSync(prefsFile, JSON.stringify({ ...prefs, tier_models: Object.fromEntries(['light', 'standard', 'heavy', 'max']
+      .map(tier => [tier, ['claude-sonnet-5', 'claude-opus-5']])) }));
+    const profile = path.join(path.dirname(request.cwd), 'profile');
+    fs.mkdirSync(path.join(profile, '.codex'), { recursive: true });
+    fs.writeFileSync(path.join(profile, '.codex/AGENTS.md'), '<!-- user:forge-routing-continuity:start -->\nFixture standing permission.\n<!-- user:forge-routing-continuity:end -->');
+    let now = Date.now();
+    const reference = 'conversation:research-recovery';
+    const authority = require('./forge-interaction').createRecoveryAuthorizationAdapter(observed => ({ ...observed,
+      received: true, answer: 'authorize', resolved_at: now }), { resolveProfile: () => profile, clock: () => now });
+    const failed = await prep.prepareStandaloneTask(request, { recoveryAuthorization: { adapter: authority, reference,
+      registration: { host: 'codex', section: 'user:forge-routing-continuity' } }, invokeSidecar: async () => {
+      throw Object.assign(Error('fixture timeout'), { code: 'claude-timeout', provider_called: true });
+    } });
+    assert.equal(failed.ok, false);
+    const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
+    // Rewrite the recorded state as a legacy v1 file whose old cumulative clock
+    // would leave ~21000 ms (started 39 s ago, deadline_at = started_at + 60000).
+    const { budget, ...current } = JSON.parse(fs.readFileSync(stateFile));
+    assert.equal(budget, 'tier-ceiling');
+    const legacyStarted = now - 39000;
+    fs.writeFileSync(stateFile, JSON.stringify({ ...current, schema_version: 1, started_at: legacyStarted, deadline_at: legacyStarted + 60000 }));
+    const restarted = require('./forge-recovery-authority').createRecoveryAuthority({ resolveProfile: () => profile, clock: () => now });
+    const { ceilingFromRoute, resolveWorkerCeiling } = require('./forge-worker-timeout');
+    let resolved, delivered = 0, handed;
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile, clock: () => now }, {
+      processProbe: () => 'stopped', recoveryAuthorization: { adapter: restarted, reference },
+      resolveDispatch: options => (resolved = resolveDispatch(options)),
+      invokeSidecar: async delivery => { delivered++; handed = delivery.route; return envelope(request); },
+    });
+    assert.equal(recovered.route.worker_mode, 'sidecar', JSON.stringify(recovered));
+    assert.equal(recovered.state_migration && recovered.state_migration.from, 1);
+    assert.equal(recovered.result.status, 'done', JSON.stringify(recovered.result));
+    assert.equal(delivered, 1, 'recovery is not stopped by the old clock');
+    const tierCeiling = resolveWorkerCeiling({ tier: resolved.tier }).seconds;
+    assert.equal(handed.workers_timeout, tierCeiling);
+    assert.equal(handed.workers_timeout, ceilingFromRoute(resolved).seconds);
+    assert.equal(handed.workers_timeout_source, ceilingFromRoute(resolved).source);
+    assert(handed.workers_timeout >= 1800, `tier ceiling, never the ~21 s remainder: ${handed.workers_timeout}`);
+    assert.deepEqual(recovered.sidecar_ceiling && recovered.sidecar_ceiling.seconds, tierCeiling);
+    const saved = JSON.parse(fs.readFileSync(stateFile));
+    assert.equal(saved.schema_version, 2); assert.equal(saved.budget, 'tier-ceiling');
+    assert.equal(saved.migrated_from.schema_version, 1);
+    assert.equal(saved.started_at, legacyStarted); assert.equal(saved.deadline_at, legacyStarted + 60000, 'inert historical deadline_at preserved');
+  });
+  // S05/T06: a standalone plan preparation stopped at the tier ceiling with a
+  // live stream resumes its own session once, on the same route and full ceiling.
+  async function activeBudgetPreparation(phase, withRef) {
+    const request = fixture({ phase, hostRuntime: 'codex', model: 'claude-sonnet-5' });
+    const failed = await prep.prepareStandaloneTask(request, { invokeSidecar: async () => {
+      throw Object.assign(Error('fixture ceiling'), { code: 'budget-exceeded-while-active', provider_called: true });
+    } });
+    assert.equal(failed.ok, false);
+    const receiptFile = request.resultFile + '.receipt.json', stateFile = request.resultFile + '.recovery.json';
+    const sessions = require('./forge-claude-session');
+    const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null,
+      configDir: path.join(path.dirname(request.cwd), 'lab-claude'), cwd: request.cwd });
+    // The production core records the ref from error.session; the injected
+    // transport cannot, so the saved attempt is completed with the same shape.
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const last = state.attempts.at(-1);
+    assert.equal(last.failure_class, 'active-budget');
+    last.session = withRef ? JSON.parse(JSON.stringify(ref)) : null;
+    fs.writeFileSync(stateFile, JSON.stringify(state));
+    return { request, receiptFile, stateFile, ref, route: last.route };
+  }
+  await test('standalone plan recovery after active-budget hands the transport claudeResume and the tier ceiling of the previous route', async () => {
+    const { request, receiptFile, stateFile, ref, route } = await activeBudgetPreparation('plan', true);
+    const receiptSha = crypto.createHash('sha256').update(fs.readFileSync(receiptFile)).digest('hex');
+    const { ceilingFromRoute } = require('./forge-worker-timeout');
+    let resolverCalls = 0, delivered = 0, handed;
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile }, {
+      processProbe: () => 'stopped',
+      resolveDispatch: () => { resolverCalls++; throw new Error('the resume never re-resolves a candidate'); },
+      invokeSidecar: async delivery => { delivered++; handed = delivery; return envelope(request); },
+    });
+    assert.equal(recovered.result && recovered.result.status, 'done', JSON.stringify(recovered));
+    assert.equal(delivered, 1);
+    assert.equal(resolverCalls, 0);
+    assert.deepEqual(handed.claudeResume, JSON.parse(JSON.stringify(ref)));
+    assert.equal(handed.resumedFrom.receipt_sha256, receiptSha);
+    assert.equal(handed.resumedFrom.dispatch_id, request.dispatchId);
+    assert.equal(handed.route.resolved_worker_engine, 'claude');
+    assert.equal(handed.route.model_resolved || handed.route.model, route.model_resolved || route.model);
+    assert.equal(handed.route.workers_timeout, ceilingFromRoute(route).seconds);
+    assert.equal(handed.route.workers_timeout_source, ceilingFromRoute(route).source);
+    assert.notEqual(handed.dispatchId, request.dispatchId);
+    const saved = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const reservation = saved.reservations.at(-1);
+    assert.equal(reservation.reason, 'same-session-resume');
+    assert(!JSON.stringify(saved.reservations).includes(ref.id), 'reservations carry only the digest');
+  });
+  await test('standalone research recovery after active-budget without a ref stops as resume-unavailable without a spawn', async () => {
+    const { request, receiptFile, stateFile } = await activeBudgetPreparation('research', false);
+    let delivered = 0;
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile, stateFile }, {
+      processProbe: () => 'stopped', invokeSidecar: async () => { delivered++; return envelope(request); } });
+    assert.equal(recovered.action, 'stop', JSON.stringify(recovered));
+    assert.equal(recovered.reason_code, 'budget-exceeded-resume-unavailable');
+    assert.equal(delivered, 0);
+  });
+  await test('a resume on an ineligible phase or route, or with a malformed resumedFrom, is refused before any transport', async () => {
+    const sessions = require('./forge-claude-session');
+    const base = fixture({ phase: 'research', hostRuntime: 'codex' });
+    const ref = sessions.createSessionRef({ id: sessions.newSessionId(), accountName: null, configDir: base.cwd, cwd: base.cwd });
+    const from = { receipt_sha256: 'a'.repeat(64), dispatch_id: 'dispatch-x' };
+    assert.throws(() => prep.validateRequest({ ...base, claudeResume: ref, resumedFrom: from }), error => error.code === 'recovery-resume-phase-ineligible');
+    const plan = { ...base, phase: 'plan' };
+    assert.equal(prep.validateRequest({ ...plan, claudeResume: ref, resumedFrom: from }).claudeResume, ref);
+    assert.throws(() => prep.validateRequest({ ...plan, claudeResume: { ...ref, id: 'not-a-uuid' }, resumedFrom: from }), error => error.code === 'claude-session-invalid');
+    for (const bad of [undefined, { receipt_sha256: 'x', dispatch_id: 'd' }, { ...from, extra: 1 }, { ...from, dispatch_id: '' }]) {
+      assert.throws(() => prep.validateRequest({ ...plan, claudeResume: ref, resumedFrom: bad }), error => error.code === 'invalid-preparation-resume');
+    }
+    // The recovery adapter itself: non-Claude/native route or non-plan phase is a named refusal before any transport.
+    const recoveryApi = require('./forge-attempt-recovery'), realRecover = recoveryApi.recoverAttempt;
+    const failedPlan = fixture({ phase: 'plan', hostRuntime: 'codex', model: 'claude-sonnet-5' });
+    await prep.prepareStandaloneTask(failedPlan, { invokeSidecar: async () => {
+      throw Object.assign(Error('fixture ceiling'), { code: 'budget-exceeded-while-active', provider_called: true }); } });
+    const receipt = JSON.parse(fs.readFileSync(failedPlan.resultFile + '.receipt.json', 'utf8'));
+    const resume = { session: ref, resumed_from: from };
+    let delivered = 0;
+    try {
+      for (const [request, route, code] of [
+        [failedPlan, { ...receipt.route, resolved_worker_engine: 'codex' }, 'recovery-resume-route-invalid'],
+        [failedPlan, { ...receipt.route, worker_mode: 'native' }, 'recovery-resume-route-invalid'],
+        [{ ...failedPlan, phase: 'research' }, receipt.route, 'recovery-resume-phase-ineligible']]) {
+        recoveryApi.recoverAttempt = async options => options.invoke(route, { ok: true }, null, undefined, 'fixture-reservation', resume);
+        await assert.rejects(() => prep.recoverStandaloneTask(request, { receiptFile: failedPlan.resultFile + '.receipt.json',
+          stateFile: failedPlan.resultFile + '.recovery.json' }, { invokeSidecar: async () => { delivered++; return envelope(request); } }),
+        error => error.code === code);
+      }
+    } finally { recoveryApi.recoverAttempt = realRecover; }
+    assert.equal(delivered, 0);
+  });
+  await test('standalone native recovery route carries no synthetic workers_timeout', async () => {
+    const request = fixture({ model: 'gpt-5.6-sol' });
+    request.activeCapabilities = codexCapabilities();
+    request.prompt = 'before repair';
+    const failed = await prep.prepareStandaloneTask(request, { invokeNative: async () => {
+      throw Object.assign(Error('fixture caller error'), { code: 'context-budget-exceeded', provider_called: false });
+    } });
+    assert.equal(failed.ok, false);
+    request.prompt = 'after offline repair';
+    const receiptRoute = JSON.parse(fs.readFileSync(request.resultFile + '.receipt.json', 'utf8')).route;
+    let handedRoute;
+    const recovered = await prep.recoverStandaloneTask(request, { receiptFile: request.resultFile + '.receipt.json',
+      stateFile: request.resultFile + '.recovery.json', correction: true }, { processProbe: () => 'stopped',
+      invokeNative: async () => framed(envelope(request)), resolveDispatch: options => (handedRoute = resolveDispatch(options)) });
+    assert.equal(recovered.corrected, true);
+    assert.equal(recovered.route.worker_mode, 'native');
+    // The native route is passed through unchanged: no ceiling is synthesized onto it.
+    const origin = handedRoute || receiptRoute;
+    assert.equal(recovered.route.workers_timeout, origin.workers_timeout);
+    assert.equal(recovered.route.workers_timeout_source, origin.workers_timeout_source);
+    console.log(`  native route workers_timeout=${recovered.route.workers_timeout} source=${recovered.route.workers_timeout_source} (origin ${handedRoute ? 'resolver' : 'receipt'})`);
+    assert.equal(recovered.sidecar_ceiling, null);
   });
   await test('four phases use the actual caller, configured Claude sidecar and exact task-local formats', async () => {
     for (const phase of Object.keys(prep.PHASE_CONTRACTS)) {

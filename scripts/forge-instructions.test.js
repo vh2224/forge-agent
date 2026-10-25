@@ -463,14 +463,16 @@ test('--check não cria arquivo nenhum num repo vazio', () => {
 
 console.log('R9 — conteúdo do contrato');
 
-test('o bloco nomeia o resolvedor, o sidecar, o fallback nomeado e a proibição de inline', () => {
+test('o bloco nomeia o resolvedor, o sidecar e a manutenção direta sem troca silenciosa', () => {
   const block = renderBlock();
   for (const needle of [
     'forge-dispatch-resolve.js',
     'forge-xllm.js',
     'worker-engine-fallback',
     'events.jsonl',
-    'inline',
+    'shared/forge-direct-actions.md',
+    'executor real',
+    'revisão independente',
     'dispatch_allowed:true',
     'provider_called:false',
     '.gsd/tasks/',
@@ -478,6 +480,7 @@ test('o bloco nomeia o resolvedor, o sidecar, o fallback nomeado e a proibição
   ]) {
     assert(block.includes(needle), `o contrato não menciona ${needle}`);
   }
+  assert(!block.includes('Nunca execute a unidade inline'), 'proibição absoluta reapareceu');
 });
 
 test('o contrato separa recusa local de rejeição do provedor e exige a cadeia real', () => {
@@ -618,7 +621,8 @@ test('recovery contract sync preserves standing personal authorization bytes and
   syncFile(file, { host: 'codex' });
   const once = fs.readFileSync(file, 'utf8');
   assert(once.startsWith(prefix), 'personal authorization bytes changed');
-  for (const term of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization', '60000ms', 'Standing permission never answers a functional question']) {
+  assert(!once.includes('60000ms'), 'projected recovery contract carries no cumulative 60000ms clock');
+  for (const term of ['createRecoveryAuthorizationAdapter', 'registerStandingAuthorization', 'tier safety ceiling', 'Standing permission never answers a functional question']) {
     assert(once.includes(term), `missing ${term}`);
   }
   assertEqual(syncFile(file, { host: 'codex' }).outcome, 'unchanged', 'second sync');

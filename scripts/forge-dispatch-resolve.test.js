@@ -179,16 +179,128 @@ withHermeticHome((cliEnv) => {
       assertEqual(omitted.resolution_context.milestone_id, null, 'standalone never invents milestone context');
     } finally { cleanup(f); }
   });
-  runCase('sidecar timeout is five minutes unless explicitly configured', () => {
-    for (const timeout of [undefined, 0, -1, null, 'invalid', 120, 300, 1800]) {
-      const expected = Number.isInteger(timeout) && timeout > 0 ? timeout : 300;
+  runCase('sidecar ceiling follows the tier unless explicitly configured', () => {
+    // workers_timeout is the per-attempt safety ceiling: the tier ceiling by
+    // default, an explicit valid value verbatim, and the inherited 300 ignored.
+    const tierSeconds = { light: 900, standard: 1800, heavy: 3600, max: 5400 };
+    const cases = [
+      [undefined, 'tier', 'tier-default', null],
+      [null, 'tier', 'tier-default', null],
+      [0, 'tier', 'tier-default', 'workers-timeout-invalid'],
+      [-1, 'tier', 'tier-default', 'workers-timeout-invalid'],
+      ['invalid', 'tier', 'tier-default', 'workers-timeout-invalid'],
+      [120, 120, 'explicit', null],
+      [1800, 1800, 'explicit', null],
+      [300, 'tier', 'legacy-300-ignored', 'legacy-300-ignored'],
+    ];
+    for (const [timeout, expected, source, warningCode] of cases) {
       const f = mkFixture({ prefsJsonc: JSON.stringify({ workers: { timeout } }) });
       for (const unitType of ['execute-task', 'plan-milestone', 'review-fix']) {
         const route = dispatch(f, { unitType, hostRuntime: 'codex' });
-        assertEqual(route.workers_timeout, expected, `${unitType} timeout ${String(timeout)}`);
+        const want = expected === 'tier' ? tierSeconds[route.tier] : expected;
+        const label = `${unitType} timeout ${String(timeout)}`;
+        assertEqual(route.workers_timeout, want, `${label} ceiling`);
+        assertEqual(route.workers_timeout_source, source, `${label} source`);
+        assertEqual(route.workers_timeout_warning ? route.workers_timeout_warning.code : null, warningCode, `${label} warning`);
+        if (route.workers_timeout_warning) {
+          assertEqual(Object.keys(route.workers_timeout_warning).join(','), 'code,message', `${label} warning shape`);
+          assert(typeof route.workers_timeout_warning.message === 'string' && route.workers_timeout_warning.message.length > 0,
+            `${label} warning message`);
+        }
       }
       cleanup(f);
     }
+  });
+
+  runCase('sidecar ceiling defaults per tier without prefs (standard, plan-slice high risk, light)', () => {
+    const f = mkFixture({ roadmap: '# Roadmap\n- S01 risk: high\n' });
+    const execute = dispatch(f, { unitType: 'execute-task' });
+    assertEqual([execute.tier, execute.workers_timeout].join(':'), 'standard:1800', 'execute-task ceiling is standard');
+    const plan = dispatch(f, { unitType: 'plan-slice', unitId: 'S01' });
+    assertEqual([plan.tier, plan.workers_timeout].join(':'), 'max:5400', 'plan-slice risk:high ceiling is max');
+    const complete = dispatch(f, { unitType: 'complete-slice' });
+    assertEqual([complete.tier, complete.workers_timeout].join(':'), 'light:900', 'complete-slice ceiling is light');
+    for (const route of [execute, plan, complete]) {
+      assertEqual(route.workers_timeout_source, 'tier-default', `${route.tier} source tier-default`);
+      assertEqual(route.workers_timeout_warning, null, `${route.tier} carries no warning`);
+    }
+    cleanup(f);
+  });
+
+  runCase('explicit workers.timeout 1234 is kept; legacy 300 resolves to the tier ceiling with a warning', () => {
+    const explicit = mkFixture({ prefsJsonc: JSON.stringify({ workers: { timeout: 1234 } }) });
+    const kept = dispatch(explicit, { unitType: 'execute-task' });
+    assertEqual(kept.workers_timeout, 1234, 'explicit 1234 kept');
+    assertEqual(kept.workers_timeout_source, 'explicit', 'explicit source');
+    assertEqual(kept.workers_timeout_warning, null, 'explicit carries no warning');
+    cleanup(explicit);
+    const legacy = mkFixture({ prefsJsonc: JSON.stringify({ workers: { timeout: 300 } }) });
+    const ignored = dispatch(legacy, { unitType: 'execute-task' });
+    assertEqual(ignored.workers_timeout, 1800, 'legacy 300 resolves to the standard ceiling');
+    assertEqual(ignored.workers_timeout_source, 'legacy-300-ignored', 'legacy source');
+    assertEqual(ignored.workers_timeout_warning && ignored.workers_timeout_warning.code, 'legacy-300-ignored', 'legacy warning code');
+    cleanup(legacy);
+  });
+
+  runCase('workers.timeout changes only the workers_timeout fields for every unit type', () => {
+    const strip = (route, fixture) => {
+      const copy = { ...route };
+      delete copy.workers_timeout; delete copy.workers_timeout_source; delete copy.workers_timeout_warning;
+      // resolution_sources fingerprints the prefs file bytes themselves, which
+      // necessarily differ between the two fixtures; the fixture directory is
+      // normalized so owner/cwd echoes compare equal. Everything else must match.
+      delete copy.resolution_sources;
+      return JSON.stringify(copy).split(JSON.stringify(fixture.dir).slice(1, -1)).join('<fixture>');
+    };
+    const unitTypes = [...new Set([...Object.keys(TIER_DEFAULTS), 'execute-task', 'plan-slice'])];
+    const bare = mkFixture({ prefsJsonc: '{}' });
+    const explicit = mkFixture({ prefsJsonc: JSON.stringify({ workers: { timeout: 1234 } }) });
+    for (const unitType of unitTypes) {
+      const a = dispatch(bare, { unitType });
+      const b = dispatch(explicit, { unitType });
+      assertEqual(strip(b, explicit), strip(a, bare), `${unitType} contract invariant apart from workers_timeout*`);
+      assertEqual(b.workers_timeout, 1234, `${unitType} explicit ceiling`);
+    }
+    cleanup(bare); cleanup(explicit);
+  });
+
+  runCase('CLI writes one stderr warning line only when the ceiling carries a warning', () => {
+    const legacy = mkFixture({ prefsJsonc: JSON.stringify({ workers: { timeout: 300 } }) });
+    const warned = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--cwd', legacy.dir], { encoding: 'utf8', env: cliEnv });
+    assertEqual(warned.status, 0, 'legacy 300 does not change the exit code');
+    const stderrLines = warned.stderr.split('\n').filter(Boolean);
+    assertEqual(stderrLines.length, 1, 'exactly one stderr line');
+    assert(/^\[forge-dispatch-resolve\] aviso: legacy-300-ignored: /.test(stderrLines[0] || ''), 'stderr line names the legacy warning', warned.stderr);
+    const stdoutLines = warned.stdout.split('\n').filter(Boolean);
+    assertEqual(stdoutLines.length, 1, 'stdout stays one JSON line');
+    let parsed = null;
+    try { parsed = JSON.parse(stdoutLines[0]); } catch (error) { fail('warned CLI stdout is valid JSON', error.message); }
+    assertEqual(parsed && parsed.workers_timeout, 1800, 'CLI contract carries the tier ceiling');
+    cleanup(legacy);
+    const clean = mkFixture({});
+    const quiet = spawnSync('node', [SCRIPT, '--json', '--unit-type', 'execute-task', '--cwd', clean.dir], { encoding: 'utf8', env: cliEnv });
+    assertEqual(quiet.status, 0, 'no-pref CLI exits zero');
+    assertEqual(quiet.stderr, '', 'no warning leaves stderr empty');
+    cleanup(clean);
+  });
+
+  runCase('--shell-exports carries the ceiling source and warning message', () => {
+    const legacy = mkFixture({ prefsJsonc: JSON.stringify({ workers: { timeout: 300 } }) });
+    const contract = dispatch(legacy, { unitType: 'execute-task' });
+    const cli = spawnSync('node', [SCRIPT, '--shell-exports'], { encoding: 'utf8', env: cliEnv, input: JSON.stringify(contract) });
+    assertEqual(cli.status, 0, 'shell exports exit 0');
+    const probe = spawnSync('bash', ['-c', 'eval "$(cat)"; printf \'%s\n%s\n%s\' "$WORKERS_TIMEOUT" "$WORKERS_TIMEOUT_SOURCE" "$WORKERS_TIMEOUT_WARNING"'],
+      { encoding: 'utf8', input: cli.stdout });
+    const [timeout, source, message] = probe.stdout.split('\n');
+    assertEqual(timeout, '1800', 'WORKERS_TIMEOUT is the ceiling');
+    assertEqual(source, 'legacy-300-ignored', 'WORKERS_TIMEOUT_SOURCE evals');
+    assertEqual(message, contract.workers_timeout_warning.message, 'WORKERS_TIMEOUT_WARNING evals to the message');
+    cleanup(legacy);
+    const clean = mkFixture({});
+    const plain = spawnSync('node', [SCRIPT, '--shell-exports'], { encoding: 'utf8', env: cliEnv, input: JSON.stringify(dispatch(clean, { unitType: 'execute-task' })) });
+    const tail = plain.stdout.trim().split('\n').slice(-2).join('\n');
+    assertEqual(tail, "WORKERS_TIMEOUT_SOURCE='tier-default'\nWORKERS_TIMEOUT_WARNING=''", 'no warning exports an empty string');
+    cleanup(clean);
   });
 
   runCase('execute-task defaults: standard chain and observed executor effort', () => {
@@ -597,7 +709,7 @@ withHermeticHome((cliEnv) => {
     ];
     assertEqual(lines.slice(0, preexistingLines.length).join('\n'), preexistingLines.join('\n'),
       'preexisting export lines remain byte-identical for the same contract');
-    assertEqual(lines.slice(-10).map((line) => line.slice(0, line.indexOf('='))).join(','),
+    assertEqual(lines.slice(-12, -2).map((line) => line.slice(0, line.indexOf('='))).join(','),
       'HOST_RUNTIME,WORKER_ENGINE,WORKER_MODE,DISPATCH_ALLOWED,DISPATCH_REASON_CODE,DISPATCH_HINT,DISPATCH_POSTURE,DISPATCH_DECISION,RESOLVED_WORKER_ENGINE,SIDECAR_DECLARED',
       'runtime exports are appended without disturbing the legacy prefix');
     assertEqual(byName.MODEL_ID, `'${contract.model}'`, 'MODEL_ID mirrors the contract');
@@ -1032,12 +1144,18 @@ withHermeticHome((cliEnv) => {
       route_source: 'tier_models',
       chain: [{ id: 'claude-sonnet-5', alias: 'sonnet', mapped: true, engine: 'claude' }],
       chain_len: 1, reason: 'unit-type:execute-task', effort: 'medium', effort_reason: 'unit-type:execute-task',
-      model_applied: null, engine_reason: 'default:claude', workers_engine: 'claude', workers_timeout: 300,
+      model_applied: null, engine_reason: 'default:claude', workers_engine: 'claude', workers_timeout: 1800,
       codex_model: '', plan_worker: '', domain_input: 'default', frontmatter_tier: '', thinking_header: '',
       routing_present: false, dispatch_engine: 'claude', sidecar_model: '', prefs_ok: true, prefs_errors: [],
     };
     assertEqual(JSON.stringify(projection), JSON.stringify(frozen),
       'all preexisting loop fields retain their deterministic serialization');
+    // workers_timeout is now the tier safety ceiling (standard -> 1800); its
+    // provenance rides in two fields appended after every preexisting key.
+    assertEqual(Object.keys(contract).slice(-2).join(','), 'workers_timeout_source,workers_timeout_warning',
+      'ceiling provenance fields are the last keys');
+    assertEqual(contract.workers_timeout_source, 'tier-default', 'frozen fixture ceiling comes from the tier');
+    assertEqual(contract.workers_timeout_warning, null, 'frozen fixture carries no ceiling warning');
     cleanup(f);
   });
 

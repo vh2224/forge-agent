@@ -38,9 +38,55 @@ already present in the conversation. Ask only for a missing important decision.
 A direct action creates no run, task, milestone, assessment, or worker dispatch.
 It does not require brainstorm, research, a new plan gate, or dialectic review.
 
-This is an entry decision, never a fallback after a routed unit fails. A refusal
-or failed sidecar retains its selected model, effort, route and pending unit;
-investigate the failure through the canonical dispatch diagnostic contract.
+These ordinary eligibility rules do not turn a refused routed unit into a direct
+action. A refusal retains its selected model, effort, route and pending unit;
+investigate it through the canonical dispatch diagnostic contract. A repair of
+Forge itself may use the separately authorized maintenance path below.
+
+## Authorized Forge maintenance
+
+Direct execution means the current host session edits code; native dispatch means
+a separate worker invoked through the host tool. They are different execution
+paths. Dispatch adapters validate only calls made through them, not arbitrary
+host edits. This contract is a host obligation, not automatic runtime enforcement.
+
+The host may implement an explicitly authorized repair of Forge itself directly,
+including when a defect in dispatch/recovery blocks its own repair task. Existing
+conversation authorization for this path and scope remains valid after restart;
+do not ask again merely because a routed attempt failed. A generic request to
+continue, a timeout, or standing permission to try another routing candidate
+does not by itself authorize replacing that route with host execution.
+
+Before editing, record the diagnosed defect, bounded repair scope, conversation
+authorization, intended files and verification in the existing work artifacts.
+For an existing task retain its plan, security and plan gates, identity, CODE_DIR,
+branch/worktree and nonempty claims. High-risk maintenance keeps its preparation
+and independent review; it does not become an ordinary low-risk direct action.
+Inspect process and receipt, replay eligible results first and reconcile every
+possible writer root. Active/unknown writers, unexplained deltas, conflicting
+claims and unanswered functional decisions still block dependent writes.
+
+Record the actual executor as the current host session and the observed model
+and effort, using unknown where not observable. Preserve the resolved route and
+failed attempts as history; never claim the host matched or completed that route,
+emit a successful worker receipt for host edits, consume a reserved invocation,
+forge a no-spawn attestation or replace protected baselines to make recovery pass.
+Keep attributable before/after hashes and the host operation evidence needed for
+later reconciliation. Do not change global routing preferences or create a new
+run merely to escape a refused unit.
+
+Run the planned verification in the actual code root, obtain independent review,
+and record the repair and remaining limitations in the handoff/checkpoint.
+An implementation, successful tests and a repaired adapter do not by themselves
+complete the blocked unit. Resume it through canonical recovery/publication only
+after revalidating its authority, history, roots, claims and live adapter evidence.
+If delivery still refuses, preserve the verified repair and report that separate
+blocker; do not rewrite history to manufacture delivery.
+
+Automated refusal handlers still stop the refused dispatch. Their stop/inline
+wording does not prohibit this authorized maintenance path outside that dispatch.
+This exception never authorizes replacing an independent reviewer with the author
+or implementing unrelated product work on a different route.
 
 ## Feedback during UAT
 

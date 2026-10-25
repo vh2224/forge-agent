@@ -235,6 +235,44 @@ function mockClaudeMain(config) {
     process.stdout.write('  \n\t');
     return;
   }
+  if (config.behavior === 'loop') {
+    // Five identical Bash tool calls (T01 stream shape), then the result.
+    const out = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const input = { command: 'echo identical-loop-step', description: 'loop fixture' };
+    (async () => {
+      for (let index = 0; index < 5; index++) {
+        const id = 'toolu_t05_' + index;
+        const message = 'msg-t05-tool-' + index;
+        out({ type: 'stream_event', event: { type: 'message_start', message: { id: message, role: 'assistant' } } });
+        out({ type: 'stream_event', event: { type: 'content_block_start', index: 0,
+          content_block: { type: 'tool_use', id, name: 'Bash', input: {} } } });
+        out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0,
+          delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } } });
+        out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+        out({ type: 'assistant', message: { id: message, role: 'assistant',
+          content: [{ type: 'tool_use', id, name: 'Bash', input }] } });
+        await sleep(15);
+        out({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id,
+          content: 'fixture-tool-output' }] }, parent_tool_use_id: null, session_id: 'fixture-session' });
+      }
+      await sleep(400);
+      mockFs.writeFileSync(mockPath.join(process.cwd(), config.mockOutput), 'loop output\n', 'utf8');
+      out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-t05-final', role: 'assistant' } } });
+      out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+      out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } });
+      out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+      out({ type: 'stream_event', event: { type: 'message_stop' } });
+      const requested = args[args.indexOf('--model') + 1];
+      process.stdout.write(JSON.stringify({
+        type: 'result', subtype: 'success', is_error: false, structured_output: payload,
+        result: ['---GSD-WORKER-RESULT---', 'status: done', 'result_json: ' + JSON.stringify(payload), '---END-RESULT---', ''].join('\n'),
+        usage: { input_tokens: 401, output_tokens: 403 },
+        modelUsage: { [requested]: { inputTokens: 401, outputTokens: 403 } },
+      }));
+    })();
+    return;
+  }
   if (config.behavior === 'protected') {
     const protectedFile = mockPath.join(process.cwd(), '.gsd', 'poison.txt');
     mockFs.mkdirSync(mockPath.dirname(protectedFile), { recursive: true });
@@ -807,6 +845,240 @@ async function reviewCalibrationRetry() {
   }
 }
 
+async function reviewLegsLiveness(root) {
+  // Review legs forward onLiveness to the Claude adapter only when supplied.
+  // The adapter is replaced at its boundary and stops each leg after capture.
+  const adapter = require('./forge-claude-sidecar');
+  const originalInvoke = adapter.invokeClaudeSidecar;
+  const modulePath = require.resolve('./forge-xllm');
+  const cached = require.cache[modulePath];
+  const inputFile = path.join(root, 'review-liveness-input.txt');
+  fs.writeFileSync(inputFile, 'fixture review input\n', 'utf8');
+  const planContextFile = path.join(root, 'plan-liveness-context.md');
+  fs.writeFileSync(planContextFile, '# Plan context fixture\n', 'utf8');
+  // The plan result channel must live outside the workspace (PROJECT_ROOT).
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'forge-xllm-plan-liveness-'));
+  const ignore = [path.join(outside, 'plan-liveness.json'), path.join(outside, 'plan-liveness.json.receipt.json')];
+  let captured = null;
+  adapter.invokeClaudeSidecar = async (options) => {
+    captured = options;
+    throw Object.assign(new Error('fixture stop after option capture'), { code: 'fixture-stop' });
+  };
+  delete require.cache[modulePath];
+  try {
+    const xllm = require('./forge-xllm');
+    const onLiveness = (transition) => transition;
+    const base = { cwd: PROJECT_ROOT, engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true,
+      model: 'claude-opus-5-5', effort: 'medium' };
+    const legs = [['runChallenge', { diffCmd: 'node --version' }], ['runDefend', { inputFile }], ['runRebuttal', { inputFile }],
+      ['runPlan', { planContextFile, resultFile: ignore[0], dispatchId: 'plan-liveness', localProofIgnore: ignore }]];
+    for (const [leg, extra] of legs) {
+      for (const supplied of [true, false]) {
+        captured = null;
+        await assert.rejects(xllm[leg]({ ...base, ...extra, ...(supplied ? { onLiveness } : {}) }), /fixture stop/);
+        assert.ok(captured, `${leg} reached the Claude adapter`);
+        if (leg === 'runPlan') assert.deepStrictEqual(captured.localProofIgnore, ignore, 'plan forwards localProofIgnore');
+        if (supplied) assert.strictEqual(captured.onLiveness, onLiveness, `${leg} forwards onLiveness`);
+        // The plan forwards the caller's value as-is (undefined when absent).
+        else if (leg === 'runPlan') assert.strictEqual(captured.onLiveness, undefined);
+        else assert.strictEqual(Object.prototype.hasOwnProperty.call(captured, 'onLiveness'), false, `${leg} adds no key when absent`);
+      }
+    }
+  } finally {
+    adapter.invokeClaudeSidecar = originalInvoke;
+    delete require.cache[modulePath]; if (cached) require.cache[modulePath] = cached;
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+}
+
+async function reviewLegsLivenessProgress(root) {
+  // CLI review leg (engine claude): the default progress writer emits the liveness block on
+  // stderr and a host reads it with readProgressLine. The Claude adapter is replaced at its
+  // boundary by a preload; everything from the CLI down to progressLine is production code.
+  const { readProgressLine } = require('./forge-sidecar-diagnostic');
+  const SENTINEL = 'S06_T04_REVIEW_SENTINEL_5b2e';
+  const scenarioDir = fs.mkdtempSync(path.join(root, 'review-progress-'));
+  try {
+    const preload = path.join(scenarioDir, 'preload.js');
+    fs.writeFileSync(preload, `'use strict';
+const adapter = require(${JSON.stringify(path.join(__dirname, 'forge-claude-sidecar.js'))});
+adapter.invokeClaudeSidecar = async (options) => {
+  options.onProgress({ elapsed_ms: 120025, phase: 'remote-activity',
+    liveness: { version: 1, state: 'slow-suspect', since_ms: 120025, reason: 'no-progress', note: ${JSON.stringify(SENTINEL)} } });
+  throw Object.assign(new Error('fixture stop after progress'), { code: 'fixture-stop' });
+};
+`, 'utf8');
+    const run = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['-r', preload, CLI_PATH, '--mode', 'challenge', '--engine', 'claude',
+        '--host-runtime', 'codex', '--sidecar-declared', '--diff-cmd', 'node --version', '--cwd', PROJECT_ROOT,
+        '--model', 'claude-opus-5-5', '--effort', 'medium', '--timeout', '12', '--env-policy', 'minimal'], {
+        cwd: scenarioDir, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const stderr = [];
+      child.stderr.on('data', (chunk) => stderr.push(chunk));
+      child.stdout.resume();
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* exited */ } reject(new Error('review progress CLI timed out')); }, 20000);
+      child.once('error', (error) => { clearTimeout(timer); reject(error); });
+      child.once('close', () => { clearTimeout(timer); resolve(Buffer.concat(stderr).toString('utf8')); });
+    });
+    const lines = run.split(/\r?\n/).filter((line) => line.startsWith('[forge-sidecar-progress]'));
+    assert.strictEqual(lines.length, 1, run.slice(0, 1200));
+    assert.deepStrictEqual(readProgressLine(lines[0]).liveness,
+      { version: 1, state: 'slow-suspect', since_ms: 120025, reason: 'no-progress' });
+    assert.ok(!run.includes(SENTINEL), 'no extra field reaches the progress line');
+  } finally {
+    removeOwnedFixture(root, scenarioDir);
+  }
+}
+
+// In-process runExecute driver, run in a child with the isolated fixture env.
+// It wraps (and delegates to) the real invokeClaudeSidecar before forge-xllm
+// loads, only to observe the received options and to inject the adapter's
+// internal test seams (fast watchdog, fake local-proof provider).
+function livenessDriverMain() {
+  'use strict';
+  const driverFs = require('fs');
+  const driverPath = require('path');
+  const [scriptsDir, configFile] = process.argv.slice(2);
+  const config = JSON.parse(driverFs.readFileSync(configFile, 'utf8'));
+  const adapter = require(driverPath.join(scriptsDir, 'forge-claude-sidecar.js'));
+  const realInvoke = adapter.invokeClaudeSidecar;
+  const seen = { transport: null, providerPrefixes: null };
+  adapter.invokeClaudeSidecar = (options) => {
+    seen.transport = { onLiveness: typeof options.onLiveness, localProofIgnore: options.localProofIgnore };
+    return realInvoke({ ...options, livenessIntervalMs: 25, localProofIntervalMs: 600000,
+      localProofFactory: (provider) => {
+        seen.providerPrefixes = provider.ignore.prefixes;
+        return { sample: () => Promise.resolve(), current: () => ({ capability: 'available', proof: 'none' }), stop() {} };
+      } });
+  };
+  const xllm = require(driverPath.join(scriptsDir, 'forge-xllm.js'));
+  const transitions = [];
+  const write = (value) => driverFs.writeFileSync(config.outFile, JSON.stringify({ ...value, seen, transitions }));
+  xllm.runExecute({ planFile: config.planFile, resultFile: config.resultFile, cwd: config.cwd, engine: 'claude',
+    hostRuntime: 'codex', sidecarDeclared: true, model: 'claude-sonnet-5', effort: 'medium', timeoutSecs: 12,
+    envPolicy: 'minimal', dispatchId: config.dispatchId, localProofIgnore: config.ignore,
+    onLiveness: (transition) => transitions.push(transition) })
+    .then((result) => write({ ok: true, status: result.status }),
+      (error) => write({ ok: false, code: error.code || null, message: error.message }));
+}
+
+function runDriver(fixture, driverFile, configFile) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [driverFile, __dirname, configFile], {
+      cwd: fixture.scenarioDir, env: fixture.env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stderr = [];
+    child.stderr.on('data', (chunk) => { if (stderr.length < 64) stderr.push(chunk); });
+    child.stdout.resume();
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* exited */ } reject(new Error('liveness driver timed out')); }, 20000);
+    child.once('error', (error) => { clearTimeout(timer); reject(error); });
+    child.once('close', (code) => { clearTimeout(timer); resolve({ code, stderr: Buffer.concat(stderr).toString('utf8') }); });
+  });
+}
+
+async function livenessPassThroughPath(root) {
+  const scenarioDir = fs.mkdtempSync(path.join(root, 'liveness-'));
+  try {
+    const fixture = createFixture(scenarioDir, 'liveness', 'loop', 'configured');
+    const driverFile = path.join(scenarioDir, 'liveness-driver.js');
+    fs.writeFileSync(driverFile, `'use strict';\n(${livenessDriverMain.toString()})();\n`, 'utf8');
+    const configFile = path.join(scenarioDir, 'liveness-config.json');
+    const outFile = path.join(scenarioDir, 'liveness-out.json');
+    const ignore = [fixture.resultFile, `${fixture.resultFile}.receipt.json`];
+    writeJson(configFile, { planFile: fixture.planFile, resultFile: fixture.resultFile, cwd: fixture.workspace,
+      dispatchId: 'fixture-liveness', ignore, outFile });
+    const started = Date.now();
+    const run = await runDriver(fixture, driverFile, configFile);
+    assert.ok(Date.now() - started < 15000, 'the liveness pass-through stays fast');
+    assert.ok(fs.existsSync(outFile), `driver wrote no outcome (exit ${run.code}): ${run.stderr.slice(0, 800)}`);
+    const outcome = JSON.parse(fs.readFileSync(outFile, 'utf8'));
+    assert.strictEqual(outcome.ok, true, JSON.stringify(outcome));
+    assert.strictEqual(outcome.status, 'done');
+    // execute path: runExecute -> runWriteContractCore -> invokeClaudeTransport -> adapter.
+    assert.strictEqual(outcome.seen.transport.onLiveness, 'function');
+    assert.deepStrictEqual(outcome.seen.transport.localProofIgnore, ignore);
+    assert.deepStrictEqual(outcome.seen.providerPrefixes, ignore.map((file) => path.resolve(file)));
+    const loops = outcome.transitions.filter((transition) => transition.reason === 'no-progress');
+    assert.strictEqual(loops.length, 1, JSON.stringify(outcome.transitions));
+    assert.strictEqual(loops[0].to, 'slow-suspect');
+    assert.strictEqual(loops[0].progress.repeats, 5);
+    assert.match(loops[0].progress.fingerprint_sha256, /^[0-9a-f]{16}$/);
+    assert.ok(!JSON.stringify(outcome.transitions).includes('identical-loop-step'), 'transitions carry no tool argument');
+  } finally {
+    removeOwnedFixture(root, scenarioDir);
+  }
+}
+
+// Ceiling driver: captures the timeoutSecs each Claude leg hands to the adapter.
+function ceilingDriverMain() {
+  'use strict';
+  const driverFs = require('fs');
+  const driverPath = require('path');
+  const [scriptsDir, configFile] = process.argv.slice(2);
+  const config = JSON.parse(driverFs.readFileSync(configFile, 'utf8'));
+  const adapter = require(driverPath.join(scriptsDir, 'forge-claude-sidecar.js'));
+  const seen = [];
+  adapter.invokeClaudeSidecar = async (options) => {
+    seen.push(options.timeoutSecs);
+    throw Object.assign(new Error('fixture stop after ceiling capture'), { code: 'fixture-stop' });
+  };
+  const xllm = require(driverPath.join(scriptsDir, 'forge-xllm.js'));
+  const base = { engine: 'claude', hostRuntime: 'codex', sidecarDeclared: true, model: 'claude-sonnet-5',
+    effort: 'medium', envPolicy: 'minimal' };
+  const legs = [
+    () => xllm.runExecute({ ...base, planFile: config.planFile, resultFile: config.resultFile, cwd: config.cwd, dispatchId: 'ceiling-exec' }),
+    () => xllm.runExecute({ ...base, tier: 'heavy', planFile: config.planFile, resultFile: config.resultFile, cwd: config.cwd, dispatchId: 'ceiling-exec-heavy' }),
+    () => xllm.runPlan({ ...base, planContextFile: config.planContextFile, resultFile: config.planResultFile, cwd: config.cwd, dispatchId: 'ceiling-plan' }),
+  ];
+  (async () => {
+    const errors = [];
+    for (const leg of legs) { try { await leg(); } catch (error) { errors.push(error.code || error.message); } }
+    driverFs.writeFileSync(config.outFile, JSON.stringify({ seen, errors }));
+  })();
+}
+
+async function ceilingDefaultPath(root) {
+  const scenarioDir = fs.mkdtempSync(path.join(root, 'ceiling-'));
+  try {
+    const fixture = createFixture(scenarioDir, 'ceiling', 'success', 'configured');
+    const driverFile = path.join(scenarioDir, 'ceiling-driver.js');
+    fs.writeFileSync(driverFile, `'use strict';
+(${ceilingDriverMain.toString()})();
+`, 'utf8');
+    const planContextFile = path.join(scenarioDir, 'plan-context.md');
+    fs.writeFileSync(planContextFile, '# Plan context fixture\n', 'utf8');
+    const configFile = path.join(scenarioDir, 'ceiling-config.json');
+    const outFile = path.join(scenarioDir, 'ceiling-out.json');
+    writeJson(configFile, { planFile: fixture.planFile, resultFile: fixture.resultFile, cwd: fixture.workspace,
+      planContextFile, planResultFile: path.join(scenarioDir, 'plan-result.json'), outFile });
+    const run = await runDriver(fixture, driverFile, configFile);
+    assert.ok(fs.existsSync(outFile), `driver wrote no outcome (exit ${run.code}): ${run.stderr.slice(0, 800)}`);
+    const outcome = JSON.parse(fs.readFileSync(outFile, 'utf8'));
+    // runExecute/runPlan without timeoutSecs: the tier ceiling (standard 1800, heavy 3600), never 300.
+    assert.deepStrictEqual(outcome.seen, [1800, 3600, 1800], JSON.stringify(outcome));
+
+    // CLI: a legacy workers.timeout 300 pref is ignored with a visible stderr warning.
+    fs.mkdirSync(path.join(scenarioDir, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(scenarioDir, '.gsd', 'forge-prefs.jsonc'), JSON.stringify({ workers: { timeout: 300 } }), 'utf8');
+    const args = cliArgs(fixture);
+    args.splice(args.indexOf('--timeout'), 2);
+    const cli = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [CLI_PATH, ...args, '--tier', 'light'], {
+        cwd: fixture.scenarioDir, env: fixture.env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const stderr = [];
+      child.stderr.on('data', (chunk) => stderr.push(chunk));
+      child.stdout.resume();
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* exited */ } reject(new Error('ceiling CLI timed out')); }, 25000);
+      child.once('error', (error) => { clearTimeout(timer); reject(error); });
+      child.once('close', (code) => { clearTimeout(timer); resolve({ code, stderr: Buffer.concat(stderr).toString('utf8') }); });
+      child.stdin.end(CLI_STDIN);
+    });
+    assert.match(cli.stderr, /forge-xllm: aviso: legacy-300-ignored: .*light \(900s\)/, cli.stderr.slice(0, 1200));
+  } finally {
+    removeOwnedFixture(root, scenarioDir);
+  }
+}
+
 async function main() {
   const root = fs.mkdtempSync(path.join(PROJECT_ROOT, '.forge-xllm-claude-test-'));
   assertPathInside(PROJECT_ROOT, root, 'suite fixture root');
@@ -817,6 +1089,10 @@ async function main() {
     ['valid worker output still crosses the shared protected-change fence', protectedWritePath],
     ['a substituted model is refused after the turn and preserves the worker tree', substitutedPath],
     ['accepted review exposes bounded calibration retry without another inference', reviewCalibrationRetry],
+    ['execute forwards onLiveness and localProofIgnore to the Claude adapter (no-progress observed)', livenessPassThroughPath],
+    ['Claude review legs and plan forward onLiveness (plan also localProofIgnore)', reviewLegsLiveness],
+    ['Claude review legs publish the liveness block in the host progress line (no-progress)', reviewLegsLivenessProgress],
+    ['plan/execute default to the tier ceiling and the CLI warns on a legacy 300 pref', ceilingDefaultPath],
   ];
   let passed = 0;
   const failures = [];

@@ -169,6 +169,11 @@ if (control.hang) setInterval(() => {}, 1000);
 else if (control.exit) process.exitCode = control.exit;
 `);
 
+// Liveness kills now record censored v2 samples: without an explicit
+// calibrationOptions every scenario reads and writes an isolated fixture home,
+// never the developer's personal calibration store.
+const DEFAULT_CALIBRATION_OPTIONS = Object.freeze({ userHome: path.join(ROOT, 'default-calibration-home') });
+
 function loadAdapter({ resolver, spawnImpl } = {}) {
   const originalResolver = accounts.resolveLaunch;
   const originalSpawn = childProcess.spawn;
@@ -176,7 +181,10 @@ function loadAdapter({ resolver, spawnImpl } = {}) {
   childProcess.spawn = spawnImpl || REAL_SPAWN;
   delete require.cache[ADAPTER_PATH];
   try {
-    return require(ADAPTER_PATH);
+    const adapter = require(ADAPTER_PATH);
+    return { ...adapter, invokeClaudeSidecar: options => adapter.invokeClaudeSidecar(
+      options && typeof options === 'object' && options.calibrationOptions === undefined
+        ? { ...options, calibrationOptions: DEFAULT_CALIBRATION_OPTIONS } : options) };
   } finally {
     accounts.resolveLaunch = originalResolver;
     childProcess.spawn = originalSpawn;
@@ -226,6 +234,13 @@ test('reason codes are frozen and expose every named failure contract', () => {
     'claude-account-unavailable', 'claude-command-not-found', 'claude-exit-nonzero',
     'claude-timeout', 'claude-empty-output', 'claude-invalid-result',
   ]);
+});
+
+test('budget-exceeded-while-active is a frozen reason code', () => {
+  const adapter = loadAdapter();
+  const code = adapter.CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED;
+  assert.strictEqual(code, 'budget-exceeded-while-active');
+  ok(Object.values(adapter.CLAUDE_SIDECAR_REASON_CODES).includes(code), 'member of the frozen reason-code set');
 });
 
 test('Claude env is allowlist-built and replaces every ambient credential', () => {
@@ -454,6 +469,23 @@ test('timeout terminates exactly once and discards an already-complete stdout bl
   assert.strictEqual(records.length, 1);
   assert.strictEqual(terminations, 1);
   assert.deepStrictEqual(tempPromptDirs(), []);
+});
+
+test('a ceiling reached while still starting stays claude-timeout with termination null', async () => {
+  const fixture = writeFixture('claude silent starting fixture.js', `
+'use strict';
+setInterval(() => {}, 1000);
+`);
+  const adapter = loadAdapter();
+  const error = await expectCode(adapter.invokeClaudeSidecar({
+    cwd: WORKSPACE, prompt: 'starting ceiling', model: FIXTURE_MODEL,
+    timeoutMs: adapter.TIMEOUT_GRACE_MS + 80, sourceEnv: sourceEnvFor(fixture),
+    terminateChild(child) { child.kill('SIGKILL'); },
+  }), adapter.CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
+  assert.strictEqual(error.liveness.version, 1);
+  assert.strictEqual(error.liveness.termination, null);
+  assert.strictEqual(error.liveness.state, 'starting');
+  assert.strictEqual(error.diagnostic.reason, 'provider-timeout');
 });
 
 test('stdout capture limit terminates a runaway child with a stable code', async () => {
@@ -1074,7 +1106,12 @@ test('unreadable calibration is visible in progress and returned telemetry', asy
   assert(!JSON.stringify(run.result.telemetry).includes('private-invalid-json'));
 });
 
-test('persisted calibrated silence aborts locally without treating kill promise as observed exit', async () => {
+// Migrated in S01/T03: liveness is now the primary kill authority. A persisted
+// v1 initial calibration (>= 120000) never tightens the locked 60000 start
+// limit, so the same silent child now dies as dead-start at the locked default.
+// The ceiling is also enforced on the injected clock now, so timeoutMs is
+// widened (15000 -> 3600000) to keep the start limit, not the ceiling, in play.
+test('persisted calibrated silence aborts locally (now dead-start at the locked 60000 default) without treating kill promise as observed exit', async () => {
   const calibration = require('./forge-sidecar-calibration');
   const calibrationOptions = { userHome: path.join(ROOT, 'calibration-home') };
   const id = { model: FIXTURE_MODEL, effort: 'medium', phase: 'execute' };
@@ -1084,15 +1121,1313 @@ test('persisted calibrated silence aborts locally without treating kill promise 
   let now = 0, kills = 0;
   const adapter = loadAdapter();
   const error = await expectCode(adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'silence', model: FIXTURE_MODEL,
-    timeoutMs: 15000, calibrationOptions, monotonicClock: () => now,
+    timeoutMs: 3600000, calibrationOptions, monotonicClock: () => now, livenessIntervalMs: 25,
     sourceEnv: sourceEnvFor(silentFixture), onHeartbeat() { now = 120001; },
     terminateChild(child) { kills++; child.kill('SIGKILL'); return Promise.reject(Error('termination unconfirmed')); },
   }), 'claude-anomalous-silence');
   assert.equal(kills, 1);
   assert.equal(error.diagnostic.observation.silence.cause, 'indeterminate');
-  assert.equal(error.diagnostic.observation.silence.threshold_ms, 120000);
+  assert.equal(error.diagnostic.observation.silence.dimension, 'initial');
+  assert.equal(error.diagnostic.observation.silence.threshold_ms, 60000);
+  assert.equal(error.diagnostic.observation.silence.source, 'locked-default');
+  assert.equal(error.liveness.termination, 'dead-start');
   assert.equal(error.diagnostic.observation.process_exit_observed, false);
   assert.deepEqual(tempPromptDirs(), []);
+});
+
+// ── Liveness watchdog (S01/T03) — accelerated injected clock, no long real waits ──
+// The watchdog consults forge-sidecar-liveness on every livenessIntervalMs tick
+// using the injected monotonicClock. `fromFirstRemote` keeps real time until the
+// first remote event so a slow child start on a loaded CI host cannot be read
+// as an accelerated dead-start; the dead-start test accelerates from spawn.
+function acceleratedClock(factor, { fromFirstRemote = false } = {}) {
+  const t0 = performance.now();
+  let pivotReal = fromFirstRemote ? null : t0, pivotValue = 0;
+  return {
+    now() {
+      const real = performance.now();
+      return pivotReal === null ? real - t0 : pivotValue + (real - pivotReal) * factor;
+    },
+    accelerate() {
+      if (pivotReal !== null) return;
+      const real = performance.now();
+      pivotValue = real - t0;
+      pivotReal = real;
+    },
+  };
+}
+
+const STREAM_PRELUDE = `
+'use strict';
+${ENVELOPE_PRELUDE}
+const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const delta = () => out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0,
+  delta: { type: 'text_delta', text: 'x' } } });
+out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-live', role: 'assistant' } } });
+out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+`;
+
+// Streams a text_delta every ~30 ms; after finishAfterMs real ms (if given)
+// closes the message and writes a valid result envelope.
+function activeStreamFixture(name, finishAfterMs) {
+  return writeFixture(name, `${STREAM_PRELUDE}
+const stopAt = ${finishAfterMs === null ? 'null' : `Date.now() + ${finishAfterMs}`};
+const tick = setInterval(() => {
+  delta();
+  if (stopAt !== null && Date.now() >= stopAt) {
+    clearInterval(tick);
+    out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+    out({ type: 'stream_event', event: { type: 'message_stop' } });
+    process.stdout.write(envelope(${JSON.stringify(okBlock('liveness active'))}) + '\\n');
+  }
+}, 30);
+`);
+}
+
+// Emits N=3 remote events (message_start + two text deltas) and then stays silent.
+const SILENT_AFTER_EVENTS_FIXTURE = writeFixture('claude silent after events fixture.js', `${STREAM_PRELUDE}
+delta();
+delta();
+setInterval(() => {}, 1000);
+`);
+const SILENT_FROM_START_FIXTURE = writeFixture('claude silent from start fixture.js', 'setInterval(() => {}, 1000);');
+
+async function runLive(fixture, clock, options = {}) {
+  // onSnapshot observes every progress snapshot without replacing the clock pivot.
+  const { onSnapshot, ...invokeOptions } = options;
+  const children = [];
+  const transitions = [];
+  let terminations = 0, result = null, error = null;
+  const adapter = loadAdapter({ spawnImpl: (cmd, args, spawnOptions) => {
+    const child = REAL_SPAWN(cmd, args, spawnOptions);
+    children.push(child);
+    return child;
+  } });
+  const started = performance.now();
+  try {
+    result = await adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'liveness', model: FIXTURE_MODEL, timeoutMs: 3600000,
+      sourceEnv: sourceEnvFor(fixture), monotonicClock: clock.now, livenessIntervalMs: 25,
+      onProgress(snapshot) {
+        if (snapshot.phase !== 'local-start') clock.accelerate();
+        if (onSnapshot) onSnapshot(snapshot);
+      },
+      onLiveness(transition) { transitions.push(transition); },
+      terminateChild(child) { terminations++; child.kill('SIGKILL'); },
+      ...invokeOptions,
+    });
+  } catch (caught) { error = caught; }
+  finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) try { child.kill('SIGKILL'); } catch { /* gone */ }
+    }
+  }
+  const realMs = performance.now() - started;
+  assert.strictEqual(children.length, 1, 'exactly one turn spawn');
+  assert.deepStrictEqual(tempPromptDirs(), []);
+  ok(realMs < 5000, `liveness test waited ${Math.round(realMs)} real ms`);
+  return { result, error, transitions, terminations, realMs };
+}
+
+function gapCalibration(label, gapSampleMs) {
+  const calibration = require('./forge-sidecar-calibration');
+  const calibrationOptions = { userHome: path.join(ROOT, `calibration-gap-${label}`) };
+  const id = { model: FIXTURE_MODEL, effort: 'medium', phase: 'execute' };
+  for (let i = 0; i < 5; i++) {
+    assert(calibration.commit(calibration.propose(id, { initial_sample_ms: null, gap_sample_ms: gapSampleMs }),
+      { receipt: 'fixture', fingerprint: 'fixture' }, calibrationOptions).committed);
+  }
+  const record = calibration.read(id, calibrationOptions);
+  assert.strictEqual(record.gap.calibrated, true);
+  return { calibrationOptions, threshold: record.gap.threshold_ms };
+}
+
+test('liveness: an active stream survives past 300000 injected ms under a 3600000 ceiling', async () => {
+  const fixture = activeStreamFixture('claude active stream fixture.js', 1200);
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }));
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  ok(run.result.metadata.observation.elapsed_ms > 300000,
+    `elapsed ${run.result.metadata.observation.elapsed_ms} must exceed 300000 injected ms`);
+  assert.strictEqual(run.terminations, 0);
+  ok(!run.transitions.some(t => t.to === 'dead'), 'an active stream never reached dead');
+});
+
+test('liveness: completion before the first watchdog tick publishes the current state, not starting', async () => {
+  const fixture = activeStreamFixture('claude fast finish fixture.js', 60);
+  const clock = { now: () => performance.now(), accelerate() {} };
+  const snapshots = [];
+  const run = await runLive(fixture, clock, { livenessIntervalMs: 1000, onSnapshot: snap => snapshots.push(snap) });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  const finalObservation = run.result.metadata.observation;
+  ok(finalObservation.remote_event_count >= 1, 'remote events were observed');
+  assert.notStrictEqual(finalObservation.liveness.state, 'starting');
+  assert.strictEqual(finalObservation.liveness.state, 'working');
+  assert.notStrictEqual(snapshots[snapshots.length - 1].liveness.state, 'starting');
+});
+
+test('liveness: no remote event dies once as dead-start at the locked 60000 default', async () => {
+  const run = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300));
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-start');
+  assert.strictEqual(run.error.liveness.state, 'dead');
+  const silence = run.error.diagnostic.observation.silence;
+  assert.strictEqual(silence.dimension, 'initial');
+  assert.strictEqual(silence.threshold_ms, 60000);
+  assert.strictEqual(silence.source, 'locked-default');
+  assert.strictEqual(silence.policy, 'forge-liveness-v1');
+  assert.strictEqual(silence.cause, 'indeterminate');
+  assert.strictEqual(run.terminations, 1);
+  assert.deepStrictEqual(run.transitions.map(t => t.to), ['starting', 'dead']);
+});
+
+test('liveness: silence after N events passes slow-suspect (120000) before dead-silence (240000)', async () => {
+  const run = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }));
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  const silence = run.error.diagnostic.observation.silence;
+  assert.strictEqual(silence.dimension, 'gap');
+  assert.strictEqual(silence.threshold_ms, 240000);
+  assert.strictEqual(silence.source, 'locked-default');
+  ok(silence.window_ms > 240000);
+  const suspect = run.transitions.findIndex(t => t.from === 'working' && t.to === 'slow-suspect');
+  const dead = run.transitions.findIndex(t => t.from === 'slow-suspect' && t.to === 'dead');
+  ok(suspect >= 0, `slow-suspect transition missing: ${JSON.stringify(run.transitions)}`);
+  ok(dead > suspect, `dead must follow slow-suspect: ${JSON.stringify(run.transitions)}`);
+  ok(run.transitions[suspect].at_ms > 120000 && run.transitions[suspect].at_ms < run.transitions[dead].at_ms);
+  assert.strictEqual(run.terminations, 1);
+});
+
+test('liveness: an active stream reaching the injected ceiling is budget-exceeded-while-active', async () => {
+  // timeoutMs 60000 gives a 55000 ms child ceiling. On the accelerated clock the
+  // watchdog reaches it in ~0.2 s real; the real setTimeout backstop (55 s) does not fire.
+  const fixture = activeStreamFixture('claude endless stream fixture.js', null);
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }), { timeoutMs: 60000 });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.diagnostic.reason, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.diagnostic.stage, 'transport');
+  assert.strictEqual(run.error.message, 'The Claude worker was still active when it reached its safety ceiling.');
+  ok(!/timeout/i.test(run.error.message), 'the message never says timeout');
+  // Terminal: Layer-1 must not relaunch the same model from scratch (S05 resumes).
+  assert.strictEqual(require('./forge-xllm').classifyErrorClass(run.error.message), 'terminal');
+  assert.strictEqual(run.error.liveness.version, 1);
+  assert.strictEqual(run.error.liveness.state, 'working');
+  assert.strictEqual(run.error.diagnostic.observation.silence, undefined);
+  ok(run.realMs < 4000, 'the injected ceiling, not the real backstop, terminated the turn');
+  assert.strictEqual(run.terminations, 1);
+});
+
+test('liveness: a calibrated v1 gap only tightens the dead limit and never exceeds 240000', async () => {
+  const loose = gapCalibration('loose', 100000);
+  ok(loose.threshold > 240000, `v1 threshold ${loose.threshold} must exceed the locked default`);
+  const capped = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }),
+    { calibrationOptions: loose.calibrationOptions });
+  assert.strictEqual(capped.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(capped.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(capped.error.diagnostic.observation.silence.threshold_ms, 240000);
+  assert.strictEqual(capped.error.diagnostic.observation.silence.source, 'locked-default');
+
+  const tight = gapCalibration('tight', 100);
+  assert.strictEqual(tight.threshold, 120000);
+  const tightened = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }),
+    { calibrationOptions: tight.calibrationOptions });
+  assert.strictEqual(tightened.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(tightened.error.liveness.termination, 'dead-silence');
+  const silence = tightened.error.diagnostic.observation.silence;
+  assert.strictEqual(silence.threshold_ms, 120000);
+  assert.strictEqual(silence.source, 'persisted-calibration');
+  ok(silence.window_ms > 120000 && silence.window_ms < 240000, `window ${silence.window_ms}`);
+});
+
+test('liveness: an invalid livenessIntervalMs is refused before any spawn', async () => {
+  for (const value of [0, -1, 1.5, '25']) {
+    const records = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    await expectCode(adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'interval', model: FIXTURE_MODEL,
+      timeoutMs: 15000, livenessIntervalMs: value, sourceEnv: sourceEnvFor(HAPPY_FIXTURE) }),
+    adapter.CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+    assert.strictEqual(records.length, 0);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+  }
+});
+
+// ── Tool liveness (S02/T04) — local proof, extension and loop detector ──
+// Proofs are injected through the internal localProofFactory seam, so every
+// three-state branch (win32 unavailable, dead pid, Linux without proof) runs on
+// every platform. Tool arguments carry a sentinel that must never surface.
+const TOOL_ARG_SENTINEL = 'forge-t04-private-tool-argument-sentinel';
+
+// Emits one tool_use cycle per entry of `inputs` (stream block + assistant
+// message), optionally a tool_result per cycle, then either hangs (tool still in
+// flight) or finishes with a text message and a valid result envelope.
+//   holdMs: real ms to keep the LAST tool in flight before its tool_result
+//   result: false keeps the last tool in flight forever (no tool_result/result)
+//   pauseAfter/sentinelFile: after cycle N, wait, touch a file, wait again
+function toolFixture(name, { inputs, gapMs = 15, holdMs = 0, result = true, pauseAfter = null, sentinelFile = null }) {
+  return writeFixture(name, `
+'use strict';
+const fs = require('fs');
+${ENVELOPE_PRELUDE}
+const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const inputs = ${JSON.stringify(inputs)};
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function toolUse(index, input) {
+  const id = 'toolu_t04_' + index, message = 'msg-tool-' + index;
+  out({ type: 'stream_event', event: { type: 'message_start', message: { id: message, role: 'assistant' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_start', index: 0,
+    content_block: { type: 'tool_use', id, name: 'Bash', input: {} } } });
+  out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0,
+    delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } } });
+  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  out({ type: 'assistant', message: { id: message, role: 'assistant',
+    content: [{ type: 'tool_use', id, name: 'Bash', input }] } });
+  return id;
+}
+function toolResult(id) {
+  out({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id,
+    content: 'fixture-tool-output' }] }, parent_tool_use_id: null, session_id: 'fixture-session' });
+}
+(async () => {
+  for (let index = 0; index < inputs.length; index++) {
+    const id = toolUse(index, inputs[index]);
+    const last = index === inputs.length - 1;
+    if (last && ${result === false}) { setInterval(() => {}, 1000); return; }
+    await sleep(last ? ${holdMs} : ${gapMs});
+    toolResult(id);
+    if (${pauseAfter === null ? -1 : pauseAfter} === index + 1) {
+      await sleep(150);
+      fs.writeFileSync(${JSON.stringify(sentinelFile)}, 'written');
+      await sleep(300);
+    }
+  }
+  await sleep(250);
+  out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-final', role: 'assistant' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } });
+  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  out({ type: 'stream_event', event: { type: 'message_stop' } });
+  process.stdout.write(envelope(${JSON.stringify(okBlock('tool liveness'))}) + '\\n');
+})();
+`);
+}
+
+function privateInput(extra = {}) {
+  return { command: `echo ${TOOL_ARG_SENTINEL}`, description: 'volatile description', ...extra };
+}
+
+// Programmable fake provider: current() returns the injected proof; sample()
+// is counted; onWrite is exposed so a test can simulate a filesystem delta.
+function fakeProof(initial, { writeWhen } = {}) {
+  const state = { proof: initial, samples: 0, currents: 0, stops: 0, options: null, wrote: false };
+  state.factory = (options) => {
+    state.options = options;
+    return {
+      sample() {
+        state.samples++;
+        if (writeWhen && !state.wrote && writeWhen()) { state.wrote = true; options.onWrite(); }
+        return Promise.resolve();
+      },
+      current() { state.currents++; return state.proof; },
+      stop() { state.stops++; },
+    };
+  };
+  return state;
+}
+
+function assertToolKill(run, reason, { extension = null } = {}) {
+  ok(run.error, `expected a ${reason} kill`);
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(run.error.liveness.state, 'dead');
+  assert.strictEqual(run.error.liveness.reason, reason);
+  assert.strictEqual(run.error.liveness.extension_ms, extension);
+  assert.strictEqual(run.error.liveness.version, 1);
+  const silence = run.error.diagnostic.observation.silence;
+  ok(silence, 'observation.silence must be accepted by the diagnostic allowlist');
+  assert.strictEqual(silence.dimension, 'gap');
+  assert.strictEqual(silence.threshold_ms, 240000);
+  assert.strictEqual(silence.policy, 'forge-liveness-v1');
+  assert.strictEqual(silence.source, 'locked-default');
+  ok(silence.window_ms > silence.threshold_ms, `window ${silence.window_ms}`);
+  assert.strictEqual(run.terminations, 1);
+  assertPrivate(run);
+  return silence;
+}
+
+function assertPrivate(run) {
+  for (const [label, value] of [['transitions', run.transitions], ['error.liveness', run.error?.liveness],
+    ['observation', run.error?.diagnostic?.observation ?? run.result?.metadata?.observation]]) {
+    ok(!JSON.stringify(value ?? null).includes(TOOL_ARG_SENTINEL), `${label} leaked tool argument text`);
+  }
+}
+
+test('liveness/tool: positive local proof survives past 240000 injected ms and is accepted', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const fixture = toolFixture('claude tool positive fixture.js', { inputs: [privateInput()], holdMs: 1100 });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  assert.strictEqual(run.terminations, 0);
+  ok(run.transitions.some(t => t.to === 'slow-suspect' && t.reason === 'tool-extended' && t.at_ms > 240000),
+    `tool-extended past 240000 expected: ${JSON.stringify(run.transitions)}`);
+  ok(!run.transitions.some(t => t.to === 'dead'));
+  assertPrivate(run);
+});
+
+test('liveness/tool: Linux/macOS without proof (available/none) dies at 240000 as tool-unproven', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude tool unproven fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  const silence = assertToolKill(run, 'tool-unproven');
+  ok(silence.window_ms < 660000, `killed at ${silence.window_ms}, not after the extension`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'none' });
+});
+
+test('liveness/tool: a dead child pid (available/negative) dies at 240000 as tool-proof-negative', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'negative' });
+  const fixture = toolFixture('claude tool negative fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  const silence = assertToolKill(run, 'tool-proof-negative');
+  ok(silence.window_ms < 660000, `killed at ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'negative' });
+});
+
+test('liveness/tool: Windows without CPU (unavailable/none) stays slow-suspect past 240000 and dies at 660001, not at the ceiling', async () => {
+  const fake = fakeProof({ capability: 'unavailable', proof: 'none' });
+  const fixture = toolFixture('claude tool unavailable fixture.js', { inputs: [privateInput()], result: false });
+  // timeoutMs 905000 gives a 900000 ms child ceiling, above the 660000 tool maximum.
+  const run = await runLive(fixture, acceleratedClock(400, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, timeoutMs: 905000 });
+  const silence = assertToolKill(run, 'tool-proof-unavailable-expired', { extension: 420000 });
+  assert.notStrictEqual(run.error.code, 'claude-timeout');
+  assert.notStrictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  ok(silence.window_ms > 660000, `window ${silence.window_ms}`);
+  const suspect = run.transitions.find(t => t.to === 'slow-suspect');
+  ok(suspect && suspect.reason === 'proof-unavailable' && suspect.at_ms > 120000 && suspect.at_ms <= 240001,
+    `slow-suspect/proof-unavailable expected: ${JSON.stringify(run.transitions)}`);
+  const dead = run.transitions.find(t => t.to === 'dead');
+  ok(dead && dead.at_ms > 660000 && dead.at_ms < 900000, `dead at ${dead && dead.at_ms}`);
+  // Alive and slow-suspect at 240001: no transition between suspect and dead.
+  assert.strictEqual(run.transitions.indexOf(dead), run.transitions.indexOf(suspect) + 1);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'unavailable', proof: 'none' });
+  ok(run.realMs < 4000, `real ${Math.round(run.realMs)} ms`);
+});
+
+test('liveness/tool: persistent positive proof dies after 660000 as tool-extension-exhausted', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const fixture = toolFixture('claude tool exhausted fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(400, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, timeoutMs: 905000 });
+  const silence = assertToolKill(run, 'tool-extension-exhausted', { extension: 420000 });
+  ok(silence.window_ms > 660000, `window ${silence.window_ms}`);
+  assert.deepStrictEqual(run.error.liveness.proof, { capability: 'available', proof: 'positive' });
+});
+
+test('liveness/tool: a ceiling below 660000 classifies with the current proof (positive tool stays working)', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'positive' });
+  const fixture = toolFixture('claude tool ceiling fixture.js', { inputs: [privateInput()], result: false });
+  // timeoutMs 205000 gives a 200000 ms child ceiling: the tool is in its
+  // local-proof window (120000..240000), so it is active, never dead.
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, timeoutMs: 205000 });
+  ok(run.error, 'expected the ceiling');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.state, 'working');
+  assert.strictEqual(run.error.liveness.reason, 'local-proof');
+  assert.strictEqual(run.terminations, 1);
+  assertPrivate(run);
+});
+
+test('liveness/tool: ceiling and tool deadline crossed in one tick keep budget-exceeded-while-active (R7)', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude tool both boundaries fixture.js', { inputs: [privateInput()], result: false });
+  // One clock jump beyond both the 240000 ms ceiling and the 240000 ms tool deadline.
+  const t0 = performance.now();
+  let pivot = null;
+  const clock = {
+    now() {
+      const real = performance.now();
+      return pivot === null ? real - t0 : (real - t0) + (real - pivot > 400 ? 241000 : 0);
+    },
+    accelerate() { if (pivot === null) pivot = performance.now(); },
+  };
+  const run = await runLive(fixture, clock, { localProofFactory: fake.factory, timeoutMs: 245000 });
+  ok(run.error, 'expected the ceiling');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.termination, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.liveness.state, 'slow-suspect');
+});
+
+test('liveness/tool: five identical tool calls without a write report no-progress once and never kill', async () => {
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude tool loop fixture.js', { inputs: Array(5).fill(privateInput()) });
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  assert.strictEqual(run.terminations, 0);
+  const loops = run.transitions.filter(t => t.reason === 'no-progress');
+  assert.strictEqual(loops.length, 1, JSON.stringify(run.transitions));
+  assert.strictEqual(loops[0].to, 'slow-suspect');
+  assert.strictEqual(loops[0].progress.repeats, 5);
+  ok(/^[0-9a-f]{16}$/.test(loops[0].progress.fingerprint_sha256), loops[0].progress.fingerprint_sha256);
+  assert.deepStrictEqual(Object.keys(loops[0].progress).sort(), ['fingerprint_sha256', 'repeats']);
+  assertPrivate(run);
+});
+
+test('liveness/tool: distinct tool calls, or a write between identical ones, report no no-progress', async () => {
+  const distinct = await runLive(toolFixture('claude tool distinct fixture.js',
+    { inputs: [0, 1, 2, 3, 4].map(n => privateInput({ step: n })) }),
+  acceleratedClock(1, { fromFirstRemote: true }), { localProofFactory: fakeProof({ capability: 'available', proof: 'none' }).factory });
+  assert.strictEqual(distinct.error, null, distinct.error && distinct.error.code);
+  ok(!distinct.transitions.some(t => t.reason === 'no-progress'), JSON.stringify(distinct.transitions));
+
+  const marker = path.join(WORKSPACE, 'claude-t04-write-marker.txt');
+  try { fs.rmSync(marker, { force: true }); } catch { /* absent */ }
+  const fake = fakeProof({ capability: 'available', proof: 'none' }, { writeWhen: () => fs.existsSync(marker) });
+  const written = await runLive(toolFixture('claude tool write fixture.js',
+    { inputs: Array(5).fill(privateInput()), pauseAfter: 3, sentinelFile: marker }),
+  acceleratedClock(1, { fromFirstRemote: true }), { localProofFactory: fake.factory, localProofIntervalMs: 20 });
+  fs.rmSync(marker, { force: true });
+  assert.strictEqual(written.error, null, written.error && written.error.code);
+  ok(fake.wrote, 'the fake provider observed the write between the 3rd and 4th call');
+  ok(!written.transitions.some(t => t.reason === 'no-progress'), JSON.stringify(written.transitions));
+});
+
+test('liveness/tool: the provider gets pid/roots/ignore, samples off the watchdog tick and stops at finish', async () => {
+  const extra = path.join(ROOT, 'writable extra root');
+  fs.mkdirSync(extra, { recursive: true });
+  const fast = fakeProof({ capability: 'unavailable', proof: 'none' });
+  const ignored = path.join(ROOT, 'result.json');
+  const run = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: fast.factory, localProofIntervalMs: 20,
+    writableRoots: [extra, WORKSPACE], localProofIgnore: [ignored, 7, ignored] });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  ok(Number.isSafeInteger(fast.options.pid) && fast.options.pid > 0, 'real child pid');
+  assert.deepStrictEqual(fast.options.roots, [path.resolve(WORKSPACE), path.resolve(extra)]);
+  assert.deepStrictEqual(fast.options.ignore, { prefixes: [path.resolve(ignored)] });
+  assert.strictEqual(typeof fast.options.onWrite, 'function');
+  ok(fast.samples > 1, `samples ${fast.samples}`);
+  assert.strictEqual(fast.stops, 1);
+  const settledSamples = fast.samples;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.strictEqual(fast.samples, settledSamples, 'sampling stops after finish');
+
+  // A long cadence leaves only the initial sample even though the 25 ms
+  // watchdog ticked many times: the tick reads current(), it never samples.
+  const slow = fakeProof({ capability: 'unavailable', proof: 'none' });
+  const readOnly = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: slow.factory, localProofIntervalMs: 600000, readOnly: true, writableRoots: [extra] });
+  assert.strictEqual(readOnly.error, null, readOnly.error && readOnly.error.code);
+  assert.strictEqual(slow.samples, 1);
+  ok(slow.currents > 1, `current() reads ${slow.currents}`);
+  assert.deepStrictEqual(slow.options.roots, []);
+});
+
+test('liveness/tool: an invalid localProofFactory or localProofIntervalMs is refused before any spawn', async () => {
+  for (const extra of [{ localProofFactory: 'createLocalProof' }, { localProofIntervalMs: 0 },
+    { localProofIntervalMs: 1.5 }, { localProofIntervalMs: '20' }]) {
+    const records = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    await expectCode(adapter.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'proof options', model: FIXTURE_MODEL,
+      timeoutMs: 15000, sourceEnv: sourceEnvFor(HAPPY_FIXTURE), ...extra }),
+    adapter.CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+    assert.strictEqual(records.length, 0);
+  }
+});
+
+test('liveness/tool: a throwing or malformed provider reads as unavailable and never breaks the run', async () => {
+  const run = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: () => ({ sample() { throw new Error('boom'); }, current() { return { capability: 'bogus' }; },
+      stop() { throw new Error('boom'); } }), localProofIntervalMs: 20 });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const thrown = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }), {
+    localProofFactory: () => { throw new Error('cannot start'); } });
+  assert.strictEqual(thrown.error, null, thrown.error && thrown.error.code);
+});
+
+test('liveness/tool: the real provider on a read-only turn scans no filesystem root and the result is accepted', async () => {
+  const fsp = fs.promises;
+  const original = { readdir: fsp.readdir, lstat: fsp.lstat };
+  const touched = [];
+  const inside = value => typeof value === 'string' && path.resolve(value).startsWith(path.resolve(ROOT));
+  fsp.readdir = function (target, ...rest) { if (inside(target)) touched.push(target); return original.readdir.call(this, target, ...rest); };
+  fsp.lstat = function (target, ...rest) { if (inside(target)) touched.push(target); return original.lstat.call(this, target, ...rest); };
+  let run;
+  try {
+    run = await runLive(SLOW_FIXTURE, acceleratedClock(1, { fromFirstRemote: true }),
+      { readOnly: true, localProofIntervalMs: 20 });
+  } finally {
+    fsp.readdir = original.readdir;
+    fsp.lstat = original.lstat;
+  }
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  assert.strictEqual(run.result.candidate.status, 'done');
+  assert.deepStrictEqual(touched, []);
+});
+
+// ── Liveness heartbeat (S06/T02) — the liveness block rides every progress snapshot ──
+const { progressLine, readProgressLine } = require('./forge-sidecar-diagnostic');
+
+function heartbeatCollector() {
+  const snapshots = [];
+  return { snapshots, onSnapshot(snapshot) { snapshots.push(snapshot); } };
+}
+
+// The host (codex) reads the worker's stderr line by line: serialize every
+// snapshot exactly as the CLI does and read it back through the host reader.
+function hostRead(snapshots) {
+  return snapshots.map(snapshot => {
+    const read = readProgressLine(progressLine(snapshot));
+    ok(read, 'the host reader must accept every progress line');
+    return read;
+  });
+}
+
+function distinctStates(blocks) {
+  const states = [];
+  for (const block of blocks) if (states.at(-1) !== block.state) states.push(block.state);
+  return states;
+}
+
+test('liveness/heartbeat: DEFAULT_PROGRESS_INTERVAL_MS is 30000 and an invalid progressIntervalMs is refused before any spawn', async () => {
+  const adapter = loadAdapter();
+  assert.strictEqual(adapter.DEFAULT_PROGRESS_INTERVAL_MS, 30000);
+  for (const value of [0, -1, 1.5, NaN, '10']) {
+    const records = [];
+    const refusing = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    const error = await expectCode(refusing.invokeClaudeSidecar({ cwd: WORKSPACE, prompt: 'interval', model: FIXTURE_MODEL,
+      timeoutMs: 15000, progressIntervalMs: value, sourceEnv: sourceEnvFor(HAPPY_FIXTURE) }),
+    refusing.CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+    assert.strictEqual(error.provider_called, false, String(value));
+    assert.strictEqual(records.length, 0);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+  }
+});
+
+test('liveness/heartbeat: host-worker contract reads starting -> working -> slow-suspect -> dead through readProgressLine', async () => {
+  const collector = heartbeatCollector();
+  const run = await runLive(SILENT_AFTER_EVENTS_FIXTURE, acceleratedClock(200, { fromFirstRemote: true }),
+    { onSnapshot: collector.onSnapshot });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  ok(blocks.every(block => block && block.version === 1), 'every snapshot carries the liveness block');
+  assert.deepStrictEqual(blocks[0], { version: 1, state: 'starting', since_ms: 0, reason: null });
+  assert.deepStrictEqual(distinctStates(blocks), ['starting', 'working', 'slow-suspect', 'dead']);
+  for (const transition of run.transitions) {
+    if (transition.from === null && transition.to === 'starting') continue;
+    ok(blocks.some(block => block.state === transition.to && block.since_ms === transition.at_ms),
+      `no snapshot published transition ${JSON.stringify(transition)}`);
+  }
+  const last = blocks.at(-1);
+  assert.strictEqual(last.state, 'dead');
+  assert.strictEqual(last.termination, 'dead-silence');
+  assert.deepStrictEqual(run.error.diagnostic.observation.liveness, last);
+  ok(blocks.slice(0, -1).every(block => block.termination === undefined), 'termination only on the final snapshot');
+});
+
+test('liveness/heartbeat: a silent start ends with the final block {dead, dead-start}', async () => {
+  const collector = heartbeatCollector();
+  const run = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300), { onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error.liveness.termination, 'dead-start');
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  assert.deepStrictEqual(distinctStates(blocks), ['starting', 'dead']);
+  const last = blocks.at(-1);
+  assert.strictEqual(last.state, 'dead');
+  assert.strictEqual(last.termination, 'dead-start');
+  assert.deepStrictEqual(run.error.diagnostic.observation.liveness, last);
+});
+
+test('liveness/heartbeat: an active stream at the injected ceiling ends budget-exceeded-while-active, never dead', async () => {
+  const collector = heartbeatCollector();
+  const fixture = activeStreamFixture('claude heartbeat endless stream fixture.js', null);
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { timeoutMs: 60000, onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  ok(!blocks.some(block => block.state === 'dead'), 'an active ceiling is never published as dead');
+  const last = blocks.at(-1);
+  assert.strictEqual(last.termination, 'budget-exceeded-while-active');
+  ok(['working', 'slow-suspect'].includes(last.state), last.state);
+  assert.deepStrictEqual(run.error.diagnostic.observation.liveness, last);
+});
+
+test('liveness/heartbeat: five identical tool calls publish reason no-progress without fingerprint or argument text', async () => {
+  const collector = heartbeatCollector();
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude heartbeat tool loop fixture.js', { inputs: Array(5).fill(privateInput()) });
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error, null, run.error && `${run.error.code} ${JSON.stringify(run.error.liveness)}`);
+  const loop = run.transitions.find(t => t.reason === 'no-progress');
+  ok(loop, JSON.stringify(run.transitions));
+  const blocks = hostRead(collector.snapshots).map(read => read.liveness);
+  ok(blocks.some(block => block.state === 'slow-suspect' && block.reason === 'no-progress'),
+    `no heartbeat carried no-progress: ${JSON.stringify(blocks)}`);
+  const serialized = JSON.stringify(collector.snapshots);
+  ok(!serialized.includes(loop.progress.fingerprint_sha256), 'the fingerprint prefix leaked into a snapshot');
+  ok(!/[0-9a-f]{16}/.test(serialized), 'a 16/64-hex fingerprint leaked into a snapshot');
+  ok(!serialized.includes(TOOL_ARG_SENTINEL), 'tool argument text leaked into a snapshot');
+  ok(!serialized.includes('fingerprint'), 'no fingerprint field in a heartbeat');
+});
+
+test('liveness/heartbeat: an injected short cadence emits periodic snapshots between transitions', async () => {
+  const collector = heartbeatCollector();
+  const fixture = activeStreamFixture('claude heartbeat cadence fixture.js', 500);
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }),
+    { progressIntervalMs: 20, onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  // Fixed milestones: local-start, first remote and terminal (plus the closing snapshot).
+  ok(collector.snapshots.length > run.transitions.length + 3 + 5,
+    `${collector.snapshots.length} snapshots for ${run.transitions.length} transitions`);
+  const working = collector.snapshots.filter(snapshot => snapshot.liveness?.state === 'working');
+  ok(working.length >= 5, `periodic snapshots while working: ${working.length}`);
+});
+
+test('liveness/heartbeat: success metadata carries the working block without termination', async () => {
+  const collector = heartbeatCollector();
+  const fixture = activeStreamFixture('claude heartbeat success fixture.js', 300);
+  const run = await runLive(fixture, acceleratedClock(1, { fromFirstRemote: true }), { onSnapshot: collector.onSnapshot });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const block = run.result.metadata.observation.liveness;
+  ok(block, 'metadata.observation.liveness is present');
+  assert.strictEqual(block.state, 'working');
+  ok(!('termination' in block), 'no termination on success');
+  assert.deepStrictEqual(run.result.telemetry.observation.liveness, block);
+  assert.deepStrictEqual(collector.snapshots.at(-1).liveness, block);
+});
+
+// ── Session persistence (S05/T02) — fake CLI writes the measured layout under a temporary profile ──
+// The fake honours --session-id: it writes <home>/.claude/projects/<projectKey(cwd)>/<id>.jsonl
+// (layout measured in S05/T01) and confirms the id in system/init. Modes:
+// ok (valid result), wrong (init reports another uuid), endless (active stream), silent.
+const SESSION_MODULE = require('./forge-claude-session');
+const OTHER_SESSION_ID = 'f1e2d3c4-b5a6-4978-a8b9-c0d1e2f3a4b5';
+function sessionFixture(mode) {
+  return writeFixture(`claude session ${mode} fixture.js`, `
+'use strict';
+const fs = require('fs');
+const path = require('path');
+${ENVELOPE_PRELUDE}
+const out = value => process.stdout.write(JSON.stringify(value) + '\\n');
+const delta = () => out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0,
+  delta: { type: 'text_delta', text: 'x' } } });
+const args = process.argv.slice(2);
+const at = args.indexOf('--session-id');
+const resumeAt = args.indexOf('--resume');
+const sid = at >= 0 ? args[at + 1] : resumeAt >= 0 ? args[resumeAt + 1] : null;
+if (sid) {
+  const home = process.platform === 'win32' ? process.env.USERPROFILE : process.env.HOME;
+  const { projectKey } = require(${JSON.stringify(require.resolve('./forge-claude-session'))});
+  const dir = path.join(home, '.claude', 'projects', projectKey(process.cwd()));
+  const file = path.join(dir, sid + '.jsonl');
+  if (resumeAt >= 0) {
+    // Like the real CLI: --resume needs the transcript in the measured layout.
+    if (!fs.existsSync(file)) {
+      process.stderr.write('No conversation found with session ID: ' + sid + '\\n');
+      process.exit(1);
+    }
+    fs.appendFileSync(file, '{"type":"fixture-resume"}\\n');
+  } else {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, '{"type":"fixture"}\\n');
+  }
+}
+out({ type: 'system', subtype: 'init', session_id: ${JSON.stringify(mode)} === 'wrong' ? ${JSON.stringify(OTHER_SESSION_ID)} : sid });
+out({ type: 'stream_event', event: { type: 'message_start', message: { id: 'msg-session', role: 'assistant' } } });
+out({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+delta();
+const mode = ${JSON.stringify(mode)};
+if (mode === 'ok' || mode === 'wrong') {
+  out({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  out({ type: 'stream_event', event: { type: 'message_stop' } });
+  process.stdout.write(envelope(${JSON.stringify(okBlock('session fixture'))}) + '\\n');
+} else if (mode === 'endless') {
+  setInterval(delta, 30);
+} else {
+  delta();
+  setInterval(() => {}, 1000);
+}
+`);
+}
+const SESSION_OK_FIXTURE = sessionFixture('ok');
+const SESSION_WRONG_FIXTURE = sessionFixture('wrong');
+const SESSION_ENDLESS_FIXTURE = sessionFixture('endless');
+const SESSION_SILENT_FIXTURE = sessionFixture('silent');
+
+let sessionHomeCounter = 0;
+function sessionHome() {
+  const home = path.join(ROOT, `session-home-${++sessionHomeCounter}`);
+  fs.mkdirSync(home, { recursive: true });
+  return home;
+}
+function sessionFile(home, id) {
+  return path.join(home, '.claude', 'projects', SESSION_MODULE.projectKey(WORKSPACE), `${id}.jsonl`);
+}
+function argvSessionId(args) {
+  const at = args.indexOf('--session-id');
+  const resumeAt = args.indexOf('--resume');
+  return at >= 0 ? args[at + 1] : resumeAt >= 0 ? args[resumeAt + 1] : null;
+}
+
+async function runSession(fixture, options = {}, clock = null, home = sessionHome()) {
+  const records = [];
+  const children = [];
+  let terminations = 0, result = null, error = null;
+  const adapter = loadAdapter({ spawnImpl: (cmd, args, spawnOptions) => {
+    records.push({ args: args.slice() });
+    const child = REAL_SPAWN(cmd, args, spawnOptions);
+    children.push(child);
+    return child;
+  } });
+  const live = clock || acceleratedClock(1, { fromFirstRemote: true });
+  try {
+    result = await adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'session', model: FIXTURE_MODEL, timeoutMs: 3600000,
+      sourceEnv: { ...sourceEnvFor(fixture), HOME: home, USERPROFILE: home },
+      monotonicClock: live.now, livenessIntervalMs: 25,
+      onProgress(snapshot) { if (snapshot.phase !== 'local-start') live.accelerate(); },
+      terminateChild(child) { terminations++; child.kill('SIGKILL'); },
+      ...options,
+    });
+  } catch (caught) { error = caught; }
+  finally {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) try { child.kill('SIGKILL'); } catch { /* gone */ }
+    }
+  }
+  assert.deepStrictEqual(tempPromptDirs(), []);
+  const id = records.length ? argvSessionId(records[0].args) : null;
+  return { home, records, result, error, terminations, id, file: id ? sessionFile(home, id) : null };
+}
+
+test('session: without the option the argv keeps --no-session-persistence and no --session-id', async () => {
+  const run = await runSession(SESSION_OK_FIXTURE);
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  ok(run.records[0].args.includes('--no-session-persistence'));
+  assert.strictEqual(run.id, null);
+  assert.strictEqual(run.result.telemetry.session, undefined);
+  assert.strictEqual(fs.existsSync(path.join(run.home, '.claude')), false, 'nothing persisted without opt-in');
+});
+
+test('session: persist in execute and plan swaps only the persistence flag for --session-id <uuid>', async () => {
+  const legacy = await runSession(SESSION_OK_FIXTURE);
+  for (const resultProfile of ['execute', 'plan']) {
+    const run = await runSession(SESSION_OK_FIXTURE, { session: { persist: true }, resultProfile });
+    const args = run.records[0].args;
+    ok(SESSION_MODULE.SESSION_ID_PATTERN.test(run.id), `uuid in argv for ${resultProfile}`);
+    ok(!args.includes('--no-session-persistence'), `flag absent for ${resultProfile}`);
+    assert.strictEqual(args.filter((arg) => arg === '--session-id').length, 1);
+    if (resultProfile === 'execute') {
+      const at = legacy.records[0].args.indexOf('--no-session-persistence');
+      const expected = [...legacy.records[0].args.slice(0, at), '--session-id', run.id,
+        ...legacy.records[0].args.slice(at + 1)];
+      assert.deepStrictEqual(args.slice(0, -1), expected.slice(0, -1), 'every other position unchanged');
+    } else {
+      // The plan contract rejects the execute-shaped fixture output; argv is what is under test.
+      ok(!run.error || run.error.code !== 'claude-invalid-options', 'plan is eligible');
+    }
+    assert.strictEqual(fs.existsSync(run.file), false, `session removed for ${resultProfile}`);
+  }
+});
+
+test('session: persist outside plan/execute or with an unknown shape is refused before any spawn or temp file', async () => {
+  const cases = [
+    { session: { persist: true }, resultProfile: 'memory' },
+    { session: { persist: true }, resultProfile: 'review' },
+    { session: { persist: true }, resultProfile: 'fix' },
+    { session: { persist: true }, resultProfile: 'preparation' },
+    { session: { persist: true }, resultProfile: 'artifacts', calibrationPhase: 'research' },
+    { session: { persist: false } },
+    { session: { persist: true, extra: 1 } },
+    { session: { resume: null, persist: true } },
+    { session: 'persist' },
+    { session: { persist: true }, sessionRemover: 'not-a-function' },
+  ];
+  for (const extra of cases) {
+    const home = sessionHome();
+    const records = [];
+    const adapter = loadAdapter({ spawnImpl: recordingSpawn(records) });
+    const error = await expectCode(adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, prompt: 'session', model: FIXTURE_MODEL, timeoutMs: 15000,
+      sourceEnv: { ...sourceEnvFor(SESSION_OK_FIXTURE), HOME: home, USERPROFILE: home }, ...extra,
+    }), 'claude-invalid-options');
+    assert.strictEqual(error.provider_called, false, JSON.stringify(extra));
+    assert.strictEqual(records.length, 0, `no spawn for ${JSON.stringify(extra)}`);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+    assert.strictEqual(fs.existsSync(path.join(home, '.claude')), false);
+  }
+});
+
+test('session: success removes the persisted transcript and reports a digest-only telemetry block', async () => {
+  let existedBeforeCleanup = null;
+  let seenRef = null;
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { persist: true },
+    sessionRemover(ref) {
+      seenRef = ref;
+      existedBeforeCleanup = fs.existsSync(sessionFile(ref.config_dir.slice(0, -'.claude'.length - 1), ref.id));
+      return SESSION_MODULE.removeSession(ref);
+    } });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  assert.strictEqual(existedBeforeCleanup, true, 'the fake CLI wrote the measured layout');
+  assert.strictEqual(fs.existsSync(run.file), false, 'transcript removed after success');
+  assert.strictEqual(seenRef.id, run.id);
+  assert.strictEqual(seenRef.account_name, FIXTURE_ACCOUNT.name);
+  assert.strictEqual(seenRef.config_dir, path.join(run.home, '.claude'), 'config dir comes from the child env');
+  assert.deepStrictEqual(run.result.telemetry.session, { persisted: true,
+    session_sha256: SESSION_MODULE.sessionDigest(run.id), cleanup: { ok: true } });
+  ok(Object.isFrozen(run.result.telemetry.session));
+  ok(!JSON.stringify(run.result.telemetry).includes(run.id), 'raw id never reaches telemetry');
+  ok(!JSON.stringify(run.result.metadata).includes(run.id), 'raw id never reaches metadata');
+});
+
+test('session: a different id in system/init is claude-session-mismatch and the session is removed', async () => {
+  const run = await runSession(SESSION_WRONG_FIXTURE, { session: { persist: true } });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-session-mismatch');
+  ok(require('./forge-claude-sidecar').CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH === 'claude-session-mismatch');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(run.error.observedSessionId, undefined);
+  assert.strictEqual(fs.existsSync(run.file), false);
+  ok(!run.error.message.includes(run.id) && !run.error.message.includes(OTHER_SESSION_ID), 'message carries no id');
+});
+
+test('session: budget-exceeded-while-active keeps the session and returns a frozen token-free ref', async () => {
+  const run = await runSession(SESSION_ENDLESS_FIXTURE, { session: { persist: true }, timeoutMs: 60000 },
+    acceleratedClock(300, { fromFirstRemote: true }));
+  try {
+    ok(run.error, 'expected rejection');
+    assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+    assert.strictEqual(run.error.session.id, run.id);
+    assert.strictEqual(run.error.session.account_name, FIXTURE_ACCOUNT.name);
+    assert.strictEqual(run.error.session.config_dir, path.join(run.home, '.claude'));
+    assert.strictEqual(run.error.session.cwd, WORKSPACE);
+    ok(Object.isFrozen(run.error.session));
+    assert.deepStrictEqual(Object.keys(run.error.session).sort(),
+      ['account_name', 'config_dir', 'created_at', 'cwd', 'id', 'version']);
+    ok(!JSON.stringify(run.error.session).includes(FIXTURE_TOKEN), 'no token in the ref');
+    assert.strictEqual(SESSION_MODULE.validateSessionRef(run.error.session).ok, true);
+    assert.strictEqual(run.error.session_cleanup, undefined);
+    assert.strictEqual(run.error.observedSessionId, undefined);
+    assert.strictEqual(fs.existsSync(run.file), true, 'session preserved for the resume');
+  } finally {
+    if (run.error && run.error.session) SESSION_MODULE.removeSession(run.error.session);
+  }
+  assert.strictEqual(fs.existsSync(run.file), false);
+});
+
+test('session: dead-silence removes the session and never attaches a ref', async () => {
+  const run = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true } },
+    acceleratedClock(200, { fromFirstRemote: true }));
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(run.error.session_cleanup, undefined);
+  assert.strictEqual(fs.existsSync(run.file), false);
+});
+
+test('session: cleanup waits for the observed child exit; an unconfirmed termination defers it to recovery', async () => {
+  let exitedBeforeRemoval = null, child = null;
+  const slow = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true },
+    terminateChild(owned) { child = owned; setTimeout(() => { try { owned.kill('SIGKILL'); } catch { /* gone */ } }, 300); },
+    sessionRemover(ref) { exitedBeforeRemoval = child.exitCode !== null || child.signalCode !== null; return SESSION_MODULE.removeSession(ref); } },
+  acceleratedClock(200, { fromFirstRemote: true }));
+  ok(slow.error, 'expected rejection');
+  assert.strictEqual(slow.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(exitedBeforeRemoval, true, 'the session is removed only after the child closed');
+  assert.strictEqual(slow.error.awaitExit, undefined, 'the internal exit probe never leaks');
+  assert.strictEqual(fs.existsSync(slow.file), false);
+
+  let removals = 0;
+  const stuck = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true }, terminationWaitMs: 100,
+    terminateChild() { /* the kill is requested but never takes effect */ },
+    sessionRemover() { removals++; return { ok: true }; } },
+  acceleratedClock(200, { fromFirstRemote: true }));
+  ok(stuck.error, 'expected rejection');
+  assert.strictEqual(stuck.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(removals, 0, 'no removal while termination is unconfirmed');
+  assert.strictEqual(stuck.error.session_cleanup.pending, true);
+  assert.strictEqual(stuck.error.session_cleanup.ok, false);
+  assert.strictEqual(stuck.error.session.id, stuck.id, 'the ref is handed to recovery for the deferred removal');
+  fs.rmSync(path.join(stuck.home, '.claude'), { recursive: true, force: true });
+});
+
+test('session: a failed removal never masks a valid result or the primary failure code', async () => {
+  const failing = (ref) => ({ ok: false, removed: [],
+    refused: [{ path: `projects/key/${ref.id}.jsonl`, reason: 'symlink' }],
+    errors: [{ path: `session-env/${ref.id}`, code: 'EPERM' }] });
+  const success = await runSession(SESSION_OK_FIXTURE, { session: { persist: true }, sessionRemover: failing });
+  try {
+    assert.strictEqual(success.error, null, success.error && success.error.code);
+    assert.strictEqual(success.result.candidate.status, 'done');
+    const cleanup = success.result.telemetry.session.cleanup;
+    assert.strictEqual(cleanup.ok, false);
+    assert.deepStrictEqual(cleanup.refused, [{ path: 'projects/key/<session>.jsonl', reason: 'symlink' }]);
+    assert.deepStrictEqual(cleanup.errors, [{ path: 'session-env/<session>', code: 'EPERM' }]);
+    ok(!JSON.stringify(success.result.telemetry).includes(success.id), 'raw id masked in the cleanup report');
+  } finally { fs.rmSync(path.join(success.home, '.claude'), { recursive: true, force: true }); }
+
+  const thrown = await runSession(SESSION_SILENT_FIXTURE, { session: { persist: true },
+    sessionRemover() { throw Object.assign(new Error('boom'), { code: 'EBUSY' }); } },
+  acceleratedClock(200, { fromFirstRemote: true }));
+  try {
+    ok(thrown.error, 'expected rejection');
+    assert.strictEqual(thrown.error.code, 'claude-anomalous-silence', 'primary code kept');
+    assert.deepStrictEqual(thrown.error.session_cleanup, { ok: false, refused: [],
+      errors: [{ path: '.', code: 'EBUSY' }] });
+    assert.strictEqual(thrown.error.session, undefined);
+  } finally { fs.rmSync(path.join(thrown.home, '.claude'), { recursive: true, force: true }); }
+});
+
+// ---- S05/T03: resume of the preserved session ----
+const RESUME_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+function resumeRef(home, overrides = {}) {
+  return SESSION_MODULE.createSessionRef({ id: RESUME_ID, accountName: FIXTURE_ACCOUNT.name,
+    configDir: path.join(home, '.claude'), cwd: WORKSPACE, ...overrides });
+}
+function seedTranscript(home, id = RESUME_ID) {
+  const file = sessionFile(home, id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{"type":"fixture"}\n');
+  return file;
+}
+function countingRemover(calls) {
+  return (ref) => { calls.push(ref); return SESSION_MODULE.removeSession(ref); };
+}
+function withoutSession(args) {
+  const out = args.slice(0, -1); // drop the -p value
+  for (const flag of ['--session-id', '--resume']) {
+    const at = out.indexOf(flag);
+    if (at >= 0) out.splice(at, 2);
+  }
+  return out;
+}
+
+test('resume: CLAUDE_RESUME_INSTRUCTION is exported, English, warns about the baseline and fits the byte limit', () => {
+  const adapter = loadAdapter();
+  const text = adapter.CLAUDE_RESUME_INSTRUCTION;
+  assert.strictEqual(typeof text, 'string');
+  ok(Buffer.byteLength(text, 'utf8') <= adapter.MAX_PROMPT_INSTRUCTION_BYTES, 'fits the instruction limit');
+  ok(/baseline/i.test(text), 'mentions the baseline');
+  ok(/re-?read/i.test(text), 'asks to re-read files');
+  ok(text.includes('structured_output'), 'asks for the structured output');
+  ok(/safety ceiling/i.test(text) && /reverted/i.test(text) && /same task/i.test(text));
+  ok(/^[\x20-\x7e]+$/.test(text), 'plain ASCII English text');
+  const codes = adapter.CLAUDE_SIDECAR_REASON_CODES;
+  assert.strictEqual(codes.RESUME_ACCOUNT_MISMATCH, 'claude-resume-account-mismatch');
+  assert.strictEqual(codes.RESUME_CONFIG_MISMATCH, 'claude-resume-config-mismatch');
+  assert.strictEqual(codes.SESSION_INVALID, 'claude-session-invalid');
+  ok(Object.isFrozen(codes));
+});
+
+test('resume: argv equals the start argv except --resume <id> and the fixed -p instruction', async () => {
+  const start = await runSession(SESSION_OK_FIXTURE, { session: { persist: true } });
+  assert.strictEqual(start.error, null, start.error && start.error.code);
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const contexts = [];
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { resume: resumeRef(home) }, prompt: undefined,
+    onPackagedContext(context) { contexts.push(context); } }, null, home);
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const args = run.records[0].args;
+  const at = args.indexOf('--resume');
+  ok(at >= 0, '--resume present');
+  assert.strictEqual(args[at + 1], RESUME_ID);
+  for (const flag of ['--session-id', '--no-session-persistence', '--fork-session']) {
+    ok(!args.includes(flag), `${flag} absent on resume`);
+  }
+  assert.strictEqual(args[args.length - 2], '-p');
+  assert.strictEqual(args[args.length - 1], require('./forge-claude-sidecar').CLAUDE_RESUME_INSTRUCTION);
+  assert.deepStrictEqual(withoutSession(args), withoutSession(start.records[0].args),
+    'model/effort/add-dir/schema/tools/permissions/settings/output keep their positions');
+  assert.strictEqual(contexts.length, 1);
+  assert.strictEqual(contexts[0].input_tokens,
+    Math.ceil(require('./forge-claude-sidecar').CLAUDE_RESUME_INSTRUCTION.length / 4), 'telemetry measures the instruction');
+  assert.strictEqual(fs.existsSync(file), false, 'session removed after the resume');
+});
+
+test('resume: invalid ref, other account, other config dir, other cwd and ineligible phase refuse before any spawn', async () => {
+  const home = sessionHome();
+  const otherHome = sessionHome();
+  const valid = resumeRef(home);
+  const cases = [
+    { code: 'claude-session-invalid', session: { resume: { ...valid, id: '--x' } } },
+    { code: 'claude-session-invalid', session: { resume: { ...valid, id: RESUME_ID.toUpperCase() } } },
+    { code: 'claude-session-invalid', session: { resume: { ...valid, extra: 1 } } },
+    { code: 'claude-session-invalid', session: { resume: { id: RESUME_ID } } },
+    { code: 'claude-session-invalid', session: { resume: 'not-a-ref' } },
+    { code: 'claude-resume-account-mismatch', session: { resume: valid },
+      resolver: () => ({ name: 'other', token: 't' }) },
+    { code: 'claude-resume-config-mismatch', session: { resume: valid }, home: otherHome },
+    { code: 'claude-resume-config-mismatch', session: { resume: resumeRef(home, { cwd: path.join(ROOT, 'other-cwd') }) } },
+    { code: 'claude-invalid-options', session: { resume: valid }, resultProfile: 'review' },
+    { code: 'claude-invalid-options', session: { resume: valid }, resultProfile: 'memory' },
+  ];
+  for (const { code, resolver, home: childHome = home, ...extra } of cases) {
+    const file = seedTranscript(home);
+    const records = [];
+    const removals = [];
+    const adapter = loadAdapter({ resolver, spawnImpl: recordingSpawn(records) });
+    const error = await expectCode(adapter.invokeClaudeSidecar({
+      cwd: WORKSPACE, model: FIXTURE_MODEL, timeoutMs: 15000, sessionRemover: countingRemover(removals),
+      sourceEnv: { ...sourceEnvFor(SESSION_OK_FIXTURE), HOME: childHome, USERPROFILE: childHome }, ...extra,
+    }), code);
+    const label = `${code} ${JSON.stringify(extra).slice(0, 120)}`;
+    assert.strictEqual(error.provider_called, false, label);
+    assert.strictEqual(records.length, 0, `no spawn for ${label}`);
+    assert.strictEqual(removals.length, 0, `refusal never removes the session for ${label}`);
+    assert.strictEqual(fs.existsSync(file), true, `transcript kept for ${label}`);
+    assert.strictEqual(error.session, undefined);
+    assert.deepStrictEqual(tempPromptDirs(), []);
+    ok(!error.message.includes(RESUME_ID), 'message carries no id');
+  }
+  SESSION_MODULE.removeSession(valid);
+});
+
+test('resume: success removes the session and reports resumed telemetry with the digest only', async () => {
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const removals = [];
+  let linesBeforeCleanup = null;
+  const ref = resumeRef(home);
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { resume: ref },
+    sessionRemover(seen) {
+      linesBeforeCleanup = fs.readFileSync(file, 'utf8').trim().split('\n').length;
+      return countingRemover(removals)(seen);
+    } }, null, home);
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  assert.strictEqual(linesBeforeCleanup, 2, 'the fake CLI appended to the existing transcript');
+  assert.strictEqual(removals.length, 1);
+  assert.strictEqual(removals[0], ref);
+  assert.strictEqual(fs.existsSync(file), false);
+  assert.deepStrictEqual(run.result.telemetry.session, { resumed: true,
+    session_sha256: SESSION_MODULE.sessionDigest(RESUME_ID), cleanup: { ok: true } });
+  ok(Object.isFrozen(run.result.telemetry.session));
+  ok(!JSON.stringify(run.result.telemetry).includes(RESUME_ID), 'raw id never reaches telemetry');
+});
+
+test('resume: a new active ceiling is budget-exceeded-while-active without error.session and removes the session', async () => {
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const removals = [];
+  const run = await runSession(SESSION_ENDLESS_FIXTURE, { session: { resume: resumeRef(home) }, timeoutMs: 60000,
+    sessionRemover: countingRemover(removals) }, acceleratedClock(300, { fromFirstRemote: true }), home);
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'budget-exceeded-while-active');
+  assert.strictEqual(run.error.session, undefined, 'at most one resume: no ref to resume again');
+  assert.strictEqual(run.error.session_cleanup, undefined);
+  assert.strictEqual(run.error.observedSessionId, undefined);
+  assert.strictEqual(removals.length, 1);
+  assert.strictEqual(fs.existsSync(file), false);
+});
+
+test('resume: a different id in system/init is claude-session-mismatch and the session is removed', async () => {
+  const home = sessionHome();
+  const file = seedTranscript(home);
+  const run = await runSession(SESSION_WRONG_FIXTURE, { session: { resume: resumeRef(home) } }, null, home);
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-session-mismatch');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(fs.existsSync(file), false);
+});
+
+test('resume: a transcript missing on disk fails in the CLI and removes nothing outside the targets', async () => {
+  const home = sessionHome();
+  const sibling = seedTranscript(home, OTHER_SESSION_ID);
+  const siblingEnv = path.join(home, '.claude', 'session-env', OTHER_SESSION_ID);
+  fs.mkdirSync(siblingEnv, { recursive: true });
+  const removals = [];
+  const run = await runSession(SESSION_OK_FIXTURE, { session: { resume: resumeRef(home) },
+    sessionRemover: countingRemover(removals) }, null, home);
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-exit-nonzero');
+  assert.strictEqual(run.error.session, undefined);
+  assert.strictEqual(run.error.session_cleanup, undefined, 'removing absent targets is not a cleanup failure');
+  assert.strictEqual(removals.length, 1, 'removal still runs after the failed resume');
+  assert.strictEqual(fs.existsSync(sibling), true, 'another session transcript untouched');
+  assert.strictEqual(fs.existsSync(siblingEnv), true, 'another session-env untouched');
+});
+
+// ── Calibration v2 wiring (S08/T03) — per-dimension precedence, v2 proposal, censored samples ──
+const calibrationV2 = require('./forge-sidecar-calibration-v2');
+const EXECUTE_IDENTITY = Object.freeze({ model: FIXTURE_MODEL, effort: 'medium', phase: 'execute' });
+const FIXTURE_BINDING = Object.freeze({ receipt: 'fixture', fingerprint: 'fixture' });
+
+function v2Home(label) {
+  return { userHome: path.join(ROOT, `calibration-v2-${label}`) };
+}
+
+function seedV2(options, identity, { initial = null, gap = null, count = 5 } = {}) {
+  for (let i = 0; i < count; i++) {
+    const outcome = calibrationV2.commit(calibrationV2.propose(identity,
+      { initial_sample_ms: initial, gap_sample_ms: gap }), FIXTURE_BINDING, options);
+    assert.strictEqual(outcome.committed, true, JSON.stringify(outcome));
+  }
+}
+
+function seedV1Gap(options, gapSampleMs) {
+  const calibration = require('./forge-sidecar-calibration');
+  for (let i = 0; i < 5; i++) {
+    assert(calibration.commit(calibration.propose(EXECUTE_IDENTITY, { initial_sample_ms: null, gap_sample_ms: gapSampleMs }),
+      FIXTURE_BINDING, options).committed);
+  }
+}
+
+function v2File(options) {
+  return path.join(calibrationV2.directory(options), calibrationV2.FILE);
+}
+
+const silentAfterEvents = options => runLive(SILENT_AFTER_EVENTS_FIXTURE,
+  acceleratedClock(200, { fromFirstRemote: true }), options);
+
+test('calibration v2: a calibrated gap (5 x 50000) passes slow-suspect at 120000 and dies at 215000 as claude-silence-v2', async () => {
+  const options = v2Home('gap');
+  seedV2(options, EXECUTE_IDENTITY, { gap: 50000 });
+  const run = await silentAfterEvents({ calibrationOptions: options });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-silence');
+  const observed = run.error.diagnostic.observation;
+  const { window_ms: windowMs, ...silence } = observed.silence;
+  assert.deepStrictEqual(silence, { dimension: 'gap', threshold_ms: 215000, policy: 'claude-silence-v2',
+    source: 'persisted-calibration', cause: 'indeterminate' });
+  ok(windowMs > 215000 && windowMs < 240000, `window ${windowMs}`);
+  const suspect = run.transitions.find(t => t.from === 'working' && t.to === 'slow-suspect');
+  const dead = run.transitions.find(t => t.from === 'slow-suspect' && t.to === 'dead');
+  ok(suspect && dead, `transitions ${JSON.stringify(run.transitions)}`);
+  ok(suspect.at_ms > 120000 && suspect.at_ms < 215000 && dead.at_ms > 215000, JSON.stringify(run.transitions));
+  // Closed block: the effective gap source is calibrated v2, the start stays uncalibrated.
+  assert.deepStrictEqual(observed.calibration, { diagnostic: null, initial: 'uncalibrated', gap: 'calibrated' });
+  // The kill leaves a censored lower bound; the frozen samples never change and the threshold never loosens past the default.
+  const stored = calibrationV2.read(EXECUTE_IDENTITY, options).gap;
+  assert.strictEqual(stored.count, 5);
+  assert.strictEqual(stored.censored.count, 1);
+  ok(stored.censored.max_ms > 215000, `censored ${stored.censored.max_ms}`);
+  ok(stored.threshold_ms >= 215000 && stored.threshold_ms <= 240000, `threshold ${stored.threshold_ms}`);
+  // No new observation key compared with an uncalibrated run of the same fixture.
+  const plain = await silentAfterEvents({ calibrationOptions: v2Home('gap-plain') });
+  assert.deepStrictEqual(Object.keys(observed).sort(), Object.keys(plain.error.diagnostic.observation).sort());
+  assert.deepStrictEqual(Object.keys(observed.calibration), ['diagnostic', 'initial', 'gap']);
+});
+
+test('calibration v2: a calibrated initial (5 x 2000) kills a silent start at 30000; uncalibrated stays 60000 forge-liveness-v1', async () => {
+  const options = v2Home('initial');
+  seedV2(options, EXECUTE_IDENTITY, { initial: 2000 });
+  const run = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300), { calibrationOptions: options });
+  ok(run.error, 'expected rejection');
+  assert.strictEqual(run.error.code, 'claude-anomalous-silence');
+  assert.strictEqual(run.error.liveness.termination, 'dead-start');
+  const { window_ms: windowMs, ...silence } = run.error.diagnostic.observation.silence;
+  assert.deepStrictEqual(silence, { dimension: 'initial', threshold_ms: 30000, policy: 'claude-silence-v2',
+    source: 'persisted-calibration', cause: 'indeterminate' });
+  ok(windowMs > 30000 && windowMs < 60000, `window ${windowMs}`);
+  assert.strictEqual(run.error.diagnostic.observation.calibration.initial, 'calibrated');
+  assert.strictEqual(calibrationV2.read(EXECUTE_IDENTITY, options).initial.censored.count, 1);
+
+  const plainOptions = v2Home('initial-plain');
+  const plain = await runLive(SILENT_FROM_START_FIXTURE, acceleratedClock(300), { calibrationOptions: plainOptions });
+  assert.strictEqual(plain.error.liveness.termination, 'dead-start');
+  const plainSilence = plain.error.diagnostic.observation.silence;
+  assert.strictEqual(plainSilence.threshold_ms, 60000);
+  assert.strictEqual(plainSilence.policy, 'forge-liveness-v1');
+  assert.strictEqual(plainSilence.source, 'locked-default');
+  // A censored start alone never calibrates.
+  assert.strictEqual(calibrationV2.read(EXECUTE_IDENTITY, plainOptions).initial.state, 'uncalibrated');
+});
+
+test('calibration v2: exact v2 beats v1 without mixing, v1 alone keeps S01, and the model fallback is reported', async () => {
+  const both = v2Home('both');
+  seedV1Gap(both, 100); // v1 alone would tighten to 120000
+  seedV2(both, EXECUTE_IDENTITY, { gap: 50000 });
+  const v2Wins = (await silentAfterEvents({ calibrationOptions: both })).error.diagnostic.observation.silence;
+  assert.strictEqual(v2Wins.threshold_ms, 215000);
+  assert.strictEqual(v2Wins.policy, 'claude-silence-v2');
+  assert.strictEqual(v2Wins.source, 'persisted-calibration');
+
+  const v1Only = v2Home('v1-only');
+  seedV1Gap(v1Only, 100);
+  const s01 = (await silentAfterEvents({ calibrationOptions: v1Only })).error.diagnostic.observation.silence;
+  assert.strictEqual(s01.threshold_ms, 120000);
+  assert.strictEqual(s01.policy, 'forge-liveness-v1');
+  assert.strictEqual(s01.source, 'persisted-calibration');
+
+  const fallback = v2Home('fallback');
+  seedV2(fallback, { ...EXECUTE_IDENTITY, phase: 'plan' }, { gap: 50000 });
+  seedV2(fallback, { ...EXECUTE_IDENTITY, phase: 'review', effort: 'high' }, { gap: 50000 });
+  assert.strictEqual(calibrationV2.resolve(EXECUTE_IDENTITY, fallback).gap.source, 'model-fallback');
+  const run = await silentAfterEvents({ calibrationOptions: fallback });
+  const viaModel = run.error.diagnostic.observation.silence;
+  assert.strictEqual(viaModel.threshold_ms, 215000);
+  assert.strictEqual(viaModel.policy, 'claude-silence-v2');
+  assert.strictEqual(viaModel.source, 'model-fallback');
+  assert.strictEqual(run.error.diagnostic.observation.calibration.gap, 'calibrated');
+});
+
+test('calibration v2: an accepted attempt proposes version 2 and commitAccepted writes only calibration-v2.json', async () => {
+  const calibration = require('./forge-sidecar-calibration');
+  const options = v2Home('accepted');
+  seedV1Gap(options, 100);
+  const v1File = path.join(calibration.directory(options), 'calibration.json');
+  const v1Bytes = fs.readFileSync(v1File);
+  const v1Mtime = fs.statSync(v1File).mtimeMs;
+  const run = await runLive(activeStreamFixture('claude v2 accepted fixture.js', 150),
+    acceleratedClock(1, { fromFirstRemote: true }), { calibrationOptions: options });
+  assert.strictEqual(run.error, null, run.error && run.error.code);
+  const proposal = run.result.telemetry.calibration_proposal;
+  assert.strictEqual(proposal.version, 2);
+  assert.strictEqual(proposal.source, 'accepted-claude-stream-v2');
+  assert.deepStrictEqual(proposal.identity, calibrationV2.identity(EXECUTE_IDENTITY));
+  ok(proposal.initial_ms !== null || proposal.gap_ms !== null, 'the accepted stream carried a sample');
+  assert.strictEqual(fs.existsSync(v2File(options)), false, 'the adapter itself never commits an accepted sample');
+  const outcome = await calibration.commitAccepted(proposal, FIXTURE_BINDING, options);
+  assert.strictEqual(outcome.committed, true, JSON.stringify(outcome));
+  const stored = calibrationV2.read(EXECUTE_IDENTITY, options);
+  ok(stored.initial.count + stored.gap.count >= 1, 'the v2 store holds the accepted sample');
+  assert.deepStrictEqual(fs.readFileSync(v1File), v1Bytes, 'calibration.json bytes untouched');
+  assert.strictEqual(fs.statSync(v1File).mtimeMs, v1Mtime);
+});
+
+test('calibration v2: the censored recorder is best-effort; a corrupted v2 store leaves the error identical', async () => {
+  const healthy = v2Home('censored-healthy');
+  const reference = await silentAfterEvents({ calibrationOptions: healthy });
+  assert.strictEqual(calibrationV2.read(EXECUTE_IDENTITY, healthy).gap.censored.count, 1);
+
+  const corrupt = v2Home('censored-corrupt');
+  fs.mkdirSync(calibrationV2.directory(corrupt), { recursive: true });
+  fs.writeFileSync(v2File(corrupt), 'private-invalid-v2-json');
+  const run = await silentAfterEvents({ calibrationOptions: corrupt });
+  ok(run.error, 'expected rejection');
+  for (const key of ['code', 'reason_code', 'message']) assert.deepStrictEqual(run.error[key], reference.error[key], key);
+  assert.deepStrictEqual(run.error.liveness, reference.error.liveness);
+  assert.strictEqual(run.error.diagnostic.reason, reference.error.diagnostic.reason);
+  const { window_ms: corruptWindow, ...silence } = run.error.diagnostic.observation.silence;
+  const { window_ms: referenceWindow, ...expected } = reference.error.diagnostic.observation.silence;
+  ok(corruptWindow > 240000 && referenceWindow > 240000);
+  assert.deepStrictEqual(silence, expected);
+  assert.strictEqual(silence.policy, 'forge-liveness-v1');
+  assert.strictEqual(run.error.diagnostic.observation.calibration.diagnostic, 'calibration-unavailable');
+  assert.strictEqual(fs.readFileSync(v2File(corrupt), 'utf8'), 'private-invalid-v2-json', 'corrupt store left as is');
+  ok(!JSON.stringify(run.error.diagnostic).includes('private-invalid-v2-json'));
+});
+
+test('calibration v2: a tool kill (gap suspended) records no censored sample', async () => {
+  const options = v2Home('tool');
+  const fake = fakeProof({ capability: 'available', proof: 'none' });
+  const fixture = toolFixture('claude v2 tool kill fixture.js', { inputs: [privateInput()], result: false });
+  const run = await runLive(fixture, acceleratedClock(300, { fromFirstRemote: true }),
+    { localProofFactory: fake.factory, calibrationOptions: options });
+  assertToolKill(run, 'tool-unproven');
+  assert.strictEqual(fs.existsSync(v2File(options)), false, 'no censored sample for a suspended gap');
 });
 
 async function main() {

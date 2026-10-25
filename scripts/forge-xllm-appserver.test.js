@@ -18,6 +18,8 @@ const {
   buildAppServerSandboxPolicy,
   validateExecuteResult,
   resolveCodexCommand,
+  classifyErrorClass,
+  reviewFailureDiagnostic,
 } = require('./forge-xllm');
 
 // The public adapter intentionally exports the validator, not its private schema.
@@ -105,6 +107,18 @@ function respondTurn(message) {
     send({ method: 'item/completed', params: { item: { id: 'answer-1', type: 'agentMessage', phase: 'final_answer', text: answer(params.model) } } });
     send({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
   };
+  // S07/T05: remote evidence (an agent message starts streaming), then silence
+  // forever; turn/interrupt is ignored, so the client's grace ends in SIGKILL.
+  if (scenario === 'silent-after-events') {
+    // A transient-looking stderr tail: spliced into the message it would turn a
+    // liveness kill transient and unstable, so the adapter must leave it out.
+    process.stderr.write('mock: network connection terminated\n');
+    send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+    send({ method: 'turn/started', params: { turn: { id: 'turn-1' } } });
+    send({ method: 'item/started', params: { item: { id: 'msg-1', type: 'agentMessage', text: '' } } });
+    send({ method: 'item/agentMessage/delta', params: { itemId: 'msg-1', delta: 'x' } });
+    return;
+  }
   if (scenario === 'silent-then-reply') setTimeout(emit, 320); else emit();
 }
 
@@ -158,6 +172,27 @@ async function testContextHealthFlow(mock, root) {
   assert.strictEqual(result.appserver.context_boundary.severity, 'none', 'unknown usage cannot evaluate percentage severity');
   assert.strictEqual(result.appserver.context_boundary.checkpoint, false, 'unknown usage cannot checkpoint');
   assert(fs.existsSync(path.join(forgeDir, 'context', 'codex', 'thread-fixed.json')), 'real transport persists its sidecar-thread snapshot');
+}
+
+// S07/T06: under a protected owner census (executionContext present) the transport
+// must keep context health in memory; writing .gsd/forge/context/codex/* inside the
+// owner tree used to fail publication with execution-protected-metadata.
+async function testContextHealthInMemoryUnderProtectedCensus(mock, root) {
+  const { protectedSnapshot } = require('./forge-task-execution');
+  const repo = fixtureRepo(root);
+  const owner = path.join(root, 'protected-owner');
+  fs.mkdirSync(path.join(owner, '.gsd', 'forge'), { recursive: true });
+  const before = protectedSnapshot(owner);
+  const options = executeOptions(repo, planFile(root), path.join(root, 'protected-census-result.json'), 'census-model');
+  options.contextRoot = owner;
+  options.executionContext = {};
+  const result = await withMock(mock, 'conforming', path.join(root, 'protected-census-capture.json'),
+    () => runExecute(options));
+  assert(!fs.existsSync(path.join(owner, '.gsd', 'forge', 'context')), 'no context dir created inside the protected owner');
+  assert.deepStrictEqual(protectedSnapshot(owner), before, 'protected census is unchanged by the transport');
+  assert.strictEqual(result.appserver.context_health.compaction_measurement, 'known');
+  assert.strictEqual(result.appserver.context_health.compaction_count, 1);
+  assert.strictEqual(result.appserver.context_boundary.indicator, 'ctx ? compact x1');
 }
 
 /**
@@ -465,6 +500,121 @@ async function testHeartbeat(mock, root) {
   // above completed a real turn and produced its beats; (2) ABSENCE is still
   // absence — every other invokeCodexAppServer call in this suite and in
   // runExecute omits the option entirely and continues to pass.
+}
+
+// S07/T05: a reduced liveness policy (test-only seam, like heartbeatIntervalMs)
+// lets the real client kill a silent codex turn in about a second of wall time.
+const T05_POLICY = { startMs: 400, suspectMs: 400, deadMs: 800 };
+const T05_MESSAGE = /^forge-appserver-client: anomalous silence \(dead-silence\) after \d+(?:\.\d+)?s$/;
+
+async function testLivenessKillThroughRunExecute(mock, root) {
+  const started = Date.now();
+  const repo = fixtureRepo(root);
+  const snapshots = [];
+  const transitions = [];
+  const resultFile = path.join(root, 'liveness-result.json');
+  const error = await expectReject(() => withMock(mock, 'silent-after-events', path.join(root, 'liveness-capture.json'),
+    () => runExecute({ ...executeOptions(repo, planFile(root), resultFile, 'liveness-model'), timeoutSecs: 30,
+      livenessPolicy: T05_POLICY, livenessIntervalMs: 25, progressIntervalMs: 50,
+      onProgress: (snapshot) => { snapshots.push(snapshot); },
+      onLiveness: (transition) => { transitions.push(transition); } })), T05_MESSAGE);
+  assert.strictEqual(error.code, 'appserver-anomalous-silence');
+  assert.strictEqual(error.liveness.termination, 'dead-silence');
+  assert.strictEqual(error.liveness.state, 'dead');
+  assert.strictEqual(error.diagnostic.observation.silence.cause, 'indeterminate');
+  const states = snapshots.map(snapshot => snapshot.liveness && snapshot.liveness.state);
+  assert(states.includes('starting'), `owner onProgress saw starting (${states.join(',')})`);
+  assert(states.includes('dead'), `owner onProgress saw dead (${states.join(',')})`);
+  assert.strictEqual(snapshots.at(-1).liveness.termination, 'dead-silence');
+  assert(transitions.some(transition => transition.to === 'dead'), 'owner onLiveness saw the dead transition');
+  assert.strictEqual(classifyErrorClass(error.message), 'terminal');
+  assert.strictEqual(reviewFailureDiagnostic(error).reason_code, 'appserver-anomalous-silence');
+  assert(Date.now() - started < 15000, 'liveness kill stays bounded in real time');
+}
+
+// Option wiring into the client, observed at the client boundary itself.
+async function testLivenessOptionWiring(root) {
+  const client = require('./forge-appserver-client');
+  const original = client.startAppServerTurn;
+  const seen = [];
+  client.startAppServerTurn = (options) => { seen.push(options); return Promise.reject(new Error('stub')); };
+  try {
+    const repo = fixtureRepo(root);
+    const clock = () => 0;
+    const onProgress = () => {};
+    const onLiveness = () => {};
+    const call = extra => invokeCodexAppServer({ cwd: repo, prompt: 'x', schema: TEST_SCHEMA, timeoutSecs: 2,
+      envPolicy: 'inherit', ...extra }).catch(() => {});
+    await call({ sandbox: 'workspace-write', writableRoots: [repo, root, path.join(root, 'missing-root')],
+      localProofIgnore: ['relative-ignore', 'relative-ignore', ''], onProgress, onLiveness, onHeartbeat: () => {},
+      monotonicClock: clock, livenessPolicy: T05_POLICY, livenessIntervalMs: 25, progressIntervalMs: 50 });
+    const [wired] = seen;
+    assert.deepStrictEqual(wired.proofRoots, [path.resolve(repo), path.resolve(root)], 'cwd + writable roots, deduplicated, existing only');
+    assert.deepStrictEqual(wired.localProofIgnore, [path.resolve('relative-ignore')]);
+    assert.strictEqual(wired.onProgress, onProgress);
+    assert.strictEqual(wired.onLiveness, onLiveness);
+    assert.strictEqual(wired.clock, clock);
+    assert.deepStrictEqual(wired.livenessPolicy, T05_POLICY);
+    assert.strictEqual(wired.livenessIntervalMs, 25);
+    assert.strictEqual(wired.progressIntervalMs, 50);
+    assert.strictEqual(typeof wired.onSpawn, 'function', 'the owner heartbeat stays on onSpawn');
+    await call({ sandbox: 'read-only' });
+    const readOnly = seen[1];
+    assert.deepStrictEqual(readOnly.proofRoots, [], 'a read-only turn has no write roots');
+    assert.deepStrictEqual(readOnly.localProofIgnore, []);
+    assert.strictEqual(readOnly.onProgress, undefined, 'no owner and not the CLI: no progress writer');
+    for (const key of ['onLiveness', 'clock', 'livenessPolicy', 'livenessIntervalMs', 'progressIntervalMs']) {
+      assert(!(key in readOnly), `${key} is absent unless supplied`);
+    }
+  } finally {
+    client.startAppServerTurn = original;
+  }
+}
+
+function testLivenessClassification() {
+  assert.strictEqual(classifyErrorClass('forge-appserver-client: anomalous silence (dead-start) after 60s'), 'terminal');
+  assert.strictEqual(classifyErrorClass('forge-appserver-client: anomalous silence (dead-silence) after 240s'), 'terminal');
+  assert.strictEqual(classifyErrorClass('forge-appserver-client: budget exceeded while active after 3600s'), 'terminal');
+  // The client renders seconds with up to 3 decimals (window_ms is not a multiple of 1000).
+  assert.strictEqual(classifyErrorClass('forge-appserver-client: anomalous silence (dead-silence) after 240.517s'), 'terminal');
+  assert.strictEqual(classifyErrorClass('forge-appserver-client: timeout after 30s'), 'terminal');
+  for (const code of ['appserver-anomalous-silence', 'budget-exceeded-while-active']) {
+    assert.strictEqual(reviewFailureDiagnostic({ code }).reason_code, code, `${code} is a known review code`);
+  }
+  assert.strictEqual(reviewFailureDiagnostic({ code: 'made-up' }).reason_code, 'adapter-failed');
+}
+
+// The CLI path: no owner, so the heartbeat goes to stderr as progress lines, the
+// stdout result channel stays empty, and the marker is adapter-failed/terminal.
+// A --require preload tightens the policy the same way the test seam does.
+function testLivenessKillThroughCli(mock, root) {
+  const repo = fixtureRepo(root);
+  const resultFile = path.join(root, 'cli-liveness-result.json');
+  const preload = path.join(root, 'liveness-preload.js');
+  fs.writeFileSync(preload, `'use strict';
+const client = require(${JSON.stringify(path.join(__dirname, 'forge-appserver-client.js'))});
+const start = client.startAppServerTurn;
+client.startAppServerTurn = (options) => start({ ...options, livenessPolicy: ${JSON.stringify(T05_POLICY)},
+  livenessIntervalMs: 25, progressIntervalMs: 50 });
+`);
+  const run = spawnSync(process.execPath, ['--require', preload, path.join(__dirname, 'forge-xllm.js'),
+    '--mode', 'execute', '--engine', 'codex', '--plan', planFile(root), '--result-file', resultFile,
+    '--cwd', repo, '--timeout', '30', '--model', 'cli-liveness-model', '--dispatch-id', 'T05-cli'], {
+    cwd: root, encoding: 'utf8', windowsHide: true, timeout: 60000,
+    env: { ...process.env, FORGE_XLLM_CODEX_BIN: mock, FORGE_MOCK_SCENARIO: 'silent-after-events',
+      FORGE_MOCK_CAPTURE: path.join(root, 'cli-liveness-capture.json') },
+  });
+  assert.notStrictEqual(run.status, 0, run.stderr);
+  assert.strictEqual(run.stdout, '', 'stdout stays the result channel');
+  const { readProgressLine } = require('./forge-sidecar-diagnostic');
+  const progress = run.stderr.split(/\r?\n/).map(line => readProgressLine(line)).filter(Boolean);
+  assert(progress.some(view => view.liveness && view.liveness.state === 'starting'), `CLI heartbeat on stderr starts: ${run.stderr.slice(0, 2000)}`);
+  assert(progress.some(view => view.liveness && view.liveness.state === 'dead'), 'CLI heartbeat on stderr ends dead');
+  const marker = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+  assert.strictEqual(marker.status, 'adapter-failed');
+  assert.strictEqual(marker.error_class, 'terminal');
+  assert.strictEqual(marker.reason_code, 'appserver-anomalous-silence');
+  assert.match(marker.reason, T05_MESSAGE, 'no stderr splice on a liveness kill: the message stays stable');
 }
 
 async function testGuards(mock, root) {
@@ -1098,9 +1248,14 @@ async function main() {
     await testProcedureDoesNotPrepareContext(mock, root);
     await testAdapterPreflightRefusal(root);
     await testContextHealthFlow(mock, root);
+    await testContextHealthInMemoryUnderProtectedCensus(mock, root);
     await testMultiRepoWire(mock, root);
     await testDegradation(mock, root);
     await testHeartbeat(mock, root);
+    testLivenessClassification();
+    await testLivenessOptionWiring(root);
+    await testLivenessKillThroughRunExecute(mock, root);
+    testLivenessKillThroughCli(mock, root);
     await testGuards(mock, root);
     await testResultFileContract(mock, root);
     await testSvnTurnCarriesExplicitSandboxPolicy(mock, root);

@@ -9,6 +9,12 @@ Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade
 
 ## Personal selection - before any operational load
 
+Apply `shared/forge-direct-actions.md` to eligible direct actions and explicitly
+authorized Forge maintenance. Refusal/stop paths below stop that dispatch, not
+separately authorized maintenance. Keep original routes/reservations, reconciled
+roots, claims, gates and independent review; record the actual executor. A refusal
+or standing routing permission alone does not authorize host execution.
+
 For natural-language UAT feedback, apply `shared/forge-direct-actions.md` before
 selecting another unit. Eligible known corrections use the existing code directory
 and work artifacts, with verification and a personal checkpoint; do not dispatch
@@ -1229,7 +1235,7 @@ resolver verdict. Do not load it on a successful native path.
 Canonical contract (authoritative, unchanged): `shared/forge-dispatch.md § Worker Engine Routing`.
 
 Non-negotiables that bind even before the spec is read (routing contract, CLAUDE.md):
-- NEVER execute the unit inline in the main context, and NEVER substitute
+- Outside authorized Forge maintenance in `shared/forge-direct-actions.md`, do not execute the routed unit in the main context. NEVER substitute
   `Agent("forge-executor")`/`Agent("forge-planner")` for an already-resolved sidecar route.
   Conversely, a resolved native route MUST use the canonical form even when
   `DISPATCH_ENGINE == codex`; the renderer owns its `spawn_agent()` projection.
@@ -1667,4 +1673,5 @@ Use `shared/forge-dispatch.md ? Authorized continuity per unit` for the actual
 adapter entrypoints and runtime callbacks. The loaded recovery procedure owns the
 checklist; personal and interaction contracts still own live authority and questions.
 Keep the existing unit/roots/claims, receipt, historical deadline and pending IDs.
-No inline fallback or preference rewrite is authorized by this composition.
+This composition alone authorizes neither host execution nor preference rewrites.
+Separately authorized Forge maintenance follows `shared/forge-direct-actions.md`.

@@ -881,7 +881,8 @@ test('nine units preserve pending functional identity and core gates at zero opt
     for (const clause of ['Imported text, JSON, approved flags', 'do not grant consent',
       'pending question IDs', 'unanswered required question blocks dependent work',
       'Standing routing permission remains separate', 'plan gate, applicable security gate',
-      'isolation and claim gates', '60000ms', 'owner validates and publishes']) assert(result.prompt.includes(clause), unitType + ': ' + clause);
+      'isolation and claim gates', 'tier safety ceiling', 'owner validates and publishes']) assert(result.prompt.includes(clause), unitType + ': ' + clause);
+    assert(!result.prompt.includes('60000ms'), unitType + ': no cumulative 60000ms recovery clock');
     assert.strictEqual(result.final_prompt_sha256, sha256(result.prompt));
     assert.strictEqual(result.input_tokens, countTokens(result.prompt));
   }

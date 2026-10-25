@@ -469,3 +469,46 @@ primeira versão desse assert **não mordia**, porque o spread do carry-forward 
 qualquer jeito); dry-run **não** registra (registrar bytes nunca escritos faria a execução seguinte
 se achar dona de um arquivo que não tocou); e o instalador **mescla** em vez de substituir, para um
 run `--runtime claude` não derrubar os destinos do Codex.
+
+### O relógio deixa de matar worker vivo — evidência de vida decide, teto por tier só protege
+
+Em 22–23/10, unidades plan/execute despachadas do host Codex para o worker Claude eram cortadas
+em ~295 s com o stream ainda ativo: último evento remoto ~1 s antes do kill, 0,6–1,6 MB de stdout,
+centenas de eventos, `reason_code: claude-timeout`, `stage: transport`. A causa era
+`DEFAULT_WORKER_TIMEOUT_SECS = 300` aplicado como deadline absoluto, e o recovery ainda herdava só
+o `remainingMs` do relógio cumulativo (uma research saudável morreu em 21 s). Matar worker que
+produz evento por causa do calendário descarta trabalho vivo e o rotula como falha do destino.
+
+**Decisão: quatro pontos, um invariante.**
+
+1. **A evidência de vida é a autoridade do kill.** `scripts/forge-sidecar-liveness.js` é o módulo
+   neutro que os dois transportes alimentam: 60 s sem primeiro evento é falha de partida, 120 s sem
+   evento e sem tool em execução é `slow-suspect` (só reporta), 240 s é `dead`. Durante uma tool, a
+   prova local de três estados (positiva, negativa, indisponível) estende o prazo por tempo limitado.
+   O detector de loop (as mesmas 5 tool calls sem escrita nova) emite `slow-suspect` e o evento
+   `sidecar-no-progress`, sem matar. Calibração `claude-silence-v2` só aperta dentro de [piso, default].
+2. **O teto por tier é só rede de segurança.** `scripts/forge-worker-timeout.js` define
+   `TIER_CEILING_MS` (light 15, standard 30, heavy 60, max 90 min). `workers.timeout` explícito
+   sobrescreve o teto; o 300 legado é ignorado com aviso (`legacy-300-ignored`), porque aplicá-lo
+   recriaria o incidente.
+3. **Teto estourado com stream vivo é `budget-exceeded-while-active`.** Não é `claude-timeout` nem
+   `claude-anomalous-silence`, e não é falha do destino. Permite **no máximo um** resume da mesma
+   sessão Claude (`same-session-resume`, só plan/execute, com sessão gravada em disco e apagada ao
+   concluir), depois de reconciliar as escritas, com receipt novo encadeado. Codex e `dead` nunca
+   são retomados: silêncio real segue para o próximo candidato.
+4. **O recovery não tem mais o relógio cumulativo de 60000 ms.** O estado v2 deixa de carregar
+   `remainingMs`; cada sidecar de recovery recebe o teto cheio do tier (`ceilingFromRoute`) e o
+   término é garantido pela lista finita de candidatos, não por um orçamento que se esgota.
+
+**Prova.** `scripts/forge-sidecar-liveness.test.js` (estados, prova local, loop),
+`forge-worker-timeout.test.js` (tetos e `legacy-300-ignored`), `forge-claude-sidecar.test.js`
+(kill por vida, classificação, calibração v2), `forge-appserver-client.test.js` e
+`forge-appserver-liveness.test.js` (mesmo contrato no Codex), `forge-attempt-recovery.test.js`
+(teto cheio, um resume, nenhum para codex/dead), `forge-unit-sidecar.test.js` (fluxo
+`--claude-resume`) e `forge-liveness-heartbeat.test.js` (heartbeat aditivo ao host).
+
+**Limites declarados, não esquecidos.** agy não tem liveness (spawn síncrono sem stream): fica só
+com o teto absoluto. No Windows não há CPU por processo, então a prova local fica
+`proof-unavailable` e a extensão expira em 660000 ms. A calibração v2 só aperta, nunca afrouxa
+acima do default. Codex não é retomado. Provas offline com fixtures não estabelecem comportamento
+do provedor real.

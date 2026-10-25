@@ -492,9 +492,9 @@ Eixo workers: qual ENGINE (claude nativo em contexto ou sidecar codex via script
 
 ### `workers.timeout`
 
-- **Tipo:** integer
-- **Default:** `300`
-- **Descrição:** Segundos — prazo absoluto por tentativa de sidecar Claude/Codex (default 5min). Heartbeat não renova o prazo; erro explícito encerra antes. Inválido/não-positivo cai em 300. Valores explícitos continuam prevalecendo; timeout não prova recusa do provedor.
+- **Tipo:** integer \| null
+- **Default:** `null`
+- **Descrição:** Segundos — teto de segurança por tentativa de sidecar. Ausente/null usa o teto do tier da rota (light/standard/heavy/max = 900/1800/3600/5400 s); valor explícito 1..86400 sobrescreve o tier. 300 é tratado como legado e ignorado com aviso legacy-300-ignored (vale o teto do tier); inválido cai no teto do tier com aviso. A liveness (60/120/240 s sem sinal) é a autoridade primária de kill; o teto só atua com worker vivo e encerra como budget-exceeded-while-active. Fonte: scripts/forge-worker-timeout.js resolveWorkerCeiling. Timeout não prova recusa do provedor.
 
 ### `workers.codex_model`
 

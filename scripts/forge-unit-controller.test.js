@@ -102,6 +102,39 @@ function testSelectionDiscoversArtifactsWithoutWriting() {
   } finally { cleanup(fixture.cwd); }
 }
 
+function testCumulativeSummaryDoesNotCloseMilestone() {
+  const fixture = setup();
+  try {
+    const dir = path.join(fixture.cwd, '.gsd', 'milestones', fixture.milestone);
+    fs.writeFileSync(path.join(dir, `${fixture.milestone}-ROADMAP.md`), '- [x] **S01: Done**\n');
+    fs.writeFileSync(path.join(dir, `${fixture.milestone}-SUMMARY.md`), '## S01: written by complete-slice\n');
+    fs.mkdirSync(path.join(dir, 'slices', 'S01'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'slices', 'S01', 'S01-PLAN.md'), '- [x] T01: Work\n');
+    fs.writeFileSync(path.join(dir, 'slices', 'S01', 'S01-SUMMARY.md'), 'done\n');
+    const options = { prefsReader: () => ({ ok: true, prefs: { skip_discuss: true, skip_research: true, skip_slice_research: true } }) };
+    const pick = () => controller.select(fixture.cwd, { milestone: fixture.milestone }, options);
+    assert.strictEqual(pick().unit.type, 'complete-milestone', 'cumulative SUMMARY alone must not skip the milestone close');
+    fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'LEDGER.md'), `## ${fixture.milestone}-other\n`);
+    assert.strictEqual(pick().unit.type, 'complete-milestone', 'a heading for another id does not close this milestone');
+    fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'LEDGER.md'), `# Ledger\n\n## ${fixture.milestone}\n`);
+    assert.strictEqual(pick().done, true, 'legacy global LEDGER heading proves the close');
+    fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'LEDGER.md'), `# Ledger\n\n## ${fixture.milestone} — Título antigo\n`);
+    assert.strictEqual(pick().done, true, 'pre-fragment "## <id> — <title>" heading proves the close');
+    fs.rmSync(path.join(fixture.cwd, '.gsd', 'LEDGER.md'));
+    const events = path.join(dir, `${fixture.milestone}-events.jsonl`);
+    const transition = outcome => JSON.stringify({ event: 'unit-transition', action: 'complete', outcome,
+      unit: `complete-milestone/${fixture.milestone}`, milestone: fixture.milestone }) + '\n';
+    fs.writeFileSync(events, 'not json\n' + transition('failed'));
+    assert.strictEqual(pick().unit.type, 'complete-milestone', 'a failed close transition is not a close');
+    fs.appendFileSync(events, transition('succeeded'));
+    assert.strictEqual(pick().done, true, 'committed complete-milestone transition proves the close without a ledger write');
+    fs.rmSync(events);
+    fs.mkdirSync(path.join(fixture.cwd, '.gsd', 'ledger'), { recursive: true });
+    fs.writeFileSync(path.join(fixture.cwd, '.gsd', 'ledger', `${fixture.milestone}.md`), 'closed\n');
+    assert.strictEqual(pick().done, true, 'ledger fragment written by complete-milestone proves the close');
+  } finally { cleanup(fixture.cwd); }
+}
+
 function testBeginCompleteHandoffAndResume() {
   const fixture = setup();
   try {
@@ -509,6 +542,7 @@ function main() {
   test('pure deterministic selection', testPureSelection);
   test('phase ordering, canonical skip preferences and stale slice selection', testSelectionPhasesAndCanonicalPrefs);
   test('artifact discovery selects without leases or STATE writes', testSelectionDiscoversArtifactsWithoutWriting);
+  test('cumulative milestone SUMMARY does not skip complete-milestone', testCumulativeSummaryDoesNotCloseMilestone);
   test('begin/complete/handoff/resume', testBeginCompleteHandoffAndResume);
   test('lease negative and boundary deny', testLeaseNegativeAndBoundaryDeny);
   test('pause and failure boundaries', testPauseAndFailureBoundaries);

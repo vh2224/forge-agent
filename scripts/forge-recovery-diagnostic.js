@@ -395,8 +395,13 @@ function renderRecovery(report) {
 function inspectAttemptRecovery(stateFile, receiptFile) {
   const state = require('./forge-xllm-state').loadRecovery(stateFile);
   const inspection = require('./forge-attempt-recovery').inspectReceipt(receiptFile);
-  return { unit: state.unit, phase: state.phase, started_at: state.started_at, deadline_at: state.deadline_at,
-    remaining_ms: Math.max(0, state.deadline_at - Date.now()),
+  // Display only: no cumulative clock is derived here. A v1 deadline_at or migrated_from
+  // record is surfaced as inert history and never grants or refuses anything.
+  const history = {};
+  if (state.deadline_at !== undefined) history.deadline_at = state.deadline_at;
+  if (state.migrated_from !== undefined) history.migrated_from = state.migrated_from;
+  return { unit: state.unit, phase: state.phase, schema_version: state.schema_version,
+    budget: state.budget || 'tier-ceiling', started_at: state.started_at, ...history,
     pending_questions: state.pending_questions, attempts: state.attempts, selection: state.selection || null,
     inspection: { ...inspection, receipt: undefined }, next_action: 'inspect-process-receipt-roots' };
 }

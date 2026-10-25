@@ -26,13 +26,18 @@ const modelPolicy = require('./forge-model-policy');
 const workerContract = require('./forge-worker-result-contract');
 const streamProtocol = require('./forge-claude-stream');
 const calibrationApi = require('./forge-sidecar-calibration');
+const calibrationV2 = require('./forge-sidecar-calibration-v2');
 const { observation } = calibrationApi;
+const liveness = require('./forge-sidecar-liveness');
+const { createLocalProof } = require('./forge-sidecar-local-proof');
+const claudeSession = require('./forge-claude-session');
 
 const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   ACCOUNT_UNAVAILABLE: 'claude-account-unavailable',
   COMMAND_NOT_FOUND: 'claude-command-not-found',
   EXIT_NONZERO: 'claude-exit-nonzero',
   TIMEOUT: 'claude-timeout',
+  BUDGET_EXCEEDED: 'budget-exceeded-while-active',
   SILENCE: 'claude-anomalous-silence',
   EMPTY_OUTPUT: 'claude-empty-output',
   INVALID_RESULT: 'claude-invalid-result',
@@ -53,6 +58,10 @@ const CLAUDE_SIDECAR_REASON_CODES = Object.freeze({
   MODEL_REQUIRED: 'claude-model-required',
   MODEL_SUBSTITUTED: 'claude-model-substituted',
   MODEL_UNVERIFIED: 'claude-model-unverified',
+  SESSION_MISMATCH: 'claude-session-mismatch',
+  SESSION_INVALID: 'claude-session-invalid',
+  RESUME_ACCOUNT_MISMATCH: 'claude-resume-account-mismatch',
+  RESUME_CONFIG_MISMATCH: 'claude-resume-config-mismatch',
 });
 
 // Membership, not truthiness. Native fs errors carry a `.code` too (EACCES,
@@ -84,12 +93,31 @@ const ENVIRONMENT_REASON_VALUES = new Set([
 
 const MAX_CAPTURE_BYTES_PER_STREAM = 1024 * 1024;
 const MAX_PROMPT_INSTRUCTION_BYTES = 4096;
+// The only -p text of a same-session resume (S05). The reconciliation that runs
+// before a resume restores every root to the attempt baseline, so the resumed
+// session remembers edits that may no longer exist on disk.
+const CLAUDE_RESUME_INSTRUCTION = 'The previous turn of this same task reached its safety ceiling while it was still '
+  + 'active and was stopped. Before this resume, Forge reconciled the workspace to the baseline of the attempt, so edits '
+  + 'made earlier in this session may have been reverted. Re-read every file before relying on any earlier edit; the '
+  + 'temporary task prompt file no longer exists, so rely on the task as you already read it in this session. Continue '
+  + 'the same task and return the required structured_output JSON.';
 const TIMEOUT_GRACE_MS = 5000;
 const TEMP_DIR_PREFIX = '.forge-claude-sidecar-';
 // Only a fallback: forge-xllm always passes the cadence it publishes as
 // heartbeat_interval_ms, and the orphan reaper derives staleAfter from that
 // published value. A callback wired without a cadence still has to beat.
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 15000;
+const DEFAULT_LIVENESS_INTERVAL_MS = 1000;
+// Progress snapshot cadence (onProgress). Independent of the result-file
+// heartbeat above: transitions are emitted immediately, so a 30 s periodic
+// snapshot is enough for the host to see the current liveness state.
+const DEFAULT_PROGRESS_INTERVAL_MS = 30000;
+// Local-proof sampling cadence. Sampling is asynchronous and cached; the 1 s
+// watchdog tick only reads the cache and never performs I/O itself.
+const DEFAULT_LOCAL_PROOF_INTERVAL_MS = 15000;
+// Stand-in when no child pid exists (or the provider cannot be built): the
+// platform measured nothing, which is `unavailable`, never a positive proof.
+const UNAVAILABLE_LOCAL_PROOF = Object.freeze({ capability: 'unavailable', proof: 'none' });
 // Inline invocation settings: `--setting-sources ''` excludes the user, project
 // and local settings files. Managed policy is not a setting source; it may still
 // apply and is never bypassed. No settings file is changed.
@@ -124,6 +152,7 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.COMMAND_NOT_FOUND]: 'The Claude executable could not be started.',
     [CLAUDE_SIDECAR_REASON_CODES.EXIT_NONZERO]: 'The Claude process exited unsuccessfully.',
     [CLAUDE_SIDECAR_REASON_CODES.TIMEOUT]: 'The Claude process exceeded its child deadline.',
+    [CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED]: 'The Claude worker was still active when it reached its safety ceiling.',
     [CLAUDE_SIDECAR_REASON_CODES.EMPTY_OUTPUT]: 'The Claude process returned empty output.',
     [CLAUDE_SIDECAR_REASON_CODES.INVALID_RESULT]: 'The Claude process returned an invalid worker result.',
     [CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED]: 'The Claude process could not be spawned.',
@@ -139,6 +168,10 @@ function sidecarError(code, reason, counts) {
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_DISABLED_INCOMPATIBLE]: 'Disabled thinking is incompatible with this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_ENABLED_INCOMPATIBLE]: 'Enabled thinking is incompatible with this model. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.THINKING_MODE_UNKNOWN]: 'The requested thinking mode is not documented for this model. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH]: 'The Claude stream reported a session other than the one Forge started. The result was not accepted.',
+    [CLAUDE_SIDECAR_REASON_CODES.SESSION_INVALID]: 'The Claude session reference is invalid. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.RESUME_ACCOUNT_MISMATCH]: 'The default Claude account differs from the account that started the session. No worker was launched.',
+    [CLAUDE_SIDECAR_REASON_CODES.RESUME_CONFIG_MISMATCH]: 'The Claude config dir or workspace differs from the one that started the session. No worker was launched.',
     [CLAUDE_SIDECAR_REASON_CODES.EFFORT_UNSUPPORTED_BY_MODEL]: 'The requested effort is not documented for this model. No worker was launched and the effort was not lowered.',
     ...CLAUDE_IDENTITY_MESSAGES,
   };
@@ -242,12 +275,126 @@ function deriveChildTimeoutMs(parentMs) {
 
 /** Absence keeps the fallback cadence; a present value is validated, never
  * coerced. 0/NaN/negative reach setInterval as a tight loop. */
-function normalizeHeartbeatIntervalMs(value) {
-  if (value === undefined || value === null) return DEFAULT_HEARTBEAT_INTERVAL_MS;
+function normalizeIntervalMs(value, fallback) {
+  if (value === undefined || value === null) return fallback;
   if (!Number.isInteger(value) || value <= 0) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
   }
   return value;
+}
+
+function normalizeHeartbeatIntervalMs(value) {
+  return normalizeIntervalMs(value, DEFAULT_HEARTBEAT_INTERVAL_MS);
+}
+
+/** Watchdog cadence (internal; tests inject a short one). Same validation as
+ * the heartbeat: a present value is never coerced into a tight loop. */
+function normalizeLivenessIntervalMs(value) {
+  return normalizeIntervalMs(value, DEFAULT_LIVENESS_INTERVAL_MS);
+}
+
+/** Progress snapshot cadence (internal seam; tests inject a short one). */
+function normalizeProgressIntervalMs(value) {
+  return normalizeIntervalMs(value, DEFAULT_PROGRESS_INTERVAL_MS);
+}
+
+/** Local-proof sampling cadence (internal seam; tests inject a short one). */
+function normalizeLocalProofIntervalMs(value) {
+  return normalizeIntervalMs(value, DEFAULT_LOCAL_PROOF_INTERVAL_MS);
+}
+
+/**
+ * Roots whose filesystem delta counts as local proof and as a new write: the
+ * workspace plus the declared writable roots, exactly what the CLI may write.
+ * A read-only unit has none; only the child's CPU can prove life there.
+ */
+function localProofRoots(cwd, options) {
+  if (options.readOnly) return [];
+  const extra = Array.isArray(options.writableRoots)
+    ? options.writableRoots.filter(root => typeof root === 'string' && root).map(root => path.resolve(root))
+    : [];
+  return [...new Set([cwd, ...extra])];
+}
+
+/** Extra ignored prefixes (Forge result/receipt files); the provider itself
+ * always ignores `.git/` and `<root>/.gsd/forge/`. Non-arrays mean none. */
+function localProofIgnorePrefixes(value) {
+  return Array.isArray(value)
+    ? [...new Set(value.filter(item => typeof item === 'string' && item).map(item => path.resolve(item)))]
+    : [];
+}
+
+/** Only {capability, proof}; an invalid provider answer reads as unavailable
+ * instead of throwing inside the watchdog tick. */
+function currentLocalProof(provider) {
+  try {
+    return liveness.normalizeLocalProof(provider.current());
+  } catch {
+    return { ...UNAVAILABLE_LOCAL_PROOF };
+  }
+}
+
+const V2_SOURCES = Object.freeze(['persisted-calibration', 'model-fallback']);
+const V2_LIMIT_KEYS = Object.freeze({ initial: 'startMs', gap: 'deadMs' });
+
+/** A resolved v2 dimension (exact or model fallback) carries its own clamped threshold. */
+function v2Threshold(calibration, dimension) {
+  const d = calibration?.v2?.[dimension];
+  return d && Number.isSafeInteger(d.threshold_ms) && V2_SOURCES.includes(d.source) ? d : null;
+}
+
+/**
+ * Liveness policy for one turn, chosen per dimension without mixing values:
+ * v2 exact > v2 model-fallback > v1 gap (S01 rule, deadMs only) > locked default.
+ * The v1 initial threshold (always >= 120000) never tightens the 60000 start
+ * limit, so it is ignored. An override (tests) can only tighten. Returns the
+ * limits and, per dimension, the v2 provenance when v2 set the effective limit.
+ */
+function livenessPolicyFor(calibration, override) {
+  const D = liveness.DEFAULTS;
+  const limits = liveness.normalizePolicy(override && typeof override === 'object' ? override : undefined);
+  const provenance = { initial: null, gap: null };
+  for (const dimension of ['initial', 'gap']) {
+    const v2 = v2Threshold(calibration, dimension), key = V2_LIMIT_KEYS[dimension];
+    if (v2 && v2.threshold_ms <= limits[key]) {
+      limits[key] = v2.threshold_ms;
+      provenance[dimension] = { threshold_ms: v2.threshold_ms, source: v2.source };
+    }
+  }
+  const gap = calibration?.v1?.gap;
+  if (!v2Threshold(calibration, 'gap') && gap?.calibrated === true && Number.isSafeInteger(gap.threshold_ms)) {
+    limits.deadMs = Math.min(limits.deadMs, Math.min(D.deadMs, Math.max(D.suspectMs, gap.threshold_ms)));
+  }
+  return { limits: liveness.normalizePolicy(limits), provenance };
+}
+
+/** Closed calibration block: the state of the effective source per dimension. */
+function calibrationView(calibration) {
+  const v1 = calibration?.v1, v2 = calibration?.v2;
+  const state = dimension => v2Threshold(calibration, dimension) ? v2[dimension].state
+    : v1?.[dimension]?.state !== 'uncalibrated' || !v2 ? v1?.[dimension]?.state : v2[dimension].state;
+  const v1Effective = !v2Threshold(calibration, 'initial') || !v2Threshold(calibration, 'gap');
+  return { diagnostic: v2?.diagnostic || (v1Effective && v1?.diagnostic) || null,
+    initial: state('initial'), gap: state('gap') };
+}
+
+/** v1 and v2 sources for one identity; the v1 store is only read. */
+function readCalibration(input, options) {
+  return { v1: calibrationApi.read(input, options), v2: calibrationV2.resolve(input, options),
+    // Best-effort censored lower bound; its outcome never reaches the caller.
+    censor(dimension, windowMs) {
+      try {
+        const proposal = calibrationV2.proposeCensored(input, { dimension, window_ms: windowMs });
+        calibrationV2.commit(proposal, { fingerprint: proposal.key,
+          receipt: `liveness-termination:${proposal.attempt_sha256}` }, options);
+      } catch { /* a censored sample is advisory */ }
+    } };
+}
+
+/** Per-dimension provenance: only a limit below its locked default is calibrated. */
+function livenessSource(dimension, thresholdMs) {
+  const locked = dimension === 'initial' ? liveness.DEFAULTS.startMs : liveness.DEFAULTS.deadMs;
+  return thresholdMs < locked ? liveness.SOURCE_CALIBRATED : liveness.SOURCE_DEFAULT;
 }
 
 /** The model id is interpolated into argv, so an absent one is legal but a
@@ -459,12 +606,16 @@ function mapSpawnError(error) {
     : sidecarError(CLAUDE_SIDECAR_REASON_CODES.SPAWN_FAILED);
 }
 
+const TERMINATION_WAIT_MS = 5000;
 function defaultTerminate(child) {
   try { child.kill('SIGKILL'); } catch { /* the owned process already exited */ }
 }
 
 function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeartbeat,
-  heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration }) {
+  heartbeatIntervalMs, validateCandidate, signal, requestedModel, resultContract, onProgress, clock, calibration,
+  onLiveness, livenessIntervalMs = DEFAULT_LIVENESS_INTERVAL_MS, livenessPolicy,
+  proofRoots = [], localProofIgnore = [], localProofFactory = null,
+  localProofIntervalMs = DEFAULT_LOCAL_PROOF_INTERVAL_MS, progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS }) {
   if (signal?.aborted) return Promise.reject(sidecarError(CLAUDE_SIDECAR_REASON_CODES.CANCELLED));
   let child;
   try {
@@ -473,22 +624,71 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   } catch (error) { return Promise.reject(mapSpawnError(error)); }
 
   return new Promise((resolve, reject) => {
-    let settled = false, terminationAttempted = false, closed = false, failed = false;
-    let watchdog, heartbeatTimer, progressTimer, timer, silence = null, transportEnd = null;
+    let settled = false, terminationAttempted = false, closed = false, failed = false, spawnFailed = false;
+    let resolveExit;
+    const exited = new Promise(done => { resolveExit = done; });
+    let watchdog, heartbeatTimer, progressTimer, proofTimer, timer, silence = null, transportEnd = null;
     let reportedRemote = false, reportedTerminal = false;
+    // Liveness is the primary kill authority (start/silence); timeoutMs is only
+    // the safety ceiling, enforced by the tracker on the injected clock and by
+    // the real setTimeout backstop below.
+    const { limits: policy, provenance } = livenessPolicyFor(calibration, livenessPolicy);
+    const calibrationBlock = calibrationView(calibration);
+    // A stream cut by liveness or by the ceiling only proves a lower bound. A gap
+    // suspended by a tool is an extension by proof, not real silence: no sample.
+    function recordCensored(termination, current) {
+      try {
+        if (current.gap_suspended === true || typeof calibration?.censor !== 'function') return;
+        if (termination === 'dead-start') calibration.censor('initial', current.elapsed_ms);
+        else if ((termination === 'dead-silence' || termination === 'budget-exceeded-while-active')
+          && current.first_remote_ms !== null) calibration.censor('gap', current.remote_silence_ms);
+      } catch { /* never alters the termination */ }
+    }
+    const tracker = liveness.createTracker(policy, timeoutMs);
+    // Loop detector: tool-call fingerprints (hashes only) since the last write.
+    const progress = liveness.createProgressTracker();
+    // Versioned liveness block published in every progress snapshot (S06). It
+    // carries only the closed state/reason vocabulary, never fingerprints or text.
+    let livenessView = { version: 1, state: 'starting', since_ms: 0, reason: null };
+    let livenessTermination = null;
     const reducer = streamProtocol.createReducer({ secret: env[TOKEN_ENV], clock, onRemote: () => {
       if (!reportedRemote) { reportedRemote = true; emit(); }
     }, onEvent: () => {
       if (!reportedTerminal && reducer.snapshot().phase === 'terminal') { reportedTerminal = true; emit(); }
+    }, onToolCall: ({ fingerprint }) => {
+      try { progress.toolCall(fingerprint); } catch { /* observer only */ }
     } });
+    // Local proof of life: sampled asynchronously into a cache, never inside the
+    // watchdog tick. Without a child pid there is nothing to measure.
+    let proof = { current: () => UNAVAILABLE_LOCAL_PROOF, sample: () => Promise.resolve(), stop() {} };
+    if (Number.isSafeInteger(child.pid)) {
+      try {
+        const provider = (localProofFactory || createLocalProof)({ pid: child.pid, roots: proofRoots,
+          ignore: { prefixes: localProofIgnore }, clock, intervalMs: localProofIntervalMs,
+          onWrite: () => { try { progress.write(); } catch { /* observer only */ } } });
+        if (provider && typeof provider.current === 'function' && typeof provider.sample === 'function') {
+          proof = provider;
+        }
+      } catch { /* a provider that cannot start leaves the proof unavailable */ }
+    }
+    function sampleProof() {
+      try { Promise.resolve(proof.sample()).catch(() => {}); } catch { /* best-effort sampling */ }
+    }
+    function livenessInputs() {
+      const current = currentLocalProof(proof);
+      let state;
+      try { state = progress.state(); } catch { state = undefined; }
+      return { localProof: { capability: current.capability, proof: current.proof }, progress: state };
+    }
     const snapshot = () => {
       const current = reducer.snapshot();
       return observation({ ...current, process_exit_observed: closed,
         phase: failed ? 'failed' : closed ? 'closed' : current.phase,
         transport_ms: transportEnd ?? current.transport_ms,
         verification_ms: transportEnd === null ? null : Math.max(0, current.elapsed_ms - transportEnd),
-        calibration: { diagnostic: calibration.diagnostic, initial: calibration.initial.state, gap: calibration.gap.state },
-        ...(silence ? { silence } : {}) });
+        calibration: calibrationBlock,
+        ...(silence ? { silence } : {}),
+        liveness: livenessTermination ? { ...livenessView, termination: livenessTermination } : livenessView });
     };
     function bestEffort(callback, value) {
       try { Promise.resolve(callback?.(value)).catch(() => {}); } catch { /* observer only */ }
@@ -502,14 +702,24 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
       clearInterval(watchdog);
       clearInterval(heartbeatTimer);
       clearInterval(progressTimer);
+      clearInterval(proofTimer);
+      try { proof.stop?.(); } catch { /* best-effort */ }
       signal?.removeEventListener('abort', cancel);
       process.removeListener('SIGINT', cancel);
       process.removeListener('SIGTERM', cancel);
       if (!error) { reducer.dispose(); resolve(value); return; }
       failed = true;
+      // Only the 'close' event (or a spawn that never produced a process) proves
+      // the child is gone; a requested kill never does. Hidden from serialization.
+      Object.defineProperty(error, 'awaitExit', { configurable: true, enumerable: false,
+        value: waitMs => closed || spawnFailed ? Promise.resolve(true) : Promise.race([exited,
+          new Promise(done => { const t = setTimeout(() => done(false), waitMs); t.unref?.(); })]) });
+      // Confirmation value only (S05): read through the accessor, never reparsed from stdout.
+      if (reducer.sessionId() !== null && error && typeof error === 'object') error.observedSessionId = reducer.sessionId();
       const reasons = { 'claude-timeout': 'provider-timeout', 'claude-cancelled': 'provider-cancelled',
         'claude-exit-nonzero': 'provider-exit', 'claude-auth-failed': 'authentication-failed',
-        'claude-output-limit': 'output-limit', 'claude-anomalous-silence': 'anomalous-silence' };
+        'claude-output-limit': 'output-limit', 'claude-anomalous-silence': 'anomalous-silence',
+        'budget-exceeded-while-active': 'budget-exceeded-while-active' };
       const observed = snapshot();
       error.diagnostic = diagnostic(error.diagnostic?.reason || reasons[error.code] || 'adapter-failed', {
         ...error.diagnostic, observation: observed, stdout_bytes: observed.stdout_bytes,
@@ -541,27 +751,106 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
     signal?.addEventListener('abort', cancel, { once: true });
     process.once('SIGINT', cancel);
     process.once('SIGTERM', cancel);
-    timer = setTimeout(() => terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT)), timeoutMs);
+    function ceilingError(decision) {
+      // The watchdog passes the decision that already won; the backstop path
+      // classifies with the state that held without the ceiling, using the same
+      // current proof/progress, so a tool whose proof allows its extension is
+      // active, not dead, when the ceiling arrives.
+      const { state, reason, termination } = decision
+        || liveness.evaluate(reducer.snapshot(), livenessInputs(), policy, null);
+      const kind = decision ? termination : liveness.classifyTermination({ cause: 'ceiling', state });
+      // A live stream at the ceiling is not a timeout of the destination: it has
+      // its own reason code (S03 decision 8). A ceiling reached while still
+      // starting (termination null) remains claude-timeout.
+      const error = kind === 'budget-exceeded-while-active'
+        ? sidecarError(CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED, 'budget-exceeded-while-active')
+        : sidecarError(CLAUDE_SIDECAR_REASON_CODES.TIMEOUT);
+      error.liveness = { version: 1, termination: kind, state, reason };
+      if (livenessView.state !== state) {
+        livenessView = { version: 1, state, since_ms: livenessView.since_ms, reason: reason ?? null };
+      }
+      // The final snapshot keeps the active state; a ceiling is not death.
+      if (liveness.TERMINATIONS.includes(kind)) {
+        livenessTermination = kind;
+        recordCensored(kind, reducer.snapshot());
+      }
+      return error;
+    }
+    timer = setTimeout(() => { if (!settled) terminate(ceilingError()); }, timeoutMs);
     beat();
     emit();
     if (onHeartbeat) heartbeatTimer = setInterval(beat, heartbeatIntervalMs);
-    if (onProgress) progressTimer = setInterval(emit, 15000);
+    if (onProgress) progressTimer = setInterval(emit, progressIntervalMs);
+    proofTimer = setInterval(sampleProof, localProofIntervalMs);
+    proofTimer.unref?.();
+    sampleProof();
+    // Evaluates current evidence, notifies onLiveness and republishes the view.
+    // Shared by the watchdog tick and the terminal paths so the final snapshot
+    // never lags behind the last remote event.
+    function refreshLiveness() {
+      // Synchronous: reads the cached proof and the progress state, no I/O.
+      const inputs = livenessInputs();
+      const { result, transition } = tracker.evaluate(reducer.snapshot(), inputs);
+      if (transition && onLiveness) {
+        const loop = transition.to === 'slow-suspect' && transition.reason === 'no-progress'
+          && typeof inputs.progress?.fingerprint === 'string';
+        bestEffort(onLiveness, loop ? { ...transition, progress: { repeats: inputs.progress.repeats,
+          fingerprint_sha256: inputs.progress.fingerprint.slice(0, 16) } } : transition);
+      }
+      // The initial snapshot already carries starting/0; every other transition
+      // is published immediately, after onLiveness.
+      if (transition && !(transition.from === null && transition.to === 'starting')) {
+        livenessView = { version: 1, state: transition.to, since_ms: transition.at_ms ?? null,
+          reason: transition.reason ?? null };
+        return { result, transition, published: true };
+      }
+      return { result, transition, published: false };
+    }
     watchdog = setInterval(() => {
       if (settled) return;
-      silence = calibrationApi.silence(calibration, reducer.snapshot());
-      if (silence) terminate(sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence'));
-    }, 1000);
+      const { result, transition, published } = refreshLiveness();
+      if (published) emit();
+      if (!result.kill) return;
+      if (result.cause === 'liveness') {
+        // Every tool kill carries threshold_ms = deadMs, so observation() accepts it.
+        const v2 = provenance[result.dimension];
+        silence = { dimension: result.dimension, window_ms: result.window_ms, threshold_ms: result.threshold_ms,
+          ...(v2 && v2.threshold_ms === result.threshold_ms
+            ? { policy: calibrationV2.POLICY, source: v2.source }
+            : { policy: liveness.POLICY, source: livenessSource(result.dimension, result.threshold_ms) }),
+          cause: 'indeterminate' };
+        const error = sidecarError(CLAUDE_SIDECAR_REASON_CODES.SILENCE, 'anomalous-silence');
+        if (livenessView.state !== 'dead') {
+          livenessView = { version: 1, state: 'dead', since_ms: transition?.at_ms ?? null, reason: result.reason ?? null };
+        }
+        livenessTermination = result.termination;
+        error.liveness = { version: 1, termination: result.termination, state: 'dead', reason: result.reason,
+          extension_ms: result.extension_ms ?? null,
+          proof: result.proof_capability === undefined ? null
+            : { capability: result.proof_capability, proof: result.proof } };
+        const current = reducer.snapshot();
+        terminate(error);
+        recordCensored(result.termination, current);
+      } else if (result.cause === 'ceiling') {
+        terminate(ceilingError(result));
+      }
+    }, livenessIntervalMs);
     child.stdout?.on('data', chunk => {
       if (!settled) try { reducer.push(chunk); } catch (error) { protocolError(error); }
     });
     child.stderr?.on('data', chunk => {
       if (!settled) try { reducer.stderr(chunk); } catch (error) { protocolError(error); }
     });
-    child.once('error', error => finish(mapSpawnError(error)));
+    child.once('error', error => {
+      if (!Number.isSafeInteger(child.pid)) spawnFailed = true;
+      finish(mapSpawnError(error));
+    });
     child.once('close', (code, exitSignal) => {
       closed = true;
+      resolveExit(true);
       if (settled) return;
       transportEnd = reducer.snapshot().elapsed_ms;
+      try { refreshLiveness(); } catch { /* the view stays at its last published state */ }
       let terminal;
       try { terminal = reducer.end(); }
       catch (error) {
@@ -586,7 +875,7 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
         }
         const observed = observation({ ...snapshot(), model_observed: observedModel });
         bestEffort(onProgress, observed);
-        finish(null, { candidate, observedModel, metadata: Object.freeze({
+        finish(null, { candidate, observedModel, observedSessionId: reducer.sessionId(), metadata: Object.freeze({
           pid: Number.isSafeInteger(child.pid) ? child.pid : null, exit_code: code, signal: exitSignal || null,
           duration_ms: observed.elapsed_ms, stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
           marker_count: 0, command: path.basename(cmd), argv_count: args.length, observation: observed,
@@ -599,6 +888,77 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
   });
 }
 
+function preSpawnRefusal(code) {
+  const refused = sidecarError(code);
+  refused.provider_called = false;
+  return refused;
+}
+
+function invalidLaunchOption() {
+  return preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+}
+
+// `session` is absent (legacy argv), exactly `{ persist: true }` or exactly
+// `{ resume: ref }`, both only for a plan or execute phase. A resume ref is
+// validated first (`claude-session-invalid`), then the phase; every other shape
+// is `claude-invalid-options`. All of them refuse before any temp file or spawn.
+function sessionMode(session, phase) {
+  if (session === undefined || session === null) return { mode: 'none', ref: null };
+  if (typeof session !== 'object' || Array.isArray(session)) throw invalidLaunchOption();
+  const keys = Object.keys(session);
+  if (keys.length !== 1) throw invalidLaunchOption();
+  if (keys[0] === 'resume') {
+    const ref = session.resume;
+    if (!claudeSession.validateSessionRef(ref).ok) {
+      throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.SESSION_INVALID);
+    }
+    try { claudeSession.assertSessionId(ref.id); }
+    catch { throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.SESSION_INVALID); }
+    if (!claudeSession.isEligible({ phase })) throw invalidLaunchOption();
+    return { mode: 'resume', ref };
+  }
+  if (keys[0] !== 'persist' || session.persist !== true) throw invalidLaunchOption();
+  if (!claudeSession.isEligible({ phase })) throw invalidLaunchOption();
+  return { mode: 'persist', ref: null };
+}
+
+// One argv for every mode: start, persisted start and resume differ only in
+// `sessionTokens` and the `-p` instruction, so a resume keeps every other
+// position (model, effort, add-dir, schema, tools, permissions, settings).
+function buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction }) {
+  return [...prefixArgs, ...(model ? ['--model', model] : []),
+    ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
+    ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
+    ...(effort ? ['--effort', effort] : []),
+    ...sessionTokens, '--disable-slash-commands',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    '--setting-sources', '', '--settings', CLAUDE_INVOCATION_SETTINGS,
+    '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+    '--json-schema', JSON.stringify(resultContract.schema),
+    '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
+    ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
+    '-p', instruction];
+}
+
+// Runs the remover and reduces its report to {ok:true} or {ok:false, refused,
+// errors}. Paths are config-dir relative; the raw id is masked so only the
+// recovery ref ever carries it. Never throws.
+function sessionCleanupReport(remover, ref) {
+  const mask = (value) => typeof value === 'string' ? value.split(ref.id).join('<session>') : value;
+  const entries = (list) => (Array.isArray(list) ? list : []).map((item) => Object.freeze(
+    Object.fromEntries(Object.entries(item && typeof item === 'object' ? item : {})
+      .filter(([key]) => ['path', 'reason', 'code'].includes(key))
+      .map(([key, value]) => [key, mask(value)]))));
+  let report;
+  try { report = remover(ref); }
+  catch (error) {
+    report = { ok: false, refused: [], errors: [{ path: '.', code: typeof error?.code === 'string' ? error.code : 'remover-failed' }] };
+  }
+  if (report && report.ok === true) return Object.freeze({ ok: true });
+  return Object.freeze({ ok: false, refused: Object.freeze(entries(report?.refused)),
+    errors: Object.freeze(entries(report?.errors)) });
+}
+
 /**
  * Launch one Claude worker attempt. There is no retry and no inline fallback.
  *
@@ -606,9 +966,48 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  * @param {string} opts.prompt complete task prompt, transported only by file.
  *   Required and non-empty: a vacuous instruction still spawns the real CLI and
  *   spends subscription quota, so absence is a named failure (S03 review R5).
+ *   Not required (and ignored) in resume mode, whose instruction is fixed.
  * @param {string} opts.cwd workspace directory that owns the temporary file
- * @param {number} [opts.timeoutMs] parent deadline in milliseconds
- * @param {number} [opts.timeoutSecs] parent deadline in seconds
+ * @param {number} [opts.timeoutMs] parent deadline in milliseconds. This is the
+ *   safety ceiling only (the child gets it minus TIMEOUT_GRACE_MS); reaching it
+ *   with an active stream rejects with `budget-exceeded-while-active` (diagnostic
+ *   reason of the same name); reaching it while still starting rejects with
+ *   `claude-timeout`. Both carry `error.liveness.termination`. Start and
+ *   silence kills are decided by forge-sidecar-liveness (locked defaults
+ *   60000/120000/240000 ms, even without calibration) and reject with
+ *   `claude-anomalous-silence` plus `error.liveness.termination`
+ *   (`dead-start` | `dead-silence`).
+ * @param {number} [opts.timeoutSecs] parent deadline in seconds (same ceiling)
+ * @param {(transition:{from:?string,to:string,at_ms:?number,reason:?string})=>void} [opts.onLiveness]
+ *   best-effort observer of liveness state transitions; non-functions are ignored.
+ * @param {number} [opts.livenessIntervalMs] watchdog cadence (default 1000);
+ *   validated as a positive integer when present.
+ * @param {{startMs?:number,suspectMs?:number,deadMs?:number,toolExtensionMs?:number}} [opts.livenessPolicy]
+ *   override that can only tighten the locked liveness defaults.
+ * @param {string[]} [opts.localProofIgnore] absolute path prefixes (Forge
+ *   result/receipt files) whose writes never count as local proof or progress;
+ *   the provider always ignores `.git/` and `<root>/.gsd/forge/`. A non-array
+ *   is treated as empty.
+ *
+ * Tool waits (a tool_use in flight) depend on the child's local proof of life,
+ * sampled every 15000 ms into a cache that the 1 s watchdog only reads. Positive
+ * proof (pid alive plus CPU or filesystem delta in cwd/writableRoots) and
+ * unavailable proof (the platform cannot measure CPU, e.g. win32; it stays
+ * slow-suspect) tolerate at most 660000 ms of silence (deadMs 240000 +
+ * toolExtensionMs 420000). No proof where the capability exists, or a dead pid,
+ * dies at 240000 ms. Tool kills reject with `claude-anomalous-silence` and
+ * `error.liveness.{termination:'dead-silence', reason, extension_ms, proof}`.
+ * Five identical tool calls without a new write report one `slow-suspect`
+ * transition with reason `no-progress` and `progress:{repeats, fingerprint_sha256}`
+ * (16 hex) through onLiveness; it never kills. Internal test seams, not public
+ * API: `localProofFactory` replaces createLocalProof and `localProofIntervalMs`
+ * replaces the 15000 ms sampling cadence (validated as a positive integer).
+ * Every onProgress snapshot carries observation().liveness
+ * `{version:1, state, since_ms, reason}` (plus `termination` on the final
+ * snapshot of a watchdog kill). Snapshots are emitted every 30000 ms
+ * (DEFAULT_PROGRESS_INTERVAL_MS) and immediately on each liveness transition.
+ * Internal test seam, not public API: `progressIntervalMs` replaces that
+ * cadence; an invalid value is refused before any spawn with provider_called:false.
  * @param {string} opts.model model id forwarded to the CLI as `--model <id>`.
  *   Required: absence is `claude-model-required` before any spawn, because the
  *   result is admitted only when modelUsage proves this exact id. Rejected when
@@ -621,6 +1020,35 @@ function runOwnedChild({ cmd, args, cwd, env, timeoutMs, terminateChild, onHeart
  *   Validated as a finite positive integer when present.
  * @param {NodeJS.ProcessEnv} [opts.sourceEnv] process env source (testable allowlist)
  * @param {(child:import('child_process').ChildProcess)=>void} [opts.terminateChild]
+ * @param {{persist:true}} [opts.session] opt-in session persistence, accepted only
+ *   for the plan/execute phases (else `claude-invalid-options` before any probe,
+ *   temp file or spawn). The argv swaps `--no-session-persistence` for
+ *   `--session-id <uuid>` (Forge-generated, strict v4); the stream's
+ *   system/init must confirm the same id or the attempt fails with
+ *   `claude-session-mismatch`. The session is removed after every outcome
+ *   except `budget-exceeded-while-active` under the confirmed id, which keeps it
+ *   and sets `error.session` (frozen ref, no token). Success reports
+ *   `telemetry.session = {persisted, session_sha256, cleanup}`; a failed removal
+ *   after a failure is `error.session_cleanup`. Without `session` the argv is the
+ *   legacy one. Internal test seam, not public API: `sessionRemover` replaces
+ *   removeSession (validated as a function).
+ * @param {{resume:object}} [opts.session] resume mode: `claude -p --resume <id>`
+ *   for a ref preserved by a `budget-exceeded-while-active` attempt. Before any
+ *   temp file or spawn, and always with `provider_called:false`: an invalid ref
+ *   (validateSessionRef/assertSessionId) is `claude-session-invalid`; an
+ *   ineligible phase is `claude-invalid-options`; a default account whose name
+ *   differs from `ref.account_name` is `claude-resume-account-mismatch`; a
+ *   child-env config dir or resolved cwd differing from the ref is
+ *   `claude-resume-config-mismatch`. None of these refusals (nor the later
+ *   model/thinking/effort/version refusals) removes the session: the recovery
+ *   stop owns that cleanup. The argv equals the start argv except for
+ *   `--resume <id>` in place of the persistence tokens (never `--session-id`,
+ *   `--no-session-persistence` or `--fork-session`) and the fixed
+ *   CLAUDE_RESUME_INSTRUCTION as `-p` (no prompt file; telemetry measures the
+ *   instruction). Once the attempt starts, the session is removed after every
+ *   outcome (at most one resume) and a failure never carries `error.session`;
+ *   a different system/init id is `claude-session-mismatch`. Success reports
+ *   `telemetry.session = {resumed:true, session_sha256, cleanup}`.
  * @returns {Promise<{candidate:object,metadata:object,telemetry:object}>} telemetry
  *   carries `model_observed` (the proven id) and `model_observed_source`
  *   (`claude-json-modelUsage`); `effort_applied` stays null.
@@ -644,17 +1072,69 @@ async function invokeClaudeSidecar(opts) {
   const terminateChild = typeof options.terminateChild === 'function'
     ? options.terminateChild : defaultTerminate;
   const childTimeoutMs = deriveChildTimeoutMs(parentTimeoutMs(options));
+  const phase = options.calibrationPhase || (['memory','review','fix','plan'].includes(options.resultProfile) ? options.resultProfile : options.resultProfile === 'preparation' ? 'artifacts' : 'execute');
+  // S05 session mode (none | persist | resume). Validated before the version
+  // probe, temp file or spawn: an ineligible phase or unknown mode is refused,
+  // never downgraded; an invalid resume ref never reaches argv.
+  const { mode: sessionModeName, ref: resumeRef } = sessionMode(options.session, phase);
+  const persistSession = sessionModeName === 'persist';
   // A missing prompt used to become '' and still spawn the real CLI with a
   // vacuous instruction, spending subscription quota to produce an invalid
-  // result (S03 review R5). Refuse before any temp file or child exists.
-  if (typeof options.prompt !== 'string' || !options.prompt.trim()) {
+  // result (S03 review R5). Refuse before any temp file or child exists. A
+  // resume sends only the fixed CLAUDE_RESUME_INSTRUCTION.
+  if (!resumeRef && (typeof options.prompt !== 'string' || !options.prompt.trim())) {
     throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.MISSING_PROMPT);
   }
   const resultContract = workerContract.contract(options.resultProfile || 'execute', options.resultSchema || options.schema);
-  const prompt = options.prompt + '\n\n' + resultContract.instruction('claude-cli');
-  const phase = options.calibrationPhase || (['memory','review','fix','plan'].includes(options.resultProfile) ? options.resultProfile : options.resultProfile === 'preparation' ? 'artifacts' : 'execute');
+  const prompt = resumeRef ? null : options.prompt + '\n\n' + resultContract.instruction('claude-cli');
   const onHeartbeat = typeof options.onHeartbeat === 'function' ? options.onHeartbeat : null;
   const heartbeatIntervalMs = normalizeHeartbeatIntervalMs(options.heartbeatIntervalMs);
+  const livenessIntervalMs = normalizeLivenessIntervalMs(options.livenessIntervalMs);
+  let progressIntervalMs;
+  try { progressIntervalMs = normalizeProgressIntervalMs(options.progressIntervalMs); }
+  catch { throw invalidLaunchOption(); }
+  const onLiveness = typeof options.onLiveness === 'function' ? options.onLiveness : null;
+  if (options.localProofFactory !== undefined && options.localProofFactory !== null
+    && typeof options.localProofFactory !== 'function') {
+    throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.INVALID_OPTIONS);
+  }
+  const localProofFactory = options.localProofFactory || null;
+  if (options.sessionRemover !== undefined && options.sessionRemover !== null
+    && typeof options.sessionRemover !== 'function') {
+    throw invalidLaunchOption();
+  }
+  const sessionRemover = options.sessionRemover || claudeSession.removeSession;
+  // The child env is built here (it was built right before spawn) so the
+  // session config dir is derived from the env the CLI actually receives.
+  const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
+  let sessionId = null, sessionRef = null;
+  if (persistSession) {
+    try {
+      sessionId = claudeSession.assertSessionId(claudeSession.newSessionId());
+      sessionRef = claudeSession.createSessionRef({ id: sessionId, accountName: account.name,
+        configDir: claudeSession.configDir(env, process.platform), cwd });
+    } catch { throw invalidLaunchOption(); }
+  } else if (resumeRef) {
+    // Same account (by name: the config dir does not change per account), same
+    // child-env config dir and same cwd as the session start, or no spawn.
+    if (account.name !== resumeRef.account_name) {
+      throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.RESUME_ACCOUNT_MISMATCH);
+    }
+    if (claudeSession.configDir(env, process.platform) !== resumeRef.config_dir || cwd !== resumeRef.cwd) {
+      throw preSpawnRefusal(CLAUDE_SIDECAR_REASON_CODES.RESUME_CONFIG_MISMATCH);
+    }
+    sessionId = resumeRef.id;
+    sessionRef = resumeRef;
+  }
+  let sessionCleaned = false;
+  const cleanupSession = () => {
+    if (!sessionRef || sessionCleaned) return null;
+    sessionCleaned = true;
+    return sessionCleanupReport(sessionRemover, sessionRef);
+  };
+  const localProofIntervalMs = normalizeLocalProofIntervalMs(options.localProofIntervalMs);
+  const proofRoots = localProofRoots(cwd, options);
+  const localProofIgnore = localProofIgnorePrefixes(options.localProofIgnore);
   const launchIdentity = claudeLaunchIdentity(options);
   const model = launchIdentity.model_sent;
   const effort = launchIdentity.effort;
@@ -712,45 +1192,53 @@ async function invokeClaudeSidecar(opts) {
   let primaryError = null;
 
   try {
-    tempDir = fs.mkdtempSync(path.join(cwd, TEMP_DIR_PREFIX));
-    const promptFile = path.join(tempDir, 'prompt.txt');
-    fs.writeFileSync(promptFile, prompt, { encoding: 'utf8', mode: 0o600 });
-
-    const instruction = 'Read the complete task prompt from this UTF-8 file: '
-      + `${JSON.stringify(promptFile)}. Follow it exactly and return the required structured_output JSON.`;
+    let instruction = CLAUDE_RESUME_INSTRUCTION;
+    let promptFile = null;
+    if (!resumeRef) {
+      tempDir = fs.mkdtempSync(path.join(cwd, TEMP_DIR_PREFIX));
+      promptFile = path.join(tempDir, 'prompt.txt');
+      fs.writeFileSync(promptFile, prompt, { encoding: 'utf8', mode: 0o600 });
+      instruction = 'Read the complete task prompt from this UTF-8 file: '
+        + `${JSON.stringify(promptFile)}. Follow it exactly and return the required structured_output JSON.`;
+    }
     if (Buffer.byteLength(instruction, 'utf8') > MAX_PROMPT_INSTRUCTION_BYTES) {
       throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
     }
 
     const { cmd, prefixArgs } = resolveClaudeCommand(sourceEnv);
-    const args = [...prefixArgs, ...(model ? ['--model', model] : []),
-      ...(options.readOnly && options.contextRoot && path.resolve(options.contextRoot) !== cwd ? ['--add-dir', path.resolve(options.contextRoot)] : []),
-      ...(Array.isArray(options.writableRoots) ? options.writableRoots.flatMap(root => ['--add-dir', path.resolve(root)]) : []),
-      ...(effort ? ['--effort', effort] : []),
-      '--no-session-persistence', '--disable-slash-commands',
-      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-      '--setting-sources', '', '--settings', CLAUDE_INVOCATION_SETTINGS,
-      '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-      '--json-schema', JSON.stringify(resultContract.schema),
-      '--tools', options.readOnly ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash',
-      ...(options.readOnly ? ['--allowedTools', 'Read,Glob,Grep'] : ['--permission-mode', 'acceptEdits']),
-      '-p', instruction];
+    const sessionTokens = resumeRef ? ['--resume', sessionId]
+      : persistSession ? ['--session-id', sessionId] : ['--no-session-persistence'];
+    const args = buildClaudeArgs({ prefixArgs, model, effort, options, cwd, resultContract, sessionTokens, instruction });
     // Observe the actual CLI packaging, after instruction/argv construction.
     // Account credentials exist only in env and never enter this measurement.
+    // A resume has no prompt file: its packaged context is the fixed instruction.
     require('./forge-attempt-telemetry').observeFinal(options, { cmd, args },
-      fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
-    const env = buildClaudeSidecarEnv(account, sourceEnv, process.platform);
-    const { observedModel, ...output } = await runOwnedChild({
+      resumeRef ? instruction : fs.readFileSync(promptFile, 'utf8'), 'claude-cli');
+    const { observedModel, observedSessionId, ...output } = await runOwnedChild({
       cmd, args, cwd, env, timeoutMs: childTimeoutMs, terminateChild,
       onHeartbeat, heartbeatIntervalMs, validateCandidate: options.validateCandidate, signal: options.signal,
       requestedModel: model, resultContract, onProgress: options.onProgress, clock: options.monotonicClock,
-      calibration: calibrationApi.read({model,effort:effort || 'medium',phase},options.calibrationOptions),
+      calibration: readCalibration({ model, effort: effort || 'medium', phase }, options.calibrationOptions),
+      onLiveness, livenessIntervalMs, livenessPolicy: options.livenessPolicy,
+      proofRoots, localProofIgnore, localProofFactory, localProofIntervalMs, progressIntervalMs,
     });
-    const proposal = calibrationApi.propose({model,effort:effort || 'medium',phase},output.metadata.observation,options.calibrationOptions);
+    // The stream only confirms the Forge-generated id; it never replaces it.
+    if (sessionRef && observedSessionId !== sessionId) {
+      throw sidecarError(CLAUDE_SIDECAR_REASON_CODES.SESSION_MISMATCH);
+    }
+    // Accepted attempts propose v2 samples; commitAccepted dispatches by version.
+    const proposal = calibrationV2.propose({ model, effort: effort || 'medium', phase }, output.metadata.observation);
+    // A failed removal is reported, never turned into a failure of a valid result.
+    const session = sessionRef ? Object.freeze({ [resumeRef ? 'resumed' : 'persisted']: true,
+      session_sha256: claudeSession.sessionDigest(sessionId), cleanup: cleanupSession() }) : null;
     return { ...output, telemetry: Object.freeze({ ...telemetryBase,
       model_observed: observedModel, model_observed_source: OBSERVED_MODEL_SOURCE, observation: output.metadata.observation,
-      calibration_proposal: proposal }) };
+      calibration_proposal: proposal, ...(session ? { session } : {}) }) };
   } catch (error) {
+    const observedSessionId = error && typeof error === 'object' ? error.observedSessionId : undefined;
+    if (error && typeof error === 'object') delete error.observedSessionId;
+    const awaitExit = error && typeof error === 'object' ? error.awaitExit : undefined;
+    if (error && typeof error === 'object') delete error.awaitExit;
     // Membership in the frozen set, not truthiness: mkdtempSync/writeFileSync
     // above throw native errors that already carry a `.code` (EACCES, ENOSPC,
     // ENOTDIR) and used to escape unwrapped, with a code outside the contract
@@ -759,6 +1247,28 @@ async function invokeClaudeSidecar(opts) {
     primaryError = error && typeof error.code === 'string'
       && CLAUDE_SIDECAR_REASON_CODE_SET.has(error.code)
       ? error : sidecarError(CLAUDE_SIDECAR_REASON_CODES.PROMPT_IO);
+    if (sessionRef) {
+      // Only an active stream that hit the safety ceiling under the confirmed
+      // id keeps its session, for the single same-session resume (S05). A
+      // resume never keeps it: at most one resume per unit.
+      if (!resumeRef && primaryError.code === CLAUDE_SIDECAR_REASON_CODES.BUDGET_EXCEEDED
+        && observedSessionId === sessionId) {
+        sessionCleaned = true;
+        primaryError.session = sessionRef;
+      } else if (typeof awaitExit === 'function'
+        && await awaitExit(Number.isSafeInteger(options.terminationWaitMs) && options.terminationWaitMs >= 0
+          ? options.terminationWaitMs : TERMINATION_WAIT_MS) !== true) {
+        // The owned CLI may still be writing: removing now could be undone by it.
+        // Defer to recovery, which removes the session once the process is stopped.
+        sessionCleaned = true;
+        primaryError.session = sessionRef;
+        primaryError.session_cleanup = Object.freeze({ ok: false, pending: true,
+          refused: Object.freeze([]), errors: Object.freeze([]) });
+      } else {
+        const cleanup = cleanupSession();
+        if (cleanup && !cleanup.ok) primaryError.session_cleanup = cleanup;
+      }
+    }
     throw primaryError;
   } finally {
     if (tempDir) {
@@ -779,8 +1289,10 @@ module.exports = {
   CLAUDE_SIDECAR_ENV_ALLOWLIST,
   MAX_CAPTURE_BYTES_PER_STREAM,
   MAX_PROMPT_INSTRUCTION_BYTES,
+  CLAUDE_RESUME_INSTRUCTION,
   TIMEOUT_GRACE_MS,
   TEMP_DIR_PREFIX,
+  DEFAULT_PROGRESS_INTERVAL_MS,
   buildClaudeSidecarEnv,
   buildClaudeProbeEnv,
   probeClaudeVersion,

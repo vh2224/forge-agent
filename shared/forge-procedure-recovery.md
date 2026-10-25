@@ -3,7 +3,10 @@
 Load this mandatory procedure before the corresponding action.
 Keep scope, phase, unit IDs, owner and physical CODE_DIR roots unchanged.
 Keep primary_root_id, claim generation, gates and original explicit model/tier/effort immutable in history.
-Never execute inline to bypass a refused route.
+Never silently replace a refused route with host execution. Explicitly authorized
+Forge maintenance follows shared/forge-direct-actions.md, preserves the original
+reservation/history and requires reconciled roots, claims, gates and independent
+review. Record actual host edits separately; maintenance does not complete recovery.
 Inspect the real process and durable receipt before considering another attempt.
 A replay-eligible saved response uses canonical replay/publication without a provider call.
 Check result identity, input fingerprints and protected metadata before replay.
@@ -26,9 +29,10 @@ Revalidate the personal authority source with the live canonical adapter.
 Persist only its reference; opaque recovery capabilities are live, scoped objects.
 Never ask again for a routing permission already granted by standing authority.
 Functional pending IDs remain pending through restart and block dependent work.
-The original cumulative additional-sidecar deadline is 60000ms, with reservations.
-Do not renew that historical clock on restart, correction or native fallback.
-An authorized native exception after expiry never permits another sidecar wait.
+Recovery state v2 has no cumulative clock: each additional sidecar receives the full
+tier safety ceiling from ceilingFromRoute (scripts/forge-worker-timeout.js), never a remainder.
+A v1 state is migrated explicitly to v2; its started_at/deadline_at remain inert history.
+Absence of a deadline never authorizes a candidate, fallback or inline execution.
 Preserve sanitized attempt telemetry, reason_code/layer and receipt references.
 Unknown provider contact or model observation remains unknown.
 Pending context ordering remains peek, file, durable handoff, then exact-record ack.
@@ -62,6 +66,8 @@ Restart must reattest history/roots through live callbacks and revalidate standi
 Previously resolved answers retain their IDs and exact text; the live host reattests their independent
 answer source on restart. Persisted resolved flags alone never answer a functional question.
 Reject transplanted transition records even when an adjacent hash was recomputed.
-Retain pending IDs, attempts, reservations, destination exclusions and original 60000ms clocks.
-Changing effort/tier never re-enables an already attempted destination. After expiry, only
-an untried native candidate with a live exception and real compatible invocation may start.
+Retain pending IDs, attempts, reservations, destination exclusions and original started_at.
+Changing effort/tier never re-enables an already attempted destination. Termination comes from
+the finite candidate list, destination exclusions, at most one corrected retry per destination,
+the single silence retry and expiry of the canonical exception. A native candidate still needs
+a live exception and a real compatible invocation.

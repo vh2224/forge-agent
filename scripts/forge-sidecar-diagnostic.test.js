@@ -14,10 +14,72 @@ const token = 'fixture-secret-never-log';
 accounts.resolveLaunch = () => ({ name: 'fixture', token });
 const claude = require('./forge-claude-sidecar');
 const unit = require('./forge-unit-sidecar');
-const { diagnostic, observation } = require('./forge-sidecar-diagnostic');
+const { diagnostic, observation, progressLine, readProgressLine } = require('./forge-sidecar-diagnostic');
 const { resolveDispatch } = require('./forge-dispatch-resolve');
 const { loadProcedureContext } = require('./forge-procedure-context');
 const sourceRoot = path.resolve(__dirname, '..');
+test('observation silence preserves the v1 snapshot and serialized bytes', () => {
+  for (const dimension of ['initial', 'gap']) {
+    for (const threshold of [120000, 300000, Number.MAX_SAFE_INTEGER - 1]) {
+      const snapshot = { dimension, window_ms: threshold + 1, threshold_ms: threshold,
+        policy: 'claude-silence-v1', source: 'persisted-calibration', cause: 'indeterminate' };
+      const result = observation({ silence: { ...snapshot, raw: token } });
+      assert.deepEqual(result.silence, snapshot);
+      assert.equal(JSON.stringify(result), JSON.stringify({ ...observation(), silence: snapshot }));
+      assert.deepEqual(observation(result), result);
+    }
+  }
+  assert(!Object.hasOwn(observation({ silence: { dimension: 'gap', window_ms: 120000,
+    threshold_ms: 119999, policy: 'claude-silence-v1', source: 'persisted-calibration',
+    cause: 'indeterminate' } }), 'silence'));
+});
+
+test('observation silence accepts liveness defaults and tightened thresholds for both sources', () => {
+  for (const source of ['locked-default', 'persisted-calibration']) {
+    for (const [dimension, threshold_ms, window_ms] of [
+      ['initial', 60000, 60001], ['gap', 240000, 241000], ['initial', 1, 2], ['gap', 1, 2],
+    ]) {
+      const silence = { dimension, window_ms, threshold_ms, policy: 'forge-liveness-v1',
+        source, cause: 'indeterminate' };
+      const result = observation({ silence: { ...silence, raw: token } });
+      assert.deepEqual(result, { ...observation(), silence });
+      assert.deepEqual(Object.keys(result.silence), ['dimension', 'window_ms', 'threshold_ms', 'policy', 'source', 'cause']);
+      assert.deepEqual(observation(result), result);
+      assert.deepEqual(diagnostic('anomalous-silence', { observation: result }).observation, result);
+    }
+  }
+});
+
+test('observation silence rejects unknown vocabulary, invalid numbers and thresholds above dimension ceilings', () => {
+  const valid = { dimension: 'gap', window_ms: 400000, threshold_ms: 240000,
+    policy: 'forge-liveness-v1', source: 'locked-default', cause: 'indeterminate' };
+  for (const change of [
+    { threshold_ms: 300000 }, { threshold_ms: 240001 },
+    { dimension: 'initial', threshold_ms: 60001 },
+    { policy: 'forge-liveness-v2' }, { policy: 'claude-silence-v2' },
+    { source: 'invented' }, { cause: 'timeout' }, { cause: null }, { dimension: 'other' },
+    { threshold_ms: 0 }, { threshold_ms: -1 }, { threshold_ms: 1.5 },
+    { threshold_ms: '1' }, { threshold_ms: NaN }, { threshold_ms: Infinity },
+    { threshold_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { window_ms: 240000 }, { window_ms: 239999 }, { window_ms: '400000' },
+    { window_ms: NaN }, { window_ms: Infinity }, { window_ms: 400000.5 },
+    { window_ms: Number.MAX_SAFE_INTEGER + 1 },
+    { policy: 'claude-silence-v1' },
+  ]) {
+    assert.deepEqual(observation({ silence: { ...valid, ...change } }), observation(), JSON.stringify(change));
+  }
+});
+
+test('observation silence adds no keys to an observation without silence', () => {
+  assert.deepEqual(Object.keys(observation({ raw: token })), [
+    'version', 'elapsed_ms', 'transport_ms', 'verification_ms', 'stdout_bytes', 'stderr_bytes',
+    'event_count', 'remote_event_count', 'first_remote_ms', 'last_remote_ms', 'initial_sample_ms',
+    'gap_sample_ms', 'remote_silence_ms', 'input_tokens', 'output_tokens', 'cache_read_tokens',
+    'cache_write_tokens', 'phase', 'cost_usd', 'cost_source', 'remote_source', 'usage_source',
+    'gap_suspended', 'process_exit_observed', 'denials',
+  ]);
+});
+
 test('calibration read outcome survives shared observation and failure projection without open fields', () => {
   const calibration = { diagnostic: 'calibration-unavailable', initial: 'calibrating', gap: 'calibrated' };
   const input = { calibration: { ...calibration, raw: token }, raw: token };
@@ -434,4 +496,89 @@ test('interrupted publication preserves validated receipt and resumes without an
   assert.equal(readJson(r.resultFile).diagnostic.reason, 'publication-failed');
   assert.equal(readJson(r.resultFile + '.receipt.json').phase, 'ready');
   assert.equal(fs.readFileSync(path.join(r.cwd, 'calls.txt'), 'utf8'), 'call\n');
+});
+
+test('budget-exceeded-while-active is a closed transport diagnostic, not adapter-failed', () => {
+  const value = diagnostic('budget-exceeded-while-active', { duration_ms: 12 });
+  assert.equal(value.stage, 'transport');
+  assert.equal(value.reason, 'budget-exceeded-while-active');
+  assert.equal(value.duration_ms, 12);
+  assert.equal(diagnostic('not-a-reason').reason, 'adapter-failed');
+});
+
+const beat = { version: 1, state: 'slow-suspect', since_ms: 120025, reason: 'silence' };
+
+test('observation liveness block is preserved when valid, with optional closed termination', () => {
+  assert.deepEqual(observation({ liveness: beat }).liveness, beat);
+  for (const termination of ['dead-start', 'dead-silence', 'budget-exceeded-while-active']) {
+    const dead = { ...beat, state: 'dead', termination };
+    assert.deepEqual(observation({ liveness: dead }).liveness, dead);
+  }
+  assert(!('termination' in observation({ liveness: beat }).liveness));
+  assert.deepEqual(observation(observation({ liveness: beat })).liveness, beat);
+});
+
+test('observation liveness block omits invalid input and keeps absent output byte-identical', () => {
+  const base = { elapsed_ms: 5, event_count: 2, raw: token };
+  const baseline = JSON.stringify(observation(base));
+  for (const bad of [undefined, null, 'slow-suspect', 7, [beat], { ...beat, state: 'sleeping' },
+    { ...beat, version: 2 }, { ...beat, version: '1' }, { state: 'working' }]) {
+    const result = observation({ ...base, liveness: bad });
+    assert(!('liveness' in result), JSON.stringify(bad));
+    assert.equal(JSON.stringify(result), baseline);
+  }
+  assert.deepEqual(Object.keys(observation({ ...base, liveness: beat })).slice(0, -1), Object.keys(observation(base)));
+});
+
+test('observation liveness block coerces fields and never leaks extras', () => {
+  const sentinel = 'sentinel-secret-/path/prompt';
+  const result = observation({ liveness: { ...beat, reason: sentinel, since_ms: -1, termination: sentinel,
+    fingerprint: sentinel, detail: sentinel, text: sentinel } }).liveness;
+  assert.deepEqual(result, { version: 1, state: 'slow-suspect', since_ms: null, reason: null });
+  assert.equal(observation({ liveness: { ...beat, since_ms: 1.5 } }).liveness.since_ms, null);
+  assert.equal(observation({ liveness: { ...beat, since_ms: '3' } }).liveness.since_ms, null);
+  assert(!JSON.stringify(observation({ liveness: { ...beat, fingerprint: sentinel, detail: sentinel } })).includes(sentinel));
+});
+
+test('readProgressLine round-trips progressLine and never throws', () => {
+  for (const input of [{ elapsed_ms: 9 }, { elapsed_ms: 9, liveness: beat },
+    { liveness: { ...beat, state: 'dead', termination: 'dead-silence' } }]) {
+    assert.deepEqual(readProgressLine(progressLine(input)), observation(input));
+  }
+  assert.deepEqual(readProgressLine('[forge-sidecar-progress] ' + JSON.stringify({ liveness: beat })).liveness, beat);
+  for (const bad of ['', 'plain text', '[forge-sidecar-progress]{}', '[forge-sidecar-progress] {nope',
+    '[forge-sidecar-progress] []', '[forge-sidecar-progress] null', '[forge-sidecar-progress] 5',
+    undefined, null, 7, {}, ['x']]) {
+    assert.equal(readProgressLine(bad), null, String(bad));
+  }
+});
+
+test('observation silence accepts claude-silence-v2 only inside [floor, default]', () => {
+  const v2 = (dimension, threshold, extra = {}) => ({ dimension, window_ms: threshold + 1, threshold_ms: threshold,
+    policy: 'claude-silence-v2', source: 'persisted-calibration', cause: 'indeterminate', ...extra });
+  for (const [dimension, limits] of [['initial', [30000, 45000, 60000]], ['gap', [120000, 215000, 240000]]]) {
+    for (const threshold of limits) for (const source of ['persisted-calibration', 'model-fallback']) {
+      const snapshot = v2(dimension, threshold, { source });
+      const result = observation({ silence: { ...snapshot, raw: token } });
+      assert.deepEqual(result.silence, snapshot);
+      assert.deepEqual(readProgressLine(progressLine({ silence: snapshot })).silence, snapshot);
+    }
+  }
+  const refused = [v2('gap', 240001), v2('gap', 119999), v2('initial', 29999), v2('initial', 60001),
+    v2('gap', 215000, { source: 'locked-default' }), v2('gap', 215000, { cause: 'measured' }),
+    v2('gap', 215000, { window_ms: 215000 }), v2('gap', 215000, { window_ms: 1000 }),
+    v2('gap', 215000.5), v2('gap', 215000, { dimension: 'other' })];
+  for (const bad of refused) assert(!('silence' in observation({ silence: bad })), JSON.stringify(bad));
+});
+
+test('observation v2 branch does not change v1 or liveness-v1 projections', () => {
+  const v1 = { dimension: 'gap', window_ms: 130001, threshold_ms: 130000, policy: 'claude-silence-v1',
+    source: 'persisted-calibration', cause: 'indeterminate' };
+  assert.deepEqual(observation({ silence: v1 }).silence, v1);
+  const live = { dimension: 'gap', window_ms: 100001, threshold_ms: 100000, policy: 'forge-liveness-v1',
+    source: 'persisted-calibration', cause: 'indeterminate' };
+  const liveOut = observation({ silence: live }).silence;
+  assert.equal(liveOut.policy, live.policy);
+  assert.deepEqual(Object.keys(observation({ calibration: { initial: 'calibrated', gap: 'calibrated' } }).calibration),
+    ['diagnostic', 'initial', 'gap']);
 });

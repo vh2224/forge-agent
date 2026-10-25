@@ -6,6 +6,15 @@ allowed-tools: Read, Write, Edit, Bash, Agent, Skill, TaskCreate, TaskUpdate, Ta
 
 Nos despachos sidecar, siga `shared/forge-bidirectional-sidecar.md § Identidade do sidecar exibida na conversa`: anuncie a solicitação pré-disparo e repasse literalmente as linhas `[forge-sidecar]` do stderr.
 
+## Direct execution and maintenance boundary
+
+Apply `shared/forge-direct-actions.md` to eligible direct actions and explicitly
+authorized repairs of Forge itself. Stop/refusal paths below stop that dispatch;
+they do not forbid the separately authorized maintenance path. Preserve original
+routes/reservations, reconciled roots, claims, gates and independent review, and
+record the actual executor. Neither a refusal nor standing routing recovery
+permission alone authorizes host execution. Never fabricate worker delivery.
+
 ## Personal selection - before any operational load
 
 For natural-language UAT feedback, apply `shared/forge-direct-actions.md` before
@@ -1262,7 +1271,7 @@ a newly allowed resolver verdict. Do not read this file on a successful native p
 contract (authoritative, unchanged): `shared/forge-dispatch.md § Worker Engine Routing`.
 
 Non-negotiables that bind even before the spec is read (routing contract, CLAUDE.md):
-- NEVER execute the unit inline in the main context, and NEVER substitute
+- Outside authorized Forge maintenance in `shared/forge-direct-actions.md`, do not execute the routed unit in the main context. NEVER substitute
   a canonical `Agent("forge-executor")`/`Agent("forge-planner")` call for an already-resolved
   `sidecar` route. Conversely, a resolved `native` route MUST use that canonical form even when
   `DISPATCH_ENGINE == codex`; the renderer owns its projection to `spawn_agent()`.
@@ -1415,7 +1424,8 @@ node "$FORGE_SCRIPTS_DIR/forge-dispatch-event.js" --route-json "$ROUTE_JSON" \
    > ⚠ Falha ao despachar subagente para `{unit_type} {unit_id}`: `{kind}` (não surfaçar `errorMsg`)
    > Execute `/forge-auto` para tentar novamente quando a API estiver disponível.
 
-Executing work inline bypasses context isolation and is NEVER acceptable as a fallback.
+Host execution is not an automatic fallback. Explicitly authorized Forge maintenance
+follows `shared/forge-direct-actions.md` and records the actual executor separately.
 
 **Heartbeat — clear worker field** after Agent() returns (M005+ pattern):
 ```bash
@@ -2079,4 +2089,5 @@ Use `shared/forge-dispatch.md ? Authorized continuity per unit` for the actual
 adapter entrypoints and runtime callbacks. The loaded recovery procedure owns the
 checklist; personal and interaction contracts still own live authority and questions.
 Keep the existing unit/roots/claims, receipt, historical deadline and pending IDs.
-No inline fallback or preference rewrite is authorized by this composition.
+This composition alone authorizes neither host execution nor preference rewrites.
+Separately authorized Forge maintenance follows `shared/forge-direct-actions.md`.

@@ -1,0 +1,7 @@
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"synthetic-message","role":"assistant"}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_synthetic","name":"SyntheticRead","input":{}}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"synthetic-private-path\",\"description\":\"synthetic-private-description\",\"options\":{\"mode\":\"synthetic-private-mode\"}}"}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"assistant","message":{"id":"synthetic-message","role":"assistant","content":[{"type":"tool_use","id":"toolu_synthetic","name":"SyntheticRead","input":{"path":"synthetic-private-path","description":"synthetic-private-description","options":{"mode":"synthetic-private-mode"}}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_synthetic","content":"synthetic-private-result"}]},"parent_tool_use_id":null,"session_id":"synthetic-session"}
+{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"done"}}

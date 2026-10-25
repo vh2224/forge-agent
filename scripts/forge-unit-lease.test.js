@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const lease = require('./forge-unit-lease.js');
+const { MAX_PROTECTED_WINDOW_MS } = require('./forge-worker-timeout.js');
 
 function temporary() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'forge unit lease espaço-測試-'));
@@ -455,6 +456,7 @@ async function main() {
     assert.throws(() => lease.assertTerminalGuard(escaped, cwd, unit), /guard|GUARD/i);
     assert.throws(() => lease.assertTerminalGuard({}, cwd, unit), /guard|GUARD/i);
   }));
+  await test('protected window covers the standard tier ceiling plus grace', testProtectedWindowCoversTierCeiling);
   console.log('forge-unit-lease tests passed');
 }
 
@@ -476,7 +478,9 @@ function testProtectedWindow() {
     assert.strictEqual(window.close().ok, false);
     assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes, 'expiry and close must never revive ownership');
     assert.strictEqual(open().reason, 'expired-awaiting-grace');
-    for (const durationMs of [0, -1, Infinity, 300001]) assert.throws(() => lease.openProtectedWindow(cwd, unit, 'held', held.generation, { durationMs }), /duration/);
+    // The bound follows the largest tier safety ceiling plus grace (was 300000).
+    assert.strictEqual(MAX_PROTECTED_WINDOW_MS, 5460000);
+    for (const durationMs of [0, -1, Infinity, 1.5, MAX_PROTECTED_WINDOW_MS + 1]) assert.throws(() => lease.openProtectedWindow(cwd, unit, 'held', held.generation, { durationMs }), /duration/);
     now = 236;
     const replacement = lease.acquire(cwd, unit, fixtureOptions(now, 'claude', { ownerToken: 'replacement' }));
     assert(replacement.ok);
@@ -487,6 +491,30 @@ function testProtectedWindow() {
     const active = lease.openProtectedWindow(cwd, unit, replacement.owner_token, replacement.generation, { now: () => now, durationMs: 50 });
     lease.release(cwd, unit, replacement.owner_token, replacement.generation);
     assert.strictEqual(active.heartbeat().ok, false, 'release/replacement invalidates a live handle');
+  });
+}
+
+function testProtectedWindowCoversTierCeiling() {
+  sandbox(cwd => {
+    let now = 1000;
+    const unit = 'execute-task/long-window', held = lease.acquire(cwd, unit, fixtureOptions(now, 'claude', { ownerToken: 'held' }));
+    assert(held.ok);
+    const before = JSON.parse(fs.readFileSync(lease.leaseFile(cwd, unit), 'utf8')).expires_at;
+    const durationMs = 1800000 + 60000; // standard ceiling + grace
+    const window = lease.openProtectedWindow(cwd, unit, 'held', held.generation, { now: () => now, durationMs });
+    assert(window.ok);
+    assert.strictEqual(window.deadline_at, 1000 + durationMs);
+    const record = JSON.parse(fs.readFileSync(lease.leaseFile(cwd, unit), 'utf8'));
+    assert.strictEqual(record.expires_at, Math.max(before, 1000 + durationMs));
+    now = 1000 + 1800000;
+    assert.strictEqual(window.check().reason, 'lease-active');
+    lease.assertProtectedWindow(window, cwd, unit);
+    now = 1000 + 1860000;
+    assert.strictEqual(window.check().reason, 'owner-mismatch');
+    assert.throws(() => lease.assertProtectedWindow(window, cwd, unit), /window-invalid/);
+    const max = lease.openProtectedWindow(cwd, unit, 'held', held.generation, { now: () => 1000, durationMs: MAX_PROTECTED_WINDOW_MS });
+    assert(max.ok, 'the largest tier ceiling plus grace is accepted');
+    max.close();
   });
 }
 

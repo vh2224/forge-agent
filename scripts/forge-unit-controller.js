@@ -401,6 +401,32 @@ function discoverInventory(cwd, milestone, current) {
     };
   });
   const roadmapComplete = slices.length > 0 && slices.every(item => item.checked);
+  // M###-SUMMARY.md is cumulative (each complete-slice appends to it), so it
+  // proves nothing about the milestone close. Proof is the controller's own
+  // committed complete-milestone transition, the ledger fragment written by
+  // complete-milestone, or a global LEDGER.md heading (`## <id>` or the
+  // pre-fragment `## <id> — <title>` form). The ledger write is non-critical
+  // in the completer, so the transition keeps a failed write from re-selecting
+  // complete-milestone forever.
+  const ledgerFragment = path.join(cwd, '.gsd', 'ledger', `${milestone}.md`);
+  const ledgerGlobal = path.join(cwd, '.gsd', 'LEDGER.md');
+  const ledgerHeading = new RegExp(`^## ${milestone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s+—.*)?\\s*$`, 'm');
+  const closeUnit = `complete-milestone/${milestone}`;
+  const closeCommitted = () => {
+    const file = eventsFile(cwd, milestone);
+    if (!fs.existsSync(file)) return false;
+    return fs.readFileSync(file, 'utf8').split(/\r?\n/).some(line => {
+      if (!line.includes(closeUnit)) return false;
+      try {
+        const event = JSON.parse(line);
+        return event.event === 'unit-transition' && event.action === 'complete'
+          && event.unit === closeUnit && event.outcome === 'succeeded';
+      } catch { return false; }
+    });
+  };
+  const milestoneClosed = fs.existsSync(ledgerFragment)
+    || (fs.existsSync(ledgerGlobal) && ledgerHeading.test(fs.readFileSync(ledgerGlobal, 'utf8')))
+    || closeCommitted();
   return {
     roadmap_exists: !!roadmapFile,
     context_exists: !!firstExisting(milestoneDir, name => name.endsWith('-CONTEXT.md')),
@@ -408,7 +434,7 @@ function discoverInventory(cwd, milestone, current) {
     active_slice: current.active_slice && current.active_slice !== '—' ? current.active_slice : null,
     slices,
     dependency_validation: true,
-    milestone_complete: roadmapComplete && !!firstExisting(milestoneDir, name => name.endsWith('-SUMMARY.md')),
+    milestone_complete: roadmapComplete && milestoneClosed,
   };
 }
 function select(cwd, request, options) {
