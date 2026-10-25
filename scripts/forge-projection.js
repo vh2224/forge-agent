@@ -40,6 +40,7 @@ const decisionsMod = require('./forge-decisions');
 const memoryMod    = require('./forge-memory');
 // Single interpretation of memory facts/stats (shared/forge-memory-evidence.md).
 const memoryEvidence = require('./forge-memory-evidence');
+const diagnostic = require('./forge-memory-diagnostic.js');
 const checkerMod   = require('./forge-checker-memory');
 const storeStateMod = require('./forge-store-state');
 const itemsMod     = require('./forge-items');
@@ -661,6 +662,10 @@ function foldMemoryFragments(fragments) {
 function projectMemoryState(cwd, opts) {
   const fragments = memoryMod.listFragments(cwd);
   const nowMs = opts && Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
+  const tracing = opts && opts.diagnostic === true;
+  let orphansShadowed = 0;
+  let prunedExcluded = 0;
+  let supersededExcluded = 0;
 
   // mem_id is fragment-local: independent extractors commonly start at MEM001.
   // Key runtime state by (unitId, mem_id) so facts and stats cannot bleed
@@ -737,7 +742,10 @@ function projectMemoryState(cwd, opts) {
   // Process the fallback bucket last so valid fragments win regardless of the
   // platform's localeCompare ordering for uppercase vs lowercase filenames.
   for (const { entry, mid, unitId } of pendingOrphans) {
-    if (validRawIds.has(mid)) continue;
+    if (validRawIds.has(mid)) {
+      if (tracing) orphansShadowed++;
+      continue;
+    }
     const identity = memoryIdentity(unitId, mid);
     factMap.set(identity, {
       ...entry,
@@ -750,7 +758,13 @@ function projectMemoryState(cwd, opts) {
   // Apply time-based decay (once, from the undecayed state) and filter pruned.
   const active = [];
   for (const [, entry] of factMap) {
-    if (entry.pruned) continue;
+    if (entry.pruned) {
+      if (tracing) {
+        prunedExcluded++;
+        if (entry.evidence.superseded === true) supersededExcluded++;
+      }
+      continue;
+    }
     const decayed = decayConfidence(entry.confidence, entry.lastAccessTs, nowMs);
     active.push({ ...entry, confidence: decayed, base_confidence: entry.confidence });
   }
@@ -772,6 +786,11 @@ function projectMemoryState(cwd, opts) {
       replayed: folded.replayed,
       duplicates: folded.duplicates,
       skipped_fragments: skipped,
+      ...(tracing ? { selection_trace: {
+        pruned_excluded: prunedExcluded,
+        superseded_excluded: supersededExcluded,
+        orphans_shadowed: orphansShadowed,
+      } } : {}),
     },
   };
 }
@@ -857,6 +876,10 @@ function diagnosticCounts(diagnostics) {
 
 function queryMemoryEntries(cwd, opts) {
   opts = opts || {};
+  if (opts.diagnostic !== undefined && opts.diagnostic !== false && opts.diagnostic !== true) {
+    throw new Error('Invalid memory diagnostic');
+  }
+  const tracing = opts.diagnostic === true;
   // Module boundary: forge-memory.queryRelevant (← forge-prompt.js:306) and the
   // `--query`/`--select` CLI both land here. Object envelope → additive fields.
   const schema = guardReadHere(cwd);
@@ -868,6 +891,9 @@ function queryMemoryEntries(cwd, opts) {
 
   const execution = unitType === 'execute-task' || unitType === 'execute-loose-task' || unitType === 'review-fix';
   const planning = /^(?:plan|research|discuss)-/.test(unitType);
+  const minimumOverlap = terms.size === 0 ? 0 : execution ? Math.min(2, terms.size) : planning ? 1 : 0;
+  const profile = execution ? 'execution' : planning ? 'planning' : 'neutral';
+  let belowMinimumOverlap = 0;
   const preferred = execution
     ? new Map([['gotcha', 3], ['convention', 2], ['architecture', 1], ['pattern', 1]])
     : planning
@@ -879,8 +905,10 @@ function queryMemoryEntries(cwd, opts) {
   for (const entry of state.entries) {
     const factTerms = queryTerms(`${entry.fact.text || ''} ${entry.fact.source_unit || ''}`);
     const matched = [...terms].filter(term => factTerms.has(term)).sort();
-    const minimumOverlap = terms.size === 0 ? 0 : execution ? Math.min(2, terms.size) : planning ? 1 : 0;
-    if (matched.length < minimumOverlap) continue;
+    if (matched.length < minimumOverlap) {
+      if (tracing) belowMinimumOverlap++;
+      continue;
+    }
 
     const category = String(entry.fact.category || 'unknown').toLowerCase();
     const quality = entry.confidence * Math.max(1, entry.hits);
@@ -897,6 +925,7 @@ function queryMemoryEntries(cwd, opts) {
   const lines = [];
   let chars = 0;
   let truncated = ranked.length > limit;
+  const textTruncated = tracing ? new Set() : null;
 
   for (const entry of ranked.slice(0, limit)) {
     const category = inlineLabel(entry.fact.category, 'unknown');
@@ -913,6 +942,7 @@ function queryMemoryEntries(cwd, opts) {
 
     let selectedText = fullText;
     if (line.length > remaining) {
+      if (tracing) textTruncated.add(selected.length);
       selectedText = fullText.slice(0, Math.max(0, remaining - prefix.length - 1)).trimEnd() + '…';
       line = prefix + selectedText;
       truncated = true;
@@ -955,6 +985,44 @@ function queryMemoryEntries(cwd, opts) {
   if (schema.partial) {
     result.schema_partial = true;
     result.schema_warning = schema.warning;
+  }
+  if (tracing) {
+    try {
+      const emitted = selected.length;
+      const candidates = [];
+      for (let i = 0; i < Math.min(ranked.length, diagnostic.LIMITS.max_candidates); i++) {
+        const entry = ranked[i];
+        const category = String(entry.fact.category || 'unknown').toLowerCase();
+        const categoryWeight = preferred.get(category) || 0;
+        const reasons = [i >= limit ? 'rank-limit' : i < emitted ? 'included' : 'ranking-budget'];
+        if (textTruncated.has(i)) reasons.push('ranking-text-truncated');
+        candidates.push({
+          rank: i, identity: entry.identity, category, reasons,
+          tie_break: i > 0 && entry.score === ranked[i - 1].score ? 'identity' : null,
+          evidence_origin: entry.evidence.origin, hits_basis: entry.evidence.hits_basis,
+          components: {
+            overlap_count: entry.matched.length, overlap_points: entry.matched.length * 100,
+            category_weight: categoryWeight, category_points: categoryWeight * 10,
+            quality: entry.confidence * Math.max(1, entry.hits), confidence: entry.confidence,
+            base_confidence: entry.base_confidence, hits: entry.hits, score: entry.score,
+          },
+        });
+      }
+      result.diagnostic = diagnostic.boundDiagnostic({
+        stages: {
+          source: { availability: 'observed', provider: 'canonical', store: 'unknown', schema_partial: schema.partial === true },
+          projection: { availability: 'observed', evidence_model_version: state.model_version,
+            ...state.diagnostics.selection_trace, skipped_fragments: state.diagnostics.skipped_fragments.length },
+          ranking: { availability: 'observed', profile, minimum_overlap: minimumOverlap,
+            query_term_count: terms.size, examined: state.entries.length, eligible: ranked.length,
+            below_minimum_overlap: belowMinimumOverlap, limit, max_tokens: maxTokens },
+          context: { availability: 'unavailable', reason: 'not-reached' },
+        },
+        candidates, total_candidates: ranked.length,
+      });
+    } catch (_) {
+      result.diagnostic = diagnostic.unavailableDiagnostic('diagnostic-failed');
+    }
   }
   return result;
 }

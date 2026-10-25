@@ -1149,6 +1149,7 @@ function queryRelevant(query) {
     limit: query.limit,
     maxTokens: query.maxTokens,
     nowMs: query.nowMs,
+    ...(query.diagnostic !== undefined ? { diagnostic: query.diagnostic } : {}),
   });
 }
 
