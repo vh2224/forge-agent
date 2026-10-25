@@ -1,6 +1,6 @@
 'use strict';
 // A selector runs exactly one recovery scenario; no arguments retain full coverage.
-const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat'];
+const scenarioSelectors = ['--delivery-publication-limits', '--recovery-contracts', '--pre-spawn-sidecar', '--pre-spawn-native', '--no-progress-event', '--owner-event-reconcile', '--ceiling-route', '--claude-session', '--claude-resume', '--liveness-heartbeat', '--memory-evidence'];
 const scenarioArgs = process.argv.slice(2);
 if (scenarioArgs.length > 1 || (scenarioArgs.length === 1 && !scenarioSelectors.includes(scenarioArgs[0]))) {
   console.error(`Usage: node forge-unit-sidecar.test.js [${scenarioSelectors.join('|')}]`);
@@ -1544,6 +1544,255 @@ async function claudeResumeContracts() {
     fs.rmSync(work, { recursive: true, force: true });
   }
 }
+// Memory extraction contract v2 through the real owner acceptance path: schema
+// selection, owner-derived evidence bindings, legacy v1 ready receipts,
+// deferred publication and replay without any provider call.
+async function memoryEvidenceContracts() {
+  const fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
+  const { spawnSync } = require('child_process');
+  const extraction = require('./forge-memory-extraction'), memory = require('./forge-memory');
+  const projection = require('./forge-projection');
+  const { matches } = require('./forge-worker-result-contract');
+  const work = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-memory-')));
+  const cwd = path.join(work, 'project'), results = path.join(work, 'results');
+  fs.mkdirSync(cwd);
+  fs.mkdirSync(results);
+  const route = { host_runtime: 'codex', worker_engine: 'native', resolved_worker_engine: 'native', worker_mode: 'native',
+    model: 'gpt-6-luna', model_resolved: 'gpt-6-luna', effort: 'medium' };
+  const telemetry = { model_requested: null, model_resolved: 'gpt-6-luna', model_argument: 'gpt-6-luna',
+    model_observed: null, model_observed_source: null, effort_requested: 'medium', effort_resolved: 'medium',
+    effort_argument: 'medium', effort_transport: 'native-argument', effort_transport_value: 'medium',
+    effort_transport_source: 'fixture-native-argument', effort_binding_observed: null,
+    effort_binding_observed_source: null, effort_binding_observed_fingerprint: null,
+    effort_applied: null, effort_applied_source: null, capabilities_source: 'fixture' };
+  const extractedAt = '2026-10-24T12:00:00.000Z';
+  const joined = { ownerJoined: true, checkedAt: extractedAt, protectedSnapshots: [] };
+  const protectedBoundary = { ownerJoined: false, checkedAt: extractedAt, protectedSnapshots: [{ id: 'fixture-worker', state: 'active' }] };
+  const request = (name, overrides) => ({ cwd, contextRoot: cwd, unitType: 'memory-extract', sourceUnitType: 'execute-task',
+    sourceUnitId: 'T01', milestoneId: 'M001', workflowId: 'memory-workflow', dispatchId: `memory-${name}`,
+    extractionId: `extract-${name}`, extractedAt, sourceFingerprint: 'sha256:source',
+    summaryContent: 'PRIVATE completed work summary', sourceResult: 'status: done', keyDecisions: [],
+    existingMemory: { facts: [], stats: [] }, route, hostRuntime: 'codex',
+    resultFile: path.join(results, `${name}.json`), publicationSafe: true, publicationBoundary: joined,
+    invocationTelemetry: telemetry, ...(overrides || {}) });
+  // The exact pre-v2 native fingerprint formula, as written by older receipts.
+  const legacyFormula = r => crypto.createHash('sha256').update(JSON.stringify({ ...r, unitType: 'memory-extract',
+    rawResult: undefined, invocationTelemetry: undefined, resultFile: undefined, publicationSafe: undefined,
+    publicationBoundary: undefined, waitForPublicationBoundary: undefined })).digest('hex');
+  const receiptOf = r => JSON.parse(fs.readFileSync(`${r.resultFile}.receipt.json`, 'utf8'));
+  const fragmentBytes = unitId => fs.readFileSync(memory.fragmentPath(cwd, unitId, { milestoneId: 'M001' }));
+  const projected = identity => projection.projectMemoryState(cwd, { nowMs: Date.parse(extractedAt) }).entries
+    .find(entry => entry.identity === identity);
+  const memoryEvents = dispatchId => {
+    const file = path.join(cwd, '.gsd/forge/events.jsonl');
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line))
+      .filter(event => event.event === 'memory-publication' && event.dispatch_id === dispatchId) : [];
+  };
+  const verified = {
+    records: [
+      { evidence_ref: 'verified', observation_id: 'obs-verify-T05', observed_kind: 'confirm', independent_ref: 'verify:T05:check-1' },
+      { evidence_ref: 'used', observation_id: 'obs-use-T05', observed_kind: 'utility' },
+    ],
+    outcomes: [{ outcome_ref: 'passed', outcome_id: 'outcome-T05', result_ref: 'result:T05:verify' }],
+  };
+  const v2 = (events, facts) => ({ schema_version: 2, status: 'done', summary: 'v2 evidence', questions: [], facts: facts || [], events });
+  try {
+    // 1. Explicit schema selection: v1 export unchanged, v2 requested, v1 decodable.
+    assert.strictEqual(sidecar.NEW_MEMORY_SCHEMA_VERSION, 2);
+    assert.strictEqual(sidecar.memoryExtractionSchema(1), sidecar.memorySchema);
+    assert.deepStrictEqual(sidecar.memoryExtractionSchema(2),
+      JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'shared', 'schemas', 'memory-extraction-v2.schema.json'), 'utf8')));
+    assert.throws(() => sidecar.memoryExtractionSchema(3), error => error.code === 'memory-schema-version-unsupported');
+    assert.strictEqual(sidecar.memoryResponseSchema(1), sidecar.memorySchema);
+    const v2Sample = v2([{ kind: 'seed', local_event_id: 'e0', local_id: 'fresh' }],
+      [{ local_id: 'fresh', category: 'pattern', text: 'Owner-bound v2 fact.', confidence_base: 0.9 }]);
+    const v1Sample = { schema_version: 1, status: 'done', summary: 'legacy', questions: [], facts: [], events: [{ kind: 'hit', existing_id: 'MEM001' }] };
+    assert(matches(v2Sample, sidecar.memoryTransportSchema) && matches(v1Sample, sidecar.memoryTransportSchema));
+    for (const invalid of [{ ...v2Sample, schema_version: 3 }, { ...v2Sample, extra: true },
+      v2([{ kind: 'hit', local_event_id: 'e1', existing_id: 'MEM001' }]), { ...v1Sample, events: [{ kind: 'exposure', existing_id: 'MEM001' }] }]) {
+      assert(!matches(invalid, sidecar.memoryTransportSchema), JSON.stringify(invalid));
+    }
+    const prompt = sidecar.memoryPrompt(request('prompt', { memoryEvidence: verified }), 'T01');
+    const promptContract = sidecar.memoryEvidenceContract(request('prompt', { memoryEvidence: verified }), 'T01');
+    assert(prompt.includes(sidecar.MEMORY_QUALITY_CONTRACT) && sidecar.MEMORY_QUALITY_CONTRACT.includes('schema_version 2')
+      && sidecar.MEMORY_QUALITY_CONTRACT.includes('three independent confirmations'));
+    assert(prompt.includes(`SCHEMA:\n${JSON.stringify(sidecar.memorySchemaV2)}`));
+    assert(prompt.includes('"evidence_refs":[{"evidence_ref":"source_exposure","observed_kind":"exposure"},{"evidence_ref":"source_reobserve","observed_kind":"reobserve"},{"evidence_ref":"used","observed_kind":"utility"},{"evidence_ref":"verified","observed_kind":"confirm"}]'));
+    assert(prompt.includes('"outcome_refs":[{"outcome_ref":"passed"}]'));
+    for (const record of promptContract.records) assert(!prompt.includes(record.observation_id), 'observations stay with the owner');
+    assert(!prompt.includes('verify:T05:check-1'), 'independence proof stays with the owner');
+    console.log('PASS memory schema selection: v1 export unchanged, transports request v2 with v1 decodable, prompt carries refs only');
+
+    // 2. Owner-derived evidence: source identity plus structured owner records only.
+    const contract = sidecar.memoryEvidenceContract(request('contract', { memoryEvidence: verified }), 'T01');
+    assert.deepStrictEqual(contract.records.map(record => record.evidence_ref), ['source_exposure', 'source_reobserve', 'used', 'verified']);
+    assert(contract.records.every(record => record.source_unit === 'execute-task/T01' && record.source_fingerprint === 'sha256:source'));
+    const sourceObservation = value => value.records.find(record => record.evidence_ref === 'source_reobserve').observation_id;
+    const reattempt = sidecar.memoryEvidenceContract(request('contract-again', { extractionId: 'another-extraction',
+      extractedAt: '2026-10-25T00:00:00.000Z', existingMemory: { facts: [{ mem_id: 'MEM009' }], stats: [] } }), 'T01');
+    assert.strictEqual(sourceObservation(reattempt), sourceObservation(contract), 'attempt, time and existingMemory never make a new observation');
+    assert.notStrictEqual(sourceObservation(sidecar.memoryEvidenceContract(request('other-source', { summaryContent: 'Another source' }), 'T01')),
+      sourceObservation(contract));
+    assert(!reattempt.records.some(record => ['confirm', 'utility'].includes(record.observed_kind)),
+      'without owner verification there is no confirm or utility reference');
+    let refusal = 0;
+    for (const memoryEvidence of [
+      { records: [{ evidence_ref: 'verified', observation_id: 'obs-x', observed_kind: 'confirm' }] },
+      { records: [{ evidence_ref: 'foreign', observation_id: 'obs-y', observed_kind: 'reobserve', source_unit: 'execute-task/T99' }] },
+      { records: [{ evidence_ref: 'source_exposure', observation_id: 'obs-z', observed_kind: 'exposure' }] },
+      { records: [], outcomes: [], path: '/etc/passwd' },
+      'not-an-object',
+    ]) {
+      const refused = request(`refused-${refusal += 1}`, { memoryEvidence });
+      await assert.rejects(sidecar.acceptNativeMemoryResult({ ...refused, rawResult: v2Sample }),
+        error => error.code === 'memory-evidence-invalid' && !String(error.message).includes('/etc/passwd'));
+      assert(!fs.existsSync(`${refused.resultFile}.receipt.json`), 'refused owner evidence precedes any receipt');
+    }
+    console.log('PASS owner evidence: source-bound, attempt-independent observations; unverified/divergent/reserved evidence refused before receipt');
+
+    // 3. A pre-v2 ready receipt (promote pending) replays with the historical
+    // rule and identities, without a provider, before and after this update.
+    memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001', facts: [{ mem_id: 'MEM001', category: 'architecture',
+      text: 'Reusable architecture constraint.', confidence_base: 0.9, created_at: '2026-10-01T00:00:00.000Z',
+      source_unit: 'execute-task/T01' }], stats: [{ kind: 'seed', mem_id: 'MEM001', ts: '2026-10-01T00:00:00.000Z', confidence_base: 0.9, hits: 2 }] });
+    const legacyRequest = request('legacy-v1', { policy: { decision: 'extract' } });
+    const legacyExtraction = extraction.validateExtractionResult({ schema_version: 1, status: 'done', summary: 'Pending promotion',
+      questions: [], facts: [], events: [{ kind: 'hit', existing_id: 'MEM001' }, { kind: 'promote', existing_id: 'MEM001', threshold_met: true }] });
+    const legacyReceipt = { phase: 'ready', kind: 'memory-extraction', fingerprint: legacyFormula(legacyRequest),
+      dispatch_id: legacyRequest.dispatchId, extraction_id: legacyRequest.extractionId, extracted_at: extractedAt,
+      source_unit: 'T01', model: 'gpt-6-luna', effort: 'medium', telemetry, extraction: legacyExtraction, artifacts: [] };
+    fs.writeFileSync(`${legacyRequest.resultFile}.receipt.json`, JSON.stringify(legacyReceipt));
+    let providerCalls = 0;
+    const provider = async () => { providerCalls += 1; throw new Error('provider must not run on replay'); };
+    const legacyReplay = await sidecar.runNativeMemory(legacyRequest, provider);
+    assert.deepStrictEqual([legacyReplay.status, legacyReplay.replayed, legacyReplay.provider_called], ['done', true, false]);
+    assert.deepStrictEqual([legacyReplay.publication.status, legacyReplay.publication.schema_version, legacyReplay.publication.promotion_policy],
+      ['written', 1, 'v1'], JSON.stringify(legacyReplay.publication));
+    const legacyStats = memory.readFragment(cwd, 'T01', { milestoneId: 'M001' }).stats;
+    assert.deepStrictEqual(legacyStats.filter(stat => String(stat.event_id || '').startsWith('extract-legacy-v1:')).map(stat => stat.event_id).sort(),
+      ['extract-legacy-v1:event:000', 'extract-legacy-v1:event:001'], 'v1 extractionId:event:index identities');
+    assert.strictEqual(projected('M001/T01/MEM001').promoted, true);
+    assert.strictEqual(projected('M001/T01/MEM001').evidence.v2.independent_confirmation_count, 0, 'legacy replay creates no independent confirmation');
+    const legacyAgain = await sidecar.runNativeMemory(legacyRequest, provider);
+    assert.deepStrictEqual([legacyAgain.publication.status, legacyAgain.publication.reason], ['noop', 'replay']);
+    assert.strictEqual(receiptOf(legacyRequest).memory_contract, undefined, 'the legacy receipt is never rewritten');
+    assert.strictEqual(receiptOf(legacyRequest).fingerprint, legacyReceipt.fingerprint);
+    const divergent = await sidecar.runNativeMemory({ ...legacyRequest, summaryContent: 'unrelated request' }, provider);
+    assert.strictEqual(divergent.reason_code, 'dispatch-identity-conflict');
+    assert.strictEqual(providerCalls, 0);
+    console.log('PASS legacy v1 ready receipt: pending promotion replays under historical rules and IDs, provider count zero, divergence conflicts');
+
+    // 4. New v2 receipt: owner bindings, deferred publication, replay in a new process.
+    memory.writeFragment(cwd, { unit_id: 'T02', milestone_id: 'M001', facts: [{ mem_id: 'MEM001', category: 'gotcha',
+      text: 'Origin fact for T02.', confidence_base: 0.8, created_at: '2026-10-01T00:00:00.000Z', source_unit: 'execute-task/T02',
+      extraction_id: 'origin-extraction', source_fingerprint: 'sha256:origin' }], stats: [] });
+    const t02 = (name, overrides) => request(name, { sourceUnitId: 'T02', memoryEvidence: verified, ...(overrides || {}) });
+    const v2Events = [
+      { kind: 'seed', local_event_id: 'e0', local_id: 'fresh' },
+      { kind: 'confirm', local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: 'verified' },
+      { kind: 'reobserve', local_event_id: 'e2', existing_id: 'MEM001', evidence_ref: 'source_reobserve' },
+      { kind: 'utility', local_event_id: 'e3', existing_id: 'MEM001', evidence_ref: 'used', outcome_ref: 'passed' },
+    ];
+    const evidenceRequest = t02('v2-evidence', { publicationSafe: false, publicationBoundary: protectedBoundary });
+    const t02Before = fragmentBytes('T02');
+    const deferred = await sidecar.acceptNativeMemoryResult({ ...evidenceRequest, rawResult: v2(v2Events, v2Sample.facts) });
+    assert.strictEqual(deferred.publication.status, 'deferred');
+    assert(fragmentBytes('T02').equals(t02Before), 'a protected boundary defers every canonical write');
+    assert.deepStrictEqual(memoryEvents(evidenceRequest.dispatchId), []);
+    const receipt = receiptOf(evidenceRequest);
+    assert.deepStrictEqual([receipt.phase, receipt.extraction.schema_version, receipt.memory_contract.schema_version], ['ready', 2, 2]);
+    assert.strictEqual(receipt.memory_contract.evidence.digest, sidecar.memoryEvidenceContract(evidenceRequest, 'T02').digest);
+    assert.strictEqual(receipt.fingerprint, sidecar.nativeMemoryFingerprint(evidenceRequest));
+    assert.notStrictEqual(receipt.fingerprint, legacyFormula(evidenceRequest), 'new requests bind version and evidence');
+    assert(!JSON.stringify(receipt).includes('PRIVATE'), 'the receipt keeps bounded refs, not source text');
+    const joinedRequest = { ...evidenceRequest, publicationSafe: true, publicationBoundary: joined };
+    const written = await sidecar.runNativeMemory(joinedRequest, provider);
+    assert.deepStrictEqual([written.status, written.replayed, written.provider_called, written.publication.status],
+      ['done', true, false, 'written'], JSON.stringify(written.publication));
+    assert.deepStrictEqual([written.publication.schema_version, written.publication.promotion_policy], [2, 'v2']);
+    const t02Stats = memory.readFragment(cwd, 'T02', { milestoneId: 'M001' }).stats;
+    const storedConfirm = t02Stats.find(stat => stat.kind === 'confirm');
+    assert.deepStrictEqual([storedConfirm.event_id, storedConfirm.observation_id, storedConfirm.independent_ref],
+      ['extract-v2-evidence:v2:e1', 'obs-verify-T05', 'verify:T05:check-1']);
+    assert.strictEqual(t02Stats.find(stat => stat.kind === 'reobserve').observation_id, sourceObservation(receipt.memory_contract.evidence));
+    const t02Entry = projected('M001/T02/MEM001');
+    const counters = t02Entry.evidence.counters;
+    assert.deepStrictEqual([counters.independent_confirmation.count, counters.reobserve.count, counters.utility.count, t02Entry.hits], [1, 1, 1, 1]);
+    const published = written.publication.state.find(item => item.mem_id === 'MEM001');
+    assert.deepStrictEqual([published.hits, published.confidence, published.independent_confirmation_count],
+      [t02Entry.hits, t02Entry.base_confidence, t02Entry.evidence.v2.independent_confirmation_count]);
+    const [publicationEvent] = memoryEvents(evidenceRequest.dispatchId);
+    assert.deepStrictEqual([publicationEvent.publication_status, publicationEvent.schema_version, publicationEvent.memory_contract_version],
+      ['written', 2, 2]);
+    assert(!JSON.stringify(publicationEvent).includes('PRIVATE') && !JSON.stringify(publicationEvent).includes('verify:T05'));
+    const requestFile = path.join(results, 'v2-evidence-request.json');
+    fs.writeFileSync(requestFile, JSON.stringify(joinedRequest));
+    const restarted = spawnSync(process.execPath, [path.join(__dirname, 'forge-unit-sidecar.js'), '--accept-native-memory', requestFile],
+      { cwd, encoding: 'utf8' });
+    assert.strictEqual(restarted.status, 0, restarted.stderr);
+    const restartedResult = JSON.parse(restarted.stdout);
+    assert.deepStrictEqual([restartedResult.publication.status, restartedResult.publication.reason], ['noop', 'replay']);
+    assert.strictEqual(memoryEvents(evidenceRequest.dispatchId).length, 1, 'replay appends no second publication event');
+    console.log('PASS v2 receipt: owner-bound confirm/reobserve/utility, deferred boundary, replay in a new process without provider');
+
+    // 5. Stable identities, deduplicated observations and explicit conflicts.
+    const settled = fragmentBytes('T02');
+    const reordered = await sidecar.acceptNativeMemoryResult({ ...t02('v2-reordered', { extractionId: 'extract-v2-evidence' }),
+      rawResult: v2([...v2Events.slice(1)].reverse()) });
+    assert.deepStrictEqual([reordered.publication.status, reordered.publication.reason], ['noop', 'replay'], 'same local_event_id, any order');
+    const repackaged = await sidecar.acceptNativeMemoryResult({ ...t02('v2-repackaged'),
+      rawResult: v2([{ kind: 'confirm', local_event_id: 'c9', existing_id: 'MEM001', evidence_ref: 'verified' }]) });
+    assert.strictEqual(repackaged.publication.status, 'noop', 'the same observation in another extraction adds no reinforcement');
+    assert.strictEqual(repackaged.publication.state.find(item => item.mem_id === 'MEM001').independent_confirmation_count, 1);
+    const conflicting = await sidecar.acceptNativeMemoryResult({ ...t02('v2-conflict', { extractionId: 'extract-v2-evidence' }),
+      rawResult: v2([{ kind: 'reobserve', local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: 'source_reobserve' }]) });
+    assert.deepStrictEqual([conflicting.status, conflicting.publication.status], ['done', 'conflict']);
+    const [conflictEvent] = memoryEvents(conflicting.dispatch_id || 'memory-v2-conflict');
+    assert.deepStrictEqual([conflictEvent.publication_reason, conflictEvent.publication_reason_code],
+      ['memory-publication-conflict', 'publication-conflict']);
+    assert(fragmentBytes('T02').equals(settled), 'no-op and conflict leave the fragment untouched');
+    console.log('PASS v2 identities: reordered events and repackaged observations are no-ops; changed content conflicts without writes');
+
+    // 6. Missing bindings, unverified claims and a tampered snapshot never write.
+    for (const [name, overrides, events] of [
+      ['v2-outcome-missing', {}, [{ kind: 'utility', local_event_id: 'u1', existing_id: 'MEM001', evidence_ref: 'used', outcome_ref: 'missing' }]],
+      ['v2-unverified', { memoryEvidence: undefined }, [{ kind: 'confirm', local_event_id: 'c1', existing_id: 'MEM001', evidence_ref: 'verified' }]],
+    ]) {
+      const refused = t02(name, overrides);
+      await assert.rejects(sidecar.acceptNativeMemoryResult({ ...refused, rawResult: v2(events) }),
+        error => error.code === 'MEMORY_EXTRACTION_INVALID');
+      assert.strictEqual(receiptOf(refused).phase, 'failed');
+      const replayedFailure = await sidecar.runNativeMemory(refused, provider);
+      assert.deepStrictEqual([replayedFailure.status, replayedFailure.reason_code, replayedFailure.provider_called],
+        ['failure', 'MEMORY_EXTRACTION_INVALID', false], 'a failed receipt is never relaunched');
+    }
+    const tamperRequest = t02('v2-tamper', { publicationSafe: false, publicationBoundary: protectedBoundary });
+    const tamperDeferred = await sidecar.acceptNativeMemoryResult({ ...tamperRequest,
+      rawResult: v2([{ kind: 'reobserve', local_event_id: 'r7', existing_id: 'MEM001', evidence_ref: 'source_reobserve' }]) });
+    assert.strictEqual(tamperDeferred.publication.status, 'deferred');
+    const tampered = receiptOf(tamperRequest);
+    tampered.memory_contract.evidence.records[0].observation_id = 'obs-forged';
+    fs.writeFileSync(`${tamperRequest.resultFile}.receipt.json`, JSON.stringify(tampered));
+    const tamperReplay = await sidecar.acceptNativeMemoryResult({ ...tamperRequest, publicationSafe: true, publicationBoundary: joined });
+    assert.deepStrictEqual([tamperReplay.publication.status, tamperReplay.publication.reason_code], ['conflict', 'evidence-registry-refused']);
+    assert(fragmentBytes('T02').equals(settled));
+    console.log('PASS v2 refusals: missing outcome and unverified confirm fail validation, failed receipts never relaunch, tampered snapshots conflict');
+
+    // 7. A v1 envelope under the v2 contract keeps v1 identities but cannot bypass the v2 promotion rule.
+    const v1Under = await sidecar.acceptNativeMemoryResult({ ...t02('v1-under-v2'), rawResult: { schema_version: 1, status: 'done',
+      summary: 'legacy shape', questions: [], facts: [], events: [{ kind: 'hit', existing_id: 'MEM001' },
+        { kind: 'promote', existing_id: 'MEM001', threshold_met: true }] } });
+    assert.deepStrictEqual([v1Under.publication.status, v1Under.publication.reason_code, v1Under.publication.promotion_policy],
+      ['conflict', 'promotion-threshold-not-met', 'v2']);
+    assert.strictEqual(receiptOf(t02('v1-under-v2')).memory_contract.schema_version, 2);
+    assert(fragmentBytes('T02').equals(settled));
+    assert.strictEqual(providerCalls, 0);
+    console.log('PASS v1 envelope under the v2 contract: historical identities, v2 promotion rule, no partial write');
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
 async function runScenarios() {
   const fs = require('fs'), path = require('path'), os = require('os');
   const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'forge-unit-profile-'))), previous = {};
@@ -1562,6 +1811,7 @@ async function runScenarios() {
     if (!selectedScenario || selectedScenario === '--claude-session') await claudeSessionContracts();
     if (!selectedScenario || selectedScenario === '--claude-resume') await claudeResumeContracts();
     if (!selectedScenario || selectedScenario === '--liveness-heartbeat') await livenessHeartbeatContracts();
+    if (!selectedScenario || selectedScenario === '--memory-evidence') await memoryEvidenceContracts();
   } finally {
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(profile, { recursive: true, force: true });

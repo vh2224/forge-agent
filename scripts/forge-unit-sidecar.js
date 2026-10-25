@@ -18,7 +18,11 @@ const forgeIds = require('./forge-ids');
 const { MAX_FILE_BYTES: MAX_DELIVERY_BYTES } = require('./forge-delivery');
 
 const schema = xllm.loadSchemaFile('unit-artifacts.schema.json');
+// v1 stays exported unchanged for its consumers; new extractions select v2.
 const memorySchema = xllm.loadSchemaFile('memory-extraction.schema.json');
+const memorySchemaV2 = xllm.loadSchemaFile('memory-extraction-v2.schema.json');
+const MEMORY_SCHEMAS = Object.freeze({ 1: memorySchema, 2: memorySchemaV2 });
+const NEW_MEMORY_SCHEMA_VERSION = 2;
 const MAX_ARTIFACT_BYTES = 512 * 1024;
 // Leave room for the envelope and provider prose within the 1 MiB stream cap.
 const MAX_ARTIFACT_PAYLOAD_BYTES = 900 * 1024;
@@ -29,11 +33,38 @@ const PREPARATION_SURFACE_MAX_ENTRIES = 2048;
 const PREPARATION_SURFACE_MAX_BYTES = 16 * 1024 * 1024;
 const MEMORY_QUALITY_CONTRACT = [
   'Keep only project-specific, non-obvious, durable facts that became true; reject pending work, secrets, generic advice and temporary state.',
-  'Use candidate-local IDs only. Never allocate MEM IDs or return paths, owner identity, timestamps, commands or publication metadata.',
-  'Preserve W1-W4 semantics: new facts, near-duplicate hit/confirm, supersede with a replacement candidate, and cap-50 prune.',
-  'Emit promote only when owner-provided state proves confidence >= 0.85, hits >= 3, an eligible category, and durable non-fix text.',
+  'Return schema_version 2. Use candidate-local IDs and one unique local_event_id per event. Never allocate MEM IDs or return paths, owner identity, timestamps, commands or publication metadata.',
+  'Emit one seed per new fact, supersede with a replacement candidate, and cap-50 prune with reason "cap".',
+  'Evidence events target existing MEM IDs and cite only an INPUT.evidence_refs entry whose observed_kind equals the event kind (utility also cites an INPUT.outcome_refs entry). Without such a reference emit no confirm or utility; there is no hit kind.',
+  'Emit promote only when owner-provided state proves confidence >= 0.85, at least three independent confirmations, an eligible category, and durable non-fix text.',
   'Empty evidence returns done with empty facts/events. Partial, blocked or error returns no publishable facts/events.',
 ].join('\n');
+
+function memoryExtractionSchema(version) {
+  if (version !== 1 && version !== 2) fail('memory-schema-version-unsupported', 'Memory extraction schemas are versions 1 and 2.');
+  return MEMORY_SCHEMAS[version];
+}
+// Transport response schema for a contract version. v2 requests v2 and keeps a
+// v1 envelope decodable for workers that still emit it; the receipt binds the
+// v2 evidence contract (and its promotion rule) whichever envelope arrives.
+function memoryResponseSchema(version) {
+  const selected = memoryExtractionSchema(version);
+  if (version === 1) return selected;
+  const strip = ({ $schema, $id, title, description, $defs, ...rest }) => rest;
+  const legacy = value => JSON.parse(JSON.stringify(value)
+    .replace(/"#\/\$defs\/([A-Za-z]+)"/g, (match, name) => `"#/$defs/v1_${name}"`));
+  return {
+    $schema: selected.$schema,
+    $id: 'https://forge-agent.local/schemas/memory-extraction-response-v2.schema.json',
+    title: 'Forge memory extraction response (v2 requested, v1 decodable)',
+    type: 'object',
+    anyOf: [strip(selected), legacy(strip(memorySchema))],
+    $defs: { ...selected.$defs,
+      ...Object.fromEntries(Object.entries(memorySchema.$defs).map(([key, value]) => [`v1_${key}`, legacy(value)])) },
+  };
+}
+const memoryTransportSchema = memoryResponseSchema(NEW_MEMORY_SCHEMA_VERSION);
+const MEMORY_RESPONSE_VERSIONS = Object.freeze([2, 1]);
 
 function fail(code, hint) { const error = new Error(hint || code); error.code = code; throw error; }
 function hash(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
@@ -702,37 +733,103 @@ async function reconcileArtifactAttempt(request, options) {
       json(files.resultFile, result);
     } });
 }
-function memorySourceContext(request, record) {
+function memorySourceLabel(request, sourceUnit) {
+  return `${request.sourceUnitType || 'unit'}/${sourceUnit}`;
+}
+function memorySourceFingerprint(request) {
   const sourcePayload = {
     summaryContent: request.summaryContent || '', sourceResult: request.sourceResult || '',
     keyDecisions: request.keyDecisions || [], existingMemory: request.existingMemory || { facts: [], stats: [] },
   };
+  return request.sourceFingerprint || hash(JSON.stringify(sourcePayload));
+}
+// Replays use the digest-bound snapshot persisted in the v2 receipt, never a
+// recomputation; legacy receipts have none and keep the historical rules.
+function memoryContractEvidence(record) {
+  const contract = record.memory_contract;
+  if (!contract || typeof contract !== 'object' || Array.isArray(contract) || contract.schema_version !== NEW_MEMORY_SCHEMA_VERSION
+      || !contract.evidence || typeof contract.evidence !== 'object' || Array.isArray(contract.evidence)) {
+    fail('memory-contract-invalid', 'The memory receipt carries an unsupported evidence contract.');
+  }
+  return contract.evidence;
+}
+function memorySourceContext(request, record) {
   return {
     unitId: record.source_unit,
     ...(request.milestoneId ? { milestoneId: request.milestoneId } : {}),
     extractionId: record.extraction_id,
     extractedAt: record.extracted_at,
     source: {
-      sourceUnit: `${request.sourceUnitType || 'unit'}/${record.source_unit}`,
-      sourceFingerprint: request.sourceFingerprint || hash(JSON.stringify(sourcePayload)),
+      sourceUnit: memorySourceLabel(request, record.source_unit),
+      sourceFingerprint: memorySourceFingerprint(request),
       dispatchId: record.dispatch_id,
       model: record.model,
       effort: record.effort,
     },
+    ...(record.memory_contract !== undefined ? { evidence: memoryContractEvidence(record) } : {}),
   };
 }
+// Owner evidence registry for a new extraction, derived only from the source
+// identity and structured owner evidence (request.memoryEvidence), never from
+// narrative SUMMARY/result text or worker output. The source observation
+// excludes existingMemory, attempt, extraction ID and time, so re-extracting
+// the same source cannot manufacture a new observation. Confirm/utility exist
+// only when the owner supplies verified independence/outcome records.
+function memoryEvidenceContract(request, sourceUnit) {
+  const extraction = require('./forge-memory-extraction');
+  const supplied = request.memoryEvidence === undefined ? { records: [], outcomes: [] } : request.memoryEvidence;
+  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)
+      || Object.keys(supplied).some(key => !['records', 'outcomes'].includes(key))
+      || !Array.isArray(supplied.records || []) || !Array.isArray(supplied.outcomes || [])) {
+    fail('memory-evidence-invalid', 'memoryEvidence must be { records, outcomes } owner data.');
+  }
+  const sourceLabel = memorySourceLabel(request, sourceUnit);
+  const sourceFingerprint = memorySourceFingerprint(request);
+  const boundFingerprint = extraction.evidenceSourceFingerprint(sourceFingerprint);
+  const observation = hash(JSON.stringify({ unit: sourceLabel, milestone: request.milestoneId || null,
+    summary: request.summaryContent || '', result: request.sourceResult || '', key_decisions: request.keyDecisions || [] })).slice(0, 40);
+  const bind = record => (record && typeof record === 'object' && !Array.isArray(record)
+    ? { source_unit: sourceLabel, source_fingerprint: boundFingerprint, ...record } : record);
+  const records = [
+    { evidence_ref: 'source_exposure', observation_id: `source-${observation}-exposure`, observed_kind: 'exposure' },
+    { evidence_ref: 'source_reobserve', observation_id: `source-${observation}-reobserve`, observed_kind: 'reobserve' },
+    ...(supplied.records || []),
+  ].map(bind);
+  try {
+    return extraction.normalizeEvidenceRegistry({ records, outcomes: supplied.outcomes || [] },
+      { sourceUnit: sourceLabel, sourceFingerprint });
+  } catch (error) {
+    // Field locations and a reason only: no supplied value reaches the error.
+    fail('memory-evidence-invalid', `Owner memory evidence was refused (${error.reason || 'invalid'}).`);
+  }
+}
+function memoryRequestFingerprint(baseFingerprint, contract) {
+  return hash(JSON.stringify({ request: baseFingerprint,
+    memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, evidence_digest: contract.digest } }));
+}
+// A receipt written before the v2 contract carries no memory_contract and the
+// historical fingerprint; only that exact pair keeps replaying (v1 rules).
+function legacyMemoryReceipt(existing, legacyFingerprint) {
+  return Boolean(existing) && existing.memory_contract === undefined && existing.fingerprint === legacyFingerprint;
+}
 function memoryPrompt(request, sourceUnit) {
+  const contract = memoryEvidenceContract(request, sourceUnit);
   const input = {
     unit_type: request.sourceUnitType || 'unit', unit_id: sourceUnit,
     milestone_id: request.milestoneId || null, summary_content: request.summaryContent || '',
     result_block: request.sourceResult || '', key_decisions: request.keyDecisions || [],
     existing_memory: request.existingMemory || { facts: [], stats: [] },
+    // References only: observation and binding details stay with the owner.
+    evidence_refs: contract.records.map(record => ({ evidence_ref: record.evidence_ref, observed_kind: record.observed_kind })),
+    outcome_refs: contract.outcomes.map(outcome => ({ outcome_ref: outcome.outcome_ref })),
   };
   const procedure = require('./forge-procedure-context').loadProcedureContext({ cwd: request.cwd || process.cwd(),
     phase: 'memory-extract', forgeHome: process.env.FORGE_HOME || path.resolve(__dirname, '..') });
-  return procedure.content + '\n\nRead-only memory extraction. Return exactly one JSON object matching the supplied schema. '
+  return procedure.content + '\n\nRead-only memory extraction. Return exactly one JSON object matching SCHEMA (schema_version 2). '
     + 'Do not write files, run commands, choose paths, or return owner identity/publication metadata.\n'
-    + `CONTRACT:\n${MEMORY_QUALITY_CONTRACT}\nINPUT:\n${JSON.stringify(input)}\nSCHEMA:\n${JSON.stringify(memorySchema)}`;
+    + `CONTRACT:\n${MEMORY_QUALITY_CONTRACT}\nINPUT:\n${JSON.stringify(input)}\nSCHEMA:\n${JSON.stringify(memorySchemaV2)}\n`
+    + 'LEGACY_SCHEMA (schema_version 1, decoded only for compatibility; it cannot cite evidence, confirm independently or satisfy promotion):\n'
+    + JSON.stringify(memorySchema);
 }
 function memoryBoundarySafe(request) {
   const boundary = request.publicationBoundary;
@@ -808,6 +905,9 @@ function appendMemoryPublicationEvent(request, record, result) {
   }
   const route = request.route || {};
   const telemetry = memoryTelemetry(record);
+  // Version and a closed reason code only; publication detail stays redacted.
+  const reasonCode = result.publication?.status === 'conflict' && typeof result.publication.reason_code === 'string'
+    && /^[a-z0-9-]{1,64}$/.test(result.publication.reason_code) ? result.publication.reason_code : null;
   const event = {
     ts: request.publicationBoundary.checkedAt,
     event: 'memory-publication', event_id: eventId,
@@ -818,6 +918,9 @@ function appendMemoryPublicationEvent(request, record, result) {
     worker_mode: telemetryScalar(route.worker_mode), status: telemetryScalar(result.status),
     publication_status: publicationStatus,
     publication_reason: publicationReason,
+    publication_reason_code: reasonCode,
+    schema_version: [1, 2].includes(record.extraction?.schema_version) ? record.extraction.schema_version : null,
+    memory_contract_version: record.memory_contract?.schema_version === NEW_MEMORY_SCHEMA_VERSION ? NEW_MEMORY_SCHEMA_VERSION : null,
     ...telemetry,
   };
   fs.mkdirSync(path.dirname(eventsFile), { recursive: true });
@@ -1002,10 +1105,15 @@ function nativeReceiptFiles(request) {
   xllm.validateResultFileTarget(receiptFile, root);
   return { cwd, root, resultFile, receiptFile };
 }
-function nativeMemoryFingerprint(request) {
+function legacyNativeMemoryFingerprint(request) {
   return hash(JSON.stringify({ ...request, unitType: 'memory-extract', rawResult: undefined, invocationTelemetry: undefined,
     resultFile: undefined, publicationSafe: undefined, publicationBoundary: undefined,
     waitForPublicationBoundary: undefined }));
+}
+function nativeMemoryFingerprint(request) {
+  const r = request || {};
+  const loc = locations({ ...r, unitType: 'memory-extract' });
+  return memoryRequestFingerprint(legacyNativeMemoryFingerprint(r), memoryEvidenceContract(r, loc.sourceUnit));
 }
 function nativeMemoryRouteIdentity(request) {
   const r = request || {}, route = r.route || {};
@@ -1100,7 +1208,9 @@ function acceptNativeMemoryFailure(request, loc) {
   let failure = proposed;
   if (fs.existsSync(files.receiptFile)) {
     const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
-    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))) {
+      fail('dispatch-identity-conflict');
+    }
     if (existing.phase !== 'failed' || !existing.failure) fail('dispatch-identity-conflict');
     failure = existing.failure;
   } else {
@@ -1118,10 +1228,14 @@ async function acceptNativeMemoryResult(request) {
   }
   if (r.nativeFailure !== undefined) return acceptNativeMemoryFailure(r, loc);
   const files = nativeReceiptFiles(r);
-  const fingerprint = nativeMemoryFingerprint(r);
+  // Refused owner evidence fails here, before any receipt exists.
+  const contract = memoryEvidenceContract(r, loc.sourceUnit);
+  const fingerprint = memoryRequestFingerprint(legacyNativeMemoryFingerprint(r), contract);
   const existing = fs.existsSync(files.receiptFile) ? JSON.parse(fs.readFileSync(files.receiptFile, 'utf8')) : null;
   if (existing) {
-    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))) {
+      fail('dispatch-identity-conflict');
+    }
     if (existing.phase === 'ready') {
       const replayIdentity = nativeMemoryIdentity(r, existing.telemetry);
       if (existing.model !== replayIdentity.model || existing.effort !== replayIdentity.effort) {
@@ -1140,12 +1254,13 @@ async function acceptNativeMemoryResult(request) {
   try {
     const identity = nativeMemoryIdentity(r);
     const extraction = require('./forge-memory-extraction').validateExtractionResult(r.rawResult,
-      { sourceUnit: loc.sourceUnit });
+      { sourceUnit: loc.sourceUnit, schemaVersions: MEMORY_RESPONSE_VERSIONS, evidence: contract });
     const record = { phase: 'ready', kind: 'memory-extraction', fingerprint,
       dispatch_id: r.dispatchId, extraction_id: r.extractionId || r.dispatchId,
       extracted_at: r.extractedAt || new Date().toISOString(), source_unit: loc.sourceUnit,
       model: identity.model, effort: identity.effort,
-      telemetry: r.invocationTelemetry || null, extraction, artifacts: [] };
+      telemetry: r.invocationTelemetry || null, extraction, artifacts: [],
+      memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, evidence: contract } };
     json(files.receiptFile, record);
     const delivered = await publishReadyRecord(r, record);
     json(files.resultFile, delivered);
@@ -1506,7 +1621,11 @@ async function runUnitSidecarCore(request, runtime, identity) {
     try { if (error?.session?.id) return claudeSessions.sessionDigest(error.session.id); } catch { /* invalid ref: no digest */ }
     return resumeSessionSha;
   };
-  const fingerprint = artifactFingerprint(r);
+  // Memory requests bind the v2 contract and its owner evidence digest; the
+  // historical fingerprint is kept only to recognize pre-v2 receipts.
+  const memoryContract = transport.mode === 'memory' ? memoryEvidenceContract(r, loc.sourceUnit) : null;
+  const legacyFingerprint = artifactFingerprint(r);
+  const fingerprint = memoryContract ? memoryRequestFingerprint(legacyFingerprint, memoryContract) : legacyFingerprint;
   const receiptFile = `${resultFile}.receipt.json`;
   xllm.validateResultFileTarget(receiptFile, cwd);
   xllm.validateResultFileTarget(receiptFile, root);
@@ -1753,7 +1872,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     return ready;
   }
   if (existing) {
-    if (existing.fingerprint !== fingerprint) fail('dispatch-identity-conflict');
+    if (existing.fingerprint !== fingerprint && !(memoryContract && legacyMemoryReceipt(existing, legacyFingerprint))) {
+      fail('dispatch-identity-conflict');
+    }
     if (existing.phase === 'ready' || existing.phase === 'executed') {
       if (nativeExecution) {
         const { native: ignoredNative, dispatch_id: ignoredDispatch, workflow_id: ignoredWorkflow,
@@ -1965,8 +2086,9 @@ async function runUnitSidecarCore(request, runtime, identity) {
     let transportTelemetry = null;
     if (transport.mode === 'memory') {
       const prompt = memoryPrompt(r, loc.sourceUnit);
+      const memoryValidation = { sourceUnit: loc.sourceUnit, schemaVersions: MEMORY_RESPONSE_VERSIONS, evidence: memoryContract };
       const validateMemory = value => {
-        try { require('./forge-memory-extraction').validateExtractionResult(value, { sourceUnit: loc.sourceUnit }); return true; }
+        try { require('./forge-memory-extraction').validateExtractionResult(value, memoryValidation); return true; }
         catch { return false; }
       };
       announce('solicitado', { ...identity, provider_called: false });
@@ -1975,7 +2097,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       if (options.engine === 'claude') {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:'memory', resultSchema:memorySchema, calibrationPhase:'memory',
+        const output = await xllm.invokeClaudeTransport({ ...options, prompt, resultProfile:'memory', resultSchema:memoryTransportSchema, calibrationPhase:'memory',
           readOnly: true, validateCandidate: validateMemory, onHeartbeat: heartbeat,
           heartbeatIntervalMs: 15000, terminateChild: xllm.terminateOwnedProcessTree });
         transportReturned = true;
@@ -1985,13 +2107,13 @@ async function runUnitSidecarCore(request, runtime, identity) {
       } else {
         enterTransport();
         transportEntered = true;
-        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memorySchema,
+        const output = await xllm.invokeCodexAppServer({ ...options, prompt, schema: memoryTransportSchema,
           sandbox: 'read-only', onHeartbeat: heartbeat });
         transportReturned = true;
         await livenessQueue;
         result = xllm.extractLastJsonBlock(output.finalText || output.agentTexts);
       }
-      result = require('./forge-memory-extraction').validateExtractionResult(result, { sourceUnit: loc.sourceUnit });
+      result = require('./forge-memory-extraction').validateExtractionResult(result, memoryValidation);
       xllm.assertUntrustedOutputBarrier(result);
       artifacts = [];
     } else if (transport.mode === 'execute') {
@@ -2230,6 +2352,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       ? { phase: 'ready', kind: 'memory-extraction', fingerprint, dispatch_id: dispatchId,
         extraction_id: r.extractionId || dispatchId, extracted_at: startedAt, source_unit: loc.sourceUnit,
         model: route.model_resolved || route.model, effort: route.effort, extraction: result, artifacts: [],
+        memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, evidence: memoryContract },
         telemetry: { model_requested: route.model_requested || route.model || null,
           model_resolved: route.model_resolved || route.model || null, model_argument: model,
           ...observedModel,
@@ -2545,7 +2668,8 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     },
   });
 }
-module.exports = { schema, memorySchema, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
+module.exports = { schema, memorySchema, memorySchemaV2, NEW_MEMORY_SCHEMA_VERSION, memoryExtractionSchema, memoryResponseSchema,
+  memoryTransportSchema, memoryEvidenceContract, MEMORY_QUALITY_CONTRACT, locations, milestonePlanFile, validateRecoveryRequest, captureMilestoneBaseline, reconcileMilestoneAttempt, validateArtifacts, inspectArtifacts, inspectDeliveryContent, executeDeliveryArtifacts, MAX_ARTIFACT_BYTES,
   MAX_ARTIFACT_PAYLOAD_BYTES, target, markChecked, materialize, memoryPrompt, memorySourceContext,
   publishReadyRecord, nativeMemoryFingerprint, acceptNativeMemoryResult, candidateFromNativeResult, runNativeMemory,
   routeIdentity, artifactFingerprint, artifactAttemptFiles, beginArtifactAttempt, replayArtifactAttempt,
