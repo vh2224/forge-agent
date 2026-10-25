@@ -145,7 +145,7 @@
     {
       "id": "memory",
       "path": "shared/forge-procedure-memory.md",
-      "sha256": "6c04f67eef1fd2001df2e17d3f3ba4f66a93793f019486457a2a1af5b6db0eba",
+      "sha256": "11c516a0995aa412a518618505c147723f677e07fb73197d3ce6ec3693eff3a2",
       "status": "ready",
       "owner": "T04",
       "dependencies": [

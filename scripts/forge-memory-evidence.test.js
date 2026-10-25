@@ -264,6 +264,50 @@ test('stored v2 rows are closed: unknown version, hybrids, extra fields and unbo
   assert.deepStrictEqual(only(result).legacyProjection.hits, 0, 'refused rows never reinforce');
 });
 
+test('legacy invocation-only exposure is closed, bounded, replay-safe and never creates observation or reinforcement', () => {
+  const invocation = (id, extra) => ({ kind: 'exposure', evidence_version: 2,
+    event_id: `invocation-${id}:v2:exposure`, extraction_id: `invocation-${id}`,
+    local_event_id: 'exposure', ts: '2026-10-02T00:00:00.000Z', mem_id: 'MEM001',
+    provenance: 'legacy-invocation-only', invocation_id: id, ...(extra || {}) });
+  const first = invocation('call-1');
+  const normalized = evidence.normalizeEvidenceEvent(first);
+  assert.strictEqual(normalized.origin, 'v2');
+  assert.strictEqual(normalized.label, 'legacy-invocation-only');
+  assert.strictEqual(normalized.observation_id, null);
+  assert.strictEqual(normalized.binding, null);
+  const result = fold([first, { ...first }, invocation('call-2'), row('exposure', 'x1')]);
+  const entry = only(result);
+  assert.strictEqual(entry.counters.exposure.count, 3, 'local invocations do not share a null observation key');
+  assert.strictEqual(result.replayed.length, 1);
+  assert.deepStrictEqual(result.duplicates, []);
+  assert.strictEqual(entry.legacyProjection.hits, 0);
+  assert.strictEqual(entry.legacyProjection.confidence, 0.8);
+  assert.strictEqual(entry.v2.independent_confirmation_count, 0);
+  assert.strictEqual(entry.counters.utility.count, 0);
+  assert.strictEqual(evidence.normalizeEvidenceEvent(invocation('call-1', { invocation_id: 'x'.repeat(128) })).origin, 'v2');
+  const namespaces = evidence.foldMemoryEvidence(['T01', 'T02'].map(unitId => ({
+    milestoneId: 'M001', unitId, facts: [fact('MEM001')], stats: [first, { ...first }],
+  })));
+  assert.deepStrictEqual(namespaces.entries.map(item => item.counters.exposure.count), [1, 1]);
+  assert.strictEqual(namespaces.replayed.length, 2, 'event identity deduplicates within each namespace');
+  throwsReason(() => fold([first, { ...first, invocation_id: 'other' }]), REASONS.EVENT_ID_CONFLICT);
+  for (const extra of [
+    { observation_id: 'obs-1' }, { independent_ref: 'verify-1' }, { outcome_id: 'out-1' },
+    { outcome_ref: 'out' }, { outcome_result_ref: 'pass' }, { evidence_ref: 'contextDelivery' },
+    { source_unit: 'confirmed-delivery' }, { source_fingerprint: 'sha256:fake' },
+    { observed_kind: 'exposure' }, { delivery_id: 'dispatch-1' },
+    { provenance: 'confirmed-delivery' }, { kind: 'confirm' }, { kind: 'utility' }, { kind: 'reobserve' },
+    { invocation_id: '' }, { invocation_id: 'x'.repeat(129) }, { invocation_id: '$(whoami)' },
+    { invocation_id: ['call-1'] },
+  ]) {
+    assert.strictEqual(evidence.normalizeEvidenceEvent(invocation('call-1', extra)).origin, 'invalid', JSON.stringify(extra));
+  }
+  for (const kind of ['exposure', 'reobserve', 'confirm', 'utility']) {
+    assert.strictEqual(evidence.normalizeEvidenceEvent(row(kind, 'missing', { observation_id: undefined })).reason,
+      REASONS.OBSERVATION_MISSING, `${kind} still needs its ordinary observation binding`);
+  }
+});
+
 // ── Four semantics ────────────────────────────────────────────────────────
 test('exposure, reobserve, independent confirmation and utility keep separate identities and counters', () => {
   const result = fold([row('exposure', 'x1'), row('reobserve', 'r1'), row('utility', 'u1'), row('confirm', 'c1')]);

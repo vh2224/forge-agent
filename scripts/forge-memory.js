@@ -19,6 +19,8 @@
 //   node forge-memory.js --write [--milestone <id>] [--cwd <dir>]   (reads JSON fragment from stdin)
 //   node forge-memory.js --validate <unit-id> [--cwd <dir>]
 //   node forge-memory.js --query [options] [--cwd <dir>]
+//   node forge-memory.js --expose --event-id <dispatch-id> [--cwd <dir>]
+//   node forge-memory.js --hit [--event-id <dispatch-id>] [--cwd <dir>]
 //   node forge-memory.js --help
 //
 // Exit codes:
@@ -1182,6 +1184,8 @@ Commands:
   --validate <unit-id> [--milestone <id>] Validate ID and check if fragment exists
   --query|--select [options] [--cwd <dir>]
                                           Select relevant memories deterministically
+  --expose --event-id <dispatch-id>        Record confirmed context exposure (stdin selection)
+  --hit [--event-id <dispatch-id>]         Exposure alias; unidentified calls record only local invocation provenance
   --help, -h                              Show this help
 
 Unit ID forms accepted:
@@ -1266,62 +1270,83 @@ function cliMain(argv) {
     process.exit(0);
   }
 
-  if (cmd === '--hit') {
-    // Records kind:'hit' stat events on the owning fragments for facts that
-    // were actually INJECTED into a worker prompt. This is the usage signal
-    // the ranking (confidence × max(1, hits)) was designed around and never
-    // received: measured before this existed, all 71 facts in this repo's
-    // store carried hits: 0 — selection had no feedback loop.
-    //
-    // stdin: the --select/--query result envelope ({entries:[...]}) or a bare
-    // array of {unit_id, mem_id, milestone_id?}. Piping --select's own output
-    // back in is the intended idiom — no second lookup of who owns which fact.
-    // Advisory by contract: per-owner failures are reported in `skipped`, the
-    // exit is 0 unless the stdin payload itself is unusable.
-    let payload;
-    try {
-      payload = JSON.parse(fs.readFileSync(0, 'utf8'));
-    } catch (e) {
-      process.stderr.write(`--hit: unparseable stdin payload (${e.message})\n`);
-      process.exit(1);
+  if (cmd === '--expose' || cmd === '--hit') {
+    // Only call after confirmed delivery of the selected context. --hit is a
+    // compatibility alias: exposure never confirms knowledge or utility.
+    const eventIndex = argv.indexOf('--event-id');
+    const deliveryId = eventIndex === -1 ? null : argv[eventIndex + 1];
+    if ((cmd === '--expose' && !deliveryId) || (eventIndex !== -1
+      && (typeof deliveryId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deliveryId)))) {
+      throw new Error('--event-id requires a bounded delivery identifier (1..128 characters)');
     }
+    let payload;
+    try { payload = JSON.parse(fs.readFileSync(0, 'utf8')); }
+    catch (e) { throw new Error(`${cmd}: unparseable stdin payload (${e.message})`); }
     const entries = Array.isArray(payload) ? payload
       : (payload && Array.isArray(payload.entries)) ? payload.entries : null;
-    if (entries === null) {
-      process.stderr.write('--hit expects a JSON array or a --select envelope ({entries:[...]}) on stdin\n');
-      process.exit(1);
-    }
+    if (entries === null) throw new Error(`${cmd} expects a JSON array or a --select envelope ({entries:[...]}) on stdin`);
+    // This random identity labels only this compatibility invocation, never a
+    // real dispatch, independent observation or outcome. Duplicate entries in
+    // one call share it; separate unidentified calls promise no replay safety.
+    const invocationId = deliveryId ? null : crypto.randomUUID();
+    const provenance = deliveryId ? 'confirmed-delivery' : 'legacy-invocation-only';
     const ts = new Date().toISOString();
     const byOwner = new Map();
     const skipped = [];
     for (const entry of entries) {
-      const unitId = entry && String(entry.unit_id || '').trim();
-      const memId = entry && String(entry.mem_id || '').trim();
+      const unitId = entry && entry.unit_id;
+      const memId = entry && entry.mem_id;
       if (!unitId || !memId) {
         skipped.push({ entry, reason: 'missing-unit-or-mem-id' });
         continue;
       }
-      const owner = `${unitId}\u0000${entry.milestone_id || ''}`;
-      if (!byOwner.has(owner)) {
-        byOwner.set(owner, { unit_id: unitId, milestone_id: entry.milestone_id || null, stats: [] });
+      const milestoneId = entry.milestone_id || null;
+      if (typeof unitId !== 'string' || !validateUnitId(unitId)
+        || typeof memId !== 'string' || !/^MEM\d{3,}$/.test(memId)
+        || (milestoneId !== null && (typeof milestoneId !== 'string' || !validateMilestoneId(milestoneId)))) {
+        skipped.push({ unit_id: unitId, reason: 'invalid-owner-or-mem-id' });
+        continue;
       }
-      byOwner.get(owner).stats.push({ kind: 'hit', mem_id: memId, ts });
+      const owner = JSON.stringify([milestoneId, unitId]);
+      if (!byOwner.has(owner)) byOwner.set(owner, { unit_id: unitId, milestone_id: milestoneId, ids: new Set() });
+      byOwner.get(owner).ids.add(memId);
     }
     const fragments = [];
     let recorded = 0;
     for (const owner of byOwner.values()) {
       try {
-        const fragment = { unit_id: owner.unit_id, facts: [], stats: owner.stats };
-        if (owner.milestone_id) fragment.milestone_id = owner.milestone_id;
-        const written = writeFragment(cwd, fragment, {});
+        const written = transactFragment(cwd, { unit_id: owner.unit_id, milestone_id: owner.milestone_id }, {}, current => {
+          const additions = [];
+          for (const memId of owner.ids) {
+            if (!(current.facts || []).some(fact => fact.mem_id === memId)) throw new Error(`unknown-target: ${memId}`);
+            const tuple = JSON.stringify([deliveryId ? 'exposure-v1' : 'invocation-exposure-v1',
+              deliveryId || invocationId, owner.milestone_id, owner.unit_id, memId]);
+            const digest = crypto.createHash('sha256').update(tuple).digest('hex');
+            const extractionId = `${deliveryId ? 'delivery' : 'invocation'}:${digest}`;
+            const eventId = `${extractionId}:v2:exposure`;
+            const existing = (current.stats || []).find(row => row.event_id === eventId);
+            const row = { kind: 'exposure', evidence_version: 2, event_id: eventId,
+              extraction_id: extractionId, local_event_id: 'exposure', ts: existing ? existing.ts : ts,
+              mem_id: memId, ...(deliveryId ? {
+                evidence_ref: 'contextDelivery', observation_id: extractionId,
+                source_unit: provenance, source_fingerprint: `sha256:${digest}`, observed_kind: 'exposure',
+              } : { provenance, invocation_id: invocationId }) };
+            // Comparing through the shared merger preserves conflict detection,
+            // including same identity with a differently bound stored payload.
+            const merged = mergeStats(current.stats || [], [row]);
+            if (merged.length > (current.stats || []).length) additions.push(row);
+          }
+          return { fragment: { ...current, stats: [...(current.stats || []), ...additions] }, result: additions.length };
+        });
         const landed = written && !written.quarantined;
-        if (landed) recorded += owner.stats.length;
-        fragments.push({ unit_id: owner.unit_id, hits: owner.stats.length, landed });
-      } catch (e) {
-        skipped.push({ unit_id: owner.unit_id, reason: e.message });
-      }
+        const exposures = landed ? written.transaction_result : 0;
+        recorded += exposures;
+        fragments.push({ unit_id: owner.unit_id, milestone_id: owner.milestone_id,
+          hits: exposures, exposures, hits_semantics: 'new-exposures-compatibility-alias', landed });
+      } catch (e) { skipped.push({ unit_id: owner.unit_id, reason: e.message }); }
     }
-    console.log(JSON.stringify({ recorded, fragments, skipped }));
+    console.log(JSON.stringify({ recorded, fragments, skipped, kind: 'exposure', evidence_version: 2,
+      provenance, delivery_id: deliveryId, invocation_id: invocationId }));
     process.exit(0);
   }
 

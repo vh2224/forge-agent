@@ -175,14 +175,38 @@ Legacy rows targeting an unknown fact keep today's silent projection behavior
 
 | Reader / writer | v1 envelope | Legacy rows | v2 rows |
 |---|---|---|---|
-| `validateExtractionResult` (v1) | accepts, bytes/limits unchanged | n/a | refuses v2 envelopes (`schema_version must equal 1`) |
-| `validateExtraction` | delegates to v1 | n/a | validates v2, refuses hybrids |
-| Current `projectMemoryEntries` | — | folds as today | ignores `exposure`/`reobserve`/`utility`; counts every stored `confirm` row (no observation dedupe) |
-| Current `publicationState` | — | folds as today | same as projection for hits |
-| `foldMemoryEvidence` | — | `legacyProjection`/`legacyPublication` reproduce both | dedupes and separates semantics |
+| v1 decoder | Frozen, accepted | Historical semantics | Refuses v2 envelope |
+| versioned decoder / publisher | Replays historical ready receipts | Preserved without relabeling | Closed validation and owner bindings |
+| projection / publicationState | Version-aware | Shared fold compatibility views | Shared fold, independent counters |
+| CLI --hit | Array or entries envelope | Historical rows untouched | Writes exposure, not hit/confirm |
+| CLI --expose --event-id | Same selection payload | No migration | Replay-safe exposure only |
 
-Until consumers switch, the owner must not store a second v2 `confirm` row for an
-observation already recorded, because old readers count each row.
+`--expose` requires a bounded real delivery ID (1..128 ID characters).
+Its SHA256 input is the versioned JSON tuple
+["exposure-v1", delivery_id, milestone_id-or-null, unit_id, mem_id].
+The digest yields extraction_id delivery:<digest> and event_id
+<extraction_id>:v2:exposure. Same tuple and binding is a no-op, preserving the
+first timestamp; conflicting payload is advisory per owner with no partial write.
+Only selected entries actually delivered can be recorded after positive receipt.
+The command does not authenticate a delivery claim; the caller owns that boundary.
+
+Old `--hit` without ID creates one random invocation_id shared by its entries.
+The closed exposure-only compatibility row contains the common v2 event fields,
+mem_id, provenance: legacy-invocation-only and bounded invocation_id (1..128 ID
+characters). It forbids observation_id, evidence_ref, source bindings,
+independent_ref and outcome fields; no contextDelivery reference is invented.
+The versioned identity tuple uses ["invocation-exposure-v1", invocation_id,
+milestone_id-or-null, unit_id, mem_id] and extraction_id invocation:<SHA256>.
+Repeated entries within the call deduplicate; separate unidentified calls make
+no cross-invocation replay promise. The reducer deduplicates event identity in
+its namespace, never indexes a null observation, and counts only exposure.
+invocation_id labels only the local call and never proves actual delivery or
+independence. Ordinary exposure/reobserve/confirm/utility keep their strict
+observation bindings; confirmation and utility requirements are unchanged.
+Both inputs accept arrays or {entries:[]}. recorded counts newly stored exposures;
+replay returns zero. fragments[].hits is a historical alias of new exposures,
+explained by hits_semantics, exposures, kind and evidence_version additions.
+Per-owner errors remain advisory in skipped; invalid stdin/event ID fails before write.
 
 ## Detecting the projection version (S05/S06)
 
@@ -196,15 +220,35 @@ observation already recorded, because old readers count each row.
 
 ## Producers and consumers inventory
 
-| Component | Role | Evidence relation |
+Canonical distribution inventory is `forge-source-manifest.json` at repo root.
+No separate memory distribution manifest, installed/personal edit or historical
+golden change is needed. Runtime schemas/shared/scripts are copied by the installer;
+agent and skills content is projected through each host renderer.
+
+| Component | Role | Evidence relation / distribution |
 |---|---|---|
-| `agents/forge-memory.md`, `shared/forge-procedure-memory.md` | Extraction worker contract | Produce v1 envelopes today. |
-| `scripts/forge-unit-sidecar.js` (`memorySchema`) | Sends the v1 schema to providers, validates, publishes receipts | Producer of envelopes. |
-| `scripts/forge-worker-result-contract.js` | Loads `memory-extraction.schema.json` for the memory profile | Envelope consumer. |
-| `scripts/forge-memory-extraction.js` (`validateExtractionResult`, `publishExtraction`, `publicationState`) | Owner validation, MEM allocation, canonical rows | Writer of fragment stats; v1 reducer. |
-| `scripts/forge-memory.js` (`mergeStats`, `statHash`) | Fragment merge, event identity, same-ts precedence | Storage order seen by readers. |
-| `scripts/forge-projection.js` (`projectMemoryEntries`, `queryMemoryEntries`, `renderMemory`) | Projection, decay, ranking | Legacy reducer (consumer). |
-| `scripts/forge-memory-evidence.js` | Version detection, v2 validation, owner binding, fold | Single shared interpretation. |
+| scripts/forge-memory-evidence.js | Pure reducer/decoder/binder | Sole interpretation of v1/v2; runtime scripts copy |
+| scripts/forge-memory.js | Store, merger, exposure CLI | Namespace validation, atomic replay, alias --hit |
+| scripts/forge-memory-extraction.js | Owner publisher | Versioned decoder, cap and promotion, immutable rows |
+| scripts/forge-projection.js | Active projection, decay, query | Shared fold; additive ranking remains separate |
+| scripts/forge-unit-sidecar.js | Prompt, transport, ready receipts | v2 schema and supplied owner evidence; v1 replay preserved |
+| scripts/forge-worker-result-contract.js | Worker envelope decoder | Version-aware memory profile |
+| shared/schemas/memory-extraction.schema.json | Frozen v1 | installer-managed shared/schemas recursive copy; historical ready compatibility |
+| shared/schemas/memory-extraction-v2.schema.json | Closed v2 | installer-managed shared/schemas copy; fresh installed decoder imports |
+| agents/forge-memory.md | Extraction instructions/example | source_id agents; Claude Markdown / Codex TOML renderer |
+| skills/forge-auto/SKILL.md | Exposure producer | source_id skills; single selection, real dispatchId, post-delivery only |
+| skills/forge-next/SKILL.md | Step exposure producer | source_id skills; same delivery boundary and replay |
+| skills/forge-memories/SKILL.md | Human canonical view | source_id skills; separate legacy/confirmation/utility |
+| shared/forge-procedure-memory.md | Mandatory memory rules | source_id procedures + installer shared copy; owner references, v2, no frequency promotion |
+| shared/forge-procedures.json | Integrity and phase inventory | source_id procedures + installer shared copy; canonical utf8-no-bom-lf-v1 memory digest |
+| scripts/forge-claude-renderer.js | Claude source renderer | agents / skills source IDs; preserves external content |
+| scripts/forge-codex-renderer.js | Codex source renderer | agents / skills source IDs; preserves external content |
+| scripts/forge-installer.js | Runtime/source installation | Copies scripts/shared/schemas and invokes both host renderers |
+| scripts/forge-memory-evidence-distribution.test.js | Temporary-root integration | Fresh child process, installed schemas/loader, both host surfaces |
+
+Installed test roots prove local distribution and decoding only. They do not prove
+live provider delivery, hosted CI, installation in a real profile or human acceptance.
+If an adapter lacks positive context receipt, exposure stays zero and delivery unknown.
 
 ## Proven divergence between the current reducers
 

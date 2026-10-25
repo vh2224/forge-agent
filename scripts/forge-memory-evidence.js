@@ -446,14 +446,19 @@ function normalizeEvidenceEvent(row, options) {
     return invalidRow(kind, REASONS.HYBRID_SHAPE, `${kind} is a legacy-only kind`);
   }
   if (!V2_KINDS.has(kind)) return invalidRow(kind, REASONS.UNKNOWN_KIND, `unknown v2 kind ${JSON.stringify(kind)}`);
-  const allowed = new Set([...V2_COMMON_FIELDS, ...V2_ROW_FIELDS[kind]]);
+  // Compatibility calls identify only a local invocation, never a delivered
+  // context or an observed outcome. Keep this a closed, exposure-only shape.
+  const legacyInvocation = kind === 'exposure' && row.provenance === 'legacy-invocation-only';
+  const allowed = new Set([...V2_COMMON_FIELDS, ...(legacyInvocation
+    ? ['mem_id', 'provenance', 'invocation_id'] : V2_ROW_FIELDS[kind])]);
   const extra = Object.keys(row).filter(key => !allowed.has(key));
   if (extra.length > 0) return invalidRow(kind, REASONS.UNEXPECTED_PROPERTY, `unexpected ${extra.sort().join(', ')}`);
 
   const ids = [['extraction_id', BOUNDED_ID_RE], ['local_event_id', LOCAL_ID_RE]];
   if (kind === 'supersede') ids.push(['old_id', MEMORY_ID_RE], ['new_id', MEMORY_ID_RE]);
   else ids.push(['mem_id', MEMORY_ID_RE]);
-  if (EVIDENCE_KINDS.includes(kind)) ids.push(['evidence_ref', LOCAL_ID_RE], ['source_fingerprint', BOUNDED_ID_RE]);
+  if (legacyInvocation) ids.push(['invocation_id', BOUNDED_ID_RE]);
+  else if (EVIDENCE_KINDS.includes(kind)) ids.push(['evidence_ref', LOCAL_ID_RE], ['source_fingerprint', BOUNDED_ID_RE]);
   for (const [field, pattern] of ids) {
     if (typeof row[field] !== 'string' || !pattern.test(row[field])) {
       return invalidRow(kind, REASONS.INVALID_IDENTIFIER, `${field} is missing or not a bounded identifier`);
@@ -475,7 +480,7 @@ function normalizeEvidenceEvent(row, options) {
     return invalidRow(kind, REASONS.INVALID_ENVELOPE, 'prune reason must equal "cap"');
   } else if (kind === 'promote' && String(row.threshold_met) !== 'true') {
     return invalidRow(kind, REASONS.INVALID_ENVELOPE, 'promote threshold_met must equal true');
-  } else if (EVIDENCE_KINDS.includes(kind)) {
+  } else if (EVIDENCE_KINDS.includes(kind) && !legacyInvocation) {
     if (!present(row.observation_id)) return invalidRow(kind, REASONS.OBSERVATION_MISSING, 'owner observation_id is required');
     if (!BOUNDED_ID_RE.test(String(row.observation_id))) {
       return invalidRow(kind, REASONS.INVALID_IDENTIFIER, 'observation_id is not a bounded identifier');
@@ -499,14 +504,14 @@ function normalizeEvidenceEvent(row, options) {
   return {
     origin: 'v2',
     kind,
-    label: kind === 'confirm' ? 'independent_confirmation' : kind,
+    label: legacyInvocation ? 'legacy-invocation-only' : kind === 'confirm' ? 'independent_confirmation' : kind,
     mem_id: memId,
     ts,
     event_id: row.event_id,
     extraction_id: row.extraction_id,
     observation_id: present(row.observation_id) ? String(row.observation_id) : null,
     payload: canonicalScalars(row),
-    binding: EVIDENCE_KINDS.includes(kind) ? canonicalScalars(row, BINDING_FIELDS) : null,
+    binding: EVIDENCE_KINDS.includes(kind) && !legacyInvocation ? canonicalScalars(row, BINDING_FIELDS) : null,
     row,
   };
 }
@@ -668,16 +673,20 @@ function applyV2(entry, event, state, report) {
     report.rejected.push({ ...where, reason: REASONS.CONFIRM_NOT_INDEPENDENT });
     return;
   }
-  const observationKey = `${entry.identity}\x00${event.observation_id}`;
-  const prior = state.observations.get(observationKey);
-  if (prior) {
-    if (prior.binding !== event.binding) {
-      fail(REASONS.OBSERVATION_CONFLICT, `observation ${event.observation_id} on ${entry.identity} is bound inconsistently`);
+  // Invocation-only exposures deduplicate by event identity, not a shared null
+  // observation key. There is no observation binding to index here.
+  if (event.observation_id !== null) {
+    const observationKey = `${entry.identity}\x00${event.observation_id}`;
+    const prior = state.observations.get(observationKey);
+    if (prior) {
+      if (prior.binding !== event.binding) {
+        fail(REASONS.OBSERVATION_CONFLICT, `observation ${event.observation_id} on ${entry.identity} is bound inconsistently`);
+      }
+      report.duplicates.push({ ...where, observation_id: event.observation_id, first_event_id: prior.event_id, reason: REASONS.DUPLICATE_OBSERVATION });
+      return;
     }
-    report.duplicates.push({ ...where, observation_id: event.observation_id, first_event_id: prior.event_id, reason: REASONS.DUPLICATE_OBSERVATION });
-    return;
+    state.observations.set(observationKey, event);
   }
-  state.observations.set(observationKey, event);
   const counters = entry.counters;
   if (event.kind === 'confirm') {
     applyReinforcement(entry, row.ts);

@@ -461,11 +461,9 @@ test('--query-file cannot escape cwd and unknown query flags fail closed', () =>
 
 // ── --hit: usage feedback loop ───────────────────────────────────────────────
 //
-// Ranking is confidence × max(1, hits), but nothing ever emitted a hit event —
-// measured: every fact in this repo's store carried hits: 0. --hit closes the
-// loop: the orchestrator pipes --select's own envelope back in after injecting.
+// --hit remains an input/output compatibility alias for exposure v2.
 
-test('--hit records a hit stat for each injected fact and ranking sees it', () => withTemp((cwd) => {
+test('--hit accepts the selection envelope and records invocation-only exposure without fabricating observation or reinforcement', () => withTemp((cwd) => {
   memory.writeFragment(cwd, {
     unit_id: 'T-20260823120000-hits',
     facts: [fact('MEM001', 'gotcha', 'spawnSync shell false rejects glob argv on win32', 'T-20260823120000-hits')],
@@ -480,18 +478,24 @@ test('--hit records a hit stat for each injected fact and ranking sees it', () =
     { encoding: 'utf8', input: select.stdout });
   const report = JSON.parse(hit.stdout);
   assert.strictEqual(hit.status, 0);
-  assert.strictEqual(report.recorded, 1, 'one hit recorded');
-  assert.strictEqual(report.fragments[0].landed, true, 'stat landed on the owning fragment');
+  assert.strictEqual(report.recorded, 1);
+  assert.deepStrictEqual(report.skipped, []);
   const again = JSON.parse(spawnSync(process.execPath, [script, '--select', '--unit-type', 'execute-task',
     '--text', 'spawnSync glob argv win32', '--cwd', cwd], { encoding: 'utf8' }).stdout);
-  assert.strictEqual(again.entries[0].hits, 1, 'projection folds the hit');
-  assert.ok(again.entries[0].confidence > envelope.entries[0].confidence, 'hit nudges confidence up');
+  assert.strictEqual(again.entries[0].hits, 0, 'exposure is not confirmation');
+  assert.strictEqual(again.entries[0].confidence, envelope.entries[0].confidence, 'exposure never reinforces confidence');
+  const rows = memory.readFragment(cwd, 'T-20260823120000-hits').stats;
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].provenance, 'legacy-invocation-only');
+  assert.strictEqual(rows[0].invocation_id, report.invocation_id);
+  for (const key of ['observation_id', 'independent_ref', 'outcome_id', 'delivery_id']) assert(!(key in rows[0]), key);
 }));
 
 test('--hit accepts a bare array, reports unusable rows in skipped, and stays exit 0', () => withTemp((cwd) => {
   memory.writeFragment(cwd, {
     unit_id: 'T-20260823120000-hits',
-    facts: [fact('MEM001', 'gotcha', 'x', 'T-20260823120000-hits')],
+    facts: [fact('MEM001', 'gotcha', 'x', 'T-20260823120000-hits'),
+      fact('MEM002', 'gotcha', 'y', 'T-20260823120000-hits')],
     stats: [],
   });
   const script = path.join(__dirname, 'forge-memory.js');
@@ -499,14 +503,19 @@ test('--hit accepts a bare array, reports unusable rows in skipped, and stays ex
     encoding: 'utf8',
     input: JSON.stringify([
       { unit_id: 'T-20260823120000-hits', mem_id: 'MEM001' },
+      { unit_id: 'T-20260823120000-hits', mem_id: 'MEM002' },
+      { unit_id: 'T-20260823120000-hits', mem_id: 'MEM001' },
       { mem_id: 'MEM-orphan' },
     ]),
   });
   const report = JSON.parse(r.stdout);
   assert.strictEqual(r.status, 0, 'advisory: per-row problems never fail the call');
-  assert.strictEqual(report.recorded, 1);
-  assert.strictEqual(report.skipped.length, 1, 'the unit-less row is named, not swallowed');
+  assert.strictEqual(report.recorded, 2);
+  assert.strictEqual(report.skipped.length, 1, 'only the unit-less row is skipped');
   assert.strictEqual(report.skipped[0].reason, 'missing-unit-or-mem-id');
+  const rows = memory.readFragment(cwd, 'T-20260823120000-hits').stats;
+  assert.strictEqual(rows.length, 2);
+  assert(rows.every(row => row.invocation_id === report.invocation_id), 'one local invocation ID shared by every entry');
 }));
 
 test('--hit refuses unusable stdin loudly (never a silent no-op)', () => withTemp((cwd) => {
@@ -804,6 +813,60 @@ test('the same v2 delivery stays separate per fragment namespace', () => withTem
     entries.map(entry => [entry.identity, entry.hits, entry.evidence.v2.independent_confirmation_count]).sort(),
     [['M001/T01/MEM001', 1, 1], ['T01/MEM001', 1, 1], ['T02/MEM001', 1, 1]],
   );
+}));
+
+test('--expose uses stable owner delivery identity: replay zero, distinct delivery one, bounded input and advisory conflict', () => withTemp(cwd => {
+  memory.writeFragment(cwd, { unit_id: 'T01', facts: [originFact('MEM001')], stats: [] });
+  const script = path.join(__dirname, 'forge-memory.js');
+  const entries = [{ unit_id: 'T01', mem_id: 'MEM001' }];
+  const invoke = (id, input = entries, cmd = '--expose') => spawnSync(process.execPath,
+    [script, cmd, ...(id === null ? [] : ['--event-id', id]), '--cwd', cwd],
+    { encoding: 'utf8', input: JSON.stringify(input) });
+  const first = JSON.parse(invoke('dispatch-1', { entries: [...entries, ...entries] }).stdout);
+  assert.strictEqual(first.recorded, 1);
+  assert.strictEqual(first.fragments[0].hits, first.fragments[0].exposures);
+  const file = memory.fragmentPath(cwd, 'T01');
+  const before = fs.readFileSync(file);
+  assert.strictEqual(JSON.parse(invoke('dispatch-1').stdout).recorded, 0);
+  assert(fs.readFileSync(file).equals(before), 'replay preserves exact bytes');
+  assert.strictEqual(JSON.parse(invoke('dispatch-2').stdout).recorded, 1);
+  const state = projection.projectMemoryEntries(cwd, { nowMs: NOW })[0];
+  assert.strictEqual(state.hits, 0);
+  assert.strictEqual(state.evidence.v2.independent_confirmation_count, 0);
+  const unchanged = fs.readFileSync(file);
+  for (const id of [null, '', 'x'.repeat(129), '../escape', '$(whoami)']) {
+    assert.notStrictEqual(invoke(id).status, 0);
+    assert(fs.readFileSync(file).equals(unchanged));
+  }
+  const legacy = JSON.parse(invoke(null, [...entries, ...entries], '--hit').stdout);
+  assert.strictEqual(legacy.recorded, 1, 'duplicate entries in one invocation count once');
+  assert.deepStrictEqual(legacy.skipped, []);
+  assert.strictEqual(legacy.provenance, 'legacy-invocation-only');
+  assert.strictEqual(legacy.delivery_id, null);
+  assert(legacy.invocation_id);
+  const nextLegacy = JSON.parse(invoke(null, entries, '--hit').stdout);
+  assert.strictEqual(nextLegacy.recorded, 1, 'separate unidentified calls are separate invocations');
+  assert.notStrictEqual(nextLegacy.invocation_id, legacy.invocation_id);
+  const rows = memory.readFragment(cwd, 'T01').stats;
+  assert.strictEqual(rows.length, 4, 'two deliveries and two local invocations');
+  assert(rows.every(row => row.kind === 'exposure' && row.evidence_version === '2'));
+  const invocationRows = rows.filter(row => row.provenance === 'legacy-invocation-only');
+  assert.strictEqual(invocationRows.length, 2);
+  for (const row of invocationRows) {
+    for (const key of ['observation_id', 'independent_ref', 'outcome_id', 'delivery_id']) assert(!(key in row), key);
+  }
+  const afterLegacy = projection.projectMemoryEntries(cwd, { nowMs: NOW })[0];
+  assert.strictEqual(afterLegacy.evidence.counters.exposure.count, 4);
+  assert.strictEqual(afterLegacy.hits, 0);
+  assert.strictEqual(afterLegacy.evidence.v2.independent_confirmation_count, 0);
+  // Tamper a stored binding to demonstrate named identity conflict before write.
+  const text = fs.readFileSync(file, 'utf8');
+  fs.writeFileSync(file, text.replace('source_unit: confirmed-delivery', 'source_unit: other'));
+  const tampered = fs.readFileSync(file);
+  const conflict = JSON.parse(invoke('dispatch-1').stdout);
+  assert.strictEqual(conflict.recorded, 0);
+  assert.match(conflict.skipped[0].reason, /conflict/i);
+  assert(fs.readFileSync(file).equals(tampered));
 }));
 
 runTests().catch(error => {

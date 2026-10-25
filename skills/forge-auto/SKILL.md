@@ -1324,21 +1324,38 @@ Store the returned `taskId` as `current_task_id`. Then immediately mark it as in
 TaskUpdate({ taskId: current_task_id, status: "in_progress" })
 ```
 
-**Selective memory injection** — one call to the store's own selector (budget-aware, unit-type-aware keyword scoring), then record which facts were actually injected so ranking learns from real use:
+**Selective memory injection** - reuse the single budget-aware selection for this unit.
 
 ```bash
-# --select ranks by (keyword overlap × category preference × confidence·max(1,hits))
-# under a token budget. --query-file feeds the unit's plan as the query; fall back
-# to --text "" when no plan exists for this unit type.
+# Additive ranking: matched_terms*100 + category_preference*10 + confidence*max(1,hits).
+# Keep this selection envelope; do not reselect when recording delivery.
 _mem_json=$(node "$FORGE_SCRIPTS_DIR/forge-memory.js" --select --unit-type "$unit_type" ${PLAN_PATH:+--query-file "$PLAN_PATH"} --limit 8 --max-tokens 2000 --cwd "$WORKING_DIR" 2>/dev/null || echo '{}')
 RELEVANT_MEMORIES=$(printf '%s' "$_mem_json" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.stdout.write(j.markdown&&j.markdown.trim()?j.markdown:'(none)')}catch(e){process.stdout.write('(none)')}}")
-# Close the usage loop: one kind:'hit' stat per injected fact (measured before this
-# existed: every fact in the store carried hits:0 — ranking had no feedback signal).
-# Advisory — never blocks the dispatch.
-printf '%s' "$_mem_json" | node "$FORGE_SCRIPTS_DIR/forge-memory.js" --hit --cwd "$WORKING_DIR" >/dev/null 2>&1 || true
 ```
 
-**Fallback:** if the fragment store is empty/absent (`--select` returned no entries and `.gsd/memory/` does not exist — pre-fragment-store workspace), fall back to `ALL_MEMORIES` (loaded from `.gsd/AUTO-MEMORY.md` at Load context) filtered to ≤8 entries sharing keywords with the plan. No hits are recorded on the fallback path (nothing owns the facts).
+Keep the exact entries included in `RELEVANT_MEMORIES` as `_delivered_mem_json`
+(a subset of `_mem_json.entries` only when packing omitted entries). After the
+actual dispatch returns positive evidence that this context was received, record:
+
+```bash
+# DISPATCH_ID is the real stable dispatchId from that invocation, never a clock,
+# new random value, unit ID alone, dispatch_allowed or text hash.
+# DELIVERY_CONFIRMED is set only from that invocation's positive delivery evidence.
+if [ "$DELIVERY_CONFIRMED" = true ] && [ -n "$DISPATCH_ID" ]; then
+  printf '%s' "$_delivered_mem_json" | node "$FORGE_SCRIPTS_DIR/forge-memory.js" --expose --event-id "$DISPATCH_ID" --cwd "$WORKING_DIR" || true
+fi
+```
+
+Native tool return confirming the invocation with the included context counts.
+Sidecar needs positive transport evidence of context send/receipt; isolated spawn,
+selection, packaging, `dispatch_allowed`, and final task success do not count.
+An adapter that supplies no such evidence records zero: diagnose delivery unknown
+on refusal/timeout or unavailable acknowledgement. Do not modify transport APIs.
+Record only after delivery, never while preparing the prompt. Replay uses the same
+`dispatchId` and entries; no second selector/ranker, model, budget, gate or isolation
+change. Exposure is advisory and never independent confirmation or utility.
+
+**Fallback:** if the fragment store is empty/absent (`--select` returned no entries and `.gsd/memory/` does not exist — pre-fragment-store workspace), fall back to `ALL_MEMORIES` (loaded from `.gsd/AUTO-MEMORY.md` at Load context) filtered to ≤8 entries sharing keywords with the plan. No exposures are recorded on the fallback path (nothing owns the facts).
 
 If nothing matches in either path: set `RELEVANT_MEMORIES` to `(none)`.
 
