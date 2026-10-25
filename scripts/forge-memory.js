@@ -33,6 +33,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { isValid, entityKind } = require('./forge-ids');
 const yamlSafe = require('./forge-yaml-safe');
+const memoryEvidence = require('./forge-memory-evidence');
 const { isGroupedFile, readGroupedUnits, readSniffBuffer, parseGroup, attachSnapshot, snapshotText, publicEntry, unitTextOf } = require('./forge-grouped-file');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -515,7 +516,9 @@ function factHash(f) {
 // New publisher events carry event_id, which is their replay identity. Legacy
 // events retain the historical (kind, mem_id, ts) tuple so additive metadata
 // cannot manufacture duplicates. Supersede is the one legacy exception: its
-// documented identity lives in old_id/new_id rather than mem_id.
+// documented identity lives in old_id/new_id rather than mem_id. Evidence v2
+// rows use the same event_id identity, which forge-memory-evidence has already
+// checked equals extraction_id:v2:local_event_id before the row reaches here.
 function statHash(s) {
   let raw;
   if (s && s.event_id) {
@@ -570,40 +573,133 @@ function mergeFacts(existing, incoming) {
   return merged;
 }
 
+// ── Evidence rows ────────────────────────────────────────────────────────────
+// A row is evidence v2 only when it carries evidence_version (contract:
+// shared/forge-memory-evidence.md); the kind name alone never implies v2.
+function isEvidenceRow(s) {
+  return Boolean(s) && s.evidence_version !== undefined && s.evidence_version !== null && s.evidence_version !== '';
+}
+
+// v2 rows persist as flat scalars only: a nested value would be String()-ed
+// into something the reader cannot round-trip, or slip past the ID patterns.
+function scalarFields(s) {
+  return Object.keys(s).every(key => {
+    const value = s[key];
+    return typeof value === 'string' || typeof value === 'boolean'
+      || (typeof value === 'number' && Number.isFinite(value));
+  });
+}
+
+function memoryEventError(code, reason, message) {
+  const error = new Error(message);
+  error.code = code;
+  error.reason = reason;
+  return error;
+}
+
+// Incoming rows are refused before anything is persisted; stored rows are
+// never re-validated here, so history is neither dropped nor rewritten.
+function normalizeIncomingStat(s) {
+  if (isEvidenceRow(s) && !scalarFields(s)) {
+    throw memoryEventError('MEMORY_EVENT_INVALID', 'non-scalar-field',
+      `Invalid memory evidence event ${s.event_id || '(no event_id)'}: every field must be a scalar`);
+  }
+  const normalized = memoryEvidence.normalizeEvidenceEvent(s);
+  if (normalized.origin === 'invalid') {
+    throw memoryEventError('MEMORY_EVENT_INVALID', normalized.reason,
+      `Invalid memory event (${normalized.reason}): ${normalized.detail}`);
+  }
+  return normalized;
+}
+
+// Replay equality: the reducer's scalar payload when both rows are valid v2,
+// otherwise the historical String()-based content hash (same canonical form).
+function samePayload(prior, s) {
+  if (isEvidenceRow(prior) && isEvidenceRow(s)) {
+    const left = memoryEvidence.normalizeEvidenceEvent(prior);
+    const right = memoryEvidence.normalizeEvidenceEvent(s);
+    if (left.origin === 'v2' && right.origin === 'v2') return left.payload === right.payload;
+  }
+  return factContentHash(prior) === factContentHash(s);
+}
+
+// Ordering wrapper consumed by the shared evidence comparator/merger.
+function orderedStat(s) {
+  return { row: s, ts: String(s.ts || ''), kind: String(s.kind || ''), event_id: String(s.event_id || '') };
+}
+
+function compareLegacyStats(a, b) {
+  const ta = String(a.ts || '');
+  const tb = String(b.ts || '');
+  if (ta < tb) return -1;
+  if (ta > tb) return 1;
+  const order = { seed: 0, hit: 1, confirm: 1, promote: 2, prune: 3, supersede: 3 };
+  const oa = Object.prototype.hasOwnProperty.call(order, a.kind) ? order[a.kind] : 2;
+  const ob = Object.prototype.hasOwnProperty.call(order, b.kind) ? order[b.kind] : 2;
+  if (oa !== ob) return oa - ob;
+  return statHash(a).localeCompare(statHash(b));
+}
+
 // ── mergeStats ────────────────────────────────────────────────────────────────
 // Merges two arrays of stat event objects.
-// Dedup by SHA1(kind, mem_id, ts) — re-writing the same event is a no-op.
-// Result sorted by ts ASC then by hash for stability.
+// Legacy rows: dedup by SHA1(kind, mem_id, ts) or event_id — re-writing the
+// same event is a no-op; when a legacy row is added the legacy subsequence is
+// sorted by ts, kind precedence and hash exactly as before. Otherwise the
+// stored legacy order and multiplicity are kept verbatim.
+// Evidence v2 rows: validated by forge-memory-evidence before persistence,
+// replayed event_id is a no-op, the same observation on the same target is a
+// no-op, and any differently bound copy is MEMORY_EVENT_CONFLICT. v2 rows are
+// ordered canonically (ts, precedence, event_id) and merged into the legacy
+// subsequence the same way the reducer reads them, so a re-read is stable.
 function mergeStats(existing, incoming) {
   const seen = new Map(existing.map(stat => [statHash(stat), stat]));
-  const merged = [...existing];
+  const legacy = existing.filter(stat => !isEvidenceRow(stat));
+  const evidence = existing.filter(isEvidenceRow);
+  const observations = new Map();
+  for (const stat of evidence) {
+    const event = memoryEvidence.normalizeEvidenceEvent(stat);
+    if (event.origin !== 'v2' || event.binding === null) continue;
+    const key = `${event.mem_id}\x00${event.observation_id}`;
+    if (!observations.has(key)) observations.set(key, event);
+  }
+  let legacyAdded = false;
 
   for (const s of incoming) {
     const h = statHash(s);
-    if (seen.has(h) && s.event_id && factContentHash(seen.get(h)) !== factContentHash(s)) {
-      const error = new Error(`Conflicting memory event identity: ${s.event_id}`);
-      error.code = 'MEMORY_EVENT_CONFLICT';
-      throw error;
+    // Identity first: a transaction hands back the stored rows it read, and an
+    // identical copy of history is a no-op whatever that history contains.
+    if (seen.has(h)) {
+      if (s && s.event_id && !samePayload(seen.get(h), s)) {
+        throw memoryEventError('MEMORY_EVENT_CONFLICT', memoryEvidence.REASONS.EVENT_ID_CONFLICT,
+          `Conflicting memory event identity: ${s.event_id}`);
+      }
+      continue;
     }
-    if (!seen.has(h)) {
-      seen.set(h, s);
-      merged.push(s);
+    const normalized = normalizeIncomingStat(s);
+    if (normalized.origin === 'v2' && normalized.binding !== null) {
+      const key = `${normalized.mem_id}\x00${normalized.observation_id}`;
+      const recorded = observations.get(key);
+      if (recorded) {
+        if (recorded.binding !== normalized.binding) {
+          throw memoryEventError('MEMORY_EVENT_CONFLICT', memoryEvidence.REASONS.OBSERVATION_CONFLICT,
+            `Conflicting memory observation ${normalized.observation_id} on ${normalized.mem_id}: ${s.event_id}`);
+        }
+        continue;
+      }
+      observations.set(key, normalized);
+    }
+    seen.set(h, s);
+    if (normalized.origin === 'v2') {
+      evidence.push(s);
+    } else {
+      legacy.push(s);
+      legacyAdded = true;
     }
   }
 
-  merged.sort((a, b) => {
-    const ta = String(a.ts || '');
-    const tb = String(b.ts || '');
-    if (ta < tb) return -1;
-    if (ta > tb) return 1;
-    const order = { seed: 0, hit: 1, confirm: 1, promote: 2, prune: 3, supersede: 3 };
-    const oa = Object.prototype.hasOwnProperty.call(order, a.kind) ? order[a.kind] : 2;
-    const ob = Object.prototype.hasOwnProperty.call(order, b.kind) ? order[b.kind] : 2;
-    if (oa !== ob) return oa - ob;
-    return statHash(a).localeCompare(statHash(b));
-  });
-
-  return merged;
+  if (legacyAdded) legacy.sort(compareLegacyStats);
+  const { mergeOrdered, compareV2 } = memoryEvidence._private;
+  return mergeOrdered(legacy.map(orderedStat), evidence.map(orderedStat).sort(compareV2)).map(item => item.row);
 }
 
 // ── serializeFrontmatter ──────────────────────────────────────────────────────
@@ -716,7 +812,9 @@ function detectGroupedMember(cwd, storageKey, opts) {
 // milestoneId qualifies the physical fragment and prevents cross-milestone collisions.
 // Merges with existing fragment if present.
 //   - facts: dedup by mem_id; existing fact fields NEVER mutated (append-only).
-//   - stats: dedup by SHA1(kind, mem_id, ts); append-only.
+//   - stats: dedup by SHA1(kind, mem_id, ts); append-only. Evidence v2 rows
+//     are validated, replay/observation-deduplicated or refused as a conflict
+//     by mergeStats before any byte is written (see mergeStats).
 // Byte-compares after merge — skips write if content is identical (idempotent).
 // Returns { path: string, created: boolean }
 // created: false if content is identical after merge.
@@ -1070,7 +1168,7 @@ module.exports = {
   validateMilestoneId,
   queryRelevant,
   ASK_ID_RE,
-  _private: { detectGroupedMember, factContentHash, statHash },
+  _private: { detectGroupedMember, factContentHash, statHash, mergeStats },
 };
 
 // ── cliMain ───────────────────────────────────────────────────────────────────

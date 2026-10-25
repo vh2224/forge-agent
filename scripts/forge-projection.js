@@ -9,6 +9,8 @@
 //   renderLedger(cwd)    → string  // LEDGER.md content reconstructed from fragments
 //   renderDecisions(cwd) → string  // DECISIONS.md content with derived # numbering
 //   renderMemory(cwd)    → string  // AUTO-MEMORY.md content with decay computed on-read
+//   projectMemoryState(cwd, { nowMs }) → { model_version, entries, diagnostics }
+//                                   // foldMemoryEvidence + one decay pass
 //   renderChecker(cwd)   → string  // CHECKER-MEMORY monolith view (on-demand only)
 //   isStale(cwd)         → { ledger:bool, decisions:bool, memory:bool }
 //   writeAll(cwd)        → { written:[string], skipped:[string] }
@@ -36,6 +38,8 @@ const path = require('path');
 const ledgerMod    = require('./forge-ledger');
 const decisionsMod = require('./forge-decisions');
 const memoryMod    = require('./forge-memory');
+// Single interpretation of memory facts/stats (shared/forge-memory-evidence.md).
+const memoryEvidence = require('./forge-memory-evidence');
 const checkerMod   = require('./forge-checker-memory');
 const storeStateMod = require('./forge-store-state');
 const itemsMod     = require('./forge-items');
@@ -568,18 +572,93 @@ function decayConfidence(baseConfidence, lastAccessTs, nowMs) {
   return Math.min(1, Math.max(0, baseConfidence * factor));
 }
 
-function finiteNumber(value, fallback) {
-  const parsed = typeof value === 'number' ? value : parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 function memoryIdentity(unitId, memId) {
   return `${unitId}\x00${memId}`;
 }
 
+// What `hits` means in every memory output: the historical ranking counter
+// (seed hits, legacy hit/confirm rows and owner-bound independent
+// confirmations). It is never a utility measure.
+const HITS_BASIS = 'legacy_ranking';
+
+function namespaceKey(milestoneId, unitId) {
+  return milestoneId ? `${milestoneId}/${unitId}` : unitId;
+}
+
+// Additive, copied view of the reducer state for one fact. Copies keep the
+// projection from aliasing the fold result handed to other consumers.
+function evidenceView(item) {
+  const counters = item.counters;
+  return {
+    model_version: memoryEvidence.EVIDENCE_MODEL_VERSION,
+    origin: item.origin,
+    hits_basis: HITS_BASIS,
+    superseded: item.superseded,
+    v2: { ...item.v2 },
+    counters: {
+      exposure: { ...counters.exposure },
+      reobserve: { ...counters.reobserve },
+      independent_confirmation: { ...counters.independent_confirmation },
+      utility: { ...counters.utility, outcome_ids: [...counters.utility.outcome_ids] },
+    },
+    legacy_ambiguous: { ...item.legacy_ambiguous },
+    promotions: item.promotions.map(promotion => ({ ...promotion })),
+  };
+}
+
+// The orphan bucket predates every evidence model: its hits are historical
+// and ambiguous, nothing in it is an exposure, confirmation or utility.
+function orphanEvidenceView(entry) {
+  const counter = () => ({ count: 0, last_ts: null });
+  return {
+    model_version: memoryEvidence.EVIDENCE_MODEL_VERSION,
+    origin: 'legacy_orphan',
+    hits_basis: HITS_BASIS,
+    superseded: false,
+    v2: { confidence: entry.confidence, independent_confirmation_count: 0, promoted: false },
+    counters: {
+      exposure: counter(),
+      reobserve: counter(),
+      independent_confirmation: counter(),
+      utility: { ...counter(), outcome_ids: [] },
+    },
+    legacy_ambiguous: { label: 'legacy_ambiguous', seed_hits: entry.hits, hit: 0, confirm: 0, promote: 0 },
+    promotions: [],
+  };
+}
+
+// One fold over every fragment. A stored conflict (MEMORY_EVIDENCE_CONFLICT)
+// is scoped to its namespace, so the offending fragment is located, named on
+// stderr and left out — the same treatment as an unparseable fragment —
+// instead of blanking the whole memory projection.
+function foldMemoryFragments(fragments) {
+  try {
+    return { folded: memoryEvidence.foldMemoryEvidence(fragments), skipped: [] };
+  } catch (error) {
+    if (!(error instanceof memoryEvidence.MemoryEvidenceError)) throw error;
+  }
+  const kept = [];
+  const skipped = [];
+  for (const fragment of fragments) {
+    try {
+      memoryEvidence.foldMemoryEvidence([fragment]);
+      kept.push(fragment);
+    } catch (error) {
+      if (!(error instanceof memoryEvidence.MemoryEvidenceError)) throw error;
+      process.stderr.write(`[forge-projection] warn: skipping memory fragment ${fragment.storageKey}: ${error.message}\n`);
+      skipped.push({ storage_key: fragment.storageKey, reason: error.reason });
+    }
+  }
+  return { folded: memoryEvidence.foldMemoryEvidence(kept), skipped };
+}
+
 // ── renderMemory ──────────────────────────────────────────────────────────────
-// Fold every fragment into structured entries with decay computed on-read.
-function projectMemoryEntries(cwd, opts) {
+// Fold every fragment through forge-memory-evidence (the single interpretation)
+// and apply time decay exactly once, here, with an explicit clock.
+//   entries[].confidence       decayed value used for ranking (unchanged formula)
+//   entries[].base_confidence  undecayed reducer state (clock independent)
+//   entries[].evidence         reducer counters, version and legacy ambiguity
+function projectMemoryState(cwd, opts) {
   const fragments = memoryMod.listFragments(cwd);
   const nowMs = opts && Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
 
@@ -589,6 +668,7 @@ function projectMemoryEntries(cwd, opts) {
   const factMap = new Map();
   const validRawIds = new Set();
   const pendingOrphans = [];
+  const parsed = [];
 
   for (const entry of fragments) {
     const { unitId, milestoneId, storageKey, path: fpath } = entry;
@@ -617,94 +697,41 @@ function projectMemoryEntries(cwd, opts) {
       continue;
     }
 
-    const localKeys = new Map();
-    const fragmentNamespace = milestoneId ? `${milestoneId}/${unitId}` : unitId;
-
-    // Register facts. First-write-wins remains unchanged inside one fragment;
-    // only cross-fragment collisions are separated.
     for (const fact of (frag.facts || [])) {
       const mid = String(fact.mem_id || '');
-      if (!mid) continue;
-      const identity = memoryIdentity(fragmentNamespace, mid);
-      localKeys.set(mid, identity);
-      validRawIds.add(mid);
-      if (!factMap.has(identity)) {
-        factMap.set(identity, {
-          identity: `${fragmentNamespace}/${mid}`,
-          unitId,
-          milestoneId: milestoneId || null,
-          storageKey,
-          fact,
-          hits: 0,
-          confidence: finiteNumber(fact.confidence_base, finiteNumber(fact.confidence, 0.5)),
-          lastAccessTs: fact.created_at || null,
-          pruned: false,
-          promoted: false,
-          promotedAt: null,
-        });
-      }
+      if (mid) validRawIds.add(mid);
     }
+    // The namespace comes from the storage key, never from frontmatter: an
+    // unqualified fragment keeps its historical unit-only identity.
+    parsed.push({
+      milestoneId: milestoneId || null,
+      unitId,
+      storageKey,
+      facts: Array.isArray(frag.facts) ? frag.facts : [],
+      stats: Array.isArray(frag.stats) ? frag.stats : [],
+    });
+  }
 
-    // Fold stat events (sorted by ts — already sorted in fragment)
-    for (const evt of (frag.stats || [])) {
-      // The documented supersede event uses old_id/new_id, not mem_id.
-      const mid = String(evt.kind === 'supersede'
-        ? (evt.old_id || evt.mem_id || '')
-        : (evt.mem_id || ''));
-      const identity = localKeys.get(mid);
-      if (!identity || !factMap.has(identity)) continue;
-      const entry = factMap.get(identity);
-
-      switch (evt.kind) {
-        case 'seed': {
-          // Seed establishes the baseline confidence/hits from a migrated memory.
-          // Must overwrite (not increment) — it is the starting point, not an accrual.
-          if (entry._mutated) {
-            process.stderr.write(`[forge-projection] warn: non-first seed event for ${mid} — applying last-seed-wins\n`);
-          }
-          entry.hits = (typeof evt.hits === 'number' ? evt.hits : parseInt(evt.hits, 10)) || 0;
-          entry.confidence = finiteNumber(
-            evt.confidence_base,
-            finiteNumber(evt.confidence, entry.confidence)
-          );
-          entry.lastAccessTs = evt.ts || entry.lastAccessTs;
-          entry._seenSeed = true;
-          break;
-        }
-        case 'hit':
-        case 'confirm':
-          entry._mutated = true;
-          entry.hits += 1;
-          entry.lastAccessTs = evt.ts || entry.lastAccessTs;
-          // Each hit nudges confidence up slightly (cap 0.99)
-          entry.confidence = Math.min(0.99, entry.confidence + 0.02);
-          break;
-        case 'prune':
-          entry._mutated = true;
-          entry.pruned = true;
-          break;
-        case 'promote':
-          entry._mutated = true;
-          entry.promoted = true;
-          entry.promotedAt = evt.ts || null;
-          entry.confidence = Math.min(0.99, entry.confidence + 0.05);
-          break;
-        case 'supersede':
-          // Superseded facts are treated as pruned
-          entry._mutated = true;
-          entry.pruned = true;
-          break;
-        case 'decay':
-          entry._mutated = true;
-          // Explicit decay events reduce confidence
-          if (evt.new_confidence !== undefined) {
-            entry.confidence = finiteNumber(evt.new_confidence, entry.confidence);
-          }
-          break;
-        default:
-          break;
-      }
-    }
+  // Facts, stats, first-fact-wins and the legacy row order are interpreted by
+  // the shared reducer; legacyProjection is the historical ranking input.
+  const { folded, skipped } = foldMemoryFragments(parsed);
+  const storageKeys = new Map(parsed.map(item => [namespaceKey(item.milestoneId, item.unitId), item.storageKey]));
+  for (const item of folded.entries) {
+    const legacy = item.legacyProjection;
+    factMap.set(memoryIdentity(namespaceKey(item.milestoneId, item.unitId), item.mem_id), {
+      identity: item.identity,
+      unitId: item.unitId,
+      milestoneId: item.milestoneId || null,
+      storageKey: storageKeys.get(namespaceKey(item.milestoneId, item.unitId)),
+      fact: item.fact,
+      hits: legacy.hits,
+      confidence: legacy.confidence,
+      lastAccessTs: legacy.lastAccessTs,
+      pruned: item.pruned,
+      promoted: legacy.promoted,
+      promotedAt: legacy.promotedAt,
+      evidence: evidenceView(item),
+    });
   }
 
   // Process the fallback bucket last so valid fragments win regardless of the
@@ -716,15 +743,16 @@ function projectMemoryEntries(cwd, opts) {
       ...entry,
       identity: `${unitId}/${mid}`,
       unitId,
+      evidence: orphanEvidenceView(entry),
     });
   }
 
-  // Apply time-based decay and filter pruned
+  // Apply time-based decay (once, from the undecayed state) and filter pruned.
   const active = [];
   for (const [, entry] of factMap) {
     if (entry.pruned) continue;
     const decayed = decayConfidence(entry.confidence, entry.lastAccessTs, nowMs);
-    active.push({ ...entry, confidence: decayed });
+    active.push({ ...entry, confidence: decayed, base_confidence: entry.confidence });
   }
 
   // Sort by (confidence * hits) DESC, then collision-safe identity for stability.
@@ -735,7 +763,21 @@ function projectMemoryEntries(cwd, opts) {
     return a.identity.localeCompare(b.identity);
   });
 
-  return active;
+  return {
+    model_version: folded.model_version,
+    entries: active,
+    diagnostics: {
+      rejected: folded.rejected,
+      ignored: folded.ignored,
+      replayed: folded.replayed,
+      duplicates: folded.duplicates,
+      skipped_fragments: skipped,
+    },
+  };
+}
+
+function projectMemoryEntries(cwd, opts) {
+  return projectMemoryState(cwd, opts).entries;
 }
 
 // Deterministic, model-free selector used by `forge-memory.js --query`.
@@ -784,6 +826,35 @@ function inlineLabel(value, fallback) {
   return normalized.slice(0, 160) || fallback;
 }
 
+// Bounded per-entry evidence summary for the selector output.
+function queryEvidence(view) {
+  const counters = view.counters;
+  const legacy = view.legacy_ambiguous;
+  return {
+    model_version: view.model_version,
+    origin: view.origin,
+    hits_basis: view.hits_basis,
+    counters: {
+      exposure: counters.exposure.count,
+      reobserve: counters.reobserve.count,
+      independent_confirmation: counters.independent_confirmation.count,
+      utility: counters.utility.count,
+    },
+    legacy_ambiguous: { seed_hits: legacy.seed_hits, hit: legacy.hit, confirm: legacy.confirm, promote: legacy.promote },
+  };
+}
+
+// Counts only: the detailed lists stay available through projectMemoryState.
+function diagnosticCounts(diagnostics) {
+  return {
+    rejected: diagnostics.rejected.length,
+    ignored: diagnostics.ignored.length,
+    replayed: diagnostics.replayed.length,
+    duplicates: diagnostics.duplicates.length,
+    skipped_fragments: diagnostics.skipped_fragments.length,
+  };
+}
+
 function queryMemoryEntries(cwd, opts) {
   opts = opts || {};
   // Module boundary: forge-memory.queryRelevant (← forge-prompt.js:306) and the
@@ -803,8 +874,9 @@ function queryMemoryEntries(cwd, opts) {
       ? new Map([['architecture', 3], ['pattern', 3], ['convention', 1], ['gotcha', 1]])
       : new Map();
 
+  const state = projectMemoryState(cwd, opts);
   const ranked = [];
-  for (const entry of projectMemoryEntries(cwd, opts)) {
+  for (const entry of state.entries) {
     const factTerms = queryTerms(`${entry.fact.text || ''} ${entry.fact.source_unit || ''}`);
     const matched = [...terms].filter(term => factTerms.has(term)).sort();
     const minimumOverlap = terms.size === 0 ? 0 : execution ? Math.min(2, terms.size) : planning ? 1 : 0;
@@ -860,6 +932,10 @@ function queryMemoryEntries(cwd, opts) {
       hits: entry.hits,
       score: Number(entry.score.toFixed(4)),
       matched_terms: entry.matched,
+      // Additive: undecayed state, counters and legacy ambiguity; `hits` keeps
+      // its numeric legacy-ranking meaning and is never a utility measure.
+      base_confidence: Number(entry.base_confidence.toFixed(4)),
+      evidence: queryEvidence(entry.evidence),
     });
     if (line.length >= remaining) break;
   }
@@ -871,6 +947,8 @@ function queryMemoryEntries(cwd, opts) {
     estimated_tokens: Math.ceil(markdown.length / 4),
     truncated,
     considered: ranked.length,
+    evidence_model_version: state.model_version,
+    evidence_diagnostics: diagnosticCounts(state.diagnostics),
   };
   // Additive, partial-only. `markdown` itself is untouched: it is injected into
   // prompts verbatim, so the marker must not travel inside the data.
@@ -879,6 +957,25 @@ function queryMemoryEntries(cwd, opts) {
     result.schema_warning = schema.warning;
   }
   return result;
+}
+
+// Labels appended after the legacy fields of the gsd-auto-memory comment, so
+// readers keyed on `mem_id … hits:N` (forge-migrate canonicalizeMemory) are
+// unaffected. No label contains the substring `hits:`, so the one legacy
+// `hits:N` token stays unambiguous for pattern readers.
+function renderEvidence(view) {
+  const counters = view.counters;
+  const legacy = view.legacy_ambiguous;
+  return [
+    `evidence:v${view.model_version}`,
+    `hits_basis:${view.hits_basis}`,
+    `exposure:${counters.exposure.count}`,
+    `reobserve:${counters.reobserve.count}`,
+    `independent_confirmations:${counters.independent_confirmation.count}`,
+    `utility:${counters.utility.count}`,
+    `legacy_seed_hit_count:${legacy.seed_hits}`,
+    `legacy_hit_event_count:${legacy.hit + legacy.confirm}`,
+  ].join(' ');
 }
 
 // ── renderMemory ─────────────────────────────────────────────────────────────────
@@ -894,6 +991,7 @@ function renderMemory(cwd) {
   const lines = ['# Forge Auto-Memory', ''];
   lines.push('> Emergent memory extracted from completed units. Max 50 entries, ranked by confidence × hits.');
   lines.push('> Decay: half-life 30 days. Computed on-read — not persisted in fragments.');
+  lines.push(`> hits = legacy ranking counter (seed hits, historical hit/confirm, owner-bound independent confirmations) — not a utility measure. Evidence model v${memoryEvidence.EVIDENCE_MODEL_VERSION}: exposure, reobserve and utility are counted apart and never change ranking; legacy_* counts are historical and ambiguous.`);
   lines.push('');
 
   if (capped.length === 0) {
@@ -909,7 +1007,7 @@ function renderMemory(cwd) {
     const mid  = f.mem_id || '';
     const promoted = entry.promoted ? `, promoted:${entry.promotedAt || 'yes'}` : '';
 
-    lines.push(`<!-- gsd-auto-memory mem_id:${mid} category:${cat} confidence:${conf} hits:${hits}${promoted} -->`);
+    lines.push(`<!-- gsd-auto-memory mem_id:${mid} category:${cat} confidence:${conf} hits:${hits}${promoted} ${renderEvidence(entry.evidence)} -->`);
     lines.push(`- **[${mid}]** *(${cat})* ${f.text || ''}`);
     if (f.source_unit) {
       lines.push(`  *(source: ${f.source_unit})*`);
@@ -1021,7 +1119,18 @@ function renderItems(cwd) {
 const crypto = require('crypto');
 const { writeAtomic } = require('./forge-yaml-safe');
 const PROJECTION_STATE = '.gsd/forge/projection-state.json';
-const RENDERER_VERSION = crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex');
+// The memory projection is this file PLUS the shared reducer it delegates to,
+// under an explicit contract version: changing only forge-memory-evidence.js,
+// or only the contract, must invalidate receipts written by the old pairing.
+const PROJECTION_CONTRACT = `forge-projection/memory-evidence-v${memoryEvidence.EVIDENCE_MODEL_VERSION}`;
+function rendererVersion(sources) {
+  return digest(JSON.stringify([sources.contract, digest(sources.projection), digest(sources.reducer)]));
+}
+const RENDERER_VERSION = rendererVersion({
+  contract: PROJECTION_CONTRACT,
+  projection: fs.readFileSync(__filename),
+  reducer: fs.readFileSync(require.resolve('./forge-memory-evidence')),
+});
 const PROJECTION_TARGETS = { ledger: LEDGER_FILE, decisions: DECISIONS_FILE, memory: MEMORY_FILE };
 
 function digest(content) { return crypto.createHash('sha256').update(content).digest('hex'); }
@@ -1168,12 +1277,15 @@ module.exports = {
   LEDGER_BLOCK_SEPARATOR_LINES,
   renderDecisions,
   projectMemoryEntries,
+  projectMemoryState,
   queryMemoryEntries,
   renderMemory,
   renderChecker,
   renderItems,
   isStale,
   writeAll,
+  RENDERER_VERSION,
+  _private: { rendererVersion, PROJECTION_CONTRACT, PROJECTION_STATE, decayConfidence },
 };
 
 // ── cliMain ───────────────────────────────────────────────────────────────────

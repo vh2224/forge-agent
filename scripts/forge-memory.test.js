@@ -9,6 +9,7 @@ const { spawn, spawnSync } = require('child_process');
 
 const memory = require('./forge-memory');
 const projection = require('./forge-projection');
+const evidence = require('./forge-memory-evidence');
 
 let passed = 0;
 let failed = 0;
@@ -584,6 +585,224 @@ test('legacy event tuple ignores additive metadata while event_id owns new repla
       }],
     }),
     error => error && error.code === 'MEMORY_EVENT_CONFLICT',
+  );
+}));
+
+// ── Evidence v2 rows in the store (S03/T02) ────────────────────────────────
+// Rows follow shared/forge-memory-evidence.md; the store validates incoming v2
+// rows through forge-memory-evidence and never rewrites stored history.
+
+function originFact(memId) {
+  return {
+    ...fact(memId, 'gotcha', `Fact ${memId}.`, 'execute-task/T01'),
+    confidence_base: 0.8, extraction_id: 'extract-1', source_fingerprint: 'sha256:origin',
+  };
+}
+
+function v2Row(kind, localEventId, overrides) {
+  const extractionId = (overrides && overrides.extraction_id) || 'extract-2';
+  const base = { kind, evidence_version: 2, event_id: `${extractionId}:v2:${localEventId}`, extraction_id: extractionId,
+    local_event_id: localEventId, ts: '2026-10-02T00:00:00.000Z', mem_id: 'MEM001' };
+  const bound = { evidence_ref: 'ev', observation_id: `obs-${localEventId}`, source_unit: 'execute-task/T02',
+    source_fingerprint: 'sha256:other', observed_kind: kind };
+  const extra = kind === 'confirm' ? { independent_ref: 'verify:T02:check-7' }
+    : kind === 'utility' ? { outcome_ref: 'out1', outcome_id: 'outcome-T02-pass', outcome_result_ref: 'result:T02:summary' } : {};
+  return { ...base, ...(evidence.EVIDENCE_KINDS.includes(kind) ? { ...bound, ...extra } : {}), ...(overrides || {}) };
+}
+
+function writeRawFragment(cwd, unitId, fragment, eol) {
+  const nl = eol || '\n';
+  const dir = path.join(cwd, '.gsd', 'memory');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${unitId}.md`);
+  fs.writeFileSync(file, `---${nl}${memory.serializeFrontmatter({ unit_id: unitId, ...fragment }, nl)}${nl}---${nl}`);
+  return file;
+}
+
+function lockNames(cwd) {
+  const lockRoot = path.join(cwd, '.gsd', 'memory', '.locks');
+  return fs.existsSync(lockRoot) ? fs.readdirSync(lockRoot) : [];
+}
+
+test('v2 evidence rows round-trip as closed scalars, keep origin and version, and replay without rewrite', () => withTemp(cwd => {
+  const yamlish = '!!js/function >- {exec: "rm -rf /"} #not-a-comment';
+  const rows = [
+    v2Row('confirm', 'c1', { source_unit: yamlish }),
+    v2Row('exposure', 'x1'),
+    v2Row('utility', 'u1'),
+    v2Row('seed', 's1', { mem_id: 'MEM002', confidence_base: 0.75, hits: 0 }),
+    v2Row('promote', 'p1', { threshold_met: true }),
+  ];
+  memory.writeFragment(cwd, {
+    unit_id: 'T01', milestone_id: 'M001', facts: [originFact('MEM001'), originFact('MEM002')], stats: rows,
+  });
+  const file = memory.fragmentPath(cwd, 'T01', { milestoneId: 'M001' });
+  const text = fs.readFileSync(file, 'utf8');
+  assert(!text.includes(`source_unit: ${yamlish}`), 'a YAML-significant owner scalar must not be emitted as a plain scalar');
+
+  const stored = memory.readFragment(cwd, 'T01', { milestoneId: 'M001' }).stats;
+  assert.strictEqual(stored.length, rows.length);
+  for (const original of rows) {
+    const back = stored.find(stat => stat.event_id === original.event_id);
+    assert(back, `${original.event_id} must survive the round-trip`);
+    assert.deepStrictEqual(Object.keys(back).sort(), Object.keys(original).sort(), 'no field is added or lost');
+    for (const key of Object.keys(original)) {
+      assert.strictEqual(back[key], String(original[key]), `${original.event_id}.${key} stays a literal scalar`);
+    }
+    const reread = evidence.normalizeEvidenceEvent(back);
+    assert.strictEqual(reread.origin, 'v2', `${original.event_id} still reads as evidence v2`);
+    assert.strictEqual(reread.payload, evidence.normalizeEvidenceEvent(original).payload);
+  }
+  const confirm = stored.find(stat => stat.kind === 'confirm');
+  assert.deepStrictEqual(
+    [confirm.evidence_version, confirm.extraction_id, confirm.local_event_id, confirm.source_unit, confirm.source_fingerprint],
+    ['2', 'extract-2', 'c1', yamlish, 'sha256:other'],
+    'version and origin are retained',
+  );
+
+  const replay = memory.writeFragment(cwd, {
+    unit_id: 'T01', milestone_id: 'M001', facts: [originFact('MEM001')], stats: stored,
+  });
+  assert.strictEqual(replay.created, false, 'replaying the parsed rows is a no-op');
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), text, 'history bytes are not rewritten');
+}));
+
+test('invalid, unknown-version, hybrid and non-scalar evidence rows are refused before any byte persists', () => withTemp(cwd => {
+  memory.writeFragment(cwd, { unit_id: 'T01', facts: [originFact('MEM001')], stats: [v2Row('exposure', 'x0')] });
+  const file = memory.fragmentPath(cwd, 'T01');
+  const before = fs.readFileSync(file);
+  const cases = [
+    [v2Row('confirm', 'c1', { evidence_version: 3 }), 'unknown-evidence-version'],
+    [v2Row('mystery', 'm1'), 'unknown-kind'],
+    [{ kind: 'exposure', mem_id: 'MEM001', ts: '2026-10-02T00:00:00.000Z' }, 'hybrid-shape'],
+    [v2Row('hit', 'h1'), 'hybrid-shape'],
+    [v2Row('exposure', 'x2', { path: '/etc/passwd' }), 'unexpected-property'],
+    [v2Row('exposure', 'x3', { observation_id: '$(rm -rf /)' }), 'invalid-identifier'],
+    [v2Row('exposure', 'x4', { event_id: 'extract-2:v2:other' }), 'identity-mismatch'],
+    [v2Row('exposure', 'x5', { source_unit: ['execute-task/T02'] }), 'non-scalar-field'],
+    [v2Row('exposure', 'x6', { ts: ['2026-10-02T00:00:00.000Z'] }), 'non-scalar-field'],
+    [v2Row('seed', 's1', { confidence_base: { valueOf: () => 0.5 }, hits: 0 }), 'non-scalar-field'],
+  ];
+  for (const [row, reason] of cases) {
+    assert.throws(
+      () => memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [v2Row('reobserve', 'ok1'), row] }),
+      error => error && error.code === 'MEMORY_EVENT_INVALID' && error.reason === reason,
+      `expected MEMORY_EVENT_INVALID/${reason}`,
+    );
+    assert(fs.readFileSync(file).equals(before), `${reason}: the valid sibling row must not persist partially`);
+  }
+  assert.throws(
+    () => memory.transactFragment(cwd, { unit_id: 'T01' }, {}, current => ({
+      ...current, stats: [...current.stats, cases[0][0]],
+    })),
+    error => error && error.code === 'MEMORY_EVENT_INVALID',
+  );
+  assert(fs.readFileSync(file).equals(before), 'a refused transaction leaves the fragment untouched');
+  assert.deepStrictEqual(lockNames(cwd), [], 'every refusal releases the fragment lock');
+}));
+
+test('v2 replay is a no-op; a conflicting event_id or observation is MEMORY_EVENT_CONFLICT before writing', () => withTemp(cwd => {
+  const confirm = v2Row('confirm', 'c1');
+  memory.writeFragment(cwd, { unit_id: 'T01', facts: [originFact('MEM001')], stats: [confirm] });
+  const file = memory.fragmentPath(cwd, 'T01');
+  const before = fs.readFileSync(file);
+
+  const replay = memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [{ ...confirm, evidence_version: '2' }] });
+  assert.strictEqual(replay.created, false, 'the stringified delivery is the same event');
+  const repackaged = v2Row('confirm', 'c9', { extraction_id: 'extract-3', event_id: 'extract-3:v2:c9',
+    observation_id: 'obs-c1', evidence_ref: 'other', ts: '2026-10-03T00:00:00.000Z' });
+  const sameObservation = memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [repackaged] });
+  assert.strictEqual(sameObservation.created, false, 'the same observation in another extraction adds no row');
+  assert.strictEqual(memory.readFragment(cwd, 'T01').stats.length, 1);
+
+  const conflicts = [
+    [{ ...confirm, independent_ref: 'verify:other' }, evidence.REASONS.EVENT_ID_CONFLICT],
+    [{ ...repackaged, source_fingerprint: 'sha256:elsewhere' }, evidence.REASONS.OBSERVATION_CONFLICT],
+    [v2Row('reobserve', 'r9', { observation_id: 'obs-c1' }), evidence.REASONS.OBSERVATION_CONFLICT],
+  ];
+  for (const [row, reason] of conflicts) {
+    assert.throws(
+      () => memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [row] }),
+      error => error && error.code === 'MEMORY_EVENT_CONFLICT' && error.reason === reason,
+      `expected MEMORY_EVENT_CONFLICT/${reason}`,
+    );
+  }
+  assert(fs.readFileSync(file).equals(before), 'conflicts never persist');
+  assert.deepStrictEqual(lockNames(cwd), []);
+}));
+
+test('legacy subsequence keeps stored order and multiplicity while v2 rows merge canonically', () => {
+  const legacyRows = [
+    { kind: 'hit', mem_id: 'MEM001', ts: '2026-10-01T03:00:00.000Z' },
+    { kind: 'decay', mem_id: 'MEM001', ts: '2026-10-01T01:00:00.000Z', new_confidence: '0.5' },
+    { kind: 'hit', mem_id: 'MEM001', ts: '2026-10-01T03:00:00.000Z' },
+  ];
+  const incoming = [
+    v2Row('exposure', 'x2', { ts: '2026-10-01T03:00:00.000Z' }),
+    v2Row('reobserve', 'r1', { ts: '2026-10-01T00:30:00.000Z' }),
+    v2Row('exposure', 'x1', { ts: '2026-10-01T03:00:00.000Z' }),
+  ];
+  const label = stat => stat.event_id ? stat.local_event_id : `${stat.kind}@${stat.ts.slice(11, 13)}`;
+  const outputs = [incoming, [incoming[2], incoming[0], incoming[1]]].map(order => withTemp(cwd => {
+    const file = writeRawFragment(cwd, 'T01', { facts: [originFact('MEM001')], stats: legacyRows });
+    memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: order });
+    const stats = memory.readFragment(cwd, 'T01').stats;
+    assert.deepStrictEqual(stats.filter(stat => !stat.evidence_version), legacyRows,
+      'stored legacy rows keep their order and their duplicate');
+    assert.deepStrictEqual(stats.map(label), ['r1', 'hit@03', 'decay@01', 'hit@03', 'x1', 'x2'],
+      'v2 rows sit before the first legacy row that sorts after them, ties going to the legacy row');
+    const bytes = fs.readFileSync(file, 'utf8');
+
+    // A legacy write keeps the historical comparator for the legacy subsequence.
+    memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [{ kind: 'hit', mem_id: 'MEM001', ts: '2026-10-01T02:00:00.000Z' }] });
+    const afterLegacy = memory.readFragment(cwd, 'T01').stats;
+    assert.deepStrictEqual(afterLegacy.filter(stat => !stat.evidence_version).map(label),
+      ['decay@01', 'hit@02', 'hit@03', 'hit@03']);
+    assert.deepStrictEqual(afterLegacy.filter(stat => stat.evidence_version).map(label), ['r1', 'x1', 'x2']);
+    return bytes;
+  }));
+  assert.strictEqual(outputs[0], outputs[1], 'the same v2 set yields the same bytes whatever the delivery order');
+});
+
+test('a CRLF fragment stays CRLF after a v2 merge', () => withTemp(cwd => {
+  const file = writeRawFragment(cwd, 'T01', {
+    facts: [originFact('MEM001')], stats: [{ kind: 'seed', mem_id: 'MEM001', ts: '2026-10-01T00:00:00.000Z', confidence_base: '0.8', hits: '1' }],
+  }, '\r\n');
+  const writerSeesCrlf = /\r\n/.test(fs.readFileSync(file, 'utf8'));
+  memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [v2Row('exposure', 'x1')] });
+  const text = fs.readFileSync(file, 'utf8');
+  if (writerSeesCrlf) {
+    assert(text.includes('\r\n'), 'CRLF must be re-emitted');
+    assert(!/[^\r]\n/.test(text), 'no bare LF may be spliced in by the merge');
+  }
+  assert.strictEqual(memory.readFragment(cwd, 'T01').stats.length, 2);
+}));
+
+test('a stored v2 row the reducer refuses is preserved verbatim by later merges', () => withTemp(cwd => {
+  const unknownVersion = v2Row('exposure', 'x1', { evidence_version: '9' });
+  writeRawFragment(cwd, 'T01', { facts: [originFact('MEM001')], stats: [unknownVersion] });
+  memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [{ kind: 'hit', mem_id: 'MEM001', ts: '2026-10-03T00:00:00.000Z' }] });
+  const stats = memory.readFragment(cwd, 'T01').stats;
+  assert.strictEqual(stats.length, 2);
+  assert.deepStrictEqual(stats.find(stat => stat.event_id === unknownVersion.event_id), unknownVersion,
+    'history is neither dropped nor rewritten');
+  const state = projection.projectMemoryState(cwd, { nowMs: NOW });
+  assert.deepStrictEqual(state.diagnostics.rejected.map(item => item.reason), [evidence.REASONS.UNKNOWN_EVIDENCE_VERSION],
+    'the reducer reports it instead of discarding it silently');
+}));
+
+test('the same v2 delivery stays separate per fragment namespace', () => withTemp(cwd => {
+  const confirm = v2Row('confirm', 'c1');
+  memory.writeFragment(cwd, { unit_id: 'T01', facts: [originFact('MEM001')], stats: [confirm] });
+  memory.writeFragment(cwd, { unit_id: 'T02', facts: [originFact('MEM001')], stats: [confirm] });
+  memory.writeFragment(cwd, { unit_id: 'T01', milestone_id: 'M001', facts: [originFact('MEM001')], stats: [confirm] });
+  for (const [unit, milestoneId] of [['T01', null], ['T02', null], ['T01', 'M001']]) {
+    assert.strictEqual(memory.readFragment(cwd, unit, { milestoneId }).stats.length, 1, `${milestoneId || ''}/${unit}`);
+  }
+  const entries = projection.projectMemoryEntries(cwd, { nowMs: NOW });
+  assert.deepStrictEqual(
+    entries.map(entry => [entry.identity, entry.hits, entry.evidence.v2.independent_confirmation_count]).sort(),
+    [['M001/T01/MEM001', 1, 1], ['T01/MEM001', 1, 1], ['T02/MEM001', 1, 1]],
   );
 }));
 
