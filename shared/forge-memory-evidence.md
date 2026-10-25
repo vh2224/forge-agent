@@ -250,11 +250,100 @@ Installed test roots prove local distribution and decoding only. They do not pro
 live provider delivery, hosted CI, installation in a real profile or human acceptance.
 If an adapter lacks positive context receipt, exposure stays zero and delivery unknown.
 
-## Proven divergence between the current reducers
+## Historical divergence retained as named views
 
-`forge-projection.js::projectMemoryEntries` adds +1 hit and +0.02 confidence
+The historical `forge-projection.js::projectMemoryEntries` added +1 hit and +0.02 confidence
 (≤0.99) for `hit`/`confirm` and +0.05 for `promote`, and applies explicit
-`decay`. `forge-memory-extraction.js::publicationState` only adds +1 hit for
+`decay`. The historical `forge-memory-extraction.js::publicationState` only added +1 hit for
 `hit`/`confirm`, marks `promote` without a bonus and ignores `decay`. The fold
 reproduces both as two named views in one pure pass instead of copying the
 drift into two new reducers.
+
+## S03 compatibility acceptance matrix
+
+Executable integration: `node scripts/forge-memory-evidence-integration.test.js`.
+Versioned inputs and exact SHA256 values live in
+`scripts/fixtures/memory-evidence/README.md`. These inputs are synthetic;
+historical shapes have source fingerprints, not invented historical executions.
+The integration uses real APIs, CLIs and fresh subprocesses in temporary roots.
+Its provider stub throws on any unexpected inference during replay.
+
+| Surface | Before / compatibility retained | After / observable assertion | Check and limit |
+|---|---|---|---|
+| Schemas | Closed schema v1 and its exact bytes | v2 separate; unknown/hybrid/extra fields fail without fragment mutation | Integration `PASS closed schemas`; pinned v1 SHA256; no migration |
+| Legacy fragments | Stored order, duplicate hits, seed.hits, tied controls and missing provenance | Five historical hits stay ambiguous; zero independent confirmations; decay 0.7 and historical promotion retained | Integration `PASS mixed fixture`; fixture v1 is synthetic |
+| Mixed fragments | Local MEM001 can occur in multiple milestones | v2 replay/reorder preserves full entries; collision fails; other namespace has zero hits | Integration `PASS mixed fixture`; v2 ordering does not sort legacy |
+| Owner publication | Historical publication and projection had different numeric views | One fold preserves both named views; owner semanticState matches reconstruction; active decay once at fixed nowMs | Integration `PASS owner parity`; no wall-clock comparison |
+| Receipt v1 | Old fingerprint and indexed event IDs; pending historical promotion | Ready replay publishes under v1 rules with zero independent evidence; receipt hash unchanged | Integration `PASS historical ready`; explicit legacy continuation only |
+| Receipt v2 | Extraction and bound source identity survive process exit | Second extraction from the same observations is noop; restarted replay changes no bytes/hash/state and calls no provider | Integration `PASS owner parity`; local stub, no live service |
+| Source binding | Worker returns references, owner owns records | Changed source, foreign/missing binding and conflicting event ID preserve canonical bytes | Integration `PASS source and identity boundaries`; failed receipt may remain diagnostic |
+| Exposure/reobserve | Old hit callers could imply reinforcement | 100 typed exposure/reobserve events leave hits=0, confidence=0.9 and promotion=false | Integration `PASS evidence matrix`; independent evidence availability not assumed |
+| Confirmation | Historical hits and packaging IDs do not establish independence | Same occurrence across extraction IDs counts once; three distinct verified occurrences can promote | Integration `PASS owner parity` and `PASS evidence matrix`; owner registry is required |
+| Utility | Narrative use is not an outcome | Bound outcome counts utility without changing ranking; absent outcome refuses publication | Integration `PASS evidence matrix` and exact 0.92/hit=1 owner assertion |
+| Cap and controls | Cap 50, supersede/prune and historical promotion guardrails | Eligible cap victim/IDs retained; wrong victim fails atomically; no new popularity default | `node scripts/forge-memory-extraction.test.js`, named cap/promotion tests; integration retains historical controls |
+| CLI reads | --read, --query, --select output contracts | Selection equals query entries; reads preserve fragment SHA256 | Integration `PASS real CLI`; CLI uses runtime clock, fixed-clock semantic checks use API |
+| CLI writes | --hit array/envelope and recorded/fragments/skipped retained | --hit aliases exposure, duplicate payload counts once, --expose delivery replay returns recorded=0 | Integration `PASS real CLI`; no-ID calls guarantee only within-call dedup |
+| Both hosts | Installer/renderers consume canonical source surfaces | Claude Markdown and Codex TOML plus fresh installed schemas/decoder/procedure loader exercised | `node scripts/forge-memory-evidence-distribution.test.js`; temporary installation only |
+
+Additional declared regressions:
+
+- `node scripts/forge-projection.test.js`: projection, namespace, additive ranking,
+  evidence counters and decay contracts.
+- `node scripts/forge-bidirectional-sidecar.test.js`: real local transport/owner
+  boundaries, ready/deferred publication and bidirectional contracts with fixture providers.
+- `node scripts/forge-installer.test.js`: installer behavior and managed surfaces;
+  these are isolated filesystem tests, not installation into a real personal profile.
+
+The integration asserts immutable JSON hashes before and after all reads/replays.
+Its README hashes are also checked against actual bytes; they identify fixtures,
+not origin, authenticity, causal impact or prospective experiment registration.
+
+## Downstream interface handoff
+
+S05 and S06 must use the same snapshot, namespace and fixed nowMs when comparing
+entries. `projectMemoryState` returns `model_version: 2`, active `entries` and
+diagnostics; it does not export the complete internal folded object.
+For the complete state (including inactive entries), use `foldMemoryEvidence`
+on the same parsed fragment set. Owner publication's `state` is a bounded
+semantic projection; `_private.foldPublication(...).folded` characterizes the
+complete fold in tests, not a new stable consumer API.
+
+The active entry separates `base_confidence` from decayed `confidence`.
+`evidence.model_version`, `evidence.origin`, `evidence.hits_basis`,
+`evidence.legacy_ambiguous`, `evidence.v2.independent_confirmation_count`,
+and `evidence.counters.{exposure,reobserve,independent_confirmation,utility}`
+are additive diagnostics. Each typed counter has count/last_ts; utility also
+has outcome_ids. Reuse them without relabelling historical hits as evidence.
+
+The active selector formula remains
+`matched_terms*100 + category_preference*10 + confidence*max(1,hits)`.
+No utility weight, popularity cap, default selection limit, category preference,
+decay constant or shadow ranker is introduced here. S06 owns any future shadow
+comparison; an exposure counter is not a replacement score.
+
+S07 receives separate extraction, schema decoding, owner evidence validation,
+ready acceptance, deferred boundary, publication and replay outcomes.
+`done` extraction does not imply written publication: publication may be noop,
+deferred, conflict or quarantined. Ready replay reuses the saved answer and
+validated source binding; it must not request a fresh inference.
+No structured independent owner evidence means independent count stays zero.
+
+S08 receives the matrix above as concrete compatibility impact: new counts
+are explicit, new promotion requires independent confirmations, publisher and
+projection now share a fold, and --hit writes exposure rather than reinforcement.
+The frozen v1 decoder, receipt continuation, legacy numerical views and command
+envelopes remain available. S08 owns version-impact judgment; S03 does no bump,
+release publication or deployment.
+
+S09 receives v1.json, v2.json, mixed.json, invalid.json and their README byte hashes,
+the integration command and all five regression/distribution commands above.
+The four JSON fixture artifacts are asserted as consumed and immutable by name.
+The integration also asserts this document's matrix/downstream boundaries and
+the README's provenance/hash declarations, so the handoff is reproducible.
+
+The case `forge-442-memory-release-ci`, family
+`forge-engineering-memory-release-ci`, remains observational. ai-memory is a
+documentary reference; these fixtures do not show improved retrieval, causal
+effectiveness or universal live evidence availability. Hosted CI, Node 22,
+real provider delivery, real-profile installation, deploy and human UAT are
+not established by local suite success. Each requires its own later evidence.
