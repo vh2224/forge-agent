@@ -6,7 +6,7 @@
     {
       "id": "core",
       "path": "shared/forge-procedure-core.md",
-      "sha256": "530c2686d74a475b99f4ba05229e93e2e0bbd3b8586f9f9233d7972dd0f4e0b6",
+      "sha256": "80854d0df7837fb869f5befa55df3a857827691585a69a740e3f34ac92677baf",
       "status": "ready",
       "owner": "T01",
       "dependencies": [],
