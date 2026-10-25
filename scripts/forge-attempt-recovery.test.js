@@ -78,7 +78,45 @@ async function main() {
   await silenceRecovery(identity, route, attempt, inspection, candidateSet);
   await persistentRecovery(route);
   await canonicalProvenance();
+  await continuationCrashRace();
   console.log('PASS recovery clock, canonical candidate provenance/order, adapters, caller repair, pending IDs and live exception');
+}
+async function continuationCrashRace() {
+  const fs = require('fs'), path = require('path'), cp = require('child_process');
+  const fixtures = require('./forge-recovery-transition.test'), f = await fixtures.ordinaryFixture();
+  try {
+    const file = path.join(f.dir, 'continuation-fixture.json');
+    const calls = path.join(f.dir, 'native-calls.txt');
+    fs.writeFileSync(file, JSON.stringify({ request: f.request, stateFile: f.stateFile, receiptFile: f.receiptFile,
+      contract: f.contract, profile: f.profile, history: f.history, now: f.now, originalOptions: f.originalOptions,
+      roadmap: f.roadmap, transitions: f.transitions, resume: f.resume, calls }));
+    const run = () => new Promise((resolve, reject) => {
+      const child = cp.spawn(process.execPath, [__filename, '--continuation-crash', file], { windowsHide: true });
+      let output = ''; child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
+      child.on('error', reject); child.on('exit', code => resolve({ code, output }));
+    });
+    const outcomes = await Promise.all([run(), run()]);
+    assert.strictEqual(outcomes.filter(row => row.code === 73).length, 1, JSON.stringify(outcomes));
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'consumed\n');
+    const saved = require('./forge-xllm-state').loadRecovery(f.stateFile);
+    assert.strictEqual(saved.continuation.status, 'dispatch-possible');
+    assert.deepStrictEqual(saved.reservations, f.initial.reservations);
+    const afterCrash = await run(); assert.notStrictEqual(afterCrash.code, 73, afterCrash.output);
+    assert.strictEqual(fs.readFileSync(calls, 'utf8'), 'consumed\n');
+    console.log('PASS continuation CAS: competing OS processes, crash after consumption, restart refuses a second native call');
+  } finally { f.cleanup(); }
+}
+async function continuationCrash() {
+  const fs = require('fs'), fixture = require('./forge-recovery-transition.test');
+  const f = JSON.parse(fs.readFileSync(process.argv[3], 'utf8')); f.binding = fixture.authority(f);
+  const digest = require('./forge-code-roots').digest;
+  await api.recoverAttempt(fixture.options(f, { transitions: f.transitions, resumeReservation: f.resume,
+    transitionAdapter: fixture.adapter(f, { attestUninvoked: challenge => ({ ...challenge,
+      binding_sha256: digest(challenge), status: 'uninvoked', native_calls: 0, evidence_reference: 'fixture:retained-native-tool-census' }) }),
+    invoke: async (_route, invocation, _remaining, guard) => {
+      guard.consumeInvocation(invocation); fs.appendFileSync(f.calls, 'consumed\n'); process.exit(73);
+    },
+  }));
 }
 async function silenceRecovery(identity, route, attempt, inspection, candidateSet) {
   let now = 0, saved;
@@ -376,4 +414,5 @@ async function resumeRecovery() {
   const afterReservation = await session.next(input);
   process.stdout.write(JSON.stringify({ native, afterReservation, state: session.snapshot() }));
 }
-(process.argv[2] === '--resume-recovery' ? resumeRecovery() : main()).catch(error => { console.error(error); process.exitCode = 1; });
+(process.argv[2] === '--continuation-crash' ? continuationCrash()
+  : process.argv[2] === '--resume-recovery' ? resumeRecovery() : main()).catch(error => { console.error(error); process.exitCode = 1; });

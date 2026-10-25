@@ -185,6 +185,7 @@ async function sidecarBoundary() {
   }
 }
 async function main() {
+  await ordinaryReservation();
   await sidecarBoundary();
   const f = setup();
   try {
@@ -236,6 +237,58 @@ async function main() {
     console.log('PASS transitions: authenticated context, source drift, forged JSON, all roots, preserved host metadata, immutable clocks/history and real restart');
   } finally { f.cleanup(); }
 }
+async function ordinaryFixture() {
+  const f = setup();
+  // Resolve with complete context from the beginning: this is an ordinary
+  // reservation, not the older omitted-context repair fixture.
+  f.originalOptions = options(f).resolverOptions;
+  f.request.route = resolver.resolveDispatch(f.originalOptions);
+  const session = recovery.createRecovery({ unit: 'plan-slice/S01', roots_sha256: digest(f.contract), request: f.request,
+    clock: () => 10, persist: value => stateApi.saveRecovery(f.stateFile, value) });
+  session.record({ ...f.initial.attempts[0], route: f.request.route, caller_request_sha256: recovery.callerRequestHash(f.request) });
+  write(f.receiptFile, JSON.stringify({ phase: 'failed', dispatch_id: f.request.dispatchId,
+    fingerprint: require('./forge-unit-sidecar').artifactFingerprint(f.request), route: f.request.route,
+    recovery_identity_sha256: digest(recovery.requestIdentity(f.request)), failure: { reason_code: 'sidecar-timeout', provider_called: 'unknown' } }));
+  await recovery.recoverAttempt(options(f, { transitions: undefined, transitionAdapter: undefined, invoke: undefined,
+    reconcile: () => ({ ok: true, roots: f.contract.code_roots.map(row => ({ root_id: row.id, reconciled: true })) }) }));
+  f.initial = stateApi.loadRecovery(f.stateFile);
+  f.history = transition.observeHistory({ request: f.request, state: f.initial, receiptFile: f.receiptFile,
+    contract: f.contract, resolverOptions: f.originalOptions });
+  f.transitions = [{ type: 'uninvoked-native-reservation', reference: 'fixture:retained-zero-calls' }];
+  f.resume = { sha256: digest(f.initial.reservations.at(-1)) };
+  f.attestUninvoked = challenge => ({ ...challenge, binding_sha256: digest(challenge), status: 'uninvoked',
+    native_calls: 0, evidence_reference: 'fixture:independent-native-tool-census' });
+  f.ordinaryOptions = extra => options(f, { transitions: f.transitions, resumeReservation: f.resume,
+    transitionAdapter: adapter(f, { attestUninvoked: f.attestUninvoked }), ...extra });
+  return f;
+}
+async function ordinaryReservation() {
+  const f = await ordinaryFixture();
+  try {
+    for (const change of [proof => { proof.native_calls = 'unknown'; }, proof => { proof.native_calls = 1; },
+      proof => { proof.status = 'possible'; }, proof => { proof.reservation_sha256 = 'foreign'; },
+      proof => { proof.binding_sha256 = 'forged'; }, proof => { delete proof.evidence_reference; }]) {
+      await assert.rejects(recovery.recoverAttempt(f.ordinaryOptions({ transitionAdapter: adapter(f, {
+        attestUninvoked: challenge => { const proof = f.attestUninvoked(challenge); change(proof); return proof; },
+      }) })), /uninvoked-unproved/);
+    }
+    await assert.rejects(recovery.recoverAttempt(f.ordinaryOptions({ transitions: [...f.transitions,
+      { type: 'resolver-context-omission', reference: 'invalid-combination' }] })), /uninvoked-adapter-required/);
+    const result = await recovery.recoverAttempt(f.ordinaryOptions({ invoke: async (_route, invocation, _remaining, guard) => {
+      guard.consumeInvocation(invocation); f.calls++;
+      assert.throws(() => guard.consumeInvocation(invocation), /not-prepared/);
+      guard.invocationReturned(); return { synthetic: true };
+    } }));
+    assert.equal(result.action, 'invoke'); assert.equal(f.calls, 1);
+    const state = stateApi.loadRecovery(f.stateFile);
+    assert.deepEqual(state.reservations, f.initial.reservations);
+    assert.deepEqual(state.attempts, f.initial.attempts);
+    assert.equal(state.deadline_at, f.initial.deadline_at);
+    assert.equal(state.continuation.status, 'returned');
+    await assert.rejects(recovery.recoverAttempt(f.ordinaryOptions()), /ordinary-reservation-required/);
+    console.log('PASS ordinary reservation: live zero-call challenge, immutable history, exclusive transition and single consumption');
+  } finally { f.cleanup(); }
+}
 async function restart(file) {
   const f = JSON.parse(fs.readFileSync(file)); f.binding = authority(f); f.calls = 0;
   const saved = stateApi.loadRecovery(f.stateFile);
@@ -245,5 +298,5 @@ async function restart(file) {
   assert.equal(stateApi.loadRecovery(f.stateFile).transitions.length, 1);
   console.log('restart-authority-checked');
 }
-module.exports = { main, setup, options, adapter, authority, capabilities, write, candidateFixture, recoverPublic, assertHistoryPreserved };
+module.exports = { main, setup, options, adapter, authority, capabilities, write, candidateFixture, recoverPublic, assertHistoryPreserved, ordinaryFixture, ordinaryReservation };
 if (require.main === module) (process.argv[2] === '--restart' ? restart(process.argv[3]) : main()).catch(error => { console.error(error); process.exitCode = 1; });

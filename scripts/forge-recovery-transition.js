@@ -9,7 +9,7 @@ const reconciliation = require('./forge-artifact-reconciliation');
 const execution = require('./forge-task-execution');
 const { digest } = roots;
 const adapters = new WeakMap(), handles = new WeakMap();
-const TYPES = Object.freeze(['resolver-context-omission', 'saved-candidate-unreplayable']);
+const TYPES = Object.freeze(['resolver-context-omission', 'saved-candidate-unreplayable', 'uninvoked-native-reservation']);
 function fail(code) { throw Object.assign(new Error(code), { code, provider_called: false }); }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 function hashFile(file) { try { return digest(fs.readFileSync(file)); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } }
@@ -110,9 +110,12 @@ async function prepare(options, state, inspection) {
       || requested.some(row => !TYPES.includes(row.type) || typeof row.reference !== 'string' || !row.reference)) fail('transition-type-invalid');
   const callbacks = adapters.get(options.transitionAdapter);
   if (!callbacks) fail('transition-live-adapter-required');
+  const ordinary = requested.some(row => row.type === 'uninvoked-native-reservation');
+  if (ordinary && (requested.length !== 1 || typeof callbacks.attestUninvoked !== 'function')) fail('transition-uninvoked-adapter-required');
   if (options.correction || options.environmentalCorrection) fail('transition-correction-conflict');
   if (typeof options.processProbe !== 'function' || inspection.process_stopped !== true) fail('transition-process-proof-required');
   const recovery = require('./forge-attempt-recovery'), request = recovery.canonicalRequest(options.request);
+  if (ordinary && request.scope !== 'milestone') fail('transition-ordinary-scope-unsupported');
   const contract = roots.validateContract(options.executionContract || roots.singleContract(request.contextRoot, request.cwd),
     { owner: request.contextRoot, revalidate: true });
   const claim = options.executionAuthority?.claim || request.claim || null;
@@ -146,7 +149,18 @@ async function prepare(options, state, inspection) {
     request_identity_sha256: digest(recovery.requestIdentity(request)), state_sha256: stateHash,
     contract_sha256: contractHash, claim_sha256: claimHash, started_at: state.started_at, deadline_at: state.deadline_at,
     candidate, roots: currentRoots };
-  const assertUnchanged = () => {
+  if (ordinary) {
+    const reservation = state.reservations?.at(-1);
+    if (!reservation || reservation.handoff_pending !== undefined || reservation.handed_off_at
+        || reservation.transition_reference || state.phase !== 'reserved'
+        || options.resumeReservation?.sha256 !== digest(reservation)
+        || state.continuation && state.continuation.status !== 'prepared') fail('transition-ordinary-reservation-required');
+    challenge.reservation_sha256 = digest(reservation);
+    challenge.dispatch_id = inspection.receipt.dispatch_id;
+    challenge.receipt_sha256 = inspection.receipt_sha256;
+    if (!challenge.dispatch_id || challenge.dispatch_id !== request.dispatchId) fail('transition-dispatch-binding');
+  }
+  const assertAuthority = () => {
     binding.adapter.readStandingAuthorization(binding.reference);
     options.validateExecutionAuthority?.();
     if (options.processProbe(inspection.receipt) !== 'stopped' || hashFile(options.receiptFile) !== inspection.receipt_sha256
@@ -154,8 +168,11 @@ async function prepare(options, state, inspection) {
         || digest(options.executionAuthority?.claim || request.claim || null) !== claimHash
         || digest(roots.validateContract(contract, { revalidate: true })) !== contractHash
         || hashFile(`${options.receiptFile}.response-anchor.json`) !== candidate.anchor_sha256
-        || previousRecords.some(row => hashFile(row.reference.path) !== row.reference.sha256)
-        || digest(rootObservations(contract, claim)) !== digest(currentRoots)) fail('transition-inspection-changed');
+        || previousRecords.some(row => hashFile(row.reference.path) !== row.reference.sha256)) fail('transition-inspection-changed');
+  };
+  const assertUnchanged = () => {
+    assertAuthority();
+    if (digest(rootObservations(contract, claim)) !== digest(currentRoots)) fail('transition-inspection-changed');
   };
   assertUnchanged();
   const attested = await callbacks.attestHistory(clone(challenge));
@@ -164,6 +181,21 @@ async function prepare(options, state, inspection) {
       || !attested.provenance_reference || attested.history_sha256 !== digest(attested.history)) fail('transition-history-unproved');
   const history = clone(attested.history);
   validateHistory(history, request, state, contract, claim, candidate, attested);
+  let uninvoked = null;
+  if (ordinary) {
+    // The host must consult retained tool-call evidence. Process absence and
+    // a serialized boolean cannot establish that this reservation was unused.
+    const proof = await callbacks.attestUninvoked(clone(challenge));
+    assertUnchanged();
+    if (proof?.binding_sha256 !== digest(challenge) || proof.native_calls !== 0
+        || proof.status !== 'uninvoked' || typeof proof.evidence_reference !== 'string' || !proof.evidence_reference.trim()
+        || ['dispatch_id', 'reservation_sha256', 'receipt_sha256', 'request_sha256', 'contract_sha256']
+          .some(key => proof[key] !== challenge[key])) fail('transition-uninvoked-unproved');
+    if (digest(history.reservations) !== digest(state.reservations)
+        || digest(history.attempts) !== digest(state.attempts)) fail('transition-reservation-history-mismatch');
+    uninvoked = { reservation_sha256: challenge.reservation_sha256, dispatch_id: challenge.dispatch_id,
+      evidence_reference: proof.evidence_reference, native_calls: 0 };
+  }
   if (previousRecords.some(row => row.record.history_sha256 !== digest(history))) fail('transition-record-binding');
   const types = requested.map(row => row.type);
   if (candidate.present) {
@@ -193,6 +225,7 @@ async function prepare(options, state, inspection) {
     evidence_reference: attested.evidence_reference, provenance_reference: attested.provenance_reference,
     original_receipt_sha256: candidate.receipt_sha256, original_candidate_sha256: candidate.candidate_sha256,
     started_at: state.started_at, deadline_at: state.deadline_at, resolution, reconciliation: rootEvidence,
+    ...(uninvoked ? { uninvoked } : {}),
     disposition: candidate.present ? 'unreplayable-original-provenance-absent' : null };
   const recordBytes = Buffer.from(JSON.stringify(record) + '\n'), recordHash = digest(recordBytes);
   const file = `${options.stateFile}.transition-${recordHash}.json`;
@@ -212,7 +245,11 @@ async function prepare(options, state, inspection) {
     }
   } finally { guard.release(); }
   const handle = Object.freeze({ id: crypto.randomUUID() });
-  handles.set(handle, { reference, resolution, rootEvidence, disposed: candidate.present,
+  handles.set(handle, { reference, resolution, rootEvidence, uninvoked, disposed: candidate.present,
+    assertAuthority() {
+      assertAuthority();
+      if (hashFile(file) !== recordHash) fail('transition-record-conflict');
+    },
     assertUnchanged() {
       assertUnchanged();
       if (hashFile(file) !== recordHash) fail('transition-record-conflict');

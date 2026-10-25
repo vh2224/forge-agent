@@ -2232,6 +2232,10 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
   const executionRequest = { ...request, ...authority };
   if (Object.keys(authority).some(key => !['execution_contract', 'claim', 'runId', 'gates'].includes(key))) fail('recovery-execution-authority-invalid');
   const canonical = require('./forge-attempt-recovery').canonicalRequest(request);
+  if (recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation')
+      && (canonical.scope !== 'milestone' || canonical.phase !== 'execute' || canonical.unitType !== 'execute-task')) {
+    fail('ordinary-native-delivery-unsupported');
+  }
   if (canonical.scope === 'standalone-task' && canonical.phase !== 'execute') {
     return require('./forge-task-preparation').recoverStandaloneTask(request, recovery, runtime);
   }
@@ -2239,7 +2243,14 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     hostRuntime: canonical.route.host_runtime, milestoneId: canonical.milestoneId,
     unitId: canonical.taskId || canonical.sliceId || canonical.milestoneId,
     planPath: canonical.planFile, roadmapPath: canonical.roadmapFile };
-  const nativeTaskName = `recovery_${request.dispatchId}_${crypto.randomUUID()}`;
+  const ordinaryResume = recovery.transitions?.some(row => row.type === 'uninvoked-native-reservation');
+  const continuationId = ordinaryResume ? recovery.resumeReservation?.sha256 : crypto.randomUUID();
+  if (ordinaryResume && !/^[a-f0-9]{64}$/.test(continuationId || '')) fail('recovery-reservation-required');
+  const nativeTaskName = `recovery_${request.dispatchId}_${continuationId}`;
+  const deliveryHelper = ordinaryResume && canonical.scope === 'milestone' && canonical.phase === 'execute'
+    ? require('./forge-native-recovery-delivery') : null;
+  const finalRequest = route => ({ ...executionRequest, route, recoveryStateFile: recovery.stateFile,
+    dispatchId: `${request.dispatchId}-recovery-${continuationId}`, resultFile: `${request.resultFile}.recovery-${continuationId}.json` });
   const nativeOptions = route => {
     // Binding preflight uses the real task plan; the transport composes the
     // complete execution/security/context prompt after prepare.
@@ -2261,6 +2272,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     const additional = recoveryProcedure.content.split(/(?=<!-- forge-procedure:)/)
       .filter(segment => segment.trim() && !present.has(/^<!-- forge-procedure:([^>]+) -->/.exec(segment)?.[1]));
     prompt += '\n\n' + additional.join('');
+    if (deliveryHelper) prompt = deliveryHelper.packagePrompt(finalRequest(route), prompt);
     return { hostRuntime: route.host_runtime, resolvedDispatch: route,
     activeCapabilities: runtime.activeCapabilities, effortBinding: runtime.effortBinding,
     prompt, forkTurns: 'none',
@@ -2268,6 +2280,10 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     agentType: ({ execute: 'forge-executor', plan: 'forge-planner', research: 'forge-researcher', discuss: 'forge-discusser' })[canonical.phase] || 'forge-worker' };
   };
   // A stale writer cannot reconcile or reserve another attempt under a new claim.
+  if (deliveryHelper) {
+    const replayed = await deliveryHelper.replay({ request: executionRequest, recovery, runtime, nativeOptions });
+    if (replayed) return replayed;
+  }
   if (canonical.scope === 'milestone' && canonical.phase === 'execute') {
     if (!executionRequest.execution_contract) fail('execution-held-claim-required');
     validateRecoveryRequest(executionRequest, { nativeInvocation: request.route.worker_mode === 'native'
@@ -2323,10 +2339,36 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
     },
     invoke: async (route, invocation, remainingMs, assertReady, reservationHash) => {
       validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: invocation });
-      const next = { ...executionRequest, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
+      const next = deliveryHelper ? finalRequest(route) : { ...executionRequest, recoveryStateFile: recovery.stateFile, route: route.worker_mode === 'sidecar'
         ? { ...route, workers_timeout: Math.max(0.001, remainingMs / 1000) } : route,
         dispatchId: `${request.dispatchId}-recovery-${crypto.randomUUID()}`, resultFile: `${request.resultFile}.recovery-${crypto.randomUUID()}.json` };
       if (route.worker_mode === 'native') {
+        if (deliveryHelper) {
+          const session = deliveryHelper.prepare({ request: next, nativeInvocation: invocation,
+            assertBoundary: runtime.assertBoundary, assertAuthority: assertReady?.assertAuthority,
+            persistDeliveryReceipt: assertReady?.persistDeliveryReceipt,
+            linkedEntryOptions: runtime.linkedEntryOptions });
+          const finalRequestHash = require('./forge-attempt-recovery').callerRequestHash(next);
+          const invoke = callback => require('./forge-native-invocation').invokeNative(nativeOptions(route), async (args, binding) => {
+            if (require('./forge-attempt-recovery').callerRequestHash(next) !== finalRequestHash) fail('recovery-final-request-changed');
+            assertReady();
+            runtime.assertBoundary();
+            validateRecoveryRequest(next, { nativeInvocation: binding, linkedEntryOptions: runtime.linkedEntryOptions });
+            assertReady.consumeInvocation(binding, { ...session.start(),
+              original_receipt_sha256: hash(fs.readFileSync(recovery.receiptFile)) });
+            const result = await callback(next, { ...binding, args }, session);
+            session.returned(result);
+            assertReady.invocationReturned();
+            return result;
+          });
+          if (!runtime.invokeNative) return { action: 'invoke-native', request: next, invocation, delivery: session, invoke };
+          const outcome = await invoke(runtime.invokeNative);
+          if (!outcome.ok || !deliveryHelper.resultContract.validate(outcome.result).ok) return outcome;
+          if (outcome.result.status !== 'done') return outcome;
+          const verified = session.verify(outcome.result);
+          const published = session.publish(outcome.result);
+          return { ...outcome, verified, published };
+        }
         if (!runtime.invokeNative) {
           assertReady?.();
           if ((recovery.environmentalCorrection || recovery.transitions) && !recovery.resumeReservation) return {
@@ -2339,6 +2381,7 @@ async function recoverUnitSidecar(request, recovery, runtime = {}) {
           return require('./forge-native-invocation').invokeNative(nativeOptions(route), (args, binding) => {
             assertReady?.();
             validateRecoveryRequest({ ...executionRequest, route }, { nativeInvocation: binding });
+            assertReady?.consumeInvocation?.(binding);
             return runtime.invokeNative(next, { ...binding, args });
           });
         }

@@ -282,14 +282,18 @@ function createRecovery(options) {
     },
     async resumeReservation(input) {
       if (state.pending_questions.some(q => q.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
+      if (input.inspection?.valid_saved_response === true) return { action: 'replay', provider_called: false };
       if (input.inspection?.process_stopped !== true || input.inspection.receipt_checked !== true
           || input.inspection.valid_saved_response || input.inspection.roots_reconciled !== true) fail('recovery-writer-reconciliation-required');
       const saved = state.reservations?.at(-1), previous = state.attempts.at(-1);
       const transition = input.transition ? transitions.assertLive(input.transition) : null;
-      if (!saved || digest(saved) !== input.reservation_sha256 || saved.handoff_pending !== true || saved.handed_off_at
+      const ordinary = transition?.uninvoked?.reservation_sha256 === input.reservation_sha256;
+      if (!saved || digest(saved) !== input.reservation_sha256 || (!ordinary && (saved.handoff_pending !== true || saved.handed_off_at
           || (transition ? digest(saved.transition_reference) !== digest(transition.reference)
             : !environmentalRepairs.has(input.correction) || saved.correction?.kind !== 'environment'
-              || saved.correction.failure_id !== input.correction.failure_id)) fail('recovery-handoff-reservation-invalid');
+              || saved.correction.failure_id !== input.correction.failure_id)))) fail('recovery-handoff-reservation-invalid');
+      if (ordinary && (state.phase !== 'reserved' || state.attempts.some(row => row.reservation && digest(row.reservation) === digest(saved))
+          || state.continuation && state.continuation.status !== 'prepared')) fail('recovery-reservation-consumed');
       const scope = exceptionFor(input.exception, state, clock()), observed = candidateSets.get(input.candidateSet);
       if (!observed || observed.provenance.request_identity_sha256 !== state.request_identity_sha256
           || digest(observed.provenance) !== digest(saved.provenance)
@@ -301,11 +305,42 @@ function createRecovery(options) {
       const invocation = await input.validateInvocation(route);
       if (invocation?.ok !== true) fail(invocation?.reason_code || 'recovery-adapter-refused');
       exceptionFor(input.exception, state, clock());
-      saved.handoff_pending = false; saved.handed_off_at = clock(); state.phase = 'external-handoff'; save();
+      if (ordinary) {
+        const args = invocation.args, prompt = args?.message || args?.prompt;
+        if (!args || typeof prompt !== 'string' || !prompt.trim()) fail('recovery-final-packaging-required');
+        const continuation = { schema_version: 1, status: 'prepared', reservation_sha256: input.reservation_sha256,
+          transition_reference: transition.reference, original_request_sha256: saved.request_sha256,
+          final_request_sha256: digest(args), prompt_sha256: digest(prompt), invocation_sha256: digest(invocation),
+          packaging_reason: 'ordinary-native-reservation-restart', offline_validation: 'native-adapter:final-arguments',
+          evidence_reference: transition.uninvoked.evidence_reference };
+        if (state.continuation && digest(state.continuation) !== digest(continuation)) fail('recovery-continuation-changed');
+        state.continuation = continuation; save();
+      } else {
+        saved.handoff_pending = false; saved.handed_off_at = clock(); state.phase = 'external-handoff'; save();
+      }
       return { action: 'invoke', route, invocation, corrected: true, correction: saved.correction,
         provenance: saved.provenance, remaining_ms: remaining(), sidecar_remaining_ms: remaining(),
         authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
-        provider_called: false, reservation_sha256: input.reservation_sha256 };
+        provider_called: false, reservation_sha256: input.reservation_sha256, ...(ordinary ? { continuation: true } : {}) };
+    },
+    consumeContinuation(invocation, reservationHash, delivery) {
+      const row = state.continuation;
+      if (!row || row.status !== 'prepared' || row.reservation_sha256 !== reservationHash
+          || digest(state.reservations.at(-1)) !== reservationHash || row.invocation_sha256 !== digest(invocation)
+          || state.pending_questions.some(q => q.status === 'pending')) fail('recovery-continuation-not-prepared');
+      if (delivery) row.delivery = JSON.parse(JSON.stringify(delivery));
+      row.status = 'dispatch-possible'; save();
+    },
+    returnContinuation() {
+      if (state.continuation?.status !== 'dispatch-possible') fail('recovery-continuation-not-dispatched');
+      state.continuation.status = 'returned'; save();
+    },
+    saveDeliveryReceipt(receipt) {
+      const row = state.continuation;
+      if (!row?.delivery || !['dispatch-possible', 'returned'].includes(row.status)
+          || !/^[a-f0-9]{64}$/.test(receipt?.sha256 || '')
+          || receipt.file !== row.delivery.receipt_file + '.' + receipt.sha256 + '.json') fail('recovery-delivery-receipt-invalid');
+      row.delivery.receipt = JSON.parse(JSON.stringify(receipt)); save();
     },
     reserve(decision, requestHash, handoffPending = false) {
       if (decision.action !== 'invoke' || state.phase !== 'ready' || state.selection?.selected !== routeKey(decision.route)) fail('recovery-reservation-invalid');
@@ -525,7 +560,8 @@ async function recoverAttempt(options) {
     ...(request.route ? { request } : {}),
     clock: options.clock, persist: value => {
       preSpawn?.assertUnchanged();
-      transitionGuard?.assertUnchanged();
+      if (value.continuation?.status === 'returned' || value.continuation?.delivery?.receipt) transitionGuard?.assertAuthority();
+      else transitionGuard?.assertUnchanged();
       const lockApi = require('./forge-lock');
       // A private transport mutex must not change guarded owner/code metadata.
       const lockRoot = path.join(require('os').tmpdir(), 'forge-recovery-' + digest(path.resolve(options.stateFile)));
@@ -654,7 +690,7 @@ async function recoverAttempt(options) {
   // The invocation budget is always the historic sidecar budget. Native
   // authorization validity is returned separately, never a fresh sidecar wait.
   preSpawn?.assertUnchanged();
-  const reservedStateHash = digest(require('fs').readFileSync(options.stateFile));
+  let reservedStateHash = digest(require('fs').readFileSync(options.stateFile));
   const reservedRequestHash = callerRequestHash(options.request);
   const assertAuthority = () => {
     const live = inspectReceipt(options.receiptFile, { processProbe: options.processProbe, request: options.request });
@@ -663,12 +699,23 @@ async function recoverAttempt(options) {
         || digest(require('fs').readFileSync(options.stateFile)) !== reservedStateHash) fail('recovery-process-receipt-inspection-changed');
     if (binding) binding.adapter.readStandingAuthorization(authorizedReference);
     if (exception) exceptionFor(exception, session.inspect(), (options.clock || Date.now)());
+    transitionGuard?.assertAuthority();
   };
   const assertReady = Object.assign(() => {
     assertAuthority();
     if (transitionGuard) transitionGuard.withLock(() => {});
     else preSpawn?.assertUnchanged();
-  }, { assertAuthority, ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
+  }, { assertAuthority,
+    ...(decision.continuation ? { consumeInvocation(invocation, delivery) {
+      assertReady();
+      transitionGuard.withLock(() => session.consumeContinuation(invocation, decision.reservation_sha256, delivery));
+      reservedStateHash = expectedStateHash;
+    }, invocationReturned() {
+      assertAuthority(); session.returnContinuation(); reservedStateHash = expectedStateHash;
+    }, persistDeliveryReceipt(receipt) {
+      assertAuthority(); session.saveDeliveryReceipt(receipt); reservedStateHash = expectedStateHash;
+    } } : {}),
+    ...(transitionGuard ? { appendOwnerEvent: line => transitionGuard.appendOwnerEvent(line) } : {}) });
   const invoke = () => options.invoke(decision.route, decision.invocation, decision.remaining_ms,
     assertReady, decision.reservation_sha256);
   // The adapter repeats assertReady at the actual native callback. Do not hold
