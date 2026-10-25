@@ -216,7 +216,11 @@ async function main() {
       const captured = JSON.parse(fs.readFileSync(`${request.resultFile}.recovery.json`));
       assert.strictEqual(captured.request_identity.linked_entry.classification, 'new-unit');
       assert.strictEqual(captured.request_identity.linked_entry.entry_id, 'fixture-entry-1');
-      assert.strictEqual(captured.deadline_at - captured.started_at, 60000);
+      assert.strictEqual(captured.schema_version, 2);
+      assert.strictEqual(captured.budget, 'tier-ceiling');
+      for (const key of ['deadline_at', 'budget_remaining_ms', 'clock_high_water', 'migrated_from']) {
+        assert.ok(!Object.hasOwn(captured, key), `fresh linked entry must not inherit ${key}`);
+      }
       assert.deepStrictEqual(history(f), before);
       await assert.rejects(sidecar.runUnitSidecar({ ...request, dispatchId: 'forged', linkedEntryBinding: {}, entry: { approved: true } }), /authority|required/);
       assert.strictEqual(calls, 1);
@@ -340,10 +344,17 @@ async function main() {
       assert.throws(() => recovery.requestIdentity({ ...f.request, linked_begin_key: key, linkedEntryBinding: {} }), /linked-entry-binding-required/);
       const bound = recovery.bindLinkedRequest({ ...f.request, linked_begin_key: key }, { ...liveOptions(f), ownerToken: f.input.owner_token });
       const fresh = recovery.createRecovery({ unit: 'plan-slice/S03', roots_sha256: 'roots', request: bound, clock: () => 90000 }).snapshot();
-      assert.strictEqual(fresh.deadline_at, 150000);
+      assert.strictEqual(fresh.started_at, 90000);
+      assert.strictEqual(fresh.schema_version, 2);
+      assert.strictEqual(fresh.budget, 'tier-ceiling');
+      assert.ok(!Object.hasOwn(fresh, 'deadline_at'));
       const old = recovery.createRecovery({ unit: 'plan-slice/S03', roots_sha256: 'roots', request: f.request, clock: () => 100 }).snapshot();
       assert.throws(() => recovery.createRecovery({ unit: 'plan-slice/S03', roots_sha256: 'roots', request: bound, state: old, clock: () => 90000 }), /identity-mismatch/);
-      assert.strictEqual(recovery.createRecovery({ unit: 'plan-slice/S03', roots_sha256: 'roots', request: f.request, state: old, clock: () => 90000 }).snapshot().deadline_at, 60100);
+      const resumed = recovery.createRecovery({ unit: 'plan-slice/S03', roots_sha256: 'roots', request: f.request, state: old, clock: () => 90000 }).snapshot();
+      assert.strictEqual(resumed.started_at, 100);
+      assert.strictEqual(resumed.schema_version, 2);
+      assert.strictEqual(resumed.budget, 'tier-ceiling');
+      assert.ok(!Object.hasOwn(resumed, 'deadline_at'));
     } finally { cleanup(f); }
   });
   test('omitted physical code root prevents consumption and complete reconciliation permits it', () => {
