@@ -12,6 +12,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const runner = require('./run-tests.js');
+const { planShards } = require('./forge-ci-shards.js');
 const {
   baselineEntriesForSuites,
   compareFailures,
@@ -389,6 +391,72 @@ process.stdout.write('Section 7: shard-aware baseline comparison\n');
     ghostOutsideShard.ok === false && ghostOutsideShard.errors.some(error => error.includes('ghost.test.js')),
     'a ghost entry is rejected even when it would not belong to the current shard'
   );
+}
+
+// --- Section 8: opt-in profile flags and public compatibility --------------
+process.stdout.write('Section 8: profile flags and legacy exports\n');
+{
+  const defaults = parseArgs([]);
+  assertEqual(defaults.shardProfile, null, 'shard profile defaults to null');
+  assertEqual(defaults.profileOut, null, 'suite profile output defaults to null');
+  const options = parseArgs(['--shard-index', '0', '--shard-count', '2',
+    '--shard-profile', 'weights.json', '--profile-out', 'observed.json']);
+  assertEqual(options.shardProfile, 'weights.json', 'shard profile path captured');
+  assertEqual(options.profileOut, 'observed.json', 'suite profile path captured');
+  for (const flag of ['--shard-profile', '--profile-out']) {
+    for (const suffix of [[], ['--verbose'], ['one.json', flag, 'two.json']]) {
+      let threw = false;
+      try { parseArgs(['--shard-index', '0', '--shard-count', '2', flag, ...suffix]); }
+      catch { threw = true; }
+      assert(threw, `${flag} rejects missing, flag-valued or repeated path: ${suffix.join(' ')}`);
+    }
+  }
+  for (const argv of [['--shard-profile', 'one.json'], ['--profile-out', 'one.json', '--list']]) {
+    let threw = false;
+    try { parseArgs(argv); } catch { threw = true; }
+    assert(threw, `incompatible profile flags rejected: ${argv.join(' ')}`);
+  }
+  for (const name of ['childEnv', 'compareFailures', 'discoverTests', 'isolatedEnv', 'main',
+    'parseArgs', 'resolveBaseline', 'suitesForChangedFiles', 'baselineEntriesForSuites', 'suitesForShard']) {
+    assert(typeof runner[name] === 'function', `legacy export ${name} remains callable`);
+  }
+  assertEqual(runner.BASELINE_PLATFORMS, ['win32', 'darwin', 'linux'], 'legacy platform export preserved');
+}
+
+// --- Section 9: weighted membership retains the bidirectional baseline -----
+process.stdout.write('Section 9: weighted shard baseline\n');
+{
+  // planShards accepts a validated loaded profile; use the public builder so
+  // the synthetic source follows the same closed schema as a real profile.
+  const { buildShardProfile } = require('./forge-ci-shards.js');
+  const source = { kind: 'run-tests-log', name: 'synthetic.log', sha256: 'a'.repeat(64), bytes: 1,
+    platform: 'win32', job_name: null, runner_image: null, runner_image_version: null,
+    node_version: null, observed_from: null, observed_to: null, suites_declared: 4,
+    suites_observed: 4, suites_failed: 0,
+    unavailable: Object.fromEntries(['job_name', 'runner_image', 'runner_image_version',
+      'node_version', 'observed_from', 'observed_to'].map(key => [key, 'synthetic'])) };
+  const profile = { state: 'loaded', sha256: 'b'.repeat(64), doc: buildShardProfile({ sources: [source],
+    observations: AVAILABLE.map((suite, index) => ({ platform: 'win32', suite,
+      elapsed_ms: [1000, 100, 50, 25][index], status: 'pass', source_index: 0 })) }) };
+  const plans = [0, 1].map(index => planShards({ suites: AVAILABLE, index, count: 2, platform: 'win32', profile }));
+  assert(plans.every(plan => plan.algorithm === 'weighted-lpt-v1'), 'public planShards uses the synthetic weighted profile');
+  assert(JSON.stringify(plans[0].selected) !== JSON.stringify(suitesForShard(AVAILABLE, 0, 2)), 'weighted membership differs from positional membership');
+  const entries = AVAILABLE.map(entry);
+  const resolved = resolveBaseline({ text: doc(entries), platform: 'win32', availableSuites: AVAILABLE });
+  assert(resolved.ok, 'weighted baseline validated against full universe before filtering');
+  for (const plan of plans) {
+    const ownEntries = baselineEntriesForSuites(resolved.entries, plan.selected);
+    const verdict = compareFailures({ executedCount: plan.selected.length, failedSuites: plan.selected,
+      baselineSuites: ownEntries.map(row => row.suite) });
+    assert(verdict.ok, `weighted shard ${plan.index}: other shard entries never become stale`);
+    const cured = compareFailures({ executedCount: plan.selected.length, failedSuites: plan.selected.slice(1),
+      baselineSuites: ownEntries.map(row => row.suite) });
+    assertEqual(cured.staleEntries, [plan.selected[0]], `weighted shard ${plan.index}: cured entry blocks its owner`);
+  }
+  const ghost = resolveBaseline({ text: doc([...entries, entry('ghost.test.js')]),
+    platform: 'win32', availableSuites: AVAILABLE });
+  assert(!ghost.ok && ghost.errors.some(error => error.includes('ghost.test.js')), 'weighted shard rejects ghost before filtering');
+  if (fails === 0) process.stdout.write('PASS S04-T04 key_link:3 weighted planShards baseline ownership cured entries and ghost validation\n');
 }
 
 process.stdout.write(`\n${passes} passed, ${fails} failed\n`);
