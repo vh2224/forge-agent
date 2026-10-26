@@ -121,11 +121,12 @@ async function main() {
     assert.deepStrictEqual([queriedEntry.hits, queriedEntry.base_confidence, queriedEntry.confidence], [1, 0.92, 0.92]);
     assert.strictEqual(queriedEntry.score, 10.92);
     console.log('PASS fixed-clock query: public memory query and projection share model_version, active state and unchanged additive score=10.92');
-    const settled = fragmentBytes(cwd);
+    let settled = fragmentBytes(cwd);
     const secondRequest = request(cwd, 'second', { memoryEvidence: fixtures.v2.memoryEvidence });
     const second = await sidecar.acceptNativeMemoryResult({ ...secondRequest, rawResult: fixtures.v2.extraction });
-    assert.strictEqual(second.publication.status, 'noop');
-    assert(fragmentBytes(cwd).equals(settled));
+    assert.strictEqual(second.publication.status, 'written');
+    assert(!fragmentBytes(cwd).equals(settled), 'new delivery IDs are durable');
+    settled = fragmentBytes(cwd);
     assert.deepStrictEqual(second.publication.state, first.publication.state);
     const replay = await sidecar.runNativeMemory(firstRequest, provider);
     assert.strictEqual(replay.publication.status, 'noop');

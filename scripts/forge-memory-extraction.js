@@ -766,7 +766,7 @@ function buildPublication(current, extraction, context) {
 
   // The reducer settles fresh v2 evidence: a refusal (e.g. confirmation from
   // the fact's own origin) is a conflict; an observation already recorded on
-  // the same target is a no-op, so the new row is dropped before writing.
+  // the same target adds no reinforcement but retains its delivery identity.
   if (freshEvidence.length > 0) {
     const fresh = new Set(freshEvidence);
     const { folded } = foldPublication(facts, stats, namespace);
@@ -775,16 +775,9 @@ function buildPublication(current, extraction, context) {
       const reasons = Array.from(new Set(refused.map(item => item.reason))).sort();
       throw new MemoryPublicationConflict(`evidence refused by the reducer (${reasons.join(', ')})`, 'evidence-reducer-refused');
     }
-    const redundant = new Set();
-    for (const duplicate of folded.duplicates) {
-      if (fresh.has(duplicate.event_id)) redundant.add(duplicate.event_id);
-      else if (fresh.has(duplicate.first_event_id)) redundant.add(duplicate.first_event_id);
-    }
-    for (const eventId of redundant) {
-      stats.splice(stats.findIndex(stat => stat.event_id === eventId), 1);
-      existingByEventId.delete(eventId);
-      eventsAdded -= 1;
-    }
+    // Keep distinct delivery IDs even when the reducer reports the same
+    // observation. Reinforcement remains deduplicated; durable IDs prevent
+    // later rebinding across publication attempts and process restarts.
   }
 
   let state = publicationState(facts, stats, namespace);

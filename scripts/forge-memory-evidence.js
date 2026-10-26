@@ -523,7 +523,12 @@ function precedence(kind) {
 }
 
 function compareEvents(left, right) {
-  return compareText(left.ts, right.ts) || precedence(left.kind) - precedence(right.kind);
+  const leftTime = Date.parse(left.ts), rightTime = Date.parse(right.ts);
+  // Valid timestamps may use different precision. Keep malformed legacy
+  // timestamps on their historical text ordering; never reorder legacy rows.
+  const chronological = Number.isFinite(leftTime) && Number.isFinite(rightTime)
+    ? leftTime - rightTime : compareText(left.ts, right.ts);
+  return chronological || precedence(left.kind) - precedence(right.kind);
 }
 
 function compareV2(left, right) {

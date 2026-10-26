@@ -856,10 +856,11 @@ async function reconcileArtifactAttempt(request, options) {
 function memorySourceLabel(request, sourceUnit) {
   return `${request.sourceUnitType || 'unit'}/${sourceUnit}`;
 }
-function memorySourceFingerprint(request) {
+function memorySourceFingerprint(request, sourceOnly = false) {
   const sourcePayload = {
     summaryContent: request.summaryContent || '', sourceResult: request.sourceResult || '',
-    keyDecisions: request.keyDecisions || [], existingMemory: request.existingMemory || { facts: [], stats: [] },
+    keyDecisions: request.keyDecisions || [],
+    ...(sourceOnly ? {} : { existingMemory: request.existingMemory || { facts: [], stats: [] } }),
   };
   return request.sourceFingerprint || hash(JSON.stringify(sourcePayload));
 }
@@ -868,6 +869,7 @@ function memorySourceFingerprint(request) {
 function memoryContractEvidence(record) {
   const contract = record.memory_contract;
   if (!contract || typeof contract !== 'object' || Array.isArray(contract) || contract.schema_version !== NEW_MEMORY_SCHEMA_VERSION
+      || (contract.source_binding !== undefined && contract.source_binding !== 'source-only-v1')
       || !contract.evidence || typeof contract.evidence !== 'object' || Array.isArray(contract.evidence)) {
     fail('memory-contract-invalid', 'The memory receipt carries an unsupported evidence contract.');
   }
@@ -881,7 +883,7 @@ function memorySourceContext(request, record) {
     extractedAt: record.extracted_at,
     source: {
       sourceUnit: memorySourceLabel(request, record.source_unit),
-      sourceFingerprint: memorySourceFingerprint(request),
+      sourceFingerprint: memorySourceFingerprint(request, record.memory_contract?.source_binding === 'source-only-v1'),
       dispatchId: record.dispatch_id,
       model: record.model,
       effort: record.effort,
@@ -895,7 +897,7 @@ function memorySourceContext(request, record) {
 // excludes existingMemory, attempt, extraction ID and time, so re-extracting
 // the same source cannot manufacture a new observation. Confirm/utility exist
 // only when the owner supplies verified independence/outcome records.
-function memoryEvidenceContract(request, sourceUnit) {
+function memoryEvidenceContract(request, sourceUnit, historicalContext = false) {
   const extraction = require('./forge-memory-extraction');
   const supplied = request.memoryEvidence === undefined ? { records: [], outcomes: [] } : request.memoryEvidence;
   if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)
@@ -904,7 +906,7 @@ function memoryEvidenceContract(request, sourceUnit) {
     fail('memory-evidence-invalid', 'memoryEvidence must be { records, outcomes } owner data.');
   }
   const sourceLabel = memorySourceLabel(request, sourceUnit);
-  const sourceFingerprint = memorySourceFingerprint(request);
+  const sourceFingerprint = memorySourceFingerprint(request, !historicalContext);
   const boundFingerprint = extraction.evidenceSourceFingerprint(sourceFingerprint);
   const observation = hash(JSON.stringify({ unit: sourceLabel, milestone: request.milestoneId || null,
     summary: request.summaryContent || '', result: request.sourceResult || '', key_decisions: request.keyDecisions || [] })).slice(0, 40);
@@ -931,6 +933,13 @@ function memoryRequestFingerprint(baseFingerprint, contract) {
 // historical fingerprint; only that exact pair keeps replaying (v1 rules).
 function legacyMemoryReceipt(existing, legacyFingerprint) {
   return Boolean(existing) && existing.memory_contract === undefined && existing.fingerprint === legacyFingerprint;
+}
+// Recognize old v2 only by its exact historical request fingerprint. Saved
+// evidence and publication context retain their original semantics on replay.
+function historicalV2MemoryReceipt(existing, request, sourceUnit, baseFingerprint) {
+  if (!existing || existing.memory_contract?.source_binding !== undefined) return false;
+  return existing.fingerprint === memoryRequestFingerprint(baseFingerprint,
+    memoryEvidenceContract(request, sourceUnit, true));
 }
 function memoryPrompt(request, sourceUnit) {
   const contract = memoryEvidenceContract(request, sourceUnit);
@@ -1328,7 +1337,8 @@ function acceptNativeMemoryFailure(request, loc) {
   let failure = proposed;
   if (fs.existsSync(files.receiptFile)) {
     const existing = JSON.parse(fs.readFileSync(files.receiptFile, 'utf8'));
-    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))) {
+    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))
+        && !historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyNativeMemoryFingerprint(r))) {
       fail('dispatch-identity-conflict');
     }
     if (existing.phase !== 'failed' || !existing.failure) fail('dispatch-identity-conflict');
@@ -1349,11 +1359,13 @@ async function acceptNativeMemoryResult(request) {
   if (r.nativeFailure !== undefined) return acceptNativeMemoryFailure(r, loc);
   const files = nativeReceiptFiles(r);
   // Refused owner evidence fails here, before any receipt exists.
-  const contract = memoryEvidenceContract(r, loc.sourceUnit);
-  const fingerprint = memoryRequestFingerprint(legacyNativeMemoryFingerprint(r), contract);
+  let contract = memoryEvidenceContract(r, loc.sourceUnit);
+  let fingerprint = memoryRequestFingerprint(legacyNativeMemoryFingerprint(r), contract);
+  let sourceBinding = 'source-only-v1';
   const existing = fs.existsSync(files.receiptFile) ? JSON.parse(fs.readFileSync(files.receiptFile, 'utf8')) : null;
   if (existing) {
-    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))) {
+    if (existing.fingerprint !== fingerprint && !legacyMemoryReceipt(existing, legacyNativeMemoryFingerprint(r))
+        && !historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyNativeMemoryFingerprint(r))) {
       fail('dispatch-identity-conflict');
     }
     if (existing.phase === 'ready') {
@@ -1367,6 +1379,11 @@ async function acceptNativeMemoryResult(request) {
     }
     if (existing.phase === 'failed') fail(existing.failure?.reason_code || 'native-memory-attempt-failed');
     if (existing.phase !== 'started' || r.rawResult === undefined) fail('native-memory-attempt-interrupted');
+    if (existing.fingerprint !== fingerprint) {
+      contract = memoryEvidenceContract(r, loc.sourceUnit, true);
+      fingerprint = existing.fingerprint;
+      sourceBinding = undefined;
+    }
   } else {
     fs.writeFileSync(files.receiptFile, JSON.stringify({ phase: 'started', fingerprint,
       dispatch_id: r.dispatchId }), { flag: 'wx', mode: 0o600 });
@@ -1380,7 +1397,7 @@ async function acceptNativeMemoryResult(request) {
       extracted_at: r.extractedAt || new Date().toISOString(), source_unit: loc.sourceUnit,
       model: identity.model, effort: identity.effort,
       telemetry: r.invocationTelemetry || null, extraction, artifacts: [],
-      memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, evidence: contract } };
+      memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, ...(sourceBinding ? { source_binding: sourceBinding } : {}), evidence: contract } };
     json(files.receiptFile, record);
     const delivered = await publishReadyRecord(r, record);
     json(files.resultFile, delivered);
@@ -2016,7 +2033,8 @@ async function runUnitSidecarCore(request, runtime, identity) {
     return ready;
   }
   if (existing) {
-    if (existing.fingerprint !== fingerprint && !(memoryContract && legacyMemoryReceipt(existing, legacyFingerprint))) {
+    if (existing.fingerprint !== fingerprint && !(memoryContract && (legacyMemoryReceipt(existing, legacyFingerprint)
+        || historicalV2MemoryReceipt(existing, r, loc.sourceUnit, legacyFingerprint)))) {
       fail('dispatch-identity-conflict');
     }
     if (existing.phase === 'ready' || existing.phase === 'executed') {
@@ -2516,7 +2534,7 @@ async function runUnitSidecarCore(request, runtime, identity) {
       ? { phase: 'ready', kind: 'memory-extraction', fingerprint, dispatch_id: dispatchId,
         extraction_id: r.extractionId || dispatchId, extracted_at: startedAt, source_unit: loc.sourceUnit,
         model: route.model_resolved || route.model, effort: route.effort, extraction: result, artifacts: [],
-        memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, evidence: memoryContract },
+        memory_contract: { schema_version: NEW_MEMORY_SCHEMA_VERSION, source_binding: 'source-only-v1', evidence: memoryContract },
         telemetry: { model_requested: route.model_requested || route.model || null,
           model_resolved: route.model_resolved || route.model || null, model_argument: model,
           ...observedModel,

@@ -1757,13 +1757,15 @@ async function memoryEvidenceContracts() {
     console.log('PASS v2 receipt: owner-bound confirm/reobserve/utility, deferred boundary, replay in a new process without provider');
 
     // 5. Stable identities, deduplicated observations and explicit conflicts.
-    const settled = fragmentBytes('T02');
+    let settled = fragmentBytes('T02');
     const reordered = await sidecar.acceptNativeMemoryResult({ ...t02('v2-reordered', { extractionId: 'extract-v2-evidence' }),
       rawResult: v2([...v2Events.slice(1)].reverse()) });
     assert.deepStrictEqual([reordered.publication.status, reordered.publication.reason], ['noop', 'replay'], 'same local_event_id, any order');
     const repackaged = await sidecar.acceptNativeMemoryResult({ ...t02('v2-repackaged'),
       rawResult: v2([{ kind: 'confirm', local_event_id: 'c9', existing_id: 'MEM001', evidence_ref: 'verified' }]) });
-    assert.strictEqual(repackaged.publication.status, 'noop', 'the same observation in another extraction adds no reinforcement');
+    assert.strictEqual(repackaged.publication.status, 'written', 'new delivery identity is retained without reinforcement');
+    assert(!fragmentBytes('T02').equals(settled));
+    settled = fragmentBytes('T02');
     assert.strictEqual(repackaged.publication.state.find(item => item.mem_id === 'MEM001').independent_confirmation_count, 1);
     const conflicting = await sidecar.acceptNativeMemoryResult({ ...t02('v2-conflict', { extractionId: 'extract-v2-evidence' }),
       rawResult: v2([{ kind: 'reobserve', local_event_id: 'e1', existing_id: 'MEM001', evidence_ref: 'source_reobserve' }]) });
@@ -1772,7 +1774,7 @@ async function memoryEvidenceContracts() {
     assert.deepStrictEqual([conflictEvent.publication_reason, conflictEvent.publication_reason_code],
       ['memory-publication-conflict', 'publication-conflict']);
     assert(fragmentBytes('T02').equals(settled), 'no-op and conflict leave the fragment untouched');
-    console.log('PASS v2 identities: reordered events and repackaged observations are no-ops; changed content conflicts without writes');
+    console.log('PASS v2 identities: reordered events are no-ops; repackaged IDs persist without reinforcement; conflicts write nothing');
 
     // 6. Missing bindings, unverified claims and a tampered snapshot never write.
     for (const [name, overrides, events] of [

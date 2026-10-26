@@ -650,7 +650,7 @@ function compareLegacyStats(a, b) {
 // stored legacy order and multiplicity are kept verbatim.
 // Evidence v2 rows: validated by forge-memory-evidence before persistence,
 // replayed event_id is a no-op, the same observation on the same target is a
-// no-op, and any differently bound copy is MEMORY_EVENT_CONFLICT. v2 rows are
+// reinforcement no-op with a retained ID; a differently bound copy conflicts. v2 rows are
 // ordered canonically (ts, precedence, event_id) and merged into the legacy
 // subsequence the same way the reducer reads them, so a re-read is stable.
 function mergeStats(existing, incoming) {
@@ -686,7 +686,8 @@ function mergeStats(existing, incoming) {
           throw memoryEventError('MEMORY_EVENT_CONFLICT', memoryEvidence.REASONS.OBSERVATION_CONFLICT,
             `Conflicting memory observation ${normalized.observation_id} on ${normalized.mem_id}: ${s.event_id}`);
         }
-        continue;
+        // Retain the delivery ID; only the reducer deduplicates reinforcement.
+        // Otherwise a later delivery could rebind this ID to another observation.
       }
       observations.set(key, normalized);
     }

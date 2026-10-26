@@ -721,12 +721,13 @@ test('v2 replay is a no-op; a conflicting event_id or observation is MEMORY_EVEN
   const repackaged = v2Row('confirm', 'c9', { extraction_id: 'extract-3', event_id: 'extract-3:v2:c9',
     observation_id: 'obs-c1', evidence_ref: 'other', ts: '2026-10-03T00:00:00.000Z' });
   const sameObservation = memory.writeFragment(cwd, { unit_id: 'T01', facts: [], stats: [repackaged] });
-  assert.strictEqual(sameObservation.created, false, 'the same observation in another extraction adds no row');
-  assert.strictEqual(memory.readFragment(cwd, 'T01').stats.length, 1);
+  assert.strictEqual(sameObservation.created, true, 'a distinct delivery identity is retained without reinforcement');
+  assert.strictEqual(memory.readFragment(cwd, 'T01').stats.length, 2);
+  const afterDelivery = fs.readFileSync(file);
 
   const conflicts = [
     [{ ...confirm, independent_ref: 'verify:other' }, evidence.REASONS.EVENT_ID_CONFLICT],
-    [{ ...repackaged, source_fingerprint: 'sha256:elsewhere' }, evidence.REASONS.OBSERVATION_CONFLICT],
+    [{ ...repackaged, event_id: 'extract-3:v2:c10', local_event_id: 'c10', source_fingerprint: 'sha256:elsewhere' }, evidence.REASONS.OBSERVATION_CONFLICT],
     [v2Row('reobserve', 'r9', { observation_id: 'obs-c1' }), evidence.REASONS.OBSERVATION_CONFLICT],
   ];
   for (const [row, reason] of conflicts) {
@@ -736,7 +737,8 @@ test('v2 replay is a no-op; a conflicting event_id or observation is MEMORY_EVEN
       `expected MEMORY_EVENT_CONFLICT/${reason}`,
     );
   }
-  assert(fs.readFileSync(file).equals(before), 'conflicts never persist');
+  assert(!afterDelivery.equals(before), 'new delivery is persisted');
+  assert(fs.readFileSync(file).equals(afterDelivery), 'conflicts never persist');
   assert.deepStrictEqual(lockNames(cwd), []);
 }));
 

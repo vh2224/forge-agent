@@ -682,9 +682,10 @@ test('v2 publication binds owner evidence under stable local_event_id identities
 
     const repackaged = publish(cwd, v2Result({ events: [{ kind: 'confirm', local_event_id: 'c9', existing_id: 'MEM001',
       evidence_ref: 'verified' }] }), v2Context('v2-b', records, outcomes));
-    assert.strictEqual(repackaged.status, 'noop', 'the same observation from another extraction adds nothing');
+    assert.strictEqual(repackaged.status, 'written', 'same observation retains its new delivery identity');
     assert.strictEqual(repackaged.state.find(item => item.mem_id === 'MEM001').independent_confirmation_count, 1);
-    assert(fs.readFileSync(first.path).equals(bytes));
+    assert(!fs.readFileSync(first.path).equals(bytes));
+    const afterDelivery = fs.readFileSync(first.path);
 
     const changed = publish(cwd, v2Result({ events: [{ kind: 'reobserve', local_event_id: 'e3', existing_id: 'MEM001',
       evidence_ref: 'again' }] }), ctx);
@@ -705,7 +706,7 @@ test('v2 publication binds owner evidence under stable local_event_id identities
       evidence_ref: 'verified' }] }), context('v2-f', { evidence: extraction.normalizeEvidenceRegistry({
       records: [ownerRecord('verified', 'confirm', { source_unit: foreignSource.sourceUnit })], outcomes: [] }, foreignSource) }));
     assert.deepStrictEqual([foreign.status, foreign.reason_code], ['conflict', 'evidence-registry-refused'], 'divergent source');
-    assert(fs.readFileSync(first.path).equals(bytes), 'refusals write nothing');
+    assert(fs.readFileSync(first.path).equals(afterDelivery), 'refusals write nothing');
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -768,7 +769,7 @@ test('new promotion needs three deduplicated independent confirmations; exposure
     for (const index of [0, 1]) assert.strictEqual(publish(cwd, confirmBoth(index), confirmations(index)).status, 'written');
     assert.strictEqual(publish(cwd, promote('MEM001'), context('promote-two')).status, 'conflict', 'two confirmations are not enough');
     const duplicate = publish(cwd, confirmBoth(0), v2Context('confirm-again', [ownerRecord('ver0', 'confirm')]));
-    assert.strictEqual(duplicate.status, 'noop', 'a repeated observation is deduplicated');
+    assert.strictEqual(duplicate.status, 'written', 'delivery retained; repeated observation adds no reinforcement');
     assert.strictEqual(duplicate.state.find(item => item.mem_id === 'MEM001').independent_confirmation_count, 2);
     assert.strictEqual(publish(cwd, confirmBoth(2), confirmations(2)).status, 'written');
     assert.strictEqual(publish(cwd, promote('MEM002'), context('promote-low')).reason_code, 'promotion-threshold-not-met',
