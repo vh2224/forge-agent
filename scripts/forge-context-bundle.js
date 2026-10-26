@@ -50,6 +50,7 @@ function readFileOrEmpty(file) {
  */
 function buildContextBundleResult(opts) {
   opts = opts || {};
+  if (opts.diagnostic !== undefined && typeof opts.diagnostic !== 'boolean') throw new Error('Invalid memory diagnostic');
   const cwd = path.resolve(opts.owner || opts.cwd || process.cwd());
   const sections = [];
 
@@ -75,7 +76,7 @@ function buildContextBundle(opts) {
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
-    const known = ['cwd', 'owner', 'slice-context', 'out', 'query', 'query-file', 'description', 'unit-type', 'phase', 'unit-id', 'milestone-id', 'slice-id', 'task-id', 'limit', 'max-tokens', 'selection-report'];
+    const known = ['cwd', 'owner', 'slice-context', 'out', 'query', 'query-file', 'description', 'unit-type', 'phase', 'unit-id', 'milestone-id', 'slice-id', 'task-id', 'limit', 'max-tokens', 'selection-report', 'memory-diagnostic'];
     if (!argv[i].startsWith('--') || !known.includes(argv[i].slice(2)) || i + 1 >= argv.length) throw new Error('Invalid bundle arguments');
     args[argv[i].slice(2)] = argv[++i];
   }
@@ -85,6 +86,12 @@ function parseArgs(argv) {
 function main() {
   let args;
   try { args = parseArgs(process.argv.slice(2)); } catch { process.stderr.write('forge-context-bundle: invalid arguments\n'); process.exitCode = 2; return; }
+  if ((args['memory-diagnostic'] !== undefined && !['on', 'off'].includes(args['memory-diagnostic'])) ||
+      (args['memory-diagnostic'] === 'on' && !args['selection-report'])) {
+    process.stderr.write('forge-context-bundle: invalid arguments\n');
+    process.exitCode = 2;
+    return;
+  }
   if (!args.out) {
     process.stderr.write('forge-context-bundle: --out <file> is required\n');
     process.exitCode = 2;
@@ -98,7 +105,7 @@ function main() {
     const result = buildContextBundleResult({ cwd: args.cwd, owner: args.owner, sliceContext: args['slice-context'],
       query, description: args.description, unitType: args['unit-type'], phase: args.phase,
       unitId: args['unit-id'], milestoneId: args['milestone-id'], sliceId: args['slice-id'], taskId: args['task-id'],
-      limit: args.limit, maxTokens: args['max-tokens'] });
+      limit: args.limit, maxTokens: args['max-tokens'], diagnostic: args['memory-diagnostic'] === 'on' ? true : undefined });
     fs.writeFileSync(out, result.markdown, 'utf8');
     if (args['selection-report']) fs.writeFileSync(path.resolve(args['selection-report']), JSON.stringify(result.selection, null, 2) + '\n', 'utf8');
   } catch (error) {
