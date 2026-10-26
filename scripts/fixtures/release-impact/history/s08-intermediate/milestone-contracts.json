@@ -1,0 +1,869 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "code_dir": "worktree .forge-worktrees/M-20261020200139-memoria-explicavel/forge-agent",
+    "branch": "forge/M-20261020200139-memoria-explicavel",
+    "observed_revision": "4c0a19890dfe8090adba5607cadee533fca095ae",
+    "last_tag": "v4.45.0",
+    "last_tag_revision": "5a44919b9631545965e93d004cd7e17b3c6f616c"
+  },
+  "contracts": [
+    {
+      "id": "S02-publication",
+      "slice": "S02",
+      "issue": null,
+      "surface": "receipt",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        ".github/workflows/release.yml",
+        "scripts/forge-release-publish.test.js",
+        "unknown"
+      ],
+      "baseline": "slice-start",
+      "baseline_reference": "323ca6b356333edc72012a1d0d8e45ca5127c995^",
+      "released": true,
+      "evidence": [
+        {
+          "file": "scripts/forge-release-publish.js",
+          "symbol": "preparePublication",
+          "observed_sha": "323ca6b356333edc72012a1d0d8e45ca5127c995",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-publish.js",
+          "symbol": "notes_sha256",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "shared/forge-release-checks.md",
+          "symbol": "exact-SHA",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "O produtor de prepare/apply acrescenta receipt vinculado ao SHA candidato, checks e hashes de pacote/notas. Comparacao com o inicio da adicao S02, nao com a API ja presente na ultima tag. O commit 323ca6b e ancestral de v4.45.0 (merge-base exit 0); 1ec6fb9 da branch nao e. Os bytes de forge-release-publish.js atuais sao identicos aos da tag; nenhuma nova quebra e inferida dessa duplicidade historica.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "S03-evidence-v2",
+      "slice": "S03",
+      "issue": null,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-extraction.js",
+        "scripts/forge-projection.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-evidence.js",
+          "symbol": "validateExtractionV2",
+          "observed_sha": "c95dc2cac33647af936a4158731dd163edf0c655",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-extraction.js",
+          "symbol": "SCHEMA_VERSIONS",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Acrescenta envelope v2 e eventos com evidencia vinculada pelo owner; validateExtractionResult sem selecao explicita continua v1. Confirmacoes independentes sao exigidas para promocao v2, nao reinterpretadas como hits v1. Modulo v2 ausente na tag. Findings historicos de S03 continuam pendentes; isto nao prova eficacia.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "S04-shards",
+      "slice": "S04",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        ".github/workflows/ci.yml",
+        "scripts/forge-ci-workflow.test.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/run-tests.js",
+          "symbol": "--shard-profile",
+          "observed_sha": "37a27ad5dd663744f866dc930593c73fac78a5ba",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-ci-shards.js",
+          "symbol": "planShards",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": ".github/workflows/ci.yml",
+          "symbol": "concurrency:",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Flags opcionais shard-index/count/profile acrescentam particionamento e perfil; argv sem shards preserva a lista canonica. CI passa a consumir shards e cancelamento por concurrency; nao se infere eficacia hospedada nem resolucao dos R1-R6.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "S05-diagnostic",
+      "slice": "S05",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-context.js",
+        "scripts/forge-memory-diagnostic-invariance.test.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-diagnostic.js",
+          "symbol": "boundDiagnostic",
+          "observed_sha": "227c135632d26df480fad1366f7271c17db3316d",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-context.js",
+          "symbol": "options.diagnostic === true",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Diagnostico opt-in acrescenta campos limitados sem mudar ranking ou envelope quando desligado. Consumidor local seleciona explicitamente diagnostic:true. Modulo ausente na tag.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": [
+        "real-minor"
+      ]
+    },
+    {
+      "id": "S06-shadow",
+      "slice": "S06",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-index.js",
+        "scripts/forge-memory-popularity-compare.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-popularity.js",
+          "symbol": "compareShadow",
+          "observed_sha": "6c2f281e0ebf525a0879821b469bf8a7f77f7132",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-popularity-compare.js",
+          "symbol": "popularity_shadow",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Comparacao opt-in de popularidade expoe sombra e fingerprints separados da selecao ativa. Acrescenta observacao, nao aplica nova formula ao ranking ativo. Ausente na tag; consumidores externos desconhecidos.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "S07-stage",
+      "slice": "S07",
+      "issue": null,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-stage-report.js",
+        "scripts/forge-memory-stage-workflow.test.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "buildStageEvidence",
+          "observed_sha": "eac567b0204a3164049a16f3a786d884f0453d80",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "buildStageReport",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Suplemento por etapa e relatorio sao novos, com disponibilidade e perdas explicitas, sem transformar ausencia em eficacia. Ambos os modulos estao ausentes na ultima tag.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "issue-232-public",
+      "slice": "S07",
+      "issue": 232,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-stage-report.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "publication(row, fact)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "selection(row, fact, published)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "content_hash_conflict",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra a ultima tag, o modulo e uma adicao nova ainda nao lancada; #232 integra essa adicao. Nao e major publico por divergir de um estado intermediario. O commit 26627ec nao e ancestral de v4.45.0 (merge-base exit 1).",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "issue-232-intermediate",
+      "slice": "S07",
+      "issue": 232,
+      "surface": "schema",
+      "kind": "meaning-change",
+      "bump": "major",
+      "consumers": [
+        "scripts/forge-memory-stage-report.js",
+        "unknown"
+      ],
+      "baseline": "slice-start",
+      "baseline_reference": "26627ec1309b0137f71eeb025bc0f1267bbd8209^ (S07 entregue antes da correcao)",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "publication(row, fact)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "selection(row, fact, published)",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-evidence.js",
+          "symbol": "content_hash_conflict",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra S07 entregue, o mesmo MEM com hashes divergentes em state/fragment deixa de contar presente/retido e vira content_hash_conflict. publication e selection agora combinam ambas as fontes; muda o significado observavel do resultado. Major somente nessa baseline intermediaria nao lancada.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "issue-233-public",
+      "slice": "S07",
+      "issue": 233,
+      "surface": "schema",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-memory-stage-workflow.test.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "checkDimensions",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "presentation_invalid",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra a ultima tag, o modulo e uma adicao nova ainda nao lancada; #233 integra essa adicao. Nao e major publico por divergir de um estado intermediario. O commit 26627ec nao e ancestral de v4.45.0 (merge-base exit 1).",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "issue-233-intermediate",
+      "slice": "S07",
+      "issue": 233,
+      "surface": "schema",
+      "kind": "new-requirement",
+      "bump": "major",
+      "consumers": [
+        "scripts/forge-memory-stage-workflow.test.js",
+        "unknown"
+      ],
+      "baseline": "slice-start",
+      "baseline_reference": "26627ec1309b0137f71eeb025bc0f1267bbd8209^ (S07 entregue antes da correcao)",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "checkDimensions",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-memory-stage-report.js",
+          "symbol": "presentation_invalid",
+          "observed_sha": "26627ec1309b0137f71eeb025bc0f1267bbd8209",
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Contra S07 entregue, checkDimensions passa a exigir tipos fechados para value, coverage, contagens e referencias; arrays/objetos aninhados antes aceitos agora falham presentation_invalid. Nova exigencia somente nessa baseline intermediaria nao lancada.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "issue-231-documentary",
+      "slice": "S06",
+      "issue": 231,
+      "surface": "worker",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        "scripts/forge-native-recovery-delivery.js",
+        "scripts/forge-delivery.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-native-recovery-delivery.js",
+          "symbol": "reviewDocumentary",
+          "observed_sha": "df7dbd670a53f099534e8004ab805674ca19122a",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-delivery.js",
+          "symbol": "documentaryObservation",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "shared/forge-delivery.md",
+          "symbol": "Documentary continuation",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Acrescenta captura documental inicial/mista por policy explicita e retomada de savedManifest sem reclassificar evidencia comportamental. Fluxos sem policy permanecem existentes. Lacuna #231 pendente: reviewDocumentary testa !c.evidence e aceita array truthy; downstream exige string nao vazia. Nenhuma resolucao afirmada.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": []
+    },
+    {
+      "id": "S08-impact",
+      "slice": "S08",
+      "issue": null,
+      "surface": "cli",
+      "kind": "compatible-addition",
+      "bump": "minor",
+      "consumers": [
+        ".github/workflows/release.yml",
+        ".github/workflows/ci.yml",
+        "scripts/forge-release-publish.js",
+        "scripts/forge-version.js",
+        "unknown"
+      ],
+      "baseline": "last-tag",
+      "baseline_reference": "v4.45.0",
+      "released": false,
+      "evidence": [
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "resolution.impact",
+          "observed_sha": "a832ffa5b08404650b8101f5092e6410a3e0b675",
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "argv.indexOf('--notes')",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "checkDeclaredVersion",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "classifyCommit",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "collectNotesCommits",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "version-commit-malformed",
+          "observed_sha": null,
+          "observed_on_branch": true
+        },
+        {
+          "file": "scripts/forge-release-version.js",
+          "symbol": "version-range-invalid",
+          "observed_sha": null,
+          "observed_on_branch": true
+        }
+      ],
+      "rationale": "Minor: impact acrescenta envelope na resolucao e --notes e flag nova; retorno ok de checkDeclaredVersion e intent legado sem impact permanecem. Bloqueio novo depende de trailer novo explicito; ausencia fica partial e nao bloqueia por impacto. Notas usam mensagem completa (breaking no corpo); fallback so para tag raiz comprovada. Rejeicao de objeto malformado e range fora da gramatica e robustez da fronteira nova, nao remocao de entrada CLI antes prometida. Notas e fallback corrigem comportamento preservando barreira exact-SHA. Nao ha prova de consumidores externos; se recusarem campos adicionais, S09 deve reavaliar. Nenhum major publico real demonstrado.",
+      "origin": "real",
+      "status": "intermediate",
+      "pending_refresh": [
+        "S03-REVIEW R1-R5",
+        "S04-REVIEW R1-R6: R1#215 R2#216 R3#214 R4#217 R5#218 R6#219; divergencia de R6 preservada",
+        "#208",
+        "#209",
+        "#212",
+        "#221",
+        "#222",
+        "#226",
+        "#228",
+        "#229",
+        "#230",
+        "#231: reviewDocumentary aceita array truthy; downstream exige string nao vazia",
+        "followups indexados em evidence/final-followups-20261025.md",
+        "S09: reclassificar candidato final reparado"
+      ],
+      "example_ids": [
+        "real-s08",
+        "declared-s08"
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "id": "major-removal",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat!: remover flag antiga\n\nForge-Impact: cli/removal; --old-flag"
+      ],
+      "declared_version": "2.0.0",
+      "expect": {
+        "bump": "major",
+        "new_tag": "v2.0.0",
+        "impact_status": "consistent",
+        "check": "ok",
+        "changelog_sections": [
+          "Breaking Changes"
+        ]
+      }
+    },
+    {
+      "id": "real-minor",
+      "origin": "real",
+      "contract_id": "S05-diagnostic",
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat(memory): implement S05/T01 bounded selection diagnostics"
+      ],
+      "declared_version": "1.3.0",
+      "expect": {
+        "bump": "minor",
+        "new_tag": "v1.3.0",
+        "impact_status": "partial",
+        "check": "ok",
+        "changelog_sections": [
+          "Features"
+        ]
+      }
+    },
+    {
+      "id": "patch-correction",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: restaurar retomada\n\nForge-Impact: migration/compatible-correction; checkpoint"
+      ],
+      "declared_version": "1.2.4",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "consistent",
+        "check": "ok",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "conflict-removal",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: remover flag\n\nForge-Impact: cli/removal; --old-flag"
+      ],
+      "declared_version": "1.2.4",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "conflict",
+        "check": "impact-label-conflict",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "resolved-removal",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: remover flag\n\nForge-Impact: cli/removal; --old-flag",
+        "chore: declarar nivel\n\nBREAKING CHANGE: remover --old-flag"
+      ],
+      "declared_version": "2.0.0",
+      "expect": {
+        "bump": "major",
+        "new_tag": "v2.0.0",
+        "impact_status": "partial",
+        "check": "ok",
+        "changelog_sections": [
+          "Bug Fixes",
+          "Breaking Changes"
+        ]
+      }
+    },
+    {
+      "id": "invalid-declaration",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: declarar\n\nForge-Impact: unknown/removal; x"
+      ],
+      "declared_version": "1.2.4",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "invalid",
+        "check": "impact-invalid",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "mismatched-version",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "fix: corrigir\n\nForge-Impact: cli/compatible-correction; argv"
+      ],
+      "declared_version": "1.2.3",
+      "expect": {
+        "bump": "patch",
+        "new_tag": "v1.2.4",
+        "impact_status": "consistent",
+        "check": "declared-version-mismatch",
+        "changelog_sections": [
+          "Bug Fixes"
+        ]
+      }
+    },
+    {
+      "id": "D2-docs-conflict",
+      "origin": "illustrative",
+      "contract_id": null,
+      "base_tag": "v1.2.3",
+      "messages": [
+        "docs: corrigir contrato\n\nForge-Impact: procedure/compatible-correction; D2"
+      ],
+      "declared_version": "1.2.3",
+      "expect": {
+        "bump": "none",
+        "new_tag": "v1.2.3",
+        "impact_status": "conflict",
+        "check": "impact-label-conflict",
+        "changelog_sections": [
+          "Other Changes"
+        ]
+      }
+    },
+    {
+      "id": "real-s08",
+      "origin": "real",
+      "contract_id": "S08-impact",
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat(release): validate impact and frame complete commit messages"
+      ],
+      "declared_version": "1.3.0",
+      "expect": {
+        "bump": "minor",
+        "new_tag": "v1.3.0",
+        "impact_status": "partial",
+        "check": "ok",
+        "changelog_sections": [
+          "Features"
+        ]
+      }
+    },
+    {
+      "id": "declared-s08",
+      "origin": "illustrative",
+      "contract_id": "S08-impact",
+      "base_tag": "v1.2.3",
+      "messages": [
+        "feat(release): acrescentar impacto e notas\n\nForge-Impact: cli/compatible-addition; S08 --notes e impact"
+      ],
+      "declared_version": "1.3.0",
+      "expect": {
+        "bump": "minor",
+        "new_tag": "v1.3.0",
+        "impact_status": "consistent",
+        "check": "ok",
+        "changelog_sections": [
+          "Features"
+        ]
+      }
+    }
+  ]
+}
