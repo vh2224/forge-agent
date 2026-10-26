@@ -14,6 +14,55 @@ helper never extracts new acceptance criteria from prose with a regular expressi
 
 ## Input schema v1
 
+### Documentary continuation
+
+An explicit documentary/manual acceptance requirement may use independent review
+of exact preserved bytes. This is `coverage: documentary`, never behavioral
+evidence. File extensions and lexical presence checks do not establish eligibility:
+the live reviewer must read the plan and identify each eligible criterion, its
+rationale, reviewed documents and hashes, and the observed content. Implementation,
+remote CI, UAT and unresolved functional questions remain outside this evidence.
+
+`forge-native-recovery-delivery.createDocumentaryContinuation` requires live host
+authority, a stopped-writer attestation and independent review. Imported JSON is
+not a capability. It binds an immutable executed partial, its manifest and receipt,
+and preserved bytes matching the returned code state. The original pre-write tree
+must have been restored. A fresh request, claim and preparation capture current
+metadata after maintenance; the old manifest is never renewed or published.
+Keep repaired runtime separate until restoration when maintenance would move the
+original CODE revision. No provider is invoked by this continuation.
+
+The capability restores only declared reviewed bytes, derives a separate result,
+and rechecks commands, structural artifacts, authority, hashes and protected
+surfaces before canonical publication. Review provenance stays outside the closed
+worker result schema, in the new manifest and artifact capture envelope. The old
+partial remains unchanged. Failed restoration requires reconciliation before
+another writer; creating a capability alone is not publication.
+
+After a restart, pass the derived `continuationManifestFile` to a newly attested
+capability and its exact saved manifest to preparation. Reopening requires the
+original revision and complete restored dirty set, including reviewed hashes.
+It never restores the files again. Executed results can be verified under fresh
+authority; ready records recompose their saved canonical captures and publish
+idempotently without another provider or command invocation. A saved manifest or
+ready record alone does not grant the documentary capability.
+This is an explicit documentary API, not the original recovery-reservation
+`replay({request,recovery,...})` path. A host bridge must durably retain the original
+manifest/result/receipt references, preserved documents and hashes, independent
+review reference, new request/manifest and immutable receipt references. On restart
+it obtains fresh live attestations, calls `createDocumentaryContinuation` with
+`continuationManifestFile`, then `prepare` with that exact saved manifest. For a
+ready receipt call `replayReady` directly; do not call `start` or restore owner
+metadata after publication has begun. For an executed receipt, normal verification
+and publication follow. This continuation never consumes or relabels the old
+partial attempt as delivered.
+
+Documentary observations are read from fingerprinted artifact envelopes with exact
+criterion text, root, reviewer/producer identity, review reference and document
+hashes. Published evidence uses the existing capture/aggregation trust boundary:
+fingerprints detect modification but are not cryptographic authenticity. Historical
+aggregation does not issue new live authority or imply behavioral verification.
+
 The orchestrator writes a bounded JSON input with this shape:
 
 ```json

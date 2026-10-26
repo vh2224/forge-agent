@@ -77,6 +77,7 @@ async function fixture() {
   return f;
 }
 async function main(){
+  await documentaryContinuation();
   await protectedLeaseRenewal();
   await implicitOrdinaryIdentity();
   await durableReplay();
@@ -122,6 +123,96 @@ async function main(){
     console.log('PASS public ordinary restart: exact payload, two claimed roots, one callback, canonical verified publication and immutable history');
     console.log('PASS milestone evidence: missing, duplicate, foreign, wrong-root, fabricated and unmet criteria refuse; standalone schema unchanged');
   }finally{f.cleanup();}
+}
+async function documentaryContinuation(){
+  const f=await fixture();
+  try {
+    const handoff=await side.recoverUnitSidecar(f.request,f.recovery,f.runtime), live=handoff.result;
+    const partial=f.result();partial.status='partial';
+    for(const row of partial.must_haves_status)if(row.kind!=='artifact'){row.status='unknown';row.evidence=[];}
+    const outcome=await live.invoke(async()=>{
+      for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'after\n');
+      return partial;
+    });
+    assert.equal(outcome.ok,true);
+    const originalManifestFile=live.request.resultFile+'.manifest.json';
+    const manifestBytes=fs.readFileSync(originalManifestFile);
+    const manifest=JSON.parse(manifestBytes);
+    const originalResultFile=path.join(f.dir,'preserved-partial.json');write(originalResultFile,JSON.stringify(partial));
+    const originalReceiptFile=fs.readdirSync(f.dir).map(name=>path.join(f.dir,name)).find(file=>{
+      if(!file.includes('.receipt.json.')||!file.endsWith('.json'))return false;
+      const row=JSON.parse(fs.readFileSync(file));return row.phase==='executed'&&row.dispatch_id===live.request.dispatchId;
+    });
+    assert(originalReceiptFile,'executed immutable receipt');
+    const documents=f.contract.code_roots.map(root=>{
+      const file=path.join(f.dir,'preserved-'+root.id);write(file,'after\n');
+      return {path:root.id+'::same.txt',file,sha256:crypto.createHash('sha256').update('after\n').digest('hex')};
+    });
+    // Real reset before a new claim. The old protected registry snapshot is
+    // intentionally stale after the maintenance/reacquisition boundary.
+    for(const root of f.contract.code_roots)write(path.join(root.path,'same.txt'),'before\n');
+    const oldClaim=structuredClone(live.request.claim);
+    require('./forge-runs').update(f.owner,'fixture-run',{write_claim:null});
+    write(path.join(f.owner,'.gsd/maintenance-documentary-proof.md'),'Reviewed isolated runtime maintenance.');
+    const claim={...oldClaim,generation:crypto.randomUUID()};
+    require('./forge-runs').update(f.owner,'fixture-run',{write_claim:claim});
+    const request={...live.request,claim,dispatchId:'documentary-continuation',resultFile:path.join(f.dir,'documentary.json')};
+    const unit=side.locations(request).rules[side.locations(request).delivery.input].unit;
+    const inventory=require('./forge-delivery').inventoryPlan(fs.readFileSync(request.planFile,'utf8'),request.planFile,unit);
+    const review={reviewer:'independent-fixture-reviewer',producer:'original-fixture-worker',reference:'fixture:document-review',
+      criteria:inventory.criteria.filter(c=>c.origin!=='artifact').flatMap(c=>f.contract.code_roots.map(root=>({
+        criterion_id:c.id,text:c.text,root_id:root.id,eligibility:'documentary',status:'met',
+        rationale:'Fixture explicitly delegates normative content review.',evidence:'Reviewer read the exact preserved fixture bytes.',
+        documents:documents.filter(doc=>doc.path.startsWith(root.id+'::')).map(({path,sha256})=>({path,sha256}))}))) };
+    const options={originalManifestFile,originalResultFile,originalReceiptFile,request,documents,
+      attestReview:()=>review,attestStoppedWriter:()=>true,assertAuthority:f.assertBoundary};
+    const create=changes=>delivery.createDocumentaryContinuation({...options,...changes});
+    assert.throws(()=>create({attestReview:null}),/live-authority/);
+    assert.throws(()=>create({attestStoppedWriter:()=>false}),/writer-not-stopped/);
+    assert.throws(()=>create({attestReview:()=>({...review,reviewer:review.producer})}),/independent-review/);
+    assert.throws(()=>create({attestReview:()=>({...review,criteria:review.criteria.filter(row=>row.criterion_id!==review.criteria[0].criterion_id)})}),/review-coverage|review-criterion/);
+    const cap=create();
+    const nativeInvocation=require('./forge-native-invocation').buildNativeInvocation({hostRuntime:'codex',resolvedDispatch:request.route,
+      activeCapabilities:capabilities,prompt:'Documentary continuation only; no provider call.',forkTurns:'none',taskName:'documentary',agentType:'forge-executor'});
+    const receipts=[];
+    const prep={request,nativeInvocation,assertBoundary:f.assertBoundary,assertAuthority:f.assertBoundary,
+      persistDeliveryReceipt:reference=>receipts.push(reference),documentaryContinuation:cap};
+    assert.throws(()=>delivery.prepare({...prep,documentaryContinuation:{}}),/capability-required/);
+    write(path.join(f.a,'unclaimed.txt'),'drift');
+    assert.throws(()=>delivery.prepare(prep),/not-reconciled/);fs.unlinkSync(path.join(f.a,'unclaimed.txt'));
+    const continuation=delivery.prepare(prep);continuation.start();
+    assert.notDeepEqual(continuation.manifest().prepared.protected_owner,manifest.prepared.protected_owner);
+    write(path.join(f.a,'unclaimed.txt'),'drift');
+    assert.throws(()=>continuation.restoreDocumentary(),/not-reconciled/);fs.unlinkSync(path.join(f.a,'unclaimed.txt'));
+    const git=(...args)=>require('child_process').execFileSync('git',args,{cwd:f.a,stdio:'pipe'});
+    const head=git('rev-parse','HEAD').toString().trim();git('commit','--allow-empty','-m','fixture head drift');
+    assert.throws(()=>continuation.restoreDocumentary(),/not-reconciled/);git('reset','--soft',head);
+    const result=continuation.restoreDocumentary();assert.equal(result.status,'done');
+    assert.equal(JSON.parse(fs.readFileSync(originalResultFile)).status,'partial');
+    continuation.returned(result);
+    const savedManifest=JSON.parse(fs.readFileSync(request.resultFile+'.manifest.json'));
+    const reopen=()=>delivery.prepare({...prep,savedManifest,documentaryContinuation:create({continuationManifestFile:request.resultFile+'.manifest.json'})});
+    assert.throws(()=>delivery.prepare({...prep,savedManifest,documentaryContinuation:undefined}),/manifest-changed/);
+    const restarted=reopen();restarted.start();
+    const beforeRestore=fs.statSync(path.join(f.a,'same.txt')).mtimeMs;
+    assert.deepEqual(restarted.restoreDocumentary(),result);
+    assert.equal(fs.statSync(path.join(f.a,'same.txt')).mtimeMs,beforeRestore,'restart never rewrites restored output');
+    const checked=restarted.verify(result);
+    assert(checked.bindings.some(row=>row.coverage==='documentary'));
+    assert(!checked.bindings.some(row=>row.coverage==='behavioral'));
+    const materialize=side.materialize;
+    try {
+      side.materialize=(request,record)=>{write(path.join(f.owner,record.artifacts[0].path),record.artifacts[0].content);throw new Error('fixture partial publication');};
+      assert.throws(()=>restarted.publish(result),/fixture partial publication/);
+    }finally{side.materialize=materialize;}
+    const published=JSON.parse(fs.readFileSync(receipts.at(-1).file));
+    assert.equal(published.result.status,'done');
+    const afterReady=reopen();afterReady.replayReady(published);afterReady.replayReady(published);
+    const changed=structuredClone(published);changed.result.summary='forged';
+    assert.throws(()=>afterReady.replayReady(changed),/ready-binding/);
+    assert.deepEqual(fs.readFileSync(originalManifestFile),manifestBytes);
+    console.log('PASS documentary continuation: preserved partial, actual reset, released/reacquired claim and maintenance metadata, fresh manifest, live review, restore, canonical verification/publication and replay without provider');
+  } finally {f.cleanup();}
 }
 async function protectedLeaseRenewal() {
   const f=await fixture(),lease=require('./forge-unit-lease');
@@ -266,5 +357,5 @@ async function guardedHandoff() {
     console.log('PASS retained handoff: final request, research and unclaimed drift refuse before callback; partial and duplicate invocation never publish');
   } finally { f.cleanup(); }
 }
-module.exports={fixture,main,protectedLeaseRenewal};
+module.exports={fixture,main,protectedLeaseRenewal,documentaryContinuation};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

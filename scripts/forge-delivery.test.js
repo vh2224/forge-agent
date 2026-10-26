@@ -645,5 +645,31 @@ test('v2 global truths require both roots and reject a substituted identity', ()
   writeJson(path.join(f.owner, 'beta.json'), source); assert.notStrictEqual(build().criteria[0].status, 'verificado'); f.cleanup();
 });
 
+test('documentary capture is distinct from behavior and requires bound independent review provenance', () => {
+  const fx=fixture('documentary'), id=criterionId(fx.unit,'truth',0);
+  const criterion=delivery.inventoryPlan(fx.planText,'task/PLAN.md',fx.unit).criteria.find(row=>row.id===id);
+  const capture={schema_version:1,original_manifest_sha256:'a'.repeat(64),original_result_sha256:'b'.repeat(64),
+    original_receipt_sha256:'c'.repeat(64),review_reference:'review:fixture',reviewer:'reviewer',producer:'worker',
+    criteria:[{criterion_id:id,text:criterion.text,eligibility:'documentary',status:'met',
+      rationale:'The fixture criterion requires documentary review.',evidence:'Exact content reviewed.',
+      documents:[{path:'doc.md',sha256:'d'.repeat(64)}]}]};
+  const emit=value=>{const payload=structuredClone(value);payload.fingerprint=delivery.fingerprint(payload);
+    writeJson(path.join(fx.owner,'documentary.json'),artifactEnvelope(fx,[],{documentary:payload}));};
+  fx.input.bindings=[bind('artifact','documentary.json',id,{property:'documentary'},'documentary')];
+  emit(capture);let result=byId(build(fx),id);assert.equal(result.status,'verificado');
+  assert.equal(result.evidence[0].coverage,'documentary');
+  for(const mutate of [value=>{value.reviewer=value.producer;},value=>{value.criteria[0].text='foreign';},
+    value=>{value.criteria[0].eligibility='behavioral';},value=>{value.criteria[0].documents=[];},
+    value=>{value.original_manifest_sha256='bad';},value=>{value.criteria=[null];},value=>{value.criteria[0].documents=[null];}]) {
+    const changed=structuredClone(capture);mutate(changed);emit(changed);
+    assert.notEqual(byId(build(fx),id).status,'verificado');
+  }
+  emit(capture);const source=JSON.parse(fs.readFileSync(path.join(fx.owner,'documentary.json')));
+  source.documentary.criteria[0].evidence='changed without recapture';writeJson(path.join(fx.owner,'documentary.json'),source);
+  assert.notEqual(byId(build(fx),id).status,'verificado');
+  writeJson(path.join(fx.owner,'documentary.json'),artifactEnvelope(fx,[]));
+  assert.notEqual(byId(build(fx),id).status,'verificado','coverage label alone is never proof');
+});
+
 for (const root of roots) { try { fs.rmSync(root, { recursive: true, force: true }); } catch (_) {} }
 process.stdout.write(`\n${passed} passed, ${skipped} skipped\n`);

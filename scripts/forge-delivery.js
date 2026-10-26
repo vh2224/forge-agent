@@ -229,6 +229,7 @@ function verificationObservation(binding, envelope, sourcePath, criterion, expec
 }
 
 function artifactObservation(binding, envelope, sourcePath, criterion, expected) {
+  if (binding.source.property === 'documentary') return documentaryObservation(binding, envelope, sourcePath, criterion, expected);
   const aspect = nonEmpty(binding.aspect) ? binding.aspect : criterion.aspects[0];
   const index = binding.source.row_index;
   const property = binding.source.property;
@@ -268,6 +269,41 @@ function artifactObservation(binding, envelope, sourcePath, criterion, expected)
   }
   observation.reasons.push(...reasons);
   observation.limitations.push(...reasons.filter((reason) => !reason.endsWith('_failed')));
+  return observation;
+}
+
+// Documentary captures use the same persisted-envelope trust boundary as local
+// command captures. A digest detects alteration; it is not a signature or a
+// substitute for the live authority required by the capture adapter.
+function documentaryObservation(binding, envelope, sourcePath, criterion, expected) {
+  const observation = observationBase(binding, `${sourcePath}#documentary`, binding.aspect || criterion.aspects[0]);
+  observation.environment = envelope.environment || null;
+  observation.revision = envelope.revision || null;
+  if (expected.executionContract) observation.root_id = envelope.root_id;
+  const reasons = contextReasons(envelope, expected);
+  const capture = envelope.documentary;
+  const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  if (binding.coverage !== 'documentary' || envelope.kind !== 'artifact' || envelope.schema_version !== SCHEMA_VERSION
+      || !isObject(capture) || capture.schema_version !== 1) reasons.push('documentary_capture_invalid');
+  if (isObject(capture)) {
+    const {fingerprint: saved, ...payload} = capture;
+    if (saved !== fingerprint(payload)) reasons.push('documentary_capture_fingerprint');
+    if (!sha(capture.original_manifest_sha256) || !sha(capture.original_result_sha256)
+        || !sha(capture.original_receipt_sha256) || !nonEmpty(capture.review_reference)
+        || !nonEmpty(capture.reviewer) || !nonEmpty(capture.producer)
+        || capture.reviewer === capture.producer) reasons.push('documentary_provenance_invalid');
+    const rows = Array.isArray(capture.criteria) ? capture.criteria.filter(row => isObject(row) && row.criterion_id === criterion.id && row.root_id === envelope.root_id) : [];
+    const row = rows[0];
+    if (rows.length !== 1 || row.text !== criterion.text || row.root_id !== envelope.root_id
+        || row.eligibility !== 'documentary' || row.status !== 'met' || !nonEmpty(row.rationale)
+        || !nonEmpty(row.evidence) || !Array.isArray(row.documents) || !row.documents.length
+        || row.documents.some(doc => !isObject(doc) || !nonEmpty(doc.path) || !sha(doc.sha256))) reasons.push('documentary_criterion_invalid');
+    observation.review_reference = capture.review_reference;
+    observation.evidence_limit = 'Independent review of documentary requirements only; no implementation, remote CI or UAT claim.';
+  }
+  observation.positive = reasons.length === 0;
+  observation.reasons.push(...reasons);
+  observation.limitations.push(...reasons);
   return observation;
 }
 
