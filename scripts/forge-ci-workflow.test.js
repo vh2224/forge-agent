@@ -39,6 +39,19 @@ assert.deepStrictEqual(concurrency.readConcurrency(texts.release), { present: tr
 assert.strictEqual(POLICY.workflows.release.blob_oid, '315d89bad9b4ef2965d3a2f3e969fd83005e61d2');
 marker('truth', 0, 'exact PR-only workflow forms and unchanged release bytes and pin');
 
+// Issue 218: unsupported YAML structure must not silently disappear.
+for (const text of [
+  '"jobs":\n  test:\n    concurrency: all',
+  "'jobs':\n  test:\n    concurrency: all",
+  'jobs:\n  test:\n    "concurrency": all',
+  "jobs:\n  test:\n    'concurrency': all",
+  '"concurrency": all',
+  'jobs: {test: {concurrency: all}}',
+  'jobs:\n  test: {concurrency: all}',
+  '{jobs: {test: {concurrency: all}}}',
+]) assert.throws(() => concurrency.readConcurrency(text), /unsupported/);
+assert.deepStrictEqual(concurrency.readConcurrency('# "concurrency": ignored\nname: "concurrency: text"\njobs:\n  test:\n    steps:\n      - run: |\n          concurrency: script text\n          "jobs": script text'), { present: false });
+
 const rehearsal = concurrency.rehearse(bytes);
 assert.strictEqual(rehearsal.schema, 'forge-ci-concurrency-rehearsal/v1');
 assert(rehearsal.passed);

@@ -28,8 +28,21 @@ function readConcurrency(text) {
   let block = false;
   let present = false;
   const values = {};
+  let scalarIndent = null;
   for (const line of lines) {
     if (/^(?:\s*#.*)?$/.test(line)) continue;
+    const indent = line.length - line.trimStart().length;
+    if (scalarIndent !== null) {
+      if (indent > scalarIndent) continue;
+      scalarIndent = null;
+    }
+    // Quoted structural keys and flow mappings are outside this deliberately
+    // bounded YAML subset. Reject them before they can hide concurrency.
+    if (indent === 0 && /^(?:['"]|[{[])/.test(line)) fail('concurrency-form-unsupported');
+    if (inJobs && /^\s+(?:-\s+)?['"][^'"]+['"]\s*:/.test(line)) fail('job-concurrency-unsupported');
+    if ((inJobs || /^jobs\s*:/.test(line)) && /:\s*[{[]/.test(line)) fail('job-concurrency-unsupported');
+    if (/^\s*(?:-\s+)?[\w-]+:\s*[|>][+-]?\s*(?:#.*)?$/.test(line)) scalarIndent = indent;
+
     if (/^\S/.test(line)) {
       inJobs = /^jobs:/.test(line);
       block = false;
