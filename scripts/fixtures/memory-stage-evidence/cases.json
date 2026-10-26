@@ -1,0 +1,136 @@
+{
+  "version": "synthetic-v1",
+  "provenance": "Public synthetic fixtures; no model inference, provider or real delivery",
+  "rubric": {
+    "review_status": "pending-independent-semantic-review",
+    "fact": "O cache exige validar o limite antes de gravar.",
+    "paraphrase": "Antes da escrita, confira a capacidade do armazenamento temporário.",
+    "contradiction": "O cache permite gravar sem validar o limite.",
+    "rule": "Validate-before-write is the required relation; negation contradicts it. Different vocabulary can express the relation. Automated assertions consume these supplied labels and do not validate Portuguese meaning.",
+    "grader_sentinel": "GRADER_ONLY_STAGE_SENTINEL"
+  },
+  "operational": {
+    "query": "cache limite",
+    "source": "O cache exige validar o limite antes de gravar.",
+    "extracted": "O cache exige validar o limite antes de gravar.",
+    "unrelated": "A janela usa uma borda azul.",
+    "paraphrase": "Antes da escrita, confira a capacidade do armazenamento temporário.",
+    "contradiction": "O cache permite gravar sem validar o limite."
+  },
+  "cases": [
+    {
+      "id": "all-present",
+      "mode": "normal",
+      "planned_unavailable": [],
+      "expected": { "loss": "none", "publication": "written", "package": "present" }
+    },
+    {
+      "id": "origin-absent",
+      "mode": "origin-absent",
+      "planned_unavailable": [],
+      "expected": { "loss": "origin_absent", "publication": "written", "package": "absent" }
+    },
+    {
+      "id": "extraction-omits",
+      "mode": "extraction-omits",
+      "planned_unavailable": [],
+      "expected": { "loss": "origin_to_extraction", "publication": "written", "package": "absent" }
+    },
+    {
+      "id": "extraction-unobserved",
+      "mode": "extraction-unobserved",
+      "planned_unavailable": ["extraction"],
+      "expected": { "loss": "unknown", "publication": "written", "package": "present" }
+    },
+    {
+      "id": "portuguese-paraphrase",
+      "mode": "paraphrase",
+      "planned_unavailable": [],
+      "expected": { "loss": "publication_to_selection", "publication": "written", "package": "absent" }
+    },
+    {
+      "id": "published-not-selected",
+      "mode": "no-match",
+      "planned_unavailable": [],
+      "expected": { "loss": "publication_to_selection", "publication": "written", "package": "absent" }
+    },
+    {
+      "id": "canonical-budget-cut",
+      "mode": "budget",
+      "planned_unavailable": [],
+      "expected": { "loss": "publication_to_selection", "publication": "written", "package": "absent" }
+    },
+    {
+      "id": "same-id-contradiction",
+      "mode": "replacement",
+      "planned_unavailable": [],
+      "expected": { "loss": "unknown", "publication": "written", "package": "absent" }
+    },
+    {
+      "id": "answer-omits",
+      "mode": "answer-omits",
+      "planned_unavailable": [],
+      "expected": { "loss": "none", "publication": "written", "package": "present" }
+    },
+    {
+      "id": "answer-unavailable",
+      "mode": "answer-unavailable",
+      "planned_unavailable": [],
+      "expected": { "loss": "none", "publication": "written", "package": "present" }
+    },
+    {
+      "id": "diagnostic-candidate-cap",
+      "mode": "candidate-cap",
+      "planned_unavailable": [],
+      "expected": { "loss": "publication_to_selection", "publication": "written", "package": "present" }
+    },
+    {
+      "id": "direct-nonempty",
+      "mode": "direct",
+      "planned_unavailable": ["selection"],
+      "expected": { "loss": "unknown", "publication": "written", "package": "present" }
+    },
+    {
+      "id": "canonical-no-query",
+      "mode": "no-query",
+      "planned_unavailable": ["selection"],
+      "expected": { "loss": "unknown", "publication": "written", "package": "absent" }
+    },
+    {
+      "id": "publication-replay",
+      "mode": "replay",
+      "planned_unavailable": [],
+      "expected": { "loss": "none", "publication": "noop", "reason": "replay", "package": "present" }
+    },
+    {
+      "id": "publication-empty",
+      "mode": "empty",
+      "planned_unavailable": [],
+      "expected": { "loss": "origin_to_extraction", "publication": "noop", "reason": "empty", "package": "absent" }
+    },
+    {
+      "id": "publication-partial",
+      "mode": "partial",
+      "planned_unavailable": [],
+      "expected": { "loss": "origin_to_extraction", "publication": "noop", "reason": "result-partial", "package": "absent" }
+    },
+    {
+      "id": "publication-blocked",
+      "mode": "blocked",
+      "planned_unavailable": [],
+      "expected": { "loss": "origin_to_extraction", "publication": "noop", "reason": "result-blocked", "package": "absent" }
+    },
+    {
+      "id": "publication-quarantined",
+      "mode": "quarantined",
+      "planned_unavailable": [],
+      "expected": { "loss": "extraction_to_publication", "publication": "quarantined", "package": "absent" }
+    },
+    {
+      "id": "publication-conflict",
+      "mode": "conflict",
+      "planned_unavailable": [],
+      "expected": { "loss": "unknown", "publication": "conflict", "package": "absent" }
+    }
+  ]
+}
