@@ -177,8 +177,9 @@ test('static CommonJS metadata resolves values without executing the inspected f
     ['module-property', 'module.exports.publicName = sampleFn;', true],
     ['direct', 'module.exports = sampleFn;', true],
     ['none', 'const local = 42;', false],
-    ['unrelated', 'module.exports = { otherFn };', false],
-    ['wrong-value', 'module.exports = { sampleFn: otherFn };', false],
+    ['unresolved-value', 'module.exports = { otherFn };', null],
+    ['unresolved-named-value', 'module.exports = { sampleFn: otherFn };', null],
+    ['empty-object', 'module.exports = {};', false],
     ['comment', '// module.exports = { sampleFn };\n/* exports.name = sampleFn; */', false],
     ['string', 'const text = "module.exports = { sampleFn };";', false],
     ['dynamic', 'module.exports = chooseExports();', null],
@@ -210,6 +211,29 @@ test('static CommonJS metadata resolves values without executing the inspected f
 });
 
 // ── Section 2: greenfield exclusion ──────────────────────────────────────────
+
+test('static CommonJS metadata does not mistake newline continuations for completed assignments', () => {
+  for (const suffix of ['\n(123);', '\n+ 1;']) {
+    const dir = mkTmpDir('export-newline-continuation');
+    writeFile(dir, 'fixture.js', `function sampleFn() { return 42; }\nexports.publicName = sampleFn${suffix}\n`);
+    const result = resolveSymbol('sampleFn', dir);
+    assertEq(result.state, 'VERIFIED');
+    assertEq(result.exported, null, suffix);
+  }
+});
+
+test('static CommonJS metadata leaves unresolved object and property aliases unknown', () => {
+  for (const body of [
+    'const api = { sampleFn };\nmodule.exports = api;',
+    'const alias = sampleFn;\nexports.publicName = alias;',
+  ]) {
+    const dir = mkTmpDir('export-unresolved-alias');
+    writeFile(dir, 'fixture.js', `function sampleFn() {}\n${body}\n`);
+    const result = resolveSymbol('sampleFn', dir);
+    assertEq(result.state, 'VERIFIED');
+    assertEq(result.exported, null, body);
+  }
+});
 
 process.stdout.write('\nSection 2: Greenfield exclusion\n\n');
 

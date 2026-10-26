@@ -258,7 +258,9 @@ function staticExportStatus(def, symbol) {
     if (/^\s*export\s+(?:(?:async\s+)?function|const|let|var|class)\b/.test(definition)) return true;
     if (/\b(?:const|let|var|function|class)\s+(?:module|exports)\b/.test(clean)) return null;
     const id = '[A-Za-z_$][A-Za-z0-9_$]*';
-    const assignment = new RegExp(`\\b(module\\s*\\.\\s*exports|exports)(?:\\s*\\.\\s*(${id}))?\\s*=\\s*(\\{[^{}]*\\}|${id})\\s*(?=;|\\n|$)`, 'g');
+    // A newline alone does not terminate a JavaScript expression: calls and
+    // operators can continue it. This subset only accepts an explicit ; or EOF.
+    const assignment = new RegExp(`\\b(module\\s*\\.\\s*exports|exports)(?:\\s*\\.\\s*(${id}))?\\s*=\\s*(\\{[^{}]*\\}|${id})\\s*(?=;|$)`, 'g');
     const values = new Map();
     let direct = null, replacements = 0, usesExportsAlias = false, match, assignments = 0;
     let remainder = clean;
@@ -294,7 +296,11 @@ function staticExportStatus(def, symbol) {
     }
     if (replacements && usesExportsAlias) return null;
     if (/\b(?:module|exports|export)\b/.test(remainder)) return null;
-    return direct === symbol || [...values.values()].includes(symbol);
+    if (direct === symbol || [...values.values()].includes(symbol)) return true;
+    // An unresolved identifier can alias the symbol or an object containing it.
+    // Without alias analysis it is not evidence that the symbol is absent.
+    if (direct !== null || values.size > 0) return null;
+    return false;
   } catch { return null; }
 }
 
