@@ -278,11 +278,11 @@ function buildProfileReport({ sources = [], jobs = [], runs = [], api_sources = 
         observed_at: row.observed_at || null });
       stratum.total_suite_ms += row.elapsed_ms || 0;
     }
-    const matching = jobs.filter(job => job.name === source.identity.job_name);
-    stratum.job_durations.push(...matching.map(job => ({ job_id: job.job_id, created_to_started_ms: job.created_to_started_ms,
-      started_to_completed_ms: job.started_to_completed_ms, created_to_started_label: WAIT_LABEL, steps: job.steps })));
+    // Display names do not establish run/attempt/job identity. Keep API facts
+    // in report.jobs, never attribute them to source conditions without proof.
     for (const field of STRATUM_FIELDS) if (key[field] === null || key[field] === 'unknown') stratum.unavailable[field] = 'not-observed-in-source';
-    if (!matching.length) { stratum.unavailable.job = 'no-matching-jobs-record'; stratum.unavailable.queue = 'not-observable-inside-runner'; }
+    stratum.unavailable.job = 'source-job-identity-unverified';
+    stratum.unavailable.queue = 'not-observable-inside-runner';
   });
   const predictions = [];
   const suites = partitions.length ? discoverTests([]) : [];

@@ -171,6 +171,19 @@ try {
     assert.throws(() => collector.profileFromSources([noPlatform]), /platform-required/);
   });
 
+  test('issue 215 same-name runs and attempts never acquire source attribution', () => {
+    const source = inputSource('windows-shard-1.log');
+    const jobs = collector.normalizeJobs(json('jobs-page.json'));
+    const matching = jobs.find(job => job.name === source.identity.job_name);
+    assert(matching);
+    const other = { ...matching, job_id: 9999, run_id: 999, run_attempt: 2 };
+    const report = collector.buildProfileReport({ sources: [source, source], jobs: [matching, other, matching] });
+    assert.deepStrictEqual(report.strata[0].job_durations, []);
+    assert.strictEqual(report.strata[0].unavailable.job, 'source-job-identity-unverified');
+    assert.deepStrictEqual(report.jobs, [matching, other, matching]);
+    assert.strictEqual(report.strata[0].source_indices.length, 2);
+  });
+
   test('S04-T05 truth:3 report source strata suites jobs queue unavailable estimated partitions and comparable-only deltas', () => {
     const source = inputSource('windows-shard-1.log');
     const local = collector.sourceFrom(collector.readInput(path.join(fixtures, 'local-run.log')), { local_platform: 'win32' });
@@ -181,8 +194,9 @@ try {
     assert.strictEqual(report.strata[0].total_suite_ms, 3330);
     assert.strictEqual(report.strata[0].suites.length, 3);
     assert(report.anomalies.some(row => row.job_index === 3 && row.reason === 'completed_at:timestamps-out-of-order'));
-    assert.strictEqual(report.strata[0].job_durations[0].created_to_started_ms, 5000);
-    assert.strictEqual(report.strata[0].job_durations[0].started_to_completed_ms, 60000);
+    assert.deepStrictEqual(report.strata[0].job_durations, []);
+    assert.strictEqual(report.strata[0].unavailable.job, 'source-job-identity-unverified');
+    assert.strictEqual(report.jobs[0].created_to_started_ms, 5000);
     assert.strictEqual(report.strata[0].key.runner_image_version, '20261001.1');
     assert.deepStrictEqual(Object.keys(report.strata[0].key), collector.STRATUM_FIELDS);
     assert(report.strata[0].unavailable.event); assert(report.strata[1].unavailable.queue);
