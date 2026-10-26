@@ -53,4 +53,45 @@ function validatePolicy(policy, { cwd, readOnly, identity } = {}) {
   if (roots.digest(expected) !== roots.digest(policy)) fail();
   return expected;
 }
-module.exports = { createPolicy, validatePolicy };
+const unsupported = new WeakMap();
+// A refusal observation, not authorization. Rebuild it from current physical
+// inputs after restart; neither its serialized id nor a self-hashed seal works.
+function inspectUnsupported({ request, seal, identity }) {
+  const recovery = require('./forge-attempt-recovery');
+  recovery.requestIdentity(request);
+  require('./forge-unit-sidecar').validateRecoveryRequest(request);
+  const contract = roots.validateContract(request.execution_contract, { revalidate: true });
+  if (!request.workflowId || !request.resultFile) fail();
+  for (const suffix of ['', '.receipt.json', '.returned.json']) {
+    recovery.validateStateTarget(`${request.resultFile}${suffix}`, request, contract);
+  }
+  if (request.claudePermissions !== 'verification' || request.route?.worker_mode !== 'sidecar'
+      || request.route?.resolved_worker_engine !== 'claude' || request.route?.dispatch_allowed !== true
+      || !request.route?.effort || !(request.route?.model_resolved || request.route?.model)
+      || !HEX.test(identity?.fingerprint || '') || identity?.dispatch_id !== request.dispatchId
+      || !identity.dispatch_id || request.unitType !== 'execute-task' || request.phase !== 'execute'
+      || roots.key(roots.realDirectory(request.contextRoot)) !== roots.key(contract.owner)
+      || roots.key(roots.realDirectory(request.cwd)) !== roots.key(contract.code_roots.find(r => r.id === contract.primary_root_id)?.path)) fail();
+  const plan = require('fs').readFileSync(request.planFile, 'utf8');
+  roots.validatePlan(plan, contract);
+  // Validate the complete generic command contract BEFORE categorizing a valid
+  // request as outside this adapter's representable subset.
+  const expected = require('./forge-verify').normalizeExecutionVerification(contract, plan, request.verification, {}, identity);
+  if (roots.digest(expected) !== roots.digest(seal)) fail();
+  if (contract.code_roots.length <= 1) fail('claude-permission-incompatibility-not-proven');
+  return { reason_code: 'claude-permission-multiroot-unsupported', request_sha256: recovery.callerRequestHash(request),
+    roots_sha256: roots.digest(contract), seal_sha256: expected.sha256, route_key: recovery.routeKey(request.route) };
+}
+function createUnsupportedPreflight(input) {
+  const proof = inspectUnsupported(input), handle = Object.freeze({});
+  unsupported.set(handle, { input, proof });
+  return handle;
+}
+function assertUnsupportedPreflight(handle, request) {
+  const saved = unsupported.get(handle);
+  if (!saved || require('./forge-attempt-recovery').callerRequestHash(request) !== saved.proof.request_sha256) fail('claude-permission-preflight-required');
+  const current = inspectUnsupported({ ...saved.input, request });
+  if (roots.digest(current) !== roots.digest(saved.proof)) fail('claude-permission-preflight-changed');
+  return Object.freeze(current);
+}
+module.exports = { createPolicy, validatePolicy, createUnsupportedPreflight, assertUnsupportedPreflight };

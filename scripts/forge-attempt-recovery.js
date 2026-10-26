@@ -200,9 +200,45 @@ function createRecovery(options) {
     return JSON.parse(JSON.stringify(state));
   };
   const sidecarCeiling = route => route.worker_mode === 'sidecar' ? ceilingFromRoute(route) : null;
-  return Object.freeze({
+  const preflights = new WeakMap(), preflightDecisions = new WeakMap();
+  const historyHash = () => digest({ attempts: state.attempts, reservations: state.reservations || [] });
+  function assertPreflight(handle) {
+    const row = preflights.get(handle);
+    if (!row || row.history !== historyHash() || !['inspection', 'ready'].includes(state.phase)) fail('recovery-preflight-stale');
+    const proof = require('./forge-claude-permissions').assertUnsupportedPreflight(row.capability, row.request);
+    const observed = row.observe();
+    if (!observed || observed.request_sha256 !== proof.request_sha256 || observed.roots_sha256 !== proof.roots_sha256
+        || observed.route_key !== proof.route_key || observed.process_stopped !== true || observed.receipt_checked !== true
+        || observed.writer_possible !== false || observed.valid_saved_response !== false) fail('recovery-preflight-inspection-required');
+    return row;
+  }
+  const recovery = Object.freeze({
     snapshot: save, state_migration: migration,
     inspect: () => JSON.parse(JSON.stringify(state)),
+    observeAdapterPreflight({ request, capability, observe, rebuild = false }) {
+      if (typeof observe !== 'function') fail('recovery-preflight-observer-required');
+      const proof = require('./forge-claude-permissions').assertUnsupportedPreflight(capability, request);
+      if (proof.roots_sha256 !== state.roots_sha256 || digest(requestIdentity(request)) !== state.request_identity_sha256) fail('recovery-identity-mismatch');
+      const observed = observe();
+      if (!observed || observed.request_sha256 !== proof.request_sha256 || observed.roots_sha256 !== proof.roots_sha256
+          || observed.route_key !== proof.route_key || observed.process_stopped !== true || observed.receipt_checked !== true
+          || observed.writer_possible !== false || observed.valid_saved_response !== false) fail('recovery-preflight-inspection-required');
+      if (rebuild) {
+        const last = state.attempts.at(-1);
+        if (!last || last.failure_class !== 'caller' || last.provider_called !== false || last.layer !== 'adapter-preflight'
+            || digest(last.adapter_preflight) !== digest(proof) || last.request_sha256 !== proof.request_sha256
+            || routeKey(last.route) !== proof.route_key || !['inspection', 'ready'].includes(state.phase)) fail('recovery-preflight-record-mismatch');
+      } else {
+        if (state.attempts.length || state.reservations?.length) fail('recovery-preflight-record-exists');
+        recovery.record({ reason_code: proof.reason_code, layer: 'adapter-preflight', failure_class: 'caller', provider_called: false,
+          request_sha256: proof.request_sha256, request_bytes: Buffer.byteLength(JSON.stringify(request)),
+          context_sha256: null, context_bytes: null, duration_ms: null, budgets: {}, route: request.route, adapter_preflight: proof });
+      }
+      const handle = Object.freeze({});
+      preflights.set(handle, { request, capability, observe, history: historyHash() });
+      assertPreflight(handle);
+      return handle;
+    },
     transition(handle) {
       const row = transitions.assertLive(handle).reference;
       if (!(state.transitions || []).some(previous => digest(previous) === digest(row))) state.transitions = [...(state.transitions || []), row];
@@ -281,6 +317,13 @@ function createRecovery(options) {
       if (input.exception) scope = exceptionFor(input.exception, state, clock());
       const previous = state.attempts.at(-1);
       if (!previous) fail('recovery-previous-attempt-required');
+      const preflight = input.adapterPreflight ? assertPreflight(input.adapterPreflight) : null;
+      const livePreflightScope = () => {
+        assertPreflight(input.adapterPreflight);
+        if (typeof input.readException !== 'function') fail('recovery-preflight-live-authority-required');
+        return exceptionFor(input.readException(), state, clock());
+      };
+      if (preflight) scope = livePreflightScope();
       let routes, provenance;
       const silenceRetry = previous.failure_class === 'silence'
         && previous.observation?.silence?.cause === 'indeterminate' && scope
@@ -290,7 +333,7 @@ function createRecovery(options) {
       if (environmentRepair && (state.reservations || []).some(a => a.correction?.kind === 'environment'
           && a.correction.failure_id === input.correction.failure_id)) fail('recovery-corrected-retry-exhausted');
       if (silenceRetry) routes = [previous.route];
-      else if (!environmentRepair && !transition && (previous.failure_class === 'caller' || previous.failure_class === 'timeout' && input.correction)) {
+      else if (!preflight && !environmentRepair && !transition && (previous.failure_class === 'caller' || previous.failure_class === 'timeout' && input.correction)) {
         const correction = input.correction;
         if (!correction || correction.offline_validated !== true || !correction.evidence_reference
             || correction.request_sha256 === previous.request_sha256 || !correction.request_sha256) fail('recovery-correction-required');
@@ -328,14 +371,22 @@ function createRecovery(options) {
         let verdict;
         try { verdict = await input.validateInvocation(candidate); }
         catch (error) { verdict = { ok: false, reason_code: error.code || 'recovery-adapter-refused' }; }
+        if (preflight && verdict?.ok === true && (!verdict.request
+            || digest(requestIdentity(verdict.request)) !== state.request_identity_sha256
+            || digest(require('./forge-code-roots').validateContract(verdict.request.execution_contract, { revalidate: true })) !== state.roots_sha256
+            || routeKey(verdict.request.route) !== routeKey(candidate))) fail('recovery-preflight-successor-mismatch');
         if (verdict?.ok === true && candidate.dispatch_allowed === true) { route = candidate; invocation = verdict; break; }
         rejected.push({ route_key: routeKey(candidate), reason_code: verdict?.reason_code || candidate.dispatch_reason_code || 'recovery-adapter-refused' });
       }
       state.selection = { provenance: provenance || null, rejected, selected: route ? routeKey(route) : null }; save();
       if (!route) return { action: 'stop', reason_code: 'recovery-candidates-exhausted', rejected };
-      if (scope) exceptionFor(input.exception, state, clock());
+      if (preflight) {
+        scope = livePreflightScope();
+        if (!scope.routes.includes(routeKey(route))) fail('recovery-exception-invalid');
+      } else if (scope) exceptionFor(input.exception, state, clock());
       state.phase = 'ready'; save();
-      return { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction,
+      const decision = { action: 'invoke', route, invocation, provenance, rejected, corrected: !!input.correction,
+        ...(preflight ? { adapter_preflight: previous.adapter_preflight } : {}),
         ...(transition ? { transition_reference: transition.reference } : {}),
         correction: input.correction ? { offline_validated: true, request_sha256: input.correction.request_sha256,
           ...(environmentRepair ? { kind: 'environment', failure_id: input.correction.failure_id } : {}),
@@ -344,6 +395,16 @@ function createRecovery(options) {
         sidecar_ceiling: sidecarCeiling(route), silence_retry: !!silenceRetry,
         ...(scope ? { authorization_reference: scope.reference, authorization_expires_at: scope.expires_at,
           native_authorization_remaining_ms: Math.max(0, scope.expires_at - clock()) } : {}), provider_called: false };
+      if (preflight) {
+        const hash = digest(decision);
+        const requestHash = callerRequestHash(invocation.request);
+        preflightDecisions.set(decision, suppliedHash => {
+          if (digest(decision) !== hash || state.pending_questions.some(q => q.status === 'pending')
+              || suppliedHash !== requestHash
+              || !livePreflightScope().routes.includes(routeKey(decision.route))) fail('recovery-preflight-decision-changed');
+        });
+      }
+      return decision;
     },
     async resumeReservation(input) {
       if (state.pending_questions.some(q => q.status === 'pending')) return { action: 'pending-questions', questions: state.pending_questions };
@@ -409,18 +470,25 @@ function createRecovery(options) {
     },
     reserve(decision, requestHash, handoffPending = false) {
       if (decision.action !== 'invoke' || state.phase !== 'ready' || state.selection?.selected !== routeKey(decision.route)) fail('recovery-reservation-invalid');
+      if (state.attempts.at(-1)?.adapter_preflight) {
+        const check = preflightDecisions.get(decision);
+        if (!check) fail('recovery-preflight-decision-required');
+        check(requestHash);
+      }
       const entry = { route_key: routeKey(decision.route), corrected: decision.corrected, request_sha256: requestHash,
         destination_key: transitions.destinationKey(decision.route),
         ...(decision.transition_reference ? { transition_reference: decision.transition_reference } : {}),
         correction: decision.correction || null,
         ...(handoffPending ? { handoff_pending: true } : {}),
         ...(decision.resume ? { session_sha256: decision.resume.session_sha256 } : {}),
-        reserved_at: clock(), reason: decision.resume ? RESUME_RESERVATION : decision.silence_retry ? 'anomalous-silence-same-target'
+        ...(decision.adapter_preflight ? { adapter_preflight: decision.adapter_preflight } : {}),
+        reserved_at: clock(), reason: decision.adapter_preflight ? 'adapter-preflight-incompatible' : decision.resume ? RESUME_RESERVATION : decision.silence_retry ? 'anomalous-silence-same-target'
           : decision.corrected ? 'offline-correction' : 'resolved-next-destination',
         provenance: decision.provenance || null, provider_called: 'unknown' };
       state.reservations = [...(state.reservations || []), entry]; state.phase = 'reserved'; return save();
     },
   });
+  return recovery;
 }
 function inspectReceipt(file, options = {}) {
   const fs = require('fs');

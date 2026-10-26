@@ -17,6 +17,17 @@ function make(list = commands) {
   return permissions.createPolicy({ seal, contract, identity, cwd: lab.a });
 }
 const clone = value => JSON.parse(JSON.stringify(value));
+test('an internally consistent multiroot seal is not proof of a valid executable request', () => {
+  const request = { unitType: 'execute-task', scope: 'milestone', phase: 'execute', milestoneId: 'M001', sliceId: 'S01', taskId: 'T01',
+    cwd: lab.a, contextRoot: lab.owner, execution_contract: lab.contract, dispatchId: identity.dispatch_id,
+    claudePermissions: 'verification', route: { worker_mode: 'sidecar', resolved_worker_engine: 'claude',
+      model: 'claude-sonnet-5', effort: 'medium', dispatch_allowed: true },
+    verification: { commandsByRoot: { alpha: ['node scripts/test.js'], beta: ['node scripts/test.js'] } } };
+  const seal = verify.normalizeExecutionVerification(lab.contract, '', request.verification, {}, identity);
+  assert.strictEqual(seal.roots.length, 2);
+  assert.throws(() => permissions.createUnsupportedPreflight({ request, seal, identity }));
+  assert.throws(() => permissions.assertUnsupportedPreflight({ reason_code: 'claude-permission-multiroot-unsupported' }, request), /preflight/);
+});
 test('canonical discovery seal yields exact individual rules and bound request/root identity', () => {
   const policy = make();
   assert.deepStrictEqual(policy.rules, commands.map(c => `Bash(${c})`));
