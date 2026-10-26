@@ -11,6 +11,37 @@ const forgeStatus = require('./forge-status.js');
 const forgeController = require('./forge-unit-controller.js');
 const forgeRuntime = require('./forge-runtime.js');
 
+// Closed summaries, not exception text: messages/paths/stack can contain private
+// context. Like sidecar diagnostics, this boundary retains only allowlisted data.
+function failureDiagnostic(cause, input, stage, transactionKey) {
+  const messages = { EPERM: 'operation not permitted', EACCES: 'permission denied',
+    ENOENT: 'file or directory not found', EIO: 'input/output error',
+    EBUSY: 'resource busy', ENOSPC: 'no space left on device', EEXIST: 'file already exists' };
+  const syscalls = ['rename', 'open', 'read', 'write', 'close', 'mkdir', 'unlink', 'rmdir',
+    'stat', 'lstat', 'realpath', 'scandir', 'copyfile', 'fsync', 'chmod'];
+  const known = Object.prototype.hasOwnProperty.call(messages, cause?.code);
+  const diagnostic = { version: 1, layer: 'orchestrator-controller', stage,
+    message: known ? messages[cause.code] : 'error details withheld',
+    message_source: known ? 'code-summary' : 'withheld',
+    syscall: syscalls.includes(cause?.syscall) ? cause.syscall : null,
+    errno: Number.isSafeInteger(cause?.errno) && Math.abs(cause.errno) <= 2147483647 ? cause.errno : null,
+    transaction: null };
+  if (transactionKey) {
+    diagnostic.transaction = { status: 'unknown', reference: null, phase: null };
+    try {
+      const file = forgeController.transactionFile(input.cwd, transactionKey);
+      const name = path.basename(file);
+      if (/^transaction-v1-[a-f0-9]{64}\.json$/.test(name)) diagnostic.transaction.reference = `.gsd/forge/transactions/${name}`;
+      const record = forgeController.lookupRecord(input.cwd, 'transaction', transactionKey);
+      diagnostic.transaction.status = record ? 'observed' : 'absent';
+      const phases = ['intent', 'result-published', 'event-published', 'boundary-pending',
+        'state-published', 'lease-release-pending', 'lease-released', 'boundary-ready', 'committed'];
+      if (record && phases.includes(record.phase)) diagnostic.transaction.phase = record.phase;
+    } catch { /* Secondary read failures never erase the original diagnostic. */ }
+  }
+  return diagnostic;
+}
+
 const PROTOCOL_VERSION = '1.0.0';
 const OPERATIONS = Object.freeze(['init', 'status', 'next', 'complete', 'consume-failure', 'reenter']);
 const OUTCOMES = Object.freeze(['needs_input', 'completed', 'blocked', 'no_work', 'failed']);
@@ -226,6 +257,7 @@ function next(inputValue, options) {
     if (cause && cause.code === 'CONTROLLER_FAILPOINT') throw cause;
     const code = cause.code || 'failed';
     const result = base('next', code === 'prefs-invalid' ? 'blocked' : 'failed', code, input);
+    result.diagnostic = failureDiagnostic(cause, input, 'select');
     return result;
   }
   if (!selection.ok) {
@@ -238,6 +270,8 @@ function next(inputValue, options) {
   const legacyKey = `forge-orchestrate-next:${input.milestone}:${selectedUnit.key}`;
   let key = input.idempotency_key || (selection.slice ? `${legacyKey}:${selection.slice}` : legacyKey);
   const txOptions = { ...(options || {}), ...(input.prefsReader ? { prefsReader: input.prefsReader } : {}) };
+  let stage = 'prepare';
+  let diagnosticKey;
   try {
     if (!input.idempotency_key && selection.slice) {
       // Resume pre-slice keys only when their durable state proves the same scope.
@@ -249,11 +283,16 @@ function next(inputValue, options) {
       state_patch: { active_slice: selection.slice || '—' } };
     // Recovery is explicit and uses the durable S02 transaction record. It is
     // harmless when no transaction exists and makes crash retry deterministic.
+    stage = 'resume';
+    diagnosticKey = key;
     forgeController.resume(input.cwd, { idempotency_key: key, owner_token: input.owner_token }, txOptions);
+    stage = 'begin';
     const begun = forgeController.begin(input.cwd, request, txOptions);
     let paused = null;
     if (input.needs_input) {
+      stage = 'pause';
       const beginRecord = forgeController.readJson(forgeController.transactionFile(input.cwd, key)) || begun.transaction;
+      diagnosticKey = `${key}:needs-input`;
       paused = forgeController.pause(input.cwd, {
         milestone: input.milestone,
         unit: selectedUnit,
@@ -264,6 +303,8 @@ function next(inputValue, options) {
         result: { status: 'cancelled' },
       }, txOptions);
     }
+    stage = 'readback';
+    diagnosticKey = key;
     const result = base('next', input.needs_input ? 'needs_input' : 'completed', input.needs_input ? 'needs-input' : 'unit-selected', input);
     result.unit = selectedUnit;
     result.state = publicState(forgeState.read(input.cwd, input.milestone));
@@ -279,6 +320,7 @@ function next(inputValue, options) {
     const code = cause.code || 'failed';
     const result = base('next', code === 'lease-active' || code === 'transaction-pending' || code === 'prefs-invalid' ? 'blocked' : 'failed', code, input);
     result.unit = selectedUnit;
+    result.diagnostic = failureDiagnostic(cause, input, stage, diagnosticKey);
     return result;
   }
 }
