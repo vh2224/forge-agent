@@ -411,10 +411,11 @@ test('staged and disk evidence produce identical whole deliveries and child fing
   const sources = { 'unpublished/nested/verify.json': verification, 'unpublished/nested/artifact.json': artifact };
   fx.input.bindings = [
     bind('verification', Object.keys(sources)[0], criterionId(unit, 'truth', 0), { check_index: 0 }, 'behavioral'),
-    bind('artifact', Object.keys(sources)[1], criterionId(unit, 'artifact', 0), { row_path: 'scripts/result.js', property: 'exists' }, 'existence'),
+    bind('artifact', Object.keys(sources)[1], criterionId(unit, 'artifact', 0), { row_index: 0, property: 'exists' }, 'structural'),
   ];
   const options = { ownerRoot: fx.owner, codeDir: fx.code };
   const staged = delivery.buildDelivery(fx.input, { ...options, sourceEnvelopes: sources });
+  assert.strictEqual(byId(staged, criterionId(unit, 'artifact', 0)).status, 'verificado');
   for (const [ref, envelope] of Object.entries(sources)) writeJson(path.join(fx.owner, ref), envelope);
   const disk = delivery.buildDelivery(fx.input, options);
   assert.deepStrictEqual(staged, disk);
@@ -431,6 +432,7 @@ test('staged and disk evidence produce identical whole deliveries and child fing
     expected_children: [{ unit, delivery: 'child.json' }] };
   writeJson(path.join(fx.owner, 'child.json'), staged);
   const stagedParent = delivery.buildDelivery(parent, options);
+  assert.strictEqual(byId(stagedParent, criterionId(unit, 'artifact', 0)).status, 'verificado');
   writeJson(path.join(fx.owner, 'child.json'), disk);
   assert.deepStrictEqual(delivery.buildDelivery(parent, options), stagedParent);
   assert(stagedParent.criteria.some(row => row.id === criterionId(unit, 'truth', 0) && row.status === 'verificado'));
