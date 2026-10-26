@@ -198,6 +198,46 @@ try {
     s.input.roots = [s.area]; assert.throws(s.report, error => error.code === 'unknown_fields');
   });
 
+  check('CHECK-REPORT-REPLAY-METRIC-SCHEMA', () => {
+    function replay(s, patch) {
+      const canonical = buildEmpiricalEvaluation(s.evaluation, { roots: [s.area] });
+      const dimensions = clone(canonical.cases[0].dimensions);
+      Object.assign(dimensions.functional, patch);
+      const body = { schema_version: 1, cases: [{ id: 'C1', delivery_id: 'D1', dimensions, diagnostics: [] }] };
+      Object.assign(s.evaluation.sources[0], write(s.area, 'baseline', { ...body, digest: fingerprint(body) }, 'baseline-report'));
+      s.refresh();
+      return dimensions;
+    }
+    for (const patch of [
+      { coverage: { raw: PRIVATE, path: 'C:/Users/private/response.txt' } },
+      { coverage: PRIVATE + ' C:/Users/private/response.txt' },
+      { references: [{ pointer: { raw: PRIVATE, path: 'C:/Users/private/response.txt' } }] },
+      { references: [{ origin: [PRIVATE, 'C:/Users/private/response.txt'] }] },
+      { references: [{ sha256: 'invalid' }] }, { references: [{ synthetic: {} }] },
+      { limitations: [{ pointer: [PRIVATE, 'C:/Users/private/response.txt'] }] },
+      { conditions: [{ origin: { raw: PRIVATE } }] }, { coverage: -1 }, { coverage: 1.1 },
+      { references: [{ source_index: {} }] },
+      { numerator: -1 }, { denominator: 0.5 }, { conditions: {} },
+    ]) {
+      const s = fixture(); replay(s, patch);
+      assert.throws(s.report, error => error.code === 'presentation_invalid');
+      const child = cliRun(s);
+      assert.equal(child.status, 2); assert.equal(child.stdout, '');
+      assert(!child.stderr.includes(PRIVATE)); assert(!child.stderr.includes('C:/Users/private'));
+    }
+    for (const coverage of [null, 0, 0.5, 1, 'none', 'partial', 'provided_sources_only']) {
+      const s = fixture(); const dimensions = replay(s, { coverage, value: true, numerator: 1, denominator: 2,
+        references: [{ id: 'safe', path: 'evidence/safe.json', sha256: H, pointer: '/observations/0',
+          revision: 'v1', synthetic: true, origin: 'synthetic' },
+        { source: 'owner:evidence/events.jsonl', sha256: H, source_kind: 'events', source_index: 0, line: 1 }] });
+      assert.deepEqual(s.report().evaluation.cases[0].dimensions, dimensions);
+    }
+    for (const value of [null, false, 0, 0.5, 12]) {
+      const s = fixture(); const dimensions = replay(s, { value });
+      assert.deepEqual(s.report().evaluation.cases[0].dimensions, dimensions);
+    }
+  });
+
   check('CHECK-REPORT-CLI-BOUNDS', () => {
     const s = fixture();
     for (const extra of [['--input', 'duplicate'], ['--sha256', H], ['--markdown', '--markdown'], ['--invalid'], ['--root']]) {

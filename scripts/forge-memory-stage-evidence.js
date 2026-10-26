@@ -232,7 +232,7 @@ function publication(row, fact) {
     }
     if (Array.isArray(entries) && fingerprint(entries.map(item => item.mem_id).sort())
         !== fingerprint(data.fragment.facts.map(item => item.mem_id).sort())) return result('conflict', 'observed', 'reread_conflict', observation);
-    entries = data.fragment.facts;
+    entries = [...(entries || []), ...data.fragment.facts];
   }
   if (!Array.isArray(entries)) return result('unknown', 'unavailable', 'reread_missing', observation);
   const members = entries.filter(item => item.mem_id === fact.mem_id);
@@ -256,7 +256,7 @@ function selection(row, fact, published) {
   const members = data.selected.filter(item => tuple(item) === tuple(fact));
   if (members.length) {
     const reread = row.observations.publication.data;
-    const entries = reread.fragment ? reread.fragment.facts : reread.state;
+    const entries = [...(reread.state || []), ...(reread.fragment?.facts || [])];
     const hashes = new Set([...members, ...entries.filter(item => item.mem_id === fact.mem_id)]
       .map(item => item.content_sha256).filter(Boolean));
     if (hashes.size > 1) return result('conflict', 'observed', 'content_hash_conflict', observation);

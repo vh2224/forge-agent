@@ -67,16 +67,43 @@ function checkDimensions(dimensions) {
   // Preservar os bytes canônicos: dados não publicáveis são recusados, não editados.
   const keys = ['value', 'unit', 'state', 'method', 'numerator', 'denominator', 'references', 'limitations',
     'confidence', 'conditions', 'coverage'];
+  const typedObject = (value, allowed) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+        || Object.keys(value).some(key => !allowed.includes(key))) fail('presentation_invalid');
+  };
+  typedObject(dimensions, DIMENSIONS);
   for (const name of DIMENSIONS) {
-    const metric = dimensions[name]; closed(metric, keys);
+    const metric = dimensions[name]; typedObject(metric, keys);
+    if (metric.value !== null && typeof metric.value !== 'boolean'
+        && (typeof metric.value !== 'number' || !Number.isFinite(metric.value))) fail('presentation_invalid');
+    for (const field of ['numerator', 'denominator']) {
+      if (metric[field] !== null && (!Number.isSafeInteger(metric[field]) || metric[field] < 0)) fail('presentation_invalid');
+    }
+    if (Object.hasOwn(metric, 'coverage') && metric.coverage !== null
+        && !['none', 'partial', 'provided_sources_only'].includes(metric.coverage)
+        && (typeof metric.coverage !== 'number' || !Number.isFinite(metric.coverage)
+          || metric.coverage < 0 || metric.coverage > 1)) fail('presentation_invalid');
     for (const field of ['unit', 'state', 'method', 'confidence']) if (metric[field] !== undefined) safeText(metric[field]);
     for (const field of ['references', 'limitations', 'conditions']) {
+      if (Object.hasOwn(metric, field) && !Array.isArray(metric[field])) fail('presentation_invalid');
       for (const item of metric[field] || []) {
         if (typeof item === 'string') { safeText(item); }
         else {
-          closed(item, ['id', 'source_id', 'path', 'sha256', 'pointer', 'revision', 'synthetic', 'origin']);
-          for (const [key, value] of Object.entries(item)) if (typeof value === 'string') {
-            if (key === 'path') relativePath(value); else safeText(value);
+          typedObject(item, ['id', 'source_id', 'path', 'sha256', 'pointer', 'revision', 'synthetic', 'origin',
+            'source', 'source_kind', 'source_index', 'line']);
+          for (const [key, value] of Object.entries(item)) {
+            if (key === 'synthetic') {
+              if (typeof value !== 'boolean') fail('presentation_invalid');
+            } else if (['source_index', 'line'].includes(key)) {
+              if (!Number.isSafeInteger(value) || value < 0) fail('presentation_invalid');
+            } else {
+              safeText(value);
+              if (key === 'sha256' && !HASH.test(value)) fail('presentation_invalid');
+              if (key === 'path') {
+                try { relativePath(value); } catch (_) { fail('presentation_invalid'); }
+              }
+            }
           }
         }
       }

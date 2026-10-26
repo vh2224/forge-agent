@@ -149,6 +149,27 @@ check('CHECK-STAGE-PUBLICATION', () => {
   assert(!/"(?:exposure|confirm|utility)"/.test(JSON.stringify(buildStageEvidence(fragment))));
 });
 
+check('CHECK-STAGE-REREAD-CONTENT-HASHES', () => {
+  for (const stateHash of [H, undefined, sha256('replaced')]) {
+    const input = fixture();
+    publication(input, { state: [{ mem_id: 'MEM1', ...(stateHash ? { content_sha256: stateHash } : {}) }],
+      fragment: { milestone_id: 'M1', unit_id: 'T1', facts: [{ mem_id: 'MEM1', content_sha256: H }] } });
+    selection(input, { selected: [{ milestone_id: 'M1', unit_id: 'T1', mem_id: 'MEM1', content_sha256: H }] });
+    const conflict = stateHash !== undefined && stateHash !== H;
+    assert.equal(evaluated(input, 'publication').state, conflict ? 'conflict' : 'present');
+    if (conflict) assert.equal(evaluated(input, 'publication').reason, 'content_hash_conflict');
+    assert.equal(boundary(input, 'selection').denominator, conflict ? 0 : 1);
+    assert.equal(boundary(input, 'selection').retained, conflict ? 0 : 1);
+  }
+  const input = fixture();
+  publication(input, { state: [{ mem_id: 'MEM1', content_sha256: H }],
+    fragment: { milestone_id: 'M1', unit_id: 'T1', facts: [{ mem_id: 'MEM1' }] } });
+  selection(input, { selected: [{ milestone_id: 'M1', unit_id: 'T1', mem_id: 'MEM1', content_sha256: sha256('replaced') }] });
+  assert.equal(evaluated(input, 'selection').state, 'conflict');
+  assert.equal(evaluated(input, 'selection').reason, 'content_hash_conflict');
+  assert.equal(boundary(input, 'selection').retained, 0);
+});
+
 check('CHECK-STAGE-BINDINGS', () => {
   const namespace = fixture(); publication(namespace, { sourceContext: { milestoneId: 'OTHER', unitId: 'T1' } });
   assert.equal(evaluated(namespace, 'publication').state, 'conflict');
