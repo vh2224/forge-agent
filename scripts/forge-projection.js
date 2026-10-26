@@ -542,8 +542,10 @@ function parseOrphanMemory(text) {
       return m ? m[1].trim() : null;
     };
 
-    const confidence   = parseFloat(get('confidence')) || 0.5;
-    const hits         = parseInt(get('hits'), 10) || 0;
+    const parsedConfidence = parseFloat(get('confidence')) || 0.5;
+    const confidence = Number.isFinite(parsedConfidence) ? parsedConfidence : 0.5;
+    const parsedHits = parseInt(get('hits'), 10) || 0;
+    const hits = Number.isFinite(parsedHits) ? parsedHits : 0;
     const text_        = get('text') || '';
     const source       = get('source') || null;
     const lastAccessTs = get('updated') || null;
@@ -572,6 +574,16 @@ function decayConfidence(baseConfidence, lastAccessTs, nowMs) {
   const ageMs = Math.max(0, nowMs - ts);
   const factor = Math.pow(0.5, ageMs / DECAY_HALF_LIFE_MS);
   return Math.min(1, Math.max(0, baseConfidence * factor));
+}
+
+// Preserve finite ranking arithmetic exactly. Saturate only IEEE-754 overflow;
+// this is a representational boundary, not a popularity cap or a new formula.
+function finiteScore(value) {
+  return value === Infinity ? Number.MAX_VALUE : value === -Infinity ? -Number.MAX_VALUE : value;
+}
+
+function memoryQuality(entry) {
+  return finiteScore(entry.confidence * Math.max(1, entry.hits));
 }
 
 function memoryIdentity(unitId, memId) {
@@ -772,9 +784,9 @@ function projectMemoryState(cwd, opts) {
 
   // Sort by (confidence * hits) DESC, then collision-safe identity for stability.
   active.sort((a, b) => {
-    const scoreA = a.confidence * Math.max(1, a.hits);
-    const scoreB = b.confidence * Math.max(1, b.hits);
-    if (scoreB !== scoreA) return scoreB - scoreA;
+    const scoreA = memoryQuality(a);
+    const scoreB = memoryQuality(b);
+    if (scoreB !== scoreA) return scoreB > scoreA ? 1 : -1;
     return a.identity.localeCompare(b.identity);
   });
 
@@ -915,13 +927,13 @@ function queryMemoryEntries(cwd, opts) {
     }
 
     const category = String(entry.fact.category || 'unknown').toLowerCase();
-    const quality = entry.confidence * Math.max(1, entry.hits);
-    const score = (matched.length * 100) + ((preferred.get(category) || 0) * 10) + quality;
+    const quality = memoryQuality(entry);
+    const score = finiteScore((matched.length * 100) + ((preferred.get(category) || 0) * 10) + quality);
     ranked.push({ ...entry, matched, score });
   }
 
   ranked.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
+    if (b.score !== a.score) return b.score > a.score ? 1 : -1;
     return a.identity.localeCompare(b.identity);
   });
 
@@ -1007,7 +1019,7 @@ function queryMemoryEntries(cwd, opts) {
           components: {
             overlap_count: entry.matched.length, overlap_points: entry.matched.length * 100,
             category_weight: categoryWeight, category_points: categoryWeight * 10,
-            quality: entry.confidence * Math.max(1, entry.hits), confidence: entry.confidence,
+            quality: memoryQuality(entry), confidence: entry.confidence,
             base_confidence: entry.base_confidence, hits: entry.hits, score: entry.score,
           },
         });
@@ -1039,7 +1051,7 @@ function queryMemoryEntries(cwd, opts) {
           category_weight: preferred.get(String(entry.fact.category || 'unknown').toLowerCase()) || 0,
           confidence: entry.confidence,
           hits: entry.hits,
-          baseline_quality: entry.confidence * Math.max(1, entry.hits),
+          baseline_quality: memoryQuality(entry),
         }));
         result.popularity_shadow = popularity.compareShadow(rows, { limit });
       }

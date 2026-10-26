@@ -581,12 +581,14 @@ function createEntry(namespace, memId, fact) {
 
 function applySeed(entry, row) {
   const projection = entry.legacyProjection;
-  projection.hits = (typeof row.hits === 'number' ? row.hits : parseInt(row.hits, 10)) || 0;
+  // Retain legacy number/parseInt semantics for every finite value. Overflow,
+  // like an unparseable counter, has no usable baseline and falls back to zero.
+  projection.hits = finiteNumber(typeof row.hits === 'number' ? row.hits : parseInt(row.hits, 10), 0);
   projection.confidence = finiteNumber(row.confidence_base, finiteNumber(row.confidence, projection.confidence));
   projection.lastAccessTs = row.ts || projection.lastAccessTs;
   const publication = entry.legacyPublication;
   publication.confidence = Number(row.confidence_base ?? row.confidence ?? publication.confidence);
-  publication.hits = Number(row.hits || 0);
+  publication.hits = finiteNumber(Number(row.hits || 0), 0);
   entry.v2.confidence = projection.confidence;
 }
 
